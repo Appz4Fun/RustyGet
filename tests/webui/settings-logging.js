@@ -45,9 +45,10 @@ const { installDetailsFixture } = require('./details-fixture');
         for (const name of ['WriteLog', 'RotateLog', 'NzbLog']) assert.equal(await page.locator('#S_' + name).count(), 0, name + ' is gone');
         const card = page.locator('#ConfigData .config-card.LOGGING', { has: page.locator('#S_LogToFile') });
         assert.equal((await card.locator('.config-card__title').textContent()).trim(), 'Log file');
-        assert.match(await card.locator('.config-card__text').textContent(), /every 10 MB and at the end of each day/);
+        assert.match(await card.locator('.config-card__text').textContent(), /every 10 MB, named by day and number, and gzipped/);
         assert.match(await card.textContent(), /Write a log file/);
         assert(await card.locator('#S_LogBuffer').count(), 'LogBuffer is in the same card');
+        assert(await card.locator('#S_LogRotations').count(), 'LogRotations is in the same card');
       });
 
       await check('an old WriteLog=none reads as off', async () => {
@@ -60,6 +61,12 @@ const { installDetailsFixture } = require('./details-fixture');
           { Name: 'DebugTarget', Value: 'none' }, { Name: 'WriteLog', Value: '${DebugTarget}' },
         ]).find(v => v.Name === 'LogToFile').Value);
         assert.equal(up, 'no');
+      });
+
+      await check('LogRotations offers Unlimited (0)', async () => {
+        const row = page.locator('#S_LogRotations').locator('xpath=ancestor::div[contains(@class,"control-group")][1]');
+        assert.match(await row.textContent(), /Unlimited/);
+        assert.match(await row.textContent(), /never deleted/);
       });
 
       await check('LogBuffer offers Unlimited', async () => {

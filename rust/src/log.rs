@@ -83,8 +83,8 @@ struct LogInner {
     device: bool,
 }
 
-/// LogFile is moved aside to `<stem>-YYYY-MM-DD.<n><ext>` once it reaches this size,
-/// or when its day ends, and a new LogFile is started.
+/// LogFile is moved aside to `<stem>-YYYY-MM-DD.<n><ext>` (then gzipped) once it
+/// reaches this size, and a new LogFile is started.
 #[cfg(not(test))]
 pub const LOG_PART_SIZE: u64 = 10 * 1024 * 1024;
 #[cfg(test)]
@@ -309,7 +309,7 @@ fn filelog_locked(
     let tmp2 = format_truncated_1023(prefix, text);
     let time_corr = options.map_or(0, |o| o.scalars().time_correction) as i64;
     let write_log = options.map_or(0, |o| o.scalars().write_log);
-    let rotate_log = options.map_or(0, |o| o.scalars().rotate_log);
+    let rotate_log = options.map_or(crate::options::LOG_ROTATIONS_DEFAULT, |o| o.scalars().rotate_log);
     let log_buffer = options.map(|o| o.scalars().log_buffer);
 
     let rawtime = current_unix_time() + time_corr;
@@ -380,15 +380,16 @@ fn filelog_locked(
     inner.file_size = size.max(0) as u64 + written as u64;
 }
 
-/// Moves LogFile aside to `<stem>-<its day>.<n><ext>` when its day has ended or the next
-/// line would take it past `LOG_PART_SIZE`, deleting day files older than `keep_days`.
+/// Moves LogFile aside to `<stem>-<day>.<n><ext>` when the next line would take it
+/// past `LOG_PART_SIZE`, then gzips the moved file (`.gz`) and keeps only the newest
+/// `keep` rolled files (0: all of them) on a background thread.
 fn rotate_if_due(
     inner: &mut LogInner,
     log_filename: &CStr,
     rawtime: i64,
     time_corr: i64,
     line_len: u64,
-    keep_days: i32,
+    keep: i32,
     log_buffer: Option<i32>,
 ) {
     use std::os::unix::ffi::OsStrExt as _;
@@ -397,49 +398,53 @@ fn rotate_if_due(
     let today = rawtime.div_euclid(86_400);
     let sep = crate::paths::PATH_SEPARATOR as u8;
     if inner.file_day.is_none() {
-        // the first write: learn what an existing LogFile holds and clear out old days
+        // the first write: learn what an existing LogFile holds, and compress and
+        // prune what earlier runs rolled over
         match std::fs::metadata(os_path) {
             Ok(m) if !m.is_file() => inner.device = true,
-            Ok(m) if m.len() > 0 => {
-                let mtime = m
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map_or(rawtime, |d| d.as_secs() as i64 + time_corr);
-                inner.file_day = Some(mtime.div_euclid(86_400));
-                inner.file_size = m.len();
-            }
+            Ok(m) => inner.file_size = m.len(),
             _ => inner.file_size = 0,
         }
-        inner.file_day.get_or_insert(today);
+        inner.file_day = Some(today);
         if !inner.device {
-            let _ = crate::systemhealth::log_rotate_log_file(path, sep, rawtime, keep_days, |msg| {
-                inner.add_message(0, msg, log_buffer)
-            });
+            roll_up_in_background(path.to_vec(), sep, keep);
         }
     }
-    let day = inner.file_day.unwrap_or(today);
-    if inner.device || inner.file_size == 0 || (day == today && inner.file_size + line_len <= LOG_PART_SIZE) {
+    let _ = (time_corr, log_buffer);
+    if inner.device || inner.file_size == 0 || inner.file_size + line_len <= LOG_PART_SIZE {
         return;
     }
     inner.log_file = None;
-    let day_path = crate::systemhealth::log_rotated_day_path(path, sep, day * 86_400);
-    let mut part = 1;
-    while std::fs::symlink_metadata(std::ffi::OsStr::from_bytes(&crate::systemhealth::log_part_path(&day_path, part))).is_ok() {
-        part += 1;
-    }
+    let day_path = crate::systemhealth::log_rotated_day_path(path, sep, today * 86_400);
+    // the next part is one past the highest of today, gzipped or not: never a
+    // gap that pruning left, or the newest file would sort as the oldest
+    let part = crate::systemhealth::log_highest_part(&day_path) + 1;
     let target = crate::systemhealth::log_part_path(&day_path, part);
     if std::fs::rename(os_path, std::ffi::OsStr::from_bytes(&target)).is_err() {
         // could not move it aside: keep writing where we are rather than losing lines
-        inner.file_day = Some(today);
         return;
     }
     inner.file_size = 0;
     inner.file_day = Some(today);
-    if day != today {
-        let _ = crate::systemhealth::log_rotate_log_file(path, sep, rawtime, keep_days, |msg| {
-            inner.add_message(0, msg, log_buffer)
-        });
+    roll_up_in_background(path.to_vec(), sep, keep);
+}
+
+/// Gzips every rolled-over log next to `log_file` and deletes the oldest beyond
+/// `keep` (0 keeps all), off the logging path. One roll-up runs at a time.
+fn roll_up_in_background(log_file: Vec<u8>, sep: u8, keep: i32) {
+    static ROLL_UP: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let work = move || {
+        let _one = ROLL_UP.lock().unwrap_or_else(|e| e.into_inner());
+        crate::systemhealth::log_roll_up(&log_file, sep, keep);
+    };
+    if cfg!(test) {
+        work();
+    } else if std::thread::Builder::new()
+        .name("log-rollup".into())
+        .spawn(work.clone())
+        .is_err()
+    {
+        work();
     }
 }
 
@@ -1000,23 +1005,33 @@ mod tests {
             .filter_map(|e| e.ok().map(|e| e.file_name().to_str().unwrap().to_owned()))
             .collect();
         names.sort();
-        // 60 lines of ~230 bytes is ~14KB: LogFile plus parts .1 to .3 of today, 4KB each
+        // 60 lines of ~230 bytes is ~14KB: LogFile plus parts .1 to .3 of today, 4KB each,
+        // each gzipped once it is moved aside
         assert_eq!(names.len(), 4, "{names:?}");
         assert!(names.contains(&"rustyget.log".to_owned()), "LogFile is still the one written: {names:?}");
-        let part1 = names.iter().find(|n| n.ends_with(".1.log")).expect("a first part").clone();
-        assert!(part1.starts_with("rustyget-") && part1.len() == "rustyget-2026-11-15.1.log".len(), "{part1}");
-        let stem = &part1[..part1.len() - 6];
+        let part1 = names.iter().find(|n| n.ends_with(".1.log.gz")).expect("a first part").clone();
+        assert!(part1.starts_with("rustyget-") && part1.len() == "rustyget-2026-11-15.1.log.gz".len(), "{part1}");
+        let stem = &part1[..part1.len() - 9];
         for part in 2..=3 {
-            assert!(names.contains(&format!("{stem}.{part}.log")), "{names:?}");
+            assert!(names.contains(&format!("{stem}.{part}.log.gz")), "{names:?}");
         }
+        let read = |name: &str| -> String {
+            let mut text = String::new();
+            if name.ends_with(".gz") {
+                let f = std::fs::File::open(dir.join(name)).unwrap();
+                std::io::Read::read_to_string(&mut flate2::read::GzDecoder::new(f), &mut text).unwrap();
+            } else {
+                text = std::fs::read_to_string(dir.join(name)).unwrap();
+            }
+            text
+        };
         // the newest lines are in LogFile, the oldest in part 1
-        let first = std::fs::read_to_string(dir.join(&part1)).unwrap();
-        assert!(first.lines().count() > 0);
+        assert!(read(&part1).lines().count() > 0);
         let mut total = 0;
         for name in &names {
-            let len = std::fs::metadata(dir.join(name)).unwrap().len();
-            assert!(len <= LOG_PART_SIZE, "{name} is {len} bytes");
-            total += std::fs::read_to_string(dir.join(name)).unwrap().lines().count();
+            let text = read(name);
+            assert!(text.len() as u64 <= LOG_PART_SIZE, "{name} is {} bytes", text.len());
+            total += text.lines().count();
         }
         assert_eq!(total, 60, "every line is written once");
 
@@ -1041,6 +1056,77 @@ mod tests {
             nzbget_rs_options_free(opts);
         }
         assert_eq!(screen.len(), 60, "LogBuffer 0 keeps every message");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn log_rotations_keeps_only_the_newest_rolled_over_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "rustyget_log_keep_{}_{}",
+            std::process::id(),
+            current_unix_time()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let log_path = dir.join("rustyget.log");
+        let log_opt = CString::new(format!("LogFile={}", log_path.to_str().unwrap())).unwrap();
+        let cmd_opts = [
+            log_opt.as_ptr(),
+            c"LogToFile=yes".as_ptr(),
+            c"InfoTarget=log".as_ptr(),
+            c"LogRotations=2".as_ptr(),
+        ];
+        let mut scalars = NzbgetRsParsedOptions::default();
+        let mut flags = 0;
+        let log = nzbget_rs_log_new(0);
+        let opts = unsafe {
+            nzbget_rs_options_new(
+                c"rustyget".as_ptr(),
+                ptr::null(),
+                1,
+                1,
+                cmd_opts.as_ptr(),
+                cmd_opts.len(),
+                0,
+                c"1.0".as_ptr(),
+                ptr::null_mut(),
+                None,
+                &mut scalars,
+                &mut flags,
+            )
+        };
+        unsafe {
+            nzbget_rs_log_ctl(log, 1, 1, 0, opts, ptr::null(), None);
+            for i in 0..120 {
+                let line = CString::new(format!("line {i:03} {}", "y".repeat(190))).unwrap();
+                nzbget_rs_log_emit(log, 0, opts, line.as_ptr());
+            }
+            nzbget_rs_log_free(log);
+            nzbget_rs_options_free(opts);
+        }
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.file_name().to_str().unwrap().to_owned()))
+            .collect();
+        names.sort();
+        // ~28KB is LogFile plus 6 or 7 parts of 4KB; only the newest 2 are kept, gzipped
+        let parts: Vec<&String> = names.iter().filter(|n| n.ends_with(".log.gz")).collect();
+        assert_eq!(parts.len(), 2, "{names:?}");
+        assert_eq!(names.len(), 3, "LogFile and two rolled-over files: {names:?}");
+        assert!(!names.iter().any(|n| n.ends_with(".1.log.gz")), "the oldest went first: {names:?}");
+        // the two kept archives hold the lines just before LogFile's: nothing newer was lost
+        let mut kept = String::new();
+        for name in &parts {
+            let f = std::fs::File::open(dir.join(name)).unwrap();
+            std::io::Read::read_to_string(&mut flate2::read::GzDecoder::new(f), &mut kept).unwrap();
+        }
+        let current = std::fs::read_to_string(dir.join("rustyget.log")).unwrap();
+        let first_current: usize = current.lines().next().unwrap().split("line ").nth(1).unwrap()[..3].parse().unwrap();
+        let last_kept = kept
+            .lines()
+            .map(|l| l.split("line ").nth(1).unwrap()[..3].parse::<usize>().unwrap())
+            .max()
+            .unwrap();
+        assert_eq!(last_kept + 1, first_current, "the newest rolled lines are kept");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

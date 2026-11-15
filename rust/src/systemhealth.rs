@@ -808,12 +808,13 @@ pub fn validate_rotate_log(write_log: i32, rotate_log: i32) -> HealthStatus {
     if write_log != 3 {
         return HealthStatus::ok();
     }
+    // LogRotations 0 keeps every rolled-over log
     if rotate_log < 0 {
-        return check_positive_num(b"RotateLog", rotate_log);
+        return check_positive_num(b"LogRotations", rotate_log);
     }
-    if rotate_log > 365 {
+    if rotate_log > 1000 {
         return HealthStatus::warning(
-            "'RotateLog' is very high (>365). This may consume significant disk space",
+            "'LogRotations' is very high (>1000). Old logs may take significant disk space",
         );
     }
     HealthStatus::ok()
@@ -836,7 +837,7 @@ pub fn validate_logging_section(
     );
     emit_if_not_ok(
         &mut emit,
-        "RotateLog",
+        "LogRotations",
         validate_rotate_log(write_log, rotate_log),
     );
 
@@ -2076,15 +2077,6 @@ pub fn maintenance_format_sig_title(base_name: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Formats `"Deleting old log-file <filename>\n"` for `Log::RotateLog`.
-pub fn log_format_deleting_old_msg(filename: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(22 + filename.len() + 1);
-    out.extend_from_slice(b"Deleting old log-file ");
-    out.extend_from_slice(filename);
-    out.push(b'\n');
-    out
-}
-
 /// Formats `"<directory><sep><base_name>-<year>-<month:02>-<mday:02><base_ext>"` for `Log::RotateLog`.
 pub fn log_format_rotated_path(
     directory: &[u8],
@@ -2130,38 +2122,6 @@ pub fn maintenance_match_sig_line_prefix(line: &[u8], sig_title: &[u8]) -> Optio
     }
 }
 
-/// Parses `(tm_year, tm_mon, tm_mday)` from a rotated log filename at the given match offsets
-/// for `Log::RotateLog`.
-pub fn log_parse_rotated_date_fields(
-    filename: &[u8],
-    year_off: usize,
-    mon_off: usize,
-    mday_off: usize,
-) -> (i32, i32, i32) {
-    let year = crate::util::parse_c_atoi(filename.get(year_off..).unwrap_or(b"")) - 1900;
-    let mon = crate::util::parse_c_atoi(filename.get(mon_off..).unwrap_or(b"")) - 1;
-    let mday = crate::util::parse_c_atoi(filename.get(mday_off..).unwrap_or(b""));
-    (year, mon, mday)
-}
-
-/// Evaluates whether a rotated log file should be deleted based on the date fields parsed from
-/// `filename` at `(year_off, mon_off, mday_off)`, `cur_time` (seconds since epoch), and `rotate_log`.
-pub fn log_should_delete_rotated_file_by_name(
-    filename: &[u8],
-    year_off: usize,
-    mon_off: usize,
-    mday_off: usize,
-    cur_time: i64,
-    rotate_log: i32,
-) -> bool {
-    let (tm_year, tm_mon, tm_mday) =
-        log_parse_rotated_date_fields(filename, year_off, mon_off, mday_off);
-    let file_time = crate::util::util_internal_timegm(tm_year, tm_mon, tm_mday, 0, 0, 0);
-    let file_day = (file_time / 86_400) as i32;
-    let cur_day = (cur_time / 86_400) as i32;
-    crate::util::log_should_delete_old_rotated(file_day, cur_day, rotate_log)
-}
-
 /// Formats `"<directory><sep><base_name>-<year>-<month:02>-<mday:02><base_ext>"` for `cur_time`
 /// (seconds since epoch, UTC civil date) for `Log::RotateLog`.
 pub fn log_format_rotated_path_for_time(
@@ -2194,6 +2154,7 @@ pub fn log_rotated_file_date(filename: &[u8], stem: &[u8], ext: &[u8]) -> Option
         return None;
     }
     let tail = &rest[10..];
+    let tail = tail.strip_suffix(b".gz").unwrap_or(tail);
     let tail = tail.strip_suffix(ext)?;
     let part_ok = tail.is_empty()
         || (tail.len() > 1 && tail[0] == b'.' && tail[1..].iter().all(u8::is_ascii_digit));
@@ -2224,41 +2185,121 @@ pub fn log_part_path(day_path: &[u8], part: u32) -> Vec<u8> {
     out
 }
 
-/// Executes `Log::RotateLog`: scans the log directory for day logs and their parts
-/// (`<stem>-####-##-##[.<n>]<ext>`), deletes those older than `rotate_log` days while emitting
-/// `"Deleting old log-file <name>\n"` via `on_info`, and returns the day log path for `cur_time`.
+/// The highest part number among `day_path`'s parts (`<stem>.<n><ext>`, gzipped or
+/// not) in its directory, 0 when there are none.
 #[cfg(unix)]
-pub fn log_rotate_log_file(
-    log_file: &[u8],
-    sep: u8,
-    cur_time: i64,
-    rotate_log: i32,
-    mut on_info: impl FnMut(&[u8]),
-) -> Vec<u8> {
+pub fn log_highest_part(day_path: &[u8]) -> u32 {
+    use std::os::unix::ffi::OsStrExt as _;
+    let pos = crate::paths::base_file_name(day_path);
+    let (stem, ext) = log_split_basename_and_ext(&day_path[pos..]);
+    let directory: &[u8] = if pos > 0 { &day_path[..pos - 1] } else { b"." };
+    let Ok(entries) = std::fs::read_dir(std::ffi::OsStr::from_bytes(directory)) else {
+        return 0;
+    };
+    let mut highest = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.as_bytes();
+        let core = name.strip_suffix(b".gz").unwrap_or(name);
+        let Some(n) = core
+            .strip_suffix(ext.as_slice())
+            .and_then(|c| c.strip_prefix(stem.as_slice()))
+            .and_then(|c| c.strip_prefix(b"."))
+            .and_then(|c| std::str::from_utf8(c).ok())
+            .and_then(|c| c.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        highest = highest.max(n);
+    }
+    highest
+}
+
+/// Rolls up the logs moved aside from `log_file` (`<stem>-YYYY-MM-DD[.<n>]<ext>`, gzipped or
+/// not): gzips each one not yet compressed (`.gz` beside it, the plain file removed once the
+/// archive is complete), then deletes the oldest so that at most `keep` remain (0 keeps all).
+/// Oldest is by day, then part number.
+#[cfg(unix)]
+pub fn log_roll_up(log_file: &[u8], sep: u8, keep: i32) {
+    use std::os::unix::ffi::OsStrExt as _;
     let pos = crate::paths::base_file_name(log_file);
-    let raw_base = &log_file[pos..];
-    let (stem, base_ext) = log_split_basename_and_ext(raw_base);
-    let directory: &[u8] = if pos > 0 { &log_file[..pos - 1] } else { &stem };
-    let dir_cstr = std::ffi::CString::new(directory).ok();
-    let mut dir = crate::fsops::PosixDirBrowser::new(dir_cstr.as_deref(), true);
-    loop {
-        let ptr = dir.next_ptr();
-        if ptr.is_null() {
-            break;
-        }
-        let filename = unsafe { std::ffi::CStr::from_ptr(ptr).to_bytes() };
-        if let Some((m0, m1, m2)) = log_rotated_file_date(filename, &stem, &base_ext) {
-            if log_should_delete_rotated_file_by_name(filename, m0, m1, m2, cur_time, rotate_log) {
-                let msg = log_format_deleting_old_msg(filename);
-                on_info(&msg);
-                let full_filename = [directory, &[sep], filename].concat();
-                if let Ok(full_cstr) = std::ffi::CString::new(full_filename) {
-                    let _ = crate::fsops::delete_file(&full_cstr);
-                }
+    let (stem, ext) = log_split_basename_and_ext(&log_file[pos..]);
+    let directory: Vec<u8> = if pos > 0 {
+        log_file[..pos - 1].to_vec()
+    } else {
+        b".".to_vec()
+    };
+    let Ok(entries) = std::fs::read_dir(std::ffi::OsStr::from_bytes(&directory)) else {
+        return;
+    };
+    let full = |name: &[u8]| -> std::path::PathBuf {
+        std::path::PathBuf::from(std::ffi::OsStr::from_bytes(
+            &[directory.as_slice(), &[sep], name].concat(),
+        ))
+    };
+    let mut rolled: Vec<(Vec<u8>, u64, Vec<u8>)> = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().as_bytes().to_vec();
+        // an archive left half-written by a crash; its plain file is still there
+        if let Some(part) = name.strip_suffix(b".part") {
+            if part.ends_with(b".gz") && log_rotated_file_date(part, &stem, &ext).is_some() {
+                let _ = std::fs::remove_file(full(&name));
             }
+            continue;
+        }
+        let Some((y, _, _)) = log_rotated_file_date(&name, &stem, &ext) else {
+            continue;
+        };
+        let day = name[y..y + 10].to_vec();
+        let core = name.strip_suffix(b".gz").unwrap_or(&name);
+        let core = core.strip_suffix(ext.as_slice()).unwrap_or(core);
+        let part = core
+            .get(y + 10..)
+            .and_then(|t| t.strip_prefix(b"."))
+            .and_then(|t| std::str::from_utf8(t).ok())
+            .and_then(|t| t.parse::<u64>().ok())
+            .unwrap_or(0);
+        rolled.push((day, part, name));
+    }
+    // compress what is still plain; a plain file whose archive exists is a leftover
+    for item in &mut rolled {
+        if item.2.ends_with(b".gz") {
+            continue;
+        }
+        let gz_name = [item.2.as_slice(), b".gz"].concat();
+        if gzip_file(&full(&item.2), &full(&gz_name)).is_ok() {
+            let _ = std::fs::remove_file(full(&item.2));
+            item.2 = gz_name;
         }
     }
-    log_format_rotated_path_for_time(directory, sep, &stem, cur_time, &base_ext)
+    rolled.sort();
+    rolled.dedup_by(|a, b| a.2 == b.2);
+    if keep > 0 && rolled.len() > keep as usize {
+        let excess = rolled.len() - keep as usize;
+        for (_, _, name) in rolled.iter().take(excess) {
+            let _ = std::fs::remove_file(full(name));
+        }
+    }
+}
+
+/// Writes `src` gzipped to `dst` through a temporary name, so a half-written archive is
+/// never taken for a finished one.
+#[cfg(unix)]
+fn gzip_file(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let tmp = dst.with_extension("gz.part");
+    let result = (|| {
+        let mut input = std::fs::File::open(src)?;
+        let out = std::fs::File::create(&tmp)?;
+        let mut enc = flate2::write::GzEncoder::new(out, flate2::Compression::default());
+        std::io::copy(&mut input, &mut enc)?;
+        enc.finish()?.flush()?;
+        std::fs::rename(&tmp, dst)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// Extracts the substring after the first ASCII space in `text` (or `text` if no space exists),
@@ -4055,9 +4096,14 @@ mod tests {
         for wl in [1, 2, 3] {
             assert!(validate_write_log(wl, Path::new("/dev/null")).is_ok());
         }
-        let rot_high = validate_rotate_log(3, 366);
+        let rot_high = validate_rotate_log(3, 1001);
         assert_eq!(rot_high.severity, Severity::Warning);
-        assert!(String::from_utf8_lossy(&rot_high.message).contains("'RotateLog' is very high"));
+        assert!(String::from_utf8_lossy(&rot_high.message).contains("'LogRotations' is very high"));
+        assert!(
+            validate_rotate_log(3, 0).is_ok(),
+            "0 keeps every rolled-over log"
+        );
+        assert!(!validate_rotate_log(3, -1).is_ok());
 
         // FeedValidator
         assert!(validate_feed_cert(b"https://my.feed.com", 2).is_ok());
@@ -4653,55 +4699,69 @@ mod tests {
         assert_eq!(log_rotated_file_date(b"rustyget-2026-3-05.log", b"rustyget", b".log"), None);
         assert_eq!(log_rotated_file_date(b"other-2026-03-05.log", b"rustyget", b".log"), None);
 
-        // rustyget-2026-03-05.log -> 5 days older than 2026-03-10
-        let fname = b"rustyget-2026-03-05.log";
-        assert!(log_should_delete_rotated_file_by_name(
-            fname, 9, 14, 17, cur_time, 3
-        ));
-        assert!(!log_should_delete_rotated_file_by_name(
-            fname, 9, 14, 17, cur_time, 10
-        ));
+        assert_eq!(log_rotated_file_date(b"rustyget-2026-03-05.12.log.gz", b"rustyget", b".log"), Some((9, 14, 17)));
 
         #[cfg(unix)]
         {
             use std::os::unix::ffi::OsStrExt;
-            let tmp = TempDir::new("log_rotate");
-            let old_log = tmp.path.join("rustyget-2026-03-05.log");
-            let old_part = tmp.path.join("rustyget-2026-03-05.2.log");
-            let recent_log = tmp.path.join("rustyget-2026-03-09.log");
-            let recent_part = tmp.path.join("rustyget-2026-03-09.1.log");
-            let other = tmp.path.join("rustyget-2026-03-05.old.log");
-            std::fs::write(&old_log, b"old").unwrap();
-            std::fs::write(&old_part, b"old").unwrap();
-            std::fs::write(&recent_log, b"recent").unwrap();
-            std::fs::write(&recent_part, b"recent").unwrap();
-            std::fs::write(&other, b"other").unwrap();
+            let tmp = TempDir::new("log_roll_up");
+            // 12 rolled logs over three days, some already gzipped, plus files that are not ours
+            let mut names = Vec::new();
+            for (day, parts) in [("2026-03-05", 4), ("2026-03-09", 5), ("2026-03-10", 3)] {
+                for part in 1..=parts {
+                    names.push(format!("rustyget-{day}.{part}.log"));
+                }
+            }
+            for (i, name) in names.iter().enumerate() {
+                let body = format!("line {i}\n").repeat(100);
+                if i % 3 == 0 {
+                    let gz = std::fs::File::create(tmp.path.join(format!("{name}.gz"))).unwrap();
+                    let mut enc = flate2::write::GzEncoder::new(gz, flate2::Compression::default());
+                    std::io::Write::write_all(&mut enc, body.as_bytes()).unwrap();
+                    enc.finish().unwrap();
+                } else {
+                    std::fs::write(tmp.path.join(name), body).unwrap();
+                }
+            }
+            std::fs::write(tmp.path.join("rustyget.log"), b"current").unwrap();
+            std::fs::write(tmp.path.join("rustyget-2026-03-05.old.log"), b"other").unwrap();
+            // a half-written archive from a crash goes; its plain file is compressed again
+            std::fs::write(tmp.path.join("rustyget-2026-03-10.3.log.gz.part"), b"half").unwrap();
             let base_log = tmp.path.join("rustyget.log");
-            let mut info_msgs = Vec::new();
-            let rotated =
-                log_rotate_log_file(base_log.as_os_str().as_bytes(), b'/', cur_time, 3, |msg| {
-                    info_msgs.push(msg.to_vec())
-                });
             assert_eq!(
-                rotated,
-                tmp.path
-                    .join("rustyget-2026-03-10.log")
-                    .as_os_str()
-                    .as_bytes()
+                log_highest_part(
+                    tmp.path
+                        .join("rustyget-2026-03-09.log")
+                        .as_os_str()
+                        .as_bytes()
+                ),
+                5
             );
-            assert!(!old_log.exists());
-            assert!(!old_part.exists(), "an old 10MB part goes with its day");
-            assert!(recent_log.exists());
-            assert!(recent_part.exists());
-            assert!(other.exists(), "a file that is not a log part is left alone");
-            info_msgs.sort();
+            log_roll_up(base_log.as_os_str().as_bytes(), b'/', 10);
+            let mut left: Vec<String> = std::fs::read_dir(&tmp.path)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_str().unwrap().to_owned())
+                .collect();
+            left.sort();
+            let mut want: Vec<String> = names[2..].iter().map(|n| format!("{n}.gz")).collect();
+            want.push("rustyget-2026-03-05.old.log".into());
+            want.push("rustyget.log".into());
+            want.sort();
             assert_eq!(
-                info_msgs,
-                vec![
-                    b"Deleting old log-file rustyget-2026-03-05.2.log\n".to_vec(),
-                    b"Deleting old log-file rustyget-2026-03-05.log\n".to_vec()
-                ]
+                left, want,
+                "the 10 newest are kept, all gzipped; LogFile and other files untouched"
             );
+            // a kept archive holds the plain file's lines
+            let mut text = String::new();
+            let gz = std::fs::File::open(tmp.path.join("rustyget-2026-03-10.2.log.gz")).unwrap();
+            std::io::Read::read_to_string(&mut flate2::read::GzDecoder::new(gz), &mut text)
+                .unwrap();
+            assert!(text.starts_with("line 10\n"), "{}", &text[..20]);
+            // 0 keeps every rolled-over log
+            std::fs::write(tmp.path.join("rustyget-2026-03-01.1.log"), b"older").unwrap();
+            log_roll_up(base_log.as_os_str().as_bytes(), b'/', 0);
+            assert!(tmp.path.join("rustyget-2026-03-01.1.log.gz").exists());
+            assert_eq!(std::fs::read_dir(&tmp.path).unwrap().count(), 13);
         }
     }
 }

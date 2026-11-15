@@ -6243,7 +6243,7 @@ def scenario_fleetintake(daemon, t):
           and 'Show.S01E01.other' not in items
           and any(members.get(n, {}).get('Status') == 'QUEUED' for n in ('Show.S01E01.bare', 'Show.S01E01.zip'))
           and log_same > 0
-          and len(set(inner.values())) == 1 and len(next(iter(inner.values()), '')) == 16)
+          and len(set(inner.values())) == 1 and len(next(iter(inner.values()), '').rsplit('.', 1)[-1]) == 16)
     return ('fleetintake', ok, 'reply=%s items=%s zip_same_logged=%s inner=%s' % (
         reply, sorted(items), log_same, inner))
 

@@ -853,19 +853,17 @@ pub fn resolve_kind(
 /// Other par2 checksums or other sampled articles only mean another
 /// container: the files in the archive, not the archive, decide. An `"alt"`
 /// from them stays one only when the fleet intake read the same video inside
-/// both copies (equal [`crate::dupeintake::INNER_PARAM`] digests); different
-/// digests make it `"other"` (another video), and without both digests it is
-/// `"container"` (another container, the video inside not verified yet).
+/// both copies ([`crate::dupeintake::same_inner`]); another video makes it
+/// `"other"`, and without two comparable values it is `"container"`
+/// (another container, the video inside not verified yet).
 pub fn verify_alt(kind: Vec<u8>, primary_inner: &[u8], dupe_inner: &[u8]) -> Vec<u8> {
     if kind != b"alt" {
         return kind;
     }
-    if primary_inner.is_empty() || dupe_inner.is_empty() {
-        b"container".to_vec()
-    } else if primary_inner == dupe_inner {
-        kind
-    } else {
-        b"other".to_vec()
+    match crate::dupeintake::same_inner(primary_inner, dupe_inner) {
+        Some(true) => kind,
+        Some(false) => b"other".to_vec(),
+        None => b"container".to_vec(),
     }
 }
 
@@ -1804,13 +1802,17 @@ mod tests {
     /// value here left the twin check idle for hours after its first round.
     #[test]
     fn par2_differences_alone_never_make_an_alt() {
+        let (a, b) = (b"4.1f.aa".as_slice(), b"4.1f.bb".as_slice());
         assert_eq!(verify_alt(b"alt".to_vec(), b"", b""), b"container");
-        assert_eq!(verify_alt(b"alt".to_vec(), b"aa", b""), b"container");
-        assert_eq!(verify_alt(b"alt".to_vec(), b"aa", b"aa"), b"alt");
-        assert_eq!(verify_alt(b"alt".to_vec(), b"aa", b"bb"), b"other");
-        assert_eq!(verify_alt(b"twin".to_vec(), b"aa", b"bb"), b"twin");
+        assert_eq!(verify_alt(b"alt".to_vec(), a, b""), b"container");
+        assert_eq!(verify_alt(b"alt".to_vec(), a, a), b"alt");
+        assert_eq!(verify_alt(b"alt".to_vec(), a, b), b"other");
+        // sampled elsewhere (another seed or sample count): not comparable
+        assert_eq!(verify_alt(b"alt".to_vec(), a, b"8.1f.bb"), b"container");
+        assert_eq!(verify_alt(b"alt".to_vec(), a, b"4.2f.aa"), b"container");
+        assert_eq!(verify_alt(b"twin".to_vec(), a, b), b"twin");
         assert_eq!(verify_alt(b"twin:2/3".to_vec(), b"", b""), b"twin:2/3");
-        assert_eq!(verify_alt(Vec::new(), b"aa", b"aa"), b"");
+        assert_eq!(verify_alt(Vec::new(), a, a), b"");
     }
 
     #[test]

@@ -1553,11 +1553,17 @@ fn fleet_intake_later(host_ctx: *mut c_void, host_cb: DupeHostFn, job: IntakeLat
     let verdicts = crate::dupeintake::judge_against(&prints, Some(&fleet));
     let mut digests: Vec<(i32, String)> = Vec::new();
     if primary_read && primary_id > 0 {
-        digests.push((primary_id, fleet.digest()));
+        digests.push((
+            primary_id,
+            crate::dupeintake::inner_param_value(&fleet, job.samples, job.seed),
+        ));
     }
     for ((id, _, _), p) in job.pending.iter().zip(&prints) {
         if let Some(p) = p {
-            digests.push((*id, p.digest()));
+            digests.push((
+                *id,
+                crate::dupeintake::inner_param_value(p, job.samples, job.seed),
+            ));
         }
     }
     #[cfg(unix)]
@@ -5755,7 +5761,8 @@ pub unsafe fn fleet_append(
             let samples = crate::dupeintake::samples_for_body_checks(
                 read_host_opts(host_ctx, host_cb).body_checks,
             );
-            let seed = u64::from(crate::dupefallback::crc32_ieee(&dupe_key)) | 1;
+            // TwinCheck groups dupe keys case-blind; the samples must land alike
+            let seed = u64::from(crate::dupefallback::crc32_ieee(&dupe_key.to_ascii_lowercase())) | 1;
             let summaries: Vec<&NzbSummaryData> =
                 usable.iter().map(|&i| &candidates[i].summary).collect();
             let (verdicts, print, prints) = fleet_intake(
@@ -6044,9 +6051,9 @@ pub unsafe fn fleet_append(
                 params.push((ALIVE_PARAM, av));
             }
             // the video inside, for TwinCheck to tell an alt from a different video
-            let inner = intake_prints[idx]
-                .as_ref()
-                .map(crate::dupeintake::Print::digest);
+            let inner = intake_prints[idx].as_ref().map(|p| {
+                crate::dupeintake::inner_param_value(p, intake_samples, intake_seed)
+            });
             if let Some(d) = inner.as_deref() {
                 params.push((crate::dupeintake::INNER_PARAM, d.as_bytes()));
             }

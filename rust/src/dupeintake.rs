@@ -64,10 +64,31 @@ pub struct Print {
     pub samples: Vec<u32>,
 }
 
-/// The nzb parameter that keeps a copy's [`Print::digest`]. Copies of one
-/// dupe key are sampled at the same offsets, so equal digests mean the same
-/// video inside, whatever containers hold it; TwinCheck labels an alt by it.
+/// The nzb parameter that keeps a copy's [`inner_param_value`]: where its
+/// video was sampled and the [`Print::digest`] of what was read there. Two
+/// values with the same sampling and digest mean the same video inside,
+/// whatever containers hold it; TwinCheck labels an alt by it.
 pub const INNER_PARAM: &[u8] = b"DupeInner";
+
+/// `<samples>.<seed hex>.<digest>`: digests compare only between copies
+/// sampled at the same offsets (the same seed and sample count).
+pub fn inner_param_value(print: &Print, samples: usize, seed: u64) -> String {
+    format!("{samples}.{seed:x}.{}", print.digest())
+}
+
+/// How two [`INNER_PARAM`] values compare: `Some(true)` the same video,
+/// `Some(false)` another video, `None` not comparable (one is missing or they
+/// were sampled at other offsets).
+pub fn same_inner(a: &[u8], b: &[u8]) -> Option<bool> {
+    let split = |v: &[u8]| -> Option<(Vec<u8>, Vec<u8>)> {
+        let dot = v.iter().rposition(|&c| c == b'.')?;
+        let (scope, digest) = (&v[..dot], &v[dot + 1..]);
+        (!scope.is_empty() && !digest.is_empty()).then(|| (scope.to_vec(), digest.to_vec()))
+    };
+    let (sa, da) = split(a)?;
+    let (sb, db) = split(b)?;
+    (sa == sb).then_some(da == db)
+}
 
 impl Print {
     /// The print in 16 hex digits (FNV-1a 64 over the size and the samples).

@@ -72,6 +72,7 @@ pub mod scheduler;
 pub mod socket;
 pub mod statmeter;
 pub mod systemhealth;
+pub mod sysmetrics;
 pub mod text;
 pub mod tlscipher;
 #[cfg(unix)]

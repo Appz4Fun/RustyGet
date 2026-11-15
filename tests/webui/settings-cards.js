@@ -7,11 +7,9 @@ const assert = require('node:assert/strict');
 const { fixtureURL } = require('./workspace-fixture');
 const { installDetailsFixture } = require('./details-fixture');
 
-const DUPE_OPTIONS = ['DupeCheck', 'DupeArticleFallback', 'DupeStreamDecompress', 'DupeStreamTimeout', 'DupeBorrowFirst',
-  'DupeSearch', 'DupeSearchUrl', 'DupeSearchApiKey', 'DupeSearchDelay', 'DupeSearchDryRun', 'DupeSearchMaxDonors',
-  'DupeHealthPercent', 'DupeHealthMin', 'DupeHealthMax', 'DupeBodyChecks', 'DupeHealthBudget', 'DupeMinAlive',
-  'DupeFastDonors', 'DupePrimaryScore', 'DupeSizeTolerance', 'DupeBodyPercent', 'DupeCheckConcurrency',
-  'DupeCheckConnections', 'HealthCheck'];
+const DUPE_OPTIONS = ['DupeCheck', 'DupeWatch', 'DupeArticleFallback', 'DupeStreamDecompress', 'DupeStreamTimeout', 'DupeBorrowFirst',
+  'DupeHealthPreset', 'DupeHealthPercent', 'DupeHealthMin', 'DupeHealthMax', 'DupeBodyChecks', 'DupeHealthBudget', 'DupeMinAlive',
+  'DupeBodyPercent', 'DupeCheckConcurrency', 'DupeCheckConnections', 'HealthCheck'];
 
 (async () => {
   const base = fixtureURL(process.argv[2] || 'http://127.0.0.1:17999/');
@@ -79,14 +77,16 @@ const DUPE_OPTIONS = ['DupeCheck', 'DupeArticleFallback', 'DupeStreamDecompress'
 
       await check('dupe fleets page holds every dupe option', async () => {
         const cards = await page.locator('#ConfigData .config-card.DUPE_FLEETS:visible .config-card__title').allTextContents();
-        assert.deepEqual(cards.map(c => c.toLowerCase()), ['fleet repair', 'health sampling', 'donor ranking', 'indexer search']);
+        assert.deepEqual(cards.map(c => c.toLowerCase()), ['fleet repair', 'health sampling']);
         for (const name of DUPE_OPTIONS) {
           assert.equal(await S(name).count(), 1, name + ' exists');
           assert.equal(await row(name).locator('xpath=ancestor::section[contains(@class,"DUPE_FLEETS")]').count(), 1, name + ' sits on Dupe fleets');
         }
         assert.equal((await row('DupeBorrowFirst').locator('.config-label').textContent()).trim(), 'Borrow first');
         assert(await row('DupeCheck').isVisible());
-        assert.equal(await row('DupeSearchUrl').isVisible(), false, 'Indexer search settings are folded while search is off');
+        assert(await row('DupeHealthPreset').isVisible(), 'The sampling preset is on the card');
+        assert.equal(await row('DupeHealthPercent').locator('xpath=ancestor::details[contains(@class,"config-card__more")]').count(), 1,
+          'The raw sampling values are folded under Custom sampling');
         assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, 'No horizontal page scroll');
       });
 
@@ -137,11 +137,11 @@ const DUPE_OPTIONS = ['DupeCheck', 'DupeArticleFallback', 'DupeStreamDecompress'
       });
 
       await check('search reaches folded options', async () => {
-        await page.locator('#ConfigTable_filter').fill('DupeSearchDryRun');
+        await page.locator('#ConfigTable_filter').fill('DupeBodyPercent');
         await page.waitForFunction(() => document.querySelector('#ConfigContent.search'));
         await page.waitForTimeout(300);
-        assert(await row('DupeSearchDryRun').isVisible(), 'A folded match is shown');
-        assert.equal(await row('DupeSearch').isVisible(), false, 'Non-matching rows in the same card stay hidden');
+        assert(await row('DupeBodyPercent').isVisible(), 'A folded match is shown');
+        assert.equal(await row('DupeMinAlive').isVisible(), false, 'Non-matching rows in the same card stay hidden');
         await page.locator('#ConfigTable_clearfilter').click();
         await page.waitForTimeout(300);
       });

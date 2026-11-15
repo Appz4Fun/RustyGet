@@ -208,6 +208,7 @@ fn identity_present(
 #[derive(Clone)]
 struct HostOpts {
     dupe_search: bool,
+    dupe_watch: bool,
     dupe_check: bool,
     dry_run: bool,
     delay_sec: i32,
@@ -367,7 +368,9 @@ fn read_host_opts(host_ctx: *mut c_void, host_cb: DupeHostFn) -> HostOpts {
     HostOpts {
         dupe_search: sc.is_some_and(|s| s.dupe_search != 0),
         dupe_check: sc.is_some_and(|s| s.dupe_check != 0),
-        dry_run: sc.is_some_and(|s| s.dupe_search_dry_run != 0),
+        dupe_watch: crate::options::dupe_watch(),
+        // DupeSearchDryRun only covers DupeSearch itself.
+        dry_run: sc.is_some_and(|s| s.dupe_search != 0 && s.dupe_search_dry_run != 0),
         delay_sec: sc.map_or(0, |s| s.dupe_search_delay),
         max_donors: sc.map_or(0, |s| s.dupe_search_max_donors),
         fast_donors: sc.map_or(0, |s| s.dupe_fast_donors),
@@ -401,6 +404,16 @@ fn read_host_opts(host_ctx: *mut c_void, host_cb: DupeHostFn) -> HostOpts {
         ext_cleanup_disk: opts
             .as_deref()
             .map_or_else(Vec::new, |o| o.str_bytes(32).to_vec()),
+    }
+}
+
+/// The log prefix of the duplicate upkeep: `DupeSearch: ` when option
+/// DupeSearch is on, `Dupes: ` when only the queued backups are looked after.
+fn log_tag() -> &'static [u8] {
+    if crate::options::active_options().is_some_and(|o| o.scalars().dupe_search != 0) {
+        b"DupeSearch: "
+    } else {
+        b"Dupes: "
     }
 }
 
@@ -1214,11 +1227,39 @@ fn fleet_member_kinds(
     summaries: &[&NzbSummaryData],
     deadline: i64,
 ) -> Vec<crate::donorkind::DonorKind> {
-    use crate::donorkind::{DonorKind, Packing};
+    use crate::donorkind::DonorKind;
     let n = summaries.len();
     if n < 2 {
         return vec![DonorKind::Unknown; n];
     }
+    let probed = probe_copies(host_ctx, host_cb, summaries, deadline);
+    (0..n)
+        .map(|i| {
+            let has_twin = (0..n).any(|j| {
+                j != i
+                    && crate::donorkind::twins(
+                        &probed[i].0,
+                        &probed[j].0,
+                        &summaries[i].data_layout,
+                        &summaries[j].data_layout,
+                    )
+            });
+            DonorKind::of(has_twin, probed[i].1)
+        })
+        .collect()
+}
+
+/// Reads each copy's par2 index and the first article of its largest file
+/// (in parallel chunks, until `deadline`): its par2 file list for the twin
+/// test and its packing (see [`crate::donorkind`]).
+fn probe_copies(
+    host_ctx: *mut c_void,
+    host_cb: DupeHostFn,
+    summaries: &[&NzbSummaryData],
+    deadline: i64,
+) -> Vec<(crate::twin::Listed, crate::donorkind::Packing)> {
+    use crate::donorkind::Packing;
+    let n = summaries.len();
     let slots: Vec<Mutex<(crate::twin::Listed, Packing)>> = (0..n)
         .map(|_| Mutex::new((crate::twin::Listed::default(), Packing::Unknown)))
         .collect();
@@ -1265,23 +1306,9 @@ fn fleet_member_kinds(
             }
         });
     }
-    let probed: Vec<(crate::twin::Listed, Packing)> = slots
+    slots
         .into_iter()
         .map(|m| m.into_inner().unwrap_or_else(|e| e.into_inner()))
-        .collect();
-    (0..n)
-        .map(|i| {
-            let has_twin = (0..n).any(|j| {
-                j != i
-                    && crate::donorkind::twins(
-                        &probed[i].0,
-                        &probed[j].0,
-                        &summaries[i].data_layout,
-                        &summaries[j].data_layout,
-                    )
-            });
-            DonorKind::of(has_twin, probed[i].1)
-        })
         .collect()
 }
 
@@ -1589,14 +1616,21 @@ impl NzbgetRsDupeSearch {
             return;
         }
         let opts = read_host_opts(host_ctx, host_cb);
-        if !opts.dupe_search || opts.stopped {
+        // Option DupeWatch: without DupeSearch the queued backups of a key
+        // are still looked after (FORCE to SCORE, dead pick, swap): see
+        // `prepare_native`.
+        if !(opts.dupe_search || (opts.dupe_check && opts.dupe_watch)) || opts.stopped {
             return;
         }
         let added = inspect_nzb(host_ctx, host_cb, added_ptr, false);
         let due = opts.now + i64::from(opts.delay_sec);
         self.schedule(added.id, due);
 
-        if action_kind == 1 && !added.is_donor && added.dupe_mode == 0 && !added.has_dupe_fleet {
+        // A fleet backup added after the first upkeep pass also wakes the
+        // queued primary, so it checks the new backup (and can swap to it);
+        // fleet_append has already scored it, so it needs no rerank.
+        let fleet_backup = added.has_dupe_fleet;
+        if action_kind == 1 && added.dupe_mode == 0 && (fleet_backup || !added.is_donor) {
             let added_key = lower_key(&effective_key(&added.dupe_key, &added.name));
             let (q_len, _) = dq_counts(host_ctx, host_cb, dq_ptr);
             let mut parent: Option<(i32, i32)> = None;
@@ -1627,7 +1661,9 @@ impl NzbgetRsDupeSearch {
             if let Some((parent_id, _)) = parent {
                 let fresh_now = host_now(host_ctx, host_cb);
                 let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-                g.rank_pending.insert(parent_id);
+                if !fleet_backup {
+                    g.rank_pending.insert(parent_id);
+                }
                 g.pending
                     .insert(parent_id, fresh_now + i64::from(opts.delay_sec));
                 self.cond.notify_all();
@@ -1686,7 +1722,10 @@ impl NzbgetRsDupeSearch {
         let mut consider_item = |item: &NzbSnap, in_history: bool| {
             let item_low = lower_key(&effective_key(&item.dupe_key, &item.name));
             let same_key = item_low == low_key;
-            let same_rel = crate::releasename::same_release(&pick.name, &item.name);
+            // Members of one fleet (appendfleet) hold the same content under
+            // differing release names: the client matched them.
+            let same_rel = crate::releasename::same_release(&pick.name, &item.name)
+                || (same_key && pick.has_dupe_fleet && item.has_dupe_fleet);
             let qf = &item.queued_filename;
             let add_known = item.kind == 0
                 && !qf.is_empty()
@@ -1762,15 +1801,24 @@ impl NzbgetRsDupeSearch {
         job: &mut SearchJob,
     ) -> bool {
         let opts = read_host_opts(host_ctx, host_cb);
-        if !opts.dupe_search || !opts.dupe_check {
+        if !opts.dupe_check || !(opts.dupe_search || opts.dupe_watch) {
             return false;
         }
+        // Option DupeWatch without DupeSearch: nothing is searched, a pick is only ranked
+        // against the backups already queued or in history under its own
+        // duplicate key, which needs a key.
+        let upkeep_only = !opts.dupe_search;
         let Some((pick_ptr, history)) = dq_find_nzb(host_ctx, host_cb, dq_ptr, nzb_id) else {
             let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             g.rank_pending.remove(&nzb_id);
             return false;
         };
         let mut pick = inspect_nzb(host_ctx, host_cb, pick_ptr, false);
+        if upkeep_only && pick.dupe_key.is_empty() {
+            let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            g.rank_pending.remove(&nzb_id);
+            return false;
+        }
         let mut key = effective_key(&pick.dupe_key, &pick.name);
         let mut low_key = lower_key(&key);
         let mut owner_prefix = nzb_id.to_string().into_bytes();
@@ -1842,9 +1890,12 @@ impl NzbgetRsDupeSearch {
                 rank_only = false;
             }
         }
+        if upkeep_only {
+            rank_only = true;
+        }
 
         if owned_key_changed {
-            rank_only = false;
+            rank_only = upkeep_only;
             if !opts.dry_run {
                 let mut owned_val = owner_prefix.clone();
                 owned_val.extend_from_slice(&key);
@@ -1888,6 +1939,14 @@ impl NzbgetRsDupeSearch {
         };
 
         let mut pick_flags = flags_of(&pick, history);
+        // A fleet (appendfleet) is left out of the duplicate search, as the
+        // client searched, and its members carry DupeAlive like donors. With
+        // DupeSearch off its queued copy still gets the upkeep (dead pick,
+        // swap); history members stay skipped as filed duplicates.
+        let fleet_upkeep = upkeep_only && pick.has_dupe_fleet;
+        if fleet_upkeep {
+            pick_flags &= !(MANAGED_FLEET | crate::dupewatch::DONOR);
+        }
         // DupeMode FORCE or ALL turns off failover: a pick DupeSearch looks
         // after is switched to SCORE once it is searched.
         let switch_to_score = crate::dupewatch::wants_score_mode(pick_flags);
@@ -1952,6 +2011,9 @@ impl NzbgetRsDupeSearch {
                 pick_flags |= MANAGED_FLEET;
             }
             peer_flags_vec.push(f);
+        }
+        if fleet_upkeep {
+            pick_flags &= !MANAGED_FLEET;
         }
 
         let decision = if preliminary == Some(Decision::Search)
@@ -2040,7 +2102,7 @@ impl NzbgetRsDupeSearch {
         }
         if switch_to_score {
             let mode = crate::dupewatch::dupe_mode_name(pick.dupe_mode);
-            let mut msg = b"DupeSearch: ".to_vec();
+            let mut msg = log_tag().to_vec();
             push_c_slice(&mut msg, &pick.name);
             if opts.dry_run {
                 msg.extend_from_slice(b": dry run, would set DupeMode ");
@@ -2109,12 +2171,18 @@ impl NzbgetRsDupeSearch {
         job.failed = history;
         job.rank_only = rank_only;
 
-        let mut msg = b"DupeSearch: searching duplicates of ".to_vec();
+        let mut msg = if upkeep_only {
+            b"Dupes: checking the backups of ".to_vec()
+        } else {
+            b"DupeSearch: searching duplicates of ".to_vec()
+        };
         push_c_slice(&mut msg, &pick.name);
         msg.extend_from_slice(b" (key ");
         push_c_slice(&mut msg, &key);
         msg.push(b')');
-        if rank_only {
+        if upkeep_only {
+            // nothing searched: the backups are only ranked
+        } else if rank_only {
             msg.extend_from_slice(b": ranking new backups");
         } else if history {
             msg.extend_from_slice(b": it failed before its search was due");
@@ -2408,7 +2476,7 @@ impl NzbgetRsDupeSearch {
         let order_idx = crate::posting::order_postings(&listings_view, bytes, cur.max_donors);
         *postings_count += order_idx.len() as i32;
 
-        let mut msg = b"DupeSearch: ".to_vec();
+        let mut msg = log_tag().to_vec();
         push_c_slice(&mut msg, &job.name);
         msg.extend_from_slice(
             format!(
@@ -2585,7 +2653,7 @@ impl NzbgetRsDupeSearch {
             .cloned()
             .collect();
 
-        let mut info_msg = b"DupeSearch: ".to_vec();
+        let mut info_msg = log_tag().to_vec();
         push_c_slice(&mut info_msg, &job.name);
         info_msg.extend_from_slice(
             format!(
@@ -2763,7 +2831,7 @@ impl NzbgetRsDupeSearch {
             };
             let norm_name = crate::releasename::normalize(&job.name);
             let _ = self.forget_search(host_ctx, host_cb, &job.dupe_key, &norm_name);
-            let mut msg = b"DupeSearch: ".to_vec();
+            let mut msg = log_tag().to_vec();
             push_c_slice(&mut msg, &job.name);
             msg.extend_from_slice(b": ");
             msg.extend_from_slice(reason_text);
@@ -2834,7 +2902,7 @@ impl NzbgetRsDupeSearch {
         let servers = if !verified.is_empty() || !job.members.is_empty() {
             let s = nntp_health_servers(host_ctx, host_cb);
             if s.is_empty() {
-                let mut msg = b"DupeSearch: ".to_vec();
+                let mut msg = log_tag().to_vec();
                 push_c_slice(&mut msg, &job.name);
                 msg.extend_from_slice(
                     b": no active news servers, the postings are added unchecked",
@@ -2861,13 +2929,51 @@ impl NzbgetRsDupeSearch {
             deadline_ms: 0,
         };
 
-        let same_data = |a: &NzbSummaryData, b: &NzbSummaryData| -> bool {
-            a.data_bytes > 0
-                && b.data_bytes > 0
-                && a.data_files > 0
-                && b.data_files > 0
-                && a.data_bytes == b.data_bytes
-                && a.data_files == b.data_files
+        // TWIN (the same post: matching par2 hashes and article counts) and
+        // DonorKind of a copy against the pick, read from the news servers
+        // once per copy. The probes share FLEET_KIND_PROBE_MAX_SEC of their
+        // own time: the health checks between them do not use it up.
+        let kind_budget = std::sync::atomic::AtomicI64::new(FLEET_KIND_PROBE_MAX_SEC);
+        let kind_deadline = || {
+            let start = now_unix_sec();
+            (
+                start,
+                start
+                    + kind_budget
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                        .max(0),
+            )
+        };
+        let kind_spent = |start: i64| {
+            kind_budget.fetch_sub(
+                (now_unix_sec() - start).max(0),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        };
+        let kind_ctx = host_ctx as usize;
+        let pick_listed =
+            if !servers.is_empty() && (!verified.is_empty() || !job.members.is_empty()) {
+                let (start, deadline) = kind_deadline();
+                let mut probed = probe_copies(host_ctx, host_cb, &[pick], deadline);
+                kind_spent(start);
+                probed.pop().map(|(listed, _)| listed)
+            } else {
+                None
+            };
+        let copy_kind = |info: &NzbSummaryData| -> (bool, crate::donorkind::DonorKind) {
+            use crate::donorkind::{DonorKind, Packing};
+            let Some(pick_listed) = pick_listed.as_ref() else {
+                return (false, DonorKind::Unknown);
+            };
+            let (start, deadline) = kind_deadline();
+            let (listed, packing) =
+                probe_copies(kind_ctx as *mut c_void, host_cb, &[info], deadline)
+                    .pop()
+                    .unwrap_or((crate::twin::Listed::default(), Packing::Unknown));
+            kind_spent(start);
+            let twin =
+                crate::donorkind::twins(pick_listed, &listed, &pick.data_layout, &info.data_layout);
+            (twin, DonorKind::of(twin, packing))
         };
         let alive_of = |h: &DonorHealthResult, s: &NzbSummaryData| -> f64 {
             effective_alive(
@@ -2982,7 +3088,7 @@ impl NzbgetRsDupeSearch {
                             pick.message_ids.iter().map(|v| v.as_slice()),
                         );
                         self.record_dead(ctx_addr as *mut c_void, host_cb, sk, !dry);
-                        let mut msg = b"DupeSearch: ".to_vec();
+                        let mut msg = log_tag().to_vec();
                         push_c_slice(&mut msg, &job.name);
                         msg.extend_from_slice(
                             format!(
@@ -3052,7 +3158,7 @@ impl NzbgetRsDupeSearch {
                         );
                         self.record_dead(host_ctx, host_cb, sk, !dry);
                         state.dead += 1;
-                        let mut msg = b"DupeSearch: ".to_vec();
+                        let mut msg = log_tag().to_vec();
                         push_c_slice(&mut msg, &job.name);
                         msg.extend_from_slice(b": dropping dead posting ");
                         push_c_slice(&mut msg, &v.listing.title);
@@ -3075,9 +3181,18 @@ impl NzbgetRsDupeSearch {
 
             let place_one = |st: &mut PlaceMutable, i: usize, alive: f64, how: &[u8]| {
                 let ctx = ctx_addr as *mut c_void;
-                let twin = same_data(pick, &verified[i].info);
+                let (twin, kind) = copy_kind(&verified[i].info);
                 let score = take_rank_set(&mut st.ranks_used, alive, twin);
-                let id = self.add_donor(ctx, host_cb, job, pick, &verified[i], base + score, alive);
+                let id = self.add_donor(
+                    ctx,
+                    host_cb,
+                    job,
+                    pick,
+                    &verified[i],
+                    base + score,
+                    alive,
+                    kind,
+                );
                 if id == 0 {
                     st.ranks_used.remove(&score);
                     return;
@@ -3093,6 +3208,8 @@ impl NzbgetRsDupeSearch {
                             twin,
                             bytes: verified[i].info.total_bytes,
                             grabs: verified[i].listing.grabs,
+                            kind: kind as u8,
+                            cap: 0,
                         },
                         title: verified[i].listing.title.clone(),
                         member: false,
@@ -3105,7 +3222,7 @@ impl NzbgetRsDupeSearch {
                 } else {
                     (100.0 * alive).round() as i32
                 };
-                let mut msg = b"DupeSearch: ".to_vec();
+                let mut msg = log_tag().to_vec();
                 push_c_slice(&mut msg, &job.name);
                 msg.extend_from_slice(b": added ");
                 push_c_slice(&mut msg, &verified[i].listing.title);
@@ -3193,7 +3310,7 @@ impl NzbgetRsDupeSearch {
                             } else {
                                 (100.0 * alive).round() as i32
                             };
-                            let mut msg = b"DupeSearch: ".to_vec();
+                            let mut msg = log_tag().to_vec();
                             push_c_slice(&mut msg, &job.name);
                             msg.extend_from_slice(b": ");
                             push_c_slice(&mut msg, &verified[i].listing.title);
@@ -3284,7 +3401,7 @@ impl NzbgetRsDupeSearch {
                                     self.record_dead(ctx, host_cb, sk, !cur.dry_run);
                                 }
                                 st.dead += 1;
-                                let mut dmsg = b"DupeSearch: ".to_vec();
+                                let mut dmsg = log_tag().to_vec();
                                 push_c_slice(&mut dmsg, &job.name);
                                 dmsg.extend_from_slice(b": dropping dead posting ");
                                 push_c_slice(&mut dmsg, &verified[i].listing.title);
@@ -3315,7 +3432,7 @@ impl NzbgetRsDupeSearch {
                 if let Some(h) = pc.take() {
                     let _ = h.join();
                 }
-                let mut msg = b"DupeSearch: ".to_vec();
+                let mut msg = log_tag().to_vec();
                 push_c_slice(&mut msg, &job.name);
                 msg.extend_from_slice(
                     b": RustyGet shuts down, the search resumes after the restart",
@@ -3429,6 +3546,7 @@ impl NzbgetRsDupeSearch {
                     }
                     let member_title = base_file_name(&job.members[m_idx].1);
                     let old_sc = job.member_scores.get(m_idx).copied().unwrap_or(0);
+                    let (member_twin, member_kind) = copy_kind(summary);
                     let item = PlacedItem {
                         id: job.members[m_idx].0,
                         entry: crate::donorscore::Entry {
@@ -3438,9 +3556,15 @@ impl NzbgetRsDupeSearch {
                                 crate::donorscore::DEAD + 1
                             },
                             alive,
-                            twin: same_data(pick, summary),
+                            twin: member_twin,
                             bytes: summary.total_bytes,
                             grabs: 0,
+                            kind: member_kind as u8,
+                            cap: if (100.0 * alive).round() < 100.0 {
+                                old_sc.saturating_sub(base).max(1)
+                            } else {
+                                0
+                            },
                         },
                         title: member_title.clone(),
                         member: true,
@@ -3448,7 +3572,7 @@ impl NzbgetRsDupeSearch {
                         old_score: old_sc,
                     };
                     state.placed.insert(verified.len() + m_idx, item);
-                    let mut mmsg = b"DupeSearch: ".to_vec();
+                    let mut mmsg = log_tag().to_vec();
                     push_c_slice(&mut mmsg, &job.name);
                     mmsg.extend_from_slice(b": duplicate ");
                     push_c_slice(&mut mmsg, &member_title);
@@ -3491,6 +3615,7 @@ impl NzbgetRsDupeSearch {
                         donor_entry_score,
                         donor_alive,
                         donor_title,
+                        donor_kind,
                     ) = {
                         let d = &st.placed[&slot_key];
                         (
@@ -3500,6 +3625,7 @@ impl NzbgetRsDupeSearch {
                             d.entry.score,
                             d.entry.alive,
                             d.title.clone(),
+                            d.entry.kind,
                         )
                     };
                     if wanted[n] == donor_entry_score && !donor_member {
@@ -3518,6 +3644,14 @@ impl NzbgetRsDupeSearch {
                         );
                         score = sc;
                         params.push(format!("DupeHealth={pct}").into_bytes());
+                        if donor_kind != crate::donorkind::DonorKind::Unknown as u8 {
+                            let mut kp = crate::donorkind::KIND_PARAM.to_vec();
+                            kp.push(b'=');
+                            kp.extend_from_slice(
+                                crate::donorkind::DonorKind::from_u8(donor_kind).param(),
+                            );
+                            params.push(kp);
+                        }
                         if add_zero {
                             params.push(b"DupeAlive=0".to_vec());
                         }
@@ -3526,7 +3660,7 @@ impl NzbgetRsDupeSearch {
                         if donor_member {
                             unchecked_members.remove(&(slot_key - verified.len()));
                         }
-                        let mut rmsg = b"DupeSearch: ".to_vec();
+                        let mut rmsg = log_tag().to_vec();
                         push_c_slice(&mut rmsg, &job.name);
                         rmsg.extend_from_slice(b": reranked ");
                         push_c_slice(&mut rmsg, &donor_title);
@@ -3572,12 +3706,21 @@ impl NzbgetRsDupeSearch {
         }
 
         if let Some(h) = final_pick_sample {
-            let candidates: Vec<(i32, f64)> = final_placed
+            let candidates: Vec<(i32, f64, u8)> = final_placed
                 .values()
                 .filter(|item| {
                     item.valid && item.id > 0 && item.entry.score > crate::donorscore::DEAD
                 })
-                .map(|item| (item.id, item.entry.alive))
+                .map(|item| {
+                    let kind = if item.entry.twin {
+                        crate::donorkind::DonorKind::Twin as u8
+                    } else {
+                        item.entry
+                            .kind
+                            .max(crate::donorkind::DonorKind::Borrowable as u8)
+                    };
+                    (item.id, item.entry.alive, kind)
+                })
                 .collect();
             self.swap_if_failing(
                 host_ctx,
@@ -3598,7 +3741,7 @@ impl NzbgetRsDupeSearch {
         let rej_keys: Vec<&[u8]> = rejected.keys().map(|k| k.as_slice()).collect();
         let rej_counts: Vec<i32> = rejected.values().copied().collect();
         let rej_str = dupesearch_format_rejected_outcome(&rej_keys, &rej_counts);
-        let mut out_msg = b"DupeSearch: ".to_vec();
+        let mut out_msg = log_tag().to_vec();
         push_c_slice(&mut out_msg, &job.name);
         out_msg.extend_from_slice(
             format!(
@@ -3700,7 +3843,7 @@ impl NzbgetRsDupeSearch {
                     }
                     self.schedule(job.nzb_id, host_now(host_ctx, host_cb) + 900);
                     if !retry_discovery {
-                        let mut rmsg = b"DupeSearch: ".to_vec();
+                        let mut rmsg = log_tag().to_vec();
                         push_c_slice(&mut rmsg, &job.name);
                         rmsg.extend_from_slice(b": retrying backup health in 15 minutes");
                         let rmsg_c = truncate_note(rmsg);
@@ -3734,7 +3877,7 @@ impl NzbgetRsDupeSearch {
             return;
         }
         let score = crate::donorscore::base(job.score) + crate::donorscore::DEAD;
-        let mut msg = b"DupeSearch: ".to_vec();
+        let mut msg = log_tag().to_vec();
         push_c_slice(&mut msg, &job.name);
         if read_host_opts(host_ctx, host_cb).dry_run {
             msg.extend_from_slice(
@@ -3800,7 +3943,7 @@ impl NzbgetRsDupeSearch {
         job: &SearchJob,
         pick: &NzbSummaryData,
         sample: &DonorHealthResult,
-        candidates: &[(i32, f64)],
+        candidates: &[(i32, f64, u8)],
         servers: &[Arc<DonorServer>],
         health_options: &DonorOptions,
     ) {
@@ -3857,7 +4000,7 @@ impl NzbgetRsDupeSearch {
             return;
         };
         let pct = |a: f64| (100.0 * a).round() as i32;
-        let mut msg = b"DupeSearch: ".to_vec();
+        let mut msg = log_tag().to_vec();
         push_c_slice(&mut msg, &job.name);
         msg.extend_from_slice(format!(": the pick sampled {}% alive", pct(alive)).as_bytes());
         if alive >= crate::dupewatch::SWAP_BELOW {
@@ -3871,7 +4014,7 @@ impl NzbgetRsDupeSearch {
             let same_group = dq_find_nzb(host_ctx, host_cb, dq_ptr, id).is_some_and(|(p, _)| {
                 let b = inspect_nzb(host_ctx, host_cb, p, false);
                 lower_key(&effective_key(&b.dupe_key, &b.name)) == lower_key(&job.dupe_key)
-                    && crate::releasename::same_release(&job.name, &b.name)
+                    && (b.has_dupe_fleet || crate::releasename::same_release(&job.name, &b.name))
             });
             if !same_group {
                 return false;
@@ -3888,11 +4031,11 @@ impl NzbgetRsDupeSearch {
                 hc_dupe,
             )
         };
-        let usable: Vec<(i32, f64)> = with_guarded_queue(host_ctx, host_cb, |dq_ptr| {
+        let usable: Vec<(i32, f64, u8)> = with_guarded_queue(host_ctx, host_cb, |dq_ptr| {
             candidates
                 .iter()
                 .copied()
-                .filter(|&(id, _)| eligible(dq_ptr, id))
+                .filter(|&(id, _, _)| eligible(dq_ptr, id))
                 .collect()
         });
         let Some((backup_id, backup_alive)) = crate::dupewatch::swap_backup(&usable, need) else {
@@ -4043,6 +4186,7 @@ impl NzbgetRsDupeSearch {
         posting: &NzbFetched,
         score: i32,
         alive: f64,
+        kind: crate::donorkind::DonorKind,
     ) -> i32 {
         let opts = read_host_opts(host_ctx, host_cb);
         if opts.stopped {
@@ -4050,7 +4194,7 @@ impl NzbgetRsDupeSearch {
         }
         let mut gone = self.pick_gone(host_ctx, host_cb, job);
         if !gone.is_empty() {
-            let mut msg = b"DupeSearch: ".to_vec();
+            let mut msg = log_tag().to_vec();
             push_c_slice(&mut msg, &job.name);
             msg.extend_from_slice(b": not adding ");
             push_c_slice(&mut msg, &posting.listing.title);
@@ -4067,7 +4211,7 @@ impl NzbgetRsDupeSearch {
             } else {
                 (100.0 * alive).round() as i32
             };
-            let mut msg = b"DupeSearch: ".to_vec();
+            let mut msg = log_tag().to_vec();
             push_c_slice(&mut msg, &job.name);
             msg.extend_from_slice(b": dry run, would add ");
             push_c_slice(&mut msg, &posting.listing.title);
@@ -4106,6 +4250,7 @@ impl NzbgetRsDupeSearch {
         if same_size {
             params.push((b"DupeSameSize", b"1"));
         }
+        params.push((crate::donorkind::KIND_PARAM, kind.param()));
         if posting.same_inner {
             params.push((b"DupeSameInner", b"1"));
         }
@@ -4152,7 +4297,7 @@ impl NzbgetRsDupeSearch {
                     0,
                 );
             });
-            let mut msg = b"DupeSearch: ".to_vec();
+            let mut msg = log_tag().to_vec();
             push_c_slice(&mut msg, &job.name);
             msg.extend_from_slice(b": removed the duplicate ");
             push_c_slice(&mut msg, &posting.listing.title);
@@ -4700,6 +4845,8 @@ impl NzbgetRsDupeSearch {
         if init_opts.dupe_search {
             self.resume_pending(host_ctx, host_cb);
             self.scan_queue(host_ctx, host_cb);
+        } else if init_opts.dupe_check && init_opts.dupe_watch {
+            self.scan_queue(host_ctx, host_cb);
         }
 
         while !host_stopped(host_ctx, host_cb) {
@@ -4733,7 +4880,10 @@ impl NzbgetRsDupeSearch {
                     self.prepare_native(host_ctx, host_cb, dq_ptr, nzb_id, &mut job)
                 });
                 if do_search {
-                    self.mark_searching(host_ctx, host_cb, &job);
+                    // Only a search is resumed after a restart.
+                    if read_host_opts(host_ctx, host_cb).dupe_search {
+                        self.mark_searching(host_ctx, host_cb, &job);
+                    }
                     self.search(host_ctx, host_cb, &job);
                 }
             }

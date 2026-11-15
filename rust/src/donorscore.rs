@@ -45,10 +45,30 @@ pub struct Entry {
     pub twin: bool,
     pub bytes: i64,
     pub grabs: i32,
+    /// `DonorKind` of a non-twin (`crate::donorkind::DonorKind as u8`:
+    /// 1 borrowable, 2 unknown, 3 unborrowable); a twin is always first.
+    pub kind: u8,
+    /// The highest offset this entry can be given (0: none). A partly alive
+    /// fleet member is never raised above its old score (see
+    /// `eval_member_rerank`); the entries ranked after it must then fall
+    /// below that, or they would overtake it.
+    pub cap: i32,
 }
 
-/// The offsets for the live entries once every check is in: most alive first
-/// (whole percent), then twin, closest to `pick_bytes`, most grabbed; strictly
+impl Entry {
+    /// TWINs first, then borrowable, unknown and unborrowable ALTs.
+    fn kind_rank(&self) -> u8 {
+        if self.twin {
+            0
+        } else {
+            self.kind.max(1)
+        }
+    }
+}
+
+/// The offsets for the live entries once every check is in: TWINs first, then
+/// borrowable, unknown and unborrowable ALTs (`Entry::kind`); within each, most
+/// alive first (whole percent), then closest to `pick_bytes`, most grabbed; strictly
 /// falling, each at most its target. Entries scored DEAD (or less) keep their
 /// score. Parallel to `entries`.
 pub fn rerank(entries: &[Entry], pick_bytes: i64) -> Vec<i32> {
@@ -68,16 +88,20 @@ pub fn rerank(entries: &[Entry], pick_bytes: i64) -> Vec<i32> {
     // std::stable_sort with the C++ comparator: a stable sort keeps equal entries in order
     live.sort_by(|&a, &b| {
         let (x, y) = (&entries[a], &entries[b]);
-        percent(y)
-            .cmp(&percent(x))
-            .then_with(|| y.twin.cmp(&x.twin))
+        x.kind_rank()
+            .cmp(&y.kind_rank())
+            .then_with(|| percent(y).cmp(&percent(x)))
             .then_with(|| distance(x).cmp(&distance(y)))
             .then_with(|| y.grabs.cmp(&x.grabs))
     });
     let mut previous = 100;
     for i in live {
-        let want = (DEAD + 1).max(target(entries[i].alive, entries[i].twin).min(previous - 1));
-        previous = want;
+        let mut want = target(entries[i].alive, entries[i].twin).min(previous - 1);
+        if entries[i].cap > 0 {
+            want = want.min(entries[i].cap);
+        }
+        let want = (DEAD + 1).max(want);
+        previous = if entries[i].cap > 0 { want.min(entries[i].cap) } else { want };
         scores[i] = want;
     }
     scores
@@ -94,7 +118,20 @@ mod tests {
             twin,
             bytes,
             grabs,
+            kind: 2,
+            cap: 0,
         }
+    }
+
+    #[test]
+    fn a_capped_member_keeps_the_entries_after_it_below() {
+        // a 98%-alive twin member scored 80 before, a whole borrowable ALT 90:
+        // the twin can't rise past 80, so the ALT must drop below it
+        let twin = Entry { cap: 80, ..e(DEAD + 1, 0.98, true, 1000, 0) };
+        let alt = Entry { kind: 1, ..e(DEAD + 1, 1.0, false, 1000, 0) };
+        let got = rerank(&[alt, twin], 1000);
+        assert_eq!(got[1], 80);
+        assert!(got[0] < got[1], "{got:?}");
     }
 
     #[test]
@@ -143,7 +180,7 @@ mod tests {
     }
 
     #[test]
-    fn rerank_orders_by_health_then_twin_then_size_then_grabs() {
+    fn rerank_orders_by_kind_then_health_then_size_then_grabs() {
         let entries = [
             e(50, 0.9, false, 100, 0),
             e(50, 1.0, false, 300, 0),
@@ -159,7 +196,17 @@ mod tests {
             e(88, 1.0, true, 1000, 1),
             e(87, 1.0, false, 1200, 1),
         ];
-        assert_eq!(rerank(&wholeness, 1000), vec![82, 85, 90, 89]);
+        // a twin outranks a wholer ALT
+        assert_eq!(rerank(&wholeness, 1000), vec![82, 80, 90, 81]);
+
+        let k = |kind: u8, alive: f64| Entry {
+            kind,
+            ..e(50, alive, false, 1000, 0)
+        };
+        // borrowable, then unknown, then unborrowable, each by health
+        let kinds = [k(3, 1.0), k(2, 1.0), k(1, 0.9), k(1, 1.0), k(0, 1.0)];
+        // kind 0 on a non-twin counts as borrowable
+        assert_eq!(rerank(&kinds, 1000), vec![79, 80, 81, 89, 88]);
 
         let dead_and_falling = [
             e(1, 0.0, false, 1000, 5),

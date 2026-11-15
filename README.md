@@ -42,7 +42,7 @@ RustyGet is a Usenet downloader that started as a fork of [NZBGet](https://githu
 | Not enough par2 blocks | Repair fails | Repairs with the fewest recovery volumes of a twin that cover the damage |
 | Holes after the download | Left to par2 | Stream repair patches verified bytes from duplicates, even across RAR, ZIP, 7-Zip, raw splits, and encrypted RAR |
 | A download that can't complete | Runs to the end, then fails over | `HealthCheck=dupe` fails over within seconds, and a probe parks dead copies before they download |
-| Finding more copies | Only what feeds and clients send | `DupeSearch` queries NZBHydra2, checks each copy on your servers, and queues the live ones as backups |
+| Finding more copies | Only what feeds and clients send | The app that sends a fleet finds the copies; RustyGet trusts them and checks each one on your servers |
 | Clients with many copies | One `append` per copy | One `appendfleet` call: RustyGet checks every copy and downloads the most complete one |
 | Configuration | 155 options | 23 new options and a new `HealthCheck` value, off unless the configuration file turns them on; RustyGet's configuration template turns on live repair and early failover |
 | API | NZBGet API | NZBGet API, plus `appendfleet`, new fields, POST for every method that changes something (plain GET runs only the methods that read), JSON-P off unless option `JsonP` turns it on, and access checks in multicalls |
@@ -51,7 +51,7 @@ RustyGet is a Usenet downloader that started as a fork of [NZBGet](https://githu
 | Unpacking | External `unrar` and `7z` programs | Built in, with no external programs |
 | CI workflows | Builds and tests for every platform | Builds and tests on Linux x86-64 and macOS for every pull request and push to `main` |
 
-The new options are `DupeArticleFallback`, `DupeStreamDecompress`, `DupeStreamTimeout`, `DupeBorrowFirst`, `DupeSearch`, `DupeSearchUrl`, `DupeSearchApiKey`, `DupeSearchDelay`, `DupeSearchDryRun`, `DupeSearchMaxDonors`, `DupeHealthPercent`, `DupeHealthMin`, `DupeHealthMax`, `DupeBodyChecks`, `DupeHealthBudget`, `DupeMinAlive`, `DupeFastDonors`, `DupePrimaryScore`, `DupeSizeTolerance`, `DupeBodyPercent`, `DupeCheckConcurrency`, and `DupeCheckConnections`, plus `JsonP` in the security settings. The full list of changes is in [Differences from NZBGet](https://appz4fun.github.io/RustyGet/differences.html).
+The new options are `DupeArticleFallback`, `DupeStreamDecompress`, `DupeStreamTimeout`, `DupeBorrowFirst`, `DupeWatch`, `DupeHealthPreset`, `DupeHealthPercent`, `DupeHealthMin`, `DupeHealthMax`, `DupeBodyChecks`, `DupeHealthBudget`, `DupeMinAlive`, `DupeBodyPercent`, `DupeCheckConcurrency`, and `DupeCheckConnections`, plus `JsonP` in the security settings. The full list of changes is in [Differences from NZBGet](https://appz4fun.github.io/RustyGet/differences.html).
 
 ## How deduplication works
 
@@ -72,11 +72,9 @@ The same release usually exists as many postings: reposts, listings on several i
 3. **Queue the best, keep the rest.** The top copy downloads, and the others wait in history as scored backups, with their measured health.
 4. **Borrow, repair, fail over.** During the download, a missing article comes from a matching file in another copy. A yEnc article must fit its place in the file, and, where they're available, it's checked against its yEnc checksum and the download's par2 block checksums. [Duplicate fleets](https://appz4fun.github.io/RustyGet/duplicate-fleets.html#making-sure-the-bytes-are-right) lists when a check can't run. Holes are patched from verified bytes. If the copy can't complete, the best backup takes over within seconds, and the add-on follows the duplicate key to the new download.
 
-RustyGet can also search on its own: with `DupeSearch=yes`, it queries NZBHydra2 for more copies of each new download, checks them the same way, and adds the live ones as backups.
-
 The add-on decides *which release* you get. RustyGet decides *which copy* of it downloads, because only your news servers know which copies still exist. Fleet submission with `appendfleet` came in add-on pull requests [514](https://github.com/Appz4Fun/NeNeTeePee-Stream-Kodi/pull/514), [518](https://github.com/Appz4Fun/NeNeTeePee-Stream-Kodi/pull/518), and [519](https://github.com/Appz4Fun/NeNeTeePee-Stream-Kodi/pull/519), and shipped in the add-on's [2.0.0-beta.3](https://github.com/Appz4Fun/NeNeTeePee-Stream-Kodi/releases/tag/v2.0.0-beta.3) pre-release on 2026-10-11. With stock NZBGet, the add-on falls back to one `append` per copy.
 
-For more detail, see [Duplicate fleets](https://appz4fun.github.io/RustyGet/duplicate-fleets.html), [Streaming with Kodi](https://appz4fun.github.io/RustyGet/kodi.html), [Donor search](https://appz4fun.github.io/RustyGet/dupesearch.html), and [NZBHydra2](https://appz4fun.github.io/RustyGet/nzbhydra2.html).
+For more detail, see [Duplicate fleets](https://appz4fun.github.io/RustyGet/duplicate-fleets.html), [Streaming with Kodi](https://appz4fun.github.io/RustyGet/kodi.html), and [NZBHydra2](https://appz4fun.github.io/RustyGet/nzbhydra2.html).
 
 ## Pull request 850
 

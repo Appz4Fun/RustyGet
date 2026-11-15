@@ -16,7 +16,7 @@ lede = "RustyGet started from NZBGet 27.0 and the work of pull request 850. This
 | Not enough par2 blocks | Repair fails | Repairs with a twin's recovery volumes |
 | Holes after the download | Left to par2 | Patched with verified bytes from duplicates, across RAR, ZIP, 7-Zip, splits, and encryption |
 | A download that can't complete | Runs to the end, then fails over | `HealthCheck=dupe` fails over within seconds, and a probe catches dead copies before they start |
-| Finding more copies | Only what feeds and clients send | `DupeSearch` queries NZBHydra2, checks each copy on your servers, and queues the live ones |
+| Finding more copies | Only what feeds and clients send | The app that sends a fleet finds the copies; RustyGet trusts them and checks each one on your servers |
 | Clients sending many copies | One `append` per copy | One `appendfleet` call; RustyGet checks every copy and picks the best |
 | Health of a backup | Unknown until it downloads | Measured, shown with its score, and used to skip dead copies |
 | Configuration | 155 options | 23 more options and a new `HealthCheck` value, off unless the configuration file turns them on; the template that ships with RustyGet turns on live repair and early failover |
@@ -42,10 +42,9 @@ lede = "RustyGet started from NZBGet 27.0 and the work of pull request 850. This
 | Early failover | `HealthCheck=dupe` | Fails over as soon as a download can't complete, by failure counts, projected health, or par2 block damage. |
 | Dead-copy probe | `HealthCheck=dupe` | Ten articles checked on every server before a download starts, when a backup waits. |
 | Failed-article recheck | Article fallback or `HealthCheck=dupe` | After a failure, RustyGet asks for a sample of the failed articles again and retries them once if most now exist. |
-| Donor search | `DupeSearch=yes` | Finds, checks, and queues more copies through NZBHydra2. |
 | Fleet submission | `appendfleet` | A client sends up to 50 copies in one call. |
 
-See [Duplicate fleets](duplicate-fleets.md) and [Donor search](dupesearch.md).
+See [Duplicate fleets](duplicate-fleets.md).
 
 ## Changes to inherited duplicate handling
 
@@ -58,7 +57,7 @@ See [Duplicate fleets](duplicate-fleets.md) and [Donor search](dupesearch.md).
 
 ## Options
 
-Twenty-two new options are in **INCOMING NZBS**, after `DupeCheck`: `DupeArticleFallback`, `DupeStreamDecompress`, `DupeStreamTimeout`, `DupeBorrowFirst`, `DupeSearch`, `DupeSearchUrl`, `DupeSearchApiKey`, `DupeSearchDelay`, `DupeSearchDryRun`, `DupeSearchMaxDonors`, `DupeHealthPercent`, `DupeHealthMin`, `DupeHealthMax`, `DupeBodyChecks`, `DupeHealthBudget`, `DupeMinAlive`, `DupeFastDonors`, `DupePrimaryScore`, `DupeSizeTolerance`, `DupeBodyPercent`, `DupeCheckConcurrency`, and `DupeCheckConnections`. Repair from duplicates is on by default, in the configuration file and when an option is left out of it: `DupeArticleFallback=live`, `DupeStreamDecompress=yes` and `DupeBorrowFirst=yes`. `HealthCheck` gains the value `dupe`, now its default, and `ParScan=dupe`, `DirectUnpack=yes` and `DirectRename=yes` are the defaults too. `DupeSearch` stays off by default. A fleet ranks its copies TWINs first (by health), then ALTs whose packaging the byte-level repair can read, then the rest, and duplicates are asked for missing data in the same order. One new option is in **SECURITY**: `JsonP`, off by default, turns on answers to JSON-P requests, which NZBGet always answered.
+Sixteen new options are in **INCOMING NZBS**, after `DupeCheck`: `DupeArticleFallback`, `DupeStreamDecompress`, `DupeStreamTimeout`, `DupeBorrowFirst`, `DupeWatch`, `DupeHealthPreset`, `DupeHealthPercent`, `DupeHealthMin`, `DupeHealthMax`, `DupeBodyChecks`, `DupeHealthBudget`, `DupeMinAlive`, `DupeBodyPercent`, `DupeCheckConcurrency`, and `DupeCheckConnections`. Repair from duplicates is on by default, in the configuration file and when an option is left out of it: `DupeArticleFallback=live`, `DupeStreamDecompress=yes`, `DupeBorrowFirst=yes` and `DupeWatch=yes`. `HealthCheck` gains the value `dupe`, now its default, and `ParScan=dupe`, `DirectUnpack=yes` and `DirectRename=yes` are the defaults too. Duplicates arrive only through the API (`appendfleet`) and are trusted; duplicate scores run from 1 to 100. A fleet ranks its copies TWINs first (by health), then ALTs whose packaging the byte-level repair can read, then the rest, and duplicates are asked for missing data in the same order. One new option is in **SECURITY**: `JsonP`, off by default, turns on answers to JSON-P requests, which NZBGet always answered.
 
 ### Defaults
 
@@ -71,6 +70,7 @@ The template differs from NZBGet's in these values:
 | `DupeArticleFallback` | | `live` |
 | `DupeStreamDecompress` | | `yes` |
 | `DupeBorrowFirst` | | `yes` |
+| `DupeWatch` | | `yes` |
 | `DirectUnpack` | `no` | `yes` |
 | `HealthCheck` | `park` | `dupe` |
 | `ArticleCache` | `0` | `500` |
@@ -117,7 +117,7 @@ See [API and compatibility](api.md).
 
 ## Security and robustness
 
-- `DupeSearchApiKey`, and any option with an API key in its name, is protected like a password: the restricted user and JSON-P see `***`.
+- Any option with an API key in its name is protected like a password: the restricted user and JSON-P see `***`.
 - File cleanup never follows symbolic links.
 - NZB parsing refuses XML entity declarations.
 - The control port limits concurrent connections and keeps running when a thread or a connection fails.

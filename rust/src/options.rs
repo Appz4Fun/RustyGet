@@ -241,7 +241,7 @@ const SECTIONS: [(&CStr, usize, &[&CStr]); 4] = [
     ),
 ];
 
-const OBSOLETE: [&CStr; 22] = [
+const OBSOLETE: [&CStr; 31] = [
     c"RetryOnCrcError",
     c"AllowReProcess",
     c"LoadPars",
@@ -264,6 +264,17 @@ const OBSOLETE: [&CStr; 22] = [
     c"AccurateRate",
     c"CreateBrokenLog",
     c"BrokenLog",
+    // Dupes arrive only through the API (appendfleet): no indexer search and
+    // no tunable donor ranking (2026-11-15).
+    c"DupeSearch",
+    c"DupeSearchUrl",
+    c"DupeSearchApiKey",
+    c"DupeSearchDelay",
+    c"DupeSearchDryRun",
+    c"DupeSearchMaxDonors",
+    c"DupePrimaryScore",
+    c"DupeFastDonors",
+    c"DupeSizeTolerance",
 ];
 
 /// Options::ValidateOptionName; `predefined` tells whether the name is one of
@@ -1037,7 +1048,7 @@ pub fn options_normalize_dupe_check_options(
     check_connections: i32,
 ) -> (i32, i32, i32, i32, i32) {
     (
-        primary_score.max(1000),
+        primary_score.clamp(1, 100),
         size_tolerance.clamp(0, 1000),
         body_percent.clamp(0, 100),
         check_concurrency.clamp(1, 100),
@@ -1509,6 +1520,26 @@ const POST_STRATEGY_VALUES: [i32; 4] = [0, 1, 2, 3];
 const FILE_NAMING_NAMES: [&CStr; 3] = [c"auto", c"article", c"nzb"];
 const FILE_NAMING_VALUES: [i32; 3] = [0, 1, 2];
 
+/// `DupeHealthPreset`: how hard each copy of a fleet is sampled.
+const DUPE_HEALTH_PRESET_NAMES: [&CStr; 4] = [c"weak", c"medium", c"hard", c"custom"];
+const DUPE_HEALTH_PRESET_VALUES: [i32; 4] = [0, 1, 2, 3];
+
+/// The sampling a `DupeHealthPreset` sets: `(DupeHealthPercent,
+/// DupeHealthMin, DupeHealthMax, DupeBodyChecks, DupeBodyPercent,
+/// DupeHealthBudget)`, or `None` for "custom" (the options themselves).
+/// "medium" is the defaults of those options.
+pub fn dupe_health_preset(preset: i32) -> Option<(i32, i32, i32, i32, i32, i32)> {
+    match preset {
+        // weak / fast: about 20-200 STATs and 5 BODY downloads a copy
+        0 => Some((2, 20, 200, 5, 10, 60)),
+        // medium / slower: the defaults
+        1 => Some((5, 50, 1000, 20, 20, 120)),
+        // hard / slowest: about 100-3000 STATs and 60 BODY downloads a copy
+        2 => Some((15, 100, 3000, 60, 40, 300)),
+        _ => None,
+    }
+}
+
 const HEALTH_CHECK_NAMES: [&CStr; 5] = [c"pause", c"delete", c"park", c"none", c"dupe"];
 const HEALTH_CHECK_VALUES: [i32; 5] = [0, 1, 2, 3, 4];
 
@@ -1550,10 +1581,14 @@ const COMMAND_VALUES: [i32; 26] = [
     0, 0, 1, 1, 1, 1, 2, 3, 3, 2, 3, 3, 4, 4, 4, 4, 6, 7, 8, 8, 9, 9, 10, 10, 11, 11,
 ];
 
+/// Seconds after a download is added before its backups are first checked
+/// (option DupeWatch).
+pub const DUPE_WATCH_DELAY_SEC: i32 = 20;
+
 /// Emits all default option `(name, value)` pairs for `Options::InitDefaults`.
 pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &CStr)) {
     let output_mode = if disable_curses { c"color" } else { c"curses" };
-    let defaults: [(&CStr, &CStr); 132] = [
+    let defaults: [(&CStr, &CStr); 125] = [
         (c"MainDir", c"~/downloads"),
         (c"WebDir", c""),
         (c"ConfigTemplate", c""),
@@ -1573,21 +1608,14 @@ pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &
         (c"DupeStreamDecompress", c"yes"),
         (c"DupeStreamTimeout", c"60"),
         (c"DupeBorrowFirst", c"yes"),
-        (c"DupeSearch", c"no"),
-        (c"DupeSearchDryRun", c"no"),
-        (c"DupeSearchUrl", c""),
-        (c"DupeSearchApiKey", c""),
-        (c"DupeSearchDelay", c"20"),
-        (c"DupeSearchMaxDonors", c"0"),
+        (c"DupeWatch", c"yes"),
+        (c"DupeHealthPreset", c"medium"),
         (c"DupeHealthPercent", c"5"),
         (c"DupeHealthMin", c"50"),
         (c"DupeHealthMax", c"1000"),
         (c"DupeBodyChecks", c"20"),
         (c"DupeHealthBudget", c"120"),
         (c"DupeMinAlive", c"50"),
-        (c"DupeFastDonors", c"5"),
-        (c"DupePrimaryScore", c"1000000"),
-        (c"DupeSizeTolerance", c"0"),
         (c"DupeBodyPercent", c"20"),
         (c"DupeCheckConcurrency", c"20"),
         (c"DupeCheckConnections", c"0"),
@@ -1784,6 +1812,16 @@ pub static DUPE_BORROW_FIRST: std::sync::atomic::AtomicBool =
 /// Current value of option `DupeBorrowFirst`.
 pub fn dupe_borrow_first() -> bool {
     DUPE_BORROW_FIRST.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Option `DupeWatch`: look after the queued and history backups of a download
+/// without `DupeSearch` (DupeMode FORCE to SCORE, dead pick, swap, rescue).
+/// Rust-only option, not part of the C scalars block.
+pub static DUPE_WATCH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Current value of option `DupeWatch`.
+pub fn dupe_watch() -> bool {
+    DUPE_WATCH.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 #[repr(C)]
@@ -2283,19 +2321,42 @@ pub fn init_scalar_options_host<H: OptionsHost>(
         host.parse_bool_value(c"DupeBorrowFirst"),
         std::sync::atomic::Ordering::Relaxed,
     );
-    s.dupe_search = i32::from(host.parse_bool_value(c"DupeSearch"));
-    s.dupe_search_dry_run = i32::from(host.parse_bool_value(c"DupeSearchDryRun"));
-    *out_dupe_search_url = host.get_option(c"DupeSearchUrl");
-    *out_dupe_search_api_key = host.get_option(c"DupeSearchApiKey");
-    let raw_search_delay = host.parse_int_value(c"DupeSearchDelay", 10);
-    let raw_search_max_donors = host.parse_int_value(c"DupeSearchMaxDonors", 10);
-    let raw_health_percent = host.parse_int_value(c"DupeHealthPercent", 10);
-    let raw_health_min = host.parse_int_value(c"DupeHealthMin", 10);
-    let raw_health_max = host.parse_int_value(c"DupeHealthMax", 10);
-    let raw_body_checks = host.parse_int_value(c"DupeBodyChecks", 10);
-    let raw_health_budget = host.parse_int_value(c"DupeHealthBudget", 10);
+    DUPE_WATCH.store(
+        host.parse_bool_value(c"DupeWatch"),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    // Dupes arrive only through the API, trusted as dupes: the indexer search
+    // and its settings are gone, and the donor ranking uses fixed values.
+    s.dupe_search = 0;
+    s.dupe_search_dry_run = 0;
+    *out_dupe_search_url = None;
+    *out_dupe_search_api_key = None;
+    let raw_search_delay = DUPE_WATCH_DELAY_SEC;
+    let raw_search_max_donors = 0;
+    let health_preset = dupe_health_preset(host.parse_enum_value(
+        c"DupeHealthPreset",
+        &DUPE_HEALTH_PRESET_NAMES,
+        &DUPE_HEALTH_PRESET_VALUES,
+    ));
+    let (
+        raw_health_percent,
+        raw_health_min,
+        raw_health_max,
+        raw_body_checks,
+        preset_body_percent,
+        raw_health_budget,
+    ) = health_preset.unwrap_or_else(|| {
+        (
+            host.parse_int_value(c"DupeHealthPercent", 10),
+            host.parse_int_value(c"DupeHealthMin", 10),
+            host.parse_int_value(c"DupeHealthMax", 10),
+            host.parse_int_value(c"DupeBodyChecks", 10),
+            host.parse_int_value(c"DupeBodyPercent", 10),
+            host.parse_int_value(c"DupeHealthBudget", 10),
+        )
+    });
     let raw_min_alive = host.parse_int_value(c"DupeMinAlive", 10);
-    let raw_fast_donors = host.parse_int_value(c"DupeFastDonors", 10);
+    let raw_fast_donors = 5;
 
     let (
         norm_mem,
@@ -2340,9 +2401,9 @@ pub fn init_scalar_options_host<H: OptionsHost>(
         s.dupe_check_concurrency,
         s.dupe_check_connections,
     ) = options_normalize_dupe_check_options(
-        host.parse_int_value(c"DupePrimaryScore", 10),
-        host.parse_int_value(c"DupeSizeTolerance", 10),
-        host.parse_int_value(c"DupeBodyPercent", 10),
+        crate::dupewatch::BASE_PICK_SCORE,
+        0,
+        preset_body_percent,
         host.parse_int_value(c"DupeCheckConcurrency", 10),
         host.parse_int_value(c"DupeCheckConnections", 10),
     );
@@ -4864,7 +4925,7 @@ mod options_full_suite_port_from_cpp {
         assert_eq!(options.scalars.dupe_health_budget, 120);
         assert_eq!(options.scalars.dupe_min_alive, 50);
         assert_eq!(options.scalars.dupe_fast_donors, 5);
-        assert_eq!(options.scalars.dupe_primary_score, 1_000_000);
+        assert_eq!(options.scalars.dupe_primary_score, 100);
         assert_eq!(options.scalars.dupe_size_tolerance, 0);
         assert_eq!(options.scalars.dupe_body_percent, 20);
         assert_eq!(options.scalars.dupe_check_concurrency, 20);
@@ -4879,6 +4940,7 @@ mod options_full_suite_port_from_cpp {
             c"DupeSearchApiKey=secret",
             c"DupeSearchDelay=7",
             c"DupeSearchMaxDonors=3",
+            c"DupeHealthPreset=custom",
             c"DupeHealthPercent=10",
             c"DupeHealthMin=30",
             c"DupeHealthMax=500",
@@ -4895,23 +4957,21 @@ mod options_full_suite_port_from_cpp {
         let mut extender = OptionsExtenderMock::default();
         let options = RustOptions::new_no_config(Some(&cmd_opts), Some(&mut extender));
 
-        assert_eq!(options.scalars.dupe_search, 1);
-        assert_eq!(
-            options.dupe_search_url.as_c_str(),
-            c"http://127.0.0.1:5076/api"
-        );
-        assert_eq!(options.dupe_search_api_key.as_c_str(), c"secret");
-        assert_eq!(options.scalars.dupe_search_delay, 7);
-        assert_eq!(options.scalars.dupe_search_max_donors, 3);
+        // the indexer search and donor ranking options are obsolete: ignored
+        assert_eq!(options.scalars.dupe_search, 0);
+        assert_eq!(options.dupe_search_url.as_c_str(), c"");
+        assert_eq!(options.dupe_search_api_key.as_c_str(), c"");
+        assert_eq!(options.scalars.dupe_search_delay, 20);
+        assert_eq!(options.scalars.dupe_search_max_donors, 0);
         assert_eq!(options.scalars.dupe_health_percent, 10);
         assert_eq!(options.scalars.dupe_health_min, 30);
         assert_eq!(options.scalars.dupe_health_max, 500);
         assert_eq!(options.scalars.dupe_body_checks, 0);
         assert_eq!(options.scalars.dupe_health_budget, 60);
         assert_eq!(options.scalars.dupe_min_alive, 70);
-        assert_eq!(options.scalars.dupe_fast_donors, 2);
-        assert_eq!(options.scalars.dupe_primary_score, 500_000);
-        assert_eq!(options.scalars.dupe_size_tolerance, 20);
+        assert_eq!(options.scalars.dupe_fast_donors, 5);
+        assert_eq!(options.scalars.dupe_primary_score, 100);
+        assert_eq!(options.scalars.dupe_size_tolerance, 0);
         assert_eq!(options.scalars.dupe_body_percent, 5);
         assert_eq!(options.scalars.dupe_check_concurrency, 3);
         assert_eq!(options.scalars.dupe_check_connections, 8);
@@ -4924,6 +4984,7 @@ mod options_full_suite_port_from_cpp {
             c"DupeSearchUrl=http://127.0.0.1:5076/api",
             c"DupeSearchDelay=-5",
             c"DupeSearchMaxDonors=-1",
+            c"DupeHealthPreset=custom",
             c"DupeHealthPercent=500",
             c"DupeHealthMin=0",
             c"DupeHealthMax=10",
@@ -4940,7 +5001,7 @@ mod options_full_suite_port_from_cpp {
         let mut extender = OptionsExtenderMock::default();
         let options = RustOptions::new_no_config(Some(&cmd_opts), Some(&mut extender));
 
-        assert_eq!(options.scalars.dupe_search_delay, 0);
+        assert_eq!(options.scalars.dupe_search_delay, 20);
         assert_eq!(options.scalars.dupe_search_max_donors, 0);
         assert_eq!(options.scalars.dupe_health_percent, 100);
         assert_eq!(options.scalars.dupe_health_min, 1);
@@ -4948,18 +5009,59 @@ mod options_full_suite_port_from_cpp {
         assert_eq!(options.scalars.dupe_body_checks, 0);
         assert_eq!(options.scalars.dupe_health_budget, 5);
         assert_eq!(options.scalars.dupe_min_alive, 100);
-        assert_eq!(options.scalars.dupe_fast_donors, 0);
-        assert_eq!(options.scalars.dupe_primary_score, 1000);
+        assert_eq!(options.scalars.dupe_fast_donors, 5);
+        assert_eq!(options.scalars.dupe_primary_score, 100);
         assert_eq!(options.scalars.dupe_size_tolerance, 0);
         assert_eq!(options.scalars.dupe_body_percent, 100);
         assert_eq!(options.scalars.dupe_check_concurrency, 1);
         // 0 = every free connection
         assert_eq!(options.scalars.dupe_check_connections, 0);
 
-        let cmd_opts2 = [c"DupeHealthMin=300", c"DupeHealthMax=100"];
+        let cmd_opts2 = [
+            c"DupeHealthPreset=custom",
+            c"DupeHealthMin=300",
+            c"DupeHealthMax=100",
+        ];
         let options2 = RustOptions::new_no_config(Some(&cmd_opts2), Some(&mut extender));
         assert_eq!(options2.scalars.dupe_health_min, 300);
         assert_eq!(options2.scalars.dupe_health_max, 300);
+    }
+
+    #[test]
+    fn dupe_health_preset_sets_the_sampling_test() {
+        let mut extender = OptionsExtenderMock::default();
+        let cmd_opts = [c"DupeHealthPreset=hard", c"DupeHealthMin=7"];
+        let o = RustOptions::new_no_config(Some(&cmd_opts), Some(&mut extender));
+        assert_eq!(o.scalars.dupe_health_percent, 15);
+        assert_eq!(o.scalars.dupe_health_min, 100);
+        assert_eq!(o.scalars.dupe_health_max, 3000);
+        assert_eq!(o.scalars.dupe_body_checks, 60);
+        assert_eq!(o.scalars.dupe_body_percent, 40);
+        assert_eq!(o.scalars.dupe_health_budget, 300);
+        let cmd_opts = [c"DupeHealthPreset=weak"];
+        let o = RustOptions::new_no_config(Some(&cmd_opts), Some(&mut extender));
+        assert_eq!(
+            (
+                o.scalars.dupe_health_percent,
+                o.scalars.dupe_health_min,
+                o.scalars.dupe_health_max
+            ),
+            (2, 20, 200)
+        );
+        // medium is the options' own defaults
+        let o = RustOptions::new_no_config(Some(&[]), Some(&mut extender));
+        assert_eq!(dupe_health_preset(1), Some((5, 50, 1000, 20, 20, 120)));
+        assert_eq!(
+            (
+                o.scalars.dupe_health_percent,
+                o.scalars.dupe_health_min,
+                o.scalars.dupe_health_max
+            ),
+            (5, 50, 1000)
+        );
+        let cmd_opts = [c"DupeHealthPreset=custom", c"DupeHealthMin=7"];
+        let o = RustOptions::new_no_config(Some(&cmd_opts), Some(&mut extender));
+        assert_eq!(o.scalars.dupe_health_min, 7);
     }
 
     #[test]
@@ -5336,8 +5438,6 @@ mod options_full_suite_port_from_cpp {
             c"BogusEarlyOption=1".as_ptr(),
             c"ErrorTarget=both".as_ptr(),
             c"WarningTarget=log".as_ptr(),
-            c"DupeSearch=yes".as_ptr(),
-            c"DupeSearchUrl=".as_ptr(),
             c"Server1.Host=news.example.com".as_ptr(),
         ];
         let mut state_flags: c_int = 0;
@@ -5368,14 +5468,6 @@ mod options_full_suite_port_from_cpp {
         assert!(cap.events[0]
             .3
             .contains("Invalid option \"BogusEarlyOption\""));
-        // 2) DupeSearch-without-URL warning sees parsed targets (ErrorTarget=both=3, WarningTarget=log=2).
-        let dupe_ev = cap
-            .events
-            .iter()
-            .find(|e| e.0 == 3)
-            .expect("expected DupeSearch warning");
-        assert_eq!(dupe_ev.1, 3);
-        assert_eq!(dupe_ev.2, 2);
         // 3) Post-InitOptions incomplete Server1 error also sees parsed targets.
         let srv_ev = cap
             .events

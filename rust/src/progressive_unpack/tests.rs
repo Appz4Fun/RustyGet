@@ -2460,7 +2460,8 @@ fn a_final_set_with_duplicate_names_is_copied() {
     assert!(!copied.is_empty(), "{copied:?}");
 }
 
-// From #430: a set repaired while the session waits, then reported final.
+// From #430: a set repaired while the session waits, then reported final. Its volumes had
+// holes, so the end-of-run upgrade (#432) moves the output, not the became-final one.
 /// As `Damaged`, for a download that ends and is repaired while the session waits: the feed
 /// then reports the set final.
 struct FinalAfterRepair {
@@ -2551,4 +2552,21 @@ fn repaired_output_of_a_final_set_is_moved_not_copied() {
         copied.is_empty(),
         "copied into place instead of moved: {copied:?}"
     );
+}
+
+#[test]
+fn a_final_set_of_many_small_volumes_extracts() {
+    // Every header step of every volume still to read rechecks the declaration; with 140
+    // small volumes, declaring before the last volume exhausted zipfast's bookkeeping budget
+    // mid-extraction.
+    let t = TestDir::new("latesmall");
+    let data = pattern(140 * 4096);
+    let vols = rar5_volumes("movie.mkv", &data, 4096);
+    let first = write_set(&t.dl(), &vols);
+    let feed = LateFinal {
+        became: true,
+        volumes: vols.len() as u64,
+    };
+    let (_log, _copied) = run_late(&first, &t.out(), Box::new(feed), Overwrite::Always);
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
 }

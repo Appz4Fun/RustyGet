@@ -1763,16 +1763,22 @@ impl FeedProvider {
         let Some(members) = late.members.as_ref() else {
             return;
         };
-        let Some(remaining) = remaining_bytes(&late.first, &self.opened) else {
+        let Some((remaining, unread)) = remaining_bytes(&late.first, &self.opened) else {
             return;
         };
-        // Each 1 MiB read step of what is left and each volume opened rechecks the
-        // declaration, and each publication runs a handful of checks plus about two per
+        // Once declared, every source step (each header read of a volume still to open, a
+        // byte at a time for its signature) rechecks every protected volume; that cost is
+        // not bounded well enough to budget. Declare only when the last volume is open: the
+        // set's last member, usually the main payload, is still renamed into place.
+        if unread != 0 {
+            return;
+        }
+        // Each 1 MiB data read of the open volume rechecks the declaration, and so do its
+        // remaining header steps; each publication runs a handful of checks plus about two per
         // parent directory.
         let steps = remaining
             .div_ceil(1024 * 1024)
-            .saturating_add(16)
-            .saturating_add(members.volumes.saturating_mul(2))
+            .saturating_add(64)
             .saturating_add(
                 members
                     .count
@@ -1827,19 +1833,23 @@ fn set_members(first: &Path, password: &str) -> Option<SetMembers> {
     (out.count > 0).then_some(out)
 }
 
-/// Bytes of the set the session has not read yet: every volume it has not opened, plus the
-/// one it is reading. `None` when a volume's size cannot be read.
-fn remaining_bytes(first: &Path, opened: &OpenedVolumes) -> Option<u64> {
+/// Bytes of the set the session has not read yet (every volume it has not opened, plus the
+/// one it is reading) and how many volumes it has not opened. `None` when a volume's size
+/// cannot be read.
+fn remaining_bytes(first: &Path, opened: &OpenedVolumes) -> Option<(u64, u64)> {
     let opened = opened.lock().unwrap_or_else(|e| e.into_inner());
     let seen: std::collections::HashSet<&Path> = opened.iter().map(|(p, _)| p.as_path()).collect();
     let mut total = 0u64;
+    let mut unread = 0u64;
     let mut p = first.to_path_buf();
     for _ in 0..4096 {
         if !p.is_file() {
             break;
         }
         let len = std::fs::metadata(&p).ok()?.len();
-        if !seen.contains(p.as_path()) || opened.last().is_some_and(|(l, _)| *l == p) {
+        let fresh = !seen.contains(p.as_path());
+        unread += u64::from(fresh);
+        if fresh || opened.last().is_some_and(|(l, _)| *l == p) {
             total = total.saturating_add(len);
         }
         match zipfast::volume::next_volume(&p) {
@@ -1847,7 +1857,7 @@ fn remaining_bytes(first: &Path, opened: &OpenedVolumes) -> Option<u64> {
             None => break,
         }
     }
-    Some(total)
+    Some((total, unread))
 }
 
 impl VolumeSource for FeedProvider {

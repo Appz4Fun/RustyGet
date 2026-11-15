@@ -2185,6 +2185,36 @@ pub fn log_part_path(day_path: &[u8], part: u32) -> Vec<u8> {
     out
 }
 
+/// The highest part number among `day_path`'s parts (`<stem>.<n><ext>`, gzipped or
+/// not) in its directory, 0 when there are none.
+#[cfg(unix)]
+pub fn log_highest_part(day_path: &[u8]) -> u32 {
+    use std::os::unix::ffi::OsStrExt as _;
+    let pos = crate::paths::base_file_name(day_path);
+    let (stem, ext) = log_split_basename_and_ext(&day_path[pos..]);
+    let directory: &[u8] = if pos > 0 { &day_path[..pos - 1] } else { b"." };
+    let Ok(entries) = std::fs::read_dir(std::ffi::OsStr::from_bytes(directory)) else {
+        return 0;
+    };
+    let mut highest = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.as_bytes();
+        let core = name.strip_suffix(b".gz").unwrap_or(name);
+        let Some(n) = core
+            .strip_suffix(ext.as_slice())
+            .and_then(|c| c.strip_prefix(stem.as_slice()))
+            .and_then(|c| c.strip_prefix(b"."))
+            .and_then(|c| std::str::from_utf8(c).ok())
+            .and_then(|c| c.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        highest = highest.max(n);
+    }
+    highest
+}
+
 /// Rolls up the logs moved aside from `log_file` (`<stem>-YYYY-MM-DD[.<n>]<ext>`, gzipped or
 /// not): gzips each one not yet compressed (`.gz` beside it, the plain file removed once the
 /// archive is complete), then deletes the oldest so that at most `keep` remain (0 keeps all).
@@ -2210,6 +2240,13 @@ pub fn log_roll_up(log_file: &[u8], sep: u8, keep: i32) {
     let mut rolled: Vec<(Vec<u8>, u64, Vec<u8>)> = Vec::new();
     for entry in entries.flatten() {
         let name = entry.file_name().as_bytes().to_vec();
+        // an archive left half-written by a crash; its plain file is still there
+        if let Some(part) = name.strip_suffix(b".part") {
+            if part.ends_with(b".gz") && log_rotated_file_date(part, &stem, &ext).is_some() {
+                let _ = std::fs::remove_file(full(&name));
+            }
+            continue;
+        }
         let Some((y, _, _)) = log_rotated_file_date(&name, &stem, &ext) else {
             continue;
         };
@@ -4688,7 +4725,18 @@ mod tests {
             }
             std::fs::write(tmp.path.join("rustyget.log"), b"current").unwrap();
             std::fs::write(tmp.path.join("rustyget-2026-03-05.old.log"), b"other").unwrap();
+            // a half-written archive from a crash goes; its plain file is compressed again
+            std::fs::write(tmp.path.join("rustyget-2026-03-10.3.log.gz.part"), b"half").unwrap();
             let base_log = tmp.path.join("rustyget.log");
+            assert_eq!(
+                log_highest_part(
+                    tmp.path
+                        .join("rustyget-2026-03-09.log")
+                        .as_os_str()
+                        .as_bytes()
+                ),
+                5
+            );
             log_roll_up(base_log.as_os_str().as_bytes(), b'/', 10);
             let mut left: Vec<String> = std::fs::read_dir(&tmp.path)
                 .unwrap()

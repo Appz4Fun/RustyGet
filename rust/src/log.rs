@@ -411,16 +411,9 @@ fn rotate_if_due(
     }
     inner.log_file = None;
     let day_path = crate::systemhealth::log_rotated_day_path(path, sep, today * 86_400);
-    let taken = |part: u32| {
-        let p = crate::systemhealth::log_part_path(&day_path, part);
-        let gz = [p.as_slice(), b".gz"].concat();
-        std::fs::symlink_metadata(std::ffi::OsStr::from_bytes(&p)).is_ok()
-            || std::fs::symlink_metadata(std::ffi::OsStr::from_bytes(&gz)).is_ok()
-    };
-    let mut part = 1;
-    while taken(part) {
-        part += 1;
-    }
+    // the next part is one past the highest of today, gzipped or not: never a
+    // gap that pruning left, or the newest file would sort as the oldest
+    let part = crate::systemhealth::log_highest_part(&day_path) + 1;
     let target = crate::systemhealth::log_part_path(&day_path, part);
     if std::fs::rename(os_path, std::ffi::OsStr::from_bytes(&target)).is_err() {
         // could not move it aside: keep writing where we are rather than losing lines
@@ -1096,10 +1089,10 @@ mod tests {
                 &mut flags,
             )
         };
-        let line = CString::new("y".repeat(200)).unwrap();
         unsafe {
             nzbget_rs_log_ctl(log, 1, 1, 0, opts, ptr::null(), None);
-            for _ in 0..120 {
+            for i in 0..120 {
+                let line = CString::new(format!("line {i:03} {}", "y".repeat(190))).unwrap();
                 nzbget_rs_log_emit(log, 0, opts, line.as_ptr());
             }
             nzbget_rs_log_free(log);
@@ -1115,6 +1108,20 @@ mod tests {
         assert_eq!(parts.len(), 2, "{names:?}");
         assert_eq!(names.len(), 3, "LogFile and two rolled-over files: {names:?}");
         assert!(!names.iter().any(|n| n.ends_with(".1.log.gz")), "the oldest went first: {names:?}");
+        // the two kept archives hold the lines just before LogFile's: nothing newer was lost
+        let mut kept = String::new();
+        for name in &parts {
+            let f = std::fs::File::open(dir.join(name)).unwrap();
+            std::io::Read::read_to_string(&mut flate2::read::GzDecoder::new(f), &mut kept).unwrap();
+        }
+        let current = std::fs::read_to_string(dir.join("rustyget.log")).unwrap();
+        let first_current: usize = current.lines().next().unwrap().split("line ").nth(1).unwrap()[..3].parse().unwrap();
+        let last_kept = kept
+            .lines()
+            .map(|l| l.split("line ").nth(1).unwrap()[..3].parse::<usize>().unwrap())
+            .max()
+            .unwrap();
+        assert_eq!(last_kept + 1, first_current, "the newest rolled lines are kept");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

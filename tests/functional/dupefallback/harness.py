@@ -3588,6 +3588,132 @@ def scenario_wholefilerestart(daemon, t):
             % (h['Status'], queued_job, recreated, integ))
 
 
+def scenario_wholefilerestartlive(daemon, t):
+    """Live, mid-download: a volume with no article available is queued for
+    stream repair while other volumes still download, and RustyGet is shut
+    down right then (live 6790: a deploy restarted it at that moment). After
+    the restart the queue must load cleanly: no "Error reading diskstate",
+    no file whose article count doubled (137 became 274 live), no file named
+    by its id (<id>.out.tmp), and the release still completes."""
+    members, donor_members, payloads = _wholefile_fixture(t, 'rl')
+    api = daemon.wait_ready()
+    daemon.append(api, 'DonRL', build_multi_nzb(donor_members), True, 'rl-key', 50)
+    daemon.append(api, 'RelRL', build_multi_nzb(members), False, 'rl-key', 100)
+    deadline = time.time() + 120
+    while time.time() < deadline and _grep_log(t, 'no article available') == 0:
+        time.sleep(0.05)
+    still_downloading = _grep_log(t, 'Collection RelRL completely downloaded') == 0
+    try:
+        api.shutdown()
+    except Exception:
+        pass
+    t.procs[-1].wait(timeout=60)
+    daemon.start()
+    api = daemon.wait_ready()
+    h = daemon.wait_history(api, 'RelRL')
+    diskstate_errors = _grep_log(t, 'Error reading diskstate')
+    tmp_names = _grep_log(t, '.out.tmp')
+    import re as _re
+    try:
+        log_text = t.read_file('nzbget.log').decode(errors='replace')
+    except Exception:
+        log_text = ''
+    counts = {}
+    for name, total in _re.findall(r'RelRL/(\S+) \[\d+/(\d+)\]', log_text):
+        counts.setdefault(name, set()).add(int(total))
+    doubled = sum(1 for v in counts.values() if len(v) > 1)
+    both_dirs = (('main', 'dst'), ('main', 'inter'))
+    integ = all(_verify_output(t, payloads[m[1]], '.rar', dirs=both_dirs) for m in members)
+    ok = still_downloading and diskstate_errors == 0 and tmp_names == 0 and doubled == 0 and integ
+    return ('wholefilerestartlive', ok,
+            'mid_download=%s status=%s diskstate_errors=%d tmp_names=%d doubled=%d integrity=%s'
+            % (still_downloading, h['Status'], diskstate_errors, tmp_names, doubled, integ))
+
+
+def scenario_restartfirstdead(daemon, t):
+    """Restart with DirectRename on while a volume that has had no article
+    arrive (first article included) is being tried (live 6790: a deploy
+    restarted RustyGet then). After the restart the direct-rename pass loaded
+    that file's article list from disk to look for a first article, and the
+    main picker, holding a read of the file from before that pass, loaded the
+    list a second time: 137 articles became 274, the saved state no longer
+    matched ("Error reading diskstate"), the volume was named <id>.out.tmp and
+    the job failed on health. part02 and part03 are wholly dead (two, so
+    direct rename cannot name them by elimination and stays running); only
+    part01 can complete. Every file must keep its own article count."""
+    seg = 100_000
+    vol = 1_500_000
+    members = [
+        ('fdA/x.part01.rar', 'Rel.part01.rar', 300_000, seg, set()),
+        ('fdA/x.part02.rar', 'Rel.part02.rar', vol, 5_000, set(range(1, 301))),
+        ('fdA/x.part03.rar', 'Rel.part03.rar', vol, seg, set(range(1, 16))),
+    ]
+    payloads = {}
+    for i, m in enumerate(members):
+        data = _payload(m[2], 9400 + i)
+        payloads[m[1]] = data
+        t.write_file(os.path.join('data', m[0]), data)
+    # The donor carries only part01, so the dead volumes stay dead and their
+    # names are never confirmed, as on 6790.
+    donor_members = [(m[0].replace('fdA', 'fdB'), m[1].replace('Rel.', 'Other.'),
+                      m[2], seg, set()) for m in members if 'part01' in m[1]]
+    for dm in donor_members:
+        t.write_file(os.path.join('data', dm[0]), payloads[dm[1].replace('Other.', 'Rel.')])
+    api = daemon.wait_ready()
+    daemon.append(api, 'DonFD', build_multi_nzb(donor_members), True, 'fd-key', 50)
+    # Obfuscated posted names with the real names only in the par2, which is
+    # listed first so it arrives before the restart, as on 6790.
+    par = generators.par2_index([(m[1], payloads[m[1]]) for m in members])
+    t.write_file(os.path.join('data', 'fdA/rel.par2'), par)
+    obf = ['Kq7vT2mZpX9dLw.rar', 'LbX0gshaVcZjLie.rar', 'R4nWq8yHs1Ufe.rar']
+    rel_members = [(m[0], o, m[2], m[3], m[4]) for m, o in zip(members, obf)]
+    rel_members.insert(0, ('fdA/rel.par2', 'Rel.par2', len(par), 500_000, set()))
+    daemon.append(api, 'RelFD', build_multi_nzb(rel_members), False, 'fd-key', 100)
+    deadline = time.time() + 120
+    import re as _re
+    def _mid():
+        try:
+            txt = t.read_file('nzbget.log').decode(errors='replace')
+        except Exception:
+            return False
+        if 'Successfully downloaded RelFD/Rel.par2' not in txt:
+            return False
+        return bool(_re.search(r'Download RelFD/LbX0gshaVcZjLie\.rar \[(?:[4-9]\d|1\d\d)/300\] failed', txt))
+    while time.time() < deadline and not _mid():
+        time.sleep(0.05)
+    mid = _mid() and _grep_log(t, 'Collection RelFD completely downloaded') == 0
+    try:
+        api.shutdown()
+    except Exception:
+        pass
+    t.procs[-1].wait(timeout=60)
+    daemon.start()
+    api = daemon.wait_ready()
+    h = daemon.wait_history(api, 'RelFD')
+    try:
+        log_text = t.read_file('nzbget.log').decode(errors='replace')
+    except Exception:
+        log_text = ''
+    counts = {}
+    for name, total in _re.findall(r'RelFD/(\S+) \[\d+/(\d+)\]', log_text):
+        counts.setdefault(name, set()).add(int(total))
+    doubled = sorted(n for n, v in counts.items() if len(v) > 1)
+    # The restart must have caught a dead volume still being tried, or the
+    # double-load path was never reached and the run proves nothing.
+    after = log_text.split('server-mode')[-1]
+    retried = bool(_re.search(r'Download(?:ing)? RelFD/(?:LbX0gshaVcZjLie|R4nWq8yHs1Ufe)\.rar \[', after))
+    diskstate_errors = log_text.count('Error reading diskstate')
+    tmp_names = log_text.count('.out.tmp')
+    both_dirs = (('main', 'dst'), ('main', 'inter'))
+    integ = all(_verify_output(t, payloads[m[1]], '.rar', dirs=both_dirs)
+                for m in members if 'part01' in m[1])
+    ok = mid and retried and not doubled and diskstate_errors == 0 and tmp_names == 0 and integ
+    return ('restartfirstdead', ok,
+            'mid_download=%s retried_after_restart=%s status=%s doubled=%s diskstate_errors=%d '
+            'tmp_names=%d integrity=%s'
+            % (mid, retried, h['Status'], doubled, diskstate_errors, tmp_names, integ))
+
+
 def scenario_wholefilestale(daemon, t):
     """A recreation of a missing volume was cut short by a shutdown: the volume is
     on disk at its full size, mostly zeros, and its job wasn't written back. After
@@ -6367,6 +6493,21 @@ def scenario_watchswap(daemon, t):
     ok = swapped == 1 and back and pick_h.get('Status') == 'DELETED/DUPE' and params.get('DupeAlive') == '70'
     return ('watchswap', ok, 'swapped_logs=%d backup_back=%s pick=%s alive=%s'
             % (swapped, back, pick_h.get('Status'), params.get('DupeAlive')))
+
+
+def scenario_watchborrow(daemon, t):
+    """DupeWatch with live article fallback and DupeBorrowFirst: a pick
+    sampled 70% alive, with a whole backup it can borrow from waiting in
+    history, is NOT swapped: it keeps downloading (and extracting) and
+    borrows its missing articles, so nothing it has done is thrown away."""
+    api, pick_id, (backup_id,) = _watch_pick_and_backups(
+        daemon, t, 'wb', 28, [('Show S01E01 1080p WEB H264-GRP', 400_000, 40, 90)])
+    kept = _watch_wait(t, 'borrows from backup %d' % backup_id)
+    swapped = _grep_log(t, 'swapped for backup')
+    in_queue = any(g.get('NZBID') == pick_id for g in api.listgroups()) or any(
+        h.get('NZBID') == pick_id and h.get('Status', '').startswith('SUCCESS') for h in api.history())
+    ok = kept >= 1 and swapped == 0 and in_queue
+    return ('watchborrow', ok, 'borrow_logs=%d swapped=%d pick_kept=%s' % (kept, swapped, in_queue))
 
 
 def scenario_watchswaptwin(daemon, t):
@@ -9942,6 +10083,8 @@ SCENARIOS = {
     'retryparkedname': scenario_retryparkedname,
     'healthlastarticle': scenario_healthlastarticle,
     'wholefilerestart': scenario_wholefilerestart,
+    'wholefilerestartlive': scenario_wholefilerestartlive,
+    'restartfirstdead': scenario_restartfirstdead,
     'wholefilestale': scenario_wholefilestale,
     'wholefilenfoproof': scenario_wholefilenfoproof,
     'wholefilesampleproof': scenario_wholefilesampleproof,
@@ -10001,6 +10144,7 @@ SCENARIOS = {
     'watchforcepick': scenario_watchforcepick,
     'watchdeadpick': scenario_watchdeadpick,
     'watchswap': scenario_watchswap,
+    'watchborrow': scenario_watchborrow,
     'watchfleet': scenario_watchfleet,
     'watchswaptwin': scenario_watchswaptwin,
     'watchrescue': scenario_watchrescue,
@@ -10212,6 +10356,7 @@ SCENARIO_OPTIONS = {
     'watchdeadpick': ['DupeArticleFallback=no', 'DupeWatch=yes', 'DupeBodyChecks=0', 'DupeHealthMin=40', 'DupeHealthMax=40'],
     'watchfleet': ['DupeArticleFallback=no', 'DupeWatch=yes', 'DupeBodyChecks=0', 'DupeHealthMin=40', 'DupeHealthMax=40'],
     'watchswap': ['DupeArticleFallback=no', 'DupeWatch=yes', 'DupeBodyChecks=0', 'DupeHealthMin=40', 'DupeHealthMax=40'],
+    'watchborrow': ['DupeArticleFallback=live', 'DupeBorrowFirst=yes', 'DupeWatch=yes', 'DupeBodyChecks=0', 'DupeHealthMin=40', 'DupeHealthMax=40'],
     'watchswaptwin': ['DupeArticleFallback=no', 'DupeWatch=yes', 'DupeBodyChecks=0', 'DupeHealthMin=40', 'DupeHealthMax=40'],
     'watchrescue': ['DupeArticleFallback=no', 'HealthCheck=delete', 'ArticleRetries=0', 'Server1.Connections=2', 'DupeWatch=yes'],
     'midwaytwin': ['DupeArticleFallback=live', 'DupeStreamDecompress=yes', 'HealthCheck=dupe', 'ParScan=dupe', 'DupeWatch=yes', 'ParCheck=auto'],
@@ -10248,6 +10393,8 @@ SCENARIO_OPTIONS = {
     # liveoverlap: the DownloadRate throttle (KB/s) keeps the big FileB
     # downloading long enough that FileA's live repair provably overlaps it
     'liveoverlap': ['DupeArticleFallback=live', 'ParCheck=auto', 'DownloadRate=8000'],
+    'wholefilerestartlive': ['DupeArticleFallback=live', 'DownloadRate=400'],
+    'restartfirstdead': ['DupeArticleFallback=live', 'DirectRename=yes', 'DirectWrite=yes', 'DownloadRate=300'],
     'livegate': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'livelastfile': ['DupeArticleFallback=live', 'ParCheck=auto'],
     # repost: ParCheck=auto runs par-check against a random-bytes stand-in
@@ -10594,7 +10741,7 @@ SCENARIO_FIRST_FAIL_PROXY = {'recheckfailed': ((b'?5=', b'?10=', b'?15='),),
 # scenarios with a FakeNewznab indexer (DupeSearchUrl points to it)
 
 # scenarios with a FakeNntp news server in place of nserv
-SCENARIO_FAKE_NNTP = {'watchfleet', 'watchforcepick', 'watchdeadpick', 'watchswap', 'watchswaptwin', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetnodupecheck', 'fleetkindorder', 'fleetintake', 'fleetintakelater', 'fleetencryptedlast', 'fleetencryptedheadless', 'fleetkindslowcheck', 'fleettwinvolumes', 'fleetalldead', 'fleetshutdown'}
+SCENARIO_FAKE_NNTP = {'watchfleet', 'watchforcepick', 'watchdeadpick', 'watchswap', 'watchborrow', 'watchswaptwin', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetnodupecheck', 'fleetkindorder', 'fleetintake', 'fleetintakelater', 'fleetencryptedlast', 'fleetencryptedheadless', 'fleetkindslowcheck', 'fleettwinvolumes', 'fleetalldead', 'fleetshutdown'}
 
 
 # --------------------------------------------------------------------------- #

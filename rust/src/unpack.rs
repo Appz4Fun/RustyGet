@@ -936,15 +936,6 @@ pub fn can_extract_with_zipfast(path: &std::path::Path) -> bool {
     false
 }
 
-/// Lists archive entries using `zipfast::extract::list_with_password`.
-pub fn list_archive_with_zipfast(
-    path: &std::path::Path,
-    password: Option<&str>,
-) -> Result<Vec<zipfast::extract::Entry>, String> {
-    let pw = password.filter(|s| !s.is_empty());
-    zipfast::extract::list_with_password(path, pw).map_err(|e| e.to_string())
-}
-
 fn record_extracted_path_from_msg(
     output_dir: &std::path::Path,
     msg: &str,
@@ -961,7 +952,6 @@ fn record_extracted_path_from_msg(
         }
     }
 }
-
 
 /// RAR sets go through zipfast's progressive session (see `progressive_unpack`).
 /// `overwrite_mode`: 0 skip, 1 overwrite, 2 auto-rename (each member gets a free name).
@@ -2980,7 +2970,7 @@ mod tests {
         std::fs::write(&zip_path, &zip_bytes).unwrap();
 
         assert!(can_extract_with_zipfast(&zip_path));
-        let listed = list_archive_with_zipfast(&zip_path, None).unwrap();
+        let listed = zipfast::extract::list_with_password(&zip_path, None).unwrap();
         assert_eq!(listed.len(), 2);
 
         let mut logs = Vec::new();

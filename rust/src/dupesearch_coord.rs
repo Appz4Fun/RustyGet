@@ -53,6 +53,47 @@ pub const ALIVE_PARAM: &[u8] = b"DupeAlive";
 const ALIVE_PARAM_STR: &str = "DupeAlive";
 pub const OWNED_KEY_PARAM: &[u8] = b"DupeSearchOwnedKey";
 pub const FLEET_PARAM: &[u8] = b"DupeFleet";
+/// Fleet intake verdict on a copy's video: `same` when its sampled payload
+/// matches the fleet's, `unverified` when it could not be read or compared,
+/// `different` when a later re-check found another video in a copy it could
+/// not drop. A copy found carrying another video at intake is dropped.
+pub const VIDEO_PARAM: &[u8] = b"DupeVideo";
+const VIDEO_DIFFERENT: &[u8] = b"different";
+
+fn video_param_value(same: bool) -> &'static [u8] {
+    if same { b"same" } else { b"unverified" }
+}
+
+/// Records the intake verdict on a copy already in the queue or history.
+fn fleet_mark_video(host_ctx: *mut c_void, host_cb: DupeHostFn, nzb_id: i32, same: bool) {
+    fleet_set_video(host_ctx, host_cb, nzb_id, video_param_value(same));
+}
+
+/// Writes a video verdict. `unverified` never replaces an earlier verdict;
+/// `same` and `different` are reads that succeeded, so they always win.
+fn fleet_set_video(host_ctx: *mut c_void, host_cb: DupeHostFn, nzb_id: i32, value: &[u8]) {
+    let decisive = value != b"unverified";
+    with_guarded_queue(host_ctx, host_cb, |dq_ptr| {
+        let Some(qh) = crate::ffi::queue_host() else {
+            return;
+        };
+        let Some((nzb_ptr, in_history)) = dq_find_nzb(host_ctx, host_cb, dq_ptr, nzb_id) else {
+            return;
+        };
+        // a read that failed this time never takes back an earlier match
+        if !decisive && qh.nzb_get_param(nzb_ptr, VIDEO_PARAM).is_some() {
+            return;
+        }
+        qh.nzb_set_param(nzb_ptr, VIDEO_PARAM, Some(value));
+        qh.nzb_set_int(nzb_ptr, crate::queuesubsys_host::NZB_INT_CHANGED, 1);
+        if in_history {
+            qh.dq_history_changed(dq_ptr);
+            qh.dq_save(dq_ptr);
+        } else {
+            qh.dq_save_changed(dq_ptr);
+        }
+    });
+}
 
 const MK_INFO: c_int = 0;
 const MK_WARNING: c_int = 1;
@@ -1572,7 +1613,10 @@ fn fleet_intake_later(host_ctx: *mut c_void, host_cb: DupeHostFn, job: IntakeLat
         let mut msg = b"Fleet intake later: ".to_vec();
         msg.extend_from_slice(name);
         match verdict {
-            Verdict::Same => msg.extend_from_slice(b" carries the fleet's video"),
+            Verdict::Same => {
+                fleet_mark_video(host_ctx, host_cb, *id, true);
+                msg.extend_from_slice(b" carries the fleet's video")
+            }
             Verdict::Different if *id == primary_id => msg.extend_from_slice(
                 b" carries another video; it is the copy being downloaded, left as is",
             ),
@@ -1614,6 +1658,10 @@ fn fleet_intake_later(host_ctx: *mut c_void, host_cb: DupeHostFn, job: IntakeLat
                     }
                     true
                 });
+                if !removed {
+                    // kept, so the panel must not offer it as a donor
+                    fleet_set_video(host_ctx, host_cb, id, VIDEO_DIFFERENT);
+                }
                 msg.extend_from_slice(if removed {
                     b" carries another video, removed from the fleet".as_slice()
                 } else {
@@ -4355,6 +4403,36 @@ impl NzbgetRsDupeSearch {
                 .filter(|&(id, _, _)| eligible(dq_ptr, id))
                 .collect()
         });
+        // With DupeBorrowFirst and live article fallback, a backup the pick
+        // can borrow from (a TWIN, a borrowable ALT, or one whose packing is
+        // not known yet) fills the pick's holes while it downloads: the pick
+        // keeps its downloaded data and its extraction, which a swap throws
+        // away (the backup would start again from its first byte). The bar
+        // is SWAP_BACKUP_ALIVE even where a swap would need the par2 bar:
+        // a donor only fills holes, it need not be whole on its own.
+        let live_fallback = crate::options::active_options().is_some_and(|o| {
+            o.scalars().dupe_article_fallback == crate::queuesubsys_host::DAF_LIVE
+        });
+        if crate::options::dupe_borrow_first() && live_fallback {
+            if let Some(&(donor_id, donor_alive, _)) = usable
+                .iter()
+                .filter(|&&(_, a, k)| {
+                    a >= crate::dupewatch::SWAP_BACKUP_ALIVE
+                        && k <= crate::donorkind::DonorKind::Unknown as u8
+                })
+                .max_by(|a, b| a.2.cmp(&b.2).reverse().then(a.1.total_cmp(&b.1)))
+            {
+                msg.extend_from_slice(
+                    format!(
+                        ": it borrows from backup {donor_id} ({}% alive) instead of swapping, keeping its download and extraction",
+                        pct(donor_alive)
+                    )
+                    .as_bytes(),
+                );
+                self.note(host_ctx, host_cb, job.nzb_id, MK_INFO, &msg);
+                return;
+            }
+        }
         let Some((backup_id, backup_alive)) = crate::dupewatch::swap_backup(&usable, need) else {
             msg.extend_from_slice(
                 b" and will likely fail, but no backup is whole enough to swap in",
@@ -5517,6 +5595,10 @@ pub unsafe fn fleet_append(
         existing_id: i32,
         error: Vec<u8>,
         kind: crate::donorkind::DonorKind,
+        // intake verdict: Some(true) same video, Some(false) unverified
+        video: Option<bool>,
+        // intake found another video in it
+        video_different: bool,
     }
 
     let mut candidates: Vec<FleetCandidate> = Vec::with_capacity(members.len());
@@ -5532,6 +5614,8 @@ pub unsafe fn fleet_append(
             existing_id: 0,
             error: Vec::new(),
             kind: crate::donorkind::DonorKind::Unknown,
+            video: None,
+            video_different: false,
         };
         if !members[i].url.is_empty() {
             let (ok, status, body) = slot.into_inner().unwrap_or_else(|e| e.into_inner());
@@ -5789,13 +5873,16 @@ pub unsafe fn fleet_append(
                 msg.extend_from_slice(name);
                 match verdict {
                     crate::dupeintake::Verdict::Same => {
+                        candidates[i].video = Some(true);
                         msg.extend_from_slice(b" carries the fleet's video")
                     }
                     crate::dupeintake::Verdict::Different => {
                         msg.extend_from_slice(b" carries another video, dropped");
                         candidates[i].error = b"not the same video".to_vec();
+                        candidates[i].video_different = true;
                     }
                     crate::dupeintake::Verdict::Unverified => {
+                        candidates[i].video = Some(false);
                         msg.extend_from_slice(b" unverified: ");
                         msg.extend_from_slice(why.as_bytes());
                     }
@@ -6013,8 +6100,16 @@ pub unsafe fn fleet_append(
         if !cand.error.is_empty() {
             entry.status = b"ERROR".to_vec();
             entry.reason = cand.error.clone();
+            // a copy already queued stays where it is, but is no donor
+            if cand.existing_id != 0 && cand.video_different {
+                fleet_set_video(host_ctx, host_cb, cand.existing_id, VIDEO_DIFFERENT);
+            }
         } else if cand.same_as >= 0 || cand.existing_id != 0 {
             entry.status = b"SAME_POSTING".to_vec();
+            // the copy already queued is the one the intake read
+            if let (true, Some(same)) = (cand.existing_id != 0, cand.video) {
+                fleet_mark_video(host_ctx, host_cb, cand.existing_id, same);
+            }
             entry.same_as = if cand.existing_id != 0 {
                 cand.existing_id
             } else {
@@ -6049,6 +6144,9 @@ pub unsafe fn fleet_append(
             ];
             if let Some(av) = alive_str.as_deref() {
                 params.push((ALIVE_PARAM, av));
+            }
+            if let Some(same) = cand.video {
+                params.push((VIDEO_PARAM, video_param_value(same)));
             }
             // the video inside, for TwinCheck to tell an alt from a different video
             let inner = intake_prints[idx].as_ref().map(|p| {

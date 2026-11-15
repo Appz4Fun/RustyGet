@@ -4835,6 +4835,46 @@
     "message": "non-borrowable",
     "description": "Caption next to an alt whose packaging (compressed or encrypted) stream repair cannot borrow from."
   },
+  "fleet_stat_articles": {
+    "message": "Articles borrowed",
+    "description": "Dupe fleet stat: label for the number of articles this copy took from other copies of the release."
+  },
+  "fleet_stat_articles_sub": {
+    "message": "from other copies",
+    "description": "Dupe fleet stat caption under the number of borrowed articles."
+  },
+  "fleet_stat_par": {
+    "message": "Par2 borrowed",
+    "description": "Dupe fleet stat: label for the number of par2 (recovery file) articles taken from other copies."
+  },
+  "fleet_stat_par_file": {
+    "message": "articles in $1 par2 file",
+    "description": "Dupe fleet stat caption: the borrowed par2 articles came from $1 (exactly one) par2 file."
+  },
+  "fleet_stat_par_files": {
+    "message": "articles in $1 par2 files",
+    "description": "Dupe fleet stat caption: the borrowed par2 articles came from $1 par2 files."
+  },
+  "fleet_stat_bytes": {
+    "message": "Bytes patched",
+    "description": "Dupe fleet stat: label for the amount of video data patched in from other copies' matching bytes."
+  },
+  "fleet_stat_donors": {
+    "message": "Can borrow from",
+    "description": "Dupe fleet stat: label for how many other copies this copy can borrow from."
+  },
+  "fleet_donor_verified": {
+    "message": "$1 verified",
+    "description": "Dupe fleet stat value: $1 copies confirmed to hold the same video (twins, and alts the fleet intake checked)."
+  },
+  "fleet_donor_split": {
+    "message": "twins $1 · alts $2",
+    "description": "Dupe fleet stat caption: $1 twin copies (the same post) and $2 alt copies (same video, other packaging) that were verified."
+  },
+  "fleet_donor_unverified": {
+    "message": "$1 unverified",
+    "description": "Dupe fleet stat caption: $1 borrowable alt copies whose video the fleet intake could not confirm yet."
+  },
   "fleet_recovered": {
     "message": "Recovered",
     "description": "Dupe fleet: label before the articles and bytes recovered from other copies."

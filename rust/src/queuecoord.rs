@@ -2026,6 +2026,25 @@ impl NzbgetRsQueueCoordinator {
             host.nzb_set_param(dest_ptr, param, None);
         }
 
+        merge_dupe_par_params(host, dest_ptr, src_ptr);
+        // what the source borrowed moves with its files, like its par2 counts
+        host.nzb_set_int(
+            dest_ptr,
+            crate::queuesubsys_host::NZB_INT_DUPE_RECOVERED_ARTICLES,
+            dest.dupe_recovered_articles
+                .saturating_add(src.dupe_recovered_articles),
+        );
+        host.nzb_set_int(
+            dest_ptr,
+            crate::queuesubsys_host::NZB_INT_DUPE_RECOVERED_HOLES,
+            dest.dupe_recovered_holes.saturating_add(src.dupe_recovered_holes),
+        );
+        host.nzb_set_i64(
+            dest_ptr,
+            crate::queuesubsys_host::NZB_I64_DUPE_RECOVERED_BYTES,
+            dest.dupe_recovered_bytes.saturating_add(src.dupe_recovered_bytes),
+        );
+
         host.disk_discard_files(src_ptr);
         crate::dupefallback::par_damage_forget_all(src.id);
         host.queue_remove(dq_ptr, src_ptr);
@@ -2110,6 +2129,22 @@ impl NzbgetRsQueueCoordinator {
             &src_snap.queued_filename,
         );
         host.nzb_copy_params(new_nzb_ptr, src_nzb_ptr);
+        // borrowed par2 counts stay with the source, as its recovered-article count does
+        host.nzb_set_param(new_nzb_ptr, PAR_ARTICLES_PARAM, None);
+        host.nzb_set_param(new_nzb_ptr, PAR_FILES_PARAM, None);
+        // a split-off part is not another post of the fleet: drop its fleet
+        // identity, as merge does on its destination
+        for param in [
+            b"DupeFiles".as_slice(),
+            b"DupeKind".as_slice(),
+            crate::donorkind::KIND_PARAM,
+            b"DupeSampled".as_slice(),
+            b"DupeSampledOf".as_slice(),
+            crate::dupesearch_coord::FLEET_PARAM,
+            crate::dupesearch_coord::VIDEO_PARAM,
+        ] {
+            host.nzb_set_param(new_nzb_ptr, param, None);
+        }
 
         let new_init_snap = host.nzb_snap(new_nzb_ptr, false);
         let mut sc = pack_merge_split_counters(&src_snap);
@@ -2346,11 +2381,9 @@ impl NzbgetRsQueueCoordinator {
                 }
             }
 
-            if file.articles_len == 0 && opts.server_mode {
-                host.disk_load_articles(file.ptr);
-                self.load_partial_state(host, opts, &nzb, file.ptr);
-                file = host.file_snap(file.ptr);
-            }
+            // `file` was read before the direct-rename pass, which may have
+            // loaded this file's articles meanwhile: decide on a fresh read.
+            file = self.ensure_articles_loaded(host, opts, &nzb, file.ptr);
 
             if let Some((idx, mut art)) = host.file_first_undefined_article(file.ptr) {
                 if file.dupe_cutover && art.dupe_fallback_round == 0 {
@@ -2400,11 +2433,7 @@ impl NzbgetRsQueueCoordinator {
             let fp = host.nzb_file_at(nzb.ptr, i);
             let mut f = host.file_snap(fp);
             if !f.filename_confirmed {
-                if f.articles_len == 0 && opts.server_mode {
-                    host.disk_load_articles(fp);
-                    self.load_partial_state(host, opts, nzb, fp);
-                    f = host.file_snap(fp);
-                }
+                f = self.ensure_articles_loaded(host, opts, nzb, fp);
                 if f.articles_len > 0 {
                     let a0 = host.article_at(fp, 0);
                     if a0.status == crate::queuesubsys_host::AI_UNDEFINED {
@@ -2485,13 +2514,31 @@ impl NzbgetRsQueueCoordinator {
         filename: &[u8],
         successful: bool,
     ) -> Result<(), crate::parchecker::RepairError> {
-        let count = if successful { 0 } else { articles.len() };
+        // the downloaded byte ranges, adjacent articles merged (par-rs
+        // normalize_ranges): a damaged 5 GB volume of 7,000 articles with a
+        // few holes is a handful of ranges, not 7,000
+        let accepted = if successful {
+            Vec::new()
+        } else {
+            downloaded_ranges(articles.iter().map(|a| {
+                (
+                    a.status == crate::queuesubsys_host::AI_FINISHED,
+                    a.segment_offset,
+                    a.segment_size as i64,
+                )
+            }))
+        };
+        let count = accepted.len();
         if count > 4096 {
             return Err(crate::parchecker::RepairError::Io {
                 context: "capturing live PAR completion".into(),
                 source: std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    "article range limit exceeded; ordinary repair required",
+                    format!(
+                        "{} arrived in {} separate pieces between its missing articles (live repair takes up to 4096 per file); it is repaired after the download",
+                        String::from_utf8_lossy(filename),
+                        count
+                    ),
                 ),
             });
         }
@@ -2499,21 +2546,6 @@ impl NzbgetRsQueueCoordinator {
             + 2 * (nzb.dest_dir.len() + filename.len() + file.hash16k.len())
             + count * 6 * std::mem::size_of::<crate::parchecker::ByteRange>();
         crate::parchecker::streaming_session_queue_completed_file(nzb.id, bytes as u64, || {
-            let accepted = if successful {
-                Vec::new()
-            } else {
-                articles
-                    .iter()
-                    .filter(|a| {
-                        a.status == crate::queuesubsys_host::AI_FINISHED
-                            && a.segment_offset >= 0
-                            && a.segment_size > 0
-                    })
-                    .map(|a| {
-                        crate::parchecker::ByteRange::new(a.segment_offset, a.segment_size as i64)
-                    })
-                    .collect()
-            };
             let path = join_path(&nzb.dest_dir, filename);
             Ok(crate::parchecker::LiveCompletedFile {
                 nzb_id: nzb.id,
@@ -3124,6 +3156,9 @@ impl NzbgetRsQueueCoordinator {
                         crate::dupefallback::CUTOVER_THRESHOLD,
                     );
                 if rec {
+                    if file.par_file {
+                        note_dupe_par_article(host, nzb.ptr, file.id, true);
+                    }
                     file.dupe_recovered_articles = next_file_rec;
                     nzb.dupe_recovered_articles = next_nzb_rec;
                     host.file_set_int(
@@ -3989,6 +4024,7 @@ impl NzbgetRsQueueCoordinator {
             crate::queuesubsys_host::ART_INT_STATUS,
             crate::queuesubsys_host::AI_FAILED,
         );
+        let par_recovered_before = file.dupe_recovered_articles;
         demote_article_counters(
             art.size,
             file.par_file,
@@ -4008,6 +4044,10 @@ impl NzbgetRsQueueCoordinator {
             &mut file.dupe_recovered_articles,
             &mut nzb.dupe_recovered_articles,
         );
+        // a borrowed par2 article taken back: it no longer counts as borrowed
+        if file.par_file && file.dupe_recovered_articles < par_recovered_before {
+            note_dupe_par_article(host, nzb.ptr, file.id, false);
+        }
         host.file_set_int(
             file.ptr,
             crate::queuesubsys_host::FILE_INT_SUCCESS_ARTICLES,
@@ -4141,6 +4181,27 @@ impl NzbgetRsQueueCoordinator {
 
     fn save_partial_state(&self, host: &crate::queuesubsys_host::QueueSubsysHost, file_ptr: usize) {
         save_partial_state_host(host, file_ptr);
+    }
+
+    /// Loads a file's article list (and partial state) from disk unless it
+    /// is already in memory, and returns a fresh snapshot. Always decides on
+    /// a fresh read: the loader appends, so loading twice doubles the list
+    /// (137 articles became 274 on a restart), the saved state then no longer
+    /// matches it and the file is written under its temporary name.
+    fn ensure_articles_loaded(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        opts: &crate::queuesubsys_host::GlobalOptsSnap,
+        nzb: &crate::queuesubsys_host::NzbSnap,
+        file_ptr: usize,
+    ) -> crate::queuesubsys_host::FileSnap {
+        let file = host.file_snap(file_ptr);
+        if file.articles_len > 0 || !opts.server_mode {
+            return file;
+        }
+        host.disk_load_articles(file_ptr);
+        self.load_partial_state(host, opts, nzb, file_ptr);
+        host.file_snap(file_ptr)
     }
 
     fn load_partial_state(
@@ -4948,10 +5009,8 @@ impl NzbgetRsQueueCoordinator {
                     offset += count;
                     continue;
                 }
-                if f.articles_len == 0 && opts.server_mode {
-                    host.disk_load_articles(f.ptr);
-                    self.load_partial_state(host, opts, nzb, f.ptr);
-                    *f = host.file_snap(f.ptr);
+                if f.articles_len == 0 {
+                    *f = self.ensure_articles_loaded(host, opts, nzb, f.ptr);
                 }
                 let idx = pos - offset;
                 if idx < f.articles_len {
@@ -5836,8 +5895,159 @@ fn save_partial_state_host(host: &crate::queuesubsys_host::QueueSubsysHost, file
     }
 }
 
+/// NZB parameters for par2 data borrowed from duplicates: `DupeParArticles` counts
+/// the articles, `DupeParFiles` lists each par2 file still holding some as
+/// `id:count`. They are saved with the item and stay with it in history, so a
+/// restart (which forgets the per-file recovered count) never counts a file
+/// twice, and a demotion that empties a file drops it from the list.
+pub(crate) const PAR_ARTICLES_PARAM: &[u8] = b"DupeParArticles";
+pub(crate) const PAR_FILES_PARAM: &[u8] = b"DupeParFiles";
+
+/// Records one par2 article of file `file_id` borrowed from a duplicate
+/// (`borrowed`), or taken back after it failed its check (`!borrowed`).
+pub(crate) fn note_dupe_par_article(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    nzb_ptr: usize,
+    file_id: i32,
+    borrowed: bool,
+) {
+    let delta = if borrowed { 1 } else { -1 };
+    let cur = host.nzb_get_param(nzb_ptr, PAR_ARTICLES_PARAM);
+    let next = bumped_count(cur.as_deref(), delta);
+    host.nzb_set_param(nzb_ptr, PAR_ARTICLES_PARAM, Some(next.to_string().as_bytes()));
+    let mut files = par_files(host.nzb_get_param(nzb_ptr, PAR_FILES_PARAM).as_deref().unwrap_or(b""));
+    bump_par_file(&mut files, file_id, i64::from(delta));
+    host.nzb_set_param(nzb_ptr, PAR_FILES_PARAM, format_par_files(&files).as_deref());
+}
+
+/// Merge: the source's borrowed par2 articles and files move to the destination
+/// along with its files.
+fn merge_dupe_par_params(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    dest_ptr: usize,
+    src_ptr: usize,
+) {
+    let src_articles = bumped_count(host.nzb_get_param(src_ptr, PAR_ARTICLES_PARAM).as_deref(), 0);
+    if src_articles > 0 {
+        let dest = host.nzb_get_param(dest_ptr, PAR_ARTICLES_PARAM);
+        let total = bumped_count(dest.as_deref(), 0).saturating_add(src_articles);
+        host.nzb_set_param(dest_ptr, PAR_ARTICLES_PARAM, Some(total.to_string().as_bytes()));
+    }
+    if let Some(src_files) = host.nzb_get_param(src_ptr, PAR_FILES_PARAM) {
+        let mut files = par_files(host.nzb_get_param(dest_ptr, PAR_FILES_PARAM).as_deref().unwrap_or(b""));
+        for (id, n) in par_files(&src_files) {
+            bump_par_file(&mut files, id, n);
+        }
+        host.nzb_set_param(dest_ptr, PAR_FILES_PARAM, format_par_files(&files).as_deref());
+    }
+}
+
+/// The par2 files borrowed from, as `id:count` pairs joined by commas (a bare
+/// `id` counts 1). Unreadable entries are skipped and repeated ids add up.
+fn par_files(list: &[u8]) -> Vec<(i32, i64)> {
+    let mut out: Vec<(i32, i64)> = Vec::new();
+    for entry in std::str::from_utf8(list).unwrap_or("").split(',') {
+        let mut parts = entry.trim().splitn(2, ':');
+        let Some(Ok(id)) = parts.next().map(|t| t.trim().parse::<i32>()) else {
+            continue;
+        };
+        let n = match parts.next() {
+            None => 1,
+            Some(t) => match t.trim().parse::<i64>() {
+                Ok(n) => n,
+                Err(_) => continue,
+            },
+        };
+        if n > 0 {
+            bump_par_file(&mut out, id, n);
+        }
+    }
+    out
+}
+
+/// Adds `delta` articles to file `id`; a file left with none is dropped.
+fn bump_par_file(files: &mut Vec<(i32, i64)>, id: i32, delta: i64) {
+    match files.iter().position(|(f, _)| *f == id) {
+        Some(i) => {
+            files[i].1 = files[i].1.saturating_add(delta);
+            if files[i].1 <= 0 {
+                files.remove(i);
+            }
+        }
+        None if delta > 0 => files.push((id, delta)),
+        None => {}
+    }
+}
+
+/// The param value for `files`, or None (param removed) when there are none.
+fn format_par_files(files: &[(i32, i64)]) -> Option<Vec<u8>> {
+    if files.is_empty() {
+        return None;
+    }
+    let parts: Vec<String> = files.iter().map(|(id, n)| format!("{id}:{n}")).collect();
+    Some(parts.join(",").into_bytes())
+}
+
+/// A count parameter's value after adding `delta`, never below 0; a missing or
+/// unreadable value counts as 0.
+fn bumped_count(cur: Option<&[u8]>, delta: i32) -> i64 {
+    cur.and_then(|v| std::str::from_utf8(v).ok())
+        .and_then(|t| t.trim().parse::<i64>().ok())
+        .unwrap_or(0)
+        .max(0)
+        .saturating_add(i64::from(delta))
+        .max(0)
+}
+
+/// The downloaded byte ranges of a file from its articles (finished?,
+/// offset, size), adjacent ones merged, capacity trimmed to the length.
+fn downloaded_ranges(
+    articles: impl Iterator<Item = (bool, i64, i64)>,
+) -> Vec<crate::parchecker::ByteRange> {
+    let ranges: Vec<crate::parchecker::ByteRange> = articles
+        .filter(|&(done, offset, size)| done && offset >= 0 && size > 0)
+        .map(|(_, offset, size)| crate::parchecker::ByteRange::new(offset, size))
+        .collect();
+    let mut merged = par_rs::damage::normalize_ranges(&ranges);
+    merged.shrink_to_fit();
+    merged
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn bumped_count_starts_from_zero_and_never_goes_negative() {
+        assert_eq!(bumped_count(None, 1), 1);
+        assert_eq!(bumped_count(Some(b"41"), 1), 42);
+        assert_eq!(bumped_count(Some(b" 7 "), 3), 10);
+        assert_eq!(bumped_count(Some(b"junk"), 2), 2);
+        assert_eq!(bumped_count(Some(b"-5"), 1), 1);
+        assert_eq!(bumped_count(Some(b"9"), -4), 5);
+        assert_eq!(bumped_count(Some(b"1"), -1), 0);
+        assert_eq!(bumped_count(None, -1), 0);
+    }
+
+    #[test]
+    fn par_files_parse_counts_and_skip_junk() {
+        assert_eq!(par_files(b"12:3, 15,x,,7:0,9:y,12:1"), vec![(12, 4), (15, 1)]);
+        assert_eq!(par_files(b""), Vec::<(i32, i64)>::new());
+    }
+
+    #[test]
+    fn par_files_count_per_file_and_drop_emptied_ones() {
+        let mut f = par_files(b"");
+        bump_par_file(&mut f, 12, 1);
+        bump_par_file(&mut f, 12, 1);
+        bump_par_file(&mut f, 15, 1);
+        assert_eq!(format_par_files(&f), Some(b"12:2,15:1".to_vec()));
+        bump_par_file(&mut f, 15, -1);
+        bump_par_file(&mut f, 99, -1);
+        assert_eq!(format_par_files(&f), Some(b"12:2".to_vec()));
+        bump_par_file(&mut f, 12, -2);
+        assert_eq!(format_par_files(&f), None);
+    }
+
     #[test]
     fn live_par_memory_refusal_is_told_in_mb() {
         let err = crate::parchecker::RepairError::StreamingMemoryLimit {
@@ -5859,6 +6069,18 @@ mod tests {
         let msg = super::NzbgetRsQueueCoordinator::live_par_deferred_message(&busy);
         assert!(!msg.contains("set ParBuffer"), "{msg}");
         assert!(msg.contains("shared live PAR reservation"), "{msg}");
+    }
+
+    #[test]
+    fn downloaded_ranges_merge_adjacent_articles() {
+        // a 7,315-article volume with two missing articles: three ranges
+        let art = 739_786i64;
+        let rows = (0..7315i64).map(|i| (i != 100 && i != 5000, i * art, art));
+        let r = super::downloaded_ranges(rows);
+        assert_eq!(r.len(), 3);
+        assert_eq!(r[0], crate::parchecker::ByteRange::new(0, 100 * art));
+        assert_eq!(r[1].offset, 101 * art);
+        assert!(r.capacity() == r.len());
     }
 
     #[test]

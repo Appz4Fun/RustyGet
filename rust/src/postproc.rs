@@ -2881,6 +2881,12 @@ impl crate::progressive_unpack::VolumeFeed for DirectUnpackFeed {
         self.expected_volumes
     }
 
+    fn set_became_final(&self) -> bool {
+        direct_unpack_download_finished(self.nzb_id)
+            && !direct_unpack_has_holds(self.nzb_id)
+            && !direct_unpack_abandoned(self.nzb_id)
+    }
+
     fn wait_repaired(&mut self, is_cancelled: &mut dyn FnMut() -> bool) -> bool {
         loop {
             if direct_unpack_abandoned(self.nzb_id) || is_cancelled() {
@@ -5336,7 +5342,6 @@ fn run_rename_job(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn, kind: i32
                 target_dir,
                 &par_ignore_ext,
                 detect_missing,
-                crate::paths::PATH_SEPARATOR,
                 &mut stop_fn,
                 &mut prog_fn,
                 &mut msg_fn,

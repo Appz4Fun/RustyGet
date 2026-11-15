@@ -66,7 +66,12 @@ const { installDetailsFixture } = require('./details-fixture');
         const roles = await page.locator('#DownloadsEdit_Fleet .fleet-member .fleet-role').allInnerTexts();
         assert.deepEqual(roles.map(r => r.toLowerCase()), ['primary', 'twin', 'alt', 'primary'], 'Copies in donor priority, history last');
         assert.match(await page.locator('#DownloadsEdit_Fleet .fleet-members').innerText(), /borrowable/i);
-        assert.match(await page.locator('#DownloadsEdit_Fleet .fleet-facts').innerText(), /41 \(29\.4 MB\)[\s\S]*3 holes/);
+        const stats = await page.locator('#DownloadsEdit_Fleet .fleet-stat').allInnerTexts();
+        assert.equal(stats.length, 4, 'Four borrow stats');
+        assert.match(stats[0], /Articles borrowed\s+41\b/i);
+        assert.match(stats[1], /Par2 borrowed\s+6\s+articles in 2 par2 files/i);
+        assert.match(stats[2], /Bytes patched\s+29\.4 MB\s+3 holes/i);
+        assert.match(stats[3], /Can borrow from\s+2 verified\s+twins 1 · alts 1/i, 'The twin and the checked borrowable alt; not the history copy');
         assert.equal(await page.locator('#DownloadsEdit_Fleet .fleet-member.is-current').count(), 1);
         const health = await page.locator('#DownloadsEdit_Fleet .fleet-member-health').allInnerTexts();
         assert.deepEqual(health, ['97.0%', '99.4%', '88.1%', '97.0%'], 'Sampled DupeHealth/DupeAlive percentages render as percentages');
@@ -79,6 +84,83 @@ const { installDetailsFixture } = require('./details-fixture');
       if (capture && [1440, 390].includes(width)) {
         await page.screenshot({ path: path.join(capture, `details-download-${theme}-${width}.jpg`), type: 'jpeg', quality: 90 });
       }
+
+      await check('donor counting rules', async () => {
+        const r = await page.evaluate(() => {
+          const g = id => Downloads.groups.find(x => x.NZBID === id);
+          const withParam = (item, name, value) => Object.assign({}, item, { Parameters: item.Parameters.map(p => p.Name === name ? { Name: name, Value: value } : p) });
+          const run = (self, groups) => {
+            const keep = Downloads.groups;
+            Downloads.groups = groups;
+            try { return DetailsPanel.donors(self, DetailsPanel.members(self), 'queue'); } finally { Downloads.groups = keep; }
+          };
+          const all = Downloads.groups.slice();
+          const unchecked = all.map(x => x.NZBID === 43 ? withParam(x, 'DupeVideo', 'unverified') : x);
+          const dead = all.map(x => x.NZBID === 42 ? Object.assign({}, x, { SuccessArticles: 0, FailedArticles: 10, Health: 0 }) : x);
+          const hist = History.items.find(x => x.NZBID === 31);
+          return {
+            fromPrimary: run(g(41), all),
+            fromHistoryCopy: (() => {
+              const keep = Downloads.groups;
+              try { return DetailsPanel.donors(hist, DetailsPanel.members(hist), 'history'); } finally { Downloads.groups = keep; }
+            })(),
+            fromAlt: run(g(43), all),
+            fromTwin: run(g(42), all),
+            unchecked: run(g(41), unchecked),
+            dead: run(g(41), dead),
+            different: run(g(41), all.map(x => x.NZBID === 43 ? withParam(x, 'DupeVideo', 'different') : x)),
+            unrelated: (() => {
+              // an older release under the same dupe key: its own print, its own post
+              // (an old fleet's primary, so it carries DupeFleet) and an old twin of it
+              const other = Object.assign({}, withParam(hist, 'DupeFiles', '0123456789abcdef-12'), { NZBID: 99, NZBFilename: 'other.release.nzb' });
+              other.Parameters = other.Parameters.concat([{ Name: 'DupeFleet', Value: '1' }]);
+              const otherTwin = Object.assign({}, other, { NZBID: 98, NZBFilename: 'other.release.copy02.nzb',
+                Parameters: other.Parameters.concat([{ Name: 'DupeKind', Value: 'twin' }]) });
+              const keepH = History.items;
+              History.items = keepH.concat([other, otherTwin]);
+              try { return { primary: run(g(41), all), alt: run(g(43), all) }; } finally { History.items = keepH; }
+            })(),
+            // a dead queued copy keeps its earlier try in history from counting
+            deadPrimary: run(g(43), all.map(x => x.NZBID === 41 ? Object.assign({}, x, { SuccessArticles: 0, FailedArticles: 10, Health: 0 }) : x)),
+            // a queued twin whose par2 set was lost, and an old history twin with the same placeholder
+            lostPrint: (() => {
+              const lost = all.map(x => x.NZBID === 42 ? withParam(x, 'DupeFiles', 'lost') : x);
+              const oldTwin = Object.assign({}, withParam(hist, 'DupeFiles', 'lost'), { NZBID: 97, NZBFilename: 'old.release.nzb',
+                Parameters: withParam(hist, 'DupeFiles', 'lost').Parameters.concat([{ Name: 'DupeKind', Value: 'twin' }]) });
+              const keepH = History.items;
+              History.items = keepH.concat([oldTwin]);
+              try { return run(g(41), lost); } finally { History.items = keepH; }
+            })(),
+            // a near twin (another packing of the same files) parked in history
+            nearTwin: (() => {
+              const near = Object.assign({}, withParam(hist, 'DupeFiles', 'fedcba9876543210-30'), { NZBID: 96, NZBFilename: 'near.copy.nzb',
+                Parameters: withParam(hist, 'DupeFiles', 'fedcba9876543210-30').Parameters.concat([{ Name: 'DupeKind', Value: 'twin:29/30' }]) });
+              const keepH = History.items;
+              History.items = keepH.concat([near]);
+              try { return run(g(41), all); } finally { History.items = keepH; }
+            })(),
+            // clients name copies freely: a queued twin sharing the primary's name
+            sameName: run(g(41), all.map(x => x.NZBID === 42 ? Object.assign({}, x, { NZBFilename: g(41).NZBFilename }) : x)),
+            // a download already running when the fleet came: no DupeFleet, no twins
+            plainPrimary: run(g(43), all.filter(x => x.NZBID !== 42).map(x => x.NZBID === 41 ?
+              Object.assign({}, x, { Parameters: x.Parameters.filter(p => p.Name !== 'DupeFleet') }) : x))
+          };
+        });
+        assert.deepEqual(r.fromPrimary, { twins: 1, alts: 1, unverified: 0 }, 'The primary skips the history try of its own post');
+        assert.deepEqual(r.fromHistoryCopy, { twins: 1, alts: 1, unverified: 0 }, 'The history try skips the queued copy of its own post');
+        assert.deepEqual(r.fromAlt, { twins: 2, alts: 0, unverified: 0 }, 'An alt counts the primary and its twin alike, the history try once');
+        assert.deepEqual(r.fromTwin, { twins: 1, alts: 1, unverified: 0 }, 'A twin borrows from its primary post (once, not again for its history copy) and the checked alt');
+        assert.deepEqual(r.unchecked, { twins: 1, alts: 0, unverified: 1 }, 'An alt the intake could not check is unverified');
+        assert.deepEqual(r.dead, { twins: 0, alts: 1, unverified: 0 }, 'A dead copy is no donor');
+        assert.deepEqual(r.different, { twins: 1, alts: 0, unverified: 0 }, 'An alt found to carry another video is no donor');
+        assert.deepEqual(r.unrelated.primary, { twins: 1, alts: 1, unverified: 0 }, 'Another release under the same key is no twin of the primary');
+        assert.deepEqual(r.unrelated.alt, { twins: 2, alts: 0, unverified: 0 }, 'Another release under the same key is no twin seen from an alt');
+        assert.deepEqual(r.deadPrimary, { twins: 1, alts: 0, unverified: 0 }, 'A dead queued copy hides its own earlier try');
+        assert.deepEqual(r.lostPrint, { twins: 1, alts: 1, unverified: 0 }, 'A queued twin without a print counts; a history twin without one does not');
+        assert.deepEqual(r.nearTwin, { twins: 2, alts: 1, unverified: 0 }, 'A near twin parked in history counts while its release is queued');
+        assert.deepEqual(r.sameName, { twins: 1, alts: 1, unverified: 0 }, 'Two queued copies sharing a name are still two posts');
+        assert.deepEqual(r.plainPrimary, { twins: 1, alts: 0, unverified: 0 }, 'An alt borrows from a primary that was downloading before the fleet came');
+      });
 
       await check('critical health wins over the fixed threshold', async () => {
         const cls = await page.evaluate(() => {

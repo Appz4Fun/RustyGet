@@ -1028,8 +1028,8 @@ fn streaming_session_start_bounded_with_context(
     let limits =
         resources(slice_size, effective_pool_bytes).ok_or(RepairError::StreamingMemoryLimit {
             context: "bounded live PAR startup",
-            required_bytes: slice_size,
-            limit_bytes: effective_pool_bytes.min(128 * 1024 * 1024),
+            required_bytes: crate::parlive::min_reservation(slice_size),
+            limit_bytes: effective_pool_bytes,
         })?;
     if !budget.resize(limits.reservation_bytes, effective_pool_bytes) {
         return Err(RepairError::StreamingMemoryLimit {
@@ -1192,8 +1192,8 @@ pub(crate) fn prepare_live_start(
         .slice_size;
     let limits = resources(size, pool).ok_or(RepairError::StreamingMemoryLimit {
         context: "bounded live PAR startup",
-        required_bytes: size,
-        limit_bytes: pool.min(128 << 20),
+        required_bytes: crate::parlive::min_reservation(size),
+        limit_bytes: pool,
     })?;
     if !budget.resize(limits.reservation_bytes, pool) {
         return Err(RepairError::StreamingMemoryLimit {

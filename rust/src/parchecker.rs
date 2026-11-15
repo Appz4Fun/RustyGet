@@ -129,6 +129,10 @@ struct ActiveStreamingSession {
     metrics: live_metrics::LiveMetricCounters,
     last_error: Mutex<Option<String>>,
     warning_reported: AtomicBool,
+    /// Distinct refusal reasons with counts (bounded), so the log says why
+    /// captures failed, not only the first failure.
+    refusals: Mutex<Vec<(String, u64)>>,
+    stop_logged: AtomicBool,
     // Drop last, after the session, queue and all owned metadata. Grows with
     // the syndrome slots as damage appears (see `grow_for_damage`).
     budget: Mutex<SessionBudgetLease>,
@@ -286,6 +290,8 @@ fn build_streaming_session(
         metrics: live_metrics::LiveMetricCounters::default(),
         last_error: Mutex::new(None),
         warning_reported: AtomicBool::new(false),
+        refusals: Mutex::new(Vec::new()),
+        stop_logged: AtomicBool::new(false),
     }))
 }
 
@@ -346,11 +352,74 @@ impl ActiveStreamingSession {
     fn record<T>(&self, result: Result<T, RepairError>) -> Result<T, RepairError> {
         if let Err(error) = &result {
             *self.last_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(error.to_string());
+            self.note_refusal(error);
         } else {
             self.observe_count_readiness();
         }
         result
     }
+    /// Count a refusal by reason; log each new reason once as it first appears.
+    fn note_refusal(&self, error: &RepairError) {
+        const MAX_REASONS: usize = 8;
+        let mut reason = error.to_string();
+        if matches!(error, RepairError::Cancelled) {
+            if let Some(why) = self.writers.stop_reason() {
+                reason = format!("{reason} ({why})");
+            }
+        }
+        // Key without numbers, so byte counts and ids in one kind of error
+        // do not each take a slot; the first full message is logged.
+        let mut key = String::with_capacity(reason.len());
+        for c in reason.chars() {
+            if !c.is_ascii_digit() {
+                key.push(c);
+            } else if !key.ends_with('#') {
+                key.push('#');
+            }
+        }
+        let mut refusals = self.refusals.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, count)) = refusals.iter_mut().find(|(known, _)| *known == key) {
+            *count += 1;
+            return;
+        }
+        if refusals.len() >= MAX_REASONS {
+            let other = "other reasons".to_owned();
+            match refusals.iter_mut().find(|(known, _)| *known == other) {
+                Some((_, count)) => *count += 1,
+                None => refusals.push((other, 1)),
+            }
+            return;
+        }
+        let message = format!(
+            "Live PAR (job {}) refused: {reason}",
+            self.metrics.report_nzb_id()
+        );
+        refusals.push((key, 1));
+        drop(refusals);
+        crate::log::log_active_bytes(crate::queuesubsys_host::MK_DETAIL, message.as_bytes());
+    }
+
+    /// Log once why this session stopped taking work.
+    fn note_stop(&self, nzb_id: i32, why: &str) {
+        if self.session.is_cancelled() || self.stop_logged.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let message = format!("Live PAR (job {nzb_id}) stopped: {why}");
+        crate::log::log_active_bytes(crate::queuesubsys_host::MK_DETAIL, message.as_bytes());
+    }
+
+    /// The refusal counts, for the disposal footer.
+    fn refusal_summary(&self) -> Option<String> {
+        let refusals = self.refusals.lock().unwrap_or_else(|e| e.into_inner());
+        (!refusals.is_empty()).then(|| {
+            refusals
+                .iter()
+                .map(|(reason, count)| format!("{count} x {reason}"))
+                .collect::<Vec<_>>()
+                .join("; ")
+        })
+    }
+
     /// Grow the syndrome slots so every damaged block can take a recovery
     /// block, paid from free ParBuffer: each slot costs two slices (its
     /// syndrome and its reconstructed output). The memory goes back to the
@@ -818,6 +887,8 @@ fn live_source_id(
         Ok(Some(Some(id))) => return Ok(id),
         Ok(Some(None)) => return Err(RepairError::UnknownFile(FileId([0; 16]))),
         Err(_) => {
+            let why = entry.writers.stop_reason().unwrap_or_else(|| "live namespace refused".to_owned());
+            entry.note_stop(entry.metrics.report_nzb_id(), &why);
             entry.session.cancel();
             return Err(RepairError::Cancelled);
         }
@@ -1469,8 +1540,11 @@ pub fn streaming_session_start_bytes(
 }
 
 /// Cancels the current generation permanently; in-flight owners retain their reservation.
+#[track_caller]
 pub fn streaming_session_cancel(nzb_id: i32) {
     if let Some(entry) = active_streaming_session(nzb_id) {
+        let at = std::panic::Location::caller();
+        entry.note_stop(nzb_id, &format!("cancelled from {}:{}", at.file(), at.line()));
         entry
             .writers
             .cancel_generation_with(entry.generation, || entry.session.cancel());
@@ -2237,8 +2311,11 @@ pub fn streaming_session_has_session(nzb_id: i32) -> bool {
 }
 
 /// Drops the [`StreamingParSession`] for `nzb_id`.
+#[track_caller]
 pub fn streaming_session_forget(nzb_id: i32) {
     if let Some(old) = active_streaming_session(nzb_id) {
+        let at = std::panic::Location::caller();
+        old.note_stop(nzb_id, &format!("forgotten from {}:{}", at.file(), at.line()));
         old.writers.cancel_generation_with(old.generation, || {
             old.session.cancel();
             let mut sessions = STREAMING_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());

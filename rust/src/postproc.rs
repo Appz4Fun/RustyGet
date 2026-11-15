@@ -3282,6 +3282,7 @@ static LIVE_PAR_HELPERS: std::sync::LazyLock<
 
 /// Waits for the live par2 repair of download `nzb_id` to end. Called before the download's
 /// files are cleaned up (deletion, shutdown) so no repair write outlives the download.
+#[track_caller]
 pub(crate) fn direct_unpack_join_live_par_repair(nzb_id: i32) {
     crate::parchecker::streaming_session_cancel(nzb_id);
     #[cfg(unix)]

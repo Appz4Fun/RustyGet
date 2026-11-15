@@ -269,8 +269,11 @@ var DetailsPanel = (new function($)
 		var out = { twins: 0, alts: 0, unverified: 0 };
 		// one post is one donor: a history copy of a post already counted (or of
 		// this copy's own post) adds nothing. Members come queue first.
+		// Names are what the client sent, so two queued copies may share one, but
+		// the intake never queues one post twice: a name hides a copy only when
+		// the copy or the one that claimed the name is in history.
 		var posts = {};
-		posts[item.NZBFilename] = true;
+		posts[item.NZBFilename] = source;
 		// prints of this fleet's own release: the viewed copy's, and those of the
 		// primary and twins in the queue. Any copy can carry a print, so a history
 		// copy marked primary or twin (say an older release under the same dupe key,
@@ -294,12 +297,14 @@ var DetailsPanel = (new function($)
 		for (var i = 0; i < members.length; i++)
 		{
 			var m = members[i];
-			if ((m.item.NZBID === item.NZBID && m.source === source) || posts[m.item.NZBFilename] ||
+			var claimed = posts[m.item.NZBFilename];
+			if ((m.item.NZBID === item.NZBID && m.source === source) ||
+				(claimed && (claimed === 'history' || m.source === 'history')) ||
 				healthPermille(m.item) <= 0)
 			{
 				continue;
 			}
-			posts[m.item.NZBFilename] = true;
+			posts[m.item.NZBFilename] = claimed || m.source;
 			var kind = m.role ? m.role.kind : '';
 			// the primary and its twins are one release posted more than once:
 			// counted the same way whichever copy is viewed

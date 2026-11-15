@@ -120,6 +120,8 @@ const { installDetailsFixture } = require('./details-fixture');
               History.items = keepH.concat([other, otherTwin]);
               try { return { primary: run(g(41), all), alt: run(g(43), all) }; } finally { History.items = keepH; }
             })(),
+            // clients name copies freely: a queued twin sharing the primary's name
+            sameName: run(g(41), all.map(x => x.NZBID === 42 ? Object.assign({}, x, { NZBFilename: g(41).NZBFilename }) : x)),
             // a download already running when the fleet came: no DupeFleet, no twins
             plainPrimary: run(g(43), all.filter(x => x.NZBID !== 42).map(x => x.NZBID === 41 ?
               Object.assign({}, x, { Parameters: x.Parameters.filter(p => p.Name !== 'DupeFleet') }) : x))
@@ -134,6 +136,7 @@ const { installDetailsFixture } = require('./details-fixture');
         assert.deepEqual(r.different, { twins: 1, alts: 0, unverified: 0 }, 'An alt found to carry another video is no donor');
         assert.deepEqual(r.unrelated.primary, { twins: 1, alts: 1, unverified: 0 }, 'Another release under the same key is no twin of the primary');
         assert.deepEqual(r.unrelated.alt, { twins: 2, alts: 0, unverified: 0 }, 'Another release under the same key is no twin seen from an alt');
+        assert.deepEqual(r.sameName, { twins: 1, alts: 1, unverified: 0 }, 'Two queued copies sharing a name are still two posts');
         assert.deepEqual(r.plainPrimary, { twins: 1, alts: 0, unverified: 0 }, 'An alt borrows from a primary that was downloading before the fleet came');
       });
 

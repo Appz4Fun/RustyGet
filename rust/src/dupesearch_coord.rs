@@ -5535,6 +5535,8 @@ pub unsafe fn fleet_append(
         kind: crate::donorkind::DonorKind,
         // intake verdict: Some(true) same video, Some(false) unverified
         video: Option<bool>,
+        // intake found another video in it
+        video_different: bool,
     }
 
     let mut candidates: Vec<FleetCandidate> = Vec::with_capacity(members.len());
@@ -5551,6 +5553,7 @@ pub unsafe fn fleet_append(
             error: Vec::new(),
             kind: crate::donorkind::DonorKind::Unknown,
             video: None,
+            video_different: false,
         };
         if !members[i].url.is_empty() {
             let (ok, status, body) = slot.into_inner().unwrap_or_else(|e| e.into_inner());
@@ -5813,6 +5816,7 @@ pub unsafe fn fleet_append(
                     crate::dupeintake::Verdict::Different => {
                         msg.extend_from_slice(b" carries another video, dropped");
                         candidates[i].error = b"not the same video".to_vec();
+                        candidates[i].video_different = true;
                     }
                     crate::dupeintake::Verdict::Unverified => {
                         candidates[i].video = Some(false);
@@ -6033,6 +6037,10 @@ pub unsafe fn fleet_append(
         if !cand.error.is_empty() {
             entry.status = b"ERROR".to_vec();
             entry.reason = cand.error.clone();
+            // a copy already queued stays where it is, but is no donor
+            if cand.existing_id != 0 && cand.video_different {
+                fleet_set_video(host_ctx, host_cb, cand.existing_id, VIDEO_DIFFERENT);
+            }
         } else if cand.same_as >= 0 || cand.existing_id != 0 {
             entry.status = b"SAME_POSTING".to_vec();
             // the copy already queued is the one the intake read

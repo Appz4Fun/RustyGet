@@ -81,6 +81,7 @@ function historyItems() {
     Parameters: params({ '*Unpack:': 'yes', DupeFiles: PRINT, DupeCopyKind: 'twin', DupeHealth: '97' })
   });
   failed.NZBName = `${RELEASE} [NZBDAV copy 01]`; failed.NZBNicename = failed.NZBName;
+  failed.NZBFilename = `${RELEASE}.copy01.nzb`; // an earlier try of copy 01's own post
   failed.DupeKey = 'TVDB=355730-s02e02'; // the daemon matches dupe keys ignoring ASCII case
   const done = group(32, '', {
     NZBName: 'Example.Completed.Release', NZBNicename: 'Example.Completed.Release', Category: 'Movies', DupeKey: '',

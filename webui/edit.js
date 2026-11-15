@@ -268,13 +268,19 @@ var DetailsPanel = (new function($)
 	{
 		var selfRole = this.role(item);
 		var out = { twins: 0, alts: 0, unverified: 0 };
+		// one post is one donor: a history copy of a post already counted (or of
+		// this copy's own post) adds nothing. Members come queue first.
+		var posts = {};
+		posts[item.NZBFilename] = true;
 		for (var i = 0; i < members.length; i++)
 		{
 			var m = members[i];
-			if ((m.item.NZBID === item.NZBID && m.source === source) || healthPermille(m.item) <= 0)
+			if ((m.item.NZBID === item.NZBID && m.source === source) || posts[m.item.NZBFilename] ||
+				healthPermille(m.item) <= 0)
 			{
 				continue;
 			}
+			posts[m.item.NZBFilename] = true;
 			var kind = m.role ? m.role.kind : '';
 			// the primary is a twin's own post
 			var twin = kind === 'twin' || (kind === 'primary' && selfRole && selfRole.kind === 'twin');

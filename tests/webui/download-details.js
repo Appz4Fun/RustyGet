@@ -103,7 +103,7 @@ const { installDetailsFixture } = require('./details-fixture');
             dead: run(g(41), dead)
           };
         });
-        assert.deepEqual(r.fromTwin, { twins: 2, alts: 1, unverified: 0 }, 'A twin borrows from its primary post, the history copy of that post, and the checked alt');
+        assert.deepEqual(r.fromTwin, { twins: 1, alts: 1, unverified: 0 }, 'A twin borrows from its primary post (once, not again for its history copy) and the checked alt');
         assert.deepEqual(r.unchecked, { twins: 1, alts: 0, unverified: 1 }, 'An alt the intake could not check is unverified');
         assert.deepEqual(r.dead, { twins: 0, alts: 1, unverified: 0 }, 'A dead copy is no donor');
       });

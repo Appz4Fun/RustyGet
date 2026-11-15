@@ -2025,6 +2025,8 @@ impl NzbgetRsQueueCoordinator {
             host.nzb_set_param(dest_ptr, param, None);
         }
 
+        merge_dupe_par_params(host, dest_ptr, src_ptr);
+
         host.disk_discard_files(src_ptr);
         crate::dupefallback::par_damage_forget_all(src.id);
         host.queue_remove(dq_ptr, src_ptr);
@@ -2109,6 +2111,9 @@ impl NzbgetRsQueueCoordinator {
             &src_snap.queued_filename,
         );
         host.nzb_copy_params(new_nzb_ptr, src_nzb_ptr);
+        // borrowed par2 counts stay with the source, as its recovered-article count does
+        host.nzb_set_param(new_nzb_ptr, PAR_ARTICLES_PARAM, None);
+        host.nzb_set_param(new_nzb_ptr, PAR_FILES_PARAM, None);
 
         let new_init_snap = host.nzb_snap(new_nzb_ptr, false);
         let mut sc = pack_merge_split_counters(&src_snap);
@@ -5851,6 +5856,41 @@ pub(crate) fn note_dupe_par_article(
     }
 }
 
+/// Merge: the source's borrowed par2 articles and files move to the destination
+/// along with its files.
+fn merge_dupe_par_params(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    dest_ptr: usize,
+    src_ptr: usize,
+) {
+    let src_articles = bumped_count(host.nzb_get_param(src_ptr, PAR_ARTICLES_PARAM).as_deref(), 0);
+    if src_articles > 0 {
+        let dest = host.nzb_get_param(dest_ptr, PAR_ARTICLES_PARAM);
+        let total = bumped_count(dest.as_deref(), 0).saturating_add(src_articles);
+        host.nzb_set_param(dest_ptr, PAR_ARTICLES_PARAM, Some(total.to_string().as_bytes()));
+    }
+    if let Some(src_files) = host.nzb_get_param(src_ptr, PAR_FILES_PARAM) {
+        let mut list = host.nzb_get_param(dest_ptr, PAR_FILES_PARAM);
+        for id in file_ids(&src_files) {
+            if let Some(next) = with_file_id(list.as_deref(), id) {
+                list = Some(next);
+            }
+        }
+        if let Some(list) = list {
+            host.nzb_set_param(dest_ptr, PAR_FILES_PARAM, Some(&list));
+        }
+    }
+}
+
+/// The file ids in a comma-separated id list; anything unreadable is skipped.
+fn file_ids(list: &[u8]) -> Vec<i32> {
+    std::str::from_utf8(list)
+        .unwrap_or("")
+        .split(',')
+        .filter_map(|t| t.trim().parse::<i32>().ok())
+        .collect()
+}
+
 /// A count parameter's value after adding `delta`, never below 0; a missing or
 /// unreadable value counts as 0.
 fn bumped_count(cur: Option<&[u8]>, delta: i32) -> i64 {
@@ -5887,6 +5927,12 @@ mod tests {
         assert_eq!(bumped_count(Some(b"9"), -4), 5);
         assert_eq!(bumped_count(Some(b"1"), -1), 0);
         assert_eq!(bumped_count(None, -1), 0);
+    }
+
+    #[test]
+    fn file_ids_skip_junk() {
+        assert_eq!(file_ids(b"12, 15,x,,7"), vec![12, 15, 7]);
+        assert_eq!(file_ids(b""), Vec::<i32>::new());
     }
 
     #[test]

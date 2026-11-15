@@ -6166,12 +6166,7 @@ pub unsafe fn fleet_append(
         .iter()
         .filter_map(|&i| {
             let c = &candidates[i];
-            // a copy already queued is read again too, so its verdict can still be saved
-            let id = if c.existing_id != 0 {
-                c.existing_id
-            } else {
-                added[c.index]
-            };
+            let id = added[c.index];
             (id > 0 && !c.dead).then(|| (id, members[c.index].name.clone(), c.summary.clone()))
         })
         .collect();

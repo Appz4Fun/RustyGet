@@ -5581,5 +5581,11 @@
   },
   "config_host_cert_minimal": {
     "message": "Certificate check is now Minimal: the certificate names the host, not this address."
+  },
+  "config_server_restored_first": {
+    "message": "Settings were restored from a backup: use Save and reload first."
+  },
+  "config_server_cipher_lost": {
+    "message": "The cipher test stopped answering and was cancelled; the cipher is unchanged."
   }
 }

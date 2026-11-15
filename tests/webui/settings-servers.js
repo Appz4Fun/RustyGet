@@ -23,8 +23,8 @@ const { installDetailsFixture } = require('./details-fixture');
       await context.addInitScript(t => localStorage.setItem('Theme', t), theme);
       await context.addInitScript(() => localStorage.setItem('SettingsMode', 'expert'));
       const page = await context.newPage();
-      const errors = [], writes = [], calls = [];
-      let upTime = 86400;
+      const errors = [], writes = [], calls = [], configReads = [];
+      let upTime = 86400, statusMisses = 0, hold = null;
       page.on('pageerror', e => errors.push(e.message));
       await installDetailsFixture(page, base, writes, { patchReply: (method, result) => {
         if (method === 'config' || method === 'loadconfig') {
@@ -33,8 +33,9 @@ const { installDetailsFixture } = require('./details-fixture');
           set('Server2.Cipher', 'AES128-SHA');
         }
         if (method === 'status') result.UpTimeSec = upTime;
+        if (method === 'config') configReads.push(Date.now());
         return result;
-      } });
+      }, holdMutation: async rpc => { if (rpc.method === 'saveconfig' && hold) await hold; } });
       await page.route(/\/jsonrpc/, async route => {
         const request = route.request();
         const rpc = request.method() === 'POST' ? request.postDataJSON() : null;
@@ -43,6 +44,10 @@ const { installDetailsFixture } = require('./details-fixture');
         let result = true;
         if (rpc.method === 'reload') upTime = 3;
         if (rpc.method === 'tlscipherstart') result = { JobID: 'job1', State: 'probing', CompletedProbes: 1, TotalProbes: 9, Servers: [] };
+        if (rpc.method === 'tlscipherstatus' && statusMisses > 0) {
+          statusMisses--;
+          return route.fulfill({ status: 500, body: 'busy' });
+        }
         if (rpc.method === 'tlscipherstatus') {
           result = rpc.params && rpc.params[0] === 'job1' ? { JobID: 'job1', State: 'completed', Saved: true, Servers: [{
             ID: 1, Outcome: 'saved', SelectedCipher: 'TLS_AES_128_GCM_SHA256', OldCipher: '',
@@ -102,6 +107,10 @@ const { installDetailsFixture } = require('./details-fixture');
 
       await check('save writes only the servers, finds a cipher, then reloads', async () => {
         await page.evaluate(() => { $('#S_ArticleRetries').val('7').trigger('change'); });
+        await page.evaluate(() => Config.addSet('Category', 'CATEGORIES'));
+        await page.waitForTimeout(700);
+        statusMisses = 2;
+        const readsBefore = configReads.length;
         await page.locator('#S_Server1_Host').fill('news2.example.invalid');
         await page.locator('#S_Server1_Host').dispatchEvent('change');
         await page.locator('.config-server-save:visible').click();
@@ -110,6 +119,10 @@ const { installDetailsFixture } = require('./details-fixture');
         const values = Object.fromEntries(save.params[0].map(o => [o.Name, o.Value]));
         assert.equal(values['Server1.Host'], 'news2.example.invalid');
         assert.notEqual(values.ArticleRetries, '7', 'an unsaved change elsewhere is not written');
+        const categories = Object.keys(values).filter(n => /^Category\d+\.Name$/.test(n)).length;
+        const saved = await page.evaluate(() => Config.config().values.filter(v => /^Category\d+\.Name$/.test(v.Name)).length);
+        assert.equal(categories, saved, 'an unsaved new category is not written');
+        assert(configReads.length > readsBefore, 'the running configuration is read again after the reload');
         assert(values._TlsCipherBaseline, 'the cipher baseline guards the write');
         const start = calls.find(c => c.method === 'tlscipherstart');
         assert.deepEqual(start && start.params, ['1'], 'the optimizer runs for this server only');
@@ -119,6 +132,26 @@ const { installDetailsFixture } = require('./details-fixture');
         assert.equal(await page.evaluate(() => $('#ConfigSaveBar .config-savebar__names').text()).then(t => /Host|Cipher/.test(t)), false,
           'the saved server is no longer an unsaved change');
         assert(await page.locator('#ConfigSaveBar').isVisible(), 'the other change is still waiting');
+      });
+
+      await check('an edit made while saving stays unsaved', async () => {
+        let release;
+        hold = new Promise(resolve => { release = resolve; });
+        upTime = 86400;
+        await page.evaluate(() => { Status.status.UpTimeSec = 86400; });
+        await page.locator('#S_Server1_Connections').fill('11');
+        await page.locator('#S_Server1_Connections').dispatchEvent('change');
+        await page.locator('.config-server-save:visible').click();
+        await page.waitForTimeout(200);
+        await page.locator('#S_Server1_Connections').fill('12');
+        await page.locator('#S_Server1_Connections').dispatchEvent('change');
+        hold = null;
+        release();
+        await page.waitForFunction(() => /in use/.test($('.config-server-status:visible').text()), null, { timeout: 8000 });
+        assert.match(await page.evaluate(() => $('#ConfigSaveBar .config-savebar__names').text()), /Connections/, 'the later value is still unsaved');
+        assert.equal(await page.evaluate(() => Config.config().values.find(v => v.Name === 'Server1.Connections').Value), '11');
+        await page.locator('#S_Server1_Connections').fill('11');
+        await page.locator('#S_Server1_Connections').dispatchEvent('change');
       });
 
       await check('a server with a cipher saves without testing', async () => {

@@ -202,6 +202,8 @@ impl Report {
 }
 
 struct Running {
+    /// The one server this job tests, or `None` for every server.
+    only: Option<u32>,
     report: Arc<Mutex<Report>>,
     cancel: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
@@ -229,6 +231,10 @@ impl Service {
                 .lock()
                 .map_err(|_| Error("job state is unavailable"))?;
             if report.active() {
+                // a running job answers only a request for the same servers
+                if job.only != only {
+                    return Err(Error("cipher testing is already running for other servers; wait for it to finish"));
+                }
                 return Ok(report.id.clone());
             }
         }
@@ -377,6 +383,7 @@ impl Service {
             }
         }).map_err(|_| Error("could not start cipher worker"))?;
         *slot = Some(Running {
+            only,
             report,
             cancel,
             handle: Some(handle),
@@ -1037,6 +1044,33 @@ mod tests {
         assert!(!report.contains("PRIVATE_TEST_"));
         assert!(report.contains("Example \\\"name\\\"\\n<script>"));
         assert!(report.len() <= 1024 * 1024 && report.starts_with('{') && report.ends_with('}'));
+    }
+    #[test]
+    fn a_running_job_answers_only_requests_for_the_same_servers() {
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let service = Service::default();
+        let id = service
+            .start_for(
+                Arc::new(CompatibilityBackend {
+                    gate: Some((entered_tx, Mutex::new(release_rx))),
+                    large: 0,
+                }),
+                Some(2),
+            )
+            .unwrap();
+        entered_rx.recv_timeout(Duration::from_secs(4)).unwrap();
+        let plain = || {
+            Arc::new(CompatibilityBackend {
+                gate: None,
+                large: 0,
+            })
+        };
+        assert_eq!(service.start_for(plain(), Some(2)).unwrap(), id);
+        assert!(service.start_for(plain(), Some(1)).is_err());
+        assert!(service.start_for(plain(), None).is_err());
+        release_tx.send(()).unwrap();
+        service.shutdown();
     }
     #[test]
     fn one_server_job_probes_and_saves_only_that_server() {

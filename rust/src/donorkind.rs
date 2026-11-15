@@ -52,6 +52,16 @@ impl DonorKind {
         }
     }
 
+    /// The kind for its `as u8` value; anything else is [`DonorKind::Unknown`].
+    pub fn from_u8(value: u8) -> Self {
+        match value {
+            0 => DonorKind::Twin,
+            1 => DonorKind::Borrowable,
+            3 => DonorKind::Unborrowable,
+            _ => DonorKind::Unknown,
+        }
+    }
+
     /// The value stored in [`KIND_PARAM`].
     pub fn param(self) -> &'static [u8] {
         match self {

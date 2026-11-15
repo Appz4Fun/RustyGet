@@ -1716,7 +1716,10 @@ impl NzbgetRsDupeSearch {
         let mut consider_item = |item: &NzbSnap, in_history: bool| {
             let item_low = lower_key(&effective_key(&item.dupe_key, &item.name));
             let same_key = item_low == low_key;
-            let same_rel = crate::releasename::same_release(&pick.name, &item.name);
+            // Members of one fleet (appendfleet) hold the same content under
+            // differing release names: the client matched them.
+            let same_rel = crate::releasename::same_release(&pick.name, &item.name)
+                || (same_key && pick.has_dupe_fleet && item.has_dupe_fleet);
             let qf = &item.queued_filename;
             let add_known = item.kind == 0
                 && !qf.is_empty()
@@ -1930,6 +1933,14 @@ impl NzbgetRsDupeSearch {
         };
 
         let mut pick_flags = flags_of(&pick, history);
+        // A fleet (appendfleet) is left out of the duplicate search, as the
+        // client searched, and its members carry DupeAlive like donors. With
+        // DupeSearch off its queued copy still gets the upkeep (dead pick,
+        // swap); history members stay skipped as filed duplicates.
+        let fleet_upkeep = upkeep_only && pick.has_dupe_fleet;
+        if fleet_upkeep {
+            pick_flags &= !(MANAGED_FLEET | crate::dupewatch::DONOR);
+        }
         // DupeMode FORCE or ALL turns off failover: a pick DupeSearch looks
         // after is switched to SCORE once it is searched.
         let switch_to_score = crate::dupewatch::wants_score_mode(pick_flags);
@@ -1994,6 +2005,9 @@ impl NzbgetRsDupeSearch {
                 pick_flags |= MANAGED_FLEET;
             }
             peer_flags_vec.push(f);
+        }
+        if fleet_upkeep {
+            pick_flags &= !MANAGED_FLEET;
         }
 
         let decision = if preliminary == Some(Decision::Search)
@@ -2911,26 +2925,46 @@ impl NzbgetRsDupeSearch {
 
         // TWIN (the same post: matching par2 hashes and article counts) and
         // DonorKind of a copy against the pick, read from the news servers
-        // once per copy, all within FLEET_KIND_PROBE_MAX_SEC.
-        let kind_deadline = now_unix_sec() + FLEET_KIND_PROBE_MAX_SEC;
-        let kind_ctx = host_ctx as usize;
-        let pick_listed = if !servers.is_empty() && (!verified.is_empty() || !job.members.is_empty())
-        {
-            probe_copies(host_ctx, host_cb, &[pick], kind_deadline)
-                .pop()
-                .map(|(listed, _)| listed)
-        } else {
-            None
+        // once per copy. The probes share FLEET_KIND_PROBE_MAX_SEC of their
+        // own time: the health checks between them do not use it up.
+        let kind_budget = std::sync::atomic::AtomicI64::new(FLEET_KIND_PROBE_MAX_SEC);
+        let kind_deadline = || {
+            let start = now_unix_sec();
+            (
+                start,
+                start
+                    + kind_budget
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                        .max(0),
+            )
         };
+        let kind_spent = |start: i64| {
+            kind_budget.fetch_sub(
+                (now_unix_sec() - start).max(0),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        };
+        let kind_ctx = host_ctx as usize;
+        let pick_listed =
+            if !servers.is_empty() && (!verified.is_empty() || !job.members.is_empty()) {
+                let (start, deadline) = kind_deadline();
+                let mut probed = probe_copies(host_ctx, host_cb, &[pick], deadline);
+                kind_spent(start);
+                probed.pop().map(|(listed, _)| listed)
+            } else {
+                None
+            };
         let copy_kind = |info: &NzbSummaryData| -> (bool, crate::donorkind::DonorKind) {
             use crate::donorkind::{DonorKind, Packing};
             let Some(pick_listed) = pick_listed.as_ref() else {
                 return (false, DonorKind::Unknown);
             };
+            let (start, deadline) = kind_deadline();
             let (listed, packing) =
-                probe_copies(kind_ctx as *mut c_void, host_cb, &[info], kind_deadline)
+                probe_copies(kind_ctx as *mut c_void, host_cb, &[info], deadline)
                     .pop()
                     .unwrap_or((crate::twin::Listed::default(), Packing::Unknown));
+            kind_spent(start);
             let twin =
                 crate::donorkind::twins(pick_listed, &listed, &pick.data_layout, &info.data_layout);
             (twin, DonorKind::of(twin, packing))
@@ -3569,6 +3603,7 @@ impl NzbgetRsDupeSearch {
                         donor_entry_score,
                         donor_alive,
                         donor_title,
+                        donor_kind,
                     ) = {
                         let d = &st.placed[&slot_key];
                         (
@@ -3578,6 +3613,7 @@ impl NzbgetRsDupeSearch {
                             d.entry.score,
                             d.entry.alive,
                             d.title.clone(),
+                            d.entry.kind,
                         )
                     };
                     if wanted[n] == donor_entry_score && !donor_member {
@@ -3596,6 +3632,14 @@ impl NzbgetRsDupeSearch {
                         );
                         score = sc;
                         params.push(format!("DupeHealth={pct}").into_bytes());
+                        if donor_kind != crate::donorkind::DonorKind::Unknown as u8 {
+                            let mut kp = crate::donorkind::KIND_PARAM.to_vec();
+                            kp.push(b'=');
+                            kp.extend_from_slice(
+                                crate::donorkind::DonorKind::from_u8(donor_kind).param(),
+                            );
+                            params.push(kp);
+                        }
                         if add_zero {
                             params.push(b"DupeAlive=0".to_vec());
                         }
@@ -3958,7 +4002,7 @@ impl NzbgetRsDupeSearch {
             let same_group = dq_find_nzb(host_ctx, host_cb, dq_ptr, id).is_some_and(|(p, _)| {
                 let b = inspect_nzb(host_ctx, host_cb, p, false);
                 lower_key(&effective_key(&b.dupe_key, &b.name)) == lower_key(&job.dupe_key)
-                    && crate::releasename::same_release(&job.name, &b.name)
+                    && (b.has_dupe_fleet || crate::releasename::same_release(&job.name, &b.name))
             });
             if !same_group {
                 return false;

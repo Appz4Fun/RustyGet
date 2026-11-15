@@ -1157,6 +1157,26 @@ def scenario_rejectnextserver(daemon, t):
             % (h['Status'], integ, daemon.proxy.rewritten, rejected))
 
 
+def scenario_backbonemiss(daemon, t):
+    """Backbone routing: Server1 (priority 1) and Server2 (priority 2) are on
+    the backbone "TestBone", Server3 (priority 2) is independent; all three
+    serve the same article store, which lacks two articles. The 430 from
+    Server1 rules out Server2 for those articles (same article store), so they
+    are asked of Server3 only, and every other article comes from Server1."""
+    size, seg = 1_000_000, 100_000
+    data = _payload(size, 9700)
+    pp = _place_copy(t, 'bbA', data, 'file.bin')
+    api = daemon.wait_ready()
+    daemon.append(api, 'RelBB', build_nzb(pp, 'BB.bin', size, seg, {3, 4}), False, 'bb-key', 100)
+    h = daemon.wait_history(api, 'RelBB')
+    skipped = _grep_log(t, 'not asking other servers on backbone TestBone')
+    on_server2 = _grep_log(t, '@ Server2 (')
+    on_server3 = _grep_log(t, '@ Server3 (')
+    ok = skipped >= 2 and on_server2 == 0 and on_server3 >= 2
+    return ('backbonemiss', ok, 'status=%s skipped_logs=%d server2_logs=%d server3_logs=%d'
+            % (h['Status'], skipped, on_server2, on_server3))
+
+
 def scenario_nzbgapborrow(daemon, t):
     """B30 and B3: the release's nzb-file skips part 4 (an indexer that didn't
     capture it) and part 5 is missing on the server; a twin duplicate lists
@@ -10008,6 +10028,7 @@ SCENARIOS = {
     'restartmidway': scenario_restartmidway,
     'declaredcountnopair': scenario_declaredcountnopair,
     'rejectnextserver': scenario_rejectnextserver,
+    'backbonemiss': scenario_backbonemiss,
     'cutover': scenario_cutover,
     'transientretry': scenario_transientretry,
     'transientexhausted': scenario_transientexhausted,
@@ -10371,6 +10392,7 @@ SCENARIO_OPTIONS = {
     'streamrestartcredit': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'streamdeaddonor': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'rejectnextserver': ['DupeArticleFallback=article', 'ArticleRetries=0'],
+    'backbonemiss': ['DupeCheck=no', 'ArticleRetries=0', 'DetailTarget=log', 'Server1.Backbone=TestBone'],
     'nzbgapborrow': ['DupeArticleFallback=article'],
     'sidefilenorepair': ['DupeArticleFallback=stream'],
     'partialnzb': ['DupeArticleFallback=stream'],
@@ -10851,6 +10873,12 @@ def main():
                     options += ['Server%d.Host=127.0.0.1' % number, 'Server%d.Port=1' % number,
                                 'Server%d.Connections=2' % number, 'Server%d.Level=0' % number,
                                 'Server%d.Encryption=no' % number, 'Server%d.Optional=yes' % number]
+            if name == 'backbonemiss':
+                for number, backbone in ((2, 'TestBone'), (3, '')):
+                    options += ['Server%d.Active=yes' % number, 'Server%d.Host=127.0.0.1' % number,
+                                'Server%d.Port=%d' % (number, nserv_port), 'Server%d.Connections=2' % number,
+                                'Server%d.Priority=2' % number, 'Server%d.Encryption=no' % number,
+                                'Server%d.Backbone=%s' % (number, backbone)]
             if name == 'authrejected':
                 daemon.reject_nntp = RejectingNntp()
                 options += ['Server2.Active=yes', 'Server2.Host=127.0.0.1', 'Server2.Port=%d' % daemon.reject_nntp.port,

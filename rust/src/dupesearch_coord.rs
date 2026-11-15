@@ -897,26 +897,30 @@ pub fn nntp_health_servers(host_ctx: *mut c_void, host_cb: DupeHostFn) -> Vec<Ar
     let map_mutex = NNTP_KNOWN_SERVERS.get_or_init(|| Mutex::new(BTreeMap::new()));
     let mut known = map_mutex.lock().unwrap_or_else(|e| e.into_inner());
     let mut raw_servers: Vec<(i32, i32, i32, i32)> = Vec::new();
+    let mut ranks: Vec<HealthServerRank> = Vec::new();
     #[cfg(unix)]
     if let Some(pool) = crate::net::active_server_pool() {
         for s in pool.servers_snapshot() {
-            raw_servers.push((
-                s.id,
-                c_int::from(s.active.load(Ordering::SeqCst)),
-                s.max_connections,
-                s.group,
-            ));
+            let active = s.active.load(Ordering::SeqCst);
+            raw_servers.push((s.id, c_int::from(active), s.max_connections, s.group));
+            ranks.push(HealthServerRank {
+                id: s.id,
+                usable: active && s.max_connections != 0,
+                group: s.group,
+                retention: s.retention,
+                level: s.norm_level.load(Ordering::SeqCst),
+            });
         }
     }
+    let representatives = backbone_representatives(&ranks);
     let check_connections =
         crate::options::active_options().map_or(0, |o| o.scalars().dupe_check_connections);
     let mut list = Vec::new();
-    let mut groups = BTreeSet::new();
     for (server_id, active, max_conns, group) in raw_servers {
         if active == 0 || max_conns == 0 {
             continue;
         }
-        if group > 0 && !groups.insert(group) {
+        if group > 0 && !representatives.contains(&server_id) {
             continue;
         }
         let wanted_cap = dupe_check_server_cap(max_conns, check_connections);
@@ -943,6 +947,38 @@ pub fn nntp_health_servers(host_ctx: *mut c_void, host_cb: DupeHostFn) -> Vec<Ar
         }
     }
     list
+}
+
+/// A news server as [`backbone_representatives`] ranks it.
+#[derive(Debug, Clone, Copy)]
+struct HealthServerRank {
+    id: i32,
+    usable: bool,
+    group: i32,
+    retention: i32,
+    level: i32,
+}
+
+/// The one server per backbone the health checks ask: servers on a backbone
+/// read from one article store, so asking more is wasted. The longest
+/// retention wins (0 = not set counts as the longest), then the lowest level,
+/// then the lowest id. Independent servers (group 0) are not listed.
+fn backbone_representatives(servers: &[HealthServerRank]) -> BTreeSet<i32> {
+    let keep = |r: i32| if r <= 0 { i32::MAX } else { r };
+    let mut best: BTreeMap<i32, HealthServerRank> = BTreeMap::new();
+    for s in servers.iter().filter(|s| s.usable && s.group > 0) {
+        let better = match best.get(&s.group) {
+            None => true,
+            Some(b) => {
+                (std::cmp::Reverse(keep(s.retention)), s.level, s.id)
+                    < (std::cmp::Reverse(keep(b.retention)), b.level, b.id)
+            }
+        };
+        if better {
+            best.insert(s.group, *s);
+        }
+    }
+    best.values().map(|s| s.id).collect()
 }
 
 /// Check connections per news server: all of its connections when
@@ -6298,6 +6334,23 @@ pub unsafe fn fleet_append(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn health_checks_ask_the_longest_retention_server_of_a_backbone() {
+        let r = |id, group, retention, level| HealthServerRank {
+            id,
+            usable: true,
+            group,
+            retention,
+            level,
+        };
+        let mut servers = vec![r(1, 5, 1000, 0), r(2, 5, 3000, 1), r(3, 0, 0, 0), r(4, 6, 0, 1), r(5, 6, 900, 0)];
+        let reps = backbone_representatives(&servers);
+        assert_eq!(reps.into_iter().collect::<Vec<_>>(), vec![2, 4]);
+        // an unusable server is never the one asked
+        servers[1].usable = false;
+        assert!(backbone_representatives(&servers).contains(&1));
+    }
     #[test]
     fn kind_probe_keeps_a_third_of_the_fleet_time() {
         // the add-on's 45 s minus the 2 s reserve: 14 s for the probe

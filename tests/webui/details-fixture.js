@@ -177,6 +177,8 @@ async function installDetailsFixture(page, base, writes = [], hooks = {}) {
     status: status(), listgroups: groups, history, log: [], loadlog: [], servervolumes: [],
     version: '26.3', sysinfo: SYSINFO, systemstats: systemStats(), systemhealth: { Alerts: [], Sections: [] }, tlscipherstatus: {},
     hostlookup: { Host: '', Port: 563, Error: '', GeoIP: false, Addresses: [] },
+    backbones: { Backbones: [{ Name: 'Omicron', Providers: ['Newshosting'] }, { Name: 'UsenetExpress', Providers: ['NewsDemon'] }],
+      Host: '', Match: 'skipped', Provider: null, Matches: [] },
     readurl: JSON.stringify({ 'stable-version': '26.3', 'testing-version': '26.3' }), listfiles: [], viewfeed: []
   };
   await page.route('**/*', async route => {

@@ -387,8 +387,9 @@ fn unrepaired_holes_fail_as_damage() {
 }
 
 #[test]
-fn rar4_compressed_is_reported_unsupported() {
-    // A RAR4 (1.5-4.x) archive with a compressed member: method 0x33.
+fn rar4_solid_compressed_is_reported_unsupported() {
+    // A RAR4 (1.5-4.x) archive with a solid compressed member (method 0x33): zipfast refuses
+    // solid RAR4 with a typed error, so the fallback decoder takes it.
     let t = TestDir::new("rar4c");
     let mut v = b"Rar!\x1a\x07\x00".to_vec();
     // main header
@@ -400,7 +401,7 @@ fn rar4_compressed_is_reported_unsupported() {
     let packed = vec![0u8; 64];
     let name = b"x.bin";
     let mut fh = vec![0x74u8];
-    fh.extend_from_slice(&0x8000u16.to_le_bytes());
+    fh.extend_from_slice(&(0x8000u16 | 0x0010).to_le_bytes()); // LONG_BLOCK | SOLID
     fh.extend_from_slice(&((32 + name.len()) as u16).to_le_bytes());
     fh.extend_from_slice(&(packed.len() as u32).to_le_bytes());
     fh.extend_from_slice(&100u32.to_le_bytes());
@@ -921,7 +922,7 @@ fn copying_into_place_never_touches_other_paths() {
 }
 
 #[test]
-fn rar4_stored_then_compressed_reports_unsupported_for_the_fallback() {
+fn rar4_stored_then_solid_compressed_reports_unsupported_for_the_fallback() {
     let t = TestDir::new("rar4mixed");
     let stored = pattern(20_000);
     let mut v = b"Rar!\x1a\x07\x00".to_vec();
@@ -941,7 +942,8 @@ fn rar4_stored_then_compressed_reports_unsupported_for_the_fallback() {
     rest.extend_from_slice(&5u16.to_le_bytes());
     rest.extend_from_slice(&0o100644u32.to_le_bytes());
     rest.extend_from_slice(b"b.bin");
-    v.extend(rar4_block(0x74, 0x8000, &rest, packed.len()));
+    // Solid compressed: refused by zipfast with a typed error.
+    v.extend(rar4_block(0x74, 0x8000 | 0x0010, &rest, packed.len()));
     v.extend(&packed);
     v.extend(rar4_block(0x7b, 0, &[], 0));
     let first = t.dl().join("mixed.rar");
@@ -1380,4 +1382,122 @@ fn checksum_less_member_of_a_complete_set_keeps_its_mode() {
     expect_ok(r, &log);
     let meta = std::fs::metadata(t.out().join("tool.sh")).unwrap();
     assert_eq!(meta.permissions().mode() & 0o111, 0o111);
+}
+
+// ---- RAR4 LZ (methods 0x31-0x35), decoded by the session since zipfast #103 ----
+
+fn lz_gold() -> Vec<u8> {
+    let mut gold = b"RAR4 bounded LZ control.\n".repeat(8000);
+    gold.extend((0u8..=255).cycle().take(256 * 400));
+    gold
+}
+
+const LZ: [&[u8]; 5] = [
+    include_bytes!("fixtures/official-lz-m1.packed"),
+    include_bytes!("fixtures/official-lz-m2.packed"),
+    include_bytes!("fixtures/official-lz-m3.packed"),
+    include_bytes!("fixtures/official-lz-m4.packed"),
+    include_bytes!("fixtures/official-lz-m5.packed"),
+];
+
+fn rar4_lz_member(name: &str, packed: &[u8], gold: &[u8], method: u8) -> Vec<u8> {
+    let mut rest = Vec::new();
+    rest.extend_from_slice(&(packed.len() as u32).to_le_bytes());
+    rest.extend_from_slice(&(gold.len() as u32).to_le_bytes());
+    rest.push(3);
+    rest.extend_from_slice(&crc32fast::hash(gold).to_le_bytes());
+    rest.extend_from_slice(&DOS_TIME.to_le_bytes());
+    rest.push(29);
+    rest.push(method);
+    rest.extend_from_slice(&(name.len() as u16).to_le_bytes());
+    rest.extend_from_slice(&0o100644u32.to_le_bytes());
+    rest.extend_from_slice(name.as_bytes());
+    let mut out = rar4_block(0x74, 0x8000, &rest, packed.len());
+    out.extend_from_slice(packed);
+    out
+}
+
+#[test]
+fn rar4_lz_members_are_decoded_by_the_session() {
+    let t = TestDir::new("rar4lz");
+    let gold = lz_gold();
+    let mut v = b"Rar!\x1a\x07\x00".to_vec();
+    v.extend(rar4_block(0x73, 0, &[0u8; 6], 0));
+    for (i, packed) in LZ.iter().enumerate() {
+        v.extend(rar4_lz_member(&format!("m{}.bin", i + 1), packed, &gold, 0x31 + i as u8));
+    }
+    v.extend(rar4_block(0x7b, 0x4000, &[], 0));
+    let first = t.dl().join("lz.rar");
+    std::fs::write(&first, &v).unwrap();
+    let (r, log) = run(&first, &t.out(), Box::new(CompleteSet));
+    let s = expect_ok(r, &log);
+    assert_eq!(s.files, 5);
+    for i in 1..=5 {
+        assert_eq!(std::fs::read(t.out().join(format!("m{i}.bin"))).unwrap(), gold, "m{i}");
+    }
+}
+
+#[test]
+fn rar4_lz_members_across_volumes_while_downloading() {
+    // One independent compressed member per volume, volumes arriving one at a time.
+    let t = TestDir::new("rar4lzdl");
+    let gold = lz_gold();
+    let n = 3;
+    for i in 0..n {
+        let mut v = b"Rar!\x1a\x07\x00".to_vec();
+        v.extend(rar4_block(0x73, 0x0001 | 0x0010 | if i == 0 { 0x0100 } else { 0 }, &[0u8; 6], 0));
+        v.extend(rar4_lz_member(&format!("part{i}.bin"), LZ[2], &gold, 0x33));
+        v.extend(rar4_block(0x7b, 0x4000 | if i + 1 < n { 0x0001 } else { 0 }, &[], 0));
+        std::fs::write(t.dl().join(rar4_name(i)), v).unwrap();
+    }
+    let names: Vec<PathBuf> = (0..n).map(|i| t.dl().join(rar4_name(i))).collect();
+    let released = Arc::new(AtomicUsize::new(1));
+    let feed = Trickle {
+        released: released.clone(),
+        names,
+        asked: Arc::new(AtomicUsize::new(0)),
+    };
+    let rel = released.clone();
+    let releaser = std::thread::spawn(move || {
+        for k in 2..=n {
+            std::thread::sleep(Duration::from_millis(40));
+            rel.store(k, Ordering::Release);
+        }
+    });
+    let (r, log) = run(&t.dl().join(rar4_name(0)), &t.out(), Box::new(feed));
+    releaser.join().unwrap();
+    expect_ok(r, &log);
+    for i in 0..n {
+        assert_eq!(std::fs::read(t.out().join(format!("part{i}.bin"))).unwrap(), gold);
+    }
+}
+
+#[test]
+fn rar4_lz_damage_is_reported_not_skipped() {
+    // A hole in compressed data cannot be read past: typed damage, no output.
+    let t = TestDir::new("rar4lzhole");
+    let gold = lz_gold();
+    let mut v = b"Rar!\x1a\x07\x00".to_vec();
+    v.extend(rar4_block(0x73, 0, &[0u8; 6], 0));
+    let at = v.len() + rar4_lz_member("m.bin", &[], &gold, 0x33).len();
+    v.extend(rar4_lz_member("m.bin", LZ[2], &gold, 0x33));
+    v.extend(rar4_block(0x7b, 0x4000, &[], 0));
+    let first = t.dl().join("lzhole.rar");
+    std::fs::write(&first, &v).unwrap();
+    struct Hole(PathBuf, u64);
+    impl VolumeFeed for Hole {
+        fn volume(&mut self, path: &Path) -> VolumeView {
+            if path == self.0 {
+                VolumeView::Ready { holes: vec![(self.1, 8)] }
+            } else {
+                VolumeView::Missing
+            }
+        }
+    }
+    let (r, log) = run(&first, &t.out(), Box::new(Hole(first.clone(), at as u64 + 300)));
+    match r {
+        Err(Error::Failed(f)) => assert!(f.is_damage(), "{f:?}"),
+        _ => panic!("expected damage: {log:?}"),
+    }
+    assert!(!t.out().join("m.bin").exists());
 }

@@ -2592,6 +2592,25 @@ pub fn os_detect_info(fallback_sysname: &[u8], fallback_release: &[u8]) -> (Vec<
     }
 }
 
+/// The crates RustyGet links, as the Status page lists them: `(name, version)`.
+/// `bundled_library_versions_match_cargo_lock` keeps the versions honest.
+/// The OpenSSL runtime library is appended separately with its live version.
+pub const BUNDLED_LIBRARIES: &[(&str, &str)] = &[
+    ("zipfast", "0.1.0"),
+    ("zipview", "0.1.0"),
+    ("par-rs", "0.2.0"),
+    ("nntmux-yenc", "0.1.0"),
+    ("flate2", "1.1.11"),
+    ("zlib-rs", "0.6.8"),
+    ("zstd", "0.14.3"),
+    ("bzip2", "0.6.1"),
+    ("crc32fast", "1.5.2"),
+    ("quick-xml", "0.41.0"),
+    ("md-5", "0.11.0"),
+    ("libc", "0.2.190"),
+    ("openssl", "0.10.82"),
+];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SystemToolView<'a> {
     pub name: &'a [u8],
@@ -2837,48 +2856,13 @@ pub fn system_info_format(
         },
     ];
     let ssl_ver_extracted;
-    let mut libraries = vec![
-        SystemLibraryView {
-            name: b"zipfast",
-            version: b"0.1.0",
-        },
-        SystemLibraryView {
-            name: b"zipview",
-            version: b"0.1.0",
-        },
-        SystemLibraryView {
-            name: b"par-rs",
-            version: b"0.2.0",
-        },
-        SystemLibraryView {
-            name: b"nntmux-yenc",
-            version: b"0.1.0 (SIMD)",
-        },
-        SystemLibraryView {
-            name: b"flate2 (zlib-rs)",
-            version: b"1.1.11",
-        },
-        SystemLibraryView {
-            name: b"zstd",
-            version: b"0.14.0",
-        },
-        SystemLibraryView {
-            name: b"bzip2",
-            version: b"0.6.1",
-        },
-        SystemLibraryView {
-            name: b"crc32fast",
-            version: b"1.5.2",
-        },
-        SystemLibraryView {
-            name: b"quick-xml",
-            version: b"0.41.0",
-        },
-        SystemLibraryView {
-            name: b"md-5",
-            version: b"0.11.0",
-        },
-    ];
+    let mut libraries: Vec<SystemLibraryView<'_>> = BUNDLED_LIBRARIES
+        .iter()
+        .map(|(name, version)| SystemLibraryView {
+            name: name.as_bytes(),
+            version: version.as_bytes(),
+        })
+        .collect();
     if !ssl_lib_name.is_empty() {
         let ver = if ssl_extract_after_space {
             ssl_ver_extracted = sysinfo_extract_version_after_space(ssl_raw_version);
@@ -3756,6 +3740,19 @@ pub fn os_parse_os_release_bytes(content: &[u8]) -> (Vec<u8>, Vec<u8>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn bundled_library_versions_match_cargo_lock() {
+        let lock = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.lock"))
+            .expect("Cargo.lock");
+        for (name, version) in super::BUNDLED_LIBRARIES {
+            let entry = format!("name = \"{name}\"\nversion = \"{version}\"\n");
+            assert!(
+                lock.contains(&entry),
+                "{name} {version} is not in Cargo.lock; update BUNDLED_LIBRARIES"
+            );
+        }
+    }
+
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 

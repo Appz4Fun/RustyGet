@@ -5554,5 +5554,9 @@
   },
   "config_server_cipher_lost": {
     "message": "The cipher test stopped answering and was cancelled; the cipher is unchanged."
+  },
+  "config_server_reload_unknown": {
+    "message": "Saved, but RustyGet did not answer after the reload. Check that it is running.",
+    "description": "Server editor status when the daemon does not come back after saving a server"
   }
 }

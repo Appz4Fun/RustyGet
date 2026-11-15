@@ -85,6 +85,41 @@ pub fn is_nested_container_name(filename: &[u8]) -> bool {
     CONTAINER_EXTS.iter().any(|&m| ext.as_slice() == m)
 }
 
+/// Which stored file of a container a one-layer content map is built for, and what the
+/// container holds. By default the biggest file is mapped and must be a media file or a
+/// stored archive; `ContentMapper` sets `nested` to see every stored file (so it can follow
+/// a volume set kept inside the container) and `want` to map one of them by name.
+#[derive(Default, Debug)]
+pub struct LayerPick {
+    /// Map the file with this base name and size instead of the biggest one. The size is
+    /// part of the identity: two files of one name can sit in different folders.
+    pub want: Option<(Vec<u8>, i64)>,
+    /// Leave the choice of what the inner file may be to the caller and fill `files`.
+    pub nested: bool,
+    /// Base name and size of every stored, unencrypted file found (when `nested`).
+    pub files: Vec<(Vec<u8>, i64)>,
+    /// What `files` already holds, so listing a big container stays linear.
+    seen: std::collections::HashSet<(Vec<u8>, i64)>,
+}
+
+impl LayerPick {
+    fn checks_name(&self) -> bool {
+        !self.nested && self.want.is_none()
+    }
+
+    fn wants(&self, base_name: &[u8], size: i64) -> bool {
+        self.want.as_ref().is_some_and(|(name, want_size)| {
+            *want_size == size && locale_casecmp(name, base_name) == std::cmp::Ordering::Equal
+        })
+    }
+
+    fn note(&mut self, base_name: &[u8], size: i64) {
+        if self.nested && !base_name.is_empty() && self.seen.insert((base_name.to_vec(), size)) {
+            self.files.push((base_name.to_vec(), size));
+        }
+    }
+}
+
 /// What a one-layer content map may name as its inner file: the media file, or a stored
 /// archive that is mapped through in turn.
 fn is_map_inner_eligible(filename: &[u8]) -> bool {
@@ -820,7 +855,25 @@ fn get_le64(buf: &[u8]) -> u64 {
 pub fn content_mapper_build_zip_map<F>(
     member_indexes: &[i32],
     member_sizes: &[i64],
+    read_member: F,
+) -> Result<(Vec<u8>, i64, Vec<NzbgetRsContentRun>), &'static str>
+where
+    F: FnMut(i32, i64, &mut [u8]) -> bool,
+{
+    content_mapper_build_zip_map_pick(
+        member_indexes,
+        member_sizes,
+        read_member,
+        &mut LayerPick::default(),
+    )
+}
+
+/// [`content_mapper_build_zip_map`] for the file `pick` asks for.
+pub fn content_mapper_build_zip_map_pick<F>(
+    member_indexes: &[i32],
+    member_sizes: &[i64],
     mut read_member: F,
+    pick: &mut LayerPick,
 ) -> Result<(Vec<u8>, i64, Vec<NzbgetRsContentRun>), &'static str>
 where
     F: FnMut(i32, i64, &mut [u8]) -> bool,
@@ -994,10 +1047,21 @@ where
             method,
             flags,
         };
-        if primary
-            .as_ref()
-            .is_none_or(|p| entry.uncomp_size > p.uncomp_size)
-        {
+        let entry_base: &[u8] = match entry.name.iter().rposition(|&b| b == b'/') {
+            Some(pos) => &entry.name[pos + 1..],
+            None => &entry.name,
+        };
+        if entry.method == 0 && (entry.flags & 0x0001) == 0 {
+            pick.note(entry_base, entry.uncomp_size as i64);
+        }
+        let better = if pick.want.is_some() {
+            primary.is_none() && pick.wants(entry_base, entry.uncomp_size as i64)
+        } else {
+            primary
+                .as_ref()
+                .is_none_or(|p| entry.uncomp_size > p.uncomp_size)
+        };
+        if better {
             primary = Some(entry);
         }
     }
@@ -1020,7 +1084,7 @@ where
     if prim.comp_size != prim.uncomp_size {
         return Err("stored entry sizes disagree");
     }
-    if !is_map_inner_eligible(&inner_name) {
+    if pick.checks_name() && !is_map_inner_eligible(&inner_name) {
         return Err("inner file is not a media file");
     }
     if (prim.disk as usize) >= disk_bases.len() {
@@ -1576,7 +1640,14 @@ pub fn content_mapper_build_seven_zip_map<F>(
 where
     F: FnMut(i32, i64, &mut [u8]) -> bool,
 {
-    match seven_zip_inspect(member_indexes, member_sizes, read_member, false, None)? {
+    match seven_zip_inspect(
+        member_indexes,
+        member_sizes,
+        read_member,
+        false,
+        None,
+        &mut LayerPick::default(),
+    )? {
         SevenZipInspect::CopyRuns(name, size, runs) => Ok((name, size, runs)),
         SevenZipInspect::EncryptedCopyRuns(_) => Err(ContentMapper::SKIP_ENCRYPTED_DATA),
         SevenZipInspect::Lzma2(_) => Err("non-Copy 7z coder (only copy mode maps)"),
@@ -1594,7 +1665,34 @@ pub fn content_mapper_build_seven_zip_map_with_password<F>(
 where
     F: FnMut(i32, i64, &mut [u8]) -> bool,
 {
-    match seven_zip_inspect(member_indexes, member_sizes, read_member, false, password)? {
+    content_mapper_build_seven_zip_map_pick(
+        member_indexes,
+        member_sizes,
+        read_member,
+        password,
+        &mut LayerPick::default(),
+    )
+}
+
+/// [`content_mapper_build_seven_zip_map_with_password`] for the file `pick` asks for.
+pub fn content_mapper_build_seven_zip_map_pick<F>(
+    member_indexes: &[i32],
+    member_sizes: &[i64],
+    read_member: F,
+    password: Option<&[u8]>,
+    pick: &mut LayerPick,
+) -> Result<SevenZipMap, &'static str>
+where
+    F: FnMut(i32, i64, &mut [u8]) -> bool,
+{
+    match seven_zip_inspect(
+        member_indexes,
+        member_sizes,
+        read_member,
+        false,
+        password,
+        pick,
+    )? {
         SevenZipInspect::CopyRuns(name, size, runs) => Ok(SevenZipMap::Plain(name, size, runs)),
         SevenZipInspect::EncryptedCopyRuns(map) => Ok(SevenZipMap::Encrypted(map)),
         SevenZipInspect::Lzma2(_) => Err("non-Copy 7z coder (only copy mode maps)"),
@@ -1611,7 +1709,14 @@ pub fn content_mapper_probe_seven_zip_lzma2<F>(
 where
     F: FnMut(i32, i64, &mut [u8]) -> bool,
 {
-    match seven_zip_inspect(member_indexes, member_sizes, read_member, true, None)? {
+    match seven_zip_inspect(
+        member_indexes,
+        member_sizes,
+        read_member,
+        true,
+        None,
+        &mut LayerPick::default(),
+    )? {
         SevenZipInspect::Lzma2(layout) => Ok(layout),
         SevenZipInspect::CopyRuns(..) | SevenZipInspect::EncryptedCopyRuns(_) => {
             Err("copy-mode 7z")
@@ -1625,6 +1730,7 @@ fn seven_zip_inspect<F>(
     mut read_member: F,
     want_lzma2: bool,
     password: Option<&[u8]>,
+    pick: &mut LayerPick,
 ) -> Result<SevenZipInspect, &'static str>
 where
     F: FnMut(i32, i64, &mut [u8]) -> bool,
@@ -2002,7 +2108,13 @@ where
 
     let mut primary: Option<&SevenZipFile> = None;
     for file in &data_files {
-        if primary.is_none_or(|p| file.size > p.size) {
+        pick.note(&file.name, file.size);
+        let better = if pick.want.is_some() {
+            primary.is_none() && pick.wants(&file.name, file.size)
+        } else {
+            primary.is_none_or(|p| file.size > p.size)
+        };
+        if better {
             primary = Some(file);
         }
     }
@@ -2012,7 +2124,7 @@ where
     if prim.name.is_empty() {
         return Err("unsupported 7z structure");
     }
-    if !is_map_inner_eligible(&prim.name) {
+    if pick.checks_name() && !is_map_inner_eligible(&prim.name) {
         return Err("inner file is not a media file");
     }
     if prim.data_pos.saturating_add(prim.size) > total_size {
@@ -2874,7 +2986,38 @@ pub fn content_mapper_build_rar_map<FCrypto>(
     vol_has_source: &[u8],
     vol_source_sizes: &[i64],
     entries: &[RarFileEntryInput<'_>],
+    make_crypto: FCrypto,
+) -> Result<RarMapOutput, &'static str>
+where
+    FCrypto: FnMut(usize, i32) -> bool,
+{
+    content_mapper_build_rar_map_pick(
+        unknown_volume,
+        has_password,
+        vol_readable,
+        vol_versions,
+        vol_member_indices,
+        vol_has_source,
+        vol_source_sizes,
+        entries,
+        make_crypto,
+        &mut LayerPick::default(),
+    )
+}
+
+/// [`content_mapper_build_rar_map`] for the file `pick` asks for.
+#[allow(clippy::too_many_arguments)]
+pub fn content_mapper_build_rar_map_pick<FCrypto>(
+    unknown_volume: i32,
+    has_password: bool,
+    vol_readable: &[u8],
+    vol_versions: &[i32],
+    vol_member_indices: &[i32],
+    vol_has_source: &[u8],
+    vol_source_sizes: &[i64],
+    entries: &[RarFileEntryInput<'_>],
     mut make_crypto: FCrypto,
+    pick: &mut LayerPick,
 ) -> Result<RarMapOutput, &'static str>
 where
     FCrypto: FnMut(usize, i32) -> bool,
@@ -2886,17 +3029,30 @@ where
         .min(vol_has_source.len())
         .min(vol_source_sizes.len());
 
+    // By default the biggest file of the first readable volume is mapped. Later volumes
+    // are looked at only to list the files (`nested`) or to find the one asked for.
     let mut primary: Option<&RarFileEntryInput<'_>> = None;
+    let mut first_volume_seen = false;
     for (v, &readable) in vol_readable.iter().take(vol_count).enumerate() {
         if readable == 0 {
             continue;
         }
         for entry in entries.iter().filter(|e| e.volume_index == v as i32) {
-            if primary.map_or(true, |p| entry.size > p.size) {
+            if entry.stored && !entry.encrypted_data {
+                pick.note(base_file_name(entry.filename), entry.size);
+            }
+            if pick.want.is_some() {
+                if primary.is_none() && pick.wants(base_file_name(entry.filename), entry.size) {
+                    primary = Some(entry);
+                }
+            } else if !first_volume_seen && primary.map_or(true, |p| entry.size > p.size) {
                 primary = Some(entry);
             }
         }
-        break;
+        first_volume_seen = true;
+        if !pick.nested && (pick.want.is_none() || primary.is_some()) {
+            break;
+        }
     }
     let Some(primary) = primary else {
         return Err("no file entries in the first readable volume");
@@ -2904,7 +3060,7 @@ where
 
     let inner_name = base_file_name(primary.filename).to_vec();
     let inner_size = primary.size;
-    if !is_map_inner_eligible(&inner_name) {
+    if pick.checks_name() && !is_map_inner_eligible(&inner_name) {
         return Err("inner file is not a media file");
     }
 
@@ -4854,6 +5010,11 @@ pub trait ContentSourceSet {
     fn aborted(&self) -> bool {
         false
     }
+
+    /// Allows `extra` more article fetches while a map is built, where fetches are
+    /// rationed: reading the headers of a volume set nested in an archive costs about one
+    /// article per volume, which the allowance for the outer archive does not foresee.
+    fn grant_fetches(&self, _extra: i32) {}
 
     fn on_rar_volume_parsed(
         &self,
@@ -6937,18 +7098,110 @@ impl ContentSource for NestedLayerSource<'_> {
     }
 }
 
-/// The one-member source set of a nested archive.
+/// Remembers what was read from a member, so the container's headers are fetched once
+/// while the map of each volume of a nested set is built from them in turn.
+struct MemoSource<'a> {
+    sources: &'a dyn ContentSourceSet,
+    member_index: i32,
+    reads: std::cell::RefCell<std::collections::HashMap<(i64, usize), Vec<u8>>>,
+    held: std::cell::Cell<usize>,
+}
+
+impl MemoSource<'_> {
+    /// Reads longer than this, and anything past the total, go straight to the member.
+    const MAX_READ: usize = 1 << 20;
+    const MAX_HELD: usize = 32 << 20;
+}
+
+impl ContentSource for MemoSource<'_> {
+    fn size(&self) -> i64 {
+        self.sources
+            .get_source(self.member_index)
+            .map_or(0, |s| s.size())
+    }
+
+    fn read(&self, offset: i64, buf: &mut [u8]) -> bool {
+        let key = (offset, buf.len());
+        if let Some(bytes) = self.reads.borrow().get(&key) {
+            buf.copy_from_slice(bytes);
+            return true;
+        }
+        let Some(source) = self.sources.get_source(self.member_index) else {
+            return false;
+        };
+        if !source.read(offset, buf) {
+            return false;
+        }
+        if buf.len() <= Self::MAX_READ && self.held.get() + buf.len() <= Self::MAX_HELD {
+            self.held.set(self.held.get() + buf.len());
+            self.reads.borrow_mut().insert(key, buf.to_vec());
+        }
+        true
+    }
+}
+
+struct MemoSources<'a> {
+    sources: &'a dyn ContentSourceSet,
+    members: Vec<MemoSource<'a>>,
+}
+
+impl<'a> MemoSources<'a> {
+    fn new(sources: &'a dyn ContentSourceSet, set: &MemberSet) -> Self {
+        Self {
+            sources,
+            members: set
+                .members
+                .iter()
+                .map(|&member_index| MemoSource {
+                    sources,
+                    member_index,
+                    reads: std::cell::RefCell::new(std::collections::HashMap::new()),
+                    held: std::cell::Cell::new(0),
+                })
+                .collect(),
+        }
+    }
+}
+
+impl ContentSourceSet for MemoSources<'_> {
+    fn get_source(&self, member_index: i32) -> Option<&dyn ContentSource> {
+        self.sources.get_source(member_index)?;
+        self.members
+            .iter()
+            .find(|m| m.member_index == member_index)
+            .map(|m| m as &dyn ContentSource)
+    }
+
+    fn aborted(&self) -> bool {
+        self.sources.aborted()
+    }
+
+    fn grant_fetches(&self, extra: i32) {
+        self.sources.grant_fetches(extra);
+    }
+}
+
+/// The source set of a nested archive: one source per volume of it.
 struct NestedLayerSources<'a> {
-    source: NestedLayerSource<'a>,
+    volumes: Vec<NestedLayerSource<'a>>,
 }
 
 impl ContentSourceSet for NestedLayerSources<'_> {
     fn get_source(&self, member_index: i32) -> Option<&dyn ContentSource> {
-        (member_index == 0).then_some(&self.source as &dyn ContentSource)
+        usize::try_from(member_index)
+            .ok()
+            .and_then(|m| self.volumes.get(m))
+            .map(|v| v as &dyn ContentSource)
     }
 
     fn aborted(&self) -> bool {
-        self.source.sources.aborted()
+        self.volumes.first().is_some_and(|v| v.sources.aborted())
+    }
+
+    fn grant_fetches(&self, extra: i32) {
+        if let Some(v) = self.volumes.first() {
+            v.sources.grant_fetches(extra);
+        }
     }
 }
 
@@ -6997,49 +7250,140 @@ impl ContentMapper {
         password: Option<&[u8]>,
         tls_enabled: bool,
     ) -> Result<ContentMap, String> {
-        let mut map = Self::build_layer_map(members, set, sources, password, tls_enabled)?;
-        let mut depth = 0;
-        // Only a stored archive is followed further; any other name is what the layer
-        // builders accepted before (a media file, or an extensionless bare file).
-        while is_nested_container_name(map.inner_name_bytes()) {
-            if depth >= Self::MAX_NESTED_LAYERS {
-                return Err("inner file is not a media file".to_string());
+        Self::build_map_at_depth(members, set, sources, password, tls_enabled, 0)
+    }
+
+    fn build_map_at_depth(
+        members: &[SetMember],
+        set: &MemberSet,
+        sources: &dyn ContentSourceSet,
+        password: Option<&[u8]>,
+        tls_enabled: bool,
+        depth: usize,
+    ) -> Result<ContentMap, String> {
+        const NOT_MEDIA: &str = "inner file is not a media file";
+        let mut listing = LayerPick {
+            nested: true,
+            ..LayerPick::default()
+        };
+        let primary =
+            Self::build_layer_map(members, set, sources, password, tls_enabled, &mut listing)?;
+        // A bare file or a raw split is the payload itself, whatever its name; in an
+        // archive, a media file is.
+        if matches!(set.format, MemberFormat::Bare | MemberFormat::Split)
+            || is_stream_eligible(primary.inner_name_bytes())
+        {
+            return Ok(primary);
+        }
+        // Otherwise the biggest file must be a stored archive, alone or one volume of a
+        // set that this container holds: find the set among the container's files.
+        if depth >= Self::MAX_NESTED_LAYERS {
+            return Err(NOT_MEDIA.to_string());
+        }
+        if primary.encrypted() {
+            // The archive inside lies in the plaintext of an encrypted one: its bytes
+            // have no place of their own in the members.
+            return Err("nested archive inside an encrypted archive".to_string());
+        }
+        // One entry per name: the mapped file itself where it shares its name with files
+        // in other folders of the container, otherwise the biggest of that name.
+        let mut files: Vec<(Vec<u8>, i64)> = Vec::new();
+        let mut index_of: std::collections::HashMap<Vec<u8>, usize> =
+            std::collections::HashMap::new();
+        let is_primary =
+            |n: &[u8], s: i64| n == primary.inner_name_bytes() && s == primary.inner_size();
+        for (name, size) in listing.files {
+            match index_of.get(&name) {
+                Some(&at) => {
+                    let kept = &mut files[at];
+                    if !is_primary(&kept.0, kept.1) && (is_primary(&name, size) || size > kept.1) {
+                        kept.1 = size;
+                    }
+                }
+                None => {
+                    index_of.insert(name.clone(), files.len());
+                    files.push((name, size));
+                }
             }
-            if map.encrypted() {
-                // The archive inside lies in the plaintext of an encrypted one: its bytes
-                // have no place of their own in the members.
-                return Err("nested archive inside an encrypted archive".to_string());
-            }
+        }
+        let Some(primary_idx) = files.iter().position(|f| {
+            f.0.as_slice() == primary.inner_name_bytes() && f.1 == primary.inner_size()
+        }) else {
+            return Err(NOT_MEDIA.to_string());
+        };
+        let file_names: Vec<&[u8]> = files.iter().map(|f| f.0.as_slice()).collect();
+        let Some((format, volume_idxs)) = content_mapper_group_sets(&file_names)
+            .into_iter()
+            .filter_map(|(fmt, idxs)| Some((MemberFormat::from_i32(fmt)?, idxs)))
+            .find(|(fmt, idxs)| {
+                !matches!(fmt, MemberFormat::Bare) && idxs.contains(&(primary_idx as i32))
+            })
+        else {
+            return Err(NOT_MEDIA.to_string());
+        };
+        if volume_idxs.len() > Self::MAX_NESTED_VOLUMES {
+            return Err("too many volumes in a nested archive".to_string());
+        }
+        // The map of every volume of the nested set onto the members. Each one parses the
+        // container again, so what that reads is remembered.
+        sources.grant_fetches(8 + (volume_idxs.len() as i32) * 4);
+        let memo = MemoSources::new(sources, set);
+        let mut volume_maps: Vec<ContentMap> = Vec::with_capacity(volume_idxs.len());
+        let mut nested_members: Vec<SetMember> = Vec::with_capacity(volume_idxs.len());
+        for &idx in &volume_idxs {
+            let (name, size) = &files[idx as usize];
             if sources.aborted() {
                 return Err("member unreadable".to_string());
             }
-            depth += 1;
-            let nested_members = [SetMember::new(map.inner_name_bytes(), map.inner_size())];
-            let Some(nested_set) = Self::group_sets(&nested_members)
-                .into_iter()
-                .find(|s| s.members == [0])
-            else {
-                return Err("inner file is not a media file".to_string());
+            let volume_map = if idx as usize == primary_idx {
+                primary.clone()
+            } else {
+                let mut one = LayerPick {
+                    want: Some((name.clone(), *size)),
+                    ..LayerPick::default()
+                };
+                Self::build_layer_map(members, set, &memo, password, tls_enabled, &mut one)?
             };
-            let layer = NestedLayerSources {
-                source: NestedLayerSource {
-                    outer: &map,
-                    sources,
-                },
-            };
-            let inner =
-                Self::build_layer_map(&nested_members, &nested_set, &layer, password, tls_enabled)?;
-            map = Self::compose_nested(&map, &inner)?;
+            if volume_map.encrypted() {
+                return Err("nested archive inside an encrypted archive".to_string());
+            }
+            if volume_map.inner_size() != *size {
+                return Err("nested archive does not lie in mapped data".to_string());
+            }
+            nested_members.push(SetMember::new(name, *size));
+            volume_maps.push(volume_map);
         }
-        Ok(map)
+        let nested_set = MemberSet {
+            format,
+            members: (0..volume_idxs.len() as i32).collect(),
+        };
+        let layer = NestedLayerSources {
+            volumes: volume_maps
+                .iter()
+                .map(|outer| NestedLayerSource { outer, sources })
+                .collect(),
+        };
+        let inner = Self::build_map_at_depth(
+            &nested_members,
+            &nested_set,
+            &layer,
+            password,
+            tls_enabled,
+            depth + 1,
+        )?;
+        Self::compose_nested(&volume_maps, &inner)
     }
+
+    /// How many volumes a nested archive set may have.
+    const MAX_NESTED_VOLUMES: usize = 1000;
 
     /// How many stored archives may sit between the members and the media file.
     const MAX_NESTED_LAYERS: usize = 4;
 
-    /// `inner` maps a file to ranges of the archive that `outer` maps to the members:
-    /// the composition maps the file straight to the members.
-    fn compose_nested(outer: &ContentMap, inner: &ContentMap) -> Result<ContentMap, String> {
+    /// `inner` maps a file to ranges of the volumes of a nested archive, and `outers` maps
+    /// each of those volumes to the members: the composition maps the file straight to the
+    /// members.
+    fn compose_nested(outers: &[ContentMap], inner: &ContentMap) -> Result<ContentMap, String> {
         const BROKEN: &str = "nested archive does not lie in mapped data";
         let mut map = ContentMap::default();
         map.set_inner_name_bytes(inner.inner_name_bytes());
@@ -7056,6 +7400,12 @@ impl ContentMapper {
                 (rc.cipher_data_offset, rc.cipher_size, rc.crypto.clone())
             } else {
                 (run.member_offset, run.size, None)
+            };
+            let Some(outer) = usize::try_from(run.member_index)
+                .ok()
+                .and_then(|m| outers.get(m))
+            else {
+                return Err(BROKEN.to_string());
             };
             let pieces = outer.map_from_inner(NzbgetRsByteRange {
                 offset: from,
@@ -7100,14 +7450,17 @@ impl ContentMapper {
         sources: &dyn ContentSourceSet,
         password: Option<&[u8]>,
         tls_enabled: bool,
+        pick: &mut LayerPick,
     ) -> Result<ContentMap, String> {
         match set.format {
             MemberFormat::Bare => Self::build_bare_map(members, set, sources),
             MemberFormat::Split => Self::build_split_map(members, set, sources),
-            MemberFormat::Rar => Self::build_rar_map(members, set, sources, password, tls_enabled),
-            MemberFormat::Zip => Self::build_zip_map(set, sources),
+            MemberFormat::Rar => {
+                Self::build_rar_map(members, set, sources, password, tls_enabled, pick)
+            }
+            MemberFormat::Zip => Self::build_zip_map(set, sources, pick),
             MemberFormat::SevenZip => {
-                Self::build_seven_zip_map(set, sources, password.filter(|_| tls_enabled))
+                Self::build_seven_zip_map(set, sources, password.filter(|_| tls_enabled), pick)
             }
         }
     }
@@ -7182,6 +7535,7 @@ impl ContentMapper {
         sources: &dyn ContentSourceSet,
         password: Option<&[u8]>,
         tls_enabled: bool,
+        pick: &mut LayerPick,
     ) -> Result<ContentMap, String> {
         let mut volumes: Vec<Option<(crate::rarreader::Volume, Vec<crate::rarreader::RarFile>)>> =
             vec![None; set.members.len()];
@@ -7290,7 +7644,7 @@ impl ContentMapper {
 
         let mut crypto_ctx: Option<std::sync::Arc<RarCryptoContext>> = None;
         let pw_bytes = password.unwrap_or(&[]);
-        let out = content_mapper_build_rar_map(
+        let out = content_mapper_build_rar_map_pick(
             unknown_volume,
             password.is_some(),
             &vol_readable,
@@ -7317,6 +7671,7 @@ impl ContentMapper {
                 }
                 crypto_ctx.is_some()
             },
+            pick,
         )
         .map_err(str::to_string)?;
 
@@ -7339,6 +7694,7 @@ impl ContentMapper {
     fn build_zip_map(
         set: &MemberSet,
         sources: &dyn ContentSourceSet,
+        pick: &mut LayerPick,
     ) -> Result<ContentMap, String> {
         let mut member_sizes = Vec::with_capacity(set.members.len());
         for &member_index in &set.members {
@@ -7351,7 +7707,7 @@ impl ContentMapper {
             }
             member_sizes.push(sz);
         }
-        let (inner_name, inner_size, runs) = content_mapper_build_zip_map(
+        let (inner_name, inner_size, runs) = content_mapper_build_zip_map_pick(
             &set.members,
             &member_sizes,
             |member_index, offset, buf| {
@@ -7359,6 +7715,7 @@ impl ContentMapper {
                     .get_source(member_index)
                     .is_some_and(|s| s.read(offset, buf))
             },
+            pick,
         )
         .map_err(str::to_string)?;
         let mut map = ContentMap::default();
@@ -7372,6 +7729,7 @@ impl ContentMapper {
         set: &MemberSet,
         sources: &dyn ContentSourceSet,
         password: Option<&[u8]>,
+        pick: &mut LayerPick,
     ) -> Result<ContentMap, String> {
         let mut member_sizes = Vec::with_capacity(set.members.len());
         for &member_index in &set.members {
@@ -7384,7 +7742,7 @@ impl ContentMapper {
             }
             member_sizes.push(sz);
         }
-        let mapped = content_mapper_build_seven_zip_map_with_password(
+        let mapped = content_mapper_build_seven_zip_map_pick(
             &set.members,
             &member_sizes,
             |member_index, offset, buf| {
@@ -7393,6 +7751,7 @@ impl ContentMapper {
                     .is_some_and(|s| s.read(offset, buf))
             },
             password,
+            pick,
         )
         .map_err(str::to_string)?;
         let mut map = ContentMap::default();
@@ -7831,6 +8190,14 @@ impl<'a, 'b> DonorSetSources<'a, 'b> {
 }
 
 impl ContentSourceSet for DonorSetSources<'_, '_> {
+    fn grant_fetches(&self, extra: i32) {
+        if let Some(budget) = self.shared.fetch_budget.get() {
+            self.shared
+                .fetch_budget
+                .set(Some(budget.saturating_add(extra.max(0))));
+        }
+    }
+
     fn get_source(&self, member_index: i32) -> Option<&dyn ContentSource> {
         if member_index < 0 {
             return None;
@@ -10033,16 +10400,59 @@ mod tests {
         inner.set_inner_size(200);
         *inner.runs_mut() = vec![run(0, 0, 60, 200)];
 
-        let map = ContentMapper::compose_nested(&outer, &inner).unwrap();
+        let map = ContentMapper::compose_nested(std::slice::from_ref(&outer), &inner).unwrap();
         assert_eq!(map.inner_name_bytes(), b"movie.mkv");
         assert_eq!(map.inner_size(), 200);
         assert!(!map.encrypted());
         // Archive bytes 60..100 are member 0 at 100..140, bytes 100..260 member 1 at 10..170.
         assert_eq!(map.runs(), &[run(0, 0, 100, 40), run(40, 1, 10, 160)]);
 
+        // A nested set of two volumes, each stored somewhere else in the container: the
+        // movie's first 150 bytes sit at 20 in volume 0, the rest at 20 in volume 1.
+        let mut vol0 = ContentMap::default();
+        vol0.set_inner_size(170);
+        *vol0.runs_mut() = vec![run(0, 0, 500, 170)];
+        let mut vol1 = ContentMap::default();
+        vol1.set_inner_size(70);
+        *vol1.runs_mut() = vec![run(0, 0, 900, 30), run(30, 1, 0, 40)];
+        let mut set = ContentMap::default();
+        set.set_inner_name_bytes(b"movie.mkv");
+        set.set_inner_size(200);
+        *set.runs_mut() = vec![run(0, 0, 20, 150), run(150, 1, 20, 50)];
+        let stitched = ContentMapper::compose_nested(&[vol0, vol1], &set).unwrap();
+        assert_eq!(
+            stitched.runs(),
+            &[
+                run(0, 0, 520, 150),
+                run(150, 0, 920, 10),
+                run(160, 1, 0, 40)
+            ]
+        );
+        // A run in a volume that is not there is refused.
+        *set.runs_mut() = vec![run(0, 2, 0, 200)];
+        assert!(ContentMapper::compose_nested(std::slice::from_ref(&outer), &set).is_err());
+
+        let mut pick = LayerPick {
+            nested: true,
+            ..LayerPick::default()
+        };
+        pick.note(b"in.part01.rar", 10);
+        pick.note(b"in.part01.rar", 10);
+        pick.note(b"", 3);
+        assert_eq!(pick.files, vec![(b"in.part01.rar".to_vec(), 10)]);
+        // The same name with another size is another file (another folder).
+        pick.note(b"in.part01.rar", 25);
+        assert_eq!(pick.files.len(), 2);
+        assert!(!pick.checks_name());
+        pick.want = Some((b"IN.PART01.RAR".to_vec(), 25));
+        assert!(pick.wants(b"in.part01.rar", 25));
+        assert!(!pick.wants(b"in.part01.rar", 10));
+        assert!(!pick.wants(b"in.part02.rar", 25));
+        assert!(LayerPick::default().checks_name());
+
         // A nested archive that claims bytes the outer one does not hold is refused.
         *inner.runs_mut() = vec![run(0, 0, 60, 400)];
-        assert!(ContentMapper::compose_nested(&outer, &inner).is_err());
+        assert!(ContentMapper::compose_nested(std::slice::from_ref(&outer), &inner).is_err());
 
         // An encrypted inner archive: 200 bytes of movie in 208 bytes of cipher at 60.
         let crypto =
@@ -10053,7 +10463,7 @@ mod tests {
             cipher_data_offset: 60,
             cipher_size: 208,
         });
-        let enc = ContentMapper::compose_nested(&outer, &inner).unwrap();
+        let enc = ContentMapper::compose_nested(std::slice::from_ref(&outer), &inner).unwrap();
         assert!(enc.encrypted());
         assert_eq!(enc.runs(), &[run(0, 0, 100, 40), run(40, 1, 10, 160)]);
         assert_eq!(enc.cipher_stream_size(), 208);

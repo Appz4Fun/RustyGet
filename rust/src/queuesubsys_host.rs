@@ -2467,6 +2467,24 @@ impl QueueSubsysHost {
         )
     }
 
+    /// The download with `nzb_id`, in the queue or (once it is done) in history; 0 if neither.
+    pub fn nzb_find_in_queue_or_history(&self, dq_ptr: usize, nzb_id: i32) -> usize {
+        let np = self.queue_find_by_id(dq_ptr, nzb_id);
+        if np != 0 {
+            return np;
+        }
+        let hi_ptr = self.history_find_by_id(dq_ptr, nzb_id);
+        if hi_ptr == 0 {
+            return 0;
+        }
+        let hi = self.hist_item_snap(hi_ptr);
+        if hi.kind == HK_NZB {
+            hi.inner_ptr
+        } else {
+            0
+        }
+    }
+
     pub fn history_find_by_id(&self, dq_ptr: usize, id: i32) -> usize {
         self.raw(
             23,

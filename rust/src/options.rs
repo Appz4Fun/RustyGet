@@ -808,6 +808,12 @@ mod tests {
             let (o, v) = convert_old_option(c"WriteLog", old);
             assert_eq!((o.to_str().unwrap(), v.to_str().unwrap()), ("LogToFile", new));
         }
+        // a reference is read as the value it names, not as text
+        let vars = |name: &CStr| (name.to_bytes() == b"DebugTarget").then(|| b"none".to_vec());
+        let (o, v) = split_and_convert_option_string(c"WriteLog=${DebugTarget}", vars).unwrap();
+        assert_eq!((o.to_str().unwrap(), v.to_str().unwrap()), ("LogToFile", "no"));
+        let (o, v) = split_and_convert_option_string(c"MainDir=${AppDir}/x", |_| None).unwrap();
+        assert_eq!((o.to_str().unwrap(), v.to_str().unwrap()), ("MainDir", "${AppDir}/x"), "other options expand later");
         assert_eq!(parse_category_source(Some(c"FeedFile")), 2);
     }
 
@@ -1706,10 +1712,19 @@ pub fn expand_option_variables(
 }
 
 /// Splits an `option=value` string and normalizes legacy option names/values (`Options::SplitOptionString`).
-pub fn split_and_convert_option_string(option: &CStr) -> Option<(CString, CString)> {
+/// `get_option` expands `${Var}` references in a legacy value whose meaning changes
+/// (`WriteLog=${DebugTarget}` must be read as the value it refers to, not as text).
+pub fn split_and_convert_option_string(
+    option: &CStr,
+    get_option: impl FnMut(&CStr) -> Option<Vec<u8>>,
+) -> Option<(CString, CString)> {
     let (raw_name, raw_val) = options_split_option_string(option.to_bytes())?;
     let name_cstr = cstring(raw_name.to_vec());
-    let val_cstr = cstring(raw_val.to_vec());
+    let val_cstr = if eq(&name_cstr, c"WriteLog") {
+        cstring(expand_option_variables(raw_val, get_option))
+    } else {
+        cstring(raw_val.to_vec())
+    };
     Some(convert_old_option(&name_cstr, &val_cstr))
 }
 
@@ -3533,7 +3548,9 @@ impl<'a> RustOptions<'a> {
     }
 
     pub fn set_option_string(&mut self, option: &CStr) -> bool {
-        let Some((optname, optvalue)) = split_and_convert_option_string(option) else {
+        let converted =
+            split_and_convert_option_string(option, |var_name| self.get_option(var_name).map(|c| c.into_bytes()));
+        let Some((optname, optvalue)) = converted else {
             let msg = format_bytes_msg(&[b"Invalid option \"", option.to_bytes(), b"\""]);
             self.config_error(&msg);
             return false;
@@ -4131,7 +4148,9 @@ impl NzbgetRsOptions {
     }
 
     fn set_option_string(&mut self, option: &CStr) -> bool {
-        let Some((optname, optvalue)) = split_and_convert_option_string(option) else {
+        let converted =
+            split_and_convert_option_string(option, |var_name| self.get_option(var_name).map(|c| c.into_bytes()));
+        let Some((optname, optvalue)) = converted else {
             let msg = format_bytes_msg(&[b"Invalid option \"", option.to_bytes(), b"\""]);
             self.config_error(&msg);
             return false;

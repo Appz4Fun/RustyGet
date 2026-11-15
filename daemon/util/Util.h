@@ -2296,7 +2296,8 @@ public:
 		m_unpackTried = false;
 		m_lastUnpackStatus = 0;
 		m_extractedArchives.clear();
-		ClearMessages();
+		// messages stay: there are no NZB log files, so a finished download's Log tab
+		// shows what is kept here (LogBuffer bounds it)
 	}
 	bool IsDupeSuccess()
 	{

@@ -5926,7 +5926,7 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                         return 0;
                     };
                     let cached_msgs = qh.with_locked_queue(|dq_ptr| {
-                        let np = qh.queue_find_by_id(dq_ptr, a2);
+                        let np = qh.nzb_find_in_queue_or_history(dq_ptr, a2);
                         if np == 0 {
                             Vec::new()
                         } else {
@@ -5976,7 +5976,7 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                     let last_time = disk_msgs.last().map_or(i32::MIN, |m| m.2);
                     let offset = disk_msgs.iter().map(|m| m.0).max().unwrap_or(0);
                     let cached_msgs = qh.with_locked_queue(|dq_ptr| {
-                        let np = qh.queue_find_by_id(dq_ptr, a2);
+                        let np = qh.nzb_find_in_queue_or_history(dq_ptr, a2);
                         if np == 0 {
                             Vec::new()
                         } else {

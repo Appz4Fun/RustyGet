@@ -55,6 +55,13 @@ const { installDetailsFixture } = require('./details-fixture');
         assert.equal(await page.locator('#S_LogToFile').getAttribute('aria-checked'), 'false', 'the switch is off');
       });
 
+      await check('an old WriteLog=${Option} is read as the value it names', async () => {
+        const up = await page.evaluate(() => Options.upgradeValues([
+          { Name: 'DebugTarget', Value: 'none' }, { Name: 'WriteLog', Value: '${DebugTarget}' },
+        ]).find(v => v.Name === 'LogToFile').Value);
+        assert.equal(up, 'no');
+      });
+
       await check('LogBuffer offers Unlimited', async () => {
         const row = page.locator('#S_LogBuffer').locator('xpath=ancestor::div[contains(@class,"control-group")][1]');
         assert.match(await row.textContent(), /Unlimited/);

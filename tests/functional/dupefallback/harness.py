@@ -1154,6 +1154,27 @@ def scenario_complementary(daemon, t):
             'status=%s recovered=%d integrity=%s' % (h['Status'], recov, integ))
 
 
+def scenario_historylog(daemon, t):
+    """A finished download keeps its messages: there are no per-download log
+    files any more, so the History Log tab (loadlog) shows the messages kept in
+    memory, and they must survive the move from the queue to history."""
+    size, seg = 1_000_000, 100_000
+    data = _payload(size, 4242)
+    pp = _place_copy(t, 'histlog', data)
+    nzb = build_nzb(pp, 'HistLog.bin', size, seg, set())
+    api = daemon.wait_ready()
+    daemon.append(api, 'HistLog', nzb, False, '', 0)
+    h = daemon.wait_history(api, 'HistLog')
+    nzb_id = h.get('NZBID') or h.get('ID')
+    msgs = api.loadlog(nzb_id, 0, 1000)
+    count = int(h.get('MessageCount', 0))
+    ok = h['Status'].startswith('SUCCESS') and len(msgs) > 0 and count > 0
+    later = api.loadlog(nzb_id, msgs[-1]['ID'], 0) if msgs else []
+    ok = ok and len(later) == 1 and later[0]['ID'] == msgs[-1]['ID']
+    return ('historylog', ok, 'status=%s messages=%d MessageCount=%d from_last_id=%d'
+            % (h['Status'], len(msgs), count, len(later)))
+
+
 def scenario_rejectnextserver(daemon, t):
     """B6: Server1 serves every article with a malformed yEnc part header (a
     proxy turns "=ypart begin=" into "=ypart begxn="), Server2 serves them
@@ -11973,6 +11994,7 @@ SCENARIOS = {
     'dupesearchlegacyrename': scenario_dupesearchlegacyrename,
     'dupesearchwatchrename': scenario_dupesearchwatchrename,
     'complementary': scenario_complementary,
+    'historylog': scenario_historylog,
     'redownloadresetsrecovered': scenario_redownloadresetsrecovered,
     'recheckfailed': scenario_recheckfailed,
     'nzbgapborrow': scenario_nzbgapborrow,

@@ -233,7 +233,7 @@ var Options = (new function($)
 			if (/^WriteLog$/i.test(v.Name) && !names.logtofile)
 			{
 				v.Name = 'LogToFile';
-				v.Value = String(v.Value).toLowerCase() === 'none' ? 'no' : 'yes';
+				v.Value = expand(v.Value, 0).trim().toLowerCase() === 'none' ? 'no' : 'yes';
 			}
 			var m = /^Server([0-9]+)\.Level$/i.exec(v.Name);
 			if (m && !names[('Server' + m[1] + '.Priority').toLowerCase()])

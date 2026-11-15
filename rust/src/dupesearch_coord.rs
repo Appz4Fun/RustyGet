@@ -54,9 +54,11 @@ const ALIVE_PARAM_STR: &str = "DupeAlive";
 pub const OWNED_KEY_PARAM: &[u8] = b"DupeSearchOwnedKey";
 pub const FLEET_PARAM: &[u8] = b"DupeFleet";
 /// Fleet intake verdict on a copy's video: `same` when its sampled payload
-/// matches the fleet's, `unverified` when it could not be read or compared.
-/// A copy carrying another video is dropped, so it never gets one.
+/// matches the fleet's, `unverified` when it could not be read or compared,
+/// `different` when a later re-check found another video in a copy it could
+/// not drop. A copy found carrying another video at intake is dropped.
 pub const VIDEO_PARAM: &[u8] = b"DupeVideo";
+const VIDEO_DIFFERENT: &[u8] = b"different";
 
 fn video_param_value(same: bool) -> &'static [u8] {
     if same { b"same" } else { b"unverified" }
@@ -64,6 +66,13 @@ fn video_param_value(same: bool) -> &'static [u8] {
 
 /// Records the intake verdict on a copy already in the queue or history.
 fn fleet_mark_video(host_ctx: *mut c_void, host_cb: DupeHostFn, nzb_id: i32, same: bool) {
+    fleet_set_video(host_ctx, host_cb, nzb_id, video_param_value(same));
+}
+
+/// Writes a video verdict. `unverified` never replaces an earlier verdict;
+/// `same` and `different` are reads that succeeded, so they always win.
+fn fleet_set_video(host_ctx: *mut c_void, host_cb: DupeHostFn, nzb_id: i32, value: &[u8]) {
+    let decisive = value != b"unverified";
     with_guarded_queue(host_ctx, host_cb, |dq_ptr| {
         let Some(qh) = crate::ffi::queue_host() else {
             return;
@@ -72,10 +81,10 @@ fn fleet_mark_video(host_ctx: *mut c_void, host_cb: DupeHostFn, nzb_id: i32, sam
             return;
         };
         // a read that failed this time never takes back an earlier match
-        if !same && qh.nzb_get_param(nzb_ptr, VIDEO_PARAM).is_some() {
+        if !decisive && qh.nzb_get_param(nzb_ptr, VIDEO_PARAM).is_some() {
             return;
         }
-        qh.nzb_set_param(nzb_ptr, VIDEO_PARAM, Some(video_param_value(same)));
+        qh.nzb_set_param(nzb_ptr, VIDEO_PARAM, Some(value));
         qh.nzb_set_int(nzb_ptr, crate::queuesubsys_host::NZB_INT_CHANGED, 1);
         if in_history {
             qh.dq_history_changed(dq_ptr);
@@ -1617,6 +1626,10 @@ fn fleet_intake_later(host_ctx: *mut c_void, host_cb: DupeHostFn, job: IntakeLat
                     }
                     true
                 });
+                if !removed {
+                    // kept, so the panel must not offer it as a donor
+                    fleet_set_video(host_ctx, host_cb, id, VIDEO_DIFFERENT);
+                }
                 msg.extend_from_slice(if removed {
                     b" carries another video, removed from the fleet".as_slice()
                 } else {

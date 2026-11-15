@@ -107,7 +107,15 @@ const { installDetailsFixture } = require('./details-fixture');
             fromAlt: run(g(43), all),
             fromTwin: run(g(42), all),
             unchecked: run(g(41), unchecked),
-            dead: run(g(41), dead)
+            dead: run(g(41), dead),
+            different: run(g(41), all.map(x => x.NZBID === 43 ? withParam(x, 'DupeVideo', 'different') : x)),
+            unrelated: (() => {
+              // an older release under the same dupe key: its own print, its own post
+              const other = Object.assign({}, withParam(hist, 'DupeFiles', '0123456789abcdef-12'), { NZBID: 99, NZBFilename: 'other.release.nzb' });
+              const keepH = History.items;
+              History.items = keepH.concat([other]);
+              try { return { primary: run(g(41), all), alt: run(g(43), all) }; } finally { History.items = keepH; }
+            })()
           };
         });
         assert.deepEqual(r.fromPrimary, { twins: 1, alts: 1, unverified: 0 }, 'The primary skips the history try of its own post');
@@ -116,6 +124,9 @@ const { installDetailsFixture } = require('./details-fixture');
         assert.deepEqual(r.fromTwin, { twins: 1, alts: 1, unverified: 0 }, 'A twin borrows from its primary post (once, not again for its history copy) and the checked alt');
         assert.deepEqual(r.unchecked, { twins: 1, alts: 0, unverified: 1 }, 'An alt the intake could not check is unverified');
         assert.deepEqual(r.dead, { twins: 0, alts: 1, unverified: 0 }, 'A dead copy is no donor');
+        assert.deepEqual(r.different, { twins: 1, alts: 0, unverified: 0 }, 'An alt found to carry another video is no donor');
+        assert.deepEqual(r.unrelated.primary, { twins: 1, alts: 1, unverified: 0 }, 'Another release under the same key is no twin of the primary');
+        assert.deepEqual(r.unrelated.alt, { twins: 2, alts: 0, unverified: 0 }, 'Another release under the same key is no twin seen from an alt');
       });
 
       await check('critical health wins over the fixed threshold', async () => {

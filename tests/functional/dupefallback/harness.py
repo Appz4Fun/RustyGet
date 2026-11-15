@@ -6362,11 +6362,16 @@ def scenario_fleetintake(daemon, t):
     other_m = members.get('Show.S01E01.other', {})
     items = {g['NZBName'] for g in api.listgroups() + api.history() if g.get('DupeKey') == 'fleet:intake'}
     log_same = _grep_log(t, "Show.S01E01.zip carries the fleet's video")
+    # both copies keep the digest of the video inside, for TwinCheck's alt label
+    inner = {g['NZBName']: next((p['Value'] for p in g.get('Parameters', []) if p['Name'] == 'DupeInner'), '')
+             for g in api.listgroups() + api.history() if g.get('DupeKey') == 'fleet:intake'}
     ok = (other_m.get('Status') == 'ERROR' and 'not the same video' in other_m.get('Reason', '')
           and 'Show.S01E01.other' not in items
           and any(members.get(n, {}).get('Status') == 'QUEUED' for n in ('Show.S01E01.bare', 'Show.S01E01.zip'))
-          and log_same > 0)
-    return ('fleetintake', ok, 'reply=%s items=%s zip_same_logged=%s' % (reply, sorted(items), log_same))
+          and log_same > 0
+          and len(set(inner.values())) == 1 and len(next(iter(inner.values()), '').rsplit('.', 1)[-1]) == 16)
+    return ('fleetintake', ok, 'reply=%s items=%s zip_same_logged=%s inner=%s' % (
+        reply, sorted(items), log_same, inner))
 
 
 def scenario_fleetintakelater(daemon, t):
@@ -9487,9 +9492,10 @@ def _twin_release(t, tag, seed, seg, block, recovery):
 def scenario_twinalt(daemon, t):
     """A dupe key with three postings: the primary; a twin (the same files, posted
     in other article sizes with another par2 set: other block size and parity
-    level); and an alt (another encode: other bytes). Each gets a fingerprint
-    from its smallest par2-file, and the duplicates in history are labelled a
-    twin or an alt of the primary."""
+    level); and a copy with other bytes. Each gets a fingerprint from its
+    smallest par2-file. The twin is labelled a twin; the other copy only
+    "container": other par2 checksums say another container, not another
+    video, and no intake read the video inside."""
     primary = _twin_release(t, 'taP', 12700, 50_000, 65536, 4)
     twin = _twin_release(t, 'taT', 12700, 70_000, 131072, 9)
     alt = _twin_release(t, 'taA', 12800, 50_000, 65536, 4)
@@ -9511,7 +9517,7 @@ def scenario_twinalt(daemon, t):
             break
         time.sleep(2)
     prints = {n: param(hist.get(n, {}), 'DupeFiles') for n in ('Primary', 'Twin', 'Alt')}
-    ok = (kinds == {'Twin': 'twin', 'Alt': 'alt'} and prints['Primary'] == prints['Twin'] and
+    ok = (kinds == {'Twin': 'twin', 'Alt': 'container'} and prints['Primary'] == prints['Twin'] and
           prints['Primary'] != prints['Alt'] and prints['Primary'] not in ('', 'none'))
     return ('twinalt', ok, 'kinds=%s prints=%s' % (kinds, prints))
 
@@ -9543,7 +9549,7 @@ def scenario_twinlabelonadd(daemon, t):
             break
         time.sleep(0.5)
     queued = [g for g in api.listgroups() if g['NZBName'] == 'Primary']
-    ok = (kinds == {'Twin': 'twin', 'Alt': 'alt'} and elapsed is not None and elapsed < 10 and
+    ok = (kinds == {'Twin': 'twin', 'Alt': 'container'} and elapsed is not None and elapsed < 10 and
           len(queued) == 1 and queued[0]['DownloadedSizeMB'] == 0)
     return ('twinlabelonadd', ok, 'kinds=%s elapsed=%s primary_queued=%s' % (
         kinds, None if elapsed is None else round(elapsed, 1), bool(queued)))
@@ -9610,7 +9616,7 @@ def scenario_twinaltsampled(daemon, t):
         if all(sampled.values()) and kinds['Twin'] and kinds['Alt']:
             break
         time.sleep(2)
-    ok = kinds == {'Twin': 'twin', 'Alt': 'alt', 'Other': ''} and sampled.get('Other') == 'none'
+    ok = kinds == {'Twin': 'twin', 'Alt': 'container', 'Other': ''} and sampled.get('Other') == 'none'
     return ('twinaltsampled', ok, 'kinds=%s sampled=%s' % (kinds, sampled))
 
 

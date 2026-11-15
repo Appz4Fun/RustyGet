@@ -2021,6 +2021,7 @@ impl NzbgetRsQueueCoordinator {
             crate::donorkind::KIND_PARAM,
             b"DupeSampled".as_slice(),
             b"DupeSampledOf".as_slice(),
+            crate::dupeintake::INNER_PARAM,
         ] {
             host.nzb_set_param(dest_ptr, param, None);
         }

@@ -1,7 +1,10 @@
 //! Twins and alts: duplicates of a download told apart by the files their par2
 //! sets describe. A twin holds files byte-identical to the primary's (its
 //! articles, par2-files and bytes can stand in for the primary's); a near-twin
-//! shares most of them (a re-packed archive header); an alt is another encode.
+//! shares most of them (a re-packed archive header). Other par2 checksums only
+//! mean another container: a copy is an alt (the same video in another
+//! container) only once the fleet intake read the video inside both copies;
+//! until then it is labelled "container", and "other" when the video differs.
 //!
 //! The C++ side (TwinCheck) fetches articles and walks the queue; everything
 //! else lives here: reading nzb-files, the per-posting file lists kept in the
@@ -487,8 +490,10 @@ fn message_id(raw: &str) -> String {
     format!("<{id}>")
 }
 
-/// Formats the log message emitted when a duplicate's `kind` (`"twin"`, `"twin:N/M"`,
-/// or `"alt"`) against `primary_name` changes (`TwinCheck::ServiceWork` in `TwinCheck.cpp`).
+/// Formats the log message emitted when a duplicate's `kind` against
+/// `primary_name` changes: `"twin"`, `"twin:N/M"`, `"alt"` (another container,
+/// the same video inside), `"container"` (another container, the video inside
+/// not verified yet) or `"other"` (another video inside).
 pub fn format_twin_kind_message(
     nzb_name: &[u8],
     primary_name: &[u8],
@@ -500,25 +505,39 @@ pub fn format_twin_kind_message(
     }
     let is_twin = kind[0] == b't';
     let colon_pos = kind.iter().position(|&b| b == b':');
-    let label: &[u8] = if is_twin {
-        if colon_pos.is_some() {
+    let outer: &[u8] = if by_par2 {
+        b"its files' par2 checksums differ"
+    } else {
+        b"the articles sampled differ"
+    };
+    let (label, reason): (&[u8], Vec<u8>) = if is_twin {
+        let label: &[u8] = if colon_pos.is_some() {
             b"a near-twin (files the same: "
         } else {
             b"a twin"
-        }
-    } else {
-        b"an alt"
-    };
-    let reason: &[u8] = if !by_par2 {
-        if is_twin {
-            b"the articles sampled are identical"
+        };
+        let reason: &[u8] = if by_par2 {
+            b"byte-identical files by their par2 checksums"
         } else {
-            b"another encode: the articles sampled differ"
-        }
-    } else if is_twin {
-        b"byte-identical files by their par2 checksums"
+            b"the articles sampled are identical"
+        };
+        (label, reason.to_vec())
+    } else if kind == b"alt" {
+        (
+            b"an alt",
+            [
+                b"another container, the same video inside: ".as_slice(),
+                outer,
+            ]
+            .concat(),
+        )
+    } else if kind == b"other" {
+        (b"not a copy", b"the video inside is another one".to_vec())
     } else {
-        b"another encode: its files' par2 checksums differ"
+        (
+            b"in another container than",
+            [b"the video inside is not verified yet: ".as_slice(), outer].concat(),
+        )
     };
 
     let mut out =
@@ -530,10 +549,13 @@ pub fn format_twin_kind_message(
         out.extend_from_slice(&kind[colon + 1..]);
         out.push(b')');
     }
-    out.extend_from_slice(b" of ");
+    if !label.ends_with(b"than") {
+        out.extend_from_slice(b" of");
+    }
+    out.push(b' ');
     out.extend_from_slice(primary_name);
     out.extend_from_slice(b" (");
-    out.extend_from_slice(reason);
+    out.extend_from_slice(&reason);
     out.push(b')');
     out
 }
@@ -826,6 +848,23 @@ pub fn resolve_kind(
         }
     }
     Vec::new()
+}
+
+/// Other par2 checksums or other sampled articles only mean another
+/// container: the files in the archive, not the archive, decide. An `"alt"`
+/// from them stays one only when the fleet intake read the same video inside
+/// both copies ([`crate::dupeintake::same_inner`]); another video makes it
+/// `"other"`, and without two comparable values it is `"container"`
+/// (another container, the video inside not verified yet).
+pub fn verify_alt(kind: Vec<u8>, primary_inner: &[u8], dupe_inner: &[u8]) -> Vec<u8> {
+    if kind != b"alt" {
+        return kind;
+    }
+    match crate::dupeintake::same_inner(primary_inner, dupe_inner) {
+        Some(true) => kind,
+        Some(false) => b"other".to_vec(),
+        None => b"container".to_vec(),
+    }
 }
 
 // ============================================================================
@@ -1121,6 +1160,7 @@ struct TwinQueueItem {
     has_sampled_of: bool,
     sampled_of_param: Vec<u8>,
     kind_param: Vec<u8>,
+    inner_param: Vec<u8>,
 }
 
 #[cfg(unix)]
@@ -1186,6 +1226,9 @@ fn run_service_work_locked(
         let p_sampled = qh.nzb_get_param(nzb_ptr, b"DupeSampled");
         let p_sampled_of = qh.nzb_get_param(nzb_ptr, b"DupeSampledOf");
         let kind_param = qh.nzb_get_param(nzb_ptr, b"DupeKind").unwrap_or_default();
+        let inner_param = qh
+            .nzb_get_param(nzb_ptr, crate::dupeintake::INNER_PARAM)
+            .unwrap_or_default();
         let item = TwinQueueItem {
             nzb_ptr,
             id,
@@ -1203,6 +1246,7 @@ fn run_service_work_locked(
             has_sampled_of: p_sampled_of.is_some(),
             sampled_of_param: p_sampled_of.unwrap_or_default(),
             kind_param,
+            inner_param,
         };
         keys.entry(key).or_default().push(item);
     };
@@ -1331,6 +1375,10 @@ fn run_service_work_locked(
                 sampled_now && item.has_sampled,
                 &item.sampled_param,
             );
+            let primary_inner = primary_usize
+                .map(|pi| items[pi].inner_param.as_slice())
+                .unwrap_or(&[]);
+            let resolved_kind = verify_alt(resolved_kind, primary_inner, &item.inner_param);
             if item.kind_param != resolved_kind {
                 qh.nzb_set_param(item.nzb_ptr, b"DupeKind", Some(&resolved_kind));
                 if !resolved_kind.is_empty() {
@@ -1460,6 +1508,40 @@ fn read_nzb_entries_from_disk(path: &[u8]) -> Vec<NzbEntry> {
     match std::fs::read(crate::fsops::path(path)) {
         Ok(xml) => read_nzb(&xml),
         Err(_) => Vec::new(),
+    }
+}
+
+/// Records the inner-video digests the fleet intake found (see
+/// [`crate::dupeintake::INNER_PARAM`]) on copies still in the queue or the
+/// history, then wakes the twin check so their labels follow.
+#[cfg(unix)]
+pub(crate) fn set_inner_digests(digests: &[(i32, String)]) {
+    if digests.is_empty() {
+        return;
+    }
+    let Some(qh) = crate::ffi::queue_host() else {
+        return;
+    };
+    let set = qh.with_locked_queue(|dq_ptr| {
+        let mut any = false;
+        for (id, digest) in digests {
+            let nzb_ptr = find_nzb_in_queue_or_history(&qh, dq_ptr, *id);
+            if nzb_ptr != 0 {
+                qh.nzb_set_param(
+                    nzb_ptr,
+                    crate::dupeintake::INNER_PARAM,
+                    Some(digest.as_bytes()),
+                );
+                any = true;
+            }
+        }
+        if any {
+            qh.dq_save(dq_ptr);
+        }
+        any
+    });
+    if set {
+        nudge_and_wake_active();
     }
 }
 
@@ -1718,6 +1800,51 @@ mod tests {
 
     /// The service coordinator counts intervals in seconds; a millisecond
     /// value here left the twin check idle for hours after its first round.
+    #[test]
+    fn par2_differences_alone_never_make_an_alt() {
+        let (a, b) = (b"4.1f.aa".as_slice(), b"4.1f.bb".as_slice());
+        assert_eq!(verify_alt(b"alt".to_vec(), b"", b""), b"container");
+        assert_eq!(verify_alt(b"alt".to_vec(), a, b""), b"container");
+        assert_eq!(verify_alt(b"alt".to_vec(), a, a), b"alt");
+        assert_eq!(verify_alt(b"alt".to_vec(), a, b), b"other");
+        // sampled elsewhere (another seed or sample count): not comparable
+        assert_eq!(verify_alt(b"alt".to_vec(), a, b"8.1f.bb"), b"container");
+        assert_eq!(verify_alt(b"alt".to_vec(), a, b"4.2f.aa"), b"container");
+        assert_eq!(verify_alt(b"twin".to_vec(), a, b), b"twin");
+        assert_eq!(verify_alt(b"twin:2/3".to_vec(), b"", b""), b"twin:2/3");
+        assert_eq!(verify_alt(Vec::new(), a, a), b"");
+    }
+
+    #[test]
+    fn kind_messages_never_guess_another_encode() {
+        let msg = |kind: &[u8], by_par2| {
+            String::from_utf8(format_twin_kind_message(b"B", b"A", kind, by_par2)).unwrap()
+        };
+        assert_eq!(
+            msg(b"container", true),
+            "B is in another container than A (the video inside is not verified yet: its files' par2 checksums differ)"
+        );
+        assert_eq!(
+            msg(b"alt", true),
+            "B is an alt of A (another container, the same video inside: its files' par2 checksums differ)"
+        );
+        assert_eq!(
+            msg(b"other", false),
+            "B is not a copy of A (the video inside is another one)"
+        );
+        assert_eq!(
+            msg(b"twin", true),
+            "B is a twin of A (byte-identical files by their par2 checksums)"
+        );
+        assert_eq!(
+            msg(b"twin:2/3", true),
+            "B is a near-twin (files the same: 2/3) of A (byte-identical files by their par2 checksums)"
+        );
+        for k in [&b"alt"[..], b"container", b"other"] {
+            assert!(!msg(k, true).contains("encode"));
+        }
+    }
+
     #[test]
     fn twin_rounds_run_within_seconds() {
         assert_eq!(TWIN_NUDGED_INTERVAL_SEC, 1);

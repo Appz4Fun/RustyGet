@@ -233,6 +233,7 @@ impl WriteCoordinator {
             }
             state.generation = generation;
             state.cancelled = false;
+            state.stop_reason = None;
             // Published bytes may already be in use by unpack. Their seals and
             // metadata charge survive live-generation replacement until close.
         }

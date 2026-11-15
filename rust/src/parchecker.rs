@@ -367,19 +367,34 @@ impl ActiveStreamingSession {
                 reason = format!("{reason} ({why})");
             }
         }
+        // Key without numbers, so byte counts and ids in one kind of error
+        // do not each take a slot; the first full message is logged.
+        let mut key = String::with_capacity(reason.len());
+        for c in reason.chars() {
+            if !c.is_ascii_digit() {
+                key.push(c);
+            } else if !key.ends_with('#') {
+                key.push('#');
+            }
+        }
         let mut refusals = self.refusals.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((_, count)) = refusals.iter_mut().find(|(known, _)| *known == reason) {
+        if let Some((_, count)) = refusals.iter_mut().find(|(known, _)| *known == key) {
             *count += 1;
             return;
         }
         if refusals.len() >= MAX_REASONS {
+            let other = "other reasons".to_owned();
+            match refusals.iter_mut().find(|(known, _)| *known == other) {
+                Some((_, count)) => *count += 1,
+                None => refusals.push((other, 1)),
+            }
             return;
         }
         let message = format!(
             "Live PAR (job {}) refused: {reason}",
             self.metrics.report_nzb_id()
         );
-        refusals.push((reason, 1));
+        refusals.push((key, 1));
         drop(refusals);
         crate::log::log_active_bytes(crate::queuesubsys_host::MK_DETAIL, message.as_bytes());
     }

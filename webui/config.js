@@ -1593,15 +1593,12 @@ var Config = (new function($)
 	var LAYOUT = {
 		DUPE_FLEETS: [
 			{ key: 'repair', title: 'Fleet repair', text: 'How copies of the same release repair each other while they download.',
-				options: ['DupeCheck', 'DupeArticleFallback', 'DupeBorrowFirst', 'DupeStreamDecompress', 'DupeStreamTimeout', 'HealthCheck'] },
-			{ key: 'health', title: 'Health sampling', text: 'How each copy is sampled before a primary is picked and donors are ranked.',
-				options: ['DupeHealthPercent', 'DupeHealthMin', 'DupeHealthMax', 'DupeBodyChecks', 'DupeBodyPercent', 'DupeMinAlive'],
-				advanced: ['DupeHealthBudget', 'DupeCheckConcurrency', 'DupeCheckConnections'] },
-			{ key: 'ranking', title: 'Donor ranking', text: 'Twins come first by health, then borrowable alts, then the rest. These settings break ties.',
-				options: ['DupePrimaryScore', 'DupeFastDonors', 'DupeSizeTolerance'] },
-			{ key: 'search', title: 'Indexer search', text: 'Off by default: fleets normally arrive from the app that sends them.',
-				options: ['DupeSearch'], advanced: ['DupeSearchUrl', 'DupeSearchApiKey', 'DupeSearchDelay', 'DupeSearchDryRun', 'DupeSearchMaxDonors'],
-				moreLabel: 'Search settings' }
+				options: ['DupeCheck', 'DupeWatch', 'DupeArticleFallback', 'DupeBorrowFirst', 'DupeStreamDecompress', 'DupeStreamTimeout', 'HealthCheck'] },
+			{ key: 'health', title: 'Health sampling', text: 'How much of each copy is checked before a primary is picked and donors are ranked.',
+				options: ['DupeHealthPreset', 'DupeMinAlive'],
+				advanced: ['DupeHealthPercent', 'DupeHealthMin', 'DupeHealthMax', 'DupeBodyChecks', 'DupeBodyPercent',
+					'DupeHealthBudget', 'DupeCheckConcurrency', 'DupeCheckConnections'],
+				moreLabel: 'Custom sampling' }
 		],
 		INCOMING_NZBS: [
 			{ key: 'folder', title: 'NZB folder', text: 'Files dropped into the NZB folder are picked up and queued.',
@@ -1897,7 +1894,10 @@ var Config = (new function($)
 				article: t('config_overview_article', 'Article swap') }[fallback] || t('config_overview_dupe_only', 'Dupe check only');
 		var fleetSub = [];
 		if (yes('DupeBorrowFirst')) fleetSub.push(t('config_overview_borrow_first', 'borrow before par2'));
-		fleetSub.push(yes('DupeSearch') ? t('config_overview_search_on', 'indexer search on') : t('config_overview_search_off', 'indexer search off'));
+		var preset = optionValueByName('DupeHealthPreset').toLowerCase() || 'medium';
+		fleetSub.push(t('config_overview_sampling', 'sampling: %s').replace('%s',
+			{ weak: t('config_overview_sampling_weak', 'weak'), medium: t('config_overview_sampling_medium', 'medium'),
+				hard: t('config_overview_sampling_hard', 'hard'), custom: t('config_overview_sampling_custom', 'custom') }[preset] || preset));
 		tiles.append(overviewTile(DUPE_SECTION.id, t('config_section_dupe_fleets', 'Dupe fleets'), 'arrow_right_alt',
 			fleetValue, fleetSub.join(' · '), yes('DupeCheck') ? 'good' : 'warn'));
 

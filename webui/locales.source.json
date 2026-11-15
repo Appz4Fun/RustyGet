@@ -223,23 +223,7 @@
     "description": "Settings card heading on the dupe_fleets page"
   },
   "config_card_dupe_fleets_health_text": {
-    "message": "How each copy is sampled before a primary is picked and donors are ranked.",
-    "description": "Settings card explanation on the dupe_fleets page"
-  },
-  "config_card_dupe_fleets_ranking": {
-    "message": "Donor ranking",
-    "description": "Settings card heading on the dupe_fleets page"
-  },
-  "config_card_dupe_fleets_ranking_text": {
-    "message": "Twins come first by health, then borrowable alts, then the rest. These settings break ties.",
-    "description": "Settings card explanation on the dupe_fleets page"
-  },
-  "config_card_dupe_fleets_search": {
-    "message": "Indexer search",
-    "description": "Settings card heading on the dupe_fleets page"
-  },
-  "config_card_dupe_fleets_search_text": {
-    "message": "Off by default: fleets normally arrive from the app that sends them.",
+    "message": "How much of each copy is checked before a primary is picked and donors are ranked.",
     "description": "Settings card explanation on the dupe_fleets page"
   },
   "config_card_incoming_nzbs_folder": {
@@ -382,12 +366,28 @@
     "message": "borrow before par2",
     "description": "Settings overview tile text"
   },
-  "config_overview_search_on": {
-    "message": "indexer search on",
+  "config_card_dupe_fleets_health_more": {
+    "message": "Custom sampling",
+    "description": "Settings card fold label"
+  },
+  "config_overview_sampling": {
+    "message": "sampling: %s",
     "description": "Settings overview tile text"
   },
-  "config_overview_search_off": {
-    "message": "indexer search off",
+  "config_overview_sampling_weak": {
+    "message": "weak",
+    "description": "Settings overview tile text"
+  },
+  "config_overview_sampling_medium": {
+    "message": "medium",
+    "description": "Settings overview tile text"
+  },
+  "config_overview_sampling_hard": {
+    "message": "hard",
+    "description": "Settings overview tile text"
+  },
+  "config_overview_sampling_custom": {
+    "message": "custom",
     "description": "Settings overview tile text"
   },
   "config_overview_par": {
@@ -437,10 +437,6 @@
   "config_overview_no_quota": {
     "message": "no quota",
     "description": "Settings overview tile text"
-  },
-  "config_card_dupe_fleets_search_more": {
-    "message": "Search settings",
-    "description": "Fold on the Dupe fleets indexer search card holding the search settings"
   },
   "config_overview_about": {
     "message": "About RustyGet",

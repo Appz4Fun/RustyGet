@@ -102,7 +102,9 @@ var ReleaseName = (new function()
 		// release group: the text after the last dash, when it is one word
 		var m = s.match(/-([A-Za-z0-9]+(?:\.[A-Za-z0-9]+)?)$/);
 		var body = s;
-		if (m && !RESOLUTION.test(m[1]) && !/^\d{1,2}$/.test(m[1]) && !/^(dl|rip|hd|x|ray)$/i.test(m[1]))
+		// "S01E01-E02" ends in an episode range, not a group
+		var range = m && /^E\d{1,4}$/i.test(m[1]) && /S\d{1,3}E\d{1,4}$/i.test(s.slice(0, m.index));
+		if (m && !range && !RESOLUTION.test(m[1]) && !/^\d{1,2}$/.test(m[1]) && !/^(dl|rip|hd|x|ray)$/i.test(m[1]))
 		{
 			r.group = m[1];
 			body = s.slice(0, m.index);

@@ -23,6 +23,9 @@ const PARSE_CASES = [
   // season and episode in separate tokens
   ['Show.Name.S01.E02.1080p.WEB-DL.x264-GRP', 'Show Name', 'S01E02', '', '1080p WEB-DL x264 GRP'],
   ['Show Name S03 E10 720p HDTV x264-GRP', 'Show Name', 'S03E10', '', '720p HDTV x264 GRP'],
+  // a trailing episode range is not a release group
+  ['Show.Name.S01E01-E02', 'Show Name', 'S01E01-E02', '', ''],
+  ['Show.Name.S01E01-E02.720p.HDTV.x264-GRP', 'Show Name', 'S01E01-E02', '', '720p HDTV x264 GRP'],
 ];
 
 (async () => {

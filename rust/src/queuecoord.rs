@@ -355,7 +355,8 @@ pub fn eval_dead_download(
 
 /// True when a download that lost a stretch of articles should keep going instead of failing
 /// over: its backup is a twin or an alt in a borrowable packing (the same video, stored), live
-/// borrowing is on, the download's own packing is not unborrowable, and at least half of what
+/// borrowing and direct unpack are on (`live_borrowing`; only direct unpack reads a rebuilt dead
+/// volume), the download's own packing is not unborrowable, and at least half of what
 /// it tried arrived. The lost parts are then borrowed from the backup (whole dead volumes
 /// included, see `deadvolume`), and the extraction already running is kept; a failover would
 /// delete it and download and extract the backup from its first byte. A download whose
@@ -4598,7 +4599,8 @@ impl NzbgetRsQueueCoordinator {
             // borrowable alt can lend is borrowed too, keeping the extraction that runs.
             let lendable = alt_covers_lost_articles(
                 false,
-                opts.dupe_article_fallback == crate::queuesubsys_host::DAF_LIVE,
+                opts.dupe_article_fallback == crate::queuesubsys_host::DAF_LIVE
+                    && opts.direct_unpack,
                 crate::donorkind::DonorKind::from_param(
                     host.nzb_get_param(nzb.ptr, crate::donorkind::KIND_PARAM).as_deref(),
                 ),
@@ -4800,7 +4802,8 @@ impl NzbgetRsQueueCoordinator {
         );
         if alt_covers_lost_articles(
             dead_rate,
-            opts.dupe_article_fallback == crate::queuesubsys_host::DAF_LIVE,
+            opts.dupe_article_fallback == crate::queuesubsys_host::DAF_LIVE
+                && opts.direct_unpack,
             own_kind,
             backup_kind,
             eval.projected,

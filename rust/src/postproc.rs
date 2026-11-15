@@ -3049,21 +3049,28 @@ pub(crate) fn direct_unpack_set_virtual(
     let id = nzb_id;
     let st = map.entry(id).or_default();
     st.virtuals.insert(full_path.to_vec(), volume);
-    *dead_volumes_borrowed().entry(nzb_id).or_default() += 1;
-    // Under obfuscated names a dead file is held under its posted name, which tells nothing
-    // of its place in the set: release one held file of this download that never reached the
-    // disk for each stand-in, so the holds still count the volumes that wait for a repair.
-    let stand_in_for = if st.held.iter().any(|p| p == full_path) {
-        Some(full_path.to_vec())
+    if let Some(i) = st.held.iter().position(|p| p == full_path) {
+        st.held.remove(i);
+        st.holes.remove(full_path);
+    } else if let Some(i) = st
+        .held
+        .iter()
+        .position(|p| !crate::fsops::path(p).exists())
+    {
+        // Under obfuscated names a dead file is held under its posted name, which tells nothing
+        // of its place in the set: drop one held file of this download that never reached the
+        // disk for each stand-in, so the holds still count the volumes that wait for a repair.
+        // Its own name is never reported released: it is no archive to extract.
+        let stand_in = st.held.remove(i);
+        st.holes.remove(&stand_in);
     } else {
-        st.held
-            .iter()
-            .find(|p| !crate::fsops::path(p).exists())
-            .cloned()
-    };
-    drop(map);
-    if let Some(p) = stand_in_for {
-        direct_unpack_release_path(&p);
+        // The volume arrived intact under a name not renamed yet: nothing was lost for it.
+        return;
+    }
+    *dead_volumes_borrowed().entry(nzb_id).or_default() += 1;
+    st.released.push(hold_path_filename(full_path).to_vec());
+    if st.held.is_empty() {
+        st.awaiting_repair = false;
     }
 }
 
@@ -7079,6 +7086,33 @@ mod post_job_arena_tests {
 
 #[cfg(all(test, unix))]
 mod live_hold_tests {
+    #[test]
+    fn borrowed_volume_is_released_under_its_own_name_not_the_stand_in() {
+        let dir = std::env::temp_dir().join(format!("rg-standin-rel-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = |n: &str| dir.join(n).to_string_lossy().as_bytes().to_vec();
+        let id = 917_302;
+        super::direct_unpack_hold(id, &p("x3obf.rar"));
+        let v = crate::deadvolume::VirtualVolume {
+            head: Vec::new(),
+            data: dir.join("none"),
+            data_len: 0,
+            tail: Vec::new(),
+        };
+        super::direct_unpack_set_virtual(id, &p("movie.part04.rar"), v.clone());
+        let (released, _) = super::direct_unpack_take_released(id);
+        assert_eq!(released, vec![b"movie.part04.rar".to_vec()]);
+        assert!(!super::direct_unpack_has_holds(id));
+        // An intact volume not renamed yet: nothing held for it, nothing counted.
+        std::fs::write(dir.join("y1obf.rar"), b"intact").unwrap();
+        super::direct_unpack_hold(id, &p("y1obf.rar"));
+        super::direct_unpack_set_virtual(id, &p("movie.part05.rar"), v);
+        assert!(super::direct_unpack_has_holds(id));
+        assert_eq!(super::take_dead_volumes_borrowed(id), 1);
+        super::direct_unpack_forget_holds(id);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn only_absent_obfuscated_stand_ins_can_be_released_without_repair() {
         let dir = std::env::temp_dir().join(format!("rg-standins-{}", std::process::id()));

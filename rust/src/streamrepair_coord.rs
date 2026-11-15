@@ -1389,6 +1389,10 @@ impl NzbgetRsStreamRepairCtrl {
         );
 
         let (pending_data_files, nzb_id) = unsafe { self.pending_data_files(ctx, cb) };
+        // Only direct unpack reads a rebuilt dead volume: without it nothing is borrowed.
+        let direct_unpack = crate::options::active_options()
+            .is_some_and(|o| o.scalars().direct_unpack != 0);
+        let nzb_id = nzb_id.filter(|_| direct_unpack);
         let dead_context = crate::streamrepair::DeadVolumeContext {
             pending_data_files,
             nzb_id,

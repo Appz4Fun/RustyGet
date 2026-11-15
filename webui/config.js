@@ -1460,6 +1460,12 @@ var Config = (new function($)
 	{
 		var option = findOptionById(optFormId);
 
+		// following a search result or help link to an option the mode hides shows that mode
+		if (option && !inMode(modeOfOption(option)))
+		{
+			Config.setMode(modeOfOption(option));
+		}
+
 		// switch to tab and scroll the option into view
 		Config.showSection(pageIdOf(option), false);
 		$('#' + optFormId).closest('details.config-card__more').prop('open', true);
@@ -2262,6 +2268,13 @@ var Config = (new function($)
 		QuotaStartDay: { min: 1, max: 31 }
 	};
 
+	// numbers that may be negative: a feed's priority (-100 very low) and the clock offset
+	var SIGNED_NUMBERS = ['Feed.Priority', 'TimeCorrection'];
+
+	// fields typed as expressions, not stepped as one number: weekday lists and ranges
+	// such as "1-5, 7", and times such as "08:00, 20:00"
+	var EXPRESSION_FIELDS = ['Task.WeekDays', 'Task.Time'];
+
 	// a range written in the option's help, such as (0-99)
 	function numberMeta(option)
 	{
@@ -2358,7 +2371,7 @@ var Config = (new function($)
 		appendBox.before(wrapper);
 		wrapper.append(appendBox);
 		input.attr({ inputmode: 'numeric', autocomplete: 'off', spellcheck: 'false' });
-		var allowMinus = !!(meta && meta.min < 0) || option.name === 'TimeCorrection';
+		var allowMinus = !!(meta && meta.min < 0) || SIGNED_NUMBERS.indexOf(optionFamily(option.name)) > -1;
 		input.attr('pattern', allowMinus ? '-?[0-9]*' : '[0-9]*');
 		var label = option.label || option.caption;
 		var minus = $('<button type="button" class="btn config-step" data-step="-1">−</button>')
@@ -2469,7 +2482,7 @@ var Config = (new function($)
 			// times (HH:MM) and octal masks (000-1000) are typed as written, not stepped
 			var unit = String(option.select && option.select[0] || '');
 			if (option.type === 'numeric' && control.is('input.editnumeric') && !control.closest('.config-number').length &&
-				!/:|^\s*0[0-9]/.test(unit))
+				!/:|^\s*0[0-9]/.test(unit) && EXPRESSION_FIELDS.indexOf(optionFamily(option.name)) === -1)
 			{
 				enhanceNumber(option, control);
 			}
@@ -2504,13 +2517,13 @@ var Config = (new function($)
 	// An option that only matters while another one has certain values is greyed out
 	// otherwise, with a note that says what to change. Its value is kept and saved.
 	var OPTION_REQUIRES = [
-		{ option: 'DirectUnpack', when: { name: 'Unpack', values: ['yes'] } },
-		{ option: 'UnpackCleanupDisk', when: { name: 'Unpack', values: ['yes'] } },
-		{ option: 'UnpackPassFile', when: { name: 'Unpack', values: ['yes'] } },
-		{ option: 'UseTempUnpackDir', when: { name: 'Unpack', values: ['yes'] } },
-		{ option: 'UnpackPauseQueue', when: { name: 'Unpack', values: ['yes'] } },
-		{ option: 'ExtCleanupDisk', when: { name: 'Unpack', values: ['yes'] } },
-		{ option: 'UnpackIgnoreExt', when: { name: 'Unpack', values: ['yes'] } },
+		{ option: 'DirectUnpack', when: { name: 'Unpack', values: ['yes'], orCategory: 'Unpack' } },
+		{ option: 'UnpackCleanupDisk', when: { name: 'Unpack', values: ['yes'], orCategory: 'Unpack' } },
+		{ option: 'UnpackPassFile', when: { name: 'Unpack', values: ['yes'], orCategory: 'Unpack' } },
+		{ option: 'UseTempUnpackDir', when: { name: 'Unpack', values: ['yes'], orCategory: 'Unpack' } },
+		{ option: 'UnpackPauseQueue', when: { name: 'Unpack', values: ['yes'], orCategory: 'Unpack' } },
+		{ option: 'ExtCleanupDisk', when: { name: 'Unpack', values: ['yes'], orCategory: 'Unpack' } },
+		{ option: 'UnpackIgnoreExt', when: { name: 'Unpack', values: ['yes'], orCategory: 'Unpack' } },
 		{ option: 'DupeArticleFallback', when: { name: 'DupeCheck', values: ['yes'] } },
 		{ option: 'DupeBorrowFirst', when: { name: 'DupeArticleFallback', values: ['article', 'stream', 'live', 'yes'] } },
 		{ option: 'DupeStreamDecompress', when: { name: 'DupeArticleFallback', values: ['stream', 'live'] } },
@@ -2523,6 +2536,20 @@ var Config = (new function($)
 		{ option: 'RestrictedPassword', when: { name: 'RestrictedUsername', notEmpty: true } },
 		{ option: 'AddPassword', when: { name: 'AddUsername', notEmpty: true } }
 	];
+
+	function anyCategoryValue(field, values)
+	{
+		var found = false;
+		allOptions(function(option)
+		{
+			if (!found && optionFamily(option.name) === 'Category.' + field &&
+				values.indexOf(currentValue(option).toLowerCase()) > -1)
+			{
+				found = true;
+			}
+		});
+		return found;
+	}
 
 	function currentValue(option)
 	{
@@ -2603,6 +2630,11 @@ var Config = (new function($)
 			}
 			var value = currentValue(needed).toLowerCase();
 			var met = rule.when.notEmpty ? value.trim() !== '' : rule.when.values.indexOf(value) > -1;
+			// a category with Unpack=yes unpacks its downloads even while Unpack is off
+			if (!met && rule.when.orCategory && anyCategoryValue(rule.when.orCategory, rule.when.values))
+			{
+				met = true;
+			}
 			setLocked(row, !met, met ? '' : requirementText(rule, needed), needed.formId);
 		});
 	}

@@ -335,6 +335,21 @@ var DetailsPanel = (new function($)
 		}
 	}
 
+	// The backdrop stays 'static' so Bootstrap never closes the panel on its own,
+	// mid-save included: a click beside the panel closes it here instead, unless
+	// a save is still in flight
+	this.closeOnOutsideClick = function($dialog)
+	{
+		var $backdrop = $('.modal-backdrop').last();
+		$backdrop.off('click.details').on('click.details', function()
+		{
+			if ($dialog.hasClass('in') && !$dialog.hasClass('is-saving'))
+			{
+				$dialog.modal('hide');
+			}
+		});
+	}
+
 	this.bindFleet = function($container)
 	{
 		$container.on('click', 'a.fleet-member', function(e)
@@ -536,7 +551,8 @@ var DownloadsEditDialog = (new function($)
 		var dupeCheck = Options.option('DupeCheck') === 'yes';
 		Util.show('#DownloadsEdit_Dupe', dupeCheck);
 		var postParam = postParamConfig[0].options.length > 0 && group.Kind === 'NZB';
-		var postLog = group.MessageCount > 0;
+		// every download has a log, from the moment it is queued
+		var postLog = group.Kind === 'NZB' || group.MessageCount > 0;
 		Util.show('#DownloadsEdit_Param', postParam);
 		Util.show('#DownloadsEdit_Log', postLog);
 
@@ -596,6 +612,7 @@ var DownloadsEditDialog = (new function($)
 		if (!switching)
 		{
 			$DownloadsEditDialog.modal({backdrop: 'static'});
+			DetailsPanel.closeOnOutsideClick($DownloadsEditDialog);
 		}
 	}
 
@@ -649,7 +666,7 @@ var DownloadsEditDialog = (new function($)
 					}
 				}});
 
-		if (tab === '#DownloadsEdit_LogTab' && !logFilled && (curGroup.postprocess || curGroup.MessageCount > 0))
+		if (tab === '#DownloadsEdit_LogTab' && !logFilled)
 		{
 			LogTab.fill('Downloads', curGroup);
 			logFilled = true;
@@ -1420,6 +1437,9 @@ var LogTab = (new function($)
 
 	this.reset = function(name)
 	{
+		curItem = null;
+		$('#' + name + 'EditDialog .loading-block').hide();
+		$('#' + name + 'Edit_LogEmpty').hide();
 		var $LogTable = $('#' + name + 'Edit_LogTable');
 		$LogTable.fasttable('update', []);
 		$LogTable.fasttable('setCurPage', 1);
@@ -1431,10 +1451,16 @@ var LogTab = (new function($)
 	this.fill = function(name, item)
 	{
 		curItem = item;
+		var requested = item;
 
 		function logLoaded(log)
 		{
-		curLog = log;
+			// a reply for a copy the panel has since moved off
+			if (curItem !== requested)
+			{
+				return;
+			}
+			curLog = log;
 
 			$('#' + name + 'EditDialog .loading-block').hide();
 			var $LogTable = $('#' + name + 'Edit_LogTable');
@@ -1479,6 +1505,7 @@ var LogTab = (new function($)
 			}
 
 			$LogTable.fasttable('update', data);
+			Util.show('#' + name + 'Edit_LogEmpty', data.length === 0);
 		}
 
 		var recordsPerPage = UISettings.read('ItemLogRecordsPerPage', 10);
@@ -2055,7 +2082,8 @@ var HistoryEditDialog = (new function($)
 			ParamTab.updatePostParamTranslations();
 		}
 
-		var postLog = hist.MessageCount > 0;
+		// a finished download keeps its log in history, whatever its outcome
+		var postLog = hist.Kind === 'NZB' || hist.MessageCount > 0;
 		Util.show('#HistoryEdit_Log', postLog);
 
 		enableAllButtons();
@@ -2085,6 +2113,7 @@ var HistoryEditDialog = (new function($)
 		if (!switching)
 		{
 			$HistoryEditDialog.modal({backdrop: 'static'});
+			DetailsPanel.closeOnOutsideClick($HistoryEditDialog);
 		}
 	}
 
@@ -2170,7 +2199,7 @@ var HistoryEditDialog = (new function($)
 			e.shiftKey || !UISettings.slideAnimation || showing ? 0 : 500,
 			{fullscreen: lastFullscreen, mini: UISettings.miniTheme});
 
-		if (tab === '#HistoryEdit_LogTab' && !logFilled && curHist.MessageCount > 0)
+		if (tab === '#HistoryEdit_LogTab' && !logFilled)
 		{
 			LogTab.fill('History', curHist);
 			logFilled = true;

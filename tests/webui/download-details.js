@@ -103,6 +103,8 @@ const { installDetailsFixture } = require('./details-fixture');
           await page.waitForFunction(() => document.getElementById('DownloadsEditDialog').classList.contains('is-saving'));
           await page.locator('#DownloadsEdit_Fleet a.fleet-member[data-fleet-id="43"]').dispatchEvent('click');
           assert.match(await page.locator('#DownloadsEdit_Title').innerText(), /copy 02/, 'No switch while saving');
+          await page.locator('.modal-backdrop').last().dispatchEvent('click');
+          assert(await panel.isVisible(), 'A click beside the panel does not interrupt a save');
         } finally {
           fixture.holdMutation = undefined;
           if (release) release();
@@ -111,6 +113,15 @@ const { installDetailsFixture } = require('./details-fixture');
         assert(writes.every(w => w.method !== 'editqueue' || w.params[2][0] === 42), 'Every edit went to the copy being saved');
         await page.locator('#DownloadsTable tbody a[data-nzbid="42"]').first().click();
         await panel.waitFor({ state: 'visible' });
+      });
+
+      await check('log for a copy with nothing logged yet', async () => {
+        assert(await page.locator('#DownloadsEdit_Log').isVisible(), 'Every download offers its log');
+        await page.locator('#DownloadsEdit_Log').click();
+        await page.locator('#DownloadsEdit_LogTab').waitFor({ state: 'visible' });
+        await page.locator('#DownloadsEdit_LogEmpty').waitFor({ state: 'visible' });
+        await page.locator('#DownloadsEdit_Back').click();
+        await page.locator('#DownloadsEdit_GeneralTab').waitFor({ state: 'visible' });
       });
 
       await check('save still edits the shown copy', async () => {
@@ -137,6 +148,36 @@ const { installDetailsFixture } = require('./details-fixture');
         }
         await page.keyboard.press('Escape');
         await page.locator('#HistoryEditDialog').waitFor({ state: 'hidden' });
+        assert.equal(await page.evaluate(() => Refresher.isPaused()), false, 'Closing resumes list updates');
+      });
+
+      await check('downloading copy log', async () => {
+        await page.locator('#DownloadsTable tbody a[data-nzbid="41"]').first().click();
+        await panel.waitFor({ state: 'visible' });
+        await page.locator('#DownloadsEdit_Log').click();
+        await page.locator('#DownloadsEdit_LogTab').waitFor({ state: 'visible' });
+        await page.waitForFunction(() => /borrowed from twin copy 02/.test(document.getElementById('DownloadsEdit_LogTable').textContent));
+        assert.equal(await page.locator('#DownloadsEdit_LogEmpty').isVisible(), false);
+        await page.keyboard.press('Escape');
+        await panel.waitFor({ state: 'hidden' });
+      });
+
+      await check('history log and click beside the panel closes it', async () => {
+        const history = page.locator('#HistoryEditDialog');
+        await page.locator('#HistoryTabLink').click();
+        await page.locator('#HistoryTable tbody a[data-nzbid="32"]').first().click();
+        await history.waitFor({ state: 'visible' });
+        assert(await page.locator('#HistoryEdit_Log').isVisible(), 'A finished download offers its log even with MessageCount 0');
+        await page.locator('#HistoryEdit_Log').click();
+        await page.locator('#HistoryEdit_LogTab').waitFor({ state: 'visible' });
+        await page.waitForFunction(() => /Unpack for Example\.Completed\.Release successful/.test(document.getElementById('HistoryEdit_LogTable').textContent));
+        assert.equal(await page.locator('#HistoryEdit_LogEmpty').isVisible(), false);
+        if (width < 768) {
+          await page.keyboard.press('Escape');
+        } else {
+          await page.mouse.click(12, Math.round(height / 2));
+        }
+        await history.waitFor({ state: 'hidden' });
         assert.equal(await page.evaluate(() => Refresher.isPaused()), false, 'Closing resumes list updates');
       });
 

@@ -54,7 +54,7 @@ function fleetGroups() {
       Parameters: params({ '*Unpack:': 'yes', DupeFiles: PRINT, DupeCopyKind: 'twin', DupeHealth: '97', DupeFleet: '1' })
     }),
     group(42, '02', {
-      Status: 'PAUSED', ...sizes('PausedSize', 1730), Health: 994,
+      Status: 'PAUSED', ...sizes('PausedSize', 1730), Health: 994, MessageCount: 0, // nothing logged yet
       Parameters: params({ '*Unpack:': 'yes', DupeFiles: PRINT, DupeKind: 'twin', DupeCopyKind: 'twin', DupeHealth: '99.4', DupeFleet: '2' })
     }),
     group(43, '03', {
@@ -84,7 +84,8 @@ function historyItems() {
   const done = group(32, '', {
     NZBName: 'Example.Completed.Release', NZBNicename: 'Example.Completed.Release', Category: 'Movies', DupeKey: '',
     Status: 'SUCCESS/ALL', ParStatus: 'SUCCESS', UnpackStatus: 'SUCCESS', ...sizes('RemainingSize', 0), RemainingFileCount: 0,
-    SuccessArticles: 2466, Parameters: params({ '*Unpack:': 'yes' }), DestDir: '/mnt/20tb/rustyget/dst/Movies/Example.Completed.Release'
+    SuccessArticles: 2466, MessageCount: 0, // history items can report 0 yet still have a log
+    Parameters: params({ '*Unpack:': 'yes' }), DestDir: '/mnt/20tb/rustyget/dst/Movies/Example.Completed.Release'
   });
   return [failed, done].map((h, i) => Object.assign(h, { ID: h.NZBID, Name: h.NZBName, HistoryTime: now - 600 * (i + 1), RetryData: false }));
 }
@@ -153,6 +154,14 @@ const SYSINFO = {
     ['md-5', '0.11.0'], ['libc', '0.2.190'], ['openssl', '0.10.82'], ['OpenSSL', '3.5.4']].map(([Name, Version]) => ({ Name, Version }))
 };
 
+// Per-download log messages that `loadlog` answers with, by NZBID.
+const NZB_LOGS = {
+  41: [['INFO', 'Downloading copy 01'], ['WARNING', 'Article 1544 missing on Primary provider, borrowed from twin copy 02']],
+  31: [['INFO', 'Collection copy 01 downloaded'], ['ERROR', 'PAR: FAILURE, 74 blocks short']],
+  32: [['INFO', 'Collection Example.Completed.Release downloaded'], ['INFO', 'Unpack for Example.Completed.Release successful'],
+    ['INFO', 'Moved Example.Completed.Release to /mnt/20tb/rustyget/dst/Movies']]
+};
+
 // Route every request of `page` to committed files and synthetic RPC replies.
 async function installDetailsFixture(page, base, writes = [], hooks = {}) {
   const { template, options } = configOptions();
@@ -178,6 +187,10 @@ async function installDetailsFixture(page, base, writes = [], hooks = {}) {
         writes.push({ method: rpc.method, params: rpc.params });
         if (hooks.holdMutation) await hooks.holdMutation(rpc);
         return route.fulfill({ contentType: 'application/json', json: { id: rpc.id, result: true } });
+      }
+      if (rpc.method === 'loadlog') {
+        const id = +(rpc.params ? rpc.params[0] : url.searchParams.get(''));
+        replies.loadlog = (NZB_LOGS[id] || []).map((m, i) => ({ ID: i + 1, Kind: m[0], Time: Math.floor(Date.now() / 1000) - 600 + i, Text: m[1] }));
       }
       if (rpc.method === 'systemstats') {
         const range = +(rpc.params ? rpc.params[0] : new URL(request.url()).searchParams.get('')) || 3600;

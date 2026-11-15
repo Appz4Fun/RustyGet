@@ -4763,6 +4763,10 @@
   "tls_cipher_unchanged": {
     "message": "Unchanged"
   },
+  "details_log_empty": {
+    "message": "No log messages for this download yet.",
+    "description": "Details panel Log page: shown when the download has no log messages."
+  },
   "details_files": {
     "message": "Files",
     "description": "Details panel tile: number of files in the download."

@@ -2505,9 +2505,9 @@ impl NzbgetRsQueueCoordinator {
                 source: std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     format!(
-                        "{} has {} separate damaged stretches (live repair takes up to 4096 per file); it is repaired after the download",
+                        "{} arrived in {} separate pieces between its missing articles (live repair takes up to 4096 per file); it is repaired after the download",
                         String::from_utf8_lossy(filename),
-                        count.saturating_sub(1)
+                        count
                     ),
                 ),
             });

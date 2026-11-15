@@ -76,7 +76,19 @@ struct LogInner {
     last_written: i64,
     opt_init: bool,
     extra_debug: bool,
+    /// the day (in days since the epoch) and size of what LogFile holds, learned on the first
+    /// write; a LogFile that is a device (/dev/stdout) is never renamed
+    file_day: Option<i64>,
+    file_size: u64,
+    device: bool,
 }
+
+/// LogFile is moved aside to `<stem>-YYYY-MM-DD.<n><ext>` once it reaches this size,
+/// or when its day ends, and a new LogFile is started.
+#[cfg(not(test))]
+pub const LOG_PART_SIZE: u64 = 10 * 1024 * 1024;
+#[cfg(test)]
+pub const LOG_PART_SIZE: u64 = 4096;
 
 impl LogInner {
     fn add_message(&mut self, kind: i32, text: &[u8], log_buffer: Option<i32>) {
@@ -88,8 +100,9 @@ impl LogInner {
             text: cstring_lossless(text),
         });
         if self.opt_init {
-            if let Some(cap) = log_buffer {
-                let max_len = (cap as u32) as usize;
+            // LogBuffer 0 keeps every message
+            if let Some(cap) = log_buffer.filter(|&cap| cap > 0) {
+                let max_len = cap as usize;
                 while self.messages.len() > max_len {
                     self.messages.pop_front();
                 }
@@ -123,6 +136,9 @@ impl NzbgetRsLog {
                 last_written: 0,
                 opt_init: false,
                 extra_debug,
+                file_day: None,
+                file_size: 0,
+                device: false,
             }),
             path: Mutex::new(c"".to_owned()),
             debuggables: Mutex::new(Vec::new()),
@@ -277,7 +293,7 @@ fn filelog_locked(
     debug_build: bool,
     options: Option<&NzbgetRsOptions>,
 ) {
-    let mut log_filename = match path_mtx.lock() {
+    let log_filename = match path_mtx.lock() {
         Ok(g) => g.clone(),
         Err(_) => return,
     };
@@ -299,27 +315,23 @@ fn filelog_locked(
         .position(|&b| b == 0)
         .unwrap_or(time_buf.len());
 
-    if crate::util::log_should_rotate(rawtime, inner.last_written, write_log) {
-        inner.log_file = None;
-        let rot_time = current_unix_time() + time_corr;
-        let opt_log = options.map_or(&[][..], |o| o.str_bytes(27));
-        let rotated = crate::systemhealth::log_rotate_log_file(
-            opt_log,
-            crate::paths::PATH_SEPARATOR as u8,
-            rot_time,
-            rotate_log,
-            |info_msg| {
-                inner.add_message(0, info_msg, log_buffer);
-            },
-        );
-        let new_cstr = cstring_lossless(&rotated);
-        if let Ok(mut pg) = path_mtx.lock() {
-            *pg = new_cstr.clone();
-        }
-        log_filename = new_cstr;
-    }
-
     inner.last_written = rawtime;
+
+    let mut line = Vec::with_capacity(time_len + tmp2.len() + 48);
+    line.extend_from_slice(&time_buf[..time_len]);
+    line.push(b'\t');
+    if debug_build {
+        let pid = unsafe { libc::getpid() as u64 };
+        let tid = unsafe { libc::pthread_self() as usize as u64 };
+        use std::io::Write as _;
+        let _ = write!(line, "{pid}\t{tid}\t");
+    }
+    line.extend_from_slice(&tmp2);
+    line.push(b'\n');
+
+    if write_log == 3 {
+        rotate_if_due(inner, &log_filename, rawtime, time_corr, line.len() as u64, rotate_log, log_buffer);
+    }
 
     if inner.log_file.is_none() {
         match LogFileGuard::open_append(&log_filename) {
@@ -350,25 +362,79 @@ fn filelog_locked(
         return;
     };
     let fp = guard.0;
-    unsafe {
+    let size = unsafe {
         let _ = libc::fseek(fp, 0, libc::SEEK_END);
-    }
+        libc::ftell(fp)
+    };
 
-    let mut line = Vec::with_capacity(time_len + tmp2.len() + 48);
-    line.extend_from_slice(&time_buf[..time_len]);
-    line.push(b'\t');
-    if debug_build {
-        let pid = unsafe { libc::getpid() as u64 };
-        let tid = unsafe { libc::pthread_self() as usize as u64 };
-        use std::io::Write as _;
-        let _ = write!(line, "{pid}\t{tid}\t");
-    }
-    line.extend_from_slice(&tmp2);
-    line.push(b'\n');
-
-    unsafe {
-        let _ = libc::fwrite(line.as_ptr().cast(), 1, line.len(), fp);
+    let written = unsafe {
+        let n = libc::fwrite(line.as_ptr().cast(), 1, line.len(), fp);
         let _ = libc::fflush(fp);
+        n
+    };
+    inner.file_size = size.max(0) as u64 + written as u64;
+}
+
+/// Moves LogFile aside to `<stem>-<its day>.<n><ext>` when its day has ended or the next
+/// line would take it past `LOG_PART_SIZE`, deleting day files older than `keep_days`.
+fn rotate_if_due(
+    inner: &mut LogInner,
+    log_filename: &CStr,
+    rawtime: i64,
+    time_corr: i64,
+    line_len: u64,
+    keep_days: i32,
+    log_buffer: Option<i32>,
+) {
+    use std::os::unix::ffi::OsStrExt as _;
+    let path = log_filename.to_bytes();
+    let os_path = std::path::Path::new(std::ffi::OsStr::from_bytes(path));
+    let today = rawtime.div_euclid(86_400);
+    let sep = crate::paths::PATH_SEPARATOR as u8;
+    if inner.file_day.is_none() {
+        // the first write: learn what an existing LogFile holds and clear out old days
+        match std::fs::metadata(os_path) {
+            Ok(m) if !m.is_file() => inner.device = true,
+            Ok(m) if m.len() > 0 => {
+                let mtime = m
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(rawtime, |d| d.as_secs() as i64 + time_corr);
+                inner.file_day = Some(mtime.div_euclid(86_400));
+                inner.file_size = m.len();
+            }
+            _ => inner.file_size = 0,
+        }
+        inner.file_day.get_or_insert(today);
+        if !inner.device {
+            let _ = crate::systemhealth::log_rotate_log_file(path, sep, rawtime, keep_days, |msg| {
+                inner.add_message(0, msg, log_buffer)
+            });
+        }
+    }
+    let day = inner.file_day.unwrap_or(today);
+    if inner.device || inner.file_size == 0 || (day == today && inner.file_size + line_len <= LOG_PART_SIZE) {
+        return;
+    }
+    inner.log_file = None;
+    let day_path = crate::systemhealth::log_rotated_day_path(path, sep, day * 86_400);
+    let mut part = 1;
+    while std::fs::symlink_metadata(std::ffi::OsStr::from_bytes(&crate::systemhealth::log_part_path(&day_path, part))).is_ok() {
+        part += 1;
+    }
+    let target = crate::systemhealth::log_part_path(&day_path, part);
+    if std::fs::rename(os_path, std::ffi::OsStr::from_bytes(&target)).is_err() {
+        // could not move it aside: keep writing where we are rather than losing lines
+        inner.file_day = Some(today);
+        return;
+    }
+    inner.file_size = 0;
+    inner.file_day = Some(today);
+    if day != today {
+        let _ = crate::systemhealth::log_rotate_log_file(path, sep, rawtime, keep_days, |msg| {
+            inner.add_message(0, msg, log_buffer)
+        });
     }
 }
 
@@ -755,6 +821,7 @@ pub(crate) unsafe fn nzbget_rs_log_collect(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::FileTypeExt as _;
     use crate::options::{nzbget_rs_options_free, nzbget_rs_options_new, NzbgetRsParsedOptions};
 
     #[test]
@@ -780,7 +847,7 @@ mod tests {
         let log_opt = CString::new(format!("LogFile={}", log_path.to_str().unwrap())).unwrap();
         let cmd_opts = [
             log_opt.as_ptr(),
-            c"WriteLog=reset".as_ptr(),
+            c"LogToFile=yes".as_ptr(),
             c"InfoTarget=both".as_ptr(),
             c"DetailTarget=log".as_ptr(),
             c"ErrorTarget=both".as_ptr(),
@@ -810,8 +877,9 @@ mod tests {
             nzbget_rs_log_ctl(log, 1, 1, 0, opts, ptr::null(), None);
         }
 
+        // LogFile itself is written: the old line is kept and new ones follow it
         let disk_text = std::fs::read_to_string(&log_path).unwrap();
-        assert!(!disk_text.contains("stale line"));
+        assert!(disk_text.starts_with("stale line\n"));
         assert!(disk_text.contains("INFO\tstartup info\n"));
         assert!(disk_text.contains("DETAIL\tstartup detail\n"));
         assert!(disk_text.contains("ERROR\tstartup err\n"));
@@ -878,5 +946,118 @@ mod tests {
             nzbget_rs_options_free(opts);
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_full_log_continues_in_numbered_parts_and_log_buffer_zero_keeps_all() {
+        let dir = std::env::temp_dir().join(format!(
+            "rustyget_log_parts_{}_{}",
+            std::process::id(),
+            current_unix_time()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let log_path = dir.join("rustyget.log");
+        let log_opt = CString::new(format!("LogFile={}", log_path.to_str().unwrap())).unwrap();
+        let cmd_opts = [
+            log_opt.as_ptr(),
+            c"LogToFile=yes".as_ptr(),
+            c"InfoTarget=both".as_ptr(),
+            c"LogBuffer=0".as_ptr(),
+        ];
+        let mut scalars = NzbgetRsParsedOptions::default();
+        let mut flags = 0;
+        let log = nzbget_rs_log_new(0);
+        let opts = unsafe {
+            nzbget_rs_options_new(
+                c"rustyget".as_ptr(),
+                ptr::null(),
+                1,
+                1,
+                cmd_opts.as_ptr(),
+                cmd_opts.len(),
+                0,
+                c"1.0".as_ptr(),
+                ptr::null_mut(),
+                None,
+                &mut scalars,
+                &mut flags,
+            )
+        };
+        let line = CString::new("x".repeat(200)).unwrap();
+        unsafe {
+            nzbget_rs_log_ctl(log, 1, 1, 0, opts, ptr::null(), None);
+            for _ in 0..60 {
+                nzbget_rs_log_emit(log, 0, opts, line.as_ptr());
+            }
+        }
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.file_name().to_str().unwrap().to_owned()))
+            .collect();
+        names.sort();
+        // 60 lines of ~230 bytes is ~14KB: LogFile plus parts .1 to .3 of today, 4KB each
+        assert_eq!(names.len(), 4, "{names:?}");
+        assert!(names.contains(&"rustyget.log".to_owned()), "LogFile is still the one written: {names:?}");
+        let part1 = names.iter().find(|n| n.ends_with(".1.log")).expect("a first part").clone();
+        assert!(part1.starts_with("rustyget-") && part1.len() == "rustyget-2026-11-15.1.log".len(), "{part1}");
+        let stem = &part1[..part1.len() - 6];
+        for part in 2..=3 {
+            assert!(names.contains(&format!("{stem}.{part}.log")), "{names:?}");
+        }
+        // the newest lines are in LogFile, the oldest in part 1
+        let first = std::fs::read_to_string(dir.join(&part1)).unwrap();
+        assert!(first.lines().count() > 0);
+        let mut total = 0;
+        for name in &names {
+            let len = std::fs::metadata(dir.join(name)).unwrap().len();
+            assert!(len <= LOG_PART_SIZE, "{name} is {len} bytes");
+            total += std::fs::read_to_string(dir.join(name)).unwrap().lines().count();
+        }
+        assert_eq!(total, 60, "every line is written once");
+
+        let mut screen: Vec<(u32, i32, String)> = Vec::new();
+        unsafe extern "C" fn collect(ctx: *mut c_void, id: u32, kind: c_int, _time: i64, text: *const c_char) {
+            let v = &mut *(ctx as *mut Vec<(u32, i32, String)>);
+            v.push((id, kind, CStr::from_ptr(text).to_str().unwrap().to_owned()));
+        }
+        unsafe {
+            nzbget_rs_log_collect(
+                0,
+                log,
+                1,
+                0,
+                0,
+                ptr::null_mut(),
+                (&mut screen as *mut Vec<_>).cast(),
+                collect as *const () as usize,
+                0,
+            );
+            nzbget_rs_log_free(log);
+            nzbget_rs_options_free(opts);
+        }
+        assert_eq!(screen.len(), 60, "LogBuffer 0 keeps every message");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_device_log_file_is_written_as_is_and_never_renamed() {
+        let mut inner = LogInner {
+            messages: VecDeque::new(),
+            log_file: None,
+            id_gen: 0,
+            last_written: 0,
+            opt_init: false,
+            extra_debug: false,
+            file_day: None,
+            file_size: 0,
+            device: false,
+        };
+        let now = current_unix_time();
+        rotate_if_due(&mut inner, c"/dev/null", now, 0, 10, 7, None);
+        assert!(inner.device, "/dev/null is a device");
+        inner.file_size = LOG_PART_SIZE * 2;
+        inner.file_day = Some(now / 86_400 - 3);
+        rotate_if_due(&mut inner, c"/dev/null", now, 0, 10, 7, None);
+        assert!(std::fs::metadata("/dev/null").unwrap().file_type().is_char_device());
     }
 }

@@ -229,6 +229,12 @@ var Options = (new function($)
 		}
 		values.forEach(function(v)
 		{
+			// WriteLog (none, append, reset, rotate) became the LogToFile switch
+			if (/^WriteLog$/i.test(v.Name) && !names.logtofile)
+			{
+				v.Name = 'LogToFile';
+				v.Value = expand(v.Value, 0).trim().toLowerCase() === 'none' ? 'no' : 'yes';
+			}
 			var m = /^Server([0-9]+)\.Level$/i.exec(v.Name);
 			if (m && !names[('Server' + m[1] + '.Priority').toLowerCase()])
 			{
@@ -612,7 +618,7 @@ var Config = (new function($)
 		MainDir: 'Main folder', DestDir: 'Completed downloads folder', InterDir: 'Intermediate folder',
 		NzbDir: 'Watch folder for NZB files', QueueDir: 'Queue folder', TempDir: 'Temporary folder',
 		ScriptDir: 'Extensions folder', LogFile: 'Log file', ConfigTemplate: 'Configuration template',
-		ControlIP: 'Listen address', ControlPort: 'Port', SecureControl: 'Use HTTPS',
+		ControlIP: 'Listen address', ControlPort: 'Port', SecureControl: 'Use HTTPS', LogToFile: 'Write a log file',
 		SecureCert: 'HTTPS certificate', SecureKey: 'HTTPS private key',
 		CertCheck: 'Check news server certificates', CertStore: 'CA certificates',
 		ControlUsername: 'Username', ControlPassword: 'Password', SevenZipCmd: '7-Zip command',
@@ -1636,7 +1642,8 @@ var Config = (new function($)
 			{ key: 'system', title: 'System', options: ['DaemonUsername', 'UMask', 'JsonP', 'CertCheck', 'CertStore'] }
 		],
 		LOGGING: [
-			{ key: 'file', title: 'Log file', options: ['WriteLog', 'RotateLog', 'NzbLog', 'LogBuffer', 'SystemHealthCheck'] },
+			{ key: 'file', title: 'Log file', options: ['LogToFile', 'LogBuffer', 'SystemHealthCheck'],
+				text: 'Moved aside every 10 MB and at the end of each day, named by day and number, and kept 7 days. Messages of each download are written here too.' },
 			{ key: 'levels', title: 'Message levels', options: ['ErrorTarget', 'WarningTarget', 'InfoTarget', 'DetailTarget', 'DebugTarget'] },
 			{ key: 'debug', title: 'Troubleshooting', options: [], advanced: ['CrashTrace', 'CrashDump', 'TimeCorrection'] }
 		]
@@ -2015,8 +2022,7 @@ var Config = (new function($)
 			'SecureControl',
 			'SecureCert',
 			'SecureKey',
-			'WriteLog',
-			'RotateLog',
+			'LogToFile',
 			'LogBuffer',
 			'ErrorTarget',
 			'WarningTarget',
@@ -2319,6 +2325,7 @@ var Config = (new function($)
 			[30, 'Short', 'Gives up on long repairs; the download is marked as failed.'],
 			[120, 'Long', 'Allows big repairs to finish.']] },
 		LogBuffer: { min: 0, max: 100000, scale: 'sqrt', presets: [
+			[0, 'Unlimited', 'Keeps every message until RustyGet restarts; memory use grows with it.'],
 			[100, 'Small', 'The Messages tab shows only recent lines.'],
 			[1000, 'Normal', ''],
 			[20000, 'Large', 'Keeps more history in memory.']] },
@@ -3089,7 +3096,6 @@ var Config = (new function($)
 		{ option: 'DupeBorrowFirst', when: { name: 'DupeArticleFallback', values: ['article', 'stream', 'live', 'yes'] } },
 		{ option: 'DupeStreamDecompress', when: { name: 'DupeArticleFallback', values: ['stream', 'live'] } },
 		{ option: 'DupeStreamTimeout', when: { name: 'DupeArticleFallback', values: ['stream', 'live'] } },
-		{ option: 'RotateLog', when: { name: 'WriteLog', values: ['rotate'] } },
 		{ option: 'HardLinkingIgnoreExt', when: { name: 'HardLinking', values: ['yes'] } },
 		{ option: 'FlushQueue', when: { name: 'DirectWrite', values: ['no'] },
 			text: ['config_requires_flush', 'Always on while "Write directly to the final file" is on: the queue file is how a download resumes.'] },

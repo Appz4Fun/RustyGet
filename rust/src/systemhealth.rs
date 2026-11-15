@@ -840,8 +840,9 @@ pub fn validate_logging_section(
         validate_rotate_log(write_log, rotate_log),
     );
 
+    // LogBuffer 0 keeps every message
     let buf_status = check_positive_num(b"LogBuffer", log_buffer).and_then(|| {
-        if log_buffer < 100 {
+        if log_buffer > 0 && log_buffer < 100 {
             HealthStatus::info(
                 "'LogBuffer' is very low. You might miss recent messages in the web UI",
             )
@@ -2075,15 +2076,6 @@ pub fn maintenance_format_sig_title(base_name: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Formats `"<base_name>-####-##-##<base_ext>"` for `Log::RotateLog`.
-pub fn log_format_rotate_mask(base_name: &[u8], base_ext: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(base_name.len() + 11 + base_ext.len());
-    out.extend_from_slice(base_name);
-    out.extend_from_slice(b"-####-##-##");
-    out.extend_from_slice(base_ext);
-    out
-}
-
 /// Formats `"Deleting old log-file <filename>\n"` for `Log::RotateLog`.
 pub fn log_format_deleting_old_msg(filename: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(22 + filename.len() + 1);
@@ -2191,9 +2183,50 @@ pub fn log_format_rotated_path_for_time(
     )
 }
 
-/// Executes `Log::RotateLog`: scans the log directory for rotated log files matching
-/// `<stem>-####-##-##<ext>`, deletes expired files while emitting `"Deleting old log-file <name>\n"`
-/// via `on_info`, and returns the rotated log path for `cur_time`.
+/// Matches a day log `<stem>-YYYY-MM-DD<ext>` or one of its 10MB parts
+/// `<stem>-YYYY-MM-DD.<n><ext>`, returning the offsets of the year, month and day.
+pub fn log_rotated_file_date(filename: &[u8], stem: &[u8], ext: &[u8]) -> Option<(usize, usize, usize)> {
+    let rest = filename.strip_prefix(stem)?.strip_prefix(b"-")?;
+    let at = stem.len() + 1;
+    let date = rest.get(..10)?;
+    let digits = |r: std::ops::Range<usize>| date[r].iter().all(u8::is_ascii_digit);
+    if !(digits(0..4) && date[4] == b'-' && digits(5..7) && date[7] == b'-' && digits(8..10)) {
+        return None;
+    }
+    let tail = &rest[10..];
+    let tail = tail.strip_suffix(ext)?;
+    let part_ok = tail.is_empty()
+        || (tail.len() > 1 && tail[0] == b'.' && tail[1..].iter().all(u8::is_ascii_digit));
+    part_ok.then_some((at, at + 5, at + 8))
+}
+
+/// The day name for `log_file` at `day_time`: `/var/log/rustyget.log` becomes
+/// `/var/log/rustyget-2026-03-10.log`.
+pub fn log_rotated_day_path(log_file: &[u8], sep: u8, day_time: i64) -> Vec<u8> {
+    let pos = crate::paths::base_file_name(log_file);
+    let (stem, ext) = log_split_basename_and_ext(&log_file[pos..]);
+    let directory: &[u8] = if pos > 0 { &log_file[..pos - 1] } else { b"." };
+    log_format_rotated_path_for_time(directory, sep, &stem, day_time, &ext)
+}
+
+/// The path of part `part` of a day log: `rustyget-2026-03-10.log` becomes
+/// `rustyget-2026-03-10.<part>.log` (part 0 is the day log itself).
+pub fn log_part_path(day_path: &[u8], part: u32) -> Vec<u8> {
+    if part == 0 {
+        return day_path.to_vec();
+    }
+    let pos = crate::paths::base_file_name(day_path);
+    let (stem, ext) = log_split_basename_and_ext(&day_path[pos..]);
+    let mut out = day_path[..pos].to_vec();
+    out.extend_from_slice(&stem);
+    out.extend_from_slice(format!(".{part}").as_bytes());
+    out.extend_from_slice(&ext);
+    out
+}
+
+/// Executes `Log::RotateLog`: scans the log directory for day logs and their parts
+/// (`<stem>-####-##-##[.<n>]<ext>`), deletes those older than `rotate_log` days while emitting
+/// `"Deleting old log-file <name>\n"` via `on_info`, and returns the day log path for `cur_time`.
 #[cfg(unix)]
 pub fn log_rotate_log_file(
     log_file: &[u8],
@@ -2206,9 +2239,6 @@ pub fn log_rotate_log_file(
     let raw_base = &log_file[pos..];
     let (stem, base_ext) = log_split_basename_and_ext(raw_base);
     let directory: &[u8] = if pos > 0 { &log_file[..pos - 1] } else { &stem };
-    let file_mask = log_format_rotate_mask(&stem, &base_ext);
-    let lower = crate::wildmask::Lower::Fold(&crate::util::wild_mask_fold_locale);
-    let mut captures = Vec::new();
     let dir_cstr = std::ffi::CString::new(directory).ok();
     let mut dir = crate::fsops::PosixDirBrowser::new(dir_cstr.as_deref(), true);
     loop {
@@ -2217,15 +2247,11 @@ pub fn log_rotate_log_file(
             break;
         }
         let filename = unsafe { std::ffi::CStr::from_ptr(ptr).to_bytes() };
-        captures.clear();
-        if crate::wildmask::wild_match(&lower, &file_mask, filename, Some(&mut captures)) {
-            let full_filename = [directory, &[sep], filename].concat();
-            let m0 = captures.first().map_or(0, |&(s, _)| s.max(0) as usize);
-            let m1 = captures.get(1).map_or(0, |&(s, _)| s.max(0) as usize);
-            let m2 = captures.get(2).map_or(0, |&(s, _)| s.max(0) as usize);
+        if let Some((m0, m1, m2)) = log_rotated_file_date(filename, &stem, &base_ext) {
             if log_should_delete_rotated_file_by_name(filename, m0, m1, m2, cur_time, rotate_log) {
                 let msg = log_format_deleting_old_msg(filename);
                 on_info(&msg);
+                let full_filename = [directory, &[sep], filename].concat();
                 if let Ok(full_cstr) = std::ffi::CString::new(full_filename) {
                     let _ = crate::fsops::delete_file(&full_cstr);
                 }
@@ -4615,6 +4641,17 @@ mod tests {
         let path =
             log_format_rotated_path_for_time(b"/var/log", b'/', b"rustyget", cur_time, b".log");
         assert_eq!(path, b"/var/log/rustyget-2026-03-10.log");
+        assert_eq!(log_part_path(&path, 0), path);
+        assert_eq!(log_part_path(&path, 3), b"/var/log/rustyget-2026-03-10.3.log");
+        assert_eq!(log_part_path(b"/var/log/rustyget-2026-03-10", 1), b"/var/log/rustyget-2026-03-10.1");
+        assert_eq!(
+            log_rotated_file_date(b"rustyget-2026-03-05.12.log", b"rustyget", b".log"),
+            Some((9, 14, 17))
+        );
+        assert_eq!(log_rotated_file_date(b"rustyget-2026-03-05.log", b"rustyget", b".log"), Some((9, 14, 17)));
+        assert_eq!(log_rotated_file_date(b"rustyget-2026-03-05..log", b"rustyget", b".log"), None);
+        assert_eq!(log_rotated_file_date(b"rustyget-2026-3-05.log", b"rustyget", b".log"), None);
+        assert_eq!(log_rotated_file_date(b"other-2026-03-05.log", b"rustyget", b".log"), None);
 
         // rustyget-2026-03-05.log -> 5 days older than 2026-03-10
         let fname = b"rustyget-2026-03-05.log";
@@ -4630,9 +4667,15 @@ mod tests {
             use std::os::unix::ffi::OsStrExt;
             let tmp = TempDir::new("log_rotate");
             let old_log = tmp.path.join("rustyget-2026-03-05.log");
+            let old_part = tmp.path.join("rustyget-2026-03-05.2.log");
             let recent_log = tmp.path.join("rustyget-2026-03-09.log");
+            let recent_part = tmp.path.join("rustyget-2026-03-09.1.log");
+            let other = tmp.path.join("rustyget-2026-03-05.old.log");
             std::fs::write(&old_log, b"old").unwrap();
+            std::fs::write(&old_part, b"old").unwrap();
             std::fs::write(&recent_log, b"recent").unwrap();
+            std::fs::write(&recent_part, b"recent").unwrap();
+            std::fs::write(&other, b"other").unwrap();
             let base_log = tmp.path.join("rustyget.log");
             let mut info_msgs = Vec::new();
             let rotated =
@@ -4647,10 +4690,17 @@ mod tests {
                     .as_bytes()
             );
             assert!(!old_log.exists());
+            assert!(!old_part.exists(), "an old 10MB part goes with its day");
             assert!(recent_log.exists());
+            assert!(recent_part.exists());
+            assert!(other.exists(), "a file that is not a log part is left alone");
+            info_msgs.sort();
             assert_eq!(
                 info_msgs,
-                vec![b"Deleting old log-file rustyget-2026-03-05.log\n".to_vec()]
+                vec![
+                    b"Deleting old log-file rustyget-2026-03-05.2.log\n".to_vec(),
+                    b"Deleting old log-file rustyget-2026-03-05.log\n".to_vec()
+                ]
             );
         }
     }

@@ -2296,7 +2296,8 @@ public:
 		m_unpackTried = false;
 		m_lastUnpackStatus = 0;
 		m_extractedArchives.clear();
-		ClearMessages();
+		// messages stay: there are no NZB log files, so a finished download's Log tab
+		// shows what is kept here (LogBuffer bounds it)
 	}
 	bool IsDupeSuccess()
 	{
@@ -2878,13 +2879,10 @@ inline void NzbInfo::AddMessage(Message::EKind kind, const char * text, bool pri
 
 	m_messages.emplace_back(++m_idMessageGen, kind, Util::CurrentTime(), text);
 
-	if (g_Options->GetServerMode() && g_Options->GetNzbLog())
-	{
-		nzbget_rs_diskstate_op(2, (uintptr_t)m_id, (int)kind, text);
-		m_messageCount.fetch_add(1, std::memory_order_relaxed);
-	}
-
-	while (m_messages.size() > (uint32)g_Options->GetLogBuffer())
+	// NZB messages go to the main log (above); there are no separate NZB log files,
+	// so the details Log tab shows the messages kept here (MessageCount falls back to them)
+	// LogBuffer 0 keeps every message
+	while (g_Options->GetLogBuffer() > 0 && m_messages.size() > (uint32)g_Options->GetLogBuffer())
 	{
 		m_messages.pop_front();
 	}

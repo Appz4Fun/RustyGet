@@ -5926,7 +5926,7 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                         return 0;
                     };
                     let cached_msgs = qh.with_locked_queue(|dq_ptr| {
-                        let np = qh.queue_find_by_id(dq_ptr, a2);
+                        let np = qh.nzb_find_in_queue_or_history(dq_ptr, a2);
                         if np == 0 {
                             Vec::new()
                         } else {
@@ -5969,12 +5969,35 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                     );
                     return 1;
                 }
+                // a download logged before NZB log files were dropped: its old file comes
+                // first, then the messages kept since, numbered after the file's last one
+                let mut disk_msgs = disk_msgs;
+                if let Some(qh) = queue_host() {
+                    let last_time = disk_msgs.last().map_or(i32::MIN, |m| m.2);
+                    let offset = disk_msgs.iter().map(|m| m.0).max().unwrap_or(0);
+                    let cached_msgs = qh.with_locked_queue(|dq_ptr| {
+                        let np = qh.nzb_find_in_queue_or_history(dq_ptr, a2);
+                        if np == 0 {
+                            Vec::new()
+                        } else {
+                            qh.nzb_cached_messages_slice(np, 0, i32::MAX)
+                        }
+                    });
+                    disk_msgs.extend(
+                        cached_msgs
+                            .into_iter()
+                            .filter(|m| m.2 > last_time)
+                            .map(|(id, kind, time, text)| (offset.saturating_add(id), kind, time, text)),
+                    );
+                }
                 let mut start = disk_msgs.len() as i32;
                 if a4 > 0 {
                     start = disk_msgs.len() as i32 - a4.min(disk_msgs.len() as i32);
                 }
                 if a3 > 0 {
-                    start = (a3 - disk_msgs[0].0).max(0);
+                    // ids skip a gap where the cached messages begin, so find the first
+                    // message at or after the asked id instead of using it as an offset
+                    start = disk_msgs.iter().position(|m| m.0 >= a3).unwrap_or(disk_msgs.len()) as i32;
                 }
                 let mut entries = Vec::new();
                 if start >= 0 && (start as usize) < disk_msgs.len() {

@@ -307,7 +307,6 @@ where
     let protected = (feed.set_is_final() && req.overwrite != Overwrite::Rename)
         .then(|| protect_volumes(req.first_volume))
         .flatten();
-    let final_set = protected.is_some();
     let feed = Arc::new(Mutex::new(feed));
     let pending: PendingWait = Arc::new(Mutex::new(None));
     let volume_count = protected
@@ -396,13 +395,10 @@ where
             ProgressiveEvent::MemberStarted { member, name, .. } => {
                 let display = String::from_utf8_lossy(&name).into_owned();
                 log_cb(4, &format!("Unrar: Extracting  {display}"));
-                // zipfast restores metadata on what it publishes itself (a final set); only
-                // copied outputs need it, read once per volume.
-                let meta = if final_set {
-                    MemberMeta::default()
-                } else {
-                    meta_cache.lookup(&current_volume, req.password, &name)
-                };
+                // Needed for outputs copied into place (zipfast restores it on what it publishes
+                // itself; a checksum-less member of a final set is still copied). Each volume's
+                // headers are read once.
+                let meta = meta_cache.lookup(&current_volume, req.password, &name);
                 next_ordinal += 1;
                 let seen = occurrences.entry(name.to_vec()).or_insert(0u32);
                 let occurrence = *seen;

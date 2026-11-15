@@ -1354,3 +1354,30 @@ fn rename_mode_names_follow_archive_order() {
     assert_eq!(std::fs::read(t.out().join("a_1.bin")).unwrap(), two);
     assert_eq!(std::fs::read(t.out().join("a_1_1.bin")).unwrap(), three);
 }
+
+#[cfg(unix)]
+#[test]
+fn checksum_less_member_of_a_complete_set_keeps_its_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = TestDir::new("nocrcmode");
+    let data = pattern(3_000);
+    let mut fields = Vec::new();
+    vint(0x2, &mut fields);
+    vint(data.len() as u64, &mut fields);
+    vint(0o755, &mut fields);
+    fields.extend_from_slice(&1_700_000_000u32.to_le_bytes());
+    vint(0, &mut fields);
+    vint(1, &mut fields);
+    vint(7, &mut fields);
+    fields.extend_from_slice(b"tool.sh");
+    let mut v = SIG.to_vec();
+    v.extend(main_block(false, None));
+    v.extend(block(2, 0, &fields, &data, true));
+    v.extend(end_block(false));
+    let first = t.dl().join("nocrcmode.rar");
+    std::fs::write(&first, &v).unwrap();
+    let (r, log) = run(&first, &t.out(), Box::new(CompleteSet));
+    expect_ok(r, &log);
+    let meta = std::fs::metadata(t.out().join("tool.sh")).unwrap();
+    assert_eq!(meta.permissions().mode() & 0o111, 0o111);
+}

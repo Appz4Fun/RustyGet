@@ -6072,6 +6072,28 @@ def scenario_fleetencryptedlast(daemon, t):
     return ('fleetencryptedlast', ok, 'order=%s chosen=%s kinds=%s' % (order, chosen, kinds))
 
 
+def scenario_fleettwinvolumes(daemon, t):
+    """appendfleet: a twin posted with par2 volumes only (no index file, as
+    MobLand S02E09 copy 11 was) is still a TWIN: its file list is read from
+    its smallest volume. Both twins rank ahead of a healthier borrowable ALT."""
+    daemon.fake_nntp.alive = set()
+    same = _payload(400_000, 7401)
+    api = daemon.wait_ready()
+    vol_only = _fleet_copy(daemon, 'tv', 'd.bin', 400_000, None, same, 36).replace('d.par2', 'd.vol-01.par2')
+    reply = _fleet(daemon, [
+        ('Show.S01E01.store', _fleet_copy(daemon, 'vs', 'b.rar', 410_000, _rar4_head(0x30), _payload(410_000, 7402))),
+        ('Show.S01E01.twinA', _fleet_copy(daemon, 'ta2', 'c.bin', 400_000, None, same, 34)),
+        ('Show.S01E01.twinvol', vol_only)],
+        key='fleet:vol')
+    order = [m['Name'] for m in sorted(reply['Members'], key=lambda m: m['Rank'])]
+    items = {g['NZBName']: g for g in api.listgroups() + api.history() if g.get('DupeKey') == 'fleet:vol'}
+    kinds = {n: {p['Name']: p['Value'] for p in g.get('Parameters', [])}.get('DupeCopyKind')
+             for n, g in items.items()}
+    ok = (set(order[:2]) == {'Show.S01E01.twinA', 'Show.S01E01.twinvol'}
+          and kinds.get('Show.S01E01.twinvol') == 'twin' and kinds.get('Show.S01E01.twinA') == 'twin')
+    return ('fleettwinvolumes', ok, 'order=%s kinds=%s' % (order, kinds))
+
+
 def scenario_fleetkindslowcheck(daemon, t):
     """appendfleet when the health check is slow enough to use the whole
     fleet budget (every sampled data article is slow to answer, as on a busy
@@ -9896,6 +9918,7 @@ SCENARIOS = {
     'fleetkindorder': scenario_fleetkindorder,
     'fleetintake': scenario_fleetintake,
     'fleetencryptedlast': scenario_fleetencryptedlast,
+    'fleettwinvolumes': scenario_fleettwinvolumes,
     'fleetkindslowcheck': scenario_fleetkindslowcheck,
     'watchforcepick': scenario_watchforcepick,
     'watchdeadpick': scenario_watchdeadpick,
@@ -10493,7 +10516,7 @@ SCENARIO_FIRST_FAIL_PROXY = {'recheckfailed': ((b'?5=', b'?10=', b'?15='),),
 # scenarios with a FakeNewznab indexer (DupeSearchUrl points to it)
 
 # scenarios with a FakeNntp news server in place of nserv
-SCENARIO_FAKE_NNTP = {'watchfleet', 'watchforcepick', 'watchdeadpick', 'watchswap', 'watchswaptwin', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetnodupecheck', 'fleetkindorder', 'fleetintake', 'fleetencryptedlast', 'fleetkindslowcheck', 'fleetalldead', 'fleetshutdown'}
+SCENARIO_FAKE_NNTP = {'watchfleet', 'watchforcepick', 'watchdeadpick', 'watchswap', 'watchswaptwin', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetnodupecheck', 'fleetkindorder', 'fleetintake', 'fleetencryptedlast', 'fleetkindslowcheck', 'fleettwinvolumes', 'fleetalldead', 'fleetshutdown'}
 
 
 # --------------------------------------------------------------------------- #

@@ -1305,11 +1305,11 @@ fn probe_copies(
                     let ctx = ctx_addr as *mut c_void;
                     let groups = summary_groups_arc(info);
                     let mut listed = crate::twin::Listed::default();
-                    if !info.par_index.id.is_empty() {
+                    if !info.par_list.id.is_empty() {
                         let art = fetch_article_via_host(
                             ctx,
                             host_cb,
-                            &info.par_index.id,
+                            &info.par_list.id,
                             &groups,
                             deadline,
                         );

@@ -964,8 +964,7 @@ fn record_extracted_path_from_msg(
 
 
 /// RAR sets go through zipfast's progressive session (see `progressive_unpack`).
-/// `overwrite_mode` 2 (auto-rename) extracts into a private directory first and renames on
-/// conflict while moving into place.
+/// `overwrite_mode`: 0 skip, 1 overwrite, 2 auto-rename (each member gets a free name).
 fn extract_rar_progressive<F>(
     archive_path: &std::path::Path,
     output_dir: &std::path::Path,
@@ -981,10 +980,6 @@ where
     use crate::progressive_unpack as pu;
     let RarFeed { feed, failure } = rar;
     let feed = feed.unwrap_or_else(|| Box::new(pu::CompleteSet));
-    let staging = (overwrite_mode == 2).then(|| {
-        output_dir.join(format!(".rustyget-unpack-{}", std::process::id()))
-    });
-    let dest = staging.as_deref().unwrap_or(output_dir);
     let mut volumes = 0u64;
     let mut cb = |kind: i32, msg: &str| {
         if msg.starts_with("Unrar: Extracting from ") {
@@ -994,25 +989,15 @@ where
     };
     let req = pu::Request {
         first_volume: archive_path,
-        dest,
+        dest: output_dir,
         password,
-        overwrite: overwrite_mode != 0,
+        overwrite: match overwrite_mode {
+            0 => pu::Overwrite::Skip,
+            2 => pu::Overwrite::Rename,
+            _ => pu::Overwrite::Always,
+        },
     };
     let result = pu::extract(&req, feed, &mut cb, is_cancelled);
-    let result = match (result, staging) {
-        (Ok(summary), Some(staging)) => {
-            let moved = move_auto_rename(&staging, output_dir);
-            let _ = std::fs::remove_dir_all(&staging);
-            moved
-                .map(|()| summary)
-                .map_err(|e| pu::Error::Failed(pu::Failure::Other(e)))
-        }
-        (r, Some(staging)) => {
-            let _ = std::fs::remove_dir_all(&staging);
-            r
-        }
-        (r, None) => r,
-    };
     match result {
         Ok(mut summary) => {
             summary.volumes = summary.volumes.max(volumes);
@@ -1026,45 +1011,6 @@ where
         }
         Err(e) => Err(e),
     }
-}
-
-/// Moves everything under `from` into `to`, renaming a file whose name is taken.
-fn move_auto_rename(from: &std::path::Path, to: &std::path::Path) -> Result<(), String> {
-    let entries = std::fs::read_dir(from).map_err(|e| e.to_string())?;
-    for entry in entries {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let src = entry.path();
-        let dst = to.join(entry.file_name());
-        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        if is_dir {
-            // Never follow a symlink in the destination out of the output tree.
-            let dst = crate::archive_native::create_dir_all_no_follow(
-                to,
-                std::path::Path::new(&entry.file_name()),
-            )?;
-            move_auto_rename(&src, &dst)?;
-            continue;
-        }
-        if std::fs::symlink_metadata(&dst).is_ok_and(|m| m.file_type().is_symlink()) {
-            return Err(format!("Refusing to write through symlink {}", dst.display()));
-        }
-        let mut target = dst.clone();
-        let mut n = 1u32;
-        while target.exists() {
-            let stem = dst
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let ext = dst
-                .extension()
-                .map(|e| format!(".{}", e.to_string_lossy()))
-                .unwrap_or_default();
-            target = to.join(format!("{stem}_{n}{ext}"));
-            n += 1;
-        }
-        std::fs::rename(&src, &target).map_err(|e| e.to_string())?;
-    }
-    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2444,23 +2390,6 @@ pub fn eval_unpack_completed_failure(
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
-    #[test]
-    fn auto_rename_move_does_not_follow_a_symlinked_directory() {
-        let base = std::env::temp_dir().join(format!("rg-autorename-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        let staging = base.join("staging");
-        let out = base.join("out");
-        let outside = base.join("outside");
-        std::fs::create_dir_all(staging.join("sub")).unwrap();
-        std::fs::create_dir_all(&out).unwrap();
-        std::fs::create_dir_all(&outside).unwrap();
-        std::fs::write(staging.join("sub/payload"), b"x").unwrap();
-        std::os::unix::fs::symlink(&outside, out.join("sub")).unwrap();
-        assert!(super::move_auto_rename(&staging, &out).is_err());
-        assert!(!outside.join("payload").exists());
-        let _ = std::fs::remove_dir_all(&base);
-    }
 
     use super::*;
 

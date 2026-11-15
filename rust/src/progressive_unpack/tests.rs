@@ -171,7 +171,7 @@ fn run(
         first_volume: first,
         dest: out,
         password: "",
-        overwrite: true,
+        overwrite: Overwrite::Always,
     };
     let r = extract(&req, feed, &mut |_, m: &str| log.push(m.to_string()), &mut || false);
     (r, log)
@@ -561,7 +561,7 @@ fn run_pw(
         first_volume: first,
         dest: out,
         password,
-        overwrite: true,
+        overwrite: Overwrite::Always,
     };
     let r = extract(&req, feed, &mut |_, m: &str| log.push(m.to_string()), &mut || false);
     (r, log)
@@ -960,4 +960,65 @@ fn holes_in_a_member_inside_a_folder_are_patched() {
     let (r, log) = run(&first, &t.out(), Box::new(feed));
     expect_ok(r, &log);
     assert_eq!(std::fs::read(t.out().join("Release/movie.mkv")).unwrap(), data);
+}
+
+#[test]
+fn rename_mode_keeps_duplicate_members_and_existing_files() {
+    let t = TestDir::new("rename");
+    std::fs::write(t.out().join("a.bin"), b"existing").unwrap();
+    let one = pattern(3_000);
+    let two = pattern(4_000);
+    let mut v = SIG.to_vec();
+    v.extend(main_block(false, None));
+    v.extend(file_block("a.bin", one.len() as u64, &one, crc32fast::hash(&one), false, false));
+    v.extend(file_block("a.bin", two.len() as u64, &two, crc32fast::hash(&two), false, false));
+    v.extend(end_block(false));
+    let first = t.dl().join("dup.rar");
+    std::fs::write(&first, &v).unwrap();
+    let mut log = Vec::new();
+    let req = Request {
+        first_volume: &first,
+        dest: &t.out(),
+        password: "",
+        overwrite: Overwrite::Rename,
+    };
+    let r = extract(&req, Box::new(CompleteSet), &mut |_, m: &str| log.push(m.to_string()), &mut || false);
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("a.bin")).unwrap(), b"existing");
+    assert_eq!(std::fs::read(t.out().join("a_1.bin")).unwrap(), one);
+    assert_eq!(std::fs::read(t.out().join("a_2.bin")).unwrap(), two);
+}
+
+#[test]
+fn holes_in_a_secondary_member_are_patched_by_re_extracting() {
+    let t = TestDir::new("secondary");
+    let big = pattern(300_000);
+    let extra: Vec<u8> = pattern(150_000).iter().map(|b| b ^ 0x5a).collect();
+    let mut v = SIG.to_vec();
+    v.extend(main_block(false, None));
+    v.extend(file_block("big.mkv", big.len() as u64, &big, crc32fast::hash(&big), false, false));
+    let extra_at = v.len() + file_block("extra.bin", extra.len() as u64, &[], 0, false, false).len();
+    v.extend(file_block("extra.bin", extra.len() as u64, &extra, crc32fast::hash(&extra), false, false));
+    v.extend(end_block(false));
+    let first = t.dl().join("two.rar");
+    let mut dmg = v.clone();
+    let hole = (extra_at as u64 + 70_000, 4_000u64);
+    dmg[hole.0 as usize..(hole.0 + hole.1) as usize].fill(0);
+    std::fs::write(&first, &dmg).unwrap();
+    let feed = Damaged {
+        holes: vec![(first.clone(), vec![hole])],
+        repair: vec![(first.clone(), v.clone())],
+        handed: false,
+    };
+    let (r, log) = run(&first, &t.out(), Box::new(feed));
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("big.mkv")).unwrap(), big);
+    assert_eq!(std::fs::read(t.out().join("extra.bin")).unwrap(), extra);
+    let leftovers: Vec<_> = std::fs::read_dir(t.out())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(".rustyget-"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
 }

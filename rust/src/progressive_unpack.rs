@@ -232,13 +232,22 @@ fn is_unsupported(e: &ProgressiveFailure) -> bool {
     }
 }
 
+/// What happens to a file that already exists where a member is extracted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Overwrite {
+    Skip,
+    Always,
+    /// Keep both: the member gets a free `<stem>_<n>.<ext>` name.
+    Rename,
+}
+
 /// Parameters of one extraction.
 pub struct Request<'a> {
     pub first_volume: &'a Path,
     pub dest: &'a Path,
     pub password: &'a str,
-    /// Overwrite files that are already in `dest`.
-    pub overwrite: bool,
+    /// What to do with a file that is already in `dest`.
+    pub overwrite: Overwrite,
 }
 
 /// Extracts the RAR set starting at `req.first_volume` into `req.dest`.
@@ -267,8 +276,8 @@ where
         .unwrap_or_default();
     // A set that is complete on disk is declared as protected native files, which lets the
     // session publish verified members itself. Each volume holds one handle.
-    let protected = feed
-        .set_is_final()
+    // In rename mode every output is copied into place, so each member can get a free name.
+    let protected = (feed.set_is_final() && req.overwrite != Overwrite::Rename)
         .then(|| protect_volumes(req.first_volume))
         .flatten();
     let final_set = protected.is_some();
@@ -287,10 +296,11 @@ where
         zipfast::extract::Options {
             mode: zipfast::extract::Mode::Extract,
             dest: req.dest.to_path_buf(),
-            overwrite: if req.overwrite {
-                zipfast::extract::Overwrite::Always
-            } else {
-                zipfast::extract::Overwrite::Skip
+            overwrite: match req.overwrite {
+                Overwrite::Skip => zipfast::extract::Overwrite::Skip,
+                // Rename: nothing is published by zipfast (no protection declaration); the
+                // copy into place picks the name.
+                Overwrite::Always | Overwrite::Rename => zipfast::extract::Overwrite::Always,
             },
             flatten: false,
             threads: None,
@@ -669,26 +679,25 @@ fn patch_from_repaired_volumes(
         format: MemberFormat::Rar,
         members: (0..members.len() as i32).collect(),
     };
+    // The content map covers the set's main stored payload. Any other member (a second video,
+    // a document) is read back by extracting the repaired set again.
     let map = ContentMapper::build_map(
         &members,
         &set,
         &sources,
         (!req.password.is_empty()).then_some(req.password),
     )
-    .map_err(|e| Failure::Damaged(format!("cannot map the repaired volumes: {e}")))?;
+    .ok();
     // The content map names the member without its directory.
     let base = name
         .rsplit(|&b| b == b'/' || b == b'\\')
         .next()
         .unwrap_or(name);
-    if map.inner_name_bytes() != base || Some(map.inner_size() as u64) != artifact.size() {
-        return Err(Failure::Damaged(format!(
-            "repaired volumes map {} ({} bytes), not {}",
-            map.inner_name(),
-            map.inner_size(),
-            String::from_utf8_lossy(name)
-        )));
-    }
+    let Some(map) = map.filter(|m| {
+        m.inner_name_bytes() == base && Some(m.inner_size() as u64) == artifact.size()
+    }) else {
+        return patch_by_reextracting(session, artifact, req, name, is_cancelled);
+    };
     let mut buf = Vec::new();
     for hole in artifact.holes().to_vec() {
         let mut at = hole.offset;
@@ -715,6 +724,78 @@ fn patch_from_repaired_volumes(
         }
     }
     Ok(())
+}
+
+/// Extracts the repaired set into a private directory and patches `artifact`'s holes from the
+/// member's copy there.
+fn patch_by_reextracting(
+    session: &mut ProgressiveSession,
+    artifact: &mut Artifact,
+    req: &Request<'_>,
+    name: &[u8],
+    is_cancelled: &mut dyn FnMut() -> bool,
+) -> Result<(), Failure> {
+    let scratch = create_unique_dir(req.dest)
+        .map_err(|e| Failure::Other(format!("cannot create a repair directory: {e}")))?;
+    let result = (|| {
+        let sub = Request {
+            first_volume: req.first_volume,
+            dest: &scratch,
+            password: req.password,
+            overwrite: Overwrite::Always,
+        };
+        match extract(&sub, Box::new(CompleteSet), &mut |_, _| {}, is_cancelled) {
+            Ok(_) => {}
+            Err(Error::Failed(f)) => return Err(f),
+            Err(Error::Unsupported(u)) => return Err(Failure::Other(u.0)),
+        }
+        let rel = zipfast::path::sanitize(&String::from_utf8_lossy(name), false)
+            .map_err(|e| Failure::UnsafePath(format!(" {e}")))?;
+        let copy = std::fs::File::open(scratch.join(rel))
+            .map_err(|e| Failure::Damaged(format!("repaired copy missing: {e}")))?;
+        let mut buf = vec![0u8; PATCH_CHUNK as usize];
+        for hole in artifact.holes().to_vec() {
+            let mut at = hole.offset;
+            let end = hole.offset + hole.len;
+            while at < end {
+                if is_cancelled() {
+                    return Err(Failure::Canceled);
+                }
+                let n = (end - at).min(PATCH_CHUNK) as usize;
+                let mut got = 0;
+                while got < n {
+                    match read_at(&copy, &mut buf[got..n], at + got as u64) {
+                        Ok(0) => return Err(Failure::Damaged("repaired copy is short".into())),
+                        Ok(k) => got += k,
+                        Err(e) => return Err(Failure::Other(e.to_string())),
+                    }
+                }
+                session
+                    .patch(artifact, at, &buf[..n])
+                    .map_err(|e| Failure::from_progressive(&e))?;
+                at += n as u64;
+            }
+        }
+        Ok(())
+    })();
+    let _ = std::fs::remove_dir_all(&scratch);
+    result
+}
+
+/// Creates a new directory under `parent` that did not exist before.
+fn create_unique_dir(parent: &Path) -> std::io::Result<PathBuf> {
+    use std::sync::atomic::AtomicU64;
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    std::fs::create_dir_all(parent)?;
+    loop {
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = parent.join(format!(".rustyget-repair-{}-{n}", std::process::id()));
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// Volume files of the set starting at `first`, in order, that exist on disk.
@@ -802,16 +883,19 @@ fn copy_artifact(
     artifact: &mut Artifact,
     dest: &Path,
     rel: &Path,
-    overwrite: bool,
+    overwrite: Overwrite,
     meta: MemberMeta,
     is_cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<(), Failure> {
-    let target = dest.join(rel);
+    let mut target = dest.join(rel);
+    let taken = |p: &Path| std::fs::symlink_metadata(p).is_ok();
+    match overwrite {
+        Overwrite::Skip if taken(&target) => return Ok(()),
+        Overwrite::Rename if taken(&target) => target = free_name(&target, &taken),
+        _ => {}
+    }
     let target = target.as_path();
     let io = |e: std::io::Error| Failure::Other(format!("cannot write {}: {e}", target.display()));
-    if target.exists() && !overwrite {
-        return Ok(());
-    }
     if let Some(parent_rel) = rel.parent().filter(|p| !p.as_os_str().is_empty()) {
         crate::archive_native::create_dir_all_no_follow(dest, parent_rel)
             .map_err(|e| Failure::Other(format!("cannot create {}: {e}", parent_rel.display())))?;
@@ -855,6 +939,29 @@ fn copy_artifact(
         return Err(io(e));
     }
     Ok(())
+}
+
+/// `<stem>_<n>.<ext>` next to `target`, the first one not taken.
+fn free_name(target: &Path, taken: &dyn Fn(&Path) -> bool) -> PathBuf {
+    let parent = target.parent().unwrap_or_else(|| Path::new("."));
+    let stem = target
+        .file_stem()
+        .map(|s| s.to_os_string())
+        .unwrap_or_else(|| "file".into());
+    let ext = target.extension().map(|e| e.to_os_string());
+    for n in 1..u32::MAX {
+        let mut name = stem.clone();
+        name.push(format!("_{n}"));
+        if let Some(e) = &ext {
+            name.push(".");
+            name.push(e);
+        }
+        let candidate = parent.join(name);
+        if !taken(&candidate) {
+            return candidate;
+        }
+    }
+    target.to_path_buf()
 }
 
 /// Creates a new, uniquely named file next to `target` without touching any existing path.

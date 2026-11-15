@@ -48,7 +48,7 @@ impl SourceRoot {
             .len()
             .checked_add(1024)
             .ok_or_else(refused)?;
-        let charge = super::reserve_control(
+        let charge = super::reserve_root_control(
             job,
             bytes as u64,
             crate::parchecker::effective_live_pool_bytes(),

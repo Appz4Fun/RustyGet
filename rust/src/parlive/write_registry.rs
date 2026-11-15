@@ -371,6 +371,38 @@ pub(crate) fn donor_write_context(
     })
 }
 
+/// Open a live repair target through the attested physical root, without
+/// following links. The root must already be bound by an attested source
+/// writer; otherwise ownership is unproven and live repair is refused.
+pub(crate) fn open_repair_target(
+    coordinator: &WriteCoordinator,
+    path: &Path,
+) -> std::io::Result<std::fs::File> {
+    let root = coordinator.physical_root().ok_or_else(refused)?;
+    if path.parent() != Some(root.spelling.as_path()) {
+        return Err(refused());
+    }
+    root.open_leaf(path.file_name().ok_or_else(refused)?, true, true)
+}
+
+/// The target path must still name the descriptor admitted for repair.
+pub(crate) fn repair_target_is_current(
+    coordinator: &WriteCoordinator,
+    path: &Path,
+    file: &std::fs::File,
+) -> std::io::Result<()> {
+    let root = coordinator.physical_root().ok_or_else(refused)?;
+    if path.parent() != Some(root.spelling.as_path()) {
+        return Err(refused());
+    }
+    let current = root.open_leaf(path.file_name().ok_or_else(refused)?, false, false)?;
+    if FileIdentity::of(file)? != FileIdentity::of(&current)? {
+        coordinator.invalidate_sources();
+        return Err(refused());
+    }
+    Ok(())
+}
+
 pub(crate) fn forget_download_writes(nzb_id: i32) {
     let mut registry = WRITES.lock().unwrap_or_else(|e| e.into_inner());
     let coordinator = registry.downloads

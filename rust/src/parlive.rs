@@ -125,7 +125,9 @@ static CONTROL_ACCOUNTING: LazyLock<Mutex<ControlAccounting>> =
 pub(crate) struct ControlLease {
     nzb_id: i32,
     bytes: u64,
-    _budget: SessionBudgetLease,
+    // None only for ordinary-write root control: still capped by the control
+    // queue, but never blocked by an exhausted live PAR pool.
+    _budget: Option<SessionBudgetLease>,
 }
 impl ControlLease {
     pub fn bytes(&self) -> u64 {
@@ -149,6 +151,25 @@ pub(crate) fn reserve_control(
     nzb_id: i32,
     bytes: u64,
     pool_limit: u64,
+) -> Result<ControlLease, RepairError> {
+    reserve_control_inner(nzb_id, bytes, pool_limit, false)
+}
+
+/// Charge physical-root control for an ordinary source write. The shared live
+/// PAR pool is preferred, but its exhaustion must not fail plain downloads.
+pub(crate) fn reserve_root_control(
+    nzb_id: i32,
+    bytes: u64,
+    pool_limit: u64,
+) -> Result<ControlLease, RepairError> {
+    reserve_control_inner(nzb_id, bytes, pool_limit, true)
+}
+
+fn reserve_control_inner(
+    nzb_id: i32,
+    bytes: u64,
+    pool_limit: u64,
+    pool_optional: bool,
 ) -> Result<ControlLease, RepairError> {
     let limit_error = |context, required, limit| RepairError::StreamingMemoryLimit {
         context,
@@ -180,9 +201,10 @@ pub(crate) fn reserve_control(
             MIB,
         ));
     }
-    let budget = LIVE_BUDGET
-        .acquire(bytes, pool_limit)
-        .ok_or_else(|| limit_error("shared live PAR reservation", bytes, pool_limit))?;
+    let budget = LIVE_BUDGET.acquire(bytes, pool_limit);
+    if budget.is_none() && !pool_optional {
+        return Err(limit_error("shared live PAR reservation", bytes, pool_limit));
+    }
     used.bytes = total.unwrap();
     used.jobs.insert(nzb_id, job.unwrap());
     Ok(ControlLease {
@@ -202,8 +224,8 @@ mod physical_ownership_tests;
 mod source_identity;
 mod write_registry;
 pub(crate) use write_registry::{
-    donor_write_context, download_writes, forget_download_writes, source_write_context,
-    SourceWriteContext,
+    donor_write_context, download_writes, forget_download_writes, open_repair_target,
+    repair_target_is_current, source_write_context, SourceWriteContext,
 };
 
 #[cfg(test)]

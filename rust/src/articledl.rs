@@ -3864,7 +3864,15 @@ mod tests {
         let context = crate::parlive::source_write_context(-1_961_502, 40, &dir, b"part40.rar").unwrap();
         let limit = crate::parchecker::effective_live_pool_bytes();
         assert!(limit > 0);
-        let reservation = crate::parlive::LIVE_BUDGET.acquire(limit, limit).unwrap();
+        // The pool is process-global; hold whatever other tests left free.
+        let mut reservation = Vec::new();
+        let mut chunk = limit;
+        while chunk != 0 {
+            while let Some(lease) = crate::parlive::LIVE_BUDGET.acquire(chunk, limit) {
+                reservation.push(lease);
+            }
+            chunk /= 2;
+        }
         let mut file = BufferedDiskFile::open_guarded(path.as_os_str().as_bytes(), true, 64, 0, context).unwrap();
         assert_eq!(file.write_bytes(b"ordinary"), 8);
         assert!(file.flush_and_close());

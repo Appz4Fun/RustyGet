@@ -1791,6 +1791,10 @@ pub(crate) struct TargetWriteLease {
     nzb_id: i32,
     ids: Vec<(i32, FileId)>,
     ownership: crate::parlive::RepairWriteLease,
+    // Descriptors admitted after writers drained; repair and verification use
+    // only these, and publication requires each path to still name them.
+    paths: Vec<PathBuf>,
+    files: Vec<par_rs::RepairTargetFile>,
     writer_wait_ns: u64,
     // Retain all live session resources until actual I/O and publication finish.
     entry: Arc<ActiveStreamingSession>,
@@ -1863,16 +1867,38 @@ impl LiveRepairRequest {
     pub(crate) fn acquire(self) -> Result<TargetWriteLease, RepairError> {
         // Fence native cache flushing before installing a pending barrier. No queue lock here.
         let waited = std::time::Instant::now();
+        let paths: Vec<PathBuf> = self.targets.iter().map(|t| t.path.clone()).collect();
         let ownership = crate::articledl::with_live_cache_fence(|| {
             self.entry
                 .writers
                 .begin_repair(self.entry.generation, self.targets, self.charge)
         })
         .map_err(|_| RepairError::Cancelled)?;
+        // Writers are drained: bind the actual target inodes under the barrier.
+        let mut files = Vec::with_capacity(paths.len());
+        for (path, (queue_id, file_id)) in paths.iter().zip(&self.ids) {
+            // Bind the physical root through the ordinary registry (alias and
+            // cross-job checks) when no source writer has attested it yet.
+            if let Some(name) = path.file_name() {
+                if let Ok(context) = crate::parlive::source_write_context(
+                    self.nzb_id,
+                    *queue_id,
+                    &self.entry.base_dir,
+                    name.as_encoded_bytes(),
+                ) {
+                    let _ = context.attest_existing_source();
+                }
+            }
+            let file = crate::parlive::open_repair_target(&self.entry.writers, path)
+                .map_err(|_| live_error("live target admission", "target ownership unproven"))?;
+            files.push(par_rs::RepairTargetFile { file_id: *file_id, file });
+        }
         Ok(TargetWriteLease {
             nzb_id: self.nzb_id,
             ids: self.ids,
             ownership,
+            paths,
+            files,
             writer_wait_ns: live_metrics::nanos(waited.elapsed()),
             entry: self.entry,
         })
@@ -1888,9 +1914,17 @@ impl TargetWriteLease {
             nzb_id,
             ids,
             ownership,
+            paths,
+            files,
             writer_wait_ns,
             entry,
         } = self;
+        let targets_current = || {
+            paths.iter().zip(&files).try_for_each(|(path, target)| {
+                crate::parlive::repair_target_is_current(&entry.writers, path, &target.file)
+            })
+            .map_err(|_| live_error("live target ownership", "target replaced after admission"))
+        };
         entry
             .metrics
             .writer_wait_ns
@@ -1911,12 +1945,14 @@ impl TargetWriteLease {
         // admitted snapshots here before ordinary postprocessing may take over.
         drain_live_articles_locked(nzb_id, &entry)?;
         let par_ids: Vec<_> = ids.iter().map(|(_, id)| *id).collect();
+        targets_current()?;
         let (report, hashes) = entry.record(
             entry
                 .session
-                .repair_available_targets_with_hashes_now(&par_ids),
+                .repair_available_targets_with_files_and_hashes_now(&par_ids, &files),
         )?;
         ensure_current_generation(nzb_id, &entry)?;
+        targets_current()?;
         // The library checks both the whole-file MD5 and actual file length under our lease.
         let verified: Vec<_> = ids
             .iter()

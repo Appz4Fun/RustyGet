@@ -76,7 +76,7 @@ impl WriteCoordinator {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let identity = WriterIdentity::Path(path.to_owned());
         if Self::is_certified(&state, &identity) { return true; }
-        if state.generation.0 == 0 && state.repair.is_none() { return false; }
+        if state.generation.0 == 0 && state.repair.is_none() && state.writers == 0 { return false; }
         let protected = state.namespace.as_ref().is_none_or(|proof| {
             path.file_name().is_none_or(|leaf| proof.protects_leaf(leaf.as_encoded_bytes()))
         });

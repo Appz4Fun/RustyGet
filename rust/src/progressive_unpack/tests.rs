@@ -1929,6 +1929,144 @@ fn a_complete_windows_set_gets_a_normal_mode() {
     );
 }
 
+/// `vols` volumes with a small `a.bin` in the first and a `movie.mkv` that spans them all, one
+/// `big_mb` part in the middle; both are damaged and then repaired in place.
+fn two_repairs_in_a_big_set(
+    overwrite: Overwrite,
+    vols: usize,
+    big_mb: usize,
+) -> (bool, Vec<String>, String) {
+    let t = TestDir::new("tworepairs");
+    let small = 64 * 1024;
+    let big = big_mb << 20;
+    let mut sizes = vec![small; vols];
+    let k = vols / 2;
+    sizes[k] = big;
+    let total: usize = sizes.iter().sum();
+    let data = pattern(total);
+    let a: Vec<u8> = pattern(300_000).into_iter().map(|b| b ^ 0x5a).collect();
+    let n = sizes.len();
+    let mut at = 0;
+    let mut paths = Vec::new();
+    let mut a_off = 0usize;
+    for (i, &sz) in sizes.iter().enumerate() {
+        let part = &data[at..at + sz];
+        at += sz;
+        let mut out = SIG.to_vec();
+        out.extend(main_block(true, if i == 0 { None } else { Some(i as u64) }));
+        if i == 0 {
+            let fb = file_block(
+                "a.bin",
+                a.len() as u64,
+                &a,
+                crc32fast::hash(&a),
+                false,
+                false,
+            );
+            a_off = out.len() + fb.len() - a.len();
+            out.extend(fb);
+        }
+        let last = i + 1 == n;
+        let crc = if last {
+            crc32fast::hash(&data)
+        } else {
+            crc32fast::hash(part)
+        };
+        out.extend(file_block(
+            "movie.mkv",
+            data.len() as u64,
+            part,
+            crc,
+            i > 0,
+            !last,
+        ));
+        out.extend(end_block(!last));
+        let p = t.dl().join(format!("set.part{:03}.rar", i + 1));
+        std::fs::write(&p, &out).unwrap();
+        paths.push(p);
+    }
+    // damage a.bin in volume 0 and movie.mkv in volume k
+    let mut repairs: Vec<(PathBuf, u64, Vec<u8>)> = Vec::new();
+    {
+        let vol = std::fs::read(&paths[0]).unwrap();
+        let off = (a_off + 100_000) as u64;
+        repairs.push((
+            paths[0].clone(),
+            off,
+            vol[off as usize..off as usize + 50_000].to_vec(),
+        ));
+        let mut d = vol.clone();
+        d[off as usize..off as usize + 50_000].fill(0);
+        std::fs::write(&paths[0], &d).unwrap();
+    }
+    {
+        let vol = std::fs::read(&paths[k]).unwrap();
+        let p = payload_offset(&vol, big) as u64 + (1 << 20);
+        repairs.push((
+            paths[k].clone(),
+            p,
+            vol[p as usize..p as usize + (1 << 20)].to_vec(),
+        ));
+        let mut d = vol.clone();
+        d[p as usize..p as usize + (1 << 20)].fill(0);
+        std::fs::write(&paths[k], &d).unwrap();
+    }
+    struct Feed(Vec<(PathBuf, u64, Vec<u8>)>, u64);
+    impl VolumeFeed for Feed {
+        fn volume(&mut self, path: &Path) -> VolumeView {
+            if let Some((_, off, b)) = self.0.iter().find(|(p, _, _)| p == path) {
+                VolumeView::Ready {
+                    holes: vec![(*off, b.len() as u64)],
+                }
+            } else if path.is_file() {
+                VolumeView::Ready { holes: Vec::new() }
+            } else {
+                VolumeView::Missing
+            }
+        }
+        fn wait_repaired(&mut self, _c: &mut dyn FnMut() -> bool) -> bool {
+            use std::io::{Seek, SeekFrom, Write};
+            for (p, off, b) in &self.0 {
+                let mut f = std::fs::OpenOptions::new().write(true).open(p).unwrap();
+                f.seek(SeekFrom::Start(*off)).unwrap();
+                f.write_all(b).unwrap();
+            }
+            true
+        }
+        fn expected_volumes(&self) -> u64 {
+            self.1
+        }
+    }
+    let (r, log) = run_with(
+        &paths[0],
+        &t.out(),
+        Box::new(Feed(repairs, vols as u64)),
+        overwrite,
+    );
+    let err = match &r {
+        Err(Error::Failed(f)) => format!("{f}"),
+        Err(Error::Unsupported(u)) => u.0.clone(),
+        Ok(_) => String::new(),
+    };
+    let ok = r.is_ok()
+        && std::fs::read(t.out().join("movie.mkv"))
+            .map(|d| d == data)
+            .unwrap_or(false)
+        && std::fs::read(t.out().join("a.bin"))
+            .map(|d| d == a)
+            .unwrap_or(false);
+    (ok, log, err)
+}
+
+#[test]
+fn a_set_too_big_for_protected_reads_keeps_copying() {
+    // With the volumes protected zipfast rechecks every volume against every other on each
+    // read step; on a set this size that would exhaust its bookkeeping budget mid-verify.
+    let (ok, log, err) = two_repairs_in_a_big_set(Overwrite::Always, 600, 96);
+    assert!(ok, "{err}");
+    assert!(!moved(&log));
+}
+
 #[test]
 fn a_repair_that_replaced_a_volume_file_keeps_the_copy_path() {
     // The Damaged feed rewrites volume files with std::fs::write (same inode on most

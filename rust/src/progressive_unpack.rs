@@ -357,6 +357,11 @@ where
     );
     opts.limits.volume_handles = opts.limits.volume_handles.max(2 * volume_count + 16);
     let handle_limit = opts.limits.volume_handles;
+    // Headroom for the per-read protection checks once the volumes are declared protected.
+    opts.limits.source_bookkeeping = opts
+        .limits
+        .source_bookkeeping
+        .saturating_add(PROTECTED_READ_BUDGET);
     opts.limits.protection_paths = opts.limits.protection_paths.max(volume_count + 16);
     log_cb(
         3,
@@ -670,7 +675,16 @@ where
         // zipfast publishes by rename only when it may replace; skip mode would need hard
         // links, which some destinations (exFAT, SMB) do not support.
         && req.overwrite == Overwrite::Always
-        && upgrade_protection(req.first_volume, &protection, &opened, handle_limit)
+        && upgrade_protection(
+            req.first_volume,
+            &protection,
+            &opened,
+            handle_limit,
+            deferred
+                .iter()
+                .map(|(_, a, _)| a.size().unwrap_or_else(|| a.produced_extent()))
+                .sum(),
+        )
     {
         log_cb(
             4,
@@ -1525,6 +1539,7 @@ fn upgrade_protection(
     slot: &ProtectionSlot,
     opened: &OpenedVolumes,
     handle_limit: u64,
+    deferred_bytes: u64,
 ) -> bool {
     let mut slot = slot.lock().unwrap_or_else(|e| e.into_inner());
     if slot.is_some() {
@@ -1552,11 +1567,39 @@ fn upgrade_protection(
     if inventory.volumes.len() < opened.len()
         || (opened.len() + inventory.volumes.len()) as u64 + 8 > handle_limit
         || !fits_open_file_limit(opened.len() + inventory.volumes.len())
+        || !fits_protected_read_budget(&inventory, deferred_bytes)
     {
         return false;
     }
     *slot = Some(inventory);
     true
+}
+
+/// Extra zipfast source-bookkeeping budget for reads after the protection upgrade.
+const PROTECTED_READ_BUDGET: u64 = 32 * 1024 * 1024;
+
+/// With the volumes declared protected, zipfast rechecks every protected volume against every
+/// admitted one on each read step (about 1 MiB of verify or patch): roughly 2V^2 + V(2P + 4)
+/// bookkeeping units, V volumes with paths up to P bytes. Upgrade only when re-reading every
+/// deferred output once fits the headroom added at session creation; large sets keep copying.
+fn fits_protected_read_budget(
+    inventory: &zipfast::progressive::ProtectionInventory,
+    deferred_bytes: u64,
+) -> bool {
+    let v = inventory.volumes.len() as u64;
+    let p = inventory
+        .volumes
+        .iter()
+        .flat_map(|vol| match &vol.backing {
+            zipfast::progressive::VolumeBacking::Native(paths) => paths.as_slice(),
+            zipfast::progressive::VolumeBacking::NonFile => &[],
+        })
+        .map(|pp| pp.path.as_os_str().len() as u64)
+        .max()
+        .unwrap_or(0);
+    let per_step = 2 * v * v + v * (2 * p + 4);
+    let steps = deferred_bytes.div_ceil(1024 * 1024) + 16;
+    per_step.saturating_mul(steps) <= PROTECTED_READ_BUDGET
 }
 
 /// Whether the process can hold `held` more files and still re-extract the set once (about one

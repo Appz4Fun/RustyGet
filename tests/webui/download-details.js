@@ -235,6 +235,47 @@ const { installDetailsFixture } = require('./details-fixture');
         await panel.waitFor({ state: 'hidden' });
       });
 
+      await check('files reply arriving after the panel closed is dropped', async () => {
+        let release;
+        await page.evaluate(() => { window.__rpcHandled = []; });
+        const asked = new Promise(resolve => {
+          fixture.holdListfiles = () => { resolve(); return new Promise(r => { release = r; }); };
+        });
+        try {
+          await page.locator('#DownloadsTable tbody a[data-nzbid="41"]').first().click();
+          await panel.waitFor({ state: 'visible' });
+          await page.locator('#DownloadsEdit_File').click();
+          await asked;
+          fixture.holdListfiles = undefined;
+          await page.keyboard.press('Escape');
+          await panel.waitFor({ state: 'hidden' });
+        } finally {
+          fixture.holdListfiles = undefined;
+          if (release) release();
+        }
+        await page.waitForFunction(k => window.__rpcHandled.includes(k), 'listfiles:41');
+        assert.doesNotMatch(await page.locator('#DownloadsEdit_FileTable').textContent(), /copy01/, 'A closed panel takes no file list');
+      });
+
+      await check('closing one panel keeps the other panel log', async () => {
+        await page.locator('#DownloadsTable tbody a[data-nzbid="41"]').first().click();
+        await panel.waitFor({ state: 'visible' });
+        await page.locator('#DownloadsEdit_Log').click();
+        await page.waitForFunction(() => /Downloading copy 01/.test(document.getElementById('DownloadsEdit_LogTable').textContent));
+        // the history panel's close handler runs while the downloads panel shows its log
+        await page.evaluate(() => { LogTab.reset('History'); });
+        const saved = await page.evaluate(() => {
+          let out = null;
+          const keep = Util.saveToLocalFile;
+          Util.saveToLocalFile = (text, type, name) => { out = { text, name }; return true; };
+          try { LogTab.export(); } finally { Util.saveToLocalFile = keep; }
+          return out;
+        });
+        assert(saved && /Downloading copy 01/.test(saved.text), 'The downloads log can still be saved');
+        await page.keyboard.press('Escape');
+        await panel.waitFor({ state: 'hidden' });
+      });
+
       await check('a confirm opened from the panel keeps both open on a click beside them', async () => {
         if (width < 768) return;
         const history = page.locator('#HistoryEditDialog');

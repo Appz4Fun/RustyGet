@@ -26,6 +26,8 @@ const { installDetailsFixture } = require('./details-fixture');
         if (method === 'config' || method === 'loadconfig') {
           const set = (name, value) => { const o = result.find(x => x.Name === name); if (o) o.Value = value; else result.push({ Name: name, Value: value }); };
           set('Unpack', 'no');
+          // a category unpacks unless told not to: switch them all off
+          [1, 2, 3, 4].forEach(n => set(`Category${n}.Unpack`, 'no'));
           set('ArticleRetries', '3');
           set('ParCheck', 'auto');
         }
@@ -88,6 +90,11 @@ const { installDetailsFixture } = require('./details-fixture');
         await page.waitForFunction(() => document.querySelector('#ConfigContent.search'));
         await page.waitForTimeout(400);
         assert(await row('ArticleInterval').isVisible(), 'A search result shows whatever the mode');
+        // following the result to the option shows the mode it needs
+        await page.locator('#label\\:S_ArticleInterval').click();
+        await page.waitForTimeout(800);
+        assert.equal(await page.evaluate(() => Config.mode()), 'expert', 'The mode rises to the option');
+        assert(await row('ArticleInterval').isVisible(), 'The option stays in view');
         await page.locator('#ConfigTable_clearfilter').click();
         await page.waitForTimeout(300);
         await mode('expert');
@@ -172,6 +179,13 @@ const { installDetailsFixture } = require('./details-fixture');
         await S('DirectUnpack').click({ force: true });
         assert.equal(await S('DirectUnpack').getAttribute('aria-checked'), before, 'A locked checkbox does not change');
         assert.match(await r.locator('.config-lock-note').textContent(), /Turn on "Unpack"/);
+        // a category that unpacks its own downloads unlocks the unpack options too
+        await page.evaluate(() => { Config.switchClick($('#S_Category1_Unpack .btn[data-value="yes"]')[0]); Config.refreshChangeState(); });
+        await page.waitForTimeout(250);
+        assert.equal(await r.evaluate(el => el.classList.contains('is-locked')), false, 'Unlocked by a category with Unpack=yes');
+        await page.evaluate(() => { Config.switchClick($('#S_Category1_Unpack .btn[data-value="no"]')[0]); Config.refreshChangeState(); });
+        await page.waitForTimeout(250);
+        assert(await r.evaluate(el => el.classList.contains('is-locked')));
         await S('Unpack').click();
         await page.waitForTimeout(300);
         assert.equal(await r.evaluate(el => el.classList.contains('is-locked')), false, 'Unlocked once Unpack is on');
@@ -183,6 +197,27 @@ const { installDetailsFixture } = require('./details-fixture');
         const stream = row('DupeStreamTimeout');
         assert(await stream.evaluate(el => el.classList.contains('is-locked')));
         assert.match(await stream.locator('.config-lock-note').textContent(), /stream or live/i);
+      });
+
+      await check('signed numbers and expression fields keep what is typed', async () => {
+        await show('RSS_FEEDS');
+        await page.locator('.config-add.RSS_FEEDS').click();
+        await page.waitForTimeout(800);
+        const prio = page.locator('[id^="S_Feed"][id$="_Priority"]').last();
+        await prio.fill('');
+        await prio.pressSequentially('-100');
+        assert.equal(await prio.inputValue(), '-100', 'A feed priority may be negative');
+        await prio.locator('xpath=ancestor::div[contains(@class,"config-number")][1]').locator('.config-step[data-step="-1"]').click();
+        assert.equal(await prio.inputValue(), '-101');
+        await show('SCHEDULER');
+        await page.locator('.config-add.SCHEDULER').click();
+        await page.waitForTimeout(800);
+        const days = page.locator('[id^="S_Task"][id$="_WeekDays"]').last();
+        assert.equal(await days.evaluate(el => !!el.closest('.config-number')), false, 'Weekdays are not a stepper');
+        await days.fill('1-5, 7');
+        await days.dispatchEvent('input');
+        await days.dispatchEvent('change');
+        assert.equal(await days.inputValue(), '1-5, 7');
       });
 
       await check('added list entries get the new controls', async () => {

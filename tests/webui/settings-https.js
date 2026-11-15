@@ -54,7 +54,8 @@ const PAIR = { Ok: true, Subject: '127.0.0.1', Names: ['127.0.0.1'], NotAfter: '
             return reply({ Cert: MAIN + '/https/server.crt', Key: MAIN + '/https/server.key', Check: PAIR, Error: '' });
           case 'checkcastore':
             calls.push(['checkcastore', a]);
-            return reply(a ? { Count: 3, Files: 1, System: false, Error: '' } : { Count: 0, System: true, Error: '' });
+            return reply(a ? { Count: 3, Files: 1, System: false, Error: '' } :
+              { Count: 0, System: false, Error: 'No CA certificates are set, so news server certificates are not checked. Upload or paste a PEM file.' });
           case 'browsefiles': {
             calls.push(['browsefiles', a]);
             const dir = a === '${MainDir}' || !a ? MAIN : a.replace(/\/[^/]*\.(crt|key)$/, '');
@@ -144,12 +145,25 @@ const PAIR = { Ok: true, Subject: '127.0.0.1', Names: ['127.0.0.1'], NotAfter: '
         assert.equal(await S('SecureCert').inputValue(), MAIN + '/https/mine.crt');
       });
 
+      await check('a path edited after picking a file is the one used', async () => {
+        await row('SecureKey').locator('.config-cert-browse').click();
+        const dialog = page.locator('#FileBrowserDialog');
+        await dialog.waitFor({ state: 'visible' });
+        await page.waitForFunction(() => $('#FileBrowserDialog_List li').text().indexOf('mine.crt') > -1, null, { timeout: 5000 });
+        await dialog.locator('li', { hasText: 'mine.crt' }).click();
+        await page.locator('#FileBrowserDialog_Path').fill('/etc/ssl/private/typed.key');
+        await page.locator('#FileBrowserDialog_Choose').click();
+        await dialog.waitFor({ state: 'hidden' });
+        assert.equal(await S('SecureKey').inputValue(), '/etc/ssl/private/typed.key');
+      });
+
       await check('certificate check and the CA store are in System', async () => {
         const card = page.locator('#ConfigData .config-card.SECURITY', { has: S('CertCheck') });
         assert.equal((await card.locator('.config-card__title').textContent()).trim(), 'System');
         assert.equal(await card.locator('#S_CertStore').count(), 1);
         await page.locator('#ConfigCaCheckBtn').click();
-        await page.waitForFunction(() => /system's own/.test($('#ConfigCaStatus').text()), null, { timeout: 5000 });
+        await page.waitForFunction(() => /not checked/.test($('#ConfigCaStatus').text()), null, { timeout: 5000 });
+        assert.equal(await page.locator('#ConfigCaStatus').getAttribute('data-state'), 'error', 'no store is an error, not a green check');
         await page.locator('#ConfigCaFile').setInputFiles({ name: 'My CA.pem', mimeType: 'text/plain',
           buffer: Buffer.from('-----BEGIN CERTIFICATE-----\nBBB\n-----END CERTIFICATE-----\n') });
         await page.waitForFunction(() => /certs\//.test($('#S_CertStore').val()), null, { timeout: 5000 });

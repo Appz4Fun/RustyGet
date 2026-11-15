@@ -3799,7 +3799,7 @@
     "description": "Description for the option RequiredDir DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>). DO NOT translate the exact uppercase keywords (NOTE:, WARNING:, INFO:, INFO FOR DEVELOPERS:, MORE INFO:) as they are used to render UI badges."
   },
   "config_desc_certstore": {
-    "message": "Certificate store file or directory.\n\nCertificate store contains root certificates used for server certificate\nverification when connecting to servers with encryption (TLS/SSL). This\nincludes communication with news-servers for article downloading and\nwith web-servers (via https) for fetching of rss feeds and nzb-files.\n\nThe option can point either to one big file containing all root\ncertificates or to a directory containing certificate files, in PEM format.\n\nExample: /etc/ssl/certs/ca-certificates.crt.\n\nNOTE: Certificate verification must be enabled separately via option <CertCheck>.\n\nNOTE: For more details visit https://rustyget.com/documentation/certificate-verification/.",
+    "message": "Certificate store file.\n\nCertificate store contains root certificates used for server certificate\nverification when connecting to servers with encryption (TLS/SSL). This\nincludes communication with news-servers for article downloading and\nwith web-servers (via https) for fetching of rss feeds and nzb-files.\n\nThe option points to one file containing all root certificates, in PEM\nformat. Without it, server certificates are not checked.\n\nExample: /etc/ssl/certs/ca-certificates.crt.\n\nNOTE: Certificate verification must be enabled separately via option <CertCheck>.\n\nNOTE: For more details visit https://rustyget.com/documentation/certificate-verification/.",
     "description": "Description for the option CertStore DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>). DO NOT translate the exact uppercase keywords (NOTE:, WARNING:, INFO:, INFO FOR DEVELOPERS:, MORE INFO:) as they are used to render UI badges. If 'News server' sounds like 'Newspaper' in your language, use 'Usenet server'."
   },
   "config_desc_server_active": {
@@ -5637,10 +5637,6 @@
   },
   "config_cert_ca_saved": {
     "message": "certificates saved to",
-    "description": "Settings: HTTPS certificate tools"
-  },
-  "config_cert_ca_system": {
-    "message": "Empty: the system's own CA certificates are used.",
     "description": "Settings: HTTPS certificate tools"
   },
   "config_cert_ca_count": {

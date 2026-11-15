@@ -3021,8 +3021,7 @@ var Config = (new function($)
 			certStatus(status, 'busy', [certText('checking', 'Checking…')]);
 			RPC.call('checkcastore', [$.trim(input.val())], function(result)
 			{
-				certStatus(status, result.Error ? 'error' : 'ok', [result.Error ? result.Error : result.System ?
-					certText('ca_system', 'Empty: the system\'s own CA certificates are used.') :
+				certStatus(status, result.Error ? 'error' : 'ok', [result.Error ? result.Error :
 					result.Count + ' ' + certText('ca_count', 'certificates found')]);
 			}, function(message) { certStatus(status, 'error', [String(message)]); });
 		}));
@@ -6009,7 +6008,8 @@ var FileBrowserDialog = (new function($)
 
 	function choose()
 	{
-		var value = selected || $.trim($('#FileBrowserDialog_Path').val());
+		// the path as shown: a selection the user then edited is not used
+		var value = $.trim($('#FileBrowserDialog_Path').val());
 		if (!value)
 		{
 			return;

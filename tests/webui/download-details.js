@@ -120,6 +120,17 @@ const { installDetailsFixture } = require('./details-fixture');
               History.items = keepH.concat([other, otherTwin]);
               try { return { primary: run(g(41), all), alt: run(g(43), all) }; } finally { History.items = keepH; }
             })(),
+            // a dead queued copy keeps its earlier try in history from counting
+            deadPrimary: run(g(43), all.map(x => x.NZBID === 41 ? Object.assign({}, x, { SuccessArticles: 0, FailedArticles: 10, Health: 0 }) : x)),
+            // a queued twin whose par2 set was lost, and an old history twin with the same placeholder
+            lostPrint: (() => {
+              const lost = all.map(x => x.NZBID === 42 ? withParam(x, 'DupeFiles', 'lost') : x);
+              const oldTwin = Object.assign({}, withParam(hist, 'DupeFiles', 'lost'), { NZBID: 97, NZBFilename: 'old.release.nzb',
+                Parameters: withParam(hist, 'DupeFiles', 'lost').Parameters.concat([{ Name: 'DupeKind', Value: 'twin' }]) });
+              const keepH = History.items;
+              History.items = keepH.concat([oldTwin]);
+              try { return run(g(41), lost); } finally { History.items = keepH; }
+            })(),
             // clients name copies freely: a queued twin sharing the primary's name
             sameName: run(g(41), all.map(x => x.NZBID === 42 ? Object.assign({}, x, { NZBFilename: g(41).NZBFilename }) : x)),
             // a download already running when the fleet came: no DupeFleet, no twins
@@ -136,6 +147,8 @@ const { installDetailsFixture } = require('./details-fixture');
         assert.deepEqual(r.different, { twins: 1, alts: 0, unverified: 0 }, 'An alt found to carry another video is no donor');
         assert.deepEqual(r.unrelated.primary, { twins: 1, alts: 1, unverified: 0 }, 'Another release under the same key is no twin of the primary');
         assert.deepEqual(r.unrelated.alt, { twins: 2, alts: 0, unverified: 0 }, 'Another release under the same key is no twin seen from an alt');
+        assert.deepEqual(r.deadPrimary, { twins: 1, alts: 0, unverified: 0 }, 'A dead queued copy hides its own earlier try');
+        assert.deepEqual(r.lostPrint, { twins: 1, alts: 1, unverified: 0 }, 'A queued twin without a print counts; a history twin without one does not');
         assert.deepEqual(r.sameName, { twins: 1, alts: 1, unverified: 0 }, 'Two queued copies sharing a name are still two posts');
         assert.deepEqual(r.plainPrimary, { twins: 1, alts: 0, unverified: 0 }, 'An alt borrows from a primary that was downloading before the fleet came');
       });

@@ -280,18 +280,25 @@ var DetailsPanel = (new function($)
 		// or an old fleet's copy) is only this release when its print is one of
 		// these. With nothing of the release in the queue, there is nothing left
 		// downloading to borrow into, so history copies seen from an alt add none.
+		// Only real prints anchor: a twin whose par2 set was missing or lost carries
+		// a placeholder (none, lost), and counts only while it is in the queue.
 		var prints = {};
-		var selfRole = DetailsPanel.role(item);
-		if (selfRole && (selfRole.kind === 'twin' || selfRole.kind === 'primary'))
+		function realPrint(it)
 		{
-			prints[param(item, 'DupeFiles')] = true;
+			var p = param(it, 'DupeFiles');
+			return /^[0-9a-f]{16}-[0-9]+$/.test(p) ? p : null;
+		}
+		var selfRole = DetailsPanel.role(item);
+		if (selfRole && (selfRole.kind === 'twin' || selfRole.kind === 'primary') && realPrint(item))
+		{
+			prints[realPrint(item)] = true;
 		}
 		for (var j = 0; j < members.length; j++)
 		{
 			var r = members[j].role ? members[j].role.kind : '';
-			if ((r === 'twin' || r === 'primary') && members[j].source === 'queue')
+			if ((r === 'twin' || r === 'primary') && members[j].source === 'queue' && realPrint(members[j].item))
 			{
-				prints[param(members[j].item, 'DupeFiles')] = true;
+				prints[realPrint(members[j].item)] = true;
 			}
 		}
 		for (var i = 0; i < members.length; i++)
@@ -299,16 +306,22 @@ var DetailsPanel = (new function($)
 			var m = members[i];
 			var claimed = posts[m.item.NZBFilename];
 			if ((m.item.NZBID === item.NZBID && m.source === source) ||
-				(claimed && (claimed === 'history' || m.source === 'history')) ||
-				healthPermille(m.item) <= 0)
+				(claimed && (claimed === 'history' || m.source === 'history')))
 			{
 				continue;
 			}
+			// a dead copy still claims its post, so its history tries add nothing
 			posts[m.item.NZBFilename] = claimed || m.source;
+			if (healthPermille(m.item) <= 0)
+			{
+				continue;
+			}
 			var kind = m.role ? m.role.kind : '';
 			// the primary and its twins are one release posted more than once:
 			// counted the same way whichever copy is viewed
-			if ((kind === 'twin' || kind === 'primary') && prints[param(m.item, 'DupeFiles')])
+			var print = realPrint(m.item);
+			if ((kind === 'twin' || kind === 'primary') &&
+				(print ? prints[print] : kind === 'twin' && m.source === 'queue'))
 			{
 				out.twins++;
 			}

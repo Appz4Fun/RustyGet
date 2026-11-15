@@ -362,6 +362,11 @@ impl ActiveStreamingSession {
     fn note_refusal(&self, error: &RepairError) {
         const MAX_REASONS: usize = 8;
         let mut reason = error.to_string();
+        if matches!(error, RepairError::UnknownFile(FileId(id)) if *id == [0; 16]) {
+            // live_source_id's "no binding yet": an obfuscated queue file
+            // whose real name and 16k hash are not known yet.
+            reason = "queue file not matched to a par2 file yet".to_owned();
+        }
         if matches!(error, RepairError::Cancelled) {
             if let Some(why) = self.writers.stop_reason() {
                 reason = format!("{reason} ({why})");

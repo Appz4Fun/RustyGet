@@ -2380,11 +2380,9 @@ impl NzbgetRsQueueCoordinator {
                 }
             }
 
-            if file.articles_len == 0 && opts.server_mode {
-                host.disk_load_articles(file.ptr);
-                self.load_partial_state(host, opts, &nzb, file.ptr);
-                file = host.file_snap(file.ptr);
-            }
+            // `file` was read before the direct-rename pass, which may have
+            // loaded this file's articles meanwhile: decide on a fresh read.
+            file = self.ensure_articles_loaded(host, opts, &nzb, file.ptr);
 
             if let Some((idx, mut art)) = host.file_first_undefined_article(file.ptr) {
                 if file.dupe_cutover && art.dupe_fallback_round == 0 {
@@ -2434,11 +2432,7 @@ impl NzbgetRsQueueCoordinator {
             let fp = host.nzb_file_at(nzb.ptr, i);
             let mut f = host.file_snap(fp);
             if !f.filename_confirmed {
-                if f.articles_len == 0 && opts.server_mode {
-                    host.disk_load_articles(fp);
-                    self.load_partial_state(host, opts, nzb, fp);
-                    f = host.file_snap(fp);
-                }
+                f = self.ensure_articles_loaded(host, opts, nzb, fp);
                 if f.articles_len > 0 {
                     let a0 = host.article_at(fp, 0);
                     if a0.status == crate::queuesubsys_host::AI_UNDEFINED {
@@ -4188,6 +4182,27 @@ impl NzbgetRsQueueCoordinator {
         save_partial_state_host(host, file_ptr);
     }
 
+    /// Loads a file's article list (and partial state) from disk unless it
+    /// is already in memory, and returns a fresh snapshot. Always decides on
+    /// a fresh read: the loader appends, so loading twice doubles the list
+    /// (137 articles became 274 on a restart), the saved state then no longer
+    /// matches it and the file is written under its temporary name.
+    fn ensure_articles_loaded(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        opts: &crate::queuesubsys_host::GlobalOptsSnap,
+        nzb: &crate::queuesubsys_host::NzbSnap,
+        file_ptr: usize,
+    ) -> crate::queuesubsys_host::FileSnap {
+        let file = host.file_snap(file_ptr);
+        if file.articles_len > 0 || !opts.server_mode {
+            return file;
+        }
+        host.disk_load_articles(file_ptr);
+        self.load_partial_state(host, opts, nzb, file_ptr);
+        host.file_snap(file_ptr)
+    }
+
     fn load_partial_state(
         &self,
         host: &crate::queuesubsys_host::QueueSubsysHost,
@@ -4993,10 +5008,8 @@ impl NzbgetRsQueueCoordinator {
                     offset += count;
                     continue;
                 }
-                if f.articles_len == 0 && opts.server_mode {
-                    host.disk_load_articles(f.ptr);
-                    self.load_partial_state(host, opts, nzb, f.ptr);
-                    *f = host.file_snap(f.ptr);
+                if f.articles_len == 0 {
+                    *f = self.ensure_articles_loaded(host, opts, nzb, f.ptr);
                 }
                 let idx = pos - offset;
                 if idx < f.articles_len {

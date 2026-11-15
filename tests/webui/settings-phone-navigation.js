@@ -5,6 +5,8 @@ const assert=require('node:assert/strict');
  const browser=await chromium.launch({channel:'chrome'});
  try {for(const theme of ['light','dark']) for(const width of [390,1280]) {
   const context=await browser.newContext({viewport:{width,height:844}});
+  // these checks cover every option, which Expert shows
+  await context.addInitScript(() => localStorage.setItem('SettingsMode', 'expert'));
   await context.addInitScript(t=>localStorage.setItem('Theme',t),theme);
   const page=await context.newPage();base.hash='settings';await page.goto(base.href);
   await page.locator('#ConfigNav a[href="#CATEGORIES"]').waitFor({state:'visible'});

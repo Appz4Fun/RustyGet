@@ -4870,5 +4870,613 @@
   "fleet_in_history": {
     "message": "history",
     "description": "Dupe fleet: marks a copy that is in history rather than in the queue."
+  },
+  "config_mode_label": {
+    "message": "Settings mode",
+    "description": "Label of the Simple/Advanced/Expert switch in Settings"
+  },
+  "config_mode_simple": {
+    "message": "Simple",
+    "description": "Settings mode that shows only the options nearly everyone changes"
+  },
+  "config_mode_advanced": {
+    "message": "Advanced",
+    "description": "Settings mode that adds everyday options; also the tag on such an option"
+  },
+  "config_mode_expert": {
+    "message": "Expert",
+    "description": "Settings mode that shows every option; also the tag on such an option"
+  },
+  "config_presets": {
+    "message": "Presets",
+    "description": "Caption of the table of suggested values in an option's help"
+  },
+  "config_step_down": {
+    "message": "Decrease",
+    "description": "Button that lowers a number by one; followed by the option name"
+  },
+  "config_step_up": {
+    "message": "Increase",
+    "description": "Button that raises a number by one; followed by the option name"
+  },
+  "config_requires_on": {
+    "message": "Turn on \"%1\" to change this.",
+    "description": "Note on a greyed-out option; %1 is the option to turn on"
+  },
+  "config_requires_value": {
+    "message": "Set \"%1\" to %2 to change this.",
+    "description": "Note on a greyed-out option; %1 is the option, %2 the value(s) it needs"
+  },
+  "config_requires_filled": {
+    "message": "Fill in \"%1\" first to change this.",
+    "description": "Note on a greyed-out option; %1 is the option that must not be empty"
+  },
+  "config_requires_or": {
+    "message": " or ",
+    "description": "Joins two values in a greyed-out option note"
+  },
+  "config_requires_go": {
+    "message": "Show me",
+    "description": "Link in a greyed-out option note that jumps to the option to change"
+  },
+  "config_preset_server_connections_4": {
+    "message": "Light",
+    "description": "Preset name for Server.Connections = 4"
+  },
+  "config_preset_server_connections_4_text": {
+    "message": "Enough for slow lines and small accounts; downloads may not reach full speed.",
+    "description": "What the Server.Connections preset 4 means"
+  },
+  "config_preset_server_connections_20": {
+    "message": "Normal",
+    "description": "Preset name for Server.Connections = 20"
+  },
+  "config_preset_server_connections_20_text": {
+    "message": "Fills most connections up to 500 Mbit/s.",
+    "description": "What the Server.Connections preset 20 means"
+  },
+  "config_preset_server_connections_50": {
+    "message": "Fast",
+    "description": "Preset name for Server.Connections = 50"
+  },
+  "config_preset_server_connections_50_text": {
+    "message": "For gigabit lines. Your account must allow this many connections.",
+    "description": "What the Server.Connections preset 50 means"
+  },
+  "config_preset_server_connections_100": {
+    "message": "Maximum",
+    "description": "Preset name for Server.Connections = 100"
+  },
+  "config_preset_server_connections_100_text": {
+    "message": "Only if your provider allows it; extra connections are refused otherwise.",
+    "description": "What the Server.Connections preset 100 means"
+  },
+  "config_preset_server_retention_0": {
+    "message": "Unlimited",
+    "description": "Preset name for Server.Retention = 0"
+  },
+  "config_preset_server_retention_0_text": {
+    "message": "Try every article on this server, however old.",
+    "description": "What the Server.Retention preset 0 means"
+  },
+  "config_preset_server_retention_1500": {
+    "message": "Block account",
+    "description": "Preset name for Server.Retention = 1500"
+  },
+  "config_preset_server_retention_1500_text": {
+    "message": "Skip articles older than about four years.",
+    "description": "What the Server.Retention preset 1500 means"
+  },
+  "config_preset_server_retention_4000": {
+    "message": "Long",
+    "description": "Preset name for Server.Retention = 4000"
+  },
+  "config_preset_server_retention_4000_text": {
+    "message": "Typical of large providers today.",
+    "description": "What the Server.Retention preset 4000 means"
+  },
+  "config_preset_articlecache_0": {
+    "message": "Off",
+    "description": "Preset name for ArticleCache = 0"
+  },
+  "config_preset_articlecache_0_text": {
+    "message": "Every article goes straight to disk: least memory, most disk writes.",
+    "description": "What the ArticleCache preset 0 means"
+  },
+  "config_preset_articlecache_200": {
+    "message": "Low",
+    "description": "Preset name for ArticleCache = 200"
+  },
+  "config_preset_articlecache_200_text": {
+    "message": "For machines with little memory.",
+    "description": "What the ArticleCache preset 200 means"
+  },
+  "config_preset_articlecache_500": {
+    "message": "Normal",
+    "description": "Preset name for ArticleCache = 500"
+  },
+  "config_preset_articlecache_500_text": {
+    "message": "Good for most machines.",
+    "description": "What the ArticleCache preset 500 means"
+  },
+  "config_preset_articlecache_2000": {
+    "message": "High",
+    "description": "Preset name for ArticleCache = 2000"
+  },
+  "config_preset_articlecache_2000_text": {
+    "message": "Fewer disk writes during fast downloads; uses up to 2 GB of memory.",
+    "description": "What the ArticleCache preset 2000 means"
+  },
+  "config_preset_writebuffer_0": {
+    "message": "Off",
+    "description": "Preset name for WriteBuffer = 0"
+  },
+  "config_preset_writebuffer_0_text": {
+    "message": "Lowest memory; more small writes.",
+    "description": "What the WriteBuffer preset 0 means"
+  },
+  "config_preset_writebuffer_1024": {
+    "message": "Normal",
+    "description": "Preset name for WriteBuffer = 1024"
+  },
+  "config_preset_writebuffer_1024_text": {
+    "message": "Good for most disks.",
+    "description": "What the WriteBuffer preset 1024 means"
+  },
+  "config_preset_writebuffer_4096": {
+    "message": "High",
+    "description": "Preset name for WriteBuffer = 4096"
+  },
+  "config_preset_writebuffer_4096_text": {
+    "message": "Fewer writes on slow or network disks; uses more memory per connection.",
+    "description": "What the WriteBuffer preset 4096 means"
+  },
+  "config_preset_diskspace_0": {
+    "message": "Never pause",
+    "description": "Preset name for DiskSpace = 0"
+  },
+  "config_preset_diskspace_0_text": {
+    "message": "Downloads continue until the disk is full.",
+    "description": "What the DiskSpace preset 0 means"
+  },
+  "config_preset_diskspace_250": {
+    "message": "Normal",
+    "description": "Preset name for DiskSpace = 250"
+  },
+  "config_preset_diskspace_250_text": {
+    "message": "Pause when less than 250 MB is free.",
+    "description": "What the DiskSpace preset 250 means"
+  },
+  "config_preset_diskspace_2000": {
+    "message": "Safe",
+    "description": "Preset name for DiskSpace = 2000"
+  },
+  "config_preset_diskspace_2000_text": {
+    "message": "Leave room for unpacking a large release.",
+    "description": "What the DiskSpace preset 2000 means"
+  },
+  "config_preset_keephistory_0": {
+    "message": "Off",
+    "description": "Preset name for KeepHistory = 0"
+  },
+  "config_preset_keephistory_0_text": {
+    "message": "Finished downloads leave the history at once; duplicate checks cannot see them.",
+    "description": "What the KeepHistory preset 0 means"
+  },
+  "config_preset_keephistory_7": {
+    "message": "Week",
+    "description": "Preset name for KeepHistory = 7"
+  },
+  "config_preset_keephistory_7_text": {
+    "message": "A short history.",
+    "description": "What the KeepHistory preset 7 means"
+  },
+  "config_preset_keephistory_30": {
+    "message": "Month",
+    "description": "Preset name for KeepHistory = 30"
+  },
+  "config_preset_keephistory_30_text": {
+    "message": "Normal.",
+    "description": "What the KeepHistory preset 30 means"
+  },
+  "config_preset_keephistory_365": {
+    "message": "Year",
+    "description": "Preset name for KeepHistory = 365"
+  },
+  "config_preset_keephistory_365_text": {
+    "message": "Remembers a year of downloads for duplicate checks; the queue file grows.",
+    "description": "What the KeepHistory preset 365 means"
+  },
+  "config_preset_feedhistory_1": {
+    "message": "Day",
+    "description": "Preset name for FeedHistory = 1"
+  },
+  "config_preset_feedhistory_1_text": {
+    "message": "Old feed items may be fetched again.",
+    "description": "What the FeedHistory preset 1 means"
+  },
+  "config_preset_feedhistory_7": {
+    "message": "Week",
+    "description": "Preset name for FeedHistory = 7"
+  },
+  "config_preset_feedhistory_7_text": {
+    "message": "Normal.",
+    "description": "What the FeedHistory preset 7 means"
+  },
+  "config_preset_feedhistory_30": {
+    "message": "Month",
+    "description": "Preset name for FeedHistory = 30"
+  },
+  "config_preset_feedhistory_30_text": {
+    "message": "For feeds that repeat old items.",
+    "description": "What the FeedHistory preset 30 means"
+  },
+  "config_preset_downloadrate_0": {
+    "message": "Unlimited",
+    "description": "Preset name for DownloadRate = 0"
+  },
+  "config_preset_downloadrate_0_text": {
+    "message": "Use the whole line.",
+    "description": "What the DownloadRate preset 0 means"
+  },
+  "config_preset_downloadrate_1250": {
+    "message": "10 Mbit/s",
+    "description": "Preset name for DownloadRate = 1250"
+  },
+  "config_preset_downloadrate_1250_text": {
+    "message": "Leaves most of a typical line free.",
+    "description": "What the DownloadRate preset 1250 means"
+  },
+  "config_preset_downloadrate_12500": {
+    "message": "100 Mbit/s",
+    "description": "Preset name for DownloadRate = 12500"
+  },
+  "config_preset_downloadrate_12500_text": {
+    "message": "A firm cap for shared lines.",
+    "description": "What the DownloadRate preset 12500 means"
+  },
+  "config_preset_downloadrate_62500": {
+    "message": "500 Mbit/s",
+    "description": "Preset name for DownloadRate = 62500"
+  },
+  "config_preset_downloadrate_62500_text": {
+    "message": "Caps only very fast lines.",
+    "description": "What the DownloadRate preset 62500 means"
+  },
+  "config_preset_articleretries_0": {
+    "message": "None",
+    "description": "Preset name for ArticleRetries = 0"
+  },
+  "config_preset_articleretries_0_text": {
+    "message": "Give up on a server at the first error and move on to the next one.",
+    "description": "What the ArticleRetries preset 0 means"
+  },
+  "config_preset_articleretries_3": {
+    "message": "Normal",
+    "description": "Preset name for ArticleRetries = 3"
+  },
+  "config_preset_articleretries_3_text": {
+    "message": "Recovers from short glitches.",
+    "description": "What the ArticleRetries preset 3 means"
+  },
+  "config_preset_articleretries_10": {
+    "message": "Stubborn",
+    "description": "Preset name for ArticleRetries = 10"
+  },
+  "config_preset_articleretries_10_text": {
+    "message": "Keeps retrying a flaky server; failures take longer to move on.",
+    "description": "What the ArticleRetries preset 10 means"
+  },
+  "config_preset_articletimeout_15": {
+    "message": "Quick",
+    "description": "Preset name for ArticleTimeout = 15"
+  },
+  "config_preset_articletimeout_15_text": {
+    "message": "Drops stalled connections fast; may cut off slow servers.",
+    "description": "What the ArticleTimeout preset 15 means"
+  },
+  "config_preset_articletimeout_60": {
+    "message": "Normal",
+    "description": "Preset name for ArticleTimeout = 60"
+  },
+  "config_preset_articletimeout_60_text": {
+    "message": "Good for most servers.",
+    "description": "What the ArticleTimeout preset 60 means"
+  },
+  "config_preset_articletimeout_180": {
+    "message": "Patient",
+    "description": "Preset name for ArticleTimeout = 180"
+  },
+  "config_preset_articletimeout_180_text": {
+    "message": "For slow or distant servers.",
+    "description": "What the ArticleTimeout preset 180 means"
+  },
+  "config_preset_articleinterval_0": {
+    "message": "At once",
+    "description": "Preset name for ArticleInterval = 0"
+  },
+  "config_preset_articleinterval_0_text": {
+    "message": "Retry immediately.",
+    "description": "What the ArticleInterval preset 0 means"
+  },
+  "config_preset_articleinterval_10": {
+    "message": "Normal",
+    "description": "Preset name for ArticleInterval = 10"
+  },
+  "config_preset_articleinterval_10_text": {
+    "message": "Give the server a moment.",
+    "description": "What the ArticleInterval preset 10 means"
+  },
+  "config_preset_articleinterval_30": {
+    "message": "Gentle",
+    "description": "Preset name for ArticleInterval = 30"
+  },
+  "config_preset_articleinterval_30_text": {
+    "message": "For servers that throttle quick retries.",
+    "description": "What the ArticleInterval preset 30 means"
+  },
+  "config_preset_urlconnections_1": {
+    "message": "One at a time",
+    "description": "Preset name for UrlConnections = 1"
+  },
+  "config_preset_urlconnections_1_text": {
+    "message": "Gentlest on indexers.",
+    "description": "What the UrlConnections preset 1 means"
+  },
+  "config_preset_urlconnections_4": {
+    "message": "Normal",
+    "description": "Preset name for UrlConnections = 4"
+  },
+  "config_preset_urlconnections_4_text": {
+    "message": "Fetches a few NZB links at once.",
+    "description": "What the UrlConnections preset 4 means"
+  },
+  "config_preset_urlconnections_10": {
+    "message": "Many",
+    "description": "Preset name for UrlConnections = 10"
+  },
+  "config_preset_urlconnections_10_text": {
+    "message": "Faster bulk adds; some indexers limit this.",
+    "description": "What the UrlConnections preset 10 means"
+  },
+  "config_preset_urlretries_0": {
+    "message": "None",
+    "description": "Preset name for UrlRetries = 0"
+  },
+  "config_preset_urlretries_0_text": {
+    "message": "One try per NZB link.",
+    "description": "What the UrlRetries preset 0 means"
+  },
+  "config_preset_urlretries_3": {
+    "message": "Normal",
+    "description": "Preset name for UrlRetries = 3"
+  },
+  "config_preset_urlretries_3_text": {
+    "message": "Recovers from short indexer outages.",
+    "description": "What the UrlRetries preset 3 means"
+  },
+  "config_preset_urlretries_10": {
+    "message": "Stubborn",
+    "description": "Preset name for UrlRetries = 10"
+  },
+  "config_preset_urlretries_10_text": {
+    "message": "Keeps trying a busy indexer.",
+    "description": "What the UrlRetries preset 10 means"
+  },
+  "config_preset_urltimeout_30": {
+    "message": "Quick",
+    "description": "Preset name for UrlTimeout = 30"
+  },
+  "config_preset_urltimeout_30_text": {
+    "message": "Gives up on slow indexers.",
+    "description": "What the UrlTimeout preset 30 means"
+  },
+  "config_preset_urltimeout_60": {
+    "message": "Normal",
+    "description": "Preset name for UrlTimeout = 60"
+  },
+  "config_preset_urltimeout_180": {
+    "message": "Patient",
+    "description": "Preset name for UrlTimeout = 180"
+  },
+  "config_preset_urltimeout_180_text": {
+    "message": "For slow indexers.",
+    "description": "What the UrlTimeout preset 180 means"
+  },
+  "config_preset_parbuffer_100": {
+    "message": "Low",
+    "description": "Preset name for ParBuffer = 100"
+  },
+  "config_preset_parbuffer_100_text": {
+    "message": "For machines with little memory; repair is slower.",
+    "description": "What the ParBuffer preset 100 means"
+  },
+  "config_preset_parbuffer_500": {
+    "message": "Normal",
+    "description": "Preset name for ParBuffer = 500"
+  },
+  "config_preset_parbuffer_2000": {
+    "message": "High",
+    "description": "Preset name for ParBuffer = 2000"
+  },
+  "config_preset_parbuffer_2000_text": {
+    "message": "Faster repair of large releases; uses up to 2 GB.",
+    "description": "What the ParBuffer preset 2000 means"
+  },
+  "config_preset_parthreads_0": {
+    "message": "Automatic",
+    "description": "Preset name for ParThreads = 0"
+  },
+  "config_preset_parthreads_0_text": {
+    "message": "One thread per CPU core.",
+    "description": "What the ParThreads preset 0 means"
+  },
+  "config_preset_parthreads_2": {
+    "message": "Background",
+    "description": "Preset name for ParThreads = 2"
+  },
+  "config_preset_parthreads_2_text": {
+    "message": "Leaves the machine responsive during repair.",
+    "description": "What the ParThreads preset 2 means"
+  },
+  "config_preset_parthreads_16": {
+    "message": "Many",
+    "description": "Preset name for ParThreads = 16"
+  },
+  "config_preset_parthreads_16_text": {
+    "message": "Only on machines with many cores.",
+    "description": "What the ParThreads preset 16 means"
+  },
+  "config_preset_partimelimit_0": {
+    "message": "No limit",
+    "description": "Preset name for ParTimeLimit = 0"
+  },
+  "config_preset_partimelimit_0_text": {
+    "message": "Repair always runs to the end.",
+    "description": "What the ParTimeLimit preset 0 means"
+  },
+  "config_preset_partimelimit_30": {
+    "message": "Short",
+    "description": "Preset name for ParTimeLimit = 30"
+  },
+  "config_preset_partimelimit_30_text": {
+    "message": "Gives up on long repairs; the download is marked as failed.",
+    "description": "What the ParTimeLimit preset 30 means"
+  },
+  "config_preset_partimelimit_120": {
+    "message": "Long",
+    "description": "Preset name for ParTimeLimit = 120"
+  },
+  "config_preset_partimelimit_120_text": {
+    "message": "Allows big repairs to finish.",
+    "description": "What the ParTimeLimit preset 120 means"
+  },
+  "config_preset_logbuffer_100": {
+    "message": "Small",
+    "description": "Preset name for LogBuffer = 100"
+  },
+  "config_preset_logbuffer_100_text": {
+    "message": "The Messages tab shows only recent lines.",
+    "description": "What the LogBuffer preset 100 means"
+  },
+  "config_preset_logbuffer_1000": {
+    "message": "Normal",
+    "description": "Preset name for LogBuffer = 1000"
+  },
+  "config_preset_logbuffer_20000": {
+    "message": "Large",
+    "description": "Preset name for LogBuffer = 20000"
+  },
+  "config_preset_logbuffer_20000_text": {
+    "message": "Keeps more history in memory.",
+    "description": "What the LogBuffer preset 20000 means"
+  },
+  "config_preset_nzbdirinterval_0": {
+    "message": "Off",
+    "description": "Preset name for NzbDirInterval = 0"
+  },
+  "config_preset_nzbdirinterval_0_text": {
+    "message": "The NZB folder is not watched.",
+    "description": "What the NzbDirInterval preset 0 means"
+  },
+  "config_preset_nzbdirinterval_5": {
+    "message": "Quick",
+    "description": "Preset name for NzbDirInterval = 5"
+  },
+  "config_preset_nzbdirinterval_5_text": {
+    "message": "New files are picked up within seconds.",
+    "description": "What the NzbDirInterval preset 5 means"
+  },
+  "config_preset_nzbdirinterval_60": {
+    "message": "Relaxed",
+    "description": "Preset name for NzbDirInterval = 60"
+  },
+  "config_preset_nzbdirinterval_60_text": {
+    "message": "Checks once a minute.",
+    "description": "What the NzbDirInterval preset 60 means"
+  },
+  "config_preset_nzbdirfileage_10": {
+    "message": "Quick",
+    "description": "Preset name for NzbDirFileAge = 10"
+  },
+  "config_preset_nzbdirfileage_10_text": {
+    "message": "May pick up a file that is still being written.",
+    "description": "What the NzbDirFileAge preset 10 means"
+  },
+  "config_preset_nzbdirfileage_60": {
+    "message": "Normal",
+    "description": "Preset name for NzbDirFileAge = 60"
+  },
+  "config_preset_nzbdirfileage_300": {
+    "message": "Safe",
+    "description": "Preset name for NzbDirFileAge = 300"
+  },
+  "config_preset_nzbdirfileage_300_text": {
+    "message": "For slow network copies.",
+    "description": "What the NzbDirFileAge preset 300 means"
+  },
+  "config_preset_dupestreamtimeout_0": {
+    "message": "No limit",
+    "description": "Preset name for DupeStreamTimeout = 0"
+  },
+  "config_preset_dupestreamtimeout_0_text": {
+    "message": "A stream repair runs until it ends.",
+    "description": "What the DupeStreamTimeout preset 0 means"
+  },
+  "config_preset_dupestreamtimeout_60": {
+    "message": "Normal",
+    "description": "Preset name for DupeStreamTimeout = 60"
+  },
+  "config_preset_dupestreamtimeout_60_text": {
+    "message": "Stops a repair that recovers nothing for a minute.",
+    "description": "What the DupeStreamTimeout preset 60 means"
+  },
+  "config_preset_dupestreamtimeout_300": {
+    "message": "Patient",
+    "description": "Preset name for DupeStreamTimeout = 300"
+  },
+  "config_preset_dupestreamtimeout_300_text": {
+    "message": "For slow donors.",
+    "description": "What the DupeStreamTimeout preset 300 means"
+  },
+  "config_preset_dupecheckconcurrency_5": {
+    "message": "Gentle",
+    "description": "Preset name for DupeCheckConcurrency = 5"
+  },
+  "config_preset_dupecheckconcurrency_5_text": {
+    "message": "Fewer copies are sampled at once.",
+    "description": "What the DupeCheckConcurrency preset 5 means"
+  },
+  "config_preset_dupecheckconcurrency_20": {
+    "message": "Normal",
+    "description": "Preset name for DupeCheckConcurrency = 20"
+  },
+  "config_preset_dupecheckconcurrency_50": {
+    "message": "Fast",
+    "description": "Preset name for DupeCheckConcurrency = 50"
+  },
+  "config_preset_dupecheckconcurrency_50_text": {
+    "message": "Samples big fleets quickly; uses more connections.",
+    "description": "What the DupeCheckConcurrency preset 50 means"
+  },
+  "config_preset_dupehealthbudget_30": {
+    "message": "Quick",
+    "description": "Preset name for DupeHealthBudget = 30"
+  },
+  "config_preset_dupehealthbudget_30_text": {
+    "message": "Less sampling per copy; picks may be less accurate.",
+    "description": "What the DupeHealthBudget preset 30 means"
+  },
+  "config_preset_dupehealthbudget_120": {
+    "message": "Normal",
+    "description": "Preset name for DupeHealthBudget = 120"
+  },
+  "config_preset_dupehealthbudget_300": {
+    "message": "Thorough",
+    "description": "Preset name for DupeHealthBudget = 300"
+  },
+  "config_preset_dupehealthbudget_300_text": {
+    "message": "More accurate picks for large fleets.",
+    "description": "What the DupeHealthBudget preset 300 means"
   }
 }

@@ -10,6 +10,8 @@ const { installOfflineModel } = require('./settings-offline-fixture');
   try {
     for (const theme of ['light', 'dark']) for (const width of [1280, 390]) {
       const context = await browser.newContext({ viewport: { width, height: 900 } });
+      // these checks cover every option, which Expert shows
+      await context.addInitScript(() => localStorage.setItem('SettingsMode', 'expert'));
       await context.addInitScript(value => localStorage.setItem('Theme', value), theme);
       const page = await context.newPage();
       const bootOffline = process.argv.includes('--offline') ? await installOfflineModel(page, base) : null;
@@ -242,6 +244,8 @@ const { installOfflineModel } = require('./settings-offline-fixture');
       // daemon retains a completed job while saved config already has its result.
       for (const theme of ['light', 'dark']) for (const width of [1280, 390]) {
         const context = await browser.newContext({ viewport: { width, height: 900 } });
+        // these checks cover every option, which Expert shows
+        await context.addInitScript(() => localStorage.setItem('SettingsMode', 'expert'));
         const page = await context.newPage();
         const boot = await installOfflineModel(page, base);
         const selected = 'TLS_AES_256_GCM_SHA384', other = 'TLS_CHACHA20_POLY1305_SHA256';

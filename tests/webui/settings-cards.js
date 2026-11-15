@@ -23,6 +23,8 @@ const DUPE_OPTIONS = ['DupeCheck', 'DupeArticleFallback', 'DupeStreamDecompress'
     for (const theme of ['light', 'dark']) for (const [width, height] of [[1440, 900], [390, 844]]) {
       const context = await browser.newContext({ viewport: { width, height } });
       await context.addInitScript(t => localStorage.setItem('Theme', t), theme);
+      // these checks cover every option, which Expert shows
+      await context.addInitScript(() => localStorage.setItem('SettingsMode', 'expert'));
       const page = await context.newPage();
       const errors = [], writes = [];
       page.on('pageerror', e => errors.push(e.message));
@@ -146,9 +148,9 @@ const DUPE_OPTIONS = ['DupeCheck', 'DupeArticleFallback', 'DupeStreamDecompress'
 
       await check('a moved option still saves', async () => {
         await page.evaluate(() => Config.showSection('DUPE_FLEETS', false));
-        await S('DupeStreamTimeout').fill('90');
-        await S('DupeStreamTimeout').dispatchEvent('input');
-        await S('DupeStreamTimeout').dispatchEvent('change');
+        await S('DupeCheckConcurrency').fill('9');
+        await S('DupeCheckConcurrency').dispatchEvent('input');
+        await S('DupeCheckConcurrency').dispatchEvent('change');
         await page.locator('#ConfigSaveBar').waitFor({ state: 'visible' });
         await page.evaluate(() => Config.saveChanges());
         await page.waitForFunction(n => n.some(w => w.method === 'saveconfig'), writes, { polling: 100, timeout: 5000 }).catch(() => {});
@@ -156,7 +158,7 @@ const DUPE_OPTIONS = ['DupeCheck', 'DupeArticleFallback', 'DupeStreamDecompress'
         const save = writes.find(w => w.method === 'saveconfig');
         assert(save, 'saveconfig was sent');
         const values = Object.fromEntries(save.params[0].map(o => [o.Name, o.Value]));
-        assert.equal(values.DupeStreamTimeout, '90');
+        assert.equal(values.DupeCheckConcurrency, '9');
         assert.equal(values.DupeCheck, 'yes');
         assert.equal(values.NzbDirInterval, '5');
       });

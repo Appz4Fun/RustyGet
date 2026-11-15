@@ -7,7 +7,10 @@ const fs=require('node:fs');
  try {for(const locale of ['en','de','tr']) {
   const entries=JSON.parse(fs.readFileSync(locale==='en'?'webui/locales.source.json':`webui/_locales/${locale}/messages.json`));
   const message=key=>typeof entries[key]==='string'?entries[key]:entries[key].message;
-  const context=await browser.newContext();await context.addInitScript(l=>localStorage.setItem('Language',l),locale);
+  const context=await browser.newContext();
+  // these checks cover every option, which Expert shows
+  await context.addInitScript(() => localStorage.setItem('SettingsMode', 'expert'));
+  await context.addInitScript(l=>localStorage.setItem('Language',l),locale);
   const page=await context.newPage();
   await page.route('**/jsonrpc*',async route=>{const req=route.request().postDataJSON();if(req&&req.method==='readurl')await route.fulfill({json:{result:'[]',error:null}});else await route.continue();});
   await page.goto(base.href);await page.locator('#ConfigNav a[href="#PATHS"]').waitFor({state:'visible'});

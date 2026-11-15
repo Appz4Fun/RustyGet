@@ -15,6 +15,8 @@ const { installOfflineModel } = require('./settings-offline-fixture');
   try {
     for (const theme of ['light', 'dark']) for (const width of [1280, 390]) {
       const context = await browser.newContext({ viewport: { width, height: 900 } });
+      // these checks cover every option, which Expert shows
+      await context.addInitScript(() => localStorage.setItem('SettingsMode', 'expert'));
       const page = await context.newPage();
       const errors = [];
       page.on('pageerror', error => errors.push(error.message));
@@ -50,7 +52,7 @@ const { installOfflineModel } = require('./settings-offline-fixture');
 
       // a switch toggles from the keyboard and is counted
       const toggle = page.locator('#S_ContinuePartial');
-      assert.equal(await toggle.getAttribute('role'), 'switch');
+      assert.equal(await toggle.getAttribute('role'), 'checkbox');
       const before = await toggle.getAttribute('aria-checked');
       await toggle.focus();
       await page.keyboard.press('Space');

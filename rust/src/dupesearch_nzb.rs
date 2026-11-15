@@ -887,20 +887,18 @@ pub fn eval_article_votes(votes: &[i32]) -> i32 {
     if votes.contains(&1) {
         return 1;
     }
-    let mut all = true;
-    let mut only_errors = true;
-    for &v in votes {
-        all &= v != 0;
-        only_errors &= v == 4;
+    // 0: not asked yet; 5: unreached (no connection, paused server), which
+    // abstains: it neither answers nor holds the article open
+    if votes.is_empty() || votes.contains(&0) {
+        return 0;
     }
-    if all && !votes.is_empty() {
-        if only_errors {
-            3
-        } else {
-            2
-        }
-    } else {
+    let answered: Vec<i32> = votes.iter().copied().filter(|&v| v != 5).collect();
+    if answered.is_empty() {
         0
+    } else if answered.iter().all(|&v| v == 4) {
+        3
+    } else {
+        2
     }
 }
 
@@ -987,6 +985,10 @@ pub enum DonorAnswer {
     Missing = 2,
     BodyBad = 3,
     Error = 4,
+    /// Not asked: no check connection came free in time (the download had
+    /// them all), the check was stopped, or the server is paused. Not an
+    /// answer, so it counts neither as present nor against the copy.
+    Unreached = 5,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -1293,7 +1295,7 @@ impl DonorServer {
                 active = guard;
             }
             if over() {
-                return vec![DonorAnswer::Error; batch.len()];
+                return vec![DonorAnswer::Unreached; batch.len()];
             }
             *active += 1;
             let cur = *active;
@@ -1311,7 +1313,11 @@ impl DonorServer {
                 self.errors.store(0, std::sync::atomic::Ordering::SeqCst);
                 ans
             }
-            Err(err) => {
+            Err(mut err) => {
+                if err.busy {
+                    // nothing was asked past what came back: those are unreached
+                    err.answers.resize(batch.len(), DonorAnswer::Unreached);
+                }
                 if !err.busy {
                     let errs = self
                         .errors
@@ -1449,7 +1455,7 @@ pub fn donor_check_items_guarded(
                     .enumerate()
                     .any(|(idx, srv)| idx != s && !srv.paused());
                 let answers = if server.paused() && others_can_answer {
-                    vec![DonorAnswer::Error; todo.len()]
+                    vec![DonorAnswer::Unreached; todo.len()]
                 } else {
                     let batch: Vec<DonorRequest> = todo
                         .iter()
@@ -4385,6 +4391,12 @@ mod tests {
         assert_eq!(eval_article_votes(&[2, 1]), 1);
         assert_eq!(eval_article_votes(&[2, 4]), 2);
         assert_eq!(eval_article_votes(&[4, 4]), 3);
+        // unreached (5) is no answer
+        assert_eq!(eval_article_votes(&[5, 5]), 0);
+        assert_eq!(eval_article_votes(&[5, 2]), 2);
+        assert_eq!(eval_article_votes(&[5, 4]), 3);
+        assert_eq!(eval_article_votes(&[0, 5]), 0);
+        assert_eq!(eval_article_votes(&[5, 1]), 1);
         assert_eq!(resolve_unsettled_vote(&[2, 0]), 2);
     }
 
@@ -5719,13 +5731,26 @@ mod tests {
             groups: no_groups(),
         }];
         for _ in 0..(DONOR_SERVER_GIVE_UP * 2) {
-            busy_s.ask(&batch1, || false);
+            // no check connection came free: the article is unreached, not an error
+            assert_eq!(busy_s.ask(&batch1, || false), vec![DonorAnswer::Unreached]);
         }
         assert!(!busy_s.paused());
         assert_eq!(
             busy_t.exchanges.load(Ordering::SeqCst),
             DONOR_SERVER_GIVE_UP * 2
         );
+        // live 2026-11-15: backups checked while the download held every
+        // connection read "alive=0% (0 of 98)"; unreached articles now count
+        // for nothing, so the copy's health stays unknown instead of 0%
+        let h = donor_check_posting(
+            &[busy_s.clone()],
+            &ids("busy", 40),
+            &no_groups(),
+            &everything(0),
+            true,
+        );
+        assert_eq!((h.present, h.missing, h.error), (0, 0, 0));
+        assert_eq!(h.alive(), -1.0);
 
         let (paused_s, paused_t) = make_server(1);
         paused_t.auth_fails.store(true, Ordering::SeqCst);
@@ -5736,7 +5761,7 @@ mod tests {
         assert!(paused_s.paused());
         let before = paused_t.exchanges.load(Ordering::SeqCst);
         let ans = paused_s.ask(&batch1, || true);
-        assert_eq!(ans, vec![DonorAnswer::Error]);
+        assert_eq!(ans, vec![DonorAnswer::Unreached]);
         assert_eq!(paused_t.exchanges.load(Ordering::SeqCst), before);
 
         donor_stop_all();

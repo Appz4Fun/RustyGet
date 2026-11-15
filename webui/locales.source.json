@@ -5612,9 +5612,6 @@
   "config_host_looking": {
     "message": "Looking up"
   },
-  "config_host_pinned": {
-    "message": "Always using this address"
-  },
   "config_host_one": {
     "message": "1 address for"
   },
@@ -5624,11 +5621,29 @@
   "config_host_use_name": {
     "message": "Use the name again"
   },
-  "config_host_any": {
-    "message": "Any of them (recommended)"
+  "config_host_auto": {
+    "message": "Auto: the fastest (recommended)"
   },
-  "config_host_any_text": {
-    "message": "RustyGet picks, and follows the provider if the addresses change."
+  "config_host_auto_text": {
+    "message": "RustyGet times each address, uses the fastest, and follows the provider if the addresses change."
+  },
+  "config_host_literal": {
+    "message": "Host is an address"
+  },
+  "config_host_use_name_text": {
+    "message": "Keeps this address as the first to try, and the name for the certificate check."
+  },
+  "config_host_gone": {
+    "message": "Not an address of this host now: skipped unless the certificate is checked strictly."
+  },
+  "config_host_check_login": {
+    "message": "Check login on each address"
+  },
+  "config_host_checking": {
+    "message": "checking…"
+  },
+  "config_host_login_ok": {
+    "message": "login OK"
   },
   "config_host_no_answer": {
     "message": "no answer"
@@ -5638,9 +5653,6 @@
   },
   "config_host_no_geoip": {
     "message": "Country and network need the DB-IP Lite files, which this install does not have."
-  },
-  "config_host_cert_minimal": {
-    "message": "Certificate check is now Minimal: the certificate names the host, not this address."
   },
   "config_server_restored_first": {
     "message": "Settings were restored from a backup: use Save and reload first."

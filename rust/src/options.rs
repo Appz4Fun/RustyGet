@@ -204,6 +204,7 @@ const SECTIONS: [(&CStr, usize, &[&CStr]); 4] = [
             c".optional",
             c".notes",
             c".ipversion",
+            c".address",
             c".certverification",
         ],
     ),
@@ -907,6 +908,7 @@ mod tests {
         assert_eq!(validate_option_name(c"Server1.Level", &mut no), NameCheck::Valid);
         assert_eq!(validate_option_name(c"Server1.Group", &mut no), NameCheck::Valid);
         assert_eq!(validate_option_name(c"Server1.Backbone", &mut no), NameCheck::Valid);
+        assert_eq!(validate_option_name(c"Server1.Address", &mut no), NameCheck::Valid);
         assert_eq!(validate_option_name(c"Server.JoinGroup", &mut no), NameCheck::Invalid);
     }
 
@@ -2738,6 +2740,9 @@ pub fn init_servers_host<H: OptionsHost>(
         let nhost = host.get_option(&cstring(options_format_indexed_opt_name(
             b"Server", n, b"Host",
         )));
+        // Expert: the address to connect to first; empty is Auto (the fastest)
+        let address_opt = cstring(options_format_indexed_opt_name(b"Server", n, b"Address"));
+        let naddress = host.get_option(&address_opt);
         let nport = host.get_option(&cstring(options_format_indexed_opt_name(
             b"Server", n, b"Port",
         )));
@@ -2842,6 +2847,21 @@ pub fn init_servers_host<H: OptionsHost>(
             break;
         }
         if state == 1 {
+            let address = naddress
+                .as_deref()
+                .map(|a| String::from_utf8_lossy(a.to_bytes()).trim().to_string())
+                .unwrap_or_default();
+            if !address.is_empty() && crate::addrpick::normalize(&address).is_none() {
+                let msg = format_bytes_msg(&[
+                    b"Invalid value for option \"",
+                    address_opt.to_bytes(),
+                    b"\": \"",
+                    address.as_bytes(),
+                    b"\" is not an IP address; using Auto",
+                ]);
+                host.config_error(&msg);
+            }
+            crate::addrpick::configure(n, &address);
             host.add_news_server(
                 n,
                 active,

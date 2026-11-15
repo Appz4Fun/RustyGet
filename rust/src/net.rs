@@ -869,6 +869,9 @@ struct ConnSession {
     nntp_active_group: Option<CString>,
     nntp_line_buf: Option<Box<[u8; NNTP_LINEBUF_SIZE]>>,
     nntp_auth: crate::nntp::Auth,
+    /// How the last `nntp_connect` ended: 0 connected, 1 socket or TLS failed, 2 the
+    /// greeting failed, 3 the login failed.
+    nntp_connect_stage: u8,
 }
 
 impl ConnSession {
@@ -883,6 +886,7 @@ impl ConnSession {
         self.nntp_auth.rejected = false;
         self.nntp_active_group = None;
         if !self.core.connect_base() {
+            self.nntp_connect_stage = 1;
             return false;
         }
         let line_buf = self
@@ -899,6 +903,11 @@ impl ConnSession {
             conn_host: &conn_host,
         };
         let result = crate::nntp::handshake(&mut io, &mut self.nntp_auth).unwrap_or(1);
+        self.nntp_connect_stage = match result {
+            0 => 0,
+            2 => 3,
+            _ => 2,
+        };
         if result != 0 {
             if result == 1 {
                 self.nntp_disconnect(user, pass, srv_name, srv_host);
@@ -1096,6 +1105,7 @@ impl NzbgetRsConn {
                 nntp_active_group: None,
                 nntp_line_buf: None,
                 nntp_auth: crate::nntp::Auth::default(),
+                nntp_connect_stage: 0,
             }),
         }
     }
@@ -1149,6 +1159,7 @@ impl NzbgetRsConn {
                 nntp_active_group: None,
                 nntp_line_buf: None,
                 nntp_auth: crate::nntp::Auth::default(),
+                nntp_connect_stage: 0,
             }),
         }
     }
@@ -2717,13 +2728,66 @@ impl PooledNntpConn {
         (*self.conn.session.get()).core.cert_verif_level = self.server.cert_verif_level;
     }
 
+    /// Connects and logs in. A host name with several addresses goes through the address
+    /// plan (`crate::addrpick`): the pinned or fastest address first, then the next one after
+    /// a network-level failure (socket, TLS, greeting), never after a login failure.
     pub unsafe fn connect(&self) -> bool {
-        (*self.conn.session.get()).nntp_connect(
-            &self.server.user,
-            &self.server.password,
-            &self.server.name,
-            &self.server.host,
-        )
+        let session = &mut *self.conn.session.get();
+        if self.conn.slot.status.load(Ordering::SeqCst) == CS_CONNECTED {
+            return true;
+        }
+        let host = String::from_utf8_lossy(self.server.host.to_bytes()).into_owned();
+        let name = String::from_utf8_lossy(self.server.name.to_bytes()).into_owned();
+        let plan = crate::addrpick::plan(&crate::addrpick::ServerFacts {
+            id: self.server.id,
+            name: &name,
+            host: &host,
+            port: self.server.port,
+            ip_version: self.server.ip_version,
+            tls: self.server.tls,
+            cert_verif_level: self.server.cert_verif_level,
+        });
+        if plan.is_empty() {
+            session.core.resolved_addrs.clear();
+            return session.nntp_connect(
+                &self.server.user,
+                &self.server.password,
+                &self.server.name,
+                &self.server.host,
+            );
+        }
+        let total = plan.len();
+        for (i, addr) in plan.iter().enumerate() {
+            session.core.resolved_addrs = vec![addr.as_bytes().to_vec()];
+            let ok = session.nntp_connect(
+                &self.server.user,
+                &self.server.password,
+                &self.server.name,
+                &self.server.host,
+            );
+            if ok {
+                crate::addrpick::report(self.server.id, addr, true);
+                return true;
+            }
+            let status = self.conn.slot.status.load(Ordering::SeqCst);
+            if session.nntp_connect_stage == 3 || status == CS_CANCELLED {
+                return false;
+            }
+            crate::addrpick::report(self.server.id, addr, false);
+            if i + 1 < total {
+                crate::log::log_active_bytes(
+                    1,
+                    format!(
+                        "{name}: could not connect to {host} at {addr}, trying {}",
+                        plan[i + 1]
+                    )
+                    .as_bytes(),
+                );
+                // a failed attempt may leave a socket or TLS state behind; start clean
+                session.core.disconnect_base();
+            }
+        }
+        false
     }
 
     pub unsafe fn disconnect(&self) -> bool {
@@ -3636,6 +3700,7 @@ pub(crate) unsafe fn nzbget_rs_serverpool_test(
     cipher: *const c_char,
     timeout: c_int,
     cert_verif_level: u32,
+    address: &[u8],
     out_err: *mut crate::ffi::RsBuf,
 ) -> c_int {
     let conn_host_cb = crate::ffi::tls_host_cb();
@@ -3683,6 +3748,16 @@ pub(crate) unsafe fn nzbget_rs_serverpool_test(
         core.cert_verif_level = srv.cert_verif_level;
         core.timeout = eff_timeout;
     }
+    if !address.is_empty() {
+        // a per-address check: connect there, keeping the host name for TLS
+        let Some(addr) = crate::addrpick::normalize(&String::from_utf8_lossy(address)) else {
+            if !out_err.is_null() {
+                *out_err = crate::ffi::into_buf(b"Not an IP address".to_vec());
+            }
+            return 0;
+        };
+        conn.session.get_mut().core.resolved_addrs = vec![addr.into_bytes()];
+    }
     conn.slot.set_suppress_errors(false);
     let mut ok =
         conn.session
@@ -3703,6 +3778,10 @@ pub(crate) unsafe fn nzbget_rs_serverpool_test(
             &srv.host,
         );
         ok = !resp.is_null() && matches!(*resp as u8, b'4' | b'2');
+        // QUIT, so the check doesn't hold one of the account's connections
+        conn.session
+            .get_mut()
+            .nntp_disconnect(&srv.user, &srv.password, &srv.name, &srv.host);
     }
     if !ok {
         if let Some(err) = trap.first_err.take() {

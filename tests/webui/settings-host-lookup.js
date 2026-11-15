@@ -1,6 +1,8 @@
 // News server host lookup: typing a host lists its addresses with country, network
-// and connect time, and one address can be picked to always use (which drops a
-// strict certificate check to Minimal, and back when the name is used again).
+// and connect time. Auto (the fastest) is the default; picking an address writes it
+// as Server.Address, keeping the name in Host for the certificate check. The login
+// can be checked on each address in turn. An address typed as Host (the old pin)
+// moves to Address with "Use the name again".
 // Offline: the committed WebUI over synthetic RPC replies (details-fixture);
 // hostlookup is intercepted.
 // Usage: node tests/webui/settings-host-lookup.js http://127.0.0.1:17999/
@@ -21,7 +23,7 @@ const { installDetailsFixture } = require('./details-fixture');
       await context.addInitScript(t => localStorage.setItem('Theme', t), theme);
       await context.addInitScript(() => localStorage.setItem('SettingsMode', 'expert'));
       const page = await context.newPage();
-      const errors = [], lookups = [];
+      const errors = [], lookups = [], tests = [];
       let geoip = true;
       page.on('pageerror', e => errors.push(e.message));
       await installDetailsFixture(page, base, [], { patchReply: (method, result) => {
@@ -33,6 +35,11 @@ const { installDetailsFixture } = require('./details-fixture');
       } });
       await page.route(/\/jsonrpc/, async route => {
         const rpc = route.request().method() === 'POST' ? route.request().postDataJSON() : null;
+        if (rpc && rpc.method === 'testserver') {
+          tests.push(rpc.params);
+          await new Promise(r => setTimeout(r, 50));
+          return route.fulfill({ contentType: 'application/json', json: { id: rpc.id, result: rpc.params[8] === '192.0.2.10' ? '' : 'Authentication failed for user' } });
+        }
         if (!rpc || rpc.method !== 'hostlookup') return route.fallback();
         lookups.push(rpc.params);
         const [host, port] = rpc.params;
@@ -66,6 +73,8 @@ const { installDetailsFixture } = require('./details-fixture');
       };
       const host = page.locator('#S_Server1_Host');
       const box = page.locator('.config-host-lookup[data-multiid="1"]');
+      const address = (n = 1) => page.evaluate(n => Config.getOptionValue(Config.findOptionByName('Server' + n + '.Address')), n);
+      const certValue = () => page.evaluate(() => String(Config.getOptionValue(Config.findOptionByName('Server1.CertVerification'))).toLowerCase());
 
       await check('typing a host lists its addresses', async () => {
         await host.fill('news.example.com');
@@ -78,46 +87,56 @@ const { installDetailsFixture } = require('./details-fixture');
         assert.match(text, /no answer/);
         assert.match(text, /IP location data by DB-IP/);
         assert.equal(await box.locator('input[type=radio]').count(), 3);
-        assert(await box.locator('input[value=""]').isChecked(), 'any address is the default');
+        assert(await box.locator('input[value=""]').isChecked(), 'Auto is the default');
+        assert.match(text, /Auto: the fastest/);
+        assert.equal(await box.locator('button', { hasText: 'Check login on each address' }).count(), 1);
       });
 
-      await check('picking an address uses it and relaxes the certificate check', async () => {
+      await check('picking an address sets Address and keeps the name and the certificate check', async () => {
         await box.locator('input[value="192.0.2.10"]').click();
-        await page.waitForFunction(() => /Always using/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
-        assert.equal(await host.inputValue(), '192.0.2.10');
-        assert.equal(await page.evaluate(() => $('#S_Server1_CertVerification .btn-primary').attr('data-value') || $('#S_Server1_CertVerification .btn-primary').val()), 'Minimal');
-        assert.match(await box.textContent(), /news\.example\.com/, 'the name is remembered');
-        assert.match(await box.textContent(), /Certificate check is now Minimal/, 'the change is explained');
-        await box.locator('input[value=""]').click();
-        await page.waitForFunction(() => /2 addresses/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
+        await page.waitForFunction(() => Config.getOptionValue(Config.findOptionByName('Server1.Address')) === '192.0.2.10', null, { timeout: 5000 });
+        await page.waitForFunction(() => /2 addresses for news/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
         assert.equal(await host.inputValue(), 'news.example.com');
-        assert.equal(await page.evaluate(() => $('#S_Server1_CertVerification .btn-primary').attr('data-value') || $('#S_Server1_CertVerification .btn-primary').val()), 'Strict');
+        assert.equal(await certValue(), 'strict');
+        assert(await box.locator('input[value="192.0.2.10"]').isChecked(), 'the pinned address is shown as picked');
+        await box.locator('input[value=""]').click();
+        await page.waitForFunction(() => Config.getOptionValue(Config.findOptionByName('Server1.Address')) === '', null, { timeout: 5000 });
+        assert.equal(await host.inputValue(), 'news.example.com');
       });
 
-      await check('typing a name back in checks the certificate strictly again', async () => {
-        const certValue = () => page.evaluate(() => $('#S_Server1_CertVerification .btn-primary').attr('data-value') || $('#S_Server1_CertVerification .btn-primary').val());
-        await box.locator('input[value="192.0.2.10"]').click();
-        await page.waitForFunction(() => /Always using/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
-        assert.equal(await certValue(), 'Minimal');
-        await host.fill('news.example.com');
-        await page.waitForFunction(() => /2 addresses/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
-        assert.equal(await certValue(), 'Strict', 'a typed name restores Strict');
-        // a check changed by hand while pinned is left as it is
-        await box.locator('input[value="192.0.2.10"]').click();
-        await page.waitForFunction(() => /Always using/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
-        await page.evaluate(() => Config.switchClick($('#S_Server1_CertVerification .btn').filter(function() { return String($(this).attr('data-value')).toLowerCase() === 'none'; })[0]));
-        await host.fill('news.example.com');
-        await page.waitForFunction(() => /2 addresses/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
-        assert.equal(String(await certValue()).toLowerCase(), 'none', 'a hand-picked check is kept');
-        // the same through "Use the name again"
-        await box.locator('input[value="192.0.2.10"]').click();
-        await page.waitForFunction(() => /Always using/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
-        await page.evaluate(() => Config.switchClick($('#S_Server1_CertVerification .btn').filter(function() { return String($(this).attr('data-value')).toLowerCase() === 'strict'; })[0]));
-        await page.evaluate(() => Config.switchClick($('#S_Server1_CertVerification .btn').filter(function() { return String($(this).attr('data-value')).toLowerCase() === 'none'; })[0]));
+      await check('the login is checked on each address in turn', async () => {
+        await page.waitForFunction(() => /2 addresses for news/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
+        tests.length = 0;
+        await box.locator('button', { hasText: 'Check login on each address' }).click();
+        await page.waitForFunction(() => $('.config-host-lookup[data-multiid="1"] .config-host-lookup__check[data-state="error"]').length === 1, null, { timeout: 5000 });
+        assert.deepEqual(tests.map(t => t[8]), ['192.0.2.10', '2001:db8::10']);
+        assert.equal(tests[0][0], 'news.example.com', 'the host name is kept for TLS');
+        assert.match(await box.locator('[data-ip="192.0.2.10"] .config-host-lookup__check').textContent(), /login OK/);
+        assert.match(await box.locator('[data-ip="2001:db8::10"] .config-host-lookup__check').textContent(), /Authentication failed/);
+        assert.equal(await box.locator('button', { hasText: 'Check login on each address' }).isDisabled(), false);
+      });
+
+      await check('an address in Host (the old pin) moves to Address with "Use the name again"', async () => {
+        await host.fill('192.0.2.10');
+        await page.waitForFunction(() => /Host is an address \(news\.example\.com\)/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
+        await box.locator('input[value="\u0001name"]').click();
+        await page.waitForFunction(() => $('#S_Server1_Host').val() === 'news.example.com', null, { timeout: 5000 });
+        assert.equal(await address(), '192.0.2.10');
+        await page.waitForFunction(() => /2 addresses for news/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
+        assert(await box.locator('input[value="192.0.2.10"]').isChecked());
         await box.locator('input[value=""]').click();
-        await page.waitForFunction(() => /2 addresses/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
-        assert.equal(String(await certValue()).toLowerCase(), 'none', 'Use the name again keeps a hand-picked check');
-        await page.evaluate(() => Config.switchClick($('#S_Server1_CertVerification .btn').filter(function() { return String($(this).attr('data-value')).toLowerCase() === 'strict'; })[0]));
+        await page.waitForFunction(() => Config.getOptionValue(Config.findOptionByName('Server1.Address')) === '', null, { timeout: 5000 });
+      });
+
+      await check('a pinned address the host no longer has is shown as gone', async () => {
+        await page.evaluate(() => Config.setOptionValue(Config.findOptionByName('Server1.Address'), '203.0.113.9'));
+        await host.fill('slow.example.com');
+        await page.waitForFunction(() => /198\.51\.100\.7/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
+        await host.fill('news.example.com');
+        await page.waitForFunction(() => /Not an address of this host now/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
+        assert(await box.locator('input[value="203.0.113.9"]').isChecked());
+        await box.locator('input[value=""]').click();
+        await page.waitForFunction(() => Config.getOptionValue(Config.findOptionByName('Server1.Address')) === '', null, { timeout: 5000 });
       });
 
       await check('a name that does not resolve says so, and no location files says so', async () => {
@@ -168,8 +187,9 @@ const { installDetailsFixture } = require('./details-fixture');
         await page.waitForTimeout(300);
         assert.equal(await page.evaluate(() => String(Config.getOptionValue(Config.findOptionByName('Server1.IpVersion'))).toLowerCase()), 'auto',
           'an IPv4 address picked while the server is IPv6 only sets it to Automatic');
+        assert.equal(await address(), '192.0.2.10');
         await page.evaluate(() => $('.config-host-lookup[data-multiid="1"]').find('input[value=""]').prop('checked', true).trigger('change'));
-        await page.waitForFunction(() => $('#S_Server1_Host').val() === 'news.example.com', null, { timeout: 5000 });
+        await page.waitForFunction(() => Config.getOptionValue(Config.findOptionByName('Server1.Address')) === '', null, { timeout: 5000 });
         await page.waitForFunction(() => /2 addresses for news/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
       });
 
@@ -196,24 +216,24 @@ const { installDetailsFixture } = require('./details-fixture');
         await page.waitForFunction(() => /2 addresses for news/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
       });
 
-      await check('picking an IPv6 address with an IPv4 part keeps the check Minimal', async () => {
+      await check('picking an IPv6 address with an IPv4 part sets it as Address', async () => {
         const cert = v => page.evaluate(v => Config.switchClick($('#S_Server1_CertVerification .btn').filter(function() { return String($(this).attr('data-value')).toLowerCase() === v; })[0]), v);
         await host.fill('mixed.example.com');
         await page.waitForFunction(() => /1 address for mixed/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
         await cert('strict');
         await page.evaluate(() => $('.config-host-lookup[data-multiid="1"]').find('input[value="::ffff:192.0.2.1"]').prop('checked', true).trigger('change'));
-        await page.waitForFunction(() => /Always using/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
-        assert.equal(await page.inputValue('#S_Server1_Host'), '::ffff:192.0.2.1');
-        assert.equal(await page.evaluate(() => String(Config.getOptionValue(Config.findOptionByName('Server1.CertVerification'))).toLowerCase()), 'minimal');
+        await page.waitForFunction(() => Config.getOptionValue(Config.findOptionByName('Server1.Address')) === '::ffff:192.0.2.1', null, { timeout: 5000 });
+        assert.equal(await page.inputValue('#S_Server1_Host'), 'mixed.example.com');
+        assert.equal(await certValue(), 'strict');
         await page.evaluate(() => $('.config-host-lookup[data-multiid="1"]').find('input[value=""]').prop('checked', true).trigger('change'));
-        await page.waitForFunction(() => $('#S_Server1_Host').val() === 'mixed.example.com', null, { timeout: 5000 });
+        await page.waitForFunction(() => Config.getOptionValue(Config.findOptionByName('Server1.Address')) === '', null, { timeout: 5000 });
         await host.fill('news.example.com');
         await page.waitForFunction(() => /2 addresses for news/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
       });
 
       await check('a scoped IPv6 address typed directly counts as an address', async () => {
         await host.fill('fe80::1%eth0');
-        await page.waitForFunction(() => /Always using/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
+        await page.waitForFunction(() => /Host is an address/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
         await host.fill('news.example.com');
         await page.waitForFunction(() => /2 addresses for news/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
       });
@@ -225,15 +245,17 @@ const { installDetailsFixture } = require('./details-fixture');
         assert.equal(await page.evaluate(() => $('#S_Server2_Host').siblings('.config-host-lookup').attr('data-multiid')), '2');
         await page.evaluate(() => $('#S_Server2_Host').siblings('.config-host-lookup').find('input[value="192.0.2.10"]').prop('checked', true).trigger('change'));
         await page.waitForTimeout(300);
-        assert.equal(await page.inputValue('#S_Server2_Host'), '192.0.2.10');
+        assert.equal(await address(2), '192.0.2.10');
+        assert.equal(await page.inputValue('#S_Server2_Host'), 'news.example.com');
         assert.equal(await page.inputValue('#S_Server1_Host'), 'block.example.invalid', 'the other server is untouched');
+        assert.equal(await address(1), '', 'the other server keeps Auto');
       });
 
       await check('an address typed directly shows its details', async () => {
         await page.locator('.config-list-row.NEWS-SERVERS.multiid1 .config-list-edit').click();
         await page.waitForTimeout(150);
         await host.fill('192.0.2.10');
-        await page.waitForFunction(() => /Always using/.test($('#S_Server1_Host').siblings('.config-host-lookup').text()), null, { timeout: 5000 });
+        await page.waitForFunction(() => /Host is an address/.test($('#S_Server1_Host').siblings('.config-host-lookup').text()), null, { timeout: 5000 });
         assert.match(await page.evaluate(() => $('#S_Server1_Host').siblings('.config-host-lookup').text()), /NL Netherlands · AS64500 Example Net · 12 ms/);
       });
 

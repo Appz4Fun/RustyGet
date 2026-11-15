@@ -2411,7 +2411,28 @@ var Config = (new function($)
 				}, this);
 				input.val(String(value)).trigger('input');
 				syncSlider(wrapper);
-			}).on('change', function() { input.trigger('change'); });
+			}).on('change', function() { input.trigger('change'); })
+			.on('keydown', function(e)
+			{
+				// arrows step the setting by one, Page keys jump between presets, Home/End to the ends
+				var value = parseInt(input.val(), 10);
+				value = isNaN(value) ? meta.min : value;
+				var presets = (meta.presets || []).map(function(p) { return p[0]; });
+				var next = null;
+				if (e.key === 'ArrowRight' || e.key === 'ArrowUp') next = value + 1;
+				else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') next = value - 1;
+				else if (e.key === 'Home') next = meta.min;
+				else if (e.key === 'End') next = meta.max;
+				else if (e.key === 'PageUp') next = presets.filter(function(p) { return p > value; })[0];
+				else if (e.key === 'PageDown') next = presets.filter(function(p) { return p < value; }).pop();
+				else return;
+				e.preventDefault();
+				if (next !== undefined && next !== null)
+				{
+					setNumber(input, next, meta);
+					syncSlider(wrapper);
+				}
+			});
 			dots.on('click', '.config-slider__dot', function()
 			{
 				setNumber(input, $(this).attr('data-value'), meta);
@@ -2524,7 +2545,6 @@ var Config = (new function($)
 		{ option: 'UnpackPauseQueue', when: { name: 'Unpack', values: ['yes'], orCategory: 'Unpack' } },
 		{ option: 'ExtCleanupDisk', when: { name: 'Unpack', values: ['yes'], orCategory: 'Unpack' } },
 		{ option: 'UnpackIgnoreExt', when: { name: 'Unpack', values: ['yes'], orCategory: 'Unpack' } },
-		{ option: 'DupeArticleFallback', when: { name: 'DupeCheck', values: ['yes'] } },
 		{ option: 'DupeBorrowFirst', when: { name: 'DupeArticleFallback', values: ['article', 'stream', 'live', 'yes'] } },
 		{ option: 'DupeStreamDecompress', when: { name: 'DupeArticleFallback', values: ['stream', 'live'] } },
 		{ option: 'DupeStreamTimeout', when: { name: 'DupeArticleFallback', values: ['stream', 'live'] } },
@@ -2800,6 +2820,11 @@ var Config = (new function($)
 		});
 		$ConfigData.on('input', '.config-number input.editnumeric', function()
 		{
+			// a reference to another option, such as ${Server1.Connections}, is kept as typed
+			if (/^\s*\$/.test(this.value))
+			{
+				return;
+			}
 			var allowMinus = $(this).attr('pattern') === '-?[0-9]*';
 			var clean = this.value.replace(allowMinus ? /(?!^-)[^0-9]/g : /[^0-9]/g, '');
 			if (clean !== this.value)
@@ -2821,7 +2846,7 @@ var Config = (new function($)
 		$ConfigData.on('change', '.config-number input.editnumeric', function()
 		{
 			var meta = $(this).closest('.config-number').data('meta');
-			if (meta && this.value !== '')
+			if (meta && this.value !== '' && !/^\s*\$/.test(this.value))
 			{
 				var n = parseInt(this.value, 10);
 				var clamped = isNaN(n) ? meta.hardMin : clampNumber(n, meta);

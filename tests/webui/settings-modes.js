@@ -143,6 +143,13 @@ const { installDetailsFixture } = require('./details-fixture');
         await input.fill('0');
         await row('ArticleRetries').locator('.config-step[data-step="-1"]').click();
         assert.equal(await input.inputValue(), '0', 'and at its minimum');
+        // a reference to another option is a valid value and is kept
+        await input.fill('');
+        await input.pressSequentially('${UrlRetries}');
+        await input.dispatchEvent('change');
+        assert.equal(await input.inputValue(), '${UrlRetries}', 'Option references are kept');
+        await input.fill('3');
+        await input.dispatchEvent('input');
       });
 
       await check('the slider has sticky preset dots explained in the help', async () => {
@@ -163,6 +170,20 @@ const { installDetailsFixture } = require('./details-fixture');
         await S('ArticleRetries').fill('40');
         await S('ArticleRetries').dispatchEvent('input');
         assert.equal(await range.inputValue(), '1000');
+        // the keyboard moves a focused slider by one, and Page keys jump between presets
+        await S('ArticleRetries').fill('3');
+        await S('ArticleRetries').dispatchEvent('input');
+        await range.focus();
+        await page.keyboard.press('ArrowRight');
+        assert.equal(await S('ArticleRetries').inputValue(), '4', 'ArrowRight steps by one');
+        await page.keyboard.press('ArrowRight');
+        assert.equal(await S('ArticleRetries').inputValue(), '5');
+        await page.keyboard.press('ArrowLeft');
+        assert.equal(await S('ArticleRetries').inputValue(), '4');
+        await page.keyboard.press('PageUp');
+        assert.equal(await S('ArticleRetries').inputValue(), '10', 'PageUp goes to the next preset');
+        await page.keyboard.press('Home');
+        assert.equal(await S('ArticleRetries').inputValue(), '0');
         const table = r.locator('.help-block table.config-presets');
         assert.equal(await table.locator('tr').count(), await dots.count(), 'The help lists each preset');
         assert((await table.locator('tr').first().locator('td').last().textContent()).length > 10, 'with what it means');
@@ -190,8 +211,13 @@ const { installDetailsFixture } = require('./details-fixture');
         await page.waitForTimeout(300);
         assert.equal(await r.evaluate(el => el.classList.contains('is-locked')), false, 'Unlocked once Unpack is on');
         assert.equal(await r.locator('.config-lock-note').count(), 0);
-        // a value rule names the values it needs
+        // article borrowing works without duplicate checking, so it stays editable
         await show('DUPE_FLEETS');
+        await page.evaluate(() => { Config.switchClick($('#S_DupeCheck .btn[data-value="no"]')[0]); Config.refreshChangeState(); });
+        await page.waitForTimeout(200);
+        assert.equal(await row('DupeArticleFallback').evaluate(el => el.classList.contains('is-locked')), false);
+        await page.evaluate(() => { Config.switchClick($('#S_DupeCheck .btn[data-value="yes"]')[0]); Config.refreshChangeState(); });
+        // a value rule names the values it needs
         await page.evaluate(() => { const b = $('#S_DupeArticleFallback .btn[data-value="article"]')[0]; Config.switchClick(b); Config.refreshChangeState(); });
         await page.waitForTimeout(200);
         const stream = row('DupeStreamTimeout');

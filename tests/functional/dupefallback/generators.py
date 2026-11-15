@@ -96,6 +96,35 @@ def rar3_store_volumes(inner_name, data, volume_size, method=0x30):
     return volumes
 
 
+def rar3_lz_payload():
+    """A real RAR 2.9 LZ (method 0x33) payload and the bytes it decodes to: the
+    RARLAB-made level-3 fixture copied from zipfast (fixtures/rar4-lz-m3.packed)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    with open(os.path.join(here, 'fixtures', 'rar4-lz-m3.packed'), 'rb') as f:
+        packed = f.read()
+    gold = b'RAR4 bounded LZ control.\n' * 8000 + bytes(range(256)) * 400
+    return packed, gold
+
+
+def rar3_lz_volumes(names):
+    """One RAR3 volume per name, each holding an independent LZ-compressed member
+    (the same payload) under that name, with real header and file CRCs."""
+    import zlib
+    packed, gold = rar3_lz_payload()
+    vols = []
+    for k, inner in enumerate(names):
+        last = k == len(names) - 1
+        name = inner.encode()
+        main = struct.pack('<HBHH', 0, 0x73, 0x0001 | 0x0010 | (0x0100 if k == 0 else 0), 13) + b'\x00' * 6
+        fh = struct.pack('<HBHH', 0, 0x74, 0x8000, 32 + len(name))
+        fh += struct.pack('<II', len(packed), len(gold)) + b'\x03'
+        fh += struct.pack('<I', zlib.crc32(gold) & 0xffffffff) + struct.pack('<I', _RAR3_DOS_TIME)
+        fh += bytes([29, 0x33]) + struct.pack('<H', len(name)) + struct.pack('<I', 0o100644) + name
+        end = struct.pack('<HBHH', 0, 0x7b, 0x4000 | (0 if last else 0x0001), 7)
+        vols.append(b'Rar!\x1a\x07\x00' + _rar3_block(main) + _rar3_block(fh) + packed + _rar3_block(end))
+    return vols, gold
+
+
 def _derive_rar3_key_iv(password, salt):
     """Pure-Python reproduction of StreamCrypto::DeriveRar3 (rar3 AES-128-CBC
     key schedule): SHA-1 over UTF-16LE password + 8-byte salt, re-fed each of

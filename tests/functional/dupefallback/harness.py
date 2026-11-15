@@ -3849,6 +3849,33 @@ def scenario_skipholepar(daemon, t):
     return ('skipholepar', good, detail)
 
 
+def scenario_rar4lzdirect(daemon, t):
+    """A RAR 2.9 set of three volumes, each holding an LZ-compressed member
+    (method 0x33), extracted by direct unpack while it downloads: the progressive
+    session decodes them itself, without the RAR 1.5-4.x fallback decoder."""
+    names = ['a.bin', 'b.bin', 'c.bin']
+    vols, gold = generators.rar3_lz_volumes(names)
+    members = []
+    for i, data in enumerate(vols):
+        rel = 'lzA/v%d' % i
+        t.write_file(os.path.join('data', rel), data)
+        members.append((rel, 'Rel.part%d.rar' % (i + 1), len(data), 200, set()))
+    api = daemon.wait_ready()
+    daemon.append(api, 'RelLZ', build_multi_nzb(members), False, 'lz-key', 100)
+    h = daemon.wait_history(api, 'RelLZ', timeout=180)
+    found = {}
+    for rel in t.find_files('main', 'dst'):
+        base = os.path.basename(rel)
+        if base in names:
+            found[base] = t.read_file(rel) == gold
+    direct = _grep_log(t, 'Direct unpack for RelLZ successful')
+    fallback = _grep_log(t, 'using the RAR 1.5-4.x decoder')
+    ok = (h['Status'].startswith('SUCCESS') and found == {n: True for n in names}
+          and direct == 1 and fallback == 0)
+    return ('rar4lzdirect', ok, 'status=%s files=%s direct_ok=%d fallback=%d' % (
+        h['Status'], found, direct, fallback))
+
+
 def scenario_wholefilenfoproof(daemon, t):
     """Corner case: a different packing of the release (same volume names and
     sizes, other bytes) that ships the SAME small .nfo. A byte match on the
@@ -9911,6 +9938,7 @@ SCENARIOS = {
     'prodrarwhole': scenario_prodrarwhole,
     'prodrarstream': scenario_prodrarstream,
     'skipholetwin': scenario_skipholetwin,
+    'rar4lzdirect': scenario_rar4lzdirect,
     'skipholepar': scenario_skipholepar,
     'wholefileonly': scenario_wholefileonly,
     'wholefilewrongdonor': scenario_wholefilewrongdonor,
@@ -10246,6 +10274,8 @@ SCENARIO_OPTIONS = {
     'prodstream': PROD_OPTIONS,
     'prodrarwhole': PROD_OPTIONS,
     'prodrarstream': PROD_OPTIONS,
+    # tiny articles (200 bytes) so the volumes arrive one by one while direct unpack runs
+    'rar4lzdirect': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'DownloadRate=2'],
     # throttled so direct unpack reaches the damaged volume before its repair lands
     'skipholetwin': PROD_OPTIONS + ['DownloadRate=1500'],
     'skipholepar': PROD_OPTIONS + ['DownloadRate=1500'],

@@ -1637,7 +1637,7 @@ var Config = (new function($)
 		],
 		LOGGING: [
 			{ key: 'file', title: 'Log file', options: ['LogToFile', 'LogBuffer', 'SystemHealthCheck'],
-				text: 'A new file each day, continued in 10 MB parts and kept 7 days. Messages of each download are written here too.' },
+				text: 'Moved aside every 10 MB and at the end of each day, named by day and number, and kept 7 days. Messages of each download are written here too.' },
 			{ key: 'levels', title: 'Message levels', options: ['ErrorTarget', 'WarningTarget', 'InfoTarget', 'DetailTarget', 'DebugTarget'] },
 			{ key: 'debug', title: 'Troubleshooting', options: [], advanced: ['CrashTrace', 'CrashDump', 'TimeCorrection'] }
 		]

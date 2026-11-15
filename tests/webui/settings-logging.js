@@ -45,7 +45,7 @@ const { installDetailsFixture } = require('./details-fixture');
         for (const name of ['WriteLog', 'RotateLog', 'NzbLog']) assert.equal(await page.locator('#S_' + name).count(), 0, name + ' is gone');
         const card = page.locator('#ConfigData .config-card.LOGGING', { has: page.locator('#S_LogToFile') });
         assert.equal((await card.locator('.config-card__title').textContent()).trim(), 'Log file');
-        assert.match(await card.locator('.config-card__text').textContent(), /10 MB parts and kept 7 days/);
+        assert.match(await card.locator('.config-card__text').textContent(), /every 10 MB and at the end of each day/);
         assert.match(await card.textContent(), /Write a log file/);
         assert(await card.locator('#S_LogBuffer').count(), 'LogBuffer is in the same card');
       });

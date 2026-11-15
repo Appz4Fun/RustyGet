@@ -3787,7 +3787,7 @@
     "description": "Description for the option LockFile"
   },
   "config_desc_logfile": {
-    "message": "Where to store log file, if it needs to be created.\n\nEach day gets its own file named after this one, such as\nrustyget-2026-11-15.log. NOTE: See also option <LogToFile>.",
+    "message": "Where to store log file, if it needs to be created.\n\nOlder parts are moved aside next to it, named by day and number,\nsuch as rustyget-2026-11-15.1.log. NOTE: See also option <LogToFile>.",
     "description": "Description for the option LogFile DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>). DO NOT translate the exact uppercase keywords (NOTE:, WARNING:, INFO:, INFO FOR DEVELOPERS:, MORE INFO:) as they are used to render UI badges."
   },
   "config_desc_configtemplate": {
@@ -4219,7 +4219,7 @@
     "description": "Description for the option SystemHealthCheck"
   },
   "config_desc_logtofile": {
-    "message": "Write messages to a log file.\n\nEach day starts a new file, such as rustyget-2026-11-15.log next to\n<LogFile>. A file that reaches 10 MB is continued in a numbered part,\nrustyget-2026-11-15.1.log, then .2 and so on. Files older than 7 days\nare deleted. Messages of each download are written here too.",
+    "message": "Write messages to a log file.\n\nMessages go to <LogFile>. When it reaches 10 MB, or its day ends, it is\nmoved aside as rustyget-2026-11-15.1.log (then .2 and so on for that\nday) and a new <LogFile> is started. Files older than 7 days are\ndeleted. A device such as /dev/stdout is written as it is. Messages of\neach download are written here too.",
     "description": "Description for the option LogToFile DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>). Keep the file names as they are."
   },
   "config_desc_errortarget": {

@@ -2200,6 +2200,15 @@ pub fn log_rotated_file_date(filename: &[u8], stem: &[u8], ext: &[u8]) -> Option
     part_ok.then_some((at, at + 5, at + 8))
 }
 
+/// The day name for `log_file` at `day_time`: `/var/log/rustyget.log` becomes
+/// `/var/log/rustyget-2026-03-10.log`.
+pub fn log_rotated_day_path(log_file: &[u8], sep: u8, day_time: i64) -> Vec<u8> {
+    let pos = crate::paths::base_file_name(log_file);
+    let (stem, ext) = log_split_basename_and_ext(&log_file[pos..]);
+    let directory: &[u8] = if pos > 0 { &log_file[..pos - 1] } else { b"." };
+    log_format_rotated_path_for_time(directory, sep, &stem, day_time, &ext)
+}
+
 /// The path of part `part` of a day log: `rustyget-2026-03-10.log` becomes
 /// `rustyget-2026-03-10.<part>.log` (part 0 is the day log itself).
 pub fn log_part_path(day_path: &[u8], part: u32) -> Vec<u8> {

@@ -8,6 +8,8 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 const MIB: u64 = 1024 * 1024;
 const JOB_CEILING: u64 = 128 * MIB;
+/// Syndrome slots a job with a large slice is allowed to grow its ceiling for.
+const MIN_SLOTS: u64 = 2;
 const FIXED_METADATA: u64 = 8 * MIB;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -18,6 +20,18 @@ pub(crate) struct LiveSessionResources {
     pub reservation_bytes: u64,
 }
 
+/// What a live session for `slice_size` needs at the least (MIN_SLOTS
+/// syndrome slots), for the message when it does not fit.
+pub(crate) fn min_reservation(slice_size: u64) -> u64 {
+    let working = slice_size.saturating_mul(2).saturating_add(MIB).max(4 * MIB);
+    working
+        .saturating_mul(6)
+        .saturating_add(32 * MIB)
+        .saturating_add(FIXED_METADATA)
+        .saturating_add(slice_size.saturating_mul(2 * MIN_SLOTS))
+        .saturating_add(MIB)
+}
+
 pub(crate) fn resources(
     slice_size: u64,
     effective_pool_bytes: u64,
@@ -25,8 +39,6 @@ pub(crate) fn resources(
     if slice_size == 0 || !slice_size.is_multiple_of(4) {
         return None;
     }
-    // Completion facts have their own shared-pool lease, with a one-MiB job cap.
-    let budget = effective_pool_bytes.min(JOB_CEILING).checked_sub(MIB)?;
     // Independent staging, fold payload, scratch, fixed tracker metadata,
     // dynamic range metadata, and queued/active caller payload allowances. The extra MiB includes parser resync space.
     let working = slice_size.checked_mul(2)?.checked_add(MIB)?.max(4 * MIB);
@@ -35,6 +47,16 @@ pub(crate) fn resources(
         .checked_mul(6)?
         .checked_add(2 * solve)?
         .checked_add(FIXED_METADATA)?;
+    // A job is held to JOB_CEILING, except that a large slice may take what
+    // MIN_SLOTS syndrome slots need (a 2160p release often has 6-10 MiB
+    // slices, which never fit 128 MiB); the pool still bounds it.
+    let needed = fixed
+        .checked_add(slice_size.checked_mul(2 * MIN_SLOTS)?)?
+        .checked_add(MIB)?;
+    // Completion facts have their own shared-pool lease, with a one-MiB job cap.
+    let budget = effective_pool_bytes
+        .min(JOB_CEILING.max(needed))
+        .checked_sub(MIB)?;
     let syndrome = budget.checked_sub(fixed)? / 2;
     let slots = (syndrome / slice_size).min(512) as usize;
     if slots == 0 {
@@ -266,6 +288,15 @@ mod tests {
         let r = resources(5 * MIB, 128 * MIB).unwrap();
         assert_eq!(r.options.preallocated_syndrome_slots, 2);
         assert!(resources(6 * MIB, 128 * MIB).is_none());
+        // a 2160p release's 6.15 MiB slice (live 2026-11-15) fits a 500 MiB
+        // pool with two slots, just above the 128 MiB job ceiling
+        let r = resources(6_451_200, 500 * MIB).unwrap();
+        assert_eq!(r.options.max_syndrome_slots, 2);
+        assert!(r.reservation_bytes <= 160 * MIB, "{}", r.reservation_bytes);
+        assert!(resources(10 * MIB, 500 * MIB).unwrap().reservation_bytes <= 220 * MIB);
+        // the message names what a slice really needs
+        assert!(min_reservation(6_451_200) > 128 * MIB);
+        assert!(resources(6_451_200, min_reservation(6_451_200)).is_some());
         assert!(resources(4 * MIB, 16 * MIB).is_none());
         assert!(resources(0, 500 * MIB).is_none());
         assert!(resources(u64::MAX, 500 * MIB).is_none());

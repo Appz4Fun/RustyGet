@@ -630,6 +630,14 @@ impl Drop for CompletionDrainLease {
             .remove(&self.nzb_id);
     }
 }
+/// A completion drain for `nzb_id` is folding files and has not yet made its
+/// follow-up live repair decision.
+pub(crate) fn streaming_session_completion_drain_active(nzb_id: i32) -> bool {
+    COMPLETION_DRAINERS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(&nzb_id)
+}
 pub(crate) fn streaming_session_claim_completion_drain(
     nzb_id: i32,
 ) -> Option<CompletionDrainLease> {

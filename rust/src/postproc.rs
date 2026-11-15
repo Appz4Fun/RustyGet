@@ -2850,6 +2850,8 @@ struct DirectUnpackHoldState {
 /// not arrived parks the session until it does.
 struct DirectUnpackFeed {
     nzb_id: i32,
+    /// RAR files the download will contain (queued plus completed).
+    expected_volumes: u64,
 }
 
 impl crate::progressive_unpack::VolumeFeed for DirectUnpackFeed {
@@ -2873,6 +2875,10 @@ impl crate::progressive_unpack::VolumeFeed for DirectUnpackFeed {
             }
             None => VolumeView::NotYet,
         }
+    }
+
+    fn expected_volumes(&self) -> u64 {
+        self.expected_volumes
     }
 
     fn wait_repaired(&mut self, is_cancelled: &mut dyn FnMut() -> bool) -> bool {
@@ -3092,6 +3098,32 @@ fn live_repair_may_start(nzb: &crate::queuesubsys_host::NzbSnap) -> bool {
     // Ordinary postprocessing owns all mutation once its queued stage is taken.
     !nzb.has_post_info
         || (!nzb.post_working && nzb.post_stage == crate::queuesubsys_host::PT_QUEUED)
+}
+
+/// Post-processing waits (boundedly) while live work for `nzb_id` is still
+/// pending: completed files not yet folded into the live session, or a live
+/// repair helper that is running.
+#[cfg(unix)]
+pub(crate) fn live_repair_should_defer_post(nzb_id: i32) -> bool {
+    static SINCE: std::sync::LazyLock<Mutex<std::collections::HashMap<i32, std::time::Instant>>> =
+        std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+    const LIMIT: Duration = Duration::from_secs(10);
+    let pending = crate::parchecker::streaming_session_pending_completed_jobs().contains(&nzb_id)
+        || crate::parchecker::streaming_session_completion_drain_active(nzb_id)
+        || direct_unpack_holds()
+            .get(&nzb_id)
+            .is_some_and(|state| state.live_repair_running);
+    let mut since = SINCE.lock().unwrap_or_else(|e| e.into_inner());
+    if !pending {
+        since.remove(&nzb_id);
+        return false;
+    }
+    let first = *since.entry(nzb_id).or_insert_with(std::time::Instant::now);
+    if first.elapsed() < LIMIT {
+        return true;
+    }
+    since.remove(&nzb_id);
+    false
 }
 
 #[cfg(unix)]
@@ -3321,6 +3353,7 @@ struct DirectUnpackRunLocal {
     final_dir_created: bool,
     use_temp_unpack_dir: bool,
     unpack_cleanup_disk: bool,
+    expected_volumes: u64,
 }
 
 pub struct NzbgetRsDirectUnpack {
@@ -4237,6 +4270,7 @@ impl NzbgetRsDirectUnpack {
         let mut failure: Option<crate::progressive_unpack::Failure> = None;
         let feed = Box::new(DirectUnpackFeed {
             nzb_id: self.nzb_id,
+            expected_volumes: local.expected_volumes,
         });
         let res = crate::unpack::extract_archive_with_feed(
             crate::fsops::path(&full_archive_path),
@@ -4313,6 +4347,7 @@ impl NzbgetRsDirectUnpack {
             final_dir_created: false,
             use_temp_unpack_dir: false,
             unpack_cleanup_disk: false,
+            expected_volumes: 0,
         };
 
         let found = with_dq_guard(ctx, host_cb, |dq_ptr| {
@@ -4350,6 +4385,19 @@ impl NzbgetRsDirectUnpack {
             local.inter_dir_opt = unsafe { ptr_bytes(strs[3]) };
             local.use_temp_unpack_dir = ints[1] != 0;
             local.unpack_cleanup_disk = ints[2] != 0;
+            // The set is still downloading: count every RAR file the queue
+            // knows of, so the session's volume budget covers the whole set.
+            if let Some(host) = crate::ffi::queue_host() {
+                let queued = (0..host.nzb_file_len(nzb_ptr))
+                    .map(|i| host.file_snap(host.nzb_file_at(nzb_ptr, i)))
+                    .filter(|f| !f.deleted && crate::filetypes::is_rar_file(&f.filename))
+                    .count();
+                let completed = (0..host.nzb_completed_files_len(nzb_ptr))
+                    .map(|i| host.nzb_completed_file_at(nzb_ptr, i))
+                    .filter(|f| crate::filetypes::is_rar_file(&f.filename))
+                    .count();
+                local.expected_volumes = (queued + completed) as u64;
+            }
             true
         });
 

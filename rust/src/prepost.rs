@@ -1719,6 +1719,12 @@ impl NzbgetRsPrePostProcessor {
                 if post_job == 0 {
                     break;
                 }
+                // A just-completed recovery volume may still be on its way into
+                // the live session; let that repair run before par-check takes over.
+                #[cfg(unix)]
+                if crate::postproc::live_repair_should_defer_post(host.nzb_snap(post_job, false).id) {
+                    break;
+                }
 
                 self.active_jobs.lock().unwrap().push(post_job);
 

@@ -28,6 +28,13 @@ use zipfast::progressive::{
     VolumeAnswer, VolumeRequest, VolumeSource,
 };
 
+/// Whether sets are ever declared to zipfast as protected native files (Complete), letting it
+/// rename verified outputs into place. Off: with a Complete declaration zipfast rechecks every
+/// protected volume on each read step, and a plain 159-volume, 15.6 GiB set ran out of its
+/// SourceBookkeeping budget mid-unpack. Every output is copied into place until that cost is
+/// bounded.
+const DECLARE_PROTECTION: bool = false;
+
 /// How long the driver sleeps between cancellation checks while the session is parked.
 const PARK_SLICE: Duration = Duration::from_millis(50);
 /// Largest patch zipfast accepts in one call.
@@ -319,9 +326,10 @@ where
     // A set that is complete on disk is declared as protected native files, which lets the
     // session publish verified members itself. Each volume holds one handle.
     // In rename mode every output is copied into place, so each member can get a free name.
-    let protected = (feed.set_is_final() && req.overwrite != Overwrite::Rename)
-        .then(|| protect_volumes(req.first_volume))
-        .flatten();
+    let protected =
+        (DECLARE_PROTECTION && feed.set_is_final() && req.overwrite != Overwrite::Rename)
+            .then(|| protect_volumes(req.first_volume))
+            .flatten();
     // A final set's volumes are all on disk; count them when no protected
     // inventory exists (rename mode) so the handle budget still fits the set.
     let expected = if feed.set_is_final() {
@@ -690,7 +698,8 @@ where
     // zipfast reads the declaration at its next publication; from then on every read step
     // rechecks every protected volume. Upgrade only for a single remaining output, so only its
     // own publication pays that, and nothing waits behind it.
-    if deferred.len() == 1
+    if DECLARE_PROTECTION
+        && deferred.len() == 1
         // zipfast names a Windows-made member with Windows path rules (a backslash splits); the copy
         // path, which placed the rest of the set, does not.
         && !deferred[0].0.meta.windows_names
@@ -1727,6 +1736,9 @@ impl FeedProvider {
     /// member, no Windows-named or duplicate-name member, every volume still the file the
     /// session read, and the handle, open-file and bookkeeping budgets fit the rest of the set.
     fn declare_if_became_final(&mut self) {
+        if !DECLARE_PROTECTION {
+            return;
+        }
         let late = &mut self.late;
         if !late.allowed || late.saw_holes || late.refused {
             return;

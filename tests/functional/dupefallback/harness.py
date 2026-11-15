@@ -1175,6 +1175,42 @@ def scenario_historylog(daemon, t):
             % (h['Status'], len(msgs), count, len(later)))
 
 
+def scenario_urlhistorylog(daemon, t):
+    """A URL whose file is not an NZB fails and goes to history with the scan's
+    messages: the History Log tab (loadlog) shows them for that URL item too."""
+    import http.server
+    import threading
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = b'this is not an nzb file'
+            self.send_response(200)
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+    server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    api = daemon.wait_ready()
+    url = 'http://127.0.0.1:%d/bad.nzb' % server.server_address[1]
+    _rpc(daemon, 'appendurl', ['BadUrlLog.nzb', url, '', 0, False, False, '', 0, 'SCORE', []], timeout=60)
+    h = None
+    deadline = time.time() + 60
+    while time.time() < deadline and h is None:
+        h = next((x for x in api.history() if x.get('NZBName', '').startswith('BadUrlLog')), None)
+        time.sleep(0.5)
+    server.shutdown()
+    if h is None:
+        return ('urlhistorylog', False, 'the URL never reached history')
+    msgs = api.loadlog(h.get('NZBID') or h.get('ID'), 0, 1000)
+    ok = h.get('Kind') == 'URL' and len(msgs) > 0
+    return ('urlhistorylog', ok, 'kind=%s status=%s messages=%d first=%s'
+            % (h.get('Kind'), h.get('Status'), len(msgs), msgs[0]['Text'][:60] if msgs else ''))
+
+
 def scenario_rejectnextserver(daemon, t):
     """B6: Server1 serves every article with a malformed yEnc part header (a
     proxy turns "=ypart begin=" into "=ypart begxn="), Server2 serves them
@@ -11995,6 +12031,7 @@ SCENARIOS = {
     'dupesearchwatchrename': scenario_dupesearchwatchrename,
     'complementary': scenario_complementary,
     'historylog': scenario_historylog,
+    'urlhistorylog': scenario_urlhistorylog,
     'redownloadresetsrecovered': scenario_redownloadresetsrecovered,
     'recheckfailed': scenario_recheckfailed,
     'nzbgapborrow': scenario_nzbgapborrow,

@@ -2477,8 +2477,9 @@ impl QueueSubsysHost {
         if hi_ptr == 0 {
             return 0;
         }
+        // a URL that failed to fetch or scan keeps its messages on its NzbInfo too
         let hi = self.hist_item_snap(hi_ptr);
-        if hi.kind == HK_NZB {
+        if hi.kind == HK_NZB || hi.kind == HK_URL {
             hi.inner_ptr
         } else {
             0

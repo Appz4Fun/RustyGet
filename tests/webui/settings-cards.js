@@ -32,6 +32,8 @@ const DUPE_OPTIONS = ['DupeCheck', 'DupeArticleFallback', 'DupeStreamDecompress'
           result[0].Template = result[0].Template.replace(/^(#?FlushQueue=.*)$/m, '$1\n\n# Fixture option the layout does not list.\n#\n# Value (yes, no).\nFixtureUnlisted=no');
         } else if (method === 'config' || method === 'loadconfig') {
           result.push({ Name: 'FixtureUnlisted', Value: 'yes' });
+          // dark runs use the older "yes" spelling, which the daemon reads as article
+          if (theme === 'dark') result.find(o => o.Name === 'DupeArticleFallback').Value = 'yes';
         }
         return result;
       } });
@@ -65,7 +67,7 @@ const DUPE_OPTIONS = ['DupeCheck', 'DupeArticleFallback', 'DupeStreamDecompress'
         const text = await page.locator('#ConfigOverview').innerText();
         assert.match(text, /2 \/ 2 active[\s\S]*40 connections/i);
         assert.match(text, /\/mnt\/20tb\/rustyget\/dst/);
-        assert.match(text, /Live repair/);
+        assert.match(text, theme === 'dark' ? /Article swap/ : /Live repair/);
         assert.match(text, /While downloading/);
         assert.match(text, /Unlimited/);
         await page.locator('#ConfigOverview .config-overview-tile[data-target="DUPE_FLEETS"]').click();

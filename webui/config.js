@@ -1794,6 +1794,10 @@ var Config = (new function($)
 
 		// dupe fleets
 		var fallback = optionValueByName('DupeArticleFallback').toLowerCase();
+		if (fallback === 'yes')
+		{
+			fallback = 'article'; // older configurations: the daemon reads "yes" as article
+		}
 		var fleetValue = !yes('DupeCheck') ? t('config_overview_off', 'Off') :
 			{ live: t('config_overview_live', 'Live repair'), stream: t('config_overview_stream', 'Stream repair'),
 				article: t('config_overview_article', 'Article swap') }[fallback] || t('config_overview_dupe_only', 'Dupe check only');

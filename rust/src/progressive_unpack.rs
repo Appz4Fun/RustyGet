@@ -1616,7 +1616,8 @@ fn path_depth(name: &[u8]) -> u64 {
 }
 
 /// Whether the process, with the files it has open now, can open `added` more for the
-/// declaration and still re-extract the set once (about one handle per volume), with room left
+/// declaration and still re-extract the set once (about two handles per volume: the repaired
+/// volume sources stay open beside the sub-session), with room left
 /// for sockets, article files and other jobs.
 fn fits_open_file_limit(added: usize) -> bool {
     #[cfg(unix)]
@@ -1637,7 +1638,7 @@ fn fits_open_file_limit(added: usize) -> bool {
         };
         let open_now = fds.count() as u64;
         let need = open_now
-            .saturating_add(2 * added as u64)
+            .saturating_add(3 * added as u64)
             .saturating_add(256);
         need <= lim.rlim_cur as u64
     }

@@ -113,7 +113,7 @@ From here the fleet features take over:
 
 - An article that no server has is borrowed from a matching file in a backup. Backups are tried in score order at first; after three misses in a row, the next backup takes the lead for that file. Within each backup, a file matches by content first (the same MD5 and length in both postings' par2 data), then by name or structure. A **twin**, whose every file is byte-identical, matches by content throughout.
 - A copy that's dying fails over early to the best backup with `HealthCheck=dupe`.
-- An **alt**, the same release in another encode, serves as a failover backup. Its files differ from the primary's, so article fallback rarely finds anything to borrow in it.
+- An **alt** holds the same video file in another container. The fleet intake decides it by reading the video inside each copy, not by par2: other par2 checksums only mean another container. Until the video inside is compared, such a copy is labelled *container*.
 
 The add-on follows the duplicate key: if RustyGet fails over, the add-on tracks the promoted backup. When a copy completes with `SUCCESS`, the add-on plays it from your completed folder.
 

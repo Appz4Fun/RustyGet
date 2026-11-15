@@ -206,6 +206,11 @@ These two words have one meaning each in code, logs, tests, and documentation.
   In a fleet (`appendfleet`) it is dropped at intake (the user's rule: the
   fleet is one video; spot-check the payload, discard a mismatch). Added any
   other way, it is a plain backup for failover.
+- Other par2 checksums (or other sampled articles) prove only another
+  container, never another video or an alt. TwinCheck labels such a copy
+  `container` (video inside not verified yet) unless the fleet intake read
+  the video inside both copies (`DupeInner` digests): equal makes it `alt`,
+  different makes it `other`. Never word it "another encode" from par2 alone.
 - Prefer donors in this order: twins, then alts that can donate by range
   (stored containers, known password), then alts that must be downloaded and
   extracted whole.

@@ -64,6 +64,50 @@ pub struct Print {
     pub samples: Vec<u32>,
 }
 
+/// The nzb parameter that keeps a copy's [`inner_param_value`]: where its
+/// video was sampled and the [`Print::digest`] of what was read there. Two
+/// values with the same sampling and digest mean the same video inside,
+/// whatever containers hold it; TwinCheck labels an alt by it.
+pub const INNER_PARAM: &[u8] = b"DupeInner";
+
+/// `<samples>.<seed hex>.<digest>`: digests compare only between copies
+/// sampled at the same offsets (the same seed and sample count).
+pub fn inner_param_value(print: &Print, samples: usize, seed: u64) -> String {
+    format!("{samples}.{seed:x}.{}", print.digest())
+}
+
+/// How two [`INNER_PARAM`] values compare: `Some(true)` the same video,
+/// `Some(false)` another video, `None` not comparable (one is missing or they
+/// were sampled at other offsets).
+pub fn same_inner(a: &[u8], b: &[u8]) -> Option<bool> {
+    let split = |v: &[u8]| -> Option<(Vec<u8>, Vec<u8>)> {
+        let dot = v.iter().rposition(|&c| c == b'.')?;
+        let (scope, digest) = (&v[..dot], &v[dot + 1..]);
+        (!scope.is_empty() && !digest.is_empty()).then(|| (scope.to_vec(), digest.to_vec()))
+    };
+    let (sa, da) = split(a)?;
+    let (sb, db) = split(b)?;
+    (sa == sb).then_some(da == db)
+}
+
+impl Print {
+    /// The print in 16 hex digits (FNV-1a 64 over the size and the samples).
+    pub fn digest(&self) -> String {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut eat = |bytes: &[u8]| {
+            for &b in bytes {
+                h ^= u64::from(b);
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        };
+        eat(&self.size.to_le_bytes());
+        for s in &self.samples {
+            eat(&s.to_le_bytes());
+        }
+        format!("{h:016x}")
+    }
+}
+
 struct Shared<'f> {
     fetch: &'f dyn ArticleFetch,
     budget: Cell<i32>,
@@ -251,9 +295,12 @@ pub fn print_copy(
     // a sample bigger than any one volume), samples left out.
     let sets = ContentMapper::group_sets(&members);
     let is_sample = |i: i32| {
-        files
-            .get(i as usize)
-            .is_some_and(|f| f.name.to_ascii_lowercase().windows(6).any(|w| w == b"sample"))
+        files.get(i as usize).is_some_and(|f| {
+            f.name
+                .to_ascii_lowercase()
+                .windows(6)
+                .any(|w| w == b"sample")
+        })
     };
     let Some(set) = sets
         .iter()
@@ -267,15 +314,17 @@ pub fn print_copy(
     else {
         return Err("no file set".to_string());
     };
-    let map: ContentMap =
-        ContentMapper::build_map_with_tls(&members, set, &sources, password, true).map_err(|e| {
-            // the mapper does not always say why; never log an empty reason
-            if e.trim().is_empty() {
-                "archive could not be mapped".to_string()
-            } else {
-                e
-            }
-        })?;
+    let map: ContentMap = ContentMapper::build_map_with_tls(
+        &members, set, &sources, password, true,
+    )
+    .map_err(|e| {
+        // the mapper does not always say why; never log an empty reason
+        if e.trim().is_empty() {
+            "archive could not be mapped".to_string()
+        } else {
+            e
+        }
+    })?;
     let size = map.inner_size();
     if size <= 0 {
         return Err("empty payload".to_string());
@@ -362,6 +411,32 @@ pub fn samples_for_body_checks(body_checks: i32) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn equal_prints_share_a_digest() {
+        let a = Print {
+            size: 10,
+            samples: vec![1, 2, 3],
+        };
+        assert_eq!(a.digest(), a.clone().digest());
+        assert_eq!(a.digest().len(), 16);
+        assert_ne!(
+            a.digest(),
+            Print {
+                size: 10,
+                samples: vec![1, 2, 4]
+            }
+            .digest()
+        );
+        assert_ne!(
+            a.digest(),
+            Print {
+                size: 11,
+                samples: vec![1, 2, 3]
+            }
+            .digest()
+        );
+    }
 
     /// Articles of fixed-size parts of named files, served from memory.
     struct Memory {
@@ -468,7 +543,13 @@ mod tests {
                 8_000,
             ));
         }
-        split.extend(copy(&mut mem, "x", "movie-sample.mkv", video(150_000, 6), 8_000));
+        split.extend(copy(
+            &mut mem,
+            "x",
+            "movie-sample.mkv",
+            video(150_000, 6),
+            8_000,
+        ));
         let a = print_copy(&bare, &mem, None, 4, 9).expect("bare");
         let b = print_copy(&split, &mem, None, 4, 9).expect("split");
         assert_eq!(a, b, "the split movie is read, not the sample");

@@ -19,7 +19,7 @@ Twin
 Alt
 : The same video file in a different container. The movie inside is byte-identical, but it's packed another way: other volume sizes, RAR instead of 7-Zip, stored inside a further archive, or encrypted with another password. The container bytes of two alts never match, so articles can't be swapped. RustyGet instead compares and borrows the bytes of the video file itself, through a map of where that file lies inside each container. An alt whose containers are stored, not compressed, and whose password is known can donate any missing range. A compressed alt has to be downloaded and extracted first, or serves as a failover backup. Tagged <span class="tag tag-alt">ALT</span>.
 
-A copy with a different video file, such as another encode, is neither a twin nor an alt. It's a plain backup that RustyGet can only fail over to.
+A copy with a different video file, such as another encode, is neither a twin nor an alt. Sent in a fleet, it's dropped at intake (see [Fleet submission](#fleet-submission)); added any other way, it's a plain backup that RustyGet can only fail over to.
 
 Same posting
 : Two NZB files that point to the same Usenet articles, such as one posting listed by two indexers. They can't back each other up, because they share every missing article. RustyGet recognizes them by their Message-IDs and keeps one.
@@ -143,9 +143,10 @@ Clients that already know every copy, such as the [Kodi add-on](kodi.md), send t
 
 1. Reads each NZB file, and marks members that are the same posting as another member, or as something RustyGet already has, as `SAME_POSTING`.
 2. Holds downloads for a moment, so the check gets connections, and checks a sample of each posting on all servers at once, within the call's time limit.
-3. Ranks the members: checked and alive first, then unknown, then dead. Within a group, the most complete copy wins, then the copy whose size is closest to the fleet's median size, which is usually the release's own packaging, then the order the client sent.
-4. Adds every usable member under the key, with scores that follow the rank. The duplicate check queues the top one and keeps the rest as backups. If a download of the key is already running, the members become its backups instead.
-5. Replies with the chosen download, a reason, and a status for every member.
+3. Opens every live copy down to its video at intake, through each stored container (7-Zip, RAR, zip, an archive inside an archive) with the same map stream repair uses, and reads the video's start plus a few random places of it: 2, 4 or 8 places for the weak, medium or hard `DupeHealthPreset`. All copies read the same places. The video most copies share is the fleet's; a copy holding another video is dropped with the status `ERROR` and the reason "not the same video". A copy that can't be opened this way (compressed, encrypted without a known password, unreadable in time) stays, unverified. The log has a line for each copy.
+4. Ranks the members: twins first, then borrowable alts, then the rest; within each, checked and alive first, then unknown, then dead, and then the most complete copy, the copy whose size is closest to the fleet's median size, and the order the client sent.
+5. Adds every usable member under the key, with scores that follow the rank. The duplicate check queues the top one and keeps the rest as backups. If a download of the key is already running, the members become its backups instead.
+6. Replies with the chosen download, a reason, and a status for every member.
 
 If the release is already on disk, RustyGet adds nothing and the reply says `ALREADY_DOWNLOADED`. See [API and compatibility](api.md#appendfleet) for the full call.
 

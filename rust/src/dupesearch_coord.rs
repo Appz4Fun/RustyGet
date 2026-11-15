@@ -15,22 +15,21 @@ use crate::deadpostings::DeadPostingsStore;
 use crate::dupesearch_nzb::{
     build_newznab_queries, build_newznab_url_percent, check_pending_identity, donor_check_posting,
     donor_check_postings, donor_dead_probe, donor_now_ms, donor_reset, donor_stop_all,
-    donor_stopping, donor_wait_all, dupe_bytes_to_path, dupe_identity_fetch_article,
-    dupe_identity_read, dupe_read_all_bytes, dupe_util_lower, dupe_write_atomic_bytes,
-    dupesearch_calc_expand_budget_ms, dupesearch_classify_search_retry_reason,
-    dupesearch_eval_post_place_retry, dupesearch_format_pending_dir,
-    dupesearch_format_rejected_outcome, dupesearch_is_better_parent_candidate,
-    dupesearch_is_rank_only_queued_member, dupesearch_parse_pending_dir_id,
-    eval_fleet_member_health, eval_fleet_outcome_reason, eval_member_rerank, eval_pick_gone,
-    fleet_calc_member_add_score, fleet_clamp_timeout_sec, fleet_ensure_nzb_ext,
-    fleet_format_fetch_error, fleet_format_summary_log, fleet_member_skip_reason,
-    fleet_update_key_score_bounds, fleet_visit_pipe_names, http_get_format_temp_path,
-    http_get_read_and_delete, lower_key, mark_searching_pending, mask_newznab_text,
-    newznab_format_query_label, newznab_format_search_info_name, parse_atoi_bytes,
-    parse_dupesearch_state_line, parse_newznab_response, parse_nzb_summary, parse_pending_meta,
-    placement_available, rank_fleet_candidates, save_pending_finish, save_pending_header,
-    save_pending_item, saved_history_backup, sort_verified_postings, DonorAnswer,
-    DonorExchangeError, DonorHealthResult, DonorOptions, DonorPosting, DonorRequest,
+    donor_stopping, donor_wait_all, dupe_bytes_to_path, dupe_identity_read, dupe_read_all_bytes,
+    dupe_util_lower, dupe_write_atomic_bytes, dupesearch_calc_expand_budget_ms,
+    dupesearch_classify_search_retry_reason, dupesearch_eval_post_place_retry,
+    dupesearch_format_pending_dir, dupesearch_format_rejected_outcome,
+    dupesearch_is_better_parent_candidate, dupesearch_is_rank_only_queued_member,
+    dupesearch_parse_pending_dir_id, eval_fleet_member_health, eval_fleet_outcome_reason,
+    eval_member_rerank, eval_pick_gone, fleet_calc_member_add_score, fleet_clamp_timeout_sec,
+    fleet_ensure_nzb_ext, fleet_format_fetch_error, fleet_format_summary_log,
+    fleet_member_skip_reason, fleet_update_key_score_bounds, fleet_visit_pipe_names,
+    http_get_format_temp_path, http_get_read_and_delete, lower_key, mark_searching_pending,
+    mask_newznab_text, newznab_format_query_label, newznab_format_search_info_name,
+    parse_atoi_bytes, parse_dupesearch_state_line, parse_newznab_response, parse_nzb_summary,
+    parse_pending_meta, placement_available, rank_fleet_candidates, save_pending_finish,
+    save_pending_header, save_pending_item, saved_history_backup, sort_verified_postings,
+    DonorAnswer, DonorExchangeError, DonorHealthResult, DonorOptions, DonorPosting, DonorRequest,
     DonorSampleOptions, DonorServer, DonorServerExchange, FetchedArticleResult, NewznabResult,
     NzbFetchReason, NzbFetched, NzbFetcherCore, NzbFetcherStats, NzbSummaryData, DONOR_MIN_KNOWN,
 };
@@ -1120,7 +1119,23 @@ fn get_nntp_fetch_host(
     None
 }
 
+/// The first article of a file (any other answers unsuccessful).
 fn fetch_article_via_host(
+    host_ctx: *mut c_void,
+    host_cb: DupeHostFn,
+    message_id: &[u8],
+    groups: &[String],
+    deadline: i64,
+) -> FetchedArticleResult {
+    let out = fetch_any_article_via_host(host_ctx, host_cb, message_id, groups, deadline);
+    if out.offset != 0 {
+        return FetchedArticleResult::default();
+    }
+    out
+}
+
+/// Any article of a file, wherever its bytes sit.
+fn fetch_any_article_via_host(
     host_ctx: *mut c_void,
     host_cb: DupeHostFn,
     message_id: &[u8],
@@ -1133,7 +1148,7 @@ fn fetch_article_via_host(
     let fetcher = Arc::new(crate::articlefetcher::ArticleFetcher::new(nntp_host));
     let fetcher_stop = Arc::clone(&fetcher);
     let ctx_addr = host_ctx as usize;
-    dupe_identity_fetch_article(
+    crate::dupesearch_nzb::fetch_article_until(
         message_id,
         groups,
         deadline,
@@ -1309,6 +1324,102 @@ fn probe_copies(
     slots
         .into_iter()
         .map(|m| m.into_inner().unwrap_or_else(|e| e.into_inner()))
+        .collect()
+}
+
+/// Longest a fleet spends opening its copies down to the video at intake.
+const FLEET_INTAKE_MAX_SEC: i64 = 30;
+
+/// Articles of one copy, read from the news servers for the intake.
+struct HostArticles {
+    ctx: usize,
+    cb: DupeHostFn,
+    groups: Arc<Vec<String>>,
+    deadline: i64,
+}
+
+impl crate::dupeintake::ArticleFetch for HostArticles {
+    fn fetch(&self, message_id: &[u8]) -> Option<crate::dupeintake::Fetched> {
+        let art = fetch_any_article_via_host(
+            self.ctx as *mut c_void,
+            self.cb,
+            message_id,
+            &self.groups,
+            self.deadline,
+        );
+        art.success.then_some(crate::dupeintake::Fetched {
+            offset: art.offset,
+            file_size: art.file_size,
+            data: art.data,
+        })
+    }
+
+    fn expired(&self) -> bool {
+        now_unix_sec() >= self.deadline || donor_stopping() || http_stopped()
+    }
+}
+
+/// Fleet intake: opens every copy down to its video (see
+/// [`crate::dupeintake`]) and reads the same `samples` random places of each,
+/// in parallel chunks until `deadline` (unix seconds). Says for each copy
+/// whether its video is the fleet's, and why a copy stayed unverified.
+fn fleet_intake(
+    host_ctx: *mut c_void,
+    host_cb: DupeHostFn,
+    summaries: &[&NzbSummaryData],
+    samples: usize,
+    seed: u64,
+    deadline: i64,
+) -> Vec<(crate::dupeintake::Verdict, String)> {
+    use crate::dupeintake::{judge, print_copy, Print};
+    let n = summaries.len();
+    let slots: Vec<Mutex<Result<Print, String>>> = (0..n)
+        .map(|_| Mutex::new(Err("time ran out".to_string())))
+        .collect();
+    let ctx_addr = host_ctx as usize;
+    for chunk in (0..n).collect::<Vec<_>>().chunks(FLEET_KIND_PROBE_PARALLEL) {
+        if now_unix_sec() >= deadline || donor_stopping() || http_stopped() {
+            break;
+        }
+        std::thread::scope(|s| {
+            for &i in chunk {
+                let info = summaries[i];
+                let slot = &slots[i];
+                s.spawn(move || {
+                    let fetch = HostArticles {
+                        ctx: ctx_addr,
+                        cb: host_cb,
+                        groups: summary_groups_arc(info),
+                        deadline,
+                    };
+                    let password = info
+                        .meta
+                        .iter()
+                        .find(|(k, v)| {
+                            k.eq_ignore_ascii_case(b"password") && !v.trim_ascii().is_empty()
+                        })
+                        .map(|(_, v)| v.trim_ascii().to_vec());
+                    let got = print_copy(
+                        &info.data_segments,
+                        &fetch,
+                        password.as_deref(),
+                        samples,
+                        seed,
+                    );
+                    *slot.lock().unwrap_or_else(|e| e.into_inner()) = got;
+                });
+            }
+        });
+    }
+    let got: Vec<Result<Print, String>> = slots
+        .into_iter()
+        .map(|m| m.into_inner().unwrap_or_else(|e| e.into_inner()))
+        .collect();
+    let prints: Vec<Option<Print>> = got.iter().map(|r| r.as_ref().ok().cloned()).collect();
+    judge(&prints)
+        .into_iter()
+        .zip(got)
+        .map(|(v, r)| (v, r.err().unwrap_or_default()))
         .collect()
 }
 
@@ -5504,6 +5615,54 @@ pub unsafe fn fleet_append(
         let kinds = fleet_member_kinds(host_ctx, host_cb, &summaries, probe_deadline);
         for (&i, kind) in usable.iter().zip(kinds) {
             candidates[i].kind = kind;
+        }
+    }
+
+    // Intake: every live copy opened down to its video; a copy carrying
+    // another video is not part of this fleet.
+    {
+        let usable: Vec<usize> = (0..candidates.len())
+            .filter(|&i| {
+                let c = &candidates[i];
+                c.error.is_empty() && c.same_as < 0 && !c.dead
+            })
+            .collect();
+        if usable.len() >= 2 && !donor_stopping() && !http_stopped() {
+            let remaining_sec = (deadline_ms - donor_now_ms() - FINISH_RESERVE_MS).max(0) / 1000;
+            let intake_deadline = now_unix_sec() + remaining_sec.min(FLEET_INTAKE_MAX_SEC);
+            let samples = crate::dupeintake::samples_for_body_checks(
+                read_host_opts(host_ctx, host_cb).body_checks,
+            );
+            let seed = u64::from(crate::dupefallback::crc32_ieee(&dupe_key)) | 1;
+            let summaries: Vec<&NzbSummaryData> =
+                usable.iter().map(|&i| &candidates[i].summary).collect();
+            let verdicts = fleet_intake(
+                host_ctx,
+                host_cb,
+                &summaries,
+                samples,
+                seed,
+                intake_deadline,
+            );
+            for (&i, (verdict, why)) in usable.iter().zip(verdicts) {
+                let name = &members[candidates[i].index].name;
+                let mut msg = b"Fleet intake: ".to_vec();
+                msg.extend_from_slice(name);
+                match verdict {
+                    crate::dupeintake::Verdict::Same => {
+                        msg.extend_from_slice(b" carries the fleet's video")
+                    }
+                    crate::dupeintake::Verdict::Different => {
+                        msg.extend_from_slice(b" carries another video, dropped");
+                        candidates[i].error = b"not the same video".to_vec();
+                    }
+                    crate::dupeintake::Verdict::Unverified => {
+                        msg.extend_from_slice(b" unverified: ");
+                        msg.extend_from_slice(why.as_bytes());
+                    }
+                }
+                host_log(host_ctx, host_cb, MK_INFO, &msg);
+            }
         }
     }
 

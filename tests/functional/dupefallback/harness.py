@@ -6072,6 +6072,74 @@ def scenario_fleetencryptedlast(daemon, t):
     return ('fleetencryptedlast', ok, 'order=%s chosen=%s kinds=%s' % (order, chosen, kinds))
 
 
+def _yenc_parts(data, name, part_size):
+    """A file posted as yEnc articles of ``part_size`` bytes."""
+    total = (len(data) + part_size - 1) // part_size
+    out = []
+    for n in range(total):
+        chunk = data[n * part_size:(n + 1) * part_size]
+        lines, line = [], bytearray()
+        for b in chunk:
+            c = (b + 42) & 255
+            if c in (0, 9, 10, 13, 32, 61, 46):
+                line += b'=' + bytes([(c + 64) & 255])
+            else:
+                line.append(c)
+            if len(line) >= 128:
+                lines.append(bytes(line))
+                line = bytearray()
+        if line:
+            lines.append(bytes(line))
+        lines = b'\r\n'.join(lines)
+        begin = n * part_size + 1
+        out.append(b'=ybegin part=%d total=%d line=128 size=%d name=%s\r\n=ypart begin=%d end=%d\r\n'
+                   % (n + 1, total, len(data), name.encode(), begin, begin + len(chunk) - 1)
+                   + lines + b'\r\n=yend size=%d part=%d pcrc32=%08x\r\n'
+                   % (len(chunk), n + 1, zlib.crc32(chunk) & 0xffffffff))
+    return out
+
+
+def _intake_copy(daemon, tag, name, data, part_size=40_000):
+    """A fleet copy whose articles really hold ``data`` as ``name``."""
+    bodies = _yenc_parts(data, name, part_size)
+    ids = ['%s-%d@x' % (tag, i) for i in range(len(bodies))]
+    for mid, body in zip(ids, bodies):
+        daemon.fake_nntp.bodies_by_id[mid] = body
+    daemon.fake_nntp.alive |= set(ids)
+    return _fake_nzb_files([(name, ids, len(data))]).decode()
+
+
+def scenario_fleetintake(daemon, t):
+    """appendfleet intake: every copy is opened down to its video and sampled.
+    A bare mkv and a stored zip holding the same mkv are the same release; a
+    copy holding another video is dropped (ERROR "not the same video") and
+    never queued."""
+    import io as _io
+    import zipfile as _zip
+    daemon.fake_nntp.alive = set()
+    ebml = b'\x1a\x45\xdf\xa3'   # intake only compares payloads that start like a video
+    video = ebml + _payload(400_000, 7201)
+    other = ebml + _payload(400_000, 7202)
+    packed = _io.BytesIO()
+    with _zip.ZipFile(packed, 'w', _zip.ZIP_STORED) as z:
+        z.writestr('movie.mkv', video)
+    api = daemon.wait_ready()
+    reply = _fleet(daemon, [
+        ('Show.S01E01.bare', _intake_copy(daemon, 'ib', 'movie.mkv', video)),
+        ('Show.S01E01.other', _intake_copy(daemon, 'io', 'film.mkv', other)),
+        ('Show.S01E01.zip', _intake_copy(daemon, 'iz', 'movie.zip', packed.getvalue()))],
+        key='fleet:intake')
+    members = {m['Name']: m for m in reply['Members']}
+    other_m = members.get('Show.S01E01.other', {})
+    items = {g['NZBName'] for g in api.listgroups() + api.history() if g.get('DupeKey') == 'fleet:intake'}
+    log_same = _grep_log(t, "Show.S01E01.zip carries the fleet's video")
+    ok = (other_m.get('Status') == 'ERROR' and 'not the same video' in other_m.get('Reason', '')
+          and 'Show.S01E01.other' not in items
+          and any(members.get(n, {}).get('Status') == 'QUEUED' for n in ('Show.S01E01.bare', 'Show.S01E01.zip'))
+          and log_same > 0)
+    return ('fleetintake', ok, 'reply=%s items=%s zip_same_logged=%s' % (reply, sorted(items), log_same))
+
+
 def _watch_wait(t, needle, timeout=90):
     deadline = time.time() + timeout
     while time.time() < deadline and _grep_log(t, needle) == 0:
@@ -9779,6 +9847,7 @@ SCENARIOS = {
     'fleetone': scenario_fleetone,
     'fleetnodupecheck': scenario_fleetnodupecheck,
     'fleetkindorder': scenario_fleetkindorder,
+    'fleetintake': scenario_fleetintake,
     'fleetencryptedlast': scenario_fleetencryptedlast,
     'watchforcepick': scenario_watchforcepick,
     'watchdeadpick': scenario_watchdeadpick,
@@ -10376,7 +10445,7 @@ SCENARIO_FIRST_FAIL_PROXY = {'recheckfailed': ((b'?5=', b'?10=', b'?15='),),
 # scenarios with a FakeNewznab indexer (DupeSearchUrl points to it)
 
 # scenarios with a FakeNntp news server in place of nserv
-SCENARIO_FAKE_NNTP = {'watchfleet', 'watchforcepick', 'watchdeadpick', 'watchswap', 'watchswaptwin', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetnodupecheck', 'fleetkindorder', 'fleetencryptedlast', 'fleetalldead', 'fleetshutdown'}
+SCENARIO_FAKE_NNTP = {'watchfleet', 'watchforcepick', 'watchdeadpick', 'watchswap', 'watchswaptwin', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetnodupecheck', 'fleetkindorder', 'fleetintake', 'fleetencryptedlast', 'fleetalldead', 'fleetshutdown'}
 
 
 # --------------------------------------------------------------------------- #

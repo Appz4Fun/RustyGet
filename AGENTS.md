@@ -202,8 +202,10 @@ These two words have one meaning each in code, logs, tests, and documentation.
   `ContentMapper::build_map_with_tls` in `rust/src/streamrepair.rs`. Extend
   it for a new container or layer; don't build a second map or compare
   container bytes.
-- A copy with a different video file, such as another encode, is neither. It
-  is a plain backup for failover.
+- A copy with a different video file, such as another encode, is neither.
+  In a fleet (`appendfleet`) it is dropped at intake (the user's rule: the
+  fleet is one video; spot-check the payload, discard a mismatch). Added any
+  other way, it is a plain backup for failover.
 - Prefer donors in this order: twins, then alts that can donate by range
   (stored containers, known password), then alts that must be downloaded and
   extracted whole.

@@ -100,7 +100,7 @@ The result:
 | `Complete` | `false` when the time limit cut the check short, so some members are less well measured. |
 | `Reason` | Why nothing new is downloading, when that's the case: `ALREADY_QUEUED`, `ALREADY_DOWNLOADED`, `ALL_DEAD`, `INCOMPLETE`, `NO_USABLE_MEMBERS`, `NO_MEMBERS`, `NOT_QUEUED`, `KEY_BUSY`, or `SHUTDOWN`. Retry after `KEY_BUSY` and `SHUTDOWN`. |
 | `Members` | One entry per member, in rank order. |
-| `Members[].Status` | `QUEUED` (downloading), `BACKUP` (kept in history), `SAME_POSTING` (a copy of another member or of an existing item), `COPY` (the same NZB file as an existing item), `DEAD`, `SKIPPED`, or `ERROR`. |
+| `Members[].Status` | `QUEUED` (downloading), `BACKUP` (kept in history), `SAME_POSTING` (a copy of another member or of an existing item), `COPY` (the same NZB file as an existing item), `DEAD`, `SKIPPED`, or `ERROR` (unreadable, or holding another video than the fleet: `Reason` says which). |
 | `Members[].Alive` | Percent of the sampled articles found, or `-1` if unknown. |
 | `Members[].SameAs`, `SameAsRank` | For `SAME_POSTING`: the ID of the item it duplicates, and that member's rank. |
 

@@ -36,15 +36,21 @@ fn block(kind: u64, flags: u64, fields: &[u8], data: &[u8], data_size_field: boo
     out
 }
 
+thread_local! {
+    /// Host OS and attributes `file_block` writes: Unix 0644 unless a test changes them.
+    static RAR5_HOST: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((1, 0o644)) };
+}
+
 fn file_block(name: &str, size: u64, part: &[u8], crc: u32, before: bool, after: bool) -> Vec<u8> {
+    let (host, attributes) = RAR5_HOST.with(|h| h.get());
     let mut fields = Vec::new();
     vint(0x4 | 0x2, &mut fields); // CRC present, mtime present
     vint(size, &mut fields);
-    vint(0o644, &mut fields);
+    vint(attributes, &mut fields);
     fields.extend_from_slice(&1_700_000_000u32.to_le_bytes());
     fields.extend_from_slice(&crc.to_le_bytes());
     vint(0, &mut fields); // stored
-    vint(1, &mut fields); // unix
+    vint(host, &mut fields); // 1 = Unix, 0 = Windows
     vint(name.len() as u64, &mut fields);
     fields.extend_from_slice(name.as_bytes());
     let mut flags = 0;
@@ -169,12 +175,21 @@ fn run(
     out: &Path,
     feed: Box<dyn VolumeFeed>,
 ) -> (Result<zipfast::extract::Summary, Error>, Vec<String>) {
+    run_with(first, out, feed, Overwrite::Always)
+}
+
+fn run_with(
+    first: &Path,
+    out: &Path,
+    feed: Box<dyn VolumeFeed>,
+    overwrite: Overwrite,
+) -> (Result<zipfast::extract::Summary, Error>, Vec<String>) {
     let mut log = Vec::new();
     let req = Request {
         first_volume: first,
         dest: out,
         password: "",
-        overwrite: Overwrite::Always,
+        overwrite,
         on_wait: None,
     };
     let r = extract(
@@ -1786,19 +1801,22 @@ fn rar4_lz_damage_is_reported_not_skipped() {
     assert!(!t.out().join("m.bin").exists());
 }
 
-#[test]
-fn after_repair_zipfast_moves_the_patched_file_into_place() {
-    let t = TestDir::new("renameafter");
+/// A set with `name` whose third volume is damaged and then repaired in place (same file, so
+/// the volumes can be declared protected afterwards). Returns the output dir, data and log.
+fn repaired_in_place(
+    t: &TestDir,
+    name: &str,
+    overwrite: Overwrite,
+) -> (PathBuf, Vec<u8>, Vec<String>) {
     let data = pattern(600_000);
     let chunk = 100_000;
-    let vols = rar5_volumes("movie.mkv", &data, chunk);
+    let vols = rar5_volumes(name, &data, chunk);
     let first = write_set(&t.dl(), &vols);
     let v3 = t.dl().join(volume_name(2, vols.len()));
     let p3 = payload_offset(&vols[2], chunk) as u64;
     let mut dmg = vols[2].clone();
     dmg[(p3 + 10_000) as usize..(p3 + 30_000) as usize].fill(0);
     std::fs::write(&v3, &dmg).unwrap();
-    // Repaired in place: same file, so the volumes can be declared protected afterwards.
     struct InPlace(PathBuf, u64, Vec<u8>);
     impl VolumeFeed for InPlace {
         fn volume(&mut self, path: &Path) -> VolumeView {
@@ -1824,28 +1842,91 @@ fn after_repair_zipfast_moves_the_patched_file_into_place() {
         }
     }
     let original = vols[2][(p3 + 10_000) as usize..(p3 + 30_000) as usize].to_vec();
-    let (r, log) = run(
+    let (r, log) = run_with(
         &first,
         &t.out(),
         Box::new(InPlace(v3, p3 + 10_000, original)),
+        overwrite,
     );
     expect_ok(r, &log);
-    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
-    assert!(
-        log.iter()
-            .any(|l| l.contains("moved into place instead of copied")),
-        "{log:?}"
-    );
-    // zipfast's stage is 0600; the published file must stay readable to other users.
+    (t.out(), data, log)
+}
+
+fn moved(log: &[String]) -> bool {
+    log.iter()
+        .any(|l| l.contains("moved into place instead of copied"))
+}
+
+#[cfg(unix)]
+fn mode_of(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+#[test]
+fn after_repair_zipfast_moves_the_patched_file_into_place() {
+    let t = TestDir::new("renameafter");
+    let (out, data, log) = repaired_in_place(&t, "movie.mkv", Overwrite::Always);
+    assert_eq!(std::fs::read(out.join("movie.mkv")).unwrap(), data);
+    assert!(moved(&log), "{log:?}");
+    // The stored Unix mode, as the copy path gives it.
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(t.out().join("movie.mkv"))
-            .unwrap()
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o044, 0o044, "mode {mode:o}");
-    }
+    assert_eq!(mode_of(&out.join("movie.mkv")), 0o644);
+}
+
+#[test]
+fn a_moved_windows_member_gets_a_normal_mode_at_its_windows_path() {
+    // zipfast stages at 0600 and names Windows-made members with Windows rules ("\" splits).
+    RAR5_HOST.with(|h| h.set((0, 0x20)));
+    let t = TestDir::new("renamewin");
+    let (out, data, log) = repaired_in_place(&t, "dir\\movie.mkv", Overwrite::Always);
+    RAR5_HOST.with(|h| h.set((1, 0o644)));
+    let target = out.join("dir").join("movie.mkv");
+    assert_eq!(std::fs::read(&target).unwrap(), data);
+    assert!(moved(&log), "{log:?}");
+    #[cfg(unix)]
+    assert_eq!(
+        mode_of(&target),
+        0o666 & !crate::lifecycle::active_umask() & 0o777
+    );
+}
+
+#[test]
+fn a_moved_member_keeps_owner_read_write() {
+    RAR5_HOST.with(|h| h.set((1, 0o000)));
+    let t = TestDir::new("rename000");
+    let (out, _data, log) = repaired_in_place(&t, "movie.mkv", Overwrite::Always);
+    RAR5_HOST.with(|h| h.set((1, 0o644)));
+    assert!(moved(&log), "{log:?}");
+    #[cfg(unix)]
+    assert_eq!(mode_of(&out.join("movie.mkv")), 0o600);
+}
+
+#[test]
+fn skip_mode_keeps_copying_after_a_repair() {
+    // zipfast publishes without replacing by hard link, which exFAT and SMB lack.
+    let t = TestDir::new("renameskip");
+    let (out, data, log) = repaired_in_place(&t, "movie.mkv", Overwrite::Skip);
+    assert_eq!(std::fs::read(out.join("movie.mkv")).unwrap(), data);
+    assert!(!moved(&log), "{log:?}");
+}
+
+#[test]
+fn a_complete_windows_set_gets_a_normal_mode() {
+    RAR5_HOST.with(|h| h.set((0, 0x20)));
+    let t = TestDir::new("completewin");
+    let data = pattern(300_000);
+    let vols = rar5_volumes("movie.mkv", &data, 100_000);
+    let first = write_set(&t.dl(), &vols);
+    RAR5_HOST.with(|h| h.set((1, 0o644)));
+    let (r, log) = run(&first, &t.out(), Box::new(CompleteSet));
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+    #[cfg(unix)]
+    assert_eq!(
+        mode_of(&t.out().join("movie.mkv")),
+        0o666 & !crate::lifecycle::active_umask() & 0o777
+    );
 }
 
 #[test]

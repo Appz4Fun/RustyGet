@@ -449,6 +449,7 @@ where
                 let name = member.name.clone();
                 match outcome {
                     MemberOutcome::Verified(_) | MemberOutcome::RecoveredInner(_) => {
+                        fix_published_mode(req.dest, &member);
                         summary.files += 1;
                         note_placed(&mut placed, &member);
                     }
@@ -666,7 +667,9 @@ where
     }
     if !deferred.is_empty()
         && first_failure.is_none()
-        && req.overwrite != Overwrite::Rename
+        // zipfast publishes by rename only when it may replace; skip mode would need hard
+        // links, which some destinations (exFAT, SMB) do not support.
+        && req.overwrite == Overwrite::Always
         && upgrade_protection(req.first_volume, &protection, &opened, handle_limit)
     {
         log_cb(
@@ -797,6 +800,8 @@ struct MemberMeta {
     unix_mode: Option<u32>,
     /// Modification time (seconds, nanoseconds).
     mtime: Option<(i64, u32)>,
+    /// The archive was not made on Unix: zipfast names its output with Windows path rules.
+    windows_names: bool,
 }
 
 /// Member metadata by volume, each volume's headers read once. Members with the same name get
@@ -839,6 +844,7 @@ fn volume_metadata(
                         .push_back(MemberMeta {
                             unix_mode: h.is_unix().then_some(h.attributes as u32),
                             mtime: h.mtime.map(|s| (s, h.mtime_nanos)),
+                            windows_names: !h.is_unix(),
                         });
                 }
                 Ok(Some(Block::End { .. })) | Ok(None) | Err(_) => break,
@@ -858,6 +864,7 @@ fn volume_metadata(
             .push_back(MemberMeta {
                 unix_mode: (f.attr & 0o170000 == 0o100000).then_some(f.attr & 0o7777),
                 mtime: crate::archive_native::rar4_dos_mtime(f.time),
+                windows_names: f.attr & 0o170000 != 0o100000,
             });
     }
     out
@@ -1179,6 +1186,11 @@ fn publish_copy(
             match session.poll_verify(artifact, &mut cx) {
                 Poll::Ready(Ok(_)) => break,
                 Poll::Ready(Err(e)) => {
+                    // Placed, but cleaning up its stage failed afterwards: the file is there.
+                    if artifact.publication() != ArtifactPublication::Unpublished {
+                        fix_published_mode(req.dest, member);
+                        return Ok(());
+                    }
                     let _ = artifact.discard();
                     return Err(Failure::from_progressive(&e));
                 }
@@ -1230,17 +1242,23 @@ fn publish_copy(
     result
 }
 
-/// zipfast publishes from a private 0600 stage and sets a mode only when the archive stores a
-/// Unix one; give other members the mode a created file gets (0666 less the umask), as the copy
-/// path does.
+/// zipfast publishes from a private 0600 stage and applies a stored Unix mode as is. Give the
+/// output the mode the copy path does: a stored mode with owner read/write kept, otherwise 0666
+/// less the umask.
 fn fix_published_mode(dest: &Path, member: &Member) {
     #[cfg(unix)]
-    if member.meta.unix_mode.is_none() {
+    {
         use std::os::unix::fs::PermissionsExt;
-        let Ok(rel) = zipfast::path::sanitize(&String::from_utf8_lossy(&member.name), false) else {
+        let Ok(rel) = zipfast::path::sanitize(
+            &String::from_utf8_lossy(&member.name),
+            member.meta.windows_names,
+        ) else {
             return;
         };
-        let mode = 0o666 & !crate::lifecycle::active_umask() & 0o777;
+        let mode = match member.meta.unix_mode {
+            Some(m) => (m & 0o777) | 0o600,
+            None => 0o666 & !crate::lifecycle::active_umask() & 0o777,
+        };
         let _ = std::fs::set_permissions(dest.join(rel), std::fs::Permissions::from_mode(mode));
     }
     #[cfg(not(unix))]

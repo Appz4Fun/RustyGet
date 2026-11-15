@@ -314,7 +314,9 @@ fn same_target(e: &Entry, s: &ServerFacts<'_>, port: u16) -> bool {
 }
 
 fn refresh_entry(s: &ServerFacts<'_>, port: u16) {
-    let found = crate::hostlookup::resolve(s.host, port).map(|ips| {
+    // every address (a pin may be past the first few, and a rotating DNS answer must not
+    // look like a changed list); only the first MAX_ADDRESSES are timed
+    let found = crate::hostlookup::resolve_all(s.host, port).map(|ips| {
         ips.into_iter()
             .filter(|ip| match s.ip_version {
                 4 => ip.is_ipv4(),
@@ -361,7 +363,18 @@ fn refresh_entry(s: &ServerFacts<'_>, port: u16) {
     }
     e.busy = true;
     drop(map);
-    let times = time_addresses(&ips);
+    let timed = crate::hostlookup::pick_addresses(ips.clone());
+    let timed_times = time_addresses(&timed);
+    let timed_names: Vec<String> = timed.iter().map(crate::hostlookup::shown_address).collect();
+    let times: Vec<Option<f64>> = names
+        .iter()
+        .map(|n| {
+            timed_names
+                .iter()
+                .position(|t| t == n)
+                .and_then(|i| timed_times[i])
+        })
+        .collect();
     let mut map = entries().lock().unwrap_or_else(|e| e.into_inner());
     let Some(e) = map.get_mut(&s.id).filter(|e| same_target(e, s, port)) else {
         return;
@@ -374,6 +387,8 @@ fn refresh_entry(s: &ServerFacts<'_>, port: u16) {
     if ranked.first() != prev_best.as_ref() {
         if let Some(best) = ranked.first() {
             let ms = e.latency.get(best).copied().flatten();
+            // nothing answered the timing: no "fastest" to report
+            if ms.is_some() {
             crate::log::log_active_bytes(
                 MK_INFO,
                 format!(
@@ -385,6 +400,7 @@ fn refresh_entry(s: &ServerFacts<'_>, port: u16) {
                 )
                 .as_bytes(),
             );
+            }
         }
     }
     e.ranked = ranked;
@@ -403,12 +419,15 @@ pub fn report(id: i32, addr: &str, ok: bool) {
         return;
     }
     e.dead.insert(addr.to_string(), Instant::now());
-    if e.ranked.first().map(String::as_str) == Some(addr) {
+    // time the addresses again, at most once per RERANK_GAP (a provider that is down
+    // fails every address on every connect)
+    let may_rerank = e.ranked_at.is_none_or(|t| t.elapsed() >= RERANK_GAP);
+    if e.ranked.first().map(String::as_str) == Some(addr) && may_rerank {
         e.rerank = true;
     }
     if !e.ranked.is_empty() && e.ranked.iter().all(|a| e.dead.contains_key(a)) {
         e.stale = true;
-        e.rerank = true;
+        e.rerank |= may_rerank;
     }
 }
 

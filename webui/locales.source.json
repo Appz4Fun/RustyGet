@@ -5630,6 +5630,9 @@
   "config_host_literal": {
     "message": "Host is an address"
   },
+  "config_host_literal_text": {
+    "message": "Type the host name instead and pick this address below: the name is then kept for the certificate check."
+  },
   "config_host_use_name_text": {
     "message": "Keeps this address as the first to try, and the name for the certificate check."
   },

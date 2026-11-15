@@ -5108,6 +5108,11 @@ var Config = (new function($)
 		};
 		if (literal)
 		{
+			if (!name)
+			{
+				box.append($('<p class="config-host-lookup__note"></p>').text(hostText('literal_text',
+					'Type the host name instead and pick this address below: the name is then kept for the certificate check.')));
+			}
 			if (name)
 			{
 				choice('\u0001name', false, hostText('use_name', 'Use the name again') + ': ' + name,

@@ -228,7 +228,7 @@ fn rar4_days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-fn rar4_dos_mtime(raw: u32) -> Option<(i64, u32)> {
+pub(crate) fn rar4_dos_mtime(raw: u32) -> Option<(i64, u32)> {
     let date = raw >> 16;
     let time = raw & 0xffff;
     let year = 1980 + i64::from((date >> 9) & 0x7f);

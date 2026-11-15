@@ -850,3 +850,92 @@ fn many_members_while_downloading_do_not_exhaust_artifact_slots() {
         assert_eq!(&std::fs::read(t.out().join(name)).unwrap(), data, "{name}");
     }
 }
+
+fn file_block_mode(name: &str, data: &[u8], mode: u64) -> Vec<u8> {
+    let mut fields = Vec::new();
+    vint(0x4 | 0x2, &mut fields);
+    vint(data.len() as u64, &mut fields);
+    vint(mode, &mut fields);
+    fields.extend_from_slice(&1_700_000_000u32.to_le_bytes());
+    fields.extend_from_slice(&crc32fast::hash(data).to_le_bytes());
+    vint(0, &mut fields);
+    vint(1, &mut fields); // unix host
+    vint(name.len() as u64, &mut fields);
+    fields.extend_from_slice(name.as_bytes());
+    block(2, 0, &fields, data, true)
+}
+
+#[cfg(unix)]
+#[test]
+fn copied_outputs_keep_mode_and_mtime() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = TestDir::new("meta");
+    let data = pattern(5_000);
+    let mut v = SIG.to_vec();
+    v.extend(main_block(false, None));
+    v.extend(file_block_mode("tool.sh", &data, 0o755));
+    v.extend(end_block(false));
+    let first = t.dl().join("meta.rar");
+    std::fs::write(&first, &v).unwrap();
+    let (r, log) = run(&first, &t.out(), Box::new(Growing));
+    expect_ok(r, &log);
+    let meta = std::fs::metadata(t.out().join("tool.sh")).unwrap();
+    assert_eq!(meta.permissions().mode() & 0o111, 0o111, "executable bits restored");
+    let mtime = meta
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    assert_eq!(mtime, 1_700_000_000);
+}
+
+#[test]
+fn copying_into_place_never_touches_other_paths() {
+    let t = TestDir::new("tmpname");
+    // Files that a predictable temporary name could collide with.
+    std::fs::write(t.out().join("movie.mkv.rgpart"), b"keep me").unwrap();
+    let data = pattern(50_000);
+    let first = write_set(&t.dl(), &rar5_volumes("movie.mkv", &data, 1 << 30));
+    let (r, log) = run(&first, &t.out(), Box::new(Growing));
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+    assert_eq!(std::fs::read(t.out().join("movie.mkv.rgpart")).unwrap(), b"keep me");
+    let leftovers: Vec<_> = std::fs::read_dir(t.out())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(".rustyget-"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+#[test]
+fn rar4_stored_then_compressed_reports_unsupported_for_the_fallback() {
+    let t = TestDir::new("rar4mixed");
+    let stored = pattern(20_000);
+    let mut v = b"Rar!\x1a\x07\x00".to_vec();
+    v.extend(rar4_block(0x73, 0, &[0u8; 6], 0));
+    v.extend(rar4_file_header("a.bin", stored.len(), stored.len(), crc32fast::hash(&stored), false, false, None));
+    v.extend_from_slice(&stored);
+    // A compressed member (method 0x33) after it.
+    let packed = vec![0u8; 64];
+    let mut rest = Vec::new();
+    rest.extend_from_slice(&(packed.len() as u32).to_le_bytes());
+    rest.extend_from_slice(&100u32.to_le_bytes());
+    rest.push(3);
+    rest.extend_from_slice(&0u32.to_le_bytes());
+    rest.extend_from_slice(&DOS_TIME.to_le_bytes());
+    rest.push(29);
+    rest.push(0x33);
+    rest.extend_from_slice(&5u16.to_le_bytes());
+    rest.extend_from_slice(&0o100644u32.to_le_bytes());
+    rest.extend_from_slice(b"b.bin");
+    v.extend(rar4_block(0x74, 0x8000, &rest, packed.len()));
+    v.extend(&packed);
+    v.extend(rar4_block(0x7b, 0, &[], 0));
+    let first = t.dl().join("mixed.rar");
+    std::fs::write(&first, &v).unwrap();
+    let (r, log) = run(&first, &t.out(), Box::new(CompleteSet));
+    assert!(matches!(r, Err(Error::Unsupported(_))), "log: {log:?}");
+}

@@ -318,11 +318,11 @@ where
     })?;
     let mut drive = Driver::new(&mut session, feed.clone(), pending);
     let mut summary = zipfast::extract::Summary::default();
-    let mut names: std::collections::HashMap<zipfast::progressive::MemberId, Vec<u8>> =
+    let mut names: std::collections::HashMap<zipfast::progressive::MemberId, Member> =
         Default::default();
-    let mut partial: Vec<(Vec<u8>, Artifact)> = Vec::new();
-    let mut provisional: Vec<(Vec<u8>, Artifact)> = Vec::new();
-    let mut anything_written = false;
+    let mut partial: Vec<(Member, Artifact)> = Vec::new();
+    let mut provisional: Vec<(Member, Artifact)> = Vec::new();
+    let mut current_volume = req.first_volume.to_path_buf();
     let mut first_failure: Option<Failure> = None;
 
     loop {
@@ -330,7 +330,7 @@ where
             Ok(Some(ev)) => ev,
             Ok(None) => break,
             Err(e) => {
-                if !anything_written && is_unsupported(&e) {
+                if is_unsupported(&e) {
                     return Err(Error::Unsupported(Unsupported(format!("{:?}", e.kind))));
                 }
                 return Err(Failure::from_progressive(&e).into());
@@ -338,20 +338,31 @@ where
         };
         match event {
             ProgressiveEvent::VolumeOpened { index, .. } => {
-                let name = volume_display_name(req.first_volume, index);
+                current_volume = volume_path(req.first_volume, index);
+                let name = current_volume
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
                 log_cb(4, &format!("Unrar: Extracting from {name}"));
             }
             ProgressiveEvent::MemberStarted { member, name, .. } => {
                 let display = String::from_utf8_lossy(&name).into_owned();
                 log_cb(4, &format!("Unrar: Extracting  {display}"));
-                names.insert(member, name.to_vec());
+                let meta = member_metadata(&current_volume, req.password, &name);
+                names.insert(
+                    member,
+                    Member {
+                        name: name.to_vec(),
+                        meta,
+                    },
+                );
             }
             ProgressiveEvent::BytesWritten { valid_bytes, .. } => {
-                anything_written |= valid_bytes > 0;
                 summary.bytes += valid_bytes;
             }
             ProgressiveEvent::MemberFinished { member, outcome } => {
-                let name = names.remove(&member).unwrap_or_default();
+                let member = names.remove(&member).unwrap_or_default();
+                let name = member.name.clone();
                 match outcome {
                     MemberOutcome::Verified(_) | MemberOutcome::RecoveredInner(_) => {
                         summary.files += 1;
@@ -363,7 +374,7 @@ where
                         // Already verified by the session: move it into place now, so the file
                         // is available while later members extract and its slot is freed.
                         if matches!(a.evidence(), ArtifactEvidence::Verified(_)) {
-                            match publish_copy(drive.session, &mut a, req, &name) {
+                            match publish_copy(drive.session, &mut a, req, &member, is_cancelled) {
                                 Ok(()) => summary.files += 1,
                                 Err(f) => {
                                     log_cb(1, &unrar_error_line(&f, &name));
@@ -371,10 +382,10 @@ where
                                 }
                             }
                         } else {
-                            provisional.push((name, a));
+                            provisional.push((member, a));
                         }
                     }
-                    MemberOutcome::Partial(a) => partial.push((name, a)),
+                    MemberOutcome::Partial(a) => partial.push((member, a)),
                     MemberOutcome::PublishedWithFailure { failure, .. } => {
                         summary.files += 1;
                         first_failure.get_or_insert(Failure::from_progressive(&failure));
@@ -385,7 +396,12 @@ where
                         if let Some(mut a) = artifact {
                             let _ = a.discard();
                         }
-                        if !anything_written && is_unsupported(&failure) {
+                        if is_unsupported(&failure) {
+                            // A member the session cannot decode (RAR4 compressed after stored
+                            // members): the fallback decoder extracts the whole set again.
+                            for (_, mut a) in partial.drain(..).chain(provisional.drain(..)) {
+                                let _ = a.discard();
+                            }
                             return Err(Error::Unsupported(Unsupported(format!(
                                 "{:?}",
                                 failure.kind
@@ -401,8 +417,8 @@ where
             ProgressiveEvent::CapacityNeeded { .. } => {
                 // Retained provisional/partial artifacts hit the session's slot limit. Publish
                 // the provisional ones now to free slots; partial ones must wait for repair.
-                for (name, mut a) in provisional.drain(..) {
-                    if let Err(f) = publish_copy(drive.session, &mut a, req, &name) {
+                for (member, mut a) in provisional.drain(..) {
+                    if let Err(f) = publish_copy(drive.session, &mut a, req, &member, is_cancelled) {
                         first_failure.get_or_insert(f);
                     } else {
                         summary.files += 1;
@@ -420,7 +436,10 @@ where
                 if let Some(mut a) = artifact {
                     let _ = a.discard();
                 }
-                if !anything_written && is_unsupported(&failure) {
+                if is_unsupported(&failure) {
+                    for (_, mut a) in partial.drain(..).chain(provisional.drain(..)) {
+                        let _ = a.discard();
+                    }
                     return Err(Error::Unsupported(Unsupported(format!("{:?}", failure.kind))));
                 }
                 let f = Failure::from_progressive(&failure);
@@ -432,8 +451,8 @@ where
         }
     }
 
-    for (name, mut a) in provisional.drain(..) {
-        match publish_copy(drive.session, &mut a, req, &name) {
+    for (member, mut a) in provisional.drain(..) {
+        match publish_copy(drive.session, &mut a, req, &member, is_cancelled) {
             Ok(()) => summary.files += 1,
             Err(f) => {
                 first_failure.get_or_insert(f);
@@ -444,10 +463,10 @@ where
     if !partial.is_empty() && first_failure.is_none() {
         let names: Vec<String> = partial
             .iter()
-            .map(|(n, a)| {
+            .map(|(m, a)| {
                 format!(
                     "{} ({} bytes missing)",
-                    String::from_utf8_lossy(n),
+                    String::from_utf8_lossy(&m.name),
                     a.holes().iter().map(|h| h.len).sum::<u64>()
                 )
             })
@@ -470,9 +489,10 @@ where
                 Failure::Damaged("the damaged volumes were not repaired".into())
             });
         } else {
-            for (name, mut a) in partial.drain(..) {
+            for (member, mut a) in partial.drain(..) {
+                let name = member.name.clone();
                 match patch_from_repaired_volumes(drive.session, &mut a, &dir, req, &name, is_cancelled)
-                    .and_then(|()| publish_copy(drive.session, &mut a, req, &name))
+                    .and_then(|()| publish_copy(drive.session, &mut a, req, &member, is_cancelled))
                 {
                     Ok(()) => {
                         summary.files += 1;
@@ -521,7 +541,7 @@ fn unrar_error_line(f: &Failure, name: &[u8]) -> String {
     }
 }
 
-fn volume_display_name(first: &Path, index: u32) -> String {
+fn volume_path(first: &Path, index: u32) -> PathBuf {
     let mut p = first.to_path_buf();
     for _ in 0..index {
         match zipfast::volume::next_volume(&p) {
@@ -529,9 +549,73 @@ fn volume_display_name(first: &Path, index: u32) -> String {
             None => break,
         }
     }
-    p.file_name()
-        .map(|n| n.to_string_lossy().into_owned())
+    p
+}
+
+/// A member being extracted: its raw name and the metadata restored on a copied output.
+#[derive(Clone, Default)]
+struct Member {
+    name: Vec<u8>,
+    meta: MemberMeta,
+}
+
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+struct MemberMeta {
+    /// Unix permission bits, when the archive was made on Unix.
+    unix_mode: Option<u32>,
+    /// Modification time (seconds, nanoseconds).
+    mtime: Option<(i64, u32)>,
+}
+
+/// Reads `name`'s header from the volume it starts in, for the metadata zipfast restores only
+/// on the outputs it publishes itself.
+fn member_metadata(volume: &Path, password: &str, name: &[u8]) -> MemberMeta {
+    use zipfast::rar5::reader::{Block, Volume};
+    let pw = (!password.is_empty()).then_some(password);
+    if let Ok(mut vol) = Volume::open_with_password(volume, pw) {
+        for _ in 0..1_000_000 {
+            match vol.next_block() {
+                Ok(Some(Block::File(h))) if h.name.as_bytes() == name => {
+                    return MemberMeta {
+                        unix_mode: h.is_unix().then_some(h.attributes as u32),
+                        mtime: h.mtime.map(|s| (s, h.mtime_nanos)),
+                    };
+                }
+                Ok(Some(Block::End { .. })) | Ok(None) | Err(_) => break,
+                Ok(Some(_)) => {}
+            }
+        }
+    }
+    // RAR 1.5-4.x headers: DOS time, and a Unix mode when the attributes are one.
+    let (_, _, files) = crate::rarreader::read_volume_file(&path_bytes(volume), password.as_bytes(), true);
+    files
+        .iter()
+        .find(|f| f.filename == name)
+        .map(|f| MemberMeta {
+            unix_mode: (f.attr & 0o170000 == 0o100000).then_some(f.attr & 0o7777),
+            mtime: crate::archive_native::rar4_dos_mtime(f.time),
+        })
         .unwrap_or_default()
+}
+
+fn apply_meta(file: &std::fs::File, meta: MemberMeta) {
+    #[cfg(unix)]
+    if let Some(mode) = meta.unix_mode {
+        use std::os::unix::fs::PermissionsExt;
+        // Owner keeps read/write; set-id and sticky bits are never restored.
+        let _ = file.set_permissions(std::fs::Permissions::from_mode((mode & 0o777) | 0o600));
+    }
+    if let Some((secs, nanos)) = meta.mtime {
+        use std::time::{Duration, UNIX_EPOCH};
+        let at = if secs >= 0 {
+            UNIX_EPOCH.checked_add(Duration::new(secs as u64, nanos.min(999_999_999)))
+        } else {
+            UNIX_EPOCH.checked_sub(Duration::from_secs(secs.unsigned_abs()))
+        };
+        if let Some(at) = at {
+            let _ = file.set_modified(at);
+        }
+    }
 }
 
 /// Reads the missing inner bytes of `artifact` out of the (now repaired) volume set in `dir`
@@ -638,8 +722,10 @@ fn publish_copy(
     session: &mut ProgressiveSession,
     artifact: &mut Artifact,
     req: &Request<'_>,
-    name: &[u8],
+    member: &Member,
+    is_cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<(), Failure> {
+    let name = member.name.as_slice();
     if artifact.publication() != ArtifactPublication::Unpublished {
         return Ok(());
     }
@@ -673,7 +759,7 @@ fn publish_copy(
     }
     let rel = zipfast::path::sanitize(&String::from_utf8_lossy(name), false)
         .map_err(|e| Failure::UnsafePath(format!(" {}: {e}", String::from_utf8_lossy(name))))?;
-    let result = copy_artifact(artifact, req.dest, &rel, req.overwrite);
+    let result = copy_artifact(artifact, req.dest, &rel, req.overwrite, member.meta, is_cancelled);
     let _ = artifact.discard();
     result
 }
@@ -683,6 +769,8 @@ fn copy_artifact(
     dest: &Path,
     rel: &Path,
     overwrite: bool,
+    meta: MemberMeta,
+    is_cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<(), Failure> {
     let target = dest.join(rel);
     let target = target.as_path();
@@ -696,37 +784,59 @@ fn copy_artifact(
     } else {
         std::fs::create_dir_all(dest).map_err(io)?;
     }
-    let mut tmp_name = target.as_os_str().to_os_string();
-    tmp_name.push(".rgpart");
-    let tmp = PathBuf::from(tmp_name);
-    let mut out = std::fs::File::create(&tmp).map_err(io)?;
+    let (tmp, mut out) = create_unique_sibling(target).map_err(io)?;
+    let fail = |out: std::fs::File, f: Failure| {
+        drop(out);
+        let _ = std::fs::remove_file(&tmp);
+        Err(f)
+    };
     let mut buf = vec![0u8; PATCH_CHUNK as usize];
     let mut at = 0u64;
     loop {
+        if is_cancelled() {
+            return fail(out, Failure::Canceled);
+        }
         match artifact.read_at(at, &mut buf) {
             Ok(ArtifactRead::Filled { count }) => {
-                out.write_all(&buf[..count]).map_err(io)?;
+                if let Err(e) = out.write_all(&buf[..count]) {
+                    return fail(out, io(e));
+                }
                 at += count as u64;
             }
             Ok(ArtifactRead::End) => break,
             Ok(ArtifactRead::Hole { .. }) => {
-                drop(out);
-                let _ = std::fs::remove_file(&tmp);
-                return Err(Failure::Damaged(format!(
-                    "{} still has a hole at {at}",
-                    target.display()
-                )));
+                let f = Failure::Damaged(format!("{} still has a hole at {at}", target.display()));
+                return fail(out, f);
             }
-            Err(e) => {
-                drop(out);
-                let _ = std::fs::remove_file(&tmp);
-                return Err(Failure::from_progressive(&e));
-            }
+            Err(e) => return fail(out, Failure::from_progressive(&e)),
         }
     }
-    out.flush().map_err(io)?;
+    if let Err(e) = out.flush() {
+        return fail(out, io(e));
+    }
+    apply_meta(&out, meta);
     drop(out);
-    std::fs::rename(&tmp, target).map_err(io)
+    if let Err(e) = std::fs::rename(&tmp, target) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(io(e));
+    }
+    Ok(())
+}
+
+/// Creates a new, uniquely named file next to `target` without touching any existing path.
+fn create_unique_sibling(target: &Path) -> std::io::Result<(PathBuf, std::fs::File)> {
+    use std::sync::atomic::AtomicU64;
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let parent = target.parent().unwrap_or_else(|| Path::new("."));
+    loop {
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let tmp = parent.join(format!(".rustyget-{}-{n}.part", std::process::id()));
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp) {
+            Ok(f) => return Ok((tmp, f)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// The volume the session is parked on and the waker that resumes it.

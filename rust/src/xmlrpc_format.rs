@@ -444,6 +444,7 @@ pub fn match_command(method: &[u8]) -> c_int {
         b"testserverspeed" => 52,
         b"testdiskspeed" => 53,
         b"testnetworkspeed" => 54,
+        b"systemstats" => 55,
         _ => 0,
     }
 }
@@ -451,7 +452,7 @@ pub fn match_command(method: &[u8]) -> c_int {
 pub fn is_safe_command(cmd_id: c_int) -> bool {
     matches!(
         cmd_id,
-        5 | 6 | 8 | 9 | 10 | 11 | 12 | 13 | 17 | 20 | 27 | 28 | 29 | 30 | 37 | 45 | 46
+        5 | 6 | 8 | 9 | 10 | 11 | 12 | 13 | 17 | 20 | 27 | 28 | 29 | 30 | 37 | 45 | 46 | 55
     )
 }
 
@@ -6398,6 +6399,8 @@ unsafe fn execute_xml_command(
                 Ok(speed_mbps) => (false, format_network_speed_bytes(is_json, speed_mbps)),
             }
         }
+        // systemstats
+        55 => (false, crate::sysmetrics::rpc_reply(is_json, cur.next_int())),
         _ => err_resp(default_err_code, default_err_text),
     }
 }

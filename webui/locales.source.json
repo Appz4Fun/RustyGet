@@ -5548,5 +5548,11 @@
   },
   "config_cipher_optimize_title": {
     "message": "Save this server and pick the fastest cipher it accepts"
+  },
+  "config_server_restored_first": {
+    "message": "Settings were restored from a backup: use Save and reload first."
+  },
+  "config_server_cipher_lost": {
+    "message": "The cipher test stopped answering and was cancelled; the cipher is unchanged."
   }
 }

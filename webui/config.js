@@ -84,6 +84,20 @@ var Options = (new function($)
 		_this.postParamConfig = initPostParamConfig();
 	}
 
+	// re-read the running configuration (after a reload) for the pages that use it,
+	// without touching the Settings editor
+	this.refreshRuntime = function(done)
+	{
+		RPC.call('config', [], function(_options)
+		{
+			_this.options = _options;
+			initCategories();
+			_this.restricted = _this.option('ControlPort') === '***';
+			notifyAll(_options);
+			if (done) done();
+		}, function() { if (done) done(); });
+	}
+
 	this.setOnPageRenderedCallback = function(callback) {
 		onPageRenderedCallback = callback;
 	}
@@ -3830,50 +3844,54 @@ var Config = (new function($)
 		return I18n.defaultValue('config_server_' + key, text);
 	}
 
-	// Everything else stays as it was last saved: only the server list is written.
+	// Everything else is written exactly as it was last saved (the saved values, not
+	// the editor, so unsaved edits, additions or deletions elsewhere stay unsaved):
+	// only the server list comes from the editor.
 	function serverOnlySaveRequest()
 	{
-		var request = [];
-		for (var k = 1; k < config.length; k++)
+		var request = (config.values || []).filter(function(item)
 		{
-			var sections = config[k].sections;
-			for (var i = 0; i < sections.length; i++)
-			{
-				var section = sections[i];
-				if (section.postparam)
-				{
-					continue;
-				}
-				for (var j = 0; j < section.options.length; j++)
-				{
-					var option = section.options[j];
-					if (option.template || option.type === 'info' || option.commandopts)
-					{
-						continue;
-					}
-					var value = section.id === 'NEWS-SERVERS' && !section.hidden ? getOptionValue(option) :
-						(option.value !== null ? option.value : option.defvalue);
-					if (value != null)
-					{
-						request.push({ Name: option.name, Value: value });
-					}
-				}
-			}
-		}
-		return request;
-	}
-
-	function markServersSaved(request)
-	{
+			return !/^Server\d+\./i.test(item.Name);
+		}).map(function(item) { return { Name: item.Name, Value: item.Value }; });
 		var section = findSectionById('NEWS-SERVERS');
 		section.options.forEach(function(option)
 		{
-			if (!option.template && option.type !== 'info')
+			if (option.template || option.type === 'info')
 			{
-				option.value = getOptionValue(option);
+				return;
+			}
+			var value = getOptionValue(option);
+			if (value != null)
+			{
+				request.push({ Name: option.name, Value: value });
 			}
 		});
-		section.modified = false;
+		return request;
+	}
+
+	function serverStructure()
+	{
+		return findSectionById('NEWS-SERVERS').options.filter(function(option) { return !option.template; })
+			.map(function(option) { return option.name; }).join('\n');
+	}
+
+	function markServersSaved(request, structure)
+	{
+		var section = findSectionById('NEWS-SERVERS');
+		var sent = {};
+		request.forEach(function(item) { sent[item.Name.toLowerCase()] = item.Value; });
+		// the saved baseline is what was written; an edit made while saving stays unsaved
+		section.options.forEach(function(option)
+		{
+			if (!option.template && option.type !== 'info' && sent.hasOwnProperty(option.name.toLowerCase()))
+			{
+				option.value = sent[option.name.toLowerCase()];
+			}
+		});
+		if (serverStructure() === structure)
+		{
+			section.modified = false;
+		}
 		// keep the saved copy in step so later saves and cipher checks compare against the file
 		var saved = {};
 		request.forEach(function(item) { saved[item.Name.toLowerCase()] = item.Value; });
@@ -3908,10 +3926,16 @@ var Config = (new function($)
 			TlsCipherDialog.showSaveBlocked();
 			return;
 		}
+		if (restored)
+		{
+			setServerStatus(serverText('restored_first', 'Settings were restored from a backup: use Save and reload first.'), 'error');
+			return;
+		}
 		serverSaving = true;
 		$('.config-server-save, .config-cipher__optimize', $ConfigData).prop('disabled', true);
 		setServerStatus(serverText('saving', 'Saving…'), 'busy');
 		var request = serverOnlySaveRequest();
+		var structure = serverStructure();
 		RPC.call('saveconfig', [Config.withCipherBaseline(request)], function(ok)
 		{
 			if (!ok)
@@ -3919,7 +3943,7 @@ var Config = (new function($)
 				serverSaveFailed(serverText('save_failed', 'Could not write the configuration file.'));
 				return;
 			}
-			markServersSaved(request);
+			markServersSaved(request, structure);
 			var encryption = findOptionByName('Server' + multiid + '.Encryption');
 			var cipher = findOptionByName('Server' + multiid + '.Cipher');
 			var wantsCipher = encryption && cipher && String(getOptionValue(encryption)).toLowerCase() === 'yes' &&
@@ -3954,10 +3978,12 @@ var Config = (new function($)
 		{
 			applySavedServers(note);
 		};
+		var misses = 0;
 		var poll = function(job)
 		{
 			RPC.call('tlscipherstatus', [job], function(result)
 			{
+				misses = 0;
 				if (['measuring', 'probing', 'saving'].indexOf(result.State) !== -1)
 				{
 					if (result.State === 'probing' && result.TotalProbes)
@@ -3981,7 +4007,17 @@ var Config = (new function($)
 				{
 					finish(forced ? (server.Message || result.Message || '') : '');
 				}
-			}, function() { finish(''); }, { timeout: 15000 });
+			}, function()
+			{
+				// a missed status reply is retried; a reload would cancel a test still running
+				if (++misses < 10)
+				{
+					setTimeout(function() { poll(job); }, 1000);
+					return;
+				}
+				RPC.call('tlsciphercancel', [job], function() {}, function() {}, { timeout: 15000 });
+				finish(serverText('cipher_lost', 'The cipher test stopped answering and was cancelled; the cipher is unchanged.'));
+			}, { timeout: 15000 });
 		};
 		RPC.call('tlscipherstart', [String(multiid)], function(result)
 		{
@@ -4019,7 +4055,7 @@ var Config = (new function($)
 				if (before === undefined || status.UpTimeSec < before)
 				{
 					Status.status = status;
-					done(serverText('saved', 'Saved and in use.'), 'ok');
+					Options.refreshRuntime(function() { done(serverText('saved', 'Saved and in use.'), 'ok'); });
 				}
 				else if (new Date() - started > 60000)
 				{

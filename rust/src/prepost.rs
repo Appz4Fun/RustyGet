@@ -356,6 +356,47 @@ pub fn pick_next_post_job(
     best_idx
 }
 
+/// True when a backup of kind `backup_kind` can lend a download of kind `own_kind` its lost
+/// volumes (see `queuecoord::alt_covers_lost_articles`).
+fn backup_can_lend(own_kind: Option<&[u8]>, backup_kind: Option<&[u8]>) -> bool {
+    use crate::donorkind::DonorKind;
+    DonorKind::from_param(own_kind) != DonorKind::Unborrowable
+        && matches!(
+            DonorKind::from_param(backup_kind),
+            DonorKind::Twin | DonorKind::Borrowable
+        )
+}
+
+/// True when a download that direct unpack extracted and verified has no damage outside its
+/// archive: every damaged or missing file is a par2 file, a RAR volume (its content was checked
+/// by the extraction), or one of at most `borrowed` files that never arrived under a name telling
+/// nothing (obfuscated dead volumes, each rebuilt from a duplicate).
+fn damage_is_borrowed_volumes(
+    files: &[crate::queuesubsys_host::CompletedFileSnap],
+    dest_dir: &[u8],
+    borrowed: usize,
+) -> bool {
+    const CF_SUCCESS: i32 = 1;
+    if borrowed == 0 {
+        return false;
+    }
+    let mut absent_unnamed = 0usize;
+    for f in files.iter().filter(|f| f.status != CF_SUCCESS && !f.par_file) {
+        if crate::filetypes::is_rar_file(&f.filename) {
+            continue;
+        }
+        let ext = crate::filetypes::file_extension(&f.filename);
+        let mut path = dest_dir.to_vec();
+        path.push(crate::paths::PATH_SEPARATOR);
+        path.extend_from_slice(&f.filename);
+        if crate::filetypes::is_known_collection_ext(ext) || crate::fsops::path(&path).exists() {
+            return false;
+        }
+        absent_unnamed += 1;
+    }
+    absent_unnamed <= borrowed
+}
+
 /// Classify skipped par-check health action in `PrePostProcessor::StartJob`:
 /// - `0`: no action
 /// - `1`: skip par-check due to health 0%
@@ -1812,9 +1853,6 @@ impl NzbgetRsPrePostProcessor {
         if stream_repair
             && !ps.stream_repair_done
             && !crate::options::dupe_borrow_first()
-            // Direct unpack paused at damaged volumes keeps going only if they are borrowed:
-            // switching to the backup would start the extraction over.
-            && !crate::postproc::direct_unpack_has_holds(nzb.id)
             && opts.health_check == HC_DUPE
             && crate::dupecoord::fails_over_snap(&opts, &nzb)
             && crate::dupecoord::find_dupe_backup_host(
@@ -1825,7 +1863,15 @@ impl NzbgetRsPrePostProcessor {
                 &nzb.name,
                 &nzb.dupe_key,
             )
-            .is_some()
+            .is_some_and(|(_, backup)| {
+                // Direct unpack paused at damaged volumes keeps going only if they are borrowed:
+                // switching to a backup that could lend them would start the extraction over.
+                !(crate::postproc::direct_unpack_has_holds(nzb.id)
+                    && backup_can_lend(
+                        host.nzb_get_param(nzb.ptr, crate::donorkind::KIND_PARAM).as_deref(),
+                        host.nzb_get_param(backup.ptr, crate::donorkind::KIND_PARAM).as_deref(),
+                    ))
+            })
         {
             let mut msg = b"Not repairing ".to_vec();
             msg.extend_from_slice(&nzb.name);
@@ -2001,7 +2047,10 @@ impl NzbgetRsPrePostProcessor {
                     && nzb.par_status != PAR_STATUS_FAILURE
                     && nzb.par_status != PAR_STATUS_REPAIR_POSSIBLE
                     && nzb.par_status != PAR_STATUS_MANUAL);
-            let mut msg = if repaired {
+            // Only obfuscated files that never arrived are held: they may not be volumes at all.
+            let stand_ins_only =
+                !repaired && crate::postproc::direct_unpack_holds_only_absent_stand_ins(nzb.id);
+            let mut msg = if repaired || stand_ins_only {
                 b"Resuming direct unpack for ".to_vec()
             } else {
                 b"Not resuming direct unpack for ".to_vec()
@@ -2009,12 +2058,14 @@ impl NzbgetRsPrePostProcessor {
             msg.extend_from_slice(&nzb.name);
             msg.extend_from_slice(if repaired {
                 b" after repair"
+            } else if stand_ins_only {
+                b": the files still missing may not be volumes"
             } else {
                 b": its damaged volumes were not repaired"
             });
             host.nzb_print_message(nzb.ptr, MK_INFO, &msg);
             host.post_set_int(post_ptr, crate::queuesubsys_host::POST_INT_WORKING, 1);
-            if repaired {
+            if repaired || stand_ins_only {
                 crate::postproc::direct_unpack_release_all(nzb.id);
             } else {
                 crate::postproc::direct_unpack_abandon(nzb.id);
@@ -2026,7 +2077,11 @@ impl NzbgetRsPrePostProcessor {
         const PAR_STATUS_SUCCESS: i32 = 3;
         if nzb.direct_unpack_status == NS_SUCCESS
             && nzb.par_status == PAR_STATUS_FAILURE
-            && crate::postproc::take_dead_volumes_borrowed(nzb.id)
+            && damage_is_borrowed_volumes(
+                &host.nzb_completed_files(nzb.ptr),
+                &nzb.dest_dir,
+                crate::postproc::take_dead_volumes_borrowed(nzb.id),
+            )
         {
             // Par-check could not restore the dead volumes, but direct unpack read them rebuilt
             // from a duplicate and the archive's own checksums verified every extracted file.
@@ -2305,6 +2360,47 @@ impl NzbgetRsPrePostProcessor {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn par_failure_is_overridden_only_for_borrowed_volume_damage() {
+        use super::damage_is_borrowed_volumes as ok;
+        use crate::queuesubsys_host::CompletedFileSnap;
+        let dir = std::env::temp_dir().join(format!("rg-borrowed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = dir.to_string_lossy().as_bytes().to_vec();
+        let f = |name: &str, status: i32, par: bool| CompletedFileSnap {
+            status,
+            par_file: par,
+            filename: name.as_bytes().to_vec(),
+            ..Default::default()
+        };
+        let base = vec![f("a.part01.rar", 1, false), f("a.part02.rar", 2, false), f("a.vol00+01.par2", 3, true)];
+        assert!(!ok(&base, &d, 0), "nothing borrowed");
+        assert!(ok(&base, &d, 1), "damage only inside the archive and its par2 files");
+        let mut obf = base.clone();
+        obf.push(f("a8f3k2", 3, false));
+        obf.push(f("q9z1m0", 3, false));
+        assert!(ok(&obf, &d, 2));
+        assert!(!ok(&obf, &d, 1), "more dead obfuscated files than borrowed volumes");
+        let mut sample = base.clone();
+        sample.push(f("a.sample.mkv", 2, false));
+        assert!(!ok(&sample, &d, 3), "a damaged loose file is real damage");
+        std::fs::write(dir.join("x1y2z3"), b"partial").unwrap();
+        let mut present = base;
+        present.push(f("x1y2z3", 2, false));
+        assert!(!ok(&present, &d, 3), "a damaged file on disk is not a borrowed volume");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn borrowing_beats_a_backup_only_when_it_can_lend() {
+        use super::backup_can_lend as can;
+        assert!(can(None, Some(b"borrowable")));
+        assert!(can(Some(b"twin"), Some(b"twin")));
+        assert!(!can(None, None));
+        assert!(!can(Some(b"borrowable"), Some(b"unborrowable")));
+        assert!(!can(Some(b"unborrowable"), Some(b"twin")));
+    }
+
     use super::*;
 
     #[test]

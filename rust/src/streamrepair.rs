@@ -8963,6 +8963,20 @@ pub struct DeadVolumeContext {
     pub nzb_id: Option<i32>,
 }
 
+impl Drop for CrossPackRepairSession {
+    /// Borrowed bytes of dead volumes that were never handed to direct unpack go away with the
+    /// session, so a partial scratch file never reaches the completed folder. Handed-over ones
+    /// belong to direct unpack, which removes them when it forgets its holds.
+    fn drop(&mut self) {
+        for d in self.dead_fills.iter().filter(|d| !d.done) {
+            let path = self.dead_fill_data_path(d);
+            if crate::deadvolume::is_scratch(crate::fsops::path(&path)) {
+                let _ = std::fs::remove_file(crate::fsops::path(&path));
+            }
+        }
+    }
+}
+
 /// One dead volume being borrowed into a scratch file.
 #[derive(Clone, Debug)]
 struct DeadFill {
@@ -9396,6 +9410,7 @@ impl CrossPackRepairSession {
                         .emit_message_bytes(TargetMessageKind::Info, &msg);
                 }
                 Err(e) => {
+                    let _ = std::fs::remove_file(crate::fsops::path(&self.dead_fill_data_path(&d)));
                     let mut msg = b"Cannot rebuild dead volume ".to_vec();
                     msg.extend_from_slice(name);
                     msg.extend_from_slice(b": ");
@@ -9406,6 +9421,15 @@ impl CrossPackRepairSession {
                 }
             }
         }
+    }
+
+    /// The scratch file a dead volume's borrowed bytes are written to.
+    fn dead_fill_data_path(&self, d: &DeadFill) -> Vec<u8> {
+        crate::artwritercore::article_writer_format_dest_file_path(
+            &self.dest_dir,
+            std::path::MAIN_SEPARATOR as u8,
+            &self.set_members[d.member as usize].name,
+        )
     }
 
     fn virtual_volume(&self, d: &DeadFill) -> Result<crate::deadvolume::VirtualVolume, String> {
@@ -17674,8 +17698,8 @@ mod dead_volume_fill_tests {
         crate::postproc::direct_unpack_forget_holds(nzb_id);
         assert!(std::fs::read_dir(&dl).unwrap().all(|e| !crate::deadvolume::is_scratch(&e.unwrap().path())));
         // Post-processing still learns, once, that the par-check failure was borrowed around.
-        assert!(crate::postproc::take_dead_volumes_borrowed(nzb_id));
-        assert!(!crate::postproc::take_dead_volumes_borrowed(nzb_id));
+        assert_eq!(crate::postproc::take_dead_volumes_borrowed(nzb_id), 3);
+        assert_eq!(crate::postproc::take_dead_volumes_borrowed(nzb_id), 0);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -1700,3 +1700,80 @@ fn dead_volumes_extract_from_borrowed_data_through_rebuilt_headers() {
     assert!(r.is_err(), "corrupt borrowed data must fail: {log:?}");
     assert!(!t2.out().join("movie.mkv").exists());
 }
+
+/// RAR4 volumes as WinRAR 3.x writes them: the end block carries the archive checksum, the
+/// volume number and 7 reserved bytes (flags 0x400f, size 20).
+fn rar4_winrar_volumes(name: &str, data: &[u8], chunk: usize) -> Vec<Vec<u8>> {
+    rar4_store_volumes(name, data, chunk)
+        .into_iter()
+        .enumerate()
+        .map(|(i, mut v)| {
+            let more = v[v.len() - 4..v.len() - 2] == 1u16.to_le_bytes();
+            v.truncate(v.len() - 7);
+            let mut rest = crc32fast::hash(&v).to_le_bytes().to_vec();
+            rest.extend_from_slice(&(i as u16).to_le_bytes());
+            rest.extend_from_slice(&[0u8; 7]);
+            let flags: u16 = 0x4000 | 0x0002 | 0x0004 | 0x0008 | u16::from(more);
+            v.extend(rar4_block(0x7b, flags, &rest, 0));
+            v
+        })
+        .collect()
+}
+
+#[test]
+fn dead_rar4_volumes_extract_from_borrowed_data_through_rebuilt_headers() {
+    use crate::deadvolume::{plan, synthesize_frame, VirtualVolume, VolumeState};
+    let t = TestDir::new("deadvol4");
+    let data = pattern(600_000);
+    let vols = rar4_winrar_volumes("movie.mkv", &data, 60_000);
+    // The complete set extracts: the fixture's end blocks are valid.
+    let tc = TestDir::new("deadvol4-full");
+    let firstc = write_named(&tc.dl(), &vols, rar4_name);
+    let (r, log) = run(&firstc, &tc.out(), Box::new(CompleteSet));
+    expect_ok(r, &log);
+
+    let first = write_named(&t.dl(), &vols, rar4_name);
+    let dead = [2usize, 3, 6];
+    let states: Vec<VolumeState> = vols
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            if dead.contains(&i) {
+                VolumeState::Dead { encoded_size: v.len() as i64 * 102 / 100 }
+            } else {
+                VolumeState::Readable(geometry_of(v))
+            }
+        })
+        .collect();
+    for &i in &dead {
+        std::fs::remove_file(t.dl().join(rar4_name(i))).unwrap();
+    }
+    let plans = plan(&states, data.len() as i64);
+    assert_eq!(plans.iter().map(|p| p.index).collect::<Vec<_>>(), dead);
+    let mut virtuals = std::collections::HashMap::new();
+    for p in &plans {
+        let borrowed = &data[p.inner_offset as usize..(p.inner_offset + p.packed_size) as usize];
+        let path = t.0.join(format!("{}.data", p.index));
+        std::fs::write(&path, borrowed).unwrap();
+        let tv = &vols[p.template];
+        let tg = geometry_of(tv);
+        let (head, tail) = synthesize_frame(
+            tg.version,
+            &tv[..tg.data_offset as usize],
+            &tv[(tg.data_offset + tg.packed_size) as usize..],
+            p.template,
+            p.index,
+            p.packed_size as u64,
+            crc32fast::hash(borrowed),
+        )
+        .unwrap();
+        crate::deadvolume::check_frame(&head, &tail, p.packed_size as u64, b"movie.mkv").unwrap();
+        virtuals.insert(
+            t.dl().join(rar4_name(p.index)),
+            VirtualVolume { head, data: path, data_len: p.packed_size as u64, tail },
+        );
+    }
+    let (r, log) = run(&first, &t.out(), Box::new(WithVirtual { virtuals }));
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+}

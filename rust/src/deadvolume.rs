@@ -103,9 +103,7 @@ pub fn plan(volumes: &[VolumeState], inner_size: i64) -> Vec<Plan> {
                     break;
                 };
                 let size = g.data_offset + g.packed_size + g.tail_len();
-                if *encoded_size > 0
-                    && (*encoded_size < size || *encoded_size > size + size / 16)
-                {
+                if *encoded_size > 0 && (*encoded_size < size || *encoded_size > size + size / 16) {
                     break;
                 }
                 if g.packed_size <= 0 || offset + g.packed_size > inner_size {
@@ -151,8 +149,11 @@ fn template_for(volumes: &[VolumeState], i: usize) -> Option<(usize, Geometry)> 
         ..g
     };
     let same_class = |j: usize| shift(j) == 0;
-    let before = (1..i).rev().find(|&j| middle(j).is_some_and(|g| g.version == version) && same_class(j));
-    let after = (i + 1..last).find(|&j| middle(j).is_some_and(|g| g.version == version) && same_class(j));
+    let before = (1..i)
+        .rev()
+        .find(|&j| middle(j).is_some_and(|g| g.version == version) && same_class(j));
+    let after =
+        (i + 1..last).find(|&j| middle(j).is_some_and(|g| g.version == version) && same_class(j));
     let pick = |j: usize| (j, adjust(j, middle(j).unwrap_or_else(|| unreachable!())));
     let chosen = match (before, after) {
         (Some(b), Some(a)) => {
@@ -284,7 +285,10 @@ pub fn check_frame(head: &[u8], tail: &[u8], packed: u64, inner_name: &[u8]) -> 
         return Err("rebuilt headers hold no file".into());
     };
     let base = |n: &[u8]| -> Vec<u8> {
-        n.rsplit(|&b| b == b'/' || b == b'\\').next().unwrap_or(n).to_vec()
+        n.rsplit(|&b| b == b'/' || b == b'\\')
+            .next()
+            .unwrap_or(n)
+            .to_vec()
     };
     if base(&f.filename) != base(inner_name)
         || !f.stored
@@ -363,8 +367,16 @@ mod rar5 {
         let mut q = 0;
         let kind = vint(h, &mut q)?;
         let flags = vint(h, &mut q)?;
-        let extra_len = if flags & HFL_EXTRA != 0 { vint(h, &mut q)? } else { 0 };
-        let data_len = if flags & HFL_DATA != 0 { vint(h, &mut q)? } else { 0 };
+        let extra_len = if flags & HFL_EXTRA != 0 {
+            vint(h, &mut q)?
+        } else {
+            0
+        };
+        let data_len = if flags & HFL_DATA != 0 {
+            vint(h, &mut q)?
+        } else {
+            0
+        };
         Some(Block {
             kind,
             flags,
@@ -429,7 +441,10 @@ mod rar5 {
                         return Err(bad("file header does not end in front of its data"));
                     }
                     let h = b.header;
-                    let extra_at = h.len().checked_sub(b.extra_len as usize).ok_or_else(|| bad("extra area"))?;
+                    let extra_at = h
+                        .len()
+                        .checked_sub(b.extra_len as usize)
+                        .ok_or_else(|| bad("extra area"))?;
                     let mut q = b.body;
                     let fflags = vint(h, &mut q).ok_or_else(|| bad("file flags"))?;
                     let fields_start = q;
@@ -446,12 +461,17 @@ mod rar5 {
                     if (comp_info >> 7) & 7 != 0 {
                         return Err(bad("compressed part"));
                     }
-                    let rest = h.get(fields_start..extra_at).ok_or_else(|| bad("file header"))?;
+                    let rest = h
+                        .get(fields_start..extra_at)
+                        .ok_or_else(|| bad("file header"))?;
                     let extra = &h[extra_at..];
                     let mut e = 0;
                     while e < extra.len() {
                         let size = vint(extra, &mut e).ok_or_else(|| bad("extra record"))? as usize;
-                        let rec_end = e.checked_add(size).filter(|&x| x <= extra.len()).ok_or_else(|| bad("extra record"))?;
+                        let rec_end = e
+                            .checked_add(size)
+                            .filter(|&x| x <= extra.len())
+                            .ok_or_else(|| bad("extra record"))?;
                         let mut r = e;
                         let kind = vint(extra, &mut r).ok_or_else(|| bad("extra record"))?;
                         match kind {
@@ -464,7 +484,11 @@ mod rar5 {
                     let mut rebuilt = Vec::new();
                     put_vint(&mut rebuilt, 2);
                     let flags = (b.flags | HFL_DATA | HFL_SPLIT_BEFORE | HFL_SPLIT_AFTER)
-                        & if extra.is_empty() { !HFL_EXTRA } else { u64::MAX };
+                        & if extra.is_empty() {
+                            !HFL_EXTRA
+                        } else {
+                            u64::MAX
+                        };
                     put_vint(&mut rebuilt, flags);
                     if !extra.is_empty() {
                         put_vint(&mut rebuilt, extra.len() as u64);
@@ -505,7 +529,9 @@ mod rar5 {
                 end = Some(e);
                 break;
             }
-            p = p.checked_add(b.data_len as usize).ok_or_else(|| bad("tail"))?;
+            p = p
+                .checked_add(b.data_len as usize)
+                .ok_or_else(|| bad("tail"))?;
         }
         let end = end.ok_or_else(|| bad("no end-of-archive header"))?;
         Ok((out, end))
@@ -520,6 +546,7 @@ mod rar4 {
     const LHD_PASSWORD: u16 = 0x0004;
     const LHD_LARGE: u16 = 0x0100;
     const EARC_DATACRC: u16 = 0x0002;
+    const EARC_REVSPACE: u16 = 0x0004;
     const EARC_VOLNUMBER: u16 = 0x0008;
 
     fn u16le(b: &[u8], at: usize) -> Option<u16> {
@@ -557,7 +584,10 @@ mod rar4 {
             if size < 7 {
                 return Err(bad("short header"));
             }
-            let mut block = head.get(p..p + size).ok_or_else(|| bad("truncated header"))?.to_vec();
+            let mut block = head
+                .get(p..p + size)
+                .ok_or_else(|| bad("truncated header"))?
+                .to_vec();
             match kind {
                 0x74 => {
                     if p + size != head.len() {
@@ -623,7 +653,9 @@ mod rar4 {
                 }
                 let mut end = Vec::new();
                 end.extend_from_slice(&[0, 0, 0x7b]);
-                let new_flags = flags & !EARC_DATACRC;
+                // Without the reserved space too: readers check the block's length against
+                // its flags.
+                let new_flags = flags & !(EARC_DATACRC | EARC_REVSPACE);
                 end.extend_from_slice(&new_flags.to_le_bytes());
                 end.extend_from_slice(&[0, 0]);
                 if flags & EARC_VOLNUMBER != 0 {
@@ -675,20 +707,46 @@ mod tests {
 
     #[test]
     fn plans_dead_middle_volumes_from_siblings() {
-        let v = vec![first(1000, 60, 900), g(1000, 61, 899), DEAD, DEAD, g(1000, 61, 899), g(500, 61, 300)];
+        let v = vec![
+            first(1000, 60, 900),
+            g(1000, 61, 899),
+            DEAD,
+            DEAD,
+            g(1000, 61, 899),
+            g(500, 61, 300),
+        ];
         let p = plan(&v, 900 + 899 * 4 + 300);
         assert_eq!(
             p,
             vec![
-                Plan { index: 2, template: 1, inner_offset: 1799, packed_size: 899, data_offset: 61 },
-                Plan { index: 3, template: 1, inner_offset: 2698, packed_size: 899, data_offset: 61 },
+                Plan {
+                    index: 2,
+                    template: 1,
+                    inner_offset: 1799,
+                    packed_size: 899,
+                    data_offset: 61
+                },
+                Plan {
+                    index: 3,
+                    template: 1,
+                    inner_offset: 2698,
+                    packed_size: 899,
+                    data_offset: 61
+                },
             ]
         );
     }
 
     #[test]
     fn stops_at_unknown_and_never_plans_first_or_last() {
-        let v = vec![first(1000, 60, 900), g(1000, 61, 899), VolumeState::Unknown, DEAD, g(1000, 61, 899), g(10, 1, 1)];
+        let v = vec![
+            first(1000, 60, 900),
+            g(1000, 61, 899),
+            VolumeState::Unknown,
+            DEAD,
+            g(1000, 61, 899),
+            g(10, 1, 1),
+        ];
         assert!(plan(&v, 1 << 40).is_empty());
         let v = vec![first(1000, 60, 900), g(1000, 61, 899), DEAD];
         assert!(plan(&v, 1 << 40).is_empty());
@@ -698,7 +756,13 @@ mod tests {
 
     #[test]
     fn disagreeing_siblings_plan_nothing() {
-        let v = vec![first(1000, 60, 900), g(1000, 61, 899), DEAD, g(1100, 61, 999), g(10, 1, 1)];
+        let v = vec![
+            first(1000, 60, 900),
+            g(1000, 61, 899),
+            DEAD,
+            g(1100, 61, 999),
+            g(10, 1, 1),
+        ];
         assert!(plan(&v, 1 << 40).is_empty());
     }
 
@@ -724,15 +788,28 @@ mod tests {
         v.push(g(10, 1, 1));
         let p = plan(&v, 1 << 40);
         assert_eq!(p.len(), 1);
-        assert_eq!((p[0].index, p[0].template, p[0].data_offset, p[0].packed_size), (128, 129, 62, 898));
+        assert_eq!(
+            (
+                p[0].index,
+                p[0].template,
+                p[0].data_offset,
+                p[0].packed_size
+            ),
+            (128, 129, 62, 898)
+        );
         // Without a two-byte sibling yet, a one-byte one is shifted.
         v[129] = VolumeState::Unknown;
         let p = plan(&v, 1 << 40);
-        assert_eq!((p[0].template, p[0].data_offset, p[0].packed_size), (127, 62, 898));
+        assert_eq!(
+            (p[0].template, p[0].data_offset, p[0].packed_size),
+            (127, 62, 898)
+        );
     }
 
     fn testdata(name: &str) -> Vec<u8> {
-        let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/testdata").join(name);
+        let p = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tests/testdata")
+            .join(name);
         std::fs::read(p).unwrap()
     }
 
@@ -755,7 +832,12 @@ mod tests {
         }
         let mut vol = crate::rarreader::Volume::default();
         let mut files = Vec::new();
-        crate::rarreader::read_from(&mut vol, &mut Mem(bytes), &mut crate::rarreader::DisabledCipher, &mut files);
+        crate::rarreader::read_from(
+            &mut vol,
+            &mut Mem(bytes),
+            &mut crate::rarreader::DisabledCipher,
+            &mut files,
+        );
         (vol, files)
     }
 

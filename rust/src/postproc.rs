@@ -2999,19 +2999,35 @@ pub(crate) fn direct_unpack_virtual(nzb_id: i32, full_path: &[u8]) -> Option<cra
         .and_then(|st| st.virtuals.get(full_path).cloned())
 }
 
-/// Downloads that had dead volumes rebuilt from a duplicate. Kept past the end of direct
-/// unpack (which forgets its holds) so post-processing can tell why par-check failed.
-fn dead_volumes_borrowed() -> std::sync::MutexGuard<'static, std::collections::HashSet<i32>> {
-    static SET: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<i32>>> =
+/// True when every file direct unpack of `nzb_id` still holds is a file that never reached the
+/// disk under a name that is not a RAR volume's (an obfuscated stand-in held in case it was a
+/// volume). Releasing those is safe: a volume the extraction really needs then shows as missing
+/// and the extraction fails as it would have, while one it never needed lets it finish.
+pub(crate) fn direct_unpack_holds_only_absent_stand_ins(nzb_id: i32) -> bool {
+    direct_unpack_holds().get(&nzb_id).is_some_and(|st| {
+        !st.held.is_empty()
+            && st.held.iter().all(|p| {
+                !crate::filetypes::is_rar_file(hold_path_filename(p))
+                    && !crate::fsops::path(p).exists()
+            })
+    })
+}
+
+/// Downloads that had dead volumes rebuilt from a duplicate, with how many. Kept past the end
+/// of direct unpack (which forgets its holds) so post-processing can tell why par-check failed.
+fn dead_volumes_borrowed(
+) -> std::sync::MutexGuard<'static, std::collections::HashMap<i32, usize>> {
+    static MAP: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<i32, usize>>> =
         std::sync::OnceLock::new();
-    SET.get_or_init(Default::default)
+    MAP.get_or_init(Default::default)
         .lock()
         .unwrap_or_else(|e| e.into_inner())
 }
 
-/// True once (then forgotten) when download `nzb_id` had dead volumes rebuilt from a duplicate.
-pub(crate) fn take_dead_volumes_borrowed(nzb_id: i32) -> bool {
-    dead_volumes_borrowed().remove(&nzb_id)
+/// How many dead volumes of download `nzb_id` were rebuilt from a duplicate (0 if none), once:
+/// the count is forgotten as it is read.
+pub(crate) fn take_dead_volumes_borrowed(nzb_id: i32) -> usize {
+    dead_volumes_borrowed().remove(&nzb_id).unwrap_or(0)
 }
 
 /// True when dead volume `full_path` already has a rebuilt stand-in.
@@ -3033,7 +3049,7 @@ pub(crate) fn direct_unpack_set_virtual(
     let id = nzb_id;
     let st = map.entry(id).or_default();
     st.virtuals.insert(full_path.to_vec(), volume);
-    dead_volumes_borrowed().insert(nzb_id);
+    *dead_volumes_borrowed().entry(nzb_id).or_default() += 1;
     // Under obfuscated names a dead file is held under its posted name, which tells nothing
     // of its place in the set: release one held file of this download that never reached the
     // disk for each stand-in, so the holds still count the volumes that wait for a repair.
@@ -7063,6 +7079,24 @@ mod post_job_arena_tests {
 
 #[cfg(all(test, unix))]
 mod live_hold_tests {
+    #[test]
+    fn only_absent_obfuscated_stand_ins_can_be_released_without_repair() {
+        let dir = std::env::temp_dir().join(format!("rg-standins-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = |n: &str| dir.join(n).to_string_lossy().as_bytes().to_vec();
+        let id = 917_301;
+        super::direct_unpack_hold(id, &p("a8f3k2b9"));
+        assert!(super::direct_unpack_holds_only_absent_stand_ins(id));
+        std::fs::write(dir.join("x1y2z3"), b"damaged").unwrap();
+        super::direct_unpack_hold(id, &p("x1y2z3"));
+        assert!(!super::direct_unpack_holds_only_absent_stand_ins(id), "a damaged file on disk");
+        super::direct_unpack_forget_holds(id);
+        super::direct_unpack_hold(id, &p("movie.part04.rar"));
+        assert!(!super::direct_unpack_holds_only_absent_stand_ins(id), "a missing RAR volume");
+        super::direct_unpack_forget_holds(id);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
     #[test]
     fn live_hold_publication_is_scoped_to_its_generation_and_download() {

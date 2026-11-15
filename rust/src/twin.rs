@@ -1336,13 +1336,18 @@ pub(crate) fn nudge_and_wake_active() {
 }
 
 #[cfg(unix)]
+/// Seconds until the next round, as the service coordinator counts them: one
+/// second after a nudge (a copy was added), else every 15 seconds.
 pub(crate) fn service_interval_active() -> i32 {
     if TWIN_NUDGED.load(std::sync::atomic::Ordering::SeqCst) {
-        1000
+        TWIN_NUDGED_INTERVAL_SEC
     } else {
-        15000
+        TWIN_INTERVAL_SEC
     }
 }
+
+const TWIN_NUDGED_INTERVAL_SEC: i32 = 1;
+const TWIN_INTERVAL_SEC: i32 = 15;
 
 #[cfg(unix)]
 fn store_has_sigs_dir(qdir: &[u8], id: i32, print: &[u8]) -> i32 {
@@ -2026,6 +2031,14 @@ fn run_twin_job(token: usize, qdir: &[u8]) {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    /// The service coordinator counts intervals in seconds; a millisecond
+    /// value here left the twin check idle for hours after its first round.
+    #[test]
+    fn twin_rounds_run_within_seconds() {
+        assert_eq!(TWIN_NUDGED_INTERVAL_SEC, 1);
+        assert_eq!(TWIN_INTERVAL_SEC, 15);
+    }
 
     fn sig(name: &str, md5: &str, length: u64) -> FileSig {
         FileSig {

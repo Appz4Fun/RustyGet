@@ -285,7 +285,7 @@ pub fn print_copy(
         }
         // Only a video's own bytes may drop a copy: an archive under an
         // obfuscated name maps as a bare file, and its bytes say nothing.
-        if offset == 0 && !is_video_start(&buf) {
+        if offset == 0 && !crate::donorkind::media_magic(&buf) {
             return Err("payload does not start like a video".to_string());
         }
         samples.push(crate::dupefallback::crc32_ieee(&buf));
@@ -307,21 +307,6 @@ pub fn print_copy(
         }
     }
     Ok(Print { size, samples })
-}
-
-/// The payload starts like a video file: Matroska/WebM (EBML), MP4/MOV
-/// (`ftyp`), AVI (`RIFF....AVI `), MPEG-TS (sync bytes every 188), MPEG-PS,
-/// Ogg, FLV or ASF/WMV.
-pub fn is_video_start(head: &[u8]) -> bool {
-    let at = |o: usize, sig: &[u8]| head.len() >= o + sig.len() && &head[o..o + sig.len()] == sig;
-    at(0, b"\x1a\x45\xdf\xa3")
-        || at(4, b"ftyp")
-        || (at(0, b"RIFF") && at(8, b"AVI "))
-        || (head.len() >= 377 && head[0] == 0x47 && head[188] == 0x47 && head[376] == 0x47)
-        || at(0, b"\x00\x00\x01\xba")
-        || at(0, b"OggS")
-        || at(0, b"FLV")
-        || at(0, b"\x30\x26\xb2\x75\x8e\x66\xcf\x11")
 }
 
 /// Which copies carry the fleet's video. The fleet's video is the one most
@@ -481,8 +466,8 @@ mod tests {
         let obf = copy(&mut mem, "o", "a8f3c2d19e", zip, 8_000);
         let got = print_copy(&obf, &mem, None, 4, 3);
         assert!(got.is_err(), "{got:?}");
-        assert!(is_video_start(&video(64, 1)));
-        assert!(!is_video_start(b"PK\x03\x04 not a video"));
+        assert!(crate::donorkind::media_magic(&video(64, 1)));
+        assert!(!crate::donorkind::media_magic(b"PK\x03\x04 not a video"));
     }
 
     /// A zip archive holding `name` stored (not compressed).

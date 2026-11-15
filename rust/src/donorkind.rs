@@ -109,7 +109,8 @@ fn split_base(name: &[u8]) -> Option<&[u8]> {
 }
 
 /// Media containers recognisable from their first bytes.
-fn media_magic(data: &[u8]) -> bool {
+/// The bytes start like a video file. Fleet intake uses it too.
+pub(crate) fn media_magic(data: &[u8]) -> bool {
     data.starts_with(&[0x1a, 0x45, 0xdf, 0xa3]) // Matroska / WebM (EBML)
         || data.get(4..8) == Some(b"ftyp") // MP4 / MOV
         || (data.starts_with(b"RIFF") && data.get(8..12) == Some(b"AVI "))

@@ -97,12 +97,22 @@ const { installDetailsFixture } = require('./details-fixture');
           const all = Downloads.groups.slice();
           const unchecked = all.map(x => x.NZBID === 43 ? withParam(x, 'DupeVideo', 'unverified') : x);
           const dead = all.map(x => x.NZBID === 42 ? Object.assign({}, x, { SuccessArticles: 0, FailedArticles: 10, Health: 0 }) : x);
+          const hist = History.items.find(x => x.NZBID === 31);
           return {
+            fromPrimary: run(g(41), all),
+            fromHistoryCopy: (() => {
+              const keep = Downloads.groups;
+              try { return DetailsPanel.donors(hist, DetailsPanel.members(hist), 'history'); } finally { Downloads.groups = keep; }
+            })(),
+            fromAlt: run(g(43), all),
             fromTwin: run(g(42), all),
             unchecked: run(g(41), unchecked),
             dead: run(g(41), dead)
           };
         });
+        assert.deepEqual(r.fromPrimary, { twins: 1, alts: 1, unverified: 0 }, 'The primary skips the history try of its own post');
+        assert.deepEqual(r.fromHistoryCopy, { twins: 1, alts: 1, unverified: 0 }, 'The history try skips the queued copy of its own post');
+        assert.deepEqual(r.fromAlt, { twins: 2, alts: 0, unverified: 0 }, 'An alt counts the primary and its twin alike, the history try once');
         assert.deepEqual(r.fromTwin, { twins: 1, alts: 1, unverified: 0 }, 'A twin borrows from its primary post (once, not again for its history copy) and the checked alt');
         assert.deepEqual(r.unchecked, { twins: 1, alts: 0, unverified: 1 }, 'An alt the intake could not check is unverified');
         assert.deepEqual(r.dead, { twins: 0, alts: 1, unverified: 0 }, 'A dead copy is no donor');

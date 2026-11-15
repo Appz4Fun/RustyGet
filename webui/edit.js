@@ -266,7 +266,6 @@ var DetailsPanel = (new function($)
 	// fleet's video in it (DupeVideo=same, set by rust/src/dupesearch_coord.rs).
 	this.donors = function(item, members, source)
 	{
-		var selfRole = this.role(item);
 		var out = { twins: 0, alts: 0, unverified: 0 };
 		// one post is one donor: a history copy of a post already counted (or of
 		// this copy's own post) adds nothing. Members come queue first.
@@ -282,9 +281,9 @@ var DetailsPanel = (new function($)
 			}
 			posts[m.item.NZBFilename] = true;
 			var kind = m.role ? m.role.kind : '';
-			// the primary is a twin's own post
-			var twin = kind === 'twin' || (kind === 'primary' && selfRole && selfRole.kind === 'twin');
-			if (twin)
+			// the primary and its twins are one release posted more than once:
+			// counted the same way whichever copy is viewed
+			if (kind === 'twin' || kind === 'primary')
 			{
 				out.twins++;
 			}
@@ -321,8 +320,9 @@ var DetailsPanel = (new function($)
 		}
 		return '<div class="fleet-stats">' +
 			stat('fleet-stat-articles', I18n.translate('fleet_stat_articles'), String(articles), I18n.translate('fleet_stat_articles_sub')) +
-			stat('fleet-stat-par', I18n.translate('fleet_stat_par'), String(parArticles),
-				I18n.translate(parFiles === 1 ? 'fleet_stat_par_file' : 'fleet_stat_par_files', String(parFiles))) +
+			stat('fleet-stat-par', I18n.translate('fleet_stat_par'), String(parArticles), parArticles > 0 ?
+				I18n.translate(parFiles === 1 ? 'fleet_stat_par_file' : 'fleet_stat_par_files', String(parFiles)) :
+				I18n.translate('fleet_stat_articles_sub')) +
 			stat('fleet-stat-bytes', I18n.translate('fleet_stat_bytes'), Util.formatSizeMB(hi * 4096 + lo / 1024.0 / 1024.0, lo),
 				I18n.translate('fleet_holes', String(holes))) +
 			stat('fleet-stat-donors', I18n.translate('fleet_stat_donors'), I18n.translate('fleet_donor_verified', String(verified)), split) +

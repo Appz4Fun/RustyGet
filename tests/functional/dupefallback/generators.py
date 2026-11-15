@@ -48,33 +48,49 @@ UNRAR_PATH = shutil.which('unrar')
 HAVE_UNRAR = UNRAR_PATH is not None
 
 
+def _rar3_block(head):
+    """Fill in a RAR3 header CRC: low 16 bits of CRC32 over the header from HEAD_TYPE on."""
+    import zlib
+    return struct.pack('<H', zlib.crc32(head[2:]) & 0xffff) + head[2:]
+
+
+_RAR3_DOS_TIME = 0x5a6b2c21
+
+
 def rar3_store_volumes(inner_name, data, volume_size, method=0x30):
-    """Split ``data`` into RAR3 store-mode volumes (MAIN + FILE + ENDARC).
+    """Split ``data`` into RAR3 store-mode volumes (MAIN + FILE + ENDARC) with real header
+    and file CRCs: non-final parts carry the CRC of their own bytes, the final part the CRC of
+    the whole file, as WinRAR writes them.
 
     ``method`` lets a scenario forge a "compressed" archive (framing says
     0x33) around opaque bytes without any real compressor."""
+    import zlib
+    full_crc = zlib.crc32(data) & 0xffffffff
+
     def file_block(chunk, split_before, split_after):
         flags = 0x8000 | (0x01 if split_before else 0) | (0x02 if split_after else 0)
         name = inner_name.encode()
+        crc = full_crc if not split_after else (zlib.crc32(chunk) & 0xffffffff)
         head = struct.pack('<HBHH', 0, 0x74, flags, 32 + len(name))
         head += struct.pack('<II', len(chunk), len(data))    # pack, unp
         head += b'\x00'                                      # host os
-        head += struct.pack('<I', 0)                         # file crc (unchecked)
-        head += struct.pack('<I', 0)                         # ftime
+        head += struct.pack('<I', crc)                       # file crc
+        head += struct.pack('<I', _RAR3_DOS_TIME)            # ftime
         head += bytes([29, method])                          # unp ver, method
         head += struct.pack('<H', len(name))
         head += struct.pack('<I', 0x20)                      # attributes
         head += name
-        return head + chunk
+        return _rar3_block(head) + chunk
 
     volumes = []
     pos = 0
     while pos < len(data):
         chunk = data[pos:pos + volume_size]
+        more = pos + volume_size < len(data)
         vol = bytes([0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x00])
-        vol += struct.pack('<HBHH', 0, 0x73, 0x0011, 13) + b'\x00' * 6
-        vol += file_block(chunk, pos > 0, pos + volume_size < len(data))
-        vol += struct.pack('<HBHH', 0, 0x7b, 0, 7)
+        vol += _rar3_block(struct.pack('<HBHH', 0, 0x73, 0x0011, 13) + b'\x00' * 6)
+        vol += file_block(chunk, pos > 0, more)
+        vol += _rar3_block(struct.pack('<HBHH', 0, 0x7b, 0x0001 if more else 0, 7))
         volumes.append(vol)
         pos += volume_size
     return volumes
@@ -164,21 +180,26 @@ def rar3_store_volumes_encrypted(inner_name, data, volume_size, password):
     encryptor = Cipher(algorithms.AES(key), modes.CBC(iv)).encryptor()
     ciphertext = encryptor.update(data + b'\x00' * pad) + encryptor.finalize()
 
+    import zlib
+    full_crc = zlib.crc32(data) & 0xffffffff
+
     def file_block(cipher_chunk, split_before, split_after):
         flags = (0x8000 | 0x0004 | 0x0400 |
                  (0x01 if split_before else 0) | (0x02 if split_after else 0))
         name = inner_name.encode()
+        # Non-final parts carry the CRC of their cipher bytes, the final one the plaintext CRC.
+        crc = (zlib.crc32(cipher_chunk) & 0xffffffff) if split_after else full_crc
         head = struct.pack('<HBHH', 0, 0x74, flags, 32 + len(name) + 8)
         head += struct.pack('<II', len(cipher_chunk), len(data))    # pack, unp
         head += b'\x00'                                      # host os
-        head += struct.pack('<I', 0)                         # file crc (unchecked)
-        head += struct.pack('<I', 0)                         # ftime
+        head += struct.pack('<I', crc)                       # file crc
+        head += struct.pack('<I', _RAR3_DOS_TIME)            # ftime
         head += bytes([29, 0x30])                            # unp ver, method (store)
         head += struct.pack('<H', len(name))
         head += struct.pack('<I', 0x20)                      # attributes
         head += name
         head += salt
-        return head + cipher_chunk
+        return _rar3_block(head) + cipher_chunk
 
     starts = list(range(0, len(data), volume_size)) or [0]
     volumes = []
@@ -187,9 +208,9 @@ def rar3_store_volumes_encrypted(inner_name, data, volume_size, password):
         end = len(ciphertext) if is_last else start + volume_size
         cipher_chunk = ciphertext[start:end]
         vol = bytes([0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x00])
-        vol += struct.pack('<HBHH', 0, 0x73, 0x0011, 13) + b'\x00' * 6
+        vol += _rar3_block(struct.pack('<HBHH', 0, 0x73, 0x0011, 13) + b'\x00' * 6)
         vol += file_block(cipher_chunk, start > 0, not is_last)
-        vol += struct.pack('<HBHH', 0, 0x7b, 0, 7)
+        vol += _rar3_block(struct.pack('<HBHH', 0, 0x7b, 0 if is_last else 0x0001, 7))
         volumes.append(vol)
     return volumes
 

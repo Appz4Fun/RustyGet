@@ -2226,7 +2226,14 @@ impl NzbgetRsPrePostProcessor {
                     file.filename.as_slice(),
                 ]
                 .concat();
-                crate::postproc::direct_unpack_hold(nzb.id, &full);
+                let articles: Vec<_> = (0..file.total_articles.max(0) as usize)
+                    .map(|i| host.article_at(file_ptr, i))
+                    .collect();
+                let holes = crate::progressive_unpack::skippable_holes(
+                    &crate::dupefallback::compute_holes_slice(&articles, file.decoded_file_size),
+                    file.decoded_file_size,
+                );
+                crate::postproc::direct_unpack_hold_with_holes(nzb.id, &full, holes);
             }
         }
 

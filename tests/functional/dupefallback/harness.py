@@ -3799,6 +3799,72 @@ def scenario_prodrarstream(daemon, t):
             'status=%s par=%s unpack=%s extracted_ok=%s' % (h['Status'], h['ParStatus'], h['UnpackStatus'], ok))
 
 
+def _skiphole_rar(daemon, t, tag, donor, recovery):
+    """Production options with direct unpack; a 4-volume store-mode rar set of
+    movie.mkv whose second volume loses one article in its middle. With
+    ``donor`` a byte-identical repost waits in history (marked dead, so only
+    stream repair borrows from it); with ``recovery`` the set carries real par2
+    recovery data and nothing else can fill the hole. Direct unpack must read
+    past the hole instead of pausing, and patch the output once the volume is
+    repaired."""
+    import subprocess as _sp
+    seg = 300_000
+    movie = _payload(5_000_000, 9971)
+    vols = generators.rar3_store_volumes_valid('movie.mkv', movie, 1_400_000)
+    work = t.path('data', tag + 'A')
+    os.makedirs(work, exist_ok=True)
+    names = ['Rel.part%02d.rar' % (i + 1) for i in range(len(vols))]
+    for name, data in zip(names, vols):
+        t.write_file(os.path.join('data', tag + 'A', name), data)
+    damage = {1: {3}}                       # bytes 600,000-899,999 of volume 2: past its headers
+    members = [('%sA/%s' % (tag, n), n, len(d), seg, damage.get(i, set()))
+               for i, (n, d) in enumerate(zip(names, vols))]
+    if recovery:
+        _sp.run(['par2', 'create', '-q', '-q', '-s65536', '-c12', '-n1', '-a', 'Rel', 'Rel.par2'] + names,
+                cwd=work, check=True, capture_output=True)
+        for n in sorted(os.listdir(work)):
+            if n.endswith('.par2'):
+                members.append(('%sA/%s' % (tag, n), n, os.path.getsize(os.path.join(work, n)), seg, set()))
+    else:
+        par = generators.par2_index(list(zip(names, vols)))
+        t.write_file(os.path.join('data', tag + 'A', 'Rel.par2'), par)
+        members.append(('%sA/Rel.par2' % tag, 'Rel.par2', len(par), seg, set()))
+    api = daemon.wait_ready()
+    if donor:
+        donor_members = []
+        for i, data in enumerate(vols):
+            t.write_file(os.path.join('data', '%sB/v%d' % (tag, i)), data)
+            donor_members.append(('%sB/v%d' % (tag, i), 'Other.part%02d.rar' % (i + 1), len(data), 200_000, set()))
+        _ds_append(api, 'Don' + tag, build_multi_nzb(donor_members), tag + '-key', 50,
+                   params=[{'Name': 'DupeAlive', 'Value': '0'}])
+    daemon.append(api, 'Rel' + tag, build_multi_nzb(members), False, tag + '-key', 100)
+    h = daemon.wait_history(api, 'Rel' + tag, timeout=300)
+    ok = _verify_output(t, movie, '.mkv', dirs=(('main', 'dst'), ('main', 'inter')))
+    skipped = _grep_log(t, 'extracted past damage in movie.mkv')
+    patched = _grep_log(t, 'repaired movie.mkv from the repaired volumes')
+    paused = _grep_log(t, 'Pausing direct unpack at Rel.part02.rar')
+    detail = 'status=%s par=%s unpack=%s extracted_ok=%s skipped=%d patched=%d paused=%d' % (
+        h['Status'], h['ParStatus'], h['UnpackStatus'], ok, skipped, patched, paused)
+    good = (ok and h['Status'].startswith('SUCCESS') and skipped >= 1 and patched >= 1 and paused == 0)
+    return good, detail
+
+
+def scenario_skipholetwin(daemon, t):
+    """Direct unpack reads past a lost article in a stored rar volume; stream
+    repair fills the volume from a twin and the extracted file is patched
+    from the repaired volume, verified and moved into place."""
+    good, detail = _skiphole_rar(daemon, t, 'SHT', donor=True, recovery=False)
+    return ('skipholetwin', good, detail)
+
+
+def scenario_skipholepar(daemon, t):
+    """As skipholetwin with no duplicate: the hole stays open until the
+    download ends, par2 repairs the volume, and the extracted file is patched
+    from the repaired volume."""
+    good, detail = _skiphole_rar(daemon, t, 'SHP', donor=False, recovery=True)
+    return ('skipholepar', good, detail)
+
+
 def scenario_wholefilenfoproof(daemon, t):
     """Corner case: a different packing of the release (same volume names and
     sizes, other bytes) that ships the SAME small .nfo. A byte match on the
@@ -12225,6 +12291,8 @@ SCENARIOS = {
     'prodstream': scenario_prodstream,
     'prodrarwhole': scenario_prodrarwhole,
     'prodrarstream': scenario_prodrarstream,
+    'skipholetwin': scenario_skipholetwin,
+    'skipholepar': scenario_skipholepar,
     'wholefileonly': scenario_wholefileonly,
     'wholefilewrongdonor': scenario_wholefilewrongdonor,
     'wholefilenofirst': scenario_wholefilenofirst,
@@ -12631,6 +12699,9 @@ SCENARIO_OPTIONS = {
     'prodstream': PROD_OPTIONS,
     'prodrarwhole': PROD_OPTIONS,
     'prodrarstream': PROD_OPTIONS,
+    # throttled so direct unpack reaches the damaged volume before its repair lands
+    'skipholetwin': PROD_OPTIONS + ['DownloadRate=1500'],
+    'skipholepar': PROD_OPTIONS + ['DownloadRate=1500'],
     'wholefileonly': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'wholefilewrongdonor': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'wholefilenofirst': ['DupeArticleFallback=stream', 'ParCheck=auto'],

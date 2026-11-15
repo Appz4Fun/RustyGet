@@ -4249,7 +4249,9 @@ var Config = (new function($)
 
 	function isIpLiteral(value)
 	{
-		return /^\d{1,3}(\.\d{1,3}){3}$/.test(value) || (/^[0-9a-f:]+$/i.test(value) && value.indexOf(':') !== -1);
+		// IPv6 may end in an IPv4 part (::ffff:192.0.2.1) and carry a scope (fe80::1%eth0)
+		return /^\d{1,3}(\.\d{1,3}){3}$/.test(value) ||
+			(/^[0-9a-f:]+(\d{1,3}(\.\d{1,3}){3})?(%[0-9a-z_.\-]+)?$/i.test(value) && value.indexOf(':') !== -1);
 	}
 
 	function enhanceHost(option, input)

@@ -41,6 +41,10 @@ const { installDetailsFixture } = require('./details-fixture');
           return route.fulfill({ contentType: 'application/json', json: { id: rpc.id, result: { Host: host, Port: port, Error: '', GeoIP: geoip,
             Addresses: [{ IP: '198.51.100.7', Family: 4, Country: '', CountryName: '', ASN: 0, Org: '', LatencyMs: 5 }] } } });
         }
+        if (host === 'mixed.example.com') {
+          return route.fulfill({ contentType: 'application/json', json: { id: rpc.id, result: { Host: host, Port: port, Error: '', GeoIP: geoip,
+            Addresses: [{ IP: '::ffff:192.0.2.1', Family: 6, Country: '', CountryName: '', ASN: 0, Org: '', LatencyMs: 3 }] } } });
+        }
         const result = host === 'nowhere.invalid' ? { Host: host, Port: port, Error: 'Could not resolve nowhere.invalid', GeoIP: geoip, Addresses: [] } :
           { Host: host, Port: port, Error: '', GeoIP: geoip, Addresses: [
             { IP: '192.0.2.10', Family: 4, Country: geoip ? 'NL' : '', CountryName: geoip ? 'Netherlands' : '', ASN: geoip ? 64500 : 0, Org: geoip ? 'Example Net' : '', LatencyMs: 12.4 },
@@ -189,6 +193,28 @@ const { installDetailsFixture } = require('./details-fixture');
         assert.equal(await page.inputValue('#S_Server1_Port'), '563');
         await page.waitForFunction(n => n.length && n[n.length - 1][1] === 563, lookups, { timeout: 5000 }).catch(() => {});
         assert.deepEqual(lookups[lookups.length - 1], ['news.example.com', 563]);
+        await page.waitForFunction(() => /2 addresses for news/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
+      });
+
+      await check('picking an IPv6 address with an IPv4 part keeps the check Minimal', async () => {
+        const cert = v => page.evaluate(v => Config.switchClick($('#S_Server1_CertVerification .btn').filter(function() { return String($(this).attr('data-value')).toLowerCase() === v; })[0]), v);
+        await host.fill('mixed.example.com');
+        await page.waitForFunction(() => /1 address for mixed/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
+        await cert('strict');
+        await page.evaluate(() => $('.config-host-lookup[data-multiid="1"]').find('input[value="::ffff:192.0.2.1"]').prop('checked', true).trigger('change'));
+        await page.waitForFunction(() => /Always using/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
+        assert.equal(await page.inputValue('#S_Server1_Host'), '::ffff:192.0.2.1');
+        assert.equal(await page.evaluate(() => String(Config.getOptionValue(Config.findOptionByName('Server1.CertVerification'))).toLowerCase()), 'minimal');
+        await page.evaluate(() => $('.config-host-lookup[data-multiid="1"]').find('input[value=""]').prop('checked', true).trigger('change'));
+        await page.waitForFunction(() => $('#S_Server1_Host').val() === 'mixed.example.com', null, { timeout: 5000 });
+        await host.fill('news.example.com');
+        await page.waitForFunction(() => /2 addresses for news/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
+      });
+
+      await check('a scoped IPv6 address typed directly counts as an address', async () => {
+        await host.fill('fe80::1%eth0');
+        await page.waitForFunction(() => /Always using/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
+        await host.fill('news.example.com');
         await page.waitForFunction(() => /2 addresses for news/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
       });
 

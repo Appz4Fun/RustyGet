@@ -2922,6 +2922,7 @@ namespace TlsCipherBackend
 		return std::string(value.data ? value.data : "", value.len);
 	}
 	inline std::string Start() { return Response(nzbget_rs_tls_cipher_start(nullptr)); }
+	inline std::string StartServer(int id) { return Response(nzbget_rs_tls_cipher_start_server(id)); }
 	inline std::string Status(const char* id) { return Response(nzbget_rs_tls_cipher_status(id)); }
 	inline std::string Cancel(const char* id) { return Response(nzbget_rs_tls_cipher_cancel(id)); }
 	inline void Shutdown() { nzbget_rs_tls_cipher_shutdown(); }
@@ -2932,6 +2933,7 @@ namespace TlsCipherBackend
 	inline constexpr bool Available() { return false; }
 	inline std::string Status(const char*) { return R"({"Available":false,"State":"unavailable","Message":"TLS cipher optimization requires a TLS-enabled Rust backend and a supported atomic configuration adapter."})"; }
 	inline std::string Start() { return Status(nullptr); }
+	inline std::string StartServer(int) { return Status(nullptr); }
 	inline std::string Cancel(const char*) { return Status(nullptr); }
 	inline void Shutdown() {}
 }
@@ -3080,7 +3082,7 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 		return 0;
 	}
 	case 7: {
-		std::string r = a1 == 0 ? TlsCipherBackend::Start() :
+		std::string r = a1 == 0 ? (s1 && *s1 ? TlsCipherBackend::StartServer(atoi(s1)) : TlsCipherBackend::Start()) :
 			a1 == 1 ? TlsCipherBackend::Status(s1) : TlsCipherBackend::Cancel(s1 ? s1 : "");
 		if (p1) *reinterpret_cast<NzbgetRsBuf*>(p1) = nzbget_rs_alloc_buf(r.data(), r.size());
 		return 1;

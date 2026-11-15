@@ -18,6 +18,7 @@ node tests/webui/settings-savebar.js http://127.0.0.1:17689/   # offline, no dae
 node tests/webui/settings-cards.js http://127.0.0.1:17999/     # offline, no daemon needed
 node tests/webui/settings-modes.js http://127.0.0.1:17999/     # offline, no daemon needed
 node tests/webui/settings-removals.js http://127.0.0.1:17999/  # offline, no daemon needed
+node tests/webui/settings-servers.js http://127.0.0.1:17999/   # offline, no daemon needed
 node tests/webui/system-metrics.js http://127.0.0.1:17999/     # offline: Status tiles, Statistics charts, License page
 node tests/webui/settings-health-startup.js http://127.0.0.1:17689/
 node tests/webui/tls-cipher.js http://127.0.0.1:17689/
@@ -78,6 +79,13 @@ repair card and its Renaming menu (Advanced) against the three options (Expert),
 the Hard linking lock, the "Allow other computers" checkbox, no update button or
 update check, and a save that writes Priority and leaves Level and the removed
 options out.
+
+The servers check (offline, both themes at 1440 and 390) covers the right-hand
+pane beside the list on a wide window and the page view on a phone, Add server
+only from the list, the Cipher menu and Optimize button without a `Server1.` key,
+a saved cipher outside the menu, and Save server: it writes only the servers (an
+unsaved change elsewhere stays unsaved), runs the cipher test for that server when
+Cipher is Automatic, applies the chosen cipher, and reloads afterwards.
 
 The locale check verifies the server health label exists in all 20 translated
 catalogs and renders translated summaries and help names in German, Spanish and

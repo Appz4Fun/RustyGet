@@ -58,6 +58,7 @@ const REMOVED = ['ContinuePartial', 'PropagationDelay', 'ParQuick', 'CrcCheck', 
         const menu = row('Server1_Priority').locator('select.config-select');
         assert.deepEqual(await menu.locator('option').evaluateAll(o => o.map(x => x.value)), ['1', '2', '3', '4', '5']);
         assert.equal(await menu.inputValue(), '1');
+        await page.evaluate(() => Config.closeServerEditor());
         await page.locator('.config-list-row.NEWS-SERVERS.multiid2 .config-list-edit').click();
         assert.equal(await row('Server2_Priority').locator('select.config-select').inputValue(), '2', 'Level 1 is priority 2');
       });

@@ -214,6 +214,11 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 impl Service {
     pub fn start(&self, backend: Arc<dyn Backend>) -> Result<String, Error> {
+        self.start_for(backend, None)
+    }
+    /// Starts a job; `only` limits probing and saving to one server ID so a
+    /// single server can be optimized without touching the others' ciphers.
+    pub fn start_for(&self, backend: Arc<dyn Backend>, only: Option<u32>) -> Result<String, Error> {
         let mut slot = self
             .running
             .lock()
@@ -232,7 +237,13 @@ impl Service {
                 handle.join().map_err(|_| Error("previous worker failed"))?;
             }
         }
-        let snapshot = backend.snapshot()?;
+        let mut snapshot = backend.snapshot()?;
+        if let Some(id) = only {
+            snapshot.servers.retain(|server| server.id == id);
+            if snapshot.servers.is_empty() {
+                return Err(Error("that server is not saved as an encrypted news server"));
+            }
+        }
         if snapshot.bytes.len() > 16 * 1024 * 1024 || snapshot.servers.len() > 256 {
             return Err(Error("configuration exceeds admission limits"));
         }
@@ -1026,6 +1037,31 @@ mod tests {
         assert!(!report.contains("PRIVATE_TEST_"));
         assert!(report.contains("Example \\\"name\\\"\\n<script>"));
         assert!(report.len() <= 1024 * 1024 && report.starts_with('{') && report.ends_with('}'));
+    }
+    #[test]
+    fn one_server_job_probes_and_saves_only_that_server() {
+        let service = Service::default();
+        let backend = || {
+            Arc::new(CompatibilityBackend {
+                gate: None,
+                large: 0,
+            })
+        };
+        assert!(service.start_for(backend(), Some(9)).is_err());
+        let id = service.start_for(backend(), Some(2)).unwrap();
+        let end = Instant::now() + Duration::from_secs(4);
+        let report = loop {
+            let report = service.status(Some(&id)).unwrap();
+            if report.contains("\"State\":\"completed\"") {
+                break report;
+            }
+            assert!(Instant::now() < end, "one-server job did not complete: {report}");
+            thread::sleep(Duration::from_millis(5));
+        };
+        service.shutdown();
+        assert!(report.contains("\"ID\":2,"), "{report}");
+        assert!(!report.contains("\"ID\":1,"), "server 1 was probed: {report}");
+        assert!(report.contains("\"TotalProbes\":4"), "{report}");
     }
     #[test]
     fn compatibility_observations_survive_unknown_and_other_server_commit() {

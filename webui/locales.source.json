@@ -5506,5 +5506,47 @@
   "config_requires_flush": {
     "message": "Always on while \"Write directly to the final file\" is on: the queue file is how a download resumes.",
     "description": "Note on Flush queue to disk while Direct write is on"
+  },
+  "config_server_save": {
+    "message": "Save server"
+  },
+  "config_server_back": {
+    "message": "Back to servers"
+  },
+  "config_server_saving": {
+    "message": "Saving…"
+  },
+  "config_server_save_failed": {
+    "message": "Could not write the configuration file."
+  },
+  "config_server_cipher_testing": {
+    "message": "Finding the fastest cipher for this server…"
+  },
+  "config_server_cipher_conflict": {
+    "message": "A cipher was saved, but the editor changed meanwhile. Refresh Settings to see it."
+  },
+  "config_server_cipher_chosen": {
+    "message": "Cipher"
+  },
+  "config_server_cipher_unavailable": {
+    "message": "Cipher testing is not available here."
+  },
+  "config_server_applying": {
+    "message": "Saved. Putting it to use…"
+  },
+  "config_server_saved": {
+    "message": "Saved and in use."
+  },
+  "config_server_saved_reload": {
+    "message": "Saved. Reload RustyGet to use it."
+  },
+  "config_cipher_auto": {
+    "message": "Automatic (fastest is found when you save)"
+  },
+  "config_cipher_optimize": {
+    "message": "Optimize"
+  },
+  "config_cipher_optimize_title": {
+    "message": "Save this server and pick the fastest cipher it accepts"
   }
 }

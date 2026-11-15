@@ -668,11 +668,14 @@ pub fn service() -> &'static Service {
     static SERVICE: OnceLock<Service> = OnceLock::new();
     SERVICE.get_or_init(Service::default)
 }
-pub fn start(io: Io) -> Result<String, Error> {
-    let id = service().start(Arc::new(Native {
-        io,
-        addresses: Mutex::new(BTreeMap::new()),
-    }))?;
+pub fn start(io: Io, only: Option<u32>) -> Result<String, Error> {
+    let id = service().start_for(
+        Arc::new(Native {
+            io,
+            addresses: Mutex::new(BTreeMap::new()),
+        }),
+        only,
+    )?;
     service().status(Some(&id))
 }
 

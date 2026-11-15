@@ -36,6 +36,11 @@ const { installDetailsFixture } = require('./details-fixture');
         if (!rpc || rpc.method !== 'hostlookup') return route.fallback();
         lookups.push(rpc.params);
         const [host, port] = rpc.params;
+        if (host === 'slow.example.com') {
+          await new Promise(r => setTimeout(r, 300));
+          return route.fulfill({ contentType: 'application/json', json: { id: rpc.id, result: { Host: host, Port: port, Error: '', GeoIP: geoip,
+            Addresses: [{ IP: '198.51.100.7', Family: 4, Country: '', CountryName: '', ASN: 0, Org: '', LatencyMs: 5 }] } } });
+        }
         const result = host === 'nowhere.invalid' ? { Host: host, Port: port, Error: 'Could not resolve nowhere.invalid', GeoIP: geoip, Addresses: [] } :
           { Host: host, Port: port, Error: '', GeoIP: geoip, Addresses: [
             { IP: '192.0.2.10', Family: 4, Country: geoip ? 'NL' : '', CountryName: geoip ? 'Netherlands' : '', ASN: geoip ? 64500 : 0, Org: geoip ? 'Example Net' : '', LatencyMs: 12.4 },
@@ -73,12 +78,13 @@ const { installDetailsFixture } = require('./details-fixture');
       });
 
       await check('picking an address uses it and relaxes the certificate check', async () => {
-        await box.locator('input[value="192.0.2.10"]').check();
+        await box.locator('input[value="192.0.2.10"]').click();
         await page.waitForFunction(() => /Always using/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
         assert.equal(await host.inputValue(), '192.0.2.10');
         assert.equal(await page.evaluate(() => $('#S_Server1_CertVerification .btn-primary').attr('data-value') || $('#S_Server1_CertVerification .btn-primary').val()), 'Minimal');
         assert.match(await box.textContent(), /news\.example\.com/, 'the name is remembered');
-        await box.locator('input[value=""]').check();
+        assert.match(await box.textContent(), /Certificate check is now Minimal/, 'the change is explained');
+        await box.locator('input[value=""]').click();
         await page.waitForFunction(() => /2 addresses/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
         assert.equal(await host.inputValue(), 'news.example.com');
         assert.equal(await page.evaluate(() => $('#S_Server1_CertVerification .btn-primary').attr('data-value') || $('#S_Server1_CertVerification .btn-primary').val()), 'Strict');
@@ -92,6 +98,41 @@ const { installDetailsFixture } = require('./details-fixture');
         await page.waitForFunction(() => /DB-IP Lite files/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
         assert.doesNotMatch(await box.textContent(), /AS64500/);
         geoip = true;
+      });
+
+      await check('a new port looks the host up again', async () => {
+        await page.waitForFunction(() => /2 addresses/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
+        await page.locator('#S_Server1_Port').fill('119');
+        await page.waitForTimeout(1000);
+        assert.deepEqual(lookups[lookups.length - 1], ['news.example.com', 119]);
+      });
+
+      await check('typing again makes a pending reply stale at once', async () => {
+        await host.fill('slow.example.com');
+        await page.waitForFunction(() => /Looking up slow/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
+        await host.fill('news.example.com');
+        await page.waitForTimeout(450);
+        assert.doesNotMatch(await box.textContent(), /198\.51\.100\.7/, 'the slow reply is not shown');
+        await page.waitForFunction(() => /2 addresses for news/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
+      });
+
+      await check('moving a server keeps its lookup with it', async () => {
+        await page.evaluate(() => Config.moveSet($('<a data-multiid="1"></a>')[0], 'Server', 'NEWS-SERVERS', 'down'));
+        await page.waitForTimeout(200);
+        assert.equal(await page.inputValue('#S_Server2_Host'), 'news.example.com');
+        assert.equal(await page.evaluate(() => $('#S_Server2_Host').siblings('.config-host-lookup').attr('data-multiid')), '2');
+        await page.evaluate(() => $('#S_Server2_Host').siblings('.config-host-lookup').find('input[value="192.0.2.10"]').prop('checked', true).trigger('change'));
+        await page.waitForTimeout(300);
+        assert.equal(await page.inputValue('#S_Server2_Host'), '192.0.2.10');
+        assert.equal(await page.inputValue('#S_Server1_Host'), 'block.example.invalid', 'the other server is untouched');
+      });
+
+      await check('an address typed directly shows its details', async () => {
+        await page.locator('.config-list-row.NEWS-SERVERS.multiid1 .config-list-edit').click();
+        await page.waitForTimeout(150);
+        await host.fill('192.0.2.10');
+        await page.waitForFunction(() => /Always using/.test($('#S_Server1_Host').siblings('.config-host-lookup').text()), null, { timeout: 5000 });
+        assert.match(await page.evaluate(() => $('#S_Server1_Host').siblings('.config-host-lookup').text()), /NL Netherlands · AS64500 Example Net · 12 ms/);
       });
 
       if (errors.length) failures.push(`${theme}/${width}: page errors: ${errors.join('; ')}`);

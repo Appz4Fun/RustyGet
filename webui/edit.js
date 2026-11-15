@@ -71,7 +71,9 @@ var DetailsPanel = (new function($)
 		}
 		if (/^[0-9a-f]{16}-[0-9]+$/.test(param(item, 'DupeFiles')))
 		{
-			return { kind: 'primary', label: I18n.translate('fleet_role_primary'), copy: '' };
+			// a primary with twins in its fleet is a twin too
+			return { kind: 'primary', label: I18n.translate('fleet_role_primary'),
+				copy: copy === 'twin' ? I18n.translate('fleet_role_twin') : '' };
 		}
 		return null;
 	}

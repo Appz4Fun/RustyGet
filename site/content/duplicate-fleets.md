@@ -166,6 +166,7 @@ If the release is already on disk, RustyGet adds nothing and the reply says `ALR
 | `DupeArticleFallback` | `live` | Uses every layer. Start with `article` on slow devices. |
 | `DupeBorrowFirst` | `yes` | Repairs from duplicates during the download instead of waiting for par2. |
 | `DupeWatch` | `yes` | Looks after a download's backups: FORCE to SCORE, dead download, swap, rescue. |
+| `DupeHealthPreset` | `medium` | How hard each copy is checked: `weak` (fast, 20-200 STATs and 5 BODYs a copy), `medium` (50-1000 and 20), `hard` (slowest, 100-3000 and 60), or `custom` for the raw options. |
 | `DirectUnpack` | `yes` | Unpacks during the download, and pauses at a damaged volume until it's repaired. |
 | `DupeStreamDecompress` | `yes` on a fast machine | Costs CPU and temporary disk space; turn it off on slow devices. |
 | `NzbCleanupDisk` | `no` | Keeps backups' NZB files so they can donate. |

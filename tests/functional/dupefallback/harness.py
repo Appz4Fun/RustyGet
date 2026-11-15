@@ -512,7 +512,7 @@ class Daemon:
             # The scenarios were written against the old built-in defaults;
             # pin them so each one still sets exactly what it tests.
             'DupeArticleFallback=no', 'DupeStreamDecompress=no', 'ParScan=extended',
-            'DupeWatch=no',
+            'DupeWatch=no', 'DupeHealthPreset=custom',
         ] + extra_options
         self.t.write_file(self.conf_rel, ('\n'.join(cfg) + '\n').encode())
 

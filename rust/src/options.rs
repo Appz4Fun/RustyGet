@@ -1520,6 +1520,26 @@ const POST_STRATEGY_VALUES: [i32; 4] = [0, 1, 2, 3];
 const FILE_NAMING_NAMES: [&CStr; 3] = [c"auto", c"article", c"nzb"];
 const FILE_NAMING_VALUES: [i32; 3] = [0, 1, 2];
 
+/// `DupeHealthPreset`: how hard each copy of a fleet is sampled.
+const DUPE_HEALTH_PRESET_NAMES: [&CStr; 4] = [c"weak", c"medium", c"hard", c"custom"];
+const DUPE_HEALTH_PRESET_VALUES: [i32; 4] = [0, 1, 2, 3];
+
+/// The sampling a `DupeHealthPreset` sets: `(DupeHealthPercent,
+/// DupeHealthMin, DupeHealthMax, DupeBodyChecks, DupeBodyPercent,
+/// DupeHealthBudget)`, or `None` for "custom" (the options themselves).
+/// "medium" is the defaults of those options.
+pub fn dupe_health_preset(preset: i32) -> Option<(i32, i32, i32, i32, i32, i32)> {
+    match preset {
+        // weak / fast: about 20-200 STATs and 5 BODY downloads a copy
+        0 => Some((2, 20, 200, 5, 10, 60)),
+        // medium / slower: the defaults
+        1 => Some((5, 50, 1000, 20, 20, 120)),
+        // hard / slowest: about 100-3000 STATs and 60 BODY downloads a copy
+        2 => Some((15, 100, 3000, 60, 40, 300)),
+        _ => None,
+    }
+}
+
 const HEALTH_CHECK_NAMES: [&CStr; 5] = [c"pause", c"delete", c"park", c"none", c"dupe"];
 const HEALTH_CHECK_VALUES: [i32; 5] = [0, 1, 2, 3, 4];
 
@@ -1568,7 +1588,7 @@ pub const DUPE_WATCH_DELAY_SEC: i32 = 20;
 /// Emits all default option `(name, value)` pairs for `Options::InitDefaults`.
 pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &CStr)) {
     let output_mode = if disable_curses { c"color" } else { c"curses" };
-    let defaults: [(&CStr, &CStr); 124] = [
+    let defaults: [(&CStr, &CStr); 125] = [
         (c"MainDir", c"~/downloads"),
         (c"WebDir", c""),
         (c"ConfigTemplate", c""),
@@ -1589,6 +1609,7 @@ pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &
         (c"DupeStreamTimeout", c"60"),
         (c"DupeBorrowFirst", c"yes"),
         (c"DupeWatch", c"yes"),
+        (c"DupeHealthPreset", c"medium"),
         (c"DupeHealthPercent", c"5"),
         (c"DupeHealthMin", c"50"),
         (c"DupeHealthMax", c"1000"),
@@ -2312,11 +2333,28 @@ pub fn init_scalar_options_host<H: OptionsHost>(
     *out_dupe_search_api_key = None;
     let raw_search_delay = DUPE_WATCH_DELAY_SEC;
     let raw_search_max_donors = 0;
-    let raw_health_percent = host.parse_int_value(c"DupeHealthPercent", 10);
-    let raw_health_min = host.parse_int_value(c"DupeHealthMin", 10);
-    let raw_health_max = host.parse_int_value(c"DupeHealthMax", 10);
-    let raw_body_checks = host.parse_int_value(c"DupeBodyChecks", 10);
-    let raw_health_budget = host.parse_int_value(c"DupeHealthBudget", 10);
+    let health_preset = dupe_health_preset(host.parse_enum_value(
+        c"DupeHealthPreset",
+        &DUPE_HEALTH_PRESET_NAMES,
+        &DUPE_HEALTH_PRESET_VALUES,
+    ));
+    let (
+        raw_health_percent,
+        raw_health_min,
+        raw_health_max,
+        raw_body_checks,
+        preset_body_percent,
+        raw_health_budget,
+    ) = health_preset.unwrap_or_else(|| {
+        (
+            host.parse_int_value(c"DupeHealthPercent", 10),
+            host.parse_int_value(c"DupeHealthMin", 10),
+            host.parse_int_value(c"DupeHealthMax", 10),
+            host.parse_int_value(c"DupeBodyChecks", 10),
+            host.parse_int_value(c"DupeBodyPercent", 10),
+            host.parse_int_value(c"DupeHealthBudget", 10),
+        )
+    });
     let raw_min_alive = host.parse_int_value(c"DupeMinAlive", 10);
     let raw_fast_donors = 5;
 
@@ -2365,7 +2403,7 @@ pub fn init_scalar_options_host<H: OptionsHost>(
     ) = options_normalize_dupe_check_options(
         crate::dupewatch::BASE_PICK_SCORE,
         0,
-        host.parse_int_value(c"DupeBodyPercent", 10),
+        preset_body_percent,
         host.parse_int_value(c"DupeCheckConcurrency", 10),
         host.parse_int_value(c"DupeCheckConnections", 10),
     );
@@ -4902,6 +4940,7 @@ mod options_full_suite_port_from_cpp {
             c"DupeSearchApiKey=secret",
             c"DupeSearchDelay=7",
             c"DupeSearchMaxDonors=3",
+            c"DupeHealthPreset=custom",
             c"DupeHealthPercent=10",
             c"DupeHealthMin=30",
             c"DupeHealthMax=500",
@@ -4945,6 +4984,7 @@ mod options_full_suite_port_from_cpp {
             c"DupeSearchUrl=http://127.0.0.1:5076/api",
             c"DupeSearchDelay=-5",
             c"DupeSearchMaxDonors=-1",
+            c"DupeHealthPreset=custom",
             c"DupeHealthPercent=500",
             c"DupeHealthMin=0",
             c"DupeHealthMax=10",
@@ -4977,10 +5017,51 @@ mod options_full_suite_port_from_cpp {
         // 0 = every free connection
         assert_eq!(options.scalars.dupe_check_connections, 0);
 
-        let cmd_opts2 = [c"DupeHealthMin=300", c"DupeHealthMax=100"];
+        let cmd_opts2 = [
+            c"DupeHealthPreset=custom",
+            c"DupeHealthMin=300",
+            c"DupeHealthMax=100",
+        ];
         let options2 = RustOptions::new_no_config(Some(&cmd_opts2), Some(&mut extender));
         assert_eq!(options2.scalars.dupe_health_min, 300);
         assert_eq!(options2.scalars.dupe_health_max, 300);
+    }
+
+    #[test]
+    fn dupe_health_preset_sets_the_sampling_test() {
+        let mut extender = OptionsExtenderMock::default();
+        let cmd_opts = [c"DupeHealthPreset=hard", c"DupeHealthMin=7"];
+        let o = RustOptions::new_no_config(Some(&cmd_opts), Some(&mut extender));
+        assert_eq!(o.scalars.dupe_health_percent, 15);
+        assert_eq!(o.scalars.dupe_health_min, 100);
+        assert_eq!(o.scalars.dupe_health_max, 3000);
+        assert_eq!(o.scalars.dupe_body_checks, 60);
+        assert_eq!(o.scalars.dupe_body_percent, 40);
+        assert_eq!(o.scalars.dupe_health_budget, 300);
+        let cmd_opts = [c"DupeHealthPreset=weak"];
+        let o = RustOptions::new_no_config(Some(&cmd_opts), Some(&mut extender));
+        assert_eq!(
+            (
+                o.scalars.dupe_health_percent,
+                o.scalars.dupe_health_min,
+                o.scalars.dupe_health_max
+            ),
+            (2, 20, 200)
+        );
+        // medium is the options' own defaults
+        let o = RustOptions::new_no_config(Some(&[]), Some(&mut extender));
+        assert_eq!(dupe_health_preset(1), Some((5, 50, 1000, 20, 20, 120)));
+        assert_eq!(
+            (
+                o.scalars.dupe_health_percent,
+                o.scalars.dupe_health_min,
+                o.scalars.dupe_health_max
+            ),
+            (5, 50, 1000)
+        );
+        let cmd_opts = [c"DupeHealthPreset=custom", c"DupeHealthMin=7"];
+        let o = RustOptions::new_no_config(Some(&cmd_opts), Some(&mut extender));
+        assert_eq!(o.scalars.dupe_health_min, 7);
     }
 
     #[test]

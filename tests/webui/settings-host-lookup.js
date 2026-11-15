@@ -180,6 +180,18 @@ const { installDetailsFixture } = require('./details-fixture');
         await page.waitForFunction(() => /2 addresses for news/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
       });
 
+      await check('turning encryption on times the new port', async () => {
+        const encryption = v => page.evaluate(v => Config.switchClick($('#S_Server1_Encryption .btn').filter(function() { return String($(this).attr('data-value')).toLowerCase() === v; })[0]), v);
+        await page.locator('#S_Server1_Port').fill('119');
+        await page.waitForFunction(n => n.length && n[n.length - 1][1] === 119, lookups, { timeout: 5000 }).catch(() => {});
+        await encryption('no');
+        await encryption('yes');
+        assert.equal(await page.inputValue('#S_Server1_Port'), '563');
+        await page.waitForFunction(n => n.length && n[n.length - 1][1] === 563, lookups, { timeout: 5000 }).catch(() => {});
+        assert.deepEqual(lookups[lookups.length - 1], ['news.example.com', 563]);
+        await page.waitForFunction(() => /2 addresses for news/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
+      });
+
       await check('moving a server keeps its lookup with it', async () => {
         await page.evaluate(() => Config.moveSet($('<a data-multiid="1"></a>')[0], 'Server', 'NEWS-SERVERS', 'down'));
         await page.waitForTimeout(200);

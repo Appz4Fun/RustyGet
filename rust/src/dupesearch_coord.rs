@@ -1372,6 +1372,10 @@ fn probe_copies(
 
 /// Longest a fleet spends opening its copies down to the video at intake.
 const FLEET_INTAKE_MAX_SEC: i64 = 30;
+/// Time the background re-check of copies the intake did not reach may take.
+const FLEET_INTAKE_LATER_SEC: i64 = 180;
+/// Why the intake left a copy unverified when it had no time for it.
+const INTAKE_TIME_RAN_OUT: &str = "time ran out";
 
 /// Articles of one copy, read from the news servers for the intake.
 struct HostArticles {
@@ -1402,22 +1406,21 @@ impl crate::dupeintake::ArticleFetch for HostArticles {
     }
 }
 
-/// Fleet intake: opens every copy down to its video (see
-/// [`crate::dupeintake`]) and reads the same `samples` random places of each,
-/// in parallel chunks until `deadline` (unix seconds). Says for each copy
-/// whether its video is the fleet's, and why a copy stayed unverified.
-fn fleet_intake(
+/// Opens each copy down to its video and prints it (see
+/// [`crate::dupeintake::print_copy`]), in parallel until `deadline` (unix
+/// seconds); a copy not reached says "time ran out".
+fn fleet_prints(
     host_ctx: *mut c_void,
     host_cb: DupeHostFn,
     summaries: &[&NzbSummaryData],
     samples: usize,
     seed: u64,
     deadline: i64,
-) -> Vec<(crate::dupeintake::Verdict, String)> {
-    use crate::dupeintake::{judge, print_copy, Print};
+) -> Vec<Result<crate::dupeintake::Print, String>> {
+    use crate::dupeintake::{print_copy, Print};
     let n = summaries.len();
     let slots: Vec<Mutex<Result<Print, String>>> = (0..n)
-        .map(|_| Mutex::new(Err("time ran out".to_string())))
+        .map(|_| Mutex::new(Err(INTAKE_TIME_RAN_OUT.to_string())))
         .collect();
     let ctx_addr = host_ctx as usize;
     for chunk in (0..n).collect::<Vec<_>>().chunks(FLEET_KIND_PROBE_PARALLEL) {
@@ -1454,16 +1457,145 @@ fn fleet_intake(
             }
         });
     }
-    let got: Vec<Result<Print, String>> = slots
+    slots
         .into_iter()
         .map(|m| m.into_inner().unwrap_or_else(|e| e.into_inner()))
-        .collect();
-    let prints: Vec<Option<Print>> = got.iter().map(|r| r.as_ref().ok().cloned()).collect();
-    judge(&prints)
+        .collect()
+}
+
+/// The intake verdict of each copy and why it is unverified, plus the fleet's
+/// video (the print most copies share), for the copies a later check reads.
+fn fleet_intake(
+    host_ctx: *mut c_void,
+    host_cb: DupeHostFn,
+    summaries: &[&NzbSummaryData],
+    samples: usize,
+    seed: u64,
+    deadline: i64,
+) -> (
+    Vec<(crate::dupeintake::Verdict, String)>,
+    Option<crate::dupeintake::Print>,
+) {
+    use crate::dupeintake::{fleet_print, judge_against};
+    let got = fleet_prints(host_ctx, host_cb, summaries, samples, seed, deadline);
+    let prints: Vec<Option<crate::dupeintake::Print>> =
+        got.iter().map(|r| r.as_ref().ok().cloned()).collect();
+    let fleet = fleet_print(&prints);
+    let verdicts = judge_against(&prints, fleet.as_ref())
         .into_iter()
         .zip(got)
         .map(|(v, r)| (v, r.err().unwrap_or_default()))
-        .collect()
+        .collect();
+    (verdicts, fleet)
+}
+
+/// What the intake could not verify when a fleet was added (no time left, or a
+/// slow or failed read), read again
+/// after the reply: each copy in `pending` (nzb id, name, summary) is printed
+/// within [`FLEET_INTAKE_LATER_SEC`] and compared with `fleet` (the fleet's
+/// video; printed from `primary` when the intake had none). A backup that
+/// carries another video is removed from the queue or history; the copy being
+/// downloaded is only reported.
+struct IntakeLater {
+    dupe_key: Vec<u8>,
+    fleet: Option<crate::dupeintake::Print>,
+    primary: Option<(i32, NzbSummaryData)>,
+    pending: Vec<(i32, Vec<u8>, NzbSummaryData)>,
+    samples: usize,
+    seed: u64,
+}
+
+fn spawn_fleet_intake_later(host_cb: DupeHostFn, job: IntakeLater) {
+    let run = move || fleet_intake_later(ptr::null_mut(), host_cb, job);
+    let _ = std::thread::Builder::new()
+        .name("fleet-intake-later".into())
+        .spawn(run);
+}
+
+fn fleet_intake_later(host_ctx: *mut c_void, host_cb: DupeHostFn, job: IntakeLater) {
+    use crate::dupeintake::Verdict;
+    let deadline = now_unix_sec() + FLEET_INTAKE_LATER_SEC;
+    let primary_id = job.primary.as_ref().map_or(0, |(id, _)| *id);
+    let fleet = match job.fleet {
+        Some(p) => p,
+        None => {
+            let Some((_, summary)) = job.primary.as_ref() else {
+                return;
+            };
+            match fleet_prints(
+                host_ctx,
+                host_cb,
+                &[summary],
+                job.samples,
+                job.seed,
+                deadline,
+            )
+            .pop()
+            {
+                Some(Ok(p)) => p,
+                other => {
+                    let why = other.and_then(|r| r.err()).unwrap_or_default();
+                    let mut msg = b"Fleet intake later: the queued copy of ".to_vec();
+                    push_c_slice(&mut msg, &job.dupe_key);
+                    msg.extend_from_slice(b" could not be read, its backups stay unverified: ");
+                    msg.extend_from_slice(why.as_bytes());
+                    host_log(host_ctx, host_cb, MK_INFO, &msg);
+                    return;
+                }
+            }
+        }
+    };
+    let summaries: Vec<&NzbSummaryData> = job.pending.iter().map(|(_, _, s)| s).collect();
+    let got = fleet_prints(
+        host_ctx,
+        host_cb,
+        &summaries,
+        job.samples,
+        job.seed,
+        deadline,
+    );
+    let prints: Vec<Option<crate::dupeintake::Print>> =
+        got.iter().map(|r| r.as_ref().ok().cloned()).collect();
+    let verdicts = crate::dupeintake::judge_against(&prints, Some(&fleet));
+    for (((id, name, _), verdict), r) in job.pending.iter().zip(verdicts).zip(got) {
+        let mut msg = b"Fleet intake later: ".to_vec();
+        msg.extend_from_slice(name);
+        match verdict {
+            Verdict::Same => msg.extend_from_slice(b" carries the fleet's video"),
+            Verdict::Different if *id == primary_id => msg.extend_from_slice(
+                b" carries another video; it is the copy being downloaded, left as is",
+            ),
+            Verdict::Different if donor_stopping() || crate::ffi::queue_host().is_none() => {
+                msg.extend_from_slice(b" carries another video; RustyGet is stopping, left as is")
+            }
+            Verdict::Different => {
+                msg.extend_from_slice(b" carries another video, removed from the fleet");
+                let id = *id;
+                with_guarded_queue(host_ctx, host_cb, |dq_ptr| unsafe {
+                    host_cb(
+                        host_ctx,
+                        6,
+                        2,
+                        id,
+                        dq_ptr,
+                        0,
+                        ptr::null(),
+                        ptr::null(),
+                        ptr::null_mut(),
+                        ptr::null_mut(),
+                        ptr::null_mut(),
+                        ptr::null(),
+                        0,
+                    );
+                });
+            }
+            Verdict::Unverified => {
+                msg.extend_from_slice(b" still unverified: ");
+                msg.extend_from_slice(r.err().unwrap_or_default().as_bytes());
+            }
+        }
+        host_log(host_ctx, host_cb, MK_INFO, &msg);
+    }
 }
 
 // ============================================================================
@@ -5568,6 +5700,10 @@ pub unsafe fn fleet_append(
         }
     }
 
+    let mut intake_later: Vec<usize> = Vec::new();
+    let mut intake_print: Option<crate::dupeintake::Print> = None;
+    let mut intake_samples = 0usize;
+    let mut intake_seed = 0u64;
     // Intake: every copy opened down to its video; a copy carrying another
     // video is not part of this fleet. Like the kinds, it runs before the
     // health check with its own share of the time (half of what is left).
@@ -5591,7 +5727,7 @@ pub unsafe fn fleet_append(
             let seed = u64::from(crate::dupefallback::crc32_ieee(&dupe_key)) | 1;
             let summaries: Vec<&NzbSummaryData> =
                 usable.iter().map(|&i| &candidates[i].summary).collect();
-            let verdicts = fleet_intake(
+            let (verdicts, print) = fleet_intake(
                 host_ctx,
                 host_cb,
                 &summaries,
@@ -5599,7 +5735,14 @@ pub unsafe fn fleet_append(
                 seed,
                 intake_deadline,
             );
+            intake_print = print;
+            intake_samples = samples;
+            intake_seed = seed;
             for (&i, (verdict, why)) in usable.iter().zip(verdicts) {
+                // unverified for want of time or a slow read: tried again later
+                if verdict == crate::dupeintake::Verdict::Unverified {
+                    intake_later.push(i);
+                }
                 let name = &members[candidates[i].index].name;
                 let mut msg = b"Fleet intake: ".to_vec();
                 msg.extend_from_slice(name);
@@ -5939,6 +6082,37 @@ pub unsafe fn fleet_append(
             3 => b"ALREADY_DOWNLOADED".to_vec(),
             _ => b"NOT_QUEUED".to_vec(),
         };
+    }
+
+    // copies the intake could not verify are read again after the reply
+    let pending: Vec<(i32, Vec<u8>, NzbSummaryData)> = intake_later
+        .iter()
+        .filter_map(|&i| {
+            let c = &candidates[i];
+            let id = added[c.index];
+            (id > 0).then(|| (id, members[c.index].name.clone(), c.summary.clone()))
+        })
+        .collect();
+    if chosen > 0 && !pending.is_empty() {
+        let primary = candidates
+            .iter()
+            .find(|c| added[c.index] == chosen)
+            .map(|c| (chosen, c.summary.clone()));
+        let mut msg = b"Fleet intake: ".to_vec();
+        msg.extend_from_slice(pending.len().to_string().as_bytes());
+        msg.extend_from_slice(b" unverified copies are checked again in the background");
+        host_log(host_ctx, host_cb, MK_INFO, &msg);
+        spawn_fleet_intake_later(
+            host_cb,
+            IntakeLater {
+                dupe_key: dupe_key.clone(),
+                fleet: intake_print.clone(),
+                primary,
+                pending,
+                samples: intake_samples,
+                seed: intake_seed,
+            },
+        );
     }
 
     let summary_log =

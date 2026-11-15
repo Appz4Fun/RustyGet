@@ -6218,6 +6218,42 @@ def scenario_fleetintake(daemon, t):
     return ('fleetintake', ok, 'reply=%s items=%s zip_same_logged=%s' % (reply, sorted(items), log_same))
 
 
+def scenario_fleetintakelater(daemon, t):
+    """appendfleet intake retried after the reply: a copy whose articles are
+    too slow for the intake's share of the fleet time is unverified at
+    submission and parked as a backup. Once the reply is sent it is read again
+    in the background; it carries another video, so it is removed from the
+    fleet and the log says so. The copies that carry the fleet's video stay."""
+    daemon.fake_nntp.alive = set()
+    ebml = b'\x1a\x45\xdf\xa3'
+    video = ebml + _payload(400_000, 7301)
+    other = ebml + _payload(400_000, 7302)
+    api = daemon.wait_ready()
+    copies = [
+        ('Show.S01E01.bare', _intake_copy(daemon, 'lb', 'movie.mkv', video)),
+        ('Show.S01E01.bare2', _intake_copy(daemon, 'lc', 'movie.mkv', video)),
+        ('Show.S01E01.slow', _intake_copy(daemon, 'ls', 'film.mkv', other))]
+    daemon.fake_nntp.delays['ls-'] = 6
+    reply = _fleet(daemon, copies, key='fleet:later', timeout=20)
+    daemon.fake_nntp.delays = {}
+    slow_at_reply = next((m for m in reply['Members'] if m['Name'] == 'Show.S01E01.slow'), {})
+    deadline = time.time() + 90
+    removed = False
+    while time.time() < deadline:
+        names = {g['NZBName'] for g in api.listgroups() + api.history() if g.get('DupeKey') == 'fleet:later'}
+        if 'Show.S01E01.slow' not in names and _grep_log(t, 'Fleet intake later: Show.S01E01.slow') > 0:
+            removed = True
+            break
+        time.sleep(1)
+    names = {g['NZBName'] for g in api.listgroups() + api.history() if g.get('DupeKey') == 'fleet:later'}
+    retried = _grep_log(t, 'unverified copies are checked again in the background')
+    gone_logged = _grep_log(t, 'Show.S01E01.slow carries another video, removed from the fleet')
+    ok = (slow_at_reply.get('Status') in ('BACKUP', 'QUEUED') and retried > 0 and removed
+          and gone_logged > 0 and {'Show.S01E01.bare', 'Show.S01E01.bare2'} <= names)
+    return ('fleetintakelater', ok, 'slow_at_reply=%s retried=%d removed=%s names=%s'
+            % (slow_at_reply.get('Status'), retried, removed, sorted(names)))
+
+
 def _watch_wait(t, needle, timeout=90):
     deadline = time.time() + timeout
     while time.time() < deadline and _grep_log(t, needle) == 0:
@@ -9926,6 +9962,7 @@ SCENARIOS = {
     'fleetnodupecheck': scenario_fleetnodupecheck,
     'fleetkindorder': scenario_fleetkindorder,
     'fleetintake': scenario_fleetintake,
+    'fleetintakelater': scenario_fleetintakelater,
     'fleetencryptedlast': scenario_fleetencryptedlast,
     'fleettwinvolumes': scenario_fleettwinvolumes,
     'fleetkindslowcheck': scenario_fleetkindslowcheck,
@@ -10525,7 +10562,7 @@ SCENARIO_FIRST_FAIL_PROXY = {'recheckfailed': ((b'?5=', b'?10=', b'?15='),),
 # scenarios with a FakeNewznab indexer (DupeSearchUrl points to it)
 
 # scenarios with a FakeNntp news server in place of nserv
-SCENARIO_FAKE_NNTP = {'watchfleet', 'watchforcepick', 'watchdeadpick', 'watchswap', 'watchswaptwin', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetnodupecheck', 'fleetkindorder', 'fleetintake', 'fleetencryptedlast', 'fleetkindslowcheck', 'fleettwinvolumes', 'fleetalldead', 'fleetshutdown'}
+SCENARIO_FAKE_NNTP = {'watchfleet', 'watchforcepick', 'watchdeadpick', 'watchswap', 'watchswaptwin', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetnodupecheck', 'fleetkindorder', 'fleetintake', 'fleetintakelater', 'fleetencryptedlast', 'fleetkindslowcheck', 'fleettwinvolumes', 'fleetalldead', 'fleetshutdown'}
 
 
 # --------------------------------------------------------------------------- #

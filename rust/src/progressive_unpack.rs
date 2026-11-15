@@ -681,7 +681,13 @@ where
         // zipfast publishes by rename only when it may replace; skip mode would need hard
         // links, which some destinations (exFAT, SMB) do not support.
         && req.overwrite == Overwrite::Always
-        && upgrade_protection(req.first_volume, &protection, &opened, handle_limit)
+        && upgrade_protection(
+            req.first_volume,
+            &protection,
+            &opened,
+            handle_limit,
+            path_depth(&deferred[0].0.name),
+        )
     {
         log_cb(
             4,
@@ -1536,6 +1542,7 @@ fn upgrade_protection(
     slot: &ProtectionSlot,
     opened: &OpenedVolumes,
     handle_limit: u64,
+    depth: u64,
 ) -> bool {
     let mut slot = slot.lock().unwrap_or_else(|e| e.into_inner());
     if slot.is_some() {
@@ -1567,7 +1574,7 @@ fn upgrade_protection(
     if inventory.volumes.len() < opened.len()
         || (opened.len() + inventory.volumes.len()) as u64 + 8 > handle_limit
         || !fits_open_file_limit(inventory.volumes.len())
-        || !fits_protected_read_budget(&inventory)
+        || !fits_protected_read_budget(&inventory, depth)
     {
         return false;
     }
@@ -1580,9 +1587,13 @@ const PROTECTED_READ_BUDGET: u64 = 32 * 1024 * 1024;
 
 /// With the volumes declared protected, each zipfast validation rechecks every protected volume
 /// against every admitted one: roughly 2V^2 + V(2P + 4) bookkeeping units, V volumes with paths
-/// up to P bytes. A publication runs a handful of them (plus one per directory it creates);
-/// upgrade only when a generous count fits the headroom added at session creation.
-fn fits_protected_read_budget(inventory: &zipfast::progressive::ProtectionInventory) -> bool {
+/// up to P bytes. A publication runs a handful of them, plus about two per parent directory it
+/// may create (`depth` path components); upgrade only when a generous count fits the headroom
+/// added at session creation.
+fn fits_protected_read_budget(
+    inventory: &zipfast::progressive::ProtectionInventory,
+    depth: u64,
+) -> bool {
     let v = inventory.volumes.len() as u64;
     let p = inventory
         .volumes
@@ -1595,7 +1606,13 @@ fn fits_protected_read_budget(inventory: &zipfast::progressive::ProtectionInvent
         .max()
         .unwrap_or(0);
     let per_check = 2 * v * v + v * (2 * p + 4);
-    per_check.saturating_mul(64) <= PROTECTED_READ_BUDGET
+    per_check.saturating_mul(16u64.saturating_add(depth.saturating_mul(4))) <= PROTECTED_READ_BUDGET
+}
+
+/// Path components of a member's output name (as the copy path names it).
+fn path_depth(name: &[u8]) -> u64 {
+    zipfast::path::sanitize(&String::from_utf8_lossy(name), false)
+        .map_or(u64::MAX / 8, |p| p.components().count() as u64)
 }
 
 /// Whether the process, with the files it has open now, can open `added` more for the

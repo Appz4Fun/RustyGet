@@ -50,7 +50,7 @@ const PAIR = { Ok: true, Subject: '127.0.0.1', Names: ['127.0.0.1'], NotAfter: '
             return reply({ Cert: MAIN + '/https/rustyget.crt', Key: MAIN + '/https/rustyget.key', Check: PAIR, Error: '' });
           case 'savepem':
             calls.push(['savepem', a, b, c]);
-            if (a === 'ca') return reply({ Path: MAIN + '/certs/' + b.replace(/\.pem$/, '') + '.pem', Count: 2, Error: '' });
+            if (a === 'ca') return reply({ Path: MAIN + '/certs/' + b.replace(/\.pem$/, '') + '-20261115-120000.pem', Count: 2, Error: '' });
             return reply({ Cert: MAIN + '/https/server.crt', Key: MAIN + '/https/server.key', Check: PAIR, Error: '' });
           case 'checkcastore':
             calls.push(['checkcastore', a]);
@@ -185,7 +185,7 @@ const PAIR = { Ok: true, Subject: '127.0.0.1', Names: ['127.0.0.1'], NotAfter: '
         const values = Object.fromEntries(save.params[0].map(o => [o.Name, o.Value]));
         assert.equal(values.SecurePort, undefined);
         assert.equal(values.SecureCert, MAIN + '/https/mine.crt', 'a hidden value is still saved');
-        assert.match(values.CertStore, /certs\/My CA\.pem$/);
+        assert.match(values.CertStore, /certs\/My CA-\d{8}-\d{6}\.pem$/);
       });
 
       if (errors.length) failures.push(`${theme}/${width}: page errors: ${errors.join('; ')}`);

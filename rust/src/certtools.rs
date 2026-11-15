@@ -346,6 +346,20 @@ fn write_new_pair(
     cert: Option<&[u8]>,
     key: Option<&[u8]>,
 ) -> Result<(Option<PathBuf>, Option<PathBuf>), String> {
+    let files: Vec<(&str, &[u8], bool)> = [cert.map(|c| ("crt", c, false)), key.map(|k| ("key", k, true))]
+        .into_iter()
+        .flatten()
+        .collect();
+    let mut paths = write_new_set(dir, base, &files)?.into_iter();
+    let cert_path = cert.and_then(|_| paths.next());
+    let key_path = key.and_then(|_| paths.next());
+    Ok((cert_path, key_path))
+}
+
+/// Writes each `(extension, data, private)` file as `<base>-YYYYMMDD-HHMMSS.<ext>` in `dir`,
+/// all with one stem (`-2`, `-3`... when any name is taken). Files are created exclusively
+/// and fully written before their paths are returned; on failure none are left.
+fn write_new_set(dir: &Path, base: &str, files: &[(&str, &[u8], bool)]) -> Result<Vec<PathBuf>, String> {
     fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -355,17 +369,10 @@ fn write_new_pair(
     let stamp = format!("{base}-{y:04}{m:02}{d:02}-{:02}{:02}{:02}", secs / 3600, secs / 60 % 60, secs % 60);
     'stems: for n in 1..1000 {
         let stem = if n == 1 { stamp.clone() } else { format!("{stamp}-{n}") };
-        let cert_path = cert.map(|_| dir.join(format!("{stem}.crt")));
-        let key_path = key.map(|_| dir.join(format!("{stem}.key")));
-        let mut made: Vec<&Path> = Vec::new();
-        for (path, data, private) in [
-            cert_path.as_deref().zip(cert).map(|(p, d)| (p, d, false)),
-            key_path.as_deref().zip(key).map(|(p, d)| (p, d, true)),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            match write_new_file(path, data, private) {
+        let mut made: Vec<PathBuf> = Vec::new();
+        for (ext, data, private) in files {
+            let path = dir.join(format!("{stem}.{ext}"));
+            match write_new_file(&path, data, *private) {
                 Ok(()) => made.push(path),
                 Err(e) => {
                     for p in &made {
@@ -378,7 +385,7 @@ fn write_new_pair(
                 }
             }
         }
-        return Ok((cert_path, key_path));
+        return Ok(made);
     }
     Err(format!("{}: no free name for a new certificate", dir.display()))
 }
@@ -396,27 +403,6 @@ fn write_new_file(path: &Path, data: &[u8], private: bool) -> std::io::Result<()
     f.write_all(data).inspect_err(|_| {
         let _ = fs::remove_file(path);
     })
-}
-
-fn write_file(path: &Path, data: &[u8], private: bool) -> Result<(), String> {
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    }
-    let mut opts = fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(if private { 0o600 } else { 0o644 });
-    }
-    let mut f = opts.open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    #[cfg(unix)]
-    if private {
-        use std::os::unix::fs::PermissionsExt;
-        // an existing file keeps its old mode on open: tighten it
-        let _ = f.set_permissions(fs::Permissions::from_mode(0o600));
-    }
-    f.write_all(data).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// The host names and addresses a self-signed certificate should cover, from text
@@ -554,8 +540,8 @@ fn safe_name(name: &str) -> String {
 
 /// Saves pasted or uploaded PEM text under `MainDir`.
 /// `kind` "https": a certificate and/or private key for the web server, written to
-/// `https/server.crt` and `https/server.key`. `kind` "ca": certificates for checking
-/// news servers, written to `certs/<name>.pem`.
+/// a new `https/server-YYYYMMDD-HHMMSS.crt` and `.key`. `kind` "ca": certificates for checking
+/// news servers, written to a new `certs/<name>-YYYYMMDD-HHMMSS.pem`.
 pub fn save_pem(kind: &str, name: &str, text: &str, main_dir: &Path) -> String {
     if text.len() > MAX_PEM {
         return error_json("The text is too large to be a certificate.");
@@ -594,7 +580,6 @@ pub fn save_pem(kind: &str, name: &str, text: &str, main_dir: &Path) -> String {
             if certs.is_empty() {
                 return error_json("No PEM certificate was found in the text.");
             }
-            let path = main_dir.join(CA_DIR).join(format!("{}.pem", safe_name(name)));
             let mut pem = Vec::new();
             for c in &certs {
                 match c.to_pem() {
@@ -602,9 +587,12 @@ pub fn save_pem(kind: &str, name: &str, text: &str, main_dir: &Path) -> String {
                     Err(e) => return error_json(&e.to_string()),
                 }
             }
-            if let Err(e) = write_file(&path, &pem, false) {
-                return error_json(&e);
-            }
+            // A fresh file each time: the bundle CertStore points at now stays as it is
+            // until Settings is saved with the new path.
+            let path = match write_new_set(&main_dir.join(CA_DIR), &safe_name(name), &[("pem", &pem, false)]) {
+                Ok(mut paths) => paths.remove(0),
+                Err(e) => return error_json(&e),
+            };
             let shown = path.to_string_lossy();
             let mut out = String::new();
             obj(
@@ -796,11 +784,14 @@ mod tests {
         let cert = fs::read_to_string(field(&made, "Cert")).unwrap();
         let dir = temp_dir("ca");
         let saved = save_pem("ca", "../My CA.pem", &format!("{cert}{cert}"), &dir);
-        assert!(saved.contains("certs/My_CA.pem") && saved.contains("\"Count\":2"), "{saved}");
+        assert!(saved.contains("certs/My_CA-") && saved.contains("\"Count\":2"), "{saved}");
+        let again = save_pem("ca", "../My CA.pem", &cert, &dir);
+        assert_ne!(field(&saved, "Path"), field(&again, "Path"), "a new paste never replaces the bundle in use");
+        assert!(check_ca_store(field(&saved, "Path").to_str().unwrap()).contains("\"Count\":2"));
         let store = dir.join("certs");
         let folder = check_ca_store(store.to_str().unwrap());
         assert!(folder.contains("is a folder"), "the TLS code loads one file: {folder}");
-        let file = check_ca_store(store.join("My_CA.pem").to_str().unwrap());
+        let file = check_ca_store(field(&saved, "Path").to_str().unwrap());
         assert!(file.contains("\"Count\":2") && file.contains("\"Files\":1"), "{file}");
         let none = check_ca_store("");
         assert!(none.contains("\"System\":false") && none.contains("not checked"), "{none}");

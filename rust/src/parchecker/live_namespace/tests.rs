@@ -310,3 +310,11 @@ fn renames_grow_the_control_reservation_on_demand() {
         drop(crate::parlive::reserve_control(id, 1 << 20, 500 << 20).unwrap());
     }
 }
+#[test]
+fn rename_by_article_name_survives_a_hash_matching_no_destination() {
+    // A damaged or out-of-order first article gives a 16k hash no PAR entry
+    // has; the article's own name still binds the row (job 210, 2026-11-15).
+    let set = metadata(&[(b"part40.rar", 1), (b"part41.rar", 2)]);
+    let mut proof = NamespaceProof::prepare(&set, facts(vec![row(40, b"obf-a.rar", b"")])).unwrap();
+    assert!(proof.bind(40, b"part40.rar", &hash_hex(9)).unwrap().is_some());
+}

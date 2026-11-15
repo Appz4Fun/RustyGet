@@ -134,6 +134,12 @@ impl SessionBudgetLease {
         units
     }
 
+    /// Take over another lease of the same pool.
+    pub fn absorb(&mut self, mut other: SessionBudgetLease) {
+        self.bytes += other.bytes;
+        other.bytes = 0;
+    }
+
     /// Give `bytes` back to the pool (never below one byte, so the lease stays valid).
     pub fn shrink_by(&mut self, bytes: u64) {
         let bytes = bytes.min(self.bytes.saturating_sub(1));
@@ -173,6 +179,8 @@ static CONTROL_ACCOUNTING: LazyLock<Mutex<ControlAccounting>> =
 pub(crate) struct ControlLease {
     nzb_id: i32,
     bytes: u64,
+    pool_limit: u64,
+    pool_optional: bool,
     // None only for ordinary-write root control: still capped by the control
     // queue, but never blocked by an exhausted live PAR pool.
     _budget: Option<SessionBudgetLease>,
@@ -180,6 +188,22 @@ pub(crate) struct ControlLease {
 impl ControlLease {
     pub fn bytes(&self) -> u64 {
         self.bytes
+    }
+
+    /// Charge at least `extra` more bytes under the caps of the original
+    /// reservation (rounded up to 1 KiB). On refusal nothing changes.
+    pub fn grow(&mut self, extra: u64) -> Result<(), RepairError> {
+        let extra = extra.max(1).div_ceil(1024).saturating_mul(1024);
+        let mut more = reserve_control_inner(self.nzb_id, extra, self.pool_limit, self.pool_optional)?;
+        match (&mut self._budget, more._budget.take()) {
+            (Some(mine), Some(theirs)) => mine.absorb(theirs),
+            (slot @ None, theirs) => *slot = theirs,
+            (Some(_), None) => {}
+        }
+        self.bytes += more.bytes;
+        // The merged bytes now belong to self; `more` must not release them.
+        more.bytes = 0;
+        Ok(())
     }
 }
 impl Drop for ControlLease {
@@ -244,6 +268,8 @@ fn reserve_control_inner(
         return Ok(ControlLease {
             nzb_id,
             bytes,
+            pool_limit,
+            pool_optional,
             _budget: budget,
         });
     }
@@ -270,6 +296,8 @@ fn reserve_control_inner(
     Ok(ControlLease {
         nzb_id,
         bytes,
+        pool_limit,
+        pool_optional,
         _budget: budget,
     })
 }

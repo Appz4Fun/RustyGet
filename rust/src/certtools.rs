@@ -628,6 +628,16 @@ fn reply(is_json: bool, json: String) -> Vec<u8> {
 /// configuration file does (Docker's CertStore is `${AppDir}/cacert.pem`); they are read
 /// with the running options' values, and `main_dir` for MainDir.
 pub fn expand_main_dir(path: &str, main_dir: &Path) -> String {
+    // `~/` first, then `${...}`, in the order the configuration loader uses
+    let homed;
+    let path = if path.starts_with("~/") {
+        homed = std::ffi::CString::new(path)
+            .map(|c| String::from_utf8_lossy(&crate::fsops::expand_home_path_auto(Some(&c))).into_owned())
+            .unwrap_or_else(|_| path.to_owned());
+        homed.as_str()
+    } else {
+        path
+    };
     let main = main_dir.to_string_lossy().into_owned();
     let running = crate::options::active_options();
     let out = crate::options::expand_option_variables(path.as_bytes(), |name| {
@@ -694,6 +704,10 @@ mod tests {
     fn main_dir_is_expanded_in_paths() {
         assert_eq!(expand_main_dir("${MainDir}/https/a.crt", Path::new("/data")), "/data/https/a.crt");
         assert_eq!(expand_main_dir("${maindir}/x", Path::new("/d")), "/d/x");
+        if let Some(home) = std::env::var_os("HOME") {
+            let want = format!("{}/https/a.crt", home.to_string_lossy().trim_end_matches('/'));
+            assert_eq!(expand_main_dir("~/https/a.crt", Path::new("/d")), want);
+        }
         assert_eq!(expand_main_dir("/etc/ssl/${Other}/x", Path::new("/d")), "/etc/ssl/${Other}/x");
     }
 

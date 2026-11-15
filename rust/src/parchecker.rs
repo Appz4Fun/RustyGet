@@ -113,7 +113,11 @@ struct ActiveStreamingSession {
     writers: Arc<WriteCoordinator>,
     operation: Mutex<()>,
     articles: Mutex<DeferredArticles>,
-    article_byte_limit: u64,
+    /// Grows when free ParBuffer is lent to queued snapshots (`lend_memory`).
+    article_byte_limit: AtomicU64,
+    /// ParBuffer lent to RAM staging and queued snapshots, at most a quarter
+    /// of the pool; returned with the session's budget.
+    lent_memory: AtomicU64,
     pending_unpause_ids: Mutex<Vec<u64>>,
     /// Recovery blocks of registered volumes that have not arrived yet: the
     /// most recovery a damaged block can still get, so growth never charges
@@ -129,6 +133,10 @@ struct ActiveStreamingSession {
     metrics: live_metrics::LiveMetricCounters,
     last_error: Mutex<Option<String>>,
     warning_reported: AtomicBool,
+    /// Distinct refusal reasons with counts (bounded), so the log says why
+    /// captures failed, not only the first failure.
+    refusals: Mutex<Vec<(String, u64)>>,
+    stop_logged: AtomicBool,
     // Drop last, after the session, queue and all owned metadata. Grows with
     // the syndrome slots as damage appears (see `grow_for_damage`).
     budget: Mutex<SessionBudgetLease>,
@@ -274,7 +282,8 @@ fn build_streaming_session(
         budget: Mutex::new(budget),
         operation: Mutex::new(()),
         articles: Mutex::new(DeferredArticles::default()),
-        article_byte_limit,
+        article_byte_limit: AtomicU64::new(article_byte_limit),
+        lent_memory: AtomicU64::new(0),
         pending_unpause_ids: Mutex::new(Vec::new()),
         queued_blocks: Mutex::new(HashMap::new()),
         logged_slots: AtomicUsize::new(0),
@@ -286,6 +295,8 @@ fn build_streaming_session(
         metrics: live_metrics::LiveMetricCounters::default(),
         last_error: Mutex::new(None),
         warning_reported: AtomicBool::new(false),
+        refusals: Mutex::new(Vec::new()),
+        stop_logged: AtomicBool::new(false),
     }))
 }
 
@@ -346,11 +357,139 @@ impl ActiveStreamingSession {
     fn record<T>(&self, result: Result<T, RepairError>) -> Result<T, RepairError> {
         if let Err(error) = &result {
             *self.last_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(error.to_string());
+            self.note_refusal(error);
+            self.lend_memory(error);
         } else {
             self.observe_count_readiness();
         }
         result
     }
+    /// Count a refusal by reason; log each new reason once as it first appears.
+    fn note_refusal(&self, error: &RepairError) {
+        const MAX_REASONS: usize = 8;
+        let mut reason = error.to_string();
+        if matches!(error, RepairError::UnknownFile(FileId(id)) if *id == [0; 16]) {
+            // live_source_id's "no binding yet": an obfuscated queue file
+            // whose real name and 16k hash are not known yet.
+            reason = "queue file not matched to a par2 file yet".to_owned();
+        }
+        if matches!(error, RepairError::Cancelled) {
+            if let Some(why) = self.writers.stop_reason() {
+                reason = format!("{reason} ({why})");
+            }
+        }
+        // Key without numbers, so byte counts and ids in one kind of error
+        // do not each take a slot; the first full message is logged.
+        let mut key = String::with_capacity(reason.len());
+        for c in reason.chars() {
+            if !c.is_ascii_digit() {
+                key.push(c);
+            } else if !key.ends_with('#') {
+                key.push('#');
+            }
+        }
+        let mut refusals = self.refusals.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, count)) = refusals.iter_mut().find(|(known, _)| *known == key) {
+            *count += 1;
+            return;
+        }
+        if refusals.len() >= MAX_REASONS {
+            let other = "other reasons".to_owned();
+            match refusals.iter_mut().find(|(known, _)| *known == other) {
+                Some((_, count)) => *count += 1,
+                None => refusals.push((other, 1)),
+            }
+            return;
+        }
+        let message = format!(
+            "Live PAR (job {}) refused: {reason}",
+            self.metrics.report_nzb_id()
+        );
+        refusals.push((key, 1));
+        drop(refusals);
+        crate::log::log_active_bytes(crate::queuesubsys_host::MK_DETAIL, message.as_bytes());
+    }
+
+    /// RAM staging or the snapshot queue ran out while many files arrive at
+    /// once: lend it one more slice of free ParBuffer, up to a quarter of the
+    /// pool, so later articles are verified from RAM instead of being replayed
+    /// from disk. The refused article itself is replayed when its file
+    /// completes. The memory returns with the session's budget.
+    fn lend_memory(&self, error: &RepairError) {
+        let RepairError::StreamingMemoryLimit {
+            context,
+            required_bytes,
+            limit_bytes,
+        } = error
+        else {
+            return;
+        };
+        let staging = *context == "RAM-only partial staging";
+        // Only a byte shortfall: the snapshot queue's article-count limit
+        // reports the same context, and memory cannot relieve it. A staging
+        // cap of 0 means staging was turned off on purpose.
+        if (!staging && *context != "live article snapshots")
+            || required_bytes <= limit_bytes
+            || (staging && self.session.max_staging_bytes() == 0)
+            || self.session.is_cancelled()
+        {
+            return;
+        }
+        let unit = self.session.slice_size();
+        let pool = effective_live_pool_bytes();
+        // Callers may hold the daemon queue lock; growth of repair slots holds
+        // the budget across volume absorbs, so never wait for it here.
+        let Ok(mut lease) = self.budget.try_lock() else {
+            return;
+        };
+        let lent = self.lent_memory.load(Ordering::Relaxed);
+        if unit == 0 || lent.saturating_add(unit) > pool / 4 || lease.grow_by_units(unit, 1, pool) == 0 {
+            return;
+        }
+        let lent = lent + unit;
+        self.lent_memory.store(lent, Ordering::Relaxed);
+        if staging {
+            self.session
+                .set_max_staging_bytes(self.session.max_staging_bytes().saturating_add(unit));
+        } else {
+            self.article_byte_limit.fetch_add(unit, Ordering::AcqRel);
+        }
+        drop(lease);
+        // Log the first loan, then each doubling.
+        if lent == unit || (lent / unit).is_power_of_two() {
+            let name = self.par_name.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let msg = format!(
+                "Live PAR for {}: staging memory grew by {} MB ({} MB of {} MB ParBuffer lent) for many files arriving at once",
+                String::from_utf8_lossy(&name),
+                unit.div_ceil(1024 * 1024),
+                lent.div_ceil(1024 * 1024),
+                pool / (1024 * 1024),
+            );
+            crate::log::log_active_bytes(crate::queuesubsys_host::MK_DETAIL, msg.as_bytes());
+        }
+    }
+
+    /// Log once why this session stopped taking work.
+    fn note_stop(&self, nzb_id: i32, why: &str) {
+        if self.session.is_cancelled() || self.stop_logged.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let message = format!("Live PAR (job {nzb_id}) stopped: {why}");
+        crate::log::log_active_bytes(crate::queuesubsys_host::MK_DETAIL, message.as_bytes());
+    }
+
+    /// The refusal counts, for the disposal footer.
+    fn refusal_summary(&self) -> Option<String> {
+        let refusals = self.refusals.lock().unwrap_or_else(|e| e.into_inner());
+        (!refusals.is_empty()).then(|| {
+            refusals
+                .iter()
+                .map(|(reason, count)| format!("{count} x {reason}"))
+                .collect::<Vec<_>>()
+                .join("; ")
+        })
+    }
+
     /// Grow the syndrome slots so every damaged block can take a recovery
     /// block, paid from free ParBuffer: each slot costs two slices (its
     /// syndrome and its reconstructed output). The memory goes back to the
@@ -507,11 +646,12 @@ pub(crate) fn streaming_session_defer_article_for_queue(
         }
         let mut queue = entry.articles.lock().unwrap_or_else(|e| e.into_inner());
         let next = queue.bytes.checked_add(size);
-        if queue.pending.len() >= 4096 || next.is_none_or(|n| n > entry.article_byte_limit) {
+        let limit = entry.article_byte_limit.load(Ordering::Acquire);
+        if queue.pending.len() >= 4096 || next.is_none_or(|n| n > limit) {
             return Err(RepairError::StreamingMemoryLimit {
                 context: "live article snapshots",
                 required_bytes: next.unwrap_or(u64::MAX),
-                limit_bytes: entry.article_byte_limit,
+                limit_bytes: limit,
             });
         }
         let bytes = snapshot().ok_or_else(|| {
@@ -818,6 +958,8 @@ fn live_source_id(
         Ok(Some(Some(id))) => return Ok(id),
         Ok(Some(None)) => return Err(RepairError::UnknownFile(FileId([0; 16]))),
         Err(_) => {
+            let why = entry.writers.stop_reason().unwrap_or_else(|| "live namespace refused".to_owned());
+            entry.note_stop(entry.metrics.report_nzb_id(), &why);
             entry.session.cancel();
             return Err(RepairError::Cancelled);
         }
@@ -1469,8 +1611,11 @@ pub fn streaming_session_start_bytes(
 }
 
 /// Cancels the current generation permanently; in-flight owners retain their reservation.
+#[track_caller]
 pub fn streaming_session_cancel(nzb_id: i32) {
     if let Some(entry) = active_streaming_session(nzb_id) {
+        let at = std::panic::Location::caller();
+        entry.note_stop(nzb_id, &format!("cancelled from {}:{}", at.file(), at.line()));
         entry
             .writers
             .cancel_generation_with(entry.generation, || entry.session.cancel());
@@ -1573,11 +1718,12 @@ impl<'a> CallerPayloadCharge<'a> {
     fn acquire(entry: &'a ActiveStreamingSession, bytes: u64) -> Result<Self, RepairError> {
         let mut queue = entry.articles.lock().unwrap_or_else(|e| e.into_inner());
         let next = queue.bytes.checked_add(bytes);
-        if next.is_none_or(|n| n > entry.article_byte_limit) {
+        let limit = entry.article_byte_limit.load(Ordering::Acquire);
+        if next.is_none_or(|n| n > limit) {
             return Err(RepairError::StreamingMemoryLimit {
                 context: "live replay payload",
                 required_bytes: next.unwrap_or(u64::MAX),
-                limit_bytes: entry.article_byte_limit,
+                limit_bytes: limit,
             });
         }
         queue.bytes = next.unwrap();
@@ -2237,8 +2383,11 @@ pub fn streaming_session_has_session(nzb_id: i32) -> bool {
 }
 
 /// Drops the [`StreamingParSession`] for `nzb_id`.
+#[track_caller]
 pub fn streaming_session_forget(nzb_id: i32) {
     if let Some(old) = active_streaming_session(nzb_id) {
+        let at = std::panic::Location::caller();
+        old.note_stop(nzb_id, &format!("forgotten from {}:{}", at.file(), at.line()));
         old.writers.cancel_generation_with(old.generation, || {
             old.session.cancel();
             let mut sessions = STREAMING_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
@@ -3666,6 +3815,96 @@ mod tests {
         // after arrival one more slot is needed and the turned-away block is
         // absorbed again.
         grow_live_slots_case(0x6a0f_0002, 3, 6, 4);
+    }
+
+    #[test]
+    fn live_session_lends_free_par_buffer_to_staging_and_snapshots_up_to_a_quarter() {
+        use par_rs::create::{build_set, SetOptions, VolumeScheme};
+
+        let nzb_id = 0x6a0f_0010;
+        let dir = std::env::temp_dir().join(format!(
+            "rustyget-parchecker-lend-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f0 = make_deterministic_bytes(8 * 4096, 405);
+        let built = build_set(
+            "lend",
+            &[("part01.rar", &f0)],
+            &SetOptions {
+                slice_size: 4096,
+                recovery_blocks: 2,
+                first_exponent: 0,
+                volumes: VolumeScheme::Single,
+                creator: "rustyget-test".to_string(),
+                unicode_names: false,
+                kernel: Kernel::detect(),
+            },
+        )
+        .unwrap();
+        let index_path = dir.join("lend.par2");
+        std::fs::write(&index_path, &built.index).unwrap();
+        streaming_session_start(
+            nzb_id,
+            &index_path,
+            &dir,
+            SessionOptions {
+                preallocated_syndrome_slots: 1,
+                max_syndrome_slots: 1,
+                max_syndrome_bytes: 4096,
+                max_working_bytes: 4 << 20,
+                max_staging_bytes: 4096,
+                solve_mem_limit_bytes: 16 << 20,
+                ..SessionOptions::default()
+            },
+        )
+        .unwrap();
+        let entry = active_streaming_session(nzb_id).unwrap();
+        let start = entry.budget.lock().unwrap().reserved_bytes();
+        let staging_full = RepairError::StreamingMemoryLimit {
+            context: "RAM-only partial staging",
+            required_bytes: 8192,
+            limit_bytes: 4096,
+        };
+        let queue_full = RepairError::StreamingMemoryLimit {
+            context: "live article snapshots",
+            required_bytes: 8192,
+            limit_bytes: 4096,
+        };
+        let queue_start = entry.article_byte_limit.load(Ordering::Relaxed);
+        let _ = entry.record::<()>(Err(staging_full));
+        assert_eq!(entry.session.max_staging_bytes(), 8192);
+        let _ = entry.record::<()>(Err(queue_full));
+        assert_eq!(entry.article_byte_limit.load(Ordering::Relaxed), queue_start + 4096);
+        assert_eq!(entry.budget.lock().unwrap().reserved_bytes(), start + 8192);
+        // The article-count limit (bytes fit) lends nothing.
+        let _ = entry.record::<()>(Err(RepairError::StreamingMemoryLimit {
+            context: "live article snapshots",
+            required_bytes: 4096,
+            limit_bytes: 1 << 20,
+        }));
+        assert_eq!(entry.budget.lock().unwrap().reserved_bytes(), start + 8192);
+        // Other limits lend nothing.
+        let _ = entry.record::<()>(Err(RepairError::StreamingMemoryLimit {
+            context: "article metadata",
+            required_bytes: 1,
+            limit_bytes: 0,
+        }));
+        assert_eq!(entry.budget.lock().unwrap().reserved_bytes(), start + 8192);
+        // Never more than a quarter of the pool.
+        entry
+            .lent_memory
+            .store(effective_live_pool_bytes() / 4, Ordering::Relaxed);
+        let _ = entry.record::<()>(Err(RepairError::StreamingMemoryLimit {
+            context: "RAM-only partial staging",
+            required_bytes: 1,
+            limit_bytes: 0,
+        }));
+        assert_eq!(entry.session.max_staging_bytes(), 8192);
+        streaming_session_cancel(nzb_id);
+        drop(entry);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

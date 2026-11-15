@@ -106,15 +106,23 @@ impl ActiveStreamingSession {
     }
 }
 
+impl LiveMetricCounters {
+    pub(super) fn report_nzb_id(&self) -> i32 {
+        self.report_nzb_id.load(Ordering::Relaxed)
+    }
+}
+
 impl Drop for ActiveStreamingSession {
     fn drop(&mut self) {
         // No writer-gate lookup here: replacement can drop an entry under that
         // gate. Only installed/reported cohorts produce a disposal footer.
         if self.metrics.report_sequence.load(Ordering::Acquire) != 0 {
-            self.emit_live_metrics(
-                self.metrics.report_nzb_id.load(Ordering::Relaxed),
-                "disposed",
-            );
+            let nzb_id = self.metrics.report_nzb_id.load(Ordering::Relaxed);
+            self.emit_live_metrics(nzb_id, "disposed");
+            if let Some(summary) = self.refusal_summary() {
+                let message = format!("Live PAR (job {nzb_id}) refusals: {summary}");
+                crate::log::log_active_bytes(crate::queuesubsys_host::MK_DETAIL, message.as_bytes());
+            }
         }
     }
 }

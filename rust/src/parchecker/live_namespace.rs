@@ -344,17 +344,21 @@ impl NamespaceProof {
             {
                 return Err(invalid("PAR source has a different queue owner"));
             }
-            // The renamer picks the first PAR entry with this row's 16k hash;
-            // a known hash must name exactly this destination.
+            // The direct renamer picks the first PAR entry with this row's 16k
+            // hash, so a hash that matches this destination must match only
+            // it. A hash naming a different entry contradicts the name. A hash
+            // matching no entry did not drive the rename (the name came from
+            // the article itself; the hashed first bytes were damaged or not
+            // the file's start), so the name stands and slice CRCs verify it.
             let known = if hint.is_empty() { &self.facts.rows[row].hash16k[..] } else { hint };
-            if !known.is_empty() {
-                let hash = live_hash16k(known).ok_or_else(|| invalid("malformed hash hint"))?;
+            if let Some(hash) = live_hash16k(known) {
                 let matches = self
                     .hash_order
                     .iter()
                     .filter(|&&i| self.catalog[i].hash == hash)
                     .count();
-                if self.catalog[index].hash != hash || matches > 1 {
+                let ours = self.catalog[index].hash == hash;
+                if (ours && matches > 1) || (!ours && matches > 0) {
                     return Err(invalid("renamed source hash does not prove its destination"));
                 }
             }

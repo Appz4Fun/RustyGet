@@ -1287,3 +1287,41 @@ fn waiting_for_a_volume_is_reported() {
     assert!(seen.contains(&true), "{seen:?}");
     assert_eq!(seen.last(), Some(&false), "{seen:?}");
 }
+
+#[test]
+fn rename_mode_out_of_slots_behind_damage_reports_damage() {
+    let t = TestDir::new("slots");
+    let first_copy = pattern(80_000);
+    let mut v = SIG.to_vec();
+    v.extend(main_block(false, None));
+    let at = v.len() + file_block("doc.bin", first_copy.len() as u64, &[], 0, false, false).len();
+    v.extend(file_block("doc.bin", first_copy.len() as u64, &first_copy, crc32fast::hash(&first_copy), false, false));
+    for i in 0..24u8 {
+        let d: Vec<u8> = pattern(1_000).iter().map(|b| b ^ i).collect();
+        v.extend(file_block("doc.bin", d.len() as u64, &d, crc32fast::hash(&d), false, false));
+    }
+    v.extend(end_block(false));
+    let first = t.dl().join("slots.rar");
+    let hole = (at as u64 + 40_000, 1_000u64);
+    let mut dmg = v.clone();
+    dmg[hole.0 as usize..(hole.0 + hole.1) as usize].fill(0);
+    std::fs::write(&first, &dmg).unwrap();
+    let feed = Damaged {
+        holes: vec![(first.clone(), vec![hole])],
+        repair: vec![(first.clone(), v.clone())],
+        handed: false,
+    };
+    let req = Request {
+        first_volume: &first,
+        dest: &t.out(),
+        password: "",
+        overwrite: Overwrite::Rename,
+        on_wait: None,
+    };
+    let r = extract(&req, Box::new(feed), &mut |_, _| {}, &mut || false);
+    match r {
+        Err(Error::Failed(f)) => assert!(f.is_damage(), "{f:?}"),
+        Ok(_) => panic!("must not succeed with renamed copies out of archive order"),
+        Err(Error::Unsupported(u)) => panic!("{u:?}"),
+    }
+}

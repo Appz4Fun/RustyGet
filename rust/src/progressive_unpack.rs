@@ -508,7 +508,25 @@ where
                 if !keep.is_empty() && partial.len() + keep.len() >= drive.session_artifact_limit() {
                     // Out of slots with duplicates held behind a damaged member. Skip mode would
                     // place them only if that member fails (which is reported): drop them.
-                    // Rename mode must keep them: place them now.
+                    // Rename mode must number them in archive order, which it cannot while the
+                    // damaged one waits: give that member up (reported as damage, so
+                    // post-processing extracts the set again) and place the rest in order.
+                    if req.overwrite == Overwrite::Rename {
+                        let blocked: Vec<Vec<u8>> = keep.iter().map(|(m, _)| m.name.clone()).collect();
+                        let mut still = Vec::new();
+                        for (m, mut a) in partial.drain(..) {
+                            if blocked.contains(&m.name) {
+                                let _ = a.discard();
+                                first_failure.get_or_insert(Failure::Damaged(format!(
+                                    "{}: too many members with this name behind its damage",
+                                    String::from_utf8_lossy(&m.name)
+                                )));
+                            } else {
+                                still.push((m, a));
+                            }
+                        }
+                        partial = still;
+                    }
                     for (member, mut a) in keep.drain(..) {
                         if req.overwrite == Overwrite::Rename {
                             match publish_copy(drive.session, &mut a, req, &member, false, is_cancelled, &mut published) {

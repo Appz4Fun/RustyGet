@@ -1,0 +1,339 @@
+/*
+ * Machine metrics (Status and Statistics pages) and the License page.
+ * Chart series colours are validated for colour-blind separation and
+ * contrast against each theme's card surface.
+ */
+
+:root,
+[data-theme="dark"] {
+	--series-1: #ea580c;
+	--series-2: #0891b2;
+	--series-3: #8b5cf6;
+}
+
+[data-theme="light"] {
+	--series-1: #c2410c;
+	--series-2: #0891b2;
+	--series-3: #7c3aed;
+}
+
+/* ---- tiles ---- */
+
+.sysmetrics-tiles {
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+	gap: var(--space-2, 8px);
+	margin-bottom: 12px;
+}
+
+.sysmetrics-tile .details-tile-label .material-icon {
+	font-size: 15px;
+	margin-right: 4px;
+}
+
+.sysmetrics-tile__value {
+	font: 600 15px/1.3 var(--font-mono);
+	color: var(--label-primary);
+	overflow-wrap: anywhere;
+}
+
+.sysmetrics-tile__sub {
+	font-size: 12px;
+	line-height: 1.35;
+	color: var(--label-secondary);
+	overflow-wrap: anywhere;
+}
+
+/* ---- Statistics: system section ---- */
+
+.sysmetrics {
+	margin: 0 0 20px;
+}
+
+.sysmetrics__head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	flex-wrap: wrap;
+	margin-bottom: 10px;
+}
+
+.sysmetrics__head h3 {
+	margin: 0;
+	font: 600 13px/1.4 var(--font-mono);
+	letter-spacing: .06em;
+	text-transform: uppercase;
+	color: var(--label-secondary);
+}
+
+.sysmetrics-range .btn.btn-active {
+	background: var(--accent-soft);
+	color: var(--label-primary);
+	border-color: var(--accent);
+}
+
+.sysmetrics-charts {
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+	gap: 12px;
+}
+
+.sysmetrics-chart {
+	margin: 0;
+	padding: 10px 12px 6px;
+	border: 1px solid var(--separator);
+	border-radius: var(--radius-md, 6px);
+	background: var(--bg-elevated);
+	min-width: 0;
+}
+
+.sysmetrics-chart__head {
+	display: flex;
+	justify-content: space-between;
+	align-items: baseline;
+	gap: 8px;
+	flex-wrap: wrap;
+}
+
+.sysmetrics-chart__title {
+	font-weight: 600;
+	font-size: 13px;
+	color: var(--label-primary);
+}
+
+.sysmetrics-chart__now {
+	font: 12px/1.4 var(--font-mono);
+	color: var(--label-secondary);
+}
+
+.sysmetrics-legend {
+	display: flex;
+	gap: 12px;
+	flex-wrap: wrap;
+	margin-top: 4px;
+	font-size: 12px;
+	color: var(--label-secondary);
+}
+
+.sysmetrics-legend__item {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+}
+
+.sysmetrics-swatch {
+	display: inline-block;
+	width: 12px;
+	height: 3px;
+	border-radius: 2px;
+	background: var(--series-1);
+}
+
+.sysmetrics-swatch.s2 { background: var(--series-2); }
+.sysmetrics-swatch.s3 { background: var(--series-3); }
+
+.sysmetrics-chart__plot {
+	position: relative;
+	margin-top: 4px;
+}
+
+.sysmetrics-svg {
+	display: block;
+	max-width: 100%;
+	overflow: visible;
+}
+
+.sysmetrics-grid { stroke: var(--separator); stroke-width: 1; }
+.sysmetrics-axis { stroke: var(--rule); stroke-width: 1; }
+.sysmetrics-tick { fill: var(--label-secondary); font: 10px var(--font-mono); }
+
+.sysmetrics-line {
+	fill: none;
+	stroke: var(--series-1);
+	stroke-width: 2;
+	stroke-linejoin: round;
+	stroke-linecap: round;
+}
+
+.sysmetrics-line.s2 { stroke: var(--series-2); }
+.sysmetrics-line.s3 { stroke: var(--series-3); }
+
+.sysmetrics-cross { stroke: var(--label-tertiary); stroke-width: 1; stroke-dasharray: 3 3; }
+
+.sysmetrics-dot {
+	fill: var(--series-1);
+	stroke: var(--bg-elevated);
+	stroke-width: 2;
+}
+
+.sysmetrics-dot.s2 { fill: var(--series-2); }
+.sysmetrics-dot.s3 { fill: var(--series-3); }
+
+.sysmetrics-tip {
+	position: absolute;
+	z-index: 5;
+	min-width: 150px;
+	padding: 6px 8px;
+	border-radius: var(--radius-md, 6px);
+	background: var(--bg-content);
+	box-shadow: var(--shadow-popover);
+	font-size: 12px;
+	color: var(--label-primary);
+	pointer-events: none;
+}
+
+.sysmetrics-tip__time {
+	font: 600 11px var(--font-mono);
+	color: var(--label-secondary);
+	margin-bottom: 2px;
+}
+
+.sysmetrics-tip__row {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.sysmetrics-tip__row strong {
+	margin-left: auto;
+	font-family: var(--font-mono);
+}
+
+@media (max-width: 600px) {
+	.sysmetrics-charts { grid-template-columns: minmax(0, 1fr); }
+	.sysmetrics-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* ---- License page ---- */
+
+.license-page {
+	max-width: 1100px;
+}
+
+.license-hero {
+	display: flex;
+	align-items: center;
+	gap: 20px;
+	padding: 18px 20px;
+	margin-bottom: 20px;
+	border: 1px solid var(--separator);
+	border-radius: var(--radius-md, 6px);
+	background: var(--bg-elevated);
+}
+
+.license-hero__number {
+	font: 700 44px/1 var(--font-mono);
+	color: var(--accent);
+	min-width: 3.2ch;
+	text-align: center;
+}
+
+.license-hero__text {
+	flex: 1;
+	min-width: 0;
+}
+
+.license-hero__text h4 {
+	margin: 0 0 4px;
+}
+
+.license-hero__text p {
+	margin: 0 0 10px;
+	color: var(--label-secondary);
+}
+
+.license-hero__text p strong {
+	color: var(--label-primary);
+}
+
+.license-hero__bar {
+	height: 8px;
+	border-radius: 4px;
+	background: var(--fill-secondary);
+	overflow: hidden;
+}
+
+.license-hero__bar span {
+	display: block;
+	height: 100%;
+	width: 0;
+	border-radius: 4px;
+	background: var(--accent);
+}
+
+.license-group {
+	margin-bottom: 20px;
+}
+
+.license-group__title {
+	font: 600 12px/1.4 var(--font-mono);
+	letter-spacing: .06em;
+	text-transform: uppercase;
+	color: var(--label-secondary);
+	margin: 0 0 8px;
+}
+
+.license-grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+	gap: 10px;
+}
+
+.license-card {
+	padding: 12px 14px;
+	border: 1px solid var(--separator);
+	border-radius: var(--radius-md, 6px);
+	background: var(--bg-elevated);
+	min-width: 0;
+}
+
+.license-card--internal {
+	border-color: var(--accent);
+	box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.license-card__head {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 6px;
+	margin-bottom: 6px;
+}
+
+.license-card__name {
+	margin: 0 auto 0 0;
+	font-size: 15px;
+}
+
+.license-card__desc {
+	margin: 0 0 6px;
+	font-size: 13px;
+	color: var(--label-primary);
+}
+
+.license-card__meta {
+	margin: 0;
+	font-size: 12px;
+	color: var(--label-secondary);
+}
+
+.license-badge {
+	display: inline-block;
+	padding: 1px 7px;
+	border-radius: 999px;
+	background: var(--fill-secondary);
+	font: 600 11px/1.6 var(--font-mono);
+	color: var(--label-secondary);
+	white-space: nowrap;
+}
+
+.license-badge--internal {
+	background: var(--accent-soft);
+	color: var(--accent);
+}
+
+@media (max-width: 600px) {
+	.license-hero { flex-direction: column; align-items: flex-start; gap: 10px; }
+	.license-hero__number { text-align: left; }
+}

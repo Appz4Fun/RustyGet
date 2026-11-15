@@ -198,20 +198,6 @@ var SystemHealth = (new function ($) {
 				data: alertsReport.errors,
 				cssClass: 'txt-error',
 				icon: 'error'
-			},
-			{
-				id: 'collapseWarnings',
-				key: 'label_warnings_count',
-				data: alertsReport.warnings,
-				cssClass: 'txt-warning',
-				icon: 'warning'
-			},
-			{
-				id: 'collapseInfo',
-				key: 'label_info_count',
-				data: alertsReport.info,
-				cssClass: 'txt-success',
-				icon: 'info'
 			}
 		];
 
@@ -300,26 +286,15 @@ var SystemHealth = (new function ($) {
 	function redrawGlobalBadges(alertsReport, sectionsReport) {
 		$SystemInfoNavBtnBadge.hide();
 
-		var infoCount = sectionsReport.getInfoCount() + (alertsReport.getInfoCount ? alertsReport.getInfoCount() : 0);
-		var warningsCount = sectionsReport.getWarningsCount() + (alertsReport.getWarningsCount ? alertsReport.getWarningsCount() : 0);
 		var errorsCount = sectionsReport.getErrorsCount() + (alertsReport.getErrorsCount ? alertsReport.getErrorsCount() : 0);
-		//toggleBadgeVisibility($appHealthInfoBadge, infoCount, SEVERITY_STYLE.INFO);
 		if (errorsCount > 0) {
 			toggleGlobalBadgeVisibility($appHealthBadge, errorsCount, SEVERITY_STYLE.ERROR);
 			toggleGlobalBadgeVisibility($SystemInfoNavBtnBadge, errorsCount, SEVERITY_STYLE.ERROR);
 			return;
 		}
 
-		// toggleGlobalBadgeVisibility($appHealthBadge, warningsCount, SEVERITY_STYLE.WARNING);	
-		if (warningsCount > 0) {
-			toggleGlobalBadgeVisibility($SystemInfoNavBtnBadge, warningsCount, SEVERITY_STYLE.WARNING);
-			return;
-		}
-
-		if (infoCount > 0) {
-			toggleGlobalBadgeVisibility($SystemInfoNavBtnBadge, infoCount, SEVERITY_STYLE.INFO);
-			return;
-		}
+		// Warnings and info are shown beside the option they are about in
+		// Settings; the Status page and its badge only carry errors.
 	}
 
 	function makeAlertsReport(health) {

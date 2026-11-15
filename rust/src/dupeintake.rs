@@ -247,12 +247,24 @@ pub fn print_copy(
             })
             .collect(),
     };
-    // The set that holds the biggest file carries the video.
-    let biggest = (0..files.len())
-        .max_by_key(|&i| files[i].bytes)
-        .unwrap_or(0) as i32;
+    // The video is the set with the most bytes (a multipart archive outweighs
+    // a sample bigger than any one volume), samples left out.
     let sets = ContentMapper::group_sets(&members);
-    let Some(set) = sets.iter().find(|s| s.members.contains(&biggest)) else {
+    let is_sample = |i: i32| {
+        files
+            .get(i as usize)
+            .is_some_and(|f| f.name.to_ascii_lowercase().windows(6).any(|w| w == b"sample"))
+    };
+    let Some(set) = sets
+        .iter()
+        .filter(|s| !s.members.iter().all(|&i| is_sample(i)))
+        .max_by_key(|s| {
+            s.members
+                .iter()
+                .filter_map(|&i| files.get(i as usize).map(|f| f.bytes.max(0)))
+                .sum::<i64>()
+        })
+    else {
         return Err("no file set".to_string());
     };
     let map: ContentMap =
@@ -411,6 +423,32 @@ mod tests {
             judge(&prints),
             vec![Verdict::Same, Verdict::Same, Verdict::Different]
         );
+    }
+
+    #[test]
+    fn a_split_movie_wins_over_a_sample_bigger_than_any_volume() {
+        let mut mem = Memory {
+            files: HashMap::new(),
+            fetched: Cell::new(0),
+        };
+        let movie = video(300_000, 5);
+        let bare = copy(&mut mem, "m", "movie.mkv", movie.clone(), 8_000);
+        // the same movie as a raw split of three 100 KB volumes, plus a
+        // 150 KB sample of another video
+        let mut split = Vec::new();
+        for (n, chunk) in movie.chunks(100_000).enumerate() {
+            split.extend(copy(
+                &mut mem,
+                &format!("s{n}"),
+                &format!("movie.mkv.{:03}", n + 1),
+                chunk.to_vec(),
+                8_000,
+            ));
+        }
+        split.extend(copy(&mut mem, "x", "movie-sample.mkv", video(150_000, 6), 8_000));
+        let a = print_copy(&bare, &mem, None, 4, 9).expect("bare");
+        let b = print_copy(&split, &mem, None, 4, 9).expect("split");
+        assert_eq!(a, b, "the split movie is read, not the sample");
     }
 
     /// A zip archive holding `name` stored (not compressed).

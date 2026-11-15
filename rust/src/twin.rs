@@ -1019,13 +1019,18 @@ pub(crate) fn nudge_and_wake_active() {
 }
 
 #[cfg(unix)]
+/// Seconds until the next round, as the service coordinator counts them: one
+/// second after a nudge (a copy was added), else every 15 seconds.
 pub(crate) fn service_interval_active() -> i32 {
     if TWIN_NUDGED.load(std::sync::atomic::Ordering::SeqCst) {
-        1000
+        TWIN_NUDGED_INTERVAL_SEC
     } else {
-        15000
+        TWIN_INTERVAL_SEC
     }
 }
+
+const TWIN_NUDGED_INTERVAL_SEC: i32 = 1;
+const TWIN_INTERVAL_SEC: i32 = 15;
 
 #[cfg(unix)]
 fn store_has_sigs_dir(qdir: &[u8], id: i32, print: &[u8]) -> i32 {
@@ -1710,6 +1715,14 @@ mod tests {
     use super::*;
     use par_rs::packet::{TYPE_FILEDESC as TYPE_FILE_DESC, TYPE_MAIN};
     use std::collections::BTreeSet;
+
+    /// The service coordinator counts intervals in seconds; a millisecond
+    /// value here left the twin check idle for hours after its first round.
+    #[test]
+    fn twin_rounds_run_within_seconds() {
+        assert_eq!(TWIN_NUDGED_INTERVAL_SEC, 1);
+        assert_eq!(TWIN_INTERVAL_SEC, 15);
+    }
 
     /// A test MD5: 32 hex digits as given, else the label's bytes zero-padded.
     fn md5_of(label: &str) -> [u8; 16] {

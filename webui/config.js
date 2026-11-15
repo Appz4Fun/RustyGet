@@ -1532,6 +1532,12 @@ var Config = (new function($)
 		}
 
 		var element = $('#' + option.formId);
+		// a hidden input (such as Cipher behind its menu) scrolls to what shows in its place
+		if (!element.is(':visible'))
+		{
+			var shown = element.siblings(':visible').first();
+			element = shown.length ? shown : element.closest(':visible');
+		}
 		var smallScreen = $(window).width() <= 768;
 		var parent = smallScreen ? $('html,.config__main') : $('.config__main');
 

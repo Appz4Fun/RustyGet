@@ -205,6 +205,18 @@ const { installDetailsFixture } = require('./details-fixture');
         assert(box.top >= box.paneTop && box.bottom <= box.paneBottom, `Connections is inside the pane (${JSON.stringify(box)})`);
       });
 
+      await check('a link to Cipher scrolls to its menu', async () => {
+        const scroller = wide ? '#ConfigServerPane .config-pane__body' : '.config__main';
+        await page.evaluate(s => { $(s).scrollTop(0); $('html').scrollTop(0); }, scroller);
+        await page.evaluate(() => Config.scrollToOption({ preventDefault() {} }, $('<a data-optid="S_Server1_Cipher"></a>')[0]));
+        await page.waitForTimeout(1200);
+        const box = await page.evaluate(() => {
+          const el = $('#S_Server1_Cipher').siblings('select.config-cipher__menu')[0].getBoundingClientRect();
+          return { top: el.top, bottom: el.bottom, height: window.innerHeight };
+        });
+        assert(box.top >= 0 && box.bottom <= box.height, `the cipher menu is on screen (${JSON.stringify(box)})`);
+      });
+
       await check('closing returns the server to the list, and Add opens the new one', async () => {
         if (wide) await pane.locator('.config-pane__close').click();
         else await edit(1).click();

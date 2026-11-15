@@ -84,6 +84,20 @@ var Options = (new function($)
 		_this.postParamConfig = initPostParamConfig();
 	}
 
+	// re-read the running configuration (after a reload) for the pages that use it,
+	// without touching the Settings editor
+	this.refreshRuntime = function(done)
+	{
+		RPC.call('config', [], function(_options)
+		{
+			_this.options = _options;
+			initCategories();
+			_this.restricted = _this.option('ControlPort') === '***';
+			notifyAll(_options);
+			if (done) done();
+		}, function() { if (done) done(); });
+	}
+
 	this.setOnPageRenderedCallback = function(callback) {
 		onPageRenderedCallback = callback;
 	}
@@ -733,6 +747,8 @@ var Config = (new function($)
 	{
 		Options.cleanup();
 		config = null;
+		serverEditing = 0;
+		$ConfigContent.removeClass('server-editing server-pane-open server-page-open');
 		$ConfigNav.children().not('.config-static').remove();
 		$ConfigData.children().not('.config-static').remove();
 	}
@@ -1013,10 +1029,11 @@ var Config = (new function($)
 
 		// a readable label first, then the option's own name in mono so it still matches rustyget.conf
 		option.label = optionLabel(option);
+		// a list editor already names its server/category, so "Server1.Cipher" would repeat it
 		if (option.label)
 		{
 			caption = '<span class="config-label">' + Util.textToHtml(option.label) + '</span>' +
-				'<span class="config-key">' + caption + '</span>';
+				(listSectionPrefix(section.id) ? '' : '<span class="config-key">' + caption + '</span>');
 		}
 
 		// makeId removes colons, so label: IDs cannot collide with option controls.
@@ -1337,6 +1354,12 @@ var Config = (new function($)
 			}
 			if (setname.toLowerCase() === 'server')
 			{
+				html = html.replace('multiset-toolbar', 'multiset-toolbar config-server-toolbar');
+				html += '<div class="config-server-actions"><button type="button" class="btn btn-primary config-button config-server-save" ' +
+					'data-multiid="' + multiid + '" onclick="Config.saveServer(this.getAttribute(\'data-multiid\'))"><span data-i18n="config_server_save">Save server</span></button> ' +
+					'<button type="button" class="btn btn-default config-server-close" onclick="Config.closeServerEditor()">' +
+					'<span data-i18n="config_server_back">Back to servers</span></button>' +
+					'<span class="config-server-status" role="status" aria-live="polite" hidden></span></div>';
 				html += ' <button type="button" class="btn btn-default config-button" data-multiid="' + multiid + '" ' +
 					'onclick="Config.testConnection(this, \'' + setname + '\',\'' + section.id + '\')">' +
 					'<span data-i18n="btn_test_connection"></span></button>';
@@ -1509,12 +1532,25 @@ var Config = (new function($)
 		}
 
 		var element = $('#' + option.formId);
+		// a hidden input (such as Cipher behind its menu) scrolls to what shows in its place
+		if (!element.is(':visible'))
+		{
+			var shown = element.siblings(':visible').first();
+			element = shown.length ? shown : element.closest(':visible');
+		}
 		var smallScreen = $(window).width() <= 768;
 		var parent = smallScreen ? $('html,.config__main') : $('.config__main');
 
 		var offsetY = 30;
 		if ($('body').hasClass('navfixed')) {
 			offsetY = 10;
+		}
+		// a server option shown in the side pane scrolls inside the pane, not the page
+		var pane = element.closest('.config-pane__body');
+		if (pane.length)
+		{
+			parent = pane;
+			offsetY = 16;
 		}
 		parent.animate({ scrollTop: parent.scrollTop() + element.offset().top - parent.offset().top - offsetY }, { duration: 'slow', easing: 'swing' });
 	}
@@ -2549,6 +2585,10 @@ var Config = (new function($)
 			{
 				enhanceSelect(control);
 			}
+			else if (optionFamily(option.name) === 'Server.Cipher' && control.is('input') && !control.hasClass('config-cipher-source'))
+			{
+				enhanceCipher(option, control);
+			}
 		});
 	}
 	this.enhanceControls = enhanceControls;
@@ -2556,7 +2596,8 @@ var Config = (new function($)
 	// keep menus and sliders in step with values set from elsewhere (Discard, restore, dialogs)
 	function syncControls()
 	{
-		$('select.config-select', $ConfigData).each(function()
+		$('select.config-cipher__menu', $ConfigData).each(function() { syncCipher($(this)); });
+		$('select.config-select', $ConfigData).not('.config-cipher__menu').each(function()
 		{
 			var group = $(this).next('.btn-switch');
 			var value = switchGetValue(group);
@@ -3211,6 +3252,7 @@ var Config = (new function($)
 
 	this.showSection = function(sectionId, animateScroll)
 	{
+		closeServerEditor();
 		this.currentSectionID = sectionId;
 		var link = $('a[href="#' + sectionId + '"]', $ConfigNav);
 		$('li', $ConfigNav).removeClass('active');
@@ -3309,6 +3351,7 @@ var Config = (new function($)
 	this.deleteSet = function(control, setname, sectionId)
 	{
 		var multiid = parseInt($(control).attr('data-multiid'));
+		if (sectionId === 'NEWS-SERVERS') closeServerEditor();
 		$('#ConfigDeleteConfirmDialog_Option').text(setname + multiid);
 		ConfirmDialog.showModal('ConfigDeleteConfirmDialog', function()
 		{
@@ -3509,6 +3552,7 @@ var Config = (new function($)
 	{
 		var id1 = parseInt($(control).attr('data-multiid'));
 		var id2 = direction === 'down' ? id1 + 1 : id1 - 1;
+		if (sectionId === 'NEWS-SERVERS') closeServerEditor();
 
 		// swap options in two sets
 		var opts1 = $('.' + sectionId + '.multiid' + (direction === 'down' ? id1 : id2), $ConfigData);
@@ -3610,9 +3654,14 @@ var Config = (new function($)
 			row.find('.config-list-health').text(issues ? issues + ' ' + I18n.translate('config_server_issues') : '').toggle(issues > 0);
 			var edit = row.find('.config-list-edit');
 			var caption = I18n.translate(edit.attr('aria-expanded') === 'true' ? 'btn_close' : 'btn_edit');
+			if (row.hasClass('is-editing') && $ConfigContent.hasClass('server-page-open'))
+			{
+				caption = I18n.defaultValue('config_server_back', 'Back to servers');
+			}
 			edit.text(caption).attr('aria-label', caption + ': ' + name);
 			edit.attr('aria-controls', details.find('input[id],.btn-switch[id]').map(function() { return this.id; }).get().join(' '));
 		});
+		refreshServerPane();
 	}
 
 	this.refreshHealth = function()
@@ -3653,6 +3702,18 @@ var Config = (new function($)
 
 	function setListEditor(sectionId, multiid, expanded)
 	{
+		if (sectionId === 'NEWS-SERVERS' && !$ConfigContent.hasClass('search'))
+		{
+			if (expanded) openServerEditor(multiid);
+			else if (serverEditing === parseInt(multiid)) closeServerEditor(true);
+			else setListEditorRaw(sectionId, multiid, false);
+			return;
+		}
+		setListEditorRaw(sectionId, multiid, expanded);
+	}
+
+	function setListEditorRaw(sectionId, multiid, expanded)
+	{
 		$('.config-list-row.' + sectionId + '.multiid' + multiid + ' .config-list-edit', $ConfigData).attr('aria-expanded', expanded);
 		$('.config-list-detail.' + sectionId + '.multiid' + multiid, $ConfigData).toggleClass('list-closed', !expanded);
 		refreshListRows();
@@ -3662,6 +3723,492 @@ var Config = (new function($)
 	{
 		var row = $(control).closest('.config-list-row');
 		setListEditor(row.attr('data-section'), row.attr('data-multiid'), $(control).attr('aria-expanded') !== 'true');
+	}
+
+	/*** SERVER EDITOR: SIDE PANE OR OWN PAGE ****************************************/
+
+	// A wide window edits a server in a pane on the right, beside the list. A narrow
+	// one gives the server the whole page. Either way "Add server" is only offered
+	// from the list, and Save writes the server to rustyget.conf straight away.
+	var SERVER_PANE_MIN_WIDTH = 1180;
+	var serverEditing = 0;
+	var serverSaving = false;
+	// while a server is being saved, the page-wide save waits: its write could be
+	// overtaken by the server's and lose the other changes
+	var pageSaving = false;
+	function setServerSaving(on)
+	{
+		serverSaving = on;
+		$('#ConfigSaveBar_Save, #Config_Save').prop('disabled', on || pageSaving);
+	}
+
+	function serverDetails(multiid)
+	{
+		return $('.config-list-detail.NEWS-SERVERS.multiid' + multiid, $ConfigData);
+	}
+
+	function serverPaneWide()
+	{
+		return window.innerWidth >= SERVER_PANE_MIN_WIDTH;
+	}
+
+	function ensureServerPane()
+	{
+		var pane = $('#ConfigServerPane');
+		if (pane.length)
+		{
+			return pane;
+		}
+		pane = $('<aside id="ConfigServerPane" class="config-pane" role="region">' +
+			'<header class="config-pane__head"><div class="config-pane__titles"><h2 class="config-pane__title"></h2>' +
+			'<p class="config-pane__host"></p></div>' +
+			'<button type="button" class="btn config-pane__close"></button></header>' +
+			'<div class="config-pane__body"></div></aside>');
+		pane.find('.config-pane__close').on('click', function() { closeServerEditor(true); })
+			.attr('aria-label', I18n.defaultValue('btn_close', 'Close')).html('<i class="material-icon">close</i>');
+		$ConfigData.append(pane);
+		return pane;
+	}
+
+	function refreshServerPane()
+	{
+		if (!serverEditing)
+		{
+			return;
+		}
+		var name = getOptionValue(findOptionByName('Server' + serverEditing + '.Name') || {}) || ('Server' + serverEditing);
+		var host = findOptionByName('Server' + serverEditing + '.Host');
+		var port = findOptionByName('Server' + serverEditing + '.Port');
+		var where = (host ? getOptionValue(host) || '' : '') + (port && getOptionValue(port) ? ':' + getOptionValue(port) : '');
+		$('#ConfigServerPane .config-pane__title').text(name);
+		$('#ConfigServerPane .config-pane__host').text(where).toggle(!!where);
+		$('#ConfigServerPane').attr('aria-label', name);
+	}
+
+	function openServerEditor(multiid)
+	{
+		multiid = parseInt(multiid);
+		if (serverEditing && serverEditing !== multiid)
+		{
+			closeServerEditor();
+		}
+		if ($ConfigContent.hasClass('search'))
+		{
+			setListEditorRaw('NEWS-SERVERS', multiid, true);
+			return;
+		}
+		var row = $('.config-list-row.NEWS-SERVERS.multiid' + multiid, $ConfigData);
+		var details = serverDetails(multiid);
+		if (!row.length || !details.length)
+		{
+			return;
+		}
+		serverEditing = multiid;
+		$ConfigContent.addClass('server-editing');
+		row.addClass('is-editing');
+		var wide = serverPaneWide();
+		$ConfigContent.toggleClass('server-pane-open', wide).toggleClass('server-page-open', !wide);
+		if (wide)
+		{
+			var pane = ensureServerPane();
+			if (!row.next('.config-pane-anchor').length)
+			{
+				row.after('<span class="config-pane-anchor" hidden></span>');
+			}
+			pane.find('.config-pane__body').append(details);
+		}
+		setListEditorRaw('NEWS-SERVERS', multiid, true);
+		refreshServerPane();
+		setServerStatus('');
+		if (wide)
+		{
+			$('#ConfigServerPane .config-pane__body').scrollTop(0);
+		}
+		else
+		{
+			$('.config__main').scrollTop(0);
+			$('html').scrollTop(0);
+		}
+	}
+
+	function closeServerEditor(restoreFocus)
+	{
+		var multiid = serverEditing;
+		if (!multiid)
+		{
+			return;
+		}
+		var row = $('.config-list-row.NEWS-SERVERS.multiid' + multiid, $ConfigData);
+		var anchor = row.next('.config-pane-anchor');
+		var details = serverDetails(multiid);
+		if (anchor.length)
+		{
+			anchor.after(details);
+			anchor.remove();
+		}
+		$('.config-pane-anchor', $ConfigData).remove();
+		$('#ConfigServerPane').remove();
+		row.removeClass('is-editing');
+		$ConfigContent.removeClass('server-editing server-pane-open server-page-open');
+		serverEditing = 0;
+		setListEditorRaw('NEWS-SERVERS', multiid, false);
+		if (restoreFocus) row.find('.config-list-edit').focus();
+	}
+	this.closeServerEditor = function() { closeServerEditor(true); };
+
+	// a window that crosses the width limit moves the open editor between pane and page
+	var serverResizeTimer = null;
+	$(window).on('resize.serverpane', function()
+	{
+		clearTimeout(serverResizeTimer);
+		serverResizeTimer = setTimeout(function()
+		{
+			if (serverEditing && serverPaneWide() !== $ConfigContent.hasClass('server-pane-open'))
+			{
+				var multiid = serverEditing;
+				closeServerEditor();
+				openServerEditor(multiid);
+			}
+		}, 150);
+	});
+
+	function setServerStatus(text, kind)
+	{
+		var status = $('.multiset-toolbar.NEWS-SERVERS.multiid' + serverEditing + ' .config-server-status', $ConfigData);
+		status.text(text || '').toggle(!!text).attr('data-kind', kind || '');
+	}
+
+	function serverText(key, text)
+	{
+		return I18n.defaultValue('config_server_' + key, text);
+	}
+
+	// Everything else is written exactly as it was last saved (the saved values, not
+	// the editor, so unsaved edits, additions or deletions elsewhere stay unsaved):
+	// only the server list comes from the editor.
+	function serverOnlySaveRequest()
+	{
+		var request = (config.values || []).filter(function(item)
+		{
+			return !/^Server\d+\./i.test(item.Name);
+		}).map(function(item) { return { Name: item.Name, Value: item.Value }; });
+		var section = findSectionById('NEWS-SERVERS');
+		section.options.forEach(function(option)
+		{
+			if (option.template || option.type === 'info')
+			{
+				return;
+			}
+			var value = getOptionValue(option);
+			if (value != null)
+			{
+				request.push({ Name: option.name, Value: value });
+			}
+		});
+		return request;
+	}
+
+	function serverStructure()
+	{
+		return findSectionById('NEWS-SERVERS').options.filter(function(option) { return !option.template; })
+			.map(function(option) { return option.name; }).join('\n');
+	}
+
+	function markServersSaved(request, structure)
+	{
+		var section = findSectionById('NEWS-SERVERS');
+		var sent = {};
+		request.forEach(function(item) { sent[item.Name.toLowerCase()] = item.Value; });
+		// the saved baseline is what was written; an edit made while saving stays unsaved
+		section.options.forEach(function(option)
+		{
+			if (!option.template && option.type !== 'info' && sent.hasOwnProperty(option.name.toLowerCase()))
+			{
+				option.value = sent[option.name.toLowerCase()];
+			}
+		});
+		if (serverStructure() === structure)
+		{
+			section.modified = false;
+		}
+		// keep the saved copy in step so later saves and cipher checks compare against the file
+		var saved = {};
+		request.forEach(function(item) { saved[item.Name.toLowerCase()] = item.Value; });
+		config.values = (config.values || []).filter(function(item)
+		{
+			return !/^Server\d+\./i.test(item.Name) || saved.hasOwnProperty(item.Name.toLowerCase());
+		}).map(function(item)
+		{
+			var key = item.Name.toLowerCase();
+			return saved.hasOwnProperty(key) ? { Name: item.Name, Value: saved[key] } : item;
+		});
+		request.forEach(function(item)
+		{
+			if (!config.values.some(function(value) { return value.Name.toLowerCase() === item.Name.toLowerCase(); }))
+			{
+				config.values.push({ Name: item.Name, Value: item.Value });
+			}
+		});
+		refreshChangeState();
+		refreshListRows();
+	}
+
+	this.saveServer = function(multiid, forceOptimize)
+	{
+		multiid = parseInt(multiid);
+		if (serverSaving || pageSaving)
+		{
+			return;
+		}
+		if (typeof TlsCipherDialog !== 'undefined' && !TlsCipherDialog.canSaveSettings())
+		{
+			TlsCipherDialog.showSaveBlocked();
+			return;
+		}
+		if (restored)
+		{
+			setServerStatus(serverText('restored_first', 'Settings were restored from a backup: use Save and reload first.'), 'error');
+			return;
+		}
+		setServerSaving(true);
+		$('.config-server-save, .config-cipher__optimize', $ConfigData).prop('disabled', true);
+		setServerStatus(serverText('saving', 'Saving…'), 'busy');
+		var request = serverOnlySaveRequest();
+		var structure = serverStructure();
+		var editor = config;
+		RPC.call('saveconfig', [Config.withCipherBaseline(request)], function(ok)
+		{
+			if (config !== editor)
+			{
+				// Settings was closed or read again while saving: the file is written,
+				// so put it to use, but leave the editor that is gone alone.
+				if (ok)
+				{
+					applySavedServers();
+				}
+				else
+				{
+					setServerSaving(false);
+				}
+				return;
+			}
+			if (!ok)
+			{
+				serverSaveFailed(serverText('save_failed', 'Could not write the configuration file.'));
+				return;
+			}
+			markServersSaved(request, structure);
+			var encryption = findOptionByName('Server' + multiid + '.Encryption');
+			var cipher = findOptionByName('Server' + multiid + '.Cipher');
+			var wantsCipher = encryption && cipher && String(getOptionValue(encryption)).toLowerCase() === 'yes' &&
+				(forceOptimize || !getOptionValue(cipher));
+			if (wantsCipher)
+			{
+				optimizeSavedServer(multiid, !!forceOptimize);
+			}
+			else
+			{
+				applySavedServers();
+			}
+		}, function(value, result)
+		{
+			serverSaveFailed(result && result.error ? result.error.message : String(value));
+		});
+	};
+
+	function serverSaveFailed(message)
+	{
+		setServerSaving(false);
+		$('.config-server-save, .config-cipher__optimize', $ConfigData).prop('disabled', false);
+		setServerStatus(message, 'error');
+	}
+
+	// Find the fastest cipher this server accepts and save it, before RustyGet reloads.
+	var cipherWaitServer, cipherWaitForced;
+	function optimizeSavedServer(multiid, forced)
+	{
+		cipherWaitServer = multiid;
+		cipherWaitForced = forced;
+		setServerStatus(serverText('cipher_testing', 'Finding the fastest cipher for this server…'), 'busy');
+		var snapshot = Config.cipherSnapshot();
+		var finish = function(note)
+		{
+			applySavedServers(note);
+		};
+		var misses = 0;
+		var poll = function(job)
+		{
+			RPC.call('tlscipherstatus', [job], function(result)
+			{
+				misses = 0;
+				if (['measuring', 'probing', 'saving'].indexOf(result.State) !== -1)
+				{
+					if (result.State === 'probing' && result.TotalProbes)
+					{
+						setServerStatus(serverText('cipher_testing', 'Finding the fastest cipher for this server…') +
+							' ' + (result.CompletedProbes || 0) + ' / ' + result.TotalProbes, 'busy');
+					}
+					setTimeout(function() { poll(job); }, 500);
+					return;
+				}
+				var server = (result.Servers || [])[0] || {};
+				if (result.Saved === true && !Config.applyCipherResults(result, snapshot))
+				{
+					finish(serverText('cipher_conflict', 'A cipher was saved, but the editor changed meanwhile. Refresh Settings to see it.'));
+				}
+				else if (result.State === 'completed' && server.SelectedCipher)
+				{
+					finish(serverText('cipher_chosen', 'Cipher') + ': ' + server.SelectedCipher);
+				}
+				else
+				{
+					finish(forced ? (server.Message || result.Message || '') : '');
+				}
+			}, function()
+			{
+				// a missed status reply is retried; a reload would cancel a test still running
+				if (++misses < 10)
+				{
+					setTimeout(function() { poll(job); }, 1000);
+					return;
+				}
+				RPC.call('tlsciphercancel', [job], function() {}, function() {}, { timeout: 15000 });
+				finish(serverText('cipher_lost', 'The cipher test stopped answering and was cancelled; the cipher is unchanged.'));
+			}, { timeout: 15000 });
+		};
+		RPC.call('tlscipherstart', [String(multiid)], function(result)
+		{
+			waitedForCipher = 0;
+			if (result.Available === false || !result.JobID)
+			{
+				finish(forced ? (result.Message || serverText('cipher_unavailable', 'Cipher testing is not available here.')) : '');
+				return;
+			}
+			poll(result.JobID);
+		}, function(value, result)
+		{
+			var message = result && result.error ? result.error.message : String(value);
+			if (/already running/.test(message))
+			{
+				// another browser is testing other servers; a reload now would cancel its test
+				waitForOtherCipherTest();
+				return;
+			}
+			finish(forced ? message : '');
+		}, { timeout: 15000 });
+	}
+
+	// Try again until the other cipher test is done, then test and reload as usual.
+	// If it never ends, the server stays saved and is put to use with a later save or reload.
+	var waitedForCipher = 0;
+	function waitForOtherCipherTest()
+	{
+		if (waitedForCipher === 0)
+		{
+			waitedForCipher = new Date().getTime();
+		}
+		if (new Date().getTime() - waitedForCipher > 15 * 60 * 1000)
+		{
+			waitedForCipher = 0;
+			setServerSaving(false);
+			$('.config-server-save, .config-cipher__optimize', $ConfigData).prop('disabled', false);
+			setServerStatus(serverText('cipher_busy_gave_up', 'Saved, but another cipher test is still running, so RustyGet was not reloaded. Save again once it finishes.'), 'error');
+			return;
+		}
+		setServerStatus(serverText('cipher_busy', 'Saved. Waiting for another cipher test to finish before putting it to use…'), 'busy');
+		setTimeout(function() { optimizeSavedServer(cipherWaitServer, cipherWaitForced); }, 2000);
+	}
+
+	// RustyGet reads servers when it starts, so a saved server is put to use with a reload.
+	function applySavedServers(note)
+	{
+		var prefix = note ? note + ' ' : '';
+		setServerStatus(prefix + serverText('applying', 'Saved. Putting it to use…'), 'busy');
+		var before = Status.status && Status.status.UpTimeSec;
+		var started = new Date();
+		Refresher.pause();
+		var done = function(text, kind)
+		{
+			setServerSaving(false);
+			$('.config-server-save, .config-cipher__optimize', $ConfigData).prop('disabled', false);
+			Refresher.resume(true);
+			setServerStatus(prefix + text, kind);
+		};
+		var check = function()
+		{
+			RPC.call('status', [], function(status)
+			{
+				if (before === undefined || status.UpTimeSec < before)
+				{
+					Status.status = status;
+					Options.refreshRuntime(function() { done(serverText('saved', 'Saved and in use.'), 'ok'); });
+				}
+				else if (new Date() - started > 60000)
+				{
+					done(serverText('saved_reload', 'Saved. Reload RustyGet to use it.'), 'ok');
+				}
+				else
+				{
+					setTimeout(check, 500);
+				}
+			}, function()
+			{
+				if (new Date() - started > 60000)
+				{
+					done(serverText('reload_unknown', 'Saved, but RustyGet did not answer after the reload. Check that it is running.'), 'error');
+				}
+				else
+				{
+					setTimeout(check, 500);
+				}
+			});
+		};
+		RPC.call('reload', [], function() { setTimeout(check, 500); }, function() { setTimeout(check, 500); });
+	}
+
+	// The cipher is a menu of the suites RustyGet can use, with "Optimize" beside it.
+	var CIPHER_GROUPS = [
+		['TLS 1.3', ['TLS_AES_128_GCM_SHA256', 'TLS_AES_256_GCM_SHA384', 'TLS_CHACHA20_POLY1305_SHA256']],
+		['TLS 1.2', ['ECDHE-ECDSA-AES128-GCM-SHA256', 'ECDHE-RSA-AES128-GCM-SHA256', 'ECDHE-ECDSA-AES256-GCM-SHA384',
+			'ECDHE-RSA-AES256-GCM-SHA384', 'ECDHE-ECDSA-CHACHA20-POLY1305', 'ECDHE-RSA-CHACHA20-POLY1305']]
+	];
+
+	function enhanceCipher(option, input)
+	{
+		var wrap = $('<div class="config-cipher"></div>');
+		var select = $('<select class="config-select config-cipher__menu"></select>')
+			.attr('aria-label', I18n.defaultValue('config_label_cipher', 'Cipher'));
+		select.append($('<option value=""></option>').text(I18n.defaultValue('config_cipher_auto', 'Automatic (fastest is found when you save)')));
+		CIPHER_GROUPS.forEach(function(group)
+		{
+			var optgroup = $('<optgroup></optgroup>').attr('label', group[0]);
+			group[1].forEach(function(name) { optgroup.append($('<option></option>').attr('value', name).text(name)); });
+			select.append(optgroup);
+		});
+		var button = $('<button type="button" class="btn config-cipher__optimize"></button>')
+			.text(I18n.defaultValue('config_cipher_optimize', 'Optimize'))
+			.attr('title', I18n.defaultValue('config_cipher_optimize_title', 'Save this server and pick the fastest cipher it accepts'))
+			.on('click', function() { Config.saveServer(option.multiid, true); });
+		input.before(wrap);
+		wrap.append(select).append(button).append(input);
+		input.addClass('config-cipher-source');
+		select.on('change', function()
+		{
+			input.val(this.value).trigger('input').trigger('change');
+			refreshChangeState();
+		});
+		syncCipher(select);
+	}
+
+	function syncCipher(select)
+	{
+		var value = $.trim(select.siblings('input').val() || '');
+		if (!select.find('option').filter(function() { return this.value === value; }).length)
+		{
+			select.find('option.config-cipher__other').remove();
+			select.append($('<option class="config-cipher__other"></option>').attr('value', value).text(value));
+		}
+		select.val(value);
 	}
 
 	/*** RSS FEEDS ********************************************************************/
@@ -3753,6 +4300,7 @@ var Config = (new function($)
 		}
 		updates.forEach(function(update) {
 			setOptionValue(update.option, update.value);
+			syncCipher($('#' + update.option.formId).siblings('select.config-cipher__menu'));
 			update.option.value = update.value;
 			var saved = (config.values || []).filter(function(value) { return value.Name.toLowerCase() === update.option.name.toLowerCase(); });
 			if (saved.length) saved.forEach(function(value) { value.Value = update.value; });
@@ -3994,6 +4542,11 @@ var Config = (new function($)
 	this.saveChanges = function()
 	{
 		$LeaveConfigDialog.modal('hide');
+		if (serverSaving)
+		{
+			setServerStatus(serverText('save_wait', 'A server is still being saved. Save the other changes once it is done.'), 'busy');
+			return;
+		}
 		if (typeof TlsCipherDialog !== 'undefined' && !TlsCipherDialog.canSaveSettings())
 		{
 			TlsCipherDialog.showSaveBlocked();
@@ -4048,12 +4601,16 @@ var Config = (new function($)
 
 	function showSaveBanner()
 	{
+		pageSaving = true;
 		$('#Config_Save').attr('disabled', 'disabled');
+		$('.config-server-save, .config-cipher__optimize', $ConfigData).prop('disabled', true);
 	}
 
 	function removeSaveBanner()
 	{
+		pageSaving = false;
 		$('#Config_Save').removeAttr('disabled');
+		$('.config-server-save, .config-cipher__optimize', $ConfigData).prop('disabled', serverSaving);
 	}
 
 	function saveCompleted(result)
@@ -4174,6 +4731,7 @@ var Config = (new function($)
 
 	function search()
 	{
+		closeServerEditor();
 		$ConfigTabBadge.show();
 		$ConfigTabBadgeEmpty.hide();
 		$ConfigContent.addClass('search');

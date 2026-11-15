@@ -5506,5 +5506,68 @@
   "config_requires_flush": {
     "message": "Always on while \"Write directly to the final file\" is on: the queue file is how a download resumes.",
     "description": "Note on Flush queue to disk while Direct write is on"
+  },
+  "config_server_save": {
+    "message": "Save server"
+  },
+  "config_server_back": {
+    "message": "Back to servers"
+  },
+  "config_server_saving": {
+    "message": "Saving…"
+  },
+  "config_server_save_failed": {
+    "message": "Could not write the configuration file."
+  },
+  "config_server_cipher_testing": {
+    "message": "Finding the fastest cipher for this server…"
+  },
+  "config_server_cipher_conflict": {
+    "message": "A cipher was saved, but the editor changed meanwhile. Refresh Settings to see it."
+  },
+  "config_server_cipher_chosen": {
+    "message": "Cipher"
+  },
+  "config_server_cipher_unavailable": {
+    "message": "Cipher testing is not available here."
+  },
+  "config_server_applying": {
+    "message": "Saved. Putting it to use…"
+  },
+  "config_server_saved": {
+    "message": "Saved and in use."
+  },
+  "config_server_saved_reload": {
+    "message": "Saved. Reload RustyGet to use it."
+  },
+  "config_cipher_auto": {
+    "message": "Automatic (fastest is found when you save)"
+  },
+  "config_cipher_optimize": {
+    "message": "Optimize"
+  },
+  "config_cipher_optimize_title": {
+    "message": "Save this server and pick the fastest cipher it accepts"
+  },
+  "config_server_restored_first": {
+    "message": "Settings were restored from a backup: use Save and reload first."
+  },
+  "config_server_cipher_lost": {
+    "message": "The cipher test stopped answering and was cancelled; the cipher is unchanged."
+  },
+  "config_server_reload_unknown": {
+    "message": "Saved, but RustyGet did not answer after the reload. Check that it is running.",
+    "description": "Server editor status when the daemon does not come back after saving a server"
+  },
+  "config_server_cipher_busy": {
+    "message": "Saved. Waiting for another cipher test to finish before putting it to use…",
+    "description": "Server editor status while another browser's cipher test runs"
+  },
+  "config_server_cipher_busy_gave_up": {
+    "message": "Saved, but another cipher test is still running, so RustyGet was not reloaded. Save again once it finishes."
+  },
+  "config_server_save_wait": {
+    "message": "A server is still being saved. Save the other changes once it is done.",
+    "description": "Settings: shown when Save and reload is used while a server save is running"
   }
 }

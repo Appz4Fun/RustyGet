@@ -2809,7 +2809,7 @@ pub unsafe fn roc_xmlrpc_tls_cipher_validate_job_id(
     id_ptr: *const c_char,
     id_len: usize,
 ) -> c_int {
-    if (operation == 0 && param_count != 0)
+    if (operation == 0 && param_count > 1)
         || (operation == 1 && param_count > 1)
         || (operation == 2 && param_count != 1)
     {
@@ -2821,6 +2821,12 @@ pub unsafe fn roc_xmlrpc_tls_cipher_validate_job_id(
         }
         let slice = unsafe { std::slice::from_raw_parts(id_ptr as *const u8, id_len) };
         if slice.contains(&0) {
+            return 0;
+        }
+        // A start takes only a server ID: 1 to 999, digits only.
+        if operation == 0
+            && (slice.len() > 3 || !slice.iter().all(u8::is_ascii_digit) || slice[0] == b'0')
+        {
             return 0;
         }
     }
@@ -6968,9 +6974,10 @@ mod remote_xmlrpc_tests {
                                         id_cstr.as_ref().map_or(std::ptr::null(), |c| c.as_ptr());
                                     let buf = unsafe {
                                         match op_kind {
-                                            0 => crate::ffi::nzbget_rs_tls_cipher_start(
-                                                std::ptr::null(),
-                                            ),
+                                            0 => match id_opt.and_then(|s| std::str::from_utf8(s).ok()?.parse().ok()) {
+                                                Some(server) => crate::ffi::nzbget_rs_tls_cipher_start_server(server),
+                                                None => crate::ffi::nzbget_rs_tls_cipher_start(std::ptr::null()),
+                                            },
                                             1 => crate::ffi::nzbget_rs_tls_cipher_status(id_ptr),
                                             _ => crate::ffi::nzbget_rs_tls_cipher_cancel(id_ptr),
                                         }

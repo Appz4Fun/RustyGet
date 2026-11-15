@@ -61,7 +61,14 @@ pub unsafe extern "C" fn nzbget_rs_tls_cipher_start(
     } else {
         unsafe { *backend }
     };
-    cipher_response(tls_cipher_native::start(io))
+    cipher_response(tls_cipher_native::start(io, None))
+}
+/// Starts the built-in backend for one saved server (`ServerN`), leaving the
+/// other servers' ciphers alone. A server ID below 1 means every server.
+#[no_mangle]
+pub extern "C" fn nzbget_rs_tls_cipher_start_server(server: c_int) -> RsBuf {
+    let only = u32::try_from(server).ok().filter(|id| *id > 0);
+    cipher_response(tls_cipher_native::start(crate::tlssock::cipher::backend(), only))
 }
 /// # Safety
 /// id is null or a readable NUL-terminated string; null/empty queries current job.

@@ -516,3 +516,115 @@
 #ConfigContent .config-inline-check input { margin: 0; accent-color: var(--accent-fill); }
 #ConfigContent div.config-option-tile > .controls > .config-listen { justify-self: stretch; }
 #ConfigContent .config-listen > input { width: 100%; }
+
+/* ---------------------------------------------------------------- server editor */
+
+/* while a server is open, "Add server" waits on the list */
+#ConfigContent.server-editing #ConfigData .config-add.NEWS-SERVERS { display: none !important; }
+#ConfigContent .config-server-actions { display: none; }
+#ConfigContent.server-editing .config-server-actions {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: var(--space-2);
+	margin: 0 0 var(--space-3);
+}
+#ConfigContent.server-pane-open .config-server-close { display: none; }
+#ConfigContent .config-server-status { font-size: 13px; color: var(--label-secondary); }
+#ConfigContent .config-server-status[data-kind="error"] { color: var(--danger, #c0392b); font-weight: 600; }
+#ConfigContent .config-server-status[data-kind="ok"] { color: var(--label-primary); }
+#ConfigContent .config-list-row.is-editing {
+	border-color: var(--accent);
+	box-shadow: inset 3px 0 0 var(--accent);
+}
+
+/* wide windows: the server opens in a pane on the right, beside the list */
+#ConfigContent.server-pane-open .config__main { padding-right: calc(min(560px, 44vw) + var(--space-4)); }
+#ConfigContent .config-pane {
+	position: fixed;
+	top: var(--navbar-space, 72px);
+	right: 0;
+	bottom: 0;
+	z-index: 30;
+	width: min(560px, 44vw);
+	display: flex;
+	flex-direction: column;
+	background: var(--bg-content);
+	border-left: 1px solid var(--separator);
+	box-shadow: var(--shadow-popover, -8px 0 24px rgba(0,0,0,.12));
+}
+#ConfigContent .config-pane__head {
+	display: flex;
+	align-items: flex-start;
+	gap: var(--space-3);
+	padding: var(--space-4);
+	border-bottom: 1px solid var(--separator);
+}
+#ConfigContent .config-pane__titles { flex: 1 1 auto; min-width: 0; }
+#ConfigContent .config-pane__title {
+	margin: 0;
+	font: 600 20px/1.25 var(--font-sans);
+	color: var(--label-primary);
+	overflow-wrap: anywhere;
+}
+#ConfigContent .config-pane__host { margin: 2px 0 0; font: 13px var(--font-mono); color: var(--label-secondary); overflow-wrap: anywhere; }
+#ConfigContent .config-pane__close { flex: 0 0 auto; padding: 4px; line-height: 1; }
+#ConfigContent .config-pane__body {
+	flex: 1 1 auto;
+	overflow-y: auto;
+	padding: var(--space-3) var(--space-4) var(--space-5);
+	display: flex;
+	flex-direction: column;
+}
+#ConfigContent .config-pane__body > .control-group { margin: 0; grid-column: auto; }
+#ConfigContent .config-pane__body > .config-server-toolbar {
+	order: -1;
+	position: sticky;
+	top: calc(-1 * var(--space-3));
+	z-index: 2;
+	margin: calc(-1 * var(--space-3)) calc(-1 * var(--space-4)) var(--space-3);
+	padding: var(--space-3) var(--space-4) 0;
+	background: var(--bg-content);
+	border-bottom: 1px solid var(--separator);
+}
+#ConfigContent .config-pane__body > .config-server-toolbar hr { display: none; }
+
+/* narrow windows: the server gets the page to itself */
+#ConfigContent.server-page-open #ConfigData > .NEWS-SERVERS.config-list-row:not(.is-editing),
+#ConfigContent.server-page-open #ConfigData > .config-card.NEWS-SERVERS { display: none !important; }
+
+/* cipher: a menu of suites with Optimize beside it */
+#ConfigContent .config-cipher { display: flex; gap: var(--space-2); align-items: center; justify-self: stretch; width: 100%; }
+#ConfigContent .config-cipher__menu { flex: 1 1 auto; min-width: 0; }
+#ConfigContent .config-cipher__optimize { flex: 0 0 auto; }
+#ConfigContent .config-cipher-source { display: none !important; }
+
+/* inside the pane each option stacks like on a phone: label, text, then the control */
+#ConfigContent .config-pane div.config-option-tile {
+	grid-template-columns: minmax(0, 1fr) auto;
+	grid-template-areas: "label help" "summary summary" "control control" "detail detail" "check check";
+	row-gap: var(--space-2);
+	border-radius: 0;
+	border-width: 0 0 1px;
+	padding: 14px 0;
+	background: transparent;
+}
+#ConfigContent .config-pane div.config-option-tile > .controls > * { justify-self: start; }
+#ConfigContent .config-pane div.config-option-tile > .controls > input[type="text"],
+#ConfigContent .config-pane div.config-option-tile > .controls > input[type="password"],
+#ConfigContent .config-pane div.config-option-tile > .controls > .config-cipher { justify-self: stretch; }
+#ConfigContent .config-pane div.config-option-tile:has(.btn-switch.is-toggle) {
+	grid-template-columns: minmax(0, 1fr) auto auto;
+	grid-template-areas: "label control help" "summary summary summary" "detail detail detail" "check check check";
+}
+#ConfigContent .config-pane div.config-option-tile:has(.btn-switch.is-toggle) > .controls > .btn-switch { justify-self: end; }
+#ConfigContent .config-server-toolbar:not(.list-closed) { display: flex !important; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
+#ConfigContent .config-server-toolbar > .config-button { margin: 0 !important; }
+#ConfigContent .config-server-toolbar > .config-server-actions { order: -1; flex: 1 0 100%; }
+#ConfigContent .config-server-toolbar > hr { flex: 1 0 100%; margin: 0; }
+#ConfigContent.server-pane-open .config-list-row .config-list-host {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}

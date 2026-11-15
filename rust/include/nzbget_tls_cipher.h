@@ -39,6 +39,8 @@ typedef struct
 
 // A null backend selects the built-in OpenSSL backend (rust/src/tlssock.rs).
 NzbgetRsBuf nzbget_rs_tls_cipher_start(const NzbgetTlsBackend* backend);
+// Built-in backend, limited to one saved server ID (below 1: every server).
+NzbgetRsBuf nzbget_rs_tls_cipher_start_server(int server);
 // Returns12/13 for an eligible exact pin, 0 otherwise; flags as in suite emitter.
 int nzbget_rs_tls_cipher_pin(int protocol, unsigned int bits, unsigned int flags);
 NzbgetRsBuf nzbget_rs_tls_cipher_status(const char* id);

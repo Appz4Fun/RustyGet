@@ -51,11 +51,11 @@ Key options: [`ArticleRetries`](options.md#articleretries), [`ArticleTimeout`](o
 
 ## Logging
 
-Enable `SystemHealthCheck` to expose configuration notices. `WriteLog`, `RotateLog`, and the log targets control file and screen output. `LogBuffer` controls the in-memory message buffer; `NzbLog` controls per-download logs.
+Enable `SystemHealthCheck` to expose configuration notices. `LogToFile` writes a new log file each day, continued in 10 MB parts (`rustyget-2026-11-15.1.log`, `.2` and so on) and kept for 7 days; messages of each download go into the same file. The log targets control file and screen output. `LogBuffer` sets how many messages stay in memory for the web interface and each download's Log tab, and `0` keeps every message.
 
 Use debug output when investigating a specific issue, then return to the level you normally use. Before sharing logs, remove credentials, private URLs, and identifying download details. The Messages tab and a download's History details provide context for failures.
 
-Key options: [`SystemHealthCheck`](options.md#systemhealthcheck), [`WriteLog`](options.md#writelog), [`RotateLog`](options.md#rotatelog), [`LogBuffer`](options.md#logbuffer), [`NzbLog`](options.md#nzblog), [`TimeCorrection`](options.md#timecorrection).
+Key options: [`SystemHealthCheck`](options.md#systemhealthcheck), [`LogToFile`](options.md#logtofile), [`LogBuffer`](options.md#logbuffer), [`TimeCorrection`](options.md#timecorrection).
 
 <figure class="settings-figure">
 <a class="settings-shot" href="assets/settings/logging.jpg" aria-label="Open full-size picture: System health, log targets, rotation, and message-buffer settings"><img src="assets/settings/logging.jpg" width="1280" height="1040" loading="lazy" alt="System health, log targets, rotation, and message-buffer settings"></a>

@@ -175,7 +175,7 @@ pub enum NameCheck {
     Valid = 1,
     /// obsolete, ignored: a warning
     Obsolete = 2,
-    /// an obsolete log option (use WriteLog): a warning
+    /// an obsolete log option (use LogToFile): a warning
     ObsoleteLog = 4,
     /// removed from Settings, now fixed: ignored without a warning
     Removed = 5,
@@ -312,7 +312,7 @@ pub fn validate_option_name(name: &CStr, predefined: &mut dyn FnMut() -> bool) -
 /// is off). Old configuration files may still have them: they are dropped quietly,
 /// and the next save leaves them out.
 fn is_removed_opt(name: &CStr) -> bool {
-    const GLOBAL: [&CStr; 6] = [
+    const GLOBAL: [&CStr; 8] = [
         c"PropagationDelay",
         c"ContinuePartial",
         c"ParQuick",
@@ -320,6 +320,9 @@ fn is_removed_opt(name: &CStr) -> bool {
         c"UpdateCheck",
         // HTTPS now shares ControlPort
         c"SecurePort",
+        // logs are kept 7 days in 10MB parts; NZB messages are in the main log
+        c"RotateLog",
+        c"NzbLog",
     ];
     if GLOBAL.iter().any(|n| eq(name, n)) {
         return true;
@@ -425,6 +428,11 @@ pub fn convert_old_option(option: &CStr, value: &CStr) -> (CString, CString) {
     }
     if eq(&option, c"LogBufferSize") {
         option = c"LogBuffer".to_owned();
+    }
+    // WriteLog (none, append, reset, rotate) became the LogToFile switch
+    if eq(&option, c"WriteLog") {
+        option = c"LogToFile".to_owned();
+        value = if eq(&value, c"none") { c"no" } else { c"yes" }.to_owned();
     }
     (option, value)
 }
@@ -796,6 +804,10 @@ mod tests {
             (b"WriteBuffer".as_slice(), b"1024".as_slice())
         );
         assert_eq!(convert_old_option(c"Decode", c"NO").1.as_bytes(), b"yes");
+        for (old, new) in [(c"none", "no"), (c"None", "no"), (c"append", "yes"), (c"reset", "yes"), (c"rotate", "yes")] {
+            let (o, v) = convert_old_option(c"WriteLog", old);
+            assert_eq!((o.to_str().unwrap(), v.to_str().unwrap()), ("LogToFile", new));
+        }
         assert_eq!(parse_category_source(Some(c"FeedFile")), 2);
     }
 
@@ -866,6 +878,8 @@ mod tests {
             c"CrcCheck",
             c"UpdateCheck",
             c"SecurePort",
+            c"RotateLog",
+            c"NzbLog",
             c"Server1.JoinGroup",
             c"server12.joingroup",
         ] {
@@ -1495,8 +1509,8 @@ const HEALTH_CHECK_VALUES: [i32; 5] = [0, 1, 2, 3, 4];
 const TARGET_NAMES: [&CStr; 4] = [c"screen", c"log", c"both", c"none"];
 const TARGET_VALUES: [i32; 4] = [1, 2, 3, 0];
 
-const WRITE_LOG_NAMES: [&CStr; 4] = [c"none", c"append", c"reset", c"rotate"];
-const WRITE_LOG_VALUES: [i32; 4] = [0, 1, 2, 3];
+/// How many days of log files are kept.
+pub const LOG_KEEP_DAYS: i32 = 7;
 
 const COMMAND_NAMES: [&CStr; 26] = [
     c"pausedownload",
@@ -1533,7 +1547,7 @@ const COMMAND_VALUES: [i32; 26] = [
 /// Emits all default option `(name, value)` pairs for `Options::InitDefaults`.
 pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &CStr)) {
     let output_mode = if disable_curses { c"color" } else { c"curses" };
-    let defaults: [(&CStr, &CStr); 134] = [
+    let defaults: [(&CStr, &CStr); 132] = [
         (c"MainDir", c"~/downloads"),
         (c"WebDir", c""),
         (c"ConfigTemplate", c""),
@@ -1545,8 +1559,7 @@ pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &
         (c"LockFile", c"${MainDir}/rustyget.lock"),
         (c"LogFile", c"${MainDir}/rustyget.log"),
         (c"RequiredDir", c""),
-        (c"WriteLog", c"append"),
-        (c"RotateLog", c"3"),
+        (c"LogToFile", c"yes"),
         (c"AppendCategoryDir", c"yes"),
         (c"OutputMode", output_mode),
         (c"DupeCheck", c"yes"),
@@ -1595,7 +1608,6 @@ pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &
         (c"RemoteTimeout", c"90"),
         (c"FlushQueue", c"yes"),
         (c"SystemHealthCheck", c"yes"),
-        (c"NzbLog", c"yes"),
         (c"RawArticle", c"no"),
         (c"SkipWrite", c"no"),
         (c"ArticleRetries", c"3"),
@@ -2166,7 +2178,8 @@ pub fn init_scalar_options_host<H: OptionsHost>(
     s.secure_port = s.control_port;
     s.url_connections = host.parse_int_value(c"UrlConnections", 10);
     s.log_buffer = host.parse_int_value(c"LogBuffer", 10);
-    s.rotate_log = host.parse_int_value(c"RotateLog", 10);
+    // day logs and their 10MB parts are kept this many days
+    s.rotate_log = LOG_KEEP_DAYS;
     s.umask = host.parse_int_value(c"UMask", 8);
     s.update_interval = host.parse_int_value(c"UpdateInterval", 10);
     s.write_buffer = host.parse_int_value(c"WriteBuffer", 10);
@@ -2201,7 +2214,8 @@ pub fn init_scalar_options_host<H: OptionsHost>(
     s.daily_quota = host.parse_int_value(c"DailyQuota", 10);
 
     s.system_health_check = i32::from(host.parse_bool_value(c"SystemHealthCheck"));
-    s.nzb_log = i32::from(host.parse_bool_value(c"NzbLog"));
+    // NZB messages go to the main log; there are no separate NZB log files
+    s.nzb_log = 0;
     s.append_category_dir = i32::from(host.parse_bool_value(c"AppendCategoryDir"));
     // ContinuePartial, ParQuick and CrcCheck are always on
     s.continue_partial = 1;
@@ -2338,7 +2352,8 @@ pub fn init_scalar_options_host<H: OptionsHost>(
     s.error_target = host.parse_enum_value(c"ErrorTarget", &TARGET_NAMES, &TARGET_VALUES);
     s.debug_target = host.parse_enum_value(c"DebugTarget", &TARGET_NAMES, &TARGET_VALUES);
     s.detail_target = host.parse_enum_value(c"DetailTarget", &TARGET_NAMES, &TARGET_VALUES);
-    s.write_log = host.parse_enum_value(c"WriteLog", &WRITE_LOG_NAMES, &WRITE_LOG_VALUES);
+    // a log file is a new file each day, continued in 10MB parts (the old "rotate")
+    s.write_log = if host.parse_bool_value(c"LogToFile") { 3 } else { 0 };
 
     s
 }
@@ -3542,7 +3557,7 @@ impl<'a> RustOptions<'a> {
                 let msg = format_bytes_msg(&[
                     b"Option \"",
                     optname.to_bytes(),
-                    b"\" is obsolete, ignored, use \"WriteLog\" instead",
+                    b"\" is obsolete, ignored, use \"LogToFile\" instead",
                 ]);
                 self.config_warn(&msg);
                 true
@@ -4140,7 +4155,7 @@ impl NzbgetRsOptions {
                 let msg = format_bytes_msg(&[
                     b"Option \"",
                     optname.to_bytes(),
-                    b"\" is obsolete, ignored, use \"WriteLog\" instead",
+                    b"\" is obsolete, ignored, use \"LogToFile\" instead",
                 ]);
                 self.config_warn(&msg);
                 true

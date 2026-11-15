@@ -76,7 +76,17 @@ struct LogInner {
     last_written: i64,
     opt_init: bool,
     extra_debug: bool,
+    /// the day log the current part belongs to, and its part number and size
+    day_path: Vec<u8>,
+    part: u32,
+    file_size: u64,
 }
+
+/// A log file is continued in a new part once it reaches this size.
+#[cfg(not(test))]
+pub const LOG_PART_SIZE: u64 = 10 * 1024 * 1024;
+#[cfg(test)]
+pub const LOG_PART_SIZE: u64 = 4096;
 
 impl LogInner {
     fn add_message(&mut self, kind: i32, text: &[u8], log_buffer: Option<i32>) {
@@ -88,8 +98,9 @@ impl LogInner {
             text: cstring_lossless(text),
         });
         if self.opt_init {
-            if let Some(cap) = log_buffer {
-                let max_len = (cap as u32) as usize;
+            // LogBuffer 0 keeps every message
+            if let Some(cap) = log_buffer.filter(|&cap| cap > 0) {
+                let max_len = cap as usize;
                 while self.messages.len() > max_len {
                     self.messages.pop_front();
                 }
@@ -123,6 +134,9 @@ impl NzbgetRsLog {
                 last_written: 0,
                 opt_init: false,
                 extra_debug,
+                day_path: Vec::new(),
+                part: 0,
+                file_size: 0,
             }),
             path: Mutex::new(c"".to_owned()),
             debuggables: Mutex::new(Vec::new()),
@@ -312,7 +326,13 @@ fn filelog_locked(
                 inner.add_message(0, info_msg, log_buffer);
             },
         );
-        let new_cstr = cstring_lossless(&rotated);
+        // continue today's last part that still has room
+        inner.part = 0;
+        while file_size_of(&crate::systemhealth::log_part_path(&rotated, inner.part)) >= LOG_PART_SIZE {
+            inner.part += 1;
+        }
+        let new_cstr = cstring_lossless(&crate::systemhealth::log_part_path(&rotated, inner.part));
+        inner.day_path = rotated;
         if let Ok(mut pg) = path_mtx.lock() {
             *pg = new_cstr.clone();
         }
@@ -320,6 +340,39 @@ fn filelog_locked(
     }
 
     inner.last_written = rawtime;
+
+    let mut line = Vec::with_capacity(time_len + tmp2.len() + 48);
+    line.extend_from_slice(&time_buf[..time_len]);
+    line.push(b'\t');
+    if debug_build {
+        let pid = unsafe { libc::getpid() as u64 };
+        let tid = unsafe { libc::pthread_self() as usize as u64 };
+        use std::io::Write as _;
+        let _ = write!(line, "{pid}\t{tid}\t");
+    }
+    line.extend_from_slice(&tmp2);
+    line.push(b'\n');
+
+    // a full part is closed and the day continues in the next one
+    if write_log == 3
+        && !inner.day_path.is_empty()
+        && inner.log_file.is_some()
+        && inner.file_size > 0
+        && inner.file_size + line.len() as u64 > LOG_PART_SIZE
+    {
+        inner.log_file = None;
+        loop {
+            inner.part += 1;
+            if file_size_of(&crate::systemhealth::log_part_path(&inner.day_path, inner.part)) < LOG_PART_SIZE {
+                break;
+            }
+        }
+        let new_cstr = cstring_lossless(&crate::systemhealth::log_part_path(&inner.day_path, inner.part));
+        if let Ok(mut pg) = path_mtx.lock() {
+            *pg = new_cstr.clone();
+        }
+        log_filename = new_cstr;
+    }
 
     if inner.log_file.is_none() {
         match LogFileGuard::open_append(&log_filename) {
@@ -350,26 +403,22 @@ fn filelog_locked(
         return;
     };
     let fp = guard.0;
-    unsafe {
+    let size = unsafe {
         let _ = libc::fseek(fp, 0, libc::SEEK_END);
-    }
+        libc::ftell(fp)
+    };
 
-    let mut line = Vec::with_capacity(time_len + tmp2.len() + 48);
-    line.extend_from_slice(&time_buf[..time_len]);
-    line.push(b'\t');
-    if debug_build {
-        let pid = unsafe { libc::getpid() as u64 };
-        let tid = unsafe { libc::pthread_self() as usize as u64 };
-        use std::io::Write as _;
-        let _ = write!(line, "{pid}\t{tid}\t");
-    }
-    line.extend_from_slice(&tmp2);
-    line.push(b'\n');
-
-    unsafe {
-        let _ = libc::fwrite(line.as_ptr().cast(), 1, line.len(), fp);
+    let written = unsafe {
+        let n = libc::fwrite(line.as_ptr().cast(), 1, line.len(), fp);
         let _ = libc::fflush(fp);
-    }
+        n
+    };
+    inner.file_size = size.max(0) as u64 + written as u64;
+}
+
+fn file_size_of(path: &[u8]) -> u64 {
+    use std::os::unix::ffi::OsStrExt as _;
+    std::fs::metadata(std::ffi::OsStr::from_bytes(path)).map_or(0, |m| m.len())
 }
 
 fn emit_message(
@@ -780,7 +829,7 @@ mod tests {
         let log_opt = CString::new(format!("LogFile={}", log_path.to_str().unwrap())).unwrap();
         let cmd_opts = [
             log_opt.as_ptr(),
-            c"WriteLog=reset".as_ptr(),
+            c"LogToFile=yes".as_ptr(),
             c"InfoTarget=both".as_ptr(),
             c"DetailTarget=log".as_ptr(),
             c"ErrorTarget=both".as_ptr(),
@@ -810,8 +859,14 @@ mod tests {
             nzbget_rs_log_ctl(log, 1, 1, 0, opts, ptr::null(), None);
         }
 
-        let disk_text = std::fs::read_to_string(&log_path).unwrap();
-        assert!(!disk_text.contains("stale line"));
+        // the log goes to today's file, nzbget-YYYY-MM-DD.log, beside the old one
+        assert_eq!(std::fs::read_to_string(&log_path).unwrap(), "stale line\n");
+        let day_log = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .find(|p| p.file_name().unwrap().to_str().unwrap().starts_with("nzbget-"))
+            .expect("a day log is written");
+        let disk_text = std::fs::read_to_string(&day_log).unwrap();
         assert!(disk_text.contains("INFO\tstartup info\n"));
         assert!(disk_text.contains("DETAIL\tstartup detail\n"));
         assert!(disk_text.contains("ERROR\tstartup err\n"));
@@ -877,6 +932,93 @@ mod tests {
             nzbget_rs_log_free(log);
             nzbget_rs_options_free(opts);
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_full_log_continues_in_numbered_parts_and_log_buffer_zero_keeps_all() {
+        let dir = std::env::temp_dir().join(format!(
+            "rustyget_log_parts_{}_{}",
+            std::process::id(),
+            current_unix_time()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let log_path = dir.join("rustyget.log");
+        let log_opt = CString::new(format!("LogFile={}", log_path.to_str().unwrap())).unwrap();
+        let cmd_opts = [
+            log_opt.as_ptr(),
+            c"LogToFile=yes".as_ptr(),
+            c"InfoTarget=both".as_ptr(),
+            c"LogBuffer=0".as_ptr(),
+        ];
+        let mut scalars = NzbgetRsParsedOptions::default();
+        let mut flags = 0;
+        let log = nzbget_rs_log_new(0);
+        let opts = unsafe {
+            nzbget_rs_options_new(
+                c"rustyget".as_ptr(),
+                ptr::null(),
+                1,
+                1,
+                cmd_opts.as_ptr(),
+                cmd_opts.len(),
+                0,
+                c"1.0".as_ptr(),
+                ptr::null_mut(),
+                None,
+                &mut scalars,
+                &mut flags,
+            )
+        };
+        let line = CString::new("x".repeat(200)).unwrap();
+        unsafe {
+            nzbget_rs_log_ctl(log, 1, 1, 0, opts, ptr::null(), None);
+            for _ in 0..60 {
+                nzbget_rs_log_emit(log, 0, opts, line.as_ptr());
+            }
+        }
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.file_name().to_str().unwrap().to_owned()))
+            .collect();
+        names.sort();
+        // 60 lines of ~230 bytes is ~14KB: the day log and parts .1 to .3 at 4KB each
+        assert_eq!(names.len(), 4, "{names:?}");
+        let day = names.iter().min_by_key(|n| n.len()).unwrap().clone();
+        assert!(day.starts_with("rustyget-") && day.ends_with(".log"), "{day}");
+        let stem = &day[..day.len() - 4];
+        for part in 1..=3 {
+            assert!(names.contains(&format!("{stem}.{part}.log")), "{names:?}");
+        }
+        let mut total = 0;
+        for name in &names {
+            let len = std::fs::metadata(dir.join(name)).unwrap().len();
+            assert!(len <= LOG_PART_SIZE, "{name} is {len} bytes");
+            total += std::fs::read_to_string(dir.join(name)).unwrap().lines().count();
+        }
+        assert_eq!(total, 60, "every line is written once");
+
+        let mut screen: Vec<(u32, i32, String)> = Vec::new();
+        unsafe extern "C" fn collect(ctx: *mut c_void, id: u32, kind: c_int, _time: i64, text: *const c_char) {
+            let v = &mut *(ctx as *mut Vec<(u32, i32, String)>);
+            v.push((id, kind, CStr::from_ptr(text).to_str().unwrap().to_owned()));
+        }
+        unsafe {
+            nzbget_rs_log_collect(
+                0,
+                log,
+                1,
+                0,
+                0,
+                ptr::null_mut(),
+                (&mut screen as *mut Vec<_>).cast(),
+                collect as *const () as usize,
+                0,
+            );
+            nzbget_rs_log_free(log);
+            nzbget_rs_options_free(opts);
+        }
+        assert_eq!(screen.len(), 60, "LogBuffer 0 keeps every message");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

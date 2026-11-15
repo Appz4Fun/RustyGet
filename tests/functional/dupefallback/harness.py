@@ -3698,15 +3698,20 @@ def scenario_restartfirstdead(daemon, t):
     for name, total in _re.findall(r'RelFD/(\S+) \[\d+/(\d+)\]', log_text):
         counts.setdefault(name, set()).add(int(total))
     doubled = sorted(n for n, v in counts.items() if len(v) > 1)
+    # The restart must have caught a dead volume still being tried, or the
+    # double-load path was never reached and the run proves nothing.
+    after = log_text.split('server-mode')[-1]
+    retried = bool(_re.search(r'Download(?:ing)? RelFD/(?:LbX0gshaVcZjLie|R4nWq8yHs1Ufe)\.rar \[', after))
     diskstate_errors = log_text.count('Error reading diskstate')
     tmp_names = log_text.count('.out.tmp')
     both_dirs = (('main', 'dst'), ('main', 'inter'))
     integ = all(_verify_output(t, payloads[m[1]], '.rar', dirs=both_dirs)
                 for m in members if 'part01' in m[1])
-    ok = mid and not doubled and diskstate_errors == 0 and tmp_names == 0 and integ
+    ok = mid and retried and not doubled and diskstate_errors == 0 and tmp_names == 0 and integ
     return ('restartfirstdead', ok,
-            'mid_download=%s status=%s doubled=%s diskstate_errors=%d tmp_names=%d integrity=%s'
-            % (mid, h['Status'], doubled, diskstate_errors, tmp_names, integ))
+            'mid_download=%s retried_after_restart=%s status=%s doubled=%s diskstate_errors=%d '
+            'tmp_names=%d integrity=%s'
+            % (mid, retried, h['Status'], doubled, diskstate_errors, tmp_names, integ))
 
 
 def scenario_wholefilestale(daemon, t):

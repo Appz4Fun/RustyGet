@@ -74,11 +74,13 @@
 	<script language="javascript" type="text/javascript" src="system-info.js"></script>
 	<script language="javascript" type="text/javascript" src="statistics.js"></script>
 	<script language="javascript" type="text/javascript" src="system-health.js"></script>
+	<script language="javascript" type="text/javascript" src="releasename.js"></script>
+	<script language="javascript" type="text/javascript" src="easteregg.js"></script>
 	%end% -->
 
 	<!-- Loading all javascript files from libraries and NZBGet in one request -->
 	<!-- %if-not-debug% -->
-	<script language="javascript" type="text/javascript" src="combined.js?lib/jquery.min.js+lib/bootstrap.min.js+lib/raphael.min.js+lib/elycharts.min.js+i18n.js+datetime.js+fasttable.js+index.js+util.js+downloads.js+edit.js+status.js+messages.js+history.js+upload.js+config.js+tlscipher.js+feed.js+system-info.js+statistics.js+system-health.js"></script>
+	<script language="javascript" type="text/javascript" src="combined.js?lib/jquery.min.js+lib/bootstrap.min.js+lib/raphael.min.js+lib/elycharts.min.js+i18n.js+datetime.js+fasttable.js+index.js+util.js+downloads.js+edit.js+status.js+messages.js+history.js+upload.js+config.js+tlscipher.js+feed.js+system-info.js+statistics.js+system-health.js+releasename.js+easteregg.js"></script>
 	<!-- %end% -->
 
 	<style>.hide{display:none;}</style>
@@ -90,10 +92,11 @@
 	<link rel="stylesheet" type="text/css" href="skin.css" />
 	<link rel="stylesheet" type="text/css" href="oxide.css" />
 	<link rel="stylesheet" type="text/css" href="settings.css" />
+	<link rel="stylesheet" type="text/css" href="releasename.css" />
 	%end% -->
 	<!-- Loading all css files from libraries and NZBGet in one request -->
 	<!-- %if-not-debug% -->
-	<link rel="stylesheet" type="text/css" href="combined.css?lib/bootstrap.css+style.css+tokens.css+ds.css+skin.css+oxide.css+settings.css" />
+	<link rel="stylesheet" type="text/css" href="combined.css?lib/bootstrap.css+style.css+tokens.css+ds.css+skin.css+oxide.css+settings.css+releasename.css" />
 	<!-- %end% -->
 
 	<!-- fav and touch icons -->
@@ -124,7 +127,7 @@
 		<div class="container-fluid navbar-container" id="NavbarContainer">
 
 			<!-- LOGO -->
-			<div id="Logo" onclick="$('#DownloadsTabLink').click()"><img class="nzb-logo-icon" src="img/nzbget-icon-dark.svg" alt="" width="32" height="32"><span class="nzb-logo-name">RustyGet</span></div>
+			<div id="Logo" onclick="EasterEgg.fire(this); $('#DownloadsTabLink').click()"><img class="nzb-logo-icon" src="img/nzbget-icon-dark.svg" alt="" width="32" height="32"><span class="nzb-logo-name">RustyGet</span></div>
 
 			<!-- PLAY/PAUSE-BUTTON -->
 			<div id="PlayBlock">

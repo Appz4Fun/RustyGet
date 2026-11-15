@@ -90,6 +90,24 @@ const { installDetailsFixture } = require('./details-fixture');
         assert.equal(await page.evaluate(() => $('#S_Server1_CertVerification .btn-primary').attr('data-value') || $('#S_Server1_CertVerification .btn-primary').val()), 'Strict');
       });
 
+      await check('typing a name back in checks the certificate strictly again', async () => {
+        const certValue = () => page.evaluate(() => $('#S_Server1_CertVerification .btn-primary').attr('data-value') || $('#S_Server1_CertVerification .btn-primary').val());
+        await box.locator('input[value="192.0.2.10"]').click();
+        await page.waitForFunction(() => /Always using/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
+        assert.equal(await certValue(), 'Minimal');
+        await host.fill('news.example.com');
+        await page.waitForFunction(() => /2 addresses/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
+        assert.equal(await certValue(), 'Strict', 'a typed name restores Strict');
+        // a check changed by hand while pinned is left as it is
+        await box.locator('input[value="192.0.2.10"]').click();
+        await page.waitForFunction(() => /Always using/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
+        await page.evaluate(() => Config.switchClick($('#S_Server1_CertVerification .btn').filter(function() { return String($(this).attr('data-value')).toLowerCase() === 'none'; })[0]));
+        await host.fill('news.example.com');
+        await page.waitForFunction(() => /2 addresses/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
+        assert.equal(String(await certValue()).toLowerCase(), 'none', 'a hand-picked check is kept');
+        await page.evaluate(() => Config.switchClick($('#S_Server1_CertVerification .btn').filter(function() { return String($(this).attr('data-value')).toLowerCase() === 'strict'; })[0]));
+      });
+
       await check('a name that does not resolve says so, and no location files says so', async () => {
         await host.fill('nowhere.invalid');
         await page.waitForFunction(() => /Could not resolve/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });

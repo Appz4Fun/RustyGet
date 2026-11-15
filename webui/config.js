@@ -4251,6 +4251,18 @@ var Config = (new function($)
 			return;
 		}
 		var host = $.trim(getOptionValue(hostOption) || '');
+		if (host && !isIpLiteral(host) && box.data('certWasStrict'))
+		{
+			// a name typed back in is checked strictly again, unless the check was changed by hand since
+			var cert = findOptionByName('Server' + multiid + '.CertVerification');
+			if (cert && String(getOptionValue(cert)).toLowerCase() === 'minimal')
+			{
+				setOptionValue(cert, 'Strict');
+				refreshChangeState();
+				refreshListRows();
+			}
+			box.removeData('certWasStrict');
+		}
 		if (!host || /\$\{/.test(host) || (!isIpLiteral(host) && host.indexOf('.') === -1))
 		{
 			box.empty().prop('hidden', true);

@@ -74,36 +74,20 @@ pub fn desc_matches_file_damage(
         && (desc_name == damage_name || (damage_size > 0 && (desc_length as i64) == damage_size))
 }
 
-/// Computes the recovery blocks contributed by a PAR2 volume file in the queue.
+/// The recovery blocks a PAR2 volume file in the queue brings: its name's
+/// count, else an estimate from its encoded size (par-rs).
 #[inline]
 pub fn calc_queued_volume_blocks(parsed_blocks: i32, file_size: i64, block_size: u64) -> i32 {
-    if parsed_blocks >= 0 {
-        parsed_blocks
-    } else {
-        let denom = block_size.saturating_add(68) as i64;
-        if denom <= 0 {
-            0
-        } else {
-            ((file_size.saturating_mul(100) / 102) / denom) as i32
-        }
-    }
+    let block_size = i64::try_from(block_size).unwrap_or(i64::MAX);
+    par_rs::filenames::calc_queued_volume_blocks(parsed_blocks, file_size, block_size)
 }
 
-/// Computes the recovery blocks contributed by a completed PAR2 volume file on disk.
+/// The recovery blocks a completed PAR2 volume file on disk brings: its name's
+/// count, else an estimate from its size (par-rs).
 #[inline]
 pub fn calc_completed_volume_blocks(parsed_blocks: i32, disk_size: i64, block_size: u64) -> i32 {
-    if parsed_blocks >= 0 {
-        parsed_blocks
-    } else if disk_size > 0 {
-        let denom = block_size.saturating_add(68) as i64;
-        if denom <= 0 {
-            0
-        } else {
-            (disk_size / denom) as i32
-        }
-    } else {
-        0
-    }
+    let block_size = i64::try_from(block_size).unwrap_or(i64::MAX);
+    par_rs::filenames::calc_completed_volume_blocks(parsed_blocks, disk_size, block_size)
 }
 
 /// Records completion of a file in `ParDamage::FileCompleted`.

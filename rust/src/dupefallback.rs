@@ -532,74 +532,6 @@ fn hex_lower(bytes: &[u8]) -> [u8; 32] {
     out
 }
 
-/// Scans a single PAR2 file on disk for `Main`, `FileDesc`, and `IFSC` packets, skipping
-/// recovery packets via `Seek` without reading their bodies.
-pub fn scan_par2_file<FMain, FDesc, FIfsc>(
-    path: &Path,
-    mut on_main: FMain,
-    mut on_desc: FDesc,
-    mut on_ifsc: FIfsc,
-) where
-    FMain: FnMut(&[u8; 32], u64),
-    FDesc: FnMut(&[u8; 32], &[u8; 32], &[u8; 32], u64, &[u8]),
-    FIfsc: FnMut(&[u8; 32], &[u8; 32], &[u32]),
-{
-    let Ok(mut file) = File::open(path) else {
-        return;
-    };
-    let mut header = [0u8; 64];
-    let mut pos: u64 = 0;
-    while file.seek(SeekFrom::Start(pos)).is_ok() && file.read_exact(&mut header).is_ok() {
-        if &header[0..8] != b"PAR2\0PKT" {
-            break;
-        }
-        let length = u64::from_le_bytes(header[8..16].try_into().unwrap());
-        if length < 64 || length % 4 != 0 {
-            break;
-        }
-        let pkt_type = &header[48..64];
-        let set_id = hex_lower(&header[32..48]);
-        let body_length = length - 64;
-        let is_main = pkt_type == b"PAR 2.0\0Main\0\0\0\0";
-        let is_desc = pkt_type == b"PAR 2.0\0FileDesc";
-        let is_ifsc = pkt_type == b"PAR 2.0\0IFSC\0\0\0\0";
-        if (is_main || is_desc || is_ifsc) && body_length <= MAX_PAR2_PACKET_BODY {
-            let mut body = vec![0u8; body_length as usize];
-            if file.read_exact(&mut body).is_err() {
-                break;
-            }
-            if is_main && body.len() >= 8 {
-                let block_size = u64::from_le_bytes(body[0..8].try_into().unwrap());
-                on_main(&set_id, block_size);
-            } else if is_desc && body.len() >= 56 {
-                let file_id = hex_lower(&body[0..16]);
-                let hash16k = hex_lower(&body[32..48]);
-                let file_len = u64::from_le_bytes(body[48..56].try_into().unwrap());
-                let raw_name = &body[56..];
-                let name_end = raw_name
-                    .iter()
-                    .position(|&b| b == 0)
-                    .unwrap_or(raw_name.len());
-                on_desc(&set_id, &file_id, &hash16k, file_len, &raw_name[..name_end]);
-            } else if is_ifsc && body.len() >= 16 {
-                let file_id = hex_lower(&body[0..16]);
-                let mut crcs = Vec::with_capacity((body.len() - 16) / 20);
-                let mut at = 16usize;
-                while at + 20 <= body.len() {
-                    let crc = u32::from_le_bytes(body[at + 16..at + 20].try_into().unwrap());
-                    crcs.push(crc);
-                    at += 20;
-                }
-                on_ifsc(&set_id, &file_id, &crcs);
-            }
-        }
-        let Some(next_pos) = pos.checked_add(length) else {
-            break;
-        };
-        pos = next_pos;
-    }
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct Par2FileSums {
     pub hash16k: [u8; 32],
@@ -610,103 +542,55 @@ pub struct Par2FileSums {
     pub block_size: u64,
 }
 
-/// Scans all PAR2 files in `dir` and returns their `file_id -> Par2FileSums` map.
+/// Reads every PAR2 file in `dir` (par-rs, packet MD5s unchecked) and returns
+/// their `file_id -> Par2FileSums` map. A file whose first bytes are not a PAR2
+/// packet is skipped unread; a later file's description of a file id replaces
+/// an earlier one's.
 pub fn load_par2_sums(dir: &Path) -> BTreeMap<[u8; 32], Par2FileSums> {
-    let files: std::cell::RefCell<BTreeMap<[u8; 32], Par2FileSums>> =
-        std::cell::RefCell::new(BTreeMap::new());
+    use par_rs::packet::{load_par2_file, ScanOptions, MAGIC};
+    let mut files: BTreeMap<[u8; 32], Par2FileSums> = BTreeMap::new();
+    // a set's block size from whichever of its files has a Main packet
     let mut set_block_sizes: BTreeMap<[u8; 32], u64> = BTreeMap::new();
     let Ok(rd) = std::fs::read_dir(dir) else {
-        return files.into_inner();
+        return files;
     };
-    for entry_res in rd {
-        let Ok(entry) = entry_res else {
+    for entry in rd.flatten() {
+        let path = entry.path();
+        let mut head = [0u8; 8];
+        let is_par2 = File::open(&path)
+            .and_then(|mut f| f.read_exact(&mut head))
+            .is_ok_and(|()| head == MAGIC);
+        if !is_par2 {
+            continue;
+        }
+        let Ok(set) = load_par2_file(&path, ScanOptions::UNVERIFIED) else {
             continue;
         };
-        scan_par2_file(
-            &entry.path(),
-            |set_id, bs| {
-                set_block_sizes.insert(*set_id, bs);
-            },
-            |set_id, file_id, hash16k, length, name| {
-                let mut map = files.borrow_mut();
-                let sums = map.entry(*file_id).or_default();
-                sums.set_id = *set_id;
-                sums.hash16k = *hash16k;
-                sums.length = length;
-                sums.name = name.to_vec();
-            },
-            |set_id, file_id, crcs| {
-                let mut map = files.borrow_mut();
-                let sums = map.entry(*file_id).or_default();
-                sums.set_id = *set_id;
-                sums.crcs = crcs.to_vec();
-            },
-        );
+        let set_id = set.set_id.map(|id| hex_lower(&id.0)).unwrap_or([0; 32]);
+        if let Some(block_size) = set.slice_size() {
+            set_block_sizes.insert(set_id, block_size);
+        }
+        for (id, desc) in &set.file_descs {
+            let sums = files.entry(hex_lower(&id.0)).or_default();
+            sums.set_id = set_id;
+            sums.hash16k = hex_lower(&desc.hash_16k);
+            sums.length = desc.file_length;
+            sums.name = desc.name.clone();
+        }
+        for (id, ifsc) in &set.ifscs {
+            let sums = files.entry(hex_lower(&id.0)).or_default();
+            sums.set_id = set_id;
+            sums.crcs = ifsc.slices.iter().map(|slice| slice.crc32).collect();
+        }
     }
-    let mut files = files.into_inner();
     for sums in files.values_mut() {
         sums.block_size = set_block_sizes.get(&sums.set_id).copied().unwrap_or(0);
     }
     files
 }
 
-const CRC32_SLICE8: [[u32; 256]; 8] = {
-    let mut table = [[0u32; 256]; 8];
-    let mut i = 0usize;
-    while i < 256 {
-        let mut crc = i as u32;
-        let mut j = 0;
-        while j < 8 {
-            crc = if crc & 1 != 0 {
-                (crc >> 1) ^ 0xEDB8_8320
-            } else {
-                crc >> 1
-            };
-            j += 1;
-        }
-        table[0][i] = crc;
-        i += 1;
-    }
-    let mut i = 0usize;
-    while i < 256 {
-        let mut crc = table[0][i];
-        let mut k = 1usize;
-        while k < 8 {
-            crc = table[0][(crc & 0xFF) as usize] ^ (crc >> 8);
-            table[k][i] = crc;
-            k += 1;
-        }
-        i += 1;
-    }
-    table
-};
-
-pub fn crc32_ieee(mut bytes: &[u8]) -> u32 {
-    let mut crc = 0xFFFF_FFFFu32;
-    while bytes.len() >= 8 {
-        let b0 = bytes[0] ^ (crc as u8);
-        let b1 = bytes[1] ^ ((crc >> 8) as u8);
-        let b2 = bytes[2] ^ ((crc >> 16) as u8);
-        let b3 = bytes[3] ^ ((crc >> 24) as u8);
-        let b4 = bytes[4];
-        let b5 = bytes[5];
-        let b6 = bytes[6];
-        let b7 = bytes[7];
-        crc = CRC32_SLICE8[7][b0 as usize]
-            ^ CRC32_SLICE8[6][b1 as usize]
-            ^ CRC32_SLICE8[5][b2 as usize]
-            ^ CRC32_SLICE8[4][b3 as usize]
-            ^ CRC32_SLICE8[3][b4 as usize]
-            ^ CRC32_SLICE8[2][b5 as usize]
-            ^ CRC32_SLICE8[1][b6 as usize]
-            ^ CRC32_SLICE8[0][b7 as usize];
-        bytes = &bytes[8..];
-    }
-    for &b in bytes {
-        crc = CRC32_SLICE8[0][((crc as u8) ^ b) as usize] ^ (crc >> 8);
-    }
-    !crc
-}
+/// The IEEE CRC-32 of `bytes` (par-rs's).
+pub use par_rs::crc::crc32 as crc32_ieee;
 
 /// Computes the lower-case 32-hex-digit MD5 of the first 16 KiB of `path`.
 pub fn hash16k_of(path: &Path) -> [u8; 32] {
@@ -3990,7 +3874,8 @@ mod tests {
             let write_par = |block_size: u64| {
                 let mut main_body = Vec::new();
                 main_body.extend_from_slice(&block_size.to_le_bytes());
-                main_body.extend_from_slice(&[0u8; 8]);
+                main_body.extend_from_slice(&1u32.to_le_bytes());
+                main_body.extend_from_slice(&file_id);
                 let mut par = packet(b"PAR 2.0\0Main\0\0\0\0", &main_body);
                 par.extend(packet(b"PAR 2.0\0FileDesc", &desc));
                 par.extend(packet(b"PAR 2.0\0IFSC\0\0\0\0", &ifsc));

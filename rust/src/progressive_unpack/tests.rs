@@ -1,5 +1,5 @@
 use super::*;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 
 // ---- RAR5 fixture builder (stored members, valid header and data CRCs) ----
 
@@ -355,6 +355,122 @@ fn holes_are_skipped_and_patched_from_the_repaired_volume() {
         log.iter().any(|l| l.contains("extracted past damage")),
         "{log:?}"
     );
+}
+
+/// As `Damaged`, for a download that ends and is repaired while the session waits: the feed
+/// then reports the set final.
+struct FinalAfterRepair {
+    inner: Damaged,
+    volumes: u64,
+    repaired: Arc<AtomicBool>,
+}
+
+impl VolumeFeed for FinalAfterRepair {
+    fn volume(&mut self, path: &Path) -> VolumeView {
+        if self.repaired.load(Ordering::Acquire) {
+            return if path.is_file() { VolumeView::Ready { holes: Vec::new() } } else { VolumeView::Missing };
+        }
+        self.inner.volume(path)
+    }
+    fn wait_repaired(&mut self, is_cancelled: &mut dyn FnMut() -> bool) -> bool {
+        let ok = self.inner.wait_repaired(is_cancelled);
+        self.repaired.store(ok, Ordering::Release);
+        ok
+    }
+    fn set_became_final(&self) -> bool {
+        self.repaired.load(Ordering::Acquire)
+    }
+    fn expected_volumes(&self) -> u64 {
+        self.volumes
+    }
+}
+
+/// A repaired output of a set that became final is moved into place by the session, not copied
+/// there byte for byte (6790: 7 min to copy a 15 GB repaired mkv). Many volumes, several of
+/// them damaged, so the declared set and the repaired volumes fit the handle budget.
+#[test]
+fn repaired_output_of_a_final_set_is_moved_not_copied() {
+    let t = TestDir::new("finalrepair");
+    let chunk = 50_000;
+    let data = pattern(60 * chunk);
+    let vols = rar5_volumes("movie.mkv", &data, chunk);
+    let first = write_set(&t.dl(), &vols);
+    let mut holes = Vec::new();
+    let mut repair = Vec::new();
+    for i in (3..vols.len() - 1).step_by(5) {
+        let path = t.dl().join(volume_name(i, vols.len()));
+        let p = payload_offset(&vols[i], chunk) as u64;
+        let h = vec![(p + 10_000, 8_000)];
+        let mut dmg = vols[i].clone();
+        dmg[(p + 10_000) as usize..(p + 18_000) as usize].fill(0);
+        std::fs::write(&path, &dmg).unwrap();
+        holes.push((path.clone(), h));
+        repair.push((path, vols[i].clone()));
+    }
+    let feed = FinalAfterRepair {
+        inner: Damaged { holes, repair, handed: false },
+        volumes: vols.len() as u64,
+        repaired: Arc::new(AtomicBool::new(false)),
+    };
+    let req = Request {
+        first_volume: &first,
+        dest: &t.out(),
+        password: "",
+        overwrite: Overwrite::Always,
+        on_wait: None,
+    };
+    let mut log = Vec::new();
+    let mut copied: Outputs = Vec::new();
+    let r = extract_recording(
+        &req,
+        Box::new(feed),
+        &mut |_, m: &str| log.push(m.to_string()),
+        &mut || false,
+        Some(&mut copied),
+    );
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+    assert!(log.iter().any(|l| l.contains("repaired movie.mkv from the repaired volumes")), "{log:?}");
+    assert!(copied.is_empty(), "copied into place instead of moved: {copied:?}");
+}
+
+/// Without the final-set report the same repaired output is still copied into place.
+#[test]
+fn repaired_output_of_an_unfinished_set_is_copied() {
+    let t = TestDir::new("unfinishedrepair");
+    let chunk = 50_000;
+    let data = pattern(6 * chunk);
+    let vols = rar5_volumes("movie.mkv", &data, chunk);
+    let first = write_set(&t.dl(), &vols);
+    let path = t.dl().join(volume_name(2, vols.len()));
+    let p = payload_offset(&vols[2], chunk) as u64;
+    let mut dmg = vols[2].clone();
+    dmg[(p + 10_000) as usize..(p + 18_000) as usize].fill(0);
+    std::fs::write(&path, &dmg).unwrap();
+    let feed = Damaged {
+        holes: vec![(path.clone(), vec![(p + 10_000, 8_000)])],
+        repair: vec![(path, vols[2].clone())],
+        handed: false,
+    };
+    let req = Request {
+        first_volume: &first,
+        dest: &t.out(),
+        password: "",
+        overwrite: Overwrite::Always,
+        on_wait: None,
+    };
+    let mut log = Vec::new();
+    let mut copied: Outputs = Vec::new();
+    let r = extract_recording(
+        &req,
+        Box::new(feed),
+        &mut |_, m: &str| log.push(m.to_string()),
+        &mut || false,
+        Some(&mut copied),
+    );
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+    assert_eq!(copied.len(), 1, "{copied:?}");
 }
 
 #[test]

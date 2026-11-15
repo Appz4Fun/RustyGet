@@ -58,6 +58,12 @@ pub trait VolumeFeed: Send + 'static {
     fn set_is_final(&self) -> bool {
         false
     }
+    /// True once a set that was still downloading has become final: the download ended, every
+    /// repair is done and nothing writes the volumes again. Verified outputs (a repaired one
+    /// above all) are then moved into place by the session instead of being copied there.
+    fn set_became_final(&self) -> bool {
+        false
+    }
     /// Upper bound on the set's volume count while it is still downloading
     /// (0 when unknown). Sizes the session's per-volume handle budget.
     fn expected_volumes(&self) -> u64 {
@@ -324,11 +330,15 @@ where
     let volume_count = protected
         .as_ref()
         .map_or(expected, |inv| (inv.volumes.len() as u64).max(expected));
+    let may_protect_late = protected.is_none() && req.overwrite != Overwrite::Rename;
     let provider = FeedProvider {
         dir: dir.clone(),
         feed: feed.clone(),
         pending: pending.clone(),
         protected,
+        first_volume: req.first_volume.to_path_buf(),
+        may_protect_late,
+        protected_late: None,
     };
     let mut opts = ProgressiveOptions::new(
         zipfast::extract::Options {
@@ -347,7 +357,10 @@ where
         },
         first_name,
     );
-    opts.limits.volume_handles = opts.limits.volume_handles.max(2 * volume_count + 16);
+    // A set still downloading may be declared once it is final (see FeedProvider::final_late);
+    // the declared volumes then hold a handle each on top of the ones already read.
+    let handles_per_volume = if may_protect_late { 3 } else { 2 };
+    opts.limits.volume_handles = opts.limits.volume_handles.max(handles_per_volume * volume_count + 16);
     opts.limits.protection_paths = opts.limits.protection_paths.max(volume_count + 16);
     log_cb(
         3,
@@ -992,8 +1005,9 @@ fn path_bytes(p: &Path) -> Vec<u8> {
 /// Verifies `artifact` (when its evidence is not already a pass) and moves it into place.
 ///
 /// zipfast publishes a member itself only when the volumes are declared as protected native
-/// files for the whole set; a download in progress cannot promise that, so verified outputs come
-/// back unpublished and are copied to their final name here.
+/// files for the whole set; a download in progress cannot promise that until the set is final
+/// (see `FeedProvider::final_late`), so verified outputs that finish earlier come back
+/// unpublished and are copied to their final name here.
 /// Before the fallback decoder extracts the whole set again: in rename mode it would add a
 /// renamed second copy of every output already in place, so those are removed first.
 fn undo_for_fallback(req: &Request<'_>, published: &Outputs) {
@@ -1328,6 +1342,45 @@ struct FeedProvider {
     feed: Arc<Mutex<Box<dyn VolumeFeed>>>,
     pending: PendingWait,
     protected: Option<zipfast::progressive::ProtectionInventory>,
+    /// First volume of the set, for the inventory declared once the set becomes final.
+    first_volume: PathBuf,
+    /// Rename mode copies every output into place, so nothing is ever declared for it.
+    may_protect_late: bool,
+    /// The inventory declared after the set became final mid-session. Once declared it is
+    /// declared again unchanged on every refresh, as zipfast requires.
+    protected_late: Option<zipfast::progressive::ProtectionInventory>,
+}
+
+impl FeedProvider {
+    /// Declares the set's volumes once the feed reports it final, and says whether it is.
+    /// Only a gapless set whose every volume is on disk is declared: zipfast fails the session
+    /// if a volume it already read is not in the inventory.
+    fn final_late(&mut self) -> bool {
+        if self.protected_late.is_some() {
+            return true;
+        }
+        if !self.may_protect_late {
+            return false;
+        }
+        let (became_final, expected) = {
+            let feed = self.feed.lock().unwrap_or_else(|e| e.into_inner());
+            (feed.set_became_final(), feed.expected_volumes())
+        };
+        if !became_final {
+            return false;
+        }
+        let Some(inventory) = protect_volumes(&self.first_volume) else {
+            return false;
+        };
+        // The handle budget was sized from `expected`: an unknown or exceeded count stays
+        // undeclared rather than risk running the session out of handles.
+        let declared = inventory.volumes.len();
+        if expected == 0 || declared as u64 > expected || declared < rar_set_members(&self.first_volume).len() {
+            return false;
+        }
+        self.protected_late = Some(inventory);
+        true
+    }
 }
 
 /// The volumes of the set starting at `first`, opened, as a protection inventory. `None` when a
@@ -1369,7 +1422,16 @@ impl VolumeSource for FeedProvider {
     ) -> ProgressiveResult<VolumeAnswer> {
         let path = self.dir.join(&request.expected);
         let mut feed = self.feed.lock().unwrap_or_else(|e| e.into_inner());
-        match feed.volume(&path) {
+        let view = feed.volume(&path);
+        drop(feed);
+        if matches!(&view, VolumeView::Ready { holes } if holes.is_empty()) && self.final_late() {
+            // Nothing writes a final set's volumes any more: zipfast's own file source carries
+            // the identity it needs to move a verified output into place.
+            return Ok(VolumeAnswer::Ready(Box::new(
+                zipfast::progressive::ImmutableFileSource::open(&path)?,
+            )));
+        }
+        match view {
             VolumeView::Ready { holes } => Ok(VolumeAnswer::Ready(Box::new(
                 HoledVolume::open(&path, holes).map_err(|cause| {
                     ProgressiveFailure::new(FailureKind::Input {
@@ -1390,13 +1452,21 @@ impl VolumeSource for FeedProvider {
     }
 
     fn protection(&mut self) -> ProgressiveResult<zipfast::progressive::ProtectionDeclaration> {
-        Ok(match &self.protected {
-            Some(inventory) => zipfast::progressive::ProtectionDeclaration::Complete {
+        if let Some(inventory) = &self.protected {
+            return Ok(zipfast::progressive::ProtectionDeclaration::Complete {
                 epoch: 1,
                 inventory: inventory.clone(),
-            },
-            None => zipfast::progressive::ProtectionDeclaration::Opaque,
-        })
+            });
+        }
+        if self.final_late() {
+            if let Some(inventory) = &self.protected_late {
+                return Ok(zipfast::progressive::ProtectionDeclaration::Complete {
+                    epoch: 2,
+                    inventory: inventory.clone(),
+                });
+            }
+        }
+        Ok(zipfast::progressive::ProtectionDeclaration::Opaque)
     }
 }
 

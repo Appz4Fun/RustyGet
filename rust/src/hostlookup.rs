@@ -6,6 +6,7 @@
 use std::fmt::Write as _;
 use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -14,6 +15,9 @@ pub const COUNTRY_DB: &str = "dbip-country-lite.mmdb";
 pub const ASN_DB: &str = "dbip-asn-lite.mmdb";
 const MAX_ADDRESSES: usize = 8;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+/// Connect-timing threads all lookups may use at once.
+const LOOKUP_THREADS: usize = 32;
+static LOOKUP_THREADS_IN_USE: AtomicUsize = AtomicUsize::new(0);
 
 /// One resolved address and what is known about it.
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -173,24 +177,48 @@ pub fn lookup(host: &str, port: i32) -> String {
         Ok(ips) => ips,
         Err(error) => return to_json(host, port, &error, geoip, &[]),
     };
+    let measure = |ip: IpAddr| {
+        let mut address = Address {
+            ip: ip.to_string(),
+            family: if ip.is_ipv6() { 6 } else { 4 },
+            latency_ms: connect_ms(ip, port, CONNECT_TIMEOUT),
+            ..Address::default()
+        };
+        locate(&mut address, country.as_ref(), asn.as_ref());
+        address
+    };
+    let measure = &measure;
+    // Each address is timed on its own thread, up to LOOKUP_THREADS across all lookups at
+    // once; past that, or if a thread can't be made, it is timed here instead, so a busy
+    // daemon answers slower rather than aborting.
     let addresses: Vec<Address> = std::thread::scope(|scope| {
-        let handles: Vec<_> = ips
-            .iter()
-            .map(|ip| {
-                let ip = *ip;
-                scope.spawn(move || {
-                    let mut address = Address {
-                        ip: ip.to_string(),
-                        family: if ip.is_ipv6() { 6 } else { 4 },
-                        latency_ms: connect_ms(ip, port, CONNECT_TIMEOUT),
-                        ..Address::default()
-                    };
-                    locate(&mut address, country.as_ref(), asn.as_ref());
-                    address
-                })
+        let mut slots: Vec<Result<std::thread::ScopedJoinHandle<'_, Address>, IpAddr>> = Vec::new();
+        for ip in ips.iter().copied() {
+            if LOOKUP_THREADS_IN_USE.fetch_add(1, Ordering::SeqCst) >= LOOKUP_THREADS {
+                LOOKUP_THREADS_IN_USE.fetch_sub(1, Ordering::SeqCst);
+                slots.push(Err(ip));
+                continue;
+            }
+            let spawned = std::thread::Builder::new().name("hostlookup".into()).spawn_scoped(scope, move || {
+                let address = measure(ip);
+                LOOKUP_THREADS_IN_USE.fetch_sub(1, Ordering::SeqCst);
+                address
+            });
+            match spawned {
+                Ok(handle) => slots.push(Ok(handle)),
+                Err(_) => {
+                    LOOKUP_THREADS_IN_USE.fetch_sub(1, Ordering::SeqCst);
+                    slots.push(Err(ip));
+                }
+            }
+        }
+        slots
+            .into_iter()
+            .filter_map(|slot| match slot {
+                Ok(handle) => handle.join().ok(),
+                Err(ip) => Some(measure(ip)),
             })
-            .collect();
-        handles.into_iter().filter_map(|h| h.join().ok()).collect()
+            .collect()
     });
     to_json(host, port, "", geoip, &addresses)
 }
@@ -651,5 +679,18 @@ mod tests {
             }],
         );
         assert_eq!(json, "{\"Host\":\"news.example\",\"Port\":563,\"Error\":\"\",\"GeoIP\":true,\"Addresses\":[{\"IP\":\"192.0.2.7\",\"Family\":4,\"Country\":\"NL\",\"CountryName\":\"Netherlands\",\"ASN\":64500,\"Org\":\"Example \\\"Net\\\"\",\"LatencyMs\":12.5}]}");
+    }
+
+    #[test]
+    fn a_lookup_with_no_threads_left_times_addresses_itself() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = i32::from(listener.local_addr().unwrap().port());
+        let spawned = lookup("127.0.0.1", port);
+        assert!(spawned.contains("\"IP\":\"127.0.0.1\"") && !spawned.contains("null"), "{spawned}");
+        LOOKUP_THREADS_IN_USE.fetch_add(LOOKUP_THREADS, Ordering::SeqCst);
+        let inline = lookup("127.0.0.1", port);
+        LOOKUP_THREADS_IN_USE.fetch_sub(LOOKUP_THREADS, Ordering::SeqCst);
+        assert!(inline.contains("\"IP\":\"127.0.0.1\"") && !inline.contains("null"), "{inline}");
+        assert_eq!(LOOKUP_THREADS_IN_USE.load(Ordering::SeqCst), 0, "every thread gave its slot back");
     }
 }

@@ -142,6 +142,33 @@ const { installDetailsFixture } = require('./details-fixture');
         await page.waitForFunction(() => /2 addresses for news/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
       });
 
+      await check('a one-word name is looked up once the field is left', async () => {
+        const before = lookups.length;
+        await host.fill('nntp-proxy');
+        await page.waitForTimeout(900);
+        assert.equal(lookups.length, before, 'not while it may still be typed');
+        await host.dispatchEvent('change');
+        await page.waitForFunction(n => n.length > 0 && n[n.length - 1][0] === 'nntp-proxy', lookups, { timeout: 5000 }).catch(() => {});
+        assert.equal(lookups[lookups.length - 1][0], 'nntp-proxy');
+        await host.fill('news.example.com');
+        await page.waitForFunction(() => /2 addresses for news/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
+      });
+
+      const ipVersion = v => page.evaluate(v => Config.switchClick($('#S_Server1_IpVersion .btn').filter(function() { return String($(this).attr('data-value')).toLowerCase() === v; })[0]), v);
+      await check('a server limited to IPv4 lists only IPv4 addresses', async () => {
+        await ipVersion('ipv4');
+        await page.waitForFunction(() => /1 address for news/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
+        assert.doesNotMatch(await box.textContent(), /2001:db8::10/);
+        await page.evaluate(() => $('#S_Server1_IpVersion .btn').removeClass('btn-primary').filter(function() { return String($(this).attr('data-value')).toLowerCase() === 'ipv6'; }).addClass('btn-primary'));
+        await page.evaluate(() => $('.config-host-lookup[data-multiid="1"]').find('input[value="192.0.2.10"]').prop('checked', true).trigger('change'));
+        await page.waitForTimeout(300);
+        assert.equal(await page.evaluate(() => String(Config.getOptionValue(Config.findOptionByName('Server1.IpVersion'))).toLowerCase()), 'auto',
+          'an IPv4 address picked while the server is IPv6 only sets it to Automatic');
+        await page.evaluate(() => $('.config-host-lookup[data-multiid="1"]').find('input[value=""]').prop('checked', true).trigger('change'));
+        await page.waitForFunction(() => $('#S_Server1_Host').val() === 'news.example.com', null, { timeout: 5000 });
+        await page.waitForFunction(() => /2 addresses for news/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
+      });
+
       await check('moving a server keeps its lookup with it', async () => {
         await page.evaluate(() => Config.moveSet($('<a data-multiid="1"></a>')[0], 'Server', 'NEWS-SERVERS', 'down'));
         await page.waitForTimeout(200);

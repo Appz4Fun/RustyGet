@@ -1003,7 +1003,10 @@ var DownloadsUI = (new function($)
 		var kind = DownloadsUI.parameterValue(parameters, 'DupeKind');
 		// a near-twin says how many of the primary's files it holds: "TWIN 154/156-"
 		var near = /^twin:(\d+\/\d+)$/.exec(kind);
-		var prefix = kind === 'twin' ? 'TWIN-' : near ? 'TWIN ' + near[1] + '-' : kind === 'alt' ? 'ALT-' : primary ? 'PRIMARY-' : '';
+		// a primary that has twins in its fleet (DupeCopyKind) says so: "PRIMARY TWIN-"
+		var copy = DownloadsUI.parameterValue(parameters, 'DupeCopyKind');
+		var prefix = kind === 'twin' ? 'TWIN-' : near ? 'TWIN ' + near[1] + '-' : kind === 'alt' ? 'ALT-' :
+			primary ? (copy === 'twin' ? 'PRIMARY TWIN-' : 'PRIMARY-') : '';
 		return ' <span class="label" style="background-color: hsl(' + hue + ', 45%, 40%)" title="' +
 			Util.textToAttr(I18n.translate('desc_twin_group', print)) + '">' + prefix + print.substring(0, 6) + '</span>';
 	}

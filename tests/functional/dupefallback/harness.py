@@ -102,6 +102,9 @@ article "missing" on the active server, so no real Usenet access is needed):
   posting: matching and borrowing go by the payload, not the containers.
 * xpacknestedsetdonor / xpacknestedsettarget - a rar VOLUME SET kept inside
   a 7z, as donor for, and as target repaired from, a BARE posting.
+* xcrypt_nestedin7zenc / xcrypt_nestedinrarenc - the movie in a plain
+  archive inside an ENCRYPTED one, as donor for a BARE target.
+* xcrypt_nestedinenctarget - the same layout as target: left alone.
 * xcrypt_enc7ztarget - a stored 7z target with encrypted headers and data
   (password in its NZB), split in volumes, repaired from a BARE donor.
 * xcrypt_enc7zdonor - a BARE target repaired by range from a stored 7z donor
@@ -2658,6 +2661,104 @@ def scenario_xpacknestedsamename(daemon, t):
     return ('xpacknestedsamename', ok,
             'status=%s recovered=%d repaired=%d integrity=%s'
             % (h['Status'], c['recov'], c['repaired'], integ['movie.mkv']))
+
+
+def scenario_xcrypt_nestedin7zenc(daemon, t):
+    """The DONOR holds the movie in a store-mode rar, and that rar in a stored
+    7z with encrypted headers and data (password in the donor's NZB), cut into
+    volumes. The target is the same movie posted bare with two missing
+    articles. The inner rar is read as the decrypted content of the 7z, the
+    movie is mapped inside it, and the missing ranges are decrypted from the
+    donor: the payload is reached through an encrypted container."""
+    if not generators.HAVE_7Z:
+        return ('xcrypt_nestedin7zenc', None, 'SKIP: 7z not installed')
+    size = 6_000_000
+    data = _payload(size, 8010)
+    password = 'outer-7z-pw'
+    pp = _place_copy(t, 'xcn7A', data, 'movie.mkv')
+    members = [(pp, 'movie.mkv', size, 500_000, {5, 6})]
+    payloads = {'movie.mkv': data}
+    rar = generators.rar3_store_volumes('movie.mkv', data, size + 4096)
+    with tempfile.TemporaryDirectory(prefix='xcn7-') as workdir:
+        archive = generators.seven_zip_copy_encrypted([('inner.rar', rar[0])], workdir, password)
+    donor_members = []
+    for i, piece in enumerate(generators.split_bytes(archive, [2_500_000, 2_500_000]), 1):
+        rel = 'xcn7B/rel.7z.%03d' % i
+        t.write_file(os.path.join('data', rel), piece)
+        donor_members.append((rel, 'Rel.7z.%03d' % i, len(piece), 300_000, set()))
+
+    h, integ, c = _xpack_run(daemon, t, 'Xcn7', members, donor_members, payloads,
+                             donor_password=password)
+    ok = integ['movie.mkv'] and c['recov'] >= 1 and c['repaired'] >= 1
+    return ('xcrypt_nestedin7zenc', ok,
+            'status=%s recovered=%d repaired=%d integrity=%s'
+            % (h['Status'], c['recov'], c['repaired'], integ['movie.mkv']))
+
+
+def scenario_xcrypt_nestedinrarenc(daemon, t):
+    """The DONOR holds the movie in a stored zip, and that zip in a
+    password-encrypted store-mode rar volume set. The target is the same movie
+    posted bare with two missing articles; it is repaired by decrypting the
+    needed ranges of the rar and reading the movie out of the zip inside."""
+    if not generators.HAVE_CRYPTO:
+        return ('xcrypt_nestedinrarenc', None, 'SKIP: cryptography not installed')
+    size = 6_000_000
+    data = _payload(size, 8020)
+    password = 'outer-rar-pw'
+    pp = _place_copy(t, 'xcnrA', data, 'movie.mkv')
+    members = [(pp, 'movie.mkv', size, 500_000, {5, 6})]
+    payloads = {'movie.mkv': data}
+    inner_zip = generators.zip_store([('movie.mkv', data)])
+    volumes = generators.rar3_store_volumes_encrypted('inner.zip', inner_zip, 2_000_003, password)
+    donor_members = []
+    for i, vol in enumerate(volumes, 1):
+        rel = 'xcnrB/rel.part%02d.rar' % i
+        t.write_file(os.path.join('data', rel), vol)
+        donor_members.append((rel, 'Rel.part%02d.rar' % i, len(vol), 300_000, set()))
+
+    h, integ, c = _xpack_run(daemon, t, 'Xcnr', members, donor_members, payloads,
+                             donor_password=password)
+    ok = integ['movie.mkv'] and c['recov'] >= 1 and c['repaired'] >= 1
+    return ('xcrypt_nestedinrarenc', ok,
+            'status=%s recovered=%d repaired=%d integrity=%s'
+            % (h['Status'], c['recov'], c['repaired'], integ['movie.mkv']))
+
+
+def scenario_xcrypt_nestedinenctarget(daemon, t):
+    """The negative for the target side: the TARGET holds the movie in a rar
+    inside an encrypted 7z and has a data hole; the donor is the movie posted
+    bare. A range of such a file cannot be written in place (the cipher blocks
+    at its edges also hold bytes of the rar around it), so cross-packing must
+    leave the target alone: nothing is written and the download stays
+    FAILURE/HEALTH for par2 or a twin."""
+    if not generators.HAVE_7Z:
+        return ('xcrypt_nestedinenctarget', None, 'SKIP: 7z not installed')
+    size = 6_000_000
+    data = _payload(size, 8030)
+    password = 'outer-7z-pw'
+    rar = generators.rar3_store_volumes('movie.mkv', data, size + 4096)
+    with tempfile.TemporaryDirectory(prefix='xcnt-') as workdir:
+        archive = generators.seven_zip_copy_encrypted([('inner.rar', rar[0])], workdir, password)
+    pieces = generators.split_bytes(archive, [2_000_003, 2_000_003])
+    payloads, members = {}, []
+    missing = [set(), {2}, set()]
+    for i, (piece, miss) in enumerate(zip(pieces, missing), 1):
+        rel = 'xcntA/rel.7z.%03d' % i
+        name = 'Rel.7z.%03d' % i
+        t.write_file(os.path.join('data', rel), piece)
+        payloads[name] = piece
+        members.append((rel, name, len(piece), 500_000, miss))
+    dp = _place_copy(t, 'xcntB', data, 'movie.mkv')
+    donor_members = [(dp, 'movie.mkv', size, 300_000, set())]
+
+    h, integ, c = _xpack_run(daemon, t, 'Xcnt', members, donor_members, payloads,
+                             primary_password=password)
+    refused = _grep_log(t, 'nested archive inside an encrypted archive')
+    intact = list(integ.values())
+    ok = c['recov'] == 0 and refused >= 1 and intact.count(False) == 1
+    return ('xcrypt_nestedinenctarget', ok,
+            'status=%s recovered=%d refused_logs=%d intact=%s'
+            % (h['Status'], c['recov'], refused, intact))
 
 
 def scenario_xpacknesteddonor(daemon, t):
@@ -11852,6 +11953,9 @@ SCENARIOS = {
     'xcrypt_encplain': scenario_xcrypt_encplain,
     'xcrypt_enc7ztarget': scenario_xcrypt_enc7ztarget,
     'xpacknesteddonor': scenario_xpacknesteddonor,
+    'xcrypt_nestedin7zenc': scenario_xcrypt_nestedin7zenc,
+    'xcrypt_nestedinrarenc': scenario_xcrypt_nestedinrarenc,
+    'xcrypt_nestedinenctarget': scenario_xcrypt_nestedinenctarget,
     'xpacknestedsamename': scenario_xpacknestedsamename,
     'xpacknestedsetdonor': scenario_xpacknestedsetdonor,
     'xpacknestedsettarget': scenario_xpacknestedsettarget,
@@ -12144,6 +12248,8 @@ EXPECTED_HISTORY_STATUS = {
     'xpackneg': 'FAILURE/HEALTH', 'xcrypt_encplain': 'SUCCESS/HEALTH',
     'xcrypt_enc7ztarget': 'SUCCESS/HEALTH', 'xcrypt_enc7zdonor': 'SUCCESS/HEALTH',
     'xpacknesteddonor': 'SUCCESS/HEALTH', 'xpacknestedtarget': 'SUCCESS/HEALTH',
+    'xcrypt_nestedin7zenc': 'SUCCESS/HEALTH', 'xcrypt_nestedinrarenc': 'SUCCESS/HEALTH',
+    'xcrypt_nestedinenctarget': 'FAILURE/HEALTH',
     'xpacknestedsamename': 'SUCCESS/HEALTH',
     'xpacknestedsetdonor': 'SUCCESS/HEALTH', 'xpacknestedsettarget': 'SUCCESS/HEALTH',
     'xcrypt_plainenc': 'SUCCESS/HEALTH', 'xcrypt_diffpass': 'SUCCESS/HEALTH',
@@ -12277,6 +12383,9 @@ SCENARIO_OPTIONS = {
     'xcrypt_encplain': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'xcrypt_enc7ztarget': ['DupeArticleFallback=stream', 'ParCheck=auto'] + _SEVENZIP_OPTION,
     'xpacknesteddonor': ['DupeArticleFallback=stream', 'ParCheck=auto'],
+    'xcrypt_nestedin7zenc': ['DupeArticleFallback=stream', 'ParCheck=auto'] + _SEVENZIP_OPTION,
+    'xcrypt_nestedinrarenc': ['DupeArticleFallback=stream', 'ParCheck=auto'],
+    'xcrypt_nestedinenctarget': ['DupeArticleFallback=stream', 'ParCheck=auto'] + _SEVENZIP_OPTION,
     'xpacknestedsamename': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'xpacknestedsetdonor': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'xpacknestedsettarget': ['DupeArticleFallback=stream', 'ParCheck=auto'],

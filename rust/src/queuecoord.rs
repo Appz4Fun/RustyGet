@@ -2131,6 +2131,19 @@ impl NzbgetRsQueueCoordinator {
         // borrowed par2 counts stay with the source, as its recovered-article count does
         host.nzb_set_param(new_nzb_ptr, PAR_ARTICLES_PARAM, None);
         host.nzb_set_param(new_nzb_ptr, PAR_FILES_PARAM, None);
+        // a split-off part is not another post of the fleet: drop its fleet
+        // identity, as merge does on its destination
+        for param in [
+            b"DupeFiles".as_slice(),
+            b"DupeKind".as_slice(),
+            crate::donorkind::KIND_PARAM,
+            b"DupeSampled".as_slice(),
+            b"DupeSampledOf".as_slice(),
+            crate::dupesearch_coord::FLEET_PARAM,
+            crate::dupesearch_coord::VIDEO_PARAM,
+        ] {
+            host.nzb_set_param(new_nzb_ptr, param, None);
+        }
 
         let new_init_snap = host.nzb_snap(new_nzb_ptr, false);
         let mut sc = pack_merge_split_counters(&src_snap);

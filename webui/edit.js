@@ -301,6 +301,7 @@ var DetailsPanel = (new function($)
 				prints[realPrint(members[j].item)] = true;
 			}
 		}
+		var anchored = Object.keys(prints).length > 0;
 		for (var i = 0; i < members.length; i++)
 		{
 			var m = members[i];
@@ -320,8 +321,13 @@ var DetailsPanel = (new function($)
 			// the primary and its twins are one release posted more than once:
 			// counted the same way whichever copy is viewed
 			var print = realPrint(m.item);
+			// a near twin (twin:N/M) holds other files, so its print never matches;
+			// its kind is resolved against the current primary, so it counts while
+			// the release is in the queue, like a twin without a print
+			var near = /^twin:\d+\/\d+$/.test(param(m.item, 'DupeKind'));
 			if ((kind === 'twin' || kind === 'primary') &&
-				(print ? prints[print] : kind === 'twin' && m.source === 'queue'))
+				((print && prints[print]) ||
+				(kind === 'twin' && (m.source === 'queue' || (near && anchored)))))
 			{
 				out.twins++;
 			}

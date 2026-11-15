@@ -131,6 +131,14 @@ const { installDetailsFixture } = require('./details-fixture');
               History.items = keepH.concat([oldTwin]);
               try { return run(g(41), lost); } finally { History.items = keepH; }
             })(),
+            // a near twin (another packing of the same files) parked in history
+            nearTwin: (() => {
+              const near = Object.assign({}, withParam(hist, 'DupeFiles', 'fedcba9876543210-30'), { NZBID: 96, NZBFilename: 'near.copy.nzb',
+                Parameters: withParam(hist, 'DupeFiles', 'fedcba9876543210-30').Parameters.concat([{ Name: 'DupeKind', Value: 'twin:29/30' }]) });
+              const keepH = History.items;
+              History.items = keepH.concat([near]);
+              try { return run(g(41), all); } finally { History.items = keepH; }
+            })(),
             // clients name copies freely: a queued twin sharing the primary's name
             sameName: run(g(41), all.map(x => x.NZBID === 42 ? Object.assign({}, x, { NZBFilename: g(41).NZBFilename }) : x)),
             // a download already running when the fleet came: no DupeFleet, no twins
@@ -149,6 +157,7 @@ const { installDetailsFixture } = require('./details-fixture');
         assert.deepEqual(r.unrelated.alt, { twins: 2, alts: 0, unverified: 0 }, 'Another release under the same key is no twin seen from an alt');
         assert.deepEqual(r.deadPrimary, { twins: 1, alts: 0, unverified: 0 }, 'A dead queued copy hides its own earlier try');
         assert.deepEqual(r.lostPrint, { twins: 1, alts: 1, unverified: 0 }, 'A queued twin without a print counts; a history twin without one does not');
+        assert.deepEqual(r.nearTwin, { twins: 2, alts: 1, unverified: 0 }, 'A near twin parked in history counts while its release is queued');
         assert.deepEqual(r.sameName, { twins: 1, alts: 1, unverified: 0 }, 'Two queued copies sharing a name are still two posts');
         assert.deepEqual(r.plainPrimary, { twins: 1, alts: 0, unverified: 0 }, 'An alt borrows from a primary that was downloading before the fleet came');
       });

@@ -2862,6 +2862,8 @@ unsafe extern "C" fn hc_native_action_cb(
             host.nzb_set_int(p2, NZB_INT_DUPE_RECOVERED_ARTICLES, 0);
             host.nzb_set_i64(p2, NZB_I64_DUPE_RECOVERED_BYTES, 0);
             host.nzb_set_int(p2, NZB_INT_DUPE_RECOVERED_HOLES, 0);
+            host.nzb_set_param(p2, crate::queuecoord::PAR_ARTICLES_PARAM, None);
+            host.nzb_set_param(p2, crate::queuecoord::PAR_FILES_PARAM, None);
             host.nzb_set_int(p2, NZB_INT_DUPE_PAR_DEFER_STATE, DP_NONE);
             host.nzb_set_int(p2, NZB_INT_DUPE_NO_PAR_NOTED, 0);
             host.nzb_redownload_replace_files(p2, src_nzb_ptr);

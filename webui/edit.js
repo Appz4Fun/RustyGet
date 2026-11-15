@@ -247,6 +247,136 @@ var DetailsPanel = (new function($)
 		return cut >= 16 ? cut : 0;
 	}
 
+	function countParam(item, name)
+	{
+		var n = parseInt(param(item, name), 10);
+		return isNaN(n) || n < 0 ? 0 : n;
+	}
+
+	function stat(cls, label, value, sub)
+	{
+		return '<div class="fleet-stat ' + cls + '"><span class="fleet-stat-label">' + Util.textToHtml(label) + '</span>' +
+			'<span class="fleet-stat-value">' + Util.textToHtml(value) + '</span>' +
+			'<span class="fleet-stat-sub">' + Util.textToHtml(sub) + '</span></div>';
+	}
+
+	// the other copies this one can borrow from: twins (the same post, swapped
+	// article by article) and borrowable alts. A twin is the same post, so it holds
+	// the same video; an alt counts as verified once the fleet intake found the
+	// fleet's video in it (DupeVideo=same, set by rust/src/dupesearch_coord.rs).
+	this.donors = function(item, members, source)
+	{
+		var out = { twins: 0, alts: 0, unverified: 0 };
+		// one post is one donor: a history copy of a post already counted (or of
+		// this copy's own post) adds nothing. Members come queue first.
+		// Names are what the client sent, so two queued copies may share one, but
+		// the intake never queues one post twice: a name hides a copy only when
+		// the copy or the one that claimed the name is in history.
+		var posts = {};
+		posts[item.NZBFilename] = source;
+		// prints of this fleet's own release: the viewed copy's, and those of the
+		// primary and twins in the queue. Any copy can carry a print, so a history
+		// copy marked primary or twin (say an older release under the same dupe key,
+		// or an old fleet's copy) is only this release when its print is one of
+		// these. With nothing of the release in the queue, there is nothing left
+		// downloading to borrow into, so history copies seen from an alt add none.
+		// Only real prints anchor: a twin whose par2 set was missing or lost carries
+		// a placeholder (none, lost), and counts only while it is in the queue.
+		var prints = {};
+		function realPrint(it)
+		{
+			var p = param(it, 'DupeFiles');
+			return /^[0-9a-f]{16}-[0-9]+$/.test(p) ? p : null;
+		}
+		var selfRole = DetailsPanel.role(item);
+		if (selfRole && (selfRole.kind === 'twin' || selfRole.kind === 'primary') && realPrint(item))
+		{
+			prints[realPrint(item)] = true;
+		}
+		for (var j = 0; j < members.length; j++)
+		{
+			var r = members[j].role ? members[j].role.kind : '';
+			if ((r === 'twin' || r === 'primary') && members[j].source === 'queue' && realPrint(members[j].item))
+			{
+				prints[realPrint(members[j].item)] = true;
+			}
+		}
+		var anchored = Object.keys(prints).length > 0;
+		for (var i = 0; i < members.length; i++)
+		{
+			var m = members[i];
+			var claimed = posts[m.item.NZBFilename];
+			if ((m.item.NZBID === item.NZBID && m.source === source) ||
+				(claimed && (claimed === 'history' || m.source === 'history')))
+			{
+				continue;
+			}
+			// a dead copy still claims its post, so its history tries add nothing
+			posts[m.item.NZBFilename] = claimed || m.source;
+			if (healthPermille(m.item) <= 0)
+			{
+				continue;
+			}
+			var kind = m.role ? m.role.kind : '';
+			// the primary and its twins are one release posted more than once:
+			// counted the same way whichever copy is viewed
+			var print = realPrint(m.item);
+			// a near twin (twin:N/M) holds other files, so its print never matches;
+			// its kind is resolved against the current primary, so it counts while
+			// the release is in the queue, like a twin without a print
+			var near = /^twin:\d+\/\d+$/.test(param(m.item, 'DupeKind'));
+			if ((kind === 'twin' || kind === 'primary') &&
+				((print && prints[print]) ||
+				(kind === 'twin' && (m.source === 'queue' || (near && anchored)))))
+			{
+				out.twins++;
+			}
+			else if (kind !== 'primary' && kind !== 'twin' && param(m.item, 'DupeCopyKind') === 'borrowable' &&
+				param(m.item, 'DupeVideo') !== 'different')
+			{
+				if (param(m.item, 'DupeVideo') === 'same')
+				{
+					out.alts++;
+				}
+				else
+				{
+					out.unverified++;
+				}
+			}
+		}
+		return out;
+	}
+
+	// what this copy borrowed from the others, and what it still can
+	function borrowStats(item, selfRole, members, source)
+	{
+		var articles = item.DupeRecoveredArticles || 0;
+		var parArticles = countParam(item, 'DupeParArticles');
+		// DupeParFiles lists the par2 files still holding borrowed articles, as id:count
+		var parFiles = (param(item, 'DupeParFiles') || '').split(',').filter(function(f) {
+			var m = /^\s*\d+\s*(?::\s*(\d+)\s*)?$/.exec(f);
+			return m && (m[1] === undefined || parseInt(m[1], 10) > 0);
+		}).length;
+		var hi = item.DupeRecoveredBytesHi || 0, lo = item.DupeRecoveredBytesLo || 0;
+		var holes = item.DupeRecoveredHoles || 0;
+		var donors = DetailsPanel.donors(item, members, source);
+		var verified = donors.twins + donors.alts;
+		var split = I18n.translate('fleet_donor_split', String(donors.twins), String(donors.alts));
+		if (donors.unverified > 0)
+		{
+			split += ' · ' + I18n.translate('fleet_donor_unverified', String(donors.unverified));
+		}
+		return '<div class="fleet-stats">' +
+			stat('fleet-stat-articles', I18n.translate('fleet_stat_articles'), String(articles), I18n.translate('fleet_stat_articles_sub')) +
+			stat('fleet-stat-par', I18n.translate('fleet_stat_par'), String(parArticles), parArticles > 0 ?
+				I18n.translate(parFiles === 1 ? 'fleet_stat_par_file' : 'fleet_stat_par_files', String(parFiles)) :
+				I18n.translate('fleet_stat_articles_sub')) +
+			stat('fleet-stat-bytes', I18n.translate('fleet_stat_bytes'), Util.formatSizeMB(hi * 4096 + lo / 1024.0 / 1024.0, lo),
+				I18n.translate('fleet_holes', String(holes))) +
+			stat('fleet-stat-donors', I18n.translate('fleet_stat_donors'), I18n.translate('fleet_donor_verified', String(verified)), split) +
+			'</div>';
+	}
+
 	// the fleet card; empty when the item has no other copy and nothing was
 	// recovered from duplicates
 	this.fleet = function(item, source)
@@ -259,14 +389,8 @@ var DetailsPanel = (new function($)
 		}
 
 		var facts = [];
-		facts.push('<span class="fleet-fact">' + roleTag(this.role(item), true) + '</span>');
-		if (recovered || Util.showDupeRecovered(item))
-		{
-			var holes = item.DupeRecoveredHoles || 0;
-			facts.push('<span class="fleet-fact"><span class="fleet-fact-label">' + Util.textToHtml(I18n.translate('fleet_recovered')) +
-				'</span> ' + Util.textToHtml(Util.formatDupeRecovered(item)) +
-				(holes > 0 ? ' · ' + Util.textToHtml(I18n.translate('fleet_holes', String(holes))) : '') + '</span>');
-		}
+		var selfRole = this.role(item);
+		facts.push('<span class="fleet-fact">' + roleTag(selfRole, true) + '</span>');
 		if (item.LiveRepairing)
 		{
 			facts.push('<span class="fleet-fact fleet-live" title="' + Util.textToAttr(I18n.translate('label_live_repair_hint')) + '">' +
@@ -301,11 +425,14 @@ var DetailsPanel = (new function($)
 				'<li><a href="#" class="fleet-member" data-fleet-source="' + m.source + '" data-fleet-id="' + m.item.NZBID + '">' + cells + '</a></li>';
 		}
 
+		var stats = members.length > 1 || recovered || Util.showDupeRecovered(item) ? borrowStats(item, selfRole, members, source) : '';
+
 		return '<div class="fleet-head"><span class="fleet-title">' + Util.textToHtml(I18n.translate('fleet_title')) + '</span>' +
 			(item.DupeKey ? '<code class="fleet-key" title="' + Util.textToAttr(I18n.translate('edit_dupe_key')) + '">' + Util.textToHtml(item.DupeKey) + '</code>' : '') +
+			'<span class="fleet-facts">' + facts.join('') + '</span>' +
 			(members.length > 1 ? '<span class="fleet-count">' + Util.textToHtml(I18n.translate('fleet_copies', String(members.length))) + '</span>' : '') +
 			'</div>' +
-			'<div class="fleet-facts">' + facts.join('') + '</div>' +
+			stats +
 			(members.length > 1 ? '<ul class="fleet-members">' + rows + '</ul>' : '');
 	}
 

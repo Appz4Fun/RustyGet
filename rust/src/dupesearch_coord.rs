@@ -1043,7 +1043,7 @@ impl DonorServerExchange for NntpHealthTransportShared {
                 commands.extend_from_slice(b"\r\n");
             }
 
-            let wait_start = host_now(ctx, host_cb);
+            let mut wait_start = host_now(ctx, host_cb);
             let ids = self.server_ids.lock().unwrap_or_else(|e| e.into_inner()).clone();
             // servers of this backbone whose connect failed during this exchange
             let mut failed: Vec<i32> = Vec::new();
@@ -1102,6 +1102,9 @@ impl DonorServerExchange for NntpHealthTransportShared {
                 if ids.iter().all(|id| failed.contains(id)) {
                     return Err(DonorExchangeError::default());
                 }
+                // the failed connect may have taken the whole wait (a server that never
+                // answers): the sibling gets a wait of its own
+                wait_start = host_now(ctx, host_cb);
             };
             let conn_ptr = release.conn_ptr;
             let conn = unsafe { &*(conn_ptr as *const crate::net::PooledNntpConn) };

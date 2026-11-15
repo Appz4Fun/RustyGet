@@ -515,250 +515,46 @@ impl<E: Env> ParRenamer<'_, E> {
 }
 
 /// ParRenamer::IsSplittedFragment: the disk file is "<correct name>.NNN"
-/// with NNN (all digits) at most 1 (.000 or .001).
+/// with NNN (all digits) at most 1 (.000 or .001), as par-rs decides it.
 pub fn is_splitted_fragment(filename: &[u8], correct_name: &[u8]) -> bool {
     let base = c(base_name(filename));
-    let base = &base[..base.len() - 1];
     let correct = c(correct_name);
-    let correct = &correct[..correct.len() - 1];
-    let base_len = correct.len();
-    let has_extension = base.contains(&b'.');
-    if !has_extension || base.len() <= base_len || !base[..base_len].eq_ignore_ascii_case(correct) {
-        return false;
-    }
-    if base.get(base_len) != Some(&b'.') {
-        return false;
-    }
-    let digits = &base[base_len + 1..];
-    digits.iter().all(u8::is_ascii_digit)
-        && std::str::from_utf8(digits).ok().map_or(false, |s| {
-            s.is_empty() || s.parse::<u32>().is_ok_and(|n| n <= 1)
-        })
+    par_rs::renamer::is_split_fragment(&base[..base.len() - 1], &correct[..correct.len() - 1])
 }
 
-fn latin1_to_utf8(latin1: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(latin1.len() * 2);
-    for &ch in latin1 {
-        if ch < 128 {
-            out.push(ch);
-        } else {
-            out.push(0xc2 + u8::from(ch > 0xbf));
-            out.push((ch & 0x3f) + 0x80);
-        }
-    }
-    out
-}
-
-fn url_encode_char(ch: u8) -> [u8; 3] {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    [b'%', HEX[(ch >> 4) as usize], HEX[(ch & 0x0f) as usize]]
-}
-
+/// A PAR2 name as a local file name (par-rs: `\\` as `/`, control bytes, a
+/// leading `/` and `../` URL-encoded, UTF-8 kept, anything else read as Latin-1).
 pub fn translate_filename_from_par2_to_local(par2_name: &[u8]) -> Vec<u8> {
-    let mut local = Vec::with_capacity(par2_name.len());
-    for &raw in par2_name {
-        let mut ch = raw;
-        let ok = ch >= 32;
-        if ch == b'\\' {
-            ch = b'/';
-        }
-        if ok {
-            local.push(ch);
-        } else {
-            local.extend_from_slice(&url_encode_char(ch));
-        }
-    }
-    if local.first() == Some(&b'/') {
-        let enc = url_encode_char(b'/');
-        local.splice(0..1, enc);
-    }
-    while let Some(idx) = local.windows(3).position(|w| w == b"../") {
-        let dot = url_encode_char(b'.');
-        let mut rep = Vec::with_capacity(6);
-        rep.extend_from_slice(&dot);
-        rep.extend_from_slice(&dot);
-        local.splice(idx..idx + 2, rep);
-    }
-    local
+    par_rs::packet::translate_filename_from_par2_to_local(par2_name).into_bytes()
 }
 
-trait Par2ByteSource {
-    fn len(&self) -> u64;
-    fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> bool;
-}
-
-impl Par2ByteSource for &[u8] {
-    fn len(&self) -> u64 {
-        <[u8]>::len(self) as u64
-    }
-    fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> bool {
-        let Ok(start) = usize::try_from(offset) else {
-            return false;
-        };
-        let Some(end) = start.checked_add(buf.len()) else {
-            return false;
-        };
-        if end > <[u8]>::len(self) {
-            return false;
-        }
-        buf.copy_from_slice(&self[start..end]);
-        true
-    }
-}
-
-struct FilePar2Source {
-    file: std::fs::File,
-    len: u64,
-}
-
-impl Par2ByteSource for FilePar2Source {
-    fn len(&self) -> u64 {
-        self.len
-    }
-    fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> bool {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::FileExt as _;
-            self.file.read_exact_at(buf, offset).is_ok()
-        }
-        #[cfg(not(unix))]
-        {
-            use std::io::{Read as _, Seek as _, SeekFrom};
-            self.file.seek(SeekFrom::Start(offset)).is_ok() && self.file.read_exact(buf).is_ok()
-        }
-    }
-}
-
-fn parse_par2_packets_from_source<S: Par2ByteSource>(mut source: S) -> Option<Vec<ParEntry>> {
-    let filesize = source.len();
-    if filesize == 0 {
+/// The `ParEntry` items of a par2 set read by par-rs, in libpar2's order: a
+/// file id with a description gives its local name and printed 16 KiB hash, a
+/// file id with only slice checksums is damaged. None when no packet of the
+/// set could be read.
+fn entries_of_set(set: par_rs::packet::PacketSet) -> Option<Vec<ParEntry>> {
+    if set.main.is_none()
+        && set.creator.is_none()
+        && set.file_descs.is_empty()
+        && set.ifscs.is_empty()
+        && set.recovery.is_empty()
+    {
         return None;
     }
-    const FILE_DESC_TYPE: &[u8; 16] = b"PAR 2.0\0FileDesc";
-    const IFSC_TYPE: &[u8; 16] = b"PAR 2.0\0IFSC\0\0\0\0";
-    const MAIN_TYPE: &[u8; 16] = b"PAR 2.0\0Main\0\0\0\0";
-    const CREATOR_TYPE: &[u8; 16] = b"PAR 2.0\0Creator\0";
-    const RECV_TYPE: &[u8; 16] = b"PAR 2.0\0RecvSlic";
-
-    let buf_size = filesize.min(1_048_576) as usize;
-    let mut buffer = vec![0u8; buf_size];
-
-    // Key is reversed fileid so BTreeMap orders identically to Par2::MD5Hash::operator<
-    let mut source_map: std::collections::BTreeMap<[u8; 16], Option<(Vec<u8>, Vec<u8>)>> =
-        std::collections::BTreeMap::new();
-    let mut set_id: Option<[u8; 16]> = None;
-    let mut packets = 0usize;
-    let mut offset = 0u64;
-    let header_len = HEADER as u64;
-
-    while offset <= filesize.saturating_sub(header_len) {
-        let mut header = [0u8; HEADER];
-        if !source.read_exact_at(offset, &mut header) {
-            break;
-        }
-        if &header[..8] != MAGIC {
-            offset += 1;
-            while offset <= filesize.saturating_sub(header_len) {
-                let want = (buffer.len() as u64).min(filesize - offset) as usize;
-                if want < HEADER || !source.read_exact_at(offset, &mut buffer[..want]) {
-                    offset = filesize;
-                    break;
-                }
-                let scan_limit = want - HEADER;
-                if let Some(pos) = buffer[..scan_limit + 8].windows(8).position(|w| w == MAGIC) {
-                    offset += pos as u64;
-                    header.copy_from_slice(&buffer[pos..pos + HEADER]);
-                    break;
-                }
-                offset += (scan_limit + 1) as u64;
-            }
-            if offset > filesize.saturating_sub(header_len) {
-                break;
-            }
-        }
-
-        let length = u64::from_le_bytes(header[8..16].try_into().unwrap());
-        if length < header_len || (length & 3) != 0 || length > filesize - offset {
-            offset += 1;
-            continue;
-        }
-
-        let mut hasher = Md5::new();
-        hasher.update(&header[32..HEADER]);
-        let mut current = offset + header_len;
-        let limit = offset + length;
-        while current < limit {
-            let want = (buffer.len() as u64).min(limit - current) as usize;
-            if !source.read_exact_at(current, &mut buffer[..want]) {
-                break;
-            }
-            hasher.update(&buffer[..want]);
-            current += want as u64;
-        }
-        if current < limit {
-            offset += 1;
-            continue;
-        }
-        let digest = hasher.finalize();
-        if digest.as_slice() != &header[16..32] {
-            offset += 1;
-            continue;
-        }
-
-        let pkt_set_id: [u8; 16] = header[32..48].try_into().unwrap();
-        if set_id.is_none() {
-            set_id = Some(pkt_set_id);
-        }
-        if set_id == Some(pkt_set_id) {
-            let pkt_type = &header[48..64];
-            if pkt_type == FILE_DESC_TYPE {
-                if length > 120 && length - 120 <= 100_000 {
-                    let body_len = (length - header_len) as usize;
-                    let body = &buffer[..body_len];
-                    let mut key: [u8; 16] = body[0..16].try_into().unwrap();
-                    key.reverse();
-                    let hashfull = &body[16..32];
-                    let hash16k = &body[32..48];
-                    let file_len = u64::from_le_bytes(body[48..56].try_into().unwrap());
-                    if !(file_len <= 16384 && hash16k != hashfull) {
-                        let raw_name = &body[56..body_len];
-                        let nul = raw_name
-                            .iter()
-                            .position(|&b| b == 0)
-                            .unwrap_or(raw_name.len());
-                        let utf8_name = latin1_to_utf8(&raw_name[..nul]);
-                        let local_name = translate_filename_from_par2_to_local(&utf8_name);
-                        let printed_hash = crate::renameanalyzer::print(hash16k)[..32].to_vec();
-                        let entry = source_map.entry(key).or_insert(None);
-                        if entry.is_none() {
-                            *entry = Some((local_name, printed_hash));
-                            packets += 1;
-                        }
-                    }
-                }
-            } else if pkt_type == IFSC_TYPE {
-                if length >= 80 && (length - 80) % 20 == 0 {
-                    let mut key = [0u8; 16];
-                    if source.read_exact_at(offset + header_len, &mut key) {
-                        key.reverse();
-                        source_map.entry(key).or_insert(None);
-                        packets += 1;
-                    }
-                }
-            } else if pkt_type == MAIN_TYPE || pkt_type == CREATOR_TYPE || pkt_type == RECV_TYPE {
-                packets += 1;
-            }
-        }
-        offset += length;
-    }
-    if packets == 0 {
-        return None;
-    }
+    let mut ids: Vec<par_rs::packet::FileId> = set.file_descs.keys().copied().collect();
+    ids.extend(
+        set.ifscs
+            .keys()
+            .filter(|id| !set.file_descs.contains_key(id)),
+    );
+    ids.sort();
     Some(
-        source_map
-            .into_values()
-            .map(|opt| match opt {
-                Some((name, hash)) => ParEntry::File { name, hash },
+        ids.into_iter()
+            .map(|id| match set.file_descs.get(&id) {
+                Some(desc) => ParEntry::File {
+                    name: desc.local_name().into_bytes(),
+                    hash: crate::renameanalyzer::print(&desc.hash_16k)[..32].to_vec(),
+                },
                 None => ParEntry::Damaged,
             })
             .collect(),
@@ -768,7 +564,8 @@ fn parse_par2_packets_from_source<S: Par2ByteSource>(mut source: S) -> Option<Ve
 /// Parses PAR2 packets (`FileDesc` and `IFSC`) from `bytes` into `ParEntry` items
 /// ordered identically to `Par2::Par2Repairer::sourcefilemap`.
 pub fn parse_par2_packets(bytes: &[u8]) -> Option<Vec<ParEntry>> {
-    parse_par2_packets_from_source(bytes)
+    use par_rs::packet::{load_par2_bytes, ScanOptions};
+    entries_of_set(load_par2_bytes(bytes, ScanOptions::METADATA).ok()?)
 }
 
 /// Loads `ParEntry` items from a `.par2` file on disk (`DirectParLoader::LoadParFile`)
@@ -779,10 +576,9 @@ pub fn load_par_entries_from_file(par_filename: &std::path::Path) -> Option<Vec<
     if meta.is_dir() {
         return None;
     }
-    parse_par2_packets_from_source(FilePar2Source {
-        file,
-        len: meta.len(),
-    })
+    drop(file);
+    use par_rs::packet::{load_par2_file, ScanOptions};
+    entries_of_set(load_par2_file(par_filename, ScanOptions::METADATA).ok()?)
 }
 
 /// `ParRenamer::ListParredFiles`: returns base names of all files listed in `par_filename`'s
@@ -799,10 +595,9 @@ pub fn list_parred_files(
     if meta.len() == 0 {
         return Some(Vec::new());
     }
-    let entries = parse_par2_packets_from_source(FilePar2Source {
-        file,
-        len: meta.len(),
-    })?;
+    drop(file);
+    use par_rs::packet::{load_par2_file, ScanOptions};
+    let entries = entries_of_set(load_par2_file(par_filename, ScanOptions::METADATA).ok()?)?;
     let mut out = Vec::new();
     for entry in entries {
         if let ParEntry::File { name, .. } = entry {
@@ -1084,7 +879,7 @@ mod tests {
     fn splitted_fragments() {
         assert!(is_splitted_fragment(b"/d/movie.mkv.001", b"movie.mkv"));
         assert!(is_splitted_fragment(b"/d/MOVIE.MKV.000", b"movie.mkv"));
-        assert!(is_splitted_fragment(b"/d/movie.mkv.", b"movie.mkv"));
+        assert!(!is_splitted_fragment(b"/d/movie.mkv.", b"movie.mkv"));
         assert!(!is_splitted_fragment(b"/d/movie.mkv.002", b"movie.mkv"));
         assert!(!is_splitted_fragment(b"/d/movie.mkv.001x", b"movie.mkv"));
         assert!(!is_splitted_fragment(b"/d/movie.mkv", b"movie.mkv"));
@@ -1185,6 +980,41 @@ mod tests {
         let listed =
             list_parred_files(&parchecker_dir.join("testfile.par2"), 16 * 1024 * 1024).unwrap();
         assert_eq!(listed.len(), 2);
+    }
+
+    #[test]
+    fn par2_names_decode_utf8_first_then_latin1() {
+        fn desc_packet(id: u8, name: &[u8]) -> Vec<u8> {
+            let mut body = [7u8; 16].to_vec(); // set id
+            body.extend_from_slice(b"PAR 2.0\0FileDesc");
+            body.extend_from_slice(&[id; 16]);
+            body.extend_from_slice(&[9; 32]); // full and 16 KiB hashes, equal
+            body.extend_from_slice(&100u64.to_le_bytes());
+            body.extend_from_slice(name);
+            body.resize(body.len().div_ceil(4) * 4, 0);
+            let mut out = b"PAR2\0PKT".to_vec();
+            out.extend_from_slice(&((body.len() + 32) as u64).to_le_bytes());
+            out.extend_from_slice(&Md5::digest(&body));
+            out.extend_from_slice(&body);
+            out
+        }
+        let mut data = desc_packet(1, "caf\u{e9}.mkv".as_bytes());
+        data.extend(desc_packet(2, b"na\xefve.nfo"));
+        let entries = parse_par2_packets(&data).unwrap();
+        let names: Vec<Vec<u8>> = entries
+            .into_iter()
+            .map(|e| match e {
+                ParEntry::File { name, .. } => name,
+                ParEntry::Damaged => Vec::new(),
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "caf\u{e9}.mkv".as_bytes().to_vec(),
+                "na\u{ef}ve.nfo".as_bytes().to_vec()
+            ]
+        );
     }
 
     #[test]

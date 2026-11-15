@@ -285,6 +285,11 @@ fn format_truncated_1023(prefix: &[u8], text: &[u8]) -> Vec<u8> {
     out
 }
 
+#[cfg(test)]
+pub(crate) fn native_detail_record_for_test(text: &[u8]) -> Vec<u8> {
+    format_truncated_1023(prefix_for_kind(4), text)
+}
+
 fn filelog_locked(
     inner: &mut LogInner,
     path_mtx: &Mutex<CString>,

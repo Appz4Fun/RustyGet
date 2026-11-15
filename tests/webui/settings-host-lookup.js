@@ -56,7 +56,7 @@ const { installDetailsFixture } = require('./details-fixture');
           { Host: host, Port: port, Error: '', GeoIP: geoip, Addresses: [
             { IP: '192.0.2.10', Family: 4, Country: geoip ? 'NL' : '', CountryName: geoip ? 'Netherlands' : '', ASN: geoip ? 64500 : 0, Org: geoip ? 'Example Net' : '', LatencyMs: 12.4 },
             { IP: '2001:db8::10', Family: 6, Country: '', CountryName: '', ASN: 0, Org: '', LatencyMs: null }
-          ].filter(a => host === 'news.example.com' || a.IP === host) };
+          ].filter(a => host === 'news.example.com' || host === '192.0.2.10' || a.IP === host) };
         return route.fulfill({ contentType: 'application/json', json: { id: rpc.id, result } });
       });
       await page.goto(base.href);
@@ -124,6 +124,18 @@ const { installDetailsFixture } = require('./details-fixture');
         assert.equal(await address(), '192.0.2.10');
         await page.waitForFunction(() => /2 addresses for news/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
         assert(await box.locator('input[value="192.0.2.10"]').isChecked());
+        await box.locator('input[value=""]').click();
+        await page.waitForFunction(() => Config.getOptionValue(Config.findOptionByName('Server1.Address')) === '', null, { timeout: 5000 });
+      });
+
+      await check('picking another address while Host is an address moves the name back to Host', async () => {
+        await host.fill('192.0.2.10');
+        await page.waitForFunction(() => /Host is an address \(news\.example\.com\)/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
+        await box.locator('input[value="2001:db8::10"]').click();
+        await page.waitForFunction(() => $('#S_Server1_Host').val() === 'news.example.com', null, { timeout: 5000 });
+        assert.equal(await address(), '2001:db8::10');
+        await page.waitForFunction(() => /2 addresses for news/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
+        assert(await box.locator('input[value="2001:db8::10"]').isChecked());
         await box.locator('input[value=""]').click();
         await page.waitForFunction(() => Config.getOptionValue(Config.findOptionByName('Server1.Address')) === '', null, { timeout: 5000 });
       });

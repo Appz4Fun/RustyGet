@@ -5182,18 +5182,25 @@ var Config = (new function($)
 		{
 			return;
 		}
-		if (ip === '\u0001name')
+		var oldHost = $.trim(getOptionValue(hostOption) || '');
+		if (ip === '\u0001name' || (ip && isIpLiteral(oldHost)))
 		{
+			// Address is not used while Host is an address: picking one moves the name back to
+			// Host and the pick to Address, or, with no name known, writes the pick as Host
 			var name = box.data('hostName');
-			var old = $.trim(getOptionValue(hostOption) || '');
-			if (!name)
+			var pick = ip === '\u0001name' ? oldHost : ip;
+			if (!name && ip === '\u0001name')
 			{
 				return;
 			}
-			$('#' + hostOption.formId).val(name);
-			setOptionValue(addrOption, isIpLiteral(old) ? old : '');
+			$('#' + hostOption.formId).val(name || ip);
+			if (!name)
+			{
+				pick = '';
+			}
+			setOptionValue(addrOption, isIpLiteral(pick) ? pick : '');
 			var cert = findOptionByName('Server' + multiid + '.CertVerification');
-			if (cert && box.data('certWasStrict') && String(getOptionValue(cert)).toLowerCase() === 'minimal')
+			if (name && cert && box.data('certWasStrict') && String(getOptionValue(cert)).toLowerCase() === 'minimal')
 			{
 				setOptionValue(cert, 'Strict');
 			}

@@ -31,6 +31,9 @@ const FIRST_LOOKUP_WAIT: Duration = Duration::from_secs(5);
 /// A new fastest address takes over only when the current one is slower than this much.
 const KEEP_FACTOR: f64 = 1.2;
 const KEEP_SLACK_MS: f64 = 5.0;
+/// The most addresses one connect tries, so a server that drops every packet
+/// fails in a few timeouts instead of one timeout per address.
+const MAX_TRIES: usize = 3;
 
 #[derive(Default)]
 struct Entry {
@@ -156,6 +159,7 @@ fn order(
             out.push(a.clone());
         }
     }
+    let live = out.len();
     if let Some(p) = pin_late {
         out.push(p);
     }
@@ -164,6 +168,8 @@ fn order(
             out.push(a.clone());
         }
     }
+    // every address failed recently: try the best one (or the pin) once, not all of them
+    out.truncate(if live == 0 { 1 } else { MAX_TRIES });
     (out, dropped)
 }
 
@@ -473,6 +479,13 @@ mod tests {
         // a pin that failed recently waits behind the live ones, ahead of the other dead ones
         let ab_dead = |x: &str| x == "a" || x == "b";
         assert_eq!(order(Some("b"), false, &ranked, &ab_dead).0, s(&["c", "b", "a"]));
+        // all dead: one try, the pin first when there is one
+        let all_dead = |_: &str| true;
+        assert_eq!(order(None, false, &ranked, &all_dead).0, s(&["a"]));
+        assert_eq!(order(Some("c"), false, &ranked, &all_dead).0, s(&["c"]));
+        // many addresses: a connect tries at most MAX_TRIES of them
+        let many = s(&["a", "b", "c", "d", "e"]);
+        assert_eq!(order(None, false, &many, &none).0.len(), MAX_TRIES);
     }
 
     #[test]

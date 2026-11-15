@@ -2829,6 +2829,54 @@ struct DirectUnpackHoldState {
     abandoned: bool,
     /// A live par2 repair of the held volumes is running on its helper thread.
     live_repair_running: bool,
+    /// Lost byte ranges of held volumes, by full path. A held volume with known ranges is
+    /// handed to the extraction session with those ranges as holes instead of pausing it.
+    holes: std::collections::HashMap<Vec<u8>, Vec<(u64, u64)>>,
+    /// The download finished: a volume that is not on disk now never will be.
+    download_finished: bool,
+}
+
+/// What direct unpack's extraction session sees of a download in progress: a volume is ready
+/// once it is complete on disk, a damaged one comes with its lost ranges as holes, one that has
+/// not arrived parks the session until it does.
+struct DirectUnpackFeed {
+    nzb_id: i32,
+}
+
+impl crate::progressive_unpack::VolumeFeed for DirectUnpackFeed {
+    fn volume(&mut self, path: &std::path::Path) -> crate::progressive_unpack::VolumeView {
+        use crate::progressive_unpack::VolumeView;
+        #[cfg(unix)]
+        let full = {
+            use std::os::unix::ffi::OsStrExt;
+            path.as_os_str().as_bytes().to_vec()
+        };
+        #[cfg(not(unix))]
+        let full = path.to_string_lossy().as_bytes().to_vec();
+        match direct_unpack_hole_view(&full) {
+            Some(holes) if !holes.is_empty() => VolumeView::Ready { holes },
+            Some(_) => VolumeView::NotYet,
+            None if path.is_file() => VolumeView::Ready { holes: Vec::new() },
+            None if direct_unpack_download_finished(self.nzb_id)
+                || direct_unpack_abandoned(self.nzb_id) =>
+            {
+                VolumeView::Missing
+            }
+            None => VolumeView::NotYet,
+        }
+    }
+
+    fn wait_repaired(&mut self, is_cancelled: &mut dyn FnMut() -> bool) -> bool {
+        loop {
+            if direct_unpack_abandoned(self.nzb_id) || is_cancelled() {
+                return false;
+            }
+            if !direct_unpack_has_holds(self.nzb_id) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
 }
 
 static DIRECT_UNPACK_HOLDS: std::sync::LazyLock<
@@ -2861,6 +2909,52 @@ pub(crate) fn direct_unpack_hold(nzb_id: i32, full_path: &[u8]) {
     }
 }
 
+/// Holds `full_path` and records its lost byte ranges (`offset`, `len`), so extraction can run
+/// past them while the volume is repaired.
+pub(crate) fn direct_unpack_hold_with_holes(nzb_id: i32, full_path: &[u8], holes: Vec<(u64, u64)>) {
+    let mut map = direct_unpack_holds();
+    let st = map.entry(nzb_id).or_default();
+    if !st.held.iter().any(|p| p == full_path) {
+        st.held.push(full_path.to_vec());
+    }
+    if holes.is_empty() {
+        st.holes.remove(full_path);
+    } else {
+        st.holes.insert(full_path.to_vec(), holes);
+    }
+}
+
+/// `None` when `full_path` is not on hold; otherwise its recorded lost ranges (empty when they
+/// are not known, in which case extraction waits for the repair).
+pub(crate) fn direct_unpack_hole_view(full_path: &[u8]) -> Option<Vec<(u64, u64)>> {
+    let map = direct_unpack_holds();
+    map.values().find_map(|st| {
+        st.held
+            .iter()
+            .any(|p| p == full_path)
+            .then(|| st.holes.get(full_path).cloned().unwrap_or_default())
+    })
+}
+
+fn direct_unpack_mark_downloaded(nzb_id: i32) {
+    direct_unpack_holds()
+        .entry(nzb_id)
+        .or_default()
+        .download_finished = true;
+}
+
+fn direct_unpack_download_finished(nzb_id: i32) -> bool {
+    direct_unpack_holds()
+        .get(&nzb_id)
+        .is_some_and(|st| st.download_finished)
+}
+
+fn direct_unpack_abandoned(nzb_id: i32) -> bool {
+    direct_unpack_holds()
+        .get(&nzb_id)
+        .is_some_and(|st| st.abandoned)
+}
+
 /// True while `full_path` is a damaged volume waiting for its repair.
 pub(crate) fn direct_unpack_is_held_path(full_path: &[u8]) -> bool {
     direct_unpack_holds()
@@ -2881,6 +2975,7 @@ pub(crate) fn direct_unpack_release_path(full_path: &[u8]) -> bool {
     for st in map.values_mut() {
         if let Some(i) = st.held.iter().position(|p| p == full_path) {
             let path = st.held.remove(i);
+            st.holes.remove(&path);
             st.released.push(hold_path_filename(&path).to_vec());
             if st.held.is_empty() {
                 st.awaiting_repair = false;
@@ -2896,6 +2991,7 @@ pub(crate) fn direct_unpack_release_all(nzb_id: i32) {
     let mut map = direct_unpack_holds();
     if let Some(st) = map.get_mut(&nzb_id) {
         let held = std::mem::take(&mut st.held);
+        st.holes.clear();
         for path in held {
             st.released.push(hold_path_filename(&path).to_vec());
         }
@@ -3027,6 +3123,7 @@ pub(crate) fn direct_unpack_abandon(nzb_id: i32) {
     let mut map = direct_unpack_holds();
     if let Some(st) = map.get_mut(&nzb_id) {
         st.held.clear();
+        st.holes.clear();
         st.awaiting_repair = false;
         st.abandoned = true;
     }
@@ -3397,6 +3494,23 @@ impl NzbgetRsDirectUnpack {
                 filename.as_slice(),
             ]
             .concat();
+            let skippable = direct_unpack_hole_view(&full).is_some_and(|h| !h.is_empty());
+            if skippable {
+                // Its lost ranges are known: extraction reads past them and the output is
+                // patched once the volume is repaired.
+                let mut v = self.lock_vol();
+                if v.waiting_file
+                    .as_ref()
+                    .is_some_and(|wf| wf.eq_ignore_ascii_case(&filename))
+                {
+                    v.waiting_file = None;
+                    self.waiting_volume.store(false, Ordering::Release);
+                }
+                if crate::unpack::direct_unpack_is_main_archive(&filename) {
+                    v.archives.push_back(filename);
+                }
+                return;
+            }
             direct_unpack_hold(self.nzb_id, &full);
             let msg = trunc_1023(
                 [
@@ -3473,6 +3587,7 @@ impl NzbgetRsDirectUnpack {
         let (waiting_missing, progress_label) = {
             let mut v = self.lock_vol();
             v.nzb_completed = true;
+            direct_unpack_mark_downloaded(self.nzb_id);
             if direct_unpack_set_awaiting_repair(self.nzb_id) {
                 drop(v);
                 // Volumes are still on hold: post-processing repairs the download first, then
@@ -3843,6 +3958,44 @@ impl NzbgetRsDirectUnpack {
         }
     }
 
+    /// Ends direct unpack after a typed extraction failure (wrong or missing password, damage
+    /// that could not be repaired); post-processing takes over as before.
+    fn stop_for_failure(
+        &self,
+        ctx: *mut c_void,
+        host_cb: NzbgetRsRepairCtrlHostFn,
+        failure: &crate::progressive_unpack::Failure,
+    ) {
+        Self::global_log(
+            ctx,
+            host_cb,
+            MK_DEBUG,
+            format!("Direct unpack stopped: {failure}").as_bytes(),
+        );
+        with_dq_guard(ctx, host_cb, |dq_ptr| {
+            let mut ints = [0 as c_int; 6];
+            let mut strs = [ptr::null() as *const c_char; 4];
+            let nzb_ptr = unsafe {
+                host_cb(
+                    ctx,
+                    1,
+                    0,
+                    self.nzb_id,
+                    dq_ptr,
+                    0,
+                    ptr::null(),
+                    ptr::null(),
+                    ints.as_mut_ptr(),
+                    ptr::null_mut(),
+                    strs.as_mut_ptr(),
+                )
+            };
+            if !Self::is_stopped(ctx, host_cb) {
+                self.stop_with_nzb(ctx, host_cb, nzb_ptr);
+            }
+        });
+    }
+
     fn create_unpack_dir(
         &self,
         ctx: *mut c_void,
@@ -3945,7 +4098,11 @@ impl NzbgetRsDirectUnpack {
         let pw_str = std::str::from_utf8(&pw_bytes).unwrap_or("");
         let cleanup_disk = local.unpack_cleanup_disk;
 
-        let res = crate::unpack::extract_archive_with_zipfast_cancellable(
+        let mut failure: Option<crate::progressive_unpack::Failure> = None;
+        let feed = Box::new(DirectUnpackFeed {
+            nzb_id: self.nzb_id,
+        });
+        let res = crate::unpack::extract_archive_with_feed(
             crate::fsops::path(&full_archive_path),
             crate::fsops::path(&unpack_dir),
             pw_str,
@@ -3959,6 +4116,8 @@ impl NzbgetRsDirectUnpack {
                     _ => MK_DETAIL,
                 };
                 self.add_message(ctx, host_cb, msg_kind, msg.as_bytes(), local);
+                // Only the RAR 1.5-4.x fallback decoder still waits for a volume through its
+                // log line; RAR sets read by the progressive session never block here.
                 while self.waiting_volume.load(Ordering::Acquire)
                     && !self.is_stopped_or_terminated(ctx, host_cb)
                 {
@@ -3966,8 +4125,23 @@ impl NzbgetRsDirectUnpack {
                     self.apply_releases(ctx, host_cb);
                 }
             },
-            &mut || self.is_stopped_or_terminated(ctx, host_cb),
+            &mut || {
+                self.apply_releases(ctx, host_cb);
+                self.is_stopped_or_terminated(ctx, host_cb)
+            },
+            crate::unpack::RarFeed {
+                feed: Some(feed),
+                failure: Some(&mut failure),
+                // A parked session counts as waiting, as the volume handshake did, so reloads
+                // are not deferred behind it.
+                on_wait: Some(&|waiting| self.waiting_volume.store(waiting, Ordering::Release)),
+            },
         );
+        if let Some(f) = &failure {
+            if f.is_password() || f.is_damage() {
+                self.stop_for_failure(ctx, host_cb, f);
+            }
+        }
 
         self.unpacking.store(false, Ordering::Release);
         self.exec_thread_key.store(0, Ordering::Release);
@@ -4067,15 +4241,22 @@ impl NzbgetRsDirectUnpack {
                     arch.as_slice(),
                 ]
                 .concat();
-                if !direct_unpack_is_held_path(&full) {
+                if direct_unpack_hole_view(&full).is_none_or(|h| !h.is_empty()) {
                     v.archives.push_back(arch);
                 }
             }
         }
 
+        let mut started: Vec<Vec<u8>> = Vec::new();
         while !Self::is_stopped(ctx, host_cb) {
             let next_archive = self.lock_vol().archives.pop_front();
             if let Some(archive) = next_archive {
+                // A main volume extracted past its damage is queued again when its repair
+                // releases it; the session already handled it.
+                if started.iter().any(|a| a.eq_ignore_ascii_case(&archive)) {
+                    continue;
+                }
+                started.push(archive.clone());
                 self.waiting_volume.store(false, Ordering::Release);
                 if !self.processed.load(Ordering::Acquire) {
                     let m = [b"Directly unpacking ", local.name.as_slice()].concat();

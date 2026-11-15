@@ -24,7 +24,7 @@ const { installDetailsFixture } = require('./details-fixture');
       await context.addInitScript(() => localStorage.setItem('SettingsMode', 'expert'));
       const page = await context.newPage();
       const errors = [], writes = [], calls = [], configReads = [];
-      let upTime = 86400, statusMisses = 0, hold = null;
+      let upTime = 86400, statusMisses = 0, hold = null, startBusy = 0;
       page.on('pageerror', e => errors.push(e.message));
       await installDetailsFixture(page, base, writes, { patchReply: (method, result) => {
         if (method === 'config' || method === 'loadconfig') {
@@ -43,6 +43,11 @@ const { installDetailsFixture } = require('./details-fixture');
         calls.push({ method: rpc.method, params: rpc.params });
         let result = true;
         if (rpc.method === 'reload') upTime = 3;
+        if (rpc.method === 'tlscipherstart' && startBusy > 0) {
+          startBusy--;
+          return route.fulfill({ contentType: 'application/json', json: { id: rpc.id, error: { name: 'JsonRpcError', code: 1,
+            message: 'cipher testing is already running for other servers; wait for it to finish' } } });
+        }
         if (rpc.method === 'tlscipherstart') result = { JobID: 'job1', State: 'probing', CompletedProbes: 1, TotalProbes: 9, Servers: [] };
         if (rpc.method === 'tlscipherstatus' && statusMisses > 0) {
           statusMisses--;
@@ -166,6 +171,38 @@ const { installDetailsFixture } = require('./details-fixture');
         await page.waitForFunction(() => /in use/.test($('.config-server-status:visible').text()), null, { timeout: 8000 });
         assert.equal(calls.filter(c => c.method === 'tlscipherstart').length, before);
         if (wide) assert.equal((await pane.locator('.config-pane__title').textContent()).trim(), 'Main');
+      });
+
+      await check('another browser\'s cipher test is waited for, not reloaded under', async () => {
+        startBusy = 2;
+        upTime = 86400;
+        await page.evaluate(() => { Status.status.UpTimeSec = 86400; });
+        const reloads = calls.filter(c => c.method === 'reload').length;
+        const starts = calls.filter(c => c.method === 'tlscipherstart').length;
+        await page.locator('.config-cipher__optimize:visible').click();
+        await page.waitForFunction(() => /Waiting for another cipher test/.test($('.config-server-status:visible').text()), null, { timeout: 5000 });
+        assert.equal(calls.filter(c => c.method === 'reload').length, reloads, 'no reload while the other test runs');
+        await page.waitForFunction(() => /in use/.test($('.config-server-status:visible').text()), null, { timeout: 12000 });
+        assert.equal(calls.filter(c => c.method === 'tlscipherstart').length, starts + 3, 'it tries again until the other test ends');
+        const reload = calls.findIndex((c, i) => i > 0 && c.method === 'reload' && calls.slice(0, i).filter(x => x.method === 'reload').length === reloads);
+        const lastStart = calls.map(c => c.method).lastIndexOf('tlscipherstart');
+        assert(reload > lastStart, 'the reload comes after its own cipher test');
+      });
+
+      if (wide) await check('a search link to a server option scrolls the pane', async () => {
+        await page.evaluate(() => $('.config-pane__body').scrollTop(0));
+        await page.evaluate(() => {
+          const a = $('<a data-optid="S_Server1_Connections"></a>')[0];
+          Config.scrollToOption({ preventDefault() {} }, a);
+        });
+        await page.waitForTimeout(1200);
+        const box = await page.evaluate(() => {
+          const body = $('#ConfigServerPane .config-pane__body')[0].getBoundingClientRect();
+          const el = $('#S_Server1_Connections')[0].getBoundingClientRect();
+          return { top: el.top, bottom: el.bottom, paneTop: body.top, paneBottom: body.bottom, scrolled: $('#ConfigServerPane .config-pane__body').scrollTop() };
+        });
+        assert(box.scrolled > 0, 'the pane scrolled');
+        assert(box.top >= box.paneTop && box.bottom <= box.paneBottom, `Connections is inside the pane (${JSON.stringify(box)})`);
       });
 
       await check('closing returns the server to the list, and Add opens the new one', async () => {

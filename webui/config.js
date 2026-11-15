@@ -202,14 +202,23 @@ var Options = (new function($)
 		{
 			return values;
 		}
-		var names = {};
-		values.forEach(function(v) { names[v.Name.toLowerCase()] = true; });
+		var names = {}, raw = {};
+		values.forEach(function(v) { names[v.Name.toLowerCase()] = true; raw[v.Name.toLowerCase()] = v.Value; });
+		// the daemon expands ${Option} references, so Server2.Level=${Server1.Level} is that level
+		function expand(value, depth)
+		{
+			return String(value).replace(/\$\{([^}]+)\}/g, function(all, name)
+			{
+				var target = raw[name.toLowerCase()];
+				return depth > 8 || target === undefined ? '' : expand(target, depth + 1);
+			});
+		}
 		values.forEach(function(v)
 		{
 			var m = /^Server([0-9]+)\.Level$/i.exec(v.Name);
 			if (m && !names[('Server' + m[1] + '.Priority').toLowerCase()])
 			{
-				var level = parseInt(v.Value, 10) || 0;
+				var level = parseInt(expand(v.Value, 0), 10) || 0;
 				v.Name = 'Server' + m[1] + '.Priority';
 				v.Value = String(Math.max(0, Math.min(4, level)) + 1);
 			}
@@ -2739,7 +2748,7 @@ var Config = (new function($)
 			.replace('%2', values.map(function(v) { return choiceLabel(needed, v); }).join(I18n.defaultValue('config_requires_or', ' or ')));
 	}
 
-	function setLocked(row, locked, text, neededId)
+	function setLocked(row, locked, text, neededId, anchorId)
 	{
 		row.toggleClass('is-locked', locked);
 		var controls = row.children('.controls');
@@ -2766,7 +2775,16 @@ var Config = (new function($)
 			}
 			else
 			{
-				document.getElementById(neededId).scrollIntoView({ block: 'center' });
+				// a combined control such as Renaming is not an option: open its page first,
+				// so the link also works from search results
+				var target = document.getElementById(neededId);
+				var anchor = anchorId && findOptionById(anchorId);
+				if (anchor && ($ConfigContent.hasClass('search') || !$(target).is(':visible')))
+				{
+					Config.showSection(pageIdOf(anchor), false);
+				}
+				$(target).closest('details.config-card__more').prop('open', true);
+				target.scrollIntoView({ block: 'center' });
 			}
 			$('#' + neededId).focus();
 		});
@@ -2800,7 +2818,7 @@ var Config = (new function($)
 			}
 			var text = rule.text ? I18n.defaultValue(rule.text[0], rule.text[1]) : requirementText(rule, needed);
 			var go = rule.go && document.getElementById(rule.go) && inMode('advanced') && !inMode('expert') ? rule.go : needed.formId;
-			setLocked(row, !met, met ? '' : text, go);
+			setLocked(row, !met, met ? '' : text, go, needed.formId);
 		});
 	}
 
@@ -4500,6 +4518,8 @@ var ConfigBackupRestore = (new function($)
 			var option = { Name: optstr.substr(0, ind).trim(), Value: optstr.substr(ind+1, 100000).trim() };
 			settings[i] = option;
 		}
+		// an older backup has ServerN.Level; read it as the Priority this template knows
+		Options.upgradeValues(settings);
 
 		function removeValue(name)
 		{

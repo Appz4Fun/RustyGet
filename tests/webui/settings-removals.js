@@ -62,6 +62,12 @@ const REMOVED = ['ContinuePartial', 'PropagationDelay', 'ParQuick', 'CrcCheck', 
         assert.equal(await row('Server2_Priority').locator('select.config-select').inputValue(), '2', 'Level 1 is priority 2');
       });
 
+      await check('an old Level that refers to another option keeps its value', async () => {
+        const up = await page.evaluate(() => Options.upgradeValues([
+          { Name: 'Server1.Level', Value: '1' }, { Name: 'Server2.Level', Value: '${Server1.Level}' }, { Name: 'Server3.Level', Value: '${Nope}' }]));
+        assert.deepEqual(up.map(v => v.Name + '=' + v.Value), ['Server1.Priority=2', 'Server2.Priority=2', 'Server3.Priority=1']);
+      });
+
       await check('check and repair is one card with a Renaming menu', async () => {
         await show('CHECK_AND_REPAIR');
         const cards = page.locator('#ConfigData .config-card.CHECK_AND_REPAIR');
@@ -87,6 +93,23 @@ const REMOVED = ['ContinuePartial', 'PropagationDelay', 'ParQuick', 'CrcCheck', 
         await menu.selectOption('during');
         await page.waitForTimeout(250);
         assert.equal(await row('HardLinking').evaluate(el => el.classList.contains('is-locked')), false);
+      });
+
+      await check('Show me reaches the Renaming menu from search', async () => {
+        await show('CHECK_AND_REPAIR');
+        await page.locator('#ConfigRenaming').selectOption('after');
+        await page.waitForTimeout(250);
+        await page.locator('#ConfigTable_filter').fill('HardLinking');
+        await page.waitForFunction(() => document.querySelector('#ConfigContent.search'));
+        await page.waitForTimeout(400);
+        await row('HardLinking').locator('.config-lock-note a').click();
+        await page.waitForTimeout(400);
+        assert(await page.locator('#ConfigRenaming').isVisible(), 'the menu is shown');
+        assert.equal(await page.evaluate(() => document.activeElement && document.activeElement.id), 'ConfigRenaming');
+        await page.locator('#ConfigRenaming').selectOption('during');
+        await page.waitForTimeout(250);
+        await page.locator('#ConfigTable_clearfilter').click();
+        await page.waitForTimeout(300);
       });
 
       await check('listen address can open to other computers', async () => {

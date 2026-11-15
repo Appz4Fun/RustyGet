@@ -8615,7 +8615,7 @@ fn hold_path_filename_bytes(path: &[u8]) -> &[u8] {
 }
 
 /// `name.partNNN.rar` split into (prefix up to "part", number, digit count, suffix).
-fn rar_part_number(name: &[u8]) -> Option<(Vec<u8>, u32, usize, Vec<u8>)> {
+pub(crate) fn rar_part_number(name: &[u8]) -> Option<(Vec<u8>, u32, usize, Vec<u8>)> {
     let lower = name.to_ascii_lowercase();
     if !lower.ends_with(b".rar") {
         return None;

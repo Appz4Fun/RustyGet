@@ -3052,11 +3052,11 @@ pub(crate) fn direct_unpack_set_virtual(
     if let Some(i) = st.held.iter().position(|p| p == full_path) {
         st.held.remove(i);
         st.holes.remove(full_path);
-    } else if let Some(i) = st
-        .held
-        .iter()
-        .position(|p| !crate::fsops::path(p).exists())
-    {
+    } else if let Some(i) = st.held.iter().position(|p| {
+        // A held part-numbered volume stands only for itself.
+        !crate::fsops::path(p).exists()
+            && crate::streamrepair::rar_part_number(hold_path_filename(p)).is_none()
+    }) {
         // Under obfuscated names a dead file is held under its posted name, which tells nothing
         // of its place in the set: drop one held file of this download that never reached the
         // disk for each stand-in, so the holds still count the volumes that wait for a repair.
@@ -7108,6 +7108,16 @@ mod live_hold_tests {
         super::direct_unpack_hold(id, &p("y1obf.rar"));
         super::direct_unpack_set_virtual(id, &p("movie.part05.rar"), v);
         assert!(super::direct_unpack_has_holds(id));
+        // Another dead volume held under its own name is no stand-in for this one.
+        super::direct_unpack_hold(id, &p("movie.part07.rar"));
+        let v2 = crate::deadvolume::VirtualVolume {
+            head: Vec::new(),
+            data: dir.join("none"),
+            data_len: 0,
+            tail: Vec::new(),
+        };
+        super::direct_unpack_set_virtual(id, &p("movie.part06.rar"), v2);
+        assert!(super::direct_unpack_is_held_path(&p("movie.part07.rar")));
         assert_eq!(super::take_dead_volumes_borrowed(id), 1);
         super::direct_unpack_forget_holds(id);
         let _ = std::fs::remove_dir_all(&dir);

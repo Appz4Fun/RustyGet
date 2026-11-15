@@ -4413,7 +4413,11 @@ var Config = (new function($)
 		}
 		else if (!ip && cert && box.data('certWasStrict'))
 		{
-			setOptionValue(cert, 'Strict');
+			// back to the name: Strict again, unless the check was changed by hand since
+			if (String(getOptionValue(cert)).toLowerCase() === 'minimal')
+			{
+				setOptionValue(cert, 'Strict');
+			}
 			box.removeData('certWasStrict');
 		}
 		refreshChangeState();

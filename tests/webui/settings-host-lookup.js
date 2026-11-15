@@ -105,6 +105,14 @@ const { installDetailsFixture } = require('./details-fixture');
         await host.fill('news.example.com');
         await page.waitForFunction(() => /2 addresses/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
         assert.equal(String(await certValue()).toLowerCase(), 'none', 'a hand-picked check is kept');
+        // the same through "Use the name again"
+        await box.locator('input[value="192.0.2.10"]').click();
+        await page.waitForFunction(() => /Always using/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
+        await page.evaluate(() => Config.switchClick($('#S_Server1_CertVerification .btn').filter(function() { return String($(this).attr('data-value')).toLowerCase() === 'strict'; })[0]));
+        await page.evaluate(() => Config.switchClick($('#S_Server1_CertVerification .btn').filter(function() { return String($(this).attr('data-value')).toLowerCase() === 'none'; })[0]));
+        await box.locator('input[value=""]').click();
+        await page.waitForFunction(() => /2 addresses/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
+        assert.equal(String(await certValue()).toLowerCase(), 'none', 'Use the name again keeps a hand-picked check');
         await page.evaluate(() => Config.switchClick($('#S_Server1_CertVerification .btn').filter(function() { return String($(this).attr('data-value')).toLowerCase() === 'strict'; })[0]));
       });
 

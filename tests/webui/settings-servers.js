@@ -128,6 +128,8 @@ const { installDetailsFixture } = require('./details-fixture');
         assert.deepEqual(start && start.params, ['1'], 'the optimizer runs for this server only');
         assert(calls.findIndex(c => c.method === 'reload') > calls.findIndex(c => c.method === 'tlscipherstart'), 'the reload comes after the cipher');
         assert.equal(await page.locator('#S_Server1_Cipher').inputValue(), 'TLS_AES_128_GCM_SHA256');
+        assert.equal(await page.evaluate(() => $('#S_Server1_Cipher').siblings('select').val()), 'TLS_AES_128_GCM_SHA256',
+          'the cipher menu shows the found cipher');
         assert.match(await page.locator('.config-server-status:visible').textContent(), /TLS_AES_128_GCM_SHA256/);
         assert.equal(await page.evaluate(() => $('#ConfigSaveBar .config-savebar__names').text()).then(t => /Host|Cipher/.test(t)), false,
           'the saved server is no longer an unsaved change');
@@ -181,6 +183,32 @@ const { installDetailsFixture } = require('./details-fixture');
         if (wide) assert.equal(await pane.locator('#S_Server3_Host').count(), 1, 'the new server opens in the pane');
         else assert(await page.locator('#S_Server3_Host').isVisible());
         await page.evaluate(() => Config.closeServerEditor());
+      });
+
+      await check('leaving Settings while a server saves still puts it to use', async () => {
+        await edit(1).click();
+        await page.waitForTimeout(150);
+        let release;
+        hold = new Promise(resolve => { release = resolve; });
+        upTime = 86400;
+        await page.evaluate(() => { Status.status.UpTimeSec = 86400; });
+        const reloads = calls.filter(c => c.method === 'reload').length;
+        await page.locator('#S_Server1_Name').fill('Leaving');
+        await page.locator('#S_Server1_Name').dispatchEvent('change');
+        await page.locator('.config-server-save:visible').click();
+        await page.waitForTimeout(200);
+        await page.evaluate(() => Config.hide());
+        hold = null;
+        release();
+        await page.waitForTimeout(1500);
+        assert.equal(calls.filter(c => c.method === 'reload').length, reloads + 1, 'the saved file is put to use');
+        await page.evaluate(() => { Config.show(); Config.shown(); });
+        await page.waitForFunction(() => Config.config() && document.querySelector('.config-list-row.NEWS-SERVERS'), null, { timeout: 8000 });
+        await page.evaluate(() => Config.showSection('NEWS-SERVERS', false));
+        await page.waitForTimeout(200);
+        await edit(1).click();
+        await page.waitForTimeout(150);
+        assert.equal(await page.locator('.config-server-save:visible').isDisabled(), false, 'saving works again');
       });
 
       if (errors.length) failures.push(`${theme}/${width}: page errors: ${errors.join('; ')}`);

@@ -216,14 +216,23 @@ var Options = (new function($)
 		{
 			return values;
 		}
-		var names = {};
-		values.forEach(function(v) { names[v.Name.toLowerCase()] = true; });
+		var names = {}, raw = {};
+		values.forEach(function(v) { names[v.Name.toLowerCase()] = true; raw[v.Name.toLowerCase()] = v.Value; });
+		// the daemon expands ${Option} references, so Server2.Level=${Server1.Level} is that level
+		function expand(value, depth)
+		{
+			return String(value).replace(/\$\{([^}]+)\}/g, function(all, name)
+			{
+				var target = raw[name.toLowerCase()];
+				return depth > 8 || target === undefined ? '' : expand(target, depth + 1);
+			});
+		}
 		values.forEach(function(v)
 		{
 			var m = /^Server([0-9]+)\.Level$/i.exec(v.Name);
 			if (m && !names[('Server' + m[1] + '.Priority').toLowerCase()])
 			{
-				var level = parseInt(v.Value, 10) || 0;
+				var level = parseInt(expand(v.Value, 0), 10) || 0;
 				v.Name = 'Server' + m[1] + '.Priority';
 				v.Value = String(Math.max(0, Math.min(4, level)) + 1);
 			}
@@ -2775,7 +2784,7 @@ var Config = (new function($)
 			.replace('%2', values.map(function(v) { return choiceLabel(needed, v); }).join(I18n.defaultValue('config_requires_or', ' or ')));
 	}
 
-	function setLocked(row, locked, text, neededId)
+	function setLocked(row, locked, text, neededId, anchorId)
 	{
 		row.toggleClass('is-locked', locked);
 		var controls = row.children('.controls');
@@ -2802,7 +2811,16 @@ var Config = (new function($)
 			}
 			else
 			{
-				document.getElementById(neededId).scrollIntoView({ block: 'center' });
+				// a combined control such as Renaming is not an option: open its page first,
+				// so the link also works from search results
+				var target = document.getElementById(neededId);
+				var anchor = anchorId && findOptionById(anchorId);
+				if (anchor && ($ConfigContent.hasClass('search') || !$(target).is(':visible')))
+				{
+					Config.showSection(pageIdOf(anchor), false);
+				}
+				$(target).closest('details.config-card__more').prop('open', true);
+				target.scrollIntoView({ block: 'center' });
 			}
 			$('#' + neededId).focus();
 		});
@@ -2836,7 +2854,7 @@ var Config = (new function($)
 			}
 			var text = rule.text ? I18n.defaultValue(rule.text[0], rule.text[1]) : requirementText(rule, needed);
 			var go = rule.go && document.getElementById(rule.go) && inMode('advanced') && !inMode('expert') ? rule.go : needed.formId;
-			setLocked(row, !met, met ? '' : text, go);
+			setLocked(row, !met, met ? '' : text, go, needed.formId);
 		});
 	}
 
@@ -3945,8 +3963,23 @@ var Config = (new function($)
 		setServerStatus(serverText('saving', 'Saving…'), 'busy');
 		var request = serverOnlySaveRequest();
 		var structure = serverStructure();
+		var editor = config;
 		RPC.call('saveconfig', [Config.withCipherBaseline(request)], function(ok)
 		{
+			if (config !== editor)
+			{
+				// Settings was closed or read again while saving: the file is written,
+				// so put it to use, but leave the editor that is gone alone.
+				if (ok)
+				{
+					applySavedServers();
+				}
+				else
+				{
+					serverSaving = false;
+				}
+				return;
+			}
 			if (!ok)
 			{
 				serverSaveFailed(serverText('save_failed', 'Could not write the configuration file.'));
@@ -4074,7 +4107,17 @@ var Config = (new function($)
 				{
 					setTimeout(check, 500);
 				}
-			}, function() { setTimeout(check, 500); });
+			}, function()
+			{
+				if (new Date() - started > 60000)
+				{
+					done(serverText('reload_unknown', 'Saved, but RustyGet did not answer after the reload. Check that it is running.'), 'error');
+				}
+				else
+				{
+					setTimeout(check, 500);
+				}
+			});
 		};
 		RPC.call('reload', [], function() { setTimeout(check, 500); }, function() { setTimeout(check, 500); });
 	}
@@ -4417,6 +4460,7 @@ var Config = (new function($)
 		}
 		updates.forEach(function(update) {
 			setOptionValue(update.option, update.value);
+			syncCipher($('#' + update.option.formId).siblings('select.config-cipher__menu'));
 			update.option.value = update.value;
 			var saved = (config.values || []).filter(function(value) { return value.Name.toLowerCase() === update.option.name.toLowerCase(); });
 			if (saved.length) saved.forEach(function(value) { value.Value = update.value; });
@@ -5183,6 +5227,8 @@ var ConfigBackupRestore = (new function($)
 			var option = { Name: optstr.substr(0, ind).trim(), Value: optstr.substr(ind+1, 100000).trim() };
 			settings[i] = option;
 		}
+		// an older backup has ServerN.Level; read it as the Priority this template knows
+		Options.upgradeValues(settings);
 
 		function removeValue(name)
 		{

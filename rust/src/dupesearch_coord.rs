@@ -1086,6 +1086,11 @@ impl DonorServerExchange for NntpHealthTransportShared {
             }
             if !unsafe { conn.connect() } {
                 release.broken = true;
+                if ids.len() > 1 {
+                    // a backbone sibling can answer: block this server for the retry
+                    // interval so the next exchange takes the sibling's connection
+                    release.pool.block_server(&conn.server);
+                }
                 return Err(DonorExchangeError::default());
             }
             if need_join && !batch[0].groups.is_empty() {

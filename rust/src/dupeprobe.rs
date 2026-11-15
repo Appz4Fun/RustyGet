@@ -470,6 +470,9 @@ impl NzbgetRsDupeProbe {
 
         let fresh = probed.insert(actual_server_id);
         let mut probed_server = false;
+        // a server that could not even connect (login refused, TLS, network) before
+        // answering anything does not count as reached: a sibling is asked instead
+        let mut never_answered = false;
         if fresh {
             self.set_conn(conn_ptr);
             let conn = unsafe { &*(conn_ptr as *const crate::net::PooledNntpConn) };
@@ -490,6 +493,7 @@ impl NzbgetRsDupeProbe {
                 if !unsafe { conn.connect() } {
                     result.unknown += remaining + 1;
                     result.unreachable = result.exists + result.missing == 0;
+                    never_answered = result.unreachable;
                     break;
                 }
 
@@ -567,7 +571,7 @@ impl NzbgetRsDupeProbe {
                     break;
                 }
             }
-            probed_server = true;
+            probed_server = !never_answered;
         }
 
         self.set_conn(0);

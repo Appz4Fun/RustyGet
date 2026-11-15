@@ -1017,38 +1017,6 @@ impl DonorServerExchange for NntpHealthTransportShared {
 
         #[cfg(unix)]
         if let Some(pool) = crate::net::active_server_pool() {
-            let wait_start = host_now(ctx, host_cb);
-            let mut conn_ptr = 0usize;
-            let mut need_join = false;
-            let ids = self.server_ids.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            while conn_ptr == 0 && !http_stopped() && host_now(ctx, host_cb) - wait_start <= 10 {
-                let mut known_any = false;
-                for &id in &ids {
-                    let Some(srv) = pool.server_by_id(id) else {
-                        continue;
-                    };
-                    known_any = true;
-                    let raw = pool.get_check_connection(&srv);
-                    if !raw.is_null() {
-                        need_join = srv.join_group;
-                        conn_ptr = raw as usize;
-                        break;
-                    }
-                }
-                if !known_any {
-                    return Err(DonorExchangeError::default());
-                }
-                if conn_ptr == 0 {
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-            }
-            if conn_ptr == 0 {
-                return Err(DonorExchangeError {
-                    answers: Vec::new(),
-                    busy: true,
-                });
-            }
-
             struct NativeConnRelease {
                 pool: Arc<crate::net::NzbgetRsServerPool>,
                 conn_ptr: usize,
@@ -1065,11 +1033,6 @@ impl DonorServerExchange for NntpHealthTransportShared {
                     self.pool.free_connection(raw, true);
                 }
             }
-            let mut release = NativeConnRelease {
-                pool,
-                conn_ptr,
-                broken: false,
-            };
 
             let mut commands = Vec::with_capacity(batch.len() * 48);
             for req in batch {
@@ -1080,19 +1043,68 @@ impl DonorServerExchange for NntpHealthTransportShared {
                 commands.extend_from_slice(b"\r\n");
             }
 
-            let conn = unsafe { &*(conn_ptr as *const crate::net::PooledNntpConn) };
-            unsafe {
-                conn.prepare_for_use();
-            }
-            if !unsafe { conn.connect() } {
-                release.broken = true;
-                if ids.len() > 1 {
-                    // a backbone sibling can answer: block this server for the retry
-                    // interval so the next exchange takes the sibling's connection
-                    release.pool.block_server(&conn.server);
+            let wait_start = host_now(ctx, host_cb);
+            let ids = self.server_ids.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            // servers of this backbone whose connect failed during this exchange
+            let mut failed: Vec<i32> = Vec::new();
+            let (mut release, need_join) = loop {
+                let mut conn_ptr = 0usize;
+                let mut need_join = false;
+                while conn_ptr == 0 && !http_stopped() && host_now(ctx, host_cb) - wait_start <= 10 {
+                    let mut known_any = false;
+                    for &id in ids.iter().filter(|id| !failed.contains(id)) {
+                        let Some(srv) = pool.server_by_id(id) else {
+                            continue;
+                        };
+                        known_any = true;
+                        let raw = pool.get_check_connection(&srv);
+                        if !raw.is_null() {
+                            need_join = srv.join_group;
+                            conn_ptr = raw as usize;
+                            break;
+                        }
+                    }
+                    if !known_any {
+                        return Err(DonorExchangeError::default());
+                    }
+                    if conn_ptr == 0 {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
                 }
-                return Err(DonorExchangeError::default());
-            }
+                if conn_ptr == 0 {
+                    return Err(DonorExchangeError {
+                        answers: Vec::new(),
+                        busy: true,
+                    });
+                }
+                let mut release = NativeConnRelease {
+                    pool: Arc::clone(&pool),
+                    conn_ptr,
+                    broken: false,
+                };
+                let conn = unsafe { &*(conn_ptr as *const crate::net::PooledNntpConn) };
+                unsafe {
+                    conn.prepare_for_use();
+                }
+                if unsafe { conn.connect() } {
+                    break (release, need_join);
+                }
+                release.broken = true;
+                if ids.len() < 2 || http_stopped() {
+                    return Err(DonorExchangeError::default());
+                }
+                // a backbone sibling can answer this batch: block this server for the
+                // retry interval (as a download's connect failure does) and ask the next
+                let failed_id = conn.server.id;
+                pool.block_server(&conn.server);
+                drop(release);
+                failed.push(failed_id);
+                if ids.iter().all(|id| failed.contains(id)) {
+                    return Err(DonorExchangeError::default());
+                }
+            };
+            let conn_ptr = release.conn_ptr;
+            let conn = unsafe { &*(conn_ptr as *const crate::net::PooledNntpConn) };
             if need_join && !batch[0].groups.is_empty() {
                 let mut joined_ptr: *const c_char = ptr::null();
                 for grp in batch[0].groups.iter() {

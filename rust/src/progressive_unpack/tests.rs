@@ -2636,7 +2636,7 @@ fn big_mb(default: usize) -> usize {
 
 /// A plain final set shaped like production job #207: 159 stored volumes through a
 /// post-download unpack, declared Complete and moved into place. Before zipfast #116 the
-/// declaration ran out of SourceBookkeeping at about 0.9 GB.
+/// declaration ran out of SourceBookkeeping at about 0.5 GB.
 #[test]
 fn big_final_set_unpacks() {
     let total = big_mb(1024) << 20;
@@ -2660,5 +2660,19 @@ fn big_final_set_unpacks() {
     );
     expect_ok(r, &log);
     assert!(copied.is_empty(), "copied instead of moved: {copied:?}");
+    assert_eq!(crc_of_file(&t.out().join("movie.mkv")), crc);
+}
+
+/// Many volumes with long paths: every volume admission sweeps the whole declared inventory,
+/// so a session-start declaration of 800 volumes ran out of SourceBookkeeping where the copy
+/// path works. Such sets are left undeclared and copied.
+#[test]
+fn a_final_set_of_many_volumes_with_long_paths_extracts() {
+    let t = TestDir::new("manyvols");
+    let dir = t.dl().join("x".repeat(150));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (first, _, crc) = write_big_set(&dir, 800 * 64 * 1024, 800);
+    let (r, log) = run(&first, &t.out(), Box::new(CompleteSet));
+    expect_ok(r, &log);
     assert_eq!(crc_of_file(&t.out().join("movie.mkv")), crc);
 }

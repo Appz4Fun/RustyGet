@@ -328,7 +328,8 @@ where
     let protected =
         (DECLARE_PROTECTION && feed.set_is_final() && req.overwrite != Overwrite::Rename)
             .then(|| protect_volumes(req.first_volume))
-            .flatten();
+            .flatten()
+            .filter(fits_session_declaration);
     // A final set's volumes are all on disk; count them when no protected
     // inventory exists (rename mode) so the handle budget still fits the set.
     let expected = if feed.set_is_final() {
@@ -1654,6 +1655,33 @@ fn fits_protected_read_budget(
         .unwrap_or(0);
     let per_check = 2 * v * v + v * (2 * p + 4);
     per_check.saturating_mul(steps) <= PROTECTED_READ_BUDGET
+}
+
+/// Whether a set declared at session start fits zipfast's bookkeeping budget. Even with the
+/// per-step recheck bounded (zipfast #116), every volume admission and member boundary still
+/// sweeps the whole inventory, so a declared session costs about 3.1 V^2 (P + 16) units for V
+/// volumes with paths up to P bytes, whatever the data size. Larger sets are left undeclared
+/// and copied.
+fn fits_session_declaration(inventory: &zipfast::progressive::ProtectionInventory) -> bool {
+    let v = inventory.volumes.len() as u64;
+    let p = inventory
+        .volumes
+        .iter()
+        .flat_map(|vol| match &vol.backing {
+            zipfast::progressive::VolumeBacking::Native(paths) => paths.as_slice(),
+            zipfast::progressive::VolumeBacking::NonFile => &[],
+        })
+        .map(|pp| pp.path.as_os_str().len() as u64)
+        .max()
+        .unwrap_or(0);
+    let budget = zipfast::progressive::ProgressiveLimits::default()
+        .source_bookkeeping
+        .saturating_add(PROTECTED_READ_BUDGET);
+    // 4 rather than the measured 3.1 for margin.
+    4u64.saturating_mul(v)
+        .saturating_mul(v)
+        .saturating_mul(p.saturating_add(16))
+        <= budget
 }
 
 /// Path components of a member's output name (as the copy path names it).

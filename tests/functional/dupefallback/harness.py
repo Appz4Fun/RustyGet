@@ -6072,6 +6072,31 @@ def scenario_fleetencryptedlast(daemon, t):
     return ('fleetencryptedlast', ok, 'order=%s chosen=%s kinds=%s' % (order, chosen, kinds))
 
 
+def scenario_fleetencryptedheadless(daemon, t):
+    """appendfleet: three encrypted 7-Zip copies (password in the nzb), one of
+    which lost the first article of its data file. That copy cannot be read,
+    but its password still makes it unborrowable, not "unknown"; so it does
+    not jump ahead of the whole copies and a whole one is queued."""
+    daemon.fake_nntp.alive = set()
+    sevenz = bytes([0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c, 0, 4]) + bytes(24)
+    api = daemon.wait_ready()
+    def enc(tag, payload_seed, headless):
+        nzb = _fleet_copy(daemon, tag, 'a.7z.001', 400_000, sevenz, _payload(400_000, payload_seed))
+        if headless:
+            daemon.fake_nntp.alive.discard('%s-0@x' % tag)
+        return nzb.replace('<file ', '<head><meta type="password">pw</meta></head><file ', 1)
+    reply = _fleet(daemon, [
+        ('Show.S01E01.headless', enc('eh', 7501, True)),
+        ('Show.S01E01.whole1', enc('w1', 7502, False)),
+        ('Show.S01E01.whole2', enc('w2', 7503, False))], key='fleet:enchead')
+    order = [m['Name'] for m in sorted(reply['Members'], key=lambda m: m['Rank'])]
+    items = {g['NZBName']: g for g in api.listgroups() + api.history() if g.get('DupeKey') == 'fleet:enchead'}
+    kinds = {n: {p['Name']: p['Value'] for p in g.get('Parameters', [])}.get('DupeCopyKind')
+             for n, g in items.items()}
+    ok = (order[-1] == 'Show.S01E01.headless' and kinds.get('Show.S01E01.headless') == 'unborrowable')
+    return ('fleetencryptedheadless', ok, 'order=%s kinds=%s' % (order, kinds))
+
+
 def scenario_fleettwinvolumes(daemon, t):
     """appendfleet: a twin posted with par2 volumes only (no index file, as
     MobLand S02E09 copy 11 was) is still a TWIN: its file list is read from
@@ -9964,6 +9989,7 @@ SCENARIOS = {
     'fleetintake': scenario_fleetintake,
     'fleetintakelater': scenario_fleetintakelater,
     'fleetencryptedlast': scenario_fleetencryptedlast,
+    'fleetencryptedheadless': scenario_fleetencryptedheadless,
     'fleettwinvolumes': scenario_fleettwinvolumes,
     'fleetkindslowcheck': scenario_fleetkindslowcheck,
     'watchforcepick': scenario_watchforcepick,
@@ -10562,7 +10588,7 @@ SCENARIO_FIRST_FAIL_PROXY = {'recheckfailed': ((b'?5=', b'?10=', b'?15='),),
 # scenarios with a FakeNewznab indexer (DupeSearchUrl points to it)
 
 # scenarios with a FakeNntp news server in place of nserv
-SCENARIO_FAKE_NNTP = {'watchfleet', 'watchforcepick', 'watchdeadpick', 'watchswap', 'watchswaptwin', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetnodupecheck', 'fleetkindorder', 'fleetintake', 'fleetintakelater', 'fleetencryptedlast', 'fleetkindslowcheck', 'fleettwinvolumes', 'fleetalldead', 'fleetshutdown'}
+SCENARIO_FAKE_NNTP = {'watchfleet', 'watchforcepick', 'watchdeadpick', 'watchswap', 'watchswaptwin', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetnodupecheck', 'fleetkindorder', 'fleetintake', 'fleetintakelater', 'fleetencryptedlast', 'fleetencryptedheadless', 'fleetkindslowcheck', 'fleettwinvolumes', 'fleetalldead', 'fleetshutdown'}
 
 
 # --------------------------------------------------------------------------- #

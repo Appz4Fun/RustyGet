@@ -5336,7 +5336,6 @@ fn run_rename_job(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn, kind: i32
                 target_dir,
                 &par_ignore_ext,
                 detect_missing,
-                crate::paths::PATH_SEPARATOR,
                 &mut stop_fn,
                 &mut prog_fn,
                 &mut msg_fn,

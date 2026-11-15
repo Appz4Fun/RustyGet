@@ -1365,6 +1365,16 @@ fn probe_copies(
                                 &head.name,
                                 summary_password_known(info),
                             );
+                        } else if summary_password_known(info)
+                            && crate::donorkind::is_7z_name(&head.name)
+                        {
+                            // a 7-Zip whose nzb carries a password is
+                            // unborrowable whatever its head holds (as
+                            // packing_of_head rules for a read head), so an
+                            // unread head (missing, or no time left) gives the
+                            // same answer instead of "unknown", which ranked
+                            // such a copy ahead of whole encrypted copies
+                            packing = Packing::Unborrowable;
                         }
                     }
                     *slot.lock().unwrap_or_else(|e| e.into_inner()) = (listed, packing);

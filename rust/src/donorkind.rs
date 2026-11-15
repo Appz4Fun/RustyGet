@@ -23,7 +23,8 @@ pub enum Packing {
     /// the nzb carries).
     Borrowable,
     /// Not known: 7-Zip without a password (its headers are at the end), an
-    /// unrecognised start, or the first article could not be read.
+    /// unrecognised start, or the first article could not be read (except a
+    /// 7-Zip whose nzb carries a password, which is unborrowable either way).
     Unknown,
     /// Compressed, encrypted without a known password, or a 7-Zip whose nzb
     /// carries a password (encrypted: borrowing means decrypting it whole).
@@ -217,6 +218,24 @@ fn zip_packing(data: &[u8]) -> Packing {
     }
 }
 
+/// Whether `name` is a 7-Zip archive or one of its volumes (`x.7z`, `x.7z.001`).
+pub fn is_7z_name(name: &[u8]) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if lower.ends_with(b".7z") {
+        return true;
+    }
+    match lower.iter().rposition(|&b| b == b'.') {
+        Some(dot)
+            if dot > 3
+                && lower[dot + 1..].iter().all(u8::is_ascii_digit)
+                && dot + 1 < lower.len() =>
+        {
+            lower[..dot].ends_with(b".7z")
+        }
+        _ => false,
+    }
+}
+
 /// The packaging of a copy, read from the decoded first article of its
 /// largest data file (`name` is that file's name in the nzb).
 /// `password_known`: the nzb carries the archive's password.
@@ -402,6 +421,18 @@ mod tests {
             packing_of_head(b"anything", b"setup.exe", false),
             Packing::Unknown
         );
+    }
+
+    #[test]
+    fn seven_zip_names() {
+        assert!(is_7z_name(b"a.7z"));
+        assert!(is_7z_name(b"X.7Z.001"));
+        assert!(is_7z_name(b"rel.7z.123"));
+        assert!(!is_7z_name(b"a.rar"));
+        assert!(!is_7z_name(b"movie.mkv"));
+        assert!(!is_7z_name(b"a.7z.par2"));
+        assert!(!is_7z_name(b"a.001"));
+        assert!(!is_7z_name(b".7z."));
     }
 
     #[test]

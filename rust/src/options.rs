@@ -1665,7 +1665,7 @@ pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &
         (c"RenameAfterUnpack", c"yes"),
         (c"RenameIgnoreExt", c""),
         (c"ParRename", c"yes"),
-        (c"ParBuffer", c"250"),
+        (c"ParBuffer", c"500"),
         (c"ParThreads", c"0"),
         (c"RarRename", c"yes"),
         (c"HealthCheck", c"dupe"),

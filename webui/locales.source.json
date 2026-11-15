@@ -4311,7 +4311,7 @@
     "description": "Description for the option ParQuick"
   },
   "config_desc_parbuffer": {
-    "message": "Memory limit for par-repair buffer.\n\nSet the amount of RAM that the par-checker may use during repair. Having\nthe buffer as big as the total size of all damaged blocks allows for\nthe optimal repair speed. The option sets the maximum buffer size, the\nallocated buffer can be smaller.\n\nIf you have a lot of RAM set the option to few hundreds (MB) for the\nbest repair performance.",
+    "message": "Memory limit for par-repair buffer.\n\nSet the amount of RAM that the par-checker may use during repair. Having\nthe buffer as big as the total size of all damaged blocks allows for\nthe optimal repair speed. The option sets the maximum buffer size, the\nallocated buffer can be smaller.\n\nIf you have a lot of RAM set the option to few hundreds (MB) for the\nbest repair performance.\n\nThe same memory lets par2 repair run during the download (live repair).\nA release needs about 16 x its par2 block size + 47 MB for that; the block\nsize is chosen by the poster, not by the release size. Below that, the\nrelease is repaired after the download as usual.\n\n  ParBuffer   largest par2 block repaired live   share of NZBs*\n  128 MB       5 MB                               60%\n  256 MB      13 MB                               89%\n  320 MB      17 MB                               93%\n  500 MB      28 MB                               96%\n  1024 MB     61 MB                               100%\n\n  * 400 random NZBs of a real library, 2026-11-15.\n\nA 100 GB release posted with 3,000 to 5,000 par2 blocks has 20 to 33 MB\nblocks and needs about 370 to 580 MB; posted with 2,000 blocks (50 MB),\nabout 850 MB. A download with par2 files holds its live repair memory\nuntil it finishes, and running downloads share ParBuffer, so the table\nholds for one download at a time.",
     "description": "Description for the option ParBuffer"
   },
   "config_desc_parthreads": {
@@ -5308,12 +5308,16 @@
     "description": "Preset name for ParBuffer = 100"
   },
   "config_preset_parbuffer_100_text": {
-    "message": "For machines with little memory; repair is slower.",
+    "message": "For machines with little memory; repair is slower and most releases repair only after the download.",
     "description": "What the ParBuffer preset 100 means"
   },
   "config_preset_parbuffer_500": {
     "message": "Normal",
     "description": "Preset name for ParBuffer = 500"
+  },
+  "config_preset_parbuffer_500_text": {
+    "message": "Repairs about 96% of releases during the download (par2 blocks up to 28 MB).",
+    "description": "What the ParBuffer preset 500 means"
   },
   "config_preset_parbuffer_2000": {
     "message": "High",

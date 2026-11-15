@@ -2221,7 +2221,7 @@ impl RsArticleWriter {
         // running direct unpack never reads it as healthy in the window before
         // the file-downloaded callback records its holes.
         if failed_articles > 0
-            && crate::filetypes::is_rar_file(&filename)
+            && crate::filetypes::may_hold_for_direct_unpack(&filename, success_articles)
             && host.qh.opts().direct_unpack
         {
             let nzb_id = host.qh.with_locked_queue(|_| {

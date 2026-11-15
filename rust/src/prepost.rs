@@ -1812,6 +1812,9 @@ impl NzbgetRsPrePostProcessor {
         if stream_repair
             && !ps.stream_repair_done
             && !crate::options::dupe_borrow_first()
+            // Direct unpack paused at damaged volumes keeps going only if they are borrowed:
+            // switching to the backup would start the extraction over.
+            && !crate::postproc::direct_unpack_has_holds(nzb.id)
             && opts.health_check == HC_DUPE
             && crate::dupecoord::fails_over_snap(&opts, &nzb)
             && crate::dupecoord::find_dupe_backup_host(
@@ -2016,6 +2019,25 @@ impl NzbgetRsPrePostProcessor {
             } else {
                 crate::postproc::direct_unpack_abandon(nzb.id);
             }
+            return;
+        }
+
+        const NS_SUCCESS: i32 = 3;
+        const PAR_STATUS_SUCCESS: i32 = 3;
+        if nzb.direct_unpack_status == NS_SUCCESS
+            && nzb.par_status == PAR_STATUS_FAILURE
+            && crate::postproc::take_dead_volumes_borrowed(nzb.id)
+        {
+            // Par-check could not restore the dead volumes, but direct unpack read them rebuilt
+            // from a duplicate and the archive's own checksums verified every extracted file.
+            let mut msg = b"Direct unpack of ".to_vec();
+            msg.extend_from_slice(&nzb.name);
+            msg.extend_from_slice(
+                b" verified the volumes borrowed from a duplicate: par-check result set to success",
+            );
+            host.nzb_print_message(nzb.ptr, MK_INFO, &msg);
+            host.nzb_set_int(nzb.ptr, NZB_INT_PAR_STATUS, PAR_STATUS_SUCCESS);
+            host.nzb_set_int(nzb.ptr, NZB_INT_CHANGED, 1);
             return;
         }
 
@@ -2229,7 +2251,9 @@ impl NzbgetRsPrePostProcessor {
             // A damaged archive volume is put on hold: direct unpack pauses in front of it
             // until a repair releases it, instead of being cancelled.
             let file = host.file_snap(file_ptr);
-            if file.failed_articles > 0 && crate::filetypes::is_rar_file(&file.filename) {
+            if file.failed_articles > 0
+                && crate::filetypes::may_hold_for_direct_unpack(&file.filename, file.success_articles)
+            {
                 let full = [
                     nzb.dest_dir.as_slice(),
                     &[crate::paths::PATH_SEPARATOR],

@@ -2843,6 +2843,9 @@ struct DirectUnpackHoldState {
     holes: std::collections::HashMap<Vec<u8>, Vec<(u64, u64)>>,
     /// The download finished: a volume that is not on disk now never will be.
     download_finished: bool,
+    /// Dead volumes rebuilt from a duplicate (see `deadvolume`), by full path: the extraction
+    /// reads these instead of the missing files.
+    virtuals: std::collections::HashMap<Vec<u8>, crate::deadvolume::VirtualVolume>,
 }
 
 /// What direct unpack's extraction session sees of a download in progress: a volume is ready
@@ -2864,12 +2867,17 @@ impl crate::progressive_unpack::VolumeFeed for DirectUnpackFeed {
         };
         #[cfg(not(unix))]
         let full = path.to_string_lossy().as_bytes().to_vec();
+        if let Some(v) = direct_unpack_virtual(self.nzb_id, &full) {
+            return VolumeView::Virtual(v);
+        }
         match direct_unpack_hole_view(&full) {
             Some(holes) if !holes.is_empty() => VolumeView::Ready { holes },
             Some(_) => VolumeView::NotYet,
             None if path.is_file() => VolumeView::Ready { holes: Vec::new() },
-            None if direct_unpack_download_finished(self.nzb_id)
-                || direct_unpack_abandoned(self.nzb_id) =>
+            // With dead files still on hold this volume may be one of them, borrowed later.
+            None if direct_unpack_abandoned(self.nzb_id)
+                || (direct_unpack_download_finished(self.nzb_id)
+                    && !direct_unpack_has_holds(self.nzb_id)) =>
             {
                 VolumeView::Missing
             }
@@ -2982,6 +2990,65 @@ pub(crate) fn direct_unpack_has_holds(nzb_id: i32) -> bool {
     direct_unpack_holds()
         .get(&nzb_id)
         .is_some_and(|st| !st.held.is_empty())
+}
+
+/// The rebuilt stand-in for dead volume `full_path` of download `nzb_id`, if one was handed over.
+pub(crate) fn direct_unpack_virtual(nzb_id: i32, full_path: &[u8]) -> Option<crate::deadvolume::VirtualVolume> {
+    direct_unpack_holds()
+        .get(&nzb_id)
+        .and_then(|st| st.virtuals.get(full_path).cloned())
+}
+
+/// Downloads that had dead volumes rebuilt from a duplicate. Kept past the end of direct
+/// unpack (which forgets its holds) so post-processing can tell why par-check failed.
+fn dead_volumes_borrowed() -> std::sync::MutexGuard<'static, std::collections::HashSet<i32>> {
+    static SET: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<i32>>> =
+        std::sync::OnceLock::new();
+    SET.get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// True once (then forgotten) when download `nzb_id` had dead volumes rebuilt from a duplicate.
+pub(crate) fn take_dead_volumes_borrowed(nzb_id: i32) -> bool {
+    dead_volumes_borrowed().remove(&nzb_id)
+}
+
+/// True when dead volume `full_path` already has a rebuilt stand-in.
+pub(crate) fn direct_unpack_has_virtual(full_path: &[u8]) -> bool {
+    direct_unpack_holds()
+        .values()
+        .any(|st| st.virtuals.contains_key(full_path))
+}
+
+/// Hands direct unpack of download `nzb_id` a rebuilt stand-in for dead volume `full_path`,
+/// releasing the volume from hold when one was set for it (a dead file with an obfuscated name
+/// is held under that name instead, see below).
+pub(crate) fn direct_unpack_set_virtual(
+    nzb_id: i32,
+    full_path: &[u8],
+    volume: crate::deadvolume::VirtualVolume,
+) {
+    let mut map = direct_unpack_holds();
+    let id = nzb_id;
+    let st = map.entry(id).or_default();
+    st.virtuals.insert(full_path.to_vec(), volume);
+    dead_volumes_borrowed().insert(nzb_id);
+    // Under obfuscated names a dead file is held under its posted name, which tells nothing
+    // of its place in the set: release one held file of this download that never reached the
+    // disk for each stand-in, so the holds still count the volumes that wait for a repair.
+    let stand_in_for = if st.held.iter().any(|p| p == full_path) {
+        Some(full_path.to_vec())
+    } else {
+        st.held
+            .iter()
+            .find(|p| !crate::fsops::path(p).exists())
+            .cloned()
+    };
+    drop(map);
+    if let Some(p) = stand_in_for {
+        direct_unpack_release_path(&p);
+    }
 }
 
 /// Releases one repaired volume by path. Returns true when it was on hold.
@@ -3332,7 +3399,13 @@ fn direct_unpack_take_released(nzb_id: i32) -> (Vec<Vec<u8>>, bool) {
 }
 
 pub(crate) fn direct_unpack_forget_holds(nzb_id: i32) {
-    direct_unpack_holds().remove(&nzb_id);
+    let gone = direct_unpack_holds().remove(&nzb_id);
+    // Borrowed data of rebuilt dead volumes is only read by direct unpack.
+    for v in gone.iter().flat_map(|st| st.virtuals.values()) {
+        if crate::deadvolume::is_scratch(&v.data) {
+            let _ = std::fs::remove_file(&v.data);
+        }
+    }
 }
 
 #[derive(Default)]
@@ -6361,6 +6434,26 @@ unsafe extern "C" fn stream_repair_job_host_cb(
             }
             host.dq_save(p1);
             host.post_set_int(pi, POST_INT_WORKING, 0);
+            0
+        }
+        16 => {
+            let out = unsafe { std::slice::from_raw_parts_mut(ints, 2) };
+            out[0] = -1;
+            let nzb = if live_mode {
+                host.queue_find_by_id(p1, job.nzb_id)
+            } else if job.post_ptr != 0 {
+                host.post_snap(job.post_ptr).nzb_ptr
+            } else {
+                0
+            };
+            if nzb != 0 {
+                let pending = (0..host.nzb_file_len(nzb))
+                    .map(|i| host.nzb_file_at(nzb, i))
+                    .filter(|&f| f != 0 && !host.file_snap(f).par_file)
+                    .count();
+                out[0] = pending as c_int;
+                out[1] = host.nzb_snap(nzb, false).id;
+            }
             0
         }
         15 => {

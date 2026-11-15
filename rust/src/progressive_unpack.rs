@@ -43,6 +43,9 @@ pub enum VolumeView {
     NotYet,
     /// Will never arrive.
     Missing,
+    /// Never arrived, but its part was borrowed from a duplicate: read the rebuilt volume
+    /// instead (see [`crate::deadvolume`]).
+    Virtual(crate::deadvolume::VirtualVolume),
 }
 
 /// The download side of a session: which volumes exist and which bytes in them are lost.
@@ -1386,6 +1389,14 @@ impl VolumeSource for FeedProvider {
                 Ok(VolumeAnswer::Wait)
             }
             VolumeView::Missing => Ok(VolumeAnswer::Missing),
+            VolumeView::Virtual(v) => Ok(VolumeAnswer::Ready(Box::new(
+                VirtualSource::open(&path, v).map_err(|cause| {
+                    ProgressiveFailure::new(FailureKind::Input {
+                        operation: zipfast::progressive::InputOperation::Open,
+                        cause,
+                    })
+                })?,
+            ))),
         }
     }
 
@@ -1482,6 +1493,93 @@ impl RangeSource for HoledVolume {
                 Err(e)
             }
         }
+    }
+}
+
+/// A dead volume as rebuilt from a duplicate: headers in memory, the borrowed part in a
+/// scratch file. Everything it answers is filled; the extraction's own checks decide whether
+/// the borrowed bytes were right.
+struct VirtualSource {
+    head: Vec<u8>,
+    data: std::fs::File,
+    data_len: u64,
+    tail: Vec<u8>,
+    info: SourceInfo,
+}
+
+impl VirtualSource {
+    fn open(path: &Path, v: crate::deadvolume::VirtualVolume) -> std::io::Result<Self> {
+        let data = std::fs::File::open(&v.data)?;
+        if data.metadata()?.len() < v.data_len {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "borrowed data is shorter than its part",
+            ));
+        }
+        // An identity no file on disk has: the volume's name, hashed, in the upper half.
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        path.hash(&mut h);
+        let len = v.len();
+        Ok(Self {
+            info: SourceInfo {
+                id: zipfast::progressive::SourceId(u128::from(h.finish()) << 64 | 0xdead),
+                generation: 0,
+                extent: len,
+                length: zipfast::progressive::SourceLength::Final(len),
+            },
+            head: v.head,
+            data,
+            data_len: v.data_len,
+            tail: v.tail,
+        })
+    }
+}
+
+impl RangeSource for VirtualSource {
+    fn info(&self) -> SourceInfo {
+        self.info
+    }
+    fn backing_files(&self) -> &[std::fs::File] {
+        std::slice::from_ref(&self.data)
+    }
+    fn read_at(
+        &mut self,
+        offset: u64,
+        buf: &mut [u8],
+        _cx: &mut Context<'_>,
+    ) -> ProgressiveResult<RangeRead> {
+        let head = self.head.len() as u64;
+        let data_end = head + self.data_len;
+        let n = buf.len().min(self.info.extent.saturating_sub(offset) as usize);
+        if n == 0 {
+            return Err(ProgressiveFailure::new(FailureKind::Truncated));
+        }
+        let count = if offset < head {
+            let k = n.min((head - offset) as usize);
+            buf[..k].copy_from_slice(&self.head[offset as usize..offset as usize + k]);
+            k
+        } else if offset < data_end {
+            let k = n.min((data_end - offset) as usize);
+            match read_at(&self.data, &mut buf[..k], offset - head) {
+                Ok(0) => return Err(ProgressiveFailure::new(FailureKind::Truncated)),
+                Ok(c) => c,
+                Err(cause) => {
+                    let mut e = ProgressiveFailure::new(FailureKind::Input {
+                        operation: zipfast::progressive::InputOperation::Read,
+                        cause,
+                    });
+                    e.context.packed_offset = Some(offset);
+                    return Err(e);
+                }
+            }
+        } else {
+            let at = (offset - data_end) as usize;
+            let k = n.min(self.tail.len() - at);
+            buf[..k].copy_from_slice(&self.tail[at..at + k]);
+            k
+        };
+        Ok(RangeRead::Filled { count })
     }
 }
 

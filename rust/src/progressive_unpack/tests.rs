@@ -1501,3 +1501,202 @@ fn rar4_lz_damage_is_reported_not_skipped() {
     }
     assert!(!t.out().join("m.bin").exists());
 }
+
+/// Dead volumes (nothing on disk) read as virtual volumes rebuilt from a sibling's headers
+/// around borrowed data: the extraction runs through them as if they had arrived.
+struct WithVirtual {
+    virtuals: std::collections::HashMap<PathBuf, crate::deadvolume::VirtualVolume>,
+}
+
+impl VolumeFeed for WithVirtual {
+    fn volume(&mut self, path: &Path) -> VolumeView {
+        if let Some(v) = self.virtuals.get(path) {
+            return VolumeView::Virtual(v.clone());
+        }
+        if path.is_file() {
+            VolumeView::Ready { holes: Vec::new() }
+        } else {
+            VolumeView::Missing
+        }
+    }
+}
+
+fn geometry_of(bytes: &[u8]) -> crate::deadvolume::Geometry {
+    struct Mem<'a>(&'a [u8]);
+    impl crate::rarreader::Source for Mem<'_> {
+        fn size(&mut self) -> i64 {
+            self.0.len() as i64
+        }
+        fn read(&mut self, offset: i64, buf: &mut [u8]) -> bool {
+            match self.0.get(offset as usize..offset as usize + buf.len()) {
+                Some(s) => {
+                    buf.copy_from_slice(s);
+                    true
+                }
+                None => false,
+            }
+        }
+    }
+    let mut vol = crate::rarreader::Volume::default();
+    let mut files: Vec<crate::rarreader::RarFile> = Vec::new();
+    crate::rarreader::read_from(&mut vol, &mut Mem(bytes), &mut crate::rarreader::DisabledCipher, &mut files);
+    let f = &files[0];
+    crate::deadvolume::Geometry {
+        version: vol.version,
+        size: bytes.len() as i64,
+        data_offset: f.data_offset,
+        packed_size: f.packed_size,
+        middle: f.split_before && f.split_after,
+    }
+}
+
+/// Adds what real RAR5 volumes carry around the part: a locator record in the main header
+/// and a quick-open service header behind the data.
+fn with_locator_and_quick_open(vol: &[u8]) -> Vec<u8> {
+    let mut p = SIG.len();
+    let mut out = SIG.to_vec();
+    let rd = |b: &[u8], p: &mut usize| -> u64 {
+        let mut v = 0u64;
+        let mut s = 0;
+        loop {
+            let c = b[*p];
+            *p += 1;
+            v |= u64::from(c & 0x7f) << s;
+            s += 7;
+            if c & 0x80 == 0 {
+                return v;
+            }
+        }
+    };
+    while p < vol.len() {
+        let start = p;
+        p += 4;
+        let size = rd(vol, &mut p) as usize;
+        let body = p;
+        p += size;
+        let mut q = body;
+        let kind = rd(vol, &mut q);
+        let flags = rd(vol, &mut q);
+        let data_len = if flags & 2 != 0 { rd(vol, &mut { q }) } else { 0 };
+        match kind {
+            1 => {
+                // main header: append an 8-byte locator extra record
+                let mut fields = vol[q..body + size].to_vec();
+                let mut extra = Vec::new();
+                vint(7, &mut extra);
+                extra.extend_from_slice(&[1, 3, 0x88, 0x0f, 0x99, 0x01, 0x00]);
+                let mut b = Vec::new();
+                vint(1, &mut b);
+                vint(flags | 1, &mut b);
+                vint(extra.len() as u64, &mut b);
+                b.append(&mut fields);
+                b.extend_from_slice(&extra);
+                let mut sized = Vec::new();
+                vint(b.len() as u64, &mut sized);
+                sized.extend_from_slice(&b);
+                out.extend_from_slice(&crc32fast::hash(&sized).to_le_bytes());
+                out.extend_from_slice(&sized);
+            }
+            5 => {
+                // quick-open service header with some data, then the end header
+                let mut fields = Vec::new();
+                vint(0, &mut fields);
+                vint(58, &mut fields);
+                vint(0, &mut fields);
+                vint(0, &mut fields);
+                vint(0, &mut fields);
+                vint(2, &mut fields);
+                fields.extend_from_slice(b"QO");
+                out.extend(block(3, 0, &fields, &[0x5a; 58], true));
+                out.extend_from_slice(&vol[start..p]);
+            }
+            _ => {
+                out.extend_from_slice(&vol[start..p + data_len as usize]);
+                p += data_len as usize;
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn dead_volumes_extract_from_borrowed_data_through_rebuilt_headers() {
+    use crate::deadvolume::{plan, synthesize_frame, VirtualVolume, VolumeState};
+    let t = TestDir::new("deadvol");
+    let data = pattern(1_000_000);
+    let vols: Vec<Vec<u8>> = rar5_volumes("movie.mkv", &data, 100_000)
+        .iter()
+        .map(|v| with_locator_and_quick_open(v))
+        .collect();
+    let first = write_set(&t.dl(), &vols);
+    let dead = [3usize, 4, 6];
+    let states: Vec<VolumeState> = vols
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            if dead.contains(&i) {
+                VolumeState::Dead { encoded_size: v.len() as i64 * 102 / 100 }
+            } else {
+                VolumeState::Readable(geometry_of(v))
+            }
+        })
+        .collect();
+    for &i in &dead {
+        std::fs::remove_file(t.dl().join(volume_name(i, vols.len()))).unwrap();
+    }
+    let plans = plan(&states, data.len() as i64);
+    assert_eq!(plans.iter().map(|p| p.index).collect::<Vec<_>>(), dead);
+    let scratch = t.0.join("scratch");
+    std::fs::create_dir_all(&scratch).unwrap();
+    let mut virtuals = std::collections::HashMap::new();
+    for p in &plans {
+        let borrowed = &data[p.inner_offset as usize..(p.inner_offset + p.packed_size) as usize];
+        let path = scratch.join(format!("{}.data", p.index));
+        std::fs::write(&path, borrowed).unwrap();
+        let tv = &vols[p.template];
+        let tg = geometry_of(tv);
+        let (head, tail) = synthesize_frame(
+            5,
+            &tv[..tg.data_offset as usize],
+            &tv[(tg.data_offset + tg.packed_size) as usize..],
+            p.template,
+            p.index,
+            p.packed_size as u64,
+            crc32fast::hash(borrowed),
+        )
+        .unwrap();
+        crate::deadvolume::check_frame(&head, &tail, p.packed_size as u64, b"movie.mkv").unwrap();
+        virtuals.insert(
+            t.dl().join(volume_name(p.index, vols.len())),
+            VirtualVolume {
+                head,
+                data: path,
+                data_len: p.packed_size as u64,
+                tail,
+            },
+        );
+    }
+    let (r, log) = run(&first, &t.out(), Box::new(WithVirtual { virtuals: virtuals.clone() }));
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+
+    // Wrong borrowed bytes are caught by the extraction's checks, never published.
+    let t2 = TestDir::new("deadvol-bad");
+    let first2 = write_set(&t2.dl(), &vols);
+    for &i in &dead {
+        std::fs::remove_file(t2.dl().join(volume_name(i, vols.len()))).unwrap();
+    }
+    let mut bad = std::collections::HashMap::new();
+    for (k, mut v) in virtuals {
+        let name = k.file_name().unwrap().to_owned();
+        let mut bytes = std::fs::read(&v.data).unwrap();
+        bytes[100] ^= 1;
+        let p = t2.0.join(format!("{}.bad", name.to_string_lossy()));
+        std::fs::write(&p, bytes).unwrap();
+        v.data = p;
+        bad.insert(t2.dl().join(name), v);
+    }
+    let (r, log) = run(&first2, &t2.out(), Box::new(WithVirtual { virtuals: bad }));
+    assert!(r.is_err(), "corrupt borrowed data must fail: {log:?}");
+    assert!(!t2.out().join("movie.mkv").exists());
+}

@@ -78,6 +78,8 @@ const DONOR_CHECK_SEC: i32 = 20;
 /// - `op == 14`: post-process `RepairCompleted` (`p1 = dq_ptr`, `p2 = nzb_ptr`):
 ///   `a2 == 0` reads `ints[0]=par_rename_status`, `ints[1]=par_status`, `i64s[0..8]=sizes`;
 ///   `a2 == 1` writes counters/flags (`a1 = write_sizes`), `dq->Save()`, `SetWorking(false)`
+/// - `op == 16`: data files (par2 left out) of the target still queued (`p1 = dq_ptr`) ->
+///   `ints[0]` (`-1` when the target is gone), `ints[1]` = the target's id
 /// - `op == 15`: live-mode `RepairCompletedLive` (`p1 = dq_ptr`, `p2 = nzb_ptr`):
 ///   `a2 == 0` checks live ownership, credits recovered bytes/holes, fills `ints[0]=job_count`, returns `nzb_ptr`;
 ///   `a2 == 1` clears `LiveRepairThread`, clears `PostInfo::Working` if `!UnpackThread`, `dq->Save()`
@@ -1317,6 +1319,33 @@ impl NzbgetRsStreamRepairCtrl {
         }
     }
 
+    /// Data files of the download still queued and the download's id (`op == 16`), each
+    /// `None` when the host cannot tell.
+    unsafe fn pending_data_files(
+        &self,
+        ctx: *mut c_void,
+        cb: NzbgetRsStreamRepairHostFn,
+    ) -> (Option<usize>, Option<i32>) {
+        let mut ints = [-1 as c_int; 2];
+        unsafe {
+            with_dq_guard(ctx, cb, |dq_ptr| {
+                cb(
+                    ctx,
+                    16,
+                    0,
+                    0,
+                    dq_ptr,
+                    0,
+                    ptr::null(),
+                    ints.as_mut_ptr(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                );
+            });
+        }
+        (usize::try_from(ints[0]).ok(), (ints[0] >= 0).then_some(ints[1]))
+    }
+
     unsafe fn exec_cross_pack_repair(
         &self,
         ctx: *mut c_void,
@@ -1334,6 +1363,7 @@ impl NzbgetRsStreamRepairCtrl {
             .map(|t| CrossPackTargetInput {
                 filename: t.filename.clone(),
                 decoded_file_size: t.decoded_file_size,
+                encoded_size: t.encoded_size,
                 patch_eligible: t.patch_eligible,
                 holes: t.holes.clone(),
             })
@@ -1358,7 +1388,12 @@ impl NzbgetRsStreamRepairCtrl {
             &rar_vol_cb as &dyn Fn(&[u8], &crate::rarreader::Volume, &[crate::rarreader::RarFile]),
         );
 
-        let Some(mut session) = CrossPackRepairSession::new(
+        let (pending_data_files, nzb_id) = unsafe { self.pending_data_files(ctx, cb) };
+        let dead_context = crate::streamrepair::DeadVolumeContext {
+            pending_data_files,
+            nzb_id,
+        };
+        let Some(mut session) = CrossPackRepairSession::new_with_dead(
             dest_dir,
             &member_name_refs,
             &target_inputs,
@@ -1367,6 +1402,7 @@ impl NzbgetRsStreamRepairCtrl {
             Some(&aborted),
             &mut emit_msg,
             rar_vol_ref,
+            dead_context,
         ) else {
             return;
         };

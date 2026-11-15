@@ -237,6 +237,14 @@ pub fn is_rar_file(name: &[u8]) -> bool {
     false
 }
 
+/// Direct unpack holds a damaged file of a download when it is a RAR volume, or when nothing
+/// of it arrived and its name tells nothing (an obfuscated posted name): such a dead file may
+/// be any volume of the set, which waits for its repair instead of being taken as missing.
+pub fn may_hold_for_direct_unpack(name: &[u8], success_articles: i32) -> bool {
+    is_rar_file(name)
+        || (success_articles == 0 && !is_known_collection_ext(file_extension(basename(name))))
+}
+
 pub fn is_archive_file(name: &[u8]) -> bool {
     is_seven_zip_file(name) || is_rar_file(name)
 }

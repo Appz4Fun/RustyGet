@@ -4302,6 +4302,9 @@ var Config = (new function($)
 	function lookupHost(box, committed)
 	{
 		box.data('key', hostLookupKey(box));
+		// the last reply belongs to the last host: an IP version switch before the
+		// next reply must not show it again
+		box.removeData('result').removeData('resultHost');
 		var multiid = parseInt(box.attr('data-multiid'), 10);
 		var hostOption = findOptionByName('Server' + multiid + '.Host');
 		var portOption = findOptionByName('Server' + multiid + '.Port');

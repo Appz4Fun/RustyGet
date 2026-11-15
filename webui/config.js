@@ -3164,6 +3164,10 @@ var Config = (new function($)
 			}
 
 			tlsSwitchHelper(option)
+			if (optionFamily(option.name) === 'Server.IpVersion')
+			{
+				rerenderHostLookup(option);
+			}
 			refreshListRows();
 		}
 	}
@@ -4249,7 +4253,7 @@ var Config = (new function($)
 		input.after(box);
 		input.on('input.lookup change.lookup', function(e)
 		{
-			scheduleHostLookup(box, e.type === 'change' ? 0 : 700);
+			scheduleHostLookup(box, e.type === 'change' ? 0 : 700, e.type === 'change');
 		});
 	}
 
@@ -4263,7 +4267,7 @@ var Config = (new function($)
 			var box = host ? $('#' + host.formId).siblings('.config-host-lookup') : $();
 			if (box.length && !box.prop('hidden'))
 			{
-				scheduleHostLookup(box, e.type === 'change' ? 0 : 700);
+				scheduleHostLookup(box, e.type === 'change' ? 0 : 700, true);
 			}
 		});
 	}
@@ -4272,7 +4276,9 @@ var Config = (new function($)
 	// during the pause before the next lookup starts.
 	// A change event that only confirms what was already looked up (leaving the field
 	// to click an address) changes nothing.
-	function scheduleHostLookup(box, delay)
+	// `committed`: the field was left (a change event), so a one-word name such as
+	// localhost is the whole name and not the start of a longer one being typed.
+	function scheduleHostLookup(box, delay, committed)
 	{
 		if (box.data('key') === hostLookupKey(box) && box.data('seq') === box.data('lookupSeq'))
 		{
@@ -4282,7 +4288,7 @@ var Config = (new function($)
 		box.data('seq', ++hostLookupSeq);
 		box.find('input[type=radio]').prop('disabled', true);
 		clearTimeout(box.data('timer'));
-		box.data('timer', setTimeout(function() { lookupHost(box); }, delay));
+		box.data('timer', setTimeout(function() { lookupHost(box, committed); }, delay));
 	}
 
 	function hostLookupKey(box)
@@ -4293,7 +4299,7 @@ var Config = (new function($)
 		return hostOption ? $.trim(getOptionValue(hostOption) || '') + ' ' + (portOption ? getOptionValue(portOption) : '') : '';
 	}
 
-	function lookupHost(box)
+	function lookupHost(box, committed)
 	{
 		box.data('key', hostLookupKey(box));
 		var multiid = parseInt(box.attr('data-multiid'), 10);
@@ -4316,7 +4322,7 @@ var Config = (new function($)
 			}
 			box.removeData('certWasStrict');
 		}
-		if (!host || /\$\{/.test(host) || (!isIpLiteral(host) && host.indexOf('.') === -1))
+		if (!host || /\$\{/.test(host) || (!committed && !isIpLiteral(host) && host.indexOf('.') === -1))
 		{
 			box.empty().prop('hidden', true);
 			return;
@@ -4348,17 +4354,34 @@ var Config = (new function($)
 		}, { timeout: 20000 });
 	}
 
+	// IP version changed: list again the addresses the server can use now
+	function rerenderHostLookup(option)
+	{
+		var host = findOptionByName('Server' + option.multiid + '.Host');
+		var box = host ? $('#' + host.formId).siblings('.config-host-lookup') : $();
+		if (box.length && !box.prop('hidden') && box.data('result') && box.data('seq') === box.data('lookupSeq'))
+		{
+			renderHostLookup(box, box.data('resultHost'), box.data('result'));
+		}
+	}
+
 	function renderHostLookup(box, host, result)
 	{
+		box.data('result', result).data('resultHost', host);
 		box.empty().attr('data-state', result.Error ? 'error' : 'ok');
 		if (result.Error)
 		{
 			box.append($('<p class="config-host-lookup__note"></p>').text(result.Error));
 			return;
 		}
-		var addresses = result.Addresses || [];
 		var name = box.data('hostName');
 		var pinned = isIpLiteral(host);
+		// a server set to IPv4 or IPv6 only can't use an address of the other kind
+		var family = serverIpVersion(box);
+		var addresses = (result.Addresses || []).filter(function(address)
+		{
+			return !family || ipFamily(address.IP) === family || (pinned && address.IP === host);
+		});
 		var head = $('<p class="config-host-lookup__head"></p>');
 		head.text(pinned ? hostText('pinned', 'Always using this address') + (name ? ' (' + name + ')' : '') :
 			addresses.length === 1 ? hostText('one', '1 address for') + ' ' + host :
@@ -4404,6 +4427,19 @@ var Config = (new function($)
 			$('<span></span>').text(hostText('no_geoip', 'Country and network need the DB-IP Lite files, which this install does not have.'))));
 	}
 
+	function ipFamily(ip)
+	{
+		return String(ip).indexOf(':') !== -1 ? 'ipv6' : 'ipv4';
+	}
+
+	// 'ipv4' or 'ipv6' when the server is limited to one, else ''
+	function serverIpVersion(box)
+	{
+		var option = findOptionByName('Server' + parseInt(box.attr('data-multiid'), 10) + '.IpVersion');
+		var value = option ? String(getOptionValue(option) || '').toLowerCase() : '';
+		return value === 'ipv4' || value === 'ipv6' ? value : '';
+	}
+
 	// Picking an address writes it as Host. The certificate names the host, not the
 	// address, so a strict certificate check drops to Minimal (the signature is still checked).
 	function pickHostAddress(box, ip)
@@ -4417,6 +4453,13 @@ var Config = (new function($)
 			return;
 		}
 		$('#' + hostOption.formId).val(value);
+		var family = serverIpVersion(box);
+		var ipVersion = findOptionByName('Server' + multiid + '.IpVersion');
+		if (ip && family && ipFamily(ip) !== family && ipVersion)
+		{
+			// an address of the other kind (a list shown before IP version was changed) needs Automatic
+			setOptionValue(ipVersion, 'auto');
+		}
 		var cert = findOptionByName('Server' + multiid + '.CertVerification');
 		var encryption = findOptionByName('Server' + multiid + '.Encryption');
 		if (ip && cert && encryption && String(getOptionValue(encryption)).toLowerCase() === 'yes' &&
@@ -4437,7 +4480,7 @@ var Config = (new function($)
 		refreshChangeState();
 		refreshListRows();
 		clearTimeout(box.data('timer'));
-		lookupHost(box);
+		lookupHost(box, true);
 	}
 
 	/*** RSS FEEDS ********************************************************************/

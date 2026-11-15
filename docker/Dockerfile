@@ -38,6 +38,7 @@ RUN \
     -e "s|^InterDir=.*|InterDir=$\{MainDir\}/intermediate|g" \
     -e "s|^LogFile=.*|LogFile=$\{MainDir\}/rustyget.log|g" \
     -e "s|^AuthorizedIP=.*|AuthorizedIP=127.0.0.1|g" \
+    -e "s|^ControlIP=.*|ControlIP=0.0.0.0|g" \
   /app/rustyget/share/rustyget/rustyget.conf && \
   cp /app/rustyget/share/rustyget/rustyget.conf /app/rustyget/webui/rustyget.conf.template && \
   cp /app/rustyget/share/rustyget/rustyget.conf /app/rustyget/webui/nzbget.conf.template

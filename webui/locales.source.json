@@ -275,20 +275,12 @@
     "description": "Settings card heading on the connection page"
   },
   "config_card_check_and_repair_par": {
-    "message": "Par check",
+    "message": "Check and repair",
     "description": "Settings card heading on the check_and_repair page"
   },
   "config_card_check_and_repair_par_text": {
     "message": "Used when no twin or alt in the fleet has the missing bytes.",
     "description": "Settings card explanation on the check_and_repair page"
-  },
-  "config_card_check_and_repair_rename": {
-    "message": "Renaming",
-    "description": "Settings card heading on the check_and_repair page"
-  },
-  "config_card_check_and_repair_links": {
-    "message": "Hard links",
-    "description": "Settings card heading on the check_and_repair page"
   },
   "config_card_unpack_unpack": {
     "message": "Unpack",
@@ -5478,5 +5470,41 @@
   "config_preset_dupehealthbudget_300_text": {
     "message": "More accurate picks for large fleets.",
     "description": "What the DupeHealthBudget preset 300 means"
+  },
+  "config_renaming": {
+    "message": "Renaming",
+    "description": "Settings menu that sets the three rename options at once"
+  },
+  "config_renaming_text": {
+    "message": "When to restore the original file names from par2 and RAR files.",
+    "description": "Summary under the Renaming menu"
+  },
+  "config_renaming_during": {
+    "message": "While downloading",
+    "description": "Renaming choice: rename as files arrive"
+  },
+  "config_renaming_after": {
+    "message": "After download",
+    "description": "Renaming choice: rename once the download finishes"
+  },
+  "config_renaming_off": {
+    "message": "Off",
+    "description": "Renaming choice: keep names as posted"
+  },
+  "config_renaming_custom": {
+    "message": "Custom (see Expert)",
+    "description": "Renaming menu value when the three rename options were set one by one"
+  },
+  "config_listen_all": {
+    "message": "Allow other computers (listen on all interfaces, 0.0.0.0)",
+    "description": "Checkbox beside the listen address"
+  },
+  "config_requires_renaming": {
+    "message": "Set \"Renaming\" to \"While downloading\" to change this.",
+    "description": "Note on Hard linking while files are renamed after download"
+  },
+  "config_requires_flush": {
+    "message": "Always on while \"Write directly to the final file\" is on: the queue file is how a download resumes.",
+    "description": "Note on Flush queue to disk while Direct write is on"
   }
 }

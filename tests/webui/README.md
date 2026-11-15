@@ -17,6 +17,7 @@ node tests/webui/settings-locales.js http://127.0.0.1:17689/
 node tests/webui/settings-savebar.js http://127.0.0.1:17689/   # offline, no daemon needed
 node tests/webui/settings-cards.js http://127.0.0.1:17999/     # offline, no daemon needed
 node tests/webui/settings-modes.js http://127.0.0.1:17999/     # offline, no daemon needed
+node tests/webui/settings-removals.js http://127.0.0.1:17999/  # offline, no daemon needed
 node tests/webui/system-metrics.js http://127.0.0.1:17999/     # offline: Status tiles, Statistics charts, License page
 node tests/webui/release-names.js http://127.0.0.1:17999/      # offline: Downloads release names, logo easter egg
 node tests/webui/settings-health-startup.js http://127.0.0.1:17689/
@@ -71,6 +72,13 @@ number boxes with +/- and arrow keys, clamping, sticky slider presets and their 
 table, options greyed out until another option is changed, new list entries, and
 the saved payload, in both themes at desktop and phone widths. The other Settings
 checks set Expert first, because they cover every option.
+
+The removals check (offline) covers the removed options having no rows, the 1-5
+server Priority menu and an old Level read as a priority, the single Check and
+repair card and its Renaming menu (Advanced) against the three options (Expert),
+the Hard linking lock, the "Allow other computers" checkbox, no update button or
+update check, and a save that writes Priority and leaves Level and the removed
+options out.
 
 The locale check verifies the server health label exists in all 20 translated
 catalogs and renders translated summaries and help names in German, Spanish and

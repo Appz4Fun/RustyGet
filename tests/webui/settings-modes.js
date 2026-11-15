@@ -102,7 +102,7 @@ const { installDetailsFixture } = require('./details-fixture');
 
       await check('yes/no options are checkboxes', async () => {
         await show('DOWNLOAD_QUEUE');
-        const box = S('FlushQueue');
+        const box = S('NzbCleanupDisk');
         assert.equal(await box.getAttribute('role'), 'checkbox');
         const before = await box.getAttribute('aria-checked');
         await box.click();

@@ -416,16 +416,32 @@ impl ActiveStreamingSession {
     /// from disk. The refused article itself is replayed when its file
     /// completes. The memory returns with the session's budget.
     fn lend_memory(&self, error: &RepairError) {
-        let RepairError::StreamingMemoryLimit { context, .. } = error else {
+        let RepairError::StreamingMemoryLimit {
+            context,
+            required_bytes,
+            limit_bytes,
+        } = error
+        else {
             return;
         };
         let staging = *context == "RAM-only partial staging";
-        if (!staging && *context != "live article snapshots") || self.session.is_cancelled() {
+        // Only a byte shortfall: the snapshot queue's article-count limit
+        // reports the same context, and memory cannot relieve it. A staging
+        // cap of 0 means staging was turned off on purpose.
+        if (!staging && *context != "live article snapshots")
+            || required_bytes <= limit_bytes
+            || (staging && self.session.max_staging_bytes() == 0)
+            || self.session.is_cancelled()
+        {
             return;
         }
         let unit = self.session.slice_size();
         let pool = effective_live_pool_bytes();
-        let mut lease = self.budget.lock().unwrap_or_else(|e| e.into_inner());
+        // Callers may hold the daemon queue lock; growth of repair slots holds
+        // the budget across volume absorbs, so never wait for it here.
+        let Ok(mut lease) = self.budget.try_lock() else {
+            return;
+        };
         let lent = self.lent_memory.load(Ordering::Relaxed);
         if unit == 0 || lent.saturating_add(unit) > pool / 4 || lease.grow_by_units(unit, 1, pool) == 0 {
             return;
@@ -3861,6 +3877,13 @@ mod tests {
         assert_eq!(entry.session.max_staging_bytes(), 8192);
         let _ = entry.record::<()>(Err(queue_full));
         assert_eq!(entry.article_byte_limit.load(Ordering::Relaxed), queue_start + 4096);
+        assert_eq!(entry.budget.lock().unwrap().reserved_bytes(), start + 8192);
+        // The article-count limit (bytes fit) lends nothing.
+        let _ = entry.record::<()>(Err(RepairError::StreamingMemoryLimit {
+            context: "live article snapshots",
+            required_bytes: 4096,
+            limit_bytes: 1 << 20,
+        }));
         assert_eq!(entry.budget.lock().unwrap().reserved_bytes(), start + 8192);
         // Other limits lend nothing.
         let _ = entry.record::<()>(Err(RepairError::StreamingMemoryLimit {

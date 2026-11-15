@@ -39,9 +39,8 @@ These settings live in **INCOMING NZBS**, **DOWNLOAD QUEUE**, and **CHECK AND RE
 | 2 | [`HealthCheck=dupe`](options.md#healthcheck) | CHECK AND REPAIR | Fails over early to a better copy when a download can't complete. Set in the template. |
 | 3 | [`DupeArticleFallback=article`](options.md#dupearticlefallback) | INCOMING NZBS | Fetches articles that no server has from duplicate postings. `live`, the template's value, also repairs bytes while downloading. |
 | 4 | [`NzbCleanupDisk=no`](options.md#nzbcleanupdisk) | DOWNLOAD QUEUE | Keeps the NZB files of history items, so they can still serve as sources. |
-| 5 | [`DupeSearch=yes`](options.md#dupesearch) | INCOMING NZBS | Searches NZBHydra2 for more copies of each new download. Start with `DupeSearchDryRun=yes`. |
 
 [Duplicate fleets](duplicate-fleets.md) explains each step, and [Configuration options](options.md) lists every setting.
 
 > [!TIP] Article retries
-> Keep `ArticleRetries` at 3 or more with `HealthCheck=dupe` or `DupeSearch`. RustyGet warns at startup when it's lower, because one network hiccup can otherwise look like a missing article.
+> Keep `ArticleRetries` at 3 or more with `HealthCheck=dupe`. RustyGet warns at startup when it's lower, because one network hiccup can otherwise look like a missing article.

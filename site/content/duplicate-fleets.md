@@ -41,7 +41,6 @@ Each layer handles what the one before it couldn't. Turn them on in this order.
 | Borrow first | `DupeBorrowFirst=yes` | Uses duplicates before the download's own par2 files. On by default. |
 | Early failover | `HealthCheck=dupe` | Switches to a better backup as soon as the primary can't complete. |
 | Look after backups | `DupeWatch=yes` | Without searching: switches a DupeMode FORCE download to SCORE, drops a dead download below its backups, swaps a failing one for a whole backup (TWINs first), and returns the best backup when a download fails with nothing of its key queued. On by default. |
-| Donor search | `DupeSearch=yes` | Finds more copies through NZBHydra2 and queues the live ones as backups. |
 | Fleet submission | `appendfleet` | Lets a client send every copy at once and have RustyGet pick the best. |
 
 Left out of the configuration file, every new setting keeps NZBGet's behavior, so a configuration carried over from NZBGet changes nothing until you opt in. RustyGet's configuration template, which a new installation starts from, sets `DupeArticleFallback=live`, `DupeStreamDecompress=yes`, and `HealthCheck=dupe`.
@@ -138,10 +137,6 @@ Failover chooses backups with care. It skips a backup whose NZB file is gone, on
 
 With article fallback or `HealthCheck=dupe` on, when a download fails with missing articles, RustyGet asks every server for up to ten of the failed articles again, within 60 seconds. If at least half now exist, the articles were only late to arrive, and RustyGet retries the failed articles once.
 
-## Donor search
-
-With `DupeSearch=yes`, RustyGet looks for more copies of each new download on its own. It searches through NZBHydra2 or another Newznab endpoint. It checks how much of each copy is alive on your servers and adds the live ones as backups. See [Donor search](dupesearch.md).
-
 ## Fleet submission
 
 Clients that already know every copy, such as the [Kodi add-on](kodi.md), send them in one `appendfleet` call. RustyGet then:
@@ -170,7 +165,7 @@ If the release is already on disk, RustyGet adds nothing and the reply says `ALR
 | `HealthCheck` | `dupe` | Fails over early instead of downloading a copy that can't complete. |
 | `DupeArticleFallback` | `live` | Uses every layer. Start with `article` on slow devices. |
 | `DupeBorrowFirst` | `yes` | Repairs from duplicates during the download instead of waiting for par2. |
-| `DupeWatch` | `yes` | Looks after a download's backups without DupeSearch: FORCE to SCORE, dead download, swap, rescue. |
+| `DupeWatch` | `yes` | Looks after a download's backups: FORCE to SCORE, dead download, swap, rescue. |
 | `DirectUnpack` | `yes` | Unpacks during the download, and pauses at a damaged volume until it's repaired. |
 | `DupeStreamDecompress` | `yes` on a fast machine | Costs CPU and temporary disk space; turn it off on slow devices. |
 | `NzbCleanupDisk` | `no` | Keeps backups' NZB files so they can donate. |

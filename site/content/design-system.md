@@ -80,8 +80,8 @@ The lowest pairing anywhere in the system is `--amber` on `--rust-soft` at 4.9:1
 Callouts borrow the shape of compiler output: a level, a colon, an optional title, and a gutter down the left. Write them in Markdown with GitHub's alert syntax, so they read the same on GitHub.
 
 ```markdown
-> [!WARNING] DupeSearch sends traffic to your indexers
-> Start with DupeSearchDryRun=yes and read the log first.
+> [!WARNING] Fleet checks use your news servers
+> Each copy is sampled with STAT and BODY requests before it is ranked.
 ```
 
 > [!NOTE] note

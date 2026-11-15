@@ -27,7 +27,7 @@ pages = ["settings", "settings-basics", "settings-downloads", "settings-automati
 
 [[nav]]
 title = "Features"
-pages = ["features", "duplicates", "duplicate-fleets", "dupesearch", "kodi", "nzbhydra2", "post-processing", "automation", "performance"]
+pages = ["features", "duplicates", "duplicate-fleets", "kodi", "nzbhydra2", "post-processing", "automation", "performance"]
 
 [[nav]]
 title = "Reference"

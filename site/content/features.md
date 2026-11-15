@@ -93,7 +93,7 @@ This is where RustyGet goes beyond NZBGet. NZBGet uses duplicates one at a time:
 - **Twins and alts.** A *twin* is a copy whose files are byte-identical, proven by par2 checksums; RustyGet can borrow its articles and par2 volumes. An *alt* is the same release in another encode; it's mainly a failover backup.
 - **Stream repair.** RustyGet patches holes that article fallback can't fill with bytes from duplicates, even from a duplicate that's packed differently.
 - **Early failover.** With `HealthCheck=dupe`, a download that can't complete switches to the best backup within seconds, and a probe catches copies that are dead before they start.
-- **Donor search.** RustyGet can search NZBHydra2 for more copies of a new download, check them on your servers, and queue the live ones as backups.
+- **Fleets from the API.** The app that sends a fleet does the searching. RustyGet trusts its copies, checks each one on your servers, and ranks them twins first.
 - **Fleet submission.** Clients such as the Kodi add-on send every copy at once with `appendfleet`, and RustyGet picks the best one.
 
 See [Duplicate fleets](duplicate-fleets.md) for how each one works.

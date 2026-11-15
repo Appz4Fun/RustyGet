@@ -19,7 +19,8 @@ pub const SCORE_MODE: u32 = 1 << 13;
 pub const DONOR: u32 = 1 << 14;
 pub const AUTO_REDOWNLOAD: u32 = 1 << 15;
 pub const MANAGED_FLEET: u32 = 1 << 16;
-pub const BASE_PICK_SCORE: i32 = 1_000_000;
+/// The DupeScore of a fleet's first copy: scores run 1 to 100.
+pub const BASE_PICK_SCORE: i32 = 100;
 pub const SEARCH_WINDOW_SEC: i64 = 6 * 3600;
 
 /// Option `DupePrimaryScore`: the score of a download DupeSearch looks after
@@ -532,7 +533,7 @@ pub fn format_searched_state_line(
 mod tests {
     #[test]
     fn primary_score_defaults_without_options() {
-        assert!(primary_score() >= 1000);
+        assert_eq!(primary_score(), BASE_PICK_SCORE);
     }
 
     #[test]

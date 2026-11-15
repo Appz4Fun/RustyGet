@@ -10,11 +10,11 @@ Pictures use an isolated demonstration service and example values. Credentials a
 
 Set the scan interval and file age for the watched NZB folder. `AppendCategoryDir` controls category subfolders. Review archive scanning options if another program submits packed NZBs.
 
-Duplicate handling belongs here too. `DupeCheck` groups backups by duplicate key. `DupeArticleFallback` enables article or live byte recovery from other copies. `DupeSearch` asks your configured indexer for more copies; start with `DupeSearchDryRun` while checking its behavior.
+Duplicate handling belongs here too. `DupeCheck` groups backups by duplicate key. `DupeArticleFallback` enables article or live byte recovery from other copies. Duplicates come only from the app that sends a fleet; `DupeWatch` looks after the backups.
 
-Keep the indexer URL and API key private. Follow [Duplicate fleets](duplicate-fleets.md) and [Donor search](dupesearch.md) for the complete setup.
+Follow [Duplicate fleets](duplicate-fleets.md) for the complete setup.
 
-Key options: [`NzbDirInterval`](options.md#nzbdirinterval), [`NzbDirFileAge`](options.md#nzbdirfileage), [`DupeCheck`](options.md#dupecheck), [`DupeArticleFallback`](options.md#dupearticlefallback), [`DupeSearch`](options.md#dupesearch), [`DupeSearchDryRun`](options.md#dupesearchdryrun).
+Key options: [`NzbDirInterval`](options.md#nzbdirinterval), [`NzbDirFileAge`](options.md#nzbdirfileage), [`DupeCheck`](options.md#dupecheck), [`DupeArticleFallback`](options.md#dupearticlefallback), [`DupeWatch`](options.md#dupewatch).
 
 <figure class="settings-figure">
 <a class="settings-shot" href="assets/settings/incoming-nzbs.jpg" aria-label="Open full-size picture: Incoming NZB and duplicate-recovery controls with blank indexer credentials"><img src="assets/settings/incoming-nzbs.jpg" width="1280" height="2093" loading="lazy" alt="Incoming NZB and duplicate-recovery controls with blank indexer credentials"></a>

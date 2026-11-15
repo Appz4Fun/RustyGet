@@ -10,7 +10,7 @@ lede = "RustyGet is rewriting a mature program while people use it every day. Th
 Open an issue in the [repository](https://github.com/Appz4Fun/RustyGet/issues). Include:
 
 - The commit you built, from `rustyget -v` or the footer of the web interface.
-- The settings involved, especially `DupeArticleFallback`, `HealthCheck`, and `DupeSearch`.
+- The settings involved, especially `DupeArticleFallback`, `HealthCheck`, and `DupeWatch`.
 - The download's log from the **History** tab. Remove server names, user names, and NZB names that you don't want to share.
 
 Report problems in stock NZBGet to the [NZBGet project](https://github.com/nzbgetcom/nzbget) instead.

@@ -32,7 +32,7 @@ What's new is how it treats duplicates. The same release usually exists as sever
 - Copies with byte-identical files, called **twins**, are proven by par2 checksums and can lend articles and recovery volumes. Other encodes, called **alts**, mostly serve as failover backups.
 - Holes that articles can't fill are patched with verified bytes, even from copies that are split, packed, or encrypted differently.
 - A copy that can't complete hands over to the best backup within seconds.
-- RustyGet can search NZBHydra2 for more copies and check each one on your servers before it counts on it.
+- RustyGet checks each copy a fleet brings on your servers before it counts on it.
 
 See [Feature highlights](features.md) for the full list.
 

@@ -98,6 +98,6 @@ Permissions
 : Unpacked files get mode `0644`, or `0755` when they're executable, and folders get `0755`, never more open than the folder they were unpacked into. This replaces the Permission Fix extension.
 
 More copies
-: [Donor search](dupesearch.md) finds, checks, and queues other postings of a download through NZBHydra2. This replaces the DupeDonors extension.
+: `DupeWatch` looks after a download's backups (dead download, swap, rescue) in the core. This replaces the DupeDonors extension.
 
 RustyGet doesn't run extension scripts. The Extension Manager, the extension options, and the extension API methods that came from NZBGet are gone.

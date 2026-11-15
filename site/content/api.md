@@ -126,7 +126,6 @@ RustyGet also stores its findings as NZB parameters, which the API returns in `P
 | `DupeSampled`, `DupeSampledOf` | A twin or alt verdict from sampled articles, for postings without par2, and the primary it refers to. |
 | `DupeAlive` | Percent of the posting found alive. `0` means dead, and failover skips it. |
 | `DupeHealth` | The measured health of a backup. |
-| `DupeSearch` | `yes` on copies that donor search added. |
 | `DupeFleet` | The member's rank in its `appendfleet` call. |
 
 ## Changes to existing methods

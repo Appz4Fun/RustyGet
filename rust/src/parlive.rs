@@ -116,6 +116,32 @@ impl Drop for SessionBudgetLease {
 }
 
 impl SessionBudgetLease {
+    #[cfg(test)]
+    pub fn reserved_bytes(&self) -> u64 {
+        self.bytes
+    }
+
+    /// Grow by as many `unit`-byte steps as the pool has room for, up to
+    /// `max_units`. Returns the steps granted (0 when the pool is full).
+    pub fn grow_by_units(&mut self, unit: u64, max_units: u64, limit: u64) -> u64 {
+        if unit == 0 {
+            return 0;
+        }
+        let mut used = self.pool.reserved.lock().unwrap_or_else(|e| e.into_inner());
+        let units = (limit.saturating_sub(*used) / unit).min(max_units);
+        *used += units * unit;
+        self.bytes += units * unit;
+        units
+    }
+
+    /// Give `bytes` back to the pool (never below one byte, so the lease stays valid).
+    pub fn shrink_by(&mut self, bytes: u64) {
+        let bytes = bytes.min(self.bytes.saturating_sub(1));
+        let mut used = self.pool.reserved.lock().unwrap_or_else(|e| e.into_inner());
+        *used -= bytes;
+        self.bytes -= bytes;
+    }
+
     pub fn resize(&mut self, bytes: u64, limit: u64) -> bool {
         if bytes == 0 {
             return false;
@@ -315,6 +341,27 @@ mod tests {
         assert!(pool.acquire(1, 100).is_none());
         drop(b);
         assert!(pool.acquire(1, 100).is_some());
+    }
+
+    #[test]
+    fn growth_takes_only_free_whole_steps_and_gives_them_back() {
+        let pool = Arc::new(BudgetPool::default());
+        let mut job = pool.acquire(40, 100).unwrap();
+        let other = pool.acquire(25, 100).unwrap();
+        // 35 free: three 10-byte steps of the five asked for.
+        assert_eq!(job.grow_by_units(10, 5, 100), 3);
+        assert!(pool.acquire(6, 100).is_none());
+        assert_eq!(job.grow_by_units(10, 5, 100), 0);
+        assert_eq!(job.grow_by_units(0, 5, 100), 0);
+        // A limit under the current use (memory pressure) grants nothing.
+        assert_eq!(job.grow_by_units(1, 5, 50), 0);
+        job.shrink_by(20);
+        assert!(pool.acquire(25, 100).is_some());
+        drop(other);
+        job.shrink_by(u64::MAX);
+        assert_eq!(job.bytes, 1);
+        drop(job);
+        assert!(pool.acquire(100, 100).is_some());
     }
 
     #[test]

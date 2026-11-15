@@ -195,9 +195,32 @@ var Options = (new function($)
 		}
 	}
 
+	// ServerN.Level (0-99) became ServerN.Priority (1-5): level 0 is priority 1
+	function upgradeValues(values)
+	{
+		if (!values)
+		{
+			return values;
+		}
+		var names = {};
+		values.forEach(function(v) { names[v.Name.toLowerCase()] = true; });
+		values.forEach(function(v)
+		{
+			var m = /^Server([0-9]+)\.Level$/i.exec(v.Name);
+			if (m && !names[('Server' + m[1] + '.Priority').toLowerCase()])
+			{
+				var level = parseInt(v.Value, 10) || 0;
+				v.Name = 'Server' + m[1] + '.Priority';
+				v.Value = String(Math.max(0, Math.min(4, level)) + 1);
+			}
+		});
+		return values;
+	}
+	this.upgradeValues = upgradeValues;
+
 	function serverValuesLoaded(data)
 	{
-		serverValues = data;
+		serverValues = upgradeValues(data);
 		RPC.call('configtemplates', [true], serverTemplateLoaded, loadServerTemplateError);
 	}
 
@@ -234,7 +257,7 @@ var Options = (new function($)
 	this.reloadConfig = function(_serverValues, _complete)
 	{
 		loadComplete = _complete;
-		serverValues = _serverValues;
+		serverValues = upgradeValues(_serverValues);
 		Options.complete();
 	}
 
@@ -570,12 +593,12 @@ var Config = (new function($)
 		SecurePort: 'HTTPS port', SecureCert: 'HTTPS certificate', SecureKey: 'HTTPS private key',
 		ControlUsername: 'Username', ControlPassword: 'Password', SevenZipCmd: '7-Zip command',
 		UnrarCmd: 'UnRAR command', ParCheck: 'Par check', ParRepair: 'Par repair', ParScan: 'Par scan',
-		ParQuick: 'Quick par verification', ParBuffer: 'Par buffer', ParThreads: 'Par threads',
+		ParBuffer: 'Par buffer', ParThreads: 'Par threads',
 		DirectWrite: 'Write directly to the final file', ArticleCache: 'Article cache',
-		ContinuePartial: 'Continue partial downloads', FlushQueue: 'Flush queue to disk',
+		FlushQueue: 'Flush queue to disk',
 		DiskSpace: 'Pause below free disk space', KeepHistory: 'Keep history for',
 		DirectUnpack: 'Unpack while downloading', DupeCheck: 'Duplicate check',
-		CrcCheck: 'CRC check', RawArticle: 'Save raw articles', SkipWrite: 'Skip writing (testing)'
+		RawArticle: 'Save raw articles', SkipWrite: 'Skip writing (testing)'
 	};
 
 	function humanizeOptionName(name)
@@ -1394,6 +1417,8 @@ var Config = (new function($)
 		I18n.translatePage($ConfigNav);
 		I18n.translatePage($ConfigData);
 		groupNav();
+		addRenamingControl();
+		addListenAllControl();
 		ensureModeSwitch();
 		enhanceControls();
 		snapshotShownValues();
@@ -1523,7 +1548,7 @@ var Config = (new function($)
 				options: ['NzbDirInterval', 'NzbDirFileAge', 'NzbDirArchiveScan', 'NzbDirArchiveAction', 'AppendCategoryDir'] }
 		],
 		DOWNLOAD_QUEUE: [
-			{ key: 'queue', title: 'Queue', options: ['ContinuePartial', 'PropagationDelay', 'PostStrategy', 'KeepHistory', 'FeedHistory', 'FlushQueue'] },
+			{ key: 'queue', title: 'Queue', options: ['PostStrategy', 'KeepHistory', 'FeedHistory', 'FlushQueue'] },
 			{ key: 'disk', title: 'Writing to disk', options: ['ArticleCache', 'DirectWrite', 'WriteBuffer', 'DiskSpace', 'NzbCleanupDisk'],
 				advanced: ['SkipWrite', 'RawArticle'] },
 			{ key: 'names', title: 'File names', options: ['FileNaming', 'PostDownloadRename', 'RenameAfterUnpack', 'ReorderFiles', 'RenameIgnoreExt'] }
@@ -1534,11 +1559,11 @@ var Config = (new function($)
 			{ key: 'urls', title: 'Fetching NZB links', options: ['UrlConnections', 'UrlForce', 'UrlRetries', 'UrlInterval', 'UrlTimeout', 'RemoteTimeout'] }
 		],
 		CHECK_AND_REPAIR: [
-			{ key: 'par', title: 'Par check', text: 'Used when no twin or alt in the fleet has the missing bytes.',
-				options: ['ParCheck', 'ParRepair', 'ParScan', 'ParQuick', 'CrcCheck', 'ParTimeLimit', 'ParPauseQueue'],
-				advanced: ['ParBuffer', 'ParThreads', 'ParIgnoreExt'] },
-			{ key: 'rename', title: 'Renaming', options: ['DirectRename', 'ParRename', 'RarRename'] },
-			{ key: 'links', title: 'Hard links', options: ['HardLinking', 'HardLinkingIgnoreExt'] }
+			// one card: par2 is the fallback when no twin or alt in the fleet has the bytes
+			{ key: 'par', title: 'Check and repair', text: 'Used when no twin or alt in the fleet has the missing bytes.',
+				options: ['ParCheck', 'ParRepair', 'ParScan', 'DirectRename', 'ParRename', 'RarRename', 'HardLinking',
+					'HardLinkingIgnoreExt', 'ParTimeLimit', 'ParPauseQueue'],
+				advanced: ['ParBuffer', 'ParThreads', 'ParIgnoreExt'] }
 		],
 		UNPACK: [
 			{ key: 'unpack', title: 'Unpack', options: ['Unpack', 'DirectUnpack', 'UnpackPassFile', 'UseTempUnpackDir', 'UnpackPauseQueue'] },
@@ -1553,7 +1578,7 @@ var Config = (new function($)
 			{ key: 'users', title: 'Extra users', text: 'A restricted user can watch and change the queue but not settings. An add user can only add NZBs.',
 				options: ['RestrictedUsername', 'RestrictedPassword', 'AddUsername', 'AddPassword'] },
 			{ key: 'https', title: 'HTTPS', options: ['SecureControl', 'SecurePort', 'SecureCert', 'SecureKey', 'CertCheck'] },
-			{ key: 'system', title: 'System', options: ['UpdateCheck'], advanced: ['DaemonUsername', 'UMask', 'JsonP'] }
+			{ key: 'system', title: 'System', options: ['DaemonUsername', 'UMask', 'JsonP'] }
 		],
 		LOGGING: [
 			{ key: 'file', title: 'Log file', options: ['WriteLog', 'RotateLog', 'NzbLog', 'LogBuffer', 'SystemHealthCheck'] },
@@ -1874,7 +1899,7 @@ var Config = (new function($)
 			'TempDir',
 			'QueueDir',
 			'MainDir',
-			'Server.Level',
+			'Server.Priority',
 			'Server.Optional',
 			'Server.Group',
 			'Server.Retention',
@@ -1921,9 +1946,6 @@ var Config = (new function($)
 			'ParRepair',
 			'ParScan',
 			'ParTimeLimit',
-			'DirectRename',
-			'ParRename',
-			'RarRename',
 			'UnpackPassFile',
 			'UnpackPauseQueue',
 			'ExtCleanupDisk',
@@ -2063,6 +2085,12 @@ var Config = (new function($)
 				});
 			});
 		}
+		$('.control-group[data-virtual-mode]', $ConfigData).each(function()
+		{
+			var mode = $(this).attr('data-virtual-mode');
+			// the menu stands in for options Expert shows one by one
+			$(this).toggleClass('mode-hidden', !inMode(mode) || settingsMode === 'expert').attr('data-mode', mode);
+		});
 		$('.config-card', $ConfigData).each(function()
 		{
 			$(this).toggleClass('mode-empty', $(this).find('.control-group').not('.mode-hidden').length === 0);
@@ -2501,6 +2529,110 @@ var Config = (new function($)
 		$('.config-number', $ConfigData).each(function() { syncSlider($(this)); });
 	}
 
+	// Renaming: one menu for the three rename options. Expert still shows each one.
+	var RENAMING = {
+		during: { DirectRename: 'yes', ParRename: 'yes', RarRename: 'yes' },
+		after: { DirectRename: 'no', ParRename: 'yes', RarRename: 'yes' },
+		off: { DirectRename: 'no', ParRename: 'no', RarRename: 'no' }
+	};
+	var RENAMING_LABELS = { during: 'While downloading', after: 'After download', off: 'Off', custom: 'Custom (see Expert)' };
+
+	function renamingValue()
+	{
+		var current = {};
+		['DirectRename', 'ParRename', 'RarRename'].forEach(function(name)
+		{
+			var option = findOptionByName(name);
+			current[name] = option ? currentValue(option).toLowerCase() : '';
+		});
+		for (var key in RENAMING)
+		{
+			if (Object.keys(RENAMING[key]).every(function(name) { return current[name] === RENAMING[key][name]; }))
+			{
+				return key;
+			}
+		}
+		return 'custom';
+	}
+
+	function addRenamingControl()
+	{
+		var anchor = $('#S_DirectRename').closest('.control-group');
+		if (!anchor.length || $('#ConfigRenaming').length)
+		{
+			return;
+		}
+		var t = function(key, text) { return I18n.defaultValue(key, text); };
+		var row = $('<div class="control-group config-option-tile config-virtual in-card" data-virtual-mode="advanced">' +
+			'<label class="control-label"><span class="option-name"><span class="config-label"></span></span></label>' +
+			'<div class="controls"><select id="ConfigRenaming" class="config-select"></select></div>' +
+			'<p class="config-option-summary"></p></div>').addClass(anchor.attr('class').match(/\bCHECK_AND_REPAIR\b/) ? 'CHECK_AND_REPAIR' : '');
+		row.find('.config-label').text(t('config_renaming', 'Renaming'));
+		row.find('.config-option-summary').text(t('config_renaming_text', 'When to restore the original file names from par2 and RAR files.'));
+		var select = row.find('select').attr('aria-label', t('config_renaming', 'Renaming'));
+		['during', 'after', 'off', 'custom'].forEach(function(key)
+		{
+			select.append($('<option></option>').attr('value', key).text(t('config_renaming_' + key, RENAMING_LABELS[key]))
+				.prop('disabled', key === 'custom'));
+		});
+		select.on('change', function()
+		{
+			var values = RENAMING[this.value];
+			if (!values)
+			{
+				return;
+			}
+			Object.keys(values).forEach(function(name)
+			{
+				var option = findOptionByName(name);
+				if (option && option.formId)
+				{
+					setOptionValue(option, values[name]);
+					$('#' + option.formId).attr('aria-checked', values[name] === 'yes' ? 'true' : 'false');
+				}
+			});
+			refreshChangeState();
+		});
+		anchor.before(row);
+		syncRenaming();
+	}
+
+	function syncRenaming()
+	{
+		var select = $('#ConfigRenaming');
+		if (select.length)
+		{
+			select.val(renamingValue());
+		}
+	}
+
+	// Listen address: a checkbox for "other computers too" (0.0.0.0) beside the field
+	function addListenAllControl()
+	{
+		var input = $('#S_ControlIP');
+		if (!input.length || $('#ConfigListenAll').length)
+		{
+			return;
+		}
+		var label = $('<label class="config-inline-check"><input type="checkbox" id="ConfigListenAll"> <span></span></label>');
+		label.find('span').text(I18n.defaultValue('config_listen_all', 'Allow other computers (listen on all interfaces, 0.0.0.0)'));
+		var wrap = $('<div class="config-listen"></div>');
+		input.before(wrap);
+		wrap.append(input).append(label);
+		var box = label.find('input');
+		box.on('change', function()
+		{
+			input.val(this.checked ? '0.0.0.0' : '127.0.0.1').trigger('input').trigger('change');
+		});
+		syncListenAll();
+	}
+
+	function syncListenAll()
+	{
+		var input = $('#S_ControlIP');
+		$('#ConfigListenAll').prop('checked', $.trim(input.val()) === '0.0.0.0');
+	}
+
 	// An option that only matters while another one has certain values is greyed out
 	// otherwise, with a note that says what to change. Its value is kept and saved.
 	var OPTION_REQUIRES = [
@@ -2520,6 +2652,8 @@ var Config = (new function($)
 		{ option: 'SecureCert', when: { name: 'SecureControl', values: ['yes'] } },
 		{ option: 'SecureKey', when: { name: 'SecureControl', values: ['yes'] } },
 		{ option: 'HardLinkingIgnoreExt', when: { name: 'HardLinking', values: ['yes'] } },
+		{ option: 'HardLinking', when: { name: 'DirectRename', values: ['yes'] }, go: 'ConfigRenaming',
+			text: ['config_requires_renaming', 'Set "Renaming" to "While downloading" to change this.'] },
 		{ option: 'RestrictedPassword', when: { name: 'RestrictedUsername', notEmpty: true } },
 		{ option: 'AddPassword', when: { name: 'AddUsername', notEmpty: true } }
 	];
@@ -2577,7 +2711,14 @@ var Config = (new function($)
 		note.children('a').text(I18n.defaultValue('config_requires_go', 'Show me')).off('click').on('click', function(e)
 		{
 			e.preventDefault();
-			scrollOptionIntoView(neededId);
+			if (findOptionById(neededId))
+			{
+				scrollOptionIntoView(neededId);
+			}
+			else
+			{
+				document.getElementById(neededId).scrollIntoView({ block: 'center' });
+			}
 			$('#' + neededId).focus();
 		});
 	}
@@ -2603,13 +2744,17 @@ var Config = (new function($)
 			}
 			var value = currentValue(needed).toLowerCase();
 			var met = rule.when.notEmpty ? value.trim() !== '' : rule.when.values.indexOf(value) > -1;
-			setLocked(row, !met, met ? '' : requirementText(rule, needed), needed.formId);
+			var text = rule.text ? I18n.defaultValue(rule.text[0], rule.text[1]) : requirementText(rule, needed);
+			var go = rule.go && document.getElementById(rule.go) && inMode('advanced') && !inMode('expert') ? rule.go : needed.formId;
+			setLocked(row, !met, met ? '' : text, go);
 		});
 	}
 
 	function refreshControls()
 	{
 		syncControls();
+		syncRenaming();
+		syncListenAll();
 		refreshRequirements();
 	}
 
@@ -4517,13 +4662,7 @@ var UpdateDialog = (new function($)
 
 	this.checkUpdate = function()
 	{
-		var lastCheck = new Date(parseInt(UISettings.read('LastUpdateCheck', '0')));
-		var hoursSinceLastCheck = Math.abs(new Date() - lastCheck) / (60*60*1000);
-		if (Options.option('UpdateCheck') !== 'none' && hoursSinceLastCheck > 12)
-		{
-			UISettings.write('LastUpdateCheck', new Date() / 1);
-			this.performCheck();
-		}
+		// updates are off for now: RustyGet doesn't look for new releases
 	}
 
 	this.performCheck = function()

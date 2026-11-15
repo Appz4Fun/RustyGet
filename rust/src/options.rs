@@ -177,6 +177,8 @@ pub enum NameCheck {
     Obsolete = 2,
     /// an obsolete log option (use WriteLog): a warning
     ObsoleteLog = 4,
+    /// removed from Settings, now fixed: ignored without a warning
+    Removed = 5,
 }
 
 /// The numbered sections and their option suffixes.
@@ -188,11 +190,11 @@ const SECTIONS: [(&CStr, usize, &[&CStr]); 4] = [
             c".active",
             c".name",
             c".level",
+            c".priority",
             c".host",
             c".port",
             c".username",
             c".password",
-            c".joingroup",
             c".encryption",
             c".connections",
             c".cipher",
@@ -294,6 +296,9 @@ pub fn validate_option_name(name: &CStr, predefined: &mut dyn FnMut() -> bool) -
     if OBSOLETE.iter().any(|n| eq(name, n)) {
         return NameCheck::Obsolete;
     }
+    if is_removed_opt(name) {
+        return NameCheck::Removed;
+    }
     if is_removed_extension_opt(name) {
         return NameCheck::Obsolete;
     }
@@ -301,6 +306,29 @@ pub fn validate_option_name(name: &CStr, predefined: &mut dyn FnMut() -> bool) -
         return NameCheck::ObsoleteLog;
     }
     NameCheck::Invalid
+}
+
+/// Options taken out of Settings because their value is now fixed (or the feature
+/// is off). Old configuration files may still have them: they are dropped quietly,
+/// and the next save leaves them out.
+fn is_removed_opt(name: &CStr) -> bool {
+    const GLOBAL: [&CStr; 5] = [
+        c"PropagationDelay",
+        c"ContinuePartial",
+        c"ParQuick",
+        c"CrcCheck",
+        c"UpdateCheck",
+    ];
+    if GLOBAL.iter().any(|n| eq(name, n)) {
+        return true;
+    }
+    // ServerN.JoinGroup
+    let bytes = name.to_bytes();
+    if bytes.len() > 6 && bytes[..6].eq_ignore_ascii_case(b"server") {
+        let digits = bytes[6..].iter().take_while(|c| c.is_ascii_digit()).count();
+        return digits > 0 && bytes[6 + digits..].eq_ignore_ascii_case(b".joingroup");
+    }
+    false
 }
 
 /// Options of the removed extension scripts feature, still accepted in old
@@ -824,6 +852,35 @@ mod tests {
             &CString::new(long).unwrap(),
             (c_char::MIN as i32) != 0
         ));
+    }
+
+    #[test]
+    fn removed_settings_are_dropped_quietly() {
+        let mut no = || false;
+        for name in [
+            c"PropagationDelay",
+            c"ContinuePartial",
+            c"ParQuick",
+            c"CrcCheck",
+            c"UpdateCheck",
+            c"Server1.JoinGroup",
+            c"server12.joingroup",
+        ] {
+            assert_eq!(validate_option_name(name, &mut no), NameCheck::Removed, "{name:?}");
+        }
+        assert_eq!(validate_option_name(c"Server1.Priority", &mut no), NameCheck::Valid);
+        assert_eq!(validate_option_name(c"Server1.Level", &mut no), NameCheck::Valid);
+        assert_eq!(validate_option_name(c"Server.JoinGroup", &mut no), NameCheck::Invalid);
+    }
+
+    #[test]
+    fn server_priority_maps_to_level() {
+        assert_eq!(server_level(Some(c"1"), None), 0);
+        assert_eq!(server_level(Some(c"5"), Some(c"0")), 4);
+        assert_eq!(server_level(Some(c"9"), None), 4);
+        assert_eq!(server_level(Some(c"0"), None), 0);
+        assert_eq!(server_level(None, Some(c"2")), 2);
+        assert_eq!(server_level(None, None), 0);
     }
 
     #[test]
@@ -1473,7 +1530,7 @@ const COMMAND_VALUES: [i32; 26] = [
 /// Emits all default option `(name, value)` pairs for `Options::InitDefaults`.
 pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &CStr)) {
     let output_mode = if disable_curses { c"color" } else { c"curses" };
-    let defaults: [(&CStr, &CStr); 140] = [
+    let defaults: [(&CStr, &CStr); 135] = [
         (c"MainDir", c"~/downloads"),
         (c"WebDir", c""),
         (c"ConfigTemplate", c""),
@@ -1513,7 +1570,7 @@ pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &
         (c"DupeCheckConcurrency", c"20"),
         (c"DupeCheckConnections", c"0"),
         (c"DownloadRate", c"0"),
-        (c"ControlIP", c"0.0.0.0"),
+        (c"ControlIP", c"127.0.0.1"),
         (c"ControlUsername", c"rustyget"),
         (c"ControlPassword", c"tegbzn6789"),
         (c"RestrictedUsername", c""),
@@ -1543,7 +1600,6 @@ pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &
         (c"ArticleInterval", c"10"),
         (c"UrlRetries", c"3"),
         (c"UrlInterval", c"10"),
-        (c"ContinuePartial", c"yes"),
         (c"UrlConnections", c"4"),
         (c"LogBuffer", c"1000"),
         (c"InfoTarget", c"both"),
@@ -1554,7 +1610,6 @@ pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &
         (c"ParCheck", c"auto"),
         (c"ParRepair", c"yes"),
         (c"ParScan", c"dupe"),
-        (c"ParQuick", c"yes"),
         (c"PostStrategy", c"sequential"),
         (c"FileNaming", c"article"),
         (c"PostDownloadRename", c"yes"),
@@ -1574,7 +1629,6 @@ pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &
         (c"CursesNzbName", c"yes"),
         (c"CursesTime", c"no"),
         (c"CursesGroup", c"no"),
-        (c"CrcCheck", c"yes"),
         (c"DirectWrite", c"yes"),
         (c"WriteBuffer", c"1024"),
         (c"NzbDirInterval", c"5"),
@@ -1603,7 +1657,6 @@ pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &
         (c"FeedHistory", c"7"),
         (c"UrlForce", c"yes"),
         (c"TimeCorrection", c"0"),
-        (c"PropagationDelay", c"0"),
         (c"ArticleCache", c"500"),
         (c"MemoryPressureInterval", c"500"),
         (c"MemoryPressurePath", c""),
@@ -1613,7 +1666,6 @@ pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &
         (c"QuotaStartDay", c"1"),
         (c"DailyQuota", c"0"),
         (c"ReorderFiles", c"yes"),
-        (c"UpdateCheck", c"none"),
     ];
     for (name, val) in defaults {
         set_opt(name, val);
@@ -2128,8 +2180,8 @@ pub fn init_scalar_options_host<H: OptionsHost>(
     s.keep_history = host.parse_int_value(c"KeepHistory", 10);
     s.feed_history = host.parse_int_value(c"FeedHistory", 10);
     s.time_correction = normalize_time_correction(host.parse_int_value(c"TimeCorrection", 10));
-    s.propagation_delay =
-        options_minutes_to_seconds_i32(host.parse_int_value(c"PropagationDelay", 10));
+    // PropagationDelay is gone: files are fetched as soon as they are queued
+    s.propagation_delay = 0;
     s.article_cache = host.parse_int_value(c"ArticleCache", 10);
     *out_memory_pressure_path = host.get_option(c"MemoryPressurePath");
     let raw_mem_pressure_interval = host.parse_int_value(c"MemoryPressureInterval", 10);
@@ -2148,11 +2200,12 @@ pub fn init_scalar_options_host<H: OptionsHost>(
     s.system_health_check = i32::from(host.parse_bool_value(c"SystemHealthCheck"));
     s.nzb_log = i32::from(host.parse_bool_value(c"NzbLog"));
     s.append_category_dir = i32::from(host.parse_bool_value(c"AppendCategoryDir"));
-    s.continue_partial = i32::from(host.parse_bool_value(c"ContinuePartial"));
+    // ContinuePartial, ParQuick and CrcCheck are always on
+    s.continue_partial = 1;
     s.flush_queue = i32::from(host.parse_bool_value(c"FlushQueue"));
     s.dupe_check = i32::from(host.parse_bool_value(c"DupeCheck"));
     s.par_repair = i32::from(host.parse_bool_value(c"ParRepair"));
-    s.par_quick = i32::from(host.parse_bool_value(c"ParQuick"));
+    s.par_quick = 1;
     s.par_rename = i32::from(host.parse_bool_value(c"ParRename"));
     s.rar_rename = i32::from(host.parse_bool_value(c"RarRename"));
     s.direct_rename = i32::from(host.parse_bool_value(c"DirectRename"));
@@ -2161,7 +2214,7 @@ pub fn init_scalar_options_host<H: OptionsHost>(
     s.curses_nzb_name = i32::from(host.parse_bool_value(c"CursesNzbName"));
     s.curses_time = i32::from(host.parse_bool_value(c"CursesTime"));
     s.curses_group = i32::from(host.parse_bool_value(c"CursesGroup"));
-    s.crc_check = i32::from(host.parse_bool_value(c"CrcCheck"));
+    s.crc_check = 1;
     s.direct_write = i32::from(host.parse_bool_value(c"DirectWrite"));
     s.raw_article = i32::from(host.parse_bool_value(c"RawArticle"));
     s.skip_write = i32::from(host.parse_bool_value(c"SkipWrite"));
@@ -2539,6 +2592,14 @@ pub fn check_options_host<H: OptionsHost>(
     }
 }
 
+/// The internal server level: `Priority` 1-5 maps to level 0-4; without it, the old `Level`.
+fn server_level(priority: Option<&CStr>, level: Option<&CStr>) -> i32 {
+    match priority {
+        Some(p) => crate::feed::c_atoi_bytes(p.to_bytes()).clamp(1, 5) - 1,
+        None => c_atoi_or_default(level, 0),
+    }
+}
+
 fn c_atoi_or_default(val: Option<&CStr>, default_val: i32) -> i32 {
     match val {
         Some(s) => crate::feed::c_atoi_bytes(s.to_bytes()),
@@ -2568,6 +2629,10 @@ pub fn init_servers_host<H: OptionsHost>(
         let nlevel = host.get_option(&cstring(options_format_indexed_opt_name(
             b"Server", n, b"Level",
         )));
+        // Priority (1 is used first, up to 5) replaced Level (0 first); an old Level still counts
+        let npriority = host.get_option(&cstring(options_format_indexed_opt_name(
+            b"Server", n, b"Priority",
+        )));
         let ngroup = host.get_option(&cstring(options_format_indexed_opt_name(
             b"Server", n, b"Group",
         )));
@@ -2588,13 +2653,8 @@ pub fn init_servers_host<H: OptionsHost>(
             b"Password",
         )));
 
-        let join_group_opt = cstring(options_format_indexed_opt_name(b"Server", n, b"JoinGroup"));
-        let njoingroup = host.get_option(&join_group_opt);
-        let join_group = if njoingroup.is_some() {
-            host.parse_bool_value(&join_group_opt)
-        } else {
-            false
-        };
+        // JoinGroup is gone: articles are fetched by message-id without a GROUP command
+        let join_group = false;
 
         let optional_opt = cstring(options_format_indexed_opt_name(b"Server", n, b"Optional"));
         let noptional = host.get_option(&optional_opt);
@@ -2660,6 +2720,7 @@ pub fn init_servers_host<H: OptionsHost>(
         let definition = nactive.is_some()
             || nname.is_some()
             || nlevel.is_some()
+            || npriority.is_some()
             || ngroup.is_some()
             || nhost.is_some()
             || nport.is_some()
@@ -2667,7 +2728,6 @@ pub fn init_servers_host<H: OptionsHost>(
             || nusername.is_some()
             || npassword.is_some()
             || nconnections.is_some()
-            || njoingroup.is_some()
             || ntls.is_some()
             || ncipher.is_some()
             || nretention.is_some();
@@ -2696,7 +2756,7 @@ pub fn init_servers_host<H: OptionsHost>(
                 ncipher.as_deref(),
                 c_atoi_or_default(nconnections.as_deref(), 1),
                 c_atoi_or_default(nretention.as_deref(), 0),
-                c_atoi_or_default(nlevel.as_deref(), 0),
+                server_level(npriority.as_deref(), nlevel.as_deref()),
                 c_atoi_or_default(ngroup.as_deref(), 0),
                 optional,
                 cert_verif_level as u32,
@@ -3489,6 +3549,7 @@ impl<'a> RustOptions<'a> {
                 self.config_warn(&msg);
                 true
             }
+            NameCheck::Removed => true,
             NameCheck::Invalid => {
                 let msg = format_bytes_msg(&[b"Invalid option \"", optname.to_bytes(), b"\""]);
                 self.config_error(&msg);
@@ -4086,6 +4147,7 @@ impl NzbgetRsOptions {
                 self.config_warn(&msg);
                 true
             }
+            NameCheck::Removed => true,
             NameCheck::Invalid => {
                 let msg = format_bytes_msg(&[b"Invalid option \"", optname.to_bytes(), b"\""]);
                 self.config_error(&msg);

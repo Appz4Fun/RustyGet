@@ -36,7 +36,7 @@ RustyGet is a Usenet downloader that started as a fork of [NZBGet](https://githu
 | Area | NZBGet | RustyGet |
 |---|---|---|
 | Language | C++ | C++ moving to Rust module by module, each port proven identical by differential tests |
-| An article missing on every server | Lost, and left to par2 repair or failure | Fetched from a matching file in another copy of the release. A borrowed yEnc article must fit its place in the file, and, where they're available, it's checked against its yEnc checksum (with the default `CrcCheck=yes`) and the download's par2 block checksums |
+| An article missing on every server | Lost, and left to par2 repair or failure | Fetched from a matching file in another copy of the release. A borrowed yEnc article must fit its place in the file, and, where they're available, it's checked against its yEnc checksum and the download's par2 block checksums |
 | Duplicates of a release | Spare downloads, tried one after another from scratch | One fleet: copies lend each other articles, bytes, and par2 recovery volumes |
 | Byte-identical copies | Not detected | **Twins** proven by par2 checksums (MD5, 16 KB hash, and length of every file); other encodes are **alts**, kept mainly as failover backups |
 | Not enough par2 blocks | Repair fails | Repairs with the fewest recovery volumes of a twin that cover the damage |
@@ -70,7 +70,7 @@ The same release usually exists as many postings: reposts, listings on several i
 1. **Check every copy on your servers.** RustyGet checks a sample of each posting's articles on all of your news servers at once, and downloads a few in full to verify their checksums. It marks copies of the same posting that the add-on couldn't see.
 2. **Rank.** Copies that are alive come first, then unknown, then dead. Within a group, the most complete copy wins, then the one whose size is closest to the fleet's median, which is usually the release's own packaging.
 3. **Queue the best, keep the rest.** The top copy downloads, and the others wait in history as scored backups, with their measured health.
-4. **Borrow, repair, fail over.** During the download, a missing article comes from a matching file in another copy. A yEnc article must fit its place in the file, and, where they're available, it's checked against its yEnc checksum (with the default `CrcCheck=yes`) and the download's par2 block checksums. [Duplicate fleets](https://appz4fun.github.io/RustyGet/duplicate-fleets.html#making-sure-the-bytes-are-right) lists when a check can't run. Holes are patched from verified bytes. If the copy can't complete, the best backup takes over within seconds, and the add-on follows the duplicate key to the new download.
+4. **Borrow, repair, fail over.** During the download, a missing article comes from a matching file in another copy. A yEnc article must fit its place in the file, and, where they're available, it's checked against its yEnc checksum and the download's par2 block checksums. [Duplicate fleets](https://appz4fun.github.io/RustyGet/duplicate-fleets.html#making-sure-the-bytes-are-right) lists when a check can't run. Holes are patched from verified bytes. If the copy can't complete, the best backup takes over within seconds, and the add-on follows the duplicate key to the new download.
 
 RustyGet can also search on its own: with `DupeSearch=yes`, it queries NZBHydra2 for more copies of each new download, checks them the same way, and adds the live ones as backups.
 

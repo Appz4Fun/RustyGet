@@ -1,4 +1,4 @@
-nzbget_options = ['ParCheck=auto', 'ParQuick=no', 'PostStrategy=rocket']
+nzbget_options = ['ParCheck=auto', 'PostStrategy=rocket']
 
 def test_parchecker_healthy(nserv, nzbget):
 	hist = nzbget.download_nzb('parchecker2.nzb')

@@ -500,3 +500,19 @@
 }
 #ConfigContent .config-lock-note .material-icon { font-size: 16px; color: var(--accent); }
 #ConfigContent .config-lock-note a { font-weight: 600; }
+
+/* ---------------------------------------------------------------- helpers */
+
+/* a checkbox beside a field, such as "Allow other computers" under Listen address */
+#ConfigContent .config-inline-check {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	margin: 6px 0 0;
+	font-size: 13px;
+	color: var(--label-secondary);
+	cursor: pointer;
+}
+#ConfigContent .config-inline-check input { margin: 0; accent-color: var(--accent-fill); }
+#ConfigContent div.config-option-tile > .controls > .config-listen { justify-self: stretch; }
+#ConfigContent .config-listen > input { width: 100%; }

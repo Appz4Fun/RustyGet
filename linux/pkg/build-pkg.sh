@@ -131,7 +131,6 @@ for ARCH in $ARCHS; do
         -e "s|^DestDir=.*|DestDir=$\{MainDir\}/completed|g" \
         -e "s|^InterDir=.*|InterDir=$\{MainDir\}/intermediate|g" \
         -e "s|^AuthorizedIP=.*|AuthorizedIP=127.0.0.1|g" \
-        -e 's|^UpdateCheck=.*|UpdateCheck=none|g' \
         -e 's|^UMask=.*|UMask=0002|g' \
         "${SHARE}nzbget.conf"
 

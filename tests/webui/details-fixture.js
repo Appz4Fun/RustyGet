@@ -107,10 +107,10 @@ function configOptions() {
   const values = new Map(template.split('\n').filter(line => /^[A-Za-z0-9$].*=/.test(line))
     .map(line => { const eq = line.indexOf('='); return [line.slice(0, eq).trim(), line.slice(eq + 1).trim()]; }));
   for (const [name, value] of Object.entries({
-    'Server1.Host': 'news.example.invalid', 'Server1.Name': 'Primary provider', 'Server1.Active': 'yes', 'Server1.Level': '0',
+    'Server1.Host': 'news.example.invalid', 'Server1.Name': 'Primary provider', 'Server1.Active': 'yes', 'Server1.Priority': '1',
     'Server2.Host': 'block.example.invalid', 'Server2.Name': 'Block account', 'Server2.Active': 'yes', 'Server2.Level': '1',
     'Category1.Name': 'Movies', 'Category2.Name': 'TV', ControlUsername: '', ControlPassword: '',
-    DestDir: '/mnt/20tb/rustyget/dst', InterDir: '/mnt/nvme/rustyget/inter', Unpack: 'yes', UpdateCheck: 'none'
+    DestDir: '/mnt/20tb/rustyget/dst', InterDir: '/mnt/nvme/rustyget/inter', Unpack: 'yes'
   })) values.set(name, value);
   return { template, options: [...values].map(([Name, Value]) => ({ Name, Value })) };
 }

@@ -40,7 +40,6 @@ sed -e 's|^MainDir=.*|MainDir=/var/lib/rustyget/downloads|' \
     -e 's|^UnrarCmd=.*|UnrarCmd=unrar|' \
     -e 's|^SevenZipCmd=.*|SevenZipCmd=7zz|' \
     -e 's|^AuthorizedIP=.*|AuthorizedIP=127.0.0.1|' \
-    -e 's|^UpdateCheck=.*|UpdateCheck=none|' \
     -e 's|^UMask=.*|UMask=0002|' \
     rustyget.conf > "$STAGE/usr/share/rustyget/rustyget.conf"
 chmod 0644 "$STAGE/usr/share/rustyget/rustyget.conf"

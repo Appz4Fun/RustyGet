@@ -1115,10 +1115,8 @@ pub fn validate_unpack_section(
 
 #[allow(clippy::too_many_arguments)]
 pub fn validate_check_and_repair_section(
-    crc_check: bool,
     par_check: i32,
     par_repair: bool,
-    par_quick: bool,
     par_buffer: i32,
     par_threads: i32,
     hw_threads: usize,
@@ -1130,13 +1128,6 @@ pub fn validate_check_and_repair_section(
     par_time_limit: i32,
     mut emit: impl FnMut(&str, Severity, &[u8]),
 ) {
-    if !crc_check {
-        emit(
-            "CrcCheck",
-            Severity::Info,
-            b"Normally, 'CrcCheck' should be enabled to better detect download errors and for quick par-verification",
-        );
-    }
     // Options::EParCheck: pcAuto = 0, pcAlways = 1, pcForce = 2, pcManual = 3
     if par_repair {
         match par_check {
@@ -1163,13 +1154,6 @@ pub fn validate_check_and_repair_section(
             "ParRepair",
             Severity::Warning,
             b"'ParRepair' is off. Corrupted files won't be automatically repaired",
-        );
-    }
-    if !par_quick && par_repair {
-        emit(
-            "ParQuick",
-            Severity::Info,
-            b"'ParQuick' is off. Files will be verified by reading from disk, which is slower",
         );
     }
     if par_repair {
@@ -1245,8 +1229,6 @@ pub fn validate_check_and_repair_section(
 #[allow(clippy::too_many_arguments)]
 pub fn validate_download_queue_section(
     flush_queue: bool,
-    continue_partial: bool,
-    propagation_delay: i32,
     article_cache: i32,
     direct_write: bool,
     write_buffer: i32,
@@ -1267,18 +1249,6 @@ pub fn validate_download_queue_section(
             b"'FlushQueue' is enabled while 'SkipWrite' is enabled: flushed data may not be written to disk",
         );
     }
-    if continue_partial {
-        emit(
-            "ContinuePartial",
-            Severity::Info,
-            b"Disabling 'ContinuePartial' may slightly reduce disk access and is recommended on fast connections",
-        );
-    }
-    emit_if_not_ok(
-        &mut emit,
-        "PropagationDelay",
-        check_positive_num(b"PropagationDelay", propagation_delay),
-    );
 
     let cache_status = if article_cache < 0 {
         HealthStatus::error("'ArticleCache' option must not be negative")
@@ -1640,11 +1610,7 @@ pub fn validate_security_section(
     mut emit: impl FnMut(&str, Severity, &[u8]),
 ) {
     let ip_status = required_option(b"ControlIP", input.control_ip).and_then(|| {
-        if input.control_ip == b"0.0.0.0" {
-            HealthStatus::info(
-                "'ControlIP' is '0.0.0.0', allowing connections from any IP. Client mode will default to 127.0.0.1 to connect",
-            )
-        } else if input.control_ip.starts_with(b"/") || input.control_ip.starts_with(b".") {
+        if input.control_ip.starts_with(b"/") || input.control_ip.starts_with(b".") {
             if cfg!(windows) {
                 HealthStatus::error("Using Unix domain sockets is not supported on Windows")
             } else {
@@ -3146,7 +3112,7 @@ fn push_health_option(options: &mut Vec<HealthOptionEntry>, name: &str, sev: Sev
 }
 
 fn build_health_sections(input: &SystemHealthDiagnoseInput<'_>) -> Vec<HealthSectionEntry> {
-    let mut sections = Vec::with_capacity(13);
+    let mut sections: Vec<HealthSectionEntry> = Vec::with_capacity(13);
 
     // 1. Paths
     {
@@ -3276,8 +3242,6 @@ fn build_health_sections(input: &SystemHealthDiagnoseInput<'_>) -> Vec<HealthSec
         let mut options = Vec::new();
         validate_download_queue_section(
             input.flush_queue,
-            input.continue_partial,
-            input.propagation_delay,
             input.article_cache,
             input.direct_write,
             input.write_buffer,
@@ -3337,10 +3301,8 @@ fn build_health_sections(input: &SystemHealthDiagnoseInput<'_>) -> Vec<HealthSec
     {
         let mut options = Vec::new();
         validate_check_and_repair_section(
-            input.crc_check,
             input.par_check,
             input.par_repair,
-            input.par_quick,
             input.par_buffer,
             input.par_threads,
             input.hw_threads,
@@ -3470,7 +3432,48 @@ fn build_health_sections(input: &SystemHealthDiagnoseInput<'_>) -> Vec<HealthSec
         });
     }
 
+    drop_setting_commentary(&mut sections);
     sections
+}
+
+/// Warnings that mean something is broken or won't work as configured. Every
+/// other warning, and every info, only comments on a choice the user made: the
+/// Settings page explains those as the option is set (presets, locked options),
+/// so health checks leave them out. Errors are always kept.
+const KEPT_WARNINGS: [&[u8]; 13] = [
+    b"' are identical that can lead to unexpected behavior",
+    b"Writable check failed",
+    b"Logging is enabled, but 'LogFile' is set to empty",
+    b"Category name is empty",
+    b"Duplicate category name",
+    b"URL is required",
+    b"URL does not start with",
+    b"' have the same URL",
+    b"'DupeSearch' is enabled while",
+    b"option must not be negative",
+    b"'FormAuth' is enabled but no form users",
+    b"'SecureControl' is enabled but",
+    b"Cipher specified but TLS is disabled",
+];
+
+fn health_shown(severity: Severity, message: &[u8]) -> bool {
+    match severity {
+        Severity::Error => true,
+        Severity::Warning => KEPT_WARNINGS
+            .iter()
+            .any(|kept| message.windows(kept.len()).any(|w| w == *kept)),
+        _ => false,
+    }
+}
+
+fn drop_setting_commentary(sections: &mut [HealthSectionEntry]) {
+    for sec in sections {
+        sec.issues.retain(|i| health_shown(i.severity, &i.message));
+        sec.options.retain(|o| health_shown(o.severity, &o.message));
+        for sub in &mut sec.subsections {
+            sub.options.retain(|o| health_shown(o.severity, &o.message));
+        }
+    }
 }
 
 fn write_xml_node_escaped(out: &mut Vec<u8>, raw: &[u8]) {

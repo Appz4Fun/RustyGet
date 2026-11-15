@@ -4082,6 +4082,14 @@ var Config = (new function($)
 	var SERVER_PANE_MIN_WIDTH = 1180;
 	var serverEditing = 0;
 	var serverSaving = false;
+	// while a server is being saved, the page-wide save waits: its write could be
+	// overtaken by the server's and lose the other changes
+	var pageSaving = false;
+	function setServerSaving(on)
+	{
+		serverSaving = on;
+		$('#ConfigSaveBar_Save, #Config_Save').prop('disabled', on || pageSaving);
+	}
 
 	function serverDetails(multiid)
 	{
@@ -4297,7 +4305,7 @@ var Config = (new function($)
 	this.saveServer = function(multiid, forceOptimize)
 	{
 		multiid = parseInt(multiid);
-		if (serverSaving)
+		if (serverSaving || pageSaving)
 		{
 			return;
 		}
@@ -4311,7 +4319,7 @@ var Config = (new function($)
 			setServerStatus(serverText('restored_first', 'Settings were restored from a backup: use Save and reload first.'), 'error');
 			return;
 		}
-		serverSaving = true;
+		setServerSaving(true);
 		$('.config-server-save, .config-cipher__optimize', $ConfigData).prop('disabled', true);
 		setServerStatus(serverText('saving', 'Saving…'), 'busy');
 		var request = serverOnlySaveRequest();
@@ -4329,7 +4337,7 @@ var Config = (new function($)
 				}
 				else
 				{
-					serverSaving = false;
+					setServerSaving(false);
 				}
 				return;
 			}
@@ -4359,7 +4367,7 @@ var Config = (new function($)
 
 	function serverSaveFailed(message)
 	{
-		serverSaving = false;
+		setServerSaving(false);
 		$('.config-server-save, .config-cipher__optimize', $ConfigData).prop('disabled', false);
 		setServerStatus(message, 'error');
 	}
@@ -4451,7 +4459,7 @@ var Config = (new function($)
 		if (new Date().getTime() - waitedForCipher > 15 * 60 * 1000)
 		{
 			waitedForCipher = 0;
-			serverSaving = false;
+			setServerSaving(false);
 			$('.config-server-save, .config-cipher__optimize', $ConfigData).prop('disabled', false);
 			setServerStatus(serverText('cipher_busy_gave_up', 'Saved, but another cipher test is still running, so RustyGet was not reloaded. Save again once it finishes.'), 'error');
 			return;
@@ -4470,7 +4478,7 @@ var Config = (new function($)
 		Refresher.pause();
 		var done = function(text, kind)
 		{
-			serverSaving = false;
+			setServerSaving(false);
 			$('.config-server-save, .config-cipher__optimize', $ConfigData).prop('disabled', false);
 			Refresher.resume(true);
 			setServerStatus(prefix + text, kind);
@@ -4883,6 +4891,11 @@ var Config = (new function($)
 	this.saveChanges = function()
 	{
 		$LeaveConfigDialog.modal('hide');
+		if (serverSaving)
+		{
+			setServerStatus(serverText('save_wait', 'A server is still being saved. Save the other changes once it is done.'), 'busy');
+			return;
+		}
 		if (typeof TlsCipherDialog !== 'undefined' && !TlsCipherDialog.canSaveSettings())
 		{
 			TlsCipherDialog.showSaveBlocked();
@@ -4937,12 +4950,16 @@ var Config = (new function($)
 
 	function showSaveBanner()
 	{
+		pageSaving = true;
 		$('#Config_Save').attr('disabled', 'disabled');
+		$('.config-server-save, .config-cipher__optimize', $ConfigData).prop('disabled', true);
 	}
 
 	function removeSaveBanner()
 	{
+		pageSaving = false;
 		$('#Config_Save').removeAttr('disabled');
+		$('.config-server-save, .config-cipher__optimize', $ConfigData).prop('disabled', serverSaving);
 	}
 
 	function saveCompleted(result)

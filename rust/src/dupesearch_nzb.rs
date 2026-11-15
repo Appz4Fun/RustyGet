@@ -1382,6 +1382,9 @@ pub fn donor_check_items_guarded(
         stop: std::sync::atomic::AtomicBool,
         mutex: std::sync::Mutex<(Vec<Vec<DonorAnswer>>, Vec<bool>, usize)>,
         cond: std::sync::Condvar,
+        /// walkers still on their pass; when none are left, articles every
+        /// server left unreached cannot settle, so the check ends
+        walking: std::sync::atomic::AtomicUsize,
         _keepalive: Option<std::sync::Arc<dyn Send + Sync>>,
     }
 
@@ -1405,6 +1408,7 @@ pub fn donor_check_items_guarded(
             count,
         )),
         cond: std::sync::Condvar::new(),
+        walking: std::sync::atomic::AtomicUsize::new(servers.len()),
         _keepalive: keepalive,
     });
     // Rebind gates so their settled closure reads `state.final_verdict[i]`
@@ -1426,13 +1430,18 @@ pub fn donor_check_items_guarded(
         let st = state.clone();
         let gt = gates_arc.clone();
         std::thread::spawn(move || {
-            struct WalkerGuard;
+            struct WalkerGuard(std::sync::Arc<SharedCheckState>);
             impl Drop for WalkerGuard {
                 fn drop(&mut self) {
                     DONOR_WALKERS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                    let _held = self.0.mutex.lock().unwrap_or_else(|e| e.into_inner());
+                    self.0
+                        .walking
+                        .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                    self.0.cond.notify_all();
                 }
             }
-            let _guard = WalkerGuard;
+            let _guard = WalkerGuard(st.clone());
             let server = &st.servers[s];
             let mut cursor = 0usize;
             while cursor < st.items.len() {
@@ -1505,7 +1514,11 @@ pub fn donor_check_items_guarded(
     let deadline =
         std::time::Instant::now() + std::time::Duration::from_millis(budget_ms.max(10) as u64);
     let mut guard = state.mutex.lock().unwrap_or_else(|e| e.into_inner());
-    while guard.2 > 0 && !donor_stopping() && std::time::Instant::now() < deadline {
+    while guard.2 > 0
+        && state.walking.load(std::sync::atomic::Ordering::SeqCst) > 0
+        && !donor_stopping()
+        && std::time::Instant::now() < deadline
+    {
         let now = std::time::Instant::now();
         let wait_dur = deadline
             .saturating_duration_since(now)
@@ -5751,6 +5764,20 @@ mod tests {
         );
         assert_eq!((h.present, h.missing, h.error), (0, 0, 0));
         assert_eq!(h.alive(), -1.0);
+        // articles no server reached do not hold the check open until its
+        // budget runs out: it ends once the walkers are through
+        let start = donor_now_ms();
+        let h = donor_check_items(
+            &[busy_s.clone()],
+            &donor_plan(&ids("busy2", 40), &no_groups(), &everything(0).sample),
+            30_000,
+        );
+        assert_eq!((h.present, h.missing, h.error), (0, 0, 0));
+        assert!(
+            donor_now_ms() - start < 5_000,
+            "{} ms",
+            donor_now_ms() - start
+        );
 
         let (paused_s, paused_t) = make_server(1);
         paused_t.auth_fails.store(true, Ordering::SeqCst);

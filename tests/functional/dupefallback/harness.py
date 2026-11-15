@@ -6121,14 +6121,14 @@ def _yenc_part(data, name='a.rar'):
             + lines + b'\r\n=yend size=%d part=1 pcrc32=%08x\r\n' % (len(data), crc))
 
 
-def _rar4_head(method):
+def _rar4_head(method, main_flags=0):
     """The start of a rar4 volume holding "movie.mkv" packed with ``method``
-    (0x30 store, 0x33 normal compression)."""
+    (0x30 store, 0x33 normal compression), with real header CRCs."""
     import struct
     name = b'movie.mkv'
-    main = struct.pack('<HBHH', 0, 0x73, 0, 13) + b'\0' * 6
-    head = struct.pack('<HBHH', 0, 0x74, 0x8000, 32 + len(name)) + struct.pack(
-        '<IIBIIBBHI', 1_000_000, 1_000_000, 3, 0, 0, 29, method, len(name), 0) + name
+    main = generators._rar3_block(struct.pack('<HBHH', 0, 0x73, main_flags, 13) + b'\0' * 6)
+    head = generators._rar3_block(struct.pack('<HBHH', 0, 0x74, 0x8000, 32 + len(name)) + struct.pack(
+        '<IIBIIBBHI', 1_000_000, 1_000_000, 3, 0, 0, 29, method, len(name), 0) + name)
     return b'Rar!\x1a\x07\x00' + main + head + b'\xaa' * 256
 
 
@@ -6197,8 +6197,7 @@ def scenario_fleetencryptedlast(daemon, t):
     although one of them is the healthiest."""
     daemon.fake_nntp.alive = set()
     same = _payload(400_000, 7101)
-    enc = _rar4_head(0x30)
-    enc = enc[:10] + bytes([0x80]) + enc[11:]   # main header flag: encrypted headers
+    enc = _rar4_head(0x30, main_flags=0x80)   # main header flag: encrypted headers
     api = daemon.wait_ready()
     reply = _fleet(daemon, [
         ('Show.S01E01.enc1', _fleet_copy(daemon, 'e1', 'a.rar', 400_000, enc, _payload(400_000, 7102))),

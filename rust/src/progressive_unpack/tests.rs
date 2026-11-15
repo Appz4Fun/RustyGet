@@ -2239,3 +2239,68 @@ fn protection_upgrade_is_skipped_when_the_handle_budget_cannot_fit_it() {
         "{log:?}"
     );
 }
+
+/// PR 430's scenario on this branch: 60 volumes, 11 damaged and repaired in place, volume count
+/// known. The repaired output is moved by the session, never copied.
+#[test]
+fn repaired_output_with_many_damaged_volumes_is_moved_not_copied() {
+    struct Counted(Damaged, u64);
+    impl VolumeFeed for Counted {
+        fn volume(&mut self, path: &Path) -> VolumeView {
+            self.0.volume(path)
+        }
+        fn wait_repaired(&mut self, c: &mut dyn FnMut() -> bool) -> bool {
+            self.0.wait_repaired(c)
+        }
+        fn expected_volumes(&self) -> u64 {
+            self.1
+        }
+    }
+    let t = TestDir::new("many_damaged_moved");
+    let chunk = 50_000;
+    let data = pattern(60 * chunk);
+    let vols = rar5_volumes("movie.mkv", &data, chunk);
+    let first = write_set(&t.dl(), &vols);
+    let mut holes = Vec::new();
+    let mut repair = Vec::new();
+    for i in (3..vols.len() - 1).step_by(5) {
+        let path = t.dl().join(volume_name(i, vols.len()));
+        let p = payload_offset(&vols[i], chunk) as u64;
+        let mut dmg = vols[i].clone();
+        dmg[(p + 10_000) as usize..(p + 18_000) as usize].fill(0);
+        std::fs::write(&path, &dmg).unwrap();
+        holes.push((path.clone(), vec![(p + 10_000, 8_000)]));
+        repair.push((path, vols[i].clone()));
+    }
+    let feed = Counted(
+        Damaged {
+            holes,
+            repair,
+            handed: false,
+        },
+        vols.len() as u64,
+    );
+    let req = Request {
+        first_volume: &first,
+        dest: &t.out(),
+        password: "",
+        overwrite: Overwrite::Always,
+        on_wait: None,
+    };
+    let mut log = Vec::new();
+    let mut copied: Outputs = Vec::new();
+    let r = extract_recording(
+        &req,
+        Box::new(feed),
+        &mut |_, m: &str| log.push(m.to_string()),
+        &mut || false,
+        Some(&mut copied),
+    );
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+    assert!(moved(&log), "{log:?}");
+    assert!(
+        copied.is_empty(),
+        "copied into place instead of moved: {copied:?}"
+    );
+}

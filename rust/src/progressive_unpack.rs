@@ -1674,7 +1674,7 @@ fn fits_session_declaration(
     let Some(members) = set_members(first, password) else {
         return false;
     };
-    if members.windows_names || members.duplicate_names {
+    if members.names_differ || members.duplicate_names {
         return false;
     }
     let v = inventory.volumes.len() as u64;
@@ -1867,6 +1867,9 @@ struct SetMembers {
     count: u64,
     max_depth: u64,
     windows_names: bool,
+    /// A Windows-made member whose name Windows path rules change (a backslash or one of
+    /// `<>:"|?*`): zipfast would place it elsewhere than the copy path.
+    names_differ: bool,
     duplicate_names: bool,
 }
 
@@ -1877,6 +1880,7 @@ fn set_members(first: &Path, password: &str) -> Option<SetMembers> {
         count: 0,
         max_depth: 0,
         windows_names: false,
+        names_differ: false,
         duplicate_names: false,
     };
     let mut seen = std::collections::HashSet::new();
@@ -1890,6 +1894,8 @@ fn set_members(first: &Path, password: &str) -> Option<SetMembers> {
             out.count += metas.len() as u64;
             out.duplicate_names |= metas.len() > 1 || !seen.insert(name.clone());
             out.windows_names |= metas.iter().any(|m| m.windows_names);
+            out.names_differ |= metas.iter().any(|m| m.windows_names)
+                && name.iter().any(|b| b"\\<>:\"|?*".contains(b));
             out.max_depth = out.max_depth.max(path_depth(&name));
         }
         match zipfast::volume::next_volume(&p) {

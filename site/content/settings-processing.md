@@ -24,7 +24,7 @@ Review `ParBuffer` and `ParThreads` against available memory and CPU capacity.
 | 500 MB (default) | 28 MB | 96% |
 | 1024 MB | 61 MB | 100% |
 
-A 100 GB release posted with 3,000 to 5,000 par2 blocks (20 to 33 MB each) needs about 370 to 580 MB; with 2,000 blocks (50 MB each), about 850 MB. The memory is only taken while a damaged release is being repaired. When a release doesn't fit, its log says how much it needs: "par2 blocks need N MB of ParBuffer". `ParPauseQueue` and `ParTimeLimit` control how repair work interacts with downloads. A successful check or repair appears in the download's History details.
+A 100 GB release posted with 3,000 to 5,000 par2 blocks (20 to 33 MB each) needs about 370 to 580 MB; with 2,000 blocks (50 MB each), about 850 MB. A download with par2 files holds its live repair memory until it finishes, and running downloads share `ParBuffer`, so the table holds for one download at a time. When a release doesn't fit, its log says how much it needs: "par2 blocks need N MB of ParBuffer". `ParPauseQueue` and `ParTimeLimit` control how repair work interacts with downloads. A successful check or repair appears in the download's History details.
 
 Key options: [`CrcCheck`](options.md#crccheck), [`ParCheck`](options.md#parcheck), [`ParRepair`](options.md#parrepair), [`ParQuick`](options.md#parquick), [`HealthCheck`](options.md#healthcheck), [`ParBuffer`](options.md#parbuffer), [`ParThreads`](options.md#parthreads).
 

@@ -2533,9 +2533,9 @@ impl NzbgetRsQueueCoordinator {
     /// refusal is told in MB with the ParBuffer it would take.
     fn live_par_deferred_message(error: &crate::parchecker::RepairError) -> String {
         if let crate::parchecker::RepairError::StreamingMemoryLimit {
+            context: "bounded live PAR startup",
             required_bytes,
             limit_bytes,
-            ..
         } = error
         {
             let mb = |b: u64| b.div_ceil(1024 * 1024);
@@ -5849,6 +5849,15 @@ mod tests {
         assert!(msg.contains("128 MB is available"), "{msg}");
         assert!(msg.contains("set ParBuffer to 146 MB or more"), "{msg}");
         assert!(!msg.contains("bytes"), "{msg}");
+        // a busy pool or a fixed cap is not a ParBuffer question
+        let busy = crate::parchecker::RepairError::StreamingMemoryLimit {
+            context: "shared live PAR reservation",
+            required_bytes: 128 * 1024 * 1024,
+            limit_bytes: 500 * 1024 * 1024,
+        };
+        let msg = super::NzbgetRsQueueCoordinator::live_par_deferred_message(&busy);
+        assert!(!msg.contains("set ParBuffer"), "{msg}");
+        assert!(msg.contains("shared live PAR reservation"), "{msg}");
     }
 
     #[test]

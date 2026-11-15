@@ -451,6 +451,7 @@ pub fn match_command(method: &[u8]) -> c_int {
         b"savepem" => 60,
         b"checkcastore" => 61,
         b"hostlookup" => 56,
+        b"backbones" => 62,
         _ => 0,
     }
 }
@@ -2508,6 +2509,8 @@ mod tests {
         assert!(is_safe_command(45));
         assert!(!is_safe_command(31));
         assert!(!is_safe_command(56));
+        assert_eq!(match_command(b"backbones"), 62);
+        assert!(!is_safe_command(62));
         assert!(!is_safe_command(0));
     }
 
@@ -6445,6 +6448,11 @@ unsafe fn execute_xml_command(
             let host_name = cur.next_str().map(|off| cur.decode_at(off, is_json)).unwrap_or_default();
             let port = cur.next_int().unwrap_or(0);
             (false, crate::hostlookup::rpc_reply(is_json, &host_name, port))
+        }
+        // backbones(host): the bundled backbone list and what is known about host
+        62 => {
+            let host_name = cur.next_str().map(|off| cur.decode_at(off, is_json)).unwrap_or_default();
+            (false, crate::backbones::rpc_reply(is_json, &host_name))
         }
         _ => err_resp(default_err_code, default_err_text),
     }

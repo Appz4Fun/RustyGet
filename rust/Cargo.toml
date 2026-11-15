@@ -23,6 +23,7 @@ quick-xml = { version = "0.41", features = ["encoding"] }
 md-5 = "0.11"
 openssl = "0.10"
 openssl-sys = "0.9"
+yaml-rust2 = { version = "0.10", default-features = false }
 
 [dev-dependencies]
 # Kernel diagnostics only; complete C++/Rust caller measurements remain the gate.

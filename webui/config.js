@@ -216,7 +216,7 @@ var Options = (new function($)
 		{
 			return values;
 		}
-		var names = {}, raw = {};
+		var names = {}, raw = {}, dropped = [];
 		values.forEach(function(v) { names[v.Name.toLowerCase()] = true; raw[v.Name.toLowerCase()] = v.Value; });
 		// the daemon expands ${Option} references, so Server2.Level=${Server1.Level} is that level
 		function expand(value, depth)
@@ -235,6 +235,27 @@ var Options = (new function($)
 				v.Name = 'LogToFile';
 				v.Value = expand(v.Value, 0).trim().toLowerCase() === 'none' ? 'no' : 'yes';
 			}
+			// ServerN.Group (0-99) became ServerN.Backbone: a group above 0 is the backbone "Group N"
+			// (an empty Backbone next to it still takes the group, as the daemon does)
+			var g = /^Server([0-9]+)\.Group$/i.exec(v.Name);
+			if (g)
+			{
+				var group = parseInt(expand(v.Value, 0), 10) || 0;
+				var backbone = values.filter(function(o) { return o.Name.toLowerCase() === ('Server' + g[1] + '.Backbone').toLowerCase(); })[0];
+				if (!backbone)
+				{
+					v.Name = 'Server' + g[1] + '.Backbone';
+					v.Value = group > 0 ? 'Group ' + group : '';
+				}
+				else
+				{
+					if (!$.trim(expand(backbone.Value, 0)) && group > 0)
+					{
+						backbone.Value = 'Group ' + group;
+					}
+					dropped.push(v);
+				}
+			}
 			var m = /^Server([0-9]+)\.Level$/i.exec(v.Name);
 			if (m && !names[('Server' + m[1] + '.Priority').toLowerCase()])
 			{
@@ -243,6 +264,7 @@ var Options = (new function($)
 				v.Value = String(Math.max(0, Math.min(4, level)) + 1);
 			}
 		});
+		dropped.forEach(function(v) { values.splice(values.indexOf(v), 1); });
 		return values;
 	}
 	this.upgradeValues = upgradeValues;
@@ -1957,6 +1979,7 @@ var Config = (new function($)
 			'Server.Active',
 			'Server.Name',
 			'Server.Host',
+			'Server.Backbone',
 			'Server.Port',
 			'Server.Encryption',
 			'Server.Username',
@@ -1981,7 +2004,6 @@ var Config = (new function($)
 			'MainDir',
 			'Server.Priority',
 			'Server.Optional',
-			'Server.Group',
 			'Server.Retention',
 			'Server.CertVerification',
 			'Server.IpVersion',
@@ -2628,6 +2650,10 @@ var Config = (new function($)
 			{
 				enhanceHost(option, control);
 			}
+			else if (optionFamily(option.name) === 'Server.Backbone' && control.is('input') && !control.hasClass('config-backbone-source'))
+			{
+				enhanceBackbone(option, control);
+			}
 			if (optionFamily(option.name) === 'Server.Port' && control.is('input'))
 			{
 				enhanceHostPort(control);
@@ -2640,7 +2666,8 @@ var Config = (new function($)
 	function syncControls()
 	{
 		$('select.config-cipher__menu', $ConfigData).each(function() { syncCipher($(this)); });
-		$('select.config-select', $ConfigData).not('.config-cipher__menu').each(function()
+		$('input.config-backbone-source', $ConfigData).each(function() { syncBackbone($(this)); });
+		$('select.config-select', $ConfigData).not('.config-cipher__menu').not('.config-backbone__menu').each(function()
 		{
 			var group = $(this).next('.btn-switch');
 			var value = switchGetValue(group);
@@ -4656,7 +4683,274 @@ var Config = (new function($)
 		input.on('input.lookup change.lookup', function(e)
 		{
 			scheduleHostLookup(box, e.type === 'change' ? 0 : 700, e.type === 'change');
+			scheduleBackboneSuggestion(this, e.type === 'change' ? 0 : 700, true);
 		});
+	}
+
+	/*** SERVER BACKBONE ***********************************************************/
+
+	// Servers on one backbone read from one article store: a 430 from one of them
+	// means the others are not asked. The menu lists the bundled backbones
+	// (rust/data/backbones.yaml, read by the daemon), "Other" for a name of your
+	// own, and "Independent". The host name suggests a backbone: a confirmed news
+	// host fills it in (unless one was picked by hand), a provider's domain only
+	// offers its backbones to click, and an unknown host gets a warning.
+	var BACKBONE_CUSTOM = '\u0001custom';
+	var backboneList = null;
+	var backboneListWaiters = [];
+
+	function backboneText(key, text)
+	{
+		return I18n.defaultValue('config_backbone_' + key, text);
+	}
+
+	function withBackboneList(done)
+	{
+		if (backboneList)
+		{
+			done(backboneList);
+			return;
+		}
+		backboneListWaiters.push(done);
+		if (backboneListWaiters.length > 1)
+		{
+			return;
+		}
+		RPC.call('backbones', [''], function(result)
+		{
+			backboneList = (result && result.Backbones || []).map(function(b) { return b.Name; });
+			var waiters = backboneListWaiters;
+			backboneListWaiters = [];
+			waiters.forEach(function(w) { w(backboneList); });
+		}, function()
+		{
+			backboneList = [];
+			var waiters = backboneListWaiters;
+			backboneListWaiters = [];
+			waiters.forEach(function(w) { w(backboneList); });
+		});
+	}
+
+	function sameBackbone(a, b)
+	{
+		var norm = function(v) { return $.trim(String(v || '')).replace(/\s+/g, ' ').toLowerCase(); };
+		return norm(a) === norm(b);
+	}
+
+	function enhanceBackbone(option, input)
+	{
+		var wrap = $('<div class="config-backbone"></div>');
+		var select = $('<select class="config-select config-backbone__menu"></select>')
+			.attr('aria-label', backboneText('label', 'Backbone'));
+		var hint = $('<div class="config-backbone__hint" aria-live="polite" hidden></div>');
+		input.before(wrap);
+		wrap.append(select).append(input).append(hint);
+		input.addClass('config-backbone-source').attr('placeholder', backboneText('custom_placeholder', 'Name of the backbone'));
+		select.on('change', function()
+		{
+			if (this.value === BACKBONE_CUSTOM)
+			{
+				// keep the current name to edit; the menu stays on Other while typing
+				input.data('customMode', true).prop('hidden', false).trigger('focus');
+			}
+			else
+			{
+				input.removeData('customMode').val(this.value).prop('hidden', true);
+			}
+			input.removeData('autoValue').trigger('input').trigger('change');
+			refreshChangeState();
+		});
+		input.on('input.backbone change.backbone', function()
+		{
+			if (!sameBackbone(input.val(), input.data('autoValue')))
+			{
+				input.removeData('autoValue');
+			}
+		});
+		input.on('blur.backbone', function()
+		{
+			if (input.data('customMode'))
+			{
+				input.removeData('customMode');
+				syncBackbone(input);
+			}
+		});
+		withBackboneList(function()
+		{
+			syncBackbone(input);
+			var host = findOptionByName('Server' + option.multiid + '.Host');
+			if (host)
+			{
+				scheduleBackboneSuggestion(document.getElementById(host.formId), 0, false);
+			}
+		});
+	}
+
+	function syncBackbone(input)
+	{
+		var select = input.siblings('select.config-backbone__menu');
+		if (!select.length)
+		{
+			return;
+		}
+		var value = $.trim(input.val() || '');
+		var list = backboneList || [];
+		select.empty();
+		select.append($('<option value=""></option>').text(backboneText('independent', 'Independent (shares articles with no other server)')));
+		list.forEach(function(name) { select.append($('<option></option>').attr('value', name).text(name)); });
+		var known = !value || list.some(function(name) { return sameBackbone(name, value); });
+		if (value && !known)
+		{
+			select.append($('<option class="config-backbone__own"></option>').attr('value', value).text(value));
+		}
+		select.append($('<option></option>').attr('value', BACKBONE_CUSTOM).text(backboneText('custom', 'Other (type a name)…')));
+		if (input.data('customMode'))
+		{
+			select.val(BACKBONE_CUSTOM);
+			input.prop('hidden', false);
+			return;
+		}
+		var match = list.filter(function(name) { return sameBackbone(name, value); })[0];
+		select.val(match || value);
+		if (!input.is(':focus'))
+		{
+			input.prop('hidden', true);
+		}
+	}
+
+	function setBackbone(input, value, auto)
+	{
+		input.val(value).trigger('input').trigger('change');
+		if (auto)
+		{
+			input.data('autoValue', value);
+		}
+		syncBackbone(input);
+		refreshChangeState();
+	}
+
+	// `edited`: the host was just typed, so a confirmed backbone may be filled in. When the
+	// page opens it is only offered: an empty Backbone may be a deliberate Independent.
+	function scheduleBackboneSuggestion(hostControl, delay, edited)
+	{
+		var option = hostControl && findOptionById(hostControl.id);
+		if (!option)
+		{
+			return;
+		}
+		var $host = $(hostControl);
+		clearTimeout($host.data('backboneTimer'));
+		$host.data('backboneTimer', setTimeout(function() { suggestBackbone(option.multiid, edited); }, delay));
+	}
+
+	function suggestBackbone(multiid, edited)
+	{
+		var hostOption = findOptionByName('Server' + multiid + '.Host');
+		var backboneOption = findOptionByName('Server' + multiid + '.Backbone');
+		if (!hostOption || !backboneOption)
+		{
+			return;
+		}
+		var input = $('#' + backboneOption.formId);
+		var hint = input.siblings('.config-backbone__hint');
+		var host = $.trim(getOptionValue(hostOption) || '');
+		var seq = (input.data('suggestSeq') || 0) + 1;
+		input.data('suggestSeq', seq);
+		if (!host || /\$\{/.test(host))
+		{
+			hint.empty().prop('hidden', true);
+			return;
+		}
+		RPC.call('backbones', [host], function(result)
+		{
+			if (seq !== input.data('suggestSeq'))
+			{
+				return;
+			}
+			renderBackboneSuggestion(input, hint, host, result || {}, edited);
+		}, function()
+		{
+			hint.empty().prop('hidden', true);
+		});
+	}
+
+	function renderBackboneSuggestion(input, hint, host, result, edited)
+	{
+		var current = $.trim(input.val() || '');
+		var filled = input.data('autoValue');
+		if (edited && result.Match !== 'confirmed' && filled !== undefined && sameBackbone(current, filled))
+		{
+			// filled in for the previous host, which this one is not: back to empty
+			input.removeData('autoValue');
+			setBackbone(input, '', false);
+			current = '';
+		}
+		var matches = result.Matches || [];
+		hint.empty().removeAttr('data-state').prop('hidden', true);
+		var note = function(state, text)
+		{
+			hint.attr('data-state', state).prop('hidden', false)
+				.append($('<p class="config-backbone__note"></p>').text(text));
+		};
+		if (result.Match === 'confirmed' && matches.length)
+		{
+			var auto = input.data('autoValue');
+			if (edited && (!current || (auto !== undefined && sameBackbone(current, auto))))
+			{
+				setBackbone(input, matches[0], true);
+				note('ok', host + ' ' + backboneText('reads_from', 'reads from') + ' ' + matches[0] + '. ' +
+					backboneText('filled', 'Filled in for you.'));
+			}
+			else if (!current)
+			{
+				note('suggest', host + ' ' + backboneText('reads_from', 'reads from') + ' ' + matches[0] + '. ' +
+					backboneText('confirm', 'Use it?'));
+				addBackboneButtons(input, hint, matches);
+			}
+			else if (!sameBackbone(current, matches[0]))
+			{
+				note('warn', host + ' ' + backboneText('reads_from', 'reads from') + ' ' + matches[0] + ', ' +
+					backboneText('not_picked', 'not the backbone picked here.'));
+				addBackboneButtons(input, hint, matches);
+			}
+			return;
+		}
+		if (result.Match === 'suggested' && matches.length)
+		{
+			if (matches.some(function(name) { return sameBackbone(name, current); }))
+			{
+				return;
+			}
+			note('suggest', matches.length === 1 ?
+				host + ' ' + backboneText('looks_like', 'looks like') + ' ' + result.Provider + ', ' +
+					backboneText('sells_one', 'which sells') + ' ' + matches[0] + '. ' + backboneText('confirm', 'Use it?') :
+				result.Provider + ' ' + backboneText('sells_many', 'sells access to several backbones:') + ' ' +
+					matches.join(', ') + '. ' + backboneText('pick_plan', 'Pick the one your plan uses.'));
+			addBackboneButtons(input, hint, matches);
+			return;
+		}
+		if (result.Match === 'unknown' && !current)
+		{
+			note('warn', backboneText('unknown', 'Unknown backbone for') + ' ' + host + '. ' +
+				backboneText('unknown_text', 'Pick one from the list, or choose Other to type a name. Leave it Independent if no other server shares its articles.'));
+		}
+	}
+
+	function addBackboneButtons(input, hint, names)
+	{
+		var row = $('<p class="config-backbone__picks"></p>');
+		names.forEach(function(name)
+		{
+			$('<button type="button" class="btn btn-small config-backbone__pick"></button>')
+				.text(backboneText('use', 'Use') + ' ' + name)
+				.on('click', function()
+				{
+					setBackbone(input, name, false);
+					hint.empty().prop('hidden', true);
+				})
+				.appendTo(row);
+		});
+		hint.append(row);
 	}
 
 	// A new port means new connect times: look the host up again.

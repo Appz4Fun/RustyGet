@@ -199,6 +199,7 @@ const SECTIONS: [(&CStr, usize, &[&CStr]); 4] = [
             c".connections",
             c".cipher",
             c".group",
+            c".backbone",
             c".retention",
             c".optional",
             c".notes",
@@ -904,6 +905,8 @@ mod tests {
         }
         assert_eq!(validate_option_name(c"Server1.Priority", &mut no), NameCheck::Valid);
         assert_eq!(validate_option_name(c"Server1.Level", &mut no), NameCheck::Valid);
+        assert_eq!(validate_option_name(c"Server1.Group", &mut no), NameCheck::Valid);
+        assert_eq!(validate_option_name(c"Server1.Backbone", &mut no), NameCheck::Valid);
         assert_eq!(validate_option_name(c"Server.JoinGroup", &mut no), NameCheck::Invalid);
     }
 
@@ -2723,8 +2726,14 @@ pub fn init_servers_host<H: OptionsHost>(
         let npriority = host.get_option(&cstring(options_format_indexed_opt_name(
             b"Server", n, b"Priority",
         )));
+        // Backbone replaced the numbered Group; an old Group above 0 still counts
         let ngroup = host.get_option(&cstring(options_format_indexed_opt_name(
             b"Server", n, b"Group",
+        )));
+        let nbackbone = host.get_option(&cstring(options_format_indexed_opt_name(
+            b"Server",
+            n,
+            b"Backbone",
         )));
         let nhost = host.get_option(&cstring(options_format_indexed_opt_name(
             b"Server", n, b"Host",
@@ -2812,6 +2821,7 @@ pub fn init_servers_host<H: OptionsHost>(
             || nlevel.is_some()
             || npriority.is_some()
             || ngroup.is_some()
+            || nbackbone.is_some()
             || nhost.is_some()
             || nport.is_some()
             || noptional.is_some()
@@ -2847,7 +2857,10 @@ pub fn init_servers_host<H: OptionsHost>(
                 c_atoi_or_default(nconnections.as_deref(), 1),
                 c_atoi_or_default(nretention.as_deref(), 0),
                 server_level(npriority.as_deref(), nlevel.as_deref()),
-                c_atoi_or_default(ngroup.as_deref(), 0),
+                crate::backbones::intern(&crate::backbones::server_backbone(
+                    nbackbone.as_deref().map(CStr::to_bytes),
+                    ngroup.as_deref().map(CStr::to_bytes),
+                )),
                 optional,
                 cert_verif_level as u32,
             );

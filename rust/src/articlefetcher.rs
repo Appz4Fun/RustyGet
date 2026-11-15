@@ -22,9 +22,11 @@ use crate::twin::NzbEntry;
 ///   `ints[2]=read_chunk`, `ints[3]=server_count`; `i64s[0]=speed_limit`,
 ///   `i64s[1]=cur_speed` (if `speed_limit > 0`), `i64s[2]=mom_speed` (if `speed_limit > 0`)
 /// - `op == 1`: server at index `a1` -> `ints[0]=active`, `ints[1]=norm_level`, `ints[2]=group`,
-///   `ints[3]=id`, `ints[4]=max_connections`, `ints[5]=join_group`, `strs[0]=name`; returns `server_ptr`
+///   `ints[3]=id`, `ints[4]=max_connections`, `ints[5]=join_group`, `ints[6]=retention`,
+///   `strs[0]=name`; returns `server_ptr`
 /// - `op == 2`: `GetConnection(level=a1, nullptr, failed_ptrs=buf[..a2])` -> returns `conn_ptr` (0 if none),
 ///   `ints[0]=reused`, `ints[1]=server_id`, `ints[2]=max_connections`, `ints[3]=join_group`,
+///   `ints[4]=group`, `ints[5]=retention`,
 ///   `i64s[0]=server_ptr`, `strs[0]=server_name`
 /// - `op == 3`: release connection `p1` (`a1=keep_connected`) -> `AddServerStats`, `Disconnect` if `!a1`
 ///   or `csCancelled`, `FreeConnection(conn, true)`
@@ -104,6 +106,7 @@ pub unsafe extern "C" fn native_nntp_fetch_host(
             *ints.add(3) = s.id;
             *ints.add(4) = s.max_connections;
             *ints.add(5) = c_int::from(s.join_group);
+            *ints.add(6) = s.retention;
             *strs.add(0) = s.name.as_ptr();
             Arc::as_ptr(s) as usize
         }
@@ -132,6 +135,7 @@ pub unsafe extern "C" fn native_nntp_fetch_host(
             *ints.add(2) = s.max_connections;
             *ints.add(3) = c_int::from(s.join_group);
             *ints.add(4) = s.group;
+            *ints.add(5) = s.retention;
             *i64s.add(0) = (Arc::as_ptr(s) as usize) as i64;
             *strs.add(0) = s.name.as_ptr();
             conn_ptr as usize
@@ -254,6 +258,8 @@ pub struct FetchedArticle {
     pub success: bool,
     pub retry: bool,
     pub transient: bool,
+    /// the server answered `430 no such article` (see `nntp::BackboneMiss`)
+    pub not_found_430: bool,
 }
 
 static UNREACHABLE_SERVERS: OnceLock<Mutex<BTreeSet<i32>>> = OnceLock::new();
@@ -438,8 +444,11 @@ impl ArticleFetcher {
 
     pub fn fetch(&self, message_id: &[u8], groups: &[Vec<u8>]) -> FetchedArticle {
         let mut result = FetchedArticle::default();
-        let mut failed_servers: Vec<(usize, i32, i32)> = Vec::new();
+        // servers this article failed on (only those: a login error or "too many
+        // connections" says nothing about a server's backbone siblings) ...
         let mut failed_ptrs: Vec<usize> = Vec::new();
+        // ... and backbones that answered 430 for it
+        let mut missing: Vec<crate::nntp::BackboneMiss> = Vec::new();
         let mut transient_attempts: BTreeMap<usize, i32> = BTreeMap::new();
         let mut stale_connections: BTreeMap<usize, i32> = BTreeMap::new();
 
@@ -459,8 +468,10 @@ impl ArticleFetcher {
 
             st = query_host_status(self.host);
             let mut eligible = 0i32;
+            // the failed servers plus every server a backbone miss rules out, at any level
+            let mut excluded_ptrs = failed_ptrs.clone();
             for idx in 0..st.server_count {
-                let mut s_ints = [0 as c_int; 6];
+                let mut s_ints = [0 as c_int; 7];
                 let mut s_strs = [ptr::null::<c_char>(); 1];
                 let s_ptr = unsafe {
                     (self.host)(
@@ -476,14 +487,14 @@ impl ArticleFetcher {
                         0,
                     )
                 };
+                let ruled_out = crate::nntp::backbone_missing(&missing, s_ints[2], s_ints[6]);
+                if ruled_out && !excluded_ptrs.contains(&s_ptr) {
+                    excluded_ptrs.push(s_ptr);
+                }
                 if s_ints[0] == 0 || s_ints[1] != level {
                     continue;
                 }
-                let s_group = s_ints[2];
-                let server_failed = failed_servers
-                    .iter()
-                    .any(|&(fp, fg, fl)| fp == s_ptr || (fg > 0 && fg == s_group && fl == level));
-                if !server_failed {
+                if !ruled_out && !failed_ptrs.contains(&s_ptr) {
                     eligible += 1;
                 }
             }
@@ -513,6 +524,7 @@ impl ArticleFetcher {
             let mut join_group = false;
             let mut server_ptr: usize = 0;
             let mut server_group_of_conn: i32 = 0;
+            let mut server_retention: i32 = 0;
             let mut server_name: Vec<u8> = Vec::new();
 
             while conn == 0 && !self.is_stopped() {
@@ -521,25 +533,25 @@ impl ArticleFetcher {
                     std::thread::sleep(Duration::from_millis(100));
                     continue;
                 }
-                let mut c_ints = [0 as c_int; 5];
+                let mut c_ints = [0 as c_int; 6];
                 let mut c_i64s = [0i64; 1];
                 let mut c_strs = [ptr::null::<c_char>(); 1];
                 conn = unsafe {
                     (self.host)(
                         2,
                         level,
-                        failed_ptrs.len() as c_int,
+                        excluded_ptrs.len() as c_int,
                         0,
                         ptr::null(),
                         c_ints.as_mut_ptr(),
                         c_i64s.as_mut_ptr(),
                         c_strs.as_mut_ptr(),
-                        if failed_ptrs.is_empty() {
+                        if excluded_ptrs.is_empty() {
                             ptr::null_mut()
                         } else {
-                            failed_ptrs.as_mut_ptr() as *mut u8
+                            excluded_ptrs.as_mut_ptr() as *mut u8
                         },
-                        failed_ptrs.len(),
+                        excluded_ptrs.len(),
                     )
                 };
                 if conn != 0 {
@@ -549,6 +561,7 @@ impl ArticleFetcher {
                     join_group = c_ints[3] != 0;
                     server_group_of_conn = c_ints[4];
                     server_ptr = c_i64s[0] as usize;
+                    server_retention = c_ints[5];
                     server_name = unsafe { ptr_to_bytes(c_strs[0]) };
                 } else {
                     std::thread::sleep(Duration::from_millis(5));
@@ -613,7 +626,15 @@ impl ArticleFetcher {
                 set_server_unreachable(server_id, true);
             }
 
-            failed_servers.push((server_ptr, server_group_of_conn, level));
+            if result.not_found_430 && server_group_of_conn > 0 {
+                let miss = crate::nntp::BackboneMiss {
+                    group: server_group_of_conn,
+                    retention: server_retention,
+                };
+                if !missing.contains(&miss) {
+                    missing.push(miss);
+                }
+            }
             failed_ptrs.push(server_ptr);
         }
 
@@ -773,6 +794,9 @@ impl ArticleFetcher {
         }
         let resp_first = unsafe { *r_strs[0] as u8 };
         if resp_first != b'2' {
+            result.not_found_430 = unsafe { CStr::from_ptr(r_strs[0]) }
+                .to_bytes()
+                .starts_with(b"430");
             let mut log = b"Stream repair: article ".to_vec();
             log.extend_from_slice(msg_slice);
             log.extend_from_slice(b" not available on ");

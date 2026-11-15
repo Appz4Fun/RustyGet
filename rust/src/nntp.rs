@@ -427,51 +427,29 @@ pub fn article_dl_is_retention_failure(
     (age_days > retention_days, age_days)
 }
 
-/// Matches the `allServersOnLevelFailed` loop in `ArticleDownloader::Run`.
+/// One server as `article_dl_all_servers_on_level_failed` sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelCandidate {
+    pub id: i32,
+    pub level: i32,
+    pub group: i32,
+    pub retention: i32,
+    /// active, has connections, and not an optional server that is blocked
+    pub available: bool,
+}
+
+/// Matches the `allServersOnLevelFailed` loop in `ArticleDownloader::Run`: every
+/// available server on `level` either failed this article itself or is on a backbone that answered 430 for it (see [`BackboneMiss`]).
 pub fn article_dl_all_servers_on_level_failed(
     level: i32,
-    cand_ids: &[i32],
-    cand_levels: &[i32],
-    cand_groups: &[i32],
-    cand_avail: &[u8],
+    candidates: &[LevelCandidate],
     failed_ids: &[i32],
-    failed_levels: &[i32],
-    failed_groups: &[i32],
+    missing: &[BackboneMiss],
 ) -> bool {
-    let n = cand_ids
-        .len()
-        .min(cand_levels.len())
-        .min(cand_groups.len())
-        .min(cand_avail.len());
-    let f = failed_ids
-        .len()
-        .min(failed_levels.len())
-        .min(failed_groups.len());
-
-    for i in 0..n {
-        if cand_levels[i] != level {
-            continue;
-        }
-        if cand_avail[i] == 0 {
-            continue;
-        }
-        let cid = cand_ids[i];
-        let clvl = cand_levels[i];
-        let cgrp = cand_groups[i];
-        let mut server_failed = false;
-        for j in 0..f {
-            if failed_ids[j] == cid
-                || (failed_groups[j] > 0 && failed_groups[j] == cgrp && failed_levels[j] == clvl)
-            {
-                server_failed = true;
-                break;
-            }
-        }
-        if !server_failed {
-            return false;
-        }
-    }
-    true
+    candidates
+        .iter()
+        .filter(|c| c.level == level && c.available)
+        .all(|c| failed_ids.contains(&c.id) || backbone_missing(missing, c.group, c.retention))
 }
 
 /// Matches the post-loop status normalization in `ArticleDownloader::Run`.
@@ -914,28 +892,45 @@ pub fn server_pool_can_advance_level(
     !(norm_level == level && active && !(optional && blocked))
 }
 
-/// Returns whether a candidate server matches `wantServer` (or its group).
-pub fn server_pool_match_want_server(
-    has_want: bool,
-    cand_id: i32,
-    want_id: i32,
-    want_group: i32,
-    cand_group: i32,
-) -> bool {
-    !has_want || cand_id == want_id || (want_group > 0 && want_group == cand_group)
+/// Returns whether a candidate server matches `wantServer`. Only that server: another
+/// server on its backbone is another provider, with its own account and retention.
+pub fn server_pool_match_want_server(has_want: bool, cand_id: i32, want_id: i32) -> bool {
+    !has_want || cand_id == want_id
 }
 
-/// Returns whether a candidate server matches an ignored server (or its same-level group).
-pub fn server_pool_match_ignore_server(
-    cand_id: i32,
-    ign_id: i32,
-    ign_group: i32,
-    cand_group: i32,
-    ign_norm_level: i32,
-    cand_norm_level: i32,
-) -> bool {
+/// An article a server answered `430 no such article` for. The other servers on
+/// the same backbone read from the same article store, so the ones that keep
+/// articles no longer than that server are not asked for it, at any priority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackboneMiss {
+    /// the backbone id (`group` of the server, 0 = independent)
+    pub group: i32,
+    /// retention of the server that answered 430, in days (0 = not set)
+    pub retention: i32,
+}
+
+/// Whether `miss` rules out a server on backbone `cand_group` with retention
+/// `cand_retention`. A sibling that may keep articles longer is still asked:
+/// both retentions must be set and the sibling's no longer, or both unset.
+pub fn backbone_miss_covers(miss: &BackboneMiss, cand_group: i32, cand_retention: i32) -> bool {
+    miss.group > 0
+        && miss.group == cand_group
+        && ((miss.retention <= 0 && cand_retention <= 0)
+            || (miss.retention > 0 && cand_retention > 0 && cand_retention <= miss.retention))
+}
+
+/// Whether any of `misses` rules out the candidate server.
+pub fn backbone_missing(misses: &[BackboneMiss], cand_group: i32, cand_retention: i32) -> bool {
+    misses
+        .iter()
+        .any(|m| backbone_miss_covers(m, cand_group, cand_retention))
+}
+
+/// Returns whether a candidate server is one the article already failed on.
+/// Only the server itself: a login error, "too many connections" or a timeout
+/// on one server says nothing about its backbone siblings.
+pub fn server_pool_match_ignore_server(cand_id: i32, ign_id: i32) -> bool {
     cand_id == ign_id
-        || (ign_group > 0 && ign_group == cand_group && ign_norm_level == cand_norm_level)
 }
 
 // ============================================================================
@@ -1184,6 +1179,8 @@ pub struct ServerPoolServerView {
     pub active: bool,
     pub optional: bool,
     pub blocked: bool,
+    /// retention in days (0 = not set), for [`BackboneMiss`]
+    pub retention: i32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1196,15 +1193,20 @@ pub struct ServerPoolConnView {
 /// Pure Rust implementation of `ServerPool::GetConnection` + `ServerPool::LockedGetConnection`.
 /// Scans levels starting at `start_level`, unblocking any servers whose connections pass the
 /// availability/want/active/blocked check (recording their indices in `out_unblock_server_indices`),
-/// filtering against `ignore_servers`, and selecting a candidate or advancing to the next level
-/// if all active servers on the current level are optional and blocked.
+/// filtering against `ignore_servers` (ids) and backbones in `missing`, and selecting a candidate or advancing to the next level if all active servers
+/// on the current level are optional and blocked. Without a wanted server, a level whose every
+/// active server is on a backbone that answered 430 for this article is passed over, so an
+/// article never waits on a level it can't use. Servers in `ignore_servers` (failed, or waiting
+/// out a temporary error) never cause a level skip: the downloader decides when to move on.
+#[allow(clippy::too_many_arguments)]
 pub fn server_pool_select_connection(
     start_level: i32,
     levels: &[i32],
     servers: &[ServerPoolServerView],
     conns: &[ServerPoolConnView],
     want_server: Option<(i32, i32)>,
-    ignore_servers: &[(i32, i32, i32)],
+    ignore_servers: &[i32],
+    missing: &[BackboneMiss],
     rand_val: i32,
     out_unblock_server_indices: &mut Vec<usize>,
 ) -> Option<(usize, i32)> {
@@ -1215,9 +1217,27 @@ pub fn server_pool_select_connection(
 
     let mut server_blocked: Vec<bool> = servers.iter().map(|s| s.blocked).collect();
     let mut unblocked_set = vec![false; servers.len()];
+    let ruled_out = |srv: &ServerPoolServerView| {
+        want_server.is_none()
+            && (ignore_servers
+                .iter()
+                .any(|&ig| server_pool_match_ignore_server(srv.id, ig))
+                || backbone_missing(missing, srv.group, srv.retention))
+    };
 
     let mut level = start_level;
-    while server_pool_has_available_level_conns(
+    loop {
+        if level >= 0
+            && (level as usize) < levels.len()
+            && want_server.is_none()
+            && level_ruled_out(servers, level, &|srv: &ServerPoolServerView| {
+                backbone_missing(missing, srv.group, srv.retention)
+            })
+        {
+            level += 1;
+            continue;
+        }
+        if !server_pool_has_available_level_conns(
         level,
         levels.len(),
         if level >= 0 && (level as usize) < levels.len() {
@@ -1226,18 +1246,19 @@ pub fn server_pool_select_connection(
             0
         },
     ) {
+            break;
+        }
         let mut candidates = Vec::new();
         for (conn_idx, conn) in conns.iter().enumerate() {
             if conn.server_index >= servers.len() {
                 continue;
             }
             let srv = &servers[conn.server_index];
-            let (has_want, want_id, want_group) = match want_server {
-                Some((id, group)) => (true, id, group),
-                None => (false, 0, 0),
+            let (has_want, want_id) = match want_server {
+                Some((id, _)) => (true, id),
+                None => (false, 0),
             };
-            let match_want =
-                server_pool_match_want_server(has_want, srv.id, want_id, want_group, srv.group);
+            let match_want = server_pool_match_want_server(has_want, srv.id, want_id);
             let is_blocked = !conn.connected && server_blocked[conn.server_index];
             if !conn.in_use
                 && srv.active
@@ -1245,22 +1266,7 @@ pub fn server_pool_select_connection(
                 && match_want
                 && (conn.connected || !is_blocked)
             {
-                let mut use_conn = true;
-                if !has_want {
-                    for &(ig_id, ig_group, ig_norm_level) in ignore_servers {
-                        if server_pool_match_ignore_server(
-                            srv.id,
-                            ig_id,
-                            ig_group,
-                            srv.group,
-                            ig_norm_level,
-                            srv.norm_level,
-                        ) {
-                            use_conn = false;
-                            break;
-                        }
-                    }
-                }
+                let use_conn = !ruled_out(srv);
                 server_blocked[conn.server_index] = false;
                 if !unblocked_set[conn.server_index] {
                     unblocked_set[conn.server_index] = true;
@@ -1293,6 +1299,24 @@ pub fn server_pool_select_connection(
     }
 
     None
+}
+
+/// Whether every active server on `level` is ruled out for the article, and
+/// the level has at least one active server (an empty level is not skipped
+/// here: the scan stops at it as before).
+fn level_ruled_out(
+    servers: &[ServerPoolServerView],
+    level: i32,
+    ruled_out: &dyn Fn(&ServerPoolServerView) -> bool,
+) -> bool {
+    let mut any = false;
+    for srv in servers.iter().filter(|s| s.norm_level == level && s.active) {
+        if !ruled_out(srv) {
+            return false;
+        }
+        any = true;
+    }
+    any
 }
 
 #[derive(Debug, Clone)]
@@ -1462,6 +1486,18 @@ impl ServerPoolModel {
         ignore_server_ids: &[i32],
         cur_time: i64,
     ) -> Option<usize> {
+        self.get_connection_missing(level, want_server_id, ignore_server_ids, &[], cur_time)
+    }
+
+    /// [`Self::get_connection`] for an article some backbones answered 430 for.
+    pub fn get_connection_missing(
+        &mut self,
+        level: i32,
+        want_server_id: Option<i32>,
+        ignore_server_ids: &[i32],
+        missing: &[BackboneMiss],
+        cur_time: i64,
+    ) -> Option<usize> {
         let srv_views: Vec<ServerPoolServerView> = self
             .sorted_server_ids
             .iter()
@@ -1480,6 +1516,7 @@ impl ServerPoolModel {
                     active: s.active,
                     optional: s.optional,
                     blocked,
+                    retention: 0,
                 }
             })
             .collect();
@@ -1505,15 +1542,6 @@ impl ServerPoolModel {
                 .find(|s| s.id == wid)
                 .map(|s| (s.id, s.group))
         });
-        let ignore_tuples: Vec<(i32, i32, i32)> = ignore_server_ids
-            .iter()
-            .filter_map(|&iid| {
-                self.servers
-                    .iter()
-                    .find(|s| s.id == iid)
-                    .map(|s| (s.id, s.group, s.norm_level))
-            })
-            .collect();
         let mut unblock_indices = Vec::new();
         let result = server_pool_select_connection(
             level,
@@ -1521,7 +1549,8 @@ impl ServerPoolModel {
             &srv_views,
             &conn_views,
             want_tuple,
-            &ignore_tuples,
+            ignore_server_ids,
+            missing,
             0,
             &mut unblock_indices,
         );
@@ -1596,6 +1625,108 @@ impl ServerPoolModel {
     pub fn changed(&mut self, cur_time: i64) {
         self.init_connections();
         self.close_unused_connections(cur_time);
+    }
+}
+
+#[cfg(test)]
+mod backbone_tests {
+    use super::*;
+
+    fn cand(id: i32, level: i32, group: i32, retention: i32) -> LevelCandidate {
+        LevelCandidate {
+            id,
+            level,
+            group,
+            retention,
+            available: true,
+        }
+    }
+
+    #[test]
+    fn a_430_rules_out_siblings_that_keep_articles_no_longer() {
+        let unset = BackboneMiss { group: 4, retention: 0 };
+        assert!(backbone_miss_covers(&unset, 4, 0));
+        // the sibling may keep articles longer: still asked
+        assert!(!backbone_miss_covers(&unset, 4, 3000));
+        let short = BackboneMiss { group: 4, retention: 1000 };
+        assert!(backbone_miss_covers(&short, 4, 1000));
+        assert!(backbone_miss_covers(&short, 4, 900));
+        assert!(!backbone_miss_covers(&short, 4, 4000));
+        assert!(!backbone_miss_covers(&short, 4, 0));
+        // other backbones and independent servers are never ruled out
+        assert!(!backbone_miss_covers(&short, 5, 900));
+        let independent = BackboneMiss { group: 0, retention: 0 };
+        assert!(!backbone_miss_covers(&independent, 0, 0));
+    }
+
+    #[test]
+    fn level_counts_as_failed_with_backbone_misses() {
+        // priority 1: servers 1 and 2 on backbone 7; priority 2: server 3 on backbone 7, server 4 on 8
+        let mut c = vec![cand(1, 0, 7, 0), cand(2, 0, 7, 0), cand(3, 1, 7, 0), cand(4, 1, 8, 0)];
+        let miss = [BackboneMiss { group: 7, retention: 0 }];
+        // server 1 answered 430: its sibling at the same and at the next priority are done too
+        assert!(article_dl_all_servers_on_level_failed(0, &c, &[1], &miss));
+        assert!(!article_dl_all_servers_on_level_failed(1, &c, &[1], &miss));
+        assert!(article_dl_all_servers_on_level_failed(1, &c, &[1, 4], &miss));
+        // server 1 refused the login or had too many connections (no 430): its
+        // sibling is still to be tried
+        assert!(!article_dl_all_servers_on_level_failed(0, &c, &[1], &[]));
+        // unavailable servers don't hold a level open
+        c[1].available = false;
+        assert!(article_dl_all_servers_on_level_failed(0, &c, &[1], &[]));
+    }
+
+    #[test]
+    fn select_passes_over_a_level_made_only_of_missing_backbones() {
+        let mut pool = ServerPoolModel::new();
+        pool.add_server(1, true, 0, false, 7, 1);
+        pool.add_server(2, true, 0, false, 7, 1);
+        pool.add_server(3, true, 1, false, 7, 1);
+        pool.add_server(4, true, 2, false, 8, 1);
+        pool.init_connections();
+        let miss = [BackboneMiss { group: 7, retention: 0 }];
+        // levels 0 and 1 are all backbone 7: the article goes straight to level 2
+        let con = pool.get_connection_missing(0, None, &[1], &miss, 1000).unwrap();
+        assert_eq!(pool.connections[con].server_id, 4);
+        // nothing left: no connection, and no wait on a level it can't use
+        assert!(pool.get_connection_missing(0, None, &[1], &miss, 1000).is_none());
+        // a wanted server (a retry of the same article on it) is not filtered
+        let mut pool = ServerPoolModel::new();
+        pool.add_server(1, true, 0, false, 7, 1);
+        pool.init_connections();
+        assert!(pool.get_connection_missing(0, Some(1), &[], &miss, 1000).is_some());
+    }
+
+    #[test]
+    fn an_ignored_server_never_moves_the_article_to_the_fill_level() {
+        // server 1 (priority 1) is waiting out a 481/502; server 2 is a priority-2 fill
+        // server: the article waits for server 1 instead of going to the fill server
+        let mut pool = ServerPoolModel::new();
+        pool.add_server(1, true, 0, false, 0, 1);
+        pool.add_server(2, true, 1, false, 0, 1);
+        pool.init_connections();
+        assert!(pool.get_connection_missing(0, None, &[1], &[], 1000).is_none());
+        // the same with both on one backbone and no 430
+        let mut pool = ServerPoolModel::new();
+        pool.add_server(1, true, 0, false, 7, 1);
+        pool.add_server(2, true, 1, false, 7, 1);
+        pool.init_connections();
+        assert!(pool.get_connection_missing(0, None, &[1], &[], 1000).is_none());
+    }
+
+    #[test]
+    fn a_wanted_server_is_only_that_server() {
+        // servers 1 and 2 share backbone 7 at one priority: a retry wanting server 1
+        // never lands on server 2 (another provider, another account)
+        let mut pool = ServerPoolModel::new();
+        pool.add_server(1, true, 0, false, 7, 1);
+        pool.add_server(2, true, 0, false, 7, 1);
+        pool.init_connections();
+        for _ in 0..2 {
+            if let Some(con) = pool.get_connection_missing(0, Some(1), &[], &[], 1000) {
+                assert_eq!(pool.connections[con].server_id, 1);
+            }
+        }
     }
 }
 
@@ -2116,7 +2247,9 @@ mod article_fetcher_tests {
             assert!(con4.is_none());
         }
 
-        // 5. IgnoreServersGroupedTest
+        // 5. IgnoreServersGroupedTest: a failed server rules out only itself (a
+        // login error or "too many connections" says nothing about its backbone);
+        // a 430 rules out its backbone
         {
             let mut pool = ServerPoolModel::new();
             pool.add_server(1, true, 0, false, 1, 2);
@@ -2126,21 +2259,23 @@ mod article_fetcher_tests {
             let con1 = pool.get_connection(0, None, &[1], 1000);
             let con2 = pool.get_connection(0, None, &[1], 1000);
             let con3 = pool.get_connection(0, None, &[1], 1000);
-            let con4 = pool.get_connection(0, None, &[1], 1000);
-            assert!(con1.is_none());
-            assert!(con2.is_none());
-            assert!(con3.is_none());
-            assert!(con4.is_none());
-
-            pool.add_server(3, true, 0, false, 2, 2);
-            pool.init_connections();
-
-            let con1 = pool.get_connection(0, None, &[1], 1000);
-            let con2 = pool.get_connection(0, None, &[1], 1000);
-            let con3 = pool.get_connection(0, None, &[1], 1000);
             assert!(con1.is_some());
             assert!(con2.is_some());
             assert!(con3.is_none());
+
+            let mut pool = ServerPoolModel::new();
+            pool.add_server(1, true, 0, false, 1, 2);
+            pool.add_server(2, true, 0, false, 1, 2);
+            pool.add_server(3, true, 0, false, 2, 2);
+            pool.init_connections();
+            let miss = [BackboneMiss { group: 1, retention: 0 }];
+            let con1 = pool.get_connection_missing(0, None, &[1], &miss, 1000);
+            let con2 = pool.get_connection_missing(0, None, &[1], &miss, 1000);
+            let con3 = pool.get_connection_missing(0, None, &[1], &miss, 1000);
+            assert!(con1.is_some());
+            assert!(con2.is_some());
+            assert!(con3.is_none());
+            assert!(pool.connections[con1.unwrap()].server_id == 3);
         }
 
         // 6-11. BlockServers variants

@@ -3018,7 +3018,18 @@ impl NzbgetRsServerPool {
         want_srv: Option<&RsNewsServer>,
         ignore_srvs: &[&RsNewsServer],
     ) -> *mut PooledNntpConn {
-        let conn = self.select_connection(level, want_srv, ignore_srvs, false);
+        self.get_connection_missing(level, want_srv, ignore_srvs, &[])
+    }
+
+    /// [`Self::get_connection`] for an article some backbones answered 430 for.
+    pub fn get_connection_missing(
+        &self,
+        level: i32,
+        want_srv: Option<&RsNewsServer>,
+        ignore_srvs: &[&RsNewsServer],
+        missing: &[crate::nntp::BackboneMiss],
+    ) -> *mut PooledNntpConn {
+        let conn = self.select_connection(level, want_srv, ignore_srvs, missing, false);
         if conn.is_null() && level >= 0 {
             self.download_starved_at_ms
                 .store(pool_now_ms(), Ordering::SeqCst);
@@ -3031,7 +3042,7 @@ impl NzbgetRsServerPool {
     /// handed out while a download was recently refused one.
     pub fn get_check_connection(&self, srv: &RsNewsServer) -> *mut PooledNntpConn {
         let nl = srv.norm_level.load(Ordering::SeqCst);
-        self.select_connection(nl, Some(srv), &[], true)
+        self.select_connection(nl, Some(srv), &[], &[], true)
     }
 
     /// [`Self::get_check_connection`] by server id.
@@ -3044,13 +3055,14 @@ impl NzbgetRsServerPool {
 
     /// Picks a free connection under the pool lock. `for_check`: the admission
     /// rule of [`check_connection_allowed`] is applied to the server that
-    /// actually supplies the connection (a group sibling may), and the check
+    /// actually supplies the connection, and the check
     /// occupancy is reserved in the same critical section.
     fn select_connection(
         &self,
         level: i32,
         want_srv: Option<&RsNewsServer>,
         ignore_srvs: &[&RsNewsServer],
+        missing: &[crate::nntp::BackboneMiss],
         for_check: bool,
     ) -> *mut PooledNntpConn {
         if level < 0 {
@@ -3081,6 +3093,7 @@ impl NzbgetRsServerPool {
                     cur_time,
                     retry_interval,
                 ),
+                retention: s.retention,
             })
             .collect();
 
@@ -3102,11 +3115,8 @@ impl NzbgetRsServerPool {
             .collect();
 
         let want_tuple = want_srv.map(|s| (s.id, s.group));
-        let ignore_tuples: Vec<(i32, i32, i32)> = if want_srv.is_none() {
-            ignore_srvs
-                .iter()
-                .map(|s| (s.id, s.group, s.norm_level.load(Ordering::SeqCst)))
-                .collect()
+        let ignore_ids: Vec<i32> = if want_srv.is_none() {
+            ignore_srvs.iter().map(|s| s.id).collect()
         } else {
             Vec::new()
         };
@@ -3119,7 +3129,8 @@ impl NzbgetRsServerPool {
             &srv_views,
             &conn_views,
             want_tuple,
-            &ignore_tuples,
+            &ignore_ids,
+            missing,
             rand_val,
             &mut unblock,
         );

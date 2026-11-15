@@ -53,37 +53,55 @@ pub fn is_dead(existing: i32, definitive_servers: i32, active_servers: i32) -> b
     existing < MIN_ALIVE_SAMPLES && definitive_servers > 0 && definitive_servers >= active_servers
 }
 
-/// Selects and sorts active servers for `DupeProbe::Measure`:
-/// filters to `active[i] != 0`, deduplicates positive `groups[i]` in iteration order,
-/// sorts by `(norm_levels[i], ids[i])`, and returns the sorted server `ids`.
+/// Selects and sorts active servers for `DupeProbe::Measure`: one entry per
+/// backbone (servers with the same positive `groups[i]` read from one article
+/// store) and one per independent server, sorted by `(norm_level, id)` of the
+/// entry's first server. Each entry lists the servers to try in order: the
+/// longest retention first (0 = not set counts as the longest), then by
+/// `(norm_level, id)`. A probe moves on to the next server of an entry only
+/// when the one before could not be reached, so a sibling with a full
+/// connection limit or a refused login never makes the backbone look empty.
 pub fn select_server_order(
     active: &[u8],
     groups: &[i32],
     norm_levels: &[i32],
+    retentions: &[i32],
     ids: &[i32],
-) -> Vec<i32> {
+) -> Vec<Vec<i32>> {
     let n = active
         .len()
         .min(groups.len())
         .min(norm_levels.len())
+        .min(retentions.len())
         .min(ids.len());
-    let mut seen_groups: Vec<i32> = Vec::new();
-    let mut order: Vec<(i32, i32)> = Vec::new();
+    let mut entries: Vec<(i32, Vec<usize>)> = Vec::new();
     for i in 0..n {
         if active[i] == 0 {
             continue;
         }
         let g = groups[i];
-        if g > 0 {
-            if seen_groups.contains(&g) {
-                continue;
-            }
-            seen_groups.push(g);
+        match entries.iter_mut().find(|(eg, _)| g > 0 && *eg == g) {
+            Some((_, members)) => members.push(i),
+            None => entries.push((g, vec![i])),
         }
-        order.push((norm_levels[i], ids[i]));
     }
-    order.sort_unstable();
-    order.into_iter().map(|(_, id)| id).collect()
+    let keep = |r: i32| if r <= 0 { i32::MAX } else { r };
+    let mut out: Vec<((i32, i32), Vec<i32>)> = entries
+        .into_iter()
+        .map(|(_, mut members)| {
+            let first = members
+                .iter()
+                .map(|&i| (norm_levels[i], ids[i]))
+                .min()
+                .unwrap_or_default();
+            members.sort_unstable_by_key(|&i| {
+                (std::cmp::Reverse(keep(retentions[i])), norm_levels[i], ids[i])
+            });
+            (first, members.into_iter().map(|i| ids[i]).collect())
+        })
+        .collect();
+    out.sort_unstable_by_key(|(first, _)| *first);
+    out.into_iter().map(|(_, members)| members).collect()
 }
 
 /// Evaluates the outcome and formats the log message for `DupeProbe::Run`.
@@ -452,6 +470,9 @@ impl NzbgetRsDupeProbe {
 
         let fresh = probed.insert(actual_server_id);
         let mut probed_server = false;
+        // a server that could not even connect (login refused, TLS, network) before
+        // answering anything does not count as reached: a sibling is asked instead
+        let mut never_answered = false;
         if fresh {
             self.set_conn(conn_ptr);
             let conn = unsafe { &*(conn_ptr as *const crate::net::PooledNntpConn) };
@@ -472,6 +493,7 @@ impl NzbgetRsDupeProbe {
                 if !unsafe { conn.connect() } {
                     result.unknown += remaining + 1;
                     result.unreachable = result.exists + result.missing == 0;
+                    never_answered = result.unreachable;
                     break;
                 }
 
@@ -549,7 +571,7 @@ impl NzbgetRsDupeProbe {
                     break;
                 }
             }
-            probed_server = true;
+            probed_server = !never_answered;
         }
 
         self.set_conn(0);
@@ -579,6 +601,7 @@ impl NzbgetRsDupeProbe {
         let mut active = Vec::new();
         let mut groups = Vec::new();
         let mut norm_levels = Vec::new();
+        let mut retentions = Vec::new();
         let mut ids = Vec::new();
         #[cfg(unix)]
         if let Some(pool) = crate::net::active_server_pool() {
@@ -586,26 +609,35 @@ impl NzbgetRsDupeProbe {
             active.reserve(srvs.len());
             groups.reserve(srvs.len());
             norm_levels.reserve(srvs.len());
+            retentions.reserve(srvs.len());
             ids.reserve(srvs.len());
             for s in &srvs {
                 active.push(u8::from(s.active.load(Ordering::SeqCst)));
                 groups.push(s.group);
                 norm_levels.push(s.norm_level.load(Ordering::SeqCst));
+                retentions.push(s.retention);
                 ids.push(s.id);
             }
         }
-        let order = select_server_order(&active, &groups, &norm_levels, &ids);
+        let order = select_server_order(&active, &groups, &norm_levels, &retentions, &ids);
         verdict.active_servers = order.len() as i32;
 
         let mut probed = BTreeSet::new();
         let start = now_sec();
-        for server_id in order {
-            if self.is_stopped() || now_sec() - start > i64::from(limit_sec) {
-                verdict.finished = false;
-                break;
+        'entries: for entry in order {
+            let mut reached = false;
+            let mut result = ServerResult::default();
+            for &server_id in &entry {
+                if self.is_stopped() || now_sec() - start > i64::from(limit_sec) {
+                    verdict.finished = false;
+                    break 'entries;
+                }
+                (reached, result) = self.probe_server(server_id, &mut probed);
+                if reached {
+                    break;
+                }
+                // could not use this one (full, blocked, login refused): try a sibling
             }
-
-            let (reached, result) = self.probe_server(server_id, &mut probed);
             if result.unreachable {
                 verdict.active_servers -= 1;
                 verdict.unreachable_servers += 1;
@@ -823,6 +855,20 @@ impl Drop for NzbgetRsDupeProbe {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn probe_order_is_one_entry_per_backbone_with_siblings_as_fallbacks() {
+        // ids 1..=5; 1 and 3 on backbone 7, 4 on backbone 8, 2 and 5 independent, 5 inactive
+        let active = [1, 1, 1, 1, 0];
+        let groups = [7, 0, 7, 8, 0];
+        let levels = [1, 0, 0, 2, 0];
+        let retentions = [3000, 0, 1000, 0, 0];
+        let ids = [1, 2, 3, 4, 5];
+        let order = select_server_order(&active, &groups, &levels, &retentions, &ids);
+        // sorted by the lowest (level, id) of each entry; inside a backbone the
+        // longest retention comes first
+        assert_eq!(order, vec![vec![2], vec![1, 3], vec![4]]);
+    }
 
     #[test]
     fn sample_indexes_and_classify() {

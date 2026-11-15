@@ -707,8 +707,13 @@ pub fn eval_fleet_member_health(
     (alive_pct, dead, member_complete)
 }
 
+/// Health share (percent alive) from which a fleet copy counts as healthy.
+pub const FLEET_HEALTHY_ALIVE: i32 = 75;
+
 /// `Fleet::Append` candidate ranking and copy interleaving.
-/// Usable members come before unknown, dead and broken ones; among them TWINs
+/// Healthy members (at least [`FLEET_HEALTHY_ALIVE`] percent alive) come first,
+/// then members whose health is not known, then weak, dead and broken ones;
+/// within each, TWINs
 /// go first, then borrowable ALTs, ALTs of unknown packaging and unborrowable
 /// ALTs (`kind`, a [`crate::donorkind::DonorKind`] as `u8`), each kind ordered
 /// by health and then by closeness to the typical size.
@@ -742,10 +747,14 @@ pub fn rank_fleet_candidates(
         sizes[sizes.len() / 2]
     };
 
+    // A copy known to miss many articles is no candidate for the lead however
+    // cheap its packaging: kind orders only copies with a high health check.
     let tier = |i: usize| -> i32 {
         if has_error[i] != 0 {
-            3
+            4
         } else if dead[i] != 0 {
+            3
+        } else if alive[i] >= 0 && alive[i] < FLEET_HEALTHY_ALIVE {
             2
         } else if alive[i] < 0 {
             1
@@ -4275,8 +4284,9 @@ mod tests {
         assert_eq!(count, 3);
         assert_eq!(ranked, [2, 0, 1]);
 
-        // TWINs by health, then borrowable, then unborrowable ALTs; a dead or
-        // unchecked member stays behind every usable one whatever its kind
+        // among healthy members TWINs first, then borrowable, then unborrowable
+        // ALTs; an unchecked member comes after them, a weak one (under
+        // FLEET_HEALTHY_ALIVE, here the 70% twin) after that, a dead one last
         let mut ranked = [0usize; 6];
         let count = rank_fleet_candidates(
             &[0, 0, 0, 0, 0, 0],
@@ -4288,7 +4298,22 @@ mod tests {
             &mut ranked,
         );
         assert_eq!(count, 6);
-        assert_eq!(ranked, [2, 1, 3, 0, 5, 4]);
+        assert_eq!(ranked, [2, 3, 0, 5, 1, 4]);
+
+        // live fleet 2026-11-15: a 13%-alive copy of unknown packaging ranked
+        // ahead of 100%-alive unborrowable (encrypted) copies
+        let mut ranked = [0usize; 3];
+        let count = rank_fleet_candidates(
+            &[0, 0, 0],
+            &[-1, -1, -1],
+            &[0, 0, 0],
+            &[13, 100, 100],
+            &[1000, 1000, 1000],
+            &[2, 3, 3],
+            &mut ranked,
+        );
+        assert_eq!(count, 3);
+        assert_eq!(ranked, [1, 2, 0]);
 
         assert_eq!(donor_sample_count(5000, 2, 20, 300), 100);
         assert_eq!(adjust_pipeline_depth(4, 500, 32), 8);

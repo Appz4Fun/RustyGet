@@ -268,7 +268,14 @@ pub fn print_copy(
         return Err("no file set".to_string());
     };
     let map: ContentMap =
-        ContentMapper::build_map_with_tls(&members, set, &sources, password, true)?;
+        ContentMapper::build_map_with_tls(&members, set, &sources, password, true).map_err(|e| {
+            // the mapper does not always say why; never log an empty reason
+            if e.trim().is_empty() {
+                "archive could not be mapped".to_string()
+            } else {
+                e
+            }
+        })?;
     let size = map.inner_size();
     if size <= 0 {
         return Err("empty payload".to_string());

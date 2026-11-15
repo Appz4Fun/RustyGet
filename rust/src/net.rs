@@ -3055,7 +3055,7 @@ impl NzbgetRsServerPool {
 
     /// Picks a free connection under the pool lock. `for_check`: the admission
     /// rule of [`check_connection_allowed`] is applied to the server that
-    /// actually supplies the connection (a group sibling may), and the check
+    /// actually supplies the connection, and the check
     /// occupancy is reserved in the same critical section.
     fn select_connection(
         &self,

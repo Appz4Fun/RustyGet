@@ -889,9 +889,10 @@ pub fn http_fetch(
 // NntpHealthServer (`NntpHealthTransportShared` & server pool cache)
 // ============================================================================
 
-static NNTP_KNOWN_SERVERS: OnceLock<
-    Mutex<BTreeMap<(i32, usize), (Arc<DonorServer>, Arc<AtomicUsize>)>>,
-> = OnceLock::new();
+type KnownHealthServer = (Arc<DonorServer>, Arc<AtomicUsize>, Arc<Mutex<Vec<i32>>>);
+
+static NNTP_KNOWN_SERVERS: OnceLock<Mutex<BTreeMap<(i32, usize), KnownHealthServer>>> =
+    OnceLock::new();
 
 pub fn nntp_health_servers(host_ctx: *mut c_void, host_cb: DupeHostFn) -> Vec<Arc<DonorServer>> {
     let map_mutex = NNTP_KNOWN_SERVERS.get_or_init(|| Mutex::new(BTreeMap::new()));
@@ -912,7 +913,7 @@ pub fn nntp_health_servers(host_ctx: *mut c_void, host_cb: DupeHostFn) -> Vec<Ar
             });
         }
     }
-    let representatives = backbone_representatives(&ranks);
+    let order = backbone_order(&ranks);
     let check_connections =
         crate::options::active_options().map_or(0, |o| o.scalars().dupe_check_connections);
     let mut list = Vec::new();
@@ -920,36 +921,44 @@ pub fn nntp_health_servers(host_ctx: *mut c_void, host_cb: DupeHostFn) -> Vec<Ar
         if active == 0 || max_conns == 0 {
             continue;
         }
-        if group > 0 && !representatives.contains(&server_id) {
-            continue;
-        }
+        // one health server per backbone: its best server, then the siblings in order
+        let servers = if group > 0 {
+            match order.get(&server_id) {
+                Some(ids) => ids.clone(),
+                None => continue,
+            }
+        } else {
+            vec![server_id]
+        };
         let wanted_cap = dupe_check_server_cap(max_conns, check_connections);
         let key = (server_id, host_cb as usize);
         let recreate = match known.get(&key) {
-            Some((srv, ctx_cell)) => {
+            Some((srv, ctx_cell, ids)) => {
                 ctx_cell.store(host_ctx as usize, Ordering::SeqCst);
+                *ids.lock().unwrap_or_else(|e| e.into_inner()) = servers.clone();
                 srv.cap() != wanted_cap
             }
             None => true,
         };
         if recreate {
             let ctx_cell = Arc::new(AtomicUsize::new(host_ctx as usize));
+            let ids = Arc::new(Mutex::new(servers));
             let transport = NntpHealthTransportShared {
-                server_id,
+                server_ids: ids.clone(),
                 host_ctx: ctx_cell.clone(),
                 host_cb,
             };
             let srv = Arc::new(DonorServer::new(wanted_cap, transport));
-            known.insert(key, (srv.clone(), ctx_cell));
+            known.insert(key, (srv.clone(), ctx_cell, ids));
             list.push(srv);
-        } else if let Some((srv, _)) = known.get(&key) {
+        } else if let Some((srv, _, _)) = known.get(&key) {
             list.push(srv.clone());
         }
     }
     list
 }
 
-/// A news server as [`backbone_representatives`] ranks it.
+/// A news server as [`backbone_order`] ranks it.
 #[derive(Debug, Clone, Copy)]
 struct HealthServerRank {
     id: i32,
@@ -959,26 +968,25 @@ struct HealthServerRank {
     level: i32,
 }
 
-/// The one server per backbone the health checks ask: servers on a backbone
-/// read from one article store, so asking more is wasted. The longest
-/// retention wins (0 = not set counts as the longest), then the lowest level,
-/// then the lowest id. Independent servers (group 0) are not listed.
-fn backbone_representatives(servers: &[HealthServerRank]) -> BTreeSet<i32> {
+/// The servers per backbone the health checks ask, keyed by the first one:
+/// servers on a backbone read from one article store, so one answer is
+/// enough, and the others are only asked when the first has no connection
+/// free (busy, blocked, login refused). The longest retention comes first
+/// (0 = not set counts as the longest), then the lowest level, then the
+/// lowest id. Independent servers (group 0) are not listed.
+fn backbone_order(servers: &[HealthServerRank]) -> BTreeMap<i32, Vec<i32>> {
     let keep = |r: i32| if r <= 0 { i32::MAX } else { r };
-    let mut best: BTreeMap<i32, HealthServerRank> = BTreeMap::new();
+    let mut by_group: BTreeMap<i32, Vec<HealthServerRank>> = BTreeMap::new();
     for s in servers.iter().filter(|s| s.usable && s.group > 0) {
-        let better = match best.get(&s.group) {
-            None => true,
-            Some(b) => {
-                (std::cmp::Reverse(keep(s.retention)), s.level, s.id)
-                    < (std::cmp::Reverse(keep(b.retention)), b.level, b.id)
-            }
-        };
-        if better {
-            best.insert(s.group, *s);
-        }
+        by_group.entry(s.group).or_default().push(*s);
     }
-    best.values().map(|s| s.id).collect()
+    by_group
+        .into_values()
+        .map(|mut members| {
+            members.sort_by_key(|s| (std::cmp::Reverse(keep(s.retention)), s.level, s.id));
+            (members[0].id, members.iter().map(|s| s.id).collect())
+        })
+        .collect()
 }
 
 /// Check connections per news server: all of its connections when
@@ -993,7 +1001,8 @@ fn dupe_check_server_cap(server_connections: i32, check_connections: i32) -> i32
 }
 
 struct NntpHealthTransportShared {
-    server_id: i32,
+    /// the backbone's servers in the order to ask (one id for an independent server)
+    server_ids: Arc<Mutex<Vec<i32>>>,
     host_ctx: Arc<AtomicUsize>,
     host_cb: DupeHostFn,
 }
@@ -1011,15 +1020,25 @@ impl DonorServerExchange for NntpHealthTransportShared {
             let wait_start = host_now(ctx, host_cb);
             let mut conn_ptr = 0usize;
             let mut need_join = false;
+            let ids = self.server_ids.lock().unwrap_or_else(|e| e.into_inner()).clone();
             while conn_ptr == 0 && !http_stopped() && host_now(ctx, host_cb) - wait_start <= 10 {
-                let Some(srv) = pool.server_by_id(self.server_id) else {
+                let mut known_any = false;
+                for &id in &ids {
+                    let Some(srv) = pool.server_by_id(id) else {
+                        continue;
+                    };
+                    known_any = true;
+                    let raw = pool.get_check_connection(&srv);
+                    if !raw.is_null() {
+                        need_join = srv.join_group;
+                        conn_ptr = raw as usize;
+                        break;
+                    }
+                }
+                if !known_any {
                     return Err(DonorExchangeError::default());
-                };
-                need_join = srv.join_group;
-                let raw = pool.get_check_connection(&srv);
-                if !raw.is_null() {
-                    conn_ptr = raw as usize;
-                } else {
+                }
+                if conn_ptr == 0 {
                     std::thread::sleep(Duration::from_millis(20));
                 }
             }
@@ -6345,11 +6364,14 @@ mod tests {
             level,
         };
         let mut servers = vec![r(1, 5, 1000, 0), r(2, 5, 3000, 1), r(3, 0, 0, 0), r(4, 6, 0, 1), r(5, 6, 900, 0)];
-        let reps = backbone_representatives(&servers);
-        assert_eq!(reps.into_iter().collect::<Vec<_>>(), vec![2, 4]);
-        // an unusable server is never the one asked
+        let order = backbone_order(&servers);
+        assert_eq!(order.keys().copied().collect::<Vec<_>>(), vec![2, 4]);
+        // the siblings follow, to be asked when the first has no connection free
+        assert_eq!(order[&2], vec![2, 1]);
+        assert_eq!(order[&4], vec![4, 5]);
+        // an unusable server is never asked
         servers[1].usable = false;
-        assert!(backbone_representatives(&servers).contains(&1));
+        assert_eq!(backbone_order(&servers)[&1], vec![1]);
     }
     #[test]
     fn kind_probe_keeps_a_third_of_the_fleet_time() {

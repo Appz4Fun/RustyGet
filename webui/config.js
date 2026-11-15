@@ -4877,6 +4877,14 @@ var Config = (new function($)
 	function renderBackboneSuggestion(input, hint, host, result, edited)
 	{
 		var current = $.trim(input.val() || '');
+		var filled = input.data('autoValue');
+		if (edited && result.Match !== 'confirmed' && filled !== undefined && sameBackbone(current, filled))
+		{
+			// filled in for the previous host, which this one is not: back to empty
+			input.removeData('autoValue');
+			setBackbone(input, '', false);
+			current = '';
+		}
 		var matches = result.Matches || [];
 		hint.empty().removeAttr('data-state').prop('hidden', true);
 		var note = function(state, text)

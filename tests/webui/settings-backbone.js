@@ -114,6 +114,13 @@ const HOSTS = {
         await page.waitForFunction(() => Config.getOptionValue(Config.findOptionByName('Server1.Backbone')) === 'Eweka Internet Services', null, { timeout: 5000 });
       });
 
+      await check('a value filled in for a confirmed host is cleared for a host that is not', async () => {
+        assert.equal(await value(), 'Eweka Internet Services');
+        await host.fill('news.example.org');
+        await page.waitForFunction(() => /Unknown backbone for news\.example\.org/.test($('#S_Server1_Backbone').siblings('.config-backbone__hint').text()), null, { timeout: 5000 });
+        assert.equal(await value(), '');
+      });
+
       await check('a reseller of several backbones is only suggested', async () => {
         await menu.selectOption('');
         await host.fill('news.newsgroupdirect.com');

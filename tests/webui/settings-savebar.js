@@ -65,7 +65,7 @@ const { installOfflineModel } = require('./settings-offline-fixture');
       await page.locator('#S_ArticleCache').fill('777');
       await page.waitForFunction(() => document.querySelector('.config-savebar__count').textContent === '2 changes');
       if (width >= 768) {
-        assert.match(await page.locator('.config-savebar__names').textContent(), /NZB cleanup disk, Article cache/);
+        assert.match(await page.locator('.config-savebar__names').textContent(), /Article cache, NZB cleanup disk/);
       }
 
       // Discard reloads the saved values and keeps the section

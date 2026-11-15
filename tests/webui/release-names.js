@@ -16,6 +16,13 @@ const PARSE_CASES = [
   ['Dune.Part.Two.2024.2160p.AMZN.WEB-DL.DDP5.1.Atmos.DV.HDR.H.265-FLUX', 'Dune Part Two', '', '2024', '2160p WEB-DL DV HDR H.265 FLUX'],
   ['show.name.1x05.hdtv.xvid-lol.nzb', 'Show Name', 'S01E05', '', 'HDTV XviD lol'],
   ['Movie.Title.2010.REPACK.1080p.BluRay.x264-GRP', 'Movie Title', '', '2010', '1080p BluRay x264 REPACK GRP'],
+  // title words that are also metadata (Max, Uncut) stay in the title
+  ['Mad.Max.Fury.Road.2015.1080p.BluRay.x264-GRP', 'Mad Max Fury Road', '', '2015', '1080p BluRay x264 GRP'],
+  ['Uncut.Gems.2019.1080p.NF.WEB-DL.x264-GRP', 'Uncut Gems', '', '2019', '1080p WEB-DL x264 GRP'],
+  ['Show.Name.REPACK.S01E02.720p.HDTV.x264-GRP', 'Show Name', 'S01E02', '', '720p HDTV x264 REPACK GRP'],
+  // season and episode in separate tokens
+  ['Show.Name.S01.E02.1080p.WEB-DL.x264-GRP', 'Show Name', 'S01E02', '', '1080p WEB-DL x264 GRP'],
+  ['Show Name S03 E10 720p HDTV x264-GRP', 'Show Name', 'S03E10', '', '720p HDTV x264 GRP'],
 ];
 
 (async () => {
@@ -56,6 +63,19 @@ const PARSE_CASES = [
         PARSE_CASES.forEach(([name, ...want], i) => assert.deepEqual(got[i], want, name));
         assert(await page.evaluate(() => ReleaseName.isObfuscated('a3f91c02d4e8b711deadbeefcafe0011')));
         assert(!(await page.evaluate(() => ReleaseName.isObfuscated('Some.Movie.2001.1080p'))));
+        assert.deepEqual(await page.evaluate(() => ReleaseName.parse('Mad.Max.Fury.Road.2015.MAX.WEB-DL-GRP').edition), ['MAX']);
+        // a readable API name without release metadata is shown instead of the hash
+        const fallback = await page.evaluate(() => {
+          const div = document.createElement('div');
+          div.innerHTML = ReleaseName.nameHtml({ NZBID: 1, NZBName: 'a3f91c02d4e8b711deadbeefcafe0011',
+            Parameters: [{ Name: 'Title', Value: 'Example Documentary' }] }, '<a href="#">');
+          return [div.querySelector('a').textContent, (div.querySelector('.release-original') || {}).textContent];
+        });
+        assert.deepEqual(fallback, ['Example Documentary', 'NZB a3f91c02d4e8b711deadbeefcafe0011']);
+        // a candidate that parses wins over one that is only readable
+        assert.equal(await page.evaluate(() => ReleaseName.bestName({ NZBName: 'a3f91c02d4e8b711deadbeefcafe0011',
+          Parameters: [{ Name: 'Title', Value: 'Example Documentary' }],
+          NZBFilename: 'Example.Documentary.2023.1080p.WEB-DL.x264-GRP.nzb' })), 'Example.Documentary.2023.1080p.WEB-DL.x264-GRP.nzb');
       });
 
       await check('download rows', async () => {

@@ -113,6 +113,9 @@ var ReleaseName = (new function()
 		var tokens = body.replace(/[._]+/g, ' ').replace(/\s+/g, ' ').trim().split(' ').map(function(w) { return w.replace(/~/g, '.'); });
 		var titleEnd = -1;
 		var markTitle = function(i) { if (titleEnd < 0 || i < titleEnd) titleEnd = i; };
+		// Streaming services and edition words are also ordinary title words ("Mad Max",
+		// "Uncut Gems"), so they only count once we know where the title ends.
+		var ambiguous = [];
 
 		for (var i = 0; i < tokens.length; i++)
 		{
@@ -124,7 +127,14 @@ var ReleaseName = (new function()
 			if ((ep = t.match(/^S(\d{1,3})(?:[ ._-]?E(\d{1,4}))?(?:[-]?E(\d{1,4}))?$/i)))
 			{
 				r.episode = 'S' + pad(ep[1]) + (ep[2] ? 'E' + pad(ep[2]) : '') + (ep[3] ? '-E' + pad(ep[3]) : '');
-				markTitle(i);
+				// "S01.E02" and "S01 E02" split the episode into its own token
+				var sep = !ep[2] && (tokens[i + 1] || '').match(/^E(\d{1,4})$/i);
+				if (sep)
+				{
+					r.episode += 'E' + pad(sep[1]);
+					i++;
+				}
+				markTitle(i - (sep ? 1 : 0));
 			}
 			else if ((ep = t.match(/^(\d{1,2})x(\d{2,3})$/i)))
 			{
@@ -162,13 +172,13 @@ var ReleaseName = (new function()
 			{
 				if (/^(amzn|nf|dsnp|hmax|max|atvp|hulu|pcok|pmtp|stan)$/.test(lower))
 				{
-					r.edition.push(SOURCE[lower]);
+					ambiguous.push({ at: i, edition: SOURCE[lower] });
 				}
 				else
 				{
 					r.source = SOURCE[lower];
+					markTitle(i);
 				}
-				markTitle(i);
 			}
 			else if (Object.prototype.hasOwnProperty.call(CODEC, lower))
 			{
@@ -195,8 +205,7 @@ var ReleaseName = (new function()
 			}
 			else if (Object.prototype.hasOwnProperty.call(EDITION, lower))
 			{
-				if (r.edition.indexOf(EDITION[lower]) < 0) r.edition.push(EDITION[lower]);
-				markTitle(i);
+				ambiguous.push({ at: i, edition: EDITION[lower] });
 			}
 		}
 
@@ -206,6 +215,18 @@ var ReleaseName = (new function()
 			titleEnd = r._yearAt;
 		}
 		delete r._yearAt;
+
+		// An ambiguous word ends the title only when nothing but metadata follows it
+		// up to the first certain marker (or the end of the name).
+		var isAmbiguous = {};
+		ambiguous.forEach(function(a) { isAmbiguous[a.at] = true; });
+		var end = titleEnd < 0 ? tokens.length : titleEnd;
+		while (end > 0 && isAmbiguous[end - 1]) end--;
+		if (end < (titleEnd < 0 ? tokens.length : titleEnd)) titleEnd = end;
+		ambiguous.forEach(function(a)
+		{
+			if (titleEnd >= 0 && a.at >= titleEnd && r.edition.indexOf(a.edition) < 0) r.edition.push(a.edition);
+		});
 
 		var titleTokens = (titleEnd < 0 ? tokens : tokens.slice(0, titleEnd)).filter(function(w) { return w && !NOISE.test(w); });
 		r.title = titleCase(titleTokens);
@@ -252,11 +273,13 @@ var ReleaseName = (new function()
 			(group.NZBFilename || '').replace(/^.*[\\\/]/, ''),
 			group.NZBNicename || ''
 		];
-		for (var i = 0; i < candidates.length; i++)
+		// a readable name that parses as a release wins over one that is only readable
+		var readable = candidates.filter(function(c) { return c && !isObfuscated(c); });
+		for (var i = 0; i < readable.length; i++)
 		{
-			if (candidates[i] && !isObfuscated(candidates[i])) return candidates[i];
+			if (parse(readable[i]).parsed) return readable[i];
 		}
-		return nzbName;
+		return readable.length ? readable[0] : nzbName;
 	}
 
 	// { title, episode, year, tags, original, source } for the Downloads list.
@@ -280,7 +303,13 @@ var ReleaseName = (new function()
 		var d = forGroup(group);
 		if (!d.parsed)
 		{
-			return link + esc(Util.formatNZBName(group.NZBName)) + '</a>';
+			if (d.from === d.original)
+			{
+				return link + esc(Util.formatNZBName(group.NZBName)) + '</a>';
+			}
+			// a readable name from the API or file name, with the obfuscated NZB name under it
+			return link + esc(Util.formatNZBName(d.from)) + '</a>' +
+				'<div class="release-original">NZB ' + esc(d.original) + '</div>';
 		}
 		var html = link + esc(d.headline) + '</a>';
 		d.tags.forEach(function(tag) { html += ' <span class="release-tag">' + esc(tag) + '</span>'; });

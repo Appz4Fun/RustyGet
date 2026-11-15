@@ -4337,7 +4337,9 @@ impl NzbgetRsDupeSearch {
         // can borrow from (a TWIN, a borrowable ALT, or one whose packing is
         // not known yet) fills the pick's holes while it downloads: the pick
         // keeps its downloaded data and its extraction, which a swap throws
-        // away (the backup would start again from its first byte).
+        // away (the backup would start again from its first byte). The bar
+        // is SWAP_BACKUP_ALIVE even where a swap would need the par2 bar:
+        // a donor only fills holes, it need not be whole on its own.
         let live_fallback = crate::options::active_options().is_some_and(|o| {
             o.scalars().dupe_article_fallback == crate::queuesubsys_host::DAF_LIVE
         });
@@ -4352,7 +4354,7 @@ impl NzbgetRsDupeSearch {
             {
                 msg.extend_from_slice(
                     format!(
-                        " and par2 alone cannot repair it: it borrows from backup {donor_id} ({}% alive) instead of swapping, keeping its download and extraction",
+                        ": it borrows from backup {donor_id} ({}% alive) instead of swapping, keeping its download and extraction",
                         pct(donor_alive)
                     )
                     .as_bytes(),

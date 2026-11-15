@@ -1324,6 +1324,12 @@ fn probe_copies(
                                 &head.name,
                                 summary_password_known(info),
                             );
+                        } else if summary_password_known(info) {
+                            // the head is gone, but the nzb's password says an
+                            // encrypted archive: never ranked above the others
+                            // as "unknown" (live: such a copy was queued ahead
+                            // of whole encrypted copies and failed at once)
+                            packing = Packing::Unborrowable;
                         }
                     }
                     *slot.lock().unwrap_or_else(|e| e.into_inner()) = (listed, packing);

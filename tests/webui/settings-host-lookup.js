@@ -1,0 +1,108 @@
+// News server host lookup: typing a host lists its addresses with country, network
+// and connect time, and one address can be picked to always use (which drops a
+// strict certificate check to Minimal, and back when the name is used again).
+// Offline: the committed WebUI over synthetic RPC replies (details-fixture);
+// hostlookup is intercepted.
+// Usage: node tests/webui/settings-host-lookup.js http://127.0.0.1:17999/
+const { chromium } = require('playwright');
+const assert = require('node:assert/strict');
+const { fixtureURL } = require('./workspace-fixture');
+const { installDetailsFixture } = require('./details-fixture');
+
+(async () => {
+  const base = fixtureURL(process.argv[2] || 'http://127.0.0.1:17999/');
+  const browser = await chromium.launch(process.env.NZBGET_CHROME_CHANNEL === 'none' ? {} : { channel: process.env.NZBGET_CHROME_CHANNEL || 'chrome' })
+    .catch(() => chromium.launch());
+  const failures = [];
+  let cases = 0;
+  try {
+    for (const theme of ['light', 'dark']) for (const [width, height] of [[1440, 900], [390, 844]]) {
+      const context = await browser.newContext({ viewport: { width, height } });
+      await context.addInitScript(t => localStorage.setItem('Theme', t), theme);
+      await context.addInitScript(() => localStorage.setItem('SettingsMode', 'expert'));
+      const page = await context.newPage();
+      const errors = [], lookups = [];
+      let geoip = true;
+      page.on('pageerror', e => errors.push(e.message));
+      await installDetailsFixture(page, base, [], { patchReply: (method, result) => {
+        if (method === 'config' || method === 'loadconfig') {
+          const set = (name, value) => { const o = result.find(x => x.Name === name); if (o) o.Value = value; else result.push({ Name: name, Value: value }); };
+          set('Server1.Encryption', 'yes'); set('Server1.CertVerification', 'strict');
+        }
+        return result;
+      } });
+      await page.route(/\/jsonrpc/, async route => {
+        const rpc = route.request().method() === 'POST' ? route.request().postDataJSON() : null;
+        if (!rpc || rpc.method !== 'hostlookup') return route.fallback();
+        lookups.push(rpc.params);
+        const [host, port] = rpc.params;
+        const result = host === 'nowhere.invalid' ? { Host: host, Port: port, Error: 'Could not resolve nowhere.invalid', GeoIP: geoip, Addresses: [] } :
+          { Host: host, Port: port, Error: '', GeoIP: geoip, Addresses: [
+            { IP: '192.0.2.10', Family: 4, Country: geoip ? 'NL' : '', CountryName: geoip ? 'Netherlands' : '', ASN: geoip ? 64500 : 0, Org: geoip ? 'Example Net' : '', LatencyMs: 12.4 },
+            { IP: '2001:db8::10', Family: 6, Country: '', CountryName: '', ASN: 0, Org: '', LatencyMs: null }
+          ].filter(a => host === 'news.example.com' || a.IP === host) };
+        return route.fulfill({ contentType: 'application/json', json: { id: rpc.id, result } });
+      });
+      await page.goto(base.href);
+      await page.locator('#DownloadsTable tbody tr').first().waitFor();
+      await page.evaluate(() => $('a[href="#ConfigTab"]').first().click());
+      await page.waitForFunction(() => document.querySelector('#ConfigMode'));
+      await page.evaluate(() => Config.showSection('NEWS-SERVERS', false));
+      await page.waitForTimeout(200);
+      await page.locator('.config-list-row.NEWS-SERVERS.multiid1 .config-list-edit').click();
+      await page.waitForTimeout(150);
+      const check = async (label, action) => {
+        cases++;
+        try { await action(); } catch (error) { failures.push(`${theme}/${width}/${label}: ${error.message}`); }
+      };
+      const host = page.locator('#S_Server1_Host');
+      const box = page.locator('.config-host-lookup[data-multiid="1"]');
+
+      await check('typing a host lists its addresses', async () => {
+        await host.fill('news.example.com');
+        await page.waitForFunction(() => /2 addresses/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
+        assert.deepEqual(lookups.pop(), ['news.example.com', 563]);
+        const text = await box.textContent();
+        assert.match(text, /192\.0\.2\.10/);
+        assert.match(text, /NL Netherlands · AS64500 Example Net · 12 ms/);
+        assert.match(text, /2001:db8::10/);
+        assert.match(text, /no answer/);
+        assert.match(text, /IP location data by DB-IP/);
+        assert.equal(await box.locator('input[type=radio]').count(), 3);
+        assert(await box.locator('input[value=""]').isChecked(), 'any address is the default');
+      });
+
+      await check('picking an address uses it and relaxes the certificate check', async () => {
+        await box.locator('input[value="192.0.2.10"]').check();
+        await page.waitForFunction(() => /Always using/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
+        assert.equal(await host.inputValue(), '192.0.2.10');
+        assert.equal(await page.evaluate(() => $('#S_Server1_CertVerification .btn-primary').attr('data-value') || $('#S_Server1_CertVerification .btn-primary').val()), 'Minimal');
+        assert.match(await box.textContent(), /news\.example\.com/, 'the name is remembered');
+        await box.locator('input[value=""]').check();
+        await page.waitForFunction(() => /2 addresses/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
+        assert.equal(await host.inputValue(), 'news.example.com');
+        assert.equal(await page.evaluate(() => $('#S_Server1_CertVerification .btn-primary').attr('data-value') || $('#S_Server1_CertVerification .btn-primary').val()), 'Strict');
+      });
+
+      await check('a name that does not resolve says so, and no location files says so', async () => {
+        await host.fill('nowhere.invalid');
+        await page.waitForFunction(() => /Could not resolve/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
+        geoip = false;
+        await host.fill('news.example.com');
+        await page.waitForFunction(() => /DB-IP Lite files/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
+        assert.doesNotMatch(await box.textContent(), /AS64500/);
+        geoip = true;
+      });
+
+      if (errors.length) failures.push(`${theme}/${width}: page errors: ${errors.join('; ')}`);
+      await context.close();
+    }
+  } finally {
+    await browser.close();
+  }
+  if (failures.length) {
+    console.error(failures.join('\n'));
+    process.exit(1);
+  }
+  console.log(`settings-host-lookup: ${cases} cases passed`);
+})();

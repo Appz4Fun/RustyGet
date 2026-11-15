@@ -445,6 +445,7 @@ pub fn match_command(method: &[u8]) -> c_int {
         b"testdiskspeed" => 53,
         b"testnetworkspeed" => 54,
         b"systemstats" => 55,
+        b"hostlookup" => 56,
         _ => 0,
     }
 }
@@ -6407,6 +6408,12 @@ unsafe fn execute_xml_command(
         }
         // systemstats
         55 => (false, crate::sysmetrics::rpc_reply(is_json, cur.next_int())),
+        // hostlookup(host, port): addresses, location and connect time for a news server name
+        56 => {
+            let host_name = cur.next_str().map(|off| cur.decode_at(off, is_json)).unwrap_or_default();
+            let port = cur.next_int().unwrap_or(0);
+            (false, crate::hostlookup::rpc_reply(is_json, &host_name, port))
+        }
         _ => err_resp(default_err_code, default_err_text),
     }
 }

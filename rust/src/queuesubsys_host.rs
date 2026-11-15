@@ -3,6 +3,8 @@
 
 use std::ffi::{c_char, c_int, c_void, CStr};
 
+mod live_namespace;
+
 pub type NzbgetRsQueueSubsysHostFn = unsafe extern "C" fn(
     ctx: *mut c_void,
     op: c_int,
@@ -5135,6 +5137,56 @@ impl QueueSubsysHost {
         );
     }
 
+    /// Caller holds the queue; dedicated claims include running articles.
+    pub fn claim_source_header(
+        &self,
+        file_ptr: usize,
+        article_ptr: usize,
+        begin: i64,
+        end: i64,
+    ) -> bool {
+        let mut range = [begin, end];
+        self.raw(
+            43,
+            13,
+            0,
+            file_ptr,
+            article_ptr,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            range.as_mut_ptr(),
+            std::ptr::null_mut(),
+        ) != 0
+    }
+    /// Cancel/latch before an accepted source is demoted or its history reset.
+    /// This is metadata-only and requires the caller's queue lock.
+    pub fn invalidate_source_replacement(&self, file_ptr: usize, article_ptr: usize) {
+        let claimed = self.raw(
+            43,
+            14,
+            0,
+            article_ptr,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        ) != 0;
+        if claimed {
+            let file = self.file_snap(file_ptr);
+            let nzb = self.nzb_snap(file.nzb_ptr, false);
+            if let Ok(context) = crate::parlive::source_write_context(
+                nzb.id,
+                file.id,
+                crate::fsops::path(&nzb.dest_dir),
+                &file.filename,
+            ) {
+                context.invalidate_identity();
+            }
+        }
+    }
     pub fn article_reset_for_retry(&self, article_ptr: usize) {
         self.raw(
             43,

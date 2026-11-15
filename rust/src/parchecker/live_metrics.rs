@@ -14,6 +14,8 @@ pub(super) struct LiveMetricCounters {
     pub cache_misses: AtomicU64,
     pub writer_wait_ns: AtomicU64,
     pub operation_wait_ns: AtomicU64,
+    report_sequence: AtomicU64,
+    report_nzb_id: std::sync::atomic::AtomicI32,
     count_ready_at: Mutex<Option<Instant>>,
     count_ready_to_handoff_ns: Mutex<Option<u64>>,
 }
@@ -85,12 +87,75 @@ impl ActiveStreamingSession {
         }
     }
     pub(super) fn emit_live_metrics(&self, nzb_id: i32, event: &str) {
-        let line = self.live_metrics().log_line(nzb_id, event);
-        crate::log::log_active_bytes(crate::queuesubsys_host::MK_DETAIL, &line);
+        self.metrics.report_nzb_id.store(nzb_id, Ordering::Relaxed);
+        let Ok(previous) =
+            self.metrics
+                .report_sequence
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |id| id.checked_add(1))
+        else {
+            crate::log::log_active_bytes(
+                crate::queuesubsys_host::MK_DETAIL,
+                b"Live PAR frame {\"version\":1,\"valid\":false}",
+            );
+            return;
+        };
+        let snapshot = self.live_metrics();
+        for frame in snapshot.log_frames(nzb_id, event, previous + 1) {
+            crate::log::log_active_bytes(crate::queuesubsys_host::MK_DETAIL, &frame);
+        }
+    }
+}
+
+impl Drop for ActiveStreamingSession {
+    fn drop(&mut self) {
+        // No writer-gate lookup here: replacement can drop an entry under that
+        // gate. Only installed/reported cohorts produce a disposal footer.
+        if self.metrics.report_sequence.load(Ordering::Acquire) != 0 {
+            self.emit_live_metrics(
+                self.metrics.report_nzb_id.load(Ordering::Relaxed),
+                "disposed",
+            );
+        }
     }
 }
 
 impl LiveCallerMetrics {
+    pub(super) fn log_frames(
+        &self,
+        nzb_id: i32,
+        event: &str,
+        report_id: u64,
+    ) -> impl Iterator<Item = Vec<u8>> {
+        const CHUNK: usize = 256;
+        // Events are internal labels, never unbounded user input. Refuse a future
+        // oversized label before allocating its serialized message.
+        let payload = if event.len() <= 128 {
+            self.log_line(nzb_id, event)
+        } else {
+            Vec::new()
+        };
+        let valid = !payload.is_empty() && payload.len() <= 64 * CHUNK;
+        let parts = if valid {
+            payload.len().div_ceil(CHUNK)
+        } else {
+            1
+        };
+        let checksum = crc32fast::hash(&payload);
+        let generation = self.generation.0;
+        (0..parts).map(move |index| {
+            if !valid {
+                return b"Live PAR frame {\"version\":1,\"valid\":false}".to_vec();
+            }
+            use std::io::Write;
+            let mut line = Vec::with_capacity(768);
+            let _ = write!(&mut line, "Live PAR frame {{\"version\":1,\"nzb_id\":{nzb_id},\"generation\":{generation},\"report_id\":{report_id},\"index\":{index},\"parts\":{parts},\"crc32\":{checksum},\"hex\":\"");
+            for byte in &payload[index * CHUNK..payload.len().min((index + 1) * CHUNK)] {
+                let _ = write!(&mut line, "{byte:02x}");
+            }
+            line.extend_from_slice(b"\"}");
+            line
+        })
+    }
     pub(super) fn log_line(&self, nzb_id: i32, event: &str) -> Vec<u8> {
         use std::io::Write;
         let io = self.io;

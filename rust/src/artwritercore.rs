@@ -718,10 +718,14 @@ pub(crate) fn article_writer_create_output_file_guarded(
     size: i64,
     context: &crate::parlive::SourceWriteContext,
 ) -> Result<(), Vec<u8>> {
-    let _permit = context
-        .permit()
+    let path = crate::fsops::path(c_bytes(output_filename));
+    let (file, context, _permit) = context
+        .open_attested(path, true)
         .map_err(|_| b"Output write ownership unavailable".to_vec())?;
-    let result = article_writer_create_output_file(output_filename, size);
+    let result = u64::try_from(size)
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))
+        .and_then(|size| file.set_len(size))
+        .map_err(|error| error.to_string().into_bytes());
     if result.is_err() {
         context.invalidate();
     }

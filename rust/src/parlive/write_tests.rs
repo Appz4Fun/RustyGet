@@ -1,6 +1,8 @@
 use super::*;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+static NEXT_DISK: AtomicU64 = AtomicU64::new(1);
 
 struct Disk(PathBuf);
 impl Disk {
@@ -9,10 +11,13 @@ impl Disk {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "rustyget-write-{tag}-{}-{nonce}",
-            std::process::id()
+        let root = std::env::temp_dir().join(format!(
+            "rustyget-write-{tag}-{}-{nonce}-{}",
+            std::process::id(),
+            NEXT_DISK.fetch_add(1, Ordering::Relaxed)
         ));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("source.rar");
         std::fs::write(&path, b"original").unwrap();
         Self(path)
     }
@@ -26,7 +31,7 @@ impl Disk {
 impl Drop for Disk {
     fn drop(&mut self) {
         if !std::thread::panicking() {
-            let _ = std::fs::remove_file(&self.0);
+            let _ = std::fs::remove_dir_all(self.0.parent().unwrap());
         }
     }
 }
@@ -164,7 +169,7 @@ fn cleanup_aborts_pending_repair_and_rejects_late_io() {
 }
 
 #[test]
-fn certification_retains_control_reservation_until_invalidation() {
+fn certification_retains_control_reservation_until_cohort_close() {
     let disk = Disk::new("cert-budget");
     let gate = WriteCoordinator::new(SessionGeneration(7));
     let lease = gate
@@ -177,6 +182,8 @@ fn certification_retains_control_reservation_until_invalidation() {
     lease.publish(&[(40, 0)], || ()).unwrap();
     assert!(reserve_control(-1900207, 256, 500 * MIB).is_err());
     gate.advance_generation(SessionGeneration(8)).unwrap();
+    assert!(reserve_control(-1900207, 256, 500 * MIB).is_err());
+    gate.close();
     assert!(reserve_control(-1900207, 256, 500 * MIB).is_ok());
 }
 
@@ -342,4 +349,227 @@ fn verified_target_crc_is_scoped_to_current_generation_id_and_path() {
     assert_eq!(gate.certified_crc(SessionGeneration(80), 40, &disk.0), None);
     gate.advance_generation(SessionGeneration(81)).unwrap();
     assert_eq!(gate.certified_crc(SessionGeneration(81), 40, &disk.0), None);
+}
+
+#[test]
+fn source_conflict_before_metadata_cannot_be_erased_by_startup() {
+    let disk = Disk::new("source-conflict-before-index");
+    let root = disk.0.with_extension("cohort");
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("part40.rar");
+    std::fs::write(&path, b"original").unwrap();
+    let context = source_write_context(-1900214, 40, &root, b"part40.rar").unwrap();
+    let gate = download_writes(-1900214, &root).unwrap();
+    context.invalidate_identity();
+    assert!(
+        gate.advance_generation(SessionGeneration(1)).is_err(),
+        "first metadata erased conflicting pre-index source history"
+    );
+    context
+        .perform_io(|| std::fs::write(&path, b"fallback"))
+        .unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"fallback");
+    assert!(gate.advance_generation(SessionGeneration(2)).is_err());
+    forget_download_writes(-1900214);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn stale_source_identity_attempt_cannot_poison_a_newer_cohort() {
+    let disk = Disk::new("stale-source-identity");
+    let root = disk.0.with_extension("cohort");
+    let old = source_write_context(-1900215, 40, &root, b"part40.rar").unwrap();
+    let gate = download_writes(-1900215, &root).unwrap();
+    gate.advance_generation(SessionGeneration(1)).unwrap();
+    gate.advance_generation(SessionGeneration(2)).unwrap();
+    assert!(gate.is_current_generation(SessionGeneration(2)));
+    old.invalidate_identity();
+    assert!(
+        gate.is_current_generation(SessionGeneration(2)),
+        "a refused old context poisoned the current source cohort"
+    );
+    forget_download_writes(-1900215);
+}
+
+#[test]
+fn refused_source_identity_attempt_keeps_the_target_certificate() {
+    let disk = Disk::new("sealed-source-identity");
+    let root = disk.0.parent().unwrap();
+    let context = source_write_context(
+        -1900216,
+        40,
+        root,
+        disk.0.file_name().unwrap().as_encoded_bytes(),
+    )
+    .unwrap();
+    let gate = download_writes(-1900216, root).unwrap();
+    gate.advance_generation(SessionGeneration(1)).unwrap();
+    gate.begin_repair(SessionGeneration(1), vec![disk.target()], control(-1900216))
+        .unwrap()
+        .publish(&[(40, 123)], || ())
+        .unwrap();
+    context.invalidate_identity();
+    assert!(
+        gate.is_current_generation(SessionGeneration(1)),
+        "a certified target's refused replacement invalidated its certificate"
+    );
+    assert_eq!(
+        gate.certified_crc(SessionGeneration(1), 40, &disk.0),
+        Some(123)
+    );
+    assert!(context
+        .perform_io(|| std::fs::write(&disk.0, b"wrong"))
+        .is_err());
+    assert_eq!(std::fs::read(&disk.0).unwrap(), b"original");
+    forget_download_writes(-1900216);
+}
+
+#[test]
+fn certified_target_seal_covers_ascii_case_alias_after_cancellation() {
+    let disk = Disk::new("sealed-case-alias");
+    let gate = WriteCoordinator::new(SessionGeneration(130));
+    let lease = gate
+        .begin_repair(
+            SessionGeneration(130),
+            vec![disk.target()],
+            control(-1900330),
+        )
+        .unwrap();
+    std::fs::write(&disk.0, b"repaired").unwrap();
+    lease.publish(&[(40, 0)], || ()).unwrap();
+    gate.cancel_generation(SessionGeneration(130));
+    let alias = disk.0.with_file_name("SOURCE.RAR");
+    let result = gate.writer(&WriterIdentity::FileAndPath(41, alias));
+    assert!(
+        matches!(result, Err(WriteBlocked::Certified)),
+        "a second queue ID must not bypass a released target's path seal"
+    );
+    assert_eq!(std::fs::read(&disk.0).unwrap(), b"repaired");
+}
+
+#[test]
+fn certified_target_seal_refuses_uncertain_namespace() {
+    let disk = Disk::new("sealed-uncertain-alias");
+    let gate = WriteCoordinator::new(SessionGeneration(131));
+    // Unsupported live identities keep their ordinary write path before any seal.
+    assert!(gate
+        .writer(&WriterIdentity::FileAndPath(
+            41,
+            disk.0.with_file_name("sourcé.rar")
+        ))
+        .is_ok());
+    let lease = gate
+        .begin_repair(
+            SessionGeneration(131),
+            vec![disk.target()],
+            control(-1900331),
+        )
+        .unwrap();
+    lease.publish(&[(40, 0)], || ()).unwrap();
+    for leaf in ["sourcé.rar", "source.rar.", "sub/../source.rar"] {
+        let identity = WriterIdentity::FileAndPath(41, disk.0.parent().unwrap().join(leaf));
+        assert!(
+            matches!(gate.writer(&identity), Err(WriteBlocked::Certified)),
+            "unprovable alias {leaf} must not bypass the existing seal"
+        );
+    }
+    // A distinct eligible source in the same established root keeps downloading.
+    let other = WriterIdentity::FileAndPath(42, disk.0.with_file_name("other.rar"));
+    assert!(gate.writer(&other).is_ok());
+}
+
+#[test]
+fn established_unicode_root_keeps_flat_ascii_identity_provable() {
+    let disk = Disk::new("unicode-root");
+    let root = disk.0.parent().unwrap().join("téléchargements");
+    std::fs::create_dir(&root).unwrap();
+    let path = root.join("source.rar");
+    std::fs::write(&path, b"original").unwrap();
+    let gate = WriteCoordinator::new(SessionGeneration(132));
+    let lease = gate
+        .begin_repair(
+            SessionGeneration(132),
+            vec![WriterTarget {
+                file_id: 40,
+                path: path.clone(),
+            }],
+            control(-1900332),
+        )
+        .unwrap();
+    lease.publish(&[(40, 0)], || ()).unwrap();
+    assert!(matches!(
+        gate.writer(&WriterIdentity::FileAndPath(41, root.join("SOURCE.RAR"))),
+        Err(WriteBlocked::Certified)
+    ));
+    assert!(gate
+        .writer(&WriterIdentity::FileAndPath(42, root.join("other.rar")))
+        .is_ok());
+}
+
+#[test]
+fn replacing_live_generation_does_not_reopen_released_target() {
+    let disk = Disk::new("sealed-generation");
+    let gate = WriteCoordinator::new(SessionGeneration(133));
+    let lease = gate
+        .begin_repair(
+            SessionGeneration(133),
+            vec![disk.target()],
+            control(-1900333),
+        )
+        .unwrap();
+    std::fs::write(&disk.0, b"repaired").unwrap();
+    lease.publish(&[(40, 0)], || ()).unwrap();
+    gate.advance_generation(SessionGeneration(134)).unwrap();
+    assert!(
+        matches!(
+            gate.writer(&WriterIdentity::FileAndPath(40, disk.0.clone())),
+            Err(WriteBlocked::Certified)
+        ),
+        "generation replacement must retain the unpack-visible target seal"
+    );
+    assert_eq!(std::fs::read(&disk.0).unwrap(), b"repaired");
+    assert!(
+        matches!(
+            gate.begin_repair(
+                SessionGeneration(134),
+                vec![disk.target()],
+                control(-1900334)
+            ),
+            Err(WriteBlocked::Certified)
+        ),
+        "replacement generation must not bypass the seal through a second repair"
+    );
+}
+
+#[test]
+fn one_live_repair_request_cannot_claim_aliased_paths() {
+    let disk = Disk::new("request-aliases");
+    let gate = WriteCoordinator::new(SessionGeneration(135));
+    let targets = vec![
+        disk.target(),
+        WriterTarget {
+            file_id: 41,
+            path: disk.0.with_file_name("SOURCE.RAR"),
+        },
+    ];
+    assert!(
+        matches!(
+            gate.begin_repair(SessionGeneration(135), targets, control(-1900335)),
+            Err(WriteBlocked::InvalidTarget)
+        ),
+        "one request cannot give two queue IDs the same potential target"
+    );
+    assert_eq!(std::fs::read(&disk.0).unwrap(), b"original");
+    // Refusal leaves the gate usable for distinct targets in this same root.
+    let targets = vec![
+        disk.target(),
+        WriterTarget {
+            file_id: 41,
+            path: disk.0.with_file_name("other.rar"),
+        },
+    ];
+    let lease = gate
+        .begin_repair(SessionGeneration(135), targets, control(-1900336))
+        .expect("distinct eligible target names remain admissible");
+    drop(lease);
 }

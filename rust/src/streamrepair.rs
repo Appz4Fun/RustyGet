@@ -8154,14 +8154,20 @@ fn guarded_donor_write(
 ) -> std::io::Result<()> {
     use std::io::{Seek, SeekFrom, Write};
     let offset = u64::try_from(offset).map_err(|_| std::io::ErrorKind::InvalidInput)?;
-    context.perform_io(|| {
+    let _permit = context.descriptor_permit(file)?;
+    context.invalidate_identity();
+    let result = (|| {
         file.seek(SeekFrom::Start(offset)).and_then(|position| {
             if position != offset {
                 return Err(std::io::Error::other("seek mismatch"));
             }
             file.write_all(data).and_then(|()| file.flush())
         })
-    })
+    })();
+    if result.is_err() {
+        context.invalidate();
+    }
+    result
 }
 
 /// Target member files in `dest_dir` opened read-write on demand for verify and patch
@@ -10027,6 +10033,9 @@ fn repair_whole_file_with_context(
     );
     let os_path = crate::fsops::path(&file_path);
     let write_context = write_context.for_path(os_path);
+    // A whole-file recreation is an independent source replacement, including
+    // when a PAR index has not arrived yet. Preserve ordinary donor fallback.
+    write_context.invalidate_identity();
     if std::fs::metadata(os_path).is_ok() {
         let existing = file_size_bytes(&file_path);
         if existing != decoded_file_size && existing != 0 {
@@ -16824,6 +16833,28 @@ mod tests {
 mod live_donor_writer_tests {
     use super::*;
     use std::os::unix::ffi::OsStrExt;
+    #[test]
+    fn live_donor_actual_descriptor_mismatch_never_writes_other_file() {
+        let dir =
+            std::env::temp_dir().join(format!("rustyget-donor-identity-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let source = dir.join("part40.rar");
+        let other = dir.join("other.rar");
+        std::fs::write(&source, b"original").unwrap();
+        std::fs::write(&other, b"protected").unwrap();
+        let context = crate::parlive::donor_write_context(&dir, &source).unwrap();
+        // Bind the actual source root before testing the independent old FD.
+        let known = std::fs::File::open(&source).unwrap();
+        drop(context.descriptor_permit(&known).unwrap());
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&other)
+            .unwrap();
+        let result = guarded_donor_write(&mut file, &context, 0, b"WRONG-FD");
+        assert_eq!(std::fs::read(&other).unwrap(), b"protected");
+        assert!(result.is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
     #[test]
     fn live_donor_patch_cannot_overwrite_certified_bytes_through_an_old_descriptor() {
         let dir =

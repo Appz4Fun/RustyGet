@@ -51,8 +51,111 @@ def metrics(target):
         log = target.read_file('nzbget.log').decode(errors='replace')
     except FileNotFoundError:
         return []
-    return [json.loads(line.split('Live PAR metrics ', 1)[1])
-            for line in log.splitlines() if 'Live PAR metrics {' in line]
+    return live_metric_reports(log, strict=False)
+
+
+
+LIVE_METRIC_KEYS = (
+    'captured_articles captured_bytes capture_refusals cache_misses '
+    'committed_replay_bytes ram_bytes_verified source_bytes_read backfill_bytes_read '
+    'recovery_bytes_read target_verification_bytes_read tracked_exponents ready_recovery '
+    'pending_folds verified_slices total_slices writer_wait_ns operation_wait_ns '
+    'repair_attempts repair_completed_calls target_bytes_written payload_wait_ns '
+    'slot_backfill_ns matrix_ns decode_ns target_write_ns target_sync_ns refold_ns '
+    'target_verification_ns repair_call_ns'
+).split()
+
+
+def live_metric_reports(log, strict=True):
+    """Decode complete per-generation packets; strict mode requires a disposal footer.
+
+    Non-strict mode is only for startup polling of a still-running daemon. It may
+    return earlier complete records while a later packet is pending, never final
+    qualification or substituted zero counters. Parse final logs after exit zero.
+    """
+    def require(condition, message):
+        if not condition:
+            raise ValueError('live metric report: ' + message)
+
+    def uint(value, maximum=(1 << 64) - 1):
+        require(type(value) is int and 0 <= value <= maximum, 'unsigned integer')
+        return value
+
+    def nzb_id(value):
+        require(type(value) is int and -(1 << 31) <= value < (1 << 31), 'NZB identity')
+        return value
+
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            require(key not in result, 'duplicate JSON member')
+            result[key] = value
+        return result
+
+    def decode_json(text):
+        data = json.loads(text, object_pairs_hook=unique_object)
+        require(isinstance(data, dict), 'record object')
+        return data
+
+    groups = {}
+    for line in log.splitlines(keepends=True):
+        marker = 'Live PAR frame '
+        if marker not in line:
+            continue
+        if not line.endswith('\n'):
+            require(not strict, 'unterminated frame')
+            continue
+        frame = decode_json(line.split(marker, 1)[1])
+        require(type(frame.get('version')) is int and frame['version'] == 1, 'version')
+        identity = (nzb_id(frame.get('nzb_id')), uint(frame.get('generation')), uint(frame.get('report_id')))
+        require(identity[1] > 0 and identity[2] > 0, 'positive generation/report identity')
+        parts = uint(frame.get('parts'), 64)
+        index = uint(frame.get('index'))
+        require(parts > 0 and index < parts, 'part geometry')
+        crc = uint(frame.get('crc32'), (1 << 32) - 1)
+        hex_data = frame.get('hex')
+        require(type(hex_data) is str and 0 < len(hex_data) <= 512 and len(hex_data) % 2 == 0
+                and re.fullmatch('[0-9a-f]+', hex_data) is not None, 'hex payload')
+        data = bytes.fromhex(hex_data)
+        require(index == parts - 1 or len(data) == 256, 'short nonfinal part')
+        group = groups.setdefault(identity, dict(parts=parts, crc=crc, rows={}))
+        require(group['parts'] == parts and group['crc'] == crc and index not in group['rows'],
+                'mixed or duplicate parts')
+        group['rows'][index] = data
+    records, cohorts = [], {}
+    for identity, group in sorted(groups.items()):
+        if len(group['rows']) != group['parts']:
+            require(not strict, 'incomplete packet')
+            continue
+        raw = b''.join(group['rows'][index] for index in range(group['parts']))
+        require(zlib.crc32(raw) == group['crc'], 'CRC mismatch')
+        prefix = b'Live PAR metrics '
+        require(raw.startswith(prefix), 'message kind')
+        sample = decode_json(raw[len(prefix):].decode('utf-8'))
+        require(nzb_id(sample.get('nzb_id')) == identity[0]
+                and uint(sample.get('generation')) == identity[1], 'inner identity')
+        require(sample.get('event') in ('started', 'repair_complete', 'disposed'), 'event')
+        for key in LIVE_METRIC_KEYS:
+            uint(sample.get(key))
+        require(type(sample.get('count_ready_observed')) is bool, 'readiness flag')
+        handoff = sample.get('count_ready_to_handoff_ns')
+        if handoff is not None:
+            uint(handoff)
+            require(sample['count_ready_observed'], 'handoff without readiness')
+        require('count_ready_to_handoff_ns' in sample, 'missing handoff field')
+        for key, expected in [('decode_includes_writes', True),
+                              ('refold_includes_queued_completion', False), ('logical_io', True)]:
+            require(sample.get(key) is expected, key)
+        records.append(sample)
+        cohorts.setdefault(identity[:2], []).append((identity[2], sample['event']))
+    if strict:
+        for reports in cohorts.values():
+            ids, events = zip(*reports)
+            require(all(report_id == index for index, report_id in enumerate(ids, 1)),
+                    'missing report sequence')
+            require(events.count('started') == 1 and events.count('disposed') == 1
+                    and events[-1] == 'disposed', 'incomplete cohort lifetime')
+    return records
 
 
 def callback_report(log, expected_min):
@@ -226,8 +329,11 @@ def run_case(binary, par2, case):
                        'explicitly resumed metadata index completion')
         assert api.editqueue('FileResume', '', sources)
         history = daemon.wait_history(api, name, timeout=120)
-        events = metrics(target)
+        assert api.shutdown(), 'graceful daemon shutdown was refused'
+        result['graceful_daemon_exit'] = daemon.process.wait(timeout=30)
+        assert result['graceful_daemon_exit'] == 0, result
         log = target.read_file('nzbget.log').decode(errors='replace')
+        events = live_metric_reports(log)
         time.sleep(0.25)  # nserv's final request-log flush
         requests = re.findall(r'Received: (?:BODY|ARTICLE) [^\r\n]*',
                               target.read_file('nserv.log').decode(errors='replace'))
@@ -292,13 +398,9 @@ def run_case(binary, par2, case):
             assert target.read_file(damaged[0]) != golden['rel.part040.rar'], \
                 'disabled repair healed the damaged source'
         if os.environ.get('RUSTYGET_BENCH_CALLBACK_METRICS') == '1':
-            assert api.shutdown(), 'graceful daemon shutdown was refused'
-            result['graceful_daemon_exit'] = daemon.process.wait(timeout=30)
-            assert result['graceful_daemon_exit'] == 0, result
-            final_log = target.read_file('nzbget.log').decode(errors='replace')
             expected_min = sum((size + segment - 1) // segment
                                for _, _, size, segment, _ in members)
-            sample = callback_report(final_log, expected_min)
+            sample = callback_report(log, expected_min)
             result['callback_metrics'] = sample
             result['callbacks_expected_min'] = expected_min
         result['passed'] = True

@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 static NEXT_FIXTURE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-struct Fixture(PathBuf);
+pub(super) struct Fixture(pub(super) PathBuf);
 impl Fixture {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -27,7 +27,7 @@ impl Fixture {
         }
         Self(dir)
     }
-    fn set(&self) -> PacketSet {
+    pub(super) fn set(&self) -> PacketSet {
         load_par2_set(&self.0.join("testfile.par2")).unwrap()
     }
 }
@@ -1139,4 +1139,133 @@ fn live_repair_readiness_includes_the_current_drainers_owned_article() {
     assert_eq!(std::fs::read(&target).unwrap(), original);
     streaming_session_forget(id);
     crate::parlive::forget_download_writes(id);
+}
+
+#[test]
+fn live_metrics_max_width_transport_survives_the_actual_native_formatter() {
+    let fx = Fixture::new();
+    let id = -1900151;
+    streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 << 20).unwrap();
+    let mut metrics = streaming_session_metrics(id).unwrap();
+    metrics.generation = SessionGeneration(u64::MAX);
+    metrics.captured_articles = u64::MAX;
+    metrics.captured_bytes = u64::MAX;
+    metrics.capture_refusals = u64::MAX;
+    metrics.cache_misses = u64::MAX;
+    metrics.committed_replay_bytes = u64::MAX;
+    metrics.writer_wait_ns = u64::MAX;
+    metrics.operation_wait_ns = u64::MAX;
+    metrics.count_ready_at = Some(std::time::Instant::now());
+    metrics.count_ready_to_handoff_ns = Some(u64::MAX);
+    metrics.io = LiveIoStats {
+        ram_bytes_verified: u64::MAX,
+        source_bytes_read: u64::MAX,
+        backfill_bytes_read: u64::MAX,
+        recovery_bytes_read: u64::MAX,
+        target_verification_bytes_read: u64::MAX,
+    };
+    metrics.repair = par_rs::streaming::RepairPhaseStats {
+        attempts: u64::MAX,
+        completed: u64::MAX,
+        target_bytes_written: u64::MAX,
+        payload_wait_ns: u64::MAX,
+        backfill_ns: u64::MAX,
+        matrix_ns: u64::MAX,
+        decode_ns: u64::MAX,
+        target_write_ns: u64::MAX,
+        target_sync_ns: u64::MAX,
+        refold_ns: u64::MAX,
+        target_verification_ns: u64::MAX,
+        total_ns: u64::MAX,
+    };
+    metrics.status.syndrome_slots = usize::MAX;
+    metrics.status.ready_recovery = usize::MAX;
+    metrics.status.pending_folds = usize::MAX;
+    metrics.status.verified = usize::MAX;
+    metrics.status.total = usize::MAX;
+    let original = metrics.log_line(i32::MIN, "repair_complete");
+    assert!(
+        original.len() > 1016,
+        "fixture must exceed the original message capacity"
+    );
+    #[cfg(target_pointer_width = "64")]
+    assert_eq!(
+        crc32fast::hash(&original),
+        3_467_611_658,
+        "independent Python reference vector"
+    );
+    let records: Vec<_> = metrics
+        .log_frames(i32::MIN, "repair_complete", u64::MAX)
+        .collect();
+    let mut restored = Vec::new();
+    for record in &records {
+        let native = crate::log::native_detail_record_for_test(record);
+        assert_eq!(
+            native.len(),
+            record.len() + b"DETAIL\t".len(),
+            "native logger truncated metrics"
+        );
+        let start = native.iter().position(|&b| b == b'{').unwrap();
+        let json = crate::json::parse(&native[start..], crate::json::TEST_LIMITS).unwrap();
+        let crate::json::Value::String(hex) = json.get(b"hex").unwrap() else {
+            panic!("frame missing payload")
+        };
+        for pair in hex.chunks_exact(2) {
+            restored.push(u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap());
+        }
+        assert_eq!(
+            json.get(b"crc32").unwrap().to_f64(),
+            Some(f64::from(crc32fast::hash(&original)))
+        );
+    }
+    assert_eq!(restored, original);
+    streaming_session_forget(id);
+    crate::parlive::forget_download_writes(id);
+}
+
+#[test]
+fn live_busy_completion_ticket_survives_until_later_tick() {
+    let fx = Fixture::new();
+    let id = -1900600;
+    let file = LiveCompletedFile {
+        nzb_id: id,
+        base_dir: fx.0.clone(),
+        path: fx.0.join("testfile.par2"),
+        name: b"testfile.par2".to_vec(),
+        hash16k: Vec::new(),
+        par_file: true,
+        successful: true,
+        accepted: Vec::new(),
+        queued_id: Some(1),
+    };
+    streaming_session_queue_completed_file(id, 4096, || Ok(file)).unwrap();
+    let result = streaming_session_process_completed_file(id, |_| {
+        Err(RepairError::Io {
+            context: "live namespace busy".into(),
+            source: std::io::Error::from(std::io::ErrorKind::WouldBlock),
+        })
+    });
+    assert!(result.is_some());
+    assert!(
+        streaming_session_pending_completed_jobs().contains(&id),
+        "transient busy consumed the only index completion event"
+    );
+    assert!(active_streaming_session(id).is_none());
+    let remainder = crate::parlive::reserve_control(id, (1 << 20) - 4096, 500 << 20).unwrap();
+    assert!(
+        crate::parlive::reserve_control(id, 4096, 500 << 20).is_err(),
+        "retry ticket lost its original metadata charge"
+    );
+    drop(remainder);
+    assert!(streaming_session_process_completed_file(id, |_| {
+        panic!("busy event was retried before a coordinator tick")
+    })
+    .is_none());
+    streaming_session_retry_completion_tick();
+    assert!(streaming_session_process_completed_file(id, |_| Ok(()))
+        .unwrap()
+        .unwrap());
+    assert!(!streaming_session_pending_completed_jobs().contains(&id));
+    assert!(active_streaming_session(id).is_some());
+    streaming_session_forget(id);
 }

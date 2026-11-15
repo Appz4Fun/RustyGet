@@ -197,6 +197,9 @@ pub(crate) use write_control::{
     RepairWriteLease, WriteBlocked, WriteCoordinator, WriterIdentity, WriterTarget,
 };
 
+#[cfg(all(test, unix))]
+mod physical_ownership_tests;
+mod source_identity;
 mod write_registry;
 pub(crate) use write_registry::{
     donor_write_context, download_writes, forget_download_writes, source_write_context,

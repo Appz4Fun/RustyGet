@@ -26,19 +26,23 @@ pub(crate) enum WriteBlocked {
 }
 
 struct CertifiedTargets {
+    generation: SessionGeneration,
     targets: Vec<WriterTarget>,
     crcs: Vec<(i32, u32)>,
     _reservation: Arc<ControlLease>,
 }
 struct WriteState {
+    physical_root: Option<Arc<super::source_identity::SourceRoot>>,
     generation: SessionGeneration,
     writer_epoch: u64,
     cancelled: bool,
+    source_identity_changed: bool,
     closed: bool,
     writers: usize,
     // A pending barrier is installed before waiting, so new writers cannot starve it.
     repair: Option<(SessionGeneration, bool)>,
     certified: Vec<CertifiedTargets>,
+    namespace: Option<crate::parchecker::live_namespace::NamespaceProof>,
 }
 
 pub(crate) struct WriteCoordinator {
@@ -71,13 +75,16 @@ impl WriteCoordinator {
     pub fn new(generation: SessionGeneration) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(WriteState {
+                physical_root: None,
                 generation,
                 writer_epoch: 0,
                 cancelled: false,
+                source_identity_changed: false,
                 closed: false,
                 writers: 0,
                 repair: None,
                 certified: Vec::new(),
+                namespace: None,
             }),
             changed: Condvar::new(),
         })
@@ -85,6 +92,42 @@ impl WriteCoordinator {
     pub(super) fn closed_and_quiescent(&self) -> (bool, bool) {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         (state.closed, state.repair.is_none() && state.writers == 0)
+    }
+    pub(super) fn physical_root(&self) -> Option<Arc<super::source_identity::SourceRoot>> {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .physical_root
+            .clone()
+    }
+    pub(super) fn bind_physical_root(
+        &self,
+        root: Arc<super::source_identity::SourceRoot>,
+    ) -> Result<(), WriteBlocked> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.closed
+            || state
+                .physical_root
+                .as_ref()
+                .is_some_and(|old| old.identity != root.identity)
+        {
+            return Err(WriteBlocked::InvalidTarget);
+        }
+        if state.physical_root.is_none() {
+            state.physical_root = Some(root);
+        }
+        Ok(())
+    }
+    pub(super) fn provisional_and_quiescent(&self) -> bool {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        !state.closed
+            && !state.cancelled
+            && !state.source_identity_changed
+            && state.generation.0 == 0
+            && state.writers == 0
+            && state.repair.is_none()
+            && state.certified.is_empty()
+            && state.namespace.is_none()
     }
     #[cfg(test)]
     pub fn status(&self) -> WriterStatus {
@@ -106,9 +149,30 @@ impl WriteCoordinator {
         generation: SessionGeneration,
         bind: impl FnOnce() -> T,
     ) -> Result<T, WriteBlocked> {
+        self.bind_generation_inner(generation, None, bind)
+    }
+
+    pub fn bind_namespace_generation<T>(
+        &self,
+        generation: SessionGeneration,
+        namespace: crate::parchecker::live_namespace::NamespaceProof,
+        bind: impl FnOnce() -> T,
+    ) -> Result<T, WriteBlocked> {
+        self.bind_generation_inner(generation, Some(namespace), bind)
+    }
+
+    fn bind_generation_inner<T>(
+        &self,
+        generation: SessionGeneration,
+        namespace: Option<crate::parchecker::live_namespace::NamespaceProof>,
+        bind: impl FnOnce() -> T,
+    ) -> Result<T, WriteBlocked> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.closed {
             return Err(WriteBlocked::Closed);
+        }
+        if state.source_identity_changed {
+            return Err(WriteBlocked::Cancelled);
         }
         if generation.0 < state.generation.0 {
             return Err(WriteBlocked::StaleGeneration);
@@ -125,11 +189,44 @@ impl WriteCoordinator {
             }
             state.generation = generation;
             state.cancelled = false;
-            state.certified.clear();
+            // Published bytes may already be in use by unpack. Their seals and
+            // metadata charge survive live-generation replacement until close.
         }
+        state.namespace = namespace;
         let result = bind();
         self.changed.notify_all();
         Ok(result)
+    }
+
+    /// Outer None is the explicit legacy API; Some(None) is an unbound row.
+    pub fn namespace_source_id(
+        &self,
+        generation: SessionGeneration,
+        queue_id: Option<i32>,
+        name: &[u8],
+        hint: &[u8],
+    ) -> Result<Option<Option<par_rs::packet::FileId>>, WriteBlocked> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.closed || state.cancelled || state.generation != generation {
+            return Err(WriteBlocked::StaleGeneration);
+        }
+        let Some(proof) = state.namespace.as_mut() else {
+            return Ok(None);
+        };
+        let resolved = queue_id.ok_or(WriteBlocked::InvalidTarget).and_then(|id| {
+            proof
+                .bind(id, name, hint)
+                .map_err(|_| WriteBlocked::InvalidTarget)
+        });
+        match resolved {
+            Ok(id) => Ok(Some(id)),
+            Err(error) => {
+                state.source_identity_changed = true;
+                state.cancelled = true;
+                self.changed.notify_all();
+                Err(error)
+            }
+        }
     }
     pub fn is_current_generation(&self, generation: SessionGeneration) -> bool {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -146,6 +243,9 @@ impl WriteCoordinator {
             return None;
         }
         state.certified.iter().find_map(|set| {
+            if set.generation != generation {
+                return None;
+            }
             set.targets
                 .iter()
                 .any(|target| target.file_id == id && target.path == path)
@@ -174,6 +274,19 @@ impl WriteCoordinator {
         self.changed.notify_all();
         result
     }
+    pub(super) fn invalidate_source_identity(&self, identity: &WriterIdentity, epoch: u64) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        // A stale or already sealed writer cannot mutate and must not poison
+        // another cohort or revoke a valid certificate by merely attempting it.
+        if state.closed || state.writer_epoch != epoch || Self::is_certified(&state, identity) {
+            return false;
+        }
+        let changed = !state.source_identity_changed;
+        state.source_identity_changed = true;
+        state.cancelled = true;
+        self.changed.notify_all();
+        changed
+    }
     pub(super) fn invalidate_sources(&self) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.cancelled = true;
@@ -185,6 +298,7 @@ impl WriteCoordinator {
         state.closed = true;
         state.cancelled = true;
         state.certified.clear();
+        state.namespace = None;
         self.changed.notify_all();
     }
 
@@ -238,25 +352,53 @@ impl WriteCoordinator {
             }
             state = self.changed.wait(state).unwrap_or_else(|e| e.into_inner());
         }
-        if state
-            .certified
-            .iter()
-            .flat_map(|set| set.targets.iter())
-            .any(|target| match identity {
-                #[cfg(test)]
-                WriterIdentity::File(id) => target.file_id == *id,
-                WriterIdentity::Path(path) => target.path == *path,
-                WriterIdentity::FileAndPath(id, path) => {
-                    target.file_id == *id || target.path == *path
-                }
-            })
-        {
+        if Self::is_certified(&state, identity) {
             return Err(WriteBlocked::Certified);
         }
         state.writers = state.writers.checked_add(1).ok_or(WriteBlocked::Busy)?;
         Ok(SourceWritePermit {
             coordinator: Arc::clone(self),
         })
+    }
+    fn is_certified(state: &WriteState, identity: &WriterIdentity) -> bool {
+        state
+            .certified
+            .iter()
+            .flat_map(|set| set.targets.iter())
+            .any(|target| match identity {
+                #[cfg(test)]
+                WriterIdentity::File(id) => target.file_id == *id,
+                WriterIdentity::Path(path) => Self::paths_may_alias(&target.path, path),
+                WriterIdentity::FileAndPath(id, path) => {
+                    target.file_id == *id || Self::paths_may_alias(&target.path, path)
+                }
+            })
+    }
+    fn paths_may_alias(left: &std::path::Path, right: &std::path::Path) -> bool {
+        // Each coordinator belongs to an established root. A different parent
+        // or an unprovable leaf cannot establish disjoint ownership here.
+        if left == right || left.parent() != right.parent() {
+            return true;
+        }
+        let flat_ascii = |name: &std::ffi::OsStr| {
+            let bytes = name.as_encoded_bytes();
+            !bytes.is_empty()
+                && bytes.len() <= 255
+                && !matches!(bytes.last(), Some(b' ' | b'.'))
+                && bytes.iter().all(|&byte| {
+                    (b' '..=b'~').contains(&byte)
+                        && !matches!(
+                            byte,
+                            b'/' | b'\\' | b':' | b'"' | b'<' | b'>' | b'|' | b'?' | b'*'
+                        )
+                })
+        };
+        match (left.file_name(), right.file_name()) {
+            (Some(left), Some(right)) if flat_ascii(left) && flat_ascii(right) => left
+                .as_encoded_bytes()
+                .eq_ignore_ascii_case(right.as_encoded_bytes()),
+            _ => true,
+        }
     }
     pub fn begin_repair(
         self: &Arc<Self>,
@@ -290,9 +432,10 @@ impl WriteCoordinator {
             || bytes.is_none_or(|bytes| bytes as u64 > request.reservation.bytes())
             || targets.iter().enumerate().any(|(index, target)| {
                 target.path.as_os_str().is_empty()
-                    || targets[..index]
-                        .iter()
-                        .any(|old| old.file_id == target.file_id || old.path == target.path)
+                    || targets[..index].iter().any(|old| {
+                        old.file_id == target.file_id
+                            || Self::paths_may_alias(&old.path, &target.path)
+                    })
             })
         {
             return Err(WriteBlocked::InvalidTarget);
@@ -306,6 +449,18 @@ impl WriteCoordinator {
         }
         if state.cancelled {
             return Err(WriteBlocked::Cancelled);
+        }
+        if targets.iter().any(|target| {
+            state
+                .certified
+                .iter()
+                .flat_map(|set| &set.targets)
+                .any(|sealed| {
+                    sealed.file_id == target.file_id
+                        || Self::paths_may_alias(&sealed.path, &target.path)
+                })
+        }) {
+            return Err(WriteBlocked::Certified);
         }
         if state.repair.is_some() {
             return Err(WriteBlocked::Busy);
@@ -385,6 +540,7 @@ impl RepairWriteLease {
         self.targets
             .retain(|target| verified.iter().any(|(id, _)| *id == target.file_id));
         state.certified.push(CertifiedTargets {
+            generation: self.generation,
             targets: std::mem::take(&mut self.targets),
             crcs: verified.to_vec(),
             _reservation: self.reservation.take().unwrap(),

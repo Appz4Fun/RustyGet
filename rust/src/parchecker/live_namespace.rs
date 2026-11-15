@@ -312,11 +312,12 @@ impl NamespaceProof {
 
     /// The direct renamer gave a queue row its real name (obfuscated posts).
     /// Follow it when the new name is unambiguous: an eligible leaf that no
-    /// other row aliases, a source row's new name resolving to the PAR
-    /// destination (by name) it is or may become bound to, and a recovery row's new
-    /// name never aliasing a source destination. Anything else still
-    /// invalidates the namespace.
-    fn follow_rename(&mut self, row: usize, name: &[u8]) -> Result<(), RepairError> {
+    /// other row aliases; for a source, either the one PAR destination (by
+    /// name, agreeing with any known 16k hash) it is or may become bound to,
+    /// or, while unbound, a name outside this set; for a recovery row, never a
+    /// source destination. Anything else still invalidates the namespace.
+    /// Longer names grow the control reservation on demand.
+    fn follow_rename(&mut self, row: usize, name: &[u8], hint: &[u8]) -> Result<(), RepairError> {
         if !eligible_leaf(name) {
             return Err(invalid("renamed queue identity is not an eligible leaf"));
         }
@@ -336,24 +337,40 @@ impl NamespaceProof {
             if candidate.is_some() {
                 return Err(invalid("recovery entry aliases a source destination"));
             }
-        } else {
-            let Some(index) = candidate else {
-                return Err(invalid("renamed source has no PAR destination"));
-            };
+        } else if let Some(index) = candidate {
             let id = self.facts.rows[row].queue_id;
             if self.bindings[row].is_some_and(|old| old != index)
                 || self.reverse_owner[index].is_some_and(|owner| owner != id)
             {
                 return Err(invalid("PAR source has a different queue owner"));
             }
+            // The renamer picks the first PAR entry with this row's 16k hash;
+            // a known hash must name exactly this destination.
+            let known = if hint.is_empty() { &self.facts.rows[row].hash16k[..] } else { hint };
+            if !known.is_empty() {
+                let hash = live_hash16k(known).ok_or_else(|| invalid("malformed hash hint"))?;
+                let matches = self
+                    .hash_order
+                    .iter()
+                    .filter(|&&i| self.catalog[i].hash == hash)
+                    .count();
+                if self.catalog[index].hash != hash || matches > 1 {
+                    return Err(invalid("renamed source hash does not prove its destination"));
+                }
+            }
+        } else if self.bindings[row].is_some() {
+            return Err(invalid("bound source renamed away from its PAR destination"));
         }
+        // An unbound source may take a name outside this PAR set (another set
+        // in the same job); it stays unbound.
         let mut renamed = reserved(name.len())?;
         renamed.extend_from_slice(name);
         let previous = std::mem::replace(&mut self.facts.rows[row].name, renamed);
-        if self
-            .allocated_bytes(0)
-            .is_none_or(|bytes| bytes as u64 > self.facts.reservation.bytes())
-        {
+        let fits = self.allocated_bytes(0).is_some_and(|bytes| {
+            let held = self.facts.reservation.bytes();
+            bytes as u64 <= held || self.facts.reservation.grow(bytes as u64 - held).is_ok()
+        });
+        if !fits {
             self.facts.rows[row].name = previous;
             return Err(invalid("renamed metadata exceeds control reservation"));
         }
@@ -445,7 +462,7 @@ impl NamespaceProof {
                 return Err(invalid("writer identity differs from its captured row"));
             }
             if self.facts.rows[row].name != name {
-                self.follow_rename(row, name)?;
+                self.follow_rename(row, name, hint)?;
             }
             let candidate = self.candidate(name, hint)?;
             if let Some(bound) = self.bindings[row] {
@@ -468,7 +485,8 @@ impl NamespaceProof {
         self.seen.fill(0);
     }
 
-    /// Allocation-free identity check of one currently borrowed native row.
+    /// Identity check of one currently borrowed native row. Allocates only
+    /// to follow a direct rename.
     pub fn recheck_row(
         &mut self,
         queue_id: i32,
@@ -487,7 +505,7 @@ impl NamespaceProof {
             if self.facts.rows[row].name != fields[0]
                 && self.facts.rows[row].par_file == (flags & 1 != 0)
             {
-                self.follow_rename(row, fields[0])?;
+                self.follow_rename(row, fields[0], fields[2])?;
             }
             let old = &self.facts.rows[row];
             if old.name != fields[0]

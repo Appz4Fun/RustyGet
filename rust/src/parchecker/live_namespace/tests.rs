@@ -239,10 +239,15 @@ fn direct_rename_that_is_ambiguous_still_invalidates() {
     )
     .unwrap();
     assert!(proof.bind(40, b"PART41.rar", b"").is_err());
-    // Renamed to a name that is no PAR destination.
+    // A bound source renamed away from its PAR destination.
     let mut proof =
         NamespaceProof::prepare(&set, facts(vec![row(40, b"obf-a.rar", b"")])).unwrap();
+    assert!(proof.bind(40, b"obf-a.rar", &hash_hex(1)).unwrap().is_some());
     assert!(proof.bind(40, b"movie.mkv", b"").is_err());
+    // A known 16k hash that names a different destination.
+    let mut proof =
+        NamespaceProof::prepare(&set, facts(vec![row(40, b"obf-a.rar", b"")])).unwrap();
+    assert!(proof.bind(40, b"part41.rar", &hash_hex(1)).is_err());
     // Renamed onto the destination another row is already bound to.
     let mut proof = NamespaceProof::prepare(
         &set,
@@ -262,4 +267,46 @@ fn direct_rename_that_is_ambiguous_still_invalidates() {
     assert!(proof
         .recheck_row(50, 1, [b"part40.rar", b"", b"", b""])
         .is_err());
+}
+#[test]
+fn unbound_source_renamed_into_another_par_set_stays_unbound() {
+    // Jobs with two PAR sets: the renamer names set-B files from set B.
+    let set = metadata(&[(b"part40.rar", 1)]);
+    let mut proof = NamespaceProof::prepare(
+        &set,
+        facts(vec![row(40, b"obf-a.rar", b""), row(41, b"obf-b.rar", b"")]),
+    )
+    .unwrap();
+    assert_eq!(proof.bind(41, b"other-set.part01.rar", b"").unwrap(), None);
+    assert!(proof.bind(40, b"part40.rar", b"").unwrap().is_some());
+}
+#[test]
+fn rename_to_a_duplicated_16k_hash_does_not_bind_by_name() {
+    let set = metadata(&[(b"part40.rar", 1), (b"part41.rar", 1)]);
+    let mut proof = NamespaceProof::prepare(&set, facts(vec![row(40, b"obf-a.rar", b"")])).unwrap();
+    assert!(proof.bind(40, b"part41.rar", &hash_hex(1)).is_err());
+}
+#[test]
+fn renames_grow_the_control_reservation_on_demand() {
+    let long = format!("{}.part40.rar", "r".repeat(240));
+    let set = metadata(&[(long.as_bytes(), 1)]);
+    // The smallest charge the captured namespace fits in, then a rename
+    // that needs more than its slack.
+    let mut jobs = Vec::new();
+    let mut proof = None;
+    for bytes in (256..65536).step_by(16) {
+        let (job, captured) = charged_facts(vec![row(40, b"o.rar", b"")], bytes);
+        jobs.push(job);
+        if let Ok(prepared) = NamespaceProof::prepare(&set, captured) {
+            proof = Some(prepared);
+            break;
+        }
+    }
+    let mut proof = proof.unwrap();
+    assert!(proof.bind(40, long.as_bytes(), b"").unwrap().is_some());
+    // Everything charged returns when the proof drops.
+    drop(proof);
+    for id in jobs {
+        drop(crate::parlive::reserve_control(id, 1 << 20, 500 << 20).unwrap());
+    }
 }

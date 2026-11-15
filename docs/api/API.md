@@ -93,6 +93,10 @@ If HTTP basic authentication is somewhat problematic the username/password can a
 - [testdiskspeed](#api-method-testdiskspeed)
 - [testnetworkspeed](#api-method-testnetworkspeed)
 
+## Machine
+
+- [systemstats](#api-method-systemstats)
+
 ## Method reference
 
 ### API-method `version`
@@ -1285,3 +1289,41 @@ Starts the network speed test.
 
 #### Return value
 - **SpeedMbps** `(double)` - The measured network speed in Mbps.
+
+### API-method `systemstats`
+
+### Since
+RustyGet `v0.1`
+
+#### Signature
+``` c++
+struct systemstats(int RangeSec);
+```
+
+#### Description
+Live metrics of the machine RustyGet runs on, and their history. The daemon
+samples every 5 seconds and keeps one hour of samples, plus one-minute averages
+for 24 hours, so the history covers time no client was connected.
+
+#### Arguments
+- **RangeSec** `(int)` - optional, seconds of history to return (60 to 86400,
+  default 3600). Up to one hour returns 5 second samples; longer returns
+  one-minute averages.
+
+#### Return value
+- **Time** `(int)` - server time, Unix seconds.
+- **Load** `(double[3])` - 1, 5 and 15 minute load averages.
+- **CpuCount** `(int)` - CPUs online.
+- **CpuPercent** `(double)` - busy CPU of the whole machine, percent of all CPUs.
+- **ProcessCpuPercent** `(double)` - CPU used by RustyGet, percent of all CPUs.
+- **Cpu** `(struct)` - `Vendor`, `Model`, `Generation` (best effort from the model name, may be empty) and `Arch`.
+- **Memory** `(struct)` - `Total`, `Free`, `Available`, `Used` (total minus available) and `Process` (RustyGet resident memory), in bytes.
+- **Swap** `(struct)` - `Total` and `Free`, in bytes.
+- **Zswap**, **Zram** `(bool)` - Linux memory compression in use.
+- **MemoryCompression** `(string)` - `zswap`, `zram`, `zswap + zram`, `macOS compressor` or `none`.
+- **Speed** `(int)` - current download speed of all servers, bytes per second.
+- **Connections** `(int)` - news server connections in use.
+- **History** `(struct)` - `Interval` (seconds per sample), `Fields` (column names) and
+  `Samples` (rows of `Time, Speed, Connections, Load1, Load5, Load15, Cpu, ProcessCpu, MemUsed, ProcessMem`).
+
+XML-RPC clients receive the same document as one JSON string.

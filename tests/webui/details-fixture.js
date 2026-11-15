@@ -115,6 +115,44 @@ function configOptions() {
   return { template, options: [...values].map(([Name, Value]) => ({ Name, Value })) };
 }
 
+// A `systemstats` reply: a 16-CPU machine and an hour of 5 second samples
+// with a download burst, so every system chart has a shape.
+function systemStats(rangeSec = 3600) {
+  const GiB = 1073741824;
+  const now = Math.floor(Date.now() / 1000);
+  const interval = rangeSec > 3600 ? 60 : 5;
+  const count = Math.min(Math.floor(rangeSec / interval), interval === 5 ? 720 : 1440);
+  const samples = [];
+  for (let i = count - 1; i >= 0; i--) {
+    const t = now - i * interval;
+    const phase = (count - i) / count;
+    const busy = phase > 0.25 && phase < 0.8 ? 1 : 0.08;
+    const wave = 0.85 + 0.15 * Math.sin(phase * 40);
+    samples.push([t, Math.round(busy * wave * 118 * MB), Math.round(busy * 58 * wave),
+      +(busy * 6.2 * wave + 0.4).toFixed(2), +(busy * 5.1 + 0.6).toFixed(2), +(busy * 3.4 + 0.8).toFixed(2),
+      +(busy * 46 * wave + 4).toFixed(2), +(busy * 31 * wave + 0.5).toFixed(2),
+      Math.round((9 + busy * 6 * wave) * GiB), Math.round((0.6 + busy * 1.4) * GiB)]);
+  }
+  const lastRow = samples[samples.length - 1];
+  return {
+    Time: now, Load: [lastRow[3], lastRow[4], lastRow[5]], CpuCount: 16, CpuPercent: lastRow[6], ProcessCpuPercent: lastRow[7],
+    Cpu: { Vendor: 'AMD', Model: 'AMD Ryzen 9 5950X 16-Core Processor', Generation: 'Ryzen 5000 (Zen 3)', Arch: 'x86_64' },
+    Memory: { Total: 64 * GiB, Free: 21 * GiB, Available: 64 * GiB - lastRow[8], Used: lastRow[8], Process: lastRow[9] },
+    Swap: { Total: 8 * GiB, Free: 7.5 * GiB }, Zswap: true, Zram: false, MemoryCompression: 'zswap',
+    Speed: lastRow[1], Connections: lastRow[2],
+    History: { Interval: interval, Fields: ['Time', 'Speed', 'Connections', 'Load1', 'Load5', 'Load15', 'Cpu', 'ProcessCpu', 'MemUsed', 'ProcessMem'],
+      Samples: samples }
+  };
+}
+
+const SYSINFO = {
+  OS: { Name: 'Debian GNU/Linux', Version: '13' }, CPU: { Model: 'AMD Ryzen 9 5950X 16-Core Processor', Arch: 'x86_64' },
+  Network: { PublicIP: '', PrivateIP: '10.0.0.2' }, Tools: [],
+  Libraries: [['zipfast', '0.1.0'], ['zipview', '0.1.0'], ['par-rs', '0.2.0'], ['nntmux-yenc', '0.1.0'], ['flate2', '1.1.11'],
+    ['zlib-rs', '0.6.8'], ['zstd', '0.14.3'], ['bzip2', '0.6.1'], ['crc32fast', '1.5.2'], ['quick-xml', '0.41.0'],
+    ['md-5', '0.11.0'], ['libc', '0.2.190'], ['openssl', '0.10.82'], ['OpenSSL', '3.5.4']].map(([Name, Version]) => ({ Name, Version }))
+};
+
 // Route every request of `page` to committed files and synthetic RPC replies.
 async function installDetailsFixture(page, base, writes = [], hooks = {}) {
   const { template, options } = configOptions();
@@ -123,7 +161,7 @@ async function installDetailsFixture(page, base, writes = [], hooks = {}) {
   const replies = {
     config: options, loadconfig: options, configtemplates: [{ Name: '', Template: template }],
     status: status(), listgroups: groups, history, log: [], loadlog: [], servervolumes: [],
-    version: '26.3', sysinfo: {}, systemhealth: { Alerts: [], Sections: [] }, tlscipherstatus: {},
+    version: '26.3', sysinfo: SYSINFO, systemstats: systemStats(), systemhealth: { Alerts: [], Sections: [] }, tlscipherstatus: {},
     readurl: JSON.stringify({ 'stable-version': '26.3', 'testing-version': '26.3' }), listfiles: [], viewfeed: []
   };
   await page.route('**/*', async route => {
@@ -139,6 +177,10 @@ async function installDetailsFixture(page, base, writes = [], hooks = {}) {
         writes.push({ method: rpc.method, params: rpc.params });
         if (hooks.holdMutation) await hooks.holdMutation(rpc);
         return route.fulfill({ contentType: 'application/json', json: { id: rpc.id, result: true } });
+      }
+      if (rpc.method === 'systemstats') {
+        const range = +(rpc.params ? rpc.params[0] : new URL(request.url()).searchParams.get('')) || 3600;
+        replies.systemstats = systemStats(range);
       }
       const result = replies[rpc.method];
       assert.notEqual(result, undefined, 'Details fixture must answer every read RPC: ' + rpc.method);
@@ -156,4 +198,4 @@ async function installDetailsFixture(page, base, writes = [], hooks = {}) {
   });
 }
 
-module.exports = { installDetailsFixture, RELEASE };
+module.exports = { installDetailsFixture, RELEASE, systemStats };

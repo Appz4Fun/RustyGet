@@ -393,6 +393,7 @@ var SystemInfo = (new function($)
 			function (sysInfo)
 			{
 				lastSysInfo = sysInfo;
+				setTimeout(function() { SystemMetrics.update(false); }, 0);
 				cleanUp();
 				hideSpinner();
 				showMainContent();
@@ -702,15 +703,25 @@ var SystemInfo = (new function($)
 
 	function renderLibraries(libs)
 	{
-		libs.forEach(function(lib)
+		Libraries.merge(libs).forEach(function(lib)
 			{
 				var tr = $('<tr>');
 				var tdName = $('<td>');
-				var tdVersion = $('<td>');
-				tdName.text(lib.Name);
-				tdVersion.text(lib.Version);
+				if (lib.url)
+				{
+					tdName.append(Libraries.link(lib, lib.name));
+				}
+				else
+				{
+					tdName.text(lib.name);
+				}
+				if (lib.internal)
+				{
+					tdName.append(' ').append($('<span class="license-badge license-badge--internal">').text(Libraries.OWNER));
+				}
 				tr.append(tdName);
-				tr.append(tdVersion);
+				tr.append($('<td>').text(lib.version || ''));
+				tr.append($('<td>').text(lib.license || ''));
 				$SysInfo_LibrariesTable.append(tr);
 			}
 		);

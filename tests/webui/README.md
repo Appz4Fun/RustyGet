@@ -16,6 +16,7 @@ node tests/webui/settings-titles.js http://127.0.0.1:17689/
 node tests/webui/settings-locales.js http://127.0.0.1:17689/
 node tests/webui/settings-savebar.js http://127.0.0.1:17689/   # offline, no daemon needed
 node tests/webui/settings-cards.js http://127.0.0.1:17999/     # offline, no daemon needed
+node tests/webui/system-metrics.js http://127.0.0.1:17999/     # offline: Status tiles, Statistics charts, License page
 node tests/webui/release-names.js http://127.0.0.1:17999/      # offline: Downloads release names, logo easter egg
 node tests/webui/settings-health-startup.js http://127.0.0.1:17689/
 node tests/webui/tls-cipher.js http://127.0.0.1:17689/

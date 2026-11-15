@@ -241,6 +241,7 @@ $(document).ready(function()
 		// SVG colours are captured at draw time; refresh cached charts even when polling is off.
 		Statistics.redraw();
 		StatDialog.redraw();
+		SystemMetrics.redraw();
 	}
 
 	function isSystemThemeDark()
@@ -300,6 +301,8 @@ var Frontend = (new function($)
 		LimitDialog.init();
 		SystemInfo.init();
 		Statistics.init();
+		SystemMetrics.init();
+		Libraries.renderLicensePage($('#ConfigLicenses'));
 		SystemHealth.init();
 
 		DownloadsEditDialog.init();
@@ -864,6 +867,7 @@ var Refresher = (new function($)
 			'status', 
 			'health',
 			'sysinfo',
+			'systemstats',
 			'listgroups', 
 			'history', 
 			'listfiles',

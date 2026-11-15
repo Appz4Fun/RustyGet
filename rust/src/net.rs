@@ -3189,6 +3189,16 @@ impl NzbgetRsServerPool {
         self.close_unused_connections();
     }
 
+    /// News server connections checked out right now (downloads and checks).
+    pub fn connections_in_use(&self) -> usize {
+        self.inner.lock().map_or(0, |g| {
+            g.connections
+                .iter()
+                .filter(|c| c.in_use.load(Ordering::SeqCst))
+                .count()
+        })
+    }
+
     pub fn primary_connections(&self) -> i32 {
         let Ok(srvs) = self.servers.read() else {
             return 0;

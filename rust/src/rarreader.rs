@@ -346,6 +346,11 @@ pub fn read_from(
                 _ => return false,
             }
         }
+        // the headers are encrypted, the password just does not open them
+        (Err(MapError::WrongPassword), _) => {
+            volume.encrypted = true;
+            return false;
+        }
         _ => return false,
     };
     if map.header_encrypted {
@@ -720,5 +725,100 @@ mod tests {
             assert!(ok);
             assert!(files[0].encrypted_data);
         }
+    }
+
+    #[test]
+    fn wrong_header_password_still_reports_encrypted_headers() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("tests/testdata/rarrenamer");
+        for name in ["testfile3encnam.part01.rar", "testfile5encnam.part01.rar"] {
+            let mut source = Bytes(std::fs::read(dir.join(name)).unwrap());
+            let mut volume = Volume {
+                has_password: true,
+                ..Volume::default()
+            };
+            let mut files = Vec::new();
+            assert!(!read_from(&mut volume, &mut source, Some(b"wrong"), &mut files));
+            assert!(volume.encrypted, "{name}");
+            assert!(files.is_empty());
+        }
+    }
+
+    /// A source that fails every read reaching past `limit`, as a content
+    /// source does at a missing article.
+    struct FailsPast {
+        data: Vec<u8>,
+        limit: usize,
+    }
+    impl Source for FailsPast {
+        fn size(&mut self) -> i64 {
+            self.data.len() as i64
+        }
+        fn read(&mut self, offset: i64, buf: &mut [u8]) -> bool {
+            let start = offset as usize;
+            let end = start + buf.len();
+            if end > self.limit || end > self.data.len() {
+                return false;
+            }
+            buf.copy_from_slice(&self.data[start..end]);
+            true
+        }
+    }
+
+    #[test]
+    fn files_read_before_a_failed_read_are_kept() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("tests/testdata/rarrenamer");
+        for name in ["testfile3.part01.rar", "testfile5.part01.rar"] {
+            let data = std::fs::read(dir.join(name)).unwrap();
+            let mut whole = Vec::new();
+            let mut volume = Volume::default();
+            assert!(read_from(&mut volume, &mut Bytes(data.clone()), None, &mut whole));
+            let first = whole[0].clone();
+            // the bytes stop right after the first file's header: its data
+            // and the end header cannot be read
+            let mut source = FailsPast {
+                limit: first.data_offset as usize + 1,
+                data,
+            };
+            let mut volume = Volume::default();
+            let mut files = Vec::new();
+            assert!(!read_from(&mut volume, &mut source, None, &mut files));
+            assert_eq!(files, vec![first], "{name}");
+            assert!(volume.multi_volume);
+            assert!(!volume.has_next_volume);
+        }
+    }
+
+    #[test]
+    fn rar3_times_offsets_and_methods_match_the_headers() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("tests/testdata/rarrenamer");
+        let data = std::fs::read(dir.join("testfile3.part01.rar")).unwrap();
+        // the first file header follows the 7-byte signature and the main header
+        let main = u16::from_le_bytes([data[12], data[13]]) as usize;
+        let at = 7 + main;
+        assert_eq!(data[at + 2], 0x74);
+        let size = u16::from_le_bytes([data[at + 5], data[at + 6]]) as usize;
+        let dos = u32::from_le_bytes(data[at + 20..at + 24].try_into().unwrap());
+        let method = data[at + 25];
+        let mut files = Vec::new();
+        let mut volume = Volume::default();
+        assert!(read_from(&mut volume, &mut Bytes(data.clone()), None, &mut files));
+        assert_eq!(files[0].time, dos);
+        assert_eq!(files[0].method, u32::from(method));
+        assert_eq!(files[0].data_offset, (at + size) as i64);
+        assert_eq!(dos_time(0), 0);
+        // 2026-11-15 23:59:58 UTC
+        assert_eq!(
+            dos_time(1_794_787_198),
+            (46 << 25) | (11 << 21) | (15 << 16) | (23 << 11) | (59 << 5) | 29
+        );
     }
 }

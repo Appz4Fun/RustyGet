@@ -703,7 +703,7 @@ where
             &protection,
             &opened,
             handle_limit,
-            16u64.saturating_add(path_depth(&deferred[0].0.name).saturating_mul(4)),
+            16u64.saturating_add(path_depth(&deferred[0].0.name).saturating_mul(14)),
         )
     {
         log_cb(
@@ -1624,9 +1624,10 @@ const PROTECTED_READ_BUDGET: u64 = 32 * 1024 * 1024;
 
 /// With the volumes declared protected, each zipfast validation rechecks every protected volume
 /// against every admitted one: roughly 2V^2 + V(2P + 4) bookkeeping units, V volumes with paths
-/// up to P bytes. `steps` is a generous count of the checks still to come (a publication runs
-/// a handful, plus about two per parent directory it may create); upgrade only when they fit
-/// the headroom added at session creation.
+/// up to P bytes. `steps` counts the checks still to come: a publication costs about 16 (it
+/// re-validates and sorts the inventory) plus about 14 per parent directory it may create.
+/// Upgrade only when they fit the headroom added at session creation (zipfast's default
+/// budget, barely used without a declaration, is a further margin).
 fn fits_protected_read_budget(
     inventory: &zipfast::progressive::ProtectionInventory,
     steps: u64,
@@ -1756,7 +1757,12 @@ impl FeedProvider {
             }
         }
         let read = self.opened.lock().unwrap_or_else(|e| e.into_inner()).len();
-        if late.tried_at == Some(read) {
+        if late.tried_at == Some(read)
+            || late
+                .members
+                .as_ref()
+                .is_some_and(|m| (read as u64) < m.volumes)
+        {
             return;
         }
         late.tried_at = Some(read);
@@ -1774,7 +1780,7 @@ impl FeedProvider {
             return;
         }
         // Each 1 MiB data read of the open volume rechecks the declaration, and so do its
-        // remaining header steps; each publication runs a handful of checks plus about two per
+        // remaining header steps; each publication costs about 16 checks plus about 14 per
         // parent directory.
         let steps = remaining
             .div_ceil(1024 * 1024)
@@ -1782,7 +1788,7 @@ impl FeedProvider {
             .saturating_add(
                 members
                     .count
-                    .saturating_mul(16u64.saturating_add(members.max_depth.saturating_mul(4))),
+                    .saturating_mul(16u64.saturating_add(members.max_depth.saturating_mul(14))),
             );
         upgrade_protection(
             &late.first,

@@ -6075,11 +6075,20 @@ def scenario_fleetencryptedlast(daemon, t):
 def scenario_fleettwinvolumes(daemon, t):
     """appendfleet: a twin posted with par2 volumes only (no index file, as
     MobLand S02E09 copy 11 was) is still a TWIN: its file list is read from
-    its smallest volume. Both twins rank ahead of a healthier borrowable ALT."""
+    its smallest volume, from the volume's end when its first article holds
+    only recovery data. Both twins rank ahead of a borrowable ALT."""
     daemon.fake_nntp.alive = set()
     same = _payload(400_000, 7401)
     api = daemon.wait_ready()
-    vol_only = _fleet_copy(daemon, 'tv', 'd.bin', 400_000, None, same, 36).replace('d.par2', 'd.vol-01.par2')
+    # a real volume layout: its first article is recovery data only, the
+    # file list (critical packets) comes after it, in the last article
+    ids = _fleet_ids('tv')
+    daemon.fake_nntp.alive |= set(ids[:36]) | {'tv-vol1@x', 'tv-vol2@x'}
+    index = generators.par2_index([('d.bin', same)], pad=0)
+    daemon.fake_nntp.bodies_by_id['tv-vol1@x'] = _yenc_part(b'\x5a' * 6000, 'd.vol-01.par2')
+    daemon.fake_nntp.bodies_by_id['tv-vol2@x'] = _yenc_part(index, 'd.vol-01.par2')
+    vol_only = _fake_nzb_files([('d.bin', ids, 400_000),
+                                ('d.vol-01.par2', ['tv-vol1@x', 'tv-vol2@x'], 6000 + len(index))]).decode()
     reply = _fleet(daemon, [
         ('Show.S01E01.store', _fleet_copy(daemon, 'vs', 'b.rar', 410_000, _rar4_head(0x30), _payload(410_000, 7402))),
         ('Show.S01E01.twinA', _fleet_copy(daemon, 'ta2', 'c.bin', 400_000, None, same, 34)),

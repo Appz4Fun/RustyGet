@@ -3501,6 +3501,9 @@ pub struct NzbSummaryHead {
     pub name: Vec<u8>,
     pub id: Vec<u8>,
     pub bytes: i64,
+    /// The file's last two segments (in order), for a par2 volume whose
+    /// critical packets follow its recovery data.
+    pub tail_ids: Vec<Vec<u8>>,
 }
 
 /// Parsed NZB summary (`NzbSummary` in `NzbReader.h`).
@@ -3622,6 +3625,7 @@ pub fn parse_nzb_summary(xml: &[u8]) -> Option<NzbSummaryData> {
     let mut m_name: Vec<u8> = Vec::new();
     let mut m_subject: Vec<u8> = Vec::new();
     let mut m_first_id: Vec<u8> = Vec::new();
+    let mut m_tail_ids: Vec<Vec<u8>> = Vec::new();
     let mut m_segments: Vec<(i64, i64, Vec<u8>)> = Vec::new();
     let mut m_parts: Vec<(i64, i64)> = Vec::new();
     let mut m_file_bytes: i64 = 0;
@@ -3665,6 +3669,7 @@ pub fn parse_nzb_summary(xml: &[u8]) -> Option<NzbSummaryData> {
                     m_name = subj[s_start..s_end].to_vec();
                     m_subject = subj.to_vec();
                     m_first_id.clear();
+                    m_tail_ids.clear();
                     m_segments.clear();
                     m_parts.clear();
                     m_file_bytes = 0;
@@ -3738,6 +3743,12 @@ pub fn parse_nzb_summary(xml: &[u8]) -> Option<NzbSummaryData> {
                         if seg_num == 1 {
                             m_first_id = seg_id.clone();
                         }
+                        if is_par {
+                            m_tail_ids.push(seg_id.clone());
+                            if m_tail_ids.len() > 2 {
+                                m_tail_ids.remove(0);
+                            }
+                        }
                     }
                     let count = declared_parts_c_locale(&m_subject);
                     let (_file_listed, file_total) = crate::dupewatch::part_counts(
@@ -3783,6 +3794,7 @@ pub fn parse_nzb_summary(xml: &[u8]) -> Option<NzbSummaryData> {
                             name: m_name.clone(),
                             id: m_first_id.clone(),
                             bytes: m_file_bytes,
+                            tail_ids: m_tail_ids.clone(),
                         });
                     }
                     if push_data_head {
@@ -3790,6 +3802,7 @@ pub fn parse_nzb_summary(xml: &[u8]) -> Option<NzbSummaryData> {
                             name: m_name.clone(),
                             id: m_first_id.clone(),
                             bytes: m_file_bytes,
+                            tail_ids: Vec::new(),
                         });
                     }
                     m_in_file = false;

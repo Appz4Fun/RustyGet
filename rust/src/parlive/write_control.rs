@@ -39,6 +39,8 @@ struct WriteState {
     source_identity_changed: bool,
     closed: bool,
     writers: usize,
+    // Leaf names of active writers (with counts) for cross-job alias checks.
+    writer_leaves: Vec<(std::ffi::OsString, usize)>,
     // A pending barrier is installed before waiting, so new writers cannot starve it.
     repair: Option<(SessionGeneration, bool)>,
     certified: Vec<CertifiedTargets>,
@@ -56,6 +58,7 @@ pub(crate) struct WriterStatus {
 }
 pub(crate) struct SourceWritePermit {
     coordinator: Arc<WriteCoordinator>,
+    leaf: Option<std::ffi::OsString>,
 }
 // Error paths must drop owned target metadata before returning its reservation.
 struct TargetRequest {
@@ -79,8 +82,16 @@ impl WriteCoordinator {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let identity = WriterIdentity::Path(path.to_owned());
         if Self::is_certified(&state, &identity) { return true; }
-        if state.generation.0 == 0 && state.repair.is_none() && (!cross_job || state.writers == 0) {
-            return false;
+        if state.generation.0 == 0 && state.repair.is_none() {
+            // Before live metadata only a concurrent write of the same file
+            // through another job's alias conflicts; unrelated files proceed.
+            let same_file = cross_job
+                && state.writer_leaves.iter().any(|(leaf, _)| {
+                    Self::paths_may_alias(std::path::Path::new(leaf), path.file_name().map_or(path, std::path::Path::new))
+                });
+            if !same_file {
+                return false;
+            }
         }
         let protected = state.namespace.as_ref().is_none_or(|proof| {
             path.file_name().is_none_or(|leaf| proof.protects_leaf(leaf.as_encoded_bytes()))
@@ -103,6 +114,7 @@ impl WriteCoordinator {
                 source_identity_changed: false,
                 closed: false,
                 writers: 0,
+                writer_leaves: Vec::new(),
                 repair: None,
                 certified: Vec::new(),
                 namespace: None,
@@ -113,6 +125,13 @@ impl WriteCoordinator {
     pub(super) fn closed_and_quiescent(&self) -> (bool, bool) {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         (state.closed, state.repair.is_none() && state.writers == 0)
+    }
+    pub(crate) fn has_physical_root(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .physical_root
+            .is_some()
     }
     pub(super) fn physical_root(&self) -> Option<Arc<super::source_identity::SourceRoot>> {
         self.state
@@ -377,8 +396,22 @@ impl WriteCoordinator {
             return Err(WriteBlocked::Certified);
         }
         state.writers = state.writers.checked_add(1).ok_or(WriteBlocked::Busy)?;
+        let leaf = match identity {
+            #[cfg(test)]
+            WriterIdentity::File(_) => None,
+            WriterIdentity::Path(path) | WriterIdentity::FileAndPath(_, path) => {
+                path.file_name().map(std::ffi::OsStr::to_os_string)
+            }
+        };
+        if let Some(leaf) = &leaf {
+            match state.writer_leaves.iter_mut().find(|(name, _)| name == leaf) {
+                Some((_, count)) => *count += 1,
+                None => state.writer_leaves.push((leaf.clone(), 1)),
+            }
+        }
         Ok(SourceWritePermit {
             coordinator: Arc::clone(self),
+            leaf,
         })
     }
     fn is_certified(state: &WriteState, identity: &WriterIdentity) -> bool {
@@ -525,6 +558,14 @@ impl Drop for SourceWritePermit {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         state.writers -= 1;
+        if let Some(leaf) = &self.leaf {
+            if let Some(index) = state.writer_leaves.iter().position(|(name, _)| name == leaf) {
+                state.writer_leaves[index].1 -= 1;
+                if state.writer_leaves[index].1 == 0 {
+                    state.writer_leaves.swap_remove(index);
+                }
+            }
+        }
         self.coordinator.changed.notify_all();
     }
 }

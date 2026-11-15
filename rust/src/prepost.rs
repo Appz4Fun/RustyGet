@@ -1681,7 +1681,16 @@ impl NzbgetRsPrePostProcessor {
                     nzb.direct_unpack_status == NS_RUNNING
                         && !crate::postproc::direct_unpack_awaiting_repair(nzb.id),
                 ),
-                has_live_repair_thread: u8::from(nzb.has_live_repair_thread),
+                // Pending live work (a recovery volume still being folded, or a
+                // running live repair) defers only this job, never the queue.
+                has_live_repair_thread: u8::from(nzb.has_live_repair_thread || {
+                    #[cfg(unix)]
+                    let defer = nzb.is_download_completed
+                        && crate::postproc::live_repair_should_defer_post(nzb.id);
+                    #[cfg(not(unix))]
+                    let defer = false;
+                    defer
+                }),
                 priority: nzb.priority,
                 force_priority: u8::from(nzb.force_priority),
                 need_par_check: u8::from(need_par),
@@ -1719,13 +1728,6 @@ impl NzbgetRsPrePostProcessor {
                 if post_job == 0 {
                     break;
                 }
-                // A just-completed recovery volume may still be on its way into
-                // the live session; let that repair run before par-check takes over.
-                #[cfg(unix)]
-                if crate::postproc::live_repair_should_defer_post(host.nzb_snap(post_job, false).id) {
-                    break;
-                }
-
                 self.active_jobs.lock().unwrap().push(post_job);
 
                 let nzb = host.nzb_snap(post_job, false);

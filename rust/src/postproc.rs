@@ -3108,11 +3108,12 @@ pub(crate) fn live_repair_should_defer_post(nzb_id: i32) -> bool {
     static SINCE: std::sync::LazyLock<Mutex<std::collections::HashMap<i32, std::time::Instant>>> =
         std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
     const LIMIT: Duration = Duration::from_secs(10);
-    let pending = crate::parchecker::streaming_session_pending_completed_jobs().contains(&nzb_id)
-        || crate::parchecker::streaming_session_completion_drain_active(nzb_id)
-        || direct_unpack_holds()
-            .get(&nzb_id)
-            .is_some_and(|state| state.live_repair_running);
+    let running = direct_unpack_holds()
+        .get(&nzb_id)
+        .is_some_and(|state| state.live_repair_running);
+    let pending = running
+        || crate::parchecker::streaming_session_pending_completed_jobs().contains(&nzb_id)
+        || crate::parchecker::streaming_session_completion_drain_active(nzb_id);
     let mut since = SINCE.lock().unwrap_or_else(|e| e.into_inner());
     if !pending {
         since.remove(&nzb_id);
@@ -3122,7 +3123,12 @@ pub(crate) fn live_repair_should_defer_post(nzb_id: i32) -> bool {
     if first.elapsed() < LIMIT {
         return true;
     }
-    since.remove(&nzb_id);
+    // Past the cap ordinary repair takes over, but never alongside a live
+    // repair: cancel it and wait for its helper to leave the files.
+    if running {
+        crate::parchecker::streaming_session_cancel(nzb_id);
+        return true;
+    }
     false
 }
 

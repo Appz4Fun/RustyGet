@@ -1220,9 +1220,8 @@ pub(crate) fn article_writer_flush_cache_guarded(
                 continue;
             }
             Err(blocked) => {
-                // Never report uncommitted data as written.
-                count += 1;
-                discard(index);
+                // Keep the segment cached and uncounted: the next flush pass
+                // builds a fresh context and writes it.
                 let message = join_c_slices(&[
                     b"Could not commit cached article for ",
                     output_filename,

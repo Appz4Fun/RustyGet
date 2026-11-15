@@ -389,3 +389,27 @@ fn preindex_cross_job_writer_conflict_cannot_disappear_at_live_startup() {
     std::fs::remove_file(alias).unwrap();
     f.finish();
 }
+
+#[test]
+fn preindex_cross_job_alias_may_write_an_unrelated_file() {
+    let f = Fixture::new();
+    let path = f.root.join("part40.rar");
+    std::fs::write(&path, b"preindex source").unwrap();
+    let context = f.context(b"part40.rar");
+    context.attest_existing_source().unwrap();
+    let writer = context.permit().unwrap();
+    let gate = download_writes(f.job, &f.root).unwrap();
+    let alias = f.root.with_extension("unrelated-alias");
+    std::os::unix::fs::symlink(&f.root, &alias).unwrap();
+    let other_job = NEXT_JOB.fetch_sub(1, Ordering::Relaxed);
+    let other = source_write_context(other_job, 41, &alias, b"other.rar").unwrap();
+    let attempt = other.open_attested(&alias.join("other.rar"), true);
+    assert!(attempt.is_ok(), "an unrelated file was refused");
+    drop(attempt);
+    assert_eq!(std::fs::read(&path).unwrap(), b"preindex source");
+    drop(writer);
+    assert!(gate.advance_generation(SessionGeneration(1)).is_ok(), "an unrelated write poisoned live startup");
+    forget_download_writes(other_job);
+    std::fs::remove_file(alias).unwrap();
+    f.finish();
+}

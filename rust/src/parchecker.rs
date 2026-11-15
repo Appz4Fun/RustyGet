@@ -1876,6 +1876,23 @@ impl LiveRepairRequest {
         // Fence native cache flushing before installing a pending barrier. No queue lock here.
         let waited = std::time::Instant::now();
         let paths: Vec<PathBuf> = self.targets.iter().map(|t| t.path.clone()).collect();
+        // Bind the physical root through the ordinary registry (alias and
+        // cross-job checks) only when no source writer attested it yet, and
+        // before the repair barrier, so the check never cancels this repair.
+        if !self.entry.writers.has_physical_root() {
+            for (path, (queue_id, _)) in paths.iter().zip(&self.ids) {
+                if let Some(name) = path.file_name() {
+                    if let Ok(context) = crate::parlive::source_write_context(
+                        self.nzb_id,
+                        *queue_id,
+                        &self.entry.base_dir,
+                        name.as_encoded_bytes(),
+                    ) {
+                        let _ = context.attest_existing_source();
+                    }
+                }
+            }
+        }
         let ownership = crate::articledl::with_live_cache_fence(|| {
             self.entry
                 .writers
@@ -1884,19 +1901,7 @@ impl LiveRepairRequest {
         .map_err(|_| RepairError::Cancelled)?;
         // Writers are drained: bind the actual target inodes under the barrier.
         let mut files = Vec::with_capacity(paths.len());
-        for (path, (queue_id, file_id)) in paths.iter().zip(&self.ids) {
-            // Bind the physical root through the ordinary registry (alias and
-            // cross-job checks) when no source writer has attested it yet.
-            if let Some(name) = path.file_name() {
-                if let Ok(context) = crate::parlive::source_write_context(
-                    self.nzb_id,
-                    *queue_id,
-                    &self.entry.base_dir,
-                    name.as_encoded_bytes(),
-                ) {
-                    let _ = context.attest_existing_source();
-                }
-            }
+        for (path, (_, file_id)) in paths.iter().zip(&self.ids) {
             let file = crate::parlive::open_repair_target(&self.entry.writers, path)
                 .map_err(|_| live_error("live target admission", "target ownership unproven"))?;
             files.push(par_rs::RepairTargetFile { file_id: *file_id, file });

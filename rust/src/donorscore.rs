@@ -48,6 +48,11 @@ pub struct Entry {
     /// `DonorKind` of a non-twin (`crate::donorkind::DonorKind as u8`:
     /// 1 borrowable, 2 unknown, 3 unborrowable); a twin is always first.
     pub kind: u8,
+    /// The highest offset this entry can be given (0: none). A partly alive
+    /// fleet member is never raised above its old score (see
+    /// `eval_member_rerank`); the entries ranked after it must then fall
+    /// below that, or they would overtake it.
+    pub cap: i32,
 }
 
 impl Entry {
@@ -91,8 +96,12 @@ pub fn rerank(entries: &[Entry], pick_bytes: i64) -> Vec<i32> {
     });
     let mut previous = 100;
     for i in live {
-        let want = (DEAD + 1).max(target(entries[i].alive, entries[i].twin).min(previous - 1));
-        previous = want;
+        let mut want = target(entries[i].alive, entries[i].twin).min(previous - 1);
+        if entries[i].cap > 0 {
+            want = want.min(entries[i].cap);
+        }
+        let want = (DEAD + 1).max(want);
+        previous = if entries[i].cap > 0 { want.min(entries[i].cap) } else { want };
         scores[i] = want;
     }
     scores
@@ -110,7 +119,19 @@ mod tests {
             bytes,
             grabs,
             kind: 2,
+            cap: 0,
         }
+    }
+
+    #[test]
+    fn a_capped_member_keeps_the_entries_after_it_below() {
+        // a 98%-alive twin member scored 80 before, a whole borrowable ALT 90:
+        // the twin can't rise past 80, so the ALT must drop below it
+        let twin = Entry { cap: 80, ..e(DEAD + 1, 0.98, true, 1000, 0) };
+        let alt = Entry { kind: 1, ..e(DEAD + 1, 1.0, false, 1000, 0) };
+        let got = rerank(&[alt, twin], 1000);
+        assert_eq!(got[1], 80);
+        assert!(got[0] < got[1], "{got:?}");
     }
 
     #[test]

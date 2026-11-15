@@ -1626,7 +1626,11 @@ impl NzbgetRsDupeSearch {
         let due = opts.now + i64::from(opts.delay_sec);
         self.schedule(added.id, due);
 
-        if action_kind == 1 && !added.is_donor && added.dupe_mode == 0 && !added.has_dupe_fleet {
+        // A fleet backup added after the first upkeep pass also wakes the
+        // queued primary, so it checks the new backup (and can swap to it);
+        // fleet_append has already scored it, so it needs no rerank.
+        let fleet_backup = added.has_dupe_fleet;
+        if action_kind == 1 && added.dupe_mode == 0 && (fleet_backup || !added.is_donor) {
             let added_key = lower_key(&effective_key(&added.dupe_key, &added.name));
             let (q_len, _) = dq_counts(host_ctx, host_cb, dq_ptr);
             let mut parent: Option<(i32, i32)> = None;
@@ -1657,7 +1661,9 @@ impl NzbgetRsDupeSearch {
             if let Some((parent_id, _)) = parent {
                 let fresh_now = host_now(host_ctx, host_cb);
                 let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-                g.rank_pending.insert(parent_id);
+                if !fleet_backup {
+                    g.rank_pending.insert(parent_id);
+                }
                 g.pending
                     .insert(parent_id, fresh_now + i64::from(opts.delay_sec));
                 self.cond.notify_all();
@@ -3203,6 +3209,7 @@ impl NzbgetRsDupeSearch {
                             bytes: verified[i].info.total_bytes,
                             grabs: verified[i].listing.grabs,
                             kind: kind as u8,
+                            cap: 0,
                         },
                         title: verified[i].listing.title.clone(),
                         member: false,
@@ -3553,6 +3560,11 @@ impl NzbgetRsDupeSearch {
                             bytes: summary.total_bytes,
                             grabs: 0,
                             kind: member_kind as u8,
+                            cap: if (100.0 * alive).round() < 100.0 {
+                                old_sc.saturating_sub(base).max(1)
+                            } else {
+                                0
+                            },
                         },
                         title: member_title.clone(),
                         member: true,

@@ -161,6 +161,30 @@ const { installDetailsFixture } = require('./details-fixture');
         await page.locator('#S_Server1_Connections').dispatchEvent('change');
       });
 
+      await check('Save and reload waits while a server is being saved', async () => {
+        let release;
+        hold = new Promise(resolve => { release = resolve; });
+        upTime = 86400;
+        await page.evaluate(() => { Status.status.UpTimeSec = 86400; });
+        await page.evaluate(() => { $('#S_ArticleRetries').val('9').trigger('change'); });
+        await page.locator('#S_Server1_Name').fill('Racing');
+        await page.locator('#S_Server1_Name').dispatchEvent('change');
+        await page.locator('.config-server-save:visible').click();
+        await page.waitForTimeout(200);
+        const saves = writes.filter(w => w.method === 'saveconfig').length;
+        assert(await page.evaluate(() => $('#ConfigSaveBar_Save').prop('disabled')), 'the page-wide save is off');
+        await page.evaluate(() => Config.saveChanges());
+        await page.waitForTimeout(300);
+        assert.equal(writes.filter(w => w.method === 'saveconfig').length, saves, 'no second write while the server saves');
+        assert.match(await page.locator('.config-server-status:visible').textContent(), /still being saved/);
+        hold = null;
+        release();
+        await page.waitForFunction(() => /in use/.test($('.config-server-status:visible').text()), null, { timeout: 8000 });
+        assert.equal(await page.evaluate(() => $('#ConfigSaveBar_Save').prop('disabled')), false, 'the page-wide save is back');
+        assert.match(await page.evaluate(() => $('#ConfigSaveBar .config-savebar__names').text()), /retries/i, 'the other change is still waiting');
+        await page.evaluate(() => { $('#S_ArticleRetries').val(Config.config().values.find(v => v.Name === 'ArticleRetries').Value).trigger('change'); });
+      });
+
       await check('a server with a cipher saves without testing', async () => {
         const before = calls.filter(c => c.method === 'tlscipherstart').length;
         upTime = 86400;

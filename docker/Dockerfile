@@ -24,6 +24,7 @@ RUN \
   mkdir -p /app/rustyget/share/rustyget && \
   cp /rustyget/rustyget.conf /app/rustyget/share/rustyget/rustyget.conf && \
   cp /rustyget/pubkey.pem /app/rustyget/pubkey.pem && \
+  sh /rustyget/scripts/fetch-geoip.sh /app/rustyget/geoip && \
   curl -o /app/rustyget/cacert.pem -L "https://curl.se/ca/cacert.pem"
 
 # change default config values

@@ -335,6 +335,9 @@ where
     let mut provisional: Vec<(Member, Artifact)> = Vec::new();
     let mut current_volume = req.first_volume.to_path_buf();
     let mut meta_cache = MetaCache::default();
+    // Outputs this call copied into place, removed again if the fallback decoder has to redo
+    // the set in rename mode (it would otherwise add renamed second copies).
+    let mut published: Vec<PathBuf> = Vec::new();
     let mut first_failure: Option<Failure> = None;
 
     loop {
@@ -343,6 +346,7 @@ where
             Ok(None) => break,
             Err(e) => {
                 if is_unsupported(&e) {
+                    undo_for_fallback(req, &published);
                     return Err(Error::Unsupported(Unsupported(format!("{:?}", e.kind))));
                 }
                 return Err(Failure::from_progressive(&e).into());
@@ -392,7 +396,7 @@ where
                         // Already verified by the session: move it into place now, so the file
                         // is available while later members extract and its slot is freed.
                         if matches!(a.evidence(), ArtifactEvidence::Verified(_)) {
-                            match publish_copy(drive.session, &mut a, req, &member, is_cancelled) {
+                            match publish_copy(drive.session, &mut a, req, &member, is_cancelled, &mut published) {
                                 Ok(()) => summary.files += 1,
                                 Err(f) => {
                                     log_cb(1, &unrar_error_line(&f, &name));
@@ -420,6 +424,7 @@ where
                             for (_, mut a) in partial.drain(..).chain(provisional.drain(..)) {
                                 let _ = a.discard();
                             }
+                            undo_for_fallback(req, &published);
                             return Err(Error::Unsupported(Unsupported(format!(
                                 "{:?}",
                                 failure.kind
@@ -436,7 +441,7 @@ where
                 // Retained provisional/partial artifacts hit the session's slot limit. Publish
                 // the provisional ones now to free slots; partial ones must wait for repair.
                 for (member, mut a) in provisional.drain(..) {
-                    if let Err(f) = publish_copy(drive.session, &mut a, req, &member, is_cancelled) {
+                    if let Err(f) = publish_copy(drive.session, &mut a, req, &member, is_cancelled, &mut published) {
                         first_failure.get_or_insert(f);
                     } else {
                         summary.files += 1;
@@ -458,6 +463,7 @@ where
                     for (_, mut a) in partial.drain(..).chain(provisional.drain(..)) {
                         let _ = a.discard();
                     }
+                    undo_for_fallback(req, &published);
                     return Err(Error::Unsupported(Unsupported(format!("{:?}", failure.kind))));
                 }
                 let f = Failure::from_progressive(&failure);
@@ -470,7 +476,7 @@ where
     }
 
     for (member, mut a) in provisional.drain(..) {
-        match publish_copy(drive.session, &mut a, req, &member, is_cancelled) {
+        match publish_copy(drive.session, &mut a, req, &member, is_cancelled, &mut published) {
             Ok(()) => summary.files += 1,
             Err(f) => {
                 first_failure.get_or_insert(f);
@@ -510,7 +516,7 @@ where
             for (member, mut a) in partial.drain(..) {
                 let name = member.name.clone();
                 match patch_from_repaired_volumes(drive.session, &mut a, &dir, req, &name, is_cancelled)
-                    .and_then(|()| publish_copy(drive.session, &mut a, req, &member, is_cancelled))
+                    .and_then(|()| publish_copy(drive.session, &mut a, req, &member, is_cancelled, &mut published))
                 {
                     Ok(()) => {
                         summary.files += 1;
@@ -833,12 +839,23 @@ fn path_bytes(p: &Path) -> Vec<u8> {
 /// zipfast publishes a member itself only when the volumes are declared as protected native
 /// files for the whole set; a download in progress cannot promise that, so verified outputs come
 /// back unpublished and are copied to their final name here.
+/// Before the fallback decoder extracts the whole set again: in rename mode it would add a
+/// renamed second copy of every output already in place, so those are removed first.
+fn undo_for_fallback(req: &Request<'_>, published: &[PathBuf]) {
+    if req.overwrite == Overwrite::Rename {
+        for p in published {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
 fn publish_copy(
     session: &mut ProgressiveSession,
     artifact: &mut Artifact,
     req: &Request<'_>,
     member: &Member,
     is_cancelled: &mut dyn FnMut() -> bool,
+    published: &mut Vec<PathBuf>,
 ) -> Result<(), Failure> {
     let name = member.name.as_slice();
     if artifact.publication() != ArtifactPublication::Unpublished {
@@ -852,6 +869,11 @@ fn publish_copy(
         let waker = Waker::noop();
         let mut cx = Context::from_waker(waker);
         loop {
+            if is_cancelled() {
+                session.control().cancel();
+                let _ = artifact.discard();
+                return Err(Failure::Canceled);
+            }
             match session.poll_verify(artifact, &mut cx) {
                 Poll::Ready(Ok(_)) => break,
                 Poll::Ready(Err(e)) => {
@@ -874,7 +896,8 @@ fn publish_copy(
     }
     let rel = zipfast::path::sanitize(&String::from_utf8_lossy(name), false)
         .map_err(|e| Failure::UnsafePath(format!(" {}: {e}", String::from_utf8_lossy(name))))?;
-    let result = copy_artifact(artifact, req.dest, &rel, req.overwrite, member.meta, is_cancelled);
+    let result = copy_artifact(artifact, req.dest, &rel, req.overwrite, member.meta, is_cancelled)
+        .map(|written| published.extend(written));
     let _ = artifact.discard();
     result
 }
@@ -886,11 +909,11 @@ fn copy_artifact(
     overwrite: Overwrite,
     meta: MemberMeta,
     is_cancelled: &mut dyn FnMut() -> bool,
-) -> Result<(), Failure> {
+) -> Result<Option<PathBuf>, Failure> {
     let mut target = dest.join(rel);
     let taken = |p: &Path| std::fs::symlink_metadata(p).is_ok();
     match overwrite {
-        Overwrite::Skip if taken(&target) => return Ok(()),
+        Overwrite::Skip if taken(&target) => return Ok(None),
         Overwrite::Rename if taken(&target) => target = free_name(&target, &taken),
         _ => {}
     }
@@ -938,7 +961,7 @@ fn copy_artifact(
         let _ = std::fs::remove_file(&tmp);
         return Err(io(e));
     }
-    Ok(())
+    Ok(Some(target.to_path_buf()))
 }
 
 /// `<stem>_<n>.<ext>` next to `target`, the first one not taken.

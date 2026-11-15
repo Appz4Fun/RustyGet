@@ -938,6 +938,22 @@ fn rar4_stored_then_compressed_reports_unsupported_for_the_fallback() {
     std::fs::write(&first, &v).unwrap();
     let (r, log) = run(&first, &t.out(), Box::new(CompleteSet));
     assert!(matches!(r, Err(Error::Unsupported(_))), "log: {log:?}");
+
+    // Rename mode: the stored member already copied into place is taken back, so the fallback
+    // decoder does not add a renamed second copy.
+    let out2 = t.0.join("out2");
+    let req = Request {
+        first_volume: &first,
+        dest: &out2,
+        password: "",
+        overwrite: Overwrite::Rename,
+    };
+    let r = extract(&req, Box::new(CompleteSet), &mut |_, _| {}, &mut || false);
+    assert!(matches!(r, Err(Error::Unsupported(_))));
+    let left: Vec<_> = std::fs::read_dir(&out2)
+        .map(|d| d.filter_map(|e| e.ok()).map(|e| e.file_name()).collect())
+        .unwrap_or_default();
+    assert!(left.is_empty(), "{left:?}");
 }
 
 #[test]

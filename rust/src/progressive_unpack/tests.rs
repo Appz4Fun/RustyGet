@@ -1325,3 +1325,32 @@ fn rename_mode_out_of_slots_behind_damage_reports_damage() {
         Err(Error::Unsupported(u)) => panic!("{u:?}"),
     }
 }
+
+#[test]
+fn rename_mode_names_follow_archive_order() {
+    // a.bin (no checksum), a.bin, a_1.bin: sequential extraction gives a.bin, a_1.bin, a_1_1.bin.
+    let t = TestDir::new("renameorder");
+    let one = pattern(1_000);
+    let two: Vec<u8> = pattern(1_100).iter().map(|b| b ^ 1).collect();
+    let three: Vec<u8> = pattern(1_200).iter().map(|b| b ^ 2).collect();
+    let mut v = SIG.to_vec();
+    v.extend(main_block(false, None));
+    v.extend(file_block_no_crc("a.bin", &one));
+    v.extend(file_block("a.bin", two.len() as u64, &two, crc32fast::hash(&two), false, false));
+    v.extend(file_block("a_1.bin", three.len() as u64, &three, crc32fast::hash(&three), false, false));
+    v.extend(end_block(false));
+    let first = t.dl().join("order.rar");
+    std::fs::write(&first, &v).unwrap();
+    let req = Request {
+        first_volume: &first,
+        dest: &t.out(),
+        password: "",
+        overwrite: Overwrite::Rename,
+        on_wait: None,
+    };
+    let r = extract(&req, Box::new(Growing), &mut |_, _| {}, &mut || false);
+    expect_ok(r, &[]);
+    assert_eq!(std::fs::read(t.out().join("a.bin")).unwrap(), one);
+    assert_eq!(std::fs::read(t.out().join("a_1.bin")).unwrap(), two);
+    assert_eq!(std::fs::read(t.out().join("a_1_1.bin")).unwrap(), three);
+}

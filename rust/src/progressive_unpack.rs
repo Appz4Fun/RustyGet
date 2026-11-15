@@ -437,9 +437,11 @@ where
                         // Outside overwrite mode an earlier pending member with the same name
                         // goes first: skip keeps the first, rename numbers them in archive order
                         // (and zipfast refuses to verify a member whose target path changed).
-                        let behind_earlier = req.overwrite != Overwrite::Always
-                            && partial.iter().chain(provisional.iter()).any(|(m, _)| m.name == member.name);
-                        if matches!(a.evidence(), ArtifactEvidence::Verified(_)) && !behind_earlier {
+                        let behind_earlier = held_behind(req, &member, &partial, &provisional);
+                        // Verified, or decoded whole with no checksum stored.
+                        let complete = matches!(a.evidence(), ArtifactEvidence::Verified(_))
+                            || (a.holes().is_empty() && a.size() == Some(a.produced_extent()));
+                        if complete && !behind_earlier {
                             match publish_copy(drive.session, &mut a, req, &member, false, is_cancelled, &mut published) {
                                 Ok(()) => {
                                     summary.files += 1;
@@ -490,10 +492,7 @@ where
                 provisional.sort_by_key(|(m, _)| m.ordinal);
                 let mut keep = Vec::new();
                 for (member, mut a) in provisional.drain(..) {
-                    let behind_earlier = req.overwrite != Overwrite::Always
-                        && partial
-                            .iter()
-                            .any(|(m, _)| m.name == member.name && m.ordinal < member.ordinal);
+                    let behind_earlier = held_behind(req, &member, &partial, &[]);
                     if behind_earlier {
                         keep.push((member, a));
                     } else if superseded(&placed, &member, req) {
@@ -512,10 +511,9 @@ where
                     // damaged one waits: give that member up (reported as damage, so
                     // post-processing extracts the set again) and place the rest in order.
                     if req.overwrite == Overwrite::Rename {
-                        let blocked: Vec<Vec<u8>> = keep.iter().map(|(m, _)| m.name.clone()).collect();
                         let mut still = Vec::new();
                         for (m, mut a) in partial.drain(..) {
-                            if blocked.contains(&m.name) {
+                            if keep.iter().any(|(k, _)| k.ordinal > m.ordinal) {
                                 let _ = a.discard();
                                 first_failure.get_or_insert(Failure::Damaged(format!(
                                     "{}: too many members with this name behind its damage",
@@ -988,6 +986,26 @@ fn undo_for_fallback(req: &Request<'_>, published: &Outputs) {
         for (_, _, p) in published {
             let _ = std::fs::remove_file(p);
         }
+    }
+}
+
+/// Whether `member` must wait for earlier members still pending. Skip mode: an earlier member
+/// with the same name goes first (it keeps the name). Rename mode: every earlier pending
+/// member goes first, so collision-resolved names follow archive order. Overwrite mode: never.
+fn held_behind(
+    req: &Request<'_>,
+    member: &Member,
+    partial: &[(Member, Artifact)],
+    provisional: &[(Member, Artifact)],
+) -> bool {
+    let earlier = |m: &Member| m.ordinal < member.ordinal;
+    match req.overwrite {
+        Overwrite::Always => false,
+        Overwrite::Skip => partial
+            .iter()
+            .chain(provisional.iter())
+            .any(|(m, _)| m.name == member.name && earlier(m)),
+        Overwrite::Rename => partial.iter().chain(provisional.iter()).any(|(m, _)| earlier(m)),
     }
 }
 

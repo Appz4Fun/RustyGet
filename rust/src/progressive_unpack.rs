@@ -271,6 +271,7 @@ where
         .set_is_final()
         .then(|| protect_volumes(req.first_volume))
         .flatten();
+    let final_set = protected.is_some();
     let feed = Arc::new(Mutex::new(feed));
     let pending: PendingWait = Arc::new(Mutex::new(None));
     let volume_count = protected
@@ -323,6 +324,7 @@ where
     let mut partial: Vec<(Member, Artifact)> = Vec::new();
     let mut provisional: Vec<(Member, Artifact)> = Vec::new();
     let mut current_volume = req.first_volume.to_path_buf();
+    let mut meta_cache = MetaCache::default();
     let mut first_failure: Option<Failure> = None;
 
     loop {
@@ -348,7 +350,13 @@ where
             ProgressiveEvent::MemberStarted { member, name, .. } => {
                 let display = String::from_utf8_lossy(&name).into_owned();
                 log_cb(4, &format!("Unrar: Extracting  {display}"));
-                let meta = member_metadata(&current_volume, req.password, &name);
+                // zipfast restores metadata on what it publishes itself (a final set); only
+                // copied outputs need it, read once per volume.
+                let meta = if final_set {
+                    MemberMeta::default()
+                } else {
+                    meta_cache.lookup(&current_volume, req.password, &name)
+                };
                 names.insert(
                     member,
                     Member {
@@ -567,35 +575,56 @@ struct MemberMeta {
     mtime: Option<(i64, u32)>,
 }
 
-/// Reads `name`'s header from the volume it starts in, for the metadata zipfast restores only
-/// on the outputs it publishes itself.
-fn member_metadata(volume: &Path, password: &str, name: &[u8]) -> MemberMeta {
+/// Member metadata by volume, each volume's headers read once.
+#[derive(Default)]
+struct MetaCache {
+    volume: PathBuf,
+    members: std::collections::HashMap<Vec<u8>, MemberMeta>,
+}
+
+impl MetaCache {
+    fn lookup(&mut self, volume: &Path, password: &str, name: &[u8]) -> MemberMeta {
+        if self.volume != volume {
+            self.volume = volume.to_path_buf();
+            self.members = volume_metadata(volume, password);
+        }
+        self.members.get(name).copied().unwrap_or_default()
+    }
+}
+
+/// Every member header in `volume`, for the metadata zipfast restores only on the outputs it
+/// publishes itself.
+fn volume_metadata(volume: &Path, password: &str) -> std::collections::HashMap<Vec<u8>, MemberMeta> {
     use zipfast::rar5::reader::{Block, Volume};
+    let mut out = std::collections::HashMap::new();
     let pw = (!password.is_empty()).then_some(password);
     if let Ok(mut vol) = Volume::open_with_password(volume, pw) {
         for _ in 0..1_000_000 {
             match vol.next_block() {
-                Ok(Some(Block::File(h))) if h.name.as_bytes() == name => {
-                    return MemberMeta {
+                Ok(Some(Block::File(h))) => {
+                    out.entry(h.name.as_bytes().to_vec()).or_insert(MemberMeta {
                         unix_mode: h.is_unix().then_some(h.attributes as u32),
                         mtime: h.mtime.map(|s| (s, h.mtime_nanos)),
-                    };
+                    });
                 }
                 Ok(Some(Block::End { .. })) | Ok(None) | Err(_) => break,
                 Ok(Some(_)) => {}
             }
         }
+        if !out.is_empty() {
+            return out;
+        }
     }
     // RAR 1.5-4.x headers: DOS time, and a Unix mode when the attributes are one.
-    let (_, _, files) = crate::rarreader::read_volume_file(&path_bytes(volume), password.as_bytes(), true);
-    files
-        .iter()
-        .find(|f| f.filename == name)
-        .map(|f| MemberMeta {
+    let (_, _, files) =
+        crate::rarreader::read_volume_file(&path_bytes(volume), password.as_bytes(), true);
+    for f in files {
+        out.entry(f.filename.clone()).or_insert(MemberMeta {
             unix_mode: (f.attr & 0o170000 == 0o100000).then_some(f.attr & 0o7777),
             mtime: crate::archive_native::rar4_dos_mtime(f.time),
-        })
-        .unwrap_or_default()
+        });
+    }
+    out
 }
 
 fn apply_meta(file: &std::fs::File, meta: MemberMeta) {
@@ -647,7 +676,12 @@ fn patch_from_repaired_volumes(
         (!req.password.is_empty()).then_some(req.password),
     )
     .map_err(|e| Failure::Damaged(format!("cannot map the repaired volumes: {e}")))?;
-    if map.inner_name_bytes() != name || Some(map.inner_size() as u64) != artifact.size() {
+    // The content map names the member without its directory.
+    let base = name
+        .rsplit(|&b| b == b'/' || b == b'\\')
+        .next()
+        .unwrap_or(name);
+    if map.inner_name_bytes() != base || Some(map.inner_size() as u64) != artifact.size() {
         return Err(Failure::Damaged(format!(
             "repaired volumes map {} ({} bytes), not {}",
             map.inner_name(),

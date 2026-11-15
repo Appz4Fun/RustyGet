@@ -1037,9 +1037,16 @@ fn move_auto_rename(from: &std::path::Path, to: &std::path::Path) -> Result<(), 
         let dst = to.join(entry.file_name());
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
         if is_dir {
-            std::fs::create_dir_all(&dst).map_err(|e| e.to_string())?;
+            // Never follow a symlink in the destination out of the output tree.
+            let dst = crate::archive_native::create_dir_all_no_follow(
+                to,
+                std::path::Path::new(&entry.file_name()),
+            )?;
             move_auto_rename(&src, &dst)?;
             continue;
+        }
+        if std::fs::symlink_metadata(&dst).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(format!("Refusing to write through symlink {}", dst.display()));
         }
         let mut target = dst.clone();
         let mut n = 1u32;
@@ -2437,6 +2444,24 @@ pub fn eval_unpack_completed_failure(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn auto_rename_move_does_not_follow_a_symlinked_directory() {
+        let base = std::env::temp_dir().join(format!("rg-autorename-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let staging = base.join("staging");
+        let out = base.join("out");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(staging.join("sub")).unwrap();
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(staging.join("sub/payload"), b"x").unwrap();
+        std::os::unix::fs::symlink(&outside, out.join("sub")).unwrap();
+        assert!(super::move_auto_rename(&staging, &out).is_err());
+        assert!(!outside.join("payload").exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     use super::*;
 
     #[test]

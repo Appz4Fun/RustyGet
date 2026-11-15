@@ -939,3 +939,25 @@ fn rar4_stored_then_compressed_reports_unsupported_for_the_fallback() {
     let (r, log) = run(&first, &t.out(), Box::new(CompleteSet));
     assert!(matches!(r, Err(Error::Unsupported(_))), "log: {log:?}");
 }
+
+#[test]
+fn holes_in_a_member_inside_a_folder_are_patched() {
+    let t = TestDir::new("holesdir");
+    let data = pattern(300_000);
+    let chunk = 100_000;
+    let vols = rar5_volumes("Release/movie.mkv", &data, chunk);
+    let first = write_set(&t.dl(), &vols);
+    let v2 = t.dl().join(volume_name(1, vols.len()));
+    let p2 = payload_offset(&vols[1], chunk) as u64;
+    let mut dmg = vols[1].clone();
+    dmg[(p2 + 40_000) as usize..(p2 + 45_000) as usize].fill(0);
+    std::fs::write(&v2, &dmg).unwrap();
+    let feed = Damaged {
+        holes: vec![(v2.clone(), vec![(p2 + 40_000, 5_000)])],
+        repair: vec![(v2, vols[1].clone())],
+        handed: false,
+    };
+    let (r, log) = run(&first, &t.out(), Box::new(feed));
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("Release/movie.mkv")).unwrap(), data);
+}

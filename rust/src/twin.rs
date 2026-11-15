@@ -2394,6 +2394,22 @@ c@x</segment><segment bytes="7" number="2">id3@x</segment></segments></file>
     }
 
     #[test]
+    fn a_volume_tail_read_mid_packet_still_lists_the_files() {
+        // the end of a par2 volume: the tail of a recovery packet, then the
+        // critical packets (what the last articles of a volume hold)
+        let mut data = vec![0x5a; 3000];
+        data.extend_from_slice(&main_packet(4096, &[1, 2], 2));
+        data.extend_from_slice(&file_desc(1, "a.mkv", 1000, &mut Rng(1)));
+        data.extend_from_slice(&file_desc(2, "a.nfo", 10, &mut Rng(2)));
+        let (sigs, complete) = par2_set(&data);
+        assert!(complete);
+        assert_eq!(sigs.len(), 2);
+        // the start of the volume alone (recovery data only) lists nothing
+        let (sigs, complete) = par2_set(&[0x5a; 3000]);
+        assert!(!complete && sigs.is_empty());
+    }
+
+    #[test]
     fn walk_ends_at_a_length_past_the_data() {
         // a length that wraps negative ended in a loop in the crate
         let mut data = main_packet(4096, &[1], 1);

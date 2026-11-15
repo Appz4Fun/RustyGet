@@ -1004,8 +1004,15 @@ var DownloadsUI = (new function($)
 		// a near-twin says how many of the primary's files it holds: "TWIN 154/156-"
 		var near = /^twin:(\d+\/\d+)$/.exec(kind);
 		var prefix = kind === 'twin' ? 'TWIN-' : near ? 'TWIN ' + near[1] + '-' : kind === 'alt' ? 'ALT-' : primary ? 'PRIMARY-' : '';
-		return ' <span class="label" style="background-color: hsl(' + hue + ', 45%, 40%)" title="' +
+		var style = ' style="background-color: hsl(' + hue + ', 45%, 40%)"';
+		var label = ' <span class="label"' + style + ' title="' +
 			Util.textToAttr(I18n.translate('desc_twin_group', print)) + '">' + prefix + print.substring(0, 6) + '</span>';
+		// a primary that has twins in its fleet (DupeCopyKind) gets a TWIN tag beside it
+		if (primary && !kind && DownloadsUI.parameterValue(parameters, 'DupeCopyKind') === 'twin')
+		{
+			label += ' <span class="label"' + style + '>TWIN</span>';
+		}
+		return label;
 	}
 
 	// "dupe score: N | H%", coloured by the health: green 95-100%, yellow 85-95%, red below

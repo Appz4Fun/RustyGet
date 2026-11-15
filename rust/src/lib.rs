@@ -10,6 +10,7 @@ pub mod binrpc;
 pub mod bytes;
 #[cfg(unix)]
 mod callback_metrics;
+pub mod certtools;
 pub mod cleanup;
 pub mod cmdline;
 pub mod collection;
@@ -34,9 +35,11 @@ pub mod fsdelete;
 #[cfg(unix)]
 pub mod fsops;
 pub mod historycoord;
+pub mod hostlookup;
 #[cfg(unix)]
 pub mod jobthread;
 pub mod json;
+pub mod liveparlog;
 #[cfg(unix)]
 pub mod log;
 #[cfg(unix)]
@@ -48,7 +51,6 @@ pub mod nserv;
 pub mod nzbfile;
 pub mod options;
 pub mod parchecker;
-pub mod liveparlog;
 pub mod pardamage;
 mod parlive;
 pub mod parparser;
@@ -58,9 +60,9 @@ pub mod posting;
 #[cfg(unix)]
 pub mod postproc;
 pub mod prepost;
-pub mod progressive_unpack;
 #[cfg(unix)]
 pub mod procrun;
+pub mod progressive_unpack;
 pub mod queueeditor;
 pub mod rarreader;
 pub mod rarrenamer;
@@ -74,10 +76,8 @@ pub mod scheduler;
 #[cfg(unix)]
 pub mod socket;
 pub mod statmeter;
-pub mod certtools;
-pub mod systemhealth;
-pub mod hostlookup;
 pub mod sysmetrics;
+pub mod systemhealth;
 pub mod text;
 pub mod tlscipher;
 #[cfg(unix)]

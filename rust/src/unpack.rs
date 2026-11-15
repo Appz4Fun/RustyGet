@@ -953,7 +953,6 @@ fn record_extracted_path_from_msg(
     }
 }
 
-
 /// RAR sets go through zipfast's progressive session (see `progressive_unpack`).
 /// `overwrite_mode`: 0 skip, 1 overwrite, 2 auto-rename (each member gets a free name).
 fn extract_rar_progressive<F>(

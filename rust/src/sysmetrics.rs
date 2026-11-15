@@ -110,9 +110,11 @@ pub fn parse_statm_rss(text: &str, page_size: u64) -> u64 {
 
 /// True when `/proc/swaps` lists a zram device in use as swap.
 pub fn proc_swaps_has_zram(text: &str) -> bool {
-    text.lines()
-        .skip(1)
-        .any(|l| l.split_whitespace().next().is_some_and(|d| d.contains("zram")))
+    text.lines().skip(1).any(|l| {
+        l.split_whitespace()
+            .next()
+            .is_some_and(|d| d.contains("zram"))
+    })
 }
 
 /// True when `/sys/module/zswap/parameters/enabled` says so (`Y` or `1`).
@@ -206,7 +208,9 @@ pub fn vendor_from_model(model: &str) -> String {
 /// Digits that start at byte `at` of `s`.
 fn digits_at(s: &str, at: usize) -> &str {
     let rest = &s[at..];
-    let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
     &rest[..end]
 }
 
@@ -225,7 +229,10 @@ pub fn cpu_generation(model: &str) -> String {
         }
     }
 
-    if let Some(pos) = lower.find("core(tm) ultra").or_else(|| lower.find("core ultra")) {
+    if let Some(pos) = lower
+        .find("core(tm) ultra")
+        .or_else(|| lower.find("core ultra"))
+    {
         // "Core Ultra 7 155H": the series is the first digit of the model number.
         let tail = &lower[pos..];
         if let Some(num) = tail
@@ -475,8 +482,7 @@ mod platform {
     extern "C" {
         fn mach_host_self() -> u32;
         fn host_statistics(host: u32, flavor: c_int, info: *mut c_int, count: *mut u32) -> c_int;
-        fn host_statistics64(host: u32, flavor: c_int, info: *mut c_int, count: *mut u32)
-            -> c_int;
+        fn host_statistics64(host: u32, flavor: c_int, info: *mut c_int, count: *mut u32) -> c_int;
     }
 
     fn sysctl_raw<T: Default>(name: &CStr) -> Option<T> {
@@ -752,10 +758,20 @@ impl History {
     pub fn window(&self, range_sec: i64, now: i64) -> (i64, Vec<Sample>) {
         let from = now - range_sec;
         if range_sec <= FINE_INTERVAL_SEC * FINE_CAPACITY as i64 {
-            let v = self.fine.iter().filter(|s| s.time > from).copied().collect();
+            let v = self
+                .fine
+                .iter()
+                .filter(|s| s.time > from)
+                .copied()
+                .collect();
             (FINE_INTERVAL_SEC, v)
         } else {
-            let v = self.coarse.iter().filter(|s| s.time > from).copied().collect();
+            let v = self
+                .coarse
+                .iter()
+                .filter(|s| s.time > from)
+                .copied()
+                .collect();
             (COARSE_INTERVAL_SEC, v)
         }
     }
@@ -934,10 +950,18 @@ pub fn snapshot() -> Snapshot {
         Some(s) if now - s.time <= FINE_INTERVAL_SEC * 2 => (s.cpu, s.cpu_process),
         _ => {
             let mut m = CpuMeter::new(cpu_count());
-            m.feed(Instant::now(), platform::machine_cpu_ticks(), process_cpu_seconds());
+            m.feed(
+                Instant::now(),
+                platform::machine_cpu_ticks(),
+                process_cpu_seconds(),
+            );
             std::thread::sleep(Duration::from_millis(250));
-            m.feed(Instant::now(), platform::machine_cpu_ticks(), process_cpu_seconds())
-                .unwrap_or((0.0, 0.0))
+            m.feed(
+                Instant::now(),
+                platform::machine_cpu_ticks(),
+                process_cpu_seconds(),
+            )
+            .unwrap_or((0.0, 0.0))
         }
     };
     Snapshot {
@@ -964,7 +988,9 @@ pub fn history(range_sec: i64) -> (i64, Vec<Sample>) {
     let range = range_sec.clamp(60, COARSE_INTERVAL_SEC * COARSE_CAPACITY as i64);
     sampler()
         .lock()
-        .map_or((FINE_INTERVAL_SEC, Vec::new()), |g| g.history.window(range, now_unix()))
+        .map_or((FINE_INTERVAL_SEC, Vec::new()), |g| {
+            g.history.window(range, now_unix())
+        })
 }
 
 pub(crate) fn json_str(out: &mut String, s: &str) {
@@ -1042,7 +1068,9 @@ pub fn to_json(snap: &Snapshot, interval: i64, samples: &[Sample]) -> String {
         ",\"Speed\":{},\"Connections\":{},",
         snap.speed, snap.connections
     ));
-    o.push_str(&format!("\"History\":{{\"Interval\":{interval},\"Fields\":["));
+    o.push_str(&format!(
+        "\"History\":{{\"Interval\":{interval},\"Fields\":["
+    ));
     for (i, f) in SAMPLE_FIELDS.iter().enumerate() {
         if i > 0 {
             o.push(',');
@@ -1131,7 +1159,10 @@ mod tests {
 
     #[test]
     fn statm_rss_in_bytes() {
-        assert_eq!(parse_statm_rss("5000 1200 300 1 0 900 0", 4096), 1200 * 4096);
+        assert_eq!(
+            parse_statm_rss("5000 1200 300 1 0 900 0", 4096),
+            1200 * 4096
+        );
         assert_eq!(parse_statm_rss("", 4096), 0);
     }
 
@@ -1139,12 +1170,17 @@ mod tests {
     fn zram_and_zswap_flags() {
         let swaps = "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n/dev/zram0  partition 4194300 0 100\n";
         assert!(proc_swaps_has_zram(swaps));
-        assert!(!proc_swaps_has_zram("Filename Type\n/swapfile file 1 0 -2\n"));
+        assert!(!proc_swaps_has_zram(
+            "Filename Type\n/swapfile file 1 0 -2\n"
+        ));
         assert!(zswap_flag_enabled("Y\n"));
         assert!(!zswap_flag_enabled("N\n"));
         assert!(!zswap_flag_enabled(""));
         assert_eq!(memory_compression_label(true, true, false), "zswap + zram");
-        assert_eq!(memory_compression_label(false, false, true), "macOS compressor");
+        assert_eq!(
+            memory_compression_label(false, false, true),
+            "macOS compressor"
+        );
         assert_eq!(memory_compression_label(false, false, false), "none");
     }
 
@@ -1175,14 +1211,29 @@ mod tests {
             ("Intel(R) Core(TM) Ultra 7 155H", "Core Ultra Series 1"),
             ("Intel(R) Core(TM) Ultra 9 285K", "Core Ultra Series 2"),
             ("Intel(R) Xeon(R) CPU E5-2680 v4 @ 2.40GHz", "v4"),
-            ("AMD Ryzen 7 PRO 4750U with Radeon Graphics", "Ryzen 4000 (Zen 2)"),
+            (
+                "AMD Ryzen 7 PRO 4750U with Radeon Graphics",
+                "Ryzen 4000 (Zen 2)",
+            ),
             ("AMD Ryzen 9 7950X 16-Core Processor", "Ryzen 7000 (Zen 4)"),
             ("AMD Ryzen 5 9600X", "Ryzen 9000 (Zen 5)"),
-            ("AMD Ryzen 5 7520U with Radeon Graphics", "Ryzen 7000 (Zen 2)"),
-            ("AMD Ryzen 7 7840HS w/ Radeon 780M Graphics", "Ryzen 7000 (Zen 4)"),
-            ("AMD Ryzen 7 7735HS with Radeon Graphics", "Ryzen 7000 (Zen 3)"),
+            (
+                "AMD Ryzen 5 7520U with Radeon Graphics",
+                "Ryzen 7000 (Zen 2)",
+            ),
+            (
+                "AMD Ryzen 7 7840HS w/ Radeon 780M Graphics",
+                "Ryzen 7000 (Zen 4)",
+            ),
+            (
+                "AMD Ryzen 7 7735HS with Radeon Graphics",
+                "Ryzen 7000 (Zen 3)",
+            ),
             ("AMD Ryzen 7 5700U with Radeon Graphics", "Ryzen 5000"),
-            ("AMD Ryzen 7 6800H with Radeon Graphics", "Ryzen 6000 (Zen 3+)"),
+            (
+                "AMD Ryzen 7 6800H with Radeon Graphics",
+                "Ryzen 6000 (Zen 3+)",
+            ),
             ("AMD EPYC 7763 64-Core Processor", "EPYC Milan (Zen 3)"),
             ("AMD EPYC 9554 64-Core Processor", "EPYC Genoa (Zen 4)"),
             ("Apple M2 Pro", "M2"),
@@ -1279,9 +1330,13 @@ mod tests {
             ..Snapshot::default()
         };
         let j = to_json(&snap, 5, &[sample(1, 2)]);
-        assert!(j.starts_with("{\"Time\":5,\"Load\":[0.5,1.25,2],\"CpuCount\":8,\"CpuPercent\":12.35,"));
+        assert!(
+            j.starts_with("{\"Time\":5,\"Load\":[0.5,1.25,2],\"CpuCount\":8,\"CpuPercent\":12.35,")
+        );
         assert!(j.contains("\"Model\":\"AMD \\\"Ryzen\\\"\""));
-        assert!(j.contains("\"Memory\":{\"Total\":100,\"Free\":10,\"Available\":40,\"Used\":60,\"Process\":7}"));
+        assert!(j.contains(
+            "\"Memory\":{\"Total\":100,\"Free\":10,\"Available\":40,\"Used\":60,\"Process\":7}"
+        ));
         assert!(j.contains("\"Zswap\":false,\"Zram\":true,\"MemoryCompression\":\"zram\""));
         assert!(j.ends_with("\"Samples\":[[1,2,10,0,0,0,50,0,0,0]]}}"));
         assert_eq!(to_xml("a<b&c"), "<string>a&lt;b&amp;c</string>");

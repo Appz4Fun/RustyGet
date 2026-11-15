@@ -91,7 +91,10 @@ fn rar5_volumes(name: &str, data: &[u8], chunk: usize) -> Vec<Vec<u8>> {
         .map(|(i, part)| {
             let mut out = SIG.to_vec();
             let multi = n > 1;
-            out.extend(main_block(multi, if i == 0 { None } else { Some(i as u64) }));
+            out.extend(main_block(
+                multi,
+                if i == 0 { None } else { Some(i as u64) },
+            ));
             let last = i + 1 == n;
             let crc = if last {
                 crc32fast::hash(data)
@@ -174,11 +177,19 @@ fn run(
         overwrite: Overwrite::Always,
         on_wait: None,
     };
-    let r = extract(&req, feed, &mut |_, m: &str| log.push(m.to_string()), &mut || false);
+    let r = extract(
+        &req,
+        feed,
+        &mut |_, m: &str| log.push(m.to_string()),
+        &mut || false,
+    );
     (r, log)
 }
 
-fn expect_ok(r: Result<zipfast::extract::Summary, Error>, log: &[String]) -> zipfast::extract::Summary {
+fn expect_ok(
+    r: Result<zipfast::extract::Summary, Error>,
+    log: &[String],
+) -> zipfast::extract::Summary {
     match r {
         Ok(s) => s,
         Err(Error::Failed(f)) => panic!("failed: {f}\nlog: {log:#?}"),
@@ -205,7 +216,10 @@ fn complete_single_volume_set_extracts() {
         .as_secs();
     assert_eq!(mtime, 1_700_000_000);
     assert!(log.iter().any(|l| l == "Unrar: All OK"), "{log:?}");
-    assert!(log.iter().any(|l| l == "Unrar: Extracting  movie.mkv"), "{log:?}");
+    assert!(
+        log.iter().any(|l| l == "Unrar: Extracting  movie.mkv"),
+        "{log:?}"
+    );
 }
 
 #[test]
@@ -217,7 +231,9 @@ fn complete_multi_volume_set_extracts() {
     expect_ok(r, &log);
     assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
     assert_eq!(
-        log.iter().filter(|l| l.starts_with("Unrar: Extracting from")).count(),
+        log.iter()
+            .filter(|l| l.starts_with("Unrar: Extracting from"))
+            .count(),
         10,
         "{log:?}"
     );
@@ -233,7 +249,10 @@ fn missing_volume_is_typed() {
     let (r, log) = run(&first, &t.out(), Box::new(CompleteSet));
     match r {
         Err(Error::Failed(f)) => assert!(f.is_damage(), "{f:?} {log:?}"),
-        other => panic!("expected a missing-volume failure, got ok={}", other.is_ok()),
+        other => panic!(
+            "expected a missing-volume failure, got ok={}",
+            other.is_ok()
+        ),
     }
     assert!(!t.out().join("movie.mkv").exists());
 }
@@ -250,7 +269,9 @@ impl VolumeFeed for Trickle {
         self.asked.fetch_add(1, Ordering::Relaxed);
         let idx = self.names.iter().position(|n| n == path);
         match idx {
-            Some(i) if i < self.released.load(Ordering::Acquire) => VolumeView::Ready { holes: Vec::new() },
+            Some(i) if i < self.released.load(Ordering::Acquire) => {
+                VolumeView::Ready { holes: Vec::new() }
+            }
             Some(_) => VolumeView::NotYet,
             None => VolumeView::Missing,
         }
@@ -263,7 +284,9 @@ fn volumes_arriving_one_at_a_time() {
     let data = pattern(500_000);
     let vols = rar5_volumes("movie.mkv", &data, 100_000);
     let first = write_set(&t.dl(), &vols);
-    let names: Vec<PathBuf> = (0..vols.len()).map(|i| t.dl().join(volume_name(i, vols.len()))).collect();
+    let names: Vec<PathBuf> = (0..vols.len())
+        .map(|i| t.dl().join(volume_name(i, vols.len())))
+        .collect();
     let released = Arc::new(AtomicUsize::new(1));
     let waker: Arc<Mutex<Option<Waker>>> = Arc::new(Mutex::new(None));
     let feed = Trickle {
@@ -370,7 +393,9 @@ fn unrepaired_holes_fail_as_damage() {
     impl VolumeFeed for NoRepair {
         fn volume(&mut self, path: &Path) -> VolumeView {
             if path == self.0 {
-                VolumeView::Ready { holes: vec![(self.1, 1000)] }
+                VolumeView::Ready {
+                    holes: vec![(self.1, 1000)],
+                }
             } else if path.is_file() {
                 VolumeView::Ready { holes: Vec::new() }
             } else {
@@ -430,12 +455,22 @@ fn orphan_continuation_volume_is_refused() {
     let payload = b"tail-bytes";
     let mut v = SIG.to_vec();
     v.extend(main_block(true, None));
-    v.extend(file_block("movie.bin", payload.len() as u64, payload, crc32fast::hash(payload), true, false));
+    v.extend(file_block(
+        "movie.bin",
+        payload.len() as u64,
+        payload,
+        crc32fast::hash(payload),
+        true,
+        false,
+    ));
     v.extend(end_block(false));
     let first = t.dl().join("orphan.part2.rar");
     std::fs::write(&first, &v).unwrap();
     let (r, log) = run(&first, &t.out(), Box::new(CompleteSet));
-    assert!(r.is_err(), "an orphan continuation must not extract: {log:?}");
+    assert!(
+        r.is_err(),
+        "an orphan continuation must not extract: {log:?}"
+    );
     assert!(!t.out().join("movie.bin").exists());
 }
 
@@ -515,7 +550,11 @@ fn rar4_store_volumes(name: &str, data: &[u8], chunk: usize) -> Vec<Vec<u8>> {
         .enumerate()
         .map(|(i, part)| {
             let last = i + 1 == n;
-            let crc = if last { crc32fast::hash(data) } else { crc32fast::hash(part) };
+            let crc = if last {
+                crc32fast::hash(data)
+            } else {
+                crc32fast::hash(part)
+            };
             let h = rar4_file_header(name, part.len(), data.len(), crc, i > 0, !last, None);
             rar4_volume(h, part, !last, i == 0)
         })
@@ -546,7 +585,15 @@ fn rar4_aes_store_volumes(name: &str, data: &[u8], chunk: usize, password: &str)
             } else {
                 crc32fast::hash(part)
             };
-            let h = rar4_file_header(name, part.len(), data.len(), crc, i > 0, !last, Some(&RAR4_SALT));
+            let h = rar4_file_header(
+                name,
+                part.len(),
+                data.len(),
+                crc,
+                i > 0,
+                !last,
+                Some(&RAR4_SALT),
+            );
             rar4_volume(h, part, !last, i == 0)
         })
         .collect()
@@ -566,7 +613,12 @@ fn run_pw(
         overwrite: Overwrite::Always,
         on_wait: None,
     };
-    let r = extract(&req, feed, &mut |_, m: &str| log.push(m.to_string()), &mut || false);
+    let r = extract(
+        &req,
+        feed,
+        &mut |_, m: &str| log.push(m.to_string()),
+        &mut || false,
+    );
     (r, log)
 }
 
@@ -585,7 +637,11 @@ fn write_named(dir: &Path, vols: &[Vec<u8>], name: fn(usize) -> String) -> PathB
 fn rar4_store_multi_volume_extracts() {
     let t = TestDir::new("rar4s");
     let data = pattern(250_000);
-    let first = write_named(&t.dl(), &rar4_store_volumes("movie.mkv", &data, 60_000), rar4_name);
+    let first = write_named(
+        &t.dl(),
+        &rar4_store_volumes("movie.mkv", &data, 60_000),
+        rar4_name,
+    );
     let (r, log) = run(&first, &t.out(), Box::new(CompleteSet));
     expect_ok(r, &log);
     assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
@@ -682,7 +738,14 @@ fn rar4_aes_store_holes_patched() {
 const RAR5_SALT: [u8; 16] = [3; 16];
 const RAR5_IV: [u8; 16] = [9; 16];
 
-fn rar5_enc_file_header(name: &str, packed: u64, size: u64, crc: u32, before: bool, after: bool) -> Vec<u8> {
+fn rar5_enc_file_header(
+    name: &str,
+    packed: u64,
+    size: u64,
+    crc: u32,
+    before: bool,
+    after: bool,
+) -> Vec<u8> {
     let mut fields = Vec::new();
     vint(0x4, &mut fields); // CRC present
     vint(size, &mut fields);
@@ -697,7 +760,10 @@ fn rar5_enc_file_header(name: &str, packed: u64, size: u64, crc: u32, before: bo
     extra.extend(RAR5_IV);
     let mut body = Vec::new();
     vint(2, &mut body);
-    vint(3 | if before { 8 } else { 0 } | if after { 16 } else { 0 }, &mut body);
+    vint(
+        3 | if before { 8 } else { 0 } | if after { 16 } else { 0 },
+        &mut body,
+    );
     vint(extra.len() as u64, &mut body);
     vint(packed, &mut body);
     body.extend(fields);
@@ -720,7 +786,12 @@ fn rar5_wire(mut h: Vec<u8>, key: &[u8; 32], ordinal: u8) -> Vec<u8> {
 
 /// Encrypted headers + encrypted stored data, one CBC stream over all volumes. Returns the
 /// volumes and each volume's payload offset.
-fn rar5_hp_volumes(name: &str, data: &[u8], chunk: usize, password: &str) -> (Vec<Vec<u8>>, Vec<usize>) {
+fn rar5_hp_volumes(
+    name: &str,
+    data: &[u8],
+    chunk: usize,
+    password: &str,
+) -> (Vec<Vec<u8>>, Vec<usize>) {
     let key = zipfast::crypto::derive_rar5_key_and_hash_key(password, 1, &RAR5_SALT, None)
         .unwrap()
         .0;
@@ -737,7 +808,11 @@ fn rar5_hp_volumes(name: &str, data: &[u8], chunk: usize, password: &str) -> (Ve
         let mut params = vec![0, 0, 1];
         params.extend(RAR5_SALT);
         v.extend(block(4, 0, &params, &[], false));
-        v.extend(rar5_wire(main_block(true, (i > 0).then_some(i as u64)), &key, 0));
+        v.extend(rar5_wire(
+            main_block(true, (i > 0).then_some(i as u64)),
+            &key,
+            0,
+        ));
         // Non-final parts carry the CRC of their packed (cipher) bytes, the last one the whole
         // plaintext CRC.
         let crc = if last {
@@ -746,7 +821,14 @@ fn rar5_hp_volumes(name: &str, data: &[u8], chunk: usize, password: &str) -> (Ve
             crc32fast::hash(part)
         };
         v.extend(rar5_wire(
-            rar5_enc_file_header(name, part.len() as u64, data.len() as u64, crc, i > 0, !last),
+            rar5_enc_file_header(
+                name,
+                part.len() as u64,
+                data.len() as u64,
+                crc,
+                i > 0,
+                !last,
+            ),
             &key,
             1,
         ));
@@ -849,7 +931,14 @@ fn many_members_while_downloading_do_not_exhaust_artifact_slots() {
     let mut v = SIG.to_vec();
     v.extend(main_block(false, None));
     for (name, data) in &files {
-        v.extend(file_block(name, data.len() as u64, data, crc32fast::hash(data), false, false));
+        v.extend(file_block(
+            name,
+            data.len() as u64,
+            data,
+            crc32fast::hash(data),
+            false,
+            false,
+        ));
     }
     v.extend(end_block(false));
     let first = t.dl().join("many.rar");
@@ -891,7 +980,11 @@ fn copied_outputs_keep_mode_and_mtime() {
     let (r, log) = run(&first, &t.out(), Box::new(Growing));
     expect_ok(r, &log);
     let meta = std::fs::metadata(t.out().join("tool.sh")).unwrap();
-    assert_eq!(meta.permissions().mode() & 0o111, 0o111, "executable bits restored");
+    assert_eq!(
+        meta.permissions().mode() & 0o111,
+        0o111,
+        "executable bits restored"
+    );
     let mtime = meta
         .modified()
         .unwrap()
@@ -911,7 +1004,10 @@ fn copying_into_place_never_touches_other_paths() {
     let (r, log) = run(&first, &t.out(), Box::new(Growing));
     expect_ok(r, &log);
     assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
-    assert_eq!(std::fs::read(t.out().join("movie.mkv.rgpart")).unwrap(), b"keep me");
+    assert_eq!(
+        std::fs::read(t.out().join("movie.mkv.rgpart")).unwrap(),
+        b"keep me"
+    );
     let leftovers: Vec<_> = std::fs::read_dir(t.out())
         .unwrap()
         .filter_map(|e| e.ok())
@@ -927,7 +1023,15 @@ fn rar4_stored_then_solid_compressed_reports_unsupported_for_the_fallback() {
     let stored = pattern(20_000);
     let mut v = b"Rar!\x1a\x07\x00".to_vec();
     v.extend(rar4_block(0x73, 0, &[0u8; 6], 0));
-    v.extend(rar4_file_header("a.bin", stored.len(), stored.len(), crc32fast::hash(&stored), false, false, None));
+    v.extend(rar4_file_header(
+        "a.bin",
+        stored.len(),
+        stored.len(),
+        crc32fast::hash(&stored),
+        false,
+        false,
+        None,
+    ));
     v.extend_from_slice(&stored);
     // A compressed member (method 0x33) after it.
     let packed = vec![0u8; 64];
@@ -988,7 +1092,10 @@ fn holes_in_a_member_inside_a_folder_are_patched() {
     };
     let (r, log) = run(&first, &t.out(), Box::new(feed));
     expect_ok(r, &log);
-    assert_eq!(std::fs::read(t.out().join("Release/movie.mkv")).unwrap(), data);
+    assert_eq!(
+        std::fs::read(t.out().join("Release/movie.mkv")).unwrap(),
+        data
+    );
 }
 
 #[test]
@@ -999,8 +1106,22 @@ fn rename_mode_keeps_duplicate_members_and_existing_files() {
     let two = pattern(4_000);
     let mut v = SIG.to_vec();
     v.extend(main_block(false, None));
-    v.extend(file_block("a.bin", one.len() as u64, &one, crc32fast::hash(&one), false, false));
-    v.extend(file_block("a.bin", two.len() as u64, &two, crc32fast::hash(&two), false, false));
+    v.extend(file_block(
+        "a.bin",
+        one.len() as u64,
+        &one,
+        crc32fast::hash(&one),
+        false,
+        false,
+    ));
+    v.extend(file_block(
+        "a.bin",
+        two.len() as u64,
+        &two,
+        crc32fast::hash(&two),
+        false,
+        false,
+    ));
     v.extend(end_block(false));
     let first = t.dl().join("dup.rar");
     std::fs::write(&first, &v).unwrap();
@@ -1012,7 +1133,12 @@ fn rename_mode_keeps_duplicate_members_and_existing_files() {
         overwrite: Overwrite::Rename,
         on_wait: None,
     };
-    let r = extract(&req, Box::new(CompleteSet), &mut |_, m: &str| log.push(m.to_string()), &mut || false);
+    let r = extract(
+        &req,
+        Box::new(CompleteSet),
+        &mut |_, m: &str| log.push(m.to_string()),
+        &mut || false,
+    );
     expect_ok(r, &log);
     assert_eq!(std::fs::read(t.out().join("a.bin")).unwrap(), b"existing");
     assert_eq!(std::fs::read(t.out().join("a_1.bin")).unwrap(), one);
@@ -1026,9 +1152,24 @@ fn holes_in_a_secondary_member_are_patched_by_re_extracting() {
     let extra: Vec<u8> = pattern(150_000).iter().map(|b| b ^ 0x5a).collect();
     let mut v = SIG.to_vec();
     v.extend(main_block(false, None));
-    v.extend(file_block("big.mkv", big.len() as u64, &big, crc32fast::hash(&big), false, false));
-    let extra_at = v.len() + file_block("extra.bin", extra.len() as u64, &[], 0, false, false).len();
-    v.extend(file_block("extra.bin", extra.len() as u64, &extra, crc32fast::hash(&extra), false, false));
+    v.extend(file_block(
+        "big.mkv",
+        big.len() as u64,
+        &big,
+        crc32fast::hash(&big),
+        false,
+        false,
+    ));
+    let extra_at =
+        v.len() + file_block("extra.bin", extra.len() as u64, &[], 0, false, false).len();
+    v.extend(file_block(
+        "extra.bin",
+        extra.len() as u64,
+        &extra,
+        crc32fast::hash(&extra),
+        false,
+        false,
+    ));
     v.extend(end_block(false));
     let first = t.dl().join("two.rar");
     let mut dmg = v.clone();
@@ -1089,8 +1230,22 @@ fn a_repaired_member_does_not_replace_a_later_member_with_the_same_name() {
     let mut v = SIG.to_vec();
     v.extend(main_block(false, None));
     let at = v.len() + file_block("a.bin", first_copy.len() as u64, &[], 0, false, false).len();
-    v.extend(file_block("a.bin", first_copy.len() as u64, &first_copy, crc32fast::hash(&first_copy), false, false));
-    v.extend(file_block("a.bin", second_copy.len() as u64, &second_copy, crc32fast::hash(&second_copy), false, false));
+    v.extend(file_block(
+        "a.bin",
+        first_copy.len() as u64,
+        &first_copy,
+        crc32fast::hash(&first_copy),
+        false,
+        false,
+    ));
+    v.extend(file_block(
+        "a.bin",
+        second_copy.len() as u64,
+        &second_copy,
+        crc32fast::hash(&second_copy),
+        false,
+        false,
+    ));
     v.extend(end_block(false));
     let first = t.dl().join("dups.rar");
     let hole = (at as u64 + 100_000, 3_000u64);
@@ -1130,7 +1285,12 @@ fn duplicate_names_keep_their_own_metadata() {
     };
     let r = extract(&req, Box::new(Growing), &mut |_, _| {}, &mut || false);
     expect_ok(r, &[]);
-    let mode = |n: &str| std::fs::metadata(t.out().join(n)).unwrap().permissions().mode();
+    let mode = |n: &str| {
+        std::fs::metadata(t.out().join(n))
+            .unwrap()
+            .permissions()
+            .mode()
+    };
     assert_eq!(mode("script.sh") & 0o111, 0, "first copy keeps 0644");
     assert_eq!(mode("script_1.sh") & 0o111, 0o111, "second copy keeps 0755");
 }
@@ -1145,7 +1305,14 @@ fn skip_mode_keeps_the_first_of_duplicate_names() {
     let mut v = SIG.to_vec();
     v.extend(main_block(false, None));
     v.extend(file_block_no_crc("a.bin", &one));
-    v.extend(file_block("a.bin", two.len() as u64, &two, crc32fast::hash(&two), false, false));
+    v.extend(file_block(
+        "a.bin",
+        two.len() as u64,
+        &two,
+        crc32fast::hash(&two),
+        false,
+        false,
+    ));
     v.extend(end_block(false));
     let first = t.dl().join("first.rar");
     std::fs::write(&first, &v).unwrap();
@@ -1171,10 +1338,31 @@ fn repairing_a_duplicate_name_uses_its_own_bytes() {
     let two: Vec<u8> = pattern(120_000).iter().map(|b| b ^ 0x77).collect();
     let mut v = SIG.to_vec();
     v.extend(main_block(false, None));
-    v.extend(file_block("main.mkv", main.len() as u64, &main, crc32fast::hash(&main), false, false));
+    v.extend(file_block(
+        "main.mkv",
+        main.len() as u64,
+        &main,
+        crc32fast::hash(&main),
+        false,
+        false,
+    ));
     let at = v.len() + file_block("doc.bin", one.len() as u64, &[], 0, false, false).len();
-    v.extend(file_block("doc.bin", one.len() as u64, &one, crc32fast::hash(&one), false, false));
-    v.extend(file_block("doc.bin", two.len() as u64, &two, crc32fast::hash(&two), false, false));
+    v.extend(file_block(
+        "doc.bin",
+        one.len() as u64,
+        &one,
+        crc32fast::hash(&one),
+        false,
+        false,
+    ));
+    v.extend(file_block(
+        "doc.bin",
+        two.len() as u64,
+        &two,
+        crc32fast::hash(&two),
+        false,
+        false,
+    ));
     v.extend(end_block(false));
     let first = t.dl().join("dupfix.rar");
     let hole = (at as u64 + 50_000, 2_000u64);
@@ -1194,7 +1382,12 @@ fn repairing_a_duplicate_name_uses_its_own_bytes() {
         on_wait: None,
     };
     let mut log = Vec::new();
-    let r = extract(&req, Box::new(feed), &mut |_, m: &str| log.push(m.to_string()), &mut || false);
+    let r = extract(
+        &req,
+        Box::new(feed),
+        &mut |_, m: &str| log.push(m.to_string()),
+        &mut || false,
+    );
     expect_ok(r, &log);
     let mut got = vec![
         std::fs::read(t.out().join("doc.bin")).unwrap(),
@@ -1216,11 +1409,39 @@ fn repair_reads_the_right_copy_when_a_member_is_named_like_a_renamed_one() {
     let c: Vec<u8> = pattern(90_000).iter().map(|b| b ^ 0x03).collect();
     let mut v = SIG.to_vec();
     v.extend(main_block(false, None));
-    v.extend(file_block("main.mkv", main.len() as u64, &main, crc32fast::hash(&main), false, false));
-    v.extend(file_block("doc.bin", a.len() as u64, &a, crc32fast::hash(&a), false, false));
-    v.extend(file_block("doc_1.bin", b.len() as u64, &b, crc32fast::hash(&b), false, false));
+    v.extend(file_block(
+        "main.mkv",
+        main.len() as u64,
+        &main,
+        crc32fast::hash(&main),
+        false,
+        false,
+    ));
+    v.extend(file_block(
+        "doc.bin",
+        a.len() as u64,
+        &a,
+        crc32fast::hash(&a),
+        false,
+        false,
+    ));
+    v.extend(file_block(
+        "doc_1.bin",
+        b.len() as u64,
+        &b,
+        crc32fast::hash(&b),
+        false,
+        false,
+    ));
     let at = v.len() + file_block("doc.bin", c.len() as u64, &[], 0, false, false).len();
-    v.extend(file_block("doc.bin", c.len() as u64, &c, crc32fast::hash(&c), false, false));
+    v.extend(file_block(
+        "doc.bin",
+        c.len() as u64,
+        &c,
+        crc32fast::hash(&c),
+        false,
+        false,
+    ));
     v.extend(end_block(false));
     let first = t.dl().join("rl.rar");
     let hole = (at as u64 + 30_000, 2_000u64);
@@ -1240,7 +1461,12 @@ fn repair_reads_the_right_copy_when_a_member_is_named_like_a_renamed_one() {
         on_wait: None,
     };
     let mut log = Vec::new();
-    let r = extract(&req, Box::new(feed), &mut |_, m: &str| log.push(m.to_string()), &mut || false);
+    let r = extract(
+        &req,
+        Box::new(feed),
+        &mut |_, m: &str| log.push(m.to_string()),
+        &mut || false,
+    );
     expect_ok(r, &log);
     let mut got: Vec<Vec<u8>> = ["doc.bin", "doc_1.bin", "doc_2.bin"]
         .iter()
@@ -1258,7 +1484,9 @@ fn waiting_for_a_volume_is_reported() {
     let data = pattern(300_000);
     let vols = rar5_volumes("movie.mkv", &data, 100_000);
     let first = write_set(&t.dl(), &vols);
-    let names: Vec<PathBuf> = (0..vols.len()).map(|i| t.dl().join(volume_name(i, vols.len()))).collect();
+    let names: Vec<PathBuf> = (0..vols.len())
+        .map(|i| t.dl().join(volume_name(i, vols.len())))
+        .collect();
     let released = Arc::new(AtomicUsize::new(1));
     let feed = Trickle {
         released: released.clone(),
@@ -1297,10 +1525,24 @@ fn rename_mode_out_of_slots_behind_damage_reports_damage() {
     let mut v = SIG.to_vec();
     v.extend(main_block(false, None));
     let at = v.len() + file_block("doc.bin", first_copy.len() as u64, &[], 0, false, false).len();
-    v.extend(file_block("doc.bin", first_copy.len() as u64, &first_copy, crc32fast::hash(&first_copy), false, false));
+    v.extend(file_block(
+        "doc.bin",
+        first_copy.len() as u64,
+        &first_copy,
+        crc32fast::hash(&first_copy),
+        false,
+        false,
+    ));
     for i in 0..24u8 {
         let d: Vec<u8> = pattern(1_000).iter().map(|b| b ^ i).collect();
-        v.extend(file_block("doc.bin", d.len() as u64, &d, crc32fast::hash(&d), false, false));
+        v.extend(file_block(
+            "doc.bin",
+            d.len() as u64,
+            &d,
+            crc32fast::hash(&d),
+            false,
+            false,
+        ));
     }
     v.extend(end_block(false));
     let first = t.dl().join("slots.rar");
@@ -1338,8 +1580,22 @@ fn rename_mode_names_follow_archive_order() {
     let mut v = SIG.to_vec();
     v.extend(main_block(false, None));
     v.extend(file_block_no_crc("a.bin", &one));
-    v.extend(file_block("a.bin", two.len() as u64, &two, crc32fast::hash(&two), false, false));
-    v.extend(file_block("a_1.bin", three.len() as u64, &three, crc32fast::hash(&three), false, false));
+    v.extend(file_block(
+        "a.bin",
+        two.len() as u64,
+        &two,
+        crc32fast::hash(&two),
+        false,
+        false,
+    ));
+    v.extend(file_block(
+        "a_1.bin",
+        three.len() as u64,
+        &three,
+        crc32fast::hash(&three),
+        false,
+        false,
+    ));
     v.extend(end_block(false));
     let first = t.dl().join("order.rar");
     std::fs::write(&first, &v).unwrap();
@@ -1424,7 +1680,12 @@ fn rar4_lz_members_are_decoded_by_the_session() {
     let mut v = b"Rar!\x1a\x07\x00".to_vec();
     v.extend(rar4_block(0x73, 0, &[0u8; 6], 0));
     for (i, packed) in LZ.iter().enumerate() {
-        v.extend(rar4_lz_member(&format!("m{}.bin", i + 1), packed, &gold, 0x31 + i as u8));
+        v.extend(rar4_lz_member(
+            &format!("m{}.bin", i + 1),
+            packed,
+            &gold,
+            0x31 + i as u8,
+        ));
     }
     v.extend(rar4_block(0x7b, 0x4000, &[], 0));
     let first = t.dl().join("lz.rar");
@@ -1433,7 +1694,11 @@ fn rar4_lz_members_are_decoded_by_the_session() {
     let s = expect_ok(r, &log);
     assert_eq!(s.files, 5);
     for i in 1..=5 {
-        assert_eq!(std::fs::read(t.out().join(format!("m{i}.bin"))).unwrap(), gold, "m{i}");
+        assert_eq!(
+            std::fs::read(t.out().join(format!("m{i}.bin"))).unwrap(),
+            gold,
+            "m{i}"
+        );
     }
 }
 
@@ -1445,9 +1710,19 @@ fn rar4_lz_members_across_volumes_while_downloading() {
     let n = 3;
     for i in 0..n {
         let mut v = b"Rar!\x1a\x07\x00".to_vec();
-        v.extend(rar4_block(0x73, 0x0001 | 0x0010 | if i == 0 { 0x0100 } else { 0 }, &[0u8; 6], 0));
+        v.extend(rar4_block(
+            0x73,
+            0x0001 | 0x0010 | if i == 0 { 0x0100 } else { 0 },
+            &[0u8; 6],
+            0,
+        ));
         v.extend(rar4_lz_member(&format!("part{i}.bin"), LZ[2], &gold, 0x33));
-        v.extend(rar4_block(0x7b, 0x4000 | if i + 1 < n { 0x0001 } else { 0 }, &[], 0));
+        v.extend(rar4_block(
+            0x7b,
+            0x4000 | if i + 1 < n { 0x0001 } else { 0 },
+            &[],
+            0,
+        ));
         std::fs::write(t.dl().join(rar4_name(i)), v).unwrap();
     }
     let names: Vec<PathBuf> = (0..n).map(|i| t.dl().join(rar4_name(i))).collect();
@@ -1468,7 +1743,10 @@ fn rar4_lz_members_across_volumes_while_downloading() {
     releaser.join().unwrap();
     expect_ok(r, &log);
     for i in 0..n {
-        assert_eq!(std::fs::read(t.out().join(format!("part{i}.bin"))).unwrap(), gold);
+        assert_eq!(
+            std::fs::read(t.out().join(format!("part{i}.bin"))).unwrap(),
+            gold
+        );
     }
 }
 
@@ -1488,13 +1766,19 @@ fn rar4_lz_damage_is_reported_not_skipped() {
     impl VolumeFeed for Hole {
         fn volume(&mut self, path: &Path) -> VolumeView {
             if path == self.0 {
-                VolumeView::Ready { holes: vec![(self.1, 8)] }
+                VolumeView::Ready {
+                    holes: vec![(self.1, 8)],
+                }
             } else {
                 VolumeView::Missing
             }
         }
     }
-    let (r, log) = run(&first, &t.out(), Box::new(Hole(first.clone(), at as u64 + 300)));
+    let (r, log) = run(
+        &first,
+        &t.out(),
+        Box::new(Hole(first.clone(), at as u64 + 300)),
+    );
     match r {
         Err(Error::Failed(f)) => assert!(f.is_damage(), "{f:?}"),
         _ => panic!("expected damage: {log:?}"),
@@ -1519,7 +1803,9 @@ fn after_repair_zipfast_moves_the_patched_file_into_place() {
     impl VolumeFeed for InPlace {
         fn volume(&mut self, path: &Path) -> VolumeView {
             if path == self.0 {
-                VolumeView::Ready { holes: vec![(self.1, 20_000)] }
+                VolumeView::Ready {
+                    holes: vec![(self.1, 20_000)],
+                }
             } else if path.is_file() {
                 VolumeView::Ready { holes: Vec::new() }
             } else {
@@ -1528,20 +1814,38 @@ fn after_repair_zipfast_moves_the_patched_file_into_place() {
         }
         fn wait_repaired(&mut self, _c: &mut dyn FnMut() -> bool) -> bool {
             use std::io::{Seek, SeekFrom, Write};
-            let mut f = std::fs::OpenOptions::new().write(true).open(&self.0).unwrap();
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&self.0)
+                .unwrap();
             f.seek(SeekFrom::Start(self.1)).unwrap();
             f.write_all(&self.2).unwrap();
             true
         }
     }
     let original = vols[2][(p3 + 10_000) as usize..(p3 + 30_000) as usize].to_vec();
-    let (r, log) = run(&first, &t.out(), Box::new(InPlace(v3, p3 + 10_000, original)));
+    let (r, log) = run(
+        &first,
+        &t.out(),
+        Box::new(InPlace(v3, p3 + 10_000, original)),
+    );
     expect_ok(r, &log);
     assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
     assert!(
-        log.iter().any(|l| l.contains("moved into place instead of copied")),
+        log.iter()
+            .any(|l| l.contains("moved into place instead of copied")),
         "{log:?}"
     );
+    // zipfast's stage is 0600; the published file must stay readable to other users.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(t.out().join("movie.mkv"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o044, 0o044, "mode {mode:o}");
+    }
 }
 
 #[test]
@@ -1562,7 +1866,9 @@ fn a_repair_that_replaced_a_volume_file_keeps_the_copy_path() {
     impl VolumeFeed for Replace {
         fn volume(&mut self, path: &Path) -> VolumeView {
             if path == self.0 {
-                VolumeView::Ready { holes: vec![(self.1, 1_000)] }
+                VolumeView::Ready {
+                    holes: vec![(self.1, 1_000)],
+                }
             } else if path.is_file() {
                 VolumeView::Ready { holes: Vec::new() }
             } else {
@@ -1576,11 +1882,16 @@ fn a_repair_that_replaced_a_volume_file_keeps_the_copy_path() {
             true
         }
     }
-    let (r, log) = run(&first, &t.out(), Box::new(Replace(v2, p2 + 5_000, vols[1].clone())));
+    let (r, log) = run(
+        &first,
+        &t.out(),
+        Box::new(Replace(v2, p2 + 5_000, vols[1].clone())),
+    );
     expect_ok(r, &log);
     assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
     assert!(
-        !log.iter().any(|l| l.contains("moved into place instead of copied")),
+        !log.iter()
+            .any(|l| l.contains("moved into place instead of copied")),
         "{log:?}"
     );
 }
@@ -1590,7 +1901,10 @@ fn a_repair_that_replaced_a_volume_file_keeps_the_copy_path() {
 #[test]
 #[ignore]
 fn patch_timing() {
-    let mb: usize = std::env::var("RG_PATCH_TIMING_MB").ok().and_then(|v| v.parse().ok()).unwrap_or(200);
+    let mb: usize = std::env::var("RG_PATCH_TIMING_MB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(200);
     let t = TestDir::new("timing");
     let data = pattern(mb << 20);
     let chunk = 50 << 20;
@@ -1610,7 +1924,9 @@ fn patch_timing() {
     impl VolumeFeed for InPlace {
         fn volume(&mut self, path: &Path) -> VolumeView {
             if path == self.0 {
-                VolumeView::Ready { holes: vec![(self.1, self.2)] }
+                VolumeView::Ready {
+                    holes: vec![(self.1, self.2)],
+                }
             } else if path.is_file() {
                 VolumeView::Ready { holes: Vec::new() }
             } else {
@@ -1619,7 +1935,10 @@ fn patch_timing() {
         }
         fn wait_repaired(&mut self, _c: &mut dyn FnMut() -> bool) -> bool {
             use std::io::{Seek, SeekFrom, Write};
-            let mut f = std::fs::OpenOptions::new().write(true).open(&self.0).unwrap();
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&self.0)
+                .unwrap();
             f.seek(SeekFrom::Start(self.1)).unwrap();
             f.write_all(&self.3).unwrap();
             f.sync_all().unwrap();
@@ -1652,8 +1971,15 @@ fn patch_timing() {
     let total = started.elapsed();
     expect_ok(r, &[]);
     let patch = repaired_at.map(|t0| t0.elapsed()).unwrap_or_default();
-    assert_eq!(std::fs::metadata(t.out().join("movie.mkv")).unwrap().len(), data.len() as u64);
-    eprintln!("PATCH_TIMING mb={mb} total={:.2}s patch_and_publish={:.2}s", total.as_secs_f64(), patch.as_secs_f64());
+    assert_eq!(
+        std::fs::metadata(t.out().join("movie.mkv")).unwrap().len(),
+        data.len() as u64
+    );
+    eprintln!(
+        "PATCH_TIMING mb={mb} total={:.2}s patch_and_publish={:.2}s",
+        total.as_secs_f64(),
+        patch.as_secs_f64()
+    );
 }
 
 #[test]
@@ -1691,5 +2017,9 @@ fn protection_upgrade_is_skipped_when_the_handle_budget_cannot_fit_it() {
     let (r, log) = run(&first, &t.out(), Box::new(feed));
     expect_ok(r, &log);
     assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
-    assert!(!log.iter().any(|l| l.contains("moved into place instead of copied")), "{log:?}");
+    assert!(
+        !log.iter()
+            .any(|l| l.contains("moved into place instead of copied")),
+        "{log:?}"
+    );
 }

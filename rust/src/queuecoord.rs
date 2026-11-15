@@ -3801,8 +3801,11 @@ impl NzbgetRsQueueCoordinator {
                         &filename,
                         file_status == crate::queuesubsys_host::CF_SUCCESS,
                     ) {
-                        let message = Self::live_par_deferred_message(&error)
-                            .replacen("catch-up", "completion", 1);
+                        let message = Self::live_par_deferred_message(&error).replacen(
+                            "catch-up",
+                            "completion",
+                            1,
+                        );
                         host.nzb_print_message(
                             nzb.ptr,
                             crate::queuesubsys_host::MK_DETAIL,

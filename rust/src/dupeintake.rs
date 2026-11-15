@@ -251,9 +251,12 @@ pub fn print_copy(
     // a sample bigger than any one volume), samples left out.
     let sets = ContentMapper::group_sets(&members);
     let is_sample = |i: i32| {
-        files
-            .get(i as usize)
-            .is_some_and(|f| f.name.to_ascii_lowercase().windows(6).any(|w| w == b"sample"))
+        files.get(i as usize).is_some_and(|f| {
+            f.name
+                .to_ascii_lowercase()
+                .windows(6)
+                .any(|w| w == b"sample")
+        })
     };
     let Some(set) = sets
         .iter()
@@ -267,15 +270,17 @@ pub fn print_copy(
     else {
         return Err("no file set".to_string());
     };
-    let map: ContentMap =
-        ContentMapper::build_map_with_tls(&members, set, &sources, password, true).map_err(|e| {
-            // the mapper does not always say why; never log an empty reason
-            if e.trim().is_empty() {
-                "archive could not be mapped".to_string()
-            } else {
-                e
-            }
-        })?;
+    let map: ContentMap = ContentMapper::build_map_with_tls(
+        &members, set, &sources, password, true,
+    )
+    .map_err(|e| {
+        // the mapper does not always say why; never log an empty reason
+        if e.trim().is_empty() {
+            "archive could not be mapped".to_string()
+        } else {
+            e
+        }
+    })?;
     let size = map.inner_size();
     if size <= 0 {
         return Err("empty payload".to_string());
@@ -468,7 +473,13 @@ mod tests {
                 8_000,
             ));
         }
-        split.extend(copy(&mut mem, "x", "movie-sample.mkv", video(150_000, 6), 8_000));
+        split.extend(copy(
+            &mut mem,
+            "x",
+            "movie-sample.mkv",
+            video(150_000, 6),
+            8_000,
+        ));
         let a = print_copy(&bare, &mem, None, 4, 9).expect("bare");
         let b = print_copy(&split, &mem, None, 4, 9).expect("split");
         assert_eq!(a, b, "the split movie is read, not the sample");

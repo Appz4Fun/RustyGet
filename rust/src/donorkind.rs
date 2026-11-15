@@ -412,10 +412,15 @@ mod tests {
         Listed {
             sigs: files
                 .iter()
-                .map(|&(name, length, md5)| FileSig {
-                    name: name.into(),
-                    length,
-                    md5: md5.into(),
+                .map(|&(name, length, md5)| {
+                    // a test label for the MD5, zero-padded
+                    let mut label = [0u8; 16];
+                    label[..md5.len()].copy_from_slice(md5.as_bytes());
+                    FileSig {
+                        name: name.into(),
+                        length,
+                        md5: label,
+                    }
                 })
                 .collect(),
             complete,

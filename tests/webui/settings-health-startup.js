@@ -10,6 +10,8 @@ const assert = require('node:assert/strict');
   const browser = await chromium.launch({ channel: 'chrome' });
   try {
     const page = await browser.newPage();
+    // these checks cover every option, which Expert shows
+    await page.addInitScript(() => localStorage.setItem('SettingsMode', 'expert'));
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
     let release;

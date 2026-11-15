@@ -16,6 +16,8 @@ const fs = require('node:fs');
     for (const locale of ['de', 'es', 'tr']) {
       const entries = JSON.parse(fs.readFileSync(`webui/_locales/${locale}/messages.json`));
       const context = await browser.newContext();
+      // these checks cover every option, which Expert shows
+      await context.addInitScript(() => localStorage.setItem('SettingsMode', 'expert'));
       await context.addInitScript(l => localStorage.setItem('Language', l), locale);
       const page = await context.newPage();
       await page.goto(base);

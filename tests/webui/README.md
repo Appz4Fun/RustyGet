@@ -16,6 +16,7 @@ node tests/webui/settings-titles.js http://127.0.0.1:17689/
 node tests/webui/settings-locales.js http://127.0.0.1:17689/
 node tests/webui/settings-savebar.js http://127.0.0.1:17689/   # offline, no daemon needed
 node tests/webui/settings-cards.js http://127.0.0.1:17999/     # offline, no daemon needed
+node tests/webui/settings-modes.js http://127.0.0.1:17999/     # offline, no daemon needed
 node tests/webui/system-metrics.js http://127.0.0.1:17999/     # offline: Status tiles, Statistics charts, License page
 node tests/webui/release-names.js http://127.0.0.1:17999/      # offline: Downloads release names, logo easter egg
 node tests/webui/settings-health-startup.js http://127.0.0.1:17689/
@@ -62,6 +63,14 @@ Overview tiles and their links, the Dupe fleets page holding every dupe option (
 Incoming NZBs keeping only its own), Advanced folds, search reaching folded options,
 and the saved payload after editing a moved option, in both themes at desktop and
 phone widths.
+
+The modes check runs offline the same way. It covers Simple as the default, what
+Advanced and Expert add (rows, tags, sidebar pages, Overview tiles), the remembered
+mode and its arrow keys, search across modes, checkboxes, dropdowns, digit-only
+number boxes with +/- and arrow keys, clamping, sticky slider presets and their help
+table, options greyed out until another option is changed, new list entries, and
+the saved payload, in both themes at desktop and phone widths. The other Settings
+checks set Expert first, because they cover every option.
 
 The locale check verifies the server health label exists in all 20 translated
 catalogs and renders translated summaries and help names in German, Spanish and

@@ -9,6 +9,8 @@ const assert = require('node:assert/strict');
   try {
     for (const theme of ['light', 'dark']) for (const width of [1280, 390]) {
       const context = await browser.newContext({ viewport: { width, height: 844 } });
+      // these checks cover every option, which Expert shows
+      await context.addInitScript(() => localStorage.setItem('SettingsMode', 'expert'));
       await context.addInitScript(t => localStorage.setItem('Theme', t), theme);
       const page = await context.newPage();
       const errors = [];

@@ -152,36 +152,37 @@
 	vertical-align: middle;
 }
 
-/* ---------------------------------------------------------------- switch */
+/* ---------------------------------------------------------------- checkbox */
 
+/* A yes/no option is a checkbox. The hidden Yes/No buttons stay for the value. */
 #ConfigContent .btn-switch.is-toggle {
 	position: relative;
 	display: inline-block;
 	flex: none;
-	width: 40px;
-	height: 24px;
+	width: 22px;
+	height: 22px;
 	padding: 0;
-	border: 0;
-	border-radius: var(--radius-full);
-	background: var(--rule);
+	border: 2px solid var(--label-secondary);
+	border-radius: 5px;
+	background: var(--bg-content);
 	box-shadow: none;
 	cursor: pointer;
-	transition: background-color .15s ease;
+	transition: background-color .12s ease, border-color .12s ease;
 }
 #ConfigContent .btn-switch.is-toggle::after {
 	content: "";
 	position: absolute;
-	top: 3px;
-	left: 3px;
-	width: 18px;
-	height: 18px;
-	border-radius: 50%;
-	background: #fff;
-	box-shadow: 0 1px 2px rgba(0, 0, 0, .3);
-	transition: transform .15s ease;
+	top: 2px;
+	left: 6px;
+	width: 6px;
+	height: 11px;
+	border: solid #fff;
+	border-width: 0 2.5px 2.5px 0;
+	transform: rotate(45deg) scale(0);
+	transition: transform .12s ease;
 }
-#ConfigContent .btn-switch.is-toggle[aria-checked="true"] { background: var(--accent-fill); }
-#ConfigContent .btn-switch.is-toggle[aria-checked="true"]::after { transform: translateX(16px); }
+#ConfigContent .btn-switch.is-toggle[aria-checked="true"] { background: var(--accent-fill); border-color: var(--accent-fill); }
+#ConfigContent .btn-switch.is-toggle[aria-checked="true"]::after { transform: rotate(45deg) scale(1); }
 #ConfigContent .btn-switch.is-toggle > .btn {
 	position: absolute;
 	inset: 0;
@@ -189,6 +190,7 @@
 	pointer-events: none;
 }
 #ConfigContent .btn-switch.is-toggle:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 3px; }
+#ConfigContent .btn-switch.is-toggle[aria-disabled="true"] { cursor: not-allowed; opacity: .45; }
 
 /* ---------------------------------------------------------------- save bar */
 
@@ -246,7 +248,8 @@
 
 @media (prefers-reduced-motion: reduce) {
 	#ConfigContent .btn-switch.is-toggle,
-	#ConfigContent .btn-switch.is-toggle::after { transition: none; }
+	#ConfigContent .btn-switch.is-toggle::after,
+	#ConfigContent .config-slider__dot { transition: none; }
 }
 
 /* ---------------------------------------------------------------- cards */
@@ -334,3 +337,166 @@
 	#ConfigContent .config-overview-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-2); }
 	#ConfigContent .config-card { margin-bottom: var(--space-3); }
 }
+
+/* ---------------------------------------------------------------- modes */
+
+/* Simple / Advanced / Expert. A row outside the mode is hidden, except in search
+   results, where it shows with its mode tag so nothing is unreachable. */
+.config-mode {
+	display: inline-flex;
+	padding: 2px;
+	border: 1px solid var(--rule);
+	border-radius: var(--radius-full);
+	background: var(--bg-content);
+}
+.config-mode button {
+	padding: 4px 12px;
+	border: 0;
+	border-radius: var(--radius-full);
+	background: transparent;
+	color: var(--label-secondary);
+	font: 600 13px/1.2 var(--font-sans);
+	cursor: pointer;
+}
+.config-mode button.is-active { background: var(--accent-fill); color: #fff; }
+.config-mode button:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+#ConfigContent:not(.search) .control-group.mode-hidden,
+#ConfigContent:not(.search) .config-card.mode-empty,
+#ConfigContent:not(.search) details.mode-empty,
+#ConfigNav li.mode-hidden { display: none !important; }
+#ConfigContent .config-mode-tag {
+	display: inline-block;
+	margin-left: 8px;
+	padding: 1px 6px;
+	border: 1px solid var(--rule);
+	border-radius: var(--radius-full);
+	font: 600 10.5px/1.4 var(--font-sans);
+	letter-spacing: .02em;
+	text-transform: uppercase;
+	color: var(--label-secondary);
+	vertical-align: middle;
+}
+
+/* ---------------------------------------------------------------- numbers */
+
+#ConfigContent .config-number {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: var(--space-2) var(--space-3);
+	justify-self: stretch;
+	min-width: 0;
+}
+#ConfigContent div.config-option-tile > .controls > .config-number { justify-self: stretch; }
+#ConfigContent .config-number__preset { font-size: 13px; font-weight: 600; color: var(--accent); }
+#ConfigContent .config-number > .input-append { display: inline-flex; align-items: stretch; flex: none; }
+#ConfigContent .config-number > .input-append > input.editnumeric {
+	flex: none;
+	width: 8ch;
+	min-width: 0;
+	text-align: center;
+	font-variant-numeric: tabular-nums;
+}
+#ConfigContent .config-step {
+	width: 30px;
+	padding: 0;
+	font: 600 16px/1 var(--font-sans);
+}
+#ConfigContent .config-slider {
+	position: relative;
+	flex: 1 1 180px;
+	min-width: 140px;
+	max-width: 360px;
+	padding: 6px 0 14px;
+}
+#ConfigContent .config-slider input[type="range"] {
+	display: block;
+	box-sizing: border-box;
+	width: 100%;
+	height: 20px;
+	margin: 0;
+	padding: 0;
+	border: 0;
+	background: transparent;
+	box-shadow: none;
+	accent-color: var(--accent-fill);
+}
+#ConfigContent .config-slider__dots {
+	position: absolute;
+	left: 8px;
+	right: 8px;
+	bottom: 0;
+	height: 12px;
+}
+#ConfigContent .config-slider__dot {
+	position: absolute;
+	top: 0;
+	width: 12px;
+	height: 12px;
+	margin-left: -6px;
+	padding: 0;
+	border: 2px solid var(--label-secondary);
+	border-radius: 50%;
+	background: var(--bg-content);
+	cursor: pointer;
+	transition: transform .12s ease;
+}
+#ConfigContent .config-slider__dot:hover { transform: scale(1.25); }
+#ConfigContent .config-slider__dot.is-on { border-color: var(--accent-fill); background: var(--accent-fill); }
+#ConfigContent .config-slider__dot:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+#ConfigContent .config-presets {
+	width: 100%;
+	max-width: 64ch;
+	margin: 0 0 var(--space-3);
+	border-collapse: collapse;
+	font-size: 13px;
+}
+#ConfigContent .config-presets caption {
+	padding-bottom: 4px;
+	text-align: left;
+	font-weight: 600;
+	color: var(--label-primary);
+}
+#ConfigContent .config-presets th,
+#ConfigContent .config-presets td {
+	padding: 4px 8px 4px 0;
+	border-top: 1px solid var(--separator);
+	text-align: left;
+	vertical-align: top;
+}
+#ConfigContent .config-presets th { white-space: nowrap; font-weight: 600; }
+#ConfigContent .config-presets__value { font-family: var(--font-mono); white-space: nowrap; }
+
+/* ---------------------------------------------------------------- menus */
+
+#ConfigContent .btn-switch.config-select-source { display: none !important; }
+#ConfigContent select.config-select {
+	width: auto;
+	min-width: 12ch;
+	max-width: 100%;
+	height: 34px;
+	padding: 4px 28px 4px 10px;
+}
+
+/* ---------------------------------------------------------------- locked */
+
+/* An option that needs another one changed first is greyed out with a note. */
+#ConfigContent .control-group.is-locked > .controls,
+#ConfigContent .control-group.is-locked .option-name { opacity: .55; }
+#ConfigContent .control-group.is-locked .config-help-toggle { opacity: 1; }
+#ConfigContent .config-lock-note {
+	grid-column: 1 / -1;
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	margin-top: var(--space-2);
+	padding: 6px 10px;
+	border: 1px solid var(--rule);
+	border-left: 3px solid var(--accent);
+	border-radius: var(--radius-md, 6px);
+	background: var(--bg-elevated);
+	font-size: 13px;
+	color: var(--label-primary);
+}
+#ConfigContent .config-lock-note .material-icon { font-size: 16px; color: var(--accent); }
+#ConfigContent .config-lock-note a { font-weight: 600; }

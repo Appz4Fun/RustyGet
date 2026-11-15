@@ -1075,7 +1075,7 @@ var Config = (new function($)
 			if (isToggle)
 			{
 				var isOn = !!value && value.toLowerCase() === 'yes';
-				html +=	'<div class="btn-group btn-switch is-toggle" role="switch" tabindex="0" aria-checked="' + isOn +
+				html +=	'<div class="btn-group btn-switch is-toggle" role="checkbox" tabindex="0" aria-checked="' + isOn +
 					'" aria-labelledby="label:' + option.formId + '" id="' + option.formId + '" onclick="Config.toggleClick(this, event)">';
 			}
 			else
@@ -1394,8 +1394,11 @@ var Config = (new function($)
 		I18n.translatePage($ConfigNav);
 		I18n.translatePage($ConfigData);
 		groupNav();
+		ensureModeSwitch();
+		enhanceControls();
 		snapshotShownValues();
 		refreshChangeState();
+		applyMode();
 		refreshListRows();
 		if (typeof TlsCipherDialog !== 'undefined') TlsCipherDialog.refreshAvailability();
 		$ConfigNav.toggleClass('long-list', $ConfigNav.children().length > 20);
@@ -1457,6 +1460,12 @@ var Config = (new function($)
 	{
 		var option = findOptionById(optFormId);
 
+		// following a search result or help link to an option the mode hides shows that mode
+		if (option && !inMode(modeOfOption(option)))
+		{
+			Config.setMode(modeOfOption(option));
+		}
+
 		// switch to tab and scroll the option into view
 		Config.showSection(pageIdOf(option), false);
 		$('#' + optFormId).closest('details.config-card__more').prop('open', true);
@@ -1478,6 +1487,10 @@ var Config = (new function($)
 
 	this.toggleClick = function(group, event)
 	{
+		if ($(group).attr('aria-disabled') === 'true')
+		{
+			return;
+		}
 		// a click on one of the hidden Yes/No buttons has already switched through its own handler
 		var onButton = event && event.target && $(event.target).is('input.btn');
 		var target = $('.btn', group).filter(function() { return !$(this).hasClass('btn-primary'); }).first();
@@ -1823,9 +1836,834 @@ var Config = (new function($)
 			rate ? Util.formatSpeed(rate * 1024) : t('config_overview_unlimited', 'Unlimited'),
 			quota ? t('config_overview_quota', 'quota set') : t('config_overview_no_quota', 'no quota')));
 
+		// a tile leads only to a page the current mode shows
+		tiles.children().each(function()
+		{
+			var item = $('a[href="#' + $(this).attr('data-target') + '"]', $ConfigNav).closest('li');
+			$(this).toggle(!item.hasClass('mode-hidden'));
+		});
 		box.empty().append(tiles);
 	}
 	this.renderOverview = renderOverview;
+
+	/*** SETTINGS MODES AND CONTROLS ********************************************/
+
+	// Simple shows what nearly everyone changes; Advanced adds the rest of the everyday
+	// options; Expert shows every option. An option not listed here is Expert. Options
+	// of a list (servers, categories, feeds, tasks) are named without their number.
+	var OPTION_MODES = {
+		simple: [
+			'DestDir',
+			'InterDir',
+			'NzbDir',
+			'Server.Active',
+			'Server.Name',
+			'Server.Host',
+			'Server.Port',
+			'Server.Encryption',
+			'Server.Username',
+			'Server.Password',
+			'Server.Connections',
+			'Category.Name',
+			'Category.DestDir',
+			'DupeCheck',
+			'DupeArticleFallback',
+			'DownloadRate',
+			'KeepHistory',
+			'Unpack',
+			'DirectUnpack',
+			'UnpackCleanupDisk',
+			'ControlUsername',
+			'ControlPassword'
+		],
+		advanced: [
+			'TempDir',
+			'QueueDir',
+			'MainDir',
+			'Server.Level',
+			'Server.Optional',
+			'Server.Group',
+			'Server.Retention',
+			'Server.CertVerification',
+			'Server.IpVersion',
+			'Server.Notes',
+			'Category.Unpack',
+			'Category.Aliases',
+			'Feed.Name',
+			'Feed.URL',
+			'Feed.Filter',
+			'Feed.Interval',
+			'Feed.Backlog',
+			'Feed.PauseNzb',
+			'Feed.Category',
+			'Feed.CategorySource',
+			'Feed.CertVerification',
+			'Feed.Priority',
+			'Task.Time',
+			'Task.WeekDays',
+			'Task.Command',
+			'Task.Param',
+			'DupeBorrowFirst',
+			'DupeStreamDecompress',
+			'DupeStreamTimeout',
+			'HealthCheck',
+			'AppendCategoryDir',
+			'NzbDirInterval',
+			'NzbDirFileAge',
+			'NzbDirArchiveScan',
+			'NzbDirArchiveAction',
+			'FeedHistory',
+			'ArticleCache',
+			'DiskSpace',
+			'PostStrategy',
+			'FileNaming',
+			'DailyQuota',
+			'MonthlyQuota',
+			'QuotaStartDay',
+			'ArticleRetries',
+			'ArticleTimeout',
+			'UrlConnections',
+			'ParCheck',
+			'ParRepair',
+			'ParScan',
+			'ParTimeLimit',
+			'DirectRename',
+			'ParRename',
+			'RarRename',
+			'UnpackPassFile',
+			'UnpackPauseQueue',
+			'ExtCleanupDisk',
+			'ControlIP',
+			'ControlPort',
+			'FormAuth',
+			'AuthorizedIP',
+			'RestrictedUsername',
+			'RestrictedPassword',
+			'AddUsername',
+			'AddPassword',
+			'SecureControl',
+			'SecureCert',
+			'SecureKey',
+			'WriteLog',
+			'RotateLog',
+			'LogBuffer',
+			'ErrorTarget',
+			'WarningTarget',
+			'InfoTarget',
+			'DetailTarget'
+		]
+	};
+
+	// pages without options: the lowest mode that lists them
+	var STATIC_PAGE_MODES = { 'Config-System': 'advanced', 'Config-Licenses': 'advanced' };
+
+	var MODE_RANK = { simple: 0, advanced: 1, expert: 2 };
+	var MODE_LABELS = { simple: 'Simple', advanced: 'Advanced', expert: 'Expert' };
+	var settingsMode = 'simple';
+	try
+	{
+		var storedMode = localStorage.getItem('SettingsMode');
+		if (MODE_RANK.hasOwnProperty(storedMode))
+		{
+			settingsMode = storedMode;
+		}
+	}
+	catch (e) { /* storage blocked: Simple */ }
+
+	var modeIndex = null;
+	function optionFamily(name)
+	{
+		return String(name).replace(/^([A-Za-z]+)[0-9]+\./, '$1.');
+	}
+
+	function modeOfOption(option)
+	{
+		if (!modeIndex)
+		{
+			modeIndex = {};
+			OPTION_MODES.advanced.forEach(function(name) { modeIndex[name.toLowerCase()] = 'advanced'; });
+			OPTION_MODES.simple.forEach(function(name) { modeIndex[name.toLowerCase()] = 'simple'; });
+		}
+		return modeIndex[optionFamily(option.name).toLowerCase()] || 'expert';
+	}
+
+	function inMode(mode)
+	{
+		return MODE_RANK[mode] <= MODE_RANK[settingsMode];
+	}
+
+	function allOptions(callback)
+	{
+		if (!config)
+		{
+			return;
+		}
+		for (var k=0; k < config.length; k++)
+		{
+			var sections = config[k].sections;
+			for (var i=0; i < sections.length; i++)
+			{
+				var section = sections[i];
+				if (section.hidden)
+				{
+					continue;
+				}
+				for (var j=0; j < section.options.length; j++)
+				{
+					var option = section.options[j];
+					if (!option.template && option.formId)
+					{
+						callback(option, section);
+					}
+				}
+			}
+		}
+	}
+
+	// hide what the mode leaves out: rows, then empty folds, cards and pages
+	function applyMode()
+	{
+		if (!$ConfigData)
+		{
+			return;
+		}
+		var pageHasRows = {};
+		allOptions(function(option, section)
+		{
+			var mode = modeOfOption(option);
+			var row = $(document.getElementById(option.formId)).closest('.control-group');
+			var hidden = !inMode(mode);
+			row.toggleClass('mode-hidden', hidden).attr('data-mode', mode);
+			var tag = row.find('.config-mode-tag');
+			if (mode === 'simple')
+			{
+				tag.remove();
+			}
+			else if (!tag.length)
+			{
+				row.find('.control-label').first().append($('<span class="config-mode-tag"></span>')
+					.text(I18n.defaultValue('config_mode_' + mode, MODE_LABELS[mode])));
+			}
+			if (!hidden)
+			{
+				pageHasRows[pageIdOf(option)] = true;
+				pageHasRows[section.id] = pageHasRows[section.id] || pageIdOf(option) === section.id;
+			}
+		});
+		// an empty list (no feeds or tasks yet) still shows when its fields are in the mode,
+		// so its add button can be reached
+		for (var k=0; k < config.length; k++)
+		{
+			config[k].sections.forEach(function(section)
+			{
+				if (section.hidden)
+				{
+					return;
+				}
+				section.options.forEach(function(option)
+				{
+					if (option.template && inMode(modeOfOption(option)))
+					{
+						pageHasRows[section.id] = true;
+					}
+				});
+			});
+		}
+		$('.config-card', $ConfigData).each(function()
+		{
+			$(this).toggleClass('mode-empty', $(this).find('.control-group').not('.mode-hidden').length === 0);
+		});
+		$('details.config-card__more', $ConfigData).each(function()
+		{
+			$(this).toggleClass('mode-empty', $(this).find('.control-group').not('.mode-hidden').length === 0);
+		});
+		// list sections: the add button and summary rows follow the list's fields
+		$('.config-list-row, .config-add', $ConfigData).each(function()
+		{
+			var sectionId = $(this).attr('data-section') || ($(this).attr('class').match(/\b(NEWS-SERVERS|CATEGORIES|RSS_FEEDS|SCHEDULER)\b/) || [])[1];
+			if (sectionId)
+			{
+				$(this).closest('.control-group').toggleClass('mode-hidden', !pageHasRows[sectionId]);
+			}
+		});
+		$('li', $ConfigNav).each(function()
+		{
+			var href = ($('> a', this).attr('href') || '').substr(1);
+			if (!href || href === 'Search' || href === 'Config-Info' || href === 'Config-SystemInfo')
+			{
+				return;
+			}
+			var visible = STATIC_PAGE_MODES.hasOwnProperty(href) ? inMode(STATIC_PAGE_MODES[href]) :
+				(findSectionById(href) ? !!pageHasRows[href] : true);
+			$(this).toggleClass('mode-hidden', !visible);
+		});
+		// a group label with nothing left under it goes too
+		$('li.config-nav-group', $ConfigNav).each(function()
+		{
+			var items = $(this).nextUntil('li.config-nav-group').not('.ConfigSearch, .divider');
+			$(this).toggleClass('mode-hidden', items.length > 0 && items.not('.mode-hidden').length === 0);
+		});
+		$ConfigContent.attr('data-mode', settingsMode);
+		$('#ConfigMode button').each(function()
+		{
+			var on = $(this).attr('data-mode') === settingsMode;
+			$(this).toggleClass('is-active', on).attr('aria-checked', on ? 'true' : 'false').attr('tabindex', on ? '0' : '-1');
+		});
+		var current = Config.currentSectionID;
+		if (current && $('a[href="#' + current + '"]', $ConfigNav).closest('li').hasClass('mode-hidden'))
+		{
+			Config.showSection('Config-Info', false);
+		}
+		else if (current === 'Config-Info')
+		{
+			renderOverview();
+		}
+		markLastControlGroup();
+	}
+
+	this.setMode = function(mode)
+	{
+		if (!MODE_RANK.hasOwnProperty(mode))
+		{
+			return;
+		}
+		settingsMode = mode;
+		try { localStorage.setItem('SettingsMode', mode); } catch (e) { /* not remembered */ }
+		applyMode();
+	};
+
+	this.mode = function()
+	{
+		return settingsMode;
+	};
+
+	function ensureModeSwitch()
+	{
+		if ($('#ConfigMode').length)
+		{
+			return;
+		}
+		var group = $('<div id="ConfigMode" class="config-mode" role="radiogroup"></div>')
+			.attr('aria-label', I18n.defaultValue('config_mode_label', 'Settings mode'));
+		['simple', 'advanced', 'expert'].forEach(function(mode)
+		{
+			group.append($('<button type="button" role="radio"></button>').attr('data-mode', mode)
+				.text(I18n.defaultValue('config_mode_' + mode, MODE_LABELS[mode])));
+		});
+		group.on('click', 'button', function() { Config.setMode($(this).attr('data-mode')); });
+		group.on('keydown', 'button', function(e)
+		{
+			var order = ['simple', 'advanced', 'expert'];
+			var index = order.indexOf(settingsMode);
+			if (e.key === 'ArrowRight' || e.key === 'ArrowDown') index = Math.min(order.length - 1, index + 1);
+			else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') index = Math.max(0, index - 1);
+			else return;
+			e.preventDefault();
+			Config.setMode(order[index]);
+			group.find('button[data-mode="' + order[index] + '"]').focus();
+		});
+		$('.config-header-actions', $ConfigContent).prepend(group);
+	}
+
+	// Number options: limits, a slider scale and three to five presets with what each
+	// one means. A slider appears when an option has limits; dots on it are the presets
+	// and the thumb snaps to a dot it passes near. The help lists the presets.
+	var NUMBER_META = {
+		'Server.Connections': { min: 1, max: 100, presets: [
+			[4, 'Light', 'Enough for slow lines and small accounts; downloads may not reach full speed.'],
+			[20, 'Normal', 'Fills most connections up to 500 Mbit/s.'],
+			[50, 'Fast', 'For gigabit lines. Your account must allow this many connections.'],
+			[100, 'Maximum', 'Only if your provider allows it; extra connections are refused otherwise.']] },
+		'Server.Retention': { min: 0, max: 6000, presets: [
+			[0, 'Unlimited', 'Try every article on this server, however old.'],
+			[1500, 'Block account', 'Skip articles older than about four years.'],
+			[4000, 'Long', 'Typical of large providers today.']] },
+		ArticleCache: { min: 0, max: 4096, scale: 'sqrt', presets: [
+			[0, 'Off', 'Every article goes straight to disk: least memory, most disk writes.'],
+			[200, 'Low', 'For machines with little memory.'],
+			[500, 'Normal', 'Good for most machines.'],
+			[2000, 'High', 'Fewer disk writes during fast downloads; uses up to 2 GB of memory.']] },
+		WriteBuffer: { min: 0, max: 8192, scale: 'sqrt', presets: [
+			[0, 'Off', 'Lowest memory; more small writes.'],
+			[1024, 'Normal', 'Good for most disks.'],
+			[4096, 'High', 'Fewer writes on slow or network disks; uses more memory per connection.']] },
+		DiskSpace: { min: 0, max: 10000, scale: 'sqrt', presets: [
+			[0, 'Never pause', 'Downloads continue until the disk is full.'],
+			[250, 'Normal', 'Pause when less than 250 MB is free.'],
+			[2000, 'Safe', 'Leave room for unpacking a large release.']] },
+		KeepHistory: { min: 0, max: 365, scale: 'sqrt', presets: [
+			[0, 'Off', 'Finished downloads leave the history at once; duplicate checks cannot see them.'],
+			[7, 'Week', 'A short history.'],
+			[30, 'Month', 'Normal.'],
+			[365, 'Year', 'Remembers a year of downloads for duplicate checks; the queue file grows.']] },
+		FeedHistory: { min: 0, max: 90, presets: [
+			[1, 'Day', 'Old feed items may be fetched again.'],
+			[7, 'Week', 'Normal.'],
+			[30, 'Month', 'For feeds that repeat old items.']] },
+		DownloadRate: { min: 0, max: 125000, scale: 'sqrt', presets: [
+			[0, 'Unlimited', 'Use the whole line.'],
+			[1250, '10 Mbit/s', 'Leaves most of a typical line free.'],
+			[12500, '100 Mbit/s', 'A firm cap for shared lines.'],
+			[62500, '500 Mbit/s', 'Caps only very fast lines.']] },
+		ArticleRetries: { min: 0, max: 10, presets: [
+			[0, 'None', 'Give up on a server at the first error and move on to the next one.'],
+			[3, 'Normal', 'Recovers from short glitches.'],
+			[10, 'Stubborn', 'Keeps retrying a flaky server; failures take longer to move on.']] },
+		ArticleTimeout: { min: 5, max: 300, presets: [
+			[15, 'Quick', 'Drops stalled connections fast; may cut off slow servers.'],
+			[60, 'Normal', 'Good for most servers.'],
+			[180, 'Patient', 'For slow or distant servers.']] },
+		ArticleInterval: { min: 0, max: 60, presets: [
+			[0, 'At once', 'Retry immediately.'],
+			[10, 'Normal', 'Give the server a moment.'],
+			[30, 'Gentle', 'For servers that throttle quick retries.']] },
+		UrlConnections: { min: 1, max: 20, presets: [
+			[1, 'One at a time', 'Gentlest on indexers.'],
+			[4, 'Normal', 'Fetches a few NZB links at once.'],
+			[10, 'Many', 'Faster bulk adds; some indexers limit this.']] },
+		UrlRetries: { min: 0, max: 10, presets: [
+			[0, 'None', 'One try per NZB link.'],
+			[3, 'Normal', 'Recovers from short indexer outages.'],
+			[10, 'Stubborn', 'Keeps trying a busy indexer.']] },
+		UrlTimeout: { min: 5, max: 300, presets: [
+			[30, 'Quick', 'Gives up on slow indexers.'],
+			[60, 'Normal', ''],
+			[180, 'Patient', 'For slow indexers.']] },
+		ParBuffer: { min: 16, max: 4096, scale: 'sqrt', presets: [
+			[100, 'Low', 'For machines with little memory; repair is slower.'],
+			[500, 'Normal', ''],
+			[2000, 'High', 'Faster repair of large releases; uses up to 2 GB.']] },
+		ParThreads: { min: 0, max: 64, presets: [
+			[0, 'Automatic', 'One thread per CPU core.'],
+			[2, 'Background', 'Leaves the machine responsive during repair.'],
+			[16, 'Many', 'Only on machines with many cores.']] },
+		ParTimeLimit: { min: 0, max: 600, scale: 'sqrt', presets: [
+			[0, 'No limit', 'Repair always runs to the end.'],
+			[30, 'Short', 'Gives up on long repairs; the download is marked as failed.'],
+			[120, 'Long', 'Allows big repairs to finish.']] },
+		LogBuffer: { min: 0, max: 100000, scale: 'sqrt', presets: [
+			[100, 'Small', 'The Messages tab shows only recent lines.'],
+			[1000, 'Normal', ''],
+			[20000, 'Large', 'Keeps more history in memory.']] },
+		NzbDirInterval: { min: 0, max: 600, scale: 'sqrt', presets: [
+			[0, 'Off', 'The NZB folder is not watched.'],
+			[5, 'Quick', 'New files are picked up within seconds.'],
+			[60, 'Relaxed', 'Checks once a minute.']] },
+		NzbDirFileAge: { min: 0, max: 600, scale: 'sqrt', presets: [
+			[10, 'Quick', 'May pick up a file that is still being written.'],
+			[60, 'Normal', ''],
+			[300, 'Safe', 'For slow network copies.']] },
+		DupeStreamTimeout: { min: 0, max: 600, scale: 'sqrt', presets: [
+			[0, 'No limit', 'A stream repair runs until it ends.'],
+			[60, 'Normal', 'Stops a repair that recovers nothing for a minute.'],
+			[300, 'Patient', 'For slow donors.']] },
+		DupeCheckConcurrency: { min: 1, max: 50, presets: [
+			[5, 'Gentle', 'Fewer copies are sampled at once.'],
+			[20, 'Normal', ''],
+			[50, 'Fast', 'Samples big fleets quickly; uses more connections.']] },
+		DupeHealthBudget: { min: 10, max: 600, scale: 'sqrt', presets: [
+			[30, 'Quick', 'Less sampling per copy; picks may be less accurate.'],
+			[120, 'Normal', ''],
+			[300, 'Thorough', 'More accurate picks for large fleets.']] },
+		QuotaStartDay: { min: 1, max: 31 }
+	};
+
+	// numbers that may be negative: a feed's priority (-100 very low) and the clock offset
+	var SIGNED_NUMBERS = ['Feed.Priority', 'TimeCorrection'];
+
+	// fields typed as expressions, not stepped as one number: weekday lists and ranges
+	// such as "1-5, 7", and times such as "08:00, 20:00"
+	var EXPRESSION_FIELDS = ['Task.WeekDays', 'Task.Time'];
+
+	// a range written in the option's help, such as (0-99)
+	function numberMeta(option)
+	{
+		var meta = NUMBER_META[optionFamily(option.name)] || NUMBER_META[option.name];
+		var unit = option.select && option.select[0];
+		var range = /^\s*(-?[0-9]+)\s*-\s*(-?[0-9]+)\s*$/.exec(unit || '');
+		if (!meta && range && !/^0/.test(range[1].substr(1)) && (+range[2] - +range[1]) <= 100)
+		{
+			meta = { min: +range[1], max: +range[2] };
+		}
+		if (meta)
+		{
+			// the slider spans the useful values; the box takes whatever the option allows
+			meta = $.extend({}, meta, range ? { hardMin: +range[1], hardMax: +range[2] } : { hardMin: Math.min(0, meta.min) });
+		}
+		return meta;
+	}
+
+	function toScale(meta, value)
+	{
+		var span = meta.max - meta.min;
+		var x = Math.max(0, Math.min(1, (value - meta.min) / (span || 1)));
+		return meta.scale === 'sqrt' ? Math.sqrt(x) : x;
+	}
+
+	function fromScale(meta, x)
+	{
+		var v = meta.scale === 'sqrt' ? x * x : x;
+		return Math.round(meta.min + v * (meta.max - meta.min));
+	}
+
+	function presetName(option, preset)
+	{
+		var key = 'config_preset_' + optionFamily(option.name).replace(/\./g, '_').toLowerCase() + '_' + preset[0];
+		return I18n.defaultValue(key, preset[1]);
+	}
+
+	function presetText(option, preset)
+	{
+		var key = 'config_preset_' + optionFamily(option.name).replace(/\./g, '_').toLowerCase() + '_' + preset[0] + '_text';
+		return preset[2] ? I18n.defaultValue(key, preset[2]) : '';
+	}
+
+	function setNumber(input, value, meta)
+	{
+		var n = parseInt(value, 10);
+		if (isNaN(n))
+		{
+			n = meta ? meta.min : 0;
+		}
+		n = !meta && $(input).attr('pattern') === '-?[0-9]*' ? n : clampNumber(n, meta);
+		$(input).val(String(n)).trigger('input').trigger('change');
+	}
+
+	function clampNumber(n, meta)
+	{
+		if (!meta)
+		{
+			return Math.max(0, n);
+		}
+		n = Math.max(meta.hardMin, n);
+		return meta.hardMax === undefined ? n : Math.min(meta.hardMax, n);
+	}
+
+	function syncSlider(wrapper)
+	{
+		var input = wrapper.find('input.editnumeric');
+		var meta = wrapper.data('meta');
+		var range = wrapper.find('input[type="range"]');
+		if (!meta || !range.length)
+		{
+			return;
+		}
+		var value = parseInt(input.val(), 10);
+		range.val(Math.round(toScale(meta, isNaN(value) ? meta.min : value) * 1000));
+		var onName = '';
+		wrapper.find('.config-slider__dot').each(function()
+		{
+			var on = +$(this).attr('data-value') === value;
+			$(this).toggleClass('is-on', on);
+			if (on)
+			{
+				onName = $(this).attr('data-name');
+			}
+		});
+		wrapper.find('.config-number__preset').text(onName || '');
+	}
+
+	function enhanceNumber(option, input)
+	{
+		var meta = numberMeta(option);
+		var appendBox = input.closest('.input-append');
+		var wrapper = $('<div class="config-number"></div>').data('meta', meta);
+		appendBox.before(wrapper);
+		wrapper.append(appendBox);
+		input.attr({ inputmode: 'numeric', autocomplete: 'off', spellcheck: 'false' });
+		var allowMinus = !!(meta && meta.min < 0) || SIGNED_NUMBERS.indexOf(optionFamily(option.name)) > -1;
+		input.attr('pattern', allowMinus ? '-?[0-9]*' : '[0-9]*');
+		var label = option.label || option.caption;
+		var minus = $('<button type="button" class="btn config-step" data-step="-1">−</button>')
+			.attr('aria-label', I18n.defaultValue('config_step_down', 'Decrease') + ' ' + label);
+		var plus = $('<button type="button" class="btn config-step" data-step="1">+</button>')
+			.attr('aria-label', I18n.defaultValue('config_step_up', 'Increase') + ' ' + label);
+		input.before(minus).after(plus);
+		if (meta && meta.max !== undefined)
+		{
+			var slider = $('<div class="config-slider"></div>');
+			var range = $('<input type="range" min="0" max="1000" step="1">')
+				.attr('aria-label', label);
+			slider.append(range);
+			var dots = $('<div class="config-slider__dots"></div>');
+			(meta.presets || []).forEach(function(preset)
+			{
+				dots.append($('<button type="button" class="config-slider__dot"></button>')
+					.attr('data-value', preset[0])
+					.attr('data-name', presetName(option, preset))
+					.attr('title', presetName(option, preset) + ' (' + preset[0] + ')')
+					.attr('aria-label', presetName(option, preset) + ': ' + preset[0])
+					.css('left', (toScale(meta, preset[0]) * 100) + '%'));
+			});
+			slider.append(dots);
+			wrapper.prepend(slider);
+			wrapper.append('<span class="config-number__preset" aria-hidden="true"></span>');
+			range.on('input', function()
+			{
+				var value = fromScale(meta, this.value / 1000);
+				// sticky presets: a value close to a dot lands on it
+				(meta.presets || []).forEach(function(preset)
+				{
+					if (Math.abs(toScale(meta, preset[0]) - this.value / 1000) <= 0.025)
+					{
+						value = preset[0];
+					}
+				}, this);
+				input.val(String(value)).trigger('input');
+				syncSlider(wrapper);
+			}).on('change', function() { input.trigger('change'); })
+			.on('keydown', function(e)
+			{
+				// arrows step the setting by one, Page keys jump between presets, Home/End to the ends
+				var value = parseInt(input.val(), 10);
+				value = isNaN(value) ? meta.min : value;
+				var presets = (meta.presets || []).map(function(p) { return p[0]; });
+				var next = null;
+				if (e.key === 'ArrowRight' || e.key === 'ArrowUp') next = value + 1;
+				else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') next = value - 1;
+				else if (e.key === 'Home') next = meta.min;
+				else if (e.key === 'End') next = meta.max;
+				else if (e.key === 'PageUp') next = presets.filter(function(p) { return p > value; })[0];
+				else if (e.key === 'PageDown') next = presets.filter(function(p) { return p < value; }).pop();
+				else return;
+				e.preventDefault();
+				if (next !== undefined && next !== null)
+				{
+					setNumber(input, next, meta);
+					syncSlider(wrapper);
+				}
+			});
+			dots.on('click', '.config-slider__dot', function()
+			{
+				setNumber(input, $(this).attr('data-value'), meta);
+				syncSlider(wrapper);
+			});
+		}
+		syncSlider(wrapper);
+		// the help lists the presets with what each one means
+		if (meta && meta.presets && meta.presets.length)
+		{
+			var help = input.closest('.control-group').find('.help-block').first();
+			var table = $('<table class="config-presets"></table>');
+			table.append($('<caption></caption>').text(I18n.defaultValue('config_presets', 'Presets')));
+			meta.presets.forEach(function(preset)
+			{
+				table.append($('<tr></tr>')
+					.append($('<th scope="row"></th>').text(presetName(option, preset)))
+					.append($('<td class="config-presets__value"></td>').text(preset[0]))
+					.append($('<td></td>').text(presetText(option, preset))));
+			});
+			if (help.length)
+			{
+				help.prepend(table);
+			}
+		}
+	}
+
+	function enhanceSelect(group)
+	{
+		var select = $('<select class="config-select"></select>');
+		group.find('.btn').each(function()
+		{
+			var text = $(this).val();
+			if (text === $(this).attr('data-value'))
+			{
+				text = text.charAt(0).toUpperCase() + text.substr(1);
+			}
+			select.append($('<option></option>').attr('value', $(this).attr('data-value')).text(text));
+		});
+		var label = group.closest('.control-group').find('.config-label').first().text() ||
+			group.closest('.control-group').find('.option-name').first().text();
+		select.attr('aria-label', label);
+		select.val(switchGetValue(group));
+		group.addClass('config-select-source').attr('aria-hidden', 'true').find('.btn').attr('tabindex', '-1');
+		group.before(select);
+		select.on('change', function()
+		{
+			var value = this.value;
+			var btn = group.find('.btn').filter(function() { return $(this).attr('data-value') === value; }).first();
+			if (btn.length)
+			{
+				Config.switchClick(btn[0]);
+			}
+		});
+	}
+
+	// numbers get a stepper (and a slider when they have limits), short choices a menu
+	function enhanceControls(scope)
+	{
+		scope = scope || $ConfigData;
+		allOptions(function(option)
+		{
+			var control = $(document.getElementById(option.formId));
+			if (!control.length || (scope[0] !== $ConfigData[0] && !$.contains(scope[0], control[0])))
+			{
+				return;
+			}
+			// times (HH:MM) and octal masks (000-1000) are typed as written, not stepped
+			var unit = String(option.select && option.select[0] || '');
+			if (option.type === 'numeric' && control.is('input.editnumeric') && !control.closest('.config-number').length &&
+				!/:|^\s*0[0-9]/.test(unit) && EXPRESSION_FIELDS.indexOf(optionFamily(option.name)) === -1)
+			{
+				enhanceNumber(option, control);
+			}
+			else if (option.type === 'switch' && control.is('.btn-switch') && !control.hasClass('is-toggle') &&
+				!control.hasClass('config-select-source'))
+			{
+				enhanceSelect(control);
+			}
+		});
+	}
+	this.enhanceControls = enhanceControls;
+
+	// keep menus and sliders in step with values set from elsewhere (Discard, restore, dialogs)
+	function syncControls()
+	{
+		$('select.config-select', $ConfigData).each(function()
+		{
+			var group = $(this).next('.btn-switch');
+			var value = switchGetValue(group);
+			if (this.value !== value)
+			{
+				if (!$(this).find('option').filter(function() { return this.value === value; }).length)
+				{
+					$(this).append($('<option></option>').attr('value', value).text(value));
+				}
+				$(this).val(value);
+			}
+		});
+		$('.config-number', $ConfigData).each(function() { syncSlider($(this)); });
+	}
+
+	// An option that only matters while another one has certain values is greyed out
+	// otherwise, with a note that says what to change. Its value is kept and saved.
+	var OPTION_REQUIRES = [
+		{ option: 'DirectUnpack', when: { name: 'Unpack', values: ['yes'], orCategory: 'Unpack' } },
+		{ option: 'UnpackCleanupDisk', when: { name: 'Unpack', values: ['yes'], orCategory: 'Unpack' } },
+		{ option: 'UnpackPassFile', when: { name: 'Unpack', values: ['yes'], orCategory: 'Unpack' } },
+		{ option: 'UseTempUnpackDir', when: { name: 'Unpack', values: ['yes'], orCategory: 'Unpack' } },
+		{ option: 'UnpackPauseQueue', when: { name: 'Unpack', values: ['yes'], orCategory: 'Unpack' } },
+		{ option: 'ExtCleanupDisk', when: { name: 'Unpack', values: ['yes'], orCategory: 'Unpack' } },
+		{ option: 'UnpackIgnoreExt', when: { name: 'Unpack', values: ['yes'], orCategory: 'Unpack' } },
+		{ option: 'DupeBorrowFirst', when: { name: 'DupeArticleFallback', values: ['article', 'stream', 'live', 'yes'] } },
+		{ option: 'DupeStreamDecompress', when: { name: 'DupeArticleFallback', values: ['stream', 'live'] } },
+		{ option: 'DupeStreamTimeout', when: { name: 'DupeArticleFallback', values: ['stream', 'live'] } },
+		{ option: 'RotateLog', when: { name: 'WriteLog', values: ['rotate'] } },
+		{ option: 'SecurePort', when: { name: 'SecureControl', values: ['yes'] } },
+		{ option: 'SecureCert', when: { name: 'SecureControl', values: ['yes'] } },
+		{ option: 'SecureKey', when: { name: 'SecureControl', values: ['yes'] } },
+		{ option: 'HardLinkingIgnoreExt', when: { name: 'HardLinking', values: ['yes'] } },
+		{ option: 'RestrictedPassword', when: { name: 'RestrictedUsername', notEmpty: true } },
+		{ option: 'AddPassword', when: { name: 'AddUsername', notEmpty: true } }
+	];
+
+	function anyCategoryValue(field, values)
+	{
+		var found = false;
+		allOptions(function(option)
+		{
+			if (!found && optionFamily(option.name) === 'Category.' + field &&
+				values.indexOf(currentValue(option).toLowerCase()) > -1)
+			{
+				found = true;
+			}
+		});
+		return found;
+	}
+
+	function currentValue(option)
+	{
+		var control = $(document.getElementById(option.formId));
+		return control.length ? String(getOptionValue(option) || '') : String(option.value === null ? option.defvalue : option.value);
+	}
+
+	function choiceLabel(option, value)
+	{
+		var low = String(value).toLowerCase();
+		if (low === 'yes' || low === 'no')
+		{
+			return I18n.defaultValue(low === 'yes' ? 'label_yes_cap' : 'label_no_cap', value);
+		}
+		return value;
+	}
+
+	function requirementText(rule, needed)
+	{
+		var name = needed.label || needed.caption;
+		if (rule.when.notEmpty)
+		{
+			return I18n.defaultValue('config_requires_filled', 'Fill in "%1" first to change this.').replace('%1', name);
+		}
+		var values = rule.when.values.filter(function(v) { return v !== 'yes' || rule.when.values.length === 1; });
+		if (values.length === 1 && values[0] === 'yes')
+		{
+			return I18n.defaultValue('config_requires_on', 'Turn on "%1" to change this.').replace('%1', name);
+		}
+		return I18n.defaultValue('config_requires_value', 'Set "%1" to %2 to change this.').replace('%1', name)
+			.replace('%2', values.map(function(v) { return choiceLabel(needed, v); }).join(I18n.defaultValue('config_requires_or', ' or ')));
+	}
+
+	function setLocked(row, locked, text, neededId)
+	{
+		row.toggleClass('is-locked', locked);
+		var controls = row.children('.controls');
+		controls.find('input, select, textarea, button').not('.config-help-toggle').prop('disabled', locked);
+		controls.find('.btn-switch.is-toggle').attr('aria-disabled', locked ? 'true' : null).attr('tabindex', locked ? '-1' : '0');
+		var note = row.children('.config-lock-note');
+		if (!locked)
+		{
+			note.remove();
+			return;
+		}
+		if (!note.length)
+		{
+			note = $('<div class="config-lock-note" role="note"><i class="material-icon" aria-hidden="true">info</i><span></span> <a href="#"></a></div>');
+			row.append(note);
+		}
+		note.children('span').text(text);
+		note.children('a').text(I18n.defaultValue('config_requires_go', 'Show me')).off('click').on('click', function(e)
+		{
+			e.preventDefault();
+			scrollOptionIntoView(neededId);
+			$('#' + neededId).focus();
+		});
+	}
+
+	function refreshRequirements()
+	{
+		if (!config)
+		{
+			return;
+		}
+		OPTION_REQUIRES.forEach(function(rule)
+		{
+			var target = findOptionByName(rule.option);
+			var needed = findOptionByName(rule.when.name);
+			if (!target || !needed || !target.formId || !needed.formId)
+			{
+				return;
+			}
+			var row = $(document.getElementById(target.formId)).closest('.control-group');
+			if (!row.length)
+			{
+				return;
+			}
+			var value = currentValue(needed).toLowerCase();
+			var met = rule.when.notEmpty ? value.trim() !== '' : rule.when.values.indexOf(value) > -1;
+			// a category with Unpack=yes unpacks its downloads even while Unpack is off
+			if (!met && rule.when.orCategory && anyCategoryValue(rule.when.orCategory, rule.when.values))
+			{
+				met = true;
+			}
+			setLocked(row, !met, met ? '' : requirementText(rule, needed), needed.formId);
+		});
+	}
+
+	function refreshControls()
+	{
+		syncControls();
+		refreshRequirements();
+	}
 
 	// Settings sections in task order, under group labels.
 	var NAV_GROUPS = [
@@ -1971,6 +2809,54 @@ var Config = (new function($)
 			clearTimeout(changeTimer);
 			changeTimer = setTimeout(refreshChangeState, 120);
 		});
+		// number boxes: the stepper buttons, and only digits (a minus where allowed)
+		$ConfigData.on('click', '.config-number .config-step', function()
+		{
+			var wrapper = $(this).closest('.config-number');
+			var input = wrapper.find('input.editnumeric');
+			var value = parseInt(input.val(), 10);
+			setNumber(input, (isNaN(value) ? 0 : value) + parseInt($(this).attr('data-step'), 10), wrapper.data('meta'));
+			syncSlider(wrapper);
+		});
+		$ConfigData.on('input', '.config-number input.editnumeric', function()
+		{
+			// a reference to another option, such as ${Server1.Connections}, is kept as typed
+			if (/^\s*\$/.test(this.value))
+			{
+				return;
+			}
+			var allowMinus = $(this).attr('pattern') === '-?[0-9]*';
+			var clean = this.value.replace(allowMinus ? /(?!^-)[^0-9]/g : /[^0-9]/g, '');
+			if (clean !== this.value)
+			{
+				var pos = Math.max(0, (this.selectionStart || 0) - (this.value.length - clean.length));
+				this.value = clean;
+				try { this.setSelectionRange(pos, pos); } catch (e) { /* not focused */ }
+			}
+			syncSlider($(this).closest('.config-number'));
+		});
+		$ConfigData.on('keydown', '.config-number input.editnumeric', function(e)
+		{
+			if (e.key === 'ArrowUp' || e.key === 'ArrowDown')
+			{
+				e.preventDefault();
+				$(this).closest('.config-number').find('.config-step[data-step="' + (e.key === 'ArrowUp' ? 1 : -1) + '"]').click();
+			}
+		});
+		$ConfigData.on('change', '.config-number input.editnumeric', function()
+		{
+			var meta = $(this).closest('.config-number').data('meta');
+			if (meta && this.value !== '' && !/^\s*\$/.test(this.value))
+			{
+				var n = parseInt(this.value, 10);
+				var clamped = isNaN(n) ? meta.hardMin : clampNumber(n, meta);
+				if (clamped !== n)
+				{
+					this.value = String(clamped);
+					syncSlider($(this).closest('.config-number'));
+				}
+			}
+		});
 		$ConfigData.on('keydown', '.btn-switch.is-toggle', function(e)
 		{
 			if (e.key === ' ' || e.key === 'Enter')
@@ -2018,6 +2904,7 @@ var Config = (new function($)
 				return option.label || option.caption;
 			}).join(', ') + (count > 4 ? ' \u2026' : ''));
 		}
+		refreshControls();
 	}
 	this.refreshChangeState = refreshChangeState;
 
@@ -2428,6 +3315,8 @@ var Config = (new function($)
 		I18n.translatePage(div);
 		div.hide();
 		addButton.parent().before(div);
+		enhanceControls(div);
+		applyMode();
 		if (listSectionPrefix(sectionId))
 		{
 			setListEditor(sectionId, multiid, true);

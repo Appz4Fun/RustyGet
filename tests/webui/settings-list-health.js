@@ -8,6 +8,8 @@ const assert = require('node:assert/strict');
   try {
     for (const width of [1280, 390]) {
       const page = await browser.newPage({viewport:{width,height:844}});
+      // these checks cover every option, which Expert shows
+      await page.addInitScript(() => localStorage.setItem('SettingsMode', 'expert'));
       await page.route(/\/jsonrpc(?:\/|$|\?)/, async route => {
         const req = route.request().method() === 'POST' ? route.request().postDataJSON() : {method:new URL(route.request().url()).pathname.split('/').pop()};
         if (!req || !['config', 'loadconfig', 'systemhealth'].includes(req.method)) return route.continue();

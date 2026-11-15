@@ -1634,15 +1634,26 @@ var Config = (new function($)
 			{
 				return;
 			}
+			// the cards take the place of the section's first row, which may itself move into one
+			var marker = $('<span class="config-layout-marker" hidden></span>');
+			var first = $ConfigData.children('.control-group.' + sectionId).not('.config-static').first();
+			if (first.length)
+			{
+				first.before(marker);
+			}
+			else
+			{
+				$ConfigData.append(marker);
+			}
 			var cards = LAYOUT[sectionId].map(function(card) { return buildCard(sectionId, card); })
 				.filter(function($card) { return $card.find('.control-group').length > 0; });
 			if (cards.length === 0)
 			{
+				marker.remove();
 				return;
 			}
 			// rows nobody listed: an untitled card first, in file order
 			var leftover = $ConfigData.children('.control-group.' + sectionId).not('.config-static');
-			var anchor = $ConfigData.children('.' + sectionId).first();
 			var $cards = $();
 			if (leftover.length)
 			{
@@ -1651,14 +1662,7 @@ var Config = (new function($)
 				$cards = $cards.add(rest);
 			}
 			cards.forEach(function($card) { $cards = $cards.add($card); });
-			if (anchor.length && !anchor.hasClass('config-card'))
-			{
-				anchor.before($cards);
-			}
-			else
-			{
-				$ConfigData.append($cards);
-			}
+			marker.replaceWith($cards);
 			if (sectionId === DUPE_SECTION.id)
 			{
 				var link = $('<a></a>').attr('href', '#' + DUPE_SECTION.id).text(I18n.defaultValue('config_section_dupe_fleets', 'Dupe fleets'));

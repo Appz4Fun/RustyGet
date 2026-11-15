@@ -26,7 +26,15 @@ const DUPE_OPTIONS = ['DupeCheck', 'DupeArticleFallback', 'DupeStreamDecompress'
       const page = await context.newPage();
       const errors = [], writes = [];
       page.on('pageerror', e => errors.push(e.message));
-      await installDetailsFixture(page, base, writes);
+      // an option the layout doesn't list (a newer or customized template) still shows, first in its section
+      await installDetailsFixture(page, base, writes, { patchReply: (method, result) => {
+        if (method === 'configtemplates') {
+          result[0].Template = result[0].Template.replace(/^(#?FlushQueue=.*)$/m, '$1\n\n# Fixture option the layout does not list.\n#\n# Value (yes, no).\nFixtureUnlisted=no');
+        } else if (method === 'config' || method === 'loadconfig') {
+          result.push({ Name: 'FixtureUnlisted', Value: 'yes' });
+        }
+        return result;
+      } });
       // health: an error on a folded dupe option and on a NZB folder option, both stored in Incoming NZBs
       await page.route(/\/jsonrpc(?:\/|$)/, route => {
         const rpc = route.request().method() === 'POST' ? route.request().postDataJSON() : null;
@@ -102,6 +110,15 @@ const DUPE_OPTIONS = ['DupeCheck', 'DupeArticleFallback', 'DupeStreamDecompress'
         assert.equal(await page.locator('.config-card.DUPE_FLEETS[data-card="health"] details.config-card__more').evaluate(d => d.open), true,
           'A fold with a health error opens');
         assert.match(await row('DupeCheckConnections').innerText(), /too many check connections/);
+      });
+
+      await check('an unlisted option lands in an untitled first card', async () => {
+        await page.evaluate(() => Config.showSection('DOWNLOAD_QUEUE', false));
+        const cards = page.locator('#ConfigData .config-card.DOWNLOAD_QUEUE');
+        assert.equal(await cards.first().getAttribute('data-card'), 'other');
+        assert.equal(await cards.first().locator('.config-card__head').count(), 0);
+        assert(await row('FixtureUnlisted').isVisible());
+        assert.deepEqual(await cards.evaluateAll(list => list.map(c => c.getAttribute('data-card'))), ['other', 'queue', 'disk', 'names']);
       });
 
       await check('advanced fold', async () => {

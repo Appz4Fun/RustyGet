@@ -215,6 +215,9 @@ struct RunCounters {
     recovered_holes: i32,
     recovered_failed_size: i64,
     recovered_failed_par_size: i64,
+    // par2 files made whole from duplicates, and their articles
+    recovered_par_articles: i32,
+    recovered_par_files: i32,
     holes_remain: bool,
     donor_dead: BTreeMap<Vec<u8>, bool>,
 }
@@ -1620,6 +1623,12 @@ impl NzbgetRsStreamRepairCtrl {
                     counters.recovered_failed_size,
                     counters.recovered_failed_par_size,
                 );
+            if outcome == 0 && target.is_par_file && new_articles > counters.recovered_articles {
+                counters.recovered_par_articles = counters
+                    .recovered_par_articles
+                    .saturating_add(new_articles - counters.recovered_articles);
+                counters.recovered_par_files = counters.recovered_par_files.saturating_add(1);
+            }
             counters.recovered_articles = new_articles;
             counters.recovered_failed_size = new_failed_size;
             counters.recovered_failed_par_size = new_failed_par_size;
@@ -1897,6 +1906,8 @@ impl NzbgetRsStreamRepairCtrl {
                     counters.recovered_holes,
                     par_flags,
                     new_par_status,
+                    counters.recovered_par_articles,
+                    counters.recovered_par_files,
                 ];
                 cb(
                     ctx,

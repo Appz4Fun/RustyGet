@@ -3105,6 +3105,10 @@ impl NzbgetRsQueueCoordinator {
                         crate::dupefallback::CUTOVER_THRESHOLD,
                     );
                 if rec {
+                    if file.par_file {
+                        let first = file.dupe_recovered_articles == 0;
+                        add_dupe_par_counts(host, nzb.ptr, 1, i32::from(first));
+                    }
                     file.dupe_recovered_articles = next_file_rec;
                     nzb.dupe_recovered_articles = next_nzb_rec;
                     host.file_set_int(
@@ -5816,8 +5820,49 @@ fn save_partial_state_host(host: &crate::queuesubsys_host::QueueSubsysHost, file
     }
 }
 
+/// NZB parameters counting par2 data borrowed from duplicates: `DupeParArticles`
+/// articles, across `DupeParFiles` par2 files. Parameters are saved with the
+/// item and stay with it in history.
+pub(crate) const PAR_ARTICLES_PARAM: &[u8] = b"DupeParArticles";
+pub(crate) const PAR_FILES_PARAM: &[u8] = b"DupeParFiles";
+
+pub(crate) fn add_dupe_par_counts(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    nzb_ptr: usize,
+    articles: i32,
+    files: i32,
+) {
+    for (name, add) in [(PAR_ARTICLES_PARAM, articles), (PAR_FILES_PARAM, files)] {
+        if add <= 0 {
+            continue;
+        }
+        let next = bumped_count(host.nzb_get_param(nzb_ptr, name).as_deref(), add);
+        host.nzb_set_param(nzb_ptr, name, Some(next.to_string().as_bytes()));
+    }
+}
+
+/// A count parameter's value after adding `add`; a missing or unreadable value counts as 0.
+fn bumped_count(cur: Option<&[u8]>, add: i32) -> i64 {
+    cur.and_then(|v| std::str::from_utf8(v).ok())
+        .and_then(|t| t.trim().parse::<i64>().ok())
+        .unwrap_or(0)
+        .max(0)
+        .saturating_add(i64::from(add.max(0)))
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn bumped_count_starts_from_zero_and_adds() {
+        assert_eq!(bumped_count(None, 1), 1);
+        assert_eq!(bumped_count(Some(b"41"), 1), 42);
+        assert_eq!(bumped_count(Some(b" 7 "), 3), 10);
+        assert_eq!(bumped_count(Some(b"junk"), 2), 2);
+        assert_eq!(bumped_count(Some(b"-5"), 1), 1);
+        assert_eq!(bumped_count(Some(b"9"), -4), 9);
+    }
+
     #[test]
     fn dupe_mass_failure_thresholds() {
         assert!(!dupe_mass_failure(1000, 3));

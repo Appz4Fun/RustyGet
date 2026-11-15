@@ -247,6 +247,81 @@ var DetailsPanel = (new function($)
 		return cut >= 16 ? cut : 0;
 	}
 
+	function countParam(item, name)
+	{
+		var n = parseInt(param(item, name), 10);
+		return isNaN(n) || n < 0 ? 0 : n;
+	}
+
+	function stat(cls, label, value, sub)
+	{
+		return '<div class="fleet-stat ' + cls + '"><span class="fleet-stat-label">' + Util.textToHtml(label) + '</span>' +
+			'<span class="fleet-stat-value">' + Util.textToHtml(value) + '</span>' +
+			'<span class="fleet-stat-sub">' + Util.textToHtml(sub) + '</span></div>';
+	}
+
+	// the other copies this one can borrow from: twins (the same post, swapped
+	// article by article) and borrowable alts. A twin is the same post, so it holds
+	// the same video; an alt counts as verified once the fleet intake found the
+	// fleet's video in it (DupeVideo=same, set by rust/src/dupesearch_coord.rs).
+	this.donors = function(item, members, source)
+	{
+		var selfRole = this.role(item);
+		var out = { twins: 0, alts: 0, unverified: 0 };
+		for (var i = 0; i < members.length; i++)
+		{
+			var m = members[i];
+			if ((m.item.NZBID === item.NZBID && m.source === source) || healthPermille(m.item) <= 0)
+			{
+				continue;
+			}
+			var kind = m.role ? m.role.kind : '';
+			// the primary is a twin's own post
+			var twin = kind === 'twin' || (kind === 'primary' && selfRole && selfRole.kind === 'twin');
+			if (twin)
+			{
+				out.twins++;
+			}
+			else if (param(m.item, 'DupeCopyKind') === 'borrowable')
+			{
+				if (param(m.item, 'DupeVideo') === 'same')
+				{
+					out.alts++;
+				}
+				else
+				{
+					out.unverified++;
+				}
+			}
+		}
+		return out;
+	}
+
+	// what this copy borrowed from the others, and what it still can
+	function borrowStats(item, selfRole, members, source)
+	{
+		var articles = item.DupeRecoveredArticles || 0;
+		var parArticles = countParam(item, 'DupeParArticles');
+		var parFiles = countParam(item, 'DupeParFiles');
+		var hi = item.DupeRecoveredBytesHi || 0, lo = item.DupeRecoveredBytesLo || 0;
+		var holes = item.DupeRecoveredHoles || 0;
+		var donors = DetailsPanel.donors(item, members, source);
+		var verified = donors.twins + donors.alts;
+		var split = I18n.translate('fleet_donor_split', String(donors.twins), String(donors.alts));
+		if (donors.unverified > 0)
+		{
+			split += ' · ' + I18n.translate('fleet_donor_unverified', String(donors.unverified));
+		}
+		return '<div class="fleet-stats">' +
+			stat('fleet-stat-articles', I18n.translate('fleet_stat_articles'), String(articles), I18n.translate('fleet_stat_articles_sub')) +
+			stat('fleet-stat-par', I18n.translate('fleet_stat_par'), String(parArticles),
+				I18n.translate(parFiles === 1 ? 'fleet_stat_par_file' : 'fleet_stat_par_files', String(parFiles))) +
+			stat('fleet-stat-bytes', I18n.translate('fleet_stat_bytes'), Util.formatSizeMB(hi * 4096 + lo / 1024.0 / 1024.0, lo),
+				I18n.translate('fleet_holes', String(holes))) +
+			stat('fleet-stat-donors', I18n.translate('fleet_stat_donors'), I18n.translate('fleet_donor_verified', String(verified)), split) +
+			'</div>';
+	}
+
 	// the fleet card; empty when the item has no other copy and nothing was
 	// recovered from duplicates
 	this.fleet = function(item, source)
@@ -259,14 +334,8 @@ var DetailsPanel = (new function($)
 		}
 
 		var facts = [];
-		facts.push('<span class="fleet-fact">' + roleTag(this.role(item), true) + '</span>');
-		if (recovered || Util.showDupeRecovered(item))
-		{
-			var holes = item.DupeRecoveredHoles || 0;
-			facts.push('<span class="fleet-fact"><span class="fleet-fact-label">' + Util.textToHtml(I18n.translate('fleet_recovered')) +
-				'</span> ' + Util.textToHtml(Util.formatDupeRecovered(item)) +
-				(holes > 0 ? ' · ' + Util.textToHtml(I18n.translate('fleet_holes', String(holes))) : '') + '</span>');
-		}
+		var selfRole = this.role(item);
+		facts.push('<span class="fleet-fact">' + roleTag(selfRole, true) + '</span>');
 		if (item.LiveRepairing)
 		{
 			facts.push('<span class="fleet-fact fleet-live" title="' + Util.textToAttr(I18n.translate('label_live_repair_hint')) + '">' +
@@ -301,11 +370,14 @@ var DetailsPanel = (new function($)
 				'<li><a href="#" class="fleet-member" data-fleet-source="' + m.source + '" data-fleet-id="' + m.item.NZBID + '">' + cells + '</a></li>';
 		}
 
+		var stats = members.length > 1 || recovered || Util.showDupeRecovered(item) ? borrowStats(item, selfRole, members, source) : '';
+
 		return '<div class="fleet-head"><span class="fleet-title">' + Util.textToHtml(I18n.translate('fleet_title')) + '</span>' +
 			(item.DupeKey ? '<code class="fleet-key" title="' + Util.textToAttr(I18n.translate('edit_dupe_key')) + '">' + Util.textToHtml(item.DupeKey) + '</code>' : '') +
+			'<span class="fleet-facts">' + facts.join('') + '</span>' +
 			(members.length > 1 ? '<span class="fleet-count">' + Util.textToHtml(I18n.translate('fleet_copies', String(members.length))) + '</span>' : '') +
 			'</div>' +
-			'<div class="fleet-facts">' + facts.join('') + '</div>' +
+			stats +
 			(members.length > 1 ? '<ul class="fleet-members">' + rows + '</ul>' : '');
 	}
 

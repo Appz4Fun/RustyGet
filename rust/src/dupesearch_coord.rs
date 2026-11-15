@@ -53,6 +53,34 @@ pub const ALIVE_PARAM: &[u8] = b"DupeAlive";
 const ALIVE_PARAM_STR: &str = "DupeAlive";
 pub const OWNED_KEY_PARAM: &[u8] = b"DupeSearchOwnedKey";
 pub const FLEET_PARAM: &[u8] = b"DupeFleet";
+/// Fleet intake verdict on a copy's video: `same` when its sampled payload
+/// matches the fleet's, `unverified` when it could not be read or compared.
+/// A copy carrying another video is dropped, so it never gets one.
+pub const VIDEO_PARAM: &[u8] = b"DupeVideo";
+
+fn video_param_value(same: bool) -> &'static [u8] {
+    if same { b"same" } else { b"unverified" }
+}
+
+/// Records the intake verdict on a copy already in the queue or history.
+fn fleet_mark_video(host_ctx: *mut c_void, host_cb: DupeHostFn, nzb_id: i32, same: bool) {
+    with_guarded_queue(host_ctx, host_cb, |dq_ptr| {
+        let Some(qh) = crate::ffi::queue_host() else {
+            return;
+        };
+        let Some((nzb_ptr, in_history)) = dq_find_nzb(host_ctx, host_cb, dq_ptr, nzb_id) else {
+            return;
+        };
+        qh.nzb_set_param(nzb_ptr, VIDEO_PARAM, Some(video_param_value(same)));
+        qh.nzb_set_int(nzb_ptr, crate::queuesubsys_host::NZB_INT_CHANGED, 1);
+        if in_history {
+            qh.dq_history_changed(dq_ptr);
+            qh.dq_save(dq_ptr);
+        } else {
+            qh.dq_save_changed(dq_ptr);
+        }
+    });
+}
 
 const MK_INFO: c_int = 0;
 const MK_WARNING: c_int = 1;
@@ -1540,7 +1568,10 @@ fn fleet_intake_later(host_ctx: *mut c_void, host_cb: DupeHostFn, job: IntakeLat
         let mut msg = b"Fleet intake later: ".to_vec();
         msg.extend_from_slice(name);
         match verdict {
-            Verdict::Same => msg.extend_from_slice(b" carries the fleet's video"),
+            Verdict::Same => {
+                fleet_mark_video(host_ctx, host_cb, *id, true);
+                msg.extend_from_slice(b" carries the fleet's video")
+            }
             Verdict::Different if *id == primary_id => msg.extend_from_slice(
                 b" carries another video; it is the copy being downloaded, left as is",
             ),
@@ -5485,6 +5516,8 @@ pub unsafe fn fleet_append(
         existing_id: i32,
         error: Vec<u8>,
         kind: crate::donorkind::DonorKind,
+        // intake verdict: Some(true) same video, Some(false) unverified
+        video: Option<bool>,
     }
 
     let mut candidates: Vec<FleetCandidate> = Vec::with_capacity(members.len());
@@ -5500,6 +5533,7 @@ pub unsafe fn fleet_append(
             existing_id: 0,
             error: Vec::new(),
             kind: crate::donorkind::DonorKind::Unknown,
+            video: None,
         };
         if !members[i].url.is_empty() {
             let (ok, status, body) = slot.into_inner().unwrap_or_else(|e| e.into_inner());
@@ -5756,6 +5790,7 @@ pub unsafe fn fleet_append(
                 msg.extend_from_slice(name);
                 match verdict {
                     crate::dupeintake::Verdict::Same => {
+                        candidates[i].video = Some(true);
                         msg.extend_from_slice(b" carries the fleet's video")
                     }
                     crate::dupeintake::Verdict::Different => {
@@ -5763,6 +5798,7 @@ pub unsafe fn fleet_append(
                         candidates[i].error = b"not the same video".to_vec();
                     }
                     crate::dupeintake::Verdict::Unverified => {
+                        candidates[i].video = Some(false);
                         msg.extend_from_slice(b" unverified: ");
                         msg.extend_from_slice(why.as_bytes());
                     }
@@ -5982,6 +6018,10 @@ pub unsafe fn fleet_append(
             entry.reason = cand.error.clone();
         } else if cand.same_as >= 0 || cand.existing_id != 0 {
             entry.status = b"SAME_POSTING".to_vec();
+            // the copy already queued is the one the intake read
+            if let (true, Some(same)) = (cand.existing_id != 0, cand.video) {
+                fleet_mark_video(host_ctx, host_cb, cand.existing_id, same);
+            }
             entry.same_as = if cand.existing_id != 0 {
                 cand.existing_id
             } else {
@@ -6016,6 +6056,9 @@ pub unsafe fn fleet_append(
             ];
             if let Some(av) = alive_str.as_deref() {
                 params.push((ALIVE_PARAM, av));
+            }
+            if let Some(same) = cand.video {
+                params.push((VIDEO_PARAM, video_param_value(same)));
             }
             let add_name = fleet_ensure_nzb_ext(&member.name);
             let member_score = fleet_calc_member_add_score(running_id, lowest, top, rank);

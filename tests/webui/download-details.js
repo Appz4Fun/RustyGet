@@ -66,7 +66,12 @@ const { installDetailsFixture } = require('./details-fixture');
         const roles = await page.locator('#DownloadsEdit_Fleet .fleet-member .fleet-role').allInnerTexts();
         assert.deepEqual(roles.map(r => r.toLowerCase()), ['primary', 'twin', 'alt', 'primary'], 'Copies in donor priority, history last');
         assert.match(await page.locator('#DownloadsEdit_Fleet .fleet-members').innerText(), /borrowable/i);
-        assert.match(await page.locator('#DownloadsEdit_Fleet .fleet-facts').innerText(), /41 \(29\.4 MB\)[\s\S]*3 holes/);
+        const stats = await page.locator('#DownloadsEdit_Fleet .fleet-stat').allInnerTexts();
+        assert.equal(stats.length, 4, 'Four borrow stats');
+        assert.match(stats[0], /Articles borrowed\s+41\b/i);
+        assert.match(stats[1], /Par2 borrowed\s+6\s+articles in 2 par2 files/i);
+        assert.match(stats[2], /Bytes patched\s+29\.4 MB\s+3 holes/i);
+        assert.match(stats[3], /Can borrow from\s+2 verified\s+twins 1 · alts 1/i, 'The twin and the checked borrowable alt; not the history copy');
         assert.equal(await page.locator('#DownloadsEdit_Fleet .fleet-member.is-current').count(), 1);
         const health = await page.locator('#DownloadsEdit_Fleet .fleet-member-health').allInnerTexts();
         assert.deepEqual(health, ['97.0%', '99.4%', '88.1%', '97.0%'], 'Sampled DupeHealth/DupeAlive percentages render as percentages');
@@ -79,6 +84,29 @@ const { installDetailsFixture } = require('./details-fixture');
       if (capture && [1440, 390].includes(width)) {
         await page.screenshot({ path: path.join(capture, `details-download-${theme}-${width}.jpg`), type: 'jpeg', quality: 90 });
       }
+
+      await check('donor counting rules', async () => {
+        const r = await page.evaluate(() => {
+          const g = id => Downloads.groups.find(x => x.NZBID === id);
+          const withParam = (item, name, value) => Object.assign({}, item, { Parameters: item.Parameters.map(p => p.Name === name ? { Name: name, Value: value } : p) });
+          const run = (self, groups) => {
+            const keep = Downloads.groups;
+            Downloads.groups = groups;
+            try { return DetailsPanel.donors(self, DetailsPanel.members(self), 'queue'); } finally { Downloads.groups = keep; }
+          };
+          const all = Downloads.groups.slice();
+          const unchecked = all.map(x => x.NZBID === 43 ? withParam(x, 'DupeVideo', 'unverified') : x);
+          const dead = all.map(x => x.NZBID === 42 ? Object.assign({}, x, { SuccessArticles: 0, FailedArticles: 10, Health: 0 }) : x);
+          return {
+            fromTwin: run(g(42), all),
+            unchecked: run(g(41), unchecked),
+            dead: run(g(41), dead)
+          };
+        });
+        assert.deepEqual(r.fromTwin, { twins: 2, alts: 1, unverified: 0 }, 'A twin borrows from its primary post, the history copy of that post, and the checked alt');
+        assert.deepEqual(r.unchecked, { twins: 1, alts: 0, unverified: 1 }, 'An alt the intake could not check is unverified');
+        assert.deepEqual(r.dead, { twins: 0, alts: 1, unverified: 0 }, 'A dead copy is no donor');
+      });
 
       await check('critical health wins over the fixed threshold', async () => {
         const cls = await page.evaluate(() => {

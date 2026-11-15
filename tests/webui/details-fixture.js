@@ -51,7 +51,8 @@ function fleetGroups() {
       RemainingFileCount: 11, SuccessArticles: 1544, FailedArticles: 49, Health: 970, DownloadTimeSec: 211,
       DupeRecoveredArticles: 41, ...sizes('DupeRecoveredBytes', 29.4), DupeRecoveredHoles: 3,
       ServerStats: [{ ServerID: 1, SuccessArticles: 1290, FailedArticles: 31 }, { ServerID: 2, SuccessArticles: 254, FailedArticles: 18 }],
-      Parameters: params({ '*Unpack:': 'yes', DupeFiles: PRINT, DupeCopyKind: 'twin', DupeHealth: '97', DupeFleet: '1' })
+      Parameters: params({ '*Unpack:': 'yes', DupeFiles: PRINT, DupeCopyKind: 'twin', DupeHealth: '97', DupeFleet: '1',
+        DupeVideo: 'same', DupeParArticles: '6', DupeParFiles: '2' })
     }),
     group(42, '02', {
       Status: 'PAUSED', ...sizes('PausedSize', 1730), Health: 994, MessageCount: 0, // nothing logged yet
@@ -61,7 +62,7 @@ function fleetGroups() {
       NZBName: `${RELEASE.replace('WEBRip', 'WEB-DL')} [NZBDAV copy 03]`, NZBNicename: `${RELEASE.replace('WEBRip', 'WEB-DL')} [NZBDAV copy 03]`,
       Status: 'PAUSED', ...sizes('FileSize', 1702), ...sizes('RemainingSize', 1702), ...sizes('PausedSize', 1702), FileCount: 36,
       RemainingFileCount: 36, TotalArticles: 2431, Health: 881,
-      Parameters: params({ '*Unpack:': 'yes', DupeFiles: 'c07be15a99d2f310-36', DupeKind: 'alt', DupeCopyKind: 'borrowable', DupeAlive: '88.1', DupeFleet: '3' })
+      Parameters: params({ '*Unpack:': 'yes', DupeFiles: 'c07be15a99d2f310-36', DupeKind: 'alt', DupeCopyKind: 'borrowable', DupeAlive: '88.1', DupeFleet: '3', DupeVideo: 'same' })
     }),
     group(44, '', {
       NZBName: 'Example.Documentary.2160p', NZBNicename: 'Example.Documentary.2160p', Category: 'Movies',

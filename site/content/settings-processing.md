@@ -12,7 +12,19 @@ Keep `CrcCheck` enabled for article checksum validation. Choose a `ParCheck` mod
 
 `HealthCheck` determines how the daemon handles a download that cannot complete from its current articles. The `dupe` mode can fail over to another copy; see [Duplicate fleets](duplicate-fleets.md) before enabling it.
 
-Review `ParBuffer` and `ParThreads` against available memory and CPU capacity. `ParPauseQueue` and `ParTimeLimit` control how repair work interacts with downloads. A successful check or repair appears in the download's History details.
+Review `ParBuffer` and `ParThreads` against available memory and CPU capacity.
+
+`ParBuffer` also decides which releases can be repaired during the download (live repair). A release needs about 16 × its par2 block size + 47 MB; the poster picks the block size, so it doesn't follow the release size. A release that doesn't fit is repaired after the download, as before. Shares below come from 400 random NZBs of a real library (2026-11-15):
+
+| ParBuffer | Largest par2 block repaired live | Share of NZBs |
+| --- | --- | --- |
+| 128 MB | 5 MB | 60% |
+| 256 MB | 13 MB | 89% |
+| 320 MB | 17 MB | 93% |
+| 500 MB (default) | 28 MB | 96% |
+| 1024 MB | 61 MB | 100% |
+
+A 100 GB release posted with 3,000 to 5,000 par2 blocks (20 to 33 MB each) needs about 370 to 580 MB; with 2,000 blocks (50 MB each), about 850 MB. The memory is only taken while a damaged release is being repaired. When a release doesn't fit, its log says how much it needs: "par2 blocks need N MB of ParBuffer". `ParPauseQueue` and `ParTimeLimit` control how repair work interacts with downloads. A successful check or repair appears in the download's History details.
 
 Key options: [`CrcCheck`](options.md#crccheck), [`ParCheck`](options.md#parcheck), [`ParRepair`](options.md#parrepair), [`ParQuick`](options.md#parquick), [`HealthCheck`](options.md#healthcheck), [`ParBuffer`](options.md#parbuffer), [`ParThreads`](options.md#parthreads).
 

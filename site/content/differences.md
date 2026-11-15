@@ -81,7 +81,7 @@ The template differs from NZBGet's in these values:
 | `LockFile`, `LogFile` | `nzbget.lock`, `nzbget.log` | `rustyget.lock`, `rustyget.log` |
 | `Server1.Active`, `Server1.Connections` | `yes`, `8` | `no`, `20` |
 
-The built-in values changed too, for an option that the file leaves out: `ArticleCache=500`, `ParBuffer=250`, `WriteBuffer=1024`, `ContinuePartial=yes`, `DirectRename=yes`, `ReorderFiles=yes`, `Unpack=yes`, `DirectUnpack=yes`, `UnpackCleanupDisk=yes`, `NzbCleanupDisk=yes`, `ExtCleanupDisk=.par2, .sfv, _brokenlog.txt`, `InterDir=${MainDir}/inter`, and `ControlUsername=rustyget`. The built-in duplicate-fleet settings stay off, so a configuration file carried over from NZBGet doesn't turn them on.
+The built-in values changed too, for an option that the file leaves out: `ArticleCache=500`, `ParBuffer=500`, `WriteBuffer=1024`, `ContinuePartial=yes`, `DirectRename=yes`, `ReorderFiles=yes`, `Unpack=yes`, `DirectUnpack=yes`, `UnpackCleanupDisk=yes`, `NzbCleanupDisk=yes`, `ExtCleanupDisk=.par2, .sfv, _brokenlog.txt`, `InterDir=${MainDir}/inter`, and `ControlUsername=rustyget`. The built-in duplicate-fleet settings stay off, so a configuration file carried over from NZBGet doesn't turn them on.
 
 `UnrarCmd` and `SevenZipCmd` left the template because unpacking is built in. The extension options, `ScriptDir`, `Extensions`, `ScriptOrder`, `ScriptPauseQueue`, `ShellOverride`, `EventInterval`, and `CategoryN.Extensions`, left too: RustyGet builds in what NZBGet needed extensions for, such as nested unpacking, permission fixes, and donor search. See [Built in instead of extensions](post-processing.md#built-in-instead-of-extensions).
 

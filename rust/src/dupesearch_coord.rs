@@ -4333,6 +4333,36 @@ impl NzbgetRsDupeSearch {
                 .filter(|&(id, _, _)| eligible(dq_ptr, id))
                 .collect()
         });
+        // With DupeBorrowFirst and live article fallback, a backup the pick
+        // can borrow from (a TWIN, a borrowable ALT, or one whose packing is
+        // not known yet) fills the pick's holes while it downloads: the pick
+        // keeps its downloaded data and its extraction, which a swap throws
+        // away (the backup would start again from its first byte). The bar
+        // is SWAP_BACKUP_ALIVE even where a swap would need the par2 bar:
+        // a donor only fills holes, it need not be whole on its own.
+        let live_fallback = crate::options::active_options().is_some_and(|o| {
+            o.scalars().dupe_article_fallback == crate::queuesubsys_host::DAF_LIVE
+        });
+        if crate::options::dupe_borrow_first() && live_fallback {
+            if let Some(&(donor_id, donor_alive, _)) = usable
+                .iter()
+                .filter(|&&(_, a, k)| {
+                    a >= crate::dupewatch::SWAP_BACKUP_ALIVE
+                        && k <= crate::donorkind::DonorKind::Unknown as u8
+                })
+                .max_by(|a, b| a.2.cmp(&b.2).reverse().then(a.1.total_cmp(&b.1)))
+            {
+                msg.extend_from_slice(
+                    format!(
+                        ": it borrows from backup {donor_id} ({}% alive) instead of swapping, keeping its download and extraction",
+                        pct(donor_alive)
+                    )
+                    .as_bytes(),
+                );
+                self.note(host_ctx, host_cb, job.nzb_id, MK_INFO, &msg);
+                return;
+            }
+        }
         let Some((backup_id, backup_alive)) = crate::dupewatch::swap_backup(&usable, need) else {
             msg.extend_from_slice(
                 b" and will likely fail, but no backup is whole enough to swap in",

@@ -553,31 +553,6 @@ impl NzbgetRsStreamRepairCtrl {
             });
         }
 
-        if mark_live_attempted {
-            for target in &mut targets {
-                for (j_idx, &jf_id) in job_file_ids.iter().enumerate() {
-                    if jf_id == target.file_id {
-                        let was_attempted = unsafe {
-                            cb(
-                                ctx,
-                                9,
-                                j_idx as c_int,
-                                1,
-                                nzb_ptr,
-                                0,
-                                ptr::null(),
-                                ptr::null_mut(),
-                                ptr::null_mut(),
-                                ptr::null_mut(),
-                            ) != 0
-                        };
-                        target.patch_eligible = !was_attempted;
-                        break;
-                    }
-                }
-            }
-        }
-
         struct CandRow {
             dupe_score: i32,
             id: i32,
@@ -649,6 +624,34 @@ impl NzbgetRsStreamRepairCtrl {
                 info_name: row.info_name,
                 password: row.password,
             });
+        }
+
+        // A live pass with no duplicate to borrow from leaves its files
+        // unattempted, so a backup added later (a fleet member, DupeWatch)
+        // still gets them; only a pass that could borrow marks them.
+        if mark_live_attempted && !donors.is_empty() {
+            for target in &mut targets {
+                for (j_idx, &jf_id) in job_file_ids.iter().enumerate() {
+                    if jf_id == target.file_id {
+                        let was_attempted = unsafe {
+                            cb(
+                                ctx,
+                                9,
+                                j_idx as c_int,
+                                1,
+                                nzb_ptr,
+                                0,
+                                ptr::null(),
+                                ptr::null_mut(),
+                                ptr::null_mut(),
+                                ptr::null_mut(),
+                            ) != 0
+                        };
+                        target.patch_eligible = !was_attempted;
+                        break;
+                    }
+                }
+            }
         }
 
         Some((nzb_name, dest_dir, targets, donors, member_names))

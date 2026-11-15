@@ -5995,7 +5995,9 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                     start = disk_msgs.len() as i32 - a4.min(disk_msgs.len() as i32);
                 }
                 if a3 > 0 {
-                    start = (a3 - disk_msgs[0].0).max(0);
+                    // ids skip a gap where the cached messages begin, so find the first
+                    // message at or after the asked id instead of using it as an offset
+                    start = disk_msgs.iter().position(|m| m.0 >= a3).unwrap_or(disk_msgs.len()) as i32;
                 }
                 let mut entries = Vec::new();
                 if start >= 0 && (start as usize) < disk_msgs.len() {

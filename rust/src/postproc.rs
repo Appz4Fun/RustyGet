@@ -4132,6 +4132,9 @@ impl NzbgetRsDirectUnpack {
             crate::unpack::RarFeed {
                 feed: Some(feed),
                 failure: Some(&mut failure),
+                // A parked session counts as waiting, as the volume handshake did, so reloads
+                // are not deferred behind it.
+                on_wait: Some(&|waiting| self.waiting_volume.store(waiting, Ordering::Release)),
             },
         );
         if let Some(f) = &failure {

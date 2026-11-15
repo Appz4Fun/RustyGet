@@ -255,7 +255,9 @@ pub struct Request<'a> {
     pub dest: &'a Path,
     pub password: &'a str,
     /// What to do with a file that is already in `dest`.
-    pub overwrite: Overwrite,
+    pub overwrite: Overwrite,    /// Told `true` while extraction waits for a volume (to download or be repaired) and
+    /// `false` when it continues.
+    pub on_wait: Option<&'a dyn Fn(bool)>,
 }
 
 /// Extracts the RAR set starting at `req.first_volume` into `req.dest`.
@@ -268,6 +270,23 @@ pub fn extract<F>(
     feed: Box<dyn VolumeFeed>,
     log_cb: &mut F,
     is_cancelled: &mut dyn FnMut() -> bool,
+) -> Result<zipfast::extract::Summary, Error>
+where
+    F: FnMut(i32, &str),
+{
+    extract_recording(req, feed, log_cb, is_cancelled, None)
+}
+
+/// Where each member was written: (name, occurrence of that name, path). Only outputs copied
+/// into place are recorded.
+type Outputs = Vec<(Vec<u8>, u32, PathBuf)>;
+
+fn extract_recording<F>(
+    req: &Request<'_>,
+    feed: Box<dyn VolumeFeed>,
+    log_cb: &mut F,
+    is_cancelled: &mut dyn FnMut() -> bool,
+    mut outputs: Option<&mut Outputs>,
 ) -> Result<zipfast::extract::Summary, Error>
 where
     F: FnMut(i32, &str),
@@ -335,7 +354,7 @@ where
             Error::Failed(Failure::from_progressive(&e))
         }
     })?;
-    let mut drive = Driver::new(&mut session, feed.clone(), pending);
+    let mut drive = Driver::new(&mut session, feed.clone(), pending, req.on_wait);
     let mut summary = zipfast::extract::Summary::default();
     let mut names: std::collections::HashMap<zipfast::progressive::MemberId, Member> =
         Default::default();
@@ -345,7 +364,7 @@ where
     let mut meta_cache = MetaCache::default();
     // Outputs this call copied into place, removed again if the fallback decoder has to redo
     // the set in rename mode (it would otherwise add renamed second copies).
-    let mut published: Vec<PathBuf> = Vec::new();
+    let mut published: Outputs = Vec::new();
     let mut next_ordinal = 0u64;
     let mut occurrences: std::collections::HashMap<Vec<u8>, u32> = Default::default();
     // Highest member ordinal already in place per name: a member repaired later must not
@@ -563,10 +582,12 @@ where
                 damaged.join(", ")
             ),
         );
+        drive.set_waiting(true);
         patch = feed
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .wait_repaired(is_cancelled);
+        drive.set_waiting(false);
         if !patch {
             first_failure = Some(if is_cancelled() {
                 Failure::Canceled
@@ -610,6 +631,9 @@ where
         }
     }
 
+    if let Some(out) = outputs.as_deref_mut() {
+        out.extend(published);
+    }
     match first_failure {
         None => {
             log_cb(4, "Unrar: All OK");
@@ -842,31 +866,21 @@ fn patch_by_reextracting(
             first_volume: req.first_volume,
             dest: &scratch,
             password: req.password,
-            // Every occurrence of a name gets its own file (<stem>_<n> in archive order), so
-            // the copy of exactly this member can be picked.
+            // Every occurrence of a name gets its own file; where each went is recorded.
             overwrite: Overwrite::Rename,
+            on_wait: None,
         };
-        match extract(&sub, Box::new(CompleteSet), &mut |_, _| {}, is_cancelled) {
+        let mut outputs: Outputs = Vec::new();
+        match extract_recording(&sub, Box::new(CompleteSet), &mut |_, _| {}, is_cancelled, Some(&mut outputs)) {
             Ok(_) => {}
             Err(Error::Failed(f)) => return Err(f),
             Err(Error::Unsupported(u)) => return Err(Failure::Other(u.0)),
         }
-        let rel = zipfast::path::sanitize(&String::from_utf8_lossy(name), false)
-            .map_err(|e| Failure::UnsafePath(format!(" {e}")))?;
-        let mut path = scratch.join(rel);
-        if member.occurrence > 0 {
-            let stem = path
-                .file_stem()
-                .map(|s| s.to_os_string())
-                .unwrap_or_else(|| "file".into());
-            let mut file = stem;
-            file.push(format!("_{}", member.occurrence));
-            if let Some(e) = path.extension().map(|e| e.to_os_string()) {
-                file.push(".");
-                file.push(e);
-            }
-            path.set_file_name(file);
-        }
+        let path = outputs
+            .iter()
+            .find(|(n, occ, _)| n == name && *occ == member.occurrence)
+            .map(|(_, _, p)| p.clone())
+            .ok_or_else(|| Failure::Damaged("the repaired set did not yield this member".into()))?;
         let copy = std::fs::File::open(&path)
             .map_err(|e| Failure::Damaged(format!("repaired copy missing: {e}")))?;
         let mut buf = vec![0u8; PATCH_CHUNK as usize];
@@ -951,9 +965,9 @@ fn path_bytes(p: &Path) -> Vec<u8> {
 /// back unpublished and are copied to their final name here.
 /// Before the fallback decoder extracts the whole set again: in rename mode it would add a
 /// renamed second copy of every output already in place, so those are removed first.
-fn undo_for_fallback(req: &Request<'_>, published: &[PathBuf]) {
+fn undo_for_fallback(req: &Request<'_>, published: &Outputs) {
     if req.overwrite == Overwrite::Rename {
-        for p in published {
+        for (_, _, p) in published {
             let _ = std::fs::remove_file(p);
         }
     }
@@ -986,7 +1000,7 @@ fn publish_copy(
     member: &Member,
     repaired: bool,
     is_cancelled: &mut dyn FnMut() -> bool,
-    published: &mut Vec<PathBuf>,
+    published: &mut Outputs,
 ) -> Result<(), Failure> {
     let name = member.name.as_slice();
     if artifact.publication() != ArtifactPublication::Unpublished {
@@ -1031,7 +1045,11 @@ fn publish_copy(
     let rel = zipfast::path::sanitize(&String::from_utf8_lossy(name), false)
         .map_err(|e| Failure::UnsafePath(format!(" {}: {e}", String::from_utf8_lossy(name))))?;
     let result = copy_artifact(artifact, req.dest, &rel, req.overwrite, member.meta, is_cancelled)
-        .map(|written| published.extend(written));
+        .map(|written| {
+            if let Some(path) = written {
+                published.push((member.name.clone(), member.occurrence, path));
+            }
+        });
     let _ = artifact.discard();
     result
 }
@@ -1146,6 +1164,8 @@ struct Driver<'s> {
     parker: Arc<Parker>,
     feed: Arc<Mutex<Box<dyn VolumeFeed>>>,
     pending: PendingWait,
+    on_wait: Option<&'s dyn Fn(bool)>,
+    waiting: bool,
 }
 
 struct Parker {
@@ -1168,6 +1188,7 @@ impl<'s> Driver<'s> {
         session: &'s mut ProgressiveSession,
         feed: Arc<Mutex<Box<dyn VolumeFeed>>>,
         pending: PendingWait,
+        on_wait: Option<&'s dyn Fn(bool)>,
     ) -> Self {
         Self {
             session,
@@ -1177,6 +1198,17 @@ impl<'s> Driver<'s> {
             }),
             feed,
             pending,
+            on_wait,
+            waiting: false,
+        }
+    }
+
+    fn set_waiting(&mut self, waiting: bool) {
+        if self.waiting != waiting {
+            self.waiting = waiting;
+            if let Some(cb) = self.on_wait {
+                cb(waiting);
+            }
         }
     }
 
@@ -1218,8 +1250,17 @@ impl<'s> Driver<'s> {
             }
             self.parker.woken.store(false, Ordering::Release);
             match self.session.poll_event(&mut cx) {
-                Poll::Ready(r) => return r,
+                Poll::Ready(r) => {
+                    self.set_waiting(false);
+                    return r;
+                }
                 Poll::Pending => {
+                    let on_volume = self
+                        .pending
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .is_some();
+                    self.set_waiting(on_volume);
                     if !self.parker.woken.load(Ordering::Acquire) {
                         std::thread::park_timeout(PARK_SLICE);
                     }

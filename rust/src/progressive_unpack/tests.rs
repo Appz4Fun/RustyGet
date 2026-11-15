@@ -172,6 +172,7 @@ fn run(
         dest: out,
         password: "",
         overwrite: Overwrite::Always,
+        on_wait: None,
     };
     let r = extract(&req, feed, &mut |_, m: &str| log.push(m.to_string()), &mut || false);
     (r, log)
@@ -562,6 +563,7 @@ fn run_pw(
         dest: out,
         password,
         overwrite: Overwrite::Always,
+        on_wait: None,
     };
     let r = extract(&req, feed, &mut |_, m: &str| log.push(m.to_string()), &mut || false);
     (r, log)
@@ -955,6 +957,7 @@ fn rar4_stored_then_compressed_reports_unsupported_for_the_fallback() {
         dest: &out2,
         password: "",
         overwrite: Overwrite::Rename,
+        on_wait: None,
     };
     let r = extract(&req, Box::new(CompleteSet), &mut |_, _| {}, &mut || false);
     assert!(matches!(r, Err(Error::Unsupported(_))));
@@ -1005,6 +1008,7 @@ fn rename_mode_keeps_duplicate_members_and_existing_files() {
         dest: &t.out(),
         password: "",
         overwrite: Overwrite::Rename,
+        on_wait: None,
     };
     let r = extract(&req, Box::new(CompleteSet), &mut |_, m: &str| log.push(m.to_string()), &mut || false);
     expect_ok(r, &log);
@@ -1120,6 +1124,7 @@ fn duplicate_names_keep_their_own_metadata() {
         dest: &t.out(),
         password: "",
         overwrite: Overwrite::Rename,
+        on_wait: None,
     };
     let r = extract(&req, Box::new(Growing), &mut |_, _| {}, &mut || false);
     expect_ok(r, &[]);
@@ -1147,6 +1152,7 @@ fn skip_mode_keeps_the_first_of_duplicate_names() {
         dest: &t.out(),
         password: "",
         overwrite: Overwrite::Skip,
+        on_wait: None,
     };
     let r = extract(&req, Box::new(Growing), &mut |_, _| {}, &mut || false);
     expect_ok(r, &[]);
@@ -1183,6 +1189,7 @@ fn repairing_a_duplicate_name_uses_its_own_bytes() {
         dest: &t.out(),
         password: "",
         overwrite: Overwrite::Rename,
+        on_wait: None,
     };
     let mut log = Vec::new();
     let r = extract(&req, Box::new(feed), &mut |_, m: &str| log.push(m.to_string()), &mut || false);
@@ -1195,4 +1202,88 @@ fn repairing_a_duplicate_name_uses_its_own_bytes() {
     let mut want = vec![one, two];
     want.sort();
     assert_eq!(got, want);
+}
+
+#[test]
+fn repair_reads_the_right_copy_when_a_member_is_named_like_a_renamed_one() {
+    // doc.bin, doc_1.bin, then a damaged second doc.bin (re-extraction names it doc_2.bin).
+    let t = TestDir::new("renamedlike");
+    let main = pattern(400_000);
+    let a: Vec<u8> = pattern(60_000).iter().map(|b| b ^ 0x01).collect();
+    let b: Vec<u8> = pattern(60_000).iter().map(|b| b ^ 0x02).collect();
+    let c: Vec<u8> = pattern(90_000).iter().map(|b| b ^ 0x03).collect();
+    let mut v = SIG.to_vec();
+    v.extend(main_block(false, None));
+    v.extend(file_block("main.mkv", main.len() as u64, &main, crc32fast::hash(&main), false, false));
+    v.extend(file_block("doc.bin", a.len() as u64, &a, crc32fast::hash(&a), false, false));
+    v.extend(file_block("doc_1.bin", b.len() as u64, &b, crc32fast::hash(&b), false, false));
+    let at = v.len() + file_block("doc.bin", c.len() as u64, &[], 0, false, false).len();
+    v.extend(file_block("doc.bin", c.len() as u64, &c, crc32fast::hash(&c), false, false));
+    v.extend(end_block(false));
+    let first = t.dl().join("rl.rar");
+    let hole = (at as u64 + 30_000, 2_000u64);
+    let mut dmg = v.clone();
+    dmg[hole.0 as usize..(hole.0 + hole.1) as usize].fill(0);
+    std::fs::write(&first, &dmg).unwrap();
+    let feed = Damaged {
+        holes: vec![(first.clone(), vec![hole])],
+        repair: vec![(first.clone(), v.clone())],
+        handed: false,
+    };
+    let req = Request {
+        first_volume: &first,
+        dest: &t.out(),
+        password: "",
+        overwrite: Overwrite::Rename,
+        on_wait: None,
+    };
+    let mut log = Vec::new();
+    let r = extract(&req, Box::new(feed), &mut |_, m: &str| log.push(m.to_string()), &mut || false);
+    expect_ok(r, &log);
+    let mut got: Vec<Vec<u8>> = ["doc.bin", "doc_1.bin", "doc_2.bin"]
+        .iter()
+        .map(|n| std::fs::read(t.out().join(n)).unwrap())
+        .collect();
+    got.sort();
+    let mut want = vec![a, b, c];
+    want.sort();
+    assert_eq!(got, want);
+}
+
+#[test]
+fn waiting_for_a_volume_is_reported() {
+    let t = TestDir::new("onwait");
+    let data = pattern(300_000);
+    let vols = rar5_volumes("movie.mkv", &data, 100_000);
+    let first = write_set(&t.dl(), &vols);
+    let names: Vec<PathBuf> = (0..vols.len()).map(|i| t.dl().join(volume_name(i, vols.len()))).collect();
+    let released = Arc::new(AtomicUsize::new(1));
+    let feed = Trickle {
+        released: released.clone(),
+        names,
+        asked: Arc::new(AtomicUsize::new(0)),
+    };
+    let rel = released.clone();
+    let n = vols.len();
+    let releaser = std::thread::spawn(move || {
+        for k in 2..=n {
+            std::thread::sleep(Duration::from_millis(120));
+            rel.store(k, Ordering::Release);
+        }
+    });
+    let seen = Mutex::new(Vec::new());
+    let on_wait = |w: bool| seen.lock().unwrap().push(w);
+    let req = Request {
+        first_volume: &first,
+        dest: &t.out(),
+        password: "",
+        overwrite: Overwrite::Always,
+        on_wait: Some(&on_wait),
+    };
+    let r = extract(&req, Box::new(feed), &mut |_, _| {}, &mut || false);
+    releaser.join().unwrap();
+    expect_ok(r, &[]);
+    let seen = seen.into_inner().unwrap();
+    assert!(seen.contains(&true), "{seen:?}");
+    assert_eq!(seen.last(), Some(&false), "{seen:?}");
 }

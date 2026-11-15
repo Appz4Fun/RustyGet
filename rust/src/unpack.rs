@@ -978,7 +978,11 @@ where
     F: FnMut(i32, &str),
 {
     use crate::progressive_unpack as pu;
-    let RarFeed { feed, failure } = rar;
+    let RarFeed {
+        feed,
+        failure,
+        on_wait,
+    } = rar;
     let feed = feed.unwrap_or_else(|| Box::new(pu::CompleteSet));
     let mut volumes = 0u64;
     let mut cb = |kind: i32, msg: &str| {
@@ -996,6 +1000,7 @@ where
             2 => pu::Overwrite::Rename,
             _ => pu::Overwrite::Always,
         },
+        on_wait,
     };
     let result = pu::extract(&req, feed, &mut cb, is_cancelled);
     match result {
@@ -1456,6 +1461,8 @@ pub struct RarFeed<'a> {
     pub feed: Option<Box<dyn crate::progressive_unpack::VolumeFeed>>,
     /// Receives the typed reason when the RAR extraction fails.
     pub failure: Option<&'a mut Option<crate::progressive_unpack::Failure>>,
+    /// Told `true` while the RAR extraction waits for a volume and `false` when it continues.
+    pub on_wait: Option<&'a dyn Fn(bool)>,
 }
 
 /// [`extract_archive_with_zipfast_cancellable`] with a volume feed for the top-level RAR set.

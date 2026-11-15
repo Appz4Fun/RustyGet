@@ -4683,7 +4683,7 @@ var Config = (new function($)
 		input.on('input.lookup change.lookup', function(e)
 		{
 			scheduleHostLookup(box, e.type === 'change' ? 0 : 700, e.type === 'change');
-			scheduleBackboneSuggestion(this, e.type === 'change' ? 0 : 700);
+			scheduleBackboneSuggestion(this, e.type === 'change' ? 0 : 700, true);
 		});
 	}
 
@@ -4750,11 +4750,12 @@ var Config = (new function($)
 		{
 			if (this.value === BACKBONE_CUSTOM)
 			{
-				input.prop('hidden', false).val('').trigger('focus');
+				// keep the current name to edit; the menu stays on Other while typing
+				input.data('customMode', true).prop('hidden', false).trigger('focus');
 			}
 			else
 			{
-				input.val(this.value).prop('hidden', true);
+				input.removeData('customMode').val(this.value).prop('hidden', true);
 			}
 			input.removeData('autoValue').trigger('input').trigger('change');
 			refreshChangeState();
@@ -4766,13 +4767,21 @@ var Config = (new function($)
 				input.removeData('autoValue');
 			}
 		});
+		input.on('blur.backbone', function()
+		{
+			if (input.data('customMode'))
+			{
+				input.removeData('customMode');
+				syncBackbone(input);
+			}
+		});
 		withBackboneList(function()
 		{
 			syncBackbone(input);
 			var host = findOptionByName('Server' + option.multiid + '.Host');
 			if (host)
 			{
-				scheduleBackboneSuggestion(document.getElementById(host.formId), 0);
+				scheduleBackboneSuggestion(document.getElementById(host.formId), 0, false);
 			}
 		});
 	}
@@ -4795,6 +4804,12 @@ var Config = (new function($)
 			select.append($('<option class="config-backbone__own"></option>').attr('value', value).text(value));
 		}
 		select.append($('<option></option>').attr('value', BACKBONE_CUSTOM).text(backboneText('custom', 'Other (type a name)…')));
+		if (input.data('customMode'))
+		{
+			select.val(BACKBONE_CUSTOM);
+			input.prop('hidden', false);
+			return;
+		}
 		var match = list.filter(function(name) { return sameBackbone(name, value); })[0];
 		select.val(match || value);
 		if (!input.is(':focus'))
@@ -4814,7 +4829,9 @@ var Config = (new function($)
 		refreshChangeState();
 	}
 
-	function scheduleBackboneSuggestion(hostControl, delay)
+	// `edited`: the host was just typed, so a confirmed backbone may be filled in. When the
+	// page opens it is only offered: an empty Backbone may be a deliberate Independent.
+	function scheduleBackboneSuggestion(hostControl, delay, edited)
 	{
 		var option = hostControl && findOptionById(hostControl.id);
 		if (!option)
@@ -4823,10 +4840,10 @@ var Config = (new function($)
 		}
 		var $host = $(hostControl);
 		clearTimeout($host.data('backboneTimer'));
-		$host.data('backboneTimer', setTimeout(function() { suggestBackbone(option.multiid); }, delay));
+		$host.data('backboneTimer', setTimeout(function() { suggestBackbone(option.multiid, edited); }, delay));
 	}
 
-	function suggestBackbone(multiid)
+	function suggestBackbone(multiid, edited)
 	{
 		var hostOption = findOptionByName('Server' + multiid + '.Host');
 		var backboneOption = findOptionByName('Server' + multiid + '.Backbone');
@@ -4850,14 +4867,14 @@ var Config = (new function($)
 			{
 				return;
 			}
-			renderBackboneSuggestion(input, hint, host, result || {});
+			renderBackboneSuggestion(input, hint, host, result || {}, edited);
 		}, function()
 		{
 			hint.empty().prop('hidden', true);
 		});
 	}
 
-	function renderBackboneSuggestion(input, hint, host, result)
+	function renderBackboneSuggestion(input, hint, host, result, edited)
 	{
 		var current = $.trim(input.val() || '');
 		var matches = result.Matches || [];
@@ -4870,11 +4887,17 @@ var Config = (new function($)
 		if (result.Match === 'confirmed' && matches.length)
 		{
 			var auto = input.data('autoValue');
-			if (!current || (auto !== undefined && sameBackbone(current, auto)))
+			if (edited && (!current || (auto !== undefined && sameBackbone(current, auto))))
 			{
 				setBackbone(input, matches[0], true);
 				note('ok', host + ' ' + backboneText('reads_from', 'reads from') + ' ' + matches[0] + '. ' +
 					backboneText('filled', 'Filled in for you.'));
+			}
+			else if (!current)
+			{
+				note('suggest', host + ' ' + backboneText('reads_from', 'reads from') + ' ' + matches[0] + '. ' +
+					backboneText('confirm', 'Use it?'));
+				addBackboneButtons(input, hint, matches);
 			}
 			else if (!sameBackbone(current, matches[0]))
 			{

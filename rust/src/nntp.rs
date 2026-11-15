@@ -892,15 +892,10 @@ pub fn server_pool_can_advance_level(
     !(norm_level == level && active && !(optional && blocked))
 }
 
-/// Returns whether a candidate server matches `wantServer` (or its group).
-pub fn server_pool_match_want_server(
-    has_want: bool,
-    cand_id: i32,
-    want_id: i32,
-    want_group: i32,
-    cand_group: i32,
-) -> bool {
-    !has_want || cand_id == want_id || (want_group > 0 && want_group == cand_group)
+/// Returns whether a candidate server matches `wantServer`. Only that server: another
+/// server on its backbone is another provider, with its own account and retention.
+pub fn server_pool_match_want_server(has_want: bool, cand_id: i32, want_id: i32) -> bool {
+    !has_want || cand_id == want_id
 }
 
 /// An article a server answered `430 no such article` for. The other servers on
@@ -1200,8 +1195,9 @@ pub struct ServerPoolConnView {
 /// availability/want/active/blocked check (recording their indices in `out_unblock_server_indices`),
 /// filtering against `ignore_servers` (ids) and backbones in `missing`, and selecting a candidate or advancing to the next level if all active servers
 /// on the current level are optional and blocked. Without a wanted server, a level whose every
-/// active server is ruled out for this article is passed over, so an article never waits on a
-/// level it can't use.
+/// active server is on a backbone that answered 430 for this article is passed over, so an
+/// article never waits on a level it can't use. Servers in `ignore_servers` (failed, or waiting
+/// out a temporary error) never cause a level skip: the downloader decides when to move on.
 #[allow(clippy::too_many_arguments)]
 pub fn server_pool_select_connection(
     start_level: i32,
@@ -1234,7 +1230,9 @@ pub fn server_pool_select_connection(
         if level >= 0
             && (level as usize) < levels.len()
             && want_server.is_none()
-            && level_ruled_out(servers, level, &ruled_out)
+            && level_ruled_out(servers, level, &|srv: &ServerPoolServerView| {
+                backbone_missing(missing, srv.group, srv.retention)
+            })
         {
             level += 1;
             continue;
@@ -1256,12 +1254,11 @@ pub fn server_pool_select_connection(
                 continue;
             }
             let srv = &servers[conn.server_index];
-            let (has_want, want_id, want_group) = match want_server {
-                Some((id, group)) => (true, id, group),
-                None => (false, 0, 0),
+            let (has_want, want_id) = match want_server {
+                Some((id, _)) => (true, id),
+                None => (false, 0),
             };
-            let match_want =
-                server_pool_match_want_server(has_want, srv.id, want_id, want_group, srv.group);
+            let match_want = server_pool_match_want_server(has_want, srv.id, want_id);
             let is_blocked = !conn.connected && server_blocked[conn.server_index];
             if !conn.in_use
                 && srv.active
@@ -1698,6 +1695,38 @@ mod backbone_tests {
         pool.add_server(1, true, 0, false, 7, 1);
         pool.init_connections();
         assert!(pool.get_connection_missing(0, Some(1), &[], &miss, 1000).is_some());
+    }
+
+    #[test]
+    fn an_ignored_server_never_moves_the_article_to_the_fill_level() {
+        // server 1 (priority 1) is waiting out a 481/502; server 2 is a priority-2 fill
+        // server: the article waits for server 1 instead of going to the fill server
+        let mut pool = ServerPoolModel::new();
+        pool.add_server(1, true, 0, false, 0, 1);
+        pool.add_server(2, true, 1, false, 0, 1);
+        pool.init_connections();
+        assert!(pool.get_connection_missing(0, None, &[1], &[], 1000).is_none());
+        // the same with both on one backbone and no 430
+        let mut pool = ServerPoolModel::new();
+        pool.add_server(1, true, 0, false, 7, 1);
+        pool.add_server(2, true, 1, false, 7, 1);
+        pool.init_connections();
+        assert!(pool.get_connection_missing(0, None, &[1], &[], 1000).is_none());
+    }
+
+    #[test]
+    fn a_wanted_server_is_only_that_server() {
+        // servers 1 and 2 share backbone 7 at one priority: a retry wanting server 1
+        // never lands on server 2 (another provider, another account)
+        let mut pool = ServerPoolModel::new();
+        pool.add_server(1, true, 0, false, 7, 1);
+        pool.add_server(2, true, 0, false, 7, 1);
+        pool.init_connections();
+        for _ in 0..2 {
+            if let Some(con) = pool.get_connection_missing(0, Some(1), &[], &[], 1000) {
+                assert_eq!(pool.connections[con].server_id, 1);
+            }
+        }
     }
 }
 

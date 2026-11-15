@@ -24,6 +24,19 @@ const { installDetailsFixture } = require('./details-fixture');
       await installDetailsFixture(page, base, writes, fixture);
       await page.goto(base.href);
       await page.locator('#DownloadsTable tbody tr').first().waitFor();
+      // late-reply checks wait until the page has run a held reply's callback
+      await page.evaluate(() => {
+        window.__rpcHandled = [];
+        const call = RPC.call;
+        RPC.call = function(method, params, done, ...rest) {
+          if (typeof done !== 'function') return call.call(this, method, params, done, ...rest);
+          return call.call(this, method, params, function(result) {
+            try { return done(result); } finally {
+              window.__rpcHandled.push(method + ':' + (method === 'listfiles' ? params[2] : params && params[0]));
+            }
+          }, ...rest);
+        };
+      });
       const check = async (label, action) => {
         try { await action(); } catch (error) { failures.push(`${theme}/${width}/${label}: ${error.message}`); }
       };
@@ -164,8 +177,7 @@ const { installDetailsFixture } = require('./details-fixture');
 
       await check('late log reply for a copy the panel left is dropped', async () => {
         let release;
-        const delivered = page.waitForResponse(r => /\/jsonrpc\/loadlog\?=41&/.test(r.url()));
-        delivered.catch(() => {}); // awaited below; a check that fails earlier must not crash the run
+        await page.evaluate(() => { window.__rpcHandled = []; });
         const asked = new Promise(resolve => {
           fixture.holdLoadlog = () => { resolve(); return new Promise(r => { release = r; }); };
         });
@@ -186,8 +198,7 @@ const { installDetailsFixture } = require('./details-fixture');
           if (release) release();
         }
         // the held copy 01 reply must have reached the page before copy 02 is checked
-        await delivered;
-        await page.evaluate(() => new Promise(r => setTimeout(r, 0)));
+        await page.waitForFunction(k => window.__rpcHandled.includes(k), 'loadlog:41');
         assert.doesNotMatch(await page.locator('#DownloadsEdit_LogTable').innerText(), /copy 01/, "Copy 01's late log stays out of copy 02");
         assert(await page.locator('#DownloadsEdit_LogEmpty').isVisible());
         assert.equal(await page.locator('#DownloadsEditDialog .loading-block:visible').count(), 0, 'No stuck spinner');
@@ -197,8 +208,7 @@ const { installDetailsFixture } = require('./details-fixture');
 
       await check('late files reply for a copy the panel left is dropped', async () => {
         let release;
-        const delivered = page.waitForResponse(r => /\/jsonrpc\/listfiles\?=0&=0&=41$/.test(r.url()));
-        delivered.catch(() => {}); // awaited below; a check that fails earlier must not crash the run
+        await page.evaluate(() => { window.__rpcHandled = []; });
         const asked = new Promise(resolve => {
           fixture.holdListfiles = () => { resolve(); return new Promise(r => { release = r; }); };
         });
@@ -217,8 +227,7 @@ const { installDetailsFixture } = require('./details-fixture');
           if (release) release();
         }
         // the held copy 01 reply must have reached the page before copy 02 is checked
-        await delivered;
-        await page.evaluate(() => new Promise(r => setTimeout(r, 0)));
+        await page.waitForFunction(k => window.__rpcHandled.includes(k), 'listfiles:41');
         await page.locator('#DownloadsEdit_File').click();
         await page.waitForFunction(() => /copy02\.7z\.001/.test(document.getElementById('DownloadsEdit_FileTable').textContent));
         assert.doesNotMatch(await page.locator('#DownloadsEdit_FileTable').innerText(), /copy01/, "Copy 01's late files stay out of copy 02");

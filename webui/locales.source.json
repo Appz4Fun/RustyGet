@@ -5718,5 +5718,12 @@
   "config_cert_paste_ca": {
     "message": "Paste…",
     "description": "Settings: HTTPS certificate tools button"
+  },
+  "config_server_cipher_busy": {
+    "message": "Saved. Waiting for another cipher test to finish before putting it to use…",
+    "description": "Server editor status while another browser's cipher test runs"
+  },
+  "config_server_cipher_busy_gave_up": {
+    "message": "Saved, but another cipher test is still running, so RustyGet was not reloaded. Save again once it finishes."
   }
 }

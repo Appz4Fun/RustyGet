@@ -490,11 +490,24 @@ where
     if succeeded {
         return -1;
     }
-    let mut best: Option<(usize, (i32, i32, i32))> = None;
+    let mut best: Option<(usize, (i32, i32, i32, i32))> = None;
     for (idx, h) in history.iter().enumerate() {
-        // TWINs first, then borrowable, unknown and unborrowable ALTs; each by
-        // its measured health and then its score
-        let rank = (-h.donor_kind, h.alive_permille.max(-1), h.dupe_score);
+        // healthy copies first, then weak, then unmeasured ones (as the fleet
+        // ranks them); within each TWINs, then borrowable, unknown and
+        // unborrowable ALTs, then by measured health and score
+        let health_tier = if h.alive_permille < 0 {
+            0
+        } else if h.alive_permille < crate::dupesearch_nzb::FLEET_HEALTHY_ALIVE * 10 {
+            1
+        } else {
+            2
+        };
+        let rank = (
+            health_tier,
+            -h.donor_kind,
+            h.alive_permille.max(-1),
+            h.dupe_score,
+        );
         if h.kind == HISTORY_KIND_NZB
             && h.same_name_or_key != 0
             && (h.delete_status == DELETE_STATUS_DUPE || h.delete_status == DELETE_STATUS_COPY)
@@ -1993,7 +2006,7 @@ mod tests {
 
     #[test]
     fn rescue_orders_twins_then_borrowable_alts() {
-        let mut twin = rescue_candidate(DUPE_MODE_SCORE, DELETE_STATUS_DUPE, 999_010, 700);
+        let mut twin = rescue_candidate(DUPE_MODE_SCORE, DELETE_STATUS_DUPE, 999_010, 900);
         twin.donor_kind = crate::donorkind::DonorKind::Twin as i32;
         let mut borrowable = rescue_candidate(DUPE_MODE_SCORE, DELETE_STATUS_DUPE, 999_090, 990);
         borrowable.donor_kind = crate::donorkind::DonorKind::Borrowable as i32;
@@ -2003,6 +2016,18 @@ mod tests {
         let history = [unborrowable, borrowable, twin];
         assert_eq!(select_rescue_backup(&history, &queue, |_| true), 2);
         assert_eq!(select_rescue_backup(&history[..2], &queue, |_| true), 1);
+    }
+
+    #[test]
+    fn rescue_takes_a_healthy_copy_before_a_weak_cheaper_kind() {
+        // as the fleet ranks them: a 13%-alive copy of unknown packaging never
+        // goes ahead of a 100%-alive unborrowable one
+        let mut weak = rescue_candidate(DUPE_MODE_SCORE, DELETE_STATUS_DUPE, 999_090, 130);
+        weak.donor_kind = crate::donorkind::DonorKind::Unknown as i32;
+        let mut healthy = rescue_candidate(DUPE_MODE_SCORE, DELETE_STATUS_DUPE, 999_010, 1000);
+        healthy.donor_kind = crate::donorkind::DonorKind::Unborrowable as i32;
+        let queue = [rescue_self()];
+        assert_eq!(select_rescue_backup(&[weak, healthy], &queue, |_| true), 1);
     }
 
     #[test]

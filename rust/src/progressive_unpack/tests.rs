@@ -1038,3 +1038,57 @@ fn holes_in_a_secondary_member_are_patched_by_re_extracting() {
         .collect();
     assert!(leftovers.is_empty(), "{leftovers:?}");
 }
+
+fn file_block_no_crc(name: &str, data: &[u8]) -> Vec<u8> {
+    let mut fields = Vec::new();
+    vint(0x2, &mut fields); // mtime only, no CRC
+    vint(data.len() as u64, &mut fields);
+    vint(0o644, &mut fields);
+    fields.extend_from_slice(&1_700_000_000u32.to_le_bytes());
+    vint(0, &mut fields);
+    vint(1, &mut fields);
+    vint(name.len() as u64, &mut fields);
+    fields.extend_from_slice(name.as_bytes());
+    block(2, 0, &fields, data, true)
+}
+
+#[test]
+fn intact_member_without_checksum_is_extracted_while_downloading() {
+    let t = TestDir::new("nocrc");
+    let data = pattern(40_000);
+    let mut v = SIG.to_vec();
+    v.extend(main_block(false, None));
+    v.extend(file_block_no_crc("plain.bin", &data));
+    v.extend(end_block(false));
+    let first = t.dl().join("nocrc.rar");
+    std::fs::write(&first, &v).unwrap();
+    let (r, log) = run(&first, &t.out(), Box::new(Growing));
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("plain.bin")).unwrap(), data);
+}
+
+#[test]
+fn a_repaired_member_does_not_replace_a_later_member_with_the_same_name() {
+    let t = TestDir::new("lastwins");
+    let first_copy = pattern(200_000);
+    let second_copy: Vec<u8> = pattern(50_000).iter().map(|b| b ^ 0x33).collect();
+    let mut v = SIG.to_vec();
+    v.extend(main_block(false, None));
+    let at = v.len() + file_block("a.bin", first_copy.len() as u64, &[], 0, false, false).len();
+    v.extend(file_block("a.bin", first_copy.len() as u64, &first_copy, crc32fast::hash(&first_copy), false, false));
+    v.extend(file_block("a.bin", second_copy.len() as u64, &second_copy, crc32fast::hash(&second_copy), false, false));
+    v.extend(end_block(false));
+    let first = t.dl().join("dups.rar");
+    let hole = (at as u64 + 100_000, 3_000u64);
+    let mut dmg = v.clone();
+    dmg[hole.0 as usize..(hole.0 + hole.1) as usize].fill(0);
+    std::fs::write(&first, &dmg).unwrap();
+    let feed = Damaged {
+        holes: vec![(first.clone(), vec![hole])],
+        repair: vec![(first.clone(), v.clone())],
+        handed: false,
+    };
+    let (r, log) = run(&first, &t.out(), Box::new(feed));
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("a.bin")).unwrap(), second_copy);
+}

@@ -338,6 +338,10 @@ where
     // Outputs this call copied into place, removed again if the fallback decoder has to redo
     // the set in rename mode (it would otherwise add renamed second copies).
     let mut published: Vec<PathBuf> = Vec::new();
+    let mut next_ordinal = 0u64;
+    // Highest member ordinal already in place per name: a member repaired later must not
+    // replace the output of a later member with the same name.
+    let mut placed: std::collections::HashMap<Vec<u8>, u64> = Default::default();
     let mut first_failure: Option<Failure> = None;
 
     loop {
@@ -371,11 +375,13 @@ where
                 } else {
                     meta_cache.lookup(&current_volume, req.password, &name)
                 };
+                next_ordinal += 1;
                 names.insert(
                     member,
                     Member {
                         name: name.to_vec(),
                         meta,
+                        ordinal: next_ordinal,
                     },
                 );
             }
@@ -388,6 +394,7 @@ where
                 match outcome {
                     MemberOutcome::Verified(_) | MemberOutcome::RecoveredInner(_) => {
                         summary.files += 1;
+                        note_placed(&mut placed, &member);
                     }
                     MemberOutcome::Directory { .. } => summary.dirs += 1,
                     MemberOutcome::Skipped(_) => summary.skipped += 1,
@@ -396,8 +403,11 @@ where
                         // Already verified by the session: move it into place now, so the file
                         // is available while later members extract and its slot is freed.
                         if matches!(a.evidence(), ArtifactEvidence::Verified(_)) {
-                            match publish_copy(drive.session, &mut a, req, &member, is_cancelled, &mut published) {
-                                Ok(()) => summary.files += 1,
+                            match publish_copy(drive.session, &mut a, req, &member, false, is_cancelled, &mut published) {
+                                Ok(()) => {
+                                    summary.files += 1;
+                                    note_placed(&mut placed, &member);
+                                }
                                 Err(f) => {
                                     log_cb(1, &unrar_error_line(&f, &name));
                                     first_failure.get_or_insert(f);
@@ -441,10 +451,13 @@ where
                 // Retained provisional/partial artifacts hit the session's slot limit. Publish
                 // the provisional ones now to free slots; partial ones must wait for repair.
                 for (member, mut a) in provisional.drain(..) {
-                    if let Err(f) = publish_copy(drive.session, &mut a, req, &member, is_cancelled, &mut published) {
+                    if superseded(&placed, &member, req) {
+                        let _ = a.discard();
+                    } else if let Err(f) = publish_copy(drive.session, &mut a, req, &member, false, is_cancelled, &mut published) {
                         first_failure.get_or_insert(f);
                     } else {
                         summary.files += 1;
+                        note_placed(&mut placed, &member);
                     }
                 }
                 if partial.len() >= drive.session_artifact_limit() {
@@ -476,8 +489,15 @@ where
     }
 
     for (member, mut a) in provisional.drain(..) {
-        match publish_copy(drive.session, &mut a, req, &member, is_cancelled, &mut published) {
-            Ok(()) => summary.files += 1,
+        if superseded(&placed, &member, req) {
+            let _ = a.discard();
+            continue;
+        }
+        match publish_copy(drive.session, &mut a, req, &member, false, is_cancelled, &mut published) {
+            Ok(()) => {
+                summary.files += 1;
+                note_placed(&mut placed, &member);
+            }
             Err(f) => {
                 first_failure.get_or_insert(f);
             }
@@ -515,11 +535,17 @@ where
         } else {
             for (member, mut a) in partial.drain(..) {
                 let name = member.name.clone();
+                if superseded(&placed, &member, req) {
+                    // A later member with the same name is already in place and wins.
+                    let _ = a.discard();
+                    continue;
+                }
                 match patch_from_repaired_volumes(drive.session, &mut a, &dir, req, &name, is_cancelled)
-                    .and_then(|()| publish_copy(drive.session, &mut a, req, &member, is_cancelled, &mut published))
+                    .and_then(|()| publish_copy(drive.session, &mut a, req, &member, true, is_cancelled, &mut published))
                 {
                     Ok(()) => {
                         summary.files += 1;
+                        note_placed(&mut placed, &member);
                         log_cb(
                             0,
                             &format!(
@@ -581,6 +607,8 @@ fn volume_path(first: &Path, index: u32) -> PathBuf {
 struct Member {
     name: Vec<u8>,
     meta: MemberMeta,
+    /// Position in the archive; a later member with the same name wins.
+    ordinal: u64,
 }
 
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
@@ -849,11 +877,32 @@ fn undo_for_fallback(req: &Request<'_>, published: &[PathBuf]) {
     }
 }
 
+fn note_placed(placed: &mut std::collections::HashMap<Vec<u8>, u64>, member: &Member) {
+    let e = placed.entry(member.name.clone()).or_insert(0);
+    *e = (*e).max(member.ordinal);
+}
+
+/// True when a later member with the same name is already in place (outside rename mode,
+/// where each member keeps its own name).
+fn superseded(
+    placed: &std::collections::HashMap<Vec<u8>, u64>,
+    member: &Member,
+    req: &Request<'_>,
+) -> bool {
+    req.overwrite != Overwrite::Rename
+        && placed
+            .get(&member.name)
+            .is_some_and(|&ord| ord > member.ordinal)
+}
+
+/// `repaired` outputs (patched after a hole) must verify against an archive checksum; an output
+/// the session decoded whole is accepted without one when the archive stores none, as before.
 fn publish_copy(
     session: &mut ProgressiveSession,
     artifact: &mut Artifact,
     req: &Request<'_>,
     member: &Member,
+    repaired: bool,
     is_cancelled: &mut dyn FnMut() -> bool,
     published: &mut Vec<PathBuf>,
 ) -> Result<(), Failure> {
@@ -863,7 +912,10 @@ fn publish_copy(
     }
     let verified = match artifact.evidence() {
         ArtifactEvidence::Verified(_) => true,
-        ArtifactEvidence::Provisional => false,
+        ArtifactEvidence::Provisional => {
+            // Decoded whole with no checksum stored: complete when its size is the declared one.
+            !repaired && artifact.holes().is_empty() && artifact.size() == Some(artifact.produced_extent())
+        }
     };
     if !verified {
         let waker = Waker::noop();

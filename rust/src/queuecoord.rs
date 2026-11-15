@@ -1161,6 +1161,7 @@ const DUPE_PROBE_MIN_ALIVE_SAMPLES: i32 = 2;
 
 #[cfg(unix)]
 pub struct NzbgetRsQueueCoordinator {
+    callback_metrics: Option<Box<crate::callback_metrics::Histogram>>,
     downloads_limit: std::sync::atomic::AtomicI32,
     server_config_generation: std::sync::atomic::AtomicI32,
     propagation_wait_logged_id: std::sync::atomic::AtomicI32,
@@ -1282,6 +1283,7 @@ fn backup_alive_permille(host: &crate::queuesubsys_host::QueueSubsysHost, nzb_pt
 impl NzbgetRsQueueCoordinator {
     pub fn new() -> Self {
         Self {
+            callback_metrics: crate::callback_metrics::Histogram::configured(),
             downloads_limit: std::sync::atomic::AtomicI32::new(0),
             server_config_generation: std::sync::atomic::AtomicI32::new(0),
             propagation_wait_logged_id: std::sync::atomic::AtomicI32::new(0),
@@ -1369,6 +1371,9 @@ impl NzbgetRsQueueCoordinator {
         crate::dupeprobe::probe_wait_all();
         crate::twin::wait_all();
         host.delete_all_active_downloads();
+        if let Some(metrics) = &self.callback_metrics {
+            metrics.emit_after_join();
+        }
         crate::parchecker::streaming_sessions_forget_all();
         host.coord_dq_final();
         host.log(
@@ -2865,6 +2870,10 @@ impl NzbgetRsQueueCoordinator {
         host: &crate::queuesubsys_host::QueueSubsysHost,
         ad_ptr: usize,
     ) {
+        let _callback_sample = self
+            .callback_metrics
+            .as_ref()
+            .map(|metrics| metrics.sample());
         host.log(crate::queuesubsys_host::MK_DEBUG, b"Article downloaded");
         let ad = host.ad_snap(ad_ptr);
         let file_ptr = ad.file_ptr;

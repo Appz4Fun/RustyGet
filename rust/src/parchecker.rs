@@ -132,11 +132,74 @@ struct DeferredArticle {
     bytes: Option<Vec<u8>>,
 }
 
+// Keep both payload ownership and its reservation through the actual fold.
+struct LiveArticleLease {
+    article: Option<DeferredArticle>,
+    source_slices: u64,
+    entry: Arc<ActiveStreamingSession>,
+}
+
+fn take_live_article(entry: &Arc<ActiveStreamingSession>) -> Option<LiveArticleLease> {
+    let mut queue = entry.articles.lock().unwrap_or_else(|e| e.into_inner());
+    let article = queue.pending.pop_front()?;
+    let size = entry.session.slice_size();
+    let source_slices = if article.bytes.is_some() {
+        (article.offset % size)
+            .saturating_add(article.size)
+            .div_ceil(size)
+    } else {
+        0
+    };
+    // Geometry and serialized consumption bound this by the source slice count.
+    queue.active_upper_bound += source_slices;
+    drop(queue);
+    Some(LiveArticleLease {
+        article: Some(article),
+        source_slices,
+        entry: Arc::clone(entry),
+    })
+}
+
+impl LiveArticleLease {
+    fn fold(&self) -> Result<ArticleOutcome, RepairError> {
+        let article = self.article.as_ref().unwrap();
+        match &article.bytes {
+            Some(data) => self.entry.session.on_article_finished_memory_only(
+                &article.file_id,
+                article.offset,
+                data,
+                article.crc32,
+            ),
+            None => self
+                .entry
+                .session
+                .on_article_failed_permanently(&article.file_id, article.offset, article.size)
+                .map(|(events, unpause)| ArticleOutcome { events, unpause }),
+        }
+    }
+}
+
+impl Drop for LiveArticleLease {
+    fn drop(&mut self) {
+        let article = self.article.take().unwrap();
+        let bytes = article.bytes.as_ref().map_or(0, |data| data.len() as u64);
+        drop(article);
+        let mut queue = self
+            .entry
+            .articles
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        queue.bytes -= bytes;
+        queue.active_upper_bound -= self.source_slices;
+    }
+}
+
 #[derive(Default)]
 struct DeferredArticles {
     pending: VecDeque<DeferredArticle>,
     // Includes the item currently being folded, until its owned bytes drop.
     bytes: u64,
+    active_upper_bound: u64,
 }
 
 static STREAMING_SESSIONS: LazyLock<Mutex<HashMap<i32, Arc<ActiveStreamingSession>>>> =
@@ -462,34 +525,11 @@ fn drain_live_articles_locked(
         let mut count = 0;
         loop {
             ensure_current_generation(nzb_id, entry)?;
-            let Some(article) = entry
-                .articles
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .pending
-                .pop_front()
-            else {
+            let Some(article) = take_live_article(entry) else {
                 return Ok(count);
             };
-            let bytes = article.bytes.as_ref().map_or(0, |data| data.len() as u64);
-            let result = match &article.bytes {
-                Some(data) => entry.session.on_article_finished_memory_only(
-                    &article.file_id,
-                    article.offset,
-                    data,
-                    article.crc32,
-                ),
-                None => entry
-                    .session
-                    .on_article_failed_permanently(&article.file_id, article.offset, article.size)
-                    .map(|(events, unpause)| ArticleOutcome { events, unpause }),
-            };
+            let result = article.fold();
             drop(article);
-            entry
-                .articles
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .bytes -= bytes;
             let outcome = result?;
             ensure_current_generation(nzb_id, entry)?;
             entry.unpause(outcome.unpause.as_ref());
@@ -1321,7 +1361,7 @@ pub(crate) fn streaming_session_verified_target_crc(
     )
 }
 
-/// A bounded count upper bound only: the helper must authenticate queued RAM and
+/// A bounded count upper bound only: the helper must authenticate owned RAM and
 /// validate actual recovery rank before patching. This function performs no GF or I/O.
 pub(crate) fn streaming_session_can_schedule_repair(nzb_id: i32) -> bool {
     let Some(entry) = active_streaming_session(nzb_id) else {
@@ -1335,14 +1375,12 @@ pub(crate) fn streaming_session_can_schedule_repair(nzb_id: i32) -> bool {
         return true;
     }
     let size = entry.session.slice_size();
-    let queued_upper_bound = entry
-        .articles
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
+    let queue = entry.articles.lock().unwrap_or_else(|e| e.into_inner());
+    let queued_upper_bound = queue
         .pending
         .iter()
         .filter(|article| article.bytes.is_some())
-        .fold(0u64, |sum, article| {
+        .fold(queue.active_upper_bound, |sum, article| {
             sum.saturating_add(
                 (article.offset % size)
                     .saturating_add(article.size)

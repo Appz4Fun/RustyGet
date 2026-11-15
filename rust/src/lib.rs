@@ -8,6 +8,8 @@ pub mod articledl;
 pub mod articlefetcher;
 pub mod binrpc;
 pub mod bytes;
+#[cfg(unix)]
+mod callback_metrics;
 pub mod cleanup;
 pub mod cmdline;
 pub mod collection;

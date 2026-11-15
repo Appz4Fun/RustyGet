@@ -1035,3 +1035,108 @@ fn first_recovery_file_stamps_readiness_before_any_repair() {
     streaming_session_forget(id);
     crate::parlive::forget_download_writes(id);
 }
+
+#[test]
+fn live_repair_readiness_includes_the_current_drainers_owned_article() {
+    let fx = Fixture::new();
+    let set = fx.set();
+    let id = -1900150;
+    streaming_session_start_bounded(id, &fx.0.join("testfile.vol00+1.PAR2"), &fx.0, 500 << 20)
+        .unwrap();
+    let files = &set.main.as_ref().unwrap().recoverable_file_ids;
+    let target_id = *files
+        .iter()
+        .max_by_key(|fid| set.file_descs[fid].file_length)
+        .unwrap();
+    let last_id = *files.iter().find(|fid| **fid != target_id).unwrap();
+    let target_desc = &set.file_descs[&target_id];
+    let target = fx.0.join(target_desc.local_name());
+    let original = std::fs::read(&target).unwrap();
+    let ss = set.main.as_ref().unwrap().slice_size;
+    streaming_session_reconcile_file(
+        id,
+        target_id,
+        &target,
+        &[ByteRange::new(
+            ss as i64,
+            (target_desc.file_length - ss) as i64,
+        )],
+    )
+    .unwrap()
+    .unwrap();
+    use std::io::Write;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&target)
+        .unwrap()
+        .write_all(&vec![0; ss as usize])
+        .unwrap();
+    let last = &set.file_descs[&last_id];
+    let bytes = std::fs::read(fx.0.join(last.local_name())).unwrap();
+    streaming_session_defer_article(
+        id,
+        (&last.name, &[]),
+        0,
+        bytes.len() as u64,
+        crc32fast::hash(&bytes),
+        || Some(bytes),
+    )
+    .unwrap()
+    .unwrap();
+    assert!(streaming_session_can_schedule_repair(id));
+    let entry = active_streaming_session(id).unwrap();
+    let operation = entry.operation.lock().unwrap();
+    // Real production dequeue: the frame is still owned and has not been folded.
+    let article = take_live_article(&entry).unwrap();
+    assert!(entry.articles.lock().unwrap().pending.is_empty());
+    assert!(!entry.session.status().early_cutover_possible);
+    assert!(
+        streaming_session_can_schedule_repair(id),
+        "active RAM disappeared between dequeue and IFSC/GF completion"
+    );
+    drop(article);
+    assert!(
+        !streaming_session_can_schedule_repair(id),
+        "discarded RAM still authorized helper scheduling"
+    );
+    let bytes = std::fs::read(fx.0.join(last.local_name())).unwrap();
+    streaming_session_defer_article(
+        id,
+        (&last.name, &[]),
+        0,
+        bytes.len() as u64,
+        crc32fast::hash(&bytes),
+        || Some(bytes),
+    )
+    .unwrap()
+    .unwrap();
+    let article = take_live_article(&entry).unwrap();
+    let outcome = article.fold().unwrap();
+    entry.unpause(outcome.unpause.as_ref());
+    drop(article);
+    drop(operation);
+    assert_eq!(entry.articles.lock().unwrap().bytes, 0);
+    let request = streaming_session_prepare_repair(
+        id,
+        vec![crate::parlive::WriterTarget {
+            file_id: 40,
+            path: target.clone(),
+        }],
+        reserve_control(id, 4096, 500 << 20).unwrap(),
+    )
+    .unwrap();
+    request
+        .acquire()
+        .unwrap()
+        .repair_and_publish(
+            |verified| {
+                assert_eq!(verified, &[40]);
+                1
+            },
+            || (),
+        )
+        .unwrap();
+    assert_eq!(std::fs::read(&target).unwrap(), original);
+    streaming_session_forget(id);
+    crate::parlive::forget_download_writes(id);
+}

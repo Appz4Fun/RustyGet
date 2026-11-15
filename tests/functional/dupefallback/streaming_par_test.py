@@ -13,9 +13,11 @@ from pathlib import Path
 import re
 import shutil
 import stat
+import struct
 import subprocess
 import tempfile
 import time
+import zlib
 
 import generators
 import harness
@@ -51,6 +53,83 @@ def metrics(target):
         return []
     return [json.loads(line.split('Live PAR metrics ', 1)[1])
             for line in log.splitlines() if 'Live PAR metrics {' in line]
+
+
+def callback_report(log, expected_min):
+    """Validate the complete framed, quiescent callback report or fail closed."""
+    def require(condition, message):
+        if not condition:
+            raise ValueError('callback report: ' + message)
+
+    def uint(value, limit=(1 << 64) - 1):
+        require(type(value) is int and 0 <= value <= limit, 'invalid unsigned integer')
+        return value
+
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            require(key not in result, 'duplicate JSON member')
+            result[key] = value
+        return result
+
+    def records(marker):
+        result = []
+        for line in log.splitlines():
+            if marker in line:
+                data = json.loads(line.split(marker, 1)[1], object_pairs_hook=unique_object)
+                require(isinstance(data, dict), 'record is not an object')
+                result.append(data)
+        return result
+
+    summaries = records('ArticleCompleted metrics ')
+    bins = records('ArticleCompleted bin ')
+    require(len(summaries) == 1, 'missing or duplicate summary')
+    summary = summaries[0]
+    require(type(summary.get('version')) is int and summary['version'] == 1, 'version')
+    for key, value in [('boundary', 'queuecoord.article_completed'),
+                       ('scope', 'coordinator_lifetime'),
+                       ('histogram_method', 'loglinear128_ns_v1'),
+                       ('transport', 'log_records_v1')]:
+        require(summary.get(key) == value, key)
+    require(summary.get('valid') is True and summary.get('quiescent') is True,
+            'invalid or nonquiescent report')
+    report_id = uint(summary.get('report_id'))
+    require(report_id > 0, 'report identity')
+    callbacks = uint(summary.get('callbacks'))
+    require(callbacks >= uint(expected_min) and callbacks > 0, 'insufficient callback coverage')
+    rows = uint(summary.get('histogram_rows'), 7424)
+    require(rows > 0 and len(bins) == rows, 'incomplete histogram')
+    checksum = uint(summary.get('histogram_crc32'), (1 << 32) - 1)
+    indexed = {}
+    for row in bins:
+        require(type(row.get('version')) is int and row['version'] == 1, 'bin version')
+        require(uint(row.get('report_id')) == report_id, 'mixed report identity')
+        require(uint(row.get('rows')) == rows, 'mixed row count')
+        index = uint(row.get('index'))
+        require(index < rows and index not in indexed, 'invalid or duplicate row index')
+        lower, upper, count = (uint(row.get(key)) for key in ('lower_ns', 'upper_ns', 'count'))
+        require(lower <= upper and count > 0, 'invalid bin')
+        shift = max(0, lower.bit_length() - 1 - 7)
+        width = 1 << shift
+        require(lower % width == 0 and upper == lower + width - 1, 'bin geometry')
+        indexed[index] = (lower, upper, count)
+    crc = zlib.crc32(struct.pack('<QQQ', report_id, callbacks, rows))
+    total, previous, bounds, histogram = 0, -1, None, []
+    rank = (callbacks * 99 + 99) // 100
+    for index in range(rows):
+        lower, upper, count = indexed[index]
+        require(lower > previous, 'overlapping or unordered bins')
+        previous = upper
+        total += count
+        histogram.append([lower, upper, count])
+        crc = zlib.crc32(struct.pack('<QQQQ', index, lower, upper, count), crc)
+        if total >= rank and bounds is None:
+            bounds = (lower, upper)
+    require(crc == checksum, 'histogram CRC mismatch')
+    require(total == callbacks and bounds is not None, 'inconsistent callback total')
+    reported_bounds = (uint(summary.get('p99_lower_ns')), uint(summary.get('p99_upper_ns')))
+    require(bounds == reported_bounds, 'inconsistent p99 bounds')
+    return dict(summary, histogram=histogram)
 
 
 def wait_until(predicate, description, timeout=30):
@@ -212,6 +291,16 @@ def run_case(binary, par2, case):
             assert len(damaged) == 1, 'disabled repair lost or duplicated the damaged source'
             assert target.read_file(damaged[0]) != golden['rel.part040.rar'], \
                 'disabled repair healed the damaged source'
+        if os.environ.get('RUSTYGET_BENCH_CALLBACK_METRICS') == '1':
+            assert api.shutdown(), 'graceful daemon shutdown was refused'
+            result['graceful_daemon_exit'] = daemon.process.wait(timeout=30)
+            assert result['graceful_daemon_exit'] == 0, result
+            final_log = target.read_file('nzbget.log').decode(errors='replace')
+            expected_min = sum((size + segment - 1) // segment
+                               for _, _, size, segment, _ in members)
+            sample = callback_report(final_log, expected_min)
+            result['callback_metrics'] = sample
+            result['callbacks_expected_min'] = expected_min
         result['passed'] = True
     except Exception as error:
         result['error'] = repr(error)

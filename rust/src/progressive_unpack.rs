@@ -674,6 +674,9 @@ where
     // rechecks every protected volume. Upgrade only for a single remaining output, so only its
     // own publication pays that, and nothing waits behind it.
     if deferred.len() == 1
+        // zipfast names a Windows-made member with Windows path rules (a backslash splits); the copy
+        // path, which placed the rest of the set, does not.
+        && !deferred[0].0.meta.windows_names
         && first_failure.is_none()
         // zipfast publishes by rename only when it may replace; skip mode would need hard
         // links, which some destinations (exFAT, SMB) do not support.
@@ -1544,6 +1547,10 @@ fn upgrade_protection(
     }
     let opened = opened.lock().unwrap_or_else(|e| e.into_inner());
     if opened.is_empty() {
+        return false;
+    }
+    // Check the budgets with the volumes read so far before opening them all again.
+    if 2 * opened.len() as u64 + 8 > handle_limit || !fits_open_file_limit(opened.len()) {
         return false;
     }
     for (path, id) in opened.iter() {

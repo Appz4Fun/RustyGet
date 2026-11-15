@@ -1875,20 +1875,16 @@ fn after_repair_zipfast_moves_the_patched_file_into_place() {
 }
 
 #[test]
-fn a_moved_windows_member_gets_a_normal_mode_at_its_windows_path() {
-    // zipfast stages at 0600 and names Windows-made members with Windows rules ("\" splits).
+fn a_repaired_windows_member_keeps_the_copy_path_name() {
+    // zipfast would name a Windows-made member with Windows rules (a backslash splits) while the copy
+    // path, which placed the rest of the set, keeps the name whole: such sets keep copying.
     RAR5_HOST.with(|h| h.set((0, 0x20)));
     let t = TestDir::new("renamewin");
     let (out, data, log) = repaired_in_place(&t, "dir\\movie.mkv", Overwrite::Always);
     RAR5_HOST.with(|h| h.set((1, 0o644)));
-    let target = out.join("dir").join("movie.mkv");
+    assert!(!moved(&log), "{log:?}");
+    let target = out.join("dir\\movie.mkv");
     assert_eq!(std::fs::read(&target).unwrap(), data);
-    assert!(moved(&log), "{log:?}");
-    #[cfg(unix)]
-    assert_eq!(
-        mode_of(&target),
-        0o666 & !crate::lifecycle::active_umask() & 0o777
-    );
 }
 
 #[test]

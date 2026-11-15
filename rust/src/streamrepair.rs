@@ -98,6 +98,8 @@ pub struct LayerPick {
     pub nested: bool,
     /// Base name and size of every stored, unencrypted file found (when `nested`).
     pub files: Vec<(Vec<u8>, i64)>,
+    /// What `files` already holds, so listing a big container stays linear.
+    seen: std::collections::HashSet<(Vec<u8>, i64)>,
 }
 
 impl LayerPick {
@@ -112,10 +114,7 @@ impl LayerPick {
     }
 
     fn note(&mut self, base_name: &[u8], size: i64) {
-        if self.nested
-            && !base_name.is_empty()
-            && !self.files.iter().any(|f| f.0 == base_name && f.1 == size)
-        {
+        if self.nested && !base_name.is_empty() && self.seen.insert((base_name.to_vec(), size)) {
             self.files.push((base_name.to_vec(), size));
         }
     }
@@ -7289,16 +7288,22 @@ impl ContentMapper {
         // One entry per name: the mapped file itself where it shares its name with files
         // in other folders of the container, otherwise the biggest of that name.
         let mut files: Vec<(Vec<u8>, i64)> = Vec::new();
+        let mut index_of: std::collections::HashMap<Vec<u8>, usize> =
+            std::collections::HashMap::new();
+        let is_primary =
+            |n: &[u8], s: i64| n == primary.inner_name_bytes() && s == primary.inner_size();
         for (name, size) in listing.files {
-            let is_primary =
-                |n: &[u8], s: i64| n == primary.inner_name_bytes() && s == primary.inner_size();
-            match files.iter_mut().find(|f| f.0 == name) {
-                Some(kept) => {
+            match index_of.get(&name) {
+                Some(&at) => {
+                    let kept = &mut files[at];
                     if !is_primary(&kept.0, kept.1) && (is_primary(&name, size) || size > kept.1) {
                         kept.1 = size;
                     }
                 }
-                None => files.push((name, size)),
+                None => {
+                    index_of.insert(name.clone(), files.len());
+                    files.push((name, size));
+                }
             }
         }
         let Some(primary_idx) = files.iter().position(|f| {

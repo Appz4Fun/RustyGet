@@ -815,32 +815,16 @@ mod tests {
             (b"WriteBuffer".as_slice(), b"1024".as_slice())
         );
         assert_eq!(convert_old_option(c"Decode", c"NO").1.as_bytes(), b"yes");
-        for (old, new) in [
-            (c"none", "no"),
-            (c"None", "no"),
-            (c"append", "yes"),
-            (c"reset", "yes"),
-            (c"rotate", "yes"),
-        ] {
+        for (old, new) in [(c"none", "no"), (c"None", "no"), (c"append", "yes"), (c"reset", "yes"), (c"rotate", "yes")] {
             let (o, v) = convert_old_option(c"WriteLog", old);
-            assert_eq!(
-                (o.to_str().unwrap(), v.to_str().unwrap()),
-                ("LogToFile", new)
-            );
+            assert_eq!((o.to_str().unwrap(), v.to_str().unwrap()), ("LogToFile", new));
         }
         // a reference is read as the value it names, not as text
         let vars = |name: &CStr| (name.to_bytes() == b"DebugTarget").then(|| b"none".to_vec());
         let (o, v) = split_and_convert_option_string(c"WriteLog=${DebugTarget}", vars).unwrap();
-        assert_eq!(
-            (o.to_str().unwrap(), v.to_str().unwrap()),
-            ("LogToFile", "no")
-        );
+        assert_eq!((o.to_str().unwrap(), v.to_str().unwrap()), ("LogToFile", "no"));
         let (o, v) = split_and_convert_option_string(c"MainDir=${AppDir}/x", |_| None).unwrap();
-        assert_eq!(
-            (o.to_str().unwrap(), v.to_str().unwrap()),
-            ("MainDir", "${AppDir}/x"),
-            "other options expand later"
-        );
+        assert_eq!((o.to_str().unwrap(), v.to_str().unwrap()), ("MainDir", "${AppDir}/x"), "other options expand later");
         assert_eq!(parse_category_source(Some(c"FeedFile")), 2);
     }
 
@@ -916,24 +900,11 @@ mod tests {
             c"Server1.JoinGroup",
             c"server12.joingroup",
         ] {
-            assert_eq!(
-                validate_option_name(name, &mut no),
-                NameCheck::Removed,
-                "{name:?}"
-            );
+            assert_eq!(validate_option_name(name, &mut no), NameCheck::Removed, "{name:?}");
         }
-        assert_eq!(
-            validate_option_name(c"Server1.Priority", &mut no),
-            NameCheck::Valid
-        );
-        assert_eq!(
-            validate_option_name(c"Server1.Level", &mut no),
-            NameCheck::Valid
-        );
-        assert_eq!(
-            validate_option_name(c"Server.JoinGroup", &mut no),
-            NameCheck::Invalid
-        );
+        assert_eq!(validate_option_name(c"Server1.Priority", &mut no), NameCheck::Valid);
+        assert_eq!(validate_option_name(c"Server1.Level", &mut no), NameCheck::Valid);
+        assert_eq!(validate_option_name(c"Server.JoinGroup", &mut no), NameCheck::Invalid);
     }
 
     #[test]
@@ -2459,11 +2430,7 @@ pub fn init_scalar_options_host<H: OptionsHost>(
     s.debug_target = host.parse_enum_value(c"DebugTarget", &TARGET_NAMES, &TARGET_VALUES);
     s.detail_target = host.parse_enum_value(c"DetailTarget", &TARGET_NAMES, &TARGET_VALUES);
     // a log file is a new file each day, continued in 10MB parts (the old "rotate")
-    s.write_log = if host.parse_bool_value(c"LogToFile") {
-        3
-    } else {
-        0
-    };
+    s.write_log = if host.parse_bool_value(c"LogToFile") { 3 } else { 0 };
 
     s
 }
@@ -2754,9 +2721,7 @@ pub fn init_servers_host<H: OptionsHost>(
         )));
         // Priority (1 is used first, up to 5) replaced Level (0 first); an old Level still counts
         let npriority = host.get_option(&cstring(options_format_indexed_opt_name(
-            b"Server",
-            n,
-            b"Priority",
+            b"Server", n, b"Priority",
         )));
         let ngroup = host.get_option(&cstring(options_format_indexed_opt_name(
             b"Server", n, b"Group",
@@ -3645,9 +3610,8 @@ impl<'a> RustOptions<'a> {
     }
 
     pub fn set_option_string(&mut self, option: &CStr) -> bool {
-        let converted = split_and_convert_option_string(option, |var_name| {
-            self.get_option(var_name).map(|c| c.into_bytes())
-        });
+        let converted =
+            split_and_convert_option_string(option, |var_name| self.get_option(var_name).map(|c| c.into_bytes()));
         let Some((optname, optvalue)) = converted else {
             let msg = format_bytes_msg(&[b"Invalid option \"", option.to_bytes(), b"\""]);
             self.config_error(&msg);
@@ -4246,9 +4210,8 @@ impl NzbgetRsOptions {
     }
 
     fn set_option_string(&mut self, option: &CStr) -> bool {
-        let converted = split_and_convert_option_string(option, |var_name| {
-            self.get_option(var_name).map(|c| c.into_bytes())
-        });
+        let converted =
+            split_and_convert_option_string(option, |var_name| self.get_option(var_name).map(|c| c.into_bytes()));
         let Some((optname, optvalue)) = converted else {
             let msg = format_bytes_msg(&[b"Invalid option \"", option.to_bytes(), b"\""]);
             self.config_error(&msg);

@@ -247,9 +247,7 @@ impl Service {
         if let Some(id) = only {
             snapshot.servers.retain(|server| server.id == id);
             if snapshot.servers.is_empty() {
-                return Err(Error(
-                    "that server is not saved as an encrypted news server",
-                ));
+                return Err(Error("that server is not saved as an encrypted news server"));
             }
         }
         if snapshot.bytes.len() > 16 * 1024 * 1024 || snapshot.servers.len() > 256 {
@@ -1091,18 +1089,12 @@ mod tests {
             if report.contains("\"State\":\"completed\"") {
                 break report;
             }
-            assert!(
-                Instant::now() < end,
-                "one-server job did not complete: {report}"
-            );
+            assert!(Instant::now() < end, "one-server job did not complete: {report}");
             thread::sleep(Duration::from_millis(5));
         };
         service.shutdown();
         assert!(report.contains("\"ID\":2,"), "{report}");
-        assert!(
-            !report.contains("\"ID\":1,"),
-            "server 1 was probed: {report}"
-        );
+        assert!(!report.contains("\"ID\":1,"), "server 1 was probed: {report}");
         assert!(report.contains("\"TotalProbes\":4"), "{report}");
     }
     #[test]

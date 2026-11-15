@@ -732,13 +732,9 @@ pub(crate) fn article_writer_create_output_file_guarded(
             &errmsg,
         ]));
     }
-    let (file, context, _permit) = context.open_attested(path, true).map_err(|error| {
-        format!(
-            "Output write ownership unavailable for {}: {error}",
-            path.display()
-        )
-        .into_bytes()
-    })?;
+    let (file, context, _permit) = context
+        .open_attested(path, true)
+        .map_err(|error| format!("Output write ownership unavailable for {}: {error}", path.display()).into_bytes())?;
     let result = u64::try_from(size)
         .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))
         .and_then(|size| file.set_len(size))

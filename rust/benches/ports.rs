@@ -385,9 +385,7 @@ fn main() {
             "x.par2",
             "movie.vol-08.par2",
         ] {
-            black_box(par_rs::filenames::volume_blocks_bytes(black_box(
-                n.as_bytes(),
-            )));
+            black_box(par_rs::filenames::volume_blocks_bytes(black_box(n.as_bytes())));
         }
     });
 

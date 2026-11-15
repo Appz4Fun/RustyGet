@@ -1950,9 +1950,7 @@ unsafe fn exec_request_processor(conn: &mut NzbgetRsConn, tls: bool) {
     // HTTPS shares ControlPort: with SecureControl on, a connection that opens with a
     // TLS handshake record (0x16) is answered over TLS, anything else as plain HTTP.
     let tls = tls
-        || (opts
-            .as_deref()
-            .is_some_and(|o| o.scalars().secure_control != 0)
+        || (opts.as_deref().is_some_and(|o| o.scalars().secure_control != 0)
             && !crate::ffi::build_tls_disabled()
             && peek_first_byte(conn) == Some(TLS_HANDSHAKE_RECORD));
     if tls && !crate::ffi::build_tls_disabled() {

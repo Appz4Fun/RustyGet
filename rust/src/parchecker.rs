@@ -1904,10 +1904,7 @@ impl LiveRepairRequest {
         for (path, (_, file_id)) in paths.iter().zip(&self.ids) {
             let file = crate::parlive::open_repair_target(&self.entry.writers, path)
                 .map_err(|_| live_error("live target admission", "target ownership unproven"))?;
-            files.push(par_rs::RepairTargetFile {
-                file_id: *file_id,
-                file,
-            });
+            files.push(par_rs::RepairTargetFile { file_id: *file_id, file });
         }
         Ok(TargetWriteLease {
             nzb_id: self.nzb_id,
@@ -1936,13 +1933,10 @@ impl TargetWriteLease {
             entry,
         } = self;
         let targets_current = || {
-            paths
-                .iter()
-                .zip(&files)
-                .try_for_each(|(path, target)| {
-                    crate::parlive::repair_target_is_current(&entry.writers, path, &target.file)
-                })
-                .map_err(|_| live_error("live target ownership", "target replaced after admission"))
+            paths.iter().zip(&files).try_for_each(|(path, target)| {
+                crate::parlive::repair_target_is_current(&entry.writers, path, &target.file)
+            })
+            .map_err(|_| live_error("live target ownership", "target replaced after admission"))
         };
         entry
             .metrics

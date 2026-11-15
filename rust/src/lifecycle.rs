@@ -1230,6 +1230,7 @@ pub(crate) fn disk_service_work_active() {
     }
 }
 
+
 /// Executes `DiskService` and `RustyGet` daemon lifecycle operations (`daemon/main/rustyget.cpp`):
 /// - `0`: `DiskService::ServiceInterval`
 /// - `1`: `DiskService::ServiceWork`

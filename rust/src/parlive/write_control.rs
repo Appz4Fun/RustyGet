@@ -81,26 +81,20 @@ impl WriteCoordinator {
     pub(super) fn foreign_source_conflicts(&self, path: &std::path::Path, cross_job: bool) -> bool {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let identity = WriterIdentity::Path(path.to_owned());
-        if Self::is_certified(&state, &identity) {
-            return true;
-        }
+        if Self::is_certified(&state, &identity) { return true; }
         if state.generation.0 == 0 && state.repair.is_none() {
             // Before live metadata only a concurrent write of the same file
             // through another job's alias conflicts; unrelated files proceed.
             let same_file = cross_job
                 && state.writer_leaves.iter().any(|(leaf, _)| {
-                    Self::paths_may_alias(
-                        std::path::Path::new(leaf),
-                        path.file_name().map_or(path, std::path::Path::new),
-                    )
+                    Self::paths_may_alias(std::path::Path::new(leaf), path.file_name().map_or(path, std::path::Path::new))
                 });
             if !same_file {
                 return false;
             }
         }
         let protected = state.namespace.as_ref().is_none_or(|proof| {
-            path.file_name()
-                .is_none_or(|leaf| proof.protects_leaf(leaf.as_encoded_bytes()))
+            path.file_name().is_none_or(|leaf| proof.protects_leaf(leaf.as_encoded_bytes()))
         });
         if protected || state.repair.is_some() {
             state.source_identity_changed = true;
@@ -410,11 +404,7 @@ impl WriteCoordinator {
             }
         };
         if let Some(leaf) = &leaf {
-            match state
-                .writer_leaves
-                .iter_mut()
-                .find(|(name, _)| name == leaf)
-            {
+            match state.writer_leaves.iter_mut().find(|(name, _)| name == leaf) {
                 Some((_, count)) => *count += 1,
                 None => state.writer_leaves.push((leaf.clone(), 1)),
             }
@@ -569,11 +559,7 @@ impl Drop for SourceWritePermit {
             .unwrap_or_else(|e| e.into_inner());
         state.writers -= 1;
         if let Some(leaf) = &self.leaf {
-            if let Some(index) = state
-                .writer_leaves
-                .iter()
-                .position(|(name, _)| name == leaf)
-            {
+            if let Some(index) = state.writer_leaves.iter().position(|(name, _)| name == leaf) {
                 state.writer_leaves[index].1 -= 1;
                 if state.writer_leaves[index].1 == 0 {
                     state.writer_leaves.swap_remove(index);

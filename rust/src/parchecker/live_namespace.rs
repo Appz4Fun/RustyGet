@@ -153,14 +153,8 @@ fn output_matches(root: &std::path::Path, id: i32, name: &[u8], bytes: &[u8]) ->
 
 impl NamespaceProof {
     pub(crate) fn protects_leaf(&self, name: &[u8]) -> bool {
-        self.catalog
-            .iter()
-            .any(|entry| entry.name.eq_ignore_ascii_case(name))
-            || self
-                .facts
-                .rows
-                .iter()
-                .any(|row| row.name.eq_ignore_ascii_case(name))
+        self.catalog.iter().any(|entry| entry.name.eq_ignore_ascii_case(name))
+            || self.facts.rows.iter().any(|row| row.name.eq_ignore_ascii_case(name))
     }
     /// Compute outside the queue, before any native metadata is copied.
     pub fn catalog_required_bytes(set: &PacketSet) -> Result<usize, RepairError> {

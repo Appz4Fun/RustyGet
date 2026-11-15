@@ -22,10 +22,11 @@ pub enum Packing {
     /// rar or zip, a raw split, an encrypted store-mode archive whose password
     /// the nzb carries).
     Borrowable,
-    /// Not known: 7-Zip (its headers are at the end), an unrecognised start,
-    /// or the first article could not be read.
+    /// Not known: 7-Zip without a password (its headers are at the end), an
+    /// unrecognised start, or the first article could not be read.
     Unknown,
-    /// Compressed, or encrypted without a known password.
+    /// Compressed, encrypted without a known password, or a 7-Zip whose nzb
+    /// carries a password (encrypted: borrowing means decrypting it whole).
     Unborrowable,
 }
 
@@ -227,7 +228,15 @@ pub fn packing_of_head(data: &[u8], name: &[u8], password_known: bool) -> Packin
         return zip_packing(data);
     }
     if data.starts_with(&[b'7', b'z', 0xbc, 0xaf, 0x27, 0x1c]) {
-        return Packing::Unknown;
+        // A 7-Zip's headers are at its end, so the head cannot tell how it is
+        // packed. A password in the nzb means an encrypted one: stream repair
+        // has to decrypt and decompress the whole archive to borrow from it,
+        // the slowest donor there is, so it ranks with the unborrowable ones.
+        return if password_known {
+            Packing::Unborrowable
+        } else {
+            Packing::Unknown
+        };
     }
     let ext = extension(name);
     if MEDIA_EXTS.contains(&ext.as_slice()) || media_magic(data) {
@@ -368,6 +377,15 @@ mod tests {
             packing_of_head(&[b'7', b'z', 0xbc, 0xaf, 0x27, 0x1c, 0, 4], b"a.7z", false),
             Packing::Unknown
         );
+        // an nzb password on a 7-Zip: encrypted, ranked after every other ALT
+        assert_eq!(
+            packing_of_head(
+                &[b'7', b'z', 0xbc, 0xaf, 0x27, 0x1c, 0, 4],
+                b"a.7z.001",
+                true
+            ),
+            Packing::Unborrowable
+        );
         assert_eq!(
             packing_of_head(b"anything", b"Movie.2020.mkv", false),
             Packing::Borrowable
@@ -412,10 +430,15 @@ mod tests {
         Listed {
             sigs: files
                 .iter()
-                .map(|&(name, length, md5)| FileSig {
-                    name: name.into(),
-                    length,
-                    md5: md5.into(),
+                .map(|&(name, length, md5)| {
+                    // a test label for the MD5, zero-padded
+                    let mut label = [0u8; 16];
+                    label[..md5.len()].copy_from_slice(md5.as_bytes());
+                    FileSig {
+                        name: name.into(),
+                        length,
+                        md5: label,
+                    }
                 })
                 .collect(),
             complete,

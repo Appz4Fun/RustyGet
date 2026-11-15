@@ -6072,6 +6072,53 @@ def scenario_fleetencryptedlast(daemon, t):
     return ('fleetencryptedlast', ok, 'order=%s chosen=%s kinds=%s' % (order, chosen, kinds))
 
 
+def scenario_fleetkindslowcheck(daemon, t):
+    """appendfleet when the health check is slow enough to use the whole
+    fleet budget (every sampled data article is slow to answer, as on a busy
+    provider; 30 s, so no copy gets a health result and the order is by kind
+    alone). The copy kinds are still read, first, with their own share of
+    the time: the store-mode rar ALT (borrowable) is queued ahead of the plain
+    7-Zip (unknown), and the compressed rar and the 7-Zip whose nzb carries a
+    password (encrypted) come last as unborrowable; the intake gives a verdict
+    for every copy too. Before, both ran after the check, got no time, and
+    every copy was "unknown" (so the order fell to size, and an encrypted
+    re-upload could be queued first)."""
+    daemon.fake_nntp.alive = set()
+    sevenz = bytes([0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c, 0, 4]) + bytes(24)
+    api = daemon.wait_ready()
+    copies = [
+        ('Show.S01E01.enc7z', _fleet_copy(daemon, 'ez', 'a.7z.001', 400_000, sevenz, _payload(400_000, 7201))),
+        ('Show.S01E01.compressed', _fleet_copy(daemon, 'cz', 'b.rar', 400_000, _rar4_head(0x33), _payload(400_000, 7202))),
+        ('Show.S01E01.plain7z', _fleet_copy(daemon, 'pz', 'c.7z.001', 400_000, sevenz, _payload(400_000, 7203))),
+        ('Show.S01E01.store', _fleet_copy(daemon, 'sz', 'd.rar', 400_000, _rar4_head(0x30), _payload(400_000, 7204)))]
+    name, nzb = copies[0]
+    copies[0] = (name, nzb.replace('<file ', '<head><meta type="password">secret</meta></head><file ', 1))
+    # data articles 1..39 of every copy answer slowly; the par2 index and the
+    # first data article (what the kind probe reads) answer at once
+    for tag in ('ez', 'cz', 'pz', 'sz'):
+        for digit in '123456789':
+            daemon.fake_nntp.delays['%s-%s' % (tag, digit)] = 30
+    started = time.time()
+    reply = _fleet(daemon, copies, key='fleet:slow', timeout=20)
+    took = time.time() - started
+    daemon.fake_nntp.delays = {}
+    order = [m['Name'] for m in sorted(reply['Members'], key=lambda m: m['Rank'])]
+    items = {g['NZBName']: g for g in api.listgroups() + api.history() if g.get('DupeKey') == 'fleet:slow'}
+    kinds = {n: {p['Name']: p['Value'] for p in g.get('Parameters', [])}.get('DupeCopyKind')
+             for n, g in items.items()}
+    ok = (order[:2] == ['Show.S01E01.store', 'Show.S01E01.plain7z']
+          and set(order[2:]) == {'Show.S01E01.enc7z', 'Show.S01E01.compressed'}
+          and kinds.get('Show.S01E01.store') == 'borrowable'
+          and kinds.get('Show.S01E01.plain7z') == 'unknown'
+          and kinds.get('Show.S01E01.enc7z') == 'unborrowable'
+          and kinds.get('Show.S01E01.compressed') == 'unborrowable')
+    # the intake also runs ahead of the slow check: one verdict line per copy
+    intake = _grep_log(t, 'Fleet intake: Show.S01E01.')
+    ok = ok and intake >= 4
+    return ('fleetkindslowcheck', ok, 'took=%.0fs order=%s kinds=%s intake_lines=%d'
+            % (took, order, kinds, intake))
+
+
 def _yenc_parts(data, name, part_size):
     """A file posted as yEnc articles of ``part_size`` bytes."""
     total = (len(data) + part_size - 1) // part_size
@@ -9849,6 +9896,7 @@ SCENARIOS = {
     'fleetkindorder': scenario_fleetkindorder,
     'fleetintake': scenario_fleetintake,
     'fleetencryptedlast': scenario_fleetencryptedlast,
+    'fleetkindslowcheck': scenario_fleetkindslowcheck,
     'watchforcepick': scenario_watchforcepick,
     'watchdeadpick': scenario_watchdeadpick,
     'watchswap': scenario_watchswap,
@@ -10445,7 +10493,7 @@ SCENARIO_FIRST_FAIL_PROXY = {'recheckfailed': ((b'?5=', b'?10=', b'?15='),),
 # scenarios with a FakeNewznab indexer (DupeSearchUrl points to it)
 
 # scenarios with a FakeNntp news server in place of nserv
-SCENARIO_FAKE_NNTP = {'watchfleet', 'watchforcepick', 'watchdeadpick', 'watchswap', 'watchswaptwin', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetnodupecheck', 'fleetkindorder', 'fleetintake', 'fleetencryptedlast', 'fleetalldead', 'fleetshutdown'}
+SCENARIO_FAKE_NNTP = {'watchfleet', 'watchforcepick', 'watchdeadpick', 'watchswap', 'watchswaptwin', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetnodupecheck', 'fleetkindorder', 'fleetintake', 'fleetencryptedlast', 'fleetkindslowcheck', 'fleetalldead', 'fleetshutdown'}
 
 
 # --------------------------------------------------------------------------- #

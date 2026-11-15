@@ -1,13 +1,7 @@
 //! CRC-32 combination (Crc32::Combine): the CRC of A followed by B from the
 //! CRCs of A and B and the length of B.
 //!
-//! The C++ code used zlib's original GF(2) matrix method, which squares 32x32
-//! bit matrices about twice per bit of the length. This uses the method of
-//! later zlib versions (1.2.12 on): multiplication modulo the CRC polynomial
-//! with a table of x^(2^k), giving the same results with far less work.
-
-/// The reflected CRC-32 polynomial.
-const POLY: u32 = 0xedb8_8320;
+//! The combination itself is par-rs's (`par_rs::crc::crc32_combine`).
 
 /// Incremental IEEE 802.3 CRC-32 accumulator matching C++ `Crc32`.
 #[derive(Debug, Clone, Copy)]
@@ -42,58 +36,14 @@ pub fn crc32_append(data: &[u8], init: u32) -> u32 {
     hasher.finalize()
 }
 
-/// a * b modulo POLY (bit-reflected: bit 31 is x^0).
-const fn mult_mod_p(a: u32, mut b: u32) -> u32 {
-    let mut m: u32 = 1 << 31;
-    let mut p = 0;
-    loop {
-        if a & m != 0 {
-            p ^= b;
-            if a & (m - 1) == 0 {
-                break;
-            }
-        }
-        m >>= 1;
-        b = if b & 1 != 0 { (b >> 1) ^ POLY } else { b >> 1 };
-    }
-    p
-}
-
-/// x^(2^k) modulo POLY, k = 0..32.
-const X2N: [u32; 32] = {
-    let mut t = [0u32; 32];
-    let mut p: u32 = 1 << 30; // x^1
-    t[0] = p;
-    let mut k = 1;
-    while k < 32 {
-        p = mult_mod_p(p, p);
-        t[k] = p;
-        k += 1;
-    }
-    t
-};
-
-/// x^(n * 2^k) modulo POLY.
-fn x2n_mod_p(mut n: u32, mut k: usize) -> u32 {
-    let mut p: u32 = 1 << 31; // x^0
-    while n != 0 {
-        if n & 1 != 0 {
-            p = mult_mod_p(X2N[k & 31], p);
-        }
-        n >>= 1;
-        k += 1;
-    }
-    p
-}
-
-/// Crc32::Combine: the CRC of A then B, given CRC(A), CRC(B) and B's length.
-/// A length of 0 returns `crc1` unchanged, as the C++ code did.
+/// Crc32::Combine: the CRC of A then B, given CRC(A), CRC(B) and B's length
+/// (par-rs does the arithmetic). A length of 0 returns `crc1` unchanged, as the
+/// C++ code did.
 pub fn combine(crc1: u32, crc2: u32, len2: u32) -> u32 {
     if len2 == 0 {
         return crc1;
     }
-    // len2 bytes = len2 * 2^3 zero bits
-    mult_mod_p(x2n_mod_p(len2, 3), crc1) ^ crc2
+    par_rs::crc::crc32_combine(crc1, crc2, u64::from(len2))
 }
 
 #[cfg(test)]
@@ -105,7 +55,11 @@ mod tests {
         for &b in data {
             c ^= b as u32;
             for _ in 0..8 {
-                c = if c & 1 != 0 { (c >> 1) ^ POLY } else { c >> 1 };
+                c = if c & 1 != 0 {
+                    (c >> 1) ^ par_rs::crc::POLY
+                } else {
+                    c >> 1
+                };
             }
         }
         !c

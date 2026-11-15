@@ -2484,13 +2484,31 @@ impl NzbgetRsQueueCoordinator {
         filename: &[u8],
         successful: bool,
     ) -> Result<(), crate::parchecker::RepairError> {
-        let count = if successful { 0 } else { articles.len() };
+        // the downloaded byte ranges, adjacent articles merged (par-rs
+        // normalize_ranges): a damaged 5 GB volume of 7,000 articles with a
+        // few holes is a handful of ranges, not 7,000
+        let accepted = if successful {
+            Vec::new()
+        } else {
+            downloaded_ranges(articles.iter().map(|a| {
+                (
+                    a.status == crate::queuesubsys_host::AI_FINISHED,
+                    a.segment_offset,
+                    a.segment_size as i64,
+                )
+            }))
+        };
+        let count = accepted.len();
         if count > 4096 {
             return Err(crate::parchecker::RepairError::Io {
                 context: "capturing live PAR completion".into(),
                 source: std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    "article range limit exceeded; ordinary repair required",
+                    format!(
+                        "{} has {} separate damaged stretches (live repair takes up to 4096 per file); it is repaired after the download",
+                        String::from_utf8_lossy(filename),
+                        count.saturating_sub(1)
+                    ),
                 ),
             });
         }
@@ -2498,21 +2516,6 @@ impl NzbgetRsQueueCoordinator {
             + 2 * (nzb.dest_dir.len() + filename.len() + file.hash16k.len())
             + count * 6 * std::mem::size_of::<crate::parchecker::ByteRange>();
         crate::parchecker::streaming_session_queue_completed_file(nzb.id, bytes as u64, || {
-            let accepted = if successful {
-                Vec::new()
-            } else {
-                articles
-                    .iter()
-                    .filter(|a| {
-                        a.status == crate::queuesubsys_host::AI_FINISHED
-                            && a.segment_offset >= 0
-                            && a.segment_size > 0
-                    })
-                    .map(|a| {
-                        crate::parchecker::ByteRange::new(a.segment_offset, a.segment_size as i64)
-                    })
-                    .collect()
-            };
             let path = join_path(&nzb.dest_dir, filename);
             Ok(crate::parchecker::LiveCompletedFile {
                 nzb_id: nzb.id,
@@ -5835,6 +5838,20 @@ fn save_partial_state_host(host: &crate::queuesubsys_host::QueueSubsysHost, file
     }
 }
 
+/// The downloaded byte ranges of a file from its articles (finished?,
+/// offset, size), adjacent ones merged, capacity trimmed to the length.
+fn downloaded_ranges(
+    articles: impl Iterator<Item = (bool, i64, i64)>,
+) -> Vec<crate::parchecker::ByteRange> {
+    let ranges: Vec<crate::parchecker::ByteRange> = articles
+        .filter(|&(done, offset, size)| done && offset >= 0 && size > 0)
+        .map(|(_, offset, size)| crate::parchecker::ByteRange::new(offset, size))
+        .collect();
+    let mut merged = par_rs::damage::normalize_ranges(&ranges);
+    merged.shrink_to_fit();
+    merged
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -5858,6 +5875,18 @@ mod tests {
         let msg = super::NzbgetRsQueueCoordinator::live_par_deferred_message(&busy);
         assert!(!msg.contains("set ParBuffer"), "{msg}");
         assert!(msg.contains("shared live PAR reservation"), "{msg}");
+    }
+
+    #[test]
+    fn downloaded_ranges_merge_adjacent_articles() {
+        // a 7,315-article volume with two missing articles: three ranges
+        let art = 739_786i64;
+        let rows = (0..7315i64).map(|i| (i != 100 && i != 5000, i * art, art));
+        let r = super::downloaded_ranges(rows);
+        assert_eq!(r.len(), 3);
+        assert_eq!(r[0], crate::parchecker::ByteRange::new(0, 100 * art));
+        assert_eq!(r[1].offset, 101 * art);
+        assert!(r.capacity() == r.len());
     }
 
     #[test]

@@ -3333,7 +3333,6 @@ pub extern "C" fn nzbget_rs_serverpool_new() -> *mut NzbgetRsServerPool {
     if let Some(lg) = crate::log::active_log() {
         lg.register_debuggable(4);
     }
-    crate::sysmetrics::start_sampler();
     Arc::into_raw(arc).cast_mut()
 }
 

@@ -1547,11 +1547,14 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
                 im.extend_from_slice(ver);
                 im.extend_from_slice(b" daemon-mode");
                 dm_log(e, 2, &im);
+                // after the fork: a thread started in the parent would not survive it
+                crate::sysmetrics::start_sampler();
             } else if server_mode {
                 let mut im = b"RustyGet ".to_vec();
                 im.extend_from_slice(ver);
                 im.extend_from_slice(b" server-mode");
                 dm_log(e, 2, &im);
+                crate::sysmetrics::start_sampler();
             } else if remote_mode {
                 let mut im = b"RustyGet ".to_vec();
                 im.extend_from_slice(ver);

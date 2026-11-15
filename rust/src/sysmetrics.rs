@@ -268,17 +268,35 @@ pub fn cpu_generation(model: &str) -> String {
             .find(|w| digits_at(w, 0).len() == 4)
         {
             let series = &num[..1];
-            let zen = match series {
-                "1" => "Zen",
-                "2" => "Zen+",
-                "3" => "Zen 2",
-                "4" => "Zen 2",
-                "5" => "Zen 3",
-                "6" => "Zen 3+",
-                "7" => "Zen 4",
-                "8" => "Zen 4",
-                "9" => "Zen 5",
-                _ => "",
+            let mobile = num[4..].starts_with(['u', 'h', 'c'])
+                || tail.contains(" hs")
+                || tail.contains(" hx");
+            let zen = if mobile {
+                // Mobile parts: from the 7000 series on the third digit names the
+                // architecture (7520U is Zen 2, 7840HS Zen 4); 4000 is Zen 2 and
+                // 6000 Zen 3+; 5000 mixes Zen 2 and Zen 3, so it gets no suffix.
+                match (series, &num[2..3]) {
+                    ("4", _) => "Zen 2",
+                    ("6", _) => "Zen 3+",
+                    ("7" | "8" | "9", "1") => "Zen+",
+                    ("7" | "8" | "9", "2") => "Zen 2",
+                    ("7" | "8" | "9", "3") => "Zen 3",
+                    ("7" | "8" | "9", "4") => "Zen 4",
+                    ("7" | "8" | "9", "5") => "Zen 5",
+                    _ => "",
+                }
+            } else {
+                match series {
+                    "1" => "Zen",
+                    "2" => "Zen+",
+                    "3" => "Zen 2",
+                    "4" => "Zen 2",
+                    "5" => "Zen 3",
+                    "7" => "Zen 4",
+                    "8" => "Zen 4",
+                    "9" => "Zen 5",
+                    _ => "",
+                }
             };
             return if zen.is_empty() {
                 format!("Ryzen {series}000")
@@ -837,18 +855,29 @@ pub fn tick() -> Option<Sample> {
     Some(s)
 }
 
-/// Starts the background sampler once; later calls do nothing.
+/// Starts the background sampler once per process; later calls do nothing.
+///
+/// The daemon calls this after it forks (a thread started before `fork` does
+/// not exist in the child), and every `systemstats` request calls it too. The
+/// process id check restarts the sampler in a forked child that inherited the
+/// "started" flag without the thread.
 pub fn start_sampler() {
-    static STARTED: OnceLock<()> = OnceLock::new();
-    STARTED.get_or_init(|| {
-        let _ = tick();
-        let _ = std::thread::Builder::new()
-            .name("sysmetrics".into())
-            .spawn(|| loop {
-                std::thread::sleep(Duration::from_secs(FINE_INTERVAL_SEC as u64));
-                let _ = tick();
-            });
-    });
+    use std::sync::atomic::{AtomicI32, Ordering};
+    static SAMPLER_PID: AtomicI32 = AtomicI32::new(0);
+    let pid = unsafe { libc::getpid() } as i32;
+    if SAMPLER_PID.swap(pid, Ordering::SeqCst) == pid {
+        return;
+    }
+    let _ = tick();
+    let _ = std::thread::Builder::new()
+        .name("sysmetrics".into())
+        .spawn(move || loop {
+            std::thread::sleep(Duration::from_secs(FINE_INTERVAL_SEC as u64));
+            if unsafe { libc::getpid() } as i32 != pid {
+                return;
+            }
+            let _ = tick();
+        });
 }
 
 // ---------------------------------------------------------------------------
@@ -1149,6 +1178,11 @@ mod tests {
             ("AMD Ryzen 7 PRO 4750U with Radeon Graphics", "Ryzen 4000 (Zen 2)"),
             ("AMD Ryzen 9 7950X 16-Core Processor", "Ryzen 7000 (Zen 4)"),
             ("AMD Ryzen 5 9600X", "Ryzen 9000 (Zen 5)"),
+            ("AMD Ryzen 5 7520U with Radeon Graphics", "Ryzen 7000 (Zen 2)"),
+            ("AMD Ryzen 7 7840HS w/ Radeon 780M Graphics", "Ryzen 7000 (Zen 4)"),
+            ("AMD Ryzen 7 7735HS with Radeon Graphics", "Ryzen 7000 (Zen 3)"),
+            ("AMD Ryzen 7 5700U with Radeon Graphics", "Ryzen 5000"),
+            ("AMD Ryzen 7 6800H with Radeon Graphics", "Ryzen 6000 (Zen 3+)"),
             ("AMD EPYC 7763 64-Core Processor", "EPYC Milan (Zen 3)"),
             ("AMD EPYC 9554 64-Core Processor", "EPYC Genoa (Zen 4)"),
             ("Apple M2 Pro", "M2"),

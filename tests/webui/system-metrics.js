@@ -55,6 +55,8 @@ const { installDetailsFixture } = require('./details-fixture');
         assert.equal(byName.zipview, 'https://github.com/xbmc4lyfe/zipview');
         assert.equal(byName['par-rs'], 'https://github.com/xbmc4lyfe/par-rs');
         assert(byName.jQuery && byName.Elycharts, 'web interface libraries are listed');
+        assert.equal(byName.OpenSSL, 'https://github.com/openssl/openssl', 'the OpenSSL runtime keeps its own entry');
+        assert.equal(byName.openssl, 'https://github.com/sfackler/rust-openssl');
         assert(links.every(([, href]) => /^https:\/\//.test(href)), 'every library links to its home');
         const rows = await page.locator('#SysInfo_LibrariesTable tr').count();
         assert(rows >= 20, `all libraries listed (${rows})`);

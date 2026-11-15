@@ -104,17 +104,24 @@ var Libraries = (new function()
 		return CATALOG.slice();
 	};
 
+	// Exact name first ("OpenSSL" the runtime vs "openssl" the crate), then any case.
 	this.find = function(name)
 	{
-		var lower = String(name || '').toLowerCase();
+		var text = String(name || '');
+		var lower = text.toLowerCase();
+		var loose = null;
 		for (var i = 0; i < CATALOG.length; i++)
 		{
-			if (CATALOG[i].name.toLowerCase() === lower)
+			if (CATALOG[i].name === text)
 			{
 				return CATALOG[i];
 			}
+			if (!loose && CATALOG[i].name.toLowerCase() === lower)
+			{
+				loose = CATALOG[i];
+			}
 		}
-		return null;
+		return loose;
 	};
 
 	// { internal, total, percent }

@@ -30,12 +30,11 @@ cp -R webui "$STAGE/usr/share/rustyget/webui"
 install -m 0644 ChangeLog.md COPYING "$STAGE/usr/share/doc/rustyget/"
 install -m 0644 "$PKG/rustyget.service" "$STAGE/lib/systemd/system/rustyget.service"
 
-# Packaged template: never collides with a stock nzbget install (port 6789/6791, /var/lib/nzbget).
+# Packaged template: never collides with a stock nzbget install (port 6789, /var/lib/nzbget).
 sed -e 's|^MainDir=.*|MainDir=/var/lib/rustyget/downloads|' \
     -e 's|^WebDir=.*|WebDir=/usr/share/rustyget/webui|' \
     -e 's|^ConfigTemplate=.*|ConfigTemplate=/usr/share/rustyget/rustyget.conf|' \
     -e 's|^ControlPort=.*|ControlPort=6790|' \
-    -e 's|^SecurePort=.*|SecurePort=6792|' \
     -e 's|^LockFile=.*|LockFile=${MainDir}/rustyget.lock|' \
     -e 's|^UnrarCmd=.*|UnrarCmd=unrar|' \
     -e 's|^SevenZipCmd=.*|SevenZipCmd=7zz|' \

@@ -64,7 +64,7 @@ Key options: [`ServerN.Host`](options.md#servern-host), [`ServerN.Encryption`](o
 
 Set `ControlUsername` and `ControlPassword` for the full-control account. Give automation its own restricted account, and use the add-only account for clients that only submit downloads. Set every account password yourself; the pictures omit them.
 
-Review `ControlIP` and `ControlPort` for your network. For HTTPS served by the daemon, configure `SecureControl`, `SecurePort`, `SecureCert`, and `SecureKey`. Keep provider certificate checks enabled and configure a certificate store when your installation requires it.
+Review `ControlIP` and `ControlPort` for your network. For HTTPS, turn on `SecureControl` and set `SecureCert` and `SecureKey`. HTTPS is answered on `ControlPort` itself, and plain HTTP keeps working on the same port. Settings can make a self-signed certificate for the name you browse with, save a pasted certificate and key, browse the daemon's own files, and check that the key belongs to the certificate. Keep provider certificate checks enabled and configure a certificate store when your installation requires it.
 
 Key options: [`ControlUsername`](options.md#controlusername), [`ControlPassword`](options.md#controlpassword), [`RestrictedUsername`](options.md#restrictedusername), [`AddUsername`](options.md#addusername), [`ControlIP`](options.md#controlip), [`SecureControl`](options.md#securecontrol), [`CertCheck`](options.md#certcheck).
 

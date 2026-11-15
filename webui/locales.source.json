@@ -3875,7 +3875,7 @@
     "description": "Description for the option ControlIP DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>). DO NOT translate technical values enclosed in quotes. DO NOT translate the exact uppercase keywords (NOTE:, WARNING:, INFO:, INFO FOR DEVELOPERS:, MORE INFO:) as they are used to render UI badges."
   },
   "config_desc_controlport": {
-    "message": "Port which RustyGet server and remote client use.\n\nNOTE: The communication via this port is not encrypted. For encrypted\ncommunication see option <SecurePort>.",
+    "message": "Port which RustyGet server and remote client use.\n\nNOTE: When option <SecureControl> is on, HTTPS is answered on this same port\nand plain HTTP keeps working.",
     "description": "Description for the option ControlPort DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>). DO NOT translate the exact uppercase keywords (NOTE:, WARNING:, INFO:, INFO FOR DEVELOPERS:, MORE INFO:) as they are used to render UI badges."
   },
   "config_desc_controlusername": {
@@ -3907,12 +3907,8 @@
     "description": "Description for the option FormAuth"
   },
   "config_desc_securecontrol": {
-    "message": "Secure control of RustyGet server.\n\nActivate the option if you want to access RustyGet built-in web-server\nvia HTTPS (web-interface and RPC). You should also provide certificate\nand key files, see option <SecureCert> and option <SecureKey>.",
-    "description": "Description for the option SecureControl DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>)."
-  },
-  "config_desc_secureport": {
-    "message": "Port which RustyGet server and remote client use for encrypted\ncommunication (1-65535).",
-    "description": "Description for the option SecurePort"
+    "message": "Secure control of RustyGet server.\n\nActivate the option if you want to access RustyGet built-in web-server\nvia HTTPS (web-interface and RPC) on the port set in option <ControlPort>.\nYou should also provide certificate and key files, see option <SecureCert>\nand option <SecureKey>.",
+    "description": "Description for the option SecureControl DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>). DO NOT translate the exact uppercase keywords (NOTE:, WARNING:, INFO:, INFO FOR DEVELOPERS:, MORE INFO:) as they are used to render UI badges."
   },
   "config_desc_securecert": {
     "message": "Full path to certificate file for encrypted communication.\n\nIn case of Let's Encrypt: full path to fullchain.pem.",
@@ -5555,8 +5551,176 @@
   "config_server_cipher_lost": {
     "message": "The cipher test stopped answering and was cancelled; the cipher is unchanged."
   },
+  "config_cert_browse": {
+    "message": "Browse…",
+    "description": "Settings: HTTPS certificate tools"
+  },
+  "config_cert_none": {
+    "message": "No certificate.",
+    "description": "Settings: HTTPS certificate tools"
+  },
+  "config_cert_for": {
+    "message": "For",
+    "description": "Settings: HTTPS certificate tools"
+  },
+  "config_cert_self_signed": {
+    "message": "self-signed",
+    "description": "Settings: HTTPS certificate tools"
+  },
+  "config_cert_expired": {
+    "message": "Expired",
+    "description": "Settings: HTTPS certificate tools"
+  },
+  "config_cert_expires": {
+    "message": "Expires",
+    "description": "Settings: HTTPS certificate tools"
+  },
+  "config_cert_not_yet": {
+    "message": "Not valid yet.",
+    "description": "Settings: HTTPS certificate tools"
+  },
+  "config_cert_key_ok": {
+    "message": "The key belongs to this certificate.",
+    "description": "Settings: HTTPS certificate tools"
+  },
+  "config_cert_key_bad": {
+    "message": "The key does not belong to this certificate.",
+    "description": "Settings: HTTPS certificate tools"
+  },
+  "config_cert_key_none": {
+    "message": "No key file is set.",
+    "description": "Settings: HTTPS certificate tools"
+  },
+  "config_cert_need": {
+    "message": "HTTPS needs a certificate and its key. Make a self-signed one, paste yours, or browse to the files.",
+    "description": "Settings: HTTPS certificate tools"
+  },
+  "config_cert_checking": {
+    "message": "Checking…",
+    "description": "Settings: HTTPS certificate tools"
+  },
+  "config_cert_cert_title": {
+    "message": "HTTPS certificate",
+    "description": "Settings: HTTPS certificate tools"
+  },
+  "config_cert_key_title": {
+    "message": "HTTPS private key",
+    "description": "Settings: HTTPS certificate tools"
+  },
+  "config_cert_pair": {
+    "message": "Certificate and key",
+    "description": "Settings: HTTPS certificate tools"
+  },
+  "config_cert_names": {
+    "message": "Names the certificate is for",
+    "description": "Settings: HTTPS certificate tools"
+  },
+  "config_cert_making": {
+    "message": "Making a certificate…",
+    "description": "Settings: HTTPS certificate tools"
+  },
+  "config_cert_pem": {
+    "message": "Certificate and private key, in PEM (the -----BEGIN lines included)",
+    "description": "Settings: HTTPS certificate tools"
+  },
+  "config_cert_save_note": {
+    "message": "Save the settings to use it.",
+    "description": "Settings: HTTPS certificate tools"
+  },
+  "config_cert_ca_title": {
+    "message": "CA certificates",
+    "description": "Settings: HTTPS certificate tools"
+  },
+  "config_cert_ca_tools": {
+    "message": "Add or check CA certificates",
+    "description": "Settings: HTTPS certificate tools"
+  },
+  "config_cert_ca_saved": {
+    "message": "certificates saved to",
+    "description": "Settings: HTTPS certificate tools"
+  },
+  "config_cert_ca_system": {
+    "message": "Empty: the system's own CA certificates are used.",
+    "description": "Settings: HTTPS certificate tools"
+  },
+  "config_cert_ca_count": {
+    "message": "certificates found",
+    "description": "Settings: HTTPS certificate tools"
+  },
+  "config_cert_too_big": {
+    "message": "That file is too large to be a certificate.",
+    "description": "Settings: HTTPS certificate tools"
+  },
+  "config_cert_ca_pem": {
+    "message": "CA certificates, in PEM (the -----BEGIN lines included)",
+    "description": "Settings: HTTPS certificate tools"
+  },
+  "file_browser_up": {
+    "message": "Up one folder",
+    "description": "File browser dialog in Settings"
+  },
+  "file_browser_choose": {
+    "message": "Choose",
+    "description": "File browser dialog in Settings"
+  },
+  "file_browser_path": {
+    "message": "Folder or file",
+    "description": "File browser dialog in Settings"
+  },
+  "file_browser_loading": {
+    "message": "Loading…",
+    "description": "File browser dialog in Settings"
+  },
+  "file_browser_no_access": {
+    "message": "RustyGet's user can't read this",
+    "description": "File browser dialog in Settings"
+  },
+  "file_browser_empty": {
+    "message": "This folder is empty.",
+    "description": "File browser dialog in Settings"
+  },
+  "file_browser_truncated": {
+    "message": "Only the first 5000 entries are shown.",
+    "description": "File browser dialog in Settings"
+  },
+  "file_browser_title": {
+    "message": "Choose a file",
+    "description": "File browser dialog in Settings"
+  },
+  "file_browser_up_short": {
+    "message": "Up",
+    "description": "File browser dialog in Settings"
+  },
   "config_server_reload_unknown": {
     "message": "Saved, but RustyGet did not answer after the reload. Check that it is running.",
     "description": "Server editor status when the daemon does not come back after saving a server"
+  },
+  "config_cert_make": {
+    "message": "Make a self-signed certificate",
+    "description": "Settings: HTTPS certificate tools button"
+  },
+  "config_cert_paste": {
+    "message": "Paste certificate and key",
+    "description": "Settings: HTTPS certificate tools button"
+  },
+  "config_cert_check": {
+    "message": "Check",
+    "description": "Settings: HTTPS certificate tools button"
+  },
+  "config_cert_make_go": {
+    "message": "Make certificate",
+    "description": "Settings: HTTPS certificate tools button"
+  },
+  "config_cert_save_pem": {
+    "message": "Use this",
+    "description": "Settings: HTTPS certificate tools button"
+  },
+  "config_cert_upload": {
+    "message": "Upload…",
+    "description": "Settings: HTTPS certificate tools button"
+  },
+  "config_cert_paste_ca": {
+    "message": "Paste…",
+    "description": "Settings: HTTPS certificate tools button"
   }
 }

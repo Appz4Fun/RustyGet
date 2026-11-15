@@ -1230,17 +1230,6 @@ pub(crate) fn disk_service_work_active() {
     }
 }
 
-#[cfg(unix)]
-pub(crate) fn should_start_secure_server_active() -> bool {
-    let Some(opts) = crate::options::active_options() else {
-        return false;
-    };
-    crate::options::nzbget_should_start_secure_server(
-        opts.scalars().secure_control != 0,
-        true,
-        opts.str_bytes(14),
-    )
-}
 
 /// Executes `DiskService` and `RustyGet` daemon lifecycle operations (`daemon/main/rustyget.cpp`):
 /// - `0`: `DiskService::ServiceInterval`

@@ -1694,6 +1694,26 @@ impl RemoteSrvInstance {
             }
         }
 
+        let secure_control = opts
+            .as_deref()
+            .is_some_and(|o| o.scalars().secure_control != 0);
+        if !self.tls && secure_control && !self.tls_disabled {
+            let missing = |path: &[u8]| {
+                path.is_empty() || !crate::fsops::file_exists(path, &crate::fsops::posix_stat)
+            };
+            if missing(&secure_cert) {
+                self.emit_log(
+                    2,
+                    b"HTTPS is on but the certificate file was not found, so only plain HTTP will work. Check option <SecureCert>",
+                );
+            } else if missing(&secure_key) {
+                self.emit_log(
+                    2,
+                    b"HTTPS is on but the key file was not found, so only plain HTTP will work. Check option <SecureKey>",
+                );
+            }
+        }
+
         let mut listener: Option<NzbgetRsConn> = None;
 
         while !self.is_stopped() {
@@ -1874,6 +1894,47 @@ impl RemoteSrvInstance {
     }
 }
 
+const TLS_HANDSHAKE_RECORD: u8 = 0x16;
+
+/// Looks at the first byte a client sent without taking it off the socket, waiting
+/// up to the connection timeout. `None` if nothing arrived or the socket failed.
+fn peek_first_byte(conn: &mut NzbgetRsConn) -> Option<u8> {
+    let fd = conn.slot.socket.load(Ordering::SeqCst);
+    if fd == INVALID_SOCKET {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        let timeout = conn.session.get_mut().core.timeout.max(1);
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one valid pollfd for the duration of the call.
+        let ready = unsafe { libc::poll(&mut pfd, 1, timeout.saturating_mul(1000)) };
+        if ready <= 0 {
+            return None;
+        }
+        let mut byte = 0u8;
+        loop {
+            // SAFETY: reads at most one byte into a local; MSG_PEEK leaves it queued.
+            let n = unsafe { libc::recv(fd, (&raw mut byte).cast(), 1, libc::MSG_PEEK) };
+            if n == 1 {
+                return Some(byte);
+            }
+            if n < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return None;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
 unsafe fn exec_request_processor(conn: &mut NzbgetRsConn, tls: bool) {
     conn.slot.set_suppress_errors(true);
     let debug_on = conn.slot.debug_on;
@@ -1886,6 +1947,12 @@ unsafe fn exec_request_processor(conn: &mut NzbgetRsConn, tls: bool) {
     };
 
     let opts = crate::options::active_options();
+    // HTTPS shares ControlPort: with SecureControl on, a connection that opens with a
+    // TLS handshake record (0x16) is answered over TLS, anything else as plain HTTP.
+    let tls = tls
+        || (opts.as_deref().is_some_and(|o| o.scalars().secure_control != 0)
+            && !crate::ffi::build_tls_disabled()
+            && peek_first_byte(conn) == Some(TLS_HANDSHAKE_RECORD));
     if tls && !crate::ffi::build_tls_disabled() {
         let cert = opts.as_deref().and_then(|o| o.str_cstr(21)).unwrap_or(c"");
         let key = opts.as_deref().and_then(|o| o.str_cstr(22)).unwrap_or(c"");
@@ -1998,11 +2065,8 @@ pub(crate) fn remote_srv_ctl(op: c_int) {
             }
             crate::webserver::init_server_tokens(|m| crate::log::log_active_bytes(2, m));
             let plain = spawn_remote_server_listener(false);
-            let secure = if crate::lifecycle::should_start_secure_server_active() {
-                spawn_remote_server_listener(true)
-            } else {
-                None
-            };
+            // HTTPS is answered on ControlPort itself (see exec_request_processor).
+            let secure = None;
             if let Ok(mut g) = ACTIVE_REMOTE_SERVERS.lock() {
                 g.plain = plain;
                 g.secure = secure;

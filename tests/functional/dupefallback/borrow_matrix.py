@@ -153,6 +153,10 @@ def build_packings(data, vol):
         r5 = b''.join(rar5_store_volumes('inner.rar', r4, len(r4)))
         nested = seven_zip([('inner5.rar', r5)], ['-m0=Copy'])
         packs['nested'] = (split(nested, vol, 'rel.7z.%03d'), None)
+        # nestedset: the mkv in a RAR5 volume set, those volumes in one 7z
+        inner_vols = rar5_store_volumes(INNER, data, max(vol // 2, 1))
+        nestedset = seven_zip([('in.part%02d.rar' % i, v) for i, v in enumerate(inner_vols, 1)], ['-m0=Copy'])
+        packs['nestedset'] = (split(nestedset, vol, 'rel.7z.%03d'), None)
     return packs
 
 
@@ -373,6 +377,11 @@ def main():
             b.run('alt bare <- nested', 'bare', ['nested'], fail=f)
             b.run('alt nested <- rar5', 'nested', ['rar5'], fail=f)
             b.run('alt nested <- 7zenc', 'nested', ['7zenc'], fail=f)
+        # a volume set kept inside another archive
+        if 'nestedset' in b.packs:
+            b.run('alt rar5 <- nestedset', 'rar5', ['nestedset'], fail=f)
+            b.run('alt nestedset <- rar5', 'nestedset', ['rar5'], fail=f)
+            b.run('alt nestedset <- nested', 'nestedset', ['nested'], fail=f)
         # no duplicate at all: what the damage costs without borrowing
         b.run('no alt rar5 (fails)', 'rar5', [], fail=f)
     finally:

@@ -2217,6 +2217,24 @@ impl RsArticleWriter {
         let skip_disk_write = ints[11] != 0;
         let write_buffer_kb = ints[12];
         let articles_len = ints[15].max(0) as usize;
+        // Hold a damaged RAR volume before it appears under its final name, so a
+        // running direct unpack never reads it as healthy in the window before
+        // the file-downloaded callback records its holes.
+        if failed_articles > 0
+            && crate::filetypes::is_rar_file(&filename)
+            && host.qh.opts().direct_unpack
+        {
+            let nzb_id = host.qh.with_locked_queue(|_| {
+                host.qh.nzb_snap(host.qh.file_snap(host.file_ptr).nzb_ptr, false).id
+            });
+            let full = [
+                nzb_dest_dir.as_slice(),
+                &[crate::paths::PATH_SEPARATOR],
+                filename.as_slice(),
+            ]
+            .concat();
+            crate::postproc::direct_unpack_hold(nzb_id, &full);
+        }
 
         let mut has_own_out = false;
         let mut has_force_dest = false;
@@ -3880,6 +3898,55 @@ mod tests {
         drop(reservation);
         crate::parlive::forget_download_writes(-1_961_502);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn jobs_sharing_a_dest_dir_do_not_refuse_each_others_writes() {
+        let root = std::env::temp_dir().join(format!("rustyget-shared-dest-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let (a, b) = (-1_961_504, -1_961_505);
+        let first = crate::parlive::source_write_context(a, 40, &root, b"one.rar").unwrap();
+        let second = crate::parlive::source_write_context(b, 41, &root, b"two.rar").unwrap();
+        let (_file, _context, held) = first.open_attested(&root.join("one.rar"), true).unwrap();
+        let (_other, _context, _permit) = second.open_attested(&root.join("two.rar"), true).unwrap();
+        drop(held);
+        crate::parlive::forget_download_writes(a);
+        crate::parlive::forget_download_writes(b);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn direct_write_off_assembly_temp_is_this_files_output() {
+        let root = std::env::temp_dir().join(format!("rustyget-assembly-tmp-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let job = -1_961_506;
+        let context = crate::parlive::source_write_context(job, 40, &root, b"part40.rar").unwrap();
+        let path = root.join("part40.rar.tmp");
+        let mut file = BufferedDiskFile::open_guarded(path.as_os_str().as_bytes(), false, 64, 0, context).unwrap();
+        assert_eq!(file.write_bytes(b"assembled"), 9);
+        assert!(file.flush_and_close());
+        assert_eq!(std::fs::read(path).unwrap(), b"assembled");
+        crate::parlive::forget_download_writes(job);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_article_temporaries_of_one_job_do_not_conflict() {
+        let root = std::env::temp_dir().join(format!("rustyget-article-concurrent-src-{}", std::process::id()));
+        let scratch = std::env::temp_dir().join(format!("rustyget-article-concurrent-tmp-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&scratch).unwrap();
+        let job = -1_961_503;
+        let source = crate::parlive::source_write_context(job, 40, &root, b"part40.rar").unwrap();
+        let first = prepare_article_write_context(source.clone(), false, &scratch, 1).unwrap();
+        let second = prepare_article_write_context(source, false, &scratch, 2).unwrap();
+        // Another connection still holds its write permit for article 1.
+        let (_file, _context, held) = first.open_attested(&scratch.join("40.001.tmp"), true).unwrap();
+        let (_other, _context, _permit) = second.open_attested(&scratch.join("40.002.tmp"), true).unwrap();
+        drop(held);
+        crate::parlive::forget_download_writes(job);
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(scratch).unwrap();
     }
 
     #[test]

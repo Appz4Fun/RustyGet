@@ -719,9 +719,22 @@ pub(crate) fn article_writer_create_output_file_guarded(
     context: &crate::parlive::SourceWriteContext,
 ) -> Result<(), Vec<u8>> {
     let path = crate::fsops::path(c_bytes(output_filename));
+    // As in the unguarded path, the destination may not exist yet; the
+    // physical root is attested only after it does.
+    let base_off = crate::paths::base_file_name(output_filename).min(1023);
+    let dest_dir = &output_filename[..base_off];
+    let mut errmsg = Vec::new();
+    if !crate::fsops::force_directories(dest_dir, &mut errmsg, &crate::fsops::posix_stat) {
+        return Err(join_c_slices(&[
+            b"Could not create directory ",
+            dest_dir,
+            b": ",
+            &errmsg,
+        ]));
+    }
     let (file, context, _permit) = context
         .open_attested(path, true)
-        .map_err(|_| b"Output write ownership unavailable".to_vec())?;
+        .map_err(|error| format!("Output write ownership unavailable for {}: {error}", path.display()).into_bytes())?;
     let result = u64::try_from(size)
         .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))
         .and_then(|size| file.set_len(size))
@@ -1199,12 +1212,24 @@ pub(crate) fn article_writer_flush_cache_guarded(
         }
         let permit = match context.permit() {
             Ok(permit) => permit,
-            Err(_) => {
+            Err(crate::parlive::WriteBlocked::Certified) => {
                 // A sealed target already contains certified bytes. Drop stale cache data.
                 count += 1;
                 size += i64::from(item.segment_size);
                 discard(index);
                 continue;
+            }
+            Err(blocked) => {
+                // Never report uncommitted data as written.
+                count += 1;
+                discard(index);
+                let message = join_c_slices(&[
+                    b"Could not commit cached article for ",
+                    output_filename,
+                    format!(": write ownership unavailable ({blocked:?})").as_bytes(),
+                ]);
+                log_error(&message);
+                break;
             }
         };
         let result = (|| -> std::io::Result<()> {

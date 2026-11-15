@@ -59,7 +59,7 @@ impl SourceWriteContext {
             let current = SourceRoot::open(&temp.spelling, self.job)?;
             if current.identity != temp.root.identity { return Err(refused()); }
             let physical_path = temp.root.spelling.join(leaf);
-            if temp.coordinator.foreign_source_conflicts(&physical_path) { return Err(refused()); }
+            if temp.coordinator.foreign_source_conflicts(&physical_path, false) { return Err(refused()); }
             if Arc::ptr_eq(&source.coordinator, &temp.coordinator) { None } else {
                 let identity = WriterIdentity::Path(physical_path);
                 Some(temp.coordinator.writer_in_epoch(&identity, temp.epoch, false).map_err(blocked)?)
@@ -112,7 +112,7 @@ impl SourceWriteContext {
             let owner = canonical.as_ref().ok_or_else(refused)?;
             let retained = owner.physical_root().ok_or_else(refused)?;
             let path = retained.spelling.join(self.identity_path()?.file_name().ok_or_else(refused)?);
-            if owner.foreign_source_conflicts(&path) { return Err(refused()); }
+            if owner.foreign_source_conflicts(&path, !Arc::ptr_eq(owner, &self.coordinator)) { return Err(refused()); }
         }
         let owner = match canonical {
             Some(owner) if !Arc::ptr_eq(&owner, &self.coordinator) => {
@@ -179,7 +179,10 @@ impl SourceWriteContext {
                 bytes == temp.basename.as_bytes() || bytes.strip_suffix(b".tmp") == Some(temp.basename.as_bytes())
             })
         });
-        if actual != expected && !own_output && !article_temp {
+        let assembly = actual.parent() == expected.parent()
+            && matches!((expected.file_name(), actual.file_name()), (Some(e), Some(a))
+                if assembly_output_of(e.as_encoded_bytes(), a.as_encoded_bytes()));
+        if actual != expected && !own_output && !article_temp && !assembly {
             self.invalidate_identity();
             return Err(refused());
         }
@@ -283,6 +286,50 @@ impl SourceWriteContext {
             crate::parchecker::streaming_session_cancel(id);
         }
     }
+}
+
+/// Completion with DirectWrite off assembles into `name.tmp`, and a name
+/// collision makes it `make_unique_filename`'s `stem.duplicateN.ext`. Those are
+/// this queue file's own outputs, still subject to its certified identity.
+fn assembly_output_of(expected: &[u8], actual: &[u8]) -> bool {
+    let actual = actual.strip_suffix(b".tmp").unwrap_or(actual);
+    if actual == expected {
+        return true;
+    }
+    let digits = |middle: &[u8]| !middle.is_empty() && middle.iter().all(u8::is_ascii_digit);
+    let mut stem = expected;
+    let mut ext: &[u8] = b"";
+    if let Some(at) = expected.iter().rposition(|&b| b == b'.').filter(|&at| at > 0) {
+        stem = &expected[..at];
+        ext = &expected[at..];
+        if ext.eq_ignore_ascii_case(b".par2") {
+            if let Some(vol) = stem.iter().rposition(|&b| b == b'.').filter(|&v| v > 0) {
+                if stem[vol..].len() >= 4 && stem[vol..vol + 4].eq_ignore_ascii_case(b".vol") {
+                    ext = &expected[vol..];
+                    stem = &expected[..vol];
+                }
+            }
+        }
+    }
+    actual
+        .strip_prefix(stem)
+        .and_then(|rest| rest.strip_prefix(b".duplicate"))
+        .and_then(|rest| rest.strip_suffix(ext))
+        .is_some_and(digits)
+}
+
+#[cfg(test)]
+#[test]
+fn assembly_outputs_match_only_this_files_names() {
+    assert!(assembly_output_of(b"foo.rar", b"foo.rar.tmp"));
+    assert!(assembly_output_of(b"foo.rar", b"foo.duplicate1.rar"));
+    assert!(assembly_output_of(b"foo.rar", b"foo.duplicate12.rar.tmp"));
+    assert!(assembly_output_of(b"a.vol0+1.par2", b"a.duplicate2.vol0+1.par2"));
+    assert!(assembly_output_of(b"README", b"README.duplicate3"));
+    assert!(!assembly_output_of(b"foo.rar", b"bar.rar"));
+    assert!(!assembly_output_of(b"foo.rar", b"foo.duplicate.rar"));
+    assert!(!assembly_output_of(b"foo.rar", b"foo.duplicate1x.rar"));
+    assert!(!assembly_output_of(b"foo.rar", b"foo.r00"));
 }
 
 fn root_coordinator(

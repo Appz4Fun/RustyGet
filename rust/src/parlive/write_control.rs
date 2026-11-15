@@ -72,11 +72,16 @@ pub(crate) struct RepairWriteLease {
 }
 
 impl WriteCoordinator {
-    pub(super) fn foreign_source_conflicts(&self, path: &std::path::Path) -> bool {
+    /// `cross_job`: another download reaches this physical root. Its write
+    /// conflicts with any active pre-index writer, since leaves are unproven.
+    /// A job's own scratch temporaries only conflict with live state.
+    pub(super) fn foreign_source_conflicts(&self, path: &std::path::Path, cross_job: bool) -> bool {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let identity = WriterIdentity::Path(path.to_owned());
         if Self::is_certified(&state, &identity) { return true; }
-        if state.generation.0 == 0 && state.repair.is_none() && state.writers == 0 { return false; }
+        if state.generation.0 == 0 && state.repair.is_none() && (!cross_job || state.writers == 0) {
+            return false;
+        }
         let protected = state.namespace.as_ref().is_none_or(|proof| {
             path.file_name().is_none_or(|leaf| proof.protects_leaf(leaf.as_encoded_bytes()))
         });

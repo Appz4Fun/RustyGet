@@ -187,6 +187,18 @@ fn reserve_control_inner(
         .copied()
         .unwrap_or(0)
         .checked_add(bytes);
+    // Ordinary-write root control is accounted (so live reservations yield to
+    // it) but never refused by the live caps.
+    if pool_optional {
+        let budget = LIVE_BUDGET.acquire(bytes, pool_limit);
+        used.bytes = used.bytes.saturating_add(bytes);
+        *used.jobs.entry(nzb_id).or_insert(0) += bytes;
+        return Ok(ControlLease {
+            nzb_id,
+            bytes,
+            _budget: budget,
+        });
+    }
     if total.is_none_or(|n| n > 8 * MIB) {
         return Err(limit_error(
             "live control queue",
@@ -202,7 +214,7 @@ fn reserve_control_inner(
         ));
     }
     let budget = LIVE_BUDGET.acquire(bytes, pool_limit);
-    if budget.is_none() && !pool_optional {
+    if budget.is_none() {
         return Err(limit_error("shared live PAR reservation", bytes, pool_limit));
     }
     used.bytes = total.unwrap();

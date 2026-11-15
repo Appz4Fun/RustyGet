@@ -1119,3 +1119,28 @@ fn duplicate_names_keep_their_own_metadata() {
     assert_eq!(mode("script.sh") & 0o111, 0, "first copy keeps 0644");
     assert_eq!(mode("script_1.sh") & 0o111, 0o111, "second copy keeps 0755");
 }
+
+#[test]
+fn skip_mode_keeps_the_first_of_duplicate_names() {
+    // The first member has no checksum (held back), the second has one (placed at once):
+    // skipping existing files must still keep the first, as sequential extraction does.
+    let t = TestDir::new("firstwins");
+    let one = pattern(5_000);
+    let two: Vec<u8> = pattern(6_000).iter().map(|b| b ^ 0x11).collect();
+    let mut v = SIG.to_vec();
+    v.extend(main_block(false, None));
+    v.extend(file_block_no_crc("a.bin", &one));
+    v.extend(file_block("a.bin", two.len() as u64, &two, crc32fast::hash(&two), false, false));
+    v.extend(end_block(false));
+    let first = t.dl().join("first.rar");
+    std::fs::write(&first, &v).unwrap();
+    let req = Request {
+        first_volume: &first,
+        dest: &t.out(),
+        password: "",
+        overwrite: Overwrite::Skip,
+    };
+    let r = extract(&req, Box::new(Growing), &mut |_, _| {}, &mut || false);
+    expect_ok(r, &[]);
+    assert_eq!(std::fs::read(t.out().join("a.bin")).unwrap(), one);
+}

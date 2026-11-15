@@ -402,7 +402,9 @@ where
                     MemberOutcome::Provisional(mut a) => {
                         // Already verified by the session: move it into place now, so the file
                         // is available while later members extract and its slot is freed.
-                        if matches!(a.evidence(), ArtifactEvidence::Verified(_)) {
+                        let behind_earlier = req.overwrite == Overwrite::Skip
+                            && partial.iter().chain(provisional.iter()).any(|(m, _)| m.name == member.name);
+                        if matches!(a.evidence(), ArtifactEvidence::Verified(_)) && !behind_earlier {
                             match publish_copy(drive.session, &mut a, req, &member, false, is_cancelled, &mut published) {
                                 Ok(()) => {
                                     summary.files += 1;
@@ -450,8 +452,16 @@ where
             ProgressiveEvent::CapacityNeeded { .. } => {
                 // Retained provisional/partial artifacts hit the session's slot limit. Publish
                 // the provisional ones now to free slots; partial ones must wait for repair.
+                provisional.sort_by_key(|(m, _)| m.ordinal);
+                let mut keep = Vec::new();
                 for (member, mut a) in provisional.drain(..) {
-                    if superseded(&placed, &member, req) {
+                    let behind_earlier = req.overwrite == Overwrite::Skip
+                        && partial
+                            .iter()
+                            .any(|(m, _)| m.name == member.name && m.ordinal < member.ordinal);
+                    if behind_earlier {
+                        keep.push((member, a));
+                    } else if superseded(&placed, &member, req) {
                         let _ = a.discard();
                     } else if let Err(f) = publish_copy(drive.session, &mut a, req, &member, false, is_cancelled, &mut published) {
                         first_failure.get_or_insert(f);
@@ -460,6 +470,7 @@ where
                         note_placed(&mut placed, &member);
                     }
                 }
+                provisional = keep;
                 if partial.len() >= drive.session_artifact_limit() {
                     let f = Failure::Damaged("too many damaged members waiting for repair".into());
                     first_failure.get_or_insert(f);
@@ -488,82 +499,79 @@ where
         }
     }
 
-    for (member, mut a) in provisional.drain(..) {
-        if superseded(&placed, &member, req) {
-            let _ = a.discard();
-            continue;
-        }
-        match publish_copy(drive.session, &mut a, req, &member, false, is_cancelled, &mut published) {
-            Ok(()) => {
-                summary.files += 1;
-                note_placed(&mut placed, &member);
-            }
-            Err(f) => {
-                first_failure.get_or_insert(f);
-            }
-        }
-    }
-
-    if !partial.is_empty() && first_failure.is_none() {
-        let names: Vec<String> = partial
-            .iter()
-            .map(|(m, a)| {
-                format!(
-                    "{} ({} bytes missing)",
-                    String::from_utf8_lossy(&m.name),
-                    a.holes().iter().map(|h| h.len).sum::<u64>()
-                )
-            })
-            .collect();
+    // Deferred outputs go into place in archive order, so duplicate names resolve as in a
+    // sequential extraction: the first one wins when skipping, the last when overwriting.
+    let mut deferred: Vec<(Member, Artifact, bool)> = provisional
+        .drain(..)
+        .map(|(m, a)| (m, a, false))
+        .chain(partial.drain(..).map(|(m, a)| (m, a, true)))
+        .collect();
+    deferred.sort_by_key(|(m, _, _)| m.ordinal);
+    let damaged: Vec<String> = deferred
+        .iter()
+        .filter(|(_, _, is_partial)| *is_partial)
+        .map(|(m, a, _)| {
+            format!(
+                "{} ({} bytes missing)",
+                String::from_utf8_lossy(&m.name),
+                a.holes().iter().map(|h| h.len).sum::<u64>()
+            )
+        })
+        .collect();
+    let mut patch = false;
+    if !damaged.is_empty() && first_failure.is_none() {
         log_cb(
             0,
             &format!(
                 "Unrar: extracted past damage in {}; waiting for the volumes to be repaired",
-                names.join(", ")
+                damaged.join(", ")
             ),
         );
-        let repaired = feed
+        patch = feed
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .wait_repaired(is_cancelled);
-        if !repaired {
+        if !patch {
             first_failure = Some(if is_cancelled() {
                 Failure::Canceled
             } else {
                 Failure::Damaged("the damaged volumes were not repaired".into())
             });
-        } else {
-            for (member, mut a) in partial.drain(..) {
-                let name = member.name.clone();
-                if superseded(&placed, &member, req) {
-                    // A later member with the same name is already in place and wins.
-                    let _ = a.discard();
-                    continue;
-                }
-                match patch_from_repaired_volumes(drive.session, &mut a, &dir, req, &name, is_cancelled)
-                    .and_then(|()| publish_copy(drive.session, &mut a, req, &member, true, is_cancelled, &mut published))
-                {
-                    Ok(()) => {
-                        summary.files += 1;
-                        note_placed(&mut placed, &member);
-                        log_cb(
-                            0,
-                            &format!(
-                                "Unrar: repaired {} from the repaired volumes",
-                                String::from_utf8_lossy(&name)
-                            ),
-                        );
-                    }
-                    Err(f) => {
-                        log_cb(1, &unrar_error_line(&f, &name));
-                        first_failure.get_or_insert(f);
-                    }
-                }
-            }
         }
     }
-    for (_, mut a) in partial {
-        let _ = a.discard();
+    for (member, mut a, is_partial) in deferred {
+        let name = member.name.clone();
+        if (is_partial && !patch) || superseded(&placed, &member, req) {
+            let _ = a.discard();
+            continue;
+        }
+        let result = if is_partial {
+            patch_from_repaired_volumes(drive.session, &mut a, &dir, req, &name, is_cancelled)
+                .and_then(|()| publish_copy(drive.session, &mut a, req, &member, true, is_cancelled, &mut published))
+        } else {
+            publish_copy(drive.session, &mut a, req, &member, false, is_cancelled, &mut published)
+        };
+        match result {
+            Ok(()) => {
+                summary.files += 1;
+                note_placed(&mut placed, &member);
+                if is_partial {
+                    log_cb(
+                        0,
+                        &format!(
+                            "Unrar: repaired {} from the repaired volumes",
+                            String::from_utf8_lossy(&name)
+                        ),
+                    );
+                }
+            }
+            Err(f) => {
+                if is_partial {
+                    log_cb(1, &unrar_error_line(&f, &name));
+                }
+                first_failure.get_or_insert(f);
+            }
+        }
     }
 
     match first_failure {

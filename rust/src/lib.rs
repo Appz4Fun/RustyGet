@@ -77,6 +77,7 @@ pub mod statmeter;
 pub mod certtools;
 pub mod systemhealth;
 pub mod backbones;
+pub mod addrpick;
 pub mod hostlookup;
 pub mod sysmetrics;
 pub mod text;

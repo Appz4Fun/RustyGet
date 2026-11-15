@@ -4527,6 +4527,8 @@ fn xmlrpc_parse_test_server_cursor(
             let cipher_off = cur.next_str()?;
             let timeout = cur.next_int()?;
             let cert_verif_level = cur.next_int()?;
+            // optional: an address to connect to (a per-address login check)
+            let address_off = cur.next_str();
             let host = cur.decode_at(host_off, is_json);
             let username = cur.decode_at(user_off, is_json);
             let password = cur.decode_at(pass_off, is_json);
@@ -4540,6 +4542,7 @@ fn xmlrpc_parse_test_server_cursor(
                 cipher,
                 timeout,
                 cert_verif_level,
+                address: address_off.map(|off| cur.decode_at(off, is_json)).unwrap_or_default(),
             })
         })();
         match parsed {
@@ -6240,6 +6243,7 @@ unsafe fn execute_xml_command(
                     let user_c = to_c_vec(&ts.username);
                     let pass_c = to_c_vec(&ts.password);
                     let cipher_c = to_c_vec(&ts.cipher);
+                    let address_c = to_c_vec(&ts.address);
                     let mut out_buf = RsBuf {
                         data: std::ptr::null_mut(),
                         len: 0,
@@ -6256,8 +6260,8 @@ unsafe fn execute_xml_command(
                             user_c.as_ptr().cast(),
                             pass_c.as_ptr().cast(),
                             cipher_c.as_ptr().cast(),
-                            std::ptr::null(),
-                            0,
+                            address_c.as_ptr().cast(),
+                            address_c.len() - 1,
                             &[],
                             &[],
                             std::ptr::null_mut(),

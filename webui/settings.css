@@ -768,3 +768,10 @@
 #ConfigContent .config-backbone__hint[data-state="warn"] { border-left-color: var(--warning, #b7791f); }
 #ConfigContent .config-backbone__hint p { margin: 0; overflow-wrap: anywhere; }
 #ConfigContent .config-backbone__picks { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-2) !important; }
+
+/* Server address picker: per-address login check */
+#ConfigContent .config-host-lookup__actions { margin-top: var(--space-2) !important; }
+#ConfigContent .config-host-lookup__check { grid-column: 2; font-size: 12px; overflow-wrap: anywhere; color: var(--label-secondary); }
+#ConfigContent .config-host-lookup__check[hidden] { display: none; }
+#ConfigContent .config-host-lookup__check[data-state="ok"] { color: var(--success, #2e7d32); }
+#ConfigContent .config-host-lookup__check[data-state="error"] { color: var(--danger, #c0392b); }

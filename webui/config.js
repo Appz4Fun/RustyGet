@@ -5064,6 +5064,11 @@ var Config = (new function($)
 		}
 	}
 
+	function addressOption(box)
+	{
+		return findOptionByName('Server' + parseInt(box.attr('data-multiid'), 10) + '.Address');
+	}
+
 	function renderHostLookup(box, host, result)
 	{
 		box.data('result', result).data('resultHost', host);
@@ -5074,15 +5079,18 @@ var Config = (new function($)
 			return;
 		}
 		var name = box.data('hostName');
-		var pinned = isIpLiteral(host);
+		// an address typed as Host (the old way to pin one) still works, without the name for TLS
+		var literal = isIpLiteral(host);
+		var addrOption = addressOption(box);
+		var current = literal ? host : $.trim(addrOption ? getOptionValue(addrOption) || '' : '');
 		// a server set to IPv4 or IPv6 only can't use an address of the other kind
 		var family = serverIpVersion(box);
 		var addresses = (result.Addresses || []).filter(function(address)
 		{
-			return !family || ipFamily(address.IP) === family || (pinned && address.IP === host);
+			return !family || ipFamily(address.IP) === family || address.IP === current;
 		});
 		var head = $('<p class="config-host-lookup__head"></p>');
-		head.text(pinned ? hostText('pinned', 'Always using this address') + (name ? ' (' + name + ')' : '') :
+		head.text(literal ? hostText('literal', 'Host is an address') + (name ? ' (' + name + ')' : '') :
 			addresses.length === 1 ? hostText('one', '1 address for') + ' ' + host :
 			addresses.length + ' ' + hostText('many', 'addresses for') + ' ' + host);
 		box.append(head);
@@ -5091,17 +5099,32 @@ var Config = (new function($)
 		var choice = function(value, checked, main, details)
 		{
 			var label = $('<label class="config-host-lookup__item"><input type="radio"><span class="config-host-lookup__main"></span>' +
-				'<span class="config-host-lookup__details"></span></label>');
+				'<span class="config-host-lookup__details"></span><span class="config-host-lookup__check" hidden></span></label>');
+			label.attr('data-ip', value);
 			label.find('input').attr({ name: group, value: value }).prop('checked', checked);
 			label.find('.config-host-lookup__main').text(main);
 			label.find('.config-host-lookup__details').text(details || '');
 			list.append(label);
 		};
-		if (!pinned || name)
+		if (literal)
 		{
-			choice('', !pinned, pinned ? hostText('use_name', 'Use the name again') + ': ' + name : hostText('any', 'Any of them (recommended)'),
-				pinned ? '' : hostText('any_text', 'RustyGet picks, and follows the provider if the addresses change.'));
+			if (!name)
+			{
+				box.append($('<p class="config-host-lookup__note"></p>').text(hostText('literal_text',
+					'Type the host name instead and pick this address below: the name is then kept for the certificate check.')));
+			}
+			if (name)
+			{
+				choice('\u0001name', false, hostText('use_name', 'Use the name again') + ': ' + name,
+					hostText('use_name_text', 'Keeps this address as the first to try, and the name for the certificate check.'));
+			}
 		}
+		else
+		{
+			choice('', !current, hostText('auto', 'Auto: the fastest (recommended)'),
+				hostText('auto_text', 'RustyGet times each address, uses the fastest, and follows the provider if the addresses change.'));
+		}
+		var listed = false;
 		addresses.forEach(function(address)
 		{
 			var where = [];
@@ -5109,17 +5132,25 @@ var Config = (new function($)
 			if (address.ASN) where.push('AS' + address.ASN + (address.Org ? ' ' + address.Org : ''));
 			where.push(address.LatencyMs === null || address.LatencyMs === undefined ? hostText('no_answer', 'no answer') :
 				Math.round(address.LatencyMs) + ' ms');
-			choice(address.IP, pinned && address.IP === host, address.IP, where.join(' · '));
+			listed = listed || address.IP === current;
+			choice(address.IP, address.IP === current, address.IP, where.join(' · '));
 		});
+		if (current && !listed && !literal)
+		{
+			choice(current, true, current, hostText('gone', 'Not an address of this host now: skipped unless the certificate is checked strictly.'));
+		}
 		if (list.children().length)
 		{
 			box.append(list);
 		}
 		list.on('change', 'input', function() { pickHostAddress(box, this.value); });
-		if (pinned && box.data('certWasStrict'))
+		if (!literal && addresses.length)
 		{
-			box.append($('<p class="config-host-lookup__cert"></p>').text(hostText('cert_minimal',
-				'Certificate check is now Minimal: the certificate names the host, not this address.')));
+			$('<p class="config-host-lookup__actions"></p>').append(
+				$('<button type="button" class="btn btn-small config-host-lookup__login"></button>')
+					.text(hostText('check_login', 'Check login on each address'))
+					.on('click', function() { checkAddressLogins(box, this); }))
+				.appendTo(box);
 		}
 		box.append($('<p class="config-host-lookup__source"></p>').append(result.GeoIP ?
 			$('<a href="https://db-ip.com" target="_blank" rel="noopener"></a>').text(hostText('source', 'IP location data by DB-IP')) :
@@ -5139,47 +5170,106 @@ var Config = (new function($)
 		return value === 'ipv4' || value === 'ipv6' ? value : '';
 	}
 
-	// Picking an address writes it as Host. The certificate names the host, not the
-	// address, so a strict certificate check drops to Minimal (the signature is still checked).
+	// Picking an address writes it as Address (empty is Auto); Host keeps the name, so the
+	// certificate check is unchanged. On a server whose Host is an address (the old way to
+	// pin one), "Use the name again" moves that address to Address and the name back to Host.
 	function pickHostAddress(box, ip)
 	{
 		var multiid = parseInt(box.attr('data-multiid'), 10);
 		var hostOption = findOptionByName('Server' + multiid + '.Host');
-		var name = box.data('hostName');
-		var value = ip || name;
-		if (!hostOption || !value)
+		var addrOption = addressOption(box);
+		if (!hostOption || !addrOption)
 		{
 			return;
 		}
-		$('#' + hostOption.formId).val(value);
-		var family = serverIpVersion(box);
-		var ipVersion = findOptionByName('Server' + multiid + '.IpVersion');
-		if (ip && family && ipFamily(ip) !== family && ipVersion)
+		var oldHost = $.trim(getOptionValue(hostOption) || '');
+		if (ip === '\u0001name' || (ip && isIpLiteral(oldHost)))
 		{
-			// an address of the other kind (a list shown before IP version was changed) needs Automatic
-			setOptionValue(ipVersion, 'auto');
-		}
-		var cert = findOptionByName('Server' + multiid + '.CertVerification');
-		var encryption = findOptionByName('Server' + multiid + '.Encryption');
-		if (ip && cert && encryption && String(getOptionValue(encryption)).toLowerCase() === 'yes' &&
-			String(getOptionValue(cert)).toLowerCase() === 'strict')
-		{
-			setOptionValue(cert, 'Minimal');
-			box.data('certWasStrict', true);
-		}
-		else if (!ip && cert && box.data('certWasStrict'))
-		{
-			// back to the name: Strict again, unless the check was changed by hand since
-			if (String(getOptionValue(cert)).toLowerCase() === 'minimal')
+			// Address is not used while Host is an address: picking one moves the name back to
+			// Host and the pick to Address, or, with no name known, writes the pick as Host
+			var name = box.data('hostName');
+			var pick = ip === '\u0001name' ? oldHost : ip;
+			if (!name && ip === '\u0001name')
+			{
+				return;
+			}
+			$('#' + hostOption.formId).val(name || ip);
+			if (!name)
+			{
+				pick = '';
+			}
+			setOptionValue(addrOption, isIpLiteral(pick) ? pick : '');
+			var cert = findOptionByName('Server' + multiid + '.CertVerification');
+			if (name && cert && box.data('certWasStrict') && String(getOptionValue(cert)).toLowerCase() === 'minimal')
 			{
 				setOptionValue(cert, 'Strict');
 			}
 			box.removeData('certWasStrict');
 		}
+		else
+		{
+			setOptionValue(addrOption, ip);
+			var family = serverIpVersion(box);
+			var ipVersion = findOptionByName('Server' + multiid + '.IpVersion');
+			if (ip && family && ipFamily(ip) !== family && ipVersion)
+			{
+				// an address of the other kind (a list shown before IP version was changed) needs Automatic
+				setOptionValue(ipVersion, 'auto');
+			}
+		}
 		refreshChangeState();
 		refreshListRows();
 		clearTimeout(box.data('timer'));
 		lookupHost(box, true);
+	}
+
+	// Logs in on each listed address, one at a time (each check sends QUIT when done), with
+	// the server's current username, password and encryption settings.
+	function checkAddressLogins(box, button)
+	{
+		var multiid = parseInt(box.attr('data-multiid'), 10);
+		var value = function(field)
+		{
+			var option = findOptionByName('Server' + multiid + '.' + field);
+			return option ? getOptionValue(option) : '';
+		};
+		var host = $.trim(value('Host') || '');
+		var rows = box.find('.config-host-lookup__item').filter(function() { return isIpLiteral($(this).attr('data-ip') || ''); }).toArray();
+		var seq = box.data('seq');
+		var timeout = Math.min(parseInt(getOptionValue(findOptionByName('ArticleTimeout')), 10) || 10, 10);
+		$(button).prop('disabled', true);
+		var next = function()
+		{
+			var row = $(rows.shift());
+			if (!row.length || seq !== box.data('seq'))
+			{
+				$(button).prop('disabled', false);
+				return;
+			}
+			var mark = row.find('.config-host-lookup__check').prop('hidden', false)
+				.attr('data-state', 'busy').text(hostText('checking', 'checking…'));
+			var done = function(state, text)
+			{
+				if (seq === box.data('seq'))
+				{
+					mark.attr('data-state', state).text(text);
+				}
+				next();
+			};
+			RPC.call('testserver', [host, parseInt(value('Port'), 10), value('Username'), value('Password'),
+				String(value('Encryption')).toLowerCase() === 'yes', value('Cipher'), timeout,
+				getCertVerifLevel(value('CertVerification')), row.attr('data-ip')],
+				function(errtext)
+				{
+					if (errtext === '') done('ok', hostText('login_ok', 'login OK'));
+					else done('error', String(errtext));
+				},
+				function(message, result)
+				{
+					done('error', result && result.error && result.error.message ? String(result.error.message) : String(message));
+				}, { timeout: (timeout + 5) * 1000 });
+		};
+		next();
 	}
 
 	/*** RSS FEEDS ********************************************************************/

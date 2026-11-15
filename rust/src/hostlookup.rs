@@ -99,6 +99,15 @@ pub fn locate(address: &mut Address, country: Option<&mmdb::Reader>, asn: Option
 /// Resolves `host` (a name or a literal address), at most `MAX_ADDRESSES`, IPv4 first.
 /// An IPv6 link-local address keeps its interface (`fe80::1%eth0`), for timing and as Host.
 pub fn resolve(host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
+    let ips = pick_addresses(resolve_all(host, port)?);
+    if ips.is_empty() {
+        return Err(format!("{} has no addresses", host.trim()));
+    }
+    Ok(ips)
+}
+
+/// Every address of `host`, without duplicates, in the resolver's order.
+pub fn resolve_all(host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
     let host = host.trim().trim_start_matches('[').trim_end_matches(']');
     if host.is_empty()
         || host.len() > 253
@@ -115,16 +124,12 @@ pub fn resolve(host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
             ips.push(addr);
         }
     }
-    let ips = pick_addresses(ips);
-    if ips.is_empty() {
-        return Err(format!("{host} has no addresses"));
-    }
     Ok(ips)
 }
 
 /// At most `MAX_ADDRESSES`, IPv4 first, keeping room for both kinds when there are both:
 /// a server set to IPv6 only still has its IPv6 addresses to pick from.
-fn pick_addresses(ips: Vec<SocketAddr>) -> Vec<SocketAddr> {
+pub fn pick_addresses(ips: Vec<SocketAddr>) -> Vec<SocketAddr> {
     let (v4, v6): (Vec<SocketAddr>, Vec<SocketAddr>) = ips.into_iter().partition(SocketAddr::is_ipv4);
     let v6_room = v6.len().min(MAX_ADDRESSES / 2).max(MAX_ADDRESSES.saturating_sub(v4.len()));
     let v4_take = v4.len().min(MAX_ADDRESSES - v6_room.min(v6.len()));

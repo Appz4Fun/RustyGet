@@ -518,6 +518,8 @@ pub struct ServerParams {
     pub cipher: Vec<u8>,
     pub timeout: i32,
     pub cert_verif_level: i32,
+    /// Optional ninth parameter: connect to this address, keeping `host` for TLS.
+    pub address: Vec<u8>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -562,6 +564,10 @@ pub fn test_server_params(
             cipher: string(&params[5])?,
             timeout: params[6].to_i32()?,
             cert_verif_level: params[7].to_i32()?,
+            address: match params.get(8) {
+                None | Some(Value::Null) => Vec::new(),
+                Some(v) => string(v)?,
+            },
         })
     })();
     parsed.ok_or(ServerParamsError::Params)

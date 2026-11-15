@@ -169,6 +169,17 @@ const { installDetailsFixture } = require('./details-fixture');
         await page.waitForFunction(() => /2 addresses for news/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
       });
 
+      await check('switching IP version while another host is looked up shows no old addresses', async () => {
+        await host.fill('slow.example.com');
+        await page.waitForFunction(() => /Looking up slow/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
+        await ipVersion('ipv4');
+        assert.doesNotMatch(await box.textContent(), /192\.0\.2\.10/, 'the reply for news.example.com is not shown for slow.example.com');
+        await page.waitForFunction(() => /198\.51\.100\.7/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
+        await ipVersion('auto');
+        await host.fill('news.example.com');
+        await page.waitForFunction(() => /2 addresses for news/.test($('.config-host-lookup[data-multiid="1"]').text()), null, { timeout: 5000 });
+      });
+
       await check('moving a server keeps its lookup with it', async () => {
         await page.evaluate(() => Config.moveSet($('<a data-multiid="1"></a>')[0], 'Server', 'NEWS-SERVERS', 'down'));
         await page.waitForTimeout(200);

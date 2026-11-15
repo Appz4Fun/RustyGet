@@ -1501,3 +1501,152 @@ fn rar4_lz_damage_is_reported_not_skipped() {
     }
     assert!(!t.out().join("m.bin").exists());
 }
+
+#[test]
+fn after_repair_zipfast_moves_the_patched_file_into_place() {
+    let t = TestDir::new("renameafter");
+    let data = pattern(600_000);
+    let chunk = 100_000;
+    let vols = rar5_volumes("movie.mkv", &data, chunk);
+    let first = write_set(&t.dl(), &vols);
+    let v3 = t.dl().join(volume_name(2, vols.len()));
+    let p3 = payload_offset(&vols[2], chunk) as u64;
+    let mut dmg = vols[2].clone();
+    dmg[(p3 + 10_000) as usize..(p3 + 30_000) as usize].fill(0);
+    std::fs::write(&v3, &dmg).unwrap();
+    // Repaired in place: same file, so the volumes can be declared protected afterwards.
+    struct InPlace(PathBuf, u64, Vec<u8>);
+    impl VolumeFeed for InPlace {
+        fn volume(&mut self, path: &Path) -> VolumeView {
+            if path == self.0 {
+                VolumeView::Ready { holes: vec![(self.1, 20_000)] }
+            } else if path.is_file() {
+                VolumeView::Ready { holes: Vec::new() }
+            } else {
+                VolumeView::Missing
+            }
+        }
+        fn wait_repaired(&mut self, _c: &mut dyn FnMut() -> bool) -> bool {
+            use std::io::{Seek, SeekFrom, Write};
+            let mut f = std::fs::OpenOptions::new().write(true).open(&self.0).unwrap();
+            f.seek(SeekFrom::Start(self.1)).unwrap();
+            f.write_all(&self.2).unwrap();
+            true
+        }
+    }
+    let original = vols[2][(p3 + 10_000) as usize..(p3 + 30_000) as usize].to_vec();
+    let (r, log) = run(&first, &t.out(), Box::new(InPlace(v3, p3 + 10_000, original)));
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+    assert!(
+        log.iter().any(|l| l.contains("moved into place instead of copied")),
+        "{log:?}"
+    );
+}
+
+#[test]
+fn a_repair_that_replaced_a_volume_file_keeps_the_copy_path() {
+    // The Damaged feed rewrites volume files with std::fs::write (same inode on most
+    // filesystems), so replace the file explicitly: new inode, protection must not upgrade.
+    let t = TestDir::new("replaced");
+    let data = pattern(300_000);
+    let chunk = 100_000;
+    let vols = rar5_volumes("movie.mkv", &data, chunk);
+    let first = write_set(&t.dl(), &vols);
+    let v2 = t.dl().join(volume_name(1, vols.len()));
+    let p2 = payload_offset(&vols[1], chunk) as u64;
+    let mut dmg = vols[1].clone();
+    dmg[(p2 + 5_000) as usize..(p2 + 6_000) as usize].fill(0);
+    std::fs::write(&v2, &dmg).unwrap();
+    struct Replace(PathBuf, u64, Vec<u8>);
+    impl VolumeFeed for Replace {
+        fn volume(&mut self, path: &Path) -> VolumeView {
+            if path == self.0 {
+                VolumeView::Ready { holes: vec![(self.1, 1_000)] }
+            } else if path.is_file() {
+                VolumeView::Ready { holes: Vec::new() }
+            } else {
+                VolumeView::Missing
+            }
+        }
+        fn wait_repaired(&mut self, _c: &mut dyn FnMut() -> bool) -> bool {
+            let tmp = self.0.with_extension("new");
+            std::fs::write(&tmp, &self.2).unwrap();
+            std::fs::rename(&tmp, &self.0).unwrap();
+            true
+        }
+    }
+    let (r, log) = run(&first, &t.out(), Box::new(Replace(v2, p2 + 5_000, vols[1].clone())));
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+    assert!(
+        !log.iter().any(|l| l.contains("moved into place instead of copied")),
+        "{log:?}"
+    );
+}
+
+/// Timing of a post-repair patch on a large stored set (run by hand:
+/// `RG_PATCH_TIMING_MB=1000 cargo test --release --lib patch_timing -- --ignored --nocapture`).
+#[test]
+#[ignore]
+fn patch_timing() {
+    let mb: usize = std::env::var("RG_PATCH_TIMING_MB").ok().and_then(|v| v.parse().ok()).unwrap_or(200);
+    let t = TestDir::new("timing");
+    let data = pattern(mb << 20);
+    let chunk = 50 << 20;
+    let vols = rar5_volumes("movie.mkv", &data, chunk);
+    let first = write_set(&t.dl(), &vols);
+    let k = vols.len() / 2;
+    let vk = t.dl().join(volume_name(k, vols.len()));
+    let pk = payload_offset(&vols[k], chunk.min(vols[k].len())) as u64;
+    let lost = (pk + (3 << 20), 2u64 << 20);
+    let mut dmg = vols[k].clone();
+    dmg[lost.0 as usize..(lost.0 + lost.1) as usize].fill(0);
+    std::fs::write(&vk, &dmg).unwrap();
+    let original = vols[k][lost.0 as usize..(lost.0 + lost.1) as usize].to_vec();
+    drop(vols);
+    struct InPlace(PathBuf, u64, u64, Vec<u8>);
+    impl VolumeFeed for InPlace {
+        fn volume(&mut self, path: &Path) -> VolumeView {
+            if path == self.0 {
+                VolumeView::Ready { holes: vec![(self.1, self.2)] }
+            } else if path.is_file() {
+                VolumeView::Ready { holes: Vec::new() }
+            } else {
+                VolumeView::Missing
+            }
+        }
+        fn wait_repaired(&mut self, _c: &mut dyn FnMut() -> bool) -> bool {
+            use std::io::{Seek, SeekFrom, Write};
+            let mut f = std::fs::OpenOptions::new().write(true).open(&self.0).unwrap();
+            f.seek(SeekFrom::Start(self.1)).unwrap();
+            f.write_all(&self.3).unwrap();
+            f.sync_all().unwrap();
+            true
+        }
+    }
+    let mut repaired_at = None;
+    let started = std::time::Instant::now();
+    let req = Request {
+        first_volume: &first,
+        dest: &t.out(),
+        password: "",
+        overwrite: Overwrite::Always,
+        on_wait: None,
+    };
+    let r = extract(
+        &req,
+        Box::new(InPlace(vk, lost.0, lost.1, original)),
+        &mut |_, m: &str| {
+            if m.contains("waiting for the volumes to be repaired") {
+                repaired_at = Some(std::time::Instant::now());
+            }
+        },
+        &mut || false,
+    );
+    let total = started.elapsed();
+    expect_ok(r, &[]);
+    let patch = repaired_at.map(|t0| t0.elapsed()).unwrap_or_default();
+    assert_eq!(std::fs::metadata(t.out().join("movie.mkv")).unwrap().len(), data.len() as u64);
+    eprintln!("PATCH_TIMING mb={mb} total={:.2}s patch_and_publish={:.2}s", total.as_secs_f64(), patch.as_secs_f64());
+}

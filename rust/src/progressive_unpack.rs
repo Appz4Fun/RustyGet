@@ -324,11 +324,14 @@ where
     let volume_count = protected
         .as_ref()
         .map_or(expected, |inv| (inv.volumes.len() as u64).max(expected));
+    let protection: ProtectionSlot = Arc::new(Mutex::new(protected));
+    let opened: OpenedVolumes = Arc::new(Mutex::new(Vec::new()));
     let provider = FeedProvider {
         dir: dir.clone(),
         feed: feed.clone(),
         pending: pending.clone(),
-        protected,
+        protection: protection.clone(),
+        opened: opened.clone(),
     };
     let mut opts = ProgressiveOptions::new(
         zipfast::extract::Options {
@@ -627,6 +630,16 @@ where
             });
         }
     }
+    if !deferred.is_empty()
+        && first_failure.is_none()
+        && req.overwrite != Overwrite::Rename
+        && upgrade_protection(req.first_volume, &protection, &opened)
+    {
+        log_cb(
+            4,
+            "Unrar: all volumes on disk; verified files are moved into place instead of copied",
+        );
+    }
     for (member, mut a, is_partial) in deferred {
         let name = member.name.clone();
         if (is_partial && !patch) || superseded(&placed, &member, req) {
@@ -634,7 +647,7 @@ where
             continue;
         }
         let result = if is_partial {
-            patch_from_repaired_volumes(drive.session, &mut a, &dir, req, &member, is_cancelled)
+            patch_from_repaired_volumes(drive.session, &mut a, &dir, req, &member, is_cancelled, log_cb)
                 .and_then(|()| publish_copy(drive.session, &mut a, req, &member, true, is_cancelled, &mut published))
         } else {
             publish_copy(drive.session, &mut a, req, &member, false, is_cancelled, &mut published)
@@ -819,6 +832,7 @@ fn patch_from_repaired_volumes(
     req: &Request<'_>,
     member: &Member,
     is_cancelled: &mut dyn FnMut() -> bool,
+    log_cb: &mut dyn FnMut(i32, &str),
 ) -> Result<(), Failure> {
     let name = member.name.as_slice();
     use crate::streamrepair::{ContentMapper, DiskSourceSet, MemberFormat};
@@ -850,6 +864,14 @@ fn patch_from_repaired_volumes(
     let Some(map) = map.filter(|m| {
         m.inner_name_bytes() == base && Some(m.inner_size() as u64) == artifact.size()
     }) else {
+        // This re-extracts the whole repaired set: worth knowing when a patch is slow.
+        log_cb(
+            0,
+            &format!(
+                "Unrar: {} is not the set's main payload; extracting the repaired set again to patch it",
+                String::from_utf8_lossy(name)
+            ),
+        );
         return patch_by_reextracting(session, artifact, req, member, is_cancelled);
     };
     let mut buf = Vec::new();
@@ -1065,24 +1087,43 @@ fn publish_copy(
         }
     };
     if !verified {
-        let waker = Waker::noop();
-        let mut cx = Context::from_waker(waker);
+        // zipfast yields once per bounded chunk and wakes the task when it can go on; park only
+        // when it has not, and never sleep a fixed time per chunk.
+        let parker = Arc::new(Parker {
+            thread: std::thread::current(),
+            woken: AtomicBool::new(false),
+        });
+        let waker = Waker::from(parker.clone());
+        let mut cx = Context::from_waker(&waker);
         loop {
             if is_cancelled() {
                 session.control().cancel();
                 let _ = artifact.discard();
                 return Err(Failure::Canceled);
             }
+            parker.woken.store(false, Ordering::Release);
             match session.poll_verify(artifact, &mut cx) {
                 Poll::Ready(Ok(_)) => break,
                 Poll::Ready(Err(e)) => {
                     let _ = artifact.discard();
                     return Err(Failure::from_progressive(&e));
                 }
-                Poll::Pending => std::thread::sleep(Duration::from_millis(1)),
+                Poll::Pending => {
+                    if !parker.woken.load(Ordering::Acquire) {
+                        std::thread::park_timeout(PARK_SLICE);
+                    }
+                }
             }
         }
         if artifact.publication() != ArtifactPublication::Unpublished {
+            return Ok(());
+        }
+        // A repaired encrypted member verifies on its plaintext only; with the volumes
+        // protected zipfast can still publish it itself.
+        if matches!(artifact.evidence(), ArtifactEvidence::Verified(_))
+            && session.publish_recovered(artifact).is_ok()
+            && artifact.publication() != ArtifactPublication::Unpublished
+        {
             return Ok(());
         }
         if !matches!(artifact.evidence(), ArtifactEvidence::Verified(_)) {
@@ -1327,7 +1368,58 @@ struct FeedProvider {
     dir: PathBuf,
     feed: Arc<Mutex<Box<dyn VolumeFeed>>>,
     pending: PendingWait,
-    protected: Option<zipfast::progressive::ProtectionInventory>,
+    protection: ProtectionSlot,
+    opened: OpenedVolumes,
+}
+
+/// The protection declaration handed to zipfast: `None` (opaque) until the set is known to be
+/// complete on disk, then the protected native volumes. zipfast accepts one opaque-to-complete
+/// upgrade and no later change.
+type ProtectionSlot = Arc<Mutex<Option<zipfast::progressive::ProtectionInventory>>>;
+/// Each volume handed to the session, with the (device, inode) of the file it read.
+type OpenedVolumes = Arc<Mutex<Vec<(PathBuf, (u64, u64))>>>;
+
+fn file_identity(meta: &std::fs::Metadata) -> (u64, u64) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        (meta.dev(), meta.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        (0, 0)
+    }
+}
+
+/// Once every volume is on disk (after the session read them all and the damage is repaired),
+/// declares them as protected native files. zipfast then publishes verified members itself by
+/// renaming them into place, instead of RustyGet copying each one. Only done when every volume
+/// is still the file the session read: a repair that replaced a volume file would make zipfast
+/// refuse the declaration, so those sets keep the copy path.
+fn upgrade_protection(first: &Path, slot: &ProtectionSlot, opened: &OpenedVolumes) -> bool {
+    let mut slot = slot.lock().unwrap_or_else(|e| e.into_inner());
+    if slot.is_some() {
+        return true;
+    }
+    let opened = opened.lock().unwrap_or_else(|e| e.into_inner());
+    if opened.is_empty() {
+        return false;
+    }
+    for (path, id) in opened.iter() {
+        match std::fs::metadata(path) {
+            Ok(meta) if file_identity(&meta) == *id => {}
+            _ => return false,
+        }
+    }
+    let Some(inventory) = protect_volumes(first) else {
+        return false;
+    };
+    if inventory.volumes.len() < opened.len() {
+        return false;
+    }
+    *slot = Some(inventory);
+    true
 }
 
 /// The volumes of the set starting at `first`, opened, as a protection inventory. `None` when a
@@ -1370,14 +1462,21 @@ impl VolumeSource for FeedProvider {
         let path = self.dir.join(&request.expected);
         let mut feed = self.feed.lock().unwrap_or_else(|e| e.into_inner());
         match feed.volume(&path) {
-            VolumeView::Ready { holes } => Ok(VolumeAnswer::Ready(Box::new(
-                HoledVolume::open(&path, holes).map_err(|cause| {
+            VolumeView::Ready { holes } => {
+                let volume = HoledVolume::open(&path, holes).map_err(|cause| {
                     ProgressiveFailure::new(FailureKind::Input {
                         operation: zipfast::progressive::InputOperation::Open,
                         cause,
                     })
-                })?,
-            ))),
+                })?;
+                if let Ok(meta) = volume.file.metadata() {
+                    self.opened
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push((path.clone(), file_identity(&meta)));
+                }
+                Ok(VolumeAnswer::Ready(Box::new(volume)))
+            }
             VolumeView::NotYet => {
                 // The driver asks the feed again while parked and wakes the session when the
                 // volume's state changes.
@@ -1390,7 +1489,8 @@ impl VolumeSource for FeedProvider {
     }
 
     fn protection(&mut self) -> ProgressiveResult<zipfast::progressive::ProtectionDeclaration> {
-        Ok(match &self.protected {
+        let protected = self.protection.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(match &*protected {
             Some(inventory) => zipfast::progressive::ProtectionDeclaration::Complete {
                 epoch: 1,
                 inventory: inventory.clone(),

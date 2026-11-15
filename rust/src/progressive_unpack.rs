@@ -619,11 +619,12 @@ struct MemberMeta {
     mtime: Option<(i64, u32)>,
 }
 
-/// Member metadata by volume, each volume's headers read once.
+/// Member metadata by volume, each volume's headers read once. Members with the same name get
+/// their own header's metadata, in archive order.
 #[derive(Default)]
 struct MetaCache {
     volume: PathBuf,
-    members: std::collections::HashMap<Vec<u8>, MemberMeta>,
+    members: std::collections::HashMap<Vec<u8>, std::collections::VecDeque<MemberMeta>>,
 }
 
 impl MetaCache {
@@ -632,24 +633,33 @@ impl MetaCache {
             self.volume = volume.to_path_buf();
             self.members = volume_metadata(volume, password);
         }
-        self.members.get(name).copied().unwrap_or_default()
+        self.members
+            .get_mut(name)
+            .and_then(|q| q.pop_front())
+            .unwrap_or_default()
     }
 }
 
-/// Every member header in `volume`, for the metadata zipfast restores only on the outputs it
-/// publishes itself.
-fn volume_metadata(volume: &Path, password: &str) -> std::collections::HashMap<Vec<u8>, MemberMeta> {
+/// The headers of members that start in `volume` (not continuations), in order, for the
+/// metadata zipfast restores only on the outputs it publishes itself.
+fn volume_metadata(
+    volume: &Path,
+    password: &str,
+) -> std::collections::HashMap<Vec<u8>, std::collections::VecDeque<MemberMeta>> {
     use zipfast::rar5::reader::{Block, Volume};
-    let mut out = std::collections::HashMap::new();
+    let mut out: std::collections::HashMap<Vec<u8>, std::collections::VecDeque<MemberMeta>> =
+        std::collections::HashMap::new();
     let pw = (!password.is_empty()).then_some(password);
     if let Ok(mut vol) = Volume::open_with_password(volume, pw) {
         for _ in 0..1_000_000 {
             match vol.next_block() {
-                Ok(Some(Block::File(h))) => {
-                    out.entry(h.name.as_bytes().to_vec()).or_insert(MemberMeta {
-                        unix_mode: h.is_unix().then_some(h.attributes as u32),
-                        mtime: h.mtime.map(|s| (s, h.mtime_nanos)),
-                    });
+                Ok(Some(Block::File(h))) if !h.split_before() => {
+                    out.entry(h.name.as_bytes().to_vec())
+                        .or_default()
+                        .push_back(MemberMeta {
+                            unix_mode: h.is_unix().then_some(h.attributes as u32),
+                            mtime: h.mtime.map(|s| (s, h.mtime_nanos)),
+                        });
                 }
                 Ok(Some(Block::End { .. })) | Ok(None) | Err(_) => break,
                 Ok(Some(_)) => {}
@@ -662,11 +672,13 @@ fn volume_metadata(volume: &Path, password: &str) -> std::collections::HashMap<V
     // RAR 1.5-4.x headers: DOS time, and a Unix mode when the attributes are one.
     let (_, _, files) =
         crate::rarreader::read_volume_file(&path_bytes(volume), password.as_bytes(), true);
-    for f in files {
-        out.entry(f.filename.clone()).or_insert(MemberMeta {
-            unix_mode: (f.attr & 0o170000 == 0o100000).then_some(f.attr & 0o7777),
-            mtime: crate::archive_native::rar4_dos_mtime(f.time),
-        });
+    for f in files.into_iter().filter(|f| !f.split_before) {
+        out.entry(f.filename.clone())
+            .or_default()
+            .push_back(MemberMeta {
+                unix_mode: (f.attr & 0o170000 == 0o100000).then_some(f.attr & 0o7777),
+                mtime: crate::archive_native::rar4_dos_mtime(f.time),
+            });
     }
     out
 }

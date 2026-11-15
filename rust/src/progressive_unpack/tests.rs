@@ -1092,3 +1092,30 @@ fn a_repaired_member_does_not_replace_a_later_member_with_the_same_name() {
     expect_ok(r, &log);
     assert_eq!(std::fs::read(t.out().join("a.bin")).unwrap(), second_copy);
 }
+
+#[cfg(unix)]
+#[test]
+fn duplicate_names_keep_their_own_metadata() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = TestDir::new("dupmeta");
+    let one = pattern(2_000);
+    let two = pattern(3_000);
+    let mut v = SIG.to_vec();
+    v.extend(main_block(false, None));
+    v.extend(file_block_mode("script.sh", &one, 0o644));
+    v.extend(file_block_mode("script.sh", &two, 0o755));
+    v.extend(end_block(false));
+    let first = t.dl().join("dupmeta.rar");
+    std::fs::write(&first, &v).unwrap();
+    let req = Request {
+        first_volume: &first,
+        dest: &t.out(),
+        password: "",
+        overwrite: Overwrite::Rename,
+    };
+    let r = extract(&req, Box::new(Growing), &mut |_, _| {}, &mut || false);
+    expect_ok(r, &[]);
+    let mode = |n: &str| std::fs::metadata(t.out().join(n)).unwrap().permissions().mode();
+    assert_eq!(mode("script.sh") & 0o111, 0, "first copy keeps 0644");
+    assert_eq!(mode("script_1.sh") & 0o111, 0o111, "second copy keeps 0755");
+}

@@ -363,28 +363,21 @@ impl ActiveStreamingSession {
             .unwrap_or_else(|e| e.into_inner())
             .values()
             .sum();
-        // Never more slots than recovery blocks that are here or still coming.
+        let turned_away = self.session.turned_away_recovery_slices();
+        // Never more slots than recovery blocks that are here, turned away by
+        // the cap (absorbed again on a raise) or still coming.
         let usable = status
             .ready_recovery
+            .saturating_add(turned_away)
             .saturating_add(usize::try_from(coming).unwrap_or(usize::MAX));
-        self.grow_slots_to(status.damaged.min(usable), &status);
-    }
-
-    /// After a volume with `volume_blocks` recovery blocks arrived and
-    /// `absorbed` of them were taken: when every slot is full but blocks are
-    /// still short (a preallocated slot held an exponent that did not come),
-    /// grow by what the volume turned away, at most; the session absorbs those
-    /// blocks again.
-    fn grow_after_arrival(&self, volume_blocks: u64, absorbed: usize) {
-        let status = self.session.status();
+        let mut want = status.damaged.min(usable);
+        // Every slot is taken but blocks are still short: a preallocated slot
+        // held an exponent that did not come. Grow into what was turned away.
         let cap = self.session.max_syndrome_slots();
-        let turned_away = usize::try_from(volume_blocks)
-            .unwrap_or(usize::MAX)
-            .saturating_sub(absorbed);
         if status.ready_recovery < status.damaged && status.syndrome_slots >= cap {
-            let short = (status.damaged - status.ready_recovery).min(turned_away);
-            self.grow_slots_to(cap + short, &status);
+            want = want.max(cap + (status.damaged - status.ready_recovery).min(turned_away));
         }
+        self.grow_slots_to(want, &status);
     }
 
     fn grow_slots_to(&self, want: usize, status: &LiveStatus) {
@@ -410,7 +403,7 @@ impl ActiveStreamingSession {
         }
         let logged = self.logged_slots.load(Ordering::Relaxed);
         // Log the first growth, then each further quarter (at least 4 blocks).
-        if effective > cap && effective >= logged + (logged / 4).max(4) {
+        if effective > cap && (logged == 0 || effective >= logged + (logged / 4).max(4)) {
             self.logged_slots.store(effective, Ordering::Relaxed);
             let name = self
                 .par_name
@@ -1804,20 +1797,15 @@ pub fn streaming_session_on_recovery_volume_arrived(
     with_live_session(nzb_id, |entry| {
         // Growth that found ParBuffer full earlier may fit now.
         entry.grow_for_damage();
-        let registered = queued_id.and_then(|id| {
+        if let Some(id) = queued_id {
             entry
                 .queued_blocks
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .remove(&id)
-        });
-        let volume_blocks = registered.unwrap_or_else(|| {
-            path.file_name()
-                .and_then(|name| volume_blocks_bytes(&par_rs::filenames::os_str_bytes(name)))
-                .map_or(0, u64::from)
-        });
+                .remove(&id);
+        }
         let count = entry.session.on_recovery_volume_arrived(path, queued_id)?;
-        entry.grow_after_arrival(volume_blocks, count);
+        entry.grow_for_damage();
         if let Some(id) = queued_id {
             entry
                 .pending_unpause_ids
@@ -3680,6 +3668,98 @@ mod tests {
         grow_live_slots_case(0x6a0f_0002, 3, 6, 4);
     }
 
+    #[test]
+    fn live_session_grows_into_blocks_turned_away_before_new_damage() {
+        use par_rs::create::{build_set, SetOptions, VolumeScheme};
+
+        let nzb_id = 0x6a0f_0004;
+        let dir = std::env::temp_dir().join(format!(
+            "rustyget-parchecker-grow-late-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f0 = make_deterministic_bytes(8 * 4096, 404);
+        let built = build_set(
+            "late",
+            &[("part01.rar", &f0)],
+            &SetOptions {
+                slice_size: 4096,
+                recovery_blocks: 6,
+                first_exponent: 0,
+                volumes: VolumeScheme::Single,
+                creator: "rustyget-test".to_string(),
+                unicode_names: false,
+                kernel: Kernel::detect(),
+            },
+        )
+        .unwrap();
+        let index_path = dir.join("late.par2");
+        std::fs::write(&index_path, &built.index).unwrap();
+        streaming_session_start(
+            nzb_id,
+            &index_path,
+            &dir,
+            SessionOptions {
+                preallocated_syndrome_slots: 1,
+                max_syndrome_slots: 1,
+                max_syndrome_bytes: 4096,
+                max_working_bytes: 4 << 20,
+                max_staging_bytes: 0,
+                solve_mem_limit_bytes: 16 << 20,
+                ..SessionOptions::default()
+            },
+        )
+        .unwrap();
+        let entry = active_streaming_session(nzb_id).unwrap();
+        let (vname, vbytes) = &built.volumes[0];
+        assert!(streaming_session_register_queued_volume(nzb_id, 7, 6, true));
+        let id0 = entry.session.file_id_by_name(b"part01.rar").unwrap();
+        let mut disk = f0.clone();
+        for s in [1usize, 4, 6] {
+            disk[s * 4096..(s + 1) * 4096].fill(0);
+        }
+        std::fs::write(dir.join("part01.rar"), &disk).unwrap();
+        let mut feed = |s: usize| {
+            let off = (s * 4096) as u64;
+            if matches!(s, 1 | 4 | 6) {
+                streaming_session_on_article_failed_permanently(nzb_id, &id0, off, 4096)
+                    .unwrap()
+                    .unwrap();
+            } else {
+                let chunk = &f0[s * 4096..(s + 1) * 4096];
+                entry
+                    .session
+                    .on_article_finished(&id0, off, 4096, par_rs::crc::crc32(chunk), Some(chunk))
+                    .unwrap();
+            }
+        };
+        for s in 0..6 {
+            feed(s);
+        }
+        assert_eq!(entry.session.max_syndrome_slots(), 2);
+        // The whole volume arrives while only two blocks are damaged.
+        let path = dir.join(vname);
+        std::fs::write(&path, vbytes).unwrap();
+        streaming_session_on_recovery_volume_arrived(nzb_id, &path, Some(7))
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.session.status().ready_recovery, 2);
+        assert_eq!(entry.session.turned_away_recovery_slices(), 4);
+        // A third damaged block grows into a block the volume turned away.
+        feed(6);
+        feed(7);
+        assert_eq!(entry.session.max_syndrome_slots(), 3);
+        assert_eq!(entry.session.status().ready_recovery, 3);
+        let report = streaming_session_repair_available_targets_now(nzb_id, &[id0])
+            .unwrap()
+            .unwrap();
+        assert_eq!(report.repaired_slices.len(), 3);
+        assert_eq!(std::fs::read(dir.join("part01.rar")).unwrap(), f0);
+        streaming_session_cancel(nzb_id);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn grow_live_slots_case(
         nzb_id: i32,
         first_exponent: u32,
@@ -3767,10 +3847,10 @@ mod tests {
         let grown = 3.min(recovery_blocks as usize);
         assert_eq!(entry.session.max_syndrome_slots(), grown);
         assert_eq!(reserved(&entry), start_bytes + (grown as u64 - 1) * 2 * 4096);
-        for (vname, bytes) in &built.volumes {
+        for (idx, (vname, bytes)) in built.volumes.iter().enumerate() {
             let path = dir.join(vname);
             std::fs::write(&path, bytes).unwrap();
-            streaming_session_on_recovery_volume_arrived(nzb_id, &path, None)
+            streaming_session_on_recovery_volume_arrived(nzb_id, &path, Some(2000 + idx as u64))
                 .unwrap()
                 .unwrap();
         }

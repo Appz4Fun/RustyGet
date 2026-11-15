@@ -1864,6 +1864,7 @@ fn mode_of(path: &Path) -> u32 {
 }
 
 #[test]
+#[ignore = "protection declarations are off (DECLARE_PROTECTION)"]
 fn after_repair_zipfast_moves_the_patched_file_into_place() {
     let t = TestDir::new("renameafter");
     let (out, data, log) = repaired_in_place(&t, "movie.mkv", Overwrite::Always);
@@ -1888,6 +1889,7 @@ fn a_repaired_windows_member_keeps_the_copy_path_name() {
 }
 
 #[test]
+#[ignore = "protection declarations are off (DECLARE_PROTECTION)"]
 fn a_moved_member_keeps_owner_read_write() {
     RAR5_HOST.with(|h| h.set((1, 0o000)));
     let t = TestDir::new("rename000");
@@ -1908,6 +1910,7 @@ fn skip_mode_keeps_copying_after_a_repair() {
 }
 
 #[test]
+#[ignore = "protection declarations are off (DECLARE_PROTECTION)"]
 fn a_complete_windows_set_gets_a_normal_mode() {
     RAR5_HOST.with(|h| h.set((0, 0x20)));
     let t = TestDir::new("completewin");
@@ -2243,6 +2246,7 @@ fn protection_upgrade_is_skipped_when_the_handle_budget_cannot_fit_it() {
 /// PR 430's scenario on this branch: 60 volumes, 11 damaged and repaired in place, volume count
 /// known. The repaired output is moved by the session, never copied.
 #[test]
+#[ignore = "protection declarations are off (DECLARE_PROTECTION)"]
 fn repaired_output_with_many_damaged_volumes_is_moved_not_copied() {
     struct Counted(Damaged, u64);
     impl VolumeFeed for Counted {
@@ -2358,6 +2362,7 @@ fn run_late(
 }
 
 #[test]
+#[ignore = "protection declarations are off (DECLARE_PROTECTION)"]
 fn a_set_that_became_final_is_moved_not_copied() {
     let t = TestDir::new("latefinal");
     let data = pattern(600_000);
@@ -2498,6 +2503,7 @@ impl VolumeFeed for FinalAfterRepair {
 /// there byte for byte (6790: 7 min to copy a 15 GB repaired mkv). Many volumes, several of
 /// them damaged, so the declared set and the repaired volumes fit the handle budget.
 #[test]
+#[ignore = "protection declarations are off (DECLARE_PROTECTION)"]
 fn repaired_output_of_a_final_set_is_moved_not_copied() {
     let t = TestDir::new("finalrepair");
     let chunk = 50_000;
@@ -2568,5 +2574,59 @@ fn a_final_set_of_many_small_volumes_extracts() {
         volumes: vols.len() as u64,
     };
     let (_log, _copied) = run_late(&first, &t.out(), Box::new(feed), Overwrite::Always);
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+}
+
+#[test]
+fn a_final_set_is_copied_into_place_while_declarations_are_off() {
+    let t = TestDir::new("final_copied");
+    let data = pattern(300_000);
+    let vols = rar5_volumes("movie.mkv", &data, 100_000);
+    let first = write_set(&t.dl(), &vols);
+    let req = Request {
+        first_volume: &first,
+        dest: &t.out(),
+        password: "",
+        overwrite: Overwrite::Always,
+        on_wait: None,
+    };
+    let mut log = Vec::new();
+    let mut copied: Outputs = Vec::new();
+    let r = extract_recording(
+        &req,
+        Box::new(CompleteSet),
+        &mut |_, m: &str| log.push(m.to_string()),
+        &mut || false,
+        Some(&mut copied),
+    );
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+    assert_eq!(copied.len(), 1, "{copied:?}");
+}
+
+/// A plain final set shaped like production job #207 (159 stored volumes) through a
+/// post-download unpack. Large: run with `RG_BIG_MB=<total MiB> cargo test --release --lib
+/// big_final_set -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn big_final_set_unpacks() {
+    let total_mb: usize = std::env::var("RG_BIG_MB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1900);
+    let volumes = 159usize;
+    let chunk = (total_mb << 20) / volumes;
+    let t = TestDir::new("big_final");
+    let data = pattern(chunk * volumes);
+    let vols = rar5_volumes("movie.mkv", &data, chunk);
+    let first = write_set(&t.dl(), &vols);
+    drop(vols);
+    let (r, log) = run(&first, &t.out(), Box::new(CompleteSet));
+    match &r {
+        Ok(_) => eprintln!("BIG_FINAL ok volumes={volumes} mb={total_mb}"),
+        Err(Error::Failed(f)) => eprintln!("BIG_FINAL failed: {f}"),
+        Err(Error::Unsupported(u)) => eprintln!("BIG_FINAL unsupported: {u:?}"),
+    }
+    expect_ok(r, &log);
     assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
 }

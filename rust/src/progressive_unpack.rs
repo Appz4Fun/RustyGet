@@ -28,12 +28,11 @@ use zipfast::progressive::{
     VolumeAnswer, VolumeRequest, VolumeSource,
 };
 
-/// Whether sets are ever declared to zipfast as protected native files (Complete), letting it
-/// rename verified outputs into place. Off: with a Complete declaration zipfast rechecks every
-/// protected volume on each read step, and a plain 159-volume, 15.6 GiB set ran out of its
-/// SourceBookkeeping budget mid-unpack. Every output is copied into place until that cost is
-/// bounded.
-const DECLARE_PROTECTION: bool = false;
+/// Whether sets are declared to zipfast as protected native files (Complete), letting it
+/// rename verified outputs into place. zipfast before #116 rechecked every protected volume
+/// on each read step and ran large sets out of SourceBookkeeping (a 159-volume 15.6 GiB set on
+/// 6790); #116 bounds the per-step recheck. `big_final_set_unpacks` is the gate.
+const DECLARE_PROTECTION: bool = true;
 
 /// How long the driver sleeps between cancellation checks while the session is parked.
 const PARK_SLICE: Duration = Duration::from_millis(50);

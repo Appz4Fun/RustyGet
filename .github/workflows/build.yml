@@ -72,6 +72,11 @@ jobs:
           RUSTFLAGS: -D warnings
         run: cargo test --locked --tests -- --test-threads=3
 
+      - name: Callback measurement transport checks
+        run: |
+          python3 -B -m unittest discover -s tests/functional/dupefallback \
+            -p test_streaming_par_metrics.py
+
       - name: Build daemon and run daemon tests
         run: just test-daemon 3
 
@@ -85,6 +90,7 @@ jobs:
       - name: Streaming PAR repair and repair policy
         env:
           TMPDIR: ${{ runner.temp }}
+          RUSTYGET_BENCH_CALLBACK_METRICS: "1"
         run: |
           python3 -B tests/functional/dupefallback/streaming_par_test.py \
             --nzbget build/debug/rustyget --case all

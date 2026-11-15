@@ -1370,12 +1370,15 @@ pub(crate) fn streaming_session_can_schedule_repair(nzb_id: i32) -> bool {
     if ensure_current_generation(nzb_id, &entry).is_err() {
         return false;
     }
+    // Hold ownership stable while sampling the engine counters. Otherwise a fold
+    // could finish and release its active bound after a stale status read.
+    // The fold never holds the article mutex while calling the engine.
+    let queue = entry.articles.lock().unwrap_or_else(|e| e.into_inner());
     let status = entry.session.status();
     if status.early_cutover_possible {
         return true;
     }
     let size = entry.session.slice_size();
-    let queue = entry.articles.lock().unwrap_or_else(|e| e.into_inner());
     let queued_upper_bound = queue
         .pending
         .iter()

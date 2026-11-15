@@ -302,7 +302,8 @@ var DetailsPanel = (new function($)
 	{
 		var articles = item.DupeRecoveredArticles || 0;
 		var parArticles = countParam(item, 'DupeParArticles');
-		var parFiles = countParam(item, 'DupeParFiles');
+		// DupeParFiles lists the ids of the par2 files the articles came from
+		var parFiles = (param(item, 'DupeParFiles') || '').split(',').filter(function(id) { return /^\s*\d+\s*$/.test(id); }).length;
 		var hi = item.DupeRecoveredBytesHi || 0, lo = item.DupeRecoveredBytesLo || 0;
 		var holes = item.DupeRecoveredHoles || 0;
 		var donors = DetailsPanel.donors(item, members, source);

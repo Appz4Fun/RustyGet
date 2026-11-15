@@ -52,7 +52,7 @@ function fleetGroups() {
       DupeRecoveredArticles: 41, ...sizes('DupeRecoveredBytes', 29.4), DupeRecoveredHoles: 3,
       ServerStats: [{ ServerID: 1, SuccessArticles: 1290, FailedArticles: 31 }, { ServerID: 2, SuccessArticles: 254, FailedArticles: 18 }],
       Parameters: params({ '*Unpack:': 'yes', DupeFiles: PRINT, DupeCopyKind: 'twin', DupeHealth: '97', DupeFleet: '1',
-        DupeVideo: 'same', DupeParArticles: '6', DupeParFiles: '2' })
+        DupeVideo: 'same', DupeParArticles: '6', DupeParFiles: '4112,4117' })
     }),
     group(42, '02', {
       Status: 'PAUSED', ...sizes('PausedSize', 1730), Health: 994, MessageCount: 0, // nothing logged yet

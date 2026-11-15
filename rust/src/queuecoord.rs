@@ -3106,8 +3106,7 @@ impl NzbgetRsQueueCoordinator {
                     );
                 if rec {
                     if file.par_file {
-                        let first = file.dupe_recovered_articles == 0;
-                        add_dupe_par_counts(host, nzb.ptr, 1, i32::from(first));
+                        note_dupe_par_article(host, nzb.ptr, file.id, true);
                     }
                     file.dupe_recovered_articles = next_file_rec;
                     nzb.dupe_recovered_articles = next_nzb_rec;
@@ -3973,6 +3972,7 @@ impl NzbgetRsQueueCoordinator {
             crate::queuesubsys_host::ART_INT_STATUS,
             crate::queuesubsys_host::AI_FAILED,
         );
+        let par_recovered_before = file.dupe_recovered_articles;
         demote_article_counters(
             art.size,
             file.par_file,
@@ -3992,6 +3992,10 @@ impl NzbgetRsQueueCoordinator {
             &mut file.dupe_recovered_articles,
             &mut nzb.dupe_recovered_articles,
         );
+        // a borrowed par2 article taken back: it no longer counts as borrowed
+        if file.par_file && file.dupe_recovered_articles < par_recovered_before {
+            note_dupe_par_article(host, nzb.ptr, file.id, false);
+        }
         host.file_set_int(
             file.ptr,
             crate::queuesubsys_host::FILE_INT_SUCCESS_ARTICLES,
@@ -5820,47 +5824,78 @@ fn save_partial_state_host(host: &crate::queuesubsys_host::QueueSubsysHost, file
     }
 }
 
-/// NZB parameters counting par2 data borrowed from duplicates: `DupeParArticles`
-/// articles, across `DupeParFiles` par2 files. Parameters are saved with the
-/// item and stay with it in history.
+/// NZB parameters for par2 data borrowed from duplicates: `DupeParArticles` counts
+/// the articles, `DupeParFiles` lists the ids of the par2 files they belong to.
+/// They are saved with the item and stay with it in history. A file id
+/// list, not a count, so a restart (which forgets the per-file recovered count)
+/// never counts a file twice.
 pub(crate) const PAR_ARTICLES_PARAM: &[u8] = b"DupeParArticles";
 pub(crate) const PAR_FILES_PARAM: &[u8] = b"DupeParFiles";
 
-pub(crate) fn add_dupe_par_counts(
+/// Records one par2 article of file `file_id` borrowed from a duplicate
+/// (`borrowed`), or taken back after it failed its check (`!borrowed`).
+pub(crate) fn note_dupe_par_article(
     host: &crate::queuesubsys_host::QueueSubsysHost,
     nzb_ptr: usize,
-    articles: i32,
-    files: i32,
+    file_id: i32,
+    borrowed: bool,
 ) {
-    for (name, add) in [(PAR_ARTICLES_PARAM, articles), (PAR_FILES_PARAM, files)] {
-        if add <= 0 {
-            continue;
+    let cur = host.nzb_get_param(nzb_ptr, PAR_ARTICLES_PARAM);
+    let next = bumped_count(cur.as_deref(), if borrowed { 1 } else { -1 });
+    host.nzb_set_param(nzb_ptr, PAR_ARTICLES_PARAM, Some(next.to_string().as_bytes()));
+    if borrowed {
+        let files = host.nzb_get_param(nzb_ptr, PAR_FILES_PARAM);
+        if let Some(list) = with_file_id(files.as_deref(), file_id) {
+            host.nzb_set_param(nzb_ptr, PAR_FILES_PARAM, Some(&list));
         }
-        let next = bumped_count(host.nzb_get_param(nzb_ptr, name).as_deref(), add);
-        host.nzb_set_param(nzb_ptr, name, Some(next.to_string().as_bytes()));
     }
 }
 
-/// A count parameter's value after adding `add`; a missing or unreadable value counts as 0.
-fn bumped_count(cur: Option<&[u8]>, add: i32) -> i64 {
+/// A count parameter's value after adding `delta`, never below 0; a missing or
+/// unreadable value counts as 0.
+fn bumped_count(cur: Option<&[u8]>, delta: i32) -> i64 {
     cur.and_then(|v| std::str::from_utf8(v).ok())
         .and_then(|t| t.trim().parse::<i64>().ok())
         .unwrap_or(0)
         .max(0)
-        .saturating_add(i64::from(add.max(0)))
+        .saturating_add(i64::from(delta))
+        .max(0)
+}
+
+/// The comma-separated id list `cur` with `id` added, or None when it is there already.
+fn with_file_id(cur: Option<&[u8]>, id: i32) -> Option<Vec<u8>> {
+    let text = cur.and_then(|v| std::str::from_utf8(v).ok()).unwrap_or("");
+    let mut ids: Vec<&str> = text.split(',').map(str::trim).filter(|t| !t.is_empty()).collect();
+    let id_str = id.to_string();
+    if ids.contains(&id_str.as_str()) {
+        return None;
+    }
+    ids.push(&id_str);
+    Some(ids.join(",").into_bytes())
 }
 
 #[cfg(test)]
 mod tests {
 
     #[test]
-    fn bumped_count_starts_from_zero_and_adds() {
+    fn bumped_count_starts_from_zero_and_never_goes_negative() {
         assert_eq!(bumped_count(None, 1), 1);
         assert_eq!(bumped_count(Some(b"41"), 1), 42);
         assert_eq!(bumped_count(Some(b" 7 "), 3), 10);
         assert_eq!(bumped_count(Some(b"junk"), 2), 2);
         assert_eq!(bumped_count(Some(b"-5"), 1), 1);
-        assert_eq!(bumped_count(Some(b"9"), -4), 9);
+        assert_eq!(bumped_count(Some(b"9"), -4), 5);
+        assert_eq!(bumped_count(Some(b"1"), -1), 0);
+        assert_eq!(bumped_count(None, -1), 0);
+    }
+
+    #[test]
+    fn par_file_ids_are_listed_once() {
+        assert_eq!(with_file_id(None, 12), Some(b"12".to_vec()));
+        assert_eq!(with_file_id(Some(b""), 12), Some(b"12".to_vec()));
+        assert_eq!(with_file_id(Some(b"12"), 15), Some(b"12,15".to_vec()));
+        assert_eq!(with_file_id(Some(b"12,15"), 12), None);
+        assert_eq!(with_file_id(Some(b" 12 , 15 "), 15), None);
     }
 
     #[test]

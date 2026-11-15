@@ -6308,9 +6308,8 @@ unsafe extern "C" fn stream_repair_job_host_cb(
                 return 0;
             }
             let ns = host.nzb_snap(p2, false);
-            let ins = unsafe { std::slice::from_raw_parts(ints, 6) };
+            let ins = unsafe { std::slice::from_raw_parts(ints, 4) };
             let i64_in = unsafe { std::slice::from_raw_parts(i64s, 9) };
-            crate::queuecoord::add_dupe_par_counts(&host, p2, ins[4], ins[5]);
             if ins[0] > 0 || i64_in[8] > 0 || ins[1] > 0 {
                 host.nzb_set_int(
                     p2,

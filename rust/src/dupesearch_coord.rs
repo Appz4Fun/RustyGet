@@ -71,6 +71,10 @@ fn fleet_mark_video(host_ctx: *mut c_void, host_cb: DupeHostFn, nzb_id: i32, sam
         let Some((nzb_ptr, in_history)) = dq_find_nzb(host_ctx, host_cb, dq_ptr, nzb_id) else {
             return;
         };
+        // a read that failed this time never takes back an earlier match
+        if !same && qh.nzb_get_param(nzb_ptr, VIDEO_PARAM).is_some() {
+            return;
+        }
         qh.nzb_set_param(nzb_ptr, VIDEO_PARAM, Some(video_param_value(same)));
         qh.nzb_set_int(nzb_ptr, crate::queuesubsys_host::NZB_INT_CHANGED, 1);
         if in_history {
@@ -6162,7 +6166,12 @@ pub unsafe fn fleet_append(
         .iter()
         .filter_map(|&i| {
             let c = &candidates[i];
-            let id = added[c.index];
+            // a copy already queued is read again too, so its verdict can still be saved
+            let id = if c.existing_id != 0 {
+                c.existing_id
+            } else {
+                added[c.index]
+            };
             (id > 0 && !c.dead).then(|| (id, members[c.index].name.clone(), c.summary.clone()))
         })
         .collect();

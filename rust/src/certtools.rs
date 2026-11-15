@@ -336,36 +336,66 @@ pub fn check_ca_store(path: &str) -> String {
     out
 }
 
-/// A name for a new certificate pair, `<base>-YYYYMMDD-HHMMSS` (with `-2`, `-3`... when
-/// taken), so a pair in use is never overwritten: Settings switches to the new one on save.
-fn fresh_stem(dir: &Path, base: &str) -> String {
+/// Writes a new certificate and/or key as `<base>-YYYYMMDD-HHMMSS.crt/.key` (then `-2`,
+/// `-3`... when taken), so a pair in use is never overwritten: Settings switches to the new
+/// one on save. Each file is created exclusively, so two requests at once can't share a
+/// name; if a write fails, neither new file is left.
+fn write_new_pair(
+    dir: &Path,
+    base: &str,
+    cert: Option<&[u8]>,
+    key: Option<&[u8]>,
+) -> Result<(Option<PathBuf>, Option<PathBuf>), String> {
+    fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64);
     let (y, m, d) = crate::statmeter::days_to_ymd(now.div_euclid(86_400));
     let secs = now.rem_euclid(86_400);
     let stamp = format!("{base}-{y:04}{m:02}{d:02}-{:02}{:02}{:02}", secs / 3600, secs / 60 % 60, secs % 60);
-    let taken = |stem: &str| dir.join(format!("{stem}.crt")).exists() || dir.join(format!("{stem}.key")).exists();
-    if !taken(&stamp) {
-        return stamp;
+    'stems: for n in 1..1000 {
+        let stem = if n == 1 { stamp.clone() } else { format!("{stamp}-{n}") };
+        let cert_path = cert.map(|_| dir.join(format!("{stem}.crt")));
+        let key_path = key.map(|_| dir.join(format!("{stem}.key")));
+        let mut made: Vec<&Path> = Vec::new();
+        for (path, data, private) in [
+            cert_path.as_deref().zip(cert).map(|(p, d)| (p, d, false)),
+            key_path.as_deref().zip(key).map(|(p, d)| (p, d, true)),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            match write_new_file(path, data, private) {
+                Ok(()) => made.push(path),
+                Err(e) => {
+                    for p in &made {
+                        let _ = fs::remove_file(p);
+                    }
+                    if e.kind() == std::io::ErrorKind::AlreadyExists {
+                        continue 'stems;
+                    }
+                    return Err(format!("{}: {e}", path.display()));
+                }
+            }
+        }
+        return Ok((cert_path, key_path));
     }
-    (2..).map(|n| format!("{stamp}-{n}")).find(|s| !taken(s)).unwrap_or(stamp)
+    Err(format!("{}: no free name for a new certificate", dir.display()))
 }
 
-/// Writes a new certificate and key; if either write fails, neither file is left.
-fn write_pair(cert: Option<(&Path, &[u8])>, key: Option<(&Path, &[u8])>) -> Result<(), String> {
-    let mut done: Vec<&Path> = Vec::new();
-    for (path, data, private) in [cert.map(|(p, d)| (p, d, false)), key.map(|(p, d)| (p, d, true))].into_iter().flatten() {
-        if let Err(e) = write_file(path, data, private) {
-            for p in done {
-                let _ = fs::remove_file(p);
-            }
-            let _ = fs::remove_file(path);
-            return Err(e);
-        }
-        done.push(path);
+/// Creates `path`, failing if it exists; a partly written file is removed.
+fn write_new_file(path: &Path, data: &[u8], private: bool) -> std::io::Result<()> {
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(if private { 0o600 } else { 0o644 });
     }
-    Ok(())
+    let mut f = opts.open(path)?;
+    f.write_all(data).inspect_err(|_| {
+        let _ = fs::remove_file(path);
+    })
 }
 
 fn write_file(path: &Path, data: &[u8], private: bool) -> Result<(), String> {
@@ -459,18 +489,14 @@ pub fn make_cert(names_text: &str, main_dir: &Path) -> String {
         Err(e) => return error_json(&format!("Could not make the certificate: {e}")),
     };
     let dir = main_dir.join(HTTPS_DIR);
-    let stem = fresh_stem(&dir, "rustyget");
-    let cert_path = dir.join(format!("{stem}.crt"));
-    let key_path = dir.join(format!("{stem}.key"));
     let pems = cert
         .to_pem()
         .and_then(|c| key.private_key_to_pem_pkcs8().map(|k| (c, k)))
         .map_err(|e| e.to_string());
-    let written = pems.and_then(|(c, k)| write_pair(Some((&cert_path, &c)), Some((&key_path, &k))));
-    if let Err(e) = written {
-        return error_json(&e);
+    match pems.and_then(|(c, k)| write_new_pair(&dir, "rustyget", Some(&c), Some(&k))) {
+        Ok((cert_path, key_path)) => saved_reply(cert_path.as_deref(), key_path.as_deref()),
+        Err(e) => error_json(&e),
     }
-    saved_reply(Some(&cert_path), Some(&key_path))
 }
 
 fn saved_reply(cert: Option<&Path>, key: Option<&Path>) -> String {
@@ -546,9 +572,6 @@ pub fn save_pem(kind: &str, name: &str, text: &str, main_dir: &Path) -> String {
                 }
             }
             let dir = main_dir.join(HTTPS_DIR);
-            let stem = fresh_stem(&dir, "server");
-            let cert_path = (!certs.is_empty()).then(|| dir.join(format!("{stem}.crt")));
-            let key_path = key.as_ref().map(|_| dir.join(format!("{stem}.key")));
             let mut cert_pem = Vec::new();
             for c in &certs {
                 match c.to_pem() {
@@ -560,13 +583,11 @@ pub fn save_pem(kind: &str, name: &str, text: &str, main_dir: &Path) -> String {
                 Ok(k) => k,
                 Err(e) => return error_json(&e.to_string()),
             };
-            let written = write_pair(
-                cert_path.as_deref().map(|p| (p, &cert_pem[..])),
-                key_path.as_deref().zip(key_pem.as_deref()),
-            );
-            if let Err(e) = written {
-                return error_json(&e);
-            }
+            let cert_arg = (!certs.is_empty()).then_some(&cert_pem[..]);
+            let (cert_path, key_path) = match write_new_pair(&dir, "server", cert_arg, key_pem.as_deref()) {
+                Ok(paths) => paths,
+                Err(e) => return error_json(&e),
+            };
             saved_reply(cert_path.as_deref(), key_path.as_deref())
         }
         "ca" => {
@@ -709,6 +730,26 @@ mod tests {
         assert!(check.contains("\"SelfSigned\":true"), "{check}");
         assert!(check.contains("\"Subject\":\"nas.local\""), "{check}");
         assert!(make_cert("  ", &dir).contains("at least one host name"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn pairs_made_at_once_get_their_own_names() {
+        let dir = temp_dir("race");
+        let replies: Vec<String> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..6).map(|i| {
+                let dir = &dir;
+                scope.spawn(move || make_cert(&format!("n{i}.local"), dir))
+            }).collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let mut certs: Vec<PathBuf> = replies.iter().map(|r| field(r, "Cert")).collect();
+        for r in &replies {
+            assert!(r.contains("\"KeyMatches\":true"), "{r}");
+        }
+        certs.sort();
+        certs.dedup();
+        assert_eq!(certs.len(), 6, "{replies:?}");
         fs::remove_dir_all(&dir).unwrap();
     }
 

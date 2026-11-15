@@ -670,21 +670,15 @@ where
             });
         }
     }
-    if !deferred.is_empty()
+    // zipfast reads the declaration at its next publication; from then on every read step
+    // rechecks every protected volume. Upgrade only for a single remaining output, so only its
+    // own publication pays that, and nothing waits behind it.
+    if deferred.len() == 1
         && first_failure.is_none()
         // zipfast publishes by rename only when it may replace; skip mode would need hard
         // links, which some destinations (exFAT, SMB) do not support.
         && req.overwrite == Overwrite::Always
-        && upgrade_protection(
-            req.first_volume,
-            &protection,
-            &opened,
-            handle_limit,
-            deferred
-                .iter()
-                .map(|(_, a, _)| a.size().unwrap_or_else(|| a.produced_extent()))
-                .sum(),
-        )
+        && upgrade_protection(req.first_volume, &protection, &opened, handle_limit)
     {
         log_cb(
             4,
@@ -1539,7 +1533,6 @@ fn upgrade_protection(
     slot: &ProtectionSlot,
     opened: &OpenedVolumes,
     handle_limit: u64,
-    deferred_bytes: u64,
 ) -> bool {
     let mut slot = slot.lock().unwrap_or_else(|e| e.into_inner());
     if slot.is_some() {
@@ -1566,8 +1559,8 @@ fn upgrade_protection(
     // per protected volume. The session's handle budget is fixed at creation.
     if inventory.volumes.len() < opened.len()
         || (opened.len() + inventory.volumes.len()) as u64 + 8 > handle_limit
-        || !fits_open_file_limit(opened.len() + inventory.volumes.len())
-        || !fits_protected_read_budget(&inventory, deferred_bytes)
+        || !fits_open_file_limit(inventory.volumes.len())
+        || !fits_protected_read_budget(&inventory)
     {
         return false;
     }
@@ -1575,17 +1568,14 @@ fn upgrade_protection(
     true
 }
 
-/// Extra zipfast source-bookkeeping budget for reads after the protection upgrade.
+/// Extra zipfast source-bookkeeping budget for the publication after the protection upgrade.
 const PROTECTED_READ_BUDGET: u64 = 32 * 1024 * 1024;
 
-/// With the volumes declared protected, zipfast rechecks every protected volume against every
-/// admitted one on each read step (about 1 MiB of verify or patch): roughly 2V^2 + V(2P + 4)
-/// bookkeeping units, V volumes with paths up to P bytes. Upgrade only when re-reading every
-/// deferred output once fits the headroom added at session creation; large sets keep copying.
-fn fits_protected_read_budget(
-    inventory: &zipfast::progressive::ProtectionInventory,
-    deferred_bytes: u64,
-) -> bool {
+/// With the volumes declared protected, each zipfast validation rechecks every protected volume
+/// against every admitted one: roughly 2V^2 + V(2P + 4) bookkeeping units, V volumes with paths
+/// up to P bytes. A publication runs a handful of them (plus one per directory it creates);
+/// upgrade only when a generous count fits the headroom added at session creation.
+fn fits_protected_read_budget(inventory: &zipfast::progressive::ProtectionInventory) -> bool {
     let v = inventory.volumes.len() as u64;
     let p = inventory
         .volumes
@@ -1597,14 +1587,14 @@ fn fits_protected_read_budget(
         .map(|pp| pp.path.as_os_str().len() as u64)
         .max()
         .unwrap_or(0);
-    let per_step = 2 * v * v + v * (2 * p + 4);
-    let steps = deferred_bytes.div_ceil(1024 * 1024) + 16;
-    per_step.saturating_mul(steps) <= PROTECTED_READ_BUDGET
+    let per_check = 2 * v * v + v * (2 * p + 4);
+    per_check.saturating_mul(64) <= PROTECTED_READ_BUDGET
 }
 
-/// Whether the process can hold `held` more files and still re-extract the set once (about one
-/// more handle per volume) with room for sockets and article files.
-fn fits_open_file_limit(held: usize) -> bool {
+/// Whether the process, with the files it has open now, can open `added` more for the
+/// declaration and still re-extract the set once (about one handle per volume), with room left
+/// for sockets, article files and other jobs.
+fn fits_open_file_limit(added: usize) -> bool {
     #[cfg(unix)]
     {
         let mut lim = libc::rlimit {
@@ -1615,14 +1605,21 @@ fn fits_open_file_limit(held: usize) -> bool {
         if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) } != 0 {
             return false;
         }
-        let need = (held as u64)
-            .saturating_add((held as u64) / 2)
-            .saturating_add(64);
-        lim.rlim_cur == libc::RLIM_INFINITY || need <= lim.rlim_cur as u64
+        if lim.rlim_cur == libc::RLIM_INFINITY {
+            return true;
+        }
+        let Ok(fds) = std::fs::read_dir("/dev/fd") else {
+            return false;
+        };
+        let open_now = fds.count() as u64;
+        let need = open_now
+            .saturating_add(2 * added as u64)
+            .saturating_add(256);
+        need <= lim.rlim_cur as u64
     }
     #[cfg(not(unix))]
     {
-        let _ = held;
+        let _ = added;
         false
     }
 }

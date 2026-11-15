@@ -2059,9 +2059,10 @@ fn two_repairs_in_a_big_set(
 }
 
 #[test]
-fn a_set_too_big_for_protected_reads_keeps_copying() {
+fn two_repaired_outputs_keep_copying() {
     // With the volumes protected zipfast rechecks every volume against every other on each
-    // read step; on a set this size that would exhaust its bookkeeping budget mid-verify.
+    // read step after its first publication; for a second repaired output on a set this size
+    // that exhausted its bookkeeping budget mid-verify.
     let (ok, log, err) = two_repairs_in_a_big_set(Overwrite::Always, 600, 96);
     assert!(ok, "{err}");
     assert!(!moved(&log));

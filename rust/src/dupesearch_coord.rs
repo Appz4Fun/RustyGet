@@ -1223,7 +1223,21 @@ fn par_doomed_via_host(
 /// Longest a fleet spends reading par2 lists and archive headers to tell its
 /// TWINs and borrowable ALTs apart.
 const FLEET_KIND_PROBE_MAX_SEC: i64 = 20;
-const FLEET_KIND_PROBE_PARALLEL: usize = 8;
+const FLEET_KIND_PROBE_PARALLEL: usize = 16;
+
+/// Seconds the copy-kind probe may use out of `left_ms`, the fleet's time
+/// left: a third of it, at most [`FLEET_KIND_PROBE_MAX_SEC`], so the intake
+/// and health check after it keep most of the budget.
+fn fleet_kind_probe_secs(left_ms: i64) -> i64 {
+    fleet_phase_secs(left_ms, 3, FLEET_KIND_PROBE_MAX_SEC)
+}
+
+/// Seconds a fleet phase that runs before the health check may use: one
+/// `share`-th of `left_ms`, at most `max_sec`. The health check spends
+/// whatever budget it is given, so the phases before it are bounded here.
+fn fleet_phase_secs(left_ms: i64, share: i64, max_sec: i64) -> i64 {
+    (left_ms.max(0) / (1000 * share.max(1))).min(max_sec)
+}
 
 fn summary_password_known(info: &NzbSummaryData) -> bool {
     info.meta
@@ -5504,6 +5518,80 @@ pub unsafe fn fleet_append(
         );
     }
 
+    // TWINs first, then ALTs by how well stream repair can borrow from them.
+    // The kinds are read before the health check, with their own share of
+    // the time: the health check spends whatever budget it is given, so a
+    // probe run after it got no time and left every member "unknown".
+    {
+        let usable: Vec<usize> = (0..candidates.len())
+            .filter(|&i| {
+                let c = &candidates[i];
+                c.error.is_empty() && c.same_as < 0
+            })
+            .collect();
+        let probe_deadline = now_unix_sec()
+            + fleet_kind_probe_secs(deadline_ms - donor_now_ms() - FINISH_RESERVE_MS);
+        let summaries: Vec<&NzbSummaryData> =
+            usable.iter().map(|&i| &candidates[i].summary).collect();
+        let kinds = fleet_member_kinds(host_ctx, host_cb, &summaries, probe_deadline);
+        for (&i, kind) in usable.iter().zip(kinds) {
+            candidates[i].kind = kind;
+        }
+    }
+
+    // Intake: every copy opened down to its video; a copy carrying another
+    // video is not part of this fleet. Like the kinds, it runs before the
+    // health check with its own share of the time (half of what is left).
+    {
+        let usable: Vec<usize> = (0..candidates.len())
+            .filter(|&i| {
+                let c = &candidates[i];
+                c.error.is_empty() && c.same_as < 0
+            })
+            .collect();
+        if usable.len() >= 2 && !donor_stopping() && !http_stopped() {
+            let intake_deadline = now_unix_sec()
+                + fleet_phase_secs(
+                    deadline_ms - donor_now_ms() - FINISH_RESERVE_MS,
+                    2,
+                    FLEET_INTAKE_MAX_SEC,
+                );
+            let samples = crate::dupeintake::samples_for_body_checks(
+                read_host_opts(host_ctx, host_cb).body_checks,
+            );
+            let seed = u64::from(crate::dupefallback::crc32_ieee(&dupe_key)) | 1;
+            let summaries: Vec<&NzbSummaryData> =
+                usable.iter().map(|&i| &candidates[i].summary).collect();
+            let verdicts = fleet_intake(
+                host_ctx,
+                host_cb,
+                &summaries,
+                samples,
+                seed,
+                intake_deadline,
+            );
+            for (&i, (verdict, why)) in usable.iter().zip(verdicts) {
+                let name = &members[candidates[i].index].name;
+                let mut msg = b"Fleet intake: ".to_vec();
+                msg.extend_from_slice(name);
+                match verdict {
+                    crate::dupeintake::Verdict::Same => {
+                        msg.extend_from_slice(b" carries the fleet's video")
+                    }
+                    crate::dupeintake::Verdict::Different => {
+                        msg.extend_from_slice(b" carries another video, dropped");
+                        candidates[i].error = b"not the same video".to_vec();
+                    }
+                    crate::dupeintake::Verdict::Unverified => {
+                        msg.extend_from_slice(b" unverified: ");
+                        msg.extend_from_slice(why.as_bytes());
+                    }
+                }
+                host_log(host_ctx, host_cb, MK_INFO, &msg);
+            }
+        }
+    }
+
     let mut postings = Vec::new();
     for cand in &candidates {
         if cand.error.is_empty() && cand.same_as < 0 && cand.existing_id == 0 {
@@ -5597,72 +5685,6 @@ pub unsafe fn fleet_append(
             cand.alive = alive;
             cand.dead = dead;
             complete &= m_comp;
-        }
-    }
-
-    // TWINs first, then ALTs by how well stream repair can borrow from them.
-    {
-        let usable: Vec<usize> = (0..candidates.len())
-            .filter(|&i| {
-                let c = &candidates[i];
-                c.error.is_empty() && c.same_as < 0 && !c.dead
-            })
-            .collect();
-        let remaining_sec = (deadline_ms - donor_now_ms() - FINISH_RESERVE_MS).max(0) / 1000;
-        let probe_deadline = now_unix_sec() + remaining_sec.min(FLEET_KIND_PROBE_MAX_SEC);
-        let summaries: Vec<&NzbSummaryData> =
-            usable.iter().map(|&i| &candidates[i].summary).collect();
-        let kinds = fleet_member_kinds(host_ctx, host_cb, &summaries, probe_deadline);
-        for (&i, kind) in usable.iter().zip(kinds) {
-            candidates[i].kind = kind;
-        }
-    }
-
-    // Intake: every live copy opened down to its video; a copy carrying
-    // another video is not part of this fleet.
-    {
-        let usable: Vec<usize> = (0..candidates.len())
-            .filter(|&i| {
-                let c = &candidates[i];
-                c.error.is_empty() && c.same_as < 0 && !c.dead
-            })
-            .collect();
-        if usable.len() >= 2 && !donor_stopping() && !http_stopped() {
-            let remaining_sec = (deadline_ms - donor_now_ms() - FINISH_RESERVE_MS).max(0) / 1000;
-            let intake_deadline = now_unix_sec() + remaining_sec.min(FLEET_INTAKE_MAX_SEC);
-            let samples = crate::dupeintake::samples_for_body_checks(
-                read_host_opts(host_ctx, host_cb).body_checks,
-            );
-            let seed = u64::from(crate::dupefallback::crc32_ieee(&dupe_key)) | 1;
-            let summaries: Vec<&NzbSummaryData> =
-                usable.iter().map(|&i| &candidates[i].summary).collect();
-            let verdicts = fleet_intake(
-                host_ctx,
-                host_cb,
-                &summaries,
-                samples,
-                seed,
-                intake_deadline,
-            );
-            for (&i, (verdict, why)) in usable.iter().zip(verdicts) {
-                let name = &members[candidates[i].index].name;
-                let mut msg = b"Fleet intake: ".to_vec();
-                msg.extend_from_slice(name);
-                match verdict {
-                    crate::dupeintake::Verdict::Same => {
-                        msg.extend_from_slice(b" carries the fleet's video")
-                    }
-                    crate::dupeintake::Verdict::Different => {
-                        msg.extend_from_slice(b" carries another video, dropped");
-                        candidates[i].error = b"not the same video".to_vec();
-                    }
-                    crate::dupeintake::Verdict::Unverified => {
-                        msg.extend_from_slice(b" unverified: ");
-                        msg.extend_from_slice(why.as_bytes());
-                    }
-                }
-                host_log(host_ctx, host_cb, MK_INFO, &msg);
-            }
         }
     }
 
@@ -5898,6 +5920,18 @@ pub unsafe fn fleet_append(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn kind_probe_keeps_a_third_of_the_fleet_time() {
+        // the add-on's 45 s minus the 2 s reserve: 14 s for the probe
+        assert_eq!(super::fleet_kind_probe_secs(43_000), 14);
+        assert_eq!(
+            super::fleet_kind_probe_secs(118_000),
+            super::FLEET_KIND_PROBE_MAX_SEC
+        );
+        assert_eq!(super::fleet_kind_probe_secs(2_000), 0);
+        assert_eq!(super::fleet_kind_probe_secs(-5), 0);
+    }
+
     use super::*;
 
     #[test]

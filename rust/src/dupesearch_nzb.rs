@@ -1198,6 +1198,22 @@ pub fn donor_stopping() -> bool {
     DONOR_STOPPING.load(std::sync::atomic::Ordering::SeqCst)
 }
 
+/// Counts a background donor thread for [`donor_wait_all`] while it lives.
+pub struct DonorWalkerGuard(());
+
+impl DonorWalkerGuard {
+    pub fn enter() -> Self {
+        DONOR_WALKERS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        DonorWalkerGuard(())
+    }
+}
+
+impl Drop for DonorWalkerGuard {
+    fn drop(&mut self) {
+        DONOR_WALKERS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 pub fn donor_wait_all() {
     while DONOR_WALKERS.load(std::sync::atomic::Ordering::SeqCst) > 0 {
         std::thread::sleep(std::time::Duration::from_millis(20));

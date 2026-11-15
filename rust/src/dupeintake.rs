@@ -316,10 +316,10 @@ pub fn print_copy(
     Ok(Print { size, samples })
 }
 
-/// Which copies carry the fleet's video. The fleet's video is the one most
-/// copies share; between equally many, the one of the earliest copy (the
-/// client sends its pick first). Copies without a print are unverified.
-pub fn judge(prints: &[Option<Print>]) -> Vec<Verdict> {
+/// The fleet's video: the print most copies share; between equally many, the
+/// one of the earliest copy (the client sends its pick first). None when no
+/// copy has a print.
+pub fn fleet_print(prints: &[Option<Print>]) -> Option<Print> {
     let mut groups: Vec<(&Print, usize, usize)> = Vec::new(); // print, count, first
     for (i, p) in prints.iter().enumerate() {
         let Some(p) = p else { continue };
@@ -328,10 +328,15 @@ pub fn judge(prints: &[Option<Print>]) -> Vec<Verdict> {
             None => groups.push((p, 1, i)),
         }
     }
-    let fleet = groups
+    groups
         .iter()
         .max_by(|a, b| a.1.cmp(&b.1).then(b.2.cmp(&a.2)))
-        .map(|g| g.0);
+        .map(|g| g.0.clone())
+}
+
+/// Which copies carry `fleet`, the fleet's video. Copies without a print are
+/// unverified.
+pub fn judge_against(prints: &[Option<Print>], fleet: Option<&Print>) -> Vec<Verdict> {
     prints
         .iter()
         .map(|p| match (p, fleet) {
@@ -340,6 +345,12 @@ pub fn judge(prints: &[Option<Print>]) -> Vec<Verdict> {
             _ => Verdict::Different,
         })
         .collect()
+}
+
+/// Which copies carry the fleet's video (see [`fleet_print`]). Copies without
+/// a print are unverified.
+pub fn judge(prints: &[Option<Print>]) -> Vec<Verdict> {
+    judge_against(prints, fleet_print(prints).as_ref())
 }
 
 /// Samples per copy, besides the payload's start, from the BODY checks of
@@ -581,6 +592,27 @@ mod tests {
             vec![Verdict::Same, Verdict::Different]
         );
         assert_eq!(judge(&[None, None]), vec![Verdict::Unverified; 2]);
+        // a later check compares with the fleet's video found at submission
+        let a = Print {
+            size: 10,
+            samples: vec![1],
+        };
+        let b = Print {
+            size: 10,
+            samples: vec![2],
+        };
+        assert_eq!(
+            fleet_print(&[None, Some(b.clone()), Some(a.clone()), Some(a.clone())]),
+            Some(a.clone())
+        );
+        assert_eq!(
+            judge_against(&[Some(b.clone()), Some(a.clone()), None], Some(&a)),
+            vec![Verdict::Different, Verdict::Same, Verdict::Unverified]
+        );
+        assert_eq!(
+            judge_against(&[Some(a.clone())], None),
+            vec![Verdict::Unverified]
+        );
     }
 
     #[test]

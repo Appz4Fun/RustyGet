@@ -13,8 +13,18 @@ use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::sync::Mutex;
 
-/// The block size of the par2 set in `data` (its Main packet), 0 if none.
-pub use par_rs::twin::block_size;
+/// The block size of the par2 set in `data`: its intact Main packet's, else
+/// that of a Main packet whose MD5 fails (a lost article damaged its body,
+/// the slice size in front is usually still right), 0 if there is none. No
+/// estimate from the slice checksums: a guess too small would make twin
+/// volumes look bigger than they are.
+pub fn block_size(data: &[u8]) -> u64 {
+    use par_rs::packet::{load_par2_bytes, ScanOptions};
+    [ScanOptions::METADATA, ScanOptions::UNVERIFIED]
+        .into_iter()
+        .find_map(|opts| load_par2_bytes(data, opts).ok()?.slice_size())
+        .unwrap_or(0)
+}
 /// The posting's fingerprint: equal for postings of byte-identical files,
 /// whatever their names. FNV-1a over the sorted "md5:length" lines, so the
 /// values TwinCheck stored before (in C++) stay valid. "" for no files.
@@ -115,13 +125,16 @@ pub fn kind(primary: &Listed, dupe: &Listed) -> String {
 }
 
 /// The files of two partial lists of one posting together (each file once):
-/// retries that saw other articles of the par2-file add what they found.
+/// retries that saw other articles of the par2-file add what they found. Names
+/// compare as the store keeps them (lossy UTF-8), so a list read back from the
+/// store and a fresh parse of the same file don't list a file twice.
 pub fn merge(a: &[FileSig], b: &[FileSig]) -> Vec<FileSig> {
-    let mut seen: std::collections::HashSet<(&[u8], &[u8; 16], u64)> =
+    let mut seen: std::collections::HashSet<(String, &[u8; 16], u64)> =
         std::collections::HashSet::new();
     let mut merged: Vec<FileSig> = Vec::with_capacity(a.len() + b.len());
     for sig in a.iter().chain(b) {
-        if seen.insert((sig.name.as_slice(), &sig.md5, sig.length)) {
+        let name = String::from_utf8_lossy(&sig.name).into_owned();
+        if seen.insert((name, &sig.md5, sig.length)) {
             merged.push(sig.clone());
         }
     }
@@ -2332,6 +2345,38 @@ c@x</segment><segment bytes="7" number="2">id3@x</segment></segments></file>
             }
         }
         assert!(sizes > 1000, "{sizes} sets with a block size");
+    }
+
+    #[test]
+    fn block_size_reads_a_damaged_main_and_never_guesses() {
+        let mut rng = Rng(5);
+        let mut data = main_packet(65536, &[1], 1);
+        data.extend(file_desc(1, "movie.mkv", 1 << 20, &mut rng));
+        let mut ifsc = vec![1u8; 16];
+        ifsc.extend(std::iter::repeat_n(0u8, 20 * 16));
+        data.extend(packet([7; 16], b"PAR 2.0\0IFSC\0\0\0\0", &ifsc));
+        assert_eq!(block_size(&data), 65536);
+        // a lost article damaged the Main packet's file ids: its slice size stands
+        let mut damaged = data.clone();
+        damaged[64 + 20] ^= 0xff;
+        assert_eq!(block_size(&damaged), 65536);
+        // no Main packet at all: unknown, not a guess from the slice checksums
+        let main_len = main_packet(65536, &[1], 1).len();
+        assert_eq!(block_size(&data[main_len..]), 0);
+    }
+
+    #[test]
+    fn merge_lists_a_file_once_whether_read_back_or_parsed() {
+        let raw = FileSig {
+            name: b"caf\xe9.nfo".to_vec(),
+            md5: [1; 16],
+            length: 9,
+        };
+        let stored = FileSig {
+            name: String::from_utf8_lossy(&raw.name).into_owned().into_bytes(),
+            ..raw.clone()
+        };
+        assert_eq!(merge(&[stored], &[raw]).len(), 1);
     }
 
     #[test]

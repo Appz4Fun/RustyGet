@@ -5495,6 +5495,26 @@
     "message": "Set \"Renaming\" to \"While downloading\" to change this.",
     "description": "Note on Hard linking while files are renamed after download"
   },
+  "config_value_dupehealthpreset_weak": {
+    "message": "Weak / fast",
+    "description": "Settings: Health sampling choice"
+  },
+  "config_value_dupehealthpreset_medium": {
+    "message": "Medium / slower",
+    "description": "Settings: Health sampling choice"
+  },
+  "config_value_dupehealthpreset_hard": {
+    "message": "Hard / slowest",
+    "description": "Settings: Health sampling choice"
+  },
+  "config_value_dupehealthpreset_custom": {
+    "message": "Custom (see Expert)",
+    "description": "Settings: Health sampling choice"
+  },
+  "config_requires_custom_sampling": {
+    "message": "Used only with \"Health sampling\" set to \"custom\".",
+    "description": "Settings: why a health sampling option is locked"
+  },
   "config_requires_flush": {
     "message": "Always on while \"Write directly to the final file\" is on: the queue file is how a download resumes.",
     "description": "Note on Flush queue to disk while Direct write is on"

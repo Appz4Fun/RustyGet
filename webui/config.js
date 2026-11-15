@@ -627,9 +627,22 @@ var Config = (new function($)
 		DirectWrite: 'Write directly to the final file', ArticleCache: 'Article cache',
 		FlushQueue: 'Flush queue to disk',
 		DiskSpace: 'Pause below free disk space', KeepHistory: 'Keep history for',
-		DirectUnpack: 'Unpack while downloading', DupeCheck: 'Duplicate check',
+		DirectUnpack: 'Unpack while downloading', DupeCheck: 'Duplicate check', DupeHealthPreset: 'Health sampling',
 		RawArticle: 'Save raw articles', SkipWrite: 'Skip writing (testing)'
 	};
+
+	// Display names of some choices (the saved value stays the same).
+	var VALUE_LABELS = {
+		DupeHealthPreset: { weak: 'Weak / fast', medium: 'Medium / slower', hard: 'Hard / slowest', custom: 'Custom (see Expert)' }
+	};
+
+	function valueLabel(option, value)
+	{
+		var labels = VALUE_LABELS[option.name];
+		var key = (value || '').toLowerCase();
+		return labels && labels.hasOwnProperty(key) ?
+			I18n.defaultValue('config_value_' + option.name.toLowerCase() + '_' + key, labels[key]) : null;
+	}
 
 	function humanizeOptionName(name)
 	{
@@ -1151,6 +1164,10 @@ var Config = (new function($)
 				else if (option.i18nSelectPrefix)
 				{
 					pvalueDisplay = I18n.defaultValue(option.i18nSelectPrefix + pvalue.toLowerCase(), pvalueDisplay);
+				}
+				else if (valueLabel(option, pvalue))
+				{
+					pvalueDisplay = valueLabel(option, pvalue);
 				}
 				if (value && pvalue.toLowerCase() === value.toLowerCase())
 				{
@@ -1949,6 +1966,7 @@ var Config = (new function($)
 			'Category.DestDir',
 			'DupeCheck',
 			'DupeArticleFallback',
+			'DupeHealthPreset',
 			'DownloadRate',
 			'KeepHistory',
 			'Unpack',
@@ -1987,6 +2005,7 @@ var Config = (new function($)
 			'DupeBorrowFirst',
 			'DupeStreamDecompress',
 			'DupeStreamTimeout',
+			'DupeMinAlive',
 			'HealthCheck',
 			'AppendCategoryDir',
 			'NzbDirInterval',
@@ -3096,6 +3115,18 @@ var Config = (new function($)
 		{ option: 'DupeBorrowFirst', when: { name: 'DupeArticleFallback', values: ['article', 'stream', 'live', 'yes'] } },
 		{ option: 'DupeStreamDecompress', when: { name: 'DupeArticleFallback', values: ['stream', 'live'] } },
 		{ option: 'DupeStreamTimeout', when: { name: 'DupeArticleFallback', values: ['stream', 'live'] } },
+		{ option: 'DupeHealthPercent', when: { name: 'DupeHealthPreset', values: ['custom'] },
+			text: ['config_requires_custom_sampling', 'Used only with "Health sampling" set to "custom".'] },
+		{ option: 'DupeHealthMin', when: { name: 'DupeHealthPreset', values: ['custom'] },
+			text: ['config_requires_custom_sampling', 'Used only with "Health sampling" set to "custom".'] },
+		{ option: 'DupeHealthMax', when: { name: 'DupeHealthPreset', values: ['custom'] },
+			text: ['config_requires_custom_sampling', 'Used only with "Health sampling" set to "custom".'] },
+		{ option: 'DupeBodyChecks', when: { name: 'DupeHealthPreset', values: ['custom'] },
+			text: ['config_requires_custom_sampling', 'Used only with "Health sampling" set to "custom".'] },
+		{ option: 'DupeBodyPercent', when: { name: 'DupeHealthPreset', values: ['custom'] },
+			text: ['config_requires_custom_sampling', 'Used only with "Health sampling" set to "custom".'] },
+		{ option: 'DupeHealthBudget', when: { name: 'DupeHealthPreset', values: ['custom'] },
+			text: ['config_requires_custom_sampling', 'Used only with "Health sampling" set to "custom".'] },
 		{ option: 'HardLinkingIgnoreExt', when: { name: 'HardLinking', values: ['yes'] } },
 		{ option: 'FlushQueue', when: { name: 'DirectWrite', values: ['no'] },
 			text: ['config_requires_flush', 'Always on while "Write directly to the final file" is on: the queue file is how a download resumes.'] },

@@ -427,8 +427,9 @@ impl ActiveStreamingSession {
         let staging = *context == "RAM-only partial staging";
         // Only a byte shortfall: the snapshot queue's article-count limit
         // reports the same context, and memory cannot relieve it. A staging
-        // cap of 0 means staging was turned off on purpose.
-        if (!staging && *context != "live article snapshots")
+        // cap of 0 means staging was turned off on purpose. Replay payloads
+        // share the snapshot queue's byte limit.
+        if (!staging && *context != "live article snapshots" && *context != "live replay payload")
             || required_bytes <= limit_bytes
             || (staging && self.session.max_staging_bytes() == 0)
             || self.session.is_cancelled()
@@ -442,26 +443,34 @@ impl ActiveStreamingSession {
         let Ok(mut lease) = self.budget.try_lock() else {
             return;
         };
-        let lent = self.lent_memory.load(Ordering::Relaxed);
-        if unit == 0 || lent.saturating_add(unit) > pool / 4 || lease.grow_by_units(unit, 1, pool) == 0 {
+        let before = self.lent_memory.load(Ordering::Relaxed);
+        if unit == 0 {
             return;
         }
-        let lent = lent + unit;
+        // Cover the whole shortfall at once: every refusal drops data.
+        let wanted = (required_bytes - limit_bytes).div_ceil(unit);
+        let room = (pool / 4).saturating_sub(before) / unit;
+        let units = lease.grow_by_units(unit, wanted.min(room), pool);
+        if units == 0 {
+            return;
+        }
+        let grant = units * unit;
+        let lent = before + grant;
         self.lent_memory.store(lent, Ordering::Relaxed);
         if staging {
             self.session
-                .set_max_staging_bytes(self.session.max_staging_bytes().saturating_add(unit));
+                .set_max_staging_bytes(self.session.max_staging_bytes().saturating_add(grant));
         } else {
-            self.article_byte_limit.fetch_add(unit, Ordering::AcqRel);
+            self.article_byte_limit.fetch_add(grant, Ordering::AcqRel);
         }
         drop(lease);
         // Log the first loan, then each doubling.
-        if lent == unit || (lent / unit).is_power_of_two() {
+        if before / unit == 0 || (lent / unit).ilog2() > (before / unit).ilog2() {
             let name = self.par_name.lock().unwrap_or_else(|e| e.into_inner()).clone();
             let msg = format!(
                 "Live PAR for {}: staging memory grew by {} MB ({} MB of {} MB ParBuffer lent) for many files arriving at once",
                 String::from_utf8_lossy(&name),
-                unit.div_ceil(1024 * 1024),
+                grant.div_ceil(1024 * 1024),
                 lent.div_ceil(1024 * 1024),
                 pool / (1024 * 1024),
             );
@@ -822,7 +831,15 @@ pub(crate) fn streaming_session_pending_article_jobs() -> Vec<i32> {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .is_some();
-            (queued || warning).then_some(id)
+            // Damage found by a completed-file replay or a recovery volume
+            // also asks for volumes; they must be unpaused even when no
+            // article waits, or recovery fetching stalls.
+            let unpause = !entry
+                .pending_unpause_ids
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty();
+            (queued || warning || unpause).then_some(id)
         })
         .collect()
 }
@@ -3892,6 +3909,29 @@ mod tests {
             limit_bytes: 0,
         }));
         assert_eq!(entry.budget.lock().unwrap().reserved_bytes(), start + 8192);
+        // A shortfall of several slices is covered in one loan.
+        let _ = entry.record::<()>(Err(RepairError::StreamingMemoryLimit {
+            context: "RAM-only partial staging",
+            required_bytes: 8192 + 3 * 4096 - 100,
+            limit_bytes: 8192,
+        }));
+        assert_eq!(entry.session.max_staging_bytes(), 8192 + 3 * 4096);
+        // Replay payloads share, and grow, the snapshot byte limit.
+        let _ = entry.record::<()>(Err(RepairError::StreamingMemoryLimit {
+            context: "live replay payload",
+            required_bytes: queue_start + 4096 + 2 * 4096,
+            limit_bytes: queue_start + 4096,
+        }));
+        assert_eq!(entry.article_byte_limit.load(Ordering::Relaxed), queue_start + 3 * 4096);
+        assert_eq!(entry.budget.lock().unwrap().reserved_bytes(), start + 7 * 4096);
+        assert_eq!(entry.lent_memory.load(Ordering::Relaxed), 7 * 4096);
+        // Pending volume unpauses are drained even with no article queued.
+        let _ = streaming_session_take_warning(nzb_id);
+        assert!(!streaming_session_pending_article_jobs().contains(&nzb_id));
+        entry.pending_unpause_ids.lock().unwrap().push(77);
+        assert!(streaming_session_pending_article_jobs().contains(&nzb_id));
+        assert_eq!(streaming_session_take_unpause_ids(nzb_id), vec![77]);
+        assert!(!streaming_session_pending_article_jobs().contains(&nzb_id));
         // Never more than a quarter of the pool.
         entry
             .lent_memory
@@ -3901,7 +3941,7 @@ mod tests {
             required_bytes: 1,
             limit_bytes: 0,
         }));
-        assert_eq!(entry.session.max_staging_bytes(), 8192);
+        assert_eq!(entry.session.max_staging_bytes(), 8192 + 3 * 4096);
         streaming_session_cancel(nzb_id);
         drop(entry);
         let _ = std::fs::remove_dir_all(&dir);

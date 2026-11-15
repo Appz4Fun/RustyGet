@@ -1276,8 +1276,8 @@ fn fleet_member_kinds(
                     && crate::donorkind::twins(
                         &probed[i].0,
                         &probed[j].0,
-                        (summaries[i].data_bytes, summaries[i].data_files),
-                        (summaries[j].data_bytes, summaries[j].data_files),
+                        &summaries[i].data_layout,
+                        &summaries[j].data_layout,
                     )
             });
             DonorKind::of(has_twin, probed[i].1)

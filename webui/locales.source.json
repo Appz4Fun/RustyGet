@@ -5545,6 +5545,39 @@
   "config_cipher_optimize_title": {
     "message": "Save this server and pick the fastest cipher it accepts"
   },
+  "config_host_looking": {
+    "message": "Looking up"
+  },
+  "config_host_pinned": {
+    "message": "Always using this address"
+  },
+  "config_host_one": {
+    "message": "1 address for"
+  },
+  "config_host_many": {
+    "message": "addresses for"
+  },
+  "config_host_use_name": {
+    "message": "Use the name again"
+  },
+  "config_host_any": {
+    "message": "Any of them (recommended)"
+  },
+  "config_host_any_text": {
+    "message": "RustyGet picks, and follows the provider if the addresses change."
+  },
+  "config_host_no_answer": {
+    "message": "no answer"
+  },
+  "config_host_source": {
+    "message": "IP location data by DB-IP"
+  },
+  "config_host_no_geoip": {
+    "message": "Country and network need the DB-IP Lite files, which this install does not have."
+  },
+  "config_host_cert_minimal": {
+    "message": "Certificate check is now Minimal: the certificate names the host, not this address."
+  },
   "config_server_restored_first": {
     "message": "Settings were restored from a backup: use Save and reload first."
   },

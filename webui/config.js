@@ -2593,6 +2593,14 @@ var Config = (new function($)
 			{
 				enhanceCipher(option, control);
 			}
+			else if (optionFamily(option.name) === 'Server.Host' && control.is('input'))
+			{
+				enhanceHost(option, control);
+			}
+			if (optionFamily(option.name) === 'Server.Port' && control.is('input'))
+			{
+				enhanceHostPort(control);
+			}
 		});
 	}
 	this.enhanceControls = enhanceControls;
@@ -3805,6 +3813,7 @@ var Config = (new function($)
 				// update label data-optid
 				$('a[data-optid=' + oldFormId + ']').attr('data-optid', option.formId).attr('id', 'label:' + option.formId);
 				var row = optionControl.closest('.control-group');
+				row.find('.config-host-lookup').attr('data-multiid', newMultiId);
 				row.find('.help-block').attr('id', 'help:' + option.formId);
 				row.find('.config-help-toggle').attr('aria-controls', 'help:' + option.formId)
 					.attr('aria-label', I18n.translate('btn_quick_help') + ': ' + setname + newMultiId + '.' + option.caption.split('.').slice(1).join('.'));
@@ -4558,6 +4567,226 @@ var Config = (new function($)
 			select.append($('<option class="config-cipher__other"></option>').attr('value', value).text(value));
 		}
 		select.val(value);
+	}
+
+	/*** SERVER HOST LOOKUP ***********************************************************/
+
+	// Typing a host name looks it up at once: every address it has, the country and
+	// network of each (from the DB-IP Lite files on this machine, no IP leaves it)
+	// and how long a connect takes. One address can be picked to always use.
+	// The state lives on the lookup box, which moves with its server when servers
+	// are reordered or deleted; the box's data-multiid is renumbered by reformatSet.
+	var hostLookupSeq = 0;
+
+	function hostText(key, text)
+	{
+		return I18n.defaultValue('config_host_' + key, text);
+	}
+
+	function isIpLiteral(value)
+	{
+		return /^\d{1,3}(\.\d{1,3}){3}$/.test(value) || (/^[0-9a-f:]+$/i.test(value) && value.indexOf(':') !== -1);
+	}
+
+	function enhanceHost(option, input)
+	{
+		if (input.siblings('.config-host-lookup').length)
+		{
+			return;
+		}
+		var box = $('<div class="config-host-lookup" aria-live="polite" hidden></div>').attr('data-multiid', option.multiid);
+		input.after(box);
+		input.on('input.lookup change.lookup', function(e)
+		{
+			scheduleHostLookup(box, e.type === 'change' ? 0 : 700);
+		});
+	}
+
+	// A new port means new connect times: look the host up again.
+	function enhanceHostPort(input)
+	{
+		input.off('.lookup').on('input.lookup change.lookup', function(e)
+		{
+			var option = findOptionById(this.id);
+			var host = option && findOptionByName('Server' + option.multiid + '.Host');
+			var box = host ? $('#' + host.formId).siblings('.config-host-lookup') : $();
+			if (box.length && !box.prop('hidden'))
+			{
+				scheduleHostLookup(box, e.type === 'change' ? 0 : 700);
+			}
+		});
+	}
+
+	// Any edit makes a pending reply stale at once, so its addresses can't be picked
+	// during the pause before the next lookup starts.
+	// A change event that only confirms what was already looked up (leaving the field
+	// to click an address) changes nothing.
+	function scheduleHostLookup(box, delay)
+	{
+		if (box.data('key') === hostLookupKey(box) && box.data('seq') === box.data('lookupSeq'))
+		{
+			clearTimeout(box.data('timer'));
+			return;
+		}
+		box.data('seq', ++hostLookupSeq);
+		box.find('input[type=radio]').prop('disabled', true);
+		clearTimeout(box.data('timer'));
+		box.data('timer', setTimeout(function() { lookupHost(box); }, delay));
+	}
+
+	function hostLookupKey(box)
+	{
+		var multiid = parseInt(box.attr('data-multiid'), 10);
+		var hostOption = findOptionByName('Server' + multiid + '.Host');
+		var portOption = findOptionByName('Server' + multiid + '.Port');
+		return hostOption ? $.trim(getOptionValue(hostOption) || '') + ' ' + (portOption ? getOptionValue(portOption) : '') : '';
+	}
+
+	function lookupHost(box)
+	{
+		box.data('key', hostLookupKey(box));
+		var multiid = parseInt(box.attr('data-multiid'), 10);
+		var hostOption = findOptionByName('Server' + multiid + '.Host');
+		var portOption = findOptionByName('Server' + multiid + '.Port');
+		if (!hostOption || !box.closest('body').length)
+		{
+			return;
+		}
+		var host = $.trim(getOptionValue(hostOption) || '');
+		if (host && !isIpLiteral(host) && box.data('certWasStrict'))
+		{
+			// a name typed back in is checked strictly again, unless the check was changed by hand since
+			var cert = findOptionByName('Server' + multiid + '.CertVerification');
+			if (cert && String(getOptionValue(cert)).toLowerCase() === 'minimal')
+			{
+				setOptionValue(cert, 'Strict');
+				refreshChangeState();
+				refreshListRows();
+			}
+			box.removeData('certWasStrict');
+		}
+		if (!host || /\$\{/.test(host) || (!isIpLiteral(host) && host.indexOf('.') === -1))
+		{
+			box.empty().prop('hidden', true);
+			return;
+		}
+		if (!isIpLiteral(host))
+		{
+			box.data('hostName', host);
+		}
+		var seq = ++hostLookupSeq;
+		box.data('seq', seq).data('lookupSeq', seq);
+		box.prop('hidden', false).attr('data-state', 'busy').empty()
+			.append($('<p class="config-host-lookup__note"></p>').text(hostText('looking', 'Looking up') + ' ' + host + '…'));
+		var port = parseInt(portOption ? getOptionValue(portOption) : '', 10) || 563;
+		RPC.call('hostlookup', [host, port], function(result)
+		{
+			if (seq !== box.data('seq'))
+			{
+				return;
+			}
+			renderHostLookup(box, host, result);
+		}, function(value, result)
+		{
+			if (seq !== box.data('seq'))
+			{
+				return;
+			}
+			box.attr('data-state', 'error').empty().append($('<p class="config-host-lookup__note"></p>')
+				.text(result && result.error ? result.error.message : String(value)));
+		}, { timeout: 20000 });
+	}
+
+	function renderHostLookup(box, host, result)
+	{
+		box.empty().attr('data-state', result.Error ? 'error' : 'ok');
+		if (result.Error)
+		{
+			box.append($('<p class="config-host-lookup__note"></p>').text(result.Error));
+			return;
+		}
+		var addresses = result.Addresses || [];
+		var name = box.data('hostName');
+		var pinned = isIpLiteral(host);
+		var head = $('<p class="config-host-lookup__head"></p>');
+		head.text(pinned ? hostText('pinned', 'Always using this address') + (name ? ' (' + name + ')' : '') :
+			addresses.length === 1 ? hostText('one', '1 address for') + ' ' + host :
+			addresses.length + ' ' + hostText('many', 'addresses for') + ' ' + host);
+		box.append(head);
+		var list = $('<div class="config-host-lookup__list" role="radiogroup"></div>').attr('aria-label', head.text());
+		var group = 'ConfigHostPick' + (++hostLookupSeq);
+		var choice = function(value, checked, main, details)
+		{
+			var label = $('<label class="config-host-lookup__item"><input type="radio"><span class="config-host-lookup__main"></span>' +
+				'<span class="config-host-lookup__details"></span></label>');
+			label.find('input').attr({ name: group, value: value }).prop('checked', checked);
+			label.find('.config-host-lookup__main').text(main);
+			label.find('.config-host-lookup__details').text(details || '');
+			list.append(label);
+		};
+		if (!pinned || name)
+		{
+			choice('', !pinned, pinned ? hostText('use_name', 'Use the name again') + ': ' + name : hostText('any', 'Any of them (recommended)'),
+				pinned ? '' : hostText('any_text', 'RustyGet picks, and follows the provider if the addresses change.'));
+		}
+		addresses.forEach(function(address)
+		{
+			var where = [];
+			if (address.Country) where.push(address.Country + (address.CountryName ? ' ' + address.CountryName : ''));
+			if (address.ASN) where.push('AS' + address.ASN + (address.Org ? ' ' + address.Org : ''));
+			where.push(address.LatencyMs === null || address.LatencyMs === undefined ? hostText('no_answer', 'no answer') :
+				Math.round(address.LatencyMs) + ' ms');
+			choice(address.IP, pinned && address.IP === host, address.IP, where.join(' · '));
+		});
+		if (list.children().length)
+		{
+			box.append(list);
+		}
+		list.on('change', 'input', function() { pickHostAddress(box, this.value); });
+		if (pinned && box.data('certWasStrict'))
+		{
+			box.append($('<p class="config-host-lookup__cert"></p>').text(hostText('cert_minimal',
+				'Certificate check is now Minimal: the certificate names the host, not this address.')));
+		}
+		box.append($('<p class="config-host-lookup__source"></p>').append(result.GeoIP ?
+			$('<a href="https://db-ip.com" target="_blank" rel="noopener"></a>').text(hostText('source', 'IP location data by DB-IP')) :
+			$('<span></span>').text(hostText('no_geoip', 'Country and network need the DB-IP Lite files, which this install does not have.'))));
+	}
+
+	// Picking an address writes it as Host. The certificate names the host, not the
+	// address, so a strict certificate check drops to Minimal (the signature is still checked).
+	function pickHostAddress(box, ip)
+	{
+		var multiid = parseInt(box.attr('data-multiid'), 10);
+		var hostOption = findOptionByName('Server' + multiid + '.Host');
+		var name = box.data('hostName');
+		var value = ip || name;
+		if (!hostOption || !value)
+		{
+			return;
+		}
+		$('#' + hostOption.formId).val(value);
+		var cert = findOptionByName('Server' + multiid + '.CertVerification');
+		var encryption = findOptionByName('Server' + multiid + '.Encryption');
+		if (ip && cert && encryption && String(getOptionValue(encryption)).toLowerCase() === 'yes' &&
+			String(getOptionValue(cert)).toLowerCase() === 'strict')
+		{
+			setOptionValue(cert, 'Minimal');
+			box.data('certWasStrict', true);
+		}
+		else if (!ip && cert && box.data('certWasStrict'))
+		{
+			// back to the name: Strict again, unless the check was changed by hand since
+			if (String(getOptionValue(cert)).toLowerCase() === 'minimal')
+			{
+				setOptionValue(cert, 'Strict');
+			}
+			box.removeData('certWasStrict');
+		}
+		refreshChangeState();
+		refreshListRows();
+		clearTimeout(box.data('timer'));
+		lookupHost(box);
 	}
 
 	/*** RSS FEEDS ********************************************************************/

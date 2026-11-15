@@ -69,6 +69,12 @@ var DetailsPanel = (new function($)
 			return { kind: copy === 'borrowable' || copy === 'unborrowable' ? copy : 'alt',
 				label: I18n.translate('fleet_role_alt'), copy: copyLabel };
 		}
+		// another container whose video inside is not verified yet, or another
+		// video: a plain copy, never the primary
+		if (kind === 'container' || kind === 'other')
+		{
+			return null;
+		}
 		if (/^[0-9a-f]{16}-[0-9]+$/.test(param(item, 'DupeFiles')))
 		{
 			// a primary with twins in its fleet is a twin too

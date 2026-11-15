@@ -1505,6 +1505,8 @@ fn fleet_intake_later(host_ctx: *mut c_void, host_cb: DupeHostFn, job: IntakeLat
         .fleet
         .clone()
         .or_else(|| job.primary.as_ref().and_then(|(_, _, p)| p.clone()));
+    // the queued copy's own print is recorded too when it is read here
+    let mut primary_read = false;
     let fleet = match known {
         Some(p) => p,
         None => {
@@ -1521,7 +1523,10 @@ fn fleet_intake_later(host_ctx: *mut c_void, host_cb: DupeHostFn, job: IntakeLat
             )
             .pop()
             {
-                Some(Ok(p)) => p,
+                Some(Ok(p)) => {
+                    primary_read = true;
+                    p
+                }
                 other => {
                     let why = other.and_then(|r| r.err()).unwrap_or_default();
                     let mut msg = b"Fleet intake later: the queued copy of ".to_vec();
@@ -1546,6 +1551,17 @@ fn fleet_intake_later(host_ctx: *mut c_void, host_cb: DupeHostFn, job: IntakeLat
     let prints: Vec<Option<crate::dupeintake::Print>> =
         got.iter().map(|r| r.as_ref().ok().cloned()).collect();
     let verdicts = crate::dupeintake::judge_against(&prints, Some(&fleet));
+    let mut digests: Vec<(i32, String)> = Vec::new();
+    if primary_read && primary_id > 0 {
+        digests.push((primary_id, fleet.digest()));
+    }
+    for ((id, _, _), p) in job.pending.iter().zip(&prints) {
+        if let Some(p) = p {
+            digests.push((*id, p.digest()));
+        }
+    }
+    #[cfg(unix)]
+    crate::twin::set_inner_digests(&digests);
     for (((id, name, _), verdict), r) in job.pending.iter().zip(verdicts).zip(got) {
         let mut msg = b"Fleet intake later: ".to_vec();
         msg.extend_from_slice(name);
@@ -6026,6 +6042,13 @@ pub unsafe fn fleet_append(
             ];
             if let Some(av) = alive_str.as_deref() {
                 params.push((ALIVE_PARAM, av));
+            }
+            // the video inside, for TwinCheck to tell an alt from a different video
+            let inner = intake_prints[idx]
+                .as_ref()
+                .map(crate::dupeintake::Print::digest);
+            if let Some(d) = inner.as_deref() {
+                params.push((crate::dupeintake::INNER_PARAM, d.as_bytes()));
             }
             let add_name = fleet_ensure_nzb_ext(&member.name);
             let member_score = fleet_calc_member_add_score(running_id, lowest, top, rank);

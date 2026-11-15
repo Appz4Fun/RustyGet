@@ -3476,7 +3476,7 @@
   },
   "status_alt": {
     "message": "alt",
-    "description": "History status of a duplicate that is another encode of the same release (its files differ from the primary's)."
+    "description": "History status of a duplicate that holds the same video file as the primary in another container (verified inside the archives, not by par2)."
   },
   "desc_twin_group": {
     "message": "Twin group $1: postings with this label hold byte-identical files",
@@ -4821,7 +4821,7 @@
   },
   "fleet_role_alt": {
     "message": "alt",
-    "description": "Fleet role tag: the same release packaged differently."
+    "description": "Fleet role tag: the same video file in another container."
   },
   "fleet_role_copy": {
     "message": "copy",

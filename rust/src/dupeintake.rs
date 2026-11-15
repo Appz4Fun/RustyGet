@@ -283,6 +283,11 @@ pub fn print_copy(
         if !map.read_donor_inner(&sources, range, &mut buf) {
             return Err("payload unreadable".to_string());
         }
+        // Only a video's own bytes may drop a copy: an archive under an
+        // obfuscated name maps as a bare file, and its bytes say nothing.
+        if offset == 0 && !is_video_start(&buf) {
+            return Err("payload does not start like a video".to_string());
+        }
         samples.push(crate::dupefallback::crc32_ieee(&buf));
     }
     // Articles that tell another file size than the nzb lists (by more than
@@ -302,6 +307,21 @@ pub fn print_copy(
         }
     }
     Ok(Print { size, samples })
+}
+
+/// The payload starts like a video file: Matroska/WebM (EBML), MP4/MOV
+/// (`ftyp`), AVI (`RIFF....AVI `), MPEG-TS (sync bytes every 188), MPEG-PS,
+/// Ogg, FLV or ASF/WMV.
+pub fn is_video_start(head: &[u8]) -> bool {
+    let at = |o: usize, sig: &[u8]| head.len() >= o + sig.len() && &head[o..o + sig.len()] == sig;
+    at(0, b"\x1a\x45\xdf\xa3")
+        || at(4, b"ftyp")
+        || (at(0, b"RIFF") && at(8, b"AVI "))
+        || (head.len() >= 377 && head[0] == 0x47 && head[188] == 0x47 && head[376] == 0x47)
+        || at(0, b"\x00\x00\x01\xba")
+        || at(0, b"OggS")
+        || at(0, b"FLV")
+        || at(0, b"\x30\x26\xb2\x75\x8e\x66\xcf\x11")
 }
 
 /// Which copies carry the fleet's video. The fleet's video is the one most
@@ -449,6 +469,20 @@ mod tests {
         let a = print_copy(&bare, &mem, None, 4, 9).expect("bare");
         let b = print_copy(&split, &mem, None, 4, 9).expect("split");
         assert_eq!(a, b, "the split movie is read, not the sample");
+    }
+
+    #[test]
+    fn an_archive_under_an_obfuscated_name_is_unverified() {
+        let mut mem = Memory {
+            files: HashMap::new(),
+            fetched: Cell::new(0),
+        };
+        let zip = stored_zip("movie.mkv", &video(100_000, 7));
+        let obf = copy(&mut mem, "o", "a8f3c2d19e", zip, 8_000);
+        let got = print_copy(&obf, &mem, None, 4, 3);
+        assert!(got.is_err(), "{got:?}");
+        assert!(is_video_start(&video(64, 1)));
+        assert!(!is_video_start(b"PK\x03\x04 not a video"));
     }
 
     /// A zip archive holding `name` stored (not compressed).

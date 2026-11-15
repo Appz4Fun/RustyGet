@@ -6090,8 +6090,9 @@ def scenario_fleetintake(daemon, t):
     import io as _io
     import zipfile as _zip
     daemon.fake_nntp.alive = set()
-    video = _payload(400_000, 7201)
-    other = _payload(400_000, 7202)
+    ebml = b'\x1a\x45\xdf\xa3'   # intake only compares payloads that start like a video
+    video = ebml + _payload(400_000, 7201)
+    other = ebml + _payload(400_000, 7202)
     packed = _io.BytesIO()
     with _zip.ZipFile(packed, 'w', _zip.ZIP_STORED) as z:
         z.writestr('movie.mkv', video)

@@ -2881,6 +2881,12 @@ impl crate::progressive_unpack::VolumeFeed for DirectUnpackFeed {
         self.expected_volumes
     }
 
+    fn set_became_final(&self) -> bool {
+        direct_unpack_download_finished(self.nzb_id)
+            && !direct_unpack_has_holds(self.nzb_id)
+            && !direct_unpack_abandoned(self.nzb_id)
+    }
+
     fn wait_repaired(&mut self, is_cancelled: &mut dyn FnMut() -> bool) -> bool {
         loop {
             if direct_unpack_abandoned(self.nzb_id) || is_cancelled() {

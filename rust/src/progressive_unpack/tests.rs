@@ -1,5 +1,5 @@
 use super::*;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 
 // ---- RAR5 fixture builder (stored members, valid header and data CRCs) ----
 
@@ -2303,4 +2303,270 @@ fn repaired_output_with_many_damaged_volumes_is_moved_not_copied() {
         copied.is_empty(),
         "copied into place instead of moved: {copied:?}"
     );
+}
+
+/// Every volume on disk without holes, the set still "downloading" (not final at the start),
+/// reported final from the start of extraction when `became` is set.
+struct LateFinal {
+    became: bool,
+    volumes: u64,
+}
+
+impl VolumeFeed for LateFinal {
+    fn volume(&mut self, path: &Path) -> VolumeView {
+        if path.is_file() {
+            VolumeView::Ready { holes: Vec::new() }
+        } else {
+            VolumeView::Missing
+        }
+    }
+    fn wait_repaired(&mut self, _c: &mut dyn FnMut() -> bool) -> bool {
+        true
+    }
+    fn set_became_final(&self) -> bool {
+        self.became
+    }
+    fn expected_volumes(&self) -> u64 {
+        self.volumes
+    }
+}
+
+fn run_late(
+    first: &Path,
+    out: &Path,
+    feed: Box<dyn VolumeFeed>,
+    overwrite: Overwrite,
+) -> (Vec<String>, Outputs) {
+    let req = Request {
+        first_volume: first,
+        dest: out,
+        password: "",
+        overwrite,
+        on_wait: None,
+    };
+    let mut log = Vec::new();
+    let mut copied: Outputs = Vec::new();
+    let r = extract_recording(
+        &req,
+        feed,
+        &mut |_, m: &str| log.push(m.to_string()),
+        &mut || false,
+        Some(&mut copied),
+    );
+    expect_ok(r, &log);
+    (log, copied)
+}
+
+#[test]
+fn a_set_that_became_final_is_moved_not_copied() {
+    let t = TestDir::new("latefinal");
+    let data = pattern(600_000);
+    let vols = rar5_volumes("movie.mkv", &data, 100_000);
+    let first = write_set(&t.dl(), &vols);
+    let feed = LateFinal {
+        became: true,
+        volumes: vols.len() as u64,
+    };
+    let (_log, copied) = run_late(&first, &t.out(), Box::new(feed), Overwrite::Always);
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+    assert!(
+        copied.is_empty(),
+        "copied into place instead of moved: {copied:?}"
+    );
+    #[cfg(unix)]
+    assert_eq!(mode_of(&t.out().join("movie.mkv")), 0o644);
+}
+
+#[test]
+fn a_set_still_downloading_is_copied() {
+    let t = TestDir::new("latenotfinal");
+    let data = pattern(600_000);
+    let vols = rar5_volumes("movie.mkv", &data, 100_000);
+    let first = write_set(&t.dl(), &vols);
+    let feed = LateFinal {
+        became: false,
+        volumes: vols.len() as u64,
+    };
+    let (_log, copied) = run_late(&first, &t.out(), Box::new(feed), Overwrite::Always);
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+    assert_eq!(copied.len(), 1, "{copied:?}");
+}
+
+#[test]
+fn a_final_set_in_skip_mode_is_copied() {
+    let t = TestDir::new("lateskip");
+    let data = pattern(600_000);
+    let vols = rar5_volumes("movie.mkv", &data, 100_000);
+    let first = write_set(&t.dl(), &vols);
+    let feed = LateFinal {
+        became: true,
+        volumes: vols.len() as u64,
+    };
+    let (_log, copied) = run_late(&first, &t.out(), Box::new(feed), Overwrite::Skip);
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+    assert_eq!(copied.len(), 1, "{copied:?}");
+}
+
+#[test]
+fn a_final_windows_set_keeps_the_copy_path_name() {
+    RAR5_HOST.with(|h| h.set((0, 0x20)));
+    let t = TestDir::new("latewin");
+    let data = pattern(600_000);
+    let vols = rar5_volumes("dir\\movie.mkv", &data, 100_000);
+    RAR5_HOST.with(|h| h.set((1, 0o644)));
+    let first = write_set(&t.dl(), &vols);
+    let feed = LateFinal {
+        became: true,
+        volumes: vols.len() as u64,
+    };
+    let (_log, copied) = run_late(&first, &t.out(), Box::new(feed), Overwrite::Always);
+    assert_eq!(std::fs::read(t.out().join("dir\\movie.mkv")).unwrap(), data);
+    assert_eq!(copied.len(), 1, "{copied:?}");
+}
+
+#[test]
+fn a_final_set_with_duplicate_names_is_copied() {
+    // A later member with the same name wins; the copy path orders that itself.
+    let t = TestDir::new("latedup");
+    let one = pattern(50_000);
+    let two: Vec<u8> = pattern(60_000).iter().map(|b| b ^ 0x33).collect();
+    let mut v = SIG.to_vec();
+    v.extend(main_block(false, None));
+    v.extend(file_block(
+        "a.bin",
+        one.len() as u64,
+        &one,
+        crc32fast::hash(&one),
+        false,
+        false,
+    ));
+    v.extend(file_block(
+        "a.bin",
+        two.len() as u64,
+        &two,
+        crc32fast::hash(&two),
+        false,
+        false,
+    ));
+    v.extend(end_block(false));
+    let first = t.dl().join("first.rar");
+    std::fs::write(&first, &v).unwrap();
+    let feed = LateFinal {
+        became: true,
+        volumes: 1,
+    };
+    let (_log, copied) = run_late(&first, &t.out(), Box::new(feed), Overwrite::Always);
+    assert_eq!(std::fs::read(t.out().join("a.bin")).unwrap(), two);
+    assert!(!copied.is_empty(), "{copied:?}");
+}
+
+// From #430: a set repaired while the session waits, then reported final. Its volumes had
+// holes, so the end-of-run upgrade (#432) moves the output, not the became-final one.
+/// As `Damaged`, for a download that ends and is repaired while the session waits: the feed
+/// then reports the set final.
+struct FinalAfterRepair {
+    inner: Damaged,
+    volumes: u64,
+    repaired: Arc<AtomicBool>,
+}
+
+impl VolumeFeed for FinalAfterRepair {
+    fn volume(&mut self, path: &Path) -> VolumeView {
+        if self.repaired.load(Ordering::Acquire) {
+            return if path.is_file() {
+                VolumeView::Ready { holes: Vec::new() }
+            } else {
+                VolumeView::Missing
+            };
+        }
+        self.inner.volume(path)
+    }
+    fn wait_repaired(&mut self, is_cancelled: &mut dyn FnMut() -> bool) -> bool {
+        let ok = self.inner.wait_repaired(is_cancelled);
+        self.repaired.store(ok, Ordering::Release);
+        ok
+    }
+    fn set_became_final(&self) -> bool {
+        self.repaired.load(Ordering::Acquire)
+    }
+    fn expected_volumes(&self) -> u64 {
+        self.volumes
+    }
+}
+
+/// A repaired output of a set that became final is moved into place by the session, not copied
+/// there byte for byte (6790: 7 min to copy a 15 GB repaired mkv). Many volumes, several of
+/// them damaged, so the declared set and the repaired volumes fit the handle budget.
+#[test]
+fn repaired_output_of_a_final_set_is_moved_not_copied() {
+    let t = TestDir::new("finalrepair");
+    let chunk = 50_000;
+    let data = pattern(60 * chunk);
+    let vols = rar5_volumes("movie.mkv", &data, chunk);
+    let first = write_set(&t.dl(), &vols);
+    let mut holes = Vec::new();
+    let mut repair = Vec::new();
+    for i in (3..vols.len() - 1).step_by(5) {
+        let path = t.dl().join(volume_name(i, vols.len()));
+        let p = payload_offset(&vols[i], chunk) as u64;
+        let h = vec![(p + 10_000, 8_000)];
+        let mut dmg = vols[i].clone();
+        dmg[(p + 10_000) as usize..(p + 18_000) as usize].fill(0);
+        std::fs::write(&path, &dmg).unwrap();
+        holes.push((path.clone(), h));
+        repair.push((path, vols[i].clone()));
+    }
+    let feed = FinalAfterRepair {
+        inner: Damaged {
+            holes,
+            repair,
+            handed: false,
+        },
+        volumes: vols.len() as u64,
+        repaired: Arc::new(AtomicBool::new(false)),
+    };
+    let req = Request {
+        first_volume: &first,
+        dest: &t.out(),
+        password: "",
+        overwrite: Overwrite::Always,
+        on_wait: None,
+    };
+    let mut log = Vec::new();
+    let mut copied: Outputs = Vec::new();
+    let r = extract_recording(
+        &req,
+        Box::new(feed),
+        &mut |_, m: &str| log.push(m.to_string()),
+        &mut || false,
+        Some(&mut copied),
+    );
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+    assert!(
+        log.iter()
+            .any(|l| l.contains("repaired movie.mkv from the repaired volumes")),
+        "{log:?}"
+    );
+    assert!(
+        copied.is_empty(),
+        "copied into place instead of moved: {copied:?}"
+    );
+}
+
+#[test]
+fn a_final_set_of_many_small_volumes_extracts() {
+    // Every header step of every volume still to read rechecks the declaration; with 140
+    // small volumes, declaring before the last volume exhausted zipfast's bookkeeping budget
+    // mid-extraction.
+    let t = TestDir::new("latesmall");
+    let data = pattern(140 * 4096);
+    let vols = rar5_volumes("movie.mkv", &data, 4096);
+    let first = write_set(&t.dl(), &vols);
+    let feed = LateFinal {
+        became: true,
+        volumes: vols.len() as u64,
+    };
+    let (_log, _copied) = run_late(&first, &t.out(), Box::new(feed), Overwrite::Always);
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
 }

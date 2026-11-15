@@ -221,6 +221,7 @@ test-daemon jobs="3": (debug jobs)
     import concurrent.futures
     import os
     import platform
+    import re
     import shutil
     import subprocess
 
@@ -233,11 +234,14 @@ test-daemon jobs="3": (debug jobs)
 
     system = platform.system()
     machine = platform.machine()
-    rust_target = (
-        ("aarch64-apple-darwin" if machine in ("arm64", "aarch64") else "x86_64-apple-darwin")
-        if system == "Darwin"
-        else "x86_64-unknown-linux-gnu"
-    )
+    if system == "Darwin":
+        rust_target = "aarch64-apple-darwin" if machine in ("arm64", "aarch64") else "x86_64-apple-darwin"
+    else:
+        out = subprocess.check_output(["rustc", "-vV"], cwd=os.path.join(root, "rust"), text=True)
+        host = re.search(r"^host:\s+(\S+)$", out, re.MULTILINE)
+        if not host:
+            raise RuntimeError("cannot determine the Rust compiler host for daemon tests")
+        rust_target = host.group(1)
     rust_lib = os.path.join(build_dir, "rust", rust_target, "debug", "libnzbget_rs.a")
     archive_path = os.path.join(build_dir, "librustyget.a")
     rustyget_bin = os.path.join(build_dir, "rustyget")

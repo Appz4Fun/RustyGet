@@ -172,30 +172,6 @@ unsafe fn bytes_arg<'a>(data: *const u8, len: usize) -> &'a [u8] {
     }
 }
 
-/// The fingerprint of `count` files given as md5 texts and lengths (the
-/// names are not part of it).
-///
-/// # Safety
-/// `md5s` points to `count` valid NUL-terminated strings (null entries are
-/// empty) and `lengths` to `count` values; both may be null for 0.
-#[cfg(test)]
-unsafe fn nzbget_rs_twin_fingerprint(
-    md5s: *const *const c_char,
-    lengths: *const u64,
-    count: usize,
-) -> RsBuf {
-    if count > 0 && (md5s.is_null() || lengths.is_null()) {
-        return into_buf(Vec::new());
-    }
-    let files = (0..count).map(|i| {
-        (
-            String::from_utf8_lossy(input(*md5s.add(i))),
-            *lengths.add(i),
-        )
-    });
-    into_buf(crate::twin::fingerprint_cow(files).into_bytes())
-}
-
 /// # Safety
 /// `buf` came from an nzbget_rs_* function and wasn't freed yet.
 #[no_mangle]
@@ -539,30 +515,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn twin_fingerprint_takes_arrays() {
-        unsafe {
-            let md5s = [
-                b"abc\0".as_ptr().cast(),
-                std::ptr::null(),
-                b"abc\0".as_ptr().cast(),
-            ];
-            let lengths = [1u64, 7, 1];
-            let result = nzbget_rs_twin_fingerprint(md5s.as_ptr(), lengths.as_ptr(), 3);
-            let expected = crate::twin::fingerprint_of([("abc", 1), ("", 7)].into_iter());
-            assert_eq!(input(result.data), expected.as_bytes()); // the repeated one counts once
-            nzbget_rs_free(result);
-            for (m, l, n) in [
-                (std::ptr::null(), std::ptr::null(), 0),
-                (std::ptr::null(), lengths.as_ptr(), 1),
-            ] {
-                let empty = nzbget_rs_twin_fingerprint(m, l, n);
-                assert_eq!(input(empty.data), b"");
-                nzbget_rs_free(empty);
-            }
-        }
-    }
-
-    #[test]
     fn fsdelete_null_inputs_initialize_outputs() {
         use std::ptr::{null, null_mut};
         // Poison rather than zero the output: a caller need not initialize
@@ -660,7 +612,7 @@ mod tests {
         assert!(crate::parparser::parse_par_filename(b"bad", true).is_none());
         assert_eq!(
             crate::parparser::parse_par_filename(b"a.vol+2.par2", true),
-            Some((1, -1))
+            Some((1, 2))
         );
         assert_eq!(
             crate::parparser::parse_par_filename(b"a.par2", true),

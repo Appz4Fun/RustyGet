@@ -74,36 +74,20 @@ pub fn desc_matches_file_damage(
         && (desc_name == damage_name || (damage_size > 0 && (desc_length as i64) == damage_size))
 }
 
-/// Computes the recovery blocks contributed by a PAR2 volume file in the queue.
+/// The recovery blocks a PAR2 volume file in the queue brings: its name's
+/// count, else an estimate from its encoded size (par-rs).
 #[inline]
 pub fn calc_queued_volume_blocks(parsed_blocks: i32, file_size: i64, block_size: u64) -> i32 {
-    if parsed_blocks >= 0 {
-        parsed_blocks
-    } else {
-        let denom = block_size.saturating_add(68) as i64;
-        if denom <= 0 {
-            0
-        } else {
-            ((file_size.saturating_mul(100) / 102) / denom) as i32
-        }
-    }
+    let block_size = i64::try_from(block_size).unwrap_or(i64::MAX);
+    par_rs::filenames::calc_queued_volume_blocks(parsed_blocks, file_size, block_size)
 }
 
-/// Computes the recovery blocks contributed by a completed PAR2 volume file on disk.
+/// The recovery blocks a completed PAR2 volume file on disk brings: its name's
+/// count, else an estimate from its size (par-rs).
 #[inline]
 pub fn calc_completed_volume_blocks(parsed_blocks: i32, disk_size: i64, block_size: u64) -> i32 {
-    if parsed_blocks >= 0 {
-        parsed_blocks
-    } else if disk_size > 0 {
-        let denom = block_size.saturating_add(68) as i64;
-        if denom <= 0 {
-            0
-        } else {
-            (disk_size / denom) as i32
-        }
-    } else {
-        0
-    }
+    let block_size = i64::try_from(block_size).unwrap_or(i64::MAX);
+    par_rs::filenames::calc_completed_volume_blocks(parsed_blocks, disk_size, block_size)
 }
 
 /// Records completion of a file in `ParDamage::FileCompleted`.
@@ -308,6 +292,51 @@ pub fn first_report(nzb_id: i32) -> bool {
     let first = !state.reported;
     state.reported = true;
     first
+}
+
+/// Bounded accepted ranges for a completed partial file. Unknown geometry or
+/// malformed damage history must not authorize sparse bytes as arrived data.
+pub(crate) fn completed_accepted_ranges(
+    nzb_id: i32,
+    name: &[u8],
+    length: u64,
+) -> Option<Vec<par_rs::damage::ByteRange>> {
+    use par_rs::damage::{normalize_ranges, ByteRange};
+    if length > i64::MAX as u64 {
+        return None;
+    }
+    let states = STATES.lock().unwrap_or_else(|e| e.into_inner());
+    let damage = states.get(&nzb_id)?.files.iter().rev().find(|file| {
+        file.name == base_file_name(name) && file.size > 0 && file.size as u64 == length
+    })?;
+    if damage.holes.len() > 4095 {
+        return None;
+    }
+    let mut holes = Vec::with_capacity(damage.holes.len());
+    for hole in &damage.holes {
+        if hole.offset < 0
+            || hole.size <= 0
+            || hole
+                .offset
+                .checked_add(hole.size)
+                .is_none_or(|end| end as u64 > length)
+        {
+            return None;
+        }
+        holes.push(ByteRange::new(hole.offset, hole.size));
+    }
+    let mut accepted = Vec::with_capacity(holes.len() + 1);
+    let mut end = 0;
+    for hole in normalize_ranges(&holes) {
+        if hole.offset > end {
+            accepted.push(ByteRange::new(end, hole.offset - end));
+        }
+        end = hole.end();
+    }
+    if end < length as i64 {
+        accepted.push(ByteRange::new(end, length as i64 - end));
+    }
+    Some(accepted)
 }
 
 /// `ParDamage::Forget`: removes any stored state for `nzb_id`.

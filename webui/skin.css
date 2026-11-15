@@ -4021,3 +4021,10 @@ a.fleet-member:hover {
 	pointer-events: none;
 	opacity: 0.6;
 }
+
+/* details panel: Log page with no messages yet */
+.details-log-empty {
+	margin: 8px 0 15px;
+	color: var(--label-secondary);
+	text-align: center;
+}

@@ -126,14 +126,15 @@ pub fn kind(primary: &Listed, dupe: &Listed) -> String {
 
 /// The files of two partial lists of one posting together (each file once):
 /// retries that saw other articles of the par2-file add what they found. Names
-/// compare as the store keeps them (lossy UTF-8), so a list read back from the
-/// store and a fresh parse of the same file don't list a file twice.
+/// compare as the store keeps them (lossy UTF-8, tabs and line breaks as
+/// '_'), so a list read back from the store and a fresh parse of the same
+/// file don't list a file twice.
 pub fn merge(a: &[FileSig], b: &[FileSig]) -> Vec<FileSig> {
     let mut seen: std::collections::HashSet<(String, &[u8; 16], u64)> =
         std::collections::HashSet::new();
     let mut merged: Vec<FileSig> = Vec::with_capacity(a.len() + b.len());
     for sig in a.iter().chain(b) {
-        let name = String::from_utf8_lossy(&sig.name).into_owned();
+        let name = String::from_utf8_lossy(&sig.name).replace(['\n', '\t', '\r'], "_");
         if seen.insert((name, &sig.md5, sig.length)) {
             merged.push(sig.clone());
         }

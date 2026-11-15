@@ -618,7 +618,7 @@ var Config = (new function($)
 		MainDir: 'Main folder', DestDir: 'Completed downloads folder', InterDir: 'Intermediate folder',
 		NzbDir: 'Watch folder for NZB files', QueueDir: 'Queue folder', TempDir: 'Temporary folder',
 		ScriptDir: 'Extensions folder', LogFile: 'Log file', ConfigTemplate: 'Configuration template',
-		ControlIP: 'Listen address', ControlPort: 'Port', SecureControl: 'Use HTTPS', LogToFile: 'Write a log file',
+		ControlIP: 'Listen address', ControlPort: 'Port', SecureControl: 'Use HTTPS', LogToFile: 'Write a log file', LogRotations: 'Rolled-over logs to keep',
 		SecureCert: 'HTTPS certificate', SecureKey: 'HTTPS private key',
 		CertCheck: 'Check news server certificates', CertStore: 'CA certificates',
 		ControlUsername: 'Username', ControlPassword: 'Password', SevenZipCmd: '7-Zip command',
@@ -1656,8 +1656,8 @@ var Config = (new function($)
 			{ key: 'system', title: 'System', options: ['DaemonUsername', 'UMask', 'JsonP', 'CertCheck', 'CertStore'] }
 		],
 		LOGGING: [
-			{ key: 'file', title: 'Log file', options: ['LogToFile', 'LogBuffer', 'SystemHealthCheck'],
-				text: 'Moved aside every 10 MB and at the end of each day, named by day and number, and kept 7 days. Messages of each download are written here too.' },
+			{ key: 'file', title: 'Log file', options: ['LogToFile', 'LogRotations', 'LogBuffer', 'SystemHealthCheck'],
+				text: 'Moved aside every 10 MB, named by day and number, and gzipped; the newest rolled-over files are kept. Messages of each download are written here too.' },
 			{ key: 'levels', title: 'Message levels', options: ['ErrorTarget', 'WarningTarget', 'InfoTarget', 'DetailTarget', 'DebugTarget'] },
 			{ key: 'debug', title: 'Troubleshooting', options: [], advanced: ['CrashTrace', 'CrashDump', 'TimeCorrection'] }
 		]
@@ -2042,6 +2042,7 @@ var Config = (new function($)
 			'SecureCert',
 			'SecureKey',
 			'LogToFile',
+			'LogRotations',
 			'LogBuffer',
 			'ErrorTarget',
 			'WarningTarget',
@@ -2343,6 +2344,10 @@ var Config = (new function($)
 			[0, 'No limit', 'Repair always runs to the end.'],
 			[30, 'Short', 'Gives up on long repairs; the download is marked as failed.'],
 			[120, 'Long', 'Allows big repairs to finish.']] },
+		LogRotations: { min: 0, max: 1000, scale: 'sqrt', presets: [
+			[0, 'Unlimited', 'Rolled-over logs are never deleted.'],
+			[10, 'Normal', 'About 100 MB of log before compression.'],
+			[100, 'Long', 'Keeps a long history.']] },
 		LogBuffer: { min: 0, max: 100000, scale: 'sqrt', presets: [
 			[0, 'Unlimited', 'Keeps every message until RustyGet restarts; memory use grows with it.'],
 			[100, 'Small', 'The Messages tab shows only recent lines.'],

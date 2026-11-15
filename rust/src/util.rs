@@ -845,9 +845,6 @@ pub fn log_should_close_idle(cur_time: i64, last_written: i64) -> bool {
     cur_time.wrapping_sub(last_written).saturating_abs() > 1
 }
 
-pub fn log_should_delete_old_rotated(file_day: i32, cur_day: i32, rotate_log: i32) -> bool {
-    file_day <= cur_day.wrapping_sub(rotate_log)
-}
 
 /// Evaluates whether `Log::Filelog` should rotate the log file on a day boundary.
 pub fn log_should_rotate(rawtime: i64, last_written: i64, write_log_mode: i32) -> bool {

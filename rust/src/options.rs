@@ -331,7 +331,7 @@ fn is_removed_opt(name: &CStr) -> bool {
         c"UpdateCheck",
         // HTTPS now shares ControlPort
         c"SecurePort",
-        // logs are kept 7 days in 10MB parts; NZB messages are in the main log
+        // logs roll over at 10MB, LogRotations of them are kept; NZB messages are in the main log
         c"RotateLog",
         c"NzbLog",
     ];
@@ -1546,8 +1546,8 @@ const HEALTH_CHECK_VALUES: [i32; 5] = [0, 1, 2, 3, 4];
 const TARGET_NAMES: [&CStr; 4] = [c"screen", c"log", c"both", c"none"];
 const TARGET_VALUES: [i32; 4] = [1, 2, 3, 0];
 
-/// How many days of log files are kept.
-pub const LOG_KEEP_DAYS: i32 = 7;
+/// How many rolled-over (10MB, gzipped) log files are kept by default; 0 keeps all.
+pub const LOG_ROTATIONS_DEFAULT: i32 = 10;
 
 const COMMAND_NAMES: [&CStr; 26] = [
     c"pausedownload",
@@ -1588,7 +1588,7 @@ pub const DUPE_WATCH_DELAY_SEC: i32 = 20;
 /// Emits all default option `(name, value)` pairs for `Options::InitDefaults`.
 pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &CStr)) {
     let output_mode = if disable_curses { c"color" } else { c"curses" };
-    let defaults: [(&CStr, &CStr); 125] = [
+    let defaults: [(&CStr, &CStr); 126] = [
         (c"MainDir", c"~/downloads"),
         (c"WebDir", c""),
         (c"ConfigTemplate", c""),
@@ -1601,6 +1601,7 @@ pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &
         (c"LogFile", c"${MainDir}/rustyget.log"),
         (c"RequiredDir", c""),
         (c"LogToFile", c"yes"),
+        (c"LogRotations", c"10"),
         (c"AppendCategoryDir", c"yes"),
         (c"OutputMode", output_mode),
         (c"DupeCheck", c"yes"),
@@ -2231,8 +2232,8 @@ pub fn init_scalar_options_host<H: OptionsHost>(
     s.secure_port = s.control_port;
     s.url_connections = host.parse_int_value(c"UrlConnections", 10);
     s.log_buffer = host.parse_int_value(c"LogBuffer", 10);
-    // day logs and their 10MB parts are kept this many days
-    s.rotate_log = LOG_KEEP_DAYS;
+    // rolled-over 10MB logs kept (gzipped); 0 keeps all
+    s.rotate_log = host.parse_int_value(c"LogRotations", 10);
     s.umask = host.parse_int_value(c"UMask", 8);
     s.update_interval = host.parse_int_value(c"UpdateInterval", 10);
     s.write_buffer = host.parse_int_value(c"WriteBuffer", 10);

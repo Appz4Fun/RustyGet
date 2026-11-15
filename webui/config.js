@@ -2665,6 +2665,8 @@ var Config = (new function($)
 		{ option: 'SecureCert', when: { name: 'SecureControl', values: ['yes'] } },
 		{ option: 'SecureKey', when: { name: 'SecureControl', values: ['yes'] } },
 		{ option: 'HardLinkingIgnoreExt', when: { name: 'HardLinking', values: ['yes'] } },
+		{ option: 'FlushQueue', when: { name: 'DirectWrite', values: ['no'] },
+			text: ['config_requires_flush', 'Always on while "Write directly to the final file" is on: the queue file is how a download resumes.'] },
 		{ option: 'HardLinking', when: { name: 'DirectRename', values: ['yes'] }, go: 'ConfigRenaming',
 			text: ['config_requires_renaming', 'Set "Renaming" to "While downloading" to change this.'] },
 		{ option: 'RestrictedPassword', when: { name: 'RestrictedUsername', notEmpty: true } },

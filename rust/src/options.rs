@@ -2574,19 +2574,14 @@ pub fn check_options_host<H: OptionsHost>(
     }
 
     if enable_flush != 0 {
-        host.locate_option_src_pos(c"FlushQueue");
-        host.config_warn(
-            c"Option 'FlushQueue=no' is incompatible with 'DirectWrite=yes'. Automatically enabling 'FlushQueue=yes' to ensure queue crash-recovery and prevent duplicate file corruption.",
-        );
+        // quietly: Settings locks FlushQueue on while DirectWrite is on
         scalars.flush_queue = 1;
         host.set_option(c"FlushQueue", c"yes");
     }
 
     if enforce_mutex != 0 {
-        host.locate_option_src_pos(c"DirectUnpack");
-        host.config_warn(
-            c"Option 'DirectUnpack=yes' with 'UnpackPauseQueue=no' can cause severe disk thrashing. Unpack concurrency will be serialized across jobs to protect I/O throughput.",
-        );
+        // DirectUnpack=yes with UnpackPauseQueue=no: unpacks run one job at a time to
+        // spare the disk. That is the default setup, so it is done without a warning.
         scalars.unpack_mutex_enforced = 1;
         host.set_option(c"_UnpackMutexEnforced", c"yes");
     }

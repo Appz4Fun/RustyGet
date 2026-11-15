@@ -5502,5 +5502,9 @@
   "config_requires_renaming": {
     "message": "Set \"Renaming\" to \"While downloading\" to change this.",
     "description": "Note on Hard linking while files are renamed after download"
+  },
+  "config_requires_flush": {
+    "message": "Always on while \"Write directly to the final file\" is on: the queue file is how a download resumes.",
+    "description": "Note on Flush queue to disk while Direct write is on"
   }
 }

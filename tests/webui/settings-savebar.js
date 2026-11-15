@@ -51,7 +51,7 @@ const { installOfflineModel } = require('./settings-offline-fixture');
       assert(await bar.isHidden(), 'No save bar before any change');
 
       // a switch toggles from the keyboard and is counted
-      const toggle = page.locator('#S_FlushQueue');
+      const toggle = page.locator('#S_NzbCleanupDisk');
       assert.equal(await toggle.getAttribute('role'), 'checkbox');
       const before = await toggle.getAttribute('aria-checked');
       await toggle.focus();
@@ -59,20 +59,20 @@ const { installOfflineModel } = require('./settings-offline-fixture');
       assert.notEqual(await toggle.getAttribute('aria-checked'), before);
       await bar.waitFor({ state: 'visible' });
       assert.equal(await count.textContent(), '1 change');
-      assert(await page.locator('.control-group.is-changed #S_FlushQueue').count() === 1);
+      assert(await page.locator('.control-group.is-changed #S_NzbCleanupDisk').count() === 1);
 
       // an option missing from the config file still counts once changed
       await page.locator('#S_ArticleCache').fill('777');
       await page.waitForFunction(() => document.querySelector('.config-savebar__count').textContent === '2 changes');
       if (width >= 768) {
-        assert.match(await page.locator('.config-savebar__names').textContent(), /Flush queue to disk, Article cache/);
+        assert.match(await page.locator('.config-savebar__names').textContent(), /NZB cleanup disk, Article cache/);
       }
 
       // Discard reloads the saved values and keeps the section
       await page.locator('#ConfigSaveBar_Discard').click();
-      await page.waitForFunction(() => Config.currentSectionID === 'DOWNLOAD_QUEUE' && document.querySelector('#S_FlushQueue'));
+      await page.waitForFunction(() => Config.currentSectionID === 'DOWNLOAD_QUEUE' && document.querySelector('#S_NzbCleanupDisk'));
       await page.waitForFunction(() => document.getElementById('ConfigSaveBar').hidden);
-      assert.equal(await page.locator('#S_FlushQueue').getAttribute('aria-checked'), before);
+      assert.equal(await page.locator('#S_NzbCleanupDisk').getAttribute('aria-checked'), before);
 
       // a list delete confirmed in a dialog shows the save bar
       await page.evaluate(() => Config.showSection('CATEGORIES', false));

@@ -1305,11 +1305,11 @@ fn probe_copies(
                     let ctx = ctx_addr as *mut c_void;
                     let groups = summary_groups_arc(info);
                     let mut listed = crate::twin::Listed::default();
-                    if !info.par_index.id.is_empty() {
+                    if !info.par_list.id.is_empty() {
                         let art = fetch_article_via_host(
                             ctx,
                             host_cb,
-                            &info.par_index.id,
+                            &info.par_list.id,
                             &groups,
                             deadline,
                         );
@@ -1317,6 +1317,35 @@ fn probe_copies(
                             let (sigs, complete) = crate::twin::par2_set(&art.data);
                             listed.sigs = sigs;
                             listed.complete = complete;
+                        }
+                        // a volume read for want of an index file carries its
+                        // file list after the recovery data, at its end
+                        let tail = &info.par_list.tail_ids;
+                        if !listed.complete
+                            && info.par_list.id != info.par_index.id
+                            && !tail.is_empty()
+                            && tail.last() != Some(&info.par_list.id)
+                        {
+                            let mut data = Vec::new();
+                            let mut all = true;
+                            for id in tail.iter().filter(|id| **id != info.par_list.id) {
+                                let art =
+                                    fetch_article_via_host(ctx, host_cb, id, &groups, deadline);
+                                if !art.success {
+                                    all = false;
+                                    break;
+                                }
+                                data.extend_from_slice(&art.data);
+                            }
+                            if all {
+                                let (sigs, complete) = crate::twin::par2_set(&data);
+                                if complete {
+                                    listed.sigs = sigs;
+                                    listed.complete = true;
+                                } else if !sigs.is_empty() {
+                                    listed.sigs = crate::twin::merge(&listed.sigs, &sigs);
+                                }
+                            }
                         }
                     }
                     let mut packing = Packing::Unknown;

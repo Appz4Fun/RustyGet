@@ -193,6 +193,32 @@ pub fn select_main_file(sizes: &[i64], is_par: &[u8]) -> (i64, isize) {
     (total_bytes, chosen)
 }
 
+/// The smallest par2 volume when every par2-file of the nzb belongs to one
+/// set (an nzb posted without its index file); none when there are several
+/// sets or none.
+fn par_list_from_volumes(parity_heads: &[NzbSummaryHead]) -> NzbSummaryHead {
+    let Some(first) = parity_heads.first() else {
+        return NzbSummaryHead::default();
+    };
+    let first_c = cstring_trunc(&first.name);
+    let one_set = parity_heads.iter().all(|h| {
+        crate::parparser::same_par_collection(
+            first_c.as_bytes(),
+            cstring_trunc(&h.name).as_bytes(),
+            true,
+        )
+    });
+    if !one_set {
+        return NzbSummaryHead::default();
+    }
+    parity_heads
+        .iter()
+        .filter(|h| !h.id.is_empty() && h.bytes > 0)
+        .min_by_key(|h| h.bytes)
+        .cloned()
+        .unwrap_or_default()
+}
+
 /// Stably sorts head indices by `head_bytes` descending and writes at most 3
 /// top head indices into `out_indices` (`NzbReader::Parse` in `NzbReader.cpp`).
 pub fn select_top_heads(head_bytes: &[i64], out_indices: &mut [usize]) -> usize {
@@ -3475,6 +3501,9 @@ pub struct NzbSummaryHead {
     pub name: Vec<u8>,
     pub id: Vec<u8>,
     pub bytes: i64,
+    /// The file's last two segments (in order), for a par2 volume whose
+    /// critical packets follow its recovery data.
+    pub tail_ids: Vec<Vec<u8>>,
 }
 
 /// Parsed NZB summary (`NzbSummary` in `NzbReader.h`).
@@ -3489,6 +3518,10 @@ pub struct NzbSummaryData {
     pub heads: Vec<NzbSummaryHead>,
     pub main_name: Vec<u8>,
     pub par_index: NzbSummaryHead,
+    /// The par2-file to read for the list of files (twin test): the index
+    /// file, or when the nzb has none (volumes only) the smallest volume of
+    /// its one par2 set; every par2-file of a set carries the file list.
+    pub par_list: NzbSummaryHead,
     pub recovery_bytes: Vec<u64>,
     pub files: i32,
     pub total_bytes: i64,
@@ -3592,6 +3625,7 @@ pub fn parse_nzb_summary(xml: &[u8]) -> Option<NzbSummaryData> {
     let mut m_name: Vec<u8> = Vec::new();
     let mut m_subject: Vec<u8> = Vec::new();
     let mut m_first_id: Vec<u8> = Vec::new();
+    let mut m_tail_ids: Vec<Vec<u8>> = Vec::new();
     let mut m_segments: Vec<(i64, i64, Vec<u8>)> = Vec::new();
     let mut m_parts: Vec<(i64, i64)> = Vec::new();
     let mut m_file_bytes: i64 = 0;
@@ -3635,6 +3669,7 @@ pub fn parse_nzb_summary(xml: &[u8]) -> Option<NzbSummaryData> {
                     m_name = subj[s_start..s_end].to_vec();
                     m_subject = subj.to_vec();
                     m_first_id.clear();
+                    m_tail_ids.clear();
                     m_segments.clear();
                     m_parts.clear();
                     m_file_bytes = 0;
@@ -3708,6 +3743,12 @@ pub fn parse_nzb_summary(xml: &[u8]) -> Option<NzbSummaryData> {
                         if seg_num == 1 {
                             m_first_id = seg_id.clone();
                         }
+                        if is_par {
+                            m_tail_ids.push(seg_id.clone());
+                            if m_tail_ids.len() > 2 {
+                                m_tail_ids.remove(0);
+                            }
+                        }
                     }
                     let count = declared_parts_c_locale(&m_subject);
                     let (_file_listed, file_total) = crate::dupewatch::part_counts(
@@ -3753,6 +3794,7 @@ pub fn parse_nzb_summary(xml: &[u8]) -> Option<NzbSummaryData> {
                             name: m_name.clone(),
                             id: m_first_id.clone(),
                             bytes: m_file_bytes,
+                            tail_ids: m_tail_ids.clone(),
                         });
                     }
                     if push_data_head {
@@ -3760,6 +3802,7 @@ pub fn parse_nzb_summary(xml: &[u8]) -> Option<NzbSummaryData> {
                             name: m_name.clone(),
                             id: m_first_id.clone(),
                             bytes: m_file_bytes,
+                            tail_ids: Vec::new(),
                         });
                     }
                     m_in_file = false;
@@ -3930,6 +3973,11 @@ pub fn parse_nzb_summary(xml: &[u8]) -> Option<NzbSummaryData> {
             }
         }
     }
+    out.par_list = if !out.par_index.id.is_empty() {
+        out.par_index.clone()
+    } else {
+        par_list_from_volumes(&parity_heads)
+    };
     if !out.par_index.id.is_empty() {
         let idx_c = cstring_trunc(&out.par_index.name);
         for head in &parity_heads {
@@ -5207,6 +5255,7 @@ mod tests {
             let info = parse_nzb_summary(&make_test_nzb(&files, "par-sets", "")).unwrap();
             assert_eq!(info.data_bytes, 3000);
             assert!(info.par_index.id.is_empty());
+            assert!(info.par_list.id.is_empty(), "two par2 sets: no list file");
             assert!(info.recovery_bytes.is_empty());
         }
 
@@ -5223,6 +5272,7 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(info.par_index.name, b"rel.par2");
+        assert_eq!(info.par_list.name, b"rel.par2");
         assert_eq!(info.recovery_bytes, vec![100, 200]);
 
         let info = parse_nzb_summary(&make_test_nzb(
@@ -5237,6 +5287,22 @@ mod tests {
         .unwrap();
         assert!(info.par_index.id.is_empty());
         assert!(info.recovery_bytes.is_empty());
+        // without an index file the smallest volume gives the file list
+        assert_eq!(info.par_list.name, b"rel.vol00+01.par2");
+
+        // volumes named vol-NN (MobLand S02E09 copy 11, 2026-11-15)
+        let info = parse_nzb_summary(&make_test_nzb(
+            &[
+                ("rel.vol-03.par2", &[900]),
+                ("rel.vol-01.par2", &[40]),
+                ("rel.vol-02.par2", &[400]),
+                ("rel.mkv", &[10000]),
+            ],
+            "par-dash-volumes",
+            "",
+        ))
+        .unwrap();
+        assert_eq!(info.par_list.name, b"rel.vol-01.par2");
 
         // NzbReaderRejectsBadNzbTest
         assert!(parse_nzb_summary(b"<nzb><file").is_none());

@@ -2529,6 +2529,26 @@ impl NzbgetRsQueueCoordinator {
         })
     }
 
+    /// The message for live PAR that could not start or catch up; a memory
+    /// refusal is told in MB with the ParBuffer it would take.
+    fn live_par_deferred_message(error: &crate::parchecker::RepairError) -> String {
+        if let crate::parchecker::RepairError::StreamingMemoryLimit {
+            context: "bounded live PAR startup",
+            required_bytes,
+            limit_bytes,
+        } = error
+        {
+            let mb = |b: u64| b.div_ceil(1024 * 1024);
+            return format!(
+                "Live PAR catch-up deferred: this release's par2 blocks need {} MB of ParBuffer to repair during the download, {} MB is available; set ParBuffer to {} MB or more for live repair. Ordinary repair remains available.",
+                mb(*required_bytes),
+                mb(*limit_bytes),
+                mb(*required_bytes)
+            );
+        }
+        format!("Live PAR catch-up deferred: {error}. Ordinary repair remains available.")
+    }
+
     fn report_live_completion_error(
         host: &crate::queuesubsys_host::QueueSubsysHost,
         nzb_id: i32,
@@ -2540,9 +2560,7 @@ impl NzbgetRsQueueCoordinator {
         host.with_locked_queue(|dq| {
             let nzb = host.queue_find_by_id(dq, nzb_id);
             if nzb != 0 {
-                let message = format!(
-                    "Live PAR catch-up deferred: {error}. Ordinary repair remains available."
-                );
+                let message = Self::live_par_deferred_message(error);
                 host.nzb_print_message(nzb, crate::queuesubsys_host::MK_DETAIL, message.as_bytes());
             }
         });
@@ -3748,7 +3766,8 @@ impl NzbgetRsQueueCoordinator {
                         &filename,
                         file_status == crate::queuesubsys_host::CF_SUCCESS,
                     ) {
-                        let message = format!("Live PAR completion deferred: {error}. Ordinary repair remains available.");
+                        let message = Self::live_par_deferred_message(&error)
+                            .replacen("catch-up", "completion", 1);
                         host.nzb_print_message(
                             nzb.ptr,
                             crate::queuesubsys_host::MK_DETAIL,
@@ -5818,6 +5837,29 @@ fn save_partial_state_host(host: &crate::queuesubsys_host::QueueSubsysHost, file
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn live_par_memory_refusal_is_told_in_mb() {
+        let err = crate::parchecker::RepairError::StreamingMemoryLimit {
+            context: "bounded live PAR startup",
+            required_bytes: 152_502_272,
+            limit_bytes: 128 * 1024 * 1024,
+        };
+        let msg = super::NzbgetRsQueueCoordinator::live_par_deferred_message(&err);
+        assert!(msg.contains("need 146 MB of ParBuffer"), "{msg}");
+        assert!(msg.contains("128 MB is available"), "{msg}");
+        assert!(msg.contains("set ParBuffer to 146 MB or more"), "{msg}");
+        assert!(!msg.contains("bytes"), "{msg}");
+        // a busy pool or a fixed cap is not a ParBuffer question
+        let busy = crate::parchecker::RepairError::StreamingMemoryLimit {
+            context: "shared live PAR reservation",
+            required_bytes: 128 * 1024 * 1024,
+            limit_bytes: 500 * 1024 * 1024,
+        };
+        let msg = super::NzbgetRsQueueCoordinator::live_par_deferred_message(&busy);
+        assert!(!msg.contains("set ParBuffer"), "{msg}");
+        assert!(msg.contains("shared live PAR reservation"), "{msg}");
+    }
+
     #[test]
     fn dupe_mass_failure_thresholds() {
         assert!(!dupe_mass_failure(1000, 3));

@@ -2333,8 +2333,8 @@ var Config = (new function($)
 			[60, 'Normal', ''],
 			[180, 'Patient', 'For slow indexers.']] },
 		ParBuffer: { min: 16, max: 4096, scale: 'sqrt', presets: [
-			[100, 'Low', 'For machines with little memory; repair is slower.'],
-			[500, 'Normal', ''],
+			[100, 'Low', 'For machines with little memory; repair is slower and most releases repair only after the download.'],
+			[500, 'Normal', 'Repairs about 96% of releases during the download (par2 blocks up to 28 MB).'],
 			[2000, 'High', 'Faster repair of large releases; uses up to 2 GB.']] },
 		ParThreads: { min: 0, max: 64, presets: [
 			[0, 'Automatic', 'One thread per CPU core.'],

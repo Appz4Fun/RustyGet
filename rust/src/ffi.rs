@@ -556,7 +556,6 @@ mod tests {
             b"",
             b"",
             false,
-            b'/',
             &mut is_stopped,
             &mut on_progress,
             &mut on_message,

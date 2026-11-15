@@ -713,6 +713,38 @@ pub fn article_writer_create_output_file(output_filename: &[u8], size: i64) -> R
     Ok(())
 }
 
+pub(crate) fn article_writer_create_output_file_guarded(
+    output_filename: &[u8],
+    size: i64,
+    context: &crate::parlive::SourceWriteContext,
+) -> Result<(), Vec<u8>> {
+    let path = crate::fsops::path(c_bytes(output_filename));
+    // As in the unguarded path, the destination may not exist yet; the
+    // physical root is attested only after it does.
+    let base_off = crate::paths::base_file_name(output_filename).min(1023);
+    let dest_dir = &output_filename[..base_off];
+    let mut errmsg = Vec::new();
+    if !crate::fsops::force_directories(dest_dir, &mut errmsg, &crate::fsops::posix_stat) {
+        return Err(join_c_slices(&[
+            b"Could not create directory ",
+            dest_dir,
+            b": ",
+            &errmsg,
+        ]));
+    }
+    let (file, context, _permit) = context
+        .open_attested(path, true)
+        .map_err(|error| format!("Output write ownership unavailable for {}: {error}", path.display()).into_bytes())?;
+    let result = u64::try_from(size)
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))
+        .and_then(|size| file.set_len(size))
+        .map_err(|error| error.to_string().into_bytes());
+    if result.is_err() {
+        context.invalidate();
+    }
+    result
+}
+
 /// `ArticleWriter::MoveCompletedFiles` (`daemon/nntp/ArticleWriter.cpp`):
 /// Creates `dest_dir`, moves each completed file from `old_dest_dir` to `dest_dir` (making unique
 /// filenames on collision and pruning empty parent directories), and removes `old_dest_dir` when
@@ -1150,6 +1182,114 @@ pub fn article_writer_flush_cache(
     }
 
     (flushed_articles, flushed_size)
+}
+
+/// Daemon cache commit with live repair ownership. Callbacks run after the permit drops.
+/// The public legacy wrapper above retains its historical commit/error behavior.
+pub(crate) fn article_writer_flush_cache_guarded(
+    items: &[ArticleWriterFlushItem<'_>],
+    direct_write: bool,
+    skip_disk_write: bool,
+    output_filename: &[u8],
+    context: &crate::parlive::SourceWriteContext,
+    mut should_stop: impl FnMut() -> bool,
+    mut discard: impl FnMut(usize),
+    mut log_error: impl FnMut(&[u8]),
+) -> (i32, i64) {
+    use std::io::{Seek, SeekFrom, Write};
+    let mut count = 0;
+    let mut size = 0;
+    let mut direct_file = None;
+    for (index, item) in items.iter().enumerate() {
+        if should_stop() {
+            break;
+        }
+        if skip_disk_write {
+            count += 1;
+            size += i64::from(item.segment_size);
+            discard(index);
+            continue;
+        }
+        let permit = match context.permit() {
+            Ok(permit) => permit,
+            Err(crate::parlive::WriteBlocked::Certified) => {
+                // A sealed target already contains certified bytes. Drop stale cache data.
+                count += 1;
+                size += i64::from(item.segment_size);
+                discard(index);
+                continue;
+            }
+            Err(blocked) => {
+                // Keep the segment cached and uncounted: the next flush pass
+                // builds a fresh context and writes it.
+                let message = join_c_slices(&[
+                    b"Could not commit cached article for ",
+                    output_filename,
+                    format!(": write ownership unavailable ({blocked:?})").as_bytes(),
+                ]);
+                log_error(&message);
+                break;
+            }
+        };
+        let result = (|| -> std::io::Result<()> {
+            let length = (item.segment_size.max(0) as usize).min(item.segment_content.len());
+            if direct_write {
+                if direct_file.is_none() {
+                    direct_file = Some(
+                        std::fs::OpenOptions::new()
+                            .read(true)
+                            .write(true)
+                            .open(crate::fsops::path(c_bytes(output_filename)))?,
+                    );
+                }
+                let file = direct_file.as_mut().unwrap();
+                let offset = u64::try_from(item.segment_offset)
+                    .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+                file.seek(SeekFrom::Start(offset))?;
+                file.write_all(&item.segment_content[..length])?;
+            } else {
+                let destination = item
+                    .result_filename
+                    .ok_or(std::io::ErrorKind::InvalidInput)?;
+                let temporary = join_c_slices(&[destination, b".tmp"]);
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open(crate::fsops::path(&temporary))?;
+                file.write_all(&item.segment_content[..length])?;
+                drop(file);
+                let source = std::ffi::CString::new(temporary)
+                    .map_err(|_| std::io::ErrorKind::InvalidInput)?;
+                let target = std::ffi::CString::new(c_bytes(destination))
+                    .map_err(|_| std::io::ErrorKind::InvalidInput)?;
+                if !crate::fsops::move_file(&source, &target) {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            context.invalidate();
+        }
+        drop(permit);
+        count += 1;
+        discard(index);
+        match result {
+            Ok(()) => size += i64::from(item.segment_size),
+            Err(error) => {
+                let message = join_c_slices(&[
+                    b"Could not commit cached article for ",
+                    output_filename,
+                    b": ",
+                    error.to_string().as_bytes(),
+                ]);
+                log_error(&message);
+                break;
+            }
+        }
+    }
+    (count, size)
 }
 
 /// `ArticleWriter::HandlePostProcessing` (`daemon/nntp/ArticleWriter.cpp`):
@@ -1837,6 +1977,133 @@ mod tests {
         assert_eq!(discarded, vec![0, 1]);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn live_preallocation_cannot_truncate_certified_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = std::env::temp_dir().join(format!(
+            "rustyget-preallocate-sealed-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("part40.rar");
+        std::fs::write(&path, b"repaired").unwrap();
+        let context =
+            crate::parlive::source_write_context(-1900232, 40, &dir, b"part40.rar").unwrap();
+        let gate = crate::parlive::download_writes(-1900232, &dir).unwrap();
+        let generation = crate::parlive::SessionGeneration(1);
+        gate.advance_generation(generation).unwrap();
+        gate.begin_repair(
+            generation,
+            vec![crate::parlive::WriterTarget {
+                file_id: 40,
+                path: path.clone(),
+            }],
+            crate::parlive::reserve_control(-1900232, 4096, 500 << 20).unwrap(),
+        )
+        .unwrap()
+        .publish(&[(40, 0)], || ())
+        .unwrap();
+        assert!(article_writer_create_output_file_guarded(
+            path.as_os_str().as_bytes(),
+            4096,
+            &context
+        )
+        .is_err());
+        assert_eq!(std::fs::read(path).unwrap(), b"repaired");
+        assert!(gate.is_current_generation(generation));
+        crate::parlive::forget_download_writes(-1900232);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn live_cache_flush_cannot_overwrite_a_certified_target() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir =
+            std::env::temp_dir().join(format!("rustyget-cache-sealed-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("part40.rar");
+        std::fs::write(&path, b"original").unwrap();
+        let context =
+            crate::parlive::source_write_context(-1900230, 40, &dir, b"part40.rar").unwrap();
+        let gate = crate::parlive::download_writes(-1900230, &dir).unwrap();
+        let generation = crate::parlive::SessionGeneration(1);
+        gate.advance_generation(generation).unwrap();
+        let lease = gate
+            .begin_repair(
+                generation,
+                vec![crate::parlive::WriterTarget {
+                    file_id: 40,
+                    path: path.clone(),
+                }],
+                crate::parlive::reserve_control(-1900230, 4096, 500 << 20).unwrap(),
+            )
+            .unwrap();
+        std::fs::write(&path, b"repaired").unwrap();
+        lease.publish(&[(40, 0)], || ()).unwrap();
+        let mut discarded = Vec::new();
+        let items = [ArticleWriterFlushItem {
+            segment_offset: 0,
+            segment_size: 8,
+            segment_content: b"late-old",
+            result_filename: None,
+        }];
+        let result = article_writer_flush_cache_guarded(
+            &items,
+            true,
+            false,
+            path.as_os_str().as_bytes(),
+            &context,
+            || false,
+            |idx| discarded.push(idx),
+            |_| panic!("certified discard is expected"),
+        );
+        assert_eq!(result, (1, 8));
+        assert_eq!(discarded, [0]);
+        assert_eq!(std::fs::read(&path).unwrap(), b"repaired");
+        assert!(gate.is_current_generation(generation));
+        crate::parlive::forget_download_writes(-1900230);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn live_cache_flush_failure_cancels_before_callbacks() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = std::env::temp_dir().join(format!("rustyget-cache-error-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("absent.rar");
+        let context =
+            crate::parlive::source_write_context(-1900231, 41, &dir, b"absent.rar").unwrap();
+        let gate = crate::parlive::download_writes(-1900231, &dir).unwrap();
+        let generation = crate::parlive::SessionGeneration(2);
+        gate.advance_generation(generation).unwrap();
+        let items = [ArticleWriterFlushItem {
+            segment_offset: 0,
+            segment_size: 4,
+            segment_content: b"data",
+            result_filename: None,
+        }];
+        let mut errors = 0;
+        let result = article_writer_flush_cache_guarded(
+            &items,
+            true,
+            false,
+            path.as_os_str().as_bytes(),
+            &context,
+            || false,
+            |_| assert_eq!(gate.status().active_writers, 0),
+            |_| {
+                assert_eq!(gate.status().active_writers, 0);
+                assert!(!gate.is_current_generation(generation));
+                errors += 1;
+            },
+        );
+        assert_eq!(result, (1, 0));
+        assert_eq!(errors, 1);
+        assert!(!path.exists());
+        crate::parlive::forget_download_writes(-1900231);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

@@ -8,6 +8,8 @@ pub mod articledl;
 pub mod articlefetcher;
 pub mod binrpc;
 pub mod bytes;
+#[cfg(unix)]
+mod callback_metrics;
 pub mod cleanup;
 pub mod cmdline;
 pub mod collection;
@@ -48,6 +50,7 @@ pub mod options;
 pub mod parchecker;
 pub mod liveparlog;
 pub mod pardamage;
+mod parlive;
 pub mod parparser;
 pub mod parrenamer;
 pub mod paths;

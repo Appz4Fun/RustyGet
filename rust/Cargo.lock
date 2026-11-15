@@ -604,15 +604,13 @@ dependencies = [
 [[package]]
 name = "par-rs"
 version = "0.2.0"
-source = "git+https://github.com/xbmc4lyfe/par-rs?branch=main#97fe5b66eac32d98d7b62c3125b02e457485b602"
+source = "git+https://github.com/xbmc4lyfe/par-rs?rev=405c44a77789ac16c21c1460c06f8a5d04013ddf#405c44a77789ac16c21c1460c06f8a5d04013ddf"
 dependencies = [
  "crc32fast",
  "md-5 0.10.6",
  "memchr",
  "memmap2",
  "rayon",
- "regex",
- "sha1",
  "thiserror",
 ]
 
@@ -768,17 +766,6 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
-]
-
-[[package]]
-name = "sha1"
-version = "0.10.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
-dependencies = [
- "cfg-if",
- "cpufeatures",
- "digest 0.10.7",
 ]
 
 [[package]]
@@ -978,12 +965,12 @@ dependencies = [
 [[package]]
 name = "zip-container"
 version = "0.1.0"
-source = "git+https://github.com/xbmc4lyfe/zipfast?rev=0030c75a86f5ab7c1cf89a8dea91d55bdc435e86#0030c75a86f5ab7c1cf89a8dea91d55bdc435e86"
+source = "git+https://github.com/xbmc4lyfe/zipfast?rev=042aea4f8643419193f59a05b14cadd3d8650454#042aea4f8643419193f59a05b14cadd3d8650454"
 
 [[package]]
 name = "zipfast"
 version = "0.1.0"
-source = "git+https://github.com/xbmc4lyfe/zipfast?rev=0030c75a86f5ab7c1cf89a8dea91d55bdc435e86#0030c75a86f5ab7c1cf89a8dea91d55bdc435e86"
+source = "git+https://github.com/xbmc4lyfe/zipfast?rev=042aea4f8643419193f59a05b14cadd3d8650454#042aea4f8643419193f59a05b14cadd3d8650454"
 dependencies = [
  "bzip2",
  "crc32fast",

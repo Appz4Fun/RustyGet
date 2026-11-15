@@ -378,14 +378,14 @@ fn main() {
     bench("twin/fingerprint 30 files", &mut || {
         black_box(twin::fingerprint(black_box(&sigs)));
     });
-    bench("twin/volume_blocks 4 names", &mut || {
+    bench("par-rs/volume_blocks_bytes 4 names", &mut || {
         for n in [
             "x.vol03+04.par2",
             "X.VOL00+128.PAR2",
             "x.par2",
             "movie.vol-08.par2",
         ] {
-            black_box(twin::volume_blocks(black_box(n)));
+            black_box(par_rs::filenames::volume_blocks_bytes(black_box(n.as_bytes())));
         }
     });
 

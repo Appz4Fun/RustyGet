@@ -347,8 +347,8 @@ use std::time::Duration;
 
 use crate::articlefetcher::{fetch_entry, ArticleFetcher, NzbgetRsNntpFetchHostFn};
 use crate::twin::{
-    block_size as par2_block_size, compare_twin_par2_data, fingerprint as twin_fingerprint,
-    par2_sigs, read_nzb, volume_blocks_bytes, NzbEntry, MAX_INDEX_SIZE,
+    block_size as par2_block_size, fingerprint as twin_fingerprint, par2_sigs, read_nzb, NzbEntry,
+    MAX_INDEX_SIZE,
 };
 
 const MK_INFO: c_int = 0;
@@ -1816,8 +1816,8 @@ impl NzbgetRsRepairController {
 
         candidates.sort_by_key(|c| std::cmp::Reverse(c.2));
 
-        let own_names: Vec<&[u8]> = own.iter().map(|s| s.name.as_bytes()).collect();
-        let own_md5s: Vec<&[u8]> = own.iter().map(|s| s.md5.as_bytes()).collect();
+        let own_names: Vec<&[u8]> = own.iter().map(|s| s.name.as_slice()).collect();
+        let own_md5s: Vec<[u8; 16]> = own.iter().map(|s| s.md5).collect();
 
         for (cand_name, cand_nzb_fn, _) in candidates {
             if self.is_stopped(ctx, host_cb) {
@@ -1837,7 +1837,9 @@ impl NzbgetRsRepairController {
             let Some((path, data)) = self.fetch_twin_file(ctx, host_cb, &index_entry) else {
                 continue;
             };
-            let cmp = compare_twin_par2_data(&own_names, &own_md5s, own_print.as_bytes(), &data);
+            let cmp =
+                par_rs::twin::compare_twin_par2_data(&own_names, &own_md5s, &own_print, &data)
+                    .code();
             if cmp != 0 {
                 let reason = twin_par2_reject_reason(cmp);
                 let reason_end = reason.iter().position(|&b| b == 0).unwrap_or(reason.len());
@@ -1895,8 +1897,8 @@ impl NzbgetRsRepairController {
             ) {
                 continue;
             }
-            let mut blocks =
-                volume_blocks_bytes(entry.filename.as_bytes()).map_or(-1, |b| b as i32);
+            let mut blocks = par_rs::filenames::volume_blocks_bytes(entry.filename.as_bytes())
+                .map_or(-1, |b| b as i32);
             if blocks < 0 && twin_block_size > 0 {
                 blocks = estimate_twin_vol_blocks(entry.size() as i64, twin_block_size);
             }

@@ -10,7 +10,7 @@ name = "nzbget_rs"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
-par-rs = { git = "https://github.com/xbmc4lyfe/par-rs", rev = "42c7e262135c3c3c89c86439efd54fa138361f82" }
+par-rs = { git = "https://github.com/xbmc4lyfe/par-rs", rev = "15e2a7b2bac4d252b5928847cf1c58bc4de9c2cd" }
 zipfast = { git = "https://github.com/xbmc4lyfe/zipfast", rev = "cab0df4cdb08fe8178489e89e6e72a3817e91748" }
 zipview = { git = "https://github.com/xbmc4lyfe/zipview", rev = "2c3d73a06b29987cea1510e903e437a482076745" }
 nntmux-yenc = { git = "https://github.com/xbmc4lyfe/newznab-tmux", rev = "8dade08ca0372e046af2bd9d3040e23a47379bd4" }

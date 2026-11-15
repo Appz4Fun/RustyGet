@@ -91,8 +91,9 @@ pub fn is_nested_container_name(filename: &[u8]) -> bool {
 /// a volume set kept inside the container) and `want` to map one of them by name.
 #[derive(Default, Debug)]
 pub struct LayerPick {
-    /// Map the file with this base name instead of the biggest one.
-    pub want: Option<Vec<u8>>,
+    /// Map the file with this base name and size instead of the biggest one. The size is
+    /// part of the identity: two files of one name can sit in different folders.
+    pub want: Option<(Vec<u8>, i64)>,
     /// Leave the choice of what the inner file may be to the caller and fill `files`.
     pub nested: bool,
     /// Base name and size of every stored, unencrypted file found (when `nested`).
@@ -104,14 +105,17 @@ impl LayerPick {
         !self.nested && self.want.is_none()
     }
 
-    fn wants(&self, base_name: &[u8]) -> bool {
-        self.want
-            .as_deref()
-            .is_some_and(|w| locale_casecmp(w, base_name) == std::cmp::Ordering::Equal)
+    fn wants(&self, base_name: &[u8], size: i64) -> bool {
+        self.want.as_ref().is_some_and(|(name, want_size)| {
+            *want_size == size && locale_casecmp(name, base_name) == std::cmp::Ordering::Equal
+        })
     }
 
     fn note(&mut self, base_name: &[u8], size: i64) {
-        if self.nested && !base_name.is_empty() && !self.files.iter().any(|f| f.0 == base_name) {
+        if self.nested
+            && !base_name.is_empty()
+            && !self.files.iter().any(|f| f.0 == base_name && f.1 == size)
+        {
             self.files.push((base_name.to_vec(), size));
         }
     }
@@ -1052,7 +1056,7 @@ where
             pick.note(entry_base, entry.uncomp_size as i64);
         }
         let better = if pick.want.is_some() {
-            primary.is_none() && pick.wants(entry_base)
+            primary.is_none() && pick.wants(entry_base, entry.uncomp_size as i64)
         } else {
             primary
                 .as_ref()
@@ -2107,7 +2111,7 @@ where
     for file in &data_files {
         pick.note(&file.name, file.size);
         let better = if pick.want.is_some() {
-            primary.is_none() && pick.wants(&file.name)
+            primary.is_none() && pick.wants(&file.name, file.size)
         } else {
             primary.is_none_or(|p| file.size > p.size)
         };
@@ -3039,7 +3043,7 @@ where
                 pick.note(base_file_name(entry.filename), entry.size);
             }
             if pick.want.is_some() {
-                if primary.is_none() && pick.wants(base_file_name(entry.filename)) {
+                if primary.is_none() && pick.wants(base_file_name(entry.filename), entry.size) {
                     primary = Some(entry);
                 }
             } else if !first_volume_seen && primary.map_or(true, |p| entry.size > p.size) {
@@ -7282,11 +7286,24 @@ impl ContentMapper {
             // have no place of their own in the members.
             return Err("nested archive inside an encrypted archive".to_string());
         }
-        let files = listing.files;
-        let Some(primary_idx) = files
-            .iter()
-            .position(|f| f.0.as_slice() == primary.inner_name_bytes())
-        else {
+        // One entry per name: the mapped file itself where it shares its name with files
+        // in other folders of the container, otherwise the biggest of that name.
+        let mut files: Vec<(Vec<u8>, i64)> = Vec::new();
+        for (name, size) in listing.files {
+            let is_primary =
+                |n: &[u8], s: i64| n == primary.inner_name_bytes() && s == primary.inner_size();
+            match files.iter_mut().find(|f| f.0 == name) {
+                Some(kept) => {
+                    if !is_primary(&kept.0, kept.1) && (is_primary(&name, size) || size > kept.1) {
+                        kept.1 = size;
+                    }
+                }
+                None => files.push((name, size)),
+            }
+        }
+        let Some(primary_idx) = files.iter().position(|f| {
+            f.0.as_slice() == primary.inner_name_bytes() && f.1 == primary.inner_size()
+        }) else {
             return Err(NOT_MEDIA.to_string());
         };
         let file_names: Vec<&[u8]> = files.iter().map(|f| f.0.as_slice()).collect();
@@ -7317,7 +7334,7 @@ impl ContentMapper {
                 primary.clone()
             } else {
                 let mut one = LayerPick {
-                    want: Some(name.clone()),
+                    want: Some((name.clone(), *size)),
                     ..LayerPick::default()
                 };
                 Self::build_layer_map(members, set, &memo, password, tls_enabled, &mut one)?
@@ -10418,10 +10435,14 @@ mod tests {
         pick.note(b"in.part01.rar", 10);
         pick.note(b"", 3);
         assert_eq!(pick.files, vec![(b"in.part01.rar".to_vec(), 10)]);
+        // The same name with another size is another file (another folder).
+        pick.note(b"in.part01.rar", 25);
+        assert_eq!(pick.files.len(), 2);
         assert!(!pick.checks_name());
-        pick.want = Some(b"IN.PART01.RAR".to_vec());
-        assert!(pick.wants(b"in.part01.rar"));
-        assert!(!pick.wants(b"in.part02.rar"));
+        pick.want = Some((b"IN.PART01.RAR".to_vec(), 25));
+        assert!(pick.wants(b"in.part01.rar", 25));
+        assert!(!pick.wants(b"in.part01.rar", 10));
+        assert!(!pick.wants(b"in.part02.rar", 25));
         assert!(LayerPick::default().checks_name());
 
         // A nested archive that claims bytes the outer one does not hold is refused.

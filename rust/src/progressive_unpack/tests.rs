@@ -608,12 +608,20 @@ fn rar4_aes_wrong_password_is_typed() {
     let (r, log) = run_pw(&first, &t.out(), "nope", Box::new(CompleteSet));
     match r {
         Err(Error::Failed(f)) => assert!(
-            f.is_password() || matches!(f, Failure::Checksum(_)),
+            f.is_password() || matches!(f, Failure::EncryptedChecksum(_)),
             "RAR4 has no password verifier: wrong password shows as a checksum failure or password failure, got {f:?}"
         ),
         _ => panic!("wrong password must fail: {log:?}"),
     }
     assert!(!t.out().join("movie.mkv").exists());
+    // The unpacker's password list moves on to the next candidate on a decryption error.
+    assert!(
+        log.iter().any(|l| {
+            let info = crate::postrepair::parse_unpack_message(l.as_bytes(), b"", false);
+            info.decrypt_error != 0 || info.password_error != 0
+        }),
+        "{log:?}"
+    );
 }
 
 fn rar4_payload_offset(vol: &[u8], part_len: usize) -> usize {
@@ -1143,4 +1151,48 @@ fn skip_mode_keeps_the_first_of_duplicate_names() {
     let r = extract(&req, Box::new(Growing), &mut |_, _| {}, &mut || false);
     expect_ok(r, &[]);
     assert_eq!(std::fs::read(t.out().join("a.bin")).unwrap(), one);
+}
+
+#[test]
+fn repairing_a_duplicate_name_uses_its_own_bytes() {
+    // Rename mode, a damaged first "doc.bin" (not the set's main payload, so the re-extraction
+    // fallback is used) followed by another "doc.bin" with other bytes.
+    let t = TestDir::new("dupfix");
+    let main = pattern(400_000);
+    let one = pattern(120_000);
+    let two: Vec<u8> = pattern(120_000).iter().map(|b| b ^ 0x77).collect();
+    let mut v = SIG.to_vec();
+    v.extend(main_block(false, None));
+    v.extend(file_block("main.mkv", main.len() as u64, &main, crc32fast::hash(&main), false, false));
+    let at = v.len() + file_block("doc.bin", one.len() as u64, &[], 0, false, false).len();
+    v.extend(file_block("doc.bin", one.len() as u64, &one, crc32fast::hash(&one), false, false));
+    v.extend(file_block("doc.bin", two.len() as u64, &two, crc32fast::hash(&two), false, false));
+    v.extend(end_block(false));
+    let first = t.dl().join("dupfix.rar");
+    let hole = (at as u64 + 50_000, 2_000u64);
+    let mut dmg = v.clone();
+    dmg[hole.0 as usize..(hole.0 + hole.1) as usize].fill(0);
+    std::fs::write(&first, &dmg).unwrap();
+    let feed = Damaged {
+        holes: vec![(first.clone(), vec![hole])],
+        repair: vec![(first.clone(), v.clone())],
+        handed: false,
+    };
+    let req = Request {
+        first_volume: &first,
+        dest: &t.out(),
+        password: "",
+        overwrite: Overwrite::Rename,
+    };
+    let mut log = Vec::new();
+    let r = extract(&req, Box::new(feed), &mut |_, m: &str| log.push(m.to_string()), &mut || false);
+    expect_ok(r, &log);
+    let mut got = vec![
+        std::fs::read(t.out().join("doc.bin")).unwrap(),
+        std::fs::read(t.out().join("doc_1.bin")).unwrap(),
+    ];
+    got.sort();
+    let mut want = vec![one, two];
+    want.sort();
+    assert_eq!(got, want);
 }

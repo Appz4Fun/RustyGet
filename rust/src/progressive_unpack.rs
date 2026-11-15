@@ -119,6 +119,9 @@ pub enum Failure {
     PasswordRequired,
     WrongPassword,
     Checksum(String),
+    /// A check failed after decryption: a wrong password or damaged data (RAR4 has no
+    /// password verifier). Reported so the next candidate password is tried.
+    EncryptedChecksum(String),
     MissingVolume(String),
     /// A hole that could not be skipped (compressed data, header, unknown encrypted size) and
     /// was not repaired.
@@ -135,7 +138,10 @@ impl Failure {
     pub fn is_damage(&self) -> bool {
         matches!(
             self,
-            Failure::Checksum(_) | Failure::MissingVolume(_) | Failure::Damaged(_)
+            Failure::Checksum(_)
+                | Failure::EncryptedChecksum(_)
+                | Failure::MissingVolume(_)
+                | Failure::Damaged(_)
         )
     }
     fn from_progressive(e: &ProgressiveFailure) -> Self {
@@ -157,9 +163,8 @@ impl Failure {
                     R::WrongPassword { .. } => Failure::WrongPassword,
                     // RAR4 has no password verifier: a failed check after decryption is either
                     // a wrong password or damaged data. Both are reported as a checksum failure.
-                    R::Integrity { .. } | R::EncryptedIntegrity { .. } => {
-                        Failure::Checksum(format!("{at} ({r})"))
-                    }
+                    R::Integrity { .. } => Failure::Checksum(format!("{at} ({r})")),
+                    R::EncryptedIntegrity { .. } => Failure::EncryptedChecksum(at.clone()),
                     R::MissingVolume { path } => {
                         Failure::MissingVolume(format!(" {}", path.display()))
                     }
@@ -178,6 +183,9 @@ impl std::fmt::Display for Failure {
             Failure::PasswordRequired => write!(f, "password required"),
             Failure::WrongPassword => write!(f, "wrong password"),
             Failure::Checksum(at) => write!(f, "checksum mismatch{at}"),
+            Failure::EncryptedChecksum(at) => {
+                write!(f, "checksum mismatch in encrypted data{at} (wrong password or damage)")
+            }
             Failure::MissingVolume(at) => write!(f, "missing volume{at}"),
             Failure::Damaged(what) => write!(f, "damaged archive data: {what}"),
             Failure::UnsafePath(at) => write!(f, "unsafe path{at}"),
@@ -339,6 +347,7 @@ where
     // the set in rename mode (it would otherwise add renamed second copies).
     let mut published: Vec<PathBuf> = Vec::new();
     let mut next_ordinal = 0u64;
+    let mut occurrences: std::collections::HashMap<Vec<u8>, u32> = Default::default();
     // Highest member ordinal already in place per name: a member repaired later must not
     // replace the output of a later member with the same name.
     let mut placed: std::collections::HashMap<Vec<u8>, u64> = Default::default();
@@ -376,12 +385,16 @@ where
                     meta_cache.lookup(&current_volume, req.password, &name)
                 };
                 next_ordinal += 1;
+                let seen = occurrences.entry(name.to_vec()).or_insert(0u32);
+                let occurrence = *seen;
+                *seen += 1;
                 names.insert(
                     member,
                     Member {
                         name: name.to_vec(),
                         meta,
                         ordinal: next_ordinal,
+                        occurrence,
                     },
                 );
             }
@@ -402,7 +415,10 @@ where
                     MemberOutcome::Provisional(mut a) => {
                         // Already verified by the session: move it into place now, so the file
                         // is available while later members extract and its slot is freed.
-                        let behind_earlier = req.overwrite == Overwrite::Skip
+                        // Outside overwrite mode an earlier pending member with the same name
+                        // goes first: skip keeps the first, rename numbers them in archive order
+                        // (and zipfast refuses to verify a member whose target path changed).
+                        let behind_earlier = req.overwrite != Overwrite::Always
                             && partial.iter().chain(provisional.iter()).any(|(m, _)| m.name == member.name);
                         if matches!(a.evidence(), ArtifactEvidence::Verified(_)) && !behind_earlier {
                             match publish_copy(drive.session, &mut a, req, &member, false, is_cancelled, &mut published) {
@@ -455,7 +471,7 @@ where
                 provisional.sort_by_key(|(m, _)| m.ordinal);
                 let mut keep = Vec::new();
                 for (member, mut a) in provisional.drain(..) {
-                    let behind_earlier = req.overwrite == Overwrite::Skip
+                    let behind_earlier = req.overwrite != Overwrite::Always
                         && partial
                             .iter()
                             .any(|(m, _)| m.name == member.name && m.ordinal < member.ordinal);
@@ -468,6 +484,26 @@ where
                     } else {
                         summary.files += 1;
                         note_placed(&mut placed, &member);
+                    }
+                }
+                if !keep.is_empty() && partial.len() + keep.len() >= drive.session_artifact_limit() {
+                    // Out of slots with duplicates held behind a damaged member. Skip mode would
+                    // place them only if that member fails (which is reported): drop them.
+                    // Rename mode must keep them: place them now.
+                    for (member, mut a) in keep.drain(..) {
+                        if req.overwrite == Overwrite::Rename {
+                            match publish_copy(drive.session, &mut a, req, &member, false, is_cancelled, &mut published) {
+                                Ok(()) => {
+                                    summary.files += 1;
+                                    note_placed(&mut placed, &member);
+                                }
+                                Err(f) => {
+                                    first_failure.get_or_insert(f);
+                                }
+                            }
+                        } else {
+                            let _ = a.discard();
+                        }
                     }
                 }
                 provisional = keep;
@@ -546,7 +582,7 @@ where
             continue;
         }
         let result = if is_partial {
-            patch_from_repaired_volumes(drive.session, &mut a, &dir, req, &name, is_cancelled)
+            patch_from_repaired_volumes(drive.session, &mut a, &dir, req, &member, is_cancelled)
                 .and_then(|()| publish_copy(drive.session, &mut a, req, &member, true, is_cancelled, &mut published))
         } else {
             publish_copy(drive.session, &mut a, req, &member, false, is_cancelled, &mut published)
@@ -594,6 +630,12 @@ fn unrar_error_line(f: &Failure, name: &[u8]) -> String {
             "Unrar: The specified password is incorrect.".to_string()
         }
         Failure::Checksum(at) => format!("Unrar: CRC error{who}{at}"),
+        // Recognised by the unpack message parser as a decryption error, which lets the
+        // password list try its next candidate.
+        Failure::EncryptedChecksum(_) => format!(
+            "Unrar: CRC failed in the encrypted file {}. Corrupt file or wrong password.",
+            String::from_utf8_lossy(name)
+        ),
         Failure::Canceled => "Aborted".to_string(),
         other => format!("Unrar: ERROR{who}: {other}"),
     }
@@ -617,6 +659,8 @@ struct Member {
     meta: MemberMeta,
     /// Position in the archive; a later member with the same name wins.
     ordinal: u64,
+    /// How many earlier members had the same name.
+    occurrence: u32,
 }
 
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
@@ -718,9 +762,10 @@ fn patch_from_repaired_volumes(
     artifact: &mut Artifact,
     dir: &Path,
     req: &Request<'_>,
-    name: &[u8],
+    member: &Member,
     is_cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<(), Failure> {
+    let name = member.name.as_slice();
     use crate::streamrepair::{ContentMapper, DiskSourceSet, MemberFormat};
 
     let members = rar_set_members(req.first_volume);
@@ -750,7 +795,7 @@ fn patch_from_repaired_volumes(
     let Some(map) = map.filter(|m| {
         m.inner_name_bytes() == base && Some(m.inner_size() as u64) == artifact.size()
     }) else {
-        return patch_by_reextracting(session, artifact, req, name, is_cancelled);
+        return patch_by_reextracting(session, artifact, req, member, is_cancelled);
     };
     let mut buf = Vec::new();
     for hole in artifact.holes().to_vec() {
@@ -786,9 +831,10 @@ fn patch_by_reextracting(
     session: &mut ProgressiveSession,
     artifact: &mut Artifact,
     req: &Request<'_>,
-    name: &[u8],
+    member: &Member,
     is_cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<(), Failure> {
+    let name = member.name.as_slice();
     let scratch = create_unique_dir(req.dest)
         .map_err(|e| Failure::Other(format!("cannot create a repair directory: {e}")))?;
     let result = (|| {
@@ -796,7 +842,9 @@ fn patch_by_reextracting(
             first_volume: req.first_volume,
             dest: &scratch,
             password: req.password,
-            overwrite: Overwrite::Always,
+            // Every occurrence of a name gets its own file (<stem>_<n> in archive order), so
+            // the copy of exactly this member can be picked.
+            overwrite: Overwrite::Rename,
         };
         match extract(&sub, Box::new(CompleteSet), &mut |_, _| {}, is_cancelled) {
             Ok(_) => {}
@@ -805,7 +853,21 @@ fn patch_by_reextracting(
         }
         let rel = zipfast::path::sanitize(&String::from_utf8_lossy(name), false)
             .map_err(|e| Failure::UnsafePath(format!(" {e}")))?;
-        let copy = std::fs::File::open(scratch.join(rel))
+        let mut path = scratch.join(rel);
+        if member.occurrence > 0 {
+            let stem = path
+                .file_stem()
+                .map(|s| s.to_os_string())
+                .unwrap_or_else(|| "file".into());
+            let mut file = stem;
+            file.push(format!("_{}", member.occurrence));
+            if let Some(e) = path.extension().map(|e| e.to_os_string()) {
+                file.push(".");
+                file.push(e);
+            }
+            path.set_file_name(file);
+        }
+        let copy = std::fs::File::open(&path)
             .map_err(|e| Failure::Damaged(format!("repaired copy missing: {e}")))?;
         let mut buf = vec![0u8; PATCH_CHUNK as usize];
         for hole in artifact.holes().to_vec() {

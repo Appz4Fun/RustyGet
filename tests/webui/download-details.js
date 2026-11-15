@@ -24,6 +24,19 @@ const { installDetailsFixture } = require('./details-fixture');
       await installDetailsFixture(page, base, writes, fixture);
       await page.goto(base.href);
       await page.locator('#DownloadsTable tbody tr').first().waitFor();
+      // late-reply checks wait until the page has run a held reply's callback
+      await page.evaluate(() => {
+        window.__rpcHandled = [];
+        const call = RPC.call;
+        RPC.call = function(method, params, done, ...rest) {
+          if (typeof done !== 'function') return call.call(this, method, params, done, ...rest);
+          return call.call(this, method, params, function(result) {
+            try { return done(result); } finally {
+              window.__rpcHandled.push(method + ':' + (method === 'listfiles' ? params[2] : params && params[0]));
+            }
+          }, ...rest);
+        };
+      });
       const check = async (label, action) => {
         try { await action(); } catch (error) { failures.push(`${theme}/${width}/${label}: ${error.message}`); }
       };
@@ -103,6 +116,8 @@ const { installDetailsFixture } = require('./details-fixture');
           await page.waitForFunction(() => document.getElementById('DownloadsEditDialog').classList.contains('is-saving'));
           await page.locator('#DownloadsEdit_Fleet a.fleet-member[data-fleet-id="43"]').dispatchEvent('click');
           assert.match(await page.locator('#DownloadsEdit_Title').innerText(), /copy 02/, 'No switch while saving');
+          await page.locator('.modal-backdrop').last().dispatchEvent('click');
+          assert(await panel.isVisible(), 'A click beside the panel does not interrupt a save');
         } finally {
           fixture.holdMutation = undefined;
           if (release) release();
@@ -111,6 +126,15 @@ const { installDetailsFixture } = require('./details-fixture');
         assert(writes.every(w => w.method !== 'editqueue' || w.params[2][0] === 42), 'Every edit went to the copy being saved');
         await page.locator('#DownloadsTable tbody a[data-nzbid="42"]').first().click();
         await panel.waitFor({ state: 'visible' });
+      });
+
+      await check('log for a copy with nothing logged yet', async () => {
+        assert(await page.locator('#DownloadsEdit_Log').isVisible(), 'Every download offers its log');
+        await page.locator('#DownloadsEdit_Log').click();
+        await page.locator('#DownloadsEdit_LogTab').waitFor({ state: 'visible' });
+        await page.locator('#DownloadsEdit_LogEmpty').waitFor({ state: 'visible' });
+        await page.locator('#DownloadsEdit_Back').click();
+        await page.locator('#DownloadsEdit_GeneralTab').waitFor({ state: 'visible' });
       });
 
       await check('save still edits the shown copy', async () => {
@@ -137,6 +161,156 @@ const { installDetailsFixture } = require('./details-fixture');
         }
         await page.keyboard.press('Escape');
         await page.locator('#HistoryEditDialog').waitFor({ state: 'hidden' });
+        assert.equal(await page.evaluate(() => Refresher.isPaused()), false, 'Closing resumes list updates');
+      });
+
+      await check('downloading copy log', async () => {
+        await page.locator('#DownloadsTable tbody a[data-nzbid="41"]').first().click();
+        await panel.waitFor({ state: 'visible' });
+        await page.locator('#DownloadsEdit_Log').click();
+        await page.locator('#DownloadsEdit_LogTab').waitFor({ state: 'visible' });
+        await page.waitForFunction(() => /borrowed from twin copy 02/.test(document.getElementById('DownloadsEdit_LogTable').textContent));
+        assert.equal(await page.locator('#DownloadsEdit_LogEmpty').isVisible(), false);
+        await page.keyboard.press('Escape');
+        await panel.waitFor({ state: 'hidden' });
+      });
+
+      await check('late log reply for a copy the panel left is dropped', async () => {
+        let release;
+        await page.evaluate(() => { window.__rpcHandled = []; });
+        const asked = new Promise(resolve => {
+          fixture.holdLoadlog = () => { resolve(); return new Promise(r => { release = r; }); };
+        });
+        try {
+          await page.locator('#DownloadsTable tbody a[data-nzbid="41"]').first().click();
+          await panel.waitFor({ state: 'visible' });
+          await page.locator('#DownloadsEdit_Log').click();
+          await asked;
+          fixture.holdLoadlog = undefined;
+          await page.keyboard.press('Escape');
+          await panel.waitFor({ state: 'hidden' });
+          await page.locator('#DownloadsTable tbody a[data-nzbid="42"]').first().click();
+          await panel.waitFor({ state: 'visible' });
+          await page.locator('#DownloadsEdit_Log').click();
+          await page.locator('#DownloadsEdit_LogEmpty').waitFor({ state: 'visible' });
+        } finally {
+          fixture.holdLoadlog = undefined;
+          if (release) release();
+        }
+        // the held copy 01 reply must have reached the page before copy 02 is checked
+        await page.waitForFunction(k => window.__rpcHandled.includes(k), 'loadlog:41');
+        assert.doesNotMatch(await page.locator('#DownloadsEdit_LogTable').innerText(), /copy 01/, "Copy 01's late log stays out of copy 02");
+        assert(await page.locator('#DownloadsEdit_LogEmpty').isVisible());
+        assert.equal(await page.locator('#DownloadsEditDialog .loading-block:visible').count(), 0, 'No stuck spinner');
+        await page.keyboard.press('Escape');
+        await panel.waitFor({ state: 'hidden' });
+      });
+
+      await check('late files reply for a copy the panel left is dropped', async () => {
+        let release;
+        await page.evaluate(() => { window.__rpcHandled = []; });
+        const asked = new Promise(resolve => {
+          fixture.holdListfiles = () => { resolve(); return new Promise(r => { release = r; }); };
+        });
+        try {
+          await page.locator('#DownloadsTable tbody a[data-nzbid="41"]').first().click();
+          await panel.waitFor({ state: 'visible' });
+          await page.locator('#DownloadsEdit_File').click();
+          await asked;
+          fixture.holdListfiles = undefined;
+          await page.keyboard.press('Escape');
+          await panel.waitFor({ state: 'hidden' });
+          await page.locator('#DownloadsTable tbody a[data-nzbid="42"]').first().click();
+          await panel.waitFor({ state: 'visible' });
+        } finally {
+          fixture.holdListfiles = undefined;
+          if (release) release();
+        }
+        // the held copy 01 reply must have reached the page before copy 02 is checked
+        await page.waitForFunction(k => window.__rpcHandled.includes(k), 'listfiles:41');
+        await page.locator('#DownloadsEdit_File').click();
+        await page.waitForFunction(() => /copy02\.7z\.001/.test(document.getElementById('DownloadsEdit_FileTable').textContent));
+        assert.doesNotMatch(await page.locator('#DownloadsEdit_FileTable').innerText(), /copy01/, "Copy 01's late files stay out of copy 02");
+        await page.keyboard.press('Escape');
+        await panel.waitFor({ state: 'hidden' });
+      });
+
+      await check('files reply arriving after the panel closed is dropped', async () => {
+        let release;
+        await page.evaluate(() => { window.__rpcHandled = []; });
+        const asked = new Promise(resolve => {
+          fixture.holdListfiles = () => { resolve(); return new Promise(r => { release = r; }); };
+        });
+        try {
+          await page.locator('#DownloadsTable tbody a[data-nzbid="41"]').first().click();
+          await panel.waitFor({ state: 'visible' });
+          await page.locator('#DownloadsEdit_File').click();
+          await asked;
+          fixture.holdListfiles = undefined;
+          await page.keyboard.press('Escape');
+          await panel.waitFor({ state: 'hidden' });
+        } finally {
+          fixture.holdListfiles = undefined;
+          if (release) release();
+        }
+        await page.waitForFunction(k => window.__rpcHandled.includes(k), 'listfiles:41');
+        assert.doesNotMatch(await page.locator('#DownloadsEdit_FileTable').textContent(), /copy01/, 'A closed panel takes no file list');
+      });
+
+      await check('closing one panel keeps the other panel log', async () => {
+        await page.locator('#DownloadsTable tbody a[data-nzbid="41"]').first().click();
+        await panel.waitFor({ state: 'visible' });
+        await page.locator('#DownloadsEdit_Log').click();
+        await page.waitForFunction(() => /Downloading copy 01/.test(document.getElementById('DownloadsEdit_LogTable').textContent));
+        // the history panel's close handler runs while the downloads panel shows its log
+        await page.evaluate(() => { LogTab.reset('History'); });
+        const saved = await page.evaluate(() => {
+          let out = null;
+          const keep = Util.saveToLocalFile;
+          Util.saveToLocalFile = (text, type, name) => { out = { text, name }; return true; };
+          try { LogTab.export(); } finally { Util.saveToLocalFile = keep; }
+          return out;
+        });
+        assert(saved && /Downloading copy 01/.test(saved.text), 'The downloads log can still be saved');
+        await page.keyboard.press('Escape');
+        await panel.waitFor({ state: 'hidden' });
+      });
+
+      await check('a confirm opened from the panel keeps both open on a click beside them', async () => {
+        if (width < 768) return;
+        const history = page.locator('#HistoryEditDialog');
+        await page.locator('#HistoryTabLink').click();
+        await page.locator('#HistoryTable tbody a[data-nzbid="32"]').first().click();
+        await history.waitFor({ state: 'visible' });
+        await page.evaluate(() => ConfirmDialog.showModal('HistoryEditRedownloadConfirmDialog', function() {}));
+        await page.locator('#ConfirmDialog').waitFor({ state: 'visible' });
+        await page.mouse.click(12, Math.round(height / 2));
+        await page.waitForTimeout(300);
+        assert(await history.isVisible(), 'Panel stays open behind its confirm');
+        assert(await page.locator('#ConfirmDialog').isVisible(), 'Confirm stays open');
+        await page.evaluate(() => $('#ConfirmDialog').modal('hide'));
+        await page.locator('#ConfirmDialog').waitFor({ state: 'hidden' });
+        await page.mouse.click(12, Math.round(height / 2));
+        await history.waitFor({ state: 'hidden' });
+        await page.locator('#DownloadsTabLink').click();
+      });
+
+      await check('history log and click beside the panel closes it', async () => {
+        const history = page.locator('#HistoryEditDialog');
+        await page.locator('#HistoryTabLink').click();
+        await page.locator('#HistoryTable tbody a[data-nzbid="32"]').first().click();
+        await history.waitFor({ state: 'visible' });
+        assert(await page.locator('#HistoryEdit_Log').isVisible(), 'A finished download offers its log even with MessageCount 0');
+        await page.locator('#HistoryEdit_Log').click();
+        await page.locator('#HistoryEdit_LogTab').waitFor({ state: 'visible' });
+        await page.waitForFunction(() => /Unpack for Example\.Completed\.Release successful/.test(document.getElementById('HistoryEdit_LogTable').textContent));
+        assert.equal(await page.locator('#HistoryEdit_LogEmpty').isVisible(), false);
+        if (width < 768) {
+          await page.keyboard.press('Escape');
+        } else {
+          await page.mouse.click(12, Math.round(height / 2));
+        }
+        await history.waitFor({ state: 'hidden' });
         assert.equal(await page.evaluate(() => Refresher.isPaused()), false, 'Closing resumes list updates');
       });
 

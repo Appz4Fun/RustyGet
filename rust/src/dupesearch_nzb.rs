@@ -1601,8 +1601,40 @@ pub struct FetchedArticleResult {
     pub data: Vec<u8>,
 }
 
-/// `DupeIdentity::FetchArticle` (`daemon/dupesearch/DupeIdentity.cpp`).
+/// `DupeIdentity::FetchArticle` (`daemon/dupesearch/DupeIdentity.cpp`): the
+/// first article of a file only.
 pub fn dupe_identity_fetch_article<N, S, F, C>(
+    message_id: &[u8],
+    groups: &[String],
+    deadline: i64,
+    now_fn: N,
+    stopped_fn: S,
+    fetch_fn: F,
+    stop_fetch_fn: C,
+) -> FetchedArticleResult
+where
+    N: Fn() -> i64,
+    S: Fn() -> bool,
+    F: FnOnce(&[u8], &[String]) -> Result<FetchedArticleResult, ()> + Send,
+    C: FnOnce(),
+{
+    let out = fetch_article_until(
+        message_id,
+        groups,
+        deadline,
+        now_fn,
+        stopped_fn,
+        fetch_fn,
+        stop_fetch_fn,
+    );
+    if out.offset != 0 {
+        return FetchedArticleResult::default();
+    }
+    out
+}
+
+/// Fetches one article, giving up at `deadline` (unix seconds) or a stop.
+pub fn fetch_article_until<N, S, F, C>(
     message_id: &[u8],
     groups: &[String],
     deadline: i64,
@@ -1649,7 +1681,7 @@ where
         }
         let _ = handle.join();
     });
-    if now_fn() >= deadline || stopped_fn() || donor_stopping() || out.offset != 0 {
+    if now_fn() >= deadline || stopped_fn() || donor_stopping() {
         return FetchedArticleResult::default();
     }
     out
@@ -3462,6 +3494,9 @@ pub struct NzbSummaryData {
     /// Article count of each data file, sorted: a TWIN (the same post) has
     /// the same counts.
     pub data_layout: Vec<u32>,
+    /// Each data file's encoded size and its article ids in part order: what
+    /// the fleet intake reads to open a copy down to its video.
+    pub data_segments: Vec<crate::dupeintake::IntakeFile>,
 }
 
 impl NzbSummaryData {
@@ -3677,6 +3712,20 @@ pub fn parse_nzb_summary(xml: &[u8]) -> Option<NzbSummaryData> {
                         data_listed_parts = data_listed_parts.wrapping_add(m_valid_parts as u64);
                         data_declared_parts = data_declared_parts.wrapping_add(file_total);
                         out.data_layout.push(m_valid_parts as u32);
+                        let mut file_ids: Vec<Vec<u8>> = Vec::new();
+                        for i in 0..seg_len {
+                            if i + 1 < seg_len && m_segments[i + 1].0 == m_segments[i].0 {
+                                continue;
+                            }
+                            if valid_message_id(&m_segments[i].2) {
+                                file_ids.push(m_segments[i].2.clone());
+                            }
+                        }
+                        out.data_segments.push(crate::dupeintake::IntakeFile {
+                            name: m_name.clone(),
+                            bytes: m_file_bytes,
+                            ids: file_ids,
+                        });
                     }
                     let (new_df, new_db, new_geom2, push_par_head, push_data_head) =
                         accum_file_data_totals(

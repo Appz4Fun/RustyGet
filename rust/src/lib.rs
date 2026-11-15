@@ -105,6 +105,7 @@ pub mod streamrepair_coord;
 pub mod xmlrpc_format;
 
 pub mod deadpostings;
+pub mod dupeintake;
 pub mod dupewatch;
 pub mod streamcompare;
 pub mod streampatchparts;

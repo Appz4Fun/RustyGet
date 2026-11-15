@@ -111,11 +111,18 @@ const { installDetailsFixture } = require('./details-fixture');
             different: run(g(41), all.map(x => x.NZBID === 43 ? withParam(x, 'DupeVideo', 'different') : x)),
             unrelated: (() => {
               // an older release under the same dupe key: its own print, its own post
+              // (an old fleet's primary, so it carries DupeFleet) and an old twin of it
               const other = Object.assign({}, withParam(hist, 'DupeFiles', '0123456789abcdef-12'), { NZBID: 99, NZBFilename: 'other.release.nzb' });
+              other.Parameters = other.Parameters.concat([{ Name: 'DupeFleet', Value: '1' }]);
+              const otherTwin = Object.assign({}, other, { NZBID: 98, NZBFilename: 'other.release.copy02.nzb',
+                Parameters: other.Parameters.concat([{ Name: 'DupeKind', Value: 'twin' }]) });
               const keepH = History.items;
-              History.items = keepH.concat([other]);
+              History.items = keepH.concat([other, otherTwin]);
               try { return { primary: run(g(41), all), alt: run(g(43), all) }; } finally { History.items = keepH; }
-            })()
+            })(),
+            // a download already running when the fleet came: no DupeFleet, no twins
+            plainPrimary: run(g(43), all.filter(x => x.NZBID !== 42).map(x => x.NZBID === 41 ?
+              Object.assign({}, x, { Parameters: x.Parameters.filter(p => p.Name !== 'DupeFleet') }) : x))
           };
         });
         assert.deepEqual(r.fromPrimary, { twins: 1, alts: 1, unverified: 0 }, 'The primary skips the history try of its own post');
@@ -127,6 +134,7 @@ const { installDetailsFixture } = require('./details-fixture');
         assert.deepEqual(r.different, { twins: 1, alts: 0, unverified: 0 }, 'An alt found to carry another video is no donor');
         assert.deepEqual(r.unrelated.primary, { twins: 1, alts: 1, unverified: 0 }, 'Another release under the same key is no twin of the primary');
         assert.deepEqual(r.unrelated.alt, { twins: 2, alts: 0, unverified: 0 }, 'Another release under the same key is no twin seen from an alt');
+        assert.deepEqual(r.plainPrimary, { twins: 1, alts: 0, unverified: 0 }, 'An alt borrows from a primary that was downloading before the fleet came');
       });
 
       await check('critical health wins over the fixed threshold', async () => {

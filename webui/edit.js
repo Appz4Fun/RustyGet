@@ -271,8 +271,12 @@ var DetailsPanel = (new function($)
 		// this copy's own post) adds nothing. Members come queue first.
 		var posts = {};
 		posts[item.NZBFilename] = true;
-		// prints of this fleet's own release: any copy can carry a print, so a
-		// copy marked primary is only this release when its print is one of these
+		// prints of this fleet's own release: the viewed copy's, and those of the
+		// primary and twins in the queue. Any copy can carry a print, so a history
+		// copy marked primary or twin (say an older release under the same dupe key,
+		// or an old fleet's copy) is only this release when its print is one of
+		// these. With nothing of the release in the queue, there is nothing left
+		// downloading to borrow into, so history copies seen from an alt add none.
 		var prints = {};
 		var selfRole = DetailsPanel.role(item);
 		if (selfRole && (selfRole.kind === 'twin' || selfRole.kind === 'primary'))
@@ -282,7 +286,7 @@ var DetailsPanel = (new function($)
 		for (var j = 0; j < members.length; j++)
 		{
 			var r = members[j].role ? members[j].role.kind : '';
-			if (r === 'twin' || (r === 'primary' && param(members[j].item, 'DupeFleet')))
+			if ((r === 'twin' || r === 'primary') && members[j].source === 'queue')
 			{
 				prints[param(members[j].item, 'DupeFiles')] = true;
 			}
@@ -299,11 +303,11 @@ var DetailsPanel = (new function($)
 			var kind = m.role ? m.role.kind : '';
 			// the primary and its twins are one release posted more than once:
 			// counted the same way whichever copy is viewed
-			if (kind === 'twin' || (kind === 'primary' && prints[param(m.item, 'DupeFiles')]))
+			if ((kind === 'twin' || kind === 'primary') && prints[param(m.item, 'DupeFiles')])
 			{
 				out.twins++;
 			}
-			else if (kind !== 'primary' && param(m.item, 'DupeCopyKind') === 'borrowable' &&
+			else if (kind !== 'primary' && kind !== 'twin' && param(m.item, 'DupeCopyKind') === 'borrowable' &&
 				param(m.item, 'DupeVideo') !== 'different')
 			{
 				if (param(m.item, 'DupeVideo') === 'same')

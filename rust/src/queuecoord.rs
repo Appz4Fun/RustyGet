@@ -2026,6 +2026,23 @@ impl NzbgetRsQueueCoordinator {
         }
 
         merge_dupe_par_params(host, dest_ptr, src_ptr);
+        // what the source borrowed moves with its files, like its par2 counts
+        host.nzb_set_int(
+            dest_ptr,
+            crate::queuesubsys_host::NZB_INT_DUPE_RECOVERED_ARTICLES,
+            dest.dupe_recovered_articles
+                .saturating_add(src.dupe_recovered_articles),
+        );
+        host.nzb_set_int(
+            dest_ptr,
+            crate::queuesubsys_host::NZB_INT_DUPE_RECOVERED_HOLES,
+            dest.dupe_recovered_holes.saturating_add(src.dupe_recovered_holes),
+        );
+        host.nzb_set_i64(
+            dest_ptr,
+            crate::queuesubsys_host::NZB_I64_DUPE_RECOVERED_BYTES,
+            dest.dupe_recovered_bytes.saturating_add(src.dupe_recovered_bytes),
+        );
 
         host.disk_discard_files(src_ptr);
         crate::dupefallback::par_damage_forget_all(src.id);

@@ -3720,7 +3720,7 @@ mod tests {
             disk[s * 4096..(s + 1) * 4096].fill(0);
         }
         std::fs::write(dir.join("part01.rar"), &disk).unwrap();
-        let mut feed = |s: usize| {
+        let feed = |s: usize| {
             let off = (s * 4096) as u64;
             if matches!(s, 1 | 4 | 6) {
                 streaming_session_on_article_failed_permanently(nzb_id, &id0, off, 4096)

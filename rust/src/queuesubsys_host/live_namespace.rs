@@ -180,6 +180,12 @@ impl QueueSubsysHost {
             .and_then(|n| n.checked_add(root.as_os_str().len()))
             .and_then(|n| n.checked_add(catalog_bytes))
             .ok_or_else(|| refused("capture size overflow"))?;
+        // Headroom for the direct renamer giving obfuscated rows their real
+        // names later (up to a full leaf per row), within the per-job cap.
+        let headroom = count
+            .saturating_mul(255)
+            .min((1usize << 20).saturating_sub(required));
+        let required = required + headroom;
         let reservation = crate::parlive::reserve_control(nzb_id, required.max(256) as u64, pool)?;
         let mut facts = NamespaceFacts {
             root: std::path::PathBuf::new(),

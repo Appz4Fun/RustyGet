@@ -191,3 +191,75 @@ fn ambiguous_hash_only_mapping_does_not_reject_unique_named_sources() {
     assert!(proof.bind(41, b"other.rar", b"").unwrap().is_some());
     assert!(proof.bind(42, b"obfuscated.bin", &hash_hex(1)).is_err());
 }
+#[test]
+fn direct_rename_to_the_par_destination_keeps_the_namespace() {
+    // Obfuscated posts: the direct renamer gives each queue row its real name
+    // while live PAR runs. That must not invalidate the session.
+    let set = metadata(&[(b"part40.rar", 1), (b"part41.rar", 2)]);
+    let ids = set.main.as_ref().unwrap().recoverable_file_ids.clone();
+    let mut par = row(50, b"x7Hq2.par2", b"");
+    par.par_file = true;
+    let mut proof = NamespaceProof::prepare(
+        &set,
+        facts(vec![
+            row(40, b"ACZKzt_qrGtChr5.rar", b""),
+            row(41, b"u2rGOjXAUK2eLrH58.rar", b""),
+            par,
+        ]),
+    )
+    .unwrap();
+    // Renamed by name to its destination, then bound to it.
+    let first = proof.bind(40, b"part40.rar", b"").unwrap().unwrap();
+    assert!(ids.contains(&first));
+    assert_eq!(proof.bind(40, b"part40.rar", b"").unwrap(), Some(first));
+    assert!(proof.protects_leaf(b"PART40.RAR"));
+    // The recovery row may be renamed too, through the recheck path.
+    proof.begin_recheck();
+    proof
+        .recheck_row(40, 0, [b"part40.rar", b"", b"", b""])
+        .unwrap();
+    proof
+        .recheck_row(41, 0, [b"part41.rar", b"", b"", b""])
+        .unwrap();
+    proof
+        .recheck_row(50, 1, [b"release.vol00+01.par2", b"", b"", b""])
+        .unwrap();
+    proof.finish_recheck().unwrap();
+}
+#[test]
+fn direct_rename_that_is_ambiguous_still_invalidates() {
+    let set = metadata(&[(b"part40.rar", 1), (b"part41.rar", 2)]);
+    // Renamed onto another row's name.
+    let mut proof = NamespaceProof::prepare(
+        &set,
+        facts(vec![
+            row(40, b"obf-a.rar", b""),
+            row(41, b"part41.rar", b""),
+        ]),
+    )
+    .unwrap();
+    assert!(proof.bind(40, b"PART41.rar", b"").is_err());
+    // Renamed to a name that is no PAR destination.
+    let mut proof =
+        NamespaceProof::prepare(&set, facts(vec![row(40, b"obf-a.rar", b"")])).unwrap();
+    assert!(proof.bind(40, b"movie.mkv", b"").is_err());
+    // Renamed onto the destination another row is already bound to.
+    let mut proof = NamespaceProof::prepare(
+        &set,
+        facts(vec![
+            row(40, b"obf-a.rar", b""),
+            row(41, b"obf-b.rar", b""),
+        ]),
+    )
+    .unwrap();
+    assert!(proof.bind(40, b"obf-a.rar", &hash_hex(2)).unwrap().is_some());
+    assert!(proof.bind(41, b"part41.rar", b"").is_err());
+    // A recovery row renamed onto a source destination.
+    let mut par = row(50, b"x7Hq2.par2", b"");
+    par.par_file = true;
+    let mut proof = NamespaceProof::prepare(&set, facts(vec![par])).unwrap();
+    proof.begin_recheck();
+    assert!(proof
+        .recheck_row(50, 1, [b"part40.rar", b"", b"", b""])
+        .is_err());
+}

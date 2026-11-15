@@ -312,12 +312,14 @@ pub fn validate_option_name(name: &CStr, predefined: &mut dyn FnMut() -> bool) -
 /// is off). Old configuration files may still have them: they are dropped quietly,
 /// and the next save leaves them out.
 fn is_removed_opt(name: &CStr) -> bool {
-    const GLOBAL: [&CStr; 5] = [
+    const GLOBAL: [&CStr; 6] = [
         c"PropagationDelay",
         c"ContinuePartial",
         c"ParQuick",
         c"CrcCheck",
         c"UpdateCheck",
+        // HTTPS now shares ControlPort
+        c"SecurePort",
     ];
     if GLOBAL.iter().any(|n| eq(name, n)) {
         return true;
@@ -863,6 +865,7 @@ mod tests {
             c"ParQuick",
             c"CrcCheck",
             c"UpdateCheck",
+            c"SecurePort",
             c"Server1.JoinGroup",
             c"server12.joingroup",
         ] {
@@ -1530,7 +1533,7 @@ const COMMAND_VALUES: [i32; 26] = [
 /// Emits all default option `(name, value)` pairs for `Options::InitDefaults`.
 pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &CStr)) {
     let output_mode = if disable_curses { c"color" } else { c"curses" };
-    let defaults: [(&CStr, &CStr); 135] = [
+    let defaults: [(&CStr, &CStr); 134] = [
         (c"MainDir", c"~/downloads"),
         (c"WebDir", c""),
         (c"ConfigTemplate", c""),
@@ -1581,7 +1584,6 @@ pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &
         (c"FormAuth", c"no"),
         (c"JsonP", c"no"),
         (c"SecureControl", c"no"),
-        (c"SecurePort", c"6791"),
         (c"SecureCert", c""),
         (c"SecureKey", c""),
         (c"CertStore", c""),
@@ -2160,7 +2162,8 @@ pub fn init_scalar_options_host<H: OptionsHost>(
     s.url_retries = host.parse_int_value(c"UrlRetries", 10);
     s.url_interval = host.parse_int_value(c"UrlInterval", 10);
     s.control_port = host.parse_int_value(c"ControlPort", 10);
-    s.secure_port = host.parse_int_value(c"SecurePort", 10);
+    // HTTPS is served on ControlPort; SecurePort is gone
+    s.secure_port = s.control_port;
     s.url_connections = host.parse_int_value(c"UrlConnections", 10);
     s.log_buffer = host.parse_int_value(c"LogBuffer", 10);
     s.rotate_log = host.parse_int_value(c"RotateLog", 10);

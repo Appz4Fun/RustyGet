@@ -613,7 +613,8 @@ var Config = (new function($)
 		NzbDir: 'Watch folder for NZB files', QueueDir: 'Queue folder', TempDir: 'Temporary folder',
 		ScriptDir: 'Extensions folder', LogFile: 'Log file', ConfigTemplate: 'Configuration template',
 		ControlIP: 'Listen address', ControlPort: 'Port', SecureControl: 'Use HTTPS',
-		SecurePort: 'HTTPS port', SecureCert: 'HTTPS certificate', SecureKey: 'HTTPS private key',
+		SecureCert: 'HTTPS certificate', SecureKey: 'HTTPS private key',
+		CertCheck: 'Check news server certificates', CertStore: 'CA certificates',
 		ControlUsername: 'Username', ControlPassword: 'Password', SevenZipCmd: '7-Zip command',
 		UnrarCmd: 'UnRAR command', ParCheck: 'Par check', ParRepair: 'Par repair', ParScan: 'Par scan',
 		ParBuffer: 'Par buffer', ParThreads: 'Par threads',
@@ -1451,6 +1452,8 @@ var Config = (new function($)
 		groupNav();
 		addRenamingControl();
 		addListenAllControl();
+		addHttpsControls();
+		addCaControls();
 		ensureModeSwitch();
 		enhanceControls();
 		snapshotShownValues();
@@ -1622,14 +1625,15 @@ var Config = (new function($)
 		],
 		PATHS: [
 			{ key: 'folders', title: 'Folders', options: ['MainDir', 'DestDir', 'InterDir', 'NzbDir', 'TempDir', 'QueueDir'],
-				advanced: ['WebDir', 'LockFile', 'LogFile', 'ConfigTemplate', 'RequiredDir', 'CertStore'] }
+				advanced: ['WebDir', 'LockFile', 'LogFile', 'ConfigTemplate', 'RequiredDir'] }
 		],
 		SECURITY: [
 			{ key: 'access', title: 'Web access', options: ['ControlIP', 'ControlPort', 'ControlUsername', 'ControlPassword', 'FormAuth', 'AuthorizedIP'] },
 			{ key: 'users', title: 'Extra users', text: 'A restricted user can watch and change the queue but not settings. An add user can only add NZBs.',
 				options: ['RestrictedUsername', 'RestrictedPassword', 'AddUsername', 'AddPassword'] },
-			{ key: 'https', title: 'HTTPS', options: ['SecureControl', 'SecurePort', 'SecureCert', 'SecureKey', 'CertCheck'] },
-			{ key: 'system', title: 'System', options: ['DaemonUsername', 'UMask', 'JsonP'] }
+			{ key: 'https', title: 'HTTPS', text: 'HTTPS is answered on the same port as the web interface.',
+				options: ['SecureControl', 'SecureCert', 'SecureKey'] },
+			{ key: 'system', title: 'System', options: ['DaemonUsername', 'UMask', 'JsonP', 'CertCheck', 'CertStore'] }
 		],
 		LOGGING: [
 			{ key: 'file', title: 'Log file', options: ['WriteLog', 'RotateLog', 'NzbLog', 'LogBuffer', 'SystemHealthCheck'] },
@@ -2725,6 +2729,353 @@ var Config = (new function($)
 		$('#ConfigListenAll').prop('checked', $.trim(input.val()) === '0.0.0.0');
 	}
 
+	/*** HTTPS AND CERTIFICATES *******************************************************/
+
+	// HTTPS shares the web port, so the card only asks for a certificate and its key,
+	// and only while "Use HTTPS" is on. The two paths get a Browse button (a browser
+	// of the daemon's own files), and one row under them makes a self-signed
+	// certificate, saves a pasted certificate and key, and checks that the pair fits.
+	// The CA store for checking news servers gets Browse, Upload, Paste and Check.
+	function certText(key, text)
+	{
+		return I18n.defaultValue('config_cert_' + key, text);
+	}
+
+	function certButton(key, text)
+	{
+		return $('<button type="button" class="btn btn-default config-cert-btn"></button>').text(certText(key, text));
+	}
+
+	function addBrowseButton(name, title)
+	{
+		var option = findOptionByName(name);
+		var input = option && $('#' + option.formId);
+		if (!input || !input.length || input.siblings('.config-cert-browse').length)
+		{
+			return;
+		}
+		certButton('browse', 'Browse…').addClass('config-cert-browse').attr('aria-label', certText('browse', 'Browse…') + ' ' + title)
+			.insertAfter(input).on('click', function()
+			{
+				FileBrowserDialog.showModal(title, $.trim(input.val()) || '${MainDir}', function(path)
+				{
+					input.val(path).trigger('input').trigger('change');
+				});
+			});
+	}
+
+	function setPathOption(name, value)
+	{
+		var option = findOptionByName(name);
+		if (option && value)
+		{
+			$('#' + option.formId).val(value).trigger('input').trigger('change');
+		}
+	}
+
+	function certStatus(box, state, lines)
+	{
+		box.attr('data-state', state).empty();
+		lines.forEach(function(line)
+		{
+			box.append($('<p></p>').text(line));
+		});
+		box.prop('hidden', !lines.length);
+	}
+
+	function describeCert(check)
+	{
+		if (!check || check.Error)
+		{
+			return { state: 'error', lines: [check ? check.Error : certText('none', 'No certificate.')] };
+		}
+		var lines = [];
+		var names = (check.Names || []).join(', ') || check.Subject;
+		lines.push(certText('for', 'For') + ' ' + names + (check.SelfSigned ? ' (' + certText('self_signed', 'self-signed') + ')' : ''));
+		lines.push((check.Expired ? certText('expired', 'Expired') : certText('expires', 'Expires')) + ' ' + check.NotAfter);
+		if (check.NotYetValid)
+		{
+			lines.push(certText('not_yet', 'Not valid yet.'));
+		}
+		lines.push(check.KeyMatches === true ? certText('key_ok', 'The key belongs to this certificate.') :
+			check.KeyMatches === false ? certText('key_bad', 'The key does not belong to this certificate.') :
+			certText('key_none', 'No key file is set.'));
+		return { state: check.Ok && check.KeyMatches === true ? 'ok' : 'error', lines: lines };
+	}
+
+	var httpsCheckTimer;
+	var httpsCheckSeq = 0;
+
+	function checkHttpsPair()
+	{
+		var box = $('#ConfigHttpsStatus');
+		var cert = findOptionByName('SecureCert'), key = findOptionByName('SecureKey');
+		if (!box.length || !cert || !key)
+		{
+			return;
+		}
+		var certPath = $.trim(getOptionValue(cert) || ''), keyPath = $.trim(getOptionValue(key) || '');
+		var seq = ++httpsCheckSeq;
+		if (!certPath)
+		{
+			certStatus(box, 'error', [certText('need', 'HTTPS needs a certificate and its key. Make a self-signed one, paste yours, or browse to the files.')]);
+			return;
+		}
+		certStatus(box, 'busy', [certText('checking', 'Checking…')]);
+		RPC.call('checkcert', [certPath, keyPath], function(result)
+		{
+			if (seq === httpsCheckSeq)
+			{
+				var d = describeCert(result);
+				certStatus(box, d.state, d.lines);
+			}
+		}, function(message)
+		{
+			if (seq === httpsCheckSeq)
+			{
+				certStatus(box, 'error', [String(message)]);
+			}
+		});
+	}
+
+	function scheduleHttpsCheck()
+	{
+		clearTimeout(httpsCheckTimer);
+		httpsCheckTimer = setTimeout(checkHttpsPair, 500);
+	}
+
+	function addHttpsControls()
+	{
+		var keyOption = findOptionByName('SecureKey');
+		var anchor = keyOption && $('#' + keyOption.formId).closest('.control-group');
+		if (!anchor || !anchor.length || $('#ConfigHttpsTools').length)
+		{
+			return;
+		}
+		addBrowseButton('SecureCert', certText('cert_title', 'HTTPS certificate'));
+		addBrowseButton('SecureKey', certText('key_title', 'HTTPS private key'));
+		var section = (anchor.attr('class').match(/\bSECURITY\b/) || [''])[0];
+		var row = $('<div class="control-group config-option-tile config-virtual in-card config-https-tools" id="ConfigHttpsTools">' +
+			'<label class="control-label"><span class="option-name"><span class="config-label"></span></span></label>' +
+			'<div class="controls"><div class="config-cert-actions"></div>' +
+			'<div class="config-cert-status" id="ConfigHttpsStatus" aria-live="polite" hidden></div>' +
+			'<div class="config-cert-form" id="ConfigHttpsMake" hidden>' +
+				'<label for="ConfigHttpsNames"></label><input type="text" id="ConfigHttpsNames" class="config-cert-names" spellcheck="false">' +
+				'<p class="config-cert-hint"></p><div class="config-cert-form-actions"></div></div>' +
+			'<div class="config-cert-form" id="ConfigHttpsPaste" hidden>' +
+				'<label for="ConfigHttpsPem"></label><textarea id="ConfigHttpsPem" rows="8" spellcheck="false"></textarea>' +
+				'<div class="config-cert-form-actions"></div></div>' +
+			'</div></div>').addClass(section);
+		row.find('.config-label').text(certText('pair', 'Certificate and key'));
+		var actions = row.find('.config-cert-actions');
+		var make = row.find('#ConfigHttpsMake'), paste = row.find('#ConfigHttpsPaste');
+		var toggle = function(form)
+		{
+			var open = form.prop('hidden');
+			make.prop('hidden', true);
+			paste.prop('hidden', true);
+			form.prop('hidden', !open);
+			if (open)
+			{
+				form.find('input, textarea').first().focus();
+			}
+		};
+		actions.append(certButton('make', 'Make a self-signed certificate').attr('id', 'ConfigHttpsMakeBtn').on('click', function()
+		{
+			var names = $('#ConfigHttpsNames');
+			if (!$.trim(names.val()))
+			{
+				names.val(location.hostname || 'localhost');
+			}
+			toggle(make);
+		}));
+		actions.append(certButton('paste', 'Paste certificate and key').attr('id', 'ConfigHttpsPasteBtn').on('click', function() { toggle(paste); }));
+		actions.append(certButton('check', 'Check').attr('id', 'ConfigHttpsCheckBtn').on('click', checkHttpsPair));
+
+		make.find('label').text(certText('names', 'Names the certificate is for'));
+		make.find('.config-cert-hint').text(certText('names_hint',
+			'The name or address you open RustyGet with. Add more, separated by commas, to use it from other names too.'));
+		make.find('.config-cert-form-actions').append(certButton('make_go', 'Make certificate').addClass('btn-primary').attr('id', 'ConfigHttpsMakeGo')
+			.on('click', function()
+			{
+				var button = $(this).prop('disabled', true);
+				certStatus($('#ConfigHttpsStatus'), 'busy', [certText('making', 'Making a certificate…')]);
+				RPC.call('makecert', [$('#ConfigHttpsNames').val()], function(result)
+				{
+					button.prop('disabled', false);
+					httpsSaved(result);
+					if (!result.Error)
+					{
+						make.prop('hidden', true);
+					}
+				}, function(message)
+				{
+					button.prop('disabled', false);
+					certStatus($('#ConfigHttpsStatus'), 'error', [String(message)]);
+				});
+			}));
+		paste.find('label').text(certText('pem', 'Certificate and private key, in PEM (the -----BEGIN lines included)'));
+		paste.find('.config-cert-form-actions').append(certButton('save_pem', 'Use this').addClass('btn-primary').attr('id', 'ConfigHttpsPasteGo')
+			.on('click', function()
+			{
+				var button = $(this).prop('disabled', true);
+				RPC.call('savepem', ['https', '', $('#ConfigHttpsPem').val()], function(result)
+				{
+					button.prop('disabled', false);
+					httpsSaved(result);
+					if (!result.Error)
+					{
+						$('#ConfigHttpsPem').val('');
+						paste.prop('hidden', true);
+					}
+				}, function(message)
+				{
+					button.prop('disabled', false);
+					certStatus($('#ConfigHttpsStatus'), 'error', [String(message)]);
+				});
+			}));
+		anchor.after(row);
+
+		['SecureCert', 'SecureKey'].forEach(function(name)
+		{
+			var option = findOptionByName(name);
+			$('#' + option.formId).on('input.https change.https', scheduleHttpsCheck);
+		});
+		syncHttps();
+	}
+
+	// A made or pasted pair was written by the daemon: point the options at it.
+	function httpsSaved(result)
+	{
+		if (result.Error)
+		{
+			certStatus($('#ConfigHttpsStatus'), 'error', [result.Error]);
+			return;
+		}
+		clearTimeout(httpsCheckTimer);
+		++httpsCheckSeq;
+		setPathOption('SecureCert', result.Cert);
+		setPathOption('SecureKey', result.Key);
+		clearTimeout(httpsCheckTimer);
+		if (result.Key && result.Check)
+		{
+			var d = describeCert(result.Check);
+			d.lines.push(certText('save_note', 'Save the settings to use it.'));
+			certStatus($('#ConfigHttpsStatus'), d.state, d.lines);
+		}
+		else
+		{
+			checkHttpsPair();
+		}
+	}
+
+	var httpsWasOn = null;
+
+	function syncHttps()
+	{
+		var control = findOptionByName('SecureControl');
+		if (!control || !$('#ConfigHttpsTools').length)
+		{
+			return;
+		}
+		var on = String(currentValue(control)).toLowerCase() === 'yes';
+		['SecureCert', 'SecureKey'].forEach(function(name)
+		{
+			var option = findOptionByName(name);
+			$('#' + option.formId).closest('.control-group').toggleClass('config-https-off', !on);
+		});
+		$('#ConfigHttpsTools').toggleClass('config-https-off', !on);
+		if (on && httpsWasOn !== true)
+		{
+			checkHttpsPair();
+		}
+		httpsWasOn = on;
+	}
+
+	function addCaControls()
+	{
+		var option = findOptionByName('CertStore');
+		var input = option && $('#' + option.formId);
+		var anchor = input && input.closest('.control-group');
+		if (!anchor || !anchor.length || $('#ConfigCaTools').length)
+		{
+			return;
+		}
+		addBrowseButton('CertStore', certText('ca_title', 'CA certificates'));
+		var section = (anchor.attr('class').match(/\bSECURITY\b/) || [''])[0];
+		var row = $('<div class="control-group config-option-tile config-virtual in-card config-ca-tools" id="ConfigCaTools">' +
+			'<label class="control-label"><span class="option-name"><span class="config-label"></span></span></label>' +
+			'<div class="controls"><div class="config-cert-actions"></div>' +
+			'<input type="file" id="ConfigCaFile" accept=".pem,.crt,.cer,text/plain" hidden>' +
+			'<div class="config-cert-status" id="ConfigCaStatus" aria-live="polite" hidden></div>' +
+			'<div class="config-cert-form" id="ConfigCaPaste" hidden>' +
+				'<label for="ConfigCaPem"></label><textarea id="ConfigCaPem" rows="6" spellcheck="false"></textarea>' +
+				'<div class="config-cert-form-actions"></div></div>' +
+			'</div></div>').addClass(section);
+		row.find('.config-label').text(certText('ca_tools', 'Add or check CA certificates'));
+		var actions = row.find('.config-cert-actions');
+		var status = row.find('#ConfigCaStatus');
+		var saveCa = function(name, text, done)
+		{
+			RPC.call('savepem', ['ca', name, text], function(result)
+			{
+				if (result.Error)
+				{
+					certStatus(status, 'error', [result.Error]);
+					return;
+				}
+				setPathOption('CertStore', result.Path);
+				certStatus(status, 'ok', [result.Count + ' ' + certText('ca_saved', 'certificates saved to') + ' ' + result.Path,
+					certText('save_note', 'Save the settings to use it.')]);
+				if (done) done();
+			}, function(message) { certStatus(status, 'error', [String(message)]); });
+		};
+		actions.append(certButton('upload', 'Upload…').attr('id', 'ConfigCaUploadBtn').on('click', function() { $('#ConfigCaFile').click(); }));
+		actions.append(certButton('paste_ca', 'Paste…').attr('id', 'ConfigCaPasteBtn').on('click', function()
+		{
+			var form = $('#ConfigCaPaste');
+			form.prop('hidden', !form.prop('hidden'));
+			if (!form.prop('hidden')) $('#ConfigCaPem').focus();
+		}));
+		actions.append(certButton('check', 'Check').attr('id', 'ConfigCaCheckBtn').on('click', function()
+		{
+			certStatus(status, 'busy', [certText('checking', 'Checking…')]);
+			RPC.call('checkcastore', [$.trim(input.val())], function(result)
+			{
+				certStatus(status, result.Error ? 'error' : 'ok', [result.Error ? result.Error :
+					result.Count + ' ' + certText('ca_count', 'certificates found')]);
+			}, function(message) { certStatus(status, 'error', [String(message)]); });
+		}));
+		row.find('#ConfigCaFile').on('change', function()
+		{
+			var file = this.files && this.files[0];
+			var picker = this;
+			if (!file)
+			{
+				return;
+			}
+			if (file.size > 1048576)
+			{
+				certStatus(status, 'error', [certText('too_big', 'That file is too large to be a certificate.')]);
+				return;
+			}
+			var reader = new FileReader();
+			reader.onload = function() { saveCa(file.name, String(reader.result)); picker.value = ''; };
+			reader.readAsText(file);
+		});
+		row.find('#ConfigCaPaste label').text(certText('ca_pem', 'CA certificates, in PEM (the -----BEGIN lines included)'));
+		row.find('#ConfigCaPaste .config-cert-form-actions').append(certButton('save_pem', 'Use this').addClass('btn-primary')
+			.attr('id', 'ConfigCaPasteGo').on('click', function()
+			{
+				saveCa('pasted', $('#ConfigCaPem').val(), function()
+				{
+					$('#ConfigCaPem').val('');
+					$('#ConfigCaPaste').prop('hidden', true);
+				});
+			}));
+		anchor.after(row);
+	}
+
 	// An option that only matters while another one has certain values is greyed out
 	// otherwise, with a note that says what to change. Its value is kept and saved.
 	var OPTION_REQUIRES = [
@@ -2739,9 +3090,6 @@ var Config = (new function($)
 		{ option: 'DupeStreamDecompress', when: { name: 'DupeArticleFallback', values: ['stream', 'live'] } },
 		{ option: 'DupeStreamTimeout', when: { name: 'DupeArticleFallback', values: ['stream', 'live'] } },
 		{ option: 'RotateLog', when: { name: 'WriteLog', values: ['rotate'] } },
-		{ option: 'SecurePort', when: { name: 'SecureControl', values: ['yes'] } },
-		{ option: 'SecureCert', when: { name: 'SecureControl', values: ['yes'] } },
-		{ option: 'SecureKey', when: { name: 'SecureControl', values: ['yes'] } },
 		{ option: 'HardLinkingIgnoreExt', when: { name: 'HardLinking', values: ['yes'] } },
 		{ option: 'FlushQueue', when: { name: 'DirectWrite', values: ['no'] },
 			text: ['config_requires_flush', 'Always on while "Write directly to the final file" is on: the queue file is how a download resumes.'] },
@@ -2876,6 +3224,7 @@ var Config = (new function($)
 		syncControls();
 		syncRenaming();
 		syncListenAll();
+		syncHttps();
 		refreshRequirements();
 	}
 
@@ -5896,4 +6245,199 @@ var UpdateDialog = (new function($)
 			});
 	}
 
+}(jQuery));
+
+/*** FILE BROWSER DIALOG **********************************************************/
+
+// Picks a file on the machine RustyGet runs on, listed by the daemon itself, so it
+// shows what the daemon user can read (not what the browser's computer has).
+var FileBrowserDialog = (new function($)
+{
+	'use strict';
+
+	var $Dialog;
+	var current = '';
+	var selected = '';
+	var onPick;
+	var seq = 0;
+
+	function t(key, text)
+	{
+		return I18n.defaultValue('file_browser_' + key, text);
+	}
+
+	function build()
+	{
+		$Dialog = $('<div class="modal modal-small modal-padded-small hide file-browser" id="FileBrowserDialog" role="dialog" aria-modal="true" aria-labelledby="FileBrowserDialog_Title">' +
+			'<div class="modal-header"><a class="close" href="#" data-dismiss="modal"><i class="material-icon">close</i></a>' +
+			'<h3 id="FileBrowserDialog_Title"></h3></div>' +
+			'<div class="modal-body">' +
+				'<div class="file-browser__bar"><button type="button" class="btn btn-default" id="FileBrowserDialog_Up"></button>' +
+				'<input type="text" id="FileBrowserDialog_Path" class="file-browser__path" spellcheck="false"></div>' +
+				'<p class="file-browser__note" id="FileBrowserDialog_Note"></p>' +
+				'<ul class="file-browser__list" id="FileBrowserDialog_List" role="listbox"></ul>' +
+			'</div>' +
+			'<div class="modal-footer"><a href="#" class="btn btn-default" data-dismiss="modal"></a>' +
+			'<a href="#" class="btn btn-primary" id="FileBrowserDialog_Choose"></a></div></div>');
+		$Dialog.find('.close').attr('title', I18n.defaultValue('btn_close', 'Close'));
+		$Dialog.find('#FileBrowserDialog_Up').text(t('up_short', 'Up')).attr('aria-label', t('up', 'Up one folder')).on('click', function()
+		{
+			load($Dialog.data('parent') || current);
+		});
+		$Dialog.find('[data-dismiss=modal].btn').text(I18n.defaultValue('btn_cancel', 'Cancel'));
+		$Dialog.find('#FileBrowserDialog_Choose').text(t('choose', 'Choose')).on('click', function(e)
+		{
+			e.preventDefault();
+			choose();
+		});
+		$Dialog.find('#FileBrowserDialog_Path').attr('aria-label', t('path', 'Folder or file')).on('keydown', function(e)
+		{
+			if (e.key === 'Enter')
+			{
+				e.preventDefault();
+				load(this.value);
+			}
+		});
+		$Dialog.find('#FileBrowserDialog_List').on('click', 'li', function()
+		{
+			var item = $(this);
+			if (item.attr('aria-disabled') === 'true')
+			{
+				return;
+			}
+			if (item.data('dir'))
+			{
+				load(item.data('path'));
+				return;
+			}
+			select(item);
+		}).on('dblclick', 'li', function()
+		{
+			if (!$(this).data('dir') && $(this).attr('aria-disabled') !== 'true')
+			{
+				select($(this));
+				choose();
+			}
+		}).on('keydown', 'li', function(e)
+		{
+			if (e.key === 'Enter' || e.key === ' ')
+			{
+				e.preventDefault();
+				$(this).trigger('click');
+			}
+			else if (e.key === 'ArrowDown' || e.key === 'ArrowUp')
+			{
+				e.preventDefault();
+				var next = e.key === 'ArrowDown' ? $(this).next('li') : $(this).prev('li');
+				next.focus();
+			}
+		});
+		$('body').append($Dialog);
+	}
+
+	function size(bytes)
+	{
+		return bytes < 1024 ? bytes + ' B' : bytes < 1048576 ? (bytes / 1024).toFixed(1) + ' KB' : Util.formatSizeMB(bytes / 1048576);
+	}
+
+	function join(dir, name)
+	{
+		return dir.replace(/\/+$/, '') + '/' + name;
+	}
+
+	function select(item)
+	{
+		$Dialog.find('li[aria-selected=true]').attr('aria-selected', 'false');
+		item.attr('aria-selected', 'true');
+		selected = item.data('path');
+		$('#FileBrowserDialog_Path').val(selected);
+		$('#FileBrowserDialog_Choose').toggleClass('disabled', false);
+	}
+
+	function choose()
+	{
+		// the path as shown: a selection the user then edited is not used
+		var value = $.trim($('#FileBrowserDialog_Path').val());
+		if (!value)
+		{
+			return;
+		}
+		$Dialog.modal('hide');
+		if (onPick)
+		{
+			onPick(value);
+		}
+	}
+
+	function note(text, error)
+	{
+		$('#FileBrowserDialog_Note').text(text || '').toggleClass('is-error', !!error).prop('hidden', !text);
+	}
+
+	function load(path)
+	{
+		var mine = ++seq;
+		note(t('loading', 'Loading…'));
+		RPC.call('browsefiles', [path || ''], function(result)
+		{
+			if (mine !== seq)
+			{
+				return;
+			}
+			render(result);
+		}, function(message)
+		{
+			if (mine === seq)
+			{
+				note(String(message), true);
+			}
+		});
+	}
+
+	function render(result)
+	{
+		current = result.Path || current;
+		$Dialog.data('parent', result.Parent || '');
+		$('#FileBrowserDialog_Up').prop('disabled', !result.Parent || result.Parent === current);
+		$('#FileBrowserDialog_Path').val(current);
+		selected = '';
+		var list = $('#FileBrowserDialog_List').empty();
+		(result.Entries || []).forEach(function(entry)
+		{
+			var item = $('<li role="option" tabindex="0" aria-selected="false"><i class="material-icon" aria-hidden="true"></i><span class="file-browser__name"></span><span class="file-browser__size"></span></li>');
+			item.find('.material-icon').text(entry.Dir ? 'folder' : 'description');
+			item.find('.file-browser__name').text(entry.Name);
+			item.find('.file-browser__size').text(entry.Dir ? '' : size(entry.Size));
+			item.data('path', join(current, entry.Name)).data('dir', entry.Dir);
+			if (!entry.Readable)
+			{
+				item.attr('aria-disabled', 'true').attr('title', t('no_access', 'RustyGet\'s user can\'t read this'));
+			}
+			list.append(item);
+		});
+		if (result.Error)
+		{
+			note(result.Error, true);
+		}
+		else if (!(result.Entries || []).length)
+		{
+			note(t('empty', 'This folder is empty.'));
+		}
+		else
+		{
+			note(result.Truncated ? t('truncated', 'Only the first 5000 entries are shown.') : '');
+		}
+	}
+
+	this.showModal = function(title, start, pick)
+	{
+		if (!$Dialog)
+		{
+			build();
+		}
+		onPick = pick;
+		$('#FileBrowserDialog_Title').text(title || t('title', 'Choose a file'));
+		$Dialog.modal({ backdrop: 'static' });
+		load(start);
+	};
 }(jQuery));

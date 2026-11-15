@@ -445,6 +445,11 @@ pub fn match_command(method: &[u8]) -> c_int {
         b"testdiskspeed" => 53,
         b"testnetworkspeed" => 54,
         b"systemstats" => 55,
+        b"browsefiles" => 57,
+        b"checkcert" => 58,
+        b"makecert" => 59,
+        b"savepem" => 60,
+        b"checkcastore" => 61,
         b"hostlookup" => 56,
         _ => 0,
     }
@@ -2674,6 +2679,11 @@ pub fn xmlrpc_check_user_access_denied(
         }
     } else if user_access == ua_restricted {
         let forbidden = method_name.eq_ignore_ascii_case(b"saveconfig")
+            || method_name.eq_ignore_ascii_case(b"browsefiles")
+            || method_name.eq_ignore_ascii_case(b"checkcert")
+            || method_name.eq_ignore_ascii_case(b"makecert")
+            || method_name.eq_ignore_ascii_case(b"savepem")
+            || method_name.eq_ignore_ascii_case(b"checkcastore")
             || method_name.eq_ignore_ascii_case(b"tlscipherstart")
             || method_name.eq_ignore_ascii_case(b"tlscipherstatus")
             || method_name.eq_ignore_ascii_case(b"tlsciphercancel");
@@ -6408,6 +6418,28 @@ unsafe fn execute_xml_command(
         }
         // systemstats
         55 => (false, crate::sysmetrics::rpc_reply(is_json, cur.next_int())),
+        // certificate tools for Settings (control user only, POST only)
+        57..=61 => {
+            let mut text = || {
+                let bytes = cur.next_str().map(|off| cur.decode_at(off, is_json)).unwrap_or_default();
+                String::from_utf8_lossy(&bytes).into_owned()
+            };
+            let reply = match cmd_id {
+                57 => crate::certtools::rpc_browse(is_json, &text()),
+                58 => {
+                    let cert = text();
+                    crate::certtools::rpc_check_cert(is_json, &cert, &text())
+                }
+                59 => crate::certtools::rpc_make_cert(is_json, &text()),
+                60 => {
+                    let kind = text();
+                    let name = text();
+                    crate::certtools::rpc_save_pem(is_json, &kind, &name, &text())
+                }
+                _ => crate::certtools::rpc_check_ca_store(is_json, &text()),
+            };
+            (false, reply)
+        }
         // hostlookup(host, port): addresses, location and connect time for a news server name
         56 => {
             let host_name = cur.next_str().map(|off| cur.decode_at(off, is_json)).unwrap_or_default();

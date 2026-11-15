@@ -1713,14 +1713,6 @@ pub fn validate_security_section(
         ),
     );
 
-    if input.secure_control && input.secure_port == 0 {
-        emit(
-            "SecureControl",
-            Severity::Error,
-            b"'SecureControl' is enabled but 'SecurePort' is invalid",
-        );
-    }
-
     if input.secure_control {
         let cert_status = if input.secure_cert.as_os_str().is_empty() {
             HealthStatus::warning("'SecureControl' is enabled but 'SecureCert' is empty")
@@ -1735,15 +1727,6 @@ pub fn validate_security_section(
             file_exists(input.secure_key).and_then(|| file_readable(input.secure_key))
         };
         emit_if_not_ok(&mut emit, "SecureKey", key_status);
-
-        let sec_port_status = network_valid_port(input.secure_port).and_then(|| {
-            if input.secure_port == input.control_port {
-                HealthStatus::error("'SecurePort' cannot be the same as 'ControlPort'")
-            } else {
-                HealthStatus::ok()
-            }
-        });
-        emit_if_not_ok(&mut emit, "SecurePort", sec_port_status);
     }
 
     if !input.cert_check && !input.cert_store_path_empty {

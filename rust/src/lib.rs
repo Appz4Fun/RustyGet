@@ -71,6 +71,7 @@ pub mod scheduler;
 #[cfg(unix)]
 pub mod socket;
 pub mod statmeter;
+pub mod certtools;
 pub mod systemhealth;
 pub mod hostlookup;
 pub mod sysmetrics;

@@ -967,7 +967,7 @@ pub fn history(range_sec: i64) -> (i64, Vec<Sample>) {
         .map_or((FINE_INTERVAL_SEC, Vec::new()), |g| g.history.window(range, now_unix()))
 }
 
-fn json_str(out: &mut String, s: &str) {
+pub(crate) fn json_str(out: &mut String, s: &str) {
     out.push('"');
     for c in s.chars() {
         match c {

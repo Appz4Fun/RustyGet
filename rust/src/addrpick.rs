@@ -24,6 +24,10 @@ const DNS_TTL: Duration = Duration::from_secs(10 * 60);
 const DEAD_FOR: Duration = Duration::from_secs(5 * 60);
 /// Time allowed for each address's timing connect.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+/// The least time between two timings of one host after failures.
+const RERANK_GAP: Duration = Duration::from_secs(60);
+/// How long a connect waits for the first lookup of its host by another thread.
+const FIRST_LOOKUP_WAIT: Duration = Duration::from_secs(5);
 /// A new fastest address takes over only when the current one is slower than this much.
 const KEEP_FACTOR: f64 = 1.2;
 const KEEP_SLACK_MS: f64 = 5.0;
@@ -44,6 +48,8 @@ struct Entry {
     rerank: bool,
     /// Look the host up again at the next connect, whatever its age.
     stale: bool,
+    /// When the addresses were last timed.
+    ranked_at: Option<Instant>,
     warned_pin: Option<String>,
 }
 
@@ -237,7 +243,9 @@ pub fn plan(s: &ServerFacts<'_>) -> Vec<String> {
                 ..Entry::default()
             };
         }
-        let due = e.stale || e.resolved_at.is_none_or(|t| t.elapsed() >= DNS_TTL);
+        let due = e.stale
+            || e.resolved_at.is_none_or(|t| t.elapsed() >= DNS_TTL)
+            || (e.rerank && e.ranked_at.is_none_or(|t| t.elapsed() >= RERANK_GAP));
         if due && !e.busy {
             e.busy = true;
             true
@@ -247,6 +255,21 @@ pub fn plan(s: &ServerFacts<'_>) -> Vec<String> {
     };
     if refresh {
         refresh_entry(s, port);
+    } else {
+        // another thread is looking the host up for the first time: wait for it, so the
+        // pin and the ranking apply to every connection from the start
+        let start = Instant::now();
+        while start.elapsed() < FIRST_LOOKUP_WAIT {
+            let waiting = entries()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&s.id)
+                .is_some_and(|e| e.busy && e.ranked.is_empty());
+            if !waiting {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 
     let pin = pinned(s.id);
@@ -286,6 +309,10 @@ pub fn plan(s: &ServerFacts<'_>) -> Vec<String> {
     list
 }
 
+fn same_target(e: &Entry, s: &ServerFacts<'_>, port: u16) -> bool {
+    e.host == s.host && e.port == port && e.ip_version == s.ip_version
+}
+
 fn refresh_entry(s: &ServerFacts<'_>, port: u16) {
     let found = crate::hostlookup::resolve(s.host, port).map(|ips| {
         ips.into_iter()
@@ -297,7 +324,8 @@ fn refresh_entry(s: &ServerFacts<'_>, port: u16) {
             .collect::<Vec<_>>()
     });
     let mut map = entries().lock().unwrap_or_else(|e| e.into_inner());
-    let Some(e) = map.get_mut(&s.id) else {
+    let Some(e) = map.get_mut(&s.id).filter(|e| same_target(e, s, port)) else {
+        // the server's host changed meanwhile: these results are for the old one
         return;
     };
     e.busy = false;
@@ -305,8 +333,13 @@ fn refresh_entry(s: &ServerFacts<'_>, port: u16) {
     e.resolved_at = Some(Instant::now());
     let ips = match found {
         Ok(ips) if !ips.is_empty() => ips,
-        // keep what was known; the next try after DNS_TTL looks again
-        _ => return,
+        // keep what was known; the next try after DNS_TTL (or RERANK_GAP) looks again
+        _ => {
+            if e.rerank {
+                e.ranked_at = Some(Instant::now());
+            }
+            return;
+        }
     };
     let names: Vec<String> = ips.iter().map(crate::hostlookup::shown_address).collect();
     let changed = {
@@ -323,17 +356,19 @@ fn refresh_entry(s: &ServerFacts<'_>, port: u16) {
     if names.len() < 2 {
         e.ranked = names;
         e.rerank = false;
+        e.ranked_at = Some(Instant::now());
         return;
     }
     e.busy = true;
     drop(map);
     let times = time_addresses(&ips);
     let mut map = entries().lock().unwrap_or_else(|e| e.into_inner());
-    let Some(e) = map.get_mut(&s.id) else {
+    let Some(e) = map.get_mut(&s.id).filter(|e| same_target(e, s, port)) else {
         return;
     };
     e.busy = false;
     e.rerank = false;
+    e.ranked_at = Some(Instant::now());
     e.latency = names.iter().cloned().zip(times).collect();
     let ranked = rank(&names, &e.latency, prev_best.as_deref());
     if ranked.first() != prev_best.as_ref() {
@@ -469,6 +504,52 @@ mod tests {
         assert!(entries().lock().unwrap().get(&id).unwrap().stale);
         report(id, "a", true);
         assert!(!entries().lock().unwrap().get(&id).unwrap().dead.contains_key("a"));
+        entries().lock().unwrap().remove(&id);
+    }
+
+    #[test]
+    fn a_failed_first_address_retimes_soon_but_not_too_often() {
+        let id = -5151;
+        let facts = ServerFacts {
+            id,
+            name: "t",
+            host: "rerank.invalid",
+            port: 119,
+            ip_version: 0,
+            tls: false,
+            cert_verif_level: 2,
+        };
+        let long_ago = Instant::now() - Duration::from_secs(3);
+        entries().lock().unwrap().insert(
+            id,
+            Entry {
+                host: "rerank.invalid".into(),
+                port: 119,
+                ranked: s(&["192.0.2.1", "192.0.2.2"]),
+                resolved_at: Some(long_ago),
+                ..Entry::default()
+            },
+        );
+        report(id, "192.0.2.1", false);
+        // the failed address goes behind the other one at once
+        assert_eq!(plan(&facts), s(&["192.0.2.2", "192.0.2.1"]));
+        // and the host was looked up again (the lookup fails here: the list is kept)
+        let (resolved, busy) = {
+            let map = entries().lock().unwrap();
+            let e = map.get(&id).unwrap();
+            (e.resolved_at.unwrap(), e.busy)
+        };
+        assert!(resolved > long_ago && !busy);
+        // another failure right after does not time the host again within RERANK_GAP
+        {
+            let mut map = entries().lock().unwrap();
+            let e = map.get_mut(&id).unwrap();
+            e.ranked_at = Some(Instant::now());
+            e.resolved_at = Some(long_ago);
+        }
+        report(id, "192.0.2.1", false);
+        plan(&facts);
+        assert_eq!(entries().lock().unwrap().get(&id).unwrap().resolved_at, Some(long_ago));
         entries().lock().unwrap().remove(&id);
     }
 

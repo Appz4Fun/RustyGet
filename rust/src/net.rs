@@ -227,6 +227,8 @@ struct ConnCore {
     remote_addr_cstr: CString,
     graceful: bool,
     cert_verif_level: u32,
+    /// the last `connect_base` failed because the connection was cancelled or the thread stopped
+    connect_cancelled: bool,
 }
 
 impl ConnCore {
@@ -490,10 +492,14 @@ impl ConnCore {
         if res && self.tls && !self.start_tls(true, c"", c"") {
             res = false;
         }
+        self.connect_cancelled = false;
         if res && self.slot.status.load(Ordering::SeqCst) != CS_CANCELLED && !self.is_stopped() {
             self.slot.status.store(CS_CONNECTED, Ordering::SeqCst);
         } else {
             res = false;
+            // seen before do_disconnect, which leaves the status at disconnected
+            self.connect_cancelled =
+                self.slot.status.load(Ordering::SeqCst) == CS_CANCELLED || self.is_stopped();
             self.do_disconnect();
         }
         res
@@ -870,7 +876,8 @@ struct ConnSession {
     nntp_line_buf: Option<Box<[u8; NNTP_LINEBUF_SIZE]>>,
     nntp_auth: crate::nntp::Auth,
     /// How the last `nntp_connect` ended: 0 connected, 1 socket or TLS failed, 2 the
-    /// greeting failed, 3 the login failed.
+    /// greeting failed (or the connection dropped during the login), 3 the server refused
+    /// the login, 4 cancelled or stopped.
     nntp_connect_stage: u8,
 }
 
@@ -884,9 +891,10 @@ impl ConnSession {
             return true;
         }
         self.nntp_auth.rejected = false;
+        self.nntp_auth.dropped = false;
         self.nntp_active_group = None;
         if !self.core.connect_base() {
-            self.nntp_connect_stage = 1;
+            self.nntp_connect_stage = if self.core.connect_cancelled { 4 } else { 1 };
             return false;
         }
         let line_buf = self
@@ -902,10 +910,15 @@ impl ConnSession {
             srv_host,
             conn_host: &conn_host,
         };
-        let result = crate::nntp::handshake(&mut io, &mut self.nntp_auth).unwrap_or(1);
+        let handshake = crate::nntp::handshake(&mut io, &mut self.nntp_auth);
+        let cancelled = handshake.is_err()
+            || self.core.slot.status.load(Ordering::SeqCst) == CS_CANCELLED
+            || self.core.is_stopped();
+        let result = handshake.unwrap_or(1);
         self.nntp_connect_stage = match result {
             0 => 0,
-            2 => 3,
+            _ if cancelled => 4,
+            2 if !self.nntp_auth.dropped => 3,
             _ => 2,
         };
         if result != 0 {
@@ -1095,6 +1108,7 @@ impl NzbgetRsConn {
             remote_addr_cstr: CString::default(),
             graceful: false,
             cert_verif_level: 2,
+            connect_cancelled: false,
         };
         core.emit_debug(b"Creating Connection");
         Self {
@@ -1147,6 +1161,7 @@ impl NzbgetRsConn {
             remote_addr_cstr: CString::default(),
             graceful: false,
             cert_verif_level: 2,
+            connect_cancelled: false,
         };
         core.emit_debug(b"Creating Connection");
         let host_cstr = core.get_remote_addr().to_owned();
@@ -2770,7 +2785,11 @@ impl PooledNntpConn {
                 return true;
             }
             let status = self.conn.slot.status.load(Ordering::SeqCst);
-            if session.nntp_connect_stage == 3 || status == CS_CANCELLED {
+            // a refused login fails the same everywhere; a cancel or stop is not the address's fault
+            if matches!(session.nntp_connect_stage, 3 | 4)
+                || status == CS_CANCELLED
+                || session.core.is_stopped()
+            {
                 return false;
             }
             crate::addrpick::report(self.server.id, addr, false);
@@ -4191,6 +4210,81 @@ mod tests {
             assert_eq!(c2.slot.status.load(Ordering::SeqCst), CS_CANCELLED);
         }
         assert!(reg.inner.lock().unwrap().1.is_empty());
+    }
+
+    /// One NNTP session from a std listener that runs `serve` on the accepted stream.
+    fn stage_after(serve: fn(std::net::TcpStream), cancel_after: Option<u64>) -> u8 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = c_int::from(listener.local_addr().unwrap().port());
+        let server = std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                serve(stream);
+            }
+        });
+        let mut client = NzbgetRsConn::new_client(b"127.0.0.1", port, false, false, false, 0, None);
+        client.session.get_mut().core.timeout = 5;
+        let slot = Arc::clone(&client.slot);
+        let canceller = cancel_after.map(|ms| {
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(ms));
+                slot.cancel(false, None);
+            })
+        });
+        let cs = client.session.get_mut();
+        assert!(!cs.nntp_connect(c"user", c"pass", c"test", c"127.0.0.1"));
+        let stage = cs.nntp_connect_stage;
+        if let Some(c) = canceller {
+            c.join().unwrap();
+        }
+        drop(client);
+        server.join().unwrap();
+        stage
+    }
+
+    #[test]
+    fn connect_stage_tells_cancel_refusal_and_drop_apart() {
+        use std::io::{BufRead, BufReader, Write};
+        // no greeting, then cancelled: a cancel, not the address's fault
+        assert_eq!(
+            stage_after(
+                |s| {
+                    std::thread::sleep(Duration::from_millis(900));
+                    drop(s);
+                },
+                Some(300)
+            ),
+            4
+        );
+        // the server refuses the login
+        assert_eq!(
+            stage_after(
+                |mut s| {
+                    s.write_all(b"200 hi\r\n").unwrap();
+                    let mut r = BufReader::new(s.try_clone().unwrap());
+                    let mut line = String::new();
+                    r.read_line(&mut line).unwrap();
+                    s.write_all(b"481 Authentication failed\r\n").unwrap();
+                    let _ = r.read_line(&mut line);
+                },
+                None
+            ),
+            3
+        );
+        // the connection drops during the login: a network failure
+        assert_eq!(
+            stage_after(
+                |mut s| {
+                    s.write_all(b"200 hi\r\n").unwrap();
+                    let mut r = BufReader::new(s.try_clone().unwrap());
+                    let mut line = String::new();
+                    r.read_line(&mut line).unwrap();
+                },
+                None
+            ),
+            2
+        );
+        // a bad greeting
+        assert_eq!(stage_after(|mut s| s.write_all(b"502 busy\r\n").unwrap(), None), 2);
     }
 
     #[test]

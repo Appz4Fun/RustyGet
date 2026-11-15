@@ -45,6 +45,8 @@ pub unsafe trait Io {
 pub struct Auth {
     pub error: bool,
     pub rejected: bool,
+    /// the connection closed or timed out during the login (no answer at all)
+    pub dropped: bool,
 }
 
 /// BString<1024>'s capacity: 1023 bytes and the NUL.
@@ -166,6 +168,7 @@ fn auth_info_pass(io: &mut dyn Io, auth: &mut Auth, mut recur: i32) -> Result<bo
                 b"Authorization failed for %s (%s): Connection closed by remote host",
                 None,
             )?;
+            auth.dropped = true;
             return Ok(false);
         }
         let bytes = unsafe { answer_bytes(answer) };
@@ -202,6 +205,7 @@ fn auth_info_user(io: &mut dyn Io, auth: &mut Auth, mut recur: i32) -> Result<bo
                 b"Authorization for %s (%s) failed: Connection closed by remote host",
                 None,
             )?;
+            auth.dropped = true;
             return Ok(false);
         }
         let bytes = unsafe { answer_bytes(answer) };

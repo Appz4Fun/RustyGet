@@ -214,7 +214,7 @@ var Downloads = (new function($)
 		{
 			var group = groups[i];
 
-			group.name = group.NZBName;
+			group.name = group.NZBName + ' ' + ReleaseName.forGroup(group).headline;
 			group.status = DownloadsUI.buildStatusText(group);
 			group.priority = DownloadsUI.buildPriorityText(group.MaxPriority);
 			group.category = group.Category;
@@ -264,7 +264,7 @@ var Downloads = (new function($)
 			propagation = '<span class="label label-warning text-uppercase" title="' + I18n.translate('desc_propagation_delayed') + '">' + I18n.translate('label_propagation_delayed') + '</span> ';
 		}
 
-		var name = '<a href="#" data-nzbid="' + group.NZBID + '">' + Util.textToHtml(Util.formatNZBName(group.NZBName)) + '</a>';
+		var name = ReleaseName.nameHtml(group, '<a href="#" data-nzbid="' + group.NZBID + '">');
 		name += DownloadsUI.buildEncryptedLabel(group.Parameters);
 
 		var url = '';

@@ -18,7 +18,7 @@ use crate::postrepair::{strncasecmp_prefix, NzbgetRsParSegment};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
 #[cfg(test)]
@@ -115,6 +115,12 @@ struct ActiveStreamingSession {
     articles: Mutex<DeferredArticles>,
     article_byte_limit: u64,
     pending_unpause_ids: Mutex<Vec<u64>>,
+    /// Recovery blocks of registered volumes that have not arrived yet: the
+    /// most recovery a damaged block can still get, so growth never charges
+    /// ParBuffer for slots no block could fill.
+    queued_blocks: Mutex<HashMap<u64, u64>>,
+    /// Slot cap last written to the log, so growth is not logged per block.
+    logged_slots: AtomicUsize,
     file_lengths: HashMap<FileId, u64>,
     target_names: HashMap<FileId, PathBuf>,
     base_dir: PathBuf,
@@ -270,6 +276,8 @@ fn build_streaming_session(
         articles: Mutex::new(DeferredArticles::default()),
         article_byte_limit,
         pending_unpause_ids: Mutex::new(Vec::new()),
+        queued_blocks: Mutex::new(HashMap::new()),
+        logged_slots: AtomicUsize::new(0),
         file_lengths: lengths,
         target_names,
         base_dir: base_dir.to_path_buf(),
@@ -349,17 +357,33 @@ impl ActiveStreamingSession {
     /// pool when the session ends.
     fn grow_for_damage(&self) {
         let status = self.session.status();
-        self.grow_slots_to(status.damaged, &status);
+        let coming: u64 = self
+            .queued_blocks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .sum();
+        // Never more slots than recovery blocks that are here or still coming.
+        let usable = status
+            .ready_recovery
+            .saturating_add(usize::try_from(coming).unwrap_or(usize::MAX));
+        self.grow_slots_to(status.damaged.min(usable), &status);
     }
 
-    /// After a volume arrived: when every slot is taken but some held an
-    /// exponent that did not come (a preallocated slot), grow by what is still
-    /// short; the session absorbs the turned-away recovery blocks again.
-    fn grow_after_arrival(&self) {
+    /// After a volume with `volume_blocks` recovery blocks arrived and
+    /// `absorbed` of them were taken: when every slot is full but blocks are
+    /// still short (a preallocated slot held an exponent that did not come),
+    /// grow by what the volume turned away, at most; the session absorbs those
+    /// blocks again.
+    fn grow_after_arrival(&self, volume_blocks: u64, absorbed: usize) {
         let status = self.session.status();
         let cap = self.session.max_syndrome_slots();
+        let turned_away = usize::try_from(volume_blocks)
+            .unwrap_or(usize::MAX)
+            .saturating_sub(absorbed);
         if status.ready_recovery < status.damaged && status.syndrome_slots >= cap {
-            self.grow_slots_to(cap + (status.damaged - status.ready_recovery), &status);
+            let short = (status.damaged - status.ready_recovery).min(turned_away);
+            self.grow_slots_to(cap + short, &status);
         }
     }
 
@@ -384,7 +408,10 @@ impl ActiveStreamingSession {
         if effective < asked {
             lease.shrink_by(unit * (asked - effective) as u64);
         }
-        if effective > cap {
+        let logged = self.logged_slots.load(Ordering::Relaxed);
+        // Log the first growth, then each further quarter (at least 4 blocks).
+        if effective > cap && effective >= logged + (logged / 4).max(4) {
+            self.logged_slots.store(effective, Ordering::Relaxed);
             let name = self
                 .par_name
                 .lock()
@@ -1678,6 +1705,11 @@ pub fn streaming_session_register_queued_volume(
         blocks,
         paused,
     });
+    entry
+        .queued_blocks
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(volume_id, u64::try_from(blocks).unwrap_or(0));
     true
 }
 
@@ -1772,8 +1804,20 @@ pub fn streaming_session_on_recovery_volume_arrived(
     with_live_session(nzb_id, |entry| {
         // Growth that found ParBuffer full earlier may fit now.
         entry.grow_for_damage();
+        let registered = queued_id.and_then(|id| {
+            entry
+                .queued_blocks
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&id)
+        });
+        let volume_blocks = registered.unwrap_or_else(|| {
+            path.file_name()
+                .and_then(|name| volume_blocks_bytes(&par_rs::filenames::os_str_bytes(name)))
+                .map_or(0, u64::from)
+        });
         let count = entry.session.on_recovery_volume_arrived(path, queued_id)?;
-        entry.grow_after_arrival();
+        entry.grow_after_arrival(volume_blocks, count);
         if let Some(id) = queued_id {
             entry
                 .pending_unpause_ids
@@ -3618,7 +3662,14 @@ mod tests {
 
     #[test]
     fn live_session_grows_syndrome_slots_from_free_par_buffer_as_damage_appears() {
-        grow_live_slots_case(0x6a0f_0001, 0, 3);
+        grow_live_slots_case(0x6a0f_0001, 0, 6, 3);
+    }
+
+    #[test]
+    fn live_session_never_grows_past_the_recovery_blocks_that_can_come() {
+        // Three damaged blocks but only two recovery blocks exist: ParBuffer
+        // is charged for two slots, not three.
+        grow_live_slots_case(0x6a0f_0003, 0, 2, 2);
     }
 
     #[test]
@@ -3626,10 +3677,15 @@ mod tests {
         // The preallocated slot holds exponent 0, but the volumes carry 3..8:
         // after arrival one more slot is needed and the turned-away block is
         // absorbed again.
-        grow_live_slots_case(0x6a0f_0002, 3, 4);
+        grow_live_slots_case(0x6a0f_0002, 3, 6, 4);
     }
 
-    fn grow_live_slots_case(nzb_id: i32, first_exponent: u32, final_cap: usize) {
+    fn grow_live_slots_case(
+        nzb_id: i32,
+        first_exponent: u32,
+        recovery_blocks: u32,
+        final_cap: usize,
+    ) {
         use par_rs::create::{build_set, SetOptions, VolumeScheme};
 
         let dir = std::env::temp_dir().join(format!(
@@ -3644,7 +3700,7 @@ mod tests {
             &[("part01.rar", &f0)],
             &SetOptions {
                 slice_size: 4096,
-                recovery_blocks: 6,
+                recovery_blocks,
                 first_exponent,
                 volumes: VolumeScheme::Single,
                 creator: "rustyget-test".to_string(),
@@ -3705,10 +3761,12 @@ mod tests {
                 .on_article_finished(&id0, off, 4096, par_rs::crc::crc32(chunk), Some(chunk))
                 .unwrap();
         }
-        // Three damaged blocks: the cap grew to three slots, two slices each.
+        // Three damaged blocks: the cap grew to one slot per block that can
+        // come, two slices each.
         assert_eq!(entry.session.status().damaged, 3);
-        assert_eq!(entry.session.max_syndrome_slots(), 3);
-        assert_eq!(reserved(&entry), start_bytes + 2 * 2 * 4096);
+        let grown = 3.min(recovery_blocks as usize);
+        assert_eq!(entry.session.max_syndrome_slots(), grown);
+        assert_eq!(reserved(&entry), start_bytes + (grown as u64 - 1) * 2 * 4096);
         for (vname, bytes) in &built.volumes {
             let path = dir.join(vname);
             std::fs::write(&path, bytes).unwrap();
@@ -3716,12 +3774,18 @@ mod tests {
                 .unwrap()
                 .unwrap();
         }
-        assert_eq!(entry.session.status().ready_recovery, 3);
         assert_eq!(entry.session.max_syndrome_slots(), final_cap);
         assert_eq!(
             reserved(&entry),
             start_bytes + (final_cap as u64 - 1) * 2 * 4096
         );
+        if recovery_blocks < 3 {
+            assert_eq!(entry.session.status().ready_recovery, recovery_blocks as usize);
+            streaming_session_cancel(nzb_id);
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        assert_eq!(entry.session.status().ready_recovery, 3);
         let report = streaming_session_repair_available_targets_now(nzb_id, &[id0])
             .unwrap()
             .unwrap();

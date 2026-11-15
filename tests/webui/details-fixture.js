@@ -142,7 +142,8 @@ async function installDetailsFixture(page, base, writes = [], hooks = {}) {
       }
       const result = replies[rpc.method];
       assert.notEqual(result, undefined, 'Details fixture must answer every read RPC: ' + rpc.method);
-      return route.fulfill({ contentType: 'application/json', json: { id: rpc.id, result: JSON.parse(JSON.stringify(result)) } });
+      const copy = JSON.parse(JSON.stringify(result));
+      return route.fulfill({ contentType: 'application/json', json: { id: rpc.id, result: hooks.patchReply ? hooks.patchReply(rpc.method, copy) : copy } });
     }
     if (url.pathname === '/combined.css' || url.pathname === '/combined.js') {
       const files = decodeURIComponent(url.search.slice(1)).split('+');

@@ -747,6 +747,8 @@
   "msg_stopping_reloading": "Заустављање свих активности и поновно учитавање...",
   "msg_terminated_waiting": "RustyGet је прекинут. Чекање на поновно покретање...",
   "nav_info": "Информације",
+  "nav_overview": "Преглед",
+  "config_overview_about": "О RustyGet-у",
   "nav_status": "Статус",
   "nav_system": "Систем",
   "not_implemented": "Није имплементирано",

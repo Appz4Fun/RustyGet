@@ -747,6 +747,8 @@
   "msg_stopping_reloading": "Minden tevékenység leállítása és újratöltés...",
   "msg_terminated_waiting": "Az RustyGet leállt. Várakozás az újraindításra...",
   "nav_info": "Információ",
+  "nav_overview": "Áttekintés",
+  "config_overview_about": "A RustyGet névjegye",
   "nav_status": "Állapot",
   "nav_system": "Rendszer",
   "not_implemented": "Nincs megvalósítva",

@@ -651,6 +651,11 @@ var Config = (new function($)
 		$(window).bind('beforeunload', userLeavesPage);
 
 		$ConfigNav.on('click', 'li > a', navClick);
+		$('#ConfigInfo').on('click', '.config-overview-tile', function(event)
+		{
+			event.preventDefault();
+			Config.showSection($(this).attr('data-target'), true);
+		});
 		$ConfigData.on('input change', '.config-list-detail input', refreshListRows);
 
 		$ConfigTable = $('#ConfigTable');
@@ -776,6 +781,10 @@ var Config = (new function($)
 
 	function findSectionById(sectionId)
 	{
+		if (sectionId === DUPE_SECTION.id)
+		{
+			return DUPE_SECTION;
+		}
 		for (var k=0; k < config.length; k++)
 		{
 			var sections = config[k].sections;
@@ -1376,6 +1385,7 @@ var Config = (new function($)
 		$ConfigNav.append('<li class="divider"></li>');
 		$ConfigNav.append('<li><a class="text-uppercase" href="#Config-Licenses" data-i18n="config_title_licenses"></a></li>');
 
+		applyLayout();
 		notifyChanges();
 
 		$ConfigNav.append('<li class="divider hide ConfigSearch"></li>');
@@ -1448,7 +1458,8 @@ var Config = (new function($)
 		var option = findOptionById(optFormId);
 
 		// switch to tab and scroll the option into view
-		Config.showSection(option.sectionId, false);
+		Config.showSection(pageIdOf(option), false);
+		$('#' + optFormId).closest('details.config-card__more').prop('open', true);
 		if (listSectionPrefix(option.sectionId))
 		{
 			setListEditor(option.sectionId, option.multiid, true);
@@ -1478,12 +1489,350 @@ var Config = (new function($)
 		refreshChangeState();
 	}
 
+	/*** SETTINGS LAYOUT: cards, advanced folds, the Dupe fleets page ***********/
+
+	// The configuration file keeps its sections; the page groups their rows into
+	// titled cards, folds rarely changed options away, and gathers every dupe fleet
+	// option onto one page. Only the DOM moves: values, health and saving still go
+	// through each option's own section. Options not listed stay in an untitled
+	// card at the top of their section, so nothing new can go missing.
+	var DUPE_SECTION = { id: 'DUPE_FLEETS', name: 'DUPE FLEETS', caption: 'Dupe fleets', options: [], virtual: true };
+
+	var LAYOUT = {
+		DUPE_FLEETS: [
+			{ key: 'repair', title: 'Fleet repair', text: 'How copies of the same release repair each other while they download.',
+				options: ['DupeCheck', 'DupeArticleFallback', 'DupeBorrowFirst', 'DupeStreamDecompress', 'DupeStreamTimeout', 'HealthCheck'] },
+			{ key: 'health', title: 'Health sampling', text: 'How each copy is sampled before a primary is picked and donors are ranked.',
+				options: ['DupeHealthPercent', 'DupeHealthMin', 'DupeHealthMax', 'DupeBodyChecks', 'DupeBodyPercent', 'DupeMinAlive'],
+				advanced: ['DupeHealthBudget', 'DupeCheckConcurrency', 'DupeCheckConnections'] },
+			{ key: 'ranking', title: 'Donor ranking', text: 'Twins come first by health, then borrowable alts, then the rest. These settings break ties.',
+				options: ['DupePrimaryScore', 'DupeFastDonors', 'DupeSizeTolerance'] },
+			{ key: 'search', title: 'Indexer search', text: 'Off by default: fleets normally arrive from the app that sends them.',
+				options: ['DupeSearch'], advanced: ['DupeSearchUrl', 'DupeSearchApiKey', 'DupeSearchDelay', 'DupeSearchDryRun', 'DupeSearchMaxDonors'],
+				moreLabel: 'Search settings' }
+		],
+		INCOMING_NZBS: [
+			{ key: 'folder', title: 'NZB folder', text: 'Files dropped into the NZB folder are picked up and queued.',
+				options: ['NzbDirInterval', 'NzbDirFileAge', 'NzbDirArchiveScan', 'NzbDirArchiveAction', 'AppendCategoryDir'] }
+		],
+		DOWNLOAD_QUEUE: [
+			{ key: 'queue', title: 'Queue', options: ['ContinuePartial', 'PropagationDelay', 'PostStrategy', 'KeepHistory', 'FeedHistory', 'FlushQueue'] },
+			{ key: 'disk', title: 'Writing to disk', options: ['ArticleCache', 'DirectWrite', 'WriteBuffer', 'DiskSpace', 'NzbCleanupDisk'],
+				advanced: ['SkipWrite', 'RawArticle'] },
+			{ key: 'names', title: 'File names', options: ['FileNaming', 'PostDownloadRename', 'RenameAfterUnpack', 'ReorderFiles', 'RenameIgnoreExt'] }
+		],
+		CONNECTION: [
+			{ key: 'speed', title: 'Speed and quotas', options: ['DownloadRate', 'DailyQuota', 'MonthlyQuota', 'QuotaStartDay'] },
+			{ key: 'articles', title: 'Articles', options: ['ArticleRetries', 'ArticleInterval', 'ArticleTimeout'], advanced: ['ArticleReadChunkSize'] },
+			{ key: 'urls', title: 'Fetching NZB links', options: ['UrlConnections', 'UrlForce', 'UrlRetries', 'UrlInterval', 'UrlTimeout', 'RemoteTimeout'] }
+		],
+		CHECK_AND_REPAIR: [
+			{ key: 'par', title: 'Par check', text: 'Used when no twin or alt in the fleet has the missing bytes.',
+				options: ['ParCheck', 'ParRepair', 'ParScan', 'ParQuick', 'CrcCheck', 'ParTimeLimit', 'ParPauseQueue'],
+				advanced: ['ParBuffer', 'ParThreads', 'ParIgnoreExt'] },
+			{ key: 'rename', title: 'Renaming', options: ['DirectRename', 'ParRename', 'RarRename'] },
+			{ key: 'links', title: 'Hard links', options: ['HardLinking', 'HardLinkingIgnoreExt'] }
+		],
+		UNPACK: [
+			{ key: 'unpack', title: 'Unpack', options: ['Unpack', 'DirectUnpack', 'UnpackPassFile', 'UseTempUnpackDir', 'UnpackPauseQueue'] },
+			{ key: 'cleanup', title: 'Cleanup', options: ['UnpackCleanupDisk', 'ExtCleanupDisk', 'UnpackIgnoreExt'] }
+		],
+		PATHS: [
+			{ key: 'folders', title: 'Folders', options: ['MainDir', 'DestDir', 'InterDir', 'NzbDir', 'TempDir', 'QueueDir'],
+				advanced: ['WebDir', 'LockFile', 'LogFile', 'ConfigTemplate', 'RequiredDir', 'CertStore'] }
+		],
+		SECURITY: [
+			{ key: 'access', title: 'Web access', options: ['ControlIP', 'ControlPort', 'ControlUsername', 'ControlPassword', 'FormAuth', 'AuthorizedIP'] },
+			{ key: 'users', title: 'Extra users', text: 'A restricted user can watch and change the queue but not settings. An add user can only add NZBs.',
+				options: ['RestrictedUsername', 'RestrictedPassword', 'AddUsername', 'AddPassword'] },
+			{ key: 'https', title: 'HTTPS', options: ['SecureControl', 'SecurePort', 'SecureCert', 'SecureKey', 'CertCheck'] },
+			{ key: 'system', title: 'System', options: ['UpdateCheck'], advanced: ['DaemonUsername', 'UMask', 'JsonP'] }
+		],
+		LOGGING: [
+			{ key: 'file', title: 'Log file', options: ['WriteLog', 'RotateLog', 'NzbLog', 'LogBuffer', 'SystemHealthCheck'] },
+			{ key: 'levels', title: 'Message levels', options: ['ErrorTarget', 'WarningTarget', 'InfoTarget', 'DetailTarget', 'DebugTarget'] },
+			{ key: 'debug', title: 'Troubleshooting', options: [], advanced: ['CrashTrace', 'CrashDump', 'TimeCorrection'] }
+		]
+	};
+
+	function layoutRow(name)
+	{
+		var option = findOptionByName(name);
+		if (!option || option.template)
+		{
+			return null;
+		}
+		var row = $('#' + option.formId, $ConfigData).closest('.control-group');
+		return row.length ? { option: option, row: row } : null;
+	}
+
+	function buildCard(sectionId, card)
+	{
+		var $card = $('<section class="config-card"></section>').addClass(sectionId).attr('data-card', card.key);
+		if (card.title)
+		{
+			var head = $('<header class="config-card__head"></header>');
+			head.append($('<h3 class="config-card__title"></h3>').text(I18n.defaultValue('config_card_' + sectionId.toLowerCase() + '_' + card.key, card.title)));
+			if (card.text)
+			{
+				head.append($('<p class="config-card__text"></p>').text(I18n.defaultValue('config_card_' + sectionId.toLowerCase() + '_' + card.key + '_text', card.text)));
+			}
+			$card.append(head);
+		}
+		var rows = $('<div class="config-card__rows"></div>').appendTo($card);
+		function move(names, target)
+		{
+			var moved = 0;
+			(names || []).forEach(function(name)
+			{
+				var found = layoutRow(name);
+				if (!found)
+				{
+					return;
+				}
+				if (sectionId !== found.option.sectionId)
+				{
+					found.row.removeClass(found.option.sectionId).addClass(sectionId);
+					found.option.pageId = sectionId;
+					DUPE_SECTION.options.push(found.option);
+				}
+				if (sectionId === DUPE_SECTION.id)
+				{
+					// every label here would start with "Duplicate": the page title says it once
+					found.row.find('.config-label').first().text(function(i, text) { return text.replace(/^Duplicate\s+(\S)/, function(m, c) { return c.toUpperCase(); }); });
+				}
+				found.row.addClass('in-card').appendTo(target);
+				moved++;
+			});
+			return moved;
+		}
+		move(card.options, rows);
+		if (card.advanced && card.advanced.length)
+		{
+			var more = $('<details class="config-card__more"></details>');
+			var summary = $('<summary class="config-card__more-toggle"></summary>').appendTo(more);
+			var body = $('<div class="config-card__rows"></div>').appendTo(more);
+			var count = move(card.advanced, body);
+			if (count)
+			{
+				summary.text((card.moreLabel ? I18n.defaultValue('config_card_' + sectionId.toLowerCase() + '_' + card.key + '_more', card.moreLabel) :
+					I18n.defaultValue('config_card_more', 'Advanced')) + ' (' + count + ')');
+				$card.append(more);
+			}
+		}
+		return $card;
+	}
+
+	function applyLayout()
+	{
+		DUPE_SECTION.options = [];
+		$('.config-card', $ConfigData).remove();
+		Object.keys(LAYOUT).forEach(function(sectionId)
+		{
+			var section = sectionId === DUPE_SECTION.id ? DUPE_SECTION : findSectionById(sectionId);
+			if (!section || section.hidden)
+			{
+				return;
+			}
+			// the cards take the place of the section's first row, which may itself move into one
+			var marker = $('<span class="config-layout-marker" hidden></span>');
+			var first = $ConfigData.children('.control-group.' + sectionId).not('.config-static').first();
+			if (first.length)
+			{
+				first.before(marker);
+			}
+			else
+			{
+				$ConfigData.append(marker);
+			}
+			var cards = LAYOUT[sectionId].map(function(card) { return buildCard(sectionId, card); })
+				.filter(function($card) { return $card.find('.control-group').length > 0; });
+			if (cards.length === 0)
+			{
+				marker.remove();
+				return;
+			}
+			// rows nobody listed: an untitled card first, in file order
+			var leftover = $ConfigData.children('.control-group.' + sectionId).not('.config-static');
+			var $cards = $();
+			if (leftover.length)
+			{
+				var rest = $('<section class="config-card"></section>').addClass(sectionId).attr('data-card', 'other');
+				$('<div class="config-card__rows"></div>').append(leftover.addClass('in-card')).appendTo(rest);
+				$cards = $cards.add(rest);
+			}
+			cards.forEach(function($card) { $cards = $cards.add($card); });
+			marker.replaceWith($cards);
+			if (sectionId === DUPE_SECTION.id)
+			{
+				var link = $('<a></a>').attr('href', '#' + DUPE_SECTION.id).text(I18n.defaultValue('config_section_dupe_fleets', 'Dupe fleets'));
+				$ConfigNav.append($('<li></li>').append(link));
+			}
+		});
+		refreshLayoutHealth();
+	}
+
+	// The Dupe fleets page gets the same error badge as other sections, counted
+	// from the rows it shows; folds open on anything that needs a look.
+	function refreshLayoutHealth()
+	{
+		function setBadge(sectionId, errors)
+		{
+			var link = $ConfigNav.find('a').filter(function() { return $(this).attr('href') === '#' + sectionId; });
+			link.children('.config-health-badges').remove();
+			if (errors > 0)
+			{
+				link.append($('<span class="config-health-badges" style="margin-left: 5px;"></span>')
+					.append($('<span class="badge badge-important" style="margin-left: 3px;"></span>').text(errors)));
+			}
+		}
+		var moved = 0;
+		var bySource = {};
+		DUPE_SECTION.options.forEach(function(option)
+		{
+			if (option.check && option.check.Severity === 'Error')
+			{
+				moved++;
+				bySource[option.sectionId] = (bySource[option.sectionId] || 0) + 1;
+			}
+		});
+		if (SystemHealth.isHealthCheckEnabled())
+		{
+			// an error on a moved option counts where the option is shown, not where it is stored
+			Object.keys(bySource).forEach(function(sectionId)
+			{
+				var health = SystemHealth.getSection(sectionId);
+				setBadge(sectionId, health ? health.getErrorsCount() - bySource[sectionId] : 0);
+			});
+		}
+		setBadge(DUPE_SECTION.id, moved);
+		openFoldsThatMatter();
+	}
+
+	// a fold opens when something inside it is changed, invalid or has a health notice
+	function openFoldsThatMatter()
+	{
+		$('details.config-card__more', $ConfigData).each(function()
+		{
+			if ($(this).find('.is-changed, .option-alert, .control-group.error').length)
+			{
+				this.open = true;
+			}
+		});
+	}
+
+	function pageIdOf(option)
+	{
+		return option.pageId || option.sectionId;
+	}
+
+	/*** SETTINGS OVERVIEW ******************************************************/
+
+	function optionValueByName(name)
+	{
+		var option = findOptionByName(name);
+		if (!option)
+		{
+			return '';
+		}
+		var control = $('#' + option.formId, $ConfigData);
+		if (control.length)
+		{
+			return String(getOptionValue(option) || '');
+		}
+		return String(option.value === null ? option.defvalue : option.value);
+	}
+
+	function overviewTile(target, label, icon, value, sub, tone)
+	{
+		var tile = $('<a class="details-tile details-tile-link config-overview-tile" href="#"></a>').attr('data-target', target);
+		tile.append($('<span class="details-tile-label"></span>').text(label)
+			.append(icon ? $('<i class="material-icon" aria-hidden="true"></i>').text(icon) : null));
+		tile.append($('<span class="details-tile-value"></span>').text(value).addClass(tone ? 'is-' + tone : ''));
+		if (sub)
+		{
+			tile.append($('<span class="details-tile-sub"></span>').text(sub));
+		}
+		return tile;
+	}
+
+	function renderOverview()
+	{
+		var box = $('#ConfigOverview');
+		if (!box.length || !config)
+		{
+			return;
+		}
+		var t = function(key, text) { return I18n.defaultValue(key, text); };
+		var yes = function(name) { return optionValueByName(name).toLowerCase() === 'yes'; };
+		var tiles = $('<div class="details-tiles config-overview-tiles"></div>');
+
+		// news servers
+		var total = 0, active = 0, connections = 0;
+		for (var id = 1; id < 100; id++)
+		{
+			if (!findOptionByName('Server' + id + '.Host'))
+			{
+				continue;
+			}
+			total++;
+			if (optionValueByName('Server' + id + '.Active').toLowerCase() !== 'no')
+			{
+				active++;
+				connections += parseInt(optionValueByName('Server' + id + '.Connections'), 10) || 0;
+			}
+		}
+		tiles.append(overviewTile('NEWS-SERVERS', t('config_overview_servers', 'News servers'), 'arrow_right_alt',
+			total ? active + ' / ' + total + ' ' + t('config_overview_active', 'active') : t('config_overview_none', 'None yet'),
+			connections + ' ' + t('config_overview_connections', 'connections'), total && active ? 'good' : 'bad'));
+
+		// where finished downloads go
+		var dest = optionValueByName('DestDir');
+		var inter = optionValueByName('InterDir');
+		tiles.append(overviewTile('PATHS', t('config_overview_dest', 'Downloads go to'), 'arrow_right_alt',
+			dest || '-', inter ? t('config_overview_inter', 'working in') + ' ' + inter : ''));
+
+		// dupe fleets
+		var fallback = optionValueByName('DupeArticleFallback').toLowerCase();
+		if (fallback === 'yes')
+		{
+			fallback = 'article'; // older configurations: the daemon reads "yes" as article
+		}
+		var fleetValue = !yes('DupeCheck') ? t('config_overview_off', 'Off') :
+			{ live: t('config_overview_live', 'Live repair'), stream: t('config_overview_stream', 'Stream repair'),
+				article: t('config_overview_article', 'Article swap') }[fallback] || t('config_overview_dupe_only', 'Dupe check only');
+		var fleetSub = [];
+		if (yes('DupeBorrowFirst')) fleetSub.push(t('config_overview_borrow_first', 'borrow before par2'));
+		fleetSub.push(yes('DupeSearch') ? t('config_overview_search_on', 'indexer search on') : t('config_overview_search_off', 'indexer search off'));
+		tiles.append(overviewTile(DUPE_SECTION.id, t('config_section_dupe_fleets', 'Dupe fleets'), 'arrow_right_alt',
+			fleetValue, fleetSub.join(' · '), yes('DupeCheck') ? 'good' : 'warn'));
+
+		// repair and unpack
+		var parCheck = optionValueByName('ParCheck');
+		tiles.append(overviewTile('CHECK_AND_REPAIR', t('config_overview_par', 'Par check'), 'arrow_right_alt',
+			parCheck ? parCheck.charAt(0).toUpperCase() + parCheck.slice(1) : '-',
+			yes('ParRepair') ? t('config_overview_repair_on', 'repair on') : t('config_overview_repair_off', 'repair off')));
+		tiles.append(overviewTile('UNPACK', t('config_overview_unpack', 'Unpack'), 'arrow_right_alt',
+			!yes('Unpack') ? t('config_overview_off', 'Off') : yes('DirectUnpack') ? t('config_overview_direct', 'While downloading') : t('config_overview_after', 'After download'),
+			yes('UnpackCleanupDisk') ? t('config_overview_cleanup', 'archives deleted after') : t('config_overview_keep', 'archives kept')));
+
+		// speed
+		var rate = parseInt(optionValueByName('DownloadRate'), 10) || 0;
+		var quota = parseInt(optionValueByName('DailyQuota'), 10) || parseInt(optionValueByName('MonthlyQuota'), 10) || 0;
+		tiles.append(overviewTile('CONNECTION', t('config_overview_speed', 'Speed limit'), 'arrow_right_alt',
+			rate ? Util.formatSpeed(rate * 1024) : t('config_overview_unlimited', 'Unlimited'),
+			quota ? t('config_overview_quota', 'quota set') : t('config_overview_no_quota', 'no quota')));
+
+		box.empty().append(tiles);
+	}
+	this.renderOverview = renderOverview;
+
 	// Settings sections in task order, under group labels.
 	var NAV_GROUPS = [
-		{ key: 'config_group_start', label: 'Start here', ids: ['NEWS-SERVERS', 'PATHS', 'CATEGORIES'] },
-		{ key: 'config_group_downloading', label: 'Downloading', ids: ['DOWNLOAD_QUEUE', 'CONNECTION', 'CHECK_AND_REPAIR', 'UNPACK'] },
+		{ key: 'config_group_start', label: 'Start here', ids: ['Config-Info', 'NEWS-SERVERS', 'PATHS', 'CATEGORIES'] },
+		{ key: 'config_group_downloading', label: 'Downloading', ids: ['DOWNLOAD_QUEUE', 'DUPE_FLEETS', 'CONNECTION', 'CHECK_AND_REPAIR', 'UNPACK'] },
 		{ key: 'config_group_automation', label: 'Automation', ids: ['RSS_FEEDS', 'INCOMING_NZBS', 'SCHEDULER'] },
-		{ key: 'config_group_system', label: 'System', ids: ['SECURITY', 'WEB-INTERFACE', 'LOGGING', 'Config-System', 'Config-SystemInfo', 'Config-Info', 'Config-Licenses'] }
+		{ key: 'config_group_system', label: 'System', ids: ['SECURITY', 'WEB-INTERFACE', 'LOGGING', 'Config-System', 'Config-SystemInfo', 'Config-Licenses'] }
 	];
 
 	function groupNav()
@@ -1848,9 +2197,10 @@ var Config = (new function($)
 
 		if (sectionId === 'Config-Info')
 		{
+			renderOverview();
 			$ConfigInfo.show();
 			$ConfigData.children().hide();
-			$ConfigTitle.attr('data-i18n', 'nav_info');
+			$ConfigTitle.attr('data-i18n', 'nav_overview');
 			I18n.translatePage($ConfigTitle.parent());
 			$ConfigTitleStatus.hide();
 			return;
@@ -2239,6 +2589,7 @@ var Config = (new function($)
 			}
 		}
 		refreshListRows();
+		refreshLayoutHealth();
 	}
 
 	function listSectionPrefix(sectionId)
@@ -2774,6 +3125,7 @@ var Config = (new function($)
 		$ConfigContent.addClass('search');
 
 		$ConfigData.children().hide();
+		$('.config-card .control-group', $ConfigData).hide();
 
 		searcher.compile(filterText);
 
@@ -2799,6 +3151,8 @@ var Config = (new function($)
 								available++;
 								var opt = $('#' + option.formId).closest('.control-group');
 								showOptionRows(opt);
+								opt.closest('.config-card').show();
+								opt.closest('details.config-card__more').prop('open', true);
 							}
 						}
 					}

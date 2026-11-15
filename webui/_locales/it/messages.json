@@ -747,6 +747,8 @@
   "msg_stopping_reloading": "Interruzione di tutte le attività e ricaricamento in corso...",
   "msg_terminated_waiting": "RustyGet è stato terminato. In attesa del riavvio...",
   "nav_info": "Info",
+  "nav_overview": "Panoramica",
+  "config_overview_about": "Informazioni su RustyGet",
   "nav_status": "Stato",
   "nav_system": "Sistema",
   "not_implemented": "Non implementato",

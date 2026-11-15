@@ -861,7 +861,16 @@ var DownloadsEditDialog = (new function($)
 	function fillFiles()
 	{
 		$('.loading-block', $DownloadsEditDialog).show();
-		RPC.call('listfiles', [0, 0, curGroup.NZBID], filesLoaded);
+		var requested = curGroup;
+		RPC.call('listfiles', [0, 0, curGroup.NZBID], function(fileArr)
+			{
+				// a reply for a copy the panel has since moved off or closed:
+				// its file ids must never reach this copy's file actions
+				if (curGroup === requested && $DownloadsEditDialog.hasClass('in'))
+				{
+					filesLoaded(fileArr);
+				}
+			});
 	}
 
 	function filesLoaded(fileArr)
@@ -1419,6 +1428,7 @@ var LogTab = (new function($)
 
 	var curLog;
 	var curItem;
+	var curName;
 
 	this.init = function(name)
 	{
@@ -1438,7 +1448,12 @@ var LogTab = (new function($)
 
 	this.reset = function(name)
 	{
-		curItem = null;
+		// both panels share this tab: closing one must not drop the other's log
+		if (name === curName)
+		{
+			curItem = null;
+			curLog = null;
+		}
 		$('#' + name + 'EditDialog .loading-block').hide();
 		$('#' + name + 'Edit_LogEmpty').hide();
 		var $LogTable = $('#' + name + 'Edit_LogTable');
@@ -1452,6 +1467,8 @@ var LogTab = (new function($)
 	this.fill = function(name, item)
 	{
 		curItem = item;
+		curName = name;
+		curLog = null;
 		var requested = item;
 
 		function logLoaded(log)
@@ -1530,6 +1547,10 @@ var LogTab = (new function($)
 
 	this.export = function()
 	{
+		if (!curItem || !curLog)
+		{
+			return;
+		}
 		var filename = curItem.NZBName + '.log';
 		var logstr = '';
 

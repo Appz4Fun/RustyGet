@@ -162,6 +162,9 @@ const NZB_LOGS = {
     ['INFO', 'Moved Example.Completed.Release to /mnt/20tb/rustyget/dst/Movies']]
 };
 
+// Files that `listfiles` answers with, by NZBID.
+const NZB_FILES = { 41: ['copy01.part01.rar', 'copy01.part02.rar'], 42: ['copy02.7z.001'] };
+
 // Route every request of `page` to committed files and synthetic RPC replies.
 async function installDetailsFixture(page, base, writes = [], hooks = {}) {
   const { template, options } = configOptions();
@@ -191,6 +194,17 @@ async function installDetailsFixture(page, base, writes = [], hooks = {}) {
       if (rpc.method === 'loadlog') {
         const id = +(rpc.params ? rpc.params[0] : url.searchParams.get(''));
         replies.loadlog = (NZB_LOGS[id] || []).map((m, i) => ({ ID: i + 1, Kind: m[0], Time: Math.floor(Date.now() / 1000) - 600 + i, Text: m[1] }));
+      }
+      if (rpc.method === 'listfiles') {
+        const id = +(rpc.params ? rpc.params[2] : url.searchParams.getAll('')[2]);
+        replies.listfiles = (NZB_FILES[id] || []).map((name, i) => ({ ID: id * 100 + i, NZBID: id, Filename: name, Subject: name,
+          FileSizeLo: 52428800, FileSizeHi: 0, RemainingSizeLo: 52428800, RemainingSizeHi: 0, PostTime: Math.floor(Date.now() / 1000) - 86400,
+          Paused: false, ActiveDownloads: 0, Progress: 0 }));
+      }
+      if (rpc.method === 'listfiles' && hooks.holdListfiles) {
+        const held = replies.listfiles;
+        await hooks.holdListfiles(rpc);
+        return route.fulfill({ contentType: 'application/json', json: { id: rpc.id, result: held } });
       }
       if (rpc.method === 'loadlog' && hooks.holdLoadlog) {
         const held = replies.loadlog;

@@ -173,9 +173,10 @@ const { installDetailsFixture } = require('./details-fixture');
           await page.locator('#DownloadsEdit_Log').click();
           await asked;
           fixture.holdLoadlog = undefined;
-          await page.locator('#DownloadsEdit_Back').click();
-          await page.locator('#DownloadsEdit_Fleet a.fleet-member[data-fleet-id="42"]').click();
-          await page.waitForFunction(() => /copy 02/.test(document.getElementById('DownloadsEdit_Title').textContent));
+          await page.keyboard.press('Escape');
+          await panel.waitFor({ state: 'hidden' });
+          await page.locator('#DownloadsTable tbody a[data-nzbid="42"]').first().click();
+          await panel.waitFor({ state: 'visible' });
           await page.locator('#DownloadsEdit_Log').click();
           await page.locator('#DownloadsEdit_LogEmpty').waitFor({ state: 'visible' });
         } finally {
@@ -186,6 +187,33 @@ const { installDetailsFixture } = require('./details-fixture');
         assert.doesNotMatch(await page.locator('#DownloadsEdit_LogTable').innerText(), /copy 01/, "Copy 01's late log stays out of copy 02");
         assert(await page.locator('#DownloadsEdit_LogEmpty').isVisible());
         assert.equal(await page.locator('#DownloadsEditDialog .loading-block:visible').count(), 0, 'No stuck spinner');
+        await page.keyboard.press('Escape');
+        await panel.waitFor({ state: 'hidden' });
+      });
+
+      await check('late files reply for a copy the panel left is dropped', async () => {
+        let release;
+        const asked = new Promise(resolve => {
+          fixture.holdListfiles = () => { resolve(); return new Promise(r => { release = r; }); };
+        });
+        try {
+          await page.locator('#DownloadsTable tbody a[data-nzbid="41"]').first().click();
+          await panel.waitFor({ state: 'visible' });
+          await page.locator('#DownloadsEdit_File').click();
+          await asked;
+          fixture.holdListfiles = undefined;
+          await page.keyboard.press('Escape');
+          await panel.waitFor({ state: 'hidden' });
+          await page.locator('#DownloadsTable tbody a[data-nzbid="42"]').first().click();
+          await panel.waitFor({ state: 'visible' });
+        } finally {
+          fixture.holdListfiles = undefined;
+          if (release) release();
+        }
+        await page.waitForTimeout(300);
+        await page.locator('#DownloadsEdit_File').click();
+        await page.waitForFunction(() => /copy02\.7z\.001/.test(document.getElementById('DownloadsEdit_FileTable').textContent));
+        assert.doesNotMatch(await page.locator('#DownloadsEdit_FileTable').innerText(), /copy01/, "Copy 01's late files stay out of copy 02");
         await page.keyboard.press('Escape');
         await panel.waitFor({ state: 'hidden' });
       });

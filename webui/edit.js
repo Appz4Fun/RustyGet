@@ -333,8 +333,11 @@ var DetailsPanel = (new function($)
 	{
 		var articles = item.DupeRecoveredArticles || 0;
 		var parArticles = countParam(item, 'DupeParArticles');
-		// DupeParFiles lists the ids of the par2 files the articles came from
-		var parFiles = (param(item, 'DupeParFiles') || '').split(',').filter(function(id) { return /^\s*\d+\s*$/.test(id); }).length;
+		// DupeParFiles lists the par2 files still holding borrowed articles, as id:count
+		var parFiles = (param(item, 'DupeParFiles') || '').split(',').filter(function(f) {
+			var m = /^\s*\d+\s*(?::\s*(\d+)\s*)?$/.exec(f);
+			return m && (m[1] === undefined || parseInt(m[1], 10) > 0);
+		}).length;
 		var hi = item.DupeRecoveredBytesHi || 0, lo = item.DupeRecoveredBytesLo || 0;
 		var holes = item.DupeRecoveredHoles || 0;
 		var donors = DetailsPanel.donors(item, members, source);

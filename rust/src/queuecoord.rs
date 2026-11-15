@@ -5847,10 +5847,10 @@ fn save_partial_state_host(host: &crate::queuesubsys_host::QueueSubsysHost, file
 }
 
 /// NZB parameters for par2 data borrowed from duplicates: `DupeParArticles` counts
-/// the articles, `DupeParFiles` lists the ids of the par2 files they belong to.
-/// They are saved with the item and stay with it in history. A file id
-/// list, not a count, so a restart (which forgets the per-file recovered count)
-/// never counts a file twice.
+/// the articles, `DupeParFiles` lists each par2 file still holding some as
+/// `id:count`. They are saved with the item and stay with it in history, so a
+/// restart (which forgets the per-file recovered count) never counts a file
+/// twice, and a demotion that empties a file drops it from the list.
 pub(crate) const PAR_ARTICLES_PARAM: &[u8] = b"DupeParArticles";
 pub(crate) const PAR_FILES_PARAM: &[u8] = b"DupeParFiles";
 
@@ -5862,15 +5862,13 @@ pub(crate) fn note_dupe_par_article(
     file_id: i32,
     borrowed: bool,
 ) {
+    let delta = if borrowed { 1 } else { -1 };
     let cur = host.nzb_get_param(nzb_ptr, PAR_ARTICLES_PARAM);
-    let next = bumped_count(cur.as_deref(), if borrowed { 1 } else { -1 });
+    let next = bumped_count(cur.as_deref(), delta);
     host.nzb_set_param(nzb_ptr, PAR_ARTICLES_PARAM, Some(next.to_string().as_bytes()));
-    if borrowed {
-        let files = host.nzb_get_param(nzb_ptr, PAR_FILES_PARAM);
-        if let Some(list) = with_file_id(files.as_deref(), file_id) {
-            host.nzb_set_param(nzb_ptr, PAR_FILES_PARAM, Some(&list));
-        }
-    }
+    let mut files = par_files(host.nzb_get_param(nzb_ptr, PAR_FILES_PARAM).as_deref().unwrap_or(b""));
+    bump_par_file(&mut files, file_id, i64::from(delta));
+    host.nzb_set_param(nzb_ptr, PAR_FILES_PARAM, format_par_files(&files).as_deref());
 }
 
 /// Merge: the source's borrowed par2 articles and files move to the destination
@@ -5887,25 +5885,58 @@ fn merge_dupe_par_params(
         host.nzb_set_param(dest_ptr, PAR_ARTICLES_PARAM, Some(total.to_string().as_bytes()));
     }
     if let Some(src_files) = host.nzb_get_param(src_ptr, PAR_FILES_PARAM) {
-        let mut list = host.nzb_get_param(dest_ptr, PAR_FILES_PARAM);
-        for id in file_ids(&src_files) {
-            if let Some(next) = with_file_id(list.as_deref(), id) {
-                list = Some(next);
-            }
+        let mut files = par_files(host.nzb_get_param(dest_ptr, PAR_FILES_PARAM).as_deref().unwrap_or(b""));
+        for (id, n) in par_files(&src_files) {
+            bump_par_file(&mut files, id, n);
         }
-        if let Some(list) = list {
-            host.nzb_set_param(dest_ptr, PAR_FILES_PARAM, Some(&list));
-        }
+        host.nzb_set_param(dest_ptr, PAR_FILES_PARAM, format_par_files(&files).as_deref());
     }
 }
 
-/// The file ids in a comma-separated id list; anything unreadable is skipped.
-fn file_ids(list: &[u8]) -> Vec<i32> {
-    std::str::from_utf8(list)
-        .unwrap_or("")
-        .split(',')
-        .filter_map(|t| t.trim().parse::<i32>().ok())
-        .collect()
+/// The par2 files borrowed from, as `id:count` pairs joined by commas (a bare
+/// `id` counts 1). Unreadable entries are skipped and repeated ids add up.
+fn par_files(list: &[u8]) -> Vec<(i32, i64)> {
+    let mut out: Vec<(i32, i64)> = Vec::new();
+    for entry in std::str::from_utf8(list).unwrap_or("").split(',') {
+        let mut parts = entry.trim().splitn(2, ':');
+        let Some(Ok(id)) = parts.next().map(|t| t.trim().parse::<i32>()) else {
+            continue;
+        };
+        let n = match parts.next() {
+            None => 1,
+            Some(t) => match t.trim().parse::<i64>() {
+                Ok(n) => n,
+                Err(_) => continue,
+            },
+        };
+        if n > 0 {
+            bump_par_file(&mut out, id, n);
+        }
+    }
+    out
+}
+
+/// Adds `delta` articles to file `id`; a file left with none is dropped.
+fn bump_par_file(files: &mut Vec<(i32, i64)>, id: i32, delta: i64) {
+    match files.iter().position(|(f, _)| *f == id) {
+        Some(i) => {
+            files[i].1 = files[i].1.saturating_add(delta);
+            if files[i].1 <= 0 {
+                files.remove(i);
+            }
+        }
+        None if delta > 0 => files.push((id, delta)),
+        None => {}
+    }
+}
+
+/// The param value for `files`, or None (param removed) when there are none.
+fn format_par_files(files: &[(i32, i64)]) -> Option<Vec<u8>> {
+    if files.is_empty() {
+        return None;
+    }
+    let parts: Vec<String> = files.iter().map(|(id, n)| format!("{id}:{n}")).collect();
+    Some(parts.join(",").into_bytes())
 }
 
 /// A count parameter's value after adding `delta`, never below 0; a missing or
@@ -5917,18 +5948,6 @@ fn bumped_count(cur: Option<&[u8]>, delta: i32) -> i64 {
         .max(0)
         .saturating_add(i64::from(delta))
         .max(0)
-}
-
-/// The comma-separated id list `cur` with `id` added, or None when it is there already.
-fn with_file_id(cur: Option<&[u8]>, id: i32) -> Option<Vec<u8>> {
-    let text = cur.and_then(|v| std::str::from_utf8(v).ok()).unwrap_or("");
-    let mut ids: Vec<&str> = text.split(',').map(str::trim).filter(|t| !t.is_empty()).collect();
-    let id_str = id.to_string();
-    if ids.contains(&id_str.as_str()) {
-        return None;
-    }
-    ids.push(&id_str);
-    Some(ids.join(",").into_bytes())
 }
 
 #[cfg(test)]
@@ -5947,18 +5966,23 @@ mod tests {
     }
 
     #[test]
-    fn file_ids_skip_junk() {
-        assert_eq!(file_ids(b"12, 15,x,,7"), vec![12, 15, 7]);
-        assert_eq!(file_ids(b""), Vec::<i32>::new());
+    fn par_files_parse_counts_and_skip_junk() {
+        assert_eq!(par_files(b"12:3, 15,x,,7:0,9:y,12:1"), vec![(12, 4), (15, 1)]);
+        assert_eq!(par_files(b""), Vec::<(i32, i64)>::new());
     }
 
     #[test]
-    fn par_file_ids_are_listed_once() {
-        assert_eq!(with_file_id(None, 12), Some(b"12".to_vec()));
-        assert_eq!(with_file_id(Some(b""), 12), Some(b"12".to_vec()));
-        assert_eq!(with_file_id(Some(b"12"), 15), Some(b"12,15".to_vec()));
-        assert_eq!(with_file_id(Some(b"12,15"), 12), None);
-        assert_eq!(with_file_id(Some(b" 12 , 15 "), 15), None);
+    fn par_files_count_per_file_and_drop_emptied_ones() {
+        let mut f = par_files(b"");
+        bump_par_file(&mut f, 12, 1);
+        bump_par_file(&mut f, 12, 1);
+        bump_par_file(&mut f, 15, 1);
+        assert_eq!(format_par_files(&f), Some(b"12:2,15:1".to_vec()));
+        bump_par_file(&mut f, 15, -1);
+        bump_par_file(&mut f, 99, -1);
+        assert_eq!(format_par_files(&f), Some(b"12:2".to_vec()));
+        bump_par_file(&mut f, 12, -2);
+        assert_eq!(format_par_files(&f), None);
     }
 
     #[test]

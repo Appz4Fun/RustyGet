@@ -310,6 +310,51 @@ pub fn first_report(nzb_id: i32) -> bool {
     first
 }
 
+/// Bounded accepted ranges for a completed partial file. Unknown geometry or
+/// malformed damage history must not authorize sparse bytes as arrived data.
+pub(crate) fn completed_accepted_ranges(
+    nzb_id: i32,
+    name: &[u8],
+    length: u64,
+) -> Option<Vec<par_rs::damage::ByteRange>> {
+    use par_rs::damage::{normalize_ranges, ByteRange};
+    if length > i64::MAX as u64 {
+        return None;
+    }
+    let states = STATES.lock().unwrap_or_else(|e| e.into_inner());
+    let damage = states.get(&nzb_id)?.files.iter().rev().find(|file| {
+        file.name == base_file_name(name) && file.size > 0 && file.size as u64 == length
+    })?;
+    if damage.holes.len() > 4095 {
+        return None;
+    }
+    let mut holes = Vec::with_capacity(damage.holes.len());
+    for hole in &damage.holes {
+        if hole.offset < 0
+            || hole.size <= 0
+            || hole
+                .offset
+                .checked_add(hole.size)
+                .is_none_or(|end| end as u64 > length)
+        {
+            return None;
+        }
+        holes.push(ByteRange::new(hole.offset, hole.size));
+    }
+    let mut accepted = Vec::with_capacity(holes.len() + 1);
+    let mut end = 0;
+    for hole in normalize_ranges(&holes) {
+        if hole.offset > end {
+            accepted.push(ByteRange::new(end, hole.offset - end));
+        }
+        end = hole.end();
+    }
+    if end < length as i64 {
+        accepted.push(ByteRange::new(end, length as i64 - end));
+    }
+    Some(accepted)
+}
+
 /// `ParDamage::Forget`: removes any stored state for `nzb_id`.
 pub fn forget(nzb_id: i32) {
     let mut guard = STATES.lock().unwrap_or_else(|e| e.into_inner());

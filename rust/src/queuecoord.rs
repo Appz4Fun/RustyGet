@@ -1161,6 +1161,8 @@ const DUPE_PROBE_MIN_ALIVE_SAMPLES: i32 = 2;
 
 #[cfg(unix)]
 pub struct NzbgetRsQueueCoordinator {
+    live_startups: crate::parchecker::LiveStartupFence,
+    callback_metrics: Option<Box<crate::callback_metrics::Histogram>>,
     downloads_limit: std::sync::atomic::AtomicI32,
     server_config_generation: std::sync::atomic::AtomicI32,
     propagation_wait_logged_id: std::sync::atomic::AtomicI32,
@@ -1201,6 +1203,26 @@ impl Default for NzbgetRsQueueCoordinator {
     fn default() -> Self {
         Self::new()
     }
+}
+
+#[cfg(unix)]
+fn automatic_live_par_repair(opts: &crate::queuesubsys_host::GlobalOptsSnap) -> bool {
+    opts.par_check != crate::queuesubsys_host::PC_MANUAL
+        && crate::options::active_options().is_some_and(|o| o.scalars().par_repair != 0)
+}
+
+#[cfg(unix)]
+pub(crate) fn live_start_context_matches(
+    nzb: &crate::queuesubsys_host::NzbSnap,
+    root: &std::path::Path,
+    automatic: bool,
+) -> bool {
+    automatic
+        && !nzb.deleting
+        && !nzb.many_dupe_files
+        && crate::fsops::path(&nzb.dest_dir) == root
+        && (!nzb.has_post_info
+            || !nzb.post_working && nzb.post_stage == crate::queuesubsys_host::PT_QUEUED)
 }
 
 #[cfg(unix)]
@@ -1276,6 +1298,8 @@ fn backup_alive_permille(host: &crate::queuesubsys_host::QueueSubsysHost, nzb_pt
 impl NzbgetRsQueueCoordinator {
     pub fn new() -> Self {
         Self {
+            live_startups: crate::parchecker::LiveStartupFence::default(),
+            callback_metrics: crate::callback_metrics::Histogram::configured(),
             downloads_limit: std::sync::atomic::AtomicI32::new(0),
             server_config_generation: std::sync::atomic::AtomicI32::new(0),
             propagation_wait_logged_id: std::sync::atomic::AtomicI32::new(0),
@@ -1363,6 +1387,10 @@ impl NzbgetRsQueueCoordinator {
         crate::dupeprobe::probe_wait_all();
         crate::twin::wait_all();
         host.delete_all_active_downloads();
+        if let Some(metrics) = &self.callback_metrics {
+            metrics.emit_after_join();
+        }
+        crate::parchecker::streaming_sessions_forget_all();
         host.coord_dq_final();
         host.log(
             crate::queuesubsys_host::MK_DEBUG,
@@ -1370,7 +1398,16 @@ impl NzbgetRsQueueCoordinator {
         );
     }
 
+    fn stop_live_startups(&self) {
+        self.live_startups.stop(|| {
+            self.stopped
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            crate::parchecker::streaming_sessions_cancel_all()
+        });
+    }
+
     pub(crate) fn stop(&self, host: &crate::queuesubsys_host::QueueSubsysHost) {
+        self.stop_live_startups();
         self.par_loaders_stopped
             .store(true, std::sync::atomic::Ordering::Release);
         crate::dupeprobe::probe_stop_all();
@@ -1560,6 +1597,10 @@ impl NzbgetRsQueueCoordinator {
                     }
                 }
             });
+
+            crate::parchecker::streaming_session_retry_completion_tick();
+            self.drain_live_par_completed_files(host);
+            Self::drain_live_par_articles(host);
 
             if !downloads_checked {
                 host.with_locked_queue(|_| {
@@ -1941,6 +1982,8 @@ impl NzbgetRsQueueCoordinator {
             return false;
         }
 
+        crate::postproc::direct_unpack_join_live_par_repair(dest.id);
+        crate::postproc::direct_unpack_join_live_par_repair(src.id);
         let old_dest_dir = src.dest_dir.clone();
         host.nzb_set_str(
             src_ptr,
@@ -2030,6 +2073,7 @@ impl NzbgetRsQueueCoordinator {
         }
 
         let src_snap = host.nzb_snap(src_nzb_ptr, false);
+        crate::postproc::direct_unpack_join_live_par_repair(src_snap.id);
         let (uptr_addr, new_nzb_ptr) = host.alloc_new_nzb_uptr();
 
         host.nzb_set_str(
@@ -2433,11 +2477,499 @@ impl NzbgetRsQueueCoordinator {
         }
     }
 
+    fn capture_live_completed_file(
+        nzb: &crate::queuesubsys_host::NzbSnap,
+        file: &crate::queuesubsys_host::FileSnap,
+        articles: &[crate::queuesubsys_host::ArticleSnap],
+        filename: &[u8],
+        successful: bool,
+    ) -> Result<(), crate::parchecker::RepairError> {
+        let count = if successful { 0 } else { articles.len() };
+        if count > 4096 {
+            return Err(crate::parchecker::RepairError::Io {
+                context: "capturing live PAR completion".into(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "article range limit exceeded; ordinary repair required",
+                ),
+            });
+        }
+        let bytes = 1024
+            + 2 * (nzb.dest_dir.len() + filename.len() + file.hash16k.len())
+            + count * 6 * std::mem::size_of::<crate::parchecker::ByteRange>();
+        crate::parchecker::streaming_session_queue_completed_file(nzb.id, bytes as u64, || {
+            let accepted = if successful {
+                Vec::new()
+            } else {
+                articles
+                    .iter()
+                    .filter(|a| {
+                        a.status == crate::queuesubsys_host::AI_FINISHED
+                            && a.segment_offset >= 0
+                            && a.segment_size > 0
+                    })
+                    .map(|a| {
+                        crate::parchecker::ByteRange::new(a.segment_offset, a.segment_size as i64)
+                    })
+                    .collect()
+            };
+            let path = join_path(&nzb.dest_dir, filename);
+            Ok(crate::parchecker::LiveCompletedFile {
+                nzb_id: nzb.id,
+                base_dir: crate::fsops::path(&nzb.dest_dir).to_path_buf(),
+                path: crate::fsops::path(&path).to_path_buf(),
+                name: filename.to_vec(),
+                hash16k: file.hash16k.clone(),
+                par_file: file.par_file
+                    || crate::parparser::parse_par_filename(filename, true).is_some(),
+                successful,
+                accepted,
+                queued_id: Some(file.id as u64),
+            })
+        })
+    }
+
+    fn report_live_completion_error(
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        nzb_id: i32,
+        error: &crate::parchecker::RepairError,
+    ) {
+        if matches!(error, crate::parchecker::RepairError::Cancelled) {
+            return;
+        }
+        host.with_locked_queue(|dq| {
+            let nzb = host.queue_find_by_id(dq, nzb_id);
+            if nzb != 0 {
+                let message = format!(
+                    "Live PAR catch-up deferred: {error}. Ordinary repair remains available."
+                );
+                host.nzb_print_message(nzb, crate::queuesubsys_host::MK_DETAIL, message.as_bytes());
+            }
+        });
+    }
+
+    fn resolve_live_completed_file(
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        file: &mut crate::parchecker::LiveCompletedFile,
+    ) -> Result<(), crate::parchecker::RepairError> {
+        let mut result = Err(crate::parchecker::RepairError::Cancelled);
+        host.with_locked_queue(|dq| {
+            let ptr = host.queue_find_by_id(dq, file.nzb_id);
+            if ptr == 0 || !automatic_live_par_repair(&host.opts()) {
+                return;
+            }
+            let nzb = host.nzb_snap(ptr, false);
+            if !live_start_context_matches(&nzb, &file.base_dir, true) {
+                return;
+            }
+            let Some(id) = file.queued_id else {
+                return;
+            };
+            let completed = (0..host.nzb_completed_files_len(ptr))
+                .map(|i| host.nzb_completed_file_at(ptr, i))
+                .find(|cf| cf.id as u64 == id);
+            let Some(current) = completed else {
+                return;
+            };
+            if file.successful && current.status != crate::queuesubsys_host::CF_SUCCESS {
+                return;
+            }
+            file.name = current.filename;
+            file.hash16k = current.hash16k;
+            file.base_dir = crate::fsops::path(&nzb.dest_dir).to_path_buf();
+            let path = join_path(&nzb.dest_dir, &file.name);
+            file.path = crate::fsops::path(&path).to_path_buf();
+            result = Ok(());
+        });
+        result
+    }
+
+    fn start_checked_live_session(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        file: &crate::parchecker::LiveCompletedFile,
+        writers: std::sync::Arc<crate::parlive::WriteCoordinator>,
+    ) -> Result<(), crate::parchecker::RepairError> {
+        use crate::parchecker::{prepare_live_start, RepairError};
+        use std::os::unix::fs::MetadataExt;
+        let root_identity = || -> Result<(u64, u64), RepairError> {
+            let metadata =
+                std::fs::symlink_metadata(&file.base_dir).map_err(|source| RepairError::Io {
+                    context: "live source root identity".into(),
+                    source,
+                })?;
+            if !metadata.is_dir() {
+                return Err(RepairError::Cancelled);
+            }
+            Ok((metadata.dev(), metadata.ino()))
+        };
+        let root = root_identity()?;
+        let attempt = self.live_startups.begin()?;
+        let check_stamp = |dq| -> Result<usize, RepairError> {
+            attempt.ensure_current()?;
+            if self.stopped.load(std::sync::atomic::Ordering::Acquire) || host.self_is_stopped() {
+                return Err(RepairError::Cancelled);
+            }
+            let ptr = host.queue_find_by_id(dq, file.nzb_id);
+            if ptr == 0 || !automatic_live_par_repair(&host.opts()) {
+                return Err(RepairError::Cancelled);
+            }
+            let nzb = host.nzb_snap(ptr, false);
+            if !live_start_context_matches(&nzb, &file.base_dir, true)
+                || file.queued_id.is_none_or(|id| {
+                    !host.live_completed_matches(ptr, id, &file.name, file.successful)
+                })
+            {
+                return Err(RepairError::Cancelled);
+            }
+            Ok(ptr)
+        };
+        let pool = crate::parchecker::effective_live_pool_bytes();
+        let metadata = prepare_live_start(&file.path, &file.base_dir, pool, writers)?;
+        let catalog = metadata.catalog_required_bytes()?;
+        let facts = host.with_locked_queue(|dq| {
+            let ptr = check_stamp(dq)?;
+            host.live_namespace_capture(ptr, file.nzb_id, &file.base_dir, catalog, pool)
+        })?;
+        let mut prepared = metadata.finish_tracked(&file.path, facts, &attempt)?;
+        if root_identity()? != root {
+            return Err(RepairError::Cancelled);
+        }
+        let installed = host.with_locked_queue(|dq| {
+            let ptr = check_stamp(dq)?;
+            prepared.check_and_install(file.nzb_id, |proof| {
+                host.live_namespace_visit(ptr, |row| {
+                    proof.recheck_row(row.queue_id, row.flags, row.fields)
+                })
+            })
+        })?;
+        installed.finish(file.nzb_id);
+        Ok(())
+    }
+
+    fn drain_live_par_completed_files(&self, host: &crate::queuesubsys_host::QueueSubsysHost) {
+        for id in crate::parchecker::streaming_session_pending_completed_jobs() {
+            let Some(_owner) = crate::parchecker::streaming_session_claim_completion_drain(id)
+            else {
+                continue;
+            };
+            while !self.stopped.load(std::sync::atomic::Ordering::Acquire) {
+                let Some(result) =
+                    crate::parchecker::streaming_session_process_completed_file_with_start(
+                        id,
+                        |file| Self::resolve_live_completed_file(host, file),
+                        |file, writers| self.start_checked_live_session(host, file, writers),
+                    )
+                else {
+                    break;
+                };
+                match result {
+                    Ok(true) => self.reconcile_live_par_startup(host, id),
+                    Ok(false) => {}
+                    Err(error) if crate::parchecker::streaming_session_capture_busy(&error) => {
+                        break
+                    }
+                    Err(error) => Self::report_live_completion_error(host, id, &error),
+                }
+            }
+            if !self.stopped.load(std::sync::atomic::Ordering::Acquire) {
+                host.with_locked_queue(|dq| {
+                    let ptr = host.queue_find_by_id(dq, id);
+                    if ptr != 0 {
+                        crate::postproc::direct_unpack_try_live_par_repair(
+                            host,
+                            &host.nzb_snap(ptr, false),
+                        );
+                    }
+                });
+            }
+        }
+    }
+
+    fn reconcile_live_par_startup(&self, host: &crate::queuesubsys_host::QueueSubsysHost, id: i32) {
+        let Some(par_name) = crate::parchecker::streaming_session_par_filename(id) else {
+            return;
+        };
+        let mut live = false;
+        host.with_locked_queue(|dq| {
+            let ptr = host.queue_find_by_id(dq, id);
+            if ptr == 0 || !automatic_live_par_repair(&host.opts()) {
+                return;
+            }
+            let nzb = host.nzb_snap(ptr, false);
+            if nzb.deleting {
+                return;
+            }
+            live = true;
+            let count = host.nzb_file_len(ptr).min(4096);
+            for i in 0..count {
+                let file = host.file_snap(host.nzb_file_at(ptr, i));
+                if file.deleted
+                    || !crate::parparser::same_par_collection(
+                        &par_name,
+                        &file.filename,
+                        file.filename_confirmed,
+                    )
+                {
+                    continue;
+                }
+                if let Some((_, blocks)) =
+                    crate::parparser::parse_par_filename(&file.filename, file.filename_confirmed)
+                {
+                    if blocks != 0
+                        && !crate::parchecker::streaming_session_register_queued_volume(
+                            id,
+                            file.id as u64,
+                            blocks.max(1),
+                            file.paused,
+                        )
+                    {
+                        break;
+                    }
+                }
+            }
+        });
+        if !live {
+            crate::parchecker::streaming_session_forget(id);
+            return;
+        }
+        // Walk completed history one owned item at a time. Large prefixes never
+        // require a second queue-sized snapshot or a long global queue lock.
+        let mut index = 0;
+        loop {
+            if self.stopped.load(std::sync::atomic::Ordering::Acquire) {
+                return;
+            }
+            let mut done = false;
+            let mut captured = Ok(false);
+            host.with_locked_queue(|dq| {
+                let ptr = host.queue_find_by_id(dq, id);
+                if ptr == 0 || !automatic_live_par_repair(&host.opts()) {
+                    done = true;
+                    return;
+                }
+                let nzb = host.nzb_snap(ptr, false);
+                if nzb.deleting || index >= host.nzb_completed_files_len(ptr) {
+                    done = true;
+                    return;
+                }
+                let file = host.nzb_completed_file_at(ptr, index);
+                index += 1;
+                if file.par_file
+                    && (file.filename == par_name
+                        || !crate::parparser::same_par_collection(&par_name, &file.filename, true))
+                {
+                    return;
+                }
+                let successful = file.status == crate::queuesubsys_host::CF_SUCCESS;
+                let partial = file.status == crate::queuesubsys_host::CF_PARTIAL;
+                let count = if partial { 4096 } else { 0 };
+                let bytes = 1024
+                    + 2 * (nzb.dest_dir.len() + file.filename.len() + file.hash16k.len())
+                    + count * 6 * std::mem::size_of::<crate::parchecker::ByteRange>();
+                captured = crate::parchecker::streaming_session_queue_completed_file(
+                    id,
+                    bytes as u64,
+                    || {
+                        let accepted = if partial {
+                            let length = crate::parchecker::streaming_session_source_length(
+                                id,
+                                &file.filename,
+                                &file.hash16k,
+                            )
+                            .ok_or(
+                                crate::parchecker::RepairError::UnknownFile(
+                                    crate::parchecker::FileId([0; 16]),
+                                ),
+                            )?;
+                            crate::pardamage::completed_accepted_ranges(id, &file.filename, length)
+                                .or_else(|| {
+                                    crate::pardamage::completed_accepted_ranges(
+                                        id,
+                                        &file.origname,
+                                        length,
+                                    )
+                                })
+                                .ok_or_else(|| crate::parchecker::RepairError::Io {
+                                    context: "live partial-file history".into(),
+                                    source: std::io::Error::new(
+                                        std::io::ErrorKind::InvalidData,
+                                        "accepted range history unavailable",
+                                    ),
+                                })?
+                        } else {
+                            Vec::new()
+                        };
+                        let path = join_path(&nzb.dest_dir, &file.filename);
+                        Ok(crate::parchecker::LiveCompletedFile {
+                            nzb_id: id,
+                            base_dir: crate::fsops::path(&nzb.dest_dir).to_path_buf(),
+                            path: crate::fsops::path(&path).to_path_buf(),
+                            name: file.filename.clone(),
+                            hash16k: file.hash16k.clone(),
+                            par_file: file.par_file,
+                            successful,
+                            accepted,
+                            queued_id: Some(file.id as u64),
+                        })
+                    },
+                )
+                .map(|()| true);
+            });
+            if done {
+                break;
+            }
+            match captured {
+                Ok(true) => {
+                    if let Some(Err(error)) =
+                        crate::parchecker::streaming_session_process_completed_file_with_start(
+                            id,
+                            |file| Self::resolve_live_completed_file(host, file),
+                            |file, writers| self.start_checked_live_session(host, file, writers),
+                        )
+                    {
+                        Self::report_live_completion_error(host, id, &error);
+                    }
+                }
+                Ok(false) => {}
+                Err(error) => Self::report_live_completion_error(host, id, &error),
+            }
+            Self::drain_live_par_articles(host);
+        }
+        // Accepted in-progress bytes may still be in the cache. Snapshot a few
+        // at a time; uncached data waits for its own committed completion event.
+        let mut ids = Vec::new();
+        host.with_locked_queue(|dq| {
+            let ptr = host.queue_find_by_id(dq, id);
+            if ptr == 0 {
+                return;
+            }
+            for i in 0..host.nzb_file_len(ptr).min(32768) {
+                let file = host.file_snap(host.nzb_file_at(ptr, i));
+                if !file.deleted && !file.par_file {
+                    ids.push(file.id);
+                }
+            }
+        });
+        for file_id in ids {
+            let mut article = 0;
+            loop {
+                if self.stopped.load(std::sync::atomic::Ordering::Acquire) {
+                    return;
+                }
+                let mut done = false;
+                host.with_locked_queue(|dq| {
+                    let ptr = host.queue_find_by_id(dq, id);
+                    if ptr == 0 || !automatic_live_par_repair(&host.opts()) {
+                        done = true;
+                        return;
+                    }
+                    let nzb = host.nzb_snap(ptr, false);
+                    if nzb.deleting {
+                        done = true;
+                        return;
+                    }
+                    let file = (0..host.nzb_file_len(ptr))
+                        .map(|i| host.file_snap(host.nzb_file_at(ptr, i)))
+                        .find(|file| file.id == file_id && !file.deleted);
+                    let Some(file) = file else {
+                        done = true;
+                        return;
+                    };
+                    for _ in 0..4 {
+                        if article >= file.articles_len {
+                            done = true;
+                            break;
+                        }
+                        let part = host.article_at(file.ptr, article);
+                        article += 1;
+                        if part.status == crate::queuesubsys_host::AI_FINISHED
+                            && part.segment_size > 0
+                            && part.segment_offset >= 0
+                        {
+                            if let Some(Err(_error)) =
+                                crate::parchecker::streaming_session_defer_article_for_queue(
+                                    id,
+                                    (Some(file.id), &file.filename, &file.hash16k),
+                                    part.segment_offset as u64,
+                                    part.segment_size as u64,
+                                    part.crc,
+                                    || {
+                                        host.article_cache_snapshot_segment(
+                                            file.ptr,
+                                            part.ptr,
+                                            part.segment_size as usize,
+                                        )
+                                    },
+                                )
+                            {
+                                Self::report_live_par_warning(host, ptr, id);
+                            }
+                        }
+                    }
+                });
+                Self::drain_live_par_articles(host);
+                if done {
+                    break;
+                }
+            }
+        }
+    }
+
+    fn report_live_par_warning(
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        nzb_ptr: usize,
+        nzb_id: i32,
+    ) {
+        if let Some(warning) = crate::parchecker::streaming_session_take_warning(nzb_id) {
+            let message = format!(
+                "Live PAR accumulation deferred: {warning}. Ordinary repair remains available."
+            );
+            host.nzb_print_message(
+                nzb_ptr,
+                crate::queuesubsys_host::MK_DETAIL,
+                message.as_bytes(),
+            );
+        }
+    }
+
+    /// Run hashing/folding outside the daemon's global queue lock, then refresh
+    /// queue identity before applying the cheap scheduling decision.
+    fn drain_live_par_articles(host: &crate::queuesubsys_host::QueueSubsysHost) {
+        for id in crate::parchecker::streaming_session_pending_article_jobs() {
+            // Operation errors are retained by the session and surfaced once below.
+            let failed = matches!(
+                crate::parchecker::streaming_session_drain_articles(id),
+                Some(Err(_))
+            );
+            host.with_locked_queue(|dq| {
+                let ptr = host.queue_find_by_id(dq, id);
+                if ptr == 0 || !automatic_live_par_repair(&host.opts()) {
+                    crate::parchecker::streaming_session_forget(id);
+                    return;
+                }
+                let nzb = host.nzb_snap(ptr, false);
+                if nzb.deleting {
+                    return;
+                }
+                if failed || crate::parchecker::streaming_session_last_error(id).is_some() {
+                    Self::report_live_par_warning(host, ptr, id);
+                }
+                Self::unpause_streaming_par_volumes(host, ptr, id);
+                crate::postproc::direct_unpack_try_live_par_repair(host, &nzb);
+            });
+        }
+    }
+
     pub(crate) fn article_completed(
         &self,
         host: &crate::queuesubsys_host::QueueSubsysHost,
         ad_ptr: usize,
     ) {
+        let _callback_sample = self
+            .callback_metrics
+            .as_ref()
+            .map(|metrics| metrics.sample());
         host.log(crate::queuesubsys_host::MK_DEBUG, b"Article downloaded");
         let ad = host.ad_snap(ad_ptr);
         let file_ptr = ad.file_ptr;
@@ -2622,18 +3154,15 @@ impl NzbgetRsQueueCoordinator {
                     && art.segment_size > 0
                     && crate::parchecker::streaming_session_has_session(nzb.id)
                 {
-                    let seg_len = art.segment_size as usize;
-                    let seg_opt =
-                        host.article_cache_snapshot_segment(file.ptr, art.ptr, seg_len);
-                    let _ = crate::parchecker::streaming_session_on_article_finished_by_name(
-                        nzb.id,
-                        &file.filename,
-                        art.segment_offset as u64,
-                        art.segment_size as u64,
-                        art.crc,
-                        seg_opt.as_deref(),
-                    );
-                    Self::unpause_streaming_par_volumes(host, nzb.ptr, nzb.id);
+                    if automatic_live_par_repair(&opts) {
+                        if let Some(Err(_error)) = crate::parchecker::streaming_session_defer_article_for_queue(
+                            nzb.id, (Some(file.id), &file.filename, &file.hash16k), art.segment_offset as u64,
+                            art.segment_size as u64, art.crc,
+                            || host.article_cache_snapshot_segment(file.ptr, art.ptr, art.segment_size as usize),
+                        ) {
+                            Self::report_live_par_warning(host, nzb.ptr, nzb.id);
+                        }
+                    }
                 }
             } else if (ad.status == crate::queuesubsys_host::AD_FAILED || misplaced)
                 && self.with_donor_cache(|cache| {
@@ -2715,14 +3244,13 @@ impl NzbgetRsQueueCoordinator {
                     && art.segment_size > 0
                     && art.segment_offset >= 0
                 {
-                    let _ =
-                        crate::parchecker::streaming_session_on_article_failed_permanently_by_name(
-                            nzb.id,
-                            &file.filename,
-                            art.segment_offset as u64,
-                            art.segment_size as u64,
-                        );
-                    Self::unpause_streaming_par_volumes(host, nzb.ptr, nzb.id);
+                    if automatic_live_par_repair(&opts) {
+                        if let Some(Err(_error)) = crate::parchecker::streaming_session_defer_failure_for_queue(
+                            nzb.id, (Some(file.id), &file.filename, &file.hash16k), art.segment_offset as u64, art.segment_size as u64,
+                        ) {
+                            Self::report_live_par_warning(host, nzb.ptr, nzb.id);
+                        }
+                    }
                 }
             } else if ad.status == crate::queuesubsys_host::AD_RETRY {
                 art.status = crate::queuesubsys_host::AI_UNDEFINED;
@@ -3044,6 +3572,8 @@ impl NzbgetRsQueueCoordinator {
                 self.delete_downloader(host, dq_ptr, ad_ptr, true);
             });
         }
+        self.drain_live_par_completed_files(host);
+        Self::drain_live_par_articles(host);
     }
 
     fn reject_borrowed_articles(
@@ -3210,6 +3740,22 @@ impl NzbgetRsQueueCoordinator {
                 crate::dupefallback::par_damage_file_completed_host(
                     host, &fresh_nzb, &file, &articles, &filename,
                 );
+                if automatic_live_par_repair(&opts) {
+                    if let Err(error) = Self::capture_live_completed_file(
+                        &fresh_nzb,
+                        &file,
+                        &articles,
+                        &filename,
+                        file_status == crate::queuesubsys_host::CF_SUCCESS,
+                    ) {
+                        let message = format!("Live PAR completion deferred: {error}. Ordinary repair remains available.");
+                        host.nzb_print_message(
+                            nzb.ptr,
+                            crate::queuesubsys_host::MK_DETAIL,
+                            message.as_bytes(),
+                        );
+                    }
+                }
             }
 
             let is_incomplete = completed
@@ -3269,8 +3815,7 @@ impl NzbgetRsQueueCoordinator {
             // when a par2 file completes, because the damage may predate the par2 index.
             // Both follow the repair settings: nothing is fetched or repaired on its own with
             // ParRepair=no or ParCheck=manual.
-            let auto_par_repair = opts.par_check != crate::queuesubsys_host::PC_MANUAL
-                && crate::options::active_options().is_some_and(|o| o.scalars().par_repair != 0);
+            let auto_par_repair = automatic_live_par_repair(&opts);
             if completed
                 && !is_side
                 && (is_incomplete || file.par_file)
@@ -3304,7 +3849,10 @@ impl NzbgetRsQueueCoordinator {
                         host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_DETAIL, &msg);
                     }
                 }
-                crate::postproc::direct_unpack_try_live_par_repair(nzb.id, &nzb.name);
+                crate::postproc::direct_unpack_try_live_par_repair(
+                    host,
+                    &host.nzb_snap(nzb.ptr, false),
+                );
             }
         }
 
@@ -3412,6 +3960,9 @@ impl NzbgetRsQueueCoordinator {
         file: &mut crate::queuesubsys_host::FileSnap,
         art: &mut crate::queuesubsys_host::ArticleSnap,
     ) {
+        // Every accepted-to-failed route must revoke source identity, including
+        // direct checksum demotion that does not discard cached content here.
+        host.invalidate_source_replacement(file.ptr, art.ptr);
         art.status = crate::queuesubsys_host::AI_FAILED;
         host.article_set_int(
             art.ptr,
@@ -3528,6 +4079,7 @@ impl NzbgetRsQueueCoordinator {
         file: &mut crate::queuesubsys_host::FileSnap,
         art: &crate::queuesubsys_host::ArticleSnap,
     ) {
+        host.invalidate_source_replacement(file.ptr, art.ptr);
         host.article_cache_discard_segment(file.ptr, art.ptr);
         file.cached_articles = host.file_snap(file.ptr).cached_articles;
     }
@@ -4846,6 +5398,9 @@ pub(crate) fn start_daemon_queue_coord() {
     let Some(qc) = DAEMON_QC_INST.lock().ok().and_then(|g| g.clone()) else {
         return;
     };
+    if !qc.live_startups.reset() {
+        return;
+    }
     qc.stopped.store(false, std::sync::atomic::Ordering::SeqCst);
     DAEMON_QC_RUNNING.store(true, std::sync::atomic::Ordering::SeqCst);
     if let Ok(h) = std::thread::Builder::new()
@@ -4883,9 +5438,10 @@ pub(crate) fn stop_daemon_queue_coord(log_stopping: bool) {
     } else if qc.is_stopped() {
         return;
     }
-    qc.stopped.store(true, std::sync::atomic::Ordering::SeqCst);
     if let Some(qh) = crate::ffi::queue_host() {
         qc.stop(&qh);
+    } else {
+        qc.stop_live_startups();
     }
     let mut g = qc.wait_lock.0.lock().unwrap_or_else(|e| e.into_inner());
     *g = true;

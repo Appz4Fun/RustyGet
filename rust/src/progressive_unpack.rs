@@ -58,6 +58,11 @@ pub trait VolumeFeed: Send + 'static {
     fn set_is_final(&self) -> bool {
         false
     }
+    /// Upper bound on the set's volume count while it is still downloading
+    /// (0 when unknown). Sizes the session's per-volume handle budget.
+    fn expected_volumes(&self) -> u64 {
+        0
+    }
 }
 
 /// Volume bytes at the start and end that hold archive headers. A hole there cannot be read
@@ -307,11 +312,18 @@ where
     let protected = (feed.set_is_final() && req.overwrite != Overwrite::Rename)
         .then(|| protect_volumes(req.first_volume))
         .flatten();
+    // A final set's volumes are all on disk; count them when no protected
+    // inventory exists (rename mode) so the handle budget still fits the set.
+    let expected = if feed.set_is_final() {
+        feed.expected_volumes().max(rar_set_members(req.first_volume).len() as u64)
+    } else {
+        feed.expected_volumes()
+    };
     let feed = Arc::new(Mutex::new(feed));
     let pending: PendingWait = Arc::new(Mutex::new(None));
     let volume_count = protected
         .as_ref()
-        .map_or(0, |inv| inv.volumes.len() as u64);
+        .map_or(expected, |inv| (inv.volumes.len() as u64).max(expected));
     let provider = FeedProvider {
         dir: dir.clone(),
         feed: feed.clone(),
@@ -337,6 +349,13 @@ where
     );
     opts.limits.volume_handles = opts.limits.volume_handles.max(2 * volume_count + 16);
     opts.limits.protection_paths = opts.limits.protection_paths.max(volume_count + 16);
+    log_cb(
+        3,
+        &format!(
+            "Unrar: volume budget {} handle(s) for {volume_count} volume(s)",
+            opts.limits.volume_handles
+        ),
+    );
     opts.hole_policy = HolePolicy::PartialStored {
         fill: HoleFill::Sparse,
     };

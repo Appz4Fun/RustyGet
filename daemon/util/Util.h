@@ -1133,6 +1133,11 @@ public:
 	const char* GetSegmentContent() { return m_segmentData; }
 	void SetSegmentOffset(int64 segmentOffset) { m_segmentOffset = segmentOffset; }
 	int64 GetSegmentOffset() { return m_segmentOffset; }
+	// Header ownership is separate from cache geometry and survives retry resets.
+	// Access only while holding the download queue lock.
+	int64 GetLiveParClaimBegin() const { return m_liveParClaimBegin; }
+	int64 GetLiveParClaimEnd() const { return m_liveParClaimEnd; }
+	void SetLiveParClaimRange(int64 begin, int64 end) { m_liveParClaimBegin = begin; m_liveParClaimEnd = end; }
 	void SetSegmentSize(int segmentSize) { m_segmentSize = segmentSize; }
 	int GetSegmentSize() { return m_segmentSize; }
 	EStatus GetStatus() { return m_status; }
@@ -1167,6 +1172,8 @@ public:
 private:
 	char* m_segmentData = nullptr;
 	int m_segmentAllocSize = 0;
+	int64 m_liveParClaimBegin = -1;
+	int64 m_liveParClaimEnd = -1;
 	std::atomic<int64> m_segmentOffset{0};
 	std::atomic<int> m_segmentSize{0};
 	std::atomic<uint32> m_crc{0};
@@ -1433,6 +1440,46 @@ private:
 
 	friend class CompletedFile;
 };
+
+// Numeric, unmasked header ownership; no cache pointer/geometry mutation or strings.
+// The queue lock serializes admission. Rejected claims never change retained order.
+inline bool live_par_claim_source_header(FileInfo* file, ArticleInfo* target, int64 begin, int64 end)
+{
+    if (begin < 0 || end <= begin) return false;
+    auto* articles = file->GetArticles();
+    size_t index = 0;
+    while (index < articles->size() && articles->at(index).get() != target) ++index;
+    if (index == articles->size()) return false;
+    // An independently fetched replacement cannot prove same-payload identity.
+    if (target->GetLiveParClaimBegin() != -1 || target->GetLiveParClaimEnd() != -1 ||
+        target->GetSegmentSize() != 0 || target->GetStatus() == ArticleInfo::aiFinished) return false;
+    auto range = [](ArticleInfo* article, int64& lo, int64& hi) {
+        lo = article->GetLiveParClaimBegin(); hi = article->GetLiveParClaimEnd();
+        if (lo != -1 || hi != -1) return lo >= 0 && hi > lo ? 1 : -1;
+        // Persisted finished geometry is stable under the queue lock. Running
+        // geometry is not a claim: cache attachment can still change it.
+        if (article->GetStatus() != ArticleInfo::aiFinished) return 0;
+        lo = article->GetSegmentOffset();
+        int size = article->GetSegmentSize();
+        if (lo < 0 || size <= 0 || lo > INT64_MAX - size) return -1;
+        hi = lo + size;
+        return 1;
+    };
+    // Restored ranges were not admitted through this helper. Validate the
+    // complete chain, including this proposed insertion, before trusting it.
+    int64 previousEnd = -1;
+    for (size_t i = 0; i < articles->size(); ++i)
+    {
+        int64 lo = begin, hi = end;
+        int known = i == index ? 1 : range(articles->at(i).get(), lo, hi);
+        if (known < 0) return false;
+        if (known == 0) continue;
+        if (previousEnd > lo) return false;
+        previousEnd = hi;
+    }
+    target->SetLiveParClaimRange(begin, end);
+    return true;
+}
 
 typedef UniqueDeque<FileInfo> FileList;
 typedef std::vector<FileInfo*> RawFileList;
@@ -3060,6 +3107,49 @@ class UrlCoordinator;
 #endif
 
 
+// Caller holds the queue throughout this synchronous borrowed-field pass.
+// 0 = callback/limit refusal, 1 = complete, 2 = transient assembly/parking busy.
+// No strings escape the callback, and this visitor neither copies nor normalises.
+using LiveParNamespaceVisitor = bool (*)(void*, int, unsigned,
+    const char*, const char*, const char*, const char*);
+inline int live_par_visit_namespace(NzbInfo* nzb, LiveParNamespaceVisitor visit, void* context)
+{
+    if (!nzb || !visit) return 0;
+    if (nzb->GetParking() || nzb->GetDeleting()) return 2;
+    constexpr size_t limit = 32768;
+    const size_t queued = nzb->GetFileList()->size();
+    if (queued > limit || nzb->GetCompletedFiles()->size() > limit - queued) return 0;
+    // CompleteFileParts can clear outputFilename outside the queue, even while
+    // its final downloader remains active. Do not borrow during that window.
+    for (const auto& file : *nzb->GetFileList())
+    {
+        const int64_t total = file->GetTotalArticles();
+        const int64_t completed = file->GetCompletedArticles();
+        const int64_t missed = file->GetMissedArticles();
+        if (total < 0 || completed < 0 || missed < 0) return 0;
+        if (total > 0 && completed + missed >= total) return 2;
+    }
+    const auto text = [](const char* value) { return value ? value : ""; };
+    for (const auto& file : *nzb->GetFileList())
+    {
+        // Active-count changes and mutex destruction require the queue. For
+        // remaining active files, this also stabilises their output string.
+        Guard output = file->GuardOutputFile();
+        const unsigned flags = (file->GetParFile() ? 1u : 0u) | (file->GetDeleted() ? 2u : 0u);
+        if (!visit(context, file->GetId(), flags, text(file->GetFilename()),
+            text(file->GetOrigname()), text(file->GetHash16k()), file->GetOutputFilename().c_str()))
+            return 0;
+    }
+    for (auto& file : *nzb->GetCompletedFiles())
+    {
+        const unsigned flags = 4u | (file.GetParFile() ? 1u : 0u);
+        if (!visit(context, file.GetId(), flags, text(file.GetFilename()),
+            text(file.GetOrigname()), text(file.GetHash16k()), ""))
+            return 0;
+    }
+    return 1;
+}
+
 inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
 	const char* s1, const char* s2, int* ints, int64_t* i64s, const char** strs)
 {
@@ -3846,6 +3936,18 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 		return 0;
 	}
 	case 43: {
+		if (a1 == 15)
+		{
+			auto visit = reinterpret_cast<LiveParNamespaceVisitor>(reinterpret_cast<uintptr_t>(s1));
+			return (uintptr_t)live_par_visit_namespace(reinterpret_cast<NzbInfo*>(p1), visit, reinterpret_cast<void*>(p2));
+		}
+		if (a1 == 13)
+			return live_par_claim_source_header(reinterpret_cast<FileInfo*>(p1), reinterpret_cast<ArticleInfo*>(p2), i64s[0], i64s[1]) ? 1 : 0;
+		if (a1 == 14)
+		{
+			auto* article = reinterpret_cast<ArticleInfo*>(p1);
+			return article->GetLiveParClaimBegin() >= 0 || article->GetSegmentSize() > 0;
+		}
 		if (a1 == 10)
 		{
 			ArticleInfo* pa = reinterpret_cast<FileInfo*>(p1)->GetArticles()->at((size_t)a2).get();

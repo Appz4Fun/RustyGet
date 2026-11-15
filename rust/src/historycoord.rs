@@ -2934,6 +2934,7 @@ unsafe extern "C" fn hc_native_action_cb(
                     if *bytes.add(idx) != 0 {
                         let art = host.article_at(p1, idx);
                         if art.ptr != 0 {
+                            host.invalidate_source_replacement(p1, art.ptr);
                             host.article_reset_for_retry(art.ptr);
                         }
                     }

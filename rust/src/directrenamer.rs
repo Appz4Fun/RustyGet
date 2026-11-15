@@ -725,6 +725,7 @@ fn try_create_hard_link_host(
     info_msg.extend_from_slice(new_name);
     host.nzb_print_message(nzb_ptr, MK_INFO, &info_msg);
 
+    crate::postproc::direct_unpack_join_live_par_repair(host.nzb_snap(nzb_ptr, false).id);
     let c_old = to_cstring(old_output_filename);
     let c_final = to_cstring(&final_output_filename);
     let mut errmsg = Vec::new();
@@ -893,6 +894,8 @@ fn rename_file_on_disk(
 ) -> bool {
     use crate::queuesubsys_host::*;
 
+    // Destructive path changes invalidate the old accumulator before any filesystem mutation.
+    crate::postproc::direct_unpack_join_live_par_repair(host.nzb_snap(nzb_ptr, false).id);
     let (old_path, old_name) = crate::paths::split_path_and_filename(old_full);
     let (new_path, new_name) = crate::paths::split_path_and_filename(new_full);
 

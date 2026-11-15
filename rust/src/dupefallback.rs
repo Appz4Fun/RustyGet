@@ -2029,7 +2029,7 @@ impl ParDamageVerdict {
 
 #[cfg(unix)]
 pub(crate) fn par_damage_file_completed_host(
-    host: &crate::queuesubsys_host::QueueSubsysHost,
+    _host: &crate::queuesubsys_host::QueueSubsysHost,
     nzb: &crate::queuesubsys_host::NzbSnap,
     file: &crate::queuesubsys_host::FileSnap,
     articles: &[crate::queuesubsys_host::ArticleSnap],
@@ -2054,97 +2054,8 @@ pub(crate) fn par_damage_file_completed_host(
         &holes,
     );
 
-    if !is_par
-        && !filename.is_empty()
-        && decoded_size > 0
-        && crate::parchecker::streaming_session_has_session(nzb.id)
-    {
-        // The file is complete on disk now: let the live par2 session verify the slices it
-        // has not seen in memory (articles fetched before the session started, slices that
-        // left the article cache) and mark the holes as damaged, so it knows exactly how
-        // many recovery blocks the collection needs.
-        for a in articles {
-            if a.status == crate::queuesubsys_host::AI_FINISHED
-                && a.segment_size > 0
-                && a.segment_offset >= 0
-            {
-                let _ = crate::parchecker::streaming_session_on_article_finished_by_name(
-                    nzb.id,
-                    filename,
-                    a.segment_offset as u64,
-                    a.segment_size as u64,
-                    a.crc,
-                    None,
-                );
-            }
-        }
-        for h in &holes {
-            if h.size > 0 && h.offset >= 0 {
-                let _ = crate::parchecker::streaming_session_on_article_failed_permanently_by_name(
-                    nzb.id,
-                    filename,
-                    h.offset as u64,
-                    h.size as u64,
-                );
-            }
-        }
-    }
-
-    if is_par && failed_plus_missed == 0 && !filename.is_empty() {
-        // `filename` is relative to the download's directory.
-        let par_full = [
-            nzb.dest_dir.as_slice(),
-            &[crate::paths::PATH_SEPARATOR],
-            filename,
-        ]
-        .concat();
-        if !crate::parchecker::streaming_session_has_session(nzb.id) {
-            if crate::parchecker::streaming_session_start(
-                nzb.id,
-                crate::fsops::path(&par_full),
-                crate::fsops::path(&nzb.dest_dir),
-                crate::parchecker::SessionOptions::default(),
-            )
-            .is_ok()
-            {
-                let flen = host.nzb_file_len(nzb.ptr);
-                for i in 0..flen {
-                    let qf_ptr = host.nzb_file_at(nzb.ptr, i);
-                    if qf_ptr == 0 || qf_ptr == file.ptr {
-                        continue;
-                    }
-                    let qf = host.file_snap(qf_ptr);
-                    if qf.deleted {
-                        continue;
-                    }
-                    if let Some((_, blocks)) =
-                        crate::parparser::parse_par_filename(&qf.filename, qf.filename_confirmed)
-                    {
-                        if blocks != 0
-                            && crate::parparser::same_par_collection(
-                                &file.filename,
-                                &qf.filename,
-                                file.filename_confirmed && qf.filename_confirmed,
-                            )
-                        {
-                            crate::parchecker::streaming_session_register_queued_volume(
-                                nzb.id,
-                                qf.id as u64,
-                                if blocks > 0 { blocks } else { 1 },
-                                qf.paused,
-                            );
-                        }
-                    }
-                }
-            }
-        } else {
-            let _ = crate::parchecker::streaming_session_on_recovery_volume_arrived(
-                nzb.id,
-                crate::fsops::path(&par_full),
-                Some(file.id as u64),
-            );
-        }
-    }
+    // Live session work is captured by QueueCoordinator and replayed after
+    // releasing its global queue lock.
 }
 
 #[cfg(unix)]
@@ -2275,6 +2186,8 @@ pub(crate) fn unpause_pars_for_damage_host(
 
 #[cfg(unix)]
 pub(crate) fn par_damage_forget_all(nzb_id: i32) {
+    crate::parlive::forget_download_writes(nzb_id);
+    crate::postproc::direct_unpack_join_live_par_repair(nzb_id);
     crate::pardamage::forget(nzb_id);
     crate::parchecker::streaming_session_forget(nzb_id);
 }

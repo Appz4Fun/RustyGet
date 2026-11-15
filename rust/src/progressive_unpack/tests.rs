@@ -2603,3 +2603,30 @@ fn a_final_set_is_copied_into_place_while_declarations_are_off() {
     assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
     assert_eq!(copied.len(), 1, "{copied:?}");
 }
+
+/// A plain final set shaped like production job #207 (159 stored volumes) through a
+/// post-download unpack. Large: run with `RG_BIG_MB=<total MiB> cargo test --release --lib
+/// big_final_set -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn big_final_set_unpacks() {
+    let total_mb: usize = std::env::var("RG_BIG_MB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1900);
+    let volumes = 159usize;
+    let chunk = (total_mb << 20) / volumes;
+    let t = TestDir::new("big_final");
+    let data = pattern(chunk * volumes);
+    let vols = rar5_volumes("movie.mkv", &data, chunk);
+    let first = write_set(&t.dl(), &vols);
+    drop(vols);
+    let (r, log) = run(&first, &t.out(), Box::new(CompleteSet));
+    match &r {
+        Ok(_) => eprintln!("BIG_FINAL ok volumes={volumes} mb={total_mb}"),
+        Err(Error::Failed(f)) => eprintln!("BIG_FINAL failed: {f}"),
+        Err(Error::Unsupported(u)) => eprintln!("BIG_FINAL unsupported: {u:?}"),
+    }
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+}

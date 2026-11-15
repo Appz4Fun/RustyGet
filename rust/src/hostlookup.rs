@@ -114,12 +114,23 @@ pub fn resolve(host: &str, port: u16) -> Result<Vec<IpAddr>, String> {
             ips.push(addr.ip());
         }
     }
-    ips.sort_by_key(|ip| ip.is_ipv6());
-    ips.truncate(MAX_ADDRESSES);
+    let ips = pick_addresses(ips);
     if ips.is_empty() {
         return Err(format!("{host} has no addresses"));
     }
     Ok(ips)
+}
+
+/// At most `MAX_ADDRESSES`, IPv4 first, keeping room for both kinds when there are both:
+/// a server set to IPv6 only still has its IPv6 addresses to pick from.
+fn pick_addresses(ips: Vec<IpAddr>) -> Vec<IpAddr> {
+    let (v4, v6): (Vec<IpAddr>, Vec<IpAddr>) = ips.into_iter().partition(IpAddr::is_ipv4);
+    let v6_room = v6.len().min(MAX_ADDRESSES / 2).max(MAX_ADDRESSES.saturating_sub(v4.len()));
+    let v4_take = v4.len().min(MAX_ADDRESSES - v6_room.min(v6.len()));
+    let mut out: Vec<IpAddr> = v4.into_iter().take(v4_take).collect();
+    let left = MAX_ADDRESSES - out.len();
+    out.extend(v6.into_iter().take(left));
+    out
 }
 
 /// Time to open a TCP connection, in milliseconds; `None` when it fails or times out.
@@ -679,6 +690,22 @@ mod tests {
             }],
         );
         assert_eq!(json, "{\"Host\":\"news.example\",\"Port\":563,\"Error\":\"\",\"GeoIP\":true,\"Addresses\":[{\"IP\":\"192.0.2.7\",\"Family\":4,\"Country\":\"NL\",\"CountryName\":\"Netherlands\",\"ASN\":64500,\"Org\":\"Example \\\"Net\\\"\",\"LatencyMs\":12.5}]}");
+    }
+
+    #[test]
+    fn many_ipv4_addresses_leave_room_for_ipv6() {
+        let v4 = |n: u8| IpAddr::from([192, 0, 2, n]);
+        let v6 = |n: u16| IpAddr::from([0x2001, 0xdb8, 0, 0, 0, 0, 0, n]);
+        let mixed: Vec<IpAddr> = (1..=10).map(v4).chain((1..=2).map(v6)).collect();
+        let picked = pick_addresses(mixed);
+        assert_eq!(picked.len(), MAX_ADDRESSES);
+        assert_eq!(picked.iter().filter(|ip| ip.is_ipv6()).count(), 2, "{picked:?}");
+        assert!(picked[0].is_ipv4(), "IPv4 first");
+        let many_v6: Vec<IpAddr> = (1..=3).map(v4).chain((1..=10).map(v6)).collect();
+        let picked = pick_addresses(many_v6);
+        assert_eq!((picked.iter().filter(|ip| ip.is_ipv4()).count(), picked.len()), (3, MAX_ADDRESSES));
+        assert_eq!(pick_addresses((1..=12).map(v4).collect()).len(), MAX_ADDRESSES);
+        assert_eq!(pick_addresses((1..=12).map(v6).collect()).len(), MAX_ADDRESSES);
     }
 
     #[test]

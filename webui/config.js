@@ -3191,7 +3191,16 @@ var Config = (new function($)
 		var useTls = getOptionValue(option) === 'yes';
 		var currentPort = getOptionValue(portOption);
 		var inputField = $('#' + portOptionId)[0];
+		tlsSwitchPort(option, useTls, currentPort, inputField, defaultPort, defaultTlsPort, defaultPort2, defaultTlsPort2);
+		if (inputField && inputField.value !== currentPort)
+		{
+			// the host lookup times the new port
+			$(inputField).trigger('change.lookup');
+		}
+	}
 
+	function tlsSwitchPort(option, useTls, currentPort, inputField, defaultPort, defaultTlsPort, defaultPort2, defaultTlsPort2)
+	{
 		if (useTls)
 		{
 			if (currentPort === defaultPort)

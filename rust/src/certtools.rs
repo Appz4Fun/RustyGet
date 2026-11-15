@@ -163,12 +163,30 @@ fn browse_error(path: &Path, message: &str) -> String {
     out
 }
 
+/// Reads at most `MAX_PEM` bytes of a regular file. The file is opened without
+/// blocking and checked through its descriptor, so a FIFO or a device such as
+/// /dev/zero is refused instead of hanging or filling memory.
 fn read_limited(path: &Path) -> Result<Vec<u8>, String> {
-    let meta = fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    if meta.len() as usize > MAX_PEM {
-        return Err(format!("{}: file is too large to be a certificate", path.display()));
+    use std::io::Read as _;
+    let shown = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
+    let mut opts = fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NONBLOCK);
     }
-    fs::read(path).map_err(|e| format!("{}: {e}", path.display()))
+    let file = opts.open(path).map_err(|e| shown(&e))?;
+    let meta = file.metadata().map_err(|e| shown(&e))?;
+    if !meta.is_file() {
+        return Err(shown(&"not a regular file"));
+    }
+    let mut data = Vec::new();
+    file.take(MAX_PEM as u64 + 1).read_to_end(&mut data).map_err(|e| shown(&e))?;
+    if data.len() > MAX_PEM {
+        return Err(shown(&"file is too large to be a certificate"));
+    }
+    Ok(data)
 }
 
 fn cert_names(cert: &X509) -> Vec<String> {
@@ -271,15 +289,22 @@ fn count_certs(path: &Path) -> usize {
         .map_or(0, |c| c.len())
 }
 
-/// Counts the certificates a CA store holds: one PEM file, or every file in a folder.
-/// An empty path means the system store.
+/// Counts the certificates in a CA store, one PEM file, the way the TLS code loads it.
+/// Without a store, news server certificates are not checked, which is an error here.
 pub fn check_ca_store(path: &str) -> String {
     let path = path.trim();
     let mut out = String::new();
     if path.is_empty() {
         obj(
             &mut out,
-            &[("Count", Field::Num(0)), ("System", Field::Bool(true)), ("Error", Field::Str(""))],
+            &[
+                ("Count", Field::Num(0)),
+                ("System", Field::Bool(false)),
+                (
+                    "Error",
+                    Field::Str("No CA certificates are set, so news server certificates are not checked. Upload or paste a PEM file."),
+                ),
+            ],
         );
         return out;
     }
@@ -288,24 +313,11 @@ pub fn check_ca_store(path: &str) -> String {
         Ok(m) => m,
         Err(e) => return error_json(&format!("{path}: {e}")),
     };
-    let (count, files) = if meta.is_dir() {
-        let Ok(reader) = fs::read_dir(p) else {
-            return error_json(&format!("{path}: the folder can't be read"));
-        };
-        let mut count = 0;
-        let mut files = 0;
-        for entry in reader.flatten() {
-            let full = entry.path();
-            if full.is_file() {
-                let n = count_certs(&full);
-                if n > 0 {
-                    files += 1;
-                    count += n;
-                }
-            }
-        }
-        (count, files)
-    } else {
+    // the TLS code loads CertStore as one file, so a folder would fail there
+    if meta.is_dir() {
+        return error_json(&format!("{path} is a folder. Pick one PEM file that holds the CA certificates."));
+    }
+    let (count, files) = {
         let n = count_certs(p);
         (n, usize::from(n > 0))
     };
@@ -322,6 +334,38 @@ pub fn check_ca_store(path: &str) -> String {
         ],
     );
     out
+}
+
+/// A name for a new certificate pair, `<base>-YYYYMMDD-HHMMSS` (with `-2`, `-3`... when
+/// taken), so a pair in use is never overwritten: Settings switches to the new one on save.
+fn fresh_stem(dir: &Path, base: &str) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    let (y, m, d) = crate::statmeter::days_to_ymd(now.div_euclid(86_400));
+    let secs = now.rem_euclid(86_400);
+    let stamp = format!("{base}-{y:04}{m:02}{d:02}-{:02}{:02}{:02}", secs / 3600, secs / 60 % 60, secs % 60);
+    let taken = |stem: &str| dir.join(format!("{stem}.crt")).exists() || dir.join(format!("{stem}.key")).exists();
+    if !taken(&stamp) {
+        return stamp;
+    }
+    (2..).map(|n| format!("{stamp}-{n}")).find(|s| !taken(s)).unwrap_or(stamp)
+}
+
+/// Writes a new certificate and key; if either write fails, neither file is left.
+fn write_pair(cert: Option<(&Path, &[u8])>, key: Option<(&Path, &[u8])>) -> Result<(), String> {
+    let mut done: Vec<&Path> = Vec::new();
+    for (path, data, private) in [cert.map(|(p, d)| (p, d, false)), key.map(|(p, d)| (p, d, true))].into_iter().flatten() {
+        if let Err(e) = write_file(path, data, private) {
+            for p in done {
+                let _ = fs::remove_file(p);
+            }
+            let _ = fs::remove_file(path);
+            return Err(e);
+        }
+        done.push(path);
+    }
+    Ok(())
 }
 
 fn write_file(path: &Path, data: &[u8], private: bool) -> Result<(), String> {
@@ -415,14 +459,14 @@ pub fn make_cert(names_text: &str, main_dir: &Path) -> String {
         Err(e) => return error_json(&format!("Could not make the certificate: {e}")),
     };
     let dir = main_dir.join(HTTPS_DIR);
-    let cert_path = dir.join("rustyget.crt");
-    let key_path = dir.join("rustyget.key");
-    let written = cert
+    let stem = fresh_stem(&dir, "rustyget");
+    let cert_path = dir.join(format!("{stem}.crt"));
+    let key_path = dir.join(format!("{stem}.key"));
+    let pems = cert
         .to_pem()
-        .map_err(|e| e.to_string())
-        .and_then(|pem| write_file(&cert_path, &pem, false))
-        .and_then(|()| key.private_key_to_pem_pkcs8().map_err(|e| e.to_string()))
-        .and_then(|pem| write_file(&key_path, &pem, true));
+        .and_then(|c| key.private_key_to_pem_pkcs8().map(|k| (c, k)))
+        .map_err(|e| e.to_string());
+    let written = pems.and_then(|(c, k)| write_pair(Some((&cert_path, &c)), Some((&key_path, &k))));
     if let Err(e) = written {
         return error_json(&e);
     }
@@ -502,28 +546,26 @@ pub fn save_pem(kind: &str, name: &str, text: &str, main_dir: &Path) -> String {
                 }
             }
             let dir = main_dir.join(HTTPS_DIR);
-            let cert_path = (!certs.is_empty()).then(|| dir.join("server.crt"));
-            let key_path = key.as_ref().map(|_| dir.join("server.key"));
-            if let Some(p) = &cert_path {
-                let mut pem = Vec::new();
-                for c in &certs {
-                    match c.to_pem() {
-                        Ok(b) => pem.extend_from_slice(&b),
-                        Err(e) => return error_json(&e.to_string()),
-                    }
-                }
-                if let Err(e) = write_file(p, &pem, false) {
-                    return error_json(&e);
+            let stem = fresh_stem(&dir, "server");
+            let cert_path = (!certs.is_empty()).then(|| dir.join(format!("{stem}.crt")));
+            let key_path = key.as_ref().map(|_| dir.join(format!("{stem}.key")));
+            let mut cert_pem = Vec::new();
+            for c in &certs {
+                match c.to_pem() {
+                    Ok(b) => cert_pem.extend_from_slice(&b),
+                    Err(e) => return error_json(&e.to_string()),
                 }
             }
-            if let (Some(p), Some(k)) = (&key_path, &key) {
-                let written = k
-                    .private_key_to_pem_pkcs8()
-                    .map_err(|e| e.to_string())
-                    .and_then(|pem| write_file(p, &pem, true));
-                if let Err(e) = written {
-                    return error_json(&e);
-                }
+            let key_pem = match key.as_ref().map(|k| k.private_key_to_pem_pkcs8()).transpose() {
+                Ok(k) => k,
+                Err(e) => return error_json(&e.to_string()),
+            };
+            let written = write_pair(
+                cert_path.as_deref().map(|p| (p, &cert_pem[..])),
+                key_path.as_deref().zip(key_pem.as_deref()),
+            );
+            if let Err(e) = written {
+                return error_json(&e);
             }
             saved_reply(cert_path.as_deref(), key_path.as_deref())
         }
@@ -613,6 +655,11 @@ pub fn rpc_save_pem(is_json: bool, kind: &str, name: &str, text: &str) -> Vec<u8
 mod tests {
     use super::*;
 
+    fn field(reply: &str, name: &str) -> PathBuf {
+        let start = reply.find(&format!("\"{name}\":\"")).unwrap() + name.len() + 4;
+        PathBuf::from(&reply[start..start + reply[start..].find('"').unwrap()])
+    }
+
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("rg-certtools-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -641,8 +688,15 @@ mod tests {
         let dir = temp_dir("make");
         let reply = make_cert("nas.local 10.0.0.2", &dir);
         assert!(reply.contains("\"Error\":\"\""), "{reply}");
-        let cert = dir.join("https/rustyget.crt");
-        let key = dir.join("https/rustyget.key");
+        let cert = field(&reply, "Cert");
+        let key = field(&reply, "Key");
+        assert!(cert.starts_with(dir.join("https")) && cert.to_str().unwrap().contains("/rustyget-"), "{reply}");
+        assert_eq!(cert.with_extension("key"), key);
+        // making another leaves the first pair as it was
+        let first = fs::read(&cert).unwrap();
+        let again = make_cert("other.local", &dir);
+        assert_ne!(field(&again, "Cert"), cert, "{again}");
+        assert_eq!(fs::read(&cert).unwrap(), first);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -662,12 +716,9 @@ mod tests {
     fn a_key_from_another_pair_does_not_match() {
         let a = temp_dir("pair-a");
         let b = temp_dir("pair-b");
-        make_cert("a.local", &a);
-        make_cert("b.local", &b);
-        let check = check_cert(
-            a.join("https/rustyget.crt").to_str().unwrap(),
-            b.join("https/rustyget.key").to_str().unwrap(),
-        );
+        let ra = make_cert("a.local", &a);
+        let rb = make_cert("b.local", &b);
+        let check = check_cert(field(&ra, "Cert").to_str().unwrap(), field(&rb, "Key").to_str().unwrap());
         assert!(check.contains("\"KeyMatches\":false") && check.contains("\"Ok\":false"), "{check}");
         let missing = check_cert(a.join("nope.crt").to_str().unwrap(), "");
         assert!(missing.contains("nope.crt"), "{missing}");
@@ -678,18 +729,18 @@ mod tests {
     #[test]
     fn pasted_text_with_both_parts_is_split_into_cert_and_key() {
         let src = temp_dir("paste-src");
-        make_cert("paste.local", &src);
-        let cert = fs::read_to_string(src.join("https/rustyget.crt")).unwrap();
-        let key = fs::read_to_string(src.join("https/rustyget.key")).unwrap();
+        let made = make_cert("paste.local", &src);
+        let cert = fs::read_to_string(field(&made, "Cert")).unwrap();
+        let key = fs::read_to_string(field(&made, "Key")).unwrap();
         let dir = temp_dir("paste");
         let reply = save_pem("https", "", &format!("junk\n{key}\nmore\n{cert}"), &dir);
-        assert!(reply.contains("server.crt") && reply.contains("server.key"), "{reply}");
+        assert!(reply.contains("/server-") && reply.contains(".crt") && reply.contains(".key"), "{reply}");
         assert!(reply.contains("\"KeyMatches\":true"), "{reply}");
         let only_cert = save_pem("https", "", &cert, &dir);
         assert!(only_cert.contains("\"Key\":\"\""), "{only_cert}");
         let other = temp_dir("paste-other");
-        make_cert("other.local", &other);
-        let other_key = fs::read_to_string(other.join("https/rustyget.key")).unwrap();
+        let other_made = make_cert("other.local", &other);
+        let other_key = fs::read_to_string(field(&other_made, "Key")).unwrap();
         assert!(save_pem("https", "", &format!("{cert}{other_key}"), &dir).contains("does not belong"));
         assert!(save_pem("https", "", "hello", &dir).contains("No PEM"));
         for d in [src, dir, other] {
@@ -700,18 +751,29 @@ mod tests {
     #[test]
     fn a_ca_store_counts_its_certificates() {
         let src = temp_dir("ca-src");
-        make_cert("ca1.local", &src);
-        let cert = fs::read_to_string(src.join("https/rustyget.crt")).unwrap();
+        let made = make_cert("ca1.local", &src);
+        let cert = fs::read_to_string(field(&made, "Cert")).unwrap();
         let dir = temp_dir("ca");
         let saved = save_pem("ca", "../My CA.pem", &format!("{cert}{cert}"), &dir);
         assert!(saved.contains("certs/My_CA.pem") && saved.contains("\"Count\":2"), "{saved}");
         let store = dir.join("certs");
-        let check = check_ca_store(store.to_str().unwrap());
-        assert!(check.contains("\"Count\":2") && check.contains("\"Files\":1"), "{check}");
+        let folder = check_ca_store(store.to_str().unwrap());
+        assert!(folder.contains("is a folder"), "the TLS code loads one file: {folder}");
         let file = check_ca_store(store.join("My_CA.pem").to_str().unwrap());
-        assert!(file.contains("\"Count\":2"), "{file}");
-        assert!(check_ca_store("").contains("\"System\":true"));
-        assert!(check_ca_store(src.to_str().unwrap()).contains("no PEM certificates"));
+        assert!(file.contains("\"Count\":2") && file.contains("\"Files\":1"), "{file}");
+        let none = check_ca_store("");
+        assert!(none.contains("\"System\":false") && none.contains("not checked"), "{none}");
+        let not_pem = check_ca_store(field(&made, "Key").to_str().unwrap());
+        assert!(not_pem.contains("no PEM certificates"), "{not_pem}");
+        #[cfg(unix)]
+        {
+            // a device or FIFO is refused rather than read without end or waited on
+            assert!(check_cert("/dev/zero", "").contains("not a regular file"));
+            let fifo = dir.join("pipe");
+            let c = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+            assert!(check_cert(fifo.to_str().unwrap(), "").contains("not a regular file"));
+        }
         assert!(save_pem("ca", "x", "nothing", &dir).contains("No PEM"));
         fs::remove_dir_all(&src).unwrap();
         fs::remove_dir_all(&dir).unwrap();

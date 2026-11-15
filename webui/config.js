@@ -1548,6 +1548,13 @@ var Config = (new function($)
 		if ($('body').hasClass('navfixed')) {
 			offsetY = 10;
 		}
+		// a server option shown in the side pane scrolls inside the pane, not the page
+		var pane = element.closest('.config-pane__body');
+		if (pane.length)
+		{
+			parent = pane;
+			offsetY = 16;
+		}
 		parent.animate({ scrollTop: parent.scrollTop() + element.offset().top - parent.offset().top - offsetY }, { duration: 'slow', easing: 'swing' });
 	}
 
@@ -3028,8 +3035,7 @@ var Config = (new function($)
 			certStatus(status, 'busy', [certText('checking', 'Checking…')]);
 			RPC.call('checkcastore', [$.trim(input.val())], function(result)
 			{
-				certStatus(status, result.Error ? 'error' : 'ok', [result.Error ? result.Error : result.System ?
-					certText('ca_system', 'Empty: the system\'s own CA certificates are used.') :
+				certStatus(status, result.Error ? 'error' : 'ok', [result.Error ? result.Error :
 					result.Count + ' ' + certText('ca_count', 'certificates found')]);
 			}, function(message) { certStatus(status, 'error', [String(message)]); });
 		}));
@@ -4359,8 +4365,11 @@ var Config = (new function($)
 	}
 
 	// Find the fastest cipher this server accepts and save it, before RustyGet reloads.
+	var cipherWaitServer, cipherWaitForced;
 	function optimizeSavedServer(multiid, forced)
 	{
+		cipherWaitServer = multiid;
+		cipherWaitForced = forced;
 		setServerStatus(serverText('cipher_testing', 'Finding the fastest cipher for this server…'), 'busy');
 		var snapshot = Config.cipherSnapshot();
 		var finish = function(note)
@@ -4410,6 +4419,7 @@ var Config = (new function($)
 		};
 		RPC.call('tlscipherstart', [String(multiid)], function(result)
 		{
+			waitedForCipher = 0;
 			if (result.Available === false || !result.JobID)
 			{
 				finish(forced ? (result.Message || serverText('cipher_unavailable', 'Cipher testing is not available here.')) : '');
@@ -4418,8 +4428,36 @@ var Config = (new function($)
 			poll(result.JobID);
 		}, function(value, result)
 		{
-			finish(forced ? (result && result.error ? result.error.message : String(value)) : '');
+			var message = result && result.error ? result.error.message : String(value);
+			if (/already running/.test(message))
+			{
+				// another browser is testing other servers; a reload now would cancel its test
+				waitForOtherCipherTest();
+				return;
+			}
+			finish(forced ? message : '');
 		}, { timeout: 15000 });
+	}
+
+	// Try again until the other cipher test is done, then test and reload as usual.
+	// If it never ends, the server stays saved and is put to use with a later save or reload.
+	var waitedForCipher = 0;
+	function waitForOtherCipherTest()
+	{
+		if (waitedForCipher === 0)
+		{
+			waitedForCipher = new Date().getTime();
+		}
+		if (new Date().getTime() - waitedForCipher > 15 * 60 * 1000)
+		{
+			waitedForCipher = 0;
+			serverSaving = false;
+			$('.config-server-save, .config-cipher__optimize', $ConfigData).prop('disabled', false);
+			setServerStatus(serverText('cipher_busy_gave_up', 'Saved, but another cipher test is still running, so RustyGet was not reloaded. Save again once it finishes.'), 'error');
+			return;
+		}
+		setServerStatus(serverText('cipher_busy', 'Saved. Waiting for another cipher test to finish before putting it to use…'), 'busy');
+		setTimeout(function() { optimizeSavedServer(cipherWaitServer, cipherWaitForced); }, 2000);
 	}
 
 	// RustyGet reads servers when it starts, so a saved server is put to use with a reload.
@@ -6015,7 +6053,8 @@ var FileBrowserDialog = (new function($)
 
 	function choose()
 	{
-		var value = selected || $.trim($('#FileBrowserDialog_Path').val());
+		// the path as shown: a selection the user then edited is not used
+		var value = $.trim($('#FileBrowserDialog_Path').val());
 		if (!value)
 		{
 			return;

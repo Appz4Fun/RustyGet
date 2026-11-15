@@ -192,6 +192,11 @@ async function installDetailsFixture(page, base, writes = [], hooks = {}) {
         const id = +(rpc.params ? rpc.params[0] : url.searchParams.get(''));
         replies.loadlog = (NZB_LOGS[id] || []).map((m, i) => ({ ID: i + 1, Kind: m[0], Time: Math.floor(Date.now() / 1000) - 600 + i, Text: m[1] }));
       }
+      if (rpc.method === 'loadlog' && hooks.holdLoadlog) {
+        const held = replies.loadlog;
+        await hooks.holdLoadlog(rpc);
+        return route.fulfill({ contentType: 'application/json', json: { id: rpc.id, result: held } });
+      }
       if (rpc.method === 'systemstats') {
         const range = +(rpc.params ? rpc.params[0] : new URL(request.url()).searchParams.get('')) || 3600;
         replies.systemstats = systemStats(range);

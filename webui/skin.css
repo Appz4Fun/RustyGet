@@ -4028,3 +4028,8 @@ a.fleet-member:hover {
 	color: var(--label-secondary);
 	text-align: center;
 }
+
+/* a slow Files or Log load must not trap the panel: Back and Close stay usable */
+.modal-drawer .loading-block {
+	pointer-events: none;
+}

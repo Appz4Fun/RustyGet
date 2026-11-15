@@ -343,7 +343,8 @@ var DetailsPanel = (new function($)
 		var $backdrop = $('.modal-backdrop').last();
 		$backdrop.off('click.details').on('click.details', function()
 		{
-			if ($dialog.hasClass('in') && !$dialog.hasClass('is-saving'))
+			// a confirm opened from the panel shares this backdrop: leave both open
+			if ($dialog.hasClass('in') && !$dialog.hasClass('is-saving') && !$('.modal.in:visible').not($dialog).length)
 			{
 				$dialog.modal('hide');
 			}

@@ -162,6 +162,53 @@ const { installDetailsFixture } = require('./details-fixture');
         await panel.waitFor({ state: 'hidden' });
       });
 
+      await check('late log reply for a copy the panel left is dropped', async () => {
+        let release;
+        const asked = new Promise(resolve => {
+          fixture.holdLoadlog = () => { resolve(); return new Promise(r => { release = r; }); };
+        });
+        try {
+          await page.locator('#DownloadsTable tbody a[data-nzbid="41"]').first().click();
+          await panel.waitFor({ state: 'visible' });
+          await page.locator('#DownloadsEdit_Log').click();
+          await asked;
+          fixture.holdLoadlog = undefined;
+          await page.locator('#DownloadsEdit_Back').click();
+          await page.locator('#DownloadsEdit_Fleet a.fleet-member[data-fleet-id="42"]').click();
+          await page.waitForFunction(() => /copy 02/.test(document.getElementById('DownloadsEdit_Title').textContent));
+          await page.locator('#DownloadsEdit_Log').click();
+          await page.locator('#DownloadsEdit_LogEmpty').waitFor({ state: 'visible' });
+        } finally {
+          fixture.holdLoadlog = undefined;
+          if (release) release();
+        }
+        await page.waitForTimeout(300);
+        assert.doesNotMatch(await page.locator('#DownloadsEdit_LogTable').innerText(), /copy 01/, "Copy 01's late log stays out of copy 02");
+        assert(await page.locator('#DownloadsEdit_LogEmpty').isVisible());
+        assert.equal(await page.locator('#DownloadsEditDialog .loading-block:visible').count(), 0, 'No stuck spinner');
+        await page.keyboard.press('Escape');
+        await panel.waitFor({ state: 'hidden' });
+      });
+
+      await check('a confirm opened from the panel keeps both open on a click beside them', async () => {
+        if (width < 768) return;
+        const history = page.locator('#HistoryEditDialog');
+        await page.locator('#HistoryTabLink').click();
+        await page.locator('#HistoryTable tbody a[data-nzbid="32"]').first().click();
+        await history.waitFor({ state: 'visible' });
+        await page.evaluate(() => ConfirmDialog.showModal('HistoryEditRedownloadConfirmDialog', function() {}));
+        await page.locator('#ConfirmDialog').waitFor({ state: 'visible' });
+        await page.mouse.click(12, Math.round(height / 2));
+        await page.waitForTimeout(300);
+        assert(await history.isVisible(), 'Panel stays open behind its confirm');
+        assert(await page.locator('#ConfirmDialog').isVisible(), 'Confirm stays open');
+        await page.evaluate(() => $('#ConfirmDialog').modal('hide'));
+        await page.locator('#ConfirmDialog').waitFor({ state: 'hidden' });
+        await page.mouse.click(12, Math.round(height / 2));
+        await history.waitFor({ state: 'hidden' });
+        await page.locator('#DownloadsTabLink').click();
+      });
+
       await check('history log and click beside the panel closes it', async () => {
         const history = page.locator('#HistoryEditDialog');
         await page.locator('#HistoryTabLink').click();

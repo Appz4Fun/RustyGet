@@ -325,11 +325,13 @@ where
     // A set that is complete on disk is declared as protected native files, which lets the
     // session publish verified members itself. Each volume holds one handle.
     // In rename mode every output is copied into place, so each member can get a free name.
+    // Overwrite mode only: skip mode would publish by hard link, which some destinations
+    // (exFAT, SMB) lack, and rename mode needs RustyGet's own numbering.
     let protected =
-        (DECLARE_PROTECTION && feed.set_is_final() && req.overwrite != Overwrite::Rename)
+        (DECLARE_PROTECTION && feed.set_is_final() && req.overwrite == Overwrite::Always)
             .then(|| protect_volumes(req.first_volume))
             .flatten()
-            .filter(fits_session_declaration);
+            .filter(|inv| fits_session_declaration(inv, req.first_volume, req.password));
     // A final set's volumes are all on disk; count them when no protected
     // inventory exists (rename mode) so the handle budget still fits the set.
     let expected = if feed.set_is_final() {
@@ -1657,12 +1659,24 @@ fn fits_protected_read_budget(
     per_check.saturating_mul(steps) <= PROTECTED_READ_BUDGET
 }
 
-/// Whether a set declared at session start fits zipfast's bookkeeping budget. Even with the
-/// per-step recheck bounded (zipfast #116), every volume admission and member boundary still
-/// sweeps the whole inventory, so a declared session costs about 3.1 V^2 (P + 16) units for V
-/// volumes with paths up to P bytes, whatever the data size. Larger sets are left undeclared
-/// and copied.
-fn fits_session_declaration(inventory: &zipfast::progressive::ProtectionInventory) -> bool {
+/// Whether a final set may be declared at session start: zipfast must place every member
+/// where the copy path would (no Windows-named or duplicate-name member) and the declaration
+/// must fit its bookkeeping budget. Even with the per-step recheck bounded (zipfast #116),
+/// every volume admission sweeps the whole inventory (about 3.1 V^2 (P + 16) units for V
+/// volumes with paths up to P bytes) and every member boundary and publication runs a full
+/// refresh (about 7-9 M V (P + 16) for M members, more with deep paths), whatever the data
+/// size. Anything else is left undeclared and copied.
+fn fits_session_declaration(
+    inventory: &zipfast::progressive::ProtectionInventory,
+    first: &Path,
+    password: &str,
+) -> bool {
+    let Some(members) = set_members(first, password) else {
+        return false;
+    };
+    if members.windows_names || members.duplicate_names {
+        return false;
+    }
     let v = inventory.volumes.len() as u64;
     let p = inventory
         .volumes
@@ -1677,11 +1691,18 @@ fn fits_session_declaration(inventory: &zipfast::progressive::ProtectionInventor
     let budget = zipfast::progressive::ProgressiveLimits::default()
         .source_bookkeeping
         .saturating_add(PROTECTED_READ_BUDGET);
-    // 4 rather than the measured 3.1 for margin.
-    4u64.saturating_mul(v)
+    // Margins over the measured costs: 4 for 3.1, 12 for 7-9.
+    let unit = p.saturating_add(16);
+    let admissions = 4u64
         .saturating_mul(v)
-        .saturating_mul(p.saturating_add(16))
-        <= budget
+        .saturating_mul(v)
+        .saturating_mul(unit);
+    let per_member = 12u64
+        .saturating_mul(v)
+        .saturating_mul(unit)
+        .saturating_mul(4u64.saturating_add(members.max_depth))
+        / 4;
+    admissions.saturating_add(members.count.saturating_mul(per_member)) <= budget
 }
 
 /// Path components of a member's output name (as the copy path names it).

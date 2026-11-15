@@ -2676,3 +2676,54 @@ fn a_final_set_of_many_volumes_with_long_paths_extracts() {
     expect_ok(r, &log);
     assert_eq!(crc_of_file(&t.out().join("movie.mkv")), crc);
 }
+
+/// Many members across many volumes: every member boundary runs a full protection refresh,
+/// so a declared session of 150 volumes and 600 members ran out of SourceBookkeeping where the
+/// copy path works. Such sets are left undeclared and copied.
+#[test]
+fn a_final_set_of_many_members_extracts() {
+    let t = TestDir::new("manymembers");
+    let dir = t.dl().join("y".repeat(100));
+    std::fs::create_dir_all(&dir).unwrap();
+    let volumes = 150;
+    let per = 4;
+    let mut expected = Vec::new();
+    for i in 0..volumes {
+        let mut v = SIG.to_vec();
+        v.extend(main_block(true, if i == 0 { None } else { Some(i as u64) }));
+        for j in 0..per {
+            let name = format!("d{}/e{}/f{i}_{j}.bin", i % 7, j);
+            let data = pattern_at(i * 10_000 + j * 997, 3_000 + j);
+            v.extend(file_block(
+                &name,
+                data.len() as u64,
+                &data,
+                crc32fast::hash(&data),
+                false,
+                false,
+            ));
+            expected.push((name, data));
+        }
+        v.extend(end_block(i + 1 < volumes));
+        std::fs::write(dir.join(volume_name(i, volumes)), &v).unwrap();
+    }
+    let first = dir.join(volume_name(0, volumes));
+    let (r, log) = run(&first, &t.out(), Box::new(CompleteSet));
+    expect_ok(r, &log);
+    for (name, data) in expected {
+        assert_eq!(std::fs::read(t.out().join(&name)).unwrap(), data, "{name}");
+    }
+}
+
+#[test]
+fn a_final_windows_set_is_copied_under_the_copy_path_name() {
+    RAR5_HOST.with(|h| h.set((0, 0x20)));
+    let t = TestDir::new("finalwin");
+    let data = pattern(300_000);
+    let vols = rar5_volumes("dir\\movie.mkv", &data, 100_000);
+    RAR5_HOST.with(|h| h.set((1, 0o644)));
+    let first = write_set(&t.dl(), &vols);
+    let (r, log) = run(&first, &t.out(), Box::new(CompleteSet));
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("dir\\movie.mkv")).unwrap(), data);
+}

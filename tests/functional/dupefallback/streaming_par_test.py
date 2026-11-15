@@ -16,6 +16,7 @@ import stat
 import struct
 import subprocess
 import tempfile
+import threading
 import time
 import zlib
 
@@ -24,6 +25,98 @@ import harness
 from par_first_test import LoggedDaemon, inspect_parity, verify_named_outputs
 
 CASES = ('ram_part40', 'manual', 'repair_off')
+LATE_CASES = ('late_par_hole_patch', 'late_par_hole_manual',
+              'late_par_hole_repair_off', 'late_par_hole_corrupt',
+              'late_par_hole_healthy', 'late_par_hole_zero_pool')
+
+
+class RecoveryBarrierProxy(harness.RewritingNntpProxy):
+    """Hold recovery requests until the fixture observes extraction past damage."""
+
+    def __init__(self, listen_port, upstream_port):
+        self.release = threading.Event()
+        self.requested = threading.Event()
+        self.serve_done = threading.Event()
+        self.lock = threading.Lock()
+        self.workers = []
+        self.sockets = []
+        self.events = []
+        self.timed_out = False
+        self.held_once = False
+        super().__init__(listen_port, upstream_port, b'', b'')
+
+    def _serve(self):
+        try:
+            while True:
+                try:
+                    client, _ = self.srv.accept()
+                    upstream = harness.socket.create_connection(('127.0.0.1', self.upstream_port))
+                except OSError:
+                    return
+                with self.lock:
+                    self.sockets.extend((client, upstream))
+                    for args in ((client, upstream, False), (upstream, client, True)):
+                        worker = threading.Thread(target=self._pipe, args=args, daemon=True)
+                        self.workers.append(worker)
+                        worker.start()
+        finally:
+            self.serve_done.set()
+
+    def _pipe(self, src, dst, rewrite):
+        pending = b''
+        try:
+            while True:
+                data = src.recv(65536)
+                if not data:
+                    break
+                if rewrite:
+                    dst.sendall(data)
+                    continue
+                pending += data
+                while b'\r\n' in pending:
+                    line, pending = pending.split(b'\r\n', 1)
+                    lower = line.lower()
+                    if lower.startswith((b'body ', b'article ')) and b'.vol' in lower:
+                        with self.lock:
+                            self.events.append({'event': 'recovery_requested',
+                                                'monotonic_ns': time.monotonic_ns()})
+                            hold = not self.held_once
+                            self.held_once = True
+                        if hold:
+                            self.requested.set()
+                        if hold and not self.release.wait(120):
+                            self.timed_out = True
+                            return
+                    dst.sendall(line + b'\r\n')
+        except OSError:
+            pass
+        finally:
+            for sock in (src, dst):
+                try:
+                    sock.shutdown(harness.socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                sock.close()
+
+    def close(self):
+        self.release.set()
+        try:
+            self.srv.shutdown(harness.socket.SHUT_RDWR)
+        except OSError:
+            pass
+        super().close()
+        self.serve_done.wait(10)
+        with self.lock:
+            sockets, workers = list(self.sockets), list(self.workers)
+        for sock in sockets:
+            try:
+                sock.shutdown(harness.socket.SHUT_RDWR)
+            except OSError:
+                pass
+        for worker in workers:
+            worker.join(timeout=10)
+        if not self.serve_done.is_set() or any(worker.is_alive() for worker in workers):
+            raise RuntimeError('owned proxy threads did not terminate')
 
 
 def digest_regular(path, limit=256 * 1024 * 1024):
@@ -245,30 +338,97 @@ def wait_until(predicate, description, timeout=30):
     raise AssertionError('timeout: ' + description)
 
 
-def make_fixture(target, par2):
+def inspect_source_geometry(paths, golden, slice_size):
+    main = None
+    descriptions = {}
+    for path in paths:
+        data = path.read_bytes()
+        offset = 0
+        while offset < len(data):
+            assert data[offset:offset + 8] == b'PAR2\0PKT'
+            length = struct.unpack_from('<Q', data, offset + 8)[0]
+            assert length >= 64 and length % 4 == 0 and offset + length <= len(data)
+            packet = data[offset:offset + length]
+            assert hashlib.md5(packet[32:]).digest() == packet[16:32]
+            kind = packet[48:64]
+            if kind == b'PAR 2.0\0Main\0\0\0\0':
+                assert length >= 76 and (length - 76) % 16 == 0
+                block_size, count = struct.unpack_from('<QI', packet, 64)
+                ids = tuple(packet[i:i + 16] for i in range(76, length, 16))
+                value = (block_size, count, ids)
+                assert main is None or main == value
+                main = value
+            elif kind == b'PAR 2.0\0FileDesc':
+                assert length >= 120
+                file_id = packet[64:80]
+                value = (struct.unpack_from('<Q', packet, 112)[0], packet[120:].rstrip(b'\0'))
+                assert file_id not in descriptions or descriptions[file_id] == value
+                descriptions[file_id] = value
+            offset += length
+    assert main is not None
+    block_size, count, ids = main
+    assert block_size == slice_size and count == len(golden) == len(ids) == len(set(ids))
+    observed = {}
+    for file_id in ids:
+        length, name = descriptions[file_id]
+        name = name.decode('ascii')
+        assert name in golden and length == len(golden[name]) and name not in observed
+        observed[name] = length
+    slices = sum((length + block_size - 1) // block_size for length in observed.values())
+    assert slices == 100 and all(length <= block_size for length in observed.values())
+    return {'source_files': count, 'source_slices': slices, 'source_lengths': observed}
+
+
+def make_fixture(target, par2, case):
     root = Path(target.makedirs('data', 'streaming-primary'))
     assert shutil.disk_usage(root).free >= 256 * 1024 * 1024
-    payload = harness._payload(100 * 65536, 20261114)
-    volumes = generators.rar3_store_volumes_valid('payload.bin', payload, 65536)
+    late = case in LATE_CASES
+    volume_size = 262144 if late else 65536
+    slice_size = 524288 if late else 131072
+    missing_article = 4 if late else 2
+    payload = harness._payload(100 * volume_size, 20261114)
+    volumes = generators.rar3_store_volumes_valid('payload.bin', payload, volume_size)
     assert len(volumes) == 100
     golden = {'rel.part%03d.rar' % (i + 1): data for i, data in enumerate(volumes)}
     for name, data in golden.items():
         (root / name).write_bytes(data)
-    create = [par2, 'create', '-q', '-q', '-s131072', '-c1', '-n1',
+    create = [par2, 'create', '-q', '-q', '-s' + str(slice_size), '-c1', '-n1',
               'rel.par2', *golden]
     with open(target.path('par2-create.log'), 'xb') as output:
         subprocess.run(create, cwd=root, stdout=output, stderr=subprocess.STDOUT,
                        timeout=60, check=True)
     parity = sorted(root.glob('*.par2'))
     assert len(parity) == 2, [p.name for p in parity]
-    assert inspect_parity(parity) == (131072, 1)
+    assert inspect_parity(parity) == (slice_size, 1)
+    geometry = inspect_source_geometry(parity, golden, slice_size)
     with open(target.path('par2-verify.log'), 'xb') as output:
         subprocess.run([par2, 'verify', '-q', '-q', 'rel.par2'], cwd=root,
                        stdout=output, stderr=subprocess.STDOUT, timeout=60, check=True)
+    original_parity_sha256 = {p.name: digest_regular(p) for p in parity}
+    if late:
+        damaged_size = len(golden['rel.part040.rar'])
+        assert 98304 >= 65536 and 131072 <= damaged_size - 4096
+    if case == 'late_par_hole_corrupt':
+        recovery = next(p for p in parity if '.vol' in p.name.lower())
+        data = bytearray(recovery.read_bytes())
+        offset = 0
+        changed = 0
+        while offset < len(data):
+            assert data[offset:offset + 8] == b'PAR2\0PKT'
+            length = struct.unpack_from('<Q', data, offset + 8)[0]
+            assert length >= 64 and offset + length <= len(data)
+            if data[offset + 48:offset + 64] == b'PAR 2.0\0RecvSlic':
+                assert length > 68
+                data[offset + 68] ^= 1
+                changed += 1
+            offset += length
+        assert changed == 1
+        recovery.write_bytes(data)
     members = []
     for name, content in golden.items():
         members.append(('streaming-primary/' + name, name, len(content), 32768,
-                        {2} if name == 'rel.part040.rar' else set()))
+                        {missing_article} if name == 'rel.part040.rar'
+                        and case not in ('late_par_hole_healthy', 'late_par_hole_zero_pool') else set()))
     for path in parity:
         members.append(('streaming-primary/' + path.name, path.name,
                         path.stat().st_size, 65536, set()))
@@ -276,9 +436,12 @@ def make_fixture(target, par2):
                'source_sha256': {name: hashlib.sha256(data).hexdigest()
                                  for name, data in golden.items()},
                'parity_sha256': {p.name: digest_regular(p) for p in parity},
+               'original_parity_sha256': original_parity_sha256,
                'par2_binary_sha256': digest_regular(par2), 'par2_create': create,
-               'source_slices': 100, 'slice_size': 131072, 'recovery_slices': 1,
-               'damaged_volume': 'rel.part040.rar', 'missing_article': 2}
+               'source_geometry': geometry, 'slice_size': slice_size, 'recovery_slices': 1,
+               'damaged_volume': 'rel.part040.rar', 'missing_article': missing_article,
+               'late_hole_range': [98304, 131072] if late else None,
+               'corrupt_recovery': case == 'late_par_hole_corrupt'}
     Path(target.path('fixture.json')).write_text(json.dumps(fixture, indent=2) + '\n')
     return payload, golden, members
 
@@ -291,7 +454,7 @@ def run_case(binary, par2, case):
     daemon = None
     proxy = None
     try:
-        payload, golden, members = make_fixture(target, par2)
+        payload, golden, members = make_fixture(target, par2, case)
         ports = set()
         while len(ports) < 3:
             ports.add(harness.free_port())
@@ -299,15 +462,21 @@ def run_case(binary, par2, case):
         daemon = LoggedDaemon(target, nserv_port, rpc_port)
         daemon.start_nserv()
         # Make the last dependency arrive after extraction reaches part40.
-        proxy = harness.DelayingNntpProxy(proxy_port, nserv_port,
-                                         [(b'rel.part100.rar', 1.0)])
+        barrier_case = case in ('late_par_hole_patch', 'late_par_hole_corrupt')
+        proxy = (RecoveryBarrierProxy(proxy_port, nserv_port) if barrier_case else
+                 harness.DelayingNntpProxy(proxy_port, nserv_port,
+                                           [(b'rel.part100.rar', 1.0)]))
         daemon.nntp_port = proxy_port
-        options = ['ParCheck=' + ('manual' if case == 'manual' else 'auto'),
-                   'ParRepair=' + ('no' if case == 'repair_off' else 'yes'),
+        manual = case in ('manual', 'late_par_hole_manual')
+        repair_off = case in ('repair_off', 'late_par_hole_repair_off')
+        options = ['ParCheck=' + ('manual' if manual else 'auto'),
+                   'ParRepair=' + ('no' if repair_off else 'yes'),
                    'ParQuick=yes', 'ParCleanupQueue=no', 'ArticleCache=16',
                    'Server1.Connections=3', 'DirectWrite=yes', 'DirectRename=no',
                    'InterDir=', 'Unpack=yes', 'DirectUnpack=yes',
                    'UnpackCleanupDisk=no', 'DupeArticleFallback=no']
+        if case == 'late_par_hole_zero_pool':
+            options.append('ParBuffer=0')
         daemon.write_config(options)
         daemon.start()
         api = daemon.wait_ready()
@@ -321,13 +490,28 @@ def run_case(binary, par2, case):
         sources = [f['ID'] for f in files if f['Filename'].endswith('.rar')]
         assert len(sources) == 100
         assert api.editqueue('FileResume', '', [index_id])
-        if case == 'ram_part40':
+        if case in ('ram_part40', 'late_par_hole_patch', 'late_par_hole_corrupt', 'late_par_hole_healthy'):
             wait_until(lambda: any(m['event'] == 'started' and m['nzb_id'] == nzb_id
                                    for m in metrics(target)), 'bounded PAR startup before source bytes')
         else:
             wait_until(lambda: all(f['ID'] != index_id for f in api.listfiles(0, 0, nzb_id)),
                        'explicitly resumed metadata index completion')
         assert api.editqueue('FileResume', '', sources)
+        if barrier_case:
+            wait_until(proxy.requested.is_set, 'automatic recovery request', timeout=90)
+            def saw_partial():
+                try:
+                    log = target.read_file('nzbget.log').decode(errors='replace')
+                except FileNotFoundError:
+                    return False
+                return 'extracted past damage' in log
+            wait_until(saw_partial, 'progressive extraction past damage while recovery is held', timeout=120)
+            assert not proxy.release.is_set() and not proxy.timed_out
+            result['partial_observed_ns'] = time.monotonic_ns()
+            assert not any(os.path.basename(p) == 'payload.bin'
+                           for p in target.find_files('main', 'dst')), 'partial output published early'
+            result['barrier_release_ns'] = time.monotonic_ns()
+            proxy.release.set()
         history = daemon.wait_history(api, name, timeout=120)
         assert api.shutdown(), 'graceful daemon shutdown was refused'
         result['graceful_daemon_exit'] = daemon.process.wait(timeout=30)
@@ -341,7 +525,40 @@ def run_case(binary, par2, case):
         recovery_requests = [line for line in requests if '.vol' in line.lower()]
         result.update(status=history.get('Status'), par_status=history.get('ParStatus'),
                       metrics=events, recovery_requests=recovery_requests)
-        if case == 'ram_part40':
+        if case == 'late_par_hole_patch':
+            result['barrier_events'] = proxy.events
+            assert proxy.events and proxy.events[0]['monotonic_ns'] < result['partial_observed_ns'] < result['barrier_release_ns']
+            assert not proxy.timed_out
+            assert any(event['event'] == 'repair_complete' for event in events), events
+            assert history.get('Status', '').startswith('SUCCESS'), history
+            integrity = verify_named_outputs(target, dict(golden, **{'payload.bin': payload}))
+            result['integrity'] = integrity
+            assert all(integrity.values()), integrity
+            assert recovery_requests, 'no recovery slice was fetched'
+            partial_at = log.find('extracted past damage')
+            repaired_at = log.find('1 paused volume(s) released')
+            patched_at = log.find('Unrar: repaired payload.bin from the repaired volumes')
+            # The helper logs release after unlocking; unpack can patch and log
+            # concurrently, so these two lines have no guaranteed mutual order.
+            assert 0 <= partial_at < repaired_at and partial_at < patched_at, \
+                'live repair and verified progressive patch did not follow the partial extraction'
+        elif case in ('late_par_hole_healthy', 'late_par_hole_zero_pool'):
+            assert history.get('Status', '').startswith('SUCCESS'), history
+            integrity = verify_named_outputs(target, dict(golden, **{'payload.bin': payload}))
+            result['integrity'] = integrity
+            assert all(integrity.values()), integrity
+            assert not recovery_requests, 'undamaged download fetched recovery'
+            if case == 'late_par_hole_zero_pool':
+                assert not events, 'zero PAR pool created a live session'
+        elif case == 'late_par_hole_corrupt':
+            result['barrier_events'] = proxy.events
+            assert not proxy.timed_out and recovery_requests
+            assert not any(event['event'] == 'repair_complete' for event in events), events
+            assert '1 paused volume(s) released' not in log
+            assert not history.get('Status', '').startswith('SUCCESS'), history
+            assert not any(os.path.basename(p) == 'payload.bin'
+                           for p in target.find_files('main', 'dst')), 'corrupt parity produced a complete output'
+        elif case == 'ram_part40':
             complete = [event for event in events if event['event'] == 'repair_complete']
             assert complete, 'no guarded live repair publication'
             event = complete[-1]
@@ -371,7 +588,7 @@ def run_case(binary, par2, case):
             assert recovery_requests, 'recovery slice never fetched'
         else:
             assert not events, 'manual/repair-off created a live session'
-            if case == 'manual':
+            if manual:
                 # Preserve incumbent manual postprocessing: it downloads the
                 # remaining PAR files for the user's later manual check.
                 manual = log.find('Downloading all remaining files for manual par-check for ' + name)
@@ -408,7 +625,11 @@ def run_case(binary, par2, case):
         result['error'] = repr(error)
     finally:
         if proxy:
-            proxy.close()
+            try:
+                proxy.close()
+            except Exception as error:
+                result['passed'] = False
+                result['proxy_cleanup_error'] = repr(error)
         target.teardown(True)
         result['native_children'] = []
         for process in target.procs:
@@ -428,7 +649,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--nzbget', required=True)
     parser.add_argument('--par2', default=shutil.which('par2'))
-    parser.add_argument('--case', choices=CASES + ('all',), default='ram_part40')
+    parser.add_argument('--case', choices=CASES + LATE_CASES + ('all',), default='ram_part40')
     args = parser.parse_args()
     assert args.par2, 'independent par2 reference tool is required'
     binary, par2 = str(Path(args.nzbget).resolve()), str(Path(args.par2).resolve())

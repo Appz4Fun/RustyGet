@@ -1029,6 +1029,19 @@ struct BufferedDiskFile {
     pos: i64,
 }
 
+fn prepare_article_write_context(
+    context: crate::parlive::SourceWriteContext,
+    direct_write: bool,
+    scratch_root: &std::path::Path,
+    article_number: i32,
+) -> std::io::Result<crate::parlive::SourceWriteContext> {
+    if direct_write {
+        Ok(context)
+    } else {
+        context.with_article_temporary(scratch_root, article_number)
+    }
+}
+
 impl BufferedDiskFile {
     #[cfg(test)]
     fn open(
@@ -1610,12 +1623,24 @@ impl RsArticleWriter {
             } else {
                 &self.temp_filename
             };
+            let scratch_dir = crate::options::active_options()
+                .map(|opts| opts.str_bytes(5).to_vec())
+                .unwrap_or_default();
+            let context = match prepare_article_write_context(
+                self.write_context.as_ref().unwrap().clone(),
+                direct_write,
+                crate::fsops::path(&scratch_dir),
+                art.part_number,
+            ) {
+                Ok(context) => context,
+                Err(_) => return false,
+            };
             match BufferedDiskFile::open_guarded(
                 out_filename,
                 direct_write,
                 write_buffer_kb,
                 art_info_size,
-                self.write_context.as_ref().unwrap().clone(),
+                context,
             ) {
                 Ok(mut f) => {
                     if direct_write {
@@ -3829,6 +3854,43 @@ impl NzbgetRsArticleDownloader {
 mod tests {
     use super::*;
     use std::os::unix::ffi::OsStrExt;
+
+    #[test]
+    fn exhausted_live_par_budget_does_not_block_an_ordinary_article_write() {
+        let dir = std::env::temp_dir().join(format!("rustyget-no-live-budget-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("part40.rar");
+        std::fs::write(&path, b"original").unwrap();
+        let context = crate::parlive::source_write_context(-1_961_502, 40, &dir, b"part40.rar").unwrap();
+        let limit = crate::parchecker::effective_live_pool_bytes();
+        assert!(limit > 0);
+        let reservation = crate::parlive::LIVE_BUDGET.acquire(limit, limit).unwrap();
+        let mut file = BufferedDiskFile::open_guarded(path.as_os_str().as_bytes(), true, 64, 0, context).unwrap();
+        assert_eq!(file.write_bytes(b"ordinary"), 8);
+        assert!(file.flush_and_close());
+        assert_eq!(std::fs::read(path).unwrap(), b"ordinary");
+        drop(reservation);
+        crate::parlive::forget_download_writes(-1_961_502);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn live_buffered_article_temporary_flush_uses_owned_scratch_root() {
+        let root = std::env::temp_dir().join(format!("rustyget-article-source-{}", std::process::id()));
+        let scratch = std::env::temp_dir().join(format!("rustyget-article-scratch-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&scratch).unwrap();
+        let context = crate::parlive::source_write_context(-1_961_501, 40, &root, b"part40.rar").unwrap();
+        let context = prepare_article_write_context(context, false, &scratch, 7).unwrap();
+        let path = scratch.join("40.007.tmp");
+        let mut file = BufferedDiskFile::open_guarded(path.as_os_str().as_bytes(), false, 64, 0, context).unwrap();
+        assert_eq!(file.write_bytes(b"one article"), 11);
+        assert!(file.flush_and_close());
+        assert_eq!(std::fs::read(path).unwrap(), b"one article");
+        crate::parlive::forget_download_writes(-1_961_501);
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(scratch).unwrap();
+    }
     #[test]
     fn live_buffered_actual_path_mismatch_never_truncates_other_file() {
         let dir = std::env::temp_dir().join(format!("rustyget-buffer-path-{}", std::process::id()));

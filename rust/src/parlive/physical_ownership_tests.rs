@@ -243,3 +243,149 @@ fn scratch_alias_cannot_replace_a_different_cohorts_certified_input() {
     source.finish();
     destination.finish();
 }
+
+#[test]
+fn alternate_root_cannot_reopen_a_closed_cohort_with_an_inflight_writer() {
+    let f = Fixture::new();
+    let path = f.root.join("part40.rar");
+    std::fs::write(&path, b"inflight bytes").unwrap();
+    let context = f.context(b"part40.rar");
+    context.attest_existing_source().unwrap();
+    let writer = context.permit().unwrap();
+    forget_download_writes(f.job);
+    let alias = f.root.with_extension("closed-alias");
+    std::os::unix::fs::symlink(&f.root, &alias).unwrap();
+    let other_job = NEXT_JOB.fetch_sub(1, Ordering::Relaxed);
+    let other = source_write_context(other_job, 40, &alias, b"part40.rar").unwrap();
+    let attempt = other.open_attested(&alias.join("part40.rar"), true);
+    if let Ok((file, _, permit)) = &attempt {
+        file.set_len(0).unwrap();
+        let _ = permit;
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), b"inflight bytes");
+    assert!(attempt.is_err());
+    drop(writer);
+    forget_download_writes(other_job);
+    std::fs::remove_file(alias).unwrap();
+    f.finish();
+}
+
+#[test]
+fn different_job_cannot_write_a_live_source_through_a_root_alias() {
+    let f = Fixture::new();
+    let path = f.root.join("part40.rar");
+    std::fs::write(&path, b"live source").unwrap();
+    let context = f.context(b"part40.rar");
+    context.attest_existing_source().unwrap();
+    let gate = download_writes(f.job, &f.root).unwrap();
+    gate.advance_generation(SessionGeneration(1)).unwrap();
+    let alias = f.root.with_extension("other-job");
+    std::os::unix::fs::symlink(&f.root, &alias).unwrap();
+    let other_job = NEXT_JOB.fetch_sub(1, Ordering::Relaxed);
+    let other = source_write_context(other_job, 41, &alias, b"part40.rar").unwrap();
+    let attempt = other.open_attested(&alias.join("part40.rar"), true);
+    if let Ok((file, _, permit)) = &attempt {
+        file.set_len(0).unwrap();
+        let _ = permit;
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), b"live source");
+    assert!(attempt.is_err());
+    forget_download_writes(other_job);
+    std::fs::remove_file(alias).unwrap();
+    f.finish();
+}
+
+#[test]
+fn rejected_job_cleanup_keeps_the_other_jobs_certified_gate_alive() {
+    let f = Fixture::new();
+    let path = f.root.join("part40.rar");
+    std::fs::write(&path, b"verified").unwrap();
+    let gate = f.seal(&path);
+    let other_job = NEXT_JOB.fetch_sub(1, Ordering::Relaxed);
+    let other = source_write_context(other_job, 41, &f.root, b"part40.rar").unwrap();
+    assert!(other.open_attested(&path, true).is_err());
+    forget_download_writes(other_job);
+    assert!(gate.is_current_generation(SessionGeneration(1)));
+    assert_eq!(std::fs::read(path).unwrap(), b"verified");
+    f.finish();
+}
+
+#[test]
+fn scratch_writer_cannot_replace_another_jobs_unsealed_live_source() {
+    let source = Fixture::new();
+    let destination = Fixture::new();
+    let path = destination.root.join("40.007.tmp");
+    std::fs::write(&path, b"other live source").unwrap();
+    let destination_context = destination.context(b"40.007.tmp");
+    destination_context.attest_existing_source().unwrap();
+    let gate = download_writes(destination.job, &destination.root).unwrap();
+    gate.advance_generation(SessionGeneration(1)).unwrap();
+    let context = source.context(b"part40.rar")
+        .with_article_temporary(&destination.root, 7).unwrap();
+    let attempt = context.open_attested(&path, true);
+    if let Ok((file, _, permit)) = &attempt {
+        file.set_len(0).unwrap();
+        let _ = permit;
+    }
+    assert_eq!(std::fs::read(path).unwrap(), b"other live source");
+    assert!(attempt.is_err());
+    assert!(!gate.is_current_generation(SessionGeneration(1)));
+    source.finish();
+    destination.finish();
+}
+
+#[test]
+fn exhausted_live_budget_does_not_bypass_a_foreign_certified_source() {
+    let f = Fixture::new();
+    let path = f.root.join("part40.rar");
+    std::fs::write(&path, b"certified").unwrap();
+    let gate = f.seal(&path);
+    let limit = crate::parchecker::effective_live_pool_bytes();
+    assert!(limit > 0);
+    let mut held = Vec::new();
+    let mut chunk = 1024 * 1024u64;
+    while chunk != 0 {
+        while let Some(lease) = LIVE_BUDGET.acquire(chunk, limit) { held.push(lease); }
+        chunk /= 2;
+    }
+    let other_job = NEXT_JOB.fetch_sub(1, Ordering::Relaxed);
+    let other = source_write_context(other_job, 41, &f.root, b"part40.rar").unwrap();
+    let attempt = other.open_attested(&path, true);
+    if let Ok((file, _, permit)) = &attempt {
+        file.set_len(0).unwrap();
+        let _ = permit;
+    }
+    assert!(attempt.is_err());
+    assert_eq!(std::fs::read(path).unwrap(), b"certified");
+    assert!(gate.is_current_generation(SessionGeneration(1)));
+    drop(held);
+    forget_download_writes(other_job);
+    f.finish();
+}
+
+#[test]
+fn preindex_cross_job_writer_conflict_cannot_disappear_at_live_startup() {
+    let f = Fixture::new();
+    let path = f.root.join("part40.rar");
+    std::fs::write(&path, b"preindex source").unwrap();
+    let context = f.context(b"part40.rar");
+    context.attest_existing_source().unwrap();
+    let writer = context.permit().unwrap();
+    let gate = download_writes(f.job, &f.root).unwrap();
+    let alias = f.root.with_extension("preindex-alias");
+    std::os::unix::fs::symlink(&f.root, &alias).unwrap();
+    let other_job = NEXT_JOB.fetch_sub(1, Ordering::Relaxed);
+    let other = source_write_context(other_job, 41, &alias, b"part40.rar").unwrap();
+    let attempt = other.open_attested(&alias.join("part40.rar"), true);
+    if let Ok((file, _, permit)) = &attempt {
+        file.set_len(0).unwrap();
+        let _ = permit;
+    }
+    assert!(attempt.is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), b"preindex source");
+    drop(writer);
+    assert!(gate.advance_generation(SessionGeneration(1)).is_err());
+    forget_download_writes(other_job);
+    std::fs::remove_file(alias).unwrap();
+    f.finish();
+}

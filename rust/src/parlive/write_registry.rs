@@ -25,6 +25,7 @@ pub(crate) struct SourceWriteContext {
     opened_leaf: Option<Arc<std::ffi::OsStr>>,
     temporary: Option<Arc<ArticleTemporary>>,
     opened_temporary: bool,
+    foreign_writer: bool,
 }
 struct ArticleTemporary {
     root: Arc<SourceRoot>,
@@ -57,8 +58,10 @@ impl SourceWriteContext {
             let temp = self.temporary.as_ref().ok_or_else(refused)?;
             let current = SourceRoot::open(&temp.spelling, self.job)?;
             if current.identity != temp.root.identity { return Err(refused()); }
+            let physical_path = temp.root.spelling.join(leaf);
+            if temp.coordinator.foreign_source_conflicts(&physical_path) { return Err(refused()); }
             if Arc::ptr_eq(&source.coordinator, &temp.coordinator) { None } else {
-                let identity = WriterIdentity::Path(temp.root.spelling.join(leaf));
+                let identity = WriterIdentity::Path(physical_path);
                 Some(temp.coordinator.writer_in_epoch(&identity, temp.epoch, false).map_err(blocked)?)
             }
         } else { None };
@@ -93,11 +96,24 @@ impl SourceWriteContext {
         let root = Arc::new(SourceRoot::open(&self.root, self.job)?);
         let mut registry = WRITES.lock().unwrap_or_else(|e| e.into_inner());
         registry.physical.retain(|_, weak| weak.strong_count() != 0);
-        let canonical = registry
-            .physical
-            .get(&root.identity)
-            .and_then(Weak::upgrade)
-            .filter(|owner| !owner.closed_and_quiescent().0);
+        let canonical = match registry.physical.get(&root.identity).and_then(Weak::upgrade) {
+            Some(owner) => match owner.closed_and_quiescent() {
+                (true, false) => return Err(blocked(WriteBlocked::Busy)),
+                (true, true) => None,
+                (false, _) => Some(owner),
+            },
+            None => None,
+        };
+        let foreign = self.job != 0 && canonical.as_ref().is_some_and(|owner| {
+            registry.downloads.iter().any(|(&job, (_, weak))| job != self.job
+                && weak.upgrade().is_some_and(|other| Arc::ptr_eq(&other, owner)))
+        });
+        if foreign {
+            let owner = canonical.as_ref().ok_or_else(refused)?;
+            let retained = owner.physical_root().ok_or_else(refused)?;
+            let path = retained.spelling.join(self.identity_path()?.file_name().ok_or_else(refused)?);
+            if owner.foreign_source_conflicts(&path) { return Err(refused()); }
+        }
         let owner = match canonical {
             Some(owner) if !Arc::ptr_eq(&owner, &self.coordinator) => {
                 if !self.coordinator.provisional_and_quiescent() {
@@ -141,6 +157,7 @@ impl SourceWriteContext {
         let mut context = self.clone();
         context.epoch = owner.writer_epoch();
         context.coordinator = owner;
+        context.foreign_writer = foreign;
         Ok((context, retained))
     }
     /// Validate the actual target before open, then the descriptor before any
@@ -195,8 +212,14 @@ impl SourceWriteContext {
         Ok(permit)
     }
     pub fn permit(&self) -> Result<SourceWritePermit, WriteBlocked> {
-        self.coordinator
-            .writer_in_epoch(&self.identity, self.epoch, true)
+        if self.foreign_writer {
+            let path = self.identity_path().map_err(|_| WriteBlocked::InvalidTarget)?;
+            let root = self.coordinator.physical_root().ok_or(WriteBlocked::InvalidTarget)?;
+            let leaf = path.file_name().ok_or(WriteBlocked::InvalidTarget)?;
+            self.coordinator.writer_in_epoch(&WriterIdentity::Path(root.spelling.join(leaf)), self.epoch, true)
+        } else {
+            self.coordinator.writer_in_epoch(&self.identity, self.epoch, true)
+        }
     }
     /// Run only filesystem work here; queue callbacks belong after the permit drops.
     pub fn perform_io<T>(&self, action: impl FnOnce() -> std::io::Result<T>) -> std::io::Result<T> {
@@ -222,6 +245,7 @@ impl SourceWriteContext {
             opened_leaf: None,
             temporary: None,
             opened_temporary: false,
+            foreign_writer: false,
         }
     }
     pub fn try_permit(&self) -> Result<SourceWritePermit, WriteBlocked> {
@@ -323,6 +347,7 @@ pub(crate) fn source_write_context(
         opened_leaf: None,
         temporary: None,
         opened_temporary: false,
+        foreign_writer: false,
     })
 }
 
@@ -342,17 +367,21 @@ pub(crate) fn donor_write_context(
         opened_leaf: None,
         temporary: None,
         opened_temporary: false,
+        foreign_writer: false,
     })
 }
 
 pub(crate) fn forget_download_writes(nzb_id: i32) {
-    let coordinator = WRITES
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .downloads
+    let mut registry = WRITES.lock().unwrap_or_else(|e| e.into_inner());
+    let coordinator = registry.downloads
         .remove(&nzb_id)
         .and_then(|(_, owner)| owner.upgrade());
     if let Some(coordinator) = coordinator {
-        coordinator.close();
+        let still_owned = registry.downloads.values().any(|(_, weak)| {
+            weak.upgrade().is_some_and(|other| Arc::ptr_eq(&other, &coordinator))
+        });
+        // Keep the lookup and close atomic: a second job must not join the
+        // coordinator between the last-owner check and closure.
+        if !still_owned { coordinator.close(); }
     }
 }

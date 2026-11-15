@@ -19,6 +19,7 @@ node tests/webui/settings-cards.js http://127.0.0.1:17999/     # offline, no dae
 node tests/webui/settings-modes.js http://127.0.0.1:17999/     # offline, no daemon needed
 node tests/webui/settings-removals.js http://127.0.0.1:17999/  # offline, no daemon needed
 node tests/webui/settings-servers.js http://127.0.0.1:17999/   # offline, no daemon needed
+node tests/webui/settings-host-lookup.js http://127.0.0.1:17999/  # offline, no daemon needed
 node tests/webui/system-metrics.js http://127.0.0.1:17999/     # offline: Status tiles, Statistics charts, License page
 node tests/webui/settings-health-startup.js http://127.0.0.1:17689/
 node tests/webui/tls-cipher.js http://127.0.0.1:17689/
@@ -86,6 +87,11 @@ only from the list, the Cipher menu and Optimize button without a `Server1.` key
 a saved cipher outside the menu, and Save server: it writes only the servers (an
 unsaved change elsewhere stays unsaved), runs the cipher test for that server when
 Cipher is Automatic, applies the chosen cipher, and reloads afterwards.
+
+The host lookup check (offline) types a host and checks the address list with
+country, network and connect time, picking an address (Host becomes the IP and a
+strict certificate check becomes Minimal), going back to the name, a name that
+does not resolve, and the note shown when the DB-IP files are missing.
 
 The locale check verifies the server health label exists in all 20 translated
 catalogs and renders translated summaries and help names in German, Spanish and

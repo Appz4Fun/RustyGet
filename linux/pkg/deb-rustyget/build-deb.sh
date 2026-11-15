@@ -27,6 +27,8 @@ mkdir -p "$STAGE/DEBIAN" "$STAGE/usr/bin" "$STAGE/usr/share/rustyget" \
 
 install -m 0755 build/release/rustyget "$STAGE/usr/bin/rustyget"
 cp -R webui "$STAGE/usr/share/rustyget/webui"
+# DB-IP Lite country/ASN files for the news server host lookup (read locally, never queried online)
+sh scripts/fetch-geoip.sh "$STAGE/usr/share/rustyget/geoip"
 install -m 0644 ChangeLog.md COPYING "$STAGE/usr/share/doc/rustyget/"
 install -m 0644 "$PKG/rustyget.service" "$STAGE/lib/systemd/system/rustyget.service"
 

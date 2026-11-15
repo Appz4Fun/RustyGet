@@ -162,6 +162,7 @@ async function installDetailsFixture(page, base, writes = [], hooks = {}) {
     config: options, loadconfig: options, configtemplates: [{ Name: '', Template: template }],
     status: status(), listgroups: groups, history, log: [], loadlog: [], servervolumes: [],
     version: '26.3', sysinfo: SYSINFO, systemstats: systemStats(), systemhealth: { Alerts: [], Sections: [] }, tlscipherstatus: {},
+    hostlookup: { Host: '', Port: 563, Error: '', GeoIP: false, Addresses: [] },
     readurl: JSON.stringify({ 'stable-version': '26.3', 'testing-version': '26.3' }), listfiles: [], viewfeed: []
   };
   await page.route('**/*', async route => {

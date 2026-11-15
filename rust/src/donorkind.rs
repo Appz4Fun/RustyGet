@@ -158,13 +158,10 @@ fn rar_packing(data: &[u8], password_known: bool) -> Packing {
     // stops there; the file header it read before that is what counts.
     crate::rarreader::read_from(&mut volume, &mut MemSource(data), &mut NoCipher, &mut files);
     if volume.encrypted {
-        // encrypted headers: nothing about the content can be read without the
-        // password, and the repair needs it to map the archive
-        return if password_known {
-            Packing::Unknown
-        } else {
-            Packing::Unborrowable
-        };
+        // encrypted headers: nothing about the content can be read here, so
+        // it is never taken before a copy that is proven borrowable or
+        // simply plain (encryption keeps a penalty even with the password)
+        return Packing::Unborrowable;
     }
     // the media file decides; a small nfo or sample in front of it says
     // nothing about how the movie is packed
@@ -173,6 +170,10 @@ fn rar_packing(data: &[u8], password_known: bool) -> Packing {
     };
     if !file.stored || (file.encrypted_data && !password_known) {
         Packing::Unborrowable
+    } else if file.encrypted_data {
+        // stored but encrypted, password known: the repair can decrypt it, at
+        // a cost, so it comes after the plain borrowable copies
+        Packing::Unknown
     } else {
         Packing::Borrowable
     }
@@ -229,30 +230,24 @@ pub fn packing_of_head(data: &[u8], name: &[u8], password_known: bool) -> Packin
     Packing::Unknown
 }
 
-/// Whether two copies are TWINs: their par2 sets list the same files (by MD5
-/// and length; a near-twin sharing most files counts too, as for article
-/// borrowing), or, when either has no complete par2 list, they hold the same
-/// number of data files with the same total size.
+/// Whether two copies are TWINs, the same post: their par2 sets list the
+/// same files by MD5 and length (a near-twin sharing most of a complete list
+/// counts too, as for article borrowing) and their data files are split into
+/// the same numbers of articles (`a_layout`, `b_layout`: the article count of
+/// each data file, sorted), so articles swap one for one. Size alone never
+/// makes a twin: a re-upload, or a copy with encrypted headers (a fresh salt
+/// every time), has the same file count and total size but different bytes.
+/// Without par2 lists two copies are not TWINs.
 pub fn twins(
     a: &crate::twin::Listed,
     b: &crate::twin::Listed,
-    a_data: (i64, i32),
-    b_data: (i64, i32),
+    a_layout: &[u32],
+    b_layout: &[u32],
 ) -> bool {
-    if a.complete && b.complete {
-        return crate::twin::kind(a, b).starts_with("twin")
-            || crate::twin::kind(b, a).starts_with("twin");
-    }
-    let (a_bytes, a_files) = a_data;
-    let (b_bytes, b_files) = b_data;
-    a_bytes > 0
-        && a_files > 0
-        && crate::dupeidentity::same_data(
-            a_bytes as u64,
-            a_files as u32,
-            b_bytes as u64,
-            b_files as u32,
-        )
+    !a_layout.is_empty()
+        && a_layout == b_layout
+        && (crate::twin::kind(a, b).starts_with("twin")
+            || crate::twin::kind(b, a).starts_with("twin"))
 }
 
 #[cfg(test)]
@@ -307,23 +302,24 @@ mod tests {
             packing_of_head(&rar4_with_file(0x33, 0, 0), b"a.rar", false),
             Packing::Unborrowable
         );
-        // encrypted file data, store mode: borrowable only with the password
+        // encrypted file data, store mode: usable only with the password, and
+        // then still after the plain borrowable copies
         assert_eq!(
             packing_of_head(&rar4_with_file(0x30, 0x04, 0), b"a.rar", false),
             Packing::Unborrowable
         );
         assert_eq!(
             packing_of_head(&rar4_with_file(0x30, 0x04, 0), b"a.rar", true),
-            Packing::Borrowable
+            Packing::Unknown
         );
-        // encrypted headers
+        // encrypted headers: last, password or not
         assert_eq!(
             packing_of_head(&rar4_with_file(0x30, 0, 0x80), b"a.rar", false),
             Packing::Unborrowable
         );
         assert_eq!(
             packing_of_head(&rar4_with_file(0x30, 0, 0x80), b"a.rar", true),
-            Packing::Unknown
+            Packing::Unborrowable
         );
         // a header cut short tells nothing
         assert_eq!(
@@ -417,17 +413,33 @@ mod tests {
     }
 
     #[test]
-    fn twins_by_par2_or_size() {
+    fn twins_need_matching_par2_and_articles() {
         let a = listed(&[("a.r00", 10, "m1"), ("a.r01", 10, "m2")], true);
         let b = listed(&[("b.r00", 10, "m1"), ("b.r01", 10, "m2")], true);
         let c = listed(&[("c.r00", 10, "x1"), ("c.r01", 10, "x2")], true);
-        assert!(twins(&a, &b, (20, 2), (20, 2)));
-        // complete lists that differ win over equal sizes
-        assert!(!twins(&a, &c, (20, 2), (20, 2)));
-        // without a complete list, equal data geometry decides
+        let l = [3u32, 3];
+        assert!(twins(&a, &b, &l, &l));
+        // same par2 hashes, other article split: an ALT, not swappable
+        assert!(!twins(&a, &b, &l, &[2, 4]));
+        assert!(!twins(&a, &b, &[], &[]));
+        // same names and sizes, other bytes (a re-upload with encrypted
+        // headers): not twins
+        assert!(!twins(&a, &c, &l, &l));
+        // a partial list sharing most files of a complete one: a near-twin
+        let three = listed(
+            &[
+                ("t.r00", 10, "m1"),
+                ("t.r01", 10, "m2"),
+                ("t.r02", 10, "m3"),
+            ],
+            true,
+        );
+        let part = listed(&[("p.r00", 10, "m1"), ("p.r01", 10, "m2")], false);
+        assert!(twins(&three, &part, &l, &l));
+        assert!(twins(&part, &three, &l, &l));
+        // without par2 lists nothing is a twin, whatever the sizes
         let none = listed(&[], false);
-        assert!(twins(&none, &c, (20, 2), (20, 2)));
-        assert!(!twins(&none, &c, (20, 2), (21, 2)));
-        assert!(!twins(&none, &none, (0, 0), (0, 0)));
+        assert!(!twins(&none, &c, &l, &l));
+        assert!(!twins(&none, &none, &l, &l));
     }
 }

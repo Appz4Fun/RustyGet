@@ -351,6 +351,7 @@ where
         first_name,
     );
     opts.limits.volume_handles = opts.limits.volume_handles.max(2 * volume_count + 16);
+    let handle_limit = opts.limits.volume_handles;
     opts.limits.protection_paths = opts.limits.protection_paths.max(volume_count + 16);
     log_cb(
         3,
@@ -633,7 +634,7 @@ where
     if !deferred.is_empty()
         && first_failure.is_none()
         && req.overwrite != Overwrite::Rename
-        && upgrade_protection(req.first_volume, &protection, &opened)
+        && upgrade_protection(req.first_volume, &protection, &opened, handle_limit)
     {
         log_cb(
             4,
@@ -1397,7 +1398,12 @@ fn file_identity(meta: &std::fs::Metadata) -> (u64, u64) {
 /// renaming them into place, instead of RustyGet copying each one. Only done when every volume
 /// is still the file the session read: a repair that replaced a volume file would make zipfast
 /// refuse the declaration, so those sets keep the copy path.
-fn upgrade_protection(first: &Path, slot: &ProtectionSlot, opened: &OpenedVolumes) -> bool {
+fn upgrade_protection(
+    first: &Path,
+    slot: &ProtectionSlot,
+    opened: &OpenedVolumes,
+    handle_limit: u64,
+) -> bool {
     let mut slot = slot.lock().unwrap_or_else(|e| e.into_inner());
     if slot.is_some() {
         return true;
@@ -1415,7 +1421,11 @@ fn upgrade_protection(first: &Path, slot: &ProtectionSlot, opened: &OpenedVolume
     let Some(inventory) = protect_volumes(first) else {
         return false;
     };
-    if inventory.volumes.len() < opened.len() {
+    // While opaque, zipfast holds a handle for every volume it read; the declaration adds one
+    // per protected volume. The session's handle budget is fixed at creation.
+    if inventory.volumes.len() < opened.len()
+        || (opened.len() + inventory.volumes.len()) as u64 + 8 > handle_limit
+    {
         return false;
     }
     *slot = Some(inventory);

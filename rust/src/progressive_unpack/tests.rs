@@ -1596,6 +1596,7 @@ fn patch_timing() {
     let chunk = 50 << 20;
     let vols = rar5_volumes("movie.mkv", &data, chunk);
     let first = write_set(&t.dl(), &vols);
+    let count = vols.len();
     let k = vols.len() / 2;
     let vk = t.dl().join(volume_name(k, vols.len()));
     let pk = payload_offset(&vols[k], chunk.min(vols[k].len())) as u64;
@@ -1605,7 +1606,7 @@ fn patch_timing() {
     std::fs::write(&vk, &dmg).unwrap();
     let original = vols[k][lost.0 as usize..(lost.0 + lost.1) as usize].to_vec();
     drop(vols);
-    struct InPlace(PathBuf, u64, u64, Vec<u8>);
+    struct InPlace(PathBuf, u64, u64, Vec<u8>, u64);
     impl VolumeFeed for InPlace {
         fn volume(&mut self, path: &Path) -> VolumeView {
             if path == self.0 {
@@ -1624,6 +1625,10 @@ fn patch_timing() {
             f.sync_all().unwrap();
             true
         }
+        // Direct unpack's feed knows the volume count from the queue.
+        fn expected_volumes(&self) -> u64 {
+            self.4
+        }
     }
     let mut repaired_at = None;
     let started = std::time::Instant::now();
@@ -1636,7 +1641,7 @@ fn patch_timing() {
     };
     let r = extract(
         &req,
-        Box::new(InPlace(vk, lost.0, lost.1, original)),
+        Box::new(InPlace(vk, lost.0, lost.1, original, count as u64)),
         &mut |_, m: &str| {
             if m.contains("waiting for the volumes to be repaired") {
                 repaired_at = Some(std::time::Instant::now());
@@ -1649,4 +1654,42 @@ fn patch_timing() {
     let patch = repaired_at.map(|t0| t0.elapsed()).unwrap_or_default();
     assert_eq!(std::fs::metadata(t.out().join("movie.mkv")).unwrap().len(), data.len() as u64);
     eprintln!("PATCH_TIMING mb={mb} total={:.2}s patch_and_publish={:.2}s", total.as_secs_f64(), patch.as_secs_f64());
+}
+
+#[test]
+fn protection_upgrade_is_skipped_when_the_handle_budget_cannot_fit_it() {
+    // 40 volumes but the feed expects 30: the session's handle budget fits the extraction but
+    // not the extra handles of the protection declaration, so the upgrade is skipped and the
+    // output copied instead of failing.
+    struct Under(Damaged);
+    impl VolumeFeed for Under {
+        fn volume(&mut self, path: &Path) -> VolumeView {
+            self.0.volume(path)
+        }
+        fn wait_repaired(&mut self, c: &mut dyn FnMut() -> bool) -> bool {
+            self.0.wait_repaired(c)
+        }
+        fn expected_volumes(&self) -> u64 {
+            30
+        }
+    }
+    let t = TestDir::new("budget");
+    let data = pattern(40 * 4_000);
+    let chunk = 4_000;
+    let vols = rar5_volumes("movie.mkv", &data, chunk);
+    let first = write_set(&t.dl(), &vols);
+    let v = t.dl().join(volume_name(20, vols.len()));
+    let p = payload_offset(&vols[20], chunk) as u64;
+    let mut dmg = vols[20].clone();
+    dmg[(p + 100) as usize..(p + 200) as usize].fill(0);
+    std::fs::write(&v, &dmg).unwrap();
+    let feed = Under(Damaged {
+        holes: vec![(v.clone(), vec![(p + 100, 100)])],
+        repair: vec![(v, vols[20].clone())],
+        handed: false,
+    });
+    let (r, log) = run(&first, &t.out(), Box::new(feed));
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+    assert!(!log.iter().any(|l| l.contains("moved into place instead of copied")), "{log:?}");
 }

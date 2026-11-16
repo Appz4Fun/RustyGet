@@ -429,6 +429,49 @@ pub fn middle_end(n: usize) -> usize {
     }
 }
 
+/// The first and last volume (indices into `names`) when the names are one
+/// RAR volume set and nothing else: `x.part01.rar` ... `x.partNN.rar`, or
+/// `x.rar`, `x.r00` ... `x.rNN`, numbered without gaps. A re-RAR is only
+/// trusted on such a list: another file beside the volumes (an nfo, a
+/// sample, a second set) was not checked by the volume rules.
+pub fn rar_set_ends(names: &[&str]) -> Option<(usize, usize)> {
+    let lower: Vec<String> = names.iter().map(|n| n.to_ascii_lowercase()).collect();
+    let digits = |t: &str| -> Option<u32> {
+        (!t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| t.parse().ok())
+            .flatten()
+    };
+    // (stem, volume number from 0) of each name
+    let new_style = |n: &str| -> Option<(String, u32)> {
+        let body = n.strip_suffix(".rar")?;
+        let at = body.rfind(".part")?;
+        let no = digits(&body[at + 5..])?;
+        Some((body[..at].to_owned(), no.checked_sub(1)?))
+    };
+    let old_style = |n: &str| -> Option<(String, u32)> {
+        if let Some(stem) = n.strip_suffix(".rar") {
+            return Some((stem.to_owned(), 0));
+        }
+        let at = n.rfind(".r")?;
+        let no = digits(&n[at + 2..]).filter(|_| n.len() - at == 4)?;
+        Some((n[..at].to_owned(), no + 1))
+    };
+    let pick = |parse: &dyn Fn(&str) -> Option<(String, u32)>| -> Option<(usize, usize)> {
+        let parsed: Vec<(String, u32)> = lower.iter().map(|n| parse(n)).collect::<Option<_>>()?;
+        let stem = &parsed.first()?.0;
+        let mut seen = vec![None; parsed.len()];
+        for (i, (s, no)) in parsed.iter().enumerate() {
+            let slot = seen.get_mut(usize::try_from(*no).ok()?)?;
+            if s != stem || slot.is_some() {
+                return None;
+            }
+            *slot = Some(i);
+        }
+        Some((seen[0]?, (*seen.last()?)?))
+    };
+    pick(&new_style).or_else(|| pick(&old_style))
+}
+
 /// Where the first member's data ends in a re-RAR's last volume, read from
 /// the first bytes of its first volume (`first`) and of its last volume
 /// (`last`; the same bytes when `single`, a one-volume archive). A re-RAR
@@ -968,6 +1011,36 @@ mod tests {
         assert_eq!(creation_of(&fixture("rerar-a.part1.rar")), None);
         assert_eq!(creation_of(&fixture("plain.7z")), None);
         assert_eq!(same_creation(None, None), None);
+    }
+
+    #[test]
+    fn rar_set_ends_needs_one_set_and_nothing_else() {
+        assert_eq!(
+            rar_set_ends(&["x.part01.rar", "x.part02.rar", "x.part03.rar"]),
+            Some((0, 2))
+        );
+        assert_eq!(rar_set_ends(&["X.PART1.RAR", "X.PART2.RAR"]), Some((0, 1)));
+        // old naming sorts x.r00 first and x.rar last
+        assert_eq!(rar_set_ends(&["x.r00", "x.r01", "x.rar"]), Some((2, 1)));
+        assert_eq!(rar_set_ends(&["x.rar"]), Some((0, 0)));
+        assert_eq!(rar_set_ends(&["x.part1.rar"]), Some((0, 0)));
+        // other files, a gap, a second set, a duplicate number
+        assert_eq!(rar_set_ends(&["x.nfo", "x.part1.rar", "x.part2.rar"]), None);
+        assert_eq!(rar_set_ends(&["x.part1.rar", "x.part2.rar", "x.sfv"]), None);
+        assert_eq!(rar_set_ends(&["x.part1.rar", "x.part3.rar"]), None);
+        assert_eq!(
+            rar_set_ends(&[
+                "cd1.part1.rar",
+                "cd1.part2.rar",
+                "cd2.part1.rar",
+                "cd2.part2.rar"
+            ]),
+            None
+        );
+        assert_eq!(rar_set_ends(&["x.r00", "x.r01"]), None);
+        // a lone .rar of any name is a one-volume set; its headers decide
+        assert_eq!(rar_set_ends(&["x.part0.rar"]), Some((0, 0)));
+        assert_eq!(rar_set_ends(&[]), None);
     }
 
     #[test]

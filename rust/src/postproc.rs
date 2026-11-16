@@ -2843,6 +2843,9 @@ struct DirectUnpackHoldState {
     holes: std::collections::HashMap<Vec<u8>, Vec<(u64, u64)>>,
     /// The download finished: a volume that is not on disk now never will be.
     download_finished: bool,
+    /// Dead volumes rebuilt from a duplicate (see `deadvolume`), by full path: the extraction
+    /// reads these instead of the missing files.
+    virtuals: std::collections::HashMap<Vec<u8>, crate::deadvolume::VirtualVolume>,
 }
 
 /// What direct unpack's extraction session sees of a download in progress: a volume is ready
@@ -2864,12 +2867,17 @@ impl crate::progressive_unpack::VolumeFeed for DirectUnpackFeed {
         };
         #[cfg(not(unix))]
         let full = path.to_string_lossy().as_bytes().to_vec();
+        if let Some(v) = direct_unpack_virtual(self.nzb_id, &full) {
+            return VolumeView::Virtual(v);
+        }
         match direct_unpack_hole_view(&full) {
             Some(holes) if !holes.is_empty() => VolumeView::Ready { holes },
             Some(_) => VolumeView::NotYet,
             None if path.is_file() => VolumeView::Ready { holes: Vec::new() },
-            None if direct_unpack_download_finished(self.nzb_id)
-                || direct_unpack_abandoned(self.nzb_id) =>
+            // With dead files still on hold this volume may be one of them, borrowed later.
+            None if direct_unpack_abandoned(self.nzb_id)
+                || (direct_unpack_download_finished(self.nzb_id)
+                    && !direct_unpack_has_holds(self.nzb_id)) =>
             {
                 VolumeView::Missing
             }
@@ -2988,6 +2996,88 @@ pub(crate) fn direct_unpack_has_holds(nzb_id: i32) -> bool {
     direct_unpack_holds()
         .get(&nzb_id)
         .is_some_and(|st| !st.held.is_empty())
+}
+
+/// The rebuilt stand-in for dead volume `full_path` of download `nzb_id`, if one was handed over.
+pub(crate) fn direct_unpack_virtual(nzb_id: i32, full_path: &[u8]) -> Option<crate::deadvolume::VirtualVolume> {
+    direct_unpack_holds()
+        .get(&nzb_id)
+        .and_then(|st| st.virtuals.get(full_path).cloned())
+}
+
+/// True when every file direct unpack of `nzb_id` still holds is a file that never reached the
+/// disk under a name that is not a RAR volume's (an obfuscated stand-in held in case it was a
+/// volume). Releasing those is safe: a volume the extraction really needs then shows as missing
+/// and the extraction fails as it would have, while one it never needed lets it finish.
+pub(crate) fn direct_unpack_holds_only_absent_stand_ins(nzb_id: i32) -> bool {
+    direct_unpack_holds().get(&nzb_id).is_some_and(|st| {
+        !st.held.is_empty()
+            && st.held.iter().all(|p| {
+                !crate::filetypes::is_rar_file(hold_path_filename(p))
+                    && !crate::fsops::path(p).exists()
+            })
+    })
+}
+
+/// Downloads that had dead volumes rebuilt from a duplicate, with how many. Kept past the end
+/// of direct unpack (which forgets its holds) so post-processing can tell why par-check failed.
+fn dead_volumes_borrowed(
+) -> std::sync::MutexGuard<'static, std::collections::HashMap<i32, usize>> {
+    static MAP: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<i32, usize>>> =
+        std::sync::OnceLock::new();
+    MAP.get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// How many dead volumes of download `nzb_id` were rebuilt from a duplicate (0 if none), once:
+/// the count is forgotten as it is read.
+pub(crate) fn take_dead_volumes_borrowed(nzb_id: i32) -> usize {
+    dead_volumes_borrowed().remove(&nzb_id).unwrap_or(0)
+}
+
+/// True when dead volume `full_path` already has a rebuilt stand-in.
+pub(crate) fn direct_unpack_has_virtual(full_path: &[u8]) -> bool {
+    direct_unpack_holds()
+        .values()
+        .any(|st| st.virtuals.contains_key(full_path))
+}
+
+/// Hands direct unpack of download `nzb_id` a rebuilt stand-in for dead volume `full_path`,
+/// releasing the volume from hold when one was set for it (a dead file with an obfuscated name
+/// is held under that name instead, see below).
+pub(crate) fn direct_unpack_set_virtual(
+    nzb_id: i32,
+    full_path: &[u8],
+    volume: crate::deadvolume::VirtualVolume,
+) {
+    let mut map = direct_unpack_holds();
+    let id = nzb_id;
+    let st = map.entry(id).or_default();
+    st.virtuals.insert(full_path.to_vec(), volume);
+    if let Some(i) = st.held.iter().position(|p| p == full_path) {
+        st.held.remove(i);
+        st.holes.remove(full_path);
+    } else if let Some(i) = st.held.iter().position(|p| {
+        // A held part-numbered volume stands only for itself.
+        !crate::fsops::path(p).exists()
+            && crate::streamrepair::rar_part_number(hold_path_filename(p)).is_none()
+    }) {
+        // Under obfuscated names a dead file is held under its posted name, which tells nothing
+        // of its place in the set: drop one held file of this download that never reached the
+        // disk for each stand-in, so the holds still count the volumes that wait for a repair.
+        // Its own name is never reported released: it is no archive to extract.
+        let stand_in = st.held.remove(i);
+        st.holes.remove(&stand_in);
+    } else {
+        // The volume arrived intact under a name not renamed yet: nothing was lost for it.
+        return;
+    }
+    *dead_volumes_borrowed().entry(nzb_id).or_default() += 1;
+    st.released.push(hold_path_filename(full_path).to_vec());
+    if st.held.is_empty() {
+        st.awaiting_repair = false;
+    }
 }
 
 /// Releases one repaired volume by path. Returns true when it was on hold.
@@ -3339,7 +3429,13 @@ fn direct_unpack_take_released(nzb_id: i32) -> (Vec<Vec<u8>>, bool) {
 }
 
 pub(crate) fn direct_unpack_forget_holds(nzb_id: i32) {
-    direct_unpack_holds().remove(&nzb_id);
+    let gone = direct_unpack_holds().remove(&nzb_id);
+    // Borrowed data of rebuilt dead volumes is only read by direct unpack.
+    for v in gone.iter().flat_map(|st| st.virtuals.values()) {
+        if crate::deadvolume::is_scratch(&v.data) {
+            let _ = std::fs::remove_file(&v.data);
+        }
+    }
 }
 
 #[derive(Default)]
@@ -6370,6 +6466,26 @@ unsafe extern "C" fn stream_repair_job_host_cb(
             host.post_set_int(pi, POST_INT_WORKING, 0);
             0
         }
+        16 => {
+            let out = unsafe { std::slice::from_raw_parts_mut(ints, 2) };
+            out[0] = -1;
+            let nzb = if live_mode {
+                host.queue_find_by_id(p1, job.nzb_id)
+            } else if job.post_ptr != 0 {
+                host.post_snap(job.post_ptr).nzb_ptr
+            } else {
+                0
+            };
+            if nzb != 0 {
+                let pending = (0..host.nzb_file_len(nzb))
+                    .map(|i| host.nzb_file_at(nzb, i))
+                    .filter(|&f| f != 0 && !host.file_snap(f).par_file)
+                    .count();
+                out[0] = pending as c_int;
+                out[1] = host.nzb_snap(nzb, false).id;
+            }
+            0
+        }
         15 => {
             if a2 == 0 {
                 let nzb = host.queue_find_by_id(p1, job.nzb_id);
@@ -6977,6 +7093,61 @@ mod post_job_arena_tests {
 
 #[cfg(all(test, unix))]
 mod live_hold_tests {
+    #[test]
+    fn borrowed_volume_is_released_under_its_own_name_not_the_stand_in() {
+        let dir = std::env::temp_dir().join(format!("rg-standin-rel-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = |n: &str| dir.join(n).to_string_lossy().as_bytes().to_vec();
+        let id = 917_302;
+        super::direct_unpack_hold(id, &p("x3obf.rar"));
+        let v = crate::deadvolume::VirtualVolume {
+            head: Vec::new(),
+            data: dir.join("none"),
+            data_len: 0,
+            tail: Vec::new(),
+        };
+        super::direct_unpack_set_virtual(id, &p("movie.part04.rar"), v.clone());
+        let (released, _) = super::direct_unpack_take_released(id);
+        assert_eq!(released, vec![b"movie.part04.rar".to_vec()]);
+        assert!(!super::direct_unpack_has_holds(id));
+        // An intact volume not renamed yet: nothing held for it, nothing counted.
+        std::fs::write(dir.join("y1obf.rar"), b"intact").unwrap();
+        super::direct_unpack_hold(id, &p("y1obf.rar"));
+        super::direct_unpack_set_virtual(id, &p("movie.part05.rar"), v);
+        assert!(super::direct_unpack_has_holds(id));
+        // Another dead volume held under its own name is no stand-in for this one.
+        super::direct_unpack_hold(id, &p("movie.part07.rar"));
+        let v2 = crate::deadvolume::VirtualVolume {
+            head: Vec::new(),
+            data: dir.join("none"),
+            data_len: 0,
+            tail: Vec::new(),
+        };
+        super::direct_unpack_set_virtual(id, &p("movie.part06.rar"), v2);
+        assert!(super::direct_unpack_is_held_path(&p("movie.part07.rar")));
+        assert_eq!(super::take_dead_volumes_borrowed(id), 1);
+        super::direct_unpack_forget_holds(id);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_absent_obfuscated_stand_ins_can_be_released_without_repair() {
+        let dir = std::env::temp_dir().join(format!("rg-standins-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = |n: &str| dir.join(n).to_string_lossy().as_bytes().to_vec();
+        let id = 917_301;
+        super::direct_unpack_hold(id, &p("a8f3k2b9"));
+        assert!(super::direct_unpack_holds_only_absent_stand_ins(id));
+        std::fs::write(dir.join("x1y2z3"), b"damaged").unwrap();
+        super::direct_unpack_hold(id, &p("x1y2z3"));
+        assert!(!super::direct_unpack_holds_only_absent_stand_ins(id), "a damaged file on disk");
+        super::direct_unpack_forget_holds(id);
+        super::direct_unpack_hold(id, &p("movie.part04.rar"));
+        assert!(!super::direct_unpack_holds_only_absent_stand_ins(id), "a missing RAR volume");
+        super::direct_unpack_forget_holds(id);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
     #[test]
     fn live_hold_publication_is_scoped_to_its_generation_and_download() {

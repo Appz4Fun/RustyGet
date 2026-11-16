@@ -16,6 +16,7 @@ pub mod collection;
 pub mod configfile;
 pub mod crc;
 pub mod decode;
+pub mod deadvolume;
 pub mod decoder;
 pub mod deobfuscation;
 pub mod directrenamer;

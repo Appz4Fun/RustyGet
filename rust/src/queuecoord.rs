@@ -353,6 +353,37 @@ pub fn eval_dead_download(
     }
 }
 
+/// True when a download that lost a stretch of articles should keep going instead of failing
+/// over: its backup is a twin or an alt in a borrowable packing (the same video, stored), live
+/// borrowing and direct unpack are on (`live_borrowing`; only direct unpack reads a rebuilt dead
+/// volume), the download's own packing is not unborrowable, and at least half of what
+/// it tried arrived. The lost parts are then borrowed from the backup (whole dead volumes
+/// included, see `deadvolume`), and the extraction already running is kept; a failover would
+/// delete it and download and extract the backup from its first byte. A download whose
+/// articles are mostly gone (`dead_rate`) still fails over.
+pub fn alt_covers_lost_articles(
+    dead_rate: bool,
+    live_borrowing: bool,
+    own_kind: crate::donorkind::DonorKind,
+    backup_kind: crate::donorkind::DonorKind,
+    projected_permille: i32,
+) -> bool {
+    use crate::donorkind::DonorKind;
+    !dead_rate
+        && live_borrowing
+        && own_kind != DonorKind::Unborrowable
+        && matches!(backup_kind, DonorKind::Twin | DonorKind::Borrowable)
+        && projected_permille >= 500
+}
+
+/// Logs "keeping for borrowing" once per download.
+fn note_kept_for_borrowing(nzb_id: i32) -> bool {
+    static NOTED: std::sync::Mutex<Option<std::collections::HashSet<i32>>> =
+        std::sync::Mutex::new(None);
+    let mut g = NOTED.lock().unwrap_or_else(|e| e.into_inner());
+    g.get_or_insert_with(Default::default).insert(nzb_id)
+}
+
 /// `QueueCoordinator::SideFile` (`QueueCoordinator.cpp`).
 pub fn is_side_file(filename: &[u8], ext_cleanup_disk: &[u8]) -> bool {
     let Some(dot_pos) = filename.iter().rposition(|&b| b == b'.') else {
@@ -4566,7 +4597,27 @@ impl NzbgetRsQueueCoordinator {
             && !dupe_mass_failure(nzb.total_articles, failed);
 
         if let Some((_, backup_nzb)) = backup {
+            // A stretch of lost articles (whole volumes included) that a twin or a
+            // borrowable alt can lend is borrowed too, keeping the extraction that runs.
+            let lendable = alt_covers_lost_articles(
+                false,
+                opts.dupe_article_fallback == crate::queuesubsys_host::DAF_LIVE
+                    && opts.direct_unpack,
+                crate::donorkind::DonorKind::from_param(
+                    host.nzb_get_param(nzb.ptr, crate::donorkind::KIND_PARAM).as_deref(),
+                ),
+                crate::donorkind::DonorKind::from_param(
+                    host.nzb_get_param(backup_nzb.ptr, crate::donorkind::KIND_PARAM)
+                        .as_deref(),
+                ),
+                nzb.health,
+            ) && !download_hopeless(
+                nzb.total_articles,
+                nzb.current_success_articles,
+                failed,
+            );
             if !light_damage
+                && !lendable
                 && crate::dupecoord::dupe_failover_warranted_inline(
                     nzb.dupe_score,
                     effective_failover_health,
@@ -4743,6 +4794,40 @@ impl NzbgetRsQueueCoordinator {
             }
             return;
         };
+
+        let backup_kind = crate::donorkind::DonorKind::from_param(
+            host.nzb_get_param(backup_nzb.ptr, crate::donorkind::KIND_PARAM)
+                .as_deref(),
+        );
+        let own_kind = crate::donorkind::DonorKind::from_param(
+            host.nzb_get_param(nzb.ptr, crate::donorkind::KIND_PARAM).as_deref(),
+        );
+        if alt_covers_lost_articles(
+            dead_rate,
+            opts.dupe_article_fallback == crate::queuesubsys_host::DAF_LIVE
+                && opts.direct_unpack,
+            own_kind,
+            backup_kind,
+            eval.projected,
+        ) {
+            if note_kept_for_borrowing(nzb.id) {
+                let mut msg = b"Keeping ".to_vec();
+                msg.extend_from_slice(&nzb.name);
+                msg.extend_from_slice(
+                    format!(
+                        ": {} of {} tried article(s) of its own arrived ({} failed in a row); duplicate ",
+                        eval.own, eval.tried, nzb.dupe_failed_run
+                    )
+                    .as_bytes(),
+                );
+                msg.extend_from_slice(&backup_nzb.name);
+                msg.extend_from_slice(
+                    b" holds the same video and lends the lost parts, so the extraction carries on instead of starting over",
+                );
+                host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_INFO, &msg);
+            }
+            return;
+        }
 
         if dead {
             if !crate::dupecoord::dupe_failover_warranted_inline(
@@ -6082,6 +6167,20 @@ mod tests {
         assert_eq!(r[0], crate::parchecker::ByteRange::new(0, 100 * art));
         assert_eq!(r[1].offset, 101 * art);
         assert!(r.capacity() == r.len());
+    }
+
+    #[test]
+    fn lost_articles_an_alt_can_lend_keep_the_download() {
+        use crate::donorkind::DonorKind::*;
+        assert!(alt_covers_lost_articles(false, true, Borrowable, Borrowable, 952));
+        assert!(alt_covers_lost_articles(false, true, Unknown, Twin, 600));
+        // Mostly gone, no live borrowing, an unborrowable backup or download: fail over.
+        assert!(!alt_covers_lost_articles(true, true, Borrowable, Borrowable, 952));
+        assert!(!alt_covers_lost_articles(false, false, Borrowable, Borrowable, 952));
+        assert!(!alt_covers_lost_articles(false, true, Borrowable, Unborrowable, 952));
+        assert!(!alt_covers_lost_articles(false, true, Borrowable, Unknown, 952));
+        assert!(!alt_covers_lost_articles(false, true, Unborrowable, Borrowable, 952));
+        assert!(!alt_covers_lost_articles(false, true, Borrowable, Borrowable, 499));
     }
 
     #[test]

@@ -1908,7 +1908,12 @@ impl NzbgetRsUnpackController {
         if crate::unpack::is_unpack_space_error(kind == MK_ERROR, text) {
             st.unpack_space_error = true;
         }
-        if kind == MK_ERROR && text.starts_with(crate::unpacklimits::LIMIT_PREFIX.as_bytes()) {
+        // Also behind a log prefix ("Join: Unpack limit: ...").
+        if kind == MK_ERROR
+            && text
+                .windows(crate::unpacklimits::LIMIT_PREFIX.len())
+                .any(|w| w == crate::unpacklimits::LIMIT_PREFIX.as_bytes())
+        {
             st.unpack_limit_error = true;
         }
 
@@ -2627,6 +2632,9 @@ impl NzbgetRsUnpackController {
         st.joined_files = joined;
         if !ok {
             st.unpack_ok = false;
+            if guard.as_ref().is_some_and(|g| crate::unpacklimits::breach_of(g).is_some()) {
+                st.unpack_limit_error = true;
+            }
         }
         st.log_prefix = None;
         Self::set_progress_label(ctx, host_cb, b"");
@@ -5464,6 +5472,19 @@ fn run_rename_job(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn, kind: i32
                     let full = [target_dir.as_slice(), &[sep], rel.as_slice()].concat();
                     match crate::unpacklimits::ascii_rename(crate::fsops::path(&full)) {
                         Ok(Some(new)) => {
+                            let new_rel = new
+                                .strip_prefix(crate::fsops::path(target_dir))
+                                .map(|p| crate::fsops::path_to_bytes(p).to_vec())
+                                .unwrap_or_default();
+                            if !new_rel.is_empty() {
+                                register_renamed_helper(
+                                    ctx,
+                                    host_cb,
+                                    &rel,
+                                    &new_rel,
+                                    &mut renamed_count,
+                                );
+                            }
                             let m = format!(
                                 "Renamed {} to {} (names are ASCII only)",
                                 String::from_utf8_lossy(&full),

@@ -133,6 +133,8 @@ pub struct Guard {
     /// retried, a direct unpack redone after the download) counts once.
     files: BTreeSet<PathBuf>,
     folders: BTreeSet<PathBuf>,
+    /// ASCII names given by [`Guard::asciify`] so far.
+    produced: BTreeSet<PathBuf>,
     breach: Option<String>,
 }
 
@@ -151,6 +153,7 @@ impl Guard {
             roots,
             files: BTreeSet::new(),
             folders: BTreeSet::new(),
+            produced: BTreeSet::new(),
             breach: None,
         }
     }
@@ -308,43 +311,76 @@ impl Guard {
     /// Renames every admitted file and folder that exists and whose name is not ASCII to its
     /// [`ascii_name`], deepest first. Run once, when the job's unpack is done.
     ///
-    /// When the ASCII name exists already: another file or folder this job wrote keeps it and
-    /// the renamed one gets `_2`, `_3`, ... before its extension; anything else there (an
-    /// older copy from an earlier unpack the job has already renamed) is replaced by a file,
-    /// and a folder is merged into it. Returns the renamed paths as (old, new).
-    pub fn asciify(&self) -> std::io::Result<Vec<(PathBuf, PathBuf)>> {
-        let base = &self.roots[0].dir;
-        let mut entries: Vec<&PathBuf> = self.files.iter().chain(self.folders.iter()).collect();
+    /// When the ASCII name exists already, the renamed entry gets `_2`, `_3`, ... before its
+    /// extension, unless what is there is an ASCII name this guard gave in an earlier run (an
+    /// older copy of the same member, unpacked again): a file replaces it and a folder is
+    /// merged into it. Returns the renamed paths as (old, new).
+    pub fn asciify(&mut self) -> std::io::Result<Vec<(PathBuf, PathBuf)>> {
+        let base = self.roots[0].dir.clone();
+        let mut entries: Vec<PathBuf> = self.files.iter().chain(self.folders.iter()).cloned().collect();
         // Deepest first: a folder is renamed after everything in it.
         entries.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
+        let mut names = Names {
+            base: &base,
+            earlier: std::mem::take(&mut self.produced),
+            now: BTreeSet::new(),
+        };
         let mut renamed = Vec::new();
+        let mut result = Ok(());
         for rel in entries {
-            let path = base.join(rel);
+            let path = base.join(&rel);
             let Some(name) = path.file_name() else {
                 continue;
             };
             if is_ascii(name) || std::fs::symlink_metadata(&path).is_err() {
                 continue;
             }
-            let dir = path.parent().unwrap_or(base).to_path_buf();
-            let target = self.place(&path, &dir, &ascii_name(&name.to_string_lossy()))?;
-            renamed.push((path, target));
+            let dir = path.parent().unwrap_or(&base).to_path_buf();
+            match names.place(&path, &dir, &ascii_name(&name.to_string_lossy())) {
+                Ok(target) => renamed.push((path, target)),
+                Err(e) => {
+                    result = Err(e);
+                    break;
+                }
+            }
         }
-        Ok(renamed)
+        let Names { earlier, now, .. } = names;
+        self.produced = earlier;
+        self.produced.extend(now);
+        result.map(|()| renamed)
+    }
+}
+
+/// The ASCII names given while renaming, relative to the unpack folder.
+struct Names<'a> {
+    base: &'a Path,
+    /// Given by earlier runs of the same guard.
+    earlier: BTreeSet<PathBuf>,
+    /// Given by this run.
+    now: BTreeSet<PathBuf>,
+}
+
+impl Names<'_> {
+    fn rel(&self, p: &Path) -> PathBuf {
+        p.strip_prefix(self.base).unwrap_or(p).to_path_buf()
     }
 
-    /// A distinct file or folder this job wrote at `path`.
-    fn taken(&self, path: &Path) -> bool {
-        path.strip_prefix(&self.roots[0].dir)
-            .is_ok_and(|r| self.files.contains(r) || self.folders.contains(r))
+    /// An older copy: inside an ASCII name an earlier run gave, and not given by this run.
+    fn stale(&self, p: &Path) -> bool {
+        let rel = self.rel(p);
+        !self.now.contains(&rel) && rel.ancestors().any(|a| self.earlier.contains(a))
     }
 
     /// Moves `src` to `dir/name` as [`Guard::asciify`] describes; returns where it went.
-    fn place(&self, src: &Path, dir: &Path, name: &str) -> std::io::Result<PathBuf> {
+    fn place(&mut self, src: &Path, dir: &Path, name: &str) -> std::io::Result<PathBuf> {
         let first = dir.join(name);
-        if let Ok(meta) = std::fs::symlink_metadata(&first) {
-            let src_is_dir = std::fs::symlink_metadata(src)?.is_dir();
-            if !self.taken(&first) && !meta.file_type().is_symlink() {
+        let target = match std::fs::symlink_metadata(&first) {
+            Err(_) => {
+                std::fs::rename(src, &first)?;
+                first
+            }
+            Ok(meta) if self.stale(&first) && !meta.file_type().is_symlink() => {
+                let src_is_dir = std::fs::symlink_metadata(src)?.is_dir();
                 if src_is_dir && meta.is_dir() {
                     for child in std::fs::read_dir(src)? {
                         let child = child?.path();
@@ -354,19 +390,24 @@ impl Guard {
                         }
                     }
                     std::fs::remove_dir(src)?;
-                    return Ok(first);
-                }
-                if !src_is_dir && !meta.is_dir() {
+                    first
+                } else if !src_is_dir && !meta.is_dir() {
                     std::fs::rename(src, &first)?;
-                    return Ok(first);
+                    first
+                } else {
+                    let t = free_name(dir, name);
+                    std::fs::rename(src, &t)?;
+                    t
                 }
             }
-        } else {
-            std::fs::rename(src, &first)?;
-            return Ok(first);
-        }
-        let target = free_name(dir, name);
-        std::fs::rename(src, &target)?;
+            Ok(_) => {
+                let t = free_name(dir, name);
+                std::fs::rename(src, &t)?;
+                t
+            }
+        };
+        let rel = self.rel(&target);
+        self.now.insert(rel);
         Ok(target)
     }
 }
@@ -545,17 +586,21 @@ pub fn ascii_rename(path: &Path) -> std::io::Result<Option<PathBuf>> {
     Ok(Some(target))
 }
 
-/// Handed from a finished direct unpack to the job's post-processing, by unpack folder.
-static HANDED_OVER: Mutex<Vec<SharedGuard>> = Mutex::new(Vec::new());
+/// Handed from a finished direct unpack to the job's post-processing, by unpack folder, with
+/// when.
+static HANDED_OVER: Mutex<Vec<(std::time::Instant, SharedGuard)>> = Mutex::new(Vec::new());
+
+/// A hand-over older than this belongs to a job that was never post-processed.
+const HAND_OVER_TTL: std::time::Duration = std::time::Duration::from_secs(12 * 3600);
 
 /// Keeps a finished direct unpack's guard for the job's post-processing, so the limits count
 /// both.
 pub fn hand_over(guard: &SharedGuard) {
     let dir = lock(guard).unpack_dir().to_path_buf();
     let mut h = lock(&HANDED_OVER);
-    h.retain(|g| lock(g).unpack_dir() != dir);
-    h.push(Arc::clone(guard));
     // Jobs deleted before post-processing never take theirs.
+    h.retain(|(t, g)| t.elapsed() < HAND_OVER_TTL && lock(g).unpack_dir() != dir);
+    h.push((std::time::Instant::now(), Arc::clone(guard)));
     if h.len() > 64 {
         h.remove(0);
     }
@@ -564,8 +609,9 @@ pub fn hand_over(guard: &SharedGuard) {
 /// The guard a direct unpack into `unpack_dir` handed over, if any.
 pub fn take_handed_over(unpack_dir: &Path) -> Option<SharedGuard> {
     let mut h = lock(&HANDED_OVER);
-    let i = h.iter().position(|g| lock(g).unpack_dir() == unpack_dir)?;
-    Some(h.remove(i))
+    let i = h.iter().position(|(_, g)| lock(g).unpack_dir() == unpack_dir)?;
+    let (t, g) = h.remove(i);
+    (t.elapsed() < HAND_OVER_TTL).then_some(g)
 }
 
 /// The breach `guard` recorded, if any.
@@ -1109,6 +1155,75 @@ mod tests {
         g.probe(&root().join("b"), false).unwrap();
         g.admit(&root().join("c"), false).unwrap();
         assert!(g.probe(&root().join("d"), false).is_err());
+    }
+
+
+    #[test]
+    fn names_that_fold_alike_all_stay() {
+        let (r, out, log) = unpack(
+            "foldalike",
+            &[
+                ("東京.mkv", b"tokyo"),
+                ("大阪.mkv", b"osaka"),
+                ("日本/a.txt", b"jp"),
+                ("中国/a.txt", b"cn"),
+            ],
+        );
+        assert!(r.is_ok(), "{r:?} {log:?}");
+        assert_eq!(names_in(&out), ["__", "__.mkv", "___2", "___2.mkv"]);
+        let mut contents: Vec<Vec<u8>> = ["__.mkv", "___2.mkv"]
+            .iter()
+            .map(|n| std::fs::read(out.join(n)).unwrap())
+            .collect();
+        contents.sort();
+        assert_eq!(contents, [b"osaka".to_vec(), b"tokyo".to_vec()]);
+        let mut dirs: Vec<Vec<u8>> = ["__", "___2"]
+            .iter()
+            .map(|n| std::fs::read(out.join(n).join("a.txt")).unwrap())
+            .collect();
+        dirs.sort();
+        assert_eq!(dirs, [b"cn".to_vec(), b"jp".to_vec()]);
+    }
+
+    #[test]
+    fn a_file_the_job_did_not_unpack_is_never_replaced() {
+        let t = std::env::temp_dir().join(format!("rg-keepdl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        std::fs::create_dir_all(&t).unwrap();
+        // Downloaded next to where the archive unpacks.
+        std::fs::write(t.join("Amelie.nfo"), b"downloaded").unwrap();
+        std::fs::write(t.join("Amélie.nfo"), b"unpacked").unwrap();
+        let mut g = Guard::new(Limits::default(), &t, &[]);
+        g.admit(&t.join("Amélie.nfo"), false).unwrap();
+        g.asciify().unwrap();
+        assert_eq!(std::fs::read(t.join("Amelie.nfo")).unwrap(), b"downloaded");
+        assert_eq!(std::fs::read(t.join("Amelie_2.nfo")).unwrap(), b"unpacked");
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
+    #[test]
+    fn an_unpack_redone_replaces_its_earlier_ascii_copies() {
+        let t = std::env::temp_dir().join(format!("rg-redo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        std::fs::create_dir_all(t.join("Café")).unwrap();
+        let mut g = Guard::new(Limits::default(), &t, &[]);
+        let write = |g: &mut Guard, v: &[u8]| {
+            std::fs::create_dir_all(t.join("Café")).unwrap();
+            std::fs::write(t.join("Café.txt"), v).unwrap();
+            std::fs::write(t.join("Café").join("a.txt"), v).unwrap();
+            g.admit(&t.join("Café.txt"), false).unwrap();
+            g.admit(&t.join("Café").join("a.txt"), false).unwrap();
+        };
+        write(&mut g, b"1");
+        g.asciify().unwrap();
+        // Direct unpack's output, unpacked again by post-processing with the same guard.
+        write(&mut g, b"2");
+        g.asciify().unwrap();
+        assert_eq!(names_in(&t), ["Cafe", "Cafe.txt"]);
+        assert_eq!(std::fs::read(t.join("Cafe.txt")).unwrap(), b"2");
+        assert_eq!(names_in(&t.join("Cafe")), ["a.txt"]);
+        assert_eq!(std::fs::read(t.join("Cafe").join("a.txt")).unwrap(), b"2");
+        let _ = std::fs::remove_dir_all(&t);
     }
 
     /// `NzbgetRsParsedOptions` is shared with C++: the header must list the same fields in

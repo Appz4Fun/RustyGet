@@ -37,6 +37,8 @@ const assert = require('node:assert/strict');
       assert.equal(await page.locator('#S_Server2_Name').inputValue(), 'Primary <news>');
       assert.match(await page.locator('.config-list-row.NEWS-SERVERS.multiid1 .config-list-name').innerText(), /Backup/);
       assert.equal(await page.locator('.config-list-row.NEWS-SERVERS.multiid1 .config-list-edit').getAttribute('data-multiid'), '1');
+      // Delete lives in the server's editor, so open it first.
+      await page.locator('.config-list-row.NEWS-SERVERS.multiid1 .config-list-edit').click();
       await page.locator('.NEWS-SERVERS.multiid1 .config-delete').click();
       await page.locator('#ConfirmDialog_OK').click();
       await page.waitForTimeout(500);
@@ -52,7 +54,8 @@ const assert = require('node:assert/strict');
       const row = page.locator('#S_ActivityAnimation').locator('xpath=ancestor::div[contains(@class,"control-group")]');
       assert.equal(await row.locator('.help-block').isVisible(), false, 'Help initially compact');
       const height = await row.evaluate(e => e.getBoundingClientRect().height);
-      assert(height <= 105, 'A Settings row has bounded height');
+      // Room for the name, option key, mode badge and a one-line summary at phone width.
+      assert(height <= 140, 'A Settings row has bounded height');
       await row.locator('.config-help-toggle').press('Space');
       assert.equal(await row.locator('.help-block').isVisible(), true);
       assert.equal(await row.locator('.config-help-toggle').getAttribute('aria-expanded'), 'true');

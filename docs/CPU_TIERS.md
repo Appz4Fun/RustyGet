@@ -28,7 +28,10 @@ that execs the v4 build when `/proc/cpuinfo` lists AVX-512 F/BW/CD/DQ/VL and the
 build otherwise. `RUSTYGET_CPU_LEVEL=default` (or another installed tier name) forces one.
 
 A tier binary started on a CPU below its tier stops at once with a message naming the
-build to use (`rust/src/cpulevel.rs`), instead of crashing on an illegal instruction.
+build to use, instead of crashing on an illegal instruction. The check lives in
+`rust/entry.rs`, which is always compiled for the compiler's default CPU and learns the
+tier only as `--cfg rustyget_tier="..."`: with `target-cpu` set, std's feature-detection
+macros answer "yes" at compile time and a check could never fire.
 
 No `apple-m5` tier yet: in the current LLVM it adds only MTE over `apple-m4`, which
 RustyGet does not use.

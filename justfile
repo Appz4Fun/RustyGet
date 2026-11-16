@@ -56,6 +56,9 @@ build profile="release" jobs="3" cpu="":
     env = os.environ.copy()
     env["CARGO_BUILD_JOBS"] = str(jobs)
     cpu_flags = [] if cpu == "generic" else ["-C", f"target-cpu={cpu}"]
+    # The entry object stays at the compiler's default CPU and only learns the
+    # tier as a cfg, so its startup tier check can run on any CPU.
+    tier_cfg = [] if cpu == "generic" else ["--cfg", f'rustyget_tier="{cpu}"']
     if cpu_flags:
         env["RUSTFLAGS"] = " ".join([env.get("RUSTFLAGS", ""), *cpu_flags]).strip()
 
@@ -76,18 +79,23 @@ build profile="release" jobs="3" cpu="":
 
     entry_obj = os.path.join(rust_target_dir, "nzbget_rs_entry.o")
     entry_src = os.path.join(root, "rust", "entry.rs")
-    if not os.path.exists(entry_obj) or os.path.getmtime(entry_src) > os.path.getmtime(entry_obj):
+    # Rebuild when the source or the tier changed (the tier is baked in as a cfg).
+    entry_stamp = entry_obj + ".tier"
+    entry_tier_stale = not os.path.exists(entry_stamp) or open(entry_stamp).read() != cpu
+    if entry_tier_stale or not os.path.exists(entry_obj) or os.path.getmtime(entry_src) > os.path.getmtime(entry_obj):
         print("[2/4] Building Rust entry point...")
         subprocess.run(
             [
                 "rustc", "--crate-name", "nzbget_rs_entry", "--crate-type", "lib",
-                "--emit=obj", "-C", "panic=abort", "-C", "opt-level=2", *cpu_flags,
+                "--emit=obj", "-C", "panic=abort", "-C", "opt-level=2", *tier_cfg,
                 "--target", rust_target, entry_src, "-o", entry_obj,
             ],
             cwd=os.path.join(root, "rust"),
             env=env,
             check=True,
         )
+        with open(entry_stamp, "w") as f:
+            f.write(cpu)
     else:
         print("[2/4] Rust entry point up to date.")
 

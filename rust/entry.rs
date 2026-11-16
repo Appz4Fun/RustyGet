@@ -50,12 +50,73 @@ static HOOKS: LifecycleHooks = LifecycleHooks {
     exit_proc: nzbget_c_exit_proc,
 };
 
+/// CPU features the Rust library was compiled to assume (its release tier,
+/// passed in by the build as `--cfg rustyget_tier="..."`) that this CPU lacks.
+/// This object is always compiled for the compiler's default CPU, so the
+/// detection below really runs on the CPU (with target-cpu set, std's
+/// detection macros would answer "yes" at compile time).
+fn missing_tier_features() -> Vec<&'static str> {
+    #[allow(unused_mut)]
+    let mut need: Vec<(&'static str, bool)> = Vec::new();
+    #[cfg(all(
+        target_arch = "x86_64",
+        any(rustyget_tier = "x86-64-v3", rustyget_tier = "x86-64-v4")
+    ))]
+    {
+        use std::arch::is_x86_feature_detected as has;
+        need.extend([
+            ("avx2", has!("avx2")),
+            ("bmi1", has!("bmi1")),
+            ("bmi2", has!("bmi2")),
+            ("fma", has!("fma")),
+            ("lzcnt", has!("lzcnt")),
+            ("movbe", has!("movbe")),
+            ("f16c", has!("f16c")),
+        ]);
+    }
+    #[cfg(all(target_arch = "x86_64", rustyget_tier = "x86-64-v4"))]
+    {
+        use std::arch::is_x86_feature_detected as has;
+        need.extend([
+            ("avx512f", has!("avx512f")),
+            ("avx512bw", has!("avx512bw")),
+            ("avx512cd", has!("avx512cd")),
+            ("avx512dq", has!("avx512dq")),
+            ("avx512vl", has!("avx512vl")),
+        ]);
+    }
+    #[cfg(all(target_arch = "aarch64", rustyget_tier = "apple-m4"))]
+    {
+        use std::arch::is_aarch64_feature_detected as has;
+        need.extend([("i8mm", has!("i8mm")), ("bf16", has!("bf16"))]);
+    }
+    need.into_iter()
+        .filter(|&(_, ok)| !ok)
+        .map(|(f, _)| f)
+        .collect()
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn main(
     argc: c_int,
     argv: *mut *mut c_char,
     argp: *mut *mut c_char,
 ) -> c_int {
+    // A tier build on a CPU below its tier: say which build to use before any
+    // tier-specific code runs, instead of dying on an illegal instruction.
+    let missing = missing_tier_features();
+    if !missing.is_empty() {
+        let floor = if cfg!(target_arch = "x86_64") {
+            "x86-64-v3"
+        } else {
+            "generic"
+        };
+        eprintln!(
+            "This RustyGet binary was built for newer CPUs: this CPU lacks {}. Install or run the {floor} build instead.",
+            missing.join(", ")
+        );
+        return 1;
+    }
     nzbget_rs_register_lifecycle_hooks(&HOOKS);
     nzbget_rs_main(argc, argv, argp)
 }

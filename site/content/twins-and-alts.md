@@ -77,8 +77,8 @@ Copies are ranked by kind:
 3. Copies whose packaging couldn't be told, such as a 7-Zip without a password, and stored RAR copies whose data needs the password to decrypt.
 4. Non-borrowable alts. They're downloaded and extracted whole, or serve as failover backups.
 
-A fleet puts health first: healthy copies, with at least 75% of the checked articles alive, come before weak ones, then copies of unknown health, then dead ones. The kinds order the copies within each of those groups, so a copy that's missing many articles never leads however cheap its packaging. Each copy's duplicate score follows that rank, so a client can't push an encrypted copy ahead of a borrowable one.
+A fleet puts health first: healthy copies, with at least 75% of the checked articles alive, come before weak ones, then copies of unknown health, then dead ones. The kinds order the copies within each of those groups, so a copy that's missing many articles never leads however cheap its packaging. RustyGet sets each copy's duplicate score itself, so a client can't push an encrypted copy ahead of a borrowable one. Scores start in that rank order; once a download runs, the backup check of `DupeWatch` scores the backups again, by kind first and then by health.
 
-Article fallback asks twins first, healthiest first, then the other copies by kind, then by duplicate score. A copy added outside a fleet has no kind from intake: article fallback counts it as a twin when par2 proved one, and otherwise with the copies whose packaging couldn't be told. Stream repair asks donors by duplicate score alone, so for a fleet it follows the fleet's rank.
+Article fallback asks twins first, healthiest first, then the other copies by kind, then by duplicate score. A copy added outside a fleet has no kind from intake: article fallback counts it as a twin when par2 proved one, otherwise by the kind the `DupeWatch` backup check worked out for it, and with the copies whose packaging couldn't be told when it has none. Stream repair asks donors by duplicate score alone.
 
 A single copy is used whatever its kind.

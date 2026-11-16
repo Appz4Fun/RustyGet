@@ -113,16 +113,27 @@ pub fn swap_nearly_done(size: i64, remaining: i64, health: i32, critical_health:
 }
 
 /// The backup `(id, alive)` a failing pick is swapped for: of those at least
-/// `need` alive, TWINs first, then borrowable, unknown and unborrowable ALTs
-/// (`kind`, a `crate::donorkind::DonorKind` as u8), each the wholest.
-/// Candidates are `(id, alive, kind)`.
+/// `need` alive, the healthy ones first (at least
+/// [`crate::dupesearch_nzb::FLEET_HEALTHY_ALIVE_PERMILLE`] alive, by whole
+/// percent, as the fleet ranks them), then within each tier TWINs, then
+/// borrowable, unknown and unborrowable ALTs (`kind`, a
+/// `crate::donorkind::DonorKind` as u8), each the wholest. Candidates are
+/// `(id, alive, kind)`.
 pub fn swap_backup(candidates: &[(i32, f64, u8)], need: f64) -> Option<(i32, f64)> {
+    let weak = |alive: f64| {
+        ((100.0 * alive).round() as i32) * 10 < crate::dupesearch_nzb::FLEET_HEALTHY_ALIVE_PERMILLE
+    };
     candidates
         .iter()
         .copied()
         .filter(|&(_, alive, _)| alive.is_finite() && alive >= need)
         .fold(None, |best: Option<(i32, f64, u8)>, c| match best {
-            Some(b) if b.2 < c.2 || (b.2 == c.2 && b.1 >= c.1) => Some(b),
+            Some(b)
+                if (weak(b.1), b.2) < (weak(c.1), c.2)
+                    || ((weak(b.1), b.2) == (weak(c.1), c.2) && b.1 >= c.1) =>
+            {
+                Some(b)
+            }
             _ => Some(c),
         })
         .map(|(id, alive, _)| (id, alive))
@@ -596,12 +607,21 @@ mod tests {
     }
 
     #[test]
-    fn swap_backup_takes_twins_then_borrowable_alts() {
-        // a whole enough twin beats a wholer borrowable ALT, which beats a
-        // wholer unborrowable one
+    fn swap_backup_takes_healthy_copies_then_twins_then_borrowable_alts() {
+        // 97.5% alive or more first: a healthy borrowable ALT beats twins
+        // under it, and beats a wholer unborrowable one
         let c = [(1, 1.0, 3), (2, 0.99, 1), (3, 0.96, 0), (4, 0.97, 0)];
-        assert_eq!(swap_backup(&c, SWAP_BACKUP_ALIVE), Some((4, 0.97)));
+        assert_eq!(swap_backup(&c, SWAP_BACKUP_ALIVE), Some((2, 0.99)));
         assert_eq!(swap_backup(&c[..2], SWAP_BACKUP_ALIVE), Some((2, 0.99)));
+        // among healthy copies the twin first
+        let healthy_twin = [(1, 1.0, 1), (2, 0.98, 0)];
+        assert_eq!(
+            swap_backup(&healthy_twin, SWAP_BACKUP_ALIVE),
+            Some((2, 0.98))
+        );
+        // among weak copies the twin first too
+        let weak = [(1, 0.97, 1), (2, 0.96, 0)];
+        assert_eq!(swap_backup(&weak, SWAP_BACKUP_ALIVE), Some((2, 0.96)));
         // a twin not whole enough does not count
         let low_twin = [(1, 0.9, 0), (2, 0.96, 3)];
         assert_eq!(swap_backup(&low_twin, SWAP_BACKUP_ALIVE), Some((2, 0.96)));

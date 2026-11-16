@@ -93,7 +93,7 @@ This is where RustyGet goes beyond NZBGet. NZBGet uses duplicates one at a time:
 - **Twins and alts.** A *twin* is a copy whose files are byte-identical, proven by par2 checksums; RustyGet can borrow its articles and par2 volumes. An *alt* holds the same video file in another container (another archive, other packing), verified by reading the video inside both copies, never by par2: other par2 checksums only mean another container, so until the video inside is compared such a copy is labelled *container*, and *other* if the video turns out to differ.
 - **Stream repair.** RustyGet patches holes that article fallback can't fill with bytes from duplicates, even from a duplicate that's packed differently.
 - **Early failover.** With `HealthCheck=dupe`, a download that can't complete switches to the best backup within seconds, and a probe catches copies that are dead before they start.
-- **Fleets from the API.** The app that sends a fleet does the searching. RustyGet trusts its copies, checks each one on your servers, and ranks them by health, then twins first.
+- **Fleets from the API.** The app that sends a fleet does the searching. RustyGet trusts its copies, checks each one on your servers, and ranks them: copies at least 97.5% alive first, twins first within them.
 - **Fleet submission.** Clients such as the Kodi add-on send every copy at once with `appendfleet`, and RustyGet picks the best one.
 
 See [Duplicate fleets](duplicate-fleets.md) for how each one works.

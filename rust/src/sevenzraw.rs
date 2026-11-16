@@ -368,11 +368,12 @@ impl<'a> Lzma2RawSource<'a> {
                 if filled != buf.len() {
                     return false;
                 }
-                // The last boundary at or before the end of this read: the next read starts there.
+                // The last (stored, checked) chunk starting before the end of this read: the
+                // next read starts there.
                 if let Some(c) = index
                     .chunks
                     .iter()
-                    .take_while(|c| c.unpacked_offset as i64 <= want_end)
+                    .take_while(|c| (c.unpacked_offset as i64) < want_end)
                     .last()
                 {
                     self.add_sync(SyncPoint {
@@ -387,10 +388,8 @@ impl<'a> Lzma2RawSource<'a> {
                 index.end,
                 zipfast::map::Lzma2End::Truncated { .. } | zipfast::map::Lzma2End::RangeEnd { .. }
             );
-            if !ended_by_window
-                || at_stream_end
-                || reached - start.unpacked > MAX_WALK + buf.len() as i64
-            {
+            // (How far a walk may go is bounded by the sync-point lookup above: MAX_WALK.)
+            if !ended_by_window || at_stream_end {
                 return false;
             }
             // What is left: the rest of the wanted output, its headers, one chunk that may run

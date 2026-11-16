@@ -635,9 +635,10 @@ dependencies = [
 [[package]]
 name = "par-rs"
 version = "0.2.0"
-source = "git+https://github.com/xbmc4lyfe/par-rs?rev=ec3497c75a15183a9c7bdd70363543e22081d8fd#ec3497c75a15183a9c7bdd70363543e22081d8fd"
+source = "git+https://github.com/xbmc4lyfe/par-rs?rev=1a870001df596da061732dae808a9f36368ee974#1a870001df596da061732dae808a9f36368ee974"
 dependencies = [
  "crc32fast",
+ "libc",
  "md-5 0.10.6",
  "memchr",
  "memmap2",
@@ -1006,12 +1007,12 @@ dependencies = [
 [[package]]
 name = "zip-container"
 version = "0.1.0"
-source = "git+https://github.com/xbmc4lyfe/zipfast?rev=a7a2ad9e3233d78aaa16ba30d6f486d927821719#a7a2ad9e3233d78aaa16ba30d6f486d927821719"
+source = "git+https://github.com/xbmc4lyfe/zipfast?rev=d7bd225ed8f76f360657a14f282abdd0e1695f8b#d7bd225ed8f76f360657a14f282abdd0e1695f8b"
 
 [[package]]
 name = "zipfast"
 version = "0.1.0"
-source = "git+https://github.com/xbmc4lyfe/zipfast?rev=a7a2ad9e3233d78aaa16ba30d6f486d927821719#a7a2ad9e3233d78aaa16ba30d6f486d927821719"
+source = "git+https://github.com/xbmc4lyfe/zipfast?rev=d7bd225ed8f76f360657a14f282abdd0e1695f8b#d7bd225ed8f76f360657a14f282abdd0e1695f8b"
 dependencies = [
  "bzip2",
  "crc32fast",

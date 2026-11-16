@@ -8651,6 +8651,8 @@ fn plan_dead_fills(
         let mut members_by_index: Vec<i32> = Vec::with_capacity(max as usize);
         let mut any_dead = false;
         let mut usable = true;
+        // Why a volume counts as not there yet, for the log.
+        let mut unknown_why: std::collections::BTreeMap<u32, String> = Default::default();
         for n in 1..=max {
             let name = volume_name(n);
             let Some(&m) = numbered.get(&n) else {
@@ -8665,6 +8667,7 @@ fn plan_dead_fills(
                         encoded_size: job.map_or(0, |t| t.encoded_size.max(0)),
                     });
                 } else {
+                    unknown_why.insert(n, format!("{} is not among the finished files", String::from_utf8_lossy(&name)));
                     states.push(VolumeState::Unknown);
                 }
                 continue;
@@ -8672,9 +8675,13 @@ fn plan_dead_fills(
             members_by_index.push(m);
             let path = path_of(&name);
             let size = file_size_bytes(&path);
-            let Ok(file) = std::fs::File::open(crate::fsops::path(&path)) else {
-                states.push(VolumeState::Unknown);
-                continue;
+            let file = match std::fs::File::open(crate::fsops::path(&path)) {
+                Ok(f) => f,
+                Err(e) => {
+                    unknown_why.insert(n, format!("{} cannot be opened: {e}", String::from_utf8_lossy(&path)));
+                    states.push(VolumeState::Unknown);
+                    continue;
+                }
             };
             let src = DiskContentSource::new(file, size);
             let mut adapter = ContentSourceRarAdapter(&src);
@@ -8686,6 +8693,7 @@ fn plan_dead_fills(
                 break;
             }
             if !ok && files.is_empty() {
+                unknown_why.insert(n, format!("{} ({size} bytes) has no readable RAR headers", String::from_utf8_lossy(&name)));
                 states.push(VolumeState::Unknown);
                 continue;
             }
@@ -8757,6 +8765,16 @@ fn plan_dead_fills(
                     .unwrap_or("they are already rebuilt or none is dead")
                     .as_bytes(),
             );
+            // Name what keeps the first missing volume out (the plan stops at the first).
+            // Only when the plan stopped at a volume of unknown state; other stops say enough.
+            let stopped_on_unknown = stop
+                .as_deref()
+                .is_some_and(|s| s.contains("not on disk or not readable"));
+            if let Some(why) = unknown_why.values().next().filter(|_| stopped_on_unknown) {
+                msg.extend_from_slice(b" (");
+                msg.extend_from_slice(why.as_bytes());
+                msg.extend_from_slice(format!("; {} of {max} volumes found)", numbered.len()).as_bytes());
+            }
             emit_msg(TargetMessageKind::Info, &msg);
             continue;
         }

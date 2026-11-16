@@ -433,7 +433,7 @@ fn unrepaired_holes_fail_as_damage() {
 }
 
 #[test]
-fn rar4_solid_compressed_is_reported_unsupported() {
+fn rar4_solid_first_member_without_history_is_refused() {
     // A RAR4 (1.5-4.x) archive with a solid compressed member (method 0x33): zipfast refuses
     // solid RAR4 with a typed error, so the fallback decoder takes it.
     let t = TestDir::new("rar4c");
@@ -466,7 +466,9 @@ fn rar4_solid_compressed_is_reported_unsupported() {
     let first = t.dl().join("old.rar");
     std::fs::write(&first, &v).unwrap();
     let (r, log) = run(&first, &t.out(), Box::new(CompleteSet));
-    assert!(matches!(r, Err(Error::Unsupported(_))), "log: {log:?}");
+    // zipfast decodes RAR4 solid archives now; a solid first member has no history to
+    // continue and its data is garbage, so it is refused (as damaged, no longer unsupported).
+    assert!(r.is_err(), "log: {log:?}");
 }
 
 #[test]
@@ -1039,7 +1041,7 @@ fn copying_into_place_never_touches_other_paths() {
 }
 
 #[test]
-fn rar4_stored_then_solid_compressed_reports_unsupported_for_the_fallback() {
+fn rar4_stored_then_broken_solid_member_fails() {
     let t = TestDir::new("rar4mixed");
     let stored = pattern(20_000);
     let mut v = b"Rar!\x1a\x07\x00".to_vec();
@@ -1067,31 +1069,15 @@ fn rar4_stored_then_solid_compressed_reports_unsupported_for_the_fallback() {
     rest.extend_from_slice(&5u16.to_le_bytes());
     rest.extend_from_slice(&0o100644u32.to_le_bytes());
     rest.extend_from_slice(b"b.bin");
-    // Solid compressed: refused by zipfast with a typed error.
+    // Solid compressed with garbage data: zipfast decodes RAR4 solid now and fails on it.
     v.extend(rar4_block(0x74, 0x8000 | 0x0010, &rest, packed.len()));
     v.extend(&packed);
     v.extend(rar4_block(0x7b, 0, &[], 0));
     let first = t.dl().join("mixed.rar");
     std::fs::write(&first, &v).unwrap();
     let (r, log) = run(&first, &t.out(), Box::new(CompleteSet));
-    assert!(matches!(r, Err(Error::Unsupported(_))), "log: {log:?}");
+    assert!(r.is_err(), "log: {log:?}");
 
-    // Rename mode: the stored member already copied into place is taken back, so the fallback
-    // decoder does not add a renamed second copy.
-    let out2 = t.0.join("out2");
-    let req = Request {
-        first_volume: &first,
-        dest: &out2,
-        password: "",
-        overwrite: Overwrite::Rename,
-        on_wait: None,
-    };
-    let r = extract(&req, Box::new(CompleteSet), &mut |_, _| {}, &mut || false);
-    assert!(matches!(r, Err(Error::Unsupported(_))));
-    let left: Vec<_> = std::fs::read_dir(&out2)
-        .map(|d| d.filter_map(|e| e.ok()).map(|e| e.file_name()).collect())
-        .unwrap_or_default();
-    assert!(left.is_empty(), "{left:?}");
 }
 
 #[test]
@@ -3095,7 +3081,7 @@ fn a_downloading_rar4_stored_set_refills_its_holes() {
 
 #[test]
 fn a_downloading_rar4_aes_set_falls_back_and_extracts() {
-    // Encrypted RAR4 stored members are refused by persistent sessions.
+    // Encrypted RAR4 stored members stay off persistent sessions (see first_volume_qualifies).
     let t = TestDir::new("persist_rar4aes");
     let data = pattern(250_000);
     let vols = rar4_aes_store_volumes("movie.mkv", &data, 60_000, "pw");
@@ -3112,8 +3098,27 @@ fn a_downloading_rar4_aes_set_falls_back_and_extracts() {
             .any(|l| l.contains("Unrar: progressive direct unpack (")),
         "{log:?}"
     );
-    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+    let listing: Vec<_> = walk_names(&t.0);
+    assert_eq!(
+        std::fs::read(t.out().join("movie.mkv")).ok().as_deref(),
+        Some(data.as_slice()),
+        "{listing:?}"
+    );
     assert!(!t.out().join(persistent::STATE_DIR).exists());
+}
+
+fn walk_names(dir: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            out.push(format!("{} {}", p.display(), e.metadata().map(|m| m.len()).unwrap_or(0)));
+            if p.is_dir() {
+                out.extend(walk_names(&p));
+            }
+        }
+    }
+    out
 }
 
 #[test]

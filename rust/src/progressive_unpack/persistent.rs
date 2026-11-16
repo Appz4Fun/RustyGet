@@ -221,6 +221,11 @@ fn first_volume_qualifies(first: &Path, password: &str) -> Result<(), String> {
                 if h.method != 0 {
                     return Err("compressed member".into());
                 }
+                // A persistent session refuses encrypted RAR4 members by design (zipfast #130);
+                // send the set to the ordinary decoder up front instead of starting a session.
+                if h.encrypted && h.format == zipfast::rar5::RarFormat::Rar4 {
+                    return Err("encrypted RAR4 member".into());
+                }
                 if h.size_unknown() {
                     return Err("member of unknown size".into());
                 }
@@ -558,6 +563,19 @@ impl<'a> Run<'a> {
                     }
                     Ok(Some(ProgressiveEvent::BytesWritten { valid_bytes, .. })) => {
                         summary.bytes += valid_bytes;
+                    }
+                    Ok(Some(ProgressiveEvent::MemberFinished {
+                        outcome: zipfast::progressive::MemberOutcome::Refused { reason },
+                        ..
+                    })) => {
+                        // zipfast wrote nothing for this member: an ordinary session extracts it.
+                        return Err(Step::Fallback(format!(
+                            "zipfast refused {}: {reason:?}",
+                            current
+                                .as_deref()
+                                .map(String::from_utf8_lossy)
+                                .unwrap_or("a member".into())
+                        )));
                     }
                     Ok(Some(ProgressiveEvent::MemberFinished { .. })) => {
                         summary.files += 1;

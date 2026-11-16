@@ -21,6 +21,8 @@ Alt
 
 A copy with a different video file, such as another encode, is neither a twin nor an alt. Sent in a fleet, it's dropped at intake (see [Fleet submission](#fleet-submission)); added any other way, it's a plain backup that RustyGet can only fail over to.
 
+[Twins and alts](twins-and-alts.md) explains how RustyGet links copies, which fingerprints it trusts, and why a matching checksum or size is never proof on its own.
+
 Same posting
 : Two NZB files that point to the same Usenet articles, such as one posting listed by two indexers. They can't back each other up, because they share every missing article. RustyGet recognizes them by their Message-IDs and keeps one.
 

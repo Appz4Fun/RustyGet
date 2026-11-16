@@ -1,0 +1,80 @@
++++
+title = "Twins and alts"
+description = "What a twin and an alt are, why RustyGet compares the video inside a copy instead of its archive bytes, which fingerprints can link two Usenet posts cheaply, and why a checksum alone is never proof."
+eyebrow = "Features"
+lede = "A release is often posted many times. Some copies are the exact same post uploaded again; others hold the same video packed another way. RustyGet tells the two apart, because each kind can repair the primary in a different way."
++++
+
+> [!NOTE] Where this page fits
+> [Duplicate fleets](duplicate-fleets.md) explains what RustyGet does with a fleet: borrowing, stream repair, and failover. This page explains the idea underneath: how two copies are linked, and what each link allows.
+
+## Two words, one meaning each
+
+Twin
+: The exact same post, uploaded again: the same files, the same article counts, and the same checksums. Because every article lines up with an article of the primary, a twin's articles can be swapped in one for one. Its par2 files can also repair the primary.
+
+Alt
+: Any container that holds the same video file, the same `.mkv`, packed another way: other volume sizes, RAR instead of 7-Zip, an archive inside an archive, or another password. An alt is either a **borrowable alt**, whose video bytes RustyGet can read by range without unpacking, or a **non-borrowable alt**, which has to be downloaded and extracted whole first.
+
+A copy with a different video file, such as another encode, is neither. It's another release that happens to share a duplicate key.
+
+## Compare the video, never the container
+
+Two alts never share container bytes. A new volume size moves every byte; a new password, or even a new file time, changes the archive headers. Comparing those bytes would say two copies differ when the movie inside is identical.
+
+So RustyGet compares and borrows on the **inner payload**: the bytes of the final video file. It reaches them through every stored layer around them, such as a 7-Zip archive in copy mode, a RAR4 or RAR5 archive in store mode, an archive inside an archive, or an encrypted archive whose password it knows, and builds a map of where each video byte sits inside each copy. A missing range in one copy is then a known range in another.
+
+The same rule works in reverse. When two copies have different par2 checksums, that proves only that their containers differ. It never means "another encode": the video inside can still be the same, and only reading the video can tell.
+
+## Fingerprints a post carries
+
+Every post leaves fingerprints that can link it to another post without downloading the whole thing. They differ in cost and in what they can prove.
+
+| Fingerprint | Where it comes from | Cost | What a match suggests |
+|---|---|---|---|
+| Sizes in the NZB file | The NZB file itself | Free | A filter only. Many unrelated files share a size, and every encrypted repost of one release shares the sizes of the others. |
+| Part checksums | The `pcrc32` value at the end of each yEnc article | Already there for every article that downloads | Same bytes in that part. The parts of a file combine into a checksum of the whole file. |
+| par2 file list | One par2 index article | One article | Each file's MD5 and length. Equal lists mean the files are byte-identical, whatever their names. |
+| Archive headers | The first article of an archive volume | One article | The name, size, and checksum of the file packed inside, and how it's packed: whether it's stored or compressed, and whether it's encrypted. |
+| Sampled video bytes | A few places spread across the video, read through the containers | A few articles | The same video inside, whatever the packaging. |
+| Encryption salts | The header of an encrypted archive | One article | The same archive run. Every new run picks a fresh random salt, so two encrypted reposts never share one. |
+
+The cheap fingerprints narrow the field; the stronger ones confirm. No single key should decide a link on its own, because every key has a known way to match wrongly.
+
+## Why a checksum alone isn't proof
+
+yEnc and RAR checksums are CRC32 values, only 32 bits long. Among millions of files, two different files share one by chance, more so among files of the same round size. A CRC32 can also be forced to any value by changing four bytes. So a matching CRC32 makes a good candidate and a poor verdict.
+
+Sizes are weaker still. A re-upload with a new password has exactly the same volume sizes as the first upload, because the size of an encrypted archive doesn't depend on the password. Size, file count, and total bytes never make a twin on their own.
+
+What can make a twin: a full MD5 together with the length, as par2 lists them, or several matching articles at the same positions, including articles that carry archive headers.
+
+## Re-packs and encrypted reposts
+
+Re-pack
+: An archive packed again with the same files, often with only a new file time. Stored archives are deterministic, so most of the articles in the middle come out byte-identical; only the articles holding headers differ. Such a copy can share most of its par2 file list with the primary. RustyGet labels it `TWIN N/M` when more than half of the files match.
+
+Encrypted repost
+: An upload whose archive headers are encrypted, such as RAR5 with `-hp` or 7-Zip with encrypted headers. Encryption hides every content fingerprint, and the fresh salt changes every byte, so it's never a twin of another upload. With the password in the NZB file, stream repair can still read through a stored, encrypted copy, so it can repair the primary, at a cost. Without the password, it can only be a failover backup.
+
+## What RustyGet checks today
+
+The preceding table lists what a post carries. RustyGet uses some of those fingerprints now:
+
+- **Twins** are proven by par2: both copies' par2 file lists must name the same files by MD5 and length, and their data files must split into the same numbers of articles. Without par2, TwinCheck compares articles at the same positions in both postings instead, but a copy without par2 never ranks as a twin in a fleet.
+- **Alts** are proven at fleet intake. RustyGet opens every live copy down to its video and reads its start plus 2, 4, or 8 random places, the same places in every copy. Copies that read the same are the same video. A copy holding another video is dropped from the fleet, and a copy that can't be opened stays as an unverified backup.
+- **How borrowable** an alt is comes from the first article of its largest file. Stored containers are borrowable. A stored archive whose data is encrypted with a password in the NZB file can be read, at a cost, so it ranks after them. Compression, encryption without a known password, and archives with encrypted headers rank last, even with the password, because nothing about their content can be read from that first article.
+- **Every borrowed byte** is checked before it counts, against bytes the primary already has, against yEnc checksums, and against the primary's own par2 blocks. See [Making sure the bytes are right](duplicate-fleets.md#making-sure-the-bytes-are-right).
+
+Part checksums are checked for each article as it downloads, but RustyGet doesn't combine them into whole-file keys or link copies on them yet. Linking on archive header checksums or on the sizes of encrypted reposts isn't built either.
+
+## Donor order
+
+When a primary needs data, RustyGet asks donors in this order:
+
+1. Twins, by health. Their articles fill holes directly.
+2. Borrowable alts. Their video bytes fill holes through the map.
+3. Copies whose packaging couldn't be told, and stored copies whose data needs the password to decrypt.
+4. Non-borrowable alts. They're downloaded and extracted whole, or serve as failover backups.
+
+A score from the client that sent the fleet only breaks ties within a tier. A single copy is used whatever its kind.

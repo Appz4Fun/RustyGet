@@ -96,12 +96,14 @@ pub fn plan(volumes: &[VolumeState], inner_size: i64) -> Vec<Plan> {
             VolumeState::Readable(g) => offset += g.packed_size,
             VolumeState::Unknown => break,
             VolumeState::Dead { encoded_size } => {
-                if i == last {
-                    break;
-                }
                 let Some((template, g)) = template_for(volumes, i) else {
                     break;
                 };
+                // The last volume known may be the set's last (shorter, closing the file): it
+                // is planned only when the inner file goes on past it.
+                if i == last && offset + g.packed_size >= inner_size {
+                    break;
+                }
                 let size = g.data_offset + g.packed_size + g.tail_len();
                 if *encoded_size > 0 && (*encoded_size < size || *encoded_size > size + size / 16) {
                     break;
@@ -737,7 +739,7 @@ mod tests {
     }
 
     #[test]
-    fn stops_at_unknown_and_never_plans_first_or_last() {
+    fn stops_at_unknown_and_never_plans_first_or_a_closing_last() {
         let v = vec![
             first(1000, 60, 900),
             g(1000, 61, 899),
@@ -747,8 +749,20 @@ mod tests {
             g(10, 1, 1),
         ];
         assert!(plan(&v, 1 << 40).is_empty());
+        // A dead volume last of those known: planned only while the file goes on past it.
         let v = vec![first(1000, 60, 900), g(1000, 61, 899), DEAD];
-        assert!(plan(&v, 1 << 40).is_empty());
+        assert!(plan(&v, 900 + 899 + 899).is_empty());
+        assert!(plan(&v, 900 + 899 + 500).is_empty());
+        assert_eq!(
+            plan(&v, 900 + 899 + 900),
+            vec![Plan {
+                index: 2,
+                template: 1,
+                inner_offset: 1799,
+                packed_size: 899,
+                data_offset: 61
+            }]
+        );
         let v = vec![DEAD, g(1000, 61, 899), g(1000, 61, 899)];
         assert!(plan(&v, 1 << 40).is_empty());
     }
@@ -831,12 +845,7 @@ mod tests {
         }
         let mut vol = crate::rarreader::Volume::default();
         let mut files = Vec::new();
-        crate::rarreader::read_from(
-            &mut vol,
-            &mut Mem(bytes),
-            None,
-            &mut files,
-        );
+        crate::rarreader::read_from(&mut vol, &mut Mem(bytes), None, &mut files);
         (vol, files)
     }
 

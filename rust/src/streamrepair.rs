@@ -8141,6 +8141,8 @@ pub struct CrossPackTargetInput {
     pub encoded_size: i64,
     pub patch_eligible: bool,
     pub holes: Vec<NzbgetRsByteRange>,
+    /// Every article of the file failed: nothing of it arrived, though a file may be on disk.
+    pub all_articles_failed: bool,
 }
 
 /// Host callback boundary for [`CrossPackRepairSession::process_donor`].
@@ -8573,12 +8575,14 @@ fn plan_dead_fills(
     let dead_jobs: Vec<&CrossPackTargetInput> = targets
         .iter()
         .filter(|t| {
-            t.decoded_file_size <= 0
-                && t.holes.is_empty()
-                && !is_par2_job_or_file(false, &t.filename)
-                && file_size_bytes(&path_of(&t.filename)) <= 0
+            !is_par2_job_or_file(false, &t.filename)
+                && (t.all_articles_failed
+                    || (t.decoded_file_size <= 0
+                        && t.holes.is_empty()
+                        && file_size_bytes(&path_of(&t.filename)) <= 0))
         })
         .collect();
+    let is_dead_job = |name: &[u8]| dead_jobs.iter().any(|t| t.filename.eq_ignore_ascii_case(name));
     if dead_jobs.is_empty() {
         return Vec::new();
     }
@@ -8592,7 +8596,8 @@ fn plan_dead_fills(
         let Some((prefix, n, width, suffix)) = rar_part_number(&member.name) else {
             continue;
         };
-        if file_size_bytes(&path_of(&member.name)) <= 0 {
+        // A dead file may be on disk all the same (written ahead, holding nothing).
+        if file_size_bytes(&path_of(&member.name)) <= 0 || is_dead_job(&member.name) {
             continue;
         }
         let key = (prefix.to_ascii_lowercase(), width, suffix.to_ascii_lowercase());
@@ -8613,7 +8618,17 @@ fn plan_dead_fills(
         if numbered.keys().next() != Some(&1) {
             continue;
         }
-        let max = *numbered.keys().next_back().unwrap_or(&1);
+        // Dead volumes at the download's front come after the last one on disk.
+        let max = dead_jobs
+            .iter()
+            .filter_map(|t| rar_part_number(&t.filename))
+            .filter(|(p, _, w, s)| {
+                p.eq_ignore_ascii_case(&prefix) && *w == width && s.eq_ignore_ascii_case(&suffix)
+            })
+            .map(|(_, n, _, _)| n)
+            .chain(numbered.keys().next_back().copied())
+            .max()
+            .unwrap_or(1);
         let volume_name = |n: u32| {
             let mut v = prefix.clone();
             v.extend_from_slice(format!("{n:0width$}").as_bytes());
@@ -8631,7 +8646,10 @@ fn plan_dead_fills(
             let Some(&m) = numbered.get(&n) else {
                 members_by_index.push(-1);
                 let job = dead_jobs.iter().find(|t| t.filename.eq_ignore_ascii_case(&name));
-                if job.is_some() || all_arrived {
+                if job.is_some()
+                    || all_arrived
+                    || crate::postproc::direct_unpack_has_virtual(&path_of(&name))
+                {
                     any_dead = true;
                     states.push(VolumeState::Dead {
                         encoded_size: job.map_or(0, |t| t.encoded_size.max(0)),
@@ -8880,6 +8898,10 @@ impl Drop for CrossPackRepairSession {
     /// session, so a partial scratch file never reaches the completed folder. Handed-over ones
     /// belong to direct unpack, which removes them when it forgets its holds.
     fn drop(&mut self) {
+        if !self.dead_fills.is_empty() {
+            // Handed-over volumes keep the borrow visible through direct unpack's state.
+            crate::postproc::note_dead_volume_borrow(self.dead_nzb_id, false);
+        }
         for d in self.dead_fills.iter().filter(|d| !d.done) {
             let path = self.dead_fill_data_path(d);
             if crate::deadvolume::is_scratch(crate::fsops::path(&path)) {
@@ -9009,6 +9031,9 @@ impl CrossPackRepairSession {
                 emit_msg,
             )
         };
+        if let (false, Some(id)) = (dead_fills.is_empty(), dead_context.nzb_id) {
+            crate::postproc::note_dead_volume_borrow(id, true);
+        }
 
         let mut any_mapped = false;
         for repair_set in &repair_sets {
@@ -17249,6 +17274,7 @@ mod tests {
                 offset: 4096,
                 size: 1024,
             }],
+            all_articles_failed: false,
         }];
 
         let mut init_msgs = Vec::new();
@@ -17606,6 +17632,7 @@ mod dead_volume_fill_tests {
                 encoded_size: 102_000,
                 patch_eligible: true,
                 holes: Vec::new(),
+                all_articles_failed: false,
             })
             .collect();
         let mut init = Vec::new();
@@ -17683,6 +17710,99 @@ mod dead_volume_fill_tests {
         // Post-processing still learns, once, that the par-check failure was borrowed around.
         assert_eq!(crate::postproc::take_dead_volumes_borrowed(nzb_id), 3);
         assert_eq!(crate::postproc::take_dead_volumes_borrowed(nzb_id), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The live case: the dead volume is the newest one (later ones still downloading), and the
+    /// downloader left a file for it on disk holding nothing.
+    #[test]
+    fn a_dead_volume_at_the_download_front_is_borrowed_while_later_ones_download() {
+        let root = std::env::temp_dir().join(format!("rg-deadfront-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dl = root.join("dl");
+        std::fs::create_dir_all(&dl).unwrap();
+        let data: Vec<u8> = (0..1_000_000u64).map(|i| (i.wrapping_mul(2654435761) >> 7) as u8).collect();
+        let vols = rar5_set("Movie.2160p.mkv", &data, 100_000);
+        let name = |i: usize| format!("set.part{:02}.rar", i + 1);
+        let dead = 5usize;
+        for (i, v) in vols.iter().enumerate().take(dead) {
+            std::fs::write(dl.join(name(i)), v).unwrap();
+        }
+        // Written ahead with nothing in it.
+        std::fs::write(dl.join(name(dead)), vec![0u8; vols[dead].len()]).unwrap();
+        let nzb_id = -4_242_002;
+        let dest = crate::fsops::path_to_bytes(&dl).to_vec();
+        let mut dead_full = dest.clone();
+        dead_full.push(b'/');
+        dead_full.extend_from_slice(name(dead).as_bytes());
+        crate::postproc::direct_unpack_hold(nzb_id, &dead_full);
+        let names: Vec<Vec<u8>> = (0..=dead).map(|i| name(i).into_bytes()).collect();
+        let name_refs: Vec<&[u8]> = names.iter().map(|n| n.as_slice()).collect();
+        let targets = vec![CrossPackTargetInput {
+            filename: name(dead).into_bytes(),
+            decoded_file_size: vols[dead].len() as i64,
+            encoded_size: vols[dead].len() as i64 * 102 / 100,
+            patch_eligible: true,
+            holes: vec![NzbgetRsByteRange { offset: 0, size: vols[dead].len() as i64 }],
+            all_articles_failed: true,
+        }];
+        let mut init = Vec::new();
+        let mut emit = |_: TargetMessageKind, m: &[u8]| init.push(String::from_utf8_lossy(m).into_owned());
+        let mut session = CrossPackRepairSession::new_with_dead(
+            &dest,
+            &name_refs,
+            &targets,
+            None,
+            true,
+            None,
+            &mut emit,
+            None,
+            DeadVolumeContext { pending_data_files: Some(4), nzb_id: Some(nzb_id) },
+        )
+        .unwrap_or_else(|| panic!("dead volume planned: {init:?}"));
+        assert_eq!(session.dead_fills.len(), 1, "{init:?}");
+        assert!(crate::postproc::dead_volume_borrow_underway(nzb_id), "failover waits for the borrow");
+        let mut env = BareDonor { bytes: data.clone(), messages: Vec::new() };
+        session.process_donor(
+            b"",
+            b"Movie.Alt",
+            b"",
+            &[b"Movie.2160p.mkv"],
+            &[data.len() as i64],
+            &[vec![data.len() as i32]],
+            false,
+            &mut env,
+        );
+        assert_eq!(env.messages.iter().filter(|m| m.starts_with("Borrowed")).count(), 1, "{init:?} {:?}", env.messages);
+        assert!(!crate::postproc::direct_unpack_has_holds(nzb_id));
+        drop(session);
+        assert!(crate::postproc::dead_volume_borrow_underway(nzb_id), "the extraction reads it now");
+        // The rest of the set arrives; the extraction reads the dead one rebuilt.
+        for (i, v) in vols.iter().enumerate().skip(dead + 1) {
+            std::fs::write(dl.join(name(i)), v).unwrap();
+        }
+        let out = root.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        let first = dl.join(name(0));
+        let req = crate::progressive_unpack::Request {
+            first_volume: &first,
+            dest: &out,
+            password: "",
+            overwrite: crate::progressive_unpack::Overwrite::Always,
+            on_wait: None,
+        };
+        let mut log = Vec::new();
+        let r = crate::progressive_unpack::extract(
+            &req,
+            Box::new(Feed { nzb_id }),
+            &mut |_, m: &str| log.push(m.to_string()),
+            &mut || false,
+        );
+        assert!(r.is_ok(), "{log:?}");
+        assert_eq!(std::fs::read(out.join("Movie.2160p.mkv")).unwrap(), data);
+        crate::postproc::direct_unpack_forget_holds(nzb_id);
+        assert!(!crate::postproc::dead_volume_borrow_underway(nzb_id));
+        let _ = crate::postproc::take_dead_volumes_borrowed(nzb_id);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

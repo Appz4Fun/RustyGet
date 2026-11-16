@@ -1366,6 +1366,7 @@ impl NzbgetRsStreamRepairCtrl {
                 encoded_size: t.encoded_size,
                 patch_eligible: t.patch_eligible,
                 holes: t.holes.clone(),
+                all_articles_failed: t.article_count > 0 && t.failed_articles >= t.article_count,
             })
             .collect();
         let pw =

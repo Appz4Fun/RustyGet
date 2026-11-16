@@ -1242,6 +1242,15 @@ fn automatic_live_par_repair(opts: &crate::queuesubsys_host::GlobalOptsSnap) -> 
         && crate::options::active_options().is_some_and(|o| o.scalars().par_repair != 0)
 }
 
+/// Live par2 syndromes while downloading: automatic repair plus the
+/// `LiveParRepair` switch. Without it no live session starts and repair runs
+/// after the download; damage tracking and recovery-volume unpausing
+/// (`pardamage`) still follow [`automatic_live_par_repair`] alone.
+#[cfg(unix)]
+fn live_par_syndromes(opts: &crate::queuesubsys_host::GlobalOptsSnap) -> bool {
+    automatic_live_par_repair(opts) && crate::options::live_par_repair()
+}
+
 #[cfg(unix)]
 pub(crate) fn live_start_context_matches(
     nzb: &crate::queuesubsys_host::NzbSnap,
@@ -2637,7 +2646,7 @@ impl NzbgetRsQueueCoordinator {
         let mut result = Err(crate::parchecker::RepairError::Cancelled);
         host.with_locked_queue(|dq| {
             let ptr = host.queue_find_by_id(dq, file.nzb_id);
-            if ptr == 0 || !automatic_live_par_repair(&host.opts()) {
+            if ptr == 0 || !live_par_syndromes(&host.opts()) {
                 return;
             }
             let nzb = host.nzb_snap(ptr, false);
@@ -2693,7 +2702,7 @@ impl NzbgetRsQueueCoordinator {
                 return Err(RepairError::Cancelled);
             }
             let ptr = host.queue_find_by_id(dq, file.nzb_id);
-            if ptr == 0 || !automatic_live_par_repair(&host.opts()) {
+            if ptr == 0 || !live_par_syndromes(&host.opts()) {
                 return Err(RepairError::Cancelled);
             }
             let nzb = host.nzb_snap(ptr, false);
@@ -2775,7 +2784,7 @@ impl NzbgetRsQueueCoordinator {
         let mut live = false;
         host.with_locked_queue(|dq| {
             let ptr = host.queue_find_by_id(dq, id);
-            if ptr == 0 || !automatic_live_par_repair(&host.opts()) {
+            if ptr == 0 || !live_par_syndromes(&host.opts()) {
                 return;
             }
             let nzb = host.nzb_snap(ptr, false);
@@ -2826,7 +2835,7 @@ impl NzbgetRsQueueCoordinator {
             let mut captured = Ok(false);
             host.with_locked_queue(|dq| {
                 let ptr = host.queue_find_by_id(dq, id);
-                if ptr == 0 || !automatic_live_par_repair(&host.opts()) {
+                if ptr == 0 || !live_par_syndromes(&host.opts()) {
                     done = true;
                     return;
                 }
@@ -2942,7 +2951,7 @@ impl NzbgetRsQueueCoordinator {
                 let mut done = false;
                 host.with_locked_queue(|dq| {
                     let ptr = host.queue_find_by_id(dq, id);
-                    if ptr == 0 || !automatic_live_par_repair(&host.opts()) {
+                    if ptr == 0 || !live_par_syndromes(&host.opts()) {
                         done = true;
                         return;
                     }
@@ -3027,7 +3036,7 @@ impl NzbgetRsQueueCoordinator {
             crate::parchecker::streaming_session_kick_backfill(id);
             host.with_locked_queue(|dq| {
                 let ptr = host.queue_find_by_id(dq, id);
-                if ptr == 0 || !automatic_live_par_repair(&host.opts()) {
+                if ptr == 0 || !live_par_syndromes(&host.opts()) {
                     crate::parchecker::streaming_session_forget(id);
                     return;
                 }
@@ -3240,7 +3249,7 @@ impl NzbgetRsQueueCoordinator {
                     && art.segment_size > 0
                     && crate::parchecker::streaming_session_has_session(nzb.id)
                 {
-                    if automatic_live_par_repair(&opts) {
+                    if live_par_syndromes(&opts) {
                         if let Some(Err(_error)) = crate::parchecker::streaming_session_defer_article_for_queue(
                             nzb.id, (Some(file.id), &file.filename, &file.hash16k), art.segment_offset as u64,
                             art.segment_size as u64, art.crc,
@@ -3330,7 +3339,7 @@ impl NzbgetRsQueueCoordinator {
                     && art.segment_size > 0
                     && art.segment_offset >= 0
                 {
-                    if automatic_live_par_repair(&opts) {
+                    if live_par_syndromes(&opts) {
                         if let Some(Err(_error)) = crate::parchecker::streaming_session_defer_failure_for_queue(
                             nzb.id, (Some(file.id), &file.filename, &file.hash16k), art.segment_offset as u64, art.segment_size as u64,
                         ) {
@@ -3826,7 +3835,7 @@ impl NzbgetRsQueueCoordinator {
                 crate::dupefallback::par_damage_file_completed_host(
                     host, &fresh_nzb, &file, &articles, &filename,
                 );
-                if automatic_live_par_repair(&opts) {
+                if live_par_syndromes(&opts) {
                     if let Err(error) = Self::capture_live_completed_file(
                         &fresh_nzb,
                         &file,

@@ -1593,7 +1593,7 @@ pub const DUPE_WATCH_DELAY_SEC: i32 = 20;
 /// Emits all default option `(name, value)` pairs for `Options::InitDefaults`.
 pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &CStr)) {
     let output_mode = if disable_curses { c"color" } else { c"curses" };
-    let defaults: [(&CStr, &CStr); 126] = [
+    let defaults: [(&CStr, &CStr); 128] = [
         (c"MainDir", c"~/downloads"),
         (c"WebDir", c""),
         (c"ConfigTemplate", c""),
@@ -1670,6 +1670,10 @@ pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &
         (c"RenameAfterUnpack", c"yes"),
         (c"RenameIgnoreExt", c""),
         (c"ParRename", c"yes"),
+        // a config without the line keeps its written ParBuffer/ParThreads/ParPauseQueue;
+        // new installs get "large" from the rustyget.conf template
+        (c"ParPreset", c"custom"),
+        (c"LiveParRepair", c"no"),
         (c"ParBuffer", c"500"),
         (c"ParThreads", c"0"),
         (c"RarRename", c"yes"),
@@ -1818,6 +1822,25 @@ pub static DUPE_BORROW_FIRST: std::sync::atomic::AtomicBool =
 /// Current value of option `DupeBorrowFirst`.
 pub fn dupe_borrow_first() -> bool {
     DUPE_BORROW_FIRST.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// `ParPreset` as parsed (see [`crate::parpreset`]).
+pub static PAR_PRESET: std::sync::atomic::AtomicI32 =
+    std::sync::atomic::AtomicI32::new(crate::parpreset::CUSTOM);
+
+/// `ParPreset` of the loaded configuration.
+pub fn par_preset() -> i32 {
+    PAR_PRESET.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// `LiveParRepair`: fold par2 syndromes while downloading (off by default:
+/// repair runs after the download, which measured faster and lighter).
+pub static LIVE_PAR_REPAIR: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// `LiveParRepair` of the loaded configuration.
+pub fn live_par_repair() -> bool {
+    LIVE_PAR_REPAIR.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Option `DupeWatch`: look after the queued and history backups of a download
@@ -2297,6 +2320,35 @@ pub fn init_scalar_options_host<H: OptionsHost>(
     s.crash_trace = i32::from(host.parse_bool_value(c"CrashTrace"));
     s.crash_dump = i32::from(host.parse_bool_value(c"CrashDump"));
     s.par_pause_queue = i32::from(host.parse_bool_value(c"ParPauseQueue"));
+    LIVE_PAR_REPAIR.store(
+        host.parse_bool_value(c"LiveParRepair"),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    let par_preset = host.parse_enum_value(
+        c"ParPreset",
+        &crate::parpreset::PRESET_NAMES,
+        &crate::parpreset::PRESET_VALUES,
+    );
+    PAR_PRESET.store(par_preset, std::sync::atomic::Ordering::Relaxed);
+    // A preset sets ParBuffer, ParThreads and ParPauseQueue; "custom" keeps them.
+    // "detect" reads CPUs and RAM now; its disk test finishes in the background
+    // and decides ParPauseQueue when post-processing asks (prepost).
+    let probe = (par_preset == crate::parpreset::DETECT).then(|| {
+        crate::parpreset::last_probe().unwrap_or_else(crate::parpreset::quick_probe)
+    });
+    if let Some(r) = crate::parpreset::resources(
+        par_preset,
+        crate::sysmetrics::cpu_count(),
+        probe.as_ref(),
+    ) {
+        s.par_buffer = r.par_buffer_mb;
+        if usize::BITS == 32 {
+            // a 32-bit build shares 1900 MB between ArticleCache and ParBuffer
+            s.par_buffer = s.par_buffer.min((1900 - s.article_cache.clamp(0, 1900)).max(64));
+        }
+        s.par_threads = r.par_threads;
+        s.par_pause_queue = i32::from(r.par_pause_queue);
+    }
     s.script_pause_queue = i32::from(host.parse_bool_value(c"ScriptPauseQueue"));
     s.nzb_cleanup_disk = i32::from(host.parse_bool_value(c"NzbCleanupDisk"));
     s.form_auth = i32::from(host.parse_bool_value(c"FormAuth"));
@@ -3888,6 +3940,9 @@ pub type NzbgetRsOptionsHostFn = Option<
 >;
 
 pub const OPT_STR_COUNT: usize = 41;
+/// `strs` index of the checked `InterDir`.
+pub const OPT_STR_INTER_DIR: usize = 4;
+pub const OPT_STR_DEST_DIR: usize = 3;
 
 /// Heap-backed daemon `Options` instance (`NzbgetRsOptions`) driving full initialization,
 /// string storage, and runtime scheduler task creation.
@@ -3923,6 +3978,11 @@ pub(crate) fn active_options() -> Option<std::sync::Arc<NzbgetRsOptions>> {
 }
 
 impl NzbgetRsOptions {
+    /// Started with no disk access (`-n`/test mode): nothing may be written.
+    pub fn no_disk_access(&self) -> bool {
+        self.no_disk_access
+    }
+
     pub(crate) fn scalars(&self) -> &NzbgetRsParsedOptions {
         &self.scalars
     }
@@ -4725,6 +4785,13 @@ pub unsafe extern "C" fn nzbget_rs_options_new(
     if let Ok(mut g) = ACTIVE_OPTIONS.write() {
         *g = Some(std::sync::Arc::downgrade(&arc));
     }
+    // "detect" tests the intermediate folder's disk once per process, in the background.
+    if arc.daemon_subsystems && !arc.no_disk_access && par_preset() == crate::parpreset::DETECT {
+        crate::parpreset::start_probe(
+            crate::parpreset::probe_dir(&arc),
+            std::time::Duration::from_secs(u64::MAX / 4),
+        );
+    }
     std::sync::Arc::into_raw(arc).cast_mut()
 }
 
@@ -5096,6 +5163,38 @@ mod options_full_suite_port_from_cpp {
         let cmd_opts = [c"DupeHealthPreset=custom", c"DupeHealthMin=7"];
         let o = RustOptions::new_no_config(Some(&cmd_opts), Some(&mut extender));
         assert_eq!(o.scalars.dupe_health_min, 7);
+    }
+
+    #[test]
+    fn par_preset_sets_buffer_threads_and_pause_test() {
+        let mut extender = OptionsExtenderMock::default();
+        let cpus = crate::sysmetrics::cpu_count() as i32;
+        let cmd_opts = [c"ParPreset=uber", c"ParBuffer=100", c"ParThreads=3"];
+        let o = RustOptions::new_no_config(Some(&cmd_opts), Some(&mut extender));
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!((o.scalars.par_buffer, o.scalars.par_threads), (4096, cpus + 2));
+        assert_eq!(o.scalars.par_pause_queue, 0);
+        let cmd_opts = [c"ParPreset=low"];
+        let o = RustOptions::new_no_config(Some(&cmd_opts), Some(&mut extender));
+        assert_eq!((o.scalars.par_buffer, o.scalars.par_threads), (64, 1));
+        assert_eq!(o.scalars.par_pause_queue, 1);
+        // a config without ParPreset (written before it existed) keeps its values
+        let cmd_opts = [c"ParBuffer=2000", c"ParThreads=2", c"ParPauseQueue=yes"];
+        let o = RustOptions::new_no_config(Some(&cmd_opts), Some(&mut extender));
+        assert_eq!((o.scalars.par_buffer, o.scalars.par_threads), (2000, 2));
+        assert_eq!(o.scalars.par_pause_queue, 1);
+        let cmd_opts = [c"ParPreset=large"];
+        let o = RustOptions::new_no_config(Some(&cmd_opts), Some(&mut extender));
+        assert_eq!((o.scalars.par_buffer, o.scalars.par_threads), (1024, 0));
+        // custom keeps the options as written
+        let cmd_opts = [c"ParPreset=custom", c"ParBuffer=100", c"ParThreads=3", c"ParPauseQueue=yes"];
+        let o = RustOptions::new_no_config(Some(&cmd_opts), Some(&mut extender));
+        assert_eq!((o.scalars.par_buffer, o.scalars.par_threads), (100, 3));
+        assert_eq!(o.scalars.par_pause_queue, 1);
+        // detect sizes the buffer from RAM even before its disk test
+        let cmd_opts = [c"ParPreset=detect"];
+        let o = RustOptions::new_no_config(Some(&cmd_opts), Some(&mut extender));
+        assert!((128..=4096).contains(&o.scalars.par_buffer), "{}", o.scalars.par_buffer);
     }
 
     #[test]

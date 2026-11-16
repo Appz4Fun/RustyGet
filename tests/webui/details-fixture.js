@@ -179,6 +179,10 @@ async function installDetailsFixture(page, base, writes = [], hooks = {}) {
     hostlookup: { Host: '', Port: 563, Error: '', GeoIP: false, Addresses: [] },
     backbones: { Backbones: [{ Name: 'Omicron', Providers: ['Newshosting'] }, { Name: 'UsenetExpress', Providers: ['NewsDemon'] }],
       Host: '', Match: 'skipped', Provider: null, Matches: [] },
+    parpresetdetect: { Running: false, CPUs: 12, MemTotalMB: 40960, MemAvailableMB: 30000, InterFreeMB: 500000, DiskWriteMBps: 1000, DiskReadMBps: 2400,
+      Presets: { low: { ParBuffer: 64, ParThreads: 1, ParPauseQueue: true }, medium: { ParBuffer: 256, ParThreads: 6, ParPauseQueue: false },
+        large: { ParBuffer: 1024, ParThreads: 0, ParPauseQueue: false }, uber: { ParBuffer: 4096, ParThreads: 14, ParPauseQueue: false },
+        detect: { ParBuffer: 4096, ParThreads: 0, ParPauseQueue: false } } },
     readurl: JSON.stringify({ 'stable-version': '26.3', 'testing-version': '26.3' }), listfiles: [], viewfeed: []
   };
   await page.route('**/*', async route => {

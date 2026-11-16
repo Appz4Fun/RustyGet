@@ -188,20 +188,39 @@ fn direct_unpack_on() -> bool {
     crate::options::active_options().is_some_and(|o| o.scalars().direct_unpack != 0)
 }
 
-/// True when `t` is a volume of which nothing arrived that the dead-volume borrow can rebuild
-/// for direct unpack: a `.partNN.rar` past the first (the borrow needs a readable first
-/// volume), or a file direct unpack already holds under a name that is not a RAR name (an
-/// obfuscated one).
-fn borrowable_dead_volume(dest_dir: &[u8], t: &RepairTarget) -> bool {
+/// Whether the live repair leaves dead volume `t` to the dead-volume borrow: `None` when `t`
+/// is not a volume of which nothing arrived (par2 files included), else `Ok(())` to borrow it or
+/// `Err(reason)` saying why not. The borrow plans `.partNN.rar` sets from a readable first
+/// volume, and files direct unpack holds under a name that is not a RAR name (obfuscated ones).
+/// The archive's own headers say whether it is stored and unencrypted, so a password set on the
+/// download does not rule it out here.
+fn dead_volume_decision(dest_dir: &[u8], t: &RepairTarget) -> Option<Result<(), &'static str>> {
+    dead_volume_decision_with(dest_dir, t, direct_unpack_on())
+}
+
+fn dead_volume_decision_with(
+    dest_dir: &[u8],
+    t: &RepairTarget,
+    direct_unpack: bool,
+) -> Option<Result<(), &'static str>> {
     if t.is_par_file || !crate::streamrepair::nothing_arrived(t.decoded_file_size, &t.holes) {
-        return false;
+        return None;
     }
-    // The borrow plans `.partNN.rar` sets only, from a readable first volume.
+    if !direct_unpack {
+        return Some(Err("DirectUnpack is off"));
+    }
+    if !t.patch_eligible {
+        return Some(Err("an earlier live repair already tried it"));
+    }
     if let Some((_, n, _, _)) = crate::streamrepair::rar_part_number(&t.filename) {
-        return n > 1;
+        return Some(if n > 1 {
+            Ok(())
+        } else {
+            Err("the first volume cannot be rebuilt")
+        });
     }
     if crate::filetypes::is_rar_file(&t.filename) {
-        return false;
+        return Some(Err("only .partNN.rar volumes can be rebuilt"));
     }
     let full = [
         dest_dir,
@@ -209,24 +228,25 @@ fn borrowable_dead_volume(dest_dir: &[u8], t: &RepairTarget) -> bool {
         t.filename.as_slice(),
     ]
     .concat();
-    crate::postproc::direct_unpack_is_held_path(&full)
+    Some(if crate::postproc::direct_unpack_is_held_path(&full) {
+        Ok(())
+    } else {
+        Err("direct unpack is not waiting on it")
+    })
+}
+
+/// True when the live repair leaves `t` to the dead-volume borrow, see [`dead_volume_decision`].
+fn borrowable_dead_volume(dest_dir: &[u8], t: &RepairTarget) -> bool {
+    matches!(dead_volume_decision(dest_dir, t), Some(Ok(())))
 }
 
 /// Which targets the live repair leaves to the dead-volume borrow instead of recreating them
 /// whole first: recreating fetches every article one by one (minutes, long enough for the queue
-/// to fail over) and only works from a twin. None without DirectUnpack (only direct unpack reads
-/// a rebuilt volume) or with a known password (encrypted sets are not borrowed).
-fn dead_volumes_to_borrow(
-    dest_dir: &[u8],
-    targets: &[RepairTarget],
-    counters: &RunCounters,
-) -> Vec<bool> {
-    if !direct_unpack_on() || !counters.target_password.is_empty() {
-        return vec![false; targets.len()];
-    }
+/// to fail over) and only works from a twin.
+fn dead_volumes_to_borrow(dest_dir: &[u8], targets: &[RepairTarget]) -> Vec<bool> {
     targets
         .iter()
-        .map(|t| t.patch_eligible && borrowable_dead_volume(dest_dir, t))
+        .map(|t| borrowable_dead_volume(dest_dir, t))
         .collect()
 }
 
@@ -2322,7 +2342,16 @@ impl NzbgetRsStreamRepairCtrl {
             let opts = unsafe { self.query_host_options(ctx, cb) };
             // Keep the queue from failing over while the repair works towards borrowing a dead
             // volume: the switch would throw away the extraction already done.
-            let left_to_borrow = dead_volumes_to_borrow(&dest_dir, &targets, &counters);
+            let left_to_borrow = dead_volumes_to_borrow(&dest_dir, &targets);
+            for t in &targets {
+                if let Some(Err(why)) = dead_volume_decision(&dest_dir, t) {
+                    let mut msg = b"Not borrowing dead volume ".to_vec();
+                    msg.extend_from_slice(&t.filename);
+                    msg.extend_from_slice(b": ");
+                    msg.extend_from_slice(why.as_bytes());
+                    unsafe { self.print_message(ctx, cb, MK_INFO, &msg) };
+                }
+            }
             let borrowing = left_to_borrow.iter().any(|l| *l);
             let borrow_note = BorrowNote::mark(if borrowing {
                 unsafe { self.pending_data_files(ctx, cb) }.1
@@ -2452,6 +2481,45 @@ mod tests {
             positional_window: 0,
             steps_hash: 0,
         }
+    }
+
+    /// The decision with DirectUnpack on (tests run without active options).
+    fn borrowable_dead_volume(dest_dir: &[u8], t: &RepairTarget) -> bool {
+        matches!(dead_volume_decision_with(dest_dir, t, true), Some(Ok(())))
+    }
+
+    #[test]
+    fn a_dead_volume_not_borrowed_says_why() {
+        let dir = b"/dst/dead-volume-reasons-test";
+        let dead = target("Movie.part36.rar", 0, vec![]);
+        assert_eq!(dead_volume_decision_with(dir, &dead, true), Some(Ok(())));
+        assert_eq!(
+            dead_volume_decision_with(dir, &dead, false),
+            Some(Err("DirectUnpack is off"))
+        );
+        let mut tried = dead.clone();
+        tried.patch_eligible = false;
+        assert_eq!(
+            dead_volume_decision_with(dir, &tried, true),
+            Some(Err("an earlier live repair already tried it"))
+        );
+        assert_eq!(
+            dead_volume_decision_with(dir, &target("Movie.part01.rar", 0, vec![]), true),
+            Some(Err("the first volume cannot be rebuilt"))
+        );
+        assert_eq!(
+            dead_volume_decision_with(dir, &target("Movie.r05", 0, vec![]), true),
+            Some(Err("only .partNN.rar volumes can be rebuilt"))
+        );
+        // Damaged but partly arrived: not a dead volume, nothing to say.
+        let hole = vec![NzbgetRsByteRange {
+            offset: 0,
+            size: 10,
+        }];
+        assert_eq!(
+            dead_volume_decision_with(dir, &target("Movie.part36.rar", 1000, hole), true),
+            None
+        );
     }
 
     #[test]

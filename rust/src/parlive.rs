@@ -74,6 +74,9 @@ pub(crate) fn resources(
             solve_mem_limit_bytes: solve,
             solve_threads: 1,
             fold_threads: 0,
+            // Re-reading verified slices for new slots runs on its own thread
+            // (`streaming_session_kick_backfill`), never under the queue lock.
+            defer_backfill: true,
             ..SessionOptions::default()
         },
         reservation_bytes,

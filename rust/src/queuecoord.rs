@@ -2993,6 +2993,7 @@ impl NzbgetRsQueueCoordinator {
                 crate::parchecker::streaming_session_drain_articles(id),
                 Some(Err(_))
             );
+            crate::parchecker::streaming_session_kick_backfill(id);
             host.with_locked_queue(|dq| {
                 let ptr = host.queue_find_by_id(dq, id);
                 if ptr == 0 || !automatic_live_par_repair(&host.opts()) {

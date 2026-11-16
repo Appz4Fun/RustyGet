@@ -398,7 +398,7 @@ BOOST_AUTO_TEST_CASE(DirectUnpackParFailureStillFinalizesUnpack)
 			{
 				return info->GetDirectUnpackStatus() == NzbInfo::nsSuccess &&
 					info->GetUnpackThread() == nullptr && info->GetPostInfo() &&
-					!info->GetPostInfo()->GetExtractedArchives()->empty();
+					info->GetPostInfo()->GetExtractedArchiveCount() > 0;
 			});
 		}));
 		BOOST_REQUIRE(fs::exists(workPath / "_unpack/testfile3.dat"));

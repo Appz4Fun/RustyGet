@@ -221,6 +221,8 @@ struct NzbData {
     texts: Mutex<[Option<CString>; TEXTS]>,
     coll: Mutex<Coll>,
     files: Mutex<Files>,
+    // (id, kind, time, text), oldest first (see `nzbget_rs_nzb_msgs`)
+    msgs: Mutex<std::collections::VecDeque<(u32, i32, i64, CString)>>,
 }
 
 /// A file that finished downloading and left the file list.
@@ -259,6 +261,8 @@ struct RepairJob {
 struct Files {
     completed: Vec<Completed>,
     jobs: Vec<RepairJob>,
+    // archives unpacked so far (cleared when post-processing ends)
+    extracted: Vec<CString>,
 }
 
 /// A collection's small lists (see `nzbget_rs_nzb_coll`).
@@ -331,6 +335,7 @@ pub extern "C" fn nzbget_rs_nzb_scalars_new() -> *mut NzbScalars {
         texts: Mutex::new(texts),
         coll: Mutex::new(Coll::default()),
         files: Mutex::new(Files::default()),
+        msgs: Mutex::new(std::collections::VecDeque::new()),
     });
     Box::into_raw(data).cast()
 }
@@ -759,8 +764,206 @@ pub unsafe extern "C" fn nzbget_rs_nzb_files(
             f.jobs.clear();
             0
         }
+        30..=33 => list_op(&mut f.extracted, op - 30, a2, s1, strs),
         _ => 0,
     }
+}
+
+/// 0 count; 1 read at a2 into strs[0] (-1 when out of range); 2 add s1;
+/// 3 clear.
+fn list_op(
+    v: &mut Vec<CString>,
+    op: c_int,
+    a2: c_int,
+    s1: *const c_char,
+    strs: *mut *const c_char,
+) -> i64 {
+    match op {
+        0 => v.len() as i64,
+        1 => match v.get(a2.max(0) as usize) {
+            Some(e) if a2 >= 0 => {
+                unsafe { *strs = e.as_ptr() };
+                0
+            }
+            _ => -1,
+        },
+        2 => {
+            v.push(owned(s1));
+            0
+        }
+        3 => {
+            v.clear();
+            0
+        }
+        _ => 0,
+    }
+}
+
+/// Post-processing state of a collection (the C++ PostInfo is a thin owner).
+pub struct Post {
+    // scalar fields by id (see `nzbget_rs_post_op`)
+    vals: [std::sync::atomic::AtomicI64; POST_VALS],
+    lists: Mutex<PostLists>,
+}
+
+const POST_VALS: usize = 20;
+
+#[derive(Default)]
+struct PostLists {
+    label: CString,
+    parred: Vec<CString>,
+    // used only when the post job has no collection
+    extracted: Vec<CString>,
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nzbget_rs_post_new() -> *mut Post {
+    Box::into_raw(Box::new(Post {
+        vals: std::array::from_fn(|_| std::sync::atomic::AtomicI64::new(0)),
+        lists: Mutex::new(PostLists::default()),
+    }))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_post_free(p: *mut Post) {
+    if !p.is_null() {
+        drop(unsafe { Box::from_raw(p) });
+    }
+}
+
+/// A copy of the progress label: it may change on another thread.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_post_label(p: *const Post) -> crate::ffi::RsBuf {
+    let post = unsafe { &*p };
+    let l = post.lists.lock().unwrap_or_else(|e| e.into_inner());
+    crate::ffi::into_buf(l.label.as_bytes().to_vec())
+}
+
+/// Fields 0-19: 0 stage, 1 working, 2 deleted, 3 request par check,
+/// 4 force par full, 5 par cannot cover, 6 need par check, 7 need unpack,
+/// 8 force repair, 9 par repaired, 10 unpack tried, 11 pass list tried,
+/// 12 last unpack status, 13 file progress, 14 stage progress,
+/// 15 stream repair done, 16 stream repair recovered, 17 start time,
+/// 18 stage time, 19 post thread pointer.
+///  0 get field a2; 1 set field a2 to v;
+///  11 set the progress label to s1 (read it with `nzbget_rs_post_label`);
+///  20-23 parred files, 30-33 extracted archives (see `list_op`): strings
+///  returned stay valid until that list changes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_post_op(
+    p: *const Post,
+    op: c_int,
+    a2: c_int,
+    v: i64,
+    s1: *const c_char,
+    strs: *mut *const c_char,
+) -> i64 {
+    use std::sync::atomic::Ordering::SeqCst;
+    let post = unsafe { &*p };
+    let field = || post.vals.get(a2.max(0) as usize).filter(|_| a2 >= 0);
+    match op {
+        0 => field().map_or(0, |f| f.load(SeqCst)),
+        1 => {
+            if let Some(f) = field() {
+                f.store(v, SeqCst);
+            }
+            0
+        }
+        11 => {
+            post.lists.lock().unwrap_or_else(|e| e.into_inner()).label = owned(s1);
+            0
+        }
+        20..=23 | 30..=33 => {
+            let mut l = post.lists.lock().unwrap_or_else(|e| e.into_inner());
+            let list = if op < 30 {
+                &mut l.parred
+            } else {
+                &mut l.extracted
+            };
+            list_op(list, op % 10, a2, s1, strs)
+        }
+        _ => 0,
+    }
+}
+
+/// Called once per message, oldest first: (ctx, id, kind, time, text).
+pub type MsgVisit = Option<unsafe extern "C" fn(usize, c_int, c_int, c_int, *const c_char)>;
+
+/// A collection's message log. The caller prints; this keeps the messages.
+///  0 add kind a2, text s1, time ints[0]; keep at most ints[1] when > 0;
+///    the id comes from the collection's idMessageGen; returns the count
+///  1 count; 2 clear;
+///  3 add p2's messages (fresh ids, time now in ints[0], limit ints[1]);
+///  4 visit messages: from id ints[0] when > 0, else the last ints[1] when
+///    > 0, else none.
+/// cachedMessageCount follows every change.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_nzb_msgs(
+    p: *const NzbScalars,
+    op: c_int,
+    a2: c_int,
+    p2: *const NzbScalars,
+    s1: *const c_char,
+    ints: *const c_int,
+    visit: MsgVisit,
+    ctx: usize,
+) -> i64 {
+    let copied: Vec<(i32, CString)> = if op == 3 && !p2.is_null() && p2 != p {
+        let o = data(p2).msgs.lock().unwrap_or_else(|e| e.into_inner());
+        o.iter().map(|m| (m.1, m.3.clone())).collect()
+    } else {
+        Vec::new()
+    };
+    let mut m = data(p).msgs.lock().unwrap_or_else(|e| e.into_inner());
+    // the scalars are C++-owned plain memory; these two fields change only
+    // under this lock
+    let sp = p.cast_mut();
+    let int = |k: usize| unsafe { *ints.add(k) };
+    let push = |m: &mut std::collections::VecDeque<_>, kind: i32, text: CString| unsafe {
+        let id = (*sp).idMessageGen.wrapping_add(1);
+        (*sp).idMessageGen = id;
+        m.push_back((id as u32, kind, i64::from(int(0)), text));
+        let limit = int(1);
+        while limit > 0 && m.len() > limit as usize {
+            m.pop_front();
+        }
+    };
+    let ret = match op {
+        0 => {
+            push(&mut m, a2, owned(s1));
+            m.len() as i64
+        }
+        1 => return m.len() as i64,
+        2 => {
+            m.clear();
+            0
+        }
+        3 => {
+            for (kind, text) in copied {
+                push(&mut m, kind, text);
+            }
+            0
+        }
+        4 => {
+            let Some(f) = visit else { return 0 };
+            let sz = m.len();
+            let mut start = sz;
+            let (from_id, last) = (int(0), int(1));
+            if last > 0 {
+                start = sz - (last as usize).min(sz);
+            }
+            if from_id > 0 && sz > 0 {
+                start = (i64::from(from_id) - i64::from(m[0].0)).max(0) as usize;
+            }
+            for e in m.iter().skip(start) {
+                unsafe { f(ctx, e.0 as c_int, e.1, e.2 as c_int, e.3.as_ptr()) };
+            }
+            return 0;
+        }
+        _ => return 0,
+    };
+    unsafe { (*sp).cachedMessageCount = m.len() as i32 };
+    ret
 }
 
 #[cfg(test)]
@@ -973,6 +1176,107 @@ mod tests {
             );
             nzbget_rs_nzb_scalars_free(p);
             nzbget_rs_nzb_scalars_free(q);
+        }
+    }
+
+    #[test]
+    fn message_log() {
+        unsafe extern "C" fn collect(
+            ctx: usize,
+            id: c_int,
+            kind: c_int,
+            _t: c_int,
+            text: *const c_char,
+        ) {
+            let v = unsafe { &mut *(ctx as *mut Vec<(i32, i32, Vec<u8>)>) };
+            v.push((
+                id,
+                kind,
+                unsafe { CStr::from_ptr(text) }.to_bytes().to_vec(),
+            ));
+        }
+        let p = nzbget_rs_nzb_scalars_new();
+        let q = nzbget_rs_nzb_scalars_new();
+        let np: *const NzbScalars = std::ptr::null();
+        let ns: *const c_char = std::ptr::null();
+        unsafe {
+            let lim = [100, 2];
+            nzbget_rs_nzb_msgs(p, 0, 0, np, c"one".as_ptr(), lim.as_ptr(), None, 0);
+            nzbget_rs_nzb_msgs(p, 0, 1, np, c"two".as_ptr(), lim.as_ptr(), None, 0);
+            assert_eq!(
+                nzbget_rs_nzb_msgs(p, 0, 2, np, c"three".as_ptr(), lim.as_ptr(), None, 0),
+                2
+            );
+            assert_eq!((*p).cachedMessageCount, 2);
+            assert_eq!((*p).idMessageGen, 3);
+            let mut got: Vec<(i32, i32, Vec<u8>)> = Vec::new();
+            let all = [0, 10];
+            nzbget_rs_nzb_msgs(
+                p,
+                4,
+                0,
+                np,
+                ns,
+                all.as_ptr(),
+                Some(collect),
+                &mut got as *mut _ as usize,
+            );
+            assert_eq!(
+                got,
+                vec![(2, 1, b"two".to_vec()), (3, 2, b"three".to_vec())]
+            );
+            got.clear();
+            let from = [3, 0];
+            nzbget_rs_nzb_msgs(
+                p,
+                4,
+                0,
+                np,
+                ns,
+                from.as_ptr(),
+                Some(collect),
+                &mut got as *mut _ as usize,
+            );
+            assert_eq!(got.len(), 1);
+            let nolimit = [100, 0];
+            nzbget_rs_nzb_msgs(q, 3, 0, p, ns, nolimit.as_ptr(), None, 0);
+            assert_eq!(
+                nzbget_rs_nzb_msgs(q, 1, 0, np, ns, nolimit.as_ptr(), None, 0),
+                2
+            );
+            assert_eq!((*q).idMessageGen, 2);
+            nzbget_rs_nzb_msgs(p, 2, 0, np, ns, nolimit.as_ptr(), None, 0);
+            assert_eq!((*p).cachedMessageCount, 0);
+            nzbget_rs_nzb_scalars_free(p);
+            nzbget_rs_nzb_scalars_free(q);
+        }
+    }
+
+    #[test]
+    fn post_state_and_lists() {
+        let ns: *const c_char = std::ptr::null();
+        let mut out = ns;
+        unsafe {
+            let p = nzbget_rs_post_new();
+            nzbget_rs_post_op(p, 1, 14, 750, ns, &mut out);
+            assert_eq!(nzbget_rs_post_op(p, 0, 14, 0, ns, &mut out), 750);
+            assert_eq!(nzbget_rs_post_op(p, 0, 99, 0, ns, &mut out), 0);
+            nzbget_rs_post_op(p, 11, 0, 0, c"Unpacking".as_ptr(), &mut out);
+            let b = nzbget_rs_post_label(p);
+            assert_eq!(
+                std::slice::from_raw_parts(b.data.cast::<u8>(), b.len),
+                b"Unpacking"
+            );
+            crate::ffi::nzbget_rs_free(b);
+            nzbget_rs_post_op(p, 22, 0, 0, c"a.par2".as_ptr(), &mut out);
+            assert_eq!(nzbget_rs_post_op(p, 20, 0, 0, ns, &mut out), 1);
+            assert_eq!(nzbget_rs_post_op(p, 21, 0, 0, ns, &mut out), 0);
+            assert_eq!(CStr::from_ptr(out).to_bytes(), b"a.par2");
+            assert_eq!(nzbget_rs_post_op(p, 31, 0, 0, ns, &mut out), -1);
+            nzbget_rs_post_op(p, 32, 0, 0, c"x.rar".as_ptr(), &mut out);
+            nzbget_rs_post_op(p, 33, 0, 0, ns, &mut out);
+            assert_eq!(nzbget_rs_post_op(p, 30, 0, 0, ns, &mut out), 0);
+            nzbget_rs_post_free(p);
         }
     }
 }

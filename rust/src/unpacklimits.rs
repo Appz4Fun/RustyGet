@@ -324,7 +324,7 @@ impl Guard {
         entries.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
         let mut names = Names {
             base: &base,
-            admitted: (&self.files, &self.folders),
+            admitted: &self.files,
             earlier: std::mem::take(&mut self.produced),
             now: BTreeSet::new(),
         };
@@ -357,8 +357,9 @@ impl Guard {
 /// The ASCII names given while renaming, relative to the unpack folder.
 struct Names<'a> {
     base: &'a Path,
-    /// What the job wrote (files, folders): never an older copy.
-    admitted: (&'a BTreeSet<PathBuf>, &'a BTreeSet<PathBuf>),
+    /// Files the job wrote: never an older copy. (A folder is merged into, which keeps
+    /// everything in it; its files are checked one by one.)
+    admitted: &'a BTreeSet<PathBuf>,
     /// Given by earlier runs of the same guard.
     earlier: BTreeSet<PathBuf>,
     /// Given by this run.
@@ -374,8 +375,7 @@ impl Names<'_> {
     fn stale(&self, p: &Path) -> bool {
         let rel = self.rel(p);
         !self.now.contains(&rel)
-            && !self.admitted.0.contains(&rel)
-            && !self.admitted.1.contains(&rel)
+            && !self.admitted.contains(&rel)
             && rel.ancestors().any(|a| self.earlier.contains(a))
     }
 
@@ -1252,6 +1252,29 @@ mod tests {
         g.asciify().unwrap();
         assert_eq!(std::fs::read(t.join("Cafe.txt")).unwrap(), b"set2");
         assert_eq!(std::fs::read(t.join("Cafe_2.txt")).unwrap(), b"set1");
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
+
+    #[test]
+    fn a_redone_folder_merges_into_its_copy_another_archive_also_wrote_into() {
+        let t = std::env::temp_dir().join(format!("rg-sharedredo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        let mut g = Guard::new(Limits::default(), &t, &[]);
+        let set_a = |g: &mut Guard, v: &[u8]| {
+            std::fs::create_dir_all(t.join("Dossié")).unwrap();
+            std::fs::write(t.join("Dossié").join("foo.txt"), v).unwrap();
+            g.admit(&t.join("Dossié").join("foo.txt"), false).unwrap();
+        };
+        set_a(&mut g, b"a1");
+        g.asciify().unwrap();
+        set_a(&mut g, b"a2");
+        std::fs::write(t.join("Dossie").join("other.txt"), b"b").unwrap();
+        g.admit(&t.join("Dossie").join("other.txt"), false).unwrap();
+        g.asciify().unwrap();
+        assert_eq!(names_in(&t), ["Dossie"]);
+        assert_eq!(names_in(&t.join("Dossie")), ["foo.txt", "other.txt"]);
+        assert_eq!(std::fs::read(t.join("Dossie").join("foo.txt")).unwrap(), b"a2");
         let _ = std::fs::remove_dir_all(&t);
     }
 

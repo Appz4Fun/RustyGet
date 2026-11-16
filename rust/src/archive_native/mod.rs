@@ -1381,12 +1381,36 @@ where
         msg
     })?;
 
+    let pw = (!password.is_empty()).then_some(password);
+    // The member list, read first: a link refuses the whole archive before anything is
+    // written, as RustyGet always did. Encrypted headers without the right password cannot be
+    // listed; the run below reports that.
+    let entries = zipfast::sevenzip::list(archive_path, pw).ok();
+    // The old decoder's rule: a Unix symlink mode or a Windows reparse point.
+    let is_link = |e: &zipfast::extract::Entry| {
+        e.link.is_some()
+            || e.mode.is_some_and(|m| m & 0o170000 == 0o120000)
+            || e.attributes.is_some_and(|a| a & 0x0400 != 0)
+    };
+    if entries
+        .as_ref()
+        .is_some_and(|list| list.iter().any(is_link))
+    {
+        log_cb(1, "ERROR: Dangerous link path was ignored");
+        log_cb(0, "Stream repair: archive contains link");
+        return Err("archive contains link".to_string());
+    }
+
     let cancel = zipfast::extract::Cancellation::default();
     let breach: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    // AutoRename: files are counted once zipfast has chosen their names (below).
+    let rename_mode = overwrite_mode == 2;
+    let requested: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
     let (tx, rx) = mpsc::channel::<SzMsg>();
 
     let select = {
         let breach = Arc::clone(&breach);
+        let requested = Arc::clone(&requested);
         let cancel = cancel.clone();
         let dest = output_dir.to_path_buf();
         let tx = Mutex::new(tx.clone());
@@ -1399,7 +1423,21 @@ where
                 // zipfast refuses the unsafe name itself.
                 return true;
             };
-            if let Err(e) = sz_admit(&dest, &rel, m.is_dir) {
+            let admitted = if rename_mode && !m.is_dir {
+                // The folders now; the file under the name zipfast picks, after the run.
+                requested
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .push(dest.join(&rel));
+                match rel.parent() {
+                    Some(parent) if !parent.as_os_str().is_empty() => sz_admit(&dest, parent, true),
+                    _ => Ok(()),
+                }
+                .and_then(|()| crate::unpacklimits::probe(&dest.join(&rel), false))
+            } else {
+                sz_admit(&dest, &rel, m.is_dir)
+            };
+            if let Err(e) = admitted {
                 *slot = Some(e);
                 cancel.cancel();
                 return false;
@@ -1425,7 +1463,6 @@ where
         parallel_min: None,
         select: Some(select),
     };
-    let pw = (!password.is_empty()).then_some(password);
     let limits = zipfast::sevenzip::SevenZipLimits::default();
 
     let mut user_cancelled = false;
@@ -1484,17 +1521,54 @@ where
         }
     };
 
-    // AutoRename: zipfast chose the final names; the limits see those too.
-    for renamed in &summary.renames {
-        let path = if renamed.path.is_absolute() {
-            renamed.path.clone()
-        } else {
-            output_dir.join(&renamed.path)
+    // AutoRename: each file counts under the name zipfast finally gave it.
+    if rename_mode {
+        let renamed: Vec<(PathBuf, PathBuf)> = summary
+            .renames
+            .iter()
+            .map(|r| {
+                let abs = |p: &Path| {
+                    if p.is_absolute() {
+                        p.to_path_buf()
+                    } else {
+                        output_dir.join(p)
+                    }
+                };
+                (abs(&r.requested), abs(&r.path))
+            })
+            .collect();
+        let requested = std::mem::take(&mut *requested.lock().unwrap_or_else(|p| p.into_inner()));
+        let mut finals: Vec<PathBuf> = requested
+            .into_iter()
+            .filter(|req| !renamed.iter().any(|(r, _)| r == req))
+            .filter(|p| p.is_file())
+            .collect();
+        finals.extend(renamed.into_iter().map(|(_, path)| path));
+        for path in finals {
+            if let Err(msg) = crate::unpacklimits::check(&path, false) {
+                let _ = std::fs::remove_file(&path);
+                log_cb(1, &msg);
+                return Err(msg);
+            }
+        }
+    }
+
+    // zipfast applies the folder modes stored in the archive; a folder RustyGet cannot write
+    // into would break the nested unpack and cleanup that run before permissions are
+    // normalized, so every extracted folder keeps owner rwx.
+    #[cfg(unix)]
+    for e in entries.iter().flatten().filter(|e| e.dir) {
+        use std::os::unix::fs::PermissionsExt;
+        let Some(rel) = sz_member_rel(&e.name) else {
+            continue;
         };
-        if let Err(msg) = crate::unpacklimits::check(&path, path.is_dir()) {
-            let _ = std::fs::remove_file(&path);
-            log_cb(1, &msg);
-            return Err(msg);
+        let path = output_dir.join(rel);
+        if let Ok(meta) = std::fs::symlink_metadata(&path) {
+            let mode = meta.permissions().mode() & 0o7777;
+            if meta.is_dir() && mode & 0o700 != 0o700 {
+                let _ =
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode | 0o700));
+            }
         }
     }
 
@@ -3708,6 +3782,15 @@ mod tests {
 
     /// A solid 7z archive: one LZMA2 folder (uncompressed chunks) holding `files` in order.
     fn build_solid_lzma2_7z(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let entries: Vec<(&str, Option<&[u8]>, Option<u32>)> =
+            files.iter().map(|(n, d)| (*n, Some(*d), None)).collect();
+        build_7z(&entries)
+    }
+
+    /// A 7z archive from `(name, data, attributes)`: `data` None is a folder (an empty-stream
+    /// entry); file data goes into one solid LZMA2 folder (uncompressed chunks), in order;
+    /// attributes, when any entry has them, are stored for all (0 for the others).
+    fn build_7z(entries: &[(&str, Option<&[u8]>, Option<u32>)]) -> Vec<u8> {
         fn number(out: &mut Vec<u8>, v: u64) {
             // 7z NUMBER: one byte below 0x80, else 0xFF and eight little-endian bytes.
             if v < 0x80 {
@@ -3717,40 +3800,55 @@ mod tests {
                 out.extend_from_slice(&v.to_le_bytes());
             }
         }
-        let solid_plain: Vec<u8> = files.iter().flat_map(|(_, d)| d.iter().copied()).collect();
-        // LZMA2 uncompressed chunks (control 0x01 = dictionary reset, then 0x02), end 0x00.
+        let files: Vec<&[u8]> = entries.iter().filter_map(|(_, d, _)| *d).collect();
+        let solid_plain: Vec<u8> = files.iter().flat_map(|d| d.iter().copied()).collect();
+        let mut hdr = vec![0x01];
         let mut packed = Vec::new();
-        for (i, chunk) in solid_plain.chunks(0x10000).enumerate() {
-            packed.push(if i == 0 { 0x01 } else { 0x02 });
-            packed.extend_from_slice(&((chunk.len() - 1) as u16).to_be_bytes());
-            packed.extend_from_slice(chunk);
-        }
-        packed.push(0x00);
-
-        let mut hdr = vec![0x01, 0x04, 0x06, 0x00, 0x01, 0x09];
-        number(&mut hdr, packed.len() as u64);
-        hdr.push(0x00); // end PackInfo
-        hdr.extend_from_slice(&[0x07, 0x0b, 0x01, 0x00, 0x01, 0x21, 0x21, 0x01, 0x18, 0x0c]);
-        number(&mut hdr, solid_plain.len() as u64);
-        hdr.push(0x00); // end UnpackInfo
-        hdr.extend_from_slice(&[0x08, 0x0d]);
-        number(&mut hdr, files.len() as u64);
-        if files.len() > 1 {
-            hdr.push(0x09);
-            for (_, d) in &files[..files.len() - 1] {
-                number(&mut hdr, d.len() as u64);
+        if !files.is_empty() {
+            // LZMA2 uncompressed chunks (control 0x01 = dictionary reset, then 0x02), end 0x00.
+            for (i, chunk) in solid_plain.chunks(0x10000).enumerate() {
+                packed.push(if i == 0 { 0x01 } else { 0x02 });
+                packed.extend_from_slice(&((chunk.len() - 1) as u16).to_be_bytes());
+                packed.extend_from_slice(chunk);
             }
+            packed.push(0x00);
+            hdr.extend_from_slice(&[0x04, 0x06, 0x00, 0x01, 0x09]);
+            number(&mut hdr, packed.len() as u64);
+            hdr.push(0x00); // end PackInfo
+            hdr.extend_from_slice(&[0x07, 0x0b, 0x01, 0x00, 0x01, 0x21, 0x21, 0x01, 0x18, 0x0c]);
+            number(&mut hdr, solid_plain.len() as u64);
+            hdr.push(0x00); // end UnpackInfo
+            hdr.extend_from_slice(&[0x08, 0x0d]);
+            number(&mut hdr, files.len() as u64);
+            if files.len() > 1 {
+                hdr.push(0x09);
+                for d in &files[..files.len() - 1] {
+                    number(&mut hdr, d.len() as u64);
+                }
+            }
+            hdr.extend_from_slice(&[0x0a, 0x01]);
+            for d in &files {
+                hdr.extend_from_slice(&crc32(d).to_le_bytes());
+            }
+            hdr.extend_from_slice(&[0x00, 0x00]); // end SubStreamsInfo, MainStreamsInfo
         }
-        hdr.extend_from_slice(&[0x0a, 0x01]);
-        for (_, d) in files {
-            hdr.extend_from_slice(&crc32(d).to_le_bytes());
-        }
-        hdr.extend_from_slice(&[0x00, 0x00]); // end SubStreamsInfo, MainStreamsInfo
         hdr.push(0x05);
-        number(&mut hdr, files.len() as u64);
+        number(&mut hdr, entries.len() as u64);
+        if entries.iter().any(|(_, d, _)| d.is_none()) {
+            // kEmptyStream: one bit per entry, most significant bit first.
+            let mut bits = vec![0u8; entries.len().div_ceil(8)];
+            for (i, (_, d, _)) in entries.iter().enumerate() {
+                if d.is_none() {
+                    bits[i / 8] |= 0x80 >> (i % 8);
+                }
+            }
+            hdr.push(0x0e);
+            number(&mut hdr, bits.len() as u64);
+            hdr.extend_from_slice(&bits);
+        }
         hdr.push(0x11);
         let mut names = vec![0x00];
-        for (name, _) in files {
+        for (name, _, _) in entries {
             for u in name.encode_utf16() {
                 names.extend_from_slice(&u.to_le_bytes());
             }
@@ -3758,6 +3856,14 @@ mod tests {
         }
         number(&mut hdr, names.len() as u64);
         hdr.extend_from_slice(&names);
+        if entries.iter().any(|(_, _, a)| a.is_some()) {
+            hdr.push(0x15);
+            number(&mut hdr, 2 + 4 * entries.len() as u64);
+            hdr.extend_from_slice(&[0x01, 0x00]); // all defined, not external
+            for (_, _, a) in entries {
+                hdr.extend_from_slice(&a.unwrap_or(0).to_le_bytes());
+            }
+        }
         hdr.extend_from_slice(&[0x00, 0x00]); // end FilesInfo, Header
 
         let mut start_hdr = [0u8; 20];
@@ -3772,6 +3878,94 @@ mod tests {
         archive.extend_from_slice(&packed);
         archive.extend_from_slice(&hdr);
         archive
+    }
+
+    /// 7z attributes carrying a Unix mode (the high 16 bits, FILE_ATTRIBUTE_UNIX_EXTENSION).
+    fn sz_unix_attrs(mode: u32, dir: bool) -> u32 {
+        (mode << 16) | 0x8000 | if dir { 0x10 } else { 0 }
+    }
+
+    #[test]
+    fn test_7z_links_folder_modes_and_auto_rename_counts() {
+        use crate::unpacklimits::{Guard, Limits, Scope};
+        use std::sync::{Arc, Mutex};
+        let dir = TempTestDir::new("7z_links_modes");
+
+        // A link refuses the whole archive before anything is written, with the old lines.
+        let link = build_7z(&[
+            ("a.txt", Some(b"a"), None),
+            (
+                "evil",
+                Some(b"/etc/passwd"),
+                Some(sz_unix_attrs(0o120777, false)),
+            ),
+        ]);
+        let link_path = dir.path().join("link.7z");
+        std::fs::write(&link_path, &link).unwrap();
+        let out = dir.path().join("link_out");
+        let mut logs = Vec::new();
+        let err = extract_7z_cancellable(
+            &link_path,
+            &out,
+            "",
+            1,
+            &mut |_, m| logs.push(m.to_string()),
+            &mut || false,
+        )
+        .unwrap_err();
+        assert_eq!(err, "archive contains link");
+        assert!(
+            logs.iter()
+                .any(|m| m == "Stream repair: archive contains link"),
+            "{logs:?}"
+        );
+        assert!(!out.join("a.txt").exists() && !out.join("evil").exists());
+
+        // A read-only folder in the archive stays writable for RustyGet.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let ro = build_7z(&[
+                ("ro", None, Some(sz_unix_attrs(0o40555, true))),
+                ("ro/f.txt", Some(b"f"), None),
+            ]);
+            let ro_path = dir.path().join("ro.7z");
+            std::fs::write(&ro_path, &ro).unwrap();
+            let out = dir.path().join("ro_out");
+            extract_7z_cancellable(&ro_path, &out, "", 1, &mut |_, _| {}, &mut || false).unwrap();
+            let mode = std::fs::metadata(out.join("ro"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o700, 0o700, "{mode:o}");
+            std::fs::write(out.join("ro").join("new.txt"), b"writable").unwrap();
+        }
+
+        // AutoRename counts each file once, under the name zipfast chose.
+        let two = build_7z(&[("a.txt", Some(b"new a"), None), ("b.txt", Some(b"b"), None)]);
+        let two_path = dir.path().join("two.7z");
+        std::fs::write(&two_path, &two).unwrap();
+        let out = dir.path().join("rename_out");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join("a.txt"), b"downloaded").unwrap();
+        let g = Arc::new(Mutex::new(Guard::new(
+            Limits {
+                max_files: 2,
+                max_depth: 2,
+                max_folders: 10,
+            },
+            &out,
+            &[],
+        )));
+        let res = {
+            let _scope = Scope::enter(&g);
+            extract_7z_cancellable(&two_path, &out, "", 2, &mut |_, _| {}, &mut || false)
+        };
+        let summary = res.unwrap();
+        assert_eq!(summary.files, 2);
+        assert_eq!(std::fs::read(out.join("a.txt")).unwrap(), b"downloaded");
+        assert_eq!(std::fs::read(out.join("a_1.txt")).unwrap(), b"new a");
+        assert_eq!(std::fs::read(out.join("b.txt")).unwrap(), b"b");
     }
 
     #[test]

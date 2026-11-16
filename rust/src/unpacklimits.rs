@@ -355,7 +355,8 @@ impl Guard {
     }
 
     /// Counts the archive volumes no nested unpack consumed: they are output. Called when an
-    /// archive and everything nested in it is unpacked.
+    /// archive and everything nested in it is unpacked, after a split-file join, and once
+    /// more when the job's unpack is done.
     pub fn settle(&mut self) -> Result<(), String> {
         if let Some(b) = &self.breach {
             return Err(b.clone());
@@ -1032,6 +1033,14 @@ mod tests {
         tag: &str,
         archives: &[&[(&str, &[u8])]],
     ) -> (Vec<Result<u64, String>>, PathBuf, Vec<String>) {
+        unpack_job_with(tag, archives, false)
+    }
+
+    fn unpack_job_with(
+        tag: &str,
+        archives: &[&[(&str, &[u8])]],
+        cleanup_disk: bool,
+    ) -> (Vec<Result<u64, String>>, PathBuf, Vec<String>) {
         let t = std::env::temp_dir().join(format!("rg-unpack-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&t);
         std::fs::create_dir_all(&t).unwrap();
@@ -1047,7 +1056,7 @@ mod tests {
                 &out,
                 "",
                 1,
-                false,
+                cleanup_disk,
                 |k, m| log.push(format!("{k} {m}")),
                 &mut || false,
                 crate::unpack::RarFeed {
@@ -1418,13 +1427,43 @@ mod tests {
             .map(|(n, v)| (n.as_str(), v.as_slice()))
             .collect();
         entries.push(("info.nfo", b"nfo"));
-        let (r, out, log) = unpack("nestedvols", &entries);
-        assert!(r.is_ok(), "{r:?} {log:?}");
+        let (r, out, log) = unpack_job_with("nestedvols", &[&entries], true);
+        assert!(r.iter().all(Result::is_ok), "{r:?} {log:?}");
         assert_eq!(
             std::fs::read(out.join("movie.mkv")).unwrap(),
             data,
             "{log:?}"
         );
+        assert_eq!(names_in(&out), ["info.nfo", "movie.mkv"]);
+        // Without cleanup the volumes stay on disk as output, and count.
+        let (r, _, log) = unpack_job_with("nestedkept", &[&entries], false);
+        let err = r[0].as_ref().unwrap_err();
+        assert!(err.contains("more than 100 files"), "{err} {log:?}");
+    }
+
+    #[test]
+    fn a_joined_file_named_like_a_volume_counts_when_settled() {
+        let t = std::env::temp_dir().join(format!("rg-settle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        std::fs::create_dir_all(&t).unwrap();
+        let mut g = Guard::new(
+            Limits {
+                max_files: 1,
+                ..Limits::default()
+            },
+            &t,
+            &[],
+        );
+        g.admit(&t.join("movie.mkv"), false).unwrap();
+        // A join's output: held back like a volume until settled.
+        std::fs::write(t.join("extras.zip"), b"z").unwrap();
+        g.admit(&t.join("extras.zip"), false).unwrap();
+        let e = g.settle().unwrap_err();
+        assert!(
+            e.contains("more than 1 files") && e.contains("extras.zip"),
+            "{e}"
+        );
+        let _ = std::fs::remove_dir_all(&t);
     }
 
     #[test]

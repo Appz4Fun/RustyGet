@@ -1234,8 +1234,6 @@ fn collect_nested_archive_volumes(main_archive: &std::path::Path) -> Vec<std::pa
     vols
 }
 
-/// Checks whether a regular file inside `output_dir` is a nested archive that Extended Unpacker
-/// / Extended Unrar should recursively unpack.
 /// Whether a file name looks like an archive or one of its volumes (RAR, 7z, ZIP, tar and
 /// numbered parts), which a nested unpack may consume (`unpacklimits`).
 pub fn may_be_archive_volume(fname: &[u8]) -> bool {
@@ -1265,6 +1263,8 @@ pub fn may_be_archive_volume(fname: &[u8]) -> bool {
     .any(|s| has_suffix_icase(fname, s))
 }
 
+/// Checks whether a regular file inside `output_dir` is a nested archive that Extended Unpacker
+/// / Extended Unrar should recursively unpack.
 fn is_nested_extractable_archive(path: &std::path::Path) -> bool {
     let bytes = path_to_bytes(path);
     let fname = path_filename(bytes);
@@ -1617,10 +1617,6 @@ where
             for v in consumed_volumes {
                 processed_nested.insert(v.clone());
             }
-            // Unpacked further: not output, so not counted against the job's limits.
-            if let Some(g) = guard {
-                crate::unpacklimits::consumed(g, consumed_volumes);
-            }
             mark_extracted_files(&sub_extracted, &mut pre_existing, &mut processed_nested);
             summary.files += sub_summary.files;
             summary.dirs += sub_summary.dirs;
@@ -1628,6 +1624,11 @@ where
             if cleanup_disk {
                 for v in consumed_volumes {
                     let _ = std::fs::remove_file(v);
+                }
+                // Unpacked further and deleted: not output, so not counted against the job's
+                // limits. Kept volumes (no cleanup) are output and count.
+                if let Some(g) = guard {
+                    crate::unpacklimits::consumed(g, consumed_volumes);
                 }
             }
         }

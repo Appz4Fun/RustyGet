@@ -8641,11 +8641,21 @@ fn plan_dead_fills(
             .chain(numbered.keys().next_back().copied())
             .max()
             .unwrap_or(1);
-        let volume_name = |n: u32| {
+        // Names are matched case-blind but opened by exact path: use a volume's own name when it
+        // is on disk, the dead job's name when one matches, and part 1's spelling otherwise.
+        let (prefix, suffix) = rar_part_number(&original_members[numbered[&1] as usize].name)
+            .map_or((prefix, suffix), |(p, _, _, s)| (p, s));
+        let volume_name = |n: u32| -> Vec<u8> {
+            if let Some(&m) = numbered.get(&n) {
+                return original_members[m as usize].name.clone();
+            }
             let mut v = prefix.clone();
             v.extend_from_slice(format!("{n:0width$}").as_bytes());
             v.extend_from_slice(&suffix);
-            v
+            dead_jobs
+                .iter()
+                .find(|t| t.filename.eq_ignore_ascii_case(&v))
+                .map_or(v, |t| t.filename.clone())
         };
         // Read every volume on disk: its version and the main member's part.
         let mut inner: Option<(Vec<u8>, i64)> = None;

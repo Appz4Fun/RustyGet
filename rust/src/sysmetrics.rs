@@ -352,6 +352,11 @@ pub fn percent(delta_busy: f64, delta_total: f64) -> f32 {
 // Platform readers
 // ---------------------------------------------------------------------------
 
+/// Total and available memory of the machine now.
+pub fn memory_info() -> MemInfo {
+    platform::memory()
+}
+
 /// Number of CPUs the system has online.
 pub fn cpu_count() -> usize {
     let n = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };

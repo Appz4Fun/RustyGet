@@ -562,6 +562,13 @@ var Options = (new function($)
 					{
 						option.value = val.Value;
 					}
+					else if (option.name === 'ParPreset' && values && values.length)
+					{
+						// a config written before ParPreset existed runs as custom
+						// (its own ParBuffer, ParThreads, ParPauseQueue): show that,
+						// and don't let a save switch it to the template's level
+						option.value = 'custom';
+					}
 				}
 			}
 		}
@@ -645,7 +652,8 @@ var Config = (new function($)
 		CertCheck: 'Check news server certificates', CertStore: 'CA certificates',
 		ControlUsername: 'Username', ControlPassword: 'Password', SevenZipCmd: '7-Zip command',
 		UnrarCmd: 'UnRAR command', ParCheck: 'Par check', ParRepair: 'Par repair', ParScan: 'Par scan',
-		ParBuffer: 'Par buffer', ParThreads: 'Par threads',
+		ParBuffer: 'Par buffer', ParThreads: 'Par threads', ParPreset: 'Resource level',
+		LiveParRepair: 'Repair while downloading (live par2)',
 		DirectWrite: 'Write directly to the final file', ArticleCache: 'Article cache',
 		FlushQueue: 'Flush queue to disk',
 		DiskSpace: 'Pause below free disk space', KeepHistory: 'Keep history for',
@@ -655,7 +663,8 @@ var Config = (new function($)
 
 	// Display names of some choices (the saved value stays the same).
 	var VALUE_LABELS = {
-		DupeHealthPreset: { weak: 'Weak / fast', medium: 'Medium / slower', hard: 'Hard / slowest', custom: 'Custom (see Expert)' }
+		DupeHealthPreset: { weak: 'Weak / fast', medium: 'Medium / slower', hard: 'Hard / slowest', custom: 'Custom (see Expert)' },
+		ParPreset: { low: 'Low', medium: 'Medium', large: 'Large', uber: 'Uber', detect: 'Detect', custom: 'Custom' }
 	};
 
 	function valueLabel(option, value)
@@ -1657,9 +1666,10 @@ var Config = (new function($)
 		CHECK_AND_REPAIR: [
 			// one card: par2 is the fallback when no twin or alt in the fleet has the bytes
 			{ key: 'par', title: 'Check and repair', text: 'Used when no twin or alt in the fleet has the missing bytes.',
-				options: ['ParCheck', 'ParRepair', 'ParScan', 'DirectRename', 'ParRename', 'RarRename', 'HardLinking',
-					'HardLinkingIgnoreExt', 'ParTimeLimit', 'ParPauseQueue'],
-				advanced: ['ParBuffer', 'ParThreads', 'ParIgnoreExt'] }
+				options: ['ParPreset', 'LiveParRepair', 'ParCheck', 'ParRepair', 'ParScan', 'DirectRename', 'ParRename', 'RarRename', 'HardLinking',
+					'HardLinkingIgnoreExt', 'ParTimeLimit', 'ParIgnoreExt'],
+				advanced: ['ParBuffer', 'ParThreads', 'ParPauseQueue'],
+				moreLabel: 'Custom resources' }
 		],
 		UNPACK: [
 			{ key: 'unpack', title: 'Unpack', options: ['Unpack', 'DirectUnpack', 'UnpackPassFile', 'UseTempUnpackDir', 'UnpackPauseQueue'] },
@@ -1944,7 +1954,8 @@ var Config = (new function($)
 		var parCheck = optionValueByName('ParCheck');
 		tiles.append(overviewTile('CHECK_AND_REPAIR', t('config_overview_par', 'Par check'), 'arrow_right_alt',
 			parCheck ? parCheck.charAt(0).toUpperCase() + parCheck.slice(1) : '-',
-			yes('ParRepair') ? t('config_overview_repair_on', 'repair on') : t('config_overview_repair_off', 'repair off')));
+			(yes('ParRepair') ? t('config_overview_repair_on', 'repair on') : t('config_overview_repair_off', 'repair off')) +
+				' · ' + t('config_overview_par_level', 'level: %s').replace('%s', VALUE_LABELS.ParPreset[String(optionValueByName('ParPreset') || 'custom').toLowerCase()] || optionValueByName('ParPreset'))));
 		tiles.append(overviewTile('UNPACK', t('config_overview_unpack', 'Unpack'), 'arrow_right_alt',
 			!yes('Unpack') ? t('config_overview_off', 'Off') : yes('DirectUnpack') ? t('config_overview_direct', 'While downloading') : t('config_overview_after', 'After download'),
 			yes('UnpackCleanupDisk') ? t('config_overview_cleanup', 'archives deleted after') : t('config_overview_keep', 'archives kept')));
@@ -2619,6 +2630,112 @@ var Config = (new function($)
 		});
 	}
 
+	/*** PAR PRESET: five one-click resource levels ***************************/
+
+	// ParPreset stays a row of buttons (not a menu). Below it a line says what the
+	// chosen level sets on this machine; "detect" also shows what was measured and
+	// can measure again. The values come from the daemon (parpresetdetect), which
+	// knows the CPU count, RAM and the intermediate folder's disk.
+	var parPresetInfo = null;
+	function pt(key, text) { return I18n.defaultValue(key, text); }
+	var parPresetProbeAsked = false;
+
+	function enhanceParPreset(option, group)
+	{
+		if (group.hasClass('config-preset-buttons'))
+		{
+			return;
+		}
+		group.addClass('config-preset-buttons');
+		var summary = $('<p class="config-preset-summary" aria-live="polite"></p>');
+		var again = $('<button type="button" class="btn btn-default config-preset-detect"></button>')
+			.text(pt('config_parpreset_detect_again', 'Measure again'))
+			.on('click', function() { loadParPresetInfo(true); });
+		group.after($('<div class="config-preset-info"></div>').append(summary).append(again));
+		option.onchange = function() { renderParPresetSummary(); };
+		loadParPresetInfo(false);
+	}
+
+	function loadParPresetInfo(start)
+	{
+		RPC.call('parpresetdetect', [!!start], function(data)
+		{
+			try
+			{
+				parPresetInfo = typeof data === 'string' ? JSON.parse(data) : data;
+			}
+			catch (e)
+			{
+				parPresetInfo = null;
+			}
+			renderParPresetSummary();
+			if (parPresetInfo && parPresetInfo.Running)
+			{
+				setTimeout(function() { loadParPresetInfo(false); }, 1500);
+			}
+		}, function() { parPresetInfo = null; renderParPresetSummary(); });
+	}
+
+	function renderParPresetSummary()
+	{
+		var group = $('.config-preset-buttons', $ConfigData);
+		if (!group.length)
+		{
+			return;
+		}
+		var preset = String(group.find('.btn-primary').attr('data-value') || 'custom').toLowerCase();
+		var info = group.siblings('.config-preset-info');
+		var summary = info.find('.config-preset-summary');
+		info.find('.config-preset-detect').toggle(preset === 'detect');
+		if (preset === 'custom')
+		{
+			summary.text(pt('config_parpreset_custom', 'Uses Par buffer, Par threads and Pause queue under Custom resources.'));
+			return;
+		}
+		var values = parPresetInfo && parPresetInfo.Presets && parPresetInfo.Presets[preset];
+		if (!values)
+		{
+			summary.text('');
+			return;
+		}
+		var threads = values.ParThreads === 0 ? pt('config_parpreset_all_cpus', 'all CPUs') :
+			values.ParThreads + ' ' + pt('config_parpreset_threads', 'threads');
+		var text = values.ParBuffer + ' MB, ' + threads + ', ' +
+			(values.ParPauseQueue ? pt('config_parpreset_pause', 'downloads pause while repairing') :
+				pt('config_parpreset_nopause', 'downloads keep going while repairing'));
+		if (preset === 'detect' && !parPresetInfo.Running && parPresetInfo.DiskWriteMBps === undefined && !parPresetProbeAsked)
+		{
+			// picking Detect measures this machine once, if it was not measured yet
+			parPresetProbeAsked = true;
+			loadParPresetInfo(true);
+		}
+		if (preset === 'detect')
+		{
+			var p = parPresetInfo;
+			var seen = p.CPUs + ' CPUs';
+			if (p.MemAvailableMB !== undefined)
+			{
+				seen += ', ' + p.MemAvailableMB + ' of ' + p.MemTotalMB + ' MB RAM free';
+			}
+			if (p.DiskWriteMBps !== undefined)
+			{
+				seen += ', disk ' + p.DiskWriteMBps + ' MB/s write' +
+					(p.DiskReadMBps !== undefined ? ', ' + p.DiskReadMBps + ' MB/s read' : '');
+			}
+			else if (p.Running)
+			{
+				seen += ', ' + pt('config_parpreset_testing', 'testing the disk…');
+			}
+			text = seen + ' → ' + text;
+			if (p.AppliedParBuffer !== undefined && p.AppliedParBuffer !== values.ParBuffer)
+			{
+				text += ' ' + pt('config_parpreset_applied', '(%s MB in use until settings are saved or reloaded)')
+					.replace('%s', p.AppliedParBuffer);
+			}
+		}
+		summary.text(text);
+	}
+
 	// numbers get a stepper (and a slider when they have limits), short choices a menu
 	function enhanceControls(scope)
 	{
@@ -2636,6 +2753,10 @@ var Config = (new function($)
 				!/:|^\s*0[0-9]/.test(unit) && EXPRESSION_FIELDS.indexOf(optionFamily(option.name)) === -1)
 			{
 				enhanceNumber(option, control);
+			}
+			else if (option.name === 'ParPreset' && control.is('.btn-switch'))
+			{
+				enhanceParPreset(option, control);
 			}
 			else if (option.type === 'switch' && control.is('.btn-switch') && !control.hasClass('is-toggle') &&
 				!control.hasClass('config-select-source'))

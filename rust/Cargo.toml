@@ -10,7 +10,7 @@ name = "nzbget_rs"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
-par-rs = { git = "https://github.com/xbmc4lyfe/par-rs", rev = "61cc252a75c18c46ad4adcaffca53a7bdc0dc856" }
+par-rs = { git = "https://github.com/xbmc4lyfe/par-rs", rev = "ec3497c75a15183a9c7bdd70363543e22081d8fd" }
 zipfast = { git = "https://github.com/xbmc4lyfe/zipfast", rev = "a7a2ad9e3233d78aaa16ba30d6f486d927821719", features = ["persistent-partials"] }
 zipview = { git = "https://github.com/xbmc4lyfe/zipview", rev = "2c3d73a06b29987cea1510e903e437a482076745" }
 nntmux-yenc = { git = "https://github.com/xbmc4lyfe/newznab-tmux", rev = "8dade08ca0372e046af2bd9d3040e23a47379bd4" }
@@ -39,6 +39,10 @@ path = "tests/dupepurge/journal.rs"
 
 [[bench]]
 name = "ports"
+harness = false
+
+[[bench]]
+name = "yenc_decode"
 harness = false
 
 [[bench]]

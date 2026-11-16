@@ -467,6 +467,34 @@
 #ConfigContent .config-presets th { white-space: nowrap; font-weight: 600; }
 #ConfigContent .config-presets__value { font-family: var(--font-mono); white-space: nowrap; }
 
+/* Check and repair resource level: one row of buttons that wraps on phones */
+#ConfigContent .config-preset-buttons {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+}
+#ConfigContent .config-preset-buttons .btn {
+	flex: 1 1 0;
+	min-width: 76px;
+	margin: 0;
+	border-radius: var(--radius-sm, 6px);
+}
+#ConfigContent .config-preset-info {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px;
+	margin-top: 6px;
+	max-width: 64ch;
+}
+#ConfigContent .config-preset-summary {
+	flex: 1 1 240px;
+	margin: 0;
+	font-size: 13px;
+	color: var(--label-secondary);
+}
+#ConfigContent .config-preset-summary:empty { display: none; }
+
 /* ---------------------------------------------------------------- menus */
 
 #ConfigContent .btn-switch.config-select-source { display: none !important; }

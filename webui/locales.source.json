@@ -5841,5 +5841,41 @@
   "config_server_save_wait": {
     "message": "A server is still being saved. Save the other changes once it is done.",
     "description": "Settings: shown when Save and reload is used while a server save is running"
+  },
+  "config_parpreset_detect_again": {
+    "message": "Measure again",
+    "description": "Button under the Check and repair resource level: runs the CPU, RAM and disk test again"
+  },
+  "config_parpreset_custom": {
+    "message": "Uses Par buffer, Par threads and Pause queue under Custom resources.",
+    "description": "Shown under the resource level when Custom is picked"
+  },
+  "config_parpreset_all_cpus": {
+    "message": "all CPUs",
+    "description": "Resource level summary: par2 uses every CPU"
+  },
+  "config_parpreset_threads": {
+    "message": "threads",
+    "description": "Resource level summary: a number of par2 threads follows before this word"
+  },
+  "config_parpreset_pause": {
+    "message": "downloads pause while repairing",
+    "description": "Resource level summary: the queue pauses during par2 repair"
+  },
+  "config_parpreset_nopause": {
+    "message": "downloads keep going while repairing",
+    "description": "Resource level summary: the queue keeps downloading during par2 repair"
+  },
+  "config_parpreset_testing": {
+    "message": "testing the disk…",
+    "description": "Resource level summary while the disk speed test runs"
+  },
+  "config_overview_par_level": {
+    "message": "level: %s",
+    "description": "Settings overview Par check tile: the Check and repair resource level (Low, Medium, Large, Uber, Detect or Custom) replaces %s"
+  },
+  "config_parpreset_applied": {
+    "message": "(%s MB in use until settings are saved or reloaded)",
+    "description": "Detect resource level: the par buffer in use now differs from the newly measured one; %s is the buffer in MB"
   }
 }

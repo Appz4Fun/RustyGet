@@ -2085,42 +2085,54 @@ public:
 		dsGood
 	};
 
-	int GetId() { return m_id; }
+	// the record lives in Rust (rust/src/qdup.rs)
+	DupInfo() = default;
+	DupInfo(const DupInfo&) = delete;
+	DupInfo& operator=(const DupInfo&) = delete;
+	~DupInfo() { nzbget_rs_dup_free(m_rs); }
+
+	int GetId() { return (int)Get(5); }
 	void SetId(int id)
 	{
-		m_id = id;
-		if (NzbInfo::m_idMax < m_id)
+		nzbget_rs_dup_set(m_rs, 5, id, nullptr);
+		if (NzbInfo::m_idMax < id)
 		{
-			NzbInfo::m_idMax = m_id;
+			NzbInfo::m_idMax = id;
 		}
 	}
-	const char* GetName() { return m_name; }
-	void SetName(const char* name) { m_name = name; }
-	const char* GetDupeKey() { return m_dupeKey; }
-	void SetDupeKey(const char* dupeKey) { m_dupeKey = dupeKey; }
-	int GetDupeScore() { return m_dupeScore; }
-	void SetDupeScore(int dupeScore) { m_dupeScore = dupeScore; }
-	EDupeMode GetDupeMode() { return m_dupeMode; }
-	void SetDupeMode(EDupeMode dupeMode) { m_dupeMode = dupeMode; }
-	int64 GetSize() { return m_size; }
-	void SetSize(int64 size) { m_size = size; }
-	uint32 GetFullContentHash() { return m_fullContentHash; }
-	void SetFullContentHash(uint32 fullContentHash) { m_fullContentHash = fullContentHash; }
-	uint32 GetFilteredContentHash() { return m_filteredContentHash; }
-	void SetFilteredContentHash(uint32 filteredContentHash) { m_filteredContentHash = filteredContentHash; }
-	EStatus GetStatus() { return m_status; }
-	void SetStatus(EStatus Status) { m_status = Status; }
+	const char* GetName() { return Text(0); }
+	void SetName(const char* name) { nzbget_rs_dup_set(m_rs, 7, 0, name); }
+	const char* GetDupeKey() { return Text(1); }
+	void SetDupeKey(const char* dupeKey) { nzbget_rs_dup_set(m_rs, 8, 0, dupeKey); }
+	int GetDupeScore() { return (int)Get(1); }
+	void SetDupeScore(int dupeScore) { nzbget_rs_dup_set(m_rs, 1, dupeScore, nullptr); }
+	EDupeMode GetDupeMode() { return (EDupeMode)Get(0); }
+	void SetDupeMode(EDupeMode dupeMode) { nzbget_rs_dup_set(m_rs, 0, dupeMode, nullptr); }
+	int64 GetSize() { return Get(6); }
+	void SetSize(int64 size) { nzbget_rs_dup_set(m_rs, 6, size, nullptr); }
+	uint32 GetFullContentHash() { return (uint32)Get(3); }
+	void SetFullContentHash(uint32 fullContentHash) { nzbget_rs_dup_set(m_rs, 3, fullContentHash, nullptr); }
+	uint32 GetFilteredContentHash() { return (uint32)Get(4); }
+	void SetFilteredContentHash(uint32 filteredContentHash) { nzbget_rs_dup_set(m_rs, 4, filteredContentHash, nullptr); }
+	EStatus GetStatus() { return (EStatus)Get(2); }
+	void SetStatus(EStatus Status) { nzbget_rs_dup_set(m_rs, 2, Status, nullptr); }
+	// every field at once (see nzbget_rs_dup_get)
+	void Read(int* ints, int64_t* i64s, const char** strs) { nzbget_rs_dup_get(m_rs, ints, i64s, strs); }
 
 private:
-	int m_id = 0;
-	CString m_name;
-	CString m_dupeKey;
-	int m_dupeScore = 0;
-	EDupeMode m_dupeMode = dmScore;
-	int64 m_size = 0;
-	uint32 m_fullContentHash = 0;
-	uint32 m_filteredContentHash = 0;
-	EStatus m_status = dsUndefined;
+	RsDup* m_rs = nzbget_rs_dup_new();
+	int64 Get(int field)
+	{
+		int ints[6]; int64_t size = 0; const char* strs[2];
+		nzbget_rs_dup_get(m_rs, ints, &size, strs);
+		return field == 6 ? size : ints[field];
+	}
+	const char* Text(int which)
+	{
+		int ints[6]; const char* strs[2];
+		nzbget_rs_dup_get(m_rs, ints, nullptr, strs);
+		return strs[which];
+	}
 };
 
 class HistoryInfo
@@ -3147,11 +3159,9 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 	case 35: {
 		if (a1 == 0)
 		{
-			DupInfo* d = reinterpret_cast<DupInfo*>(p1);
-			ints[0] = (int)d->GetDupeMode(); ints[1] = d->GetDupeScore(); ints[2] = (int)d->GetStatus();
-			ints[3] = (int)d->GetFullContentHash(); ints[4] = (int)d->GetFilteredContentHash();
-			if (i64s) i64s[0] = d->GetSize();
-			strs[0] = d->GetName(); strs[1] = d->GetDupeKey();
+			int all[6];
+			reinterpret_cast<DupInfo*>(p1)->Read(all, i64s, strs);
+			for (int k = 0; k < 5; k++) ints[k] = all[k];
 			return 0;
 		}
 		if (a1 == 1) { reinterpret_cast<DupInfo*>(p1)->SetStatus((DupInfo::EStatus)a2); return 0; }

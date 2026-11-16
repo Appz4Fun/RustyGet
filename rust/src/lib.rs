@@ -111,6 +111,7 @@ pub mod qarticle;
 pub mod qfile;
 #[cfg(unix)]
 pub mod qnzb;
+pub mod qdup;
 pub mod queuecoord;
 pub(crate) mod queuesubsys_host;
 pub mod sevenzraw;

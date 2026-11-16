@@ -1452,9 +1452,10 @@ mod tests {
     /// NNTP dot-stuffing) doubled.
     fn yenc_article(data: &[u8], stuff_dots: bool) -> Vec<u8> {
         let size = data.len();
-        let mut out =
-            format!("=ybegin part=1 line=128 size={size} name=f.bin\r\n=ypart begin=1 end={size}\r\n")
-                .into_bytes();
+        let mut out = format!(
+            "=ybegin part=1 line=128 size={size} name=f.bin\r\n=ypart begin=1 end={size}\r\n"
+        )
+        .into_bytes();
         let mut col = 0;
         for &b in data {
             let e = b.wrapping_add(42);
@@ -1500,7 +1501,12 @@ mod tests {
                 .map(|_| {
                     let r = next();
                     if round % 3 == 0 && r % 4 == 0 {
-                        [b'.'.wrapping_sub(42), 0u8.wrapping_sub(42), b'\r'.wrapping_sub(42), b'='.wrapping_sub(42)][(r >> 8) as usize % 4]
+                        [
+                            b'.'.wrapping_sub(42),
+                            0u8.wrapping_sub(42),
+                            b'\r'.wrapping_sub(42),
+                            b'='.wrapping_sub(42),
+                        ][(r >> 8) as usize % 4]
                     } else {
                         r as u8
                     }

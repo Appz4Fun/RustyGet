@@ -697,7 +697,8 @@ fn live_target_rejects_replacement_after_source_attestation() {
     let fx = Fixture::new();
     let set = fx.set();
     let id = -1_961_700;
-    streaming_session_start_bounded(id, &fx.0.join("testfile.vol00+1.PAR2"), &fx.0, 500 << 20).unwrap();
+    streaming_session_start_bounded(id, &fx.0.join("testfile.vol00+1.PAR2"), &fx.0, 500 << 20)
+        .unwrap();
     let first = set.main.as_ref().unwrap().recoverable_file_ids[0];
     let ss = set.main.as_ref().unwrap().slice_size;
     let desc = &set.file_descs[&first];
@@ -705,28 +706,65 @@ fn live_target_rejects_replacement_after_source_attestation() {
     let original = std::fs::read(&target).unwrap();
     for fid in &set.main.as_ref().unwrap().recoverable_file_ids {
         let file = &set.file_descs[fid];
-        let start = if *fid == first { ss.min(file.file_length) } else { 0 };
-        streaming_session_reconcile_file(id, *fid, &fx.0.join(file.local_name()),
-            &[ByteRange::new(start as i64, (file.file_length - start) as i64)]).unwrap().unwrap();
+        let start = if *fid == first {
+            ss.min(file.file_length)
+        } else {
+            0
+        };
+        streaming_session_reconcile_file(
+            id,
+            *fid,
+            &fx.0.join(file.local_name()),
+            &[ByteRange::new(
+                start as i64,
+                (file.file_length - start) as i64,
+            )],
+        )
+        .unwrap()
+        .unwrap();
     }
-    let mut disk = std::fs::OpenOptions::new().write(true).open(&target).unwrap();
+    let mut disk = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&target)
+        .unwrap();
     disk.seek(SeekFrom::Start(0)).unwrap();
-    disk.write_all(&vec![0; (ss as usize).min(original.len())]).unwrap();
+    disk.write_all(&vec![0; (ss as usize).min(original.len())])
+        .unwrap();
     drop(disk);
     let damaged = std::fs::read(&target).unwrap();
     let context = crate::parlive::source_write_context(id, 40, &fx.0, &desc.name).unwrap();
     context.attest_existing_source().unwrap();
-    let request = streaming_session_prepare_repair(id,
-        vec![crate::parlive::WriterTarget { file_id: 40, path: target.clone() }],
-        reserve_control(id, 4096, 500 << 20).unwrap()).unwrap();
+    let request = streaming_session_prepare_repair(
+        id,
+        vec![crate::parlive::WriterTarget {
+            file_id: 40,
+            path: target.clone(),
+        }],
+        reserve_control(id, 4096, 500 << 20).unwrap(),
+    )
+    .unwrap();
     let lease = request.acquire().unwrap();
     let old = fx.0.join("original-inode-held");
     std::fs::rename(&target, &old).unwrap();
     std::fs::write(&target, &damaged).unwrap();
     let mut published = false;
-    let result = lease.repair_and_publish(|_| { published = true; 1 }, || ());
-    assert_eq!(std::fs::read(&target).unwrap(), damaged, "replacement inode was modified");
-    assert_eq!(std::fs::read(old).unwrap(), damaged, "old inode was modified after the path changed");
+    let result = lease.repair_and_publish(
+        |_| {
+            published = true;
+            1
+        },
+        || (),
+    );
+    assert_eq!(
+        std::fs::read(&target).unwrap(),
+        damaged,
+        "replacement inode was modified"
+    );
+    assert_eq!(
+        std::fs::read(old).unwrap(),
+        damaged,
+        "old inode was modified after the path changed"
+    );
     assert!(!published, "replaced source released a hold");
     assert!(result.is_err());
     streaming_session_forget(id);

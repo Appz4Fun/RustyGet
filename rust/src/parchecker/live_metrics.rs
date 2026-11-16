@@ -121,7 +121,10 @@ impl Drop for ActiveStreamingSession {
             self.emit_live_metrics(nzb_id, "disposed");
             if let Some(summary) = self.refusal_summary() {
                 let message = format!("Live PAR (job {nzb_id}) refusals: {summary}");
-                crate::log::log_active_bytes(crate::queuesubsys_host::MK_DETAIL, message.as_bytes());
+                crate::log::log_active_bytes(
+                    crate::queuesubsys_host::MK_DETAIL,
+                    message.as_bytes(),
+                );
             }
         }
     }

@@ -92,7 +92,11 @@ fn str_map(y: &Yaml, lower_key: bool, lower_value: bool) -> Result<Vec<(String, 
                 };
                 out.push((
                     if lower_key { k.to_ascii_lowercase() } else { k },
-                    if lower_value { v.to_ascii_lowercase() } else { v },
+                    if lower_value {
+                        v.to_ascii_lowercase()
+                    } else {
+                        v
+                    },
                 ));
             }
         }
@@ -266,7 +270,9 @@ pub fn name_of(id: i32) -> Option<String> {
 /// "Group N", so servers that shared a group still count as copies of each
 /// other. Settings drops `Group` when it saves, so an emptied Backbone stays empty.
 pub fn server_backbone(backbone: Option<&[u8]>, group: Option<&[u8]>) -> String {
-    let named = backbone.map(|b| display_name(&String::from_utf8_lossy(b))).unwrap_or_default();
+    let named = backbone
+        .map(|b| display_name(&String::from_utf8_lossy(b)))
+        .unwrap_or_default();
     if !named.is_empty() {
         return named;
     }
@@ -343,18 +349,25 @@ mod tests {
         let c = parse(DATA).expect("data/backbones.yaml parses");
         assert_eq!(c.backbones.len(), 10);
         assert_eq!(c.backbones[0].name, "Omicron");
-        assert!(c.backbones[0].providers.contains(&"iLoad USENET".to_string()));
+        assert!(c.backbones[0]
+            .providers
+            .contains(&"iLoad USENET".to_string()));
         // every provider has a domain, and every domain names a known provider
         for b in &c.backbones {
             for p in &b.providers {
                 assert!(
-                    c.domains.iter().any(|(dp, _)| normalize(dp) == normalize(p)),
+                    c.domains
+                        .iter()
+                        .any(|(dp, _)| normalize(dp) == normalize(p)),
                     "no domain for provider {p}"
                 );
             }
         }
         for (p, d) in &c.domains {
-            assert!(!c.backbones_of(p).is_empty(), "domain {d} for unknown provider {p}");
+            assert!(
+                !c.backbones_of(p).is_empty(),
+                "domain {d} for unknown provider {p}"
+            );
             assert_eq!(
                 c.domains.iter().filter(|(_, d2)| d2 == d).count(),
                 1,
@@ -364,7 +377,9 @@ mod tests {
         // every confirmed host names a known backbone
         for (h, b) in &c.hosts {
             assert!(
-                c.backbones.iter().any(|x| normalize(&x.name) == normalize(b)),
+                c.backbones
+                    .iter()
+                    .any(|x| normalize(&x.name) == normalize(b)),
                 "host {h} names unknown backbone {b}"
             );
         }
@@ -394,10 +409,20 @@ mod tests {
 
         // suffix match on a dot boundary only
         assert_eq!(c.lookup("notxlned.com").kind, MatchKind::Unknown);
-        assert_eq!(c.lookup("news.usenet.farm").provider.as_deref(), Some("Usenet.Farm"));
+        assert_eq!(
+            c.lookup("news.usenet.farm").provider.as_deref(),
+            Some("Usenet.Farm")
+        );
         assert_eq!(c.lookup("news.example.org").kind, MatchKind::Unknown);
 
-        for skipped in ["127.0.0.1", "::1", "[2001:db8::1]", "localhost", "proxy", ""] {
+        for skipped in [
+            "127.0.0.1",
+            "::1",
+            "[2001:db8::1]",
+            "localhost",
+            "proxy",
+            "",
+        ] {
             assert_eq!(c.lookup(skipped).kind, MatchKind::Skipped, "{skipped}");
         }
     }
@@ -432,6 +457,8 @@ mod tests {
         assert!(j.starts_with("{\"Backbones\":[{\"Name\":\"Omicron\",\"Providers\":[\"AnonyNews\""));
         assert!(j.contains("\"Match\":\"confirmed\",\"Provider\":\"Eweka\",\"Matches\":[\"Eweka Internet Services\"]"));
         let j = rpc_json("");
-        assert!(j.ends_with("\"Host\":\"\",\"Match\":\"skipped\",\"Provider\":null,\"Matches\":[]}"));
+        assert!(
+            j.ends_with("\"Host\":\"\",\"Match\":\"skipped\",\"Provider\":null,\"Matches\":[]}")
+        );
     }
 }

@@ -2146,7 +2146,11 @@ pub fn log_format_rotated_path_for_time(
 
 /// Matches a day log `<stem>-YYYY-MM-DD<ext>` or one of its 10MB parts
 /// `<stem>-YYYY-MM-DD.<n><ext>`, returning the offsets of the year, month and day.
-pub fn log_rotated_file_date(filename: &[u8], stem: &[u8], ext: &[u8]) -> Option<(usize, usize, usize)> {
+pub fn log_rotated_file_date(
+    filename: &[u8],
+    stem: &[u8],
+    ext: &[u8],
+) -> Option<(usize, usize, usize)> {
     let rest = filename.strip_prefix(stem)?.strip_prefix(b"-")?;
     let at = stem.len() + 1;
     let date = rest.get(..10)?;
@@ -4689,18 +4693,39 @@ mod tests {
             log_format_rotated_path_for_time(b"/var/log", b'/', b"rustyget", cur_time, b".log");
         assert_eq!(path, b"/var/log/rustyget-2026-03-10.log");
         assert_eq!(log_part_path(&path, 0), path);
-        assert_eq!(log_part_path(&path, 3), b"/var/log/rustyget-2026-03-10.3.log");
-        assert_eq!(log_part_path(b"/var/log/rustyget-2026-03-10", 1), b"/var/log/rustyget-2026-03-10.1");
+        assert_eq!(
+            log_part_path(&path, 3),
+            b"/var/log/rustyget-2026-03-10.3.log"
+        );
+        assert_eq!(
+            log_part_path(b"/var/log/rustyget-2026-03-10", 1),
+            b"/var/log/rustyget-2026-03-10.1"
+        );
         assert_eq!(
             log_rotated_file_date(b"rustyget-2026-03-05.12.log", b"rustyget", b".log"),
             Some((9, 14, 17))
         );
-        assert_eq!(log_rotated_file_date(b"rustyget-2026-03-05.log", b"rustyget", b".log"), Some((9, 14, 17)));
-        assert_eq!(log_rotated_file_date(b"rustyget-2026-03-05..log", b"rustyget", b".log"), None);
-        assert_eq!(log_rotated_file_date(b"rustyget-2026-3-05.log", b"rustyget", b".log"), None);
-        assert_eq!(log_rotated_file_date(b"other-2026-03-05.log", b"rustyget", b".log"), None);
+        assert_eq!(
+            log_rotated_file_date(b"rustyget-2026-03-05.log", b"rustyget", b".log"),
+            Some((9, 14, 17))
+        );
+        assert_eq!(
+            log_rotated_file_date(b"rustyget-2026-03-05..log", b"rustyget", b".log"),
+            None
+        );
+        assert_eq!(
+            log_rotated_file_date(b"rustyget-2026-3-05.log", b"rustyget", b".log"),
+            None
+        );
+        assert_eq!(
+            log_rotated_file_date(b"other-2026-03-05.log", b"rustyget", b".log"),
+            None
+        );
 
-        assert_eq!(log_rotated_file_date(b"rustyget-2026-03-05.12.log.gz", b"rustyget", b".log"), Some((9, 14, 17)));
+        assert_eq!(
+            log_rotated_file_date(b"rustyget-2026-03-05.12.log.gz", b"rustyget", b".log"),
+            Some((9, 14, 17))
+        );
 
         #[cfg(unix)]
         {

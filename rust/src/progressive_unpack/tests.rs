@@ -1077,7 +1077,6 @@ fn rar4_stored_then_broken_solid_member_fails() {
     std::fs::write(&first, &v).unwrap();
     let (r, log) = run(&first, &t.out(), Box::new(CompleteSet));
     assert!(r.is_err(), "log: {log:?}");
-
 }
 
 #[test]
@@ -3112,7 +3111,11 @@ fn walk_names(dir: &Path) -> Vec<String> {
     if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {
             let p = e.path();
-            out.push(format!("{} {}", p.display(), e.metadata().map(|m| m.len()).unwrap_or(0)));
+            out.push(format!(
+                "{} {}",
+                p.display(),
+                e.metadata().map(|m| m.len()).unwrap_or(0)
+            ));
             if p.is_dir() {
                 out.extend(walk_names(&p));
             }
@@ -4035,7 +4038,11 @@ fn with_locator_and_quick_open(vol: &[u8]) -> Vec<u8> {
         let mut q = body;
         let kind = rd(vol, &mut q);
         let flags = rd(vol, &mut q);
-        let data_len = if flags & 2 != 0 { rd(vol, &mut { q }) } else { 0 };
+        let data_len = if flags & 2 != 0 {
+            rd(vol, &mut { q })
+        } else {
+            0
+        };
         match kind {
             1 => {
                 // main header: append an 8-byte locator extra record
@@ -4093,7 +4100,9 @@ fn dead_volumes_extract_from_borrowed_data_through_rebuilt_headers() {
         .enumerate()
         .map(|(i, v)| {
             if dead.contains(&i) {
-                VolumeState::Dead { encoded_size: v.len() as i64 * 102 / 100 }
+                VolumeState::Dead {
+                    encoded_size: v.len() as i64 * 102 / 100,
+                }
             } else {
                 VolumeState::Readable(geometry_of(v))
             }
@@ -4134,7 +4143,13 @@ fn dead_volumes_extract_from_borrowed_data_through_rebuilt_headers() {
             },
         );
     }
-    let (r, log) = run(&first, &t.out(), Box::new(WithVirtual { virtuals: virtuals.clone() }));
+    let (r, log) = run(
+        &first,
+        &t.out(),
+        Box::new(WithVirtual {
+            virtuals: virtuals.clone(),
+        }),
+    );
     expect_ok(r, &log);
     assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
 
@@ -4197,7 +4212,9 @@ fn dead_rar4_volumes_extract_from_borrowed_data_through_rebuilt_headers() {
         .enumerate()
         .map(|(i, v)| {
             if dead.contains(&i) {
-                VolumeState::Dead { encoded_size: v.len() as i64 * 102 / 100 }
+                VolumeState::Dead {
+                    encoded_size: v.len() as i64 * 102 / 100,
+                }
             } else {
                 VolumeState::Readable(geometry_of(v))
             }
@@ -4228,7 +4245,12 @@ fn dead_rar4_volumes_extract_from_borrowed_data_through_rebuilt_headers() {
         crate::deadvolume::check_frame(&head, &tail, p.packed_size as u64, b"movie.mkv").unwrap();
         virtuals.insert(
             t.dl().join(rar4_name(p.index)),
-            VirtualVolume { head, data: path, data_len: p.packed_size as u64, tail },
+            VirtualVolume {
+                head,
+                data: path,
+                data_len: p.packed_size as u64,
+                tail,
+            },
         );
     }
     let (r, log) = run(&first, &t.out(), Box::new(WithVirtual { virtuals }));

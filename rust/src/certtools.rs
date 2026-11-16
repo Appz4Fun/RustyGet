@@ -71,7 +71,11 @@ fn readable(path: &Path, dir: bool) -> bool {
     let Ok(c) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
         return false;
     };
-    let mode = if dir { libc::R_OK | libc::X_OK } else { libc::R_OK };
+    let mode = if dir {
+        libc::R_OK | libc::X_OK
+    } else {
+        libc::R_OK
+    };
     // SAFETY: a valid NUL-terminated path for the duration of the call.
     unsafe { libc::access(c.as_ptr(), mode) == 0 }
 }
@@ -109,10 +113,15 @@ pub fn browse(path: &str, start: &Path) -> String {
         let full = entry.path();
         // follow links, so a link to a folder can be opened
         let meta = fs::metadata(&full).or_else(|_| entry.metadata());
-        let (is_dir, size) = meta.map_or((false, 0), |m| (m.is_dir(), if m.is_dir() { 0 } else { m.len() }));
+        let (is_dir, size) = meta.map_or((false, 0), |m| {
+            (m.is_dir(), if m.is_dir() { 0 } else { m.len() })
+        });
         entries.push((is_dir, name, size, readable(&full, is_dir)));
     }
-    entries.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase())));
+    entries.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase()))
+    });
 
     let mut list = String::from("[");
     for (i, (is_dir, name, size, ok)) in entries.iter().enumerate() {
@@ -131,7 +140,10 @@ pub fn browse(path: &str, start: &Path) -> String {
     }
     list.push(']');
     let shown = dir.to_string_lossy();
-    let parent = dir.parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+    let parent = dir
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let mut out = String::new();
     obj(
         &mut out,
@@ -148,7 +160,10 @@ pub fn browse(path: &str, start: &Path) -> String {
 
 fn browse_error(path: &Path, message: &str) -> String {
     let shown = path.to_string_lossy();
-    let parent = path.parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+    let parent = path
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let mut out = String::new();
     obj(
         &mut out,
@@ -182,7 +197,9 @@ fn read_limited(path: &Path) -> Result<Vec<u8>, String> {
         return Err(shown(&"not a regular file"));
     }
     let mut data = Vec::new();
-    file.take(MAX_PEM as u64 + 1).read_to_end(&mut data).map_err(|e| shown(&e))?;
+    file.take(MAX_PEM as u64 + 1)
+        .read_to_end(&mut data)
+        .map_err(|e| shown(&e))?;
     if data.len() > MAX_PEM {
         return Err(shown(&"file is too large to be a certificate"));
     }
@@ -250,8 +267,12 @@ pub fn check_cert(cert_path: &str, key_path: &str) -> String {
     let now = Asn1Time::days_from_now(0).ok();
     let expired = now.as_ref().is_some_and(|n| leaf.not_after() < n);
     let not_yet = now.as_ref().is_some_and(|n| leaf.not_before() > n);
-    let self_signed = matches!(leaf.subject_name().try_cmp(leaf.issuer_name()), Ok(std::cmp::Ordering::Equal))
-        && leaf.public_key().is_ok_and(|public| leaf.verify(&public).unwrap_or(false));
+    let self_signed = matches!(
+        leaf.subject_name().try_cmp(leaf.issuer_name()),
+        Ok(std::cmp::Ordering::Equal)
+    ) && leaf
+        .public_key()
+        .is_ok_and(|public| leaf.verify(&public).unwrap_or(false));
     let mut names = String::from("[");
     for (i, n) in cert_names(leaf).iter().enumerate() {
         if i > 0 {
@@ -315,7 +336,9 @@ pub fn check_ca_store(path: &str) -> String {
     };
     // the TLS code loads CertStore as one file, so a folder would fail there
     if meta.is_dir() {
-        return error_json(&format!("{path} is a folder. Pick one PEM file that holds the CA certificates."));
+        return error_json(&format!(
+            "{path} is a folder. Pick one PEM file that holds the CA certificates."
+        ));
     }
     let (count, files) = {
         let n = count_certs(p);
@@ -346,10 +369,13 @@ fn write_new_pair(
     cert: Option<&[u8]>,
     key: Option<&[u8]>,
 ) -> Result<(Option<PathBuf>, Option<PathBuf>), String> {
-    let files: Vec<(&str, &[u8], bool)> = [cert.map(|c| ("crt", c, false)), key.map(|k| ("key", k, true))]
-        .into_iter()
-        .flatten()
-        .collect();
+    let files: Vec<(&str, &[u8], bool)> = [
+        cert.map(|c| ("crt", c, false)),
+        key.map(|k| ("key", k, true)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     let mut paths = write_new_set(dir, base, &files)?.into_iter();
     let cert_path = cert.and_then(|_| paths.next());
     let key_path = key.and_then(|_| paths.next());
@@ -359,16 +385,29 @@ fn write_new_pair(
 /// Writes each `(extension, data, private)` file as `<base>-YYYYMMDD-HHMMSS.<ext>` in `dir`,
 /// all with one stem (`-2`, `-3`... when any name is taken). Files are created exclusively
 /// and fully written before their paths are returned; on failure none are left.
-fn write_new_set(dir: &Path, base: &str, files: &[(&str, &[u8], bool)]) -> Result<Vec<PathBuf>, String> {
+fn write_new_set(
+    dir: &Path,
+    base: &str,
+    files: &[(&str, &[u8], bool)],
+) -> Result<Vec<PathBuf>, String> {
     fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64);
     let (y, m, d) = crate::statmeter::days_to_ymd(now.div_euclid(86_400));
     let secs = now.rem_euclid(86_400);
-    let stamp = format!("{base}-{y:04}{m:02}{d:02}-{:02}{:02}{:02}", secs / 3600, secs / 60 % 60, secs % 60);
+    let stamp = format!(
+        "{base}-{y:04}{m:02}{d:02}-{:02}{:02}{:02}",
+        secs / 3600,
+        secs / 60 % 60,
+        secs % 60
+    );
     'stems: for n in 1..1000 {
-        let stem = if n == 1 { stamp.clone() } else { format!("{stamp}-{n}") };
+        let stem = if n == 1 {
+            stamp.clone()
+        } else {
+            format!("{stamp}-{n}")
+        };
         let mut made: Vec<PathBuf> = Vec::new();
         for (ext, data, private) in files {
             let path = dir.join(format!("{stem}.{ext}"));
@@ -387,7 +426,10 @@ fn write_new_set(dir: &Path, base: &str, files: &[(&str, &[u8], bool)]) -> Resul
         }
         return Ok(made);
     }
-    Err(format!("{}: no free name for a new certificate", dir.display()))
+    Err(format!(
+        "{}: no free name for a new certificate",
+        dir.display()
+    ))
 }
 
 /// Creates `path`, failing if it exists; a partly written file is removed.
@@ -410,7 +452,11 @@ fn write_new_file(path: &Path, data: &[u8], private: bool) -> std::io::Result<()
 pub fn parse_names(text: &str) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
     for raw in text.split(|c: char| c == ',' || c.is_whitespace()) {
-        let name = raw.trim().trim_start_matches('[').trim_end_matches(']').to_lowercase();
+        let name = raw
+            .trim()
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_lowercase();
         if name.is_empty() || name.len() > 253 || names.contains(&name) {
             continue;
         }
@@ -418,7 +464,8 @@ pub fn parse_names(text: &str) -> Vec<String> {
             || name.split('.').all(|label| {
                 !label.is_empty()
                     && label.len() <= 63
-                    && (label == "*" || label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+                    && (label == "*"
+                        || label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
             });
         if valid {
             names.push(name);
@@ -427,7 +474,9 @@ pub fn parse_names(text: &str) -> Vec<String> {
     names
 }
 
-fn build_self_signed(names: &[String]) -> Result<(X509, PKey<Private>), openssl::error::ErrorStack> {
+fn build_self_signed(
+    names: &[String],
+) -> Result<(X509, PKey<Private>), openssl::error::ErrorStack> {
     let key = PKey::from_rsa(Rsa::generate(2048)?)?;
     let mut subject = X509NameBuilder::new()?;
     subject.append_entry_by_nid(openssl::nid::Nid::COMMONNAME, &names[0])?;
@@ -447,7 +496,13 @@ fn build_self_signed(names: &[String]) -> Result<(X509, PKey<Private>), openssl:
     builder.set_not_before(&not_before)?;
     builder.set_not_after(&not_after)?;
     builder.append_extension(BasicConstraints::new().critical().build()?)?;
-    builder.append_extension(KeyUsage::new().critical().digital_signature().key_encipherment().build()?)?;
+    builder.append_extension(
+        KeyUsage::new()
+            .critical()
+            .digital_signature()
+            .key_encipherment()
+            .build()?,
+    )?;
     builder.append_extension(ExtendedKeyUsage::new().server_auth().build()?)?;
     let mut san = SubjectAlternativeName::new();
     for name in names {
@@ -486,9 +541,17 @@ pub fn make_cert(names_text: &str, main_dir: &Path) -> String {
 }
 
 fn saved_reply(cert: Option<&Path>, key: Option<&Path>) -> String {
-    let cert_s = cert.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
-    let key_s = key.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
-    let check = if cert.is_some() { check_cert(&cert_s, &key_s) } else { String::from("null") };
+    let cert_s = cert
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let key_s = key
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let check = if cert.is_some() {
+        check_cert(&cert_s, &key_s)
+    } else {
+        String::from("null")
+    };
     let mut out = String::new();
     obj(
         &mut out,
@@ -509,10 +572,14 @@ fn split_pem(text: &str) -> (Vec<X509>, Option<PKey<Private>>) {
     let mut rest = text;
     while let Some(start) = rest.find("-----BEGIN ") {
         let block = &rest[start..];
-        let Some(label_end) = block[11..].find("-----") else { break };
+        let Some(label_end) = block[11..].find("-----") else {
+            break;
+        };
         let label = &block[11..11 + label_end];
         let end_marker = format!("-----END {label}-----");
-        let Some(end) = block.find(&end_marker) else { break };
+        let Some(end) = block.find(&end_marker) else {
+            break;
+        };
         let pem = &block[..end + end_marker.len()];
         if label == "CERTIFICATE" || label == "TRUSTED CERTIFICATE" {
             if let Ok(c) = X509::from_pem(pem.as_bytes()) {
@@ -532,10 +599,24 @@ fn safe_name(name: &str) -> String {
         .trim_end_matches(".pem")
         .trim_end_matches(".crt")
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
-    let stem = stem.trim_matches(|c| c == '.' || c == '_').chars().take(64).collect::<String>();
-    if stem.is_empty() { String::from("ca") } else { stem }
+    let stem = stem
+        .trim_matches(|c| c == '.' || c == '_')
+        .chars()
+        .take(64)
+        .collect::<String>();
+    if stem.is_empty() {
+        String::from("ca")
+    } else {
+        stem
+    }
 }
 
 /// Saves pasted or uploaded PEM text under `MainDir`.
@@ -565,15 +646,20 @@ pub fn save_pem(kind: &str, name: &str, text: &str, main_dir: &Path) -> String {
                     Err(e) => return error_json(&e.to_string()),
                 }
             }
-            let key_pem = match key.as_ref().map(|k| k.private_key_to_pem_pkcs8()).transpose() {
+            let key_pem = match key
+                .as_ref()
+                .map(|k| k.private_key_to_pem_pkcs8())
+                .transpose()
+            {
                 Ok(k) => k,
                 Err(e) => return error_json(&e.to_string()),
             };
             let cert_arg = (!certs.is_empty()).then_some(&cert_pem[..]);
-            let (cert_path, key_path) = match write_new_pair(&dir, "server", cert_arg, key_pem.as_deref()) {
-                Ok(paths) => paths,
-                Err(e) => return error_json(&e),
-            };
+            let (cert_path, key_path) =
+                match write_new_pair(&dir, "server", cert_arg, key_pem.as_deref()) {
+                    Ok(paths) => paths,
+                    Err(e) => return error_json(&e),
+                };
             saved_reply(cert_path.as_deref(), key_path.as_deref())
         }
         "ca" => {
@@ -589,7 +675,11 @@ pub fn save_pem(kind: &str, name: &str, text: &str, main_dir: &Path) -> String {
             }
             // A fresh file each time: the bundle CertStore points at now stays as it is
             // until Settings is saved with the new path.
-            let path = match write_new_set(&main_dir.join(CA_DIR), &safe_name(name), &[("pem", &pem, false)]) {
+            let path = match write_new_set(
+                &main_dir.join(CA_DIR),
+                &safe_name(name),
+                &[("pem", &pem, false)],
+            ) {
                 Ok(mut paths) => paths.remove(0),
                 Err(e) => return error_json(&e),
             };
@@ -632,7 +722,9 @@ pub fn expand_main_dir(path: &str, main_dir: &Path) -> String {
     let homed;
     let path = if path.starts_with("~/") {
         homed = std::ffi::CString::new(path)
-            .map(|c| String::from_utf8_lossy(&crate::fsops::expand_home_path_auto(Some(&c))).into_owned())
+            .map(|c| {
+                String::from_utf8_lossy(&crate::fsops::expand_home_path_auto(Some(&c))).into_owned()
+            })
             .unwrap_or_else(|_| path.to_owned());
         homed.as_str()
     } else {
@@ -666,7 +758,10 @@ pub fn rpc_browse(is_json: bool, path: &str) -> Vec<u8> {
 /// `checkcert(certfile, keyfile)`
 pub fn rpc_check_cert(is_json: bool, cert: &str, key: &str) -> Vec<u8> {
     let main = main_dir();
-    reply(is_json, check_cert(&expand_main_dir(cert, &main), &expand_main_dir(key, &main)))
+    reply(
+        is_json,
+        check_cert(&expand_main_dir(cert, &main), &expand_main_dir(key, &main)),
+    )
 }
 
 /// `checkcastore(path)`
@@ -702,13 +797,22 @@ mod tests {
 
     #[test]
     fn main_dir_is_expanded_in_paths() {
-        assert_eq!(expand_main_dir("${MainDir}/https/a.crt", Path::new("/data")), "/data/https/a.crt");
+        assert_eq!(
+            expand_main_dir("${MainDir}/https/a.crt", Path::new("/data")),
+            "/data/https/a.crt"
+        );
         assert_eq!(expand_main_dir("${maindir}/x", Path::new("/d")), "/d/x");
         if let Some(home) = std::env::var_os("HOME") {
-            let want = format!("{}/https/a.crt", home.to_string_lossy().trim_end_matches('/'));
+            let want = format!(
+                "{}/https/a.crt",
+                home.to_string_lossy().trim_end_matches('/')
+            );
             assert_eq!(expand_main_dir("~/https/a.crt", Path::new("/d")), want);
         }
-        assert_eq!(expand_main_dir("/etc/ssl/${Other}/x", Path::new("/d")), "/etc/ssl/${Other}/x");
+        assert_eq!(
+            expand_main_dir("/etc/ssl/${Other}/x", Path::new("/d")),
+            "/etc/ssl/${Other}/x"
+        );
     }
 
     #[test]
@@ -727,7 +831,10 @@ mod tests {
         assert!(reply.contains("\"Error\":\"\""), "{reply}");
         let cert = field(&reply, "Cert");
         let key = field(&reply, "Key");
-        assert!(cert.starts_with(dir.join("https")) && cert.to_str().unwrap().contains("/rustyget-"), "{reply}");
+        assert!(
+            cert.starts_with(dir.join("https")) && cert.to_str().unwrap().contains("/rustyget-"),
+            "{reply}"
+        );
         assert_eq!(cert.with_extension("key"), key);
         // making another leaves the first pair as it was
         let first = fs::read(&cert).unwrap();
@@ -737,11 +844,17 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(fs::metadata(&key).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                fs::metadata(&key).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
         }
         let check = check_cert(cert.to_str().unwrap(), key.to_str().unwrap());
         assert!(check.contains("\"Ok\":true"), "{check}");
-        assert!(check.contains("\"Names\":[\"nas.local\",\"10.0.0.2\"]"), "{check}");
+        assert!(
+            check.contains("\"Names\":[\"nas.local\",\"10.0.0.2\"]"),
+            "{check}"
+        );
         assert!(check.contains("\"KeyMatches\":true"), "{check}");
         assert!(check.contains("\"SelfSigned\":true"), "{check}");
         assert!(check.contains("\"Subject\":\"nas.local\""), "{check}");
@@ -753,10 +866,12 @@ mod tests {
     fn pairs_made_at_once_get_their_own_names() {
         let dir = temp_dir("race");
         let replies: Vec<String> = std::thread::scope(|scope| {
-            let handles: Vec<_> = (0..6).map(|i| {
-                let dir = &dir;
-                scope.spawn(move || make_cert(&format!("n{i}.local"), dir))
-            }).collect();
+            let handles: Vec<_> = (0..6)
+                .map(|i| {
+                    let dir = &dir;
+                    scope.spawn(move || make_cert(&format!("n{i}.local"), dir))
+                })
+                .collect();
             handles.into_iter().map(|h| h.join().unwrap()).collect()
         });
         let mut certs: Vec<PathBuf> = replies.iter().map(|r| field(r, "Cert")).collect();
@@ -775,8 +890,14 @@ mod tests {
         let b = temp_dir("pair-b");
         let ra = make_cert("a.local", &a);
         let rb = make_cert("b.local", &b);
-        let check = check_cert(field(&ra, "Cert").to_str().unwrap(), field(&rb, "Key").to_str().unwrap());
-        assert!(check.contains("\"KeyMatches\":false") && check.contains("\"Ok\":false"), "{check}");
+        let check = check_cert(
+            field(&ra, "Cert").to_str().unwrap(),
+            field(&rb, "Key").to_str().unwrap(),
+        );
+        assert!(
+            check.contains("\"KeyMatches\":false") && check.contains("\"Ok\":false"),
+            "{check}"
+        );
         let missing = check_cert(a.join("nope.crt").to_str().unwrap(), "");
         assert!(missing.contains("nope.crt"), "{missing}");
         fs::remove_dir_all(&a).unwrap();
@@ -791,14 +912,19 @@ mod tests {
         let key = fs::read_to_string(field(&made, "Key")).unwrap();
         let dir = temp_dir("paste");
         let reply = save_pem("https", "", &format!("junk\n{key}\nmore\n{cert}"), &dir);
-        assert!(reply.contains("/server-") && reply.contains(".crt") && reply.contains(".key"), "{reply}");
+        assert!(
+            reply.contains("/server-") && reply.contains(".crt") && reply.contains(".key"),
+            "{reply}"
+        );
         assert!(reply.contains("\"KeyMatches\":true"), "{reply}");
         let only_cert = save_pem("https", "", &cert, &dir);
         assert!(only_cert.contains("\"Key\":\"\""), "{only_cert}");
         let other = temp_dir("paste-other");
         let other_made = make_cert("other.local", &other);
         let other_key = fs::read_to_string(field(&other_made, "Key")).unwrap();
-        assert!(save_pem("https", "", &format!("{cert}{other_key}"), &dir).contains("does not belong"));
+        assert!(
+            save_pem("https", "", &format!("{cert}{other_key}"), &dir).contains("does not belong")
+        );
         assert!(save_pem("https", "", "hello", &dir).contains("No PEM"));
         for d in [src, dir, other] {
             fs::remove_dir_all(d).unwrap();
@@ -812,17 +938,33 @@ mod tests {
         let cert = fs::read_to_string(field(&made, "Cert")).unwrap();
         let dir = temp_dir("ca");
         let saved = save_pem("ca", "../My CA.pem", &format!("{cert}{cert}"), &dir);
-        assert!(saved.contains("certs/My_CA-") && saved.contains("\"Count\":2"), "{saved}");
+        assert!(
+            saved.contains("certs/My_CA-") && saved.contains("\"Count\":2"),
+            "{saved}"
+        );
         let again = save_pem("ca", "../My CA.pem", &cert, &dir);
-        assert_ne!(field(&saved, "Path"), field(&again, "Path"), "a new paste never replaces the bundle in use");
+        assert_ne!(
+            field(&saved, "Path"),
+            field(&again, "Path"),
+            "a new paste never replaces the bundle in use"
+        );
         assert!(check_ca_store(field(&saved, "Path").to_str().unwrap()).contains("\"Count\":2"));
         let store = dir.join("certs");
         let folder = check_ca_store(store.to_str().unwrap());
-        assert!(folder.contains("is a folder"), "the TLS code loads one file: {folder}");
+        assert!(
+            folder.contains("is a folder"),
+            "the TLS code loads one file: {folder}"
+        );
         let file = check_ca_store(field(&saved, "Path").to_str().unwrap());
-        assert!(file.contains("\"Count\":2") && file.contains("\"Files\":1"), "{file}");
+        assert!(
+            file.contains("\"Count\":2") && file.contains("\"Files\":1"),
+            "{file}"
+        );
         let none = check_ca_store("");
-        assert!(none.contains("\"System\":false") && none.contains("not checked"), "{none}");
+        assert!(
+            none.contains("\"System\":false") && none.contains("not checked"),
+            "{none}"
+        );
         let not_pem = check_ca_store(field(&made, "Key").to_str().unwrap());
         assert!(not_pem.contains("no PEM certificates"), "{not_pem}");
         #[cfg(unix)]

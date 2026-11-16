@@ -95,7 +95,11 @@ pub fn select_server_order(
                 .min()
                 .unwrap_or_default();
             members.sort_unstable_by_key(|&i| {
-                (std::cmp::Reverse(keep(retentions[i])), norm_levels[i], ids[i])
+                (
+                    std::cmp::Reverse(keep(retentions[i])),
+                    norm_levels[i],
+                    ids[i],
+                )
             });
             (first, members.into_iter().map(|i| ids[i]).collect())
         })

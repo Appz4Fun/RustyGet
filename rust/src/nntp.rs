@@ -1242,14 +1242,14 @@ pub fn server_pool_select_connection(
             continue;
         }
         if !server_pool_has_available_level_conns(
-        level,
-        levels.len(),
-        if level >= 0 && (level as usize) < levels.len() {
-            levels[level as usize]
-        } else {
-            0
-        },
-    ) {
+            level,
+            levels.len(),
+            if level >= 0 && (level as usize) < levels.len() {
+                levels[level as usize]
+            } else {
+                0
+            },
+        ) {
             break;
         }
         let mut candidates = Vec::new();
@@ -1648,30 +1648,52 @@ mod backbone_tests {
 
     #[test]
     fn a_430_rules_out_siblings_that_keep_articles_no_longer() {
-        let unset = BackboneMiss { group: 4, retention: 0 };
+        let unset = BackboneMiss {
+            group: 4,
+            retention: 0,
+        };
         assert!(backbone_miss_covers(&unset, 4, 0));
         // the sibling may keep articles longer: still asked
         assert!(!backbone_miss_covers(&unset, 4, 3000));
-        let short = BackboneMiss { group: 4, retention: 1000 };
+        let short = BackboneMiss {
+            group: 4,
+            retention: 1000,
+        };
         assert!(backbone_miss_covers(&short, 4, 1000));
         assert!(backbone_miss_covers(&short, 4, 900));
         assert!(!backbone_miss_covers(&short, 4, 4000));
         assert!(!backbone_miss_covers(&short, 4, 0));
         // other backbones and independent servers are never ruled out
         assert!(!backbone_miss_covers(&short, 5, 900));
-        let independent = BackboneMiss { group: 0, retention: 0 };
+        let independent = BackboneMiss {
+            group: 0,
+            retention: 0,
+        };
         assert!(!backbone_miss_covers(&independent, 0, 0));
     }
 
     #[test]
     fn level_counts_as_failed_with_backbone_misses() {
         // priority 1: servers 1 and 2 on backbone 7; priority 2: server 3 on backbone 7, server 4 on 8
-        let mut c = vec![cand(1, 0, 7, 0), cand(2, 0, 7, 0), cand(3, 1, 7, 0), cand(4, 1, 8, 0)];
-        let miss = [BackboneMiss { group: 7, retention: 0 }];
+        let mut c = vec![
+            cand(1, 0, 7, 0),
+            cand(2, 0, 7, 0),
+            cand(3, 1, 7, 0),
+            cand(4, 1, 8, 0),
+        ];
+        let miss = [BackboneMiss {
+            group: 7,
+            retention: 0,
+        }];
         // server 1 answered 430: its sibling at the same and at the next priority are done too
         assert!(article_dl_all_servers_on_level_failed(0, &c, &[1], &miss));
         assert!(!article_dl_all_servers_on_level_failed(1, &c, &[1], &miss));
-        assert!(article_dl_all_servers_on_level_failed(1, &c, &[1, 4], &miss));
+        assert!(article_dl_all_servers_on_level_failed(
+            1,
+            &c,
+            &[1, 4],
+            &miss
+        ));
         // server 1 refused the login or had too many connections (no 430): its
         // sibling is still to be tried
         assert!(!article_dl_all_servers_on_level_failed(0, &c, &[1], &[]));
@@ -1688,17 +1710,26 @@ mod backbone_tests {
         pool.add_server(3, true, 1, false, 7, 1);
         pool.add_server(4, true, 2, false, 8, 1);
         pool.init_connections();
-        let miss = [BackboneMiss { group: 7, retention: 0 }];
+        let miss = [BackboneMiss {
+            group: 7,
+            retention: 0,
+        }];
         // levels 0 and 1 are all backbone 7: the article goes straight to level 2
-        let con = pool.get_connection_missing(0, None, &[1], &miss, 1000).unwrap();
+        let con = pool
+            .get_connection_missing(0, None, &[1], &miss, 1000)
+            .unwrap();
         assert_eq!(pool.connections[con].server_id, 4);
         // nothing left: no connection, and no wait on a level it can't use
-        assert!(pool.get_connection_missing(0, None, &[1], &miss, 1000).is_none());
+        assert!(pool
+            .get_connection_missing(0, None, &[1], &miss, 1000)
+            .is_none());
         // a wanted server (a retry of the same article on it) is not filtered
         let mut pool = ServerPoolModel::new();
         pool.add_server(1, true, 0, false, 7, 1);
         pool.init_connections();
-        assert!(pool.get_connection_missing(0, Some(1), &[], &miss, 1000).is_some());
+        assert!(pool
+            .get_connection_missing(0, Some(1), &[], &miss, 1000)
+            .is_some());
     }
 
     #[test]
@@ -1709,13 +1740,17 @@ mod backbone_tests {
         pool.add_server(1, true, 0, false, 0, 1);
         pool.add_server(2, true, 1, false, 0, 1);
         pool.init_connections();
-        assert!(pool.get_connection_missing(0, None, &[1], &[], 1000).is_none());
+        assert!(pool
+            .get_connection_missing(0, None, &[1], &[], 1000)
+            .is_none());
         // the same with both on one backbone and no 430
         let mut pool = ServerPoolModel::new();
         pool.add_server(1, true, 0, false, 7, 1);
         pool.add_server(2, true, 1, false, 7, 1);
         pool.init_connections();
-        assert!(pool.get_connection_missing(0, None, &[1], &[], 1000).is_none());
+        assert!(pool
+            .get_connection_missing(0, None, &[1], &[], 1000)
+            .is_none());
     }
 
     #[test]
@@ -2272,7 +2307,10 @@ mod article_fetcher_tests {
             pool.add_server(2, true, 0, false, 1, 2);
             pool.add_server(3, true, 0, false, 2, 2);
             pool.init_connections();
-            let miss = [BackboneMiss { group: 1, retention: 0 }];
+            let miss = [BackboneMiss {
+                group: 1,
+                retention: 0,
+            }];
             let con1 = pool.get_connection_missing(0, None, &[1], &miss, 1000);
             let con2 = pool.get_connection_missing(0, None, &[1], &miss, 1000);
             let con3 = pool.get_connection_missing(0, None, &[1], &miss, 1000);

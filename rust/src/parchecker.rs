@@ -496,7 +496,11 @@ impl ActiveStreamingSession {
         drop(lease);
         // Log the first loan, then each doubling.
         if before / unit == 0 || (lent / unit).ilog2() > (before / unit).ilog2() {
-            let name = self.par_name.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let name = self
+                .par_name
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
             let msg = format!(
                 "Live PAR for {}: staging memory grew by {} MB ({} MB of {} MB ParBuffer lent) for many files arriving at once",
                 String::from_utf8_lossy(&name),
@@ -1015,7 +1019,10 @@ fn live_source_id(
         Ok(Some(Some(id))) => return Ok(id),
         Ok(Some(None)) => return Err(RepairError::UnknownFile(FileId([0; 16]))),
         Err(_) => {
-            let why = entry.writers.stop_reason().unwrap_or_else(|| "live namespace refused".to_owned());
+            let why = entry
+                .writers
+                .stop_reason()
+                .unwrap_or_else(|| "live namespace refused".to_owned());
             entry.note_stop(entry.metrics.report_nzb_id(), &why);
             entry.session.cancel();
             return Err(RepairError::Cancelled);
@@ -1680,7 +1687,10 @@ pub fn streaming_session_start_bytes(
 pub fn streaming_session_cancel(nzb_id: i32) {
     if let Some(entry) = active_streaming_session(nzb_id) {
         let at = std::panic::Location::caller();
-        entry.note_stop(nzb_id, &format!("cancelled from {}:{}", at.file(), at.line()));
+        entry.note_stop(
+            nzb_id,
+            &format!("cancelled from {}:{}", at.file(), at.line()),
+        );
         entry
             .writers
             .cancel_generation_with(entry.generation, || entry.session.cancel());
@@ -2279,7 +2289,10 @@ impl LiveRepairRequest {
         for (path, (_, file_id)) in paths.iter().zip(&self.ids) {
             let file = crate::parlive::open_repair_target(&self.entry.writers, path)
                 .map_err(|_| live_error("live target admission", "target ownership unproven"))?;
-            files.push(par_rs::RepairTargetFile { file_id: *file_id, file });
+            files.push(par_rs::RepairTargetFile {
+                file_id: *file_id,
+                file,
+            });
         }
         Ok(TargetWriteLease {
             nzb_id: self.nzb_id,
@@ -2308,10 +2321,13 @@ impl TargetWriteLease {
             entry,
         } = self;
         let targets_current = || {
-            paths.iter().zip(&files).try_for_each(|(path, target)| {
-                crate::parlive::repair_target_is_current(&entry.writers, path, &target.file)
-            })
-            .map_err(|_| live_error("live target ownership", "target replaced after admission"))
+            paths
+                .iter()
+                .zip(&files)
+                .try_for_each(|(path, target)| {
+                    crate::parlive::repair_target_is_current(&entry.writers, path, &target.file)
+                })
+                .map_err(|_| live_error("live target ownership", "target replaced after admission"))
         };
         entry
             .metrics
@@ -2515,7 +2531,10 @@ pub fn streaming_session_has_session(nzb_id: i32) -> bool {
 pub fn streaming_session_forget(nzb_id: i32) {
     if let Some(old) = active_streaming_session(nzb_id) {
         let at = std::panic::Location::caller();
-        old.note_stop(nzb_id, &format!("forgotten from {}:{}", at.file(), at.line()));
+        old.note_stop(
+            nzb_id,
+            &format!("forgotten from {}:{}", at.file(), at.line()),
+        );
         old.writers.cancel_generation_with(old.generation, || {
             old.session.cancel();
             let mut sessions = STREAMING_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
@@ -3950,10 +3969,8 @@ mod tests {
         use par_rs::create::{build_set, SetOptions, VolumeScheme};
 
         let nzb_id = 0x6a0f_0010;
-        let dir = std::env::temp_dir().join(format!(
-            "rustyget-parchecker-lend-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("rustyget-parchecker-lend-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let f0 = make_deterministic_bytes(8 * 4096, 405);
@@ -4004,7 +4021,10 @@ mod tests {
         let _ = entry.record::<()>(Err(staging_full));
         assert_eq!(entry.session.max_staging_bytes(), 8192);
         let _ = entry.record::<()>(Err(queue_full));
-        assert_eq!(entry.article_byte_limit.load(Ordering::Relaxed), queue_start + 4096);
+        assert_eq!(
+            entry.article_byte_limit.load(Ordering::Relaxed),
+            queue_start + 4096
+        );
         assert_eq!(entry.budget.lock().unwrap().reserved_bytes(), start + 8192);
         // The article-count limit (bytes fit) lends nothing.
         let _ = entry.record::<()>(Err(RepairError::StreamingMemoryLimit {
@@ -4033,8 +4053,14 @@ mod tests {
             required_bytes: queue_start + 4096 + 2 * 4096,
             limit_bytes: queue_start + 4096,
         }));
-        assert_eq!(entry.article_byte_limit.load(Ordering::Relaxed), queue_start + 3 * 4096);
-        assert_eq!(entry.budget.lock().unwrap().reserved_bytes(), start + 7 * 4096);
+        assert_eq!(
+            entry.article_byte_limit.load(Ordering::Relaxed),
+            queue_start + 3 * 4096
+        );
+        assert_eq!(
+            entry.budget.lock().unwrap().reserved_bytes(),
+            start + 7 * 4096
+        );
         assert_eq!(entry.lent_memory.load(Ordering::Relaxed), 7 * 4096);
         // A replay chunk that fits the limit on its own is admitted even
         // while snapshots fill the queue; a larger one is refused.
@@ -4253,7 +4279,10 @@ mod tests {
         assert_eq!(entry.session.status().damaged, 3);
         let grown = 3.min(recovery_blocks as usize);
         assert_eq!(entry.session.max_syndrome_slots(), grown);
-        assert_eq!(reserved(&entry), start_bytes + (grown as u64 - 1) * 2 * 4096);
+        assert_eq!(
+            reserved(&entry),
+            start_bytes + (grown as u64 - 1) * 2 * 4096
+        );
         for (idx, (vname, bytes)) in built.volumes.iter().enumerate() {
             let path = dir.join(vname);
             std::fs::write(&path, bytes).unwrap();
@@ -4266,7 +4295,10 @@ mod tests {
         // thread of their own, not inside the arrival.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while entry.session.needs_backfill() || entry.backfill_running.load(Ordering::Acquire) {
-            assert!(std::time::Instant::now() < deadline, "back-fill never finished");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "back-fill never finished"
+            );
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert_eq!(
@@ -4274,7 +4306,10 @@ mod tests {
             start_bytes + (final_cap as u64 - 1) * 2 * 4096
         );
         if recovery_blocks < 3 {
-            assert_eq!(entry.session.status().ready_recovery, recovery_blocks as usize);
+            assert_eq!(
+                entry.session.status().ready_recovery,
+                recovery_blocks as usize
+            );
             streaming_session_cancel(nzb_id);
             let _ = std::fs::remove_dir_all(&dir);
             return;

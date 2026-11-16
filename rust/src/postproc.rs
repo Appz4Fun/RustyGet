@@ -2638,10 +2638,16 @@ impl NzbgetRsUnpackController {
                 }
             }
         }
-        let ok = ok && guard.as_ref().is_none_or(|g| crate::unpacklimits::breach_of(g).is_none());
+        let ok = ok
+            && guard
+                .as_ref()
+                .is_none_or(|g| crate::unpacklimits::breach_of(g).is_none());
         if !ok {
             st.unpack_ok = false;
-            if guard.as_ref().is_some_and(|g| crate::unpacklimits::breach_of(g).is_some()) {
+            if guard
+                .as_ref()
+                .is_some_and(|g| crate::unpacklimits::breach_of(g).is_some())
+            {
                 st.unpack_limit_error = true;
             }
         }
@@ -3088,7 +3094,10 @@ pub(crate) fn direct_unpack_has_holds(nzb_id: i32) -> bool {
 }
 
 /// The rebuilt stand-in for dead volume `full_path` of download `nzb_id`, if one was handed over.
-pub(crate) fn direct_unpack_virtual(nzb_id: i32, full_path: &[u8]) -> Option<crate::deadvolume::VirtualVolume> {
+pub(crate) fn direct_unpack_virtual(
+    nzb_id: i32,
+    full_path: &[u8],
+) -> Option<crate::deadvolume::VirtualVolume> {
     direct_unpack_holds()
         .get(&nzb_id)
         .and_then(|st| st.virtuals.get(full_path).cloned())
@@ -3110,8 +3119,8 @@ pub(crate) fn direct_unpack_holds_only_absent_stand_ins(nzb_id: i32) -> bool {
 
 /// Downloads that had dead volumes rebuilt from a duplicate, with how many. Kept past the end
 /// of direct unpack (which forgets its holds) so post-processing can tell why par-check failed.
-fn dead_volumes_borrowed(
-) -> std::sync::MutexGuard<'static, std::collections::HashMap<i32, usize>> {
+fn dead_volumes_borrowed() -> std::sync::MutexGuard<'static, std::collections::HashMap<i32, usize>>
+{
     static MAP: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<i32, usize>>> =
         std::sync::OnceLock::new();
     MAP.get_or_init(Default::default)
@@ -3156,13 +3165,15 @@ pub(crate) fn take_dead_volumes_borrowed(nzb_id: i32) -> usize {
 /// and that has no rebuilt stand-in yet: a later live repair may be able to place and borrow it
 /// once the volumes before it have arrived.
 pub(crate) fn direct_unpack_waits_on_dead_volume(nzb_id: i32) -> bool {
-    let candidates: Vec<Vec<u8>> = direct_unpack_holds().get(&nzb_id).map_or_else(Vec::new, |st| {
-        st.held
-            .iter()
-            .filter(|p| !st.virtuals.contains_key(*p))
-            .cloned()
-            .collect()
-    });
+    let candidates: Vec<Vec<u8>> = direct_unpack_holds()
+        .get(&nzb_id)
+        .map_or_else(Vec::new, |st| {
+            st.held
+                .iter()
+                .filter(|p| !st.virtuals.contains_key(*p))
+                .cloned()
+                .collect()
+        });
     // The disk is looked at after the holds lock is released.
     candidates
         .iter()
@@ -7384,10 +7395,16 @@ mod live_hold_tests {
         assert!(super::direct_unpack_holds_only_absent_stand_ins(id));
         std::fs::write(dir.join("x1y2z3"), b"damaged").unwrap();
         super::direct_unpack_hold(id, &p("x1y2z3"));
-        assert!(!super::direct_unpack_holds_only_absent_stand_ins(id), "a damaged file on disk");
+        assert!(
+            !super::direct_unpack_holds_only_absent_stand_ins(id),
+            "a damaged file on disk"
+        );
         super::direct_unpack_forget_holds(id);
         super::direct_unpack_hold(id, &p("movie.part04.rar"));
-        assert!(!super::direct_unpack_holds_only_absent_stand_ins(id), "a missing RAR volume");
+        assert!(
+            !super::direct_unpack_holds_only_absent_stand_ins(id),
+            "a missing RAR volume"
+        );
         super::direct_unpack_forget_holds(id);
         let _ = std::fs::remove_dir_all(&dir);
     }

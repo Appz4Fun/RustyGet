@@ -1243,7 +1243,10 @@ pub fn may_be_archive_volume(fname: &[u8]) -> bool {
     if let Some(dot) = fname.iter().rposition(|&b| b == b'.') {
         let ext = &fname[dot + 1..];
         // .z01 ... split ZIP parts.
-        if ext.len() == 3 && ext[0].eq_ignore_ascii_case(&b'z') && ext[1..].iter().all(u8::is_ascii_digit) {
+        if ext.len() == 3
+            && ext[0].eq_ignore_ascii_case(&b'z')
+            && ext[1..].iter().all(u8::is_ascii_digit)
+        {
             return true;
         }
     }

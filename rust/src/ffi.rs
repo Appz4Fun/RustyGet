@@ -68,7 +68,10 @@ pub unsafe extern "C" fn nzbget_rs_tls_cipher_start(
 #[no_mangle]
 pub extern "C" fn nzbget_rs_tls_cipher_start_server(server: c_int) -> RsBuf {
     let only = u32::try_from(server).ok().filter(|id| *id > 0);
-    cipher_response(tls_cipher_native::start(crate::tlssock::cipher::backend(), only))
+    cipher_response(tls_cipher_native::start(
+        crate::tlssock::cipher::backend(),
+        only,
+    ))
 }
 /// # Safety
 /// id is null or a readable NUL-terminated string; null/empty queries current job.
@@ -5026,7 +5029,9 @@ pub(crate) fn set_active_prepost(pp: &std::sync::Arc<crate::prepost::NzbgetRsPre
 pub(crate) fn clear_active_prepost(pp: &std::sync::Arc<crate::prepost::NzbgetRsPrePostProcessor>) {
     let wk = std::sync::Arc::downgrade(pp);
     if let Ok(mut g) = ACTIVE_PREPOST.write() {
-        if g.as_ref().is_some_and(|cur| std::sync::Weak::ptr_eq(cur, &wk)) {
+        if g.as_ref()
+            .is_some_and(|cur| std::sync::Weak::ptr_eq(cur, &wk))
+        {
             *g = None;
         }
     }
@@ -5941,12 +5946,9 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                             qh.nzb_cached_messages_slice(np, 0, i32::MAX)
                         }
                     });
-                    disk_msgs.extend(
-                        cached_msgs
-                            .into_iter()
-                            .filter(|m| m.2 > last_time)
-                            .map(|(id, kind, time, text)| (offset.saturating_add(id), kind, time, text)),
-                    );
+                    disk_msgs.extend(cached_msgs.into_iter().filter(|m| m.2 > last_time).map(
+                        |(id, kind, time, text)| (offset.saturating_add(id), kind, time, text),
+                    ));
                 }
                 let mut start = disk_msgs.len() as i32;
                 if a4 > 0 {
@@ -5955,7 +5957,10 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                 if a3 > 0 {
                     // ids skip a gap where the cached messages begin, so find the first
                     // message at or after the asked id instead of using it as an offset
-                    start = disk_msgs.iter().position(|m| m.0 >= a3).unwrap_or(disk_msgs.len()) as i32;
+                    start = disk_msgs
+                        .iter()
+                        .position(|m| m.0 >= a3)
+                        .unwrap_or(disk_msgs.len()) as i32;
                 }
                 let mut entries = Vec::new();
                 if start >= 0 && (start as usize) < disk_msgs.len() {

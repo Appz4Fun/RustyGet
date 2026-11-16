@@ -120,7 +120,10 @@ pub fn resolve_all(host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
         .map_err(|e| format!("Could not resolve {host}: {e}"))?;
     let mut ips: Vec<SocketAddr> = Vec::new();
     for addr in found {
-        if !ips.iter().any(|seen| shown_address(seen) == shown_address(&addr)) {
+        if !ips
+            .iter()
+            .any(|seen| shown_address(seen) == shown_address(&addr))
+        {
             ips.push(addr);
         }
     }
@@ -130,8 +133,12 @@ pub fn resolve_all(host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
 /// At most `MAX_ADDRESSES`, IPv4 first, keeping room for both kinds when there are both:
 /// a server set to IPv6 only still has its IPv6 addresses to pick from.
 pub fn pick_addresses(ips: Vec<SocketAddr>) -> Vec<SocketAddr> {
-    let (v4, v6): (Vec<SocketAddr>, Vec<SocketAddr>) = ips.into_iter().partition(SocketAddr::is_ipv4);
-    let v6_room = v6.len().min(MAX_ADDRESSES / 2).max(MAX_ADDRESSES.saturating_sub(v4.len()));
+    let (v4, v6): (Vec<SocketAddr>, Vec<SocketAddr>) =
+        ips.into_iter().partition(SocketAddr::is_ipv4);
+    let v6_room = v6
+        .len()
+        .min(MAX_ADDRESSES / 2)
+        .max(MAX_ADDRESSES.saturating_sub(v4.len()));
     let v4_take = v4.len().min(MAX_ADDRESSES - v6_room.min(v6.len()));
     let mut out: Vec<SocketAddr> = v4.into_iter().take(v4_take).collect();
     let left = MAX_ADDRESSES - out.len();
@@ -145,10 +152,13 @@ pub fn shown_address(addr: &SocketAddr) -> String {
         SocketAddr::V6(v6) if v6.scope_id() != 0 => {
             let mut name = [0 as libc::c_char; libc::IF_NAMESIZE];
             // SAFETY: the buffer is IF_NAMESIZE long, as if_indextoname requires
-            let found = unsafe { !libc::if_indextoname(v6.scope_id(), name.as_mut_ptr()).is_null() };
+            let found =
+                unsafe { !libc::if_indextoname(v6.scope_id(), name.as_mut_ptr()).is_null() };
             let scope = if found {
                 // SAFETY: if_indextoname wrote a NUL-terminated name into the buffer
-                unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) }.to_string_lossy().into_owned()
+                unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) }
+                    .to_string_lossy()
+                    .into_owned()
             } else {
                 v6.scope_id().to_string()
             };
@@ -228,18 +238,21 @@ pub fn lookup(host: &str, port: i32) -> String {
     // once; past that, or if a thread can't be made, it is timed here instead, so a busy
     // daemon answers slower rather than aborting.
     let addresses: Vec<Address> = std::thread::scope(|scope| {
-        let mut slots: Vec<Result<std::thread::ScopedJoinHandle<'_, Address>, SocketAddr>> = Vec::new();
+        let mut slots: Vec<Result<std::thread::ScopedJoinHandle<'_, Address>, SocketAddr>> =
+            Vec::new();
         for ip in ips.iter().copied() {
             if LOOKUP_THREADS_IN_USE.fetch_add(1, Ordering::SeqCst) >= LOOKUP_THREADS {
                 LOOKUP_THREADS_IN_USE.fetch_sub(1, Ordering::SeqCst);
                 slots.push(Err(ip));
                 continue;
             }
-            let spawned = std::thread::Builder::new().name("hostlookup".into()).spawn_scoped(scope, move || {
-                let address = measure(ip);
-                LOOKUP_THREADS_IN_USE.fetch_sub(1, Ordering::SeqCst);
-                address
-            });
+            let spawned = std::thread::Builder::new()
+                .name("hostlookup".into())
+                .spawn_scoped(scope, move || {
+                    let address = measure(ip);
+                    LOOKUP_THREADS_IN_USE.fetch_sub(1, Ordering::SeqCst);
+                    address
+                });
             match spawned {
                 Ok(handle) => slots.push(Ok(handle)),
                 Err(_) => {
@@ -697,7 +710,11 @@ mod tests {
         assert!(resolve("bad host", 563).is_err());
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        assert!(connect_ms(SocketAddr::new("127.0.0.1".parse().unwrap(), port), Duration::from_secs(2)).is_some());
+        assert!(connect_ms(
+            SocketAddr::new("127.0.0.1".parse().unwrap(), port),
+            Duration::from_secs(2)
+        )
+        .is_some());
         drop(listener);
         let json = to_json(
             "news.example",
@@ -725,11 +742,22 @@ mod tests {
         if index == 0 {
             return;
         }
-        let scoped = SocketAddr::V6(std::net::SocketAddrV6::new("fe80::1".parse().unwrap(), 563, 0, index));
+        let scoped = SocketAddr::V6(std::net::SocketAddrV6::new(
+            "fe80::1".parse().unwrap(),
+            563,
+            0,
+            index,
+        ));
         assert_eq!(shown_address(&scoped), "fe80::1%lo");
         let found = resolve("fe80::1%lo", 563).unwrap();
-        assert_eq!(found.iter().map(shown_address).collect::<Vec<_>>(), vec!["fe80::1%lo".to_string()]);
-        assert_eq!(shown_address(&"[2001:db8::1]:563".parse().unwrap()), "2001:db8::1");
+        assert_eq!(
+            found.iter().map(shown_address).collect::<Vec<_>>(),
+            vec!["fe80::1%lo".to_string()]
+        );
+        assert_eq!(
+            shown_address(&"[2001:db8::1]:563".parse().unwrap()),
+            "2001:db8::1"
+        );
     }
 
     #[test]
@@ -739,13 +767,29 @@ mod tests {
         let mixed: Vec<SocketAddr> = (1..=10).map(v4).chain((1..=2).map(v6)).collect();
         let picked = pick_addresses(mixed);
         assert_eq!(picked.len(), MAX_ADDRESSES);
-        assert_eq!(picked.iter().filter(|ip| ip.is_ipv6()).count(), 2, "{picked:?}");
+        assert_eq!(
+            picked.iter().filter(|ip| ip.is_ipv6()).count(),
+            2,
+            "{picked:?}"
+        );
         assert!(picked[0].is_ipv4(), "IPv4 first");
         let many_v6: Vec<SocketAddr> = (1..=3).map(v4).chain((1..=10).map(v6)).collect();
         let picked = pick_addresses(many_v6);
-        assert_eq!((picked.iter().filter(|ip| ip.is_ipv4()).count(), picked.len()), (3, MAX_ADDRESSES));
-        assert_eq!(pick_addresses((1..=12).map(v4).collect()).len(), MAX_ADDRESSES);
-        assert_eq!(pick_addresses((1..=12).map(v6).collect()).len(), MAX_ADDRESSES);
+        assert_eq!(
+            (
+                picked.iter().filter(|ip| ip.is_ipv4()).count(),
+                picked.len()
+            ),
+            (3, MAX_ADDRESSES)
+        );
+        assert_eq!(
+            pick_addresses((1..=12).map(v4).collect()).len(),
+            MAX_ADDRESSES
+        );
+        assert_eq!(
+            pick_addresses((1..=12).map(v6).collect()).len(),
+            MAX_ADDRESSES
+        );
     }
 
     #[test]
@@ -753,11 +797,21 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = i32::from(listener.local_addr().unwrap().port());
         let spawned = lookup("127.0.0.1", port);
-        assert!(spawned.contains("\"IP\":\"127.0.0.1\"") && !spawned.contains("null"), "{spawned}");
+        assert!(
+            spawned.contains("\"IP\":\"127.0.0.1\"") && !spawned.contains("null"),
+            "{spawned}"
+        );
         LOOKUP_THREADS_IN_USE.fetch_add(LOOKUP_THREADS, Ordering::SeqCst);
         let inline = lookup("127.0.0.1", port);
         LOOKUP_THREADS_IN_USE.fetch_sub(LOOKUP_THREADS, Ordering::SeqCst);
-        assert!(inline.contains("\"IP\":\"127.0.0.1\"") && !inline.contains("null"), "{inline}");
-        assert_eq!(LOOKUP_THREADS_IN_USE.load(Ordering::SeqCst), 0, "every thread gave its slot back");
+        assert!(
+            inline.contains("\"IP\":\"127.0.0.1\"") && !inline.contains("null"),
+            "{inline}"
+        );
+        assert_eq!(
+            LOOKUP_THREADS_IN_USE.load(Ordering::SeqCst),
+            0,
+            "every thread gave its slot back"
+        );
     }
 }

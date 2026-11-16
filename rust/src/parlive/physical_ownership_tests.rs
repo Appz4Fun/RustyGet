@@ -195,10 +195,20 @@ fn own_generated_output_is_allowed_but_another_owner_is_preserved() {
     std::fs::write(&other, b"other owner").unwrap();
     let context = f.context(b"part40.rar");
     crate::artwritercore::article_writer_create_output_file_guarded(
-        own.as_os_str().as_bytes(), 8, &context).unwrap();
+        own.as_os_str().as_bytes(),
+        8,
+        &context,
+    )
+    .unwrap();
     assert_eq!(std::fs::metadata(own).unwrap().len(), 8);
-    assert!(crate::artwritercore::article_writer_create_output_file_guarded(
-        other.as_os_str().as_bytes(), 4096, &context).is_err());
+    assert!(
+        crate::artwritercore::article_writer_create_output_file_guarded(
+            other.as_os_str().as_bytes(),
+            4096,
+            &context
+        )
+        .is_err()
+    );
     assert_eq!(std::fs::read(other).unwrap(), b"other owner");
     f.finish();
 }
@@ -211,15 +221,19 @@ fn article_temporary_has_exact_owner_number_and_independent_physical_gate() {
     let own = scratch.root.join("40.007.tmp");
     let other = scratch.root.join("41.007.tmp");
     std::fs::write(&other, b"foreign article").unwrap();
-    let context = source.context(b"part40.rar")
-        .with_article_temporary(&scratch.root, 7).unwrap();
+    let context = source
+        .context(b"part40.rar")
+        .with_article_temporary(&scratch.root, 7)
+        .unwrap();
     let (mut file, context, permit) = context.open_attested(&own, true).unwrap();
     file.write_all(b"same frame").unwrap();
     drop(permit);
     drop(context.descriptor_permit(&file).unwrap());
     assert_eq!(std::fs::read(&own).unwrap(), b"same frame");
     assert!(context.open_attested(&other, true).is_err());
-    assert!(context.open_attested(&scratch.root.join("40.008.tmp"), true).is_err());
+    assert!(context
+        .open_attested(&scratch.root.join("40.008.tmp"), true)
+        .is_err());
     assert_eq!(std::fs::read(other).unwrap(), b"foreign article");
     drop(file);
     drop(context);
@@ -234,8 +248,10 @@ fn scratch_alias_cannot_replace_a_different_cohorts_certified_input() {
     let path = destination.root.join("40.007.tmp");
     std::fs::write(&path, b"certified source").unwrap();
     let _gate = destination.seal(&path);
-    let context = source.context(b"part40.rar")
-        .with_article_temporary(&destination.root, 7).unwrap();
+    let context = source
+        .context(b"part40.rar")
+        .with_article_temporary(&destination.root, 7)
+        .unwrap();
     let before = std::fs::metadata(&path).unwrap();
     assert!(context.open_attested(&path, true).is_err());
     assert_preserved(&path, &before, b"certified source");
@@ -320,8 +336,10 @@ fn scratch_writer_cannot_replace_another_jobs_unsealed_live_source() {
     destination_context.attest_existing_source().unwrap();
     let gate = download_writes(destination.job, &destination.root).unwrap();
     gate.advance_generation(SessionGeneration(1)).unwrap();
-    let context = source.context(b"part40.rar")
-        .with_article_temporary(&destination.root, 7).unwrap();
+    let context = source
+        .context(b"part40.rar")
+        .with_article_temporary(&destination.root, 7)
+        .unwrap();
     let attempt = context.open_attested(&path, true);
     if let Ok((file, _, permit)) = &attempt {
         file.set_len(0).unwrap();
@@ -345,7 +363,9 @@ fn exhausted_live_budget_does_not_bypass_a_foreign_certified_source() {
     let mut held = Vec::new();
     let mut chunk = 1024 * 1024u64;
     while chunk != 0 {
-        while let Some(lease) = LIVE_BUDGET.acquire(chunk, limit) { held.push(lease); }
+        while let Some(lease) = LIVE_BUDGET.acquire(chunk, limit) {
+            held.push(lease);
+        }
         chunk /= 2;
     }
     let other_job = NEXT_JOB.fetch_sub(1, Ordering::Relaxed);
@@ -408,7 +428,10 @@ fn preindex_cross_job_alias_may_write_an_unrelated_file() {
     drop(attempt);
     assert_eq!(std::fs::read(&path).unwrap(), b"preindex source");
     drop(writer);
-    assert!(gate.advance_generation(SessionGeneration(1)).is_ok(), "an unrelated write poisoned live startup");
+    assert!(
+        gate.advance_generation(SessionGeneration(1)).is_ok(),
+        "an unrelated write poisoned live startup"
+    );
     forget_download_writes(other_job);
     std::fs::remove_file(alias).unwrap();
     f.finish();

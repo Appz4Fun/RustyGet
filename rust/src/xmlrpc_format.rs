@@ -4545,7 +4545,9 @@ fn xmlrpc_parse_test_server_cursor(
                 cipher,
                 timeout,
                 cert_verif_level,
-                address: address_off.map(|off| cur.decode_at(off, is_json)).unwrap_or_default(),
+                address: address_off
+                    .map(|off| cur.decode_at(off, is_json))
+                    .unwrap_or_default(),
             })
         })();
         match parsed {
@@ -6431,7 +6433,10 @@ unsafe fn execute_xml_command(
         // certificate tools for Settings (control user only, POST only)
         57..=61 => {
             let mut text = || {
-                let bytes = cur.next_str().map(|off| cur.decode_at(off, is_json)).unwrap_or_default();
+                let bytes = cur
+                    .next_str()
+                    .map(|off| cur.decode_at(off, is_json))
+                    .unwrap_or_default();
                 String::from_utf8_lossy(&bytes).into_owned()
             };
             let reply = match cmd_id {
@@ -6452,13 +6457,22 @@ unsafe fn execute_xml_command(
         }
         // hostlookup(host, port): addresses, location and connect time for a news server name
         56 => {
-            let host_name = cur.next_str().map(|off| cur.decode_at(off, is_json)).unwrap_or_default();
+            let host_name = cur
+                .next_str()
+                .map(|off| cur.decode_at(off, is_json))
+                .unwrap_or_default();
             let port = cur.next_int().unwrap_or(0);
-            (false, crate::hostlookup::rpc_reply(is_json, &host_name, port))
+            (
+                false,
+                crate::hostlookup::rpc_reply(is_json, &host_name, port),
+            )
         }
         // backbones(host): the bundled backbone list and what is known about host
         62 => {
-            let host_name = cur.next_str().map(|off| cur.decode_at(off, is_json)).unwrap_or_default();
+            let host_name = cur
+                .next_str()
+                .map(|off| cur.decode_at(off, is_json))
+                .unwrap_or_default();
             (false, crate::backbones::rpc_reply(is_json, &host_name))
         }
         // parpresetdetect(start): what "detect" measured for the Check and repair
@@ -7034,9 +7048,17 @@ mod remote_xmlrpc_tests {
                                         id_cstr.as_ref().map_or(std::ptr::null(), |c| c.as_ptr());
                                     let buf = unsafe {
                                         match op_kind {
-                                            0 => match id_opt.and_then(|s| std::str::from_utf8(s).ok()?.parse().ok()) {
-                                                Some(server) => crate::ffi::nzbget_rs_tls_cipher_start_server(server),
-                                                None => crate::ffi::nzbget_rs_tls_cipher_start(std::ptr::null()),
+                                            0 => match id_opt.and_then(|s| {
+                                                std::str::from_utf8(s).ok()?.parse().ok()
+                                            }) {
+                                                Some(server) => {
+                                                    crate::ffi::nzbget_rs_tls_cipher_start_server(
+                                                        server,
+                                                    )
+                                                }
+                                                None => crate::ffi::nzbget_rs_tls_cipher_start(
+                                                    std::ptr::null(),
+                                                ),
                                             },
                                             1 => crate::ffi::nzbget_rs_tls_cipher_status(id_ptr),
                                             _ => crate::ffi::nzbget_rs_tls_cipher_cancel(id_ptr),

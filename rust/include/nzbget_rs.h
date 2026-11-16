@@ -477,6 +477,9 @@ typedef struct NzbgetRsNzbScalars {
 NzbgetRsNzbScalars* nzbget_rs_nzb_scalars_new(void);
 void nzbget_rs_nzb_scalars_free(NzbgetRsNzbScalars* p);
 size_t nzbget_rs_nzb_scalars_size(void);
+// Text fields (ids as in qnzb.rs); null when unset. len < 0: NUL-terminated.
+const char* nzbget_rs_nzb_text(const NzbgetRsNzbScalars* p, int id);
+void nzbget_rs_nzb_set_text(const NzbgetRsNzbScalars* p, int id, const char* s, intptr_t len);
 // Job threads for post-processing, live repair and direct unpack (rust/src/jobthread.rs).
 typedef struct JobThread JobThread;
 JobThread* nzbget_rs_job_new_post(int kind, uintptr_t post_ptr, int nzb_id, int auto_destroy);

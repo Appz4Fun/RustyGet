@@ -8610,8 +8610,10 @@ fn plan_dead_fills(
         if file_size_bytes(&path_of(&member.name)) <= 0 || is_dead_job(&member.name) {
             continue;
         }
-        let key = (prefix.to_ascii_lowercase(), width, suffix.to_ascii_lowercase());
-        let pos = match buckets.iter().position(|(k, _)| k.0 == key.0 && k.1 == key.1 && k.2 == key.2) {
+        // Compare names case-blind: the bucket keeps the first member's spelling.
+        let pos = match buckets.iter().position(|(k, _)| {
+            k.0.eq_ignore_ascii_case(&prefix) && k.1 == width && k.2.eq_ignore_ascii_case(&suffix)
+        }) {
             Some(p) => p,
             None => {
                 buckets.push(((prefix, width, suffix), Default::default()));
@@ -8639,11 +8641,21 @@ fn plan_dead_fills(
             .chain(numbered.keys().next_back().copied())
             .max()
             .unwrap_or(1);
-        let volume_name = |n: u32| {
+        // Names are matched case-blind but opened by exact path: use a volume's own name when it
+        // is on disk, the dead job's name when one matches, and part 1's spelling otherwise.
+        let (prefix, suffix) = rar_part_number(&original_members[numbered[&1] as usize].name)
+            .map_or((prefix, suffix), |(p, _, _, s)| (p, s));
+        let volume_name = |n: u32| -> Vec<u8> {
+            if let Some(&m) = numbered.get(&n) {
+                return original_members[m as usize].name.clone();
+            }
             let mut v = prefix.clone();
             v.extend_from_slice(format!("{n:0width$}").as_bytes());
             v.extend_from_slice(&suffix);
-            v
+            dead_jobs
+                .iter()
+                .find(|t| t.filename.eq_ignore_ascii_case(&v))
+                .map_or(v, |t| t.filename.clone())
         };
         // Read every volume on disk: its version and the main member's part.
         let mut inner: Option<(Vec<u8>, i64)> = None;
@@ -17646,7 +17658,8 @@ mod dead_volume_fill_tests {
         std::fs::create_dir_all(&dl).unwrap();
         let data: Vec<u8> = (0..1_000_000u64).map(|i| (i.wrapping_mul(2654435761) >> 9) as u8).collect();
         let vols = rar5_set("Movie.2160p.mkv", &data, 100_000);
-        let name = |i: usize| format!("set.part{:02}.rar", i + 1);
+        // Mixed case, like real release names: every volume must land in one set.
+        let name = |i: usize| format!("The.Set.NTb.part{:02}.rar", i + 1);
         let dead = [2usize, 5, 6];
         for (i, v) in vols.iter().enumerate() {
             if !dead.contains(&i) {

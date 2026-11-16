@@ -3091,7 +3091,13 @@ pub(crate) fn direct_unpack_has_holds(nzb_id: i32) -> bool {
 pub(crate) fn direct_unpack_virtual(nzb_id: i32, full_path: &[u8]) -> Option<crate::deadvolume::VirtualVolume> {
     direct_unpack_holds()
         .get(&nzb_id)
-        .and_then(|st| st.virtuals.get(full_path).cloned())
+        .and_then(|st| {
+            // Names may differ in case between the extractor and the dead job (see set_virtual).
+            st.virtuals.get(full_path).or_else(|| {
+                st.virtuals.iter().find(|(k, _)| k.eq_ignore_ascii_case(full_path)).map(|(_, v)| v)
+            })
+            .cloned()
+        })
 }
 
 /// True when every file direct unpack of `nzb_id` still holds is a file that never reached the
@@ -3193,7 +3199,7 @@ pub(crate) fn take_dead_volume_rerun(nzb_id: i32) -> bool {
 pub(crate) fn direct_unpack_has_virtual(full_path: &[u8]) -> bool {
     direct_unpack_holds()
         .values()
-        .any(|st| st.virtuals.contains_key(full_path))
+        .any(|st| st.virtuals.keys().any(|k| k.eq_ignore_ascii_case(full_path)))
 }
 
 /// Hands direct unpack of download `nzb_id` a rebuilt stand-in for dead volume `full_path`,
@@ -3208,9 +3214,11 @@ pub(crate) fn direct_unpack_set_virtual(
     let id = nzb_id;
     let st = map.entry(id).or_default();
     st.virtuals.insert(full_path.to_vec(), volume);
-    if let Some(i) = st.held.iter().position(|p| p == full_path) {
-        st.held.remove(i);
-        st.holes.remove(full_path);
+    // The extractor derives volume names from part 1's spelling, a dead job keeps its posted
+    // spelling: match the hold case-blind.
+    if let Some(i) = st.held.iter().position(|p| p.eq_ignore_ascii_case(full_path)) {
+        let held = st.held.remove(i);
+        st.holes.remove(&held);
     } else if let Some(i) = st.held.iter().position(|p| {
         // A held part-numbered volume stands only for itself.
         !crate::fsops::path(p).exists()
@@ -7473,5 +7481,29 @@ mod live_hold_tests {
         assert!(direct_unpack_has_holds(id));
         assert!(direct_unpack_awaiting_repair(id));
         direct_unpack_forget_holds(id);
+    }
+}
+
+#[cfg(test)]
+mod dead_volume_case_tests {
+    use super::*;
+
+    #[test]
+    fn a_borrowed_volume_is_found_whatever_case_the_dead_job_used() {
+        let id = -4_242_471;
+        let held = b"/dl/SET.part03.rar";
+        let extractor = b"/dl/set.part03.rar";
+        direct_unpack_hold(id, held);
+        let v = crate::deadvolume::VirtualVolume {
+            head: vec![1],
+            data: std::path::PathBuf::from("/dl/x"),
+            data_len: 0,
+            tail: Vec::new(),
+        };
+        direct_unpack_set_virtual(id, held, v.clone());
+        assert!(!direct_unpack_has_holds(id), "the hold is released");
+        assert_eq!(direct_unpack_virtual(id, extractor), Some(v));
+        assert!(direct_unpack_has_virtual(extractor));
+        direct_unpack_holds().remove(&id);
     }
 }

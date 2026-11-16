@@ -845,15 +845,15 @@ mod tests {
         let mut strs: [*const c_char; 4];
         unsafe {
             let call = |n,
-                            op,
-                            a2,
-                            p2,
-                            s1,
-                            s2,
-                            raw: *const i64,
-                            ints: &mut [c_int; 5],
-                            i64s: &mut [i64; 4],
-                            strs: &mut [*const c_char; 4]| {
+                        op,
+                        a2,
+                        p2,
+                        s1,
+                        s2,
+                        raw: *const i64,
+                        ints: &mut [c_int; 5],
+                        i64s: &mut [i64; 4],
+                        strs: &mut [*const c_char; 4]| {
                 nzbget_rs_nzb_files(
                     n,
                     op,

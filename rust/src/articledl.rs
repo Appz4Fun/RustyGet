@@ -628,6 +628,13 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
         .as_bytes(),
     );
 
+    // Take the flush lock before choosing a file. Selection marks the file
+    // busy (CACHE_FILE_INFO) under the queue lock, and `delete_file_info`
+    // waits for that mark while holding the queue lock; downloaders take the
+    // flush lock first and the queue lock second. Waiting for the flush lock
+    // after marking the file deadlocked all three (seen with many connections
+    // and frequent DirectWrite flushes). Always flush lock, then queue lock.
+    cache_lock_flush();
     let selected = qh.with_locked_queue(|dq_ptr| {
         let qlen = qh.queue_len(dq_ptr);
         for ni in 0..qlen {
@@ -664,6 +671,7 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
 
     let Some((file_ptr, info_name, write_context)) = selected else {
         CACHE_FILE_INFO.store(0, Ordering::SeqCst);
+        cache_unlock_flush();
         crate::log::log_active_bytes(MK_DEBUG, b"Checking cache... nothing to flush");
         return false;
     };
@@ -681,7 +689,6 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
         &join_c_slices(&[b"Flushing cache for ", &info_name]),
     );
 
-    cache_lock_flush();
     let (direct_write, skip_disk_write, nzb_ptr, output_filename) =
         qh.file_cache_flush_prepare(file_ptr);
     let Some(metas) = qh.file_cache_flush_lock_collect(file_ptr) else {
@@ -751,6 +758,12 @@ fn daemon_article_cache_run() {
 
     let mut reset_counter = 0i32;
     let mut just_flushed = false;
+    // Articles are malloc'd one by one; after a flush hand the freed heap
+    // back to the OS once the cache is empty, so RSS follows what is held.
+    // At most one trim per TRIM_EVERY: malloc_trim walks every arena.
+    const TRIM_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+    let mut trim_pending = false;
+    let mut last_trim: Option<std::time::Instant> = None;
     loop {
         let (allocated, effective_limit, is_stopped, direct_write, tier) = snap();
         if is_stopped && allocated == 0 {
@@ -767,14 +780,50 @@ fn daemon_article_cache_run() {
         );
         if should_flush {
             just_flushed = daemon_article_cache_check_flush(allocated, flush_everything);
+            trim_pending |= just_flushed;
             reset_counter = 0;
             let (alloc_now, _, stopped_now, _, _) = snap();
             if need_emergency_flush && alloc_now == 0 {
                 crate::memory_pressure::trim_heap();
-            } else if !just_flushed && !stopped_now {
+                trim_pending = false;
+                last_trim = Some(std::time::Instant::now());
+            } else if !just_flushed && !stopped_now && !need_emergency_flush {
+                // Nothing could be written yet: cache bytes are reserved when
+                // an article starts, so many connections' in-flight articles
+                // alone can pass the 32 MiB DirectWrite hold. Back off rather
+                // than scanning the queue every few milliseconds.
+                sleep_ms(50);
+            } else if alloc_now >= allocated || !just_flushed {
+                // A "flush" that freed nothing (file busy, write blocked)
+                // must not spin, also while stopping.
                 sleep_ms(5);
             }
         } else if allocated == 0 {
+            if trim_pending {
+                let wait = last_trim.map_or(std::time::Duration::ZERO, |t| {
+                    TRIM_EVERY.saturating_sub(t.elapsed())
+                });
+                if wait.is_zero() {
+                    crate::memory_pressure::trim_heap();
+                    trim_pending = false;
+                    last_trim = Some(std::time::Instant::now());
+                } else {
+                    // Too soon after the last trim: come back when it is due
+                    // (or earlier, when articles arrive) instead of sleeping
+                    // until the next download and keeping the freed heap.
+                    let guard = CACHE_ALLOC_LOCK.0.lock().unwrap_or_else(|e| e.into_inner());
+                    if CACHE_ALLOCATED.load(Ordering::SeqCst) == 0 && !is_stopped_cb() {
+                        drop(
+                            CACHE_ALLOC_LOCK
+                                .1
+                                .wait_timeout(guard, wait)
+                                .unwrap_or_else(|e| e.into_inner()),
+                        );
+                    }
+                    reset_counter = 0;
+                    continue;
+                }
+            }
             let mut guard = CACHE_ALLOC_LOCK.0.lock().unwrap_or_else(|e| e.into_inner());
             while CACHE_ALLOCATED.load(Ordering::SeqCst) == 0 && !is_stopped_cb() {
                 guard = CACHE_ALLOC_LOCK

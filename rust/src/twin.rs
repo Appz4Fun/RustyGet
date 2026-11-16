@@ -1841,6 +1841,9 @@ fn run_twin_job(token: usize, qdir: &[u8]) {
                     }
                     None => None,
                     Some(_) => {
+                        if is_stopped() {
+                            return;
+                        }
                         // the sizes cannot be learned now: ask again a few
                         // times, then give up like an unreadable par2 index
                         if count_sample_attempt(spec.nzb_id, spec.primary_id) < MAX_ATTEMPTS {
@@ -1954,7 +1957,13 @@ fn run_twin_job(token: usize, qdir: &[u8]) {
                 }
             };
             let mut unread = false;
-            let mut proven = true;
+            // The list must be one RAR volume set and nothing else, so its
+            // first and last volume are known and no other file lends.
+            let names: Vec<&str> = primary.iter().map(|e| e.filename.as_str()).collect();
+            let dupe_names: Vec<&str> = dupe.iter().map(|e| e.filename.as_str()).collect();
+            let ends = crate::twinfields::rar_set_ends(&names)
+                .filter(|_| crate::twinfields::rar_set_ends(&dupe_names).is_some());
+            let mut proven = ends.is_some();
             // How many articles at a volume's end differ: the last, and those
             // of a recovery record before it. Measured on a largest file (a
             // recovery record is a share of its volume, so a full volume has
@@ -1965,7 +1974,7 @@ fn run_twin_job(token: usize, qdir: &[u8]) {
             let largest = (0..primary.len())
                 .max_by_key(|&f| (p_counts[f], std::cmp::Reverse(f)))
                 .filter(|&f| p_counts[f] >= 3);
-            match largest {
+            match largest.filter(|_| proven) {
                 None => proven = false,
                 Some(f) => {
                     let n = p_counts[f];
@@ -2012,15 +2021,6 @@ fn run_twin_job(token: usize, qdir: &[u8]) {
             // differ mid-volume, and what follows its end in the last volume
             // (other members, a quick-open record, the end header) counts as
             // tail there.
-            // The list must be one RAR volume set and nothing else, so its
-            // first and last volume are known and no other file lends.
-            let names: Vec<&str> = primary.iter().map(|e| e.filename.as_str()).collect();
-            let dupe_names: Vec<&str> = dupe.iter().map(|e| e.filename.as_str()).collect();
-            let ends = crate::twinfields::rar_set_ends(&names)
-                .filter(|_| crate::twinfields::rar_set_ends(&dupe_names).is_some());
-            if ends.is_none() {
-                proven = false;
-            }
             if let Some((first_f, last_f)) = ends.filter(|_| proven && !unread && !is_stopped()) {
                 match (
                     fetch_part(&primary[first_f], 0),

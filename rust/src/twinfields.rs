@@ -196,8 +196,9 @@ pub fn plan_lcm(
                 break;
             };
             let (sa, sb) = (offset / part_a, offset / part_b);
-            // strictly inside: never a file's first or last article
-            if sa + 2 > na as u64 || sb + 2 > nb as u64 {
+            // strictly inside: never a file's first or last article, nor
+            // its last eighth (see [`middle_end`])
+            if sa >= middle_end(na) as u64 || sb >= middle_end(nb) as u64 {
                 break;
             }
             inner.push((f, sa as usize, sb as usize));
@@ -846,9 +847,11 @@ mod tests {
         let plan = plan_lcm(&[100], &[94], 716_800, 768_000, 6).unwrap();
         for p in plan.iter().filter(|p| !p.header) {
             assert_eq!(p.seg_a as u64 * 716_800, p.seg_b as u64 * 768_000);
-            assert!(p.seg_a > 0 && p.seg_a + 1 < 100 && p.seg_b + 1 < 94);
+            // off the last eighth, where a recovery record sits
+            assert!(p.seg_a > 0 && p.seg_a < middle_end(100) && p.seg_b < middle_end(94));
         }
-        assert_eq!(plan.iter().filter(|p| !p.header).count(), 6);
+        // only five grid points fall before the last eighth
+        assert_eq!(plan.iter().filter(|p| !p.header).count(), 5);
         assert!(plan
             .iter()
             .any(|p| p.tail && p.seg_a == 99 && p.seg_b == 93));

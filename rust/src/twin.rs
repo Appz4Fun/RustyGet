@@ -950,6 +950,21 @@ struct TwinCoordState {
     jobs: std::collections::BTreeMap<usize, ActiveTwinJob>,
     checking: std::collections::BTreeSet<i32>,
     failed_attempts: std::collections::BTreeMap<i32, i32>,
+    /// Sampling attempts that read too little, by `(copy, primary)`: kept
+    /// apart from the par2 index attempts so neither uses up the other.
+    sample_attempts: std::collections::BTreeMap<(i32, i32), i32>,
+}
+
+/// Counts one sampling attempt of copy `nzb_id` against `primary_id` that
+/// read too little, and returns the attempts so far.
+fn count_sample_attempt(nzb_id: i32, primary_id: i32) -> i32 {
+    let mut guard = twin_coord().lock().unwrap_or_else(|e| e.into_inner());
+    let att = guard
+        .sample_attempts
+        .entry((nzb_id, primary_id))
+        .or_insert(0);
+    *att += 1;
+    *att
 }
 
 static OPENED_STORE_PATH: Mutex<Vec<u8>> = Mutex::new(Vec::new());
@@ -1828,10 +1843,7 @@ fn run_twin_job(token: usize, qdir: &[u8]) {
                     Some(_) => {
                         // the sizes cannot be learned now: ask again a few
                         // times, then give up like an unreadable par2 index
-                        let mut guard = twin_coord().lock().unwrap_or_else(|e| e.into_inner());
-                        let att = guard.failed_attempts.entry(spec.nzb_id).or_insert(0);
-                        *att += 1;
-                        if *att < MAX_ATTEMPTS {
+                        if count_sample_attempt(spec.nzb_id, spec.primary_id) < MAX_ATTEMPTS {
                             return;
                         }
                         None
@@ -1913,12 +1925,7 @@ fn run_twin_job(token: usize, qdir: &[u8]) {
             }
             // too few articles could be read (missing on one side): ask
             // again a few times, then give up as unreadable
-            let gave_up = {
-                let mut guard = twin_coord().lock().unwrap_or_else(|e| e.into_inner());
-                let att = guard.failed_attempts.entry(spec.nzb_id).or_insert(0);
-                *att += 1;
-                *att >= MAX_ATTEMPTS
-            };
+            let gave_up = count_sample_attempt(spec.nzb_id, spec.primary_id) >= MAX_ATTEMPTS;
             if gave_up && store_sample(b"none", None) {
                 unreg.stored = true;
             }
@@ -1928,17 +1935,41 @@ fn run_twin_job(token: usize, qdir: &[u8]) {
         if let crate::twinfields::SampleVerdict::Rerar { .. } = verdict {
             // How many articles at a volume's end differ: the last, and those
             // of a recovery record before it. Measured on a sampled file whose
-            // last article differed (a repacked volume, not a sample or other
-            // file packed once) cut into three or more articles, walking back
-            // until one is equal. With no such file it cannot be measured, and
-            // the copy is not trusted as a re-RAR.
+            // last article differs (a repacked volume, not a sample or other
+            // file packed once), the largest, cut into three or more articles,
+            // walking back until one is equal. With no such file it cannot be
+            // measured, and the copy is not trusted as a re-RAR.
             let mut tail: u32 = 1;
             let mut settled = false;
-            let measured = tail_files
-                .iter()
-                .copied()
-                .filter(|&f| p_counts[f] >= 3)
-                .max_by_key(|&f| p_counts[f]);
+            // The tail is measured on a largest file (a recovery record is a
+            // share of its volume, so a full volume has the longest), whose
+            // last article must be read and differ: a repacked volume.
+            let largest = (0..primary.len()).max_by_key(|&f| (p_counts[f], std::cmp::Reverse(f)));
+            let measured = largest.filter(|&f| {
+                if p_counts[f] < 3 {
+                    return false;
+                }
+                if tail_files.contains(&f) {
+                    return true;
+                }
+                let last = p_counts[f] - 1;
+                match (fetch_part(&primary[f], last), fetch_part(&dupe[f], last)) {
+                    (Some(a), Some(b)) if a.success && b.success => {
+                        crate::twinfields::pair_differs(
+                            &crate::twinfields::SamplePair {
+                                file: f,
+                                seg_a: last,
+                                seg_b: last,
+                                header: true,
+                                tail: false,
+                            },
+                            (a.offset, a.file_size, &a.data),
+                            (b.offset, b.file_size, &b.data),
+                        )
+                    }
+                    _ => false,
+                }
+            });
             if measured.is_none() {
                 verdict = crate::twinfields::SampleVerdict::Alt;
             }
@@ -2000,6 +2031,11 @@ fn run_twin_job(token: usize, qdir: &[u8]) {
             };
         if store_sample(&verdict.param(), Some(&note)) {
             unreg.stored = true;
+            twin_coord()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .sample_attempts
+                .remove(&(spec.nzb_id, spec.primary_id));
         }
         return;
     }

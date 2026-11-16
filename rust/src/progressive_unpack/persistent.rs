@@ -443,6 +443,9 @@ impl VolumeFeed for RememberedHoles {
     fn remember_damaged(&mut self, path: &Path, holes: Vec<(u64, u64)>) {
         self.inner.remember_damaged(path, holes)
     }
+    fn still_held(&self, path: &Path) -> bool {
+        self.inner.still_held(path)
+    }
 }
 
 /// Volume provider of a persistent session: every expected volume is declared up front as a
@@ -457,6 +460,8 @@ struct Provider {
     /// Where the damaged volumes still waiting for their repair are saved (see
     /// `save_pending_repair`).
     pending_repair: PathBuf,
+    /// The damaged volumes in that file.
+    saved: std::collections::HashSet<PathBuf>,
 }
 
 impl VolumeSource for Provider {
@@ -466,18 +471,47 @@ impl VolumeSource for Provider {
         cx: &mut Context<'_>,
     ) -> ProgressiveResult<VolumeAnswer> {
         let path = self.dir.join(&request.expected);
-        let view = self
-            .feed
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .volume(&path);
+        let (view, released) = {
+            let feed = self.feed.lock().unwrap_or_else(|e| e.into_inner());
+            let damaged = self.damaged.lock().unwrap_or_else(|e| e.into_inner());
+            // Damaged volumes repaired and released since: a restart must not hold them again.
+            let released: Vec<PathBuf> = damaged
+                .keys()
+                .filter(|p| self.saved.contains(*p) && !feed.still_held(p))
+                .cloned()
+                .collect();
+            drop(damaged);
+            let mut feed = feed;
+            (feed.volume(&path), released)
+        };
+        let mut changed = !released.is_empty();
+        for p in &released {
+            self.saved.remove(p);
+        }
+        if let VolumeView::Ready { holes } = &view {
+            if !holes.is_empty() {
+                let damaged = self.damaged.lock().unwrap_or_else(|e| e.into_inner());
+                changed |= damaged.get(&path) != Some(holes) || !self.saved.contains(&path);
+                drop(damaged);
+                self.saved.insert(path.clone());
+            }
+        }
         match view {
             VolumeView::Ready { holes } => {
                 if !holes.is_empty() {
-                    let mut damaged = self.damaged.lock().unwrap_or_else(|e| e.into_inner());
-                    if damaged.insert(path.clone(), holes.clone()).as_ref() != Some(&holes) {
-                        save_pending_repair(&self.pending_repair, &damaged);
-                    }
+                    self.damaged
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(path.clone(), holes.clone());
+                }
+                if changed {
+                    let damaged = self.damaged.lock().unwrap_or_else(|e| e.into_inner());
+                    let pending: std::collections::HashMap<PathBuf, Vec<(u64, u64)>> = damaged
+                        .iter()
+                        .filter(|(p, _)| self.saved.contains(*p))
+                        .map(|(p, h)| (p.clone(), h.clone()))
+                        .collect();
+                    save_pending_repair(&self.pending_repair, &pending);
                 }
                 let mut volume = HoledVolume::open(&path, holes).map_err(|cause| {
                     ProgressiveFailure::new(FailureKind::Input {
@@ -575,6 +609,13 @@ impl<'a> Run<'a> {
             declaration: self.plan.inventory(),
             damaged: self.damaged.clone(),
             pending_repair: self.plan.root.join(PENDING_REPAIR),
+            saved: self
+                .damaged
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .keys()
+                .cloned()
+                .collect(),
         };
         let first_name = self.plan.names[0].clone();
         let mut opts = ProgressiveOptions::new(

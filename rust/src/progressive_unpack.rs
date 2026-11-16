@@ -88,6 +88,11 @@ pub trait VolumeFeed: Send + 'static {
     /// handed it damaged and its repair had not happened yet, so `wait_repaired` must wait for
     /// it again. A feed that cannot hold a volume ignores this.
     fn remember_damaged(&mut self, _path: &Path, _holes: Vec<(u64, u64)>) {}
+    /// False once damaged volume `path` was repaired and released. A feed that does not track
+    /// holds says true.
+    fn still_held(&self, _path: &Path) -> bool {
+        true
+    }
 }
 
 /// Volume bytes at the start and end that hold archive headers. A hole there cannot be read

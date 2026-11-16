@@ -2985,11 +2985,6 @@ impl crate::progressive_unpack::VolumeFeed for DirectUnpackFeed {
     }
 
     fn remember_damaged(&mut self, path: &std::path::Path, holes: Vec<(u64, u64)>) {
-        // Once the download is over nothing would release a new hold (post-processing only
-        // waits for holds the download left), so the refill reads the volume as it is.
-        if direct_unpack_download_finished(self.nzb_id) || direct_unpack_abandoned(self.nzb_id) {
-            return;
-        }
         #[cfg(unix)]
         let full = {
             use std::os::unix::ffi::OsStrExt;
@@ -2997,7 +2992,20 @@ impl crate::progressive_unpack::VolumeFeed for DirectUnpackFeed {
         };
         #[cfg(not(unix))]
         let full = path.to_string_lossy().as_bytes().to_vec();
-        direct_unpack_hold_with_holes(self.nzb_id, &full, holes);
+        direct_unpack_rehold(self.nzb_id, &full, holes);
+    }
+
+    fn still_held(&self, path: &std::path::Path) -> bool {
+        #[cfg(unix)]
+        let full = {
+            use std::os::unix::ffi::OsStrExt;
+            path.as_os_str().as_bytes().to_vec()
+        };
+        #[cfg(not(unix))]
+        let full = path.to_string_lossy().as_bytes().to_vec();
+        direct_unpack_holds()
+            .get(&self.nzb_id)
+            .is_some_and(|st| st.held.iter().any(|p| p == &full))
     }
 
     fn wait_repaired(&mut self, is_cancelled: &mut dyn FnMut() -> bool) -> bool {
@@ -3056,6 +3064,23 @@ pub(crate) fn direct_unpack_hold_with_holes(nzb_id: i32, full_path: &[u8], holes
     } else {
         st.holes.insert(full_path.to_vec(), holes);
     }
+}
+
+/// Holds `full_path` again with its lost ranges after a restart, unless the download is over or
+/// abandoned: nothing would release a new hold then (post-processing only waits for holds the
+/// download left), so the refill reads the volume as it is. One lock, so `NzbDownloaded` sees
+/// either no hold or this one.
+fn direct_unpack_rehold(nzb_id: i32, full_path: &[u8], holes: Vec<(u64, u64)>) -> bool {
+    let mut map = direct_unpack_holds();
+    let st = map.entry(nzb_id).or_default();
+    if st.download_finished || st.abandoned || holes.is_empty() {
+        return false;
+    }
+    if !st.held.iter().any(|p| p == full_path) {
+        st.held.push(full_path.to_vec());
+    }
+    st.holes.insert(full_path.to_vec(), holes);
+    true
 }
 
 /// `None` when `full_path` is not on hold; otherwise its recorded lost ranges (empty when they

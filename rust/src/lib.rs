@@ -107,6 +107,10 @@ pub mod ncurses_format;
 pub mod postrepair;
 #[cfg(unix)]
 pub mod qarticle;
+#[cfg(unix)]
+pub mod qfile;
+#[cfg(unix)]
+pub mod qnzb;
 pub mod queuecoord;
 pub(crate) mod queuesubsys_host;
 pub mod sevenzraw;

@@ -2366,13 +2366,60 @@ impl NzbgetRsStreamRepairCtrl {
     }
 
     unsafe fn run_live(&self, ctx: *mut c_void, cb: NzbgetRsStreamRepairHostFn) {
+        // Volumes can go dead while a pass borrows another one (a run of dead volumes arrives
+        // over a minute or two): look again after each pass, while this thread still holds the
+        // job, and borrow the new ones before post-processing takes over and par2 rebuilds them.
+        let mut tried: std::collections::BTreeSet<Vec<u8>> = Default::default();
+        for _ in 0..MAX_LIVE_BORROW_PASSES {
+            let Some(left) = (unsafe { self.run_live_pass(ctx, cb) }) else {
+                return;
+            };
+            tried.extend(left);
+            if unsafe { self.host_is_stopped(ctx, cb) } {
+                return;
+            }
+            let fresh = unsafe { self.dead_volumes_left_to_borrow(ctx, cb) };
+            if fresh.iter().all(|n| tried.contains(n)) {
+                return;
+            }
+        }
+    }
+
+    /// Names of the dead volumes a pass would leave to the borrow now.
+    unsafe fn dead_volumes_left_to_borrow(
+        &self,
+        ctx: *mut c_void,
+        cb: NzbgetRsStreamRepairHostFn,
+    ) -> Vec<Vec<u8>> {
+        let mut counters = RunCounters::default();
+        let Some((_, dest_dir, targets, _, _)) = (unsafe {
+            with_dq_guard(ctx, cb, |dq_ptr| {
+                self.collect_targets_and_donors(ctx, cb, dq_ptr, false, true, &mut counters)
+            })
+        }) else {
+            return Vec::new();
+        };
+        dead_volumes_to_borrow(&dest_dir, &targets)
+            .into_iter()
+            .zip(targets)
+            .filter_map(|(left, t)| left.then_some(t.filename))
+            .collect()
+    }
+
+    /// One live pass; returns the dead volumes it left to the borrow, None when there was
+    /// nothing to look at.
+    unsafe fn run_live_pass(
+        &self,
+        ctx: *mut c_void,
+        cb: NzbgetRsStreamRepairHostFn,
+    ) -> Option<Vec<Vec<u8>>> {
         let mut counters = RunCounters::default();
         let Some((nzb_name, dest_dir, mut targets, donors, mut member_names)) = (unsafe {
             with_dq_guard(ctx, cb, |dq_ptr| {
                 self.collect_targets_and_donors(ctx, cb, dq_ptr, false, true, &mut counters)
             })
         }) else {
-            return;
+            return None;
         };
 
         let mut info_name = b"live stream repair for ".to_vec();
@@ -2486,8 +2533,18 @@ impl NzbgetRsStreamRepairCtrl {
             .concat();
             crate::postproc::direct_unpack_release_path(&full);
         }
+        Some(
+            left_to_borrow
+                .iter()
+                .zip(&targets)
+                .filter_map(|(left, t)| left.then(|| t.filename.clone()))
+                .collect(),
+        )
     }
 }
+
+/// Bounds the borrow passes one live repair makes for volumes that go dead while it runs.
+const MAX_LIVE_BORROW_PASSES: usize = 8;
 
 pub unsafe fn stream_repair_ctrl_exec(
     ctrl: *const NzbgetRsStreamRepairCtrl,

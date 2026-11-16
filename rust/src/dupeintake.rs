@@ -315,7 +315,7 @@ pub fn inner_key_copy(
         if !last.read(0, &mut head) {
             return None;
         }
-        return crate::twinfields::rar_last_volume_key(&head);
+        return crate::twinfields::rar_last_volume_key(&head, vols.len() > 1);
     }
     if magic != crate::twinfields::SEVEN_ZIP_MAGIC {
         return None;
@@ -651,10 +651,13 @@ mod tests {
         };
         let a = key_of(&mut mem, "a", "rerar-a");
         let c = key_of(&mut mem, "c", "rerar-c");
-        let ka = inner_key_copy(&a, &mem).expect("the last volume records the key");
+        let video = crate::twinfields::InnerKey {
+            size: 49156,
+            crc32: 0x771f_bd29,
+        };
+        assert_eq!(inner_key_copy(&a, &mem), Some(video));
         // a re-RAR of the same file records the same size and CRC32
-        assert_eq!(inner_key_copy(&c, &mem), Some(ka));
-        assert!(ka.size > 0);
+        assert_eq!(inner_key_copy(&c, &mem), Some(video));
     }
 
     #[test]

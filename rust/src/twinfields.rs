@@ -728,10 +728,13 @@ impl VolumeSource for Volumes {
 /// that volume (its first article is enough). Each file's last part header
 /// stores the unpacked size and the CRC32 of the whole file, whatever the
 /// compression, so a stored, compressed or re-RARed copy of one video gives
-/// the same key. The largest file whose last part starts in `head` is taken.
+/// the same key. The largest file whose last part starts in `head` is taken;
+/// in a set of several volumes (`multi_volume`) only a file continued from
+/// the volume before counts, so a small file packed after the video (an nfo,
+/// subtitles) that alone sits in the last volume never stands for the video.
 /// None for encrypted headers (`-hp`), keyed checks (RAR 5 `-p`), a file whose
-/// CRC is not recorded, or a head with no last part of a file.
-pub fn rar_last_volume_key(head: &[u8]) -> Option<InnerKey> {
+/// CRC is not recorded, or a head with no last part of such a file.
+pub fn rar_last_volume_key(head: &[u8], multi_volume: bool) -> Option<InnerKey> {
     if !head.starts_with(b"Rar!") {
         return None;
     }
@@ -741,7 +744,7 @@ pub fn rar_last_volume_key(head: &[u8]) -> Option<InnerKey> {
     }
     map.members
         .iter()
-        .filter(|m| !m.is_dir)
+        .filter(|m| !m.is_dir && (m.split_before || !multi_volume))
         .filter_map(|m| {
             let checks = m.checks?;
             if checks.keyed {
@@ -891,6 +894,24 @@ mod tests {
             }
         }
         judge(&t, false, pa == pb)
+    }
+
+    #[test]
+    fn a_rar_last_volume_keys_the_file_continued_into_it() {
+        // video.mkv then info.nfo: the video's last part comes first
+        let mm = rar_last_volume_key(&fixture("mm.part3.head"), true).expect("video key");
+        // info.nfo then video.mkv: still the video, not the nfo
+        let nfo_first =
+            rar_last_volume_key(&fixture("nfo-first.part3.head"), true).expect("video key");
+        assert!(
+            mm.size > 1000 && nfo_first.size > 1000,
+            "{mm:?} {nfo_first:?}"
+        );
+        // a first volume records no final check of a continued file
+        assert_eq!(rar_last_volume_key(&fixture("mm.part1.head"), true), None);
+        // encrypted headers give no key
+        assert_eq!(rar_last_volume_key(&fixture("hp1.part2.head"), true), None);
+        assert_eq!(rar_last_volume_key(b"not a rar", false), None);
     }
 
     #[test]

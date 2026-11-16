@@ -2764,3 +2764,39 @@ fn a_final_set_of_tens_of_thousands_of_members_extracts() {
         );
     }
 }
+
+/// Many volumes with long file names in a short directory: every volume opened and every
+/// publication charges each volume's name, which ran out of NameBytes where the copy path
+/// works. A declared set gets that cost added to its limits too.
+#[test]
+fn a_final_set_of_many_long_named_volumes_extracts() {
+    let t = TestDir::new("longnames");
+    let volumes = 750;
+    let stem = "Some.Long.Descriptive.Release.Name.2026.2160p.UHD.BluRay.REMUX.HDR.HEVC.DTS-HD.MA.7.1-GROUPNAME.and.more";
+    let total = volumes * 4096;
+    let chunk = 4096;
+    let mut whole = crc32fast::Hasher::new();
+    whole.update(&pattern_at(0, total));
+    let whole = whole.finalize();
+    for i in 0..volumes {
+        let part = pattern_at(i * chunk, chunk);
+        let last = i + 1 == volumes;
+        let crc = if last { whole } else { crc32fast::hash(&part) };
+        let mut out = SIG.to_vec();
+        out.extend(main_block(true, if i == 0 { None } else { Some(i as u64) }));
+        out.extend(file_block(
+            "movie.mkv",
+            total as u64,
+            &part,
+            crc,
+            i > 0,
+            !last,
+        ));
+        out.extend(end_block(!last));
+        std::fs::write(t.dl().join(format!("{stem}.part{:03}.rar", i + 1)), &out).unwrap();
+    }
+    let first = t.dl().join(format!("{stem}.part001.rar"));
+    let (r, log) = run(&first, &t.out(), Box::new(CompleteSet));
+    expect_ok(r, &log);
+    assert_eq!(crc_of_file(&t.out().join("movie.mkv")), whole);
+}

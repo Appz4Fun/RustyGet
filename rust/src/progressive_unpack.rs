@@ -396,9 +396,13 @@ where
         .saturating_add(PROTECTED_READ_BUDGET);
     // A set declared at session start gets its estimated protection cost on top, so the
     // declaration never eats the budget the extraction itself needs.
-    if let Some((bookkeeping, metadata)) = declared_cost {
-        opts.limits.source_bookkeeping = opts.limits.source_bookkeeping.saturating_add(bookkeeping);
-        opts.limits.metadata_bytes = opts.limits.metadata_bytes.saturating_add(metadata);
+    if let Some(cost) = declared_cost {
+        opts.limits.source_bookkeeping = opts
+            .limits
+            .source_bookkeeping
+            .saturating_add(cost.bookkeeping);
+        opts.limits.metadata_bytes = opts.limits.metadata_bytes.saturating_add(cost.metadata);
+        opts.limits.name_bytes = opts.limits.name_bytes.saturating_add(cost.names);
     }
     opts.limits.protection_paths = opts.limits.protection_paths.max(volume_count + 16);
     log_cb(
@@ -1669,8 +1673,16 @@ fn fits_protected_read_budget(
     per_check.saturating_mul(steps) <= PROTECTED_READ_BUDGET
 }
 
+/// What declaring a set costs zipfast on top of an undeclared extraction.
+#[derive(Clone, Copy, Debug)]
+struct DeclarationCost {
+    bookkeeping: u64,
+    metadata: u64,
+    names: u64,
+}
+
 /// Whether a final set may be declared at session start, and what declaring costs on top of
-/// an undeclared extraction: (SourceBookkeeping, MetadataBytes). zipfast must place every
+/// an undeclared extraction (SourceBookkeeping, MetadataBytes, NameBytes). zipfast must place every
 /// member where the copy path would (no Windows-made name that Windows rules change, no
 /// duplicate names). Even with the per-step recheck bounded (zipfast #116), every volume
 /// admission sweeps the whole inventory (about 3.3 V^2 (P + 15) bookkeeping units for V
@@ -1683,11 +1695,12 @@ fn session_declaration_cost(
     inventory: &zipfast::progressive::ProtectionInventory,
     first: &Path,
     password: &str,
-) -> Option<(u64, u64)> {
-    /// Largest extra budget granted for a declaration (bookkeeping is CPU work, metadata a
-    /// cumulative accounting of small allocations).
+) -> Option<DeclarationCost> {
+    /// Largest extra budget granted for a declaration (bookkeeping is CPU work, metadata and
+    /// names cumulative accountings of small allocations).
     const MAX_EXTRA_BOOKKEEPING: u64 = 512 * 1024 * 1024;
     const MAX_EXTRA_METADATA: u64 = 256 * 1024 * 1024;
+    const MAX_EXTRA_NAMES: u64 = 256 * 1024 * 1024;
     let members = set_members(first, password)?;
     if members.names_differ || members.duplicate_names {
         return None;
@@ -1703,8 +1716,15 @@ fn session_declaration_cost(
         .map(|pp| pp.path.as_os_str().len() as u64)
         .max()
         .unwrap_or(0);
+    // Longest volume file name: every refresh also compares and charges each volume's name.
+    let n = inventory
+        .volumes
+        .iter()
+        .map(|vol| vol.name.len() as u64)
+        .max()
+        .unwrap_or(0);
     // Margins over the measured costs: 4 for 3.3, 12 for 7-9.
-    let unit = p.saturating_add(16);
+    let unit = p.saturating_add(n.saturating_mul(2)).saturating_add(16);
     let admissions = 4u64
         .saturating_mul(v)
         .saturating_mul(v)
@@ -1715,7 +1735,7 @@ fn session_declaration_cost(
         .saturating_mul(4u64.saturating_add(members.max_depth))
         / 4;
     let bookkeeping = admissions.saturating_add(members.count.saturating_mul(per_member));
-    let wide = p.saturating_add(128);
+    let wide = p.saturating_add(n).saturating_add(128);
     let metadata = v.saturating_mul(v).saturating_mul(wide).saturating_add(
         members.count.saturating_mul(
             4u64.saturating_mul(v)
@@ -1723,8 +1743,20 @@ fn session_declaration_cost(
                 .saturating_add(4u64.saturating_mul(members.max_name)),
         ),
     );
-    (bookkeeping <= MAX_EXTRA_BOOKKEEPING && metadata <= MAX_EXTRA_METADATA)
-        .then_some((bookkeeping, metadata))
+    // Each volume opened and each publication charges every volume's name: V (V + M) N,
+    // granted with margin.
+    let names = 2u64
+        .saturating_mul(v)
+        .saturating_mul(v.saturating_add(4u64.saturating_mul(members.count)))
+        .saturating_mul(n);
+    (bookkeeping <= MAX_EXTRA_BOOKKEEPING
+        && metadata <= MAX_EXTRA_METADATA
+        && names <= MAX_EXTRA_NAMES)
+        .then_some(DeclarationCost {
+            bookkeeping,
+            metadata,
+            names,
+        })
 }
 
 /// Path components of a member's output name (as the copy path names it).

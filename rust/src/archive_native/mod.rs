@@ -1401,16 +1401,67 @@ where
         return Err("archive contains link".to_string());
     }
 
+    // Folder entries, parents first, with the mode of those that already exist: zipfast
+    // applies the archive's folder modes (also when the run fails), so afterwards a folder
+    // that was already there gets its own mode back and a new one keeps owner rwx.
+    let mut folders: Vec<(PathBuf, Option<u32>)> = entries
+        .iter()
+        .flatten()
+        .filter(|e| e.dir)
+        .filter_map(|e| sz_member_rel(&e.name))
+        .map(|rel| {
+            let path = output_dir.join(rel);
+            let before = std::fs::symlink_metadata(&path)
+                .ok()
+                .filter(|m| m.is_dir())
+                .map(|m| {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        m.permissions().mode() & 0o7777
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        let _ = m;
+                        0
+                    }
+                });
+            (path, before)
+        })
+        .collect();
+    folders.sort_by_key(|(p, _)| p.components().count());
+    folders.dedup_by(|a, b| a.0 == b.0);
+    let fix_folders = || {
+        #[cfg(unix)]
+        for (path, before) in &folders {
+            use std::os::unix::fs::PermissionsExt;
+            let Ok(meta) = std::fs::symlink_metadata(path) else {
+                continue;
+            };
+            if !meta.is_dir() {
+                continue;
+            }
+            let mode = meta.permissions().mode() & 0o7777;
+            let wanted = before.unwrap_or(mode | 0o700);
+            if mode != wanted {
+                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(wanted));
+            }
+        }
+    };
+
     let cancel = zipfast::extract::Cancellation::default();
     let breach: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    // AutoRename: files are counted once zipfast has chosen their names (below).
+    // AutoRename: each file is counted, before anything is written, under the name zipfast
+    // will give it (its own rule: the first free `stem_N.ext`, members with the same name
+    // taking the next number each).
     let rename_mode = overwrite_mode == 2;
-    let requested: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
+    let predicted: Arc<Mutex<std::collections::HashSet<PathBuf>>> =
+        Arc::new(Mutex::new(std::collections::HashSet::new()));
     let (tx, rx) = mpsc::channel::<SzMsg>();
 
     let select = {
         let breach = Arc::clone(&breach);
-        let requested = Arc::clone(&requested);
+        let predicted = Arc::clone(&predicted);
         let cancel = cancel.clone();
         let dest = output_dir.to_path_buf();
         let tx = Mutex::new(tx.clone());
@@ -1424,16 +1475,41 @@ where
                 return true;
             };
             let admitted = if rename_mode && !m.is_dir {
-                // The folders now; the file under the name zipfast picks, after the run.
-                requested
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .push(dest.join(&rel));
-                match rel.parent() {
-                    Some(parent) if !parent.as_os_str().is_empty() => sz_admit(&dest, parent, true),
-                    _ => Ok(()),
+                let mut claimed = predicted.lock().unwrap_or_else(|p| p.into_inner());
+                let wanted = dest.join(&rel);
+                let taken = |p: &Path| claimed.contains(p) || std::fs::symlink_metadata(p).is_ok();
+                let fname = wanted
+                    .file_name()
+                    .map(|n| n.to_os_string())
+                    .unwrap_or_default();
+                let target = if !taken(&wanted) {
+                    Some(wanted.clone())
+                } else {
+                    (1..=zipfast::extract::RENAME_LIMIT)
+                        .map(|n| {
+                            wanted.with_file_name(zipfast::extract::renamed_name(
+                                &fname,
+                                n,
+                                zipfast::extract::RenameStyle::Underscore,
+                            ))
+                        })
+                        .find(|p| !taken(p))
+                };
+                match target {
+                    // zipfast fails such a member itself.
+                    None => Ok(()),
+                    Some(target) => {
+                        let res = match rel.parent() {
+                            Some(parent) if !parent.as_os_str().is_empty() => {
+                                sz_admit(&dest, parent, true)
+                            }
+                            _ => Ok(()),
+                        }
+                        .and_then(|()| crate::unpacklimits::check(&target, false));
+                        claimed.insert(target);
+                        res
+                    }
                 }
-                .and_then(|()| crate::unpacklimits::probe(&dest.join(&rel), false))
             } else {
                 sz_admit(&dest, &rel, m.is_dir)
             };
@@ -1497,6 +1573,9 @@ where
         })
     });
 
+    // Whatever the outcome: zipfast set the folder modes before it returned.
+    fix_folders();
+
     if let Some(msg) = breach.lock().unwrap_or_else(|p| p.into_inner()).take() {
         log_cb(1, &msg);
         return Err(msg);
@@ -1521,53 +1600,22 @@ where
         }
     };
 
-    // AutoRename: each file counts under the name zipfast finally gave it.
+    // AutoRename: a name zipfast chose differently from the prediction (something appeared
+    // in the folder meanwhile) is counted now.
     if rename_mode {
-        let renamed: Vec<(PathBuf, PathBuf)> = summary
-            .renames
-            .iter()
-            .map(|r| {
-                let abs = |p: &Path| {
-                    if p.is_absolute() {
-                        p.to_path_buf()
-                    } else {
-                        output_dir.join(p)
-                    }
-                };
-                (abs(&r.requested), abs(&r.path))
-            })
-            .collect();
-        let requested = std::mem::take(&mut *requested.lock().unwrap_or_else(|p| p.into_inner()));
-        let mut finals: Vec<PathBuf> = requested
-            .into_iter()
-            .filter(|req| !renamed.iter().any(|(r, _)| r == req))
-            .filter(|p| p.is_file())
-            .collect();
-        finals.extend(renamed.into_iter().map(|(_, path)| path));
-        for path in finals {
-            if let Err(msg) = crate::unpacklimits::check(&path, false) {
-                let _ = std::fs::remove_file(&path);
-                log_cb(1, &msg);
-                return Err(msg);
-            }
-        }
-    }
-
-    // zipfast applies the folder modes stored in the archive; a folder RustyGet cannot write
-    // into would break the nested unpack and cleanup that run before permissions are
-    // normalized, so every extracted folder keeps owner rwx.
-    #[cfg(unix)]
-    for e in entries.iter().flatten().filter(|e| e.dir) {
-        use std::os::unix::fs::PermissionsExt;
-        let Some(rel) = sz_member_rel(&e.name) else {
-            continue;
-        };
-        let path = output_dir.join(rel);
-        if let Ok(meta) = std::fs::symlink_metadata(&path) {
-            let mode = meta.permissions().mode() & 0o7777;
-            if meta.is_dir() && mode & 0o700 != 0o700 {
-                let _ =
-                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode | 0o700));
+        let predicted = std::mem::take(&mut *predicted.lock().unwrap_or_else(|p| p.into_inner()));
+        for r in &summary.renames {
+            let path = if r.path.is_absolute() {
+                r.path.clone()
+            } else {
+                output_dir.join(&r.path)
+            };
+            if !predicted.contains(&path) {
+                if let Err(msg) = crate::unpacklimits::check(&path, false) {
+                    let _ = std::fs::remove_file(&path);
+                    log_cb(1, &msg);
+                    return Err(msg);
+                }
             }
         }
     }
@@ -3966,6 +4014,94 @@ mod tests {
         assert_eq!(std::fs::read(out.join("a.txt")).unwrap(), b"downloaded");
         assert_eq!(std::fs::read(out.join("a_1.txt")).unwrap(), b"new a");
         assert_eq!(std::fs::read(out.join("b.txt")).unwrap(), b"b");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_7z_folder_modes_after_failure_and_for_existing_folders() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempTestDir::new("7z_folder_modes");
+        let mode_of = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o7777;
+
+        // zipfast sets the stored 0555 even when the run then fails; the folder must still be
+        // writable for a retry. (A cancel can land before zipfast makes the folder, so the
+        // mode is checked only when it exists; `fix_folders` runs before every return.)
+        let big = vec![0x11u8; 8 << 20];
+        let ro = build_7z(&[
+            ("ro", None, Some(sz_unix_attrs(0o40555, true))),
+            ("ro/big.bin", Some(&big), None),
+        ]);
+        let ro_path = dir.path().join("ro.7z");
+        std::fs::write(&ro_path, &ro).unwrap();
+        let out = dir.path().join("ro_out");
+        let mut polls = 0u32;
+        let err = extract_7z_cancellable(&ro_path, &out, "", 1, &mut |_, _| {}, &mut || {
+            polls += 1;
+            polls > 2
+        })
+        .unwrap_err();
+        assert_eq!(err, "7-Zip: Aborted");
+        if out.join("ro").is_dir() {
+            assert_eq!(mode_of(&out.join("ro")) & 0o700, 0o700);
+        }
+        // The retry into the same folder works.
+        extract_7z_cancellable(&ro_path, &out, "", 1, &mut |_, _| {}, &mut || false).unwrap();
+        assert_eq!(std::fs::read(out.join("ro").join("big.bin")).unwrap(), big);
+
+        // A folder that was already there keeps its own mode.
+        let w = build_7z(&[
+            ("w", None, Some(sz_unix_attrs(0o40777, true))),
+            ("w/f.txt", Some(b"f"), None),
+        ]);
+        let w_path = dir.path().join("w.7z");
+        std::fs::write(&w_path, &w).unwrap();
+        let out = dir.path().join("w_out");
+        std::fs::create_dir_all(out.join("w")).unwrap();
+        std::fs::set_permissions(out.join("w"), std::fs::Permissions::from_mode(0o750)).unwrap();
+        extract_7z_cancellable(&w_path, &out, "", 1, &mut |_, _| {}, &mut || false).unwrap();
+        assert_eq!(mode_of(&out.join("w")), 0o750);
+    }
+
+    #[test]
+    fn test_7z_auto_rename_limits_apply_before_writing() {
+        use crate::unpacklimits::{Guard, Limits, Scope};
+        use std::sync::{Arc, Mutex};
+        let dir = TempTestDir::new("7z_rename_limits");
+        let one = Limits {
+            max_files: 1,
+            max_depth: 2,
+            max_folders: 10,
+        };
+        let run = |name: &str, entries: &[(&str, Option<&[u8]>, Option<u32>)]| {
+            let path = dir.path().join(format!("{name}.7z"));
+            std::fs::write(&path, build_7z(entries)).unwrap();
+            let out = dir.path().join(name);
+            std::fs::create_dir_all(&out).unwrap();
+            let g = Arc::new(Mutex::new(Guard::new(one, &out, &[])));
+            let res = {
+                let _scope = Scope::enter(&g);
+                extract_7z_cancellable(&path, &out, "", 2, &mut |_, _| {}, &mut || false)
+            };
+            (res, out)
+        };
+        // Over the limit: refused before any file is written.
+        let (res, out) = run(
+            "four",
+            &[
+                ("a.txt", Some(b"a"), None),
+                ("b.txt", Some(b"b"), None),
+                ("c.txt", Some(b"c"), None),
+            ],
+        );
+        assert!(res.unwrap_err().contains("more than 1 files"));
+        assert_eq!(std::fs::read_dir(&out).unwrap().count(), 0);
+        // Two members with the same name are two files.
+        let (res, out) = run(
+            "dupes",
+            &[("a.txt", Some(b"1"), None), ("a.txt", Some(b"2"), None)],
+        );
+        assert!(res.unwrap_err().contains("more than 1 files"));
+        assert_eq!(std::fs::read_dir(&out).unwrap().count(), 0);
     }
 
     #[test]

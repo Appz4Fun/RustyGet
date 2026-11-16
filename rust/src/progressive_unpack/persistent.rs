@@ -689,12 +689,16 @@ impl<'a> Run<'a> {
                     .is_ok_and(|r| r == rel)
             });
             set_copy_path_mode(&from, member.and_then(|m| m.meta.unix_mode));
-            let to = self.req.dest.join(rel);
-            if let Some(parent) = to.parent() {
-                // Folders as the copy path makes them (0777 less the umask).
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("{}: {e}", parent.display()))?;
-            }
+            // Folders as the copy path makes them: never through a symlink, mode 0777 less the
+            // umask.
+            let to = match rel.parent().filter(|p| !p.as_os_str().is_empty()) {
+                Some(parent_rel) => {
+                    let dir =
+                        crate::archive_native::create_dir_all_no_follow(self.req.dest, parent_rel)?;
+                    dir.join(rel.file_name().unwrap_or_default())
+                }
+                None => self.req.dest.join(rel),
+            };
             std::fs::rename(&from, &to).map_err(|e| format!("{}: {e}", to.display()))?;
         }
         remove_state_root(&self.plan.root);

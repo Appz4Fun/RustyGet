@@ -3989,8 +3989,9 @@ def scenario_skipholetwin(daemon, t):
 
 
 def scenario_persistdeadprimary(daemon, t):
-    """The primary dies mid-download: from the middle of the second volume on,
-    none of its articles exist. A byte-identical twin waits in history. Direct
+    """The primary loses articles mid-download: two articles in the middle of
+    the second volume and one in the third. A byte-identical twin waits in
+    history. Direct
     unpack writes movie.mkv once as a persistent partial file and keeps it: the
     lost ranges are holes (or the session waits on a volume whose headers are
     lost), stream repair fills the volumes from the twin, and only the holes are

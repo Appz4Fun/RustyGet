@@ -3574,3 +3574,25 @@ fn a_failed_persistent_run_keeps_a_pre_existing_empty_folder() {
     assert!(t.out().join("release").is_dir());
     assert!(!t.out().join(persistent::STATE_DIR).exists());
 }
+
+#[cfg(unix)]
+#[test]
+fn publishing_never_follows_a_symlinked_folder_in_the_destination() {
+    let t = TestDir::new("persist_symlinkdir");
+    let elsewhere = t.0.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, t.out().join("Release")).unwrap();
+    let data = pattern(300_000);
+    let vols = rar5_volumes("Release/movie.mkv", &data, 100_000);
+    let first = write_set(&t.dl(), &vols);
+    let damaged = Damaged {
+        holes: Vec::new(),
+        repair: Vec::new(),
+        handed: false,
+    };
+    let (r, log) = run_downloading(&first, &t.out(), damaged, vols.len() as u64);
+    // As the copy path: refused, and nothing written outside the destination.
+    assert!(r.is_err(), "{log:?}");
+    assert!(!elsewhere.join("movie.mkv").exists());
+    assert!(!t.out().join(persistent::STATE_DIR).exists());
+}

@@ -34,6 +34,9 @@ use zipfast::progressive::{
 /// 6790); #116 bounds the per-step recheck. `big_final_set_unpacks` is the gate.
 const DECLARE_PROTECTION: bool = true;
 
+mod anchors;
+mod persistent;
+
 /// How long the driver sleeps between cancellation checks while the session is parked.
 const PARK_SLICE: Duration = Duration::from_millis(50);
 /// Largest patch zipfast accepts in one call.
@@ -315,6 +318,19 @@ where
     // A complete set is declared to zipfast up front when its estimated cost fits. Should a
     // declared session still run out of one of zipfast's limits, the set is extracted again
     // undeclared (copied into place), as before declarations: never a failed unpack.
+    // A set still downloading goes to persistent partial files when it qualifies.
+    let feed = if persistent::enabled() && outputs.is_none() && !feed.set_is_final() {
+        match persistent::try_extract(req, feed, log_cb, is_cancelled) {
+            persistent::Outcome::Done(r) => return r,
+            persistent::Outcome::Fallback(feed, why) => {
+                log_cb(3, &format!("Unrar: progressive direct unpack ({why})"));
+                feed
+            }
+        }
+    } else {
+        persistent::forget_state(req);
+        feed
+    };
     let mut declared = false;
     let first = extract_once(
         req,
@@ -2149,6 +2165,8 @@ struct HoledVolume {
     file: std::fs::File,
     info: SourceInfo,
     holes: Vec<(u64, u64)>,
+    /// Whether zipfast sees `file` as the volume's backing (false when it is declared NonFile).
+    expose_backing: bool,
 }
 
 impl HoledVolume {
@@ -2177,6 +2195,7 @@ impl HoledVolume {
                 length: zipfast::progressive::SourceLength::Final(len),
             },
             holes,
+            expose_backing: true,
         })
     }
 }
@@ -2186,7 +2205,11 @@ impl RangeSource for HoledVolume {
         self.info
     }
     fn backing_files(&self) -> &[std::fs::File] {
-        std::slice::from_ref(&self.file)
+        if self.expose_backing {
+            std::slice::from_ref(&self.file)
+        } else {
+            &[]
+        }
     }
     fn read_at(
         &mut self,

@@ -1019,6 +1019,7 @@ dependencies = [
  "getrandom",
  "libc",
  "liblzma",
+ "serde",
  "subtle",
  "tempfile",
  "zip-container",

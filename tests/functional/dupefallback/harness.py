@@ -3929,7 +3929,7 @@ def scenario_prodrarstream(daemon, t):
             'status=%s par=%s unpack=%s extracted_ok=%s' % (h['Status'], h['ParStatus'], h['UnpackStatus'], ok))
 
 
-def _skiphole_rar(daemon, t, tag, donor, recovery):
+def _skiphole_rar(daemon, t, tag, donor, recovery, damage=None):
     """Production options with direct unpack; a 4-volume store-mode rar set of
     movie.mkv whose second volume loses one article in its middle. With
     ``donor`` a byte-identical repost waits in history (marked dead, so only
@@ -3946,7 +3946,8 @@ def _skiphole_rar(daemon, t, tag, donor, recovery):
     names = ['Rel.part%02d.rar' % (i + 1) for i in range(len(vols))]
     for name, data in zip(names, vols):
         t.write_file(os.path.join('data', tag + 'A', name), data)
-    damage = {1: {3}}                       # bytes 600,000-899,999 of volume 2: past its headers
+    if damage is None:
+        damage = {1: {3}}                   # bytes 600,000-899,999 of volume 2: past its headers
     members = [('%sA/%s' % (tag, n), n, len(d), seg, damage.get(i, set()))
                for i, (n, d) in enumerate(zip(names, vols))]
     if recovery:
@@ -3985,6 +3986,23 @@ def scenario_skipholetwin(daemon, t):
     from the repaired volume, verified and moved into place."""
     good, detail = _skiphole_rar(daemon, t, 'SHT', donor=True, recovery=False)
     return ('skipholetwin', good, detail)
+
+
+def scenario_persistdeadprimary(daemon, t):
+    """The primary loses articles mid-download: two articles in the middle of
+    the second volume and one in the third. A byte-identical twin waits in
+    history. Direct
+    unpack writes movie.mkv once as a persistent partial file and keeps it: the
+    lost ranges are holes (or the session waits on a volume whose headers are
+    lost), stream repair fills the volumes from the twin, and only the holes are
+    read back. Never restarted, never copied, byte-identical."""
+    dead = {1: {2, 3}, 2: {2}}
+    good, detail = _skiphole_rar(daemon, t, 'PDP', donor=True, recovery=False, damage=dead)
+    started = _grep_log(t, 'direct unpack into persistent partial files')
+    fell_back = _grep_log(t, 'progressive direct unpack (')
+    status_ok = 'status=SUCCESS' in detail and 'extracted_ok=True' in detail
+    ok = status_ok and started == 1 and fell_back == 0
+    return ('persistdeadprimary', ok, '%s persistent_starts=%d fallbacks=%d' % (detail, started, fell_back))
 
 
 def scenario_skipholepar(daemon, t):
@@ -10320,6 +10338,7 @@ SCENARIOS = {
     'prodrarwhole': scenario_prodrarwhole,
     'prodrarstream': scenario_prodrarstream,
     'skipholetwin': scenario_skipholetwin,
+    'persistdeadprimary': scenario_persistdeadprimary,
     'rar4lzdirect': scenario_rar4lzdirect,
     'skipholepar': scenario_skipholepar,
     'wholefileonly': scenario_wholefileonly,
@@ -10370,6 +10389,12 @@ EXPECTED_HISTORY_STATUS = {
 # tool to shell out to; empty when none was found (the scenarios themselves
 # SKIP in that case, see generators.HAVE_7Z).
 _SEVENZIP_OPTION = ['SevenZipCmd=%s' % generators.SEVENZIP_PATH] if generators.HAVE_7Z else []
+
+# Environment variables the daemon of a scenario runs with (others are cleared).
+SCENARIO_ENV = {
+    'persistdeadprimary': {'RUSTYGET_PERSISTENT_UNPACK': '1'},
+}
+SCENARIO_ENV_KEYS = sorted({k for env in SCENARIO_ENV.values() for k in env})
 
 SCENARIO_OPTIONS = {
     'watchforcepick': ['DupeArticleFallback=no', 'DupeWatch=yes', 'DupeBodyChecks=0', 'DupeHealthMin=40', 'DupeHealthMax=40'],
@@ -10665,6 +10690,7 @@ SCENARIO_OPTIONS = {
     # throttled so direct unpack reaches the damaged volume before its repair lands
     'skipholetwin': PROD_OPTIONS + ['DownloadRate=1500'],
     'skipholepar': PROD_OPTIONS + ['DownloadRate=1500'],
+    'persistdeadprimary': PROD_OPTIONS + ['DownloadRate=1500'],
     'wholefileonly': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'wholefilewrongdonor': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'wholefilenofirst': ['DupeArticleFallback=stream', 'ParCheck=auto'],
@@ -10812,6 +10838,9 @@ def main():
             results.append((name, None, 'SKIP: target-side archive extractor is not provisioned on Android'))
             print('[SKIP] %s  (target-side archive extractor is not provisioned on Android)' % name)
             continue
+        for key in SCENARIO_ENV_KEYS:
+            os.environ.pop(key, None)
+        os.environ.update(SCENARIO_ENV.get(name, {}))
         nntp = free_port()
         rpc = free_port()
         while rpc == nntp:  # the two must not coincide

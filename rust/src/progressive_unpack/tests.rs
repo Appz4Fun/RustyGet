@@ -2842,3 +2842,1032 @@ fn only_limits_a_declaration_inflates_trigger_the_undeclared_retry() {
     ));
     assert!(!is_declaration_limit("checksum mismatch"));
 }
+
+/// A download in progress (not final) with a known volume count and optional holes that the
+/// repair fills in place, as the fleet does from par2 or a twin's articles.
+struct Downloading {
+    damaged: Damaged,
+    volumes: u64,
+}
+
+impl VolumeFeed for Downloading {
+    fn volume(&mut self, path: &Path) -> VolumeView {
+        self.damaged.volume(path)
+    }
+    fn wait_repaired(&mut self, c: &mut dyn FnMut() -> bool) -> bool {
+        self.damaged.wait_repaired(c)
+    }
+    fn expected_volumes(&self) -> u64 {
+        self.volumes
+    }
+}
+
+fn run_downloading(
+    first: &Path,
+    out: &Path,
+    damaged: Damaged,
+    volumes: u64,
+) -> (Result<zipfast::extract::Summary, Error>, Vec<String>) {
+    let mut log = Vec::new();
+    let req = Request {
+        first_volume: first,
+        dest: out,
+        password: "",
+        overwrite: Overwrite::Always,
+        on_wait: None,
+    };
+    let r = extract(
+        &req,
+        Box::new(Downloading { damaged, volumes }),
+        &mut |_, m: &str| log.push(m.to_string()),
+        &mut || false,
+    );
+    (r, log)
+}
+
+/// The persistent path ran to the end (started and never fell back).
+fn persistent(log: &[String]) -> bool {
+    log.iter().any(|l| l.contains("persistent partial files"))
+        && !log
+            .iter()
+            .any(|l| l.contains("progressive direct unpack ("))
+}
+
+#[test]
+fn a_downloading_stored_set_extracts_into_persistent_partial_files() {
+    let t = TestDir::new("persist_clean");
+    let data = pattern(600_000);
+    let vols = rar5_volumes("movie.mkv", &data, 100_000);
+    let first = write_set(&t.dl(), &vols);
+    let damaged = Damaged {
+        holes: Vec::new(),
+        repair: Vec::new(),
+        handed: false,
+    };
+    let (r, log) = run_downloading(&first, &t.out(), damaged, vols.len() as u64);
+    expect_ok(r, &log);
+    assert!(persistent(&log), "{log:?}");
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+    assert!(!t.out().join(persistent::STATE_DIR).exists());
+    #[cfg(unix)]
+    assert_eq!(mode_of(&t.out().join("movie.mkv")), 0o644);
+}
+
+#[test]
+fn holes_in_a_persistent_output_are_refilled_from_the_repaired_volumes() {
+    // A primary that died mid-download: two volumes lost ranges, which the fleet later writes
+    // into the volume files. The output is never recreated; only the holes are read back.
+    let t = TestDir::new("persist_holes");
+    let data = pattern(600_000);
+    let chunk = 100_000;
+    let vols = rar5_volumes("movie.mkv", &data, chunk);
+    let first = write_set(&t.dl(), &vols);
+    let mut holes = Vec::new();
+    let mut repair = Vec::new();
+    for i in [1usize, 3] {
+        let path = t.dl().join(volume_name(i, vols.len()));
+        let p = payload_offset(&vols[i], chunk) as u64;
+        let mut dmg = vols[i].clone();
+        dmg[(p + 10_000) as usize..(p + 30_000) as usize].fill(0);
+        std::fs::write(&path, &dmg).unwrap();
+        holes.push((path.clone(), vec![(p + 10_000, 20_000)]));
+        repair.push((path, vols[i].clone()));
+    }
+    let damaged = Damaged {
+        holes,
+        repair,
+        handed: false,
+    };
+    let (r, log) = run_downloading(&first, &t.out(), damaged, vols.len() as u64);
+    expect_ok(r, &log);
+    assert!(persistent(&log), "{log:?}");
+    assert!(log.iter().any(|l| l.contains("has a hole")), "{log:?}");
+    assert!(
+        log.iter().any(|l| l.contains("from the repaired volumes")),
+        "{log:?}"
+    );
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+    assert!(!t.out().join(persistent::STATE_DIR).exists());
+}
+
+#[test]
+fn an_unknown_volume_count_uses_the_progressive_path() {
+    let t = TestDir::new("persist_nocount");
+    let data = pattern(300_000);
+    let vols = rar5_volumes("movie.mkv", &data, 100_000);
+    let first = write_set(&t.dl(), &vols);
+    let damaged = Damaged {
+        holes: Vec::new(),
+        repair: Vec::new(),
+        handed: false,
+    };
+    let (r, log) = run_downloading(&first, &t.out(), damaged, 0);
+    expect_ok(r, &log);
+    assert!(!persistent(&log), "{log:?}");
+    assert!(
+        log.iter().any(|l| l.contains("volume count unknown")),
+        "{log:?}"
+    );
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+}
+
+fn run_downloading_pw(
+    first: &Path,
+    out: &Path,
+    password: &str,
+    damaged: Damaged,
+    volumes: u64,
+) -> (Result<zipfast::extract::Summary, Error>, Vec<String>) {
+    run_pw(
+        first,
+        out,
+        password,
+        Box::new(Downloading { damaged, volumes }),
+    )
+}
+
+#[test]
+fn a_downloading_encrypted_rar5_set_refills_its_holes() {
+    // Encrypted data (AES-256-CBC), plain headers: holes mid-volume, at a volume start and
+    // in the final padding, refilled across CBC neighbours.
+    for (label, vol, off, len) in [
+        ("mid", 1usize, 10_007u64, 2_000u64),
+        ("start", 2, 0, 3_000),
+        ("pad", 3, 0, 0),
+    ] {
+        let t = TestDir::new(&format!("persist_aes_{label}"));
+        let data = pattern(320_000 - 5);
+        let (vols, offs) = rar5_aes_data_volumes("movie.mkv", &data, 80_000, "pw");
+        let first = write_set(&t.dl(), &vols);
+        let vol = vol.min(vols.len() - 1);
+        let len = if len == 0 {
+            (vols[vol].len() - offs[vol]) as u64 - 16 - 8
+        } else {
+            len
+        };
+        let v = t.dl().join(volume_name(vol, vols.len()));
+        let p = offs[vol] as u64 + off;
+        let mut dmg = vols[vol].clone();
+        dmg[p as usize..(p + len) as usize].fill(0);
+        std::fs::write(&v, &dmg).unwrap();
+        let damaged = Damaged {
+            holes: vec![(v.clone(), vec![(p, len)])],
+            repair: vec![(v, vols[vol].clone())],
+            handed: false,
+        };
+        let (r, log) = run_downloading_pw(&first, &t.out(), "pw", damaged, vols.len() as u64);
+        expect_ok(r, &log);
+        assert!(persistent(&log), "{label}: {log:?}");
+        assert_eq!(
+            std::fs::read(t.out().join("movie.mkv")).unwrap(),
+            data,
+            "{label}"
+        );
+    }
+}
+
+/// A RAR5 set with encrypted data and plain headers.
+fn rar5_aes_data_volumes(
+    name: &str,
+    data: &[u8],
+    chunk: usize,
+    password: &str,
+) -> (Vec<Vec<u8>>, Vec<usize>) {
+    let key = zipfast::crypto::derive_rar5_key_and_hash_key(password, 1, &RAR5_SALT, None)
+        .unwrap()
+        .0;
+    let mut padded = data.to_vec();
+    padded.resize(data.len().next_multiple_of(16), 0);
+    let cipher = zipfast::crypto::encrypt_cbc(&key, &RAR5_IV, &padded).unwrap();
+    let parts: Vec<&[u8]> = cipher.chunks(chunk).collect();
+    let n = parts.len();
+    let mut vols = Vec::new();
+    let mut offsets = Vec::new();
+    for (i, part) in parts.iter().enumerate() {
+        let last = i + 1 == n;
+        let mut v = SIG.to_vec();
+        v.extend(main_block(true, (i > 0).then_some(i as u64)));
+        let crc = if last {
+            crc32fast::hash(data)
+        } else {
+            crc32fast::hash(part)
+        };
+        v.extend(rar5_enc_file_header(
+            name,
+            part.len() as u64,
+            data.len() as u64,
+            crc,
+            i > 0,
+            !last,
+        ));
+        offsets.push(v.len());
+        v.extend_from_slice(part);
+        v.extend(end_block(!last));
+        vols.push(v);
+    }
+    (vols, offsets)
+}
+
+#[test]
+fn a_downloading_rar4_stored_set_refills_its_holes() {
+    let t = TestDir::new("persist_rar4");
+    let data = pattern(250_000);
+    let vols = rar4_store_volumes("movie.mkv", &data, 60_000);
+    let first = write_named(&t.dl(), &vols, rar4_name);
+    // Damage the middle of the second volume's payload.
+    let v2 = t.dl().join(rar4_name(1));
+    let len = vols[1].len();
+    let (a, b) = (len - 30_000, len - 25_000);
+    let mut dmg = vols[1].clone();
+    dmg[a..b].fill(0);
+    std::fs::write(&v2, &dmg).unwrap();
+    let damaged = Damaged {
+        holes: vec![(v2.clone(), vec![(a as u64, (b - a) as u64)])],
+        repair: vec![(v2, vols[1].clone())],
+        handed: false,
+    };
+    let (r, log) = run_downloading_pw(&first, &t.out(), "", damaged, vols.len() as u64);
+    expect_ok(r, &log);
+    assert!(persistent(&log), "{log:?}");
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+}
+
+#[test]
+fn a_downloading_rar4_aes_set_falls_back_and_extracts() {
+    // Encrypted RAR4 stored members are refused by persistent sessions.
+    let t = TestDir::new("persist_rar4aes");
+    let data = pattern(250_000);
+    let vols = rar4_aes_store_volumes("movie.mkv", &data, 60_000, "pw");
+    let first = write_named(&t.dl(), &vols, rar4_name);
+    let damaged = Damaged {
+        holes: Vec::new(),
+        repair: Vec::new(),
+        handed: false,
+    };
+    let (r, log) = run_downloading_pw(&first, &t.out(), "pw", damaged, vols.len() as u64);
+    expect_ok(r, &log);
+    assert!(
+        log.iter()
+            .any(|l| l.contains("Unrar: progressive direct unpack (")),
+        "{log:?}"
+    );
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+    assert!(!t.out().join(persistent::STATE_DIR).exists());
+}
+
+#[test]
+fn an_existing_output_is_replaced_as_in_overwrite_mode() {
+    // The persistent session writes into its own stage; verified outputs replace what is in
+    // the destination, as the copy path does in overwrite mode.
+    let t = TestDir::new("persist_exists");
+    let data = pattern(300_000);
+    let vols = rar5_volumes("movie.mkv", &data, 100_000);
+    let first = write_set(&t.dl(), &vols);
+    std::fs::write(t.out().join("movie.mkv"), b"old").unwrap();
+    let damaged = Damaged {
+        holes: Vec::new(),
+        repair: Vec::new(),
+        handed: false,
+    };
+    let (r, log) = run_downloading(&first, &t.out(), damaged, vols.len() as u64);
+    expect_ok(r, &log);
+    assert!(persistent(&log), "{log:?}");
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+    assert!(!t.out().join(persistent::STATE_DIR).exists());
+}
+
+/// As `big_final_set_unpacks`, for a download in progress with one lost range mid-set: the
+/// persistent path stays persistent (no zipfast limit) and refills the hole.
+#[test]
+fn big_downloading_set_unpacks() {
+    // 256 MB by default: a persistent session syncs every write, slow on macOS CI.
+    let total = big_mb(256) << 20;
+    let volumes = 159;
+    let t = TestDir::new("big_downloading");
+    let (first, layout, crc) = write_big_set(&t.dl(), total, volumes);
+    let k = volumes / 2;
+    let path = t.dl().join(volume_name(k, volumes));
+    let good = std::fs::read(&path).unwrap();
+    let at = layout[k].0 + 1000;
+    let mut dmg = good.clone();
+    dmg[at..at + 100_000].fill(0);
+    std::fs::write(&path, &dmg).unwrap();
+    let damaged = Damaged {
+        holes: vec![(path.clone(), vec![(at as u64, 100_000)])],
+        repair: vec![(path, good)],
+        handed: false,
+    };
+    let (r, log) = run_downloading(&first, &t.out(), damaged, volumes as u64);
+    expect_ok(r, &log);
+    assert!(persistent(&log), "{log:?}");
+    assert!(
+        !log.iter()
+            .any(|l| l.contains("progressive direct unpack (")),
+        "{log:?}"
+    );
+    assert_eq!(crc_of_file(&t.out().join("movie.mkv")), crc);
+}
+
+/// Times one large stored member (RG_BIG_MB, default 15000) through the persistent path and
+/// through the progressive copy path. `cargo test --release --lib big_member_timing --
+/// --ignored --nocapture`.
+#[test]
+#[ignore]
+fn big_member_timing() {
+    let total = big_mb(15_000) << 20;
+    let volumes: usize = std::env::var("RG_BIG_VOLS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(159);
+    let t = TestDir::new("big_timing");
+    let (first, _, crc) = write_big_set(&t.dl(), total, volumes);
+    // Skip mode keeps the progressive copy path (the persistent path needs overwrite mode)
+    // with the same volume count and handle budget.
+    for (label, overwrite) in [("persistent", Overwrite::Always), ("copy", Overwrite::Skip)] {
+        let out = t.0.join(format!("out-{label}"));
+        std::fs::create_dir_all(&out).unwrap();
+        let feed = Downloading {
+            damaged: Damaged {
+                holes: Vec::new(),
+                repair: Vec::new(),
+                handed: false,
+            },
+            volumes: volumes as u64,
+        };
+        let req = Request {
+            first_volume: &first,
+            dest: &out,
+            password: "",
+            overwrite,
+            on_wait: None,
+        };
+        let mut log = Vec::new();
+        let started = std::time::Instant::now();
+        let r = extract(
+            &req,
+            Box::new(feed),
+            &mut |_, m: &str| log.push(m.to_string()),
+            &mut || false,
+        );
+        let secs = started.elapsed().as_secs_f64();
+        expect_ok(r, &log);
+        assert_eq!(persistent(&log), overwrite == Overwrite::Always, "{log:?}");
+        assert_eq!(crc_of_file(&out.join("movie.mkv")), crc);
+        eprintln!(
+            "BIG_TIMING {label} mb={} volumes={volumes} secs={secs:.1}",
+            total >> 20
+        );
+        std::fs::remove_dir_all(&out).unwrap();
+    }
+}
+
+#[test]
+fn unrepaired_holes_in_a_persistent_output_leave_nothing_behind() {
+    struct NoRepair(Damaged, u64);
+    impl VolumeFeed for NoRepair {
+        fn volume(&mut self, path: &Path) -> VolumeView {
+            self.0.volume(path)
+        }
+        fn wait_repaired(&mut self, _c: &mut dyn FnMut() -> bool) -> bool {
+            false
+        }
+        fn expected_volumes(&self) -> u64 {
+            self.1
+        }
+    }
+    let t = TestDir::new("persist_norepair");
+    let data = pattern(600_000);
+    let chunk = 100_000;
+    let vols = rar5_volumes("movie.mkv", &data, chunk);
+    let first = write_set(&t.dl(), &vols);
+    let path = t.dl().join(volume_name(2, vols.len()));
+    let p = payload_offset(&vols[2], chunk) as u64;
+    let mut dmg = vols[2].clone();
+    dmg[(p + 10_000) as usize..(p + 30_000) as usize].fill(0);
+    std::fs::write(&path, &dmg).unwrap();
+    let feed = NoRepair(
+        Damaged {
+            holes: vec![(path, vec![(p + 10_000, 20_000)])],
+            repair: Vec::new(),
+            handed: false,
+        },
+        vols.len() as u64,
+    );
+    let (r, log) = run(&first, &t.out(), Box::new(feed));
+    assert!(
+        matches!(r, Err(Error::Failed(Failure::Damaged(_)))),
+        "{log:?}"
+    );
+    assert!(!t.out().join("movie.mkv").exists(), "{log:?}");
+    assert!(!t.out().join(persistent::STATE_DIR).exists());
+}
+
+#[test]
+fn a_downloading_member_without_checksum_extracts() {
+    let t = TestDir::new("persist_nocrc");
+    let data = pattern(50_000);
+    let mut v = SIG.to_vec();
+    v.extend(main_block(false, None));
+    v.extend(file_block_no_crc("a.bin", &data));
+    v.extend(end_block(false));
+    let first = t.dl().join("set.rar");
+    std::fs::write(&first, &v).unwrap();
+    let damaged = Damaged {
+        holes: Vec::new(),
+        repair: Vec::new(),
+        handed: false,
+    };
+    let (r, log) = run_downloading(&first, &t.out(), damaged, 1);
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("a.bin")).unwrap(), data);
+    assert!(!t.out().join(persistent::STATE_DIR).exists());
+}
+
+#[test]
+fn a_persistent_output_gets_the_copy_path_mode() {
+    for (stored, want) in [(0o444u64, 0o644u32), (0o400, 0o600), (0o755, 0o755)] {
+        RAR5_HOST.with(|h| h.set((1, stored)));
+        let t = TestDir::new(&format!("persist_mode_{stored:o}"));
+        let data = pattern(300_000);
+        let vols = rar5_volumes("movie.mkv", &data, 100_000);
+        RAR5_HOST.with(|h| h.set((1, 0o644)));
+        let first = write_set(&t.dl(), &vols);
+        let damaged = Damaged {
+            holes: Vec::new(),
+            repair: Vec::new(),
+            handed: false,
+        };
+        let (r, log) = run_downloading(&first, &t.out(), damaged, vols.len() as u64);
+        expect_ok(r, &log);
+        assert!(persistent(&log), "{log:?}");
+        #[cfg(unix)]
+        assert_eq!(
+            mode_of(&t.out().join("movie.mkv")),
+            want,
+            "stored {stored:o}"
+        );
+    }
+}
+
+// Leftover checks from the second review of the persistent path.
+fn files_under(root: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap().flatten() {
+            let p = e.path();
+            out.push(p.strip_prefix(root).unwrap().to_string_lossy().into_owned());
+            if p.is_dir() {
+                stack.push(p);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+#[test]
+fn a_cancel_right_after_a_member_starts_leaves_nothing() {
+    let t = TestDir::new("persist_cancel");
+    let data = pattern(600_000);
+    let vols = rar5_volumes("Release/movie.mkv", &data, 100_000);
+    let first = write_set(&t.dl(), &vols);
+    let damaged = Damaged {
+        holes: vec![],
+        repair: vec![],
+        handed: false,
+    };
+    let flag = std::cell::Cell::new(false);
+    let mut log = Vec::new();
+    let out = t.out();
+    let req = Request {
+        first_volume: &first,
+        dest: &out,
+        password: "",
+        overwrite: Overwrite::Always,
+        on_wait: None,
+    };
+    let r = extract(
+        &req,
+        Box::new(Downloading {
+            damaged,
+            volumes: vols.len() as u64,
+        }),
+        &mut |_, m: &str| {
+            if m.starts_with("Unrar: Extracting  ") {
+                flag.set(true);
+            }
+            log.push(m.to_string())
+        },
+        &mut || flag.get(),
+    );
+    let left = files_under(&out);
+    assert!(matches!(r, Err(Error::Failed(Failure::Canceled))));
+    assert!(left.is_empty(), "{left:?}");
+}
+
+#[test]
+fn an_unrepaired_member_in_a_folder_leaves_nothing() {
+    struct NoRepair(Damaged, u64);
+    impl VolumeFeed for NoRepair {
+        fn volume(&mut self, path: &Path) -> VolumeView {
+            self.0.volume(path)
+        }
+        fn wait_repaired(&mut self, _c: &mut dyn FnMut() -> bool) -> bool {
+            false
+        }
+        fn expected_volumes(&self) -> u64 {
+            self.1
+        }
+    }
+    let t = TestDir::new("persist_norepair_dir");
+    let data = pattern(600_000);
+    let chunk = 100_000;
+    let vols = rar5_volumes("Release/movie.mkv", &data, chunk);
+    let first = write_set(&t.dl(), &vols);
+    let path = t.dl().join(volume_name(2, vols.len()));
+    let p = payload_offset(&vols[2], chunk) as u64;
+    let feed = NoRepair(
+        Damaged {
+            holes: vec![(path, vec![(p + 10_000, 20_000)])],
+            repair: vec![],
+            handed: false,
+        },
+        vols.len() as u64,
+    );
+    let (r, log) = run(&first, &t.out(), Box::new(feed));
+    assert!(
+        matches!(r, Err(Error::Failed(Failure::Damaged(_)))),
+        "{log:?}"
+    );
+    let left = files_under(&t.out());
+    assert!(left.is_empty(), "{left:?}");
+}
+
+fn two_volume_set_with_host(
+    host: u64,
+    a: (&str, u64),
+    b: (&str, u64),
+    c: (&str, u64),
+) -> (Vec<Vec<u8>>, [Vec<u8>; 3]) {
+    let x = pattern(20_000);
+    let y: Vec<u8> = pattern(30_000).iter().map(|v| v ^ 1).collect();
+    let z: Vec<u8> = pattern(25_000).iter().map(|v| v ^ 2).collect();
+    let set = |m: u64| RAR5_HOST.with(|h| h.set((host, m)));
+    let mut v1 = SIG.to_vec();
+    v1.extend(main_block(true, None));
+    set(a.1);
+    v1.extend(file_block(
+        a.0,
+        x.len() as u64,
+        &x,
+        crc32fast::hash(&x),
+        false,
+        false,
+    ));
+    set(b.1);
+    v1.extend(file_block(
+        b.0,
+        y.len() as u64,
+        &y[..10_000],
+        crc32fast::hash(&y[..10_000]),
+        false,
+        true,
+    ));
+    v1.extend(end_block(true));
+    let mut v2 = SIG.to_vec();
+    v2.extend(main_block(true, Some(1)));
+    v2.extend(file_block(
+        b.0,
+        y.len() as u64,
+        &y[10_000..],
+        crc32fast::hash(&y),
+        true,
+        false,
+    ));
+    set(c.1);
+    v2.extend(file_block(
+        c.0,
+        z.len() as u64,
+        &z,
+        crc32fast::hash(&z),
+        false,
+        false,
+    ));
+    v2.extend(end_block(false));
+    RAR5_HOST.with(|h| h.set((1, 0o644)));
+    (vec![v1, v2], [x, y, z])
+}
+
+#[test]
+fn a_windows_member_in_a_later_volume_leaves_no_stray_file() {
+    let t = TestDir::new("persist_winbs");
+    let (vols, _data) =
+        two_volume_set_with_host(0, ("x.bin", 0x20), ("y.bin", 0x20), ("sub\\z.bin", 0x20));
+    let first = write_set(&t.dl(), &vols);
+    let damaged = Damaged {
+        holes: vec![],
+        repair: vec![],
+        handed: false,
+    };
+    let (r, log) = run_downloading(&first, &t.out(), damaged, 2);
+    expect_ok(r, &log);
+    let left = files_under(&t.out());
+    // Reference: the same set through the progressive path only (unknown volume count).
+    let t2 = TestDir::new("persist_winbs_ref");
+    let first2 = write_set(&t2.dl(), &vols);
+    let damaged2 = Damaged {
+        holes: vec![],
+        repair: vec![],
+        handed: false,
+    };
+    let (r2, log2) = run_downloading(&first2, &t2.out(), damaged2, 0);
+    expect_ok(r2, &log2);
+    let left2 = files_under(&t2.out());
+    assert_eq!(left, left2);
+}
+
+#[test]
+fn stale_persistent_state_is_removed_when_the_path_is_not_taken() {
+    let t = TestDir::new("persist_stale");
+    let data = pattern(300_000);
+    let vols = rar5_volumes("movie.mkv", &data, 100_000);
+    let first = write_set(&t.dl(), &vols);
+    let req = Request {
+        first_volume: &first,
+        dest: &t.out(),
+        password: "",
+        overwrite: Overwrite::Always,
+        on_wait: None,
+    };
+    // A crashed run's state for this set, then a post-download (final) unpack.
+    persistent::plant_state_for_test(&req);
+    let (r, log) = run(&first, &t.out(), Box::new(CompleteSet));
+    expect_ok(r, &log);
+    assert!(!t.out().join(persistent::STATE_DIR).exists());
+}
+
+#[test]
+fn a_persistent_output_in_a_folder_gets_the_copy_path_folder_mode() {
+    let t = TestDir::new("persist_dirmode");
+    let data = pattern(300_000);
+    let vols = rar5_volumes("Release/movie.mkv", &data, 100_000);
+    let first = write_set(&t.dl(), &vols);
+    let damaged = Damaged {
+        holes: Vec::new(),
+        repair: Vec::new(),
+        handed: false,
+    };
+    let (r, log) = run_downloading(&first, &t.out(), damaged, vols.len() as u64);
+    expect_ok(r, &log);
+    assert!(persistent(&log), "{log:?}");
+    assert_eq!(
+        std::fs::read(t.out().join("Release/movie.mkv")).unwrap(),
+        data
+    );
+    // Same folder mode as std::fs::create_dir_all gives the copy path.
+    #[cfg(unix)]
+    {
+        let reference = t.0.join("reference");
+        std::fs::create_dir_all(&reference).unwrap();
+        assert_eq!(mode_of(&t.out().join("Release")), mode_of(&reference));
+    }
+}
+
+#[test]
+fn a_failed_persistent_run_keeps_a_pre_existing_empty_folder() {
+    // Case-insensitive filesystems map "Release" onto an existing "release": nothing of the
+    // run reaches the destination before verification, so it can never be removed.
+    struct NoRepair(Damaged, u64);
+    impl VolumeFeed for NoRepair {
+        fn volume(&mut self, path: &Path) -> VolumeView {
+            self.0.volume(path)
+        }
+        fn wait_repaired(&mut self, _c: &mut dyn FnMut() -> bool) -> bool {
+            false
+        }
+        fn expected_volumes(&self) -> u64 {
+            self.1
+        }
+    }
+    let t = TestDir::new("persist_keepdir");
+    std::fs::create_dir_all(t.out().join("release")).unwrap();
+    let data = pattern(600_000);
+    let chunk = 100_000;
+    let vols = rar5_volumes("Release/movie.mkv", &data, chunk);
+    let first = write_set(&t.dl(), &vols);
+    let path = t.dl().join(volume_name(2, vols.len()));
+    let p = payload_offset(&vols[2], chunk) as u64;
+    let feed = NoRepair(
+        Damaged {
+            holes: vec![(path, vec![(p + 10_000, 20_000)])],
+            repair: vec![],
+            handed: false,
+        },
+        vols.len() as u64,
+    );
+    let (r, log) = run(&first, &t.out(), Box::new(feed));
+    assert!(
+        matches!(r, Err(Error::Failed(Failure::Damaged(_)))),
+        "{log:?}"
+    );
+    assert!(t.out().join("release").is_dir());
+    assert!(!t.out().join(persistent::STATE_DIR).exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn publishing_never_follows_a_symlinked_folder_in_the_destination() {
+    let t = TestDir::new("persist_symlinkdir");
+    let elsewhere = t.0.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, t.out().join("Release")).unwrap();
+    let data = pattern(300_000);
+    let vols = rar5_volumes("Release/movie.mkv", &data, 100_000);
+    let first = write_set(&t.dl(), &vols);
+    let damaged = Damaged {
+        holes: Vec::new(),
+        repair: Vec::new(),
+        handed: false,
+    };
+    let (r, log) = run_downloading(&first, &t.out(), damaged, vols.len() as u64);
+    // As the copy path: refused, and nothing written outside the destination.
+    assert!(r.is_err(), "{log:?}");
+    assert!(!elsewhere.join("movie.mkv").exists());
+    assert!(!t.out().join(persistent::STATE_DIR).exists());
+}
+
+#[test]
+fn a_wrong_password_after_a_refill_fails_as_the_progressive_path_does() {
+    let t = TestDir::new("persist_wrongpw");
+    let data = pattern(320_000 - 5);
+    let (vols, offs) = rar5_aes_data_volumes("movie.mkv", &data, 80_000, "pw");
+    let first = write_set(&t.dl(), &vols);
+    let v = t.dl().join(volume_name(1, vols.len()));
+    let p = offs[1] as u64 + 10_007;
+    let mut dmg = vols[1].clone();
+    dmg[p as usize..p as usize + 2_000].fill(0);
+    std::fs::write(&v, &dmg).unwrap();
+    let damaged = Damaged {
+        holes: vec![(v.clone(), vec![(p, 2_000)])],
+        repair: vec![(v, vols[1].clone())],
+        handed: false,
+    };
+    let (r, log) = run_downloading_pw(&first, &t.out(), "wrong", damaged, vols.len() as u64);
+    assert!(
+        matches!(r, Err(Error::Failed(Failure::EncryptedChecksum(_)))),
+        "{log:?}"
+    );
+    assert!(!t.out().join(persistent::STATE_DIR).exists());
+}
+
+#[test]
+fn an_unrepaired_set_places_its_intact_members_as_the_progressive_path_does() {
+    struct NoRepair(Damaged, u64);
+    impl VolumeFeed for NoRepair {
+        fn volume(&mut self, path: &Path) -> VolumeView {
+            self.0.volume(path)
+        }
+        fn wait_repaired(&mut self, _c: &mut dyn FnMut() -> bool) -> bool {
+            false
+        }
+        fn expected_volumes(&self) -> u64 {
+            self.1
+        }
+    }
+    let t = TestDir::new("persist_intact");
+    let a = pattern(200_000);
+    let b: Vec<u8> = pattern(50_000).iter().map(|x| x ^ 0x5a).collect();
+    let mut v = SIG.to_vec();
+    v.extend(main_block(false, None));
+    let fa = file_block(
+        "a.bin",
+        a.len() as u64,
+        &a,
+        crc32fast::hash(&a),
+        false,
+        false,
+    );
+    let a_off = v.len() + fa.len() - a.len();
+    v.extend(fa);
+    v.extend(file_block(
+        "b.bin",
+        b.len() as u64,
+        &b,
+        crc32fast::hash(&b),
+        false,
+        false,
+    ));
+    v.extend(end_block(false));
+    let first = t.dl().join("set.rar");
+    let mut dmg = v.clone();
+    dmg[a_off + 50_000..a_off + 60_000].fill(0);
+    std::fs::write(&first, &dmg).unwrap();
+    let feed = NoRepair(
+        Damaged {
+            holes: vec![(first.clone(), vec![((a_off + 50_000) as u64, 10_000)])],
+            repair: Vec::new(),
+            handed: false,
+        },
+        1,
+    );
+    let (r, log) = run(&first, &t.out(), Box::new(feed));
+    assert!(
+        matches!(r, Err(Error::Failed(Failure::Damaged(_)))),
+        "{log:?}"
+    );
+    assert_eq!(std::fs::read(t.out().join("b.bin")).unwrap(), b);
+    assert!(!t.out().join("a.bin").exists());
+    assert!(!t.out().join(persistent::STATE_DIR).exists());
+}
+
+/// Like DirectUnpackFeed: direct_unpack_abandon clears held + holes, so after a give-up a
+/// damaged volume is answered as Ready with no holes.
+struct AbandonFeed {
+    inner: Damaged,
+    given_up: bool,
+    expected: u64,
+    waits: std::sync::Arc<std::sync::atomic::AtomicU32>,
+}
+impl VolumeFeed for AbandonFeed {
+    fn volume(&mut self, path: &Path) -> VolumeView {
+        if self.given_up {
+            return if path.is_file() {
+                VolumeView::Ready { holes: Vec::new() }
+            } else {
+                VolumeView::Missing
+            };
+        }
+        self.inner.volume(path)
+    }
+    fn wait_repaired(&mut self, _c: &mut dyn FnMut() -> bool) -> bool {
+        self.waits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.given_up = true;
+        false
+    }
+    fn expected_volumes(&self) -> u64 {
+        self.expected
+    }
+}
+
+fn abandon_case(
+    tag: &str,
+    expected: u64,
+) -> (
+    Result<zipfast::extract::Summary, Error>,
+    Vec<String>,
+    TestDir,
+    Vec<u8>,
+    u32,
+) {
+    let t = TestDir::new(tag);
+    let a = pattern(200_000);
+    let b: Vec<u8> = pattern(50_000).iter().map(|x| x ^ 0x5a).collect();
+    let mut v = SIG.to_vec();
+    v.extend(main_block(false, None));
+    let fa = file_block(
+        "a.bin",
+        a.len() as u64,
+        &a,
+        crc32fast::hash(&a),
+        false,
+        false,
+    );
+    let a_off = v.len() + fa.len() - a.len();
+    v.extend(fa);
+    v.extend(file_block(
+        "b.bin",
+        b.len() as u64,
+        &b,
+        crc32fast::hash(&b),
+        false,
+        false,
+    ));
+    v.extend(end_block(false));
+    let first = t.dl().join("set.rar");
+    let mut dmg = v.clone();
+    dmg[a_off + 50_000..a_off + 60_000].fill(0);
+    std::fs::write(&first, &dmg).unwrap();
+    let waits = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let feed = AbandonFeed {
+        inner: Damaged {
+            holes: vec![(first.clone(), vec![((a_off + 50_000) as u64, 10_000)])],
+            repair: Vec::new(),
+            handed: false,
+        },
+        given_up: false,
+        expected,
+        waits: waits.clone(),
+    };
+    let (r, log) = run(&first, &t.out(), Box::new(feed));
+    let n = waits.load(std::sync::atomic::Ordering::SeqCst);
+    (r, log, t, b, n)
+}
+
+#[test]
+fn a_given_up_repair_ends_as_the_progressive_path_does() {
+    // expected 0: the persistent path refuses (volume count unknown), progressive path alone.
+    let (r0, log0, t0, b, _) = abandon_case("persist_abandon_ref", 0);
+    let (r1, log1, t1, _, _) = abandon_case("persist_abandon", 1);
+    assert!(
+        matches!(r0, Err(Error::Failed(Failure::Damaged(_)))),
+        "{log0:?}"
+    );
+    assert!(
+        matches!(r1, Err(Error::Failed(Failure::Damaged(_)))),
+        "{log1:?}"
+    );
+    assert!(persistent(&log1), "{log1:?}");
+    assert_eq!(std::fs::read(t0.out().join("b.bin")).unwrap(), b);
+    assert_eq!(std::fs::read(t1.out().join("b.bin")).unwrap(), b);
+    assert!(!t1.out().join("a.bin").exists());
+    assert!(!t1.out().join(persistent::STATE_DIR).exists());
+}
+
+/// Like DirectUnpackFeed when the repair is abandoned while the session waits for a volume that
+/// never arrived: the holes are forgotten and the absent volume is Missing from then on.
+struct AbandonMidFeed {
+    holes: Vec<(PathBuf, Vec<(u64, u64)>)>,
+    abandoned: bool,
+    expected: u64,
+}
+impl VolumeFeed for AbandonMidFeed {
+    fn volume(&mut self, path: &Path) -> VolumeView {
+        if !path.is_file() {
+            // The repair is given up now (direct_unpack_abandon clears held + holes).
+            self.abandoned = true;
+            return VolumeView::Missing;
+        }
+        if self.abandoned {
+            return VolumeView::Ready { holes: Vec::new() };
+        }
+        let holes = self
+            .holes
+            .iter()
+            .find(|(p, _)| p == path)
+            .map(|(_, h)| h.clone())
+            .unwrap_or_default();
+        VolumeView::Ready { holes }
+    }
+    fn wait_repaired(&mut self, _c: &mut dyn FnMut() -> bool) -> bool {
+        self.abandoned = true;
+        false
+    }
+    fn expected_volumes(&self) -> u64 {
+        self.expected
+    }
+}
+
+fn abandoned_mid_set(tag: &str, expected: u64, crc: bool) -> (bool, Vec<String>, Vec<String>) {
+    let t = TestDir::new(tag);
+    let n = pattern(200_000);
+    let c = pattern(150_000);
+    let mut v = SIG.to_vec();
+    v.extend(main_block(true, None));
+    let fb = if crc {
+        file_block(
+            "n.bin",
+            n.len() as u64,
+            &n,
+            crc32fast::hash(&n),
+            false,
+            false,
+        )
+    } else {
+        file_block_no_crc("n.bin", &n)
+    };
+    let off = v.len() + fb.len() - n.len();
+    v.extend(fb);
+    v.extend(file_block(
+        "c.bin",
+        c.len() as u64,
+        &c[..100_000],
+        crc32fast::hash(&c[..100_000]),
+        false,
+        true,
+    ));
+    v.extend(end_block(true));
+    let first = t.dl().join(volume_name(0, 2));
+    let hole = ((off + 80_000) as u64, 20_000u64);
+    let mut dmg = v.clone();
+    dmg[hole.0 as usize..(hole.0 + hole.1) as usize].fill(0);
+    std::fs::write(&first, &dmg).unwrap();
+    let feed = AbandonMidFeed {
+        holes: vec![(first.clone(), vec![hole])],
+        abandoned: false,
+        expected,
+    };
+    let (r, log) = run(&first, &t.out(), Box::new(feed));
+    (r.is_ok(), log, files_under(&t.out()))
+}
+
+#[test]
+fn a_fallback_after_a_given_up_repair_never_places_damaged_bytes() {
+    // The feed forgets its holes when it gives up; the fallback must still see them.
+    for crc in [false, true] {
+        let (ok0, log0, l0) = abandoned_mid_set(&format!("persist_mid_ref_{crc}"), 0, crc);
+        let (ok1, log1, l1) = abandoned_mid_set(&format!("persist_mid_{crc}"), 2, crc);
+        assert!(!ok0 && !ok1, "{log0:?}\n{log1:?}");
+        assert_eq!(l0, l1, "crc={crc}\n{log1:?}");
+    }
+}

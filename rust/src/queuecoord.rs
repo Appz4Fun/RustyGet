@@ -3914,6 +3914,21 @@ impl NzbgetRsQueueCoordinator {
             };
             host.nzb_push_completed_file(nzb.ptr, file.ptr, &filename, file_status, file_crc);
 
+            // A dead volume the live repair could not place yet may be placeable now that
+            // another volume arrived: run it again while direct unpack waits on one.
+            if completed
+                && !is_incomplete
+                && opts.dupe_article_fallback == crate::queuesubsys_host::DAF_LIVE
+                && opts.direct_unpack
+                && crate::postproc::direct_unpack_waits_on_dead_volume(nzb.id)
+            {
+                if host.nzb_snap(nzb.ptr, false).has_live_repair_thread {
+                    crate::postproc::request_dead_volume_rerun(nzb.id);
+                } else {
+                    host.stream_repair_start_live(nzb.ptr);
+                }
+            }
+
             // Live par2: fetch the recovery volumes for the damage known so far. Checked again
             // when a par2 file completes, because the damage may predate the par2 index.
             // Both follow the repair settings: nothing is fetched or repaired on its own with

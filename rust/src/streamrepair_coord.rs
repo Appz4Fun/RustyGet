@@ -181,6 +181,8 @@ struct RepairTarget {
     positional_rank: i32,
     positional_window: i32,
     steps_hash: u64,
+    /// An earlier live repair already took this file on (it is not `patch_eligible` then).
+    tried_before: bool,
 }
 
 /// True when DirectUnpack is on: only direct unpack reads a rebuilt dead volume.
@@ -208,9 +210,6 @@ fn dead_volume_decision_with(
     }
     if !direct_unpack {
         return Some(Err("DirectUnpack is off"));
-    }
-    if !t.patch_eligible {
-        return Some(Err("an earlier live repair already tried it"));
     }
     if let Some((_, n, _, _)) = crate::streamrepair::rar_part_number(&t.filename) {
         return Some(if n > 1 {
@@ -638,6 +637,7 @@ impl NzbgetRsStreamRepairCtrl {
                 failed_articles,
                 is_par_file,
                 patch_eligible: true,
+                tried_before: false,
                 positional_rank: -1,
                 positional_window: 0,
                 steps_hash,
@@ -739,6 +739,7 @@ impl NzbgetRsStreamRepairCtrl {
                             ) != 0
                         };
                         target.patch_eligible = !was_attempted;
+                        target.tried_before = was_attempted;
                         break;
                     }
                 }
@@ -1443,6 +1444,7 @@ impl NzbgetRsStreamRepairCtrl {
             .map(|i| {
                 let t = &targets[i];
                 left_to_borrow.get(i).copied().unwrap_or(false)
+                    && !t.tried_before
                     && t.needs_repair()
                     && !crate::postproc::direct_unpack_has_virtual(
                         &[
@@ -1481,8 +1483,16 @@ impl NzbgetRsStreamRepairCtrl {
                 &[],
             );
         }
-        for (t, s) in targets.iter_mut().zip(saved) {
+        for ((t, s), r) in targets.iter_mut().zip(saved).zip(&retry) {
             t.patch_eligible = s;
+            if *r && t.needs_repair() {
+                let mut msg = b"No byte-identical duplicate holds ".to_vec();
+                msg.extend_from_slice(&t.filename);
+                msg.extend_from_slice(
+                    b" either; a later run may still borrow it, else par2 rebuilds it",
+                );
+                unsafe { self.print_message(ctx, cb, MK_INFO, &msg) };
+            }
         }
     }
 
@@ -2333,6 +2343,15 @@ impl NzbgetRsStreamRepairCtrl {
         info_name.extend_from_slice(&nzb_name);
         unsafe { self.set_info_name(ctx, cb, &info_name) };
 
+        // A dead volume is offered to the borrow on every run, also after an earlier one could
+        // not place it yet: volumes arriving since may let it be placed now. Planning costs no
+        // fetches; only the whole-file recreation is not repeated.
+        let left_to_borrow = dead_volumes_to_borrow(&dest_dir, &targets);
+        for (t, left) in targets.iter_mut().zip(&left_to_borrow) {
+            if *left {
+                t.patch_eligible = true;
+            }
+        }
         let any_eligible = targets.iter().any(|t| t.patch_eligible && t.needs_repair());
         if any_eligible && !donors.is_empty() {
             let mut msg = b"Starting live stream repair for ".to_vec();
@@ -2342,7 +2361,6 @@ impl NzbgetRsStreamRepairCtrl {
             let opts = unsafe { self.query_host_options(ctx, cb) };
             // Keep the queue from failing over while the repair works towards borrowing a dead
             // volume: the switch would throw away the extraction already done.
-            let left_to_borrow = dead_volumes_to_borrow(&dest_dir, &targets);
             for t in &targets {
                 if let Some(Err(why)) = dead_volume_decision(&dest_dir, t) {
                     let mut msg = b"Not borrowing dead volume ".to_vec();
@@ -2477,6 +2495,7 @@ mod tests {
             failed_articles: 388,
             is_par_file: false,
             patch_eligible: true,
+            tried_before: false,
             positional_rank: 0,
             positional_window: 0,
             steps_hash: 0,
@@ -2497,12 +2516,11 @@ mod tests {
             dead_volume_decision_with(dir, &dead, false),
             Some(Err("DirectUnpack is off"))
         );
+        // A volume an earlier run could not place is offered to the borrow again.
         let mut tried = dead.clone();
         tried.patch_eligible = false;
-        assert_eq!(
-            dead_volume_decision_with(dir, &tried, true),
-            Some(Err("an earlier live repair already tried it"))
-        );
+        tried.tried_before = true;
+        assert_eq!(dead_volume_decision_with(dir, &tried, true), Some(Ok(())));
         assert_eq!(
             dead_volume_decision_with(dir, &target("Movie.part01.rar", 0, vec![]), true),
             Some(Err("the first volume cannot be rebuilt"))

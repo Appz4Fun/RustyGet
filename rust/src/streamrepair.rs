@@ -8743,15 +8743,19 @@ fn plan_dead_fills(
         let Some((inner_name, inner_size)) = inner.filter(|_| usable && any_dead) else {
             continue;
         };
-        let plans: Vec<crate::deadvolume::Plan> = crate::deadvolume::plan(&states, inner_size)
+        let (all_plans, stop) = crate::deadvolume::plan_with_stop(&states, inner_size);
+        let plans: Vec<crate::deadvolume::Plan> = all_plans
             .into_iter()
             .filter(|p| !crate::postproc::direct_unpack_has_virtual(&path_of(&volume_name(p.index as u32 + 1))))
             .collect();
         if plans.is_empty() {
             let mut msg = b"Dead volumes in ".to_vec();
             msg.extend_from_slice(&volume_name(1));
+            msg.extend_from_slice(b" cannot be placed yet: ");
             msg.extend_from_slice(
-                b" cannot be placed yet (a volume before them is not on disk, or no sibling fits)",
+                stop.as_deref()
+                    .unwrap_or("they are already rebuilt or none is dead")
+                    .as_bytes(),
             );
             emit_msg(TargetMessageKind::Info, &msg);
             continue;

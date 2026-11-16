@@ -144,32 +144,14 @@ impl crate::rarreader::Source for MemSource<'_> {
     }
 }
 
-/// Headers are only read without a password here: an encrypted header stops
-/// the reader before it asks for a key.
-struct NoCipher;
-
-impl crate::rarreader::Cipher for NoCipher {
-    fn rar3_prepare(&mut self, _salt: &[u8; 8]) -> bool {
-        false
-    }
-    fn rar5_prepare(&mut self, _kdf_count: u8, _salt: &[u8; 16]) -> bool {
-        false
-    }
-    fn init(&mut self, _key_bits: i32, _iv: Option<&[u8; 16]>) -> bool {
-        false
-    }
-    fn decrypt(&mut self, _input: &[u8; 16], _output: &mut [u8; 16]) -> bool {
-        false
-    }
-    fn free(&mut self) {}
-}
-
 fn rar_packing(data: &[u8], password_known: bool) -> Packing {
     let mut volume = crate::rarreader::Volume::default();
     let mut files: Vec<crate::rarreader::RarFile> = Vec::new();
     // The decoded article ends inside the first file's data, so the reader
     // stops there; the file header it read before that is what counts.
-    crate::rarreader::read_from(&mut volume, &mut MemSource(data), &mut NoCipher, &mut files);
+    // Headers are only read without a password here: encrypted headers stop
+    // the reader.
+    crate::rarreader::read_from(&mut volume, &mut MemSource(data), None, &mut files);
     if volume.encrypted {
         // encrypted headers: nothing about the content can be read here, so
         // it is never taken before a copy that is proven borrowable or
@@ -315,6 +297,12 @@ mod tests {
         v.extend_from_slice(&(name.len() as u16).to_le_bytes());
         v.extend_from_slice(&[0; 4]); // attr
         v.extend_from_slice(name);
+        // header checksums: the low 16 bits of the CRC32 of each header
+        // after its own checksum field
+        for (at, len) in [(7, 13), (20, usize::from(size))] {
+            let crc = crc32fast::hash(&v[at + 2..at + len]) as u16;
+            v[at..at + 2].copy_from_slice(&crc.to_le_bytes());
+        }
         v.extend_from_slice(&[0xaa; 64]); // start of the packed data
         v
     }

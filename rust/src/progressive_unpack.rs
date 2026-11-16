@@ -376,6 +376,7 @@ where
             threads: None,
             protected_paths: Default::default(),
             parallel_min: None,
+            select: None,
         },
         first_name,
     );

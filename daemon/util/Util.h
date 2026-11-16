@@ -1101,6 +1101,22 @@ inline uintptr_t ArtOp(RsArticleList* list, uintptr_t article, int op, int a2 = 
 	return nzbget_rs_article_host(list, reinterpret_cast<RsArticle*>(article), op, a2, p2, s1, ints, i64s, strs);
 }
 
+// The file's data lives in Rust (rust/src/qfile.rs); this class owns it and
+// keeps the C++ queue model's accessors.
+class FileInfo;
+class FileOutputGuard
+{
+public:
+	explicit FileOutputGuard(RsFile* file) : m_file(file), m_taken(nzbget_rs_file_op(file, 20, 0, nullptr, nullptr, nullptr) != 0) {}
+	FileOutputGuard(FileOutputGuard&& other) : m_file(other.m_file), m_taken(other.m_taken) { other.m_taken = false; }
+	FileOutputGuard(const FileOutputGuard&) = delete;
+	~FileOutputGuard() { if (m_taken) nzbget_rs_file_op(m_file, 21, 0, nullptr, nullptr, nullptr); }
+
+private:
+	RsFile* m_file;
+	bool m_taken;
+};
+
 class FileInfo
 {
 public:
@@ -1110,76 +1126,6 @@ public:
 		psPartial,
 		psCompleted
 	};
-
-	typedef std::vector<CString> Groups;
-
-	FileInfo(int id = 0) : m_id(id ? id : ++m_idGen) {}
-	~FileInfo() { nzbget_rs_artlist_free(m_articles); }
-	FileInfo(const FileInfo&) = delete;
-	FileInfo& operator=(const FileInfo&) = delete;
-	int GetId() { return m_id; }
-	void SetId(int id)
-	{
-		m_id = id;
-		if (m_idMax < m_id)
-		{
-			m_idMax = m_id;
-		}
-	}
-	static void ResetGenId(bool max)
-	{
-		if (max)
-		{
-			m_idGen = m_idMax;
-		}
-		else
-		{
-			m_idGen = 0;
-			m_idMax = 0;
-		}
-	}
-	static void RaiseIdFloor(int id) { m_idMax = std::max(m_idMax, id); }
-	static int LastGenId() { return m_idGen; }
-	NzbInfo* GetNzbInfo() { return m_nzbInfo; }
-	void SetNzbInfo(NzbInfo* nzbInfo) { m_nzbInfo = nzbInfo; }
-	RsArticleList* GetArticleList() { return m_articles; }
-	Groups* GetGroups() { return &m_groups; }
-	const char* GetSubject() { return m_subject; }
-	void SetSubject(const char* subject) { m_subject = subject; }
-	const char* GetFilename() { return m_filename.c_str(); }
-	void SetFilename(const char* filename) { m_filename = filename ? filename : ""; }
-	void SetOrigname(const char* origname) { m_origname = origname; }
-	const char* GetOrigname() { return m_origname; }
-	void MakeValidFilename()
-	{
-		m_filename = FileSystem::MakeValidFilename(m_filename.c_str()).Str();
-	}
-	bool GetFilenameConfirmed() { return m_filenameConfirmed; }
-	void SetFilenameConfirmed(bool filenameConfirmed) { m_filenameConfirmed = filenameConfirmed; }
-	void SetSize(int64 size) { m_size = size; m_remainingSize = size; }
-	int64 GetSize() { return m_size; }
-	int64 GetRemainingSize() { return m_remainingSize; }
-	void SetRemainingSize(int64 remainingSize) { m_remainingSize = remainingSize; }
-	int64 GetMissedSize() { return m_missedSize; }
-	void SetMissedSize(int64 missedSize) { m_missedSize = missedSize; }
-	int64 GetSuccessSize() { return m_successSize; }
-	void SetSuccessSize(int64 successSize) { m_successSize = successSize; }
-	int64 GetFailedSize() { return m_failedSize; }
-	void SetFailedSize(int64 failedSize) { m_failedSize = failedSize; }
-	int GetTotalArticles() { return m_totalArticles; }
-	void SetTotalArticles(int totalArticles) { m_totalArticles = totalArticles; }
-	int GetMissedArticles() { return m_missedArticles; }
-	void SetMissedArticles(int missedArticles) { m_missedArticles = missedArticles; }
-	int GetFailedArticles() { return m_failedArticles; }
-	void SetFailedArticles(int failedArticles) { m_failedArticles = failedArticles; }
-	int GetSuccessArticles() { return m_successArticles; }
-	void SetSuccessArticles(int successArticles) { m_successArticles = successArticles; }
-	int GetDupeRecoveredArticles() { return m_dupeRecoveredArticles; }
-	void SetDupeRecoveredArticles(int dupeRecoveredArticles) { m_dupeRecoveredArticles = dupeRecoveredArticles; }
-	int GetDupeAttemptedArticles() { return m_dupeAttemptedArticles; }
-	void SetDupeAttemptedArticles(int dupeAttemptedArticles) { m_dupeAttemptedArticles = dupeAttemptedArticles; }
-	bool GetDupeCutover() { return m_dupeCutover; }
-	void SetDupeCutover(bool dupeCutover) { m_dupeCutover = dupeCutover; }
 	// what the file's first article holds: borrowing from duplicates never writes
 	// into par2 data, whatever the file is called
 	enum EFirstContent
@@ -1188,144 +1134,137 @@ public:
 		fcPar2,
 		fcOther
 	};
-	EFirstContent GetFirstContent() { return m_firstContent; }
-	void SetFirstContent(EFirstContent firstContent) { m_firstContent = firstContent; }
-	bool GetDupeNoSourceLogged() { return m_dupeNoSourceLogged; }
-	void SetDupeNoSourceLogged(bool logged) { m_dupeNoSourceLogged = logged; }
-	int GetDupeLeadDonorId() { return m_dupeLeadDonorId; }
-	void SetDupeLeadDonorId(int dupeLeadDonorId) { m_dupeLeadDonorId = dupeLeadDonorId; }
-	int GetDupeLeadFailures() { return m_dupeLeadFailures; }
-	void SetDupeLeadFailures(int dupeLeadFailures) { m_dupeLeadFailures = dupeLeadFailures; }
-	int GetDupeLeadSwitches() { return m_dupeLeadSwitches; }
-	void SetDupeLeadSwitches(int dupeLeadSwitches) { m_dupeLeadSwitches = dupeLeadSwitches; }
-	time_t GetTime() { return m_time; }
-	void SetTime(time_t time) { m_time = time; }
-	bool GetPaused() { return m_paused; }
+
+	FileInfo(int id = 0) : m_rs(nzbget_rs_file_new(id)) {}
+	~FileInfo() { nzbget_rs_file_free(m_rs); }
+	FileInfo(const FileInfo&) = delete;
+	FileInfo& operator=(const FileInfo&) = delete;
+	RsFile* Rs() { return m_rs; }
+	void SetId(int id) { S(0, id); }
+	static void ResetGenId(bool max) { nzbget_rs_file_ids(max ? 1 : 2, 0); }
+	static void RaiseIdFloor(int id) { nzbget_rs_file_ids(3, id); }
+	static int LastGenId() { return nzbget_rs_file_ids(0, 0); }
+	NzbInfo* GetNzbInfo() { return reinterpret_cast<NzbInfo*>((uintptr_t)I(35)); }
+	void SetNzbInfo(NzbInfo* nzbInfo) { S(35, (int64)reinterpret_cast<uintptr_t>(nzbInfo)); }
+	RsArticleList* GetArticleList() { return nzbget_rs_file_articles(m_rs); }
+	size_t GroupCount() { return (size_t)nzbget_rs_file_op(m_rs, 0, 0, nullptr, nullptr, nullptr); }
+	const char* GroupAt(size_t i) { const char* g = nullptr; nzbget_rs_file_op(m_rs, 1, (int)i, nullptr, nullptr, &g); return g; }
+	void AddGroup(const char* group) { nzbget_rs_file_op(m_rs, 2, 0, group, nullptr, nullptr); }
+	const char* GetSubject() { return T(0); }
+	void SetSubject(const char* subject) { ST(0, subject); }
+	const char* GetFilename() { return T(1); }
+	void SetFilename(const char* filename) { ST(1, filename); }
+	const char* GetOrigname() { return T(2); }
+	void SetOrigname(const char* origname) { ST(2, origname); }
+	void MakeValidFilename() { SetFilename(FileSystem::MakeValidFilename(GetFilename()).Str()); }
+	int GetId() { return (int)I(0); }
+	int64 GetSize() { return (int64)I(1); }
+	void SetSize(int64 v) { S(1, (int64)v); }
+	int64 GetRemainingSize() { return (int64)I(2); }
+	void SetRemainingSize(int64 v) { S(2, (int64)v); }
+	int64 GetSuccessSize() { return (int64)I(3); }
+	void SetSuccessSize(int64 v) { S(3, (int64)v); }
+	int64 GetFailedSize() { return (int64)I(4); }
+	void SetFailedSize(int64 v) { S(4, (int64)v); }
+	int64 GetMissedSize() { return (int64)I(5); }
+	void SetMissedSize(int64 v) { S(5, (int64)v); }
+	int GetTotalArticles() { return (int)I(6); }
+	void SetTotalArticles(int v) { S(6, (int64)v); }
+	int GetMissedArticles() { return (int)I(7); }
+	void SetMissedArticles(int v) { S(7, (int64)v); }
+	int GetFailedArticles() { return (int)I(8); }
+	void SetFailedArticles(int v) { S(8, (int64)v); }
+	int GetSuccessArticles() { return (int)I(9); }
+	void SetSuccessArticles(int v) { S(9, (int64)v); }
+	int GetDupeRecoveredArticles() { return (int)I(10); }
+	void SetDupeRecoveredArticles(int v) { S(10, (int64)v); }
+	int GetDupeAttemptedArticles() { return (int)I(11); }
+	void SetDupeAttemptedArticles(int v) { S(11, (int64)v); }
+	bool GetDupeCutover() { return (bool)I(12); }
+	void SetDupeCutover(bool v) { S(12, (int64)v); }
+	bool GetDupeNoSourceLogged() { return (bool)I(13); }
+	void SetDupeNoSourceLogged(bool v) { S(13, (int64)v); }
+	EFirstContent GetFirstContent() { return (EFirstContent)I(14); }
+	void SetFirstContent(EFirstContent v) { S(14, (int64)v); }
+	int GetDupeLeadDonorId() { return (int)I(15); }
+	void SetDupeLeadDonorId(int v) { S(15, (int64)v); }
+	int GetDupeLeadFailures() { return (int)I(16); }
+	void SetDupeLeadFailures(int v) { S(16, (int64)v); }
+	int GetDupeLeadSwitches() { return (int)I(17); }
+	void SetDupeLeadSwitches(int v) { S(17, (int64)v); }
+	time_t GetTime() { return (time_t)I(18); }
+	void SetTime(time_t v) { S(18, (int64)v); }
+	bool GetPaused() { return (bool)I(19); }
+	bool GetDeleted() { return (bool)I(20); }
+	void SetDeleted(bool v) { S(20, (int64)v); }
+	bool GetFilenameConfirmed() { return (bool)I(21); }
+	void SetFilenameConfirmed(bool v) { S(21, (int64)v); }
+	bool GetParFile() { return (bool)I(22); }
+	void SetParFile(bool v) { S(22, (int64)v); }
+	int GetCompletedArticles() { return (int)I(23); }
+	void SetCompletedArticles(int v) { S(23, (int64)v); }
+	bool GetOutputInitialized() { return (bool)I(24); }
+	void SetOutputInitialized(bool v) { S(24, (int64)v); }
+	bool GetExtraPriority() { return (bool)I(25); }
+	int GetActiveDownloads() { return (int)I(26); }
+	void SetActiveDownloads(int v) { S(26, (int64)v); }
+	bool GetDupeDeleted() { return (bool)I(27); }
+	void SetDupeDeleted(bool v) { S(27, (int64)v); }
+	int GetCachedArticles() { return (int)I(28); }
+	void SetCachedArticles(int v) { S(28, (int64)v); }
+	bool GetPartialChanged() { return (bool)I(29); }
+	void SetPartialChanged(bool v) { S(29, (int64)v); }
+	bool GetForceDirectWrite() { return (bool)I(30); }
+	void SetForceDirectWrite(bool v) { S(30, (int64)v); }
+	EPartialState GetPartialState() { return (EPartialState)I(31); }
+	void SetPartialState(EPartialState v) { S(31, (int64)v); }
+	uint32 GetCrc() { return (uint32)I(32); }
+	void SetCrc(uint32 v) { S(32, (int64)v); }
+	bool GetFlushLocked() { return (bool)I(33); }
+	void SetFlushLocked(bool v) { S(33, (int64)v); }
+	int64 GetDecodedFileSize() { return (int64)I(34); }
+	void SetDecodedFileSize(int64 v) { S(34, (int64)v); }
 	void SetPaused(bool paused);
-	bool GetDeleted() { return m_deleted; }
-	void SetDeleted(bool Deleted) { m_deleted = Deleted; }
-	int GetCompletedArticles() { return m_completedArticles; }
-	void SetCompletedArticles(int completedArticles) { m_completedArticles = completedArticles; }
-	bool GetParFile() { return m_parFile; }
-	void SetParFile(bool parFile) { m_parFile = parFile; }
-	Guard GuardOutputFile() { return Guard(m_outputFileMutex); }
-	const std::string& GetOutputFilename() const { return m_outputFilename; }
-	void SetOutputFilename(const char* outputFilename) { m_outputFilename = outputFilename ? outputFilename : ""; }
-	bool GetOutputInitialized() { return m_outputInitialized; }
-	void SetOutputInitialized(bool outputInitialized) { m_outputInitialized = outputInitialized; }
-	bool GetExtraPriority() { return m_extraPriority; }
 	void SetExtraPriority(bool extraPriority);
-	int GetActiveDownloads() { return m_activeDownloads; }
-	void SetActiveDownloads(int activeDownloads)
+	FileOutputGuard GuardOutputFile() { return FileOutputGuard(m_rs); }
+	std::string GetOutputFilename() { return T(3); }
+	const char* GetOutputFilenameC() { return T(3); }
+	void SetOutputFilename(const char* outputFilename) { ST(3, outputFilename); }
+	const char* GetHash16k() { return T(4); }
+	void SetHash16k(const char* hash16k) { ST(4, hash16k); }
+	const char* GetParSetId() { return T(5); }
+	void SetParSetId(const char* parSetId) { ST(5, parSetId); }
+	std::string GetHardLinkPath() { return T(6); }
+	const char* GetHardLinkPathC() { return T(6); }
+	void SetHardLinkPath(std::string hardLinkPath) { ST(6, hardLinkPath.c_str()); }
+	bool IsHardLinked() { return *T(6) != '\0'; }
+	// server stats are kept in Rust; ServerStatsCopy() gives a list for ListOp
+	size_t StatCount() { return (size_t)nzbget_rs_file_op(m_rs, 10, 0, nullptr, nullptr, nullptr); }
+	void StatAt(size_t i, int* out3) { nzbget_rs_file_op(m_rs, 11, (int)i, nullptr, out3, nullptr); }
+	void StatOp(int serverId, int success, int failed, ServerStatList::EStatOperation op)
 	{
-		m_activeDownloads = activeDownloads;
-
-		if (m_activeDownloads > 0 && !m_outputFileMutex)
-		{
-			m_outputFileMutex = std::make_unique<Mutex>();
-		}
-		else if (m_activeDownloads == 0 && m_outputFileMutex)
-		{
-			m_outputFileMutex.reset();
-		}
+		int v[3] = { serverId, success, failed };
+		nzbget_rs_file_op(m_rs, 12, (int)op, nullptr, v, nullptr);
 	}
-	bool GetDupeDeleted() { return m_dupeDeleted; }
-	void SetDupeDeleted(bool dupeDeleted) { m_dupeDeleted = dupeDeleted; }
-	int GetCachedArticles() { return m_cachedArticles; }
-	void SetCachedArticles(int cachedArticles) { m_cachedArticles = cachedArticles; }
-	bool GetPartialChanged() { return m_partialChanged; }
-	void SetPartialChanged(bool partialChanged) { m_partialChanged = partialChanged; }
-	bool GetForceDirectWrite() { return m_forceDirectWrite; }
-	void SetForceDirectWrite(bool forceDirectWrite) { m_forceDirectWrite = forceDirectWrite; }
-	EPartialState GetPartialState() { return m_partialState; }
-	void SetPartialState(EPartialState partialState) { m_partialState = partialState; }
-	uint32 GetCrc() { return m_crc; }
-	void SetCrc(uint32 crc) { m_crc = crc; }
-	const char* GetHash16k() { return m_hash16k; }
-	void SetHash16k(const char* hash16k) { m_hash16k = hash16k; }
-	const char* GetParSetId() { return m_parSetId; }
-	void SetParSetId(const char* parSetId) { m_parSetId = parSetId; }
-	bool GetFlushLocked() { return m_flushLocked; }
-	void SetFlushLocked(bool flushLocked) { m_flushLocked = flushLocked; }
-	const std::string& GetHardLinkPath() const { return m_hardLinkPath; }
-	void SetHardLinkPath(std::string hardLinkPath) { m_hardLinkPath = std::move(hardLinkPath); }
-	bool IsHardLinked()
+	void ClearStats() { nzbget_rs_file_op(m_rs, 13, 0, nullptr, nullptr, nullptr); }
+	ServerStatList ServerStatsCopy()
 	{
-		return !m_hardLinkPath.empty();
+		ServerStatList list;
+		for (size_t i = 0, n = StatCount(); i < n; i++)
+		{
+			int v[3];
+			StatAt(i, v);
+			list.StatOp(v[0], v[1], v[2], ServerStatList::soSet);
+		}
+		return list;
 	}
-	int64 GetDecodedFileSize() { return m_decodedFileSize; }
-	void SetDecodedFileSize(int64 decodedFileSize) { m_decodedFileSize = decodedFileSize; }
-
-	ServerStatList* GetServerStats() { return &m_serverStats; }
 
 private:
-	int m_id;
-	NzbInfo* m_nzbInfo = nullptr;
-	RsArticleList* m_articles = nzbget_rs_artlist_new();
-	Groups m_groups;
-	ServerStatList m_serverStats;
-	CString m_subject;
-	std::string m_filename;
-	CString m_origname;
-	int64 m_size = 0;
-	int64 m_remainingSize = 0;
-	int64 m_successSize = 0;
-	int64 m_failedSize = 0;
-	int64 m_missedSize = 0;
-	int m_totalArticles = 0;
-	int m_missedArticles = 0;
-	int m_failedArticles = 0;
-	int m_successArticles = 0;
-	// articles obtained from a duplicate collection via DupeArticleFallback (not persisted)
-	int m_dupeRecoveredArticles = 0;
-	// distinct articles for which a duplicate source was tried (not persisted);
-	// the denominator for the recovered/attempted completion summary
-	int m_dupeAttemptedArticles = 0;
-	// once the primary proves to be missing many articles of this file, lead
-	// with the duplicate for the remaining articles instead of failing on the
-	// primary first (not persisted)
-	bool m_dupeCutover = false;
-	bool m_dupeNoSourceLogged = false;	// in memory only: said once per file
-	EFirstContent m_firstContent = fcUnknown;	// in memory only: read from the file after a restart
-	// nzb-id of the duplicate this file's fresh articles try first; rotated to
-	// the next duplicate when the lead keeps missing articles, so fresh
-	// articles do not re-fail on a holed posting; 0 = not decided yet, the
-	// top-scored duplicate leads (not persisted)
-	int m_dupeLeadDonorId = 0;
-	// consecutive lead-donor misses; reaching LeadDemoteThreshold rotates
-	// m_dupeLeadDonorId (not persisted)
-	int m_dupeLeadFailures = 0;
-	// lead rotations since the last lead success; capped at the donor count so
-	// a release whose duplicates are ALL holed stops rotating (and logging)
-	// once every duplicate has led (not persisted)
-	int m_dupeLeadSwitches = 0;
-	time_t m_time = 0;
-	bool m_paused = false;
-	bool m_deleted = false;
-	bool m_filenameConfirmed = false;
-	bool m_parFile = false;
-	int m_completedArticles = 0;
-	bool m_outputInitialized = false;
-	std::string m_outputFilename;
-	std::unique_ptr<Mutex> m_outputFileMutex;
-	bool m_extraPriority = false;
-	int m_activeDownloads = 0;
-	bool m_dupeDeleted = false;
-	std::atomic<int> m_cachedArticles{0};
-	bool m_partialChanged = false;
-	bool m_forceDirectWrite = false;
-	EPartialState m_partialState = psNone;
-	uint32 m_crc = 0;
-	CString m_hash16k;
-	CString m_parSetId;
-	bool m_flushLocked = false;
-	std::string m_hardLinkPath;
-	// raw file size declared by the first successfully decoded yEnc article
-	// (not persisted); used to verify articles borrowed from duplicates
-	std::atomic<int64> m_decodedFileSize{0};
-
-	inline static std::atomic<int> m_idGen{0};
-	inline static int m_idMax = 0;
+	RsFile* m_rs;
+	int64 I(int id) { return nzbget_rs_file_get(m_rs, id); }
+	void S(int id, int64 v) { nzbget_rs_file_set(m_rs, id, v); }
+	const char* T(int id) { return nzbget_rs_file_text(m_rs, id); }
+	void ST(int id, const char* v) { nzbget_rs_file_set_text(m_rs, id, v); }
 
 	friend class CompletedFile;
 };
@@ -1356,10 +1295,7 @@ public:
 		, m_hash16k(std::move(hash16k))
 		, m_parSetId(std::move(parSetId))
 	{
-		if (FileInfo::m_idMax < m_id)
-		{
-			FileInfo::m_idMax = m_id;
-		}
+		FileInfo::RaiseIdFloor(m_id);
 	}
 	int GetId() { return m_id; }
 	void SetFilename(std::string filename) { m_filename = std::move(filename); }
@@ -2258,7 +2194,7 @@ public:
 				&acc, fileInfo->GetRemainingSize(), fileInfo->GetSuccessArticles(),
 				fileInfo->GetFailedArticles(), fileInfo->GetSuccessSize(), fileInfo->GetFailedSize(),
 				fileInfo->GetExtraPriority() ? 1 : 0, fileInfo->GetPaused() ? 1 : 0, fileInfo->GetParFile() ? 1 : 0);
-			m_currentServerStats.ListOp(fileInfo->GetServerStats(), ServerStatList::soAdd);
+			{ ServerStatList fs = fileInfo->ServerStatsCopy(); m_currentServerStats.ListOp(&fs, ServerStatList::soAdd); }
 		}
 		m_pausedFileCount = acc.paused_file_count;
 		m_remainingParCount = acc.remaining_par_count;
@@ -2282,7 +2218,7 @@ public:
 			&m_successSize, &m_failedSize, &m_failedArticles, &m_successArticles,
 			&m_extraPriority, &m_parSuccessSize, &m_parFailedSize,
 			&m_remainingParCount, &m_pausedFileCount);
-		m_serverStats.ListOp(fileInfo->GetServerStats(), ServerStatList::soAdd);
+		{ ServerStatList fs = fileInfo->ServerStatsCopy(); m_serverStats.ListOp(&fs, ServerStatList::soAdd); }
 	}
 	void UpdateDeletedStats(FileInfo* fileInfo)
 	{
@@ -2299,7 +2235,7 @@ public:
 			&m_extraPriority, &m_remainingParCount, &m_parSize,
 			&m_parCurrentSuccessSize, &m_parFailedSize, &m_parCurrentFailedSize,
 			&m_pausedFileCount, &m_pausedSize);
-		m_currentServerStats.ListOp(fileInfo->GetServerStats(), ServerStatList::soSubtract);
+		{ ServerStatList fs = fileInfo->ServerStatsCopy(); m_currentServerStats.ListOp(&fs, ServerStatList::soSubtract); }
 	}
 	bool IsDownloadCompleted(bool ignorePausedPars)
 	{
@@ -2476,21 +2412,23 @@ using PostInfo = NzbInfo::PostInfo;
 
 inline void FileInfo::SetPaused(bool paused)
 {
-	if (m_paused != paused && m_nzbInfo)
+	NzbInfo* nzb = GetNzbInfo();
+	if (GetPaused() != paused && nzb)
 	{
-		m_nzbInfo->SetPausedFileCount(m_nzbInfo->GetPausedFileCount() + (paused ? 1 : -1));
-		m_nzbInfo->SetPausedSize(m_nzbInfo->GetPausedSize() + (paused ? m_remainingSize : -m_remainingSize));
+		nzb->SetPausedFileCount(nzb->GetPausedFileCount() + (paused ? 1 : -1));
+		nzb->SetPausedSize(nzb->GetPausedSize() + (paused ? GetRemainingSize() : -GetRemainingSize()));
 	}
-	m_paused = paused;
+	S(19, paused ? 1 : 0);
 }
 
 inline void FileInfo::SetExtraPriority(bool extraPriority)
 {
-	if (m_extraPriority != extraPriority && m_nzbInfo)
+	NzbInfo* nzb = GetNzbInfo();
+	if (GetExtraPriority() != extraPriority && nzb)
 	{
-		m_nzbInfo->SetExtraPriority(m_nzbInfo->GetExtraPriority() + (extraPriority ? 1 : -1));
+		nzb->SetExtraPriority(nzb->GetExtraPriority() + (extraPriority ? 1 : -1));
 	}
-	m_extraPriority = extraPriority;
+	S(25, extraPriority ? 1 : 0);
 }
 
 typedef UniqueDeque<NzbInfo> NzbList;
@@ -2984,10 +2922,10 @@ inline int live_par_visit_namespace(NzbInfo* nzb, LiveParNamespaceVisitor visit,
     {
         // Active-count changes and mutex destruction require the queue. For
         // remaining active files, this also stabilises their output string.
-        Guard output = file->GuardOutputFile();
+        FileOutputGuard output = file->GuardOutputFile();
         const unsigned flags = (file->GetParFile() ? 1u : 0u) | (file->GetDeleted() ? 2u : 0u);
         if (!visit(context, file->GetId(), flags, text(file->GetFilename()),
-            text(file->GetOrigname()), text(file->GetHash16k()), file->GetOutputFilename().c_str()))
+            text(file->GetOrigname()), text(file->GetHash16k()), file->GetOutputFilenameC()))
             return 0;
     }
     for (auto& file : *nzb->GetCompletedFiles())
@@ -3280,7 +3218,7 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 			for (FileInfo* fi : n->GetFileList())
 				if (fi->GetOutputInitialized() && !fi->GetOutputFilename().empty() && fi->GetActiveDownloads() > 0)
 				{
-					Guard g = fi->GuardOutputFile();
+					FileOutputGuard g = fi->GuardOutputFile();
 					if (fi->GetOutputInitialized()) return 1;
 				}
 			return 0;
@@ -3438,8 +3376,9 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 			FileInfo* f = reinterpret_cast<FileInfo*>(p2);
 			dst->GetFileList()->Add(src->GetFileList()->Remove(f));
 			f->SetNzbInfo(dst);
-			src->GetCurrentServerStats()->ListOp(f->GetServerStats(), ServerStatList::soSubtract);
-			dst->GetCurrentServerStats()->ListOp(f->GetServerStats(), ServerStatList::soAdd);
+			ServerStatList fs = f->ServerStatsCopy();
+			src->GetCurrentServerStats()->ListOp(&fs, ServerStatList::soSubtract);
+			dst->GetCurrentServerStats()->ListOp(&fs, ServerStatList::soAdd);
 			return 0;
 		}
 		if (a1 == 4)
@@ -3592,7 +3531,7 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 			fi->SetTime((time_t)ints[1]); fi->SetSize(i64s[0]); fi->SetRemainingSize(i64s[1]); fi->SetMissedSize(i64s[2]);
 			fi->SetTotalArticles(ints[2]); fi->SetMissedArticles(ints[3]); fi->SetParFile(ints[4] != 0);
 			const auto* gPtrs = reinterpret_cast<const char* const*>(strs[0]);
-			for (int g = 0; g < ints[5]; g++) fi->GetGroups()->push_back(gPtrs[g] ? gPtrs[g] : "");
+			for (int g = 0; g < ints[5]; g++) fi->AddGroup(gPtrs[g] ? gPtrs[g] : "");
 			const auto* aParts = reinterpret_cast<const int*>((uintptr_t)i64s[3]);
 			const auto* aSizes = reinterpret_cast<const int64_t*>((uintptr_t)i64s[4]);
 			const auto* aMids = reinterpret_cast<const char* const*>(strs[1]);
@@ -3679,9 +3618,9 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 		if (strs)
 		{
 			static thread_local std::string s_outFn;
-			if (f->GetActiveDownloads() > 0) { Guard og = f->GuardOutputFile(); s_outFn = f->GetOutputFilename(); strs[2] = s_outFn.c_str(); }
-			else strs[2] = f->GetOutputFilename().c_str();
-			strs[0] = f->GetFilename(); strs[1] = f->GetSubject(); strs[3] = f->GetHardLinkPath().c_str();
+			if (f->GetActiveDownloads() > 0) { FileOutputGuard og = f->GuardOutputFile(); s_outFn = f->GetOutputFilename(); strs[2] = s_outFn.c_str(); }
+			else strs[2] = f->GetOutputFilenameC();
+			strs[0] = f->GetFilename(); strs[1] = f->GetSubject(); strs[3] = f->GetHardLinkPathC();
 			strs[4] = f->GetOrigname(); strs[5] = f->GetHash16k(); strs[6] = f->GetParSetId();
 		}
 		return ArtOp(f->GetArticleList(), 0, 100);
@@ -3690,19 +3629,18 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 		FileInfo* f = reinterpret_cast<FileInfo*>(p1);
 		if (a1 == 0)
 		{
-			if (a2 < 0) return f->GetGroups()->size();
-			strs[0] = *f->GetGroups()->at((size_t)a2);
+			if (a2 < 0) return f->GroupCount();
+			strs[0] = f->GroupAt((size_t)a2);
 			return 0;
 		}
 		if (a1 == 1)
 		{
-			if (a2 < 0) return f->GetServerStats()->size();
-			ServerStat& st = f->GetServerStats()->at((size_t)a2);
-			ints[0] = st.GetServerId(); ints[1] = st.GetSuccessArticles(); ints[2] = st.GetFailedArticles();
+			if (a2 < 0) return f->StatCount();
+			f->StatAt((size_t)a2, ints);
 			return 0;
 		}
-		if (a1 == 2) { f->GetServerStats()->StatOp(ints[0], ints[1], ints[2], ServerStatList::soSet); return 0; }
-		if (a1 == 3) { f->GetGroups()->push_back(s1 ? s1 : ""); return 0; }
+		if (a1 == 2) { f->StatOp(ints[0], ints[1], ints[2], ServerStatList::soSet); return 0; }
+		if (a1 == 3) { f->AddGroup(s1 ? s1 : ""); return 0; }
 		return 0;
 	}
 	case 42: {
@@ -3744,7 +3682,7 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 		case 33: f->SetDecodedFileSize(i64s[0]); break;
 		case 40: f->SetFilename(s1); break;
 		case 41: {
-			std::optional<Guard> og;
+			std::optional<FileOutputGuard> og;
 			if (f->GetActiveDownloads() > 0) og.emplace(f->GuardOutputFile());
 			f->SetOutputFilename(s1);
 			break;
@@ -3756,17 +3694,17 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 		case 50: f->MakeValidFilename(); break;
 		case 51: ArtOp(f->GetArticleList(), 0, 101); break;
 		case 52: ArtOp(f->GetArticleList(), 0, 102); break;
-		case 53: reinterpret_cast<NzbInfo*>(p2)->GetCurrentServerStats()->ListOp(f->GetServerStats(), ServerStatList::soSubtract); f->GetServerStats()->clear(); break;
+		case 53: { ServerStatList fs = f->ServerStatsCopy(); reinterpret_cast<NzbInfo*>(p2)->GetCurrentServerStats()->ListOp(&fs, ServerStatList::soSubtract); f->ClearStats(); } break;
 		case 54: ArtOp(f->GetArticleList(), 0, 103); break;
 		case 55: {
-			std::optional<Guard> og;
+			std::optional<FileOutputGuard> og;
 			if (f->GetActiveDownloads() > 0) og.emplace(f->GuardOutputFile());
 			ArtOp(f->GetArticleList(), 0, 104, 0, p2);
 			break;
 		}
 		case 57: delete f; break;
 		case 58: f->SetNzbInfo(reinterpret_cast<NzbInfo*>(p2)); break;
-		case 59: reinterpret_cast<NzbInfo*>(p2)->GetServerStats()->ListOp(f->GetServerStats(), ServerStatList::soSubtract); break;
+		case 59: { ServerStatList fs = f->ServerStatsCopy(); reinterpret_cast<NzbInfo*>(p2)->GetServerStats()->ListOp(&fs, ServerStatList::soSubtract); } break;
 		case 61: f->SetSubject(s1); break;
 		case 62: f->SetTime((time_t)i64s[0]); break;
 		case 63: f->SetSize(i64s[0]); break;
@@ -3820,7 +3758,7 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 		{
 			static thread_local std::string s_outFn;
 			bool outInit = false;
-			{ Guard og = f->GuardOutputFile(); outInit = f->GetOutputInitialized(); s_outFn = f->GetOutputFilename(); }
+			{ FileOutputGuard og = f->GuardOutputFile(); outInit = f->GetOutputInitialized(); s_outFn = f->GetOutputFilename(); }
 			ints[0] = ((g_Options->GetDirectWrite() || f->GetForceDirectWrite()) && outInit) ? 1 : 0;
 			ints[1] = ((f->GetNzbInfo() && f->GetNzbInfo()->GetSkipDiskWrite()) || g_Options->GetSkipWrite()) ? 1 : 0;
 			i64s[0] = (int64_t)s_outFn.size();
@@ -3862,7 +3800,7 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 		FileInfo* f = reinterpret_cast<FileInfo*>(p1);
 		if (a1 == 0)
 		{
-			std::optional<Guard> og;
+			std::optional<FileOutputGuard> og;
 			if (a2 != 0 || f->GetActiveDownloads() > 0) og.emplace(f->GuardOutputFile());
 			reinterpret_cast<void(*)(void*)>(p2)(reinterpret_cast<void*>((uintptr_t)i64s[0]));
 			return 0;
@@ -3871,7 +3809,7 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 		{
 			ints[0] = f->GetId(); ints[1] = (int)ArtOp(nullptr, p2, 118);
 			ints[2] = f->GetForceDirectWrite() ? 1 : 0; ints[3] = f->GetOutputInitialized() ? 1 : 0;
-			strs[0] = f->GetNzbInfo()->GetDestDir(); strs[1] = f->GetOutputFilename().c_str(); strs[2] = f->GetFilename();
+			strs[0] = f->GetNzbInfo()->GetDestDir(); strs[1] = f->GetOutputFilenameC(); strs[2] = f->GetFilename();
 			return 0;
 		}
 		if (a1 == 2)
@@ -3894,13 +3832,13 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 		{
 			bool outInit = false, isOwn = false;
 			{
-				Guard g = f->GuardOutputFile();
+				FileOutputGuard g = f->GuardOutputFile();
 				outInit = f->GetOutputInitialized();
 				if (!g_Options->GetDirectWrite() && !f->GetForceDirectWrite()) f->SetOutputInitialized(true);
 			}
 			if (g_Options->GetDirectWrite() || f->GetForceDirectWrite())
 			{
-				Guard g = f->GuardOutputFile();
+				FileOutputGuard g = f->GuardOutputFile();
 				isOwn = f->GetForceDirectWrite() || (s1 && !f->GetOutputFilename().empty() && FileSystem::SameFilename(f->GetOutputFilename().c_str(), s1));
 			}
 			ints[0] = outInit ? 1 : 0; ints[1] = isOwn ? 1 : 0;
@@ -3950,14 +3888,14 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 				NzbInfo* nzb = f->GetNzbInfo();
 				f->SetCrc((uint32)p2); f->SetOutputFilename(s1 ? s1 : "");
 				ints[0] = f->IsHardLinked() ? 1 : 0; ints[1] = Util::EmptyStr(g_Options->GetInterDir()) ? 1 : 0;
-				strs[0] = f->GetFilename(); strs[1] = f->GetOutputFilename().c_str(); strs[2] = nzb->GetDestDir();
+				strs[0] = f->GetFilename(); strs[1] = f->GetOutputFilenameC(); strs[2] = nzb->GetDestDir();
 				return reinterpret_cast<uintptr_t>(nzb);
 			}
 			return 0;
 		}
 		if (a1 == 10)
 		{
-			f->GetServerStats()->StatOp(ints[0], ints[1], ints[2], ServerStatList::soAdd);
+			f->StatOp(ints[0], ints[1], ints[2], ServerStatList::soAdd);
 			f->GetNzbInfo()->GetCurrentServerStats()->StatOp(ints[0], ints[1], ints[2], ServerStatList::soAdd);
 			return 0;
 		}

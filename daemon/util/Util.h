@@ -1520,6 +1520,10 @@ public:
 	NzbInfo& operator=(const NzbInfo&) = delete;
 	// numeric and status fields live in Rust (rust/src/qnzb.rs)
 	NzbgetRsNzbScalars* Scalars() { return m_s; }
+	// strings live in Rust too: 0 url, 1 filename, 2 name, 3 dest dir, 4 final dir,
+	// 5 category, 6 queued filename, 7 dupe key, 8 hard-link path, 9 meta name
+	const char* NT(int id) { return nzbget_rs_nzb_text(m_s, id); }
+	void NST(int id, const char* v) { nzbget_rs_nzb_set_text(m_s, id, v, -1); }
 	enum EDirectRenameStatus
 	{
 		tsNone,
@@ -1663,26 +1667,26 @@ public:
 	static int LastGenId() { return m_idGen; }
 	EKind GetKind() { return (EKind)m_s->kind; }
 	void SetKind(EKind kind) { m_s->kind = kind; }
-	const char* GetUrl() { return m_url; }
+	const char* GetUrl() { return NT(0); }
 	void SetUrl(const char* url)
 	{
-		m_url = url;
+		NST(0, url);
 
-		if (!m_name)
+		if (!NT(2))
 		{
-			CString nzbNicename = MakeNiceUrlName(url, m_filename);
+			CString nzbNicename = MakeNiceUrlName(url, NT(1));
 			SetName(nzbNicename);
 		}
 	}
-	const char* GetFilename() { return m_filename; }
+	const char* GetFilename() { return NT(1); }
 	void SetFilename(const char* filename)
 	{
-		bool hadFilename = !Util::EmptyStr(m_filename);
-		m_filename = filename;
+		bool hadFilename = !Util::EmptyStr(NT(1));
+		NST(1, filename);
 
-		if ((!m_name || !hadFilename) && !Util::EmptyStr(filename))
+		if ((!NT(2) || !hadFilename) && !Util::EmptyStr(filename))
 		{
-			CString nzbNicename = MakeNiceNzbName(m_filename, true);
+			CString nzbNicename = MakeNiceNzbName(NT(1), true);
 			if (nzbNicename.Empty())
 			{
 				nzbNicename.Format("nzb_%i", GetId());
@@ -1706,18 +1710,20 @@ public:
 		nzbget_rs_free(buf);
 		return out;
 	}
-	const char* GetDestDir() { return m_destDir; }
-	void SetDestDir(const char* destDir) { m_destDir = destDir; }
-	const char* GetFinalDir() { return m_finalDir; }
-	void SetFinalDir(const char* finalDir) { m_finalDir = finalDir; }
-	const char* GetCategory() { return m_category; }
-	void SetCategory(const char* category) { m_category = category; }
-	const char* GetName() { return m_name; }
-	void SetHardLinkPath(std::string hardLinkPath) { m_hardLinkPath = std::move(hardLinkPath); }
-	const std::string& GetHardLinkPath() const { return m_hardLinkPath; }
-	void SetName(const char* name) { m_name = name; }
-	const std::string& GetMetaName() const { return m_metaName; }
-	void SetMetaName(std::string metaName) { m_metaName = std::move(metaName); }
+	const char* GetDestDir() { return NT(3); }
+	void SetDestDir(const char* destDir) { NST(3, destDir); }
+	const char* GetFinalDir() { return NT(4); }
+	void SetFinalDir(const char* finalDir) { NST(4, finalDir); }
+	const char* GetCategory() { return NT(5); }
+	void SetCategory(const char* category) { NST(5, category); }
+	const char* GetName() { return NT(2); }
+	void SetHardLinkPath(std::string hardLinkPath) { NST(8, hardLinkPath.c_str()); }
+	std::string GetHardLinkPath() { return NT(8); }
+	const char* GetHardLinkPathC() { return NT(8); }
+	void SetName(const char* name) { NST(2, name); }
+	std::string GetMetaName() { return NT(9); }
+	const char* GetMetaNameC() { return NT(9); }
+	void SetMetaName(std::string metaName) { NST(9, metaName.c_str()); }
 	int GetFileCount() { return m_s->fileCount; }
 	void SetFileCount(int fileCount) { m_s->fileCount = fileCount; }
 	int GetParkedFileCount() { return m_s->parkedFileCount; }
@@ -1811,16 +1817,16 @@ public:
 	CString BuildFinalDirName()
 	{
 		const char* categoryDestDir = nullptr;
-		if (!m_category.Empty())
+		if (!Util::EmptyStr(NT(5)))
 		{
 			const char* strs[3]{};
-			if (g_Options->QueryCategory(m_category, false, nullptr, strs) && !Util::EmptyStr(strs[1]))
+			if (g_Options->QueryCategory(NT(5), false, nullptr, strs) && !Util::EmptyStr(strs[1]))
 			{
 				categoryDestDir = strs[1];
 			}
 		}
 		NzbgetRsBuf buf = nzbget_rs_nzb_format_name(
-			2, g_Options->GetDestDir(), categoryDestDir, *m_category,
+			2, g_Options->GetDestDir(), categoryDestDir, NT(5),
 			GetName(), nullptr, g_Options->GetAppendCategoryDir() ? 1 : 0, GetId());
 		CString out(buf.data, static_cast<int>(buf.len));
 		nzbget_rs_free(buf);
@@ -1829,18 +1835,18 @@ public:
 	void BuildDestDirName()
 	{
 		const char* categoryDestDir = nullptr;
-		if (Util::EmptyStr(g_Options->GetInterDir()) && !m_category.Empty())
+		if (Util::EmptyStr(g_Options->GetInterDir()) && !Util::EmptyStr(NT(5)))
 		{
 			const char* strs[3]{};
-			if (g_Options->QueryCategory(m_category, false, nullptr, strs) && !Util::EmptyStr(strs[1]))
+			if (g_Options->QueryCategory(NT(5), false, nullptr, strs) && !Util::EmptyStr(strs[1]))
 			{
 				categoryDestDir = strs[1];
 			}
 		}
 		NzbgetRsBuf buf = nzbget_rs_nzb_format_name(
 			3, g_Options->GetInterDir(), g_Options->GetDestDir(), categoryDestDir,
-			*m_category, GetName(), g_Options->GetAppendCategoryDir() ? 1 : 0, GetId());
-		m_destDir = CString(buf.data, static_cast<int>(buf.len));
+			NT(5), GetName(), g_Options->GetAppendCategoryDir() ? 1 : 0, GetId());
+		nzbget_rs_nzb_set_text(m_s, 3, buf.data, (intptr_t)buf.len);
 		nzbget_rs_free(buf);
 	}
 	CompletedFileList* GetCompletedFiles() { return &m_completedFiles; }
@@ -1887,8 +1893,8 @@ public:
 	int GetExtraParBlocks() { return m_s->extraParBlocks; }
 	void SetExtraParBlocks(int extraParBlocks) { m_s->extraParBlocks = extraParBlocks; }
 	void SetUrlStatus(EUrlStatus urlStatus) { m_s->urlStatus = urlStatus; }
-	const char* GetQueuedFilename() { return m_queuedFilename; }
-	void SetQueuedFilename(const char* queuedFilename) { m_queuedFilename = queuedFilename; }
+	const char* GetQueuedFilename() { return NT(6); }
+	void SetQueuedFilename(const char* queuedFilename) { NST(6, queuedFilename); }
 	bool GetDeleting() { return m_s->deleting; }
 	void SetDeleting(bool deleting) { m_s->deleting = deleting; }
 	bool GetParking() { return m_s->parking; }
@@ -1922,8 +1928,8 @@ public:
 		return nzbget_rs_nzb_calc_health(
 			1, m_s->size, m_s->parSize, m_s->currentFailedSize, m_s->parCurrentFailedSize, allowEstimation ? 1 : 0);
 	}
-	const char* GetDupeKey() { return m_dupeKey; }
-	void SetDupeKey(const char* dupeKey) { m_dupeKey = dupeKey ? dupeKey : ""; }
+	const char* GetDupeKey() { return NT(7); }
+	void SetDupeKey(const char* dupeKey) { NST(7, dupeKey ? dupeKey : ""); }
 	int GetDupeScore() { return m_s->dupeScore; }
 	void SetDupeScore(int dupeScore) { m_s->dupeScore = dupeScore; }
 	EDupeMode GetDupeMode() { return (EDupeMode)m_s->dupeMode; }
@@ -2278,14 +2284,6 @@ public:
 	static const int FORCE_PRIORITY = 900;
 
 private:
-	CString m_url = "";
-	CString m_filename = "";
-	CString m_name;
-	CString m_destDir = "";
-	CString m_finalDir = "";
-	CString m_category = "";
-	std::string m_hardLinkPath;
-	std::string m_metaName;
 	// aggregate of FileInfo::m_s->dupeRecoveredArticles (persisted for restart)
 	std::set<int> m_dupeBlockedDonors;
 	// failed articles that were tried from duplicates / that no duplicate
@@ -2299,8 +2297,6 @@ private:
 	// from duplicate collections in post-processing (persisted)
 	StreamRepairJobList m_streamRepairJobs;
 	CompletedFileList m_completedFiles;
-	CString m_queuedFilename = "";
-	CString m_dupeKey = "";
 	FileList m_fileList;
 	NzbParameterList m_ppParameters;
 	ScriptStatusList m_scriptStatuses;
@@ -3104,8 +3100,8 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 		if (a1 == 3) { static thread_local CString s_finalDir; s_finalDir = n->BuildFinalDirName(); strs[0] = s_finalDir.Str(); return 0; }
 		if (a1 == 4) return n->GetDupeBlockedDonors()->count(a2) ? 1 : 0;
 		if (a1 == 5) { n->GetDupeBlockedDonors()->insert(a2); return 1; }
-		if (a1 == 6) { strs[0] = n->GetHardLinkPath().c_str(); return 0; }
-		if (a1 == 7) { strs[0] = n->GetMetaName().c_str(); return 0; }
+		if (a1 == 6) { strs[0] = n->GetHardLinkPathC(); return 0; }
+		if (a1 == 7) { strs[0] = n->GetMetaNameC(); return 0; }
 		if (a1 == 8) { if (a2 < 0) return n->GetParameters()->size(); NzbParameter& p = n->GetParameters()->at((size_t)a2); strs[0] = p.GetName(); strs[1] = p.GetValue(); return 0; }
 		if (a1 == 9) { if (a2 < 0) return n->GetServerStats()->size(); ServerStat& ss = n->GetServerStats()->at((size_t)a2); ints[0] = ss.GetServerId(); ints[1] = ss.GetSuccessArticles(); ints[2] = ss.GetFailedArticles(); return 0; }
 		if (a1 == 10) { n->GetScriptStatuses()->emplace_back(s1 ? s1 : "", (ScriptStatus::EStatus)a2); return 0; }

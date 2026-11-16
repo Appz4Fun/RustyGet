@@ -367,12 +367,17 @@ pub fn alt_covers_lost_articles(
     own_kind: crate::donorkind::DonorKind,
     backup_kind: crate::donorkind::DonorKind,
     projected_permille: i32,
+    borrow_underway: bool,
 ) -> bool {
     use crate::donorkind::DonorKind;
+    // A backup whose kind is not known yet still lends once a borrow from it is underway
+    // (dead volumes were placed in its video, or one was handed to the extraction).
+    let backup_lends = matches!(backup_kind, DonorKind::Twin | DonorKind::Borrowable)
+        || (borrow_underway && backup_kind != DonorKind::Unborrowable);
     !dead_rate
         && live_borrowing
         && own_kind != DonorKind::Unborrowable
-        && matches!(backup_kind, DonorKind::Twin | DonorKind::Borrowable)
+        && backup_lends
         && projected_permille >= 500
 }
 
@@ -4620,6 +4625,7 @@ impl NzbgetRsQueueCoordinator {
                         .as_deref(),
                 ),
                 nzb.health,
+                crate::postproc::dead_volume_borrow_underway(nzb.id),
             ) && !download_hopeless(
                 nzb.total_articles,
                 nzb.current_success_articles,
@@ -4818,6 +4824,7 @@ impl NzbgetRsQueueCoordinator {
             own_kind,
             backup_kind,
             eval.projected,
+            crate::postproc::dead_volume_borrow_underway(nzb.id),
         ) {
             if note_kept_for_borrowing(nzb.id) {
                 let mut msg = b"Keeping ".to_vec();
@@ -6181,15 +6188,19 @@ mod tests {
     #[test]
     fn lost_articles_an_alt_can_lend_keep_the_download() {
         use crate::donorkind::DonorKind::*;
-        assert!(alt_covers_lost_articles(false, true, Borrowable, Borrowable, 952));
-        assert!(alt_covers_lost_articles(false, true, Unknown, Twin, 600));
+        assert!(alt_covers_lost_articles(false, true, Borrowable, Borrowable, 952, false));
+        assert!(alt_covers_lost_articles(false, true, Unknown, Twin, 600, false));
         // Mostly gone, no live borrowing, an unborrowable backup or download: fail over.
-        assert!(!alt_covers_lost_articles(true, true, Borrowable, Borrowable, 952));
-        assert!(!alt_covers_lost_articles(false, false, Borrowable, Borrowable, 952));
-        assert!(!alt_covers_lost_articles(false, true, Borrowable, Unborrowable, 952));
-        assert!(!alt_covers_lost_articles(false, true, Borrowable, Unknown, 952));
-        assert!(!alt_covers_lost_articles(false, true, Unborrowable, Borrowable, 952));
-        assert!(!alt_covers_lost_articles(false, true, Borrowable, Borrowable, 499));
+        assert!(!alt_covers_lost_articles(true, true, Borrowable, Borrowable, 952, false));
+        assert!(!alt_covers_lost_articles(false, false, Borrowable, Borrowable, 952, false));
+        assert!(!alt_covers_lost_articles(false, true, Borrowable, Unborrowable, 952, false));
+        assert!(!alt_covers_lost_articles(false, true, Borrowable, Unknown, 952, false));
+        assert!(!alt_covers_lost_articles(false, true, Unborrowable, Borrowable, 952, false));
+        assert!(!alt_covers_lost_articles(false, true, Borrowable, Borrowable, 499, false));
+        // A backup of unknown kind lends once a borrow from it is underway, never otherwise.
+        assert!(alt_covers_lost_articles(false, true, Unknown, Unknown, 952, true));
+        assert!(!alt_covers_lost_articles(false, true, Unknown, Unborrowable, 952, true));
+        assert!(!alt_covers_lost_articles(true, true, Unknown, Unknown, 952, true));
     }
 
     #[test]

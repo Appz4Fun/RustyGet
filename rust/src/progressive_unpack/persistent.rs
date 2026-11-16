@@ -1,10 +1,11 @@
 //! Direct unpack of stored RAR members into zipfast persistent partial files.
 //!
-//! Each stored member is written straight to its final name as a persistent `PartialFile`.
-//! Lost article ranges become holes in that file instead of stopping extraction, and once the
-//! damaged volumes are repaired (from par2 or a twin's articles written into the volume files)
-//! only those ranges are read back in with `refill_from_packed`. Nothing is copied into place
-//! and nothing already extracted is redone when a primary dies and the fleet takes over.
+//! Each stored member is written as a persistent `PartialFile` into a private stage under the
+//! destination. Lost article ranges become holes in that file instead of stopping extraction,
+//! and once the damaged volumes are repaired (from par2 or a twin's articles written into the
+//! volume files) only those ranges are read back in with `refill_from_packed`. Verified outputs
+//! are then moved into place (a rename); nothing already extracted is redone when a primary
+//! dies and the fleet takes over. On by default; `RUSTYGET_PERSISTENT_UNPACK=0` turns it off.
 //!
 //! The persistent path runs only when it can: stored members of known size in the first
 //! volume, an expected volume count, overwrite mode and a Unix build. Anything else, and any
@@ -21,12 +22,31 @@ use zipfast::progressive::{
     ProtectedVolume, ProtectionDeclaration, ProtectionInventory, SessionControl, VolumeBacking,
 };
 
-/// Off by default: zipfast commits every 1 MiB write durably, which made a 15 GB member take
-/// 19 minutes against 95 s for the progressive copy path (Linux VM). Set
-/// `RUSTYGET_PERSISTENT_UNPACK=1` to use it until zipfast groups commits.
+/// On by default on Linux since zipfast groups persistent commits (#121): on a Linux VM a 15 GB
+/// stored member took 348 s persistent against 320 s for the progressive copy path, and 4 GB
+/// took 22.8 s against 33.9 s. Off by default on macOS, where each group commit's F_FULLFSYNCs
+/// made 4 GB about 2.5x slower than the copy path. `RUSTYGET_PERSISTENT_UNPACK` overrides
+/// either way: 0/false/off/no or 1/true/on/yes (any case).
 pub(super) fn enabled() -> bool {
-    cfg!(test) || std::env::var("RUSTYGET_PERSISTENT_UNPACK").as_deref() == Ok("1")
+    if cfg!(test) {
+        return true;
+    }
+    let value = std::env::var("RUSTYGET_PERSISTENT_UNPACK").unwrap_or_default();
+    switch_value(&value, !cfg!(target_os = "macos"))
 }
+
+/// Reads the switch's value; anything unrecognised (including empty) keeps the default.
+pub(super) fn switch_value(value: &str, default: bool) -> bool {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "0" | "false" | "off" | "no" => false,
+        "1" | "true" | "on" | "yes" => true,
+        _ => default,
+    }
+}
+
+/// Most members a set's first volume may hold for the persistent path: zipfast keeps every
+/// member's state for the session (about 3 of its 128 state pages and 6 descriptors each).
+const MAX_FIRST_VOLUME_MEMBERS: usize = 30;
 
 /// Directory under the destination that holds each set's partial state and trusted anchors.
 pub(super) const STATE_DIR: &str = ".rustyget-partial";
@@ -156,7 +176,13 @@ impl Plan {
                 p = zipfast::volume::next_volume(&p).ok_or("volume naming")?;
             }
         }
-        first_volume_qualifies(req.first_volume, req.password)?;
+        let members = first_volume_qualifies(req.first_volume, req.password)?;
+        // The session holds about one descriptor per volume and six per member; a set that would
+        // crowd the process's descriptors (and its sockets and article files) stays on the copy
+        // path.
+        if !fits_open_file_limit(names.len() + 6 * members) {
+            return Err("not enough file descriptors".into());
+        }
         let binding = binding_for(req);
         let root = req.dest.join(STATE_DIR).join(hex(&binding.archive[..8]));
         let stage = root.join("out");
@@ -204,7 +230,7 @@ pub(super) fn forget_state(req: &Request<'_>) {
 /// Members that start in the first volume must all be stored files of known size (RAR5 plain
 /// or AES, RAR4 plain), with names both path rules agree on. Later volumes are checked by
 /// zipfast when reached; a refusal there falls back.
-fn first_volume_qualifies(first: &Path, password: &str) -> Result<(), String> {
+fn first_volume_qualifies(first: &Path, password: &str) -> Result<usize, String> {
     use zipfast::rar5::reader::{Block, Volume};
     let pw = (!password.is_empty()).then_some(password);
     let mut vol = Volume::open_with_password(first, pw).map_err(|e| format!("headers: {e}"))?;
@@ -234,10 +260,13 @@ fn first_volume_qualifies(first: &Path, password: &str) -> Result<(), String> {
             Err(e) => return Err(format!("headers: {e}")),
         }
     }
+    if members > MAX_FIRST_VOLUME_MEMBERS {
+        return Err(format!("{members} members in the first volume"));
+    }
     if members == 0 {
         return Err("no member starts in the first volume".into());
     }
-    Ok(())
+    Ok(members)
 }
 
 fn binding_for(req: &Request<'_>) -> ArchiveBinding {

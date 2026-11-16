@@ -480,6 +480,9 @@ size_t nzbget_rs_nzb_scalars_size(void);
 // Text fields (ids as in qnzb.rs); null when unset. len < 0: NUL-terminated.
 const char* nzbget_rs_nzb_text(const NzbgetRsNzbScalars* p, int id);
 void nzbget_rs_nzb_set_text(const NzbgetRsNzbScalars* p, int id, const char* s, intptr_t len);
+// Small lists of a collection (op codes in qnzb.rs).
+int64_t nzbget_rs_nzb_coll(const NzbgetRsNzbScalars* p, int op, int a2, const NzbgetRsNzbScalars* p2,
+    const char* s1, const char* s2, int* ints, const char** strs);
 // Job threads for post-processing, live repair and direct unpack (rust/src/jobthread.rs).
 typedef struct JobThread JobThread;
 JobThread* nzbget_rs_job_new_post(int kind, uintptr_t post_ptr, int nzb_id, int auto_destroy);

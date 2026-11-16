@@ -127,6 +127,19 @@ fn fleet_upgrade_kind(
         let Some((nzb_ptr, in_history)) = dq_find_nzb(host_ctx, host_cb, dq_ptr, nzb_id) else {
             return;
         };
+        // it may have failed or died while the fleet was checked
+        if in_history
+            && inspect_nzb(host_ctx, host_cb, nzb_ptr, false).delete_status
+                != crate::dupecoord::DELETE_STATUS_DUPE
+        {
+            return;
+        }
+        if qh
+            .nzb_get_param(nzb_ptr, ALIVE_PARAM)
+            .is_some_and(|v| v.trim_ascii() == b"0")
+        {
+            return;
+        }
         let stored = DonorKind::from_param(qh.nzb_get_param(nzb_ptr, KIND_PARAM).as_deref());
         if !kind_upgrades(stored, kind) {
             return;
@@ -5869,6 +5882,12 @@ pub unsafe fn fleet_append(
     // with the new members, so a backup added later is classed now against
     // them, before it downloads, and they get a kind they lacked
     let mut earlier: Vec<(i32, NzbSummaryData)> = Vec::new();
+    // queued copies merged from several nzbs: one member's probe never speaks for one
+    let merged: Vec<i32> = existing
+        .iter()
+        .map(|(id, _)| *id)
+        .filter(|id| existing.iter().filter(|(x, _)| x == id).count() > 1)
+        .collect();
     for (ex_id, ex_path) in &existing {
         let Some(summary) = parse_nzb_summary(&dupe_read_all_bytes(ex_path)) else {
             continue;
@@ -6215,7 +6234,9 @@ pub unsafe fn fleet_append(
                 .iter()
                 .copied()
                 .filter(|&j| {
+                    // a member that is a dead or failed queued copy is no partner
                     j != i
+                        && (candidates[j].existing_id == 0 || member_stored[j].is_some())
                         && crate::donorkind::twins(
                             listed,
                             &probed[j].as_ref().expect("filtered on is_some").0,
@@ -6242,7 +6263,7 @@ pub unsafe fn fleet_append(
             let id = candidates[i].existing_id;
             // only a copy queued or parked as a backup (not failed, deleted or
             // dead) is ranked by, or written, its stored kind
-            if id != 0 && member_stored[i].is_some() {
+            if id != 0 && member_stored[i].is_some() && !merged.contains(&id) {
                 // a member already queued: rank and report what is known of it
                 if let Some(stored) = member_stored[i] {
                     if !kind_upgrades(stored, found) {

@@ -2027,7 +2027,10 @@ pub(crate) fn unpause_pars_for_damage_host(
         }
     }
     for cf in host.nzb_completed_files(nzb.ptr) {
-        if cf.status == crate::queuesubsys_host::CF_FAILURE {
+        // A volume that lost articles may bring far fewer blocks than its name
+        // says; counting it in full would under-fetch and leave the shortfall to
+        // a second fetch after the download. Count only complete volumes.
+        if cf.status != crate::queuesubsys_host::CF_SUCCESS {
             continue;
         }
         if let Some((_, blocks)) = crate::parparser::parse_par_filename(&cf.filename, true) {

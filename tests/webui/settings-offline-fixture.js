@@ -20,7 +20,8 @@ async function installOfflineModel(page, base) {
     if (url.pathname === '/jsonrpc') {
       const rpc = route.request().postDataJSON();
       const result = { loadconfig: options, config: options, configtemplates: [{ Name: '', Template: template }],
-        backbones: { Backbones: [], Host: '', Match: 'skipped', Provider: null, Matches: [] } }[rpc.method];
+        backbones: { Backbones: [], Host: '', Match: 'skipped', Provider: null, Matches: [] },
+        parpresetdetect: { Running: false, CPUs: 8, Presets: { large: { ParBuffer: 1024, ParThreads: 0, ParPauseQueue: false } } } }[rpc.method];
       assert.notEqual(result, undefined, 'Offline fixture must account for every read RPC: ' + rpc.method);
       return route.fulfill({ contentType: 'application/json', json: { result, id: rpc.id } });
     }

@@ -4093,6 +4093,7 @@ where
         let aes = entry.encrypted() && (entry.listing_method() == 99 || entry.aes_info().is_some());
         let spooled = aes && entry.packed_size() > ZIP_SPOOLED_CIPHERTEXT;
         let packed = entry.packed_size();
+        let entry_encrypted = entry.encrypted();
 
         let Some((mut dest_file, target_path, created_new)) =
             create_dest_file_with_path_no_follow(output_dir, &rel, overwrite_mode)
@@ -4126,7 +4127,8 @@ where
                 ways[attempt].clone(),
                 &cancel,
                 &mut dest_file,
-                spooled,
+                // The in-memory reader decrypts an encrypted member before any output.
+                spooled || (entry_encrypted && matches!(ways[attempt], ZipReadMode::InMemory)),
                 is_cancelled,
             );
             let Err(err) = &res else {
@@ -4154,14 +4156,18 @@ where
                     ..
                 })
             );
-            // A spool folder that fails for any other reason (TMPDIR missing or unwritable)
-            // still leaves the in-memory way.
-            let spool_failed = matches!(ways[attempt], ZipReadMode::Checked(_))
-                && matches!(ways.get(attempt + 1), Some(ZipReadMode::InMemory))
+            // A spool folder that fails for any other reason (TMPDIR missing or unwritable, or
+            // the disk full) still leaves the next way: the default temporary folder, then
+            // memory.
+            let spool_failed = spooled
+                && matches!(ways[attempt], ZipReadMode::Checked(_))
                 && matches!(err.operation(), Some(zipfast::zip::ReadFault::Io { .. }));
             if (storage || spool_failed) && attempt + 1 < ways.len() {
                 attempt += 1;
-            } else if trailing && !matches!(ways[attempt], ZipReadMode::InMemory) {
+            } else if trailing
+                && !matches!(ways[attempt], ZipReadMode::InMemory)
+                && (!entry_encrypted || packed <= ZIP_IN_MEMORY_LIMIT)
+            {
                 // The CRC is still checked by the plain reader.
                 ways.push(ZipReadMode::InMemory);
                 attempt = ways.len() - 1;

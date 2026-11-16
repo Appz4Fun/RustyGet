@@ -4608,6 +4608,29 @@ mod tests {
     }
 
     #[test]
+    fn test_7z_ppmd_archive_extracts() {
+        // tests/testdata/sevenzip/ppmd.7z: `7zz a -m0=PPMd -mx=9` of a 240427-byte text file.
+        // RustyGet's old 7z decoder handled PPMd; zipfast does from 1956a80 (#142).
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/testdata/sevenzip/ppmd.7z");
+        let dir = TempTestDir::new("7z_ppmd");
+        let out = dir.path().join("out");
+        let summary =
+            extract_7z_cancellable(&fixture, &out, "", 1, &mut |_, _| {}, &mut || false).unwrap();
+        assert_eq!(summary.files, 1);
+        let data = std::fs::read(out.join("notes.txt")).unwrap();
+        assert_eq!(data.len(), 240_427);
+        let hex: String = zipfast::crypto::sha256(&data)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(
+            hex,
+            "0122ad8992bd7ac4a223af24eeb3d68b40f6dfbcaa6348ba4c3a499b2aca577d"
+        );
+    }
+
+    #[test]
     fn test_7z_streaming_compressed_solid_folder() {
         let file1 = b"First file in solid LZMA2 folder!\n";
         let file2 = b"Second file in solid LZMA2 folder!\n";

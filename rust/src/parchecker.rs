@@ -2042,16 +2042,20 @@ pub(crate) fn streaming_session_kick_backfill(nzb_id: i32) {
                 }
             }
             let _running = Running(&worker.backfill_running);
-            let result = worker.session.backfill_pending();
+            let retry_at = || {
+                worker
+                    .backfill_retry_at
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+            };
+            // Back off up front, so a panic below waits out the delay too.
+            *retry_at() = Some(std::time::Instant::now() + BACKFILL_RETRY_DELAY);
             // A shared back-fill error is expected while verified slices still
             // sit in the article cache, so it is retried, never reported: the
             // strict back-fill inside repair surfaces any error that persists.
-            *worker
-                .backfill_retry_at
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = result
-                .is_err()
-                .then(|| std::time::Instant::now() + BACKFILL_RETRY_DELAY);
+            if worker.session.backfill_pending().is_ok() {
+                *retry_at() = None;
+            }
         });
     if spawned.is_err() {
         entry.backfill_running.store(false, Ordering::Release);

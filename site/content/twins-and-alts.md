@@ -22,7 +22,7 @@ A copy with a different video file, such as another encode, is neither. It's ano
 
 Two alts never share container bytes. A new volume size moves every byte; a new password, or even a new file time, changes the archive headers. Comparing those bytes would say two copies differ when the movie inside is identical.
 
-So RustyGet compares and borrows on the **inner payload**: the bytes of the final video file. It reaches them through every stored layer around them, such as a 7-Zip archive in copy mode, a RAR4 or RAR5 archive in store mode, an archive inside an archive, or an encrypted archive whose password it knows, and builds a map of where each video byte sits inside each copy. A missing range in one copy is then a known range in another.
+So RustyGet compares and borrows on the **inner payload**: the bytes of the final video file. It reaches them through every stored layer around them, such as a 7-Zip archive in copy mode, a RAR4 or RAR5 archive in store mode, an archive inside an archive, or an encrypted RAR or 7-Zip archive whose password it knows, and builds a map of where each video byte sits inside each copy. A missing range in one copy is then a known range in another.
 
 The same rule works in reverse. When two copies have different par2 checksums, that proves only that their containers differ. It never means "another encode": the video inside can still be the same, and only reading the video can tell.
 
@@ -47,7 +47,7 @@ yEnc and RAR checksums are CRC32 values, only 32 bits long. Among millions of fi
 
 Sizes are weaker still. A re-upload with a new password has exactly the same volume sizes as the first upload, because the size of an encrypted archive doesn't depend on the password. Size, file count, and total bytes never make a twin on their own.
 
-What can make a twin: a full MD5 together with the length, as par2 lists them, or several matching articles at the same positions, including articles that carry archive headers.
+What can make a twin: a full MD5 together with the length, as par2 lists them. Matching articles at the same positions are weaker evidence, and only strong when they include the articles that carry archive headers, because that's where a re-pack differs.
 
 ## Re-packs and encrypted reposts
 
@@ -61,20 +61,22 @@ Encrypted repost
 
 The preceding table lists what a post carries. RustyGet uses some of those fingerprints now:
 
-- **Twins** are proven by par2: both copies' par2 file lists must name the same files by MD5 and length, or more than half of them for a near-twin (`TWIN N/M`). To rank as a twin in a fleet, their data files must also split into the same numbers of articles. Without par2, TwinCheck compares articles at the same positions in both postings instead, but a copy without par2 never ranks as a twin in a fleet.
+- **Twins** are proven by par2: both copies' par2 file lists must name the same files by MD5 and length, or more than half of them for a near-twin (`TWIN N/M`). To rank as a twin in a fleet, their data files must also split into the same numbers of articles. Without par2, TwinCheck compares articles spread evenly across both postings instead. That sampling doesn't aim at the header articles, so it can't tell a re-pack from a twin, and a copy without par2 never ranks as a twin in a fleet.
 - **Alts** are proven at fleet intake. RustyGet opens every live copy down to its video and reads its start plus 2, 4, or 8 random places, the same places in every copy. Copies that read the same are the same video. A copy holding another video is dropped from the fleet, and a copy that can't be opened stays as an unverified backup.
-- **How borrowable** an alt is comes from the first article of its largest file. A bare video, a raw split, and a stored RAR or ZIP are borrowable. A stored RAR whose data is encrypted with a password in the NZB file can be read, at a cost, so it ranks after them. A 7-Zip keeps its headers at its end, so its first article can't tell: without a password it ranks in the middle, and with one it ranks last. Compression, encryption without a known password, and RAR archives with encrypted headers rank last too, even with the password, because nothing about their content can be read from that first article.
+- **How borrowable** an alt is comes from the first article of its largest file. A bare video, a raw split, and a stored RAR or ZIP are borrowable. A stored RAR whose data is encrypted with a password in the NZB file can be read, at a cost, so it ranks after them. A 7-Zip keeps its headers at its end, so its first article can't tell: without a password it ranks in the middle, and a single `.7z` file with a password ranks last. A ZIP entry that's encrypted ranks last even with the password, because stream repair doesn't decrypt ZIP. Compression, encryption without a known password, and RAR archives with encrypted headers rank last too, even with the password, because nothing about their content can be read from that first article.
 - **Borrowed data** is checked before it counts: against bytes the primary already has, against yEnc checksums where the article carries one, and against the primary's par2 blocks where its par2 set covers them. Stream repair proves a donor with probe reads, and the par check after the download has the final say. See [Making sure the bytes are right](duplicate-fleets.md#making-sure-the-bytes-are-right).
 
-Part checksums are checked for each article as it downloads, but RustyGet doesn't combine them into whole-file keys or link copies on them yet. Linking on archive header checksums or on the sizes of encrypted reposts isn't built either.
+Part checksums are checked for each article as it downloads, but RustyGet doesn't combine them into whole-file keys or link copies on them yet. Linking on archive header checksums, on encryption salts, or on the sizes of encrypted reposts isn't built either.
 
 ## Donor order
 
-When a primary needs data, RustyGet asks donors in this order:
+A fleet ranks its copies in these tiers, and article fallback asks donors in the same order:
 
 1. Twins, by health. Their articles fill holes directly.
 2. Borrowable alts. Their video bytes fill holes through the map.
 3. Copies whose packaging couldn't be told, such as a 7-Zip without a password, and stored RAR copies whose data needs the password to decrypt.
 4. Non-borrowable alts. They're downloaded and extracted whole, or serve as failover backups.
+
+A copy added outside a fleet has no tier from intake: article fallback counts it as a twin when TwinCheck proved one, and otherwise with the copies whose packaging couldn't be told. Stream repair asks donors by duplicate score alone, which for a fleet follows the same tiers.
 
 Within a tier, the copy's duplicate score breaks ties. For a fleet, that's the score RustyGet gave each copy from its own ranking, so a client can't push an encrypted copy ahead of a borrowable one. A single copy is used whatever its kind.

@@ -563,7 +563,7 @@ fn rar4_volume(header: Vec<u8>, payload: &[u8], more: bool, first: bool) -> Vec<
     v
 }
 
-fn rar4_store_volumes(name: &str, data: &[u8], chunk: usize) -> Vec<Vec<u8>> {
+pub(crate) fn rar4_store_volumes(name: &str, data: &[u8], chunk: usize) -> Vec<Vec<u8>> {
     let parts: Vec<&[u8]> = data.chunks(chunk).collect();
     let n = parts.len();
     parts
@@ -4229,4 +4229,28 @@ fn dead_rar4_volumes_extract_from_borrowed_data_through_rebuilt_headers() {
     let (r, log) = run(&first, &t.out(), Box::new(WithVirtual { virtuals }));
     expect_ok(r, &log);
     assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+}
+
+/// One non-volume RAR4 archive of stored 1-byte members, Windows host, DOS attrs.
+pub(crate) fn rar4_windows_store_archive(names: &[String]) -> Vec<u8> {
+    let mut v = b"Rar!\x1a\x07\x00".to_vec();
+    v.extend(rar4_block(0x73, 0, &[0u8; 6], 0));
+    for name in names {
+        let data = b"x";
+        let mut rest = Vec::new();
+        rest.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        rest.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        rest.push(2); // host OS: Windows
+        rest.extend_from_slice(&crc32fast::hash(data).to_le_bytes());
+        rest.extend_from_slice(&DOS_TIME.to_le_bytes());
+        rest.push(29);
+        rest.push(0x30);
+        rest.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        rest.extend_from_slice(&0x20u32.to_le_bytes());
+        rest.extend_from_slice(name.as_bytes());
+        v.extend(rar4_block(0x74, 0x8000, &rest, data.len()));
+        v.extend_from_slice(data);
+    }
+    v.extend(rar4_block(0x7b, 0, &[], 0));
+    v
 }

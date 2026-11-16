@@ -2630,6 +2630,15 @@ impl NzbgetRsUnpackController {
             },
         );
         st.joined_files = joined;
+        // A joined file named like an archive volume is output: count it now.
+        if ok {
+            if let Some(g) = &guard {
+                if let Err(why) = crate::unpacklimits::settle(g) {
+                    self.print_message(ctx, host_cb, st, MK_ERROR, why.as_bytes());
+                }
+            }
+        }
+        let ok = ok && guard.as_ref().is_none_or(|g| crate::unpacklimits::breach_of(g).is_none());
         if !ok {
             st.unpack_ok = false;
             if guard.as_ref().is_some_and(|g| crate::unpacklimits::breach_of(g).is_some()) {
@@ -2719,7 +2728,17 @@ impl NzbgetRsUnpackController {
             return;
         }
 
-        // Names are ASCII only: renamed once every unpack pass of the job is done.
+        // Every file the job unpacked is counted (archive volumes held back included), then
+        // names are made ASCII: once every unpack pass of the job is done.
+        if st.unpack_ok {
+            if let Some(guard) = st.unpack_guard.clone() {
+                if let Err(why) = crate::unpacklimits::settle_job(&guard) {
+                    self.print_message(ctx, host_cb, st, MK_ERROR, why.as_bytes());
+                    st.unpack_ok = false;
+                    st.unpack_limit_error = true;
+                }
+            }
+        }
         if st.unpack_ok {
             if let Some(guard) = st.unpack_guard.clone() {
                 let mut lines: Vec<(i32, String)> = Vec::new();

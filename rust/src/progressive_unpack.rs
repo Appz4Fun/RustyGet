@@ -497,6 +497,11 @@ where
         opts.limits.name_bytes = opts.limits.name_bytes.saturating_add(cost.names);
     }
     opts.limits.protection_paths = opts.limits.protection_paths.max(volume_count + 16);
+    // Tests force a declared set past a limit so the undeclared retry runs.
+    #[cfg(test)]
+    if tests::FORCE_DECLARE.with(|f| f.get()) && *declared {
+        opts.limits.protection_path_bytes = 4096;
+    }
     log_cb(
         3,
         &format!(

@@ -1,7 +1,8 @@
 use super::*;
 
 thread_local! {
-    /// Declares complete sets at session start whatever their estimated cost.
+    /// Declares complete sets at session start whatever their estimated cost, and caps
+    /// the declared session's protection path bytes so it hits a limit.
     pub(super) static FORCE_DECLARE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 use std::sync::atomic::{AtomicBool, AtomicUsize};

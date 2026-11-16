@@ -3869,8 +3869,9 @@ enum ZipReadMode {
     InMemory,
 }
 
-/// An AES member up to this size can still be read in memory when zipfast refuses every
-/// spool folder (zipfast's own in-memory limit for encrypted members).
+/// An AES member with up to this much ciphertext can still be read in memory when zipfast
+/// refuses every spool folder (zipfast's own in-memory limit for encrypted members; only the
+/// ciphertext is held, the output is streamed, so the unpacked size is not limited).
 const ZIP_IN_MEMORY_LIMIT: u64 = 128 << 20;
 
 /// Decodes one selected member with zipfast into `dest`, returning the bytes written. `poll`
@@ -3899,11 +3900,9 @@ fn zip_read_member(
                 check: &mut dyn FnMut() -> bool| {
         let mut written = 0u64;
         if in_memory {
-            let selected = session
-                .select(id, ZIP_IN_MEMORY_LIMIT, cancel.clone())
-                .map_err(|e| {
-                    zipfast::zip::ZipReadError::from(zipfast::zip::ReadFault::Session(e))
-                })?;
+            let selected = session.select(id, u64::MAX, cancel.clone()).map_err(|e| {
+                zipfast::zip::ZipReadError::from(zipfast::zip::ReadFault::Session(e))
+            })?;
             selected
                 .read(password, |chunk| {
                     if check() {
@@ -3947,15 +3946,25 @@ fn zip_read_member(
         return read(session, dest, is_cancelled);
     }
     let spawned = std::thread::scope(|scope| {
+        // The worker drops `done` when it returns (or panics), which wakes the wait below at
+        // once instead of on the next poll tick.
+        let (done, finished) = std::sync::mpsc::channel::<()>();
+        let (worker_session, worker_dest, worker_read) = (&mut *session, &mut *dest, &read);
         let worker = std::thread::Builder::new()
             .name("zip-member".into())
-            .spawn_scoped(scope, || read(&mut *session, &mut *dest, &mut || false))
+            .spawn_scoped(scope, move || {
+                let _done = done;
+                worker_read(worker_session, worker_dest, &mut || false)
+            })
             .ok()?;
-        while !worker.is_finished() {
+        loop {
             if is_cancelled() {
                 cancel.cancel();
             }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            match finished.recv_timeout(std::time::Duration::from_millis(10)) {
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                _ => break,
+            }
         }
         Some(worker.join().unwrap_or_else(|_| {
             Err(
@@ -5178,6 +5187,68 @@ mod tests {
             cancelled * 2 < full,
             "cancel took {cancelled:?}, a full extraction {full:?}"
         );
+    }
+
+    #[test]
+    fn test_zip_in_memory_aes_fallback_streams_large_unpacked_members() {
+        // Compresses well: ~130 KiB of ciphertext unpacks to 130 MiB, over the 128 MiB that
+        // limits only the in-memory reader's ciphertext.
+        use std::io::Write;
+        let size = 130usize << 20;
+        let mut enc = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::best());
+        let zeros = vec![0u8; 1 << 20];
+        for _ in 0..(size >> 20) {
+            enc.write_all(&zeros).unwrap();
+        }
+        let deflated = enc.finish().unwrap();
+        let password = "pw";
+        let salt = [0x66u8; 16];
+        let derived = zipfast::crypto::aes_derive(password.as_bytes(), &salt, 32).unwrap();
+        let ct = zipfast::crypto::decrypt_winzip_ctr(&derived[..32], &deflated).unwrap();
+        let auth = {
+            let key = openssl::pkey::PKey::hmac(&derived[32..64]).unwrap();
+            let mut signer =
+                openssl::sign::Signer::new(openssl::hash::MessageDigest::sha1(), &key).unwrap();
+            signer.update(&ct).unwrap();
+            signer.sign_to_vec().unwrap()
+        };
+        let mut payload = salt.to_vec();
+        payload.extend_from_slice(&derived[64..66]);
+        payload.extend_from_slice(&ct);
+        payload.extend_from_slice(&auth[..10]);
+        let mut extra = Vec::new();
+        extra.extend_from_slice(&0x9901u16.to_le_bytes());
+        extra.extend_from_slice(&7u16.to_le_bytes());
+        extra.extend_from_slice(&2u16.to_le_bytes());
+        extra.extend_from_slice(b"AE");
+        extra.push(3);
+        extra.extend_from_slice(&8u16.to_le_bytes()); // inner method: deflate
+        let dir = TempTestDir::new("aes_inmem");
+        let zip_path = dir.path().join("zeros.zip");
+        std::fs::write(
+            &zip_path,
+            build_single_entry_zip(b"zeros.bin", 1, 99, 0, size as u32, &extra, &payload),
+        )
+        .unwrap();
+
+        let cancel = zipfast::extract::Cancellation::default();
+        let mut session = zipfast::zip::ReadSession::open_cancelable(&zip_path, &cancel).unwrap();
+        let id = session.metadata().entry_id(0).unwrap();
+        let out_path = dir.path().join("zeros.bin");
+        let mut out = std::fs::File::create(&out_path).unwrap();
+        let written = zip_read_member(
+            &mut session,
+            &id,
+            Some(password),
+            ZipReadMode::InMemory,
+            &cancel,
+            &mut out,
+            true,
+            &mut || false,
+        )
+        .unwrap();
+        assert_eq!(written, size as u64);
+        assert_eq!(std::fs::metadata(&out_path).unwrap().len(), size as u64);
     }
 
     /// Run by hand against a folder on a file system zipfast's own staged output refuses

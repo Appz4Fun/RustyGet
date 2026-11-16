@@ -49,7 +49,7 @@ pub(super) fn switch_value(value: &str, default: bool) -> bool {
 const MAX_FIRST_VOLUME_MEMBERS: usize = 30;
 
 /// Directory under the destination that holds each set's partial state and trusted anchors.
-pub(super) const STATE_DIR: &str = ".rustyget-partial";
+pub(crate) const STATE_DIR: &str = ".rustyget-partial";
 
 pub(super) enum Outcome {
     Done(Result<zipfast::extract::Summary, Error>),
@@ -101,8 +101,12 @@ where
             ))))
         }
         Err(Step::Fail(f)) => {
-            // Everything this run wrote is in its own state directory, unpublished.
-            remove_state_root(&plan.root);
+            // Everything this run wrote is in its own state directory, unpublished. A cancel
+            // keeps it: a daemon shutdown resumes from it on the next start, and deleting the
+            // job removes it with the direct-unpack cleanup (unpack::direct_unpack_cleanup).
+            if !matches!(f, Failure::Canceled) {
+                remove_state_root(&plan.root);
+            }
             Outcome::Done(Err(Error::Failed(f)))
         }
         Err(Step::Fallback(why)) => {
@@ -441,6 +445,11 @@ struct Run<'a> {
     /// Each member's handle and output path, by archive order.
     handles: Vec<(MemberKey, PartialFile, Member)>,
     holes: Vec<HoleReport>,
+    /// Members adopted from an earlier run's state (a restart) that still have holes: their
+    /// holes were reported to that run, so they are refilled from every volume.
+    adopted_holed: Vec<MemberKey>,
+    /// Every member zipfast adopted from an earlier run's state.
+    adopted: Vec<MemberKey>,
     anchors: Option<Arc<DurableAnchors>>,
 }
 
@@ -453,6 +462,8 @@ impl<'a> Run<'a> {
             damaged: Arc::new(Mutex::new(std::collections::HashMap::new())),
             handles: Vec::new(),
             holes: Vec::new(),
+            adopted_holed: Vec::new(),
+            adopted: Vec::new(),
             anchors: None,
         }
     }
@@ -465,8 +476,8 @@ impl<'a> Run<'a> {
     where
         F: FnMut(i32, &str),
     {
-        // Reopening an earlier run's state is not supported: start from an empty root.
-        let _ = std::fs::remove_dir_all(&self.plan.root);
+        // An earlier run's state for this set (a restart) is kept: zipfast adopts the members it
+        // anchored and resumes the one that was mid-extraction from its committed output.
         let state_dir = self.plan.root.join("state");
         let anchor_dir = self.plan.root.join("anchors");
         provision_dir(&state_dir)
@@ -572,6 +583,30 @@ impl<'a> Run<'a> {
                             .map_err(|e| Step::Fallback(format!("partial handle: {e:?}")))?;
                         self.handles.push((member, file, current_member.clone()));
                     }
+                    Ok(Some(ProgressiveEvent::PartialAdopted {
+                        member,
+                        produced,
+                        finished,
+                        ..
+                    })) => {
+                        let file = drive
+                            .session
+                            .partial_file(&member)
+                            .map_err(|e| Step::Fallback(format!("partial handle: {e:?}")))?;
+                        log_cb(
+                            3,
+                            &format!(
+                                "Unrar: resuming {} from its saved state ({produced} bytes{})",
+                                String::from_utf8_lossy(&current_member.name),
+                                if finished { ", finished" } else { "" }
+                            ),
+                        );
+                        if file.remaining().map(|r| !r.is_empty()).unwrap_or(true) && finished {
+                            self.adopted_holed.push(member.clone());
+                        }
+                        self.adopted.push(member.clone());
+                        self.handles.push((member, file, current_member.clone()));
+                    }
                     Ok(Some(ProgressiveEvent::Hole(report))) => {
                         log_cb(
                             3,
@@ -630,7 +665,19 @@ impl<'a> Run<'a> {
             }
         }
         drop(session);
-        if !self.holes.is_empty() {
+        // A resumed member that was mid-extraction may have been finished by this run: check
+        // every adopted member for holes now. Holes this run reported do not name the volumes
+        // of holes the earlier run reported, so an adopted member with any hole left is
+        // refilled from every volume.
+        for (key, file, _) in &self.handles {
+            if self.adopted.contains(key)
+                && !self.adopted_holed.contains(key)
+                && file.remaining().map(|r| !r.is_empty()).unwrap_or(false)
+            {
+                self.adopted_holed.push(key.clone());
+            }
+        }
+        if !self.holes.is_empty() || !self.adopted_holed.is_empty() {
             match self.refill(log_cb, is_cancelled) {
                 Err(Step::GaveUp) => {
                     self.publish_intact(is_cancelled).map_err(Step::Fallback)?;
@@ -714,28 +761,40 @@ impl<'a> Run<'a> {
                 Step::GaveUp
             });
         }
-        let mut volumes: Vec<u32> = self
+        let mut volumes: Vec<u32> = if self.adopted_holed.is_empty() {
+            self.holes
+                .iter()
+                .flat_map(|h| h.packed.iter().map(|s| s.volume))
+                .collect()
+        } else {
+            (0..self.plan.names.len() as u32).collect()
+        };
+        volumes.sort_unstable();
+        volumes.dedup();
+        // Volumes a hole of this run named must be on disk; the rest of an all-volumes refill
+        // skips a volume that has no file (one rebuilt from a duplicate): a hole it was needed
+        // for stays and verify sends the set to the progressive path.
+        let required: Vec<u32> = self
             .holes
             .iter()
             .flat_map(|h| h.packed.iter().map(|s| s.volume))
             .collect();
-        volumes.sort_unstable();
-        volumes.dedup();
-        for (key, file, path) in self.handles.iter_mut() {
-            let Some(name) = self
-                .holes
-                .iter()
-                .find(|h| &h.member == key)
-                .map(|h| String::from_utf8_lossy(&h.name).into_owned())
-            else {
+        for (key, file, member) in self.handles.iter_mut() {
+            let name = if self.holes.iter().any(|h| &h.member == key)
+                || self.adopted_holed.contains(key)
+            {
+                String::from_utf8_lossy(&member.name).into_owned()
+            } else {
                 continue;
             };
-            let _ = &path;
             for &v in &volumes {
                 let Some(name) = self.plan.names.get(v as usize) else {
                     continue;
                 };
                 let path = self.plan.dir.join(name);
+                if !required.contains(&v) && !path.is_file() {
+                    continue;
+                }
                 let mut f = std::fs::File::open(&path).map_err(|e| {
                     Step::Fallback(format!("repaired volume {}: {e}", path.display()))
                 })?;

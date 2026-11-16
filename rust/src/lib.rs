@@ -109,6 +109,8 @@ pub mod postrepair;
 pub mod qarticle;
 #[cfg(unix)]
 pub mod qfile;
+#[cfg(unix)]
+pub mod qnzb;
 pub mod queuecoord;
 pub(crate) mod queuesubsys_host;
 pub mod sevenzraw;

@@ -369,6 +369,17 @@ RsArticleList* nzbget_rs_artlist_new(void);
 void nzbget_rs_artlist_free(RsArticleList* list);
 uintptr_t nzbget_rs_article_host(RsArticleList* list, RsArticle* article, int op, int a2, uintptr_t p2,
     const char* s1, int* ints, int64_t* i64s, const char** strs);
+// A queued file's data (rust/src/qfile.rs); field ids in qfile::field / qfile::text.
+typedef struct RsFile RsFile;
+RsFile* nzbget_rs_file_new(int id);
+void nzbget_rs_file_free(RsFile* f);
+int nzbget_rs_file_ids(int op, int v);
+int64_t nzbget_rs_file_get(const RsFile* f, int id);
+void nzbget_rs_file_set(const RsFile* f, int id, int64_t v);
+const char* nzbget_rs_file_text(const RsFile* f, int id);
+void nzbget_rs_file_set_text(const RsFile* f, int id, const char* s);
+RsArticleList* nzbget_rs_file_articles(const RsFile* f);
+int64_t nzbget_rs_file_op(const RsFile* f, int op, int a2, const char* s1, int* ints, const char** strs);
 // Job threads for post-processing, live repair and direct unpack (rust/src/jobthread.rs).
 typedef struct JobThread JobThread;
 JobThread* nzbget_rs_job_new_post(int kind, uintptr_t post_ptr, int nzb_id, int auto_destroy);

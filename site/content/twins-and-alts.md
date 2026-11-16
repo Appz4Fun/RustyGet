@@ -35,9 +35,9 @@ Every post leaves fingerprints that can link it to another post without download
 | Sizes in the NZB file | The NZB file itself | Free | A filter only. Many unrelated files share a size, and every encrypted repost of one release shares the sizes of the others. |
 | Part checksums | The checksum at the end of each yEnc article (`pcrc32`, or `crc32` for a single-part post), when the poster includes one | Already there for every article that downloads | Same bytes in that part. The parts of a file combine into a checksum of the whole file. |
 | par2 file list | One par2 index article | One article | Each file's MD5 and length. Equal lists mean the files are byte-identical, whatever their names. |
-| Archive headers | The first article of a RAR or ZIP volume; for 7-Zip, the end of the last volume, where it keeps its headers | One or two articles | The name and size of the file packed inside, and how it's packed: whether it's stored or compressed, and whether it's encrypted. The checksum covers the whole file only in the last volume of a split RAR; earlier volumes carry the checksum of their own part. |
+| Archive headers | The first article of each RAR volume or of a ZIP's first piece; for 7-Zip, the end of the last volume, where it keeps its headers | One or two articles | The name and size of the file packed inside, and how it's packed: whether it's stored or compressed, and whether it's encrypted. The checksum covers the whole file only in the last volume of a split RAR; earlier volumes carry the checksum of their own part. |
 | Sampled video bytes | A few places spread across the video, read through the containers | A few articles | The same video inside, whatever the packaging. |
-| Encryption salts | The header of an encrypted archive | One article | The same archive run. Every new run picks a fresh random salt (RAR) or initialization vector (7-Zip), so two encrypted reposts never share one. |
+| Encryption salts | The header of an encrypted archive | One article | The same encryption run. Each run picks a fresh random salt (RAR) or initialization vector (7-Zip), so two separately encrypted archives never share one. |
 
 The cheap fingerprints narrow the field; the stronger ones confirm. No single key should decide a link on its own, because every key has a known way to match wrongly.
 
@@ -55,7 +55,7 @@ Re-pack
 : An archive packed again with the same files, often with only a new file time. Stored archives are deterministic, so most of the articles in the middle come out byte-identical; only the articles holding headers differ. par2 lists one MD5 per file, though, and in a multi-volume RAR every volume carries a header, so every volume's MD5 changes. Such a copy shares most of its par2 file list with the primary only when the changed headers sit in a few of its files, as in a 7-Zip split into `.001` pieces or a release of many separate files. RustyGet labels it `TWIN N/M` when more than half of the files match.
 
 Encrypted repost
-: An upload whose archive headers are encrypted, such as RAR5 with `-hp` or 7-Zip with encrypted headers. Encryption hides every content fingerprint, and the fresh salt or initialization vector changes every byte, so it's never a twin of another upload. With the password in the NZB file, stream repair can still read through a stored, encrypted copy, so it can repair the primary, at a cost. Without the password, it can only be a failover backup.
+: An upload whose archive headers are encrypted, such as RAR5 with `-hp` or 7-Zip with encrypted headers. Encryption hides every content fingerprint. An archive encrypted again gets a fresh salt or initialization vector that changes every byte, so it's never a twin of another encryption run; the same encrypted files uploaded again are still a twin. With the password in the NZB file, stream repair can still read through a stored, encrypted copy, so it can repair the primary, at a cost. Without the password, it can only be a failover backup.
 
 ## What RustyGet checks today
 
@@ -70,13 +70,15 @@ Part checksums are checked for each article as it downloads, but RustyGet doesn'
 
 ## Donor order
 
-A fleet ranks its copies in these tiers, and article fallback asks donors in the same order:
+Copies are ranked by kind:
 
-1. Twins, by health. Their articles fill holes directly.
+1. Twins. Their articles fill holes directly.
 2. Borrowable alts. Their video bytes fill holes through the map.
 3. Copies whose packaging couldn't be told, such as a 7-Zip without a password, and stored RAR copies whose data needs the password to decrypt.
 4. Non-borrowable alts. They're downloaded and extracted whole, or serve as failover backups.
 
-A copy added outside a fleet has no tier from intake: article fallback counts it as a twin when TwinCheck proved one, and otherwise with the copies whose packaging couldn't be told. Stream repair asks donors by duplicate score alone, which for a fleet follows the same tiers.
+A fleet puts health first: healthy copies, with at least 75% of the checked articles alive, come before weak ones, then copies of unknown health, then dead ones. The kinds order the copies within each of those groups, so a copy that's missing many articles never leads however cheap its packaging. Each copy's duplicate score follows that rank, so a client can't push an encrypted copy ahead of a borrowable one.
 
-Within a tier, the copy's duplicate score breaks ties. For a fleet, that's the score RustyGet gave each copy from its own ranking, so a client can't push an encrypted copy ahead of a borrowable one. A single copy is used whatever its kind.
+Article fallback asks donors by kind first, then by duplicate score. A copy added outside a fleet has no kind from intake: article fallback counts it as a twin when par2 proved one, and otherwise with the copies whose packaging couldn't be told. Stream repair asks donors by duplicate score alone, so for a fleet it follows the fleet's rank.
+
+A single copy is used whatever its kind.

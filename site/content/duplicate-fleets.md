@@ -144,9 +144,10 @@ Clients that already know every copy, such as the [Kodi add-on](kodi.md), send t
 1. Reads each NZB file, and marks members that are the same posting as another member, or as something RustyGet already has, as `SAME_POSTING`.
 2. Holds downloads for a moment, so the check gets connections, and checks a sample of each posting on all servers at once, within the call's time limit.
 3. Opens every live copy down to its video at intake, through each stored container (7-Zip, RAR, zip, an archive inside an archive) with the same map stream repair uses, and reads the video's start plus a few random places of it: 2, 4 or 8 places for the weak, medium or hard `DupeHealthPreset`. All copies read the same places. The video most copies share is the fleet's; a copy holding another video is dropped with the status `ERROR` and the reason "not the same video". A copy that can't be opened this way (compressed, encrypted without a known password, unreadable in time) stays, unverified. The log has a line for each copy.
-4. Ranks the members: twins first, then borrowable alts, then the rest; within each, checked and alive first, then unknown, then dead, and then the most complete copy, the copy whose size is closest to the fleet's median size, and the order the client sent.
-5. Adds every usable member under the key, with scores that follow the rank. The duplicate check queues the top one and keeps the rest as backups. If a download of the key is already running, the members become its backups instead.
-6. Replies with the chosen download, a reason, and a status for every member.
+4. Reads one or two articles of every copy, even a fleet of one, to class it as a twin, a borrowable alt or an unborrowable alt (`DupeCopyKind`). Copies of the key already queued from an earlier fleet are read with the new ones, so a backup sent later is classed against them before it downloads, and a queued copy that turns out to have a twin among the new members becomes a twin too.
+5. Ranks the members: twins first, then borrowable alts, then the rest; within each, checked and alive first, then unknown, then dead, and then the most complete copy, the copy whose size is closest to the fleet's median size, and the order the client sent.
+6. Adds every usable member under the key, with scores that follow the rank. The duplicate check queues the top one and keeps the rest as backups. If a download of the key is already running, the members become its backups instead.
+7. Replies with the chosen download, a reason, and a status for every member.
 
 If the release is already on disk, RustyGet adds nothing and the reply says `ALREADY_DOWNLOADED`. See [API and compatibility](api.md#appendfleet) for the full call.
 

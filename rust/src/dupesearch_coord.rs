@@ -65,6 +65,76 @@ fn video_param_value(same: bool) -> &'static [u8] {
 }
 
 /// Records the intake verdict on a copy already in the queue or history.
+/// Whether each copy queued from an earlier submission may count as a twin
+/// partner: not when its health says it is dead (`DupeAlive=0`).
+fn fleet_earlier_alive(
+    host_ctx: *mut c_void,
+    host_cb: DupeHostFn,
+    earlier: &[(i32, NzbSummaryData)],
+) -> Vec<bool> {
+    if earlier.is_empty() {
+        return Vec::new();
+    }
+    with_guarded_queue(host_ctx, host_cb, |dq_ptr| {
+        let Some(qh) = crate::ffi::queue_host() else {
+            return vec![false; earlier.len()];
+        };
+        earlier
+            .iter()
+            .map(|(id, _)| {
+                dq_find_nzb(host_ctx, host_cb, dq_ptr, *id).is_some_and(|(ptr_, _)| {
+                    qh.nzb_get_param(ptr_, ALIVE_PARAM)
+                        .is_none_or(|v| v.trim_ascii() != b"0")
+                })
+            })
+            .collect()
+    })
+}
+
+/// Records the kind a probe found for a copy queued from an earlier
+/// submission. It only ever gets better informed: `unknown` writes nothing,
+/// and a kind already stored is replaced only by `twin` (a twin turned up), or
+/// when the stored one is `unknown`.
+fn fleet_upgrade_kind(
+    host_ctx: *mut c_void,
+    host_cb: DupeHostFn,
+    nzb_id: i32,
+    kind: crate::donorkind::DonorKind,
+) {
+    use crate::donorkind::{DonorKind, KIND_PARAM};
+    if kind == DonorKind::Unknown {
+        return;
+    }
+    with_guarded_queue(host_ctx, host_cb, |dq_ptr| {
+        let Some(qh) = crate::ffi::queue_host() else {
+            return;
+        };
+        let Some((nzb_ptr, in_history)) = dq_find_nzb(host_ctx, host_cb, dq_ptr, nzb_id) else {
+            return;
+        };
+        let stored = DonorKind::from_param(qh.nzb_get_param(nzb_ptr, KIND_PARAM).as_deref());
+        if !kind_upgrades(stored, kind) {
+            return;
+        }
+        qh.nzb_set_param(nzb_ptr, KIND_PARAM, Some(kind.param()));
+        qh.nzb_set_int(nzb_ptr, crate::queuesubsys_host::NZB_INT_CHANGED, 1);
+        if in_history {
+            qh.dq_history_changed(dq_ptr);
+            qh.dq_save(dq_ptr);
+        } else {
+            qh.dq_save_changed(dq_ptr);
+        }
+    });
+}
+
+/// Whether a probed kind replaces the stored one (see [`fleet_upgrade_kind`]).
+fn kind_upgrades(stored: crate::donorkind::DonorKind, found: crate::donorkind::DonorKind) -> bool {
+    use crate::donorkind::DonorKind;
+    found != DonorKind::Unknown
+        && found != stored
+        && (stored == DonorKind::Unknown || found == DonorKind::Twin)
+}
+
 fn fleet_mark_video(host_ctx: *mut c_void, host_cb: DupeHostFn, nzb_id: i32, same: bool) {
     fleet_set_video(host_ctx, host_cb, nzb_id, video_param_value(same));
 }
@@ -1340,6 +1410,8 @@ fn par_doomed_via_host(
 /// TWINs and borrowable ALTs apart.
 const FLEET_KIND_PROBE_MAX_SEC: i64 = 20;
 const FLEET_KIND_PROBE_PARALLEL: usize = 16;
+/// Copies queued from an earlier submission probed with a new one, at most.
+const FLEET_KIND_EARLIER_MAX: usize = 8;
 
 /// Seconds the copy-kind probe may use out of `left_ms`, the fleet's time
 /// left: a third of it, at most [`FLEET_KIND_PROBE_MAX_SEC`], so the intake
@@ -5776,8 +5848,13 @@ pub unsafe fn fleet_append(
         (top, running_id, lowest, existing)
     });
 
-    for (ex_id, ex_path) in existing {
-        let Some(summary) = parse_nzb_summary(&dupe_read_all_bytes(&ex_path)) else {
+    // copies of this release already queued or parked from an earlier
+    // submission: each one posted as one nzb (not a merge of several) is probed
+    // with the new members, so a backup added later is classed now against
+    // them, before it downloads, and they get a kind they lacked
+    let mut earlier: Vec<(i32, NzbSummaryData)> = Vec::new();
+    for (ex_id, ex_path) in &existing {
+        let Some(summary) = parse_nzb_summary(&dupe_read_all_bytes(ex_path)) else {
             continue;
         };
         for cand in &mut candidates {
@@ -5786,10 +5863,15 @@ pub unsafe fn fleet_append(
                 && cand.existing_id == 0
                 && same_posting_vecs(&summary.message_ids, &cand.summary.message_ids)
             {
-                cand.existing_id = ex_id;
+                cand.existing_id = *ex_id;
             }
         }
+        let parts = existing.iter().filter(|(id, _)| id == ex_id).count();
+        if parts == 1 && !summary.message_ids.is_empty() {
+            earlier.push((*ex_id, summary));
+        }
     }
+    earlier.truncate(FLEET_KIND_EARLIER_MAX);
 
     let already_downloaded_name: Option<Vec<u8>> =
         with_guarded_queue(host_ctx, host_cb, |dq_ptr| {
@@ -5874,21 +5956,27 @@ pub unsafe fn fleet_append(
     // the time: the health check spends whatever budget it is given, so a
     // probe run after it got no time and left every member "unknown". The
     // kinds are told after it, so a dead copy never makes another a TWIN.
+    // A single copy is probed too: its packing alone gives its kind. Copies
+    // queued from an earlier submission are probed with the new ones (only
+    // when there is a new one) and count as twin partners.
     let mut probed: Vec<Option<(crate::twin::Listed, crate::donorkind::Packing)>> =
         vec![None; candidates.len()];
+    let mut earlier_probed: Vec<(crate::twin::Listed, crate::donorkind::Packing)> = Vec::new();
     {
         let usable: Vec<usize> = (0..candidates.len())
             .filter(|&i| {
                 let c = &candidates[i];
-                c.error.is_empty() && c.same_as < 0
+                c.error.is_empty() && c.same_as < 0 && c.existing_id == 0
             })
             .collect();
-        if usable.len() >= 2 {
+        if !usable.is_empty() {
             let probe_deadline = now_unix_sec()
                 + fleet_kind_probe_secs(deadline_ms - donor_now_ms() - FINISH_RESERVE_MS);
-            let summaries: Vec<&NzbSummaryData> =
+            let mut summaries: Vec<&NzbSummaryData> =
                 usable.iter().map(|&i| &candidates[i].summary).collect();
-            let got = probe_copies(host_ctx, host_cb, &summaries, probe_deadline);
+            summaries.extend(earlier.iter().map(|(_, s)| s));
+            let mut got = probe_copies(host_ctx, host_cb, &summaries, probe_deadline);
+            earlier_probed = got.split_off(usable.len().min(got.len()));
             for (&i, p) in usable.iter().zip(got) {
                 probed[i] = Some(p);
             }
@@ -6070,9 +6158,12 @@ pub unsafe fn fleet_append(
                 c.error.is_empty() && c.same_as < 0 && !c.dead && probed[i].is_some()
             })
             .collect();
+        // an earlier copy whose health says it is dead makes no TWIN either
+        let earlier_alive = fleet_earlier_alive(host_ctx, host_cb, &earlier);
+        let mut earlier_twin = vec![false; earlier_probed.len()];
         for &i in &live {
             let (listed, packing) = probed[i].as_ref().expect("filtered on is_some");
-            let has_twin = live.iter().any(|&j| {
+            let mut has_twin = live.iter().any(|&j| {
                 j != i
                     && crate::donorkind::twins(
                         listed,
@@ -6081,7 +6172,30 @@ pub unsafe fn fleet_append(
                         &candidates[j].summary.data_layout,
                     )
             });
+            for (e, (e_listed, _)) in earlier_probed.iter().enumerate() {
+                if earlier_alive.get(e).copied().unwrap_or(false)
+                    && crate::donorkind::twins(
+                        listed,
+                        e_listed,
+                        &candidates[i].summary.data_layout,
+                        &earlier[e].1.data_layout,
+                    )
+                {
+                    has_twin = true;
+                    earlier_twin[e] = true;
+                }
+            }
             candidates[i].kind = crate::donorkind::DonorKind::of(has_twin, *packing);
+        }
+        for (e, (_, packing)) in earlier_probed.iter().enumerate() {
+            let kind = crate::donorkind::DonorKind::of(earlier_twin[e], *packing);
+            fleet_upgrade_kind(host_ctx, host_cb, earlier[e].0, kind);
+            // a member that is this queued copy reports its kind
+            for c in candidates.iter_mut() {
+                if c.existing_id == earlier[e].0 {
+                    c.kind = kind;
+                }
+            }
         }
     }
 
@@ -6406,6 +6520,25 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn earlier_copy_kind_only_gets_better_informed() {
+        use crate::donorkind::DonorKind::*;
+        // nothing learned writes nothing
+        assert!(!kind_upgrades(Unknown, Unknown));
+        assert!(!kind_upgrades(Borrowable, Unknown));
+        // a copy without a kind gets one
+        assert!(kind_upgrades(Unknown, Borrowable));
+        assert!(kind_upgrades(Unknown, Unborrowable));
+        assert!(kind_upgrades(Unknown, Twin));
+        // a twin that turned up wins over packing
+        assert!(kind_upgrades(Borrowable, Twin));
+        assert!(kind_upgrades(Unborrowable, Twin));
+        // packing never takes back a stored twin or another packing
+        assert!(!kind_upgrades(Twin, Borrowable));
+        assert!(!kind_upgrades(Borrowable, Unborrowable));
+        assert!(!kind_upgrades(Twin, Twin));
+    }
 
     #[test]
     fn check_server_cap_all_connections_or_explicit_limit() {

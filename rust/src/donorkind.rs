@@ -239,6 +239,11 @@ pub fn packing_of_head(data: &[u8], name: &[u8], password_known: bool) -> Packin
             Packing::Unknown
         };
     }
+    // a later piece of a split 7-Zip (x.7z.003) has no signature; a password
+    // in the nzb makes it unborrowable all the same
+    if password_known && is_7z_name(name) {
+        return Packing::Unborrowable;
+    }
     let ext = extension(name);
     if MEDIA_EXTS.contains(&ext.as_slice()) || media_magic(data) {
         return Packing::Borrowable;
@@ -274,6 +279,18 @@ pub fn twins(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_later_piece_of_a_passworded_split_7z_is_unborrowable() {
+        let body = [0x5au8; 64];
+        assert_eq!(
+            packing_of_head(&body, b"x.7z.003", true),
+            Packing::Unborrowable
+        );
+        assert_eq!(packing_of_head(&body, b"x.7z", true), Packing::Unborrowable);
+        // without a password a 7-Zip piece stays unknown
+        assert_eq!(packing_of_head(&body, b"x.7z.003", false), Packing::Unknown);
+    }
     use crate::twin::{FileSig, Listed};
 
     fn rar4_named(name: &[u8], method: u8, file_flags: u16, main_flags: u16) -> Vec<u8> {

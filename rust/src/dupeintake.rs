@@ -14,7 +14,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::dupefallback::NzbgetRsByteRange;
-use crate::streamrepair::{ContentMap, ContentMapper, ContentSource, ContentSourceSet, SetMember};
+use crate::streamrepair::{
+    ContentMap, ContentMapper, ContentSource, ContentSourceSet, MemberSet, SetMember,
+};
 
 /// One data file of a copy as its nzb lists it: name, encoded bytes and the
 /// message ids of its articles in order.
@@ -257,6 +259,83 @@ pub fn sample_offsets(size: i64, count: usize, seed: u64) -> Vec<i64> {
     out
 }
 
+/// The size and CRC32 of the largest file of a copy's 7z set, read from the
+/// 7z header ([`crate::twinfields::seven_zip_key`]). A 7z with a password but
+/// without `-mhe` keeps that header in the clear, so a copy [`print_copy`]
+/// cannot open without the password still gets a key TwinCheck can match to
+/// the fleet's video. Reads the first article of the first and the last
+/// volume and the header articles near the end. None for other packings.
+pub fn inner_key_copy(
+    files: &[IntakeFile],
+    fetch: &dyn ArticleFetch,
+) -> Option<crate::twinfields::InnerKey> {
+    let files: Vec<&IntakeFile> = files.iter().filter(|f| !f.ids.is_empty()).collect();
+    let members: Vec<SetMember> = files
+        .iter()
+        .map(|f| SetMember::new(base_name(&f.name), f.bytes))
+        .collect();
+    let sets = ContentMapper::group_sets(&members);
+    let set = largest_set(&sets, &files)?;
+    let shared = Rc::new(Shared {
+        fetch,
+        budget: Cell::new(FETCH_BUDGET),
+    });
+    let vols: Vec<ArticleMember> = set
+        .members
+        .iter()
+        .filter_map(|&i| files.get(i as usize))
+        .map(|f| ArticleMember {
+            ids: f.ids.clone(),
+            shared: Rc::clone(&shared),
+            cache: RefCell::new(HashMap::new()),
+            part_size: Cell::new(0),
+            file_size: Cell::new(0),
+        })
+        .collect();
+    let first = vols.first()?;
+    let mut magic = [0u8; 6];
+    if !first.read(0, &mut magic) || magic != crate::twinfields::SEVEN_ZIP_MAGIC {
+        return None;
+    }
+    // 7-Zip splits into equal volumes but the last
+    let first_len = u64::try_from(first.size()).ok().filter(|&n| n > 0)?;
+    let last_len = u64::try_from(vols.last()?.size()).ok().filter(|&n| n > 0)?;
+    let mut lens = vec![first_len; vols.len()];
+    *lens.last_mut()? = last_len;
+    let first_file = files.get(usize::try_from(*set.members.first()?).ok()?)?;
+    let name = String::from_utf8_lossy(base_name(&first_file.name)).into_owned();
+    crate::twinfields::seven_zip_key(
+        &lens,
+        |vol, offset, buf| {
+            vols.get(vol as usize)
+                .is_some_and(|m| i64::try_from(offset).is_ok_and(|o| m.read(o, buf)))
+        },
+        &name,
+    )
+    .ok()
+}
+
+/// The set with the most bytes, sample sets left out: a multipart archive
+/// outweighs a sample bigger than any one volume.
+fn largest_set<'s>(sets: &'s [MemberSet], files: &[&IntakeFile]) -> Option<&'s MemberSet> {
+    let is_sample = |i: i32| {
+        files.get(i as usize).is_some_and(|f| {
+            f.name
+                .to_ascii_lowercase()
+                .windows(6)
+                .any(|w| w == b"sample")
+        })
+    };
+    sets.iter()
+        .filter(|s| !s.members.iter().all(|&i| is_sample(i)))
+        .max_by_key(|s| {
+            s.members
+                .iter()
+                .filter_map(|&i| files.get(i as usize).map(|f| f.bytes.max(0)))
+                .sum::<i64>()
+        })
+}
+
 /// Opens a copy down to its video and reads `count` random samples of it
 /// (plus its start), or says why it could not.
 pub fn print_copy(
@@ -291,27 +370,9 @@ pub fn print_copy(
             })
             .collect(),
     };
-    // The video is the set with the most bytes (a multipart archive outweighs
-    // a sample bigger than any one volume), samples left out.
+    // The video is the set with the most bytes, samples left out.
     let sets = ContentMapper::group_sets(&members);
-    let is_sample = |i: i32| {
-        files.get(i as usize).is_some_and(|f| {
-            f.name
-                .to_ascii_lowercase()
-                .windows(6)
-                .any(|w| w == b"sample")
-        })
-    };
-    let Some(set) = sets
-        .iter()
-        .filter(|s| !s.members.iter().all(|&i| is_sample(i)))
-        .max_by_key(|s| {
-            s.members
-                .iter()
-                .filter_map(|&i| files.get(i as usize).map(|f| f.bytes.max(0)))
-                .sum::<i64>()
-        })
-    else {
+    let Some(set) = largest_set(&sets, &files) else {
         return Err("no file set".to_string());
     };
     let map: ContentMap = ContentMapper::build_map_with_tls(
@@ -496,6 +557,53 @@ mod tests {
         };
         mem.files.insert(prefix.as_bytes().to_vec(), (data, part));
         vec![file]
+    }
+
+    fn fixture(name: &str) -> Vec<u8> {
+        std::fs::read(format!(
+            "{}/src/twinfields/fixtures/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_passworded_7z_without_mhe_gets_its_key_but_no_print() {
+        let mut mem = Memory {
+            files: HashMap::new(),
+            fetched: Cell::new(0),
+        };
+        let video = crate::twinfields::InnerKey {
+            size: 49156,
+            crc32: 0x771f_bd29,
+        };
+        let pass = copy(&mut mem, "p", "rel.7z", fixture("pass.7z"), 4000);
+        assert!(print_copy(&pass, &mem, None, 2, 1).is_err(), "no password");
+        assert_eq!(inner_key_copy(&pass, &mem), Some(video));
+        let plain = copy(&mut mem, "z", "rel.7z", fixture("plain.7z"), 3000);
+        assert_eq!(inner_key_copy(&plain, &mem), Some(video));
+        let mut split = Vec::new();
+        for i in 1..=3 {
+            let name = format!("rel.7z.00{i}");
+            split.extend(copy(
+                &mut mem,
+                &format!("s{i}"),
+                &name,
+                fixture(&format!("pass-split.{}", &name[4..])),
+                4000,
+            ));
+        }
+        assert_eq!(inner_key_copy(&split, &mem), Some(video));
+        let mhe = copy(&mut mem, "h", "rel.7z", fixture("pass-mhe.7z"), 4000);
+        assert_eq!(inner_key_copy(&mhe, &mem), None);
+        let rar = copy(
+            &mut mem,
+            "r",
+            "rel.part1.rar",
+            fixture("rerar-a.part1.rar"),
+            4000,
+        );
+        assert_eq!(inner_key_copy(&rar, &mem), None);
     }
 
     #[test]

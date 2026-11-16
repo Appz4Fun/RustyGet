@@ -560,6 +560,25 @@ pub fn format_twin_kind_message(
     out
 }
 
+/// The log line for an alt the samples prove: the same files packed again
+/// (re-RAR), or cut into other article sizes.
+pub fn format_rerar_message(nzb_name: &[u8], primary_name: &[u8], sampled: &[u8]) -> Vec<u8> {
+    let mut out = nzb_name.to_vec();
+    out.extend_from_slice(b" is an alt of ");
+    out.extend_from_slice(primary_name);
+    if sampled == b"samefiles" {
+        out.extend_from_slice(
+            b" (the same bytes cut into articles of other sizes: not lent article for article)",
+        );
+    } else {
+        out.extend_from_slice(
+            b" (the same files packed again: only the archive header articles differ, \
+the articles between them are identical and are lent like a twin's)",
+        );
+    }
+    out
+}
+
 /// `TwinCheckJob::IndexData` (`TwinCheck.cpp`): selects the index of the smallest `.par2`
 /// entry in `entries` within `max_index_size`, returning `-1` if no eligible `.par2` entry exists.
 pub fn select_min_par2_index(is_par2: &[u8], sizes: &[i64], max_index_size: i64) -> i32 {
@@ -841,9 +860,11 @@ pub fn resolve_kind(
         }
     }
     if sampleable && sampled_now {
-        if sampled_val == b"twin" {
+        if sampled_val == crate::twinfields::TWIN_PARAM {
             return b"twin".to_vec();
-        } else if sampled_val == b"alt" {
+        } else if crate::twinfields::SampleVerdict::from_param(sampled_val).is_some() {
+            // alt, or the same files packed again (re-RAR) or cut into other
+            // article sizes: an alt
             return b"alt".to_vec();
         }
     }
@@ -857,14 +878,41 @@ pub fn resolve_kind(
 /// `"other"`, and without two comparable values it is `"container"`
 /// (another container, the video inside not verified yet).
 pub fn verify_alt(kind: Vec<u8>, primary_inner: &[u8], dupe_inner: &[u8]) -> Vec<u8> {
+    verify_alt_keyed(kind, primary_inner, dupe_inner, b"", b"")
+}
+
+/// [`verify_alt`], then, when the sampled digests do not compare, the size
+/// and CRC32 of the video as the containers record them
+/// ([`crate::twinfields::INNER_KEY_PARAM`]): a 7z with a password but no
+/// `-mhe` keeps them readable, so it is matched without opening it.
+pub fn verify_alt_keyed(
+    kind: Vec<u8>,
+    primary_inner: &[u8],
+    dupe_inner: &[u8],
+    primary_key: &[u8],
+    dupe_key: &[u8],
+) -> Vec<u8> {
     if kind != b"alt" {
         return kind;
     }
-    match crate::dupeintake::same_inner(primary_inner, dupe_inner) {
+    let by_digest = crate::dupeintake::same_inner(primary_inner, dupe_inner);
+    let by_key = || {
+        crate::twinfields::same_inner_key(primary_key, dupe_key, crate::twinfields::MIN_KEY_SIZE)
+    };
+    match by_digest.or_else(by_key) {
         Some(true) => kind,
         Some(false) => b"other".to_vec(),
         None => b"container".to_vec(),
     }
+}
+
+/// A `DupeSampled` re-RAR or same-files verdict: identical bytes already
+/// show the same files inside, so its alt label needs no further check.
+pub fn is_proven_alt(sampleable: bool, sampled_now: bool, sampled_val: &[u8]) -> bool {
+    sampleable
+        && sampled_now
+        && crate::twinfields::SampleVerdict::from_param(sampled_val)
+            .is_some_and(crate::twinfields::SampleVerdict::proves_same_files)
 }
 
 // ============================================================================
@@ -902,6 +950,21 @@ struct TwinCoordState {
     jobs: std::collections::BTreeMap<usize, ActiveTwinJob>,
     checking: std::collections::BTreeSet<i32>,
     failed_attempts: std::collections::BTreeMap<i32, i32>,
+    /// Sampling attempts that read too little, by `(copy, primary)`: kept
+    /// apart from the par2 index attempts so neither uses up the other.
+    sample_attempts: std::collections::BTreeMap<(i32, i32), i32>,
+}
+
+/// Counts one sampling attempt of copy `nzb_id` against `primary_id` that
+/// read too little, and returns the attempts so far.
+fn count_sample_attempt(nzb_id: i32, primary_id: i32) -> i32 {
+    let mut guard = twin_coord().lock().unwrap_or_else(|e| e.into_inner());
+    let att = guard
+        .sample_attempts
+        .entry((nzb_id, primary_id))
+        .or_insert(0);
+    *att += 1;
+    *att
 }
 
 static OPENED_STORE_PATH: Mutex<Vec<u8>> = Mutex::new(Vec::new());
@@ -1161,6 +1224,7 @@ struct TwinQueueItem {
     sampled_of_param: Vec<u8>,
     kind_param: Vec<u8>,
     inner_param: Vec<u8>,
+    inner_key_param: Vec<u8>,
 }
 
 #[cfg(unix)]
@@ -1229,6 +1293,9 @@ fn run_service_work_locked(
         let inner_param = qh
             .nzb_get_param(nzb_ptr, crate::dupeintake::INNER_PARAM)
             .unwrap_or_default();
+        let inner_key_param = qh
+            .nzb_get_param(nzb_ptr, crate::twinfields::INNER_KEY_PARAM)
+            .unwrap_or_default();
         let item = TwinQueueItem {
             nzb_ptr,
             id,
@@ -1241,12 +1308,16 @@ fn run_service_work_locked(
             name: snap.name,
             queued_filename: snap.queued_filename,
             files_param,
-            has_sampled: p_sampled.is_some(),
+            // the older middle-only sampler's bare "twin" is sampled again
+            has_sampled: p_sampled
+                .as_deref()
+                .is_some_and(|v| v != crate::twinfields::LEGACY_TWIN_PARAM),
             sampled_param: p_sampled.unwrap_or_default(),
             has_sampled_of: p_sampled_of.is_some(),
             sampled_of_param: p_sampled_of.unwrap_or_default(),
             kind_param,
             inner_param,
+            inner_key_param,
         };
         keys.entry(key).or_default().push(item);
     };
@@ -1378,14 +1449,36 @@ fn run_service_work_locked(
             let primary_inner = primary_usize
                 .map(|pi| items[pi].inner_param.as_slice())
                 .unwrap_or(&[]);
-            let resolved_kind = verify_alt(resolved_kind, primary_inner, &item.inner_param);
+            let primary_key = primary_usize
+                .map(|pi| items[pi].inner_key_param.as_slice())
+                .unwrap_or(&[]);
+            let rerar = is_proven_alt(
+                sampleable,
+                sampled_now && item.has_sampled,
+                &item.sampled_param,
+            );
+            let resolved_kind = if rerar {
+                resolved_kind
+            } else {
+                verify_alt_keyed(
+                    resolved_kind,
+                    primary_inner,
+                    &item.inner_param,
+                    primary_key,
+                    &item.inner_key_param,
+                )
+            };
             if item.kind_param != resolved_kind {
                 qh.nzb_set_param(item.nzb_ptr, b"DupeKind", Some(&resolved_kind));
                 if !resolved_kind.is_empty() {
                     let p_name = primary_usize
                         .map(|pi| items[pi].name.as_slice())
                         .unwrap_or(&[]);
-                    let msg = format_twin_kind_message(&item.name, p_name, &resolved_kind, by_par2);
+                    let msg = if rerar && resolved_kind == b"alt" {
+                        format_rerar_message(&item.name, p_name, &item.sampled_param)
+                    } else {
+                        format_twin_kind_message(&item.name, p_name, &resolved_kind, by_par2)
+                    };
                     qh.nzb_print_message(item.nzb_ptr, crate::queuesubsys_host::MK_INFO, &msg);
                 }
                 changed = true;
@@ -1516,6 +1609,18 @@ fn read_nzb_entries_from_disk(path: &[u8]) -> Vec<NzbEntry> {
 /// history, then wakes the twin check so their labels follow.
 #[cfg(unix)]
 pub(crate) fn set_inner_digests(digests: &[(i32, String)]) {
+    set_inner_params(crate::dupeintake::INNER_PARAM, digests);
+}
+
+/// Records the video sizes and CRC32s the fleet intake read from 7z headers
+/// (see [`crate::twinfields::INNER_KEY_PARAM`]), like [`set_inner_digests`].
+#[cfg(unix)]
+pub(crate) fn set_inner_keys(keys: &[(i32, String)]) {
+    set_inner_params(crate::twinfields::INNER_KEY_PARAM, keys);
+}
+
+#[cfg(unix)]
+fn set_inner_params(param: &[u8], digests: &[(i32, String)]) {
     if digests.is_empty() {
         return;
     }
@@ -1527,11 +1632,7 @@ pub(crate) fn set_inner_digests(digests: &[(i32, String)]) {
         for (id, digest) in digests {
             let nzb_ptr = find_nzb_in_queue_or_history(&qh, dq_ptr, *id);
             if nzb_ptr != 0 {
-                qh.nzb_set_param(
-                    nzb_ptr,
-                    crate::dupeintake::INNER_PARAM,
-                    Some(digest.as_bytes()),
-                );
+                qh.nzb_set_param(nzb_ptr, param, Some(digest.as_bytes()));
                 any = true;
             }
         }
@@ -1662,7 +1763,7 @@ fn run_twin_job(token: usize, qdir: &[u8]) {
         let (p_counts, p_bytes) = flatten(&primary);
         let (d_counts, d_bytes) = flatten(&dupe);
 
-        let store_sample = |val: &[u8]| -> bool {
+        let store_sample = |val: &[u8], note: Option<&str>| -> bool {
             let Some(qh) = crate::ffi::queue_host() else {
                 return false;
             };
@@ -1673,52 +1774,320 @@ fn run_twin_job(token: usize, qdir: &[u8]) {
                 }
                 qh.nzb_set_param(nzb_ptr, b"DupeSampled", Some(val));
                 qh.nzb_set_param(nzb_ptr, b"DupeSampledOf", Some(&primary_id_bytes));
+                if let Some(note) = note {
+                    let mut msg = b"Sampled articles of ".to_vec();
+                    msg.extend_from_slice(&qh.nzb_snap(nzb_ptr, false).name);
+                    msg.extend_from_slice(note.as_bytes());
+                    qh.nzb_print_message(nzb_ptr, crate::queuesubsys_host::MK_DETAIL, &msg);
+                }
                 qh.dq_history_changed(dq_ptr);
                 qh.dq_save(dq_ptr);
                 true
             })
         };
 
-        let Some(pairs) = sample_indices(&p_counts, &p_bytes, &d_counts, &d_bytes, SAMPLE_COUNT)
-        else {
-            if store_sample(b"none") {
+        let fetch_part =
+            |e: &NzbEntry, seg: usize| -> Option<crate::articlefetcher::FetchedArticle> {
+                let id = e.segments.get(seg)?.1.as_bytes();
+                let groups: Vec<Vec<u8>> = e.groups.iter().map(|g| g.as_bytes().to_vec()).collect();
+                Some(fetcher.fetch(id, &groups))
+            };
+        // Articles at the same places of both posts; for posts with other
+        // article sizes, where both start an article at the same offset.
+        let mut first_pair: Option<(
+            usize,
+            crate::articlefetcher::FetchedArticle,
+            crate::articlefetcher::FetchedArticle,
+        )> = None;
+        let mut same_layout = true;
+        let plan = match crate::twinfields::plan_same_layout(
+            &p_counts,
+            &p_bytes,
+            &d_counts,
+            &d_bytes,
+            crate::twinfields::MIDDLE_SAMPLES,
+        ) {
+            Some(plan) => Some(plan),
+            None if !primary.is_empty() && primary.len() == dupe.len() => {
+                // the article size of each post, from the first article of
+                // a file both cut into two or more
+                let probe = (0..primary.len())
+                    .find(|&f| primary[f].segments.len() > 1 && dupe[f].segments.len() > 1);
+                match probe.map(|f| (f, fetch_part(&primary[f], 0), fetch_part(&dupe[f], 0))) {
+                    Some((f, Some(a), Some(b))) if a.success && b.success => {
+                        let (pa, pb) = (a.data.len() as u64, b.data.len() as u64);
+                        let plan = if pa == pb && p_counts == d_counts {
+                            // the same articles, encoded to other sizes
+                            // (another line length): compare as one layout
+                            crate::twinfields::plan_same_layout(
+                                &p_counts,
+                                &p_bytes,
+                                &p_counts,
+                                &p_bytes,
+                                crate::twinfields::MIDDLE_SAMPLES,
+                            )
+                        } else {
+                            same_layout = false;
+                            crate::twinfields::plan_lcm(
+                                &p_counts,
+                                &d_counts,
+                                pa,
+                                pb,
+                                crate::twinfields::MIDDLE_SAMPLES,
+                            )
+                        };
+                        first_pair = Some((f, a, b));
+                        plan
+                    }
+                    None => None,
+                    Some(_) => {
+                        if is_stopped() {
+                            return;
+                        }
+                        // the sizes cannot be learned now: ask again a few
+                        // times, then give up like an unreadable par2 index
+                        if count_sample_attempt(spec.nzb_id, spec.primary_id) < MAX_ATTEMPTS {
+                            return;
+                        }
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
+        let Some(plan) = plan else {
+            if store_sample(b"none", None) {
                 unreg.stored = true;
             }
             return;
         };
 
-        let mut compared = 0i32;
-        let mut differ = 0i32;
-        for (file_idx, seg_idx) in pairs {
-            if is_stopped() {
+        let mut tally = crate::twinfields::Tally {
+            middle_planned: plan.iter().filter(|p| !p.header).count(),
+            ..Default::default()
+        };
+        let mut creation_note = String::new();
+        let mut tail_files: Vec<usize> = Vec::new();
+        for pair in &plan {
+            if is_stopped() || tally.settled() {
                 break;
             }
-            let a = &primary[file_idx];
-            let b = &dupe[file_idx];
-            let a_groups: Vec<Vec<u8>> = a.groups.iter().map(|g| g.as_bytes().to_vec()).collect();
-            let b_groups: Vec<Vec<u8>> = b.groups.iter().map(|g| g.as_bytes().to_vec()).collect();
-            let part_a = fetcher.fetch(a.segments[seg_idx].1.as_bytes(), &a_groups);
-            let part_b = fetcher.fetch(b.segments[seg_idx].1.as_bytes(), &b_groups);
-            let (c_next, d_next) = compare_sampled_pair(
-                i32::from(part_a.success),
-                i32::from(part_b.success),
-                part_a.offset,
-                part_b.offset,
-                i32::from(part_a.data == part_b.data),
-                compared,
-                differ,
+            let a_entry = &primary[pair.file];
+            let b_entry = &dupe[pair.file];
+            let (part_a, part_b) = match first_pair.take() {
+                Some((f, a, b)) if pair.file == f && pair.seg_a == 0 && pair.seg_b == 0 => (a, b),
+                other => {
+                    first_pair = other;
+                    match (
+                        fetch_part(a_entry, pair.seg_a),
+                        fetch_part(b_entry, pair.seg_b),
+                    ) {
+                        (Some(a), Some(b)) => (a, b),
+                        _ => continue,
+                    }
+                }
+            };
+            if !part_a.success || !part_b.success {
+                continue;
+            }
+            if pair.header && pair.seg_a == 0 && part_a.offset == 0 && part_b.offset == 0 {
+                let ca = crate::twinfields::creation_of(&part_a.data);
+                let cb = crate::twinfields::creation_of(&part_b.data);
+                if let Some(same) = crate::twinfields::same_creation(ca.as_ref(), cb.as_ref()) {
+                    if tally.same_creation != Some(false) {
+                        tally.same_creation = Some(same);
+                    }
+                    if let (Some(ca), Some(cb)) = (&ca, &cb) {
+                        creation_note = if same {
+                            format!("; the same {} (one archiver run)", ca.what)
+                        } else {
+                            format!(
+                                "; another archiver run ({} differs from {})",
+                                ca.what, cb.what
+                            )
+                        };
+                    }
+                }
+            }
+            let differs = crate::twinfields::pair_differs(
+                pair,
+                (part_a.offset, part_a.file_size, &part_a.data),
+                (part_b.offset, part_b.file_size, &part_b.data),
             );
-            compared = c_next;
-            differ = d_next;
+            tally.add(pair.header, differs);
+            if differs && pair.header && pair.seg_a > 0 && !tail_files.contains(&pair.file) {
+                // a volume end that differs: where a re-RAR's tail is measured
+                tail_files.push(pair.file);
+            }
         }
 
-        let verdict = eval_sample_verdict(is_stopped(), compared, differ, SAMPLE_COUNT as i32);
-        if verdict == 0 {
+        let mut verdict = crate::twinfields::judge(&tally, is_stopped(), same_layout);
+        if verdict == crate::twinfields::SampleVerdict::Retry {
+            if is_stopped() {
+                return;
+            }
+            // too few articles could be read (missing on one side): ask
+            // again a few times, then give up as unreadable
+            let gave_up = count_sample_attempt(spec.nzb_id, spec.primary_id) >= MAX_ATTEMPTS;
+            if gave_up && store_sample(b"none", None) {
+                unreg.stored = true;
+            }
             return;
         }
-        let sampled_val: &[u8] = if verdict == 2 { b"alt" } else { b"twin" };
-        if store_sample(sampled_val) {
+        let mut tail_note = String::new();
+        if let crate::twinfields::SampleVerdict::Rerar { .. } = verdict {
+            // Whether article `k` of file `f` differs between the copies;
+            // None when it could not be read now.
+            let pair_at = |f: usize, k: usize| -> Option<bool> {
+                match (fetch_part(&primary[f], k), fetch_part(&dupe[f], k)) {
+                    (Some(a), Some(b)) if a.success && b.success => {
+                        Some(crate::twinfields::pair_differs(
+                            &crate::twinfields::SamplePair {
+                                file: f,
+                                seg_a: k,
+                                seg_b: k,
+                                header: true,
+                                tail: false,
+                            },
+                            (a.offset, a.file_size, &a.data),
+                            (b.offset, b.file_size, &b.data),
+                        ))
+                    }
+                    _ => None,
+                }
+            };
+            let mut unread = false;
+            // The list must be one RAR volume set and nothing else, so its
+            // first and last volume are known and no other file lends.
+            let names: Vec<&str> = primary.iter().map(|e| e.filename.as_str()).collect();
+            let dupe_names: Vec<&str> = dupe.iter().map(|e| e.filename.as_str()).collect();
+            let ends = crate::twinfields::rar_set_ends(&names)
+                .filter(|_| crate::twinfields::rar_set_ends(&dupe_names).is_some());
+            let mut proven = ends.is_some();
+            // How many articles at a volume's end differ: the last, and those
+            // of a recovery record before it. Measured on a largest file (a
+            // recovery record is a share of its volume, so a full volume has
+            // the longest) cut into three or more articles, whose last article
+            // differs (a repacked volume, not a file packed once), walking
+            // back until one is equal.
+            let mut tail: u32 = 1;
+            let largest = (0..primary.len())
+                .max_by_key(|&f| (p_counts[f], std::cmp::Reverse(f)))
+                .filter(|&f| p_counts[f] >= 3);
+            match largest.filter(|_| proven) {
+                None => proven = false,
+                Some(f) => {
+                    let n = p_counts[f];
+                    let last_differs = if tail_files.contains(&f) {
+                        Some(true)
+                    } else {
+                        pair_at(f, n - 1)
+                    };
+                    match last_differs {
+                        None => unread = true,
+                        Some(false) => proven = false,
+                        Some(true) => {
+                            let lowest = n
+                                .saturating_sub(1 + crate::twinfields::MAX_TAIL_PROBE)
+                                .max(1);
+                            let mut settled = false;
+                            for k in (lowest..n - 1).rev() {
+                                if is_stopped() {
+                                    return;
+                                }
+                                match pair_at(f, k) {
+                                    None => {
+                                        unread = true;
+                                        break;
+                                    }
+                                    Some(false) => {
+                                        settled = true;
+                                        break;
+                                    }
+                                    Some(true) => tail += 1,
+                                }
+                            }
+                            if !unread && !settled && lowest > 1 {
+                                // more differs at the end than a recovery
+                                // record explains
+                                proven = false;
+                            }
+                        }
+                    }
+                }
+            }
+            // A re-RAR rewrites every member header: only while one member
+            // runs from the first volume into the last does nothing else
+            // differ mid-volume, and what follows its end in the last volume
+            // (other members, a quick-open record, the end header) counts as
+            // tail there.
+            if let Some((first_f, last_f)) = ends.filter(|_| proven && !unread && !is_stopped()) {
+                match (
+                    fetch_part(&primary[first_f], 0),
+                    fetch_part(&primary[last_f], 0),
+                ) {
+                    (Some(a), Some(b)) if a.success && b.success => {
+                        let end = crate::twinfields::rerar_member_end(
+                            &a.data,
+                            &b.data,
+                            last_f == first_f,
+                        );
+                        let part = b.data.len() as u64;
+                        match end {
+                            Some(end) if part > 0 && b.offset == 0 => {
+                                let from = usize::try_from(end / part).unwrap_or(usize::MAX);
+                                let last_tail = p_counts[last_f].saturating_sub(from).max(1);
+                                tail = tail.max(u32::try_from(last_tail).unwrap_or(u32::MAX));
+                            }
+                            _ => proven = false,
+                        }
+                    }
+                    _ => unread = true,
+                }
+            }
+            if is_stopped() {
+                return;
+            }
+            if unread {
+                // ask again later, then give up as unreadable
+                if count_sample_attempt(spec.nzb_id, spec.primary_id) >= MAX_ATTEMPTS
+                    && store_sample(b"none", None)
+                {
+                    unreg.stored = true;
+                }
+                return;
+            }
+            if proven {
+                verdict = crate::twinfields::SampleVerdict::Rerar { tail };
+                tail_note = format!("; the last {tail} article(s) of a volume differ");
+            } else {
+                // not shown to be the same files packed again: an alt
+                verdict = crate::twinfields::SampleVerdict::Alt;
+            }
+        }
+        let note = format!(
+            " against the primary: {} of {} header article pair(s) and {} of {} middle pair(s) differ{}",
+            tally.header_differ,
+            tally.header_compared,
+            tally.middle_differ,
+            tally.middle_compared,
+            creation_note
+        ) + &tail_note
+            + if same_layout {
+                ""
+            } else {
+                "; the posts use other article sizes"
+            };
+        if is_stopped() {
+            return;
+        }
+        if store_sample(&verdict.param(), Some(&note)) {
             unreg.stored = true;
+            twin_coord()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .sample_attempts
+                .remove(&(spec.nzb_id, spec.primary_id));
         }
         return;
     }

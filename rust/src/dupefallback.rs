@@ -2731,6 +2731,21 @@ fn pin_sources_host(
     let mut contributors: Vec<i32> = Vec::new();
     let mut same_posting = 0i32;
     let mut unparsed = 0i32;
+    // what TwinCheck sampled between this copy and each donor without par2:
+    // a sampled twin lends like a twin, a re-RAR (the same files packed
+    // again) lends its middle articles like a twin and never the first or
+    // last article of a file, which hold the archive headers that differ
+    let own_sampled = host
+        .nzb_get_param(nzb.ptr, b"DupeSampled")
+        .unwrap_or_default();
+    let own_sampled_of = host
+        .nzb_get_param(nzb.ptr, b"DupeSampledOf")
+        .unwrap_or_default();
+    let total_parts = if file.total_articles > 0 {
+        file.total_articles
+    } else {
+        file.articles_len as i32
+    };
 
     for donor in &donors {
         if host.nzb_blocked_donor_op(nzb.ptr, false, donor.id) {
@@ -2740,6 +2755,30 @@ fn pin_sources_host(
             same_posting += 1;
             continue;
         }
+        // a merged copy holds files that were never sampled: no relation
+        let merged = nzb.queued_filename.contains(&b'|') || donor.queued_filename.contains(&b'|');
+        let relation = if merged {
+            None
+        } else {
+            crate::twinfields::sampled_relation(
+                nzb.id,
+                &own_sampled,
+                &own_sampled_of,
+                donor.id,
+                &host
+                    .nzb_get_param(donor.ptr, b"DupeSampled")
+                    .unwrap_or_default(),
+                &host
+                    .nzb_get_param(donor.ptr, b"DupeSampledOf")
+                    .unwrap_or_default(),
+            )
+        };
+        let donor_twin_only = match crate::twinfields::lend_rule(relation, part_number, total_parts)
+        {
+            crate::twinfields::Lend::Never => continue,
+            crate::twinfields::Lend::LikeTwin => false,
+            crate::twinfields::Lend::Default => twin_only,
+        };
         if let Some(parsed_donor) = cache.get_parsed_donor(host, donor, opts) {
             let donor_identity = twin_identity_of(host, donor);
             if let Some(df) = match_donor_file_parsed(
@@ -2753,7 +2792,7 @@ fn pin_sources_host(
                 &target_nzb_filename,
                 donor.id,
                 &donor_identity,
-                twin_only,
+                donor_twin_only,
             ) {
                 let mut found_msg: Option<&[u8]> = None;
                 for (j, &part) in df.article_parts.iter().enumerate() {

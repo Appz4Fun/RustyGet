@@ -1611,10 +1611,33 @@ fn fleet_prints(
     seed: u64,
     deadline: i64,
 ) -> Vec<Result<crate::dupeintake::Print, String>> {
-    use crate::dupeintake::{print_copy, Print};
+    fleet_prints_keyed(host_ctx, host_cb, summaries, samples, seed, deadline)
+        .into_iter()
+        .map(|(print, _)| print)
+        .collect()
+}
+
+/// A copy's print, and the size and CRC32 of the video its 7z header records
+/// (see [`crate::dupeintake::inner_key_copy`]), which a 7z with a password
+/// but without `-mhe` gives even when it cannot be printed.
+type KeyedPrint = (
+    Result<crate::dupeintake::Print, String>,
+    Option<crate::twinfields::InnerKey>,
+);
+
+/// [`fleet_prints`] with each copy's [`KeyedPrint`] key.
+fn fleet_prints_keyed(
+    host_ctx: *mut c_void,
+    host_cb: DupeHostFn,
+    summaries: &[&NzbSummaryData],
+    samples: usize,
+    seed: u64,
+    deadline: i64,
+) -> Vec<KeyedPrint> {
+    use crate::dupeintake::{inner_key_copy, print_copy};
     let n = summaries.len();
-    let slots: Vec<Mutex<Result<Print, String>>> = (0..n)
-        .map(|_| Mutex::new(Err(INTAKE_TIME_RAN_OUT.to_string())))
+    let slots: Vec<Mutex<KeyedPrint>> = (0..n)
+        .map(|_| Mutex::new((Err(INTAKE_TIME_RAN_OUT.to_string()), None)))
         .collect();
     let ctx_addr = host_ctx as usize;
     for chunk in (0..n).collect::<Vec<_>>().chunks(FLEET_KIND_PROBE_PARALLEL) {
@@ -1646,7 +1669,18 @@ fn fleet_prints(
                         samples,
                         seed,
                     );
-                    *slot.lock().unwrap_or_else(|e| e.into_inner()) = got;
+                    // a 7z header's key costs article reads: only for a
+                    // copy that names 7z volumes or could not be printed
+                    let named_7z = info.data_segments.iter().any(|f| {
+                        let n = f.name.to_ascii_lowercase();
+                        n.ends_with(b".7z") || n.windows(4).any(|w| w == b".7z.")
+                    });
+                    let key = if named_7z || got.is_err() {
+                        inner_key_copy(&info.data_segments, &fetch)
+                    } else {
+                        None
+                    };
+                    *slot.lock().unwrap_or_else(|e| e.into_inner()) = (got, key);
                 });
             }
         });
@@ -1670,9 +1704,13 @@ fn fleet_intake(
     Vec<(crate::dupeintake::Verdict, String)>,
     Option<crate::dupeintake::Print>,
     Vec<Option<crate::dupeintake::Print>>,
+    Vec<Option<crate::twinfields::InnerKey>>,
 ) {
     use crate::dupeintake::{fleet_print, judge_against};
-    let got = fleet_prints(host_ctx, host_cb, summaries, samples, seed, deadline);
+    let (got, keys): (Vec<_>, Vec<_>) =
+        fleet_prints_keyed(host_ctx, host_cb, summaries, samples, seed, deadline)
+            .into_iter()
+            .unzip();
     let prints: Vec<Option<crate::dupeintake::Print>> =
         got.iter().map(|r| r.as_ref().ok().cloned()).collect();
     let fleet = fleet_print(&prints);
@@ -1681,7 +1719,7 @@ fn fleet_intake(
         .zip(got)
         .map(|(v, r)| (v, r.err().unwrap_or_default()))
         .collect();
-    (verdicts, fleet, prints)
+    (verdicts, fleet, prints, keys)
 }
 
 /// What the intake could not verify when a fleet was added (no time left, or a
@@ -1757,13 +1795,23 @@ fn fleet_intake_later(host_ctx: *mut c_void, host_cb: DupeHostFn, job: IntakeLat
         }
     };
     let summaries: Vec<&NzbSummaryData> = job.pending.iter().map(|(_, _, s)| s).collect();
-    let got = fleet_prints(
+    let (got, keys): (Vec<_>, Vec<_>) = fleet_prints_keyed(
         host_ctx,
         host_cb,
         &summaries,
         job.samples,
         job.seed,
         deadline,
+    )
+    .into_iter()
+    .unzip();
+    #[cfg(unix)]
+    crate::twin::set_inner_keys(
+        &job.pending
+            .iter()
+            .zip(&keys)
+            .filter_map(|((id, _, _), k)| k.map(|k| (*id, k.param())))
+            .collect::<Vec<_>>(),
     );
     let prints: Vec<Option<crate::dupeintake::Print>> =
         got.iter().map(|r| r.as_ref().ok().cloned()).collect();
@@ -6046,6 +6094,7 @@ pub unsafe fn fleet_append(
     let mut intake_later: Vec<usize> = Vec::new();
     let mut intake_print: Option<crate::dupeintake::Print> = None;
     let mut intake_prints: Vec<Option<crate::dupeintake::Print>> = vec![None; candidates.len()];
+    let mut intake_keys: Vec<Option<crate::twinfields::InnerKey>> = vec![None; candidates.len()];
     let mut intake_samples = 0usize;
     let mut intake_seed = 0u64;
     // Intake: every copy opened down to its video; a copy carrying another
@@ -6069,10 +6118,12 @@ pub unsafe fn fleet_append(
                 read_host_opts(host_ctx, host_cb).body_checks,
             );
             // TwinCheck groups dupe keys case-blind; the samples must land alike
-            let seed = u64::from(crate::dupefallback::crc32_ieee(&dupe_key.to_ascii_lowercase())) | 1;
+            let seed = u64::from(crate::dupefallback::crc32_ieee(
+                &dupe_key.to_ascii_lowercase(),
+            )) | 1;
             let summaries: Vec<&NzbSummaryData> =
                 usable.iter().map(|&i| &candidates[i].summary).collect();
-            let (verdicts, print, prints) = fleet_intake(
+            let (verdicts, print, prints, keys) = fleet_intake(
                 host_ctx,
                 host_cb,
                 &summaries,
@@ -6083,6 +6134,9 @@ pub unsafe fn fleet_append(
             intake_print = print;
             for (&i, p) in usable.iter().zip(prints) {
                 intake_prints[i] = p;
+            }
+            for (&i, k) in usable.iter().zip(keys) {
+                intake_keys[i] = k;
             }
             intake_samples = samples;
             intake_seed = seed;
@@ -6427,11 +6481,17 @@ pub unsafe fn fleet_append(
                 params.push((VIDEO_PARAM, video_param_value(same)));
             }
             // the video inside, for TwinCheck to tell an alt from a different video
-            let inner = intake_prints[idx].as_ref().map(|p| {
-                crate::dupeintake::inner_param_value(p, intake_samples, intake_seed)
-            });
+            let inner = intake_prints[idx]
+                .as_ref()
+                .map(|p| crate::dupeintake::inner_param_value(p, intake_samples, intake_seed));
             if let Some(d) = inner.as_deref() {
                 params.push((crate::dupeintake::INNER_PARAM, d.as_bytes()));
+            }
+            // the video's size and CRC32 from a 7z header, for a copy the
+            // intake could not open (a password without -mhe)
+            let inner_key = intake_keys[idx].map(|k| k.param());
+            if let Some(k) = inner_key.as_deref() {
+                params.push((crate::twinfields::INNER_KEY_PARAM, k.as_bytes()));
             }
             let add_name = fleet_ensure_nzb_ext(&member.name);
             let member_score = fleet_calc_member_add_score(running_id, lowest, top, rank);

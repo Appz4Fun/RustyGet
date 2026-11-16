@@ -87,6 +87,7 @@ pub mod tlscipher;
 #[cfg(unix)]
 pub mod tlssock;
 pub mod twin;
+pub mod twinfields;
 pub mod unpack;
 pub mod unpacklimits;
 pub mod url;

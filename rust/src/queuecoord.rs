@@ -2067,6 +2067,7 @@ impl NzbgetRsQueueCoordinator {
             b"DupeSampled".as_slice(),
             b"DupeSampledOf".as_slice(),
             crate::dupeintake::INNER_PARAM,
+            crate::twinfields::INNER_KEY_PARAM,
         ] {
             host.nzb_set_param(dest_ptr, param, None);
         }
@@ -2185,6 +2186,7 @@ impl NzbgetRsQueueCoordinator {
             crate::donorkind::KIND_PARAM,
             b"DupeSampled".as_slice(),
             b"DupeSampledOf".as_slice(),
+            crate::twinfields::INNER_KEY_PARAM,
             crate::dupesearch_coord::FLEET_PARAM,
             crate::dupesearch_coord::VIDEO_PARAM,
         ] {

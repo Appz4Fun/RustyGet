@@ -1449,6 +1449,26 @@ where
         }
     };
 
+    // Member file targets, and the identity of those already there (see the file-mode fix-up).
+    let file_targets: Vec<PathBuf> = entries
+        .iter()
+        .flatten()
+        .filter(|e| !e.dir)
+        .filter_map(|e| sz_member_rel(&e.name))
+        .map(|rel| output_dir.join(rel))
+        .collect();
+    #[cfg(unix)]
+    let before_files: std::collections::HashMap<PathBuf, (u64, u64)> = {
+        use std::os::unix::fs::MetadataExt;
+        file_targets
+            .iter()
+            .filter_map(|p| {
+                let m = std::fs::symlink_metadata(p).ok()?;
+                Some((p.clone(), (m.dev(), m.ino())))
+            })
+            .collect()
+    };
+
     let cancel = zipfast::extract::Cancellation::default();
     let breach: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     // AutoRename: each file is counted, before anything is written, under the name zipfast
@@ -1601,30 +1621,35 @@ where
     fix_folders();
     // zipfast applies the stored file modes as they are; RustyGet keeps owner read/write on
     // what it extracts (as the old 7z decoder and the RAR path do), so a member stored
-    // read-only or as mode 0 stays readable for the nested unpack and later steps.
+    // read-only or as mode 0 stays readable for the nested unpack and later steps. Only files
+    // this run wrote are touched: zipfast publishes through a temporary file and a rename, so
+    // a written target has a new inode, and a file it left alone (skipped, failed, refused)
+    // keeps the one recorded before the run. Paths whose real folder is not inside the output
+    // folder are never touched.
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let renamed = result
-            .as_ref()
-            .ok()
-            .map(|s| s.renames.iter().map(|r| r.path.clone()));
-        let files = entries
-            .iter()
-            .flatten()
-            .filter(|e| !e.dir)
-            .filter_map(|e| sz_member_rel(&e.name))
-            .map(|rel| output_dir.join(rel))
-            .chain(renamed.into_iter().flatten());
-        for path in files {
-            if let Ok(meta) = std::fs::symlink_metadata(&path) {
-                let mode = meta.permissions().mode() & 0o7777;
-                if meta.is_file() && mode & 0o600 != 0o600 {
-                    let _ = std::fs::set_permissions(
-                        &path,
-                        std::fs::Permissions::from_mode(mode | 0o600),
-                    );
-                }
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let canon_out = output_dir.canonicalize().ok();
+        let renamed = predicted.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        for path in file_targets.iter().chain(renamed.iter()) {
+            let inside = path
+                .parent()
+                .and_then(|parent| parent.canonicalize().ok())
+                .zip(canon_out.as_ref())
+                .is_some_and(|(parent, out)| parent.starts_with(out));
+            if !inside {
+                continue;
+            }
+            let Ok(meta) = std::fs::symlink_metadata(path) else {
+                continue;
+            };
+            if !meta.is_file() || before_files.get(path) == Some(&(meta.dev(), meta.ino())) {
+                continue;
+            }
+            let mode = meta.permissions().mode() & 0o7777;
+            if mode & 0o600 != 0o600 {
+                let _ =
+                    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode | 0o600));
             }
         }
     }
@@ -4182,6 +4207,68 @@ mod tests {
         assert_eq!(std::fs::read(out.join("zero.bin")).unwrap(), b"zero");
         assert_eq!(mode_of(&out.join("ro.bin")) & 0o600, 0o600);
         assert_eq!(mode_of(&out.join("run.sh")) & 0o700, 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_7z_file_mode_fix_touches_only_what_the_run_wrote() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempTestDir::new("7z_mode_scope");
+        let mode_of =
+            |p: &Path| std::fs::symlink_metadata(p).unwrap().permissions().mode() & 0o7777;
+        let set_mode = |p: &Path, m: u32| {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap()
+        };
+
+        // Skip mode: an existing read-only file with a member's name is left exactly as it was.
+        let a = build_7z(&[("a.txt", Some(b"new"), Some(sz_unix_attrs(0o100000, false)))]);
+        let a_path = dir.path().join("a.7z");
+        std::fs::write(&a_path, &a).unwrap();
+        let out = dir.path().join("skip");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join("a.txt"), b"old").unwrap();
+        set_mode(&out.join("a.txt"), 0o400);
+        extract_7z_cancellable(&a_path, &out, "", 0, &mut |_, _| {}, &mut || false).unwrap();
+        assert_eq!(mode_of(&out.join("a.txt")), 0o400);
+
+        // A folder in the output that links outside: zipfast refuses the member, and nothing
+        // outside the output folder is changed.
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("f.txt"), b"keep").unwrap();
+        set_mode(&outside.join("f.txt"), 0o400);
+        let s = build_7z(&[("sub/f.txt", Some(b"x"), None)]);
+        let s_path = dir.path().join("sub.7z");
+        std::fs::write(&s_path, &s).unwrap();
+        let out = dir.path().join("linked");
+        std::fs::create_dir_all(&out).unwrap();
+        std::os::unix::fs::symlink(&outside, out.join("sub")).unwrap();
+        assert!(
+            extract_7z_cancellable(&s_path, &out, "", 1, &mut |_, _| {}, &mut || false).is_err()
+        );
+        assert_eq!(mode_of(&outside.join("f.txt")), 0o400);
+
+        // AutoRename output written before the run fails still gets owner read/write.
+        let r = build_7z(&[
+            (
+                "a.txt",
+                Some(b"renamed"),
+                Some(sz_unix_attrs(0o100000, false)),
+            ),
+            ("d", Some(b"file d"), None),
+            ("d/f", Some(b"f"), None),
+        ]);
+        let r_path = dir.path().join("r.7z");
+        std::fs::write(&r_path, &r).unwrap();
+        let out = dir.path().join("rename_fail");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join("a.txt"), b"old").unwrap();
+        let _ = extract_7z_cancellable(&r_path, &out, "", 2, &mut |_, _| {}, &mut || false);
+        assert!(
+            out.join("a_1.txt").exists(),
+            "zipfast writes a_1.txt before failing on d"
+        );
+        assert_eq!(mode_of(&out.join("a_1.txt")) & 0o600, 0o600);
     }
 
     #[test]

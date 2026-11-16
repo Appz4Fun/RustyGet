@@ -753,7 +753,10 @@ fn daemon_article_cache_run() {
     let mut just_flushed = false;
     // Articles are malloc'd one by one; after a flush hand the freed heap
     // back to the OS once the cache is empty, so RSS follows what is held.
+    // At most one trim per TRIM_EVERY: malloc_trim walks every arena.
+    const TRIM_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
     let mut trim_pending = false;
+    let mut last_trim: Option<std::time::Instant> = None;
     loop {
         let (allocated, effective_limit, is_stopped, direct_write, tier) = snap();
         if is_stopped && allocated == 0 {
@@ -775,14 +778,19 @@ fn daemon_article_cache_run() {
             let (alloc_now, _, stopped_now, _, _) = snap();
             if need_emergency_flush && alloc_now == 0 {
                 crate::memory_pressure::trim_heap();
-            } else if (!just_flushed || alloc_now >= allocated) && !stopped_now {
+                trim_pending = false;
+                last_trim = Some(std::time::Instant::now());
+            } else if alloc_now >= allocated || (!just_flushed && !stopped_now) {
                 // A "flush" that freed nothing (file busy, write blocked)
-                // must not spin: the 32 MiB DirectWrite hold reaches this often.
+                // must not spin, also while stopping: the 32 MiB DirectWrite
+                // hold reaches this often.
                 sleep_ms(5);
             }
         } else if allocated == 0 {
-            if std::mem::take(&mut trim_pending) {
+            if trim_pending && last_trim.is_none_or(|t| t.elapsed() >= TRIM_EVERY) {
                 crate::memory_pressure::trim_heap();
+                trim_pending = false;
+                last_trim = Some(std::time::Instant::now());
             }
             let mut guard = CACHE_ALLOC_LOCK.0.lock().unwrap_or_else(|e| e.into_inner());
             while CACHE_ALLOCATED.load(Ordering::SeqCst) == 0 && !is_stopped_cb() {

@@ -466,8 +466,9 @@ impl ActiveStreamingSession {
             return;
         }
         // Cover the whole shortfall at once: every refusal drops data. With
-        // many files downloading at once staging holds about one partial slice
-        // per file, so loans may take up to half of ParBuffer. They never take
+        // many files downloading at once staging holds the received part of
+        // one partial slice per file (par-rs charges bytes held, not whole
+        // slices), so loans may take up to half of ParBuffer. They never take
         // the last quarter, which stays free for repair slots; when the pool
         // has room for two ordinary jobs, it is at least one ordinary job's
         // start reservation, so another job's live PAR can still start (a job

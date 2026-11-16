@@ -1617,9 +1617,10 @@ fn fleet_prints(
         .collect()
 }
 
-/// A copy's print, and the size and CRC32 of the video its 7z header records
-/// (see [`crate::dupeintake::inner_key_copy`]), which a 7z with a password
-/// but without `-mhe` gives even when it cannot be printed.
+/// A copy's print, and the size and CRC32 of the video its archive headers
+/// record (see [`crate::dupeintake::inner_key_copy`]): a RAR set's last
+/// volume, or a 7z header, which a 7z with a password but without `-mhe`
+/// gives even when it cannot be printed.
 type KeyedPrint = (
     Result<crate::dupeintake::Print, String>,
     Option<crate::twinfields::InnerKey>,
@@ -1669,13 +1670,17 @@ fn fleet_prints_keyed(
                         samples,
                         seed,
                     );
-                    // a 7z header's key costs article reads: only for a
-                    // copy that names 7z volumes or could not be printed
-                    let named_7z = info.data_segments.iter().any(|f| {
+                    // a key costs article reads: a 7z header several, a RAR
+                    // set's last volume two (its first article and the first
+                    // volume's); only for a copy that names 7z or RAR volumes,
+                    // or could not be printed
+                    let named_archive = info.data_segments.iter().any(|f| {
                         let n = f.name.to_ascii_lowercase();
-                        n.ends_with(b".7z") || n.windows(4).any(|w| w == b".7z.")
+                        n.ends_with(b".7z")
+                            || n.windows(4).any(|w| w == b".7z.")
+                            || crate::filetypes::is_rar_file(&n)
                     });
-                    let key = if named_7z || got.is_err() {
+                    let key = if named_archive || got.is_err() {
                         inner_key_copy(&info.data_segments, &fetch)
                     } else {
                         None

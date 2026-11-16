@@ -259,7 +259,19 @@ pub fn sample_offsets(size: i64, count: usize, seed: u64) -> Vec<i64> {
     out
 }
 
-/// The size and CRC32 of the largest file of a copy's 7z set, read from the
+/// Smallest file a RAR key may stand for: a smaller one is a sample or nfo
+/// spilling into the last volume, not the video (tests use small fixtures).
+#[cfg(not(test))]
+const RAR_KEY_MIN: u64 = crate::twinfields::MIN_KEY_SIZE;
+#[cfg(test)]
+const RAR_KEY_MIN: u64 = 0;
+/// Bytes of a RAR set's last volume read for its file header: within the
+/// first article of any posting.
+const RAR_KEY_HEAD: usize = 64 * 1024;
+
+/// The size and CRC32 of the largest file of a copy's archive set: for RAR
+/// from the file header at the start of the last volume
+/// ([`crate::twinfields::rar_last_volume_key`], one article), for 7z from the
 /// 7z header ([`crate::twinfields::seven_zip_key`]). A 7z with a password but
 /// without `-mhe` keeps that header in the clear, so a copy [`print_copy`]
 /// cannot open without the password still gets a key TwinCheck can match to
@@ -294,7 +306,52 @@ pub fn inner_key_copy(
         .collect();
     let first = vols.first()?;
     let mut magic = [0u8; 6];
-    if !first.read(0, &mut magic) || magic != crate::twinfields::SEVEN_ZIP_MAGIC {
+    if !first.read(0, &mut magic) {
+        return None;
+    }
+    if magic.starts_with(b"Rar!") {
+        // the last volume's first bytes hold its file header, which records
+        // the whole file's size and CRC32
+        let last = vols.last()?;
+        let len = usize::try_from(last.size())
+            .ok()
+            .filter(|&n| n > 0)?
+            .min(RAR_KEY_HEAD);
+        let mut head = vec![0u8; len];
+        if !last.read(0, &mut head) {
+            return None;
+        }
+        // RAR volumes are one size but the last: a full-size "last" volume
+        // means the copy lacks the set's real last volumes, and a middle
+        // volume would key the file that ends there, not the video
+        let first_len = u64::try_from(first.size()).unwrap_or(0);
+        let last_len = u64::try_from(last.size()).unwrap_or(0);
+        if vols.len() > 1 && last_len >= first_len {
+            return None;
+        }
+        // the last volume shows the file packed last, not the largest: trust
+        // it only when it fills most of the set, so it must be the largest
+        // (two CDs, a featurette or a season pack give no key, not CD2's).
+        // The set's size is measured from its volumes, and the nzb's byte
+        // counts only ever raise it
+        let measured = first_len
+            .saturating_mul(vols.len() as u64 - 1)
+            .saturating_add(last_len);
+        // counted over the whole copy (but par2 and samples), so a 2CD
+        // release posted as two sets keys neither CD
+        let listed: u64 = files
+            .iter()
+            .filter(|f| {
+                let n = base_name(&f.name).to_ascii_lowercase();
+                !n.ends_with(b".par2") && !n.windows(6).any(|w| w == b"sample")
+            })
+            .map(|f| u64::try_from(f.bytes).unwrap_or(0))
+            .fold(0u64, u64::saturating_add);
+        let set_bytes = measured.max(listed);
+        return crate::twinfields::rar_last_volume_key(&head, vols.len() > 1, RAR_KEY_MIN)
+            .filter(|k| k.size.saturating_mul(2) > set_bytes);
+    }
+    if magic != crate::twinfields::SEVEN_ZIP_MAGIC {
         return None;
     }
     // 7-Zip splits into equal volumes but the last
@@ -603,7 +660,73 @@ mod tests {
             fixture("rerar-a.part1.rar"),
             4000,
         );
+        // a first volume alone records no whole-file CRC
         assert_eq!(inner_key_copy(&rar, &mem), None);
+    }
+
+    #[test]
+    fn a_rar_set_gets_its_key_from_the_last_volume() {
+        let mut mem = Memory {
+            files: HashMap::new(),
+            fetched: Cell::new(0),
+        };
+        let key_of = |mem: &mut Memory, tag: &str, set: &str| {
+            let mut files = Vec::new();
+            for i in 1..=3 {
+                files.extend(copy(
+                    mem,
+                    &format!("{tag}{i}"),
+                    &format!("rel.part{i}.rar"),
+                    fixture(&format!("{set}.part{i}.rar")),
+                    4000,
+                ));
+            }
+            files
+        };
+        let a = key_of(&mut mem, "a", "rerar-a");
+        let c = key_of(&mut mem, "c", "rerar-c");
+        let video = crate::twinfields::InnerKey {
+            size: 49156,
+            crc32: 0x771f_bd29,
+        };
+        assert_eq!(inner_key_copy(&a, &mem), Some(video));
+        // a re-RAR of the same file records the same size and CRC32
+        assert_eq!(inner_key_copy(&c, &mem), Some(video));
+        // when the file seen is not most of the set (a second CD packed
+        // before it), it may not be the largest: no key
+        let mut two_cds = a.clone();
+        two_cds[0].bytes += 60_000;
+        assert_eq!(inner_key_copy(&two_cds, &mem), None);
+        // with no byte counts in the nzb the set is measured from its volumes
+        let mut no_bytes = a.clone();
+        no_bytes.iter_mut().for_each(|f| f.bytes = 0);
+        assert_eq!(inner_key_copy(&no_bytes, &mem), Some(video));
+        // a copy lacking its real last volume keys nothing from a full-size
+        // "last" one: here the final volume padded to full size, in place of
+        // part 2, would otherwise give the video's key
+        let mut padded = fixture("rerar-a.part3.rar");
+        padded.resize(20480, 0);
+        let mut short = copy(
+            &mut mem,
+            "s1",
+            "rel.part1.rar",
+            fixture("rerar-a.part1.rar"),
+            4000,
+        );
+        short.extend(copy(&mut mem, "s2", "rel.part2.rar", padded, 4000));
+        assert_eq!(inner_key_copy(&short, &mem), None);
+        // a second set as large as the first (CD2 posted on its own) leaves
+        // the video under half the copy: no key
+        let mut two_sets = a.clone();
+        two_sets.extend(copy(
+            &mut mem,
+            "d",
+            "rel-cd2.rar",
+            fixture("rerar-c.part1.rar"),
+            4000,
+        ));
+        two_sets.last_mut().unwrap().bytes = 49_000;
+        assert_eq!(inner_key_copy(&two_sets, &mem), None);
     }
 
     #[test]

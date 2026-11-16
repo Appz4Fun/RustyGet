@@ -724,6 +724,64 @@ impl VolumeSource for Volumes {
     }
 }
 
+/// The [`InnerKey`] a RAR set's last volume records: `head` is the start of
+/// that volume (its first article is enough). Each file's last part header
+/// stores the unpacked size and the CRC32 of the whole file, whatever the
+/// compression, so a stored, compressed or re-RARed copy of one video gives
+/// the same key. The largest file whose last part starts in `head` is taken;
+/// in a set of several volumes (`multi_volume`) only a file continued from
+/// the volume before counts, so a small file packed after the video (an nfo,
+/// subtitles) that alone sits in the last volume never stands for the video.
+/// In a single volume the chosen file's data must run past `head`, so a small
+/// file (an nfo) whose header is the only one seen never stands in for a
+/// video whose header lies beyond it. Keys under `min_size` are dropped too:
+/// a sample or nfo spilling into the last volume after the video is the only
+/// file continued there, and a wrong key would mark a real alt as other.
+/// Only a video counts, so an inner archive (a RAR inside a RAR) gives none.
+/// None for encrypted headers (`-hp`), keyed checks (RAR 5 `-p`), a file whose
+/// CRC is not recorded, or a head with no last part of such a file.
+pub fn rar_last_volume_key(head: &[u8], multi_volume: bool, min_size: u64) -> Option<InnerKey> {
+    if !head.starts_with(b"Rar!") {
+        return None;
+    }
+    let map = MemberMap::from_volume(head, MapOptions::new("head.rar")).ok()?;
+    // the volume's own main header must agree: a lone middle volume (names
+    // too obfuscated to group) is no whole archive, and a set's last volume
+    // is never its first
+    if map.header_encrypted
+        || !map.main_read
+        || map.multi_volume != multi_volume
+        || (multi_volume && map.first_volume)
+    {
+        return None;
+    }
+    map.members
+        .iter()
+        .filter(|m| {
+            !m.is_dir
+                && crate::streamrepair::is_stream_eligible(
+                    m.name.as_deref().map_or(&m.raw_name[..], str::as_bytes),
+                )
+                && if multi_volume {
+                    m.split_before
+                } else {
+                    m.packed.end > head.len() as u64
+                }
+        })
+        .filter_map(|m| {
+            let checks = m.checks?;
+            if checks.keyed {
+                return None;
+            }
+            Some(InnerKey {
+                size: m.unpacked_size?,
+                crc32: checks.crc32?,
+            })
+        })
+        .max_by_key(|k| k.size)
+        .filter(|k| k.size >= min_size)
+}
+
 /// Reads the header of a 7z set and returns its largest file's [`InnerKey`].
 /// The volumes are `lens` bytes long; `read(volume, offset, buf)` fills `buf`
 /// from a volume. Only header bytes are read (the start header and the
@@ -860,6 +918,54 @@ mod tests {
             }
         }
         judge(&t, false, pa == pb)
+    }
+
+    #[test]
+    fn a_rar_last_volume_keys_the_file_continued_into_it() {
+        // video.mkv then info.nfo: the video's last part comes first
+        let mm = rar_last_volume_key(&fixture("mm.part3.head"), true, 0).expect("video key");
+        // info.nfo then video.mkv: still the video, not the nfo
+        let nfo_first =
+            rar_last_volume_key(&fixture("nfo-first.part3.head"), true, 0).expect("video key");
+        // the fixture heads hold only the video's tail (the nfo lies beyond
+        // 4096 bytes), so this checks the key, not the nfo being passed over;
+        // the intake's majority rule backs up the split_before filter
+        let video = InnerKey {
+            size: 49156,
+            crc32: 0x771f_bd29,
+        };
+        assert_eq!((mm, nfo_first), (video, video));
+        // a first volume records no final check of a continued file
+        assert_eq!(
+            rar_last_volume_key(&fixture("mm.part1.head"), true, 0),
+            None
+        );
+        // encrypted headers give no key
+        assert_eq!(
+            rar_last_volume_key(&fixture("hp1.part2.head"), true, 0),
+            None
+        );
+        assert_eq!(rar_last_volume_key(b"not a rar", false, 0), None);
+        // a key under the minimum size (a sample or nfo spilling over) is dropped
+        let head = fixture("mm.part3.head");
+        assert_eq!(rar_last_volume_key(&head, true, mm.size), Some(mm));
+        assert_eq!(rar_last_volume_key(&head, true, mm.size + 1), None);
+        // a set's volume read as if it were a whole archive gives no key
+        assert_eq!(rar_last_volume_key(&head, false, 0), None);
+        // a lone nfo whose data ends inside the head never stands for the
+        // video whose header follows it (the name filter drops it; the
+        // data-past-head rule has no fixture of its own, as no rar is at hand)
+        let nfo_head = fixture("nfo-first.part1.head");
+        let nfo = MemberMap::from_volume(&nfo_head, MapOptions::new("x.rar")).unwrap();
+        assert!(
+            nfo.members
+                .iter()
+                .any(|m| m.checks.is_some_and(|c| c.crc32.is_some())
+                    && m.packed.end <= nfo_head.len() as u64),
+            "{:?}",
+            nfo.members.len()
+        );
+        assert_eq!(rar_last_volume_key(&nfo_head, false, 0), None);
     }
 
     #[test]

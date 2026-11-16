@@ -1077,7 +1077,6 @@ fn rar4_stored_then_broken_solid_member_fails() {
     std::fs::write(&first, &v).unwrap();
     let (r, log) = run(&first, &t.out(), Box::new(CompleteSet));
     assert!(r.is_err(), "log: {log:?}");
-
 }
 
 #[test]
@@ -3108,7 +3107,11 @@ fn walk_names(dir: &Path) -> Vec<String> {
     if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {
             let p = e.path();
-            out.push(format!("{} {}", p.display(), e.metadata().map(|m| m.len()).unwrap_or(0)));
+            out.push(format!(
+                "{} {}",
+                p.display(),
+                e.metadata().map(|m| m.len()).unwrap_or(0)
+            ));
             if p.is_dir() {
                 out.extend(walk_names(&p));
             }
@@ -4031,7 +4034,11 @@ fn with_locator_and_quick_open(vol: &[u8]) -> Vec<u8> {
         let mut q = body;
         let kind = rd(vol, &mut q);
         let flags = rd(vol, &mut q);
-        let data_len = if flags & 2 != 0 { rd(vol, &mut { q }) } else { 0 };
+        let data_len = if flags & 2 != 0 {
+            rd(vol, &mut { q })
+        } else {
+            0
+        };
         match kind {
             1 => {
                 // main header: append an 8-byte locator extra record
@@ -4089,7 +4096,9 @@ fn dead_volumes_extract_from_borrowed_data_through_rebuilt_headers() {
         .enumerate()
         .map(|(i, v)| {
             if dead.contains(&i) {
-                VolumeState::Dead { encoded_size: v.len() as i64 * 102 / 100 }
+                VolumeState::Dead {
+                    encoded_size: v.len() as i64 * 102 / 100,
+                }
             } else {
                 VolumeState::Readable(geometry_of(v))
             }
@@ -4130,7 +4139,13 @@ fn dead_volumes_extract_from_borrowed_data_through_rebuilt_headers() {
             },
         );
     }
-    let (r, log) = run(&first, &t.out(), Box::new(WithVirtual { virtuals: virtuals.clone() }));
+    let (r, log) = run(
+        &first,
+        &t.out(),
+        Box::new(WithVirtual {
+            virtuals: virtuals.clone(),
+        }),
+    );
     expect_ok(r, &log);
     assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
 
@@ -4193,7 +4208,9 @@ fn dead_rar4_volumes_extract_from_borrowed_data_through_rebuilt_headers() {
         .enumerate()
         .map(|(i, v)| {
             if dead.contains(&i) {
-                VolumeState::Dead { encoded_size: v.len() as i64 * 102 / 100 }
+                VolumeState::Dead {
+                    encoded_size: v.len() as i64 * 102 / 100,
+                }
             } else {
                 VolumeState::Readable(geometry_of(v))
             }
@@ -4224,7 +4241,12 @@ fn dead_rar4_volumes_extract_from_borrowed_data_through_rebuilt_headers() {
         crate::deadvolume::check_frame(&head, &tail, p.packed_size as u64, b"movie.mkv").unwrap();
         virtuals.insert(
             t.dl().join(rar4_name(p.index)),
-            VirtualVolume { head, data: path, data_len: p.packed_size as u64, tail },
+            VirtualVolume {
+                head,
+                data: path,
+                data_len: p.packed_size as u64,
+                tail,
+            },
         );
     }
     let (r, log) = run(&first, &t.out(), Box::new(WithVirtual { virtuals }));
@@ -4254,4 +4276,128 @@ pub(crate) fn rar4_windows_store_archive(names: &[String]) -> Vec<u8> {
     }
     v.extend(rar4_block(0x7b, 0, &[], 0));
     v
+}
+
+/// A RAR5 directory entry.
+fn dir_block(name: &str, attributes: u64, host: u64) -> Vec<u8> {
+    let mut fields = Vec::new();
+    vint(0x1 | 0x2, &mut fields); // directory, mtime present
+    vint(0, &mut fields);
+    vint(attributes, &mut fields);
+    fields.extend_from_slice(&1_700_000_000u32.to_le_bytes());
+    vint(0, &mut fields); // stored
+    vint(host, &mut fields);
+    vint(name.len() as u64, &mut fields);
+    fields.extend_from_slice(name.as_bytes());
+    block(2, 0, &fields, &[], true)
+}
+
+fn set_with_directory(dir: &Path, host: u64, dir_attr: u64) -> (PathBuf, Vec<u8>) {
+    let a = pattern(40_000);
+    let mut v = SIG.to_vec();
+    v.extend(main_block(false, None));
+    v.extend(dir_block("Sub", dir_attr, host));
+    v.extend(file_block(
+        "Sub/a.bin",
+        a.len() as u64,
+        &a,
+        crc32fast::hash(&a),
+        false,
+        false,
+    ));
+    v.extend(end_block(false));
+    let first = dir.join("set.rar");
+    std::fs::write(&first, &v).unwrap();
+    (first, a)
+}
+
+#[test]
+fn a_directory_entry_extracts_while_the_set_downloads() {
+    let t = TestDir::new("direntry_dl");
+    let (first, a) = set_with_directory(&t.dl(), 1, 0o040550);
+    let damaged = Damaged {
+        holes: Vec::new(),
+        repair: Vec::new(),
+        handed: false,
+    };
+    // Unknown volume count: the progressive path, undeclared.
+    let (r, log) = run_downloading(&first, &t.out(), damaged, 0);
+    expect_ok(r, &log);
+    assert!(t.out().join("Sub").is_dir());
+    assert_eq!(std::fs::read(t.out().join("Sub/a.bin")).unwrap(), a);
+    // Stored 0550 with owner access kept, and the stored time.
+    #[cfg(unix)]
+    assert_eq!(mode_of(&t.out().join("Sub")), 0o750);
+    let mtime = std::fs::metadata(t.out().join("Sub"))
+        .unwrap()
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    assert_eq!(mtime, 1_700_000_000);
+}
+
+#[test]
+fn a_directory_entry_extracts_from_an_undeclared_complete_set() {
+    // Skip mode never declares, even for a complete set.
+    let t = TestDir::new("direntry_skip");
+    let (first, a) = set_with_directory(&t.dl(), 0, 0x10);
+    let req = Request {
+        first_volume: &first,
+        dest: &t.out(),
+        password: "",
+        overwrite: Overwrite::Skip,
+        on_wait: None,
+    };
+    let mut log = Vec::new();
+    let r = extract(
+        &req,
+        Box::new(CompleteSet),
+        &mut |_, m: &str| log.push(m.to_string()),
+        &mut || false,
+    );
+    expect_ok(r, &log);
+    assert!(t.out().join("Sub").is_dir());
+    assert_eq!(std::fs::read(t.out().join("Sub/a.bin")).unwrap(), a);
+}
+
+#[test]
+fn a_windows_directory_entry_lands_where_its_files_are_copied() {
+    // Windows rules would turn "What?" into "What_"; the copy path keeps the name.
+    let t = TestDir::new("direntry_win_name");
+    let a = pattern(30_000);
+    let mut v = SIG.to_vec();
+    v.extend(main_block(false, None));
+    v.extend(dir_block("What?", 0x10, 0));
+    RAR5_HOST.with(|h| h.set((0, 0x20)));
+    v.extend(file_block(
+        "What?/a.bin",
+        a.len() as u64,
+        &a,
+        crc32fast::hash(&a),
+        false,
+        false,
+    ));
+    RAR5_HOST.with(|h| h.set((1, 0o644)));
+    v.extend(end_block(false));
+    let first = t.dl().join("set.rar");
+    std::fs::write(&first, &v).unwrap();
+    let req = Request {
+        first_volume: &first,
+        dest: &t.out(),
+        password: "",
+        overwrite: Overwrite::Skip,
+        on_wait: None,
+    };
+    let mut log = Vec::new();
+    let r = extract(
+        &req,
+        Box::new(CompleteSet),
+        &mut |_, m: &str| log.push(m.to_string()),
+        &mut || false,
+    );
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("What?/a.bin")).unwrap(), a);
+    assert!(!t.out().join("What_").exists());
 }

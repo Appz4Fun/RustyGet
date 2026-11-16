@@ -7,6 +7,13 @@
 
 use std::ffi::{c_int, c_ulong, c_void, CStr};
 
+mod scan;
+
+/// Which break-scan kernel this CPU uses: 1 scalar, 2 AVX2, 3 AVX-512BW, 4 NEON.
+pub fn scan_kernel() -> u8 {
+    scan::imp::kernel()
+}
+
 /// rapidyenc_decode_incremental: returns 0 (no end), 1 ("\r\n=y" found,
 /// `src` after the 'y') or 2 ("\r\n.\r\n" found, `src` after it).
 pub type DecodeFn = unsafe extern "C" fn(
@@ -138,23 +145,7 @@ pub unsafe extern "C" fn rust_yenc_decode_incremental(
         if idx >= next_simd_check {
             // Scan ahead for a span free of `\r\n.`, `\r\n=`, `=\r`, `=\n`
             let max_end = len - 2;
-            let mut raw_scan_end = idx;
-            while raw_scan_end < max_end {
-                let b = *s.add(raw_scan_end);
-                if b == b'\r' {
-                    let b1 = *s.add(raw_scan_end + 1);
-                    let b2 = *s.add(raw_scan_end + 2);
-                    if b1 == b'\n' && (b2 == b'.' || b2 == b'=') {
-                        break;
-                    }
-                } else if b == b'=' {
-                    let b1 = *s.add(raw_scan_end + 1);
-                    if b1 == b'\r' || b1 == b'\n' {
-                        break;
-                    }
-                }
-                raw_scan_end += 1;
-            }
+            let raw_scan_end = scan::find_break(s, idx, max_end);
             let mut run_end = raw_scan_end;
             // Back off trailing `=`, `\r`, `\n` so the SIMD span ends in clean RYDEC_STATE_NONE
             while run_end > idx {
@@ -1453,6 +1444,84 @@ mod tests {
             let got = decode_uu_line(&short_line);
             assert_eq!(got.len(), 45);
             assert_eq!(got, decode_uu_line(&full_line));
+        }
+    }
+
+    /// Encode `data` as a news server sends a yEnc part: 128-byte lines,
+    /// critical bytes escaped, and a line-leading '.' either escaped or (as
+    /// NNTP dot-stuffing) doubled.
+    fn yenc_article(data: &[u8], stuff_dots: bool) -> Vec<u8> {
+        let size = data.len();
+        let mut out =
+            format!("=ybegin part=1 line=128 size={size} name=f.bin\r\n=ypart begin=1 end={size}\r\n")
+                .into_bytes();
+        let mut col = 0;
+        for &b in data {
+            let e = b.wrapping_add(42);
+            let dot_lead = col == 0 && e == b'.';
+            let esc = matches!(e, 0 | b'\n' | b'\r' | b'=')
+                || (col == 0 && matches!(e, b'\t' | b' '))
+                || (dot_lead && !stuff_dots);
+            if esc {
+                out.extend_from_slice(&[b'=', e.wrapping_add(64)]);
+                col += 2;
+            } else {
+                if dot_lead {
+                    out.push(b'.');
+                }
+                out.push(e);
+                col += 1;
+            }
+            if col >= 128 {
+                out.extend_from_slice(b"\r\n");
+                col = 0;
+            }
+        }
+        let crc = crc32fast::hash(data);
+        out.extend_from_slice(
+            format!("\r\n=yend size={size} part=1 pcrc32={crc:08x}\r\n.\r\n").as_bytes(),
+        );
+        out
+    }
+
+    #[test]
+    fn simd_break_scan_decodes_random_articles_in_random_pieces() {
+        let mut x = 0x9e3779b97f4a7c15u64;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for round in 0..60 {
+            let size = (next() % 20_000) as usize + 1;
+            // Skew some rounds toward bytes that encode to '.', '=', CR, LF.
+            let data: Vec<u8> = (0..size)
+                .map(|_| {
+                    let r = next();
+                    if round % 3 == 0 && r % 4 == 0 {
+                        [b'.'.wrapping_sub(42), 0u8.wrapping_sub(42), b'\r'.wrapping_sub(42), b'='.wrapping_sub(42)][(r >> 8) as usize % 4]
+                    } else {
+                        r as u8
+                    }
+                })
+                .collect();
+            let art = yenc_article(&data, round % 2 == 0);
+            let mut d = Decoder::new(rust_yenc_decode_incremental, rust_yenc_crc);
+            d.crc_check = true;
+            let mut got = Vec::new();
+            let mut at = 0;
+            while at < art.len() {
+                let n = ((next() % 9000) as usize + 1).min(art.len() - at);
+                let mut piece = art[at..at + n].to_vec();
+                piece.resize(n + 128, 0);
+                let w = unsafe { d.decode_buffer(piece.as_mut_ptr(), n) };
+                got.extend_from_slice(&piece[..w]);
+                at += n;
+            }
+            assert_eq!(d.check(), Status::Finished, "round {round}");
+            assert_eq!(got, data, "round {round}");
+            assert_eq!(d.calculated_crc, crc32fast::hash(&data), "round {round}");
         }
     }
 }

@@ -120,6 +120,14 @@ conditional, not worker admission or proof that the tooling is installed.
   Recheck live same-repository PR/base/head identity before writes; missing
   configuration or incomplete publication must invalidate stale success.
 
+## CPU tiers and SIMD
+
+- Every build must run on an Intel Coffee Lake desktop (AVX2, no AVX-512) and an Apple
+  M4 Air/Pro; anything older is unsupported. Newer instructions (AVX-512, GFNI, ARM
+  crypto, M4/M5 extras) are welcome where a benchmark proves them faster, behind runtime
+  dispatch with the scalar version kept as the reference. See
+  [CPU tiers and SIMD](docs/CPU_TIERS.md) for the release tiers and the test rules.
+
 ## Runtime replacements and output contracts
 
 Read [the Rust conversion procedures](docs/RUST_CONVERSION_PROCEDURES.md) for

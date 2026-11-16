@@ -42,6 +42,10 @@ name = "ports"
 harness = false
 
 [[bench]]
+name = "yenc_decode"
+harness = false
+
+[[bench]]
 name = "criterion_ports"
 harness = false
 

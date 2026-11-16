@@ -64,28 +64,43 @@ fn video_param_value(same: bool) -> &'static [u8] {
     if same { b"same" } else { b"unverified" }
 }
 
-/// Records the intake verdict on a copy already in the queue or history.
-/// Whether each copy queued from an earlier submission may count as a twin
-/// partner: not when its health says it is dead (`DupeAlive=0`).
-fn fleet_earlier_alive(
+/// The kind stored on each copy of the key already queued (`id` 0 or a copy
+/// not found gives `None`): only a copy that is queued, or parked in history
+/// as a backup, and whose health does not say it is dead (`DupeAlive=0`).
+fn fleet_queued_kinds(
     host_ctx: *mut c_void,
     host_cb: DupeHostFn,
-    earlier: &[(i32, NzbSummaryData)],
-) -> Vec<bool> {
-    if earlier.is_empty() {
-        return Vec::new();
+    ids: &[i32],
+) -> Vec<Option<crate::donorkind::DonorKind>> {
+    if ids.iter().all(|&id| id == 0) {
+        return vec![None; ids.len()];
     }
     with_guarded_queue(host_ctx, host_cb, |dq_ptr| {
         let Some(qh) = crate::ffi::queue_host() else {
-            return vec![false; earlier.len()];
+            return vec![None; ids.len()];
         };
-        earlier
-            .iter()
-            .map(|(id, _)| {
-                dq_find_nzb(host_ctx, host_cb, dq_ptr, *id).is_some_and(|(ptr_, _)| {
-                    qh.nzb_get_param(ptr_, ALIVE_PARAM)
-                        .is_none_or(|v| v.trim_ascii() != b"0")
-                })
+        ids.iter()
+            .map(|&id| {
+                if id == 0 {
+                    return None;
+                }
+                let (ptr_, in_history) = dq_find_nzb(host_ctx, host_cb, dq_ptr, id)?;
+                if in_history {
+                    let item = inspect_nzb(host_ctx, host_cb, ptr_, false);
+                    if item.delete_status != crate::dupecoord::DELETE_STATUS_DUPE {
+                        return None;
+                    }
+                }
+                if qh
+                    .nzb_get_param(ptr_, ALIVE_PARAM)
+                    .is_some_and(|v| v.trim_ascii() == b"0")
+                {
+                    return None;
+                }
+                Some(crate::donorkind::DonorKind::from_param(
+                    qh.nzb_get_param(ptr_, crate::donorkind::KIND_PARAM)
+                        .as_deref(),
+                ))
             })
             .collect()
     })
@@ -135,6 +150,7 @@ fn kind_upgrades(stored: crate::donorkind::DonorKind, found: crate::donorkind::D
         && (stored == DonorKind::Unknown || found == DonorKind::Twin)
 }
 
+/// Records the intake verdict on a copy already in the queue or history.
 fn fleet_mark_video(host_ctx: *mut c_void, host_cb: DupeHostFn, nzb_id: i32, same: bool) {
     fleet_set_video(host_ctx, host_cb, nzb_id, video_param_value(same));
 }
@@ -5871,7 +5887,28 @@ pub unsafe fn fleet_append(
             earlier.push((*ex_id, summary));
         }
     }
-    earlier.truncate(FLEET_KIND_EARLIER_MAX);
+    // a queued copy a member is the same posting as is probed as that member
+    earlier.retain(|(id, _)| !candidates.iter().any(|c| c.existing_id == *id));
+    // only copies queued or parked as backups, and not dead, are partners;
+    // the kind each one has stored is kept unless the probe knows better
+    let earlier_stored = fleet_queued_kinds(
+        host_ctx,
+        host_cb,
+        &earlier.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+    );
+    let mut earlier_kept: Vec<(i32, NzbSummaryData)> = Vec::new();
+    for ((id, summary), stored) in earlier.into_iter().zip(&earlier_stored) {
+        if stored.is_some() && earlier_kept.len() < FLEET_KIND_EARLIER_MAX {
+            earlier_kept.push((id, summary));
+        }
+    }
+    let earlier = earlier_kept;
+    // the stored kind of each queued copy a member is the same posting as
+    let member_stored = fleet_queued_kinds(
+        host_ctx,
+        host_cb,
+        &candidates.iter().map(|c| c.existing_id).collect::<Vec<_>>(),
+    );
 
     let already_downloaded_name: Option<Vec<u8>> =
         with_guarded_queue(host_ctx, host_cb, |dq_ptr| {
@@ -5957,8 +5994,8 @@ pub unsafe fn fleet_append(
     // probe run after it got no time and left every member "unknown". The
     // kinds are told after it, so a dead copy never makes another a TWIN.
     // A single copy is probed too: its packing alone gives its kind. Copies
-    // queued from an earlier submission are probed with the new ones (only
-    // when there is a new one) and count as twin partners.
+    // queued from an earlier submission are probed with the members and count
+    // as twin partners.
     let mut probed: Vec<Option<(crate::twin::Listed, crate::donorkind::Packing)>> =
         vec![None; candidates.len()];
     let mut earlier_probed: Vec<(crate::twin::Listed, crate::donorkind::Packing)> = Vec::new();
@@ -5966,7 +6003,7 @@ pub unsafe fn fleet_append(
         let usable: Vec<usize> = (0..candidates.len())
             .filter(|&i| {
                 let c = &candidates[i];
-                c.error.is_empty() && c.same_as < 0 && c.existing_id == 0
+                c.error.is_empty() && c.same_as < 0
             })
             .collect();
         if !usable.is_empty() {
@@ -6151,6 +6188,15 @@ pub unsafe fn fleet_append(
         }
     }
 
+    // kinds found for copies already queued, written once the members are
+    // added: a twin only counts when its partner is queued by then
+    struct KindWrite {
+        nzb_id: i32,
+        packing: crate::donorkind::Packing,
+        twin_queued: bool,
+        partners: Vec<usize>,
+    }
+    let mut kind_writes: Vec<KindWrite> = Vec::new();
     {
         let live: Vec<usize> = (0..candidates.len())
             .filter(|&i| {
@@ -6158,44 +6204,60 @@ pub unsafe fn fleet_append(
                 c.error.is_empty() && c.same_as < 0 && !c.dead && probed[i].is_some()
             })
             .collect();
-        // an earlier copy whose health says it is dead makes no TWIN either
-        let earlier_alive = fleet_earlier_alive(host_ctx, host_cb, &earlier);
-        let mut earlier_twin = vec![false; earlier_probed.len()];
+        let mut earlier_partners: Vec<Vec<usize>> = vec![Vec::new(); earlier_probed.len()];
         for &i in &live {
             let (listed, packing) = probed[i].as_ref().expect("filtered on is_some");
-            let mut has_twin = live.iter().any(|&j| {
-                j != i
-                    && crate::donorkind::twins(
-                        listed,
-                        &probed[j].as_ref().expect("filtered on is_some").0,
-                        &candidates[i].summary.data_layout,
-                        &candidates[j].summary.data_layout,
-                    )
-            });
+            let partners: Vec<usize> = live
+                .iter()
+                .copied()
+                .filter(|&j| {
+                    j != i
+                        && crate::donorkind::twins(
+                            listed,
+                            &probed[j].as_ref().expect("filtered on is_some").0,
+                            &candidates[i].summary.data_layout,
+                            &candidates[j].summary.data_layout,
+                        )
+                })
+                .collect();
+            let mut twin_queued = false;
             for (e, (e_listed, _)) in earlier_probed.iter().enumerate() {
-                if earlier_alive.get(e).copied().unwrap_or(false)
-                    && crate::donorkind::twins(
-                        listed,
-                        e_listed,
-                        &candidates[i].summary.data_layout,
-                        &earlier[e].1.data_layout,
-                    )
-                {
-                    has_twin = true;
-                    earlier_twin[e] = true;
+                if crate::donorkind::twins(
+                    listed,
+                    e_listed,
+                    &candidates[i].summary.data_layout,
+                    &earlier[e].1.data_layout,
+                ) {
+                    twin_queued = true;
+                    earlier_partners[e].push(i);
                 }
             }
-            candidates[i].kind = crate::donorkind::DonorKind::of(has_twin, *packing);
+            let found =
+                crate::donorkind::DonorKind::of(twin_queued || !partners.is_empty(), *packing);
+            candidates[i].kind = found;
+            let id = candidates[i].existing_id;
+            if id != 0 {
+                // a member already queued: rank and report what is known of it
+                if let Some(stored) = member_stored[i] {
+                    if !kind_upgrades(stored, found) {
+                        candidates[i].kind = stored;
+                    }
+                }
+                kind_writes.push(KindWrite {
+                    nzb_id: id,
+                    packing: *packing,
+                    twin_queued,
+                    partners,
+                });
+            }
         }
         for (e, (_, packing)) in earlier_probed.iter().enumerate() {
-            let kind = crate::donorkind::DonorKind::of(earlier_twin[e], *packing);
-            fleet_upgrade_kind(host_ctx, host_cb, earlier[e].0, kind);
-            // a member that is this queued copy reports its kind
-            for c in candidates.iter_mut() {
-                if c.existing_id == earlier[e].0 {
-                    c.kind = kind;
-                }
-            }
+            kind_writes.push(KindWrite {
+                nzb_id: earlier[e].0,
+                packing: *packing,
+                twin_queued: false,
+                partners: std::mem::take(&mut earlier_partners[e]),
+            });
         }
     }
 
@@ -6369,6 +6431,15 @@ pub unsafe fn fleet_append(
             }
         }
         out_entries.push(entry);
+    }
+
+    for w in &kind_writes {
+        let partner_queued = w.twin_queued
+            || w.partners
+                .iter()
+                .any(|&p| added[p] != 0 || candidates[p].existing_id != 0);
+        let kind = crate::donorkind::DonorKind::of(partner_queued, w.packing);
+        fleet_upgrade_kind(host_ctx, host_cb, w.nzb_id, kind);
     }
 
     let mut chosen = 0i32;

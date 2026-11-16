@@ -745,7 +745,14 @@ pub fn rar_last_volume_key(head: &[u8], multi_volume: bool, min_size: u64) -> Op
         return None;
     }
     let map = MemberMap::from_volume(head, MapOptions::new("head.rar")).ok()?;
-    if map.header_encrypted {
+    // the volume's own main header must agree: a lone middle volume (names
+    // too obfuscated to group) is no whole archive, and a set's last volume
+    // is never its first
+    if map.header_encrypted
+        || !map.main_read
+        || map.multi_volume != multi_volume
+        || (multi_volume && map.first_volume)
+    {
         return None;
     }
     map.members
@@ -943,8 +950,8 @@ mod tests {
         let head = fixture("mm.part3.head");
         assert_eq!(rar_last_volume_key(&head, true, mm.size), Some(mm));
         assert_eq!(rar_last_volume_key(&head, true, mm.size + 1), None);
-        // read as one whole volume, a file whose data runs past the head counts
-        assert_eq!(rar_last_volume_key(&head, false, 0), Some(mm));
+        // a set's volume read as if it were a whole archive gives no key
+        assert_eq!(rar_last_volume_key(&head, false, 0), None);
         // a lone nfo whose data ends inside the head never stands for the
         // video whose header follows it (the name filter drops it; the
         // data-past-head rule has no fixture of its own, as no rar is at hand)

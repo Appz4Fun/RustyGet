@@ -346,7 +346,7 @@ pub fn inner_key_copy(
                 !n.ends_with(b".par2") && !n.windows(6).any(|w| w == b"sample")
             })
             .map(|f| u64::try_from(f.bytes).unwrap_or(0))
-            .sum();
+            .fold(0u64, u64::saturating_add);
         let set_bytes = measured.max(listed);
         return crate::twinfields::rar_last_volume_key(&head, vols.len() > 1, RAR_KEY_MIN)
             .filter(|k| k.size.saturating_mul(2) > set_bytes);
@@ -725,7 +725,7 @@ mod tests {
             fixture("rerar-c.part1.rar"),
             4000,
         ));
-        two_sets.last_mut().unwrap().bytes = 60_000;
+        two_sets.last_mut().unwrap().bytes = 49_000;
         assert_eq!(inner_key_copy(&two_sets, &mem), None);
     }
 

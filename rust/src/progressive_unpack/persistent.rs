@@ -63,12 +63,8 @@ where
     let feed = Arc::new(Mutex::new(feed));
     let mut run = Run::new(req, &plan, feed.clone());
     let result = run.extract(log_cb, is_cancelled);
-    let made_output = !run.handles.is_empty();
     let outcome = match result {
-        Ok(summary) => {
-            run.finish_clean();
-            Ok(summary)
-        }
+        Ok(summary) => run.publish().map(|()| summary).map_err(Step::Fallback),
         Err(e) => Err(e),
     };
     drop(run);
@@ -78,14 +74,12 @@ where
             Outcome::Done(Ok(summary))
         }
         Err(Step::Fail(f)) => {
-            // Every output here was created by this run (exclusively) and is unverified.
-            plan.remove_outputs();
+            // Everything this run wrote is in its own state directory, unpublished.
+            remove_state_root(&plan.root);
             Outcome::Done(Err(Error::Failed(f)))
         }
         Err(Step::Fallback(why)) => {
-            if made_output || plan.root.exists() {
-                plan.remove_outputs();
-            }
+            remove_state_root(&plan.root);
             match Arc::try_unwrap(feed) {
                 Ok(m) => Outcome::Fallback(m.into_inner().unwrap_or_else(|e| e.into_inner()), why),
                 // The session that held the other reference is gone with `run`.
@@ -108,13 +102,10 @@ struct Plan {
     dir: PathBuf,
     names: Vec<OsString>,
     root: PathBuf,
-    dest: PathBuf,
     binding: ArchiveBinding,
-    /// Outputs zipfast created, for removal on fallback or failure.
-    outputs: Mutex<Vec<PathBuf>>,
-    /// Directories under the destination before the session ran: parent folders zipfast
-    /// creates for outputs are removed again with them, these never.
-    existing_dirs: std::collections::HashSet<PathBuf>,
+    /// Where the session writes its outputs, inside `root`: nothing reaches the destination
+    /// until every member verified, and anything left on failure goes with `root`.
+    stage: PathBuf,
 }
 
 impl Plan {
@@ -142,17 +133,16 @@ impl Plan {
                 p = zipfast::volume::next_volume(&p).ok_or("volume naming")?;
             }
         }
-        first_volume_qualifies(req.first_volume, req.password, req.dest)?;
+        first_volume_qualifies(req.first_volume, req.password)?;
         let binding = binding_for(req);
         let root = req.dest.join(STATE_DIR).join(hex(&binding.archive[..8]));
+        let stage = root.join("out");
         Ok(Self {
             dir,
             names,
             root,
-            dest: req.dest.to_path_buf(),
             binding,
-            outputs: Mutex::new(Vec::new()),
-            existing_dirs: dirs_under(req.dest),
+            stage,
         })
     }
 
@@ -174,50 +164,6 @@ impl Plan {
             },
         }
     }
-
-    fn remove_outputs(&self) {
-        for path in self
-            .outputs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-        {
-            let _ = std::fs::remove_file(path);
-            // Parent folders this run created, deepest first; remove_dir leaves any that are
-            // not empty.
-            let mut dir = path.parent();
-            while let Some(d) = dir {
-                if !d.starts_with(&self.dest) || d == self.dest || self.existing_dirs.contains(d) {
-                    break;
-                }
-                if std::fs::remove_dir(d).is_err() {
-                    break;
-                }
-                dir = d.parent();
-            }
-        }
-        remove_state_root(&self.root);
-    }
-}
-
-/// Every directory under `dest` (bounded), recorded before the session creates any.
-fn dirs_under(dest: &Path) -> std::collections::HashSet<PathBuf> {
-    let mut out = std::collections::HashSet::new();
-    let mut stack = vec![dest.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        if out.len() > 100_000 {
-            break;
-        }
-        if let Ok(entries) = std::fs::read_dir(&d) {
-            for e in entries.flatten() {
-                if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                    stack.push(e.path());
-                }
-            }
-        }
-        out.insert(d);
-    }
-    out
 }
 
 /// Removes state a crashed or killed earlier persistent run left for this set, when the
@@ -235,7 +181,7 @@ pub(super) fn forget_state(req: &Request<'_>) {
 /// Members that start in the first volume must all be stored files of known size (RAR5 plain
 /// or AES, RAR4 plain), with names both path rules agree on. Later volumes are checked by
 /// zipfast when reached; a refusal there falls back.
-fn first_volume_qualifies(first: &Path, password: &str, dest: &Path) -> Result<(), String> {
+fn first_volume_qualifies(first: &Path, password: &str) -> Result<(), String> {
     use zipfast::rar5::reader::{Block, Volume};
     let pw = (!password.is_empty()).then_some(password);
     let mut vol = Volume::open_with_password(first, pw).map_err(|e| format!("headers: {e}"))?;
@@ -257,13 +203,6 @@ fn first_volume_qualifies(first: &Path, password: &str, dest: &Path) -> Result<(
                 }
                 if h.name.contains(['\\', '<', '>', ':', '"', '|', '?', '*']) {
                     return Err("member name differs between path rules".into());
-                }
-                // zipfast creates persistent outputs exclusively and never replaces a file.
-                if zipfast::path::sanitize(&h.name, false)
-                    .map(|rel| dest.join(rel).symlink_metadata().is_ok())
-                    .unwrap_or(true)
-                {
-                    return Err("an output already exists".into());
                 }
                 members += 1;
             }
@@ -426,10 +365,13 @@ impl<'a> Run<'a> {
     where
         F: FnMut(i32, &str),
     {
+        // Reopening an earlier run's state is not supported: start from an empty root.
+        let _ = std::fs::remove_dir_all(&self.plan.root);
         let state_dir = self.plan.root.join("state");
         let anchor_dir = self.plan.root.join("anchors");
         provision_dir(&state_dir)
             .and_then(|_| provision_dir(&anchor_dir))
+            .and_then(|_| provision_dir(&self.plan.stage))
             .map_err(|e| Step::Fallback(format!("state directory: {e}")))?;
         let anchors = Arc::new(
             DurableAnchors::open(&anchor_dir)
@@ -449,7 +391,7 @@ impl<'a> Run<'a> {
         let mut opts = ProgressiveOptions::new(
             zipfast::extract::Options {
                 mode: zipfast::extract::Mode::Extract,
-                dest: self.req.dest.to_path_buf(),
+                dest: self.plan.stage.clone(),
                 overwrite: zipfast::extract::Overwrite::Always,
                 flatten: false,
                 threads: None,
@@ -506,17 +448,8 @@ impl<'a> Run<'a> {
                         }
                     }
                     Ok(Some(ProgressiveEvent::MemberStarted { name, .. })) => {
-                        // zipfast created the output (exclusively) before this event, named
-                        // with its own path rules: record it first so any stop removes it.
                         let meta = meta_cache.lookup(&current_volume, self.req.password, &name);
                         let display = String::from_utf8_lossy(&name).into_owned();
-                        if let Ok(rel) = zipfast::path::sanitize(&display, meta.windows_names) {
-                            self.plan
-                                .outputs
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .push(self.req.dest.join(rel));
-                        }
                         if name.iter().any(|b| b"\\<>:\"|?*".contains(b)) {
                             return Err(Step::Fallback(
                                 "member name differs between path rules".into(),
@@ -693,7 +626,7 @@ impl<'a> Run<'a> {
         });
         let waker = Waker::from(parker.clone());
         let mut cx = Context::from_waker(&waker);
-        for (_, file, member) in self.handles.iter_mut() {
+        for (_, file, _) in self.handles.iter_mut() {
             let verdict = loop {
                 if is_cancelled() {
                     return Err(Step::Fail(Failure::Canceled));
@@ -709,11 +642,7 @@ impl<'a> Run<'a> {
                 }
             };
             match verdict {
-                Ok(Verdict::Ok { .. }) => {
-                    // zipfast applies a stored mode as is and leaves others at 0600: give the
-                    // output the mode the copy path does.
-                    fix_published_mode(self.req.dest, member);
-                }
+                Ok(Verdict::Ok { .. }) => {}
                 Ok(bad @ (Verdict::Bad { .. } | Verdict::PartBad { .. })) => {
                     let line = format!("Unrar: verification failed: {bad:?}");
                     log_cb(1, &line);
@@ -732,15 +661,67 @@ impl<'a> Run<'a> {
         Ok(())
     }
 
-    /// All members verified: the partial state is no longer needed.
-    fn finish_clean(&mut self) {
-        self.handles.clear();
+    /// Every member verified: moves the outputs from the stage into the destination (with the
+    /// copy path's modes and folder modes) and drops the partial state.
+    fn publish(&mut self) -> Result<(), String> {
+        let members: Vec<Member> = self.handles.drain(..).map(|(_, _, m)| m).collect();
         self.anchors = None;
-        let _ = std::fs::remove_dir_all(&self.plan.root);
-        if let Some(parent) = self.plan.root.parent() {
-            let _ = std::fs::remove_dir(parent);
+        let stage = self.plan.stage.clone();
+        let mut files = Vec::new();
+        let mut stack = vec![stage.clone()];
+        while let Some(d) = stack.pop() {
+            let entries = std::fs::read_dir(&d).map_err(|e| format!("stage: {e}"))?;
+            for e in entries.flatten() {
+                let ty = e.file_type().map_err(|e| format!("stage: {e}"))?;
+                if ty.is_dir() {
+                    stack.push(e.path());
+                } else if ty.is_file() {
+                    files.push(e.path());
+                }
+            }
         }
+        for from in files {
+            let rel = from
+                .strip_prefix(&stage)
+                .map_err(|e| format!("stage: {e}"))?;
+            let member = members.iter().find(|m| {
+                zipfast::path::sanitize(&String::from_utf8_lossy(&m.name), m.meta.windows_names)
+                    .is_ok_and(|r| r == rel)
+            });
+            set_copy_path_mode(&from, member.and_then(|m| m.meta.unix_mode));
+            let to = self.req.dest.join(rel);
+            if let Some(parent) = to.parent() {
+                // Folders as the copy path makes them (0777 less the umask).
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("{}: {e}", parent.display()))?;
+            }
+            std::fs::rename(&from, &to).map_err(|e| format!("{}: {e}", to.display()))?;
+        }
+        remove_state_root(&self.plan.root);
+        Ok(())
     }
+}
+
+/// The mode the copy path gives an output: a stored Unix mode with owner read/write kept,
+/// otherwise 0666 less the umask. zipfast created the stage file at 0600 or applied the
+/// stored mode as is; without the header (an undecoded name) 0600 means none was stored.
+fn set_copy_path_mode(path: &Path, stored: Option<u32>) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let Ok(meta) = std::fs::metadata(path) else {
+            return;
+        };
+        let current = meta.permissions().mode() & 0o777;
+        let mode = match stored {
+            Some(m) => (m & 0o777) | 0o600,
+            None if current == 0o600 => 0o666 & !crate::lifecycle::active_umask() & 0o777,
+            None => current | 0o600,
+        };
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+    }
+    #[cfg(not(unix))]
+    let _ = (path, stored);
 }
 
 #[cfg(test)]

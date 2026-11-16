@@ -3116,7 +3116,9 @@ fn a_downloading_rar4_aes_set_falls_back_and_extracts() {
 }
 
 #[test]
-fn an_existing_output_keeps_the_progressive_path() {
+fn an_existing_output_is_replaced_as_in_overwrite_mode() {
+    // The persistent session writes into its own stage; verified outputs replace what is in
+    // the destination, as the copy path does in overwrite mode.
     let t = TestDir::new("persist_exists");
     let data = pattern(300_000);
     let vols = rar5_volumes("movie.mkv", &data, 100_000);
@@ -3129,12 +3131,9 @@ fn an_existing_output_keeps_the_progressive_path() {
     };
     let (r, log) = run_downloading(&first, &t.out(), damaged, vols.len() as u64);
     expect_ok(r, &log);
-    assert!(!persistent(&log), "{log:?}");
-    assert!(
-        log.iter().any(|l| l.contains("an output already exists")),
-        "{log:?}"
-    );
+    assert!(persistent(&log), "{log:?}");
     assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+    assert!(!t.out().join(persistent::STATE_DIR).exists());
 }
 
 /// As `big_final_set_unpacks`, for a download in progress with one lost range mid-set: the
@@ -3505,5 +3504,73 @@ fn stale_persistent_state_is_removed_when_the_path_is_not_taken() {
     persistent::plant_state_for_test(&req);
     let (r, log) = run(&first, &t.out(), Box::new(CompleteSet));
     expect_ok(r, &log);
+    assert!(!t.out().join(persistent::STATE_DIR).exists());
+}
+
+#[test]
+fn a_persistent_output_in_a_folder_gets_the_copy_path_folder_mode() {
+    let t = TestDir::new("persist_dirmode");
+    let data = pattern(300_000);
+    let vols = rar5_volumes("Release/movie.mkv", &data, 100_000);
+    let first = write_set(&t.dl(), &vols);
+    let damaged = Damaged {
+        holes: Vec::new(),
+        repair: Vec::new(),
+        handed: false,
+    };
+    let (r, log) = run_downloading(&first, &t.out(), damaged, vols.len() as u64);
+    expect_ok(r, &log);
+    assert!(persistent(&log), "{log:?}");
+    assert_eq!(
+        std::fs::read(t.out().join("Release/movie.mkv")).unwrap(),
+        data
+    );
+    // Same folder mode as std::fs::create_dir_all gives the copy path.
+    #[cfg(unix)]
+    {
+        let reference = t.0.join("reference");
+        std::fs::create_dir_all(&reference).unwrap();
+        assert_eq!(mode_of(&t.out().join("Release")), mode_of(&reference));
+    }
+}
+
+#[test]
+fn a_failed_persistent_run_keeps_a_pre_existing_empty_folder() {
+    // Case-insensitive filesystems map "Release" onto an existing "release": nothing of the
+    // run reaches the destination before verification, so it can never be removed.
+    struct NoRepair(Damaged, u64);
+    impl VolumeFeed for NoRepair {
+        fn volume(&mut self, path: &Path) -> VolumeView {
+            self.0.volume(path)
+        }
+        fn wait_repaired(&mut self, _c: &mut dyn FnMut() -> bool) -> bool {
+            false
+        }
+        fn expected_volumes(&self) -> u64 {
+            self.1
+        }
+    }
+    let t = TestDir::new("persist_keepdir");
+    std::fs::create_dir_all(t.out().join("release")).unwrap();
+    let data = pattern(600_000);
+    let chunk = 100_000;
+    let vols = rar5_volumes("Release/movie.mkv", &data, chunk);
+    let first = write_set(&t.dl(), &vols);
+    let path = t.dl().join(volume_name(2, vols.len()));
+    let p = payload_offset(&vols[2], chunk) as u64;
+    let feed = NoRepair(
+        Damaged {
+            holes: vec![(path, vec![(p + 10_000, 20_000)])],
+            repair: vec![],
+            handed: false,
+        },
+        vols.len() as u64,
+    );
+    let (r, log) = run(&first, &t.out(), Box::new(feed));
+    assert!(
+        matches!(r, Err(Error::Failed(Failure::Damaged(_)))),
+        "{log:?}"
+    );
+    assert!(t.out().join("release").is_dir());
     assert!(!t.out().join(persistent::STATE_DIR).exists());
 }

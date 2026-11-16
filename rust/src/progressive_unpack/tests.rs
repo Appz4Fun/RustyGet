@@ -4874,3 +4874,86 @@ fn a_damaged_volume_released_before_a_restart_is_not_saved_for_it() {
         assert_eq!(saved.contains(&name), !released, "released={released}: {saved:?}");
     }
 }
+
+/// Volume 2 is handed out with a hole and released right after; volume 3 is not there the
+/// first time it is asked for.
+struct ReleasedThenNotYet {
+    inner: Downloading,
+    v2: PathBuf,
+    v3: PathBuf,
+    released: std::sync::atomic::AtomicBool,
+    v3_asked: bool,
+}
+
+impl VolumeFeed for ReleasedThenNotYet {
+    fn volume(&mut self, path: &Path) -> VolumeView {
+        if path == self.v3 && !self.v3_asked {
+            self.v3_asked = true;
+            return VolumeView::NotYet;
+        }
+        let view = self.inner.volume(path);
+        if path == self.v2 {
+            self.released.store(true, Ordering::Release);
+        }
+        view
+    }
+    fn wait_repaired(&mut self, c: &mut dyn FnMut() -> bool) -> bool {
+        self.inner.wait_repaired(c)
+    }
+    fn expected_volumes(&self) -> u64 {
+        self.inner.expected_volumes()
+    }
+    fn still_held(&self, path: &Path) -> bool {
+        !(path == self.v2 && self.released.load(Ordering::Acquire))
+    }
+}
+
+#[test]
+fn a_release_seen_while_the_next_volume_is_not_there_is_saved() {
+    let t = TestDir::new("persist_pending_released_notyet");
+    let data = pattern(3_000_000);
+    let chunk = 500_000;
+    let vols = rar5_volumes("movie.mkv", &data, chunk);
+    let first = write_set(&t.dl(), &vols);
+    let v2 = t.dl().join(volume_name(1, vols.len()));
+    let v3 = t.dl().join(volume_name(2, vols.len()));
+    let p = payload_offset(&vols[1], chunk) as u64 + 100_000;
+    let req = Request {
+        first_volume: &first,
+        dest: &t.out(),
+        password: "",
+        overwrite: Overwrite::Always,
+        on_wait: None,
+    };
+    let feed = ReleasedThenNotYet {
+        inner: Downloading {
+            damaged: Damaged {
+                holes: vec![(v2.clone(), vec![(p, 50_000)])],
+                repair: Vec::new(),
+                handed: false,
+            },
+            volumes: vols.len() as u64,
+        },
+        v2: v2.clone(),
+        v3,
+        released: std::sync::atomic::AtomicBool::new(false),
+        v3_asked: false,
+    };
+    let seen = std::cell::Cell::new(0);
+    let mut log = Vec::new();
+    let r = extract(
+        &req,
+        Box::new(feed),
+        &mut |_, m: &str| {
+            if m.starts_with("Unrar: Extracting from ") {
+                seen.set(seen.get() + 1);
+            }
+            log.push(m.to_string())
+        },
+        &mut || seen.get() >= 4,
+    );
+    assert!(matches!(r, Err(Error::Failed(Failure::Canceled))), "{log:?}");
+    let saved = String::from_utf8_lossy(&saved_pending_repair(&t.out())).into_owned();
+    let name = v2.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(!saved.contains(&name), "{saved:?} {log:?}");
+}

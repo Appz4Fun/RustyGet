@@ -3783,3 +3783,91 @@ fn a_given_up_repair_ends_as_the_progressive_path_does() {
     assert!(!t1.out().join("a.bin").exists());
     assert!(!t1.out().join(persistent::STATE_DIR).exists());
 }
+
+/// Like DirectUnpackFeed when the repair is abandoned while the session waits for a volume that
+/// never arrived: the holes are forgotten and the absent volume is Missing from then on.
+struct AbandonMidFeed {
+    holes: Vec<(PathBuf, Vec<(u64, u64)>)>,
+    abandoned: bool,
+    expected: u64,
+}
+impl VolumeFeed for AbandonMidFeed {
+    fn volume(&mut self, path: &Path) -> VolumeView {
+        if !path.is_file() {
+            // The repair is given up now (direct_unpack_abandon clears held + holes).
+            self.abandoned = true;
+            return VolumeView::Missing;
+        }
+        if self.abandoned {
+            return VolumeView::Ready { holes: Vec::new() };
+        }
+        let holes = self
+            .holes
+            .iter()
+            .find(|(p, _)| p == path)
+            .map(|(_, h)| h.clone())
+            .unwrap_or_default();
+        VolumeView::Ready { holes }
+    }
+    fn wait_repaired(&mut self, _c: &mut dyn FnMut() -> bool) -> bool {
+        self.abandoned = true;
+        false
+    }
+    fn expected_volumes(&self) -> u64 {
+        self.expected
+    }
+}
+
+fn abandoned_mid_set(tag: &str, expected: u64, crc: bool) -> (bool, Vec<String>, Vec<String>) {
+    let t = TestDir::new(tag);
+    let n = pattern(200_000);
+    let c = pattern(150_000);
+    let mut v = SIG.to_vec();
+    v.extend(main_block(true, None));
+    let fb = if crc {
+        file_block(
+            "n.bin",
+            n.len() as u64,
+            &n,
+            crc32fast::hash(&n),
+            false,
+            false,
+        )
+    } else {
+        file_block_no_crc("n.bin", &n)
+    };
+    let off = v.len() + fb.len() - n.len();
+    v.extend(fb);
+    v.extend(file_block(
+        "c.bin",
+        c.len() as u64,
+        &c[..100_000],
+        crc32fast::hash(&c[..100_000]),
+        false,
+        true,
+    ));
+    v.extend(end_block(true));
+    let first = t.dl().join(volume_name(0, 2));
+    let hole = ((off + 80_000) as u64, 20_000u64);
+    let mut dmg = v.clone();
+    dmg[hole.0 as usize..(hole.0 + hole.1) as usize].fill(0);
+    std::fs::write(&first, &dmg).unwrap();
+    let feed = AbandonMidFeed {
+        holes: vec![(first.clone(), vec![hole])],
+        abandoned: false,
+        expected,
+    };
+    let (r, log) = run(&first, &t.out(), Box::new(feed));
+    (r.is_ok(), log, files_under(&t.out()))
+}
+
+#[test]
+fn a_fallback_after_a_given_up_repair_never_places_damaged_bytes() {
+    // The feed forgets its holes when it gives up; the fallback must still see them.
+    for crc in [false, true] {
+        let (ok0, log0, l0) = abandoned_mid_set(&format!("persist_mid_ref_{crc}"), 0, crc);
+        let (ok1, log1, l1) = abandoned_mid_set(&format!("persist_mid_{crc}"), 2, crc);
+        assert!(!ok0 && !ok1, "{log0:?}\n{log1:?}");
+        assert_eq!(l0, l1, "crc={crc}\n{log1:?}");
+    }
+}

@@ -62,6 +62,7 @@ where
     };
     let feed = Arc::new(Mutex::new(feed));
     let mut run = Run::new(req, &plan, feed.clone());
+    let damaged = run.damaged.clone();
     let result = run.extract(log_cb, is_cancelled);
     let outcome = match result {
         Ok(summary) => run.publish().map(|()| summary).map_err(Step::Fallback),
@@ -87,7 +88,21 @@ where
         Err(Step::Fallback(why)) => {
             remove_state_root(&plan.root);
             match Arc::try_unwrap(feed) {
-                Ok(m) => Outcome::Fallback(m.into_inner().unwrap_or_else(|e| e.into_inner()), why),
+                Ok(m) => {
+                    let inner = m.into_inner().unwrap_or_else(|e| e.into_inner());
+                    let handed =
+                        std::mem::take(&mut *damaged.lock().unwrap_or_else(|e| e.into_inner()));
+                    let feed: Box<dyn VolumeFeed> = if handed.is_empty() {
+                        inner
+                    } else {
+                        Box::new(RememberedHoles {
+                            inner,
+                            holes: handed,
+                            repaired: false,
+                        })
+                    };
+                    Outcome::Fallback(feed, why)
+                }
                 // The session that held the other reference is gone with `run`.
                 Err(_) => Outcome::Done(Err(Error::Failed(Failure::Other(format!(
                     "direct unpack: {why}"
@@ -285,6 +300,45 @@ fn provision_dir(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Holes handed to the session, by volume path, until a repair succeeds.
+type HandedHoles = Arc<Mutex<std::collections::HashMap<PathBuf, Vec<(u64, u64)>>>>;
+
+/// The feed handed to the progressive path after a fallback. The direct-unpack feed forgets
+/// a volume's holes when it gives up a repair; the progressive run must still see the holes
+/// the persistent run was handed, or it reads the lost ranges as data.
+struct RememberedHoles {
+    inner: Box<dyn VolumeFeed>,
+    holes: std::collections::HashMap<PathBuf, Vec<(u64, u64)>>,
+    repaired: bool,
+}
+
+impl VolumeFeed for RememberedHoles {
+    fn volume(&mut self, path: &Path) -> VolumeView {
+        match self.inner.volume(path) {
+            VolumeView::Ready { holes } if holes.is_empty() && !self.repaired => {
+                VolumeView::Ready {
+                    holes: self.holes.get(path).cloned().unwrap_or_default(),
+                }
+            }
+            other => other,
+        }
+    }
+    fn wait_repaired(&mut self, is_cancelled: &mut dyn FnMut() -> bool) -> bool {
+        let repaired = self.inner.wait_repaired(is_cancelled);
+        self.repaired |= repaired;
+        repaired
+    }
+    fn set_is_final(&self) -> bool {
+        self.inner.set_is_final()
+    }
+    fn expected_volumes(&self) -> u64 {
+        self.inner.expected_volumes()
+    }
+    fn set_became_final(&self) -> bool {
+        self.inner.set_became_final()
+    }
+}
+
 /// Volume provider of a persistent session: every expected volume is declared up front as a
 /// non-file source, handed over once the feed has it.
 struct Provider {
@@ -293,7 +347,7 @@ struct Provider {
     pending: PendingWait,
     declaration: ProtectionDeclaration,
     /// Volumes handed out with holes: (index, path).
-    damaged: Arc<Mutex<Vec<(u32, PathBuf)>>>,
+    damaged: HandedHoles,
 }
 
 impl VolumeSource for Provider {
@@ -314,7 +368,7 @@ impl VolumeSource for Provider {
                     self.damaged
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
-                        .push((request.index, path.clone()));
+                        .insert(path.clone(), holes.clone());
                 }
                 let mut volume = HoledVolume::open(&path, holes).map_err(|cause| {
                     ProgressiveFailure::new(FailureKind::Input {
@@ -345,7 +399,7 @@ struct Run<'a> {
     req: &'a Request<'a>,
     plan: &'a Plan,
     feed: Arc<Mutex<Box<dyn VolumeFeed>>>,
-    damaged: Arc<Mutex<Vec<(u32, PathBuf)>>>,
+    damaged: HandedHoles,
     /// Each member's handle and output path, by archive order.
     handles: Vec<(MemberKey, PartialFile, Member)>,
     holes: Vec<HoleReport>,
@@ -358,7 +412,7 @@ impl<'a> Run<'a> {
             req,
             plan,
             feed,
-            damaged: Arc::new(Mutex::new(Vec::new())),
+            damaged: Arc::new(Mutex::new(std::collections::HashMap::new())),
             handles: Vec::new(),
             holes: Vec::new(),
             anchors: None,
@@ -572,6 +626,13 @@ impl<'a> Run<'a> {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .wait_repaired(is_cancelled);
+        if repaired {
+            // The holes are really gone now: a later fallback reads the repaired bytes.
+            self.damaged
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
+        }
         if let Some(cb) = self.req.on_wait {
             cb(false);
         }

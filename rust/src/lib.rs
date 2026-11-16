@@ -86,6 +86,7 @@ pub mod tlscipher;
 pub mod tlssock;
 pub mod twin;
 pub mod unpack;
+pub mod unpacklimits;
 pub mod url;
 pub mod urlcoord;
 pub mod util;

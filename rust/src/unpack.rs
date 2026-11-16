@@ -972,6 +972,7 @@ where
         feed,
         failure,
         on_wait,
+        ..
     } = rar;
     let feed = feed.unwrap_or_else(|| Box::new(pu::CompleteSet));
     let mut volumes = 0u64;
@@ -1456,6 +1457,9 @@ pub struct RarFeed<'a> {
     pub failure: Option<&'a mut Option<crate::progressive_unpack::Failure>>,
     /// Told `true` while the RAR extraction waits for a volume and `false` when it continues.
     pub on_wait: Option<&'a dyn Fn(bool)>,
+    /// The job's unpack limits, shared by all its archives. `None` checks this archive alone
+    /// against the configured limits and `output_dir`'s filesystem.
+    pub guard: Option<&'a std::cell::RefCell<crate::unpacklimits::Guard>>,
 }
 
 /// [`extract_archive_with_zipfast_cancellable`] with a volume feed for the top-level RAR set.
@@ -1468,7 +1472,7 @@ pub fn extract_archive_with_feed<F>(
     cleanup_disk: bool,
     mut log_cb: F,
     is_cancelled: &mut dyn FnMut() -> bool,
-    rar: RarFeed<'_>,
+    mut rar: RarFeed<'_>,
 ) -> Result<zipfast::extract::Summary, String>
 where
     F: FnMut(i32, &str),
@@ -1476,6 +1480,31 @@ where
     if is_cancelled() {
         return Err("Aborted".to_string());
     }
+    let own_guard;
+    let guard = match rar.guard.take() {
+        Some(g) => g,
+        None => {
+            own_guard = std::cell::RefCell::new(crate::unpacklimits::Guard::new(
+                crate::unpacklimits::Limits::from_options(),
+                output_dir,
+                None,
+            ));
+            &own_guard
+        }
+    };
+    // Where the extractor running now writes, relative to `output_dir`.
+    let prefix = std::cell::RefCell::new(std::path::PathBuf::new());
+    let mut log_cb = |kind: i32, msg: &str| {
+        guard.borrow_mut().observe(&prefix.borrow(), msg);
+        log_cb(kind, msg);
+    };
+    let mut is_cancelled = || guard.borrow().breach().is_some() || is_cancelled();
+    let is_cancelled: &mut dyn FnMut() -> bool = &mut is_cancelled;
+    let breached = |log_cb: &mut dyn FnMut(i32, &str)| -> Option<String> {
+        let why = guard.borrow().breach()?.to_string();
+        log_cb(1, &why);
+        Some(why)
+    };
     let mut pre_existing: std::collections::BTreeSet<std::path::PathBuf> =
         std::collections::BTreeSet::new();
     collect_existing_paths_in_dir(output_dir, &mut pre_existing);
@@ -1506,7 +1535,7 @@ where
         };
 
     let mut extracted_paths = Vec::new();
-    let mut summary = extract_single_archive_in_process(
+    let first = extract_single_archive_in_process(
         archive_path,
         output_dir,
         password,
@@ -1515,7 +1544,11 @@ where
         is_cancelled,
         &mut extracted_paths,
         rar,
-    )?;
+    );
+    if let Some(why) = breached(&mut log_cb) {
+        return Err(why);
+    }
+    let mut summary = first?;
     mark_extracted_files(&extracted_paths, &mut pre_existing, &mut processed_nested);
 
     // First-class Extended Unpacker & Extended Unrar: recursively unpack nested archives up to 5 levels
@@ -1547,7 +1580,11 @@ where
             );
             let volumes = collect_nested_archive_volumes(&nested_arch);
             let mut sub_extracted = Vec::new();
-            let sub_summary = extract_single_archive_in_process(
+            *prefix.borrow_mut() = target_dir
+                .strip_prefix(output_dir)
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_default();
+            let sub = extract_single_archive_in_process(
                 &nested_arch,
                 &target_dir,
                 password,
@@ -1556,7 +1593,12 @@ where
                 is_cancelled,
                 &mut sub_extracted,
                 RarFeed::default(),
-            )?;
+            );
+            prefix.borrow_mut().clear();
+            if let Some(why) = breached(&mut log_cb) {
+                return Err(why);
+            }
+            let sub_summary = sub?;
             let consumed_count = (sub_summary.volumes.max(1) as usize).min(volumes.len());
             let consumed_volumes = &volumes[..consumed_count];
             for v in consumed_volumes {
@@ -1576,6 +1618,28 @@ where
 
     if is_cancelled() {
         return Err("Aborted".to_string());
+    }
+
+    // Names are ASCII only: new files and folders with other characters are renamed.
+    let wrote = |name: &str| guard.borrow().wrote_name(name);
+    match crate::unpacklimits::asciify_new_entries(output_dir, &pre_existing, &wrote) {
+        Ok(renamed) => {
+            for (old, new) in renamed {
+                log_cb(
+                    0,
+                    &format!(
+                        "Renamed {} to {} (names are ASCII only)",
+                        old.display(),
+                        new.display()
+                    ),
+                );
+            }
+        }
+        Err(e) => {
+            let msg = format!("Could not rename unpacked files to ASCII names: {e}");
+            log_cb(1, &msg);
+            return Err(msg);
+        }
     }
 
     // First-class Permission Fixer: normalize POSIX file & directory permissions
@@ -1748,9 +1812,11 @@ pub fn discover_unpack_archives(
 /// Discovers, sorts, and extracts all matching archives in `dest_dir` into `unpack_dir`
 /// for `UnpackController::ExecuteUnrar` / `UnpackController::ExecuteSevenZip`.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub fn extract_discovered_archives(
     dest_dir: &[u8],
     unpack_dir: &std::path::Path,
+    final_dir: Option<&std::path::Path>,
     password: &str,
     is_seven_zip: bool,
     multi_volumes: bool,
@@ -1774,13 +1840,19 @@ pub fn extract_discovered_archives(
     }
 
     let sep = crate::paths::PATH_SEPARATOR;
+    // One job: its archives share the limits.
+    let guard = std::cell::RefCell::new(crate::unpacklimits::Guard::new(
+        crate::unpacklimits::Limits::from_options(),
+        unpack_dir,
+        final_dir,
+    ));
     for archive in archives {
         if is_stopped() {
             return false;
         }
         let full = [dest_dir, &[sep], &archive].concat();
         reset_all_ok();
-        let res = extract_archive_with_zipfast_cancellable(
+        let res = extract_archive_with_feed(
             crate::fsops::path(&full),
             unpack_dir,
             password,
@@ -1788,6 +1860,10 @@ pub fn extract_discovered_archives(
             cleanup_disk,
             &mut *log_cb,
             is_stopped,
+            RarFeed {
+                guard: Some(&guard),
+                ..RarFeed::default()
+            },
         );
         if res.is_err() || !has_all_ok() {
             return false;

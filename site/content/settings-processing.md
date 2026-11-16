@@ -41,7 +41,9 @@ Turn `Unpack` on when you want archive extraction. RustyGet extracts RAR, 7-Zip,
 
 A category can override the global unpack setting. Nested archives are unpacked too, up to five levels deep; see [Built in instead of extensions](post-processing.md#built-in-instead-of-extensions).
 
-Key options: [`Unpack`](options.md#unpack), [`DirectUnpack`](options.md#directunpack), [`UseTempUnpackDir`](options.md#usetempunpackdir), [`UnpackCleanupDisk`](options.md#unpackcleanupdisk), [`UnpackIgnoreExt`](options.md#unpackignoreext).
+Every unpack is checked as each file starts. Unpacked names are made ASCII: accents are dropped, other characters become `_`, and upper and lower case are kept. `../` and absolute paths are refused. Names and paths must fit the file systems of both the unpack folder and the final folder. A download may unpack at most `UnpackMaxFiles` files (default 100), `UnpackMaxFolders` folders (default 10) and `UnpackMaxDepth` levels of folders (default 2; `Release/Sample/sample.mkv` is 2 deep). A download over a limit stops unpacking and fails post-processing, with a message that names the limit and the file. No par repair is tried. Set a limit to 0 to turn it off.
+
+Key options: [`Unpack`](options.md#unpack), [`DirectUnpack`](options.md#directunpack), [`UseTempUnpackDir`](options.md#usetempunpackdir), [`UnpackCleanupDisk`](options.md#unpackcleanupdisk), [`UnpackIgnoreExt`](options.md#unpackignoreext), [`UnpackMaxFiles`](options.md#unpackmaxfiles), [`UnpackMaxDepth`](options.md#unpackmaxdepth), [`UnpackMaxFolders`](options.md#unpackmaxfolders).
 
 <figure class="settings-figure">
 <a class="settings-shot" href="assets/settings/unpack.jpg" aria-label="Open full-size picture: Archive extraction and cleanup settings"><img src="assets/settings/unpack.jpg" width="1280" height="908" loading="lazy" alt="Archive extraction and cleanup settings"></a>

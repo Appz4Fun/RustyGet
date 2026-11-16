@@ -1701,6 +1701,8 @@ struct UnpackRunState {
     unpack_ok: bool,
     unpack_start_error: bool,
     unpack_space_error: bool,
+    /// An unpack limit was breached (`unpacklimits`): a par repair cannot help.
+    unpack_limit_error: bool,
     unpack_decrypt_error: bool,
     unpack_password_error: bool,
     cleaned_up_disk: bool,
@@ -1903,6 +1905,9 @@ impl NzbgetRsUnpackController {
         }
         if crate::unpack::is_unpack_space_error(kind == MK_ERROR, text) {
             st.unpack_space_error = true;
+        }
+        if kind == MK_ERROR && text.starts_with(crate::unpacklimits::LIMIT_PREFIX.as_bytes()) {
+            st.unpack_limit_error = true;
         }
 
         if !self.is_stopped(ctx, host_cb)
@@ -2448,6 +2453,7 @@ impl NzbgetRsUnpackController {
     ) {
         st.all_ok_received = false;
         st.unpack_space_error = false;
+        st.unpack_limit_error = false;
         st.is_seven_zip = is_seven_zip;
 
         if is_seven_zip {
@@ -2469,10 +2475,12 @@ impl NzbgetRsUnpackController {
         let cleanup_disk = st.unpack_cleanup_disk;
         let pw_str = std::str::from_utf8(password).unwrap_or("");
 
+        let final_dir = st.final_dir.clone();
         let st_cell = std::cell::RefCell::new(&mut *st);
         let all_ok = crate::unpack::extract_discovered_archives(
             &dest_dir,
             crate::fsops::path(&unpack_dir),
+            (!final_dir.is_empty()).then(|| crate::fsops::path(&final_dir)),
             pw_str,
             is_seven_zip,
             multi_volumes,
@@ -2710,7 +2718,7 @@ impl NzbgetRsUnpackController {
                 par_info[0],
                 1,
                 par_info[1] != 0,
-                st.unpack_start_error,
+                st.unpack_start_error || st.unpack_limit_error,
                 st.unpack_space_error,
                 st.unpack_password_error,
                 st.unpack_decrypt_error,
@@ -4281,6 +4289,11 @@ impl NzbgetRsDirectUnpack {
         let cleanup_disk = local.unpack_cleanup_disk;
 
         let mut failure: Option<crate::progressive_unpack::Failure> = None;
+        let guard = std::cell::RefCell::new(crate::unpacklimits::Guard::new(
+            crate::unpacklimits::Limits::from_options(),
+            crate::fsops::path(&unpack_dir),
+            (!local.final_dir.is_empty()).then(|| crate::fsops::path(&local.final_dir)),
+        ));
         let feed = Box::new(DirectUnpackFeed {
             nzb_id: self.nzb_id,
             expected_volumes: local.expected_volumes,
@@ -4318,6 +4331,7 @@ impl NzbgetRsDirectUnpack {
                 // A parked session counts as waiting, as the volume handshake did, so reloads
                 // are not deferred behind it.
                 on_wait: Some(&|waiting| self.waiting_volume.store(waiting, Ordering::Release)),
+                guard: Some(&guard),
             },
         );
         if let Some(f) = &failure {

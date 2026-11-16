@@ -1662,7 +1662,8 @@ var Config = (new function($)
 				advanced: ['ParBuffer', 'ParThreads', 'ParIgnoreExt'] }
 		],
 		UNPACK: [
-			{ key: 'unpack', title: 'Unpack', options: ['Unpack', 'DirectUnpack', 'UnpackPassFile', 'UseTempUnpackDir', 'UnpackPauseQueue'] },
+			{ key: 'unpack', title: 'Unpack', options: ['Unpack', 'DirectUnpack', 'UnpackPassFile', 'UseTempUnpackDir', 'UnpackPauseQueue'],
+				advanced: ['UnpackMaxFiles', 'UnpackMaxDepth', 'UnpackMaxFolders'] },
 			{ key: 'cleanup', title: 'Cleanup', options: ['UnpackCleanupDisk', 'ExtCleanupDisk', 'UnpackIgnoreExt'] }
 		],
 		PATHS: [
@@ -3142,6 +3143,9 @@ var Config = (new function($)
 		{ option: 'UnpackPassFile', when: { name: 'Unpack', values: ['yes'], orCategory: 'Unpack' } },
 		{ option: 'UseTempUnpackDir', when: { name: 'Unpack', values: ['yes'], orCategory: 'Unpack' } },
 		{ option: 'UnpackPauseQueue', when: { name: 'Unpack', values: ['yes'], orCategory: 'Unpack' } },
+		{ option: 'UnpackMaxFiles', when: { name: 'Unpack', values: ['yes'], orCategory: 'Unpack' } },
+		{ option: 'UnpackMaxDepth', when: { name: 'Unpack', values: ['yes'], orCategory: 'Unpack' } },
+		{ option: 'UnpackMaxFolders', when: { name: 'Unpack', values: ['yes'], orCategory: 'Unpack' } },
 		{ option: 'ExtCleanupDisk', when: { name: 'Unpack', values: ['yes'], orCategory: 'Unpack' } },
 		{ option: 'UnpackIgnoreExt', when: { name: 'Unpack', values: ['yes'], orCategory: 'Unpack' } },
 		{ option: 'DupeBorrowFirst', when: { name: 'DupeArticleFallback', values: ['article', 'stream', 'live', 'yes'] } },

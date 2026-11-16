@@ -2984,6 +2984,22 @@ impl crate::progressive_unpack::VolumeFeed for DirectUnpackFeed {
             && !direct_unpack_abandoned(self.nzb_id)
     }
 
+    fn remember_damaged(&mut self, path: &std::path::Path, holes: Vec<(u64, u64)>) {
+        // Once the download is over nothing would release a new hold (post-processing only
+        // waits for holds the download left), so the refill reads the volume as it is.
+        if direct_unpack_download_finished(self.nzb_id) || direct_unpack_abandoned(self.nzb_id) {
+            return;
+        }
+        #[cfg(unix)]
+        let full = {
+            use std::os::unix::ffi::OsStrExt;
+            path.as_os_str().as_bytes().to_vec()
+        };
+        #[cfg(not(unix))]
+        let full = path.to_string_lossy().as_bytes().to_vec();
+        direct_unpack_hold_with_holes(self.nzb_id, &full, holes);
+    }
+
     fn wait_repaired(&mut self, is_cancelled: &mut dyn FnMut() -> bool) -> bool {
         loop {
             if direct_unpack_abandoned(self.nzb_id) || is_cancelled() {
@@ -7378,6 +7394,29 @@ mod live_hold_tests {
         super::direct_unpack_set_virtual(id, &p("movie.part06.rar"), v2);
         assert!(super::direct_unpack_is_held_path(&p("movie.part07.rar")));
         assert_eq!(super::take_dead_volumes_borrowed(id), 1);
+        super::direct_unpack_forget_holds(id);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_volume_remembered_after_a_restart_is_held_until_repaired() {
+        use crate::progressive_unpack::{VolumeFeed, VolumeView};
+        let dir = std::env::temp_dir().join(format!("rg-remember-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let vol = dir.join("movie.part02.rar");
+        std::fs::write(&vol, b"damaged").unwrap();
+        let id = 917_311;
+        let mut feed = super::DirectUnpackFeed { nzb_id: id, expected_volumes: 4 };
+        assert!(matches!(feed.volume(&vol), VolumeView::Ready { ref holes } if holes.is_empty()));
+        feed.remember_damaged(&vol, vec![(2, 3)]);
+        assert!(super::direct_unpack_has_holds(id));
+        assert!(matches!(feed.volume(&vol), VolumeView::Ready { ref holes } if holes == &[(2, 3)]));
+        assert!(!feed.wait_repaired(&mut || true), "still held: waits (here cancelled)");
+        super::direct_unpack_forget_holds(id);
+        // Once the download is over nothing would release a new hold.
+        super::direct_unpack_mark_downloaded(id);
+        feed.remember_damaged(&vol, vec![(2, 3)]);
+        assert!(!super::direct_unpack_has_holds(id));
         super::direct_unpack_forget_holds(id);
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -84,6 +84,10 @@ pub trait VolumeFeed: Send + 'static {
     fn set_became_final(&self) -> bool {
         false
     }
+    /// Puts `path` back on hold with its lost ranges: an earlier run (before a restart) was
+    /// handed it damaged and its repair had not happened yet, so `wait_repaired` must wait for
+    /// it again. A feed that cannot hold a volume ignores this.
+    fn remember_damaged(&mut self, _path: &Path, _holes: Vec<(u64, u64)>) {}
 }
 
 /// Volume bytes at the start and end that hold archive headers. A hole there cannot be read

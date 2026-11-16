@@ -4657,3 +4657,136 @@ fn a_resumed_member_with_old_and_new_holes_refills_both() {
     );
     assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
 }
+
+/// A feed after a restart: it no longer knows which volumes are damaged and repairs only the
+/// ones put back on hold through `remember_damaged`.
+struct Restarted {
+    volumes: u64,
+    remembered: Vec<PathBuf>,
+    repair: Vec<(PathBuf, Vec<u8>)>,
+}
+
+impl VolumeFeed for Restarted {
+    fn volume(&mut self, path: &Path) -> VolumeView {
+        if !path.is_file() {
+            return VolumeView::Missing;
+        }
+        VolumeView::Ready { holes: Vec::new() }
+    }
+    fn wait_repaired(&mut self, _c: &mut dyn FnMut() -> bool) -> bool {
+        for (p, bytes) in &self.repair {
+            if self.remembered.contains(p) {
+                std::fs::write(p, bytes).unwrap();
+            }
+        }
+        true
+    }
+    fn expected_volumes(&self) -> u64 {
+        self.volumes
+    }
+    fn remember_damaged(&mut self, path: &Path, holes: Vec<(u64, u64)>) {
+        assert!(!holes.is_empty());
+        self.remembered.push(path.to_path_buf());
+    }
+}
+
+#[test]
+fn a_restart_waits_for_the_repair_of_a_volume_the_earlier_run_saw_damaged() {
+    // First run: a hole in volume 2, cancelled before the repair. The daemon restarts with the
+    // volume still damaged on disk and a feed that does not know it: the saved list puts it
+    // back on hold, the refill waits for its repair and the set never leaves the persistent
+    // path.
+    let t = TestDir::new("persist_resume_pending_repair");
+    let data = pattern(3_000_000);
+    let chunk = 500_000;
+    let vols = rar5_volumes("movie.mkv", &data, chunk);
+    let first = write_set(&t.dl(), &vols);
+    let v2 = t.dl().join(volume_name(1, vols.len()));
+    let p = payload_offset(&vols[1], chunk) as u64 + 100_000;
+    let mut dmg = vols[1].clone();
+    dmg[p as usize..p as usize + 50_000].fill(0);
+    std::fs::write(&v2, &dmg).unwrap();
+    let req = Request {
+        first_volume: &first,
+        dest: &t.out(),
+        password: "",
+        overwrite: Overwrite::Always,
+        on_wait: None,
+    };
+    let feed = Downloading {
+        damaged: Damaged {
+            holes: vec![(v2.clone(), vec![(p, 50_000)])],
+            repair: Vec::new(),
+            handed: false,
+        },
+        volumes: vols.len() as u64,
+    };
+    let seen = std::cell::Cell::new(0);
+    let mut log1 = Vec::new();
+    let r1 = extract(
+        &req,
+        Box::new(feed),
+        &mut |_, m: &str| {
+            if m.starts_with("Unrar: Extracting from ") {
+                seen.set(seen.get() + 1);
+            }
+            log1.push(m.to_string())
+        },
+        &mut || seen.get() >= 4,
+    );
+    assert!(
+        matches!(r1, Err(Error::Failed(Failure::Canceled))),
+        "{log1:?}"
+    );
+    let mut log2 = Vec::new();
+    let r2 = extract(
+        &req,
+        Box::new(Restarted {
+            volumes: vols.len() as u64,
+            remembered: Vec::new(),
+            repair: vec![(v2.clone(), vols[1].clone())],
+        }),
+        &mut |_, m: &str| log2.push(m.to_string()),
+        &mut || false,
+    );
+    expect_ok(r2, &log2);
+    assert!(
+        log2.iter()
+            .any(|l| l.contains("still waiting for its repair")),
+        "{log2:?}"
+    );
+    assert!(persistent(&log2), "{log2:?}");
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+    assert!(!persistent_state_left(&t.out()), "state left behind");
+}
+
+#[test]
+fn the_pending_repair_list_round_trips_and_ignores_bad_lines() {
+    let t = TestDir::new("persist_pending_repair_file");
+    let file = t.out().join("pending-repair");
+    std::fs::create_dir_all(t.out()).unwrap();
+    let mut map = std::collections::HashMap::new();
+    map.insert(t.dl().join("a.part02.rar"), vec![(10, 20), (100, 5)]);
+    map.insert(t.dl().join("a.part05.rar"), vec![(0, 7)]);
+    persistent::save_pending_repair(&file, &map);
+    let mut back = persistent::load_pending_repair(&file, &t.dl());
+    back.sort();
+    let mut want: Vec<_> = map.into_iter().collect();
+    want.sort();
+    assert_eq!(back, want);
+    std::fs::write(
+        &file,
+        b"1:2\tok.rar\nx:y\tbad.rar\n3:4\t../up.rar\n\t\n5:6\n7:8\tsub/dir.rar\n",
+    )
+    .unwrap();
+    assert_eq!(
+        persistent::load_pending_repair(&file, &t.dl()),
+        vec![(t.dl().join("ok.rar"), vec![(1, 2)])]
+    );
+    persistent::save_pending_repair(&file, &Default::default());
+    assert!(!file.exists());
+}
+
+fn persistent_state_left(out: &Path) -> bool {
+    out.join(super::PERSISTENT_STATE_DIR).exists()
+}

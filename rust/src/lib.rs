@@ -14,6 +14,7 @@ pub mod cleanup;
 pub mod cmdline;
 pub mod collection;
 pub mod configfile;
+pub mod cpulevel;
 pub mod crc;
 pub mod decode;
 pub mod decoder;

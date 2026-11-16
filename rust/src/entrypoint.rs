@@ -108,6 +108,13 @@ pub unsafe extern "C" fn nzbget_rs_main(
     argv: *mut *mut c_char,
     argp: *mut *mut c_char,
 ) -> c_int {
+    // 0. A tiered release build on a CPU below its tier: say which build to use
+    //    before any tier-specific code runs.
+    if let Some(msg) = crate::cpulevel::mismatch_message() {
+        eprintln!("{msg}");
+        return 1;
+    }
+
     // 1. Pre-flight check
     let route = inspect_preflight(argc, argv as *const *mut c_char);
     if route == EntrypointRoute::TlsCipherResolve {

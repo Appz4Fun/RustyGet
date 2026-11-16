@@ -7,8 +7,12 @@ version := "27.0"
 # Default recipe: build the release binary
 default: build
 
-# Build rustyget (`profile` = "release" or "debug", `jobs` = max parallel jobs, capped at 3 per AGENTS.md)
-build profile="release" jobs="3":
+# Build rustyget (`profile` = "release" or "debug", `jobs` = max parallel jobs, capped at 3 per AGENTS.md).
+# `cpu` = the Rust target-cpu tier. Empty picks the supported floor for release builds
+# (x86-64-v3 on x86_64: Coffee Lake and newer; apple-m4 on Apple silicon) and the
+# compiler default for debug builds. "generic" forces the compiler default. A tier other
+# than the floor builds into build/<profile>-<cpu>/ so tiers can sit side by side.
+build profile="release" jobs="3" cpu="":
     #!/usr/bin/env python3
     import concurrent.futures
     import glob
@@ -27,14 +31,21 @@ build profile="release" jobs="3":
     cargo_profile = "dev" if is_debug else "release"
     cargo_profile_dir = "debug" if is_debug else "release"
 
-    build_dir = os.path.join(root, "build", profile)
+    system = platform.system()
+    machine = platform.machine()
+    cpu = {{quote(cpu)}}
+    floor = {"x86_64": "x86-64-v3", "AMD64": "x86-64-v3"}.get(machine, "")
+    if system == "Darwin" and machine in ("arm64", "aarch64"):
+        floor = "apple-m4"
+    default_cpu = "generic" if is_debug else (floor or "generic")
+    cpu = cpu or default_cpu
+    build_name = profile if cpu == default_cpu else f"{profile}-{cpu}"
+    build_dir = os.path.join(root, "build", build_name)
     obj_dir = os.path.join(build_dir, "obj")
     rust_target_dir = os.path.join(build_dir, "rust")
     os.makedirs(obj_dir, exist_ok=True)
     os.makedirs(rust_target_dir, exist_ok=True)
 
-    system = platform.system()
-    machine = platform.machine()
     if system == "Darwin":
         rust_target = "aarch64-apple-darwin" if machine in ("arm64", "aarch64") else "x86_64-apple-darwin"
     else:
@@ -44,8 +55,11 @@ build profile="release" jobs="3":
 
     env = os.environ.copy()
     env["CARGO_BUILD_JOBS"] = str(jobs)
+    cpu_flags = [] if cpu == "generic" else ["-C", f"target-cpu={cpu}"]
+    if cpu_flags:
+        env["RUSTFLAGS"] = " ".join([env.get("RUSTFLAGS", ""), *cpu_flags]).strip()
 
-    print(f"[1/4] Building Rust staticlib ({cargo_profile}, {rust_target}, jobs={jobs})...")
+    print(f"[1/4] Building Rust staticlib ({cargo_profile}, {rust_target}, cpu={cpu}, jobs={jobs})...")
     subprocess.run(
         [
             "cargo", "rustc", "--lib", "--locked",
@@ -67,7 +81,7 @@ build profile="release" jobs="3":
         subprocess.run(
             [
                 "rustc", "--crate-name", "nzbget_rs_entry", "--crate-type", "lib",
-                "--emit=obj", "-C", "panic=abort", "-C", "opt-level=2",
+                "--emit=obj", "-C", "panic=abort", "-C", "opt-level=2", *cpu_flags,
                 "--target", rust_target, entry_src, "-o", entry_obj,
             ],
             cwd=os.path.join(root, "rust"),
@@ -200,9 +214,24 @@ build profile="release" jobs="3":
         subprocess.run(["strip", bin_path], check=True)
     print(f"Built {bin_path}")
 
-# Build release binary (`build/release/rustyget`)
+# Build release binary (`build/release/rustyget`, built for the supported CPU floor)
 release jobs="3":
     @just build release {{jobs}}
+
+# Build every release CPU tier for this host's architecture: the floor into
+# build/release/ plus each newer tier into build/release-<cpu>/.
+# x86_64: x86-64-v3 (floor) and x86-64-v4 (AVX-512: Zen 4/5, Xeon Sapphire Rapids+).
+# Apple silicon: apple-m4 only (apple-m5 adds just MTE over apple-m4 in this LLVM, so no
+# measurable gain yet). Other architectures: the default only.
+release-tiers jobs="3":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "$(uname -sm)" in
+        *x86_64*) tiers="x86-64-v4" ;;
+        *) tiers="" ;;
+    esac
+    just build release {{jobs}}
+    for t in $tiers; do just build release {{jobs}} "$t"; done
 
 # Build debug binary (`build/debug/rustyget`)
 debug jobs="3":

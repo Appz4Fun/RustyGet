@@ -1060,15 +1060,19 @@ pub(crate) fn streaming_session_process_completed_file_with_start(
         }
         let file = &item.file;
         if file.par_file {
-            if !file.successful {
-                return Ok(false);
-            }
             // The production per-job CompletionDrainLease owns initialization;
             // shutdown must never wait on a lock held through recovery work.
             if active_streaming_session(nzb_id).is_none() {
+                if !file.successful {
+                    return Ok(false);
+                }
                 start(file, Arc::clone(&item.writers))?;
                 return Ok(true);
             }
+            // A recovery volume that lost articles still carries good blocks:
+            // every packet is checked by MD5 and the reader resyncs past holes,
+            // so only the damaged blocks are lost. Dropping the whole volume made
+            // the selector fetch the next, larger one for blocks already here.
             streaming_session_on_recovery_volume_arrived(nzb_id, &file.path, file.queued_id)
                 .ok_or(RepairError::Cancelled)??;
             return Ok(false);

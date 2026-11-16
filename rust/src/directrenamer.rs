@@ -381,22 +381,30 @@ fn check_state_host(
         return;
     }
 
+    // A file whose first article failed never gets a 16k hash (nor, for a par2
+    // file, a set id). Waiting for it held the rename, and with it direct unpack,
+    // for the whole download; such a file cannot be matched by hash anyway.
     let flen = host.nzb_file_len(nzb_ptr);
     let mut files = Vec::with_capacity(flen);
     for i in 0..flen {
         let f = host.file_snap(host.nzb_file_at(nzb_ptr, i));
         if f.hash16k.is_empty() || (f.par_file && f.par_set_id.is_empty()) {
-            return;
+            let first_failed = f.articles_len > 0 && host.article_at(f.ptr, 0).status == AI_FAILED;
+            if !first_failed {
+                return;
+            }
+            continue;
         }
         files.push(f);
     }
 
-    let completed = host.nzb_completed_files(nzb_ptr);
-    for cf in &completed {
-        if cf.hash16k.is_empty() || (cf.par_file && cf.par_set_id.is_empty()) {
-            return;
-        }
-    }
+    // A completed file has every article settled: a missing hash or set id means
+    // its first article failed.
+    let completed: Vec<_> = host
+        .nzb_completed_files(nzb_ptr)
+        .into_iter()
+        .filter(|cf| !cf.hash16k.is_empty() && !(cf.par_file && cf.par_set_id.is_empty()))
+        .collect();
 
     let mut waiting_par = nzb.waiting_par;
     if !waiting_par {

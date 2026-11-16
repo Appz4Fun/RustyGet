@@ -355,6 +355,56 @@ fn live_file_completion_queue_starts_from_first_par_and_replays_committed_source
 }
 
 #[test]
+fn damaged_recovery_volume_still_delivers_its_good_blocks() {
+    let fx = Fixture::new();
+    let id = -1900141;
+    let par = LiveCompletedFile {
+        nzb_id: id,
+        base_dir: fx.0.clone(),
+        path: fx.0.join("testfile.vol00+1.PAR2"),
+        name: b"testfile.vol00+1.PAR2".to_vec(),
+        hash16k: Vec::new(),
+        par_file: true,
+        successful: true,
+        accepted: Vec::new(),
+        queued_id: Some(1),
+    };
+    streaming_session_queue_completed_file(id, 4096, || Ok(par)).unwrap();
+    assert!(streaming_session_process_completed_file(id, |_| Ok(()))
+        .unwrap()
+        .unwrap());
+    assert_eq!(streaming_session_status(id).unwrap().ready_recovery, 1);
+    // A lost article zero-fills part of the second of three recovery packets.
+    let vol = fx.0.join("testfile.vol03+3.PAR2");
+    let mut bytes = std::fs::read(&vol).unwrap();
+    let magic = b"PAR 2.0\0RecvSlic";
+    let starts: Vec<usize> = (0..bytes.len().saturating_sub(16))
+        .filter(|&i| &bytes[i..i + 16] == magic)
+        .collect();
+    assert_eq!(starts.len(), 3);
+    let hole = starts[1] + 64;
+    bytes[hole..hole + 256].fill(0);
+    std::fs::write(&vol, &bytes).unwrap();
+    let damaged = LiveCompletedFile {
+        nzb_id: id,
+        base_dir: fx.0.clone(),
+        path: vol,
+        name: b"testfile.vol03+3.PAR2".to_vec(),
+        hash16k: Vec::new(),
+        par_file: true,
+        successful: false,
+        accepted: Vec::new(),
+        queued_id: Some(4),
+    };
+    streaming_session_queue_completed_file(id, 4096, || Ok(damaged)).unwrap();
+    assert!(!streaming_session_process_completed_file(id, |_| Ok(()))
+        .unwrap()
+        .unwrap());
+    assert_eq!(streaming_session_status(id).unwrap().ready_recovery, 3);
+    streaming_session_forget(id);
+}
+
+#[test]
 fn live_partial_completed_ranges_do_not_accept_sparse_holes() {
     let fx = Fixture::new();
     let set = fx.set();

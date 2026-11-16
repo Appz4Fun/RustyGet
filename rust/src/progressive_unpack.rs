@@ -658,6 +658,22 @@ where
                     }
                     MemberOutcome::Stopped {
                         failure, artifact, ..
+                    } if artifact.is_none()
+                        && matches!(failure.kind, FailureKind::PublicationAuthorityRequired) =>
+                    {
+                        // A directory entry of a set that is not declared: zipfast places
+                        // directories only with publication authority, so make it here, as the
+                        // copy path places files.
+                        match place_directory(req.dest, &member) {
+                            Ok(()) => summary.dirs += 1,
+                            Err(f) => {
+                                log_cb(1, &unrar_error_line(&f, &name));
+                                first_failure.get_or_insert(f);
+                            }
+                        }
+                    }
+                    MemberOutcome::Stopped {
+                        failure, artifact, ..
                     } => {
                         if let Some(mut a) = artifact {
                             let _ = a.discard();
@@ -1485,6 +1501,30 @@ fn fix_published_mode(dest: &Path, member: &Member) {
     }
     #[cfg(not(unix))]
     let _ = (dest, member);
+}
+
+/// Creates a directory member under `dest` the way the copy path creates an output's
+/// folders: never through a symlink. A stored Unix mode is applied with owner access kept.
+fn place_directory(dest: &Path, member: &Member) -> Result<(), Failure> {
+    let display = String::from_utf8_lossy(&member.name);
+    let rel = zipfast::path::sanitize(&display, member.meta.windows_names)
+        .map_err(|e| Failure::UnsafePath(format!(" {display}: {e}")))?;
+    if rel.as_os_str().is_empty() {
+        return Ok(());
+    }
+    let dir = crate::archive_native::create_dir_all_no_follow(dest, &rel)
+        .map_err(|e| Failure::Other(format!("cannot create {}: {e}", rel.display())))?;
+    #[cfg(unix)]
+    if let Some(mode) = member.meta.unix_mode {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(
+            &dir,
+            std::fs::Permissions::from_mode((mode & 0o777) | 0o700),
+        );
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
+    Ok(())
 }
 
 fn copy_artifact(
@@ -2382,7 +2422,9 @@ impl RangeSource for VirtualSource {
     ) -> ProgressiveResult<RangeRead> {
         let head = self.head.len() as u64;
         let data_end = head + self.data_len;
-        let n = buf.len().min(self.info.extent.saturating_sub(offset) as usize);
+        let n = buf
+            .len()
+            .min(self.info.extent.saturating_sub(offset) as usize);
         if n == 0 {
             return Err(ProgressiveFailure::new(FailureKind::Truncated));
         }

@@ -327,11 +327,15 @@ where
     // In rename mode every output is copied into place, so each member can get a free name.
     // Overwrite mode only: skip mode would publish by hard link, which some destinations
     // (exFAT, SMB) lack, and rename mode needs RustyGet's own numbering.
+    let mut declared_cost = None;
     let protected =
         (DECLARE_PROTECTION && feed.set_is_final() && req.overwrite == Overwrite::Always)
             .then(|| protect_volumes(req.first_volume))
             .flatten()
-            .filter(|inv| fits_session_declaration(inv, req.first_volume, req.password));
+            .filter(|inv| {
+                declared_cost = session_declaration_cost(inv, req.first_volume, req.password);
+                declared_cost.is_some()
+            });
     // A final set's volumes are all on disk; count them when no protected
     // inventory exists (rename mode) so the handle budget still fits the set.
     let expected = if feed.set_is_final() {
@@ -390,6 +394,12 @@ where
         .limits
         .source_bookkeeping
         .saturating_add(PROTECTED_READ_BUDGET);
+    // A set declared at session start gets its estimated protection cost on top, so the
+    // declaration never eats the budget the extraction itself needs.
+    if let Some((bookkeeping, metadata)) = declared_cost {
+        opts.limits.source_bookkeeping = opts.limits.source_bookkeeping.saturating_add(bookkeeping);
+        opts.limits.metadata_bytes = opts.limits.metadata_bytes.saturating_add(metadata);
+    }
     opts.limits.protection_paths = opts.limits.protection_paths.max(volume_count + 16);
     log_cb(
         3,
@@ -1659,23 +1669,28 @@ fn fits_protected_read_budget(
     per_check.saturating_mul(steps) <= PROTECTED_READ_BUDGET
 }
 
-/// Whether a final set may be declared at session start: zipfast must place every member
-/// where the copy path would (no Windows-named or duplicate-name member) and the declaration
-/// must fit its bookkeeping budget. Even with the per-step recheck bounded (zipfast #116),
-/// every volume admission sweeps the whole inventory (about 3.1 V^2 (P + 16) units for V
+/// Whether a final set may be declared at session start, and what declaring costs on top of
+/// an undeclared extraction: (SourceBookkeeping, MetadataBytes). zipfast must place every
+/// member where the copy path would (no Windows-made name that Windows rules change, no
+/// duplicate names). Even with the per-step recheck bounded (zipfast #116), every volume
+/// admission sweeps the whole inventory (about 3.3 V^2 (P + 15) bookkeeping units for V
 /// volumes with paths up to P bytes) and every member boundary and publication runs a full
-/// refresh (about 7-9 M V (P + 16) for M members, more with deep paths), whatever the data
-/// size. Anything else is left undeclared and copied.
-fn fits_session_declaration(
+/// refresh (about 7-9 M V (P + 16) for M members, more with deep paths), and each of those
+/// validations also charges metadata bytes. Data size barely matters. The estimates (with
+/// margin) are added to the session's limits; sets whose cost is too large to grant are left
+/// undeclared and copied.
+fn session_declaration_cost(
     inventory: &zipfast::progressive::ProtectionInventory,
     first: &Path,
     password: &str,
-) -> bool {
-    let Some(members) = set_members(first, password) else {
-        return false;
-    };
+) -> Option<(u64, u64)> {
+    /// Largest extra budget granted for a declaration (bookkeeping is CPU work, metadata a
+    /// cumulative accounting of small allocations).
+    const MAX_EXTRA_BOOKKEEPING: u64 = 512 * 1024 * 1024;
+    const MAX_EXTRA_METADATA: u64 = 256 * 1024 * 1024;
+    let members = set_members(first, password)?;
     if members.names_differ || members.duplicate_names {
-        return false;
+        return None;
     }
     let v = inventory.volumes.len() as u64;
     let p = inventory
@@ -1688,10 +1703,7 @@ fn fits_session_declaration(
         .map(|pp| pp.path.as_os_str().len() as u64)
         .max()
         .unwrap_or(0);
-    let budget = zipfast::progressive::ProgressiveLimits::default()
-        .source_bookkeeping
-        .saturating_add(PROTECTED_READ_BUDGET);
-    // Margins over the measured costs: 4 for 3.1, 12 for 7-9.
+    // Margins over the measured costs: 4 for 3.3, 12 for 7-9.
     let unit = p.saturating_add(16);
     let admissions = 4u64
         .saturating_mul(v)
@@ -1702,7 +1714,17 @@ fn fits_session_declaration(
         .saturating_mul(unit)
         .saturating_mul(4u64.saturating_add(members.max_depth))
         / 4;
-    admissions.saturating_add(members.count.saturating_mul(per_member)) <= budget
+    let bookkeeping = admissions.saturating_add(members.count.saturating_mul(per_member));
+    let wide = p.saturating_add(128);
+    let metadata = v.saturating_mul(v).saturating_mul(wide).saturating_add(
+        members.count.saturating_mul(
+            4u64.saturating_mul(v)
+                .saturating_mul(wide)
+                .saturating_add(4u64.saturating_mul(members.max_name)),
+        ),
+    );
+    (bookkeeping <= MAX_EXTRA_BOOKKEEPING && metadata <= MAX_EXTRA_METADATA)
+        .then_some((bookkeeping, metadata))
 }
 
 /// Path components of a member's output name (as the copy path names it).
@@ -1866,6 +1888,8 @@ struct SetMembers {
     volumes: u64,
     count: u64,
     max_depth: u64,
+    /// Longest member name, bytes.
+    max_name: u64,
     windows_names: bool,
     /// A Windows-made member whose name Windows path rules change (a backslash or one of
     /// `<>:"|?*`): zipfast would place it elsewhere than the copy path.
@@ -1879,6 +1903,7 @@ fn set_members(first: &Path, password: &str) -> Option<SetMembers> {
         volumes: 0,
         count: 0,
         max_depth: 0,
+        max_name: 0,
         windows_names: false,
         names_differ: false,
         duplicate_names: false,
@@ -1897,6 +1922,7 @@ fn set_members(first: &Path, password: &str) -> Option<SetMembers> {
             out.names_differ |= metas.iter().any(|m| m.windows_names)
                 && name.iter().any(|b| b"\\<>:\"|?*".contains(b));
             out.max_depth = out.max_depth.max(path_depth(&name));
+            out.max_name = out.max_name.max(name.len() as u64);
         }
         match zipfast::volume::next_volume(&p) {
             Some(n) => p = n,

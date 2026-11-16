@@ -2727,3 +2727,40 @@ fn a_final_windows_set_is_copied_under_the_copy_path_name() {
     expect_ok(r, &log);
     assert_eq!(std::fs::read(t.out().join("dir\\movie.mkv")).unwrap(), data);
 }
+
+/// One volume with tens of thousands of members: each declared member validation charges
+/// metadata bytes, which ran out of MetadataBytes where the copy path works. A declared set
+/// gets its estimated cost added to the session's limits.
+#[test]
+fn a_final_set_of_tens_of_thousands_of_members_extracts() {
+    let t = TestDir::new("hugemembers");
+    let mut v = SIG.to_vec();
+    v.extend(main_block(false, None));
+    let n = 20_000;
+    let long = "n".repeat(200);
+    for j in 0..n {
+        let name = format!("f/{long}{j:06}.txt");
+        let data = format!("{j}").into_bytes();
+        v.extend(file_block(
+            &name,
+            data.len() as u64,
+            &data,
+            crc32fast::hash(&data),
+            false,
+            false,
+        ));
+    }
+    v.extend(end_block(false));
+    let dir = t.dl().join("z".repeat(150));
+    std::fs::create_dir_all(&dir).unwrap();
+    let first = dir.join("set.rar");
+    std::fs::write(&first, &v).unwrap();
+    let (r, log) = run(&first, &t.out(), Box::new(CompleteSet));
+    expect_ok(r, &log);
+    for j in [0, 17_000, n - 1] {
+        assert_eq!(
+            std::fs::read(t.out().join(format!("f/{long}{j:06}.txt"))).unwrap(),
+            format!("{j}").into_bytes()
+        );
+    }
+}

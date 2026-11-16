@@ -1321,6 +1321,17 @@ where
     )
 }
 
+/// zipfast's 7z limits with RustyGet's old decoder's sizes: zipfast streams every folder, so
+/// the per-folder output cap is only a decompression-bomb guard (the old streaming path had
+/// none: a 4K remux in one solid block is well over zipfast's 16 GiB default), and LZMA
+/// dictionaries up to 4 GiB open as before (zipfast's default is 1 GiB; 7-Zip offers 1.5 GiB).
+fn sz_limits() -> zipfast::sevenzip::SevenZipLimits {
+    let mut limits = zipfast::sevenzip::SevenZipLimits::default();
+    limits.folder_bytes = 1 << 60;
+    limits.dictionary_bytes = 4 << 30;
+    limits
+}
+
 /// The line RustyGet's unpack parser keys a 7z password retry on.
 const SZ_WRONG_PASSWORD: &str = "7-Zip: Data Error in encrypted file. Wrong password?";
 
@@ -1583,7 +1594,7 @@ where
         parallel_min: None,
         select: Some(select),
     };
-    let limits = zipfast::sevenzip::SevenZipLimits::default();
+    let limits = sz_limits();
 
     let mut user_cancelled = false;
     let result = std::thread::scope(|scope| {
@@ -4347,6 +4358,26 @@ mod tests {
         assert_eq!(summary.files, 2);
         assert_eq!(std::fs::read(out.join("d").join("f")).unwrap(), b"f");
         assert_eq!(std::fs::read(out.join("d_1")).unwrap(), b"file d");
+    }
+
+    #[test]
+    fn test_7z_limits_allow_huge_solid_blocks_and_large_dictionaries() {
+        // The old decoder streamed folders of any size and opened dictionaries up to 4 GiB.
+        let l = sz_limits();
+        assert!(
+            l.folder_bytes >= 1 << 50,
+            "a 17 GiB solid block must extract"
+        );
+        assert!(
+            l.folder_bytes.checked_mul(4).is_some(),
+            "zipfast multiplies it by four"
+        );
+        assert!(
+            l.dictionary_bytes >= 3 << 29,
+            "7-Zip's 1536 MB dictionary must open"
+        );
+        let d = zipfast::sevenzip::SevenZipLimits::default();
+        assert_eq!((l.folders, l.entries), (d.folders, d.entries));
     }
 
     #[test]

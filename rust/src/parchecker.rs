@@ -1110,8 +1110,12 @@ pub(crate) fn streaming_session_process_completed_file_with_start(
                 start(file, Arc::clone(&item.writers))?;
                 return Ok(true);
             }
-            // A volume that failed outright may never have been written.
+            // A volume that failed outright may never have been written: fetch
+            // a replacement for the blocks it was expected to bring.
             if !file.successful && !file.path.exists() {
+                if let Some(id) = file.queued_id {
+                    streaming_session_on_recovery_volume_lost(nzb_id, id);
+                }
                 return Ok(false);
             }
             // A recovery volume that lost articles still carries good blocks:
@@ -2003,6 +2007,20 @@ pub fn streaming_session_on_article_failed_permanently_by_name(
         entry.unpause(outcome.1.as_ref());
         Ok(outcome)
     })
+}
+
+/// A recovery volume that was in flight failed outright and left nothing on
+/// disk: stop counting its blocks as coming and fetch a replacement.
+pub(crate) fn streaming_session_on_recovery_volume_lost(nzb_id: i32, queued_id: u64) {
+    let _ = with_live_session(nzb_id, |entry| {
+        entry
+            .queued_blocks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&queued_id);
+        entry.unpause(entry.session.on_recovery_volume_lost(queued_id).as_ref());
+        Ok(())
+    });
 }
 
 /// Registers a newly downloaded `.vol*.par2` recovery volume with the active [`StreamingParSession`].

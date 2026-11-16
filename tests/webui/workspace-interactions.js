@@ -28,7 +28,7 @@ const { fixtureURL, installFixture } = require('./workspace-fixture');
         const dialog = page.locator(`#${id}`);
         await dialog.waitFor({ state: 'visible' });
         await page.waitForFunction(() => !jQuery('.modal:visible, .modal:visible *').is(':animated'));
-        // The side panel slides in with a CSS transition that jQuery does not see.
+        // The side panel slides in with a CSS animation that jQuery does not see.
         await page.waitForFunction(dialogId => document.getElementById(dialogId).getAnimations({ subtree: true })
           .every(animation => animation.playState !== 'running'), id);
         await page.waitForFunction(() => !jQuery('[id^=Notif_]').is(':visible'));

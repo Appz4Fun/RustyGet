@@ -562,6 +562,13 @@ var Options = (new function($)
 					{
 						option.value = val.Value;
 					}
+					else if (option.name === 'ParPreset' && values && values.length)
+					{
+						// a config written before ParPreset existed runs as custom
+						// (its own ParBuffer, ParThreads, ParPauseQueue): show that,
+						// and don't let a save switch it to the template's level
+						option.value = 'custom';
+					}
 				}
 			}
 		}
@@ -2720,6 +2727,11 @@ var Config = (new function($)
 				seen += ', ' + pt('config_parpreset_testing', 'testing the disk…');
 			}
 			text = seen + ' → ' + text;
+			if (p.AppliedParBuffer !== undefined && p.AppliedParBuffer !== values.ParBuffer)
+			{
+				text += ' ' + pt('config_parpreset_applied', '(%s MB in use until settings are saved or reloaded)')
+					.replace('%s', p.AppliedParBuffer);
+			}
 		}
 		summary.text(text);
 	}

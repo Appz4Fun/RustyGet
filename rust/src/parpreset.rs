@@ -181,8 +181,16 @@ pub fn start_probe(inter_dir: Vec<u8>, min_age: Duration) {
             s.at = Some(Instant::now());
             drop(s);
             let r = detected(&probe);
+            // ParBuffer and ParThreads were set when the options were read;
+            // a newer RAM figure only takes effect on the next reload
+            let applied = crate::options::active_options().map(|o| o.scalars().par_buffer);
+            let later = if applied.is_some_and(|b| b != r.par_buffer_mb) {
+                " (ParBuffer applies after the next reload)"
+            } else {
+                ""
+            };
             let msg = format!(
-                "Par preset detect: {} CPUs, {} MB RAM available of {}, intermediate disk {}; ParBuffer {} MB, ParThreads {}, ParPauseQueue {}",
+                "Par preset detect: {} CPUs, {} MB RAM available of {}, intermediate disk {}; ParBuffer {} MB, ParThreads {}, ParPauseQueue {}{later}",
                 probe.cpus,
                 probe.mem_available / MB,
                 probe.mem_total / MB,
@@ -242,12 +250,6 @@ fn disk_test(dir: &[u8], max: u64, limit: Duration) -> Option<(f64, Option<f64>)
     // (ZFS, btrfs) still has to write them all
     let mut block = vec![0u8; 4 * MB as usize];
     let mut x: u64 = 0x9e37_79b9_7f4a_7c15 ^ u64::from(std::process::id());
-    for chunk in block.chunks_exact_mut(8) {
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        chunk.copy_from_slice(&x.to_le_bytes());
-    }
     let mut file = std::fs::File::create(&path).ok()?;
     // macOS: keep the written pages out of the cache too, or the read test
     // would measure memory (Linux drops them after the sync instead)
@@ -256,6 +258,14 @@ fn disk_test(dir: &[u8], max: u64, limit: Duration) -> Option<(f64, Option<f64>)
     let start = Instant::now();
     let mut written = 0u64;
     while written < max && start.elapsed() < limit {
+        // new bytes for every block, so a deduplicating filesystem can't
+        // store the test once
+        for chunk in block.chunks_exact_mut(8) {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            chunk.copy_from_slice(&x.to_le_bytes());
+        }
         file.write_all(&block).ok()?;
         written += block.len() as u64;
     }
@@ -309,6 +319,10 @@ fn uncache(_file: &std::fs::File) -> bool {
 pub fn to_json(probe: Option<&Probe>, running: bool, cpus: usize) -> String {
     let mut o = String::from("{");
     o.push_str(&format!("\"Running\":{running},\"CPUs\":{cpus}"));
+    // the ParBuffer in use now (a new RAM reading applies on the next reload)
+    if let Some(opts) = crate::options::active_options() {
+        o.push_str(&format!(",\"AppliedParBuffer\":{}", opts.scalars().par_buffer));
+    }
     if let Some(p) = probe {
         o.push_str(&format!(
             ",\"MemTotalMB\":{},\"MemAvailableMB\":{}",
@@ -345,11 +359,22 @@ pub fn to_json(probe: Option<&Probe>, running: bool, cpus: usize) -> String {
 
 /// Handles `parpresetdetect(start)`: `start` true runs a new probe of the
 /// intermediate folder (at most one every 30 s).
+/// The folder whose disk "detect" tests: InterDir, or DestDir when InterDir
+/// is empty (downloads then go straight to DestDir).
+pub fn probe_dir(o: &crate::options::NzbgetRsOptions) -> Vec<u8> {
+    let inter = o.str_bytes(crate::options::OPT_STR_INTER_DIR);
+    if inter.is_empty() {
+        o.str_bytes(crate::options::OPT_STR_DEST_DIR).to_vec()
+    } else {
+        inter.to_vec()
+    }
+}
+
 pub fn rpc_reply(is_json: bool, start: bool) -> Vec<u8> {
     if start {
         let inter = crate::options::active_options()
             .filter(|o| !o.no_disk_access())
-            .map(|o| o.str_bytes(crate::options::OPT_STR_INTER_DIR).to_vec())
+            .map(|o| probe_dir(&o))
             .unwrap_or_default();
         if !inter.is_empty() {
             start_probe(inter, Duration::from_secs(30));

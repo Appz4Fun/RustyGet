@@ -34,6 +34,8 @@ const DUPE_OPTIONS = ['DupeCheck', 'DupeWatch', 'DupeArticleFallback', 'DupeStre
           result.push({ Name: 'FixtureUnlisted', Value: 'yes' });
           // dark runs use the older "yes" spelling, which the daemon reads as article
           if (theme === 'dark') result.find(o => o.Name === 'DupeArticleFallback').Value = 'yes';
+          // dark runs load a config written before ParPreset existed: it runs as custom
+          if (theme === 'dark') result.splice(result.findIndex(o => o.Name === 'ParPreset'), 1);
         }
         return result;
       } });
@@ -152,7 +154,12 @@ const DUPE_OPTIONS = ['DupeCheck', 'DupeWatch', 'DupeArticleFallback', 'DupeStre
         assert.equal(await group.locator('.btn').count(), 6, 'low, medium, large, uber, detect, custom');
         assert.equal(await row('ParPreset').locator('select.config-select').count(), 0, 'stays buttons, not a menu');
         const summary = row('ParPreset').locator('.config-preset-summary');
-        await page.waitForFunction(() => /1024 MB/.test($('.config-preset-summary').text()));
+        if (theme === 'dark') {
+          assert.equal(await group.locator('.btn-primary').getAttribute('data-value'), 'custom', 'a config without ParPreset shows Custom');
+          assert.match(await summary.innerText(), /Custom resources/);
+        } else {
+          await page.waitForFunction(() => /1024 MB/.test($('.config-preset-summary').text()));
+        }
         await group.locator('.btn[data-value="uber"]').click();
         assert.match(await summary.innerText(), /4096 MB, 14 threads/);
         assert(!(await row('ParPreset').locator('.config-preset-detect').isVisible()), 'Measure again only for Detect');

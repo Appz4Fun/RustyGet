@@ -3938,6 +3938,7 @@ pub type NzbgetRsOptionsHostFn = Option<
 pub const OPT_STR_COUNT: usize = 41;
 /// `strs` index of the checked `InterDir`.
 pub const OPT_STR_INTER_DIR: usize = 4;
+pub const OPT_STR_DEST_DIR: usize = 3;
 
 /// Heap-backed daemon `Options` instance (`NzbgetRsOptions`) driving full initialization,
 /// string storage, and runtime scheduler task creation.
@@ -4783,7 +4784,7 @@ pub unsafe extern "C" fn nzbget_rs_options_new(
     // "detect" tests the intermediate folder's disk once per process, in the background.
     if arc.daemon_subsystems && !arc.no_disk_access && par_preset() == crate::parpreset::DETECT {
         crate::parpreset::start_probe(
-            arc.str_bytes(OPT_STR_INTER_DIR).to_vec(),
+            crate::parpreset::probe_dir(&arc),
             std::time::Duration::from_secs(u64::MAX / 4),
         );
     }

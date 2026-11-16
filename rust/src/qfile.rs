@@ -360,6 +360,102 @@ pub unsafe extern "C" fn nzbget_rs_file_op(
     }
 }
 
+/// What the queue host reported for a file (host op 40), read directly:
+/// `ints` and `i64s` in that op's order, the seven texts (filename, subject,
+/// output filename, hard-link path, origname, hash16k, par set id) when
+/// asked; returns the article count.
+///
+/// # Safety
+/// `f` is a live file.
+pub(crate) unsafe fn host_snapshot(
+    f: *const File,
+    ints: &mut [i32; 28],
+    i64s: &mut [i64; 8],
+    texts: Option<&mut [Vec<u8>; 7]>,
+) -> usize {
+    use field::*;
+    let file = unsafe { &*f };
+    let g = |id| file.get(id);
+    *ints = [
+        g(ID) as i32,
+        g(PAUSED) as i32,
+        g(DELETED) as i32,
+        g(DUPE_DELETED) as i32,
+        g(PAR_FILE) as i32,
+        g(FILENAME_CONFIRMED) as i32,
+        g(FIRST_CONTENT) as i32,
+        g(EXTRA_PRIORITY) as i32,
+        g(FORCE_DIRECT_WRITE) as i32,
+        g(OUTPUT_INITIALIZED) as i32,
+        0,
+        g(PARTIAL_STATE) as i32,
+        g(PARTIAL_CHANGED) as i32,
+        g(DUPE_CUTOVER) as i32,
+        g(DUPE_NO_SOURCE_LOGGED) as i32,
+        g(DUPE_LEAD_DONOR_ID) as i32,
+        g(DUPE_LEAD_FAILURES) as i32,
+        g(DUPE_LEAD_SWITCHES) as i32,
+        g(DUPE_RECOVERED_ARTICLES) as i32,
+        g(DUPE_ATTEMPTED_ARTICLES) as i32,
+        g(TOTAL_ARTICLES) as i32,
+        g(MISSED_ARTICLES) as i32,
+        g(COMPLETED_ARTICLES) as i32,
+        g(SUCCESS_ARTICLES) as i32,
+        g(FAILED_ARTICLES) as i32,
+        g(ACTIVE_DOWNLOADS) as i32,
+        g(CACHED_ARTICLES) as i32,
+        g(CRC) as u32 as i32,
+    ];
+    *i64s = [
+        g(SIZE),
+        g(REMAINING_SIZE),
+        g(MISSED_SIZE),
+        g(SUCCESS_SIZE),
+        g(FAILED_SIZE),
+        g(DECODED_FILE_SIZE),
+        g(NZB),
+        g(TIME),
+    ];
+    {
+        let d = file.lock();
+        ints[10] = i32::from(!d.texts[text::HARD_LINK_PATH as usize].is_empty());
+    }
+    if let Some(out) = texts {
+        // the output name changes under the output lock while downloads run
+        let taken = file.output_lock();
+        {
+            let d = file.lock();
+            for (slot, id) in out.iter_mut().zip([
+                text::FILENAME,
+                text::SUBJECT,
+                text::OUTPUT_FILENAME,
+                text::HARD_LINK_PATH,
+                text::ORIGNAME,
+                text::HASH16K,
+                text::PAR_SET_ID,
+            ]) {
+                *slot = d.texts[id as usize].as_bytes().to_vec();
+            }
+        }
+        if taken {
+            file.output_unlock();
+        }
+    }
+    unsafe {
+        crate::qarticle::nzbget_rs_article_host(
+            file.articles,
+            ptr::null_mut(),
+            100,
+            0,
+            0,
+            ptr::null(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

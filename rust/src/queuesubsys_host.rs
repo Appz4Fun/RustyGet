@@ -851,6 +851,11 @@ impl QueueSubsysHost {
         i64s: *mut i64,
         strs: *mut *const c_char,
     ) -> usize {
+        if self.use_active {
+            if let Some(r) = unsafe { native_op(op, a1, a2, p1, p2, s1, ints, i64s, strs) } {
+                return r;
+            }
+        }
         unsafe { (self.cb)(self.ctx, op, a1, a2, p1, p2, s1, s2, ints, i64s, strs) }
     }
 
@@ -2757,18 +2762,29 @@ impl QueueSubsysHost {
                     let fp = self.nzb_file_at(nzb_ptr, j);
                     let mut f_ints = [0i32; 28];
                     let mut f_i64s = [0i64; 8];
-                    self.raw(
-                        40,
-                        0,
-                        0,
-                        fp,
-                        0,
-                        std::ptr::null(),
-                        std::ptr::null(),
-                        f_ints.as_mut_ptr(),
-                        f_i64s.as_mut_ptr(),
-                        std::ptr::null_mut(),
-                    );
+                    if self.use_active {
+                        unsafe {
+                            crate::qfile::host_snapshot(
+                                fp as *const crate::qfile::File,
+                                &mut f_ints,
+                                &mut f_i64s,
+                                None,
+                            )
+                        };
+                    } else {
+                        self.raw(
+                            40,
+                            0,
+                            0,
+                            fp,
+                            0,
+                            std::ptr::null(),
+                            std::ptr::null(),
+                            f_ints.as_mut_ptr(),
+                            f_i64s.as_mut_ptr(),
+                            std::ptr::null_mut(),
+                        );
+                    }
                     if f_ints[1] == 0 && f_ints[2] == 0 {
                         rem += f_i64s[1];
                         if force {
@@ -3757,6 +3773,13 @@ impl QueueSubsysHost {
             c.downloaded_size,
             c.download_start_time,
         ];
+        if self.use_active {
+            // the collection is the Rust object itself
+            unsafe {
+                crate::qnzb::host_set_stats(nzb_ptr as *mut crate::qnzb::NzbScalars, &ints, &i64s)
+            };
+            return;
+        }
         self.raw(
             33,
             0,
@@ -4499,6 +4522,18 @@ impl QueueSubsysHost {
         }
         let mut ints = [0i32; 28];
         let mut i64s = [0i64; 8];
+        if self.use_active {
+            let mut texts: [Vec<u8>; 7] = Default::default();
+            let articles_len = unsafe {
+                crate::qfile::host_snapshot(
+                    file_ptr as *const crate::qfile::File,
+                    &mut ints,
+                    &mut i64s,
+                    Some(&mut texts),
+                )
+            };
+            return file_snap_from(file_ptr, &ints, &i64s, articles_len, texts);
+        }
         let mut strs = [std::ptr::null(); 7];
         let articles_len = self.raw(
             40,
@@ -4512,55 +4547,8 @@ impl QueueSubsysHost {
             i64s.as_mut_ptr(),
             strs.as_mut_ptr(),
         );
-        unsafe {
-            FileSnap {
-                ptr: file_ptr,
-                nzb_ptr: i64s[6] as usize,
-                id: ints[0],
-                paused: ints[1] != 0,
-                deleted: ints[2] != 0,
-                dupe_deleted: ints[3] != 0,
-                par_file: ints[4] != 0,
-                filename_confirmed: ints[5] != 0,
-                first_content: ints[6],
-                extra_priority: ints[7] != 0,
-                force_direct_write: ints[8] != 0,
-                output_initialized: ints[9] != 0,
-                is_hard_linked: ints[10] != 0,
-                partial_state: ints[11],
-                partial_changed: ints[12] != 0,
-                dupe_cutover: ints[13] != 0,
-                dupe_no_source_logged: ints[14] != 0,
-                dupe_lead_donor_id: ints[15],
-                dupe_lead_failures: ints[16],
-                dupe_lead_switches: ints[17],
-                dupe_recovered_articles: ints[18],
-                dupe_attempted_articles: ints[19],
-                total_articles: ints[20],
-                missed_articles: ints[21],
-                completed_articles: ints[22],
-                success_articles: ints[23],
-                failed_articles: ints[24],
-                active_downloads: ints[25],
-                cached_articles: ints[26],
-                articles_len,
-                crc: ints[27] as u32,
-                size: i64s[0],
-                remaining_size: i64s[1],
-                missed_size: i64s[2],
-                success_size: i64s[3],
-                failed_size: i64s[4],
-                decoded_file_size: i64s[5],
-                time: i64s[7],
-                filename: read_cstr(strs[0]),
-                subject: read_cstr(strs[1]),
-                output_filename: read_cstr(strs[2]),
-                hard_link_path: read_cstr(strs[3]),
-                origname: read_cstr(strs[4]),
-                hash16k: read_cstr(strs[5]),
-                par_set_id: read_cstr(strs[6]),
-            }
-        }
+        let texts: [Vec<u8>; 7] = std::array::from_fn(|k| unsafe { read_cstr(strs[k]) });
+        file_snap_from(file_ptr, &ints, &i64s, articles_len, texts)
     }
 
     pub fn file_groups(&self, file_ptr: usize) -> Vec<Vec<u8>> {
@@ -6055,5 +6043,148 @@ impl QueueSubsysHost {
             std::ptr::null_mut(),
             std::ptr::null_mut(),
         );
+    }
+}
+
+fn file_snap_from(
+    file_ptr: usize,
+    ints: &[i32; 28],
+    i64s: &[i64; 8],
+    articles_len: usize,
+    mut texts: [Vec<u8>; 7],
+) -> FileSnap {
+    FileSnap {
+        ptr: file_ptr,
+        nzb_ptr: i64s[6] as usize,
+        id: ints[0],
+        paused: ints[1] != 0,
+        deleted: ints[2] != 0,
+        dupe_deleted: ints[3] != 0,
+        par_file: ints[4] != 0,
+        filename_confirmed: ints[5] != 0,
+        first_content: ints[6],
+        extra_priority: ints[7] != 0,
+        force_direct_write: ints[8] != 0,
+        output_initialized: ints[9] != 0,
+        is_hard_linked: ints[10] != 0,
+        partial_state: ints[11],
+        partial_changed: ints[12] != 0,
+        dupe_cutover: ints[13] != 0,
+        dupe_no_source_logged: ints[14] != 0,
+        dupe_lead_donor_id: ints[15],
+        dupe_lead_failures: ints[16],
+        dupe_lead_switches: ints[17],
+        dupe_recovered_articles: ints[18],
+        dupe_attempted_articles: ints[19],
+        total_articles: ints[20],
+        missed_articles: ints[21],
+        completed_articles: ints[22],
+        success_articles: ints[23],
+        failed_articles: ints[24],
+        active_downloads: ints[25],
+        cached_articles: ints[26],
+        articles_len,
+        crc: ints[27] as u32,
+        size: i64s[0],
+        remaining_size: i64s[1],
+        missed_size: i64s[2],
+        success_size: i64s[3],
+        failed_size: i64s[4],
+        decoded_file_size: i64s[5],
+        time: i64s[7],
+        filename: std::mem::take(&mut texts[0]),
+        subject: std::mem::take(&mut texts[1]),
+        output_filename: std::mem::take(&mut texts[2]),
+        hard_link_path: std::mem::take(&mut texts[3]),
+        origname: std::mem::take(&mut texts[4]),
+        hash16k: std::mem::take(&mut texts[5]),
+        par_set_id: std::mem::take(&mut texts[6]),
+    }
+}
+
+/// Host ops answered in Rust: the queue objects they name are Rust objects
+/// (a FileInfo* is a `qfile::File`). None = the host still serves it.
+#[allow(clippy::too_many_arguments)]
+unsafe fn native_op(
+    op: i32,
+    a1: i32,
+    a2: i32,
+    p1: usize,
+    p2: usize,
+    s1: *const c_char,
+    ints: *mut c_int,
+    i64s: *mut i64,
+    strs: *mut *const c_char,
+) -> Option<usize> {
+    use crate::qfile::{nzbget_rs_file_articles, nzbget_rs_file_op, File};
+    let file = p1 as *const File;
+    match (op, a1) {
+        // file groups and server stats
+        (41, 0) => Some(if a2 < 0 {
+            unsafe { nzbget_rs_file_op(file, 0, 0, std::ptr::null(), ints, strs) as usize }
+        } else {
+            unsafe { nzbget_rs_file_op(file, 1, a2, std::ptr::null(), ints, strs) };
+            0
+        }),
+        (41, 1) => Some(if a2 < 0 {
+            unsafe { nzbget_rs_file_op(file, 10, 0, std::ptr::null(), ints, strs) as usize }
+        } else {
+            unsafe { nzbget_rs_file_op(file, 11, a2, std::ptr::null(), ints, strs) };
+            0
+        }),
+        // set a server's stats (soSet)
+        (41, 2) => {
+            unsafe { nzbget_rs_file_op(file, 12, 0, std::ptr::null(), ints, strs) };
+            Some(0)
+        }
+        (41, 3) => {
+            let empty = c"".as_ptr();
+            unsafe {
+                nzbget_rs_file_op(
+                    file,
+                    2,
+                    0,
+                    if s1.is_null() { empty } else { s1 },
+                    ints,
+                    strs,
+                )
+            };
+            Some(0)
+        }
+        (41, _) => Some(0),
+        // article ops (15, the live-par namespace walk, stays with the host)
+        (43, 15) => None,
+        (43, _) => {
+            // file-based ops take the file in p1 (and the article in p2 for 8 and 13)
+            let file_op = matches!(a1, 0 | 7 | 8 | 10 | 11 | 12 | 13);
+            let list = if file_op {
+                unsafe { nzbget_rs_file_articles(file) }
+            } else {
+                std::ptr::null_mut()
+            };
+            let article = if file_op {
+                if a1 == 8 || a1 == 13 {
+                    p2
+                } else {
+                    0
+                }
+            } else {
+                p1
+            };
+            Some(unsafe {
+                crate::qarticle::nzbget_rs_article_host(
+                    list,
+                    article as *mut crate::qarticle::Article,
+                    a1,
+                    a2,
+                    p2,
+                    s1,
+                    ints,
+                    i64s,
+                    strs,
+                )
+            })
+        }
+        _ => None,
     }
 }

@@ -891,6 +891,67 @@ pub unsafe extern "C" fn nzbget_rs_post_op(
     }
 }
 
+/// Writes a collection's download counters (what host op 33 did), in the
+/// same order: ints = file count, active downloads, full hash, filtered
+/// hash, paused file count, remaining par count, total, success, failed,
+/// current success, current failed articles, download seconds; i64s = size,
+/// remaining, paused, success, current success, failed, current failed,
+/// par size, par success, par current success, par failed, par current
+/// failed, min time, max time, downloaded size, download start time.
+///
+/// # Safety
+/// `p` is a live collection; the caller holds the queue lock.
+pub(crate) unsafe fn host_set_stats(p: *mut NzbScalars, ints: &[i32; 12], i64s: &[i64; 16]) {
+    let s = unsafe { &mut *p };
+    s.fileCount = ints[0];
+    // as SetActiveDownloads: account download time when downloads start or stop
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    let (sec, start_time, start_sec, changed) = crate::downloadinfo::calc_active_downloads_sec(
+        s.activeDownloads,
+        ints[1],
+        s.kind == 0,
+        now,
+        s.downloadSec,
+        s.downloadStartTime,
+        s.downloadStartSec,
+    );
+    s.downloadSec = sec;
+    s.downloadStartTime = start_time;
+    s.downloadStartSec = start_sec;
+    if changed {
+        s.changed = true;
+    }
+    s.activeDownloads = ints[1];
+    s.fullContentHash = ints[2] as u32;
+    s.filteredContentHash = ints[3] as u32;
+    s.size = i64s[0];
+    s.remainingSize = i64s[1];
+    s.pausedFileCount = ints[4];
+    s.pausedSize = i64s[2];
+    s.successSize = i64s[3];
+    s.currentSuccessSize = i64s[4];
+    s.failedSize = i64s[5];
+    s.currentFailedSize = i64s[6];
+    s.parSize = i64s[7];
+    s.parSuccessSize = i64s[8];
+    s.parCurrentSuccessSize = i64s[9];
+    s.parFailedSize = i64s[10];
+    s.parCurrentFailedSize = i64s[11];
+    s.remainingParCount = ints[5];
+    s.totalArticles = ints[6];
+    s.successArticles = ints[7];
+    s.failedArticles = ints[8];
+    s.currentSuccessArticles = ints[9];
+    s.currentFailedArticles = ints[10];
+    s.downloadSec = ints[11];
+    s.minTime = i64s[12];
+    s.maxTime = i64s[13];
+    s.downloadedSize = i64s[14];
+    s.downloadStartTime = i64s[15];
+}
+
 /// Host handles kept with a collection: 0 file list, 1 post-processing info,
 /// 2 direct-unpack job, 3 live-repair job, 4 message count. The host owns
 /// what they point to. set != 0 stores v; returns the (previous) value.

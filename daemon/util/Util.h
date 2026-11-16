@@ -2962,24 +2962,6 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 		}
 		return 0;
 	}
-	case 33: {
-		NzbInfo* n = reinterpret_cast<NzbInfo*>(p1);
-		n->SetFileCount(ints[0]); n->SetActiveDownloads(ints[1]);
-		n->SetFullContentHash((uint32)ints[2]); n->SetFilteredContentHash((uint32)ints[3]);
-		n->SetSize(i64s[0]); n->SetRemainingSize(i64s[1]);
-		n->SetPausedFileCount(ints[4]); n->SetPausedSize(i64s[2]);
-		n->SetSuccessSize(i64s[3]); n->SetCurrentSuccessSize(i64s[4]);
-		n->SetFailedSize(i64s[5]); n->SetCurrentFailedSize(i64s[6]);
-		n->SetParSize(i64s[7]); n->SetParSuccessSize(i64s[8]);
-		n->SetParCurrentSuccessSize(i64s[9]); n->SetParFailedSize(i64s[10]);
-		n->SetParCurrentFailedSize(i64s[11]); n->SetRemainingParCount(ints[5]);
-		n->SetTotalArticles(ints[6]); n->SetSuccessArticles(ints[7]);
-		n->SetFailedArticles(ints[8]); n->SetCurrentSuccessArticles(ints[9]);
-		n->SetCurrentFailedArticles(ints[10]); n->SetDownloadSec(ints[11]);
-		n->SetMinTime((time_t)i64s[12]); n->SetMaxTime((time_t)i64s[13]);
-		n->SetDownloadedSize(i64s[14]); n->SetDownloadStartTime((time_t)i64s[15]);
-		return 0;
-	}
 	case 34: {
 		if (a1 == 0) return reinterpret_cast<NzbInfo*>(p1)->GetFileList()->size();
 		if (a1 == 1) return reinterpret_cast<uintptr_t>(reinterpret_cast<NzbInfo*>(p1)->GetFileList()->at((size_t)a2));
@@ -3152,52 +3134,6 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 		if (a1 == 6) { reinterpret_cast<DupInfo*>(p1)->SetDupeMode((EDupeMode)a2); return 0; }
 		return 0;
 	}
-	case 40: {
-		FileInfo* f = reinterpret_cast<FileInfo*>(p1);
-		ints[0] = f->GetId(); ints[1] = f->GetPaused() ? 1 : 0; ints[2] = f->GetDeleted() ? 1 : 0;
-		ints[3] = f->GetDupeDeleted() ? 1 : 0; ints[4] = f->GetParFile() ? 1 : 0;
-		ints[5] = f->GetFilenameConfirmed() ? 1 : 0; ints[6] = (int)f->GetFirstContent();
-		ints[7] = f->GetExtraPriority() ? 1 : 0; ints[8] = f->GetForceDirectWrite() ? 1 : 0;
-		ints[9] = f->GetOutputInitialized() ? 1 : 0; ints[10] = f->IsHardLinked() ? 1 : 0;
-		ints[11] = (int)f->GetPartialState(); ints[12] = f->GetPartialChanged() ? 1 : 0;
-		ints[13] = f->GetDupeCutover() ? 1 : 0; ints[14] = f->GetDupeNoSourceLogged() ? 1 : 0;
-		ints[15] = f->GetDupeLeadDonorId(); ints[16] = f->GetDupeLeadFailures();
-		ints[17] = f->GetDupeLeadSwitches(); ints[18] = f->GetDupeRecoveredArticles();
-		ints[19] = f->GetDupeAttemptedArticles(); ints[20] = f->GetTotalArticles();
-		ints[21] = f->GetMissedArticles(); ints[22] = f->GetCompletedArticles();
-		ints[23] = f->GetSuccessArticles(); ints[24] = f->GetFailedArticles();
-		ints[25] = f->GetActiveDownloads(); ints[26] = f->GetCachedArticles(); ints[27] = (int)f->GetCrc();
-		i64s[0] = f->GetSize(); i64s[1] = f->GetRemainingSize(); i64s[2] = f->GetMissedSize();
-		i64s[3] = f->GetSuccessSize(); i64s[4] = f->GetFailedSize(); i64s[5] = f->GetDecodedFileSize();
-		i64s[6] = (int64_t)reinterpret_cast<uintptr_t>(f->GetNzbInfo()); i64s[7] = (int64_t)f->GetTime();
-		if (strs)
-		{
-			static thread_local std::string s_outFn;
-			if (f->GetActiveDownloads() > 0) { FileOutputGuard og = f->GuardOutputFile(); s_outFn = f->GetOutputFilename(); strs[2] = s_outFn.c_str(); }
-			else strs[2] = f->GetOutputFilenameC();
-			strs[0] = f->GetFilename(); strs[1] = f->GetSubject(); strs[3] = f->GetHardLinkPathC();
-			strs[4] = f->GetOrigname(); strs[5] = f->GetHash16k(); strs[6] = f->GetParSetId();
-		}
-		return ArtOp(f->GetArticleList(), 0, 100);
-	}
-	case 41: {
-		FileInfo* f = reinterpret_cast<FileInfo*>(p1);
-		if (a1 == 0)
-		{
-			if (a2 < 0) return f->GroupCount();
-			strs[0] = f->GroupAt((size_t)a2);
-			return 0;
-		}
-		if (a1 == 1)
-		{
-			if (a2 < 0) return f->StatCount();
-			f->StatAt((size_t)a2, ints);
-			return 0;
-		}
-		if (a1 == 2) { f->StatOp(ints[0], ints[1], ints[2], ServerStatList::soSet); return 0; }
-		if (a1 == 3) { f->AddGroup(s1 ? s1 : ""); return 0; }
-		return 0;
-	}
 	case 42: {
 		if (a1 == 56) return (uintptr_t)std::make_unique<FileInfo>()->GetId();
 		if (a1 == 60)
@@ -3276,11 +3212,8 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 			auto visit = reinterpret_cast<LiveParNamespaceVisitor>(reinterpret_cast<uintptr_t>(s1));
 			return (uintptr_t)live_par_visit_namespace(reinterpret_cast<NzbInfo*>(p1), visit, reinterpret_cast<void*>(p2));
 		}
-		// file-based ops take the FileInfo in p1 (and the article in p2 for 8 and 13)
-		const bool fileOp = a1 == 0 || a1 == 7 || a1 == 8 || a1 == 10 || a1 == 11 || a1 == 12 || a1 == 13;
-		RsArticleList* list = fileOp ? reinterpret_cast<FileInfo*>(p1)->GetArticleList() : nullptr;
-		uintptr_t article = fileOp ? ((a1 == 8 || a1 == 13) ? p2 : 0) : p1;
-		return ArtOp(list, article, a1, a2, p2, s1, ints, i64s, strs);
+		// other article ops are answered in Rust (rust/src/queuesubsys_host.rs native_op)
+		return 0;
 	}
 	case 44: {
 		FileInfo* f = reinterpret_cast<FileInfo*>(p1);

@@ -5171,6 +5171,7 @@ mod options_full_suite_port_from_cpp {
         let cpus = crate::sysmetrics::cpu_count() as i32;
         let cmd_opts = [c"ParPreset=uber", c"ParBuffer=100", c"ParThreads=3"];
         let o = RustOptions::new_no_config(Some(&cmd_opts), Some(&mut extender));
+        #[cfg(target_pointer_width = "64")]
         assert_eq!((o.scalars.par_buffer, o.scalars.par_threads), (4096, cpus + 2));
         assert_eq!(o.scalars.par_pause_queue, 0);
         let cmd_opts = [c"ParPreset=low"];

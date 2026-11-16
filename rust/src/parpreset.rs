@@ -244,7 +244,11 @@ fn disk_test(dir: &[u8], max: u64, limit: Duration) -> Option<(f64, Option<f64>)
     };
     #[cfg(not(unix))]
     let dir = std::path::PathBuf::from(String::from_utf8_lossy(dir).into_owned());
-    let path = dir.join(format!(".rustyget-parpreset-{}.tmp", std::process::id()));
+    // a unique name per test, so a given-up probe that wakes later can't
+    // touch a newer probe's file
+    static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = dir.join(format!(".rustyget-parpreset-{}-{seq}.tmp", std::process::id()));
     struct Remove(std::path::PathBuf);
     impl Drop for Remove {
         fn drop(&mut self) {
@@ -425,7 +429,7 @@ mod tests {
         assert_eq!(low, ParResources { par_buffer_mb: 64, par_threads: 1, par_pause_queue: true });
         assert_eq!(medium, ParResources { par_buffer_mb: 256, par_threads: 6, par_pause_queue: false });
         assert_eq!(large, ParResources { par_buffer_mb: 1024, par_threads: 0, par_pause_queue: false });
-        assert_eq!(uber, ParResources { par_buffer_mb: 4096, par_threads: 14, par_pause_queue: false });
+        assert_eq!(uber, ParResources { par_buffer_mb: MAX_PAR_BUFFER_MB, par_threads: 14, par_pause_queue: false });
         assert!(low.par_buffer_mb < medium.par_buffer_mb && medium.par_buffer_mb < large.par_buffer_mb);
         assert!(large.par_buffer_mb < uber.par_buffer_mb);
         // a single CPU still gets one thread on medium

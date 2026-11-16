@@ -1038,66 +1038,8 @@ namespace System { class SystemInfo; }
 class NzbInfo;
 class DownloadQueue;
 
-class ServerStat
-{
-public:
-	ServerStat(int serverId) : m_serverId(serverId) {}
-	int GetServerId() { return m_serverId; }
-	int GetSuccessArticles() { return m_successArticles; }
-	void SetSuccessArticles(int successArticles) { m_successArticles = successArticles; }
-	int GetFailedArticles() { return m_failedArticles; }
-	void SetFailedArticles(int failedArticles) { m_failedArticles = failedArticles; }
-
-private:
-	int m_serverId;
-	int m_successArticles = 0;
-	int m_failedArticles = 0;
-};
-
-typedef std::vector<ServerStat> ServerStatListBase;
-
-class ServerStatList : public ServerStatListBase
-{
-public:
-	enum EStatOperation
-	{
-		soSet,
-		soAdd,
-		soSubtract
-	};
-
-	void StatOp(int serverId, int successArticles, int failedArticles, EStatOperation statOperation)
-	{
-		ServerStat* serverStat = nullptr;
-		for (ServerStat& serverStat1 : this)
-		{
-			if (serverStat1.GetServerId() == serverId)
-			{
-				serverStat = &serverStat1;
-				break;
-			}
-		}
-
-		if (!serverStat)
-		{
-			emplace_back(serverId);
-			serverStat = &back();
-		}
-
-		int s = serverStat->GetSuccessArticles(), f = serverStat->GetFailedArticles();
-		nzbget_rs_server_stat_apply_op((int)statOperation, successArticles, failedArticles, &s, &f);
-		serverStat->SetSuccessArticles(s);
-		serverStat->SetFailedArticles(f);
-	}
-
-	void ListOp(ServerStatList* serverStats, EStatOperation statOperation)
-	{
-		for (ServerStat& serverStat : serverStats)
-		{
-			StatOp(serverStat.GetServerId(), serverStat.GetSuccessArticles(), serverStat.GetFailedArticles(), statOperation);
-		}
-	}
-};
+// server-stat operations, as nzbget_rs_server_stat_apply_op takes them
+namespace ServerStatList { enum EStatOperation { soSet, soAdd, soSubtract }; }
 
 // Articles live in Rust (rust/src/qarticle.rs). Status values as there.
 enum EArticleStatus { aiUndefined, aiRunning, aiFinished, aiFailed };
@@ -1244,7 +1186,7 @@ public:
 	const char* GetHardLinkPathC() { return T(6); }
 	void SetHardLinkPath(std::string hardLinkPath) { ST(6, hardLinkPath.c_str()); }
 	bool IsHardLinked() { return *T(6) != '\0'; }
-	// server stats are kept in Rust; ServerStatsCopy() gives a list for ListOp
+	// server stats are kept in Rust
 	size_t StatCount() { return (size_t)nzbget_rs_file_op(m_rs, 10, 0, nullptr, nullptr, nullptr); }
 	void StatAt(size_t i, int* out3) { nzbget_rs_file_op(m_rs, 11, (int)i, nullptr, out3, nullptr); }
 	void StatOp(int serverId, int success, int failed, ServerStatList::EStatOperation op)
@@ -1253,17 +1195,6 @@ public:
 		nzbget_rs_file_op(m_rs, 12, (int)op, nullptr, v, nullptr);
 	}
 	void ClearStats() { nzbget_rs_file_op(m_rs, 13, 0, nullptr, nullptr, nullptr); }
-	ServerStatList ServerStatsCopy()
-	{
-		ServerStatList list;
-		for (size_t i = 0, n = StatCount(); i < n; i++)
-		{
-			int v[3];
-			StatAt(i, v);
-			list.StatOp(v[0], v[1], v[2], ServerStatList::soSet);
-		}
-		return list;
-	}
 
 private:
 	RsFile* m_rs;
@@ -1394,112 +1325,9 @@ private:
 
 typedef std::vector<StreamRepairJob> StreamRepairJobList;
 
-class NzbParameter
-{
-public:
-	NzbParameter(const char* name, const char* value) :
-		m_name(name), m_value(value) {}
-	const char* GetName() { return m_name; }
-	const char* GetValue() { return m_value; }
 
-private:
-	CString m_name;
-	CString m_value;
-
-	void SetValue(const char* value) { m_value = value; }
-
-	friend class NzbParameterList;
-};
-
-typedef std::deque<NzbParameter> NzbParameterListBase;
-
-class NzbParameterList : public NzbParameterListBase
-{
-public:
-	void SetParameter(const char* name, const char* value)
-	{
-		bool emptyVal = Util::EmptyStr(value);
-
-		iterator pos = std::find_if(begin(), end(),
-			[name](NzbParameter& parameter)
-			{
-				return !strcasecmp(parameter.GetName(), name);
-			});
-
-		if (emptyVal && pos != end())
-		{
-			erase(pos);
-		}
-		else if (!emptyVal)
-		{
-			if (pos != end())
-			{
-				pos->SetValue(value);
-			}
-			else
-			{
-				emplace_back(name, value);
-			}
-		}
-	}
-
-	NzbParameter* Find(const char* name)
-	{
-		for (NzbParameter& parameter : this)
-		{
-			if (!strcasecmp(parameter.GetName(), name))
-			{
-				return &parameter;
-			}
-		}
-
-		return nullptr;
-	}
-
-	void CopyFrom(NzbParameterList* sourceParameters)
-	{
-		for (NzbParameter& parameter : sourceParameters)
-		{
-			SetParameter(parameter.GetName(), parameter.GetValue());
-		}
-	}
-};
-
-class ScriptStatus
-{
-public:
-	enum EStatus
-	{
-		srNone,
-		srFailure,
-		srSuccess
-	};
-
-	ScriptStatus(const char* name, EStatus status) :
-		m_name(name), m_status(status) {}
-	const char* GetName() { return m_name; }
-	EStatus GetStatus() { return m_status; }
-
-private:
-	CString m_name;
-	EStatus m_status;
-
-	friend class ScriptStatusList;
-};
-
-typedef std::deque<ScriptStatus> ScriptStatusListBase;
-
-class ScriptStatusList : public ScriptStatusListBase
-{
-public:
-	ScriptStatus::EStatus CalcTotalStatus()
-	{
-		std::vector<int> statuses;
-		statuses.reserve(size());
-		for (ScriptStatus& s : this) statuses.push_back((int)s.GetStatus());
-		return (ScriptStatus::EStatus)nzbget_rs_script_calc_total_status(statuses.data(), statuses.size());
-	}
-};
+// script status values (rust/src/qnzb.rs keeps the statuses)
+namespace ScriptStatus { enum EStatus { srNone, srFailure, srSuccess }; }
 
 #ifndef EDUPEMODE_DEFINED
 #define EDUPEMODE_DEFINED
@@ -1781,7 +1609,6 @@ public:
 	void SetCurrentFailedArticles(int currentFailedArticles) { m_s->currentFailedArticles = currentFailedArticles; }
 	int GetDupeRecoveredArticles() { return m_s->dupeRecoveredArticles; }
 	// duplicates whose articles failed the par2 checksums: no more articles from them (B40, not persisted)
-	std::set<int>* GetDupeBlockedDonors() { return &m_dupeBlockedDonors; }
 	// failed articles of its own in a row, first articles of files aside (B49, not persisted)
 	int GetDupeFailedRun() { return m_s->dupeFailedRun; }
 	void SetDupeFailedRun(int dupeFailedRun) { m_s->dupeFailedRun = dupeFailedRun; }
@@ -1914,10 +1741,25 @@ public:
 	bool GetAddUrlPaused() { return m_s->addUrlPaused; }
 	void SetAddUrlPaused(bool addUrlPaused) { m_s->addUrlPaused = addUrlPaused; }
 	FileList* GetFileList() { return &m_fileList; }
-	NzbParameterList* GetParameters() { return &m_ppParameters; }
-	ScriptStatusList* GetScriptStatuses() { return &m_scriptStatuses; }
-	ServerStatList* GetServerStats() { return &m_serverStats; }
-	ServerStatList* GetCurrentServerStats() { return &m_currentServerStats; }
+	// parameters, script statuses, blocked donors and server stats live in Rust;
+	// op codes as in rust/src/qnzb.rs nzbget_rs_nzb_coll
+	int64 NC(int op, int a2 = 0, NzbInfo* other = nullptr, const char* s1 = nullptr, const char* s2 = nullptr,
+		int* ints = nullptr, const char** strs = nullptr)
+	{
+		return nzbget_rs_nzb_coll(m_s, op, a2, other ? other->m_s : nullptr, s1, s2, ints, strs);
+	}
+	ScriptStatus::EStatus ScriptTotalStatus() { return (ScriptStatus::EStatus)NC(14); }
+	// applies op (0 set, 1 add, 2 subtract) of a file's server stats to the
+	// totals (which 0) or the current-session list (which 1)
+	void AddFileStats(FileInfo* file, int which, int op)
+	{
+		for (size_t i = 0, n = file->StatCount(); i < n; i++)
+		{
+			int v[3];
+			file->StatAt(i, v);
+			NC(44 + which, op, nullptr, nullptr, nullptr, v);
+		}
+	}
 	int CalcHealth()
 	{
 		return nzbget_rs_nzb_calc_health(
@@ -2161,7 +2003,7 @@ public:
 	const char* MakeTextStatus(bool ignoreScriptStatus)
 	{
 		ScriptStatus::EStatus scriptStatus = ignoreScriptStatus ?
-			ScriptStatus::srSuccess : m_scriptStatuses.CalcTotalStatus();
+			ScriptStatus::srSuccess : ScriptTotalStatus();
 		return nzbget_rs_nzb_make_text_status(
 			static_cast<int>(m_s->kind), static_cast<int>(m_s->markStatus),
 			static_cast<int>(m_s->deleteStatus), static_cast<int>(m_s->parStatus),
@@ -2205,14 +2047,14 @@ public:
 		acc.current_failed_size = m_s->failedSize;
 		acc.par_current_success_size = m_s->parSuccessSize;
 		acc.par_current_failed_size = m_s->parFailedSize;
-		m_currentServerStats.ListOp(&m_serverStats, ServerStatList::soSet);
+		NC(48);
 		for (FileInfo* fileInfo : &m_fileList)
 		{
 			nzbget_rs_nzb_update_current_stats_step(
 				&acc, fileInfo->GetRemainingSize(), fileInfo->GetSuccessArticles(),
 				fileInfo->GetFailedArticles(), fileInfo->GetSuccessSize(), fileInfo->GetFailedSize(),
 				fileInfo->GetExtraPriority() ? 1 : 0, fileInfo->GetPaused() ? 1 : 0, fileInfo->GetParFile() ? 1 : 0);
-			{ ServerStatList fs = fileInfo->ServerStatsCopy(); m_currentServerStats.ListOp(&fs, ServerStatList::soAdd); }
+			AddFileStats(fileInfo, 1, 1);
 		}
 		m_s->pausedFileCount = acc.paused_file_count;
 		m_s->remainingParCount = acc.remaining_par_count;
@@ -2236,7 +2078,7 @@ public:
 			&m_s->successSize, &m_s->failedSize, &m_s->failedArticles, &m_s->successArticles,
 			&m_s->extraPriority, &m_s->parSuccessSize, &m_s->parFailedSize,
 			&m_s->remainingParCount, &m_s->pausedFileCount);
-		{ ServerStatList fs = fileInfo->ServerStatsCopy(); m_serverStats.ListOp(&fs, ServerStatList::soAdd); }
+		AddFileStats(fileInfo, 0, 1);
 	}
 	void UpdateDeletedStats(FileInfo* fileInfo)
 	{
@@ -2253,7 +2095,7 @@ public:
 			&m_s->extraPriority, &m_s->remainingParCount, &m_s->parSize,
 			&m_s->parCurrentSuccessSize, &m_s->parFailedSize, &m_s->parCurrentFailedSize,
 			&m_s->pausedFileCount, &m_s->pausedSize);
-		{ ServerStatList fs = fileInfo->ServerStatsCopy(); m_currentServerStats.ListOp(&fs, ServerStatList::soSubtract); }
+		AddFileStats(fileInfo, 1, 2);
 	}
 	bool IsDownloadCompleted(bool ignorePausedPars)
 	{
@@ -2285,7 +2127,6 @@ public:
 
 private:
 	// aggregate of FileInfo::m_s->dupeRecoveredArticles (persisted for restart)
-	std::set<int> m_dupeBlockedDonors;
 	// failed articles that were tried from duplicates / that no duplicate
 	// could even offer a source for (the early dupe failover's sample of how
 	// the download-time recovery is faring; not persisted)
@@ -2298,10 +2139,6 @@ private:
 	StreamRepairJobList m_streamRepairJobs;
 	CompletedFileList m_completedFiles;
 	FileList m_fileList;
-	NzbParameterList m_ppParameters;
-	ScriptStatusList m_scriptStatuses;
-	ServerStatList m_serverStats;
-	ServerStatList m_currentServerStats;
 	Mutex m_logMutex;
 	MessageList m_messages;
 	std::unique_ptr<PostInfo> m_postInfo;
@@ -3067,7 +2904,7 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 		ints[68] = n->GetUnpackThread() ? 1 : 0; ints[69] = n->GetStreamRepairJobs()->empty() ? 0 : 1;
 		ints[70] = (int)n->GetUrlStatus(); ints[71] = n->GetParSec(); ints[72] = n->GetRepairSec();
 		ints[73] = n->GetUnpackSec(); ints[74] = n->GetReprocess() ? 1 : 0; ints[75] = n->GetExtraParBlocks();
-		ints[76] = n->GetDupeRecoveredHoles(); ints[77] = (int)n->GetScriptStatuses()->CalcTotalStatus();
+		ints[76] = n->GetDupeRecoveredHoles(); ints[77] = (int)n->ScriptTotalStatus();
 		ints[78] = n->GetParkedFileCount(); ints[79] = n->GetDeletePaused() ? 1 : 0;
 		ints[80] = n->GetAutoCategory() ? 1 : 0; ints[81] = n->GetAddUrlPaused() ? 1 : 0;
 		ints[82] = n->GetMessageCount(); ints[83] = (pi && pi->GetForceParFull()) ? 1 : 0;
@@ -3094,26 +2931,26 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 	}
 	case 31: {
 		NzbInfo* n = reinterpret_cast<NzbInfo*>(p1);
-		if (a1 == 0) { NzbParameter* p = n->GetParameters()->Find(s1); if (!p) return 0; strs[0] = p->GetValue(); return 1; }
-		if (a1 == 1) { n->GetParameters()->SetParameter(s1, s2); return 0; }
-		if (a1 == 2) { n->GetParameters()->CopyFrom(reinterpret_cast<NzbInfo*>(p2)->GetParameters()); return 0; }
+		if (a1 == 0) return n->NC(0, 0, nullptr, s1, nullptr, nullptr, strs) ? 1 : 0;
+		if (a1 == 1) { n->NC(1, 0, nullptr, s1, s2); return 0; }
+		if (a1 == 2) { n->NC(2, 0, reinterpret_cast<NzbInfo*>(p2)); return 0; }
 		if (a1 == 3) { static thread_local CString s_finalDir; s_finalDir = n->BuildFinalDirName(); strs[0] = s_finalDir.Str(); return 0; }
-		if (a1 == 4) return n->GetDupeBlockedDonors()->count(a2) ? 1 : 0;
-		if (a1 == 5) { n->GetDupeBlockedDonors()->insert(a2); return 1; }
+		if (a1 == 4) return n->NC(20, a2) ? 1 : 0;
+		if (a1 == 5) { n->NC(21, a2); return 1; }
 		if (a1 == 6) { strs[0] = n->GetHardLinkPathC(); return 0; }
 		if (a1 == 7) { strs[0] = n->GetMetaNameC(); return 0; }
-		if (a1 == 8) { if (a2 < 0) return n->GetParameters()->size(); NzbParameter& p = n->GetParameters()->at((size_t)a2); strs[0] = p.GetName(); strs[1] = p.GetValue(); return 0; }
-		if (a1 == 9) { if (a2 < 0) return n->GetServerStats()->size(); ServerStat& ss = n->GetServerStats()->at((size_t)a2); ints[0] = ss.GetServerId(); ints[1] = ss.GetSuccessArticles(); ints[2] = ss.GetFailedArticles(); return 0; }
-		if (a1 == 10) { n->GetScriptStatuses()->emplace_back(s1 ? s1 : "", (ScriptStatus::EStatus)a2); return 0; }
+		if (a1 == 8) { if (a2 < 0) return n->NC(3); n->NC(4, a2, nullptr, nullptr, nullptr, nullptr, strs); return 0; }
+		if (a1 == 9) { if (a2 < 0) return n->NC(40); n->NC(42, a2, nullptr, nullptr, nullptr, ints); return 0; }
+		if (a1 == 10) { n->NC(10, a2, nullptr, s1 ? s1 : ""); return 0; }
 		if (a1 == 11) return n->RenameCompletedFile(s1 ? s1 : "", s2 ? s2 : "") ? 1 : 0;
 		if (a1 == 12) return reinterpret_cast<uintptr_t>(n->GetUnpackThread());
 		if (a1 == 13) { if (n->GetExtractedArchives()) n->GetExtractedArchives()->emplace_back(s1 ? s1 : ""); return 0; }
 		if (a1 == 14) { n->SetMetaName(s1 ? s1 : ""); return 0; }
 		if (a1 == 15) { for (Message& m : reinterpret_cast<NzbInfo*>(p2)->GuardCachedMessages()) n->AddMessage(m.GetKind(), m.GetText(), false); return 0; }
 		if (a1 == 16) { static thread_local CString s_niceUrl; s_niceUrl = n->MakeNiceUrlName(s1 ? s1 : "", s2 ? s2 : ""); strs[0] = s_niceUrl.Str(); return 0; }
-		if (a1 == 17) { if (a2 < 0) return n->GetScriptStatuses()->size(); ScriptStatus& s = n->GetScriptStatuses()->at((size_t)a2); ints[0] = (int)s.GetStatus(); strs[0] = s.GetName(); return 0; }
+		if (a1 == 17) { if (a2 < 0) return n->NC(11); n->NC(12, a2, nullptr, nullptr, nullptr, ints, strs); return 0; }
 		if (a1 == 18) { auto* ea = n->GetExtractedArchives(); if (a2 < 0) return ea ? ea->size() : 0; strs[0] = (*ea)[(size_t)a2].Str() ? (*ea)[(size_t)a2].Str() : ""; return 0; }
-		if (a1 == 19) { if (a2 == 0) n->GetServerStats()->StatOp(ints[0], ints[1], ints[2], ServerStatList::soSet); else n->GetCurrentServerStats()->ListOp(n->GetServerStats(), ServerStatList::soSet); return 0; }
+		if (a1 == 19) { if (a2 == 0) n->NC(44, 0, nullptr, nullptr, nullptr, ints); else n->NC(48); return 0; }
 		if (a1 == 20)
 		{
 			GuardedMessageList messages = n->GuardCachedMessages();
@@ -3130,7 +2967,7 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 				}
 			return 0;
 		}
-		if (a1 == 21) { if (a2 < 0) return n->GetCurrentServerStats()->size(); ServerStat& ss = n->GetCurrentServerStats()->at((size_t)a2); ints[0] = ss.GetServerId(); ints[1] = ss.GetSuccessArticles(); ints[2] = ss.GetFailedArticles(); return 0; }
+		if (a1 == 21) { if (a2 < 0) return n->NC(41); n->NC(43, a2, nullptr, nullptr, nullptr, ints); return 0; }
 		if (a1 == 22)
 		{
 			for (FileInfo* fi : n->GetFileList())
@@ -3203,7 +3040,7 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 		case 53: n->UpdateDeletedStats(reinterpret_cast<FileInfo*>(p2)); break;
 		case 54: n->EnterPostProcess(); break;
 		case 55: n->LeavePostProcess(); break;
-		case 56: n->GetScriptStatuses()->clear(); break;
+		case 56: n->NC(13); break;
 		case 57: n->SetUnpackThread(nullptr); n->SetLiveRepairThread(nullptr); break;
 		case 58: n->SetLiveRepairThread(nullptr); break;
 		case 59: n->SetFinalDir(s1 ? s1 : ""); break;
@@ -3258,7 +3095,7 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 		case 108: n->SetTotalArticles(a2); break;
 		case 109: if (n->GetPostInfo()) n->GetPostInfo()->SetStage((PostInfo::EStage)a2); break;
 		case 110: if (n->GetPostInfo()) { n->GetPostInfo()->SetForceParFull((a2 & 1) != 0); n->GetPostInfo()->SetForceRepair((a2 & 2) != 0); } break;
-		case 111: n->GetParameters()->clear(); break;
+		case 111: n->NC(5); break;
 		case 112: n->GetStreamRepairJobs()->clear(); break;
 		case 113: n->GetCompletedFiles()->clear(); break;
 		default: break;
@@ -3294,9 +3131,8 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 			FileInfo* f = reinterpret_cast<FileInfo*>(p2);
 			dst->GetFileList()->Add(src->GetFileList()->Remove(f));
 			f->SetNzbInfo(dst);
-			ServerStatList fs = f->ServerStatsCopy();
-			src->GetCurrentServerStats()->ListOp(&fs, ServerStatList::soSubtract);
-			dst->GetCurrentServerStats()->ListOp(&fs, ServerStatList::soAdd);
+			src->AddFileStats(f, 1, 2);
+			dst->AddFileStats(f, 1, 1);
 			return 0;
 		}
 		if (a1 == 4)
@@ -3305,8 +3141,10 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 			NzbInfo* src = reinterpret_cast<NzbInfo*>(p2);
 			for (std::unique_ptr<FileInfo>& fi : *src->GetFileList()) { fi->SetNzbInfo(dst); dst->GetFileList()->Add(std::move(fi)); }
 			src->GetFileList()->clear();
-			dst->GetServerStats()->ListOp(src->GetServerStats(), ServerStatList::soAdd);
-			dst->GetCurrentServerStats()->ListOp(src->GetCurrentServerStats(), ServerStatList::soAdd);
+			int lists[2] = { 0, 0 };
+			dst->NC(49, 1, src, nullptr, nullptr, lists);
+			lists[0] = lists[1] = 1;
+			dst->NC(49, 1, src, nullptr, nullptr, lists);
 			for (CompletedFile& cf : src->GetCompletedFiles()) dst->GetCompletedFiles()->push_back(std::move(cf));
 			src->GetCompletedFiles()->clear();
 			return 0;
@@ -3463,7 +3301,7 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 		{
 			NzbInfo* n = reinterpret_cast<NzbInfo*>(p1);
 			n->GetCompletedFiles()->clear(); n->GetStreamRepairJobs()->clear();
-			n->GetServerStats()->clear(); n->GetCurrentServerStats()->clear();
+			n->NC(46); n->NC(47);
 			n->MoveFileList(reinterpret_cast<NzbInfo*>(p2));
 			return 0;
 		}
@@ -3612,7 +3450,7 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 		case 50: f->MakeValidFilename(); break;
 		case 51: ArtOp(f->GetArticleList(), 0, 101); break;
 		case 52: ArtOp(f->GetArticleList(), 0, 102); break;
-		case 53: { ServerStatList fs = f->ServerStatsCopy(); reinterpret_cast<NzbInfo*>(p2)->GetCurrentServerStats()->ListOp(&fs, ServerStatList::soSubtract); f->ClearStats(); } break;
+		case 53: reinterpret_cast<NzbInfo*>(p2)->AddFileStats(f, 1, 2); f->ClearStats(); break;
 		case 54: ArtOp(f->GetArticleList(), 0, 103); break;
 		case 55: {
 			std::optional<FileOutputGuard> og;
@@ -3622,7 +3460,7 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 		}
 		case 57: delete f; break;
 		case 58: f->SetNzbInfo(reinterpret_cast<NzbInfo*>(p2)); break;
-		case 59: { ServerStatList fs = f->ServerStatsCopy(); reinterpret_cast<NzbInfo*>(p2)->GetServerStats()->ListOp(&fs, ServerStatList::soSubtract); } break;
+		case 59: reinterpret_cast<NzbInfo*>(p2)->AddFileStats(f, 0, 2); break;
 		case 61: f->SetSubject(s1); break;
 		case 62: f->SetTime((time_t)i64s[0]); break;
 		case 63: f->SetSize(i64s[0]); break;
@@ -3814,7 +3652,7 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 		if (a1 == 10)
 		{
 			f->StatOp(ints[0], ints[1], ints[2], ServerStatList::soAdd);
-			f->GetNzbInfo()->GetCurrentServerStats()->StatOp(ints[0], ints[1], ints[2], ServerStatList::soAdd);
+			f->GetNzbInfo()->NC(45, 1, nullptr, nullptr, nullptr, ints);
 			return 0;
 		}
 		return 0;

@@ -450,17 +450,8 @@ mod tests {
         assert!(hold(b"movie.part03.rar", 12));
         assert!(hold(b"a8f3k2b9", 0));
         assert!(hold(b"a8f3k2b9.7x2", 0));
-        assert!(
-            !hold(b"a8f3k2b9", 1),
-            "articles arrived: its type is known later"
-        );
-        for extra in [
-            &b"release.srr"[..],
-            b"Sample.SRS",
-            b"info.txt",
-            b"x.sfv",
-            b"site.url",
-        ] {
+        assert!(!hold(b"a8f3k2b9", 1), "articles arrived: its type is known later");
+        for extra in [&b"release.srr"[..], b"Sample.SRS", b"info.txt", b"x.sfv", b"site.url"] {
             assert!(!hold(extra, 0), "{}", String::from_utf8_lossy(extra));
         }
         assert!(!hold(b"movie.mkv", 0));

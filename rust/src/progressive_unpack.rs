@@ -2382,9 +2382,7 @@ impl RangeSource for VirtualSource {
     ) -> ProgressiveResult<RangeRead> {
         let head = self.head.len() as u64;
         let data_end = head + self.data_len;
-        let n = buf
-            .len()
-            .min(self.info.extent.saturating_sub(offset) as usize);
+        let n = buf.len().min(self.info.extent.saturating_sub(offset) as usize);
         if n == 0 {
             return Err(ProgressiveFailure::new(FailureKind::Truncated));
         }

@@ -83,31 +83,23 @@ impl WriteCoordinator {
     pub(super) fn foreign_source_conflicts(&self, path: &std::path::Path, cross_job: bool) -> bool {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let identity = WriterIdentity::Path(path.to_owned());
-        if Self::is_certified(&state, &identity) {
-            return true;
-        }
+        if Self::is_certified(&state, &identity) { return true; }
         if state.generation.0 == 0 && state.repair.is_none() {
             // Before live metadata only a concurrent write of the same file
             // through another job's alias conflicts; unrelated files proceed.
             let same_file = cross_job
                 && state.writer_leaves.iter().any(|(leaf, _)| {
-                    Self::paths_may_alias(
-                        std::path::Path::new(leaf),
-                        path.file_name().map_or(path, std::path::Path::new),
-                    )
+                    Self::paths_may_alias(std::path::Path::new(leaf), path.file_name().map_or(path, std::path::Path::new))
                 });
             if !same_file {
                 return false;
             }
         }
         let protected = state.namespace.as_ref().is_none_or(|proof| {
-            path.file_name()
-                .is_none_or(|leaf| proof.protects_leaf(leaf.as_encoded_bytes()))
+            path.file_name().is_none_or(|leaf| proof.protects_leaf(leaf.as_encoded_bytes()))
         });
         if protected || state.repair.is_some() {
-            Self::stop_because(&mut state, || {
-                format!("another write reached source path {}", path.display())
-            });
+            Self::stop_because(&mut state, || format!("another write reached source path {}", path.display()));
             state.source_identity_changed = true;
             state.cancelled = true;
             self.changed.notify_all();
@@ -294,11 +286,7 @@ impl WriteCoordinator {
     }
     /// Why this cohort stopped, when something invalidated it.
     pub fn stop_reason(&self) -> Option<String> {
-        self.state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .stop_reason
-            .clone()
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).stop_reason.clone()
     }
     pub fn is_current_generation(&self, generation: SessionGeneration) -> bool {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -354,9 +342,7 @@ impl WriteCoordinator {
             return false;
         }
         let changed = !state.source_identity_changed;
-        Self::stop_because(&mut state, || {
-            format!("source identity changed: {identity:?}")
-        });
+        Self::stop_because(&mut state, || format!("source identity changed: {identity:?}"));
         state.source_identity_changed = true;
         state.cancelled = true;
         self.changed.notify_all();
@@ -366,9 +352,7 @@ impl WriteCoordinator {
     pub(super) fn invalidate_sources(&self) {
         let at = std::panic::Location::caller();
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        Self::stop_because(&mut state, || {
-            format!("sources invalidated from {}:{}", at.file(), at.line())
-        });
+        Self::stop_because(&mut state, || format!("sources invalidated from {}:{}", at.file(), at.line()));
         state.cancelled = true;
         self.changed.notify_all();
     }
@@ -444,11 +428,7 @@ impl WriteCoordinator {
             }
         };
         if let Some(leaf) = &leaf {
-            match state
-                .writer_leaves
-                .iter_mut()
-                .find(|(name, _)| name == leaf)
-            {
+            match state.writer_leaves.iter_mut().find(|(name, _)| name == leaf) {
                 Some((_, count)) => *count += 1,
                 None => state.writer_leaves.push((leaf.clone(), 1)),
             }
@@ -603,11 +583,7 @@ impl Drop for SourceWritePermit {
             .unwrap_or_else(|e| e.into_inner());
         state.writers -= 1;
         if let Some(leaf) = &self.leaf {
-            if let Some(index) = state
-                .writer_leaves
-                .iter()
-                .position(|(name, _)| name == leaf)
-            {
+            if let Some(index) = state.writer_leaves.iter().position(|(name, _)| name == leaf) {
                 state.writer_leaves[index].1 -= 1;
                 if state.writer_leaves[index].1 == 0 {
                     state.writer_leaves.swap_remove(index);

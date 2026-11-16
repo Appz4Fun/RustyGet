@@ -114,11 +114,7 @@ pub fn rerank(entries: &[Entry], pick_bytes: i64) -> Vec<i32> {
             want = want.min(entries[i].cap);
         }
         let want = (DEAD + 1).max(want);
-        previous = if entries[i].cap > 0 {
-            want.min(entries[i].cap)
-        } else {
-            want
-        };
+        previous = if entries[i].cap > 0 { want.min(entries[i].cap) } else { want };
         scores[i] = want;
     }
     scores
@@ -177,14 +173,8 @@ mod tests {
     fn a_capped_member_keeps_the_entries_after_it_below() {
         // a 98%-alive twin member scored 80 before, a whole borrowable ALT 90:
         // the twin can't rise past 80, so the ALT must drop below it
-        let twin = Entry {
-            cap: 80,
-            ..e(DEAD + 1, 0.98, true, 1000, 0)
-        };
-        let alt = Entry {
-            kind: 1,
-            ..e(DEAD + 1, 1.0, false, 1000, 0)
-        };
+        let twin = Entry { cap: 80, ..e(DEAD + 1, 0.98, true, 1000, 0) };
+        let alt = Entry { kind: 1, ..e(DEAD + 1, 1.0, false, 1000, 0) };
         let got = rerank(&[alt, twin], 1000);
         assert_eq!(got[1], 80);
         assert!(got[0] < got[1], "{got:?}");

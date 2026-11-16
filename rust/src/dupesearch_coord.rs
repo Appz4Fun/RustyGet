@@ -61,11 +61,7 @@ pub const VIDEO_PARAM: &[u8] = b"DupeVideo";
 const VIDEO_DIFFERENT: &[u8] = b"different";
 
 fn video_param_value(same: bool) -> &'static [u8] {
-    if same {
-        b"same"
-    } else {
-        b"unverified"
-    }
+    if same { b"same" } else { b"unverified" }
 }
 
 /// The kind stored on each copy of the key already queued (`id` 0 or a copy
@@ -1147,18 +1143,13 @@ impl DonorServerExchange for NntpHealthTransportShared {
             }
 
             let mut wait_start = host_now(ctx, host_cb);
-            let ids = self
-                .server_ids
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone();
+            let ids = self.server_ids.lock().unwrap_or_else(|e| e.into_inner()).clone();
             // servers of this backbone whose connect failed during this exchange
             let mut failed: Vec<i32> = Vec::new();
             let (mut release, need_join) = loop {
                 let mut conn_ptr = 0usize;
                 let mut need_join = false;
-                while conn_ptr == 0 && !http_stopped() && host_now(ctx, host_cb) - wait_start <= 10
-                {
+                while conn_ptr == 0 && !http_stopped() && host_now(ctx, host_cb) - wait_start <= 10 {
                     let mut known_any = false;
                     for &id in ids.iter().filter(|id| !failed.contains(id)) {
                         let Some(srv) = pool.server_by_id(id) else {
@@ -6669,13 +6660,7 @@ mod tests {
             retention,
             level,
         };
-        let mut servers = vec![
-            r(1, 5, 1000, 0),
-            r(2, 5, 3000, 1),
-            r(3, 0, 0, 0),
-            r(4, 6, 0, 1),
-            r(5, 6, 900, 0),
-        ];
+        let mut servers = vec![r(1, 5, 1000, 0), r(2, 5, 3000, 1), r(3, 0, 0, 0), r(4, 6, 0, 1), r(5, 6, 900, 0)];
         let order = backbone_order(&servers);
         assert_eq!(order.keys().copied().collect::<Vec<_>>(), vec![2, 4]);
         // the siblings follow, to be asked when the first has no connection free

@@ -23,10 +23,7 @@ pub(crate) struct LiveSessionResources {
 /// What a live session for `slice_size` needs at the least (MIN_SLOTS
 /// syndrome slots), for the message when it does not fit.
 pub(crate) fn min_reservation(slice_size: u64) -> u64 {
-    let working = slice_size
-        .saturating_mul(2)
-        .saturating_add(MIB)
-        .max(4 * MIB);
+    let working = slice_size.saturating_mul(2).saturating_add(MIB).max(4 * MIB);
     working
         .saturating_mul(6)
         .saturating_add(32 * MIB)
@@ -200,8 +197,7 @@ impl ControlLease {
     /// reservation (rounded up to 1 KiB). On refusal nothing changes.
     pub fn grow(&mut self, extra: u64) -> Result<(), RepairError> {
         let extra = extra.max(1).div_ceil(1024).saturating_mul(1024);
-        let mut more =
-            reserve_control_inner(self.nzb_id, extra, self.pool_limit, self.pool_optional)?;
+        let mut more = reserve_control_inner(self.nzb_id, extra, self.pool_limit, self.pool_optional)?;
         match (&mut self._budget, more._budget.take()) {
             (Some(mine), Some(theirs)) => mine.absorb(theirs),
             (slot @ None, theirs) => *slot = theirs,
@@ -296,11 +292,7 @@ fn reserve_control_inner(
     }
     let budget = LIVE_BUDGET.acquire(bytes, pool_limit);
     if budget.is_none() {
-        return Err(limit_error(
-            "shared live PAR reservation",
-            bytes,
-            pool_limit,
-        ));
+        return Err(limit_error("shared live PAR reservation", bytes, pool_limit));
     }
     used.bytes = total.unwrap();
     used.jobs.insert(nzb_id, job.unwrap());

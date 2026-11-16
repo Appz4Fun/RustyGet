@@ -71,11 +71,7 @@ pub fn resources(preset: i32, cpus: usize, probe: Option<&Probe>) -> Option<ParR
     let cpus = cpus.max(1);
     match preset {
         // least CPU and RAM: one thread, a small buffer, downloads pause while repairing
-        LOW => Some(ParResources {
-            par_buffer_mb: 64,
-            par_threads: 1,
-            par_pause_queue: true,
-        }),
+        LOW => Some(ParResources { par_buffer_mb: 64, par_threads: 1, par_pause_queue: true }),
         // a trade-off: half the CPUs
         MEDIUM => Some(ParResources {
             par_buffer_mb: 256,
@@ -83,11 +79,7 @@ pub fn resources(preset: i32, cpus: usize, probe: Option<&Probe>) -> Option<ParR
             par_pause_queue: false,
         }),
         // aggressive: every CPU and 1 GB
-        LARGE => Some(ParResources {
-            par_buffer_mb: 1024,
-            par_threads: 0,
-            par_pause_queue: false,
-        }),
+        LARGE => Some(ParResources { par_buffer_mb: 1024, par_threads: 0, par_pause_queue: false }),
         // everything maxed out: the largest buffer and two threads more than CPUs
         // to cover waits for I/O
         UBER => Some(ParResources {
@@ -118,11 +110,7 @@ pub fn detected(p: &Probe) -> ParResources {
     let share = p.mem_available / 100 * 15 / MB;
     let par_buffer_mb = (share / 64 * 64).clamp(128, MAX_PAR_BUFFER_MB as u64) as i32;
     let par_pause_queue = p.disk_write_mbps.is_some_and(|w| w < SLOW_DISK_MBPS);
-    ParResources {
-        par_buffer_mb,
-        par_threads,
-        par_pause_queue,
-    }
+    ParResources { par_buffer_mb, par_threads, par_pause_queue }
 }
 
 /// `ParPauseQueue` as post-processing should apply it: with "detect" the
@@ -146,12 +134,8 @@ struct ProbeState {
     started: Option<Instant>,
 }
 
-static STATE: Mutex<ProbeState> = Mutex::new(ProbeState {
-    probe: None,
-    running: false,
-    at: None,
-    started: None,
-});
+static STATE: Mutex<ProbeState> =
+    Mutex::new(ProbeState { probe: None, running: false, at: None, started: None });
 
 /// A probe still running after this long (a disk that hangs in sync) is
 /// given up on: it no longer blocks a new probe or keeps Settings polling.
@@ -264,10 +248,7 @@ fn disk_test(dir: &[u8], max: u64, limit: Duration) -> Option<(f64, Option<f64>)
     // touch a newer probe's file
     static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let path = dir.join(format!(
-        ".rustyget-parpreset-{}-{seq}.tmp",
-        std::process::id()
-    ));
+    let path = dir.join(format!(".rustyget-parpreset-{}-{seq}.tmp", std::process::id()));
     struct Remove(std::path::PathBuf);
     impl Drop for Remove {
         fn drop(&mut self) {
@@ -351,10 +332,7 @@ pub fn to_json(probe: Option<&Probe>, running: bool, cpus: usize) -> String {
     o.push_str(&format!("\"Running\":{running},\"CPUs\":{cpus}"));
     // the ParBuffer in use now (a new RAM reading applies on the next reload)
     if let Some(opts) = crate::options::active_options() {
-        o.push_str(&format!(
-            ",\"AppliedParBuffer\":{}",
-            opts.scalars().par_buffer
-        ));
+        o.push_str(&format!(",\"AppliedParBuffer\":{}", opts.scalars().par_buffer));
     }
     if let Some(p) = probe {
         o.push_str(&format!(
@@ -374,9 +352,7 @@ pub fn to_json(probe: Option<&Probe>, running: bool, cpus: usize) -> String {
     }
     o.push_str(",\"Presets\":{");
     for (i, (name, value)) in PRESET_NAMES.iter().zip(PRESET_VALUES).enumerate() {
-        let Some(r) = resources(value, cpus, probe) else {
-            continue;
-        };
+        let Some(r) = resources(value, cpus, probe) else { continue };
         if i > 0 {
             o.push(',');
         }
@@ -450,41 +426,11 @@ mod tests {
         let medium = resources(MEDIUM, 12, None).unwrap();
         let large = resources(LARGE, 12, None).unwrap();
         let uber = resources(UBER, 12, None).unwrap();
-        assert_eq!(
-            low,
-            ParResources {
-                par_buffer_mb: 64,
-                par_threads: 1,
-                par_pause_queue: true
-            }
-        );
-        assert_eq!(
-            medium,
-            ParResources {
-                par_buffer_mb: 256,
-                par_threads: 6,
-                par_pause_queue: false
-            }
-        );
-        assert_eq!(
-            large,
-            ParResources {
-                par_buffer_mb: 1024,
-                par_threads: 0,
-                par_pause_queue: false
-            }
-        );
-        assert_eq!(
-            uber,
-            ParResources {
-                par_buffer_mb: MAX_PAR_BUFFER_MB,
-                par_threads: 14,
-                par_pause_queue: false
-            }
-        );
-        assert!(
-            low.par_buffer_mb < medium.par_buffer_mb && medium.par_buffer_mb < large.par_buffer_mb
-        );
+        assert_eq!(low, ParResources { par_buffer_mb: 64, par_threads: 1, par_pause_queue: true });
+        assert_eq!(medium, ParResources { par_buffer_mb: 256, par_threads: 6, par_pause_queue: false });
+        assert_eq!(large, ParResources { par_buffer_mb: 1024, par_threads: 0, par_pause_queue: false });
+        assert_eq!(uber, ParResources { par_buffer_mb: MAX_PAR_BUFFER_MB, par_threads: 14, par_pause_queue: false });
+        assert!(low.par_buffer_mb < medium.par_buffer_mb && medium.par_buffer_mb < large.par_buffer_mb);
         assert!(large.par_buffer_mb < uber.par_buffer_mb);
         // a single CPU still gets one thread on medium
         assert_eq!(resources(MEDIUM, 1, None).unwrap().par_threads, 1);
@@ -538,11 +484,7 @@ mod tests {
         let bytes = dir.to_string_lossy().as_bytes().to_vec();
         let (w, _r) = disk_test(&bytes, 8 * MB, Duration::from_secs(2)).unwrap();
         assert!(w > 0.0);
-        assert_eq!(
-            std::fs::read_dir(&dir).unwrap().count(),
-            0,
-            "test file removed"
-        );
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "test file removed");
         let _ = std::fs::remove_dir(&dir);
     }
 }

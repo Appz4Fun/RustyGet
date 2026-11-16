@@ -817,32 +817,16 @@ mod tests {
             (b"WriteBuffer".as_slice(), b"1024".as_slice())
         );
         assert_eq!(convert_old_option(c"Decode", c"NO").1.as_bytes(), b"yes");
-        for (old, new) in [
-            (c"none", "no"),
-            (c"None", "no"),
-            (c"append", "yes"),
-            (c"reset", "yes"),
-            (c"rotate", "yes"),
-        ] {
+        for (old, new) in [(c"none", "no"), (c"None", "no"), (c"append", "yes"), (c"reset", "yes"), (c"rotate", "yes")] {
             let (o, v) = convert_old_option(c"WriteLog", old);
-            assert_eq!(
-                (o.to_str().unwrap(), v.to_str().unwrap()),
-                ("LogToFile", new)
-            );
+            assert_eq!((o.to_str().unwrap(), v.to_str().unwrap()), ("LogToFile", new));
         }
         // a reference is read as the value it names, not as text
         let vars = |name: &CStr| (name.to_bytes() == b"DebugTarget").then(|| b"none".to_vec());
         let (o, v) = split_and_convert_option_string(c"WriteLog=${DebugTarget}", vars).unwrap();
-        assert_eq!(
-            (o.to_str().unwrap(), v.to_str().unwrap()),
-            ("LogToFile", "no")
-        );
+        assert_eq!((o.to_str().unwrap(), v.to_str().unwrap()), ("LogToFile", "no"));
         let (o, v) = split_and_convert_option_string(c"MainDir=${AppDir}/x", |_| None).unwrap();
-        assert_eq!(
-            (o.to_str().unwrap(), v.to_str().unwrap()),
-            ("MainDir", "${AppDir}/x"),
-            "other options expand later"
-        );
+        assert_eq!((o.to_str().unwrap(), v.to_str().unwrap()), ("MainDir", "${AppDir}/x"), "other options expand later");
         assert_eq!(parse_category_source(Some(c"FeedFile")), 2);
     }
 
@@ -918,36 +902,14 @@ mod tests {
             c"Server1.JoinGroup",
             c"server12.joingroup",
         ] {
-            assert_eq!(
-                validate_option_name(name, &mut no),
-                NameCheck::Removed,
-                "{name:?}"
-            );
+            assert_eq!(validate_option_name(name, &mut no), NameCheck::Removed, "{name:?}");
         }
-        assert_eq!(
-            validate_option_name(c"Server1.Priority", &mut no),
-            NameCheck::Valid
-        );
-        assert_eq!(
-            validate_option_name(c"Server1.Level", &mut no),
-            NameCheck::Valid
-        );
-        assert_eq!(
-            validate_option_name(c"Server1.Group", &mut no),
-            NameCheck::Valid
-        );
-        assert_eq!(
-            validate_option_name(c"Server1.Backbone", &mut no),
-            NameCheck::Valid
-        );
-        assert_eq!(
-            validate_option_name(c"Server1.Address", &mut no),
-            NameCheck::Valid
-        );
-        assert_eq!(
-            validate_option_name(c"Server.JoinGroup", &mut no),
-            NameCheck::Invalid
-        );
+        assert_eq!(validate_option_name(c"Server1.Priority", &mut no), NameCheck::Valid);
+        assert_eq!(validate_option_name(c"Server1.Level", &mut no), NameCheck::Valid);
+        assert_eq!(validate_option_name(c"Server1.Group", &mut no), NameCheck::Valid);
+        assert_eq!(validate_option_name(c"Server1.Backbone", &mut no), NameCheck::Valid);
+        assert_eq!(validate_option_name(c"Server1.Address", &mut no), NameCheck::Valid);
+        assert_eq!(validate_option_name(c"Server.JoinGroup", &mut no), NameCheck::Invalid);
     }
 
     #[test]
@@ -2381,17 +2343,18 @@ pub fn init_scalar_options_host<H: OptionsHost>(
     // A preset sets ParBuffer, ParThreads and ParPauseQueue; "custom" keeps them.
     // "detect" reads CPUs and RAM now; its disk test finishes in the background
     // and decides ParPauseQueue when post-processing asks (prepost).
-    let probe = (par_preset == crate::parpreset::DETECT)
-        .then(|| crate::parpreset::last_probe().unwrap_or_else(crate::parpreset::quick_probe));
-    if let Some(r) =
-        crate::parpreset::resources(par_preset, crate::sysmetrics::cpu_count(), probe.as_ref())
-    {
+    let probe = (par_preset == crate::parpreset::DETECT).then(|| {
+        crate::parpreset::last_probe().unwrap_or_else(crate::parpreset::quick_probe)
+    });
+    if let Some(r) = crate::parpreset::resources(
+        par_preset,
+        crate::sysmetrics::cpu_count(),
+        probe.as_ref(),
+    ) {
         s.par_buffer = r.par_buffer_mb;
         if usize::BITS == 32 {
             // a 32-bit build shares 1900 MB between ArticleCache and ParBuffer
-            s.par_buffer = s
-                .par_buffer
-                .min((1900 - s.article_cache.clamp(0, 1900)).max(64));
+            s.par_buffer = s.par_buffer.min((1900 - s.article_cache.clamp(0, 1900)).max(64));
         }
         s.par_threads = r.par_threads;
         s.par_pause_queue = i32::from(r.par_pause_queue);
@@ -2537,11 +2500,7 @@ pub fn init_scalar_options_host<H: OptionsHost>(
     s.debug_target = host.parse_enum_value(c"DebugTarget", &TARGET_NAMES, &TARGET_VALUES);
     s.detail_target = host.parse_enum_value(c"DetailTarget", &TARGET_NAMES, &TARGET_VALUES);
     // a log file is a new file each day, continued in 10MB parts (the old "rotate")
-    s.write_log = if host.parse_bool_value(c"LogToFile") {
-        3
-    } else {
-        0
-    };
+    s.write_log = if host.parse_bool_value(c"LogToFile") { 3 } else { 0 };
 
     s
 }
@@ -2832,9 +2791,7 @@ pub fn init_servers_host<H: OptionsHost>(
         )));
         // Priority (1 is used first, up to 5) replaced Level (0 first); an old Level still counts
         let npriority = host.get_option(&cstring(options_format_indexed_opt_name(
-            b"Server",
-            n,
-            b"Priority",
+            b"Server", n, b"Priority",
         )));
         // Backbone replaced the numbered Group; an old Group above 0 still counts
         let ngroup = host.get_option(&cstring(options_format_indexed_opt_name(
@@ -3751,9 +3708,8 @@ impl<'a> RustOptions<'a> {
     }
 
     pub fn set_option_string(&mut self, option: &CStr) -> bool {
-        let converted = split_and_convert_option_string(option, |var_name| {
-            self.get_option(var_name).map(|c| c.into_bytes())
-        });
+        let converted =
+            split_and_convert_option_string(option, |var_name| self.get_option(var_name).map(|c| c.into_bytes()));
         let Some((optname, optvalue)) = converted else {
             let msg = format_bytes_msg(&[b"Invalid option \"", option.to_bytes(), b"\""]);
             self.config_error(&msg);
@@ -4360,9 +4316,8 @@ impl NzbgetRsOptions {
     }
 
     fn set_option_string(&mut self, option: &CStr) -> bool {
-        let converted = split_and_convert_option_string(option, |var_name| {
-            self.get_option(var_name).map(|c| c.into_bytes())
-        });
+        let converted =
+            split_and_convert_option_string(option, |var_name| self.get_option(var_name).map(|c| c.into_bytes()));
         let Some((optname, optvalue)) = converted else {
             let msg = format_bytes_msg(&[b"Invalid option \"", option.to_bytes(), b"\""]);
             self.config_error(&msg);
@@ -5230,10 +5185,7 @@ mod options_full_suite_port_from_cpp {
         let cmd_opts = [c"ParPreset=uber", c"ParBuffer=100", c"ParThreads=3"];
         let o = RustOptions::new_no_config(Some(&cmd_opts), Some(&mut extender));
         #[cfg(target_pointer_width = "64")]
-        assert_eq!(
-            (o.scalars.par_buffer, o.scalars.par_threads),
-            (4096, cpus + 2)
-        );
+        assert_eq!((o.scalars.par_buffer, o.scalars.par_threads), (4096, cpus + 2));
         assert_eq!(o.scalars.par_pause_queue, 0);
         let cmd_opts = [c"ParPreset=low"];
         let o = RustOptions::new_no_config(Some(&cmd_opts), Some(&mut extender));
@@ -5248,23 +5200,14 @@ mod options_full_suite_port_from_cpp {
         let o = RustOptions::new_no_config(Some(&cmd_opts), Some(&mut extender));
         assert_eq!((o.scalars.par_buffer, o.scalars.par_threads), (1024, 0));
         // custom keeps the options as written
-        let cmd_opts = [
-            c"ParPreset=custom",
-            c"ParBuffer=100",
-            c"ParThreads=3",
-            c"ParPauseQueue=yes",
-        ];
+        let cmd_opts = [c"ParPreset=custom", c"ParBuffer=100", c"ParThreads=3", c"ParPauseQueue=yes"];
         let o = RustOptions::new_no_config(Some(&cmd_opts), Some(&mut extender));
         assert_eq!((o.scalars.par_buffer, o.scalars.par_threads), (100, 3));
         assert_eq!(o.scalars.par_pause_queue, 1);
         // detect sizes the buffer from RAM even before its disk test
         let cmd_opts = [c"ParPreset=detect"];
         let o = RustOptions::new_no_config(Some(&cmd_opts), Some(&mut extender));
-        assert!(
-            (128..=4096).contains(&o.scalars.par_buffer),
-            "{}",
-            o.scalars.par_buffer
-        );
+        assert!((128..=4096).contains(&o.scalars.par_buffer), "{}", o.scalars.par_buffer);
     }
 
     #[test]

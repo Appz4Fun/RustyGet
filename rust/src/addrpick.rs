@@ -70,10 +70,7 @@ fn entries() -> &'static Mutex<HashMap<i32, Entry>> {
 /// IPv6 `%interface` allowed. Returns the normal form, or `None`.
 pub fn normalize(value: &str) -> Option<String> {
     let v = value.trim();
-    let v = v
-        .strip_prefix('[')
-        .and_then(|s| s.strip_suffix(']'))
-        .unwrap_or(v);
+    let v = v.strip_prefix('[').and_then(|s| s.strip_suffix(']')).unwrap_or(v);
     if v.is_empty() {
         return None;
     }
@@ -84,9 +81,7 @@ pub fn normalize(value: &str) -> Option<String> {
     let ip: IpAddr = ip_part.parse().ok()?;
     match (ip, scope) {
         (IpAddr::V4(_), Some(_)) => None,
-        (_, Some(s)) if s.is_empty() || s.bytes().any(|b| b.is_ascii_whitespace() || b == b'/') => {
-            None
-        }
+        (_, Some(s)) if s.is_empty() || s.bytes().any(|b| b.is_ascii_whitespace() || b == b'/') => None,
         (_, Some(s)) => Some(format!("{ip}%{s}")),
         (_, None) => Some(ip.to_string()),
     }
@@ -105,21 +100,13 @@ pub fn configure(id: i32, pinned: &str) {
         }
     }
     drop(map);
-    if let Some(e) = entries()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get_mut(&id)
-    {
+    if let Some(e) = entries().lock().unwrap_or_else(|e| e.into_inner()).get_mut(&id) {
         e.warned_pin = None;
     }
 }
 
 pub fn pinned(id: i32) -> Option<String> {
-    pins()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(&id)
-        .cloned()
+    pins().lock().unwrap_or_else(|e| e.into_inner()).get(&id).cloned()
 }
 
 /// Whether `host` gets an address plan: a name other than localhost.
@@ -188,11 +175,7 @@ fn order(
 
 /// Fastest first, unreachable last, keeping `prev_best` first while it is within
 /// `KEEP_FACTOR`/`KEEP_SLACK_MS` of the fastest.
-fn rank(
-    addrs: &[String],
-    latency: &HashMap<String, Option<f64>>,
-    prev_best: Option<&str>,
-) -> Vec<String> {
+fn rank(addrs: &[String], latency: &HashMap<String, Option<f64>>, prev_best: Option<&str>) -> Vec<String> {
     let mut list: Vec<String> = addrs.to_vec();
     let key = |a: &String| latency.get(a).copied().flatten();
     list.sort_by(|a, b| match (key(a), key(b)) {
@@ -222,9 +205,7 @@ fn time_addresses(addrs: &[SocketAddr]) -> Vec<Option<f64>> {
                 let a = *a;
                 std::thread::Builder::new()
                     .name("addrpick".into())
-                    .spawn_scoped(scope, move || {
-                        crate::hostlookup::connect_ms(a, PROBE_TIMEOUT)
-                    })
+                    .spawn_scoped(scope, move || crate::hostlookup::connect_ms(a, PROBE_TIMEOUT))
                     .map_err(|_| a)
             })
             .collect();
@@ -315,9 +296,7 @@ pub fn plan(s: &ServerFacts<'_>) -> Vec<String> {
     }
     let pin = pin.filter(|p| family_ok(p, s.ip_version));
     let dead = e.dead.clone();
-    let (list, dropped) = order(pin.as_deref(), pin_outside_ok, &e.ranked, &|a| {
-        dead.contains_key(a)
-    });
+    let (list, dropped) = order(pin.as_deref(), pin_outside_ok, &e.ranked, &|a| dead.contains_key(a));
     if dropped {
         let p = pin.unwrap_or_default();
         if e.warned_pin.as_deref() != Some(p.as_str()) {
@@ -416,17 +395,17 @@ fn refresh_entry(s: &ServerFacts<'_>, port: u16) {
             let ms = e.latency.get(best).copied().flatten();
             // nothing answered the timing: no "fastest" to report
             if ms.is_some() {
-                crate::log::log_active_bytes(
-                    MK_INFO,
-                    format!(
-                        "{}: connecting to {best} first, the fastest of {} addresses for {}{}",
-                        s.name,
-                        ranked.len(),
-                        s.host,
-                        ms.map(|m| format!(" ({m} ms)")).unwrap_or_default()
-                    )
-                    .as_bytes(),
-                );
+            crate::log::log_active_bytes(
+                MK_INFO,
+                format!(
+                    "{}: connecting to {best} first, the fastest of {} addresses for {}{}",
+                    s.name,
+                    ranked.len(),
+                    s.host,
+                    ms.map(|m| format!(" ({m} ms)")).unwrap_or_default()
+                )
+                .as_bytes(),
+            );
             }
         }
     }
@@ -494,18 +473,12 @@ mod tests {
         let ranked = s(&["a", "b", "c"]);
         let none = |_: &str| false;
         assert_eq!(order(None, false, &ranked, &none).0, ranked);
-        assert_eq!(
-            order(Some("c"), false, &ranked, &none),
-            (s(&["c", "a", "b"]), false)
-        );
+        assert_eq!(order(Some("c"), false, &ranked, &none), (s(&["c", "a", "b"]), false));
         let b_dead = |x: &str| x == "b";
         assert_eq!(order(None, false, &ranked, &b_dead).0, s(&["a", "c", "b"]));
         // a pin that failed recently waits behind the live ones, ahead of the other dead ones
         let ab_dead = |x: &str| x == "a" || x == "b";
-        assert_eq!(
-            order(Some("b"), false, &ranked, &ab_dead).0,
-            s(&["c", "b", "a"])
-        );
+        assert_eq!(order(Some("b"), false, &ranked, &ab_dead).0, s(&["c", "b", "a"]));
         // all dead: one try, the pin first when there is one
         let all_dead = |_: &str| true;
         assert_eq!(order(None, false, &ranked, &all_dead).0, s(&["a"]));
@@ -519,36 +492,20 @@ mod tests {
     fn pin_outside_dns_needs_strict_tls() {
         let ranked = s(&["a", "b"]);
         let none = |_: &str| false;
-        assert_eq!(
-            order(Some("z"), false, &ranked, &none),
-            (s(&["a", "b"]), true)
-        );
-        assert_eq!(
-            order(Some("z"), true, &ranked, &none),
-            (s(&["z", "a", "b"]), false)
-        );
+        assert_eq!(order(Some("z"), false, &ranked, &none), (s(&["a", "b"]), true));
+        assert_eq!(order(Some("z"), true, &ranked, &none), (s(&["z", "a", "b"]), false));
     }
 
     #[test]
     fn rank_fastest_first_with_hysteresis() {
         let names = s(&["a", "b", "c"]);
-        let lat: HashMap<String, Option<f64>> = [
-            ("a".into(), Some(30.0)),
-            ("b".into(), Some(10.0)),
-            ("c".into(), None),
-        ]
-        .into_iter()
-        .collect();
+        let lat: HashMap<String, Option<f64>> =
+            [("a".into(), Some(30.0)), ("b".into(), Some(10.0)), ("c".into(), None)].into_iter().collect();
         assert_eq!(rank(&names, &lat, None), s(&["b", "a", "c"]));
         // a is 30 ms against 10: too slow to keep
         assert_eq!(rank(&names, &lat, Some("a")), s(&["b", "a", "c"]));
-        let close: HashMap<String, Option<f64>> = [
-            ("a".into(), Some(14.0)),
-            ("b".into(), Some(10.0)),
-            ("c".into(), Some(50.0)),
-        ]
-        .into_iter()
-        .collect();
+        let close: HashMap<String, Option<f64>> =
+            [("a".into(), Some(14.0)), ("b".into(), Some(10.0)), ("c".into(), Some(50.0))].into_iter().collect();
         // a at 14 ms is within 10 * 1.2 + 5: it stays first
         assert_eq!(rank(&names, &close, Some("a")), s(&["a", "b", "c"]));
         // an unreachable previous best never stays first
@@ -578,13 +535,7 @@ mod tests {
         report(id, "b", false);
         assert!(entries().lock().unwrap().get(&id).unwrap().stale);
         report(id, "a", true);
-        assert!(!entries()
-            .lock()
-            .unwrap()
-            .get(&id)
-            .unwrap()
-            .dead
-            .contains_key("a"));
+        assert!(!entries().lock().unwrap().get(&id).unwrap().dead.contains_key("a"));
         entries().lock().unwrap().remove(&id);
     }
 
@@ -630,10 +581,7 @@ mod tests {
         }
         report(id, "192.0.2.1", false);
         plan(&facts);
-        assert_eq!(
-            entries().lock().unwrap().get(&id).unwrap().resolved_at,
-            Some(long_ago)
-        );
+        assert_eq!(entries().lock().unwrap().get(&id).unwrap().resolved_at, Some(long_ago));
         entries().lock().unwrap().remove(&id);
     }
 

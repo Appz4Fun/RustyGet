@@ -153,14 +153,8 @@ fn output_matches(root: &std::path::Path, id: i32, name: &[u8], bytes: &[u8]) ->
 
 impl NamespaceProof {
     pub(crate) fn protects_leaf(&self, name: &[u8]) -> bool {
-        self.catalog
-            .iter()
-            .any(|entry| entry.name.eq_ignore_ascii_case(name))
-            || self
-                .facts
-                .rows
-                .iter()
-                .any(|row| row.name.eq_ignore_ascii_case(name))
+        self.catalog.iter().any(|entry| entry.name.eq_ignore_ascii_case(name))
+            || self.facts.rows.iter().any(|row| row.name.eq_ignore_ascii_case(name))
     }
     /// Compute outside the queue, before any native metadata is copied.
     pub fn catalog_required_bytes(set: &PacketSet) -> Result<usize, RepairError> {
@@ -356,11 +350,7 @@ impl NamespaceProof {
             // matching no entry did not drive the rename (the name came from
             // the article itself; the hashed first bytes were damaged or not
             // the file's start), so the name stands and slice CRCs verify it.
-            let known = if hint.is_empty() {
-                &self.facts.rows[row].hash16k[..]
-            } else {
-                hint
-            };
+            let known = if hint.is_empty() { &self.facts.rows[row].hash16k[..] } else { hint };
             if let Some(hash) = live_hash16k(known) {
                 let matches = self
                     .hash_order
@@ -369,15 +359,11 @@ impl NamespaceProof {
                     .count();
                 let ours = self.catalog[index].hash == hash;
                 if (ours && matches > 1) || (!ours && matches > 0) {
-                    return Err(invalid(
-                        "renamed source hash does not prove its destination",
-                    ));
+                    return Err(invalid("renamed source hash does not prove its destination"));
                 }
             }
         } else if self.bindings[row].is_some() {
-            return Err(invalid(
-                "bound source renamed away from its PAR destination",
-            ));
+            return Err(invalid("bound source renamed away from its PAR destination"));
         }
         // An unbound source may take a name outside this PAR set (another set
         // in the same job); it stays unbound.

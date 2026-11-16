@@ -1,25 +1,22 @@
 //! Rust parts of nzbget, called from C++ through a C ABI (see nzbget_rs.h).
 //! Each module replaces one C++ routine and must match its output byte for byte.
 
-pub mod addrpick;
 pub mod archive_native;
 #[cfg(unix)]
 pub mod articledl;
 #[cfg(unix)]
 pub mod articlefetcher;
-pub mod backbones;
 pub mod binrpc;
 pub mod bytes;
 #[cfg(unix)]
 mod callback_metrics;
-pub mod certtools;
 pub mod cleanup;
 pub mod cmdline;
 pub mod collection;
 pub mod configfile;
 pub mod crc;
-pub mod deadvolume;
 pub mod decode;
+pub mod deadvolume;
 pub mod decoder;
 pub mod deobfuscation;
 pub mod directrenamer;
@@ -38,11 +35,9 @@ pub mod fsdelete;
 #[cfg(unix)]
 pub mod fsops;
 pub mod historycoord;
-pub mod hostlookup;
 #[cfg(unix)]
 pub mod jobthread;
 pub mod json;
-pub mod liveparlog;
 #[cfg(unix)]
 pub mod log;
 #[cfg(unix)]
@@ -54,19 +49,20 @@ pub mod nserv;
 pub mod nzbfile;
 pub mod options;
 pub mod parchecker;
+pub mod liveparlog;
 pub mod pardamage;
+pub mod parpreset;
 mod parlive;
 pub mod parparser;
-pub mod parpreset;
 pub mod parrenamer;
 pub mod paths;
 pub mod posting;
 #[cfg(unix)]
 pub mod postproc;
 pub mod prepost;
+pub mod progressive_unpack;
 #[cfg(unix)]
 pub mod procrun;
-pub mod progressive_unpack;
 pub mod queueeditor;
 pub mod rarreader;
 pub mod rarrenamer;
@@ -80,8 +76,12 @@ pub mod scheduler;
 #[cfg(unix)]
 pub mod socket;
 pub mod statmeter;
-pub mod sysmetrics;
+pub mod certtools;
 pub mod systemhealth;
+pub mod backbones;
+pub mod addrpick;
+pub mod hostlookup;
+pub mod sysmetrics;
 pub mod text;
 pub mod tlscipher;
 #[cfg(unix)]

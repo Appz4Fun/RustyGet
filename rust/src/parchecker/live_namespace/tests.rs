@@ -240,25 +240,24 @@ fn direct_rename_that_is_ambiguous_still_invalidates() {
     .unwrap();
     assert!(proof.bind(40, b"PART41.rar", b"").is_err());
     // A bound source renamed away from its PAR destination.
-    let mut proof = NamespaceProof::prepare(&set, facts(vec![row(40, b"obf-a.rar", b"")])).unwrap();
-    assert!(proof
-        .bind(40, b"obf-a.rar", &hash_hex(1))
-        .unwrap()
-        .is_some());
+    let mut proof =
+        NamespaceProof::prepare(&set, facts(vec![row(40, b"obf-a.rar", b"")])).unwrap();
+    assert!(proof.bind(40, b"obf-a.rar", &hash_hex(1)).unwrap().is_some());
     assert!(proof.bind(40, b"movie.mkv", b"").is_err());
     // A known 16k hash that names a different destination.
-    let mut proof = NamespaceProof::prepare(&set, facts(vec![row(40, b"obf-a.rar", b"")])).unwrap();
+    let mut proof =
+        NamespaceProof::prepare(&set, facts(vec![row(40, b"obf-a.rar", b"")])).unwrap();
     assert!(proof.bind(40, b"part41.rar", &hash_hex(1)).is_err());
     // Renamed onto the destination another row is already bound to.
     let mut proof = NamespaceProof::prepare(
         &set,
-        facts(vec![row(40, b"obf-a.rar", b""), row(41, b"obf-b.rar", b"")]),
+        facts(vec![
+            row(40, b"obf-a.rar", b""),
+            row(41, b"obf-b.rar", b""),
+        ]),
     )
     .unwrap();
-    assert!(proof
-        .bind(40, b"obf-a.rar", &hash_hex(2))
-        .unwrap()
-        .is_some());
+    assert!(proof.bind(40, b"obf-a.rar", &hash_hex(2)).unwrap().is_some());
     assert!(proof.bind(41, b"part41.rar", b"").is_err());
     // A recovery row renamed onto a source destination.
     let mut par = row(50, b"x7Hq2.par2", b"");
@@ -317,8 +316,5 @@ fn rename_by_article_name_survives_a_hash_matching_no_destination() {
     // has; the article's own name still binds the row (job 210, 2026-11-15).
     let set = metadata(&[(b"part40.rar", 1), (b"part41.rar", 2)]);
     let mut proof = NamespaceProof::prepare(&set, facts(vec![row(40, b"obf-a.rar", b"")])).unwrap();
-    assert!(proof
-        .bind(40, b"part40.rar", &hash_hex(9))
-        .unwrap()
-        .is_some());
+    assert!(proof.bind(40, b"part40.rar", &hash_hex(9)).unwrap().is_some());
 }

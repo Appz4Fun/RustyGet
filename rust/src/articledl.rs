@@ -2225,9 +2225,7 @@ impl RsArticleWriter {
             && host.qh.opts().direct_unpack
         {
             let nzb_id = host.qh.with_locked_queue(|_| {
-                host.qh
-                    .nzb_snap(host.qh.file_snap(host.file_ptr).nzb_ptr, false)
-                    .id
+                host.qh.nzb_snap(host.qh.file_snap(host.file_ptr).nzb_ptr, false).id
             });
             let full = [
                 nzb_dest_dir.as_slice(),
@@ -3834,9 +3832,7 @@ impl NzbgetRsArticleDownloader {
                     // never waits on a level it can't use
                     while adv_lvl
                         && !break_all
-                        && article_dl_all_servers_on_level_failed(
-                            next_lvl, &cands, &f_ids, &missing,
-                        )
+                        && article_dl_all_servers_on_level_failed(next_lvl, &cands, &f_ids, &missing)
                     {
                         if next_lvl >= max_norm_lvl {
                             break_all = true;
@@ -3916,13 +3912,11 @@ mod tests {
 
     #[test]
     fn exhausted_live_par_budget_does_not_block_an_ordinary_article_write() {
-        let dir =
-            std::env::temp_dir().join(format!("rustyget-no-live-budget-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rustyget-no-live-budget-{}", std::process::id()));
         std::fs::create_dir(&dir).unwrap();
         let path = dir.join("part40.rar");
         std::fs::write(&path, b"original").unwrap();
-        let context =
-            crate::parlive::source_write_context(-1_961_502, 40, &dir, b"part40.rar").unwrap();
+        let context = crate::parlive::source_write_context(-1_961_502, 40, &dir, b"part40.rar").unwrap();
         let limit = crate::parchecker::effective_live_pool_bytes();
         assert!(limit > 0);
         // The pool is process-global; hold whatever other tests left free.
@@ -3934,9 +3928,7 @@ mod tests {
             }
             chunk /= 2;
         }
-        let mut file =
-            BufferedDiskFile::open_guarded(path.as_os_str().as_bytes(), true, 64, 0, context)
-                .unwrap();
+        let mut file = BufferedDiskFile::open_guarded(path.as_os_str().as_bytes(), true, 64, 0, context).unwrap();
         assert_eq!(file.write_bytes(b"ordinary"), 8);
         assert!(file.flush_and_close());
         assert_eq!(std::fs::read(path).unwrap(), b"ordinary");
@@ -3947,15 +3939,13 @@ mod tests {
 
     #[test]
     fn jobs_sharing_a_dest_dir_do_not_refuse_each_others_writes() {
-        let root =
-            std::env::temp_dir().join(format!("rustyget-shared-dest-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("rustyget-shared-dest-{}", std::process::id()));
         std::fs::create_dir(&root).unwrap();
         let (a, b) = (-1_961_504, -1_961_505);
         let first = crate::parlive::source_write_context(a, 40, &root, b"one.rar").unwrap();
         let second = crate::parlive::source_write_context(b, 41, &root, b"two.rar").unwrap();
         let (_file, _context, held) = first.open_attested(&root.join("one.rar"), true).unwrap();
-        let (_other, _context, _permit) =
-            second.open_attested(&root.join("two.rar"), true).unwrap();
+        let (_other, _context, _permit) = second.open_attested(&root.join("two.rar"), true).unwrap();
         drop(held);
         crate::parlive::forget_download_writes(a);
         crate::parlive::forget_download_writes(b);
@@ -3964,15 +3954,12 @@ mod tests {
 
     #[test]
     fn direct_write_off_assembly_temp_is_this_files_output() {
-        let root =
-            std::env::temp_dir().join(format!("rustyget-assembly-tmp-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("rustyget-assembly-tmp-{}", std::process::id()));
         std::fs::create_dir(&root).unwrap();
         let job = -1_961_506;
         let context = crate::parlive::source_write_context(job, 40, &root, b"part40.rar").unwrap();
         let path = root.join("part40.rar.tmp");
-        let mut file =
-            BufferedDiskFile::open_guarded(path.as_os_str().as_bytes(), false, 64, 0, context)
-                .unwrap();
+        let mut file = BufferedDiskFile::open_guarded(path.as_os_str().as_bytes(), false, 64, 0, context).unwrap();
         assert_eq!(file.write_bytes(b"assembled"), 9);
         assert!(file.flush_and_close());
         assert_eq!(std::fs::read(path).unwrap(), b"assembled");
@@ -3982,14 +3969,8 @@ mod tests {
 
     #[test]
     fn concurrent_article_temporaries_of_one_job_do_not_conflict() {
-        let root = std::env::temp_dir().join(format!(
-            "rustyget-article-concurrent-src-{}",
-            std::process::id()
-        ));
-        let scratch = std::env::temp_dir().join(format!(
-            "rustyget-article-concurrent-tmp-{}",
-            std::process::id()
-        ));
+        let root = std::env::temp_dir().join(format!("rustyget-article-concurrent-src-{}", std::process::id()));
+        let scratch = std::env::temp_dir().join(format!("rustyget-article-concurrent-tmp-{}", std::process::id()));
         std::fs::create_dir(&root).unwrap();
         std::fs::create_dir(&scratch).unwrap();
         let job = -1_961_503;
@@ -3997,12 +3978,8 @@ mod tests {
         let first = prepare_article_write_context(source.clone(), false, &scratch, 1).unwrap();
         let second = prepare_article_write_context(source, false, &scratch, 2).unwrap();
         // Another connection still holds its write permit for article 1.
-        let (_file, _context, held) = first
-            .open_attested(&scratch.join("40.001.tmp"), true)
-            .unwrap();
-        let (_other, _context, _permit) = second
-            .open_attested(&scratch.join("40.002.tmp"), true)
-            .unwrap();
+        let (_file, _context, held) = first.open_attested(&scratch.join("40.001.tmp"), true).unwrap();
+        let (_other, _context, _permit) = second.open_attested(&scratch.join("40.002.tmp"), true).unwrap();
         drop(held);
         crate::parlive::forget_download_writes(job);
         std::fs::remove_dir_all(root).unwrap();
@@ -4011,19 +3988,14 @@ mod tests {
 
     #[test]
     fn live_buffered_article_temporary_flush_uses_owned_scratch_root() {
-        let root =
-            std::env::temp_dir().join(format!("rustyget-article-source-{}", std::process::id()));
-        let scratch =
-            std::env::temp_dir().join(format!("rustyget-article-scratch-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("rustyget-article-source-{}", std::process::id()));
+        let scratch = std::env::temp_dir().join(format!("rustyget-article-scratch-{}", std::process::id()));
         std::fs::create_dir(&root).unwrap();
         std::fs::create_dir(&scratch).unwrap();
-        let context =
-            crate::parlive::source_write_context(-1_961_501, 40, &root, b"part40.rar").unwrap();
+        let context = crate::parlive::source_write_context(-1_961_501, 40, &root, b"part40.rar").unwrap();
         let context = prepare_article_write_context(context, false, &scratch, 7).unwrap();
         let path = scratch.join("40.007.tmp");
-        let mut file =
-            BufferedDiskFile::open_guarded(path.as_os_str().as_bytes(), false, 64, 0, context)
-                .unwrap();
+        let mut file = BufferedDiskFile::open_guarded(path.as_os_str().as_bytes(), false, 64, 0, context).unwrap();
         assert_eq!(file.write_bytes(b"one article"), 11);
         assert!(file.flush_and_close());
         assert_eq!(std::fs::read(path).unwrap(), b"one article");

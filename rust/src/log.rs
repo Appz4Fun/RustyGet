@@ -309,9 +309,7 @@ fn filelog_locked(
     let tmp2 = format_truncated_1023(prefix, text);
     let time_corr = options.map_or(0, |o| o.scalars().time_correction) as i64;
     let write_log = options.map_or(0, |o| o.scalars().write_log);
-    let rotate_log = options.map_or(crate::options::LOG_ROTATIONS_DEFAULT, |o| {
-        o.scalars().rotate_log
-    });
+    let rotate_log = options.map_or(crate::options::LOG_ROTATIONS_DEFAULT, |o| o.scalars().rotate_log);
     let log_buffer = options.map(|o| o.scalars().log_buffer);
 
     let rawtime = current_unix_time() + time_corr;
@@ -337,15 +335,7 @@ fn filelog_locked(
     line.push(b'\n');
 
     if write_log == 3 {
-        rotate_if_due(
-            inner,
-            &log_filename,
-            rawtime,
-            time_corr,
-            line.len() as u64,
-            rotate_log,
-            log_buffer,
-        );
+        rotate_if_due(inner, &log_filename, rawtime, time_corr, line.len() as u64, rotate_log, log_buffer);
     }
 
     if inner.log_file.is_none() {
@@ -841,8 +831,8 @@ pub(crate) unsafe fn nzbget_rs_log_collect(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::options::{nzbget_rs_options_free, nzbget_rs_options_new, NzbgetRsParsedOptions};
     use std::os::unix::fs::FileTypeExt as _;
+    use crate::options::{nzbget_rs_options_free, nzbget_rs_options_new, NzbgetRsParsedOptions};
 
     #[test]
     fn startup_buffering_init_options_file_flush_and_ring_trim() {
@@ -1018,32 +1008,18 @@ mod tests {
         // 60 lines of ~230 bytes is ~14KB: LogFile plus parts .1 to .3 of today, 4KB each,
         // each gzipped once it is moved aside
         assert_eq!(names.len(), 4, "{names:?}");
-        assert!(
-            names.contains(&"rustyget.log".to_owned()),
-            "LogFile is still the one written: {names:?}"
-        );
-        let part1 = names
-            .iter()
-            .find(|n| n.ends_with(".1.log.gz"))
-            .expect("a first part")
-            .clone();
-        assert!(
-            part1.starts_with("rustyget-") && part1.len() == "rustyget-2026-11-15.1.log.gz".len(),
-            "{part1}"
-        );
+        assert!(names.contains(&"rustyget.log".to_owned()), "LogFile is still the one written: {names:?}");
+        let part1 = names.iter().find(|n| n.ends_with(".1.log.gz")).expect("a first part").clone();
+        assert!(part1.starts_with("rustyget-") && part1.len() == "rustyget-2026-11-15.1.log.gz".len(), "{part1}");
         let stem = &part1[..part1.len() - 9];
         for part in 2..=3 {
-            assert!(
-                names.contains(&format!("{stem}.{part}.log.gz")),
-                "{names:?}"
-            );
+            assert!(names.contains(&format!("{stem}.{part}.log.gz")), "{names:?}");
         }
         let read = |name: &str| -> String {
             let mut text = String::new();
             if name.ends_with(".gz") {
                 let f = std::fs::File::open(dir.join(name)).unwrap();
-                std::io::Read::read_to_string(&mut flate2::read::GzDecoder::new(f), &mut text)
-                    .unwrap();
+                std::io::Read::read_to_string(&mut flate2::read::GzDecoder::new(f), &mut text).unwrap();
             } else {
                 text = std::fs::read_to_string(dir.join(name)).unwrap();
             }
@@ -1054,23 +1030,13 @@ mod tests {
         let mut total = 0;
         for name in &names {
             let text = read(name);
-            assert!(
-                text.len() as u64 <= LOG_PART_SIZE,
-                "{name} is {} bytes",
-                text.len()
-            );
+            assert!(text.len() as u64 <= LOG_PART_SIZE, "{name} is {} bytes", text.len());
             total += text.lines().count();
         }
         assert_eq!(total, 60, "every line is written once");
 
         let mut screen: Vec<(u32, i32, String)> = Vec::new();
-        unsafe extern "C" fn collect(
-            ctx: *mut c_void,
-            id: u32,
-            kind: c_int,
-            _time: i64,
-            text: *const c_char,
-        ) {
+        unsafe extern "C" fn collect(ctx: *mut c_void, id: u32, kind: c_int, _time: i64, text: *const c_char) {
             let v = &mut *(ctx as *mut Vec<(u32, i32, String)>);
             v.push((id, kind, CStr::from_ptr(text).to_str().unwrap().to_owned()));
         }
@@ -1145,15 +1111,8 @@ mod tests {
         // ~28KB is LogFile plus 6 or 7 parts of 4KB; only the newest 2 are kept, gzipped
         let parts: Vec<&String> = names.iter().filter(|n| n.ends_with(".log.gz")).collect();
         assert_eq!(parts.len(), 2, "{names:?}");
-        assert_eq!(
-            names.len(),
-            3,
-            "LogFile and two rolled-over files: {names:?}"
-        );
-        assert!(
-            !names.iter().any(|n| n.ends_with(".1.log.gz")),
-            "the oldest went first: {names:?}"
-        );
+        assert_eq!(names.len(), 3, "LogFile and two rolled-over files: {names:?}");
+        assert!(!names.iter().any(|n| n.ends_with(".1.log.gz")), "the oldest went first: {names:?}");
         // the two kept archives hold the lines just before LogFile's: nothing newer was lost
         let mut kept = String::new();
         for name in &parts {
@@ -1161,29 +1120,13 @@ mod tests {
             std::io::Read::read_to_string(&mut flate2::read::GzDecoder::new(f), &mut kept).unwrap();
         }
         let current = std::fs::read_to_string(dir.join("rustyget.log")).unwrap();
-        let first_current: usize = current
-            .lines()
-            .next()
-            .unwrap()
-            .split("line ")
-            .nth(1)
-            .unwrap()[..3]
-            .parse()
-            .unwrap();
+        let first_current: usize = current.lines().next().unwrap().split("line ").nth(1).unwrap()[..3].parse().unwrap();
         let last_kept = kept
             .lines()
-            .map(|l| {
-                l.split("line ").nth(1).unwrap()[..3]
-                    .parse::<usize>()
-                    .unwrap()
-            })
+            .map(|l| l.split("line ").nth(1).unwrap()[..3].parse::<usize>().unwrap())
             .max()
             .unwrap();
-        assert_eq!(
-            last_kept + 1,
-            first_current,
-            "the newest rolled lines are kept"
-        );
+        assert_eq!(last_kept + 1, first_current, "the newest rolled lines are kept");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1206,9 +1149,6 @@ mod tests {
         inner.file_size = LOG_PART_SIZE * 2;
         inner.file_day = Some(now / 86_400 - 3);
         rotate_if_due(&mut inner, c"/dev/null", now, 0, 10, 7, None);
-        assert!(std::fs::metadata("/dev/null")
-            .unwrap()
-            .file_type()
-            .is_char_device());
+        assert!(std::fs::metadata("/dev/null").unwrap().file_type().is_char_device());
     }
 }

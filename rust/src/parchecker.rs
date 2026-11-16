@@ -429,7 +429,8 @@ impl ActiveStreamingSession {
     }
 
     /// RAM staging or the snapshot queue ran out while many files arrive at
-    /// once: lend it free ParBuffer, up to half of the pool, so later articles are verified from RAM instead of being replayed
+    /// once: lend it free ParBuffer, up to half of the pool, so later
+    /// articles are verified from RAM instead of being replayed
     /// from disk. The refused article itself is replayed when its file
     /// completes. The memory returns with the session's budget.
     fn lend_memory(&self, error: &RepairError) {
@@ -467,11 +468,18 @@ impl ActiveStreamingSession {
         // Cover the whole shortfall at once: every refusal drops data. With
         // many files downloading at once staging holds about one partial slice
         // per file, so loans may take up to half of ParBuffer. They never take
-        // the last quarter (at least one job's start reservation), which stays
-        // free for repair slots and for another job's live PAR to start.
+        // the last quarter, which stays free for repair slots; when the pool
+        // has room for two ordinary jobs, it is at least one ordinary job's
+        // start reservation, so another job's live PAR can still start (a job
+        // with very large slices may reserve more than that).
         let wanted = (required_bytes - limit_bytes).div_ceil(unit);
         let room = (pool / 2).saturating_sub(before) / unit;
-        let keep_free = (pool / 4).max(crate::parlive::JOB_CEILING);
+        let ceiling = crate::parlive::JOB_CEILING;
+        let keep_free = if pool >= 2 * ceiling {
+            (pool / 4).max(ceiling)
+        } else {
+            pool / 4
+        };
         let units = lease.grow_by_units(unit, wanted.min(room), pool.saturating_sub(keep_free));
         if units == 0 {
             return;

@@ -4,30 +4,31 @@
 //! The C++ `FileInfo` keeps one [`ArticleList`] handle. Host operation 43 (and
 //! the article parts of 34, 40, 42, 44 and 45) forward to
 //! [`nzbget_rs_article_host`], so the `article_ptr` values Rust code passes
-//! around are addresses of [`Article`]s. As before, plain fields are guarded by
-//! the download-queue lock and the cache geometry fields are atomics.
+//! around are addresses of [`Article`]s.
+//!
+//! Article operations only ever take a shared reference: the cache segment
+//! (pointer, allocation, offset, size, crc) is atomic because the article
+//! writer attaches it outside the queue lock, and every other field sits behind
+//! the article's own mutex. Changing the list itself (append, clear, restore)
+//! still relies on the download-queue lock, as the C++ code did.
 
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::ptr;
-use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU32, AtomicUsize, Ordering};
+use std::sync::{Mutex, MutexGuard};
 
 pub const AI_UNDEFINED: i32 = 0;
 pub const AI_RUNNING: i32 = 1;
 pub const AI_FINISHED: i32 = 2;
 pub const AI_FAILED: i32 = 3;
 
-/// One article of a file.
-pub struct Article {
+/// The fields of an article other than its cache segment.
+struct Data {
     part_number: i32,
     size: i32,
     status: i32,
     message_id: CString,
     result_filename: Option<CString>,
-    segment_data: usize,
-    segment_alloc_size: i32,
-    segment_offset: AtomicI64,
-    segment_size: AtomicI32,
-    crc: AtomicU32,
     live_par_claim_begin: i64,
     live_par_claim_end: i64,
     // requeues with a message-id borrowed from a duplicate (not persisted)
@@ -47,7 +48,7 @@ pub struct Article {
     dupe_proactive: bool,
 }
 
-impl Default for Article {
+impl Default for Data {
     fn default() -> Self {
         Self {
             part_number: 0,
@@ -55,11 +56,6 @@ impl Default for Article {
             status: AI_UNDEFINED,
             message_id: CString::default(),
             result_filename: None,
-            segment_data: 0,
-            segment_alloc_size: 0,
-            segment_offset: AtomicI64::new(0),
-            segment_size: AtomicI32::new(0),
-            crc: AtomicU32::new(0),
             live_par_claim_begin: -1,
             live_par_claim_end: -1,
             dupe_fallback_round: 0,
@@ -77,6 +73,25 @@ impl Default for Article {
     }
 }
 
+impl Data {
+    fn result_filename_ptr(&self) -> *const c_char {
+        self.result_filename
+            .as_ref()
+            .map_or(ptr::null(), |s| s.as_ptr())
+    }
+}
+
+/// One article of a file.
+#[derive(Default)]
+pub struct Article {
+    segment_data: AtomicUsize,
+    segment_alloc_size: AtomicI32,
+    segment_offset: AtomicI64,
+    segment_size: AtomicI32,
+    crc: AtomicU32,
+    d: Mutex<Data>,
+}
+
 impl Drop for Article {
     fn drop(&mut self) {
         self.discard_segment();
@@ -91,13 +106,28 @@ fn cstring(p: *const c_char) -> CString {
     }
 }
 
+fn opt_cstring(p: *const c_char) -> Option<CString> {
+    (!p.is_null()).then(|| cstring(p))
+}
+
 impl Article {
     fn new(part_number: i32, size: i32, message_id: *const c_char) -> Self {
-        let mut a = Self::default();
-        a.part_number = part_number;
-        a.size = size;
-        a.message_id = cstring(message_id);
+        let a = Self::default();
+        {
+            let mut d = a.lock();
+            d.part_number = part_number;
+            d.size = size;
+            d.message_id = cstring(message_id);
+        }
         a
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Data> {
+        self.d.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn addr(&self) -> usize {
+        self as *const Article as usize
     }
 
     fn segment_offset(&self) -> i64 {
@@ -112,30 +142,24 @@ impl Article {
         self.crc.load(Ordering::SeqCst)
     }
 
-    fn result_filename_ptr(&self) -> *const c_char {
-        self.result_filename
-            .as_ref()
-            .map_or(ptr::null(), |s| s.as_ptr())
-    }
-
-    fn set_result_filename(&mut self, s: *const c_char) {
-        self.result_filename = if s.is_null() { None } else { Some(cstring(s)) };
-    }
-
-    fn attach_segment(&mut self, data: usize, alloc_size: i32, offset: i64, size: i32) {
-        self.discard_segment();
-        self.segment_data = data;
-        self.segment_alloc_size = alloc_size;
+    fn set_geometry(&self, offset: i64, size: i32) {
         self.segment_offset.store(offset, Ordering::SeqCst);
         self.segment_size.store(size, Ordering::SeqCst);
     }
 
-    fn discard_segment(&mut self) {
-        if self.segment_alloc_size != 0 {
-            crate::articledl::cache_free_raw(self.segment_data as *mut u8, self.segment_alloc_size);
+    fn attach_segment(&self, data: usize, alloc_size: i32, offset: i64, size: i32) {
+        self.discard_segment();
+        self.segment_data.store(data, Ordering::SeqCst);
+        self.segment_alloc_size.store(alloc_size, Ordering::SeqCst);
+        self.set_geometry(offset, size);
+    }
+
+    fn discard_segment(&self) {
+        let alloc = self.segment_alloc_size.swap(0, Ordering::SeqCst);
+        let data = self.segment_data.swap(0, Ordering::SeqCst);
+        if alloc != 0 {
+            crate::articledl::cache_free_raw(data as *mut u8, alloc);
         }
-        self.segment_data = 0;
-        self.segment_alloc_size = 0;
     }
 
     /// Fills the summary the Rust side reads for an article (op 43, a1 0/1/7/8).
@@ -146,24 +170,46 @@ impl Article {
         i64s: *mut i64,
         strs: *mut *const c_char,
     ) -> usize {
-        let run = !done && self.status == AI_RUNNING;
+        let d = self.lock();
+        let run = !done && d.status == AI_RUNNING;
         unsafe {
-            *ints = self.part_number;
-            *ints.add(1) = self.size;
-            *ints.add(2) = self.status;
+            *ints = d.part_number;
+            *ints.add(1) = d.size;
+            *ints.add(2) = d.status;
             *ints.add(3) = if run { 0 } else { self.segment_size() };
             *ints.add(4) = if run { 0 } else { self.crc() as i32 };
-            *ints.add(5) = self.dupe_fallback_round;
-            *ints.add(6) = self.dupe_lead_snapshot;
-            *ints.add(7) = self.dupe_next_lead;
-            *ints.add(8) = self.dupe_donor_count;
-            *ints.add(9) = self.dupe_donor_id;
-            *ints.add(10) = c_int::from(self.dupe_proactive);
+            *ints.add(5) = d.dupe_fallback_round;
+            *ints.add(6) = d.dupe_lead_snapshot;
+            *ints.add(7) = d.dupe_next_lead;
+            *ints.add(8) = d.dupe_donor_count;
+            *ints.add(9) = d.dupe_donor_id;
+            *ints.add(10) = c_int::from(d.dupe_proactive);
             *i64s = if run { -1 } else { self.segment_offset() };
-            *strs = self.message_id.as_ptr();
-            *strs.add(1) = self.dupe_original_message_id.as_ptr();
+            *strs = d.message_id.as_ptr();
+            *strs.add(1) = d.dupe_original_message_id.as_ptr();
         }
-        self as *const Article as usize
+        self.addr()
+    }
+
+    /// The range this article is known to cover, for claim validation:
+    /// (1, lo, hi) known, (0, ..) unknown, (-1, ..) malformed.
+    fn known_range(&self) -> (i32, i64, i64) {
+        let d = self.lock();
+        let (lo, hi) = (d.live_par_claim_begin, d.live_par_claim_end);
+        if lo != -1 || hi != -1 {
+            return (if lo >= 0 && hi > lo { 1 } else { -1 }, lo, hi);
+        }
+        // Finished geometry is stable under the queue lock; running geometry
+        // is not a claim, cache attachment can still change it.
+        if d.status != AI_FINISHED {
+            return (0, 0, 0);
+        }
+        let lo = self.segment_offset();
+        let size = self.segment_size();
+        if lo < 0 || size <= 0 || lo > i64::MAX - i64::from(size) {
+            return (-1, 0, 0);
+        }
+        (1, lo, lo + i64::from(size))
     }
 }
 
@@ -174,14 +220,12 @@ pub struct ArticleList {
 }
 
 impl ArticleList {
-    fn at(&mut self, index: usize) -> Option<&mut Article> {
-        self.items.get_mut(index).map(|b| &mut **b)
+    fn at(&self, index: usize) -> Option<&Article> {
+        self.items.get(index).map(|b| &**b)
     }
 
     fn index_of(&self, target: usize) -> Option<usize> {
-        self.items
-            .iter()
-            .position(|a| (&**a as *const Article as usize) == target)
+        self.items.iter().position(|a| a.addr() == target)
     }
 
     /// Admits a live-par claim on `target`'s header range when it keeps the
@@ -189,7 +233,7 @@ impl ArticleList {
     /// `live_par_claim_source_header`). Numeric only: no cache geometry or
     /// strings change. The queue lock serializes admission; a rejected claim
     /// changes nothing.
-    fn claim_source_header(&mut self, target: usize, begin: i64, end: i64) -> bool {
+    fn claim_source_header(&self, target: usize, begin: i64, end: i64) -> bool {
         if begin < 0 || end <= begin {
             return false;
         }
@@ -198,32 +242,16 @@ impl ArticleList {
         };
         {
             let t = &self.items[index];
+            let d = t.lock();
             // An independently fetched replacement cannot prove same-payload identity.
-            if t.live_par_claim_begin != -1
-                || t.live_par_claim_end != -1
+            if d.live_par_claim_begin != -1
+                || d.live_par_claim_end != -1
                 || t.segment_size() != 0
-                || t.status == AI_FINISHED
+                || d.status == AI_FINISHED
             {
                 return false;
             }
         }
-        let range = |a: &Article| -> (i32, i64, i64) {
-            let (lo, hi) = (a.live_par_claim_begin, a.live_par_claim_end);
-            if lo != -1 || hi != -1 {
-                return (if lo >= 0 && hi > lo { 1 } else { -1 }, lo, hi);
-            }
-            // Finished geometry is stable under the queue lock; running
-            // geometry is not a claim, cache attachment can still change it.
-            if a.status != AI_FINISHED {
-                return (0, 0, 0);
-            }
-            let lo = a.segment_offset();
-            let size = a.segment_size();
-            if lo < 0 || size <= 0 || lo > i64::MAX - i64::from(size) {
-                return (-1, 0, 0);
-            }
-            (1, lo, lo + i64::from(size))
-        };
         // Restored ranges were not admitted here: validate the whole chain,
         // including the proposed insertion, before trusting it.
         let mut previous_end = -1i64;
@@ -231,7 +259,7 @@ impl ArticleList {
             let (known, lo, hi) = if i == index {
                 (1, begin, end)
             } else {
-                range(a)
+                a.known_range()
             };
             if known < 0 {
                 return false;
@@ -244,9 +272,9 @@ impl ArticleList {
             }
             previous_end = hi;
         }
-        let t = &mut self.items[index];
-        t.live_par_claim_begin = begin;
-        t.live_par_claim_end = end;
+        let mut d = self.items[index].lock();
+        d.live_par_claim_begin = begin;
+        d.live_par_claim_end = end;
         true
     }
 }
@@ -262,14 +290,6 @@ pub extern "C" fn nzbget_rs_artlist_new() -> *mut ArticleList {
 pub unsafe extern "C" fn nzbget_rs_artlist_free(list: *mut ArticleList) {
     if !list.is_null() {
         drop(unsafe { Box::from_raw(list) });
-    }
-}
-
-unsafe fn str_or_empty<'a>(p: *const c_char) -> &'a [u8] {
-    if p.is_null() {
-        &[]
-    } else {
-        unsafe { CStr::from_ptr(p) }.to_bytes()
     }
 }
 
@@ -306,7 +326,8 @@ unsafe fn str_or_empty<'a>(p: *const c_char) -> &'a [u8] {
 ///
 /// # Safety
 /// `list` and `article` are null or live; output arrays are large enough for
-/// the operation. The caller holds the queue lock where the C++ code did.
+/// the operation. Operations that change the list (11, 12, 101, 105) need the
+/// queue lock, as in the C++ code; article operations lock the article.
 #[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_article_host(
@@ -320,9 +341,19 @@ pub unsafe extern "C" fn nzbget_rs_article_host(
     i64s: *mut i64,
     strs: *mut *const c_char,
 ) -> usize {
-    let list = unsafe { list.as_mut() };
-    let art = unsafe { article.as_mut() };
-    match (op, list, art) {
+    // List changes need exclusive access; everything else only reads the list.
+    let list_ref: Option<&ArticleList> = unsafe { list.as_ref() };
+    let art: Option<&Article> = unsafe { article.cast_const().as_ref() };
+    match op {
+        11 | 12 | 101 | 105 => {
+            let Some(l) = (unsafe { list.as_mut() }) else {
+                return 0;
+            };
+            return unsafe { list_change(l, op, a2, p2, s1, ints, i64s, strs) };
+        }
+        _ => {}
+    }
+    match (op, list_ref, art) {
         (0, Some(l), _) => match l.at(a2 as usize) {
             Some(a) => unsafe { a.fill(false, ints, i64s, strs) },
             None => 0,
@@ -330,7 +361,7 @@ pub unsafe extern "C" fn nzbget_rs_article_host(
         (1, _, Some(a)) => unsafe { a.fill(true, ints, i64s, strs) },
         (7, Some(l), _) | (8, Some(l), _) => {
             let found = if op == 7 {
-                l.items.iter().position(|a| a.status == AI_UNDEFINED)
+                l.items.iter().position(|a| a.lock().status == AI_UNDEFINED)
             } else {
                 l.index_of(article as usize)
             };
@@ -344,107 +375,86 @@ pub unsafe extern "C" fn nzbget_rs_article_host(
         }
         (2, _, Some(a)) => {
             let v = p2 as i32;
+            let mut d = a.lock();
             match a2 {
-                0 => a.status = v,
-                1 => a.dupe_fallback_round = v,
-                2 => a.dupe_donor_id = v,
-                3 => a.dupe_proactive = v != 0,
+                0 => d.status = v,
+                1 => d.dupe_fallback_round = v,
+                2 => d.dupe_donor_id = v,
+                3 => d.dupe_proactive = v != 0,
                 _ => {}
             }
             0
         }
         (3, _, Some(a)) => {
+            let d = a.lock();
             if a2 < 0 {
-                return a.dupe_sources.len();
+                return d.dupe_sources.len();
             }
             let i = a2 as usize;
-            let has = i < a.dupe_source_donors.len();
+            let has = i < d.dupe_source_donors.len();
             unsafe {
                 *ints.add(1) = c_int::from(has);
-                *ints = if has { a.dupe_source_donors[i] } else { 0 };
-                *strs = a.dupe_sources.get(i).map_or(ptr::null(), |s| s.as_ptr());
+                *ints = if has { d.dupe_source_donors[i] } else { 0 };
+                *strs = d.dupe_sources.get(i).map_or(ptr::null(), |s| s.as_ptr());
             }
             0
         }
         (4, _, Some(a)) => {
+            let mut d = a.lock();
             unsafe {
-                a.dupe_lead_snapshot = *ints;
-                a.dupe_next_lead = *ints.add(1);
-                a.dupe_donor_count = *ints.add(2);
-                a.dupe_sources = (0..a2.max(0) as usize)
+                d.dupe_lead_snapshot = *ints;
+                d.dupe_next_lead = *ints.add(1);
+                d.dupe_donor_count = *ints.add(2);
+                d.dupe_sources = (0..a2.max(0) as usize)
                     .map(|i| cstring(*strs.add(i)))
                     .collect();
                 let n = (*ints.add(3)).max(0) as usize;
-                a.dupe_source_donors = (0..n).map(|i| *ints.add(4 + i)).collect();
+                d.dupe_source_donors = (0..n).map(|i| *ints.add(4 + i)).collect();
             }
             0
         }
         (5, _, Some(a)) => {
+            let mut d = a.lock();
             unsafe {
-                a.dupe_expected_offset = *i64s;
-                a.dupe_expected_end = *i64s.add(1);
+                d.dupe_expected_offset = *i64s;
+                d.dupe_expected_end = *i64s.add(1);
             }
             0
         }
         (6, _, Some(a)) => {
+            let mut d = a.lock();
             if a2 == 0 {
-                a.message_id = cstring(s1);
+                d.message_id = cstring(s1);
             } else if a2 == 1 {
-                a.dupe_original_message_id = cstring(s1);
+                d.dupe_original_message_id = cstring(s1);
             }
             0
         }
         (9, _, Some(a)) => {
-            a.status = AI_UNDEFINED;
+            let mut d = a.lock();
+            d.status = AI_UNDEFINED;
             a.crc.store(0, Ordering::SeqCst);
-            a.segment_offset.store(0, Ordering::SeqCst);
-            a.segment_size.store(0, Ordering::SeqCst);
-            a.dupe_expected_offset = -1;
-            a.dupe_expected_end = -1;
+            a.set_geometry(0, 0);
+            d.dupe_expected_offset = -1;
+            d.dupe_expected_end = -1;
             0
         }
         (10, Some(l), _) => {
             let Some(a) = l.at(a2 as usize) else {
                 return 0;
             };
+            let d = a.lock();
             unsafe {
-                *ints = a.status;
+                *ints = d.status;
                 *ints.add(1) = a.segment_size();
                 *ints.add(2) = a.crc() as i32;
-                *ints.add(3) = a.dupe_fallback_round;
-                *ints.add(4) = c_int::from(a.result_filename.is_some());
-                *ints.add(5) = a.part_number;
-                *ints.add(6) = a.size;
+                *ints.add(3) = d.dupe_fallback_round;
+                *ints.add(4) = c_int::from(d.result_filename.is_some());
+                *ints.add(5) = d.part_number;
+                *ints.add(6) = d.size;
                 *i64s = a.segment_offset();
-                *strs = a.message_id.as_ptr();
-                *strs.add(1) = a.dupe_original_message_id.as_ptr();
-            }
-            0
-        }
-        (11, Some(l), _) => {
-            l.items.push(Box::new(Article::new(a2, p2 as i32, s1)));
-            0
-        }
-        (12, Some(l), _) => {
-            let i = a2.max(0) as usize;
-            while l.items.len() <= i {
-                l.items.push(Box::default());
-            }
-            let a = &mut l.items[i];
-            if p2 == 0 {
-                return ((a.part_number << 1) | i32::from(a.result_filename.is_some())) as usize;
-            }
-            unsafe {
-                if *ints >= 2 {
-                    a.segment_offset.store(*i64s, Ordering::SeqCst);
-                    a.segment_size.store(*ints.add(1), Ordering::SeqCst);
-                    a.crc.store(*ints.add(2) as u32, Ordering::SeqCst);
-                }
-                a.dupe_fallback_round = *ints.add(3);
-                if !s1.is_null() {
-                    a.set_result_filename(s1);
-                }
-                a.status = *ints.add(4);
+                *strs = d.message_id.as_ptr();
+                *strs.add(1) = d.dupe_original_message_id.as_ptr();
             }
             0
         }
@@ -452,32 +462,32 @@ pub unsafe extern "C" fn nzbget_rs_article_host(
             let (begin, end) = unsafe { (*i64s, *i64s.add(1)) };
             usize::from(l.claim_source_header(article as usize, begin, end))
         }
-        (14, _, Some(a)) => usize::from(a.live_par_claim_begin >= 0 || a.segment_size() > 0),
+        (14, _, Some(a)) => usize::from(a.lock().live_par_claim_begin >= 0 || a.segment_size() > 0),
         (100, Some(l), _) => l.items.len(),
-        (101, Some(l), _) => {
-            l.items.clear();
-            0
-        }
         (102, Some(l), _) => {
-            for a in &mut l.items {
-                a.status = AI_UNDEFINED;
-                a.result_filename = None;
+            for a in &l.items {
+                let mut d = a.lock();
+                d.status = AI_UNDEFINED;
+                d.result_filename = None;
+                drop(d);
                 a.discard_segment();
             }
             0
         }
         (103, Some(l), _) => {
-            for a in &mut l.items {
-                if a.status == AI_FINISHED {
-                    a.status = AI_FAILED;
+            for a in &l.items {
+                let mut d = a.lock();
+                if d.status == AI_FINISHED {
+                    d.status = AI_FAILED;
                 }
             }
             0
         }
         (104, Some(l), _) => {
             for a in &l.items {
-                if a.status != AI_RUNNING && (p2 != 0 || a.dupe_fallback_round > 0) {
-                    if let Some(f) = &a.result_filename {
+                let d = a.lock();
+                if d.status != AI_RUNNING && (p2 != 0 || d.dupe_fallback_round > 0) {
+                    if let Some(f) = &d.result_filename {
                         use std::os::unix::ffi::OsStrExt;
                         let _ = std::fs::remove_file(std::ffi::OsStr::from_bytes(f.to_bytes()));
                     }
@@ -485,7 +495,113 @@ pub unsafe extern "C" fn nzbget_rs_article_host(
             }
             0
         }
-        (105, Some(l), _) => {
+        (106, Some(l), _) => l.at(a2.max(0) as usize).map_or(0, Article::addr),
+        (110, _, Some(a)) => a.segment_data.load(Ordering::SeqCst),
+        (111, _, Some(a)) => {
+            a.discard_segment();
+            0
+        }
+        (112, _, Some(a)) => {
+            unsafe { a.attach_segment(*i64s.add(1) as usize, *ints, *i64s, *ints.add(1)) };
+            0
+        }
+        (113, _, Some(a)) => {
+            unsafe { a.set_geometry(*i64s, *ints) };
+            0
+        }
+        (114, _, Some(a)) => a.lock().result_filename_ptr() as usize,
+        (115, _, Some(a)) => {
+            let mut d = a.lock();
+            if !s1.is_null() {
+                d.result_filename = opt_cstring(s1);
+            }
+            d.result_filename_ptr() as usize
+        }
+        (116, _, Some(a)) => {
+            a.crc.store(a2 as u32, Ordering::SeqCst);
+            0
+        }
+        (117, _, Some(a)) => a.lock().dupe_fallback_round as usize,
+        (118, _, Some(a)) => a.lock().part_number as usize,
+        (119, _, Some(a)) => {
+            let d = a.lock();
+            unsafe {
+                *i64s = d.dupe_expected_offset;
+                *i64s.add(1) = d.dupe_expected_end;
+            }
+            0
+        }
+        (120, _, Some(a)) => {
+            let d = a.lock();
+            unsafe {
+                *ints = d.status;
+                *ints.add(1) = a.segment_size();
+                *ints.add(2) = a.crc() as i32;
+                *ints.add(3) = d.part_number;
+                *ints.add(4) = d.dupe_fallback_round;
+                *i64s = a.segment_offset();
+                *strs = a.segment_data.load(Ordering::SeqCst) as *const c_char;
+                *strs.add(1) = d.result_filename_ptr();
+            }
+            usize::from(d.status == AI_FINISHED)
+        }
+        (121, _, Some(a)) => {
+            let d = a.lock();
+            unsafe {
+                *i64s = d.live_par_claim_begin;
+                *i64s.add(1) = d.live_par_claim_end;
+            }
+            0
+        }
+        _ => 0,
+    }
+}
+
+/// The list-changing operations (11, 12, 101, 105); see [`nzbget_rs_article_host`].
+#[allow(clippy::too_many_arguments)]
+unsafe fn list_change(
+    l: &mut ArticleList,
+    op: c_int,
+    a2: c_int,
+    p2: usize,
+    s1: *const c_char,
+    ints: *mut c_int,
+    i64s: *mut i64,
+    strs: *mut *const c_char,
+) -> usize {
+    match op {
+        11 => {
+            l.items.push(Box::new(Article::new(a2, p2 as i32, s1)));
+            0
+        }
+        12 => {
+            let i = a2.max(0) as usize;
+            while l.items.len() <= i {
+                l.items.push(Box::default());
+            }
+            let a = &l.items[i];
+            let mut d = a.lock();
+            if p2 == 0 {
+                return ((d.part_number << 1) | i32::from(d.result_filename.is_some())) as usize;
+            }
+            unsafe {
+                if *ints >= 2 {
+                    a.set_geometry(*i64s, *ints.add(1));
+                    a.crc.store(*ints.add(2) as u32, Ordering::SeqCst);
+                }
+                d.dupe_fallback_round = *ints.add(3);
+                if !s1.is_null() {
+                    d.result_filename = opt_cstring(s1);
+                }
+                d.status = *ints.add(4);
+            }
+            0
+        }
+        101 => {
+            l.items.clear();
+            0
+        }
+        105 => {
             let n = a2.max(0) as usize;
             let (parts, sizes) = unsafe { (*i64s as *const c_int, *i64s.add(1) as *const i64) };
             l.items.reserve(n);
@@ -500,70 +616,7 @@ pub unsafe extern "C" fn nzbget_rs_article_host(
             }
             0
         }
-        (106, Some(l), _) => l
-            .items
-            .get(a2.max(0) as usize)
-            .map_or(0, |a| &**a as *const Article as usize),
-        (110, _, Some(a)) => a.segment_data,
-        (111, _, Some(a)) => {
-            a.discard_segment();
-            0
-        }
-        (112, _, Some(a)) => {
-            unsafe { a.attach_segment(*i64s.add(1) as usize, *ints, *i64s, *ints.add(1)) };
-            0
-        }
-        (113, _, Some(a)) => {
-            unsafe {
-                a.segment_offset.store(*i64s, Ordering::SeqCst);
-                a.segment_size.store(*ints, Ordering::SeqCst);
-            }
-            0
-        }
-        (114, _, Some(a)) => a.result_filename_ptr() as usize,
-        (115, _, Some(a)) => {
-            if !s1.is_null() {
-                a.set_result_filename(s1);
-            }
-            a.result_filename_ptr() as usize
-        }
-        (116, _, Some(a)) => {
-            a.crc.store(a2 as u32, Ordering::SeqCst);
-            0
-        }
-        (117, _, Some(a)) => a.dupe_fallback_round as usize,
-        (118, _, Some(a)) => a.part_number as usize,
-        (119, _, Some(a)) => {
-            unsafe {
-                *i64s = a.dupe_expected_offset;
-                *i64s.add(1) = a.dupe_expected_end;
-            }
-            0
-        }
-        (121, _, Some(a)) => {
-            unsafe {
-                *i64s = a.live_par_claim_begin;
-                *i64s.add(1) = a.live_par_claim_end;
-            }
-            0
-        }
-        (120, _, Some(a)) => {
-            unsafe {
-                *ints = a.status;
-                *ints.add(1) = a.segment_size();
-                *ints.add(2) = a.crc() as i32;
-                *ints.add(3) = a.part_number;
-                *ints.add(4) = a.dupe_fallback_round;
-                *i64s = a.segment_offset();
-                *strs = a.segment_data as *const c_char;
-                *strs.add(1) = a.result_filename_ptr();
-            }
-            usize::from(a.status == AI_FINISHED)
-        }
-        _ => {
-            let _ = unsafe { str_or_empty(s1) };
-            0
-        }
+        _ => 0,
     }
 }
 

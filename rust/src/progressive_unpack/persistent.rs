@@ -503,7 +503,7 @@ impl<'a> Run<'a> {
         if !self.holes.is_empty() {
             self.refill(log_cb, is_cancelled)?;
         }
-        self.verify(log_cb, is_cancelled)?;
+        self.verify(is_cancelled)?;
         Ok(summary)
     }
 
@@ -612,14 +612,7 @@ impl<'a> Run<'a> {
     }
 
     /// Every member must verify Ok against its archive checksums.
-    fn verify<F>(
-        &mut self,
-        log_cb: &mut F,
-        is_cancelled: &mut dyn FnMut() -> bool,
-    ) -> Result<(), Step>
-    where
-        F: FnMut(i32, &str),
-    {
+    fn verify(&mut self, is_cancelled: &mut dyn FnMut() -> bool) -> Result<(), Step> {
         let parker = Arc::new(Parker {
             thread: std::thread::current(),
             woken: AtomicBool::new(false),
@@ -643,13 +636,9 @@ impl<'a> Run<'a> {
             };
             match verdict {
                 Ok(Verdict::Ok { .. }) => {}
-                Ok(bad @ (Verdict::Bad { .. } | Verdict::PartBad { .. })) => {
-                    let line = format!("Unrar: verification failed: {bad:?}");
-                    log_cb(1, &line);
-                    return Err(Step::Fail(Failure::Checksum(format!(" ({bad:?})"))));
-                }
-                // Holes left, or no stored checksum to verify against: the progressive path
-                // decides as before.
+                // A failed check (bad bytes, or a wrong password on an encrypted member),
+                // holes left, or no stored checksum: the progressive path decides and reports
+                // exactly as before.
                 Ok(other) => {
                     return Err(Step::Fallback(format!("verification: {other:?}")));
                 }

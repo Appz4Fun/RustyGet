@@ -3596,3 +3596,27 @@ fn publishing_never_follows_a_symlinked_folder_in_the_destination() {
     assert!(!elsewhere.join("movie.mkv").exists());
     assert!(!t.out().join(persistent::STATE_DIR).exists());
 }
+
+#[test]
+fn a_wrong_password_after_a_refill_fails_as_the_progressive_path_does() {
+    let t = TestDir::new("persist_wrongpw");
+    let data = pattern(320_000 - 5);
+    let (vols, offs) = rar5_aes_data_volumes("movie.mkv", &data, 80_000, "pw");
+    let first = write_set(&t.dl(), &vols);
+    let v = t.dl().join(volume_name(1, vols.len()));
+    let p = offs[1] as u64 + 10_007;
+    let mut dmg = vols[1].clone();
+    dmg[p as usize..p as usize + 2_000].fill(0);
+    std::fs::write(&v, &dmg).unwrap();
+    let damaged = Damaged {
+        holes: vec![(v.clone(), vec![(p, 2_000)])],
+        repair: vec![(v, vols[1].clone())],
+        handed: false,
+    };
+    let (r, log) = run_downloading_pw(&first, &t.out(), "wrong", damaged, vols.len() as u64);
+    assert!(
+        matches!(r, Err(Error::Failed(Failure::EncryptedChecksum(_)))),
+        "{log:?}"
+    );
+    assert!(!t.out().join(persistent::STATE_DIR).exists());
+}

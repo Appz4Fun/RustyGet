@@ -429,6 +429,35 @@ pub fn middle_end(n: usize) -> usize {
     }
 }
 
+/// Where the first member's data ends in a re-RAR's last volume, read from
+/// the first bytes of its first volume (`first`) and of its last volume
+/// (`last`; the same bytes when `single`, a one-volume archive). A re-RAR
+/// rewrites every member header, so a header in the middle of a volume
+/// differs too: the middle articles lend like a twin's only while one member
+/// runs through every volume, from the first volume's start into the last.
+/// Bytes after this offset (other members, a recovery record, the end
+/// header) must count as differing. None when that is not shown.
+pub fn rerar_member_end(first: &[u8], last: &[u8], single: bool) -> Option<u64> {
+    let map = |head: &[u8]| {
+        if !head.starts_with(b"Rar!") {
+            return None;
+        }
+        MemberMap::from_volume(head, MapOptions::new("head.rar")).ok()
+    };
+    let f = map(first)?;
+    let m = f.members.first()?;
+    if !f.first_volume || m.split_before || m.is_dir {
+        return None;
+    }
+    if single {
+        return (!m.split_after).then_some(m.packed.end);
+    }
+    let l = map(last)?;
+    let n = l.members.first()?;
+    (m.split_after && n.split_before && !n.split_after && n.raw_name == m.raw_name)
+        .then_some(n.packed.end)
+}
+
 /// Most article pairs read back from a volume's end to measure a re-RAR's
 /// tail; a tail longer than this is not trusted as a re-RAR.
 pub const MAX_TAIL_PROBE: usize = 24;
@@ -939,6 +968,49 @@ mod tests {
         assert_eq!(creation_of(&fixture("rerar-a.part1.rar")), None);
         assert_eq!(creation_of(&fixture("plain.7z")), None);
         assert_eq!(same_creation(None, None), None);
+    }
+
+    #[test]
+    fn rerar_lends_only_while_one_member_runs_through_the_set() {
+        // one member: it runs from part 1 into part 3, ending before the
+        // last volume's recovery record and end header
+        let end = rerar_member_end(
+            &fixture("rerar-a.part1.rar"),
+            &fixture("rerar-a.part3.rar"),
+            false,
+        )
+        .expect("one member");
+        assert!(end > 0 && end < 8624);
+        // video.mkv then info.nfo: the video runs through, the nfo header
+        // (it differs in a re-RAR) sits after its end in part 3
+        let end = rerar_member_end(&fixture("mm.part1.head"), &fixture("mm.part3.head"), false)
+            .expect("the video runs through");
+        assert!(
+            end <= 8551,
+            "nfo header bytes 8551.. differ in a re-RAR: {end}"
+        );
+        // info.nfo first: a member header lies inside part 1
+        assert_eq!(
+            rerar_member_end(
+                &fixture("nfo-first.part1.head"),
+                &fixture("nfo-first.part3.head"),
+                false
+            ),
+            None
+        );
+        // the last volume must hold the end of the first volume's member
+        assert_eq!(
+            rerar_member_end(
+                &fixture("rerar-a.part1.rar"),
+                &fixture("rerar-a.part2.rar"),
+                false
+            ),
+            None
+        );
+        assert_eq!(
+            rerar_member_end(&fixture("plain.7z"), &fixture("plain.7z"), true),
+            None
+        );
     }
 
     #[test]

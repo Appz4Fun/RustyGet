@@ -18,3 +18,11 @@ The video itself is not kept.
 
 rar 7.00 cannot write RAR4 (`-ma4` was removed), so RAR4 salts are covered by
 zipfast's own tests only.
+
+Two packings of several members, same `rar a -m0 -v20k -ma5`, first 4096
+bytes of a volume kept (`info.nfo` is `release notes\n` 40 times):
+
+| Files | Packed |
+| --- | --- |
+| `mm.part{1,3}.head` | `video.mkv info.nfo`: in a re-RAR (+123 s) the nfo header at bytes 8551.. of part 3 differs |
+| `nfo-first.part{1,3}.head` | `info.nfo video.mkv`: a member header sits inside part 1 |

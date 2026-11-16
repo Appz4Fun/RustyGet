@@ -1933,87 +1933,122 @@ fn run_twin_job(token: usize, qdir: &[u8]) {
         }
         let mut tail_note = String::new();
         if let crate::twinfields::SampleVerdict::Rerar { .. } = verdict {
-            // How many articles at a volume's end differ: the last, and those
-            // of a recovery record before it. Measured on a sampled file whose
-            // last article differs (a repacked volume, not a sample or other
-            // file packed once), the largest, cut into three or more articles,
-            // walking back until one is equal. With no such file it cannot be
-            // measured, and the copy is not trusted as a re-RAR.
-            let mut tail: u32 = 1;
-            let mut settled = false;
-            // The tail is measured on a largest file (a recovery record is a
-            // share of its volume, so a full volume has the longest), whose
-            // last article must be read and differ: a repacked volume.
-            let largest = (0..primary.len()).max_by_key(|&f| (p_counts[f], std::cmp::Reverse(f)));
-            let measured = largest.filter(|&f| {
-                if p_counts[f] < 3 {
-                    return false;
-                }
-                if tail_files.contains(&f) {
-                    return true;
-                }
-                let last = p_counts[f] - 1;
-                match (fetch_part(&primary[f], last), fetch_part(&dupe[f], last)) {
+            // Whether article `k` of file `f` differs between the copies;
+            // None when it could not be read now.
+            let pair_at = |f: usize, k: usize| -> Option<bool> {
+                match (fetch_part(&primary[f], k), fetch_part(&dupe[f], k)) {
                     (Some(a), Some(b)) if a.success && b.success => {
-                        crate::twinfields::pair_differs(
+                        Some(crate::twinfields::pair_differs(
                             &crate::twinfields::SamplePair {
                                 file: f,
-                                seg_a: last,
-                                seg_b: last,
+                                seg_a: k,
+                                seg_b: k,
                                 header: true,
                                 tail: false,
                             },
                             (a.offset, a.file_size, &a.data),
                             (b.offset, b.file_size, &b.data),
-                        )
+                        ))
                     }
-                    _ => false,
+                    _ => None,
                 }
-            });
-            if measured.is_none() {
-                verdict = crate::twinfields::SampleVerdict::Alt;
-            }
-            if let Some(f) = measured {
-                let n = p_counts[f];
-                let lowest = n
-                    .saturating_sub(1 + crate::twinfields::MAX_TAIL_PROBE)
-                    .max(1);
-                for k in (lowest..n - 1).rev() {
-                    if is_stopped() {
-                        return;
-                    }
-                    let equal = match (fetch_part(&primary[f], k), fetch_part(&dupe[f], k)) {
-                        (Some(a), Some(b)) if a.success && b.success => {
-                            !crate::twinfields::pair_differs(
-                                &crate::twinfields::SamplePair {
-                                    file: f,
-                                    seg_a: k,
-                                    seg_b: k,
-                                    header: true,
-                                    tail: false,
-                                },
-                                (a.offset, a.file_size, &a.data),
-                                (b.offset, b.file_size, &b.data),
-                            )
-                        }
-                        // unread: counted as differing, never lent
-                        _ => false,
+            };
+            let mut unread = false;
+            let mut proven = true;
+            // How many articles at a volume's end differ: the last, and those
+            // of a recovery record before it. Measured on a largest file (a
+            // recovery record is a share of its volume, so a full volume has
+            // the longest) cut into three or more articles, whose last article
+            // differs (a repacked volume, not a file packed once), walking
+            // back until one is equal.
+            let mut tail: u32 = 1;
+            let largest = (0..primary.len())
+                .max_by_key(|&f| (p_counts[f], std::cmp::Reverse(f)))
+                .filter(|&f| p_counts[f] >= 3);
+            match largest {
+                None => proven = false,
+                Some(f) => {
+                    let n = p_counts[f];
+                    let last_differs = if tail_files.contains(&f) {
+                        Some(true)
+                    } else {
+                        pair_at(f, n - 1)
                     };
-                    if equal {
-                        settled = true;
-                        break;
+                    match last_differs {
+                        None => unread = true,
+                        Some(false) => proven = false,
+                        Some(true) => {
+                            let lowest = n
+                                .saturating_sub(1 + crate::twinfields::MAX_TAIL_PROBE)
+                                .max(1);
+                            let mut settled = false;
+                            for k in (lowest..n - 1).rev() {
+                                if is_stopped() {
+                                    return;
+                                }
+                                match pair_at(f, k) {
+                                    None => {
+                                        unread = true;
+                                        break;
+                                    }
+                                    Some(false) => {
+                                        settled = true;
+                                        break;
+                                    }
+                                    Some(true) => tail += 1,
+                                }
+                            }
+                            if !unread && !settled && lowest > 1 {
+                                // more differs at the end than a recovery
+                                // record explains
+                                proven = false;
+                            }
+                        }
                     }
-                    tail += 1;
-                }
-                if !settled && lowest > 1 {
-                    // more differs at the end than a recovery record
-                    // explains: not trusted as a re-RAR
-                    verdict = crate::twinfields::SampleVerdict::Alt;
                 }
             }
-            if let crate::twinfields::SampleVerdict::Rerar { .. } = verdict {
+            // A re-RAR rewrites every member header: only while one member
+            // runs from the first volume into the last does nothing else
+            // differ mid-volume, and what follows its end in the last volume
+            // (other members, a quick-open record, the end header) counts as
+            // tail there.
+            if proven && !unread && !is_stopped() {
+                let last_f = primary.len() - 1;
+                match (fetch_part(&primary[0], 0), fetch_part(&primary[last_f], 0)) {
+                    (Some(a), Some(b)) if a.success && b.success => {
+                        let end =
+                            crate::twinfields::rerar_member_end(&a.data, &b.data, last_f == 0);
+                        let part = b.data.len() as u64;
+                        match end {
+                            Some(end) if part > 0 && b.offset == 0 => {
+                                let from = usize::try_from(end / part).unwrap_or(usize::MAX);
+                                let last_tail = p_counts[last_f].saturating_sub(from).max(1);
+                                tail = tail.max(u32::try_from(last_tail).unwrap_or(u32::MAX));
+                            }
+                            _ => proven = false,
+                        }
+                    }
+                    _ => unread = true,
+                }
+            }
+            if is_stopped() {
+                return;
+            }
+            if unread {
+                // ask again later, then give up as unreadable
+                if count_sample_attempt(spec.nzb_id, spec.primary_id) >= MAX_ATTEMPTS
+                    && store_sample(b"none", None)
+                {
+                    unreg.stored = true;
+                }
+                return;
+            }
+            if proven {
                 verdict = crate::twinfields::SampleVerdict::Rerar { tail };
                 tail_note = format!("; the last {tail} article(s) of a volume differ");
+            } else {
+                // not shown to be the same files packed again: an alt
+                verdict = crate::twinfields::SampleVerdict::Alt;
             }
         }
         let note = format!(
@@ -2029,6 +2064,9 @@ fn run_twin_job(token: usize, qdir: &[u8]) {
             } else {
                 "; the posts use other article sizes"
             };
+        if is_stopped() {
+            return;
+        }
         if store_sample(&verdict.param(), Some(&note)) {
             unreg.stored = true;
             twin_coord()

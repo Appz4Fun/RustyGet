@@ -73,6 +73,12 @@ where
             log_cb(4, "Unrar: All OK");
             Outcome::Done(Ok(summary))
         }
+        Err(Step::GaveUp) => {
+            remove_state_root(&plan.root);
+            Outcome::Done(Err(Error::Failed(Failure::Damaged(
+                "the damaged volumes were not repaired".into(),
+            ))))
+        }
         Err(Step::Fail(f)) => {
             // Everything this run wrote is in its own state directory, unpublished.
             remove_state_root(&plan.root);
@@ -95,6 +101,8 @@ where
 enum Step {
     Fallback(String),
     Fail(Failure),
+    /// The repair was given up: intact members are published, the job fails as damaged.
+    GaveUp,
 }
 
 /// Everything decided before the session starts.
@@ -501,7 +509,15 @@ impl<'a> Run<'a> {
         }
         drop(session);
         if !self.holes.is_empty() {
-            self.refill(log_cb, is_cancelled)?;
+            match self.refill(log_cb, is_cancelled) {
+                Err(Step::GaveUp) => {
+                    self.publish_intact(is_cancelled).map_err(Step::Fallback)?;
+                    return Err(Step::Fail(Failure::Damaged(
+                        "the damaged volumes were not repaired".into(),
+                    )));
+                }
+                other => other?,
+            }
         }
         self.verify(is_cancelled)?;
         Ok(summary)
@@ -560,12 +576,13 @@ impl<'a> Run<'a> {
             cb(false);
         }
         if !repaired {
-            // Repair given up: the progressive path places the intact members and reports the
-            // damage as before (its wait_repaired answers again at once).
+            // Repair given up: the intact members are placed and the damage reported, as the
+            // progressive path does (a fallback would not see the holes any more: the feed
+            // forgets them when it gives up).
             return Err(if is_cancelled() {
                 Step::Fail(Failure::Canceled)
             } else {
-                Step::Fallback("the damaged volumes were not repaired".into())
+                Step::GaveUp
             });
         }
         let mut volumes: Vec<u32> = self
@@ -591,10 +608,7 @@ impl<'a> Run<'a> {
                 };
                 let path = self.plan.dir.join(name);
                 let mut f = std::fs::File::open(&path).map_err(|e| {
-                    Step::Fail(Failure::Damaged(format!(
-                        "repaired volume {}: {e}",
-                        path.display()
-                    )))
+                    Step::Fallback(format!("repaired volume {}: {e}", path.display()))
                 })?;
                 let len = f.metadata().map(|m| m.len()).unwrap_or(0);
                 // A limit or any other refusal here is zipfast's, not damage: the progressive
@@ -613,28 +627,8 @@ impl<'a> Run<'a> {
 
     /// Every member must verify Ok against its archive checksums.
     fn verify(&mut self, is_cancelled: &mut dyn FnMut() -> bool) -> Result<(), Step> {
-        let parker = Arc::new(Parker {
-            thread: std::thread::current(),
-            woken: AtomicBool::new(false),
-        });
-        let waker = Waker::from(parker.clone());
-        let mut cx = Context::from_waker(&waker);
-        for (_, file, _) in self.handles.iter_mut() {
-            let verdict = loop {
-                if is_cancelled() {
-                    return Err(Step::Fail(Failure::Canceled));
-                }
-                parker.woken.store(false, Ordering::Release);
-                match file.poll_verify(&mut cx) {
-                    Poll::Ready(r) => break r,
-                    Poll::Pending => {
-                        if !parker.woken.load(Ordering::Acquire) {
-                            std::thread::park_timeout(PARK_SLICE);
-                        }
-                    }
-                }
-            };
-            match verdict {
+        for i in 0..self.handles.len() {
+            match self.verify_one(i, is_cancelled)? {
                 Ok(Verdict::Ok { .. }) => {}
                 // A failed check (bad bytes, or a wrong password on an encrypted member),
                 // holes left, or no stored checksum: the progressive path decides and reports
@@ -650,9 +644,73 @@ impl<'a> Run<'a> {
         Ok(())
     }
 
+    /// Polls member `i`'s verification to its verdict.
+    fn verify_one(
+        &mut self,
+        i: usize,
+        is_cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<zipfast::partial::PartialResult<Verdict>, Step> {
+        let parker = Arc::new(Parker {
+            thread: std::thread::current(),
+            woken: AtomicBool::new(false),
+        });
+        let waker = Waker::from(parker.clone());
+        let mut cx = Context::from_waker(&waker);
+        let file = &mut self.handles[i].1;
+        loop {
+            if is_cancelled() {
+                return Err(Step::Fail(Failure::Canceled));
+            }
+            parker.woken.store(false, Ordering::Release);
+            match file.poll_verify(&mut cx) {
+                Poll::Ready(r) => return Ok(r),
+                Poll::Pending => {
+                    if !parker.woken.load(Ordering::Acquire) {
+                        std::thread::park_timeout(PARK_SLICE);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The repair was given up: publishes the members that had no hole and verify (or have no
+    /// checksum to verify against), as the progressive path places them; the rest is dropped
+    /// with the state.
+    fn publish_intact(&mut self, is_cancelled: &mut dyn FnMut() -> bool) -> Result<(), String> {
+        let mut keep = std::collections::HashSet::new();
+        for i in 0..self.handles.len() {
+            let key = self.handles[i].0.clone();
+            if self.holes.iter().any(|h| h.member == key) {
+                continue;
+            }
+            let intact = match self.verify_one(i, is_cancelled) {
+                Ok(Ok(Verdict::Ok { .. })) => true,
+                Ok(Ok(Verdict::Incomplete { holes, .. })) => holes.is_empty(),
+                _ => false,
+            };
+            if intact {
+                let m = &self.handles[i].2;
+                if let Ok(rel) =
+                    zipfast::path::sanitize(&String::from_utf8_lossy(&m.name), m.meta.windows_names)
+                {
+                    keep.insert(rel);
+                }
+            }
+        }
+        self.publish_where(Some(&keep))
+    }
+
     /// Every member verified: moves the outputs from the stage into the destination (with the
     /// copy path's modes and folder modes) and drops the partial state.
     fn publish(&mut self) -> Result<(), String> {
+        self.publish_where(None)
+    }
+
+    /// Publishes the stage's files (only those in `keep`, when given).
+    fn publish_where(
+        &mut self,
+        keep: Option<&std::collections::HashSet<PathBuf>>,
+    ) -> Result<(), String> {
         let members: Vec<Member> = self.handles.drain(..).map(|(_, _, m)| m).collect();
         self.anchors = None;
         let stage = self.plan.stage.clone();
@@ -673,6 +731,9 @@ impl<'a> Run<'a> {
             let rel = from
                 .strip_prefix(&stage)
                 .map_err(|e| format!("stage: {e}"))?;
+            if keep.is_some_and(|k| !k.contains(rel)) {
+                continue;
+            }
             let member = members.iter().find(|m| {
                 zipfast::path::sanitize(&String::from_utf8_lossy(&m.name), m.meta.windows_names)
                     .is_ok_and(|r| r == rel)

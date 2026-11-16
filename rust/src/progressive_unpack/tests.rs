@@ -3680,3 +3680,106 @@ fn an_unrepaired_set_places_its_intact_members_as_the_progressive_path_does() {
     assert!(!t.out().join("a.bin").exists());
     assert!(!t.out().join(persistent::STATE_DIR).exists());
 }
+
+/// Like DirectUnpackFeed: direct_unpack_abandon clears held + holes, so after a give-up a
+/// damaged volume is answered as Ready with no holes.
+struct AbandonFeed {
+    inner: Damaged,
+    given_up: bool,
+    expected: u64,
+    waits: std::sync::Arc<std::sync::atomic::AtomicU32>,
+}
+impl VolumeFeed for AbandonFeed {
+    fn volume(&mut self, path: &Path) -> VolumeView {
+        if self.given_up {
+            return if path.is_file() {
+                VolumeView::Ready { holes: Vec::new() }
+            } else {
+                VolumeView::Missing
+            };
+        }
+        self.inner.volume(path)
+    }
+    fn wait_repaired(&mut self, _c: &mut dyn FnMut() -> bool) -> bool {
+        self.waits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.given_up = true;
+        false
+    }
+    fn expected_volumes(&self) -> u64 {
+        self.expected
+    }
+}
+
+fn abandon_case(
+    tag: &str,
+    expected: u64,
+) -> (
+    Result<zipfast::extract::Summary, Error>,
+    Vec<String>,
+    TestDir,
+    Vec<u8>,
+    u32,
+) {
+    let t = TestDir::new(tag);
+    let a = pattern(200_000);
+    let b: Vec<u8> = pattern(50_000).iter().map(|x| x ^ 0x5a).collect();
+    let mut v = SIG.to_vec();
+    v.extend(main_block(false, None));
+    let fa = file_block(
+        "a.bin",
+        a.len() as u64,
+        &a,
+        crc32fast::hash(&a),
+        false,
+        false,
+    );
+    let a_off = v.len() + fa.len() - a.len();
+    v.extend(fa);
+    v.extend(file_block(
+        "b.bin",
+        b.len() as u64,
+        &b,
+        crc32fast::hash(&b),
+        false,
+        false,
+    ));
+    v.extend(end_block(false));
+    let first = t.dl().join("set.rar");
+    let mut dmg = v.clone();
+    dmg[a_off + 50_000..a_off + 60_000].fill(0);
+    std::fs::write(&first, &dmg).unwrap();
+    let waits = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let feed = AbandonFeed {
+        inner: Damaged {
+            holes: vec![(first.clone(), vec![((a_off + 50_000) as u64, 10_000)])],
+            repair: Vec::new(),
+            handed: false,
+        },
+        given_up: false,
+        expected,
+        waits: waits.clone(),
+    };
+    let (r, log) = run(&first, &t.out(), Box::new(feed));
+    let n = waits.load(std::sync::atomic::Ordering::SeqCst);
+    (r, log, t, b, n)
+}
+
+#[test]
+fn a_given_up_repair_ends_as_the_progressive_path_does() {
+    // expected 0: the persistent path refuses (volume count unknown), progressive path alone.
+    let (r0, log0, t0, b, _) = abandon_case("persist_abandon_ref", 0);
+    let (r1, log1, t1, _, _) = abandon_case("persist_abandon", 1);
+    assert!(
+        matches!(r0, Err(Error::Failed(Failure::Damaged(_)))),
+        "{log0:?}"
+    );
+    assert!(
+        matches!(r1, Err(Error::Failed(Failure::Damaged(_)))),
+        "{log1:?}"
+    );
+    assert!(persistent(&log1), "{log1:?}");
+    assert_eq!(std::fs::read(t0.out().join("b.bin")).unwrap(), b);
+    assert_eq!(std::fs::read(t1.out().join("b.bin")).unwrap(), b);
+    assert!(!t1.out().join("a.bin").exists());
+    assert!(!t1.out().join(persistent::STATE_DIR).exists());
+}

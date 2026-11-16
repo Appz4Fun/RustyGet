@@ -752,7 +752,9 @@ pub fn rar_last_volume_key(head: &[u8], multi_volume: bool, min_size: u64) -> Op
         .iter()
         .filter(|m| {
             !m.is_dir
-                && crate::streamrepair::is_stream_eligible(&m.raw_name)
+                && crate::streamrepair::is_stream_eligible(
+                    m.name.as_deref().map_or(&m.raw_name[..], str::as_bytes),
+                )
                 && if multi_volume {
                     m.split_before
                 } else {
@@ -944,7 +946,8 @@ mod tests {
         // read as one whole volume, a file whose data runs past the head counts
         assert_eq!(rar_last_volume_key(&head, false, 0), Some(mm));
         // a lone nfo whose data ends inside the head never stands for the
-        // video whose header follows it (its first part records no CRC here)
+        // video whose header follows it (the name filter drops it; the
+        // data-past-head rule has no fixture of its own, as no rar is at hand)
         let nfo_head = fixture("nfo-first.part1.head");
         let nfo = MemberMap::from_volume(&nfo_head, MapOptions::new("x.rar")).unwrap();
         assert!(

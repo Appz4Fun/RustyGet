@@ -337,10 +337,14 @@ pub fn inner_key_copy(
         let measured = first_len
             .saturating_mul(vols.len() as u64 - 1)
             .saturating_add(last_len);
-        let listed: u64 = set
-            .members
+        // counted over the whole copy (but par2 and samples), so a 2CD
+        // release posted as two sets keys neither CD
+        let listed: u64 = files
             .iter()
-            .filter_map(|&i| files.get(i as usize))
+            .filter(|f| {
+                let n = base_name(&f.name).to_ascii_lowercase();
+                !n.ends_with(b".par2") && !n.windows(6).any(|w| w == b"sample")
+            })
             .map(|f| u64::try_from(f.bytes).unwrap_or(0))
             .sum();
         let set_bytes = measured.max(listed);
@@ -697,8 +701,32 @@ mod tests {
         let mut no_bytes = a.clone();
         no_bytes.iter_mut().for_each(|f| f.bytes = 0);
         assert_eq!(inner_key_copy(&no_bytes, &mem), Some(video));
-        // a copy lacking its last volume would key from a middle volume
-        assert_eq!(inner_key_copy(&a[..2], &mem), None);
+        // a copy lacking its real last volume keys nothing from a full-size
+        // "last" one: here the final volume padded to full size, in place of
+        // part 2, would otherwise give the video's key
+        let mut padded = fixture("rerar-a.part3.rar");
+        padded.resize(20480, 0);
+        let mut short = copy(
+            &mut mem,
+            "s1",
+            "rel.part1.rar",
+            fixture("rerar-a.part1.rar"),
+            4000,
+        );
+        short.extend(copy(&mut mem, "s2", "rel.part2.rar", padded, 4000));
+        assert_eq!(inner_key_copy(&short, &mem), None);
+        // a second set as large as the first (CD2 posted on its own) leaves
+        // the video under half the copy: no key
+        let mut two_sets = a.clone();
+        two_sets.extend(copy(
+            &mut mem,
+            "d",
+            "rel-cd2.rar",
+            fixture("rerar-c.part1.rar"),
+            4000,
+        ));
+        two_sets.last_mut().unwrap().bytes = 60_000;
+        assert_eq!(inner_key_copy(&two_sets, &mem), None);
     }
 
     #[test]

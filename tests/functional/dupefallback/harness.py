@@ -6179,12 +6179,12 @@ def _fleet_copy(daemon, tag, data_name, size, first_body, par_data, alive_count=
 
 
 def scenario_fleetkindorder(daemon, t):
-    """appendfleet orders copies by kind before health: TWINs first (two
-    copies whose par2 sets list the same file, the healthier one queued), then
-    the ALT in store-mode rar (borrowable), then the ALT in compressed rar
-    (unborrowable), although both ALTs are healthier than either twin. Each
-    added copy keeps its kind in DupeCopyKind. (Which copy is queued when the
-    reply is sent is timing: the tiny twinB may already have failed over.)"""
+    """appendfleet orders copies by health tier first, then kind (97.5%+
+    alive first): the whole ALT in store-mode rar (borrowable), then the whole
+    ALT in compressed rar (unborrowable), then the TWINs (two copies whose par2
+    sets list the same file), which are under 97.5% alive, the healthier one
+    first. Each added copy keeps its kind in DupeCopyKind. (Which copy is
+    queued when the reply is sent is timing.)"""
     daemon.fake_nntp.alive = set()
     same = _payload(400_000, 7001)
     api = daemon.wait_ready()
@@ -6200,19 +6200,57 @@ def scenario_fleetkindorder(daemon, t):
         params = {p['Name']: p['Value'] for p in g.get('Parameters', [])}
         kinds[name] = params.get('DupeCopyKind')
     chosen = next((m['Name'] for m in reply['Members'] if m['Status'] == 'QUEUED'), None)
-    ok = (order == ['Show.S01E01.twinB', 'Show.S01E01.twinA', 'Show.S01E01.store', 'Show.S01E01.compressed']
+    ok = (order == ['Show.S01E01.store', 'Show.S01E01.compressed', 'Show.S01E01.twinB', 'Show.S01E01.twinA']
           and kinds.get('Show.S01E01.twinA') == 'twin' and kinds.get('Show.S01E01.store') == 'borrowable'
           and kinds.get('Show.S01E01.compressed') == 'unborrowable')
     return ('fleetkindorder', ok, 'order=%s chosen=%s kinds=%s' % (order, chosen, kinds))
+
+
+def _fleet_kinds(api, key):
+    return {g['NZBName']: {p['Name']: p['Value'] for p in g.get('Parameters', [])}.get('DupeCopyKind')
+            for g in api.listgroups() + api.history() if g.get('DupeKey') == key}
+
+
+def scenario_fleetkindsingle(daemon, t):
+    """appendfleet with one copy (store-mode rar): it is probed too, so it
+    gets its kind (borrowable) instead of none."""
+    daemon.fake_nntp.alive = set()
+    api = daemon.wait_ready()
+    reply = _fleet(daemon, [
+        ('Show.S01E01.store', _fleet_copy(daemon, 'ks', 'b.rar', 410_000, _rar4_head(0x30), _payload(410_000, 7101)))],
+        key='fleet:kindsingle')
+    kinds = _fleet_kinds(api, 'fleet:kindsingle')
+    ok = reply['Chosen'] > 0 and kinds.get('Show.S01E01.store') == 'borrowable'
+    return ('fleetkindsingle', ok, 'reply=%s kinds=%s' % (reply, kinds))
+
+
+def scenario_fleetkindlater(daemon, t):
+    """A backup sent in a later fleet is classed against the copy already
+    queued before it downloads: twinB (the same post as the queued twinA)
+    is added as a twin, and twinA, queued alone as borrowable, becomes a twin."""
+    daemon.fake_nntp.alive = set()
+    same = _payload(400_000, 7102)
+    api = daemon.wait_ready()
+    a = _fleet(daemon, [
+        ('Show.S01E01.twinA', _fleet_copy(daemon, 'la', 'c.rar', 400_000, _rar4_head(0x30), same))],
+        key='fleet:kindlater')
+    first = _fleet_kinds(api, 'fleet:kindlater')
+    b = _fleet(daemon, [
+        ('Show.S01E01.twinB', _fleet_copy(daemon, 'lb', 'c.rar', 400_000, _rar4_head(0x30), same))],
+        key='fleet:kindlater')
+    kinds = _fleet_kinds(api, 'fleet:kindlater')
+    ok = (first.get('Show.S01E01.twinA') == 'borrowable' and kinds.get('Show.S01E01.twinB') == 'twin'
+          and kinds.get('Show.S01E01.twinA') == 'twin')
+    return ('fleetkindlater', ok, 'first=%s kinds=%s a=%s b=%s' % (first, kinds, a, b))
 
 
 def scenario_fleetencryptedlast(daemon, t):
     """appendfleet: re-uploads of one release, some with encrypted rar headers.
     All have the same file count and size, but an encrypted re-upload has other
     bytes (a fresh salt), so its par2 set lists other hashes: same size is not a
-    twin. The two plain re-uploads, whose par2 sets match, are the TWINs and the
-    healthier one is queued; the encrypted copies come last (unborrowable),
-    although one of them is the healthiest."""
+    twin. The two whole plain re-uploads, whose par2 sets match, are the TWINs
+    and go first; the whole encrypted copy comes next (unborrowable), and the
+    encrypted copy under 97.5% alive last."""
     daemon.fake_nntp.alive = set()
     same = _payload(400_000, 7101)
     enc = _rar4_head(0x30, main_flags=0x80)   # main header flag: encrypted headers
@@ -6220,16 +6258,16 @@ def scenario_fleetencryptedlast(daemon, t):
     reply = _fleet(daemon, [
         ('Show.S01E01.enc1', _fleet_copy(daemon, 'e1', 'a.rar', 400_000, enc, _payload(400_000, 7102))),
         ('Show.S01E01.enc2', _fleet_copy(daemon, 'e2', 'b.rar', 400_000, enc, _payload(400_000, 7103), 38)),
-        ('Show.S01E01.plainA', _fleet_copy(daemon, 'pa', 'c.rar', 400_000, _rar4_head(0x30), same, 34)),
-        ('Show.S01E01.plainB', _fleet_copy(daemon, 'pb', 'd.rar', 400_000, _rar4_head(0x30), same, 36))],
+        ('Show.S01E01.plainA', _fleet_copy(daemon, 'pa', 'c.rar', 400_000, _rar4_head(0x30), same)),
+        ('Show.S01E01.plainB', _fleet_copy(daemon, 'pb', 'd.rar', 400_000, _rar4_head(0x30), same))],
         key='fleet:enc')
     order = [m['Name'] for m in sorted(reply['Members'], key=lambda m: m['Rank'])]
     items = {g['NZBName']: g for g in api.listgroups() + api.history() if g.get('DupeKey') == 'fleet:enc'}
     kinds = {name: {p['Name']: p['Value'] for p in g.get('Parameters', [])}.get('DupeCopyKind')
              for name, g in items.items()}
     chosen = next((m['Name'] for m in reply['Members'] if m['Status'] == 'QUEUED'), None)
-    ok = (order[:2] == ['Show.S01E01.plainB', 'Show.S01E01.plainA']
-          and set(order[2:]) == {'Show.S01E01.enc1', 'Show.S01E01.enc2'}
+    ok = (set(order[:2]) == {'Show.S01E01.plainB', 'Show.S01E01.plainA'}
+          and order[2:] == ['Show.S01E01.enc1', 'Show.S01E01.enc2']
           and kinds.get('Show.S01E01.plainA') == 'twin' and kinds.get('Show.S01E01.enc1') == 'unborrowable'
           and kinds.get('Show.S01E01.enc2') == 'unborrowable')
     return ('fleetencryptedlast', ok, 'order=%s chosen=%s kinds=%s' % (order, chosen, kinds))
@@ -6264,14 +6302,15 @@ def scenario_fleettwinvolumes(daemon, t):
     """appendfleet: a twin posted with par2 volumes only (no index file, as
     MobLand S02E09 copy 11 was) is still a TWIN: its file list is read from
     its smallest volume, from the volume's end when its first article holds
-    only recovery data. Both twins rank ahead of a borrowable ALT."""
+    only recovery data. Both twins, whole like the ALT, rank ahead of a
+    borrowable ALT."""
     daemon.fake_nntp.alive = set()
     same = _payload(400_000, 7401)
     api = daemon.wait_ready()
     # a real volume layout: its first article is recovery data only, the
     # file list (critical packets) comes after it, in the last article
     ids = _fleet_ids('tv')
-    daemon.fake_nntp.alive |= set(ids[:36]) | {'tv-vol1@x', 'tv-vol2@x'}
+    daemon.fake_nntp.alive |= set(ids) | {'tv-vol1@x', 'tv-vol2@x'}
     index = generators.par2_index([('d.bin', same)], pad=0)
     daemon.fake_nntp.bodies_by_id['tv-vol1@x'] = _yenc_part(b'\x5a' * 6000, 'd.vol-01.par2')
     daemon.fake_nntp.bodies_by_id['tv-vol2@x'] = _yenc_part(index, 'd.vol-01.par2')
@@ -6279,7 +6318,7 @@ def scenario_fleettwinvolumes(daemon, t):
                                 ('d.vol-01.par2', ['tv-vol1@x', 'tv-vol2@x'], 6000 + len(index))]).decode()
     reply = _fleet(daemon, [
         ('Show.S01E01.store', _fleet_copy(daemon, 'vs', 'b.rar', 410_000, _rar4_head(0x30), _payload(410_000, 7402))),
-        ('Show.S01E01.twinA', _fleet_copy(daemon, 'ta2', 'c.bin', 400_000, None, same, 34)),
+        ('Show.S01E01.twinA', _fleet_copy(daemon, 'ta2', 'c.bin', 400_000, None, same)),
         ('Show.S01E01.twinvol', vol_only)],
         key='fleet:vol')
     order = [m['Name'] for m in sorted(reply['Members'], key=lambda m: m['Rank'])]
@@ -10173,6 +10212,8 @@ SCENARIOS = {
     'fleetone': scenario_fleetone,
     'fleetnodupecheck': scenario_fleetnodupecheck,
     'fleetkindorder': scenario_fleetkindorder,
+    'fleetkindsingle': scenario_fleetkindsingle,
+    'fleetkindlater': scenario_fleetkindlater,
     'fleetintake': scenario_fleetintake,
     'fleetintakelater': scenario_fleetintakelater,
     'fleetencryptedlast': scenario_fleetencryptedlast,
@@ -10788,7 +10829,7 @@ SCENARIO_FIRST_FAIL_PROXY = {'recheckfailed': ((b'?5=', b'?10=', b'?15='),),
 # scenarios with a FakeNewznab indexer (DupeSearchUrl points to it)
 
 # scenarios with a FakeNntp news server in place of nserv
-SCENARIO_FAKE_NNTP = {'watchfleet', 'watchforcepick', 'watchdeadpick', 'watchswap', 'watchborrow', 'watchswaptwin', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetnodupecheck', 'fleetkindorder', 'fleetintake', 'fleetintakelater', 'fleetencryptedlast', 'fleetencryptedheadless', 'fleetkindslowcheck', 'fleettwinvolumes', 'fleetalldead', 'fleetshutdown'}
+SCENARIO_FAKE_NNTP = {'watchfleet', 'watchforcepick', 'watchdeadpick', 'watchswap', 'watchborrow', 'watchswaptwin', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetnodupecheck', 'fleetkindorder', 'fleetkindsingle', 'fleetkindlater', 'fleetintake', 'fleetintakelater', 'fleetencryptedlast', 'fleetencryptedheadless', 'fleetkindslowcheck', 'fleettwinvolumes', 'fleetalldead', 'fleetshutdown'}
 
 
 # --------------------------------------------------------------------------- #

@@ -4437,8 +4437,10 @@ pub(crate) unsafe fn nzbget_rs_cross_pack_session_new(
             targets_vec.push(crate::streamrepair::CrossPackTargetInput {
                 filename: input(fnames[t]).to_vec(),
                 decoded_file_size: dsizes[t],
+                encoded_size: 0,
                 patch_eligible: peligible[t] != 0,
                 holes: flat[cursor..end].to_vec(),
+                all_articles_failed: false,
             });
             cursor = end;
         }

@@ -386,6 +386,15 @@ impl VolumeSource for Provider {
                 Ok(VolumeAnswer::Wait)
             }
             VolumeView::Missing => Ok(VolumeAnswer::Missing),
+            // A dead volume rebuilt around bytes borrowed from a duplicate (see `deadvolume`).
+            VolumeView::Virtual(v) => Ok(VolumeAnswer::Ready(Box::new(
+                super::VirtualSource::open(&path, v).map_err(|cause| {
+                    ProgressiveFailure::new(FailureKind::Input {
+                        operation: zipfast::progressive::InputOperation::Open,
+                        cause,
+                    })
+                })?,
+            ))),
         }
     }
 

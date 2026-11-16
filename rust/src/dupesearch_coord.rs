@@ -5883,7 +5883,11 @@ pub unsafe fn fleet_append(
             }
         }
         let parts = existing.iter().filter(|(id, _)| id == ex_id).count();
-        if parts == 1 && !summary.message_ids.is_empty() {
+        // the same posting as a member (even queued twice) is that member
+        let a_member = candidates.iter().any(|c| {
+            c.error.is_empty() && same_posting_vecs(&summary.message_ids, &c.summary.message_ids)
+        });
+        if parts == 1 && !summary.message_ids.is_empty() && !a_member {
             earlier.push((*ex_id, summary));
         }
     }
@@ -6236,7 +6240,9 @@ pub unsafe fn fleet_append(
                 crate::donorkind::DonorKind::of(twin_queued || !partners.is_empty(), *packing);
             candidates[i].kind = found;
             let id = candidates[i].existing_id;
-            if id != 0 {
+            // only a copy queued or parked as a backup (not failed, deleted or
+            // dead) is ranked by, or written, its stored kind
+            if id != 0 && member_stored[i].is_some() {
                 // a member already queued: rank and report what is known of it
                 if let Some(stored) = member_stored[i] {
                     if !kind_upgrades(stored, found) {
@@ -6437,7 +6443,7 @@ pub unsafe fn fleet_append(
         let partner_queued = w.twin_queued
             || w.partners
                 .iter()
-                .any(|&p| added[p] != 0 || candidates[p].existing_id != 0);
+                .any(|&p| added[p] != 0 || member_stored[p].is_some());
         let kind = crate::donorkind::DonorKind::of(partner_queued, w.packing);
         fleet_upgrade_kind(host_ctx, host_cb, w.nzb_id, kind);
     }

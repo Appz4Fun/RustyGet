@@ -577,6 +577,14 @@ impl<'a> Run<'a> {
                                 .unwrap_or("a member".into())
                         )));
                     }
+                    // A directory entry (zipfast #130 creates it in persistent sessions).
+                    Ok(Some(ProgressiveEvent::MemberFinished {
+                        outcome: zipfast::progressive::MemberOutcome::Directory { .. },
+                        ..
+                    })) => {
+                        summary.dirs += 1;
+                        current = None;
+                    }
                     Ok(Some(ProgressiveEvent::MemberFinished { .. })) => {
                         summary.files += 1;
                         current = None;

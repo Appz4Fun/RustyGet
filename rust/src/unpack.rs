@@ -3601,7 +3601,7 @@ mod tests {
             let sz_out = work_dir.join("sz_out");
             let err = extract_archive_with_zipfast(&sz_fixture, &sz_out, "", 1, |_, _| {})
                 .expect_err("damaged 7z fixture must fail CRC check");
-            assert!(err.contains("CRC failed"));
+            assert!(err.contains("CRC failed"), "{err}");
 
             // Also verify clean extraction on an intact multi-volume `.7z.001`..`.003` set.
             let sz_clean_dir = work_dir.join("sz_clean_vols");

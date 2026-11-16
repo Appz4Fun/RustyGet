@@ -138,7 +138,7 @@ pub fn maintenance_prepare_signature_inputs(
     use std::io::{BufRead, BufReader, Read};
 
     let mut in_file = std::fs::File::open(bytes_to_path(in_filename)).ok()?;
-    let mut hasher = crate::archive_native::Sha256State::new();
+    let mut hasher = zipfast::crypto::Sha256::new();
     let mut chunk = vec![0u8; 32 * 1024];
     loop {
         let n = in_file.read(&mut chunk).ok()?;

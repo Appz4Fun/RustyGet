@@ -10,6 +10,7 @@
 
 #![allow(non_snake_case)]
 
+use std::collections::BTreeSet;
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::sync::Mutex;
 
@@ -218,6 +219,64 @@ const TEXTS: usize = 10;
 struct NzbData {
     s: NzbScalars,
     texts: Mutex<[Option<CString>; TEXTS]>,
+    coll: Mutex<Coll>,
+}
+
+/// A collection's small lists (see `nzbget_rs_nzb_coll`).
+#[derive(Default)]
+struct Coll {
+    // post-processing parameters, names compared case-insensitively
+    params: Vec<(CString, CString)>,
+    // (script name, status)
+    script_statuses: Vec<(CString, i32)>,
+    // donors this collection must not borrow from again
+    blocked_donors: BTreeSet<i32>,
+    // (server id, success, failed): totals and current-session counts
+    stats: [Vec<[i32; 3]>; 2],
+}
+
+impl Coll {
+    fn set_param(&mut self, name: &CStr, value: &CStr) {
+        let pos = self
+            .params
+            .iter()
+            .position(|(n, _)| n.to_bytes().eq_ignore_ascii_case(name.to_bytes()));
+        match (value.to_bytes().is_empty(), pos) {
+            (true, Some(i)) => {
+                self.params.remove(i);
+            }
+            (false, Some(i)) => self.params[i].1 = value.to_owned(),
+            (false, None) => self.params.push((name.to_owned(), value.to_owned())),
+            (true, None) => {}
+        }
+    }
+}
+
+/// Applies a server-stat operation (0 set, 1 add, 2 subtract) to `list`.
+fn stat_op(list: &mut Vec<[i32; 3]>, server_id: i32, success: i32, failed: i32, op: i32) {
+    let i = match list.iter().position(|s| s[0] == server_id) {
+        Some(i) => i,
+        None => {
+            list.push([server_id, 0, 0]);
+            list.len() - 1
+        }
+    };
+    let (mut s, mut f) = (list[i][1], list[i][2]);
+    unsafe { crate::ffi::nzbget_rs_server_stat_apply_op(op, success, failed, &mut s, &mut f) };
+    list[i][1] = s;
+    list[i][2] = f;
+}
+
+fn cstr<'a>(p: *const c_char) -> &'a CStr {
+    if p.is_null() {
+        c""
+    } else {
+        unsafe { CStr::from_ptr(p) }
+    }
+}
+
+fn data<'a>(p: *const NzbScalars) -> &'a NzbData {
+    unsafe { &*p.cast::<NzbData>() }
 }
 
 #[unsafe(no_mangle)]
@@ -231,6 +290,7 @@ pub extern "C" fn nzbget_rs_nzb_scalars_new() -> *mut NzbScalars {
     let data = Box::new(NzbData {
         s: NzbScalars::default(),
         texts: Mutex::new(texts),
+        coll: Mutex::new(Coll::default()),
     });
     Box::into_raw(data).cast()
 }
@@ -292,6 +352,162 @@ pub extern "C" fn nzbget_rs_nzb_scalars_size() -> usize {
     std::mem::size_of::<NzbScalars>()
 }
 
+/// A collection's small lists. `p2` is another collection where noted.
+///
+/// - Parameters: 0 find `s1` (value into `strs[0]`, returns 1 when found);
+///   1 set `s1` = `s2` (an empty value removes it); 2 copy all of `p2`'s in;
+///   3 count; 4 parameter `a2` into `strs[0..2]`; 5 clear.
+/// - Script statuses: 10 add `s1` with status `a2`; 11 count; 12 status `a2`
+///   into `ints[0]` and `strs[0]`; 13 clear; 14 total status.
+/// - Blocked donors: 20 contains `a2`; 21 add `a2`.
+/// - Server stats (`w` = 0 totals, 1 current): 40+w count; 42+w entry `a2`
+///   into `ints[0..3]`; 44+w apply op `a2` (0 set, 1 add, 2 subtract) with
+///   `ints[0..3]`; 46+w clear; 48 set current from the totals; 49 apply op
+///   `a2` of `p2`'s list `ints[1]` to this one's list `ints[0]`.
+///
+/// # Safety
+/// `p` (and `p2` where used) come from `nzbget_rs_nzb_scalars_new`; output
+/// arrays are large enough; strings are null or NUL-terminated.
+#[allow(clippy::too_many_arguments)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_nzb_coll(
+    p: *const NzbScalars,
+    op: c_int,
+    a2: c_int,
+    p2: *const NzbScalars,
+    s1: *const c_char,
+    s2: *const c_char,
+    ints: *mut c_int,
+    strs: *mut *const c_char,
+) -> i64 {
+    // copy another collection's lists before locking this one (p2 may be p)
+    let other: Option<Coll> = match op {
+        2 | 49 if !p2.is_null() => {
+            let o = data(p2).coll.lock().unwrap_or_else(|e| e.into_inner());
+            Some(Coll {
+                params: o.params.clone(),
+                stats: o.stats.clone(),
+                ..Coll::default()
+            })
+        }
+        _ => None,
+    };
+    let mut c = data(p).coll.lock().unwrap_or_else(|e| e.into_inner());
+    match op {
+        0 => {
+            let name = cstr(s1).to_bytes();
+            match c
+                .params
+                .iter()
+                .find(|(n, _)| n.to_bytes().eq_ignore_ascii_case(name))
+            {
+                Some((_, v)) => {
+                    unsafe { *strs = v.as_ptr() };
+                    1
+                }
+                None => 0,
+            }
+        }
+        1 => {
+            c.set_param(cstr(s1), cstr(s2));
+            0
+        }
+        2 => {
+            if let Some(o) = other {
+                for (n, v) in &o.params {
+                    c.set_param(n, v);
+                }
+            }
+            0
+        }
+        3 => c.params.len() as i64,
+        4 => match c.params.get(a2 as usize) {
+            Some((n, v)) => {
+                unsafe {
+                    *strs = n.as_ptr();
+                    *strs.add(1) = v.as_ptr();
+                }
+                0
+            }
+            None => 0,
+        },
+        5 => {
+            c.params.clear();
+            0
+        }
+        10 => {
+            c.script_statuses.push((cstr(s1).to_owned(), a2));
+            0
+        }
+        11 => c.script_statuses.len() as i64,
+        12 => match c.script_statuses.get(a2 as usize) {
+            Some((n, st)) => {
+                unsafe {
+                    *ints = *st;
+                    *strs = n.as_ptr();
+                }
+                0
+            }
+            None => 0,
+        },
+        13 => {
+            c.script_statuses.clear();
+            0
+        }
+        14 => {
+            let all: Vec<c_int> = c.script_statuses.iter().map(|(_, s)| *s).collect();
+            i64::from(unsafe {
+                crate::ffi::nzbget_rs_script_calc_total_status(all.as_ptr(), all.len())
+            })
+        }
+        20 => i64::from(c.blocked_donors.contains(&a2)),
+        21 => i64::from(c.blocked_donors.insert(a2) || true),
+        40 | 41 => c.stats[(op - 40) as usize].len() as i64,
+        42 | 43 => match c.stats[(op - 42) as usize].get(a2 as usize) {
+            Some(e) => {
+                unsafe {
+                    *ints = e[0];
+                    *ints.add(1) = e[1];
+                    *ints.add(2) = e[2];
+                }
+                0
+            }
+            None => 0,
+        },
+        44 | 45 => {
+            let (id, ok, bad) = unsafe { (*ints, *ints.add(1), *ints.add(2)) };
+            stat_op(&mut c.stats[(op - 44) as usize], id, ok, bad, a2);
+            0
+        }
+        46 | 47 => {
+            c.stats[(op - 46) as usize].clear();
+            0
+        }
+        48 => {
+            let totals = c.stats[0].clone();
+            for e in totals {
+                stat_op(&mut c.stats[1], e[0], e[1], e[2], 0);
+            }
+            0
+        }
+        49 => {
+            if let Some(o) = other {
+                let (dst, src) = unsafe {
+                    (
+                        (*ints).clamp(0, 1) as usize,
+                        (*ints.add(1)).clamp(0, 1) as usize,
+                    )
+                };
+                for e in &o.stats[src] {
+                    stat_op(&mut c.stats[dst], e[0], e[1], e[2], a2);
+                }
+            }
+            0
+        }
+        _ => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,6 +531,51 @@ mod tests {
             (*p).id = 7;
             assert_eq!((*p).id, 7);
             nzbget_rs_nzb_scalars_free(p);
+        }
+    }
+
+    #[test]
+    fn small_collections() {
+        let p = nzbget_rs_nzb_scalars_new();
+        let q = nzbget_rs_nzb_scalars_new();
+        let np: *const NzbScalars = std::ptr::null();
+        let ns: *const c_char = std::ptr::null();
+        let mut ints = [0 as c_int; 4];
+        let mut strs = [ns; 2];
+        let mut coll = |n: *const NzbScalars,
+                        op: c_int,
+                        a2: c_int,
+                        p2: *const NzbScalars,
+                        s1: *const c_char,
+                        s2: *const c_char| unsafe {
+            nzbget_rs_nzb_coll(n, op, a2, p2, s1, s2, ints.as_mut_ptr(), strs.as_mut_ptr())
+        };
+        coll(p, 1, 0, np, c"Category".as_ptr(), c"tv".as_ptr());
+        assert_eq!(coll(p, 0, 0, np, c"category".as_ptr(), ns), 1);
+        coll(p, 1, 0, np, c"CATEGORY".as_ptr(), c"".as_ptr());
+        assert_eq!(coll(p, 3, 0, np, ns, ns), 0);
+        coll(q, 1, 0, np, c"a".as_ptr(), c"1".as_ptr());
+        coll(p, 2, 0, q, ns, ns);
+        assert_eq!(coll(p, 3, 0, np, ns, ns), 1);
+        coll(p, 10, 2, np, c"script.py".as_ptr(), ns);
+        assert_eq!(coll(p, 11, 0, np, ns, ns), 1);
+        assert_eq!(coll(p, 20, 7, np, ns, ns), 0);
+        coll(p, 21, 7, np, ns, ns);
+        assert_eq!(coll(p, 20, 7, np, ns, ns), 1);
+        drop(coll);
+        unsafe {
+            ints[..3].copy_from_slice(&[1, 5, 2]);
+            nzbget_rs_nzb_coll(p, 44, 1, np, ns, ns, ints.as_mut_ptr(), strs.as_mut_ptr());
+            nzbget_rs_nzb_coll(p, 48, 0, np, ns, ns, ints.as_mut_ptr(), strs.as_mut_ptr());
+            nzbget_rs_nzb_coll(p, 43, 0, np, ns, ns, ints.as_mut_ptr(), strs.as_mut_ptr());
+            assert_eq!(&ints[..3], &[1, 5, 2]);
+            ints[0] = 0;
+            ints[1] = 1;
+            nzbget_rs_nzb_coll(q, 49, 1, p, ns, ns, ints.as_mut_ptr(), strs.as_mut_ptr());
+            nzbget_rs_nzb_coll(q, 42, 0, np, ns, ns, ints.as_mut_ptr(), strs.as_mut_ptr());
+            assert_eq!(&ints[..3], &[1, 5, 2]);
+            nzbget_rs_nzb_scalars_free(p);
+            nzbget_rs_nzb_scalars_free(q);
         }
     }
 }

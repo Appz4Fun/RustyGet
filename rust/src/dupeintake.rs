@@ -259,7 +259,13 @@ pub fn sample_offsets(size: i64, count: usize, seed: u64) -> Vec<i64> {
     out
 }
 
-/// The size and CRC32 of the largest file of a copy's 7z set, read from the
+/// Bytes of a RAR set's last volume read for its file header: within the
+/// first article of any posting.
+const RAR_KEY_HEAD: usize = 64 * 1024;
+
+/// The size and CRC32 of the largest file of a copy's archive set: for RAR
+/// from the file header at the start of the last volume
+/// ([`crate::twinfields::rar_last_volume_key`], one article), for 7z from the
 /// 7z header ([`crate::twinfields::seven_zip_key`]). A 7z with a password but
 /// without `-mhe` keeps that header in the clear, so a copy [`print_copy`]
 /// cannot open without the password still gets a key TwinCheck can match to
@@ -294,7 +300,24 @@ pub fn inner_key_copy(
         .collect();
     let first = vols.first()?;
     let mut magic = [0u8; 6];
-    if !first.read(0, &mut magic) || magic != crate::twinfields::SEVEN_ZIP_MAGIC {
+    if !first.read(0, &mut magic) {
+        return None;
+    }
+    if magic.starts_with(b"Rar!") {
+        // the last volume's first bytes hold its file header, which records
+        // the whole file's size and CRC32
+        let last = vols.last()?;
+        let len = usize::try_from(last.size())
+            .ok()
+            .filter(|&n| n > 0)?
+            .min(RAR_KEY_HEAD);
+        let mut head = vec![0u8; len];
+        if !last.read(0, &mut head) {
+            return None;
+        }
+        return crate::twinfields::rar_last_volume_key(&head);
+    }
+    if magic != crate::twinfields::SEVEN_ZIP_MAGIC {
         return None;
     }
     // 7-Zip splits into equal volumes but the last
@@ -603,7 +626,35 @@ mod tests {
             fixture("rerar-a.part1.rar"),
             4000,
         );
+        // a first volume alone records no whole-file CRC
         assert_eq!(inner_key_copy(&rar, &mem), None);
+    }
+
+    #[test]
+    fn a_rar_set_gets_its_key_from_the_last_volume() {
+        let mut mem = Memory {
+            files: HashMap::new(),
+            fetched: Cell::new(0),
+        };
+        let key_of = |mem: &mut Memory, tag: &str, set: &str| {
+            let mut files = Vec::new();
+            for i in 1..=3 {
+                files.extend(copy(
+                    mem,
+                    &format!("{tag}{i}"),
+                    &format!("rel.part{i}.rar"),
+                    fixture(&format!("{set}.part{i}.rar")),
+                    4000,
+                ));
+            }
+            files
+        };
+        let a = key_of(&mut mem, "a", "rerar-a");
+        let c = key_of(&mut mem, "c", "rerar-c");
+        let ka = inner_key_copy(&a, &mem).expect("the last volume records the key");
+        // a re-RAR of the same file records the same size and CRC32
+        assert_eq!(inner_key_copy(&c, &mem), Some(ka));
+        assert!(ka.size > 0);
     }
 
     #[test]

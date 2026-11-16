@@ -724,6 +724,37 @@ impl VolumeSource for Volumes {
     }
 }
 
+/// The [`InnerKey`] a RAR set's last volume records: `head` is the start of
+/// that volume (its first article is enough). Each file's last part header
+/// stores the unpacked size and the CRC32 of the whole file, whatever the
+/// compression, so a stored, compressed or re-RARed copy of one video gives
+/// the same key. The largest file whose last part starts in `head` is taken.
+/// None for encrypted headers (`-hp`), keyed checks (RAR 5 `-p`), a file whose
+/// CRC is not recorded, or a head with no last part of a file.
+pub fn rar_last_volume_key(head: &[u8]) -> Option<InnerKey> {
+    if !head.starts_with(b"Rar!") {
+        return None;
+    }
+    let map = MemberMap::from_volume(head, MapOptions::new("head.rar")).ok()?;
+    if map.header_encrypted {
+        return None;
+    }
+    map.members
+        .iter()
+        .filter(|m| !m.is_dir)
+        .filter_map(|m| {
+            let checks = m.checks?;
+            if checks.keyed {
+                return None;
+            }
+            Some(InnerKey {
+                size: m.unpacked_size?,
+                crc32: checks.crc32?,
+            })
+        })
+        .max_by_key(|k| k.size)
+}
+
 /// Reads the header of a 7z set and returns its largest file's [`InnerKey`].
 /// The volumes are `lens` bytes long; `read(volume, offset, buf)` fills `buf`
 /// from a volume. Only header bytes are read (the start header and the

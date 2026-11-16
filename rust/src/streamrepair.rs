@@ -8727,6 +8727,19 @@ fn plan_dead_fills(
                 }
             }
         }
+        if !usable
+            && dead_jobs.iter().any(|t| {
+                t.filename.len() >= prefix.len()
+                    && t.filename[..prefix.len()].eq_ignore_ascii_case(&prefix)
+            })
+        {
+            let mut msg = b"Dead volumes in ".to_vec();
+            msg.extend_from_slice(&volume_name(1));
+            msg.extend_from_slice(
+                b" cannot be borrowed: the archive is encrypted, compressed or holds no video",
+            );
+            emit_msg(TargetMessageKind::Info, &msg);
+        }
         let Some((inner_name, inner_size)) = inner.filter(|_| usable && any_dead) else {
             continue;
         };
@@ -9024,9 +9037,9 @@ impl CrossPackRepairSession {
 
         let mut repair_sets = repair_sets;
         let mut target_holes = target_holes;
-        let dead_fills = if target_password.is_some_and(|p| !p.is_empty())
-            || dead_context.nzb_id.is_none()
-        {
+        // A password set on the download does not stop the borrow: planning reads the archive's
+        // own headers and borrows only stored, unencrypted data.
+        let dead_fills = if dead_context.nzb_id.is_none() {
             Vec::new()
         } else {
             plan_dead_fills(

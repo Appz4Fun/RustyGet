@@ -6206,6 +6206,44 @@ def scenario_fleetkindorder(daemon, t):
     return ('fleetkindorder', ok, 'order=%s chosen=%s kinds=%s' % (order, chosen, kinds))
 
 
+def _fleet_kinds(api, key):
+    return {g['NZBName']: {p['Name']: p['Value'] for p in g.get('Parameters', [])}.get('DupeCopyKind')
+            for g in api.listgroups() + api.history() if g.get('DupeKey') == key}
+
+
+def scenario_fleetkindsingle(daemon, t):
+    """appendfleet with one copy (store-mode rar): it is probed too, so it
+    gets its kind (borrowable) instead of none."""
+    daemon.fake_nntp.alive = set()
+    api = daemon.wait_ready()
+    reply = _fleet(daemon, [
+        ('Show.S01E01.store', _fleet_copy(daemon, 'ks', 'b.rar', 410_000, _rar4_head(0x30), _payload(410_000, 7101)))],
+        key='fleet:kindsingle')
+    kinds = _fleet_kinds(api, 'fleet:kindsingle')
+    ok = reply['Chosen'] > 0 and kinds.get('Show.S01E01.store') == 'borrowable'
+    return ('fleetkindsingle', ok, 'reply=%s kinds=%s' % (reply, kinds))
+
+
+def scenario_fleetkindlater(daemon, t):
+    """A backup sent in a later fleet is classed against the copy already
+    queued before it downloads: twinB (the same post as the queued twinA)
+    is added as a twin, and twinA, queued alone as borrowable, becomes a twin."""
+    daemon.fake_nntp.alive = set()
+    same = _payload(400_000, 7102)
+    api = daemon.wait_ready()
+    a = _fleet(daemon, [
+        ('Show.S01E01.twinA', _fleet_copy(daemon, 'la', 'c.rar', 400_000, _rar4_head(0x30), same))],
+        key='fleet:kindlater')
+    first = _fleet_kinds(api, 'fleet:kindlater')
+    b = _fleet(daemon, [
+        ('Show.S01E01.twinB', _fleet_copy(daemon, 'lb', 'c.rar', 400_000, _rar4_head(0x30), same))],
+        key='fleet:kindlater')
+    kinds = _fleet_kinds(api, 'fleet:kindlater')
+    ok = (first.get('Show.S01E01.twinA') == 'borrowable' and kinds.get('Show.S01E01.twinB') == 'twin'
+          and kinds.get('Show.S01E01.twinA') == 'twin')
+    return ('fleetkindlater', ok, 'first=%s kinds=%s a=%s b=%s' % (first, kinds, a, b))
+
+
 def scenario_fleetencryptedlast(daemon, t):
     """appendfleet: re-uploads of one release, some with encrypted rar headers.
     All have the same file count and size, but an encrypted re-upload has other
@@ -10174,6 +10212,8 @@ SCENARIOS = {
     'fleetone': scenario_fleetone,
     'fleetnodupecheck': scenario_fleetnodupecheck,
     'fleetkindorder': scenario_fleetkindorder,
+    'fleetkindsingle': scenario_fleetkindsingle,
+    'fleetkindlater': scenario_fleetkindlater,
     'fleetintake': scenario_fleetintake,
     'fleetintakelater': scenario_fleetintakelater,
     'fleetencryptedlast': scenario_fleetencryptedlast,
@@ -10789,7 +10829,7 @@ SCENARIO_FIRST_FAIL_PROXY = {'recheckfailed': ((b'?5=', b'?10=', b'?15='),),
 # scenarios with a FakeNewznab indexer (DupeSearchUrl points to it)
 
 # scenarios with a FakeNntp news server in place of nserv
-SCENARIO_FAKE_NNTP = {'watchfleet', 'watchforcepick', 'watchdeadpick', 'watchswap', 'watchborrow', 'watchswaptwin', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetnodupecheck', 'fleetkindorder', 'fleetintake', 'fleetintakelater', 'fleetencryptedlast', 'fleetencryptedheadless', 'fleetkindslowcheck', 'fleettwinvolumes', 'fleetalldead', 'fleetshutdown'}
+SCENARIO_FAKE_NNTP = {'watchfleet', 'watchforcepick', 'watchdeadpick', 'watchswap', 'watchborrow', 'watchswaptwin', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetnodupecheck', 'fleetkindorder', 'fleetkindsingle', 'fleetkindlater', 'fleetintake', 'fleetintakelater', 'fleetencryptedlast', 'fleetencryptedheadless', 'fleetkindslowcheck', 'fleettwinvolumes', 'fleetalldead', 'fleetshutdown'}
 
 
 # --------------------------------------------------------------------------- #

@@ -2570,7 +2570,6 @@ mod tests {
         !crc
     }
 
-    /// Builds a valid ZIP archive in memory from `(name, payload, unix_mode, flags, encrypted_payload)`.
     #[cfg(unix)]
     #[test]
     fn test_zip_modes_follow_rustyget_rules_not_the_archive() {
@@ -2607,13 +2606,59 @@ mod tests {
             )
             .unwrap();
             assert_eq!(summary.files, 3, "mode {overwrite}");
-            assert_eq!(mode_of(&out.join("ro")), 0o755, "mode {overwrite}");
+            // Folders and plain files get default permissions (umask), never the archive's.
+            assert_eq!(mode_of(&out.join("ro")) & 0o700, 0o700, "mode {overwrite}");
             std::fs::write(out.join("ro/new.txt"), b"writable").unwrap();
-            assert_eq!(mode_of(&out.join("zero.txt")), 0o644, "mode {overwrite}");
+            assert_eq!(
+                mode_of(&out.join("zero.txt")) & 0o600,
+                0o600,
+                "mode {overwrite}"
+            );
             assert_eq!(std::fs::read(out.join("zero.txt")).unwrap(), b"zero");
             assert_eq!(mode_of(&out.join("run.sh")), 0o750, "mode {overwrite}");
             assert_eq!(mode_of(&out.join("keep")), 0o700, "mode {overwrite}");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_zip_survives_a_chmod_on_the_archive_mid_run() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("rg_zip_touch_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let zip_path = dir.join("touch.zip");
+        std::fs::write(
+            &zip_path,
+            build_test_zip(&[
+                ("a.txt", b"first", None, 0, None),
+                ("b.txt", b"second", None, 0, None),
+            ]),
+        )
+        .unwrap();
+        let out = dir.join("out");
+        let mut logs = Vec::new();
+        let summary = crate::archive_native::extract_zipfast_cancellable(
+            &zip_path,
+            &out,
+            "",
+            1,
+            &mut |_, m| {
+                // An indexer or a permission fix touches the archive (ctime changes) while
+                // zipfast holds it open.
+                if m == "Unrar: Extracting  a.txt" {
+                    std::fs::set_permissions(&zip_path, std::fs::Permissions::from_mode(0o600))
+                        .unwrap();
+                }
+                logs.push(m.to_string());
+            },
+            &mut || false,
+        )
+        .unwrap_or_else(|e| panic!("{e}: {logs:?}"));
+        assert_eq!(summary.files, 2);
+        assert_eq!(std::fs::read(out.join("a.txt")).unwrap(), b"first");
+        assert_eq!(std::fs::read(out.join("b.txt")).unwrap(), b"second");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2714,6 +2759,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Builds a valid ZIP archive in memory from `(name, payload, unix_mode, flags, encrypted_payload)`.
     fn build_test_zip(entries: &[(&str, &[u8], Option<u32>, u16, Option<&[u8]>)]) -> Vec<u8> {
         let mut out = Vec::new();
         let mut cd = Vec::new();

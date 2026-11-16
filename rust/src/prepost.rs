@@ -2139,7 +2139,7 @@ impl NzbgetRsPrePostProcessor {
         let opts = host.opts();
         let need_pause = calc_post_pause_state(
             &stages,
-            opts.par_pause_queue,
+            crate::parpreset::pause_queue(opts.par_pause_queue),
             opts.unpack_pause_queue,
             opts.script_pause_queue,
         );

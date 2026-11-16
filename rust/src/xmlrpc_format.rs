@@ -452,6 +452,7 @@ pub fn match_command(method: &[u8]) -> c_int {
         b"checkcastore" => 61,
         b"hostlookup" => 56,
         b"backbones" => 62,
+        b"parpresetdetect" => 63,
         _ => 0,
     }
 }
@@ -2510,6 +2511,7 @@ mod tests {
         assert!(!is_safe_command(31));
         assert!(!is_safe_command(56));
         assert_eq!(match_command(b"backbones"), 62);
+        assert_eq!(match_command(b"parpresetdetect"), 63);
         assert!(!is_safe_command(62));
         assert!(!is_safe_command(0));
     }
@@ -6457,6 +6459,12 @@ unsafe fn execute_xml_command(
         62 => {
             let host_name = cur.next_str().map(|off| cur.decode_at(off, is_json)).unwrap_or_default();
             (false, crate::backbones::rpc_reply(is_json, &host_name))
+        }
+        // parpresetdetect(start): what "detect" measured for the Check and repair
+        // presets; start=true measures again (at most once every 30 s)
+        63 => {
+            let start = cur.next_bool(is_json).unwrap_or(false);
+            (false, crate::parpreset::rpc_reply(is_json, start))
         }
         _ => err_resp(default_err_code, default_err_text),
     }

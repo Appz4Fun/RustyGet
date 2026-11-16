@@ -146,6 +146,26 @@ const DUPE_OPTIONS = ['DupeCheck', 'DupeWatch', 'DupeArticleFallback', 'DupeStre
         await page.waitForTimeout(300);
       });
 
+      await check('par resource level buttons', async () => {
+        await page.evaluate(() => Config.showSection('CHECK_AND_REPAIR', false));
+        const group = row('ParPreset').locator('.config-preset-buttons');
+        assert.equal(await group.locator('.btn').count(), 6, 'low, medium, large, uber, detect, custom');
+        assert.equal(await row('ParPreset').locator('select.config-select').count(), 0, 'stays buttons, not a menu');
+        const summary = row('ParPreset').locator('.config-preset-summary');
+        await page.waitForFunction(() => /1024 MB/.test($('.config-preset-summary').text()));
+        await group.locator('.btn[data-value="uber"]').click();
+        assert.match(await summary.innerText(), /4096 MB, 14 threads/);
+        assert(!(await row('ParPreset').locator('.config-preset-detect').isVisible()), 'Measure again only for Detect');
+        await group.locator('.btn[data-value="detect"]').click();
+        assert.match(await summary.innerText(), /12 CPUs.*1000 MB\/s write.*4096 MB, all CPUs/);
+        assert(await row('ParPreset').locator('.config-preset-detect').isVisible());
+        await group.locator('.btn[data-value="custom"]').click();
+        assert.match(await summary.innerText(), /Custom resources/);
+        const box = await group.boundingBox();
+        assert(box.width <= width, 'buttons fit the width');
+        await group.locator('.btn[data-value="large"]').click();
+      });
+
       await check('a moved option still saves', async () => {
         await page.evaluate(() => Config.showSection('DUPE_FLEETS', false));
         await S('DupeCheckConcurrency').fill('9');

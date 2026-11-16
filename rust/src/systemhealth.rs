@@ -1172,7 +1172,12 @@ pub fn validate_check_and_repair_section(
 
         let threads_status = if par_threads < 0 {
             check_positive_num(b"ParThreads", par_threads)
-        } else if par_threads > 0 && hw_threads > 0 && (par_threads as usize) > hw_threads {
+        } else if par_threads > 0
+            && hw_threads > 0
+            && (par_threads as usize) > hw_threads
+            // "uber" sets two threads over the CPU count on purpose
+            && crate::options::par_preset() != crate::parpreset::UBER
+        {
             HealthStatus::warning(format!(
                 "'ParThreads' ({par_threads}) exceeds the number of CPU cores ({hw_threads}). This may slow down repair due to excessive context switching"
             ))

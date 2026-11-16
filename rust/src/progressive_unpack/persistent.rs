@@ -448,6 +448,8 @@ struct Run<'a> {
     /// Members adopted from an earlier run's state (a restart) that still have holes: their
     /// holes were reported to that run, so they are refilled from every volume.
     adopted_holed: Vec<MemberKey>,
+    /// Every member zipfast adopted from an earlier run's state.
+    adopted: Vec<MemberKey>,
     anchors: Option<Arc<DurableAnchors>>,
 }
 
@@ -461,6 +463,7 @@ impl<'a> Run<'a> {
             handles: Vec::new(),
             holes: Vec::new(),
             adopted_holed: Vec::new(),
+            adopted: Vec::new(),
             anchors: None,
         }
     }
@@ -601,6 +604,7 @@ impl<'a> Run<'a> {
                         if file.remaining().map(|r| !r.is_empty()).unwrap_or(true) && finished {
                             self.adopted_holed.push(member.clone());
                         }
+                        self.adopted.push(member.clone());
                         self.handles.push((member, file, current_member.clone()));
                     }
                     Ok(Some(ProgressiveEvent::Hole(report))) => {
@@ -662,10 +666,12 @@ impl<'a> Run<'a> {
         }
         drop(session);
         // A resumed member that was mid-extraction may have been finished by this run: check
-        // every adopted member for holes now.
+        // every adopted member for holes now. Holes this run reported do not name the volumes
+        // of holes the earlier run reported, so an adopted member with any hole left is
+        // refilled from every volume.
         for (key, file, _) in &self.handles {
-            if !self.adopted_holed.contains(key)
-                && !self.holes.iter().any(|h| &h.member == key)
+            if self.adopted.contains(key)
+                && !self.adopted_holed.contains(key)
                 && file.remaining().map(|r| !r.is_empty()).unwrap_or(false)
             {
                 self.adopted_holed.push(key.clone());
@@ -765,6 +771,14 @@ impl<'a> Run<'a> {
         };
         volumes.sort_unstable();
         volumes.dedup();
+        // Volumes a hole of this run named must be on disk; the rest of an all-volumes refill
+        // skips a volume that has no file (one rebuilt from a duplicate): a hole it was needed
+        // for stays and verify sends the set to the progressive path.
+        let required: Vec<u32> = self
+            .holes
+            .iter()
+            .flat_map(|h| h.packed.iter().map(|s| s.volume))
+            .collect();
         for (key, file, member) in self.handles.iter_mut() {
             let name = if self.holes.iter().any(|h| &h.member == key)
                 || self.adopted_holed.contains(key)
@@ -778,6 +792,9 @@ impl<'a> Run<'a> {
                     continue;
                 };
                 let path = self.plan.dir.join(name);
+                if !required.contains(&v) && !path.is_file() {
+                    continue;
+                }
                 let mut f = std::fs::File::open(&path).map_err(|e| {
                     Step::Fallback(format!("repaired volume {}: {e}", path.display()))
                 })?;

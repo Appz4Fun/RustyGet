@@ -4582,3 +4582,78 @@ fn a_resumed_member_refills_holes_the_earlier_run_reported() {
     );
     assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
 }
+
+#[test]
+fn a_resumed_member_with_old_and_new_holes_refills_both() {
+    // First run: a hole in volume 2, cancelled before the repair (state kept). Second run: the
+    // member is adopted mid-extraction, volume 2 is still damaged on disk and volume 5 reports
+    // a new hole; both are repaired and both holes are refilled without leaving the persistent
+    // path.
+    let t = TestDir::new("persist_resume_two_holes");
+    let data = pattern(3_000_000);
+    let chunk = 500_000;
+    let vols = rar5_volumes("movie.mkv", &data, chunk);
+    let first = write_set(&t.dl(), &vols);
+    let v2 = t.dl().join(volume_name(1, vols.len()));
+    let v5 = t.dl().join(volume_name(4, vols.len()));
+    let p2 = payload_offset(&vols[1], chunk) as u64 + 100_000;
+    let p5 = payload_offset(&vols[4], chunk) as u64 + 100_000;
+    let mut dmg2 = vols[1].clone();
+    dmg2[p2 as usize..p2 as usize + 50_000].fill(0);
+    std::fs::write(&v2, &dmg2).unwrap();
+    let req = Request {
+        first_volume: &first,
+        dest: &t.out(),
+        password: "",
+        overwrite: Overwrite::Always,
+        on_wait: None,
+    };
+    let feed = Downloading {
+        damaged: Damaged {
+            holes: vec![(v2.clone(), vec![(p2, 50_000)])],
+            repair: Vec::new(),
+            handed: false,
+        },
+        volumes: vols.len() as u64,
+    };
+    let seen = std::cell::Cell::new(0);
+    let mut log1 = Vec::new();
+    let r1 = extract(
+        &req,
+        Box::new(feed),
+        &mut |_, m: &str| {
+            if m.starts_with("Unrar: Extracting from ") {
+                seen.set(seen.get() + 1);
+            }
+            log1.push(m.to_string())
+        },
+        &mut || seen.get() >= 4,
+    );
+    assert!(
+        matches!(r1, Err(Error::Failed(Failure::Canceled))),
+        "{log1:?}"
+    );
+    let mut dmg5 = vols[4].clone();
+    dmg5[p5 as usize..p5 as usize + 50_000].fill(0);
+    std::fs::write(&v5, &dmg5).unwrap();
+    let damaged = Damaged {
+        holes: vec![(v5.clone(), vec![(p5, 50_000)])],
+        repair: vec![(v2.clone(), vols[1].clone()), (v5.clone(), vols[4].clone())],
+        handed: false,
+    };
+    let (r2, log2) = run_downloading(&first, &t.out(), damaged, vols.len() as u64);
+    expect_ok(r2, &log2);
+    assert!(
+        log2.iter().any(|l| l.contains("resuming movie.mkv")),
+        "{log2:?}"
+    );
+    assert!(
+        log2.iter().any(|l| l.contains("from the repaired volumes")),
+        "{log2:?}"
+    );
+    assert!(
+        !log2.iter().any(|l| l.contains("progressive direct unpack (")),
+        "{log2:?}"
+    );
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+}

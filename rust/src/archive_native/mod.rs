@@ -4526,8 +4526,8 @@ mod tests {
     #[test]
     fn test_7z_pre_pass_still_runs_on_folders_over_16_gib() {
         // A header that declares a 17 GiB file in one folder (the data is not there: the
-        // pre-pass reads headers only). zipfast's list() refuses it under its default limits;
-        // RustyGet's own listing uses the raised limits, so the link refusal still applies.
+        // pre-pass reads headers only). RustyGet's listing must read it (zipfast #144 dropped the
+        // default per-folder cap that once refused it), so the link refusal still applies.
         fn number(out: &mut Vec<u8>, v: u64) {
             if v < 0x80 {
                 out.push(v as u8);
@@ -4581,10 +4581,6 @@ mod tests {
         let dir = TempTestDir::new("7z_big_prepass");
         let path = dir.path().join("big.7z");
         std::fs::write(&path, &archive).unwrap();
-        assert!(
-            zipfast::sevenzip::list(&path, None).is_err(),
-            "zipfast's default limits refuse it"
-        );
         let entries = sz_list(&path, None).expect("RustyGet's listing reads it");
         assert_eq!(entries.len(), 2);
         let out = dir.path().join("out");

@@ -37,6 +37,9 @@ const DECLARE_PROTECTION: bool = true;
 mod anchors;
 mod persistent;
 
+/// Directory under an unpack destination holding persistent direct-unpack state.
+pub(crate) use persistent::STATE_DIR as PERSISTENT_STATE_DIR;
+
 /// How long the driver sleeps between cancellation checks while the session is parked.
 const PARK_SLICE: Duration = Duration::from_millis(50);
 /// Largest patch zipfast accepts in one call.

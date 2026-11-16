@@ -458,10 +458,12 @@ where
     best_idx.map(|i| i as i32).unwrap_or(-1)
 }
 
-/// Returns true when `RarLister::FindLargestFile` in `DupeMatcher.cpp` should continue waiting for `unrar` (`is_running && start_time + timeout_sec > cur_time && start_time >= cur_time`).
 /// The history backup to send back to the queue after a download failed its
-/// health check with nothing of its key left in the queue: TWINs first, then
-/// borrowable, unknown and unborrowable ALTs (`DupeCopyKind`, see
+/// health check with nothing of its key left in the queue, in the fleet's
+/// order: backups at least
+/// [`crate::dupesearch_nzb::FLEET_HEALTHY_ALIVE_PERMILLE`] alive first, then
+/// weak ones, then unmeasured ones; within each TWINs, then borrowable,
+/// unknown and unborrowable ALTs (`DupeCopyKind`, see
 /// [`crate::donorkind`]), each the wholest live backup by its measured
 /// `DupeAlive` share and then its score. Unlike
 /// `select_dupe_backup` it takes backups in DupeMode FORCE and backups filed

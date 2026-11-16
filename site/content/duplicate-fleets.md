@@ -40,7 +40,7 @@ Each layer handles what the one before it couldn't. Turn them on in this order.
 | Live repair | `DupeArticleFallback=live` | Runs stream repair while the download is still running. |
 | Borrow first | `DupeBorrowFirst=yes` | Uses duplicates before the download's own par2 files. On by default. |
 | Early failover | `HealthCheck=dupe` | Switches to a better backup as soon as the primary can't complete. |
-| Look after backups | `DupeWatch=yes` | Without searching: switches a DupeMode FORCE download to SCORE, drops a dead download below its backups, swaps a failing one for a whole backup (TWINs first), and returns the best backup when a download fails with nothing of its key queued. On by default. |
+| Look after backups | `DupeWatch=yes` | Without searching: switches a DupeMode FORCE download to SCORE, drops a dead download below its backups, swaps a failing one for a whole backup (copies at least 97.5% alive first, TWINs first among them), and returns the best backup when a download fails with nothing of its key queued. On by default. |
 | Fleet submission | `appendfleet` | Lets a client send every copy at once and have RustyGet pick the best. |
 
 Left out of the configuration file, every new setting keeps NZBGet's behavior, so a configuration carried over from NZBGet changes nothing until you opt in. RustyGet's configuration template, which a new installation starts from, sets `DupeArticleFallback=live`, `DupeStreamDecompress=yes`, and `HealthCheck=dupe`.

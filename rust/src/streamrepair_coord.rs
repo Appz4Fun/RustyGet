@@ -343,6 +343,8 @@ pub struct NzbgetRsStreamRepairCtrl {
     live_mode: bool,
     /// Keys the repeated-line filter, so one job's lines never hide another's.
     nzb_id: i32,
+    /// Set once a live repair borrows a dead volume: its fetches then run in parallel.
+    parallel_live_fetch: AtomicBool,
     tls_enabled: bool,
     debug_enabled: bool,
     fetcher: ArticleFetcher,
@@ -367,6 +369,7 @@ impl NzbgetRsStreamRepairCtrl {
         Self {
             live_mode,
             nzb_id,
+            parallel_live_fetch: AtomicBool::new(false),
             tls_enabled,
             debug_enabled,
             fetcher: ArticleFetcher::new(nntp_host),
@@ -1251,7 +1254,11 @@ impl NzbgetRsStreamRepairCtrl {
         left_to_borrow: &[bool],
     ) {
         self.batch_fetcher.set_worker_count(if self.live_mode {
-            0
+            if self.parallel_live_fetch.load(Ordering::SeqCst) {
+                stream_fetch_worker_count(opts.primary_connections)
+            } else {
+                0
+            }
         } else {
             stream_fetch_worker_count(opts.primary_connections)
         });
@@ -2392,9 +2399,10 @@ impl NzbgetRsStreamRepairCtrl {
         cb: NzbgetRsStreamRepairHostFn,
     ) -> Vec<Vec<u8>> {
         let mut counters = RunCounters::default();
+        // Only looks: the live-attempted marks belong to the pass that repairs the files.
         let Some((_, dest_dir, targets, _, _)) = (unsafe {
             with_dq_guard(ctx, cb, |dq_ptr| {
-                self.collect_targets_and_donors(ctx, cb, dq_ptr, false, true, &mut counters)
+                self.collect_targets_and_donors(ctx, cb, dq_ptr, false, false, &mut counters)
             })
         }) else {
             return Vec::new();
@@ -2476,6 +2484,16 @@ impl NzbgetRsStreamRepairCtrl {
             }
             let any_holes = targets.iter().any(|t| t.patch_eligible && t.needs_repair());
             if any_holes && unsafe { !self.host_is_stopped(ctx, cb) } {
+                // Live repairs fetch one article at a time so they never crowd out the download.
+                // Direct unpack stands still until a dead volume is borrowed, so that borrow
+                // fetches in parallel like the repair after the download does.
+                // Once raised it stays raised for this repair: workers already spawned would
+                // keep claiming requests that an inline (zero-worker) fetch then reads empty.
+                if borrowing {
+                    self.parallel_live_fetch.store(true, Ordering::SeqCst);
+                    self.batch_fetcher
+                        .set_worker_count(stream_fetch_worker_count(opts.primary_connections));
+                }
                 unsafe {
                     self.refresh_live_names(ctx, cb, &mut targets, &mut member_names);
                     self.exec_cross_pack_repair(

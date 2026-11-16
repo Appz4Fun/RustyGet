@@ -1366,6 +1366,10 @@ impl NzbgetRsStreamRepairCtrl {
                 encoded_size: t.encoded_size,
                 patch_eligible: t.patch_eligible,
                 holes: t.holes.clone(),
+                all_articles_failed: crate::streamrepair::nothing_arrived(
+                    t.decoded_file_size,
+                    &t.holes,
+                ),
             })
             .collect();
         let pw =

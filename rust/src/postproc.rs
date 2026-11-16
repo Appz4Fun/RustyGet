@@ -3030,6 +3030,33 @@ fn dead_volumes_borrowed(
         .unwrap_or_else(|e| e.into_inner())
 }
 
+/// Downloads whose dead volumes were placed in a duplicate's video by a repair still running.
+fn dead_volume_borrows() -> std::sync::MutexGuard<'static, std::collections::HashSet<i32>> {
+    static SET: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<i32>>> =
+        std::sync::OnceLock::new();
+    SET.get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// Marks (or clears) a borrow of dead volumes of download `nzb_id` in progress.
+pub(crate) fn note_dead_volume_borrow(nzb_id: i32, underway: bool) {
+    if underway {
+        dead_volume_borrows().insert(nzb_id);
+    } else {
+        dead_volume_borrows().remove(&nzb_id);
+    }
+}
+
+/// True while dead volumes of download `nzb_id` are being borrowed from a duplicate, or once
+/// direct unpack reads one rebuilt: replacing the download would throw that away.
+pub(crate) fn dead_volume_borrow_underway(nzb_id: i32) -> bool {
+    dead_volume_borrows().contains(&nzb_id)
+        || direct_unpack_holds()
+            .get(&nzb_id)
+            .is_some_and(|st| !st.virtuals.is_empty())
+}
+
 /// How many dead volumes of download `nzb_id` were rebuilt from a duplicate (0 if none), once:
 /// the count is forgotten as it is read.
 pub(crate) fn take_dead_volumes_borrowed(nzb_id: i32) -> usize {
@@ -3429,6 +3456,7 @@ fn direct_unpack_take_released(nzb_id: i32) -> (Vec<Vec<u8>>, bool) {
 }
 
 pub(crate) fn direct_unpack_forget_holds(nzb_id: i32) {
+    note_dead_volume_borrow(nzb_id, false);
     let gone = direct_unpack_holds().remove(&nzb_id);
     // Borrowed data of rebuilt dead volumes is only read by direct unpack.
     for v in gone.iter().flat_map(|st| st.virtuals.values()) {

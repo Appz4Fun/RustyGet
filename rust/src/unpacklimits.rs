@@ -124,7 +124,9 @@ pub struct Guard {
     limits: Limits,
     /// The folder the job unpacks to, and the one it ends up in when that differs.
     roots: Vec<Root>,
-    files: u64,
+    /// Files admitted, by path: a member read again (an extraction retried from the first
+    /// volume, a direct unpack redone after the download) counts once.
+    files: BTreeSet<String>,
     folders: BTreeSet<Vec<String>>,
     /// The ASCII form of every name component members were written under.
     written: BTreeSet<String>,
@@ -142,7 +144,7 @@ impl Guard {
         Self {
             limits,
             roots,
-            files: 0,
+            files: BTreeSet::new(),
             folders: BTreeSet::new(),
             written: BTreeSet::new(),
             breach: None,
@@ -232,16 +234,18 @@ impl Guard {
                 self.limits.max_folders
             ));
         }
+        let rel = parts.join("/");
         if !is_dir_entry {
-            self.files += 1;
-            if self.limits.max_files > 0 && self.files > u64::from(self.limits.max_files) {
+            self.files.insert(rel.clone());
+            if self.limits.max_files > 0
+                && self.files.len() as u64 > u64::from(self.limits.max_files)
+            {
                 return Err(format!(
                     "more than {} files (UnpackMaxFiles), at \"{shown}\"",
                     self.limits.max_files
                 ));
             }
         }
-        let rel = parts.join("/");
         for root in &self.roots {
             if let Some(long) = parts.iter().find(|p| p.len() as u64 > root.name_max) {
                 return Err(format!(
@@ -564,6 +568,21 @@ mod tests {
         assert_eq!(std::fs::read(t.join("Marnukh.mkv")).unwrap(), b"taken");
         assert_eq!(std::fs::read(t.join("Marnukh_2.mkv")).unwrap(), b"m");
         let _ = std::fs::remove_dir_all(&t);
+    }
+
+    #[test]
+    fn a_member_read_again_counts_once() {
+        let mut g = guard(Limits {
+            max_files: 2,
+            ..Limits::default()
+        });
+        for _ in 0..3 {
+            g.admit(Path::new(""), "a.bin");
+            g.admit(Path::new(""), "b.bin");
+        }
+        assert_eq!(g.breach(), None);
+        g.admit(Path::new(""), "c.bin");
+        assert!(g.breach().unwrap().contains("more than 2 files"));
     }
 
     /// A ustar archive of regular files.

@@ -2570,6 +2570,282 @@ mod tests {
         !crc
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_zip_modes_follow_rustyget_rules_not_the_archive() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("rg_zip_modes_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let zip_path = dir.join("modes.zip");
+        std::fs::write(
+            &zip_path,
+            build_test_zip(&[
+                ("ro/", b"", Some(0o040555), 0, None),
+                ("ro/f.txt", b"inside", Some(0o100644), 0, None),
+                ("zero.txt", b"zero", Some(0o100000), 0, None),
+                ("run.sh", b"#!/bin/sh", Some(0o100750), 0, None),
+                ("keep/", b"", Some(0o040555), 0, None),
+            ]),
+        )
+        .unwrap();
+        let mode_of =
+            |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o7777;
+        for overwrite in [1, 2] {
+            let out = dir.join(format!("out{overwrite}"));
+            std::fs::create_dir_all(out.join("keep")).unwrap();
+            std::fs::set_permissions(out.join("keep"), std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+            let summary = crate::archive_native::extract_zipfast_cancellable(
+                &zip_path,
+                &out,
+                "",
+                overwrite,
+                &mut |_, _| {},
+                &mut || false,
+            )
+            .unwrap();
+            assert_eq!(summary.files, 3, "mode {overwrite}");
+            // Folders and plain files get default permissions (umask), never the archive's.
+            assert_eq!(mode_of(&out.join("ro")) & 0o700, 0o700, "mode {overwrite}");
+            std::fs::write(out.join("ro/new.txt"), b"writable").unwrap();
+            assert_eq!(
+                mode_of(&out.join("zero.txt")) & 0o600,
+                0o600,
+                "mode {overwrite}"
+            );
+            assert_eq!(std::fs::read(out.join("zero.txt")).unwrap(), b"zero");
+            assert_eq!(mode_of(&out.join("run.sh")), 0o750, "mode {overwrite}");
+            assert_eq!(mode_of(&out.join("keep")), 0o700, "mode {overwrite}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_zip_survives_a_chmod_on_the_archive_mid_run() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("rg_zip_touch_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let zip_path = dir.join("touch.zip");
+        std::fs::write(
+            &zip_path,
+            build_test_zip(&[
+                ("a.txt", b"first", None, 0, None),
+                ("b.txt", b"second", None, 0, None),
+            ]),
+        )
+        .unwrap();
+        let out = dir.join("out");
+        let mut logs = Vec::new();
+        // An indexer or a permission fix touches the archive (ctime changes) while zipfast
+        // holds it open: once before a.txt is read and again while it is being read.
+        let touch = |mode: u32| {
+            std::fs::set_permissions(&zip_path, std::fs::Permissions::from_mode(mode)).unwrap()
+        };
+        let reading_a = std::cell::Cell::new(false);
+        let mut touched_again = false;
+        let summary = crate::archive_native::extract_zipfast_cancellable(
+            &zip_path,
+            &out,
+            "",
+            1,
+            &mut |_, m| {
+                if m == "Unrar: Extracting  a.txt" {
+                    touch(0o600);
+                    reading_a.set(true);
+                }
+                logs.push(m.to_string());
+            },
+            &mut || {
+                if reading_a.get() && !touched_again {
+                    touched_again = true;
+                    touch(0o640);
+                }
+                false
+            },
+        )
+        .unwrap_or_else(|e| panic!("{e}: {logs:?}"));
+        assert_eq!(summary.files, 2);
+        assert_eq!(std::fs::read(out.join("a.txt")).unwrap(), b"first");
+        assert_eq!(std::fs::read(out.join("b.txt")).unwrap(), b"second");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_zip_members_go_through_the_unpack_limits() {
+        // Every file and folder the ZIP path creates passes unpacklimits with its real path,
+        // as the RAR path does: the first breach refuses the member before it is created.
+        use crate::unpacklimits::{finish_names, Guard, Limits, Scope};
+        use std::sync::{Arc, Mutex};
+        let dir = std::env::temp_dir().join(format!("rg_zip_limits_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let too_many = dir.join("many.zip");
+        std::fs::write(
+            &too_many,
+            build_test_zip(&[
+                ("a.txt", b"a", None, 0, None),
+                ("b.txt", b"b", None, 0, None),
+                ("c.txt", b"c", None, 0, None),
+            ]),
+        )
+        .unwrap();
+        let too_deep = dir.join("deep.zip");
+        std::fs::write(
+            &too_deep,
+            build_test_zip(&[("x/y/z.txt", b"z", None, 0, None)]),
+        )
+        .unwrap();
+        let accented = dir.join("accented.zip");
+        std::fs::write(
+            &accented,
+            build_test_zip(&[("Caf\u{e9}.txt", b"c", None, 0, None)]),
+        )
+        .unwrap();
+        let limits = Limits {
+            max_files: 2,
+            max_depth: 1,
+            max_folders: 10,
+        };
+        for overwrite in [1, 2] {
+            let run = |zip: &std::path::Path, out: &std::path::Path| {
+                let g = Arc::new(Mutex::new(Guard::new(limits, out, &[])));
+                let res = {
+                    let _scope = Scope::enter(&g);
+                    crate::archive_native::extract_zipfast_cancellable(
+                        zip,
+                        out,
+                        "",
+                        overwrite,
+                        &mut |_, _| {},
+                        &mut || false,
+                    )
+                };
+                (res, g)
+            };
+
+            let out = dir.join(format!("many{overwrite}"));
+            let (res, _) = run(&too_many, &out);
+            let err = res.unwrap_err();
+            assert!(err.contains("more than 2 files"), "mode {overwrite}: {err}");
+            assert!(out.join("b.txt").exists() && !out.join("c.txt").exists());
+
+            let out = dir.join(format!("deep{overwrite}"));
+            let (res, _) = run(&too_deep, &out);
+            assert!(
+                res.is_err(),
+                "mode {overwrite}: deeper than 1 level was allowed"
+            );
+            assert!(!out.join("x").join("y").exists(), "mode {overwrite}");
+
+            let out = dir.join(format!("accented{overwrite}"));
+            let (res, g) = run(&accented, &out);
+            res.unwrap();
+            finish_names(&g, &mut |_, _| {}).unwrap();
+            assert!(out.join("Cafe.txt").exists(), "mode {overwrite}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_zip_auto_rename_keeps_duplicates_and_creates_missing_output() {
+        let dir = std::env::temp_dir().join(format!("rg_zip_dupes_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let zip_path = dir.join("dupes.zip");
+        std::fs::write(
+            &zip_path,
+            build_test_zip(&[
+                ("a.txt", b"first", None, 0, None),
+                ("a.txt", b"second", None, 0, None),
+            ]),
+        )
+        .unwrap();
+        let out = dir.join("missing").join("out");
+        let summary = crate::archive_native::extract_zipfast_cancellable(
+            &zip_path,
+            &out,
+            "",
+            2,
+            &mut |_, _| {},
+            &mut || false,
+        )
+        .unwrap();
+        assert_eq!(summary.files, 2);
+        assert_eq!(std::fs::read(out.join("a.txt")).unwrap(), b"first");
+        assert_eq!(std::fs::read(out.join("a_1.txt")).unwrap(), b"second");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_zip_cancel_and_refusals_log_short_messages() {
+        let dir = std::env::temp_dir().join(format!("rg_zip_msgs_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Cancel while a large member is being written: Err("Aborted"), no error lines.
+        let big = vec![0x5au8; 96 << 20];
+        let big_zip = dir.join("big.zip");
+        std::fs::write(
+            &big_zip,
+            build_test_zip(&[("big.bin", &big, None, 0, None)]),
+        )
+        .unwrap();
+        drop(big);
+        for overwrite in [1, 2] {
+            let out = dir.join(format!("big_out{overwrite}"));
+            let started = std::cell::Cell::new(false);
+            let mut polls_after_start = 0u32;
+            let mut errors = Vec::new();
+            let err = crate::archive_native::extract_zipfast_cancellable(
+                &big_zip,
+                &out,
+                "",
+                overwrite,
+                &mut |k, m| {
+                    if m.starts_with("Unrar: Extracting from") {
+                        started.set(true);
+                    }
+                    if k == 1 {
+                        errors.push(m.to_string());
+                    }
+                },
+                &mut || {
+                    if started.get() {
+                        polls_after_start += 1;
+                    }
+                    polls_after_start > 2
+                },
+            )
+            .unwrap_err();
+            assert_eq!(err, "Aborted", "mode {overwrite}");
+            assert!(errors.is_empty(), "mode {overwrite}: {errors:?}");
+            assert!(!out.join("big.bin").exists(), "mode {overwrite}");
+        }
+
+        // A path-traversal name is refused with a short line, not an error dump.
+        let evil_zip = dir.join("evil.zip");
+        std::fs::write(
+            &evil_zip,
+            build_test_zip(&[("../evil.txt", b"x", None, 0, None)]),
+        )
+        .unwrap();
+        let err = crate::archive_native::extract_zipfast_cancellable(
+            &evil_zip,
+            &dir.join("evil_out"),
+            "",
+            1,
+            &mut |_, _| {},
+            &mut || false,
+        )
+        .unwrap_err();
+        assert!(err.len() < 200 && !err.contains("ZipReadError"), "{err}");
+        assert!(!dir.join("evil.txt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Builds a valid ZIP archive in memory from `(name, payload, unix_mode, flags, encrypted_payload)`.
     fn build_test_zip(entries: &[(&str, &[u8], Option<u32>, u16, Option<&[u8]>)]) -> Vec<u8> {
         let mut out = Vec::new();
@@ -3372,7 +3648,7 @@ mod tests {
             .is_err());
             assert!(!rar5_cancel_out.join("testfile5.dat").exists());
         }
-        // Mid-entry ZIP cancellation removes partial output file
+        // ZIP cancellation once the zipfast run has started leaves no output file
         let big_zip_path = work_dir.join("big_cancel.zip");
         let big_zip_out = work_dir.join("big_cancel_out");
         let big_payload = vec![0x42u8; 512 * 1024];
@@ -3381,21 +3657,24 @@ mod tests {
             build_test_zip(&[("big.bin", &big_payload, Some(0o100644), 0, None)]),
         )
         .unwrap();
-        let mut zip_checks = 0usize;
-        let mut cancel_mid_zip = || {
-            zip_checks += 1;
-            zip_checks > 5
-        };
+        // "Extracting from" is logged just before the run starts, so the next poll is inside it.
+        let run_started = std::cell::Cell::new(false);
+        let mut cancel_mid_zip = || run_started.get();
         assert!(extract_archive_with_zipfast_cancellable(
             &big_zip_path,
             &big_zip_out,
             "",
             1,
             true,
-            |_, _| {},
+            |_, m| {
+                if m == "Unrar: Extracting from big_cancel.zip" {
+                    run_started.set(true);
+                }
+            },
             &mut cancel_mid_zip,
         )
         .is_err());
+        assert!(run_started.get());
         assert!(!big_zip_out.join("big.bin").exists());
 
         // 5. Bounded central-directory inspection matches in-memory zipview inspection

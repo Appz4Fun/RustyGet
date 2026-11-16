@@ -641,36 +641,8 @@ void detail(const char* msg, ...) PRINTF_SYNTAX(1);
 void debug(const char* filename, const char* funcname, int lineNr, const char* msg, ...) PRINTF_SYNTAX(4);
 #endif
 
-class Message
-{
-public:
-	enum EKind
-	{
-		mkInfo,
-		mkWarning,
-		mkError,
-		mkDebug,
-		mkDetail
-	};
-
-	Message(uint32 id, EKind kind, time_t time, const char* text) :
-		m_id(id), m_kind(kind), m_time(time), m_text(text) {}
-	uint32 GetId() { return m_id; }
-	EKind GetKind() { return m_kind; }
-	time_t GetTime() { return m_time; }
-	const char* GetText() { return m_text; }
-
-private:
-	uint32 m_id;
-	EKind m_kind;
-	time_t m_time;
-	CString m_text;
-
-	friend class Log;
-};
-
-typedef std::deque<Message> MessageList;
-typedef GuardedPtr<MessageList> GuardedMessageList;
+// message kinds (rust/src/qnzb.rs keeps a collection's messages)
+namespace Message { enum EKind { mkInfo, mkWarning, mkError, mkDebug, mkDetail }; }
 
 #ifndef OPTIONS_H
 #define OPTIONS_H
@@ -1918,7 +1890,12 @@ public:
 	int GetMessageCount() const { return m_messageCount; }
 	void SetMessageCount(int messageCount) { m_messageCount = messageCount; }
 	int GetCachedMessageCount() { return m_s->cachedMessageCount; }
-	GuardedMessageList GuardCachedMessages() { return GuardedMessageList(&m_messages, &m_logMutex); }
+	// message log ops in rust/src/qnzb.rs nzbget_rs_nzb_msgs
+	int64 NM(int op, int a2 = 0, NzbInfo* p2 = nullptr, const char* s1 = nullptr, const int* ints = nullptr,
+		void (*visit)(uintptr_t, int, int, int, const char*) = nullptr, uintptr_t ctx = 0)
+	{
+		return nzbget_rs_nzb_msgs(m_s, op, a2, p2 ? p2->m_s : nullptr, s1, ints, visit, ctx);
+	}
 	bool GetAllFirst() { return m_s->allFirst; }
 	void SetAllFirst(bool allFirst) { m_s->allFirst = allFirst; }
 	bool GetWaitingPar() { return m_s->waitingPar; }
@@ -2028,8 +2005,6 @@ private:
 	// missing byte ranges of completed media files awaiting stream repair
 	// from duplicate collections in post-processing (persisted)
 	FileList m_fileList;
-	Mutex m_logMutex;
-	MessageList m_messages;
 	std::unique_ptr<PostInfo> m_postInfo;
 	std::vector<CString> m_extractedArchives;
 	std::atomic<int> m_messageCount{0};
@@ -2042,12 +2017,7 @@ private:
 	inline static std::atomic<int> m_idGen{0};
 	inline static int m_idMax = 0;
 
-	void ClearMessages()
-	{
-		Guard guard(m_logMutex);
-		m_messages.clear();
-		m_s->cachedMessageCount = 0;
-	}
+	void ClearMessages() { NM(2); }
 
 	friend class DupInfo;
 };
@@ -2354,19 +2324,11 @@ inline void NzbInfo::AddMessage(Message::EKind kind, const char * text, bool pri
 		}
 	}
 
-	Guard guard(m_logMutex);
-
-	m_messages.emplace_back(++m_s->idMessageGen, kind, Util::CurrentTime(), text);
-
 	// NZB messages go to the main log (above); there are no separate NZB log files,
 	// so the details Log tab shows the messages kept here (MessageCount falls back to them)
 	// LogBuffer 0 keeps every message
-	while (g_Options->GetLogBuffer() > 0 && m_messages.size() > (uint32)g_Options->GetLogBuffer())
-	{
-		m_messages.pop_front();
-	}
-
-	m_s->cachedMessageCount = m_messages.size();
+	const int ints[2] = { (int)Util::CurrentTime(), g_Options->GetLogBuffer() };
+	NM(0, (int)kind, nullptr, text ? text : "", ints);
 }
 
 
@@ -2838,25 +2800,20 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 		if (a1 == 12) return reinterpret_cast<uintptr_t>(n->GetUnpackThread());
 		if (a1 == 13) { if (n->GetExtractedArchives()) n->GetExtractedArchives()->emplace_back(s1 ? s1 : ""); return 0; }
 		if (a1 == 14) { n->SetMetaName(s1 ? s1 : ""); return 0; }
-		if (a1 == 15) { for (Message& m : reinterpret_cast<NzbInfo*>(p2)->GuardCachedMessages()) n->AddMessage(m.GetKind(), m.GetText(), false); return 0; }
+		if (a1 == 15)
+		{
+			const int lim[2] = { (int)Util::CurrentTime(), g_Options->GetLogBuffer() };
+			n->NM(3, 0, reinterpret_cast<NzbInfo*>(p2), nullptr, lim);
+			return 0;
+		}
 		if (a1 == 16) { static thread_local CString s_niceUrl; s_niceUrl = n->MakeNiceUrlName(s1 ? s1 : "", s2 ? s2 : ""); strs[0] = s_niceUrl.Str(); return 0; }
 		if (a1 == 17) { if (a2 < 0) return n->NC(11); n->NC(12, a2, nullptr, nullptr, nullptr, ints, strs); return 0; }
 		if (a1 == 18) { auto* ea = n->GetExtractedArchives(); if (a2 < 0) return ea ? ea->size() : 0; strs[0] = (*ea)[(size_t)a2].Str() ? (*ea)[(size_t)a2].Str() : ""; return 0; }
 		if (a1 == 19) { if (a2 == 0) n->NC(44, 0, nullptr, nullptr, nullptr, ints); else n->NC(48); return 0; }
 		if (a1 == 20)
 		{
-			GuardedMessageList messages = n->GuardCachedMessages();
-			int sz = (int)messages->size();
-			int start = sz;
-			if (ints[1] > 0) start = sz - std::min(ints[1], sz);
-			if (ints[0] > 0 && sz > 0) start = std::max(0, ints[0] - (int)messages->front().GetId());
 			auto pushFn = reinterpret_cast<void(*)(uintptr_t, int, int, int, const char*)>(reinterpret_cast<uintptr_t>(s1));
-			if ((uint32)start < (uint32)sz)
-				for (uint32 i = (uint32)start; i < (uint32)sz; i++)
-				{
-					Message& m = messages->at(i);
-					pushFn(p2, (int)m.GetId(), (int)m.GetKind(), (int)m.GetTime(), m.GetText());
-				}
+			n->NM(4, 0, nullptr, nullptr, ints, pushFn, p2);
 			return 0;
 		}
 		if (a1 == 21) { if (a2 < 0) return n->NC(41); n->NC(43, a2, nullptr, nullptr, nullptr, ints); return 0; }

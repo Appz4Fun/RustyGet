@@ -3864,8 +3864,10 @@ enum ZipReadMode {
     /// zipfast's checked reader; a large AES member is spooled in this folder (or the default
     /// temporary folder for `None`).
     Checked(Option<PathBuf>),
-    /// zipfast's in-memory reader (no spool), for an AES member no spool folder accepts.
-    /// zipfast limits it to 128 MiB of ciphertext.
+    /// zipfast's plain session reader: it streams clear members and holds an encrypted
+    /// member's ciphertext in memory (no spool; zipfast limits that to 128 MiB). Used for an
+    /// AES member no spool folder accepts, and for a member the checked reader refuses only
+    /// because bytes follow the end of its compressed stream (as main and 7-Zip accept).
     InMemory,
 }
 
@@ -4087,7 +4089,8 @@ where
         let mode = entry.extraction_unix_mode();
         let mtime = entry.modified();
         // Only WinZip AES (raw method 99) is spooled; ZipCrypto streams.
-        let aes = entry.encrypted() && entry.listing_method() == 99;
+        // zipfast treats any entry with a WinZip AES extra field as AES, whatever its method.
+        let aes = entry.encrypted() && (entry.listing_method() == 99 || entry.aes_info().is_some());
         let spooled = aes && entry.packed_size() > ZIP_SPOOLED_CIPHERTEXT;
         let packed = entry.packed_size();
 
@@ -4144,8 +4147,24 @@ where
                         zipfast::zip::SessionError::SourceChanged { .. }
                     ))
                 );
-            if storage && attempt + 1 < ways.len() {
+            let trailing = matches!(
+                err.operation(),
+                Some(zipfast::zip::ReadFault::Integrity {
+                    reason: zipfast::zip::IntegrityReason::TrailingData,
+                    ..
+                })
+            );
+            // A spool folder that fails for any other reason (TMPDIR missing or unwritable)
+            // still leaves the in-memory way.
+            let spool_failed = matches!(ways[attempt], ZipReadMode::Checked(_))
+                && matches!(ways.get(attempt + 1), Some(ZipReadMode::InMemory))
+                && matches!(err.operation(), Some(zipfast::zip::ReadFault::Io { .. }));
+            if (storage || spool_failed) && attempt + 1 < ways.len() {
                 attempt += 1;
+            } else if trailing && !matches!(ways[attempt], ZipReadMode::InMemory) {
+                // The CRC is still checked by the plain reader.
+                ways.push(ZipReadMode::InMemory);
+                attempt = ways.len() - 1;
             } else if source_changed && reopens_left > 0 {
                 // Something touched the archive (chmod, xattr, indexer): read it again from a
                 // fresh session, if it still lists the same members.
@@ -5249,6 +5268,38 @@ mod tests {
         .unwrap();
         assert_eq!(written, size as u64);
         assert_eq!(std::fs::metadata(&out_path).unwrap().len(), size as u64);
+    }
+
+    #[test]
+    fn test_zip_bytes_after_the_deflate_stream_are_accepted_like_before() {
+        // Some writers leave padding after the end of a member's deflate stream inside its
+        // packed size. RustyGet (and 7-Zip) always extracted these; the CRC still decides.
+        use std::io::Write;
+        let plain = b"deflated member followed by padding inside the packed size";
+        let mut enc = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::best());
+        enc.write_all(plain).unwrap();
+        let mut packed = enc.finish().unwrap();
+        packed.extend_from_slice(&[0u8; 4]);
+        let dir = TempTestDir::new("zip_trailing");
+        for (crc, ok) in [(crc32(plain), true), (crc32(plain) ^ 1, false)] {
+            let zip_path = dir.path().join(format!("t{ok}.zip"));
+            std::fs::write(
+                &zip_path,
+                build_single_entry_zip(b"a.txt", 0, 8, crc, plain.len() as u32, &[], &packed),
+            )
+            .unwrap();
+            let out = dir.path().join(format!("out{ok}"));
+            let res =
+                extract_zip_cancellable(&zip_path, &out, "", 1, &mut |_, _| {}, &mut || false);
+            if ok {
+                assert_eq!(res.unwrap().files, 1);
+                assert_eq!(std::fs::read(out.join("a.txt")).unwrap(), plain);
+            } else {
+                let err = res.unwrap_err();
+                assert!(err.contains("CRC failed"), "{err}");
+                assert!(!out.join("a.txt").exists());
+            }
+        }
     }
 
     /// Run by hand against a folder on a file system zipfast's own staged output refuses

@@ -122,8 +122,6 @@ struct Shared {
     len: u64,
     want: Option<(u64, usize)>,
     have: (u64, Vec<u8>),
-    /// the furthest offset the map asked for
-    furthest: u64,
 }
 
 struct Bridge(Arc<Mutex<Shared>>);
@@ -146,7 +144,6 @@ impl RangeSource for Bridge {
         _: &mut Context<'_>,
     ) -> ProgressiveResult<RangeRead> {
         let mut s = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        s.furthest = s.furthest.max(offset);
         let (at, data) = &s.have;
         if let Some(rel) = offset
             .checked_sub(*at)
@@ -185,30 +182,23 @@ fn read_prefix(source: &mut dyn Source, offset: u64, len: usize) -> Vec<u8> {
     Vec::new()
 }
 
-/// Maps the volume behind `source`, ending it at `cap` when given.
-fn walk(
-    source: &mut dyn Source,
-    size: u64,
-    password: Option<&str>,
-    cap: Option<u64>,
-) -> (Result<VolumeMap, MapError>, u64) {
+/// Maps the volume behind `source`.
+fn walk(source: &mut dyn Source, size: u64, password: Option<&str>) -> Result<VolumeMap, MapError> {
     let shared = Arc::new(Mutex::new(Shared {
-        len: cap.map_or(size, |c| c.min(size)),
+        len: size,
         want: None,
         have: (0, Vec::new()),
-        furthest: 0,
     }));
     let options = MapOptions::new("volume.rar").password(password);
     let mut builder = VolumeMapBuilder::new(Box::new(Bridge(shared.clone())), options);
     let mut cx = Context::from_waker(Waker::noop());
     loop {
         if let Poll::Ready(result) = builder.poll_map(&mut cx) {
-            let furthest = shared.lock().map_or(0, |s| s.furthest);
-            return (result, furthest);
+            return result;
         }
         let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
         let Some((offset, len)) = s.want.take() else {
-            return (Err(MapError::AlreadyFinished), s.furthest);
+            return Err(MapError::AlreadyFinished);
         };
         let len = len.min(usize::try_from(s.len.saturating_sub(offset)).unwrap_or(usize::MAX));
         let data = read_prefix(source, offset, len);
@@ -218,32 +208,6 @@ fn walk(
         }
         s.have = (offset, data);
     }
-}
-
-/// A unix time as a DOS date and time (RAR3 headers store those; zipfast
-/// reports them as unix times read as UTC).
-fn dos_time(unix: i64) -> u32 {
-    let days = unix.div_euclid(86_400);
-    let secs = unix.rem_euclid(86_400);
-    // civil date from days since 1970 (proleptic Gregorian)
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    if !(1980..=2107).contains(&year) {
-        return 0;
-    }
-    (((year - 1980) as u32) << 25)
-        | ((month as u32) << 21)
-        | ((day as u32) << 16)
-        | (((secs / 3600) as u32) << 11)
-        | ((((secs / 60) % 60) as u32) << 5)
-        | (((secs % 60) / 2) as u32)
 }
 
 fn rar_file(m: &zipfast::map::VolumeMember, rar5: bool) -> RarFile {
@@ -259,10 +223,12 @@ fn rar_file(m: &zipfast::map::VolumeMember, rar5: bool) -> RarFile {
         MapMethod::Compressed { id } => (u32::from(id), false),
         _ => (u32::MAX, false),
     };
-    let time = m.mtime.map_or(
-        0,
-        |(secs, _)| if rar5 { secs as u32 } else { dos_time(secs) },
-    );
+    // RAR3 headers store DOS times, passed on as stored (invalid ones too)
+    let time = if rar5 {
+        m.mtime.map_or(0, |(secs, _)| secs as u32)
+    } else {
+        m.dos_time.unwrap_or(0)
+    };
     let mut f = RarFile {
         filename,
         time,
@@ -334,24 +300,14 @@ pub fn read_from(
         .filter(|p| volume.has_password && !p.is_empty())
         .map(String::from_utf8_lossy);
     let password = password.as_deref();
-    let map = match walk(source, size, password, None) {
-        (Ok(map), _) => map,
-        // A damaged header: keep what came before it, as the C++ reader did,
-        // by ending the volume where the map last read.
-        (Err(MapError::Malformed { .. } | MapError::Unsupported { .. }), furthest)
-            if furthest > 0 =>
-        {
-            match walk(source, size, password, Some(furthest)) {
-                (Ok(map), _) => map,
-                _ => return false,
-            }
-        }
+    let map = match walk(source, size, password) {
+        Ok(map) => map,
         // the headers are encrypted, the password just does not open them
-        (Err(MapError::WrongPassword), _) => {
+        Err(MapError::WrongPassword) => {
             volume.encrypted = true;
             return false;
         }
-        _ => return false,
+        Err(_) => return false,
     };
     if map.header_encrypted {
         volume.encrypted = true;
@@ -740,7 +696,12 @@ mod tests {
                 ..Volume::default()
             };
             let mut files = Vec::new();
-            assert!(!read_from(&mut volume, &mut source, Some(b"wrong"), &mut files));
+            assert!(!read_from(
+                &mut volume,
+                &mut source,
+                Some(b"wrong"),
+                &mut files
+            ));
             assert!(volume.encrypted, "{name}");
             assert!(files.is_empty());
         }
@@ -777,7 +738,12 @@ mod tests {
             let data = std::fs::read(dir.join(name)).unwrap();
             let mut whole = Vec::new();
             let mut volume = Volume::default();
-            assert!(read_from(&mut volume, &mut Bytes(data.clone()), None, &mut whole));
+            assert!(read_from(
+                &mut volume,
+                &mut Bytes(data.clone()),
+                None,
+                &mut whole
+            ));
             let first = whole[0].clone();
             // the bytes stop right after the first file's header: its data
             // and the end header cannot be read
@@ -810,15 +776,40 @@ mod tests {
         let method = data[at + 25];
         let mut files = Vec::new();
         let mut volume = Volume::default();
-        assert!(read_from(&mut volume, &mut Bytes(data.clone()), None, &mut files));
+        assert!(read_from(
+            &mut volume,
+            &mut Bytes(data.clone()),
+            None,
+            &mut files
+        ));
         assert_eq!(files[0].time, dos);
         assert_eq!(files[0].method, u32::from(method));
         assert_eq!(files[0].data_offset, (at + size) as i64);
-        assert_eq!(dos_time(0), 0);
-        // 2026-11-15 23:59:58 UTC
-        assert_eq!(
-            dos_time(1_794_787_198),
-            (46 << 25) | (11 << 21) | (15 << 16) | (23 << 11) | (59 << 5) | 29
-        );
+    }
+
+    #[test]
+    fn files_before_a_damaged_header_are_kept() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("tests/testdata/rarrenamer");
+        for name in ["testfile3.part01.rar", "testfile5.part01.rar"] {
+            let mut data = std::fs::read(dir.join(name)).unwrap();
+            let mut whole = Vec::new();
+            assert!(read_from(
+                &mut Volume::default(),
+                &mut Bytes(data.clone()),
+                None,
+                &mut whole
+            ));
+            // break the checksum of the header after the first file's data
+            let after = (whole[0].data_offset + whole[0].packed_size) as usize;
+            data[after] ^= 0xff;
+            let mut volume = Volume::default();
+            let mut files = Vec::new();
+            assert!(!read_from(&mut volume, &mut Bytes(data), None, &mut files));
+            assert_eq!(files, whole[..1].to_vec(), "{name}");
+            assert!(volume.multi_volume);
+        }
     }
 }

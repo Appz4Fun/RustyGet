@@ -1006,12 +1006,12 @@ dependencies = [
 [[package]]
 name = "zip-container"
 version = "0.1.0"
-source = "git+https://github.com/xbmc4lyfe/zipfast?rev=a82778313c98bc60e8fc51ea4356c8a1fcd1a093#a82778313c98bc60e8fc51ea4356c8a1fcd1a093"
+source = "git+https://github.com/xbmc4lyfe/zipfast?rev=b03934a002fce63ca21860a03c641904b9209ba7#b03934a002fce63ca21860a03c641904b9209ba7"
 
 [[package]]
 name = "zipfast"
 version = "0.1.0"
-source = "git+https://github.com/xbmc4lyfe/zipfast?rev=a82778313c98bc60e8fc51ea4356c8a1fcd1a093#a82778313c98bc60e8fc51ea4356c8a1fcd1a093"
+source = "git+https://github.com/xbmc4lyfe/zipfast?rev=b03934a002fce63ca21860a03c641904b9209ba7#b03934a002fce63ca21860a03c641904b9209ba7"
 dependencies = [
  "bzip2",
  "crc32fast",

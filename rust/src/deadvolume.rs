@@ -85,30 +85,54 @@ fn rar5_volnum_len(index: usize) -> i64 {
 /// difference. When the nzb lists the dead volume's size it has to fit the sibling's (yEnc
 /// adds 1 to 4 percent), which rules out a short last volume. `inner_size` bounds every range.
 pub fn plan(volumes: &[VolumeState], inner_size: i64) -> Vec<Plan> {
+    plan_with_stop(volumes, inner_size).0
+}
+
+/// [`plan`], plus why planning stopped before the end of `volumes`, if it did: which volume
+/// (numbered from 1) and what kept it from being planned. For the log.
+pub fn plan_with_stop(volumes: &[VolumeState], inner_size: i64) -> (Vec<Plan>, Option<String>) {
     let mut out = Vec::new();
     let Some(VolumeState::Readable(first)) = volumes.first() else {
-        return out;
+        return (out, Some("volume 1 is not readable".to_string()));
     };
+    let mut stop = None;
     let last = volumes.len() - 1;
     let mut offset = first.packed_size;
     for i in 1..volumes.len() {
         match &volumes[i] {
             VolumeState::Readable(g) => offset += g.packed_size,
-            VolumeState::Unknown => break,
+            VolumeState::Unknown => {
+                stop = Some(format!(
+                    "volume {} is not on disk or not readable yet",
+                    i + 1
+                ));
+                break;
+            }
             VolumeState::Dead { encoded_size } => {
                 let Some((template, g)) = template_for(volumes, i) else {
+                    stop = Some(format!(
+                        "no readable sibling gives volume {}'s layout",
+                        i + 1
+                    ));
                     break;
                 };
                 // The last volume known may be the set's last (shorter, closing the file): it
                 // is planned only when the inner file goes on past it.
                 if i == last && offset + g.packed_size >= inner_size {
+                    stop = Some(format!("volume {} may be the set's last", i + 1));
                     break;
                 }
                 let size = g.data_offset + g.packed_size + g.tail_len();
                 if *encoded_size > 0 && (*encoded_size < size || *encoded_size > size + size / 16) {
+                    stop = Some(format!(
+                        "volume {} is listed at {encoded_size} bytes, which does not fit a \
+                         {size}-byte volume like its sibling",
+                        i + 1
+                    ));
                     break;
                 }
                 if g.packed_size <= 0 || offset + g.packed_size > inner_size {
+                    stop = Some(format!("volume {} would end past the inner file", i + 1));
                     break;
                 }
                 out.push(Plan {
@@ -123,10 +147,14 @@ pub fn plan(volumes: &[VolumeState], inner_size: i64) -> Vec<Plan> {
         }
         if offset > inner_size {
             // Something before does not add up: plan nothing past it.
+            stop = Some(format!(
+                "the volumes up to {} hold more than the inner file",
+                i + 1
+            ));
             break;
         }
     }
-    out
+    (out, stop)
 }
 
 /// The geometry dead volume `i` would have, from its siblings, and the sibling it came from.

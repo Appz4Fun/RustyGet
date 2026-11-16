@@ -309,78 +309,116 @@ impl<'a> Lzma2RawSource<'a> {
             }
         };
 
-        // Read the packed stream from the sync point far enough to cover the wanted bytes:
-        // stored chunks cost three header bytes per 64 KiB, and the chunk holding the last
-        // wanted byte may run one whole chunk (64 KiB) past it. Let zipfast walk what was
-        // read; a window that turns out short is extended, never read again.
+        // Walk forward from the sync point in slabs, as zipfast indexes what has been read.
+        // Only stored chunks are accepted between the sync point and the end of the wanted
+        // bytes: a compressed chunk (or damage, or the end marker) there ends the borrow, so a
+        // misplaced sync point can never be carried across LZMA data onto the wrong bytes.
+        // Chunks fully behind the wanted bytes are dropped from the window as the walk goes,
+        // and every MiB of them leaves a sync point, so memory stays small and a later read
+        // (or a retry after a failure) starts close.
+        // The most a stored chunk's header and payload take: one chunk may run past the end.
         const CHUNK_MAX: i64 = 65_536 + 3;
-        let need = want_end - start.unpacked;
-        let mut span = need + need / 16_384 + CHUNK_MAX + 4096;
+        let mut base = start;
         let mut slab: Vec<u8> = Vec::new();
+        let mut last_noted = start.unpacked;
+        // Packed bytes the next step reads: at most a slab, and only what the wanted bytes can
+        // still need (their output, headers, and one chunk running past the end).
+        let need = want_end - start.unpacked;
+        let mut step = need + need / 16_384 + CHUNK_MAX + 64;
         loop {
-            let span_len = usize::try_from(span.min(l.pack_size - start.packed)).unwrap_or(0);
-            if span_len > slab.len() {
-                let Some(more) = self
-                    .read_packed_clamped(start.packed + slab.len() as i64, span_len - slab.len())
-                else {
+            if base.packed + slab.len() as i64 >= l.pack_size && slab.is_empty() {
+                return false;
+            }
+            if base.packed + slab.len() as i64 >= l.pack_size {
+                // Nothing more to read: the index below decides.
+            } else {
+                let Some(more) = self.read_packed_clamped(
+                    base.packed + slab.len() as i64,
+                    usize::try_from(step.clamp(4096, SLAB as i64)).unwrap_or(SLAB),
+                ) else {
                     return false;
                 };
                 slab.extend_from_slice(&more);
             }
-            let index = index_from(&slab, start.unpacked);
-            let reached = index.end_position();
-            let window_end_reached = start.packed + slab.len() as i64 >= l.pack_size;
+            let at_stream_end = base.packed + slab.len() as i64 >= l.pack_size;
+            let index = index_from(&slab, base.unpacked);
+            // The chunks that start before the end of the wanted bytes must be stored.
+            if index
+                .chunks
+                .iter()
+                .take_while(|c| (c.unpacked_offset as i64) < want_end)
+                .any(|c| c.kind != zipfast::map::Lzma2ChunkKind::Stored)
+            {
+                return false;
+            }
+            let reached = index.end_position().unpacked as i64;
+            if reached >= want_end {
+                let mut filled = 0usize;
+                for piece in index.plan(want_start as u64..want_end as u64) {
+                    let zipfast::map::Lzma2Piece::Stored { packed, .. } = piece else {
+                        return false;
+                    };
+                    let (from, to) = (packed.start as usize, packed.end as usize);
+                    if to > slab.len() || filled + (to - from) > buf.len() {
+                        return false;
+                    }
+                    buf[filled..filled + (to - from)].copy_from_slice(&slab[from..to]);
+                    filled += to - from;
+                }
+                if filled != buf.len() {
+                    return false;
+                }
+                // The last boundary at or before the end of this read: the next read starts there.
+                if let Some(c) = index
+                    .chunks
+                    .iter()
+                    .take_while(|c| c.unpacked_offset as i64 <= want_end)
+                    .last()
+                {
+                    self.add_sync(SyncPoint {
+                        unpacked: c.unpacked_offset as i64,
+                        packed: base.packed + c.packed_offset as i64,
+                    });
+                }
+                return true;
+            }
+            // Not there yet. Anything but the window's end stopped the walk: give up.
             let ended_by_window = matches!(
                 index.end,
                 zipfast::map::Lzma2End::Truncated { .. } | zipfast::map::Lzma2End::RangeEnd { .. }
             );
-            if (reached.unpacked as i64) < want_end && ended_by_window && !window_end_reached {
-                if span >= MAX_WALK + buf.len() as i64 {
-                    return false;
-                }
-                span = (span * 2).min(MAX_WALK + buf.len() as i64);
-                continue;
-            }
-            // Every piece must be a stored payload: a compressed chunk (or damage, or the
-            // end of the stream) in the way ends the borrow.
-            let mut filled = 0usize;
-            for piece in index.plan(want_start as u64..want_end as u64) {
-                let zipfast::map::Lzma2Piece::Stored { packed, .. } = piece else {
-                    return false;
-                };
-                let (from, to) = (packed.start as usize, packed.end as usize);
-                if to > slab.len() || filled + (to - from) > buf.len() {
-                    return false;
-                }
-                buf[filled..filled + (to - from)].copy_from_slice(&slab[from..to]);
-                filled += to - from;
-            }
-            if filled != buf.len() {
+            if !ended_by_window
+                || at_stream_end
+                || reached - start.unpacked > MAX_WALK + buf.len() as i64
+            {
                 return false;
             }
-            // Remember chunk boundaries about every MiB, and the last one at or before the
-            // end of this read: later reads start closer.
-            let mut last_noted = start.unpacked;
-            let mut last_before_end = None;
-            for c in &index.chunks {
-                let at = c.unpacked_offset as i64;
-                if at > want_end {
-                    break;
-                }
-                let sp = SyncPoint {
-                    unpacked: at,
-                    packed: start.packed + c.packed_offset as i64,
+            // What is left: the rest of the wanted output, its headers, one chunk that may run
+            // past the end, minus the bytes of the unfinished chunk already read.
+            let left = want_end - reached;
+            let have_beyond = slab.len() as i64 - index.end_position().packed as i64;
+            step = left + left / 16_384 + CHUNK_MAX + 64 - have_beyond.max(0);
+            // Move the window past the complete chunks that end before the wanted bytes.
+            if let Some(c) = index
+                .chunks
+                .iter()
+                .take_while(|c| (c.unpacked().end as i64) <= want_start)
+                .last()
+            {
+                let next = SyncPoint {
+                    unpacked: c.unpacked().end as i64,
+                    packed: base.packed + c.packed().end as i64,
                 };
-                if at - last_noted >= 1024 * 1024 {
-                    self.add_sync(sp);
-                    last_noted = at;
+                let drop = (next.packed - base.packed) as usize;
+                if drop > 0 && drop <= slab.len() {
+                    slab.drain(..drop);
+                    base = next;
+                    if base.unpacked - last_noted >= 1024 * 1024 {
+                        self.add_sync(base);
+                        last_noted = base.unpacked;
+                    }
                 }
-                last_before_end = Some(sp);
             }
-            if let Some(sp) = last_before_end {
-                self.add_sync(sp);
-            }
-            return true;
         }
     }
 }
@@ -544,6 +582,56 @@ mod tests {
         assert_eq!(ok, &inner[1_400_000..1_450_000]);
         let mut blocked = vec![0u8; 600_000];
         assert!(!src.read_inner(1_400_000, &mut blocked));
+    }
+
+    #[test]
+    fn a_compressed_chunk_after_the_sync_point_ends_the_borrow() {
+        // Stored chunks, one LZMA chunk (its packed bytes are not the output), stored again.
+        // zipfast's index can walk across the LZMA chunk, but a borrow never goes past one:
+        // reads from a sync point before it succeed only up to it.
+        let folder = noise(4 * 1024 * 1024, 31);
+        let lzma_at = 2_000_000usize;
+        let lzma_len = 300_000usize;
+        let mut packed = pack_raw(&folder[..lzma_at]);
+        packed.pop(); // drop the end marker
+        let u = lzma_len - 1;
+        let p = 999usize;
+        packed.extend_from_slice(&[
+            0x80 | ((u >> 16) as u8),
+            (u >> 8) as u8,
+            u as u8,
+            (p >> 8) as u8,
+            p as u8,
+        ]);
+        packed.extend_from_slice(&noise(p + 1, 33));
+        let mut rest = pack_raw(&folder[lzma_at + lzma_len..]);
+        rest[0] = 0x02; // continues the stream: no dictionary reset
+        packed.extend_from_slice(&rest);
+        let layout = layout_for(&folder, 0, 0, &packed);
+        let src = Lzma2RawSource::new(
+            layout,
+            Box::new(|off, buf: &mut [u8]| {
+                let o = off as usize;
+                if o + buf.len() > packed.len() {
+                    return false;
+                }
+                buf.copy_from_slice(&packed[o..o + buf.len()]);
+                true
+            }),
+        );
+        let mut read_target = |off: i64, buf: &mut [u8]| {
+            let o = off as usize;
+            buf.copy_from_slice(&folder[o..o + buf.len()]);
+            true
+        };
+        assert!(src.sync_before(1_900_000, &mut read_target, &|_, _| true));
+        let mut before = vec![0u8; 50_000];
+        assert!(src.read_inner(1_900_000, &mut before));
+        assert_eq!(before, &folder[1_900_000..1_950_000]);
+        let mut across = vec![0u8; 500_000];
+        assert!(!src.read_inner(1_950_000, &mut across));
+        let mut after = vec![0u8; 100_000];
+        assert!(!src.read_inner(2_500_000, &mut after));
     }
 
     #[test]

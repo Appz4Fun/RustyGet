@@ -787,10 +787,30 @@ fn daemon_article_cache_run() {
                 sleep_ms(5);
             }
         } else if allocated == 0 {
-            if trim_pending && last_trim.is_none_or(|t| t.elapsed() >= TRIM_EVERY) {
-                crate::memory_pressure::trim_heap();
-                trim_pending = false;
-                last_trim = Some(std::time::Instant::now());
+            if trim_pending {
+                let wait = last_trim.map_or(std::time::Duration::ZERO, |t| {
+                    TRIM_EVERY.saturating_sub(t.elapsed())
+                });
+                if wait.is_zero() {
+                    crate::memory_pressure::trim_heap();
+                    trim_pending = false;
+                    last_trim = Some(std::time::Instant::now());
+                } else {
+                    // Too soon after the last trim: come back when it is due
+                    // (or earlier, when articles arrive) instead of sleeping
+                    // until the next download and keeping the freed heap.
+                    let guard = CACHE_ALLOC_LOCK.0.lock().unwrap_or_else(|e| e.into_inner());
+                    if CACHE_ALLOCATED.load(Ordering::SeqCst) == 0 && !is_stopped_cb() {
+                        drop(
+                            CACHE_ALLOC_LOCK
+                                .1
+                                .wait_timeout(guard, wait)
+                                .unwrap_or_else(|e| e.into_inner()),
+                        );
+                    }
+                    reset_counter = 0;
+                    continue;
+                }
             }
             let mut guard = CACHE_ALLOC_LOCK.0.lock().unwrap_or_else(|e| e.into_inner());
             while CACHE_ALLOCATED.load(Ordering::SeqCst) == 0 && !is_stopped_cb() {

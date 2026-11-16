@@ -775,7 +775,9 @@ fn daemon_article_cache_run() {
             let (alloc_now, _, stopped_now, _, _) = snap();
             if need_emergency_flush && alloc_now == 0 {
                 crate::memory_pressure::trim_heap();
-            } else if !just_flushed && !stopped_now {
+            } else if (!just_flushed || alloc_now >= allocated) && !stopped_now {
+                // A "flush" that freed nothing (file busy, write blocked)
+                // must not spin: the 32 MiB DirectWrite hold reaches this often.
                 sleep_ms(5);
             }
         } else if allocated == 0 {

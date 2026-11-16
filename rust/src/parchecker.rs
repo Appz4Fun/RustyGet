@@ -2526,6 +2526,12 @@ pub fn streaming_session_forget(nzb_id: i32) {
                 sessions.remove(&nzb_id);
             }
         });
+        // Its slots and staging go with the last reference; give the freed
+        // heap back to the OS. Off this thread: callers may hold the queue lock.
+        drop(old);
+        let _ = std::thread::Builder::new()
+            .name("live-par-trim".into())
+            .spawn(crate::memory_pressure::trim_heap);
     }
     COMPLETED_LIVE_FILES
         .lock()

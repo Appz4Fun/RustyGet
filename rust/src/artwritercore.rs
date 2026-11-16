@@ -1431,6 +1431,10 @@ pub fn calc_write_buffer_size(write_buffer_kb: i32, rec_size: i32) -> i32 {
     }
 }
 
+/// Most the article cache holds under DirectWrite before it writes
+/// everything out (ArticleCache, when smaller, still caps it).
+pub const DIRECT_WRITE_CACHE_HOLD: usize = 32 * 1024 * 1024;
+
 pub const PRESSURE_NORMAL: i32 = 0;
 pub const PRESSURE_CONSTRAINED: i32 = 1;
 pub const PRESSURE_CRITICAL: i32 = 2;
@@ -1449,11 +1453,18 @@ pub fn article_cache_should_flush(
 ) -> (bool, bool, bool) {
     let is_critical = tier == PRESSURE_CRITICAL;
     let is_constrained = tier == PRESSURE_CONSTRAINED;
-    let fill_threshold = if effective_limit > 0 {
+    let mut fill_threshold = if effective_limit > 0 {
         (effective_limit / 100) * 90
     } else {
         0
     };
+    // With DirectWrite each article goes straight to its place in the
+    // output file, so the cache only batches writes: holding more than a
+    // small burst gains nothing and keeps memory the download does not need.
+    // ArticleCache stays the ceiling.
+    if direct_write {
+        fill_threshold = fill_threshold.min(DIRECT_WRITE_CACHE_HOLD);
+    }
     let need_emergency_flush = is_critical && allocated > 0;
     let need_constrained_flush = is_constrained && allocated > effective_limit;
 
@@ -2171,5 +2182,26 @@ mod tests {
         assert_eq!(std::fs::read(dir.join("renamed.bin")).unwrap(), b"world");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn direct_write_cache_flushes_after_a_small_burst_not_at_the_ceiling() {
+        const MIB: usize = 1024 * 1024;
+        let limit = 1024 * MIB;
+        // DirectWrite: past the burst hold everything is written out.
+        let (flush, everything, _) =
+            article_cache_should_flush(40 * MIB, limit, PRESSURE_NORMAL, false, 0, false, true);
+        assert!(flush && everything);
+        let (flush, _, _) =
+            article_cache_should_flush(8 * MIB, limit, PRESSURE_NORMAL, false, 0, false, true);
+        assert!(!flush);
+        // Without DirectWrite the cache still fills to 90% of ArticleCache.
+        let (flush, everything, _) =
+            article_cache_should_flush(40 * MIB, limit, PRESSURE_NORMAL, false, 0, false, false);
+        assert!(!flush && !everything);
+        // A smaller ArticleCache stays the ceiling under DirectWrite.
+        let (flush, everything, _) =
+            article_cache_should_flush(19 * MIB, 20 * MIB, PRESSURE_NORMAL, false, 0, false, true);
+        assert!(flush && everything);
     }
 }

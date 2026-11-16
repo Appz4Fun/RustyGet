@@ -1336,6 +1336,7 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
             1
         }
         2 => {
+            crate::memory_pressure::limit_malloc_arenas();
             #[cfg(unix)]
             {
                 crate::diskstate_format::reset_active_legacy_queue_read();

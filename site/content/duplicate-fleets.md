@@ -83,7 +83,7 @@ par2 repair needs as many recovery blocks as there are damaged blocks. When a do
 
 The twin's set is separate from the download's own set, so its volumes can't simply be added to the repair; RustyGet runs the repair with the twin's set, and only when the filenames in both sets match.
 
-To find twins, RustyGet fetches the smallest par2 file of each posting, at most 16 MB, and stores a fingerprint of its file list. For postings without par2, it compares six articles at the same positions in both postings instead.
+To find twins, RustyGet fetches the smallest par2 file of each posting, at most 16 MB, and stores a fingerprint of its file list. For postings without par2, it compares the first and last article of up to three files plus six middle articles instead; see [Twins and alts](twins-and-alts.md#what-rustyget-checks-today).
 
 ## Stream repair
 

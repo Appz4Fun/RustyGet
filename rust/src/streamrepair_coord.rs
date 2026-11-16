@@ -183,6 +183,75 @@ struct RepairTarget {
     steps_hash: u64,
 }
 
+/// True when DirectUnpack is on: only direct unpack reads a rebuilt dead volume.
+fn direct_unpack_on() -> bool {
+    crate::options::active_options().is_some_and(|o| o.scalars().direct_unpack != 0)
+}
+
+/// True when `t` is a volume of which nothing arrived that the dead-volume borrow can rebuild
+/// for direct unpack: a `.partNN.rar` past the first (the borrow needs a readable first
+/// volume), or a file direct unpack already holds under a name that is not a RAR name (an
+/// obfuscated one).
+fn borrowable_dead_volume(dest_dir: &[u8], t: &RepairTarget) -> bool {
+    if t.is_par_file || !crate::streamrepair::nothing_arrived(t.decoded_file_size, &t.holes) {
+        return false;
+    }
+    // The borrow plans `.partNN.rar` sets only, from a readable first volume.
+    if let Some((_, n, _, _)) = crate::streamrepair::rar_part_number(&t.filename) {
+        return n > 1;
+    }
+    if crate::filetypes::is_rar_file(&t.filename) {
+        return false;
+    }
+    let full = [
+        dest_dir,
+        &[crate::paths::PATH_SEPARATOR],
+        t.filename.as_slice(),
+    ]
+    .concat();
+    crate::postproc::direct_unpack_is_held_path(&full)
+}
+
+/// Which targets the live repair leaves to the dead-volume borrow instead of recreating them
+/// whole first: recreating fetches every article one by one (minutes, long enough for the queue
+/// to fail over) and only works from a twin. None without DirectUnpack (only direct unpack reads
+/// a rebuilt volume) or with a known password (encrypted sets are not borrowed).
+fn dead_volumes_to_borrow(
+    dest_dir: &[u8],
+    targets: &[RepairTarget],
+    counters: &RunCounters,
+) -> Vec<bool> {
+    if !direct_unpack_on() || !counters.target_password.is_empty() {
+        return vec![false; targets.len()];
+    }
+    targets
+        .iter()
+        .map(|t| t.patch_eligible && borrowable_dead_volume(dest_dir, t))
+        .collect()
+}
+
+/// Marks a borrow of dead volumes of a download underway for as long as it lives, so the
+/// queue does not fail over meanwhile; dropping it (also on unwind) clears the mark.
+struct BorrowNote(Option<i32>);
+
+impl BorrowNote {
+    fn mark(nzb_id: Option<i32>) -> Self {
+        if let Some(id) = nzb_id {
+            crate::postproc::note_dead_volume_borrow(id, true);
+        }
+        Self(nzb_id)
+    }
+}
+
+impl Drop for BorrowNote {
+    fn drop(&mut self) {
+        // A rebuilt volume handed to direct unpack keeps the borrow marked on its own.
+        if let Some(id) = self.0.take() {
+            crate::postproc::note_dead_volume_borrow(id, false);
+        }
+    }
+}
+
 impl RepairTarget {
     #[inline]
     fn needs_repair(&self) -> bool {
@@ -1122,6 +1191,7 @@ impl NzbgetRsStreamRepairCtrl {
         donors: &[DonorSource],
         member_names: &[Vec<u8>],
         counters: &mut RunCounters,
+        left_to_borrow: &[bool],
     ) {
         self.batch_fetcher.set_worker_count(if self.live_mode {
             0
@@ -1129,12 +1199,26 @@ impl NzbgetRsStreamRepairCtrl {
             stream_fetch_worker_count(opts.primary_connections)
         });
         let mut tried_postings: BTreeSet<Vec<u8>> = BTreeSet::new();
+        // Dead volumes left to the cross-packing repair to borrow (the mask from
+        // `dead_volumes_to_borrow`, or empty for none) skip the whole-file recreation.
+        let left_to_borrow: Vec<bool> = (0..targets.len())
+            .map(|i| left_to_borrow.get(i).copied().unwrap_or(false))
+            .collect();
+        for (t, _) in targets.iter().zip(&left_to_borrow).filter(|(_, l)| **l) {
+            let mut msg = b"Leaving dead volume ".to_vec();
+            msg.extend_from_slice(&t.filename);
+            msg.extend_from_slice(b" to be borrowed from a duplicate; direct unpack keeps going");
+            unsafe { self.print_message(ctx, cb, MK_INFO, &msg) };
+        }
 
         for donor in donors {
             if unsafe { self.host_is_stopped(ctx, cb) } {
                 break;
             }
-            let any_holes = targets.iter().any(|t| t.patch_eligible && t.needs_repair());
+            let any_holes = targets
+                .iter()
+                .zip(&left_to_borrow)
+                .any(|(t, left)| !left && t.patch_eligible && t.needs_repair());
             if !any_holes {
                 break;
             }
@@ -1164,7 +1248,8 @@ impl NzbgetRsStreamRepairCtrl {
             let member_name_refs: Vec<&[u8]> = member_names.iter().map(|m| m.as_slice()).collect();
             let mut m1_targets: Vec<M1RepairTarget> = targets
                 .iter()
-                .map(|t| M1RepairTarget {
+                .zip(&left_to_borrow)
+                .map(|(t, left)| M1RepairTarget {
                     filename: t.filename.clone(),
                     decoded_file_size: t.decoded_file_size,
                     holes: t.holes.clone(),
@@ -1172,7 +1257,7 @@ impl NzbgetRsStreamRepairCtrl {
                     article_count: t.article_count,
                     recreated: t.recreated,
                     donor_set: Vec::new(),
-                    patch_eligible: t.patch_eligible,
+                    patch_eligible: t.patch_eligible && !left,
                     positional_rank: t.positional_rank,
                     positional_window: t.positional_window,
                     steps_hash: t.steps_hash,
@@ -1319,6 +1404,68 @@ impl NzbgetRsStreamRepairCtrl {
         }
     }
 
+    /// Runs the whole-file recreation for the dead volumes left to the borrow that it did not
+    /// rebuild, and for nothing else.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn recreate_unborrowed(
+        &self,
+        ctx: *mut c_void,
+        cb: NzbgetRsStreamRepairHostFn,
+        opts: &HostOptions,
+        dest_dir: &[u8],
+        targets: &mut [RepairTarget],
+        donors: &[DonorSource],
+        member_names: &[Vec<u8>],
+        counters: &mut RunCounters,
+        left_to_borrow: &[bool],
+    ) {
+        let retry: Vec<bool> = (0..targets.len())
+            .map(|i| {
+                let t = &targets[i];
+                left_to_borrow.get(i).copied().unwrap_or(false)
+                    && t.needs_repair()
+                    && !crate::postproc::direct_unpack_has_virtual(
+                        &[
+                            dest_dir,
+                            &[crate::paths::PATH_SEPARATOR],
+                            t.filename.as_slice(),
+                        ]
+                        .concat(),
+                    )
+            })
+            .collect();
+        if !retry.iter().any(|r| *r) {
+            return;
+        }
+        let saved: Vec<bool> = targets.iter().map(|t| t.patch_eligible).collect();
+        for (t, r) in targets.iter_mut().zip(&retry) {
+            if *r {
+                let mut msg = b"Could not borrow dead volume ".to_vec();
+                msg.extend_from_slice(&t.filename);
+                msg.extend_from_slice(b"; recreating it from a byte-identical duplicate");
+                unsafe { self.print_message(ctx, cb, MK_INFO, &msg) };
+            } else {
+                t.patch_eligible = false;
+            }
+        }
+        unsafe {
+            self.exec_repair(
+                ctx,
+                cb,
+                opts,
+                dest_dir,
+                targets,
+                donors,
+                member_names,
+                counters,
+                &[],
+            );
+        }
+        for (t, s) in targets.iter_mut().zip(saved) {
+            t.patch_eligible = s;
+        }
+    }
+
     /// Data files of the download still queued and the download's id (`op == 16`), each
     /// `None` when the host cannot tell.
     unsafe fn pending_data_files(
@@ -1343,7 +1490,10 @@ impl NzbgetRsStreamRepairCtrl {
                 );
             });
         }
-        (usize::try_from(ints[0]).ok(), (ints[0] >= 0).then_some(ints[1]))
+        (
+            usize::try_from(ints[0]).ok(),
+            (ints[0] >= 0).then_some(ints[1]),
+        )
     }
 
     unsafe fn exec_cross_pack_repair(
@@ -1394,9 +1544,7 @@ impl NzbgetRsStreamRepairCtrl {
 
         let (pending_data_files, nzb_id) = unsafe { self.pending_data_files(ctx, cb) };
         // Only direct unpack reads a rebuilt dead volume: without it nothing is borrowed.
-        let direct_unpack = crate::options::active_options()
-            .is_some_and(|o| o.scalars().direct_unpack != 0);
-        let nzb_id = nzb_id.filter(|_| direct_unpack);
+        let nzb_id = nzb_id.filter(|_| direct_unpack_on());
         let dead_context = crate::streamrepair::DeadVolumeContext {
             pending_data_files,
             nzb_id,
@@ -2115,6 +2263,7 @@ impl NzbgetRsStreamRepairCtrl {
                     &donors,
                     &member_names,
                     &mut counters,
+                    &[],
                 );
             }
             let any_holes = targets.iter().any(|t| t.needs_repair());
@@ -2171,6 +2320,15 @@ impl NzbgetRsStreamRepairCtrl {
             unsafe { self.print_message(ctx, cb, MK_INFO, &msg) };
 
             let opts = unsafe { self.query_host_options(ctx, cb) };
+            // Keep the queue from failing over while the repair works towards borrowing a dead
+            // volume: the switch would throw away the extraction already done.
+            let left_to_borrow = dead_volumes_to_borrow(&dest_dir, &targets, &counters);
+            let borrowing = left_to_borrow.iter().any(|l| *l);
+            let borrow_note = BorrowNote::mark(if borrowing {
+                unsafe { self.pending_data_files(ctx, cb) }.1
+            } else {
+                None
+            });
             let wd_handle = self.start_watchdog(ctx, cb, &opts, &targets);
             self.compute_positional_ranks(&dest_dir, &mut targets, &member_names);
             unsafe {
@@ -2183,6 +2341,7 @@ impl NzbgetRsStreamRepairCtrl {
                     &donors,
                     &member_names,
                     &mut counters,
+                    &left_to_borrow,
                 );
             }
             let any_holes = targets.iter().any(|t| t.patch_eligible && t.needs_repair());
@@ -2198,6 +2357,25 @@ impl NzbgetRsStreamRepairCtrl {
                         &donors,
                         &member_names,
                         &mut counters,
+                    );
+                }
+            }
+            drop(borrow_note);
+            // Dead volumes the borrow could not rebuild (a compressed set, a volume that cannot
+            // be placed yet, the real last one...) still get the whole-file recreation from a
+            // byte-identical duplicate, as before.
+            if borrowing && unsafe { !self.host_is_stopped(ctx, cb) } {
+                unsafe {
+                    self.recreate_unborrowed(
+                        ctx,
+                        cb,
+                        &opts,
+                        &dest_dir,
+                        &mut targets,
+                        &donors,
+                        &member_names,
+                        &mut counters,
+                        &left_to_borrow,
                     );
                 }
             }
@@ -2249,5 +2427,114 @@ pub unsafe fn stream_repair_ctrl_exec(
             0
         }
         _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn target(name: &str, decoded: i64, holes: Vec<NzbgetRsByteRange>) -> RepairTarget {
+        RepairTarget {
+            file_id: 1,
+            filename: name.as_bytes().to_vec(),
+            decoded_file_size: decoded,
+            holes,
+            encoded_size: 277_872_640,
+            article_count: 388,
+            recreated: false,
+            failed_size: 0,
+            missed_size: 0,
+            failed_articles: 388,
+            is_par_file: false,
+            patch_eligible: true,
+            positional_rank: 0,
+            positional_window: 0,
+            steps_hash: 0,
+        }
+    }
+
+    #[test]
+    fn only_dead_volumes_the_borrow_can_rebuild_skip_the_whole_file_recreate() {
+        let dir = b"/dst/borrowable-dead-volume-test";
+        // The live case: part36 of a stored set, nothing arrived.
+        assert!(borrowable_dead_volume(
+            dir,
+            &target("Movie.part36.rar", 0, vec![])
+        ));
+        // Holes covering the whole file count as nothing arrived too.
+        let whole = vec![NzbgetRsByteRange {
+            offset: 0,
+            size: 1000,
+        }];
+        assert!(borrowable_dead_volume(
+            dir,
+            &target("Movie.part36.rar", 1000, whole)
+        ));
+        // A damaged volume with a small hole keeps the article-level repair.
+        let hole = vec![NzbgetRsByteRange {
+            offset: 0,
+            size: 10,
+        }];
+        assert!(!borrowable_dead_volume(
+            dir,
+            &target("Movie.part36.rar", 1000, hole)
+        ));
+        // The first volume cannot be rebuilt, old naming and par2 files are not borrowed.
+        assert!(!borrowable_dead_volume(
+            dir,
+            &target("Movie.part01.rar", 0, vec![])
+        ));
+        assert!(!borrowable_dead_volume(
+            dir,
+            &target("Movie.r05", 0, vec![])
+        ));
+        let mut par = target("Movie.vol07+08.par2", 0, vec![]);
+        par.is_par_file = true;
+        assert!(!borrowable_dead_volume(dir, &par));
+        // Held RAR names that the borrow cannot plan stay with the recreation.
+        for name in ["Movie.part01.rar", "Movie.r05", "Movie.rar"] {
+            let full = [
+                dir.as_slice(),
+                &[crate::paths::PATH_SEPARATOR],
+                name.as_bytes(),
+            ]
+            .concat();
+            crate::postproc::direct_unpack_hold(987_653, &full);
+            let held = borrowable_dead_volume(dir, &target(name, 0, vec![]));
+            crate::postproc::direct_unpack_forget_holds(987_653);
+            assert!(!held, "{name}");
+        }
+        // An obfuscated name counts once direct unpack holds it.
+        let obf = target("a8f3c1d9e2", 0, vec![]);
+        assert!(!borrowable_dead_volume(dir, &obf));
+        let full = [
+            dir.as_slice(),
+            &[crate::paths::PATH_SEPARATOR],
+            b"a8f3c1d9e2",
+        ]
+        .concat();
+        crate::postproc::direct_unpack_hold(987_654, &full);
+        let held = borrowable_dead_volume(dir, &obf);
+        crate::postproc::direct_unpack_forget_holds(987_654);
+        assert!(held);
+        assert!(!borrowable_dead_volume(dir, &obf));
+    }
+
+    #[test]
+    fn the_borrow_note_is_cleared_when_dropped_even_on_unwind() {
+        let id = 987_655;
+        {
+            let _note = BorrowNote::mark(Some(id));
+            assert!(crate::postproc::dead_volume_borrow_underway(id));
+        }
+        assert!(!crate::postproc::dead_volume_borrow_underway(id));
+        let unwound = std::panic::catch_unwind(|| {
+            let _note = BorrowNote::mark(Some(id));
+            panic!("repair failed");
+        });
+        assert!(unwound.is_err());
+        assert!(!crate::postproc::dead_volume_borrow_underway(id));
+        drop(BorrowNote::mark(None));
     }
 }

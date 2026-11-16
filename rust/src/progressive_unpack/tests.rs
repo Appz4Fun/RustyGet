@@ -1,7 +1,8 @@
 use super::*;
 
 thread_local! {
-    /// Declares complete sets at session start whatever their estimated cost.
+    /// Declares complete sets at session start whatever their estimated cost, and caps
+    /// the declared session's protection path bytes so it hits a limit.
     pub(super) static FORCE_DECLARE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 use std::sync::atomic::{AtomicBool, AtomicUsize};
@@ -3870,4 +3871,57 @@ fn a_fallback_after_a_given_up_repair_never_places_damaged_bytes() {
         assert!(!ok0 && !ok1, "{log0:?}\n{log1:?}");
         assert_eq!(l0, l1, "crc={crc}\n{log1:?}");
     }
+}
+
+/// A RAR 1.5-4.x backslash separates directories, as unrar and zipfast read it: the member
+/// lands in the folder with its stored mode and archive time, in every mode.
+#[cfg(unix)]
+#[test]
+fn a_rar4_backslash_name_lands_in_its_folder_with_mode_and_time() {
+    for (tag, overwrite) in [
+        ("bsalways", Overwrite::Always),
+        ("bsrename", Overwrite::Rename),
+        ("bsskip", Overwrite::Skip),
+    ] {
+        let t = TestDir::new(tag);
+        let data = pattern(70_000);
+        let first = write_set(
+            &t.dl(),
+            &rar4_store_volumes("dir\\file.bin", &data, 1 << 30),
+        );
+        let (r, log) = run_with(&first, &t.out(), Box::new(CompleteSet), overwrite);
+        expect_ok(r, &log);
+        assert!(
+            log.iter().any(|l| l == "Unrar: Extracting  dir/file.bin"),
+            "{tag}: {log:?}"
+        );
+        let out = t.out().join("dir").join("file.bin");
+        assert_eq!(std::fs::read(&out).unwrap(), data, "{tag}: {log:?}");
+        assert!(!t.out().join("dir\\file.bin").exists(), "{tag}");
+        assert_eq!(mode_of(&out), 0o644, "{tag}");
+        let age = std::time::SystemTime::now()
+            .duration_since(std::fs::metadata(&out).unwrap().modified().unwrap())
+            .unwrap();
+        assert!(age.as_secs() > 86_400, "{tag}: archive time not restored");
+    }
+}
+
+/// Skip mode checks a RAR4 backslash name where it lands.
+#[test]
+fn skip_mode_keeps_an_existing_rar4_backslash_target() {
+    let t = TestDir::new("bsskipkept");
+    let data = pattern(70_000);
+    let first = write_set(
+        &t.dl(),
+        &rar4_store_volumes("dir\\file.bin", &data, 1 << 30),
+    );
+    std::fs::create_dir_all(t.out().join("dir")).unwrap();
+    std::fs::write(t.out().join("dir").join("file.bin"), b"kept").unwrap();
+    let (r, log) = run_with(&first, &t.out(), Box::new(CompleteSet), Overwrite::Skip);
+    let s = expect_ok(r, &log);
+    assert_eq!(s.skipped, 1, "{log:?}");
+    assert_eq!(
+        std::fs::read(t.out().join("dir").join("file.bin")).unwrap(),
+        b"kept"
+    );
 }

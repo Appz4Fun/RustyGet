@@ -171,7 +171,8 @@ fn name4(raw: &[u8], flags: u16) -> (String, Option<Vec<u8>>) {
 fn sanitize_rar4_rel_path_bytes(raw_name: &[u8], windows_names: bool) -> Result<PathBuf, String> {
     let unsafe_err = || format!("unsafe archive path: {}", String::from_utf8_lossy(raw_name));
     let mut out = PathBuf::new();
-    let is_sep = |b: u8| b == b'/' || (windows_names && b == b'\\');
+    // A backslash separates directories whatever the host, as unrar reads RAR 1.5-4.x names.
+    let is_sep = |b: u8| b == b'/' || b == b'\\';
     for (i, part) in raw_name.split(|&b| is_sep(b)).enumerate() {
         if i == 0 && part.is_empty() && !raw_name.is_empty() {
             return Err(unsafe_err());
@@ -962,11 +963,13 @@ where
                     log_cb(1, &msg);
                     msg
                 })?,
-            None => zipfast::path::sanitize(&first.name, first.windows_names).map_err(|e| {
-                let msg = format!("Unrar: {e}");
-                log_cb(1, &msg);
-                msg
-            })?,
+            // A backslash separates directories whatever the host, as for raw names.
+            None => zipfast::path::sanitize(&first.name.replace('\\', "/"), first.windows_names)
+                .map_err(|e| {
+                    let msg = format!("Unrar: {e}");
+                    log_cb(1, &msg);
+                    msg
+                })?,
         };
         if first.is_dir {
             create_dir_all_no_follow(output_dir, &rel).map_err(|e| {
@@ -5587,6 +5590,16 @@ mod tests {
                 .unwrap();
         assert_eq!(summary.files, 1);
         assert_eq!(std::fs::read(out_dir.join("hello.txt")).unwrap(), payload);
+    }
+
+    #[test]
+    fn test_rar4_backslash_separates_directories_on_every_host() {
+        for windows in [false, true] {
+            assert_eq!(
+                sanitize_rar4_rel_path_bytes(b"dir\\file.bin", windows).unwrap(),
+                PathBuf::from("dir").join("file.bin")
+            );
+        }
     }
 
     #[test]

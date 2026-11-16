@@ -1507,7 +1507,8 @@ fn fix_published_mode(dest: &Path, member: &Member) {
 /// folders: never through a symlink. A stored Unix mode is applied with owner access kept.
 fn place_directory(dest: &Path, member: &Member) -> Result<(), Failure> {
     let display = String::from_utf8_lossy(&member.name);
-    let rel = zipfast::path::sanitize(&display, member.meta.windows_names)
+    // Unix rules, as publish_copy names the directory's files.
+    let rel = zipfast::path::sanitize(&display, false)
         .map_err(|e| Failure::UnsafePath(format!(" {display}: {e}")))?;
     if rel.as_os_str().is_empty() {
         return Ok(());

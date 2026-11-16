@@ -4356,3 +4356,43 @@ fn a_directory_entry_extracts_from_an_undeclared_complete_set() {
     assert!(t.out().join("Sub").is_dir());
     assert_eq!(std::fs::read(t.out().join("Sub/a.bin")).unwrap(), a);
 }
+
+#[test]
+fn a_windows_directory_entry_lands_where_its_files_are_copied() {
+    // Windows rules would turn "What?" into "What_"; the copy path keeps the name.
+    let t = TestDir::new("direntry_win_name");
+    let a = pattern(30_000);
+    let mut v = SIG.to_vec();
+    v.extend(main_block(false, None));
+    v.extend(dir_block("What?", 0x10, 0));
+    RAR5_HOST.with(|h| h.set((0, 0x20)));
+    v.extend(file_block(
+        "What?/a.bin",
+        a.len() as u64,
+        &a,
+        crc32fast::hash(&a),
+        false,
+        false,
+    ));
+    RAR5_HOST.with(|h| h.set((1, 0o644)));
+    v.extend(end_block(false));
+    let first = t.dl().join("set.rar");
+    std::fs::write(&first, &v).unwrap();
+    let req = Request {
+        first_volume: &first,
+        dest: &t.out(),
+        password: "",
+        overwrite: Overwrite::Skip,
+        on_wait: None,
+    };
+    let mut log = Vec::new();
+    let r = extract(
+        &req,
+        Box::new(CompleteSet),
+        &mut |_, m: &str| log.push(m.to_string()),
+        &mut || false,
+    );
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("What?/a.bin")).unwrap(), a);
+    assert!(!t.out().join("What_").exists());
+}

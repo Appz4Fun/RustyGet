@@ -177,83 +177,69 @@ template <typename T> typename std::vector<T>::iterator end(std::vector<T>* c) {
 template <typename T> typename std::list<T>::iterator begin(std::list<T>* c) { return c->begin(); }
 template <typename T> typename std::list<T>::iterator end(std::list<T>* c) { return c->end(); }
 
-template <typename T>
-struct RawDequeIterator
-{
-	RawDequeIterator(typename std::deque<std::unique_ptr<T>>::iterator baseIterator) : m_baseIterator(baseIterator) {}
-	typename std::deque<std::unique_ptr<T>>::iterator m_baseIterator;
-};
-template <typename T> bool operator!=(RawDequeIterator<T>& it1, RawDequeIterator<T>& it2) { return it1.m_baseIterator != it2.m_baseIterator; }
-template <typename T> T* operator*(RawDequeIterator<T>& it) { return (*it.m_baseIterator).get(); }
-template <typename T> RawDequeIterator<T> operator++(RawDequeIterator<T>& it) { return RawDequeIterator<T>(it.m_baseIterator++); }
-template <typename T> RawDequeIterator<T> begin(std::deque<std::unique_ptr<T>>* c) { return RawDequeIterator<T>(c->begin()); }
-template <typename T> RawDequeIterator<T> end(std::deque<std::unique_ptr<T>>* c) { return RawDequeIterator<T>(c->end()); }
 
-template <typename T>
-struct RawVectorIterator
-{
-	RawVectorIterator(typename std::vector<std::unique_ptr<T>>::iterator baseIterator) : m_baseIterator(baseIterator) {}
-	typename std::vector<std::unique_ptr<T>>::iterator m_baseIterator;
-};
-template <typename T> bool operator!=(RawVectorIterator<T>& it1, RawVectorIterator<T>& it2) { return it1.m_baseIterator != it2.m_baseIterator; }
-template <typename T> T* operator*(RawVectorIterator<T>& it) { return (*it.m_baseIterator).get(); }
-template <typename T> RawVectorIterator<T> operator++(RawVectorIterator<T>& it) { return RawVectorIterator<T>(it.m_baseIterator++); }
-template <typename T> RawVectorIterator<T> begin(std::vector<std::unique_ptr<T>>* c) { return RawVectorIterator<T>(c->begin()); }
-template <typename T> RawVectorIterator<T> end(std::vector<std::unique_ptr<T>>* c) { return RawVectorIterator<T>(c->end()); }
+#include "nzbget_rs.h"
 
-/* Template class for deque of unique_ptr with useful utility functions */
+/* An ordered list owning T objects, kept in Rust (rust/src/qlist.rs). The
+   caller holds the lock that guards the list's owner, as with the queue. */
 template <typename T>
-class UniqueDeque : public std::deque<std::unique_ptr<T>>
+class RsList
 {
 public:
-	void Add(std::unique_ptr<T> uptr, bool addTop = false)
+	RsList() : m_rs(nzbget_rs_ptrlist_new([](uintptr_t p) { delete reinterpret_cast<T*>(p); })) {}
+	RsList(const RsList&) = delete;
+	RsList& operator=(const RsList&) = delete;
+	~RsList() { nzbget_rs_ptrlist_free(m_rs); }
+
+	size_t size() const { return (size_t)Op(0); }
+	bool empty() const { return size() == 0; }
+	T* at(size_t index) const { return reinterpret_cast<T*>((uintptr_t)Op(1, (int64_t)index)); }
+	// -1 when not in the list
+	int64_t IndexOf(T* p) const { return Op(2, 0, p); }
+	void Add(std::unique_ptr<T> uptr, bool addTop = false) { Op(addTop ? 4 : 3, 0, uptr.release()); }
+	// before the item at index (at the back when out of range)
+	void Insert(int64_t index, std::unique_ptr<T> uptr) { Op(5, index, uptr.release()); }
+	std::unique_ptr<T> Remove(T* p) { return std::unique_ptr<T>(reinterpret_cast<T*>((uintptr_t)Op(6, 0, p))); }
+	void EraseAt(size_t index) { Op(7, (int64_t)index); }
+	void ReplaceAt(size_t index, std::unique_ptr<T> uptr) { Op(8, (int64_t)index, uptr.release()); }
+	void clear() { Op(9); }
+	// order: every current item once, in the new order (ignored otherwise)
+	void Reorder(const uintptr_t* order, size_t count)
 	{
-		if (addTop)
-		{
-			this->push_front(std::move(uptr));
-		}
-		else
-		{
-			this->push_back(std::move(uptr));
-		}
+		nzbget_rs_ptrlist_op(m_rs, 10, (int64_t)count, 0, order, nullptr);
 	}
-
-	std::unique_ptr<T> Remove(T* p)
+	// appends and takes every item of other
+	void TakeAll(RsList& other) { nzbget_rs_ptrlist_op(m_rs, 11, 0, 0, nullptr, other.m_rs); }
+	T* Find(int id) const
 	{
-		std::unique_ptr<T> uptr;
-
-		typename UniqueDeque::iterator it = Find(p);
-		if (it != this->end())
+		for (size_t i = 0, n = size(); i < n; i++)
 		{
-			uptr = std::move(*it);
-			this->erase(it);
+			T* item = at(i);
+			if (item && item->GetId() == id) return item;
 		}
-
-		return uptr;
-	}
-
-	typename UniqueDeque::iterator Find(T* p)
-	{
-		return std::find_if(this->begin(), this->end(),
-			[p](std::unique_ptr<T>& uptr)
-			{
-				return uptr.get() == p;
-			});
-	}
-
-	T* Find(int id)
-	{
-		for (std::unique_ptr<T>& uptr : *this)
-		{
-			if (uptr->GetId() == id)
-			{
-				return uptr.get();
-			}
-		}
-
 		return nullptr;
 	}
+
+	struct iterator
+	{
+		const RsList* list;
+		size_t index;
+		T* operator*() const { return list->at(index); }
+		iterator& operator++() { ++index; return *this; }
+		bool operator!=(const iterator& other) const { return index != other.index; }
+	};
+	iterator begin() const { return iterator{this, 0}; }
+	iterator end() const { return iterator{this, size()}; }
+
+private:
+	RsPtrList* m_rs;
+	int64_t Op(int op, int64_t a = 0, T* p = nullptr) const
+	{
+		return nzbget_rs_ptrlist_op(m_rs, op, a, reinterpret_cast<uintptr_t>(p), nullptr, nullptr);
+	}
 };
+template <typename T> typename RsList<T>::iterator begin(RsList<T>* c) { return c->begin(); }
+template <typename T> typename RsList<T>::iterator end(RsList<T>* c) { return c->end(); }
 
 #endif
 
@@ -1178,8 +1164,7 @@ private:
 };
 
 
-typedef UniqueDeque<FileInfo> FileList;
-typedef std::vector<FileInfo*> RawFileList;
+typedef RsList<FileInfo> FileList;
 
 // completed file status values (rust/src/qnzb.rs keeps completed files and
 // stream-repair jobs)
@@ -1671,7 +1656,8 @@ public:
 	void SetFeedId(int feedId) { m_s->feedId = feedId; }
 	void MoveFileList(NzbInfo* srcNzbInfo)
 	{
-		m_fileList = std::move(*srcNzbInfo->GetFileList());
+		m_fileList.clear();
+		m_fileList.TakeAll(*srcNzbInfo->GetFileList());
 		for (FileInfo* fileInfo : &m_fileList)
 		{
 			fileInfo->SetNzbInfo(this);
@@ -2064,8 +2050,7 @@ inline void FileInfo::SetExtraPriority(bool extraPriority)
 	S(25, extraPriority ? 1 : 0);
 }
 
-typedef UniqueDeque<NzbInfo> NzbList;
-typedef std::vector<NzbInfo*> RawNzbList;
+typedef RsList<NzbInfo> NzbList;
 
 typedef std::vector<int> IdList;
 
@@ -2199,7 +2184,7 @@ private:
 	time_t m_time = 0;
 };
 
-typedef UniqueDeque<HistoryInfo> HistoryList;
+typedef RsList<HistoryInfo> HistoryList;
 
 typedef GuardedPtr<DownloadQueue> GuardedDownloadQueue;
 
@@ -2611,7 +2596,7 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 	}
 	case 21: {
 		auto* dq = reinterpret_cast<DownloadQueue*>(p1);
-		return a1 < 0 ? dq->GetQueue()->size() : reinterpret_cast<uintptr_t>(dq->GetQueue()->at((size_t)a1).get());
+		return a1 < 0 ? dq->GetQueue()->size() : reinterpret_cast<uintptr_t>(dq->GetQueue()->at((size_t)a1));
 	}
 	case 22: {
 		if (a1 == 7)
@@ -2635,7 +2620,7 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 			if (up && *up)
 			{
 				auto* urlInfo = reinterpret_cast<NzbInfo*>((uintptr_t)i64s[0]);
-				if (urlInfo) dq->GetQueue()->insert(dq->GetQueue()->Find(urlInfo), std::move(*up));
+				if (urlInfo) dq->GetQueue()->Insert(dq->GetQueue()->IndexOf(urlInfo), std::move(*up));
 				else dq->GetQueue()->Add(std::move(*up), a2 != 0);
 			}
 			return 0;
@@ -2655,13 +2640,7 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 		}
 		if (a1 == 5)
 		{
-			NzbList* q = dq->GetQueue();
-			const uintptr_t* ord = reinterpret_cast<const uintptr_t*>(p2);
-			if (ord && (size_t)a2 == q->size())
-			{
-				for (size_t i = 0; i < q->size(); i++) (void)q->at(i).release();
-				for (size_t i = 0; i < (size_t)a2; i++) q->at(i).reset(reinterpret_cast<NzbInfo*>(ord[i]));
-			}
+			dq->GetQueue()->Reorder(reinterpret_cast<const uintptr_t*>(p2), (size_t)a2);
 		}
 		if (a1 == 6) { delete reinterpret_cast<std::unique_ptr<NzbInfo>*>(p2); return 0; }
 		return 0;
@@ -2675,7 +2654,7 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 			{
 				auto hi = std::make_unique<HistoryInfo>(std::move(*up));
 				hi->SetTime((time_t)a2);
-				dq->GetHistory()->push_back(std::move(hi));
+				dq->GetHistory()->Add(std::move(hi));
 			}
 			delete up;
 			return 0;
@@ -2694,7 +2673,7 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 			d->SetId(ints[0]);
 			auto hi = std::make_unique<HistoryInfo>(std::move(d));
 			hi->SetTime((time_t)ints[1]);
-			dq->GetHistory()->push_back(std::move(hi));
+			dq->GetHistory()->Add(std::move(hi));
 			return 0;
 		}
 		if (a1 == -1) return dq->GetHistory()->size();
@@ -2717,20 +2696,20 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 			dup->SetStatus(static_cast<DupInfo::EStatus>(a2));
 			auto newHist = std::make_unique<HistoryInfo>(std::move(dup));
 			newHist->SetTime(hist->GetTime());
-			(*dq->GetHistory())[dq->GetHistory()->size() - 1 - (size_t)ints[0]] = std::move(newHist);
+			dq->GetHistory()->ReplaceAt(dq->GetHistory()->size() - 1 - (size_t)ints[0], std::move(newHist));
 			return 0;
 		}
-		if (a1 == -5) { dq->GetHistory()->erase(dq->GetHistory()->begin() + a2); return 0; }
+		if (a1 == -5) { dq->GetHistory()->EraseAt((size_t)a2); return 0; }
 		if (a1 == -6)
 		{
 			auto* hist = reinterpret_cast<HistoryInfo*>(p2);
 			NzbInfo* nzb = hist->GetNzbInfo();
 			hist->DiscardNzbInfo();
 			dq->GetQueue()->Add(std::unique_ptr<NzbInfo>(nzb), true);
-			dq->GetHistory()->erase(dq->GetHistory()->begin() + a2);
+			dq->GetHistory()->EraseAt((size_t)a2);
 			return reinterpret_cast<uintptr_t>(nzb);
 		}
-		HistoryInfo* h = dq->GetHistory()->at((size_t)a1).get();
+		HistoryInfo* h = dq->GetHistory()->at((size_t)a1);
 		ints[0] = (int)h->GetKind(); ints[1] = h->GetId(); strs[0] = h->GetName();
 		i64s[0] = (h->GetKind() == HistoryInfo::hkNzb || h->GetKind() == HistoryInfo::hkUrl)
 			? (int64_t)reinterpret_cast<uintptr_t>(h->GetNzbInfo())
@@ -3002,7 +2981,7 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 	}
 	case 34: {
 		if (a1 == 0) return reinterpret_cast<NzbInfo*>(p1)->GetFileList()->size();
-		if (a1 == 1) return reinterpret_cast<uintptr_t>(reinterpret_cast<NzbInfo*>(p1)->GetFileList()->at((size_t)a2).get());
+		if (a1 == 1) return reinterpret_cast<uintptr_t>(reinterpret_cast<NzbInfo*>(p1)->GetFileList()->at((size_t)a2));
 		if (a1 == 2) { reinterpret_cast<NzbInfo*>(p1)->GetFileList()->Remove(reinterpret_cast<FileInfo*>(p2)); return 0; }
 		if (a1 == 3)
 		{
@@ -3019,8 +2998,8 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 		{
 			NzbInfo* dst = reinterpret_cast<NzbInfo*>(p1);
 			NzbInfo* src = reinterpret_cast<NzbInfo*>(p2);
-			for (std::unique_ptr<FileInfo>& fi : *src->GetFileList()) { fi->SetNzbInfo(dst); dst->GetFileList()->Add(std::move(fi)); }
-			src->GetFileList()->clear();
+			for (FileInfo* fi : src->GetFileList()) fi->SetNzbInfo(dst);
+			dst->GetFileList()->TakeAll(*src->GetFileList());
 			int lists[2] = { 0, 0 };
 			dst->NC(49, 1, src, nullptr, nullptr, lists);
 			lists[0] = lists[1] = 1;
@@ -3068,13 +3047,7 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 		}
 		if (a1 == 10)
 		{
-			FileList* fl = reinterpret_cast<NzbInfo*>(p1)->GetFileList();
-			const uintptr_t* ord = reinterpret_cast<const uintptr_t*>(p2);
-			if (ord && (size_t)a2 == fl->size())
-			{
-				for (size_t i = 0; i < fl->size(); i++) (void)fl->at(i).release();
-				for (size_t i = 0; i < (size_t)a2; i++) fl->at(i).reset(reinterpret_cast<FileInfo*>(ord[i]));
-			}
+			reinterpret_cast<NzbInfo*>(p1)->GetFileList()->Reorder(reinterpret_cast<const uintptr_t*>(p2), (size_t)a2);
 			return 0;
 		}
 		if (a1 == 11)

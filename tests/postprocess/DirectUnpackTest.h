@@ -74,17 +74,15 @@ template<typename Func>
 bool WithNzbInfo(int id, Func&& func)
 {
 	GuardedDownloadQueue queueGuard = DownloadQueue::Guard();
-	for (const auto& nzb : *queueGuard->GetQueue())
+	for (NzbInfo* nzbInfo : *queueGuard->GetQueue())
 	{
-		NzbInfo* nzbInfo = nzb.get();
 		if (nzbInfo->GetId() == id)
 		{
 			return func(nzbInfo);
 		}
 	}
-	for (const auto& history : *queueGuard->GetHistory())
+	for (HistoryInfo* historyInfo : *queueGuard->GetHistory())
 	{
-		HistoryInfo* historyInfo = history.get();
 		if (historyInfo->GetNzbInfo() && historyInfo->GetNzbInfo()->GetId() == id)
 		{
 			return func(historyInfo->GetNzbInfo());

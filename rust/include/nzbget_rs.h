@@ -486,6 +486,12 @@ int64_t nzbget_rs_nzb_coll(const NzbgetRsNzbScalars* p, int op, int a2, const Nz
 // Completed files and stream-repair jobs of a collection (op codes in qnzb.rs).
 int64_t nzbget_rs_nzb_files(const NzbgetRsNzbScalars* p, int op, int a2, const NzbgetRsNzbScalars* p2,
     const char* s1, const char* s2, int* ints, int64_t* i64s, const char** strs, const int64_t* raw);
+// Ordered list owning host objects (rust/src/qlist.rs).
+typedef struct RsPtrList RsPtrList;
+RsPtrList* nzbget_rs_ptrlist_new(void (*drop_fn)(uintptr_t));
+void nzbget_rs_ptrlist_free(RsPtrList* l);
+int64_t nzbget_rs_ptrlist_op(const RsPtrList* l, int op, int64_t a, uintptr_t p, const uintptr_t* order,
+    const RsPtrList* other);
 // History-only duplicate record (rust/src/qdup.rs).
 typedef struct RsDup RsDup;
 RsDup* nzbget_rs_dup_new(void);

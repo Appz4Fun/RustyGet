@@ -963,11 +963,13 @@ where
                     log_cb(1, &msg);
                     msg
                 })?,
-            None => zipfast::path::sanitize(&first.name, first.windows_names).map_err(|e| {
-                let msg = format!("Unrar: {e}");
-                log_cb(1, &msg);
-                msg
-            })?,
+            // A backslash separates directories whatever the host, as for raw names.
+            None => zipfast::path::sanitize(&first.name.replace('\\', "/"), first.windows_names)
+                .map_err(|e| {
+                    let msg = format!("Unrar: {e}");
+                    log_cb(1, &msg);
+                    msg
+                })?,
         };
         if first.is_dir {
             create_dir_all_no_follow(output_dir, &rel).map_err(|e| {

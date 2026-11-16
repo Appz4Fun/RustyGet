@@ -10389,6 +10389,12 @@ EXPECTED_HISTORY_STATUS = {
 # SKIP in that case, see generators.HAVE_7Z).
 _SEVENZIP_OPTION = ['SevenZipCmd=%s' % generators.SEVENZIP_PATH] if generators.HAVE_7Z else []
 
+# Environment variables the daemon of a scenario runs with (others are cleared).
+SCENARIO_ENV = {
+    'persistdeadprimary': {'RUSTYGET_PERSISTENT_UNPACK': '1'},
+}
+SCENARIO_ENV_KEYS = sorted({k for env in SCENARIO_ENV.values() for k in env})
+
 SCENARIO_OPTIONS = {
     'watchforcepick': ['DupeArticleFallback=no', 'DupeWatch=yes', 'DupeBodyChecks=0', 'DupeHealthMin=40', 'DupeHealthMax=40'],
     'watchdeadpick': ['DupeArticleFallback=no', 'DupeWatch=yes', 'DupeBodyChecks=0', 'DupeHealthMin=40', 'DupeHealthMax=40'],
@@ -10831,6 +10837,9 @@ def main():
             results.append((name, None, 'SKIP: target-side archive extractor is not provisioned on Android'))
             print('[SKIP] %s  (target-side archive extractor is not provisioned on Android)' % name)
             continue
+        for key in SCENARIO_ENV_KEYS:
+            os.environ.pop(key, None)
+        os.environ.update(SCENARIO_ENV.get(name, {}))
         nntp = free_port()
         rpc = free_port()
         while rpc == nntp:  # the two must not coincide

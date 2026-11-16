@@ -319,7 +319,7 @@ where
     // declared session still run out of one of zipfast's limits, the set is extracted again
     // undeclared (copied into place), as before declarations: never a failed unpack.
     // A set still downloading goes to persistent partial files when it qualifies.
-    let feed = if outputs.is_none() && !feed.set_is_final() {
+    let feed = if persistent::enabled() && outputs.is_none() && !feed.set_is_final() {
         match persistent::try_extract(req, feed, log_cb, is_cancelled) {
             persistent::Outcome::Done(r) => return r,
             persistent::Outcome::Fallback(feed, why) => {

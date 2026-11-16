@@ -24,7 +24,7 @@ use zipfast::progressive::{
 /// Off by default: zipfast commits every 1 MiB write durably, which made a 15 GB member take
 /// 19 minutes against 95 s for the progressive copy path (Linux VM). Set
 /// `RUSTYGET_PERSISTENT_UNPACK=1` to use it until zipfast groups commits.
-fn enabled() -> bool {
+pub(super) fn enabled() -> bool {
     cfg!(test) || std::env::var("RUSTYGET_PERSISTENT_UNPACK").as_deref() == Ok("1")
 }
 
@@ -48,12 +48,17 @@ pub(super) fn try_extract<F>(
 where
     F: FnMut(i32, &str),
 {
-    if !enabled() {
-        return Outcome::Fallback(feed, "persistent partial files are off".into());
-    }
     let plan = match Plan::new(req, feed.as_ref()) {
         Ok(plan) => plan,
-        Err(why) => return Outcome::Fallback(feed, why),
+        Err(why) => {
+            // State a crashed earlier run left for this set is no use without its outputs.
+            remove_state_root(
+                &req.dest
+                    .join(STATE_DIR)
+                    .join(hex(&binding_for(req).archive[..8])),
+            );
+            return Outcome::Fallback(feed, why);
+        }
     };
     let feed = Arc::new(Mutex::new(feed));
     let mut run = Run::new(req, &plan, feed.clone());
@@ -72,7 +77,11 @@ where
             log_cb(4, "Unrar: All OK");
             Outcome::Done(Ok(summary))
         }
-        Err(Step::Fail(f)) => Outcome::Done(Err(Error::Failed(f))),
+        Err(Step::Fail(f)) => {
+            // Every output here was created by this run (exclusively) and is unverified.
+            plan.remove_outputs();
+            Outcome::Done(Err(Error::Failed(f)))
+        }
         Err(Step::Fallback(why)) => {
             if made_output || plan.root.exists() {
                 plan.remove_outputs();
@@ -169,10 +178,7 @@ impl Plan {
         {
             let _ = std::fs::remove_file(path);
         }
-        let _ = std::fs::remove_dir_all(&self.root);
-        if let Some(parent) = self.root.parent() {
-            let _ = std::fs::remove_dir(parent);
-        }
+        remove_state_root(&self.root);
     }
 }
 
@@ -241,6 +247,14 @@ fn binding_for(req: &Request<'_>) -> ArchiveBinding {
     archive[..16].copy_from_slice(&a);
     archive[16..].copy_from_slice(&b);
     ArchiveBinding { job, archive }
+}
+
+/// Removes one set's state directory and, when empty, the shared state directory above it.
+fn remove_state_root(root: &Path) {
+    let _ = std::fs::remove_dir_all(root);
+    if let Some(parent) = root.parent() {
+        let _ = std::fs::remove_dir(parent);
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -336,7 +350,7 @@ struct Run<'a> {
     feed: Arc<Mutex<Box<dyn VolumeFeed>>>,
     damaged: Arc<Mutex<Vec<(u32, PathBuf)>>>,
     /// Each member's handle and output path, by archive order.
-    handles: Vec<(MemberKey, PartialFile, PathBuf)>,
+    handles: Vec<(MemberKey, PartialFile, Member)>,
     holes: Vec<HoleReport>,
     anchors: Option<Arc<DurableAnchors>>,
 }
@@ -426,12 +440,16 @@ impl<'a> Run<'a> {
             let mut drive = Driver::new(&mut session, self.feed.clone(), pending, self.req.on_wait);
             let mut current: Option<Vec<u8>> = None;
             let mut current_path = PathBuf::new();
+            let mut current_member = Member::default();
+            let mut current_volume = self.req.first_volume.to_path_buf();
+            let mut meta_cache = MetaCache::default();
             loop {
                 let event = drive.next_event(is_cancelled);
                 match event {
                     Ok(None) => break,
                     Ok(Some(ProgressiveEvent::VolumeOpened { index, .. })) => {
                         if let Some(name) = self.plan.names.get(index as usize) {
+                            current_volume = self.plan.dir.join(name);
                             log_cb(
                                 4,
                                 &format!("Unrar: Extracting from {}", name.to_string_lossy()),
@@ -449,6 +467,12 @@ impl<'a> Run<'a> {
                             current_path = self.req.dest.join(rel);
                         }
                         log_cb(4, &format!("Unrar: Extracting  {display}"));
+                        current_member = Member {
+                            name: name.to_vec(),
+                            meta: meta_cache.lookup(&current_volume, self.req.password, &name),
+                            ordinal: 0,
+                            occurrence: 0,
+                        };
                         current = Some(name.to_vec());
                     }
                     Ok(Some(ProgressiveEvent::PartialReady { member, .. })) => {
@@ -462,7 +486,7 @@ impl<'a> Run<'a> {
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
                             .push(current_path.clone());
-                        self.handles.push((member, file, current_path.clone()));
+                        self.handles.push((member, file, current_member.clone()));
                     }
                     Ok(Some(ProgressiveEvent::Hole(report))) => {
                         log_cb(
@@ -619,7 +643,7 @@ impl<'a> Run<'a> {
         });
         let waker = Waker::from(parker.clone());
         let mut cx = Context::from_waker(&waker);
-        for (_, file, path) in self.handles.iter_mut() {
+        for (_, file, member) in self.handles.iter_mut() {
             let verdict = loop {
                 if is_cancelled() {
                     return Err(Step::Fail(Failure::Canceled));
@@ -636,12 +660,19 @@ impl<'a> Run<'a> {
             };
             match verdict {
                 Ok(Verdict::Ok { .. }) => {
-                    fix_mode_without_stored(path);
+                    // zipfast applies a stored mode as is and leaves others at 0600: give the
+                    // output the mode the copy path does.
+                    fix_published_mode(self.req.dest, member);
                 }
-                Ok(other) => {
-                    let line = format!("Unrar: verification failed: {other:?}");
+                Ok(bad @ (Verdict::Bad { .. } | Verdict::PartBad { .. })) => {
+                    let line = format!("Unrar: verification failed: {bad:?}");
                     log_cb(1, &line);
-                    return Err(Step::Fail(Failure::Checksum(format!(" ({other:?})"))));
+                    return Err(Step::Fail(Failure::Checksum(format!(" ({bad:?})"))));
+                }
+                // Holes left, or no stored checksum to verify against: the progressive path
+                // decides as before.
+                Ok(other) => {
+                    return Err(Step::Fallback(format!("verification: {other:?}")));
                 }
                 Err(e) => {
                     return Err(Step::Fallback(format!("verification: {:?}", e.kind)));
@@ -660,21 +691,4 @@ impl<'a> Run<'a> {
             let _ = std::fs::remove_dir(parent);
         }
     }
-}
-
-/// zipfast creates a persistent output at 0600 and applies a mode only when the archive
-/// stores a Unix one; give the rest 0666 less the umask, as a copied output gets.
-fn fix_mode_without_stored(path: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Ok(meta) = std::fs::metadata(path) {
-            if meta.permissions().mode() & 0o777 == 0o600 {
-                let mode = 0o666 & !crate::lifecycle::active_umask() & 0o777;
-                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
-            }
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = path;
 }

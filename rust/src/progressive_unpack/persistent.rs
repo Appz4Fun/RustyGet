@@ -302,6 +302,76 @@ fn remove_state_root(root: &Path) {
     }
 }
 
+/// File in a set's state directory naming the damaged volumes still waiting for their repair.
+const PENDING_REPAIR: &str = "pending-repair";
+
+/// Saves the damaged volumes still waiting for their repair, one per line as
+/// `offset:len,offset:len<TAB>file name`, replacing the file atomically; removes it when there
+/// are none. Best effort: without it a restart reads the damaged bytes and falls back.
+pub(super) fn save_pending_repair(file: &Path, damaged: &std::collections::HashMap<PathBuf, Vec<(u64, u64)>>) {
+    if damaged.is_empty() {
+        let _ = std::fs::remove_file(file);
+        return;
+    }
+    let mut entries: Vec<_> = damaged.iter().collect();
+    entries.sort();
+    let mut out = Vec::new();
+    for (path, holes) in entries {
+        let Some(name) = path.file_name() else {
+            continue;
+        };
+        let name = name.as_encoded_bytes();
+        if name.contains(&b'\n') || holes.is_empty() {
+            continue;
+        }
+        let ranges: Vec<String> = holes.iter().map(|(o, l)| format!("{o}:{l}")).collect();
+        out.extend_from_slice(ranges.join(",").as_bytes());
+        out.push(b'\t');
+        out.extend_from_slice(name);
+        out.push(b'\n');
+    }
+    let tmp = file.with_extension("tmp");
+    let written = (|| -> std::io::Result<()> {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(&out)?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, file)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+/// The damaged volumes `save_pending_repair` saved, as paths under `dir`.
+pub(super) fn load_pending_repair(file: &Path, dir: &Path) -> Vec<(PathBuf, Vec<(u64, u64)>)> {
+    let Ok(bytes) = std::fs::read(file) else {
+        return Vec::new();
+    };
+    bytes
+        .split(|&b| b == b'\n')
+        .filter_map(|line| {
+            let tab = line.iter().position(|&b| b == b'\t')?;
+            let (ranges, name) = (&line[..tab], &line[tab + 1..]);
+            if name.is_empty() || name.contains(&b'/') || name == b"." || name == b".." {
+                return None;
+            }
+            let holes: Option<Vec<(u64, u64)>> = std::str::from_utf8(ranges)
+                .ok()?
+                .split(',')
+                .map(|r| {
+                    let (o, l) = r.split_once(':')?;
+                    Some((o.parse().ok()?, l.parse().ok()?))
+                })
+                .collect();
+            let holes = holes.filter(|h| !h.is_empty())?;
+            // SAFETY: the bytes were written from `OsStr::as_encoded_bytes` on this platform.
+            let name = unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(name) };
+            Some((dir.join(name), holes))
+        })
+        .collect()
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -370,6 +440,12 @@ impl VolumeFeed for RememberedHoles {
     fn set_became_final(&self) -> bool {
         self.inner.set_became_final()
     }
+    fn remember_damaged(&mut self, path: &Path, holes: Vec<(u64, u64)>) {
+        self.inner.remember_damaged(path, holes)
+    }
+    fn still_held(&self, path: &Path) -> bool {
+        self.inner.still_held(path)
+    }
 }
 
 /// Volume provider of a persistent session: every expected volume is declared up front as a
@@ -381,6 +457,11 @@ struct Provider {
     declaration: ProtectionDeclaration,
     /// Volumes handed out with holes: (index, path).
     damaged: HandedHoles,
+    /// Where the damaged volumes still waiting for their repair are saved (see
+    /// `save_pending_repair`).
+    pending_repair: PathBuf,
+    /// The damaged volumes in that file.
+    saved: std::collections::HashSet<PathBuf>,
 }
 
 impl VolumeSource for Provider {
@@ -390,19 +471,35 @@ impl VolumeSource for Provider {
         cx: &mut Context<'_>,
     ) -> ProgressiveResult<VolumeAnswer> {
         let path = self.dir.join(&request.expected);
-        let view = self
-            .feed
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .volume(&path);
+        let view = {
+            let mut feed = self.feed.lock().unwrap_or_else(|e| e.into_inner());
+            // Damaged volumes repaired and released since: a restart must not hold them again.
+            // Saved below whatever the answer is (a volume not here yet included).
+            let before = self.saved.len();
+            self.saved.retain(|p| feed.still_held(p));
+            let mut changed = self.saved.len() != before;
+            let view = feed.volume(&path);
+            drop(feed);
+            let mut damaged = self.damaged.lock().unwrap_or_else(|e| e.into_inner());
+            if let VolumeView::Ready { holes } = &view {
+                if !holes.is_empty() {
+                    changed |= damaged.get(&path) != Some(holes) || !self.saved.contains(&path);
+                    damaged.insert(path.clone(), holes.clone());
+                    self.saved.insert(path.clone());
+                }
+            }
+            if changed {
+                let pending: std::collections::HashMap<PathBuf, Vec<(u64, u64)>> = damaged
+                    .iter()
+                    .filter(|(p, _)| self.saved.contains(*p))
+                    .map(|(p, h)| (p.clone(), h.clone()))
+                    .collect();
+                save_pending_repair(&self.pending_repair, &pending);
+            }
+            view
+        };
         match view {
             VolumeView::Ready { holes } => {
-                if !holes.is_empty() {
-                    self.damaged
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .insert(path.clone(), holes.clone());
-                }
                 let mut volume = HoledVolume::open(&path, holes).map_err(|cause| {
                     ProgressiveFailure::new(FailureKind::Input {
                         operation: zipfast::progressive::InputOperation::Open,
@@ -489,6 +586,7 @@ impl<'a> Run<'a> {
                 .map_err(|e| Step::Fallback(format!("anchor store: {e:?}")))?,
         );
         self.anchors = Some(anchors.clone());
+        self.remember_pending_repair(log_cb);
         let volumes = self.plan.names.len() as u64;
         let pending: PendingWait = Arc::new(Mutex::new(None));
         let provider = Provider {
@@ -497,6 +595,14 @@ impl<'a> Run<'a> {
             pending: pending.clone(),
             declaration: self.plan.inventory(),
             damaged: self.damaged.clone(),
+            pending_repair: self.plan.root.join(PENDING_REPAIR),
+            saved: self
+                .damaged
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .keys()
+                .cloned()
+                .collect(),
         };
         let first_name = self.plan.names[0].clone();
         let mut opts = ProgressiveOptions::new(
@@ -712,6 +818,38 @@ impl<'a> Run<'a> {
 
     /// Waits for the damaged volumes to be repaired in place (par2, or a twin's articles), then
     /// reads back only the bytes that are still holes in each member.
+    /// A restart: the volumes the earlier run was handed damaged and that were not repaired
+    /// before it stopped go back on hold with their lost ranges, so the refill waits for their
+    /// repair instead of reading the damaged bytes.
+    fn remember_pending_repair<F>(&mut self, log_cb: &mut F)
+    where
+        F: FnMut(i32, &str),
+    {
+        let saved = load_pending_repair(&self.plan.root.join(PENDING_REPAIR), &self.plan.dir);
+        if saved.is_empty() {
+            return;
+        }
+        let mut feed = self.feed.lock().unwrap_or_else(|e| e.into_inner());
+        let mut damaged = self.damaged.lock().unwrap_or_else(|e| e.into_inner());
+        for (path, holes) in saved {
+            let known = path
+                .file_name()
+                .is_some_and(|n| self.plan.names.iter().any(|v| v.as_os_str() == n));
+            if !known || !path.is_file() {
+                continue;
+            }
+            log_cb(
+                3,
+                &format!(
+                    "Unrar: {} is still waiting for its repair (from before the restart)",
+                    path.file_name().unwrap_or_default().to_string_lossy()
+                ),
+            );
+            feed.remember_damaged(&path, holes.clone());
+            damaged.insert(path, holes);
+        }
+    }
+
     fn refill<F>(
         &mut self,
         log_cb: &mut F,
@@ -726,6 +864,18 @@ impl<'a> Run<'a> {
             .map(|h| String::from_utf8_lossy(&h.name).into_owned())
             .collect();
         damaged.dedup();
+        if damaged.is_empty() {
+            // Only damage an earlier run saw (a restart): name its volumes instead.
+            let mut names: Vec<String> = self
+                .damaged
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .keys()
+                .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                .collect();
+            names.sort();
+            damaged = names;
+        }
         log_cb(
             0,
             &format!(
@@ -743,10 +893,9 @@ impl<'a> Run<'a> {
             .wait_repaired(is_cancelled);
         if repaired {
             // The holes are really gone now: a later fallback reads the repaired bytes.
-            self.damaged
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clear();
+            let mut damaged = self.damaged.lock().unwrap_or_else(|e| e.into_inner());
+            damaged.clear();
+            save_pending_repair(&self.plan.root.join(PENDING_REPAIR), &damaged);
         }
         if let Some(cb) = self.req.on_wait {
             cb(false);

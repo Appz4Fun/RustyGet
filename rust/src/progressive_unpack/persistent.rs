@@ -577,6 +577,22 @@ impl<'a> Run<'a> {
                                 .unwrap_or("a member".into())
                         )));
                     }
+                    // A directory entry: zipfast #130 creates it inside this run's stage, but
+                    // publishing moves only files out of the stage, so an empty folder would be
+                    // lost. Hand the set to the progressive path, as before #130 (which refused
+                    // directory entries in persistent sessions).
+                    Ok(Some(ProgressiveEvent::MemberFinished {
+                        outcome: zipfast::progressive::MemberOutcome::Directory { .. },
+                        ..
+                    })) => {
+                        return Err(Step::Fallback(format!(
+                            "directory entry{}",
+                            current
+                                .as_deref()
+                                .map(|m| format!(" {}", String::from_utf8_lossy(m)))
+                                .unwrap_or_default()
+                        )));
+                    }
                     Ok(Some(ProgressiveEvent::MemberFinished { .. })) => {
                         summary.files += 1;
                         current = None;

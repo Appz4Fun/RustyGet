@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 
 const MIB: u64 = 1024 * 1024;
-const JOB_CEILING: u64 = 128 * MIB;
+pub(crate) const JOB_CEILING: u64 = 128 * MIB;
 /// Syndrome slots a job with a large slice is allowed to grow its ceiling for.
 const MIN_SLOTS: u64 = 2;
 const FIXED_METADATA: u64 = 8 * MIB;

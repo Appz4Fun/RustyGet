@@ -115,8 +115,8 @@ struct ActiveStreamingSession {
     articles: Mutex<DeferredArticles>,
     /// Grows when free ParBuffer is lent to queued snapshots (`lend_memory`).
     article_byte_limit: AtomicU64,
-    /// ParBuffer lent to RAM staging and queued snapshots, at most a quarter
-    /// of the pool; returned with the session's budget.
+    /// ParBuffer lent to RAM staging and queued snapshots, at most half of
+    /// the pool; returned with the session's budget.
     lent_memory: AtomicU64,
     pending_unpause_ids: Mutex<Vec<u64>>,
     /// A back-fill thread is re-reading verified slices for new slots.
@@ -429,8 +429,7 @@ impl ActiveStreamingSession {
     }
 
     /// RAM staging or the snapshot queue ran out while many files arrive at
-    /// once: lend it one more slice of free ParBuffer, up to a quarter of the
-    /// pool, so later articles are verified from RAM instead of being replayed
+    /// once: lend it free ParBuffer, up to half of the pool, so later articles are verified from RAM instead of being replayed
     /// from disk. The refused article itself is replayed when its file
     /// completes. The memory returns with the session's budget.
     fn lend_memory(&self, error: &RepairError) {
@@ -467,11 +466,13 @@ impl ActiveStreamingSession {
         }
         // Cover the whole shortfall at once: every refusal drops data. With
         // many files downloading at once staging holds about one partial slice
-        // per file, so loans may take up to half of ParBuffer, but never the
-        // last quarter: that stays free for repair slots as damage grows.
+        // per file, so loans may take up to half of ParBuffer. They never take
+        // the last quarter (at least one job's start reservation), which stays
+        // free for repair slots and for another job's live PAR to start.
         let wanted = (required_bytes - limit_bytes).div_ceil(unit);
         let room = (pool / 2).saturating_sub(before) / unit;
-        let units = lease.grow_by_units(unit, wanted.min(room), pool - pool / 4);
+        let keep_free = (pool / 4).max(crate::parlive::JOB_CEILING);
+        let units = lease.grow_by_units(unit, wanted.min(room), pool.saturating_sub(keep_free));
         if units == 0 {
             return;
         }

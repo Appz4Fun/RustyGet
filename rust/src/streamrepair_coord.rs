@@ -185,6 +185,36 @@ struct RepairTarget {
     tried_before: bool,
 }
 
+/// True for a dead-volume status line (or the live repair's start line) already logged in the
+/// last ten minutes: the live repair reruns as each volume arrives, and the same lines would
+/// otherwise repeat every few seconds.
+fn repeats_recent_dead_volume_line(text: &[u8]) -> bool {
+    const PREFIXES: [&[u8]; 6] = [
+        b"Starting live stream repair",
+        b"Leaving dead volume",
+        b"Dead volumes in",
+        b"Could not borrow dead volume",
+        b"No byte-identical duplicate holds",
+        b"Not borrowing dead volume",
+    ];
+    if !PREFIXES.iter().any(|p| text.starts_with(p)) {
+        return false;
+    }
+    static SEEN: std::sync::Mutex<Vec<(Vec<u8>, std::time::Instant)>> =
+        std::sync::Mutex::new(Vec::new());
+    let now = std::time::Instant::now();
+    let window = std::time::Duration::from_secs(600);
+    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    seen.retain(|(_, at)| now.duration_since(*at) < window);
+    if seen.iter().any(|(t, _)| t == text) {
+        return true;
+    }
+    if seen.len() < 512 {
+        seen.push((text.to_vec(), now));
+    }
+    false
+}
+
 /// True when DirectUnpack is on: only direct unpack reads a rebuilt dead volume.
 fn direct_unpack_on() -> bool {
     crate::options::active_options().is_some_and(|o| o.scalars().direct_unpack != 0)
@@ -401,6 +431,9 @@ impl NzbgetRsStreamRepairCtrl {
         kind: c_int,
         text: &[u8],
     ) {
+        if self.live_mode && repeats_recent_dead_volume_line(text) {
+            return;
+        }
         let text_c = to_c_bytes(text);
         unsafe {
             cb(

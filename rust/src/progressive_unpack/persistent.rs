@@ -221,6 +221,12 @@ fn first_volume_qualifies(first: &Path, password: &str) -> Result<(), String> {
                 if h.method != 0 {
                     return Err("compressed member".into());
                 }
+                // zipfast d7bd225 takes encrypted RAR4 members in persistent sessions but
+                // publishes no output for them (reported to zipfast); the fallback decoder
+                // extracts them.
+                if h.encrypted && h.format == zipfast::rar5::RarFormat::Rar4 {
+                    return Err("encrypted RAR4 member".into());
+                }
                 if h.size_unknown() {
                     return Err("member of unknown size".into());
                 }

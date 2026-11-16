@@ -4401,3 +4401,110 @@ fn a_windows_directory_entry_lands_where_its_files_are_copied() {
     assert_eq!(std::fs::read(t.out().join("What?/a.bin")).unwrap(), a);
     assert!(!t.out().join("What_").exists());
 }
+
+/// A downloading set whose dead volumes are borrowed while the session waits: the feed says
+/// NotYet `late` times for each dead volume, then hands the rebuilt virtual volume.
+struct DownloadingWithVirtual {
+    virtuals: std::collections::HashMap<PathBuf, crate::deadvolume::VirtualVolume>,
+    late: usize,
+    asked: std::collections::HashMap<PathBuf, usize>,
+    volumes: u64,
+}
+
+impl VolumeFeed for DownloadingWithVirtual {
+    fn volume(&mut self, path: &Path) -> VolumeView {
+        if let Some(v) = self.virtuals.get(path) {
+            let n = self.asked.entry(path.to_path_buf()).or_default();
+            *n += 1;
+            if *n <= self.late {
+                return VolumeView::NotYet;
+            }
+            return VolumeView::Virtual(v.clone());
+        }
+        if path.is_file() {
+            VolumeView::Ready { holes: Vec::new() }
+        } else {
+            VolumeView::Missing
+        }
+    }
+    fn expected_volumes(&self) -> u64 {
+        self.volumes
+    }
+}
+
+#[test]
+fn a_persistent_session_reads_a_run_of_borrowed_volumes() {
+    use crate::deadvolume::{plan, synthesize_frame, VirtualVolume, VolumeState};
+    for late in [0usize, 3] {
+        let t = TestDir::new(&format!("deadvol-persist-{late}"));
+        let data = pattern(1_000_000);
+        let vols: Vec<Vec<u8>> = rar5_volumes("movie.mkv", &data, 100_000)
+            .iter()
+            .map(|v| with_locator_and_quick_open(v))
+            .collect();
+        let first = write_set(&t.dl(), &vols);
+        let dead = [3usize, 4, 5];
+        let states: Vec<VolumeState> = vols
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                if dead.contains(&i) {
+                    VolumeState::Dead {
+                        encoded_size: v.len() as i64 * 102 / 100,
+                    }
+                } else {
+                    VolumeState::Readable(geometry_of(v))
+                }
+            })
+            .collect();
+        for &i in &dead {
+            std::fs::remove_file(t.dl().join(volume_name(i, vols.len()))).unwrap();
+        }
+        let plans = plan(&states, data.len() as i64);
+        assert_eq!(plans.iter().map(|p| p.index).collect::<Vec<_>>(), dead);
+        let scratch = t.0.join("scratch");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let mut virtuals = std::collections::HashMap::new();
+        for p in &plans {
+            let borrowed =
+                &data[p.inner_offset as usize..(p.inner_offset + p.packed_size) as usize];
+            let path = scratch.join(format!("{}.data", p.index));
+            std::fs::write(&path, borrowed).unwrap();
+            let tv = &vols[p.template];
+            let tg = geometry_of(tv);
+            let (head, tail) = synthesize_frame(
+                5,
+                &tv[..tg.data_offset as usize],
+                &tv[(tg.data_offset + tg.packed_size) as usize..],
+                p.template,
+                p.index,
+                p.packed_size as u64,
+                crc32fast::hash(borrowed),
+            )
+            .unwrap();
+            virtuals.insert(
+                t.dl().join(volume_name(p.index, vols.len())),
+                VirtualVolume {
+                    head,
+                    data: path,
+                    data_len: p.packed_size as u64,
+                    tail,
+                },
+            );
+        }
+        let feed = DownloadingWithVirtual {
+            virtuals,
+            late,
+            asked: Default::default(),
+            volumes: vols.len() as u64,
+        };
+        let (r, log) = run(&first, &t.out(), Box::new(feed));
+        expect_ok(r, &log);
+        assert!(persistent(&log), "late {late}: {log:?}");
+        assert_eq!(
+            std::fs::read(t.out().join("movie.mkv")).unwrap(),
+            data,
+            "late {late}"
+        );
+    }
+}

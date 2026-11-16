@@ -2436,7 +2436,9 @@ impl RangeSource for VirtualSource {
         self.info
     }
     fn backing_files(&self) -> &[std::fs::File] {
-        std::slice::from_ref(&self.data)
+        // The scratch file holds only the borrowed part, at other offsets than the volume's:
+        // it is not the volume's backing file.
+        &[]
     }
     fn read_at(
         &mut self,

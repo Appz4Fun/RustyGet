@@ -628,6 +628,13 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
         .as_bytes(),
     );
 
+    // Take the flush lock before choosing a file. Selection marks the file
+    // busy (CACHE_FILE_INFO) under the queue lock, and `delete_file_info`
+    // waits for that mark while holding the queue lock; downloaders take the
+    // flush lock first and the queue lock second. Waiting for the flush lock
+    // after marking the file deadlocked all three (seen with many connections
+    // and frequent DirectWrite flushes). Always flush lock, then queue lock.
+    cache_lock_flush();
     let selected = qh.with_locked_queue(|dq_ptr| {
         let qlen = qh.queue_len(dq_ptr);
         for ni in 0..qlen {
@@ -664,6 +671,7 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
 
     let Some((file_ptr, info_name, write_context)) = selected else {
         CACHE_FILE_INFO.store(0, Ordering::SeqCst);
+        cache_unlock_flush();
         crate::log::log_active_bytes(MK_DEBUG, b"Checking cache... nothing to flush");
         return false;
     };
@@ -681,7 +689,6 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
         &join_c_slices(&[b"Flushing cache for ", &info_name]),
     );
 
-    cache_lock_flush();
     let (direct_write, skip_disk_write, nzb_ptr, output_filename) =
         qh.file_cache_flush_prepare(file_ptr);
     let Some(metas) = qh.file_cache_flush_lock_collect(file_ptr) else {

@@ -312,6 +312,52 @@ fn extract_recording<F>(
 where
     F: FnMut(i32, &str),
 {
+    // A complete set is declared to zipfast up front when its estimated cost fits. Should a
+    // declared session still run out of one of zipfast's limits, the set is extracted again
+    // undeclared (copied into place), as before declarations: never a failed unpack.
+    let complete = feed.set_is_final();
+    let first = extract_once(
+        req,
+        feed,
+        log_cb,
+        is_cancelled,
+        outputs.as_deref_mut(),
+        true,
+    );
+    match first {
+        Err(Error::Failed(Failure::Other(ref what)))
+            if complete && DECLARE_PROTECTION && what.starts_with("Limit {") =>
+        {
+            log_cb(
+                3,
+                &format!(
+                    "Unrar: declared extraction hit a zipfast limit ({what}); extracting again without declaring"
+                ),
+            );
+            extract_once(
+                req,
+                Box::new(CompleteSet),
+                log_cb,
+                is_cancelled,
+                outputs,
+                false,
+            )
+        }
+        other => other,
+    }
+}
+
+fn extract_once<F>(
+    req: &Request<'_>,
+    feed: Box<dyn VolumeFeed>,
+    log_cb: &mut F,
+    is_cancelled: &mut dyn FnMut() -> bool,
+    mut outputs: Option<&mut Outputs>,
+    declare_at_start: bool,
+) -> Result<zipfast::extract::Summary, Error>
+where
+    F: FnMut(i32, &str),
+{
     let dir = req
         .first_volume
         .parent()
@@ -328,14 +374,24 @@ where
     // Overwrite mode only: skip mode would publish by hard link, which some destinations
     // (exFAT, SMB) lack, and rename mode needs RustyGet's own numbering.
     let mut declared_cost = None;
-    let protected =
-        (DECLARE_PROTECTION && feed.set_is_final() && req.overwrite == Overwrite::Always)
-            .then(|| protect_volumes(req.first_volume))
-            .flatten()
-            .filter(|inv| {
-                declared_cost = session_declaration_cost(inv, req.first_volume, req.password);
-                declared_cost.is_some()
-            });
+    let protected = (DECLARE_PROTECTION
+        && declare_at_start
+        && feed.set_is_final()
+        && req.overwrite == Overwrite::Always)
+        .then(|| protect_volumes(req.first_volume))
+        .flatten()
+        .filter(|inv| {
+            declared_cost = session_declaration_cost(inv, req.first_volume, req.dest, req.password);
+            #[cfg(test)]
+            if tests::FORCE_DECLARE.with(|f| f.get()) {
+                declared_cost = Some(DeclarationCost {
+                    bookkeeping: 0,
+                    metadata: 0,
+                    names: 0,
+                });
+            }
+            declared_cost.is_some()
+        });
     // A final set's volumes are all on disk; count them when no protected
     // inventory exists (rename mode) so the handle budget still fits the set.
     let expected = if feed.set_is_final() {
@@ -1688,12 +1744,13 @@ struct DeclarationCost {
 /// admission sweeps the whole inventory (about 3.3 V^2 (P + 15) bookkeeping units for V
 /// volumes with paths up to P bytes) and every member boundary and publication runs a full
 /// refresh (about 7-9 M V (P + 16) for M members, more with deep paths), and each of those
-/// validations also charges metadata bytes. Data size barely matters. The estimates (with
+/// validations also charges metadata bytes; each read step re-observes one volume. The estimates (with
 /// margin) are added to the session's limits; sets whose cost is too large to grant are left
 /// undeclared and copied.
 fn session_declaration_cost(
     inventory: &zipfast::progressive::ProtectionInventory,
     first: &Path,
+    dest: &Path,
     password: &str,
 ) -> Option<DeclarationCost> {
     /// Largest extra budget granted for a declaration (bookkeeping is CPU work, metadata and
@@ -1729,17 +1786,39 @@ fn session_declaration_cost(
         .saturating_mul(v)
         .saturating_mul(v)
         .saturating_mul(unit);
+    // Each publication check (the member's file and every parent directory it creates) runs
+    // full refreshes plus a target check of 1 + T + P per volume, T the absolute target path.
+    let target = (std::path::absolute(dest)
+        .map(|d| d.as_os_str().len())
+        .unwrap_or(dest.as_os_str().len()) as u64)
+        .saturating_add(members.max_name)
+        .saturating_add(1);
+    let checks = 1u64.saturating_add(members.max_depth);
     let per_member = 12u64
         .saturating_mul(v)
-        .saturating_mul(unit)
-        .saturating_mul(4u64.saturating_add(members.max_depth))
-        / 4;
-    let bookkeeping = admissions.saturating_add(members.count.saturating_mul(per_member));
+        .saturating_mul(unit.saturating_add(target))
+        .saturating_mul(checks);
+    // Every read step (about 1 MiB) re-observes one protected volume: 1 + P.
+    let data_mib: u64 = inventory
+        .volumes
+        .iter()
+        .flat_map(|vol| match &vol.backing {
+            zipfast::progressive::VolumeBacking::Native(paths) => paths.as_slice(),
+            zipfast::progressive::VolumeBacking::NonFile => &[],
+        })
+        .filter_map(|pp| pp.file.as_ref()?.metadata().ok())
+        .map(|m| m.len().div_ceil(1 << 20))
+        .sum();
+    let reads = data_mib.saturating_mul(p.saturating_add(64));
+    let bookkeeping = admissions
+        .saturating_add(members.count.saturating_mul(per_member))
+        .saturating_add(reads);
     let wide = p.saturating_add(n).saturating_add(128);
     let metadata = v.saturating_mul(v).saturating_mul(wide).saturating_add(
         members.count.saturating_mul(
             4u64.saturating_mul(v)
                 .saturating_mul(wide)
+                .saturating_mul(checks)
                 .saturating_add(4u64.saturating_mul(members.max_name)),
         ),
     );

@@ -1,4 +1,9 @@
 use super::*;
+
+thread_local! {
+    /// Declares complete sets at session start whatever their estimated cost.
+    pub(super) static FORCE_DECLARE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 
 // ---- RAR5 fixture builder (stored members, valid header and data CRCs) ----
@@ -2799,4 +2804,24 @@ fn a_final_set_of_many_long_named_volumes_extracts() {
     let (r, log) = run(&first, &t.out(), Box::new(CompleteSet));
     expect_ok(r, &log);
     assert_eq!(crc_of_file(&t.out().join("movie.mkv")), whole);
+}
+
+/// A declared session that still runs out of a zipfast limit is extracted again undeclared:
+/// forced past the estimate, 800 long-path volumes fail declared and then copy.
+#[test]
+fn a_declared_set_that_hits_a_limit_is_extracted_again() {
+    FORCE_DECLARE.with(|f| f.set(true));
+    let t = TestDir::new("retryundeclared");
+    let dir = t.dl().join("x".repeat(150));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (first, _, crc) = write_big_set(&dir, 800 * 64 * 1024, 800);
+    let (r, log) = run(&first, &t.out(), Box::new(CompleteSet));
+    FORCE_DECLARE.with(|f| f.set(false));
+    expect_ok(r, &log);
+    assert!(
+        log.iter()
+            .any(|l| l.contains("extracting again without declaring")),
+        "{log:?}"
+    );
+    assert_eq!(crc_of_file(&t.out().join("movie.mkv")), crc);
 }

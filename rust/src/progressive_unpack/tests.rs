@@ -4401,3 +4401,57 @@ fn a_windows_directory_entry_lands_where_its_files_are_copied() {
     assert_eq!(std::fs::read(t.out().join("What?/a.bin")).unwrap(), a);
     assert!(!t.out().join("What_").exists());
 }
+
+#[test]
+fn the_persistent_switch_reads_common_values() {
+    for v in ["0", "false", "OFF", " no "] {
+        assert!(!persistent::switch_value(v, true), "{v}");
+    }
+    for v in ["1", "true", "On", "YES"] {
+        assert!(persistent::switch_value(v, false), "{v}");
+    }
+    assert!(persistent::switch_value("", true));
+    assert!(!persistent::switch_value("", false));
+    assert!(!persistent::switch_value("maybe", false));
+}
+
+#[test]
+fn a_first_volume_with_many_members_keeps_the_progressive_path() {
+    // zipfast keeps every member's state for the session; past ~40 members its state pages
+    // run out mid-set, so such sets stay on the copy path from the start.
+    let t = TestDir::new("persist_manyfiles");
+    let mut v = SIG.to_vec();
+    v.extend(main_block(false, None));
+    let mut files = Vec::new();
+    for i in 0..31 {
+        let d = pattern_at(i * 1000, 2_000);
+        let name = format!("f{i:02}.bin");
+        v.extend(file_block(
+            &name,
+            d.len() as u64,
+            &d,
+            crc32fast::hash(&d),
+            false,
+            false,
+        ));
+        files.push((name, d));
+    }
+    v.extend(end_block(false));
+    let first = t.dl().join("set.rar");
+    std::fs::write(&first, &v).unwrap();
+    let damaged = Damaged {
+        holes: Vec::new(),
+        repair: Vec::new(),
+        handed: false,
+    };
+    let (r, log) = run_downloading(&first, &t.out(), damaged, 1);
+    expect_ok(r, &log);
+    assert!(
+        log.iter()
+            .any(|l| l.contains("members in the first volume")),
+        "{log:?}"
+    );
+    for (name, d) in files {
+        assert_eq!(std::fs::read(t.out().join(&name)).unwrap(), d);
+    }
+}

@@ -842,9 +842,9 @@ mod tests {
         let ns: *const c_char = std::ptr::null();
         let mut ints = [0 as c_int; 5];
         let mut i64s = [0i64; 4];
-        let mut strs = [ns; 4];
+        let mut strs: [*const c_char; 4];
         unsafe {
-            let mut call = |n,
+            let call = |n,
                             op,
                             a2,
                             p2,

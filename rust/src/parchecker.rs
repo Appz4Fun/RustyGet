@@ -119,6 +119,11 @@ struct ActiveStreamingSession {
     /// of the pool; returned with the session's budget.
     lent_memory: AtomicU64,
     pending_unpause_ids: Mutex<Vec<u64>>,
+    /// A back-fill thread is re-reading verified slices for new slots.
+    backfill_running: AtomicBool,
+    /// After a back-fill that left slices out (verified from RAM, not on
+    /// disk yet), no new one starts before this time.
+    backfill_retry_at: Mutex<Option<std::time::Instant>>,
     /// Recovery blocks of registered volumes that have not arrived yet: the
     /// most recovery a damaged block can still get, so growth never charges
     /// ParBuffer for slots no block could fill.
@@ -285,6 +290,8 @@ fn build_streaming_session(
         article_byte_limit: AtomicU64::new(article_byte_limit),
         lent_memory: AtomicU64::new(0),
         pending_unpause_ids: Mutex::new(Vec::new()),
+        backfill_running: AtomicBool::new(false),
+        backfill_retry_at: Mutex::new(None),
         queued_blocks: Mutex::new(HashMap::new()),
         logged_slots: AtomicUsize::new(0),
         file_lengths: lengths,
@@ -354,6 +361,17 @@ fn ensure_registry_generation(
 }
 
 impl ActiveStreamingSession {
+    /// A back-fill is pending, none runs, and no retry delay is in force.
+    fn backfill_due(&self) -> bool {
+        self.session.needs_backfill()
+            && !self.backfill_running.load(Ordering::Acquire)
+            && self
+                .backfill_retry_at
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_none_or(|at| std::time::Instant::now() >= at)
+    }
+
     fn record<T>(&self, result: Result<T, RepairError>) -> Result<T, RepairError> {
         if let Err(error) = &result {
             *self.last_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(error.to_string());
@@ -839,7 +857,8 @@ pub(crate) fn streaming_session_pending_article_jobs() -> Vec<i32> {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .is_empty();
-            (queued || warning || unpause).then_some(id)
+            let backfill = entry.backfill_due();
+            (queued || warning || unpause || backfill).then_some(id)
         })
         .collect()
 }
@@ -1994,6 +2013,61 @@ pub fn streaming_session_on_recovery_volume_arrived(
         }
         Ok(count)
     })
+    .inspect(|_| streaming_session_kick_backfill(nzb_id))
+}
+
+/// A back-fill that could not re-read every slice (slices verified from RAM
+/// reach the disk when the cache flushes them) is retried after this delay,
+/// not on every coordinator tick.
+const BACKFILL_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Starts re-reading verified slices for syndrome slots allocated since the
+/// last back-fill, on a thread of its own: it can take seconds per GB, and
+/// live articles keep folding meanwhile. At most one runs per session; after
+/// an error the back-fill is tried again once [`BACKFILL_RETRY_DELAY`] passes.
+pub(crate) fn streaming_session_kick_backfill(nzb_id: i32) {
+    let Some(entry) = active_streaming_session(nzb_id) else {
+        return;
+    };
+    if entry.session.is_cancelled()
+        || !entry.backfill_due()
+        || entry
+            .backfill_running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+    {
+        return;
+    }
+    let worker = Arc::clone(&entry);
+    let spawned = std::thread::Builder::new()
+        .name(format!("live-par-backfill-{nzb_id}"))
+        .spawn(move || {
+            // Clears the running flag even if the back-fill panics.
+            struct Running<'a>(&'a AtomicBool);
+            impl Drop for Running<'_> {
+                fn drop(&mut self) {
+                    self.0.store(false, Ordering::Release);
+                }
+            }
+            let _running = Running(&worker.backfill_running);
+            let retry_at = || {
+                worker
+                    .backfill_retry_at
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+            };
+            // Back off up front, so a panic below waits out the delay too.
+            *retry_at() = Some(std::time::Instant::now() + BACKFILL_RETRY_DELAY);
+            // A shared back-fill error is expected while verified slices still
+            // sit in the article cache, so it is retried, never reported: the
+            // strict back-fill inside repair surfaces any error that persists.
+            if worker.session.backfill_pending().is_ok() {
+                *retry_at() = None;
+            }
+        });
+    if spawned.is_err() {
+        entry.backfill_running.store(false, Ordering::Release);
+    }
 }
 
 /// Polls the live status of the [`StreamingParSession`] for `nzb_id`.
@@ -4114,6 +4188,7 @@ mod tests {
                 max_working_bytes: 4 << 20,
                 max_staging_bytes: 0,
                 solve_mem_limit_bytes: 16 << 20,
+                defer_backfill: true,
                 ..SessionOptions::default()
             },
         )
@@ -4166,6 +4241,13 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(entry.session.max_syndrome_slots(), final_cap);
+        // Slots that arrived after slices were verified are back-filled on a
+        // thread of their own, not inside the arrival.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while entry.session.needs_backfill() || entry.backfill_running.load(Ordering::Acquire) {
+            assert!(std::time::Instant::now() < deadline, "back-fill never finished");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         assert_eq!(
             reserved(&entry),
             start_bytes + (final_cap as u64 - 1) * 2 * 4096

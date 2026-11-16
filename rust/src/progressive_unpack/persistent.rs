@@ -512,9 +512,9 @@ impl<'a> Run<'a> {
     fn stop(&self, e: &ProgressiveFailure, member: Option<&[u8]>) -> Step {
         match &e.kind {
             FailureKind::Canceled => Step::Fail(Failure::Canceled),
-            FailureKind::PasswordRequired | FailureKind::WrongPassword => {
-                Step::Fail(Failure::from_progressive(e))
-            }
+            // Password errors, like everything else zipfast refuses, go to the progressive path:
+            // it reports them (the line the unpack parsers read) and places the members before
+            // the encrypted one exactly as before.
             _ => Step::Fallback(format!(
                 "{:?}{}",
                 e.kind,
@@ -560,12 +560,12 @@ impl<'a> Run<'a> {
             cb(false);
         }
         if !repaired {
+            // Repair given up: the progressive path places the intact members and reports the
+            // damage as before (its wait_repaired answers again at once).
             return Err(if is_cancelled() {
                 Step::Fail(Failure::Canceled)
             } else {
-                Step::Fail(Failure::Damaged(
-                    "the damaged volumes were not repaired".into(),
-                ))
+                Step::Fallback("the damaged volumes were not repaired".into())
             });
         }
         let mut volumes: Vec<u32> = self

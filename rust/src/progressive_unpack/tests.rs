@@ -3620,3 +3620,63 @@ fn a_wrong_password_after_a_refill_fails_as_the_progressive_path_does() {
     );
     assert!(!t.out().join(persistent::STATE_DIR).exists());
 }
+
+#[test]
+fn an_unrepaired_set_places_its_intact_members_as_the_progressive_path_does() {
+    struct NoRepair(Damaged, u64);
+    impl VolumeFeed for NoRepair {
+        fn volume(&mut self, path: &Path) -> VolumeView {
+            self.0.volume(path)
+        }
+        fn wait_repaired(&mut self, _c: &mut dyn FnMut() -> bool) -> bool {
+            false
+        }
+        fn expected_volumes(&self) -> u64 {
+            self.1
+        }
+    }
+    let t = TestDir::new("persist_intact");
+    let a = pattern(200_000);
+    let b: Vec<u8> = pattern(50_000).iter().map(|x| x ^ 0x5a).collect();
+    let mut v = SIG.to_vec();
+    v.extend(main_block(false, None));
+    let fa = file_block(
+        "a.bin",
+        a.len() as u64,
+        &a,
+        crc32fast::hash(&a),
+        false,
+        false,
+    );
+    let a_off = v.len() + fa.len() - a.len();
+    v.extend(fa);
+    v.extend(file_block(
+        "b.bin",
+        b.len() as u64,
+        &b,
+        crc32fast::hash(&b),
+        false,
+        false,
+    ));
+    v.extend(end_block(false));
+    let first = t.dl().join("set.rar");
+    let mut dmg = v.clone();
+    dmg[a_off + 50_000..a_off + 60_000].fill(0);
+    std::fs::write(&first, &dmg).unwrap();
+    let feed = NoRepair(
+        Damaged {
+            holes: vec![(first.clone(), vec![((a_off + 50_000) as u64, 10_000)])],
+            repair: Vec::new(),
+            handed: false,
+        },
+        1,
+    );
+    let (r, log) = run(&first, &t.out(), Box::new(feed));
+    assert!(
+        matches!(r, Err(Error::Failed(Failure::Damaged(_)))),
+        "{log:?}"
+    );
+    assert_eq!(std::fs::read(t.out().join("b.bin")).unwrap(), b);
+    assert!(!t.out().join("a.bin").exists());
+    assert!(!t.out().join(persistent::STATE_DIR).exists());
+}

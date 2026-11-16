@@ -2674,6 +2674,82 @@ mod tests {
     }
 
     #[test]
+    fn test_zip_members_go_through_the_unpack_limits() {
+        // Every file and folder the ZIP path creates passes unpacklimits with its real path,
+        // as the RAR path does: the first breach refuses the member before it is created.
+        use crate::unpacklimits::{finish_names, Guard, Limits, Scope};
+        use std::sync::{Arc, Mutex};
+        let dir = std::env::temp_dir().join(format!("rg_zip_limits_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let too_many = dir.join("many.zip");
+        std::fs::write(
+            &too_many,
+            build_test_zip(&[
+                ("a.txt", b"a", None, 0, None),
+                ("b.txt", b"b", None, 0, None),
+                ("c.txt", b"c", None, 0, None),
+            ]),
+        )
+        .unwrap();
+        let too_deep = dir.join("deep.zip");
+        std::fs::write(
+            &too_deep,
+            build_test_zip(&[("x/y/z.txt", b"z", None, 0, None)]),
+        )
+        .unwrap();
+        let accented = dir.join("accented.zip");
+        std::fs::write(
+            &accented,
+            build_test_zip(&[("Caf\u{e9}.txt", b"c", None, 0, None)]),
+        )
+        .unwrap();
+        let limits = Limits {
+            max_files: 2,
+            max_depth: 1,
+            max_folders: 10,
+        };
+        for overwrite in [1, 2] {
+            let run = |zip: &std::path::Path, out: &std::path::Path| {
+                let g = Arc::new(Mutex::new(Guard::new(limits, out, &[])));
+                let res = {
+                    let _scope = Scope::enter(&g);
+                    crate::archive_native::extract_zipfast_cancellable(
+                        zip,
+                        out,
+                        "",
+                        overwrite,
+                        &mut |_, _| {},
+                        &mut || false,
+                    )
+                };
+                (res, g)
+            };
+
+            let out = dir.join(format!("many{overwrite}"));
+            let (res, _) = run(&too_many, &out);
+            let err = res.unwrap_err();
+            assert!(err.contains("more than 2 files"), "mode {overwrite}: {err}");
+            assert!(out.join("b.txt").exists() && !out.join("c.txt").exists());
+
+            let out = dir.join(format!("deep{overwrite}"));
+            let (res, _) = run(&too_deep, &out);
+            assert!(
+                res.is_err(),
+                "mode {overwrite}: deeper than 1 level was allowed"
+            );
+            assert!(!out.join("x").join("y").exists(), "mode {overwrite}");
+
+            let out = dir.join(format!("accented{overwrite}"));
+            let (res, g) = run(&accented, &out);
+            res.unwrap();
+            finish_names(&g, &mut |_, _| {}).unwrap();
+            assert!(out.join("Cafe.txt").exists(), "mode {overwrite}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn test_zip_auto_rename_keeps_duplicates_and_creates_missing_output() {
         let dir = std::env::temp_dir().join(format!("rg_zip_dupes_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

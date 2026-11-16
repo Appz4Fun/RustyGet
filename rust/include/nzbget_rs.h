@@ -248,6 +248,9 @@ typedef struct NzbgetRsParsedOptions {
     int32_t detail_target;
     int32_t write_log;
     int32_t tls;
+    int32_t unpack_max_files;
+    int32_t unpack_max_depth;
+    int32_t unpack_max_folders;
 } NzbgetRsParsedOptions;
 
 typedef void (*NzbgetRsOptionsHostFn)(

@@ -1701,6 +1701,10 @@ struct UnpackRunState {
     unpack_ok: bool,
     unpack_start_error: bool,
     unpack_space_error: bool,
+    /// An unpack limit was breached (`unpacklimits`): a par repair cannot help.
+    unpack_limit_error: bool,
+    /// The job's unpack limits, shared by every unpack pass.
+    unpack_guard: Option<crate::unpacklimits::SharedGuard>,
     unpack_decrypt_error: bool,
     unpack_password_error: bool,
     cleaned_up_disk: bool,
@@ -1903,6 +1907,14 @@ impl NzbgetRsUnpackController {
         }
         if crate::unpack::is_unpack_space_error(kind == MK_ERROR, text) {
             st.unpack_space_error = true;
+        }
+        // Also behind a log prefix ("Join: Unpack limit: ...").
+        if kind == MK_ERROR
+            && text
+                .windows(crate::unpacklimits::LIMIT_PREFIX.len())
+                .any(|w| w == crate::unpacklimits::LIMIT_PREFIX.as_bytes())
+        {
+            st.unpack_limit_error = true;
         }
 
         if !self.is_stopped(ctx, host_cb)
@@ -2122,6 +2134,25 @@ impl NzbgetRsUnpackController {
             let m = [b"Unpacking ", st.name.as_slice()].concat();
             self.print_message(ctx, host_cb, &mut st, MK_INFO, &m);
             self.create_unpack_dir(ctx, host_cb, &mut st);
+            // One guard for the job's unpack limits, continuing the count of the job's direct
+            // unpack. Without one (after a restart), a temporary unpack folder that was there
+            // already holds what direct unpack wrote for this job: it counts too.
+            let guard = crate::unpacklimits::take_handed_over(crate::fsops::path(&st.unpack_dir))
+                .unwrap_or_else(|| {
+                    let mut guard = crate::unpacklimits::Guard::new(
+                        crate::unpacklimits::Limits::from_options(),
+                        crate::fsops::path(&st.unpack_dir),
+                        &[
+                            crate::fsops::path(&st.dest_dir),
+                            crate::fsops::path(&st.final_dir),
+                        ],
+                    );
+                    if st.use_temp_unpack_dir && !st.unpack_dir_created {
+                        guard.seed_existing();
+                    }
+                    std::sync::Arc::new(std::sync::Mutex::new(guard))
+                });
+            st.unpack_guard = Some(guard);
 
             if st.has_rar_files {
                 if st.has_not_unpacked_rar_files || st.unpack_dir_created {
@@ -2448,6 +2479,7 @@ impl NzbgetRsUnpackController {
     ) {
         st.all_ok_received = false;
         st.unpack_space_error = false;
+        st.unpack_limit_error = false;
         st.is_seven_zip = is_seven_zip;
 
         if is_seven_zip {
@@ -2469,10 +2501,24 @@ impl NzbgetRsUnpackController {
         let cleanup_disk = st.unpack_cleanup_disk;
         let pw_str = std::str::from_utf8(password).unwrap_or("");
 
+        // Unpacked files may end up in the download or the final folder.
+        let guard = st
+            .unpack_guard
+            .get_or_insert_with(|| {
+                crate::unpacklimits::Guard::shared(
+                    crate::fsops::path(&unpack_dir),
+                    &[
+                        crate::fsops::path(&st.dest_dir),
+                        crate::fsops::path(&st.final_dir),
+                    ],
+                )
+            })
+            .clone();
         let st_cell = std::cell::RefCell::new(&mut *st);
         let all_ok = crate::unpack::extract_discovered_archives(
             &dest_dir,
             crate::fsops::path(&unpack_dir),
+            &guard,
             pw_str,
             is_seven_zip,
             multi_volumes,
@@ -2542,6 +2588,8 @@ impl NzbgetRsUnpackController {
         let par_success = st.par_status == 3;
         let write_buf = st.write_buffer_kb;
         let mut joined = std::mem::take(&mut st.joined_files);
+        let guard = st.unpack_guard.clone();
+        let _scope = guard.as_ref().map(crate::unpacklimits::Scope::enter);
 
         let ok = crate::unpack::join_splitted_files(
             &dest_dir,
@@ -2584,6 +2632,9 @@ impl NzbgetRsUnpackController {
         st.joined_files = joined;
         if !ok {
             st.unpack_ok = false;
+            if guard.as_ref().is_some_and(|g| crate::unpacklimits::breach_of(g).is_some()) {
+                st.unpack_limit_error = true;
+            }
         }
         st.log_prefix = None;
         Self::set_progress_label(ctx, host_cb, b"");
@@ -2668,6 +2719,25 @@ impl NzbgetRsUnpackController {
             return;
         }
 
+        // Names are ASCII only: renamed once every unpack pass of the job is done.
+        if st.unpack_ok {
+            if let Some(guard) = st.unpack_guard.clone() {
+                let mut lines: Vec<(i32, String)> = Vec::new();
+                let named = crate::unpacklimits::finish_names(&guard, &mut |k, m| {
+                    lines.push((k, m.to_string()));
+                });
+                for (k, m) in lines {
+                    let kind = if k == 1 { MK_ERROR } else { MK_INFO };
+                    self.print_message(ctx, host_cb, st, kind, m.as_bytes());
+                }
+                if named.is_err() {
+                    // A file system error: a par repair cannot help.
+                    st.unpack_ok = false;
+                    st.unpack_start_error = true;
+                }
+            }
+        }
+
         let cleanup_success = self.cleanup(ctx, host_cb, st);
         if st.unpack_ok && cleanup_success {
             let m = [st.info_name_up.as_slice(), b" successful"].concat();
@@ -2710,7 +2780,7 @@ impl NzbgetRsUnpackController {
                 par_info[0],
                 1,
                 par_info[1] != 0,
-                st.unpack_start_error,
+                st.unpack_start_error || st.unpack_limit_error,
                 st.unpack_space_error,
                 st.unpack_password_error,
                 st.unpack_decrypt_error,
@@ -3491,6 +3561,8 @@ struct DirectUnpackRunLocal {
     use_temp_unpack_dir: bool,
     unpack_cleanup_disk: bool,
     expected_volumes: u64,
+    /// The job's unpack limits, shared by every archive set this run unpacks.
+    unpack_guard: Option<crate::unpacklimits::SharedGuard>,
 }
 
 pub struct NzbgetRsDirectUnpack {
@@ -4405,6 +4477,20 @@ impl NzbgetRsDirectUnpack {
         let cleanup_disk = local.unpack_cleanup_disk;
 
         let mut failure: Option<crate::progressive_unpack::Failure> = None;
+        let guard = local
+            .unpack_guard
+            .get_or_insert_with(|| {
+                // A guard an earlier run left for this folder is stale.
+                let _ = crate::unpacklimits::take_handed_over(crate::fsops::path(&unpack_dir));
+                crate::unpacklimits::Guard::shared(
+                    crate::fsops::path(&unpack_dir),
+                    &[
+                        crate::fsops::path(&local.dest_dir),
+                        crate::fsops::path(&local.final_dir),
+                    ],
+                )
+            })
+            .clone();
         let feed = Box::new(DirectUnpackFeed {
             nzb_id: self.nzb_id,
             expected_volumes: local.expected_volumes,
@@ -4442,6 +4528,7 @@ impl NzbgetRsDirectUnpack {
                 // A parked session counts as waiting, as the volume handshake did, so reloads
                 // are not deferred behind it.
                 on_wait: Some(&|waiting| self.waiting_volume.store(waiting, Ordering::Release)),
+                guard: Some(&guard),
             },
         );
         if let Some(f) = &failure {
@@ -4485,6 +4572,7 @@ impl NzbgetRsDirectUnpack {
             use_temp_unpack_dir: false,
             unpack_cleanup_disk: false,
             expected_volumes: 0,
+            unpack_guard: None,
         };
 
         let found = with_dq_guard(ctx, host_cb, |dq_ptr| {
@@ -4614,6 +4702,29 @@ impl NzbgetRsDirectUnpack {
 
         let cancelled = self.cancelled.load(Ordering::Acquire);
         let interrupted = !cancelled && self.is_stopped_or_terminated(ctx, host_cb);
+        // Names are ASCII only. A temporary unpack folder is renamed by post-processing, which
+        // counts what is in it; files unpacked next to the download are renamed now.
+        if local.unpack_ok && !interrupted && !cancelled {
+            // Post-processing continues this count.
+            if let Some(guard) = &local.unpack_guard {
+                crate::unpacklimits::hand_over(guard);
+            }
+        }
+        if local.unpack_ok && !interrupted && !cancelled && !local.use_temp_unpack_dir {
+            if let Some(guard) = local.unpack_guard.clone() {
+                let mut lines: Vec<(i32, String)> = Vec::new();
+                let named = crate::unpacklimits::finish_names(&guard, &mut |k, m| {
+                    lines.push((k, m.to_string()));
+                });
+                for (k, m) in lines {
+                    let kind = if k == 1 { MK_ERROR } else { MK_INFO };
+                    self.add_message(ctx, host_cb, kind, m.as_bytes(), &mut local);
+                }
+                if named.is_err() {
+                    local.unpack_ok = false;
+                }
+            }
+        }
         if (!local.unpack_ok && !interrupted) || cancelled {
             self.cleanup(ctx, host_cb, &mut local);
         }
@@ -5458,8 +5569,10 @@ fn run_rename_job(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn, kind: i32
                     );
                 }
             };
+            let mut renamed_to: Vec<Vec<u8>> = Vec::new();
             let mut ren_fn = |old_rel: &[u8], new_rel: &[u8]| {
                 register_renamed_helper(ctx, host_cb, old_rel, new_rel, &mut renamed_count);
+                renamed_to.push(new_rel.to_vec());
             };
 
             let state = crate::parrenamer::execute_all(
@@ -5475,6 +5588,45 @@ fn run_rename_job(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn, kind: i32
             );
             has_missed_files = state.has_missed_files;
             has_damaged_par_files = state.has_damaged_par_files;
+            // After an unpack, names are ASCII only (`unpacklimits`): a par rename back to a
+            // non-ASCII name is renamed again.
+            if unpack_status == 3 {
+                for rel in renamed_to {
+                    let sep = crate::paths::PATH_SEPARATOR;
+                    let full = [target_dir.as_slice(), &[sep], rel.as_slice()].concat();
+                    match crate::unpacklimits::ascii_rename(crate::fsops::path(&full)) {
+                        Ok(Some(new)) => {
+                            let new_rel = new
+                                .strip_prefix(crate::fsops::path(target_dir))
+                                .map(|p| crate::fsops::path_to_bytes(p).to_vec())
+                                .unwrap_or_default();
+                            if !new_rel.is_empty() {
+                                register_renamed_helper(
+                                    ctx,
+                                    host_cb,
+                                    &rel,
+                                    &new_rel,
+                                    &mut renamed_count,
+                                );
+                            }
+                            let m = format!(
+                                "Renamed {} to {} (names are ASCII only)",
+                                String::from_utf8_lossy(&full),
+                                new.display()
+                            );
+                            emit_job_msg(ctx, host_cb, MK_INFO, m.as_bytes());
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            let m = format!(
+                                "Could not rename {} to an ASCII name: {e}",
+                                String::from_utf8_lossy(&full)
+                            );
+                            emit_job_msg(ctx, host_cb, MK_ERROR, m.as_bytes());
+                        }
+                    }
+                }
+            }
         }
     } else if kind == 1 {
         let mut cbs = RenameRarCallbacks {

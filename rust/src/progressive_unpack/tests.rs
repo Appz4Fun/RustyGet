@@ -3926,6 +3926,35 @@ fn skip_mode_keeps_an_existing_rar4_backslash_target() {
     );
 }
 
+/// A member the job's unpack limits refuse stops the RAR extraction before it is written.
+#[test]
+fn a_rar_member_over_the_unpack_limits_is_refused_before_it_is_written() {
+    let t = TestDir::new("limitdeep");
+    let data = pattern(70_000);
+    let first = write_set(
+        &t.dl(),
+        &rar4_store_volumes("a\\b\\c\\file.bin", &data, 1 << 30),
+    );
+    let guard = crate::unpacklimits::Guard::shared(&t.out(), &[]);
+    let r = {
+        let _scope = crate::unpacklimits::Scope::enter(&guard);
+        run_with(&first, &t.out(), Box::new(CompleteSet), Overwrite::Always)
+    };
+    let (r, log) = r;
+    assert!(r.is_err(), "{log:?}");
+    let why = crate::unpacklimits::breach_of(&guard).unwrap();
+    assert!(why.contains("3 folders deep"), "{why}");
+    assert!(!t.out().join("a").join("b").join("c").exists(), "{log:?}");
+    // The same set passes without a guard.
+    let t = TestDir::new("limitdeepok");
+    let first = write_set(
+        &t.dl(),
+        &rar4_store_volumes("a\\b\\c\\file.bin", &data, 1 << 30),
+    );
+    let (r, log) = run_with(&first, &t.out(), Box::new(CompleteSet), Overwrite::Always);
+    expect_ok(r, &log);
+}
+
 /// Dead volumes (nothing on disk) read as virtual volumes rebuilt from a sibling's headers
 /// around borrowed data: the extraction runs through them as if they had arrived.
 struct WithVirtual {

@@ -1593,7 +1593,7 @@ pub const DUPE_WATCH_DELAY_SEC: i32 = 20;
 /// Emits all default option `(name, value)` pairs for `Options::InitDefaults`.
 pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &CStr)) {
     let output_mode = if disable_curses { c"color" } else { c"curses" };
-    let defaults: [(&CStr, &CStr); 128] = [
+    let defaults: [(&CStr, &CStr); 131] = [
         (c"MainDir", c"~/downloads"),
         (c"WebDir", c""),
         (c"ConfigTemplate", c""),
@@ -1709,6 +1709,9 @@ pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &
         (c"SevenZipCmd", c""),
         (c"UnpackPassFile", c""),
         (c"UnpackPauseQueue", c"no"),
+        (c"UnpackMaxFiles", c"100"),
+        (c"UnpackMaxDepth", c"2"),
+        (c"UnpackMaxFolders", c"10"),
         (c"ExtCleanupDisk", c".par2, .sfv, _brokenlog.txt"),
         (c"ParIgnoreExt", c""),
         (c"UnpackIgnoreExt", c""),
@@ -1961,6 +1964,13 @@ pub struct NzbgetRsParsedOptions {
     pub detail_target: i32,
     pub write_log: i32,
     pub tls: i32,
+    // Appended last: the C header (`nzbget_rs.h`) mirrors this layout.
+    /// Most files one job may unpack; 0 means no limit (`unpacklimits`).
+    pub unpack_max_files: i32,
+    /// Deepest folder nesting one job may unpack; 0 means no limit.
+    pub unpack_max_depth: i32,
+    /// Most folders one job may unpack; 0 means no limit.
+    pub unpack_max_folders: i32,
 }
 
 impl NzbgetRsParsedOptions {
@@ -2359,6 +2369,9 @@ pub fn init_scalar_options_host<H: OptionsHost>(
     s.use_temp_unpack_dir = i32::from(host.parse_bool_value(c"UseTempUnpackDir"));
     s.unpack_cleanup_disk = i32::from(host.parse_bool_value(c"UnpackCleanupDisk"));
     s.unpack_pause_queue = i32::from(host.parse_bool_value(c"UnpackPauseQueue"));
+    s.unpack_max_files = host.parse_int_value(c"UnpackMaxFiles", 10).max(0);
+    s.unpack_max_depth = host.parse_int_value(c"UnpackMaxDepth", 10).max(0);
+    s.unpack_max_folders = host.parse_int_value(c"UnpackMaxFolders", 10).max(0);
     s.url_force = i32::from(host.parse_bool_value(c"UrlForce"));
     s.cert_check = i32::from(host.parse_bool_value(c"CertCheck"));
     s.reorder_files = i32::from(host.parse_bool_value(c"ReorderFiles"));

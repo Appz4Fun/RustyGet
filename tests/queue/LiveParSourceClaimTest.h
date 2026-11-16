@@ -37,7 +37,7 @@ BOOST_AUTO_TEST_CASE(LiveParNamespaceBorrowedRowsCoverQueueAndCompleted)
     parity->SetFilename("rel.par2");
     parity->SetParFile(true);
     nzb.GetFileList()->Add(std::move(parity));
-    nzb.GetCompletedFiles()->emplace_back(39, "part39.rar", "part39.rar",
+    nzb.AddCompletedFile(39, "part39.rar", "part39.rar",
         CompletedFile::cfSuccess, 0, false, "", "");
     std::vector<LiveNamespaceTestRow> rows;
     BOOST_REQUIRE_EQUAL(live_par_visit_namespace(&nzb, LiveNamespaceCollect, &rows), 1);

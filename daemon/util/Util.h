@@ -1203,127 +1203,15 @@ private:
 	const char* T(int id) { return nzbget_rs_file_text(m_rs, id); }
 	void ST(int id, const char* v) { nzbget_rs_file_set_text(m_rs, id, v); }
 
-	friend class CompletedFile;
 };
 
 
 typedef UniqueDeque<FileInfo> FileList;
 typedef std::vector<FileInfo*> RawFileList;
 
-class CompletedFile
-{
-public:
-	enum EStatus
-	{
-		cfNone,
-		cfSuccess,
-		cfPartial,
-		cfFailure
-	};
-
-	CompletedFile(int id, std::string filename, std::string origname, EStatus status,
-		uint32 crc, bool parFile, std::string hash16k, std::string parSetId)
-		: m_id(id)
-		, m_status(status)
-		, m_crc(crc)
-		, m_parFile(parFile)
-		, m_filename(std::move(filename))
-		, m_origname(std::move(origname))
-		, m_hash16k(std::move(hash16k))
-		, m_parSetId(std::move(parSetId))
-	{
-		FileInfo::RaiseIdFloor(m_id);
-	}
-	int GetId() { return m_id; }
-	void SetFilename(std::string filename) { m_filename = std::move(filename); }
-	const char* GetFilename() { return m_filename.c_str(); }
-	void SetOrigname(std::string origname) { m_origname = std::move(origname); }
-	const char* GetOrigname() { return m_origname.c_str(); }
-	bool GetParFile() { return m_parFile; }
-	EStatus GetStatus() { return m_status; }
-	// a failed file recreated from a duplicate (stream repair) is partial:
-	// its bytes are on disk, but were never download-verified
-	void SetStatus(EStatus status) { m_status = status; }
-	uint32 GetCrc() { return m_crc; }
-	const char* GetHash16k() { return m_hash16k.c_str(); }
-	const char* GetParSetId() { return m_parSetId.c_str(); }
-
-private:
-	int m_id;
-	EStatus m_status;
-	uint32 m_crc;
-	bool m_parFile;
-	std::string m_filename;
-	std::string m_origname;
-	std::string m_hash16k;
-	std::string m_parSetId;
-};
-
-typedef std::deque<CompletedFile> CompletedFileList;
-
-// a contiguous byte range of a decoded file
-struct StreamRange
-{
-	int64 Offset = 0;
-	int64 Size = 0;
-};
-
-typedef std::vector<StreamRange> StreamRangeList;
-
-/*
- * Byte ranges of a completed file which no news server could supply,
- * captured while the file's article list still exists, so post-processing
- * can repair them from a differently segmented duplicate posting
- * (see option <DupeArticleFallback> value "stream"; not persisted).
- */
-class StreamRepairJob
-{
-public:
-	StreamRepairJob(int fileId, const char* filename, int64 decodedFileSize, int64 failedSize,
-		int64 missedSize, int failedArticles, bool parFile, StreamRangeList holes,
-		uint64 stepsHash = 0) :
-		m_fileId(fileId), m_filename(filename), m_decodedFileSize(decodedFileSize),
-		m_failedSize(failedSize), m_missedSize(missedSize), m_failedArticles(failedArticles),
-		m_parFile(parFile), m_holes(std::move(holes)), m_stepsHash(stepsHash) {}
-	int GetFileId() const { return m_fileId; }
-	const char* GetFilename() const { return m_filename; }
-	int64 GetDecodedFileSize() const { return m_decodedFileSize; }
-	// the file's ENCODED failed size (bytes= units, as counted into
-	// m_currentFailedSize) and whether it is a par2 file, captured at
-	// job-creation time while the FileInfo was still alive
-	int64 GetFailedSize() const { return m_failedSize; }
-	int64 GetMissedSize() const { return m_missedSize; }
-	int GetFailedArticles() const { return m_failedArticles; }
-	bool GetParFile() const { return m_parFile; }
-	StreamRangeList* GetHoles() { return &m_holes; }
-	const StreamRangeList* GetHoles() const { return &m_holes; }
-	void SetHoles(StreamRangeList holes) { m_holes = std::move(holes); }
-	// a whole-file job (0) learns its size from the first donor article
-	void SetDecodedFileSize(int64 decodedFileSize) { m_decodedFileSize = decodedFileSize; }
-	// article-size step fingerprint of the file's posting (see
-	// DupeArticleFallback::ArticleSizeStepsHash), 0 = none
-	uint64 GetStepsHash() const { return m_stepsHash; }
-	bool GetLiveAttempted() const { return m_liveAttempted; }
-	void SetLiveAttempted(bool liveAttempted) { m_liveAttempted = liveAttempted; }
-
-private:
-	int m_fileId;
-	CString m_filename;
-	int64 m_decodedFileSize;
-	int64 m_failedSize;
-	int64 m_missedSize;
-	int m_failedArticles;
-	bool m_parFile;
-	StreamRangeList m_holes;
-	uint64 m_stepsHash;
-	// whether the download-concurrent live pass already tried this job once:
-	// donors are static, so retrying live would only re-pay fetch traffic -
-	// whatever is left waits for the post-processing pass (not persisted; a
-	// restart re-allows one live attempt, which is harmless)
-	bool m_liveAttempted = false;
-};
-
-typedef std::vector<StreamRepairJob> StreamRepairJobList;
+// completed file status values (rust/src/qnzb.rs keeps completed files and
+// stream-repair jobs)
+namespace CompletedFile { enum EStatus { cfNone, cfSuccess, cfPartial, cfFailure }; }
 
 
 // script status values (rust/src/qnzb.rs keeps the statuses)
@@ -1630,7 +1518,22 @@ public:
 	void SetDupeParDeferState(EDupeParDeferState state) { m_s->dupeParDeferState = state; }
 	bool GetDupeNoParNoted() { return m_s->dupeNoParNoted; }
 	void SetDupeNoParNoted(bool noted) { m_s->dupeNoParNoted = noted; }
-	StreamRepairJobList* GetStreamRepairJobs() { return &m_streamRepairJobs; }
+	// completed files and stream-repair jobs (ops in rust/src/qnzb.rs nzbget_rs_nzb_files)
+	int64 NF(int op, int a2 = 0, NzbInfo* p2 = nullptr, const char* s1 = nullptr, const char* s2 = nullptr,
+		int* ints = nullptr, int64_t* i64s = nullptr, const char** strs = nullptr, const int64_t* raw = nullptr)
+	{
+		return nzbget_rs_nzb_files(m_s, op, a2, p2 ? p2->m_s : nullptr, s1, s2, ints, i64s, strs, raw);
+	}
+	int GetCompletedFileCount() { return (int)NF(0); }
+	void AddCompletedFile(int id, const char* filename, const char* origname, CompletedFile::EStatus status,
+		uint32 crc, bool parFile, const char* hash16k, const char* parSetId)
+	{
+		FileInfo::RaiseIdFloor(id);
+		int ints[4] = { id, (int)status, (int)crc, parFile ? 1 : 0 };
+		const char* strs[4] = { filename, origname, hash16k, parSetId };
+		NF(2, 0, nullptr, nullptr, nullptr, ints, nullptr, strs);
+	}
+	bool HasStreamRepairJobs() { return NF(20) > 0; }
 	int GetPriority() { return m_s->priority; }
 	void SetPriority(int priority) { m_s->priority = priority; }
 	int GetExtraPriority() { return m_s->extraPriority; }
@@ -1676,21 +1579,9 @@ public:
 		nzbget_rs_nzb_set_text(m_s, 3, buf.data, (intptr_t)buf.len);
 		nzbget_rs_free(buf);
 	}
-	CompletedFileList* GetCompletedFiles() { return &m_completedFiles; }
 	bool RenameCompletedFile(const char* oldName, const char* newAbsoluteOrRelativePath)
 	{
-		if (Util::EmptyStr(oldName) || Util::EmptyStr(newAbsoluteOrRelativePath)) return false;
-		for (CompletedFile& completedFile : m_completedFiles)
-		{
-			const char* fn = completedFile.GetFilename() ? completedFile.GetFilename() : "";
-			if (nzbget_rs_nzb_completed_same_filename(fn, oldName))
-			{
-				if (Util::EmptyStr(completedFile.GetOrigname())) completedFile.SetOrigname(fn);
-				completedFile.SetFilename(newAbsoluteOrRelativePath);
-				return true;
-			}
-		}
-		return false;
+		return NF(4, 0, nullptr, oldName, newAbsoluteOrRelativePath) != 0;
 	}
 	void SetDirectRenameStatus(EDirectRenameStatus renameStatus) { m_s->directRenameStatus = renameStatus; }
 	EDirectRenameStatus GetDirectRenameStatus() { return (EDirectRenameStatus)m_s->directRenameStatus; }
@@ -2136,8 +2027,6 @@ private:
 	// which way the par-first rule of duplicate recovery went, for logging once (not persisted)
 	// missing byte ranges of completed media files awaiting stream repair
 	// from duplicate collections in post-processing (persisted)
-	StreamRepairJobList m_streamRepairJobs;
-	CompletedFileList m_completedFiles;
 	FileList m_fileList;
 	Mutex m_logMutex;
 	MessageList m_messages;
@@ -2661,7 +2550,7 @@ inline int live_par_visit_namespace(NzbInfo* nzb, LiveParNamespaceVisitor visit,
     if (nzb->GetParking() || nzb->GetDeleting()) return 2;
     constexpr size_t limit = 32768;
     const size_t queued = nzb->GetFileList()->size();
-    if (queued > limit || nzb->GetCompletedFiles()->size() > limit - queued) return 0;
+    if (queued > limit || (size_t)nzb->GetCompletedFileCount() > limit - queued) return 0;
     // CompleteFileParts can clear outputFilename outside the queue, even while
     // its final downloader remains active. Do not borrow during that window.
     for (const auto& file : *nzb->GetFileList())
@@ -2683,11 +2572,14 @@ inline int live_par_visit_namespace(NzbInfo* nzb, LiveParNamespaceVisitor visit,
             text(file->GetOrigname()), text(file->GetHash16k()), file->GetOutputFilenameC()))
             return 0;
     }
-    for (auto& file : *nzb->GetCompletedFiles())
+    const int completedCount = nzb->GetCompletedFileCount();
+    for (int i = 0; i < completedCount; i++)
     {
-        const unsigned flags = 4u | (file.GetParFile() ? 1u : 0u);
-        if (!visit(context, file.GetId(), flags, text(file.GetFilename()),
-            text(file.GetOrigname()), text(file.GetHash16k()), ""))
+        int ints[4] = {};
+        const char* strs[4] = {};
+        if (nzb->NF(1, i, nullptr, nullptr, nullptr, ints, nullptr, strs) != 0) return 0;
+        const unsigned flags = 4u | (ints[2] ? 1u : 0u);
+        if (!visit(context, ints[0], flags, text(strs[0]), text(strs[1]), text(strs[2]), ""))
             return 0;
     }
     return 1;
@@ -2901,7 +2793,7 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 		ints[60] = n->GetPostTotalSec(); ints[61] = (int)n->GetParRenameStatus(); ints[62] = (int)n->GetRarRenameStatus();
 		ints[63] = (int)n->GetUnpackStatus(); ints[64] = (int)n->GetCleanupStatus(); ints[65] = (int)n->GetMoveStatus();
 		ints[66] = (int)n->GetPostDownloadRenamingStatus(); ints[67] = (int)n->GetPostUnpackRenamingStatus();
-		ints[68] = n->GetUnpackThread() ? 1 : 0; ints[69] = n->GetStreamRepairJobs()->empty() ? 0 : 1;
+		ints[68] = n->GetUnpackThread() ? 1 : 0; ints[69] = n->HasStreamRepairJobs() ? 1 : 0;
 		ints[70] = (int)n->GetUrlStatus(); ints[71] = n->GetParSec(); ints[72] = n->GetRepairSec();
 		ints[73] = n->GetUnpackSec(); ints[74] = n->GetReprocess() ? 1 : 0; ints[75] = n->GetExtraParBlocks();
 		ints[76] = n->GetDupeRecoveredHoles(); ints[77] = (int)n->ScriptTotalStatus();
@@ -3096,8 +2988,8 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 		case 109: if (n->GetPostInfo()) n->GetPostInfo()->SetStage((PostInfo::EStage)a2); break;
 		case 110: if (n->GetPostInfo()) { n->GetPostInfo()->SetForceParFull((a2 & 1) != 0); n->GetPostInfo()->SetForceRepair((a2 & 2) != 0); } break;
 		case 111: n->NC(5); break;
-		case 112: n->GetStreamRepairJobs()->clear(); break;
-		case 113: n->GetCompletedFiles()->clear(); break;
+		case 112: n->NF(27); break;
+		case 113: n->NF(7); break;
 		default: break;
 		}
 		return 0;
@@ -3145,46 +3037,34 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 			dst->NC(49, 1, src, nullptr, nullptr, lists);
 			lists[0] = lists[1] = 1;
 			dst->NC(49, 1, src, nullptr, nullptr, lists);
-			for (CompletedFile& cf : src->GetCompletedFiles()) dst->GetCompletedFiles()->push_back(std::move(cf));
-			src->GetCompletedFiles()->clear();
+			dst->NF(8, 0, src);
 			return 0;
 		}
 		if (a1 == 5)
 		{
 			NzbInfo* n = reinterpret_cast<NzbInfo*>(p1);
-			if (a2 < 0) return n->GetCompletedFiles()->size();
-			CompletedFile& cf = n->GetCompletedFiles()->at((size_t)a2);
-			ints[0] = cf.GetId(); ints[1] = (int)cf.GetStatus(); ints[2] = cf.GetParFile() ? 1 : 0;
-			ints[3] = (int)cf.GetCrc();
-			strs[0] = cf.GetFilename(); strs[1] = cf.GetOrigname(); strs[2] = cf.GetHash16k(); strs[3] = cf.GetParSetId();
+			if (a2 < 0) return n->NF(0);
+			n->NF(1, a2, nullptr, nullptr, nullptr, ints, nullptr, strs);
 			return 0;
 		}
 		if (a1 == 6)
 		{
 			NzbInfo* n = reinterpret_cast<NzbInfo*>(p1);
 			FileInfo* f = reinterpret_cast<FileInfo*>(p2);
-			n->GetCompletedFiles()->emplace_back(f->GetId(), s1 ? s1 : "",
-				f->GetOrigname() ? f->GetOrigname() : "", (CompletedFile::EStatus)a2,
-				(uint32)ints[0], f->GetParFile(), f->GetHash16k() ? f->GetHash16k() : "",
-				f->GetParSetId() ? f->GetParSetId() : "");
+			n->AddCompletedFile(f->GetId(), s1, f->GetOrigname(), (CompletedFile::EStatus)a2,
+				(uint32)ints[0], f->GetParFile(), f->GetHash16k(), f->GetParSetId());
 			return 0;
 		}
 		if (a1 == 7)
 		{
 			NzbInfo* n = reinterpret_cast<NzbInfo*>(p1);
-			CompletedFile& cf = n->GetCompletedFiles()->at((size_t)a2);
-			if (s2) cf.SetOrigname(s2);
-			cf.SetFilename(s1 ? s1 : "");
+			n->NF(3, a2, nullptr, s1, s2);
 			return 0;
 		}
 		if (a1 == 8)
 		{
 			NzbInfo* n = reinterpret_cast<NzbInfo*>(p1);
-			const auto* rawHoles = reinterpret_cast<const StreamRange*>(p2);
-			StreamRangeList holes;
-			if (rawHoles && a2 > 0) holes.assign(rawHoles, rawHoles + a2);
-			n->GetStreamRepairJobs()->emplace_back(ints[0], s1 ? s1 : "", i64s[0], i64s[1], i64s[2],
-				ints[1], ints[2] != 0, std::move(holes), (uint64)i64s[3]);
+			n->NF(23, a2, nullptr, s1, nullptr, ints, i64s, nullptr, reinterpret_cast<const int64_t*>(p2));
 			return 0;
 		}
 		if (a1 == 9)
@@ -3212,71 +3092,31 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 		if (a1 == 11)
 		{
 			NzbInfo* n = reinterpret_cast<NzbInfo*>(p1);
-			if (a2 < 0) return n->GetStreamRepairJobs()->size();
-			StreamRepairJob& job = n->GetStreamRepairJobs()->at((size_t)a2);
-			int64_t holesTotal = 0;
-			for (const StreamRange& r : *job.GetHoles()) holesTotal += r.Size;
-			ints[0] = job.GetFileId();
-			i64s[0] = job.GetDecodedFileSize();
-			i64s[1] = holesTotal;
-			i64s[2] = job.GetFailedSize() + job.GetMissedSize();
-			strs[0] = job.GetFilename();
+			if (a2 < 0) return n->NF(20);
+			n->NF(21, a2, nullptr, nullptr, nullptr, ints, i64s, strs);
 			return 0;
 		}
 		if (a1 == 12)
 		{
 			NzbInfo* n = reinterpret_cast<NzbInfo*>(p1);
-			for (CompletedFile& cf : n->GetCompletedFiles())
-			{
-				if (cf.GetId() == a2)
-				{
-					if (ints[0] == 1 && cf.GetStatus() != CompletedFile::cfSuccess)
-					{
-						cf.SetStatus(CompletedFile::cfSuccess);
-						return 1;
-					}
-					else if (ints[0] == 2 && cf.GetStatus() == CompletedFile::cfFailure)
-					{
-						cf.SetStatus(CompletedFile::cfPartial);
-					}
-					break;
-				}
-			}
-			return 0;
+			return n->NF(5, a2, nullptr, nullptr, nullptr, ints);
 		}
 		if (a1 == 13)
 		{
 			NzbInfo* n = reinterpret_cast<NzbInfo*>(p1);
-			auto* jobs = n->GetStreamRepairJobs();
-			if (ints[0] == 1)
-			{
-				StreamRepairJob& job = jobs->at((size_t)a2);
-				bool prev = job.GetLiveAttempted();
-				job.SetLiveAttempted(true);
-				return prev ? 1 : 0;
-			}
+			if (ints[0] == 1) return n->NF(24, a2);
 			if (ints[0] == 2)
 			{
-				jobs->erase(jobs->begin() + a2);
+				n->NF(25, a2);
 				if (ints[1] != 0) n->SetChanged(true);
 				return 0;
 			}
 			if (ints[0] == 3)
 			{
-				StreamRepairJob& job = jobs->at((size_t)a2);
-				if (i64s[0] >= 0) job.SetDecodedFileSize(i64s[0]);
-				const auto* ranges = reinterpret_cast<const StreamRange*>(p2);
-				job.SetHoles(ranges && ints[1] > 0 ? StreamRangeList(ranges, ranges + ints[1]) : StreamRangeList());
+				n->NF(26, a2, nullptr, nullptr, nullptr, ints, i64s, nullptr, reinterpret_cast<const int64_t*>(p2));
 				return 0;
 			}
-			StreamRepairJob& job = jobs->at((size_t)a2);
-			ints[0] = job.GetFileId(); ints[1] = job.GetFailedArticles();
-			ints[2] = job.GetParFile() ? 1 : 0; ints[3] = job.GetLiveAttempted() ? 1 : 0;
-			ints[4] = (int)job.GetHoles()->size();
-			i64s[0] = job.GetDecodedFileSize(); i64s[1] = job.GetFailedSize();
-			i64s[2] = job.GetMissedSize(); i64s[3] = (int64_t)job.GetStepsHash();
-			strs[0] = job.GetFilename();
-			strs[1] = job.GetHoles()->empty() ? nullptr : reinterpret_cast<const char*>(job.GetHoles()->data());
+			n->NF(22, a2, nullptr, nullptr, nullptr, ints, i64s, strs);
 			return 0;
 		}
 		if (a1 == 14)
@@ -3300,19 +3140,18 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 		if (a1 == 15)
 		{
 			NzbInfo* n = reinterpret_cast<NzbInfo*>(p1);
-			n->GetCompletedFiles()->clear(); n->GetStreamRepairJobs()->clear();
+			n->NF(7); n->NF(27);
 			n->NC(46); n->NC(47);
 			n->MoveFileList(reinterpret_cast<NzbInfo*>(p2));
 			return 0;
 		}
-		if (a1 == 16) { auto* cfs = reinterpret_cast<NzbInfo*>(p1)->GetCompletedFiles(); cfs->erase(cfs->begin() + a2); return 0; }
+		if (a1 == 16) { reinterpret_cast<NzbInfo*>(p1)->NF(6, a2); return 0; }
 		if (a1 == 17) { reinterpret_cast<NzbInfo*>(p1)->GetFileList()->Add(std::unique_ptr<FileInfo>(reinterpret_cast<FileInfo*>(p2)), false); return 0; }
 		if (a1 == 18)
 		{
 			NzbInfo* n = reinterpret_cast<NzbInfo*>(p1);
-			n->GetCompletedFiles()->emplace_back(ints[0], strs[0] ? strs[0] : "", strs[1] ? strs[1] : "",
-				(CompletedFile::EStatus)ints[1], (uint32)ints[2], ints[3] != 0,
-				strs[2] ? strs[2] : "", strs[3] ? strs[3] : "");
+			n->AddCompletedFile(ints[0], strs[0], strs[1], (CompletedFile::EStatus)ints[1],
+				(uint32)ints[2], ints[3] != 0, strs[2], strs[3]);
 			return 0;
 		}
 		if (a1 == 19)

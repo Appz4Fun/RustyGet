@@ -8610,8 +8610,10 @@ fn plan_dead_fills(
         if file_size_bytes(&path_of(&member.name)) <= 0 || is_dead_job(&member.name) {
             continue;
         }
-        let key = (prefix.to_ascii_lowercase(), width, suffix.to_ascii_lowercase());
-        let pos = match buckets.iter().position(|(k, _)| k.0 == key.0 && k.1 == key.1 && k.2 == key.2) {
+        // Compare names case-blind: the bucket keeps the first member's spelling.
+        let pos = match buckets.iter().position(|(k, _)| {
+            k.0.eq_ignore_ascii_case(&prefix) && k.1 == width && k.2.eq_ignore_ascii_case(&suffix)
+        }) {
             Some(p) => p,
             None => {
                 buckets.push(((prefix, width, suffix), Default::default()));
@@ -17646,7 +17648,8 @@ mod dead_volume_fill_tests {
         std::fs::create_dir_all(&dl).unwrap();
         let data: Vec<u8> = (0..1_000_000u64).map(|i| (i.wrapping_mul(2654435761) >> 9) as u8).collect();
         let vols = rar5_set("Movie.2160p.mkv", &data, 100_000);
-        let name = |i: usize| format!("set.part{:02}.rar", i + 1);
+        // Mixed case, like real release names: every volume must land in one set.
+        let name = |i: usize| format!("The.Set.NTb.part{:02}.rar", i + 1);
         let dead = [2usize, 5, 6];
         for (i, v) in vols.iter().enumerate() {
             if !dead.contains(&i) {

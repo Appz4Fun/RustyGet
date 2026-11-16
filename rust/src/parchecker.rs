@@ -466,8 +466,9 @@ impl ActiveStreamingSession {
             return;
         }
         // Cover the whole shortfall at once: every refusal drops data. With
-        // many files downloading at once staging holds about one partial slice
-        // per file, so loans may take up to half of ParBuffer. They never take
+        // many files downloading at once staging holds the received part of
+        // one partial slice per file (par-rs charges bytes held, not whole
+        // slices), so loans may take up to half of ParBuffer. They never take
         // the last quarter, which stays free for repair slots; when the pool
         // has room for two ordinary jobs, it is at least one ordinary job's
         // start reservation, so another job's live PAR can still start (a job
@@ -1109,8 +1110,12 @@ pub(crate) fn streaming_session_process_completed_file_with_start(
                 start(file, Arc::clone(&item.writers))?;
                 return Ok(true);
             }
-            // A volume that failed outright may never have been written.
+            // A volume that failed outright may never have been written: fetch
+            // a replacement for the blocks it was expected to bring.
             if !file.successful && !file.path.exists() {
+                if let Some(id) = file.queued_id {
+                    streaming_session_on_recovery_volume_lost(nzb_id, id);
+                }
                 return Ok(false);
             }
             // A recovery volume that lost articles still carries good blocks:
@@ -2004,6 +2009,20 @@ pub fn streaming_session_on_article_failed_permanently_by_name(
     })
 }
 
+/// A recovery volume that was in flight failed outright and left nothing on
+/// disk: stop counting its blocks as coming and fetch a replacement.
+pub(crate) fn streaming_session_on_recovery_volume_lost(nzb_id: i32, queued_id: u64) {
+    let _ = with_live_session(nzb_id, |entry| {
+        entry
+            .queued_blocks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&queued_id);
+        entry.unpause(entry.session.on_recovery_volume_lost(queued_id).as_ref());
+        Ok(())
+    });
+}
+
 /// Registers a newly downloaded `.vol*.par2` recovery volume with the active [`StreamingParSession`].
 pub fn streaming_session_on_recovery_volume_arrived(
     nzb_id: i32,
@@ -2526,6 +2545,12 @@ pub fn streaming_session_forget(nzb_id: i32) {
                 sessions.remove(&nzb_id);
             }
         });
+        // Its slots and staging go with the last reference; give the freed
+        // heap back to the OS. Off this thread: callers may hold the queue lock.
+        drop(old);
+        let _ = std::thread::Builder::new()
+            .name("live-par-trim".into())
+            .spawn(crate::memory_pressure::trim_heap);
     }
     COMPLETED_LIVE_FILES
         .lock()

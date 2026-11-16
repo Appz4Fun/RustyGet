@@ -221,11 +221,6 @@ fn first_volume_qualifies(first: &Path, password: &str) -> Result<(), String> {
                 if h.method != 0 {
                     return Err("compressed member".into());
                 }
-                // A persistent session refuses encrypted RAR4 members by design (zipfast #130);
-                // send the set to the ordinary decoder up front instead of starting a session.
-                if h.encrypted && h.format == zipfast::rar5::RarFormat::Rar4 {
-                    return Err("encrypted RAR4 member".into());
-                }
                 if h.size_unknown() {
                     return Err("member of unknown size".into());
                 }
@@ -575,6 +570,22 @@ impl<'a> Run<'a> {
                                 .as_deref()
                                 .map(String::from_utf8_lossy)
                                 .unwrap_or("a member".into())
+                        )));
+                    }
+                    // A directory entry: zipfast #130 creates it inside this run's stage, but
+                    // publishing moves only files out of the stage, so an empty folder would be
+                    // lost. Hand the set to the progressive path, as before #130 (which refused
+                    // directory entries in persistent sessions).
+                    Ok(Some(ProgressiveEvent::MemberFinished {
+                        outcome: zipfast::progressive::MemberOutcome::Directory { .. },
+                        ..
+                    })) => {
+                        return Err(Step::Fallback(format!(
+                            "directory entry{}",
+                            current
+                                .as_deref()
+                                .map(|m| format!(" {}", String::from_utf8_lossy(m)))
+                                .unwrap_or_default()
                         )));
                     }
                     Ok(Some(ProgressiveEvent::MemberFinished { .. })) => {

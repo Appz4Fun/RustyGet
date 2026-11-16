@@ -3079,8 +3079,8 @@ fn a_downloading_rar4_stored_set_refills_its_holes() {
 }
 
 #[test]
-fn a_downloading_rar4_aes_set_falls_back_and_extracts() {
-    // Encrypted RAR4 stored members stay off persistent sessions (see first_volume_qualifies).
+fn a_downloading_rar4_aes_set_extracts_in_a_persistent_session() {
+    // zipfast #146: persistent sessions take RAR 3.x AES stored members.
     let t = TestDir::new("persist_rar4aes");
     let data = pattern(250_000);
     let vols = rar4_aes_store_volumes("movie.mkv", &data, 60_000, "pw");
@@ -3092,11 +3092,7 @@ fn a_downloading_rar4_aes_set_falls_back_and_extracts() {
     };
     let (r, log) = run_downloading_pw(&first, &t.out(), "pw", damaged, vols.len() as u64);
     expect_ok(r, &log);
-    assert!(
-        log.iter()
-            .any(|l| l.contains("Unrar: progressive direct unpack (")),
-        "{log:?}"
-    );
+    assert!(persistent(&log), "{log:?}");
     let listing: Vec<_> = walk_names(&t.0);
     assert_eq!(
         std::fs::read(t.out().join("movie.mkv")).ok().as_deref(),

@@ -105,6 +105,8 @@ pub mod dupefallback;
 pub mod dupeidentity;
 pub mod ncurses_format;
 pub mod postrepair;
+#[cfg(unix)]
+pub mod qarticle;
 pub mod queuecoord;
 pub(crate) mod queuesubsys_host;
 pub mod sevenzraw;

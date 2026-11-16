@@ -729,6 +729,32 @@ fn sample_darwin(m: &mut MemoryMetrics) {
     }
 }
 
+/// Most malloc arenas glibc may create. By default it allows 8 per CPU and
+/// every download or repair thread can end up with its own; each keeps the
+/// memory it once held (about 2 MB apiece, 70+ MB in all on a 9-core box after
+/// a few jobs), which `malloc_trim` cannot give back while small blocks stay
+/// live in it. A few arenas keep allocation fast and let RSS fall to what is
+/// in use. An explicit `MALLOC_ARENA_MAX` in the environment wins.
+pub const MALLOC_ARENA_LIMIT: i32 = 4;
+
+pub fn limit_malloc_arenas() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        if std::env::var_os("MALLOC_ARENA_MAX").is_some() {
+            return;
+        }
+        const M_ARENA_MAX: std::ffi::c_int = -8;
+        unsafe extern "C" {
+            fn mallopt(param: std::ffi::c_int, value: std::ffi::c_int) -> std::ffi::c_int;
+        }
+        // SAFETY: mallopt only changes allocator tuning; M_ARENA_MAX applies
+        // to arenas created from now on.
+        unsafe {
+            mallopt(M_ARENA_MAX, MALLOC_ARENA_LIMIT);
+        }
+    }
+}
+
 pub fn trim_heap() {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     unsafe {

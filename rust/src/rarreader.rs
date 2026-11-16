@@ -200,6 +200,10 @@ fn walk(source: &mut dyn Source, size: u64, password: Option<&str>) -> Result<Vo
     limits.entries = limits.entries.max(1 << 24);
     limits.parts = limits.parts.max(1 << 24);
     limits.header_blocks = limits.header_blocks.max(1 << 25);
+    // Every header costs the map a wake and two reads here: reads are not
+    // run ahead of what it asks for, as they could fetch articles of data.
+    limits.provider_wakes = limits.provider_wakes.max(1 << 32);
+    limits.source_requests = limits.source_requests.max(1 << 33);
     let mut builder = VolumeMapBuilder::new(Box::new(Bridge(shared.clone())), options);
     let mut cx = Context::from_waker(Waker::noop());
     loop {

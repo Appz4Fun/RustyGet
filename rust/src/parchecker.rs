@@ -115,8 +115,8 @@ struct ActiveStreamingSession {
     articles: Mutex<DeferredArticles>,
     /// Grows when free ParBuffer is lent to queued snapshots (`lend_memory`).
     article_byte_limit: AtomicU64,
-    /// ParBuffer lent to RAM staging and queued snapshots, at most a quarter
-    /// of the pool; returned with the session's budget.
+    /// ParBuffer lent to RAM staging and queued snapshots, at most half of
+    /// the pool; returned with the session's budget.
     lent_memory: AtomicU64,
     pending_unpause_ids: Mutex<Vec<u64>>,
     /// A back-fill thread is re-reading verified slices for new slots.
@@ -429,8 +429,8 @@ impl ActiveStreamingSession {
     }
 
     /// RAM staging or the snapshot queue ran out while many files arrive at
-    /// once: lend it one more slice of free ParBuffer, up to a quarter of the
-    /// pool, so later articles are verified from RAM instead of being replayed
+    /// once: lend it free ParBuffer, up to half of the pool, so later
+    /// articles are verified from RAM instead of being replayed
     /// from disk. The refused article itself is replayed when its file
     /// completes. The memory returns with the session's budget.
     fn lend_memory(&self, error: &RepairError) {
@@ -465,10 +465,22 @@ impl ActiveStreamingSession {
         if unit == 0 {
             return;
         }
-        // Cover the whole shortfall at once: every refusal drops data.
+        // Cover the whole shortfall at once: every refusal drops data. With
+        // many files downloading at once staging holds about one partial slice
+        // per file, so loans may take up to half of ParBuffer. They never take
+        // the last quarter, which stays free for repair slots; when the pool
+        // has room for two ordinary jobs, it is at least one ordinary job's
+        // start reservation, so another job's live PAR can still start (a job
+        // with very large slices may reserve more than that).
         let wanted = (required_bytes - limit_bytes).div_ceil(unit);
-        let room = (pool / 4).saturating_sub(before) / unit;
-        let units = lease.grow_by_units(unit, wanted.min(room), pool);
+        let room = (pool / 2).saturating_sub(before) / unit;
+        let ceiling = crate::parlive::JOB_CEILING;
+        let keep_free = if pool >= 2 * ceiling {
+            (pool / 4).max(ceiling)
+        } else {
+            pool / 4
+        };
+        let units = lease.grow_by_units(unit, wanted.min(room), pool.saturating_sub(keep_free));
         if units == 0 {
             return;
         }
@@ -509,11 +521,20 @@ impl ActiveStreamingSession {
     fn refusal_summary(&self) -> Option<String> {
         let refusals = self.refusals.lock().unwrap_or_else(|e| e.into_inner());
         (!refusals.is_empty()).then(|| {
-            refusals
-                .iter()
-                .map(|(reason, count)| format!("{count} x {reason}"))
-                .collect::<Vec<_>>()
-                .join("; ")
+            // Each reason above shows its first message, from before any loan;
+            // the final limits tell whether loans kept up.
+            let mb = |bytes: u64| bytes.div_ceil(1024 * 1024);
+            format!(
+                "{} (final limits: staging {} MB, article snapshots {} MB, {} MB of ParBuffer lent)",
+                refusals
+                    .iter()
+                    .map(|(reason, count)| format!("{count} x {reason}"))
+                    .collect::<Vec<_>>()
+                    .join("; "),
+                mb(self.session.max_staging_bytes()),
+                mb(self.article_byte_limit.load(Ordering::Relaxed)),
+                mb(self.lent_memory.load(Ordering::Relaxed)),
+            )
         })
     }
 
@@ -3925,7 +3946,7 @@ mod tests {
     }
 
     #[test]
-    fn live_session_lends_free_par_buffer_to_staging_and_snapshots_up_to_a_quarter() {
+    fn live_session_lends_free_par_buffer_to_staging_and_snapshots_up_to_half() {
         use par_rs::create::{build_set, SetOptions, VolumeScheme};
 
         let nzb_id = 0x6a0f_0010;
@@ -4038,10 +4059,10 @@ mod tests {
         assert!(streaming_session_pending_article_jobs().contains(&nzb_id));
         assert_eq!(streaming_session_take_unpause_ids(nzb_id), vec![77]);
         assert!(!streaming_session_pending_article_jobs().contains(&nzb_id));
-        // Never more than a quarter of the pool.
+        // Never more than half of the pool.
         entry
             .lent_memory
-            .store(effective_live_pool_bytes() / 4, Ordering::Relaxed);
+            .store(effective_live_pool_bytes() / 2, Ordering::Relaxed);
         let _ = entry.record::<()>(Err(RepairError::StreamingMemoryLimit {
             context: "RAM-only partial staging",
             required_bytes: 1,

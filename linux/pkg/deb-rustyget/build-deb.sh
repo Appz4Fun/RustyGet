@@ -9,9 +9,10 @@ PKG=$(cd "$(dirname "$0")" && pwd)
 JOBS=${1:-3}
 cd "$ROOT"
 
-just release "$JOBS"
-
 ARCH=$(dpkg --print-architecture)
+# The floor build plus each newer CPU tier for this arch (see `just release-tiers`).
+just release-tiers "$JOBS"
+
 BASE=$(sed -n 's/^version = "\(.*\)"/\1/p' rust/Cargo.toml | head -1)
 # RG_VERSION overrides (e.g. when building from a copy without .git).
 if [ -z "${RG_VERSION:-}" ] && git rev-parse HEAD >/dev/null 2>&1; then
@@ -25,7 +26,13 @@ rm -rf "$STAGE"
 mkdir -p "$STAGE/DEBIAN" "$STAGE/usr/bin" "$STAGE/usr/share/rustyget" \
          "$STAGE/usr/share/doc/rustyget" "$STAGE/lib/systemd/system"
 
-install -m 0755 build/release/rustyget "$STAGE/usr/bin/rustyget"
+# /usr/bin/rustyget is a launcher that execs the best tier in /usr/lib/rustyget.
+mkdir -p "$STAGE/usr/lib/rustyget"
+install -m 0755 build/release/rustyget "$STAGE/usr/lib/rustyget/rustyget-default"
+if [ "$ARCH" = amd64 ]; then
+    install -m 0755 build/release-x86-64-v4/rustyget "$STAGE/usr/lib/rustyget/rustyget-x86-64-v4"
+fi
+install -m 0755 "$PKG/rustyget-launcher.sh" "$STAGE/usr/bin/rustyget"
 cp -R webui "$STAGE/usr/share/rustyget/webui"
 # DB-IP Lite country/ASN files for the news server host lookup (read locally, never queried online)
 sh scripts/fetch-geoip.sh "$STAGE/usr/share/rustyget/geoip"
@@ -49,7 +56,7 @@ chmod 0644 "$STAGE/usr/share/rustyget/rustyget.conf"
 SHL=$(mktemp -d)
 mkdir -p "$SHL/debian"
 printf 'Source: rustyget\n\nPackage: rustyget\nArchitecture: any\n' > "$SHL/debian/control"
-if ! SHLIBS=$(cd "$SHL" && dpkg-shlibdeps -O "$STAGE/usr/bin/rustyget"); then
+if ! SHLIBS=$(cd "$SHL" && dpkg-shlibdeps -O "$STAGE"/usr/lib/rustyget/rustyget-*); then
     rm -rf "$SHL"
     echo "dpkg-shlibdeps failed; refusing to build a package without library dependencies" >&2
     exit 1

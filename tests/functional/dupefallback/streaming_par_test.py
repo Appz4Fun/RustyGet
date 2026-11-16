@@ -24,7 +24,7 @@ import generators
 import harness
 from par_first_test import LoggedDaemon, inspect_parity, verify_named_outputs
 
-CASES = ('ram_part40', 'manual', 'repair_off')
+CASES = ('ram_part40', 'manual', 'repair_off', 'live_off')
 LATE_CASES = ('late_par_hole_patch', 'late_par_hole_manual',
               'late_par_hole_repair_off', 'late_par_hole_corrupt',
               'late_par_hole_healthy', 'late_par_hole_zero_pool')
@@ -475,8 +475,11 @@ def run_case(binary, par2, case):
                    'Server1.Connections=3', 'DirectWrite=yes', 'DirectRename=no',
                    'InterDir=', 'Unpack=yes', 'DirectUnpack=yes',
                    'UnpackCleanupDisk=no', 'DupeArticleFallback=no']
+        # The live session runs only with LiveParRepair=yes (off by default);
+        # 'live_off' checks the default: repair right after the download.
+        options.append('LiveParRepair=' + ('no' if case == 'live_off' else 'yes'))
         if case == 'late_par_hole_zero_pool':
-            options.append('ParBuffer=0')
+            options += ['ParPreset=custom', 'ParBuffer=0']
         daemon.write_config(options)
         daemon.start()
         api = daemon.wait_ready()
@@ -558,6 +561,18 @@ def run_case(binary, par2, case):
             assert not history.get('Status', '').startswith('SUCCESS'), history
             assert not any(os.path.basename(p) == 'payload.bin'
                            for p in target.find_files('main', 'dst')), 'corrupt parity produced a complete output'
+        elif case == 'live_off':
+            # No live session: no Live PAR frames, no live hold release; the
+            # recovery volume is still fetched and the ordinary repair heals
+            # part040 right after the download.
+            assert not events, 'LiveParRepair=no created a live session'
+            assert 'paused volume(s) released' not in log, 'live repair ran with LiveParRepair=no'
+            assert history.get('Status', '').startswith('SUCCESS'), history
+            integrity = verify_named_outputs(target, dict(golden, **{'payload.bin': payload}))
+            result['integrity'] = integrity
+            assert all(integrity.values()), integrity
+            assert recovery_requests, 'recovery slice never fetched'
+            assert 'Repairing ' + name in log, 'ordinary repair did not run'
         elif case == 'ram_part40':
             complete = [event for event in events if event['event'] == 'repair_complete']
             assert complete, 'no guarded live repair publication'

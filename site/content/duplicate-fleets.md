@@ -21,6 +21,8 @@ Alt
 
 A copy with a different video file, such as another encode, is neither a twin nor an alt. Sent in a fleet, it's dropped at intake (see [Fleet submission](#fleet-submission)); added any other way, it's a plain backup that RustyGet can only fail over to.
 
+[Twins and alts](twins-and-alts.md) explains how RustyGet links copies, which fingerprints it trusts, and why a matching checksum or size is never proof on its own.
+
 Same posting
 : Two NZB files that point to the same Usenet articles, such as one posting listed by two indexers. They can't back each other up, because they share every missing article. RustyGet recognizes them by their Message-IDs and keeps one.
 
@@ -47,7 +49,7 @@ Left out of the configuration file, every new setting keeps NZBGet's behavior, s
 
 ## Article fallback
 
-When an article fails on every server, RustyGet asks the fleet for it. It looks for the same file in the other copies, in the queue and in history, highest score first, and fetches the matching article by its Message-ID.
+When an article fails on every server, RustyGet asks the fleet for it. It looks for the same file in the other copies, in the queue and in history, twins first, then the other copies by kind and score (see [Donor order](twins-and-alts.md#donor-order)), and fetches the matching article by its Message-ID.
 
 ### Finding the matching file
 
@@ -145,7 +147,7 @@ Clients that already know every copy, such as the [Kodi add-on](kodi.md), send t
 2. Holds downloads for a moment, so the check gets connections, and checks a sample of each posting on all servers at once, within the call's time limit.
 3. Opens every live copy down to its video at intake, through each stored container (7-Zip, RAR, zip, an archive inside an archive) with the same map stream repair uses, and reads the video's start plus a few random places of it: 2, 4 or 8 places for the weak, medium or hard `DupeHealthPreset`. All copies read the same places. The video most copies share is the fleet's; a copy holding another video is dropped with the status `ERROR` and the reason "not the same video". A copy that can't be opened this way (compressed, encrypted without a known password, unreadable in time) stays, unverified. The log has a line for each copy.
 4. Reads one or two articles of every copy, even a fleet of one, to class it as a twin, a borrowable alt or an unborrowable alt (`DupeCopyKind`). Copies of the key already queued from an earlier fleet are read with the new ones, so a backup sent later is classed against them before it downloads, and a queued copy that turns out to have a twin among the new members becomes a twin too.
-5. Ranks the members: twins first, then borrowable alts, then the rest; within each, checked and alive first, then unknown, then dead, and then the most complete copy, the copy whose size is closest to the fleet's median size, and the order the client sent.
+5. Ranks the members by health first: healthy copies (at least 75% of the checked articles alive), then weak ones, then copies of unknown health, then dead ones. Within each, twins come first, then borrowable alts, then the rest, and then the most complete copy, the copy whose size is closest to the fleet's median size, and the order the client sent.
 6. Adds every usable member under the key, with scores that follow the rank. The duplicate check queues the top one and keeps the rest as backups. If a download of the key is already running, the members become its backups instead.
 7. Replies with the chosen download, a reason, and a status for every member.
 

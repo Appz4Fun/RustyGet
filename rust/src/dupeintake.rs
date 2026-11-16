@@ -259,14 +259,14 @@ pub fn sample_offsets(size: i64, count: usize, seed: u64) -> Vec<i64> {
     out
 }
 
-/// Bytes of a RAR set's last volume read for its file header: within the
-/// first article of any posting.
 /// Smallest file a RAR key may stand for: a smaller one is a sample or nfo
 /// spilling into the last volume, not the video (tests use small fixtures).
 #[cfg(not(test))]
 const RAR_KEY_MIN: u64 = crate::twinfields::MIN_KEY_SIZE;
 #[cfg(test)]
 const RAR_KEY_MIN: u64 = 0;
+/// Bytes of a RAR set's last volume read for its file header: within the
+/// first article of any posting.
 const RAR_KEY_HEAD: usize = 64 * 1024;
 
 /// The size and CRC32 of the largest file of a copy's archive set: for RAR
@@ -321,7 +321,17 @@ pub fn inner_key_copy(
         if !last.read(0, &mut head) {
             return None;
         }
-        return crate::twinfields::rar_last_volume_key(&head, vols.len() > 1, RAR_KEY_MIN);
+        // the last volume shows the file packed last, not the largest: trust
+        // it only when it fills most of the set, so it must be the largest
+        // (two CDs, a featurette or a season pack give no key, not CD2's)
+        let set_bytes: u64 = set
+            .members
+            .iter()
+            .filter_map(|&i| files.get(i as usize))
+            .map(|f| u64::try_from(f.bytes).unwrap_or(0))
+            .sum();
+        return crate::twinfields::rar_last_volume_key(&head, vols.len() > 1, RAR_KEY_MIN)
+            .filter(|k| k.size.saturating_mul(2) > set_bytes);
     }
     if magic != crate::twinfields::SEVEN_ZIP_MAGIC {
         return None;
@@ -664,6 +674,11 @@ mod tests {
         assert_eq!(inner_key_copy(&a, &mem), Some(video));
         // a re-RAR of the same file records the same size and CRC32
         assert_eq!(inner_key_copy(&c, &mem), Some(video));
+        // when the file seen is not most of the set (a second CD packed
+        // before it), it may not be the largest: no key
+        let mut two_cds = a.clone();
+        two_cds[0].bytes += 60_000;
+        assert_eq!(inner_key_copy(&two_cds, &mem), None);
     }
 
     #[test]

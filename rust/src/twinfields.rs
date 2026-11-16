@@ -916,10 +916,14 @@ mod tests {
         // info.nfo then video.mkv: still the video, not the nfo
         let nfo_first =
             rar_last_volume_key(&fixture("nfo-first.part3.head"), true, 0).expect("video key");
-        assert!(
-            mm.size > 1000 && nfo_first.size > 1000,
-            "{mm:?} {nfo_first:?}"
-        );
+        // the fixture heads hold only the video's tail (the nfo lies beyond
+        // 4096 bytes), so this checks the key, not the nfo being passed over;
+        // the intake's majority rule backs up the split_before filter
+        let video = InnerKey {
+            size: 49156,
+            crc32: 0x771f_bd29,
+        };
+        assert_eq!((mm, nfo_first), (video, video));
         // a first volume records no final check of a continued file
         assert_eq!(
             rar_last_volume_key(&fixture("mm.part1.head"), true, 0),

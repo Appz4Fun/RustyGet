@@ -19,13 +19,16 @@ run on that floor.
    (`-C target-cpu=x86-64-v3` on x86_64, `apple-m4` on Apple silicon; other architectures
    use the compiler default). `just release-tiers` also builds the newer tiers into
    `build/release-<cpu>/`: today `x86-64-v4` (AVX-512: AMD Zen 4/5 on AM5, Xeon Sapphire
-   Rapids and newer). `just build release 3 <cpu>` builds any single tier. Debug and test
+   Rapids and newer). `just build release 3 <cpu>` builds any single tier; only `x86-64-v3`, `x86-64-v4` and
+   `apple-m4` get the startup tier check below. Debug and test
    builds keep the compiler default, so they run on any CI machine.
 
 The `rustyget` .deb ships `/usr/lib/rustyget/rustyget-default` (the floor build) and, on
 amd64, `/usr/lib/rustyget/rustyget-x86-64-v4`. `/usr/bin/rustyget` is a small launcher
 that execs the v4 build when `/proc/cpuinfo` lists AVX-512 F/BW/CD/DQ/VL and the floor
 build otherwise. `RUSTYGET_CPU_LEVEL=default` (or another installed tier name) forces one.
+The process name is therefore `rustyget-default` or `rustyget-x86-64-v4` (use
+`systemctl` or `pgrep -f rustyget`, not `pidof rustyget`), and `AppDir` is `/usr/lib/rustyget`.
 
 A tier binary started on a CPU below its tier stops at once with a message naming the
 build to use, instead of crashing on an illegal instruction. The check lives in

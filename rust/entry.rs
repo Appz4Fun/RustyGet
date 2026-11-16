@@ -106,13 +106,13 @@ pub unsafe extern "C" fn main(
     // tier-specific code runs, instead of dying on an illegal instruction.
     let missing = missing_tier_features();
     if !missing.is_empty() {
-        let floor = if cfg!(target_arch = "x86_64") {
-            "x86-64-v3"
+        let advice = if cfg!(rustyget_tier = "x86-64-v4") {
+            "Install or run the default (x86-64-v3) build instead."
         } else {
-            "generic"
+            "This CPU is below RustyGet's supported floor (Intel 8th gen / AVX2, Apple M4)."
         };
         eprintln!(
-            "This RustyGet binary was built for newer CPUs: this CPU lacks {}. Install or run the {floor} build instead.",
+            "This RustyGet binary was built for newer CPUs: this CPU lacks {}. {advice}",
             missing.join(", ")
         );
         return 1;

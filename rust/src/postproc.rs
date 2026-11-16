@@ -3156,12 +3156,37 @@ pub(crate) fn take_dead_volumes_borrowed(nzb_id: i32) -> usize {
 /// and that has no rebuilt stand-in yet: a later live repair may be able to place and borrow it
 /// once the volumes before it have arrived.
 pub(crate) fn direct_unpack_waits_on_dead_volume(nzb_id: i32) -> bool {
-    direct_unpack_holds().get(&nzb_id).is_some_and(|st| {
-        st.held.iter().any(|p| {
-            !st.virtuals.contains_key(p)
-                && !std::fs::metadata(crate::fsops::path(p)).is_ok_and(|m| m.len() > 0)
-        })
-    })
+    let candidates: Vec<Vec<u8>> = direct_unpack_holds().get(&nzb_id).map_or_else(Vec::new, |st| {
+        st.held
+            .iter()
+            .filter(|p| !st.virtuals.contains_key(*p))
+            .cloned()
+            .collect()
+    });
+    // The disk is looked at after the holds lock is released.
+    candidates
+        .iter()
+        .any(|p| !std::fs::metadata(crate::fsops::path(p)).is_ok_and(|m| m.len() > 0))
+}
+
+fn dead_volume_reruns() -> std::sync::MutexGuard<'static, std::collections::HashSet<i32>> {
+    static RERUNS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<i32>>> =
+        std::sync::OnceLock::new();
+    RERUNS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// Asks the running live repair of download `nzb_id` for one more pass: a volume arrived while
+/// it ran, which may let a dead volume be placed.
+pub(crate) fn request_dead_volume_rerun(nzb_id: i32) {
+    dead_volume_reruns().insert(nzb_id);
+}
+
+/// True (once) when a pass was asked for since the last call.
+pub(crate) fn take_dead_volume_rerun(nzb_id: i32) -> bool {
+    dead_volume_reruns().remove(&nzb_id)
 }
 
 /// True when dead volume `full_path` already has a rebuilt stand-in.
@@ -6731,6 +6756,14 @@ unsafe extern "C" fn stream_repair_job_host_cb(
             }
             host.nzb_action(p2, NZB_ACT_CLEAR_LIVE_REPAIR_THREAD, 0);
             let ns = host.nzb_snap(p2, false);
+            // A volume arrived while this pass ran and direct unpack still waits on a dead
+            // volume: one more pass may now place it for the borrow.
+            if ns.post_info_ptr == 0
+                && take_dead_volume_rerun(ns.id)
+                && direct_unpack_waits_on_dead_volume(ns.id)
+            {
+                host.stream_repair_start_live(p2);
+            }
             // A direct unpack parked on damaged volumes waits for post-processing itself, so
             // it will not release the job: the ending live repair has to.
             if ns.post_info_ptr != 0

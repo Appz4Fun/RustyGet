@@ -3920,10 +3920,13 @@ impl NzbgetRsQueueCoordinator {
                 && !is_incomplete
                 && opts.dupe_article_fallback == crate::queuesubsys_host::DAF_LIVE
                 && opts.direct_unpack
-                && !host.nzb_snap(nzb.ptr, false).has_live_repair_thread
                 && crate::postproc::direct_unpack_waits_on_dead_volume(nzb.id)
             {
-                host.stream_repair_start_live(nzb.ptr);
+                if host.nzb_snap(nzb.ptr, false).has_live_repair_thread {
+                    crate::postproc::request_dead_volume_rerun(nzb.id);
+                } else {
+                    host.stream_repair_start_live(nzb.ptr);
+                }
             }
 
             // Live par2: fetch the recovery volumes for the damage known so far. Checked again

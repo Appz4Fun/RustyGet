@@ -81,7 +81,7 @@ BOOST_AUTO_TEST_CASE(LiveParNamespaceSizingRefusalStopsBeforeCopy)
     BOOST_CHECK_EQUAL(visits, 1);
     // Assembly may still have its final downloader registered. Neither active
     // count is proof that borrowing its changing output string is safe.
-    auto* first = nzb.GetFileList()->at(0).get();
+    auto* first = nzb.GetFileList()->at(0);
     first->SetTotalArticles(1);
     first->SetCompletedArticles(1);
     for (int active : {0, 1}) {

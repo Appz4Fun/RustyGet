@@ -2015,8 +2015,8 @@ const BACKFILL_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs
 
 /// Starts re-reading verified slices for syndrome slots allocated since the
 /// last back-fill, on a thread of its own: it can take seconds per GB, and
-/// live articles keep folding meanwhile. At most one runs per session; an
-/// error is recorded and the back-fill is tried again on the next kick.
+/// live articles keep folding meanwhile. At most one runs per session; after
+/// an error the back-fill is tried again once [`BACKFILL_RETRY_DELAY`] passes.
 pub(crate) fn streaming_session_kick_backfill(nzb_id: i32) {
     let Some(entry) = active_streaming_session(nzb_id) else {
         return;
@@ -2034,17 +2034,24 @@ pub(crate) fn streaming_session_kick_backfill(nzb_id: i32) {
     let spawned = std::thread::Builder::new()
         .name(format!("live-par-backfill-{nzb_id}"))
         .spawn(move || {
+            // Clears the running flag even if the back-fill panics.
+            struct Running<'a>(&'a AtomicBool);
+            impl Drop for Running<'_> {
+                fn drop(&mut self) {
+                    self.0.store(false, Ordering::Release);
+                }
+            }
+            let _running = Running(&worker.backfill_running);
             let result = worker.session.backfill_pending();
+            // A shared back-fill error is expected while verified slices still
+            // sit in the article cache, so it is retried, never reported: the
+            // strict back-fill inside repair surfaces any error that persists.
             *worker
                 .backfill_retry_at
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()) = result
                 .is_err()
                 .then(|| std::time::Instant::now() + BACKFILL_RETRY_DELAY);
-            if !matches!(result, Err(RepairError::Cancelled)) {
-                let _ = worker.record(result);
-            }
-            worker.backfill_running.store(false, Ordering::Release);
         });
     if spawned.is_err() {
         entry.backfill_running.store(false, Ordering::Release);

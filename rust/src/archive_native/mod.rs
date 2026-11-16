@@ -1,215 +1,21 @@
-//! Native pure-Rust RAR 1.5/2.0/2.9 (RAR3/4) and 7z (`.7z`, `.7z.001`) archive extractors.
+//! RustyGet's glue around zipfast's 7z (`.7z`, `.7z.001`) and ZIP extractors, plus shared
+//! helpers (no-follow folder creation, RAR4 DOS times). RAR itself goes through
+//! `progressive_unpack`.
 
-pub mod heap;
 pub mod lzma;
-pub mod ppmd_h;
-pub mod rar15;
-pub mod rar20;
-pub mod rar3;
-pub mod rarbits;
 
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
 const MARK4: &[u8] = b"Rar!\x1a\x07\x00";
 #[cfg(test)]
 const SEVEN_Z: &[u8] = b"7z\xbc\xaf\x27\x1c";
-const MAX_BLOCKS: usize = 65_536;
-const MAX_NAME_BYTES: usize = 4096;
 
 #[inline]
+#[cfg(test)]
 fn crc32(data: &[u8]) -> u32 {
     crc32fast::hash(data)
-}
-
-#[inline]
-fn le16(b: &[u8], at: usize) -> Option<u16> {
-    Some(u16::from_le_bytes(
-        b.get(at..at.checked_add(2)?)?.try_into().ok()?,
-    ))
-}
-
-#[inline]
-fn le32(b: &[u8], at: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(
-        b.get(at..at.checked_add(4)?)?.try_into().ok()?,
-    ))
-}
-
-#[derive(Default)]
-struct Rar4KeyCache {
-    entries: Vec<([u8; 8], [u8; 16], [u8; 16])>,
-}
-
-impl Rar4KeyCache {
-    fn derive(&mut self, password: &str, salt: &[u8; 8]) -> ([u8; 16], [u8; 16]) {
-        if let Some((_, k, i)) = self.entries.iter().find(|(s, _, _)| s == salt) {
-            return (*k, *i);
-        }
-        let (k, i) = zipfast::crypto::derive_rar4_key_iv(password, salt);
-        self.entries.push((*salt, k, i));
-        (k, i)
-    }
-}
-
-fn decrypt_rar4_header(
-    data: &[u8],
-    pos: usize,
-    password: &str,
-    cache: &mut Rar4KeyCache,
-) -> Option<(usize, Vec<u8>, [u8; 8])> {
-    let salt: [u8; 8] = data.get(pos..pos.checked_add(8)?)?.try_into().ok()?;
-    let (key, iv) = cache.derive(password, &salt);
-    let (header, ct_end) = zipfast::crypto::decrypt_rar4_header(data, pos + 8, &key, &iv)?;
-    Some((ct_end.checked_sub(pos)?, header, salt))
-}
-
-fn encode_utf16_injective(units: &[u16]) -> String {
-    let mut out = String::with_capacity(units.len());
-    for res in char::decode_utf16(units.iter().copied()) {
-        match res {
-            Ok(ch) => {
-                if ('\u{E000}'..='\u{E2FF}').contains(&ch) {
-                    let cp = ch as u32;
-                    out.push('\u{E200}');
-                    for shift in [12u32, 8, 4, 0] {
-                        out.push(char::from_u32(0xE210 + ((cp >> shift) & 0xF)).unwrap());
-                    }
-                } else {
-                    out.push(ch);
-                }
-            }
-            Err(unpaired) => {
-                let cp = u32::from(unpaired.unpaired_surrogate());
-                out.push('\u{E201}');
-                for shift in [12u32, 8, 4, 0] {
-                    out.push(char::from_u32(0xE210 + ((cp >> shift) & 0xF)).unwrap());
-                }
-            }
-        }
-    }
-    out
-}
-
-fn unicode4(name: &[u8], enc: &[u8]) -> Option<String> {
-    let mut bytes = enc.iter().copied();
-    let high = bytes.next()?;
-    let high = u16::from(high) << 8;
-    let mut out: Vec<u16> = Vec::new();
-    let (mut flags, mut bits) = (0u8, 0u32);
-    while out.len() < MAX_NAME_BYTES {
-        if bits == 0 {
-            let Some(f) = bytes.next() else { break };
-            flags = f;
-            bits = 8;
-        }
-        let command = flags >> 6;
-        flags = flags.wrapping_shl(2);
-        bits -= 2;
-        match command {
-            0 => {
-                let Some(b) = bytes.next() else { break };
-                out.push(u16::from(b));
-            }
-            1 => {
-                let Some(b) = bytes.next() else { break };
-                out.push(u16::from(b) | high);
-            }
-            2 => {
-                let (Some(a), Some(b)) = (bytes.next(), bytes.next()) else {
-                    break;
-                };
-                out.push(u16::from_le_bytes([a, b]));
-            }
-            _ => {
-                let Some(len) = bytes.next() else { break };
-                let correction = if len & 0x80 != 0 {
-                    let Some(k) = bytes.next() else { break };
-                    Some(k)
-                } else {
-                    None
-                };
-                for _ in 0..usize::from(len & 0x7f) + 2 {
-                    let Some(c) = name.get(out.len()).copied() else {
-                        break;
-                    };
-                    out.push(match correction {
-                        Some(k) => u16::from(c.wrapping_add(k)) | high,
-                        None => u16::from(c),
-                    });
-                }
-            }
-        }
-    }
-    Some(encode_utf16_injective(&out))
-}
-
-fn name4(raw: &[u8], flags: u16) -> (String, Option<Vec<u8>>) {
-    if flags & 0x0200 != 0 {
-        if let Some(nul) = raw.iter().position(|b| *b == 0) {
-            if let (Some(name), Some(enc)) = (raw.get(..nul), raw.get(nul + 1..)) {
-                if let Some(decoded) = unicode4(name, enc) {
-                    return (decoded, None);
-                }
-            }
-        }
-    }
-    let raw_bytes = raw.split(|b| *b == 0).next().unwrap_or(raw);
-    (
-        encode_bytes_injective_utf8(raw_bytes),
-        Some(raw_bytes.to_vec()),
-    )
-}
-
-fn sanitize_rar4_rel_path_bytes(raw_name: &[u8], windows_names: bool) -> Result<PathBuf, String> {
-    let unsafe_err = || format!("unsafe archive path: {}", String::from_utf8_lossy(raw_name));
-    let mut out = PathBuf::new();
-    // A backslash separates directories whatever the host, as unrar reads RAR 1.5-4.x names.
-    let is_sep = |b: u8| b == b'/' || b == b'\\';
-    for (i, part) in raw_name.split(|&b| is_sep(b)).enumerate() {
-        if i == 0 && part.is_empty() && !raw_name.is_empty() {
-            return Err(unsafe_err());
-        }
-        if part.is_empty() || part == b"." {
-            continue;
-        }
-        if part == b".." || part.contains(&0) {
-            return Err(unsafe_err());
-        }
-        if windows_names && i == 0 && part.len() == 2 && part[1] == b':' {
-            return Err(unsafe_err());
-        }
-        let cleaned: Vec<u8> = if cfg!(windows) || windows_names {
-            part.iter()
-                .map(|&b| {
-                    if matches!(b, b'<' | b'>' | b':' | b'"' | b'|' | b'?' | b'*') {
-                        b'_'
-                    } else {
-                        b
-                    }
-                })
-                .collect()
-        } else {
-            part.to_vec()
-        };
-        #[cfg(all(unix, not(target_vendor = "apple")))]
-        {
-            use std::os::unix::ffi::OsStrExt;
-            out.push(std::ffi::OsStr::from_bytes(&cleaned));
-        }
-        #[cfg(any(not(unix), target_vendor = "apple"))]
-        {
-            out.push(encode_bytes_injective_utf8(&cleaned));
-        }
-    }
-    if out.as_os_str().is_empty()
-        || out
-            .components()
-            .any(|c| !matches!(c, std::path::Component::Normal(_)))
-    {
-        return Err(unsafe_err());
-    }
-    Ok(out)
 }
 
 fn rar4_days_from_civil(y: i64, m: u32, d: u32) -> i64 {
@@ -244,439 +50,6 @@ pub(crate) fn rar4_dos_mtime(raw: u32) -> Option<(i64, u32)> {
         days * 86_400 + i64::from(hour) * 3600 + i64::from(minute) * 60 + i64::from(second),
         0,
     ))
-}
-
-fn rar4_extended_mtime(area: &[u8], dos: Option<(i64, u32)>) -> Option<(i64, u32)> {
-    let flags = u16::from_le_bytes([*area.first()?, *area.get(1)?]);
-    let group = (flags >> 12) & 0x0f;
-    if group & 0x8 == 0 {
-        return dos;
-    }
-    let count = usize::from(group & 0x3);
-    let bytes = area.get(2..2 + count)?;
-    let mut ticks = 0u32;
-    for (i, &b) in bytes.iter().enumerate() {
-        ticks |= u32::from(b) << (8 * (3 - count + i));
-    }
-    let (base_secs, _) = dos?;
-    let nanos = (ticks & 0x00ff_ffff) * 100;
-    Some((
-        base_secs + i64::from(group & 0x4 != 0) + i64::from(nanos / 1_000_000_000),
-        nanos % 1_000_000_000,
-    ))
-}
-
-#[derive(Clone, Debug)]
-struct Rar4FileChunk {
-    name: String,
-    raw_name_bytes: Option<Vec<u8>>,
-    unpacked_size: u64,
-    crc32: u32,
-    rar_version: u8,
-    method: u8,
-    is_dir: bool,
-    is_symlink: bool,
-    unix_mode: Option<u32>,
-    mtime: Option<(i64, u32)>,
-    solid: bool,
-    encrypted: bool,
-    salt: Option<[u8; 8]>,
-    split_before: bool,
-    continues: bool,
-    windows_names: bool,
-    vol_path: PathBuf,
-    data_offset: u64,
-    data_len: u64,
-}
-
-struct ParsedRar4Volume {
-    chunks: Vec<Rar4FileChunk>,
-    has_next_volume: bool,
-    may_have_next_volume: bool,
-}
-
-fn parse_rar4_volume_chunks(
-    vol_path: &Path,
-    password: &str,
-    cache: &mut Rar4KeyCache,
-) -> Result<ParsedRar4Volume, String> {
-    use std::io::{Read, Seek, SeekFrom};
-
-    let mut file = std::fs::File::open(vol_path)
-        .map_err(|e| format!("Unrar: Could not read {}: {e}", vol_path.display()))?;
-    let file_len = file
-        .metadata()
-        .map_err(|e| format!("Unrar: Could not read {}: {e}", vol_path.display()))?
-        .len();
-    if file_len < MARK4.len() as u64 {
-        return Err("Not a RAR 1.5-4.x volume".to_string());
-    }
-    let mut sig = [0u8; 7];
-    file.read_exact(&mut sig)
-        .map_err(|e| format!("Unrar: Could not read {}: {e}", vol_path.display()))?;
-    if sig != MARK4 {
-        return Err("Not a RAR 1.5-4.x volume".to_string());
-    }
-
-    let mut chunks = Vec::new();
-    let mut pos = MARK4.len() as u64;
-    let mut encrypted_headers = false;
-    let mut reached_end = false;
-    let mut saw_end_block = false;
-    let mut main_is_volume = false;
-    let mut end_has_next_volume = false;
-    let mut hdr_buf = vec![0u8; 65544];
-
-    for _ in 0..MAX_BLOCKS {
-        if pos >= file_len {
-            reached_end = true;
-            break;
-        }
-        let avail = (file_len - pos).min(hdr_buf.len() as u64) as usize;
-        file.seek(SeekFrom::Start(pos))
-            .map_err(|e| format!("Unrar: Could not seek {}: {e}", vol_path.display()))?;
-        file.read_exact(&mut hdr_buf[..avail])
-            .map_err(|e| format!("Unrar: Could not read {}: {e}", vol_path.display()))?;
-        let rest = &hdr_buf[..avail];
-
-        let (hdr_bytes, header, block_salt) = if encrypted_headers {
-            if password.is_empty() {
-                return Err("Unrar: The specified password is incorrect.".to_string());
-            }
-            let Some((hb, hdr, bs)) = decrypt_rar4_header(rest, 0, password, cache) else {
-                return Err("Unrar: The specified password is incorrect.".to_string());
-            };
-            (hb, hdr, Some(bs))
-        } else {
-            if rest.len() < 7 {
-                return Err("Unrar: Unexpected end of archive header".to_string());
-            }
-            let (Some(ty), Some(flags), Some(size)) =
-                (rest.get(2).copied(), le16(rest, 3), le16(rest, 5))
-            else {
-                return Err("Unrar: Unexpected end of archive header".to_string());
-            };
-            let size = usize::from(size);
-            if size < 7 {
-                return Err("Unrar: Archive header is corrupt".to_string());
-            }
-            let Some(hdr) = rest.get(..size) else {
-                return Err("Unrar: Unexpected end of archive header".to_string());
-            };
-            if matches!(ty, 0x73 | 0x74 | 0x7a | 0x7b) {
-                let covered = if ty == 0x73 && flags & 0x0002 != 0 {
-                    hdr.get(2..13)
-                } else {
-                    hdr.get(2..)
-                };
-                let stored = le16(hdr, 0);
-                if covered.is_none_or(|c| Some(crc32(c) as u16) != stored) {
-                    return Err("Unrar: Archive header checksum error".to_string());
-                }
-            }
-            (size, hdr.to_vec(), None)
-        };
-
-        let (Some(ty), Some(flags)) = (header.get(2).copied(), le16(&header, 3)) else {
-            return Err("Unrar: Corrupt block header".to_string());
-        };
-        if ty == 0x7b {
-            saw_end_block = true;
-            end_has_next_volume = (flags & 0x0001) != 0;
-            reached_end = true;
-            break;
-        }
-        if ty == 0x73 {
-            main_is_volume = (flags & 0x0001) != 0;
-            if !encrypted_headers && (flags & 0x0080 != 0) {
-                encrypted_headers = true;
-                pos = pos.saturating_add(hdr_bytes as u64);
-                continue;
-            }
-        }
-
-        let mut add = 0u64;
-        if flags & 0x8000 != 0 {
-            let Some(low) = le32(&header, 7) else {
-                return Err("Unrar: Corrupt block header".to_string());
-            };
-            add = u64::from(low);
-        }
-
-        let data_at = pos.saturating_add(hdr_bytes as u64);
-        if ty == 0x74 {
-            if header.len() < 32 {
-                return Err("Unrar: Corrupt file header".to_string());
-            }
-            let unp_low = u64::from(le32(&header, 11).unwrap_or(0));
-            let host_os = header.get(15).copied().unwrap_or(0);
-            let file_crc = le32(&header, 16).unwrap_or(0);
-            let dos_time = le32(&header, 20).unwrap_or(0);
-            let rar_version = header.get(24).copied().unwrap_or(29);
-            let method = header.get(25).copied().unwrap_or(0x30);
-            let name_len = usize::from(le16(&header, 26).unwrap_or(0));
-            let attr = le32(&header, 28).unwrap_or(0);
-            let (high_pack, high_unp, name_at) = if flags & 0x0100 != 0 {
-                if header.len() < 40 {
-                    return Err("Unrar: Corrupt 64-bit file header".to_string());
-                }
-                (
-                    u64::from(le32(&header, 32).unwrap_or(0)),
-                    u64::from(le32(&header, 36).unwrap_or(0)),
-                    40usize,
-                )
-            } else {
-                (0u64, 0u64, 32usize)
-            };
-            add |= high_pack << 32;
-            let unpacked_size = unp_low | (high_unp << 32);
-            let name_end = (name_at + name_len).min(header.len());
-            let raw_name = header.get(name_at..name_end).unwrap_or_default();
-            let (name, raw_name_bytes) = name4(raw_name, flags);
-            let mut ext_cursor = name_end;
-            let mut salt = if flags & 0x0400 != 0 {
-                let s = header
-                    .get(ext_cursor..ext_cursor + 8)
-                    .and_then(|s| s.try_into().ok());
-                ext_cursor = (ext_cursor + 8).min(header.len());
-                s
-            } else {
-                None
-            };
-            if salt.is_none() {
-                salt = block_salt;
-            }
-            let mut mtime = rar4_dos_mtime(dos_time);
-            if flags & 0x1000 != 0 {
-                mtime = rar4_extended_mtime(&header[ext_cursor..], mtime).or(mtime);
-            }
-            let data_end = data_at
-                .checked_add(add)
-                .ok_or_else(|| "Unrar: Packed data offset overflow".to_string())?;
-            if data_end > file_len {
-                return Err("Unrar: Unexpected end of archive data".to_string());
-            }
-            let is_dir = (flags & 0x00e0) == 0x00e0;
-            let unix_mode_raw = if host_os == 3 {
-                if (attr & 0xffff) != 0 {
-                    attr & 0xffff
-                } else {
-                    attr >> 16
-                }
-            } else {
-                0
-            };
-            let is_symlink = host_os == 3 && (unix_mode_raw & 0o170000) == 0o120000;
-            let unix_mode = (host_os == 3 && unix_mode_raw != 0).then_some(unix_mode_raw);
-            chunks.push(Rar4FileChunk {
-                name,
-                raw_name_bytes,
-                unpacked_size,
-                crc32: file_crc,
-                rar_version,
-                method,
-                is_dir,
-                is_symlink,
-                unix_mode,
-                mtime,
-                solid: (flags & 0x0010) != 0,
-                encrypted: (flags & 0x0004 != 0) || encrypted_headers,
-                salt,
-                split_before: (flags & 0x0001) != 0,
-                continues: (flags & 0x0002) != 0,
-                windows_names: host_os != 3,
-                vol_path: vol_path.to_path_buf(),
-                data_offset: data_at,
-                data_len: add,
-            });
-        }
-
-        let next = data_at
-            .checked_add(add)
-            .ok_or_else(|| "Unrar: Packed data offset overflow".to_string())?;
-        if next <= pos || next > file_len {
-            return Err("Unrar: Unexpected end of archive data".to_string());
-        }
-        pos = next;
-    }
-
-    if !reached_end {
-        return Err("Unrar: Archive exceeds maximum block count".to_string());
-    }
-
-    let has_next_volume = end_has_next_volume || chunks.last().is_some_and(|c| c.continues);
-    let may_have_next_volume = has_next_volume || (!saw_end_block && main_is_volume);
-    Ok(ParsedRar4Volume {
-        chunks,
-        has_next_volume,
-        may_have_next_volume,
-    })
-}
-
-struct Rar4ChunkStreamReader<'a> {
-    chunks: &'a [Rar4FileChunk],
-    chunk_idx: usize,
-    chunk_rem: u64,
-    cur_file: Option<std::fs::File>,
-    encrypted: bool,
-    per_vol: bool,
-    password: &'a str,
-    first_salt: Option<[u8; 8]>,
-    cur_key: [u8; 16],
-    cur_iv: [u8; 16],
-    have_key: bool,
-    raw_buf: Vec<u8>,
-}
-
-impl<'a> Rar4ChunkStreamReader<'a> {
-    fn new(chunks: &'a [Rar4FileChunk], encrypted: bool, per_vol: bool, password: &'a str) -> Self {
-        let first_salt = chunks.first().and_then(|c| c.salt);
-        Self {
-            chunks,
-            chunk_idx: 0,
-            chunk_rem: 0,
-            cur_file: None,
-            encrypted,
-            per_vol,
-            password,
-            first_salt,
-            cur_key: [0u8; 16],
-            cur_iv: [0u8; 16],
-            have_key: false,
-            raw_buf: Vec::with_capacity(256 * 1024),
-        }
-    }
-
-    fn advance_chunk(&mut self, cache: &mut Rar4KeyCache) -> Result<bool, String> {
-        use std::io::{Seek, SeekFrom};
-        while self.chunk_rem == 0 {
-            if self.chunk_idx >= self.chunks.len() {
-                self.cur_file = None;
-                return Ok(false);
-            }
-            let ch = &self.chunks[self.chunk_idx];
-            self.chunk_idx += 1;
-            let mut f = std::fs::File::open(&ch.vol_path)
-                .map_err(|e| format!("Unrar: Could not read {}: {e}", ch.vol_path.display()))?;
-            f.seek(SeekFrom::Start(ch.data_offset))
-                .map_err(|e| format!("Unrar: Could not seek {}: {e}", ch.vol_path.display()))?;
-            self.chunk_rem = ch.data_len;
-            self.cur_file = Some(f);
-            if self.encrypted && (self.per_vol || !self.have_key) {
-                let Some(salt) = ch.salt.or(self.first_salt) else {
-                    return Err("Unrar: Missing encryption salt".to_string());
-                };
-                let (k, iv) = cache.derive(self.password, &salt);
-                self.cur_key = k;
-                self.cur_iv = iv;
-                self.have_key = true;
-            }
-        }
-        Ok(true)
-    }
-
-    fn read_next_block(
-        &mut self,
-        out: &mut Vec<u8>,
-        cache: &mut Rar4KeyCache,
-    ) -> Result<usize, String> {
-        use std::io::Read;
-        const BLOCK_BYTES: usize = 256 * 1024;
-
-        self.raw_buf.clear();
-        while self.raw_buf.len() < BLOCK_BYTES {
-            if !self.advance_chunk(cache)? {
-                break;
-            }
-            let want = (BLOCK_BYTES - self.raw_buf.len()).min(self.chunk_rem as usize);
-            let cur_len = self.raw_buf.len();
-            self.raw_buf.resize(cur_len + want, 0);
-            let f = self.cur_file.as_mut().unwrap();
-            f.read_exact(&mut self.raw_buf[cur_len..cur_len + want])
-                .map_err(|e| format!("Unrar: Read error: {e}"))?;
-            self.chunk_rem -= want as u64;
-            if self.per_vol && self.chunk_rem == 0 {
-                break;
-            }
-        }
-
-        if self.raw_buf.is_empty() {
-            return Ok(0);
-        }
-
-        if !self.encrypted {
-            out.extend_from_slice(&self.raw_buf);
-            return Ok(self.raw_buf.len());
-        }
-
-        if self.raw_buf.len() % 16 != 0 {
-            return Err("Unrar: Encrypted stream not aligned to AES block size".to_string());
-        }
-        let next_iv: [u8; 16] = self.raw_buf[self.raw_buf.len() - 16..].try_into().unwrap();
-        let Some(dec) = zipfast::crypto::decrypt_cbc(&self.cur_key, &self.cur_iv, &self.raw_buf)
-        else {
-            return Err("Unrar: Failed to decrypt block".to_string());
-        };
-        self.cur_iv = next_iv;
-        let n = dec.len();
-        out.extend_from_slice(&dec);
-        Ok(n)
-    }
-}
-
-#[derive(Default, Clone)]
-struct RarDecoderSuite {
-    r15: rar15::Rar15Decoder,
-    r20: rar20::Rar20Decoder,
-    r29: rar3::Rar29Decoder,
-}
-
-impl RarDecoderSuite {
-    fn decode_stream(
-        &mut self,
-        reader: &mut Rar4ChunkStreamReader<'_>,
-        cache: &mut Rar4KeyCache,
-        method: u8,
-        rar_version: u8,
-        unpacked_size: u64,
-        solid: bool,
-        on_output: &mut dyn FnMut(&[u8]) -> Result<(), String>,
-    ) -> Result<(), String> {
-        if method == 0x30 {
-            let mut rem = unpacked_size;
-            let mut buf = Vec::with_capacity(256 * 1024);
-            while rem > 0 {
-                buf.clear();
-                let n = reader.read_next_block(&mut buf, cache)?;
-                if n == 0 {
-                    return Err("Unrar: Stored stream shorter than unpacked size".to_string());
-                }
-                let take_n = buf.len().min(usize::try_from(rem).unwrap_or(usize::MAX));
-                on_output(&buf[..take_n])?;
-                rem -= take_n as u64;
-            }
-            return Ok(());
-        }
-        let target = usize::try_from(unpacked_size).map_err(|_| "Unpacked size overflow")?;
-        match rar_version {
-            15 | 20 | 26 => {
-                let mut packed = Vec::new();
-                while reader.read_next_block(&mut packed, cache)? > 0 {}
-                let out = if rar_version == 15 {
-                    self.r15.decode(&packed, target, solid)?
-                } else {
-                    self.r20.decode(&packed, target, solid)?
-                };
-                on_output(&out)
-            }
-            _ => self.r29.decode_stream(
-                target,
-                solid,
-                &mut |in_buf| reader.read_next_block(in_buf, cache),
-                on_output,
-            ),
-        }
-    }
 }
 
 fn encode_bytes_injective_utf8(bytes: &[u8]) -> String {
@@ -900,401 +273,6 @@ fn apply_unix_executable_mode(file: &std::fs::File, mode: u32) {
 
 #[cfg(not(unix))]
 fn apply_unix_executable_mode(_file: &std::fs::File, _mode: u32) {}
-
-#[allow(clippy::too_many_arguments)]
-fn process_ready_rar4_chunks<F>(
-    pending: &mut std::collections::VecDeque<Rar4FileChunk>,
-    flush_incomplete: bool,
-    output_dir: &Path,
-    password: &str,
-    overwrite_mode: i32,
-    cache: &mut Rar4KeyCache,
-    decoders: &mut RarDecoderSuite,
-    summary: &mut zipfast::extract::Summary,
-    log_cb: &mut F,
-    is_cancelled: &mut dyn FnMut() -> bool,
-) -> Result<(), String>
-where
-    F: FnMut(i32, &str),
-{
-    use std::io::{Seek, SeekFrom};
-
-    while let Some(first) = pending.front() {
-        if is_cancelled() {
-            return Err("Unpack cancelled".to_string());
-        }
-        if first.continues && !flush_incomplete {
-            // Check whether all continuation chunks for this member have arrived
-            let mut end_idx = 0usize;
-            let mut complete = false;
-            while let Some(ch) = pending.get(end_idx) {
-                if !ch.continues {
-                    complete = true;
-                    break;
-                }
-                end_idx += 1;
-            }
-            if !complete {
-                break;
-            }
-        }
-
-        let first = pending.pop_front().unwrap();
-        if first.is_symlink {
-            log_cb(1, "ERROR: Dangerous link path was ignored");
-            log_cb(0, "Stream repair: archive contains link");
-            return Err("archive contains link".to_string());
-        }
-        let rel = match first.raw_name_bytes {
-            Some(ref raw_bytes) => sanitize_rar4_rel_path_bytes(raw_bytes, first.windows_names)
-                .map_err(|e| {
-                    let msg = format!("Unrar: {e}");
-                    log_cb(1, &msg);
-                    msg
-                })?,
-            // A backslash separates directories whatever the host, as for raw names.
-            None => zipfast::path::sanitize(&first.name.replace('\\', "/"), first.windows_names)
-                .map_err(|e| {
-                    let msg = format!("Unrar: {e}");
-                    log_cb(1, &msg);
-                    msg
-                })?,
-        };
-        if first.is_dir {
-            create_dir_all_no_follow(output_dir, &rel).map_err(|e| {
-                let msg = format!("Unrar: {e}");
-                log_cb(1, &msg);
-                msg
-            })?;
-            summary.dirs += 1;
-            continue;
-        }
-        if first.split_before {
-            let msg =
-                "Unrar: WARNING: You need to start extraction from a previous volume".to_string();
-            log_cb(1, &msg);
-            return Err(msg);
-        }
-        if first.encrypted && password.is_empty() {
-            let msg = "Unrar: The specified password is incorrect.".to_string();
-            log_cb(1, &msg);
-            return Err(msg);
-        }
-
-        let mut member_chunks = vec![first.clone()];
-        while member_chunks.last().unwrap().continues {
-            let Some(next_chunk) = pending.pop_front() else {
-                let msg = format!("Unrar: {} : packed data CRC failed in volume", first.name);
-                log_cb(1, &msg);
-                return Err(msg);
-            };
-            if !next_chunk.split_before {
-                let msg = format!("Unrar: {} : packed data CRC failed in volume", first.name);
-                log_cb(1, &msg);
-                return Err(msg);
-            }
-            member_chunks.push(next_chunk);
-        }
-        let last_chunk = member_chunks.last().unwrap().clone();
-
-        log_cb(4, &format!("Unrar: Extracting  {}", first.name));
-        if is_cancelled() {
-            return Err("Unpack cancelled".to_string());
-        }
-
-        let mut dest = create_dest_file_with_path_no_follow(output_dir, &rel, overwrite_mode)
-            .map_err(|e| {
-                let msg = format!("Unrar: {e}");
-                log_cb(1, &msg);
-                msg
-            })?;
-
-        let cleanup_dest = |dest: Option<(std::fs::File, PathBuf, bool)>| {
-            if let Some((f, path, created_new)) = dest {
-                drop(f);
-                if created_new {
-                    let _ = std::fs::remove_file(path);
-                }
-            }
-        };
-
-        if first.encrypted {
-            let saved_decoders = decoders.clone();
-            let mut matched = false;
-            let modes: &[bool] = if member_chunks.len() > 1 {
-                &[false, true]
-            } else {
-                &[false]
-            };
-            for (attempt, &per_vol) in modes.iter().enumerate() {
-                if is_cancelled() {
-                    cleanup_dest(dest);
-                    return Err("Unpack cancelled".to_string());
-                }
-                if attempt > 0 {
-                    *decoders = saved_decoders.clone();
-                    if let Some((f, _, _)) = dest.as_mut() {
-                        let _ = f.set_len(0);
-                        let _ = f.seek(SeekFrom::Start(0));
-                    }
-                }
-                let mut reader =
-                    Rar4ChunkStreamReader::new(&member_chunks, true, per_vol, password);
-                let mut hasher = crc32fast::Hasher::new();
-                let mut written = 0u64;
-                let mut cancelled = false;
-                let res = decoders.decode_stream(
-                    &mut reader,
-                    cache,
-                    first.method,
-                    first.rar_version,
-                    last_chunk.unpacked_size,
-                    first.solid,
-                    &mut |slice| {
-                        if is_cancelled() {
-                            cancelled = true;
-                            return Err("Unpack cancelled".to_string());
-                        }
-                        hasher.update(slice);
-                        written += slice.len() as u64;
-                        if let Some((f, _, _)) = dest.as_mut() {
-                            f.write_all(slice).map_err(|e| e.to_string())?;
-                        }
-                        Ok(())
-                    },
-                );
-                if cancelled {
-                    cleanup_dest(dest);
-                    return Err("Unpack cancelled".to_string());
-                }
-                if res.is_ok()
-                    && written == last_chunk.unpacked_size
-                    && hasher.finalize() == last_chunk.crc32
-                {
-                    matched = true;
-                    break;
-                }
-            }
-            if !matched {
-                cleanup_dest(dest);
-                let msg = format!("Unrar: Checksum error in the encrypted file {}", first.name);
-                log_cb(1, &msg);
-                let pw_msg = "Unrar: The specified password is incorrect.".to_string();
-                log_cb(1, &pw_msg);
-                return Err(pw_msg);
-            }
-        } else {
-            let mut reader = Rar4ChunkStreamReader::new(&member_chunks, false, false, password);
-            let mut hasher = crc32fast::Hasher::new();
-            let mut written = 0u64;
-            let mut cancelled = false;
-            if let Err(e) = decoders.decode_stream(
-                &mut reader,
-                cache,
-                first.method,
-                first.rar_version,
-                last_chunk.unpacked_size,
-                first.solid,
-                &mut |slice| {
-                    if is_cancelled() {
-                        cancelled = true;
-                        return Err("Unpack cancelled".to_string());
-                    }
-                    hasher.update(slice);
-                    written += slice.len() as u64;
-                    if let Some((f, _, _)) = dest.as_mut() {
-                        f.write_all(slice).map_err(|e| e.to_string())?;
-                    }
-                    Ok(())
-                },
-            ) {
-                cleanup_dest(dest);
-                if cancelled {
-                    return Err("Unpack cancelled".to_string());
-                }
-                let crc_msg = format!("Unrar: {} - CRC failed", first.name);
-                log_cb(1, &crc_msg);
-                log_cb(1, &e);
-                return Err(crc_msg);
-            }
-            if written != last_chunk.unpacked_size || hasher.finalize() != last_chunk.crc32 {
-                cleanup_dest(dest);
-                let crc_msg = format!("Unrar: {} - CRC failed", first.name);
-                log_cb(1, &crc_msg);
-                return Err(crc_msg);
-            }
-        }
-
-        match dest {
-            Some((f, _, _)) => {
-                if let Some(mode) = first.unix_mode {
-                    apply_unix_executable_mode(&f, mode);
-                }
-                if let Some((secs, nanos)) = first.mtime.or(last_chunk.mtime) {
-                    set_file_mtime(&f, Some(secs), nanos);
-                }
-                summary.files += 1;
-                summary.bytes += last_chunk.unpacked_size;
-            }
-            None => {
-                summary.skipped += 1;
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Extracts a RAR 1.5–4.x single or multi-volume archive into `output_dir`.
-/// A following volume can be read: it exists and is not a damaged file that direct unpack
-/// keeps on hold until its repair finished.
-fn volume_ready(path: &std::path::Path) -> bool {
-    if !path.exists() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        !crate::postproc::direct_unpack_is_held_path(path.as_os_str().as_bytes())
-    }
-    #[cfg(not(unix))]
-    {
-        true
-    }
-}
-
-pub fn extract_rar4<F>(
-    archive_path: &Path,
-    output_dir: &Path,
-    password: &str,
-    overwrite_mode: i32,
-    log_cb: &mut F,
-) -> Result<zipfast::extract::Summary, String>
-where
-    F: FnMut(i32, &str),
-{
-    extract_rar4_cancellable(
-        archive_path,
-        output_dir,
-        password,
-        overwrite_mode,
-        log_cb,
-        &mut || false,
-    )
-}
-
-/// Extracts a RAR 1.5–4.x single or multi-volume archive into `output_dir`, polling `is_cancelled`.
-pub fn extract_rar4_cancellable<F>(
-    archive_path: &Path,
-    output_dir: &Path,
-    password: &str,
-    overwrite_mode: i32,
-    log_cb: &mut F,
-    is_cancelled: &mut dyn FnMut() -> bool,
-) -> Result<zipfast::extract::Summary, String>
-where
-    F: FnMut(i32, &str),
-{
-    log_cb(
-        4,
-        "Unrar: UNRAR 7.00 (RustyGet built-in) Copyright (c) 1993-2026 Alexander Roshal",
-    );
-
-    let mut cache = Rar4KeyCache::default();
-    let mut decoders = RarDecoderSuite::default();
-    let mut pending_chunks: std::collections::VecDeque<Rar4FileChunk> =
-        std::collections::VecDeque::new();
-    let mut summary = zipfast::extract::Summary::default();
-    let mut cur_vol = archive_path.to_path_buf();
-    let mut reached_final_volume = false;
-
-    for _ in 0..4096 {
-        if is_cancelled() {
-            return Err("Unpack cancelled".to_string());
-        }
-        let vol_name = cur_vol
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("archive.rar");
-        log_cb(4, &format!("Unrar: Extracting from {vol_name}"));
-        let parsed = parse_rar4_volume_chunks(&cur_vol, password, &mut cache).map_err(|e| {
-            log_cb(1, &e);
-            e
-        })?;
-        summary.volumes += 1;
-        for c in parsed.chunks {
-            pending_chunks.push_back(c);
-        }
-        process_ready_rar4_chunks(
-            &mut pending_chunks,
-            false,
-            output_dir,
-            password,
-            overwrite_mode,
-            &mut cache,
-            &mut decoders,
-            &mut summary,
-            log_cb,
-            is_cancelled,
-        )?;
-
-        if !parsed.may_have_next_volume {
-            reached_final_volume = true;
-            break;
-        }
-        let Some(next_vol) = zipfast::volume::next_volume(&cur_vol) else {
-            if parsed.has_next_volume {
-                let msg = "Unrar: Cannot find next volume".to_string();
-                log_cb(1, &msg);
-                return Err(msg);
-            }
-            reached_final_volume = true;
-            break;
-        };
-        if !volume_ready(&next_vol) {
-            if parsed.has_next_volume || next_vol.exists() {
-                let next_name = next_vol
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("next volume");
-                log_cb(
-                    4,
-                    &format!("Unrar: Insert disk with {next_name} [C]ontinue, [Q]uit"),
-                );
-                if !volume_ready(&next_vol) {
-                    let msg = format!("Unrar: Cannot find volume {next_name}");
-                    log_cb(1, &msg);
-                    return Err(msg);
-                }
-            } else {
-                reached_final_volume = true;
-                break;
-            }
-        }
-        cur_vol = next_vol;
-    }
-
-    if !reached_final_volume {
-        let msg = "Unrar: Archive exceeds maximum volume count".to_string();
-        log_cb(1, &msg);
-        return Err(msg);
-    }
-
-    process_ready_rar4_chunks(
-        &mut pending_chunks,
-        true,
-        output_dir,
-        password,
-        overwrite_mode,
-        &mut cache,
-        &mut decoders,
-        &mut summary,
-        log_cb,
-        is_cancelled,
-    )?;
-
-    log_cb(4, "Unrar: All OK");
-    Ok(summary)
-}
 
 // ============================================================================
 // 7z (`.7z` and `.7z.001`) through zipfast
@@ -3810,27 +2788,21 @@ mod tests {
         std::fs::write(&stale_vol2, b"corrupt leftover volume from old download").unwrap();
 
         let out_dir = dir.path().join("out");
+        // RAR 1.5-4.x sets go through zipfast now (RustyGet's own decoder is gone).
         let summary =
-            extract_rar4_cancellable(&vol1, &out_dir, "", 1, &mut |_, _| {}, &mut || false)
-                .unwrap();
+            crate::unpack::extract_archive_with_zipfast(&vol1, &out_dir, "", 1, |_, _| {}).unwrap();
         assert_eq!(summary.files, 1);
         assert_eq!(std::fs::read(out_dir.join("hello.txt")).unwrap(), payload);
     }
 
-    #[test]
-    fn test_rar4_backslash_separates_directories_on_every_host() {
-        for windows in [false, true] {
-            assert_eq!(
-                sanitize_rar4_rel_path_bytes(b"dir\\file.bin", windows).unwrap(),
-                PathBuf::from("dir").join("file.bin")
-            );
-        }
-    }
-
-    #[test]
-    fn test_rar4_preserves_distinct_non_utf8_member_names() {
-        let dir = TempTestDir::new("rar4_non_utf8");
-        let append_rar4_stored_member = |rar: &mut Vec<u8>, name: &[u8], payload: &[u8]| {
+    /// A RAR 1.5-4.x archive of stored members written on Unix, with raw (non-Unicode) names.
+    fn rar4_stored(members: &[(&[u8], &[u8])]) -> Vec<u8> {
+        let mut rar = Vec::new();
+        rar.extend_from_slice(MARK4);
+        let main_body = [0x73u8, 0x00, 0x00, 13, 0x00, 0, 0, 0, 0, 0, 0];
+        rar.extend_from_slice(&(crc32(&main_body) as u16).to_le_bytes());
+        rar.extend_from_slice(&main_body);
+        for (name, payload) in members {
             let hdr_size = (32 + name.len()) as u16;
             let mut fh = Vec::new();
             fh.push(0x74);
@@ -3846,46 +2818,54 @@ mod tests {
             fh.extend_from_slice(&(name.len() as u16).to_le_bytes());
             fh.extend_from_slice(&0o644u32.to_le_bytes());
             fh.extend_from_slice(name);
-            let fh_crc = (crc32(&fh) as u16).to_le_bytes();
-            rar.extend_from_slice(&fh_crc);
+            rar.extend_from_slice(&(crc32(&fh) as u16).to_le_bytes());
             rar.extend_from_slice(&fh);
             rar.extend_from_slice(payload);
-        };
-
-        let mut rar = Vec::new();
-        rar.extend_from_slice(MARK4);
-        let main_body = [0x73u8, 0x00, 0x00, 13, 0x00, 0, 0, 0, 0, 0, 0];
-        let main_crc = (crc32(&main_body) as u16).to_le_bytes();
-        rar.extend_from_slice(&main_crc);
-        rar.extend_from_slice(&main_body);
-
-        append_rar4_stored_member(&mut rar, b"caf\xe9.txt", b"first");
-        append_rar4_stored_member(&mut rar, b"caf\xe8.txt", b"second");
-
+        }
         let end_body = [0x7bu8, 0x00, 0x00, 7, 0x00];
-        let end_crc = (crc32(&end_body) as u16).to_le_bytes();
-        rar.extend_from_slice(&end_crc);
+        rar.extend_from_slice(&(crc32(&end_body) as u16).to_le_bytes());
         rar.extend_from_slice(&end_body);
+        rar
+    }
 
-        let rar_path = dir.path().join("legacy.rar");
+    #[test]
+    fn test_rar4_backslash_separates_directories_on_every_host() {
+        // A backslash in a RAR 1.5-4.x name is a folder separator, also from a Unix host.
+        let dir = TempTestDir::new("rar4_backslash");
+        let rar_path = dir.path().join("dirs.rar");
+        std::fs::write(&rar_path, rar4_stored(&[(b"dir\\file.bin", b"inside")])).unwrap();
         let out_dir = dir.path().join("out");
-        std::fs::write(&rar_path, &rar).unwrap();
+        let summary =
+            crate::unpack::extract_archive_with_zipfast(&rar_path, &out_dir, "", 1, |_, _| {})
+                .unwrap();
+        assert_eq!(summary.files, 1);
+        assert_eq!(
+            std::fs::read(out_dir.join("dir").join("file.bin")).unwrap(),
+            b"inside"
+        );
+    }
 
-        let summary = extract_rar4_cancellable(
+    #[test]
+    fn test_rar4_preserves_distinct_non_utf8_member_names() {
+        let dir = TempTestDir::new("rar4_non_utf8");
+        let rar_path = dir.path().join("legacy.rar");
+        std::fs::write(
             &rar_path,
-            &out_dir,
-            "",
-            1, // overwrite=true
-            &mut |_, _| {},
-            &mut || false,
+            rar4_stored(&[(b"caf\xe9.txt", b"first"), (b"caf\xe8.txt", b"second")]),
         )
         .unwrap();
+        let out_dir = dir.path().join("out");
+        let summary =
+            crate::unpack::extract_archive_with_zipfast(&rar_path, &out_dir, "", 1, |_, _| {})
+                .unwrap();
         assert_eq!(summary.files, 2);
-        let rel1 = sanitize_rar4_rel_path_bytes(b"caf\xe9.txt", false).unwrap();
-        let rel2 = sanitize_rar4_rel_path_bytes(b"caf\xe8.txt", false).unwrap();
-        assert_ne!(rel1, rel2);
-        assert_eq!(std::fs::read(out_dir.join(rel1)).unwrap(), b"first");
-        assert_eq!(std::fs::read(out_dir.join(rel2)).unwrap(), b"second");
+        // Two members whose raw names differ come out as two files, each with its own data.
+        let mut contents: Vec<Vec<u8>> = std::fs::read_dir(&out_dir)
+            .unwrap()
+            .map(|e| std::fs::read(e.unwrap().path()).unwrap())
+            .collect();
+        contents.sort();
+        assert_eq!(contents, vec![b"first".to_vec(), b"second".to_vec()]);
     }
 
     #[test]
@@ -4789,7 +3769,7 @@ mod tests {
 
         std::fs::write(&rar_path, &archive).unwrap();
         let summary =
-            extract_rar4_cancellable(&rar_path, &out_dir, "", 1, &mut |_, _| {}, &mut || false)
+            crate::unpack::extract_archive_with_zipfast(&rar_path, &out_dir, "", 1, |_, _| {})
                 .unwrap();
         assert_eq!(summary.files, 1);
         let extracted = out_dir.join("dated.txt");

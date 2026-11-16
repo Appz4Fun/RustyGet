@@ -4614,8 +4614,8 @@ impl NzbgetRsDirectUnpack {
                     _ => MK_DETAIL,
                 };
                 self.add_message(ctx, host_cb, msg_kind, msg.as_bytes(), local);
-                // Only the RAR 1.5-4.x fallback decoder still waits for a volume through its
-                // log line; RAR sets read by the progressive session never block here.
+                // A volume wait signalled through a log line holds the extractor here; RAR sets
+                // read by the progressive session wait in the session and never block here.
                 while self.waiting_volume.load(Ordering::Acquire)
                     && !self.is_stopped_or_terminated(ctx, host_cb)
                 {

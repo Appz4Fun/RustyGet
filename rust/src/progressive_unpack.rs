@@ -9,9 +9,9 @@
 //! bytes are read back out of the repaired volumes and patched into the output, which is then
 //! verified against the archive checksums and moved into place.
 //!
-//! Covered here: RAR5 with every method, RAR4 plain and salted-AES stored members, encrypted
-//! headers and split members. Everything zipfast reports as unsupported (RAR4 compressed and
-//! older codecs) is left to `archive_native`, see [`Unsupported`].
+//! Covered here: every RAR version zipfast decodes (RAR 1.5 to 5, every method, encryption,
+//! encrypted headers, solid sets and split members). What zipfast still refuses is reported
+//! as [`Unsupported`]; RustyGet has no other RAR decoder.
 
 use std::ffi::OsString;
 use std::io::Write;
@@ -233,8 +233,9 @@ impl std::fmt::Display for Failure {
     }
 }
 
-/// zipfast cannot read this set through a session (RAR4 compressed or older codecs, a format
-/// that is not RAR). Nothing was written; the caller uses its fallback extractor.
+/// zipfast cannot read this set through a session (a method or format it refuses). The caller
+/// reports the archive as unsupported; in rename mode the outputs this run placed are removed
+/// first (see `undo_for_fallback`), in other modes they stay.
 #[derive(Debug)]
 pub struct Unsupported(pub String);
 
@@ -265,8 +266,8 @@ fn describe_context(e: &ProgressiveFailure) -> String {
     s
 }
 
-/// True when a failure means "this format or method is not handled by the session" (so a
-/// fallback extractor should try) rather than "the archive is bad".
+/// True when a failure means "this format or method is not handled by the session" (the set
+/// is reported unsupported) rather than "the archive is bad".
 fn is_unsupported(e: &ProgressiveFailure) -> bool {
     match &e.kind {
         FailureKind::UnsupportedMethod => true,
@@ -548,8 +549,8 @@ where
     let mut provisional: Vec<(Member, Artifact)> = Vec::new();
     let mut current_volume = req.first_volume.to_path_buf();
     let mut meta_cache = MetaCache::default();
-    // Outputs this call copied into place, removed again if the fallback decoder has to redo
-    // the set in rename mode (it would otherwise add renamed second copies).
+    // Outputs this call copied into place, removed again in rename mode when the set turns out
+    // to be unsupported.
     let mut published: Outputs = Vec::new();
     // Directory entries created here (undeclared sets), with their stored times.
     let mut placed_dirs: Vec<(PathBuf, Option<(i64, u32)>)> = Vec::new();
@@ -629,6 +630,25 @@ where
                         summary.files += 1;
                         note_placed(&mut placed, &member);
                     }
+                    MemberOutcome::Directory {
+                        deferred: Some(_), ..
+                    } => {
+                        // A directory entry of a set that is not declared: zipfast creates
+                        // directories only with publication authority and leaves this one to
+                        // the caller, so make it here, as the copy path places files.
+                        match place_directory(req.dest, &member) {
+                            Ok(dir) => {
+                                summary.dirs += 1;
+                                // Its time is applied after its children are placed.
+                                placed_dirs.retain(|(d, _)| *d != dir);
+                                placed_dirs.push((dir, member.meta.mtime));
+                            }
+                            Err(f) => {
+                                log_cb(1, &unrar_error_line(&f, &name));
+                                first_failure.get_or_insert(f);
+                            }
+                        }
+                    }
                     MemberOutcome::Directory { .. } => summary.dirs += 1,
                     MemberOutcome::Skipped(_) => summary.skipped += 1,
                     MemberOutcome::Tested(_) => {}
@@ -672,34 +692,13 @@ where
                     }
                     MemberOutcome::Stopped {
                         failure, artifact, ..
-                    } if artifact.is_none()
-                        && matches!(failure.kind, FailureKind::PublicationAuthorityRequired) =>
-                    {
-                        // A directory entry of a set that is not declared: zipfast places
-                        // directories only with publication authority, so make it here, as the
-                        // copy path places files.
-                        match place_directory(req.dest, &member) {
-                            Ok(dir) => {
-                                summary.dirs += 1;
-                                // Its time is applied after its children are placed.
-                                placed_dirs.retain(|(d, _)| *d != dir);
-                                placed_dirs.push((dir, member.meta.mtime));
-                            }
-                            Err(f) => {
-                                log_cb(1, &unrar_error_line(&f, &name));
-                                first_failure.get_or_insert(f);
-                            }
-                        }
-                    }
-                    MemberOutcome::Stopped {
-                        failure, artifact, ..
                     } => {
                         if let Some(mut a) = artifact {
                             let _ = a.discard();
                         }
                         if is_unsupported(&failure) {
-                            // A member the session cannot decode (RAR4 compressed after stored
-                            // members): the fallback decoder extracts the whole set again.
+                            // A member the session cannot decode: the set is reported
+                            // unsupported (rename mode removes the outputs it placed).
                             for (_, mut a) in partial.drain(..).chain(provisional.drain(..)) {
                                 let _ = a.discard();
                             }
@@ -1327,8 +1326,9 @@ fn path_bytes(p: &Path) -> Vec<u8> {
 /// zipfast publishes a member itself only when the volumes are declared as protected native
 /// files for the whole set; a download in progress cannot promise that, so verified outputs come
 /// back unpublished and are copied to their final name here.
-/// Before the fallback decoder extracts the whole set again: in rename mode it would add a
-/// renamed second copy of every output already in place, so those are removed first.
+///
+/// When the set turns out to be unsupported in rename mode: the outputs this run already put in
+/// place (all under new names) are removed. Other modes keep what was written.
 fn undo_for_fallback(req: &Request<'_>, published: &Outputs) {
     if req.overwrite == Overwrite::Rename {
         for (_, _, p) in published {

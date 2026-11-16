@@ -458,10 +458,12 @@ where
     best_idx.map(|i| i as i32).unwrap_or(-1)
 }
 
-/// Returns true when `RarLister::FindLargestFile` in `DupeMatcher.cpp` should continue waiting for `unrar` (`is_running && start_time + timeout_sec > cur_time && start_time >= cur_time`).
 /// The history backup to send back to the queue after a download failed its
-/// health check with nothing of its key left in the queue: TWINs first, then
-/// borrowable, unknown and unborrowable ALTs (`DupeCopyKind`, see
+/// health check with nothing of its key left in the queue, in the fleet's
+/// order: backups at least
+/// [`crate::dupesearch_nzb::FLEET_HEALTHY_ALIVE_PERMILLE`] alive first, then
+/// weak ones, then unmeasured ones; within each TWINs, then borrowable,
+/// unknown and unborrowable ALTs (`DupeCopyKind`, see
 /// [`crate::donorkind`]), each the wholest live backup by its measured
 /// `DupeAlive` share and then its score. Unlike
 /// `select_dupe_backup` it takes backups in DupeMode FORCE and backups filed
@@ -497,7 +499,7 @@ where
         // unborrowable ALTs, then by measured health and score
         let health_tier = if h.alive_permille < 0 {
             0
-        } else if h.alive_permille < crate::dupesearch_nzb::FLEET_HEALTHY_ALIVE * 10 {
+        } else if h.alive_permille < crate::dupesearch_nzb::FLEET_HEALTHY_ALIVE_PERMILLE {
             1
         } else {
             2
@@ -523,6 +525,7 @@ where
     best.map_or(-1, |(idx, _)| idx as i32)
 }
 
+/// Returns true when `RarLister::FindLargestFile` in `DupeMatcher.cpp` should continue waiting for `unrar` (`is_running && start_time + timeout_sec > cur_time && start_time >= cur_time`).
 pub fn dupematcher_should_wait_rar_lister(
     is_running: bool,
     start_time: i64,
@@ -2006,7 +2009,7 @@ mod tests {
 
     #[test]
     fn rescue_orders_twins_then_borrowable_alts() {
-        let mut twin = rescue_candidate(DUPE_MODE_SCORE, DELETE_STATUS_DUPE, 999_010, 900);
+        let mut twin = rescue_candidate(DUPE_MODE_SCORE, DELETE_STATUS_DUPE, 999_010, 980);
         twin.donor_kind = crate::donorkind::DonorKind::Twin as i32;
         let mut borrowable = rescue_candidate(DUPE_MODE_SCORE, DELETE_STATUS_DUPE, 999_090, 990);
         borrowable.donor_kind = crate::donorkind::DonorKind::Borrowable as i32;
@@ -2016,6 +2019,11 @@ mod tests {
         let history = [unborrowable, borrowable, twin];
         assert_eq!(select_rescue_backup(&history, &queue, |_| true), 2);
         assert_eq!(select_rescue_backup(&history[..2], &queue, |_| true), 1);
+        // a weak twin (90% alive, under 97.5%) comes after the healthy ALTs
+        let mut weak_twin = twin;
+        weak_twin.alive_permille = 900;
+        let history = [weak_twin, unborrowable, borrowable];
+        assert_eq!(select_rescue_backup(&history, &queue, |_| true), 2);
     }
 
     #[test]

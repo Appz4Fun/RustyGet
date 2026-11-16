@@ -2342,6 +2342,10 @@ pub fn init_scalar_options_host<H: OptionsHost>(
         probe.as_ref(),
     ) {
         s.par_buffer = r.par_buffer_mb;
+        if usize::BITS == 32 {
+            // a 32-bit build shares 1900 MB between ArticleCache and ParBuffer
+            s.par_buffer = s.par_buffer.min((1900 - s.article_cache.clamp(0, 1900)).max(64));
+        }
         s.par_threads = r.par_threads;
         s.par_pause_queue = i32::from(r.par_pause_queue);
     }

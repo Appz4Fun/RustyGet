@@ -26,8 +26,13 @@ pub const UBER: i32 = 3;
 pub const DETECT: i32 = 4;
 pub const CUSTOM: i32 = 5;
 
-/// Largest ParBuffer a preset sets (the Settings slider's top).
+/// Largest ParBuffer a preset sets (the Settings slider's top). A 32-bit
+/// build can't address that much: ArticleCache plus ParBuffer must stay
+/// within 1900 MB there (see `options::clamp_32bit_memory_limits`).
+#[cfg(target_pointer_width = "64")]
 pub const MAX_PAR_BUFFER_MB: i32 = 4096;
+#[cfg(not(target_pointer_width = "64"))]
+pub const MAX_PAR_BUFFER_MB: i32 = 1024;
 
 /// What a preset sets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,7 +108,7 @@ pub fn detected(p: &Probe) -> ParResources {
         _ => 0,
     };
     let share = p.mem_available / 100 * 15 / MB;
-    let par_buffer_mb = ((share / 64 * 64) as i32).clamp(128, MAX_PAR_BUFFER_MB);
+    let par_buffer_mb = (share / 64 * 64).clamp(128, MAX_PAR_BUFFER_MB as u64) as i32;
     let par_pause_queue = p.disk_write_mbps.is_some_and(|w| w < SLOW_DISK_MBPS);
     ParResources { par_buffer_mb, par_threads, par_pause_queue }
 }
@@ -184,7 +189,9 @@ pub fn start_probe(inter_dir: Vec<u8>, min_age: Duration) {
             // ParBuffer and ParThreads were set when the options were read;
             // a newer RAM figure only takes effect on the next reload
             let applied = crate::options::active_options().map(|o| o.scalars().par_buffer);
-            let later = if applied.is_some_and(|b| b != r.par_buffer_mb) {
+            let later = if crate::options::par_preset() == DETECT
+                && applied.is_some_and(|b| b != r.par_buffer_mb)
+            {
                 " (ParBuffer applies after the next reload)"
             } else {
                 ""
@@ -384,6 +391,8 @@ pub fn rpc_reply(is_json: bool, start: bool) -> Vec<u8> {
         let s = STATE.lock().unwrap_or_else(|e| e.into_inner());
         (s.probe, s.running_now())
     };
+    // before a disk test finishes, size "detect" from RAM now, as the parser does
+    let probe = probe.or_else(|| Some(quick_probe()));
     let json = to_json(probe.as_ref(), running, crate::sysmetrics::cpu_count());
     if is_json {
         json.into_bytes()

@@ -2639,21 +2639,32 @@ mod tests {
         .unwrap();
         let out = dir.join("out");
         let mut logs = Vec::new();
+        // An indexer or a permission fix touches the archive (ctime changes) while zipfast
+        // holds it open: once before a.txt is read and again while it is being read.
+        let touch = |mode: u32| {
+            std::fs::set_permissions(&zip_path, std::fs::Permissions::from_mode(mode)).unwrap()
+        };
+        let reading_a = std::cell::Cell::new(false);
+        let mut touched_again = false;
         let summary = crate::archive_native::extract_zipfast_cancellable(
             &zip_path,
             &out,
             "",
             1,
             &mut |_, m| {
-                // An indexer or a permission fix touches the archive (ctime changes) while
-                // zipfast holds it open.
                 if m == "Unrar: Extracting  a.txt" {
-                    std::fs::set_permissions(&zip_path, std::fs::Permissions::from_mode(0o600))
-                        .unwrap();
+                    touch(0o600);
+                    reading_a.set(true);
                 }
                 logs.push(m.to_string());
             },
-            &mut || false,
+            &mut || {
+                if reading_a.get() && !touched_again {
+                    touched_again = true;
+                    touch(0o640);
+                }
+                false
+            },
         )
         .unwrap_or_else(|e| panic!("{e}: {logs:?}"));
         assert_eq!(summary.files, 2);

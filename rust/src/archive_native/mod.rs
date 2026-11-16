@@ -3772,6 +3772,18 @@ fn zip_member_failure_lines(name: &str, error: &zipfast::zip::ZipReadError) -> V
         Some(ReadFault::Io { error, .. }) => vec![format!("{name}: {error}")],
         Some(ReadFault::Directory { error }) => vec![format!("{name}: {error}")],
         Some(ReadFault::Legacy(error)) => vec![format!("{name}: {error}")],
+        Some(ReadFault::Session(SessionError::Archive(error))) => match error {
+            zipfast::Error::BadChecksum(_) => vec![format!("Unrar: {name} - CRC failed")],
+            // The in-memory reader reports a wrong password or a damaged AES stream as one
+            // error; RustyGet keys its password retry on this line.
+            zipfast::Error::Corrupt(what) if what.contains("wrong password") => {
+                vec![
+                    ZIP_BAD_PASSWORD.to_string(),
+                    format!("{name}: wrong password"),
+                ]
+            }
+            other => vec![format!("{name}: {other}")],
+        },
         Some(ReadFault::Session(error)) => vec![format!("{name}: {error}")],
         Some(ReadFault::Cancelled) => vec!["Aborted".to_string()],
         Some(other) => vec![format!("{name}: {other:?}")],
@@ -3846,16 +3858,31 @@ impl Drop for ZipSpoolDir {
     }
 }
 
-/// Decodes one selected member with zipfast's checked reader into `dest`, returning the bytes
-/// written. `poll` runs the read on a helper thread and polls `is_cancelled` here, for members
-/// whose spool and authentication pass produce no output for a long time; otherwise the sink
-/// polls `is_cancelled` on every chunk.
+/// How [`zip_read_member`] decodes a member.
+#[derive(Clone, Debug)]
+enum ZipReadMode {
+    /// zipfast's checked reader; a large AES member is spooled in this folder (or the default
+    /// temporary folder for `None`).
+    Checked(Option<PathBuf>),
+    /// zipfast's in-memory reader (no spool), for an AES member no spool folder accepts.
+    /// zipfast limits it to 128 MiB of ciphertext.
+    InMemory,
+}
+
+/// An AES member up to this size can still be read in memory when zipfast refuses every
+/// spool folder (zipfast's own in-memory limit for encrypted members).
+const ZIP_IN_MEMORY_LIMIT: u64 = 128 << 20;
+
+/// Decodes one selected member with zipfast into `dest`, returning the bytes written. `poll`
+/// runs the read on a helper thread and polls `is_cancelled` here, for members whose spool and
+/// authentication pass produce no output for a long time; otherwise the sink polls
+/// `is_cancelled` on every chunk. If no helper thread can be started the read runs inline.
 #[allow(clippy::too_many_arguments, clippy::result_large_err)]
 fn zip_read_member(
     session: &mut zipfast::zip::ReadSession,
     id: &zipfast::zip::EntryId,
     password: Option<&str>,
-    temp_dir: Option<PathBuf>,
+    how: ZipReadMode,
     cancel: &zipfast::extract::Cancellation,
     dest: &mut std::fs::File,
     poll: bool,
@@ -3863,11 +3890,35 @@ fn zip_read_member(
 ) -> Result<u64, zipfast::zip::ZipReadError> {
     use std::io::Write;
     let mut overrides = zipfast::zip::EncryptedReadOverrides::default();
-    overrides.temp_dir = temp_dir;
+    let in_memory = matches!(how, ZipReadMode::InMemory);
+    if let ZipReadMode::Checked(temp_dir) = how {
+        overrides.temp_dir = temp_dir;
+    }
     let read = |session: &mut zipfast::zip::ReadSession,
                 dest: &mut std::fs::File,
                 check: &mut dyn FnMut() -> bool| {
         let mut written = 0u64;
+        if in_memory {
+            let selected = session
+                .select(id, ZIP_IN_MEMORY_LIMIT, cancel.clone())
+                .map_err(|e| {
+                    zipfast::zip::ZipReadError::from(zipfast::zip::ReadFault::Session(e))
+                })?;
+            selected
+                .read(password, |chunk| {
+                    if check() {
+                        cancel.cancel();
+                        return Err(zipfast::Error::Io(std::io::ErrorKind::Interrupted.into()));
+                    }
+                    dest.write_all(chunk).map_err(zipfast::Error::Io)?;
+                    written += chunk.len() as u64;
+                    Ok(())
+                })
+                .map_err(|e| {
+                    zipfast::zip::ZipReadError::from(zipfast::zip::ReadFault::Session(e))
+                })?;
+            return Ok(written);
+        }
         let mut context = zipfast::zip::EncryptedReadContext::for_session(
             session,
             id,
@@ -3895,18 +3946,30 @@ fn zip_read_member(
     if !poll {
         return read(session, dest, is_cancelled);
     }
-    std::thread::scope(|scope| {
-        let worker = scope.spawn(|| read(session, dest, &mut || false));
+    let spawned = std::thread::scope(|scope| {
+        let worker = std::thread::Builder::new()
+            .name("zip-member".into())
+            .spawn_scoped(scope, || read(&mut *session, &mut *dest, &mut || false))
+            .ok()?;
         while !worker.is_finished() {
             if is_cancelled() {
                 cancel.cancel();
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        worker
-            .join()
-            .unwrap_or_else(|_| Err(zipfast::zip::ReadFault::InvalidPlan.into()))
-    })
+        Some(worker.join().unwrap_or_else(|_| {
+            Err(
+                zipfast::zip::ReadFault::Legacy(zipfast::Error::Io(std::io::Error::other(
+                    "the zipfast reader stopped unexpectedly",
+                )))
+                .into(),
+            )
+        }))
+    });
+    match spawned {
+        Some(result) => result,
+        None => read(session, dest, is_cancelled),
+    }
 }
 
 /// Extracts a ZIP with zipfast doing all decoding and verification: one `ReadSession` parses
@@ -3975,9 +4038,15 @@ where
             return Err("Aborted".to_string());
         }
         let Some(mut id) = metadata.entry_id(ordinal) else {
-            break;
+            let msg = format!("{}: entry {ordinal} is missing", archive_path.display());
+            log_cb(1, &msg);
+            return Err(msg);
         };
-        let entry = metadata.entry(&id).map_err(|e| e.to_string())?;
+        let entry = metadata.entry(&id).map_err(|e| {
+            let msg = format!("{}: {e}", archive_path.display());
+            log_cb(1, &msg);
+            msg
+        })?;
         let name = entry.name().to_string();
         summary.matched += 1;
         let rel = zipfast::path::sanitize(&name, entry.creator_host() != 3).map_err(|err| {
@@ -4008,7 +4077,10 @@ where
         }
         let mode = entry.extraction_unix_mode();
         let mtime = entry.modified();
-        let spooled = entry.encrypted() && entry.packed_size() > ZIP_SPOOLED_CIPHERTEXT;
+        // Only WinZip AES (raw method 99) is spooled; ZipCrypto streams.
+        let aes = entry.encrypted() && entry.listing_method() == 99;
+        let spooled = aes && entry.packed_size() > ZIP_SPOOLED_CIPHERTEXT;
+        let packed = entry.packed_size();
 
         let Some((mut dest_file, target_path, created_new)) =
             create_dest_file_with_path_no_follow(output_dir, &rel, overwrite_mode)
@@ -4019,23 +4091,27 @@ where
         };
         log_cb(4, &format!("Unrar: Extracting  {name}"));
 
-        // Spool folders to try, in order: a private one beside the output, then the default
-        // temporary folder. Members that are not spooled use neither.
-        let mut temp_dirs: Vec<Option<PathBuf>> = Vec::new();
+        // Ways to read it, in order: for a spooled member a private spool folder beside the
+        // output, then the default temporary folder, then (up to 128 MiB) in memory.
+        let mut ways: Vec<ZipReadMode> = Vec::new();
         if spooled {
             if let Some(dir) = spool.get() {
-                temp_dirs.push(Some(dir));
+                ways.push(ZipReadMode::Checked(Some(dir)));
             }
         }
-        temp_dirs.push(None);
-        let mut reopened = false;
+        ways.push(ZipReadMode::Checked(None));
+        if spooled && packed <= ZIP_IN_MEMORY_LIMIT {
+            ways.push(ZipReadMode::InMemory);
+        }
+        // Reopens allowed for this member when something touches the archive mid-read.
+        let mut reopens_left = 3u32;
         let mut attempt = 0usize;
         let res = loop {
             let res = zip_read_member(
                 &mut session,
                 &id,
                 pw,
-                temp_dirs[attempt].clone(),
+                ways[attempt].clone(),
                 &cancel,
                 &mut dest_file,
                 spooled,
@@ -4059,16 +4135,19 @@ where
                         zipfast::zip::SessionError::SourceChanged { .. }
                     ))
                 );
-            if storage && attempt + 1 < temp_dirs.len() {
+            if storage && attempt + 1 < ways.len() {
                 attempt += 1;
-            } else if source_changed && !reopened {
-                // Something touched the archive (chmod, xattr, indexer): read it again once,
-                // from a fresh session, if the member is still the same one.
-                reopened = true;
+            } else if source_changed && reopens_left > 0 {
+                // Something touched the archive (chmod, xattr, indexer): read it again from a
+                // fresh session, if it still lists the same members.
+                reopens_left -= 1;
                 let Ok(fresh) = open_session(&cancel) else {
                     break res;
                 };
                 let fresh_meta = fresh.metadata();
+                if fresh_meta.len() != metadata.len() {
+                    break res;
+                }
                 let same = fresh_meta
                     .entry_id(ordinal)
                     .and_then(|fid| fresh_meta.entry(&fid).ok().map(|e| (fid, e.name() == name)));
@@ -5103,7 +5182,8 @@ mod tests {
 
     /// Run by hand against a folder on a file system zipfast's own staged output refuses
     /// (HFS+, exFAT, NFS, SMB, ZFS, overlayfs, FUSE): `RUSTYGET_ZIP_FS_DIR=/Volumes/hfs
-    /// cargo test --lib zip_extracts_on_any_file_system -- --ignored`.
+    /// TMPDIR=/Volumes/hfs/tmp cargo test --lib zip_extracts_on_any_file_system -- --ignored`
+    /// (TMPDIR there too makes zipfast refuse every AES spool folder).
     #[test]
     #[ignore]
     fn test_zip_extracts_on_any_file_system() {
@@ -5137,6 +5217,50 @@ mod tests {
                 "mode {mode}"
             );
         }
+
+        // A WinZip AES member over the 64 KiB spool threshold. With TMPDIR also on such a
+        // file system zipfast refuses every spool folder, so it is read in memory.
+        let plain: Vec<u8> = (0..300_000u32).map(|i| (i * 13 % 251) as u8).collect();
+        let password = "pw";
+        let salt = [0x55u8; 16];
+        let derived = zipfast::crypto::aes_derive(password.as_bytes(), &salt, 32).unwrap();
+        let ct = zipfast::crypto::decrypt_winzip_ctr(&derived[..32], &plain).unwrap();
+        let auth = {
+            let key = openssl::pkey::PKey::hmac(&derived[32..64]).unwrap();
+            let mut signer =
+                openssl::sign::Signer::new(openssl::hash::MessageDigest::sha1(), &key).unwrap();
+            signer.update(&ct).unwrap();
+            signer.sign_to_vec().unwrap()
+        };
+        let mut aes_payload = salt.to_vec();
+        aes_payload.extend_from_slice(&derived[64..66]);
+        aes_payload.extend_from_slice(&ct);
+        aes_payload.extend_from_slice(&auth[..10]);
+        let mut extra = Vec::new();
+        extra.extend_from_slice(&0x9901u16.to_le_bytes());
+        extra.extend_from_slice(&7u16.to_le_bytes());
+        extra.extend_from_slice(&2u16.to_le_bytes());
+        extra.extend_from_slice(b"AE");
+        extra.push(3);
+        extra.extend_from_slice(&0u16.to_le_bytes());
+        let aes_zip = base.join("aes.zip");
+        std::fs::write(
+            &aes_zip,
+            build_single_entry_zip(
+                b"big.bin",
+                1,
+                99,
+                0,
+                plain.len() as u32,
+                &extra,
+                &aes_payload,
+            ),
+        )
+        .unwrap();
+        let out = base.join("out_aes");
+        extract_zip_cancellable(&aes_zip, &out, password, 1, &mut |_, _| {}, &mut || false)
+            .unwrap();
+        assert_eq!(std::fs::read(out.join("big.bin")).unwrap(), plain);
         let _ = std::fs::remove_dir_all(&base);
     }
 

@@ -780,10 +780,15 @@ fn daemon_article_cache_run() {
                 crate::memory_pressure::trim_heap();
                 trim_pending = false;
                 last_trim = Some(std::time::Instant::now());
-            } else if alloc_now >= allocated || (!just_flushed && !stopped_now) {
+            } else if !just_flushed && !stopped_now && !need_emergency_flush {
+                // Nothing could be written yet: cache bytes are reserved when
+                // an article starts, so many connections' in-flight articles
+                // alone can pass the 32 MiB DirectWrite hold. Back off rather
+                // than scanning the queue every few milliseconds.
+                sleep_ms(50);
+            } else if alloc_now >= allocated || !just_flushed {
                 // A "flush" that freed nothing (file busy, write blocked)
-                // must not spin, also while stopping: the 32 MiB DirectWrite
-                // hold reaches this often.
+                // must not spin, also while stopping.
                 sleep_ms(5);
             }
         } else if allocated == 0 {

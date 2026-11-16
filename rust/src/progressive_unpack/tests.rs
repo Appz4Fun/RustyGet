@@ -3873,14 +3873,43 @@ fn a_fallback_after_a_given_up_repair_never_places_damaged_bytes() {
     }
 }
 
-/// zipfast decodes a stored RAR4 backslash as a slash, but reports the stored name while
-/// extracting: the member keeps its stored name, mode and archive time, in every mode.
+/// Extracts as unpack does: a set the session turns away goes to the RAR 1.5-4.x decoder.
+/// Returns whether it was turned away for a backslash name.
+fn run_rar4_like_unpack(first: &Path, out: &Path, overwrite: Overwrite) -> bool {
+    match run_with(first, out, Box::new(CompleteSet), overwrite) {
+        (Err(Error::Unsupported(u)), _) => {
+            let mode = match overwrite {
+                Overwrite::Skip => 0,
+                Overwrite::Rename => 2,
+                Overwrite::Always => 1,
+            };
+            let r = crate::archive_native::extract_rar4_cancellable(
+                first,
+                out,
+                "",
+                mode,
+                &mut |_, _| {},
+                &mut || false,
+            );
+            assert!(r.is_ok(), "{r:?}");
+            u.0 == BACKSLASH_NAME
+        }
+        (r, log) => {
+            expect_ok(r, &log);
+            false
+        }
+    }
+}
+
+/// zipfast decodes a stored RAR4 backslash as a separator: such a set goes to the RAR 1.5-4.x
+/// decoder, and the member keeps its stored name, mode and archive time, in every mode.
 #[cfg(unix)]
 #[test]
 fn a_rar4_name_with_a_backslash_keeps_its_name_mode_and_time() {
     for (tag, overwrite) in [
         ("bsalways", Overwrite::Always),
         ("bsrename", Overwrite::Rename),
+        ("bsskip", Overwrite::Skip),
     ] {
         let t = TestDir::new(tag);
         let data = pattern(70_000);
@@ -3888,11 +3917,10 @@ fn a_rar4_name_with_a_backslash_keeps_its_name_mode_and_time() {
             &t.dl(),
             &rar4_store_volumes("dir\\file.bin", &data, 1 << 30),
         );
-        let (r, log) = run_with(&first, &t.out(), Box::new(CompleteSet), overwrite);
-        expect_ok(r, &log);
+        assert!(run_rar4_like_unpack(&first, &t.out(), overwrite), "{tag}");
         let out = t.out().join("dir\\file.bin");
-        assert_eq!(std::fs::read(&out).unwrap(), data, "{tag}: {log:?}");
-        assert!(!t.out().join("dir").exists(), "{tag}: {log:?}");
+        assert_eq!(std::fs::read(&out).unwrap(), data, "{tag}");
+        assert!(!t.out().join("dir").exists(), "{tag}");
         assert_eq!(mode_of(&out), 0o644, "{tag}");
         let age = std::time::SystemTime::now()
             .duration_since(std::fs::metadata(&out).unwrap().modified().unwrap())
@@ -3901,11 +3929,36 @@ fn a_rar4_name_with_a_backslash_keeps_its_name_mode_and_time() {
     }
 }
 
-/// Skip mode checks a RAR4 member's existing target under the stored name the copy path
-/// places, not zipfast's decoded one: an unrelated `dir/file.bin` does not skip `dir\\file.bin`.
+/// Skip mode checks a RAR4 backslash name where it is placed: an unrelated `dir/file.bin`
+/// does not skip `dir\file.bin`, and a regular file `dir` does not stop it.
 #[test]
-fn skip_mode_checks_a_rar4_backslash_name_where_it_is_placed() {
-    let t = TestDir::new("bsskip");
+fn a_rar4_backslash_name_ignores_what_its_decoded_path_holds() {
+    for (tag, overwrite) in [
+        ("bsdiralways", Overwrite::Always),
+        ("bsdirrename", Overwrite::Rename),
+        ("bsdirskip", Overwrite::Skip),
+    ] {
+        let t = TestDir::new(tag);
+        let data = pattern(70_000);
+        let first = write_set(
+            &t.dl(),
+            &rar4_store_volumes("dir\\file.bin", &data, 1 << 30),
+        );
+        std::fs::create_dir_all(t.out()).unwrap();
+        std::fs::write(t.out().join("dir"), b"a file").unwrap();
+        assert!(run_rar4_like_unpack(&first, &t.out(), overwrite), "{tag}");
+        assert_eq!(
+            std::fs::read(t.out().join("dir\\file.bin")).unwrap(),
+            data,
+            "{tag}"
+        );
+        assert_eq!(
+            std::fs::read(t.out().join("dir")).unwrap(),
+            b"a file",
+            "{tag}"
+        );
+    }
+    let t = TestDir::new("bsskipother");
     let data = pattern(70_000);
     let first = write_set(
         &t.dl(),
@@ -3913,24 +3966,35 @@ fn skip_mode_checks_a_rar4_backslash_name_where_it_is_placed() {
     );
     std::fs::create_dir_all(t.out().join("dir")).unwrap();
     std::fs::write(t.out().join("dir").join("file.bin"), b"other").unwrap();
-    let (r, log) = run_with(&first, &t.out(), Box::new(CompleteSet), Overwrite::Skip);
-    expect_ok(r, &log);
-    assert_eq!(
-        std::fs::read(t.out().join("dir\\file.bin")).unwrap(),
-        data,
-        "{log:?}"
-    );
+    assert!(run_rar4_like_unpack(&first, &t.out(), Overwrite::Skip));
+    assert_eq!(std::fs::read(t.out().join("dir\\file.bin")).unwrap(), data);
     assert_eq!(
         std::fs::read(t.out().join("dir").join("file.bin")).unwrap(),
         b"other"
     );
     // A target that exists under the stored name is still skipped.
     std::fs::write(t.out().join("dir\\file.bin"), b"kept").unwrap();
-    let (r, log) = run_with(&first, &t.out(), Box::new(CompleteSet), Overwrite::Skip);
-    expect_ok(r, &log);
+    assert!(run_rar4_like_unpack(&first, &t.out(), Overwrite::Skip));
     assert_eq!(
         std::fs::read(t.out().join("dir\\file.bin")).unwrap(),
-        b"kept",
-        "{log:?}"
+        b"kept"
     );
+}
+
+/// Skip mode on a RAR4 set without backslash names still lets zipfast skip an existing
+/// target without reading it: a damaged member whose target exists does not fail the set.
+#[test]
+fn skip_mode_skips_a_damaged_rar4_member_whose_target_exists() {
+    let t = TestDir::new("rar4skipdamaged");
+    let data = pattern(70_000);
+    let mut vols = rar4_store_volumes("movie.bin", &data, 1 << 30);
+    let at = vols[0].len() - 40_000;
+    vols[0][at] ^= 0xff;
+    let first = write_set(&t.dl(), &vols);
+    std::fs::create_dir_all(t.out()).unwrap();
+    std::fs::write(t.out().join("movie.bin"), b"kept").unwrap();
+    let (r, log) = run_with(&first, &t.out(), Box::new(CompleteSet), Overwrite::Skip);
+    let s = expect_ok(r, &log);
+    assert_eq!(s.skipped, 1);
+    assert_eq!(std::fs::read(t.out().join("movie.bin")).unwrap(), b"kept");
 }

@@ -319,6 +319,9 @@ where
     // declared session still run out of one of zipfast's limits, the set is extracted again
     // undeclared (copied into place), as before declarations: never a failed unpack.
     // A set still downloading goes to persistent partial files when it qualifies.
+    if outputs.is_none() && has_backslash_names(req.first_volume, req.password) {
+        return Err(Error::Unsupported(Unsupported(BACKSLASH_NAME.into())));
+    }
     let feed = if persistent::enabled() && outputs.is_none() && !feed.set_is_final() {
         match persistent::try_extract(req, feed, log_cb, is_cancelled) {
             persistent::Outcome::Done(r) => return r,
@@ -367,6 +370,15 @@ where
 }
 
 /// A zipfast limit that a protection declaration inflates (and an undeclared run may not hit).
+/// zipfast reads a stored RAR 1.5-4.x backslash as a directory separator, and checks and
+/// prepares the output under that name, while RustyGet places the stored name. A set with such
+/// a member in a volume on disk goes to the RAR 1.5-4.x decoder, which keeps the stored name.
+const BACKSLASH_NAME: &str = "RAR 1.5-4.x member name with a backslash";
+
+fn has_backslash_names(first: &Path, password: &str) -> bool {
+    is_rar4_volume(first) && set_members(first, password).is_some_and(|m| m.separator_mapped)
+}
+
 /// The volume starts with the RAR 1.5-4.x signature.
 fn is_rar4_volume(volume: &Path) -> bool {
     use std::io::Read;
@@ -474,13 +486,7 @@ where
             mode: zipfast::extract::Mode::Extract,
             dest: req.dest.to_path_buf(),
             overwrite: match req.overwrite {
-                // zipfast checks a RAR 1.5-4.x member's existing target under its decoded name
-                // (backslashes read as separators), not the stored name the copy path places:
-                // the copy into place does the skipping for those sets.
-                Overwrite::Skip if !is_rar4_volume(req.first_volume) => {
-                    zipfast::extract::Overwrite::Skip
-                }
-                Overwrite::Skip => zipfast::extract::Overwrite::Always,
+                Overwrite::Skip => zipfast::extract::Overwrite::Skip,
                 // Rename: nothing is published by zipfast (no protection declaration); the
                 // copy into place picks the name.
                 Overwrite::Always | Overwrite::Rename => zipfast::extract::Overwrite::Always,
@@ -586,6 +592,13 @@ where
                 // itself; a checksum-less member of a final set is still copied). Each volume's
                 // headers are read once.
                 let meta = meta_cache.lookup(&current_volume, req.password, &name);
+                if outputs.is_none() && meta.separator_mapped && name.contains(&b'\\') {
+                    for (_, mut a) in partial.drain(..).chain(provisional.drain(..)) {
+                        let _ = a.discard();
+                    }
+                    undo_for_fallback(req, &published);
+                    return Err(Error::Unsupported(Unsupported(BACKSLASH_NAME.into())));
+                }
                 next_ordinal += 1;
                 let seen = occurrences.entry(name.to_vec()).or_insert(0u32);
                 let occurrence = *seen;
@@ -763,15 +776,21 @@ where
                 if let Some(mut a) = artifact {
                     let _ = a.discard();
                 }
-                if is_unsupported(&failure) {
+                // A backslash name zipfast placed under its decoded name can end the session
+                // (an unsafe path) before its member starts.
+                let backslash = !is_unsupported(&failure)
+                    && outputs.is_none()
+                    && has_backslash_names(req.first_volume, req.password);
+                if is_unsupported(&failure) || backslash {
                     for (_, mut a) in partial.drain(..).chain(provisional.drain(..)) {
                         let _ = a.discard();
                     }
                     undo_for_fallback(req, &published);
-                    return Err(Error::Unsupported(Unsupported(format!(
-                        "{:?}",
-                        failure.kind
-                    ))));
+                    return Err(Error::Unsupported(Unsupported(if backslash {
+                        BACKSLASH_NAME.into()
+                    } else {
+                        format!("{:?}", failure.kind)
+                    })));
                 }
                 let f = Failure::from_progressive(&failure);
                 log_cb(1, &unrar_error_line(&f, b""));
@@ -2083,6 +2102,8 @@ struct SetMembers {
     /// `<>:"|?*`), or a RAR 1.5-4.x name whose backslashes zipfast reads as separators:
     /// zipfast would place it elsewhere than the copy path.
     names_differ: bool,
+    /// A RAR 1.5-4.x member name with a backslash (see [`MemberMeta::separator_mapped`]).
+    separator_mapped: bool,
     duplicate_names: bool,
 }
 
@@ -2095,6 +2116,7 @@ fn set_members(first: &Path, password: &str) -> Option<SetMembers> {
         max_name: 0,
         windows_names: false,
         names_differ: false,
+        separator_mapped: false,
         duplicate_names: false,
     };
     let mut seen = std::collections::HashSet::new();
@@ -2111,6 +2133,7 @@ fn set_members(first: &Path, password: &str) -> Option<SetMembers> {
             out.names_differ |= (metas.iter().any(|m| m.windows_names)
                 && name.iter().any(|b| b"\\<>:\"|?*".contains(b)))
                 || metas.iter().any(|m| m.separator_mapped);
+            out.separator_mapped |= metas.iter().any(|m| m.separator_mapped);
             out.max_depth = out.max_depth.max(path_depth(&name));
             out.max_name = out.max_name.max(name.len() as u64);
         }

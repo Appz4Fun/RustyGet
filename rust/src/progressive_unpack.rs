@@ -328,6 +328,7 @@ where
             }
         }
     } else {
+        persistent::forget_state(req);
         feed
     };
     let mut declared = false;

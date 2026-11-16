@@ -108,9 +108,13 @@ struct Plan {
     dir: PathBuf,
     names: Vec<OsString>,
     root: PathBuf,
+    dest: PathBuf,
     binding: ArchiveBinding,
-    /// Outputs zipfast will create, for removal on fallback.
+    /// Outputs zipfast created, for removal on fallback or failure.
     outputs: Mutex<Vec<PathBuf>>,
+    /// Directories under the destination before the session ran: parent folders zipfast
+    /// creates for outputs are removed again with them, these never.
+    existing_dirs: std::collections::HashSet<PathBuf>,
 }
 
 impl Plan {
@@ -145,8 +149,10 @@ impl Plan {
             dir,
             names,
             root,
+            dest: req.dest.to_path_buf(),
             binding,
             outputs: Mutex::new(Vec::new()),
+            existing_dirs: dirs_under(req.dest),
         })
     }
 
@@ -177,8 +183,52 @@ impl Plan {
             .iter()
         {
             let _ = std::fs::remove_file(path);
+            // Parent folders this run created, deepest first; remove_dir leaves any that are
+            // not empty.
+            let mut dir = path.parent();
+            while let Some(d) = dir {
+                if !d.starts_with(&self.dest) || d == self.dest || self.existing_dirs.contains(d) {
+                    break;
+                }
+                if std::fs::remove_dir(d).is_err() {
+                    break;
+                }
+                dir = d.parent();
+            }
         }
         remove_state_root(&self.root);
+    }
+}
+
+/// Every directory under `dest` (bounded), recorded before the session creates any.
+fn dirs_under(dest: &Path) -> std::collections::HashSet<PathBuf> {
+    let mut out = std::collections::HashSet::new();
+    let mut stack = vec![dest.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        if out.len() > 100_000 {
+            break;
+        }
+        if let Ok(entries) = std::fs::read_dir(&d) {
+            for e in entries.flatten() {
+                if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    stack.push(e.path());
+                }
+            }
+        }
+        out.insert(d);
+    }
+    out
+}
+
+/// Removes state a crashed or killed earlier persistent run left for this set, when the
+/// persistent path is not taken now.
+pub(super) fn forget_state(req: &Request<'_>) {
+    let root = req
+        .dest
+        .join(STATE_DIR)
+        .join(hex(&binding_for(req).archive[..8]));
+    if root.exists() {
+        remove_state_root(&root);
     }
 }
 
@@ -439,7 +489,6 @@ impl<'a> Run<'a> {
         {
             let mut drive = Driver::new(&mut session, self.feed.clone(), pending, self.req.on_wait);
             let mut current: Option<Vec<u8>> = None;
-            let mut current_path = PathBuf::new();
             let mut current_member = Member::default();
             let mut current_volume = self.req.first_volume.to_path_buf();
             let mut meta_cache = MetaCache::default();
@@ -457,19 +506,26 @@ impl<'a> Run<'a> {
                         }
                     }
                     Ok(Some(ProgressiveEvent::MemberStarted { name, .. })) => {
+                        // zipfast created the output (exclusively) before this event, named
+                        // with its own path rules: record it first so any stop removes it.
+                        let meta = meta_cache.lookup(&current_volume, self.req.password, &name);
+                        let display = String::from_utf8_lossy(&name).into_owned();
+                        if let Ok(rel) = zipfast::path::sanitize(&display, meta.windows_names) {
+                            self.plan
+                                .outputs
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .push(self.req.dest.join(rel));
+                        }
                         if name.iter().any(|b| b"\\<>:\"|?*".contains(b)) {
                             return Err(Step::Fallback(
                                 "member name differs between path rules".into(),
                             ));
                         }
-                        let display = String::from_utf8_lossy(&name).into_owned();
-                        if let Ok(rel) = zipfast::path::sanitize(&display, false) {
-                            current_path = self.req.dest.join(rel);
-                        }
                         log_cb(4, &format!("Unrar: Extracting  {display}"));
                         current_member = Member {
                             name: name.to_vec(),
-                            meta: meta_cache.lookup(&current_volume, self.req.password, &name),
+                            meta,
                             ordinal: 0,
                             occurrence: 0,
                         };
@@ -480,12 +536,6 @@ impl<'a> Run<'a> {
                             .session
                             .partial_file(&member)
                             .map_err(|e| Step::Fallback(format!("partial handle: {e:?}")))?;
-                        // Created by zipfast (exclusively): removed again on fallback.
-                        self.plan
-                            .outputs
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .push(current_path.clone());
                         self.handles.push((member, file, current_member.clone()));
                     }
                     Ok(Some(ProgressiveEvent::Hole(report))) => {
@@ -691,4 +741,14 @@ impl<'a> Run<'a> {
             let _ = std::fs::remove_dir(parent);
         }
     }
+}
+
+#[cfg(test)]
+pub(super) fn plant_state_for_test(req: &Request<'_>) {
+    let root = req
+        .dest
+        .join(STATE_DIR)
+        .join(hex(&binding_for(req).archive[..8]));
+    std::fs::create_dir_all(root.join("state")).unwrap();
+    std::fs::write(root.join("state").join("bundle"), b"x").unwrap();
 }

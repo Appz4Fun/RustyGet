@@ -2191,6 +2191,23 @@ impl NzbgetRsStreamRepairCtrl {
     ) {
         unsafe {
             with_dq_guard(ctx, cb, |dq_ptr| {
+                self.record_live_pass(ctx, cb, dq_ptr, targets, counters);
+            });
+        }
+    }
+
+    /// Writes one live pass's results to the job; returns the job, 0 when this thread no
+    /// longer holds it.
+    unsafe fn record_live_pass(
+        &self,
+        ctx: *mut c_void,
+        cb: NzbgetRsStreamRepairHostFn,
+        dq_ptr: usize,
+        targets: &[RepairTarget],
+        counters: &RunCounters,
+    ) -> usize {
+        unsafe {
+            {
                 let mut ints = [0, counters.recovered_holes];
                 let mut i64s = [counters.recovered_bytes];
                 let nzb_ptr = cb(
@@ -2206,7 +2223,7 @@ impl NzbgetRsStreamRepairCtrl {
                     ptr::null_mut(),
                 );
                 if nzb_ptr == 0 {
-                    return;
+                    return 0;
                 }
                 let job_count = ints[0].max(0) as usize;
                 let mut job_ids = Vec::with_capacity(job_count);
@@ -2274,7 +2291,20 @@ impl NzbgetRsStreamRepairCtrl {
                         }
                     }
                 }
+                nzb_ptr
+            }
+        }
+    }
 
+    /// Ends the live repair: gives the job back (clears the live-repair thread, lets a waiting
+    /// post-processing go on). Called once, after the last pass.
+    unsafe fn release_live_job(&self, ctx: *mut c_void, cb: NzbgetRsStreamRepairHostFn) {
+        unsafe {
+            with_dq_guard(ctx, cb, |dq_ptr| {
+                let nzb_ptr = self.record_live_pass(ctx, cb, dq_ptr, &[], &RunCounters::default());
+                if nzb_ptr == 0 {
+                    return;
+                }
                 cb(
                     ctx,
                     15,
@@ -2376,19 +2406,26 @@ impl NzbgetRsStreamRepairCtrl {
         // Volumes can go dead while a pass borrows another one (a run of dead volumes arrives
         // over a minute or two): look again after each pass, while this thread still holds the
         // job, and borrow the new ones before post-processing takes over and par2 rebuilds them.
+        // The job is given back only after the last pass: giving it back after each one would
+        // end this thread's hold, and the next look would find nothing.
         let mut tried: std::collections::BTreeSet<Vec<u8>> = Default::default();
+        let mut ran = false;
         for _ in 0..MAX_LIVE_BORROW_PASSES {
             let Some(left) = (unsafe { self.run_live_pass(ctx, cb) }) else {
-                return;
+                break;
             };
+            ran = true;
             tried.extend(left);
             if unsafe { self.host_is_stopped(ctx, cb) } {
-                return;
+                break;
             }
             let fresh = unsafe { self.dead_volumes_left_to_borrow(ctx, cb) };
             if fresh.iter().all(|n| tried.contains(n)) {
-                return;
+                break;
             }
+        }
+        if ran {
+            unsafe { self.release_live_job(ctx, cb) };
         }
     }
 

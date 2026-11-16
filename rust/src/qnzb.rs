@@ -220,6 +220,45 @@ struct NzbData {
     s: NzbScalars,
     texts: Mutex<[Option<CString>; TEXTS]>,
     coll: Mutex<Coll>,
+    files: Mutex<Files>,
+}
+
+/// A file that finished downloading and left the file list.
+struct Completed {
+    id: i32,
+    // 0 none, 1 success, 2 partial, 3 failure
+    status: i32,
+    crc: u32,
+    par: bool,
+    filename: CString,
+    origname: CString,
+    hash16k: CString,
+    par_set_id: CString,
+}
+
+/// Byte ranges of a completed file no server could supply, kept for stream
+/// repair from a duplicate posting (see option DupeArticleFallback).
+struct RepairJob {
+    file_id: i32,
+    filename: CString,
+    decoded_size: i64,
+    // encoded failed size and missed size, captured while the file was queued
+    failed_size: i64,
+    missed_size: i64,
+    failed_articles: i32,
+    par: bool,
+    // (offset, size) pairs, as the host passes them
+    holes: Vec<[i64; 2]>,
+    steps_hash: u64,
+    // the live pass already tried this job once (not persisted)
+    live_attempted: bool,
+}
+
+/// Completed files and stream-repair jobs (see `nzbget_rs_nzb_files`).
+#[derive(Default)]
+struct Files {
+    completed: Vec<Completed>,
+    jobs: Vec<RepairJob>,
 }
 
 /// A collection's small lists (see `nzbget_rs_nzb_coll`).
@@ -291,6 +330,7 @@ pub extern "C" fn nzbget_rs_nzb_scalars_new() -> *mut NzbScalars {
         s: NzbScalars::default(),
         texts: Mutex::new(texts),
         coll: Mutex::new(Coll::default()),
+        files: Mutex::new(Files::default()),
     });
     Box::into_raw(data).cast()
 }
@@ -508,6 +548,221 @@ pub unsafe extern "C" fn nzbget_rs_nzb_coll(
     }
 }
 
+fn owned(s: *const c_char) -> CString {
+    cstr(s).to_owned()
+}
+
+fn ranges(raw: *const i64, count: c_int) -> Vec<[i64; 2]> {
+    if raw.is_null() || count <= 0 {
+        return Vec::new();
+    }
+    let flat = unsafe { std::slice::from_raw_parts(raw, count as usize * 2) };
+    flat.chunks_exact(2).map(|r| [r[0], r[1]]).collect()
+}
+
+/// Completed files (ops 0-8) and stream-repair jobs (ops 20-27).
+/// Returned strings and hole pointers stay valid until the list changes;
+/// callers hold the queue lock.
+///
+/// Completed file: ints = id, status, par, crc; strs = filename, origname,
+/// hash16k, par set id.
+///  0 count; 1 read at a2; 2 add (ints = id, status, crc, par); 3 rename at a2 (s1 filename, s2 origname
+///  when not null); 4 rename by name s1 to s2, returns 1 when found;
+///  5 for id a2: ints[0]=1 mark success (returns 1 when it changed),
+///  ints[0]=2 failure becomes partial; 6 erase at a2; 7 clear;
+///  8 append and take p2's list.
+/// Job: ints = file id, failed articles, par, live attempted, hole count;
+/// i64s = decoded size, failed size, missed size, steps hash.
+///  20 count; 21 summary at a2 (ints[0] file id; i64s decoded size, hole
+///  total, failed+missed; strs[0] filename); 22 read at a2 (strs[0]
+///  filename, strs[1] holes); 23 add (s1 filename, `raw` a2 holes);
+///  24 mark live attempted at a2, returns the previous value; 25 erase at
+///  a2; 26 at a2 set decoded size i64s[0] when >= 0 and holes `raw`
+///  ints[1]; 27 clear.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_nzb_files(
+    p: *const NzbScalars,
+    op: c_int,
+    a2: c_int,
+    p2: *const NzbScalars,
+    s1: *const c_char,
+    s2: *const c_char,
+    ints: *mut c_int,
+    i64s: *mut i64,
+    strs: *mut *const c_char,
+    raw: *const i64,
+) -> i64 {
+    let taken = if op == 8 && !p2.is_null() && p2 != p {
+        let mut o = data(p2).files.lock().unwrap_or_else(|e| e.into_inner());
+        std::mem::take(&mut o.completed)
+    } else {
+        Vec::new()
+    };
+    let mut f = data(p).files.lock().unwrap_or_else(|e| e.into_inner());
+    let i = a2.max(0) as usize;
+    let int = |k: usize| unsafe { *ints.add(k) };
+    let put = |k: usize, v: c_int| unsafe { *ints.add(k) = v };
+    let put64 = |k: usize, v: i64| unsafe { *i64s.add(k) = v };
+    let put_s = |k: usize, v: *const c_char| unsafe { *strs.add(k) = v };
+    match op {
+        0 => f.completed.len() as i64,
+        1 => match f.completed.get(i) {
+            Some(c) if a2 >= 0 => {
+                put(0, c.id);
+                put(1, c.status);
+                put(2, i32::from(c.par));
+                put(3, c.crc as i32);
+                put_s(0, c.filename.as_ptr());
+                put_s(1, c.origname.as_ptr());
+                put_s(2, c.hash16k.as_ptr());
+                put_s(3, c.par_set_id.as_ptr());
+                0
+            }
+            _ => -1,
+        },
+        2 => {
+            let s = |k: usize| owned(unsafe { *strs.add(k) });
+            f.completed.push(Completed {
+                id: int(0),
+                status: int(1),
+                crc: int(2) as u32,
+                par: int(3) != 0,
+                filename: s(0),
+                origname: s(1),
+                hash16k: s(2),
+                par_set_id: s(3),
+            });
+            0
+        }
+        3 => {
+            if let Some(c) = f.completed.get_mut(i) {
+                if !s2.is_null() {
+                    c.origname = owned(s2);
+                }
+                c.filename = owned(s1);
+            }
+            0
+        }
+        4 => {
+            let (old, new) = (cstr(s1).to_bytes(), cstr(s2));
+            if old.is_empty() || new.to_bytes().is_empty() {
+                return 0;
+            }
+            for c in f.completed.iter_mut() {
+                if crate::downloadinfo::completed_same_filename(c.filename.to_bytes(), old) {
+                    if c.origname.to_bytes().is_empty() {
+                        c.origname = c.filename.clone();
+                    }
+                    c.filename = new.to_owned();
+                    return 1;
+                }
+            }
+            0
+        }
+        5 => {
+            let mode = int(0);
+            if let Some(c) = f.completed.iter_mut().find(|c| c.id == a2) {
+                if mode == 1 && c.status != 1 {
+                    c.status = 1;
+                    return 1;
+                }
+                if mode == 2 && c.status == 3 {
+                    c.status = 2;
+                }
+            }
+            0
+        }
+        6 => {
+            if a2 >= 0 && i < f.completed.len() {
+                f.completed.remove(i);
+            }
+            0
+        }
+        7 => {
+            f.completed.clear();
+            0
+        }
+        8 => {
+            f.completed.extend(taken);
+            0
+        }
+        20 => f.jobs.len() as i64,
+        21 | 22 => match f.jobs.get(i) {
+            Some(j) if a2 >= 0 => {
+                put_s(0, j.filename.as_ptr());
+                if op == 21 {
+                    put(0, j.file_id);
+                    put64(0, j.decoded_size);
+                    put64(1, j.holes.iter().map(|r| r[1]).sum());
+                    put64(2, j.failed_size + j.missed_size);
+                } else {
+                    put(0, j.file_id);
+                    put(1, j.failed_articles);
+                    put(2, i32::from(j.par));
+                    put(3, i32::from(j.live_attempted));
+                    put(4, j.holes.len() as c_int);
+                    put64(0, j.decoded_size);
+                    put64(1, j.failed_size);
+                    put64(2, j.missed_size);
+                    put64(3, j.steps_hash as i64);
+                    put_s(
+                        1,
+                        if j.holes.is_empty() {
+                            std::ptr::null()
+                        } else {
+                            j.holes.as_ptr().cast()
+                        },
+                    );
+                }
+                0
+            }
+            _ => -1,
+        },
+        23 => {
+            let g = |k: usize| unsafe { *i64s.add(k) };
+            f.jobs.push(RepairJob {
+                file_id: int(0),
+                filename: owned(s1),
+                decoded_size: g(0),
+                failed_size: g(1),
+                missed_size: g(2),
+                failed_articles: int(1),
+                par: int(2) != 0,
+                holes: ranges(raw, a2),
+                steps_hash: g(3) as u64,
+                live_attempted: false,
+            });
+            0
+        }
+        24 => match f.jobs.get_mut(i) {
+            Some(j) if a2 >= 0 => i64::from(std::mem::replace(&mut j.live_attempted, true)),
+            _ => 0,
+        },
+        25 => {
+            if a2 >= 0 && i < f.jobs.len() {
+                f.jobs.remove(i);
+            }
+            0
+        }
+        26 => {
+            let size = unsafe { *i64s };
+            let holes = ranges(raw, int(1));
+            if let Some(j) = f.jobs.get_mut(i) {
+                if size >= 0 {
+                    j.decoded_size = size;
+                }
+                j.holes = holes;
+            }
+            0
+        }
+        27 => {
+            f.jobs.clear();
+            0
+        }
+        _ => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -574,6 +829,148 @@ mod tests {
             nzbget_rs_nzb_coll(q, 49, 1, p, ns, ns, ints.as_mut_ptr(), strs.as_mut_ptr());
             nzbget_rs_nzb_coll(q, 42, 0, np, ns, ns, ints.as_mut_ptr(), strs.as_mut_ptr());
             assert_eq!(&ints[..3], &[1, 5, 2]);
+            nzbget_rs_nzb_scalars_free(p);
+            nzbget_rs_nzb_scalars_free(q);
+        }
+    }
+
+    #[test]
+    fn completed_files_and_jobs() {
+        let p = nzbget_rs_nzb_scalars_new();
+        let q = nzbget_rs_nzb_scalars_new();
+        let np: *const NzbScalars = std::ptr::null();
+        let ns: *const c_char = std::ptr::null();
+        let mut ints = [0 as c_int; 5];
+        let mut i64s = [0i64; 4];
+        let mut strs = [ns; 4];
+        unsafe {
+            let mut call = |n,
+                            op,
+                            a2,
+                            p2,
+                            s1,
+                            s2,
+                            raw: *const i64,
+                            ints: &mut [c_int; 5],
+                            i64s: &mut [i64; 4],
+                            strs: &mut [*const c_char; 4]| {
+                nzbget_rs_nzb_files(
+                    n,
+                    op,
+                    a2,
+                    p2,
+                    s1,
+                    s2,
+                    ints.as_mut_ptr(),
+                    i64s.as_mut_ptr(),
+                    strs.as_mut_ptr(),
+                    raw,
+                )
+            };
+            let nr: *const i64 = std::ptr::null();
+            ints[..4].copy_from_slice(&[5, 3, 77, 0]);
+            strs = [
+                c"a.r00".as_ptr(),
+                c"".as_ptr(),
+                c"h".as_ptr(),
+                c"set".as_ptr(),
+            ];
+            call(q, 2, 0, np, ns, ns, nr, &mut ints, &mut i64s, &mut strs);
+            assert_eq!(
+                call(p, 8, 0, q, ns, ns, nr, &mut ints, &mut i64s, &mut strs),
+                0
+            );
+            assert_eq!(
+                call(q, 0, 0, np, ns, ns, nr, &mut ints, &mut i64s, &mut strs),
+                0
+            );
+            assert_eq!(
+                call(p, 0, 0, np, ns, ns, nr, &mut ints, &mut i64s, &mut strs),
+                1
+            );
+            assert_eq!(
+                call(
+                    p,
+                    4,
+                    0,
+                    np,
+                    c"a.r00".as_ptr(),
+                    c"b.r00".as_ptr(),
+                    nr,
+                    &mut ints,
+                    &mut i64s,
+                    &mut strs
+                ),
+                1
+            );
+            ints[0] = 2;
+            call(p, 5, 5, np, ns, ns, nr, &mut ints, &mut i64s, &mut strs);
+            call(p, 1, 0, np, ns, ns, nr, &mut ints, &mut i64s, &mut strs);
+            assert_eq!(&ints[..4], &[5, 2, 0, 77]);
+            assert_eq!(CStr::from_ptr(strs[0]).to_bytes(), b"b.r00");
+            assert_eq!(CStr::from_ptr(strs[1]).to_bytes(), b"a.r00");
+            ints[0] = 1;
+            assert_eq!(
+                call(p, 5, 5, np, ns, ns, nr, &mut ints, &mut i64s, &mut strs),
+                1
+            );
+            assert_eq!(
+                call(p, 5, 5, np, ns, ns, nr, &mut ints, &mut i64s, &mut strs),
+                0
+            );
+
+            let holes = [10i64, 5, 40, 7];
+            ints[..3].copy_from_slice(&[9, 4, 1]);
+            i64s = [100, 30, 2, 0xabc];
+            call(
+                p,
+                23,
+                2,
+                np,
+                c"m.mkv".as_ptr(),
+                ns,
+                holes.as_ptr(),
+                &mut ints,
+                &mut i64s,
+                &mut strs,
+            );
+            assert_eq!(
+                call(p, 20, 0, np, ns, ns, nr, &mut ints, &mut i64s, &mut strs),
+                1
+            );
+            call(p, 21, 0, np, ns, ns, nr, &mut ints, &mut i64s, &mut strs);
+            assert_eq!((ints[0], i64s[0], i64s[1], i64s[2]), (9, 100, 12, 32));
+            assert_eq!(
+                call(p, 24, 0, np, ns, ns, nr, &mut ints, &mut i64s, &mut strs),
+                0
+            );
+            assert_eq!(
+                call(p, 24, 0, np, ns, ns, nr, &mut ints, &mut i64s, &mut strs),
+                1
+            );
+            i64s[0] = 200;
+            ints[1] = 1;
+            call(
+                p,
+                26,
+                0,
+                np,
+                ns,
+                ns,
+                holes.as_ptr(),
+                &mut ints,
+                &mut i64s,
+                &mut strs,
+            );
+            call(p, 22, 0, np, ns, ns, nr, &mut ints, &mut i64s, &mut strs);
+            assert_eq!(&ints[..5], &[9, 4, 1, 1, 1]);
+            assert_eq!(i64s, [200, 30, 2, 0xabc]);
+            assert_eq!(*strs[1].cast::<[i64; 2]>(), [10, 5]);
+            call(p, 25, 0, np, ns, ns, nr, &mut ints, &mut i64s, &mut strs);
+            assert_eq!(
+                call(p, 20, 0, np, ns, ns, nr, &mut ints, &mut i64s, &mut strs),
+                0
+            );
             nzbget_rs_nzb_scalars_free(p);
             nzbget_rs_nzb_scalars_free(q);
         }

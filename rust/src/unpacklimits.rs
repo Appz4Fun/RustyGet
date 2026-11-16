@@ -170,7 +170,9 @@ impl Guard {
                 continue;
             };
             for e in rd.flatten() {
-                if e.file_name().to_string_lossy().starts_with(".rustyget-") {
+                let n = e.file_name();
+                let n = n.to_string_lossy();
+                if n.starts_with(".rustyget-") || n.starts_with(".zipfast-") {
                     continue;
                 }
                 let rel = rel_dir.join(e.file_name());
@@ -322,6 +324,7 @@ impl Guard {
         entries.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
         let mut names = Names {
             base: &base,
+            admitted: (&self.files, &self.folders),
             earlier: std::mem::take(&mut self.produced),
             now: BTreeSet::new(),
         };
@@ -354,6 +357,8 @@ impl Guard {
 /// The ASCII names given while renaming, relative to the unpack folder.
 struct Names<'a> {
     base: &'a Path,
+    /// What the job wrote (files, folders): never an older copy.
+    admitted: (&'a BTreeSet<PathBuf>, &'a BTreeSet<PathBuf>),
     /// Given by earlier runs of the same guard.
     earlier: BTreeSet<PathBuf>,
     /// Given by this run.
@@ -368,7 +373,10 @@ impl Names<'_> {
     /// An older copy: inside an ASCII name an earlier run gave, and not given by this run.
     fn stale(&self, p: &Path) -> bool {
         let rel = self.rel(p);
-        !self.now.contains(&rel) && rel.ancestors().any(|a| self.earlier.contains(a))
+        !self.now.contains(&rel)
+            && !self.admitted.0.contains(&rel)
+            && !self.admitted.1.contains(&rel)
+            && rel.ancestors().any(|a| self.earlier.contains(a))
     }
 
     /// Moves `src` to `dir/name` as [`Guard::asciify`] describes; returns where it went.
@@ -1223,6 +1231,27 @@ mod tests {
         assert_eq!(std::fs::read(t.join("Cafe.txt")).unwrap(), b"2");
         assert_eq!(names_in(&t.join("Cafe")), ["a.txt"]);
         assert_eq!(std::fs::read(t.join("Cafe").join("a.txt")).unwrap(), b"2");
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
+
+    #[test]
+    fn a_member_of_this_run_is_never_an_older_copy() {
+        let t = std::env::temp_dir().join(format!("rg-crossset-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        std::fs::create_dir_all(&t).unwrap();
+        let mut g = Guard::new(Limits::default(), &t, &[]);
+        std::fs::write(t.join("Café.txt"), b"set1").unwrap();
+        g.admit(&t.join("Café.txt"), false).unwrap();
+        g.asciify().unwrap();
+        // Unpacked again: set 1's member, and set 2's own Cafe.txt over the earlier copy.
+        std::fs::write(t.join("Café.txt"), b"set1").unwrap();
+        g.admit(&t.join("Café.txt"), false).unwrap();
+        std::fs::write(t.join("Cafe.txt"), b"set2").unwrap();
+        g.admit(&t.join("Cafe.txt"), false).unwrap();
+        g.asciify().unwrap();
+        assert_eq!(std::fs::read(t.join("Cafe.txt")).unwrap(), b"set2");
+        assert_eq!(std::fs::read(t.join("Cafe_2.txt")).unwrap(), b"set1");
         let _ = std::fs::remove_dir_all(&t);
     }
 

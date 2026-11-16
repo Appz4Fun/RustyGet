@@ -3716,6 +3716,183 @@ where
     )
 }
 
+/// Messages from the zipfast worker thread to the thread that owns `log_cb` and `is_cancelled`.
+enum ZipRunMsg {
+    Log(i32, String),
+}
+
+/// How a failed ZIP member is reported, in RustyGet's existing wording.
+fn zip_member_failure_lines(name: &str, error: &zipfast::zip::ZipReadError) -> Vec<String> {
+    use zipfast::zip::ReadFault;
+    const BAD_PASSWORD: &str = "Unrar: The specified password is incorrect.";
+    match error.operation() {
+        Some(ReadFault::PasswordRequired) | Some(ReadFault::PasswordCheckFailed { .. }) => {
+            vec![BAD_PASSWORD.to_string(), format!("{name}: wrong password")]
+        }
+        // The password verifier already matched: a bad WinZip AES tag is damaged data.
+        Some(ReadFault::AuthenticationFailed) => vec![format!("Unrar: {name} - CRC failed")],
+        Some(ReadFault::UnsupportedMethod { method }) => {
+            vec![format!(
+                "{name}: compression method {method} is not supported"
+            )]
+        }
+        Some(ReadFault::Integrity { .. }) => vec![format!("Unrar: {name} - CRC failed")],
+        Some(ReadFault::Cancelled) => vec!["Aborted".to_string()],
+        Some(ReadFault::Io { error, .. }) => vec![format!("{name}: {error}")],
+        _ => vec![format!("{name}: {error:?}")],
+    }
+}
+
+/// Runs zipfast's checked ZIP extraction on a worker thread so the caller's (non-`Send`)
+/// `is_cancelled` keeps being polled here and drives a [`zipfast::extract::Cancellation`].
+/// Member log lines are forwarded to `log_cb` from this thread. The first failed member
+/// cancels the rest of the run, matching the stop-at-first-error behaviour RustyGet always had.
+fn run_zipfast_zip<F>(
+    archive_path: &Path,
+    dest: &Path,
+    password: &str,
+    overwrite: zipfast::extract::Overwrite,
+    log_cb: &mut F,
+    is_cancelled: &mut dyn FnMut() -> bool,
+) -> Result<zipfast::zip::ZipRunReport, String>
+where
+    F: FnMut(i32, &str),
+{
+    use std::sync::mpsc;
+    use std::time::Duration;
+    use zipfast::zip::{ZipRunEvent, ZipSinkResult};
+
+    let cancel = zipfast::extract::Cancellation::default();
+    let options = zipfast::extract::Options {
+        mode: zipfast::extract::Mode::Extract,
+        dest: dest.to_path_buf(),
+        overwrite,
+        flatten: false,
+        threads: None,
+        protected_paths: Default::default(),
+        parallel_min: None,
+        select: None,
+    };
+    let password = (!password.is_empty()).then_some(password);
+    let (tx, rx) = mpsc::channel::<ZipRunMsg>();
+    let first_failure: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+    let result = std::thread::scope(|scope| {
+        let worker_cancel = cancel.clone();
+        let first_failure = &first_failure;
+        let options = &options;
+        let worker = scope.spawn(move || {
+            let observer_cancel = worker_cancel.clone();
+            let observer = move |event: ZipRunEvent<'_>| -> ZipSinkResult<()> {
+                match event {
+                    ZipRunEvent::MemberSucceeded { name, .. } => {
+                        if !name.ends_with('/') && !name.ends_with('\\') {
+                            let _ =
+                                tx.send(ZipRunMsg::Log(4, format!("Unrar: Extracting  {name}")));
+                        }
+                    }
+                    ZipRunEvent::MemberFailed { name, error, .. } => {
+                        let lines = zip_member_failure_lines(name, error);
+                        let aborted = lines.len() == 1 && lines[0] == "Aborted";
+                        if !aborted {
+                            let mut slot = first_failure.lock().unwrap_or_else(|p| p.into_inner());
+                            if slot.is_none() {
+                                *slot = lines.last().cloned();
+                                for line in &lines {
+                                    let _ = tx.send(ZipRunMsg::Log(1, line.clone()));
+                                }
+                            }
+                        }
+                        observer_cancel.cancel();
+                    }
+                    _ => {}
+                }
+                Ok(())
+            };
+            zipfast::zip::run_with_policy(
+                archive_path,
+                options,
+                password,
+                &worker_cancel,
+                &zipfast::zip::EncryptedReadOverrides::default(),
+                observer,
+            )
+        });
+        let mut user_cancelled = false;
+        loop {
+            if !user_cancelled && is_cancelled() {
+                user_cancelled = true;
+                cancel.cancel();
+            }
+            match rx.recv_timeout(Duration::from_millis(10)) {
+                Ok(ZipRunMsg::Log(kind, line)) => log_cb(kind, &line),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        let result = worker
+            .join()
+            .unwrap_or_else(|_| Err(zipfast::zip::ReadFault::InvalidPlan.into()));
+        (result, user_cancelled)
+    });
+
+    let (result, user_cancelled) = result;
+    if user_cancelled {
+        return Err("Aborted".to_string());
+    }
+    let failure = first_failure
+        .into_inner()
+        .unwrap_or_else(|p| p.into_inner());
+    match (result, failure) {
+        (_, Some(msg)) => Err(msg),
+        (Ok(report), None) if report.failed() == 0 => Ok(report),
+        (Ok(report), None) => {
+            let msg = format!("{} member(s) failed", report.failed());
+            log_cb(1, &msg);
+            Err(msg)
+        }
+        (Err(error), None) => {
+            if matches!(error.operation(), Some(zipfast::zip::ReadFault::Cancelled)) {
+                return Err("Aborted".to_string());
+            }
+            let msg = format!("{}: {error:?}", archive_path.display());
+            log_cb(1, &msg);
+            Err(msg)
+        }
+    }
+}
+
+/// AutoRename for ZIP until zipfast's `Overwrite` has a rename mode (zipfast PR #128): extract
+/// into a private folder inside `output_dir`, then move every file to its free name with the
+/// same no-follow chooser the other formats use.
+fn place_staged_with_rename(staging: &Path, output_dir: &Path, rel: &Path) -> Result<(), String> {
+    let here = staging.join(rel);
+    let entries = std::fs::read_dir(&here).map_err(|e| e.to_string())?;
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let child_rel = rel.join(entry.file_name());
+        let ty = entry.file_type().map_err(|e| e.to_string())?;
+        if ty.is_dir() {
+            create_dir_all_no_follow(output_dir, &child_rel)?;
+            place_staged_with_rename(staging, output_dir, &child_rel)?;
+        } else if ty.is_file() {
+            let Some((placeholder, target, _)) =
+                create_dest_file_with_path_no_follow(output_dir, &child_rel, 2)?
+            else {
+                continue;
+            };
+            drop(placeholder);
+            std::fs::rename(entry.path(), &target).map_err(|e| e.to_string())?;
+        } else {
+            return Err(format!(
+                "{}: unexpected staged file type",
+                child_rel.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn extract_zip_cancellable<F>(
     archive_path: &Path,
     output_dir: &Path,
@@ -3727,1026 +3904,83 @@ fn extract_zip_cancellable<F>(
 where
     F: FnMut(i32, &str),
 {
+    // The central directory is read first so links and unreadable names refuse the whole
+    // archive before anything is written.
     let archive = zipfast::zip::Archive::open(archive_path).map_err(|e| {
         let msg = e.to_string();
         log_cb(1, &msg);
         msg
     })?;
-
     if archive.entries.iter().any(|e| e.is_link()) {
         log_cb(1, "ERROR: Dangerous link path was ignored");
         log_cb(0, "Stream repair: archive contains link");
         return Err("archive contains link".to_string());
     }
+    if let Some(e) = archive.entries.iter().find(|e| e.name.contains('\u{FFFD}')) {
+        let msg = format!("{}: invalid UTF-8 filename", e.name);
+        log_cb(1, &msg);
+        return Err(msg);
+    }
+    drop(archive);
 
-    let mut file = std::fs::File::open(archive_path).map_err(|e| e.to_string())?;
-    let file_len = file.metadata().map_err(|e| e.to_string())?.len();
     if let Some(vol_name) = archive_path.file_name().and_then(|s| s.to_str()) {
         log_cb(4, &format!("Unrar: Extracting from {vol_name}"));
     }
 
-    let mut summary = zipfast::extract::Summary::default();
-    summary.volumes = 1;
-    let mut io_buf = vec![0u8; 256 * 1024];
-
-    for e in &archive.entries {
-        if is_cancelled() {
-            return Err("Aborted".to_string());
-        }
-        if e.name.contains('\u{FFFD}') {
-            let msg = format!("{}: invalid UTF-8 filename", e.name);
-            log_cb(1, &msg);
-            return Err(msg);
-        }
-        let rel = zipfast::path::sanitize(&e.name, e.host != 3).map_err(|err| {
-            let msg = format!("{}: {err}", e.name);
+    let report = if overwrite_mode == 2 {
+        let staging = output_dir.join(format!(
+            ".rustyget-zip-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir(&staging).map_err(|e| {
+            let msg = format!("Could not create {}: {e}", staging.display());
             log_cb(1, &msg);
             msg
         })?;
-        if e.is_dir() {
-            create_dir_all_no_follow(output_dir, &rel).map_err(|err| {
-                log_cb(1, &err);
-                err
-            })?;
-            summary.dirs += 1;
-            continue;
-        }
-        if e.encrypted() && password.is_empty() {
-            let msg = "Unrar: The specified password is incorrect.";
-            log_cb(1, msg);
-            return Err(msg.to_string());
-        }
-        let eff_method = e.effective_method();
-        if !matches!(eff_method, 0 | 8 | 12 | 14 | 93 | 95) {
-            let msg = format!(
-                "{}: compression method {eff_method} is not supported",
-                e.name
-            );
-            log_cb(1, &msg);
-            return Err(msg);
-        }
-
-        let opened = create_dest_file_with_path_no_follow(output_dir, &rel, overwrite_mode)
-            .map_err(|err| {
-                log_cb(1, &err);
-                err
-            })?;
-        let Some((mut dest_file, target_path, created_new)) = opened else {
-            summary.skipped += 1;
-            continue;
-        };
-
-        log_cb(4, &format!("Unrar: Extracting  {}", e.name));
-        let res = extract_single_zip_entry(
-            &mut file,
-            file_len,
-            e,
+        let res = run_zipfast_zip(
+            archive_path,
+            &staging,
             password,
-            &mut io_buf,
-            &mut dest_file,
+            zipfast::extract::Overwrite::Always,
+            log_cb,
             is_cancelled,
-        );
-        if let Err(err) = res {
-            drop(dest_file);
-            if created_new {
-                let _ = std::fs::remove_file(&target_path);
-            }
-            if err != "Aborted" {
-                if err.contains("wrong password") || err.contains("encrypted") {
-                    log_cb(1, "Unrar: The specified password is incorrect.");
-                }
+        )
+        .and_then(|report| {
+            place_staged_with_rename(&staging, output_dir, Path::new("")).map_err(|err| {
                 log_cb(1, &err);
-            }
-            return Err(err);
-        }
-
-        if let Some(mode) = e.unix_mode() {
-            apply_unix_executable_mode(&dest_file, mode);
-        }
-        set_file_mtime(&dest_file, e.mtime, e.nanos);
-        summary.files += 1;
-        summary.bytes += e.size;
-    }
-
-    Ok(summary)
-}
-
-struct Sha1State {
-    state: [u32; 5],
-    buf: [u8; 64],
-    buf_len: usize,
-    total_len: u64,
-}
-
-impl Sha1State {
-    fn new() -> Self {
-        Self {
-            state: [
-                0x6745_2301,
-                0xefcd_ab89,
-                0x98ba_dcfe,
-                0x1032_5476,
-                0xc3d2_e1f0,
-            ],
-            buf: [0u8; 64],
-            buf_len: 0,
-            total_len: 0,
-        }
-    }
-
-    fn compress(state: &mut [u32; 5], chunk: &[u8; 64]) {
-        let mut w = [0u32; 80];
-        for (i, word) in chunk.chunks_exact(4).enumerate() {
-            w[i] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
-        }
-        for i in 16..80 {
-            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
-        }
-        let [mut a, mut b, mut c, mut d, mut e] = *state;
-        for (i, &wi) in w.iter().enumerate() {
-            let (f, k) = match i {
-                0..=19 => ((b & c) | ((!b) & d), 0x5a82_7999u32),
-                20..=39 => (b ^ c ^ d, 0x6ed9_eba1u32),
-                40..=59 => ((b & c) | (b & d) | (c & d), 0x8f1b_bcdcu32),
-                _ => (b ^ c ^ d, 0xca62_c1d6u32),
-            };
-            let temp = a
-                .rotate_left(5)
-                .wrapping_add(f)
-                .wrapping_add(e)
-                .wrapping_add(k)
-                .wrapping_add(wi);
-            e = d;
-            d = c;
-            c = b.rotate_left(30);
-            b = a;
-            a = temp;
-        }
-        state[0] = state[0].wrapping_add(a);
-        state[1] = state[1].wrapping_add(b);
-        state[2] = state[2].wrapping_add(c);
-        state[3] = state[3].wrapping_add(d);
-        state[4] = state[4].wrapping_add(e);
-    }
-
-    fn update(&mut self, mut data: &[u8]) {
-        self.total_len += data.len() as u64;
-        if self.buf_len > 0 {
-            let take = (64 - self.buf_len).min(data.len());
-            self.buf[self.buf_len..self.buf_len + take].copy_from_slice(&data[..take]);
-            self.buf_len += take;
-            data = &data[take..];
-            if self.buf_len == 64 {
-                Self::compress(&mut self.state, &self.buf);
-                self.buf_len = 0;
-            }
-        }
-        while data.len() >= 64 {
-            let (blk, rest) = data.split_at(64);
-            let block: &[u8; 64] = blk.try_into().unwrap();
-            Self::compress(&mut self.state, block);
-            data = rest;
-        }
-        if !data.is_empty() {
-            self.buf[..data.len()].copy_from_slice(data);
-            self.buf_len = data.len();
-        }
-    }
-
-    fn finalize(mut self) -> [u8; 20] {
-        let bit_len = self.total_len.wrapping_mul(8);
-        self.buf[self.buf_len] = 0x80;
-        self.buf_len += 1;
-        if self.buf_len > 56 {
-            self.buf[self.buf_len..64].fill(0);
-            Self::compress(&mut self.state, &self.buf);
-            self.buf_len = 0;
-        }
-        self.buf[self.buf_len..56].fill(0);
-        self.buf[56..64].copy_from_slice(&bit_len.to_be_bytes());
-        Self::compress(&mut self.state, &self.buf);
-        let mut out = [0u8; 20];
-        for (i, &w) in self.state.iter().enumerate() {
-            out[i * 4..i * 4 + 4].copy_from_slice(&w.to_be_bytes());
-        }
-        out
-    }
-}
-
-struct HmacSha1State {
-    inner: Sha1State,
-    opad: [u8; 64],
-}
-
-impl HmacSha1State {
-    fn new(key: &[u8]) -> Self {
-        let mut k = [0u8; 64];
-        if key.len() > 64 {
-            let mut s = Sha1State::new();
-            s.update(key);
-            k[..20].copy_from_slice(&s.finalize());
-        } else {
-            k[..key.len()].copy_from_slice(key);
-        }
-        let mut ipad = [0x36u8; 64];
-        let mut opad = [0x5cu8; 64];
-        for i in 0..64 {
-            ipad[i] ^= k[i];
-            opad[i] ^= k[i];
-        }
-        let mut inner = Sha1State::new();
-        inner.update(&ipad);
-        Self { inner, opad }
-    }
-
-    fn update(&mut self, data: &[u8]) {
-        self.inner.update(data);
-    }
-
-    fn finalize(self) -> [u8; 20] {
-        let inner_digest = self.inner.finalize();
-        let mut outer = Sha1State::new();
-        outer.update(&self.opad);
-        outer.update(&inner_digest);
-        outer.finalize()
-    }
-}
-
-enum ZipCipherState {
-    Plain,
-    ZipCrypto {
-        keys: [u32; 3],
-    },
-    WinZipAes {
-        aes: zipfast::crypto::AesKey,
-        hmac: HmacSha1State,
-        counter: [u8; 16],
-        ks: [u8; 16],
-        ks_pos: usize,
-    },
-}
-
-#[inline]
-fn zipcrypto_crc_byte(crc: u32, b: u8) -> u32 {
-    let mut c = (crc ^ u32::from(b)) & 0xff;
-    for _ in 0..8 {
-        c = if c & 1 != 0 {
-            (c >> 1) ^ 0xedb8_8320
-        } else {
-            c >> 1
-        };
-    }
-    (crc >> 8) ^ c
-}
-
-#[inline]
-fn zipcrypto_update(keys: &mut [u32; 3], b: u8) {
-    keys[0] = zipcrypto_crc_byte(keys[0], b);
-    keys[1] = keys[1]
-        .wrapping_add(keys[0] & 0xff)
-        .wrapping_mul(134_775_813)
-        .wrapping_add(1);
-    keys[2] = zipcrypto_crc_byte(keys[2], (keys[1] >> 24) as u8);
-}
-
-#[inline]
-fn zipcrypto_step(keys: &mut [u32; 3], cipher: u8) -> u8 {
-    let t = keys[2] | 2;
-    let plain = cipher ^ (t.wrapping_mul(t ^ 1) >> 8) as u8;
-    zipcrypto_update(keys, plain);
-    plain
-}
-
-struct ZipPayloadReader<'a, 'b> {
-    file: &'a mut std::fs::File,
-    rem: u64,
-    cipher: ZipCipherState,
-    cancel_cell: &'a std::cell::RefCell<&'b mut dyn FnMut() -> bool>,
-}
-
-impl Read for ZipPayloadReader<'_, '_> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if (self.cancel_cell.borrow_mut())() {
-            return Err(std::io::Error::other("Aborted"));
-        }
-        if self.rem == 0 || buf.is_empty() {
-            return Ok(0);
-        }
-        let max_n = (self.rem.min(buf.len() as u64)) as usize;
-        let n = self.file.read(&mut buf[..max_n])?;
-        if n == 0 {
-            return Ok(0);
-        }
-        self.rem -= n as u64;
-        match &mut self.cipher {
-            ZipCipherState::Plain => {}
-            ZipCipherState::ZipCrypto { keys } => {
-                for b in &mut buf[..n] {
-                    *b = zipcrypto_step(keys, *b);
-                }
-            }
-            ZipCipherState::WinZipAes {
-                aes,
-                hmac,
-                counter,
-                ks,
-                ks_pos,
-            } => {
-                hmac.update(&buf[..n]);
-                for b in &mut buf[..n] {
-                    if *ks_pos >= 16 {
-                        for cb in counter.iter_mut() {
-                            *cb = cb.wrapping_add(1);
-                            if *cb != 0 {
-                                break;
-                            }
-                        }
-                        *ks = aes.encrypt_block(counter);
-                        *ks_pos = 0;
-                    }
-                    *b ^= ks[*ks_pos];
-                    *ks_pos += 1;
-                }
-            }
-        }
-        Ok(n)
-    }
-}
-
-fn xz_crc64_update(mut crc: u64, data: &[u8]) -> u64 {
-    for &b in data {
-        let mut c = (crc ^ u64::from(b)) & 0xff;
-        for _ in 0..8 {
-            c = if c & 1 != 0 {
-                (c >> 1) ^ 0xc96c_5795_d787_0f42
-            } else {
-                c >> 1
-            };
-        }
-        crc = (crc >> 8) ^ c;
-    }
-    crc
-}
-
-enum XzBlockCheck {
-    None,
-    Crc32(zipfast::crc32::Hasher),
-    Crc64(u64),
-    Sha256(Sha256State),
-    Other,
-}
-
-impl XzBlockCheck {
-    fn new(check_id: u8) -> Self {
-        match check_id {
-            0x00 => Self::None,
-            0x01 => Self::Crc32(zipfast::crc32::Hasher::new()),
-            0x04 => Self::Crc64(u64::MAX),
-            0x0a => Self::Sha256(Sha256State::new()),
-            _ => Self::Other,
-        }
-    }
-
-    fn update(&mut self, data: &[u8]) {
-        match self {
-            Self::None | Self::Other => {}
-            Self::Crc32(h) => h.update(data),
-            Self::Crc64(c) => *c = xz_crc64_update(*c, data),
-            Self::Sha256(s) => s.update(data),
-        }
-    }
-
-    fn verify(self, expected: &[u8]) -> bool {
-        match self {
-            Self::None | Self::Other => true,
-            Self::Crc32(h) => expected.len() == 4 && h.finalize().to_le_bytes() == expected,
-            Self::Crc64(c) => expected.len() == 8 && (!c).to_le_bytes() == expected,
-            Self::Sha256(s) => expected.len() == 32 && s.finalize() == expected,
-        }
-    }
-}
-
-fn xz_read_vint<R: Read>(r: &mut R) -> Result<(u64, usize), String> {
-    let mut val = 0u64;
-    for i in 0..9usize {
-        let mut b = [0u8; 1];
-        r.read_exact(&mut b)
-            .map_err(|e| format!("corrupt xz vint: {e}"))?;
-        val |= u64::from(b[0] & 0x7f) << (i * 7);
-        if b[0] & 0x80 == 0 {
-            return Ok((val, i + 1));
-        }
-    }
-    Err("xz vint overflow".to_string())
-}
-
-fn decode_xz_stream_from_reader<R: Read>(
-    reader: &mut R,
-    emit: &mut dyn FnMut(&[u8]) -> Result<(), String>,
-) -> Result<(), String> {
-    let mut saw_stream = false;
-    loop {
-        let mut first = [0u8; 1];
-        let mut zeros = 0usize;
-        let has_more = loop {
-            match reader.read(&mut first) {
-                Ok(0) => break false,
-                Ok(_) if first[0] == 0 => {
-                    zeros += 1;
-                }
-                Ok(_) => break true,
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(format!("xz read error: {e}")),
-            }
-        };
-        if !zeros.is_multiple_of(4) {
-            return Err("corrupt xz stream padding".to_string());
-        }
-        if !has_more {
-            if !saw_stream {
-                return Err("empty xz stream".to_string());
-            }
-            return Ok(());
-        }
-        saw_stream = true;
-        let mut hdr = [0u8; 12];
-        hdr[0] = first[0];
-        reader
-            .read_exact(&mut hdr[1..])
-            .map_err(|e| format!("truncated xz stream header: {e}"))?;
-        if &hdr[..6] != b"\xfd7zXZ\x00" {
-            return Err("invalid xz stream magic".to_string());
-        }
-        let stream_flags = [hdr[6], hdr[7]];
-        if stream_flags[0] != 0 || (stream_flags[1] & 0xf0) != 0 {
-            return Err("unsupported xz stream flags".to_string());
-        }
-        if crc32(&stream_flags) != le32(&hdr, 8).unwrap_or(0) {
-            return Err("corrupt xz stream header CRC32".to_string());
-        }
-        let check_id = stream_flags[1] & 0x0f;
-        let check_size = match check_id {
-            0 => 0usize,
-            1..=3 => 4,
-            4..=6 => 8,
-            7..=9 => 16,
-            10..=12 => 32,
-            _ => 64,
-        };
-
-        let mut blocks_meta: Vec<(u64, u64)> = Vec::new();
-        loop {
-            let mut blk_ind = [0u8; 1];
-            reader
-                .read_exact(&mut blk_ind)
-                .map_err(|e| format!("truncated xz block header: {e}"))?;
-            if blk_ind[0] == 0 {
-                break;
-            }
-            let hdr_size = (usize::from(blk_ind[0]) + 1) * 4;
-            let mut blk_hdr = vec![0u8; hdr_size];
-            blk_hdr[0] = blk_ind[0];
-            reader
-                .read_exact(&mut blk_hdr[1..])
-                .map_err(|e| format!("truncated xz block header body: {e}"))?;
-            if crc32(&blk_hdr[..hdr_size - 4]) != le32(&blk_hdr, hdr_size - 4).unwrap_or(0) {
-                return Err("corrupt xz block header CRC32".to_string());
-            }
-            let blk_flags = blk_hdr[1];
-            if (blk_flags & 0x3c) != 0 {
-                return Err("unsupported xz block flags".to_string());
-            }
-            let num_filters = usize::from(blk_flags & 0x03) + 1;
-            let mut cursor = std::io::Cursor::new(&blk_hdr[2..hdr_size - 4]);
-            let expected_comp = if (blk_flags & 0x40) != 0 {
-                Some(xz_read_vint(&mut cursor)?.0)
-            } else {
-                None
-            };
-            let expected_uncomp = if (blk_flags & 0x80) != 0 {
-                Some(xz_read_vint(&mut cursor)?.0)
-            } else {
-                None
-            };
-            let mut dict_cap = 8usize << 20;
-            let mut filters = Vec::with_capacity(num_filters);
-            for i in 0..num_filters {
-                let (fid, _) = xz_read_vint(&mut cursor)?;
-                let (psz, _) = xz_read_vint(&mut cursor)?;
-                let rem_hdr = (hdr_size - 6).saturating_sub(cursor.position() as usize);
-                if psz > rem_hdr as u64 {
-                    return Err("truncated xz filter properties".to_string());
-                }
-                let mut fprops = vec![0u8; psz as usize];
-                cursor
-                    .read_exact(&mut fprops)
-                    .map_err(|_| "truncated xz filter properties".to_string())?;
-                if i + 1 == num_filters {
-                    if fid != 0x21 || fprops.len() != 1 {
-                        return Err(format!("unsupported xz last filter {fid:#x}"));
-                    }
-                    let bits = fprops[0] & 0x3f;
-                    if bits > 40 {
-                        return Err("invalid xz LZMA2 dictionary bits".to_string());
-                    }
-                    let d = if bits == 40 {
-                        usize::try_from(u32::MAX).unwrap_or(usize::MAX)
-                    } else {
-                        let base = 2usize | (usize::from(bits) & 1);
-                        base.checked_shl(u32::from(bits / 2 + 11))
-                            .unwrap_or(usize::MAX)
-                    };
-                    dict_cap = d.max(64 * 1024);
-                } else {
-                    filters.push((fid, fprops));
-                }
-            }
-            let pos = cursor.position() as usize;
-            if blk_hdr[2 + pos..hdr_size - 4].iter().any(|&b| b != 0) {
-                return Err("non-zero xz block header padding".to_string());
-            }
-
-            let mut blk_check = XzBlockCheck::new(check_id);
-            let mut blk_unpacked = 0u64;
-            let comp_bytes = if filters.is_empty() {
-                lzma::lzma2_from_reader(reader, dict_cap, &mut |chunk| {
-                    blk_check.update(chunk);
-                    blk_unpacked += chunk.len() as u64;
-                    emit(chunk)
-                })?
-            } else {
-                let mut stream_filters = Vec::with_capacity(filters.len());
-                for (fid, fprops) in filters.iter().rev() {
-                    let filter = match *fid {
-                        0x03 => {
-                            let dist = fprops.first().map_or(1, |&d| usize::from(d) + 1);
-                            bcj::Filter::Delta { dist }
-                        }
-                        0x04 => bcj::Filter::Bcj {
-                            arch: bcj::Arch::X86,
-                            start: sz_bcj_start(fprops)?,
-                        },
-                        0x05 => bcj::Filter::Bcj {
-                            arch: bcj::Arch::PowerPc,
-                            start: sz_bcj_start(fprops)?,
-                        },
-                        0x06 => bcj::Filter::Bcj {
-                            arch: bcj::Arch::Ia64,
-                            start: sz_bcj_start(fprops)?,
-                        },
-                        0x07 => bcj::Filter::Bcj {
-                            arch: bcj::Arch::Arm,
-                            start: sz_bcj_start(fprops)?,
-                        },
-                        0x08 => bcj::Filter::Bcj {
-                            arch: bcj::Arch::ArmThumb,
-                            start: sz_bcj_start(fprops)?,
-                        },
-                        0x09 => bcj::Filter::Bcj {
-                            arch: bcj::Arch::Sparc,
-                            start: sz_bcj_start(fprops)?,
-                        },
-                        0x0a => bcj::Filter::Bcj {
-                            arch: bcj::Arch::Arm64,
-                            start: sz_bcj_start(fprops)?,
-                        },
-                        other => return Err(format!("unsupported xz filter {other:#x}")),
-                    };
-                    stream_filters.push(bcj::StreamFilter::new(filter));
-                }
-                let mut stage_a = Vec::new();
-                let mut stage_b = Vec::new();
-                let cb = lzma::lzma2_from_reader(reader, dict_cap, &mut |chunk| {
-                    stage_a.clear();
-                    stage_a.extend_from_slice(chunk);
-                    for sf in &mut stream_filters {
-                        stage_b.clear();
-                        sf.push(&stage_a, &mut stage_b);
-                        std::mem::swap(&mut stage_a, &mut stage_b);
-                    }
-                    if !stage_a.is_empty() {
-                        blk_check.update(&stage_a);
-                        blk_unpacked += stage_a.len() as u64;
-                        emit(&stage_a)?;
-                    }
-                    Ok(())
-                })?;
-                stage_a.clear();
-                for sf in &mut stream_filters {
-                    stage_b.clear();
-                    if !stage_a.is_empty() {
-                        sf.push(&stage_a, &mut stage_b);
-                    }
-                    sf.finish(&mut stage_b);
-                    std::mem::swap(&mut stage_a, &mut stage_b);
-                }
-                if !stage_a.is_empty() {
-                    blk_check.update(&stage_a);
-                    blk_unpacked += stage_a.len() as u64;
-                    emit(&stage_a)?;
-                }
-                cb
-            };
-
-            if let Some(exp_c) = expected_comp {
-                if comp_bytes != exp_c {
-                    return Err("xz block compressed size mismatch".to_string());
-                }
-            }
-            if let Some(exp_u) = expected_uncomp {
-                if blk_unpacked != exp_u {
-                    return Err("xz block uncompressed size mismatch".to_string());
-                }
-            }
-
-            let pad_len = ((4 - (comp_bytes % 4)) % 4) as usize;
-            let mut pad_and_check = vec![0u8; pad_len + check_size];
-            reader
-                .read_exact(&mut pad_and_check)
-                .map_err(|e| format!("truncated xz block trailer: {e}"))?;
-            if pad_and_check[..pad_len].iter().any(|&b| b != 0) {
-                return Err("non-zero xz block data padding".to_string());
-            }
-            if !blk_check.verify(&pad_and_check[pad_len..]) {
-                return Err("corrupt xz block data check".to_string());
-            }
-            let unpadded = (hdr_size as u64) + comp_bytes + (check_size as u64);
-            blocks_meta.push((unpadded, blk_unpacked));
-        }
-
-        // Parse XZ Index (indicator byte 0x00 was already read)
-        let mut idx_bytes = vec![0u8];
-        let (num_records, _) = {
-            let mut tap = XzTapReader {
-                inner: reader,
-                recorded: &mut idx_bytes,
-            };
-            xz_read_vint(&mut tap)?
-        };
-        if num_records != blocks_meta.len() as u64 {
-            return Err("xz index record count mismatch".to_string());
-        }
-        for &(exp_unpadded, exp_unpacked) in &blocks_meta {
-            let mut tap = XzTapReader {
-                inner: reader,
-                recorded: &mut idx_bytes,
-            };
-            let (rec_unpadded, _) = xz_read_vint(&mut tap)?;
-            let (rec_unpacked, _) = xz_read_vint(&mut tap)?;
-            if rec_unpadded != exp_unpadded || rec_unpacked != exp_unpacked {
-                return Err("xz index record size mismatch".to_string());
-            }
-        }
-        let idx_pad = (4 - (idx_bytes.len() % 4)) % 4;
-        if idx_pad > 0 {
-            let prev = idx_bytes.len();
-            idx_bytes.resize(prev + idx_pad, 0);
-            reader
-                .read_exact(&mut idx_bytes[prev..])
-                .map_err(|e| format!("truncated xz index padding: {e}"))?;
-            if idx_bytes[prev..].iter().any(|&b| b != 0) {
-                return Err("non-zero xz index padding".to_string());
-            }
-        }
-        let mut idx_crc = [0u8; 4];
-        reader
-            .read_exact(&mut idx_crc)
-            .map_err(|e| format!("truncated xz index crc: {e}"))?;
-        if crc32(&idx_bytes) != u32::from_le_bytes(idx_crc) {
-            return Err("corrupt xz index CRC32".to_string());
-        }
-
-        let mut footer = [0u8; 12];
-        reader
-            .read_exact(&mut footer)
-            .map_err(|e| format!("truncated xz stream footer: {e}"))?;
-        if &footer[10..12] != b"YZ" || footer[8..10] != stream_flags {
-            return Err("corrupt xz stream footer".to_string());
-        }
-        if crc32(&footer[4..10]) != le32(&footer, 0).unwrap_or(0) {
-            return Err("corrupt xz stream footer CRC32".to_string());
-        }
-        let backward_size = ((le32(&footer, 4).unwrap_or(0) as usize) + 1) * 4;
-        if backward_size != idx_bytes.len() + 4 {
-            return Err("corrupt xz backward size".to_string());
-        }
-    }
-}
-
-struct XzTapReader<'a, R> {
-    inner: &'a mut R,
-    recorded: &'a mut Vec<u8>,
-}
-
-impl<R: Read> Read for XzTapReader<'_, R> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let n = self.inner.read(buf)?;
-        self.recorded.extend_from_slice(&buf[..n]);
-        Ok(n)
-    }
-}
-
-fn extract_single_zip_entry(
-    file: &mut std::fs::File,
-    file_len: u64,
-    e: &zipfast::zip::ZipEntry,
-    password: &str,
-    buf: &mut [u8],
-    dest_file: &mut std::fs::File,
-    is_cancelled: &mut dyn FnMut() -> bool,
-) -> Result<(), String> {
-    use flate2::{Decompress, FlushDecompress, Status};
-
-    if e.local_at.checked_add(30).is_none_or(|end| end > file_len) {
-        return Err(format!("{}: truncated local header", e.name));
-    }
-    file.seek(SeekFrom::Start(e.local_at))
-        .map_err(|err| err.to_string())?;
-    let mut local_head = [0u8; 30];
-    file.read_exact(&mut local_head)
-        .map_err(|err| err.to_string())?;
-    if le32(&local_head, 0) != Some(0x0403_4b50) {
-        return Err(format!("{}: corrupt local header signature", e.name));
-    }
-    let name_len = u64::from(le16(&local_head, 26).unwrap_or(0));
-    let extra_len = u64::from(le16(&local_head, 28).unwrap_or(0));
-    let data_at = e.local_at + 30 + name_len + extra_len;
-    if data_at
-        .checked_add(e.packed)
-        .is_none_or(|end| end > file_len)
-    {
-        return Err(format!("{}: truncated entry data", e.name));
-    }
-    file.seek(SeekFrom::Start(data_at))
-        .map_err(|err| err.to_string())?;
-
-    let mut skip_crc = false;
-    let mut trailing_auth = 0usize;
-    let (payload_packed, cipher) = if e.encrypted() {
-        if e.method == 99 || e.aes_info.is_some() {
-            let (strength, vendor, _) = e
-                .aes_info
-                .ok_or_else(|| format!("{}: missing WinZip AES extra field", e.name))?;
-            if !(1..=3).contains(&strength) {
-                return Err(format!("{}: invalid WinZip AES strength", e.name));
-            }
-            if vendor == 2 {
-                skip_crc = true;
-            }
-            let salt_len = usize::from(strength) * 4 + 4;
-            let key_len = (usize::from(strength) + 1) * 8;
-            let overhead = (salt_len as u64) + 12;
-            if e.packed < overhead {
-                return Err(format!("{}: truncated WinZip AES entry", e.name));
-            }
-            let mut header_bytes = vec![0u8; salt_len + 2];
-            file.read_exact(&mut header_bytes)
-                .map_err(|err| err.to_string())?;
-            let salt = &header_bytes[..salt_len];
-            let verifier = &header_bytes[salt_len..salt_len + 2];
-            let derived = zipfast::crypto::aes_derive(password.as_bytes(), salt, key_len)
-                .ok_or_else(|| "Unrar: The specified password is incorrect.".to_string())?;
-            if derived.get(key_len * 2..key_len * 2 + 2) != Some(verifier) {
-                return Err("Unrar: The specified password is incorrect.".to_string());
-            }
-            let aes = zipfast::crypto::AesKey::new(&derived[..key_len])
-                .ok_or_else(|| "Unrar: The specified password is incorrect.".to_string())?;
-            let hmac = HmacSha1State::new(&derived[key_len..key_len * 2]);
-            trailing_auth = 10;
-            (
-                e.packed - overhead,
-                ZipCipherState::WinZipAes {
-                    aes,
-                    hmac,
-                    counter: [0u8; 16],
-                    ks: [0u8; 16],
-                    ks_pos: 16,
-                },
-            )
-        } else {
-            if e.packed < 12 {
-                return Err(format!("{}: truncated ZipCrypto header", e.name));
-            }
-            let mut hdr12 = [0u8; 12];
-            file.read_exact(&mut hdr12).map_err(|err| err.to_string())?;
-            let mut keys = [0x1234_5678u32, 0x2345_6789, 0x3456_7890];
-            for &b in password.as_bytes() {
-                zipcrypto_update(&mut keys, b);
-            }
-            let mut last = 0u8;
-            for &b in &hdr12 {
-                last = zipcrypto_step(&mut keys, b);
-            }
-            let check = if e.flags & 0x0008 != 0 {
-                local_head[11]
-            } else {
-                (e.crc32 >> 24) as u8
-            };
-            if last != check {
-                return Err("Unrar: The specified password is incorrect.".to_string());
-            }
-            (e.packed - 12, ZipCipherState::ZipCrypto { keys })
-        }
+                err
+            })?;
+            Ok(report)
+        });
+        let _ = std::fs::remove_dir_all(&staging);
+        res?
     } else {
-        (e.packed, ZipCipherState::Plain)
-    };
-
-    let cancel_cell = std::cell::RefCell::new(is_cancelled);
-    let check_cancelled = || -> bool { (cancel_cell.borrow_mut())() };
-    let map_cancel_err = |err: String| -> String {
-        if check_cancelled() || err.contains("Aborted") {
-            "Aborted".to_string()
+        let overwrite = if overwrite_mode == 0 {
+            zipfast::extract::Overwrite::Skip
         } else {
-            err
-        }
+            zipfast::extract::Overwrite::Always
+        };
+        run_zipfast_zip(
+            archive_path,
+            output_dir,
+            password,
+            overwrite,
+            log_cb,
+            is_cancelled,
+        )?
     };
 
-    let mut reader = ZipPayloadReader {
-        file,
-        rem: payload_packed,
-        cipher,
-        cancel_cell: &cancel_cell,
-    };
-
-    let mut crc = zipfast::crc32::Hasher::new();
-    let mut written = 0u64;
-    let mut emit = |chunk: &[u8]| -> Result<(), String> {
-        for sub in chunk.chunks(64 * 1024) {
-            if check_cancelled() {
-                return Err("Aborted".to_string());
-            }
-            written += sub.len() as u64;
-            if written > e.size {
-                return Err(format!("{}: more data than directory size", e.name));
-            }
-            crc.update(sub);
-            dest_file.write_all(sub).map_err(|err| err.to_string())?;
-        }
-        Ok(())
-    };
-
-    let method = e.effective_method();
-    let decode_res: Result<(), String> = (|| {
-        match method {
-            0 => {
-                if payload_packed != e.size {
-                    return Err(format!("{}: stored entry size mismatch", e.name));
-                }
-                while reader.rem > 0 {
-                    if check_cancelled() {
-                        return Err("Aborted".to_string());
-                    }
-                    let n = (reader.rem.min(buf.len() as u64)) as usize;
-                    reader
-                        .read_exact(&mut buf[..n])
-                        .map_err(|err| err.to_string())?;
-                    emit(&buf[..n])?;
-                }
-            }
-            8 => {
-                let mut z = Decompress::new(false);
-                let mut out = vec![0u8; 256 * 1024];
-                let mut done = false;
-                while !done {
-                    if check_cancelled() {
-                        return Err("Aborted".to_string());
-                    }
-                    let n = (reader.rem.min(buf.len() as u64)) as usize;
-                    if n > 0 {
-                        reader
-                            .read_exact(&mut buf[..n])
-                            .map_err(|err| err.to_string())?;
-                    }
-                    let mut input = &buf[..n];
-                    loop {
-                        if check_cancelled() {
-                            return Err("Aborted".to_string());
-                        }
-                        let (before_in, before_out) = (z.total_in(), z.total_out());
-                        let status = z
-                            .decompress(input, &mut out, FlushDecompress::None)
-                            .map_err(|_| format!("{}: corrupt deflate data", e.name))?;
-                        let used = (z.total_in() - before_in) as usize;
-                        let made = (z.total_out() - before_out) as usize;
-                        input = &input[used..];
-                        emit(&out[..made])?;
-                        if status == Status::StreamEnd {
-                            done = true;
-                            break;
-                        }
-                        if made == out.len() {
-                            continue;
-                        }
-                        if input.is_empty() {
-                            if reader.rem == 0 {
-                                return Err(format!("{}: deflate stream ended early", e.name));
-                            }
-                            break;
-                        }
-                        if used == 0 && made == 0 {
-                            return Err(format!("{}: corrupt deflate data", e.name));
-                        }
-                    }
-                }
-            }
-            12 => {
-                let packed = std::io::BufReader::with_capacity(256 * 1024, &mut reader);
-                let mut dec = bzip2::bufread::MultiBzDecoder::new(packed);
-                loop {
-                    if check_cancelled() {
-                        return Err("Aborted".to_string());
-                    }
-                    let n = dec
-                        .read(buf)
-                        .map_err(|err| format!("{}: corrupt bzip2 data: {err}", e.name))?;
-                    if n == 0 {
-                        break;
-                    }
-                    emit(&buf[..n])?;
-                }
-            }
-            93 => {
-                let packed = std::io::BufReader::with_capacity(256 * 1024, &mut reader);
-                let mut dec = zstd::stream::read::Decoder::with_buffer(packed)
-                    .map_err(|err| format!("{}: {err}", e.name))?;
-                loop {
-                    if check_cancelled() {
-                        return Err("Aborted".to_string());
-                    }
-                    let n = dec
-                        .read(buf)
-                        .map_err(|err| format!("{}: corrupt zstd data: {err}", e.name))?;
-                    if n == 0 {
-                        break;
-                    }
-                    emit(&buf[..n])?;
-                }
-            }
-            14 => {
-                let mut head = [0u8; 4];
-                reader
-                    .read_exact(&mut head)
-                    .map_err(|err| err.to_string())?;
-                let props_len = u16::from_le_bytes([head[2], head[3]]) as usize;
-                if props_len != 5 {
-                    return Err(format!("{}: corrupt LZMA properties", e.name));
-                }
-                let mut props = [0u8; 5];
-                reader
-                    .read_exact(&mut props)
-                    .map_err(|err| err.to_string())?;
-                let lzma_props = lzma::Props::from_byte(props[0])
-                    .ok_or_else(|| format!("{}: corrupt LZMA properties", e.name))?;
-                let dict_size =
-                    u32::from_le_bytes([props[1], props[2], props[3], props[4]]) as usize;
-                let size_opt = if e.flags & 0x0002 != 0 {
-                    None
-                } else {
-                    Some(e.size)
-                };
-                let mut packed = std::io::BufReader::with_capacity(256 * 1024, &mut reader);
-                lzma::lzma_from_reader(&mut packed, lzma_props, dict_size, size_opt, &mut emit)
-                    .map_err(|err| format!("{}: {err}", e.name))?;
-            }
-            95 => {
-                let mut packed = std::io::BufReader::with_capacity(256 * 1024, &mut reader);
-                decode_xz_stream_from_reader(&mut packed, &mut emit)
-                    .map_err(|err| format!("{}: {err}", e.name))?;
-            }
-            other => return Err(format!("{}: unsupported method {other}", e.name)),
-        }
-        Ok(())
-    })();
-    decode_res.map_err(map_cancel_err)?;
-
-    while reader.rem > 0 {
-        let n = (reader.rem.min(buf.len() as u64)) as usize;
-        reader
-            .read_exact(&mut buf[..n])
-            .map_err(|err| map_cancel_err(err.to_string()))?;
-    }
-
-    if trailing_auth > 0 {
-        let mut auth = [0u8; 10];
-        reader
-            .file
-            .read_exact(&mut auth[..trailing_auth])
-            .map_err(|err| err.to_string())?;
-        if let ZipCipherState::WinZipAes { hmac, .. } = reader.cipher {
-            let digest = hmac.finalize();
-            if digest[..10] != auth {
-                return Err(format!("Unrar: {} - CRC failed", e.name));
-            }
-        }
-    }
-
-    if written != e.size {
-        return Err(format!("{}: incomplete entry output", e.name));
-    }
-    if !skip_crc && crc.finalize() != e.crc32 {
-        return Err(format!("Unrar: {} - CRC failed", e.name));
-    }
-    Ok(())
+    let mut summary = zipfast::extract::Summary::default();
+    summary.files = report.files();
+    summary.dirs = report.dirs();
+    summary.bytes = u64::try_from(report.decoded_bytes()).unwrap_or(u64::MAX);
+    summary.skipped = report.skipped();
+    summary.matched = report.matched();
+    summary.volumes = 1;
+    Ok(summary)
 }
 
 fn tar_octal(field: &[u8]) -> Option<u64> {
@@ -5339,9 +4573,13 @@ mod tests {
         let derived = zipfast::crypto::aes_derive(password.as_bytes(), &salt, key_len).unwrap();
         let verifier = &derived[key_len * 2..key_len * 2 + 2];
         let ct = zipfast::crypto::decrypt_winzip_ctr(&derived[..key_len], plain).unwrap();
-        let mut hmac = HmacSha1State::new(&derived[key_len..key_len * 2]);
-        hmac.update(&ct);
-        let auth = hmac.finalize();
+        let auth = {
+            let key = openssl::pkey::PKey::hmac(&derived[key_len..key_len * 2]).unwrap();
+            let mut signer =
+                openssl::sign::Signer::new(openssl::hash::MessageDigest::sha1(), &key).unwrap();
+            signer.update(&ct).unwrap();
+            signer.sign_to_vec().unwrap()
+        };
 
         let mut aes_payload = Vec::new();
         aes_payload.extend_from_slice(&salt);
@@ -5412,6 +4650,26 @@ mod tests {
         assert!(err.contains("CRC failed"), "unexpected error: {err}");
 
         // 2. Build a ZipCrypto (method 0 stored) ZIP entry
+        // ZipCrypto key schedule (APPNOTE 6.1.5), here only to build the fixture.
+        fn zipcrypto_update(keys: &mut [u32; 3], b: u8) {
+            let crc_byte = |crc: u32, b: u8| {
+                let mut c = (crc ^ u32::from(b)) & 0xff;
+                for _ in 0..8 {
+                    c = if c & 1 != 0 {
+                        (c >> 1) ^ 0xEDB8_8320
+                    } else {
+                        c >> 1
+                    };
+                }
+                c ^ (crc >> 8)
+            };
+            keys[0] = crc_byte(keys[0], b);
+            keys[1] = keys[1]
+                .wrapping_add(keys[0] & 0xff)
+                .wrapping_mul(134_775_813)
+                .wrapping_add(1);
+            keys[2] = crc_byte(keys[2], (keys[1] >> 24) as u8);
+        }
         let mut keys = [0x1234_5678u32, 0x2345_6789, 0x3456_7890];
         for &b in password.as_bytes() {
             zipcrypto_update(&mut keys, b);
@@ -5451,6 +4709,69 @@ mod tests {
     }
 
     #[test]
+    fn test_zip_overwrite_modes_skip_always_rename() {
+        let dir = TempTestDir::new("zip_modes");
+        let zip_path = dir.path().join("modes.zip");
+        let out = dir.path().join("out");
+        let payload = b"fresh payload";
+        std::fs::write(
+            &zip_path,
+            build_single_entry_zip(
+                b"a.txt",
+                0,
+                0,
+                crc32(payload),
+                payload.len() as u32,
+                &[],
+                payload,
+            ),
+        )
+        .unwrap();
+        std::fs::create_dir_all(&out).unwrap();
+        let run = |mode: i32| {
+            let mut logs = Vec::new();
+            let summary = extract_zip_cancellable(
+                &zip_path,
+                &out,
+                "",
+                mode,
+                &mut |_, m| logs.push(m.to_string()),
+                &mut || false,
+            )
+            .unwrap();
+            (summary, logs)
+        };
+
+        std::fs::write(out.join("a.txt"), b"old").unwrap();
+        let (skip, _) = run(0);
+        assert_eq!((skip.files, skip.skipped), (0, 1));
+        assert_eq!(std::fs::read(out.join("a.txt")).unwrap(), b"old");
+
+        let (always, logs) = run(1);
+        assert_eq!(always.files, 1);
+        assert_eq!(std::fs::read(out.join("a.txt")).unwrap(), payload);
+        assert!(
+            logs.iter().any(|m| m == "Unrar: Extracting  a.txt"),
+            "{logs:?}"
+        );
+
+        let (renamed, _) = run(2);
+        assert_eq!(renamed.files, 1);
+        assert_eq!(std::fs::read(out.join("a.txt")).unwrap(), payload);
+        assert_eq!(std::fs::read(out.join("a_1.txt")).unwrap(), payload);
+        let leftovers: Vec<_> = std::fs::read_dir(&out)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(".rustyget-zip-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "staging folder left behind: {leftovers:?}"
+        );
+    }
+
+    #[test]
     fn test_zip_method_95_xz_extraction() {
         let plain = b"ZIP method 95 XZ stream payload test!";
         let plain_crc = crc32(plain);
@@ -5480,7 +4801,18 @@ mod tests {
         xz.resize(xz.len() + pad_len, 0);
 
         // Block check (CRC64/XZ)
-        let crc64 = !xz_crc64_update(u64::MAX, plain);
+        // CRC-64/XZ, here only to build the fixture.
+        let crc64 = !plain.iter().fold(u64::MAX, |mut crc, &b| {
+            crc ^= u64::from(b);
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 {
+                    (crc >> 1) ^ 0xC96C_5795_D787_0F42
+                } else {
+                    crc >> 1
+                };
+            }
+            crc
+        });
         xz.extend_from_slice(&crc64.to_le_bytes());
 
         // Index: indicator=0x00, num_records=1, unpadded_size=12+comp_bytes+8, unpacked_size=plain.len()
@@ -5533,12 +4865,25 @@ mod tests {
         let bad_blk_crc = crc32(&bad_blk_hdr);
         bad_blk_hdr.extend_from_slice(&bad_blk_crc.to_le_bytes());
         bad_xz.extend_from_slice(&bad_blk_hdr);
-        let mut bad_cursor = std::io::Cursor::new(&bad_xz);
-        let err = decode_xz_stream_from_reader(&mut bad_cursor, &mut |_| Ok(())).unwrap_err();
-        assert!(
-            err.contains("truncated xz filter properties"),
-            "unexpected: {err}"
+        let bad_zip = build_single_entry_zip(
+            b"bad.xz.txt",
+            0,
+            95,
+            plain_crc,
+            plain.len() as u32,
+            &[],
+            &bad_xz,
         );
+        let bad_zip_path = dir.path().join("xz95_bad.zip");
+        std::fs::write(&bad_zip_path, &bad_zip).unwrap();
+        let bad_out = dir.path().join("out_xz95_bad");
+        let err =
+            extract_zip_cancellable(&bad_zip_path, &bad_out, "", 0, &mut |_, _| {}, &mut || {
+                false
+            })
+            .unwrap_err();
+        assert!(err.contains("bad.xz.txt"), "unexpected: {err}");
+        assert!(!bad_out.join("bad.xz.txt").exists());
     }
 
     #[test]

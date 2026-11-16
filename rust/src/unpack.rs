@@ -3372,7 +3372,7 @@ mod tests {
             .is_err());
             assert!(!rar5_cancel_out.join("testfile5.dat").exists());
         }
-        // Mid-entry ZIP cancellation removes partial output file
+        // ZIP cancellation once the zipfast run has started leaves no output file
         let big_zip_path = work_dir.join("big_cancel.zip");
         let big_zip_out = work_dir.join("big_cancel_out");
         let big_payload = vec![0x42u8; 512 * 1024];
@@ -3381,21 +3381,24 @@ mod tests {
             build_test_zip(&[("big.bin", &big_payload, Some(0o100644), 0, None)]),
         )
         .unwrap();
-        let mut zip_checks = 0usize;
-        let mut cancel_mid_zip = || {
-            zip_checks += 1;
-            zip_checks > 5
-        };
+        // "Extracting from" is logged just before the run starts, so the next poll is inside it.
+        let run_started = std::cell::Cell::new(false);
+        let mut cancel_mid_zip = || run_started.get();
         assert!(extract_archive_with_zipfast_cancellable(
             &big_zip_path,
             &big_zip_out,
             "",
             1,
             true,
-            |_, _| {},
+            |_, m| {
+                if m == "Unrar: Extracting from big_cancel.zip" {
+                    run_started.set(true);
+                }
+            },
             &mut cancel_mid_zip,
         )
         .is_err());
+        assert!(run_started.get());
         assert!(!big_zip_out.join("big.bin").exists());
 
         // 5. Bounded central-directory inspection matches in-memory zipview inspection

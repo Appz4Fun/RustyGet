@@ -466,8 +466,9 @@ impl ActiveStreamingSession {
             return;
         }
         // Cover the whole shortfall at once: every refusal drops data. With
-        // many files downloading at once staging holds about one partial slice
-        // per file, so loans may take up to half of ParBuffer. They never take
+        // many files downloading at once staging holds the received part of
+        // one partial slice per file (par-rs charges bytes held, not whole
+        // slices), so loans may take up to half of ParBuffer. They never take
         // the last quarter, which stays free for repair slots; when the pool
         // has room for two ordinary jobs, it is at least one ordinary job's
         // start reservation, so another job's live PAR can still start (a job
@@ -2526,6 +2527,12 @@ pub fn streaming_session_forget(nzb_id: i32) {
                 sessions.remove(&nzb_id);
             }
         });
+        // Its slots and staging go with the last reference; give the freed
+        // heap back to the OS. Off this thread: callers may hold the queue lock.
+        drop(old);
+        let _ = std::thread::Builder::new()
+            .name("live-par-trim".into())
+            .spawn(crate::memory_pressure::trim_heap);
     }
     COMPLETED_LIVE_FILES
         .lock()

@@ -2825,3 +2825,20 @@ fn a_declared_set_that_hits_a_limit_is_extracted_again() {
     );
     assert_eq!(crc_of_file(&t.out().join("movie.mkv")), crc);
 }
+
+#[test]
+fn only_limits_a_declaration_inflates_trigger_the_undeclared_retry() {
+    assert!(is_declaration_limit(
+        "Limit { resource: SourceBookkeeping, limit: 100663296, attempted: 100663340 } in set.part76.rar"
+    ));
+    assert!(is_declaration_limit(
+        "Limit { resource: NameBytes, limit: 1, attempted: 2 }"
+    ));
+    assert!(!is_declaration_limit(
+        "Limit { resource: SourceBytes, limit: 1, attempted: 2 }"
+    ));
+    assert!(!is_declaration_limit(
+        "Limit { resource: TempBytes, limit: 1, attempted: 2 }"
+    ));
+    assert!(!is_declaration_limit("checksum mismatch"));
+}

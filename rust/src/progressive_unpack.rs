@@ -315,7 +315,7 @@ where
     // A complete set is declared to zipfast up front when its estimated cost fits. Should a
     // declared session still run out of one of zipfast's limits, the set is extracted again
     // undeclared (copied into place), as before declarations: never a failed unpack.
-    let complete = feed.set_is_final();
+    let mut declared = false;
     let first = extract_once(
         req,
         feed,
@@ -323,10 +323,11 @@ where
         is_cancelled,
         outputs.as_deref_mut(),
         true,
+        &mut declared,
     );
     match first {
         Err(Error::Failed(Failure::Other(ref what)))
-            if complete && DECLARE_PROTECTION && what.starts_with("Limit {") =>
+            if declared && req.overwrite == Overwrite::Always && is_declaration_limit(what) =>
         {
             log_cb(
                 3,
@@ -334,6 +335,7 @@ where
                     "Unrar: declared extraction hit a zipfast limit ({what}); extracting again without declaring"
                 ),
             );
+            let mut again = false;
             extract_once(
                 req,
                 Box::new(CompleteSet),
@@ -341,10 +343,26 @@ where
                 is_cancelled,
                 outputs,
                 false,
+                &mut again,
             )
         }
         other => other,
     }
+}
+
+/// A zipfast limit that a protection declaration inflates (and an undeclared run may not hit).
+fn is_declaration_limit(what: &str) -> bool {
+    what.starts_with("Limit {")
+        && [
+            "SourceBookkeeping",
+            "MetadataBytes",
+            "NameBytes",
+            "ProtectionPaths",
+            "ProtectionPathBytes",
+            "VolumeHandles",
+        ]
+        .iter()
+        .any(|r| what.starts_with(&format!("Limit {{ resource: {r},")))
 }
 
 fn extract_once<F>(
@@ -354,6 +372,7 @@ fn extract_once<F>(
     is_cancelled: &mut dyn FnMut() -> bool,
     mut outputs: Option<&mut Outputs>,
     declare_at_start: bool,
+    declared: &mut bool,
 ) -> Result<zipfast::extract::Summary, Error>
 where
     F: FnMut(i32, &str),
@@ -392,6 +411,7 @@ where
             }
             declared_cost.is_some()
         });
+    *declared = protected.is_some();
     // A final set's volumes are all on disk; count them when no protected
     // inventory exists (rename mode) so the handle budget still fits the set.
     let expected = if feed.set_is_final() {

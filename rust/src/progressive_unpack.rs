@@ -28,12 +28,11 @@ use zipfast::progressive::{
     VolumeAnswer, VolumeRequest, VolumeSource,
 };
 
-/// Whether sets are ever declared to zipfast as protected native files (Complete), letting it
-/// rename verified outputs into place. Off: with a Complete declaration zipfast rechecks every
-/// protected volume on each read step, and a plain 159-volume, 15.6 GiB set ran out of its
-/// SourceBookkeeping budget mid-unpack. Every output is copied into place until that cost is
-/// bounded.
-const DECLARE_PROTECTION: bool = false;
+/// Whether sets are declared to zipfast as protected native files (Complete), letting it
+/// rename verified outputs into place. zipfast before #116 rechecked every protected volume
+/// on each read step and ran large sets out of SourceBookkeeping (a 159-volume 15.6 GiB set on
+/// 6790); #116 bounds the per-step recheck. `big_final_set_unpacks` is the gate.
+const DECLARE_PROTECTION: bool = true;
 
 /// How long the driver sleeps between cancellation checks while the session is parked.
 const PARK_SLICE: Duration = Duration::from_millis(50);
@@ -313,6 +312,71 @@ fn extract_recording<F>(
 where
     F: FnMut(i32, &str),
 {
+    // A complete set is declared to zipfast up front when its estimated cost fits. Should a
+    // declared session still run out of one of zipfast's limits, the set is extracted again
+    // undeclared (copied into place), as before declarations: never a failed unpack.
+    let mut declared = false;
+    let first = extract_once(
+        req,
+        feed,
+        log_cb,
+        is_cancelled,
+        outputs.as_deref_mut(),
+        true,
+        &mut declared,
+    );
+    match first {
+        Err(Error::Failed(Failure::Other(ref what)))
+            if declared && req.overwrite == Overwrite::Always && is_declaration_limit(what) =>
+        {
+            log_cb(
+                3,
+                &format!(
+                    "Unrar: declared extraction hit a zipfast limit ({what}); extracting again without declaring"
+                ),
+            );
+            let mut again = false;
+            extract_once(
+                req,
+                Box::new(CompleteSet),
+                log_cb,
+                is_cancelled,
+                outputs,
+                false,
+                &mut again,
+            )
+        }
+        other => other,
+    }
+}
+
+/// A zipfast limit that a protection declaration inflates (and an undeclared run may not hit).
+fn is_declaration_limit(what: &str) -> bool {
+    what.starts_with("Limit {")
+        && [
+            "SourceBookkeeping",
+            "MetadataBytes",
+            "NameBytes",
+            "ProtectionPaths",
+            "ProtectionPathBytes",
+            "VolumeHandles",
+        ]
+        .iter()
+        .any(|r| what.starts_with(&format!("Limit {{ resource: {r},")))
+}
+
+fn extract_once<F>(
+    req: &Request<'_>,
+    feed: Box<dyn VolumeFeed>,
+    log_cb: &mut F,
+    is_cancelled: &mut dyn FnMut() -> bool,
+    mut outputs: Option<&mut Outputs>,
+    declare_at_start: bool,
+    declared: &mut bool,
+) -> Result<zipfast::extract::Summary, Error>
+where
+    F: FnMut(i32, &str),
+{
     let dir = req
         .first_volume
         .parent()
@@ -326,10 +390,28 @@ where
     // A set that is complete on disk is declared as protected native files, which lets the
     // session publish verified members itself. Each volume holds one handle.
     // In rename mode every output is copied into place, so each member can get a free name.
-    let protected =
-        (DECLARE_PROTECTION && feed.set_is_final() && req.overwrite != Overwrite::Rename)
-            .then(|| protect_volumes(req.first_volume))
-            .flatten();
+    // Overwrite mode only: skip mode would publish by hard link, which some destinations
+    // (exFAT, SMB) lack, and rename mode needs RustyGet's own numbering.
+    let mut declared_cost = None;
+    let protected = (DECLARE_PROTECTION
+        && declare_at_start
+        && feed.set_is_final()
+        && req.overwrite == Overwrite::Always)
+        .then(|| protect_volumes(req.first_volume))
+        .flatten()
+        .filter(|inv| {
+            declared_cost = session_declaration_cost(inv, req.first_volume, req.dest, req.password);
+            #[cfg(test)]
+            if tests::FORCE_DECLARE.with(|f| f.get()) {
+                declared_cost = Some(DeclarationCost {
+                    bookkeeping: 0,
+                    metadata: 0,
+                    names: 0,
+                });
+            }
+            declared_cost.is_some()
+        });
+    *declared = protected.is_some();
     // A final set's volumes are all on disk; count them when no protected
     // inventory exists (rename mode) so the handle budget still fits the set.
     let expected = if feed.set_is_final() {
@@ -376,6 +458,7 @@ where
             threads: None,
             protected_paths: Default::default(),
             parallel_min: None,
+            select: None,
         },
         first_name,
     );
@@ -387,6 +470,16 @@ where
         .limits
         .source_bookkeeping
         .saturating_add(PROTECTED_READ_BUDGET);
+    // A set declared at session start gets its estimated protection cost on top, so the
+    // declaration never eats the budget the extraction itself needs.
+    if let Some(cost) = declared_cost {
+        opts.limits.source_bookkeeping = opts
+            .limits
+            .source_bookkeeping
+            .saturating_add(cost.bookkeeping);
+        opts.limits.metadata_bytes = opts.limits.metadata_bytes.saturating_add(cost.metadata);
+        opts.limits.name_bytes = opts.limits.name_bytes.saturating_add(cost.names);
+    }
     opts.limits.protection_paths = opts.limits.protection_paths.max(volume_count + 16);
     log_cb(
         3,
@@ -1656,6 +1749,115 @@ fn fits_protected_read_budget(
     per_check.saturating_mul(steps) <= PROTECTED_READ_BUDGET
 }
 
+/// What declaring a set costs zipfast on top of an undeclared extraction.
+#[derive(Clone, Copy, Debug)]
+struct DeclarationCost {
+    bookkeeping: u64,
+    metadata: u64,
+    names: u64,
+}
+
+/// Whether a final set may be declared at session start, and what declaring costs on top of
+/// an undeclared extraction (SourceBookkeeping, MetadataBytes, NameBytes). zipfast must place every
+/// member where the copy path would (no Windows-made name that Windows rules change, no
+/// duplicate names). Even with the per-step recheck bounded (zipfast #116), every volume
+/// admission sweeps the whole inventory (about 3.3 V^2 (P + 15) bookkeeping units for V
+/// volumes with paths up to P bytes) and every member boundary and publication runs a full
+/// refresh (about 7-9 M V (P + 16) for M members, more with deep paths), and each of those
+/// validations also charges metadata bytes; each read step re-observes one volume. The estimates (with
+/// margin) are added to the session's limits; sets whose cost is too large to grant are left
+/// undeclared and copied.
+fn session_declaration_cost(
+    inventory: &zipfast::progressive::ProtectionInventory,
+    first: &Path,
+    dest: &Path,
+    password: &str,
+) -> Option<DeclarationCost> {
+    /// Largest extra budget granted for a declaration (bookkeeping is CPU work, metadata and
+    /// names cumulative accountings of small allocations).
+    const MAX_EXTRA_BOOKKEEPING: u64 = 512 * 1024 * 1024;
+    const MAX_EXTRA_METADATA: u64 = 256 * 1024 * 1024;
+    const MAX_EXTRA_NAMES: u64 = 256 * 1024 * 1024;
+    let members = set_members(first, password)?;
+    if members.names_differ || members.duplicate_names {
+        return None;
+    }
+    let v = inventory.volumes.len() as u64;
+    let p = inventory
+        .volumes
+        .iter()
+        .flat_map(|vol| match &vol.backing {
+            zipfast::progressive::VolumeBacking::Native(paths) => paths.as_slice(),
+            zipfast::progressive::VolumeBacking::NonFile => &[],
+        })
+        .map(|pp| pp.path.as_os_str().len() as u64)
+        .max()
+        .unwrap_or(0);
+    // Longest volume file name: every refresh also compares and charges each volume's name.
+    let n = inventory
+        .volumes
+        .iter()
+        .map(|vol| vol.name.len() as u64)
+        .max()
+        .unwrap_or(0);
+    // Margins over the measured costs: 4 for 3.3, 12 for 7-9.
+    let unit = p.saturating_add(n.saturating_mul(2)).saturating_add(16);
+    let admissions = 4u64
+        .saturating_mul(v)
+        .saturating_mul(v)
+        .saturating_mul(unit);
+    // Each publication check (the member's file and every parent directory it creates) runs
+    // full refreshes plus a target check of 1 + T + P per volume, T the absolute target path.
+    let target = (std::path::absolute(dest)
+        .map(|d| d.as_os_str().len())
+        .unwrap_or(dest.as_os_str().len()) as u64)
+        .saturating_add(members.max_name)
+        .saturating_add(1);
+    let checks = 1u64.saturating_add(members.max_depth);
+    let per_member = 12u64
+        .saturating_mul(v)
+        .saturating_mul(unit.saturating_add(target))
+        .saturating_mul(checks);
+    // Every read step (about 1 MiB) re-observes one protected volume: 1 + P.
+    let data_mib: u64 = inventory
+        .volumes
+        .iter()
+        .flat_map(|vol| match &vol.backing {
+            zipfast::progressive::VolumeBacking::Native(paths) => paths.as_slice(),
+            zipfast::progressive::VolumeBacking::NonFile => &[],
+        })
+        .filter_map(|pp| pp.file.as_ref()?.metadata().ok())
+        .map(|m| m.len().div_ceil(1 << 20))
+        .sum();
+    let reads = data_mib.saturating_mul(p.saturating_add(64));
+    let bookkeeping = admissions
+        .saturating_add(members.count.saturating_mul(per_member))
+        .saturating_add(reads);
+    let wide = p.saturating_add(n).saturating_add(128);
+    let metadata = v.saturating_mul(v).saturating_mul(wide).saturating_add(
+        members.count.saturating_mul(
+            4u64.saturating_mul(v)
+                .saturating_mul(wide)
+                .saturating_mul(checks)
+                .saturating_add(4u64.saturating_mul(members.max_name)),
+        ),
+    );
+    // Each volume opened and each publication charges every volume's name: V (V + M) N,
+    // granted with margin.
+    let names = 2u64
+        .saturating_mul(v)
+        .saturating_mul(v.saturating_add(4u64.saturating_mul(members.count)))
+        .saturating_mul(n);
+    (bookkeeping <= MAX_EXTRA_BOOKKEEPING
+        && metadata <= MAX_EXTRA_METADATA
+        && names <= MAX_EXTRA_NAMES)
+        .then_some(DeclarationCost {
+            bookkeeping,
+            metadata,
+            names,
+        })
+}
+
 /// Path components of a member's output name (as the copy path names it).
 fn path_depth(name: &[u8]) -> u64 {
     zipfast::path::sanitize(&String::from_utf8_lossy(name), false)
@@ -1817,7 +2019,12 @@ struct SetMembers {
     volumes: u64,
     count: u64,
     max_depth: u64,
+    /// Longest member name, bytes.
+    max_name: u64,
     windows_names: bool,
+    /// A Windows-made member whose name Windows path rules change (a backslash or one of
+    /// `<>:"|?*`): zipfast would place it elsewhere than the copy path.
+    names_differ: bool,
     duplicate_names: bool,
 }
 
@@ -1827,7 +2034,9 @@ fn set_members(first: &Path, password: &str) -> Option<SetMembers> {
         volumes: 0,
         count: 0,
         max_depth: 0,
+        max_name: 0,
         windows_names: false,
+        names_differ: false,
         duplicate_names: false,
     };
     let mut seen = std::collections::HashSet::new();
@@ -1841,7 +2050,10 @@ fn set_members(first: &Path, password: &str) -> Option<SetMembers> {
             out.count += metas.len() as u64;
             out.duplicate_names |= metas.len() > 1 || !seen.insert(name.clone());
             out.windows_names |= metas.iter().any(|m| m.windows_names);
+            out.names_differ |= metas.iter().any(|m| m.windows_names)
+                && name.iter().any(|b| b"\\<>:\"|?*".contains(b));
             out.max_depth = out.max_depth.max(path_depth(&name));
+            out.max_name = out.max_name.max(name.len() as u64);
         }
         match zipfast::volume::next_volume(&p) {
             Some(n) => p = n,

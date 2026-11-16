@@ -978,6 +978,9 @@ where
     let mut cb = |kind: i32, msg: &str| {
         if msg.starts_with("Unrar: Extracting from ") {
             volumes += 1;
+        } else if msg.contains("extracting again without declaring") {
+            // The set is read again from its first volume.
+            volumes = 0;
         }
         log_cb(kind, msg);
     };

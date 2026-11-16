@@ -1,29 +1,25 @@
-//! RarVolume's header parsing (RarReader.cpp): the RAR3 and RAR5 block
-//! structure of one volume - its version, naming and volume flags, and the
-//! files it holds with their sizes, times, split flags, methods, data offsets
-//! and encryption records - read from an untrusted content source exactly as
-//! the C++ did, including the decryption of encrypted headers block by block.
-//! The source and the cipher (OpenSSL, key derivation) stay C++: the parser
-//! reads through `Source` and decrypts through `Cipher`.
+//! RarVolume's header reading (RarReader.cpp) on top of zipfast's single-volume
+//! map (`zipfast::map::VolumeMapBuilder`): the version, naming and volume flags
+//! of one RAR3 or RAR5 volume and the files it holds with their sizes, times,
+//! split flags, methods, data offsets and encryption records. zipfast parses
+//! and decrypts the headers; this module only reads the volume's bytes for it
+//! from a `Source` and reports the result in the C++ reader's shapes.
+
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Waker};
+
+use zipfast::map::{
+    CipherParams, MapError, MapMethod, MapOptions, VolumeEnd, VolumeMap, VolumeMapBuilder,
+};
+use zipfast::progressive::{
+    ProgressiveResult, RangeRead, RangeSource, SourceId, SourceInfo, SourceLength,
+};
 
 /// The content a volume is read from (ContentSource).
 pub trait Source {
     fn size(&mut self) -> i64;
     /// `buf.len()` bytes at `offset`, or false
     fn read(&mut self, offset: i64, buf: &mut [u8]) -> bool;
-}
-
-/// The header cipher (OpenSSL in the C++).
-pub trait Cipher {
-    /// rar3: derives the key and IV from the password and this salt
-    fn rar3_prepare(&mut self, salt: &[u8; 8]) -> bool;
-    /// rar5: derives the key from the password, KDF count and salt
-    fn rar5_prepare(&mut self, kdf_count: u8, salt: &[u8; 16]) -> bool;
-    /// starts AES-CBC (128 or 256 bits) with this IV, or rar3's derived one
-    fn init(&mut self, key_bits: i32, iv: Option<&[u8; 16]>) -> bool;
-    /// one 16-byte block
-    fn decrypt(&mut self, input: &[u8; 16], output: &mut [u8; 16]) -> bool;
-    fn free(&mut self);
 }
 
 /// Receives files at the same commit points as the C++ reader. A failed
@@ -87,7 +83,7 @@ impl Default for RarFile {
 }
 
 /// The volume state RarVolume keeps (read and updated by a parse).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Volume {
     pub version: i32,
     pub volume_no: u32,
@@ -96,691 +92,259 @@ pub struct Volume {
     pub multi_volume: bool,
     pub encrypted: bool,
     pub has_password: bool,
-    pub decrypt_buf: [u8; 16],
-    pub decrypt_pos: u8,
 }
 
-impl Default for Volume {
-    fn default() -> Self {
-        Volume {
-            version: 0,
-            volume_no: 0,
-            new_naming: false,
-            has_next_volume: false,
-            multi_volume: false,
-            encrypted: false,
-            has_password: false,
-            decrypt_buf: [0; 16],
-            decrypt_pos: 16,
-        }
+/// DetectRarVersion: the signatures compared as C strings (strcmp)
+fn detect_version(source: &mut dyn Source, size: i64) -> i32 {
+    const RAR3: &[u8] = b"Rar!\x1a\x07\x00";
+    const RAR5: &[u8] = b"Rar!\x1a\x07\x01\x00";
+    let mut sig = [0u8; 8];
+    if size < 8 || !source.read(0, &mut sig) {
+        return 0;
+    }
+    // strcmp(signature, read): equal up to and including the signature's NUL
+    let strcmp_eq = |s: &[u8]| s.iter().zip(sig.iter()).all(|(a, b)| a == b);
+    if strcmp_eq(RAR5) {
+        5
+    } else if strcmp_eq(RAR3) {
+        3
+    } else {
+        0
     }
 }
 
-const SO_SET: i32 = 0;
-const SO_CUR: i32 = 1;
-const SO_END: i32 = 2;
-
-/// RarSourceCursor
-struct Cursor<'a> {
-    source: &'a mut dyn Source,
-    position: i64,
-    eof: bool,
+/// What the map's reads and the volume's bytes share: zipfast asks through
+/// `RangeSource::read_at`, which answers `NotYet` until `walk` has read the
+/// asked range from the borrowed `Source`.
+struct Shared {
+    /// where the volume ends for the map: the source's size, or the start of
+    /// the first range the source could not read
+    len: u64,
+    want: Option<(u64, usize)>,
+    have: (u64, Vec<u8>),
 }
 
-impl Cursor<'_> {
-    fn read(&mut self, buf: &mut [u8]) -> i64 {
-        let size = buf.len() as i64;
-        let available = size.min(self.source.size().wrapping_sub(self.position).max(0));
-        if available < size {
-            // like feof: only a read past the end raises it
-            self.eof = true;
+struct Bridge(Arc<Mutex<Shared>>);
+
+impl RangeSource for Bridge {
+    fn info(&self) -> SourceInfo {
+        let len = self.0.lock().map_or(0, |s| s.len);
+        SourceInfo {
+            id: SourceId(0),
+            generation: 0,
+            extent: len,
+            length: SourceLength::Final(len),
         }
-        if available <= 0 {
-            return 0;
-        }
-        if !self
-            .source
-            .read(self.position, &mut buf[..available as usize])
+    }
+
+    fn read_at(
+        &mut self,
+        offset: u64,
+        buf: &mut [u8],
+        _: &mut Context<'_>,
+    ) -> ProgressiveResult<RangeRead> {
+        let mut s = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let (at, data) = &s.have;
+        if let Some(rel) = offset
+            .checked_sub(*at)
+            .and_then(|r| usize::try_from(r).ok())
         {
-            return 0;
+            if rel < data.len() {
+                let count = buf.len().min(data.len() - rel);
+                buf[..count].copy_from_slice(&data[rel..rel + count]);
+                return Ok(RangeRead::Filled { count });
+            }
         }
-        self.position = self.position.wrapping_add(available);
-        available
+        s.want = Some((offset, buf.len()));
+        Ok(RangeRead::NotYet)
     }
 
-    fn seek(&mut self, position: i64, origin: i32) -> bool {
-        let target = match origin {
-            SO_CUR => self.position.wrapping_add(position),
-            SO_END => self.source.size().wrapping_add(position),
-            _ => position,
-        };
-        if target < 0 {
-            return false;
-        }
-        self.position = target;
-        self.eof = false;
-        true
+    fn backing_files(&self) -> &[std::fs::File] {
+        &[]
     }
 }
 
-#[derive(Clone, Copy, Default)]
-struct Block {
-    #[allow(dead_code)]
-    crc: u32,
-    kind: u8,
-    flags: u16,
-    addsize: u64,
-    trailsize: u64,
-    datasize: u64,
+/// The longest prefix of `len` bytes at `offset` that `source` reads, found by
+/// halving: a content source fails a whole read that runs into a missing
+/// article, where the C++ reader, reading field by field, got up to it.
+fn read_prefix(source: &mut dyn Source, offset: u64, len: usize) -> Vec<u8> {
+    let Ok(at) = i64::try_from(offset) else {
+        return Vec::new();
+    };
+    let mut want = len;
+    while want > 0 {
+        let mut buf = vec![0u8; want];
+        if source.read(at, &mut buf) {
+            return buf;
+        }
+        want /= 2;
+    }
+    Vec::new()
 }
 
-const RAR3_MAIN_VOLUME: u16 = 0x0001;
-const RAR3_MAIN_NEWNUMBERING: u16 = 0x0010;
-const RAR3_MAIN_PASSWORD: u16 = 0x0080;
-const RAR3_BLOCK_MAIN: u8 = 0x73;
-const RAR3_BLOCK_FILE: u8 = 0x74;
-const RAR3_BLOCK_ENDARC: u8 = 0x7b;
-const RAR3_BLOCK_ADDSIZE: u16 = 0x8000;
-const RAR3_FILE_ADDSIZE: u16 = 0x0100;
-const RAR3_FILE_SPLITBEFORE: u16 = 0x0001;
-const RAR3_FILE_SPLITAFTER: u16 = 0x0002;
-const RAR3_FILE_PASSWORD: u16 = 0x0004;
-const RAR3_FILE_SALT: u16 = 0x0400;
-const RAR3_ENDARC_NEXTVOL: u16 = 0x0001;
-const RAR3_ENDARC_DATACRC: u16 = 0x0002;
-const RAR3_ENDARC_VOLNUMBER: u16 = 0x0008;
-
-const RAR5_BLOCK_MAIN: u8 = 1;
-const RAR5_BLOCK_FILE: u8 = 2;
-const RAR5_BLOCK_ENCRYPTION: u8 = 4;
-const RAR5_BLOCK_ENDARC: u8 = 5;
-const RAR5_BLOCK_EXTRADATA: u16 = 0x01;
-const RAR5_BLOCK_DATAAREA: u16 = 0x02;
-const RAR5_BLOCK_SPLITBEFORE: u16 = 0x08;
-const RAR5_BLOCK_SPLITAFTER: u16 = 0x10;
-const RAR5_MAIN_ISVOL: u64 = 0x01;
-const RAR5_MAIN_VOLNR: u64 = 0x02;
-const RAR5_FILE_TIME: u64 = 0x02;
-const RAR5_FILE_CRC: u64 = 0x04;
-const RAR5_FILE_EXTRATIME: u64 = 0x03;
-const RAR5_FILE_EXTRATIMEUNIXFORMAT: u64 = 0x01;
-const RAR5_FILE_EXTRACRYPT: u64 = 0x01;
-const RAR5_CRYPT_PSWCHECK: u64 = 0x01;
-const RAR5_ENDARC_NEXTVOL: u64 = 0x01;
-
-/// The parser: the volume state, the cursor and the cipher.
-struct Parser<'a, 'b> {
-    v: &'a mut Volume,
-    file: Cursor<'b>,
-    cipher: &'a mut dyn Cipher,
-    files: &'a mut dyn Files,
+/// Maps the volume behind `source`.
+fn walk(source: &mut dyn Source, size: u64, password: Option<&str>) -> Result<VolumeMap, MapError> {
+    let shared = Arc::new(Mutex::new(Shared {
+        len: size,
+        want: None,
+        have: (0, Vec::new()),
+    }));
+    let mut options = MapOptions::new("volume.rar").password(password);
+    // The C++ reader had no header budget: a volume of a few hundred
+    // thousand small files must still be listed.
+    let limits = &mut options.limits;
+    limits.header_bytes = limits.header_bytes.max(1 << 30);
+    limits.volume_header_bytes = limits.volume_header_bytes.max(1 << 30);
+    limits.metadata_bytes = limits.metadata_bytes.max(1 << 31);
+    limits.name_bytes = limits.name_bytes.max(1 << 30);
+    limits.entries = limits.entries.max(1 << 24);
+    limits.parts = limits.parts.max(1 << 24);
+    limits.header_blocks = limits.header_blocks.max(1 << 25);
+    // Every header costs the map a wake and two reads here: reads are not
+    // run ahead of what it asks for, as they could fetch articles of data.
+    limits.provider_wakes = limits.provider_wakes.max(1 << 32);
+    limits.source_requests = limits.source_requests.max(1 << 33);
+    let mut builder = VolumeMapBuilder::new(Box::new(Bridge(shared.clone())), options);
+    let mut cx = Context::from_waker(Waker::noop());
+    loop {
+        if let Poll::Ready(result) = builder.poll_map(&mut cx) {
+            return result;
+        }
+        let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
+        let Some((offset, len)) = s.want.take() else {
+            return Err(MapError::AlreadyFinished);
+        };
+        let len = len.min(usize::try_from(s.len.saturating_sub(offset)).unwrap_or(usize::MAX));
+        let data = read_prefix(source, offset, len);
+        if data.is_empty() {
+            // the volume ends here for the map: what it read before is kept
+            s.len = s.len.min(offset);
+        }
+        s.have = (offset, data);
+    }
 }
 
-impl Parser<'_, '_> {
-    /// DecryptRead
-    fn decrypt_read(&mut self, buffer: &mut [u8]) -> bool {
-        let mut done = 0;
-        while done < buffer.len() {
-            if self.v.decrypt_pos >= 16 {
-                let mut buf = [0u8; 16];
-                if self.file.read(&mut buf) != 16 {
-                    return false;
-                }
-                self.v.decrypt_pos = 0;
-                if !self.cipher.decrypt(&buf, &mut self.v.decrypt_buf) {
-                    return false;
-                }
+fn rar_file(m: &zipfast::map::VolumeMember, rar5: bool) -> RarFile {
+    let mut filename = m.raw_name.clone();
+    filename.truncate(
+        filename
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(filename.len()),
+    );
+    let (method, stored) = match m.method {
+        MapMethod::Stored => (if rar5 { 0 } else { 0x30 }, true),
+        MapMethod::Compressed { id } => (u32::from(id), false),
+        _ => (u32::MAX, false),
+    };
+    // RAR3 headers store DOS times, passed on as stored (invalid ones too)
+    let time = if rar5 {
+        m.mtime.map_or(0, |(secs, _)| secs as u32)
+    } else {
+        m.dos_time.unwrap_or(0)
+    };
+    let mut f = RarFile {
+        filename,
+        time,
+        attr: m.attributes as u32,
+        size: m.unpacked_size.map_or(0, |s| s as i64),
+        split_before: m.split_before,
+        split_after: m.split_after,
+        method,
+        stored,
+        packed_size: m.packed_size as i64,
+        data_offset: -1,
+        encrypted_data: m.encrypted,
+        ..RarFile::default()
+    };
+    match &m.cipher {
+        Some(CipherParams::Rar5 {
+            kdf_count,
+            salt,
+            iv,
+            check,
+            keyed_checks,
+        }) => {
+            let mut check_value = [0u8; 12];
+            if let Some((value, sum)) = check {
+                check_value[..8].copy_from_slice(value);
+                check_value[8..].copy_from_slice(sum);
             }
-            let remaining = 16 - self.v.decrypt_pos as usize;
-            let len = (buffer.len() - done).min(remaining);
-            let pos = self.v.decrypt_pos as usize;
-            buffer[done..done + len].copy_from_slice(&self.v.decrypt_buf[pos..pos + len]);
-            self.v.decrypt_pos += len as u8;
-            done += len;
+            f.crypt = Some(Rar5Crypt {
+                version: 0,
+                flags: u64::from(check.is_some()) | (u64::from(*keyed_checks) << 1),
+                kdf_count: *kdf_count,
+                salt: *salt,
+                iv: iv.unwrap_or_default(),
+                check_value,
+                has_check: check.is_some(),
+            });
         }
-        true
-    }
-
-    /// Read
-    fn read(&mut self, block: Option<&mut Block>, buffer: &mut [u8]) -> bool {
-        if self.v.encrypted {
-            if !self.decrypt_read(buffer) {
-                return false;
-            }
-        } else if self.file.read(buffer) != buffer.len() as i64 {
-            return false;
-        }
-        if let Some(block) = block {
-            block.trailsize = block.trailsize.wrapping_sub(buffer.len() as u64);
-        }
-        true
-    }
-
-    fn read16(&mut self, block: Option<&mut Block>) -> Option<u16> {
-        let mut b = [0u8; 2];
-        self.read(block, &mut b).then(|| u16::from_le_bytes(b))
-    }
-
-    fn read32(&mut self, block: Option<&mut Block>) -> Option<u32> {
-        let mut b = [0u8; 4];
-        self.read(block, &mut b).then(|| u32::from_le_bytes(b))
-    }
-
-    /// ReadV: a RAR5 vint (a 64-bit value takes at most 10 bytes)
-    fn read_v(&mut self, mut block: Option<&mut Block>) -> Option<u64> {
-        let mut result = 0u64;
-        let mut bits = 0u32;
-        loop {
-            if bits >= 64 {
-                return None;
-            }
-            let mut b = [0u8; 1];
-            if !self.read(block.as_deref_mut(), &mut b) {
-                return None;
-            }
-            result = result.wrapping_add(((b[0] & 0x7f) as u64) << bits);
-            bits += 7;
-            if b[0] & 0x80 == 0 {
-                return Some(result);
-            }
-        }
-    }
-
-    /// ReadVLimited: ReadV within a byte budget
-    fn read_v_limited(&mut self, block: &mut Block, avail: &mut u64) -> Option<u64> {
-        let mut result = 0u64;
-        let mut bits = 0u32;
-        loop {
-            if *avail == 0 || bits >= 64 {
-                return None;
-            }
-            let mut b = [0u8; 1];
-            if !self.read(Some(block), &mut b) {
-                return None;
-            }
-            *avail -= 1;
-            result = result.wrapping_add(((b[0] & 0x7f) as u64) << bits);
-            bits += 7;
-            if b[0] & 0x80 == 0 {
-                return Some(result);
-            }
-        }
-    }
-
-    fn skip(&mut self, block: &mut Block, mut size: i64) -> bool {
-        let mut buf = [0u8; 256];
-        while size > 0 {
-            let len = size.min(256) as usize;
-            if !self.read(Some(block), &mut buf[..len]) {
-                return false;
-            }
-            size -= len as i64;
-        }
-        true
-    }
-
-    /// DetectRarVersion: the signatures compared as C strings (strcmp)
-    fn detect_version(&mut self) -> i32 {
-        const RAR3: &[u8] = b"Rar!\x1a\x07\x00";
-        const RAR5: &[u8] = b"Rar!\x1a\x07\x01\x00";
-        let mut sig = [0u8; 8];
-        let cnt = self.file.read(&mut sig);
-        // strcmp(signature, read): equal up to and including the signature's NUL
-        let strcmp_eq = |s: &[u8]| s.iter().zip(sig.iter()).all(|(a, b)| a == b);
-        let rar5 = cnt == 8 && strcmp_eq(RAR5);
-        let rar3 = !rar5 && cnt == 8 && strcmp_eq(RAR3);
-        if rar3 {
-            3
-        } else if rar5 {
-            5
-        } else {
-            0
-        }
-    }
-
-    fn rar3_block(&mut self) -> Option<Block> {
-        let mut block = Block::default();
-        if self.v.encrypted {
-            let mut salt = [0u8; 8];
-            if !(self.file.read(&mut salt) == 8
-                && self.cipher.rar3_prepare(&salt)
-                && self.cipher.init(128, None))
-            {
-                return None;
-            }
-        }
-        let mut buf = [0u8; 7];
-        if !self.read(None, &mut buf) {
-            return None;
-        }
-        block.crc = u16::from_le_bytes([buf[0], buf[1]]) as u32;
-        block.kind = buf[2];
-        block.flags = u16::from_le_bytes([buf[3], buf[4]]);
-        let size = u16::from_le_bytes([buf[5], buf[6]]);
-        let mut blocksize = size as u32;
-        if self.v.encrypted {
-            // align to 16 bytes
-            blocksize = blocksize.wrapping_add((!blocksize).wrapping_add(1) & 15);
-        }
-        // sizeof(buf) promotes the C++ subtraction to size_t, including
-        // its 32-bit wrap before assignment to the 64-bit trailer field.
-        block.trailsize = (blocksize as usize).wrapping_sub(7) as u64;
-        let mut add = [0u8; 4];
-        if block.flags & RAR3_BLOCK_ADDSIZE != 0 && !self.read(None, &mut add) {
-            return None;
-        }
-        block.addsize = u32::from_le_bytes(add) as u64;
-        block.datasize = 0;
-        if block.flags & RAR3_BLOCK_ADDSIZE != 0 {
-            // Header and packed data together can exceed the low 32-bit size.
-            // Retain the native-size subtraction for undersized headers.
-            let total = blocksize as u64 + block.addsize;
-            block.trailsize = if total >= 11 {
-                total - 11
-            } else {
-                (total as usize).wrapping_sub(11) as u64
-            };
-        }
-        // a zero type ends the parse (as the C++'s empty block)
-        (block.kind != 0).then_some(block)
-    }
-
-    fn rar3_file(&mut self, block: &mut Block, f: &mut RarFile) -> bool {
-        f.split_before = block.flags & RAR3_FILE_SPLITBEFORE != 0;
-        f.split_after = block.flags & RAR3_FILE_SPLITAFTER != 0;
-        f.packed_size = block.addsize as i64;
-        f.encrypted_data = block.flags & RAR3_FILE_PASSWORD != 0;
-        let Some(size) = self.read32(Some(block)) else {
-            return false;
-        };
-        f.size = size as i64;
-        if !self.skip(block, 1) || !self.skip(block, 4) {
-            return false;
-        }
-        let Some(time) = self.read32(Some(block)) else {
-            return false;
-        };
-        f.time = time;
-        let mut b = [0u8; 1];
-        if !self.read(Some(block), &mut b) {
-            return false;
-        }
-        if !self.read(Some(block), &mut b) {
-            return false;
-        }
-        f.method = b[0] as u32;
-        f.stored = b[0] == 0x30;
-        let Some(namelen) = self.read16(Some(block)) else {
-            return false;
-        };
-        let Some(attr) = self.read32(Some(block)) else {
-            return false;
-        };
-        f.attr = attr;
-        if block.flags & RAR3_FILE_ADDSIZE != 0 {
-            let Some(high) = self.read32(Some(block)) else {
-                return false;
-            };
-            block.trailsize = block.trailsize.wrapping_add((high as u64) << 32);
-            f.packed_size = f.packed_size.wrapping_add(((high as u64) << 32) as i64);
-            let Some(high) = self.read32(Some(block)) else {
-                return false;
-            };
-            f.size = f.size.wrapping_add(((high as u64) << 32) as i64);
-        }
-        if namelen > 8192 {
-            return false;
-        }
-        let mut name = vec![0u8; namelen as usize];
-        if !self.read(Some(block), &mut name) {
-            return false;
-        }
-        name.truncate(name.iter().position(|&c| c == 0).unwrap_or(name.len()));
-        f.filename = name;
-        if block.flags & RAR3_FILE_SALT != 0 {
-            let mut salt = [0u8; 8];
-            if !self.read(Some(block), &mut salt) {
-                return false;
-            }
-            f.salt = salt;
+        Some(
+            CipherParams::Rar4 { salt }
+            | CipherParams::Rar4Legacy {
+                salt: Some(salt), ..
+            },
+        ) => {
             f.has_salt = true;
+            f.salt = *salt;
         }
-        true
+        _ => {}
     }
-
-    /// the skip to the next block, with the encrypted padding; false when it
-    /// doesn't land past `start`, where the block began (the read position
-    /// must advance with every block)
-    fn skip_to_next(&mut self, block: &Block, rar5: bool, start: i64) -> bool {
-        let mut skip = block.trailsize;
-        if self.v.encrypted {
-            skip = skip.wrapping_sub((16i32 - self.v.decrypt_pos as i32) as u64);
-            if rar5 {
-                if self.v.decrypt_pos < 16 {
-                    skip = skip.wrapping_add(if !skip.is_multiple_of(16) {
-                        16 - skip % 16
-                    } else {
-                        0
-                    });
-                    self.v.decrypt_pos = 16;
-                }
-            } else {
-                self.v.decrypt_pos = 16;
-            }
-            self.cipher.free();
-        }
-        self.file.seek(skip as i64, SO_CUR) && self.file.position > start
-    }
-
-    fn rar3_volume(&mut self) -> bool {
-        while !self.file.eof {
-            let start = self.file.position;
-            let Some(mut block) = self.rar3_block() else {
-                return false;
-            };
-            let mut file_block = false;
-            if block.kind == RAR3_BLOCK_MAIN {
-                if block.flags & RAR3_MAIN_PASSWORD != 0 {
-                    self.v.encrypted = true;
-                    if !self.v.has_password {
-                        return false;
-                    }
-                }
-                self.v.new_naming = block.flags & RAR3_MAIN_NEWNUMBERING != 0;
-                self.v.multi_volume = block.flags & RAR3_MAIN_VOLUME != 0;
-            } else if block.kind == RAR3_BLOCK_FILE {
-                let mut f = RarFile::default();
-                let ok = self.rar3_file(&mut block, &mut f);
-                if !ok {
-                    return false;
-                }
-                if !self.files.add(&f) {
-                    return false;
-                }
-                file_block = true;
-            } else if block.kind == RAR3_BLOCK_ENDARC {
-                if block.flags & RAR3_ENDARC_DATACRC != 0 && !self.skip(&mut block, 4) {
-                    return false;
-                }
-                if block.flags & RAR3_ENDARC_VOLNUMBER != 0 {
-                    let Some(no) = self.read32(Some(&mut block)) else {
-                        return false;
-                    };
-                    self.v.volume_no = no;
-                    self.v.has_next_volume = block.flags & RAR3_ENDARC_NEXTVOL != 0;
-                }
-                break;
-            } else if !(0x72..=0x7b).contains(&block.kind) {
-                return false;
-            }
-            if !self.skip_to_next(&block, false, start) {
-                return false;
-            }
-            if file_block {
-                self.files.set_data_offset(self.file.position);
-            }
-        }
-        true
-    }
-
-    fn rar5_block(&mut self) -> Option<Block> {
-        let mut block = Block::default();
-        if self.v.encrypted {
-            let mut iv = [0u8; 16];
-            if !(self.file.read(&mut iv) == 16 && self.cipher.init(256, Some(&iv))) {
-                return None;
-            }
-        }
-        block.crc = self.read32(None)?;
-        let size = self.read_v(None)? as u32;
-        block.trailsize = size as u64;
-        block.kind = self.read_v(Some(&mut block))? as u8;
-        block.flags = self.read_v(Some(&mut block))? as u16;
-        block.addsize = 0;
-        if block.flags & RAR5_BLOCK_EXTRADATA != 0 {
-            block.addsize = self.read_v(Some(&mut block))?;
-        }
-        let mut datasize = 0;
-        if block.flags & RAR5_BLOCK_DATAAREA != 0 {
-            datasize = self.read_v(Some(&mut block))?;
-        }
-        block.trailsize = block.trailsize.wrapping_add(datasize);
-        block.datasize = datasize;
-        (block.kind != 0).then_some(block)
-    }
-
-    fn rar5_crypt(&mut self, block: &mut Block, f: &mut RarFile, content_len: u64) -> bool {
-        let mut avail = content_len;
-        let mut crypt = Rar5Crypt::default();
-        let Some(version) = self.read_v_limited(block, &mut avail) else {
-            return true;
-        };
-        crypt.version = version;
-        let Some(flags) = self.read_v_limited(block, &mut avail) else {
-            return true;
-        };
-        crypt.flags = flags;
-        if avail < 1 + 16 + 16 {
-            return true;
-        }
-        let mut b = [0u8; 1];
-        if !self.read(Some(block), &mut b) {
-            return false;
-        }
-        crypt.kdf_count = b[0];
-        avail -= 1;
-        if !self.read(Some(block), &mut crypt.salt) {
-            return false;
-        }
-        avail -= 16;
-        if !self.read(Some(block), &mut crypt.iv) {
-            return false;
-        }
-        avail -= 16;
-        crypt.has_check = crypt.flags & RAR5_CRYPT_PSWCHECK != 0;
-        if crypt.has_check {
-            if avail < 12 {
-                return true;
-            }
-            if !self.read(Some(block), &mut crypt.check_value) {
-                return false;
-            }
-        }
-        f.crypt = Some(crypt);
-        true
-    }
-
-    fn rar5_file(&mut self, block: &mut Block, f: &mut RarFile) -> bool {
-        f.split_before = block.flags & RAR5_BLOCK_SPLITBEFORE != 0;
-        f.split_after = block.flags & RAR5_BLOCK_SPLITAFTER != 0;
-        f.packed_size = block.datasize as i64;
-        let Some(fileflags) = self.read_v(Some(block)) else {
-            return false;
-        };
-        let Some(size) = self.read_v(Some(block)) else {
-            return false;
-        };
-        f.size = size as i64;
-        let Some(attr) = self.read_v(Some(block)) else {
-            return false;
-        };
-        f.attr = attr as u32;
-        if fileflags & RAR5_FILE_TIME != 0 {
-            let Some(t) = self.read32(Some(block)) else {
-                return false;
-            };
-            f.time = t;
-        }
-        if fileflags & RAR5_FILE_CRC != 0 && !self.skip(block, 4) {
-            return false;
-        }
-        let Some(comp) = self.read_v(Some(block)) else {
-            return false;
-        };
-        f.method = ((comp >> 7) & 7) as u32;
-        f.stored = f.method == 0;
-        if self.read_v(Some(block)).is_none() {
-            return false;
-        }
-        let Some(namelen) = self.read_v(Some(block)) else {
-            return false;
-        };
-        if namelen > 8192 {
-            return false;
-        }
-        let mut name = vec![0u8; namelen as usize];
-        if !self.read(Some(block), &mut name) {
-            return false;
-        }
-        name.truncate(name.iter().position(|&c| c == 0).unwrap_or(name.len()));
-        f.filename = name;
-        if block.flags & RAR5_BLOCK_EXTRADATA != 0 {
-            let mut remsize = block.addsize;
-            while remsize > 0 {
-                let mut trailsize = block.trailsize;
-                let Some(mut len) = self.read_v(Some(block)) else {
-                    return false;
-                };
-                remsize =
-                    remsize.wrapping_sub(trailsize.wrapping_sub(block.trailsize).wrapping_add(len));
-                trailsize = block.trailsize;
-                let Some(kind) = self.read_v(Some(block)) else {
-                    return false;
-                };
-                if kind == RAR5_FILE_EXTRACRYPT {
-                    f.encrypted_data = true;
-                    let type_bytes = trailsize.wrapping_sub(block.trailsize);
-                    let content = len.saturating_sub(type_bytes);
-                    if !self.rar5_crypt(block, f, content) {
-                        return false;
-                    }
-                }
-                if kind == RAR5_FILE_EXTRATIME {
-                    let Some(flags) = self.read_v(Some(block)) else {
-                        return false;
-                    };
-                    if flags & RAR5_FILE_EXTRATIMEUNIXFORMAT != 0 {
-                        let Some(t) = self.read32(Some(block)) else {
-                            return false;
-                        };
-                        f.time = t;
-                    } else {
-                        let Some(low) = self.read32(Some(block)) else {
-                            return false;
-                        };
-                        let Some(high) = self.read32(Some(block)) else {
-                            return false;
-                        };
-                        let wintime = ((high as u64) << 32).wrapping_add(low as u64);
-                        f.time =
-                            ((wintime / 10_000_000) as i64).wrapping_sub(11_644_473_600) as u32;
-                    }
-                }
-                len = len.wrapping_sub(trailsize.wrapping_sub(block.trailsize));
-                if !self.skip(block, len as i64) {
-                    return false;
-                }
-            }
-        }
-        true
-    }
-
-    fn rar5_volume(&mut self) -> bool {
-        self.file.seek(8, SO_SET);
-        while !self.file.eof {
-            let start = self.file.position;
-            let Some(mut block) = self.rar5_block() else {
-                return false;
-            };
-            let mut file_block = false;
-            if block.kind == RAR5_BLOCK_MAIN {
-                let Some(arcflags) = self.read_v(Some(&mut block)) else {
-                    return false;
-                };
-                if arcflags & RAR5_MAIN_VOLNR != 0 {
-                    let Some(volnr) = self.read_v(Some(&mut block)) else {
-                        return false;
-                    };
-                    self.v.volume_no = volnr as u32;
-                }
-                self.v.new_naming = true;
-                self.v.multi_volume = arcflags & RAR5_MAIN_ISVOL != 0;
-            } else if block.kind == RAR5_BLOCK_ENCRYPTION {
-                match self.read_v(Some(&mut block)) {
-                    Some(0) => {}
-                    _ => return false, // only AES
-                }
-                if self.read_v(Some(&mut block)).is_none() {
-                    return false;
-                }
-                let mut kdf = [0u8; 1];
-                if !self.read(Some(&mut block), &mut kdf) {
-                    return false;
-                }
-                let mut salt = [0u8; 16];
-                if !self.read(Some(&mut block), &mut salt) {
-                    return false;
-                }
-                self.v.encrypted = true;
-                if !self.v.has_password || !self.cipher.rar5_prepare(kdf[0], &salt) {
-                    return false;
-                }
-            } else if block.kind == RAR5_BLOCK_FILE {
-                let mut f = RarFile::default();
-                if !self.rar5_file(&mut block, &mut f) {
-                    return false;
-                }
-                if !self.files.add(&f) {
-                    return false;
-                }
-                file_block = true;
-            } else if block.kind == RAR5_BLOCK_ENDARC {
-                let Some(endflags) = self.read_v(Some(&mut block)) else {
-                    return false;
-                };
-                self.v.has_next_volume = endflags & RAR5_ENDARC_NEXTVOL != 0;
-                break;
-            } else if block.kind > 5 {
-                return false;
-            }
-            if !self.skip_to_next(&block, true, start) {
-                return false;
-            }
-            if file_block {
-                self.files.set_data_offset(self.file.position);
-            }
-        }
-        true
-    }
+    f
 }
 
-/// RarVolume::ReadFrom: parses `source` into `volume`; true when the volume
-/// was read to its end.
+/// RarVolume::ReadFrom: reads the volume behind `source` into `volume` and
+/// `files`; true when the volume was read to its end header. Encrypted headers
+/// are read with `password` when `volume.has_password` is set. A volume cut
+/// short, or damaged past some file headers, still reports those files.
 pub fn read_from(
     volume: &mut Volume,
     source: &mut dyn Source,
-    cipher: &mut dyn Cipher,
+    password: Option<&[u8]>,
     files: &mut dyn Files,
 ) -> bool {
-    let mut p = Parser {
-        v: volume,
-        file: Cursor {
-            source,
-            position: 0,
-            eof: false,
-        },
-        cipher,
-        files,
+    let size = source.size();
+    volume.version = detect_version(source, size);
+    if volume.version == 0 {
+        return false;
+    }
+    let size = size as u64;
+    let password = password
+        .filter(|p| volume.has_password && !p.is_empty())
+        .map(String::from_utf8_lossy);
+    let password = password.as_deref();
+    let map = match walk(source, size, password) {
+        Ok(map) => map,
+        // the headers are encrypted, the password just does not open them
+        Err(MapError::WrongPassword) => {
+            volume.encrypted = true;
+            return false;
+        }
+        Err(_) => return false,
     };
-    p.v.version = p.detect_version();
-    p.file.seek(0, SO_SET);
-    let ok = match p.v.version {
-        3 => p.rar3_volume(),
-        5 => p.rar5_volume(),
-        _ => false,
-    };
-    p.cipher.free();
-    ok
+    if map.header_encrypted {
+        volume.encrypted = true;
+    }
+    if map.main_read {
+        volume.new_naming = map.new_naming;
+        volume.multi_volume = map.multi_volume;
+        if let Some(no) = map.volume_number {
+            volume.volume_no = no;
+        }
+    }
+    let complete = map.end == VolumeEnd::Complete;
+    if complete {
+        volume.has_next_volume = map.has_next_volume;
+    }
+    let rar5 = volume.version == 5;
+    for m in &map.members {
+        if !files.add(&rar_file(m, rar5)) {
+            return false;
+        }
+        files.set_data_offset(m.packed.end as i64);
+    }
+    complete
 }
 
 impl Files for Vec<RarFile> {
@@ -878,27 +442,8 @@ impl Source for FileSource {
     }
 }
 
-/// Cipher stub when TLS/crypto is disabled (`DISABLE_TLS`).
-pub struct DisabledCipher;
-
-impl Cipher for DisabledCipher {
-    fn rar3_prepare(&mut self, _: &[u8; 8]) -> bool {
-        false
-    }
-    fn rar5_prepare(&mut self, _: u8, _: &[u8; 16]) -> bool {
-        false
-    }
-    fn init(&mut self, _: i32, _: Option<&[u8; 16]>) -> bool {
-        false
-    }
-    fn decrypt(&mut self, _: &[u8; 16], _: &mut [u8; 16]) -> bool {
-        false
-    }
-    fn free(&mut self) {}
-}
-
 /// `RarVolume::Read` (`RarReader.cpp`): opens `path`, sizes through the open handle,
-/// and parses RAR3/RAR5 headers using `NativeRarCipher` when `tls_enabled` is true.
+/// and reads RAR3/RAR5 headers, decrypting encrypted ones only when `tls_enabled` is true.
 pub fn read_volume_file(
     path: &[u8],
     password: &[u8],
@@ -912,13 +457,9 @@ pub fn read_volume_file(
     let Some(mut source) = FileSource::open(path) else {
         return (false, vol, files);
     };
-    let ok = if tls_enabled {
-        let mut cipher = crate::streamrepair::NativeRarCipher::new(password);
-        read_from(&mut vol, &mut source, &mut cipher, &mut files)
-    } else {
-        let mut cipher = DisabledCipher;
-        read_from(&mut vol, &mut source, &mut cipher, &mut files)
-    };
+    // without TLS there is no AES: encrypted headers stay unread
+    let password = tls_enabled.then_some(password);
+    let ok = read_from(&mut vol, &mut source, password, &mut files);
     (ok, vol, files)
 }
 
@@ -940,342 +481,6 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
-    struct TestCipher {
-        fail: bool,
-        blocks: usize,
-        frees: usize,
-    }
-    impl Cipher for TestCipher {
-        fn rar3_prepare(&mut self, _: &[u8; 8]) -> bool {
-            true
-        }
-        fn rar5_prepare(&mut self, _: u8, _: &[u8; 16]) -> bool {
-            true
-        }
-        fn init(&mut self, _: i32, _: Option<&[u8; 16]>) -> bool {
-            true
-        }
-        fn decrypt(&mut self, input: &[u8; 16], out: &mut [u8; 16]) -> bool {
-            self.blocks += 1;
-            if self.fail {
-                out[..4].copy_from_slice(&input[..4]);
-                return false;
-            }
-            *out = *input;
-            true
-        }
-        fn free(&mut self) {
-            self.frees += 1;
-        }
-    }
-
-    #[test]
-    fn rar3_trailer_size_boundaries() {
-        let max = usize::MAX as u64;
-        for (size, add, expected) in [
-            (0u16, None, max - 6),
-            (7, None, 0),
-            (10, Some(0u32), max),
-            (11, Some(0), 0),
-            (7, Some(u32::MAX), (1u64 << 32) - 5),
-            (u16::MAX, Some(u32::MAX), (1u64 << 32) + 65523),
-        ] {
-            let mut bytes = vec![
-                0,
-                0,
-                RAR3_BLOCK_FILE,
-                0,
-                if add.is_some() { 0x80 } else { 0 },
-            ];
-            bytes.extend(size.to_le_bytes());
-            if let Some(add) = add {
-                bytes.extend(add.to_le_bytes());
-            }
-            let mut source = Bytes(bytes);
-            let mut volume = Volume::default();
-            let mut cipher = TestCipher::default();
-            let mut files = Vec::new();
-            let mut p = Parser {
-                v: &mut volume,
-                file: Cursor {
-                    source: &mut source,
-                    position: 0,
-                    eof: false,
-                },
-                cipher: &mut cipher,
-                files: &mut files,
-            };
-            let block = p.rar3_block().unwrap();
-            assert_eq!(block.trailsize, expected);
-            assert_eq!(block.addsize, add.unwrap_or(0) as u64);
-        }
-    }
-
-    #[test]
-    fn rar3_large_block_offsets() {
-        struct Sparse {
-            prefix: Vec<u8>,
-            end: i64,
-        }
-        impl Source for Sparse {
-            fn size(&mut self) -> i64 {
-                self.end + 7
-            }
-            fn read(&mut self, offset: i64, buf: &mut [u8]) -> bool {
-                let tail = [0, 0, RAR3_BLOCK_ENDARC, 0, 0, 7, 0];
-                let bytes = if offset >= self.end {
-                    tail.get((offset - self.end) as usize..)
-                } else {
-                    self.prefix.get(offset as usize..)
-                };
-                let Some(bytes) = bytes.and_then(|b| b.get(..buf.len())) else {
-                    return false;
-                };
-                buf.copy_from_slice(bytes);
-                true
-            }
-        }
-        for large in [false, true] {
-            let header_size = if large { 41u16 } else { 33 };
-            for packed in [
-                (1u64 << 32) - header_size as u64 - 1,
-                (1u64 << 32) - header_size as u64,
-                (1u64 << 32) - header_size as u64 + 1,
-                u32::MAX as u64,
-                (1u64 << 32) + 7,
-            ] {
-                if !large && packed > u32::MAX as u64 {
-                    continue;
-                }
-                let mut prefix = b"Rar!\x1a\x07\0\0\0\x73\0\0\x0d\0\0\0\0\0\0\0".to_vec();
-                prefix.extend([0, 0, RAR3_BLOCK_FILE]);
-                prefix.extend(
-                    (RAR3_BLOCK_ADDSIZE | if large { RAR3_FILE_ADDSIZE } else { 0 }).to_le_bytes(),
-                );
-                prefix.extend(header_size.to_le_bytes());
-                prefix.extend((packed as u32).to_le_bytes());
-                prefix.extend((packed as u32).to_le_bytes());
-                prefix.extend([0; 9]);
-                prefix.extend([20, 0x30, 1, 0]);
-                prefix.extend([0; 4]);
-                if large {
-                    prefix.extend(((packed >> 32) as u32).to_le_bytes());
-                    prefix.extend(((packed >> 32) as u32).to_le_bytes());
-                }
-                prefix.push(b'a');
-                assert_eq!(prefix.len(), 20 + header_size as usize);
-                let end = prefix.len() as i64 + packed as i64;
-                let mut source = Sparse { prefix, end };
-                let mut volume = Volume::default();
-                let mut cipher = TestCipher::default();
-                let mut files = Vec::new();
-                assert!(read_from(&mut volume, &mut source, &mut cipher, &mut files));
-                assert_eq!(files.len(), 1);
-                assert_eq!(files[0].packed_size, packed as i64);
-                assert_eq!(files[0].size, packed as i64);
-                assert_eq!(files[0].data_offset, 20 + header_size as i64);
-            }
-        }
-    }
-
-    #[test]
-    fn rar3_large_encrypted_block_padding() {
-        for size in [31u16, 32, 33] {
-            let mut data = vec![0; 8];
-            data.extend([0, 0, RAR3_BLOCK_FILE, 0, 0x80]);
-            data.extend(size.to_le_bytes());
-            data.extend(u32::MAX.to_le_bytes());
-            data.resize(24, 0);
-            let mut source = Bytes(data);
-            let mut volume = Volume {
-                encrypted: true,
-                ..Volume::default()
-            };
-            let mut cipher = TestCipher::default();
-            let mut files = Vec::new();
-            let mut p = Parser {
-                v: &mut volume,
-                file: Cursor {
-                    source: &mut source,
-                    position: 0,
-                    eof: false,
-                },
-                cipher: &mut cipher,
-                files: &mut files,
-            };
-            let block = p.rar3_block().unwrap();
-            assert!(p.skip_to_next(&block, false, 0));
-            assert_eq!(
-                p.file.position,
-                8 + ((size as i64 + 15) & !15) + u32::MAX as i64
-            );
-            assert_eq!(p.v.decrypt_pos, 16);
-        }
-    }
-
-    #[test]
-    fn decrypt_cache_partial_reads_and_failed_output() {
-        let mut source = Bytes((0..48).collect());
-        let mut volume = Volume {
-            encrypted: true,
-            ..Volume::default()
-        };
-        let mut cipher = TestCipher::default();
-        let mut files = Vec::new();
-        let mut p = Parser {
-            v: &mut volume,
-            file: Cursor {
-                source: &mut source,
-                position: 0,
-                eof: false,
-            },
-            cipher: &mut cipher,
-            files: &mut files,
-        };
-        let mut first = [0; 7];
-        assert!(p.decrypt_read(&mut first));
-        assert_eq!(first, [0, 1, 2, 3, 4, 5, 6]);
-        assert_eq!(p.file.position, 16);
-        assert_eq!(p.v.decrypt_pos, 7);
-        let mut second = [0; 12];
-        assert!(p.decrypt_read(&mut second));
-        assert_eq!(second, [7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]);
-        assert_eq!(p.file.position, 32);
-        assert_eq!(p.v.decrypt_pos, 3);
-        assert!(p.skip_to_next(
-            &Block {
-                trailsize: 13,
-                ..Block::default()
-            },
-            true,
-            0
-        ));
-        assert_eq!(p.file.position, 32);
-        assert_eq!(p.v.decrypt_pos, 16);
-        cipher.fail = true;
-        let mut p = Parser {
-            v: &mut volume,
-            file: Cursor {
-                source: &mut source,
-                position: 32,
-                eof: false,
-            },
-            cipher: &mut cipher,
-            files: &mut files,
-        };
-        assert!(!p.decrypt_read(&mut first));
-        assert_eq!(p.v.decrypt_pos, 0);
-        assert_eq!(
-            p.v.decrypt_buf,
-            [32, 33, 34, 35, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
-        );
-        assert_eq!(p.file.position, 48);
-        p.v.decrypt_pos = 16;
-        assert!(!p.decrypt_read(&mut first));
-        assert_eq!(p.v.decrypt_pos, 16);
-        assert_eq!(p.file.position, 48);
-        assert_eq!(cipher.blocks, 3);
-        assert_eq!(cipher.frees, 1);
-    }
-
-    #[test]
-    fn a_block_must_advance() {
-        let mut source = Bytes(b"Rar!\x1a\x07\x00\x00\x00\x73\x00\x00\x00\x00".to_vec());
-        let mut volume = Volume::default();
-        let mut cipher = TestCipher {
-            fail: false,
-            blocks: 0,
-            frees: 0,
-        };
-        let mut files: Vec<RarFile> = Vec::new();
-        assert!(!read_from(
-            &mut volume,
-            &mut source,
-            &mut cipher,
-            &mut files
-        ));
-        assert_eq!(volume.version, 3);
-    }
-
-    #[test]
-    fn progress_is_measured_from_the_block_start() {
-        for rar5 in [false, true] {
-            for encrypted in [false, true] {
-                for (trailsize, expected) in [(0u64.wrapping_sub(16), false), (0, true)] {
-                    let mut source = Bytes(vec![0; 64]);
-                    let mut volume = Volume {
-                        encrypted,
-                        decrypt_pos: 7,
-                        ..Volume::default()
-                    };
-                    let mut cipher = TestCipher::default();
-                    let mut files = Vec::new();
-                    let mut p = Parser {
-                        v: &mut volume,
-                        file: Cursor {
-                            source: &mut source,
-                            position: 32,
-                            eof: false,
-                        },
-                        cipher: &mut cipher,
-                        files: &mut files,
-                    };
-                    assert_eq!(
-                        p.skip_to_next(
-                            &Block {
-                                trailsize,
-                                ..Block::default()
-                            },
-                            rar5,
-                            16
-                        ),
-                        expected
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn rar5_non_advancing_blocks() {
-        for delta in [0u64, 1] {
-            let mut data = b"Rar!\x1a\x07\x01\0".to_vec();
-            data.extend([0, 0, 0, 0, 12, 3, 2]);
-            let mut size = 0u64.wrapping_sub(17 + delta);
-            while size >= 128 {
-                data.push((size as u8 & 127) | 128);
-                size >>= 7;
-            }
-            data.push(size as u8);
-            let mut source = Bytes(data);
-            let mut volume = Volume::default();
-            let mut cipher = TestCipher::default();
-            let mut files = Vec::new();
-            assert!(!read_from(
-                &mut volume,
-                &mut source,
-                &mut cipher,
-                &mut files
-            ));
-            assert_eq!(volume.version, 5);
-        }
-    }
-
-    #[test]
-    fn signature_and_terminal_blocks() {
-        for data in [
-            b"Rar!\x1a\x07\0\0\0\x73\0\0\x07\0\0\0\x7b\0\0\x07\0".as_slice(),
-            b"Rar!\x1a\x07\x01\0\0\0\0\0\x03\x01\0\0\0\0\0\0\x03\x05\0\0".as_slice(),
-        ] {
-            let mut source = Bytes(data.to_vec());
-            let mut volume = Volume::default();
-            let mut cipher = TestCipher::default();
-            let mut files = Vec::new();
-            assert!(read_from(&mut volume, &mut source, &mut cipher, &mut files));
-        }
-    }
-
     #[test]
     fn rar_reader_full_suite_port_from_cpp() {
         let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -1293,9 +498,8 @@ mod tests {
                 has_password: password.is_some(),
                 ..Volume::default()
             };
-            let mut cipher = crate::streamrepair::NativeRarCipher::new(password.unwrap_or(b""));
             let mut files = Vec::new();
-            let ok = read_from(&mut volume, &mut source, &mut cipher, &mut files);
+            let ok = read_from(&mut volume, &mut source, password, &mut files);
             (ok, volume, files, size)
         };
 
@@ -1324,9 +528,8 @@ mod tests {
             bytes.extend([0u8; 64]);
             let mut source = Bytes(bytes);
             let mut vol = Volume::default();
-            let mut cipher = crate::streamrepair::NativeRarCipher::new(b"");
             let mut files = Vec::new();
-            assert!(!read_from(&mut vol, &mut source, &mut cipher, &mut files));
+            assert!(!read_from(&mut vol, &mut source, None, &mut files));
         }
 
         // 3. Rar3ZeroAdvanceTest
@@ -1336,9 +539,8 @@ mod tests {
             ];
             let mut source = Bytes(bytes);
             let mut vol = Volume::default();
-            let mut cipher = crate::streamrepair::NativeRarCipher::new(b"");
             let mut files = Vec::new();
-            assert!(!read_from(&mut vol, &mut source, &mut cipher, &mut files));
+            assert!(!read_from(&mut vol, &mut source, None, &mut files));
         }
 
         // 4. Rar5Test
@@ -1493,141 +695,217 @@ mod tests {
             assert!(ok);
             assert!(files[0].encrypted_data);
         }
+    }
 
-        // 12. RarCursorWrappingSeekTest & RarCursorWrappingReadTest
-        {
-            let mut source = Bytes(vec![0u8; 8]);
-            let mut cursor = Cursor {
-                source: &mut source,
-                position: 0,
-                eof: false,
+    #[test]
+    fn wrong_header_password_still_reports_encrypted_headers() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("tests/testdata/rarrenamer");
+        for name in ["testfile3encnam.part01.rar", "testfile5encnam.part01.rar"] {
+            let mut source = Bytes(std::fs::read(dir.join(name)).unwrap());
+            let mut volume = Volume {
+                has_password: true,
+                ..Volume::default()
             };
-            assert!(cursor.seek(i64::MAX, SO_SET));
-            assert!(!cursor.seek(1, SO_CUR));
-            assert_eq!(cursor.position, i64::MAX);
-            assert!(!cursor.seek(i64::MAX, SO_END));
-            assert_eq!(cursor.position, i64::MAX);
-        }
-        {
-            struct WrappingSource;
-            impl Source for WrappingSource {
-                fn size(&mut self) -> i64 {
-                    i64::MIN
-                }
-                fn read(&mut self, offset: i64, buf: &mut [u8]) -> bool {
-                    if offset != i64::MAX || buf.len() != 1 {
-                        return false;
-                    }
-                    buf[0] = b'x';
-                    true
-                }
-            }
-            let mut source = WrappingSource;
-            let mut cursor = Cursor {
-                source: &mut source,
-                position: 0,
-                eof: false,
-            };
-            assert!(cursor.seek(i64::MAX, SO_SET));
-            let mut byte = [0u8; 1];
-            assert_eq!(cursor.read(&mut byte), 1);
-            assert_eq!(byte[0], b'x');
-            assert_eq!(cursor.position, i64::MIN);
-        }
-
-        // 13. RarSourceExceptionStateTest (aborting source after partial file commit & repeated ReadFrom)
-        {
-            struct FailingSource {
-                data: Vec<u8>,
-                fail_at: i32,
-                size_fails: bool,
-                reads: i32,
-                failed: bool,
-                sig_read: bool,
-            }
-            impl Source for FailingSource {
-                fn size(&mut self) -> i64 {
-                    if self.failed || self.size_fails {
-                        self.failed = true;
-                        return -1;
-                    }
-                    self.data.len() as i64
-                }
-                fn read(&mut self, offset: i64, buf: &mut [u8]) -> bool {
-                    if self.failed {
-                        return false;
-                    }
-                    let r = self.reads;
-                    self.reads += 1;
-                    if r == self.fail_at {
-                        self.failed = true;
-                        return false;
-                    }
-                    let Some(s) = self.data.get(offset as usize..offset as usize + buf.len())
-                    else {
-                        self.sig_read = true;
-                        return false;
-                    };
-                    buf.copy_from_slice(s);
-                    self.sig_read = true;
-                    true
-                }
-            }
-
-            let mut data = b"Rar!\x1a\x07\x01\0".to_vec();
-            let file_hdr = [0u8, 0, 0, 0, 9, 2, 0, 0, 0, 0, 0, 0, 1, b'a'];
-            data.extend_from_slice(&file_hdr);
-            data.extend_from_slice(&file_hdr);
-
-            let mut vol = Volume::default();
             let mut files = Vec::new();
-            let mut cipher = TestCipher::default();
-            let mut src1 = FailingSource {
-                data: data.clone(),
-                fail_at: 12,
-                size_fails: false,
-                reads: 0,
-                failed: false,
-                sig_read: false,
-            };
-            assert!(!read_from(&mut vol, &mut src1, &mut cipher, &mut files));
-            assert!(src1.failed);
-            assert_eq!(vol.version, 5);
-            assert_eq!(files.len(), 1);
-            assert_eq!(files[0].filename, b"a");
-            assert_eq!(files[0].data_offset, 22);
+            assert!(!read_from(
+                &mut volume,
+                &mut source,
+                Some(b"wrong"),
+                &mut files
+            ));
+            assert!(volume.encrypted, "{name}");
+            assert!(files.is_empty());
+        }
+    }
 
-            let prev_version = vol.version;
-            let mut src2 = FailingSource {
-                data: data.clone(),
-                fail_at: 0,
-                size_fails: false,
-                reads: 0,
-                failed: false,
-                sig_read: false,
-            };
-            assert!(!read_from(&mut vol, &mut src2, &mut cipher, &mut files));
-            if src2.failed && !src2.sig_read {
-                vol.version = prev_version;
+    /// A source that fails every read reaching past `limit`, as a content
+    /// source does at a missing article.
+    struct FailsPast {
+        data: Vec<u8>,
+        limit: usize,
+    }
+    impl Source for FailsPast {
+        fn size(&mut self) -> i64 {
+            self.data.len() as i64
+        }
+        fn read(&mut self, offset: i64, buf: &mut [u8]) -> bool {
+            let start = offset as usize;
+            let end = start + buf.len();
+            if end > self.limit || end > self.data.len() {
+                return false;
             }
-            assert_eq!(vol.version, 5);
-            assert_eq!(files.len(), 1);
+            buf.copy_from_slice(&self.data[start..end]);
+            true
+        }
+    }
 
-            let prev_version = vol.version;
-            let mut src3 = FailingSource {
+    #[test]
+    fn files_read_before_a_failed_read_are_kept() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("tests/testdata/rarrenamer");
+        for name in ["testfile3.part01.rar", "testfile5.part01.rar"] {
+            let data = std::fs::read(dir.join(name)).unwrap();
+            let mut whole = Vec::new();
+            let mut volume = Volume::default();
+            assert!(read_from(
+                &mut volume,
+                &mut Bytes(data.clone()),
+                None,
+                &mut whole
+            ));
+            let first = whole[0].clone();
+            // the bytes stop right after the first file's header: its data
+            // and the end header cannot be read
+            let mut source = FailsPast {
+                limit: first.data_offset as usize + 1,
                 data,
-                fail_at: -1,
-                size_fails: true,
-                reads: 0,
-                failed: false,
-                sig_read: false,
             };
-            assert!(!read_from(&mut vol, &mut src3, &mut cipher, &mut files));
-            if src3.failed && !src3.sig_read {
-                vol.version = prev_version;
+            let mut volume = Volume::default();
+            let mut files = Vec::new();
+            assert!(!read_from(&mut volume, &mut source, None, &mut files));
+            assert_eq!(files, vec![first], "{name}");
+            assert!(volume.multi_volume);
+            assert!(!volume.has_next_volume);
+        }
+    }
+
+    #[test]
+    fn rar3_times_offsets_and_methods_match_the_headers() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("tests/testdata/rarrenamer");
+        let data = std::fs::read(dir.join("testfile3.part01.rar")).unwrap();
+        // the first file header follows the 7-byte signature and the main header
+        let main = u16::from_le_bytes([data[12], data[13]]) as usize;
+        let at = 7 + main;
+        assert_eq!(data[at + 2], 0x74);
+        let size = u16::from_le_bytes([data[at + 5], data[at + 6]]) as usize;
+        let dos = u32::from_le_bytes(data[at + 20..at + 24].try_into().unwrap());
+        let method = data[at + 25];
+        let mut files = Vec::new();
+        let mut volume = Volume::default();
+        assert!(read_from(
+            &mut volume,
+            &mut Bytes(data.clone()),
+            None,
+            &mut files
+        ));
+        assert_eq!(files[0].time, dos);
+        assert_eq!(files[0].method, u32::from(method));
+        assert_eq!(files[0].data_offset, (at + size) as i64);
+    }
+
+    #[test]
+    fn files_before_a_damaged_header_are_kept() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("tests/testdata/rarrenamer");
+        for name in ["testfile3.part01.rar", "testfile5.part01.rar"] {
+            let mut data = std::fs::read(dir.join(name)).unwrap();
+            let mut whole = Vec::new();
+            assert!(read_from(
+                &mut Volume::default(),
+                &mut Bytes(data.clone()),
+                None,
+                &mut whole
+            ));
+            // break the checksum of the header after the first file's data
+            let after = (whole[0].data_offset + whole[0].packed_size) as usize;
+            data[after] ^= 0xff;
+            let mut volume = Volume::default();
+            let mut files = Vec::new();
+            assert!(!read_from(&mut volume, &mut Bytes(data), None, &mut files));
+            assert_eq!(files, whole[..1].to_vec(), "{name}");
+            assert!(volume.multi_volume);
+        }
+    }
+
+    /// A RAR3 volume of one stored file of `packed` bytes, whose data are
+    /// zeros never kept in memory.
+    struct Sparse {
+        head: Vec<u8>,
+        tail_at: usize,
+        tail: Vec<u8>,
+    }
+    impl Source for Sparse {
+        fn size(&mut self) -> i64 {
+            (self.tail_at + self.tail.len()) as i64
+        }
+        fn read(&mut self, offset: i64, buf: &mut [u8]) -> bool {
+            let start = offset as usize;
+            if start + buf.len() > self.tail_at + self.tail.len() {
+                return false;
             }
-            assert_eq!(vol.version, 5);
+            for (i, b) in buf.iter_mut().enumerate() {
+                let at = start + i;
+                *b = if at < self.head.len() {
+                    self.head[at]
+                } else if at >= self.tail_at {
+                    self.tail[at - self.tail_at]
+                } else {
+                    0
+                };
+            }
+            true
+        }
+    }
+
+    fn rar3_header(kind: u8, flags: u16, fields: &[u8]) -> Vec<u8> {
+        let mut h = vec![0, 0, kind];
+        h.extend(flags.to_le_bytes());
+        h.extend(((7 + fields.len()) as u16).to_le_bytes());
+        h.extend(fields);
+        let crc = crc32fast::hash(&h[2..]) as u16;
+        h[..2].copy_from_slice(&crc.to_le_bytes());
+        h
+    }
+
+    #[test]
+    fn rar3_sizes_and_offsets_past_4_gib() {
+        for packed in [u32::MAX as u64, (1u64 << 32) + 7, 5 << 30] {
+            let large = packed > u32::MAX as u64;
+            let mut head = b"Rar!\x1a\x07\x00".to_vec();
+            head.extend(rar3_header(0x73, 0, &[0; 6]));
+            let mut f = Vec::new();
+            f.extend((packed as u32).to_le_bytes());
+            f.extend((packed as u32).to_le_bytes());
+            f.push(2); // host os
+            f.extend([0; 4]); // crc
+            f.extend(0x5a6b_2c21u32.to_le_bytes()); // DOS time
+            f.extend([29, 0x30]);
+            f.extend(1u16.to_le_bytes());
+            f.extend(0x20u32.to_le_bytes());
+            if large {
+                f.extend(((packed >> 32) as u32).to_le_bytes());
+                f.extend(((packed >> 32) as u32).to_le_bytes());
+            }
+            f.push(b'a');
+            let flags = 0x8000 | if large { 0x0100 } else { 0 };
+            head.extend(rar3_header(0x74, flags, &f));
+            let data_at = head.len();
+            let mut source = Sparse {
+                tail_at: data_at + packed as usize,
+                tail: rar3_header(0x7b, 0, &[]),
+                head,
+            };
+            let mut volume = Volume::default();
+            let mut files = Vec::new();
+            assert!(
+                read_from(&mut volume, &mut source, None, &mut files),
+                "{packed}"
+            );
             assert_eq!(files.len(), 1);
+            assert_eq!(files[0].packed_size, packed as i64);
+            assert_eq!(files[0].size, packed as i64);
+            assert_eq!(files[0].data_offset, data_at as i64);
+            assert_eq!(files[0].time, 0x5a6b_2c21);
         }
     }
 }

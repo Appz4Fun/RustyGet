@@ -1,4 +1,9 @@
 use super::*;
+
+thread_local! {
+    /// Declares complete sets at session start whatever their estimated cost.
+    pub(super) static FORCE_DECLARE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 
 // ---- RAR5 fixture builder (stored members, valid header and data CRCs) ----
@@ -1864,7 +1869,6 @@ fn mode_of(path: &Path) -> u32 {
 }
 
 #[test]
-#[ignore = "protection declarations are off (DECLARE_PROTECTION)"]
 fn after_repair_zipfast_moves_the_patched_file_into_place() {
     let t = TestDir::new("renameafter");
     let (out, data, log) = repaired_in_place(&t, "movie.mkv", Overwrite::Always);
@@ -1889,7 +1893,6 @@ fn a_repaired_windows_member_keeps_the_copy_path_name() {
 }
 
 #[test]
-#[ignore = "protection declarations are off (DECLARE_PROTECTION)"]
 fn a_moved_member_keeps_owner_read_write() {
     RAR5_HOST.with(|h| h.set((1, 0o000)));
     let t = TestDir::new("rename000");
@@ -1910,7 +1913,6 @@ fn skip_mode_keeps_copying_after_a_repair() {
 }
 
 #[test]
-#[ignore = "protection declarations are off (DECLARE_PROTECTION)"]
 fn a_complete_windows_set_gets_a_normal_mode() {
     RAR5_HOST.with(|h| h.set((0, 0x20)));
     let t = TestDir::new("completewin");
@@ -2246,7 +2248,6 @@ fn protection_upgrade_is_skipped_when_the_handle_budget_cannot_fit_it() {
 /// PR 430's scenario on this branch: 60 volumes, 11 damaged and repaired in place, volume count
 /// known. The repaired output is moved by the session, never copied.
 #[test]
-#[ignore = "protection declarations are off (DECLARE_PROTECTION)"]
 fn repaired_output_with_many_damaged_volumes_is_moved_not_copied() {
     struct Counted(Damaged, u64);
     impl VolumeFeed for Counted {
@@ -2362,7 +2363,6 @@ fn run_late(
 }
 
 #[test]
-#[ignore = "protection declarations are off (DECLARE_PROTECTION)"]
 fn a_set_that_became_final_is_moved_not_copied() {
     let t = TestDir::new("latefinal");
     let data = pattern(600_000);
@@ -2503,7 +2503,6 @@ impl VolumeFeed for FinalAfterRepair {
 /// there byte for byte (6790: 7 min to copy a 15 GB repaired mkv). Many volumes, several of
 /// them damaged, so the declared set and the repaired volumes fit the handle budget.
 #[test]
-#[ignore = "protection declarations are off (DECLARE_PROTECTION)"]
 fn repaired_output_of_a_final_set_is_moved_not_copied() {
     let t = TestDir::new("finalrepair");
     let chunk = 50_000;
@@ -2577,12 +2576,77 @@ fn a_final_set_of_many_small_volumes_extracts() {
     assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
 }
 
+/// Bytes `start..start + len` of `pattern`, without building the whole buffer.
+fn pattern_at(start: usize, len: usize) -> Vec<u8> {
+    (start..start + len)
+        .map(|i| ((i as u64).wrapping_mul(2654435761) >> 7) as u8)
+        .collect()
+}
+
+/// Writes a `volumes`-volume stored RAR5 set of `movie.mkv` (`total` bytes of `pattern`) one
+/// volume at a time, so large sets need only one volume in memory. Returns the first volume,
+/// the payload offset and length of each volume, and the member's CRC32.
+fn write_big_set(dir: &Path, total: usize, volumes: usize) -> (PathBuf, Vec<(usize, usize)>, u32) {
+    let chunk = total.div_ceil(volumes);
+    let mut whole = crc32fast::Hasher::new();
+    for i in 0..volumes {
+        let start = i * chunk;
+        whole.update(&pattern_at(start, chunk.min(total - start)));
+    }
+    let whole = whole.finalize();
+    let mut layout = Vec::new();
+    for i in 0..volumes {
+        let start = i * chunk;
+        let part = pattern_at(start, chunk.min(total - start));
+        let last = i + 1 == volumes;
+        let crc = if last { whole } else { crc32fast::hash(&part) };
+        let mut out = SIG.to_vec();
+        out.extend(main_block(true, if i == 0 { None } else { Some(i as u64) }));
+        out.extend(file_block(
+            "movie.mkv",
+            total as u64,
+            &part,
+            crc,
+            i > 0,
+            !last,
+        ));
+        out.extend(end_block(!last));
+        layout.push((payload_offset(&out, part.len()), part.len()));
+        std::fs::write(dir.join(volume_name(i, volumes)), &out).unwrap();
+    }
+    (dir.join(volume_name(0, volumes)), layout, whole)
+}
+
+fn crc_of_file(path: &Path) -> u32 {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).unwrap();
+    let mut h = crc32fast::Hasher::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = f.read(&mut buf).unwrap();
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    h.finalize()
+}
+
+fn big_mb(default: usize) -> usize {
+    std::env::var("RG_BIG_MB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+/// A plain final set shaped like production job #207: 159 stored volumes through a
+/// post-download unpack, declared Complete and moved into place. Before zipfast #116 the
+/// declaration ran out of SourceBookkeeping at about 0.5 GB.
 #[test]
-fn a_final_set_is_copied_into_place_while_declarations_are_off() {
-    let t = TestDir::new("final_copied");
-    let data = pattern(300_000);
-    let vols = rar5_volumes("movie.mkv", &data, 100_000);
-    let first = write_set(&t.dl(), &vols);
+fn big_final_set_unpacks() {
+    let total = big_mb(1024) << 20;
+    let t = TestDir::new("big_final");
+    let (first, _, crc) = write_big_set(&t.dl(), total, 159);
     let req = Request {
         first_volume: &first,
         dest: &t.out(),
@@ -2600,33 +2664,181 @@ fn a_final_set_is_copied_into_place_while_declarations_are_off() {
         Some(&mut copied),
     );
     expect_ok(r, &log);
-    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
-    assert_eq!(copied.len(), 1, "{copied:?}");
+    assert!(copied.is_empty(), "copied instead of moved: {copied:?}");
+    assert_eq!(crc_of_file(&t.out().join("movie.mkv")), crc);
 }
 
-/// A plain final set shaped like production job #207 (159 stored volumes) through a
-/// post-download unpack. Large: run with `RG_BIG_MB=<total MiB> cargo test --release --lib
-/// big_final_set -- --ignored --nocapture`.
+/// Many volumes with long paths: every volume admission sweeps the whole declared inventory,
+/// so a session-start declaration of 800 volumes ran out of SourceBookkeeping where the copy
+/// path works. Such sets are left undeclared and copied.
 #[test]
-#[ignore]
-fn big_final_set_unpacks() {
-    let total_mb: usize = std::env::var("RG_BIG_MB")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(1900);
-    let volumes = 159usize;
-    let chunk = (total_mb << 20) / volumes;
-    let t = TestDir::new("big_final");
-    let data = pattern(chunk * volumes);
-    let vols = rar5_volumes("movie.mkv", &data, chunk);
-    let first = write_set(&t.dl(), &vols);
-    drop(vols);
+fn a_final_set_of_many_volumes_with_long_paths_extracts() {
+    let t = TestDir::new("manyvols");
+    let dir = t.dl().join("x".repeat(150));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (first, _, crc) = write_big_set(&dir, 800 * 64 * 1024, 800);
     let (r, log) = run(&first, &t.out(), Box::new(CompleteSet));
-    match &r {
-        Ok(_) => eprintln!("BIG_FINAL ok volumes={volumes} mb={total_mb}"),
-        Err(Error::Failed(f)) => eprintln!("BIG_FINAL failed: {f}"),
-        Err(Error::Unsupported(u)) => eprintln!("BIG_FINAL unsupported: {u:?}"),
-    }
     expect_ok(r, &log);
-    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+    assert_eq!(crc_of_file(&t.out().join("movie.mkv")), crc);
+}
+
+/// Many members across many volumes: every member boundary runs a full protection refresh,
+/// so a declared session of 150 volumes and 600 members ran out of SourceBookkeeping where the
+/// copy path works. Such sets are left undeclared and copied.
+#[test]
+fn a_final_set_of_many_members_extracts() {
+    let t = TestDir::new("manymembers");
+    let dir = t.dl().join("y".repeat(100));
+    std::fs::create_dir_all(&dir).unwrap();
+    let volumes = 150;
+    let per = 4;
+    let mut expected = Vec::new();
+    for i in 0..volumes {
+        let mut v = SIG.to_vec();
+        v.extend(main_block(true, if i == 0 { None } else { Some(i as u64) }));
+        for j in 0..per {
+            let name = format!("d{}/e{}/f{i}_{j}.bin", i % 7, j);
+            let data = pattern_at(i * 10_000 + j * 997, 3_000 + j);
+            v.extend(file_block(
+                &name,
+                data.len() as u64,
+                &data,
+                crc32fast::hash(&data),
+                false,
+                false,
+            ));
+            expected.push((name, data));
+        }
+        v.extend(end_block(i + 1 < volumes));
+        std::fs::write(dir.join(volume_name(i, volumes)), &v).unwrap();
+    }
+    let first = dir.join(volume_name(0, volumes));
+    let (r, log) = run(&first, &t.out(), Box::new(CompleteSet));
+    expect_ok(r, &log);
+    for (name, data) in expected {
+        assert_eq!(std::fs::read(t.out().join(&name)).unwrap(), data, "{name}");
+    }
+}
+
+#[test]
+fn a_final_windows_set_is_copied_under_the_copy_path_name() {
+    RAR5_HOST.with(|h| h.set((0, 0x20)));
+    let t = TestDir::new("finalwin");
+    let data = pattern(300_000);
+    let vols = rar5_volumes("dir\\movie.mkv", &data, 100_000);
+    RAR5_HOST.with(|h| h.set((1, 0o644)));
+    let first = write_set(&t.dl(), &vols);
+    let (r, log) = run(&first, &t.out(), Box::new(CompleteSet));
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("dir\\movie.mkv")).unwrap(), data);
+}
+
+/// One volume with tens of thousands of members: each declared member validation charges
+/// metadata bytes, which ran out of MetadataBytes where the copy path works. A declared set
+/// gets its estimated cost added to the session's limits.
+#[test]
+fn a_final_set_of_tens_of_thousands_of_members_extracts() {
+    let t = TestDir::new("hugemembers");
+    let mut v = SIG.to_vec();
+    v.extend(main_block(false, None));
+    let n = 20_000;
+    let long = "n".repeat(200);
+    for j in 0..n {
+        let name = format!("f/{long}{j:06}.txt");
+        let data = format!("{j}").into_bytes();
+        v.extend(file_block(
+            &name,
+            data.len() as u64,
+            &data,
+            crc32fast::hash(&data),
+            false,
+            false,
+        ));
+    }
+    v.extend(end_block(false));
+    let dir = t.dl().join("z".repeat(150));
+    std::fs::create_dir_all(&dir).unwrap();
+    let first = dir.join("set.rar");
+    std::fs::write(&first, &v).unwrap();
+    let (r, log) = run(&first, &t.out(), Box::new(CompleteSet));
+    expect_ok(r, &log);
+    for j in [0, 17_000, n - 1] {
+        assert_eq!(
+            std::fs::read(t.out().join(format!("f/{long}{j:06}.txt"))).unwrap(),
+            format!("{j}").into_bytes()
+        );
+    }
+}
+
+/// Many volumes with long file names in a short directory: every volume opened and every
+/// publication charges each volume's name, which ran out of NameBytes where the copy path
+/// works. A declared set gets that cost added to its limits too.
+#[test]
+fn a_final_set_of_many_long_named_volumes_extracts() {
+    let t = TestDir::new("longnames");
+    let volumes = 750;
+    let stem = "Some.Long.Descriptive.Release.Name.2026.2160p.UHD.BluRay.REMUX.HDR.HEVC.DTS-HD.MA.7.1-GROUPNAME.and.more";
+    let total = volumes * 4096;
+    let chunk = 4096;
+    let mut whole = crc32fast::Hasher::new();
+    whole.update(&pattern_at(0, total));
+    let whole = whole.finalize();
+    for i in 0..volumes {
+        let part = pattern_at(i * chunk, chunk);
+        let last = i + 1 == volumes;
+        let crc = if last { whole } else { crc32fast::hash(&part) };
+        let mut out = SIG.to_vec();
+        out.extend(main_block(true, if i == 0 { None } else { Some(i as u64) }));
+        out.extend(file_block(
+            "movie.mkv",
+            total as u64,
+            &part,
+            crc,
+            i > 0,
+            !last,
+        ));
+        out.extend(end_block(!last));
+        std::fs::write(t.dl().join(format!("{stem}.part{:03}.rar", i + 1)), &out).unwrap();
+    }
+    let first = t.dl().join(format!("{stem}.part001.rar"));
+    let (r, log) = run(&first, &t.out(), Box::new(CompleteSet));
+    expect_ok(r, &log);
+    assert_eq!(crc_of_file(&t.out().join("movie.mkv")), whole);
+}
+
+/// A declared session that still runs out of a zipfast limit is extracted again undeclared:
+/// forced past the estimate, 800 long-path volumes fail declared and then copy.
+#[test]
+fn a_declared_set_that_hits_a_limit_is_extracted_again() {
+    FORCE_DECLARE.with(|f| f.set(true));
+    let t = TestDir::new("retryundeclared");
+    let dir = t.dl().join("x".repeat(150));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (first, _, crc) = write_big_set(&dir, 800 * 64 * 1024, 800);
+    let (r, log) = run(&first, &t.out(), Box::new(CompleteSet));
+    FORCE_DECLARE.with(|f| f.set(false));
+    expect_ok(r, &log);
+    assert!(
+        log.iter()
+            .any(|l| l.contains("extracting again without declaring")),
+        "{log:?}"
+    );
+    assert_eq!(crc_of_file(&t.out().join("movie.mkv")), crc);
+}
+
+#[test]
+fn only_limits_a_declaration_inflates_trigger_the_undeclared_retry() {
+    assert!(is_declaration_limit(
+        "Limit { resource: SourceBookkeeping, limit: 100663296, attempted: 100663340 } in set.part76.rar"
+    ));
+    assert!(is_declaration_limit(
+        "Limit { resource: NameBytes, limit: 1, attempted: 2 }"
+    ));
+    assert!(!is_declaration_limit(
+        "Limit { resource: SourceBytes, limit: 1, attempted: 2 }"
+    ));
+    assert!(!is_declaration_limit(
+        "Limit { resource: TempBytes, limit: 1, attempted: 2 }"
+    ));
+    assert!(!is_declaration_limit("checksum mismatch"));
 }

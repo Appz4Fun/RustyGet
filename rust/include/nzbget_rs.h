@@ -362,6 +362,13 @@ void nzbget_rs_par_checker_free(NzbgetRsParChecker* ctrl);
 int nzbget_rs_par_checker_exec(
     const NzbgetRsParChecker* ctrl, int op, int a1, const char* s1,
     NzbgetRsRepairCtrlHostFn host_cb, void* ctx);
+// Articles of a queued file (rust/src/qarticle.rs); see nzbget_rs_article_host for op codes.
+typedef struct RsArticleList RsArticleList;
+typedef struct RsArticle RsArticle;
+RsArticleList* nzbget_rs_artlist_new(void);
+void nzbget_rs_artlist_free(RsArticleList* list);
+uintptr_t nzbget_rs_article_host(RsArticleList* list, RsArticle* article, int op, int a2, uintptr_t p2,
+    const char* s1, int* ints, int64_t* i64s, const char** strs);
 // Job threads for post-processing, live repair and direct unpack (rust/src/jobthread.rs).
 typedef struct JobThread JobThread;
 JobThread* nzbget_rs_job_new_post(int kind, uintptr_t post_ptr, int nzb_id, int auto_destroy);

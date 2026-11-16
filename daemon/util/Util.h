@@ -1093,127 +1093,13 @@ public:
 	}
 };
 
-class ArticleInfo
+// Articles live in Rust (rust/src/qarticle.rs). Status values as there.
+enum EArticleStatus { aiUndefined, aiRunning, aiFinished, aiFailed };
+inline uintptr_t ArtOp(RsArticleList* list, uintptr_t article, int op, int a2 = 0, uintptr_t p2 = 0,
+	const char* s1 = nullptr, int* ints = nullptr, int64_t* i64s = nullptr, const char** strs = nullptr)
 {
-public:
-	enum EStatus
-	{
-		aiUndefined,
-		aiRunning,
-		aiFinished,
-		aiFailed
-	};
-
-	ArticleInfo() = default;
-	~ArticleInfo() { DiscardSegment(); }
-	ArticleInfo(const ArticleInfo&) = delete;
-	ArticleInfo& operator=(const ArticleInfo&) = delete;
-
-	void SetPartNumber(int s) { m_partNumber = s; }
-	int GetPartNumber() { return m_partNumber; }
-	const char* GetMessageId() { return m_messageId; }
-	void SetMessageId(const char* messageId) { m_messageId = messageId; }
-	void SetSize(int size) { m_size = size; }
-	int GetSize() { return m_size; }
-	void AttachSegment(char* data, int allocSize, int64 offset, int size)
-	{
-		DiscardSegment();
-		m_segmentData = data;
-		m_segmentAllocSize = allocSize;
-		m_segmentOffset = offset;
-		m_segmentSize = size;
-	}
-	void DiscardSegment()
-	{
-		if (m_segmentAllocSize)
-			nzbget_rs_diskstate_op(99, reinterpret_cast<uintptr_t>(m_segmentData), m_segmentAllocSize, nullptr);
-		m_segmentData = nullptr;
-		m_segmentAllocSize = 0;
-	}
-	const char* GetSegmentContent() { return m_segmentData; }
-	void SetSegmentOffset(int64 segmentOffset) { m_segmentOffset = segmentOffset; }
-	int64 GetSegmentOffset() { return m_segmentOffset; }
-	// Header ownership is separate from cache geometry and survives retry resets.
-	// Access only while holding the download queue lock.
-	int64 GetLiveParClaimBegin() const { return m_liveParClaimBegin; }
-	int64 GetLiveParClaimEnd() const { return m_liveParClaimEnd; }
-	void SetLiveParClaimRange(int64 begin, int64 end) { m_liveParClaimBegin = begin; m_liveParClaimEnd = end; }
-	void SetSegmentSize(int segmentSize) { m_segmentSize = segmentSize; }
-	int GetSegmentSize() { return m_segmentSize; }
-	EStatus GetStatus() { return m_status; }
-	void SetStatus(EStatus Status) { m_status = Status; }
-	const char* GetResultFilename() { return m_resultFilename; }
-	void SetResultFilename(const char* resultFilename) { m_resultFilename = resultFilename; }
-	uint32 GetCrc() { return m_crc; }
-	void SetCrc(uint32 crc) { m_crc = crc; }
-	int GetDupeFallbackRound() { return m_dupeFallbackRound; }
-	void SetDupeFallbackRound(int dupeFallbackRound) { m_dupeFallbackRound = dupeFallbackRound; }
-	const char* GetDupeOriginalMessageId() { return m_dupeOriginalMessageId; }
-	void SetDupeOriginalMessageId(const char* messageId) { m_dupeOriginalMessageId = messageId; }
-	int64 GetDupeExpectedOffset() { return m_dupeExpectedOffset; }
-	void SetDupeExpectedOffset(int64 dupeExpectedOffset) { m_dupeExpectedOffset = dupeExpectedOffset; }
-	int64 GetDupeExpectedEnd() { return m_dupeExpectedEnd; }
-	void SetDupeExpectedEnd(int64 dupeExpectedEnd) { m_dupeExpectedEnd = dupeExpectedEnd; }
-	std::vector<CString>* GetDupeSources() { return &m_dupeSources; }
-	// the donor (nzb-id) behind each pinned source; the release's own message-id has none
-	std::vector<int>* GetDupeSourceDonors() { return &m_dupeSourceDonors; }
-	// the donor whose article filled this one (0: the release's own)
-	int GetDupeDonorId() { return m_dupeDonorId; }
-	void SetDupeDonorId(int dupeDonorId) { m_dupeDonorId = dupeDonorId; }
-	int GetDupeLeadSnapshot() { return m_dupeLeadSnapshot; }
-	void SetDupeLeadSnapshot(int dupeLeadSnapshot) { m_dupeLeadSnapshot = dupeLeadSnapshot; }
-	int GetDupeNextLead() { return m_dupeNextLead; }
-	void SetDupeNextLead(int dupeNextLead) { m_dupeNextLead = dupeNextLead; }
-	int GetDupeDonorCount() { return m_dupeDonorCount; }
-	void SetDupeDonorCount(int dupeDonorCount) { m_dupeDonorCount = dupeDonorCount; }
-	bool GetDupeProactive() { return m_dupeProactive; }
-	void SetDupeProactive(bool dupeProactive) { m_dupeProactive = dupeProactive; }
-
-private:
-	char* m_segmentData = nullptr;
-	int m_segmentAllocSize = 0;
-	int64 m_liveParClaimBegin = -1;
-	int64 m_liveParClaimEnd = -1;
-	std::atomic<int64> m_segmentOffset{0};
-	std::atomic<int> m_segmentSize{0};
-	std::atomic<uint32> m_crc{0};
-	CString m_messageId;
-	CString m_resultFilename;
-	EStatus m_status = aiUndefined;
-	int m_partNumber;
-	int m_size = 0;
-	// number of times this article was requeued with a message-id borrowed
-	// from a duplicate collection (not persisted)
-	int m_dupeFallbackRound = 0;
-	// the article's own (primary) message-id, saved before the first
-	// substitution so the primary can be tried as a revert source (not persisted)
-	CString m_dupeOriginalMessageId;
-	// decoded byte range a substituted (donor) article is expected to occupy,
-	// derived from already-finished neighbour articles at substitution time;
-	// -1 = unknown (not persisted)
-	int64 m_dupeExpectedOffset = -1;
-	int64 m_dupeExpectedEnd = -1;
-	// the message-ids this article is tried against, pinned at its first
-	// fallback so no later queue/history change or lead rotation can shift the
-	// round->source mapping under the article (not persisted)
-	std::vector<CString> m_dupeSources;
-	std::vector<int> m_dupeSourceDonors;
-	int m_dupeDonorId = 0;
-	// the nzb-id of the donor whose article the pinned slot 0 fetches; a
-	// lead-round result only counts towards demotion while this donor is still
-	// the file's lead (not persisted)
-	int m_dupeLeadSnapshot = 0;
-	// the nzb-id of the next distinct donor in the pinned order - the donor a
-	// demotion rotates the file's lead to; 0 = no other donor (not persisted)
-	int m_dupeNextLead = 0;
-	// distinct donors in the pinned order; bounds the lead rotation (not persisted)
-	int m_dupeDonorCount = 0;
-	// true when the first donor attempt was proactive cutover rather than a
-	// retry after the target article failed on its primary source
-	bool m_dupeProactive = false;
-};
-
-typedef std::vector<std::unique_ptr<ArticleInfo>> ArticleList;
+	return nzbget_rs_article_host(list, reinterpret_cast<RsArticle*>(article), op, a2, p2, s1, ints, i64s, strs);
+}
 
 class FileInfo
 {
@@ -1228,6 +1114,9 @@ public:
 	typedef std::vector<CString> Groups;
 
 	FileInfo(int id = 0) : m_id(id ? id : ++m_idGen) {}
+	~FileInfo() { nzbget_rs_artlist_free(m_articles); }
+	FileInfo(const FileInfo&) = delete;
+	FileInfo& operator=(const FileInfo&) = delete;
 	int GetId() { return m_id; }
 	void SetId(int id)
 	{
@@ -1253,7 +1142,7 @@ public:
 	static int LastGenId() { return m_idGen; }
 	NzbInfo* GetNzbInfo() { return m_nzbInfo; }
 	void SetNzbInfo(NzbInfo* nzbInfo) { m_nzbInfo = nzbInfo; }
-	ArticleList* GetArticles() { return &m_articles; }
+	RsArticleList* GetArticleList() { return m_articles; }
 	Groups* GetGroups() { return &m_groups; }
 	const char* GetSubject() { return m_subject; }
 	void SetSubject(const char* subject) { m_subject = subject; }
@@ -1372,7 +1261,7 @@ public:
 private:
 	int m_id;
 	NzbInfo* m_nzbInfo = nullptr;
-	ArticleList m_articles;
+	RsArticleList* m_articles = nzbget_rs_artlist_new();
 	Groups m_groups;
 	ServerStatList m_serverStats;
 	CString m_subject;
@@ -1441,45 +1330,6 @@ private:
 	friend class CompletedFile;
 };
 
-// Numeric, unmasked header ownership; no cache pointer/geometry mutation or strings.
-// The queue lock serializes admission. Rejected claims never change retained order.
-inline bool live_par_claim_source_header(FileInfo* file, ArticleInfo* target, int64 begin, int64 end)
-{
-    if (begin < 0 || end <= begin) return false;
-    auto* articles = file->GetArticles();
-    size_t index = 0;
-    while (index < articles->size() && articles->at(index).get() != target) ++index;
-    if (index == articles->size()) return false;
-    // An independently fetched replacement cannot prove same-payload identity.
-    if (target->GetLiveParClaimBegin() != -1 || target->GetLiveParClaimEnd() != -1 ||
-        target->GetSegmentSize() != 0 || target->GetStatus() == ArticleInfo::aiFinished) return false;
-    auto range = [](ArticleInfo* article, int64& lo, int64& hi) {
-        lo = article->GetLiveParClaimBegin(); hi = article->GetLiveParClaimEnd();
-        if (lo != -1 || hi != -1) return lo >= 0 && hi > lo ? 1 : -1;
-        // Persisted finished geometry is stable under the queue lock. Running
-        // geometry is not a claim: cache attachment can still change it.
-        if (article->GetStatus() != ArticleInfo::aiFinished) return 0;
-        lo = article->GetSegmentOffset();
-        int size = article->GetSegmentSize();
-        if (lo < 0 || size <= 0 || lo > INT64_MAX - size) return -1;
-        hi = lo + size;
-        return 1;
-    };
-    // Restored ranges were not admitted through this helper. Validate the
-    // complete chain, including this proposed insertion, before trusting it.
-    int64 previousEnd = -1;
-    for (size_t i = 0; i < articles->size(); ++i)
-    {
-        int64 lo = begin, hi = end;
-        int known = i == index ? 1 : range(articles->at(i).get(), lo, hi);
-        if (known < 0) return false;
-        if (known == 0) continue;
-        if (previousEnd > lo) return false;
-        previousEnd = hi;
-    }
-    target->SetLiveParClaimRange(begin, end);
-    return true;
-}
 
 typedef UniqueDeque<FileInfo> FileList;
 typedef std::vector<FileInfo*> RawFileList;
@@ -3746,14 +3596,8 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 			const auto* aParts = reinterpret_cast<const int*>((uintptr_t)i64s[3]);
 			const auto* aSizes = reinterpret_cast<const int64_t*>((uintptr_t)i64s[4]);
 			const auto* aMids = reinterpret_cast<const char* const*>(strs[1]);
-			ArticleList* arts = fi->GetArticles();
-			arts->reserve((size_t)ints[6]);
-			for (int k = 0; k < ints[6]; k++)
-			{
-				auto art = std::make_unique<ArticleInfo>();
-				art->SetPartNumber(aParts[k]); art->SetSize((int)aSizes[k]); art->SetMessageId(aMids[k] ? aMids[k] : "");
-				arts->push_back(std::move(art));
-			}
+			int64_t artArgs[2] = { (int64_t)(uintptr_t)aParts, (int64_t)(uintptr_t)aSizes };
+			ArtOp(fi->GetArticleList(), 0, 105, ints[6], 0, nullptr, nullptr, artArgs, const_cast<const char**>(aMids));
 			FileInfo* raw = fi.get();
 			n->GetFileList()->Add(std::move(fi));
 			return reinterpret_cast<uintptr_t>(raw);
@@ -3840,7 +3684,7 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 			strs[0] = f->GetFilename(); strs[1] = f->GetSubject(); strs[3] = f->GetHardLinkPath().c_str();
 			strs[4] = f->GetOrigname(); strs[5] = f->GetHash16k(); strs[6] = f->GetParSetId();
 		}
-		return f->GetArticles()->size();
+		return ArtOp(f->GetArticleList(), 0, 100);
 	}
 	case 41: {
 		FileInfo* f = reinterpret_cast<FileInfo*>(p1);
@@ -3910,16 +3754,14 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 		case 44: f->SetParSetId(s1); break;
 		case 45: f->SetHardLinkPath(s1 ? s1 : ""); break;
 		case 50: f->MakeValidFilename(); break;
-		case 51: f->GetArticles()->clear(); break;
-		case 52: for (ArticleInfo* ai : f->GetArticles()) { ai->SetStatus(ArticleInfo::aiUndefined); ai->SetResultFilename(nullptr); ai->DiscardSegment(); } break;
+		case 51: ArtOp(f->GetArticleList(), 0, 101); break;
+		case 52: ArtOp(f->GetArticleList(), 0, 102); break;
 		case 53: reinterpret_cast<NzbInfo*>(p2)->GetCurrentServerStats()->ListOp(f->GetServerStats(), ServerStatList::soSubtract); f->GetServerStats()->clear(); break;
-		case 54: for (ArticleInfo* ai : f->GetArticles()) if (ai->GetStatus() == ArticleInfo::aiFinished) ai->SetStatus(ArticleInfo::aiFailed); break;
+		case 54: ArtOp(f->GetArticleList(), 0, 103); break;
 		case 55: {
 			std::optional<Guard> og;
 			if (f->GetActiveDownloads() > 0) og.emplace(f->GuardOutputFile());
-			for (ArticleInfo* pa : f->GetArticles())
-				if (pa->GetStatus() != ArticleInfo::aiRunning && pa->GetResultFilename() && (p2 != 0 || pa->GetDupeFallbackRound() > 0))
-					FileSystem::DeleteFile(pa->GetResultFilename());
+			ArtOp(f->GetArticleList(), 0, 104, 0, p2);
 			break;
 		}
 		case 57: delete f; break;
@@ -3941,121 +3783,30 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 			auto visit = reinterpret_cast<LiveParNamespaceVisitor>(reinterpret_cast<uintptr_t>(s1));
 			return (uintptr_t)live_par_visit_namespace(reinterpret_cast<NzbInfo*>(p1), visit, reinterpret_cast<void*>(p2));
 		}
-		if (a1 == 13)
-			return live_par_claim_source_header(reinterpret_cast<FileInfo*>(p1), reinterpret_cast<ArticleInfo*>(p2), i64s[0], i64s[1]) ? 1 : 0;
-		if (a1 == 14)
-		{
-			auto* article = reinterpret_cast<ArticleInfo*>(p1);
-			return article->GetLiveParClaimBegin() >= 0 || article->GetSegmentSize() > 0;
-		}
-		if (a1 == 10)
-		{
-			ArticleInfo* pa = reinterpret_cast<FileInfo*>(p1)->GetArticles()->at((size_t)a2).get();
-			ints[0] = (int)pa->GetStatus(); ints[1] = pa->GetSegmentSize(); ints[2] = (int)pa->GetCrc();
-			ints[3] = pa->GetDupeFallbackRound(); ints[4] = pa->GetResultFilename() ? 1 : 0;
-			ints[5] = pa->GetPartNumber(); ints[6] = pa->GetSize();
-			i64s[0] = pa->GetSegmentOffset();
-			strs[0] = pa->GetMessageId(); strs[1] = pa->GetDupeOriginalMessageId();
-			return 0;
-		}
-		if (a1 == 11)
-		{
-			auto ai = std::make_unique<ArticleInfo>();
-			ai->SetPartNumber(a2); ai->SetSize((int)p2); ai->SetMessageId(s1 ? s1 : "");
-			reinterpret_cast<FileInfo*>(p1)->GetArticles()->push_back(std::move(ai));
-			return 0;
-		}
-		if (a1 == 12)
-		{
-			auto* arts = reinterpret_cast<FileInfo*>(p1)->GetArticles();
-			while ((size_t)a2 >= arts->size()) arts->push_back(std::make_unique<ArticleInfo>());
-			ArticleInfo* pa = arts->at((size_t)a2).get();
-			if (p2 == 0) return (uintptr_t)((pa->GetPartNumber() << 1) | (pa->GetResultFilename() ? 1 : 0));
-			if (ints[0] >= 2)
-			{
-				pa->SetSegmentOffset(i64s[0]);
-				pa->SetSegmentSize(ints[1]);
-				pa->SetCrc((uint32)ints[2]);
-			}
-			pa->SetDupeFallbackRound(ints[3]);
-			if (s1) pa->SetResultFilename(s1);
-			pa->SetStatus((ArticleInfo::EStatus)ints[4]);
-			return 0;
-		}
-		auto fillArt = [&](ArticleInfo* a, bool done) -> uintptr_t {
-			bool run = !done && a->GetStatus() == ArticleInfo::aiRunning;
-			ints[0] = a->GetPartNumber(); ints[1] = a->GetSize(); ints[2] = (int)a->GetStatus();
-			ints[3] = run ? 0 : a->GetSegmentSize(); ints[4] = run ? 0 : (int)a->GetCrc(); ints[5] = a->GetDupeFallbackRound();
-			ints[6] = a->GetDupeLeadSnapshot(); ints[7] = a->GetDupeNextLead(); ints[8] = a->GetDupeDonorCount();
-			ints[9] = a->GetDupeDonorId(); ints[10] = a->GetDupeProactive() ? 1 : 0;
-			i64s[0] = run ? -1 : a->GetSegmentOffset();
-			strs[0] = a->GetMessageId(); strs[1] = a->GetDupeOriginalMessageId();
-			return reinterpret_cast<uintptr_t>(a);
-		};
-		if (a1 == 0) return fillArt(reinterpret_cast<FileInfo*>(p1)->GetArticles()->at((size_t)a2).get(), false);
-		if (a1 == 1) return fillArt(reinterpret_cast<ArticleInfo*>(p1), true);
-		if (a1 == 7 || a1 == 8)
-		{
-			auto* arts = reinterpret_cast<FileInfo*>(p1)->GetArticles();
-			auto* target = reinterpret_cast<ArticleInfo*>(p2);
-			for (size_t i = 0; i < arts->size(); i++)
-				if (a1 == 7 ? arts->at(i)->GetStatus() == ArticleInfo::aiUndefined : arts->at(i).get() == target)
-				{
-					ints[11] = (int)i;
-					return fillArt(arts->at(i).get(), a1 == 8);
-				}
-			return 0;
-		}
-		ArticleInfo* a = reinterpret_cast<ArticleInfo*>(p1);
-		if (a1 == 2)
-		{
-			int v = (int)p2;
-			if (a2 == 0) a->SetStatus((ArticleInfo::EStatus)v);
-			else if (a2 == 1) a->SetDupeFallbackRound(v);
-			else if (a2 == 2) a->SetDupeDonorId(v);
-			else if (a2 == 3) a->SetDupeProactive(v != 0);
-		}
-		else if (a1 == 3)
-		{
-			if (a2 < 0) return a->GetDupeSources()->size();
-			ints[1] = ((size_t)a2 < a->GetDupeSourceDonors()->size()) ? 1 : 0;
-			ints[0] = ints[1] ? a->GetDupeSourceDonors()->at((size_t)a2) : 0;
-			strs[0] = *a->GetDupeSources()->at((size_t)a2);
-		}
-		else if (a1 == 4)
-		{
-			a->SetDupeLeadSnapshot(ints[0]); a->SetDupeNextLead(ints[1]); a->SetDupeDonorCount(ints[2]);
-			a->GetDupeSources()->clear(); a->GetDupeSources()->reserve((size_t)a2);
-			for (int i = 0; i < a2; i++) a->GetDupeSources()->emplace_back(strs[i]);
-			a->GetDupeSourceDonors()->assign(ints + 4, ints + 4 + ints[3]);
-		}
-		else if (a1 == 5) { a->SetDupeExpectedOffset(i64s[0]); a->SetDupeExpectedEnd(i64s[1]); }
-		else if (a1 == 6)
-		{
-			if (a2 == 0) a->SetMessageId(s1);
-			else if (a2 == 1) a->SetDupeOriginalMessageId(s1);
-		}
-		else if (a1 == 9) { a->SetStatus(ArticleInfo::aiUndefined); a->SetCrc(0); a->SetSegmentOffset(0); a->SetSegmentSize(0); a->SetDupeExpectedOffset(-1); a->SetDupeExpectedEnd(-1); }
-		return 0;
+		// file-based ops take the FileInfo in p1 (and the article in p2 for 8 and 13)
+		const bool fileOp = a1 == 0 || a1 == 7 || a1 == 8 || a1 == 10 || a1 == 11 || a1 == 12 || a1 == 13;
+		RsArticleList* list = fileOp ? reinterpret_cast<FileInfo*>(p1)->GetArticleList() : nullptr;
+		uintptr_t article = fileOp ? ((a1 == 8 || a1 == 13) ? p2 : 0) : p1;
+		return ArtOp(list, article, a1, a2, p2, s1, ints, i64s, strs);
 	}
 	case 44: {
 		FileInfo* f = reinterpret_cast<FileInfo*>(p1);
 		if (a1 == 1)
 		{
-			ArticleInfo* a = reinterpret_cast<ArticleInfo*>(p2);
-			if (!f->GetFlushLocked() && a->GetSegmentContent() && a2 > 0)
+			const char* data = reinterpret_cast<const char*>(ArtOp(nullptr, p2, 110));
+			if (!f->GetFlushLocked() && data && a2 > 0)
 			{
-				memcpy(reinterpret_cast<void*>((uintptr_t)i64s[0]), a->GetSegmentContent(), (size_t)a2);
+				memcpy(reinterpret_cast<void*>((uintptr_t)i64s[0]), data, (size_t)a2);
 				return 1;
 			}
 			return 0;
 		}
 		if (a1 == 2)
 		{
-			ArticleInfo* a = reinterpret_cast<ArticleInfo*>(p2);
-			if (a->GetDupeFallbackRound() > 0 && a->GetResultFilename()) FileSystem::DeleteFile(a->GetResultFilename());
-			if (!a->GetSegmentContent() || f->GetFlushLocked()) return 0;
-			a->DiscardSegment();
+			const char* result = reinterpret_cast<const char*>(ArtOp(nullptr, p2, 114));
+			if (ArtOp(nullptr, p2, 117) > 0 && result) FileSystem::DeleteFile(result);
+			if (!ArtOp(nullptr, p2, 110) || f->GetFlushLocked()) return 0;
+			ArtOp(nullptr, p2, 111);
 			f->SetCachedArticles(f->GetCachedArticles() - 1);
 			return 1;
 		}
@@ -4082,15 +3833,20 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 			if (f->GetFlushLocked()) return 0;
 			f->SetFlushLocked(true);
 			auto pushSeg = reinterpret_cast<void(*)(uintptr_t, uintptr_t, int64_t, int, const char*, const char*)>(reinterpret_cast<uintptr_t>(s1));
-			for (ArticleInfo* pa : f->GetArticles())
-				if (pa->GetSegmentContent())
-					pushSeg(p2, reinterpret_cast<uintptr_t>(pa), pa->GetSegmentOffset(), pa->GetSegmentSize(), pa->GetSegmentContent(), pa->GetResultFilename());
+			RsArticleList* list = f->GetArticleList();
+			for (uintptr_t i = 0, n = ArtOp(list, 0, 100); i < n; i++)
+			{
+				uintptr_t pa = ArtOp(list, 0, 106, (int)i);
+				int ai[5]; int64_t ao[1]; const char* as[2];
+				ArtOp(nullptr, pa, 120, 0, 0, nullptr, ai, ao, as);
+				if (as[0]) pushSeg(p2, pa, ao[0], ai[1], as[0], as[1]);
+			}
 			return 1;
 		}
 		if (a1 == 6)
 		{
 			if (a2 == 0) return (f->GetDeleted() && !f->GetNzbInfo()->GetParking()) ? 1 : 0;
-			reinterpret_cast<ArticleInfo*>(p2)->DiscardSegment();
+			ArtOp(nullptr, p2, 111);
 			return 0;
 		}
 		if (a1 == 7)
@@ -4113,26 +3869,25 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 		}
 		if (a1 == 1)
 		{
-			ArticleInfo* a = reinterpret_cast<ArticleInfo*>(p2);
-			ints[0] = f->GetId(); ints[1] = a->GetPartNumber();
+			ints[0] = f->GetId(); ints[1] = (int)ArtOp(nullptr, p2, 118);
 			ints[2] = f->GetForceDirectWrite() ? 1 : 0; ints[3] = f->GetOutputInitialized() ? 1 : 0;
 			strs[0] = f->GetNzbInfo()->GetDestDir(); strs[1] = f->GetOutputFilename().c_str(); strs[2] = f->GetFilename();
 			return 0;
 		}
 		if (a1 == 2)
 		{
-			ArticleInfo* a = reinterpret_cast<ArticleInfo*>(p2);
-			if (s1) a->SetResultFilename(s1);
+			const char* result = reinterpret_cast<const char*>(ArtOp(nullptr, p2, 115, 0, 0, s1));
 			if (s2) f->SetOutputFilename(s2);
-			strs[0] = a->GetResultFilename();
+			strs[0] = result;
 			return 0;
 		}
-		if (a1 == 3) { reinterpret_cast<ArticleInfo*>(p2)->SetCrc((uint32)a2); return 0; }
+		if (a1 == 3) { ArtOp(nullptr, p2, 116, a2); return 0; }
 		if (a1 == 4)
 		{
-			ArticleInfo* a = reinterpret_cast<ArticleInfo*>(p2);
-			ints[0] = a->GetDupeFallbackRound();
-			i64s[0] = f->GetDecodedFileSize(); i64s[1] = a->GetDupeExpectedOffset(); i64s[2] = a->GetDupeExpectedEnd();
+			ints[0] = (int)ArtOp(nullptr, p2, 117);
+			int64_t range[2];
+			ArtOp(nullptr, p2, 119, 0, 0, nullptr, nullptr, range);
+			i64s[0] = f->GetDecodedFileSize(); i64s[1] = range[0]; i64s[2] = range[1];
 			return 0;
 		}
 		if (a1 == 5)
@@ -4154,17 +3909,13 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 		if (a1 == 6) { f->SetOutputInitialized(true); return 0; }
 		if (a1 == 7)
 		{
-			ArticleInfo* a = reinterpret_cast<ArticleInfo*>(p2);
 			if (a2 == 0)
 			{
-				a->AttachSegment(reinterpret_cast<char*>((uintptr_t)i64s[1]), ints[0], i64s[0], ints[1]);
+				ArtOp(nullptr, p2, 112, 0, 0, nullptr, ints, i64s);
 				f->SetCachedArticles(f->GetCachedArticles() + 1);
 			}
 			else
-			{
-				a->SetSegmentOffset(i64s[0]);
-				a->SetSegmentSize(ints[0]);
-			}
+				ArtOp(nullptr, p2, 113, 0, 0, nullptr, ints, i64s);
 			return 0;
 		}
 		if (a1 == 8) { f->SetOutputFilename(s1 ? s1 : ""); return 0; }
@@ -4182,20 +3933,17 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 				ints[6] = f->GetMissedArticles(); ints[7] = f->GetTotalArticles();
 				ints[8] = f->IsHardLinked() ? 1 : 0; ints[9] = Util::EmptyStr(g_Options->GetInterDir()) ? 1 : 0;
 				ints[10] = g_Options->GetRawArticle() ? 1 : 0; ints[11] = (nzb->GetSkipDiskWrite() || g_Options->GetSkipWrite()) ? 1 : 0;
-				ints[12] = g_Options->GetWriteBuffer(); ints[15] = (int)f->GetArticles()->size();
+				ints[12] = g_Options->GetWriteBuffer(); ints[15] = (int)ArtOp(f->GetArticleList(), 0, 100);
 				strs[0] = s_nName.c_str(); strs[1] = s_nDest.c_str(); strs[2] = s_fName.c_str(); strs[3] = s_fOut.c_str();
 				return reinterpret_cast<uintptr_t>(nzb);
 			}
 			if (a2 == 2) { GuardedDownloadQueue g = DownloadQueue::Guard(); f->SetCrc(0); f->SetOutputFilename(""); return 0; }
 			if (a2 == 4)
 			{
-				ArticleInfo* pa = f->GetArticles()->at(p2).get();
-				ints[0] = (int)pa->GetStatus(); ints[1] = pa->GetSegmentSize(); ints[2] = (int)pa->GetCrc();
-				ints[3] = pa->GetPartNumber(); ints[4] = pa->GetDupeFallbackRound();
-				i64s[0] = pa->GetSegmentOffset(); strs[0] = pa->GetSegmentContent(); strs[1] = pa->GetResultFilename();
-				return pa->GetStatus() == ArticleInfo::aiFinished ? 1 : 0;
+				uintptr_t pa = ArtOp(f->GetArticleList(), 0, 106, (int)p2);
+				return pa ? ArtOp(nullptr, pa, 120, 0, 0, nullptr, ints, i64s, strs) : 0;
 			}
-			if (a2 == 5) { f->GetArticles()->at(p2)->DiscardSegment(); return 0; }
+			if (a2 == 5) { ArtOp(nullptr, ArtOp(f->GetArticleList(), 0, 106, (int)p2), 111); return 0; }
 			if (a2 == 6) { f->SetFailedArticles(f->GetFailedArticles() + (int)p2); f->SetSuccessArticles(f->GetSuccessArticles() - (int)p2); return 0; }
 			if (a2 == 8)
 			{

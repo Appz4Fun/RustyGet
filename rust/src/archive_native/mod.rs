@@ -753,7 +753,7 @@ pub(crate) fn create_dir_all_no_follow(
         };
         cur.push(part);
         // The job's unpack limits (`unpacklimits`), before anything is looked up or created.
-        crate::unpacklimits::check(&cur, true)?;
+        crate::unpacklimits::probe(&cur, true)?;
         let meta_res = match std::fs::symlink_metadata(&cur) {
             Err(e) if is_invalid_utf8_fs_error(&e) => {
                 cur.pop();
@@ -762,6 +762,7 @@ pub(crate) fn create_dir_all_no_follow(
             }
             res => res,
         };
+        crate::unpacklimits::check(&cur, true)?;
         match meta_res {
             Ok(meta) => {
                 if meta.file_type().is_symlink() {
@@ -833,8 +834,7 @@ fn create_dest_file_with_path_no_follow(
         .ok_or_else(|| "Destination path is missing file name".to_string())?;
     let parent_dir = create_dir_all_no_follow(output_dir, parent_rel)?;
     let mut candidate = parent_dir.join(file_name);
-    crate::unpacklimits::check(&candidate, false)?;
-    let checked = candidate.clone();
+    crate::unpacklimits::probe(&candidate, false)?;
     let meta_res = match std::fs::symlink_metadata(&candidate) {
         Err(e) if is_invalid_utf8_fs_error(&e) => {
             candidate = parent_dir.join(encode_os_str_injective_utf8(file_name));
@@ -901,10 +901,9 @@ fn create_dest_file_with_path_no_follow(
         }
     }
 
-    if target_path != checked {
-        // Renamed (an automatic rename, or an injective encoding of a non-UTF-8 name).
-        crate::unpacklimits::check(&target_path, false)?;
-    }
+    // The name finally created (after an automatic rename, or an injective encoding of a
+    // non-UTF-8 name) is the one counted.
+    crate::unpacklimits::check(&target_path, false)?;
     let file = open_file_no_follow(&target_path).map_err(|e| e.to_string())?;
     Ok(Some((file, target_path, created_new)))
 }

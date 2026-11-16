@@ -2129,6 +2129,20 @@ impl NzbgetRsUnpackController {
             let m = [b"Unpacking ", st.name.as_slice()].concat();
             self.print_message(ctx, host_cb, &mut st, MK_INFO, &m);
             self.create_unpack_dir(ctx, host_cb, &mut st);
+            // One guard for the job's unpack limits. A temporary unpack folder that was there
+            // already holds what direct unpack wrote for this job: it counts too.
+            let mut guard = crate::unpacklimits::Guard::new(
+                crate::unpacklimits::Limits::from_options(),
+                crate::fsops::path(&st.unpack_dir),
+                &[
+                    crate::fsops::path(&st.dest_dir),
+                    crate::fsops::path(&st.final_dir),
+                ],
+            );
+            if st.use_temp_unpack_dir && !st.unpack_dir_created {
+                guard.seed_existing();
+            }
+            st.unpack_guard = Some(std::sync::Arc::new(std::sync::Mutex::new(guard)));
 
             if st.has_rar_files {
                 if st.has_not_unpacked_rar_files || st.unpack_dir_created {
@@ -2688,6 +2702,25 @@ impl NzbgetRsUnpackController {
                 b"Unpack stopped due to reload/shutdown, preserving _unpack directory",
             );
             return;
+        }
+
+        // Names are ASCII only: renamed once every unpack pass of the job is done.
+        if st.unpack_ok {
+            if let Some(guard) = st.unpack_guard.clone() {
+                let mut lines: Vec<(i32, String)> = Vec::new();
+                let named = crate::unpacklimits::finish_names(&guard, &mut |k, m| {
+                    lines.push((k, m.to_string()));
+                });
+                for (k, m) in lines {
+                    let kind = if k == 1 { MK_ERROR } else { MK_INFO };
+                    self.print_message(ctx, host_cb, st, kind, m.as_bytes());
+                }
+                if named.is_err() {
+                    // A file system error: a par repair cannot help.
+                    st.unpack_ok = false;
+                    st.unpack_start_error = true;
+                }
+            }
         }
 
         let cleanup_success = self.cleanup(ctx, host_cb, st);
@@ -3389,6 +3422,8 @@ struct DirectUnpackRunLocal {
     use_temp_unpack_dir: bool,
     unpack_cleanup_disk: bool,
     expected_volumes: u64,
+    /// The job's unpack limits, shared by every archive set this run unpacks.
+    unpack_guard: Option<crate::unpacklimits::SharedGuard>,
 }
 
 pub struct NzbgetRsDirectUnpack {
@@ -4303,13 +4338,18 @@ impl NzbgetRsDirectUnpack {
         let cleanup_disk = local.unpack_cleanup_disk;
 
         let mut failure: Option<crate::progressive_unpack::Failure> = None;
-        let guard = crate::unpacklimits::Guard::shared(
-            crate::fsops::path(&unpack_dir),
-            &[
-                crate::fsops::path(&local.dest_dir),
-                crate::fsops::path(&local.final_dir),
-            ],
-        );
+        let guard = local
+            .unpack_guard
+            .get_or_insert_with(|| {
+                crate::unpacklimits::Guard::shared(
+                    crate::fsops::path(&unpack_dir),
+                    &[
+                        crate::fsops::path(&local.dest_dir),
+                        crate::fsops::path(&local.final_dir),
+                    ],
+                )
+            })
+            .clone();
         let feed = Box::new(DirectUnpackFeed {
             nzb_id: self.nzb_id,
             expected_volumes: local.expected_volumes,
@@ -4391,6 +4431,7 @@ impl NzbgetRsDirectUnpack {
             use_temp_unpack_dir: false,
             unpack_cleanup_disk: false,
             expected_volumes: 0,
+            unpack_guard: None,
         };
 
         let found = with_dq_guard(ctx, host_cb, |dq_ptr| {
@@ -4520,6 +4561,23 @@ impl NzbgetRsDirectUnpack {
 
         let cancelled = self.cancelled.load(Ordering::Acquire);
         let interrupted = !cancelled && self.is_stopped_or_terminated(ctx, host_cb);
+        // Names are ASCII only. A temporary unpack folder is renamed by post-processing, which
+        // counts what is in it; files unpacked next to the download are renamed now.
+        if local.unpack_ok && !interrupted && !cancelled && !local.use_temp_unpack_dir {
+            if let Some(guard) = local.unpack_guard.clone() {
+                let mut lines: Vec<(i32, String)> = Vec::new();
+                let named = crate::unpacklimits::finish_names(&guard, &mut |k, m| {
+                    lines.push((k, m.to_string()));
+                });
+                for (k, m) in lines {
+                    let kind = if k == 1 { MK_ERROR } else { MK_INFO };
+                    self.add_message(ctx, host_cb, kind, m.as_bytes(), &mut local);
+                }
+                if named.is_err() {
+                    local.unpack_ok = false;
+                }
+            }
+        }
         if (!local.unpack_ok && !interrupted) || cancelled {
             self.cleanup(ctx, host_cb, &mut local);
         }

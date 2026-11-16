@@ -1903,12 +1903,6 @@ pub struct NzbgetRsParsedOptions {
     pub use_temp_unpack_dir: i32,
     pub unpack_cleanup_disk: i32,
     pub unpack_pause_queue: i32,
-    /// Most files one job may unpack; 0 means no limit (`unpacklimits`).
-    pub unpack_max_files: i32,
-    /// Deepest folder nesting one job may unpack; 0 means no limit.
-    pub unpack_max_depth: i32,
-    /// Most folders one job may unpack; 0 means no limit.
-    pub unpack_max_folders: i32,
     pub unpack_mutex_enforced: i32,
     pub url_force: i32,
     pub cert_check: i32,
@@ -1947,6 +1941,13 @@ pub struct NzbgetRsParsedOptions {
     pub detail_target: i32,
     pub write_log: i32,
     pub tls: i32,
+    // Appended last: the C header (`nzbget_rs.h`) mirrors this layout.
+    /// Most files one job may unpack; 0 means no limit (`unpacklimits`).
+    pub unpack_max_files: i32,
+    /// Deepest folder nesting one job may unpack; 0 means no limit.
+    pub unpack_max_depth: i32,
+    /// Most folders one job may unpack; 0 means no limit.
+    pub unpack_max_folders: i32,
 }
 
 impl NzbgetRsParsedOptions {

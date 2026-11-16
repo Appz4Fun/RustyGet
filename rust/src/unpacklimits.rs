@@ -133,6 +133,9 @@ pub struct Guard {
     /// retried, a direct unpack redone after the download) counts once.
     files: BTreeSet<PathBuf>,
     folders: BTreeSet<PathBuf>,
+    /// Files and folders that were in the unpack folder when the guard was made (an earlier
+    /// direct unpack of the same job): counted, but replaced when a name is made ASCII.
+    seeded: BTreeSet<PathBuf>,
     breach: Option<String>,
 }
 
@@ -151,7 +154,30 @@ impl Guard {
             roots,
             files: BTreeSet::new(),
             folders: BTreeSet::new(),
+            seeded: BTreeSet::new(),
             breach: None,
+        }
+    }
+
+    /// Counts what an earlier unpack of the same job left in the unpack folder.
+    pub fn seed_existing(&mut self) {
+        let base = self.roots[0].dir.clone();
+        let mut stack = vec![base.clone()];
+        while let Some(dir) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for e in rd.flatten() {
+                let path = e.path();
+                let is_dir = e.file_type().is_ok_and(|t| t.is_dir());
+                let _ = self.admit(&path, is_dir);
+                if let Ok(rel) = path.strip_prefix(&base) {
+                    self.seeded.insert(rel.to_path_buf());
+                }
+                if is_dir {
+                    stack.push(path);
+                }
+            }
         }
     }
 
@@ -177,17 +203,27 @@ impl Guard {
     /// Admits `path`, a file or folder about to be created. Once a limit is breached every
     /// later path is refused with the same message.
     pub fn admit(&mut self, path: &Path, is_dir: bool) -> Result<(), String> {
+        self.admit_inner(path, is_dir, true)
+    }
+
+    /// Checks `path` like [`Guard::admit`] without counting it: for a name looked up before
+    /// the one finally created is known.
+    pub fn probe(&mut self, path: &Path, is_dir: bool) -> Result<(), String> {
+        self.admit_inner(path, is_dir, false)
+    }
+
+    fn admit_inner(&mut self, path: &Path, is_dir: bool, record: bool) -> Result<(), String> {
         if let Some(b) = &self.breach {
             return Err(b.clone());
         }
-        self.check(path, is_dir).map_err(|why| {
+        self.check(path, is_dir, record).map_err(|why| {
             let msg = format!("{LIMIT_PREFIX}{why}");
             self.breach = Some(msg.clone());
             msg
         })
     }
 
-    fn check(&mut self, path: &Path, is_dir: bool) -> Result<(), String> {
+    fn check(&mut self, path: &Path, is_dir: bool, record: bool) -> Result<(), String> {
         let shown = path.display().to_string();
         let Ok(rel) = path.strip_prefix(&self.roots[0].dir) else {
             return Err(format!(
@@ -260,16 +296,22 @@ impl Guard {
                 rel.display()
             ));
         }
-        self.folders.extend(new_folders);
-        if !is_dir {
-            self.files.insert(rel);
+        if record {
+            self.folders.extend(new_folders);
+            if !is_dir {
+                self.files.insert(rel);
+            }
         }
         Ok(())
     }
 
     /// Renames every admitted file and folder that exists and whose name is not ASCII to its
-    /// [`ascii_name`], deepest first. A taken name gets `_2`, `_3`, ... before its extension.
-    /// Returns the renamed paths as (old, new).
+    /// [`ascii_name`], deepest first. Run once, when the job's unpack is done.
+    ///
+    /// When the ASCII name exists already: another file or folder this job wrote keeps it and
+    /// the renamed one gets `_2`, `_3`, ... before its extension; an older copy (an earlier
+    /// unpack of the job, or a file left in the folder) is replaced by a file, and a folder is
+    /// merged into it. Returns the renamed paths as (old, new).
     pub fn asciify(&self) -> std::io::Result<Vec<(PathBuf, PathBuf)>> {
         let base = &self.roots[0].dir;
         let mut entries: Vec<&PathBuf> = self.files.iter().chain(self.folders.iter()).collect();
@@ -281,22 +323,58 @@ impl Guard {
             let Some(name) = path.file_name() else {
                 continue;
             };
-            if name
-                .to_str()
-                .is_some_and(|n| n.bytes().all(|b| (0x20..0x7f).contains(&b)))
-            {
+            if is_ascii(name) || std::fs::symlink_metadata(&path).is_err() {
                 continue;
             }
-            if std::fs::symlink_metadata(&path).is_err() {
-                continue;
-            }
-            let dir = path.parent().unwrap_or(base);
-            let target = free_name(dir, &ascii_name(&name.to_string_lossy()));
-            std::fs::rename(&path, &target)?;
+            let dir = path.parent().unwrap_or(base).to_path_buf();
+            let target = self.place(&path, &dir, &ascii_name(&name.to_string_lossy()))?;
             renamed.push((path, target));
         }
         Ok(renamed)
     }
+
+    /// A distinct file or folder this job wrote at `path`.
+    fn taken(&self, path: &Path) -> bool {
+        path.strip_prefix(&self.roots[0].dir).is_ok_and(|r| {
+            (self.files.contains(r) || self.folders.contains(r)) && !self.seeded.contains(r)
+        })
+    }
+
+    /// Moves `src` to `dir/name` as [`Guard::asciify`] describes; returns where it went.
+    fn place(&self, src: &Path, dir: &Path, name: &str) -> std::io::Result<PathBuf> {
+        let first = dir.join(name);
+        if let Ok(meta) = std::fs::symlink_metadata(&first) {
+            let src_is_dir = std::fs::symlink_metadata(src)?.is_dir();
+            if !self.taken(&first) && !meta.file_type().is_symlink() {
+                if src_is_dir && meta.is_dir() {
+                    for child in std::fs::read_dir(src)? {
+                        let child = child?.path();
+                        if let Some(n) = child.file_name() {
+                            let n = ascii_name(&n.to_string_lossy());
+                            self.place(&child, &first, &n)?;
+                        }
+                    }
+                    std::fs::remove_dir(src)?;
+                    return Ok(first);
+                }
+                if !src_is_dir && !meta.is_dir() {
+                    std::fs::rename(src, &first)?;
+                    return Ok(first);
+                }
+            }
+        } else {
+            std::fs::rename(src, &first)?;
+            return Ok(first);
+        }
+        let target = free_name(dir, name);
+        std::fs::rename(src, &target)?;
+        Ok(target)
+    }
+}
+
+fn is_ascii(name: &std::ffi::OsStr) -> bool {
+    name.to_str()
+        .is_some_and(|n| n.bytes().all(|b| (0x20..0x7f).contains(&b)))
 }
 
 static ACTIVE: Mutex<Vec<(u64, SharedGuard)>> = Mutex::new(Vec::new());
@@ -350,6 +428,15 @@ fn guard_for(path: &Path) -> Option<SharedGuard> {
 pub fn check(path: &Path, is_dir: bool) -> Result<(), String> {
     match guard_for(path) {
         Some(g) => lock(&g).admit(path, is_dir),
+        None => Ok(()),
+    }
+}
+
+/// [`check`] without counting the path: for a name looked up before the one created is
+/// known.
+pub fn probe(path: &Path, is_dir: bool) -> Result<(), String> {
+    match guard_for(path) {
+        Some(g) => lock(&g).probe(path, is_dir),
         None => Ok(()),
     }
 }
@@ -449,9 +536,29 @@ pub fn breach_of(guard: &SharedGuard) -> Option<String> {
     lock(guard).breach().map(str::to_string)
 }
 
-/// [`Guard::asciify`] on a shared guard.
-pub fn asciify(guard: &SharedGuard) -> std::io::Result<Vec<(PathBuf, PathBuf)>> {
-    lock(guard).asciify()
+/// Makes the names a job unpacked ASCII ([`Guard::asciify`]), logging each rename. Called
+/// once, when every unpack pass of the job is done; fails with the logged reason.
+pub fn finish_names(guard: &SharedGuard, log_cb: &mut dyn FnMut(i32, &str)) -> Result<(), String> {
+    match lock(guard).asciify() {
+        Ok(renamed) => {
+            for (old, new) in renamed {
+                log_cb(
+                    0,
+                    &format!(
+                        "Renamed {} to {} (names are ASCII only)",
+                        old.display(),
+                        new.display()
+                    ),
+                );
+            }
+            Ok(())
+        }
+        Err(e) => {
+            let msg = format!("Could not rename unpacked files to ASCII names: {e}");
+            log_cb(1, &msg);
+            Err(msg)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -757,6 +864,12 @@ mod tests {
             .map(|s| s.files);
             results.push(r);
         }
+        if results.iter().all(Result::is_ok) {
+            let mut cb = |k: i32, m: &str| log.push(format!("{k} {m}"));
+            if let Err(e) = finish_names(&guard, &mut cb) {
+                results.push(Err(e));
+            }
+        }
         (results, out, log)
     }
 
@@ -846,4 +959,121 @@ mod tests {
         assert_eq!(r.map(|s| s.files), Ok(121));
         assert!(out.join("Marnûkh.mkv").exists());
     }
+
+
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn one_folder_written_by_two_archives_is_renamed_once() {
+        let (r, out, log) = unpack_job(
+            "twosets",
+            &[&[("Café/a.txt", b"a")], &[("Café/b.txt", b"b")]],
+        );
+        assert!(r.iter().all(Result::is_ok), "{r:?} {log:?}");
+        assert_eq!(names_in(&out), ["Cafe"]);
+        assert_eq!(names_in(&out.join("Cafe")), ["a.txt", "b.txt"]);
+    }
+
+    #[test]
+    fn a_file_written_twice_is_renamed_once() {
+        let (r, out, log) = unpack_job(
+            "twice",
+            &[&[("Café.txt", b"1")], &[("Café.txt", b"2")]],
+        );
+        assert!(r.iter().all(Result::is_ok), "{r:?} {log:?}");
+        assert_eq!(names_in(&out), ["Cafe.txt"]);
+        assert_eq!(std::fs::read(out.join("Cafe.txt")).unwrap(), b"2");
+    }
+
+    #[test]
+    fn two_members_with_the_same_ascii_name_both_stay() {
+        let (r, out, log) = unpack("clash", &[("Café.txt", b"accent"), ("Cafe.txt", b"plain")]);
+        assert!(r.is_ok(), "{r:?} {log:?}");
+        assert_eq!(names_in(&out), ["Cafe.txt", "Cafe_2.txt"]);
+        assert_eq!(std::fs::read(out.join("Cafe.txt")).unwrap(), b"plain");
+        assert_eq!(std::fs::read(out.join("Cafe_2.txt")).unwrap(), b"accent");
+    }
+
+    #[test]
+    fn an_earlier_unpack_is_counted_and_its_copies_replaced() {
+        let t = std::env::temp_dir().join(format!("rg-seed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        std::fs::create_dir_all(t.join("Cafe")).unwrap();
+        std::fs::write(t.join("Cafe").join("old.txt"), b"old").unwrap();
+        std::fs::write(t.join("Cafe.txt"), b"stale").unwrap();
+        let mut g = Guard::new(
+            Limits {
+                max_files: 3,
+                ..Limits::default()
+            },
+            &t,
+            &[],
+        );
+        g.seed_existing();
+        assert_eq!(g.files.len(), 2);
+        // The job's own unpack again: the same member under its original name.
+        std::fs::write(t.join("Café.txt"), b"new").unwrap();
+        g.admit(&t.join("Café.txt"), false).unwrap();
+        std::fs::create_dir_all(t.join("Café")).unwrap();
+        std::fs::write(t.join("Café").join("new.txt"), b"n").unwrap();
+        g.admit(&t.join("Café").join("new.txt"), false).unwrap_err();
+        // Over the limit by one; drop the extra file and rename what was admitted.
+        std::fs::remove_file(t.join("Café").join("new.txt")).unwrap();
+        g.breach = None;
+        g.admit(&t.join("Café"), true).unwrap();
+        g.asciify().unwrap();
+        assert_eq!(names_in(&t), ["Cafe", "Cafe.txt"]);
+        assert_eq!(std::fs::read(t.join("Cafe.txt")).unwrap(), b"new");
+        assert_eq!(names_in(&t.join("Cafe")), ["old.txt"]);
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
+    #[test]
+    fn a_probe_counts_nothing() {
+        let mut g = guard(Limits {
+            max_files: 1,
+            ..Limits::default()
+        });
+        g.probe(&root().join("a"), false).unwrap();
+        g.probe(&root().join("b"), false).unwrap();
+        g.admit(&root().join("c"), false).unwrap();
+        assert!(g.probe(&root().join("d"), false).is_err());
+    }
+
+    /// `NzbgetRsParsedOptions` is shared with C++: the header must list the same fields in
+    /// the same order, all `int32_t`.
+    #[test]
+    fn the_options_struct_matches_the_c_header() {
+        let header = include_str!("../include/nzbget_rs.h");
+        let start = header.find("typedef struct NzbgetRsParsedOptions {").unwrap();
+        let end = start + header[start..].find("} NzbgetRsParsedOptions;").unwrap();
+        let c: Vec<&str> = header[start..end]
+            .lines()
+            .skip(1)
+            .filter_map(|l| l.trim().strip_prefix("int32_t "))
+            .map(|l| l.trim_end_matches(';'))
+            .collect();
+        let rust_src = include_str!("options.rs");
+        let start = rust_src.find("pub struct NzbgetRsParsedOptions {").unwrap();
+        let end = start + rust_src[start..].find("\n}").unwrap();
+        let r: Vec<&str> = rust_src[start..end]
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("pub "))
+            .filter_map(|l| l.strip_suffix(": i32,"))
+            .collect();
+        assert_eq!(c, r);
+        assert_eq!(
+            std::mem::size_of::<crate::options::NzbgetRsParsedOptions>(),
+            4 * c.len()
+        );
+    }
+
 }

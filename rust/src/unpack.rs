@@ -1457,9 +1457,10 @@ pub struct RarFeed<'a> {
     pub failure: Option<&'a mut Option<crate::progressive_unpack::Failure>>,
     /// Told `true` while the RAR extraction waits for a volume and `false` when it continues.
     pub on_wait: Option<&'a dyn Fn(bool)>,
-    /// The job's unpack limits (`unpacklimits`), shared by all its archives and passes; with
-    /// one, the unpacked names are also made ASCII. `None` (an archive that is not a job's
-    /// download) limits and renames nothing.
+    /// The job's unpack limits (`unpacklimits`), shared by all its archives and passes. The
+    /// caller makes the names ASCII once the job's unpack is done
+    /// (`unpacklimits::finish_names`). `None` (an archive that is not a job's download) limits
+    /// nothing.
     pub guard: Option<&'a crate::unpacklimits::SharedGuard>,
 }
 
@@ -1601,28 +1602,6 @@ where
 
     if is_cancelled() {
         return Err("Aborted".to_string());
-    }
-
-    // Names are ASCII only: the files and folders the job created with other characters are
-    // renamed.
-    match guard.map_or(Ok(Vec::new()), crate::unpacklimits::asciify) {
-        Ok(renamed) => {
-            for (old, new) in renamed {
-                log_cb(
-                    0,
-                    &format!(
-                        "Renamed {} to {} (names are ASCII only)",
-                        old.display(),
-                        new.display()
-                    ),
-                );
-            }
-        }
-        Err(e) => {
-            let msg = format!("Could not rename unpacked files to ASCII names: {e}");
-            log_cb(1, &msg);
-            return Err(msg);
-        }
     }
 
     // First-class Permission Fixer: normalize POSIX file & directory permissions

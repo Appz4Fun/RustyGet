@@ -8145,10 +8145,14 @@ pub struct CrossPackTargetInput {
     pub all_articles_failed: bool,
 }
 
-/// True when the holes of a file of `decoded_file_size` bytes cover all of it: nothing of it
-/// arrived. (The host sends no article total for a repair job.)
+/// True when nothing of a repair job's file arrived. The host sends no article total: a file
+/// of which no article arrived comes as size 0 without holes (a partly failed file of unknown
+/// size gets no job at all), and holes covering the whole file say the same.
 pub fn nothing_arrived(decoded_file_size: i64, holes: &[NzbgetRsByteRange]) -> bool {
-    decoded_file_size > 0 && holes.iter().map(|h| h.size.max(0)).sum::<i64>() >= decoded_file_size
+    if decoded_file_size <= 0 {
+        return holes.is_empty();
+    }
+    holes.iter().map(|h| h.size.max(0)).sum::<i64>() >= decoded_file_size
 }
 
 /// Host callback boundary for [`CrossPackRepairSession::process_donor`].
@@ -17744,12 +17748,13 @@ mod dead_volume_fill_tests {
         crate::postproc::direct_unpack_hold(nzb_id, &dead_full);
         let names: Vec<Vec<u8>> = (0..=dead).map(|i| name(i).into_bytes()).collect();
         let name_refs: Vec<&[u8]> = names.iter().map(|n| n.as_slice()).collect();
-        let dead_holes = vec![NzbgetRsByteRange { offset: 0, size: vols[dead].len() as i64 }];
+        // As the host sends a file of which no article arrived: size 0, no holes.
+        let dead_holes: Vec<NzbgetRsByteRange> = Vec::new();
         // An earlier volume lost a few articles: damaged, not dead.
         let small_hole = vec![NzbgetRsByteRange { offset: 50_000, size: 768 }];
-        assert!(nothing_arrived(vols[dead].len() as i64, &dead_holes));
+        assert!(nothing_arrived(0, &dead_holes));
+        assert!(nothing_arrived(1000, &[NzbgetRsByteRange { offset: 0, size: 1000 }]));
         assert!(!nothing_arrived(vols[3].len() as i64, &small_hole));
-        assert!(!nothing_arrived(0, &[]));
         let targets = vec![
             CrossPackTargetInput {
                 filename: name(3).into_bytes(),
@@ -17761,11 +17766,11 @@ mod dead_volume_fill_tests {
             },
             CrossPackTargetInput {
                 filename: name(dead).into_bytes(),
-                decoded_file_size: vols[dead].len() as i64,
+                decoded_file_size: 0,
                 encoded_size: vols[dead].len() as i64 * 102 / 100,
                 patch_eligible: true,
                 holes: dead_holes.clone(),
-                all_articles_failed: nothing_arrived(vols[dead].len() as i64, &dead_holes),
+                all_articles_failed: nothing_arrived(0, &dead_holes),
             },
         ];
         let mut init = Vec::new();

@@ -486,6 +486,12 @@ int64_t nzbget_rs_nzb_coll(const NzbgetRsNzbScalars* p, int op, int a2, const Nz
 // Completed files and stream-repair jobs of a collection (op codes in qnzb.rs).
 int64_t nzbget_rs_nzb_files(const NzbgetRsNzbScalars* p, int op, int a2, const NzbgetRsNzbScalars* p2,
     const char* s1, const char* s2, int* ints, int64_t* i64s, const char** strs, const int64_t* raw);
+// History-only duplicate record (rust/src/qdup.rs).
+typedef struct RsDup RsDup;
+RsDup* nzbget_rs_dup_new(void);
+void nzbget_rs_dup_free(RsDup* d);
+void nzbget_rs_dup_get(const RsDup* d, int* ints, int64_t* i64s, const char** strs);
+void nzbget_rs_dup_set(const RsDup* d, int field, int64_t v, const char* s);
 // Post-processing state (op codes in qnzb.rs).
 typedef struct RsPost RsPost;
 RsPost* nzbget_rs_post_new(void);

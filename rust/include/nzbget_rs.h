@@ -486,6 +486,12 @@ int64_t nzbget_rs_nzb_coll(const NzbgetRsNzbScalars* p, int op, int a2, const Nz
 // Completed files and stream-repair jobs of a collection (op codes in qnzb.rs).
 int64_t nzbget_rs_nzb_files(const NzbgetRsNzbScalars* p, int op, int a2, const NzbgetRsNzbScalars* p2,
     const char* s1, const char* s2, int* ints, int64_t* i64s, const char** strs, const int64_t* raw);
+// Post-processing state (op codes in qnzb.rs).
+typedef struct RsPost RsPost;
+RsPost* nzbget_rs_post_new(void);
+void nzbget_rs_post_free(RsPost* p);
+int64_t nzbget_rs_post_op(const RsPost* p, int op, int a2, int64_t v, const char* s1, const char** strs);
+NzbgetRsBuf nzbget_rs_post_label(const RsPost* p);
 // A collection's message log (op codes in qnzb.rs).
 int64_t nzbget_rs_nzb_msgs(const NzbgetRsNzbScalars* p, int op, int a2, const NzbgetRsNzbScalars* p2,
     const char* s1, const int* ints, void (*visit)(uintptr_t, int, int, int, const char*), uintptr_t ctx);

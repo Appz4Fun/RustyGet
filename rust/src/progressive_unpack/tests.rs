@@ -4412,6 +4412,9 @@ struct DownloadingWithVirtual {
 }
 
 impl VolumeFeed for DownloadingWithVirtual {
+    fn has_borrowed(&self) -> bool {
+        !self.virtuals.is_empty()
+    }
     fn volume(&mut self, path: &Path) -> VolumeView {
         if let Some(v) = self.virtuals.get(path) {
             let n = self.asked.entry(path.to_path_buf()).or_default();
@@ -4531,10 +4534,14 @@ impl VolumeFeed for FinalWithVirtual {
         self.0.volume(path)
     }
     fn expected_volumes(&self) -> u64 {
-        self.0.volumes
+        // Unknown, as when the queue cannot count the set: the guard must not depend on it.
+        0
     }
     fn set_became_final(&self) -> bool {
         true
+    }
+    fn has_borrowed(&self) -> bool {
+        self.0.has_borrowed()
     }
 }
 

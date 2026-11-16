@@ -2978,6 +2978,12 @@ impl crate::progressive_unpack::VolumeFeed for DirectUnpackFeed {
         self.expected_volumes
     }
 
+    fn has_borrowed(&self) -> bool {
+        direct_unpack_holds()
+            .get(&self.nzb_id)
+            .is_some_and(|st| !st.virtuals.is_empty())
+    }
+
     fn set_became_final(&self) -> bool {
         direct_unpack_download_finished(self.nzb_id)
             && !direct_unpack_has_holds(self.nzb_id)

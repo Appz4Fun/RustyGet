@@ -337,6 +337,9 @@ impl VolumeFeed for RememberedHoles {
     fn set_became_final(&self) -> bool {
         self.inner.set_became_final()
     }
+    fn has_borrowed(&self) -> bool {
+        self.inner.has_borrowed()
+    }
 }
 
 /// Volume provider of a persistent session: every expected volume is declared up front as a

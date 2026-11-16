@@ -3915,9 +3915,9 @@ impl NzbgetRsQueueCoordinator {
             host.nzb_push_completed_file(nzb.ptr, file.ptr, &filename, file_status, file_crc);
 
             // A dead volume the live repair could not place yet may be placeable now that
-            // another volume arrived: run it again while direct unpack waits on one.
+            // another volume arrived, and a volume that just went dead wants a borrow pass of
+            // its own: run it again while direct unpack waits on one.
             if completed
-                && !is_incomplete
                 && opts.dupe_article_fallback == crate::queuesubsys_host::DAF_LIVE
                 && opts.direct_unpack
                 && crate::postproc::direct_unpack_waits_on_dead_volume(nzb.id)

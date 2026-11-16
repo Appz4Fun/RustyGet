@@ -497,6 +497,11 @@ where
         opts.limits.name_bytes = opts.limits.name_bytes.saturating_add(cost.names);
     }
     opts.limits.protection_paths = opts.limits.protection_paths.max(volume_count + 16);
+    // Tests force a declared set past a limit so the undeclared retry runs.
+    #[cfg(test)]
+    if tests::FORCE_DECLARE.with(|f| f.get()) && *declared {
+        opts.limits.protection_path_bytes = 4096;
+    }
     log_cb(
         3,
         &format!(
@@ -560,12 +565,21 @@ where
                 log_cb(4, &format!("Unrar: Extracting from {name}"));
             }
             ProgressiveEvent::MemberStarted { member, name, .. } => {
-                let display = String::from_utf8_lossy(&name).into_owned();
-                log_cb(4, &format!("Unrar: Extracting  {display}"));
                 // Needed for outputs copied into place (zipfast restores it on what it publishes
                 // itself; a checksum-less member of a final set is still copied). Each volume's
                 // headers are read once.
                 let meta = meta_cache.lookup(&current_volume, req.password, &name);
+                // Placed where unrar and zipfast place it: a RAR 1.5-4.x backslash separates
+                // directories.
+                let name = if meta.separator_mapped {
+                    name.iter()
+                        .map(|&b| if b == b'\\' { b'/' } else { b })
+                        .collect()
+                } else {
+                    name.to_vec()
+                };
+                let display = String::from_utf8_lossy(&name).into_owned();
+                log_cb(4, &format!("Unrar: Extracting  {display}"));
                 next_ordinal += 1;
                 let seen = occurrences.entry(name.to_vec()).or_insert(0u32);
                 let occurrence = *seen;
@@ -954,6 +968,9 @@ struct MemberMeta {
     mtime: Option<(i64, u32)>,
     /// The archive was not made on Unix: zipfast names its output with Windows path rules.
     windows_names: bool,
+    /// A RAR 1.5-4.x member: a stored backslash is a directory separator whatever the host,
+    /// as unrar and zipfast read it, so the output is placed under the name with slashes.
+    separator_mapped: bool,
 }
 
 /// Member metadata by volume, each volume's headers read once. Members with the same name get
@@ -970,8 +987,20 @@ impl MetaCache {
             self.volume = volume.to_path_buf();
             self.members = volume_metadata(volume, password);
         }
+        // zipfast's decoded RAR 1.5-4.x names have slashes where the stored name (the one
+        // zipfast reports while extracting) has backslashes.
+        let mapped;
+        let key = if !self.members.contains_key(name) && name.contains(&b'\\') {
+            mapped = name
+                .iter()
+                .map(|&b| if b == b'\\' { b'/' } else { b })
+                .collect::<Vec<u8>>();
+            mapped.as_slice()
+        } else {
+            name
+        };
         self.members
-            .get_mut(name)
+            .get_mut(key)
             .and_then(|q| q.pop_front())
             .unwrap_or_default()
     }
@@ -997,6 +1026,7 @@ fn volume_metadata(
                             unix_mode: h.is_unix().then_some(h.attributes as u32),
                             mtime: h.mtime.map(|s| (s, h.mtime_nanos)),
                             windows_names: !h.is_unix(),
+                            separator_mapped: h.rar4.is_some(),
                         });
                 }
                 Ok(Some(Block::End { .. })) | Ok(None) | Err(_) => break,
@@ -1017,6 +1047,7 @@ fn volume_metadata(
                 unix_mode: (f.attr & 0o170000 == 0o100000).then_some(f.attr & 0o7777),
                 mtime: crate::archive_native::rar4_dos_mtime(f.time),
                 windows_names: f.attr & 0o170000 != 0o100000,
+                separator_mapped: true,
             });
     }
     out

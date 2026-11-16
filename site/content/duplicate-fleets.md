@@ -49,7 +49,7 @@ Left out of the configuration file, every new setting keeps NZBGet's behavior, s
 
 ## Article fallback
 
-When an article fails on every server, RustyGet asks the fleet for it. It looks for the same file in the other copies, in the queue and in history, highest score first, and fetches the matching article by its Message-ID.
+When an article fails on every server, RustyGet asks the fleet for it. It looks for the same file in the other copies, in the queue and in history, twins first, then the other copies by kind and score (see [Donor order](twins-and-alts.md#donor-order)), and fetches the matching article by its Message-ID.
 
 ### Finding the matching file
 

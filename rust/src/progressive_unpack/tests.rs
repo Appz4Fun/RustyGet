@@ -3900,3 +3900,37 @@ fn a_rar4_name_with_a_backslash_keeps_its_name_mode_and_time() {
         assert!(age.as_secs() > 86_400, "{tag}: archive time not restored");
     }
 }
+
+/// Skip mode checks a RAR4 member's existing target under the stored name the copy path
+/// places, not zipfast's decoded one: an unrelated `dir/file.bin` does not skip `dir\\file.bin`.
+#[test]
+fn skip_mode_checks_a_rar4_backslash_name_where_it_is_placed() {
+    let t = TestDir::new("bsskip");
+    let data = pattern(70_000);
+    let first = write_set(
+        &t.dl(),
+        &rar4_store_volumes("dir\\file.bin", &data, 1 << 30),
+    );
+    std::fs::create_dir_all(t.out().join("dir")).unwrap();
+    std::fs::write(t.out().join("dir").join("file.bin"), b"other").unwrap();
+    let (r, log) = run_with(&first, &t.out(), Box::new(CompleteSet), Overwrite::Skip);
+    expect_ok(r, &log);
+    assert_eq!(
+        std::fs::read(t.out().join("dir\\file.bin")).unwrap(),
+        data,
+        "{log:?}"
+    );
+    assert_eq!(
+        std::fs::read(t.out().join("dir").join("file.bin")).unwrap(),
+        b"other"
+    );
+    // A target that exists under the stored name is still skipped.
+    std::fs::write(t.out().join("dir\\file.bin"), b"kept").unwrap();
+    let (r, log) = run_with(&first, &t.out(), Box::new(CompleteSet), Overwrite::Skip);
+    expect_ok(r, &log);
+    assert_eq!(
+        std::fs::read(t.out().join("dir\\file.bin")).unwrap(),
+        b"kept",
+        "{log:?}"
+    );
+}

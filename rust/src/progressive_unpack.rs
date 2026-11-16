@@ -367,6 +367,15 @@ where
 }
 
 /// A zipfast limit that a protection declaration inflates (and an undeclared run may not hit).
+/// The volume starts with the RAR 1.5-4.x signature.
+fn is_rar4_volume(volume: &Path) -> bool {
+    use std::io::Read;
+    let mut sig = [0u8; 7];
+    std::fs::File::open(volume)
+        .and_then(|mut f| f.read_exact(&mut sig))
+        .is_ok_and(|()| &sig == b"Rar!\x1a\x07\x00")
+}
+
 fn is_declaration_limit(what: &str) -> bool {
     what.starts_with("Limit {")
         && [
@@ -465,7 +474,13 @@ where
             mode: zipfast::extract::Mode::Extract,
             dest: req.dest.to_path_buf(),
             overwrite: match req.overwrite {
-                Overwrite::Skip => zipfast::extract::Overwrite::Skip,
+                // zipfast checks a RAR 1.5-4.x member's existing target under its decoded name
+                // (backslashes read as separators), not the stored name the copy path places:
+                // the copy into place does the skipping for those sets.
+                Overwrite::Skip if !is_rar4_volume(req.first_volume) => {
+                    zipfast::extract::Overwrite::Skip
+                }
+                Overwrite::Skip => zipfast::extract::Overwrite::Always,
                 // Rename: nothing is published by zipfast (no protection declaration); the
                 // copy into place picks the name.
                 Overwrite::Always | Overwrite::Rename => zipfast::extract::Overwrite::Always,

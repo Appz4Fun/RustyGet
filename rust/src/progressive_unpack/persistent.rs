@@ -517,6 +517,7 @@ impl<'a> Run<'a> {
                                 "member name differs between path rules".into(),
                             ));
                         }
+                        super::admit_member(self.req.dest, &name, meta).map_err(Step::Fail)?;
                         log_cb(4, &format!("Unrar: Extracting  {display}"));
                         current_member = Member {
                             name: name.to_vec(),

@@ -578,6 +578,12 @@ where
                 } else {
                     name.to_vec()
                 };
+                if let Err(f) = admit_member(req.dest, &name, meta) {
+                    for (_, mut a) in partial.drain(..).chain(provisional.drain(..)) {
+                        let _ = a.discard();
+                    }
+                    return Err(f.into());
+                }
                 let display = String::from_utf8_lossy(&name).into_owned();
                 log_cb(4, &format!("Unrar: Extracting  {display}"));
                 next_ordinal += 1;
@@ -971,6 +977,8 @@ struct MemberMeta {
     /// A RAR 1.5-4.x member: a stored backslash is a directory separator whatever the host,
     /// as unrar and zipfast read it, so the output is placed under the name with slashes.
     separator_mapped: bool,
+    /// A folder entry.
+    is_dir: bool,
 }
 
 /// Member metadata by volume, each volume's headers read once. Members with the same name get
@@ -1027,6 +1035,7 @@ fn volume_metadata(
                             mtime: h.mtime.map(|s| (s, h.mtime_nanos)),
                             windows_names: !h.is_unix(),
                             separator_mapped: h.rar4.is_some(),
+                            is_dir: h.is_dir(),
                         });
                 }
                 Ok(Some(Block::End { .. })) | Ok(None) | Err(_) => break,
@@ -1048,6 +1057,11 @@ fn volume_metadata(
                 mtime: crate::archive_native::rar4_dos_mtime(f.time),
                 windows_names: f.attr & 0o170000 != 0o100000,
                 separator_mapped: true,
+                is_dir: if f.attr & 0o170000 != 0 {
+                    f.attr & 0o170000 == 0o040000
+                } else {
+                    f.attr & 0x10 != 0
+                },
             });
     }
     out
@@ -1423,6 +1437,18 @@ fn publish_copy(
     });
     let _ = artifact.discard();
     result
+}
+
+/// Checks a member against the job's unpack limits (`unpacklimits`) before it is written
+/// under `dest`. A name zipfast's path rules refuse is left for zipfast to refuse.
+fn admit_member(dest: &Path, name: &[u8], meta: MemberMeta) -> Result<(), Failure> {
+    let Ok(rel) = zipfast::path::sanitize(&String::from_utf8_lossy(name), meta.windows_names)
+    else {
+        return Ok(());
+    };
+    let is_dir = meta.is_dir || name.ends_with(b"/") || name.ends_with(b"\\");
+    crate::unpacklimits::check(&dest.join(rel), is_dir)
+        .map_err(|e| Failure::UnsafePath(format!(": {e}")))
 }
 
 /// zipfast publishes from a private 0600 stage and applies a stored Unix mode as is. Give the

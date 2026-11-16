@@ -1,20 +1,22 @@
-//! Limits on what an unpack may create, checked as each member starts.
+//! Limits on what an unpack may create, checked before each file or folder is created.
 //!
-//! Every extractor logs `Unrar: Extracting  <name>` or `7-Zip: Extracting  <name>` before it
-//! writes a member. [`Guard::admit`] checks each name as it is logged:
-//! - no absolute paths and no `..`;
-//! - at most `UnpackMaxFiles` files, `UnpackMaxFolders` folders and `UnpackMaxDepth` levels of
-//!   nesting per job;
-//! - names and paths within the filesystem limits of both the folder the job unpacks to and
-//!   the folder it ends up in.
+//! The extractors create every file and folder through a few helpers, which call [`check`]
+//! with the path they are about to create. While a [`Scope`] for a job's [`Guard`] is active,
+//! [`check`] refuses:
+//! - a path with `..` or one that is not under the job's unpack folder;
+//! - more than `UnpackMaxFiles` files, `UnpackMaxFolders` folders or `UnpackMaxDepth` levels
+//!   of nesting, counted over the whole job (every archive, every pass);
+//! - names and paths over the filesystem limits of the folder the job unpacks to or the one
+//!   it ends up in.
 //!
-//! The first breach stops the unpack: the guard reports it as cancelled and the unpack fails
-//! with a message that starts with [`LIMIT_PREFIX`] and names the limit and the member.
-//! Once the unpack is done, [`asciify_new_entries`] renames every new file and folder with
-//! non-ASCII characters to an ASCII name that keeps upper and lower case.
+//! The first breach stops the unpack, which fails with a message that starts with
+//! [`LIMIT_PREFIX`] and names the limit and the path. Once the unpack is done,
+//! [`Guard::asciify`] renames every file and folder it created with non-ASCII characters to an
+//! ASCII name that keeps upper and lower case.
 
 use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 /// The start of every message for a breached limit; post-processing fails such a job without
 /// a par repair.
@@ -118,42 +120,53 @@ fn pathconf(_path: &Path, what: PathConf) -> Option<u64> {
     })
 }
 
+/// A guard shared by the extractors of one job.
+pub type SharedGuard = Arc<Mutex<Guard>>;
+
 /// Tracks what one job's unpack has created so far.
 #[derive(Debug)]
 pub struct Guard {
     limits: Limits,
-    /// The folder the job unpacks to, and the one it ends up in when that differs.
+    /// The folder the job unpacks to, then the one it ends up in when that differs.
     roots: Vec<Root>,
-    /// Files admitted, by path: a member read again (an extraction retried from the first
-    /// volume, a direct unpack redone after the download) counts once.
-    files: BTreeSet<String>,
-    folders: BTreeSet<Vec<String>>,
-    /// The ASCII form of every name component members were written under.
-    written: BTreeSet<String>,
+    /// Files admitted, relative to the unpack folder: a member written again (an extraction
+    /// retried, a direct unpack redone after the download) counts once.
+    files: BTreeSet<PathBuf>,
+    folders: BTreeSet<PathBuf>,
     breach: Option<String>,
 }
 
 impl Guard {
-    /// `unpack_dir`: where members are written; `final_dir`: where the job's files end up,
-    /// when they are moved after unpacking.
-    pub fn new(limits: Limits, unpack_dir: &Path, final_dir: Option<&Path>) -> Self {
+    /// `unpack_dir`: where members are written; `moved_to`: the folders the job's files may
+    /// be moved to after unpacking, keeping their paths relative to `unpack_dir`.
+    pub fn new(limits: Limits, unpack_dir: &Path, moved_to: &[&Path]) -> Self {
         let mut roots = vec![Root::new(unpack_dir)];
-        if let Some(f) = final_dir.filter(|f| !f.as_os_str().is_empty() && *f != unpack_dir) {
-            roots.push(Root::new(f));
+        for f in moved_to {
+            if !f.as_os_str().is_empty() && !roots.iter().any(|r| r.dir == *f) {
+                roots.push(Root::new(f));
+            }
         }
         Self {
             limits,
             roots,
             files: BTreeSet::new(),
             folders: BTreeSet::new(),
-            written: BTreeSet::new(),
             breach: None,
         }
     }
 
-    /// Whether an entry named `name` may be one this unpack wrote.
-    pub fn wrote_name(&self, name: &str) -> bool {
-        self.written.contains(&ascii_name(name))
+    /// A guard for one job with the configured limits.
+    pub fn shared(unpack_dir: &Path, moved_to: &[&Path]) -> SharedGuard {
+        Arc::new(Mutex::new(Self::new(
+            Limits::from_options(),
+            unpack_dir,
+            moved_to,
+        )))
+    }
+
+    /// The folder members are written to.
+    pub fn unpack_dir(&self) -> &Path {
+        &self.roots[0].dir
     }
 
     /// The first breached limit, as the message the unpack fails with.
@@ -161,118 +174,184 @@ impl Guard {
         self.breach.as_deref()
     }
 
-    /// Checks one extractor log line. `prefix` is where the extractor writes, relative to the
-    /// unpack folder (a nested archive unpacks next to itself).
-    pub fn observe(&mut self, prefix: &Path, msg: &str) {
-        if let Some(name) = msg
-            .strip_prefix("Unrar: Extracting  ")
-            .or_else(|| msg.strip_prefix("7-Zip: Extracting  "))
-        {
-            self.admit(prefix, name);
+    /// Admits `path`, a file or folder about to be created. Once a limit is breached every
+    /// later path is refused with the same message.
+    pub fn admit(&mut self, path: &Path, is_dir: bool) -> Result<(), String> {
+        if let Some(b) = &self.breach {
+            return Err(b.clone());
         }
+        self.check(path, is_dir).map_err(|why| {
+            let msg = format!("{LIMIT_PREFIX}{why}");
+            self.breach = Some(msg.clone());
+            msg
+        })
     }
 
-    /// Admits the member `name`, written under `prefix` (relative to the unpack folder).
-    /// Records the first breach; later members are ignored once one is recorded.
-    pub fn admit(&mut self, prefix: &Path, name: &str) {
-        if self.breach.is_some() {
-            return;
-        }
-        if let Err(why) = self.check(prefix, name) {
-            self.breach = Some(format!("{LIMIT_PREFIX}{why}"));
-        }
-    }
-
-    fn check(&mut self, prefix: &Path, name: &str) -> Result<(), String> {
-        let shown = name.escape_debug().to_string();
-        if name.starts_with('/') || name.starts_with('\\') || has_drive(name) {
-            return Err(format!("absolute path refused: \"{shown}\""));
-        }
-        let mut parts: Vec<String> = Vec::new();
-        for c in prefix.components() {
+    fn check(&mut self, path: &Path, is_dir: bool) -> Result<(), String> {
+        let shown = path.display().to_string();
+        let Ok(rel) = path.strip_prefix(&self.roots[0].dir) else {
+            return Err(format!(
+                "\"{shown}\" is outside the unpack folder {}",
+                self.roots[0].dir.display()
+            ));
+        };
+        let mut parts: Vec<&std::ffi::OsStr> = Vec::new();
+        for c in rel.components() {
             match c {
-                Component::Normal(p) => parts.push(ascii_name(&p.to_string_lossy())),
-                _ => return Err(format!("path outside the unpack folder: \"{shown}\"")),
+                Component::Normal(p) => parts.push(p),
+                Component::CurDir => {}
+                _ => return Err(format!("\"{shown}\" leaves the unpack folder")),
             }
         }
-        let nested = parts.len();
-        let is_dir_entry = name.ends_with('/') || name.ends_with('\\');
-        for part in name.split(['/', '\\']) {
-            match part {
-                "" | "." => {}
-                ".." => return Err(format!("relative path refused: \"{shown}\"")),
-                p => {
-                    let a = ascii_name(p);
-                    self.written.insert(a.clone());
-                    parts.push(a);
-                }
-            }
-        }
-        if parts.len() == nested {
+        if parts.is_empty() {
             return Ok(());
         }
-        let folders_in = if is_dir_entry {
-            parts.len()
-        } else {
-            parts.len() - 1
-        };
-        let depth = folders_in as u64;
-        if self.limits.max_depth > 0 && depth > u64::from(self.limits.max_depth) {
+        let rel: PathBuf = parts.iter().collect();
+        let folders_in = if is_dir { parts.len() } else { parts.len() - 1 };
+        if self.limits.max_depth > 0 && folders_in as u64 > u64::from(self.limits.max_depth) {
             return Err(format!(
-                "\"{shown}\" is {depth} folders deep, more than {} (UnpackMaxDepth)",
+                "\"{}\" is {folders_in} folders deep, more than {} (UnpackMaxDepth)",
+                rel.display(),
                 self.limits.max_depth
             ));
-        }
-        for n in 1..=folders_in {
-            self.folders.insert(parts[..n].to_vec());
-        }
-        if self.limits.max_folders > 0
-            && self.folders.len() as u64 > u64::from(self.limits.max_folders)
-        {
-            return Err(format!(
-                "more than {} folders (UnpackMaxFolders), at \"{shown}\"",
-                self.limits.max_folders
-            ));
-        }
-        let rel = parts.join("/");
-        if !is_dir_entry {
-            self.files.insert(rel.clone());
-            if self.limits.max_files > 0
-                && self.files.len() as u64 > u64::from(self.limits.max_files)
-            {
-                return Err(format!(
-                    "more than {} files (UnpackMaxFiles), at \"{shown}\"",
-                    self.limits.max_files
-                ));
-            }
         }
         for root in &self.roots {
             if let Some(long) = parts.iter().find(|p| p.len() as u64 > root.name_max) {
                 return Err(format!(
                     "name \"{}\" is {} bytes, more than the {} bytes {} allows",
-                    long.escape_debug(),
+                    long.to_string_lossy(),
                     long.len(),
                     root.name_max,
                     root.dir.display()
                 ));
             }
             // PATH_MAX counts the terminating NUL.
-            let len = root.dir.as_os_str().len() as u64 + 1 + rel.len() as u64;
+            let len = root.dir.as_os_str().len() as u64 + 1 + rel.as_os_str().len() as u64;
             if len >= root.path_max {
                 return Err(format!(
-                    "path to \"{shown}\" is {len} bytes in {}, more than its limit of {}",
+                    "path to \"{}\" is {len} bytes in {}, more than its limit of {}",
+                    rel.display(),
                     root.dir.display(),
                     root.path_max - 1
                 ));
             }
         }
+        let new_folders: Vec<PathBuf> = (1..=folders_in)
+            .map(|n| parts[..n].iter().collect::<PathBuf>())
+            .filter(|f| !self.folders.contains(f))
+            .collect();
+        if self.limits.max_folders > 0
+            && (self.folders.len() + new_folders.len()) as u64 > u64::from(self.limits.max_folders)
+        {
+            return Err(format!(
+                "more than {} folders (UnpackMaxFolders), at \"{}\"",
+                self.limits.max_folders,
+                rel.display()
+            ));
+        }
+        if !is_dir
+            && !self.files.contains(&rel)
+            && self.limits.max_files > 0
+            && self.files.len() as u64 >= u64::from(self.limits.max_files)
+        {
+            return Err(format!(
+                "more than {} files (UnpackMaxFiles), at \"{}\"",
+                self.limits.max_files,
+                rel.display()
+            ));
+        }
+        self.folders.extend(new_folders);
+        if !is_dir {
+            self.files.insert(rel);
+        }
         Ok(())
+    }
+
+    /// Renames every admitted file and folder that exists and whose name is not ASCII to its
+    /// [`ascii_name`], deepest first. A taken name gets `_2`, `_3`, ... before its extension.
+    /// Returns the renamed paths as (old, new).
+    pub fn asciify(&self) -> std::io::Result<Vec<(PathBuf, PathBuf)>> {
+        let base = &self.roots[0].dir;
+        let mut entries: Vec<&PathBuf> = self.files.iter().chain(self.folders.iter()).collect();
+        // Deepest first: a folder is renamed after everything in it.
+        entries.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
+        let mut renamed = Vec::new();
+        for rel in entries {
+            let path = base.join(rel);
+            let Some(name) = path.file_name() else {
+                continue;
+            };
+            if name
+                .to_str()
+                .is_some_and(|n| n.bytes().all(|b| (0x20..0x7f).contains(&b)))
+            {
+                continue;
+            }
+            if std::fs::symlink_metadata(&path).is_err() {
+                continue;
+            }
+            let dir = path.parent().unwrap_or(base);
+            let target = free_name(dir, &ascii_name(&name.to_string_lossy()));
+            std::fs::rename(&path, &target)?;
+            renamed.push((path, target));
+        }
+        Ok(renamed)
     }
 }
 
-fn has_drive(name: &str) -> bool {
-    let b = name.as_bytes();
-    b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
+static ACTIVE: Mutex<Vec<(u64, SharedGuard)>> = Mutex::new(Vec::new());
+static NEXT_SCOPE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// While alive, [`check`] applies its guard to every path under the guard's unpack folder,
+/// on any thread. Scopes nest; the guard with the longest unpack folder holding a path
+/// applies.
+#[must_use]
+pub struct Scope(u64);
+
+impl Scope {
+    pub fn enter(guard: &SharedGuard) -> Self {
+        let id = NEXT_SCOPE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        lock(&ACTIVE).push((id, Arc::clone(guard)));
+        Self(id)
+    }
+}
+
+impl Drop for Scope {
+    fn drop(&mut self) {
+        lock(&ACTIVE).retain(|(id, _)| *id != self.0);
+    }
+}
+
+fn guard_for(path: &Path) -> Option<SharedGuard> {
+    let active = lock(&ACTIVE);
+    let mut best: Option<(usize, &SharedGuard)> = None;
+    for (_, g) in active.iter().rev() {
+        let depth = {
+            let g = lock(g);
+            let dir = g.unpack_dir();
+            if !path.starts_with(dir) {
+                continue;
+            }
+            dir.components().count()
+        };
+        if best.is_none_or(|(d, _)| depth > d) {
+            best = Some((depth, g));
+        }
+    }
+    best.map(|(_, g)| Arc::clone(g))
+}
+
+/// Called by the extractors with each file (`is_dir` false) or folder they are about to
+/// create. A path no active [`Scope`] covers passes.
+pub fn check(path: &Path, is_dir: bool) -> Result<(), String> {
+    match guard_for(path) {
+        Some(g) => lock(&g).admit(path, is_dir),
+        None => Ok(()),
+    }
 }
 
 /// An ASCII version of one path component: accented Latin letters lose their accent and keep
@@ -350,53 +429,6 @@ fn fold(c: char) -> &'static str {
     }
 }
 
-/// Renames every entry under `dir` that is not in `pre_existing`, whose name is not ASCII and
-/// that `wrote` says an extractor wrote (files still downloading into the same folder keep
-/// their names), deepest first, to its [`ascii_name`]. A taken name gets `_2`, `_3`, ...
-/// before its extension. Returns the renamed paths as (old, new).
-pub fn asciify_new_entries(
-    dir: &Path,
-    pre_existing: &BTreeSet<PathBuf>,
-    wrote: &dyn Fn(&str) -> bool,
-) -> std::io::Result<Vec<(PathBuf, PathBuf)>> {
-    let mut renamed = Vec::new();
-    asciify_dir(dir, pre_existing, wrote, &mut renamed)?;
-    Ok(renamed)
-}
-
-fn asciify_dir(
-    dir: &Path,
-    pre_existing: &BTreeSet<PathBuf>,
-    wrote: &dyn Fn(&str) -> bool,
-    renamed: &mut Vec<(PathBuf, PathBuf)>,
-) -> std::io::Result<()> {
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .collect();
-    entries.sort();
-    for path in entries {
-        let meta = std::fs::symlink_metadata(&path)?;
-        if meta.is_dir() {
-            asciify_dir(&path, pre_existing, wrote, renamed)?;
-        }
-        if pre_existing.contains(&path) {
-            continue;
-        }
-        let Some(name) = path.file_name() else {
-            continue;
-        };
-        let lossy = name.to_string_lossy();
-        let ascii = ascii_name(&lossy);
-        if (ascii == *name.to_string_lossy() && name.to_str().is_some()) || !wrote(&lossy) {
-            continue;
-        }
-        let target = free_name(dir, &ascii);
-        std::fs::rename(&path, &target)?;
-        renamed.push((path, target));
-    }
-    Ok(())
-}
-
 fn free_name(dir: &Path, name: &str) -> PathBuf {
     let first = dir.join(name);
     if std::fs::symlink_metadata(&first).is_err() {
@@ -412,19 +444,40 @@ fn free_name(dir: &Path, name: &str) -> PathBuf {
         .expect("a free name")
 }
 
+/// The breach `guard` recorded, if any.
+pub fn breach_of(guard: &SharedGuard) -> Option<String> {
+    lock(guard).breach().map(str::to_string)
+}
+
+/// [`Guard::asciify`] on a shared guard.
+pub fn asciify(guard: &SharedGuard) -> std::io::Result<Vec<(PathBuf, PathBuf)>> {
+    lock(guard).asciify()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn guard(limits: Limits) -> Guard {
-        Guard::new(limits, Path::new("/tmp"), None)
+    fn root() -> PathBuf {
+        PathBuf::from("/tmp/rg-root")
     }
 
+    fn guard(limits: Limits) -> Guard {
+        Guard::new(limits, &root(), &[])
+    }
+
+    /// Admits files (`dir/` names are folders); returns the first refusal.
     fn admit_all(g: &mut Guard, names: &[&str]) -> Option<String> {
         for n in names {
-            g.admit(Path::new(""), n);
+            let (n, is_dir) = match n.strip_suffix('/') {
+                Some(d) => (d, true),
+                None => (*n, false),
+            };
+            if let Err(e) = g.admit(&root().join(n), is_dir) {
+                return Some(e);
+            }
         }
-        g.breach().map(str::to_string)
+        None
     }
 
     #[test]
@@ -443,24 +496,28 @@ mod tests {
             &mut g,
             &[
                 "Release.mkv",
+                "Sample/",
                 "Sample/release-sample.mkv",
                 "Subs/English.srt",
-                "Subs\\Spanish.srt",
+                "Proof/Covers/",
                 "Proof/Covers/front.jpg",
             ],
         );
         assert_eq!(r, None);
+        assert_eq!(g.files.len(), 4);
+        assert_eq!(g.folders.len(), 4);
     }
 
     #[test]
-    fn too_deep_is_refused() {
+    fn too_deep_is_refused_for_files_and_folders() {
         let mut g = guard(Limits::default());
         let r = admit_all(&mut g, &["a/b/c/file.bin"]).unwrap();
         assert!(r.starts_with(LIMIT_PREFIX), "{r}");
-        assert!(
-            r.contains("3 folders deep") && r.contains("UnpackMaxDepth"),
-            "{r}"
-        );
+        assert!(r.contains("3 folders deep") && r.contains("UnpackMaxDepth"), "{r}");
+
+        let mut g = guard(Limits::default());
+        let r = admit_all(&mut g, &["a/", "a/b/", "a/b/c/"]).unwrap();
+        assert!(r.contains("\"a/b/c\" is 3 folders deep"), "{r}");
     }
 
     #[test]
@@ -469,19 +526,26 @@ mod tests {
         let names: Vec<String> = (0..101).map(|i| format!("f{i}.bin")).collect();
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let r = admit_all(&mut g, &refs).unwrap();
-        assert!(
-            r.contains("more than 100 files") && r.contains("f100.bin"),
-            "{r}"
-        );
+        assert!(r.contains("more than 100 files") && r.contains("f100.bin"), "{r}");
+        assert_eq!(g.files.len(), 100);
     }
 
     #[test]
-    fn too_many_folders_is_refused() {
+    fn empty_folders_count_toward_the_folder_limit() {
         let mut g = guard(Limits::default());
-        let names: Vec<String> = (0..11).map(|i| format!("d{i}/f.bin")).collect();
+        let names: Vec<String> = (0..11).map(|i| format!("d{i}/")).collect();
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let r = admit_all(&mut g, &refs).unwrap();
-        assert!(r.contains("more than 10 folders"), "{r}");
+        assert!(r.contains("more than 10 folders") && r.contains("d10"), "{r}");
+        assert!(g.files.is_empty());
+    }
+
+    #[test]
+    fn a_breach_refuses_everything_after_it() {
+        let mut g = guard(Limits::default());
+        assert!(admit_all(&mut g, &["a/b/c/x"]).is_some());
+        let again = admit_all(&mut g, &["fine.mkv"]).unwrap();
+        assert!(again.contains("UnpackMaxDepth"), "{again}");
     }
 
     #[test]
@@ -498,24 +562,26 @@ mod tests {
 
     #[test]
     fn escapes_are_refused() {
-        for bad in [
-            "../etc/passwd",
-            "a/../../x",
-            "/var/config/x",
-            "\\x",
-            "C:\\x",
-        ] {
+        for bad in ["/var/config/x", "/tmp/rg-root/../x", "/tmp/rg-rootx/y"] {
             let mut g = guard(Limits::default());
-            let r = admit_all(&mut g, &[bad]).unwrap();
-            assert!(r.contains("refused"), "{bad}: {r}");
+            let r = g.admit(Path::new(bad), false).unwrap_err();
+            assert!(
+                r.contains("outside the unpack folder") || r.contains("leaves the unpack folder"),
+                "{bad}: {r}"
+            );
         }
     }
 
     #[test]
-    fn names_and_paths_over_the_filesystem_limits_are_refused() {
+    fn raw_names_and_paths_over_the_filesystem_limits_are_refused() {
         let mut g = guard(Limits::default());
         let long = "x".repeat(300);
         let r = admit_all(&mut g, &[&long]).unwrap();
+        assert!(r.contains("300 bytes"), "{r}");
+
+        // 150 two-byte characters: 300 bytes on disk, though its ASCII name would fit.
+        let mut g = guard(Limits::default());
+        let r = admit_all(&mut g, &[&"é".repeat(150)]).unwrap();
         assert!(r.contains("300 bytes"), "{r}");
 
         let mut g = guard(Limits::default());
@@ -527,82 +593,97 @@ mod tests {
     #[test]
     fn both_folders_are_checked() {
         let t = std::env::temp_dir().join(format!("rg-limits-{}", std::process::id()));
-        let mut g = Guard::new(Limits::default(), &t, Some(&t.join("a".repeat(200))));
+        let mut g = Guard::new(Limits::default(), &t, &[&t.join("a".repeat(200))]);
         assert_eq!(g.roots.len(), 2);
         g.roots[1].path_max = 300;
-        g.admit(Path::new(""), &"z".repeat(100));
-        assert!(
-            g.breach().unwrap().contains(&"a".repeat(200)),
-            "{:?}",
-            g.breach()
-        );
+        let e = g.admit(&t.join("z".repeat(100)), false).unwrap_err();
+        assert!(e.contains(&"a".repeat(200)), "{e}");
     }
 
     #[test]
-    fn nested_prefixes_count_toward_depth() {
-        let mut g = guard(Limits::default());
-        g.admit(Path::new("Inner"), "Sub/file.bin");
-        assert_eq!(g.breach(), None);
-        g.admit(Path::new("Inner/Sub"), "More/file.bin");
-        assert!(g.breach().unwrap().contains("UnpackMaxDepth"));
-    }
-
-    #[test]
-    fn new_non_ascii_entries_are_renamed() {
-        let t = std::env::temp_dir().join(format!("rg-asciify-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&t);
-        std::fs::create_dir_all(t.join("Sübs")).unwrap();
-        std::fs::write(t.join("Sübs").join("Españ.srt"), b"x").unwrap();
-        std::fs::write(t.join("old_ü.txt"), b"keep").unwrap();
-        std::fs::write(t.join("Marnûkh.mkv"), b"m").unwrap();
-        std::fs::write(t.join("Marnukh.mkv"), b"taken").unwrap();
-        std::fs::write(t.join("Downloading_é.rar"), b"vol").unwrap();
-        let pre: BTreeSet<PathBuf> = [t.join("old_ü.txt"), t.join("Marnukh.mkv")].into();
-        asciify_new_entries(&t, &pre, &|n| n != "Downloading_é.rar").unwrap();
-        assert!(t.join("Downloading_é.rar").exists());
-        assert_eq!(
-            std::fs::read(t.join("Subs").join("Espan.srt")).unwrap(),
-            b"x"
-        );
-        assert!(t.join("old_ü.txt").exists());
-        assert_eq!(std::fs::read(t.join("Marnukh.mkv")).unwrap(), b"taken");
-        assert_eq!(std::fs::read(t.join("Marnukh_2.mkv")).unwrap(), b"m");
-        let _ = std::fs::remove_dir_all(&t);
-    }
-
-    #[test]
-    fn a_member_read_again_counts_once() {
+    fn a_file_written_again_counts_once() {
         let mut g = guard(Limits {
             max_files: 2,
             ..Limits::default()
         });
         for _ in 0..3 {
-            g.admit(Path::new(""), "a.bin");
-            g.admit(Path::new(""), "b.bin");
+            assert_eq!(admit_all(&mut g, &["a.bin", "b.bin"]), None);
         }
-        assert_eq!(g.breach(), None);
-        g.admit(Path::new(""), "c.bin");
-        assert!(g.breach().unwrap().contains("more than 2 files"));
+        let r = admit_all(&mut g, &["c.bin"]).unwrap();
+        assert!(r.contains("more than 2 files"), "{r}");
     }
 
-    /// A ustar archive of regular files.
+    #[test]
+    fn check_applies_the_guard_whose_scope_covers_the_path() {
+        let dir = std::env::temp_dir().join(format!("rg-scope-{}", std::process::id()));
+        let g = Arc::new(Mutex::new(Guard::new(
+            Limits {
+                max_files: 1,
+                ..Limits::default()
+            },
+            &dir,
+            &[],
+        )));
+        // No scope: nothing is checked.
+        assert!(check(&dir.join("a"), false).is_ok());
+        assert!(check(&dir.join("b"), false).is_ok());
+        {
+            let _scope = Scope::enter(&g);
+            assert!(check(&dir.join("a"), false).is_ok());
+            // Another thread is covered too.
+            let d = dir.clone();
+            let e = std::thread::spawn(move || check(&d.join("b"), false))
+                .join()
+                .unwrap()
+                .unwrap_err();
+            assert!(e.contains("more than 1 files"), "{e}");
+            // A path outside the job's folder is not this guard's.
+            assert!(check(Path::new("/elsewhere/x"), false).is_ok());
+        }
+        assert!(check(&dir.join("c"), false).is_ok());
+    }
+
+    #[test]
+    fn admitted_non_ascii_entries_are_renamed() {
+        let t = std::env::temp_dir().join(format!("rg-asciify-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        std::fs::create_dir_all(t.join("Sübs")).unwrap();
+        std::fs::write(t.join("Sübs").join("Españ.srt"), b"x").unwrap();
+        std::fs::write(t.join("Marnûkh.mkv"), b"m").unwrap();
+        std::fs::write(t.join("Marnukh.mkv"), b"taken").unwrap();
+        std::fs::write(t.join("Downloading_é.rar"), b"vol").unwrap();
+        let mut g = Guard::new(Limits::default(), &t, &[]);
+        for (p, d) in [
+            ("Sübs", true),
+            ("Sübs/Españ.srt", false),
+            ("Marnûkh.mkv", false),
+            ("Marnukh.mkv", false),
+        ] {
+            g.admit(&t.join(p), d).unwrap();
+        }
+        let renamed = g.asciify().unwrap();
+        assert_eq!(renamed.len(), 3, "{renamed:?}");
+        assert!(t.join("Downloading_é.rar").exists());
+        assert_eq!(std::fs::read(t.join("Subs").join("Espan.srt")).unwrap(), b"x");
+        assert_eq!(std::fs::read(t.join("Marnukh.mkv")).unwrap(), b"taken");
+        assert_eq!(std::fs::read(t.join("Marnukh_2.mkv")).unwrap(), b"m");
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
+    /// A ustar archive; a name ending in `/` is a folder entry, a name over 99 bytes gets a
+    /// GNU long-name entry.
     fn tar(entries: &[(&str, &[u8])]) -> Vec<u8> {
         let mut out = Vec::new();
         for (name, data) in entries {
-            let mut h = [0u8; 512];
-            h[..name.len()].copy_from_slice(name.as_bytes());
-            h[100..108].copy_from_slice(b"0000644\0");
-            h[108..116].copy_from_slice(b"0000000\0");
-            h[116..124].copy_from_slice(b"0000000\0");
-            h[124..136].copy_from_slice(format!("{:011o}\0", data.len()).as_bytes());
-            h[136..148].copy_from_slice(b"14000000000\0");
-            h[156] = b'0';
-            h[257..263].copy_from_slice(b"ustar\0");
-            h[263..265].copy_from_slice(b"00");
-            h[148..156].copy_from_slice(b"        ");
-            let sum: u32 = h.iter().map(|&b| u32::from(b)).sum();
-            h[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
-            out.extend_from_slice(&h);
+            if name.len() > 99 {
+                let long = [name.as_bytes(), b"\0"].concat();
+                out.extend(header("././@LongLink", long.len(), b'L'));
+                out.extend_from_slice(&long);
+                out.resize(out.len().div_ceil(512) * 512, 0);
+            }
+            let dir = name.ends_with('/');
+            let short = &name[..name.len().min(99)];
+            out.extend(header(short, data.len(), if dir { b'5' } else { b'0' }));
             out.extend_from_slice(data);
             out.resize(out.len().div_ceil(512) * 512, 0);
         }
@@ -610,19 +691,24 @@ mod tests {
         out
     }
 
-    fn unpack(tag: &str, entries: &[(&str, &[u8])]) -> (Result<u64, String>, PathBuf, Vec<String>) {
-        let t = std::env::temp_dir().join(format!("rg-unpack-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&t);
-        std::fs::create_dir_all(&t).unwrap();
-        let archive = t.join("set.tar");
-        std::fs::write(&archive, tar(entries)).unwrap();
-        let out = t.join("out");
-        let mut log = Vec::new();
-        let r = crate::unpack::extract_archive_with_zipfast(&archive, &out, "", 1, |k, m| {
-            log.push(format!("{k} {m}"))
-        })
-        .map(|s| s.files);
-        (r, out, log)
+    fn header(name: &str, size: usize, kind: u8) -> [u8; 512] {
+        {
+            let mut h = [0u8; 512];
+            h[..name.len()].copy_from_slice(name.as_bytes());
+            let dir = kind == b'5';
+            h[100..108].copy_from_slice(if dir { b"0000755\0" } else { b"0000644\0" });
+            h[108..116].copy_from_slice(b"0000000\0");
+            h[116..124].copy_from_slice(b"0000000\0");
+            h[124..136].copy_from_slice(format!("{size:011o}\0").as_bytes());
+            h[136..148].copy_from_slice(b"14000000000\0");
+            h[156] = kind;
+            h[257..263].copy_from_slice(b"ustar\0");
+            h[263..265].copy_from_slice(b"00");
+            h[148..156].copy_from_slice(b"        ");
+            let sum: u32 = h.iter().map(|&b| u32::from(b)).sum();
+            h[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+            h
+        }
     }
 
     fn files_under(dir: &Path) -> usize {
@@ -639,29 +725,90 @@ mod tests {
         })
     }
 
+    /// Unpacks tar archives into one folder with one job guard, archive by archive as
+    /// post-processing does; returns each result, the output folder and the log.
+    fn unpack_job(
+        tag: &str,
+        archives: &[&[(&str, &[u8])]],
+    ) -> (Vec<Result<u64, String>>, PathBuf, Vec<String>) {
+        let t = std::env::temp_dir().join(format!("rg-unpack-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        std::fs::create_dir_all(&t).unwrap();
+        let out = t.join("out");
+        let guard = Guard::shared(&out, &[]);
+        let mut log = Vec::new();
+        let mut results = Vec::new();
+        for (i, entries) in archives.iter().enumerate() {
+            let archive = t.join(format!("set{i}.tar"));
+            std::fs::write(&archive, tar(entries)).unwrap();
+            let r = crate::unpack::extract_archive_with_feed(
+                &archive,
+                &out,
+                "",
+                1,
+                false,
+                |k, m| log.push(format!("{k} {m}")),
+                &mut || false,
+                crate::unpack::RarFeed {
+                    guard: Some(&guard),
+                    ..crate::unpack::RarFeed::default()
+                },
+            )
+            .map(|s| s.files);
+            results.push(r);
+        }
+        (results, out, log)
+    }
+
+    fn unpack(tag: &str, entries: &[(&str, &[u8])]) -> (Result<u64, String>, PathBuf, Vec<String>) {
+        let (mut r, out, log) = unpack_job(tag, &[entries]);
+        (r.remove(0), out, log)
+    }
+
     #[test]
-    fn an_unpack_with_too_many_files_stops_and_fails_with_the_reason() {
+    fn an_unpack_with_too_many_files_stops_before_the_next_file() {
         let names: Vec<String> = (0..150).map(|i| format!("f{i:03}.bin")).collect();
         let entries: Vec<(&str, &[u8])> = names.iter().map(|n| (n.as_str(), &b"x"[..])).collect();
         let (r, out, log) = unpack("files", &entries);
         let err = r.unwrap_err();
-        assert!(
-            err.starts_with(LIMIT_PREFIX) && err.contains("more than 100 files"),
-            "{err}"
-        );
-        assert!(
-            log.iter().any(|l| l.starts_with("1 Unpack limit: ")),
-            "{log:?}"
-        );
+        assert!(err.starts_with(LIMIT_PREFIX) && err.contains("more than 100 files"), "{err}");
+        assert!(log.iter().any(|l| l.starts_with("1 Unpack limit: ")), "{log:?}");
         assert!(!log.iter().any(|l| l.contains("All OK")), "{log:?}");
-        assert!(files_under(&out) <= 101, "{}", files_under(&out));
+        assert_eq!(files_under(&out), 100);
     }
 
     #[test]
-    fn an_unpack_nested_too_deep_fails_with_the_reason() {
-        let (r, _, _) = unpack("deep", &[("a/b/c/x.bin", b"x")]);
+    fn folder_entries_count_toward_depth_and_folders() {
+        let (r, out, _) = unpack("deepdirs", &[("a/", b""), ("a/b/", b""), ("a/b/c/", b"")]);
         let err = r.unwrap_err();
         assert!(err.contains("UnpackMaxDepth"), "{err}");
+        assert!(!out.join("a/b/c").exists());
+
+        let dirs: Vec<String> = (0..12).map(|i| format!("d{i:02}/")).collect();
+        let entries: Vec<(&str, &[u8])> = dirs.iter().map(|n| (n.as_str(), &b""[..])).collect();
+        let (r, _, _) = unpack("manydirs", &entries);
+        assert!(r.unwrap_err().contains("UnpackMaxFolders"));
+    }
+
+    #[test]
+    fn an_over_long_name_fails_with_the_reason() {
+        let long = format!("{}.mkv", "n".repeat(296));
+        let (r, out, log) = unpack("longname", &[(long.as_str(), b"x")]);
+        let err = r.unwrap_err();
+        assert!(err.starts_with(LIMIT_PREFIX) && err.contains("300 bytes"), "{err}");
+        assert!(log.iter().any(|l| l.starts_with("1 Unpack limit: ")), "{log:?}");
+        assert_eq!(files_under(&out), 0);
+    }
+
+    #[test]
+    fn the_limits_count_over_all_archives_of_a_job() {
+        let a: Vec<String> = (0..60).map(|i| format!("a{i:02}.bin")).collect();
+        let b: Vec<String> = (0..60).map(|i| format!("b{i:02}.bin")).collect();
+        let ea: Vec<(&str, &[u8])> = a.iter().map(|n| (n.as_str(), &b"x"[..])).collect();
+        let eb: Vec<(&str, &[u8])> = b.iter().map(|n| (n.as_str(), &b"x"[..])).collect();
+        let (r, _, _) = unpack_job("perjob", &[&ea, &eb]);
+        assert_eq!(r[0], Ok(60));
+        assert!(r[1].as_ref().unwrap_err().contains("more than 100 files"), "{r:?}");
     }
 
     #[test]
@@ -675,17 +822,28 @@ mod tests {
     fn unpacked_names_are_made_ascii() {
         let (r, out, log) = unpack(
             "ascii",
-            &[("Marnûkh.mkv", b"m"), ("Sample/sämple.mkv", b"s")],
+            &[("Marnûkh.mkv", b"m"), ("Sämple/", b""), ("Sämple/sämple.mkv", b"s")],
         );
         assert_eq!(r, Ok(2), "{log:?}");
         assert_eq!(std::fs::read(out.join("Marnukh.mkv")).unwrap(), b"m");
-        assert_eq!(
-            std::fs::read(out.join("Sample").join("sample.mkv")).unwrap(),
-            b"s"
-        );
-        assert!(
-            log.iter().any(|l| l.contains("names are ASCII only")),
-            "{log:?}"
-        );
+        assert_eq!(std::fs::read(out.join("Sample").join("sample.mkv")).unwrap(), b"s");
+        assert!(log.iter().any(|l| l.contains("names are ASCII only")), "{log:?}");
+    }
+
+    #[test]
+    fn without_a_guard_nothing_is_limited_or_renamed() {
+        let names: Vec<String> = (0..120).map(|i| format!("f{i:03}.bin")).collect();
+        let mut entries: Vec<(&str, &[u8])> =
+            names.iter().map(|n| (n.as_str(), &b"x"[..])).collect();
+        entries.push(("Marnûkh.mkv", b"m"));
+        let t = std::env::temp_dir().join(format!("rg-unpack-noguard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        std::fs::create_dir_all(&t).unwrap();
+        let archive = t.join("set.tar");
+        std::fs::write(&archive, tar(&entries)).unwrap();
+        let out = t.join("out");
+        let r = crate::unpack::extract_archive_with_zipfast(&archive, &out, "", 1, |_, _| {});
+        assert_eq!(r.map(|s| s.files), Ok(121));
+        assert!(out.join("Marnûkh.mkv").exists());
     }
 }

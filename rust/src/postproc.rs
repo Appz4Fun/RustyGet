@@ -1703,6 +1703,8 @@ struct UnpackRunState {
     unpack_space_error: bool,
     /// An unpack limit was breached (`unpacklimits`): a par repair cannot help.
     unpack_limit_error: bool,
+    /// The job's unpack limits, shared by every unpack pass.
+    unpack_guard: Option<crate::unpacklimits::SharedGuard>,
     unpack_decrypt_error: bool,
     unpack_password_error: bool,
     cleaned_up_disk: bool,
@@ -2475,12 +2477,24 @@ impl NzbgetRsUnpackController {
         let cleanup_disk = st.unpack_cleanup_disk;
         let pw_str = std::str::from_utf8(password).unwrap_or("");
 
-        let final_dir = st.final_dir.clone();
+        // Unpacked files may end up in the download or the final folder.
+        let guard = st
+            .unpack_guard
+            .get_or_insert_with(|| {
+                crate::unpacklimits::Guard::shared(
+                    crate::fsops::path(&unpack_dir),
+                    &[
+                        crate::fsops::path(&st.dest_dir),
+                        crate::fsops::path(&st.final_dir),
+                    ],
+                )
+            })
+            .clone();
         let st_cell = std::cell::RefCell::new(&mut *st);
         let all_ok = crate::unpack::extract_discovered_archives(
             &dest_dir,
             crate::fsops::path(&unpack_dir),
-            (!final_dir.is_empty()).then(|| crate::fsops::path(&final_dir)),
+            &guard,
             pw_str,
             is_seven_zip,
             multi_volumes,
@@ -4289,11 +4303,13 @@ impl NzbgetRsDirectUnpack {
         let cleanup_disk = local.unpack_cleanup_disk;
 
         let mut failure: Option<crate::progressive_unpack::Failure> = None;
-        let guard = std::cell::RefCell::new(crate::unpacklimits::Guard::new(
-            crate::unpacklimits::Limits::from_options(),
+        let guard = crate::unpacklimits::Guard::shared(
             crate::fsops::path(&unpack_dir),
-            (!local.final_dir.is_empty()).then(|| crate::fsops::path(&local.final_dir)),
-        ));
+            &[
+                crate::fsops::path(&local.dest_dir),
+                crate::fsops::path(&local.final_dir),
+            ],
+        );
         let feed = Box::new(DirectUnpackFeed {
             nzb_id: self.nzb_id,
             expected_volumes: local.expected_volumes,

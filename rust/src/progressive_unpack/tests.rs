@@ -563,7 +563,7 @@ fn rar4_volume(header: Vec<u8>, payload: &[u8], more: bool, first: bool) -> Vec<
     v
 }
 
-fn rar4_store_volumes(name: &str, data: &[u8], chunk: usize) -> Vec<Vec<u8>> {
+pub(crate) fn rar4_store_volumes(name: &str, data: &[u8], chunk: usize) -> Vec<Vec<u8>> {
     let parts: Vec<&[u8]> = data.chunks(chunk).collect();
     let n = parts.len();
     parts

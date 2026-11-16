@@ -1236,6 +1236,35 @@ fn collect_nested_archive_volumes(main_archive: &std::path::Path) -> Vec<std::pa
 
 /// Checks whether a regular file inside `output_dir` is a nested archive that Extended Unpacker
 /// / Extended Unrar should recursively unpack.
+/// Whether a file name looks like an archive or one of its volumes (RAR, 7z, ZIP, tar and
+/// numbered parts), which a nested unpack may consume (`unpacklimits`).
+pub fn may_be_archive_volume(fname: &[u8]) -> bool {
+    if classify_archive_file(fname) != 0 {
+        return true;
+    }
+    if let Some(dot) = fname.iter().rposition(|&b| b == b'.') {
+        let ext = &fname[dot + 1..];
+        // .z01 ... split ZIP parts.
+        if ext.len() == 3 && ext[0].eq_ignore_ascii_case(&b'z') && ext[1..].iter().all(u8::is_ascii_digit) {
+            return true;
+        }
+    }
+    [
+        &b".zip"[..],
+        b".tar",
+        b".tgz",
+        b".tar.gz",
+        b".tbz2",
+        b".tar.bz2",
+        b".txz",
+        b".tar.xz",
+        b".tzst",
+        b".tar.zst",
+    ]
+    .iter()
+    .any(|s| has_suffix_icase(fname, s))
+}
+
 fn is_nested_extractable_archive(path: &std::path::Path) -> bool {
     let bytes = path_to_bytes(path);
     let fname = path_filename(bytes);
@@ -1588,6 +1617,10 @@ where
             for v in consumed_volumes {
                 processed_nested.insert(v.clone());
             }
+            // Unpacked further: not output, so not counted against the job's limits.
+            if let Some(g) = guard {
+                crate::unpacklimits::consumed(g, consumed_volumes);
+            }
             mark_extracted_files(&sub_extracted, &mut pre_existing, &mut processed_nested);
             summary.files += sub_summary.files;
             summary.dirs += sub_summary.dirs;
@@ -1602,6 +1635,13 @@ where
 
     if is_cancelled() {
         return Err("Aborted".to_string());
+    }
+    // Archive volumes nothing unpacked further are output: counted now.
+    if let Some(g) = guard {
+        if let Err(why) = crate::unpacklimits::settle(g) {
+            log_cb(1, &why);
+            return Err(why);
+        }
     }
 
     // First-class Permission Fixer: normalize POSIX file & directory permissions

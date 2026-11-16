@@ -26,6 +26,9 @@ pub const DEFAULT_MAX_FILES: u32 = 100;
 pub const DEFAULT_MAX_DEPTH: u32 = 2;
 pub const DEFAULT_MAX_FOLDERS: u32 = 10;
 
+/// Archive volumes waiting to be unpacked further may number this many times UnpackMaxFiles.
+pub const VOLUME_FACTOR: u64 = 100;
+
 /// The configured limits; 0 means no limit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
@@ -135,6 +138,12 @@ pub struct Guard {
     folders: BTreeSet<PathBuf>,
     /// ASCII names given by [`Guard::asciify`] so far.
     produced: BTreeSet<PathBuf>,
+    /// Files named like archive volumes, not counted yet: a nested archive unpacked further
+    /// consumes them ([`Guard::consumed`]); [`Guard::settle`] counts the rest.
+    deferred: BTreeSet<PathBuf>,
+    /// Volumes of nested archives that were unpacked further: never counted, but still made
+    /// ASCII if they stay on disk.
+    intermediate: BTreeSet<PathBuf>,
     breach: Option<String>,
 }
 
@@ -154,6 +163,8 @@ impl Guard {
             files: BTreeSet::new(),
             folders: BTreeSet::new(),
             produced: BTreeSet::new(),
+            deferred: BTreeSet::new(),
+            intermediate: BTreeSet::new(),
             breach: None,
         }
     }
@@ -290,7 +301,26 @@ impl Guard {
                 rel.display()
             ));
         }
-        if !is_dir
+        // An archive volume is counted once it is clear it stays (see `settle`): the volumes
+        // of an archive inside an archive are unpacked further and are not output.
+        let volume = !is_dir
+            && !self.files.contains(&rel)
+            && crate::unpack::may_be_archive_volume(crate::fsops::path_to_bytes(Path::new(
+                parts[parts.len() - 1],
+            )));
+        if volume {
+            // Still bounded: a flood of "volumes" is refused like any other.
+            let cap = u64::from(self.limits.max_files).saturating_mul(VOLUME_FACTOR);
+            if self.limits.max_files > 0
+                && !self.deferred.contains(&rel)
+                && self.deferred.len() as u64 >= cap
+            {
+                return Err(format!(
+                    "more than {cap} archive volumes ({VOLUME_FACTOR} x UnpackMaxFiles), at \"{}\"",
+                    rel.display()
+                ));
+            }
+        } else if !is_dir
             && !self.files.contains(&rel)
             && self.limits.max_files > 0
             && self.files.len() as u64 >= u64::from(self.limits.max_files)
@@ -303,9 +333,51 @@ impl Guard {
         }
         if record {
             self.folders.extend(new_folders);
-            if !is_dir {
+            if volume {
+                self.intermediate.remove(&rel);
+                self.deferred.insert(rel);
+            } else if !is_dir {
                 self.files.insert(rel);
             }
+        }
+        Ok(())
+    }
+
+    /// The volumes of a nested archive that was unpacked further: not output, never counted.
+    pub fn consumed(&mut self, volumes: &[PathBuf]) {
+        for v in volumes {
+            if let Ok(rel) = v.strip_prefix(&self.roots[0].dir) {
+                if self.deferred.remove(rel) {
+                    self.intermediate.insert(rel.to_path_buf());
+                }
+            }
+        }
+    }
+
+    /// Counts the archive volumes no nested unpack consumed: they are output. Called when an
+    /// archive and everything nested in it is unpacked.
+    pub fn settle(&mut self) -> Result<(), String> {
+        if let Some(b) = &self.breach {
+            return Err(b.clone());
+        }
+        let base = self.roots[0].dir.clone();
+        for rel in std::mem::take(&mut self.deferred) {
+            if std::fs::symlink_metadata(base.join(&rel)).is_err() {
+                continue;
+            }
+            if self.limits.max_files > 0
+                && !self.files.contains(&rel)
+                && self.files.len() as u64 >= u64::from(self.limits.max_files)
+            {
+                let msg = format!(
+                    "{LIMIT_PREFIX}more than {} files (UnpackMaxFiles), at \"{}\"",
+                    self.limits.max_files,
+                    rel.display()
+                );
+                self.breach = Some(msg.clone());
+                return Err(msg);
+            }
+            self.files.insert(rel);
         }
         Ok(())
     }
@@ -319,7 +391,14 @@ impl Guard {
     /// merged into it. Returns the renamed paths as (old, new).
     pub fn asciify(&mut self) -> std::io::Result<Vec<(PathBuf, PathBuf)>> {
         let base = self.roots[0].dir.clone();
-        let mut entries: Vec<PathBuf> = self.files.iter().chain(self.folders.iter()).cloned().collect();
+        let mut entries: Vec<PathBuf> = self
+            .files
+            .iter()
+            .chain(self.folders.iter())
+            .chain(self.intermediate.iter())
+            .chain(self.deferred.iter())
+            .cloned()
+            .collect();
         // Deepest first: a folder is renamed after everything in it.
         entries.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
         let mut names = Names {
@@ -617,9 +696,21 @@ pub fn hand_over(guard: &SharedGuard) {
 /// The guard a direct unpack into `unpack_dir` handed over, if any.
 pub fn take_handed_over(unpack_dir: &Path) -> Option<SharedGuard> {
     let mut h = lock(&HANDED_OVER);
-    let i = h.iter().position(|(_, g)| lock(g).unpack_dir() == unpack_dir)?;
+    let i = h
+        .iter()
+        .position(|(_, g)| lock(g).unpack_dir() == unpack_dir)?;
     let (t, g) = h.remove(i);
     (t.elapsed() < HAND_OVER_TTL).then_some(g)
+}
+
+/// [`Guard::consumed`] on a shared guard.
+pub fn consumed(guard: &SharedGuard, volumes: &[PathBuf]) {
+    lock(guard).consumed(volumes);
+}
+
+/// [`Guard::settle`] on a shared guard.
+pub fn settle(guard: &SharedGuard) -> Result<(), String> {
+    lock(guard).settle()
 }
 
 /// The breach `guard` recorded, if any.
@@ -711,7 +802,10 @@ mod tests {
         let mut g = guard(Limits::default());
         let r = admit_all(&mut g, &["a/b/c/file.bin"]).unwrap();
         assert!(r.starts_with(LIMIT_PREFIX), "{r}");
-        assert!(r.contains("3 folders deep") && r.contains("UnpackMaxDepth"), "{r}");
+        assert!(
+            r.contains("3 folders deep") && r.contains("UnpackMaxDepth"),
+            "{r}"
+        );
 
         let mut g = guard(Limits::default());
         let r = admit_all(&mut g, &["a/", "a/b/", "a/b/c/"]).unwrap();
@@ -724,7 +818,10 @@ mod tests {
         let names: Vec<String> = (0..101).map(|i| format!("f{i}.bin")).collect();
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let r = admit_all(&mut g, &refs).unwrap();
-        assert!(r.contains("more than 100 files") && r.contains("f100.bin"), "{r}");
+        assert!(
+            r.contains("more than 100 files") && r.contains("f100.bin"),
+            "{r}"
+        );
         assert_eq!(g.files.len(), 100);
     }
 
@@ -734,7 +831,10 @@ mod tests {
         let names: Vec<String> = (0..11).map(|i| format!("d{i}/")).collect();
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let r = admit_all(&mut g, &refs).unwrap();
-        assert!(r.contains("more than 10 folders") && r.contains("d10"), "{r}");
+        assert!(
+            r.contains("more than 10 folders") && r.contains("d10"),
+            "{r}"
+        );
         assert!(g.files.is_empty());
     }
 
@@ -862,7 +962,10 @@ mod tests {
         let renamed = g.asciify().unwrap();
         assert_eq!(renamed.len(), 3, "{renamed:?}");
         assert!(t.join("Downloading_é.rar").exists());
-        assert_eq!(std::fs::read(t.join("Subs").join("Espan.srt")).unwrap(), b"x");
+        assert_eq!(
+            std::fs::read(t.join("Subs").join("Espan.srt")).unwrap(),
+            b"x"
+        );
         assert_eq!(std::fs::read(t.join("Marnukh.mkv")).unwrap(), b"taken");
         assert_eq!(std::fs::read(t.join("Marnukh_2.mkv")).unwrap(), b"m");
         let _ = std::fs::remove_dir_all(&t);
@@ -975,8 +1078,14 @@ mod tests {
         let entries: Vec<(&str, &[u8])> = names.iter().map(|n| (n.as_str(), &b"x"[..])).collect();
         let (r, out, log) = unpack("files", &entries);
         let err = r.unwrap_err();
-        assert!(err.starts_with(LIMIT_PREFIX) && err.contains("more than 100 files"), "{err}");
-        assert!(log.iter().any(|l| l.starts_with("1 Unpack limit: ")), "{log:?}");
+        assert!(
+            err.starts_with(LIMIT_PREFIX) && err.contains("more than 100 files"),
+            "{err}"
+        );
+        assert!(
+            log.iter().any(|l| l.starts_with("1 Unpack limit: ")),
+            "{log:?}"
+        );
         assert!(!log.iter().any(|l| l.contains("All OK")), "{log:?}");
         assert_eq!(files_under(&out), 100);
     }
@@ -999,8 +1108,14 @@ mod tests {
         let long = format!("{}.mkv", "n".repeat(296));
         let (r, out, log) = unpack("longname", &[(long.as_str(), b"x")]);
         let err = r.unwrap_err();
-        assert!(err.starts_with(LIMIT_PREFIX) && err.contains("300 bytes"), "{err}");
-        assert!(log.iter().any(|l| l.starts_with("1 Unpack limit: ")), "{log:?}");
+        assert!(
+            err.starts_with(LIMIT_PREFIX) && err.contains("300 bytes"),
+            "{err}"
+        );
+        assert!(
+            log.iter().any(|l| l.starts_with("1 Unpack limit: ")),
+            "{log:?}"
+        );
         assert_eq!(files_under(&out), 0);
     }
 
@@ -1012,7 +1127,10 @@ mod tests {
         let eb: Vec<(&str, &[u8])> = b.iter().map(|n| (n.as_str(), &b"x"[..])).collect();
         let (r, _, _) = unpack_job("perjob", &[&ea, &eb]);
         assert_eq!(r[0], Ok(60));
-        assert!(r[1].as_ref().unwrap_err().contains("more than 100 files"), "{r:?}");
+        assert!(
+            r[1].as_ref().unwrap_err().contains("more than 100 files"),
+            "{r:?}"
+        );
     }
 
     #[test]
@@ -1026,12 +1144,22 @@ mod tests {
     fn unpacked_names_are_made_ascii() {
         let (r, out, log) = unpack(
             "ascii",
-            &[("Marnûkh.mkv", b"m"), ("Sämple/", b""), ("Sämple/sämple.mkv", b"s")],
+            &[
+                ("Marnûkh.mkv", b"m"),
+                ("Sämple/", b""),
+                ("Sämple/sämple.mkv", b"s"),
+            ],
         );
         assert_eq!(r, Ok(2), "{log:?}");
         assert_eq!(std::fs::read(out.join("Marnukh.mkv")).unwrap(), b"m");
-        assert_eq!(std::fs::read(out.join("Sample").join("sample.mkv")).unwrap(), b"s");
-        assert!(log.iter().any(|l| l.contains("names are ASCII only")), "{log:?}");
+        assert_eq!(
+            std::fs::read(out.join("Sample").join("sample.mkv")).unwrap(),
+            b"s"
+        );
+        assert!(
+            log.iter().any(|l| l.contains("names are ASCII only")),
+            "{log:?}"
+        );
     }
 
     #[test]
@@ -1050,7 +1178,6 @@ mod tests {
         assert_eq!(r.map(|s| s.files), Ok(121));
         assert!(out.join("Marnûkh.mkv").exists());
     }
-
 
     fn names_in(dir: &Path) -> Vec<String> {
         let mut v: Vec<String> = std::fs::read_dir(dir)
@@ -1075,10 +1202,7 @@ mod tests {
 
     #[test]
     fn a_file_written_twice_is_renamed_once() {
-        let (r, out, log) = unpack_job(
-            "twice",
-            &[&[("Café.txt", b"1")], &[("Café.txt", b"2")]],
-        );
+        let (r, out, log) = unpack_job("twice", &[&[("Café.txt", b"1")], &[("Café.txt", b"2")]]);
         assert!(r.iter().all(Result::is_ok), "{r:?} {log:?}");
         assert_eq!(names_in(&out), ["Cafe.txt"]);
         assert_eq!(std::fs::read(out.join("Cafe.txt")).unwrap(), b"2");
@@ -1165,7 +1289,6 @@ mod tests {
         assert!(g.probe(&root().join("d"), false).is_err());
     }
 
-
     #[test]
     fn names_that_fold_alike_all_stay() {
         let (r, out, log) = unpack(
@@ -1234,7 +1357,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&t);
     }
 
-
     #[test]
     fn a_member_of_this_run_is_never_an_older_copy() {
         let t = std::env::temp_dir().join(format!("rg-crossset-{}", std::process::id()));
@@ -1255,7 +1377,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&t);
     }
 
-
     #[test]
     fn a_redone_folder_merges_into_its_copy_another_archive_also_wrote_into() {
         let t = std::env::temp_dir().join(format!("rg-sharedredo-{}", std::process::id()));
@@ -1274,8 +1395,62 @@ mod tests {
         g.asciify().unwrap();
         assert_eq!(names_in(&t), ["Dossie"]);
         assert_eq!(names_in(&t.join("Dossie")), ["foo.txt", "other.txt"]);
-        assert_eq!(std::fs::read(t.join("Dossie").join("foo.txt")).unwrap(), b"a2");
+        assert_eq!(
+            std::fs::read(t.join("Dossie").join("foo.txt")).unwrap(),
+            b"a2"
+        );
         let _ = std::fs::remove_dir_all(&t);
+    }
+
+    /// A release whose outer archive holds a 150-volume RAR set: the inner volumes are
+    /// unpacked further, so only the mkv inside counts.
+    #[test]
+    fn the_volumes_of_a_nested_archive_do_not_count() {
+        let data: Vec<u8> = (0..150 * 512).map(|i| (i % 251) as u8).collect();
+        let vols = crate::progressive_unpack::tests::rar4_store_volumes("movie.mkv", &data, 512);
+        assert_eq!(vols.len(), 150);
+        let names: Vec<String> = (1..=vols.len())
+            .map(|i| format!("inner.part{i:03}.rar"))
+            .collect();
+        let mut entries: Vec<(&str, &[u8])> = names
+            .iter()
+            .zip(&vols)
+            .map(|(n, v)| (n.as_str(), v.as_slice()))
+            .collect();
+        entries.push(("info.nfo", b"nfo"));
+        let (r, out, log) = unpack("nestedvols", &entries);
+        assert!(r.is_ok(), "{r:?} {log:?}");
+        assert_eq!(
+            std::fs::read(out.join("movie.mkv")).unwrap(),
+            data,
+            "{log:?}"
+        );
+    }
+
+    #[test]
+    fn archive_volumes_nothing_unpacks_further_count_at_the_end() {
+        // 101 split pieces of a plain file: not an archive inside, so they are output.
+        let names: Vec<String> = (1..=101).map(|i| format!("movie.mkv.{i:03}")).collect();
+        let entries: Vec<(&str, &[u8])> = names.iter().map(|n| (n.as_str(), &b"x"[..])).collect();
+        let (r, _, log) = unpack("leftvols", &entries);
+        let err = r.unwrap_err();
+        assert!(err.contains("more than 100 files"), "{err} {log:?}");
+        assert!(
+            log.iter().any(|l| l.starts_with("1 Unpack limit: ")),
+            "{log:?}"
+        );
+    }
+
+    #[test]
+    fn a_flood_of_volume_names_is_still_refused() {
+        let mut g = guard(Limits {
+            max_files: 2,
+            ..Limits::default()
+        });
+        let names: Vec<String> = (0..201).map(|i| format!("x.part{i:03}.rar")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let r = admit_all(&mut g, &refs).unwrap();
+        assert!(r.contains("more than 200 archive volumes"), "{r}");
     }
 
     /// `NzbgetRsParsedOptions` is shared with C++: the header must list the same fields in
@@ -1283,7 +1458,9 @@ mod tests {
     #[test]
     fn the_options_struct_matches_the_c_header() {
         let header = include_str!("../include/nzbget_rs.h");
-        let start = header.find("typedef struct NzbgetRsParsedOptions {").unwrap();
+        let start = header
+            .find("typedef struct NzbgetRsParsedOptions {")
+            .unwrap();
         let end = start + header[start..].find("} NzbgetRsParsedOptions;").unwrap();
         let c: Vec<&str> = header[start..end]
             .lines()
@@ -1305,5 +1482,4 @@ mod tests {
             4 * c.len()
         );
     }
-
 }

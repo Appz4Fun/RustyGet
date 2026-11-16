@@ -2422,4 +2422,4 @@ fn read_at(file: &std::fs::File, buf: &mut [u8], offset: u64) -> std::io::Result
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

@@ -2571,6 +2571,149 @@ mod tests {
     }
 
     /// Builds a valid ZIP archive in memory from `(name, payload, unix_mode, flags, encrypted_payload)`.
+    #[cfg(unix)]
+    #[test]
+    fn test_zip_modes_follow_rustyget_rules_not_the_archive() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("rg_zip_modes_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let zip_path = dir.join("modes.zip");
+        std::fs::write(
+            &zip_path,
+            build_test_zip(&[
+                ("ro/", b"", Some(0o040555), 0, None),
+                ("ro/f.txt", b"inside", Some(0o100644), 0, None),
+                ("zero.txt", b"zero", Some(0o100000), 0, None),
+                ("run.sh", b"#!/bin/sh", Some(0o100750), 0, None),
+                ("keep/", b"", Some(0o040555), 0, None),
+            ]),
+        )
+        .unwrap();
+        let mode_of =
+            |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o7777;
+        for overwrite in [1, 2] {
+            let out = dir.join(format!("out{overwrite}"));
+            std::fs::create_dir_all(out.join("keep")).unwrap();
+            std::fs::set_permissions(out.join("keep"), std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+            let summary = crate::archive_native::extract_zipfast_cancellable(
+                &zip_path,
+                &out,
+                "",
+                overwrite,
+                &mut |_, _| {},
+                &mut || false,
+            )
+            .unwrap();
+            assert_eq!(summary.files, 3, "mode {overwrite}");
+            assert_eq!(mode_of(&out.join("ro")), 0o755, "mode {overwrite}");
+            std::fs::write(out.join("ro/new.txt"), b"writable").unwrap();
+            assert_eq!(mode_of(&out.join("zero.txt")), 0o644, "mode {overwrite}");
+            assert_eq!(std::fs::read(out.join("zero.txt")).unwrap(), b"zero");
+            assert_eq!(mode_of(&out.join("run.sh")), 0o750, "mode {overwrite}");
+            assert_eq!(mode_of(&out.join("keep")), 0o700, "mode {overwrite}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_zip_auto_rename_keeps_duplicates_and_creates_missing_output() {
+        let dir = std::env::temp_dir().join(format!("rg_zip_dupes_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let zip_path = dir.join("dupes.zip");
+        std::fs::write(
+            &zip_path,
+            build_test_zip(&[
+                ("a.txt", b"first", None, 0, None),
+                ("a.txt", b"second", None, 0, None),
+            ]),
+        )
+        .unwrap();
+        let out = dir.join("missing").join("out");
+        let summary = crate::archive_native::extract_zipfast_cancellable(
+            &zip_path,
+            &out,
+            "",
+            2,
+            &mut |_, _| {},
+            &mut || false,
+        )
+        .unwrap();
+        assert_eq!(summary.files, 2);
+        assert_eq!(std::fs::read(out.join("a.txt")).unwrap(), b"first");
+        assert_eq!(std::fs::read(out.join("a_1.txt")).unwrap(), b"second");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_zip_cancel_and_refusals_log_short_messages() {
+        let dir = std::env::temp_dir().join(format!("rg_zip_msgs_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Cancel while a large member is being written: Err("Aborted"), no error lines.
+        let big = vec![0x5au8; 96 << 20];
+        let big_zip = dir.join("big.zip");
+        std::fs::write(
+            &big_zip,
+            build_test_zip(&[("big.bin", &big, None, 0, None)]),
+        )
+        .unwrap();
+        drop(big);
+        for overwrite in [1, 2] {
+            let out = dir.join(format!("big_out{overwrite}"));
+            let started = std::cell::Cell::new(false);
+            let mut polls_after_start = 0u32;
+            let mut errors = Vec::new();
+            let err = crate::archive_native::extract_zipfast_cancellable(
+                &big_zip,
+                &out,
+                "",
+                overwrite,
+                &mut |k, m| {
+                    if m.starts_with("Unrar: Extracting from") {
+                        started.set(true);
+                    }
+                    if k == 1 {
+                        errors.push(m.to_string());
+                    }
+                },
+                &mut || {
+                    if started.get() {
+                        polls_after_start += 1;
+                    }
+                    polls_after_start > 2
+                },
+            )
+            .unwrap_err();
+            assert_eq!(err, "Aborted", "mode {overwrite}");
+            assert!(errors.is_empty(), "mode {overwrite}: {errors:?}");
+            assert!(!out.join("big.bin").exists(), "mode {overwrite}");
+        }
+
+        // A path-traversal name is refused with a short line, not an error dump.
+        let evil_zip = dir.join("evil.zip");
+        std::fs::write(
+            &evil_zip,
+            build_test_zip(&[("../evil.txt", b"x", None, 0, None)]),
+        )
+        .unwrap();
+        let err = crate::archive_native::extract_zipfast_cancellable(
+            &evil_zip,
+            &dir.join("evil_out"),
+            "",
+            1,
+            &mut |_, _| {},
+            &mut || false,
+        )
+        .unwrap_err();
+        assert!(err.len() < 200 && !err.contains("ZipReadError"), "{err}");
+        assert!(!dir.join("evil.txt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn build_test_zip(entries: &[(&str, &[u8], Option<u32>, u16, Option<&[u8]>)]) -> Vec<u8> {
         let mut out = Vec::new();
         let mut cd = Vec::new();

@@ -3719,27 +3719,58 @@ where
 /// Messages from the zipfast worker thread to the thread that owns `log_cb` and `is_cancelled`.
 enum ZipRunMsg {
     Log(i32, String),
+    Succeeded(String),
 }
 
-/// How a failed ZIP member is reported, in RustyGet's existing wording.
+const ZIP_BAD_PASSWORD: &str = "Unrar: The specified password is incorrect.";
+
+/// Whether a failed member only reports that the run was cancelled.
+fn zip_error_is_cancel(error: &zipfast::zip::ZipReadError) -> bool {
+    matches!(error.operation(), Some(zipfast::zip::ReadFault::Cancelled))
+        || matches!(
+            error.sink_fault(),
+            Some(zipfast::zip::ZipSinkFault::Cancelled)
+        )
+}
+
+/// How a failed ZIP member is reported, in RustyGet's existing wording. The last line is the
+/// one returned as the error.
 fn zip_member_failure_lines(name: &str, error: &zipfast::zip::ZipReadError) -> Vec<String> {
-    use zipfast::zip::ReadFault;
-    const BAD_PASSWORD: &str = "Unrar: The specified password is incorrect.";
+    use zipfast::zip::{ReadFault, ZipSinkFault};
     match error.operation() {
         Some(ReadFault::PasswordRequired) | Some(ReadFault::PasswordCheckFailed { .. }) => {
-            vec![BAD_PASSWORD.to_string(), format!("{name}: wrong password")]
+            vec![
+                ZIP_BAD_PASSWORD.to_string(),
+                format!("{name}: wrong password"),
+            ]
         }
         // The password verifier already matched: a bad WinZip AES tag is damaged data.
-        Some(ReadFault::AuthenticationFailed) => vec![format!("Unrar: {name} - CRC failed")],
+        Some(ReadFault::AuthenticationFailed) | Some(ReadFault::Integrity { .. }) => {
+            vec![format!("Unrar: {name} - CRC failed")]
+        }
         Some(ReadFault::UnsupportedMethod { method }) => {
             vec![format!(
                 "{name}: compression method {method} is not supported"
             )]
         }
-        Some(ReadFault::Integrity { .. }) => vec![format!("Unrar: {name} - CRC failed")],
-        Some(ReadFault::Cancelled) => vec!["Aborted".to_string()],
+        Some(ReadFault::CheckedFormat { reason }) => vec![format!("{name}: {reason}")],
+        Some(ReadFault::Limit { resource, .. }) => {
+            vec![format!("{name}: exceeds the {resource:?} limit")]
+        }
         Some(ReadFault::Io { error, .. }) => vec![format!("{name}: {error}")],
-        _ => vec![format!("{name}: {error:?}")],
+        Some(ReadFault::Directory { error }) => vec![format!("{name}: {error}")],
+        Some(ReadFault::Legacy(error)) => vec![format!("{name}: {error}")],
+        Some(ReadFault::Cancelled) => vec!["Aborted".to_string()],
+        Some(other) => vec![format!("{name}: {other:?}")],
+        None => match error.sink_fault() {
+            Some(ZipSinkFault::Cancelled) => vec!["Aborted".to_string()],
+            Some(ZipSinkFault::Io { error, .. }) => vec![format!("{name}: {error}")],
+            Some(ZipSinkFault::Caller(error)) => vec![format!("{name}: {error}")],
+            Some(ZipSinkFault::Limit { resource, .. }) => {
+                vec![format!("{name}: exceeds the {resource:?} limit")]
+            }
+            _ => vec![format!("{name}: extraction failed ({:?})", error.kind())],
+        },
     }
 }
 
@@ -3747,6 +3778,7 @@ fn zip_member_failure_lines(name: &str, error: &zipfast::zip::ZipReadError) -> V
 /// `is_cancelled` keeps being polled here and drives a [`zipfast::extract::Cancellation`].
 /// Member log lines are forwarded to `log_cb` from this thread. The first failed member
 /// cancels the rest of the run, matching the stop-at-first-error behaviour RustyGet always had.
+/// Returns the report and the names of the members zipfast wrote.
 fn run_zipfast_zip<F>(
     archive_path: &Path,
     dest: &Path,
@@ -3754,7 +3786,7 @@ fn run_zipfast_zip<F>(
     overwrite: zipfast::extract::Overwrite,
     log_cb: &mut F,
     is_cancelled: &mut dyn FnMut() -> bool,
-) -> Result<zipfast::zip::ZipRunReport, String>
+) -> Result<(zipfast::zip::ZipRunReport, Vec<String>), String>
 where
     F: FnMut(i32, &str),
 {
@@ -3773,14 +3805,20 @@ where
         parallel_min: None,
         select: None,
     };
+    // Large encrypted members are spooled before they are verified: keep that spool on the
+    // destination's file system rather than in TMPDIR.
+    let mut overrides = zipfast::zip::EncryptedReadOverrides::default();
+    overrides.temp_dir = Some(dest.to_path_buf());
     let password = (!password.is_empty()).then_some(password);
     let (tx, rx) = mpsc::channel::<ZipRunMsg>();
     let first_failure: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+    let mut succeeded = Vec::new();
 
     let result = std::thread::scope(|scope| {
         let worker_cancel = cancel.clone();
         let first_failure = &first_failure;
         let options = &options;
+        let overrides = &overrides;
         let worker = scope.spawn(move || {
             let observer_cancel = worker_cancel.clone();
             let observer = move |event: ZipRunEvent<'_>| -> ZipSinkResult<()> {
@@ -3790,11 +3828,13 @@ where
                             let _ =
                                 tx.send(ZipRunMsg::Log(4, format!("Unrar: Extracting  {name}")));
                         }
+                        let _ = tx.send(ZipRunMsg::Succeeded(name.to_string()));
                     }
                     ZipRunEvent::MemberFailed { name, error, .. } => {
-                        let lines = zip_member_failure_lines(name, error);
-                        let aborted = lines.len() == 1 && lines[0] == "Aborted";
-                        if !aborted {
+                        // Once the run is cancelled (by the caller or by an earlier failure),
+                        // later failures only report the cancellation.
+                        if !zip_error_is_cancel(error) && !observer_cancel.is_canceled() {
+                            let lines = zip_member_failure_lines(name, error);
                             let mut slot = first_failure.lock().unwrap_or_else(|p| p.into_inner());
                             if slot.is_none() {
                                 *slot = lines.last().cloned();
@@ -3814,7 +3854,7 @@ where
                 options,
                 password,
                 &worker_cancel,
-                &zipfast::zip::EncryptedReadOverrides::default(),
+                overrides,
                 observer,
             )
         });
@@ -3826,6 +3866,7 @@ where
             }
             match rx.recv_timeout(Duration::from_millis(10)) {
                 Ok(ZipRunMsg::Log(kind, line)) => log_cb(kind, &line),
+                Ok(ZipRunMsg::Succeeded(name)) => succeeded.push(name),
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
@@ -3845,52 +3886,204 @@ where
         .unwrap_or_else(|p| p.into_inner());
     match (result, failure) {
         (_, Some(msg)) => Err(msg),
-        (Ok(report), None) if report.failed() == 0 => Ok(report),
+        (Ok(report), None) if report.failed() == 0 => Ok((report, succeeded)),
         (Ok(report), None) => {
             let msg = format!("{} member(s) failed", report.failed());
             log_cb(1, &msg);
             Err(msg)
         }
         (Err(error), None) => {
-            if matches!(error.operation(), Some(zipfast::zip::ReadFault::Cancelled)) {
+            if zip_error_is_cancel(&error) {
                 return Err("Aborted".to_string());
             }
-            let msg = format!("{}: {error:?}", archive_path.display());
+            let name = archive_path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| archive_path.display().to_string());
+            let msg = zip_member_failure_lines(&name, &error)
+                .pop()
+                .unwrap_or_default();
             log_cb(1, &msg);
             Err(msg)
         }
     }
 }
 
-/// AutoRename for ZIP until zipfast's `Overwrite` has a rename mode (zipfast PR #128): extract
-/// into a private folder inside `output_dir`, then move every file to its free name with the
-/// same no-follow chooser the other formats use.
-fn place_staged_with_rename(staging: &Path, output_dir: &Path, rel: &Path) -> Result<(), String> {
-    let here = staging.join(rel);
-    let entries = std::fs::read_dir(&here).map_err(|e| e.to_string())?;
-    for entry in entries {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let child_rel = rel.join(entry.file_name());
-        let ty = entry.file_type().map_err(|e| e.to_string())?;
-        if ty.is_dir() {
-            create_dir_all_no_follow(output_dir, &child_rel)?;
-            place_staged_with_rename(staging, output_dir, &child_rel)?;
-        } else if ty.is_file() {
-            let Some((placeholder, target, _)) =
-                create_dest_file_with_path_no_follow(output_dir, &child_rel, 2)?
-            else {
-                continue;
-            };
-            drop(placeholder);
-            std::fs::rename(entry.path(), &target).map_err(|e| e.to_string())?;
+/// One central-directory entry, as the permission fix-up needs it.
+struct ZipEntryInfo {
+    name: String,
+    windows_names: bool,
+    is_dir: bool,
+    mode: Option<u32>,
+}
+
+/// zipfast restores each entry's stored Unix mode exactly, and sets the stored mode and time on
+/// a folder entry even when that folder was already in the destination. RustyGet has always
+/// kept default permissions (adding only the stored execute bits to files) and never changed a
+/// folder it did not create, so a `0555` folder or a mode-0 file in an archive could not break
+/// nested unpacking or cleanup. This puts that back for the members zipfast wrote.
+#[cfg(unix)]
+fn restore_rustyget_modes(
+    dest: &Path,
+    entries: &[ZipEntryInfo],
+    succeeded: &std::collections::HashSet<String>,
+    existing_dirs: &[(PathBuf, std::fs::Metadata)],
+) {
+    use std::os::unix::fs::PermissionsExt;
+    let set_mode = |path: &Path, mode: u32| {
+        // Never follow a link that is not ours.
+        if std::fs::symlink_metadata(path).is_ok_and(|m| !m.file_type().is_symlink()) {
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+        }
+    };
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut files: Vec<(PathBuf, Option<u32>)> = Vec::new();
+    // Every folder entry is fixed (zipfast finalizes folders after its member events), files
+    // only when zipfast wrote them.
+    for e in entries
+        .iter()
+        .filter(|e| e.is_dir || succeeded.contains(&e.name))
+    {
+        let Ok(rel) = zipfast::path::sanitize(&e.name, e.windows_names) else {
+            continue;
+        };
+        if e.is_dir {
+            dirs.push(dest.join(rel));
         } else {
-            return Err(format!(
-                "{}: unexpected staged file type",
-                child_rel.display()
-            ));
+            files.push((dest.join(rel), e.mode));
         }
     }
-    Ok(())
+    // Parents before children, so every folder can be reached when its own mode is fixed.
+    dirs.sort_by_key(|p| p.components().count());
+    for dir in &dirs {
+        match existing_dirs.iter().find(|(p, _)| p == dir) {
+            Some((_, before)) => {
+                set_mode(dir, before.permissions().mode() & 0o7777);
+                if let (Ok(at), Ok(handle)) = (before.modified(), std::fs::File::open(dir)) {
+                    let _ = handle.set_modified(at);
+                }
+            }
+            None => set_mode(dir, 0o755),
+        }
+    }
+    for (file, mode) in &files {
+        let mode = mode.unwrap_or(0);
+        let wanted = if mode & 0o111 != 0 {
+            (mode & 0o777) | 0o600
+        } else {
+            0o644
+        };
+        set_mode(file, wanted);
+    }
+}
+
+#[cfg(not(unix))]
+fn restore_rustyget_modes(
+    _dest: &Path,
+    _entries: &[ZipEntryInfo],
+    _succeeded: &std::collections::HashSet<String>,
+    _existing_dirs: &[(PathBuf, std::fs::Metadata)],
+) {
+}
+
+fn zip_legacy_failure_lines(name: &str, error: &zipfast::Error) -> Vec<String> {
+    match error {
+        zipfast::Error::Encrypted => {
+            vec![
+                ZIP_BAD_PASSWORD.to_string(),
+                format!("{name}: wrong password"),
+            ]
+        }
+        zipfast::Error::BadChecksum(_) => vec![format!("Unrar: {name} - CRC failed")],
+        other => vec![format!("{name}: {other}")],
+    }
+}
+
+/// AutoRename (`overwrite_mode` 2) until zipfast's `Overwrite` has a rename mode (zipfast PR
+/// #128): each member gets its free name from the same no-follow chooser the other formats use
+/// and is decoded straight into that file with zipfast's selected-entry reader, on this thread,
+/// so `is_cancelled` is checked on every chunk.
+fn extract_zip_auto_rename<F>(
+    archive_path: &Path,
+    output_dir: &Path,
+    password: &str,
+    entries: &[ZipEntryInfo],
+    log_cb: &mut F,
+    is_cancelled: &mut dyn FnMut() -> bool,
+) -> Result<zipfast::extract::Summary, String>
+where
+    F: FnMut(i32, &str),
+{
+    use std::io::Write;
+    let password = (!password.is_empty()).then_some(password);
+    let mut summary = zipfast::extract::Summary::default();
+    summary.volumes = 1;
+    for (index, e) in entries.iter().enumerate() {
+        if is_cancelled() {
+            return Err("Aborted".to_string());
+        }
+        summary.matched += 1;
+        let rel = zipfast::path::sanitize(&e.name, e.windows_names).map_err(|err| {
+            let msg = format!("{}: {err}", e.name);
+            log_cb(1, &msg);
+            msg
+        })?;
+        if e.is_dir {
+            create_dir_all_no_follow(output_dir, &rel).inspect_err(|err| log_cb(1, err))?;
+            summary.dirs += 1;
+            continue;
+        }
+        let Some((mut dest_file, target_path, created_new)) =
+            create_dest_file_with_path_no_follow(output_dir, &rel, 2)
+                .inspect_err(|err| log_cb(1, err))?
+        else {
+            summary.skipped += 1;
+            continue;
+        };
+        log_cb(4, &format!("Unrar: Extracting  {}", e.name));
+        let cancel = zipfast::extract::Cancellation::default();
+        let mut written = 0u64;
+        let mut aborted = false;
+        let res = zipfast::extract::SelectedEntry::open_cancelable(
+            archive_path,
+            index,
+            password,
+            u64::MAX,
+            cancel.clone(),
+        )
+        .and_then(|selected| {
+            selected.read(password, |chunk| {
+                if is_cancelled() {
+                    aborted = true;
+                    cancel.cancel();
+                    return Err(zipfast::Error::Io(std::io::ErrorKind::Interrupted.into()));
+                }
+                dest_file.write_all(chunk).map_err(zipfast::Error::Io)?;
+                written += chunk.len() as u64;
+                Ok(())
+            })
+        });
+        if let Err(err) = res {
+            drop(dest_file);
+            if created_new {
+                let _ = std::fs::remove_file(&target_path);
+            }
+            if aborted {
+                return Err("Aborted".to_string());
+            }
+            let lines = zip_legacy_failure_lines(&e.name, &err);
+            for line in &lines {
+                log_cb(1, line);
+            }
+            return Err(lines.last().cloned().unwrap_or_default());
+        }
+        if let Some(mode) = e.mode {
+            apply_unix_executable_mode(&dest_file, mode);
+        }
+        summary.files += 1;
+        summary.bytes += written;
+    }
+    Ok(summary)
 }
 
 fn extract_zip_cancellable<F>(
@@ -3921,57 +4114,69 @@ where
         log_cb(1, &msg);
         return Err(msg);
     }
+    let entries: Vec<ZipEntryInfo> = archive
+        .entries
+        .iter()
+        .map(|e| ZipEntryInfo {
+            name: e.name.clone(),
+            windows_names: e.host != 3,
+            is_dir: e.is_dir(),
+            mode: e.unix_mode(),
+        })
+        .collect();
     drop(archive);
 
+    std::fs::create_dir_all(output_dir).map_err(|e| {
+        let msg = format!("Could not create {}: {e}", output_dir.display());
+        log_cb(1, &msg);
+        msg
+    })?;
     if let Some(vol_name) = archive_path.file_name().and_then(|s| s.to_str()) {
         log_cb(4, &format!("Unrar: Extracting from {vol_name}"));
     }
 
-    let report = if overwrite_mode == 2 {
-        let staging = output_dir.join(format!(
-            ".rustyget-zip-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_nanos())
-        ));
-        std::fs::create_dir(&staging).map_err(|e| {
-            let msg = format!("Could not create {}: {e}", staging.display());
-            log_cb(1, &msg);
-            msg
-        })?;
-        let res = run_zipfast_zip(
-            archive_path,
-            &staging,
-            password,
-            zipfast::extract::Overwrite::Always,
-            log_cb,
-            is_cancelled,
-        )
-        .and_then(|report| {
-            place_staged_with_rename(&staging, output_dir, Path::new("")).map_err(|err| {
-                log_cb(1, &err);
-                err
-            })?;
-            Ok(report)
-        });
-        let _ = std::fs::remove_dir_all(&staging);
-        res?
-    } else {
-        let overwrite = if overwrite_mode == 0 {
-            zipfast::extract::Overwrite::Skip
-        } else {
-            zipfast::extract::Overwrite::Always
-        };
-        run_zipfast_zip(
+    if overwrite_mode == 2 {
+        return extract_zip_auto_rename(
             archive_path,
             output_dir,
             password,
-            overwrite,
+            &entries,
             log_cb,
             is_cancelled,
-        )?
+        );
+    }
+
+    // Folder entries that already exist keep their mode and time (see restore_rustyget_modes).
+    let existing_dirs: Vec<(PathBuf, std::fs::Metadata)> = entries
+        .iter()
+        .filter(|e| e.is_dir)
+        .filter_map(|e| zipfast::path::sanitize(&e.name, e.windows_names).ok())
+        .map(|rel| output_dir.join(rel))
+        .filter_map(|p| {
+            let meta = std::fs::symlink_metadata(&p).ok()?;
+            meta.is_dir().then_some((p, meta))
+        })
+        .collect();
+    let overwrite = if overwrite_mode == 0 {
+        zipfast::extract::Overwrite::Skip
+    } else {
+        zipfast::extract::Overwrite::Always
     };
+    let result = run_zipfast_zip(
+        archive_path,
+        output_dir,
+        password,
+        overwrite,
+        log_cb,
+        is_cancelled,
+    );
+    // A failed run can still have finished folders; those are put back too.
+    let succeeded: std::collections::HashSet<String> = match &result {
+        Ok((_, names)) => names.iter().cloned().collect(),
+        Err(_) => Default::default(),
+    };
+    restore_rustyget_modes(output_dir, &entries, &succeeded, &existing_dirs);
+    let (report, _) = result?;
 
     let mut summary = zipfast::extract::Summary::default();
     summary.files = report.files();
@@ -4769,6 +4974,66 @@ mod tests {
             leftovers.is_empty(),
             "staging folder left behind: {leftovers:?}"
         );
+    }
+
+    #[test]
+    fn test_zip_large_winzip_aes_member_spools_beside_the_output() {
+        // Over zipfast's 64 KiB in-memory threshold, so the ciphertext is spooled before the
+        // tag is checked; the spool must not be left behind in the destination.
+        let plain: Vec<u8> = (0..300_000u32).map(|i| (i * 7 % 251) as u8).collect();
+        let password = "pw";
+        let salt = [0x22u8; 16];
+        let key_len = 32usize;
+        let derived = zipfast::crypto::aes_derive(password.as_bytes(), &salt, key_len).unwrap();
+        let ct = zipfast::crypto::decrypt_winzip_ctr(&derived[..key_len], &plain).unwrap();
+        let auth = {
+            let key = openssl::pkey::PKey::hmac(&derived[key_len..key_len * 2]).unwrap();
+            let mut signer =
+                openssl::sign::Signer::new(openssl::hash::MessageDigest::sha1(), &key).unwrap();
+            signer.update(&ct).unwrap();
+            signer.sign_to_vec().unwrap()
+        };
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&salt);
+        payload.extend_from_slice(&derived[key_len * 2..key_len * 2 + 2]);
+        payload.extend_from_slice(&ct);
+        payload.extend_from_slice(&auth[..10]);
+        let mut extra = Vec::new();
+        extra.extend_from_slice(&0x9901u16.to_le_bytes());
+        extra.extend_from_slice(&7u16.to_le_bytes());
+        extra.extend_from_slice(&2u16.to_le_bytes());
+        extra.extend_from_slice(b"AE");
+        extra.push(3);
+        extra.extend_from_slice(&0u16.to_le_bytes());
+        let zip =
+            build_single_entry_zip(b"big.bin", 1, 99, 0, plain.len() as u32, &extra, &payload);
+
+        let dir = TempTestDir::new("aes_big");
+        let zip_path = dir.path().join("big.zip");
+        std::fs::write(&zip_path, &zip).unwrap();
+        for mode in [1, 2] {
+            let out = dir.path().join(format!("out{mode}"));
+            let summary = extract_zip_cancellable(
+                &zip_path,
+                &out,
+                password,
+                mode,
+                &mut |_, _| {},
+                &mut || false,
+            )
+            .unwrap();
+            assert_eq!(summary.files, 1, "mode {mode}");
+            assert_eq!(
+                std::fs::read(out.join("big.bin")).unwrap(),
+                plain,
+                "mode {mode}"
+            );
+            let names: Vec<_> = std::fs::read_dir(&out)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(names, vec!["big.bin".to_string()], "mode {mode}");
+        }
     }
 
     #[test]

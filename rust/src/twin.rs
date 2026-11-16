@@ -860,7 +860,7 @@ pub fn resolve_kind(
         }
     }
     if sampleable && sampled_now {
-        if sampled_val == b"twin" {
+        if sampled_val == crate::twinfields::TWIN_PARAM {
             return b"twin".to_vec();
         } else if crate::twinfields::SampleVerdict::from_param(sampled_val).is_some() {
             // alt, or the same files packed again (re-RAR) or cut into other
@@ -1293,7 +1293,10 @@ fn run_service_work_locked(
             name: snap.name,
             queued_filename: snap.queued_filename,
             files_param,
-            has_sampled: p_sampled.is_some(),
+            // the older middle-only sampler's bare "twin" is sampled again
+            has_sampled: p_sampled
+                .as_deref()
+                .is_some_and(|v| v != crate::twinfields::LEGACY_TWIN_PARAM),
             sampled_param: p_sampled.unwrap_or_default(),
             has_sampled_of: p_sampled_of.is_some(),
             sampled_of_param: p_sampled_of.unwrap_or_default(),
@@ -1849,6 +1852,7 @@ fn run_twin_job(token: usize, qdir: &[u8]) {
             ..Default::default()
         };
         let mut creation_note = String::new();
+        let mut tail_files: Vec<usize> = Vec::new();
         for pair in &plan {
             if is_stopped() || tally.settled() {
                 break;
@@ -1896,20 +1900,49 @@ fn run_twin_job(token: usize, qdir: &[u8]) {
                 (part_b.offset, part_b.file_size, &part_b.data),
             );
             tally.add(pair.header, differs);
+            if differs && pair.header && pair.seg_a > 0 && !tail_files.contains(&pair.file) {
+                // a volume end that differs: where a re-RAR's tail is measured
+                tail_files.push(pair.file);
+            }
         }
 
         let mut verdict = crate::twinfields::judge(&tally, is_stopped(), same_layout);
         if verdict == crate::twinfields::SampleVerdict::Retry {
+            if is_stopped() {
+                return;
+            }
+            // too few articles could be read (missing on one side): ask
+            // again a few times, then give up as unreadable
+            let gave_up = {
+                let mut guard = twin_coord().lock().unwrap_or_else(|e| e.into_inner());
+                let att = guard.failed_attempts.entry(spec.nzb_id).or_insert(0);
+                *att += 1;
+                *att >= MAX_ATTEMPTS
+            };
+            if gave_up && store_sample(b"none", None) {
+                unreg.stored = true;
+            }
             return;
         }
         let mut tail_note = String::new();
         if let crate::twinfields::SampleVerdict::Rerar { .. } = verdict {
             // How many articles at a volume's end differ: the last, and those
-            // of a recovery record before it. Measured on the first file cut
-            // into three or more articles, walking back until one is equal.
+            // of a recovery record before it. Measured on a sampled file whose
+            // last article differed (a repacked volume, not a sample or other
+            // file packed once) cut into three or more articles, walking back
+            // until one is equal. With no such file it cannot be measured, and
+            // the copy is not trusted as a re-RAR.
             let mut tail: u32 = 1;
             let mut settled = false;
-            if let Some(f) = (0..primary.len()).find(|&f| p_counts[f] >= 3) {
+            let measured = tail_files
+                .iter()
+                .copied()
+                .filter(|&f| p_counts[f] >= 3)
+                .max_by_key(|&f| p_counts[f]);
+            if measured.is_none() {
+                verdict = crate::twinfields::SampleVerdict::Alt;
+            }
+            if let Some(f) = measured {
                 let n = p_counts[f];
                 let lowest = n
                     .saturating_sub(1 + crate::twinfields::MAX_TAIL_PROBE)

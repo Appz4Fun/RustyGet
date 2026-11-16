@@ -131,7 +131,7 @@ pub fn plan_same_layout(
     }
     let mut inner = Vec::new();
     for (f, &n) in a_counts.iter().enumerate() {
-        for k in 1..n.saturating_sub(1) {
+        for k in 1..middle_end(n) {
             inner.push((f, k));
         }
     }
@@ -270,12 +270,22 @@ pub enum SampleVerdict {
     Alt,
 }
 
+/// The `DupeSampled` value of a sampled twin (see [`SampleVerdict::param`]).
+pub const TWIN_PARAM: &[u8] = b"twin:hdr";
+
+/// The bare `DupeSampled` twin value of the older middle-only sampler: not
+/// trusted, sampled again.
+pub const LEGACY_TWIN_PARAM: &[u8] = b"twin";
+
 impl SampleVerdict {
-    /// The `DupeSampled` value: `twin`, `rerar:<tail>`, `samefiles`, `alt`.
+    /// The `DupeSampled` value: `twin:hdr`, `rerar:<tail>`, `samefiles`, `alt`.
+    /// A twin is `twin:hdr`, not the bare `twin` the older middle-only
+    /// sampler wrote: that one never compared header articles (a re-RAR
+    /// passed it), so it is read as no verdict and sampled again.
     pub fn param(self) -> Vec<u8> {
         match self {
             Self::Retry => Vec::new(),
-            Self::Twin => b"twin".to_vec(),
+            Self::Twin => TWIN_PARAM.to_vec(),
             Self::Rerar { tail } => format!("rerar:{tail}").into_bytes(),
             Self::SameFiles => b"samefiles".to_vec(),
             Self::Alt => b"alt".to_vec(),
@@ -285,7 +295,7 @@ impl SampleVerdict {
     /// Reads a `DupeSampled` value (see [`Self::param`]).
     pub fn from_param(value: &[u8]) -> Option<Self> {
         match value {
-            b"twin" => Some(Self::Twin),
+            TWIN_PARAM => Some(Self::Twin),
             b"samefiles" => Some(Self::SameFiles),
             b"alt" => Some(Self::Alt),
             _ => {
@@ -404,6 +414,18 @@ pub fn sampled_relation(
 pub fn is_header_part(part_number: i32, total: i32, tail: u32) -> bool {
     let tail = i64::from(tail.max(1));
     part_number <= 1 || (total > 0 && i64::from(part_number) > i64::from(total) - tail)
+}
+
+/// The end (exclusive) of the articles a middle sample may take in a file of
+/// `n` articles: never the last, and in a file of 8 or more not its last
+/// eighth either, where a re-RAR's recovery record sits; it differs between
+/// runs like a header and would read a re-RAR as an alt.
+pub fn middle_end(n: usize) -> usize {
+    if n >= 8 {
+        n - 1 - n / 8
+    } else {
+        n.saturating_sub(1)
+    }
 }
 
 /// Most article pairs read back from a volume's end to measure a re-RAR's
@@ -917,6 +939,20 @@ mod tests {
     }
 
     #[test]
+    fn middle_samples_stay_off_a_volume_end() {
+        assert_eq!(middle_end(3), 2);
+        assert_eq!(middle_end(7), 6);
+        // 143 articles: the last 17 (a recovery record's place) are left out
+        assert_eq!(middle_end(143), 125);
+        let bytes = vec![700_000_i64; 143];
+        let plan = plan_same_layout(&[143], &bytes, &[143], &bytes, 6).expect("plan");
+        assert!(plan
+            .iter()
+            .filter(|p| !p.header)
+            .all(|p| p.seg_a >= 1 && p.seg_a < 125));
+    }
+
+    #[test]
     fn sampled_relation_and_lending() {
         assert_eq!(
             sampled_relation(7, b"", b"", 9, b"rerar:2", b"7"),
@@ -928,10 +964,19 @@ mod tests {
             Some(SampleVerdict::SameFiles)
         );
         assert_eq!(
-            sampled_relation(7, b"twin", b"9", 9, b"", b""),
+            sampled_relation(7, b"twin:hdr", b"9", 9, b"", b""),
             Some(SampleVerdict::Twin)
         );
-        assert_eq!(sampled_relation(7, b"twin", b"8", 9, b"rerar", b"6"), None);
+        // the older middle-only sampler's bare "twin" is not trusted
+        assert_eq!(sampled_relation(7, b"twin", b"9", 9, b"", b""), None);
+        assert_eq!(
+            lend_rule(sampled_relation(7, b"twin", b"9", 9, b"", b""), 1, 30),
+            Lend::Default
+        );
+        assert_eq!(
+            sampled_relation(7, b"twin:hdr", b"8", 9, b"rerar", b"6"),
+            None
+        );
         assert_eq!(sampled_relation(7, b"none", b"9", 9, b"", b""), None);
         let rerar = Some(SampleVerdict::Rerar { tail: 1 });
         assert_eq!(lend_rule(rerar, 1, 30), Lend::Never);

@@ -214,7 +214,7 @@ These two words have one meaning each in code, logs, tests, and documentation.
 - A **re-RAR** is an alt made by packing the same files again (another
   modification time): only the first and last article of each volume
   differ. TwinCheck's no-par2 sample always reads those header articles
-  (`rust/src/twinfields.rs`), labels such a copy `alt` (`DupeSampled=rerar`),
+  (`rust/src/twinfields.rs`), labels such a copy `alt` (`DupeSampled=rerar:<tail>`),
   and lets it lend its middle articles one for one, never a header article.
 - Prefer donors in this order: twins, then alts that can donate by range
   (stored containers, known password), then alts that must be downloaded and

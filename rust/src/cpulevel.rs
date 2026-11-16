@@ -8,11 +8,25 @@
 
 /// The tier named by the features this binary was compiled with.
 pub fn build_level() -> &'static str {
-    if cfg!(all(target_arch = "x86_64", target_feature = "avx512bw", target_feature = "avx512vl")) {
+    if cfg!(all(
+        target_arch = "x86_64",
+        target_feature = "avx512bw",
+        target_feature = "avx512vl"
+    )) {
         "x86-64-v4"
-    } else if cfg!(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2", target_feature = "fma")) {
+    } else if cfg!(all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        target_feature = "bmi2",
+        target_feature = "fma"
+    )) {
         "x86-64-v3"
-    } else if cfg!(all(target_os = "macos", target_arch = "aarch64", target_feature = "i8mm", target_feature = "bf16")) {
+    } else if cfg!(all(
+        target_os = "macos",
+        target_arch = "aarch64",
+        target_feature = "i8mm",
+        target_feature = "bf16"
+    )) {
         // apple-m2 and newer; release builds use apple-m4 or apple-m5
         "apple-m4"
     } else {
@@ -58,7 +72,11 @@ pub fn mismatch_message() -> Option<String> {
     if missing.is_empty() {
         return None;
     }
-    let use_instead = if cfg!(target_arch = "x86_64") { "x86-64-v3" } else { "apple-m4 or generic" };
+    let use_instead = if cfg!(target_arch = "x86_64") {
+        "x86-64-v3"
+    } else {
+        "apple-m4 or generic"
+    };
     Some(format!(
         "This RustyGet binary was built for {} CPUs, but this CPU lacks {}. Install or run the {} build instead.",
         build_level(),

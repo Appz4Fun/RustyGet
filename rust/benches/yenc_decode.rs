@@ -17,7 +17,10 @@ fn article(seed: u64, size: usize) -> (Vec<u8>, u32) {
         })
         .collect();
     let crc = crc32fast::hash(&data);
-    let mut out = format!("=ybegin part=1 line=128 size={size} name=bench.bin\r\n=ypart begin=1 end={size}\r\n").into_bytes();
+    let mut out = format!(
+        "=ybegin part=1 line=128 size={size} name=bench.bin\r\n=ypart begin=1 end={size}\r\n"
+    )
+    .into_bytes();
     let mut col = 0;
     for &b in &data {
         let e = b.wrapping_add(42);
@@ -37,7 +40,9 @@ fn article(seed: u64, size: usize) -> (Vec<u8>, u32) {
             col = 0;
         }
     }
-    out.extend_from_slice(format!("\r\n=yend size={size} part=1 pcrc32={crc:08x}\r\n.\r\n").as_bytes());
+    out.extend_from_slice(
+        format!("\r\n=yend size={size} part=1 pcrc32={crc:08x}\r\n.\r\n").as_bytes(),
+    );
     (out, crc)
 }
 
@@ -64,15 +69,32 @@ fn main() {
     if std::env::var_os("YENC_PARTS").is_some() {
         let data: Vec<u8> = art.iter().map(|b| b.wrapping_add(1)).collect();
         let t = Instant::now();
-        for _ in 0..200 { std::hint::black_box(crc32fast::hash(std::hint::black_box(&data))); }
-        println!("crc32fast: {:.1} MB/s", data.len() as f64 * 200.0 / t.elapsed().as_secs_f64() / 1e6);
+        for _ in 0..200 {
+            std::hint::black_box(crc32fast::hash(std::hint::black_box(&data)));
+        }
+        println!(
+            "crc32fast: {:.1} MB/s",
+            data.len() as f64 * 200.0 / t.elapsed().as_secs_f64() / 1e6
+        );
         let mut buf = art.clone();
         let t = Instant::now();
-        for _ in 0..200 { buf.copy_from_slice(&art); std::hint::black_box(nntmux_yenc::decoder::decode_in_place(&mut buf)); }
-        println!("copy+nntmux decode_in_place: {:.1} MB/s", art.len() as f64 * 200.0 / t.elapsed().as_secs_f64() / 1e6);
+        for _ in 0..200 {
+            buf.copy_from_slice(&art);
+            std::hint::black_box(nntmux_yenc::decoder::decode_in_place(&mut buf));
+        }
+        println!(
+            "copy+nntmux decode_in_place: {:.1} MB/s",
+            art.len() as f64 * 200.0 / t.elapsed().as_secs_f64() / 1e6
+        );
         let t = Instant::now();
-        for _ in 0..200 { buf.copy_from_slice(std::hint::black_box(&art)); std::hint::black_box(&buf); }
-        println!("copy only: {:.1} MB/s", art.len() as f64 * 200.0 / t.elapsed().as_secs_f64() / 1e6);
+        for _ in 0..200 {
+            buf.copy_from_slice(std::hint::black_box(&art));
+            std::hint::black_box(&buf);
+        }
+        println!(
+            "copy only: {:.1} MB/s",
+            art.len() as f64 * 200.0 / t.elapsed().as_secs_f64() / 1e6
+        );
     }
     for chunk in [4096usize, 16384, 65536, art.len()] {
         let iters = if quick { 3 } else { 400 };
@@ -91,4 +113,3 @@ fn main() {
         );
     }
 }
-

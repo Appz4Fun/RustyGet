@@ -266,7 +266,10 @@ mod tests {
                     .map(|_| alpha[(next() % alpha.len() as u64) as usize])
                     .collect();
                 let max_end = len - 2;
-                for from in [0, 1, 2, 15, 31, 33, 63, 65].into_iter().filter(|&f| f <= max_end) {
+                for from in [0, 1, 2, 15, 31, 33, 63, 65]
+                    .into_iter()
+                    .filter(|&f| f <= max_end)
+                {
                     let want = unsafe { find_break_scalar(buf.as_ptr(), from, max_end) };
                     for (name, f) in versions() {
                         let got = unsafe { f(buf.as_ptr(), from, max_end) };

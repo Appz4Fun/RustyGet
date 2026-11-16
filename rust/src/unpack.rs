@@ -1622,13 +1622,20 @@ where
             summary.dirs += sub_summary.dirs;
             summary.bytes += sub_summary.bytes;
             if cleanup_disk {
+                let mut deleted = Vec::new();
                 for v in consumed_volumes {
-                    let _ = std::fs::remove_file(v);
+                    match std::fs::remove_file(v) {
+                        Ok(()) => deleted.push(v.clone()),
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            deleted.push(v.clone())
+                        }
+                        Err(_) => {}
+                    }
                 }
                 // Unpacked further and deleted: not output, so not counted against the job's
-                // limits. Kept volumes (no cleanup) are output and count.
+                // limits. Volumes left on disk are output and count.
                 if let Some(g) = guard {
-                    crate::unpacklimits::consumed(g, consumed_volumes);
+                    crate::unpacklimits::consumed(g, &deleted);
                 }
             }
         }

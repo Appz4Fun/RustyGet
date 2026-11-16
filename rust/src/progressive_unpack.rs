@@ -1450,8 +1450,18 @@ fn admit_member(dest: &Path, name: &[u8], meta: MemberMeta) -> Result<(), Failur
         return Ok(());
     };
     let is_dir = meta.is_dir || name.ends_with(b"/") || name.ends_with(b"\\");
-    crate::unpacklimits::check(&dest.join(rel), is_dir)
-        .map_err(|e| Failure::UnsafePath(format!(": {e}")))
+    let limit = |e: String| Failure::UnsafePath(format!(": {e}"));
+    crate::unpacklimits::check(&dest.join(&rel), is_dir).map_err(limit)?;
+    // zipfast publishes under the member's own path rules, the copy path under Unix rules:
+    // both names are checked when they differ.
+    if meta.windows_names {
+        if let Ok(unix_rel) = zipfast::path::sanitize(&String::from_utf8_lossy(name), false) {
+            if unix_rel != rel {
+                crate::unpacklimits::check(&dest.join(unix_rel), is_dir).map_err(limit)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// zipfast publishes from a private 0600 stage and applies a stored Unix mode as is. Give the

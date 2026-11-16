@@ -191,7 +191,14 @@ impl Guard {
                     self.folders.insert(rel.clone());
                     stack.push(rel);
                 } else {
-                    self.files.insert(rel);
+                    // A volume is held back like a fresh one: a nested unpack may consume it.
+                    if crate::unpack::may_be_archive_volume(crate::fsops::path_to_bytes(Path::new(
+                        &e.file_name(),
+                    ))) {
+                        self.deferred.insert(rel);
+                    } else {
+                        self.files.insert(rel);
+                    }
                 }
             }
         }
@@ -361,11 +368,9 @@ impl Guard {
         if let Some(b) = &self.breach {
             return Err(b.clone());
         }
-        let base = self.roots[0].dir.clone();
+        // Every held-back file counts, on disk or not: a consumed volume was taken out
+        // already, and a name admitted under other path rules may not be on disk as such.
         for rel in std::mem::take(&mut self.deferred) {
-            if std::fs::symlink_metadata(base.join(&rel)).is_err() {
-                continue;
-            }
             if self.limits.max_files > 0
                 && !self.files.contains(&rel)
                 && self.files.len() as u64 >= u64::from(self.limits.max_files)
@@ -1490,6 +1495,85 @@ mod tests {
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let r = admit_all(&mut g, &refs).unwrap();
         assert!(r.contains("more than 200 archive volumes"), "{r}");
+    }
+
+    #[test]
+    fn volumes_with_windows_names_still_count() {
+        let t = std::env::temp_dir().join(format!("rg-lim-win-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        std::fs::create_dir_all(&t).unwrap();
+        let out = t.join("out");
+        let names: Vec<String> = (0..300).map(|i| format!("x?{i:04}.r00")).collect();
+        let archive = t.join("outer.rar");
+        std::fs::write(
+            &archive,
+            crate::progressive_unpack::tests::rar4_windows_store_archive(&names),
+        )
+        .unwrap();
+        let guard = Guard::shared(&out, &[]);
+        let mut log = Vec::new();
+        let r = crate::unpack::extract_archive_with_feed(
+            &archive,
+            &out,
+            "",
+            1,
+            true,
+            |k, m| log.push(format!("{k} {m}")),
+            &mut || false,
+            crate::unpack::RarFeed {
+                guard: Some(&guard),
+                ..crate::unpack::RarFeed::default()
+            },
+        );
+        let on_disk = std::fs::read_dir(&out).map(|d| d.count()).unwrap_or(0);
+        assert!(
+            r.is_err() || on_disk <= 100,
+            "bypass: {on_disk} files on disk, unpack Ok"
+        );
+    }
+
+    #[test]
+    fn a_restart_with_seeded_inner_volumes_unpacks() {
+        let data: Vec<u8> = (0..150 * 512).map(|i| (i % 251) as u8).collect();
+        let vols = crate::progressive_unpack::tests::rar4_store_volumes("movie.mkv", &data, 512);
+        let names: Vec<String> = (1..=vols.len())
+            .map(|i| format!("inner.part{i:03}.rar"))
+            .collect();
+        let mut entries: Vec<(&str, &[u8])> = names
+            .iter()
+            .zip(&vols)
+            .map(|(n, v)| (n.as_str(), v.as_slice()))
+            .collect();
+        entries.push(("info.nfo", b"nfo"));
+        let t = std::env::temp_dir().join(format!("rg-lim-seed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        std::fs::create_dir_all(&t).unwrap();
+        let out = t.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        // An interrupted direct unpack left the inner volumes in the temp unpack folder.
+        for (n, v) in &entries {
+            std::fs::write(out.join(n), v).unwrap();
+        }
+        let mut g = Guard::new(Limits::default(), &out, &[]);
+        g.seed_existing();
+        let guard = Arc::new(Mutex::new(g));
+        let archive = t.join("set0.tar");
+        std::fs::write(&archive, tar(&entries)).unwrap();
+        let mut log = Vec::new();
+        let r = crate::unpack::extract_archive_with_feed(
+            &archive,
+            &out,
+            "",
+            1,
+            true,
+            |k, m| log.push(format!("{k} {m}")),
+            &mut || false,
+            crate::unpack::RarFeed {
+                guard: Some(&guard),
+                ..crate::unpack::RarFeed::default()
+            },
+        );
+        assert!(r.is_ok(), "false breach after restart: {r:?}");
     }
 
     /// `NzbgetRsParsedOptions` is shared with C++: the header must list the same fields in

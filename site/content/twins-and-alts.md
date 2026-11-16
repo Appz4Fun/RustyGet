@@ -43,7 +43,7 @@ The cheap fingerprints narrow the field; the stronger ones confirm. No single ke
 
 ## Why a checksum alone isn't proof
 
-yEnc and RAR checksums are CRC32 values, only 32 bits long. Among millions of files, two different files share one by chance, and an equal size adds little, because many unrelated files share round sizes. A CRC32 can also be forced to any value by changing four bytes. So a matching CRC32 makes a good candidate and a poor verdict.
+yEnc checksums, and the file checksums RAR stores by default, are CRC32 values, only 32 bits long. Among millions of files, two different files share one by chance, and an equal size adds little, because many unrelated files share round sizes. A CRC32 can also be forced to any value by changing four bytes. So a matching CRC32 makes a good candidate and a poor verdict.
 
 Sizes are weaker still. A re-upload with a new password has exactly the same volume sizes as the first upload, because the size of an encrypted archive doesn't depend on the password. Size, file count, and total bytes never make a twin on their own.
 
@@ -79,6 +79,6 @@ Copies are ranked by kind:
 
 A fleet puts health first: healthy copies, with at least 75% of the checked articles alive, come before weak ones, then copies of unknown health, then dead ones. The kinds order the copies within each of those groups, so a copy that's missing many articles never leads however cheap its packaging. Each copy's duplicate score follows that rank, so a client can't push an encrypted copy ahead of a borrowable one.
 
-Article fallback asks donors by kind first, then by duplicate score. A copy added outside a fleet has no kind from intake: article fallback counts it as a twin when par2 proved one, and otherwise with the copies whose packaging couldn't be told. Stream repair asks donors by duplicate score alone, so for a fleet it follows the fleet's rank.
+Article fallback asks twins first, healthiest first, then the other copies by kind, then by duplicate score. A copy added outside a fleet has no kind from intake: article fallback counts it as a twin when par2 proved one, and otherwise with the copies whose packaging couldn't be told. Stream repair asks donors by duplicate score alone, so for a fleet it follows the fleet's rank.
 
 A single copy is used whatever its kind.

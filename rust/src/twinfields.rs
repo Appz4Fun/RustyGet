@@ -732,9 +732,14 @@ impl VolumeSource for Volumes {
 /// in a set of several volumes (`multi_volume`) only a file continued from
 /// the volume before counts, so a small file packed after the video (an nfo,
 /// subtitles) that alone sits in the last volume never stands for the video.
+/// In a single volume the chosen file's data must run past `head`, so a small
+/// file (an nfo) whose header is the only one seen never stands in for a
+/// video whose header lies beyond it. Keys under `min_size` are dropped too:
+/// a sample or nfo spilling into the last volume after the video is the only
+/// file continued there, and a wrong key would mark a real alt as other.
 /// None for encrypted headers (`-hp`), keyed checks (RAR 5 `-p`), a file whose
 /// CRC is not recorded, or a head with no last part of such a file.
-pub fn rar_last_volume_key(head: &[u8], multi_volume: bool) -> Option<InnerKey> {
+pub fn rar_last_volume_key(head: &[u8], multi_volume: bool, min_size: u64) -> Option<InnerKey> {
     if !head.starts_with(b"Rar!") {
         return None;
     }
@@ -744,7 +749,14 @@ pub fn rar_last_volume_key(head: &[u8], multi_volume: bool) -> Option<InnerKey> 
     }
     map.members
         .iter()
-        .filter(|m| !m.is_dir && (m.split_before || !multi_volume))
+        .filter(|m| {
+            !m.is_dir
+                && if multi_volume {
+                    m.split_before
+                } else {
+                    m.packed.end > head.len() as u64
+                }
+        })
         .filter_map(|m| {
             let checks = m.checks?;
             if checks.keyed {
@@ -756,6 +768,7 @@ pub fn rar_last_volume_key(head: &[u8], multi_volume: bool) -> Option<InnerKey> 
             })
         })
         .max_by_key(|k| k.size)
+        .filter(|k| k.size >= min_size)
 }
 
 /// Reads the header of a 7z set and returns its largest file's [`InnerKey`].
@@ -899,19 +912,44 @@ mod tests {
     #[test]
     fn a_rar_last_volume_keys_the_file_continued_into_it() {
         // video.mkv then info.nfo: the video's last part comes first
-        let mm = rar_last_volume_key(&fixture("mm.part3.head"), true).expect("video key");
+        let mm = rar_last_volume_key(&fixture("mm.part3.head"), true, 0).expect("video key");
         // info.nfo then video.mkv: still the video, not the nfo
         let nfo_first =
-            rar_last_volume_key(&fixture("nfo-first.part3.head"), true).expect("video key");
+            rar_last_volume_key(&fixture("nfo-first.part3.head"), true, 0).expect("video key");
         assert!(
             mm.size > 1000 && nfo_first.size > 1000,
             "{mm:?} {nfo_first:?}"
         );
         // a first volume records no final check of a continued file
-        assert_eq!(rar_last_volume_key(&fixture("mm.part1.head"), true), None);
+        assert_eq!(
+            rar_last_volume_key(&fixture("mm.part1.head"), true, 0),
+            None
+        );
         // encrypted headers give no key
-        assert_eq!(rar_last_volume_key(&fixture("hp1.part2.head"), true), None);
-        assert_eq!(rar_last_volume_key(b"not a rar", false), None);
+        assert_eq!(
+            rar_last_volume_key(&fixture("hp1.part2.head"), true, 0),
+            None
+        );
+        assert_eq!(rar_last_volume_key(b"not a rar", false, 0), None);
+        // a key under the minimum size (a sample or nfo spilling over) is dropped
+        let head = fixture("mm.part3.head");
+        assert_eq!(rar_last_volume_key(&head, true, mm.size), Some(mm));
+        assert_eq!(rar_last_volume_key(&head, true, mm.size + 1), None);
+        // read as one whole volume, a file whose data runs past the head counts
+        assert_eq!(rar_last_volume_key(&head, false, 0), Some(mm));
+        // a lone nfo whose data ends inside the head never stands for the
+        // video whose header follows it (its first part records no CRC here)
+        let nfo_head = fixture("nfo-first.part1.head");
+        let nfo = MemberMap::from_volume(&nfo_head, MapOptions::new("x.rar")).unwrap();
+        assert!(
+            nfo.members
+                .iter()
+                .any(|m| m.checks.is_some_and(|c| c.crc32.is_some())
+                    && m.packed.end <= nfo_head.len() as u64),
+            "{:?}",
+            nfo.members.len()
+        );
+        assert_eq!(rar_last_volume_key(&nfo_head, false, 0), None);
     }
 
     #[test]

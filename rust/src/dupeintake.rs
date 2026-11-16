@@ -261,6 +261,12 @@ pub fn sample_offsets(size: i64, count: usize, seed: u64) -> Vec<i64> {
 
 /// Bytes of a RAR set's last volume read for its file header: within the
 /// first article of any posting.
+/// Smallest file a RAR key may stand for: a smaller one is a sample or nfo
+/// spilling into the last volume, not the video (tests use small fixtures).
+#[cfg(not(test))]
+const RAR_KEY_MIN: u64 = crate::twinfields::MIN_KEY_SIZE;
+#[cfg(test)]
+const RAR_KEY_MIN: u64 = 0;
 const RAR_KEY_HEAD: usize = 64 * 1024;
 
 /// The size and CRC32 of the largest file of a copy's archive set: for RAR
@@ -315,7 +321,7 @@ pub fn inner_key_copy(
         if !last.read(0, &mut head) {
             return None;
         }
-        return crate::twinfields::rar_last_volume_key(&head, vols.len() > 1);
+        return crate::twinfields::rar_last_volume_key(&head, vols.len() > 1, RAR_KEY_MIN);
     }
     if magic != crate::twinfields::SEVEN_ZIP_MAGIC {
         return None;

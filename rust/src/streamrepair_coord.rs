@@ -2522,10 +2522,11 @@ impl NzbgetRsStreamRepairCtrl {
             let any_holes = targets.iter().any(|t| t.patch_eligible && t.needs_repair());
             if any_holes && unsafe { !self.host_is_stopped(ctx, cb) } {
                 // Live repairs fetch one article at a time so they never crowd out the download.
-                // Direct unpack stands still until a dead volume is borrowed, so that borrow
-                // fetches in parallel like the repair after the download does.
-                // Once raised it stays raised for this repair: workers already spawned would
-                // keep claiming requests that an inline (zero-worker) fetch then reads empty.
+                // Direct unpack stands still until a dead volume is borrowed, so from here on
+                // this live repair (the borrow, the recreation fallback and any later pass)
+                // fetches in parallel like the repair after the download does. Once raised it
+                // stays raised: workers already spawned would keep claiming requests that an
+                // inline (zero-worker) fetch then reads empty.
                 if borrowing {
                     self.parallel_live_fetch.store(true, Ordering::SeqCst);
                     self.batch_fetcher

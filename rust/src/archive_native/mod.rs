@@ -1604,7 +1604,14 @@ where
             match rx.recv_timeout(std::time::Duration::from_millis(10)) {
                 Ok(SzMsg::Log(kind, line)) => log_cb(kind, &line),
                 Err(mpsc::RecvTimeoutError::Timeout) if worker.is_finished() => break,
-                Err(_) => {}
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                // Not expected while `options` holds the filter's sender; never spin on it.
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    if worker.is_finished() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
             }
         }
         while let Ok(SzMsg::Log(kind, line)) = rx.try_recv() {
@@ -1630,7 +1637,18 @@ where
     {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         let canon_out = output_dir.canonicalize().ok();
-        let renamed = predicted.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        // Renamed outputs: the predicted names (known on every path) and, after a run that
+        // returned, the names zipfast actually chose (they differ on a case-insensitive file
+        // system).
+        let mut renamed: Vec<PathBuf> = predicted
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .cloned()
+            .collect();
+        if let Ok(summary) = &result {
+            renamed.extend(summary.renames.iter().map(|r| r.path.clone()));
+        }
         for path in file_targets.iter().chain(renamed.iter()) {
             let inside = path
                 .parent()
@@ -4269,6 +4287,36 @@ mod tests {
             "zipfast writes a_1.txt before failing on d"
         );
         assert_eq!(mode_of(&out.join("a_1.txt")) & 0o600, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_7z_auto_rename_case_only_names_keep_owner_read_write() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempTestDir::new("7z_case_rename");
+        let a = build_7z(&[
+            (
+                "A.txt",
+                Some(b"upper"),
+                Some(sz_unix_attrs(0o100000, false)),
+            ),
+            (
+                "a.txt",
+                Some(b"lower"),
+                Some(sz_unix_attrs(0o100000, false)),
+            ),
+        ]);
+        let path = dir.path().join("case.7z");
+        std::fs::write(&path, &a).unwrap();
+        let out = dir.path().join("out");
+        extract_7z_cancellable(&path, &out, "", 2, &mut |_, _| {}, &mut || false).unwrap();
+        // On a case-insensitive file system zipfast renames the second one; either way every
+        // file written stays readable for the owner.
+        for e in std::fs::read_dir(&out).unwrap() {
+            let p = e.unwrap().path();
+            let mode = std::fs::metadata(&p).unwrap().permissions().mode();
+            assert_eq!(mode & 0o600, 0o600, "{} {mode:o}", p.display());
+        }
     }
 
     #[test]

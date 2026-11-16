@@ -1332,6 +1332,151 @@ fn sz_limits() -> zipfast::sevenzip::SevenZipLimits {
     limits
 }
 
+/// One 7z member as RustyGet's pre-pass needs it (zipfast's member map).
+struct SzEntry {
+    name: String,
+    dir: bool,
+    mode: Option<u32>,
+    attributes: u64,
+}
+
+/// An archive volume file as a zipfast [`RangeSource`] for the member map.
+struct SzFileRange {
+    file: std::fs::File,
+    info: zipfast::progressive::SourceInfo,
+}
+
+impl zipfast::progressive::RangeSource for SzFileRange {
+    fn info(&self) -> zipfast::progressive::SourceInfo {
+        self.info
+    }
+
+    fn read_at(
+        &mut self,
+        offset: u64,
+        buf: &mut [u8],
+        _: &mut std::task::Context<'_>,
+    ) -> zipfast::progressive::ProgressiveResult<zipfast::progressive::RangeRead> {
+        use zipfast::progressive::{FailureKind, InputOperation, ProgressiveFailure};
+        let n = self
+            .info
+            .extent
+            .saturating_sub(offset)
+            .min(buf.len() as u64) as usize;
+        let count = loop {
+            #[cfg(unix)]
+            let res = std::os::unix::fs::FileExt::read_at(&self.file, &mut buf[..n], offset);
+            #[cfg(windows)]
+            let res = std::os::windows::fs::FileExt::seek_read(&self.file, &mut buf[..n], offset);
+            match res {
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                other => break other,
+            }
+        }
+        .map_err(|cause| {
+            ProgressiveFailure::new(FailureKind::Input {
+                operation: InputOperation::Read,
+                cause,
+            })
+        })?;
+        if count == 0 && n != 0 {
+            return Err(ProgressiveFailure::new(FailureKind::Truncated));
+        }
+        Ok(zipfast::progressive::RangeRead::Filled { count })
+    }
+
+    fn backing_files(&self) -> &[std::fs::File] {
+        std::slice::from_ref(&self.file)
+    }
+}
+
+/// The archive's volumes on disk: volume 0 is `first`, later ones the names the map asks for
+/// (`.7z.002`, ...), as zipfast's own 7z run opens them.
+struct SzFileVolumes(PathBuf);
+
+impl zipfast::progressive::VolumeSource for SzFileVolumes {
+    fn volume(
+        &mut self,
+        request: &zipfast::progressive::VolumeRequest,
+        _: &mut std::task::Context<'_>,
+    ) -> zipfast::progressive::ProgressiveResult<zipfast::progressive::VolumeAnswer> {
+        use zipfast::progressive::{
+            FailureKind, InputOperation, ProgressiveFailure, SourceId, SourceInfo, SourceLength,
+            VolumeAnswer,
+        };
+        let path = if request.index == 0 {
+            self.0.clone()
+        } else {
+            PathBuf::from(&request.expected)
+        };
+        let open = |cause| {
+            ProgressiveFailure::new(FailureKind::Input {
+                operation: InputOperation::Open,
+                cause,
+            })
+        };
+        let file = match std::fs::File::open(&path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && request.index > 0 => {
+                return Ok(VolumeAnswer::Missing)
+            }
+            Err(e) => return Err(open(e)),
+        };
+        let len = file.metadata().map_err(open)?.len();
+        let info = SourceInfo {
+            id: SourceId(u128::from(request.index) + 1),
+            generation: 0,
+            extent: len,
+            length: SourceLength::Final(len),
+        };
+        Ok(VolumeAnswer::Ready(Box::new(SzFileRange { file, info })))
+    }
+}
+
+/// The members of the 7z archive whose first volume is `first`, read with zipfast's member
+/// map under the same limits the run uses ([`sz_limits`]). `zipfast::sevenzip::list` always
+/// applies zipfast's default limits, so it fails on a folder over 16 GiB (one 4K remux) and
+/// the pre-pass would be lost on exactly those archives. None when the headers cannot be read
+/// (encrypted headers without the right password, damage); the run then reports why.
+fn sz_list(first: &Path, password: Option<&str>) -> Option<Vec<SzEntry>> {
+    let limits = sz_limits();
+    let mut options = zipfast::map::MapOptions::new(first.as_os_str()).password(password);
+    options.limits.entries = limits.entries;
+    // Encrypted headers take the key derivations 7-Zip accepts, as zipfast's own 7z run.
+    options.limits.kdf_exponent = 24;
+    options.limits.kdf_derivation_blocks = 1 << 40;
+    options.limits.kdf_session_blocks = 1 << 40;
+    let mut builder =
+        zipfast::map::MapBuilder::new(Box::new(SzFileVolumes(first.to_path_buf())), options);
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    let map = match builder.poll_map(&mut cx) {
+        std::task::Poll::Ready(Ok(map)) => map,
+        _ => return None,
+    };
+    if map.format != zipfast::map::MapFormat::SevenZip {
+        return None;
+    }
+    Some(
+        map.members
+            .iter()
+            .map(|m| SzEntry {
+                // zipfast's own name rule for 7z members.
+                name: m.name.clone().unwrap_or_else(|| {
+                    let units: Vec<u16> = m
+                        .raw_name
+                        .chunks_exact(2)
+                        .map(|u| u16::from_le_bytes([u[0], u[1]]))
+                        .collect();
+                    String::from_utf16_lossy(&units)
+                }),
+                dir: m.is_dir,
+                mode: m.unix_mode,
+                attributes: m.attributes,
+            })
+            .collect(),
+    )
+}
+
 /// The line RustyGet's unpack parser keys a 7z password retry on.
 const SZ_WRONG_PASSWORD: &str = "7-Zip: Data Error in encrypted file. Wrong password?";
 
@@ -1396,12 +1541,10 @@ where
     // The member list, read first: a link refuses the whole archive before anything is
     // written, as RustyGet always did. Encrypted headers without the right password cannot be
     // listed; the run below reports that.
-    let entries = zipfast::sevenzip::list(archive_path, pw).ok();
+    let entries = sz_list(archive_path, pw);
     // The old decoder's rule: a Unix symlink mode or a Windows reparse point.
-    let is_link = |e: &zipfast::extract::Entry| {
-        e.link.is_some()
-            || e.mode.is_some_and(|m| m & 0o170000 == 0o120000)
-            || e.attributes.is_some_and(|a| a & 0x0400 != 0)
+    let is_link = |e: &SzEntry| {
+        e.mode.is_some_and(|m| m & 0o170000 == 0o120000) || e.attributes & 0x0400 != 0
     };
     if entries
         .as_ref()
@@ -4378,6 +4521,90 @@ mod tests {
         );
         let d = zipfast::sevenzip::SevenZipLimits::default();
         assert_eq!((l.folders, l.entries), (d.folders, d.entries));
+    }
+
+    #[test]
+    fn test_7z_pre_pass_still_runs_on_folders_over_16_gib() {
+        // A header that declares a 17 GiB file in one folder (the data is not there: the
+        // pre-pass reads headers only). zipfast's list() refuses it under its default limits;
+        // RustyGet's own listing uses the raised limits, so the link refusal still applies.
+        fn number(out: &mut Vec<u8>, v: u64) {
+            if v < 0x80 {
+                out.push(v as u8);
+            } else {
+                out.push(0xff);
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        let big: u64 = 17 << 30;
+        let link_target = b"/etc/passwd";
+        let packed = vec![0x01, 0x00, 0x00, 0x41, 0x00]; // a stub LZMA2 chunk
+        let mut hdr = vec![0x01, 0x04, 0x06, 0x00, 0x01, 0x09];
+        number(&mut hdr, packed.len() as u64);
+        hdr.push(0x00);
+        hdr.extend_from_slice(&[0x07, 0x0b, 0x01, 0x00, 0x01, 0x21, 0x21, 0x01, 0x18, 0x0c]);
+        number(&mut hdr, big + link_target.len() as u64);
+        hdr.push(0x00);
+        hdr.extend_from_slice(&[0x08, 0x0d, 0x02, 0x09]);
+        number(&mut hdr, big);
+        hdr.extend_from_slice(&[0x0a, 0x01]);
+        hdr.extend_from_slice(&0u32.to_le_bytes());
+        hdr.extend_from_slice(&crc32(link_target).to_le_bytes());
+        hdr.extend_from_slice(&[0x00, 0x00, 0x05, 0x02, 0x11]);
+        let mut names = vec![0x00];
+        for name in ["big.bin", "link"] {
+            for u in name.encode_utf16() {
+                names.extend_from_slice(&u.to_le_bytes());
+            }
+            names.extend_from_slice(&0u16.to_le_bytes());
+        }
+        number(&mut hdr, names.len() as u64);
+        hdr.extend_from_slice(&names);
+        hdr.push(0x15);
+        number(&mut hdr, 2 + 8);
+        hdr.extend_from_slice(&[0x01, 0x00]);
+        hdr.extend_from_slice(&0u32.to_le_bytes());
+        hdr.extend_from_slice(&sz_unix_attrs(0o120777, false).to_le_bytes());
+        hdr.extend_from_slice(&[0x00, 0x00]);
+        let mut start_hdr = [0u8; 20];
+        start_hdr[0..8].copy_from_slice(&(packed.len() as u64).to_le_bytes());
+        start_hdr[8..16].copy_from_slice(&(hdr.len() as u64).to_le_bytes());
+        start_hdr[16..20].copy_from_slice(&crc32(&hdr).to_le_bytes());
+        let mut archive = Vec::new();
+        archive.extend_from_slice(SEVEN_Z);
+        archive.extend_from_slice(&[0x00, 0x04]);
+        archive.extend_from_slice(&crc32(&start_hdr).to_le_bytes());
+        archive.extend_from_slice(&start_hdr);
+        archive.extend_from_slice(&packed);
+        archive.extend_from_slice(&hdr);
+
+        let dir = TempTestDir::new("7z_big_prepass");
+        let path = dir.path().join("big.7z");
+        std::fs::write(&path, &archive).unwrap();
+        assert!(
+            zipfast::sevenzip::list(&path, None).is_err(),
+            "zipfast's default limits refuse it"
+        );
+        let entries = sz_list(&path, None).expect("RustyGet's listing reads it");
+        assert_eq!(entries.len(), 2);
+        let out = dir.path().join("out");
+        let mut logs = Vec::new();
+        let err = extract_7z_cancellable(
+            &path,
+            &out,
+            "",
+            1,
+            &mut |_, m| logs.push(m.to_string()),
+            &mut || false,
+        )
+        .unwrap_err();
+        assert_eq!(err, "archive contains link");
+        assert!(
+            logs.iter()
+                .any(|m| m == "Stream repair: archive contains link"),
+            "{logs:?}"
+        );
+        assert!(!out.join("big.bin").exists());
     }
 
     #[test]

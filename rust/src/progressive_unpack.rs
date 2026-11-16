@@ -2112,7 +2112,19 @@ impl FeedProvider {
             return;
         }
         if late.members.is_none() {
+            // A dead volume borrowed from a duplicate has no file: the set on disk stops short
+            // of the volumes the download holds, and a declaration of it would leave the
+            // borrowed (virtual) volumes out.
+            let expected = self
+                .feed
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .expected_volumes();
             match set_members(&late.first, &late.password) {
+                Some(m) if expected > m.volumes => {
+                    late.refused = true;
+                    return;
+                }
                 Some(m) if !m.windows_names && !m.duplicate_names => late.members = Some(m),
                 _ => {
                     late.refused = true;
@@ -2273,14 +2285,18 @@ impl VolumeSource for FeedProvider {
                 Ok(VolumeAnswer::Wait)
             }
             VolumeView::Missing => Ok(VolumeAnswer::Missing),
-            VolumeView::Virtual(v) => Ok(VolumeAnswer::Ready(Box::new(
-                VirtualSource::open(&path, v).map_err(|cause| {
-                    ProgressiveFailure::new(FailureKind::Input {
-                        operation: zipfast::progressive::InputOperation::Open,
-                        cause,
-                    })
-                })?,
-            ))),
+            VolumeView::Virtual(v) => {
+                // A virtual volume is no file of the set: never declare the set complete.
+                self.late.refused = true;
+                Ok(VolumeAnswer::Ready(Box::new(
+                    VirtualSource::open(&path, v).map_err(|cause| {
+                        ProgressiveFailure::new(FailureKind::Input {
+                            operation: zipfast::progressive::InputOperation::Open,
+                            cause,
+                        })
+                    })?,
+                )))
+            }
         }
     }
 

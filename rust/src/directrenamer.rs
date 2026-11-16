@@ -381,22 +381,30 @@ fn check_state_host(
         return;
     }
 
+    // A file whose first article failed never gets a 16k hash (nor, for a par2
+    // file, a set id). Waiting for it held the rename, and with it direct unpack,
+    // for the whole download; such a file cannot be matched by hash anyway.
     let flen = host.nzb_file_len(nzb_ptr);
     let mut files = Vec::with_capacity(flen);
     for i in 0..flen {
         let f = host.file_snap(host.nzb_file_at(nzb_ptr, i));
         if f.hash16k.is_empty() || (f.par_file && f.par_set_id.is_empty()) {
-            return;
+            let first_failed = f.articles_len > 0 && host.article_at(f.ptr, 0).status == AI_FAILED;
+            if !first_failed {
+                return;
+            }
+            continue;
         }
         files.push(f);
     }
 
-    let completed = host.nzb_completed_files(nzb_ptr);
-    for cf in &completed {
-        if cf.hash16k.is_empty() || (cf.par_file && cf.par_set_id.is_empty()) {
-            return;
-        }
-    }
+    // A completed file has every article settled: a missing hash or set id means
+    // its first article failed.
+    let completed: Vec<_> = host
+        .nzb_completed_files(nzb_ptr)
+        .into_iter()
+        .filter(|cf| !cf.hash16k.is_empty() && !(cf.par_file && cf.par_set_id.is_empty()))
+        .collect();
 
     let mut waiting_par = nzb.waiting_par;
     if !waiting_par {
@@ -672,7 +680,11 @@ fn resolve_new_name(
     hard_linking: bool,
     vol: &mut i32,
 ) -> Vec<u8> {
-    let mut new_name = if par_file && need_pars {
+    // A par2 file whose first article failed has no set id: an empty base name
+    // would make it a nameless dotfile, so it keeps its name.
+    let mut new_name = if par_file && need_pars && par_set_id.is_empty() {
+        Vec::new()
+    } else if par_file && need_pars {
         par_name_on_disk(filename, dest_dir, par_set_id, b'/', vol)
     } else if !par_file {
         let c_old = to_cstring(filename);
@@ -935,6 +947,24 @@ fn rename_file_on_disk(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn par_file_without_set_id_keeps_its_name() {
+        let mut vol = 1;
+        let name = resolve_new_name(
+            b"q8w7.vol07+08.par2",
+            true,
+            b"",
+            b"",
+            b"/nonexistent-dest",
+            &[],
+            true,
+            false,
+            &mut vol,
+        );
+        assert!(name.is_empty());
+        assert_eq!(vol, 1);
+    }
 
     #[test]
     fn regular_name_takes_the_first_matching_hash() {

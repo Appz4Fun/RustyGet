@@ -18,7 +18,7 @@ use crate::postrepair::{strncasecmp_prefix, NzbgetRsParSegment};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
 #[cfg(test)]
@@ -113,8 +113,23 @@ struct ActiveStreamingSession {
     writers: Arc<WriteCoordinator>,
     operation: Mutex<()>,
     articles: Mutex<DeferredArticles>,
-    article_byte_limit: u64,
+    /// Grows when free ParBuffer is lent to queued snapshots (`lend_memory`).
+    article_byte_limit: AtomicU64,
+    /// ParBuffer lent to RAM staging and queued snapshots, at most half of
+    /// the pool; returned with the session's budget.
+    lent_memory: AtomicU64,
     pending_unpause_ids: Mutex<Vec<u64>>,
+    /// A back-fill thread is re-reading verified slices for new slots.
+    backfill_running: AtomicBool,
+    /// After a back-fill that left slices out (verified from RAM, not on
+    /// disk yet), no new one starts before this time.
+    backfill_retry_at: Mutex<Option<std::time::Instant>>,
+    /// Recovery blocks of registered volumes that have not arrived yet: the
+    /// most recovery a damaged block can still get, so growth never charges
+    /// ParBuffer for slots no block could fill.
+    queued_blocks: Mutex<HashMap<u64, u64>>,
+    /// Slot cap last written to the log, so growth is not logged per block.
+    logged_slots: AtomicUsize,
     file_lengths: HashMap<FileId, u64>,
     target_names: HashMap<FileId, PathBuf>,
     base_dir: PathBuf,
@@ -123,8 +138,13 @@ struct ActiveStreamingSession {
     metrics: live_metrics::LiveMetricCounters,
     last_error: Mutex<Option<String>>,
     warning_reported: AtomicBool,
-    // Drop last, after the session, queue and all owned metadata.
-    _budget: SessionBudgetLease,
+    /// Distinct refusal reasons with counts (bounded), so the log says why
+    /// captures failed, not only the first failure.
+    refusals: Mutex<Vec<(String, u64)>>,
+    stop_logged: AtomicBool,
+    // Drop last, after the session, queue and all owned metadata. Grows with
+    // the syndrome slots as damage appears (see `grow_for_damage`).
+    budget: Mutex<SessionBudgetLease>,
 }
 
 struct DeferredArticle {
@@ -264,11 +284,16 @@ fn build_streaming_session(
         session: StreamingParSession::new(set, base_dir, options)?,
         generation: SessionGeneration(generation),
         writers,
-        _budget: budget,
+        budget: Mutex::new(budget),
         operation: Mutex::new(()),
         articles: Mutex::new(DeferredArticles::default()),
-        article_byte_limit,
+        article_byte_limit: AtomicU64::new(article_byte_limit),
+        lent_memory: AtomicU64::new(0),
         pending_unpause_ids: Mutex::new(Vec::new()),
+        backfill_running: AtomicBool::new(false),
+        backfill_retry_at: Mutex::new(None),
+        queued_blocks: Mutex::new(HashMap::new()),
+        logged_slots: AtomicUsize::new(0),
         file_lengths: lengths,
         target_names,
         base_dir: base_dir.to_path_buf(),
@@ -277,6 +302,8 @@ fn build_streaming_session(
         metrics: live_metrics::LiveMetricCounters::default(),
         last_error: Mutex::new(None),
         warning_reported: AtomicBool::new(false),
+        refusals: Mutex::new(Vec::new()),
+        stop_logged: AtomicBool::new(false),
     }))
 }
 
@@ -334,15 +361,261 @@ fn ensure_registry_generation(
 }
 
 impl ActiveStreamingSession {
+    /// A back-fill is pending, none runs, and no retry delay is in force.
+    fn backfill_due(&self) -> bool {
+        self.session.needs_backfill()
+            && !self.backfill_running.load(Ordering::Acquire)
+            && self
+                .backfill_retry_at
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_none_or(|at| std::time::Instant::now() >= at)
+    }
+
     fn record<T>(&self, result: Result<T, RepairError>) -> Result<T, RepairError> {
         if let Err(error) = &result {
             *self.last_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(error.to_string());
+            self.note_refusal(error);
+            self.lend_memory(error);
         } else {
             self.observe_count_readiness();
         }
         result
     }
+    /// Count a refusal by reason; log each new reason once as it first appears.
+    fn note_refusal(&self, error: &RepairError) {
+        const MAX_REASONS: usize = 8;
+        let mut reason = error.to_string();
+        if matches!(error, RepairError::UnknownFile(FileId(id)) if *id == [0; 16]) {
+            // live_source_id's "no binding yet": an obfuscated queue file
+            // whose real name and 16k hash are not known yet.
+            reason = "queue file not matched to a par2 file yet".to_owned();
+        }
+        if matches!(error, RepairError::Cancelled) {
+            if let Some(why) = self.writers.stop_reason() {
+                reason = format!("{reason} ({why})");
+            }
+        }
+        // Key without numbers, so byte counts and ids in one kind of error
+        // do not each take a slot; the first full message is logged.
+        let mut key = String::with_capacity(reason.len());
+        for c in reason.chars() {
+            if !c.is_ascii_digit() {
+                key.push(c);
+            } else if !key.ends_with('#') {
+                key.push('#');
+            }
+        }
+        let mut refusals = self.refusals.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, count)) = refusals.iter_mut().find(|(known, _)| *known == key) {
+            *count += 1;
+            return;
+        }
+        if refusals.len() >= MAX_REASONS {
+            let other = "other reasons".to_owned();
+            match refusals.iter_mut().find(|(known, _)| *known == other) {
+                Some((_, count)) => *count += 1,
+                None => refusals.push((other, 1)),
+            }
+            return;
+        }
+        let message = format!(
+            "Live PAR (job {}) refused: {reason}",
+            self.metrics.report_nzb_id()
+        );
+        refusals.push((key, 1));
+        drop(refusals);
+        crate::log::log_active_bytes(crate::queuesubsys_host::MK_DETAIL, message.as_bytes());
+    }
+
+    /// RAM staging or the snapshot queue ran out while many files arrive at
+    /// once: lend it free ParBuffer, up to half of the pool, so later
+    /// articles are verified from RAM instead of being replayed
+    /// from disk. The refused article itself is replayed when its file
+    /// completes. The memory returns with the session's budget.
+    fn lend_memory(&self, error: &RepairError) {
+        let RepairError::StreamingMemoryLimit {
+            context,
+            required_bytes,
+            limit_bytes,
+        } = error
+        else {
+            return;
+        };
+        let staging = *context == "RAM-only partial staging";
+        // Only a byte shortfall: the snapshot queue's article-count limit
+        // reports the same context, and memory cannot relieve it. A staging
+        // cap of 0 means staging was turned off on purpose. Replay payloads
+        // share the snapshot queue's byte limit.
+        if (!staging && *context != "live article snapshots" && *context != "live replay payload")
+            || required_bytes <= limit_bytes
+            || (staging && self.session.max_staging_bytes() == 0)
+            || self.session.is_cancelled()
+        {
+            return;
+        }
+        let unit = self.session.slice_size();
+        let pool = effective_live_pool_bytes();
+        // Callers may hold the daemon queue lock; growth of repair slots holds
+        // the budget across volume absorbs, so never wait for it here.
+        let Ok(mut lease) = self.budget.try_lock() else {
+            return;
+        };
+        let before = self.lent_memory.load(Ordering::Relaxed);
+        if unit == 0 {
+            return;
+        }
+        // Cover the whole shortfall at once: every refusal drops data. With
+        // many files downloading at once staging holds about one partial slice
+        // per file, so loans may take up to half of ParBuffer. They never take
+        // the last quarter, which stays free for repair slots; when the pool
+        // has room for two ordinary jobs, it is at least one ordinary job's
+        // start reservation, so another job's live PAR can still start (a job
+        // with very large slices may reserve more than that).
+        let wanted = (required_bytes - limit_bytes).div_ceil(unit);
+        let room = (pool / 2).saturating_sub(before) / unit;
+        let ceiling = crate::parlive::JOB_CEILING;
+        let keep_free = if pool >= 2 * ceiling {
+            (pool / 4).max(ceiling)
+        } else {
+            pool / 4
+        };
+        let units = lease.grow_by_units(unit, wanted.min(room), pool.saturating_sub(keep_free));
+        if units == 0 {
+            return;
+        }
+        let grant = units * unit;
+        let lent = before + grant;
+        self.lent_memory.store(lent, Ordering::Relaxed);
+        if staging {
+            self.session
+                .set_max_staging_bytes(self.session.max_staging_bytes().saturating_add(grant));
+        } else {
+            self.article_byte_limit.fetch_add(grant, Ordering::AcqRel);
+        }
+        drop(lease);
+        // Log the first loan, then each doubling.
+        if before / unit == 0 || (lent / unit).ilog2() > (before / unit).ilog2() {
+            let name = self.par_name.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let msg = format!(
+                "Live PAR for {}: staging memory grew by {} MB ({} MB of {} MB ParBuffer lent) for many files arriving at once",
+                String::from_utf8_lossy(&name),
+                grant.div_ceil(1024 * 1024),
+                lent.div_ceil(1024 * 1024),
+                pool / (1024 * 1024),
+            );
+            crate::log::log_active_bytes(crate::queuesubsys_host::MK_DETAIL, msg.as_bytes());
+        }
+    }
+
+    /// Log once why this session stopped taking work.
+    fn note_stop(&self, nzb_id: i32, why: &str) {
+        if self.session.is_cancelled() || self.stop_logged.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let message = format!("Live PAR (job {nzb_id}) stopped: {why}");
+        crate::log::log_active_bytes(crate::queuesubsys_host::MK_DETAIL, message.as_bytes());
+    }
+
+    /// The refusal counts, for the disposal footer.
+    fn refusal_summary(&self) -> Option<String> {
+        let refusals = self.refusals.lock().unwrap_or_else(|e| e.into_inner());
+        (!refusals.is_empty()).then(|| {
+            // Each reason above shows its first message, from before any loan;
+            // the final limits tell whether loans kept up.
+            let mb = |bytes: u64| bytes.div_ceil(1024 * 1024);
+            format!(
+                "{} (final limits: staging {} MB, article snapshots {} MB, {} MB of ParBuffer lent)",
+                refusals
+                    .iter()
+                    .map(|(reason, count)| format!("{count} x {reason}"))
+                    .collect::<Vec<_>>()
+                    .join("; "),
+                mb(self.session.max_staging_bytes()),
+                mb(self.article_byte_limit.load(Ordering::Relaxed)),
+                mb(self.lent_memory.load(Ordering::Relaxed)),
+            )
+        })
+    }
+
+    /// Grow the syndrome slots so every damaged block can take a recovery
+    /// block, paid from free ParBuffer: each slot costs two slices (its
+    /// syndrome and its reconstructed output). The memory goes back to the
+    /// pool when the session ends.
+    fn grow_for_damage(&self) {
+        let status = self.session.status();
+        let coming: u64 = self
+            .queued_blocks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .sum();
+        let turned_away = self.session.turned_away_recovery_slices();
+        // Never more slots than recovery blocks that are here, turned away by
+        // the cap (absorbed again on a raise) or still coming.
+        let usable = status
+            .ready_recovery
+            .saturating_add(turned_away)
+            .saturating_add(usize::try_from(coming).unwrap_or(usize::MAX));
+        let mut want = status.damaged.min(usable);
+        // Every slot is taken but blocks are still short: a preallocated slot
+        // held an exponent that did not come. Grow into what was turned away.
+        let cap = self.session.max_syndrome_slots();
+        if status.ready_recovery < status.damaged && status.syndrome_slots >= cap {
+            want = want.max(cap + (status.damaged - status.ready_recovery).min(turned_away));
+        }
+        self.grow_slots_to(want, &status);
+    }
+
+    fn grow_slots_to(&self, want: usize, status: &LiveStatus) {
+        if self.session.is_cancelled() || want <= self.session.max_syndrome_slots() {
+            return;
+        }
+        let unit = self.session.slice_size().saturating_mul(2);
+        let mut lease = self.budget.lock().unwrap_or_else(|e| e.into_inner());
+        let cap = self.session.max_syndrome_slots();
+        if want <= cap {
+            return;
+        }
+        let pool = effective_live_pool_bytes();
+        let granted = lease.grow_by_units(unit, (want - cap) as u64, pool);
+        if granted == 0 {
+            return;
+        }
+        let asked = cap + granted as usize;
+        let result = self.session.set_max_syndrome_slots(asked);
+        let effective = self.session.max_syndrome_slots().max(cap);
+        if effective < asked {
+            lease.shrink_by(unit * (asked - effective) as u64);
+        }
+        let logged = self.logged_slots.load(Ordering::Relaxed);
+        // Log the first growth, then each further quarter (at least 4 blocks).
+        if effective > cap && (logged == 0 || effective >= logged + (logged / 4).max(4)) {
+            self.logged_slots.store(effective, Ordering::Relaxed);
+            let name = self
+                .par_name
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let msg = format!(
+                "Live PAR for {}: repair memory grew to {} blocks ({} MB of {} MB ParBuffer) for {} damaged blocks",
+                String::from_utf8_lossy(&name),
+                effective,
+                (effective as u64 * unit).div_ceil(1024 * 1024),
+                pool / (1024 * 1024),
+                status.damaged,
+            );
+            crate::log::log_active_bytes(crate::queuesubsys_host::MK_INFO, msg.as_bytes());
+        }
+        if let Err(error) = result {
+            *self.last_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(error.to_string());
+        }
+    }
+
     fn unpause(&self, action: Option<&UnpauseAction>) {
+        // Every outcome may carry new damage, also when volumes already in
+        // flight cover it and no unpause is due.
+        self.grow_for_damage();
         if let Some(action) = action {
             let mut ids = self
                 .pending_unpause_ids
@@ -421,11 +694,12 @@ pub(crate) fn streaming_session_defer_article_for_queue(
         }
         let mut queue = entry.articles.lock().unwrap_or_else(|e| e.into_inner());
         let next = queue.bytes.checked_add(size);
-        if queue.pending.len() >= 4096 || next.is_none_or(|n| n > entry.article_byte_limit) {
+        let limit = entry.article_byte_limit.load(Ordering::Acquire);
+        if queue.pending.len() >= 4096 || next.is_none_or(|n| n > limit) {
             return Err(RepairError::StreamingMemoryLimit {
                 context: "live article snapshots",
                 required_bytes: next.unwrap_or(u64::MAX),
-                limit_bytes: entry.article_byte_limit,
+                limit_bytes: limit,
             });
         }
         let bytes = snapshot().ok_or_else(|| {
@@ -596,7 +870,16 @@ pub(crate) fn streaming_session_pending_article_jobs() -> Vec<i32> {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .is_some();
-            (queued || warning).then_some(id)
+            // Damage found by a completed-file replay or a recovery volume
+            // also asks for volumes; they must be unpaused even when no
+            // article waits, or recovery fetching stalls.
+            let unpause = !entry
+                .pending_unpause_ids
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty();
+            let backfill = entry.backfill_due();
+            (queued || warning || unpause || backfill).then_some(id)
         })
         .collect()
 }
@@ -732,6 +1015,8 @@ fn live_source_id(
         Ok(Some(Some(id))) => return Ok(id),
         Ok(Some(None)) => return Err(RepairError::UnknownFile(FileId([0; 16]))),
         Err(_) => {
+            let why = entry.writers.stop_reason().unwrap_or_else(|| "live namespace refused".to_owned());
+            entry.note_stop(entry.metrics.report_nzb_id(), &why);
             entry.session.cancel();
             return Err(RepairError::Cancelled);
         }
@@ -815,15 +1100,23 @@ pub(crate) fn streaming_session_process_completed_file_with_start(
         }
         let file = &item.file;
         if file.par_file {
-            if !file.successful {
-                return Ok(false);
-            }
             // The production per-job CompletionDrainLease owns initialization;
             // shutdown must never wait on a lock held through recovery work.
             if active_streaming_session(nzb_id).is_none() {
+                if !file.successful {
+                    return Ok(false);
+                }
                 start(file, Arc::clone(&item.writers))?;
                 return Ok(true);
             }
+            // A volume that failed outright may never have been written.
+            if !file.successful && !file.path.exists() {
+                return Ok(false);
+            }
+            // A recovery volume that lost articles still carries good blocks:
+            // every packet is checked by MD5 and the reader resyncs past holes,
+            // so only the damaged blocks are lost. Dropping the whole volume made
+            // the selector fetch the next, larger one for blocks already here.
             streaming_session_on_recovery_volume_arrived(nzb_id, &file.path, file.queued_id)
                 .ok_or(RepairError::Cancelled)??;
             return Ok(false);
@@ -1383,8 +1676,11 @@ pub fn streaming_session_start_bytes(
 }
 
 /// Cancels the current generation permanently; in-flight owners retain their reservation.
+#[track_caller]
 pub fn streaming_session_cancel(nzb_id: i32) {
     if let Some(entry) = active_streaming_session(nzb_id) {
+        let at = std::panic::Location::caller();
+        entry.note_stop(nzb_id, &format!("cancelled from {}:{}", at.file(), at.line()));
         entry
             .writers
             .cancel_generation_with(entry.generation, || entry.session.cancel());
@@ -1484,14 +1780,20 @@ struct CallerPayloadCharge<'a> {
     bytes: u64,
 }
 impl<'a> CallerPayloadCharge<'a> {
+    /// Replays run one chunk at a time under the session's operation lock, so
+    /// a chunk that fits the limit on its own is admitted even while article
+    /// snapshots fill the queue: otherwise a busy download defers committed
+    /// replay, the fallback for every refused snapshot, until it ends. Memory
+    /// stays bounded by the limit plus one chunk.
     fn acquire(entry: &'a ActiveStreamingSession, bytes: u64) -> Result<Self, RepairError> {
         let mut queue = entry.articles.lock().unwrap_or_else(|e| e.into_inner());
         let next = queue.bytes.checked_add(bytes);
-        if next.is_none_or(|n| n > entry.article_byte_limit) {
+        let limit = entry.article_byte_limit.load(Ordering::Acquire);
+        if next.is_none() || bytes > limit {
             return Err(RepairError::StreamingMemoryLimit {
                 context: "live replay payload",
-                required_bytes: next.unwrap_or(u64::MAX),
-                limit_bytes: entry.article_byte_limit,
+                required_bytes: if next.is_none() { u64::MAX } else { bytes },
+                limit_bytes: limit,
             });
         }
         queue.bytes = next.unwrap();
@@ -1612,6 +1914,11 @@ pub fn streaming_session_register_queued_volume(
         blocks,
         paused,
     });
+    entry
+        .queued_blocks
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(volume_id, u64::try_from(blocks).unwrap_or(0));
     true
 }
 
@@ -1704,7 +2011,20 @@ pub fn streaming_session_on_recovery_volume_arrived(
     queued_id: Option<u64>,
 ) -> Option<Result<usize, RepairError>> {
     with_live_session(nzb_id, |entry| {
+        // Growth that found ParBuffer full earlier may fit now.
+        entry.grow_for_damage();
+        if let Some(id) = queued_id {
+            entry
+                .queued_blocks
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&id);
+        }
         let count = entry.session.on_recovery_volume_arrived(path, queued_id)?;
+        entry.grow_for_damage();
+        // The volume may have brought fewer usable blocks than it promised
+        // while in flight; fetch the rest now, not at the next damage.
+        entry.unpause(entry.session.request_unpause().as_ref());
         if let Some(id) = queued_id {
             entry
                 .pending_unpause_ids
@@ -1714,6 +2034,61 @@ pub fn streaming_session_on_recovery_volume_arrived(
         }
         Ok(count)
     })
+    .inspect(|_| streaming_session_kick_backfill(nzb_id))
+}
+
+/// A back-fill that could not re-read every slice (slices verified from RAM
+/// reach the disk when the cache flushes them) is retried after this delay,
+/// not on every coordinator tick.
+const BACKFILL_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Starts re-reading verified slices for syndrome slots allocated since the
+/// last back-fill, on a thread of its own: it can take seconds per GB, and
+/// live articles keep folding meanwhile. At most one runs per session; after
+/// an error the back-fill is tried again once [`BACKFILL_RETRY_DELAY`] passes.
+pub(crate) fn streaming_session_kick_backfill(nzb_id: i32) {
+    let Some(entry) = active_streaming_session(nzb_id) else {
+        return;
+    };
+    if entry.session.is_cancelled()
+        || !entry.backfill_due()
+        || entry
+            .backfill_running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+    {
+        return;
+    }
+    let worker = Arc::clone(&entry);
+    let spawned = std::thread::Builder::new()
+        .name(format!("live-par-backfill-{nzb_id}"))
+        .spawn(move || {
+            // Clears the running flag even if the back-fill panics.
+            struct Running<'a>(&'a AtomicBool);
+            impl Drop for Running<'_> {
+                fn drop(&mut self) {
+                    self.0.store(false, Ordering::Release);
+                }
+            }
+            let _running = Running(&worker.backfill_running);
+            let retry_at = || {
+                worker
+                    .backfill_retry_at
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+            };
+            // Back off up front, so a panic below waits out the delay too.
+            *retry_at() = Some(std::time::Instant::now() + BACKFILL_RETRY_DELAY);
+            // A shared back-fill error is expected while verified slices still
+            // sit in the article cache, so it is retried, never reported: the
+            // strict back-fill inside repair surfaces any error that persists.
+            if worker.session.backfill_pending().is_ok() {
+                *retry_at() = None;
+            }
+        });
+    if spawned.is_err() {
+        entry.backfill_running.store(false, Ordering::Release);
+    }
 }
 
 /// Polls the live status of the [`StreamingParSession`] for `nzb_id`.
@@ -2136,8 +2511,11 @@ pub fn streaming_session_has_session(nzb_id: i32) -> bool {
 }
 
 /// Drops the [`StreamingParSession`] for `nzb_id`.
+#[track_caller]
 pub fn streaming_session_forget(nzb_id: i32) {
     if let Some(old) = active_streaming_session(nzb_id) {
+        let at = std::panic::Location::caller();
+        old.note_stop(nzb_id, &format!("forgotten from {}:{}", at.file(), at.line()));
         old.writers.cancel_generation_with(old.generation, || {
             old.session.cancel();
             let mut sessions = STREAMING_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
@@ -3545,6 +3923,370 @@ mod tests {
                 (s >> 37) as u8
             })
             .collect()
+    }
+
+    #[test]
+    fn live_session_grows_syndrome_slots_from_free_par_buffer_as_damage_appears() {
+        grow_live_slots_case(0x6a0f_0001, 0, 6, 3);
+    }
+
+    #[test]
+    fn live_session_never_grows_past_the_recovery_blocks_that_can_come() {
+        // Three damaged blocks but only two recovery blocks exist: ParBuffer
+        // is charged for two slots, not three.
+        grow_live_slots_case(0x6a0f_0003, 0, 2, 2);
+    }
+
+    #[test]
+    fn live_session_grows_past_a_preallocated_slot_whose_exponent_never_comes() {
+        // The preallocated slot holds exponent 0, but the volumes carry 3..8:
+        // after arrival one more slot is needed and the turned-away block is
+        // absorbed again.
+        grow_live_slots_case(0x6a0f_0002, 3, 6, 4);
+    }
+
+    #[test]
+    fn live_session_lends_free_par_buffer_to_staging_and_snapshots_up_to_half() {
+        use par_rs::create::{build_set, SetOptions, VolumeScheme};
+
+        let nzb_id = 0x6a0f_0010;
+        let dir = std::env::temp_dir().join(format!(
+            "rustyget-parchecker-lend-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f0 = make_deterministic_bytes(8 * 4096, 405);
+        let built = build_set(
+            "lend",
+            &[("part01.rar", &f0)],
+            &SetOptions {
+                slice_size: 4096,
+                recovery_blocks: 2,
+                first_exponent: 0,
+                volumes: VolumeScheme::Single,
+                creator: "rustyget-test".to_string(),
+                unicode_names: false,
+                kernel: Kernel::detect(),
+            },
+        )
+        .unwrap();
+        let index_path = dir.join("lend.par2");
+        std::fs::write(&index_path, &built.index).unwrap();
+        streaming_session_start(
+            nzb_id,
+            &index_path,
+            &dir,
+            SessionOptions {
+                preallocated_syndrome_slots: 1,
+                max_syndrome_slots: 1,
+                max_syndrome_bytes: 4096,
+                max_working_bytes: 4 << 20,
+                max_staging_bytes: 4096,
+                solve_mem_limit_bytes: 16 << 20,
+                ..SessionOptions::default()
+            },
+        )
+        .unwrap();
+        let entry = active_streaming_session(nzb_id).unwrap();
+        let start = entry.budget.lock().unwrap().reserved_bytes();
+        let staging_full = RepairError::StreamingMemoryLimit {
+            context: "RAM-only partial staging",
+            required_bytes: 8192,
+            limit_bytes: 4096,
+        };
+        let queue_full = RepairError::StreamingMemoryLimit {
+            context: "live article snapshots",
+            required_bytes: 8192,
+            limit_bytes: 4096,
+        };
+        let queue_start = entry.article_byte_limit.load(Ordering::Relaxed);
+        let _ = entry.record::<()>(Err(staging_full));
+        assert_eq!(entry.session.max_staging_bytes(), 8192);
+        let _ = entry.record::<()>(Err(queue_full));
+        assert_eq!(entry.article_byte_limit.load(Ordering::Relaxed), queue_start + 4096);
+        assert_eq!(entry.budget.lock().unwrap().reserved_bytes(), start + 8192);
+        // The article-count limit (bytes fit) lends nothing.
+        let _ = entry.record::<()>(Err(RepairError::StreamingMemoryLimit {
+            context: "live article snapshots",
+            required_bytes: 4096,
+            limit_bytes: 1 << 20,
+        }));
+        assert_eq!(entry.budget.lock().unwrap().reserved_bytes(), start + 8192);
+        // Other limits lend nothing.
+        let _ = entry.record::<()>(Err(RepairError::StreamingMemoryLimit {
+            context: "article metadata",
+            required_bytes: 1,
+            limit_bytes: 0,
+        }));
+        assert_eq!(entry.budget.lock().unwrap().reserved_bytes(), start + 8192);
+        // A shortfall of several slices is covered in one loan.
+        let _ = entry.record::<()>(Err(RepairError::StreamingMemoryLimit {
+            context: "RAM-only partial staging",
+            required_bytes: 8192 + 3 * 4096 - 100,
+            limit_bytes: 8192,
+        }));
+        assert_eq!(entry.session.max_staging_bytes(), 8192 + 3 * 4096);
+        // Replay payloads share, and grow, the snapshot byte limit.
+        let _ = entry.record::<()>(Err(RepairError::StreamingMemoryLimit {
+            context: "live replay payload",
+            required_bytes: queue_start + 4096 + 2 * 4096,
+            limit_bytes: queue_start + 4096,
+        }));
+        assert_eq!(entry.article_byte_limit.load(Ordering::Relaxed), queue_start + 3 * 4096);
+        assert_eq!(entry.budget.lock().unwrap().reserved_bytes(), start + 7 * 4096);
+        assert_eq!(entry.lent_memory.load(Ordering::Relaxed), 7 * 4096);
+        // A replay chunk that fits the limit on its own is admitted even
+        // while snapshots fill the queue; a larger one is refused.
+        let limit = entry.article_byte_limit.load(Ordering::Relaxed);
+        entry.articles.lock().unwrap().bytes += limit - 10;
+        {
+            let charge = CallerPayloadCharge::acquire(&entry, limit).unwrap();
+            assert_eq!(entry.articles.lock().unwrap().bytes, 2 * limit - 10);
+            drop(charge);
+        }
+        assert_eq!(entry.articles.lock().unwrap().bytes, limit - 10);
+        assert!(matches!(
+            CallerPayloadCharge::acquire(&entry, limit + 1),
+            Err(RepairError::StreamingMemoryLimit { context: "live replay payload", required_bytes, .. })
+                if required_bytes == limit + 1
+        ));
+        entry.articles.lock().unwrap().bytes -= limit - 10;
+        // Pending volume unpauses are drained even with no article queued.
+        let _ = streaming_session_take_warning(nzb_id);
+        assert!(!streaming_session_pending_article_jobs().contains(&nzb_id));
+        entry.pending_unpause_ids.lock().unwrap().push(77);
+        assert!(streaming_session_pending_article_jobs().contains(&nzb_id));
+        assert_eq!(streaming_session_take_unpause_ids(nzb_id), vec![77]);
+        assert!(!streaming_session_pending_article_jobs().contains(&nzb_id));
+        // Never more than half of the pool.
+        entry
+            .lent_memory
+            .store(effective_live_pool_bytes() / 2, Ordering::Relaxed);
+        let _ = entry.record::<()>(Err(RepairError::StreamingMemoryLimit {
+            context: "RAM-only partial staging",
+            required_bytes: 1,
+            limit_bytes: 0,
+        }));
+        assert_eq!(entry.session.max_staging_bytes(), 8192 + 3 * 4096);
+        streaming_session_cancel(nzb_id);
+        drop(entry);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn live_session_grows_into_blocks_turned_away_before_new_damage() {
+        use par_rs::create::{build_set, SetOptions, VolumeScheme};
+
+        let nzb_id = 0x6a0f_0004;
+        let dir = std::env::temp_dir().join(format!(
+            "rustyget-parchecker-grow-late-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f0 = make_deterministic_bytes(8 * 4096, 404);
+        let built = build_set(
+            "late",
+            &[("part01.rar", &f0)],
+            &SetOptions {
+                slice_size: 4096,
+                recovery_blocks: 6,
+                first_exponent: 0,
+                volumes: VolumeScheme::Single,
+                creator: "rustyget-test".to_string(),
+                unicode_names: false,
+                kernel: Kernel::detect(),
+            },
+        )
+        .unwrap();
+        let index_path = dir.join("late.par2");
+        std::fs::write(&index_path, &built.index).unwrap();
+        streaming_session_start(
+            nzb_id,
+            &index_path,
+            &dir,
+            SessionOptions {
+                preallocated_syndrome_slots: 1,
+                max_syndrome_slots: 1,
+                max_syndrome_bytes: 4096,
+                max_working_bytes: 4 << 20,
+                max_staging_bytes: 0,
+                solve_mem_limit_bytes: 16 << 20,
+                ..SessionOptions::default()
+            },
+        )
+        .unwrap();
+        let entry = active_streaming_session(nzb_id).unwrap();
+        let (vname, vbytes) = &built.volumes[0];
+        assert!(streaming_session_register_queued_volume(nzb_id, 7, 6, true));
+        let id0 = entry.session.file_id_by_name(b"part01.rar").unwrap();
+        let mut disk = f0.clone();
+        for s in [1usize, 4, 6] {
+            disk[s * 4096..(s + 1) * 4096].fill(0);
+        }
+        std::fs::write(dir.join("part01.rar"), &disk).unwrap();
+        let feed = |s: usize| {
+            let off = (s * 4096) as u64;
+            if matches!(s, 1 | 4 | 6) {
+                streaming_session_on_article_failed_permanently(nzb_id, &id0, off, 4096)
+                    .unwrap()
+                    .unwrap();
+            } else {
+                let chunk = &f0[s * 4096..(s + 1) * 4096];
+                entry
+                    .session
+                    .on_article_finished(&id0, off, 4096, par_rs::crc::crc32(chunk), Some(chunk))
+                    .unwrap();
+            }
+        };
+        for s in 0..6 {
+            feed(s);
+        }
+        assert_eq!(entry.session.max_syndrome_slots(), 2);
+        // The whole volume arrives while only two blocks are damaged.
+        let path = dir.join(vname);
+        std::fs::write(&path, vbytes).unwrap();
+        streaming_session_on_recovery_volume_arrived(nzb_id, &path, Some(7))
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.session.status().ready_recovery, 2);
+        assert_eq!(entry.session.turned_away_recovery_slices(), 4);
+        // A third damaged block grows into a block the volume turned away.
+        feed(6);
+        feed(7);
+        assert_eq!(entry.session.max_syndrome_slots(), 3);
+        assert_eq!(entry.session.status().ready_recovery, 3);
+        let report = streaming_session_repair_available_targets_now(nzb_id, &[id0])
+            .unwrap()
+            .unwrap();
+        assert_eq!(report.repaired_slices.len(), 3);
+        assert_eq!(std::fs::read(dir.join("part01.rar")).unwrap(), f0);
+        streaming_session_cancel(nzb_id);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn grow_live_slots_case(
+        nzb_id: i32,
+        first_exponent: u32,
+        recovery_blocks: u32,
+        final_cap: usize,
+    ) {
+        use par_rs::create::{build_set, SetOptions, VolumeScheme};
+
+        let dir = std::env::temp_dir().join(format!(
+            "rustyget-parchecker-grow-{}-{nzb_id}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f0 = make_deterministic_bytes(8 * 4096, 303);
+        let built = build_set(
+            "grow",
+            &[("part01.rar", &f0)],
+            &SetOptions {
+                slice_size: 4096,
+                recovery_blocks,
+                first_exponent,
+                volumes: VolumeScheme::Single,
+                creator: "rustyget-test".to_string(),
+                unicode_names: false,
+                kernel: Kernel::detect(),
+            },
+        )
+        .unwrap();
+        let index_path = dir.join("grow.par2");
+        std::fs::write(&index_path, &built.index).unwrap();
+        // Start with room for one recovery block only.
+        streaming_session_start(
+            nzb_id,
+            &index_path,
+            &dir,
+            SessionOptions {
+                preallocated_syndrome_slots: 1,
+                max_syndrome_slots: 1,
+                max_syndrome_bytes: 4096,
+                max_working_bytes: 4 << 20,
+                max_staging_bytes: 0,
+                solve_mem_limit_bytes: 16 << 20,
+                defer_backfill: true,
+                ..SessionOptions::default()
+            },
+        )
+        .unwrap();
+        let entry = active_streaming_session(nzb_id).unwrap();
+        let reserved =
+            |entry: &ActiveStreamingSession| entry.budget.lock().unwrap().reserved_bytes();
+        let start_bytes = reserved(&entry);
+        assert_eq!(entry.session.max_syndrome_slots(), 1);
+        for (idx, (vname, _)) in built.volumes.iter().enumerate() {
+            let blocks = volume_blocks_bytes(vname.as_bytes()).unwrap_or(1) as i32;
+            assert!(streaming_session_register_queued_volume(
+                nzb_id,
+                2000 + idx as u64,
+                blocks,
+                true
+            ));
+        }
+        let id0 = entry.session.file_id_by_name(b"part01.rar").unwrap();
+        let mut disk = f0.clone();
+        for s in [1usize, 4, 6] {
+            disk[s * 4096..(s + 1) * 4096].fill(0);
+        }
+        std::fs::write(dir.join("part01.rar"), &disk).unwrap();
+        for s in 0..8usize {
+            let off = (s * 4096) as u64;
+            if matches!(s, 1 | 4 | 6) {
+                streaming_session_on_article_failed_permanently(nzb_id, &id0, off, 4096)
+                    .unwrap()
+                    .unwrap();
+                continue;
+            }
+            let chunk = &f0[s * 4096..(s + 1) * 4096];
+            entry
+                .session
+                .on_article_finished(&id0, off, 4096, par_rs::crc::crc32(chunk), Some(chunk))
+                .unwrap();
+        }
+        // Three damaged blocks: the cap grew to one slot per block that can
+        // come, two slices each.
+        assert_eq!(entry.session.status().damaged, 3);
+        let grown = 3.min(recovery_blocks as usize);
+        assert_eq!(entry.session.max_syndrome_slots(), grown);
+        assert_eq!(reserved(&entry), start_bytes + (grown as u64 - 1) * 2 * 4096);
+        for (idx, (vname, bytes)) in built.volumes.iter().enumerate() {
+            let path = dir.join(vname);
+            std::fs::write(&path, bytes).unwrap();
+            streaming_session_on_recovery_volume_arrived(nzb_id, &path, Some(2000 + idx as u64))
+                .unwrap()
+                .unwrap();
+        }
+        assert_eq!(entry.session.max_syndrome_slots(), final_cap);
+        // Slots that arrived after slices were verified are back-filled on a
+        // thread of their own, not inside the arrival.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while entry.session.needs_backfill() || entry.backfill_running.load(Ordering::Acquire) {
+            assert!(std::time::Instant::now() < deadline, "back-fill never finished");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            reserved(&entry),
+            start_bytes + (final_cap as u64 - 1) * 2 * 4096
+        );
+        if recovery_blocks < 3 {
+            assert_eq!(entry.session.status().ready_recovery, recovery_blocks as usize);
+            streaming_session_cancel(nzb_id);
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        assert_eq!(entry.session.status().ready_recovery, 3);
+        let report = streaming_session_repair_available_targets_now(nzb_id, &[id0])
+            .unwrap()
+            .unwrap();
+        assert_eq!(report.repaired_slices.len(), 3);
+        assert_eq!(std::fs::read(dir.join("part01.rar")).unwrap(), f0);
+        streaming_session_cancel(nzb_id);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

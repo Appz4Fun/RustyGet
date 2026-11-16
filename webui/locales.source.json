@@ -3476,7 +3476,7 @@
   },
   "status_alt": {
     "message": "alt",
-    "description": "History status of a duplicate that is another encode of the same release (its files differ from the primary's)."
+    "description": "History status of a duplicate that holds the same video file as the primary in another container (verified inside the archives, not by par2)."
   },
   "desc_twin_group": {
     "message": "Twin group $1: postings with this label hold byte-identical files",
@@ -3814,9 +3814,9 @@
     "message": "This is an optional non-reliable server.\n\nMarking server as optional tells RustyGet to ignore this server if a\nconnection to this server cannot be established. Normally RustyGet\ndoesn't try upper-level servers before all servers on current level\nwere tried. If a connection to server fails RustyGet waits until the\nserver becomes available (it may try others from current level at this\ntime). This is usually what you want to avoid exhausting of\n(costly) upper level servers if one of main servers is temporary\nunavailable. However, for less reliable servers you may prefer to ignore\nconnection errors and go on with higher-level servers instead.",
     "description": "Description for the option Server1.Optional"
   },
-  "config_desc_server_group": {
-    "message": "Group of news server.\n\nIf you have multiple accounts with same conditions (retention, etc.)\non the same news server, set the same group (greater than 0) for all\nof them. If download fails on one news server, RustyGet does not try\nother servers from the same group.\n\nValue \"0\" means no group defined (default).",
-    "description": "Description for the option Server1.Group DO NOT translate technical values enclosed in quotes. If 'News server' sounds like 'Newspaper' in your language, use 'Usenet server'."
+  "config_desc_server_backbone": {
+    "message": "Usenet backbone of news server.\n\nThe backbone is the company whose article storage the server reads from.\nMany providers resell the same backbone, so servers from different\nproviders can hold exactly the same articles.\n\nWhen a server answers that an article does not exist (430), RustyGet does\nnot ask the other servers on the same backbone for it, at any priority,\nunless they keep articles longer (see option <ServerX.Retention>). Login\nerrors, \"too many connections\" and timeouts only rule out that one server:\nthe next server on the same backbone is still tried.\n\nPick the backbone from the list, or type a name of your own: servers with\nthe same name count as one backbone. Leave it empty when the server shares\nits articles with none of your other servers. The web interface suggests\nthe backbone from the host name.\n\nThis is not a priority: use option <ServerX.Priority> to make a server a\nfill (backfill) server.\n\nNOTE: Older configuration files used ServerX.Group (0-99). A group above\n0 is read as the backbone \"Group N\".",
+    "description": "Description for the option Server1.Backbone DO NOT translate technical values enclosed in quotes. If 'News server' sounds like 'Newspaper' in your language, use 'Usenet server'."
   },
   "config_desc_server_host": {
     "message": "Host name of news server.",
@@ -4821,7 +4821,7 @@
   },
   "fleet_role_alt": {
     "message": "alt",
-    "description": "Fleet role tag: the same release packaged differently."
+    "description": "Fleet role tag: the same video file in another container."
   },
   "fleet_role_copy": {
     "message": "copy",
@@ -5612,9 +5612,6 @@
   "config_host_looking": {
     "message": "Looking up"
   },
-  "config_host_pinned": {
-    "message": "Always using this address"
-  },
   "config_host_one": {
     "message": "1 address for"
   },
@@ -5624,11 +5621,32 @@
   "config_host_use_name": {
     "message": "Use the name again"
   },
-  "config_host_any": {
-    "message": "Any of them (recommended)"
+  "config_host_auto": {
+    "message": "Auto: the fastest (recommended)"
   },
-  "config_host_any_text": {
-    "message": "RustyGet picks, and follows the provider if the addresses change."
+  "config_host_auto_text": {
+    "message": "RustyGet times each address, uses the fastest, and follows the provider if the addresses change."
+  },
+  "config_host_literal": {
+    "message": "Host is an address"
+  },
+  "config_host_literal_text": {
+    "message": "Type the host name instead and pick this address below: the name is then kept for the certificate check."
+  },
+  "config_host_use_name_text": {
+    "message": "Keeps this address as the first to try, and the name for the certificate check."
+  },
+  "config_host_gone": {
+    "message": "Not an address of this host now: skipped unless the certificate is checked strictly."
+  },
+  "config_host_check_login": {
+    "message": "Check login on each address"
+  },
+  "config_host_checking": {
+    "message": "checking…"
+  },
+  "config_host_login_ok": {
+    "message": "login OK"
   },
   "config_host_no_answer": {
     "message": "no answer"
@@ -5638,9 +5656,6 @@
   },
   "config_host_no_geoip": {
     "message": "Country and network need the DB-IP Lite files, which this install does not have."
-  },
-  "config_host_cert_minimal": {
-    "message": "Certificate check is now Minimal: the certificate names the host, not this address."
   },
   "config_server_restored_first": {
     "message": "Settings were restored from a backup: use Save and reload first."

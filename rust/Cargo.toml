@@ -10,8 +10,8 @@ name = "nzbget_rs"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
-par-rs = { git = "https://github.com/xbmc4lyfe/par-rs", rev = "fd1554b95c90480aeaf5080f53a858e3e3e44d69" }
-zipfast = { git = "https://github.com/xbmc4lyfe/zipfast", rev = "042aea4f8643419193f59a05b14cadd3d8650454" }
+par-rs = { git = "https://github.com/xbmc4lyfe/par-rs", rev = "61cc252a75c18c46ad4adcaffca53a7bdc0dc856" }
+zipfast = { git = "https://github.com/xbmc4lyfe/zipfast", rev = "a7a2ad9e3233d78aaa16ba30d6f486d927821719", features = ["persistent-partials"] }
 zipview = { git = "https://github.com/xbmc4lyfe/zipview", rev = "2c3d73a06b29987cea1510e903e437a482076745" }
 nntmux-yenc = { git = "https://github.com/xbmc4lyfe/newznab-tmux", rev = "8dade08ca0372e046af2bd9d3040e23a47379bd4" }
 crc32fast = "1.5"
@@ -23,6 +23,7 @@ quick-xml = { version = "0.41", features = ["encoding"] }
 md-5 = "0.11"
 openssl = "0.10"
 openssl-sys = "0.9"
+yaml-rust2 = { version = "0.10", default-features = false }
 
 [dev-dependencies]
 # Kernel diagnostics only; complete C++/Rust caller measurements remain the gate.

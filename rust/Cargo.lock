@@ -39,6 +39,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "940b3a0ca603d1eade50a4846a2afffd5ef57a9feac2c0e2ec2e14f9ead76000"
 
 [[package]]
+name = "arraydeque"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d902e3d592a523def97af8f317b08ce16b7ab854c1985a0c671e6f15cebc236"
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -330,6 +336,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "foldhash"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
+
+[[package]]
 name = "foreign-types"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -374,6 +386,24 @@ dependencies = [
  "cfg-if",
  "crunchy",
  "zerocopy",
+]
+
+[[package]]
+name = "hashbrown"
+version = "0.15.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
+dependencies = [
+ "foldhash",
+]
+
+[[package]]
+name = "hashlink"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7382cf6263419f2d8df38c55d7da83da5c18aef87fc7a7fc1fb1e344edfe14c1"
+dependencies = [
+ "hashbrown",
 ]
 
 [[package]]
@@ -537,6 +567,7 @@ dependencies = [
  "openssl-sys",
  "par-rs",
  "quick-xml",
+ "yaml-rust2",
  "zipfast",
  "zipview",
  "zstd",
@@ -604,7 +635,7 @@ dependencies = [
 [[package]]
 name = "par-rs"
 version = "0.2.0"
-source = "git+https://github.com/xbmc4lyfe/par-rs?rev=fd1554b95c90480aeaf5080f53a858e3e3e44d69#fd1554b95c90480aeaf5080f53a858e3e3e44d69"
+source = "git+https://github.com/xbmc4lyfe/par-rs?rev=61cc252a75c18c46ad4adcaffca53a7bdc0dc856#61cc252a75c18c46ad4adcaffca53a7bdc0dc856"
 dependencies = [
  "crc32fast",
  "md-5 0.10.6",
@@ -943,6 +974,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "yaml-rust2"
+version = "0.10.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2462ea039c445496d8793d052e13787f2b90e750b833afee748e601c17621ed9"
+dependencies = [
+ "arraydeque",
+ "hashlink",
+]
+
+[[package]]
 name = "zerocopy"
 version = "0.8.62"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -965,12 +1006,12 @@ dependencies = [
 [[package]]
 name = "zip-container"
 version = "0.1.0"
-source = "git+https://github.com/xbmc4lyfe/zipfast?rev=042aea4f8643419193f59a05b14cadd3d8650454#042aea4f8643419193f59a05b14cadd3d8650454"
+source = "git+https://github.com/xbmc4lyfe/zipfast?rev=a7a2ad9e3233d78aaa16ba30d6f486d927821719#a7a2ad9e3233d78aaa16ba30d6f486d927821719"
 
 [[package]]
 name = "zipfast"
 version = "0.1.0"
-source = "git+https://github.com/xbmc4lyfe/zipfast?rev=042aea4f8643419193f59a05b14cadd3d8650454#042aea4f8643419193f59a05b14cadd3d8650454"
+source = "git+https://github.com/xbmc4lyfe/zipfast?rev=a7a2ad9e3233d78aaa16ba30d6f486d927821719#a7a2ad9e3233d78aaa16ba30d6f486d927821719"
 dependencies = [
  "bzip2",
  "crc32fast",
@@ -978,6 +1019,7 @@ dependencies = [
  "getrandom",
  "libc",
  "liblzma",
+ "serde",
  "subtle",
  "tempfile",
  "zip-container",

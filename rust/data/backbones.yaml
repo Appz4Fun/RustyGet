@@ -1,0 +1,171 @@
+# Usenet backbones: the companies that store the articles, and the providers
+# that sell access to them. Servers on the same backbone hold the same articles.
+# Source: https://usenet.rexum.space/tree#table, 2026-11-15.
+#
+# backbones: backbone -> providers (block style, one provider per line).
+# domains:   provider -> website domain. A host under one of these domains is
+#            only SUGGESTED in Settings; the user confirms it.
+# hosts:     confirmed NNTP host -> backbone. Only these fill in automatically.
+#            Add a host here only when you know which backbone it reads from.
+
+backbones:
+  - Omicron:
+      - AnonyNews
+      - Astraweb
+      - BinTube
+      - EasyNews
+      - ExtremeUsenet
+      - Fast-Usenet
+      - Firstload
+      - Ixinews
+      - NewsLeecher
+      - Newsgroup Ninja
+      - Newshosting
+      - Ngroups
+      - Prepaid-Usenet
+      - PureUsenet
+      - Shemes
+      - SimonNews
+      - SnelNL
+      - SunnyUsenet
+      - Usenet-News
+      - Usenet.se
+      - Usenet4u
+      - UsenetBucket
+      - UsenetStorm
+      - Usenetserver
+      - XLned
+      - iLoad USENET
+  - UsenetExpress:
+      - Binary Boy
+      - MaximumUSENET
+      - NewsDemon
+      - NewsgroupDirect
+      - ThunderNews
+      - UsenetExpress
+      - UsenetNews
+      - UsenetPrime
+      - theCubeNet
+  - Abavia:
+      - Bulknews
+      - CheapNews
+      - EasyUsenet
+      - FreeDiscussions
+      - Frugal Usenet
+      - Gebruikhet
+      - HitNews
+      - I-Telligent
+      - LatinUsenet
+      - NewsGrabber
+      - NewsXS
+      - Spotnews
+      - StingyUsenet
+      - TurboUsenet
+      - UseNight
+      - UsenetAgency
+      - UsenetDeal
+      - UsenetPrime
+      - Usenetdiscounter.com
+      - Usenext
+      - XS News
+  - NetNews:
+      - Blocknews
+      - Frugal Usenet
+      - UsenetNow
+  - Giganews:
+      - Giganews
+      - NewsgroupDirect
+      - Supernews
+  - Its Hosted:
+      - NewsgroupDirect
+      - Usenet.Farm
+      - UsenetNews
+  - Uzo Reto:
+      - NewsgroupDirect
+      - UsenetNews
+      - ViperNews
+  - Base IP:
+      - Newshosting
+      - TweakNews
+  - Elbracht:
+      - Premium News
+      - United Newsserver
+  - Eweka Internet Services:
+      - Eweka
+
+domains:
+  AnonyNews: anonynews.com
+  Astraweb: astraweb.com
+  BinTube: bintube.com
+  Binary Boy: binaryboy.com
+  Blocknews: blocknews.net
+  Bulknews: bulknews.eu
+  CheapNews: cheapnews.eu
+  EasyNews: easynews.com
+  EasyUsenet: easyusenet.com
+  Eweka: eweka.nl
+  ExtremeUsenet: extremeusenet.nl
+  Fast-Usenet: fastusenet.org
+  Firstload: firstload.com
+  FreeDiscussions: freediscussions.com
+  Frugal Usenet: frugalusenet.com
+  Gebruikhet: gebruikhet.net
+  Giganews: giganews.com
+  HitNews: hitnews.com
+  I-Telligent: i-telligent.nl
+  Ixinews: ixinews.com
+  LatinUsenet: latinusenet.com
+  MaximumUSENET: maximumusenet.com
+  NewsDemon: newsdemon.com
+  NewsGrabber: newsgrabber.nl
+  NewsLeecher: newsleecher.com
+  NewsXS: newsxs.nl
+  Newsgroup Ninja: newsgroup.ninja
+  NewsgroupDirect: newsgroupdirect.com
+  Newshosting: newshosting.com
+  Ngroups: ngroups.net
+  Premium News: premium-news.com
+  Prepaid-Usenet: prepaid-usenet.de
+  PureUsenet: pureusenet.nl
+  Shemes: shemes.com
+  SimonNews: simonews.com
+  SnelNL: snelnl.com
+  Spotnews: spotnews.nl
+  StingyUsenet: stingyusenet.com
+  SunnyUsenet: sunnyusenet.com
+  Supernews: supernews.com
+  ThunderNews: thundernews.com
+  TurboUsenet: turbousenet.com
+  TweakNews: tweaknews.eu
+  United Newsserver: united-newsserver.de
+  UseNight: usenight.com
+  Usenet-News: usenet-news.net
+  "Usenet.Farm": usenet.farm
+  "Usenet.se": usenet.se
+  Usenet4u: usenet4u.nl
+  UsenetAgency: usenet.agency
+  UsenetBucket: usenetbucket.com
+  UsenetDeal: usenetdeal.com
+  UsenetExpress: usenetexpress.com
+  UsenetNews: usenetnews.net
+  UsenetNow: usenetnow.net
+  UsenetPrime: usenetprime.com
+  UsenetStorm: usenetstorm.com
+  "Usenetdiscounter.com": usenetdiscounter.com
+  Usenetserver: usenetserver.com
+  Usenext: usenext.com
+  ViperNews: vipernews.com
+  XLned: xlned.com
+  XS News: xsnews.com
+  iLoad USENET: iload-usenet.com
+  theCubeNet: thecubenet.com
+
+hosts:
+  news.eweka.nl: Eweka Internet Services
+  news.giganews.com: Giganews
+  news.supernews.com: Giganews
+  news.usenetexpress.com: UsenetExpress
+  news.newsdemon.com: UsenetExpress
+  news.easynews.com: Omicron
+  news.usenetserver.com: Omicron
+  news.tweaknews.eu: Base IP

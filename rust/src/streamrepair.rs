@@ -4929,89 +4929,6 @@ impl RarCryptoContext {
     }
 }
 
-/// Pure-Rust implementation of `crate::rarreader::Cipher` for parsing header-encrypted (`-hp`) RAR3/RAR5 volumes.
-#[derive(Clone, Default)]
-pub struct NativeRarCipher {
-    password: Vec<u8>,
-    key: [u8; 32],
-    iv: [u8; 16],
-    aes: Option<AesRoundKeys>,
-    cv: [u8; 16],
-}
-
-impl NativeRarCipher {
-    pub fn new(password: &[u8]) -> Self {
-        Self {
-            password: password.to_vec(),
-            ..Self::default()
-        }
-    }
-
-    pub fn with_state(password: &[u8], key: [u8; 32], iv: [u8; 16]) -> Self {
-        Self {
-            password: password.to_vec(),
-            key,
-            iv,
-            aes: None,
-            cv: [0; 16],
-        }
-    }
-
-    pub fn state(&self) -> ([u8; 32], [u8; 16]) {
-        (self.key, self.iv)
-    }
-}
-
-impl crate::rarreader::Cipher for NativeRarCipher {
-    fn rar3_prepare(&mut self, salt: &[u8; 8]) -> bool {
-        let Some((key, iv)) = streamcrypto_derive_rar3(&self.password, salt) else {
-            return false;
-        };
-        self.key[..16].copy_from_slice(&key);
-        self.iv = iv;
-        true
-    }
-
-    fn rar5_prepare(&mut self, kdf_count: u8, salt: &[u8; 16]) -> bool {
-        let Some(key) = streamcrypto_derive_rar5(&self.password, kdf_count, salt) else {
-            return false;
-        };
-        self.key = key;
-        true
-    }
-
-    fn init(&mut self, key_bits: i32, iv: Option<&[u8; 16]>) -> bool {
-        if let Some(iv) = iv {
-            self.iv = *iv;
-        }
-        let key_slice = match key_bits {
-            128 => &self.key[..16],
-            256 => &self.key[..32],
-            _ => return false,
-        };
-        self.aes = AesRoundKeys::new(key_slice);
-        self.cv = self.iv;
-        self.aes.is_some()
-    }
-
-    fn decrypt(&mut self, input: &[u8; 16], output: &mut [u8; 16]) -> bool {
-        let Some(aes) = &self.aes else {
-            return false;
-        };
-        let mut dec = aes.decrypt_block(input);
-        for i in 0..16 {
-            dec[i] ^= self.cv[i];
-        }
-        *output = dec;
-        self.cv = *input;
-        true
-    }
-
-    fn free(&mut self) {
-        self.aes = None;
-    }
-}
-
 /// Pure-Rust `ContentSource` trait mirroring `daemon/postprocess/ContentMap.h`.
 pub trait ContentSource {
     fn size(&self) -> i64;
@@ -7711,13 +7628,9 @@ impl ContentMapper {
             let mut files = Vec::new();
             let parsed = if let Some(src) = source {
                 let mut adapter = ContentSourceRarAdapter(src);
-                let ok = if tls_enabled {
-                    let mut cipher = NativeRarCipher::new(password.unwrap_or(&[]));
-                    crate::rarreader::read_from(&mut vol, &mut adapter, &mut cipher, &mut files)
-                } else {
-                    let mut cipher = crate::rarreader::DisabledCipher;
-                    crate::rarreader::read_from(&mut vol, &mut adapter, &mut cipher, &mut files)
-                };
+                // without TLS there is no AES: encrypted headers stay unread
+                let password = password.filter(|_| tls_enabled);
+                let ok = crate::rarreader::read_from(&mut vol, &mut adapter, password, &mut files);
                 if sources.aborted() {
                     return Err(String::new());
                 }
@@ -8739,8 +8652,7 @@ fn plan_dead_fills(
             let mut adapter = ContentSourceRarAdapter(&src);
             let mut vol = crate::rarreader::Volume::default();
             let mut files: Vec<crate::rarreader::RarFile> = Vec::new();
-            let mut cipher = crate::rarreader::DisabledCipher;
-            let ok = crate::rarreader::read_from(&mut vol, &mut adapter, &mut cipher, &mut files);
+            let ok = crate::rarreader::read_from(&mut vol, &mut adapter, None, &mut files);
             if vol.encrypted {
                 usable = false;
                 break;
@@ -11885,9 +11797,8 @@ mod tests {
             ..crate::rarreader::Volume::default()
         };
         let mut src = MemSource(bytes);
-        let mut cipher = NativeRarCipher::new(password);
         let mut files = VecFiles(Vec::new());
-        let ok = crate::rarreader::read_from(&mut vol, &mut src, &mut cipher, &mut files);
+        let ok = crate::rarreader::read_from(&mut vol, &mut src, Some(password), &mut files);
         (ok, vol, files.0)
     }
 
@@ -11929,6 +11840,7 @@ mod tests {
         out.extend_from_slice(name);
         out.extend_from_slice(salt);
         if !trailing {
+            seal_rar_headers(&mut out);
             return out;
         }
         out.extend_from_slice(data);
@@ -11936,7 +11848,69 @@ mod tests {
         out.push(0x7b);
         out.extend_from_slice(&0u16.to_le_bytes());
         out.extend_from_slice(&7u16.to_le_bytes());
+        seal_rar_headers(&mut out);
         out
+    }
+
+    /// Writes the header checksums of a hand-built RAR3 or RAR5 volume, as
+    /// WinRAR would: the low 16 bits of each RAR3 header's CRC32 after its
+    /// checksum field, the CRC32 of each RAR5 header from its size on.
+    /// Headers cut short by the end of the bytes are left alone.
+    fn seal_rar_headers(v: &mut [u8]) {
+        fn vint(v: &[u8], at: &mut usize) -> Option<u64> {
+            let mut value = 0u64;
+            for shift in (0..64).step_by(7) {
+                let byte = *v.get(*at)?;
+                *at += 1;
+                value |= u64::from(byte & 0x7f) << shift;
+                if byte & 0x80 == 0 {
+                    return Some(value);
+                }
+            }
+            None
+        }
+        if v.starts_with(b"Rar!\x1a\x07\x01\x00") {
+            let mut pos = 8;
+            loop {
+                let mut at = pos + 4;
+                let Some(size) = vint(v, &mut at) else { return };
+                let end = at + size as usize;
+                if end > v.len() {
+                    return;
+                }
+                let crc = crc32fast::hash(&v[pos + 4..end]);
+                v[pos..pos + 4].copy_from_slice(&crc.to_le_bytes());
+                let (Some(_), Some(flags)) = (vint(v, &mut at), vint(v, &mut at)) else {
+                    return;
+                };
+                if flags & 1 != 0 && vint(v, &mut at).is_none() {
+                    return;
+                }
+                let data = if flags & 2 != 0 {
+                    vint(v, &mut at).unwrap_or(0)
+                } else {
+                    0
+                };
+                pos = end + data as usize;
+            }
+        } else if v.starts_with(b"Rar!\x1a\x07\x00") {
+            let mut pos = 7;
+            while pos + 7 <= v.len() {
+                let flags = u16::from_le_bytes([v[pos + 3], v[pos + 4]]);
+                let size = usize::from(u16::from_le_bytes([v[pos + 5], v[pos + 6]]));
+                if size < 7 || pos + size > v.len() {
+                    return;
+                }
+                let crc = crc32fast::hash(&v[pos + 2..pos + size]) as u16;
+                v[pos..pos + 2].copy_from_slice(&crc.to_le_bytes());
+                let add = if flags & 0x8000 != 0 {
+                    u32::from_le_bytes(v[pos + 7..pos + 11].try_into().unwrap()) as usize
+                } else {
+                    0
+                };
+                pos += size + add;
+            }
+        }
     }
 
     struct Rar5CryptSpec {
@@ -12040,6 +12014,7 @@ mod tests {
             put_vint(&mut out, eh.len() as u64);
             out.extend_from_slice(&eh);
         }
+        seal_rar_headers(&mut out);
         (out, salt_offset)
     }
 
@@ -12164,10 +12139,11 @@ mod tests {
             &iv_r5,
             &[0u8; 12],
         );
+        // a crypt record without its IV is a damaged header: zipfast lists
+        // nothing from it, and the volume is not read to its end
         let (ok, _, files) = parse_rar_bytes(vol_short, b"");
-        assert!(ok);
-        assert!(files[0].encrypted_data);
-        assert!(files[0].crypt.is_none());
+        assert!(!ok);
+        assert!(files.is_empty());
 
         let spec_trunc = Rar5CryptSpec {
             trailing: false,
@@ -12191,11 +12167,12 @@ mod tests {
             &iv_r5,
             &check_r5,
         );
+        // no key can be derived with such a KDF count: zipfast refuses the
+        // header instead of listing a file that could never be decrypted
         let (ok, _, files) = parse_rar_bytes(vol_over, b"");
-        assert!(ok);
-        let crypt = files[0].crypt.unwrap();
-        assert_eq!(crypt.kdf_count, 200);
-        assert!(streamcrypto_derive_rar5(b"123", crypt.kdf_count, &crypt.salt).is_none());
+        assert!(!ok);
+        assert!(files.is_empty());
+        assert!(streamcrypto_derive_rar5(b"123", 200, &salt_r5).is_none());
 
         // 5. Real WinRAR testdata tests: StreamCryptoRar5PswCheckVectorTest, StreamCryptoRar5RealCiphertextCrossCheckTest,
         // StreamCryptoRar3HeaderCrossCheckTest, StreamCryptoRar3WrongPasswordTest
@@ -12478,6 +12455,7 @@ mod tests {
         out.push(0x7b);
         cm_put_le16(&mut out, 0);
         cm_put_le16(&mut out, 7);
+        seal_rar_headers(&mut out);
         out
     }
 
@@ -12524,6 +12502,7 @@ mod tests {
         cm_put_le32(&mut out, 0);
         cm_put_vint(&mut out, end_header.len() as u64);
         out.extend_from_slice(&end_header);
+        seal_rar_headers(&mut out);
         out
     }
 
@@ -12557,6 +12536,7 @@ mod tests {
         out.push(0x7b);
         cm_put_le16(&mut out, 0);
         cm_put_le16(&mut out, 7);
+        seal_rar_headers(&mut out);
         out
     }
 
@@ -12567,6 +12547,7 @@ mod tests {
         cm_put_le16(&mut out, 0x0091);
         cm_put_le16(&mut out, 13);
         out.extend_from_slice(&[0u8; 6]);
+        seal_rar_headers(&mut out);
         out
     }
 
@@ -12615,6 +12596,7 @@ mod tests {
         out.push(0x7b);
         cm_put_le16(&mut out, 0);
         cm_put_le16(&mut out, 7);
+        seal_rar_headers(&mut out);
         out
     }
 
@@ -12683,6 +12665,7 @@ mod tests {
         cm_put_le32(&mut out, 0);
         cm_put_vint(&mut out, end_header.len() as u64);
         out.extend_from_slice(&end_header);
+        seal_rar_headers(&mut out);
         out
     }
 

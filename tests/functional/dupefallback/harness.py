@@ -1157,6 +1157,26 @@ def scenario_rejectnextserver(daemon, t):
             % (h['Status'], integ, daemon.proxy.rewritten, rejected))
 
 
+def scenario_backbonemiss(daemon, t):
+    """Backbone routing: Server1 (priority 1) and Server2 (priority 2) are on
+    the backbone "TestBone", Server3 (priority 2) is independent; all three
+    serve the same article store, which lacks two articles. The 430 from
+    Server1 rules out Server2 for those articles (same article store), so they
+    are asked of Server3 only, and every other article comes from Server1."""
+    size, seg = 1_000_000, 100_000
+    data = _payload(size, 9700)
+    pp = _place_copy(t, 'bbA', data, 'file.bin')
+    api = daemon.wait_ready()
+    daemon.append(api, 'RelBB', build_nzb(pp, 'BB.bin', size, seg, {3, 4}), False, 'bb-key', 100)
+    h = daemon.wait_history(api, 'RelBB')
+    skipped = _grep_log(t, 'not asking other servers on backbone TestBone')
+    on_server2 = _grep_log(t, '@ Server2 (')
+    on_server3 = _grep_log(t, '@ Server3 (')
+    ok = skipped >= 2 and on_server2 == 0 and on_server3 >= 2
+    return ('backbonemiss', ok, 'status=%s skipped_logs=%d server2_logs=%d server3_logs=%d'
+            % (h['Status'], skipped, on_server2, on_server3))
+
+
 def scenario_nzbgapborrow(daemon, t):
     """B30 and B3: the release's nzb-file skips part 4 (an indexer that didn't
     capture it) and part 5 is missing on the server; a twin duplicate lists
@@ -3909,7 +3929,7 @@ def scenario_prodrarstream(daemon, t):
             'status=%s par=%s unpack=%s extracted_ok=%s' % (h['Status'], h['ParStatus'], h['UnpackStatus'], ok))
 
 
-def _skiphole_rar(daemon, t, tag, donor, recovery):
+def _skiphole_rar(daemon, t, tag, donor, recovery, damage=None):
     """Production options with direct unpack; a 4-volume store-mode rar set of
     movie.mkv whose second volume loses one article in its middle. With
     ``donor`` a byte-identical repost waits in history (marked dead, so only
@@ -3926,7 +3946,8 @@ def _skiphole_rar(daemon, t, tag, donor, recovery):
     names = ['Rel.part%02d.rar' % (i + 1) for i in range(len(vols))]
     for name, data in zip(names, vols):
         t.write_file(os.path.join('data', tag + 'A', name), data)
-    damage = {1: {3}}                       # bytes 600,000-899,999 of volume 2: past its headers
+    if damage is None:
+        damage = {1: {3}}                   # bytes 600,000-899,999 of volume 2: past its headers
     members = [('%sA/%s' % (tag, n), n, len(d), seg, damage.get(i, set()))
                for i, (n, d) in enumerate(zip(names, vols))]
     if recovery:
@@ -3965,6 +3986,23 @@ def scenario_skipholetwin(daemon, t):
     from the repaired volume, verified and moved into place."""
     good, detail = _skiphole_rar(daemon, t, 'SHT', donor=True, recovery=False)
     return ('skipholetwin', good, detail)
+
+
+def scenario_persistdeadprimary(daemon, t):
+    """The primary loses articles mid-download: two articles in the middle of
+    the second volume and one in the third. A byte-identical twin waits in
+    history. Direct
+    unpack writes movie.mkv once as a persistent partial file and keeps it: the
+    lost ranges are holes (or the session waits on a volume whose headers are
+    lost), stream repair fills the volumes from the twin, and only the holes are
+    read back. Never restarted, never copied, byte-identical."""
+    dead = {1: {2, 3}, 2: {2}}
+    good, detail = _skiphole_rar(daemon, t, 'PDP', donor=True, recovery=False, damage=dead)
+    started = _grep_log(t, 'direct unpack into persistent partial files')
+    fell_back = _grep_log(t, 'progressive direct unpack (')
+    status_ok = 'status=SUCCESS' in detail and 'extracted_ok=True' in detail
+    ok = status_ok and started == 1 and fell_back == 0
+    return ('persistdeadprimary', ok, '%s persistent_starts=%d fallbacks=%d' % (detail, started, fell_back))
 
 
 def scenario_skipholepar(daemon, t):
@@ -6101,14 +6139,14 @@ def _yenc_part(data, name='a.rar'):
             + lines + b'\r\n=yend size=%d part=1 pcrc32=%08x\r\n' % (len(data), crc))
 
 
-def _rar4_head(method):
+def _rar4_head(method, main_flags=0):
     """The start of a rar4 volume holding "movie.mkv" packed with ``method``
-    (0x30 store, 0x33 normal compression)."""
+    (0x30 store, 0x33 normal compression), with real header CRCs."""
     import struct
     name = b'movie.mkv'
-    main = struct.pack('<HBHH', 0, 0x73, 0, 13) + b'\0' * 6
-    head = struct.pack('<HBHH', 0, 0x74, 0x8000, 32 + len(name)) + struct.pack(
-        '<IIBIIBBHI', 1_000_000, 1_000_000, 3, 0, 0, 29, method, len(name), 0) + name
+    main = generators._rar3_block(struct.pack('<HBHH', 0, 0x73, main_flags, 13) + b'\0' * 6)
+    head = generators._rar3_block(struct.pack('<HBHH', 0, 0x74, 0x8000, 32 + len(name)) + struct.pack(
+        '<IIBIIBBHI', 1_000_000, 1_000_000, 3, 0, 0, 29, method, len(name), 0) + name)
     return b'Rar!\x1a\x07\x00' + main + head + b'\xaa' * 256
 
 
@@ -6177,8 +6215,7 @@ def scenario_fleetencryptedlast(daemon, t):
     although one of them is the healthiest."""
     daemon.fake_nntp.alive = set()
     same = _payload(400_000, 7101)
-    enc = _rar4_head(0x30)
-    enc = enc[:10] + bytes([0x80]) + enc[11:]   # main header flag: encrypted headers
+    enc = _rar4_head(0x30, main_flags=0x80)   # main header flag: encrypted headers
     api = daemon.wait_ready()
     reply = _fleet(daemon, [
         ('Show.S01E01.enc1', _fleet_copy(daemon, 'e1', 'a.rar', 400_000, enc, _payload(400_000, 7102))),
@@ -6362,11 +6399,16 @@ def scenario_fleetintake(daemon, t):
     other_m = members.get('Show.S01E01.other', {})
     items = {g['NZBName'] for g in api.listgroups() + api.history() if g.get('DupeKey') == 'fleet:intake'}
     log_same = _grep_log(t, "Show.S01E01.zip carries the fleet's video")
+    # both copies keep the digest of the video inside, for TwinCheck's alt label
+    inner = {g['NZBName']: next((p['Value'] for p in g.get('Parameters', []) if p['Name'] == 'DupeInner'), '')
+             for g in api.listgroups() + api.history() if g.get('DupeKey') == 'fleet:intake'}
     ok = (other_m.get('Status') == 'ERROR' and 'not the same video' in other_m.get('Reason', '')
           and 'Show.S01E01.other' not in items
           and any(members.get(n, {}).get('Status') == 'QUEUED' for n in ('Show.S01E01.bare', 'Show.S01E01.zip'))
-          and log_same > 0)
-    return ('fleetintake', ok, 'reply=%s items=%s zip_same_logged=%s' % (reply, sorted(items), log_same))
+          and log_same > 0
+          and len(set(inner.values())) == 1 and len(next(iter(inner.values()), '').rsplit('.', 1)[-1]) == 16)
+    return ('fleetintake', ok, 'reply=%s items=%s zip_same_logged=%s inner=%s' % (
+        reply, sorted(items), log_same, inner))
 
 
 def scenario_fleetintakelater(daemon, t):
@@ -9487,9 +9529,10 @@ def _twin_release(t, tag, seed, seg, block, recovery):
 def scenario_twinalt(daemon, t):
     """A dupe key with three postings: the primary; a twin (the same files, posted
     in other article sizes with another par2 set: other block size and parity
-    level); and an alt (another encode: other bytes). Each gets a fingerprint
-    from its smallest par2-file, and the duplicates in history are labelled a
-    twin or an alt of the primary."""
+    level); and a copy with other bytes. Each gets a fingerprint from its
+    smallest par2-file. The twin is labelled a twin; the other copy only
+    "container": other par2 checksums say another container, not another
+    video, and no intake read the video inside."""
     primary = _twin_release(t, 'taP', 12700, 50_000, 65536, 4)
     twin = _twin_release(t, 'taT', 12700, 70_000, 131072, 9)
     alt = _twin_release(t, 'taA', 12800, 50_000, 65536, 4)
@@ -9511,7 +9554,7 @@ def scenario_twinalt(daemon, t):
             break
         time.sleep(2)
     prints = {n: param(hist.get(n, {}), 'DupeFiles') for n in ('Primary', 'Twin', 'Alt')}
-    ok = (kinds == {'Twin': 'twin', 'Alt': 'alt'} and prints['Primary'] == prints['Twin'] and
+    ok = (kinds == {'Twin': 'twin', 'Alt': 'container'} and prints['Primary'] == prints['Twin'] and
           prints['Primary'] != prints['Alt'] and prints['Primary'] not in ('', 'none'))
     return ('twinalt', ok, 'kinds=%s prints=%s' % (kinds, prints))
 
@@ -9543,7 +9586,7 @@ def scenario_twinlabelonadd(daemon, t):
             break
         time.sleep(0.5)
     queued = [g for g in api.listgroups() if g['NZBName'] == 'Primary']
-    ok = (kinds == {'Twin': 'twin', 'Alt': 'alt'} and elapsed is not None and elapsed < 10 and
+    ok = (kinds == {'Twin': 'twin', 'Alt': 'container'} and elapsed is not None and elapsed < 10 and
           len(queued) == 1 and queued[0]['DownloadedSizeMB'] == 0)
     return ('twinlabelonadd', ok, 'kinds=%s elapsed=%s primary_queued=%s' % (
         kinds, None if elapsed is None else round(elapsed, 1), bool(queued)))
@@ -9610,7 +9653,7 @@ def scenario_twinaltsampled(daemon, t):
         if all(sampled.values()) and kinds['Twin'] and kinds['Alt']:
             break
         time.sleep(2)
-    ok = kinds == {'Twin': 'twin', 'Alt': 'alt', 'Other': ''} and sampled.get('Other') == 'none'
+    ok = kinds == {'Twin': 'twin', 'Alt': 'container', 'Other': ''} and sampled.get('Other') == 'none'
     return ('twinaltsampled', ok, 'kinds=%s sampled=%s' % (kinds, sampled))
 
 
@@ -10002,6 +10045,7 @@ SCENARIOS = {
     'restartmidway': scenario_restartmidway,
     'declaredcountnopair': scenario_declaredcountnopair,
     'rejectnextserver': scenario_rejectnextserver,
+    'backbonemiss': scenario_backbonemiss,
     'cutover': scenario_cutover,
     'transientretry': scenario_transientretry,
     'transientexhausted': scenario_transientexhausted,
@@ -10294,6 +10338,7 @@ SCENARIOS = {
     'prodrarwhole': scenario_prodrarwhole,
     'prodrarstream': scenario_prodrarstream,
     'skipholetwin': scenario_skipholetwin,
+    'persistdeadprimary': scenario_persistdeadprimary,
     'rar4lzdirect': scenario_rar4lzdirect,
     'skipholepar': scenario_skipholepar,
     'wholefileonly': scenario_wholefileonly,
@@ -10345,6 +10390,12 @@ EXPECTED_HISTORY_STATUS = {
 # SKIP in that case, see generators.HAVE_7Z).
 _SEVENZIP_OPTION = ['SevenZipCmd=%s' % generators.SEVENZIP_PATH] if generators.HAVE_7Z else []
 
+# Environment variables the daemon of a scenario runs with (others are cleared).
+SCENARIO_ENV = {
+    'persistdeadprimary': {'RUSTYGET_PERSISTENT_UNPACK': '1'},
+}
+SCENARIO_ENV_KEYS = sorted({k for env in SCENARIO_ENV.values() for k in env})
+
 SCENARIO_OPTIONS = {
     'watchforcepick': ['DupeArticleFallback=no', 'DupeWatch=yes', 'DupeBodyChecks=0', 'DupeHealthMin=40', 'DupeHealthMax=40'],
     'watchdeadpick': ['DupeArticleFallback=no', 'DupeWatch=yes', 'DupeBodyChecks=0', 'DupeHealthMin=40', 'DupeHealthMax=40'],
@@ -10365,6 +10416,7 @@ SCENARIO_OPTIONS = {
     'streamrestartcredit': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'streamdeaddonor': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'rejectnextserver': ['DupeArticleFallback=article', 'ArticleRetries=0'],
+    'backbonemiss': ['DupeCheck=no', 'ArticleRetries=0', 'DetailTarget=log', 'Server1.Backbone=TestBone'],
     'nzbgapborrow': ['DupeArticleFallback=article'],
     'sidefilenorepair': ['DupeArticleFallback=stream'],
     'partialnzb': ['DupeArticleFallback=stream'],
@@ -10638,6 +10690,7 @@ SCENARIO_OPTIONS = {
     # throttled so direct unpack reaches the damaged volume before its repair lands
     'skipholetwin': PROD_OPTIONS + ['DownloadRate=1500'],
     'skipholepar': PROD_OPTIONS + ['DownloadRate=1500'],
+    'persistdeadprimary': PROD_OPTIONS + ['DownloadRate=1500'],
     'wholefileonly': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'wholefilewrongdonor': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'wholefilenofirst': ['DupeArticleFallback=stream', 'ParCheck=auto'],
@@ -10785,6 +10838,9 @@ def main():
             results.append((name, None, 'SKIP: target-side archive extractor is not provisioned on Android'))
             print('[SKIP] %s  (target-side archive extractor is not provisioned on Android)' % name)
             continue
+        for key in SCENARIO_ENV_KEYS:
+            os.environ.pop(key, None)
+        os.environ.update(SCENARIO_ENV.get(name, {}))
         nntp = free_port()
         rpc = free_port()
         while rpc == nntp:  # the two must not coincide
@@ -10845,6 +10901,12 @@ def main():
                     options += ['Server%d.Host=127.0.0.1' % number, 'Server%d.Port=1' % number,
                                 'Server%d.Connections=2' % number, 'Server%d.Level=0' % number,
                                 'Server%d.Encryption=no' % number, 'Server%d.Optional=yes' % number]
+            if name == 'backbonemiss':
+                for number, backbone in ((2, 'TestBone'), (3, '')):
+                    options += ['Server%d.Active=yes' % number, 'Server%d.Host=127.0.0.1' % number,
+                                'Server%d.Port=%d' % (number, nserv_port), 'Server%d.Connections=2' % number,
+                                'Server%d.Priority=2' % number, 'Server%d.Encryption=no' % number,
+                                'Server%d.Backbone=%s' % (number, backbone)]
             if name == 'authrejected':
                 daemon.reject_nntp = RejectingNntp()
                 options += ['Server2.Active=yes', 'Server2.Host=127.0.0.1', 'Server2.Port=%d' % daemon.reject_nntp.port,

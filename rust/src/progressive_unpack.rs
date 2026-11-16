@@ -24,9 +24,18 @@ use std::time::Duration;
 use zipfast::progressive::{
     Artifact, ArtifactAftermath, ArtifactEvidence, ArtifactPublication, ArtifactRead, FailureKind,
     HoleFill, HolePolicy, MemberOutcome, ProgressiveEvent, ProgressiveFailure, ProgressiveOptions,
-    ProgressiveResult, ProgressiveSession, RangeRead, RangeSource, RecoveryPublication,
-    SourceInfo, VolumeAnswer, VolumeRequest, VolumeSource,
+    ProgressiveResult, ProgressiveSession, RangeRead, RangeSource, RecoveryPublication, SourceInfo,
+    VolumeAnswer, VolumeRequest, VolumeSource,
 };
+
+/// Whether sets are declared to zipfast as protected native files (Complete), letting it
+/// rename verified outputs into place. zipfast before #116 rechecked every protected volume
+/// on each read step and ran large sets out of SourceBookkeeping (a 159-volume 15.6 GiB set on
+/// 6790); #116 bounds the per-step recheck. `big_final_set_unpacks` is the gate.
+const DECLARE_PROTECTION: bool = true;
+
+mod anchors;
+mod persistent;
 
 /// How long the driver sleeps between cancellation checks while the session is parked.
 const PARK_SLICE: Duration = Duration::from_millis(50);
@@ -65,6 +74,12 @@ pub trait VolumeFeed: Send + 'static {
     /// (0 when unknown). Sizes the session's per-volume handle budget.
     fn expected_volumes(&self) -> u64 {
         0
+    }
+    /// True once a set that was still downloading has become final: the download ended, every
+    /// repair is done and nothing writes the volumes again. Outputs verified from then on can
+    /// be moved into place by the session instead of copied (see `FeedProvider::protection`).
+    fn set_became_final(&self) -> bool {
+        false
     }
 }
 
@@ -192,7 +207,10 @@ impl std::fmt::Display for Failure {
             Failure::WrongPassword => write!(f, "wrong password"),
             Failure::Checksum(at) => write!(f, "checksum mismatch{at}"),
             Failure::EncryptedChecksum(at) => {
-                write!(f, "checksum mismatch in encrypted data{at} (wrong password or damage)")
+                write!(
+                    f,
+                    "checksum mismatch in encrypted data{at} (wrong password or damage)"
+                )
             }
             Failure::MissingVolume(at) => write!(f, "missing volume{at}"),
             Failure::Damaged(what) => write!(f, "damaged archive data: {what}"),
@@ -263,7 +281,8 @@ pub struct Request<'a> {
     pub dest: &'a Path,
     pub password: &'a str,
     /// What to do with a file that is already in `dest`.
-    pub overwrite: Overwrite,    /// Told `true` while extraction waits for a volume (to download or be repaired) and
+    pub overwrite: Overwrite,
+    /// Told `true` while extraction waits for a volume (to download or be repaired) and
     /// `false` when it continues.
     pub on_wait: Option<&'a dyn Fn(bool)>,
 }
@@ -299,6 +318,84 @@ fn extract_recording<F>(
 where
     F: FnMut(i32, &str),
 {
+    // A complete set is declared to zipfast up front when its estimated cost fits. Should a
+    // declared session still run out of one of zipfast's limits, the set is extracted again
+    // undeclared (copied into place), as before declarations: never a failed unpack.
+    // A set still downloading goes to persistent partial files when it qualifies.
+    let feed = if persistent::enabled() && outputs.is_none() && !feed.set_is_final() {
+        match persistent::try_extract(req, feed, log_cb, is_cancelled) {
+            persistent::Outcome::Done(r) => return r,
+            persistent::Outcome::Fallback(feed, why) => {
+                log_cb(3, &format!("Unrar: progressive direct unpack ({why})"));
+                feed
+            }
+        }
+    } else {
+        persistent::forget_state(req);
+        feed
+    };
+    let mut declared = false;
+    let first = extract_once(
+        req,
+        feed,
+        log_cb,
+        is_cancelled,
+        outputs.as_deref_mut(),
+        true,
+        &mut declared,
+    );
+    match first {
+        Err(Error::Failed(Failure::Other(ref what)))
+            if declared && req.overwrite == Overwrite::Always && is_declaration_limit(what) =>
+        {
+            log_cb(
+                3,
+                &format!(
+                    "Unrar: declared extraction hit a zipfast limit ({what}); extracting again without declaring"
+                ),
+            );
+            let mut again = false;
+            extract_once(
+                req,
+                Box::new(CompleteSet),
+                log_cb,
+                is_cancelled,
+                outputs,
+                false,
+                &mut again,
+            )
+        }
+        other => other,
+    }
+}
+
+/// A zipfast limit that a protection declaration inflates (and an undeclared run may not hit).
+fn is_declaration_limit(what: &str) -> bool {
+    what.starts_with("Limit {")
+        && [
+            "SourceBookkeeping",
+            "MetadataBytes",
+            "NameBytes",
+            "ProtectionPaths",
+            "ProtectionPathBytes",
+            "VolumeHandles",
+        ]
+        .iter()
+        .any(|r| what.starts_with(&format!("Limit {{ resource: {r},")))
+}
+
+fn extract_once<F>(
+    req: &Request<'_>,
+    feed: Box<dyn VolumeFeed>,
+    log_cb: &mut F,
+    is_cancelled: &mut dyn FnMut() -> bool,
+    mut outputs: Option<&mut Outputs>,
+    declare_at_start: bool,
+    declared: &mut bool,
+) -> Result<zipfast::extract::Summary, Error>
+where
+    F: FnMut(i32, &str),
+{
     let dir = req
         .first_volume
         .parent()
@@ -312,13 +409,33 @@ where
     // A set that is complete on disk is declared as protected native files, which lets the
     // session publish verified members itself. Each volume holds one handle.
     // In rename mode every output is copied into place, so each member can get a free name.
-    let protected = (feed.set_is_final() && req.overwrite != Overwrite::Rename)
+    // Overwrite mode only: skip mode would publish by hard link, which some destinations
+    // (exFAT, SMB) lack, and rename mode needs RustyGet's own numbering.
+    let mut declared_cost = None;
+    let protected = (DECLARE_PROTECTION
+        && declare_at_start
+        && feed.set_is_final()
+        && req.overwrite == Overwrite::Always)
         .then(|| protect_volumes(req.first_volume))
-        .flatten();
+        .flatten()
+        .filter(|inv| {
+            declared_cost = session_declaration_cost(inv, req.first_volume, req.dest, req.password);
+            #[cfg(test)]
+            if tests::FORCE_DECLARE.with(|f| f.get()) {
+                declared_cost = Some(DeclarationCost {
+                    bookkeeping: 0,
+                    metadata: 0,
+                    names: 0,
+                });
+            }
+            declared_cost.is_some()
+        });
+    *declared = protected.is_some();
     // A final set's volumes are all on disk; count them when no protected
     // inventory exists (rename mode) so the handle budget still fits the set.
     let expected = if feed.set_is_final() {
-        feed.expected_volumes().max(rar_set_members(req.first_volume).len() as u64)
+        feed.expected_volumes()
+            .max(rar_set_members(req.first_volume).len() as u64)
     } else {
         feed.expected_volumes()
     };
@@ -327,11 +444,24 @@ where
     let volume_count = protected
         .as_ref()
         .map_or(expected, |inv| (inv.volumes.len() as u64).max(expected));
-    let provider = FeedProvider {
+    let protection: ProtectionSlot = Arc::new(Mutex::new(protected));
+    let opened: OpenedVolumes = Arc::new(Mutex::new(Vec::new()));
+    let mut provider = FeedProvider {
         dir: dir.clone(),
         feed: feed.clone(),
         pending: pending.clone(),
-        protected,
+        protection: protection.clone(),
+        opened: opened.clone(),
+        late: LateProtection {
+            first: req.first_volume.to_path_buf(),
+            password: req.password.to_string(),
+            allowed: req.overwrite == Overwrite::Always,
+            handle_limit: 0,
+            saw_holes: false,
+            refused: false,
+            members: None,
+            tried_at: None,
+        },
     };
     let mut opts = ProgressiveOptions::new(
         zipfast::extract::Options {
@@ -347,11 +477,34 @@ where
             threads: None,
             protected_paths: Default::default(),
             parallel_min: None,
+            select: None,
         },
         first_name,
     );
     opts.limits.volume_handles = opts.limits.volume_handles.max(2 * volume_count + 16);
+    let handle_limit = opts.limits.volume_handles;
+    provider.late.handle_limit = handle_limit;
+    // Headroom for the per-read protection checks once the volumes are declared protected.
+    opts.limits.source_bookkeeping = opts
+        .limits
+        .source_bookkeeping
+        .saturating_add(PROTECTED_READ_BUDGET);
+    // A set declared at session start gets its estimated protection cost on top, so the
+    // declaration never eats the budget the extraction itself needs.
+    if let Some(cost) = declared_cost {
+        opts.limits.source_bookkeeping = opts
+            .limits
+            .source_bookkeeping
+            .saturating_add(cost.bookkeeping);
+        opts.limits.metadata_bytes = opts.limits.metadata_bytes.saturating_add(cost.metadata);
+        opts.limits.name_bytes = opts.limits.name_bytes.saturating_add(cost.names);
+    }
     opts.limits.protection_paths = opts.limits.protection_paths.max(volume_count + 16);
+    // Tests force a declared set past a limit so the undeclared retry runs.
+    #[cfg(test)]
+    if tests::FORCE_DECLARE.with(|f| f.get()) && *declared {
+        opts.limits.protection_path_bytes = 4096;
+    }
     log_cb(
         3,
         &format!(
@@ -415,12 +568,21 @@ where
                 log_cb(4, &format!("Unrar: Extracting from {name}"));
             }
             ProgressiveEvent::MemberStarted { member, name, .. } => {
-                let display = String::from_utf8_lossy(&name).into_owned();
-                log_cb(4, &format!("Unrar: Extracting  {display}"));
                 // Needed for outputs copied into place (zipfast restores it on what it publishes
                 // itself; a checksum-less member of a final set is still copied). Each volume's
                 // headers are read once.
                 let meta = meta_cache.lookup(&current_volume, req.password, &name);
+                // Placed where unrar and zipfast place it: a RAR 1.5-4.x backslash separates
+                // directories.
+                let name = if meta.separator_mapped {
+                    name.iter()
+                        .map(|&b| if b == b'\\' { b'/' } else { b })
+                        .collect()
+                } else {
+                    name.to_vec()
+                };
+                let display = String::from_utf8_lossy(&name).into_owned();
+                log_cb(4, &format!("Unrar: Extracting  {display}"));
                 next_ordinal += 1;
                 let seen = occurrences.entry(name.to_vec()).or_insert(0u32);
                 let occurrence = *seen;
@@ -443,6 +605,7 @@ where
                 let name = member.name.clone();
                 match outcome {
                     MemberOutcome::Verified(_) | MemberOutcome::RecoveredInner(_) => {
+                        fix_published_mode(req.dest, &member);
                         summary.files += 1;
                         note_placed(&mut placed, &member);
                     }
@@ -460,7 +623,15 @@ where
                         let complete = matches!(a.evidence(), ArtifactEvidence::Verified(_))
                             || (a.holes().is_empty() && a.size() == Some(a.produced_extent()));
                         if complete && !behind_earlier {
-                            match publish_copy(drive.session, &mut a, req, &member, false, is_cancelled, &mut published) {
+                            match publish_copy(
+                                drive.session,
+                                &mut a,
+                                req,
+                                &member,
+                                false,
+                                is_cancelled,
+                                &mut published,
+                            ) {
                                 Ok(()) => {
                                     summary.files += 1;
                                     note_placed(&mut placed, &member);
@@ -515,14 +686,23 @@ where
                         keep.push((member, a));
                     } else if superseded(&placed, &member, req) {
                         let _ = a.discard();
-                    } else if let Err(f) = publish_copy(drive.session, &mut a, req, &member, false, is_cancelled, &mut published) {
+                    } else if let Err(f) = publish_copy(
+                        drive.session,
+                        &mut a,
+                        req,
+                        &member,
+                        false,
+                        is_cancelled,
+                        &mut published,
+                    ) {
                         first_failure.get_or_insert(f);
                     } else {
                         summary.files += 1;
                         note_placed(&mut placed, &member);
                     }
                 }
-                if !keep.is_empty() && partial.len() + keep.len() >= drive.session_artifact_limit() {
+                if !keep.is_empty() && partial.len() + keep.len() >= drive.session_artifact_limit()
+                {
                     // Out of slots with duplicates held behind a damaged member. Skip mode would
                     // place them only if that member fails (which is reported): drop them.
                     // Rename mode must number them in archive order, which it cannot while the
@@ -545,7 +725,15 @@ where
                     }
                     for (member, mut a) in keep.drain(..) {
                         if req.overwrite == Overwrite::Rename {
-                            match publish_copy(drive.session, &mut a, req, &member, false, is_cancelled, &mut published) {
+                            match publish_copy(
+                                drive.session,
+                                &mut a,
+                                req,
+                                &member,
+                                false,
+                                is_cancelled,
+                                &mut published,
+                            ) {
                                 Ok(()) => {
                                     summary.files += 1;
                                     note_placed(&mut placed, &member);
@@ -577,7 +765,10 @@ where
                         let _ = a.discard();
                     }
                     undo_for_fallback(req, &published);
-                    return Err(Error::Unsupported(Unsupported(format!("{:?}", failure.kind))));
+                    return Err(Error::Unsupported(Unsupported(format!(
+                        "{:?}",
+                        failure.kind
+                    ))));
                 }
                 let f = Failure::from_progressive(&failure);
                 log_cb(1, &unrar_error_line(&f, b""));
@@ -630,6 +821,31 @@ where
             });
         }
     }
+    // zipfast reads the declaration at its next publication; from then on every read step
+    // rechecks every protected volume. Upgrade only for a single remaining output, so only its
+    // own publication pays that, and nothing waits behind it.
+    if DECLARE_PROTECTION
+        && deferred.len() == 1
+        // zipfast names a Windows-made member with Windows path rules (a backslash splits); the copy
+        // path, which placed the rest of the set, does not.
+        && !deferred[0].0.meta.windows_names
+        && first_failure.is_none()
+        // zipfast publishes by rename only when it may replace; skip mode would need hard
+        // links, which some destinations (exFAT, SMB) do not support.
+        && req.overwrite == Overwrite::Always
+        && upgrade_protection(
+            req.first_volume,
+            &protection,
+            &opened,
+            handle_limit,
+            16u64.saturating_add(path_depth(&deferred[0].0.name).saturating_mul(14)),
+        )
+    {
+        log_cb(
+            4,
+            "Unrar: all volumes on disk; verified files are moved into place instead of copied",
+        );
+    }
     for (member, mut a, is_partial) in deferred {
         let name = member.name.clone();
         if (is_partial && !patch) || superseded(&placed, &member, req) {
@@ -637,10 +853,36 @@ where
             continue;
         }
         let result = if is_partial {
-            patch_from_repaired_volumes(drive.session, &mut a, &dir, req, &member, is_cancelled)
-                .and_then(|()| publish_copy(drive.session, &mut a, req, &member, true, is_cancelled, &mut published))
+            patch_from_repaired_volumes(
+                drive.session,
+                &mut a,
+                &dir,
+                req,
+                &member,
+                is_cancelled,
+                log_cb,
+            )
+            .and_then(|()| {
+                publish_copy(
+                    drive.session,
+                    &mut a,
+                    req,
+                    &member,
+                    true,
+                    is_cancelled,
+                    &mut published,
+                )
+            })
         } else {
-            publish_copy(drive.session, &mut a, req, &member, false, is_cancelled, &mut published)
+            publish_copy(
+                drive.session,
+                &mut a,
+                req,
+                &member,
+                false,
+                is_cancelled,
+                &mut published,
+            )
         };
         match result {
             Ok(()) => {
@@ -727,6 +969,11 @@ struct MemberMeta {
     unix_mode: Option<u32>,
     /// Modification time (seconds, nanoseconds).
     mtime: Option<(i64, u32)>,
+    /// The archive was not made on Unix: zipfast names its output with Windows path rules.
+    windows_names: bool,
+    /// A RAR 1.5-4.x member: a stored backslash is a directory separator whatever the host,
+    /// as unrar and zipfast read it, so the output is placed under the name with slashes.
+    separator_mapped: bool,
 }
 
 /// Member metadata by volume, each volume's headers read once. Members with the same name get
@@ -743,8 +990,20 @@ impl MetaCache {
             self.volume = volume.to_path_buf();
             self.members = volume_metadata(volume, password);
         }
+        // zipfast's decoded RAR 1.5-4.x names have slashes where the stored name (the one
+        // zipfast reports while extracting) has backslashes.
+        let mapped;
+        let key = if !self.members.contains_key(name) && name.contains(&b'\\') {
+            mapped = name
+                .iter()
+                .map(|&b| if b == b'\\' { b'/' } else { b })
+                .collect::<Vec<u8>>();
+            mapped.as_slice()
+        } else {
+            name
+        };
         self.members
-            .get_mut(name)
+            .get_mut(key)
             .and_then(|q| q.pop_front())
             .unwrap_or_default()
     }
@@ -769,6 +1028,8 @@ fn volume_metadata(
                         .push_back(MemberMeta {
                             unix_mode: h.is_unix().then_some(h.attributes as u32),
                             mtime: h.mtime.map(|s| (s, h.mtime_nanos)),
+                            windows_names: !h.is_unix(),
+                            separator_mapped: h.rar4.is_some(),
                         });
                 }
                 Ok(Some(Block::End { .. })) | Ok(None) | Err(_) => break,
@@ -788,6 +1049,8 @@ fn volume_metadata(
             .push_back(MemberMeta {
                 unix_mode: (f.attr & 0o170000 == 0o100000).then_some(f.attr & 0o7777),
                 mtime: crate::archive_native::rar4_dos_mtime(f.time),
+                windows_names: f.attr & 0o170000 != 0o100000,
+                separator_mapped: true,
             });
     }
     out
@@ -822,13 +1085,16 @@ fn patch_from_repaired_volumes(
     req: &Request<'_>,
     member: &Member,
     is_cancelled: &mut dyn FnMut() -> bool,
+    log_cb: &mut dyn FnMut(i32, &str),
 ) -> Result<(), Failure> {
     let name = member.name.as_slice();
     use crate::streamrepair::{ContentMapper, DiskSourceSet, MemberFormat};
 
     let members = rar_set_members(req.first_volume);
     if members.is_empty() {
-        return Err(Failure::Damaged("no volumes to read the repair from".into()));
+        return Err(Failure::Damaged(
+            "no volumes to read the repair from".into(),
+        ));
     }
     let dir_bytes = path_bytes(dir);
     let sources = DiskSourceSet::new(&dir_bytes, &members);
@@ -850,9 +1116,17 @@ fn patch_from_repaired_volumes(
         .rsplit(|&b| b == b'/' || b == b'\\')
         .next()
         .unwrap_or(name);
-    let Some(map) = map.filter(|m| {
-        m.inner_name_bytes() == base && Some(m.inner_size() as u64) == artifact.size()
-    }) else {
+    let Some(map) = map
+        .filter(|m| m.inner_name_bytes() == base && Some(m.inner_size() as u64) == artifact.size())
+    else {
+        // This re-extracts the whole repaired set: worth knowing when a patch is slow.
+        log_cb(
+            0,
+            &format!(
+                "Unrar: {} is not the set's main payload; extracting the repaired set again to patch it",
+                String::from_utf8_lossy(name)
+            ),
+        );
         return patch_by_reextracting(session, artifact, req, member, is_cancelled);
     };
     let mut buf = Vec::new();
@@ -905,7 +1179,13 @@ fn patch_by_reextracting(
             on_wait: None,
         };
         let mut outputs: Outputs = Vec::new();
-        match extract_recording(&sub, Box::new(CompleteSet), &mut |_, _| {}, is_cancelled, Some(&mut outputs)) {
+        match extract_recording(
+            &sub,
+            Box::new(CompleteSet),
+            &mut |_, _| {},
+            is_cancelled,
+            Some(&mut outputs),
+        ) {
             Ok(_) => {}
             Err(Error::Failed(f)) => return Err(f),
             Err(Error::Unsupported(u)) => return Err(Failure::Other(u.0)),
@@ -1023,7 +1303,10 @@ fn held_behind(
             .iter()
             .chain(provisional.iter())
             .any(|(m, _)| m.name == member.name && earlier(m)),
-        Overwrite::Rename => partial.iter().chain(provisional.iter()).any(|(m, _)| earlier(m)),
+        Overwrite::Rename => partial
+            .iter()
+            .chain(provisional.iter())
+            .any(|(m, _)| earlier(m)),
     }
 }
 
@@ -1058,35 +1341,65 @@ fn publish_copy(
 ) -> Result<(), Failure> {
     let name = member.name.as_slice();
     if artifact.publication() != ArtifactPublication::Unpublished {
+        fix_published_mode(req.dest, member);
         return Ok(());
     }
     let verified = match artifact.evidence() {
         ArtifactEvidence::Verified(_) => true,
         ArtifactEvidence::Provisional => {
             // Decoded whole with no checksum stored: complete when its size is the declared one.
-            !repaired && artifact.holes().is_empty() && artifact.size() == Some(artifact.produced_extent())
+            !repaired
+                && artifact.holes().is_empty()
+                && artifact.size() == Some(artifact.produced_extent())
         }
     };
     if !verified {
-        let waker = Waker::noop();
-        let mut cx = Context::from_waker(waker);
+        // zipfast yields once per bounded chunk and wakes the task when it can go on; park only
+        // when it has not, and never sleep a fixed time per chunk.
+        let parker = Arc::new(Parker {
+            thread: std::thread::current(),
+            woken: AtomicBool::new(false),
+        });
+        let waker = Waker::from(parker.clone());
+        let mut cx = Context::from_waker(&waker);
         loop {
             if is_cancelled() {
                 session.control().cancel();
                 let _ = artifact.discard();
                 return Err(Failure::Canceled);
             }
+            parker.woken.store(false, Ordering::Release);
             match session.poll_verify(artifact, &mut cx) {
                 Poll::Ready(Ok(_)) => break,
                 Poll::Ready(Err(e)) => {
+                    // Placed, but cleaning up its stage failed afterwards: the file is there.
+                    if artifact.publication() != ArtifactPublication::Unpublished {
+                        fix_published_mode(req.dest, member);
+                        return Ok(());
+                    }
                     let _ = artifact.discard();
                     return Err(Failure::from_progressive(&e));
                 }
-                Poll::Pending => std::thread::sleep(Duration::from_millis(1)),
+                Poll::Pending => {
+                    if !parker.woken.load(Ordering::Acquire) {
+                        std::thread::park_timeout(PARK_SLICE);
+                    }
+                }
             }
         }
         if artifact.publication() != ArtifactPublication::Unpublished {
+            fix_published_mode(req.dest, member);
             return Ok(());
+        }
+        // A repaired encrypted member verifies on its plaintext only; with the volumes
+        // protected zipfast can still publish it itself. The file can be in place even when
+        // cleanup afterwards reports an error, so the publication decides.
+        if matches!(artifact.evidence(), ArtifactEvidence::Verified(_)) {
+            let _ = session.publish_recovered(artifact);
+            if artifact.publication() != ArtifactPublication::Unpublished {
+                fix_published_mode(req.dest, member);
+                return Ok(());
+            }
         }
         if !matches!(artifact.evidence(), ArtifactEvidence::Verified(_)) {
             let _ = artifact.discard();
@@ -1098,14 +1411,44 @@ fn publish_copy(
     }
     let rel = zipfast::path::sanitize(&String::from_utf8_lossy(name), false)
         .map_err(|e| Failure::UnsafePath(format!(" {}: {e}", String::from_utf8_lossy(name))))?;
-    let result = copy_artifact(artifact, req.dest, &rel, req.overwrite, member.meta, is_cancelled)
-        .map(|written| {
-            if let Some(path) = written {
-                published.push((member.name.clone(), member.occurrence, path));
-            }
-        });
+    let result = copy_artifact(
+        artifact,
+        req.dest,
+        &rel,
+        req.overwrite,
+        member.meta,
+        is_cancelled,
+    )
+    .map(|written| {
+        if let Some(path) = written {
+            published.push((member.name.clone(), member.occurrence, path));
+        }
+    });
     let _ = artifact.discard();
     result
+}
+
+/// zipfast publishes from a private 0600 stage and applies a stored Unix mode as is. Give the
+/// output the mode the copy path does: a stored mode with owner read/write kept, otherwise 0666
+/// less the umask.
+fn fix_published_mode(dest: &Path, member: &Member) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let Ok(rel) = zipfast::path::sanitize(
+            &String::from_utf8_lossy(&member.name),
+            member.meta.windows_names,
+        ) else {
+            return;
+        };
+        let mode = match member.meta.unix_mode {
+            Some(m) => (m & 0o777) | 0o600,
+            None => 0o666 & !crate::lifecycle::active_umask() & 0o777,
+        };
+        let _ = std::fs::set_permissions(dest.join(rel), std::fs::Permissions::from_mode(mode));
+    }
+    #[cfg(not(unix))]
+    let _ = (dest, member);
 }
 
 fn copy_artifact(
@@ -1201,7 +1544,11 @@ fn create_unique_sibling(target: &Path) -> std::io::Result<(PathBuf, std::fs::Fi
     loop {
         let n = SEQ.fetch_add(1, Ordering::Relaxed);
         let tmp = parent.join(format!(".rustyget-{}-{n}.part", std::process::id()));
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp) {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+        {
             Ok(f) => return Ok((tmp, f)),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(e),
@@ -1330,13 +1677,283 @@ struct FeedProvider {
     dir: PathBuf,
     feed: Arc<Mutex<Box<dyn VolumeFeed>>>,
     pending: PendingWait,
-    protected: Option<zipfast::progressive::ProtectionInventory>,
+    protection: ProtectionSlot,
+    opened: OpenedVolumes,
+    late: LateProtection,
+}
+
+/// What deciding a declaration for a set that becomes final mid-session needs.
+struct LateProtection {
+    first: PathBuf,
+    password: String,
+    /// Overwrite mode: zipfast renames over a target; skip mode would need hard links and
+    /// rename mode RustyGet's own numbering.
+    allowed: bool,
+    handle_limit: u64,
+    /// A volume was handed out with holes: its member is deferred and patched after the
+    /// repair, which declares the set itself when it is the only output left.
+    saw_holes: bool,
+    /// The set has a member the declaration must not cover; not checked again.
+    refused: bool,
+    /// Header summary of the set, read once after it became final.
+    members: Option<SetMembers>,
+    /// Volumes the session had read at the last attempt: budgets are retried once per volume.
+    tried_at: Option<usize>,
+}
+
+/// The protection declaration handed to zipfast: `None` (opaque) until the set is known to be
+/// complete on disk, then the protected native volumes. zipfast accepts one opaque-to-complete
+/// upgrade and no later change.
+type ProtectionSlot = Arc<Mutex<Option<zipfast::progressive::ProtectionInventory>>>;
+/// Each volume handed to the session, with the (device, inode) of the file it read.
+type OpenedVolumes = Arc<Mutex<Vec<(PathBuf, (u64, u64))>>>;
+
+fn file_identity(meta: &std::fs::Metadata) -> (u64, u64) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        (meta.dev(), meta.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        (0, 0)
+    }
+}
+
+/// Once every volume is on disk (after the session read them all and the damage is repaired),
+/// declares them as protected native files. zipfast then publishes verified members itself by
+/// renaming them into place, instead of RustyGet copying each one. Only done when every volume
+/// is still the file the session read: a repair that replaced a volume file would make zipfast
+/// refuse the declaration, so those sets keep the copy path.
+fn upgrade_protection(
+    first: &Path,
+    slot: &ProtectionSlot,
+    opened: &OpenedVolumes,
+    handle_limit: u64,
+    steps: u64,
+) -> bool {
+    let mut slot = slot.lock().unwrap_or_else(|e| e.into_inner());
+    if slot.is_some() {
+        return true;
+    }
+    // zipfast checks protected volumes by (device, inode), which only Unix builds report.
+    if cfg!(not(unix)) {
+        return false;
+    }
+    let opened = opened.lock().unwrap_or_else(|e| e.into_inner());
+    if opened.is_empty() {
+        return false;
+    }
+    // Check the budgets with the volumes read so far before opening them all again.
+    if 2 * opened.len() as u64 + 8 > handle_limit || !fits_open_file_limit(opened.len()) {
+        return false;
+    }
+    for (path, id) in opened.iter() {
+        match std::fs::metadata(path) {
+            Ok(meta) if file_identity(&meta) == *id => {}
+            _ => return false,
+        }
+    }
+    let Some(inventory) = protect_volumes(first) else {
+        return false;
+    };
+    // While opaque, zipfast holds a handle for every volume it read; the declaration adds one
+    // per protected volume. The session's handle budget is fixed at creation.
+    if inventory.volumes.len() < opened.len()
+        || (opened.len() + inventory.volumes.len()) as u64 + 8 > handle_limit
+        || !fits_open_file_limit(inventory.volumes.len())
+        || !fits_protected_read_budget(&inventory, steps)
+    {
+        return false;
+    }
+    *slot = Some(inventory);
+    true
+}
+
+/// Extra zipfast source-bookkeeping budget for the publication after the protection upgrade.
+const PROTECTED_READ_BUDGET: u64 = 32 * 1024 * 1024;
+
+/// With the volumes declared protected, each zipfast validation rechecks every protected volume
+/// against every admitted one: roughly 2V^2 + V(2P + 4) bookkeeping units, V volumes with paths
+/// up to P bytes. `steps` counts the checks still to come: a publication costs about 16 (it
+/// re-validates and sorts the inventory) plus about 14 per parent directory it may create.
+/// Upgrade only when they fit the headroom added at session creation (zipfast's default
+/// budget, barely used without a declaration, is a further margin).
+fn fits_protected_read_budget(
+    inventory: &zipfast::progressive::ProtectionInventory,
+    steps: u64,
+) -> bool {
+    let v = inventory.volumes.len() as u64;
+    let p = inventory
+        .volumes
+        .iter()
+        .flat_map(|vol| match &vol.backing {
+            zipfast::progressive::VolumeBacking::Native(paths) => paths.as_slice(),
+            zipfast::progressive::VolumeBacking::NonFile => &[],
+        })
+        .map(|pp| pp.path.as_os_str().len() as u64)
+        .max()
+        .unwrap_or(0);
+    let per_check = 2 * v * v + v * (2 * p + 4);
+    per_check.saturating_mul(steps) <= PROTECTED_READ_BUDGET
+}
+
+/// What declaring a set costs zipfast on top of an undeclared extraction.
+#[derive(Clone, Copy, Debug)]
+struct DeclarationCost {
+    bookkeeping: u64,
+    metadata: u64,
+    names: u64,
+}
+
+/// Whether a final set may be declared at session start, and what declaring costs on top of
+/// an undeclared extraction (SourceBookkeeping, MetadataBytes, NameBytes). zipfast must place every
+/// member where the copy path would (no Windows-made name that Windows rules change, no
+/// duplicate names). Even with the per-step recheck bounded (zipfast #116), every volume
+/// admission sweeps the whole inventory (about 3.3 V^2 (P + 15) bookkeeping units for V
+/// volumes with paths up to P bytes) and every member boundary and publication runs a full
+/// refresh (about 7-9 M V (P + 16) for M members, more with deep paths), and each of those
+/// validations also charges metadata bytes; each read step re-observes one volume. The estimates (with
+/// margin) are added to the session's limits; sets whose cost is too large to grant are left
+/// undeclared and copied.
+fn session_declaration_cost(
+    inventory: &zipfast::progressive::ProtectionInventory,
+    first: &Path,
+    dest: &Path,
+    password: &str,
+) -> Option<DeclarationCost> {
+    /// Largest extra budget granted for a declaration (bookkeeping is CPU work, metadata and
+    /// names cumulative accountings of small allocations).
+    const MAX_EXTRA_BOOKKEEPING: u64 = 512 * 1024 * 1024;
+    const MAX_EXTRA_METADATA: u64 = 256 * 1024 * 1024;
+    const MAX_EXTRA_NAMES: u64 = 256 * 1024 * 1024;
+    let members = set_members(first, password)?;
+    if members.names_differ || members.duplicate_names {
+        return None;
+    }
+    let v = inventory.volumes.len() as u64;
+    let p = inventory
+        .volumes
+        .iter()
+        .flat_map(|vol| match &vol.backing {
+            zipfast::progressive::VolumeBacking::Native(paths) => paths.as_slice(),
+            zipfast::progressive::VolumeBacking::NonFile => &[],
+        })
+        .map(|pp| pp.path.as_os_str().len() as u64)
+        .max()
+        .unwrap_or(0);
+    // Longest volume file name: every refresh also compares and charges each volume's name.
+    let n = inventory
+        .volumes
+        .iter()
+        .map(|vol| vol.name.len() as u64)
+        .max()
+        .unwrap_or(0);
+    // Margins over the measured costs: 4 for 3.3, 12 for 7-9.
+    let unit = p.saturating_add(n.saturating_mul(2)).saturating_add(16);
+    let admissions = 4u64
+        .saturating_mul(v)
+        .saturating_mul(v)
+        .saturating_mul(unit);
+    // Each publication check (the member's file and every parent directory it creates) runs
+    // full refreshes plus a target check of 1 + T + P per volume, T the absolute target path.
+    let target = (std::path::absolute(dest)
+        .map(|d| d.as_os_str().len())
+        .unwrap_or(dest.as_os_str().len()) as u64)
+        .saturating_add(members.max_name)
+        .saturating_add(1);
+    let checks = 1u64.saturating_add(members.max_depth);
+    let per_member = 12u64
+        .saturating_mul(v)
+        .saturating_mul(unit.saturating_add(target))
+        .saturating_mul(checks);
+    // Every read step (about 1 MiB) re-observes one protected volume: 1 + P.
+    let data_mib: u64 = inventory
+        .volumes
+        .iter()
+        .flat_map(|vol| match &vol.backing {
+            zipfast::progressive::VolumeBacking::Native(paths) => paths.as_slice(),
+            zipfast::progressive::VolumeBacking::NonFile => &[],
+        })
+        .filter_map(|pp| pp.file.as_ref()?.metadata().ok())
+        .map(|m| m.len().div_ceil(1 << 20))
+        .sum();
+    let reads = data_mib.saturating_mul(p.saturating_add(64));
+    let bookkeeping = admissions
+        .saturating_add(members.count.saturating_mul(per_member))
+        .saturating_add(reads);
+    let wide = p.saturating_add(n).saturating_add(128);
+    let metadata = v.saturating_mul(v).saturating_mul(wide).saturating_add(
+        members.count.saturating_mul(
+            4u64.saturating_mul(v)
+                .saturating_mul(wide)
+                .saturating_mul(checks)
+                .saturating_add(4u64.saturating_mul(members.max_name)),
+        ),
+    );
+    // Each volume opened and each publication charges every volume's name: V (V + M) N,
+    // granted with margin.
+    let names = 2u64
+        .saturating_mul(v)
+        .saturating_mul(v.saturating_add(4u64.saturating_mul(members.count)))
+        .saturating_mul(n);
+    (bookkeeping <= MAX_EXTRA_BOOKKEEPING
+        && metadata <= MAX_EXTRA_METADATA
+        && names <= MAX_EXTRA_NAMES)
+        .then_some(DeclarationCost {
+            bookkeeping,
+            metadata,
+            names,
+        })
+}
+
+/// Path components of a member's output name (as the copy path names it).
+fn path_depth(name: &[u8]) -> u64 {
+    zipfast::path::sanitize(&String::from_utf8_lossy(name), false)
+        .map_or(u64::MAX / 8, |p| p.components().count() as u64)
+}
+
+/// Whether the process, with the files it has open now, can open `added` more for the
+/// declaration and still re-extract the set once (about two handles per volume: the repaired
+/// volume sources stay open beside the sub-session), with room left
+/// for sockets, article files and other jobs.
+fn fits_open_file_limit(added: usize) -> bool {
+    #[cfg(unix)]
+    {
+        let mut lim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: getrlimit writes into the struct we own.
+        if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) } != 0 {
+            return false;
+        }
+        if lim.rlim_cur == libc::RLIM_INFINITY {
+            return true;
+        }
+        let Ok(fds) = std::fs::read_dir("/dev/fd") else {
+            return false;
+        };
+        let open_now = fds.count() as u64;
+        let need = open_now
+            .saturating_add(3 * added as u64)
+            .saturating_add(256);
+        need <= lim.rlim_cur as u64
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = added;
+        false
+    }
 }
 
 /// The volumes of the set starting at `first`, opened, as a protection inventory. `None` when a
 /// volume cannot be opened.
 fn protect_volumes(first: &Path) -> Option<zipfast::progressive::ProtectionInventory> {
-    use zipfast::progressive::{ProtectedPath, ProtectedVolume, ProtectionInventory, VolumeBacking};
+    use zipfast::progressive::{
+        ProtectedPath, ProtectedVolume, ProtectionInventory, VolumeBacking,
+    };
     let mut volumes = Vec::new();
     let mut p = first.to_path_buf();
     while p.is_file() {
@@ -1364,6 +1981,165 @@ fn protect_volumes(first: &Path) -> Option<zipfast::progressive::ProtectionInven
     })
 }
 
+impl FeedProvider {
+    /// Declares a set that was still downloading once the feed reports it final, so members
+    /// verified from then on are moved into place instead of copied. Only when that cannot fail
+    /// or place a file differently from the copy path: overwrite mode, no deferred (holed)
+    /// member, no Windows-named or duplicate-name member, every volume still the file the
+    /// session read, and the handle, open-file and bookkeeping budgets fit the rest of the set.
+    fn declare_if_became_final(&mut self) {
+        if !DECLARE_PROTECTION {
+            return;
+        }
+        let late = &mut self.late;
+        if !late.allowed || late.saw_holes || late.refused {
+            return;
+        }
+        if self
+            .protection
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+        {
+            return;
+        }
+        let became_final = self
+            .feed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .set_became_final();
+        if !became_final {
+            return;
+        }
+        if late.members.is_none() {
+            match set_members(&late.first, &late.password) {
+                Some(m) if !m.windows_names && !m.duplicate_names => late.members = Some(m),
+                _ => {
+                    late.refused = true;
+                    return;
+                }
+            }
+        }
+        let read = self.opened.lock().unwrap_or_else(|e| e.into_inner()).len();
+        if late.tried_at == Some(read)
+            || late
+                .members
+                .as_ref()
+                .is_some_and(|m| (read as u64) < m.volumes)
+        {
+            return;
+        }
+        late.tried_at = Some(read);
+        let Some(members) = late.members.as_ref() else {
+            return;
+        };
+        let Some((remaining, unread)) = remaining_bytes(&late.first, &self.opened) else {
+            return;
+        };
+        // Once declared, every source step (each header read of a volume still to open, a
+        // byte at a time for its signature) rechecks every protected volume; that cost is
+        // not bounded well enough to budget. Declare only when the last volume is open: the
+        // set's last member, usually the main payload, is still renamed into place.
+        if unread != 0 {
+            return;
+        }
+        // Each 1 MiB data read of the open volume rechecks the declaration, and so do its
+        // remaining header steps; each publication costs about 16 checks plus about 14 per
+        // parent directory.
+        let steps = remaining
+            .div_ceil(1024 * 1024)
+            .saturating_add(64)
+            .saturating_add(
+                members
+                    .count
+                    .saturating_mul(16u64.saturating_add(members.max_depth.saturating_mul(14))),
+            );
+        upgrade_protection(
+            &late.first,
+            &self.protection,
+            &self.opened,
+            late.handle_limit,
+            steps,
+        );
+    }
+}
+
+/// Members that start in each volume of a set, from its headers.
+struct SetMembers {
+    volumes: u64,
+    count: u64,
+    max_depth: u64,
+    /// Longest member name, bytes.
+    max_name: u64,
+    windows_names: bool,
+    /// A Windows-made member whose name Windows path rules change (a backslash or one of
+    /// `<>:"|?*`): zipfast would place it elsewhere than the copy path.
+    names_differ: bool,
+    duplicate_names: bool,
+}
+
+/// `None` when a volume's headers cannot be read.
+fn set_members(first: &Path, password: &str) -> Option<SetMembers> {
+    let mut out = SetMembers {
+        volumes: 0,
+        count: 0,
+        max_depth: 0,
+        max_name: 0,
+        windows_names: false,
+        names_differ: false,
+        duplicate_names: false,
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut p = first.to_path_buf();
+    for _ in 0..4096 {
+        if !p.is_file() {
+            break;
+        }
+        out.volumes += 1;
+        for (name, metas) in volume_metadata(&p, password) {
+            out.count += metas.len() as u64;
+            out.duplicate_names |= metas.len() > 1 || !seen.insert(name.clone());
+            out.windows_names |= metas.iter().any(|m| m.windows_names);
+            out.names_differ |= metas.iter().any(|m| m.windows_names)
+                && name.iter().any(|b| b"\\<>:\"|?*".contains(b));
+            out.max_depth = out.max_depth.max(path_depth(&name));
+            out.max_name = out.max_name.max(name.len() as u64);
+        }
+        match zipfast::volume::next_volume(&p) {
+            Some(n) => p = n,
+            None => break,
+        }
+    }
+    (out.count > 0).then_some(out)
+}
+
+/// Bytes of the set the session has not read yet (every volume it has not opened, plus the
+/// one it is reading) and how many volumes it has not opened. `None` when a volume's size
+/// cannot be read.
+fn remaining_bytes(first: &Path, opened: &OpenedVolumes) -> Option<(u64, u64)> {
+    let opened = opened.lock().unwrap_or_else(|e| e.into_inner());
+    let seen: std::collections::HashSet<&Path> = opened.iter().map(|(p, _)| p.as_path()).collect();
+    let mut total = 0u64;
+    let mut unread = 0u64;
+    let mut p = first.to_path_buf();
+    for _ in 0..4096 {
+        if !p.is_file() {
+            break;
+        }
+        let len = std::fs::metadata(&p).ok()?.len();
+        let fresh = !seen.contains(p.as_path());
+        unread += u64::from(fresh);
+        if fresh || opened.last().is_some_and(|(l, _)| *l == p) {
+            total = total.saturating_add(len);
+        }
+        match zipfast::volume::next_volume(&p) {
+            Some(n) => p = n,
+            None => break,
+        }
+    }
+    Some((total, unread))
+}
+
 impl VolumeSource for FeedProvider {
     fn volume(
         &mut self,
@@ -1373,14 +2149,22 @@ impl VolumeSource for FeedProvider {
         let path = self.dir.join(&request.expected);
         let mut feed = self.feed.lock().unwrap_or_else(|e| e.into_inner());
         match feed.volume(&path) {
-            VolumeView::Ready { holes } => Ok(VolumeAnswer::Ready(Box::new(
-                HoledVolume::open(&path, holes).map_err(|cause| {
+            VolumeView::Ready { holes } => {
+                self.late.saw_holes |= !holes.is_empty();
+                let volume = HoledVolume::open(&path, holes).map_err(|cause| {
                     ProgressiveFailure::new(FailureKind::Input {
                         operation: zipfast::progressive::InputOperation::Open,
                         cause,
                     })
-                })?,
-            ))),
+                })?;
+                if let Ok(meta) = volume.file.metadata() {
+                    self.opened
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push((path.clone(), file_identity(&meta)));
+                }
+                Ok(VolumeAnswer::Ready(Box::new(volume)))
+            }
             VolumeView::NotYet => {
                 // The driver asks the feed again while parked and wakes the session when the
                 // volume's state changes.
@@ -1401,7 +2185,9 @@ impl VolumeSource for FeedProvider {
     }
 
     fn protection(&mut self) -> ProgressiveResult<zipfast::progressive::ProtectionDeclaration> {
-        Ok(match &self.protected {
+        self.declare_if_became_final();
+        let protected = self.protection.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(match &*protected {
             Some(inventory) => zipfast::progressive::ProtectionDeclaration::Complete {
                 epoch: 1,
                 inventory: inventory.clone(),
@@ -1421,6 +2207,8 @@ struct HoledVolume {
     file: std::fs::File,
     info: SourceInfo,
     holes: Vec<(u64, u64)>,
+    /// Whether zipfast sees `file` as the volume's backing (false when it is declared NonFile).
+    expose_backing: bool,
 }
 
 impl HoledVolume {
@@ -1449,6 +2237,7 @@ impl HoledVolume {
                 length: zipfast::progressive::SourceLength::Final(len),
             },
             holes,
+            expose_backing: true,
         })
     }
 }
@@ -1458,7 +2247,11 @@ impl RangeSource for HoledVolume {
         self.info
     }
     fn backing_files(&self) -> &[std::fs::File] {
-        std::slice::from_ref(&self.file)
+        if self.expose_backing {
+            std::slice::from_ref(&self.file)
+        } else {
+            &[]
+        }
     }
     fn read_at(
         &mut self,
@@ -1476,7 +2269,9 @@ impl RangeSource for HoledVolume {
                 len: (start + len - offset).min(buf.len() as u64),
             });
         }
-        let mut n = buf.len().min(self.info.extent.saturating_sub(offset) as usize);
+        let mut n = buf
+            .len()
+            .min(self.info.extent.saturating_sub(offset) as usize);
         if let Some(&(start, _)) = self.holes.iter().find(|&&(s, _)| s > offset) {
             n = n.min((start - offset) as usize);
         }

@@ -5430,6 +5430,11 @@ unsafe extern "C" fn web_rpc_action_bridge(
                 if s4.is_null() { c"".as_ptr() } else { s4 },
                 a3,
                 a4 as u32,
+                if body.is_null() || body_len == 0 {
+                    &[][..]
+                } else {
+                    std::slice::from_raw_parts(body.cast::<u8>(), body_len)
+                },
                 &mut err,
             );
             if ok == 0 && !err.data.is_null() && !out_buf.is_null() {

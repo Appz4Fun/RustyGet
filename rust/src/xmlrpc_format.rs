@@ -451,6 +451,7 @@ pub fn match_command(method: &[u8]) -> c_int {
         b"savepem" => 60,
         b"checkcastore" => 61,
         b"hostlookup" => 56,
+        b"backbones" => 62,
         _ => 0,
     }
 }
@@ -2508,6 +2509,8 @@ mod tests {
         assert!(is_safe_command(45));
         assert!(!is_safe_command(31));
         assert!(!is_safe_command(56));
+        assert_eq!(match_command(b"backbones"), 62);
+        assert!(!is_safe_command(62));
         assert!(!is_safe_command(0));
     }
 
@@ -4524,6 +4527,8 @@ fn xmlrpc_parse_test_server_cursor(
             let cipher_off = cur.next_str()?;
             let timeout = cur.next_int()?;
             let cert_verif_level = cur.next_int()?;
+            // optional: an address to connect to (a per-address login check)
+            let address_off = cur.next_str();
             let host = cur.decode_at(host_off, is_json);
             let username = cur.decode_at(user_off, is_json);
             let password = cur.decode_at(pass_off, is_json);
@@ -4537,6 +4542,7 @@ fn xmlrpc_parse_test_server_cursor(
                 cipher,
                 timeout,
                 cert_verif_level,
+                address: address_off.map(|off| cur.decode_at(off, is_json)).unwrap_or_default(),
             })
         })();
         match parsed {
@@ -6237,6 +6243,7 @@ unsafe fn execute_xml_command(
                     let user_c = to_c_vec(&ts.username);
                     let pass_c = to_c_vec(&ts.password);
                     let cipher_c = to_c_vec(&ts.cipher);
+                    let address_c = to_c_vec(&ts.address);
                     let mut out_buf = RsBuf {
                         data: std::ptr::null_mut(),
                         len: 0,
@@ -6253,8 +6260,8 @@ unsafe fn execute_xml_command(
                             user_c.as_ptr().cast(),
                             pass_c.as_ptr().cast(),
                             cipher_c.as_ptr().cast(),
-                            std::ptr::null(),
-                            0,
+                            address_c.as_ptr().cast(),
+                            address_c.len() - 1,
                             &[],
                             &[],
                             std::ptr::null_mut(),
@@ -6445,6 +6452,11 @@ unsafe fn execute_xml_command(
             let host_name = cur.next_str().map(|off| cur.decode_at(off, is_json)).unwrap_or_default();
             let port = cur.next_int().unwrap_or(0);
             (false, crate::hostlookup::rpc_reply(is_json, &host_name, port))
+        }
+        // backbones(host): the bundled backbone list and what is known about host
+        62 => {
+            let host_name = cur.next_str().map(|off| cur.decode_at(off, is_json)).unwrap_or_default();
+            (false, crate::backbones::rpc_reply(is_json, &host_name))
         }
         _ => err_resp(default_err_code, default_err_text),
     }

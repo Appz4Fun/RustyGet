@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 
 const MIB: u64 = 1024 * 1024;
-const JOB_CEILING: u64 = 128 * MIB;
+pub(crate) const JOB_CEILING: u64 = 128 * MIB;
 /// Syndrome slots a job with a large slice is allowed to grow its ceiling for.
 const MIN_SLOTS: u64 = 2;
 const FIXED_METADATA: u64 = 8 * MIB;
@@ -74,6 +74,9 @@ pub(crate) fn resources(
             solve_mem_limit_bytes: solve,
             solve_threads: 1,
             fold_threads: 0,
+            // Re-reading verified slices for new slots runs on its own thread
+            // (`streaming_session_kick_backfill`), never under the queue lock.
+            defer_backfill: true,
             ..SessionOptions::default()
         },
         reservation_bytes,
@@ -116,6 +119,38 @@ impl Drop for SessionBudgetLease {
 }
 
 impl SessionBudgetLease {
+    #[cfg(test)]
+    pub fn reserved_bytes(&self) -> u64 {
+        self.bytes
+    }
+
+    /// Grow by as many `unit`-byte steps as the pool has room for, up to
+    /// `max_units`. Returns the steps granted (0 when the pool is full).
+    pub fn grow_by_units(&mut self, unit: u64, max_units: u64, limit: u64) -> u64 {
+        if unit == 0 {
+            return 0;
+        }
+        let mut used = self.pool.reserved.lock().unwrap_or_else(|e| e.into_inner());
+        let units = (limit.saturating_sub(*used) / unit).min(max_units);
+        *used += units * unit;
+        self.bytes += units * unit;
+        units
+    }
+
+    /// Take over another lease of the same pool.
+    pub fn absorb(&mut self, mut other: SessionBudgetLease) {
+        self.bytes += other.bytes;
+        other.bytes = 0;
+    }
+
+    /// Give `bytes` back to the pool (never below one byte, so the lease stays valid).
+    pub fn shrink_by(&mut self, bytes: u64) {
+        let bytes = bytes.min(self.bytes.saturating_sub(1));
+        let mut used = self.pool.reserved.lock().unwrap_or_else(|e| e.into_inner());
+        *used -= bytes;
+        self.bytes -= bytes;
+    }
+
     pub fn resize(&mut self, bytes: u64, limit: u64) -> bool {
         if bytes == 0 {
             return false;
@@ -147,6 +182,8 @@ static CONTROL_ACCOUNTING: LazyLock<Mutex<ControlAccounting>> =
 pub(crate) struct ControlLease {
     nzb_id: i32,
     bytes: u64,
+    pool_limit: u64,
+    pool_optional: bool,
     // None only for ordinary-write root control: still capped by the control
     // queue, but never blocked by an exhausted live PAR pool.
     _budget: Option<SessionBudgetLease>,
@@ -154,6 +191,22 @@ pub(crate) struct ControlLease {
 impl ControlLease {
     pub fn bytes(&self) -> u64 {
         self.bytes
+    }
+
+    /// Charge at least `extra` more bytes under the caps of the original
+    /// reservation (rounded up to 1 KiB). On refusal nothing changes.
+    pub fn grow(&mut self, extra: u64) -> Result<(), RepairError> {
+        let extra = extra.max(1).div_ceil(1024).saturating_mul(1024);
+        let mut more = reserve_control_inner(self.nzb_id, extra, self.pool_limit, self.pool_optional)?;
+        match (&mut self._budget, more._budget.take()) {
+            (Some(mine), Some(theirs)) => mine.absorb(theirs),
+            (slot @ None, theirs) => *slot = theirs,
+            (Some(_), None) => {}
+        }
+        self.bytes += more.bytes;
+        // The merged bytes now belong to self; `more` must not release them.
+        more.bytes = 0;
+        Ok(())
     }
 }
 impl Drop for ControlLease {
@@ -218,6 +271,8 @@ fn reserve_control_inner(
         return Ok(ControlLease {
             nzb_id,
             bytes,
+            pool_limit,
+            pool_optional,
             _budget: budget,
         });
     }
@@ -244,6 +299,8 @@ fn reserve_control_inner(
     Ok(ControlLease {
         nzb_id,
         bytes,
+        pool_limit,
+        pool_optional,
         _budget: budget,
     })
 }
@@ -315,6 +372,27 @@ mod tests {
         assert!(pool.acquire(1, 100).is_none());
         drop(b);
         assert!(pool.acquire(1, 100).is_some());
+    }
+
+    #[test]
+    fn growth_takes_only_free_whole_steps_and_gives_them_back() {
+        let pool = Arc::new(BudgetPool::default());
+        let mut job = pool.acquire(40, 100).unwrap();
+        let other = pool.acquire(25, 100).unwrap();
+        // 35 free: three 10-byte steps of the five asked for.
+        assert_eq!(job.grow_by_units(10, 5, 100), 3);
+        assert!(pool.acquire(6, 100).is_none());
+        assert_eq!(job.grow_by_units(10, 5, 100), 0);
+        assert_eq!(job.grow_by_units(0, 5, 100), 0);
+        // A limit under the current use (memory pressure) grants nothing.
+        assert_eq!(job.grow_by_units(1, 5, 50), 0);
+        job.shrink_by(20);
+        assert!(pool.acquire(25, 100).is_some());
+        drop(other);
+        job.shrink_by(u64::MAX);
+        assert_eq!(job.bytes, 1);
+        drop(job);
+        assert!(pool.acquire(100, 100).is_some());
     }
 
     #[test]

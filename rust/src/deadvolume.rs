@@ -276,8 +276,7 @@ pub fn check_frame(head: &[u8], tail: &[u8], packed: u64, inner_name: &[u8]) -> 
     let mut src = Frame { head, packed, tail };
     let mut vol = crate::rarreader::Volume::default();
     let mut files: Vec<crate::rarreader::RarFile> = Vec::new();
-    let mut cipher = crate::rarreader::DisabledCipher;
-    let ok = crate::rarreader::read_from(&mut vol, &mut src, &mut cipher, &mut files);
+    let ok = crate::rarreader::read_from(&mut vol, &mut src, None, &mut files);
     if !ok && files.is_empty() {
         return Err("rebuilt headers do not read back".into());
     }
@@ -835,7 +834,7 @@ mod tests {
         crate::rarreader::read_from(
             &mut vol,
             &mut Mem(bytes),
-            &mut crate::rarreader::DisabledCipher,
+            None,
             &mut files,
         );
         (vol, files)

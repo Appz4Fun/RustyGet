@@ -199,10 +199,12 @@ const SECTIONS: [(&CStr, usize, &[&CStr]); 4] = [
             c".connections",
             c".cipher",
             c".group",
+            c".backbone",
             c".retention",
             c".optional",
             c".notes",
             c".ipversion",
+            c".address",
             c".certverification",
         ],
     ),
@@ -904,6 +906,9 @@ mod tests {
         }
         assert_eq!(validate_option_name(c"Server1.Priority", &mut no), NameCheck::Valid);
         assert_eq!(validate_option_name(c"Server1.Level", &mut no), NameCheck::Valid);
+        assert_eq!(validate_option_name(c"Server1.Group", &mut no), NameCheck::Valid);
+        assert_eq!(validate_option_name(c"Server1.Backbone", &mut no), NameCheck::Valid);
+        assert_eq!(validate_option_name(c"Server1.Address", &mut no), NameCheck::Valid);
         assert_eq!(validate_option_name(c"Server.JoinGroup", &mut no), NameCheck::Invalid);
     }
 
@@ -2723,12 +2728,21 @@ pub fn init_servers_host<H: OptionsHost>(
         let npriority = host.get_option(&cstring(options_format_indexed_opt_name(
             b"Server", n, b"Priority",
         )));
+        // Backbone replaced the numbered Group; an old Group above 0 still counts
         let ngroup = host.get_option(&cstring(options_format_indexed_opt_name(
             b"Server", n, b"Group",
+        )));
+        let nbackbone = host.get_option(&cstring(options_format_indexed_opt_name(
+            b"Server",
+            n,
+            b"Backbone",
         )));
         let nhost = host.get_option(&cstring(options_format_indexed_opt_name(
             b"Server", n, b"Host",
         )));
+        // Expert: the address to connect to first; empty is Auto (the fastest)
+        let address_opt = cstring(options_format_indexed_opt_name(b"Server", n, b"Address"));
+        let naddress = host.get_option(&address_opt);
         let nport = host.get_option(&cstring(options_format_indexed_opt_name(
             b"Server", n, b"Port",
         )));
@@ -2812,6 +2826,7 @@ pub fn init_servers_host<H: OptionsHost>(
             || nlevel.is_some()
             || npriority.is_some()
             || ngroup.is_some()
+            || nbackbone.is_some()
             || nhost.is_some()
             || nport.is_some()
             || noptional.is_some()
@@ -2832,6 +2847,21 @@ pub fn init_servers_host<H: OptionsHost>(
             break;
         }
         if state == 1 {
+            let address = naddress
+                .as_deref()
+                .map(|a| String::from_utf8_lossy(a.to_bytes()).trim().to_string())
+                .unwrap_or_default();
+            if !address.is_empty() && crate::addrpick::normalize(&address).is_none() {
+                let msg = format_bytes_msg(&[
+                    b"Invalid value for option \"",
+                    address_opt.to_bytes(),
+                    b"\": \"",
+                    address.as_bytes(),
+                    b"\" is not an IP address; using Auto",
+                ]);
+                host.config_error(&msg);
+            }
+            crate::addrpick::configure(n, &address);
             host.add_news_server(
                 n,
                 active,
@@ -2847,7 +2877,10 @@ pub fn init_servers_host<H: OptionsHost>(
                 c_atoi_or_default(nconnections.as_deref(), 1),
                 c_atoi_or_default(nretention.as_deref(), 0),
                 server_level(npriority.as_deref(), nlevel.as_deref()),
-                c_atoi_or_default(ngroup.as_deref(), 0),
+                crate::backbones::intern(&crate::backbones::server_backbone(
+                    nbackbone.as_deref().map(CStr::to_bytes),
+                    ngroup.as_deref().map(CStr::to_bytes),
+                )),
                 optional,
                 cert_verif_level as u32,
             );

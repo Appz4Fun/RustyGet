@@ -2889,6 +2889,12 @@ impl crate::progressive_unpack::VolumeFeed for DirectUnpackFeed {
         self.expected_volumes
     }
 
+    fn set_became_final(&self) -> bool {
+        direct_unpack_download_finished(self.nzb_id)
+            && !direct_unpack_has_holds(self.nzb_id)
+            && !direct_unpack_abandoned(self.nzb_id)
+    }
+
     fn wait_repaired(&mut self, is_cancelled: &mut dyn FnMut() -> bool) -> bool {
         loop {
             if direct_unpack_abandoned(self.nzb_id) || is_cancelled() {
@@ -3366,6 +3372,7 @@ static LIVE_PAR_HELPERS: std::sync::LazyLock<
 
 /// Waits for the live par2 repair of download `nzb_id` to end. Called before the download's
 /// files are cleaned up (deletion, shutdown) so no repair write outlives the download.
+#[track_caller]
 pub(crate) fn direct_unpack_join_live_par_repair(nzb_id: i32) {
     crate::parchecker::streaming_session_cancel(nzb_id);
     #[cfg(unix)]

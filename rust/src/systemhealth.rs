@@ -1954,10 +1954,6 @@ pub fn validate_news_server_section(
         validate_server_optional(input.active, input.optional, input.level),
     );
 
-    if input.active && !(0..=99).contains(&input.group) {
-        emit("Group", Severity::Error, b"Group must be between 0 and 99");
-    }
-
     emit_if_not_ok(
         &mut emit,
         "Host",

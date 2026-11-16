@@ -45,6 +45,8 @@ struct WriteState {
     repair: Option<(SessionGeneration, bool)>,
     certified: Vec<CertifiedTargets>,
     namespace: Option<crate::parchecker::live_namespace::NamespaceProof>,
+    /// Why the cohort was invalidated, first reason only, for the log.
+    stop_reason: Option<String>,
 }
 
 pub(crate) struct WriteCoordinator {
@@ -97,6 +99,7 @@ impl WriteCoordinator {
             path.file_name().is_none_or(|leaf| proof.protects_leaf(leaf.as_encoded_bytes()))
         });
         if protected || state.repair.is_some() {
+            Self::stop_because(&mut state, || format!("another write reached source path {}", path.display()));
             state.source_identity_changed = true;
             state.cancelled = true;
             self.changed.notify_all();
@@ -118,6 +121,7 @@ impl WriteCoordinator {
                 repair: None,
                 certified: Vec::new(),
                 namespace: None,
+                stop_reason: None,
             }),
             changed: Condvar::new(),
         })
@@ -229,6 +233,7 @@ impl WriteCoordinator {
             }
             state.generation = generation;
             state.cancelled = false;
+            state.stop_reason = None;
             // Published bytes may already be in use by unpack. Their seals and
             // metadata charge survive live-generation replacement until close.
         }
@@ -253,20 +258,35 @@ impl WriteCoordinator {
         let Some(proof) = state.namespace.as_mut() else {
             return Ok(None);
         };
-        let resolved = queue_id.ok_or(WriteBlocked::InvalidTarget).and_then(|id| {
-            proof
-                .bind(id, name, hint)
-                .map_err(|_| WriteBlocked::InvalidTarget)
-        });
+        let resolved = match queue_id {
+            None => Err("no queue id".to_owned()),
+            Some(id) => proof.bind(id, name, hint).map_err(|error| {
+                format!(
+                    "live namespace refused queue file {id} ({}): {error}",
+                    String::from_utf8_lossy(name)
+                )
+            }),
+        };
         match resolved {
             Ok(id) => Ok(Some(id)),
-            Err(error) => {
+            Err(why) => {
+                let error = WriteBlocked::InvalidTarget;
+                Self::stop_because(&mut state, || why);
                 state.source_identity_changed = true;
                 state.cancelled = true;
                 self.changed.notify_all();
                 Err(error)
             }
         }
+    }
+    fn stop_because(state: &mut WriteState, why: impl FnOnce() -> String) {
+        if !state.cancelled && state.stop_reason.is_none() {
+            state.stop_reason = Some(why());
+        }
+    }
+    /// Why this cohort stopped, when something invalidated it.
+    pub fn stop_reason(&self) -> Option<String> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).stop_reason.clone()
     }
     pub fn is_current_generation(&self, generation: SessionGeneration) -> bool {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -322,13 +342,17 @@ impl WriteCoordinator {
             return false;
         }
         let changed = !state.source_identity_changed;
+        Self::stop_because(&mut state, || format!("source identity changed: {identity:?}"));
         state.source_identity_changed = true;
         state.cancelled = true;
         self.changed.notify_all();
         changed
     }
+    #[track_caller]
     pub(super) fn invalidate_sources(&self) {
+        let at = std::panic::Location::caller();
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        Self::stop_because(&mut state, || format!("sources invalidated from {}:{}", at.file(), at.line()));
         state.cancelled = true;
         self.changed.notify_all();
     }

@@ -216,7 +216,7 @@ var Options = (new function($)
 		{
 			return values;
 		}
-		var names = {}, raw = {};
+		var names = {}, raw = {}, dropped = [];
 		values.forEach(function(v) { names[v.Name.toLowerCase()] = true; raw[v.Name.toLowerCase()] = v.Value; });
 		// the daemon expands ${Option} references, so Server2.Level=${Server1.Level} is that level
 		function expand(value, depth)
@@ -235,6 +235,27 @@ var Options = (new function($)
 				v.Name = 'LogToFile';
 				v.Value = expand(v.Value, 0).trim().toLowerCase() === 'none' ? 'no' : 'yes';
 			}
+			// ServerN.Group (0-99) became ServerN.Backbone: a group above 0 is the backbone "Group N"
+			// (an empty Backbone next to it still takes the group, as the daemon does)
+			var g = /^Server([0-9]+)\.Group$/i.exec(v.Name);
+			if (g)
+			{
+				var group = parseInt(expand(v.Value, 0), 10) || 0;
+				var backbone = values.filter(function(o) { return o.Name.toLowerCase() === ('Server' + g[1] + '.Backbone').toLowerCase(); })[0];
+				if (!backbone)
+				{
+					v.Name = 'Server' + g[1] + '.Backbone';
+					v.Value = group > 0 ? 'Group ' + group : '';
+				}
+				else
+				{
+					if (!$.trim(expand(backbone.Value, 0)) && group > 0)
+					{
+						backbone.Value = 'Group ' + group;
+					}
+					dropped.push(v);
+				}
+			}
 			var m = /^Server([0-9]+)\.Level$/i.exec(v.Name);
 			if (m && !names[('Server' + m[1] + '.Priority').toLowerCase()])
 			{
@@ -243,6 +264,7 @@ var Options = (new function($)
 				v.Value = String(Math.max(0, Math.min(4, level)) + 1);
 			}
 		});
+		dropped.forEach(function(v) { values.splice(values.indexOf(v), 1); });
 		return values;
 	}
 	this.upgradeValues = upgradeValues;
@@ -1957,6 +1979,7 @@ var Config = (new function($)
 			'Server.Active',
 			'Server.Name',
 			'Server.Host',
+			'Server.Backbone',
 			'Server.Port',
 			'Server.Encryption',
 			'Server.Username',
@@ -1981,7 +2004,6 @@ var Config = (new function($)
 			'MainDir',
 			'Server.Priority',
 			'Server.Optional',
-			'Server.Group',
 			'Server.Retention',
 			'Server.CertVerification',
 			'Server.IpVersion',
@@ -2628,6 +2650,10 @@ var Config = (new function($)
 			{
 				enhanceHost(option, control);
 			}
+			else if (optionFamily(option.name) === 'Server.Backbone' && control.is('input') && !control.hasClass('config-backbone-source'))
+			{
+				enhanceBackbone(option, control);
+			}
 			if (optionFamily(option.name) === 'Server.Port' && control.is('input'))
 			{
 				enhanceHostPort(control);
@@ -2640,7 +2666,8 @@ var Config = (new function($)
 	function syncControls()
 	{
 		$('select.config-cipher__menu', $ConfigData).each(function() { syncCipher($(this)); });
-		$('select.config-select', $ConfigData).not('.config-cipher__menu').each(function()
+		$('input.config-backbone-source', $ConfigData).each(function() { syncBackbone($(this)); });
+		$('select.config-select', $ConfigData).not('.config-cipher__menu').not('.config-backbone__menu').each(function()
 		{
 			var group = $(this).next('.btn-switch');
 			var value = switchGetValue(group);
@@ -4656,7 +4683,274 @@ var Config = (new function($)
 		input.on('input.lookup change.lookup', function(e)
 		{
 			scheduleHostLookup(box, e.type === 'change' ? 0 : 700, e.type === 'change');
+			scheduleBackboneSuggestion(this, e.type === 'change' ? 0 : 700, true);
 		});
+	}
+
+	/*** SERVER BACKBONE ***********************************************************/
+
+	// Servers on one backbone read from one article store: a 430 from one of them
+	// means the others are not asked. The menu lists the bundled backbones
+	// (rust/data/backbones.yaml, read by the daemon), "Other" for a name of your
+	// own, and "Independent". The host name suggests a backbone: a confirmed news
+	// host fills it in (unless one was picked by hand), a provider's domain only
+	// offers its backbones to click, and an unknown host gets a warning.
+	var BACKBONE_CUSTOM = '\u0001custom';
+	var backboneList = null;
+	var backboneListWaiters = [];
+
+	function backboneText(key, text)
+	{
+		return I18n.defaultValue('config_backbone_' + key, text);
+	}
+
+	function withBackboneList(done)
+	{
+		if (backboneList)
+		{
+			done(backboneList);
+			return;
+		}
+		backboneListWaiters.push(done);
+		if (backboneListWaiters.length > 1)
+		{
+			return;
+		}
+		RPC.call('backbones', [''], function(result)
+		{
+			backboneList = (result && result.Backbones || []).map(function(b) { return b.Name; });
+			var waiters = backboneListWaiters;
+			backboneListWaiters = [];
+			waiters.forEach(function(w) { w(backboneList); });
+		}, function()
+		{
+			backboneList = [];
+			var waiters = backboneListWaiters;
+			backboneListWaiters = [];
+			waiters.forEach(function(w) { w(backboneList); });
+		});
+	}
+
+	function sameBackbone(a, b)
+	{
+		var norm = function(v) { return $.trim(String(v || '')).replace(/\s+/g, ' ').toLowerCase(); };
+		return norm(a) === norm(b);
+	}
+
+	function enhanceBackbone(option, input)
+	{
+		var wrap = $('<div class="config-backbone"></div>');
+		var select = $('<select class="config-select config-backbone__menu"></select>')
+			.attr('aria-label', backboneText('label', 'Backbone'));
+		var hint = $('<div class="config-backbone__hint" aria-live="polite" hidden></div>');
+		input.before(wrap);
+		wrap.append(select).append(input).append(hint);
+		input.addClass('config-backbone-source').attr('placeholder', backboneText('custom_placeholder', 'Name of the backbone'));
+		select.on('change', function()
+		{
+			if (this.value === BACKBONE_CUSTOM)
+			{
+				// keep the current name to edit; the menu stays on Other while typing
+				input.data('customMode', true).prop('hidden', false).trigger('focus');
+			}
+			else
+			{
+				input.removeData('customMode').val(this.value).prop('hidden', true);
+			}
+			input.removeData('autoValue').trigger('input').trigger('change');
+			refreshChangeState();
+		});
+		input.on('input.backbone change.backbone', function()
+		{
+			if (!sameBackbone(input.val(), input.data('autoValue')))
+			{
+				input.removeData('autoValue');
+			}
+		});
+		input.on('blur.backbone', function()
+		{
+			if (input.data('customMode'))
+			{
+				input.removeData('customMode');
+				syncBackbone(input);
+			}
+		});
+		withBackboneList(function()
+		{
+			syncBackbone(input);
+			var host = findOptionByName('Server' + option.multiid + '.Host');
+			if (host)
+			{
+				scheduleBackboneSuggestion(document.getElementById(host.formId), 0, false);
+			}
+		});
+	}
+
+	function syncBackbone(input)
+	{
+		var select = input.siblings('select.config-backbone__menu');
+		if (!select.length)
+		{
+			return;
+		}
+		var value = $.trim(input.val() || '');
+		var list = backboneList || [];
+		select.empty();
+		select.append($('<option value=""></option>').text(backboneText('independent', 'Independent (shares articles with no other server)')));
+		list.forEach(function(name) { select.append($('<option></option>').attr('value', name).text(name)); });
+		var known = !value || list.some(function(name) { return sameBackbone(name, value); });
+		if (value && !known)
+		{
+			select.append($('<option class="config-backbone__own"></option>').attr('value', value).text(value));
+		}
+		select.append($('<option></option>').attr('value', BACKBONE_CUSTOM).text(backboneText('custom', 'Other (type a name)…')));
+		if (input.data('customMode'))
+		{
+			select.val(BACKBONE_CUSTOM);
+			input.prop('hidden', false);
+			return;
+		}
+		var match = list.filter(function(name) { return sameBackbone(name, value); })[0];
+		select.val(match || value);
+		if (!input.is(':focus'))
+		{
+			input.prop('hidden', true);
+		}
+	}
+
+	function setBackbone(input, value, auto)
+	{
+		input.val(value).trigger('input').trigger('change');
+		if (auto)
+		{
+			input.data('autoValue', value);
+		}
+		syncBackbone(input);
+		refreshChangeState();
+	}
+
+	// `edited`: the host was just typed, so a confirmed backbone may be filled in. When the
+	// page opens it is only offered: an empty Backbone may be a deliberate Independent.
+	function scheduleBackboneSuggestion(hostControl, delay, edited)
+	{
+		var option = hostControl && findOptionById(hostControl.id);
+		if (!option)
+		{
+			return;
+		}
+		var $host = $(hostControl);
+		clearTimeout($host.data('backboneTimer'));
+		$host.data('backboneTimer', setTimeout(function() { suggestBackbone(option.multiid, edited); }, delay));
+	}
+
+	function suggestBackbone(multiid, edited)
+	{
+		var hostOption = findOptionByName('Server' + multiid + '.Host');
+		var backboneOption = findOptionByName('Server' + multiid + '.Backbone');
+		if (!hostOption || !backboneOption)
+		{
+			return;
+		}
+		var input = $('#' + backboneOption.formId);
+		var hint = input.siblings('.config-backbone__hint');
+		var host = $.trim(getOptionValue(hostOption) || '');
+		var seq = (input.data('suggestSeq') || 0) + 1;
+		input.data('suggestSeq', seq);
+		if (!host || /\$\{/.test(host))
+		{
+			hint.empty().prop('hidden', true);
+			return;
+		}
+		RPC.call('backbones', [host], function(result)
+		{
+			if (seq !== input.data('suggestSeq'))
+			{
+				return;
+			}
+			renderBackboneSuggestion(input, hint, host, result || {}, edited);
+		}, function()
+		{
+			hint.empty().prop('hidden', true);
+		});
+	}
+
+	function renderBackboneSuggestion(input, hint, host, result, edited)
+	{
+		var current = $.trim(input.val() || '');
+		var filled = input.data('autoValue');
+		if (edited && result.Match !== 'confirmed' && filled !== undefined && sameBackbone(current, filled))
+		{
+			// filled in for the previous host, which this one is not: back to empty
+			input.removeData('autoValue');
+			setBackbone(input, '', false);
+			current = '';
+		}
+		var matches = result.Matches || [];
+		hint.empty().removeAttr('data-state').prop('hidden', true);
+		var note = function(state, text)
+		{
+			hint.attr('data-state', state).prop('hidden', false)
+				.append($('<p class="config-backbone__note"></p>').text(text));
+		};
+		if (result.Match === 'confirmed' && matches.length)
+		{
+			var auto = input.data('autoValue');
+			if (edited && (!current || (auto !== undefined && sameBackbone(current, auto))))
+			{
+				setBackbone(input, matches[0], true);
+				note('ok', host + ' ' + backboneText('reads_from', 'reads from') + ' ' + matches[0] + '. ' +
+					backboneText('filled', 'Filled in for you.'));
+			}
+			else if (!current)
+			{
+				note('suggest', host + ' ' + backboneText('reads_from', 'reads from') + ' ' + matches[0] + '. ' +
+					backboneText('confirm', 'Use it?'));
+				addBackboneButtons(input, hint, matches);
+			}
+			else if (!sameBackbone(current, matches[0]))
+			{
+				note('warn', host + ' ' + backboneText('reads_from', 'reads from') + ' ' + matches[0] + ', ' +
+					backboneText('not_picked', 'not the backbone picked here.'));
+				addBackboneButtons(input, hint, matches);
+			}
+			return;
+		}
+		if (result.Match === 'suggested' && matches.length)
+		{
+			if (matches.some(function(name) { return sameBackbone(name, current); }))
+			{
+				return;
+			}
+			note('suggest', matches.length === 1 ?
+				host + ' ' + backboneText('looks_like', 'looks like') + ' ' + result.Provider + ', ' +
+					backboneText('sells_one', 'which sells') + ' ' + matches[0] + '. ' + backboneText('confirm', 'Use it?') :
+				result.Provider + ' ' + backboneText('sells_many', 'sells access to several backbones:') + ' ' +
+					matches.join(', ') + '. ' + backboneText('pick_plan', 'Pick the one your plan uses.'));
+			addBackboneButtons(input, hint, matches);
+			return;
+		}
+		if (result.Match === 'unknown' && !current)
+		{
+			note('warn', backboneText('unknown', 'Unknown backbone for') + ' ' + host + '. ' +
+				backboneText('unknown_text', 'Pick one from the list, or choose Other to type a name. Leave it Independent if no other server shares its articles.'));
+		}
+	}
+
+	function addBackboneButtons(input, hint, names)
+	{
+		var row = $('<p class="config-backbone__picks"></p>');
+		names.forEach(function(name)
+		{
+			$('<button type="button" class="btn btn-small config-backbone__pick"></button>')
+				.text(backboneText('use', 'Use') + ' ' + name)
+				.on('click', function()
+				{
+					setBackbone(input, name, false);
+					hint.empty().prop('hidden', true);
+				})
+				.appendTo(row);
+		});
+		hint.append(row);
 	}
 
 	// A new port means new connect times: look the host up again.
@@ -4770,6 +5064,11 @@ var Config = (new function($)
 		}
 	}
 
+	function addressOption(box)
+	{
+		return findOptionByName('Server' + parseInt(box.attr('data-multiid'), 10) + '.Address');
+	}
+
 	function renderHostLookup(box, host, result)
 	{
 		box.data('result', result).data('resultHost', host);
@@ -4780,15 +5079,18 @@ var Config = (new function($)
 			return;
 		}
 		var name = box.data('hostName');
-		var pinned = isIpLiteral(host);
+		// an address typed as Host (the old way to pin one) still works, without the name for TLS
+		var literal = isIpLiteral(host);
+		var addrOption = addressOption(box);
+		var current = literal ? host : $.trim(addrOption ? getOptionValue(addrOption) || '' : '');
 		// a server set to IPv4 or IPv6 only can't use an address of the other kind
 		var family = serverIpVersion(box);
 		var addresses = (result.Addresses || []).filter(function(address)
 		{
-			return !family || ipFamily(address.IP) === family || (pinned && address.IP === host);
+			return !family || ipFamily(address.IP) === family || address.IP === current;
 		});
 		var head = $('<p class="config-host-lookup__head"></p>');
-		head.text(pinned ? hostText('pinned', 'Always using this address') + (name ? ' (' + name + ')' : '') :
+		head.text(literal ? hostText('literal', 'Host is an address') + (name ? ' (' + name + ')' : '') :
 			addresses.length === 1 ? hostText('one', '1 address for') + ' ' + host :
 			addresses.length + ' ' + hostText('many', 'addresses for') + ' ' + host);
 		box.append(head);
@@ -4797,17 +5099,32 @@ var Config = (new function($)
 		var choice = function(value, checked, main, details)
 		{
 			var label = $('<label class="config-host-lookup__item"><input type="radio"><span class="config-host-lookup__main"></span>' +
-				'<span class="config-host-lookup__details"></span></label>');
+				'<span class="config-host-lookup__details"></span><span class="config-host-lookup__check" hidden></span></label>');
+			label.attr('data-ip', value);
 			label.find('input').attr({ name: group, value: value }).prop('checked', checked);
 			label.find('.config-host-lookup__main').text(main);
 			label.find('.config-host-lookup__details').text(details || '');
 			list.append(label);
 		};
-		if (!pinned || name)
+		if (literal)
 		{
-			choice('', !pinned, pinned ? hostText('use_name', 'Use the name again') + ': ' + name : hostText('any', 'Any of them (recommended)'),
-				pinned ? '' : hostText('any_text', 'RustyGet picks, and follows the provider if the addresses change.'));
+			if (!name)
+			{
+				box.append($('<p class="config-host-lookup__note"></p>').text(hostText('literal_text',
+					'Type the host name instead and pick this address below: the name is then kept for the certificate check.')));
+			}
+			if (name)
+			{
+				choice('\u0001name', false, hostText('use_name', 'Use the name again') + ': ' + name,
+					hostText('use_name_text', 'Keeps this address as the first to try, and the name for the certificate check.'));
+			}
 		}
+		else
+		{
+			choice('', !current, hostText('auto', 'Auto: the fastest (recommended)'),
+				hostText('auto_text', 'RustyGet times each address, uses the fastest, and follows the provider if the addresses change.'));
+		}
+		var listed = false;
 		addresses.forEach(function(address)
 		{
 			var where = [];
@@ -4815,17 +5132,25 @@ var Config = (new function($)
 			if (address.ASN) where.push('AS' + address.ASN + (address.Org ? ' ' + address.Org : ''));
 			where.push(address.LatencyMs === null || address.LatencyMs === undefined ? hostText('no_answer', 'no answer') :
 				Math.round(address.LatencyMs) + ' ms');
-			choice(address.IP, pinned && address.IP === host, address.IP, where.join(' · '));
+			listed = listed || address.IP === current;
+			choice(address.IP, address.IP === current, address.IP, where.join(' · '));
 		});
+		if (current && !listed && !literal)
+		{
+			choice(current, true, current, hostText('gone', 'Not an address of this host now: skipped unless the certificate is checked strictly.'));
+		}
 		if (list.children().length)
 		{
 			box.append(list);
 		}
 		list.on('change', 'input', function() { pickHostAddress(box, this.value); });
-		if (pinned && box.data('certWasStrict'))
+		if (!literal && addresses.length)
 		{
-			box.append($('<p class="config-host-lookup__cert"></p>').text(hostText('cert_minimal',
-				'Certificate check is now Minimal: the certificate names the host, not this address.')));
+			$('<p class="config-host-lookup__actions"></p>').append(
+				$('<button type="button" class="btn btn-small config-host-lookup__login"></button>')
+					.text(hostText('check_login', 'Check login on each address'))
+					.on('click', function() { checkAddressLogins(box, this); }))
+				.appendTo(box);
 		}
 		box.append($('<p class="config-host-lookup__source"></p>').append(result.GeoIP ?
 			$('<a href="https://db-ip.com" target="_blank" rel="noopener"></a>').text(hostText('source', 'IP location data by DB-IP')) :
@@ -4845,47 +5170,106 @@ var Config = (new function($)
 		return value === 'ipv4' || value === 'ipv6' ? value : '';
 	}
 
-	// Picking an address writes it as Host. The certificate names the host, not the
-	// address, so a strict certificate check drops to Minimal (the signature is still checked).
+	// Picking an address writes it as Address (empty is Auto); Host keeps the name, so the
+	// certificate check is unchanged. On a server whose Host is an address (the old way to
+	// pin one), "Use the name again" moves that address to Address and the name back to Host.
 	function pickHostAddress(box, ip)
 	{
 		var multiid = parseInt(box.attr('data-multiid'), 10);
 		var hostOption = findOptionByName('Server' + multiid + '.Host');
-		var name = box.data('hostName');
-		var value = ip || name;
-		if (!hostOption || !value)
+		var addrOption = addressOption(box);
+		if (!hostOption || !addrOption)
 		{
 			return;
 		}
-		$('#' + hostOption.formId).val(value);
-		var family = serverIpVersion(box);
-		var ipVersion = findOptionByName('Server' + multiid + '.IpVersion');
-		if (ip && family && ipFamily(ip) !== family && ipVersion)
+		var oldHost = $.trim(getOptionValue(hostOption) || '');
+		if (ip === '\u0001name' || (ip && isIpLiteral(oldHost)))
 		{
-			// an address of the other kind (a list shown before IP version was changed) needs Automatic
-			setOptionValue(ipVersion, 'auto');
-		}
-		var cert = findOptionByName('Server' + multiid + '.CertVerification');
-		var encryption = findOptionByName('Server' + multiid + '.Encryption');
-		if (ip && cert && encryption && String(getOptionValue(encryption)).toLowerCase() === 'yes' &&
-			String(getOptionValue(cert)).toLowerCase() === 'strict')
-		{
-			setOptionValue(cert, 'Minimal');
-			box.data('certWasStrict', true);
-		}
-		else if (!ip && cert && box.data('certWasStrict'))
-		{
-			// back to the name: Strict again, unless the check was changed by hand since
-			if (String(getOptionValue(cert)).toLowerCase() === 'minimal')
+			// Address is not used while Host is an address: picking one moves the name back to
+			// Host and the pick to Address, or, with no name known, writes the pick as Host
+			var name = box.data('hostName');
+			var pick = ip === '\u0001name' ? oldHost : ip;
+			if (!name && ip === '\u0001name')
+			{
+				return;
+			}
+			$('#' + hostOption.formId).val(name || ip);
+			if (!name)
+			{
+				pick = '';
+			}
+			setOptionValue(addrOption, isIpLiteral(pick) ? pick : '');
+			var cert = findOptionByName('Server' + multiid + '.CertVerification');
+			if (name && cert && box.data('certWasStrict') && String(getOptionValue(cert)).toLowerCase() === 'minimal')
 			{
 				setOptionValue(cert, 'Strict');
 			}
 			box.removeData('certWasStrict');
 		}
+		else
+		{
+			setOptionValue(addrOption, ip);
+			var family = serverIpVersion(box);
+			var ipVersion = findOptionByName('Server' + multiid + '.IpVersion');
+			if (ip && family && ipFamily(ip) !== family && ipVersion)
+			{
+				// an address of the other kind (a list shown before IP version was changed) needs Automatic
+				setOptionValue(ipVersion, 'auto');
+			}
+		}
 		refreshChangeState();
 		refreshListRows();
 		clearTimeout(box.data('timer'));
 		lookupHost(box, true);
+	}
+
+	// Logs in on each listed address, one at a time (each check sends QUIT when done), with
+	// the server's current username, password and encryption settings.
+	function checkAddressLogins(box, button)
+	{
+		var multiid = parseInt(box.attr('data-multiid'), 10);
+		var value = function(field)
+		{
+			var option = findOptionByName('Server' + multiid + '.' + field);
+			return option ? getOptionValue(option) : '';
+		};
+		var host = $.trim(value('Host') || '');
+		var rows = box.find('.config-host-lookup__item').filter(function() { return isIpLiteral($(this).attr('data-ip') || ''); }).toArray();
+		var seq = box.data('seq');
+		var timeout = Math.min(parseInt(getOptionValue(findOptionByName('ArticleTimeout')), 10) || 10, 10);
+		$(button).prop('disabled', true);
+		var next = function()
+		{
+			var row = $(rows.shift());
+			if (!row.length || seq !== box.data('seq'))
+			{
+				$(button).prop('disabled', false);
+				return;
+			}
+			var mark = row.find('.config-host-lookup__check').prop('hidden', false)
+				.attr('data-state', 'busy').text(hostText('checking', 'checking…'));
+			var done = function(state, text)
+			{
+				if (seq === box.data('seq'))
+				{
+					mark.attr('data-state', state).text(text);
+				}
+				next();
+			};
+			RPC.call('testserver', [host, parseInt(value('Port'), 10), value('Username'), value('Password'),
+				String(value('Encryption')).toLowerCase() === 'yes', value('Cipher'), timeout,
+				getCertVerifLevel(value('CertVerification')), row.attr('data-ip')],
+				function(errtext)
+				{
+					if (errtext === '') done('ok', hostText('login_ok', 'login OK'));
+					else done('error', String(errtext));
+				},
+				function(message, result)
+				{
+					done('error', result && result.error && result.error.message ? String(result.error.message) : String(message));
+				}, { timeout: (timeout + 5) * 1000 });
+		};
+		next();
 	}
 
 	/*** RSS FEEDS ********************************************************************/

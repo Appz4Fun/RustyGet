@@ -27,7 +27,7 @@ use crate::nntp::{
     article_dl_eval_level_exhaustion, article_dl_handle_content_rejected,
     article_dl_is_join_group_ok, article_dl_is_retention_failure,
     article_dl_normalize_connect_and_decrement_retries, article_dl_resolve_final_status,
-    article_dl_should_advance_server_list, TransientRetries,
+    article_dl_should_advance_server_list, BackboneMiss, LevelCandidate, TransientRetries,
 };
 use crate::queuesubsys_host::{
     ActiveDownloadSnap, QueueSubsysHost, AD_FAILED, AD_FATAL_ERROR, AD_FINISHED, AD_RETRY,
@@ -2610,6 +2610,8 @@ struct DlWorker {
     writing_started: bool,
     local_write_error: bool,
     content_rejected: bool,
+    /// the last fetch was answered `430 no such article` (not 411/420/451)
+    last_430: bool,
     downloaded_size: i32,
     decoded_file_size: i64,
 }
@@ -2671,6 +2673,7 @@ impl NzbgetRsArticleDownloader {
                 writing_started: false,
                 local_write_error: false,
                 content_rejected: false,
+                last_430: false,
                 downloaded_size: 0,
                 decoded_file_size: 0,
             }),
@@ -3177,6 +3180,7 @@ impl NzbgetRsArticleDownloader {
         w.writing_started = false;
         w.local_write_error = false;
         w.content_rejected = false;
+        w.last_430 = false;
         if let Some(ref mut ca) = w.analyzer {
             ca.reset();
         }
@@ -3248,6 +3252,7 @@ impl NzbgetRsArticleDownloader {
         let resp_ptr = unsafe { conn.request(cmd_c.as_ptr().cast()) };
         let req_auth_err = unsafe { conn.auth_error() };
         let fetch_resp = unsafe { opt_cstr(resp_ptr) };
+        w.last_430 = !req_auth_err && fetch_resp.as_deref().is_some_and(|r| r.starts_with(b"430"));
         let st = self.check_response(
             host,
             &conn_name,
@@ -3429,6 +3434,8 @@ impl NzbgetRsArticleDownloader {
 
             let mut transient_retries = TransientRetries::new(retries, interval_sec);
             let mut failed_servers: Vec<usize> = Vec::with_capacity(servers_cap);
+            // backbones that answered 430 for this article (see `BackboneMiss`)
+            let mut missing: Vec<BackboneMiss> = Vec::new();
             let mut want_server: usize = 0;
             let mut level = 0i32;
             let mut status = AD_FAILED;
@@ -3458,7 +3465,11 @@ impl NzbgetRsArticleDownloader {
                 )
             };
 
-            let try_acquire_conn = |lvl: i32, want_ptr: usize, ignore_ptrs: &[usize]| -> usize {
+            let try_acquire_conn = |lvl: i32,
+                                    want_ptr: usize,
+                                    ignore_ptrs: &[usize],
+                                    missing: &[BackboneMiss]|
+             -> usize {
                 let Some(pool) = crate::net::active_server_pool() else {
                     return 0;
                 };
@@ -3484,7 +3495,7 @@ impl NzbgetRsArticleDownloader {
                         }
                     }
                 }
-                pool.get_connection(lvl, want_srv, &ign_refs) as usize
+                pool.get_connection_missing(lvl, want_srv, &ign_refs, missing) as usize
             };
 
             loop {
@@ -3501,7 +3512,7 @@ impl NzbgetRsArticleDownloader {
                         break;
                     }
                     if transient_retries.is_empty() {
-                        let got = try_acquire_conn(level, want_server, &failed_servers);
+                        let got = try_acquire_conn(level, want_server, &failed_servers, &missing);
                         if got != 0 {
                             self.set_conn_ptr(got);
                         }
@@ -3512,7 +3523,7 @@ impl NzbgetRsArticleDownloader {
                                 Vec::with_capacity(failed_servers.len() + waiting.len());
                             ign_all.extend_from_slice(&failed_servers);
                             ign_all.extend_from_slice(&waiting);
-                            let got = try_acquire_conn(level, want_server, &ign_all);
+                            let got = try_acquire_conn(level, want_server, &ign_all, &missing);
                             if got != 0 {
                                 self.set_conn_ptr(got);
                             }
@@ -3549,6 +3560,7 @@ impl NzbgetRsArticleDownloader {
                 level = srv.norm_level.load(Ordering::SeqCst);
                 let retention = srv.retention;
                 let server_id = srv.id;
+                let backbone = srv.group;
                 let join_group = srv.join_group;
                 let mut remained_retries = transient_retries.remained_retries(last_server);
 
@@ -3615,6 +3627,29 @@ impl NzbgetRsArticleDownloader {
                         } else {
                             status = AD_FAILED;
                             remained_retries = 0;
+                        }
+                    }
+
+                    if status == AD_NOT_FOUND && w.last_430 && backbone > 0 {
+                        // the same article store answers for every server on this backbone
+                        let miss = BackboneMiss {
+                            group: backbone,
+                            retention,
+                        };
+                        if !missing.contains(&miss) {
+                            missing.push(miss);
+                            let name = crate::backbones::name_of(backbone).unwrap_or_default();
+                            host.log(
+                                MK_DETAIL,
+                                &join_c_slices(&[
+                                    b"Article ",
+                                    &self.info_name,
+                                    b" @ ",
+                                    &conn_name,
+                                    b" not found; not asking other servers on backbone ",
+                                    name.as_bytes(),
+                                ]),
+                            );
                         }
                     }
 
@@ -3758,52 +3793,54 @@ impl NzbgetRsArticleDownloader {
                         failed_servers.push(last_server);
                     }
 
-                    let (cand_ptrs, cand_ids, cand_lvls, cand_grps, cand_avail) =
+                    let (cand_ptrs, cands): (Vec<usize>, Vec<LevelCandidate>) =
                         crate::net::active_server_pool()
                             .map(|pool| {
-                                let list = pool.servers_snapshot();
-                                let mut c_ptrs = Vec::with_capacity(list.len());
-                                let mut c_ids = Vec::with_capacity(list.len());
-                                let mut c_lvls = Vec::with_capacity(list.len());
-                                let mut c_grps = Vec::with_capacity(list.len());
-                                let mut c_avail = Vec::with_capacity(list.len());
-                                for s in &list {
-                                    c_ptrs.push(std::sync::Arc::as_ptr(s) as usize);
-                                    c_ids.push(s.id);
-                                    c_lvls.push(s.norm_level.load(Ordering::SeqCst));
-                                    c_grps.push(s.group);
-                                    let avail = s.active.load(Ordering::SeqCst)
-                                        && s.max_connections != 0
-                                        && !(s.optional && pool.is_server_blocked(s));
-                                    c_avail.push(u8::from(avail));
-                                }
-                                (c_ptrs, c_ids, c_lvls, c_grps, c_avail)
+                                pool.servers_snapshot()
+                                    .iter()
+                                    .map(|s| {
+                                        let available = s.active.load(Ordering::SeqCst)
+                                            && s.max_connections != 0
+                                            && !(s.optional && pool.is_server_blocked(s));
+                                        (
+                                            std::sync::Arc::as_ptr(s) as usize,
+                                            LevelCandidate {
+                                                id: s.id,
+                                                level: s.norm_level.load(Ordering::SeqCst),
+                                                group: s.group,
+                                                retention: s.retention,
+                                                available,
+                                            },
+                                        )
+                                    })
+                                    .unzip()
                             })
                             .unwrap_or_default();
 
-                    let mut f_ids = Vec::with_capacity(failed_servers.len());
-                    let mut f_lvls = Vec::with_capacity(failed_servers.len());
-                    let mut f_grps = Vec::with_capacity(failed_servers.len());
-                    for &fp in &failed_servers {
-                        if let Some(pos) = cand_ptrs.iter().position(|&p| p == fp) {
-                            f_ids.push(cand_ids[pos]);
-                            f_lvls.push(cand_lvls[pos]);
-                            f_grps.push(cand_grps[pos]);
+                    let f_ids: Vec<i32> = failed_servers
+                        .iter()
+                        .filter_map(|fp| cand_ptrs.iter().position(|p| p == fp))
+                        .map(|pos| cands[pos].id)
+                        .collect();
+
+                    let all_failed =
+                        article_dl_all_servers_on_level_failed(level, &cands, &f_ids, &missing);
+                    let (adv_lvl, mut next_lvl, mut break_all) =
+                        article_dl_eval_level_exhaustion(all_failed, level, max_norm_lvl);
+                    // pass over the next levels too when nothing on them can have the
+                    // article (all on backbones that answered 430), so the article
+                    // never waits on a level it can't use
+                    while adv_lvl
+                        && !break_all
+                        && article_dl_all_servers_on_level_failed(next_lvl, &cands, &f_ids, &missing)
+                    {
+                        if next_lvl >= max_norm_lvl {
+                            break_all = true;
+                        } else {
+                            next_lvl += 1;
                         }
                     }
-
-                    let all_failed = article_dl_all_servers_on_level_failed(
-                        level,
-                        &cand_ids,
-                        &cand_lvls,
-                        &cand_grps,
-                        &cand_avail,
-                        &f_ids,
-                        &f_lvls,
-                        &f_grps,
-                    );
-                    let (adv_lvl, next_lvl, break_all) =
-                        article_dl_eval_level_exhaustion(all_failed, level, max_norm_lvl);
+                    let adv_lvl = adv_lvl && !break_all;
                     if adv_lvl {
                         let tail = format!(" @ all level {level} servers failed, increasing level");
                         host.log(

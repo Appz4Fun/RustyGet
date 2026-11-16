@@ -889,60 +889,104 @@ pub fn http_fetch(
 // NntpHealthServer (`NntpHealthTransportShared` & server pool cache)
 // ============================================================================
 
-static NNTP_KNOWN_SERVERS: OnceLock<
-    Mutex<BTreeMap<(i32, usize), (Arc<DonorServer>, Arc<AtomicUsize>)>>,
-> = OnceLock::new();
+type KnownHealthServer = (Arc<DonorServer>, Arc<AtomicUsize>, Arc<Mutex<Vec<i32>>>);
+
+static NNTP_KNOWN_SERVERS: OnceLock<Mutex<BTreeMap<(i32, usize), KnownHealthServer>>> =
+    OnceLock::new();
 
 pub fn nntp_health_servers(host_ctx: *mut c_void, host_cb: DupeHostFn) -> Vec<Arc<DonorServer>> {
     let map_mutex = NNTP_KNOWN_SERVERS.get_or_init(|| Mutex::new(BTreeMap::new()));
     let mut known = map_mutex.lock().unwrap_or_else(|e| e.into_inner());
     let mut raw_servers: Vec<(i32, i32, i32, i32)> = Vec::new();
+    let mut ranks: Vec<HealthServerRank> = Vec::new();
     #[cfg(unix)]
     if let Some(pool) = crate::net::active_server_pool() {
         for s in pool.servers_snapshot() {
-            raw_servers.push((
-                s.id,
-                c_int::from(s.active.load(Ordering::SeqCst)),
-                s.max_connections,
-                s.group,
-            ));
+            let active = s.active.load(Ordering::SeqCst);
+            raw_servers.push((s.id, c_int::from(active), s.max_connections, s.group));
+            ranks.push(HealthServerRank {
+                id: s.id,
+                usable: active && s.max_connections != 0,
+                group: s.group,
+                retention: s.retention,
+                level: s.norm_level.load(Ordering::SeqCst),
+            });
         }
     }
+    let order = backbone_order(&ranks);
     let check_connections =
         crate::options::active_options().map_or(0, |o| o.scalars().dupe_check_connections);
     let mut list = Vec::new();
-    let mut groups = BTreeSet::new();
     for (server_id, active, max_conns, group) in raw_servers {
         if active == 0 || max_conns == 0 {
             continue;
         }
-        if group > 0 && !groups.insert(group) {
-            continue;
-        }
+        // one health server per backbone: its best server, then the siblings in order
+        let servers = if group > 0 {
+            match order.get(&server_id) {
+                Some(ids) => ids.clone(),
+                None => continue,
+            }
+        } else {
+            vec![server_id]
+        };
         let wanted_cap = dupe_check_server_cap(max_conns, check_connections);
         let key = (server_id, host_cb as usize);
         let recreate = match known.get(&key) {
-            Some((srv, ctx_cell)) => {
+            Some((srv, ctx_cell, ids)) => {
                 ctx_cell.store(host_ctx as usize, Ordering::SeqCst);
+                *ids.lock().unwrap_or_else(|e| e.into_inner()) = servers.clone();
                 srv.cap() != wanted_cap
             }
             None => true,
         };
         if recreate {
             let ctx_cell = Arc::new(AtomicUsize::new(host_ctx as usize));
+            let ids = Arc::new(Mutex::new(servers));
             let transport = NntpHealthTransportShared {
-                server_id,
+                server_ids: ids.clone(),
                 host_ctx: ctx_cell.clone(),
                 host_cb,
             };
             let srv = Arc::new(DonorServer::new(wanted_cap, transport));
-            known.insert(key, (srv.clone(), ctx_cell));
+            known.insert(key, (srv.clone(), ctx_cell, ids));
             list.push(srv);
-        } else if let Some((srv, _)) = known.get(&key) {
+        } else if let Some((srv, _, _)) = known.get(&key) {
             list.push(srv.clone());
         }
     }
     list
+}
+
+/// A news server as [`backbone_order`] ranks it.
+#[derive(Debug, Clone, Copy)]
+struct HealthServerRank {
+    id: i32,
+    usable: bool,
+    group: i32,
+    retention: i32,
+    level: i32,
+}
+
+/// The servers per backbone the health checks ask, keyed by the first one:
+/// servers on a backbone read from one article store, so one answer is
+/// enough, and the others are only asked when the first has no connection
+/// free (busy, blocked, login refused). The longest retention comes first
+/// (0 = not set counts as the longest), then the lowest level, then the
+/// lowest id. Independent servers (group 0) are not listed.
+fn backbone_order(servers: &[HealthServerRank]) -> BTreeMap<i32, Vec<i32>> {
+    let keep = |r: i32| if r <= 0 { i32::MAX } else { r };
+    let mut by_group: BTreeMap<i32, Vec<HealthServerRank>> = BTreeMap::new();
+    for s in servers.iter().filter(|s| s.usable && s.group > 0) {
+        by_group.entry(s.group).or_default().push(*s);
+    }
+    by_group
+        .into_values()
+        .map(|mut members| {
+            members.sort_by_key(|s| (std::cmp::Reverse(keep(s.retention)), s.level, s.id));
+            (members[0].id, members.iter().map(|s| s.id).collect())
+        })
+        .collect()
 }
 
 /// Check connections per news server: all of its connections when
@@ -957,7 +1001,8 @@ fn dupe_check_server_cap(server_connections: i32, check_connections: i32) -> i32
 }
 
 struct NntpHealthTransportShared {
-    server_id: i32,
+    /// the backbone's servers in the order to ask (one id for an independent server)
+    server_ids: Arc<Mutex<Vec<i32>>>,
     host_ctx: Arc<AtomicUsize>,
     host_cb: DupeHostFn,
 }
@@ -972,28 +1017,6 @@ impl DonorServerExchange for NntpHealthTransportShared {
 
         #[cfg(unix)]
         if let Some(pool) = crate::net::active_server_pool() {
-            let wait_start = host_now(ctx, host_cb);
-            let mut conn_ptr = 0usize;
-            let mut need_join = false;
-            while conn_ptr == 0 && !http_stopped() && host_now(ctx, host_cb) - wait_start <= 10 {
-                let Some(srv) = pool.server_by_id(self.server_id) else {
-                    return Err(DonorExchangeError::default());
-                };
-                need_join = srv.join_group;
-                let raw = pool.get_check_connection(&srv);
-                if !raw.is_null() {
-                    conn_ptr = raw as usize;
-                } else {
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-            }
-            if conn_ptr == 0 {
-                return Err(DonorExchangeError {
-                    answers: Vec::new(),
-                    busy: true,
-                });
-            }
-
             struct NativeConnRelease {
                 pool: Arc<crate::net::NzbgetRsServerPool>,
                 conn_ptr: usize,
@@ -1010,11 +1033,6 @@ impl DonorServerExchange for NntpHealthTransportShared {
                     self.pool.free_connection(raw, true);
                 }
             }
-            let mut release = NativeConnRelease {
-                pool,
-                conn_ptr,
-                broken: false,
-            };
 
             let mut commands = Vec::with_capacity(batch.len() * 48);
             for req in batch {
@@ -1025,14 +1043,71 @@ impl DonorServerExchange for NntpHealthTransportShared {
                 commands.extend_from_slice(b"\r\n");
             }
 
-            let conn = unsafe { &*(conn_ptr as *const crate::net::PooledNntpConn) };
-            unsafe {
-                conn.prepare_for_use();
-            }
-            if !unsafe { conn.connect() } {
+            let mut wait_start = host_now(ctx, host_cb);
+            let ids = self.server_ids.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            // servers of this backbone whose connect failed during this exchange
+            let mut failed: Vec<i32> = Vec::new();
+            let (mut release, need_join) = loop {
+                let mut conn_ptr = 0usize;
+                let mut need_join = false;
+                while conn_ptr == 0 && !http_stopped() && host_now(ctx, host_cb) - wait_start <= 10 {
+                    let mut known_any = false;
+                    for &id in ids.iter().filter(|id| !failed.contains(id)) {
+                        let Some(srv) = pool.server_by_id(id) else {
+                            continue;
+                        };
+                        known_any = true;
+                        let raw = pool.get_check_connection(&srv);
+                        if !raw.is_null() {
+                            need_join = srv.join_group;
+                            conn_ptr = raw as usize;
+                            break;
+                        }
+                    }
+                    if !known_any {
+                        return Err(DonorExchangeError::default());
+                    }
+                    if conn_ptr == 0 {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                }
+                if conn_ptr == 0 {
+                    return Err(DonorExchangeError {
+                        answers: Vec::new(),
+                        busy: true,
+                    });
+                }
+                let mut release = NativeConnRelease {
+                    pool: Arc::clone(&pool),
+                    conn_ptr,
+                    broken: false,
+                };
+                let conn = unsafe { &*(conn_ptr as *const crate::net::PooledNntpConn) };
+                unsafe {
+                    conn.prepare_for_use();
+                }
+                if unsafe { conn.connect() } {
+                    break (release, need_join);
+                }
                 release.broken = true;
-                return Err(DonorExchangeError::default());
-            }
+                if ids.len() < 2 || http_stopped() {
+                    return Err(DonorExchangeError::default());
+                }
+                // a backbone sibling can answer this batch: block this server for the
+                // retry interval (as a download's connect failure does) and ask the next
+                let failed_id = conn.server.id;
+                pool.block_server(&conn.server);
+                drop(release);
+                failed.push(failed_id);
+                if ids.iter().all(|id| failed.contains(id)) {
+                    return Err(DonorExchangeError::default());
+                }
+                // the failed connect may have taken the whole wait (a server that never
+                // answers): the sibling gets a wait of its own
+                wait_start = host_now(ctx, host_cb);
+            };
+            let conn_ptr = release.conn_ptr;
+            let conn = unsafe { &*(conn_ptr as *const crate::net::PooledNntpConn) };
             if need_join && !batch[0].groups.is_empty() {
                 let mut joined_ptr: *const c_char = ptr::null();
                 for grp in batch[0].groups.iter() {
@@ -1546,6 +1621,8 @@ fn fleet_intake_later(host_ctx: *mut c_void, host_cb: DupeHostFn, job: IntakeLat
         .fleet
         .clone()
         .or_else(|| job.primary.as_ref().and_then(|(_, _, p)| p.clone()));
+    // the queued copy's own print is recorded too when it is read here
+    let mut primary_read = false;
     let fleet = match known {
         Some(p) => p,
         None => {
@@ -1562,7 +1639,10 @@ fn fleet_intake_later(host_ctx: *mut c_void, host_cb: DupeHostFn, job: IntakeLat
             )
             .pop()
             {
-                Some(Ok(p)) => p,
+                Some(Ok(p)) => {
+                    primary_read = true;
+                    p
+                }
                 other => {
                     let why = other.and_then(|r| r.err()).unwrap_or_default();
                     let mut msg = b"Fleet intake later: the queued copy of ".to_vec();
@@ -1587,6 +1667,23 @@ fn fleet_intake_later(host_ctx: *mut c_void, host_cb: DupeHostFn, job: IntakeLat
     let prints: Vec<Option<crate::dupeintake::Print>> =
         got.iter().map(|r| r.as_ref().ok().cloned()).collect();
     let verdicts = crate::dupeintake::judge_against(&prints, Some(&fleet));
+    let mut digests: Vec<(i32, String)> = Vec::new();
+    if primary_read && primary_id > 0 {
+        digests.push((
+            primary_id,
+            crate::dupeintake::inner_param_value(&fleet, job.samples, job.seed),
+        ));
+    }
+    for ((id, _, _), p) in job.pending.iter().zip(&prints) {
+        if let Some(p) = p {
+            digests.push((
+                *id,
+                crate::dupeintake::inner_param_value(p, job.samples, job.seed),
+            ));
+        }
+    }
+    #[cfg(unix)]
+    crate::twin::set_inner_digests(&digests);
     for (((id, name, _), verdict), r) in job.pending.iter().zip(verdicts).zip(got) {
         let mut msg = b"Fleet intake later: ".to_vec();
         msg.extend_from_slice(name);
@@ -5823,7 +5920,8 @@ pub unsafe fn fleet_append(
             let samples = crate::dupeintake::samples_for_body_checks(
                 read_host_opts(host_ctx, host_cb).body_checks,
             );
-            let seed = u64::from(crate::dupefallback::crc32_ieee(&dupe_key)) | 1;
+            // TwinCheck groups dupe keys case-blind; the samples must land alike
+            let seed = u64::from(crate::dupefallback::crc32_ieee(&dupe_key.to_ascii_lowercase())) | 1;
             let summaries: Vec<&NzbSummaryData> =
                 usable.iter().map(|&i| &candidates[i].summary).collect();
             let (verdicts, print, prints) = fleet_intake(
@@ -6125,6 +6223,13 @@ pub unsafe fn fleet_append(
             if let Some(same) = cand.video {
                 params.push((VIDEO_PARAM, video_param_value(same)));
             }
+            // the video inside, for TwinCheck to tell an alt from a different video
+            let inner = intake_prints[idx].as_ref().map(|p| {
+                crate::dupeintake::inner_param_value(p, intake_samples, intake_seed)
+            });
+            if let Some(d) = inner.as_deref() {
+                params.push((crate::dupeintake::INNER_PARAM, d.as_bytes()));
+            }
             let add_name = fleet_ensure_nzb_ext(&member.name);
             let member_score = fleet_calc_member_add_score(running_id, lowest, top, rank);
             entry.nzb_id = scanner_add_external(
@@ -6268,6 +6373,26 @@ pub unsafe fn fleet_append(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn health_checks_ask_the_longest_retention_server_of_a_backbone() {
+        let r = |id, group, retention, level| HealthServerRank {
+            id,
+            usable: true,
+            group,
+            retention,
+            level,
+        };
+        let mut servers = vec![r(1, 5, 1000, 0), r(2, 5, 3000, 1), r(3, 0, 0, 0), r(4, 6, 0, 1), r(5, 6, 900, 0)];
+        let order = backbone_order(&servers);
+        assert_eq!(order.keys().copied().collect::<Vec<_>>(), vec![2, 4]);
+        // the siblings follow, to be asked when the first has no connection free
+        assert_eq!(order[&2], vec![2, 1]);
+        assert_eq!(order[&4], vec![4, 5]);
+        // an unusable server is never asked
+        servers[1].usable = false;
+        assert_eq!(backbone_order(&servers)[&1], vec![1]);
+    }
     #[test]
     fn kind_probe_keeps_a_third_of_the_fleet_time() {
         // the add-on's 45 s minus the 2 s reserve: 14 s for the probe

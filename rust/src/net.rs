@@ -227,6 +227,8 @@ struct ConnCore {
     remote_addr_cstr: CString,
     graceful: bool,
     cert_verif_level: u32,
+    /// the last `connect_base` failed because the connection was cancelled or the thread stopped
+    connect_cancelled: bool,
 }
 
 impl ConnCore {
@@ -490,10 +492,14 @@ impl ConnCore {
         if res && self.tls && !self.start_tls(true, c"", c"") {
             res = false;
         }
+        self.connect_cancelled = false;
         if res && self.slot.status.load(Ordering::SeqCst) != CS_CANCELLED && !self.is_stopped() {
             self.slot.status.store(CS_CONNECTED, Ordering::SeqCst);
         } else {
             res = false;
+            // seen before do_disconnect, which leaves the status at disconnected
+            self.connect_cancelled =
+                self.slot.status.load(Ordering::SeqCst) == CS_CANCELLED || self.is_stopped();
             self.do_disconnect();
         }
         res
@@ -869,6 +875,10 @@ struct ConnSession {
     nntp_active_group: Option<CString>,
     nntp_line_buf: Option<Box<[u8; NNTP_LINEBUF_SIZE]>>,
     nntp_auth: crate::nntp::Auth,
+    /// How the last `nntp_connect` ended: 0 connected, 1 socket or TLS failed, 2 the
+    /// greeting failed (or the connection dropped during the login), 3 the server refused
+    /// the login, 4 cancelled or stopped.
+    nntp_connect_stage: u8,
 }
 
 impl ConnSession {
@@ -881,8 +891,10 @@ impl ConnSession {
             return true;
         }
         self.nntp_auth.rejected = false;
+        self.nntp_auth.dropped = false;
         self.nntp_active_group = None;
         if !self.core.connect_base() {
+            self.nntp_connect_stage = if self.core.connect_cancelled { 4 } else { 1 };
             return false;
         }
         let line_buf = self
@@ -898,7 +910,17 @@ impl ConnSession {
             srv_host,
             conn_host: &conn_host,
         };
-        let result = crate::nntp::handshake(&mut io, &mut self.nntp_auth).unwrap_or(1);
+        let handshake = crate::nntp::handshake(&mut io, &mut self.nntp_auth);
+        let cancelled = handshake.is_err()
+            || self.core.slot.status.load(Ordering::SeqCst) == CS_CANCELLED
+            || self.core.is_stopped();
+        let result = handshake.unwrap_or(1);
+        self.nntp_connect_stage = match result {
+            0 => 0,
+            _ if cancelled => 4,
+            2 if !self.nntp_auth.dropped => 3,
+            _ => 2,
+        };
         if result != 0 {
             if result == 1 {
                 self.nntp_disconnect(user, pass, srv_name, srv_host);
@@ -1086,6 +1108,7 @@ impl NzbgetRsConn {
             remote_addr_cstr: CString::default(),
             graceful: false,
             cert_verif_level: 2,
+            connect_cancelled: false,
         };
         core.emit_debug(b"Creating Connection");
         Self {
@@ -1096,6 +1119,7 @@ impl NzbgetRsConn {
                 nntp_active_group: None,
                 nntp_line_buf: None,
                 nntp_auth: crate::nntp::Auth::default(),
+                nntp_connect_stage: 0,
             }),
         }
     }
@@ -1137,6 +1161,7 @@ impl NzbgetRsConn {
             remote_addr_cstr: CString::default(),
             graceful: false,
             cert_verif_level: 2,
+            connect_cancelled: false,
         };
         core.emit_debug(b"Creating Connection");
         let host_cstr = core.get_remote_addr().to_owned();
@@ -1149,6 +1174,7 @@ impl NzbgetRsConn {
                 nntp_active_group: None,
                 nntp_line_buf: None,
                 nntp_auth: crate::nntp::Auth::default(),
+                nntp_connect_stage: 0,
             }),
         }
     }
@@ -2717,13 +2743,70 @@ impl PooledNntpConn {
         (*self.conn.session.get()).core.cert_verif_level = self.server.cert_verif_level;
     }
 
+    /// Connects and logs in. A host name with several addresses goes through the address
+    /// plan (`crate::addrpick`): the pinned or fastest address first, then the next one after
+    /// a network-level failure (socket, TLS, greeting), never after a login failure.
     pub unsafe fn connect(&self) -> bool {
-        (*self.conn.session.get()).nntp_connect(
-            &self.server.user,
-            &self.server.password,
-            &self.server.name,
-            &self.server.host,
-        )
+        let session = &mut *self.conn.session.get();
+        if self.conn.slot.status.load(Ordering::SeqCst) == CS_CONNECTED {
+            return true;
+        }
+        let host = String::from_utf8_lossy(self.server.host.to_bytes()).into_owned();
+        let name = String::from_utf8_lossy(self.server.name.to_bytes()).into_owned();
+        let plan = crate::addrpick::plan(&crate::addrpick::ServerFacts {
+            id: self.server.id,
+            name: &name,
+            host: &host,
+            port: self.server.port,
+            ip_version: self.server.ip_version,
+            tls: self.server.tls,
+            cert_verif_level: self.server.cert_verif_level,
+        });
+        if plan.is_empty() {
+            session.core.resolved_addrs.clear();
+            return session.nntp_connect(
+                &self.server.user,
+                &self.server.password,
+                &self.server.name,
+                &self.server.host,
+            );
+        }
+        let total = plan.len();
+        for (i, addr) in plan.iter().enumerate() {
+            session.core.resolved_addrs = vec![addr.as_bytes().to_vec()];
+            let ok = session.nntp_connect(
+                &self.server.user,
+                &self.server.password,
+                &self.server.name,
+                &self.server.host,
+            );
+            if ok {
+                crate::addrpick::report(self.server.id, addr, true);
+                return true;
+            }
+            let status = self.conn.slot.status.load(Ordering::SeqCst);
+            // a refused login fails the same everywhere; a cancel or stop is not the address's fault
+            if matches!(session.nntp_connect_stage, 3 | 4)
+                || status == CS_CANCELLED
+                || session.core.is_stopped()
+            {
+                return false;
+            }
+            crate::addrpick::report(self.server.id, addr, false);
+            if i + 1 < total {
+                crate::log::log_active_bytes(
+                    1,
+                    format!(
+                        "{name}: could not connect to {host} at {addr}, trying {}",
+                        plan[i + 1]
+                    )
+                    .as_bytes(),
+                );
+                // a failed attempt may leave a socket or TLS state behind; start clean
+                session.core.disconnect_base();
+            }
+        }
+        false
     }
 
     pub unsafe fn disconnect(&self) -> bool {
@@ -3018,7 +3101,18 @@ impl NzbgetRsServerPool {
         want_srv: Option<&RsNewsServer>,
         ignore_srvs: &[&RsNewsServer],
     ) -> *mut PooledNntpConn {
-        let conn = self.select_connection(level, want_srv, ignore_srvs, false);
+        self.get_connection_missing(level, want_srv, ignore_srvs, &[])
+    }
+
+    /// [`Self::get_connection`] for an article some backbones answered 430 for.
+    pub fn get_connection_missing(
+        &self,
+        level: i32,
+        want_srv: Option<&RsNewsServer>,
+        ignore_srvs: &[&RsNewsServer],
+        missing: &[crate::nntp::BackboneMiss],
+    ) -> *mut PooledNntpConn {
+        let conn = self.select_connection(level, want_srv, ignore_srvs, missing, false);
         if conn.is_null() && level >= 0 {
             self.download_starved_at_ms
                 .store(pool_now_ms(), Ordering::SeqCst);
@@ -3031,7 +3125,7 @@ impl NzbgetRsServerPool {
     /// handed out while a download was recently refused one.
     pub fn get_check_connection(&self, srv: &RsNewsServer) -> *mut PooledNntpConn {
         let nl = srv.norm_level.load(Ordering::SeqCst);
-        self.select_connection(nl, Some(srv), &[], true)
+        self.select_connection(nl, Some(srv), &[], &[], true)
     }
 
     /// [`Self::get_check_connection`] by server id.
@@ -3044,13 +3138,14 @@ impl NzbgetRsServerPool {
 
     /// Picks a free connection under the pool lock. `for_check`: the admission
     /// rule of [`check_connection_allowed`] is applied to the server that
-    /// actually supplies the connection (a group sibling may), and the check
+    /// actually supplies the connection, and the check
     /// occupancy is reserved in the same critical section.
     fn select_connection(
         &self,
         level: i32,
         want_srv: Option<&RsNewsServer>,
         ignore_srvs: &[&RsNewsServer],
+        missing: &[crate::nntp::BackboneMiss],
         for_check: bool,
     ) -> *mut PooledNntpConn {
         if level < 0 {
@@ -3081,6 +3176,7 @@ impl NzbgetRsServerPool {
                     cur_time,
                     retry_interval,
                 ),
+                retention: s.retention,
             })
             .collect();
 
@@ -3102,11 +3198,8 @@ impl NzbgetRsServerPool {
             .collect();
 
         let want_tuple = want_srv.map(|s| (s.id, s.group));
-        let ignore_tuples: Vec<(i32, i32, i32)> = if want_srv.is_none() {
-            ignore_srvs
-                .iter()
-                .map(|s| (s.id, s.group, s.norm_level.load(Ordering::SeqCst)))
-                .collect()
+        let ignore_ids: Vec<i32> = if want_srv.is_none() {
+            ignore_srvs.iter().map(|s| s.id).collect()
         } else {
             Vec::new()
         };
@@ -3119,7 +3212,8 @@ impl NzbgetRsServerPool {
             &srv_views,
             &conn_views,
             want_tuple,
-            &ignore_tuples,
+            &ignore_ids,
+            missing,
             rand_val,
             &mut unblock,
         );
@@ -3625,6 +3719,7 @@ pub(crate) unsafe fn nzbget_rs_serverpool_test(
     cipher: *const c_char,
     timeout: c_int,
     cert_verif_level: u32,
+    address: &[u8],
     out_err: *mut crate::ffi::RsBuf,
 ) -> c_int {
     let conn_host_cb = crate::ffi::tls_host_cb();
@@ -3672,6 +3767,16 @@ pub(crate) unsafe fn nzbget_rs_serverpool_test(
         core.cert_verif_level = srv.cert_verif_level;
         core.timeout = eff_timeout;
     }
+    if !address.is_empty() {
+        // a per-address check: connect there, keeping the host name for TLS
+        let Some(addr) = crate::addrpick::normalize(&String::from_utf8_lossy(address)) else {
+            if !out_err.is_null() {
+                *out_err = crate::ffi::into_buf(b"Not an IP address".to_vec());
+            }
+            return 0;
+        };
+        conn.session.get_mut().core.resolved_addrs = vec![addr.into_bytes()];
+    }
     conn.slot.set_suppress_errors(false);
     let mut ok =
         conn.session
@@ -3692,6 +3797,10 @@ pub(crate) unsafe fn nzbget_rs_serverpool_test(
             &srv.host,
         );
         ok = !resp.is_null() && matches!(*resp as u8, b'4' | b'2');
+        // QUIT, so the check doesn't hold one of the account's connections
+        conn.session
+            .get_mut()
+            .nntp_disconnect(&srv.user, &srv.password, &srv.name, &srv.host);
     }
     if !ok {
         if let Some(err) = trap.first_err.take() {
@@ -4101,6 +4210,81 @@ mod tests {
             assert_eq!(c2.slot.status.load(Ordering::SeqCst), CS_CANCELLED);
         }
         assert!(reg.inner.lock().unwrap().1.is_empty());
+    }
+
+    /// One NNTP session from a std listener that runs `serve` on the accepted stream.
+    fn stage_after(serve: fn(std::net::TcpStream), cancel_after: Option<u64>) -> u8 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = c_int::from(listener.local_addr().unwrap().port());
+        let server = std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                serve(stream);
+            }
+        });
+        let mut client = NzbgetRsConn::new_client(b"127.0.0.1", port, false, false, false, 0, None);
+        client.session.get_mut().core.timeout = 5;
+        let slot = Arc::clone(&client.slot);
+        let canceller = cancel_after.map(|ms| {
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(ms));
+                slot.cancel(false, None);
+            })
+        });
+        let cs = client.session.get_mut();
+        assert!(!cs.nntp_connect(c"user", c"pass", c"test", c"127.0.0.1"));
+        let stage = cs.nntp_connect_stage;
+        if let Some(c) = canceller {
+            c.join().unwrap();
+        }
+        drop(client);
+        server.join().unwrap();
+        stage
+    }
+
+    #[test]
+    fn connect_stage_tells_cancel_refusal_and_drop_apart() {
+        use std::io::{BufRead, BufReader, Write};
+        // no greeting, then cancelled: a cancel, not the address's fault
+        assert_eq!(
+            stage_after(
+                |s| {
+                    std::thread::sleep(Duration::from_millis(900));
+                    drop(s);
+                },
+                Some(300)
+            ),
+            4
+        );
+        // the server refuses the login
+        assert_eq!(
+            stage_after(
+                |mut s| {
+                    s.write_all(b"200 hi\r\n").unwrap();
+                    let mut r = BufReader::new(s.try_clone().unwrap());
+                    let mut line = String::new();
+                    r.read_line(&mut line).unwrap();
+                    s.write_all(b"481 Authentication failed\r\n").unwrap();
+                    let _ = r.read_line(&mut line);
+                },
+                None
+            ),
+            3
+        );
+        // the connection drops during the login: a network failure
+        assert_eq!(
+            stage_after(
+                |mut s| {
+                    s.write_all(b"200 hi\r\n").unwrap();
+                    let mut r = BufReader::new(s.try_clone().unwrap());
+                    let mut line = String::new();
+                    r.read_line(&mut line).unwrap();
+                },
+                None
+            ),
+            2
+        );
+        // a bad greeting
+        assert_eq!(stage_after(|mut s| s.write_all(b"502 busy\r\n").unwrap(), None), 2);
     }
 
     #[test]

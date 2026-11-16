@@ -144,6 +144,10 @@ pub struct Guard {
     /// Volumes of nested archives that were unpacked further: never counted, but still made
     /// ASCII if they stay on disk.
     intermediate: BTreeSet<PathBuf>,
+    /// Volume-named files an earlier run left behind ([`Guard::seed_existing`]): any archive
+    /// of the job may write them again and consume them, so they wait for
+    /// [`Guard::settle_job`].
+    seeded: BTreeSet<PathBuf>,
     breach: Option<String>,
 }
 
@@ -165,6 +169,7 @@ impl Guard {
             produced: BTreeSet::new(),
             deferred: BTreeSet::new(),
             intermediate: BTreeSet::new(),
+            seeded: BTreeSet::new(),
             breach: None,
         }
     }
@@ -191,11 +196,12 @@ impl Guard {
                     self.folders.insert(rel.clone());
                     stack.push(rel);
                 } else {
-                    // A volume is held back like a fresh one: a nested unpack may consume it.
+                    // A volume is held back until the job's unpack is done: a nested unpack of
+                    // any of its archives may write it again and consume it.
                     if crate::unpack::may_be_archive_volume(crate::fsops::path_to_bytes(Path::new(
                         &e.file_name(),
                     ))) {
-                        self.deferred.insert(rel);
+                        self.seeded.insert(rel);
                     } else {
                         self.files.insert(rel);
                     }
@@ -342,6 +348,7 @@ impl Guard {
             self.folders.extend(new_folders);
             if volume {
                 self.intermediate.remove(&rel);
+                self.seeded.remove(&rel);
                 self.deferred.insert(rel);
             } else if !is_dir {
                 self.files.insert(rel);
@@ -388,6 +395,14 @@ impl Guard {
         Ok(())
     }
 
+    /// [`Guard::settle`] once every unpack pass of the job is done: volumes an earlier run
+    /// left behind that no archive wrote again count too.
+    pub fn settle_job(&mut self) -> Result<(), String> {
+        let seeded = std::mem::take(&mut self.seeded);
+        self.deferred.extend(seeded);
+        self.settle()
+    }
+
     /// Renames every admitted file and folder that exists and whose name is not ASCII to its
     /// [`ascii_name`], deepest first. Run once, when the job's unpack is done.
     ///
@@ -403,6 +418,7 @@ impl Guard {
             .chain(self.folders.iter())
             .chain(self.intermediate.iter())
             .chain(self.deferred.iter())
+            .chain(self.seeded.iter())
             .cloned()
             .collect();
         // Deepest first: a folder is renamed after everything in it.
@@ -717,6 +733,11 @@ pub fn consumed(guard: &SharedGuard, volumes: &[PathBuf]) {
 /// [`Guard::settle`] on a shared guard.
 pub fn settle(guard: &SharedGuard) -> Result<(), String> {
     lock(guard).settle()
+}
+
+/// [`Guard::settle_job`] on a shared guard.
+pub fn settle_job(guard: &SharedGuard) -> Result<(), String> {
+    lock(guard).settle_job()
 }
 
 /// The breach `guard` recorded, if any.
@@ -1525,11 +1546,8 @@ mod tests {
                 ..crate::unpack::RarFeed::default()
             },
         );
-        let on_disk = std::fs::read_dir(&out).map(|d| d.count()).unwrap_or(0);
-        assert!(
-            r.is_err() || on_disk <= 100,
-            "bypass: {on_disk} files on disk, unpack Ok"
-        );
+        let why = r.expect_err("300 Windows-named volumes unpacked within a 100-file limit");
+        assert!(why.contains(LIMIT_PREFIX), "{why}");
     }
 
     #[test]
@@ -1574,6 +1592,71 @@ mod tests {
             },
         );
         assert!(r.is_ok(), "false breach after restart: {r:?}");
+    }
+
+    #[test]
+    fn seeded_volumes_wait_for_the_archive_that_owns_them() {
+        let data: Vec<u8> = (0..150 * 512).map(|i| (i % 251) as u8).collect();
+        let vols = crate::progressive_unpack::tests::rar4_store_volumes("movie.mkv", &data, 512);
+        let names: Vec<String> = (1..=vols.len())
+            .map(|i| format!("inner.part{i:03}.rar"))
+            .collect();
+        let mut entries: Vec<(&str, &[u8])> = names
+            .iter()
+            .zip(&vols)
+            .map(|(n, v)| (n.as_str(), v.as_slice()))
+            .collect();
+        entries.push(("info.nfo", b"nfo"));
+        let t = std::env::temp_dir().join(format!("rg-lim-seed2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        let out = t.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        // An interrupted direct unpack left the inner volumes behind.
+        for (n, v) in &entries {
+            std::fs::write(out.join(n), v).unwrap();
+        }
+        let mut g = Guard::new(Limits::default(), &out, &[]);
+        g.seed_existing();
+        let guard = Arc::new(Mutex::new(g));
+        // Post-processing unpacks archives by name: this one comes first.
+        let a = t.join("a.subs.tar");
+        std::fs::write(&a, tar(&[("subs.srt", b"s")])).unwrap();
+        let b = t.join("movie.tar");
+        std::fs::write(&b, tar(&entries)).unwrap();
+        for archive in [&a, &b] {
+            let r = crate::unpack::extract_archive_with_feed(
+                archive,
+                &out,
+                "",
+                1,
+                true,
+                |_, _| {},
+                &mut || false,
+                crate::unpack::RarFeed {
+                    guard: Some(&guard),
+                    ..crate::unpack::RarFeed::default()
+                },
+            );
+            assert!(r.is_ok(), "false breach at {}: {r:?}", archive.display());
+        }
+        settle_job(&guard).unwrap();
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
+    #[test]
+    fn seeded_volumes_nothing_rewrites_count_when_the_job_settles() {
+        let t = std::env::temp_dir().join(format!("rg-lim-seed3-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        std::fs::create_dir_all(&t).unwrap();
+        for i in 0..101 {
+            std::fs::write(t.join(format!("left.part{i:03}.rar")), b"x").unwrap();
+        }
+        let mut g = Guard::new(Limits::default(), &t, &[]);
+        g.seed_existing();
+        g.settle().unwrap();
+        let why = g.settle_job().unwrap_err();
+        assert!(why.contains("more than 100 files"), "{why}");
+        let _ = std::fs::remove_dir_all(&t);
     }
 
     /// `NzbgetRsParsedOptions` is shared with C++: the header must list the same fields in

@@ -2732,7 +2732,7 @@ impl NzbgetRsUnpackController {
         // names are made ASCII: once every unpack pass of the job is done.
         if st.unpack_ok {
             if let Some(guard) = st.unpack_guard.clone() {
-                if let Err(why) = crate::unpacklimits::settle(&guard) {
+                if let Err(why) = crate::unpacklimits::settle_job(&guard) {
                     self.print_message(ctx, host_cb, st, MK_ERROR, why.as_bytes());
                     st.unpack_ok = false;
                     st.unpack_limit_error = true;

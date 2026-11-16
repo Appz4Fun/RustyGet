@@ -3872,3 +3872,31 @@ fn a_fallback_after_a_given_up_repair_never_places_damaged_bytes() {
         assert_eq!(l0, l1, "crc={crc}\n{log1:?}");
     }
 }
+
+/// zipfast decodes a stored RAR4 backslash as a slash, but reports the stored name while
+/// extracting: the member keeps its stored name, mode and archive time, in every mode.
+#[cfg(unix)]
+#[test]
+fn a_rar4_name_with_a_backslash_keeps_its_name_mode_and_time() {
+    for (tag, overwrite) in [
+        ("bsalways", Overwrite::Always),
+        ("bsrename", Overwrite::Rename),
+    ] {
+        let t = TestDir::new(tag);
+        let data = pattern(70_000);
+        let first = write_set(
+            &t.dl(),
+            &rar4_store_volumes("dir\\file.bin", &data, 1 << 30),
+        );
+        let (r, log) = run_with(&first, &t.out(), Box::new(CompleteSet), overwrite);
+        expect_ok(r, &log);
+        let out = t.out().join("dir\\file.bin");
+        assert_eq!(std::fs::read(&out).unwrap(), data, "{tag}: {log:?}");
+        assert!(!t.out().join("dir").exists(), "{tag}: {log:?}");
+        assert_eq!(mode_of(&out), 0o644, "{tag}");
+        let age = std::time::SystemTime::now()
+            .duration_since(std::fs::metadata(&out).unwrap().modified().unwrap())
+            .unwrap();
+        assert!(age.as_secs() > 86_400, "{tag}: archive time not restored");
+    }
+}

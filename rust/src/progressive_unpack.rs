@@ -817,6 +817,7 @@ where
         // zipfast names a Windows-made member with Windows path rules (a backslash splits); the copy
         // path, which placed the rest of the set, does not.
         && !deferred[0].0.meta.windows_names
+        && !deferred[0].0.meta.separator_mapped
         && first_failure.is_none()
         // zipfast publishes by rename only when it may replace; skip mode would need hard
         // links, which some destinations (exFAT, SMB) do not support.
@@ -959,6 +960,10 @@ struct MemberMeta {
     mtime: Option<(i64, u32)>,
     /// The archive was not made on Unix: zipfast names its output with Windows path rules.
     windows_names: bool,
+    /// A RAR 1.5-4.x name with a slash: zipfast reads a stored backslash as a directory
+    /// separator whatever the host, so it may place the output elsewhere than the copy path,
+    /// which keeps the stored name.
+    separator_mapped: bool,
 }
 
 /// Member metadata by volume, each volume's headers read once. Members with the same name get
@@ -975,8 +980,20 @@ impl MetaCache {
             self.volume = volume.to_path_buf();
             self.members = volume_metadata(volume, password);
         }
+        // zipfast's decoded RAR 1.5-4.x names have slashes where the stored name (the one
+        // zipfast reports while extracting) has backslashes.
+        let mapped;
+        let key = if !self.members.contains_key(name) && name.contains(&b'\\') {
+            mapped = name
+                .iter()
+                .map(|&b| if b == b'\\' { b'/' } else { b })
+                .collect::<Vec<u8>>();
+            mapped.as_slice()
+        } else {
+            name
+        };
         self.members
-            .get_mut(name)
+            .get_mut(key)
             .and_then(|q| q.pop_front())
             .unwrap_or_default()
     }
@@ -1002,6 +1019,7 @@ fn volume_metadata(
                             unix_mode: h.is_unix().then_some(h.attributes as u32),
                             mtime: h.mtime.map(|s| (s, h.mtime_nanos)),
                             windows_names: !h.is_unix(),
+                            separator_mapped: h.rar4.is_some() && h.name.contains('/'),
                         });
                 }
                 Ok(Some(Block::End { .. })) | Ok(None) | Err(_) => break,
@@ -1022,6 +1040,7 @@ fn volume_metadata(
                 unix_mode: (f.attr & 0o170000 == 0o100000).then_some(f.attr & 0o7777),
                 mtime: crate::archive_native::rar4_dos_mtime(f.time),
                 windows_names: f.attr & 0o170000 != 0o100000,
+                separator_mapped: f.filename.contains(&b'\\'),
             });
     }
     out
@@ -1984,7 +2003,9 @@ impl FeedProvider {
         }
         if late.members.is_none() {
             match set_members(&late.first, &late.password) {
-                Some(m) if !m.windows_names && !m.duplicate_names => late.members = Some(m),
+                Some(m) if !m.windows_names && !m.names_differ && !m.duplicate_names => {
+                    late.members = Some(m)
+                }
                 _ => {
                     late.refused = true;
                     return;
@@ -2044,7 +2065,8 @@ struct SetMembers {
     max_name: u64,
     windows_names: bool,
     /// A Windows-made member whose name Windows path rules change (a backslash or one of
-    /// `<>:"|?*`): zipfast would place it elsewhere than the copy path.
+    /// `<>:"|?*`), or a RAR 1.5-4.x name whose backslashes zipfast reads as separators:
+    /// zipfast would place it elsewhere than the copy path.
     names_differ: bool,
     duplicate_names: bool,
 }
@@ -2071,8 +2093,9 @@ fn set_members(first: &Path, password: &str) -> Option<SetMembers> {
             out.count += metas.len() as u64;
             out.duplicate_names |= metas.len() > 1 || !seen.insert(name.clone());
             out.windows_names |= metas.iter().any(|m| m.windows_names);
-            out.names_differ |= metas.iter().any(|m| m.windows_names)
-                && name.iter().any(|b| b"\\<>:\"|?*".contains(b));
+            out.names_differ |= (metas.iter().any(|m| m.windows_names)
+                && name.iter().any(|b| b"\\<>:\"|?*".contains(b)))
+                || metas.iter().any(|m| m.separator_mapped);
             out.max_depth = out.max_depth.max(path_depth(&name));
             out.max_name = out.max_name.max(name.len() as u64);
         }

@@ -1,10 +1,11 @@
 //! Direct unpack of stored RAR members into zipfast persistent partial files.
 //!
-//! Each stored member is written straight to its final name as a persistent `PartialFile`.
-//! Lost article ranges become holes in that file instead of stopping extraction, and once the
-//! damaged volumes are repaired (from par2 or a twin's articles written into the volume files)
-//! only those ranges are read back in with `refill_from_packed`. Nothing is copied into place
-//! and nothing already extracted is redone when a primary dies and the fleet takes over.
+//! Each stored member is written as a persistent `PartialFile` into a private stage under the
+//! destination. Lost article ranges become holes in that file instead of stopping extraction,
+//! and once the damaged volumes are repaired (from par2 or a twin's articles written into the
+//! volume files) only those ranges are read back in with `refill_from_packed`. Verified outputs
+//! are then moved into place (a rename); nothing already extracted is redone when a primary
+//! dies and the fleet takes over. On by default; `RUSTYGET_PERSISTENT_UNPACK=0` turns it off.
 //!
 //! The persistent path runs only when it can: stored members of known size in the first
 //! volume, an expected volume count, overwrite mode and a Unix build. Anything else, and any
@@ -21,11 +22,11 @@ use zipfast::progressive::{
     ProtectedVolume, ProtectionDeclaration, ProtectionInventory, SessionControl, VolumeBacking,
 };
 
-/// Off by default: zipfast commits every 1 MiB write durably, which made a 15 GB member take
-/// 19 minutes against 95 s for the progressive copy path (Linux VM). Set
-/// `RUSTYGET_PERSISTENT_UNPACK=1` to use it until zipfast groups commits.
+/// On by default since zipfast groups persistent commits (#121): on a Linux VM a 15 GB stored
+/// member took 348 s persistent against 320 s for the progressive copy path, and 4 GB took
+/// 22.8 s against 33.9 s. `RUSTYGET_PERSISTENT_UNPACK=0` turns it off.
 pub(super) fn enabled() -> bool {
-    cfg!(test) || std::env::var("RUSTYGET_PERSISTENT_UNPACK").as_deref() == Ok("1")
+    cfg!(test) || std::env::var("RUSTYGET_PERSISTENT_UNPACK").as_deref() != Ok("0")
 }
 
 /// Directory under the destination that holds each set's partial state and trusted anchors.

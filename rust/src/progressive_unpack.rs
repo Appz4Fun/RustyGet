@@ -319,9 +319,6 @@ where
     // declared session still run out of one of zipfast's limits, the set is extracted again
     // undeclared (copied into place), as before declarations: never a failed unpack.
     // A set still downloading goes to persistent partial files when it qualifies.
-    if outputs.is_none() && has_backslash_names(req.first_volume, req.password) {
-        return Err(Error::Unsupported(Unsupported(BACKSLASH_NAME.into())));
-    }
     let feed = if persistent::enabled() && outputs.is_none() && !feed.set_is_final() {
         match persistent::try_extract(req, feed, log_cb, is_cancelled) {
             persistent::Outcome::Done(r) => return r,
@@ -370,24 +367,6 @@ where
 }
 
 /// A zipfast limit that a protection declaration inflates (and an undeclared run may not hit).
-/// zipfast reads a stored RAR 1.5-4.x backslash as a directory separator, and checks and
-/// prepares the output under that name, while RustyGet places the stored name. A set with such
-/// a member in a volume on disk goes to the RAR 1.5-4.x decoder, which keeps the stored name.
-const BACKSLASH_NAME: &str = "RAR 1.5-4.x member name with a backslash";
-
-fn has_backslash_names(first: &Path, password: &str) -> bool {
-    is_rar4_volume(first) && set_members(first, password).is_some_and(|m| m.separator_mapped)
-}
-
-/// The volume starts with the RAR 1.5-4.x signature.
-fn is_rar4_volume(volume: &Path) -> bool {
-    use std::io::Read;
-    let mut sig = [0u8; 7];
-    std::fs::File::open(volume)
-        .and_then(|mut f| f.read_exact(&mut sig))
-        .is_ok_and(|()| &sig == b"Rar!\x1a\x07\x00")
-}
-
 fn is_declaration_limit(what: &str) -> bool {
     what.starts_with("Limit {")
         && [
@@ -586,19 +565,21 @@ where
                 log_cb(4, &format!("Unrar: Extracting from {name}"));
             }
             ProgressiveEvent::MemberStarted { member, name, .. } => {
-                let display = String::from_utf8_lossy(&name).into_owned();
-                log_cb(4, &format!("Unrar: Extracting  {display}"));
                 // Needed for outputs copied into place (zipfast restores it on what it publishes
                 // itself; a checksum-less member of a final set is still copied). Each volume's
                 // headers are read once.
                 let meta = meta_cache.lookup(&current_volume, req.password, &name);
-                if outputs.is_none() && meta.separator_mapped && name.contains(&b'\\') {
-                    for (_, mut a) in partial.drain(..).chain(provisional.drain(..)) {
-                        let _ = a.discard();
-                    }
-                    undo_for_fallback(req, &published);
-                    return Err(Error::Unsupported(Unsupported(BACKSLASH_NAME.into())));
-                }
+                // Placed where unrar and zipfast place it: a RAR 1.5-4.x backslash separates
+                // directories.
+                let name = if meta.separator_mapped {
+                    name.iter()
+                        .map(|&b| if b == b'\\' { b'/' } else { b })
+                        .collect()
+                } else {
+                    name.to_vec()
+                };
+                let display = String::from_utf8_lossy(&name).into_owned();
+                log_cb(4, &format!("Unrar: Extracting  {display}"));
                 next_ordinal += 1;
                 let seen = occurrences.entry(name.to_vec()).or_insert(0u32);
                 let occurrence = *seen;
@@ -776,21 +757,15 @@ where
                 if let Some(mut a) = artifact {
                     let _ = a.discard();
                 }
-                // A backslash name zipfast placed under its decoded name can end the session
-                // (an unsafe path) before its member starts.
-                let backslash = !is_unsupported(&failure)
-                    && outputs.is_none()
-                    && has_backslash_names(req.first_volume, req.password);
-                if is_unsupported(&failure) || backslash {
+                if is_unsupported(&failure) {
                     for (_, mut a) in partial.drain(..).chain(provisional.drain(..)) {
                         let _ = a.discard();
                     }
                     undo_for_fallback(req, &published);
-                    return Err(Error::Unsupported(Unsupported(if backslash {
-                        BACKSLASH_NAME.into()
-                    } else {
-                        format!("{:?}", failure.kind)
-                    })));
+                    return Err(Error::Unsupported(Unsupported(format!(
+                        "{:?}",
+                        failure.kind
+                    ))));
                 }
                 let f = Failure::from_progressive(&failure);
                 log_cb(1, &unrar_error_line(&f, b""));
@@ -851,7 +826,6 @@ where
         // zipfast names a Windows-made member with Windows path rules (a backslash splits); the copy
         // path, which placed the rest of the set, does not.
         && !deferred[0].0.meta.windows_names
-        && !deferred[0].0.meta.separator_mapped
         && first_failure.is_none()
         // zipfast publishes by rename only when it may replace; skip mode would need hard
         // links, which some destinations (exFAT, SMB) do not support.
@@ -994,9 +968,8 @@ struct MemberMeta {
     mtime: Option<(i64, u32)>,
     /// The archive was not made on Unix: zipfast names its output with Windows path rules.
     windows_names: bool,
-    /// A RAR 1.5-4.x name with a slash: zipfast reads a stored backslash as a directory
-    /// separator whatever the host, so it may place the output elsewhere than the copy path,
-    /// which keeps the stored name.
+    /// A RAR 1.5-4.x member: a stored backslash is a directory separator whatever the host,
+    /// as unrar and zipfast read it, so the output is placed under the name with slashes.
     separator_mapped: bool,
 }
 
@@ -1053,7 +1026,7 @@ fn volume_metadata(
                             unix_mode: h.is_unix().then_some(h.attributes as u32),
                             mtime: h.mtime.map(|s| (s, h.mtime_nanos)),
                             windows_names: !h.is_unix(),
-                            separator_mapped: h.rar4.is_some() && h.name.contains('/'),
+                            separator_mapped: h.rar4.is_some(),
                         });
                 }
                 Ok(Some(Block::End { .. })) | Ok(None) | Err(_) => break,
@@ -1074,7 +1047,7 @@ fn volume_metadata(
                 unix_mode: (f.attr & 0o170000 == 0o100000).then_some(f.attr & 0o7777),
                 mtime: crate::archive_native::rar4_dos_mtime(f.time),
                 windows_names: f.attr & 0o170000 != 0o100000,
-                separator_mapped: f.filename.contains(&b'\\'),
+                separator_mapped: true,
             });
     }
     out
@@ -2037,9 +2010,7 @@ impl FeedProvider {
         }
         if late.members.is_none() {
             match set_members(&late.first, &late.password) {
-                Some(m) if !m.windows_names && !m.names_differ && !m.duplicate_names => {
-                    late.members = Some(m)
-                }
+                Some(m) if !m.windows_names && !m.duplicate_names => late.members = Some(m),
                 _ => {
                     late.refused = true;
                     return;
@@ -2099,11 +2070,8 @@ struct SetMembers {
     max_name: u64,
     windows_names: bool,
     /// A Windows-made member whose name Windows path rules change (a backslash or one of
-    /// `<>:"|?*`), or a RAR 1.5-4.x name whose backslashes zipfast reads as separators:
-    /// zipfast would place it elsewhere than the copy path.
+    /// `<>:"|?*`): zipfast would place it elsewhere than the copy path.
     names_differ: bool,
-    /// A RAR 1.5-4.x member name with a backslash (see [`MemberMeta::separator_mapped`]).
-    separator_mapped: bool,
     duplicate_names: bool,
 }
 
@@ -2116,7 +2084,6 @@ fn set_members(first: &Path, password: &str) -> Option<SetMembers> {
         max_name: 0,
         windows_names: false,
         names_differ: false,
-        separator_mapped: false,
         duplicate_names: false,
     };
     let mut seen = std::collections::HashSet::new();
@@ -2130,10 +2097,8 @@ fn set_members(first: &Path, password: &str) -> Option<SetMembers> {
             out.count += metas.len() as u64;
             out.duplicate_names |= metas.len() > 1 || !seen.insert(name.clone());
             out.windows_names |= metas.iter().any(|m| m.windows_names);
-            out.names_differ |= (metas.iter().any(|m| m.windows_names)
-                && name.iter().any(|b| b"\\<>:\"|?*".contains(b)))
-                || metas.iter().any(|m| m.separator_mapped);
-            out.separator_mapped |= metas.iter().any(|m| m.separator_mapped);
+            out.names_differ |= metas.iter().any(|m| m.windows_names)
+                && name.iter().any(|b| b"\\<>:\"|?*".contains(b));
             out.max_depth = out.max_depth.max(path_depth(&name));
             out.max_name = out.max_name.max(name.len() as u64);
         }

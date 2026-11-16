@@ -1457,11 +1457,31 @@ where
     let rename_mode = overwrite_mode == 2;
     let predicted: Arc<Mutex<std::collections::HashSet<PathBuf>>> =
         Arc::new(Mutex::new(std::collections::HashSet::new()));
+    // Folders the archive will create (entries and the parents of every member): a file of
+    // the same name is renamed by zipfast, so the prediction treats them as taken.
+    let archive_folders: std::collections::HashSet<PathBuf> = entries
+        .iter()
+        .flatten()
+        .filter_map(|e| sz_member_rel(&e.name).map(|rel| (rel, e.dir)))
+        .flat_map(|(rel, dir)| {
+            let mut out: Vec<PathBuf> = rel
+                .ancestors()
+                .skip(1)
+                .filter(|a| !a.as_os_str().is_empty())
+                .map(|a| output_dir.join(a))
+                .collect();
+            if dir {
+                out.push(output_dir.join(&rel));
+            }
+            out
+        })
+        .collect();
     let (tx, rx) = mpsc::channel::<SzMsg>();
 
     let select = {
         let breach = Arc::clone(&breach);
         let predicted = Arc::clone(&predicted);
+        let archive_folders = archive_folders.clone();
         let cancel = cancel.clone();
         let dest = output_dir.to_path_buf();
         let tx = Mutex::new(tx.clone());
@@ -1477,7 +1497,11 @@ where
             let admitted = if rename_mode && !m.is_dir {
                 let mut claimed = predicted.lock().unwrap_or_else(|p| p.into_inner());
                 let wanted = dest.join(&rel);
-                let taken = |p: &Path| claimed.contains(p) || std::fs::symlink_metadata(p).is_ok();
+                let taken = |p: &Path| {
+                    claimed.contains(p)
+                        || archive_folders.contains(p)
+                        || std::fs::symlink_metadata(p).is_ok()
+                };
                 let fname = wanted
                     .file_name()
                     .map(|n| n.to_os_string())
@@ -1575,6 +1599,35 @@ where
 
     // Whatever the outcome: zipfast set the folder modes before it returned.
     fix_folders();
+    // zipfast applies the stored file modes as they are; RustyGet keeps owner read/write on
+    // what it extracts (as the old 7z decoder and the RAR path do), so a member stored
+    // read-only or as mode 0 stays readable for the nested unpack and later steps.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let renamed = result
+            .as_ref()
+            .ok()
+            .map(|s| s.renames.iter().map(|r| r.path.clone()));
+        let files = entries
+            .iter()
+            .flatten()
+            .filter(|e| !e.dir)
+            .filter_map(|e| sz_member_rel(&e.name))
+            .map(|rel| output_dir.join(rel))
+            .chain(renamed.into_iter().flatten());
+        for path in files {
+            if let Ok(meta) = std::fs::symlink_metadata(&path) {
+                let mode = meta.permissions().mode() & 0o7777;
+                if meta.is_file() && mode & 0o600 != 0o600 {
+                    let _ = std::fs::set_permissions(
+                        &path,
+                        std::fs::Permissions::from_mode(mode | 0o600),
+                    );
+                }
+            }
+        }
+    }
 
     if let Some(msg) = breach.lock().unwrap_or_else(|p| p.into_inner()).take() {
         log_cb(1, &msg);
@@ -1600,19 +1653,17 @@ where
         }
     };
 
-    // AutoRename: a name zipfast chose differently from the prediction (something appeared
-    // in the folder meanwhile) is counted now.
+    // AutoRename: a name zipfast chose differently from the prediction (a case-insensitive
+    // file system, something that appeared meanwhile) was already counted once under the
+    // predicted name; the actual name is checked for its length and depth without counting
+    // the file a second time.
     if rename_mode {
         let predicted = std::mem::take(&mut *predicted.lock().unwrap_or_else(|p| p.into_inner()));
         for r in &summary.renames {
-            let path = if r.path.is_absolute() {
-                r.path.clone()
-            } else {
-                output_dir.join(&r.path)
-            };
-            if !predicted.contains(&path) {
-                if let Err(msg) = crate::unpacklimits::check(&path, false) {
-                    let _ = std::fs::remove_file(&path);
+            let path = &r.path;
+            if !predicted.contains(path) {
+                if let Err(msg) = crate::unpacklimits::probe(path, false) {
+                    let _ = std::fs::remove_file(path);
                     log_cb(1, &msg);
                     return Err(msg);
                 }
@@ -4102,6 +4153,65 @@ mod tests {
         );
         assert!(res.unwrap_err().contains("more than 1 files"));
         assert_eq!(std::fs::read_dir(&out).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_7z_file_modes_keep_owner_read_write() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempTestDir::new("7z_file_modes");
+        let a = build_7z(&[
+            (
+                "zero.bin",
+                Some(b"zero"),
+                Some(sz_unix_attrs(0o100000, false)),
+            ),
+            ("ro.bin", Some(b"ro"), Some(sz_unix_attrs(0o100444, false))),
+            (
+                "run.sh",
+                Some(b"#!/bin/sh"),
+                Some(sz_unix_attrs(0o100750, false)),
+            ),
+        ]);
+        let path = dir.path().join("modes.7z");
+        std::fs::write(&path, &a).unwrap();
+        let out = dir.path().join("out");
+        extract_7z_cancellable(&path, &out, "", 1, &mut |_, _| {}, &mut || false).unwrap();
+        let mode_of = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode_of(&out.join("zero.bin")) & 0o600, 0o600);
+        assert_eq!(std::fs::read(out.join("zero.bin")).unwrap(), b"zero");
+        assert_eq!(mode_of(&out.join("ro.bin")) & 0o600, 0o600);
+        assert_eq!(mode_of(&out.join("run.sh")) & 0o700, 0o700);
+    }
+
+    #[test]
+    fn test_7z_auto_rename_file_in_the_way_of_a_folder_counts_once() {
+        use crate::unpacklimits::{Guard, Limits, Scope};
+        use std::sync::{Arc, Mutex};
+        let dir = TempTestDir::new("7z_rename_folder");
+        // `d/f` makes the folder `d`; the file `d` after it is renamed by zipfast.
+        let a = build_7z(&[("d/f", Some(b"f"), None), ("d", Some(b"file d"), None)]);
+        let path = dir.path().join("inway.7z");
+        std::fs::write(&path, &a).unwrap();
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        let g = Arc::new(Mutex::new(Guard::new(
+            Limits {
+                max_files: 2,
+                max_depth: 2,
+                max_folders: 10,
+            },
+            &out,
+            &[],
+        )));
+        let res = {
+            let _scope = Scope::enter(&g);
+            extract_7z_cancellable(&path, &out, "", 2, &mut |_, _| {}, &mut || false)
+        };
+        let summary = res.unwrap();
+        assert_eq!(summary.files, 2);
+        assert_eq!(std::fs::read(out.join("d").join("f")).unwrap(), b"f");
+        assert_eq!(std::fs::read(out.join("d_1")).unwrap(), b"file d");
     }
 
     #[test]

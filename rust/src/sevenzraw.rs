@@ -14,12 +14,15 @@
 //! chunks are walked forward and their payloads returned. Only the few articles around the
 //! hole are ever read. A chunk that really was compressed ends the walk: such a stretch is
 //! left to the other repair paths.
+//!
+//! The LZMA2 stream itself is read with zipfast (`zipfast::map`): its chain finder
+//! (`find_stored_chunk_chains`) proposes chunk starts, and from a sync point an
+//! `Lzma2Index` resumed there walks the chunks and plans which packed bytes hold the wanted
+//! output. What stays here is the part only a repair has: fixing the output position of a
+//! chunk by finding its payload among the target's own bytes.
 
 use std::cell::RefCell;
 
-/// Raw chunk control bytes: `0x01` resets the dictionary, `0x02` does not.
-const CTL_RAW_RESET: u8 = 0x01;
-const CTL_RAW: u8 = 0x02;
 /// Links of chunk headers that must chain before a candidate is believed.
 const CHAIN_LINKS: usize = 3;
 /// Payload bytes searched in the target to fix the alignment.
@@ -61,49 +64,36 @@ struct SyncPoint {
     packed: i64,
 }
 
-/// A raw chunk header at `pos` in `data`: returns the payload size.
-fn raw_chunk_at(data: &[u8], pos: usize) -> Option<usize> {
-    if pos + 3 > data.len() {
-        return None;
-    }
-    let ctl = data[pos];
-    if ctl != CTL_RAW && ctl != CTL_RAW_RESET {
-        return None;
-    }
-    Some(((usize::from(data[pos + 1]) << 8) | usize::from(data[pos + 2])) + 1)
+/// Where chains of stored chunk headers start in `data` (a window at unknown alignment).
+fn find_chunk_chains(data: &[u8]) -> Vec<usize> {
+    zipfast::map::find_stored_chunk_chains(data, CHAIN_LINKS)
 }
 
-/// True when `CHAIN_LINKS` raw chunk headers follow one another from `pos` inside `data`.
-fn chain_starts_at(data: &[u8], pos: usize) -> bool {
-    let mut p = pos;
-    for _ in 0..CHAIN_LINKS {
-        let Some(n) = raw_chunk_at(data, p) else {
-            return false;
-        };
-        p += 3 + n;
-    }
-    // The header after the last link must exist and be a plausible control byte too.
-    match data.get(p) {
-        Some(&c) => c == CTL_RAW || c == CTL_RAW_RESET || c >= 0x80 || c == 0,
-        None => false,
-    }
+/// The LZMA2 chunks in `packed` (a window whose byte 0 is a chunk header at output offset
+/// `unpacked`), as zipfast reads them: a resumed walk, ended by the window's end, damage or
+/// the end marker.
+fn index_from(packed: &[u8], unpacked: i64) -> zipfast::map::Lzma2Index {
+    zipfast::map::Lzma2Index::from_bytes(
+        packed,
+        zipfast::map::Lzma2IndexOptions {
+            start: zipfast::map::Lzma2Start::Resume(zipfast::map::Lzma2Position {
+                packed: 0,
+                unpacked: unpacked.max(0) as u64,
+            }),
+            ..Default::default()
+        },
+    )
 }
 
-/// Positions in `data` where a chain of raw chunk headers starts, in order.
-pub fn find_chunk_chains(data: &[u8]) -> Vec<usize> {
-    let mut out = Vec::new();
-    let mut pos = 0usize;
-    while pos + 3 <= data.len() {
-        if chain_starts_at(data, pos) {
-            out.push(pos);
-            // The following headers of this chain would be reported too; skip to the next
-            // chunk so each chain start is tried once per chunk.
-            pos += 3 + raw_chunk_at(data, pos).unwrap_or(0);
-        } else {
-            pos += 1;
-        }
+/// The payload of the stored chunk whose header starts `data`, if it is one.
+fn stored_payload(data: &[u8]) -> Option<&[u8]> {
+    let index = index_from(data, 0);
+    let first = index.chunks.first()?;
+    if first.kind != zipfast::map::Lzma2ChunkKind::Stored {
+        return None;
     }
-    out
+    let p = first.payload();
+    data.get(p.start as usize..(p.end as usize).min(data.len()))
 }
 
 fn has_varied_bytes(data: &[u8]) -> bool {
@@ -238,10 +228,9 @@ impl<'a> Lzma2RawSource<'a> {
                 return false;
             };
             for chain_pos in find_chunk_chains(&slab) {
-                let Some(n) = raw_chunk_at(&slab, chain_pos) else {
+                let Some(payload) = stored_payload(&slab[chain_pos..]) else {
                     continue;
                 };
-                let payload = &slab[chain_pos + 3..(chain_pos + 3 + n).min(slab.len())];
                 if payload.len() < SAMPLE_LEN {
                     continue;
                 }
@@ -320,62 +309,78 @@ impl<'a> Lzma2RawSource<'a> {
             }
         };
 
-        let mut unpacked = start.unpacked;
-        let mut packed = start.packed;
+        // Read the packed stream from the sync point far enough to cover the wanted bytes:
+        // stored chunks cost three header bytes per 64 KiB, and the chunk holding the last
+        // wanted byte may run one whole chunk (64 KiB) past it. Let zipfast walk what was
+        // read; a window that turns out short is extended, never read again.
+        const CHUNK_MAX: i64 = 65_536 + 3;
+        let need = want_end - start.unpacked;
+        let mut span = need + need / 16_384 + CHUNK_MAX + 4096;
         let mut slab: Vec<u8> = Vec::new();
-        let mut slab_start: i64 = 0;
-        let mut last_noted = start.unpacked;
         loop {
-            // Make sure the 3 byte header at `packed` is in the slab.
-            if packed < slab_start || packed + 3 > slab_start + slab.len() as i64 {
-                match self.read_packed_clamped(packed, SLAB) {
-                    Some(s) => {
-                        slab = s;
-                        slab_start = packed;
-                    }
-                    None => return false,
-                }
-            }
-            let rel = (packed - slab_start) as usize;
-            let Some(n) = raw_chunk_at(&slab, rel) else {
-                // A compressed chunk, the end marker, or a short read.
-                return false;
-            };
-            let chunk_start = unpacked;
-            let chunk_end = unpacked + n as i64;
-            if chunk_end > want_start {
-                // Overlap of this payload with the wanted range.
-                let from = want_start.max(chunk_start);
-                let to = want_end.min(chunk_end);
-                let pay_off = packed + 3 + (from - chunk_start);
-                let len = (to - from) as usize;
-                let dst =
-                    &mut buf[(from - want_start) as usize..(from - want_start) as usize + len];
-                let in_slab =
-                    pay_off >= slab_start && pay_off + len as i64 <= slab_start + slab.len() as i64;
-                if in_slab {
-                    let o = (pay_off - slab_start) as usize;
-                    dst.copy_from_slice(&slab[o..o + len]);
-                } else if !(self.read_packed)(pay_off, dst) {
+            let span_len = usize::try_from(span.min(l.pack_size - start.packed)).unwrap_or(0);
+            if span_len > slab.len() {
+                let Some(more) = self
+                    .read_packed_clamped(start.packed + slab.len() as i64, span_len - slab.len())
+                else {
                     return false;
-                } else {
-                    *self.packed_bytes_read.borrow_mut() += len as i64;
+                };
+                slab.extend_from_slice(&more);
+            }
+            let index = index_from(&slab, start.unpacked);
+            let reached = index.end_position();
+            let window_end_reached = start.packed + slab.len() as i64 >= l.pack_size;
+            let ended_by_window = matches!(
+                index.end,
+                zipfast::map::Lzma2End::Truncated { .. } | zipfast::map::Lzma2End::RangeEnd { .. }
+            );
+            if (reached.unpacked as i64) < want_end && ended_by_window && !window_end_reached {
+                if span >= MAX_WALK + buf.len() as i64 {
+                    return false;
                 }
+                span = (span * 2).min(MAX_WALK + buf.len() as i64);
+                continue;
             }
-            unpacked = chunk_end;
-            packed += 3 + n as i64;
-            if unpacked - last_noted >= 1024 * 1024 {
-                // Remember where we are: later reads start closer.
-                self.add_sync(SyncPoint { unpacked, packed });
-                last_noted = unpacked;
+            // Every piece must be a stored payload: a compressed chunk (or damage, or the
+            // end of the stream) in the way ends the borrow.
+            let mut filled = 0usize;
+            for piece in index.plan(want_start as u64..want_end as u64) {
+                let zipfast::map::Lzma2Piece::Stored { packed, .. } = piece else {
+                    return false;
+                };
+                let (from, to) = (packed.start as usize, packed.end as usize);
+                if to > slab.len() || filled + (to - from) > buf.len() {
+                    return false;
+                }
+                buf[filled..filled + (to - from)].copy_from_slice(&slab[from..to]);
+                filled += to - from;
             }
-            if unpacked >= want_end {
-                self.add_sync(SyncPoint { unpacked, packed });
-                return true;
-            }
-            if packed >= l.pack_size {
+            if filled != buf.len() {
                 return false;
             }
+            // Remember chunk boundaries about every MiB, and the last one at or before the
+            // end of this read: later reads start closer.
+            let mut last_noted = start.unpacked;
+            let mut last_before_end = None;
+            for c in &index.chunks {
+                let at = c.unpacked_offset as i64;
+                if at > want_end {
+                    break;
+                }
+                let sp = SyncPoint {
+                    unpacked: at,
+                    packed: start.packed + c.packed_offset as i64,
+                };
+                if at - last_noted >= 1024 * 1024 {
+                    self.add_sync(sp);
+                    last_noted = at;
+                }
+                last_before_end = Some(sp);
+            }
+            if let Some(sp) = last_before_end {
+                self.add_sync(sp);
+            }
+            return true;
         }
     }
 }
@@ -395,7 +400,7 @@ mod tests {
             let n = (30_000 + (seed >> 16) as usize % 35_000)
                 .min(data.len() - pos)
                 .min(65_536);
-            out.push(if first { CTL_RAW_RESET } else { CTL_RAW });
+            out.push(if first { 0x01 } else { 0x02 });
             out.push(((n - 1) >> 8) as u8);
             out.push(((n - 1) & 0xff) as u8);
             out.extend_from_slice(&data[pos..pos + n]);

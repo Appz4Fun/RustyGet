@@ -1732,14 +1732,19 @@ struct CallerPayloadCharge<'a> {
     bytes: u64,
 }
 impl<'a> CallerPayloadCharge<'a> {
+    /// Replays run one chunk at a time under the session's operation lock, so
+    /// a chunk that fits the limit on its own is admitted even while article
+    /// snapshots fill the queue: otherwise a busy download defers committed
+    /// replay, the fallback for every refused snapshot, until it ends. Memory
+    /// stays bounded by the limit plus one chunk.
     fn acquire(entry: &'a ActiveStreamingSession, bytes: u64) -> Result<Self, RepairError> {
         let mut queue = entry.articles.lock().unwrap_or_else(|e| e.into_inner());
         let next = queue.bytes.checked_add(bytes);
         let limit = entry.article_byte_limit.load(Ordering::Acquire);
-        if next.is_none_or(|n| n > limit) {
+        if next.is_none() || bytes > limit {
             return Err(RepairError::StreamingMemoryLimit {
                 context: "live replay payload",
-                required_bytes: next.unwrap_or(u64::MAX),
+                required_bytes: if next.is_none() { u64::MAX } else { bytes },
                 limit_bytes: limit,
             });
         }
@@ -1969,6 +1974,9 @@ pub fn streaming_session_on_recovery_volume_arrived(
         }
         let count = entry.session.on_recovery_volume_arrived(path, queued_id)?;
         entry.grow_for_damage();
+        // The volume may have brought fewer usable blocks than it promised
+        // while in flight; fetch the rest now, not at the next damage.
+        entry.unpause(entry.session.request_unpause().as_ref());
         if let Some(id) = queued_id {
             entry
                 .pending_unpause_ids
@@ -3925,6 +3933,22 @@ mod tests {
         assert_eq!(entry.article_byte_limit.load(Ordering::Relaxed), queue_start + 3 * 4096);
         assert_eq!(entry.budget.lock().unwrap().reserved_bytes(), start + 7 * 4096);
         assert_eq!(entry.lent_memory.load(Ordering::Relaxed), 7 * 4096);
+        // A replay chunk that fits the limit on its own is admitted even
+        // while snapshots fill the queue; a larger one is refused.
+        let limit = entry.article_byte_limit.load(Ordering::Relaxed);
+        entry.articles.lock().unwrap().bytes += limit - 10;
+        {
+            let charge = CallerPayloadCharge::acquire(&entry, limit).unwrap();
+            assert_eq!(entry.articles.lock().unwrap().bytes, 2 * limit - 10);
+            drop(charge);
+        }
+        assert_eq!(entry.articles.lock().unwrap().bytes, limit - 10);
+        assert!(matches!(
+            CallerPayloadCharge::acquire(&entry, limit + 1),
+            Err(RepairError::StreamingMemoryLimit { context: "live replay payload", required_bytes, .. })
+                if required_bytes == limit + 1
+        ));
+        entry.articles.lock().unwrap().bytes -= limit - 10;
         // Pending volume unpauses are drained even with no article queued.
         let _ = streaming_session_take_warning(nzb_id);
         assert!(!streaming_session_pending_article_jobs().contains(&nzb_id));

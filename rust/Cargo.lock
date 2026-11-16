@@ -635,7 +635,7 @@ dependencies = [
 [[package]]
 name = "par-rs"
 version = "0.2.0"
-source = "git+https://github.com/xbmc4lyfe/par-rs?rev=ce2de4ef77f2646fa37e2edd66d23fe339050f06#ce2de4ef77f2646fa37e2edd66d23fe339050f06"
+source = "git+https://github.com/xbmc4lyfe/par-rs?rev=5ed2697de95c294bcd0be8ee61c442a50912298f#5ed2697de95c294bcd0be8ee61c442a50912298f"
 dependencies = [
  "crc32fast",
  "md-5 0.10.6",

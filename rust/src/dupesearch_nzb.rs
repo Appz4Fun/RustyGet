@@ -733,11 +733,15 @@ pub fn eval_fleet_member_health(
     (alive_pct, dead, member_complete)
 }
 
-/// Health share (percent alive) from which a fleet copy counts as healthy.
-pub const FLEET_HEALTHY_ALIVE: i32 = 75;
+/// Health share (permille alive) from which a fleet copy counts as healthy:
+/// 97.5%. Healthy copies go first, then the copies under it, whatever their
+/// kind (the user's rule, 2026-11-16: 97.5%+ health first, then kind). The
+/// intake, the backup rescore ([`crate::donorscore::rerank`]) and the rescue
+/// pick all use it.
+pub const FLEET_HEALTHY_ALIVE_PERMILLE: i32 = 975;
 
 /// `Fleet::Append` candidate ranking and copy interleaving.
-/// Healthy members (at least [`FLEET_HEALTHY_ALIVE`] percent alive) come first,
+/// Healthy members (at least [`FLEET_HEALTHY_ALIVE_PERMILLE`] alive) come first,
 /// then weak ones, then members whose health is not known, then dead and
 /// broken ones; within each, TWINs
 /// go first, then borrowable ALTs, ALTs of unknown packaging and unborrowable
@@ -782,7 +786,7 @@ pub fn rank_fleet_candidates(
             3
         } else if alive[i] < 0 {
             2
-        } else if alive[i] < FLEET_HEALTHY_ALIVE {
+        } else if alive[i].saturating_mul(10) < FLEET_HEALTHY_ALIVE_PERMILLE {
             1
         } else {
             0
@@ -4367,9 +4371,10 @@ mod tests {
         assert_eq!(count, 3);
         assert_eq!(ranked, [2, 0, 1]);
 
-        // among healthy members TWINs first, then borrowable, then unborrowable
-        // ALTs; a weak one (under FLEET_HEALTHY_ALIVE, here the 70% twin) comes
-        // after them, an unchecked one after that, a dead one last
+        // among healthy members (97.5% alive or more) borrowable, then
+        // unborrowable ALTs; the weak ones (here the 90% and 70% twins) come
+        // after them, TWINs first among those, an unchecked one after that, a
+        // dead one last
         let mut ranked = [0usize; 6];
         let count = rank_fleet_candidates(
             &[0, 0, 0, 0, 0, 0],
@@ -4381,7 +4386,7 @@ mod tests {
             &mut ranked,
         );
         assert_eq!(count, 6);
-        assert_eq!(ranked, [2, 3, 0, 1, 5, 4]);
+        assert_eq!(ranked, [3, 0, 2, 1, 5, 4]);
 
         // live fleet 2026-11-15: a 13%-alive copy of unknown packaging ranked
         // ahead of 100%-alive unborrowable (encrypted) copies

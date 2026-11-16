@@ -497,7 +497,7 @@ where
         // unborrowable ALTs, then by measured health and score
         let health_tier = if h.alive_permille < 0 {
             0
-        } else if h.alive_permille < crate::dupesearch_nzb::FLEET_HEALTHY_ALIVE * 10 {
+        } else if h.alive_permille < crate::dupesearch_nzb::FLEET_HEALTHY_ALIVE_PERMILLE {
             1
         } else {
             2
@@ -2006,7 +2006,7 @@ mod tests {
 
     #[test]
     fn rescue_orders_twins_then_borrowable_alts() {
-        let mut twin = rescue_candidate(DUPE_MODE_SCORE, DELETE_STATUS_DUPE, 999_010, 900);
+        let mut twin = rescue_candidate(DUPE_MODE_SCORE, DELETE_STATUS_DUPE, 999_010, 980);
         twin.donor_kind = crate::donorkind::DonorKind::Twin as i32;
         let mut borrowable = rescue_candidate(DUPE_MODE_SCORE, DELETE_STATUS_DUPE, 999_090, 990);
         borrowable.donor_kind = crate::donorkind::DonorKind::Borrowable as i32;
@@ -2016,6 +2016,11 @@ mod tests {
         let history = [unborrowable, borrowable, twin];
         assert_eq!(select_rescue_backup(&history, &queue, |_| true), 2);
         assert_eq!(select_rescue_backup(&history[..2], &queue, |_| true), 1);
+        // a weak twin (90% alive, under 97.5%) comes after the healthy ALTs
+        let mut weak_twin = twin;
+        weak_twin.alive_permille = 900;
+        let history = [weak_twin, unborrowable, borrowable];
+        assert_eq!(select_rescue_backup(&history, &queue, |_| true), 2);
     }
 
     #[test]

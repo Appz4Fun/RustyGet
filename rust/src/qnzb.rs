@@ -223,7 +223,11 @@ struct NzbData {
     files: Mutex<Files>,
     // (id, kind, time, text), oldest first (see `nzbget_rs_nzb_msgs`)
     msgs: Mutex<std::collections::VecDeque<(u32, i32, i64, CString)>>,
+    // host handles (see `nzbget_rs_nzb_slot`)
+    slots: [std::sync::atomic::AtomicUsize; SLOTS],
 }
+
+const SLOTS: usize = 5;
 
 /// A file that finished downloading and left the file list.
 struct Completed {
@@ -336,6 +340,7 @@ pub extern "C" fn nzbget_rs_nzb_scalars_new() -> *mut NzbScalars {
         coll: Mutex::new(Coll::default()),
         files: Mutex::new(Files::default()),
         msgs: Mutex::new(std::collections::VecDeque::new()),
+        slots: std::array::from_fn(|_| std::sync::atomic::AtomicUsize::new(0)),
     });
     Box::into_raw(data).cast()
 }
@@ -883,6 +888,27 @@ pub unsafe extern "C" fn nzbget_rs_post_op(
             list_op(list, op % 10, a2, s1, strs)
         }
         _ => 0,
+    }
+}
+
+/// Host handles kept with a collection: 0 file list, 1 post-processing info,
+/// 2 direct-unpack job, 3 live-repair job, 4 message count. The host owns
+/// what they point to. set != 0 stores v; returns the (previous) value.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_nzb_slot(
+    p: *const NzbScalars,
+    id: c_int,
+    set: c_int,
+    v: usize,
+) -> usize {
+    use std::sync::atomic::Ordering::SeqCst;
+    let Some(slot) = usize::try_from(id).ok().and_then(|i| data(p).slots.get(i)) else {
+        return 0;
+    };
+    if set != 0 {
+        slot.swap(v, SeqCst)
+    } else {
+        slot.load(SeqCst)
     }
 }
 

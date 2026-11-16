@@ -23,7 +23,8 @@ bool LiveNamespaceStop(void* context, int, unsigned, const char*,
 }
 BOOST_AUTO_TEST_CASE(LiveParNamespaceBorrowedRowsCoverQueueAndCompleted)
 {
-    NzbInfo nzb;
+    auto nzbOwner = std::make_unique<NzbInfo>();
+    NzbInfo& nzb = *nzbOwner;
     auto source = std::make_unique<FileInfo>(40);
     source->SetNzbInfo(&nzb);
     source->SetFilename("part40.rar");
@@ -63,7 +64,8 @@ BOOST_AUTO_TEST_CASE(LiveParNamespaceBorrowedRowsCoverQueueAndCompleted)
 }
 BOOST_AUTO_TEST_CASE(LiveParNamespaceSizingRefusalStopsBeforeCopy)
 {
-    NzbInfo nzb;
+    auto nzbOwner = std::make_unique<NzbInfo>();
+    NzbInfo& nzb = *nzbOwner;
     for (int id : {40, 41}) {
         auto file = std::make_unique<FileInfo>(id);
         file->SetNzbInfo(&nzb);

@@ -138,10 +138,11 @@ fn stat_op(list: &mut Vec<[i32; 3]>, server_id: i32, success: i32, failed: i32, 
 
 impl File {
     fn new(id: i32) -> Self {
-        let id = if id != 0 {
-            id
-        } else {
-            ID_GEN.fetch_add(1, Ordering::SeqCst) + 1
+        // < 0: storage for a host object whose constructor sets the id
+        let id = match id {
+            0 => ID_GEN.fetch_add(1, Ordering::SeqCst) + 1,
+            i if i < 0 => 0,
+            i => i,
         };
         let f = Self {
             articles: nzbget_rs_artlist_new(),
@@ -227,7 +228,8 @@ pub unsafe extern "C" fn nzbget_rs_file_free(f: *mut File) {
 }
 
 /// Id generation shared by all files: 0 last generated id, 1 reset to the
-/// highest id seen, 2 reset to zero, 3 raise the floor to `v`.
+/// highest id seen, 2 reset to zero, 3 raise the floor to `v`, 4 generate
+/// the next id.
 #[unsafe(no_mangle)]
 pub extern "C" fn nzbget_rs_file_ids(op: c_int, v: c_int) -> c_int {
     match op {
@@ -245,6 +247,7 @@ pub extern "C" fn nzbget_rs_file_ids(op: c_int, v: c_int) -> c_int {
             ID_MAX.fetch_max(v, Ordering::SeqCst);
             0
         }
+        4 => ID_GEN.fetch_add(1, Ordering::SeqCst) + 1,
         _ => 0,
     }
 }

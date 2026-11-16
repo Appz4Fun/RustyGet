@@ -480,6 +480,9 @@ size_t nzbget_rs_nzb_scalars_size(void);
 // Text fields (ids as in qnzb.rs); null when unset. len < 0: NUL-terminated.
 const char* nzbget_rs_nzb_text(const NzbgetRsNzbScalars* p, int id);
 void nzbget_rs_nzb_set_text(const NzbgetRsNzbScalars* p, int id, const char* s, intptr_t len);
+// Host handles of a collection: 0 file list, 1 post info, 2 unpack job, 3 live-repair job,
+// 4 message count. set != 0 stores v; returns the (previous) value.
+uintptr_t nzbget_rs_nzb_slot(const NzbgetRsNzbScalars* p, int id, int set, uintptr_t v);
 // Small lists of a collection (op codes in qnzb.rs).
 int64_t nzbget_rs_nzb_coll(const NzbgetRsNzbScalars* p, int op, int a2, const NzbgetRsNzbScalars* p2,
     const char* s1, const char* s2, int* ints, const char** strs);

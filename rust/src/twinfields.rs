@@ -737,6 +737,7 @@ impl VolumeSource for Volumes {
 /// video whose header lies beyond it. Keys under `min_size` are dropped too:
 /// a sample or nfo spilling into the last volume after the video is the only
 /// file continued there, and a wrong key would mark a real alt as other.
+/// Only a video counts, so an inner archive (a RAR inside a RAR) gives none.
 /// None for encrypted headers (`-hp`), keyed checks (RAR 5 `-p`), a file whose
 /// CRC is not recorded, or a head with no last part of such a file.
 pub fn rar_last_volume_key(head: &[u8], multi_volume: bool, min_size: u64) -> Option<InnerKey> {
@@ -751,6 +752,7 @@ pub fn rar_last_volume_key(head: &[u8], multi_volume: bool, min_size: u64) -> Op
         .iter()
         .filter(|m| {
             !m.is_dir
+                && crate::streamrepair::is_stream_eligible(&m.raw_name)
                 && if multi_volume {
                     m.split_before
                 } else {

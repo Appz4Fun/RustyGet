@@ -125,9 +125,22 @@ struct ProbeState {
     probe: Option<Probe>,
     running: bool,
     at: Option<Instant>,
+    /// When the running probe started.
+    started: Option<Instant>,
 }
 
-static STATE: Mutex<ProbeState> = Mutex::new(ProbeState { probe: None, running: false, at: None });
+static STATE: Mutex<ProbeState> =
+    Mutex::new(ProbeState { probe: None, running: false, at: None, started: None });
+
+/// A probe still running after this long (a disk that hangs in sync) is
+/// given up on: it no longer blocks a new probe or keeps Settings polling.
+const PROBE_GIVE_UP: Duration = Duration::from_secs(300);
+
+impl ProbeState {
+    fn running_now(&self) -> bool {
+        self.running && self.started.is_some_and(|t| t.elapsed() < PROBE_GIVE_UP)
+    }
+}
 
 /// The last probe, if one has finished.
 pub fn last_probe() -> Option<Probe> {
@@ -152,10 +165,11 @@ pub fn quick_probe() -> Probe {
 pub fn start_probe(inter_dir: Vec<u8>, min_age: Duration) {
     {
         let mut s = STATE.lock().unwrap_or_else(|e| e.into_inner());
-        if s.running || s.at.is_some_and(|at| at.elapsed() < min_age) {
+        if s.running_now() || s.at.is_some_and(|at| at.elapsed() < min_age) {
             return;
         }
         s.running = true;
+        s.started = Some(Instant::now());
     }
     let spawned = std::thread::Builder::new()
         .name("parpreset-probe".into())
@@ -224,8 +238,21 @@ fn disk_test(dir: &[u8], max: u64, limit: Duration) -> Option<(f64, Option<f64>)
     }
     let _remove = Remove(path.clone());
 
-    let block = vec![0x5au8; 4 * MB as usize];
+    // pseudo-random bytes, so a compressing or deduplicating filesystem
+    // (ZFS, btrfs) still has to write them all
+    let mut block = vec![0u8; 4 * MB as usize];
+    let mut x: u64 = 0x9e37_79b9_7f4a_7c15 ^ u64::from(std::process::id());
+    for chunk in block.chunks_exact_mut(8) {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        chunk.copy_from_slice(&x.to_le_bytes());
+    }
     let mut file = std::fs::File::create(&path).ok()?;
+    // macOS: keep the written pages out of the cache too, or the read test
+    // would measure memory (Linux drops them after the sync instead)
+    #[cfg(target_os = "macos")]
+    uncache(&file);
     let start = Instant::now();
     let mut written = 0u64;
     while written < max && start.elapsed() < limit {
@@ -321,6 +348,7 @@ pub fn to_json(probe: Option<&Probe>, running: bool, cpus: usize) -> String {
 pub fn rpc_reply(is_json: bool, start: bool) -> Vec<u8> {
     if start {
         let inter = crate::options::active_options()
+            .filter(|o| !o.no_disk_access())
             .map(|o| o.str_bytes(crate::options::OPT_STR_INTER_DIR).to_vec())
             .unwrap_or_default();
         if !inter.is_empty() {
@@ -329,7 +357,7 @@ pub fn rpc_reply(is_json: bool, start: bool) -> Vec<u8> {
     }
     let (probe, running) = {
         let s = STATE.lock().unwrap_or_else(|e| e.into_inner());
-        (s.probe, s.running)
+        (s.probe, s.running_now())
     };
     let json = to_json(probe.as_ref(), running, crate::sysmetrics::cpu_count());
     if is_json {

@@ -1670,7 +1670,9 @@ pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &
         (c"RenameAfterUnpack", c"yes"),
         (c"RenameIgnoreExt", c""),
         (c"ParRename", c"yes"),
-        (c"ParPreset", c"large"),
+        // a config without the line keeps its written ParBuffer/ParThreads/ParPauseQueue;
+        // new installs get "large" from the rustyget.conf template
+        (c"ParPreset", c"custom"),
         (c"LiveParRepair", c"no"),
         (c"ParBuffer", c"500"),
         (c"ParThreads", c"0"),
@@ -1822,12 +1824,9 @@ pub fn dupe_borrow_first() -> bool {
     DUPE_BORROW_FIRST.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Option `DupeWatch`: look after the queued and history backups of a download
-/// without `DupeSearch` (DupeMode FORCE to SCORE, dead pick, swap, rescue).
-/// Rust-only option, not part of the C scalars block.
 /// `ParPreset` as parsed (see [`crate::parpreset`]).
 pub static PAR_PRESET: std::sync::atomic::AtomicI32 =
-    std::sync::atomic::AtomicI32::new(crate::parpreset::LARGE);
+    std::sync::atomic::AtomicI32::new(crate::parpreset::CUSTOM);
 
 /// `ParPreset` of the loaded configuration.
 pub fn par_preset() -> i32 {
@@ -1844,6 +1843,9 @@ pub fn live_par_repair() -> bool {
     LIVE_PAR_REPAIR.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Option `DupeWatch`: look after the queued and history backups of a download
+/// without `DupeSearch` (DupeMode FORCE to SCORE, dead pick, swap, rescue).
+/// Rust-only option, not part of the C scalars block.
 pub static DUPE_WATCH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 /// Current value of option `DupeWatch`.
@@ -3971,6 +3973,11 @@ pub(crate) fn active_options() -> Option<std::sync::Arc<NzbgetRsOptions>> {
 }
 
 impl NzbgetRsOptions {
+    /// Started with no disk access (`-n`/test mode): nothing may be written.
+    pub fn no_disk_access(&self) -> bool {
+        self.no_disk_access
+    }
+
     pub(crate) fn scalars(&self) -> &NzbgetRsParsedOptions {
         &self.scalars
     }
@@ -5165,8 +5172,13 @@ mod options_full_suite_port_from_cpp {
         let o = RustOptions::new_no_config(Some(&cmd_opts), Some(&mut extender));
         assert_eq!((o.scalars.par_buffer, o.scalars.par_threads), (64, 1));
         assert_eq!(o.scalars.par_pause_queue, 1);
-        // large is the default
-        let o = RustOptions::new_no_config(Some(&[]), Some(&mut extender));
+        // a config without ParPreset (written before it existed) keeps its values
+        let cmd_opts = [c"ParBuffer=2000", c"ParThreads=2", c"ParPauseQueue=yes"];
+        let o = RustOptions::new_no_config(Some(&cmd_opts), Some(&mut extender));
+        assert_eq!((o.scalars.par_buffer, o.scalars.par_threads), (2000, 2));
+        assert_eq!(o.scalars.par_pause_queue, 1);
+        let cmd_opts = [c"ParPreset=large"];
+        let o = RustOptions::new_no_config(Some(&cmd_opts), Some(&mut extender));
         assert_eq!((o.scalars.par_buffer, o.scalars.par_threads), (1024, 0));
         // custom keeps the options as written
         let cmd_opts = [c"ParPreset=custom", c"ParBuffer=100", c"ParThreads=3", c"ParPauseQueue=yes"];

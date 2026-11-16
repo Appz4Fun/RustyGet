@@ -1161,7 +1161,7 @@ pub fn validate_check_and_repair_section(
     if par_repair {
         let buf_status = if par_buffer < 0 {
             check_positive_num(b"ParBuffer", par_buffer)
-        } else if par_buffer < 256 {
+        } else if par_buffer < 256 && crate::options::par_preset() == crate::parpreset::CUSTOM {
             HealthStatus::info(format!(
                 "'ParBuffer' is set to {par_buffer} MB. 256 MB or more is recommended: it speeds up repair and lets most releases repair during the download (500 MB covers about 96%)"
             ))

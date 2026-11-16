@@ -1948,7 +1948,7 @@ var Config = (new function($)
 		tiles.append(overviewTile('CHECK_AND_REPAIR', t('config_overview_par', 'Par check'), 'arrow_right_alt',
 			parCheck ? parCheck.charAt(0).toUpperCase() + parCheck.slice(1) : '-',
 			(yes('ParRepair') ? t('config_overview_repair_on', 'repair on') : t('config_overview_repair_off', 'repair off')) +
-				' · ' + t('config_overview_par_level', 'level: %s').replace('%s', VALUE_LABELS.ParPreset[String(optionValueByName('ParPreset') || 'large').toLowerCase()] || optionValueByName('ParPreset'))));
+				' · ' + t('config_overview_par_level', 'level: %s').replace('%s', VALUE_LABELS.ParPreset[String(optionValueByName('ParPreset') || 'custom').toLowerCase()] || optionValueByName('ParPreset'))));
 		tiles.append(overviewTile('UNPACK', t('config_overview_unpack', 'Unpack'), 'arrow_right_alt',
 			!yes('Unpack') ? t('config_overview_off', 'Off') : yes('DirectUnpack') ? t('config_overview_direct', 'While downloading') : t('config_overview_after', 'After download'),
 			yes('UnpackCleanupDisk') ? t('config_overview_cleanup', 'archives deleted after') : t('config_overview_keep', 'archives kept')));
@@ -2676,7 +2676,7 @@ var Config = (new function($)
 		{
 			return;
 		}
-		var preset = String(group.find('.btn-primary').attr('data-value') || 'large').toLowerCase();
+		var preset = String(group.find('.btn-primary').attr('data-value') || 'custom').toLowerCase();
 		var info = group.siblings('.config-preset-info');
 		var summary = info.find('.config-preset-summary');
 		info.find('.config-preset-detect').toggle(preset === 'detect');

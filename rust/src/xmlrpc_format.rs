@@ -2691,7 +2691,8 @@ pub fn xmlrpc_check_user_access_denied(
             || method_name.eq_ignore_ascii_case(b"checkcastore")
             || method_name.eq_ignore_ascii_case(b"tlscipherstart")
             || method_name.eq_ignore_ascii_case(b"tlscipherstatus")
-            || method_name.eq_ignore_ascii_case(b"tlsciphercancel");
+            || method_name.eq_ignore_ascii_case(b"tlsciphercancel")
+            || method_name.eq_ignore_ascii_case(b"parpresetdetect");
         if forbidden {
             return 2;
         }

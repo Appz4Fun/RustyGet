@@ -189,7 +189,17 @@ fn walk(source: &mut dyn Source, size: u64, password: Option<&str>) -> Result<Vo
         want: None,
         have: (0, Vec::new()),
     }));
-    let options = MapOptions::new("volume.rar").password(password);
+    let mut options = MapOptions::new("volume.rar").password(password);
+    // The C++ reader had no header budget: a volume of a few hundred
+    // thousand small files must still be listed.
+    let limits = &mut options.limits;
+    limits.header_bytes = limits.header_bytes.max(1 << 30);
+    limits.volume_header_bytes = limits.volume_header_bytes.max(1 << 30);
+    limits.metadata_bytes = limits.metadata_bytes.max(1 << 31);
+    limits.name_bytes = limits.name_bytes.max(1 << 30);
+    limits.entries = limits.entries.max(1 << 24);
+    limits.parts = limits.parts.max(1 << 24);
+    limits.header_blocks = limits.header_blocks.max(1 << 25);
     let mut builder = VolumeMapBuilder::new(Box::new(Bridge(shared.clone())), options);
     let mut cx = Context::from_waker(Waker::noop());
     loop {
@@ -810,6 +820,88 @@ mod tests {
             assert!(!read_from(&mut volume, &mut Bytes(data), None, &mut files));
             assert_eq!(files, whole[..1].to_vec(), "{name}");
             assert!(volume.multi_volume);
+        }
+    }
+
+    /// A RAR3 volume of one stored file of `packed` bytes, whose data are
+    /// zeros never kept in memory.
+    struct Sparse {
+        head: Vec<u8>,
+        tail_at: usize,
+        tail: Vec<u8>,
+    }
+    impl Source for Sparse {
+        fn size(&mut self) -> i64 {
+            (self.tail_at + self.tail.len()) as i64
+        }
+        fn read(&mut self, offset: i64, buf: &mut [u8]) -> bool {
+            let start = offset as usize;
+            if start + buf.len() > self.tail_at + self.tail.len() {
+                return false;
+            }
+            for (i, b) in buf.iter_mut().enumerate() {
+                let at = start + i;
+                *b = if at < self.head.len() {
+                    self.head[at]
+                } else if at >= self.tail_at {
+                    self.tail[at - self.tail_at]
+                } else {
+                    0
+                };
+            }
+            true
+        }
+    }
+
+    fn rar3_header(kind: u8, flags: u16, fields: &[u8]) -> Vec<u8> {
+        let mut h = vec![0, 0, kind];
+        h.extend(flags.to_le_bytes());
+        h.extend(((7 + fields.len()) as u16).to_le_bytes());
+        h.extend(fields);
+        let crc = crc32fast::hash(&h[2..]) as u16;
+        h[..2].copy_from_slice(&crc.to_le_bytes());
+        h
+    }
+
+    #[test]
+    fn rar3_sizes_and_offsets_past_4_gib() {
+        for packed in [u32::MAX as u64, (1u64 << 32) + 7, 5 << 30] {
+            let large = packed > u32::MAX as u64;
+            let mut head = b"Rar!\x1a\x07\x00".to_vec();
+            head.extend(rar3_header(0x73, 0, &[0; 6]));
+            let mut f = Vec::new();
+            f.extend((packed as u32).to_le_bytes());
+            f.extend((packed as u32).to_le_bytes());
+            f.push(2); // host os
+            f.extend([0; 4]); // crc
+            f.extend(0x5a6b_2c21u32.to_le_bytes()); // DOS time
+            f.extend([29, 0x30]);
+            f.extend(1u16.to_le_bytes());
+            f.extend(0x20u32.to_le_bytes());
+            if large {
+                f.extend(((packed >> 32) as u32).to_le_bytes());
+                f.extend(((packed >> 32) as u32).to_le_bytes());
+            }
+            f.push(b'a');
+            let flags = 0x8000 | if large { 0x0100 } else { 0 };
+            head.extend(rar3_header(0x74, flags, &f));
+            let data_at = head.len();
+            let mut source = Sparse {
+                tail_at: data_at + packed as usize,
+                tail: rar3_header(0x7b, 0, &[]),
+                head,
+            };
+            let mut volume = Volume::default();
+            let mut files = Vec::new();
+            assert!(
+                read_from(&mut volume, &mut source, None, &mut files),
+                "{packed}"
+            );
+            assert_eq!(files.len(), 1);
+            assert_eq!(files[0].packed_size, packed as i64);
+            assert_eq!(files[0].size, packed as i64);
+            assert_eq!(files[0].data_offset, data_at as i64);
+            assert_eq!(files[0].time, 0x5a6b_2c21);
         }
     }
 }

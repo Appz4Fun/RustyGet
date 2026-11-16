@@ -1933,6 +1933,11 @@ pub fn join_file(
     progress_cb(None, 0);
 
     let dest_filename = [unpack_dir, &[sep], &dest_base_name].concat();
+    // The job's unpack limits (`unpacklimits`) and its ASCII names cover the joined file.
+    if let Err(why) = crate::unpacklimits::check(crate::fsops::path(&dest_filename), false) {
+        log_cb(1, why.as_bytes());
+        return false;
+    }
     let out_file = match std::fs::File::create(crate::fsops::path(&dest_filename)) {
         Ok(f) => f,
         Err(e) => {

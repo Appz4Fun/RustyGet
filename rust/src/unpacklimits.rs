@@ -133,9 +133,6 @@ pub struct Guard {
     /// retried, a direct unpack redone after the download) counts once.
     files: BTreeSet<PathBuf>,
     folders: BTreeSet<PathBuf>,
-    /// Files and folders that were in the unpack folder when the guard was made (an earlier
-    /// direct unpack of the same job): counted, but replaced when a name is made ASCII.
-    seeded: BTreeSet<PathBuf>,
     breach: Option<String>,
 }
 
@@ -154,28 +151,31 @@ impl Guard {
             roots,
             files: BTreeSet::new(),
             folders: BTreeSet::new(),
-            seeded: BTreeSet::new(),
             breach: None,
         }
     }
 
-    /// Counts what an earlier unpack of the same job left in the unpack folder.
+    /// Counts what an earlier unpack of the same job left in the unpack folder (after a
+    /// restart, when its guard is gone). Nothing is refused here: the counts make the next
+    /// file or folder over a limit fail. RustyGet's own working files (`.rustyget-*`) are
+    /// skipped.
     pub fn seed_existing(&mut self) {
         let base = self.roots[0].dir.clone();
-        let mut stack = vec![base.clone()];
-        while let Some(dir) = stack.pop() {
-            let Ok(rd) = std::fs::read_dir(&dir) else {
+        let mut stack = vec![PathBuf::new()];
+        while let Some(rel_dir) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(base.join(&rel_dir)) else {
                 continue;
             };
             for e in rd.flatten() {
-                let path = e.path();
-                let is_dir = e.file_type().is_ok_and(|t| t.is_dir());
-                let _ = self.admit(&path, is_dir);
-                if let Ok(rel) = path.strip_prefix(&base) {
-                    self.seeded.insert(rel.to_path_buf());
+                if e.file_name().to_string_lossy().starts_with(".rustyget-") {
+                    continue;
                 }
-                if is_dir {
-                    stack.push(path);
+                let rel = rel_dir.join(e.file_name());
+                if e.file_type().is_ok_and(|t| t.is_dir()) {
+                    self.folders.insert(rel.clone());
+                    stack.push(rel);
+                } else {
+                    self.files.insert(rel);
                 }
             }
         }
@@ -309,9 +309,9 @@ impl Guard {
     /// [`ascii_name`], deepest first. Run once, when the job's unpack is done.
     ///
     /// When the ASCII name exists already: another file or folder this job wrote keeps it and
-    /// the renamed one gets `_2`, `_3`, ... before its extension; an older copy (an earlier
-    /// unpack of the job, or a file left in the folder) is replaced by a file, and a folder is
-    /// merged into it. Returns the renamed paths as (old, new).
+    /// the renamed one gets `_2`, `_3`, ... before its extension; anything else there (an
+    /// older copy from an earlier unpack the job has already renamed) is replaced by a file,
+    /// and a folder is merged into it. Returns the renamed paths as (old, new).
     pub fn asciify(&self) -> std::io::Result<Vec<(PathBuf, PathBuf)>> {
         let base = &self.roots[0].dir;
         let mut entries: Vec<&PathBuf> = self.files.iter().chain(self.folders.iter()).collect();
@@ -335,9 +335,8 @@ impl Guard {
 
     /// A distinct file or folder this job wrote at `path`.
     fn taken(&self, path: &Path) -> bool {
-        path.strip_prefix(&self.roots[0].dir).is_ok_and(|r| {
-            (self.files.contains(r) || self.folders.contains(r)) && !self.seeded.contains(r)
-        })
+        path.strip_prefix(&self.roots[0].dir)
+            .is_ok_and(|r| self.files.contains(r) || self.folders.contains(r))
     }
 
     /// Moves `src` to `dir/name` as [`Guard::asciify`] describes; returns where it went.
@@ -529,6 +528,44 @@ fn free_name(dir: &Path, name: &str) -> PathBuf {
         .map(|n| dir.join(format!("{stem}_{n}{ext}")))
         .find(|p| std::fs::symlink_metadata(p).is_err())
         .expect("a free name")
+}
+
+/// Renames `path` to its [`ascii_name`] when its name is not ASCII, with `_2`, `_3`, ... when
+/// that name is taken; returns the new path. For names given to unpacked files after the
+/// unpack (a par rename in the final folder).
+pub fn ascii_rename(path: &Path) -> std::io::Result<Option<PathBuf>> {
+    let (Some(name), Some(dir)) = (path.file_name(), path.parent()) else {
+        return Ok(None);
+    };
+    if is_ascii(name) || std::fs::symlink_metadata(path).is_err() {
+        return Ok(None);
+    }
+    let target = free_name(dir, &ascii_name(&name.to_string_lossy()));
+    std::fs::rename(path, &target)?;
+    Ok(Some(target))
+}
+
+/// Handed from a finished direct unpack to the job's post-processing, by unpack folder.
+static HANDED_OVER: Mutex<Vec<SharedGuard>> = Mutex::new(Vec::new());
+
+/// Keeps a finished direct unpack's guard for the job's post-processing, so the limits count
+/// both.
+pub fn hand_over(guard: &SharedGuard) {
+    let dir = lock(guard).unpack_dir().to_path_buf();
+    let mut h = lock(&HANDED_OVER);
+    h.retain(|g| lock(g).unpack_dir() != dir);
+    h.push(Arc::clone(guard));
+    // Jobs deleted before post-processing never take theirs.
+    if h.len() > 64 {
+        h.remove(0);
+    }
+}
+
+/// The guard a direct unpack into `unpack_dir` handed over, if any.
+pub fn take_handed_over(unpack_dir: &Path) -> Option<SharedGuard> {
+    let mut h = lock(&HANDED_OVER);
+    let i = h.iter().position(|g| lock(g).unpack_dir() == unpack_dir)?;
+    Some(h.remove(i))
 }
 
 /// The breach `guard` recorded, if any.
@@ -1003,36 +1040,62 @@ mod tests {
     }
 
     #[test]
-    fn an_earlier_unpack_is_counted_and_its_copies_replaced() {
+    fn an_earlier_unpack_is_counted_without_refusing_anything() {
         let t = std::env::temp_dir().join(format!("rg-seed-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&t);
-        std::fs::create_dir_all(t.join("Cafe")).unwrap();
-        std::fs::write(t.join("Cafe").join("old.txt"), b"old").unwrap();
-        std::fs::write(t.join("Cafe.txt"), b"stale").unwrap();
+        std::fs::create_dir_all(t.join("Sub")).unwrap();
+        std::fs::write(t.join("Sub").join("a.txt"), b"a").unwrap();
+        std::fs::write(t.join("Cafe.txt"), b"plain").unwrap();
+        std::fs::write(t.join("Café.txt"), b"accent").unwrap();
+        // A direct unpack's working state, deeper than the limit.
+        std::fs::create_dir_all(t.join(".rustyget-partial/0011/out/x")).unwrap();
+        std::fs::write(t.join(".rustyget-partial/0011/out/x/f"), b"p").unwrap();
         let mut g = Guard::new(
             Limits {
-                max_files: 3,
+                max_files: 4,
                 ..Limits::default()
             },
             &t,
             &[],
         );
         g.seed_existing();
-        assert_eq!(g.files.len(), 2);
-        // The job's own unpack again: the same member under its original name.
-        std::fs::write(t.join("Café.txt"), b"new").unwrap();
-        g.admit(&t.join("Café.txt"), false).unwrap();
-        std::fs::create_dir_all(t.join("Café")).unwrap();
-        std::fs::write(t.join("Café").join("new.txt"), b"n").unwrap();
-        g.admit(&t.join("Café").join("new.txt"), false).unwrap_err();
-        // Over the limit by one; drop the extra file and rename what was admitted.
-        std::fs::remove_file(t.join("Café").join("new.txt")).unwrap();
-        g.breach = None;
-        g.admit(&t.join("Café"), true).unwrap();
+        assert_eq!(g.breach(), None);
+        assert_eq!(g.files.len(), 3);
+        assert_eq!(g.folders.len(), 1);
+        // Written again: counted once. One more file fits, the next does not.
+        g.admit(&t.join("Sub").join("a.txt"), false).unwrap();
+        g.admit(&t.join("new.txt"), false).unwrap();
+        assert!(g.admit(&t.join("more.txt"), false).is_err());
+        // Two members of the job whose ASCII names clash both stay.
         g.asciify().unwrap();
-        assert_eq!(names_in(&t), ["Cafe", "Cafe.txt"]);
-        assert_eq!(std::fs::read(t.join("Cafe.txt")).unwrap(), b"new");
-        assert_eq!(names_in(&t.join("Cafe")), ["old.txt"]);
+        assert_eq!(std::fs::read(t.join("Cafe.txt")).unwrap(), b"plain");
+        assert_eq!(std::fs::read(t.join("Cafe_2.txt")).unwrap(), b"accent");
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
+    #[test]
+    fn a_direct_unpack_hands_its_guard_to_post_processing() {
+        let dir = std::env::temp_dir().join(format!("rg-handover-{}", std::process::id()));
+        let g = Guard::shared(&dir, &[]);
+        lock(&g).admit(&dir.join("a.mkv"), false).unwrap();
+        hand_over(&g);
+        let got = take_handed_over(&dir).unwrap();
+        assert!(Arc::ptr_eq(&g, &got));
+        assert!(take_handed_over(&dir).is_none());
+    }
+
+    #[test]
+    fn a_renamed_name_is_made_ascii() {
+        let t = std::env::temp_dir().join(format!("rg-asciiren-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        std::fs::create_dir_all(&t).unwrap();
+        std::fs::write(t.join("Amélie.mkv"), b"m").unwrap();
+        std::fs::write(t.join("plain.mkv"), b"p").unwrap();
+        assert_eq!(
+            ascii_rename(&t.join("Amélie.mkv")).unwrap(),
+            Some(t.join("Amelie.mkv"))
+        );
+        assert_eq!(ascii_rename(&t.join("plain.mkv")).unwrap(), None);
         let _ = std::fs::remove_dir_all(&t);
     }
 

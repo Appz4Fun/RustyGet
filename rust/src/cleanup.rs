@@ -772,7 +772,12 @@ where
         return 3;
     }
 
-    let target_name = crate::collection::resolve_target_name(meta_name, nzb_name);
+    let mut target_name = crate::collection::resolve_target_name(meta_name, nzb_name);
+    if is_post_unpack {
+        // Unpacked names are ASCII only (`unpacklimits`).
+        target_name =
+            crate::unpacklimits::ascii_name(&String::from_utf8_lossy(&target_name)).into_bytes();
+    }
     let stage_label: &[u8] = if is_post_unpack {
         b"Post-unpack renaming"
     } else {

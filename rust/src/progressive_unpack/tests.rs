@@ -4318,7 +4318,7 @@ fn set_with_directory(dir: &Path, host: u64, dir_attr: u64) -> (PathBuf, Vec<u8>
 #[test]
 fn a_directory_entry_extracts_while_the_set_downloads() {
     let t = TestDir::new("direntry_dl");
-    let (first, a) = set_with_directory(&t.dl(), 1, 0o040755);
+    let (first, a) = set_with_directory(&t.dl(), 1, 0o040550);
     let damaged = Damaged {
         holes: Vec::new(),
         repair: Vec::new(),
@@ -4329,8 +4329,17 @@ fn a_directory_entry_extracts_while_the_set_downloads() {
     expect_ok(r, &log);
     assert!(t.out().join("Sub").is_dir());
     assert_eq!(std::fs::read(t.out().join("Sub/a.bin")).unwrap(), a);
+    // Stored 0550 with owner access kept, and the stored time.
     #[cfg(unix)]
-    assert_eq!(mode_of(&t.out().join("Sub")), 0o755);
+    assert_eq!(mode_of(&t.out().join("Sub")), 0o750);
+    let mtime = std::fs::metadata(t.out().join("Sub"))
+        .unwrap()
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    assert_eq!(mtime, 1_700_000_000);
 }
 
 #[test]

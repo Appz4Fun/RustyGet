@@ -539,6 +539,8 @@ where
     // Outputs this call copied into place, removed again if the fallback decoder has to redo
     // the set in rename mode (it would otherwise add renamed second copies).
     let mut published: Outputs = Vec::new();
+    // Directory entries created here (undeclared sets), with their stored times.
+    let mut placed_dirs: Vec<(PathBuf, Option<(i64, u32)>)> = Vec::new();
     let mut next_ordinal = 0u64;
     let mut occurrences: std::collections::HashMap<Vec<u8>, u32> = Default::default();
     // Highest member ordinal already in place per name: a member repaired later must not
@@ -665,7 +667,12 @@ where
                         // directories only with publication authority, so make it here, as the
                         // copy path places files.
                         match place_directory(req.dest, &member) {
-                            Ok(()) => summary.dirs += 1,
+                            Ok(dir) => {
+                                summary.dirs += 1;
+                                // Its time is applied after its children are placed.
+                                placed_dirs.retain(|(d, _)| *d != dir);
+                                placed_dirs.push((dir, member.meta.mtime));
+                            }
                             Err(f) => {
                                 log_cb(1, &unrar_error_line(&f, &name));
                                 first_failure.get_or_insert(f);
@@ -929,6 +936,7 @@ where
         }
     }
 
+    set_directory_times(placed_dirs);
     if let Some(out) = outputs.as_deref_mut() {
         out.extend(published);
     }
@@ -1505,14 +1513,11 @@ fn fix_published_mode(dest: &Path, member: &Member) {
 
 /// Creates a directory member under `dest` the way the copy path creates an output's
 /// folders: never through a symlink. A stored Unix mode is applied with owner access kept.
-fn place_directory(dest: &Path, member: &Member) -> Result<(), Failure> {
+fn place_directory(dest: &Path, member: &Member) -> Result<PathBuf, Failure> {
     let display = String::from_utf8_lossy(&member.name);
     // Unix rules, as publish_copy names the directory's files.
     let rel = zipfast::path::sanitize(&display, false)
         .map_err(|e| Failure::UnsafePath(format!(" {display}: {e}")))?;
-    if rel.as_os_str().is_empty() {
-        return Ok(());
-    }
     let dir = crate::archive_native::create_dir_all_no_follow(dest, &rel)
         .map_err(|e| Failure::Other(format!("cannot create {}: {e}", rel.display())))?;
     #[cfg(unix)]
@@ -1523,9 +1528,27 @@ fn place_directory(dest: &Path, member: &Member) -> Result<(), Failure> {
             std::fs::Permissions::from_mode((mode & 0o777) | 0o700),
         );
     }
-    #[cfg(not(unix))]
-    let _ = dir;
-    Ok(())
+    Ok(dir)
+}
+
+/// Applies the stored modification times of the directories placed here, deepest first and
+/// after their children, as zipfast's declared path does for the directories it publishes.
+fn set_directory_times(mut dirs: Vec<(PathBuf, Option<(i64, u32)>)>) {
+    use std::time::{Duration, UNIX_EPOCH};
+    dirs.sort_by_key(|(d, _)| std::cmp::Reverse(d.components().count()));
+    for (dir, mtime) in dirs {
+        let Some((secs, nanos)) = mtime else {
+            continue;
+        };
+        let at = if secs >= 0 {
+            UNIX_EPOCH.checked_add(Duration::new(secs as u64, nanos.min(999_999_999)))
+        } else {
+            UNIX_EPOCH.checked_sub(Duration::from_secs(secs.unsigned_abs()))
+        };
+        if let (Some(at), Ok(f)) = (at, std::fs::File::open(&dir)) {
+            let _ = f.set_modified(at);
+        }
+    }
 }
 
 fn copy_artifact(

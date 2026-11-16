@@ -1069,6 +1069,10 @@ pub(crate) fn streaming_session_process_completed_file_with_start(
                 start(file, Arc::clone(&item.writers))?;
                 return Ok(true);
             }
+            // A volume that failed outright may never have been written.
+            if !file.successful && !file.path.exists() {
+                return Ok(false);
+            }
             // A recovery volume that lost articles still carries good blocks:
             // every packet is checked by MD5 and the reader resyncs past holes,
             // so only the damaged blocks are lost. Dropping the whole volume made

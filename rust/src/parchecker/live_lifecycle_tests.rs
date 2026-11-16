@@ -357,7 +357,7 @@ fn live_file_completion_queue_starts_from_first_par_and_replays_committed_source
 #[test]
 fn damaged_recovery_volume_still_delivers_its_good_blocks() {
     let fx = Fixture::new();
-    let id = -1900141;
+    let id = -1900199;
     let par = LiveCompletedFile {
         nzb_id: id,
         base_dir: fx.0.clone(),

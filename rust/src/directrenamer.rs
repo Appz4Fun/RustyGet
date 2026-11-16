@@ -680,7 +680,11 @@ fn resolve_new_name(
     hard_linking: bool,
     vol: &mut i32,
 ) -> Vec<u8> {
-    let mut new_name = if par_file && need_pars {
+    // A par2 file whose first article failed has no set id: an empty base name
+    // would make it a nameless dotfile, so it keeps its name.
+    let mut new_name = if par_file && need_pars && par_set_id.is_empty() {
+        Vec::new()
+    } else if par_file && need_pars {
         par_name_on_disk(filename, dest_dir, par_set_id, b'/', vol)
     } else if !par_file {
         let c_old = to_cstring(filename);
@@ -943,6 +947,24 @@ fn rename_file_on_disk(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn par_file_without_set_id_keeps_its_name() {
+        let mut vol = 1;
+        let name = resolve_new_name(
+            b"q8w7.vol07+08.par2",
+            true,
+            b"",
+            b"",
+            b"/nonexistent-dest",
+            &[],
+            true,
+            false,
+            &mut vol,
+        );
+        assert!(name.is_empty());
+        assert_eq!(vol, 1);
+    }
 
     #[test]
     fn regular_name_takes_the_first_matching_hash() {

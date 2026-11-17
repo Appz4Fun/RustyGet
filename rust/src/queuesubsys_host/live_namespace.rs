@@ -238,3 +238,355 @@ impl QueueSubsysHost {
         Ok(facts)
     }
 }
+
+/// Borrowed-row visitor: (context, queue id, flags, name, original, hash16k, output).
+/// Returning false stops the walk.
+pub(crate) type NamespaceVisitor = unsafe extern "C" fn(
+    *mut c_void,
+    c_int,
+    u32,
+    *const c_char,
+    *const c_char,
+    *const c_char,
+    *const c_char,
+) -> bool;
+
+/// Host op 43 sub-op 15: walks a collection's queued files, then its completed
+/// files, lending each row's strings to `visit` for the duration of the call.
+/// The caller holds the queue throughout. Returns 0 on a callback or limit
+/// refusal, 1 when complete, 2 when the collection is transiently busy
+/// (parking, deleting, or a file whose final assembly may be clearing its
+/// output name). Flags: 1 par file, 2 deleted, 4 completed record.
+pub(crate) unsafe fn live_par_visit_namespace(
+    nzb: *const crate::qnzb::NzbScalars,
+    visit: Option<NamespaceVisitor>,
+    context: *mut c_void,
+) -> usize {
+    use crate::qfile::{
+        field, nzbget_rs_file_get, nzbget_rs_file_op, nzbget_rs_file_text, text, File,
+    };
+    let Some(visit) = visit else { return 0 };
+    if nzb.is_null() {
+        return 0;
+    }
+    let scalars = &*nzb;
+    if scalars.parking || scalars.deleting {
+        return 2;
+    }
+    let list = crate::qnzb::file_list(nzb) as *const crate::qlist::PtrList;
+    let op = |op: c_int, a: i64| {
+        crate::qlist::nzbget_rs_ptrlist_op(list, op, a, 0, std::ptr::null(), std::ptr::null())
+    };
+    let queued = op(0, 0).max(0) as usize;
+    let none = std::ptr::null_mut();
+    let nl: *mut i64 = std::ptr::null_mut();
+    let ns: *mut *const c_char = std::ptr::null_mut();
+    let completed_count = crate::qnzb::nzbget_rs_nzb_files(
+        nzb,
+        0,
+        0,
+        std::ptr::null(),
+        std::ptr::null(),
+        std::ptr::null(),
+        none,
+        nl,
+        ns,
+        std::ptr::null(),
+    )
+    .max(0) as usize;
+    if queued > MAX_ROWS || completed_count > MAX_ROWS - queued {
+        return 0;
+    }
+    let files: Vec<*const File> = (0..queued)
+        .map(|i| op(1, i as i64) as usize as *const File)
+        .collect();
+    // Final assembly can clear the output name outside the queue, even while
+    // its last downloader is still registered. Do not borrow in that window.
+    for &f in &files {
+        let total = nzbget_rs_file_get(f, field::TOTAL_ARTICLES) as i32;
+        let completed = nzbget_rs_file_get(f, field::COMPLETED_ARTICLES) as i32;
+        let missed = nzbget_rs_file_get(f, field::MISSED_ARTICLES) as i32;
+        if total < 0 || completed < 0 || missed < 0 {
+            return 0;
+        }
+        if total > 0 && i64::from(completed) + i64::from(missed) >= i64::from(total) {
+            return 2;
+        }
+    }
+    let empty = c"".as_ptr();
+    let or_empty = |s: *const c_char| if s.is_null() { empty } else { s };
+    for &f in &files {
+        let taken = nzbget_rs_file_op(f, 20, 0, std::ptr::null(), none, ns) != 0;
+        let flags = u32::from(nzbget_rs_file_get(f, field::PAR_FILE) != 0)
+            | (u32::from(nzbget_rs_file_get(f, field::DELETED) != 0) << 1);
+        let kept = visit(
+            context,
+            nzbget_rs_file_get(f, field::ID) as c_int,
+            flags,
+            or_empty(nzbget_rs_file_text(f, text::FILENAME)),
+            or_empty(nzbget_rs_file_text(f, text::ORIGNAME)),
+            or_empty(nzbget_rs_file_text(f, text::HASH16K)),
+            or_empty(nzbget_rs_file_text(f, text::OUTPUT_FILENAME)),
+        );
+        if taken {
+            nzbget_rs_file_op(f, 21, 0, std::ptr::null(), none, ns);
+        }
+        if !kept {
+            return 0;
+        }
+    }
+    for i in 0..completed_count {
+        let mut ints = [0 as c_int; 4];
+        let mut strs = [std::ptr::null::<c_char>(); 4];
+        if crate::qnzb::nzbget_rs_nzb_files(
+            nzb,
+            1,
+            i as c_int,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            ints.as_mut_ptr(),
+            nl,
+            strs.as_mut_ptr(),
+            std::ptr::null(),
+        ) != 0
+        {
+            return 0;
+        }
+        let flags = 4 | u32::from(ints[2] != 0);
+        if !visit(
+            context,
+            ints[0],
+            flags,
+            or_empty(strs[0]),
+            or_empty(strs[1]),
+            or_empty(strs[2]),
+            empty,
+        ) {
+            return 0;
+        }
+    }
+    1
+}
+
+/// Ported from tests/queue/LiveParSourceClaimTest.h (the retired C++ harness).
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::qfile::{
+        field, nzbget_rs_file_new, nzbget_rs_file_set, nzbget_rs_file_set_text, text,
+    };
+    use crate::qnzb::{
+        nzbget_rs_nzb_scalars_free, nzbget_rs_nzb_scalars_new, nzbget_rs_nzb_slot, NzbScalars,
+    };
+
+    struct Row {
+        id: i32,
+        flags: u32,
+        name: String,
+        original: String,
+        hash: String,
+        output: String,
+    }
+
+    unsafe extern "C" fn drop_file(p: usize) {
+        crate::qfile::nzbget_rs_file_free(p as *mut crate::qfile::File);
+    }
+
+    /// A collection with a Rust file list, as NzbInfo's constructor builds it.
+    struct Nzb(*mut NzbScalars);
+    impl Nzb {
+        fn new() -> Self {
+            let p = nzbget_rs_nzb_scalars_new();
+            let list = crate::qlist::nzbget_rs_ptrlist_new(drop_file);
+            unsafe { nzbget_rs_nzb_slot(p, 0, 1, list as usize) };
+            Nzb(p)
+        }
+        fn add(&self, id: i32, name: &str) -> *mut crate::qfile::File {
+            let f = nzbget_rs_file_new(id);
+            let n = std::ffi::CString::new(name).unwrap();
+            unsafe {
+                nzbget_rs_file_set(f, field::NZB, self.0 as i64);
+                nzbget_rs_file_set_text(f, text::FILENAME, n.as_ptr());
+                let list = crate::qnzb::file_list(self.0) as *const crate::qlist::PtrList;
+                crate::qlist::nzbget_rs_ptrlist_op(
+                    list,
+                    3,
+                    0,
+                    f as usize,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                );
+            }
+            f
+        }
+        fn host(&self, ctx: *mut c_void, v: NamespaceVisitor) -> usize {
+            unsafe {
+                native_op(
+                    43,
+                    15,
+                    0,
+                    self.0 as usize,
+                    ctx as usize,
+                    v as *const () as *const c_char,
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            }
+            .expect("op 43/15 is answered in Rust")
+        }
+        fn walk(&self, ctx: *mut c_void, v: NamespaceVisitor) -> usize {
+            unsafe { live_par_visit_namespace(self.0, Some(v), ctx) }
+        }
+    }
+    impl Drop for Nzb {
+        fn drop(&mut self) {
+            unsafe {
+                let list = nzbget_rs_nzb_slot(self.0, 0, 1, 0);
+                crate::qlist::nzbget_rs_ptrlist_free(list as *mut crate::qlist::PtrList);
+                nzbget_rs_nzb_scalars_free(self.0);
+            }
+        }
+    }
+
+    unsafe fn s(p: *const c_char) -> String {
+        CStr::from_ptr(p).to_string_lossy().into_owned()
+    }
+    unsafe extern "C" fn collect(
+        ctx: *mut c_void,
+        id: c_int,
+        flags: u32,
+        name: *const c_char,
+        original: *const c_char,
+        hash: *const c_char,
+        output: *const c_char,
+    ) -> bool {
+        let rows = &mut *ctx.cast::<Vec<Row>>();
+        rows.push(Row {
+            id,
+            flags,
+            name: s(name),
+            original: s(original),
+            hash: s(hash),
+            output: s(output),
+        });
+        true
+    }
+    unsafe extern "C" fn stop(
+        ctx: *mut c_void,
+        _: c_int,
+        _: u32,
+        _: *const c_char,
+        _: *const c_char,
+        _: *const c_char,
+        _: *const c_char,
+    ) -> bool {
+        *ctx.cast::<i32>() += 1;
+        false
+    }
+
+    #[test]
+    fn live_par_namespace_borrowed_rows_cover_queue_and_completed() {
+        let nzb = Nzb::new();
+        let source = nzb.add(40, "part40.rar");
+        unsafe {
+            nzbget_rs_file_set_text(source, text::ORIGNAME, c"original-part40.rar".as_ptr());
+            nzbget_rs_file_set_text(
+                source,
+                text::HASH16K,
+                c"00112233445566778899aabbccddeeff".as_ptr(),
+            );
+            nzbget_rs_file_set_text(
+                source,
+                text::OUTPUT_FILENAME,
+                c"/fixture/40.out.tmp".as_ptr(),
+            );
+            nzbget_rs_file_set(source, field::ACTIVE_DOWNLOADS, 1);
+        }
+        let parity = nzb.add(99, "rel.par2");
+        unsafe { nzbget_rs_file_set(parity, field::PAR_FILE, 1) };
+        let mut ints = [39, 1 /* cfSuccess */, 0, 0];
+        let mut strs = [
+            c"part39.rar".as_ptr(),
+            c"part39.rar".as_ptr(),
+            c"".as_ptr(),
+            c"".as_ptr(),
+        ];
+        unsafe {
+            crate::qnzb::nzbget_rs_nzb_files(
+                nzb.0,
+                2,
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                ints.as_mut_ptr(),
+                std::ptr::null_mut(),
+                strs.as_mut_ptr(),
+                std::ptr::null(),
+            );
+        }
+        let mut rows: Vec<Row> = Vec::new();
+        let ctx = std::ptr::from_mut(&mut rows).cast::<c_void>();
+        assert_eq!(nzb.walk(ctx, collect), 1);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].id, 40);
+        assert_eq!(rows[0].name, "part40.rar");
+        assert_eq!(rows[0].original, "original-part40.rar");
+        assert_eq!(rows[0].hash, "00112233445566778899aabbccddeeff");
+        assert_eq!(rows[0].output, "/fixture/40.out.tmp");
+        assert_eq!(rows[1].id, 99);
+        assert_ne!(rows[1].flags & 1, 0);
+        assert_eq!(rows[1].hash, "");
+        assert_eq!(rows[2].id, 39);
+        assert_eq!(rows[2].name, "part39.rar");
+        assert_ne!(rows[2].flags & 4, 0);
+        rows.clear();
+        let ctx = std::ptr::from_mut(&mut rows).cast::<c_void>();
+        assert_eq!(nzb.host(ctx, collect), 1);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].output, "/fixture/40.out.tmp");
+    }
+
+    #[test]
+    fn live_par_namespace_sizing_refusal_stops_before_copy() {
+        let nzb = Nzb::new();
+        let first = nzb.add(40, "part.rar");
+        nzb.add(41, "part.rar");
+        let mut visits = 0i32;
+        let ctx = std::ptr::from_mut(&mut visits).cast::<c_void>();
+        assert_eq!(nzb.walk(ctx, stop), 0);
+        assert_eq!(visits, 1);
+        visits = 0;
+        assert_eq!(nzb.host(ctx, stop), 0);
+        assert_eq!(visits, 1);
+        // Assembly may still have its final downloader registered. Neither
+        // active count makes borrowing its changing output string safe.
+        unsafe {
+            nzbget_rs_file_set(first, field::TOTAL_ARTICLES, 1);
+            nzbget_rs_file_set(first, field::COMPLETED_ARTICLES, 1);
+        }
+        for active in [0, 1] {
+            unsafe { nzbget_rs_file_set(first, field::ACTIVE_DOWNLOADS, active) };
+            visits = 0;
+            assert_eq!(nzb.walk(ctx, stop), 2);
+            assert_eq!(visits, 0);
+            assert_eq!(nzb.host(ctx, stop), 2);
+            assert_eq!(visits, 0);
+        }
+        unsafe {
+            nzbget_rs_file_set(first, field::ACTIVE_DOWNLOADS, 0);
+            nzbget_rs_file_set(first, field::COMPLETED_ARTICLES, 0);
+            (*nzb.0).parking = true;
+        }
+        assert_eq!(nzb.walk(ctx, stop), 2);
+        unsafe {
+            (*nzb.0).parking = false;
+            (*nzb.0).deleting = true;
+        }
+        assert_eq!(nzb.walk(ctx, stop), 2);
+        assert_eq!(visits, 0);
+    }
+}

@@ -6063,6 +6063,109 @@ def scenario_directunpackkeep(daemon, t):
         h['Status'], at_failure, len(kept), len(volumes)))
 
 
+# The direct-unpack cases below were the C++ PostprocessTest suite
+# (tests/postprocess/DirectUnpackTest.h); they now run the daemon end to end.
+RARRENAMER_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'testdata', 'rarrenamer')
+
+
+def _rarrenamer_members(t, tag, sets):
+    """Serve the tests/testdata/rarrenamer volumes of each set (e.g. 'testfile3')."""
+    members = []
+    for name in sets:
+        for i in (1, 2, 3):
+            vol = '%s.part%02d.rar' % (name, i)
+            with open(os.path.join(RARRENAMER_DIR, vol), 'rb') as f:
+                data = f.read()
+            rel = '%s/%s' % (tag, vol)
+            t.write_file(os.path.join('data', rel), data)
+            members.append((rel, vol, len(data), 500_000, set(), data))
+    return members
+
+
+def _direct_unpack_release(daemon, t, name, tag, sets, par_failure=False):
+    """Queue the volumes of `sets` (plus, with `par_failure`, a side file with a
+    missing article and a recovery-less par2 index of everything, so the par
+    check fails while the archives stay whole) and wait for its history entry."""
+    members = _rarrenamer_members(t, tag, sets)
+    if par_failure:
+        side = _payload(1_200_000, 7171)
+        t.write_file(os.path.join('data', tag, 'side.bin'), side)
+        members.append(('%s/side.bin' % tag, 'side.bin', len(side), 500_000, {2}, side))
+        par = generators.par2_index([(m[1], m[5]) for m in members])
+        t.write_file(os.path.join('data', tag, 'rel.par2'), par)
+        members.append(('%s/rel.par2' % tag, 'rel.par2', len(par), 500_000, set(), par))
+    api = daemon.wait_ready()
+    daemon.append(api, name, build_multi_nzb([m[:5] for m in members]), False, tag + '-key', 100)
+    return daemon.wait_history(api, name, timeout=180)
+
+
+def _main_basenames(t):
+    return sorted(os.path.basename(rel) for rel in t.find_files('main'))
+
+
+def scenario_directunpacksimple(daemon, t):
+    """DirectUnpackSimpleTest: a three-volume rar set is extracted by direct
+    unpack while it downloads, and its file lands in the destination."""
+    h = _direct_unpack_release(daemon, t, 'RelDUS', 'dusA', ['testfile3'])
+    files = _main_basenames(t)
+    du = _grep_log(t, 'Direct unpack for RelDUS successful')
+    ok = du == 1 and 'testfile3.dat' in files and h['UnpackStatus'] == 'SUCCESS'
+    return ('directunpacksimple', ok, 'status=%s unpack=%s du_ok=%d files=%s' % (
+        h['Status'], h['UnpackStatus'], du, files))
+
+
+def scenario_directunpacktwoarchives(daemon, t):
+    """DirectUnpackTwoArchives: two rar sets in one download are both extracted
+    by direct unpack."""
+    h = _direct_unpack_release(daemon, t, 'RelDU2', 'du2A', ['testfile3', 'testfile5'])
+    files = _main_basenames(t)
+    du = _grep_log(t, 'Direct unpack for RelDU2 successful')
+    ok = (du == 1 and 'testfile3.dat' in files and 'testfile5.dat' in files and
+          h['UnpackStatus'] == 'SUCCESS')
+    return ('directunpacktwoarchives', ok, 'status=%s unpack=%s du_ok=%d files=%s' % (
+        h['Status'], h['UnpackStatus'], du, files))
+
+
+def scenario_directunpackparfailure(daemon, t):
+    """DirectUnpackParFailureStillFinalizesUnpack: the par check fails (a side
+    file is damaged and the par2 has no recovery data) but direct unpack
+    extracted every archive, so post-processing still finalizes that unpack:
+    unpack SUCCESS, status FAILURE/PAR, the file moved out of _unpack."""
+    h = _direct_unpack_release(daemon, t, 'RelDUP', 'dupA', ['testfile3'], par_failure=True)
+    files = _main_basenames(t)
+    leftover = [rel for rel in t.find_files('main') if '/_unpack/' in rel.replace(os.sep, '/')]
+    du = _grep_log(t, 'Direct unpack for RelDUP successful')
+    ok = (du == 1 and h['ParStatus'] == 'FAILURE' and h['UnpackStatus'] == 'SUCCESS' and
+          h['Status'] == 'FAILURE/PAR' and 'testfile3.dat' in files and not leftover)
+    return ('directunpackparfailure', ok, 'status=%s par=%s unpack=%s du_ok=%d files=%s leftover=%s' % (
+        h['Status'], h['ParStatus'], h['UnpackStatus'], du, files, leftover))
+
+
+def _par_failure_skips_unpack(daemon, t, label, name, tag, sets):
+    h = _direct_unpack_release(daemon, t, name, tag, sets, par_failure=True)
+    skipped = _grep_log(t, 'Skipping unpack for %s due to par-failure' % name)
+    ok = (skipped >= 1 and h['ParStatus'] == 'FAILURE' and h['UnpackStatus'] == 'NONE' and
+          _grep_log(t, 'Direct unpack for %s successful' % name) == 0)
+    return (label, ok, 'status=%s par=%s unpack=%s skipped_logs=%d' % (
+        h['Status'], h['ParStatus'], h['UnpackStatus'], skipped))
+
+
+def scenario_parfailurenodirectunpack(daemon, t):
+    """ParFailureWithoutSuccessfulDirectUnpackStillSkipsUnpack, direct unpack off
+    (nsNone): a failed par check skips the unpack."""
+    return _par_failure_skips_unpack(daemon, t, 'parfailurenodirectunpack', 'RelPFN', 'pfnA', ['testfile3'])
+
+
+def scenario_parfailuredirectunpackfailed(daemon, t):
+    """ParFailureWithoutSuccessfulDirectUnpackStillSkipsUnpack, direct unpack
+    failed (nsFailure: an encrypted set without its password): a failed par
+    check still skips the unpack."""
+    label, ok, detail = _par_failure_skips_unpack(daemon, t, 'parfailuredirectunpackfailed', 'RelPFF', 'pffA',
+                                                  ['testfile3encdata'])
+    du_failed = _grep_log(t, 'Direct unpack for RelPFF failed')
+    return (label, ok and du_failed == 1, '%s du_failed=%d' % (detail, du_failed))
+
+
 def scenario_jointwosets(daemon, t):
     """Two sets of split files in one download (a.mkv.001-003, b.srt.001-002): both
     are joined. The fragment check counted the other set's pieces too, and the join
@@ -10343,6 +10446,11 @@ SCENARIOS = {
     'apiaccess': scenario_apiaccess,
     'queueedits': scenario_queueedits,
     'directunpackkeep': scenario_directunpackkeep,
+    'directunpacksimple': scenario_directunpacksimple,
+    'directunpacktwoarchives': scenario_directunpacktwoarchives,
+    'directunpackparfailure': scenario_directunpackparfailure,
+    'parfailurenodirectunpack': scenario_parfailurenodirectunpack,
+    'parfailuredirectunpackfailed': scenario_parfailuredirectunpackfailed,
     'jointwosets': scenario_jointwosets,
     'staleprogress': scenario_staleprogress,
     'authrejected': scenario_authrejected,
@@ -10728,6 +10836,11 @@ SCENARIO_OPTIONS = {
     'joingroupreconnect': ['Server1.JoinGroup=yes', 'Server1.Connections=1', 'ArticleRetries=0', 'DirectWrite=no'],
     'joingroupnogroups': ['Server1.JoinGroup=yes', 'ArticleRetries=0', 'DirectWrite=no'],
     'stallquit': ['ArticleTimeout=5', 'ArticleRetries=2', 'ArticleInterval=0', 'DirectWrite=no', 'Server1.Connections=1'],
+    'directunpacksimple': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1'],
+    'directunpacktwoarchives': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1'],
+    'directunpackparfailure': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1'],
+    'parfailurenodirectunpack': ['Unpack=yes', 'DirectUnpack=no', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1'],
+    'parfailuredirectunpackfailed': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'ParRepair=yes', 'DupeCheck=no', 'KeepHistory=1'],
     'directunpackkeep': ['Unpack=yes', 'DirectUnpack=yes', 'UseTempUnpackDir=no', UNRAR_CMD, 'UnpackCleanupDisk=yes', 'ParCheck=auto'],
     'directunpackkeepnointer': ['InterDir=', 'Unpack=yes', 'DirectUnpack=yes', 'UseTempUnpackDir=no', UNRAR_CMD, 'UnpackCleanupDisk=yes', 'ParCheck=auto'],
     'apiaccess': ['ControlPassword=ctlpass', 'RestrictedUsername=ro', 'RestrictedPassword=ropass'],

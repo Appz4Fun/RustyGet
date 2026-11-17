@@ -252,55 +252,6 @@ template <typename T> typename RsList<T>::iterator end(RsList<T>* c) { return c-
 #ifndef THREAD_H
 #define THREAD_H
 
-class Mutex
-{
-public:
-	Mutex() {};
-	Mutex(const Mutex&) = delete;
-	void Lock() { m_mutexObj.lock(); }
-	void Unlock() { m_mutexObj.unlock(); }
-
-private:
-	std::mutex m_mutexObj;
-};
-
-class Guard
-{
-public:
-	Guard(Mutex& mutex) : m_mutex(&mutex) { if (m_mutex) m_mutex->Lock(); }
-	Guard(std::unique_ptr<Mutex>& mutex) : m_mutex(mutex.get()) { if (m_mutex) m_mutex->Lock(); }
-	Guard(Guard&& other) : m_mutex(other.m_mutex) { other.m_mutex = nullptr; }
-	Guard(const Guard&) = delete;
-	~Guard() { Unlock(); }
-
-private:
-	Mutex* m_mutex;
-
-	void Unlock() { if (m_mutex) { m_mutex->Unlock(); m_mutex = nullptr; } }
-};
-
-template<typename T>
-class GuardedPtr
-{
-public:
-	GuardedPtr(T* ptr, Mutex* mutex) : m_ptr(ptr), m_mutex(mutex) { if (m_mutex) m_mutex->Lock(); }
-	GuardedPtr(GuardedPtr&& other) : m_ptr(other.m_ptr), m_mutex(other.m_mutex) { other.m_mutex = nullptr; }
-	GuardedPtr(const GuardedPtr& other) = delete;
-	~GuardedPtr() { Unlock(); }
-	T* operator->() { return m_ptr; }
-	operator T*() { return m_ptr; }
-
-	// for-range loops on GuardedPtr
-	auto begin() { return m_ptr->begin(); }
-	auto end() { return m_ptr->end(); }
-
-private:
-	T* m_ptr;
-	Mutex* m_mutex;
-
-	void Unlock() { if (m_mutex) { m_mutex->Unlock(); m_mutex = nullptr; } }
-};
-
 #include "nzbget_rs.h"
 
 
@@ -681,7 +632,6 @@ namespace ActiveOptions
 	inline bool GetRawArticle() { return Scalars().raw_article != 0; }
 	inline bool GetSkipWrite() { return Scalars().skip_write != 0; }
 	inline bool GetAppendCategoryDir() { return Scalars().append_category_dir != 0; }
-	inline int GetLogBuffer() { return Scalars().log_buffer; }
 	inline EHealthCheck GetHealthCheck() { return (EHealthCheck)Scalars().health_check; }
 	inline bool GetDirectWrite() { return Scalars().direct_write != 0; }
 	inline int GetWriteBuffer() { return Scalars().write_buffer; }
@@ -806,6 +756,8 @@ inline void detail(const char* msg, ...)
 inline uintptr_t NzbgetCQueueHost(void* ctx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
 	const char* s1, const char* s2, int* ints, int64_t* i64s, const char** strs);
 
+inline void RegisterRsQueueHooks();
+
 inline void InitRsBuildEnv()
 {
 	static std::once_flag once;
@@ -848,6 +800,7 @@ inline void InitRsBuildEnv()
 		flags |= 8;
 #endif
 #endif
+		RegisterRsQueueHooks();
 		nzbget_rs_build_env_init(flags, Util::VersionRevision(), sslLib, sslVer, nullptr,
 			+[](const char* ptr, size_t len, int doFlush) {
 				if (ptr && len > 0) fwrite(ptr, 1, len, stdout);
@@ -924,9 +877,7 @@ public:
 	FileInfo& operator=(const FileInfo&) = delete;
 	RsFile* Rs() { return reinterpret_cast<RsFile*>(this); }
 	void SetId(int id) { S(0, id); }
-	static void ResetGenId(bool max) { nzbget_rs_file_ids(max ? 1 : 2, 0); }
 	static void RaiseIdFloor(int id) { nzbget_rs_file_ids(3, id); }
-	static int LastGenId() { return nzbget_rs_file_ids(0, 0); }
 	NzbInfo* GetNzbInfo() { return reinterpret_cast<NzbInfo*>((uintptr_t)I(35)); }
 	void SetNzbInfo(NzbInfo* nzbInfo) { S(35, (int64)reinterpret_cast<uintptr_t>(nzbInfo)); }
 	RsArticleList* GetArticleList() { return nzbget_rs_file_articles(Rs()); }
@@ -1069,8 +1020,8 @@ public:
 	static void operator delete(void* p) { nzbget_rs_nzb_scalars_free(static_cast<NzbgetRsNzbScalars*>(p)); }
 	NzbInfo()
 	{
-		Scalars()->id = ++m_idGen;
-		nzbget_rs_nzb_slot(Scalars(), 0, 1, reinterpret_cast<uintptr_t>(new FileList));
+		// the next id and an empty file list (rust/src/qnzb.rs)
+		nzbget_rs_nzb_init(Scalars());
 	}
 	~NzbInfo()
 	{
@@ -1207,25 +1158,8 @@ public:
 	void SetId(int id)
 	{
 		Scalars()->id = id;
-		if (m_idMax < Scalars()->id)
-		{
-			m_idMax = Scalars()->id;
-		}
+		nzbget_rs_nzb_ids(3, id);
 	}
-	static void ResetGenId(bool max)
-	{
-		if (max)
-		{
-			m_idGen = m_idMax;
-		}
-		else
-		{
-			m_idGen = 0;
-			m_idMax = 0;
-		}
-	}
-	static void RaiseIdFloor(int id) { m_idMax = std::max(m_idMax, id); }
-	static int LastGenId() { return m_idGen; }
 	EKind GetKind() { return (EKind)Scalars()->kind; }
 	void SetKind(EKind kind) { Scalars()->kind = kind; }
 	const char* GetUrl() { return NT(0); }
@@ -1733,19 +1667,6 @@ public:
 			static_cast<int>(Scalars()->urlStatus), static_cast<int>(scriptStatus),
 			CalcHealth(), CalcCriticalHealth(false));
 	}
-	void AddMessage(Message::EKind kind, const char* text, bool print = true);
-	void PrintMessage(Message::EKind kind, const char* format, ...) PRINTF_SYNTAX(3)
-	{
-		char tmp2[1024];
-
-		va_list ap;
-		va_start(ap, format);
-		vsnprintf(tmp2, 1024, format, ap);
-		tmp2[1024-1] = '\0';
-		va_end(ap);
-
-		AddMessage(kind, tmp2);
-	}
 	int GetMessageCount() { return (int)(intptr_t)nzbget_rs_nzb_slot(Scalars(), 4, 0, 0); }
 	void SetMessageCount(int messageCount) { nzbget_rs_nzb_slot(Scalars(), 4, 1, (uintptr_t)(intptr_t)messageCount); }
 	int GetCachedMessageCount() { return Scalars()->cachedMessageCount; }
@@ -1853,12 +1774,8 @@ public:
 	static const int FORCE_PRIORITY = 900;
 
 private:
-	inline static std::atomic<int> m_idGen{0};
-	inline static int m_idMax = 0;
-
 	void ClearMessages() { NM(2); }
 
-	friend class DupInfo;
 };
 
 using PostInfo = NzbInfo::PostInfo;
@@ -1925,10 +1842,7 @@ public:
 	void SetId(int id)
 	{
 		nzbget_rs_dup_set(Rs(), 5, id, nullptr);
-		if (NzbInfo::m_idMax < id)
-		{
-			NzbInfo::m_idMax = id;
-		}
+		nzbget_rs_nzb_ids(3, id);
 	}
 	const char* GetName() { return Text(0); }
 	void SetName(const char* name) { nzbget_rs_dup_set(Rs(), 7, 0, name); }
@@ -2053,7 +1967,30 @@ static_assert(std::is_empty<HistoryInfo>::value && !std::is_polymorphic<HistoryI
 
 typedef RsList<HistoryInfo> HistoryList;
 
-typedef GuardedPtr<DownloadQueue> GuardedDownloadQueue;
+// holds the current queue's lock (rust/src/qqueue.rs) while it lives
+class GuardedDownloadQueue
+{
+public:
+	explicit GuardedDownloadQueue(DownloadQueue* queue) : m_ptr(queue)
+	{
+		if (m_ptr) nzbget_rs_queue_op(reinterpret_cast<uintptr_t>(m_ptr), 3);
+	}
+	GuardedDownloadQueue(GuardedDownloadQueue&& other) : m_ptr(other.m_ptr), m_locked(other.m_locked) { other.m_locked = false; }
+	GuardedDownloadQueue(const GuardedDownloadQueue&) = delete;
+	~GuardedDownloadQueue() { if (m_ptr && m_locked) nzbget_rs_queue_op(reinterpret_cast<uintptr_t>(m_ptr), 4); }
+	DownloadQueue* operator->() { return m_ptr; }
+	operator DownloadQueue*() { return m_ptr; }
+
+private:
+	DownloadQueue* m_ptr;
+	bool m_locked = true;
+};
+
+// lets Rust delete a NzbInfo (its destructor still frees host objects)
+inline void RegisterRsQueueHooks()
+{
+	nzbget_rs_queue_hooks([](uintptr_t p) { delete reinterpret_cast<NzbInfo*>(p); });
+}
 
 class DownloadQueue
 {
@@ -2152,108 +2089,37 @@ public:
 		mmRegEx
 	};
 
-	static bool IsLoaded() { return g_Loaded; }
-	static GuardedDownloadQueue Guard() { return GuardedDownloadQueue(g_DownloadQueue, &g_DownloadQueue->m_lockMutex); }
-	NzbList* GetQueue() { return m_queue; }
-	HistoryList* GetHistory() { return m_history; }
+	// the daemon's queue (rust/src/qqueue.rs), locked while the guard lives
+	static GuardedDownloadQueue Guard();
+	NzbList* GetQueue() { return reinterpret_cast<NzbList*>(nzbget_rs_queue_op(Key(), 1)); }
+	HistoryList* GetHistory() { return reinterpret_cast<HistoryList*>(nzbget_rs_queue_op(Key(), 2)); }
 
-	// a reload creates the queue anew: until it is loaded again, threads
-	// waiting for IsLoaded() (the post-processor's queue sanitising, for
-	// one) must not take the previous queue's state for it
-	static void Init(DownloadQueue* globalInstance) { g_DownloadQueue = globalInstance; g_Loaded = false; nzbget_rs_thread_count_op(4); }
-	static void Final() { g_DownloadQueue = nullptr; g_Loaded = false; nzbget_rs_thread_count_op(4); }
-	static void Loaded() { g_Loaded = true; nzbget_rs_thread_count_op(3); }
-
-	DownloadQueue() = default;
+	// the object's storage is the Rust queue that host op 25 creates: a
+	// DownloadQueue* is an RsQueue*, never made here
+	DownloadQueue() = delete;
 	DownloadQueue(const DownloadQueue&) = delete;
 	DownloadQueue& operator=(const DownloadQueue&) = delete;
-	~DownloadQueue() { delete m_history; delete m_queue; }
 
 private:
-	// Rust lists (see RsList)
-	NzbList* m_queue = new NzbList;
-	HistoryList* m_history = new HistoryList;
-	Mutex m_lockMutex;
-
-	inline static DownloadQueue* g_DownloadQueue = nullptr;
-	inline static std::atomic<bool> g_Loaded{false};
+	uintptr_t Key() const { return reinterpret_cast<uintptr_t>(this); }
 };
+
+static_assert(std::is_empty<DownloadQueue>::value && !std::is_polymorphic<DownloadQueue>::value);
+
+inline GuardedDownloadQueue DownloadQueue::Guard()
+{
+	return GuardedDownloadQueue(reinterpret_cast<DownloadQueue*>(nzbget_rs_queue_op(0, 9)));
+}
 
 
 class DiskState {};
 extern DiskState* g_DiskState;
 
-inline void NzbInfo::AddMessage(Message::EKind kind, const char * text, bool print)
-{
-	if (print)
-	{
-		switch (kind)
-		{
-		case Message::mkDetail:
-			detail("%s", text);
-			break;
-
-		case Message::mkInfo:
-			info("%s", text);
-			break;
-
-		case Message::mkWarning:
-			warn("%s", text);
-			break;
-
-		case Message::mkError:
-			error("%s", text);
-			break;
-
-		case Message::mkDebug:
-			debug("%s", text);
-			break;
-		}
-	}
-
-	// NZB messages go to the main log (above); there are no separate NZB log files,
-	// so the details Log tab shows the messages kept here (MessageCount falls back to them)
-	// LogBuffer 0 keeps every message
-	const int ints[2] = { (int)Util::CurrentTime(), ActiveOptions::GetLogBuffer() };
-	NM(0, (int)kind, nullptr, text ? text : "", ints);
-}
 
 
 #ifndef SERVERPOOL_H
 #define SERVERPOOL_H
 
-
-#ifndef NZBGET_TLS_CIPHER_BACKEND_H
-#define NZBGET_TLS_CIPHER_BACKEND_H
-
-#if !defined(DISABLE_TLS) && (defined(__APPLE__) || defined(__linux__))
-// The OpenSSL backend lives in Rust (rust/src/tlssock.rs); a null table selects it.
-namespace TlsCipherBackend
-{
-	inline constexpr bool Available() { return true; }
-	inline std::string Response(NzbgetRsBuf value)
-	{
-		struct Release { NzbgetRsBuf value; ~Release() { nzbget_rs_free(value); } } release{value};
-		return std::string(value.data ? value.data : "", value.len);
-	}
-	inline std::string Start() { return Response(nzbget_rs_tls_cipher_start(nullptr)); }
-	inline std::string StartServer(int id) { return Response(nzbget_rs_tls_cipher_start_server(id)); }
-	inline std::string Status(const char* id) { return Response(nzbget_rs_tls_cipher_status(id)); }
-	inline std::string Cancel(const char* id) { return Response(nzbget_rs_tls_cipher_cancel(id)); }
-	inline void Shutdown() { nzbget_rs_tls_cipher_shutdown(); }
-}
-#else
-namespace TlsCipherBackend
-{
-	inline constexpr bool Available() { return false; }
-	inline std::string Status(const char*) { return R"({"Available":false,"State":"unavailable","Message":"TLS cipher optimization requires a TLS-enabled Rust backend and a supported atomic configuration adapter."})"; }
-	inline std::string Start() { return Status(nullptr); }
-	inline std::string StartServer(int) { return Status(nullptr); }
-	inline std::string Cancel(const char*) { return Status(nullptr); }
-	inline void Shutdown() {}
-}
-#endif
-#endif
 
 #ifndef STATMETER_H
 #define STATMETER_H
@@ -2327,14 +2193,6 @@ extern DupeCoordinator* g_DupeCoordinator;
 #ifndef PREPOSTPROCESSOR_H
 #define PREPOSTPROCESSOR_H
 
-// Job threads live in Rust (rust/src/jobthread.rs); the queue model keeps their handles.
-inline void StartLiveRepairJob(NzbInfo* nzbInfo)
-{
-	if (!nzbInfo) return;
-	JobThread* job = nzbget_rs_job_new_post(10, 0, nzbInfo->GetId(), 1);
-	nzbInfo->SetLiveRepairThread(job);
-	if (!nzbget_rs_job_start(job)) { nzbInfo->SetLiveRepairThread(nullptr); nzbget_rs_job_free(job, 0); }
-}
 #endif
 
 class Scanner {};
@@ -2355,173 +2213,6 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 {
 	switch (op)
 	{
-	case 2: {
-		if (p1 != 0)
-		{
-			const char* msg = s1 ? s1 : "";
-			NzbInfo* n = reinterpret_cast<NzbInfo*>(p1);
-			if (a2 == 1) n->AddMessage((Message::EKind)a1, msg);
-			else n->PrintMessage((Message::EKind)a1, "%s", msg);
-		}
-		return 0;
-	}
-	case 6: {
-		if (a1 == 5) StartLiveRepairJob(reinterpret_cast<NzbInfo*>(p1));
-		return 0;
-	}
-	case 7: {
-		std::string r = a1 == 0 ? (s1 && *s1 ? TlsCipherBackend::StartServer(atoi(s1)) : TlsCipherBackend::Start()) :
-			a1 == 1 ? TlsCipherBackend::Status(s1) : TlsCipherBackend::Cancel(s1 ? s1 : "");
-		if (p1) *reinterpret_cast<NzbgetRsBuf*>(p1) = nzbget_rs_alloc_buf(r.data(), r.size());
-		return 1;
-	}
-	case 20: {
-		GuardedDownloadQueue dq = DownloadQueue::Guard();
-		reinterpret_cast<void(*)(void*, uintptr_t)>(p1)(reinterpret_cast<void*>(p2),
-			reinterpret_cast<uintptr_t>(static_cast<DownloadQueue*>(dq)));
-		return 0;
-	}
-	case 21: {
-		auto* dq = reinterpret_cast<DownloadQueue*>(p1);
-		return a1 < 0 ? dq->GetQueue()->size() : reinterpret_cast<uintptr_t>(dq->GetQueue()->at((size_t)a1));
-	}
-	case 22: {
-		if (a1 == 7)
-		{
-			if (a2 == 0) { ints[0] = NzbInfo::LastGenId(); ints[1] = FileInfo::LastGenId(); }
-			else
-			{
-				if (ints[0] >= 0) NzbInfo::RaiseIdFloor(ints[0]);
-				if (ints[1] >= 0) FileInfo::RaiseIdFloor(ints[1]);
-				NzbInfo::ResetGenId(true);
-				FileInfo::ResetGenId(true);
-			}
-			return 0;
-		}
-		auto* dq = reinterpret_cast<DownloadQueue*>(p1);
-		if (a1 == 0) return reinterpret_cast<uintptr_t>(dq->GetQueue()->Find(a2));
-		if (a1 == 1) { dq->GetQueue()->Remove(reinterpret_cast<NzbInfo*>(p2)); return 0; }
-		if (a1 == 2)
-		{
-			auto* up = reinterpret_cast<std::unique_ptr<NzbInfo>*>(p2);
-			if (up && *up)
-			{
-				auto* urlInfo = reinterpret_cast<NzbInfo*>((uintptr_t)i64s[0]);
-				if (urlInfo) dq->GetQueue()->Insert(dq->GetQueue()->IndexOf(urlInfo), std::move(*up));
-				else dq->GetQueue()->Add(std::move(*up), a2 != 0);
-			}
-			return 0;
-		}
-		if (a1 == 3)
-		{
-			auto* up = new std::unique_ptr<NzbInfo>(std::make_unique<NzbInfo>());
-			i64s[0] = (int64_t)reinterpret_cast<uintptr_t>(up->get());
-			return reinterpret_cast<uintptr_t>(up);
-		}
-		if (a1 == 4)
-		{
-			auto* up = reinterpret_cast<std::unique_ptr<NzbInfo>*>(p2);
-			dq->GetQueue()->Add(std::move(*up));
-			delete up;
-			return 0;
-		}
-		if (a1 == 5)
-		{
-			dq->GetQueue()->Reorder(reinterpret_cast<const uintptr_t*>(p2), (size_t)a2);
-		}
-		if (a1 == 6) { delete reinterpret_cast<std::unique_ptr<NzbInfo>*>(p2); return 0; }
-		return 0;
-	}
-	case 23: {
-		auto* dq = reinterpret_cast<DownloadQueue*>(p1);
-		if (a1 == -7)
-		{
-			auto* up = reinterpret_cast<std::unique_ptr<NzbInfo>*>(p2);
-			if (up && *up)
-			{
-				auto hi = std::make_unique<HistoryInfo>(std::move(*up));
-				hi->SetTime((time_t)a2);
-				dq->GetHistory()->Add(std::move(hi));
-			}
-			delete up;
-			return 0;
-		}
-		if (a1 == -8)
-		{
-			auto d = std::make_unique<DupInfo>();
-			d->SetStatus((DupInfo::EStatus)ints[2]);
-			d->SetFullContentHash((uint32)ints[3]);
-			d->SetFilteredContentHash((uint32)ints[4]);
-			d->SetSize(i64s[0]);
-			d->SetDupeScore(ints[5]);
-			d->SetDupeMode((EDupeMode)ints[6]);
-			d->SetName(s1 ? s1 : "");
-			d->SetDupeKey(s2 ? s2 : "");
-			d->SetId(ints[0]);
-			auto hi = std::make_unique<HistoryInfo>(std::move(d));
-			hi->SetTime((time_t)ints[1]);
-			dq->GetHistory()->Add(std::move(hi));
-			return 0;
-		}
-		if (a1 == -1) return dq->GetHistory()->size();
-		if (a1 == -2) return reinterpret_cast<uintptr_t>(dq->GetHistory()->Find(a2));
-		if (a1 == -3)
-		{
-			auto hist = std::make_unique<HistoryInfo>(dq->GetQueue()->Remove(reinterpret_cast<NzbInfo*>(p2)));
-			hist->SetTime(Util::CurrentTime());
-			dq->GetHistory()->Add(std::move(hist), true);
-			return 0;
-		}
-		if (a1 == -4)
-		{
-			auto* hist = reinterpret_cast<HistoryInfo*>(p2);
-			NzbInfo* nzb = hist->GetNzbInfo();
-			auto dup = std::make_unique<DupInfo>();
-			dup->SetId(nzb->GetId()); dup->SetName(nzb->GetName()); dup->SetDupeKey(nzb->GetDupeKey());
-			dup->SetDupeScore(nzb->GetDupeScore()); dup->SetDupeMode(nzb->GetDupeMode()); dup->SetSize(nzb->GetSize());
-			dup->SetFullContentHash(nzb->GetFullContentHash()); dup->SetFilteredContentHash(nzb->GetFilteredContentHash());
-			dup->SetStatus(static_cast<DupInfo::EStatus>(a2));
-			auto newHist = std::make_unique<HistoryInfo>(std::move(dup));
-			newHist->SetTime(hist->GetTime());
-			dq->GetHistory()->ReplaceAt(dq->GetHistory()->size() - 1 - (size_t)ints[0], std::move(newHist));
-			return 0;
-		}
-		if (a1 == -5) { dq->GetHistory()->EraseAt((size_t)a2); return 0; }
-		if (a1 == -6)
-		{
-			auto* hist = reinterpret_cast<HistoryInfo*>(p2);
-			NzbInfo* nzb = hist->GetNzbInfo();
-			hist->DiscardNzbInfo();
-			dq->GetQueue()->Add(std::unique_ptr<NzbInfo>(nzb), true);
-			dq->GetHistory()->EraseAt((size_t)a2);
-			return reinterpret_cast<uintptr_t>(nzb);
-		}
-		HistoryInfo* h = dq->GetHistory()->at((size_t)a1);
-		ints[0] = (int)h->GetKind(); ints[1] = h->GetId(); strs[0] = h->GetName();
-		i64s[0] = (h->GetKind() == HistoryInfo::hkNzb || h->GetKind() == HistoryInfo::hkUrl)
-			? (int64_t)reinterpret_cast<uintptr_t>(h->GetNzbInfo())
-			: (h->GetKind() == HistoryInfo::hkDup ? (int64_t)reinterpret_cast<uintptr_t>(h->GetDupInfo()) : 0);
-		i64s[1] = (int64_t)h->GetTime();
-		return reinterpret_cast<uintptr_t>(h);
-	}
-	case 24: {
-		if (a1 == 3)
-		{
-			auto* dq = reinterpret_cast<DownloadQueue*>(p1);
-			DownloadQueue::Aspect aspect = { (DownloadQueue::EAspectAction)a2, dq,
-				reinterpret_cast<NzbInfo*>(p2), reinterpret_cast<FileInfo*>((uintptr_t)i64s[0]) };
-			dq->Notify(&aspect);
-		}
-		return 0;
-	}
-	case 25: {
-		static DownloadQueue* s_daemonQueue = nullptr;
-		if (a1 == 0) return reinterpret_cast<uintptr_t>(s_daemonQueue);
-		if (a1 == 1) { delete s_daemonQueue; s_daemonQueue = new DownloadQueue(); DownloadQueue::Init(s_daemonQueue); }
-		else if (a1 == 2) DownloadQueue::Loaded();
-		else if (a1 == 3) { DownloadQueue::Final(); delete s_daemonQueue; s_daemonQueue = nullptr; }
-		return 0;
-	}
 	case 30: {
 		NzbInfo* n = reinterpret_cast<NzbInfo*>(p1);
 		PostInfo* pi = n->GetPostInfo();

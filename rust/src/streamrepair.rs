@@ -8787,7 +8787,7 @@ fn plan_dead_fills(
             .into_iter()
             .filter(|p| !crate::postproc::direct_unpack_has_virtual(&path_of(&volume_name(p.index as u32 + 1))))
             .collect();
-        if plans.is_empty() && any_dead && !holes_here {
+        if plans.is_empty() && any_dead {
             let mut msg = b"Dead volumes in ".to_vec();
             msg.extend_from_slice(&volume_name(1));
             msg.extend_from_slice(b" cannot be placed yet: ");
@@ -8807,7 +8807,9 @@ fn plan_dead_fills(
                 msg.extend_from_slice(format!("; {} of {max} volumes found)", numbered.len()).as_bytes());
             }
             emit_msg(TargetMessageKind::Info, &msg);
-            continue;
+            if !holes_here {
+                continue;
+            }
         }
         // The map: every volume up to the first one whose place is unknown.
         let mut map = ContentMap::default();
@@ -8916,6 +8918,7 @@ fn plan_dead_fills(
             continue;
         }
         let holed: i64 = total_size(&inner_holes) - set_fills.iter().map(|d| d.packed).sum::<i64>();
+        let in_map = map.runs_mut().len();
         let data = RepairSetData {
             set: set.clone(),
             map: Some(map),
@@ -8928,7 +8931,6 @@ fn plan_dead_fills(
             _ => repair_sets.push(data),
         }
         if holes_here && holed > 0 {
-            let in_map = readable_runs.len() + set_fills.len();
             let mut msg = b"Cross-packing repair of ".to_vec();
             msg.extend_from_slice(&volume_name(1));
             msg.extend_from_slice(

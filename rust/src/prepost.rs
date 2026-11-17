@@ -412,18 +412,31 @@ fn direct_unpack_read_all_damage(
     borrowed: usize,
 ) -> bool {
     const CF_SUCCESS: i32 = 1;
+    // Files that never reached the disk: each one must be a dead volume read borrowed.
     let mut absent = 0usize;
     for f in files
         .iter()
         .filter(|f| f.status != CF_SUCCESS && !f.par_file)
     {
-        if extracted.iter().any(|e| e.eq_ignore_ascii_case(&f.filename)) {
-            continue;
-        }
+        let read = extracted.iter().any(|e| e.eq_ignore_ascii_case(&f.filename));
         let mut path = dest_dir.to_vec();
         path.push(crate::paths::PATH_SEPARATOR);
         path.extend_from_slice(&f.filename);
         if crate::fsops::path(&path).exists() {
+            if read {
+                continue;
+            }
+            return false;
+        }
+        // A borrowed volume is read under its own name, so it is in `extracted` too: it still
+        // takes its place in `borrowed`. One under an obfuscated name has no known extension;
+        // a known file that never arrived (a sample, subtitles) was never borrowed.
+        if !read
+            && !crate::filetypes::is_rar_file(&f.filename)
+            && crate::filetypes::is_known_collection_ext(crate::filetypes::file_extension(
+                &f.filename,
+            ))
+        {
             return false;
         }
         absent += 1;
@@ -2490,7 +2503,7 @@ mod tests {
             .iter()
             .map(|n| n.as_bytes().to_vec())
             .collect();
-        std::fs::write(dir.join("a.part02.rar"), b"holed").unwrap();
+        std::fs::write(dir.join("A.PART02.rar"), b"holed").unwrap();
         // part02 lost articles (repaired and read), part04 never arrived and was borrowed
         let files = vec![
             f("a.part01.rar", 1, false),
@@ -2510,6 +2523,17 @@ mod tests {
         other_set.push(f("subs.rar", 2, false));
         assert!(!ok(&other_set, &extracted, &d, 5), "an archive direct unpack did not extract");
         assert!(ok(&[f("a.part01.rar", 1, false)], &extracted, &d, 0), "no damage at all");
+        // part03 never arrived and was read borrowed (so it is in `extracted`): it takes the
+        // one borrowed slot, and a missing obfuscated file has none left.
+        let borrowed_read = vec![f("a.part03.rar", 3, false)];
+        assert!(ok(&borrowed_read, &extracted, &d, 1));
+        let mut plus_obf = borrowed_read.clone();
+        plus_obf.push(f("q9z1m0", 3, false));
+        assert!(!ok(&plus_obf, &extracted, &d, 1), "one borrowed volume covers one file");
+        assert!(ok(&plus_obf, &extracted, &d, 2));
+        let mut plus_sample = borrowed_read;
+        plus_sample.push(f("a.sample.mkv", 3, false));
+        assert!(!ok(&plus_sample, &extracted, &d, 5), "a sample that never arrived");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

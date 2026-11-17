@@ -794,10 +794,13 @@ pub(crate) struct ActiveDownloadSnap {
     pub article_filename: Vec<u8>,
 }
 
+/// The queue host. The daemon's (`use_active`) answers every op in Rust from
+/// the live queue objects; a test mock (`new_mock`) sends every op to its
+/// callback instead.
 #[derive(Clone, Copy)]
 pub(crate) struct QueueSubsysHost {
     pub ctx: *mut c_void,
-    pub cb: NzbgetRsQueueSubsysHostFn,
+    pub cb: Option<NzbgetRsQueueSubsysHostFn>,
     pub use_active: bool,
 }
 
@@ -817,11 +820,12 @@ unsafe extern "C" fn locked_queue_trampoline<R, F: FnOnce(usize) -> R>(
 }
 
 impl QueueSubsysHost {
+    /// The daemon's host: every op is answered in Rust.
     #[inline]
-    pub fn new(ctx: *mut c_void, cb: NzbgetRsQueueSubsysHostFn) -> Self {
+    pub fn active() -> Self {
         Self {
-            ctx,
-            cb,
+            ctx: std::ptr::null_mut(),
+            cb: None,
             use_active: true,
         }
     }
@@ -831,7 +835,7 @@ impl QueueSubsysHost {
     pub fn new_mock(ctx: *mut c_void, cb: NzbgetRsQueueSubsysHostFn) -> Self {
         Self {
             ctx,
-            cb,
+            cb: Some(cb),
             use_active: false,
         }
     }
@@ -852,11 +856,13 @@ impl QueueSubsysHost {
         strs: *mut *const c_char,
     ) -> usize {
         if self.use_active {
-            if let Some(r) = unsafe { native_op(op, a1, a2, p1, p2, s1, s2, ints, i64s, strs) } {
-                return r;
-            }
+            // an op Rust does not answer was a no-op in the C++ host too
+            return unsafe { native_op(op, a1, a2, p1, p2, s1, s2, ints, i64s, strs) }.unwrap_or(0);
         }
-        unsafe { (self.cb)(self.ctx, op, a1, a2, p1, p2, s1, s2, ints, i64s, strs) }
+        match self.cb {
+            Some(cb) => unsafe { cb(self.ctx, op, a1, a2, p1, p2, s1, s2, ints, i64s, strs) },
+            None => 0,
+        }
     }
 
     pub fn opts(&self) -> GlobalOptsSnap {
@@ -6103,7 +6109,7 @@ fn file_snap_from(
 }
 
 /// Host ops answered in Rust: the queue objects they name are Rust objects
-/// (a FileInfo* is a `qfile::File`). None = the host still serves it.
+/// (a file is a `qfile::File`). None = an op no host answers (it reads as 0).
 #[allow(clippy::too_many_arguments)]
 unsafe fn native_op(
     op: i32,
@@ -6280,6 +6286,10 @@ unsafe fn native_op(
             )
         }),
         (62, _) => Some(unsafe { crate::qnzb::host_post_job_op(a1, a2, p1, p2, i64s) }),
+        // the article writer's and downloader's file ops
+        (45, _) => Some(unsafe {
+            crate::qfile::host_output_op(file, a1, a2, p2, s1, s2, ints, i64s, strs)
+        }),
         // article cache ops on a file
         (44, _) => {
             Some(unsafe { crate::qfile::host_cache_op(file, a1, a2, p2, s1, ints, i64s, strs) })

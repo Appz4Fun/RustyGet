@@ -68,7 +68,10 @@ pub unsafe extern "C" fn nzbget_rs_tls_cipher_start(
 #[no_mangle]
 pub extern "C" fn nzbget_rs_tls_cipher_start_server(server: c_int) -> RsBuf {
     let only = u32::try_from(server).ok().filter(|id| *id > 0);
-    cipher_response(tls_cipher_native::start(crate::tlssock::cipher::backend(), only))
+    cipher_response(tls_cipher_native::start(
+        crate::tlssock::cipher::backend(),
+        only,
+    ))
 }
 /// # Safety
 /// id is null or a readable NUL-terminated string; null/empty queries current job.
@@ -3027,14 +3030,12 @@ pub(crate) fn active_queue_coord(
 
 #[cfg(unix)]
 pub(crate) fn queue_host() -> Option<crate::queuesubsys_host::QueueSubsysHost> {
-    let cb = BUILD_ENV
-        .read()
-        .ok()
-        .and_then(|g| g.as_ref().and_then(|e| e.queue_host_cb))?;
-    Some(crate::queuesubsys_host::QueueSubsysHost::new(
-        std::ptr::null_mut(),
-        cb,
-    ))
+    // the daemon's queue host exists once start-up set the build environment
+    // (never in unit tests, which use mock hosts)
+    BUILD_ENV.read().ok().and_then(|g| {
+        g.as_ref()
+            .map(|_| crate::queuesubsys_host::QueueSubsysHost::active())
+    })
 }
 
 #[cfg(unix)]
@@ -3345,7 +3346,6 @@ struct BuildEnvRuntime {
     ssl_raw_version: CString,
     tls_host_cb: crate::net::NzbgetRsConnHostFn,
     write_stdout_cb: Option<unsafe extern "C" fn(*const c_char, usize, c_int)>,
-    queue_host_cb: Option<crate::queuesubsys_host::NzbgetRsQueueSubsysHostFn>,
 }
 
 static BUILD_FLAGS: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
@@ -3363,7 +3363,6 @@ pub unsafe extern "C" fn nzbget_rs_build_env_init(
     ssl_raw_version: *const c_char,
     tls_host_cb: crate::net::NzbgetRsConnHostFn,
     write_stdout_cb: Option<unsafe extern "C" fn(*const c_char, usize, c_int)>,
-    queue_host_cb: Option<crate::queuesubsys_host::NzbgetRsQueueSubsysHostFn>,
 ) {
     BUILD_FLAGS.store(flags, std::sync::atomic::Ordering::SeqCst);
     let _ = BUILD_VERSION.set(to_nul_cvec(input(version)));
@@ -3373,7 +3372,6 @@ pub unsafe extern "C" fn nzbget_rs_build_env_init(
             ssl_raw_version: to_nul_cvec(input(ssl_raw_version)),
             tls_host_cb,
             write_stdout_cb,
-            queue_host_cb,
         });
     }
 }
@@ -4693,7 +4691,9 @@ pub(crate) fn set_active_prepost(pp: &std::sync::Arc<crate::prepost::NzbgetRsPre
 pub(crate) fn clear_active_prepost(pp: &std::sync::Arc<crate::prepost::NzbgetRsPrePostProcessor>) {
     let wk = std::sync::Arc::downgrade(pp);
     if let Ok(mut g) = ACTIVE_PREPOST.write() {
-        if g.as_ref().is_some_and(|cur| std::sync::Weak::ptr_eq(cur, &wk)) {
+        if g.as_ref()
+            .is_some_and(|cur| std::sync::Weak::ptr_eq(cur, &wk))
+        {
             *g = None;
         }
     }
@@ -5604,12 +5604,9 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                             qh.nzb_cached_messages_slice(np, 0, i32::MAX)
                         }
                     });
-                    disk_msgs.extend(
-                        cached_msgs
-                            .into_iter()
-                            .filter(|m| m.2 > last_time)
-                            .map(|(id, kind, time, text)| (offset.saturating_add(id), kind, time, text)),
-                    );
+                    disk_msgs.extend(cached_msgs.into_iter().filter(|m| m.2 > last_time).map(
+                        |(id, kind, time, text)| (offset.saturating_add(id), kind, time, text),
+                    ));
                 }
                 let mut start = disk_msgs.len() as i32;
                 if a4 > 0 {
@@ -5618,7 +5615,10 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                 if a3 > 0 {
                     // ids skip a gap where the cached messages begin, so find the first
                     // message at or after the asked id instead of using it as an offset
-                    start = disk_msgs.iter().position(|m| m.0 >= a3).unwrap_or(disk_msgs.len()) as i32;
+                    start = disk_msgs
+                        .iter()
+                        .position(|m| m.0 >= a3)
+                        .unwrap_or(disk_msgs.len()) as i32;
                 }
                 let mut entries = Vec::new();
                 if start >= 0 && (start as usize) < disk_msgs.len() {

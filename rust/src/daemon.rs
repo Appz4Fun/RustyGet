@@ -4,7 +4,7 @@
 //! [`daemon_hooks`] is the table `LifecycleManager::run_daemon_loop` drives.
 //! The process entry (`rust/entry.rs`) registers it through
 //! `nzbget_rs_register_daemon_hooks`, handing over the one C++ call left:
-//! `nzbget_c_util_init`, which registers the C++ queue model's host callback.
+//! `nzbget_c_util_init`, which hands Rust the build flags and TLS version text.
 //!
 //! One daemon instance lives from phase 1 to phase 4. It owns the log, the
 //! options, the work state, the server pool and the pre/post-processor runner,

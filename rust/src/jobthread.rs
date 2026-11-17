@@ -278,12 +278,8 @@ impl PrePostRunner {
         let Some(qh) = crate::ffi::queue_host() else {
             return 0;
         };
-        let (ctx, cb) = (qh.ctx, qh.cb);
         let _cancel_guard = unsafe { crate::ffi::PosixCancelGuard::disable() };
-        unsafe {
-            self.pp
-                .exec(op, a1, 0, p1, p2, p3, std::ptr::null(), ctx, cb)
-        }
+        unsafe { self.pp.exec(op, a1, 0, p1, p2, p3, std::ptr::null(), qh) }
     }
 }
 

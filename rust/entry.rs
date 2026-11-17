@@ -6,8 +6,8 @@
 use std::ffi::{c_char, c_int};
 
 extern "C" {
-    /// The C++ start-up shim (`daemon/main/rustyget.cpp`): build flags and the
-    /// queue model's host callback.
+    /// The C++ start-up shim (`daemon/main/rustyget.cpp`): build flags, the
+    /// TLS version text and the stdout writer.
     fn nzbget_c_util_init();
 
     fn nzbget_rs_register_daemon_hooks(util_init: Option<unsafe extern "C" fn()>);

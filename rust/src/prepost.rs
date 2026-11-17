@@ -381,7 +381,10 @@ fn damage_is_borrowed_volumes(
         return false;
     }
     let mut absent_unnamed = 0usize;
-    for f in files.iter().filter(|f| f.status != CF_SUCCESS && !f.par_file) {
+    for f in files
+        .iter()
+        .filter(|f| f.status != CF_SUCCESS && !f.par_file)
+    {
         if crate::filetypes::is_rar_file(&f.filename) {
             continue;
         }
@@ -920,7 +923,7 @@ impl NzbgetRsPrePostProcessor {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub unsafe fn exec(
+    pub(crate) unsafe fn exec(
         &self,
         op: std::ffi::c_int,
         a1: std::ffi::c_int,
@@ -929,12 +932,10 @@ impl NzbgetRsPrePostProcessor {
         p2: usize,
         p3: usize,
         s1: *const std::ffi::c_char,
-        host_ctx: *mut std::ffi::c_void,
-        host_cb: crate::queuesubsys_host::NzbgetRsQueueSubsysHostFn,
+        host: crate::queuesubsys_host::QueueSubsysHost,
     ) -> usize {
         use std::sync::atomic::Ordering;
         let _ = (a2, s1);
-        let host = crate::queuesubsys_host::QueueSubsysHost::new(host_ctx, host_cb);
         match op {
             0 => {
                 self.run(&host);
@@ -1724,14 +1725,16 @@ impl NzbgetRsPrePostProcessor {
                 ),
                 // Pending live work (a recovery volume still being folded, or a
                 // running live repair) defers only this job, never the queue.
-                has_live_repair_thread: u8::from(nzb.has_live_repair_thread || {
-                    #[cfg(unix)]
-                    let defer = nzb.is_download_completed
-                        && crate::postproc::live_repair_should_defer_post(nzb.id);
-                    #[cfg(not(unix))]
-                    let defer = false;
-                    defer
-                }),
+                has_live_repair_thread: u8::from(
+                    nzb.has_live_repair_thread || {
+                        #[cfg(unix)]
+                        let defer = nzb.is_download_completed
+                            && crate::postproc::live_repair_should_defer_post(nzb.id);
+                        #[cfg(not(unix))]
+                        let defer = false;
+                        defer
+                    },
+                ),
                 priority: nzb.priority,
                 force_priority: u8::from(nzb.force_priority),
                 need_par_check: u8::from(need_par),
@@ -1868,8 +1871,10 @@ impl NzbgetRsPrePostProcessor {
                 // switching to a backup that could lend them would start the extraction over.
                 !(crate::postproc::direct_unpack_has_holds(nzb.id)
                     && backup_can_lend(
-                        host.nzb_get_param(nzb.ptr, crate::donorkind::KIND_PARAM).as_deref(),
-                        host.nzb_get_param(backup.ptr, crate::donorkind::KIND_PARAM).as_deref(),
+                        host.nzb_get_param(nzb.ptr, crate::donorkind::KIND_PARAM)
+                            .as_deref(),
+                        host.nzb_get_param(backup.ptr, crate::donorkind::KIND_PARAM)
+                            .as_deref(),
                     ))
             })
         {
@@ -2307,7 +2312,10 @@ impl NzbgetRsPrePostProcessor {
             // until a repair releases it, instead of being cancelled.
             let file = host.file_snap(file_ptr);
             if file.failed_articles > 0
-                && crate::filetypes::may_hold_for_direct_unpack(&file.filename, file.success_articles)
+                && crate::filetypes::may_hold_for_direct_unpack(
+                    &file.filename,
+                    file.success_articles,
+                )
             {
                 let full = [
                     nzb.dest_dir.as_slice(),
@@ -2373,21 +2381,34 @@ mod tests {
             filename: name.as_bytes().to_vec(),
             ..Default::default()
         };
-        let base = vec![f("a.part01.rar", 1, false), f("a.part02.rar", 2, false), f("a.vol00+01.par2", 3, true)];
+        let base = vec![
+            f("a.part01.rar", 1, false),
+            f("a.part02.rar", 2, false),
+            f("a.vol00+01.par2", 3, true),
+        ];
         assert!(!ok(&base, &d, 0), "nothing borrowed");
-        assert!(ok(&base, &d, 1), "damage only inside the archive and its par2 files");
+        assert!(
+            ok(&base, &d, 1),
+            "damage only inside the archive and its par2 files"
+        );
         let mut obf = base.clone();
         obf.push(f("a8f3k2", 3, false));
         obf.push(f("q9z1m0", 3, false));
         assert!(ok(&obf, &d, 2));
-        assert!(!ok(&obf, &d, 1), "more dead obfuscated files than borrowed volumes");
+        assert!(
+            !ok(&obf, &d, 1),
+            "more dead obfuscated files than borrowed volumes"
+        );
         let mut sample = base.clone();
         sample.push(f("a.sample.mkv", 2, false));
         assert!(!ok(&sample, &d, 3), "a damaged loose file is real damage");
         std::fs::write(dir.join("x1y2z3"), b"partial").unwrap();
         let mut present = base;
         present.push(f("x1y2z3", 2, false));
-        assert!(!ok(&present, &d, 3), "a damaged file on disk is not a borrowed volume");
+        assert!(
+            !ok(&present, &d, 3),
+            "a damaged file on disk is not a borrowed volume"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

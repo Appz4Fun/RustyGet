@@ -721,6 +721,388 @@ pub(crate) unsafe fn host_cache_op(
     }
 }
 
+thread_local! {
+    // the names handed back by host op 45 sub-op 9/0 (valid until the next
+    // call on this thread, as the C++ thread_local strings were)
+    static WRITER_NAMES: std::cell::RefCell<[CString; 4]> = std::cell::RefCell::new(Default::default());
+}
+
+/// Holds the current queue's lock while it lives (the C++
+/// `GuardedDownloadQueue`); no lock when there is no current queue.
+struct QueueGuard(usize);
+
+impl QueueGuard {
+    fn lock() -> Self {
+        let q = crate::qqueue::nzbget_rs_queue_op(0, 9);
+        if q != 0 {
+            crate::qqueue::nzbget_rs_queue_op(q, 3);
+        }
+        Self(q)
+    }
+}
+
+impl Drop for QueueGuard {
+    fn drop(&mut self) {
+        if self.0 != 0 {
+            crate::qqueue::nzbget_rs_queue_op(self.0, 4);
+        }
+    }
+}
+
+/// Holds a file's output lock while it lives (the C++ `FileOutputGuard`).
+struct OutputGuard<'a>(&'a File, bool);
+
+impl<'a> OutputGuard<'a> {
+    fn take(file: &'a File) -> Self {
+        Self(file, file.output_lock())
+    }
+}
+
+impl Drop for OutputGuard<'_> {
+    fn drop(&mut self) {
+        if self.1 {
+            self.0.output_unlock();
+        }
+    }
+}
+
+/// The article writer's and downloader's file ops (host op 45), as the C++
+/// host did them. Returns what that op returned.
+///
+/// # Safety
+/// `f` is a live file; `p2` is a live article for the article-based
+/// sub-ops, a `void(void*)` callback for 0 (context in `i64s[0]`), an
+/// article index for 9/4 and 9/5, a count for 9/6 and a CRC for 9/8; output
+/// arrays are large enough for the op.
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn host_output_op(
+    f: *const File,
+    a1: i32,
+    a2: i32,
+    p2: usize,
+    s1: *const c_char,
+    s2: *const c_char,
+    ints: *mut c_int,
+    i64s: *mut i64,
+    strs: *mut *const c_char,
+) -> usize {
+    use field::*;
+    if f.is_null() {
+        return 0;
+    }
+    let file = unsafe { &*f };
+    let art_op = |list: *mut ArticleList,
+                  article: usize,
+                  op: c_int,
+                  a2: c_int,
+                  s1: *const c_char,
+                  ints: *mut c_int,
+                  i64s: *mut i64,
+                  strs: *mut *const c_char| unsafe {
+        crate::qarticle::nzbget_rs_article_host(
+            list,
+            article as *mut crate::qarticle::Article,
+            op,
+            a2,
+            0,
+            s1,
+            ints,
+            i64s,
+            strs,
+        )
+    };
+    let (null_i, null_l, null_s) = (ptr::null_mut(), ptr::null_mut(), ptr::null_mut());
+    let nzb = file.get(NZB) as usize as *const crate::qnzb::NzbScalars;
+    let nzb_text = |id: c_int| {
+        if nzb.is_null() {
+            ptr::null()
+        } else {
+            unsafe { crate::qnzb::nzbget_rs_nzb_text(nzb, id) }
+        }
+    };
+    let text = |id: i32| unsafe { nzbget_rs_file_text(f, id) };
+    let set_text = |id: i32, v: *const c_char| unsafe { nzbget_rs_file_set_text(f, id, v) };
+    let or_empty = |s: *const c_char| if s.is_null() { c"".as_ptr() } else { s };
+    let opts = crate::options::active_options();
+    let direct_write = opts.as_ref().is_some_and(|o| o.scalars().direct_write != 0);
+    let inter_dir_empty = opts.as_ref().is_none_or(|o| o.str_bytes(4).is_empty());
+    let hard_linked = || file.lock().texts[text::HARD_LINK_PATH as usize].as_bytes() != b"";
+    let flag = |b: bool| c_int::from(b);
+    match a1 {
+        // run the callback under the output lock (taken while downloads run)
+        0 => {
+            let _g = OutputGuard::take(file);
+            let cb: unsafe extern "C" fn(*mut std::ffi::c_void) =
+                unsafe { std::mem::transmute::<usize, _>(p2) };
+            unsafe { cb(*i64s as usize as *mut std::ffi::c_void) };
+            0
+        }
+        1 => {
+            unsafe {
+                *ints = file.get(ID) as c_int;
+                *ints.add(1) = art_op(
+                    null_l,
+                    p2,
+                    118,
+                    0,
+                    ptr::null(),
+                    null_i,
+                    null_l.cast(),
+                    null_s,
+                ) as c_int;
+                *ints.add(2) = flag(file.get(FORCE_DIRECT_WRITE) != 0);
+                *ints.add(3) = flag(file.get(OUTPUT_INITIALIZED) != 0);
+                *strs = nzb_text(3);
+                *strs.add(1) = text(text::OUTPUT_FILENAME);
+                *strs.add(2) = text(text::FILENAME);
+            }
+            0
+        }
+        2 => {
+            let result = art_op(null_l, p2, 115, 0, s1, null_i, null_l.cast(), null_s);
+            if !s2.is_null() {
+                set_text(text::OUTPUT_FILENAME, s2);
+            }
+            unsafe { *strs = result as *const c_char };
+            0
+        }
+        3 => {
+            art_op(
+                null_l,
+                p2,
+                116,
+                a2,
+                ptr::null(),
+                null_i,
+                null_l.cast(),
+                null_s,
+            );
+            0
+        }
+        4 => {
+            let mut range = [0i64; 2];
+            unsafe {
+                *ints = art_op(
+                    null_l,
+                    p2,
+                    117,
+                    0,
+                    ptr::null(),
+                    null_i,
+                    null_l.cast(),
+                    null_s,
+                ) as c_int;
+            }
+            art_op(
+                null_l,
+                p2,
+                119,
+                0,
+                ptr::null(),
+                null_i,
+                range.as_mut_ptr(),
+                null_s,
+            );
+            unsafe {
+                *i64s = file.get(DECODED_FILE_SIZE);
+                *i64s.add(1) = range[0];
+                *i64s.add(2) = range[1];
+            }
+            0
+        }
+        5 => {
+            let force = || file.get(FORCE_DIRECT_WRITE) != 0;
+            let out_init = {
+                let _g = OutputGuard::take(file);
+                let out_init = file.get(OUTPUT_INITIALIZED) != 0;
+                if !direct_write && !force() {
+                    file.set(OUTPUT_INITIALIZED, 1);
+                }
+                out_init
+            };
+            let mut is_own = false;
+            if direct_write || force() {
+                let _g = OutputGuard::take(file);
+                is_own = force() || {
+                    let out = file.lock().texts[text::OUTPUT_FILENAME as usize].clone();
+                    !s1.is_null()
+                        && !out.as_bytes().is_empty()
+                        && out.as_c_str() == unsafe { CStr::from_ptr(s1) }
+                };
+            }
+            unsafe {
+                *ints = flag(out_init);
+                *ints.add(1) = flag(is_own);
+            }
+            0
+        }
+        6 => {
+            file.set(OUTPUT_INITIALIZED, 1);
+            0
+        }
+        7 => {
+            if a2 == 0 {
+                art_op(null_l, p2, 112, 0, ptr::null(), ints, i64s, null_s);
+                file.set(CACHED_ARTICLES, file.get(CACHED_ARTICLES) + 1);
+            } else {
+                art_op(null_l, p2, 113, 0, ptr::null(), ints, i64s, null_s);
+            }
+            0
+        }
+        8 => {
+            set_text(text::OUTPUT_FILENAME, or_empty(s1));
+            0
+        }
+        9 => match a2 {
+            0 => {
+                let cstr = |p: *const c_char| {
+                    if p.is_null() {
+                        CString::default()
+                    } else {
+                        unsafe { CStr::from_ptr(p) }.to_owned()
+                    }
+                };
+                let (n_name, n_dest, f_name) = {
+                    let _g = QueueGuard::lock();
+                    (
+                        cstr(nzb_text(2)),
+                        cstr(nzb_text(3)),
+                        cstr(text(text::FILENAME)),
+                    )
+                };
+                let f_out = file.lock().texts[text::OUTPUT_FILENAME as usize].clone();
+                let skip_write = (!nzb.is_null() && unsafe { (*nzb).skipDiskWrite })
+                    || opts.as_ref().is_some_and(|o| o.scalars().skip_write != 0);
+                unsafe {
+                    *ints = flag(direct_write);
+                    *ints.add(1) = flag(file.get(FORCE_DIRECT_WRITE) != 0);
+                    *ints.add(2) = flag(file.get(OUTPUT_INITIALIZED) != 0);
+                    *ints.add(3) = file.get(CACHED_ARTICLES) as c_int;
+                    *ints.add(4) = file.get(SUCCESS_ARTICLES) as c_int;
+                    *ints.add(5) = file.get(FAILED_ARTICLES) as c_int;
+                    *ints.add(6) = file.get(MISSED_ARTICLES) as c_int;
+                    *ints.add(7) = file.get(TOTAL_ARTICLES) as c_int;
+                    *ints.add(8) = flag(hard_linked());
+                    *ints.add(9) = flag(inter_dir_empty);
+                    *ints.add(10) =
+                        flag(opts.as_ref().is_some_and(|o| o.scalars().raw_article != 0));
+                    *ints.add(11) = flag(skip_write);
+                    *ints.add(12) = opts.as_ref().map_or(0, |o| o.scalars().write_buffer);
+                    *ints.add(15) = art_op(
+                        file.articles,
+                        0,
+                        100,
+                        0,
+                        ptr::null(),
+                        null_i,
+                        null_l.cast(),
+                        null_s,
+                    ) as c_int;
+                }
+                WRITER_NAMES.with(|names| {
+                    let mut names = names.borrow_mut();
+                    *names = [n_name, n_dest, f_name, f_out];
+                    for (i, s) in names.iter().enumerate() {
+                        unsafe { *strs.add(i) = s.as_ptr() };
+                    }
+                });
+                nzb as usize
+            }
+            2 => {
+                let _g = QueueGuard::lock();
+                file.set(CRC, 0);
+                set_text(text::OUTPUT_FILENAME, c"".as_ptr());
+                0
+            }
+            4 => {
+                let pa = art_op(
+                    file.articles,
+                    0,
+                    106,
+                    p2 as c_int,
+                    ptr::null(),
+                    null_i,
+                    null_l.cast(),
+                    null_s,
+                );
+                if pa == 0 {
+                    0
+                } else {
+                    art_op(null_l, pa, 120, 0, ptr::null(), ints, i64s, strs)
+                }
+            }
+            5 => {
+                let pa = art_op(
+                    file.articles,
+                    0,
+                    106,
+                    p2 as c_int,
+                    ptr::null(),
+                    null_i,
+                    null_l.cast(),
+                    null_s,
+                );
+                art_op(
+                    null_l,
+                    pa,
+                    111,
+                    0,
+                    ptr::null(),
+                    null_i,
+                    null_l.cast(),
+                    null_s,
+                );
+                0
+            }
+            6 => {
+                let n = i64::from(p2 as c_int);
+                file.set(
+                    FAILED_ARTICLES,
+                    i64::from(file.get(FAILED_ARTICLES) as c_int) + n,
+                );
+                file.set(
+                    SUCCESS_ARTICLES,
+                    i64::from(file.get(SUCCESS_ARTICLES) as c_int) - n,
+                );
+                0
+            }
+            8 => {
+                file.set(CRC, i64::from(p2 as u32));
+                set_text(text::OUTPUT_FILENAME, or_empty(s1));
+                unsafe {
+                    *ints = flag(hard_linked());
+                    *ints.add(1) = flag(inter_dir_empty);
+                    *strs = text(text::FILENAME);
+                    *strs.add(1) = text(text::OUTPUT_FILENAME);
+                    *strs.add(2) = nzb_text(3);
+                }
+                nzb as usize
+            }
+            _ => 0,
+        },
+        // add a server's stats to the file and to its collection
+        10 => {
+            unsafe { nzbget_rs_file_op(f, 12, 1, ptr::null(), ints, ptr::null_mut()) };
+            if !nzb.is_null() {
+                unsafe {
+                    crate::qnzb::nzbget_rs_nzb_coll(
+                        nzb,
+                        45,
+                        1,
+                        ptr::null(),
+                        ptr::null(),
+                        ptr::null(),
+                        ints,
+                        ptr::null_mut(),
+                    )
+                };
+            }
+            0
+        }
+        _ => 0,
+    }
+}
+
 /// What the queue host reported for a file (host op 40), read directly:
 /// `ints` and `i64s` in that op's order, the seven texts (filename, subject,
 /// output filename, hard-link path, origname, hash16k, par set id) when
@@ -820,6 +1202,132 @@ pub(crate) unsafe fn host_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    unsafe extern "C" fn bump(ctx: *mut std::ffi::c_void) {
+        unsafe { *ctx.cast::<i32>() += 1 };
+    }
+
+    #[test]
+    fn output_op_matches_the_cpp_host() {
+        let f = nzbget_rs_file_new(0);
+        let (ni, nl, ns) = (
+            ptr::null_mut::<c_int>(),
+            ptr::null_mut::<i64>(),
+            ptr::null_mut::<*const c_char>(),
+        );
+        unsafe {
+            // 0: the callback runs (no downloads: no output lock needed)
+            let mut hits = 0i32;
+            let mut ctx = [(&mut hits as *mut i32) as usize as i64];
+            host_output_op(
+                f,
+                0,
+                0,
+                bump as *const () as usize,
+                ptr::null(),
+                ptr::null(),
+                ni,
+                ctx.as_mut_ptr(),
+                ns,
+            );
+            assert_eq!(hits, 1);
+            // 8 and 9/8: the output name, the CRC and what the writer needs back
+            let out = CString::new("/inter/x.out.tmp").unwrap();
+            host_output_op(f, 8, 0, 0, out.as_ptr(), ptr::null(), ni, nl, ns);
+            assert_eq!(
+                CStr::from_ptr(nzbget_rs_file_text(f, text::OUTPUT_FILENAME)).to_bytes(),
+                b"/inter/x.out.tmp"
+            );
+            let mut ints = [7 as c_int; 2];
+            let mut strs = [ptr::null::<c_char>(); 3];
+            let nzb = host_output_op(
+                f,
+                9,
+                8,
+                0xdead_beef,
+                out.as_ptr(),
+                ptr::null(),
+                ints.as_mut_ptr(),
+                nl,
+                strs.as_mut_ptr(),
+            );
+            assert_eq!(nzb, 0);
+            assert_eq!(nzbget_rs_file_get(f, field::CRC), 0xdead_beef);
+            assert_eq!(ints, [0, 1]); // not hard-linked; no InterDir without options
+            assert_eq!(CStr::from_ptr(strs[1]).to_bytes(), b"/inter/x.out.tmp");
+            assert!(strs[2].is_null());
+            // 9/6: moves articles from success to failed
+            nzbget_rs_file_set(f, field::SUCCESS_ARTICLES, 10);
+            nzbget_rs_file_set(f, field::FAILED_ARTICLES, 1);
+            host_output_op(f, 9, 6, 3, ptr::null(), ptr::null(), ni, nl, ns);
+            assert_eq!(nzbget_rs_file_get(f, field::SUCCESS_ARTICLES), 7);
+            assert_eq!(nzbget_rs_file_get(f, field::FAILED_ARTICLES), 4);
+            // 5: without direct write the output gets initialized; 6 sets it
+            let mut ints = [9 as c_int; 2];
+            host_output_op(
+                f,
+                5,
+                0,
+                0,
+                out.as_ptr(),
+                ptr::null(),
+                ints.as_mut_ptr(),
+                nl,
+                ns,
+            );
+            assert_eq!(ints, [0, 0]);
+            assert_eq!(nzbget_rs_file_get(f, field::OUTPUT_INITIALIZED), 1);
+            // with forced direct write the output is the file's own
+            nzbget_rs_file_set(f, field::FORCE_DIRECT_WRITE, 1);
+            host_output_op(
+                f,
+                5,
+                0,
+                0,
+                out.as_ptr(),
+                ptr::null(),
+                ints.as_mut_ptr(),
+                nl,
+                ns,
+            );
+            assert_eq!(ints, [1, 1]);
+            // 10: server stats are added
+            let mut stat = [3 as c_int, 5, 2];
+            host_output_op(
+                f,
+                10,
+                0,
+                0,
+                ptr::null(),
+                ptr::null(),
+                stat.as_mut_ptr(),
+                nl,
+                ns,
+            );
+            host_output_op(
+                f,
+                10,
+                0,
+                0,
+                ptr::null(),
+                ptr::null(),
+                stat.as_mut_ptr(),
+                nl,
+                ns,
+            );
+            let mut got = [0 as c_int; 3];
+            nzbget_rs_file_op(f, 11, 0, ptr::null(), got.as_mut_ptr(), ns);
+            assert_eq!(got, [3, 10, 4]);
+            // 9/2: the CRC and output name reset
+            host_output_op(f, 9, 2, 0, ptr::null(), ptr::null(), ni, nl, ns);
+            assert_eq!(nzbget_rs_file_get(f, field::CRC), 0);
+            assert_eq!(
+                CStr::from_ptr(nzbget_rs_file_text(f, text::OUTPUT_FILENAME)).to_bytes(),
+                b""
+            );
+            nzbget_rs_file_free(f);
+        }
+    }
 
     #[test]
     fn fields_texts_and_ids() {

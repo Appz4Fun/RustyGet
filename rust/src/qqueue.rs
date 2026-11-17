@@ -2,10 +2,9 @@
 //! daemon's queue, which is the current one. The C++ `DownloadQueue` object is this allocation
 //! (host op 25 creates it), so a `DownloadQueue*` is a `*mut Queue`.
 //!
-//! The queue owns its `NzbInfo`s and the history its `HistoryInfo`s. A
-//! `NzbInfo` is deleted by the host (`nzbget_rs_queue_hooks`), because its
-//! destructor still frees host objects; a history entry is freed here,
-//! deleting its inner record first as the C++ destructor did.
+//! The queue owns its collections and the history its entries. Both are
+//! freed here: a collection with its post job and files, a history entry
+//! after its inner record, as the C++ destructors did.
 
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -19,30 +18,17 @@ use crate::qhist::{
 use crate::qlist::{nzbget_rs_ptrlist_free, nzbget_rs_ptrlist_new, nzbget_rs_ptrlist_op, PtrList};
 use crate::qnzb::{nzbget_rs_nzb_text, NzbScalars};
 
-/// The host's `delete NzbInfo*` (0 until registered).
-static NZB_DROP: AtomicUsize = AtomicUsize::new(0);
-
-/// Registers the host's `NzbInfo` deleter. Called at start-up (and again
-/// harmlessly by every queue the host creates).
-#[unsafe(no_mangle)]
-pub extern "C" fn nzbget_rs_queue_hooks(nzb_drop: Option<unsafe extern "C" fn(usize)>) {
-    NZB_DROP.store(nzb_drop.map_or(0, |f| f as usize), Ordering::SeqCst);
-}
-
-/// Deletes a `NzbInfo` (null is ignored). Without a registered host deleter
-/// (Rust tests) it frees the file list and the collection itself.
+/// Deletes a collection (null is ignored), as `delete NzbInfo*` did: its
+/// post job, then its file list (which frees its files), then the
+/// collection itself.
 pub fn drop_nzb(p: usize) {
     if p == 0 {
         return;
     }
-    let hook = NZB_DROP.load(Ordering::SeqCst);
-    if hook != 0 {
-        let f: unsafe extern "C" fn(usize) = unsafe { std::mem::transmute(hook) };
-        unsafe { f(p) };
-        return;
-    }
     let n = p as *mut NzbScalars;
     unsafe {
+        let post = crate::qnzb::nzbget_rs_nzb_slot(n, 1, 1, 0);
+        crate::qnzb::nzbget_rs_post_free(post as *mut crate::qnzb::Post);
         let files = crate::qnzb::nzbget_rs_nzb_slot(n, 0, 1, 0);
         nzbget_rs_ptrlist_free(files as *mut PtrList);
         crate::qnzb::nzbget_rs_nzb_scalars_free(n);

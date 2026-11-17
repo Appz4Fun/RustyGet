@@ -360,6 +360,176 @@ pub unsafe extern "C" fn nzbget_rs_file_op(
     }
 }
 
+/// Applies a queue-host file setter (host op 42 sub-op `a1`) as the C++
+/// FileInfo did; `p2` is the collection where the op names one.
+///
+/// # Safety
+/// `f` is a live file; `p2` a live collection for 53 and 59; the caller
+/// holds the queue lock.
+pub(crate) unsafe fn host_file_set(
+    f: *const File,
+    a1: i32,
+    a2: i32,
+    p2: usize,
+    s1: *const c_char,
+    i64s: *const i64,
+) {
+    use field::*;
+    if f.is_null() {
+        return;
+    }
+    let file = unsafe { &*f };
+    let flag = i64::from(a2 != 0);
+    let v64 = || unsafe { *i64s };
+    let nzb = file.get(NZB) as usize as *mut crate::qnzb::NzbScalars;
+    // simple setters: (sub-op, field, value)
+    let simple = match a1 {
+        1 => Some((DELETED, flag)),
+        2 => Some((DUPE_DELETED, flag)),
+        3 => Some((FILENAME_CONFIRMED, flag)),
+        4 => Some((FIRST_CONTENT, i64::from(a2))),
+        6 => Some((FORCE_DIRECT_WRITE, flag)),
+        7 => Some((OUTPUT_INITIALIZED, flag)),
+        8 => Some((PARTIAL_STATE, i64::from(a2))),
+        9 => Some((PARTIAL_CHANGED, flag)),
+        10 => Some((DUPE_CUTOVER, flag)),
+        11 => Some((DUPE_NO_SOURCE_LOGGED, flag)),
+        12 => Some((DUPE_LEAD_DONOR_ID, i64::from(a2))),
+        13 => Some((DUPE_LEAD_FAILURES, i64::from(a2))),
+        14 => Some((DUPE_LEAD_SWITCHES, i64::from(a2))),
+        15 => Some((DUPE_RECOVERED_ARTICLES, i64::from(a2))),
+        16 => Some((DUPE_ATTEMPTED_ARTICLES, i64::from(a2))),
+        17 => Some((COMPLETED_ARTICLES, i64::from(a2))),
+        18 => Some((SUCCESS_ARTICLES, i64::from(a2))),
+        19 => Some((FAILED_ARTICLES, i64::from(a2))),
+        20 => Some((ACTIVE_DOWNLOADS, i64::from(a2))),
+        21 => Some((CACHED_ARTICLES, i64::from(a2))),
+        22 => Some((PAR_FILE, flag)),
+        30 => Some((REMAINING_SIZE, v64())),
+        31 => Some((SUCCESS_SIZE, v64())),
+        32 => Some((FAILED_SIZE, v64())),
+        33 => Some((DECODED_FILE_SIZE, v64())),
+        58 => Some((NZB, p2 as i64)),
+        62 => Some((TIME, v64())),
+        63 => Some((SIZE, v64())),
+        64 => Some((MISSED_SIZE, v64())),
+        65 => Some((TOTAL_ARTICLES, i64::from(a2))),
+        66 => Some((MISSED_ARTICLES, i64::from(a2))),
+        _ => None,
+    };
+    if let Some((id, v)) = simple {
+        file.set(id, v);
+        return;
+    }
+    let set_text = |id: i32, v: *const c_char| unsafe { nzbget_rs_file_set_text(f, id, v) };
+    // the collection's copy of a file's server stats (NzbInfo::AddFileStats)
+    let add_stats = |which: i32, op: i32| {
+        let stats = file.lock().server_stats.clone();
+        for st in stats {
+            let mut v = st;
+            unsafe {
+                crate::qnzb::nzbget_rs_nzb_coll(
+                    p2 as *const crate::qnzb::NzbScalars,
+                    44 + which,
+                    op,
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    v.as_mut_ptr(),
+                    ptr::null_mut(),
+                )
+            };
+        }
+    };
+    match a1 {
+        0 => {
+            let paused = a2 != 0;
+            if (file.get(PAUSED) != 0) != paused && !nzb.is_null() {
+                let remaining = file.get(REMAINING_SIZE);
+                let n = unsafe { &mut *nzb };
+                n.pausedFileCount += if paused { 1 } else { -1 };
+                n.pausedSize += if paused { remaining } else { -remaining };
+            }
+            file.set(PAUSED, i64::from(paused));
+        }
+        5 => {
+            let extra = a2 != 0;
+            if (file.get(EXTRA_PRIORITY) != 0) != extra && !nzb.is_null() {
+                unsafe { &mut *nzb }.extraPriority += if extra { 1 } else { -1 };
+            }
+            file.set(EXTRA_PRIORITY, i64::from(extra));
+        }
+        40 => set_text(text::FILENAME, s1),
+        41 => {
+            // the output name changes under the output lock while downloads run
+            let taken = file.output_lock();
+            set_text(text::OUTPUT_FILENAME, s1);
+            if taken {
+                file.output_unlock();
+            }
+        }
+        42 => set_text(text::ORIGNAME, s1),
+        43 => set_text(text::HASH16K, s1),
+        44 => set_text(text::PAR_SET_ID, s1),
+        45 => set_text(
+            text::HARD_LINK_PATH,
+            if s1.is_null() { c"".as_ptr() } else { s1 },
+        ),
+        50 => {
+            let name = file.lock().texts[text::FILENAME as usize]
+                .as_bytes()
+                .to_vec();
+            let valid = crate::paths::make_valid_filename(&name, false);
+            let valid = CString::new(valid).unwrap_or_default();
+            set_text(text::FILENAME, valid.as_ptr());
+        }
+        51 | 52 | 54 => unsafe {
+            let op = match a1 {
+                51 => 101,
+                52 => 102,
+                _ => 103,
+            };
+            crate::qarticle::nzbget_rs_article_host(
+                file.articles,
+                ptr::null_mut(),
+                op,
+                0,
+                0,
+                ptr::null(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            );
+        },
+        53 => {
+            add_stats(1, 2);
+            file.lock().server_stats.clear();
+        }
+        55 => {
+            let taken = file.output_lock();
+            unsafe {
+                crate::qarticle::nzbget_rs_article_host(
+                    file.articles,
+                    ptr::null_mut(),
+                    104,
+                    0,
+                    p2,
+                    ptr::null(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                )
+            };
+            if taken {
+                file.output_unlock();
+            }
+        }
+        59 => add_stats(0, 2),
+        61 => set_text(text::SUBJECT, s1),
+        _ => {}
+    }
+}
+
 /// What the queue host reported for a file (host op 40), read directly:
 /// `ints` and `i64s` in that op's order, the seven texts (filename, subject,
 /// output filename, hard-link path, origname, hash16k, par set id) when

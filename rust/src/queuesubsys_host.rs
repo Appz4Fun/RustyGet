@@ -6152,6 +6152,40 @@ unsafe fn native_op(
             Some(0)
         }
         (41, _) => Some(0),
+        // file setters, creation and deletion
+        (42, 56) => {
+            // the id a new file would get (the file itself is not kept)
+            let id = crate::qfile::nzbget_rs_file_ids(4, 0);
+            crate::qfile::nzbget_rs_file_ids(3, id);
+            Some(id as usize)
+        }
+        (42, 60) => {
+            use crate::qfile::{field, nzbget_rs_file_ids, nzbget_rs_file_new, nzbget_rs_file_set};
+            let f = nzbget_rs_file_new(-1);
+            let given = p2 as i32;
+            unsafe {
+                if a2 != 0 {
+                    nzbget_rs_file_set(f, field::ID, i64::from(nzbget_rs_file_ids(4, 0)));
+                    nzbget_rs_file_set(f, field::ID, i64::from(given));
+                } else {
+                    let id = if given != 0 {
+                        given
+                    } else {
+                        nzbget_rs_file_ids(4, 0)
+                    };
+                    nzbget_rs_file_set(f, field::ID, i64::from(id));
+                }
+            }
+            Some(f as usize)
+        }
+        (42, 57) => {
+            unsafe { crate::qfile::nzbget_rs_file_free(p1 as *mut File) };
+            Some(0)
+        }
+        (42, _) => {
+            unsafe { crate::qfile::host_file_set(file, a1, a2, p2, s1, i64s) };
+            Some(0)
+        }
         // article ops (15, the live-par namespace walk, stays with the host)
         (43, 15) => None,
         (43, _) => {

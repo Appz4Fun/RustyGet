@@ -1084,26 +1084,15 @@ where
             ) {
                 Ok(summary) => return Ok(summary),
                 Err(crate::progressive_unpack::Error::Failed(f)) => return Err(f.to_string()),
-                Err(crate::progressive_unpack::Error::Unsupported(why)) if rar4 => {
-                    tracking_cb(
-                        4,
-                        &format!("Unrar: using the RAR 1.5-4.x decoder ({})", why.0),
-                    );
-                }
+                // zipfast decodes every RAR version (1.5 to 5, PPMd, the standard VM filters,
+                // solid sets, encryption); what it still refuses has no other decoder here.
                 Err(crate::progressive_unpack::Error::Unsupported(why)) => {
-                    let msg = format!("Unrar: unsupported RAR5 archive: {}", why.0);
+                    let version = if rar4 { "RAR 1.5-4.x" } else { "RAR5" };
+                    let msg = format!("Unrar: unsupported {version} archive: {}", why.0);
                     tracking_cb(1, &msg);
                     return Err(msg);
                 }
             }
-            return crate::archive_native::extract_rar4_cancellable(
-                archive_path,
-                output_dir,
-                password,
-                overwrite_mode,
-                &mut tracking_cb,
-                is_cancelled,
-            );
         }
     }
 

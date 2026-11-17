@@ -434,8 +434,7 @@ fn unrepaired_holes_fail_as_damage() {
 
 #[test]
 fn rar4_solid_first_member_without_history_is_refused() {
-    // A RAR4 (1.5-4.x) archive with a solid compressed member (method 0x33): zipfast refuses
-    // solid RAR4 with a typed error, so the fallback decoder takes it.
+    // A RAR4 (1.5-4.x) archive whose first member is solid and compressed (method 0x33).
     let t = TestDir::new("rar4c");
     let mut v = b"Rar!\x1a\x07\x00".to_vec();
     // main header

@@ -1597,11 +1597,6 @@ public:
 	void SetUnpackTried(bool unpackTried) { Scalars()->unpackTried = unpackTried; }
 	int GetLastUnpackStatus() { return Scalars()->lastUnpackStatus; }
 	void SetLastUnpackStatus(int lastUnpackStatus) { Scalars()->lastUnpackStatus = lastUnpackStatus; }
-	// archives unpacked so far (ops 30-33 of nzbget_rs_nzb_files)
-	int64 EA(int op, int index = 0, const char* s1 = nullptr, const char** strs = nullptr)
-	{
-		return NF(30 + op, index, nullptr, s1, nullptr, nullptr, nullptr, strs);
-	}
 
 	class PostInfo
 	{
@@ -1627,22 +1622,26 @@ public:
 			ptStreamRepairing
 		};
 
-		// the state lives in Rust (rust/src/qnzb.rs nzbget_rs_post_op)
+		// the object's storage is the Rust post job (rust/src/qnzb.rs Post): a
+		// PostInfo* is an RsPost*. Rust creates and frees it (host op 32 sub-ops
+		// 54 and 55) and answers the host ops on it (60 and 62).
+		static void* operator new(size_t) { return nzbget_rs_post_new(); }
+		static void operator delete(void* p) { nzbget_rs_post_free(static_cast<RsPost*>(p)); }
 		PostInfo() = default;
 		PostInfo(const PostInfo&) = delete;
 		PostInfo& operator=(const PostInfo&) = delete;
-		~PostInfo() { nzbget_rs_post_free(m_rs); }
+		RsPost* Rs() const { return reinterpret_cast<RsPost*>(const_cast<PostInfo*>(this)); }
 
-		NzbInfo* GetNzbInfo() { return m_nzbInfo; }
-		void SetNzbInfo(NzbInfo* nzbInfo) { m_nzbInfo = nzbInfo; }
+		NzbInfo* GetNzbInfo() { return reinterpret_cast<NzbInfo*>((uintptr_t)nzbget_rs_post_op(Rs(), 2, 0, 0, nullptr, nullptr)); }
+		void SetNzbInfo(NzbInfo* nzbInfo) { nzbget_rs_post_op(Rs(), 3, 0, (int64)reinterpret_cast<uintptr_t>(nzbInfo), nullptr, nullptr); }
 		EStage GetStage() { return (EStage)V(0); }
 		void SetStage(EStage stage) { SetV(0, stage); }
-		void SetProgressLabel(const char* progressLabel) { nzbget_rs_post_op(m_rs, 11, 0, 0, progressLabel, nullptr); }
+		void SetProgressLabel(const char* progressLabel) { nzbget_rs_post_op(Rs(), 11, 0, 0, progressLabel, nullptr); }
 		// a copy, valid on this thread until the next call
 		const char* GetProgressLabel()
 		{
 			static thread_local CString label;
-			NzbgetRsBuf buf = nzbget_rs_post_label(m_rs);
+			NzbgetRsBuf buf = nzbget_rs_post_label(Rs());
 			if (buf.data && buf.len > 0) label.Set(reinterpret_cast<const char*>(buf.data), (int)buf.len); else label = "";
 			nzbget_rs_free(buf);
 			return label;
@@ -1650,7 +1649,7 @@ public:
 		int GetFileProgress() { return (int)V(13); }
 		void SetFileProgress(int fileProgress) { SetV(13, fileProgress); }
 		int GetStageProgress() { return (int)V(14); }
-		void SetStageProgress(int stageProgress) { SetV(14, std::clamp(stageProgress, 0, 1000)); }
+		void SetStageProgress(int stageProgress) { SetV(14, stageProgress); }
 		time_t GetStartTime() { return (time_t)V(17); }
 		void SetStartTime(time_t startTime) { SetV(17, (int64)startTime); }
 		time_t GetStageTime() { return (time_t)V(18); }
@@ -1673,69 +1672,48 @@ public:
 		void SetParCannotCover(bool parCannotCover) { SetV(5, parCannotCover); }
 		bool GetForceRepair() { return V(8) != 0; }
 		void SetForceRepair(bool forceRepair) { SetV(8, forceRepair); }
-		bool GetParRepaired() { return m_nzbInfo ? m_nzbInfo->GetParRepaired() : V(9) != 0; }
-		void SetParRepaired(bool parRepaired)
-		{
-			SetV(9, parRepaired);
-			if (m_nzbInfo) m_nzbInfo->SetParRepaired(parRepaired);
-		}
-		bool GetUnpackTried() { return m_nzbInfo ? m_nzbInfo->GetUnpackTried() : V(10) != 0; }
-		void SetUnpackTried(bool unpackTried)
-		{
-			SetV(10, unpackTried);
-			if (m_nzbInfo) m_nzbInfo->SetUnpackTried(unpackTried);
-		}
+		// par repaired, unpack tried and last unpack status are the collection's
+		// when there is one (Rust reads and writes it)
+		bool GetParRepaired() { return V(9) != 0; }
+		void SetParRepaired(bool parRepaired) { SetV(9, parRepaired); }
+		bool GetUnpackTried() { return V(10) != 0; }
+		void SetUnpackTried(bool unpackTried) { SetV(10, unpackTried); }
 		bool GetPassListTried() { return V(11) != 0; }
 		void SetPassListTried(bool passListTried) { SetV(11, passListTried); }
-		int GetLastUnpackStatus() { return m_nzbInfo ? m_nzbInfo->GetLastUnpackStatus() : (int)V(12); }
-		void SetLastUnpackStatus(int unpackStatus)
-		{
-			SetV(12, unpackStatus);
-			if (m_nzbInfo) m_nzbInfo->SetLastUnpackStatus(unpackStatus);
-		}
+		int GetLastUnpackStatus() { return (int)V(12); }
+		void SetLastUnpackStatus(int unpackStatus) { SetV(12, unpackStatus); }
 		bool GetNeedParCheck() { return V(6) != 0; }
 		void SetNeedParCheck(bool needParCheck) { SetV(6, needParCheck); }
 		bool GetNeedUnpack() { return V(7) != 0; }
 		void SetNeedUnpack(bool needUnpack) { SetV(7, needUnpack); }
 		JobThread* GetPostThread() { return reinterpret_cast<JobThread*>((uintptr_t)V(19)); }
 		void SetPostThread(JobThread* postThread) { SetV(19, (int64)reinterpret_cast<uintptr_t>(postThread)); }
-		int GetParredFileCount() { return (int)nzbget_rs_post_op(m_rs, 20, 0, 0, nullptr, nullptr); }
+		int GetParredFileCount() { return (int)nzbget_rs_post_op(Rs(), 20, 0, 0, nullptr, nullptr); }
 		const char* GetParredFile(int index)
 		{
 			const char* s = "";
-			nzbget_rs_post_op(m_rs, 21, index, 0, nullptr, &s);
+			nzbget_rs_post_op(Rs(), 21, index, 0, nullptr, &s);
 			return s;
 		}
-		void AddParredFile(const char* filename) { nzbget_rs_post_op(m_rs, 22, 0, 0, filename ? filename : "", nullptr); }
+		void AddParredFile(const char* filename) { nzbget_rs_post_op(Rs(), 22, 0, 0, filename ? filename : "", nullptr); }
 		// extracted archives belong to the collection; a post job without one keeps its own
-		int GetExtractedArchiveCount();
-		const char* GetExtractedArchive(int index);
-		void ClearExtractedArchives();
+		int GetExtractedArchiveCount() { return (int)nzbget_rs_post_op(Rs(), 30, 0, 0, nullptr, nullptr); }
+		const char* GetExtractedArchive(int index)
+		{
+			const char* s = "";
+			nzbget_rs_post_op(Rs(), 31, index, 0, nullptr, &s);
+			return s;
+		}
+		void ClearExtractedArchives() { nzbget_rs_post_op(Rs(), 33, 0, 0, nullptr, nullptr); }
 
 	private:
-		NzbInfo* m_nzbInfo = nullptr;
-		RsPost* m_rs = nzbget_rs_post_new();
-		int64 V(int id) { return nzbget_rs_post_op(m_rs, 0, id, 0, nullptr, nullptr); }
-		void SetV(int id, int64 v) { nzbget_rs_post_op(m_rs, 1, id, v, nullptr, nullptr); }
-		int64 EA(int op, int index = 0, const char* s1 = nullptr, const char** strs = nullptr);
+		int64 V(int id) { return nzbget_rs_post_op(Rs(), 0, id, 0, nullptr, nullptr); }
+		void SetV(int id, int64 v) { nzbget_rs_post_op(Rs(), 1, id, v, nullptr, nullptr); }
 	};
 
 	PostInfo* GetPostInfo() { return reinterpret_cast<PostInfo*>(nzbget_rs_nzb_slot(Scalars(), 1, 0, 0)); }
-	void EnterPostProcess()
-	{
-		auto* postInfo = new PostInfo();
-		postInfo->SetNzbInfo(this);
-		delete reinterpret_cast<PostInfo*>(nzbget_rs_nzb_slot(Scalars(), 1, 1, reinterpret_cast<uintptr_t>(postInfo)));
-	}
-	void LeavePostProcess()
-	{
-		delete reinterpret_cast<PostInfo*>(nzbget_rs_nzb_slot(Scalars(), 1, 1, 0));
-		Scalars()->unpackTried = false;
-		Scalars()->lastUnpackStatus = 0;
-		EA(3);
-		// messages stay: there are no NZB log files, so a finished download's Log tab
-		// shows what is kept here (LogBuffer bounds it)
-	}
+	// post-processing starts and ends in Rust (host op 32 sub-ops 54 and 55,
+	// rust/src/qnzb.rs enter_post_process / leave_post_process)
 	bool IsDupeSuccess()
 	{
 		return nzbget_rs_nzb_is_dupe_success(
@@ -1885,20 +1863,6 @@ private:
 
 using PostInfo = NzbInfo::PostInfo;
 
-inline int64 PostInfo::EA(int op, int index, const char* s1, const char** strs)
-{
-	if (m_nzbInfo) return m_nzbInfo->EA(op, index, s1, strs);
-	return nzbget_rs_post_op(m_rs, 30 + op, index, 0, s1, strs);
-}
-inline int PostInfo::GetExtractedArchiveCount() { return (int)EA(0); }
-inline const char* PostInfo::GetExtractedArchive(int index)
-{
-	const char* s = "";
-	EA(1, index, nullptr, &s);
-	return s;
-}
-inline void PostInfo::ClearExtractedArchives() { EA(3); }
-
 inline void FileInfo::SetPaused(bool paused)
 {
 	NzbInfo* nzb = GetNzbInfo();
@@ -1925,6 +1889,7 @@ inline void FileInfo::SetExtraPriority(bool extraPriority)
 static_assert(std::is_empty<FileInfo>::value && !std::is_polymorphic<FileInfo>::value);
 static_assert(std::is_empty<NzbInfo>::value && !std::is_polymorphic<NzbInfo>::value);
 static_assert(std::is_empty<FileList>::value && !std::is_polymorphic<FileList>::value);
+static_assert(std::is_empty<PostInfo>::value && !std::is_polymorphic<PostInfo>::value);
 
 typedef RsList<NzbInfo> NzbList;
 
@@ -2363,40 +2328,12 @@ extern DupeCoordinator* g_DupeCoordinator;
 #define PREPOSTPROCESSOR_H
 
 // Job threads live in Rust (rust/src/jobthread.rs); the queue model keeps their handles.
-inline void StartPostJob(PostInfo* postInfo, int kind)
-{
-	if (!postInfo || (kind == 9 && postInfo->GetNzbInfo() && postInfo->GetNzbInfo()->GetSkipScriptProcessing()))
-		return;
-	JobThread* job = nzbget_rs_job_new_post(kind, reinterpret_cast<uintptr_t>(postInfo), 0, 0);
-	postInfo->SetPostThread(job);
-	if (!nzbget_rs_job_start(job))
-	{
-		// no worker will finish this stage: let the scheduler clean up and retry it
-		postInfo->SetPostThread(nullptr);
-		postInfo->SetWorking(false);
-		nzbget_rs_job_free(job, 0);
-	}
-}
-
 inline void StartLiveRepairJob(NzbInfo* nzbInfo)
 {
 	if (!nzbInfo) return;
 	JobThread* job = nzbget_rs_job_new_post(10, 0, nzbInfo->GetId(), 1);
 	nzbInfo->SetLiveRepairThread(job);
 	if (!nzbget_rs_job_start(job)) { nzbInfo->SetLiveRepairThread(nullptr); nzbget_rs_job_free(job, 0); }
-}
-
-inline void StartDirectUnpackJob(NzbInfo* nzbInfo)
-{
-	JobThread* job = nzbget_rs_job_new_unpack(nzbInfo->GetId());
-	nzbInfo->SetUnpackThread(job);
-	nzbInfo->SetDirectUnpackStatus(NzbInfo::nsRunning);
-	if (!nzbget_rs_job_start(job))
-	{
-		nzbInfo->SetUnpackThread(nullptr);
-		nzbInfo->SetDirectUnpackStatus(NzbInfo::nsNone);
-		nzbget_rs_job_free(job, 0);
-	}
 }
 #endif
 
@@ -2672,13 +2609,9 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 		case 51: n->UpdateMinMaxTime(); break;
 		case 52: n->UpdateCompletedStats(reinterpret_cast<FileInfo*>(p2)); break;
 		case 53: n->UpdateDeletedStats(reinterpret_cast<FileInfo*>(p2)); break;
-		case 54: n->EnterPostProcess(); break;
-		case 55: n->LeavePostProcess(); break;
 		case 96: n->SetUrl(s1); break;
 		case 97: n->GetFileList()->clear(); break;
 		case 98: n->UpdateCurrentStats(); break;
-		case 109: if (n->GetPostInfo()) n->GetPostInfo()->SetStage((PostInfo::EStage)a2); break;
-		case 110: if (n->GetPostInfo()) { n->GetPostInfo()->SetForceParFull((a2 & 1) != 0); n->GetPostInfo()->SetForceRepair((a2 & 2) != 0); } break;
 		default: break;
 		}
 		return 0;
@@ -2793,104 +2726,8 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 		}
 		return 0;
 	}
-	case 60: {
-		PostInfo* pi = reinterpret_cast<PostInfo*>(p1);
-		if (!pi) return 0;
-		if (a1 == 0)
-		{
-			JobThread* pt = pi->GetPostThread();
-			ints[0] = (int)pi->GetStage(); ints[1] = pi->GetWorking() ? 1 : 0; ints[2] = pi->GetDeleted() ? 1 : 0;
-			ints[3] = pi->GetRequestParCheck() ? 1 : 0; ints[4] = pi->GetForceParFull() ? 1 : 0; ints[5] = pi->GetForceRepair() ? 1 : 0;
-			ints[6] = pi->GetStreamRepairDone() ? 1 : 0; ints[7] = pi->GetStreamRepairRecovered() ? 1 : 0; ints[8] = pi->GetParCannotCover() ? 1 : 0;
-			ints[9] = pi->GetNeedParCheck() ? 1 : 0; ints[10] = pi->GetNeedUnpack() ? 1 : 0;
-			ints[11] = pt ? 1 : 0; ints[12] = (pt && nzbget_rs_job_op(pt, 4, 0, 0, 0)) ? 1 : 0;
-			ints[13] = pi->GetUnpackTried() ? 1 : 0; ints[14] = pi->GetParRepaired() ? 1 : 0;
-			ints[15] = pi->GetPassListTried() ? 1 : 0; ints[16] = pi->GetLastUnpackStatus();
-			ints[17] = pi->GetExtractedArchiveCount();
-			ints[18] = pi->GetParredFileCount();
-			ints[19] = pi->GetStageProgress(); ints[20] = pi->GetFileProgress();
-			i64s[0] = (int64_t)pi->GetStartTime(); i64s[1] = (int64_t)reinterpret_cast<uintptr_t>(pi->GetNzbInfo());
-			i64s[2] = (int64_t)pi->GetStageTime();
-			if (strs) strs[0] = pi->GetProgressLabel();
-			return 0;
-		}
-		if (a1 == 1)
-		{
-			int v = (int)p2;
-			if (a2 == 0) pi->SetStage((PostInfo::EStage)v);
-			else if (a2 == 1) pi->SetWorking(v != 0);
-			else if (a2 == 2) pi->SetDeleted(v != 0);
-			else if (a2 == 3) pi->SetRequestParCheck(v != 0);
-			else if (a2 == 4) pi->SetForceParFull(v != 0);
-			else if (a2 == 5) pi->SetParCannotCover(v != 0);
-			else if (a2 == 6) pi->SetNeedParCheck(v != 0);
-			else if (a2 == 7) pi->SetNeedUnpack(v != 0);
-			else if (a2 == 8) pi->SetForceRepair(v != 0);
-			else if (a2 == 9) pi->SetParRepaired(v != 0);
-			else if (a2 == 10) pi->SetUnpackTried(v != 0);
-			else if (a2 == 11) pi->SetPassListTried(v != 0);
-			else if (a2 == 12) pi->SetLastUnpackStatus(v);
-			else if (a2 == 13) pi->SetFileProgress(v);
-			else if (a2 == 14) pi->SetStageProgress(v);
-			else if (a2 == 15) pi->SetStreamRepairDone(v != 0);
-			else if (a2 == 16) pi->SetStreamRepairRecovered(v != 0);
-			return 0;
-		}
-		if (a1 == 2) { pi->SetStartTime((time_t)i64s[0]); return 0; }
-		if (a1 == 3) { pi->SetStageTime((time_t)i64s[0]); pi->SetStageProgress(0); pi->SetFileProgress(0); pi->SetProgressLabel(""); return 0; }
-		if (a1 == 4) { pi->SetStageTime((time_t)i64s[0]); return 0; }
-		if (a1 == 5) { pi->SetProgressLabel(s1 ? s1 : ""); return 0; }
-		if (a1 == 6) { if (a2 < 0) pi->AddParredFile(s1); else strs[0] = pi->GetParredFile(a2); return 0; }
-		if (a1 == 7) { if (a2 < 0) pi->ClearExtractedArchives(); else strs[0] = pi->GetExtractedArchive(a2); return 0; }
-		return 0;
-	}
-	case 62: {
-		if (a1 == 0) { PostInfo* pi = reinterpret_cast<PostInfo*>(p1); if (pi && pi->GetPostThread()) nzbget_rs_job_op(pi->GetPostThread(), 0, 0, 0, 0); return 0; }
-		if (a1 == 1 || a1 == 2)
-		{
-			PostInfo* pi = reinterpret_cast<PostInfo*>(p1);
-			if (pi && pi->GetPostThread()) { JobThread* t = pi->GetPostThread(); pi->SetPostThread(nullptr); nzbget_rs_job_free(t, a1 == 2 ? 1 : 0); }
-			return 0;
-		}
-		if (a1 == 3)
-		{
-			NzbInfo* n = reinterpret_cast<NzbInfo*>(p1);
-			if (!n || !n->GetUnpackThread()) return 0;
-			JobThread* du = n->GetUnpackThread();
-			return (a2 != 0 || (nzbget_rs_job_op(du, 15, 0, 0, 0) && !nzbget_rs_job_op(du, 16, 0, 0, 0))) ? 1 : 0;
-		}
-		if (a1 >= 4 && a1 <= 7)
-		{
-			NzbInfo* n = reinterpret_cast<NzbInfo*>(p2);
-			if (!n || !n->GetUnpackThread()) return 0;
-			// direct-unpack ops: 4 stop, 5 collection downloaded, 6 deleted, 7 file downloaded
-			static const int du_op[] = {11, 13, 14, 12};
-			uintptr_t arg = a1 == 7 ? (uintptr_t)i64s[0] : p2;
-			nzbget_rs_job_op(n->GetUnpackThread(), du_op[a1 - 4], 0, p1, arg);
-			return 0;
-		}
-		if (a1 == 8) { StartDirectUnpackJob(reinterpret_cast<NzbInfo*>(p1)); return 0; }
-		if (a1 == 9) { NzbInfo* n = reinterpret_cast<NzbInfo*>(p1); if (n && n->GetLiveRepairThread()) nzbget_rs_job_op(n->GetLiveRepairThread(), 0, 0, 0, 0); return 0; }
-		if (a1 == 10) { NzbInfo* n = reinterpret_cast<NzbInfo*>(p1); if (n && n->GetLiveRepairThread()) { JobThread* t = n->GetLiveRepairThread(); n->SetLiveRepairThread(nullptr); nzbget_rs_job_op(t, 0, 0, 0, 0); } return 0; }
-		if (a1 == 11)
-		{
-#ifndef DISABLE_PARCHECK
-			PostInfo* pi = reinterpret_cast<PostInfo*>(p1);
-			if (pi && pi->GetPostThread()) return nzbget_rs_job_op(pi->GetPostThread(), 5, a2 != 0 ? 1 : 0, p2, 0) ? 1 : 0;
-#endif
-			return 0;
-		}
-		if (a1 == 12)
-		{
-			PostInfo* pi = reinterpret_cast<PostInfo*>(p1);
-#ifdef DISABLE_PARCHECK
-			if (a2 == 3) return 0;
-#endif
-			StartPostJob(pi, a2);
-			return 0;
-		}
-		return 0;
-	}
+	// 60 (post-processing state) and 62 (post and direct-unpack job handles) are
+	// answered in Rust (rust/src/qnzb.rs host_post_op / host_post_job_op)
 	default: return 0;
 	}
 }

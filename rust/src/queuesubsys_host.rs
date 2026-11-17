@@ -6226,6 +6226,20 @@ unsafe fn native_op(
         (35, _) => Some(unsafe {
             crate::qdup::host_dup_op(p1 as *const crate::qdup::Dup, a1, a2, s1, ints, i64s, strs)
         }),
+        // post-processing state and job handles
+        (60, _) => Some(unsafe {
+            crate::qnzb::host_post_op(
+                p1 as *const crate::qnzb::Post,
+                a1,
+                a2,
+                p2,
+                s1,
+                ints,
+                i64s,
+                strs,
+            )
+        }),
+        (62, _) => Some(unsafe { crate::qnzb::host_post_job_op(a1, a2, p1, p2, i64s) }),
         // article cache ops on a file
         (44, _) => {
             Some(unsafe { crate::qfile::host_cache_op(file, a1, a2, p2, s1, ints, i64s, strs) })

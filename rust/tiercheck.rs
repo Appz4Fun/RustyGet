@@ -166,8 +166,8 @@ fn arm_hwcap2(bit: u32) -> bool {
         fn getauxval(t: core::ffi::c_ulong) -> core::ffi::c_ulong;
     }
     const AT_HWCAP2: core::ffi::c_ulong = 26;
-    unsafe { getauxval(AT_HWCAP2) }
-    &(1 << bit) != 0
+    let hwcap2 = unsafe { getauxval(AT_HWCAP2) };
+    hwcap2 & (1 << bit) != 0
 }
 
 #[unsafe(no_mangle)]

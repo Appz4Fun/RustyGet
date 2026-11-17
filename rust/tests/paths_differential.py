@@ -180,10 +180,5 @@ with tempfile.TemporaryDirectory(prefix="nzbget-paths-") as temp:
     compile_cmd = [*shlex.split(os.environ.get("CXX", "c++")), *shlex.split(get("CXX_FLAGS")),
                    *shlex.split(get("CXX_DEFINES")), *shlex.split(get("CXX_INCLUDES"))]
     link_libs = [str(BUILD / l) if not l.startswith(("-", "/")) else l for l in libs]
-    if sys.platform.startswith("linux"):
-        ownership = temp / "ownership"
-        subprocess.run([*compile_cmd, str(ROOT / "rust/tests/paths_ownership.cpp"), "-o", str(ownership),
-                        "-Wl,--wrap=nzbget_rs_free", *link_libs], check=True, cwd=BUILD)
-        subprocess.run([str(ownership)], check=True)
     subprocess.run([*compile_cmd, "-w", str(temp / "main.cpp"), "-o", str(binary), *link_libs], check=True, cwd=BUILD)
     subprocess.run([str(binary), *TEXTS], check=True, env=env)

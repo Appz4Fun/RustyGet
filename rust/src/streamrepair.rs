@@ -9556,7 +9556,13 @@ impl CrossPackRepairSession {
             }
             // The archive's last volume is the last member of the set (they are in data
             // order), which is not where the mapped file ends when other files follow it.
-            let final_member = *members.last().unwrap_or(&-1);
+            // A map of the volumes on disk so far (the set still downloading) does not reach the
+            // end of the inner file: its last member is not the archive's last volume.
+            let final_member = if last_inner >= map.inner_size() {
+                *members.last().unwrap_or(&-1)
+            } else {
+                -1
+            };
             let tail_of = |this: &Self, m: i32| -> Option<(i64, i64)> {
                 let size = this.set_members.get(m as usize)?.size;
                 let end = *data_end.get(&m)?;
@@ -17997,6 +18003,87 @@ mod dead_volume_fill_tests {
         assert!(session.target_holes()[0].is_empty(), "{:?}", env.messages);
         assert_eq!(std::fs::read(dl.join(name(holed))).unwrap(), vols[holed]);
         assert!(!crate::postproc::dead_volume_borrow_underway(nzb_id));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The newest volume on disk lost its last articles, end block included, while later
+    /// volumes download: its end block must keep saying that another volume follows.
+    #[test]
+    fn the_newest_volume_on_disk_keeps_its_next_volume_flag() {
+        let root = std::env::temp_dir().join(format!("rg-livetail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dl = root.join("dl");
+        std::fs::create_dir_all(&dl).unwrap();
+        let data: Vec<u8> = (0..1_000_000u64).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+        let vols = rar5_set("Movie.2160p.mkv", &data, 100_000);
+        let name = |i: usize| format!("The.Set.part{:02}.rar", i + 1);
+        let on_disk = 6usize;
+        let newest = on_disk - 1;
+        let len = vols[newest].len() as i64;
+        let hole = NzbgetRsByteRange { offset: len - 3_000, size: 3_000 };
+        for (i, v) in vols.iter().enumerate().take(on_disk) {
+            let mut v = v.clone();
+            if i == newest {
+                v[hole.offset as usize..].fill(0);
+            }
+            std::fs::write(dl.join(name(i)), v).unwrap();
+        }
+        let dest = crate::fsops::path_to_bytes(&dl).to_vec();
+        let names: Vec<Vec<u8>> = (0..vols.len()).map(|i| name(i).into_bytes()).collect();
+        let name_refs: Vec<&[u8]> = names.iter().map(|n| n.as_slice()).collect();
+        let targets = vec![CrossPackTargetInput {
+            filename: name(newest).into_bytes(),
+            decoded_file_size: len,
+            encoded_size: 3_000,
+            patch_eligible: true,
+            holes: vec![hole],
+            all_articles_failed: false,
+        }];
+        let mut init = Vec::new();
+        let mut emit = |_: TargetMessageKind, m: &[u8]| init.push(String::from_utf8_lossy(m).into_owned());
+        let mut session = CrossPackRepairSession::new_with_dead(
+            &dest,
+            &name_refs,
+            &targets,
+            None,
+            true,
+            None,
+            &mut emit,
+            None,
+            DeadVolumeContext { pending_data_files: Some(4), nzb_id: Some(-4_242_004) },
+        )
+        .unwrap_or_else(|| panic!("holes placed: {init:?}"));
+        let mut env = BareDonor { bytes: data.clone(), messages: Vec::new() };
+        session.process_donor(
+            b"",
+            b"Movie.Alt",
+            b"",
+            &[b"Movie.2160p.mkv"],
+            &[data.len() as i64],
+            &[vec![data.len() as i32]],
+            false,
+            &mut env,
+        );
+        let got = std::fs::read(dl.join(name(newest))).unwrap();
+        // The payload came back; the end block is either the original one or still missing,
+        // never rewritten as the archive's last.
+        let mut vol = crate::rarreader::Volume::default();
+        let src = DiskContentSource::new(std::fs::File::open(dl.join(name(newest))).unwrap(), len);
+        let mut adapter = ContentSourceRarAdapter(&src);
+        let mut files = Vec::new();
+        crate::rarreader::read_from(&mut vol, &mut adapter, None, &mut files);
+        let f = files.first().expect("member header");
+        let data_end = (f.data_offset + f.packed_size) as usize;
+        assert_eq!(&got[..data_end], &vols[newest][..data_end], "{:?}", env.messages);
+        let tail = &got[data_end..];
+        assert!(
+            tail == &vols[newest][data_end..] || tail.iter().all(|&b| b == 0),
+            "end block rewritten: {:?}",
+            env.messages
+        );
+        if tail.iter().all(|&b| b == 0) {
+            assert!(!session.target_holes()[0].is_empty(), "a hole left must stay a hole");
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 }

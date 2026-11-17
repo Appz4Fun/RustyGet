@@ -2732,6 +2732,23 @@ impl PooledNntpConn {
         self.conn.slot.total_bytes_read.swap(0, Ordering::SeqCst)
     }
 
+    /// Sets how long a read or write on the open socket may wait, in seconds; `0` or less
+    /// restores the connection's own timeout (the pool's `ArticleTimeout`). Takes effect on the
+    /// current socket only: a reconnect applies the connection's own timeout again.
+    pub fn set_io_timeout(&self, secs: i32) {
+        let fd = self.conn.slot.socket.load(Ordering::SeqCst);
+        if fd < 0 || !self.is_connected() {
+            return;
+        }
+        let secs = if secs > 0 {
+            secs
+        } else {
+            // SAFETY: only the thread holding the checked-out connection calls this
+            unsafe { (*self.conn.session.get()).core.timeout }
+        };
+        let _ = crate::socket::init_socket_opts(fd, secs);
+    }
+
     #[inline]
     pub fn host_cstr(&self) -> &CStr {
         &self.conn.host

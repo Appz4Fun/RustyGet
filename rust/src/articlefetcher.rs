@@ -6,7 +6,7 @@ use std::ffi::{c_char, c_int, CStr};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::decoder::{rust_yenc_crc, rust_yenc_decode_incremental, Decoder, Format, Status};
 use crate::dupefallback::{
@@ -37,6 +37,7 @@ use crate::twin::NzbEntry;
 ///   `ints[0]=len`, `strs[0]=buffer_ptr`, returns `1` if `len > 0`
 /// - `op == 8`: `Disconnect()` on `p1`
 /// - `op == 9`: `SetSuppressErrors(true); Cancel();` on `p1`
+/// - `op == 11`: socket read/write timeout of `p1` to `a1` seconds (`a1 <= 0` restores its own)
 /// - `op == 10`: `detail("%s", s1)`
 pub type NzbgetRsNntpFetchHostFn = unsafe extern "C" fn(
     op: c_int,
@@ -230,6 +231,12 @@ pub unsafe extern "C" fn native_nntp_fetch_host(
             }
             0
         }
+        11 => {
+            if p1 != 0 {
+                (*(p1 as *const crate::net::PooledNntpConn)).set_io_timeout(a1);
+            }
+            0
+        }
         10 => {
             let msg = if s1.is_null() {
                 &[][..]
@@ -244,6 +251,57 @@ pub unsafe extern "C" fn native_nntp_fetch_host(
 }
 
 pub const MAX_TRANSIENT_ATTEMPTS: i32 = 4;
+
+/// The longest a stream-repair fetch waits for the server to say anything. A borrow pass has
+/// `DupeStreamTimeout` in all, so one article that never answers must not use it up at
+/// `ArticleTimeout` per try: past this the try counts as timed out and goes to another connection.
+pub const STREAM_REPLY_TIMEOUT_SECS: i32 = 60;
+
+/// A read that failed after at least this long timed out rather than failed fast.
+#[cfg(not(test))]
+const TIMED_OUT_AFTER: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const TIMED_OUT_AFTER: Duration = Duration::from_millis(50);
+
+/// How many tries that time out one server gets for one article before the fetch moves on.
+pub const MAX_TIMED_OUT_TRIES: i32 = 2;
+
+/// Waiting longer than this for a free connection is logged.
+const SLOW_CONNECTION_WAIT: Duration = Duration::from_secs(10);
+
+/// Whether a read that failed after `elapsed` timed out. The bar sits below the reply timeout,
+/// so a very short `ArticleTimeout` still counts as a timeout.
+fn read_timed_out(elapsed: Duration) -> bool {
+    let reply = Duration::from_secs(stream_reply_timeout_secs() as u64);
+    elapsed >= TIMED_OUT_AFTER.min(reply * 4 / 5)
+}
+
+/// `STREAM_REPLY_TIMEOUT_SECS`, or `ArticleTimeout` when that is shorter.
+fn stream_reply_timeout_secs() -> i32 {
+    let article = crate::options::active_options().map_or(0, |o| o.scalars().article_timeout);
+    if article > 0 {
+        article.min(STREAM_REPLY_TIMEOUT_SECS)
+    } else {
+        STREAM_REPLY_TIMEOUT_SECS
+    }
+}
+
+fn set_conn_io_timeout(host: NzbgetRsNntpFetchHostFn, conn: usize, secs: i32) {
+    unsafe {
+        host(
+            11,
+            secs,
+            0,
+            conn,
+            ptr::null(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            0,
+        );
+    }
+}
 
 #[inline]
 pub fn transient_retry_delay(attempt: i32) -> i32 {
@@ -260,6 +318,8 @@ pub struct FetchedArticle {
     pub transient: bool,
     /// the server answered `430 no such article` (see `nntp::BackboneMiss`)
     pub not_found_430: bool,
+    /// the connection was open but the server stopped answering (a read timed out)
+    pub timed_out: bool,
 }
 
 static UNREACHABLE_SERVERS: OnceLock<Mutex<BTreeSet<i32>>> = OnceLock::new();
@@ -451,6 +511,7 @@ impl ArticleFetcher {
         let mut missing: Vec<crate::nntp::BackboneMiss> = Vec::new();
         let mut transient_attempts: BTreeMap<usize, i32> = BTreeMap::new();
         let mut stale_connections: BTreeMap<usize, i32> = BTreeMap::new();
+        let mut timed_out_tries: BTreeMap<usize, i32> = BTreeMap::new();
 
         let mut level: i32 = 0;
         while !self.is_stopped() {
@@ -527,6 +588,7 @@ impl ArticleFetcher {
             let mut server_retention: i32 = 0;
             let mut server_name: Vec<u8> = Vec::new();
 
+            let wait_started = Instant::now();
             while conn == 0 && !self.is_stopped() {
                 let cur_st = query_host_status(self.host);
                 if cur_st.quota_reached {
@@ -573,6 +635,22 @@ impl ArticleFetcher {
                 level += 1;
                 continue;
             }
+            let waited = wait_started.elapsed();
+            if waited >= SLOW_CONNECTION_WAIT {
+                let msg_end = message_id
+                    .iter()
+                    .position(|&b| b == 0)
+                    .unwrap_or(message_id.len());
+                let mut log = format!(
+                    "Stream repair: waited {}s for a free connection to ",
+                    waited.as_secs()
+                )
+                .into_bytes();
+                log.extend_from_slice(&server_name);
+                log.extend_from_slice(b" for ");
+                log.extend_from_slice(&message_id[..msg_end]);
+                emit_detail(self.host, &log);
+            }
 
             let stopped_now = {
                 let mut guard = self.conn_ptr.lock().unwrap();
@@ -590,6 +668,7 @@ impl ArticleFetcher {
                 message_id,
                 groups,
             );
+            let timed_out = result.timed_out;
             self.release_connection(conn, true);
 
             if result.success || !result.transient {
@@ -604,7 +683,15 @@ impl ArticleFetcher {
                 }
                 continue;
             }
-            if result.transient && !server_unreachable(server_id) {
+            if timed_out && !self.is_stopped() {
+                // a server that sits on one article is not unreachable: retry once on
+                // another connection (the timed-out one was disconnected), then move on
+                let tries = timed_out_tries.entry(server_ptr).or_insert(0);
+                *tries += 1;
+                if *tries < MAX_TIMED_OUT_TRIES {
+                    continue;
+                }
+            } else if result.transient && !server_unreachable(server_id) {
                 if reused {
                     let stale = stale_connections.entry(server_ptr).or_insert(0);
                     *stale += 1;
@@ -701,6 +788,16 @@ impl ArticleFetcher {
             return result;
         }
 
+        // the connection goes back to the pool with its own timeout
+        struct IoTimeout(NzbgetRsNntpFetchHostFn, usize);
+        impl Drop for IoTimeout {
+            fn drop(&mut self) {
+                set_conn_io_timeout(self.0, self.1, 0);
+            }
+        }
+        set_conn_io_timeout(self.host, conn, stream_reply_timeout_secs());
+        let _io_timeout = IoTimeout(self.host, conn);
+
         let disconnect = || unsafe {
             (self.host)(
                 8,
@@ -717,6 +814,7 @@ impl ArticleFetcher {
         };
 
         if join_group {
+            let join_started = Instant::now();
             let mut joined_resp: Option<Vec<u8>> = None;
             for group in groups {
                 let grp_c = to_c_bytes(group);
@@ -756,6 +854,7 @@ impl ArticleFetcher {
                 log.extend_from_slice(msg_slice);
                 emit_detail(self.host, &log);
                 result.transient = joined_resp.is_none();
+                result.timed_out = result.transient && read_timed_out(join_started.elapsed());
                 if result.transient {
                     disconnect();
                 }
@@ -768,6 +867,7 @@ impl ArticleFetcher {
         body_cmd.extend_from_slice(msg_slice);
         body_cmd.extend_from_slice(b"\r\n\0");
         let mut r_strs = [ptr::null::<c_char>(); 1];
+        let requested = Instant::now();
         let req_ok = unsafe {
             (self.host)(
                 6,
@@ -787,9 +887,11 @@ impl ArticleFetcher {
             log.extend_from_slice(server_name);
             log.extend_from_slice(b" for ");
             log.extend_from_slice(msg_slice);
+            log.extend_from_slice(format!(" after {}s", requested.elapsed().as_secs()).as_bytes());
             emit_detail(self.host, &log);
             disconnect();
             result.transient = true;
+            result.timed_out = read_timed_out(requested.elapsed());
             return result;
         }
         let resp_first = unsafe { *r_strs[0] as u8 };
@@ -844,6 +946,7 @@ impl ArticleFetcher {
 
             let mut rd_ints = [0 as c_int; 1];
             let mut rd_strs = [ptr::null::<c_char>(); 1];
+            let read_started = Instant::now();
             let rd_ok = unsafe {
                 (self.host)(
                     7,
@@ -868,6 +971,7 @@ impl ArticleFetcher {
                 disconnect();
                 return FetchedArticle {
                     transient: true,
+                    timed_out: read_timed_out(read_started.elapsed()),
                     ..Default::default()
                 };
             }
@@ -1344,5 +1448,72 @@ mod tests {
         };
         let got = fetch_entry(&fetcher, &entry, 1024 * 1024, || false).expect("fetched entry");
         assert_eq!(got, expected);
+    }
+
+    static SILENT_REQUESTS: AtomicI32 = AtomicI32::new(0);
+    static SILENT_TIMEOUTS: Mutex<Vec<c_int>> = Mutex::new(Vec::new());
+
+    /// One server whose connections are reused and never answer `BODY`.
+    unsafe extern "C" fn silent_nntp_host(
+        op: c_int,
+        a1: c_int,
+        a2: c_int,
+        p1: usize,
+        s1: *const c_char,
+        ints: *mut c_int,
+        i64s: *mut i64,
+        strs: *mut *const c_char,
+        buf: *mut u8,
+        buf_len: usize,
+    ) -> usize {
+        match op {
+            1 => {
+                let r =
+                    unsafe { mock_nntp_host(op, a1, a2, p1, s1, ints, i64s, strs, buf, buf_len) };
+                unsafe { *ints.add(3) = 9 };
+                r
+            }
+            2 => {
+                let r =
+                    unsafe { mock_nntp_host(op, a1, a2, p1, s1, ints, i64s, strs, buf, buf_len) };
+                unsafe {
+                    *ints = 1; // reused
+                    *ints.add(1) = 9;
+                }
+                r
+            }
+            6 => {
+                SILENT_REQUESTS.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(TIMED_OUT_AFTER + Duration::from_millis(30));
+                unsafe { *strs = ptr::null() };
+                0
+            }
+            11 => {
+                SILENT_TIMEOUTS.lock().unwrap().push(a1);
+                0
+            }
+            _ => unsafe { mock_nntp_host(op, a1, a2, p1, s1, ints, i64s, strs, buf, buf_len) },
+        }
+    }
+
+    #[test]
+    fn an_article_that_never_answers_gets_two_tries_not_a_stale_retry_per_connection() {
+        let fetcher = ArticleFetcher::new(silent_nntp_host);
+        let started = Instant::now();
+        let got = fetcher.fetch(b"<silent@test>", &[b"alt.binaries.test".to_vec()]);
+
+        assert!(!got.success);
+        assert!(got.timed_out);
+        // one retry on another connection, then the server is out for this article: no
+        // max_connections stale retries and no growing retry delays
+        assert_eq!(SILENT_REQUESTS.load(Ordering::SeqCst), MAX_TIMED_OUT_TRIES);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        // sitting on one article does not make the server unreachable for every other fetch
+        assert!(!server_unreachable(9));
+        // each try shortens the wait and gives the connection back with its own timeout
+        let timeouts = SILENT_TIMEOUTS.lock().unwrap().clone();
+        let short = stream_reply_timeout_secs();
+        assert!(short > 0 && short <= STREAM_REPLY_TIMEOUT_SECS);
+        assert_eq!(timeouts, vec![short, 0, short, 0]);
     }
 }

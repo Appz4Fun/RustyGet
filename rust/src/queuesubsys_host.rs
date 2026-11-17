@@ -6205,6 +6205,13 @@ unsafe fn native_op(
                 strs,
             )
         },
+        // a history entry's summary, and a duplicate record's fields
+        (35, 2) => Some(unsafe {
+            crate::qhist::host_hist_summary(p1 as *const crate::qhist::Hist, ints, strs)
+        }),
+        (35, _) => Some(unsafe {
+            crate::qdup::host_dup_op(p1 as *const crate::qdup::Dup, a1, a2, s1, ints, i64s, strs)
+        }),
         // article cache ops on a file
         (44, _) => {
             Some(unsafe { crate::qfile::host_cache_op(file, a1, a2, p2, s1, ints, i64s, strs) })

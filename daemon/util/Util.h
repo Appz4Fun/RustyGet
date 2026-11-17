@@ -2071,52 +2071,55 @@ public:
 		dsGood
 	};
 
-	// the record lives in Rust (rust/src/qdup.rs)
-	DupInfo() = default;
+	// the object's storage is the Rust record (rust/src/qdup.rs): a DupInfo* is an RsDup*
+	static void* operator new(size_t) { return nzbget_rs_dup_new(); }
+	static void operator delete(void* p) { nzbget_rs_dup_free(static_cast<RsDup*>(p)); }
+	// user-provided, so value-initialisation never zeroes the Rust storage
+	DupInfo() {}
+	~DupInfo() = default;
 	DupInfo(const DupInfo&) = delete;
 	DupInfo& operator=(const DupInfo&) = delete;
-	~DupInfo() { nzbget_rs_dup_free(m_rs); }
+	RsDup* Rs() { return reinterpret_cast<RsDup*>(this); }
 
 	int GetId() { return (int)Get(5); }
 	void SetId(int id)
 	{
-		nzbget_rs_dup_set(m_rs, 5, id, nullptr);
+		nzbget_rs_dup_set(Rs(), 5, id, nullptr);
 		if (NzbInfo::m_idMax < id)
 		{
 			NzbInfo::m_idMax = id;
 		}
 	}
 	const char* GetName() { return Text(0); }
-	void SetName(const char* name) { nzbget_rs_dup_set(m_rs, 7, 0, name); }
+	void SetName(const char* name) { nzbget_rs_dup_set(Rs(), 7, 0, name); }
 	const char* GetDupeKey() { return Text(1); }
-	void SetDupeKey(const char* dupeKey) { nzbget_rs_dup_set(m_rs, 8, 0, dupeKey); }
+	void SetDupeKey(const char* dupeKey) { nzbget_rs_dup_set(Rs(), 8, 0, dupeKey); }
 	int GetDupeScore() { return (int)Get(1); }
-	void SetDupeScore(int dupeScore) { nzbget_rs_dup_set(m_rs, 1, dupeScore, nullptr); }
+	void SetDupeScore(int dupeScore) { nzbget_rs_dup_set(Rs(), 1, dupeScore, nullptr); }
 	EDupeMode GetDupeMode() { return (EDupeMode)Get(0); }
-	void SetDupeMode(EDupeMode dupeMode) { nzbget_rs_dup_set(m_rs, 0, dupeMode, nullptr); }
+	void SetDupeMode(EDupeMode dupeMode) { nzbget_rs_dup_set(Rs(), 0, dupeMode, nullptr); }
 	int64 GetSize() { return Get(6); }
-	void SetSize(int64 size) { nzbget_rs_dup_set(m_rs, 6, size, nullptr); }
+	void SetSize(int64 size) { nzbget_rs_dup_set(Rs(), 6, size, nullptr); }
 	uint32 GetFullContentHash() { return (uint32)Get(3); }
-	void SetFullContentHash(uint32 fullContentHash) { nzbget_rs_dup_set(m_rs, 3, fullContentHash, nullptr); }
+	void SetFullContentHash(uint32 fullContentHash) { nzbget_rs_dup_set(Rs(), 3, fullContentHash, nullptr); }
 	uint32 GetFilteredContentHash() { return (uint32)Get(4); }
-	void SetFilteredContentHash(uint32 filteredContentHash) { nzbget_rs_dup_set(m_rs, 4, filteredContentHash, nullptr); }
+	void SetFilteredContentHash(uint32 filteredContentHash) { nzbget_rs_dup_set(Rs(), 4, filteredContentHash, nullptr); }
 	EStatus GetStatus() { return (EStatus)Get(2); }
-	void SetStatus(EStatus Status) { nzbget_rs_dup_set(m_rs, 2, Status, nullptr); }
+	void SetStatus(EStatus Status) { nzbget_rs_dup_set(Rs(), 2, Status, nullptr); }
 	// every field at once (see nzbget_rs_dup_get)
-	void Read(int* ints, int64_t* i64s, const char** strs) { nzbget_rs_dup_get(m_rs, ints, i64s, strs); }
+	void Read(int* ints, int64_t* i64s, const char** strs) { nzbget_rs_dup_get(Rs(), ints, i64s, strs); }
 
 private:
-	RsDup* m_rs = nzbget_rs_dup_new();
 	int64 Get(int field)
 	{
 		int ints[6]; int64_t size = 0; const char* strs[2];
-		nzbget_rs_dup_get(m_rs, ints, &size, strs);
+		nzbget_rs_dup_get(Rs(), ints, &size, strs);
 		return field == 6 ? size : ints[field];
 	}
 	const char* Text(int which)
 	{
 		int ints[6]; const char* strs[2];
-		nzbget_rs_dup_get(m_rs, ints, nullptr, strs);
+		nzbget_rs_dup_get(Rs(), ints, nullptr, strs);
 		return strs[which];
 	}
 };
@@ -2132,44 +2135,62 @@ public:
 		hkDup
 	};
 
-	HistoryInfo(std::unique_ptr<NzbInfo> nzbInfo) : m_info(nzbInfo.release()),
-		m_kind(GetNzbInfo()->GetKind() == NzbInfo::nkNzb ? hkNzb : hkUrl) {}
-	HistoryInfo(std::unique_ptr<DupInfo> dupInfo) : m_info(dupInfo.release()), m_kind(hkDup) {}
+	// the object's storage is the Rust entry (rust/src/qhist.rs): a HistoryInfo* is an
+	// RsHist* holding the kind, the time and the inner NzbInfo* or DupInfo*
+	static void* operator new(size_t) { return nzbget_rs_hist_new(); }
+	static void operator delete(void* p) { nzbget_rs_hist_free(static_cast<RsHist*>(p)); }
+	HistoryInfo(std::unique_ptr<NzbInfo> nzbInfo)
+	{
+		NzbInfo* nzb = nzbInfo.release();
+		SetInfo(nzb);
+		Set(0, nzb->GetKind() == NzbInfo::nkNzb ? hkNzb : hkUrl);
+	}
+	HistoryInfo(std::unique_ptr<DupInfo> dupInfo)
+	{
+		SetInfo(dupInfo.release());
+		Set(0, hkDup);
+	}
+	// deletes the inner record (unless DiscardNzbInfo took it) before operator delete
+	// frees the entry
 	~HistoryInfo()
 	{
-		if ((m_kind == hkNzb || m_kind == hkUrl) && m_info)
+		EKind kind = GetKind();
+		if ((kind == hkNzb || kind == hkUrl) && Info())
 		{
-			delete (NzbInfo*)m_info;
+			delete GetNzbInfo();
 		}
-		else if (m_kind == hkDup && m_info)
+		else if (kind == hkDup && Info())
 		{
-			delete (DupInfo*)m_info;
+			delete GetDupInfo();
 		}
 	}
-	EKind GetKind() { return m_kind; }
+	HistoryInfo(const HistoryInfo&) = delete;
+	HistoryInfo& operator=(const HistoryInfo&) = delete;
+	RsHist* Rs() { return reinterpret_cast<RsHist*>(this); }
+	EKind GetKind() { return (EKind)Get(0); }
 	int GetId()
 	{
-		if ((m_kind == hkNzb || m_kind == hkUrl))
+		if (GetKind() == hkNzb || GetKind() == hkUrl)
 		{
-			return ((NzbInfo*)m_info)->GetId();
+			return GetNzbInfo()->GetId();
 		}
-		else // if (m_eKind == hkDup)
+		else // if (GetKind() == hkDup)
 		{
-			return ((DupInfo*)m_info)->GetId();
+			return GetDupInfo()->GetId();
 		}
 	}
-	NzbInfo* GetNzbInfo() { return (NzbInfo*)m_info; }
-	DupInfo* GetDupInfo() { return (DupInfo*)m_info; }
-	void DiscardNzbInfo() { m_info = nullptr; }
-	time_t GetTime() { return m_time; }
-	void SetTime(time_t time) { m_time = time; }
+	NzbInfo* GetNzbInfo() { return reinterpret_cast<NzbInfo*>(Info()); }
+	DupInfo* GetDupInfo() { return reinterpret_cast<DupInfo*>(Info()); }
+	void DiscardNzbInfo() { SetInfo(nullptr); }
+	time_t GetTime() { return (time_t)Get(1); }
+	void SetTime(time_t time) { Set(1, (int64)time); }
 	const char* GetName()
 	{
-		if (m_kind == hkNzb || m_kind == hkUrl)
+		if (GetKind() == hkNzb || GetKind() == hkUrl)
 		{
 			return GetNzbInfo()->GetName();
 		}
-		else if (m_kind == hkDup)
+		else if (GetKind() == hkDup)
 		{
 			return GetDupInfo()->GetName();
 		}
@@ -2180,10 +2201,15 @@ public:
 	}
 
 private:
-	void* m_info;
-	EKind m_kind;
-	time_t m_time = 0;
+	int64 Get(int field) { return nzbget_rs_hist_get(Rs(), field); }
+	void Set(int field, int64 v) { nzbget_rs_hist_set(Rs(), field, v); }
+	uintptr_t Info() { return (uintptr_t)Get(2); }
+	void SetInfo(void* info) { Set(2, (int64)reinterpret_cast<uintptr_t>(info)); }
 };
+
+// Rust allocations as well (see their operator new)
+static_assert(std::is_empty<DupInfo>::value && !std::is_polymorphic<DupInfo>::value);
+static_assert(std::is_empty<HistoryInfo>::value && !std::is_polymorphic<HistoryInfo>::value);
 
 typedef RsList<HistoryInfo> HistoryList;
 
@@ -2982,28 +3008,6 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 			n->GetFileList()->Add(std::move(fi));
 			return 0;
 		}
-		return 0;
-	}
-	case 35: {
-		if (a1 == 0)
-		{
-			int all[6];
-			reinterpret_cast<DupInfo*>(p1)->Read(all, i64s, strs);
-			for (int k = 0; k < 5; k++) ints[k] = all[k];
-			return 0;
-		}
-		if (a1 == 1) { reinterpret_cast<DupInfo*>(p1)->SetStatus((DupInfo::EStatus)a2); return 0; }
-		if (a1 == 2)
-		{
-			HistoryInfo* h = reinterpret_cast<HistoryInfo*>(p1);
-			ints[0] = (int)h->GetKind(); ints[1] = h->GetId(); strs[0] = h->GetName();
-			if (h->GetKind() == HistoryInfo::hkNzb || h->GetKind() == HistoryInfo::hkUrl) return reinterpret_cast<uintptr_t>(h->GetNzbInfo());
-			if (h->GetKind() == HistoryInfo::hkDup) return reinterpret_cast<uintptr_t>(h->GetDupInfo());
-		}
-		if (a1 == 3) { reinterpret_cast<DupInfo*>(p1)->SetName(s1 ? s1 : ""); return 0; }
-		if (a1 == 4) { reinterpret_cast<DupInfo*>(p1)->SetDupeKey(s1 ? s1 : ""); return 0; }
-		if (a1 == 5) { reinterpret_cast<DupInfo*>(p1)->SetDupeScore(a2); return 0; }
-		if (a1 == 6) { reinterpret_cast<DupInfo*>(p1)->SetDupeMode((EDupeMode)a2); return 0; }
 		return 0;
 	}
 	case 43: {

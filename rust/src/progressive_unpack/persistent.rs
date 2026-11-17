@@ -618,6 +618,7 @@ impl<'a> Run<'a> {
                 protected_paths: Default::default(),
                 parallel_min: None,
                 select: None,
+                windows_safe_names: false,
             },
             first_name,
         );

@@ -176,9 +176,9 @@ dependencies = [
 
 [[package]]
 name = "crc32fast"
-version = "1.5.2"
+version = "1.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01a7799fd6b852db0e61728dde9a204c423b44d689dbd432522543614b490e78"
+checksum = "2b929dd2a135771f40afabd1073f85eed59c800b7c61901e5c254270497dad64"
 dependencies = [
  "cfg-if",
 ]
@@ -485,6 +485,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
+name = "lz4_flex"
+version = "0.14.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f56455fff36934a9500d69062aec1c77037179b6f0669e4d5d6b72b84722d6a3"
+
+[[package]]
 name = "md-5"
 version = "0.10.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -635,7 +641,7 @@ dependencies = [
 [[package]]
 name = "par-rs"
 version = "0.2.0"
-source = "git+https://github.com/xbmc4lyfe/par-rs?rev=fa81b469f1a58187f89aef7ca4784fda88e44e20#fa81b469f1a58187f89aef7ca4784fda88e44e20"
+source = "git+https://github.com/xbmc4lyfe/par-rs?rev=48d8f957e54e6c96f1a3449f69109ec2661f0142#48d8f957e54e6c96f1a3449f69109ec2661f0142"
 dependencies = [
  "crc32fast",
  "libc",
@@ -1007,12 +1013,12 @@ dependencies = [
 [[package]]
 name = "zip-container"
 version = "0.1.0"
-source = "git+https://github.com/xbmc4lyfe/zipfast?rev=94beeeb8418e372051d287b996d37e4157ff8c1c#94beeeb8418e372051d287b996d37e4157ff8c1c"
+source = "git+https://github.com/xbmc4lyfe/zipfast?rev=4c4bec207791d1de5805d64de088f4b0411c21af#4c4bec207791d1de5805d64de088f4b0411c21af"
 
 [[package]]
 name = "zipfast"
 version = "0.1.0"
-source = "git+https://github.com/xbmc4lyfe/zipfast?rev=94beeeb8418e372051d287b996d37e4157ff8c1c#94beeeb8418e372051d287b996d37e4157ff8c1c"
+source = "git+https://github.com/xbmc4lyfe/zipfast?rev=4c4bec207791d1de5805d64de088f4b0411c21af#4c4bec207791d1de5805d64de088f4b0411c21af"
 dependencies = [
  "bzip2",
  "crc32fast",
@@ -1020,6 +1026,7 @@ dependencies = [
  "getrandom",
  "libc",
  "liblzma",
+ "lz4_flex",
  "serde",
  "subtle",
  "tempfile",

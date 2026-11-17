@@ -2655,7 +2655,7 @@ pub const BUNDLED_LIBRARIES: &[(&str, &str)] = &[
     ("zlib-rs", "0.6.8"),
     ("zstd", "0.14.3"),
     ("bzip2", "0.6.1"),
-    ("crc32fast", "1.5.2"),
+    ("crc32fast", "1.5.5"),
     ("quick-xml", "0.41.0"),
     ("md-5", "0.11.0"),
     ("libc", "0.2.190"),

@@ -3725,8 +3725,9 @@ mod tests {
         let rar_path = dir.path().join("mtime.rar");
         let out_dir = dir.path().join("out");
 
-        // DOS timestamp 0x5D32_86A0 = 2026-09-18 16:53:00 UTC = 1_789_750_380
-        // Extended time [0x00, 0xC0] adds +1 second -> 1_789_750_381
+        // DOS timestamp 0x5D32_86A0 = 2026-09-18 16:53:00; extended time [0x00, 0xC0] adds +1 second.
+        // zipfast reads DOS times as local time, as UnRAR does, so the expected value is that wall
+        // clock time in the test's own time zone (1_789_750_381 under UTC).
         let payload = b"timestamped rar4 payload";
         let name = b"dated.txt";
         let mut archive = MARK4.to_vec();
@@ -3782,6 +3783,18 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        assert_eq!(mtime_secs, 1_789_750_381);
+        // SAFETY: an all-zero libc::tm is a valid value; mktime only reads and normalises it.
+        let expected = unsafe {
+            let mut tm: libc::tm = std::mem::zeroed();
+            tm.tm_year = 2026 - 1900;
+            tm.tm_mon = 8;
+            tm.tm_mday = 18;
+            tm.tm_hour = 16;
+            tm.tm_min = 53;
+            tm.tm_sec = 1;
+            tm.tm_isdst = -1;
+            libc::mktime(&mut tm)
+        };
+        assert_eq!(mtime_secs, expected as u64);
     }
 }

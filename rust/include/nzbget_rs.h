@@ -504,11 +504,8 @@ int64_t nzbget_rs_ptrlist_op(const RsPtrList* l, int op, int64_t a, uintptr_t p,
     const RsPtrList* other);
 // The download queue (rust/src/qqueue.rs); a DownloadQueue* is an RsQueue*.
 typedef struct RsQueue RsQueue;
-RsQueue* nzbget_rs_queue_new(void);
-void nzbget_rs_queue_free(RsQueue* q);
-// 0 queue behind key, 1 queue list, 2 history list, 3 lock, 4 unlock, 5 make current,
-// 6 no current queue, 7 mark loaded, 8 is loaded, 9 current queue
-uintptr_t nzbget_rs_queue_op(uintptr_t key, int op);
+// 1 queue list, 2 history list, 3 lock, 4 unlock, 9 current (daemon) queue
+uintptr_t nzbget_rs_queue_op(uintptr_t q, int op);
 void nzbget_rs_queue_hooks(void (*nzb_drop)(uintptr_t));
 // Collection ids: 0 last, 1 reset to max, 2 reset to zero, 3 raise floor, 4 next.
 int nzbget_rs_nzb_ids(int op, int v);

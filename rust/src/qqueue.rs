@@ -1,19 +1,12 @@
 //! The download queue: the queue and history lists, the queue lock, and the
-//! current (global) queue. The C++ `DownloadQueue` object is this allocation
-//! (its operator new calls `nzbget_rs_queue_new`), so a `DownloadQueue*` is a
-//! `*mut Queue`.
-//!
-//! A C++ subclass of `DownloadQueue` made on the stack (a test mock) is not
-//! one of these allocations. When such an object is made current with
-//! `Init`, a queue is created for it and found again by its address until
-//! `Final`, which frees it.
+//! daemon's queue, which is the current one. The C++ `DownloadQueue` object is this allocation
+//! (host op 25 creates it), so a `DownloadQueue*` is a `*mut Queue`.
 //!
 //! The queue owns its `NzbInfo`s and the history its `HistoryInfo`s. A
 //! `NzbInfo` is deleted by the host (`nzbget_rs_queue_hooks`), because its
 //! destructor still frees host objects; a history entry is freed here,
 //! deleting its inner record first as the C++ destructor did.
 
-use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard};
@@ -119,30 +112,8 @@ impl Queue {
     }
 }
 
-struct Registry {
-    /// queues created by `nzbget_rs_queue_new`
-    native: HashMap<usize, ()>,
-    /// queues created for foreign objects, by the object's address
-    foreign: HashMap<usize, usize>,
-    /// the daemon's queue (host op 25)
-    daemon: usize,
-    /// the foreign key the current queue belongs to (0 when native)
-    current_key: usize,
-}
-
-static REGISTRY: Mutex<Option<Registry>> = Mutex::new(None);
-static CURRENT: AtomicUsize = AtomicUsize::new(0);
-
-fn with_registry<R>(f: impl FnOnce(&mut Registry) -> R) -> R {
-    let mut g = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
-    let r = g.get_or_insert_with(|| Registry {
-        native: HashMap::new(),
-        foreign: HashMap::new(),
-        daemon: 0,
-        current_key: 0,
-    });
-    f(r)
-}
+/// The daemon's queue (host op 25), also the current one; 0 when none.
+static DAEMON: AtomicUsize = AtomicUsize::new(0);
 
 fn alloc_queue() -> *mut Queue {
     Box::into_raw(Box::new(Queue {
@@ -164,124 +135,35 @@ unsafe fn free_queue(q: *mut Queue) {
     }
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn nzbget_rs_queue_new() -> *mut Queue {
-    let q = alloc_queue();
-    with_registry(|r| r.native.insert(q as usize, ()));
-    q
-}
-
-/// # Safety
-/// `q` is null or from `nzbget_rs_queue_new`, freed once.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_queue_free(q: *mut Queue) {
-    if q.is_null() {
-        return;
-    }
-    with_registry(|r| r.native.remove(&(q as usize)));
-    let _ = CURRENT.compare_exchange(q as usize, 0, Ordering::SeqCst, Ordering::SeqCst);
-    unsafe { free_queue(q) };
-}
-
-/// The queue behind `key`: a queue itself, or the object a queue was
-/// created for in `Init`. Null when unknown.
-pub fn resolve(key: usize) -> *const Queue {
-    if key == 0 {
-        return std::ptr::null();
-    }
-    if key == CURRENT.load(Ordering::SeqCst) {
-        return key as *const Queue;
-    }
-    with_registry(|r| {
-        if r.native.contains_key(&key) {
-            key as *const Queue
-        } else {
-            r.foreign
-                .get(&key)
-                .map_or(std::ptr::null(), |&q| q as *const Queue)
-        }
-    })
+fn resolve(key: usize) -> *const Queue {
+    key as *const Queue
 }
 
 fn current() -> *const Queue {
-    CURRENT.load(Ordering::SeqCst) as *const Queue
+    DAEMON.load(Ordering::SeqCst) as *const Queue
 }
 
-fn init(key: usize) {
-    let q = with_registry(|r| {
-        if key == 0 {
-            r.current_key = 0;
-            return 0;
-        }
-        if r.native.contains_key(&key) {
-            r.current_key = 0;
-            return key;
-        }
-        let q = *r
-            .foreign
-            .entry(key)
-            .or_insert_with(|| alloc_queue() as usize);
-        r.current_key = key;
-        q
-    });
-    CURRENT.store(q, Ordering::SeqCst);
-    crate::ffi::nzbget_rs_thread_count_op(4);
-}
-
-fn finalize() {
-    let foreign = with_registry(|r| {
-        let key = std::mem::take(&mut r.current_key);
-        if key != 0 {
-            r.foreign.remove(&key)
-        } else {
-            None
-        }
-    });
-    CURRENT.store(0, Ordering::SeqCst);
-    crate::ffi::nzbget_rs_thread_count_op(4);
-    if let Some(q) = foreign {
-        unsafe { free_queue(q as *mut Queue) };
-    }
-}
-
-/// Queue operations for the host's `DownloadQueue` (`key` a queue or an
-/// object made current with op 5):
-///  0 the queue behind key; 1 its queue list; 2 its history list;
-///  3 lock; 4 unlock; 5 make key the current queue (not loaded);
-///  6 no current queue (frees one made for a foreign object);
-///  7 mark loaded; 8 is loaded; 9 the current queue.
+/// Queue operations for the host's `DownloadQueue` (`q` a queue, or 0):
+///  1 its queue list; 2 its history list; 3 lock; 4 unlock; 9 the current
+///  (daemon) queue.
 #[unsafe(no_mangle)]
-pub extern "C" fn nzbget_rs_queue_op(key: usize, op: c_int) -> usize {
-    let q = || unsafe { resolve(key).as_ref() };
+pub extern "C" fn nzbget_rs_queue_op(q: usize, op: c_int) -> usize {
+    let queue = || unsafe { resolve(q).as_ref() };
     match op {
-        0 => resolve(key) as usize,
-        1 => q().map_or(0, |q| q.queue() as usize),
-        2 => q().map_or(0, |q| q.history() as usize),
+        1 => queue().map_or(0, |q| q.queue() as usize),
+        2 => queue().map_or(0, |q| q.history() as usize),
         3 => {
-            if let Some(q) = q() {
+            if let Some(q) = queue() {
                 q.lock.lock();
             }
             0
         }
         4 => {
-            if let Some(q) = q() {
+            if let Some(q) = queue() {
                 q.lock.unlock();
             }
             0
         }
-        5 => {
-            init(key);
-            0
-        }
-        6 => {
-            finalize();
-            0
-        }
-        7 => {
-            crate::ffi::nzbget_rs_thread_count_op(3);
-            0
-        }
-        8 => usize::from(crate::ffi::is_queue_loaded()),
         9 => current() as usize,
         _ => 0,
     }
@@ -640,23 +522,22 @@ pub unsafe fn host_history_op(
 /// 2 mark loaded, 3 no current queue and free it).
 pub fn host_daemon_queue(a1: i32) -> usize {
     match a1 {
-        0 => with_registry(|r| r.daemon),
+        0 => DAEMON.load(Ordering::SeqCst),
         1 => {
-            let old = with_registry(|r| std::mem::take(&mut r.daemon));
-            unsafe { nzbget_rs_queue_free(old as *mut Queue) };
-            let q = nzbget_rs_queue_new();
-            with_registry(|r| r.daemon = q as usize);
-            init(q as usize);
+            let old = DAEMON.swap(alloc_queue() as usize, Ordering::SeqCst);
+            unsafe { free_queue(old as *mut Queue) };
+            // a reload creates the queue anew: not loaded until it is again
+            crate::ffi::nzbget_rs_thread_count_op(4);
             0
         }
         2 => {
-            nzbget_rs_queue_op(0, 7);
+            crate::ffi::nzbget_rs_thread_count_op(3);
             0
         }
         3 => {
-            finalize();
-            let old = with_registry(|r| std::mem::take(&mut r.daemon));
-            unsafe { nzbget_rs_queue_free(old as *mut Queue) };
+            let old = DAEMON.swap(0, Ordering::SeqCst);
+            crate::ffi::nzbget_rs_thread_count_op(4);
+            unsafe { free_queue(old as *mut Queue) };
             0
         }
         _ => 0,
@@ -798,48 +679,18 @@ mod tests {
     }
 
     #[test]
-    fn native_queue_resolves_and_frees() {
-        let _s = serial();
-        let q = nzbget_rs_queue_new();
-        assert_eq!(nzbget_rs_queue_op(q as usize, 0), q as usize);
-        assert_ne!(nzbget_rs_queue_op(q as usize, 1), 0);
-        assert_ne!(nzbget_rs_queue_op(q as usize, 2), 0);
-        assert_ne!(
-            nzbget_rs_queue_op(q as usize, 1),
-            nzbget_rs_queue_op(q as usize, 2)
-        );
-        unsafe { nzbget_rs_queue_free(q) };
-        assert_eq!(resolve(q as usize), std::ptr::null());
-    }
-
-    #[test]
-    fn foreign_object_gets_a_queue_until_final() {
-        let _s = serial();
-        let obj = Box::new(0u8);
-        let key = &*obj as *const u8 as usize;
-        assert_eq!(nzbget_rs_queue_op(key, 0), 0);
-        nzbget_rs_queue_op(key, 5);
-        let q = nzbget_rs_queue_op(key, 0);
-        assert_ne!(q, 0);
-        assert_ne!(q, key);
-        assert_eq!(nzbget_rs_queue_op(0, 9), q);
-        nzbget_rs_queue_op(0, 7);
-        assert_eq!(nzbget_rs_queue_op(0, 8), 1);
-        let mut i64s = [0i64];
-        let h = unsafe { host_queue_op(3, 0, 0, 0, std::ptr::null_mut(), i64s.as_mut_ptr()) };
-        unsafe { host_queue_op(4, 0, key, h, std::ptr::null_mut(), std::ptr::null_mut()) };
-        assert_eq!(host_queue_at(key, -1), 1);
-        assert_eq!(host_queue_at(q, 0), i64s[0] as usize);
-        nzbget_rs_queue_op(0, 6);
-        assert_eq!(nzbget_rs_queue_op(0, 8), 0);
-        assert_eq!(nzbget_rs_queue_op(0, 9), 0);
-        assert_eq!(nzbget_rs_queue_op(key, 0), 0);
+    fn queue_lists_are_distinct_and_free() {
+        let q = alloc_queue() as usize;
+        let (ql, hl) = (nzbget_rs_queue_op(q, 1), nzbget_rs_queue_op(q, 2));
+        assert!(ql != 0 && hl != 0 && ql != hl);
+        assert_eq!(nzbget_rs_queue_op(0, 1), 0);
+        unsafe { free_queue(q as *mut Queue) };
     }
 
     #[test]
     fn queue_ops_insert_find_remove_reorder() {
         let _s = serial();
-        let q = nzbget_rs_queue_new() as usize;
+        let q = alloc_queue() as usize;
         let mut made = Vec::new();
         for _ in 0..3 {
             let mut i64s = [0i64];
@@ -879,7 +730,7 @@ mod tests {
         unsafe { host_queue_op(1, 0, q, made[0].1, ni, nl) };
         assert_eq!(host_queue_at(q, -1), 2);
         assert_eq!(unsafe { host_queue_op(0, ids[0], q, 0, ni, nl) }, 0);
-        unsafe { nzbget_rs_queue_free(q as *mut Queue) };
+        unsafe { free_queue(q as *mut Queue) };
     }
 
     #[test]
@@ -901,7 +752,7 @@ mod tests {
     #[test]
     fn history_ops() {
         let _s = serial();
-        let q = nzbget_rs_queue_new() as usize;
+        let q = alloc_queue() as usize;
         let (ni, nl, ns): (*mut c_int, *mut i64, *mut *const c_char) = (
             std::ptr::null_mut(),
             std::ptr::null_mut(),
@@ -993,7 +844,7 @@ mod tests {
         assert_eq!(hist(-1, 0, 0, &mut ints, &mut i64s, &mut strs), 2);
         hist(-5, 0, 0, &mut ints, &mut i64s, &mut strs);
         assert_eq!(hist(-1, 0, 0, &mut ints, &mut i64s, &mut strs), 1);
-        unsafe { nzbget_rs_queue_free(q as *mut Queue) };
+        unsafe { free_queue(q as *mut Queue) };
     }
 
     static CALLS: AtomicUsize = AtomicUsize::new(0);

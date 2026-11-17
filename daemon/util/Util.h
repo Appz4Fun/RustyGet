@@ -2089,35 +2089,16 @@ public:
 		mmRegEx
 	};
 
-	static bool IsLoaded() { return nzbget_rs_queue_op(0, 8) != 0; }
+	// the daemon's queue (rust/src/qqueue.rs), locked while the guard lives
 	static GuardedDownloadQueue Guard();
 	NzbList* GetQueue() { return reinterpret_cast<NzbList*>(nzbget_rs_queue_op(Key(), 1)); }
 	HistoryList* GetHistory() { return reinterpret_cast<HistoryList*>(nzbget_rs_queue_op(Key(), 2)); }
 
-	// a reload creates the queue anew: until it is loaded again, threads
-	// waiting for IsLoaded() (the post-processor's queue sanitising, for
-	// one) must not take the previous queue's state for it
-	static void Init(DownloadQueue* globalInstance)
-	{
-		RegisterRsQueueHooks();
-		nzbget_rs_queue_op(reinterpret_cast<uintptr_t>(globalInstance), 5);
-	}
-	static void Final() { nzbget_rs_queue_op(0, 6); }
-	static void Loaded() { nzbget_rs_queue_op(0, 7); }
-
-	// the object's storage is the Rust queue (rust/src/qqueue.rs): a DownloadQueue*
-	// is an RsQueue*. A subclass made elsewhere (a test mock on the stack) gets a
-	// Rust queue of its own from Init, found by its address until Final.
-	static void* operator new(size_t)
-	{
-		RegisterRsQueueHooks();
-		return nzbget_rs_queue_new();
-	}
-	static void operator delete(void* p) { nzbget_rs_queue_free(static_cast<RsQueue*>(p)); }
-	DownloadQueue() = default;
+	// the object's storage is the Rust queue that host op 25 creates: a
+	// DownloadQueue* is an RsQueue*, never made here
+	DownloadQueue() = delete;
 	DownloadQueue(const DownloadQueue&) = delete;
 	DownloadQueue& operator=(const DownloadQueue&) = delete;
-	~DownloadQueue() = default;
 
 private:
 	uintptr_t Key() const { return reinterpret_cast<uintptr_t>(this); }

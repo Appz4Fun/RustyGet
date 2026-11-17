@@ -1391,9 +1391,7 @@ pub(crate) unsafe extern "C" fn active_script_host_cb(
             0
         }
         7 => {
-            if let Some(hooks) =
-                crate::lifecycle::get_hooks().or_else(crate::lifecycle::resolve_hooks)
-            {
+            if let Some(hooks) = crate::lifecycle::get_hooks() {
                 if let Some(exit_fn) = hooks.exit_proc {
                     exit_fn();
                 }

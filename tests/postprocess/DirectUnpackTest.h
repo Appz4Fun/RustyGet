@@ -185,21 +185,11 @@ private:
 	DupeCoordinator m_dupe;
 };
 
-class RestoreOptionsGlobal final
-{
-public:
-	RestoreOptionsGlobal() : m_previous(g_Options) {}
-	~RestoreOptionsGlobal() { g_Options = m_previous; }
-
-private:
-	Options* m_previous;
-};
-
 // Shared by the PAR-failure/DirectUnpack tests below; unrarCmdOpt is only needed
 // when a test actually runs a real unpack (pass nullptr to skip it).
-Options::CmdOptList MakeParFailureTestOpts(const char* unrarCmdOpt)
+TestOptions::CmdOptList MakeParFailureTestOpts(const char* unrarCmdOpt)
 {
-	Options::CmdOptList cmdOpts;
+	TestOptions::CmdOptList cmdOpts;
 	cmdOpts.push_back("WriteLog=none");
 	cmdOpts.push_back("NzbLog=no");
 	if (unrarCmdOpt)
@@ -229,10 +219,10 @@ int QueueParFailureTestNzb(DirectUnpackDownloadQueueMock& downloadQueue, const c
 
 BOOST_AUTO_TEST_CASE(DirectUnpackSimpleTest)
 {
-	Options::CmdOptList cmdOpts;
+	TestOptions::CmdOptList cmdOpts;
 	cmdOpts.push_back("WriteLog=none");
 	cmdOpts.push_back("NzbLog=no");
-	Options options(&cmdOpts, nullptr);
+	TestOptions options(&cmdOpts);
 
 	DirectUnpackDownloadQueueMock downloadQueue;
 
@@ -284,10 +274,10 @@ BOOST_AUTO_TEST_CASE(DirectUnpackSimpleTest)
 
 BOOST_AUTO_TEST_CASE(DirectUnpackTwoArchives)
 {
-	Options::CmdOptList cmdOpts;
+	TestOptions::CmdOptList cmdOpts;
 	cmdOpts.push_back("WriteLog=none");
 	cmdOpts.push_back("NzbLog=no");
-	Options options(&cmdOpts, nullptr);
+	TestOptions options(&cmdOpts);
 
 	DirectUnpackDownloadQueueMock downloadQueue;
 
@@ -353,9 +343,8 @@ BOOST_AUTO_TEST_CASE(DirectUnpackTwoArchives)
 
 BOOST_AUTO_TEST_CASE(DirectUnpackParFailureStillFinalizesUnpack)
 {
-	Options::CmdOptList cmdOpts = MakeParFailureTestOpts(nullptr);
-	RestoreOptionsGlobal restoreOptions;
-	Options options(&cmdOpts, nullptr);
+	TestOptions::CmdOptList cmdOpts = MakeParFailureTestOpts(nullptr);
+	TestOptions options(&cmdOpts);
 	DirectUnpackDownloadQueueMock downloadQueue;
 	ScopedPostProcessPause postProcessPause(true);
 	ScopedPostProcessCoordinators postProcessCoordinators;
@@ -422,9 +411,8 @@ BOOST_AUTO_TEST_CASE(ParFailureWithoutSuccessfulDirectUnpackStillSkipsUnpack)
 {
 	for (NzbInfo::EDirectUnpackStatus directStatus : {NzbInfo::nsNone, NzbInfo::nsFailure})
 	{
-		Options::CmdOptList cmdOpts = MakeParFailureTestOpts(nullptr);
-		RestoreOptionsGlobal restoreOptions;
-		Options options(&cmdOpts, nullptr);
+		TestOptions::CmdOptList cmdOpts = MakeParFailureTestOpts(nullptr);
+		TestOptions options(&cmdOpts);
 		DirectUnpackDownloadQueueMock downloadQueue;
 		ScopedPostProcessPause postProcessPause;
 		ScopedPostProcessCoordinators postProcessCoordinators;

@@ -649,155 +649,52 @@ enum EDupeMode
 #endif
 
 
-class Options;
-extern Options* g_Options;
-
-class Options
+// The daemon's options live in Rust (rust/src/options.rs). These read the
+// active set: the daemon's, or in tests the newest one created.
+namespace ActiveOptions
 {
-public:
-	enum EOutputMode { omLoggable, omColored, omNCurses };
-	enum EParCheck { pcAuto, pcAlways, pcForce, pcManual };
-	enum EParScan { psLimited, psExtended, psFull, psDupe };
-	enum EDupeArticleFallback
-	{
-		// ordered by capability: every value includes the capabilities of the
-		// values before it, so feature gates compare with >= (dafLive adds
-		// download-concurrent repair on top of dafStream's post-processing repair)
-		dafNone,
-		dafArticle,
-		dafStream,
-		dafLive
-	};
 	enum EHealthCheck { hcPause, hcDelete, hcPark, hcNone, hcDupe };
-	enum ECertVerifLevel { cvNone, cvMinimal, cvStrict, Count };
 
-	typedef std::vector<const char*> CmdOptList;
+	inline const NzbgetRsOptions* Handle() { return nzbget_rs_options_active(); }
 
-	Options() { Init(nullptr, nullptr, -1, nullptr, false); }
-
-	Options(CmdOptList* commandLineOptions, void* = nullptr)
+	inline const NzbgetRsParsedOptions& Scalars()
 	{
-		Init("rustyget/rustyget", nullptr, 1, commandLineOptions, true);
+		static const NzbgetRsParsedOptions none{};
+		const NzbgetRsParsedOptions* scalars = nzbget_rs_options_scalars(Handle());
+		return scalars ? *scalars : none;
 	}
 
-	~Options()
-	{
-		nzbget_rs_options_free(m_rs);
-		g_Options = nullptr;
-	}
-
-	const NzbgetRsOptions* RsHandle() const { return m_rs; }
-
-	bool QueryCategory(const char* name, bool searchAliases, int* outUnpack, const char** outStrs) const
+	inline bool QueryCategory(const char* name, bool searchAliases, int* outUnpack, const char** outStrs)
 	{
 		return nzbget_rs_options_query(
-			m_rs, 0, name, searchAliases ? 1 : 0, outUnpack, outStrs, 0, nullptr) != 0;
+			Handle(), 0, name, searchAliases ? 1 : 0, outUnpack, outStrs, 0, nullptr) != 0;
 	}
 
-	const char* GetDestDir() const { return Str(3); }
-	const char* GetInterDir() const { return Str(4); }
-	bool GetNzbLog() const { return m_scalars.nzb_log != 0; }
-	bool GetRawArticle() const { return m_scalars.raw_article != 0; }
-	bool GetSkipWrite() const { return m_scalars.skip_write != 0; }
-	bool GetAppendCategoryDir() const { return m_scalars.append_category_dir != 0; }
-	const char* GetCertStore() const { return Str(23); }
-	bool GetCertCheck() const { return m_scalars.cert_check != 0; }
-	int GetLogBuffer() const { return m_scalars.log_buffer; }
-	EHealthCheck GetHealthCheck() const { return (EHealthCheck)m_scalars.health_check; }
-	bool GetDirectWrite() const { return m_scalars.direct_write != 0; }
-	int GetWriteBuffer() const { return m_scalars.write_buffer; }
-
-	bool GetServerMode() const { return Mode(0); }
-
-private:
-	NzbgetRsOptions* m_rs = nullptr;
-	NzbgetRsParsedOptions m_scalars{};
-
-	const char* Str(int id) const { return nzbget_rs_options_str(m_rs, id); }
-	bool Mode(int idx) const
-	{
-		return nzbget_rs_options_query(
-			m_rs, 4, nullptr, idx, nullptr, nullptr, 0, nullptr) != 0;
-	}
-
-	void Init(const char* exeName, const char* configFilename, int noConfig,
-		CmdOptList* commandLineOptions, bool noDiskAccess)
-	{
-		g_Options = this;
-		int flags = 32;
-#ifdef DISABLE_CURSES
-		flags |= 1;
-#endif
-#ifdef DISABLE_PARCHECK
-		flags |= 2;
-#endif
-#ifdef DISABLE_TLS
-		flags |= 4;
-#endif
-#ifdef HAVE_X509_CHECK_HOST
-		flags |= 8;
-#endif
-		int stateFlags = 0;
-		m_rs = nzbget_rs_options_new(
-			exeName, configFilename, noConfig, noDiskAccess ? 1 : 0,
-			commandLineOptions && !commandLineOptions->empty() ? commandLineOptions->data() : nullptr,
-			commandLineOptions ? commandLineOptions->size() : 0,
-			flags, Util::VersionRevision(), nullptr, nullptr, &m_scalars, &stateFlags);
-	}
-};
+	inline const char* GetDestDir() { return nzbget_rs_options_str(Handle(), 3); }
+	inline const char* GetInterDir() { return nzbget_rs_options_str(Handle(), 4); }
+	inline bool GetRawArticle() { return Scalars().raw_article != 0; }
+	inline bool GetSkipWrite() { return Scalars().skip_write != 0; }
+	inline bool GetAppendCategoryDir() { return Scalars().append_category_dir != 0; }
+	inline int GetLogBuffer() { return Scalars().log_buffer; }
+	inline EHealthCheck GetHealthCheck() { return (EHealthCheck)Scalars().health_check; }
+	inline bool GetDirectWrite() { return Scalars().direct_write != 0; }
+	inline int GetWriteBuffer() { return Scalars().write_buffer; }
+}
 
 #endif /* OPTIONS_H */
 
-class Log;
-extern Log* g_Log;
-
-class Log
+// Messages go to the daemon's active log (rust/src/log.rs).
+inline void LogEmitV(Message::EKind kind, const char* msg, va_list ap)
 {
-public:
-	Log();
-
-	~Log()
-	{
-		nzbget_rs_log_free(m_rs);
-		g_Log = nullptr;
-	}
-
-private:
-	NzbgetRsLog* m_rs = nullptr;
-
-	static const NzbgetRsOptions* OptRs() { return g_Options ? g_Options->RsHandle() : nullptr; }
-
-	void EmitV(Message::EKind kind, const char* msg, va_list ap)
-	{
-		char tmp2[1024];
-		vsnprintf(tmp2, 1024, msg, ap);
-		tmp2[1024 - 1] = '\0';
-		nzbget_rs_log_emit(m_rs, static_cast<int>(kind), OptRs(), tmp2);
-	}
-
-	friend void error(const char* msg, ...);
-	friend void warn(const char* msg, ...);
-	friend void info(const char* msg, ...);
-	friend void detail(const char* msg, ...);
-#ifdef DEBUG
-	friend void debug(const char* filename, const char* funcname, int lineNr, const char* msg, ...);
-#endif
-};
-
-inline Log::Log()
-{
-	g_Log = this;
-#ifdef DEBUG
-	m_rs = nzbget_rs_log_new(1);
-#else
-	m_rs = nzbget_rs_log_new(0);
-#endif
+	char text[1024];
+	vsnprintf(text, 1024, msg, ap);
+	text[1024 - 1] = '\0';
+	nzbget_rs_log_active_emit(static_cast<int>(kind), text);
 }
 
 #ifdef DEBUG
 inline void debug(const char* filename, const char* funcname, int lineNr, const char* msg, ...)
 {
-	if (!g_Log) return;
 	char tmp1[1024];
 	va_list ap;
 	va_start(ap, msg);
@@ -807,7 +704,7 @@ inline void debug(const char* filename, const char* funcname, int lineNr, const 
 	BString<1024> tmp2;
 	if (funcname) tmp2.Format("%s (%s:%i:%s)", tmp1, FileSystem::BaseFileName(filename), lineNr, funcname);
 	else tmp2.Format("%s (%s:%i)", tmp1, FileSystem::BaseFileName(filename), lineNr);
-	nzbget_rs_log_emit(g_Log->m_rs, static_cast<int>(Message::mkDebug), Log::OptRs(), *tmp2);
+	nzbget_rs_log_active_emit(static_cast<int>(Message::mkDebug), *tmp2);
 }
 #endif
 
@@ -815,7 +712,7 @@ inline void error(const char* msg, ...)
 {
 	va_list ap;
 	va_start(ap, msg);
-	g_Log->EmitV(Message::mkError, msg, ap);
+	LogEmitV(Message::mkError, msg, ap);
 	va_end(ap);
 }
 
@@ -823,7 +720,7 @@ inline void warn(const char* msg, ...)
 {
 	va_list ap;
 	va_start(ap, msg);
-	g_Log->EmitV(Message::mkWarning, msg, ap);
+	LogEmitV(Message::mkWarning, msg, ap);
 	va_end(ap);
 }
 
@@ -831,7 +728,7 @@ inline void info(const char* msg, ...)
 {
 	va_list ap;
 	va_start(ap, msg);
-	g_Log->EmitV(Message::mkInfo, msg, ap);
+	LogEmitV(Message::mkInfo, msg, ap);
 	va_end(ap);
 }
 
@@ -839,7 +736,7 @@ inline void detail(const char* msg, ...)
 {
 	va_list ap;
 	va_start(ap, msg);
-	g_Log->EmitV(Message::mkDetail, msg, ap);
+	LogEmitV(Message::mkDetail, msg, ap);
 	va_end(ap);
 }
 
@@ -851,35 +748,6 @@ inline void detail(const char* msg, ...)
 
 #endif /* LOG_H */
 
-#ifndef SERVICE_H
-#define SERVICE_H
-
-class ServiceCoordinator {};
-extern ServiceCoordinator* g_ServiceCoordinator;
-
-#endif
-
-#ifndef WORKSTATE_H
-#define WORKSTATE_H
-
-class WorkState final
-{
-public:
-	WorkState() : m_rs(nzbget_rs_workstate_new()) {}
-	~WorkState() { nzbget_rs_workstate_free(m_rs); }
-
-	bool GetPausePostProcess() const { return Ctl(1) != 0; }
-	void SetTempPausePostprocess(bool v) { Ctl(5, 1, v ? 1 : 0); }
-	bool GetTempPausePostprocess() const { return Ctl(5) != 0; }
-
-private:
-	NzbgetRsWorkState* m_rs = nullptr;
-	int64_t Ctl(int id, int write = 0, int64_t val = 0) const { return nzbget_rs_workstate_ctl(m_rs, id, write, val); }
-};
-
-extern WorkState* g_WorkState;
-
-#endif
 
 /*
  *  This file is part of nzbget. See <https://nzbget.com>.
@@ -1521,14 +1389,14 @@ public:
 		if (!Util::EmptyStr(NT(5)))
 		{
 			const char* strs[3]{};
-			if (g_Options->QueryCategory(NT(5), false, nullptr, strs) && !Util::EmptyStr(strs[1]))
+			if (ActiveOptions::QueryCategory(NT(5), false, nullptr, strs) && !Util::EmptyStr(strs[1]))
 			{
 				categoryDestDir = strs[1];
 			}
 		}
 		NzbgetRsBuf buf = nzbget_rs_nzb_format_name(
-			2, g_Options->GetDestDir(), categoryDestDir, NT(5),
-			GetName(), nullptr, g_Options->GetAppendCategoryDir() ? 1 : 0, GetId());
+			2, ActiveOptions::GetDestDir(), categoryDestDir, NT(5),
+			GetName(), nullptr, ActiveOptions::GetAppendCategoryDir() ? 1 : 0, GetId());
 		CString out(buf.data, static_cast<int>(buf.len));
 		nzbget_rs_free(buf);
 		return out;
@@ -1536,17 +1404,17 @@ public:
 	void BuildDestDirName()
 	{
 		const char* categoryDestDir = nullptr;
-		if (Util::EmptyStr(g_Options->GetInterDir()) && !Util::EmptyStr(NT(5)))
+		if (Util::EmptyStr(ActiveOptions::GetInterDir()) && !Util::EmptyStr(NT(5)))
 		{
 			const char* strs[3]{};
-			if (g_Options->QueryCategory(NT(5), false, nullptr, strs) && !Util::EmptyStr(strs[1]))
+			if (ActiveOptions::QueryCategory(NT(5), false, nullptr, strs) && !Util::EmptyStr(strs[1]))
 			{
 				categoryDestDir = strs[1];
 			}
 		}
 		NzbgetRsBuf buf = nzbget_rs_nzb_format_name(
-			3, g_Options->GetInterDir(), g_Options->GetDestDir(), categoryDestDir,
-			NT(5), GetName(), g_Options->GetAppendCategoryDir() ? 1 : 0, GetId());
+			3, ActiveOptions::GetInterDir(), ActiveOptions::GetDestDir(), categoryDestDir,
+			NT(5), GetName(), ActiveOptions::GetAppendCategoryDir() ? 1 : 0, GetId());
 		nzbget_rs_nzb_set_text(Scalars(), 3, buf.data, (intptr_t)buf.len);
 		nzbget_rs_free(buf);
 	}
@@ -1868,7 +1736,7 @@ public:
 			static_cast<int>(Scalars()->markStatus), static_cast<int>(Scalars()->deleteStatus),
 			static_cast<int>(Scalars()->parStatus), static_cast<int>(Scalars()->unpackStatus),
 			static_cast<int>(Scalars()->urlStatus), CalcHealth(), CalcCriticalHealth(true),
-			CalcCriticalHealth(false), g_Options->GetHealthCheck() == Options::hcDupe ? 1 : 0) != 0;
+			CalcCriticalHealth(false), ActiveOptions::GetHealthCheck() == ActiveOptions::hcDupe ? 1 : 0) != 0;
 	}
 	const char* MakeTextStatus(bool ignoreScriptStatus)
 	{
@@ -2370,7 +2238,7 @@ inline void NzbInfo::AddMessage(Message::EKind kind, const char * text, bool pri
 	// NZB messages go to the main log (above); there are no separate NZB log files,
 	// so the details Log tab shows the messages kept here (MessageCount falls back to them)
 	// LogBuffer 0 keeps every message
-	const int ints[2] = { (int)Util::CurrentTime(), g_Options->GetLogBuffer() };
+	const int ints[2] = { (int)Util::CurrentTime(), ActiveOptions::GetLogBuffer() };
 	NM(0, (int)kind, nullptr, text ? text : "", ints);
 }
 
@@ -2378,17 +2246,6 @@ inline void NzbInfo::AddMessage(Message::EKind kind, const char * text, bool pri
 #ifndef SERVERPOOL_H
 #define SERVERPOOL_H
 
-class ServerPool
-{
-public:
-	ServerPool() { InitRsBuildEnv(); m_rs = nzbget_rs_serverpool_new(); }
-	~ServerPool() { nzbget_rs_serverpool_free(m_rs); }
-
-private:
-	NzbgetRsServerPool* m_rs = nullptr;
-};
-
-extern ServerPool* g_ServerPool;
 
 #ifndef NZBGET_TLS_CIPHER_BACKEND_H
 #define NZBGET_TLS_CIPHER_BACKEND_H
@@ -3057,9 +2914,9 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 			{
 				FileOutputGuard g = f->GuardOutputFile();
 				outInit = f->GetOutputInitialized();
-				if (!g_Options->GetDirectWrite() && !f->GetForceDirectWrite()) f->SetOutputInitialized(true);
+				if (!ActiveOptions::GetDirectWrite() && !f->GetForceDirectWrite()) f->SetOutputInitialized(true);
 			}
-			if (g_Options->GetDirectWrite() || f->GetForceDirectWrite())
+			if (ActiveOptions::GetDirectWrite() || f->GetForceDirectWrite())
 			{
 				FileOutputGuard g = f->GuardOutputFile();
 				isOwn = f->GetForceDirectWrite() || (s1 && !f->GetOutputFilename().empty() && FileSystem::SameFilename(f->GetOutputFilename().c_str(), s1));
@@ -3088,13 +2945,13 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 				static thread_local std::string s_nName, s_nDest, s_fName, s_fOut;
 				{ GuardedDownloadQueue g = DownloadQueue::Guard(); s_nName = nzb->GetName(); s_nDest = nzb->GetDestDir(); s_fName = f->GetFilename(); }
 				s_fOut = f->GetOutputFilename();
-				ints[0] = g_Options->GetDirectWrite() ? 1 : 0; ints[1] = f->GetForceDirectWrite() ? 1 : 0;
+				ints[0] = ActiveOptions::GetDirectWrite() ? 1 : 0; ints[1] = f->GetForceDirectWrite() ? 1 : 0;
 				ints[2] = f->GetOutputInitialized() ? 1 : 0; ints[3] = f->GetCachedArticles();
 				ints[4] = f->GetSuccessArticles(); ints[5] = f->GetFailedArticles();
 				ints[6] = f->GetMissedArticles(); ints[7] = f->GetTotalArticles();
-				ints[8] = f->IsHardLinked() ? 1 : 0; ints[9] = Util::EmptyStr(g_Options->GetInterDir()) ? 1 : 0;
-				ints[10] = g_Options->GetRawArticle() ? 1 : 0; ints[11] = (nzb->GetSkipDiskWrite() || g_Options->GetSkipWrite()) ? 1 : 0;
-				ints[12] = g_Options->GetWriteBuffer(); ints[15] = (int)ArtOp(f->GetArticleList(), 0, 100);
+				ints[8] = f->IsHardLinked() ? 1 : 0; ints[9] = Util::EmptyStr(ActiveOptions::GetInterDir()) ? 1 : 0;
+				ints[10] = ActiveOptions::GetRawArticle() ? 1 : 0; ints[11] = (nzb->GetSkipDiskWrite() || ActiveOptions::GetSkipWrite()) ? 1 : 0;
+				ints[12] = ActiveOptions::GetWriteBuffer(); ints[15] = (int)ArtOp(f->GetArticleList(), 0, 100);
 				strs[0] = s_nName.c_str(); strs[1] = s_nDest.c_str(); strs[2] = s_fName.c_str(); strs[3] = s_fOut.c_str();
 				return reinterpret_cast<uintptr_t>(nzb);
 			}
@@ -3110,7 +2967,7 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 			{
 				NzbInfo* nzb = f->GetNzbInfo();
 				f->SetCrc((uint32)p2); f->SetOutputFilename(s1 ? s1 : "");
-				ints[0] = f->IsHardLinked() ? 1 : 0; ints[1] = Util::EmptyStr(g_Options->GetInterDir()) ? 1 : 0;
+				ints[0] = f->IsHardLinked() ? 1 : 0; ints[1] = Util::EmptyStr(ActiveOptions::GetInterDir()) ? 1 : 0;
 				strs[0] = f->GetFilename(); strs[1] = f->GetOutputFilenameC(); strs[2] = nzb->GetDestDir();
 				return reinterpret_cast<uintptr_t>(nzb);
 			}

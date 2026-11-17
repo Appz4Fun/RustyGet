@@ -18,16 +18,6 @@ pub(crate) fn active_umask() -> u32 {
     ACTIVE_UMASK.load(Ordering::Relaxed)
 }
 
-#[cfg(unix)]
-extern "C" {
-    fn dlsym(handle: *mut std::ffi::c_void, symbol: *const c_char) -> *mut std::ffi::c_void;
-}
-
-#[cfg(target_os = "macos")]
-const RTLD_DEFAULT: *mut std::ffi::c_void = -2isize as *mut std::ffi::c_void;
-#[cfg(all(unix, not(target_os = "macos")))]
-const RTLD_DEFAULT: *mut std::ffi::c_void = std::ptr::null_mut();
-
 /// Daemon lifecycle phases managed by Rust orchestrator.
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,7 +43,8 @@ impl From<u32> for LifecyclePhase {
     }
 }
 
-/// Function table of C++ subsystem lifecycle bridge hooks.
+/// Function table of the daemon lifecycle hooks (`crate::daemon::daemon_hooks`;
+/// tests register mocks).
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct LifecycleHooks {
@@ -80,56 +71,6 @@ pub fn register_hooks(hooks: LifecycleHooks) {
 
 pub fn get_hooks() -> Option<LifecycleHooks> {
     REGISTERED_HOOKS.read().ok().and_then(|guard| *guard)
-}
-
-#[cfg(unix)]
-unsafe fn resolve_sym<T: Copy>(name: &[u8]) -> Option<T> {
-    let sym = dlsym(RTLD_DEFAULT, name.as_ptr() as *const c_char);
-    if sym.is_null() {
-        None
-    } else {
-        Some(std::mem::transmute_copy(&sym))
-    }
-}
-
-pub fn resolve_hooks() -> Option<LifecycleHooks> {
-    #[cfg(unix)]
-    unsafe {
-        let util_init = resolve_sym(b"nzbget_c_util_init\0");
-        let nserv_main = resolve_sym(b"nzbget_c_nserv_main\0");
-        let phase1_init = resolve_sym(b"nzbget_c_phase1_init\0");
-        let phase2_subsystems_create_and_recover =
-            resolve_sym(b"nzbget_c_phase2_subsystems_create_and_recover\0");
-        let phase3_server_activate = resolve_sym(b"nzbget_c_phase3_server_activate\0");
-        let phase4_shutdown = resolve_sym(b"nzbget_c_phase4_shutdown\0");
-        let has_active_unpack = resolve_sym(b"nzbget_c_has_active_unpack\0");
-        let is_reloading = resolve_sym(b"nzbget_c_is_reloading\0");
-        let stop_server = resolve_sym(b"nzbget_c_stop_server\0");
-        let reload = resolve_sym(b"nzbget_c_reload\0");
-        let exit_proc = resolve_sym(b"nzbget_c_exit_proc\0");
-
-        if phase1_init.is_some() && phase3_server_activate.is_some() {
-            Some(LifecycleHooks {
-                util_init,
-                nserv_main,
-                phase1_init,
-                phase2_subsystems_create_and_recover,
-                phase3_server_activate,
-                phase4_shutdown,
-                has_active_unpack,
-                is_reloading,
-                stop_server,
-                reload,
-                exit_proc,
-            })
-        } else {
-            None
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        None
-    }
 }
 
 pub struct LifecycleManager {
@@ -184,7 +125,7 @@ impl LifecycleManager {
         {
             return;
         }
-        if let Some(hooks) = get_hooks().or_else(resolve_hooks) {
+        if let Some(hooks) = get_hooks() {
             if let Some(reload_fn) = hooks.reload {
                 unsafe { reload_fn() };
             }
@@ -199,7 +140,7 @@ impl LifecycleManager {
         {
             return;
         }
-        if let Some(hooks) = get_hooks().or_else(resolve_hooks) {
+        if let Some(hooks) = get_hooks() {
             if let Some(exit_fn) = hooks.exit_proc {
                 unsafe { exit_fn() };
             }
@@ -229,9 +170,7 @@ impl LifecycleManager {
         _argv: *mut *mut c_char,
         _argp: *mut *mut c_char,
     ) -> c_int {
-        let hooks = get_hooks()
-            .or_else(resolve_hooks)
-            .expect("Lifecycle hooks must be registered");
+        let hooks = get_hooks().expect("Lifecycle hooks must be registered");
 
         let mut reloading = false;
         let mut exit_code = 0;
@@ -1231,7 +1170,7 @@ pub(crate) fn disk_service_work_active() {
 }
 
 
-/// Executes `DiskService` and `RustyGet` daemon lifecycle operations (`daemon/main/rustyget.cpp`):
+/// Executes `DiskService` and `RustyGet` daemon lifecycle operations (driven by `crate::daemon`):
 /// - `0`: `DiskService::ServiceInterval`
 /// - `1`: `DiskService::ServiceWork`
 /// - `2`: `ResetInstance(a1 = reload)`

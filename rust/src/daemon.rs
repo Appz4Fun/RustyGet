@@ -3,8 +3,8 @@
 //!
 //! [`daemon_hooks`] is the table `LifecycleManager::run_daemon_loop` drives.
 //! The process entry (`rust/entry.rs`) registers it through
-//! `nzbget_rs_register_daemon_hooks`, handing over the one C++ call left:
-//! `nzbget_c_util_init`, which hands Rust the build flags and TLS version text.
+//! [`register_daemon_hooks`]. Its first hook, [`util_init`], sets the build
+//! environment (formerly the C++ `Util::Init`).
 //!
 //! One daemon instance lives from phase 1 to phase 4. It owns the log, the
 //! options, the work state, the server pool and the pre/post-processor runner,
@@ -39,11 +39,16 @@ static SERVER_POOL: AtomicPtr<NzbgetRsServerPool> = AtomicPtr::new(ptr::null_mut
 static PRE_POST: AtomicPtr<PrePostRunner> = AtomicPtr::new(ptr::null_mut());
 static ATEXIT: Once = Once::new();
 
-/// The lifecycle table for the daemon binary. `util_init` is the C++ start-up
-/// call; everything else runs here.
-pub fn daemon_hooks(util_init: Option<unsafe extern "C" fn()>) -> LifecycleHooks {
+/// Sets the build flags, the version and the TLS library's version text,
+/// before anything else runs (the former C++ `Util::Init`).
+unsafe extern "C" fn util_init() {
+    crate::ffi::init_build_env();
+}
+
+/// The lifecycle table for the daemon binary.
+pub fn daemon_hooks() -> LifecycleHooks {
     LifecycleHooks {
-        util_init,
+        util_init: Some(util_init),
         nserv_main: Some(nserv_main),
         phase1_init: Some(phase1_init),
         phase2_subsystems_create_and_recover: None,
@@ -58,9 +63,8 @@ pub fn daemon_hooks(util_init: Option<unsafe extern "C" fn()>) -> LifecycleHooks
 }
 
 /// Registers [`daemon_hooks`] for `nzbget_rs_main`. Called by the process entry.
-#[no_mangle]
-pub extern "C" fn nzbget_rs_register_daemon_hooks(util_init: Option<unsafe extern "C" fn()>) {
-    crate::lifecycle::register_hooks(daemon_hooks(util_init));
+pub fn register_daemon_hooks() {
+    crate::lifecycle::register_hooks(daemon_hooks());
 }
 
 fn empty_env() -> NzbgetRsDaemonEnv {

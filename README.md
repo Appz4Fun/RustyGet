@@ -35,7 +35,7 @@ RustyGet is a Usenet downloader that started as a fork of [NZBGet](https://githu
 
 | Area | NZBGet | RustyGet |
 |---|---|---|
-| Language | C++ | C++ moving to Rust module by module, each port proven identical by differential tests |
+| Language | C++ | Rust, ported module by module, each port proven identical by differential tests |
 | An article missing on every server | Lost, and left to par2 repair or failure | Fetched from a matching file in another copy of the release. A borrowed yEnc article must fit its place in the file, and, where they're available, it's checked against its yEnc checksum and the download's par2 block checksums |
 | Duplicates of a release | Spare downloads, tried one after another from scratch | One fleet: copies lend each other articles, bytes, and par2 recovery volumes |
 | Byte-identical copies | Not detected | **Twins** proven by par2 checksums (MD5, 16 KB hash, and length of every file); other encodes are **alts**, kept mainly as failover backups |
@@ -108,7 +108,7 @@ On 2026-10-09 the NZBGet maintainers closed it without merging, along with the r
 
 ## Build and run
 
-RustyGet runs on Linux and macOS. It has no release packages yet, so build it from source with `just`, a C++20 compiler, and Rust. The repository pins Rust 1.99.0, and rustup installs it on the first build.
+RustyGet runs on Linux and macOS. It has no release packages yet, so build it from source with `just` and Rust (plus a C compiler and linker, which Rust uses to link and to build the bundled zstd library). The repository pins Rust 1.99.0, and rustup installs it on the first build.
 
 ```bash
 git clone https://github.com/Appz4Fun/RustyGet.git rustyget

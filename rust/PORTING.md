@@ -1,5 +1,8 @@
 # Porting nzbget to Rust
 
+> Historical: the port is finished. No C++ is left, and cargo builds the `rustyget`
+> binary from Rust alone (`rust/entry.rs`); `rust/include/` and the C++ shim are gone.
+
 nzbget moves to Rust one routine at a time. The Rust code lives in `rust/` and
 builds as a static library (`cmake/rust.cmake`). C++ calls it through the C ABI
 in `rust/include/nzbget_rs.h`.

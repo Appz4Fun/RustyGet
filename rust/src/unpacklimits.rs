@@ -1658,34 +1658,4 @@ mod tests {
         assert!(why.contains("more than 100 files"), "{why}");
         let _ = std::fs::remove_dir_all(&t);
     }
-
-    /// `NzbgetRsParsedOptions` is shared with C++: the header must list the same fields in
-    /// the same order, all `int32_t`.
-    #[test]
-    fn the_options_struct_matches_the_c_header() {
-        let header = include_str!("../include/nzbget_rs.h");
-        let start = header
-            .find("typedef struct NzbgetRsParsedOptions {")
-            .unwrap();
-        let end = start + header[start..].find("} NzbgetRsParsedOptions;").unwrap();
-        let c: Vec<&str> = header[start..end]
-            .lines()
-            .skip(1)
-            .filter_map(|l| l.trim().strip_prefix("int32_t "))
-            .map(|l| l.trim_end_matches(';'))
-            .collect();
-        let rust_src = include_str!("options.rs");
-        let start = rust_src.find("pub struct NzbgetRsParsedOptions {").unwrap();
-        let end = start + rust_src[start..].find("\n}").unwrap();
-        let r: Vec<&str> = rust_src[start..end]
-            .lines()
-            .filter_map(|l| l.trim().strip_prefix("pub "))
-            .filter_map(|l| l.strip_suffix(": i32,"))
-            .collect();
-        assert_eq!(c, r);
-        assert_eq!(
-            std::mem::size_of::<crate::options::NzbgetRsParsedOptions>(),
-            4 * c.len()
-        );
-    }
 }

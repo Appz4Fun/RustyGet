@@ -9,7 +9,7 @@ lede = "RustyGet replaces NZBGet's C++ with Rust one module at a time, while the
 
 ## How the port works
 
-The Rust code lives in `rust/` as a library crate, `nzbget_rs`, that links into the `rustyget` binary. The remaining C++ calls it through the C interface declared in `rust/include/nzbget_rs.h`. Module by module, the program moved behind that interface, and today the C++ is little more than glue.
+The Rust code lives in `rust/`: the library crate `nzbget_rs` and the `rustyget` binary built from it by cargo. Module by module, the program moved from C++ into Rust behind a C interface, and once the last module moved, the C++ and that interface were deleted.
 
 <ol class="steps">
 <li><strong>Pick a module.</strong> Hot paths first, measured with real downloads. Whole modules are preferred over single functions.</li>

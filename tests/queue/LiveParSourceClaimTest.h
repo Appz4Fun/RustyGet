@@ -23,7 +23,8 @@ bool LiveNamespaceStop(void* context, int, unsigned, const char*,
 }
 BOOST_AUTO_TEST_CASE(LiveParNamespaceBorrowedRowsCoverQueueAndCompleted)
 {
-    NzbInfo nzb;
+    auto nzbOwner = std::make_unique<NzbInfo>();
+    NzbInfo& nzb = *nzbOwner;
     auto source = std::make_unique<FileInfo>(40);
     source->SetNzbInfo(&nzb);
     source->SetFilename("part40.rar");
@@ -37,7 +38,7 @@ BOOST_AUTO_TEST_CASE(LiveParNamespaceBorrowedRowsCoverQueueAndCompleted)
     parity->SetFilename("rel.par2");
     parity->SetParFile(true);
     nzb.GetFileList()->Add(std::move(parity));
-    nzb.GetCompletedFiles()->emplace_back(39, "part39.rar", "part39.rar",
+    nzb.AddCompletedFile(39, "part39.rar", "part39.rar",
         CompletedFile::cfSuccess, 0, false, "", "");
     std::vector<LiveNamespaceTestRow> rows;
     BOOST_REQUIRE_EQUAL(live_par_visit_namespace(&nzb, LiveNamespaceCollect, &rows), 1);
@@ -63,7 +64,8 @@ BOOST_AUTO_TEST_CASE(LiveParNamespaceBorrowedRowsCoverQueueAndCompleted)
 }
 BOOST_AUTO_TEST_CASE(LiveParNamespaceSizingRefusalStopsBeforeCopy)
 {
-    NzbInfo nzb;
+    auto nzbOwner = std::make_unique<NzbInfo>();
+    NzbInfo& nzb = *nzbOwner;
     for (int id : {40, 41}) {
         auto file = std::make_unique<FileInfo>(id);
         file->SetNzbInfo(&nzb);
@@ -81,7 +83,7 @@ BOOST_AUTO_TEST_CASE(LiveParNamespaceSizingRefusalStopsBeforeCopy)
     BOOST_CHECK_EQUAL(visits, 1);
     // Assembly may still have its final downloader registered. Neither active
     // count is proof that borrowing its changing output string is safe.
-    auto* first = nzb.GetFileList()->at(0).get();
+    auto* first = nzb.GetFileList()->at(0);
     first->SetTotalArticles(1);
     first->SetCompletedArticles(1);
     for (int active : {0, 1}) {

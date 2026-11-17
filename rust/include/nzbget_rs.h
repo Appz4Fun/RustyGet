@@ -480,9 +480,36 @@ size_t nzbget_rs_nzb_scalars_size(void);
 // Text fields (ids as in qnzb.rs); null when unset. len < 0: NUL-terminated.
 const char* nzbget_rs_nzb_text(const NzbgetRsNzbScalars* p, int id);
 void nzbget_rs_nzb_set_text(const NzbgetRsNzbScalars* p, int id, const char* s, intptr_t len);
+// Host handles of a collection: 0 file list, 1 post info, 2 unpack job, 3 live-repair job,
+// 4 message count. set != 0 stores v; returns the (previous) value.
+uintptr_t nzbget_rs_nzb_slot(const NzbgetRsNzbScalars* p, int id, int set, uintptr_t v);
 // Small lists of a collection (op codes in qnzb.rs).
 int64_t nzbget_rs_nzb_coll(const NzbgetRsNzbScalars* p, int op, int a2, const NzbgetRsNzbScalars* p2,
     const char* s1, const char* s2, int* ints, const char** strs);
+// Completed files and stream-repair jobs of a collection (op codes in qnzb.rs).
+int64_t nzbget_rs_nzb_files(const NzbgetRsNzbScalars* p, int op, int a2, const NzbgetRsNzbScalars* p2,
+    const char* s1, const char* s2, int* ints, int64_t* i64s, const char** strs, const int64_t* raw);
+// Ordered list owning host objects (rust/src/qlist.rs).
+typedef struct RsPtrList RsPtrList;
+RsPtrList* nzbget_rs_ptrlist_new(void (*drop_fn)(uintptr_t));
+void nzbget_rs_ptrlist_free(RsPtrList* l);
+int64_t nzbget_rs_ptrlist_op(const RsPtrList* l, int op, int64_t a, uintptr_t p, const uintptr_t* order,
+    const RsPtrList* other);
+// History-only duplicate record (rust/src/qdup.rs).
+typedef struct RsDup RsDup;
+RsDup* nzbget_rs_dup_new(void);
+void nzbget_rs_dup_free(RsDup* d);
+void nzbget_rs_dup_get(const RsDup* d, int* ints, int64_t* i64s, const char** strs);
+void nzbget_rs_dup_set(const RsDup* d, int field, int64_t v, const char* s);
+// Post-processing state (op codes in qnzb.rs).
+typedef struct RsPost RsPost;
+RsPost* nzbget_rs_post_new(void);
+void nzbget_rs_post_free(RsPost* p);
+int64_t nzbget_rs_post_op(const RsPost* p, int op, int a2, int64_t v, const char* s1, const char** strs);
+NzbgetRsBuf nzbget_rs_post_label(const RsPost* p);
+// A collection's message log (op codes in qnzb.rs).
+int64_t nzbget_rs_nzb_msgs(const NzbgetRsNzbScalars* p, int op, int a2, const NzbgetRsNzbScalars* p2,
+    const char* s1, const int* ints, void (*visit)(uintptr_t, int, int, int, const char*), uintptr_t ctx);
 // Job threads for post-processing, live repair and direct unpack (rust/src/jobthread.rs).
 typedef struct JobThread JobThread;
 JobThread* nzbget_rs_job_new_post(int kind, uintptr_t post_ptr, int nzb_id, int auto_destroy);

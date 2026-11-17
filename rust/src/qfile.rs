@@ -138,10 +138,11 @@ fn stat_op(list: &mut Vec<[i32; 3]>, server_id: i32, success: i32, failed: i32, 
 
 impl File {
     fn new(id: i32) -> Self {
-        let id = if id != 0 {
-            id
-        } else {
-            ID_GEN.fetch_add(1, Ordering::SeqCst) + 1
+        // < 0: storage for a host object whose constructor sets the id
+        let id = match id {
+            0 => ID_GEN.fetch_add(1, Ordering::SeqCst) + 1,
+            i if i < 0 => 0,
+            i => i,
         };
         let f = Self {
             articles: nzbget_rs_artlist_new(),
@@ -227,7 +228,8 @@ pub unsafe extern "C" fn nzbget_rs_file_free(f: *mut File) {
 }
 
 /// Id generation shared by all files: 0 last generated id, 1 reset to the
-/// highest id seen, 2 reset to zero, 3 raise the floor to `v`.
+/// highest id seen, 2 reset to zero, 3 raise the floor to `v`, 4 generate
+/// the next id.
 #[unsafe(no_mangle)]
 pub extern "C" fn nzbget_rs_file_ids(op: c_int, v: c_int) -> c_int {
     match op {
@@ -245,6 +247,7 @@ pub extern "C" fn nzbget_rs_file_ids(op: c_int, v: c_int) -> c_int {
             ID_MAX.fetch_max(v, Ordering::SeqCst);
             0
         }
+        4 => ID_GEN.fetch_add(1, Ordering::SeqCst) + 1,
         _ => 0,
     }
 }
@@ -354,6 +357,456 @@ pub unsafe extern "C" fn nzbget_rs_file_op(
             0
         }
         _ => 0,
+    }
+}
+
+/// Applies a queue-host file setter (host op 42 sub-op `a1`) as the C++
+/// FileInfo did; `p2` is the collection where the op names one.
+///
+/// # Safety
+/// `f` is a live file; `p2` a live collection for 53 and 59; the caller
+/// holds the queue lock.
+pub(crate) unsafe fn host_file_set(
+    f: *const File,
+    a1: i32,
+    a2: i32,
+    p2: usize,
+    s1: *const c_char,
+    i64s: *const i64,
+) {
+    use field::*;
+    if f.is_null() {
+        return;
+    }
+    let file = unsafe { &*f };
+    let flag = i64::from(a2 != 0);
+    let v64 = || unsafe { *i64s };
+    let nzb = file.get(NZB) as usize as *mut crate::qnzb::NzbScalars;
+    // simple setters: (sub-op, field, value)
+    let simple = match a1 {
+        1 => Some((DELETED, flag)),
+        2 => Some((DUPE_DELETED, flag)),
+        3 => Some((FILENAME_CONFIRMED, flag)),
+        4 => Some((FIRST_CONTENT, i64::from(a2))),
+        6 => Some((FORCE_DIRECT_WRITE, flag)),
+        7 => Some((OUTPUT_INITIALIZED, flag)),
+        8 => Some((PARTIAL_STATE, i64::from(a2))),
+        9 => Some((PARTIAL_CHANGED, flag)),
+        10 => Some((DUPE_CUTOVER, flag)),
+        11 => Some((DUPE_NO_SOURCE_LOGGED, flag)),
+        12 => Some((DUPE_LEAD_DONOR_ID, i64::from(a2))),
+        13 => Some((DUPE_LEAD_FAILURES, i64::from(a2))),
+        14 => Some((DUPE_LEAD_SWITCHES, i64::from(a2))),
+        15 => Some((DUPE_RECOVERED_ARTICLES, i64::from(a2))),
+        16 => Some((DUPE_ATTEMPTED_ARTICLES, i64::from(a2))),
+        17 => Some((COMPLETED_ARTICLES, i64::from(a2))),
+        18 => Some((SUCCESS_ARTICLES, i64::from(a2))),
+        19 => Some((FAILED_ARTICLES, i64::from(a2))),
+        20 => Some((ACTIVE_DOWNLOADS, i64::from(a2))),
+        21 => Some((CACHED_ARTICLES, i64::from(a2))),
+        22 => Some((PAR_FILE, flag)),
+        30 => Some((REMAINING_SIZE, v64())),
+        31 => Some((SUCCESS_SIZE, v64())),
+        32 => Some((FAILED_SIZE, v64())),
+        33 => Some((DECODED_FILE_SIZE, v64())),
+        58 => Some((NZB, p2 as i64)),
+        62 => Some((TIME, v64())),
+        63 => Some((SIZE, v64())),
+        64 => Some((MISSED_SIZE, v64())),
+        65 => Some((TOTAL_ARTICLES, i64::from(a2))),
+        66 => Some((MISSED_ARTICLES, i64::from(a2))),
+        _ => None,
+    };
+    if let Some((id, v)) = simple {
+        file.set(id, v);
+        return;
+    }
+    let set_text = |id: i32, v: *const c_char| unsafe { nzbget_rs_file_set_text(f, id, v) };
+    // the collection's copy of a file's server stats (NzbInfo::AddFileStats)
+    let add_stats = |which: i32, op: i32| {
+        let stats = file.lock().server_stats.clone();
+        for st in stats {
+            let mut v = st;
+            unsafe {
+                crate::qnzb::nzbget_rs_nzb_coll(
+                    p2 as *const crate::qnzb::NzbScalars,
+                    44 + which,
+                    op,
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    v.as_mut_ptr(),
+                    ptr::null_mut(),
+                )
+            };
+        }
+    };
+    match a1 {
+        0 => {
+            let paused = a2 != 0;
+            if (file.get(PAUSED) != 0) != paused && !nzb.is_null() {
+                let remaining = file.get(REMAINING_SIZE);
+                let n = unsafe { &mut *nzb };
+                n.pausedFileCount += if paused { 1 } else { -1 };
+                n.pausedSize += if paused { remaining } else { -remaining };
+            }
+            file.set(PAUSED, i64::from(paused));
+        }
+        5 => {
+            let extra = a2 != 0;
+            if (file.get(EXTRA_PRIORITY) != 0) != extra && !nzb.is_null() {
+                unsafe { &mut *nzb }.extraPriority += if extra { 1 } else { -1 };
+            }
+            file.set(EXTRA_PRIORITY, i64::from(extra));
+        }
+        40 => set_text(text::FILENAME, s1),
+        41 => {
+            // the output name changes under the output lock while downloads run
+            let taken = file.output_lock();
+            set_text(text::OUTPUT_FILENAME, s1);
+            if taken {
+                file.output_unlock();
+            }
+        }
+        42 => set_text(text::ORIGNAME, s1),
+        43 => set_text(text::HASH16K, s1),
+        44 => set_text(text::PAR_SET_ID, s1),
+        45 => set_text(
+            text::HARD_LINK_PATH,
+            if s1.is_null() { c"".as_ptr() } else { s1 },
+        ),
+        50 => {
+            let name = file.lock().texts[text::FILENAME as usize]
+                .as_bytes()
+                .to_vec();
+            let valid = crate::paths::make_valid_filename(&name, false);
+            let valid = CString::new(valid).unwrap_or_default();
+            set_text(text::FILENAME, valid.as_ptr());
+        }
+        51 | 52 | 54 => unsafe {
+            let op = match a1 {
+                51 => 101,
+                52 => 102,
+                _ => 103,
+            };
+            crate::qarticle::nzbget_rs_article_host(
+                file.articles,
+                ptr::null_mut(),
+                op,
+                0,
+                0,
+                ptr::null(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            );
+        },
+        53 => {
+            add_stats(1, 2);
+            file.lock().server_stats.clear();
+        }
+        55 => {
+            let taken = file.output_lock();
+            unsafe {
+                crate::qarticle::nzbget_rs_article_host(
+                    file.articles,
+                    ptr::null_mut(),
+                    104,
+                    0,
+                    p2,
+                    ptr::null(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                )
+            };
+            if taken {
+                file.output_unlock();
+            }
+        }
+        59 => add_stats(0, 2),
+        61 => set_text(text::SUBJECT, s1),
+        _ => {}
+    }
+}
+
+fn art(
+    list: *mut ArticleList,
+    article: usize,
+    op: c_int,
+    a2: c_int,
+    ints: *mut c_int,
+    i64s: *mut i64,
+    strs: *mut *const c_char,
+) -> usize {
+    unsafe {
+        crate::qarticle::nzbget_rs_article_host(
+            list,
+            article as *mut crate::qarticle::Article,
+            op,
+            a2,
+            0,
+            ptr::null(),
+            ints,
+            i64s,
+            strs,
+        )
+    }
+}
+
+thread_local! {
+    // the output name handed back by host op 44 sub-op 4 (valid until the
+    // next call on this thread, as the C++ thread_local string was)
+    static OUT_NAME: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The article cache's file ops (host op 44), as the C++ host did them.
+/// Returns what that op returned.
+///
+/// # Safety
+/// `f` is a live file; `p2` is a live article for 1, 2 and 6 (a2 != 0), the
+/// callback context for 5; output arrays are large enough for the op.
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn host_cache_op(
+    f: *const File,
+    a1: i32,
+    a2: i32,
+    p2: usize,
+    s1: *const c_char,
+    ints: *mut c_int,
+    i64s: *mut i64,
+    strs: *mut *const c_char,
+) -> usize {
+    use field::*;
+    if f.is_null() {
+        return 0;
+    }
+    let file = unsafe { &*f };
+    let null_i = ptr::null_mut();
+    let null_l = ptr::null_mut();
+    let null_s = ptr::null_mut();
+    let nzb = file.get(NZB) as usize as *const crate::qnzb::NzbScalars;
+    let opts = crate::options::active_options();
+    let skip_write = || {
+        let nzb_skip = !nzb.is_null() && unsafe { (*nzb).skipDiskWrite };
+        nzb_skip || opts.as_ref().is_some_and(|o| o.scalars().skip_write != 0)
+    };
+    // take the flush lock unless it is already taken
+    let try_flush_lock = || {
+        let mut d = file.lock();
+        if d.ints[FLUSH_LOCKED as usize] != 0 {
+            false
+        } else {
+            d.ints[FLUSH_LOCKED as usize] = 1;
+            true
+        }
+    };
+    match a1 {
+        // copy the article's cached data out
+        1 => {
+            let data = art(null_l, p2, 110, 0, null_i, null_l.cast(), null_s) as *const u8;
+            if file.get(FLUSH_LOCKED) == 0 && !data.is_null() && a2 > 0 {
+                unsafe { ptr::copy_nonoverlapping(data, *i64s as usize as *mut u8, a2 as usize) };
+                1
+            } else {
+                0
+            }
+        }
+        // drop the article's cached data once it is written
+        2 => {
+            let result = art(null_l, p2, 114, 0, null_i, null_l.cast(), null_s) as *const c_char;
+            if art(null_l, p2, 117, 0, null_i, null_l.cast(), null_s) > 0 && !result.is_null() {
+                unsafe { libc::unlink(result) };
+            }
+            if art(null_l, p2, 110, 0, null_i, null_l.cast(), null_s) == 0
+                || file.get(FLUSH_LOCKED) != 0
+            {
+                return 0;
+            }
+            art(null_l, p2, 111, 0, null_i, null_l.cast(), null_s);
+            file.set(CACHED_ARTICLES, file.get(CACHED_ARTICLES) - 1);
+            1
+        }
+        3 => {
+            if a2 != 0 {
+                usize::from(try_flush_lock())
+            } else {
+                file.set(FLUSH_LOCKED, 0);
+                1
+            }
+        }
+        // where and how the article writer should write
+        4 => {
+            let (out_init, name) = {
+                let taken = file.output_lock();
+                let r = {
+                    let d = file.lock();
+                    (
+                        d.ints[OUTPUT_INITIALIZED as usize] != 0,
+                        d.texts[text::OUTPUT_FILENAME as usize].as_bytes().to_vec(),
+                    )
+                };
+                if taken {
+                    file.output_unlock();
+                }
+                r
+            };
+            let direct = opts.as_ref().is_some_and(|o| o.scalars().direct_write != 0)
+                || file.get(FORCE_DIRECT_WRITE) != 0;
+            unsafe {
+                *ints = i32::from(direct && out_init);
+                *ints.add(1) = i32::from(skip_write());
+                *i64s = name.len() as i64;
+                *i64s.add(1) = nzb as usize as i64;
+            }
+            OUT_NAME.with(|n| {
+                let mut n = n.borrow_mut();
+                *n = name;
+                unsafe { *strs = n.as_ptr().cast() };
+            });
+            1
+        }
+        // hand every cached segment to the writer callback, under the flush lock
+        5 => {
+            if s1.is_null() || !try_flush_lock() {
+                return 0;
+            }
+            type PushSeg =
+                unsafe extern "C" fn(usize, usize, i64, c_int, *const c_char, *const c_char);
+            let push: PushSeg = unsafe { std::mem::transmute::<*const c_char, PushSeg>(s1) };
+            let list = file.articles;
+            let n = art(list, 0, 100, 0, null_i, null_l.cast(), null_s);
+            for i in 0..n {
+                let pa = art(list, 0, 106, i as c_int, null_i, null_l.cast(), null_s);
+                let mut ai = [0 as c_int; 5];
+                let mut ao = [0i64; 1];
+                let mut as_ = [ptr::null::<c_char>(); 2];
+                art(
+                    ptr::null_mut(),
+                    pa,
+                    120,
+                    0,
+                    ai.as_mut_ptr(),
+                    ao.as_mut_ptr(),
+                    as_.as_mut_ptr(),
+                );
+                if !as_[0].is_null() {
+                    unsafe { push(p2, pa, ao[0], ai[1], as_[0], as_[1]) };
+                }
+            }
+            1
+        }
+        6 => {
+            if a2 == 0 {
+                let parking = !nzb.is_null() && unsafe { (*nzb).parking };
+                return usize::from(file.get(DELETED) != 0 && !parking);
+            }
+            art(null_l, p2, 111, 0, null_i, null_l.cast(), null_s);
+            0
+        }
+        7 => {
+            file.set(CACHED_ARTICLES, file.get(CACHED_ARTICLES) - i64::from(a2));
+            file.set(FLUSH_LOCKED, 0);
+            unsafe { *ints = i32::from(skip_write()) };
+            0
+        }
+        _ => 0,
+    }
+}
+
+/// What the queue host reported for a file (host op 40), read directly:
+/// `ints` and `i64s` in that op's order, the seven texts (filename, subject,
+/// output filename, hard-link path, origname, hash16k, par set id) when
+/// asked; returns the article count.
+///
+/// # Safety
+/// `f` is a live file.
+pub(crate) unsafe fn host_snapshot(
+    f: *const File,
+    ints: &mut [i32; 28],
+    i64s: &mut [i64; 8],
+    texts: Option<&mut [Vec<u8>; 7]>,
+) -> usize {
+    use field::*;
+    let file = unsafe { &*f };
+    let g = |id| file.get(id);
+    *ints = [
+        g(ID) as i32,
+        g(PAUSED) as i32,
+        g(DELETED) as i32,
+        g(DUPE_DELETED) as i32,
+        g(PAR_FILE) as i32,
+        g(FILENAME_CONFIRMED) as i32,
+        g(FIRST_CONTENT) as i32,
+        g(EXTRA_PRIORITY) as i32,
+        g(FORCE_DIRECT_WRITE) as i32,
+        g(OUTPUT_INITIALIZED) as i32,
+        0,
+        g(PARTIAL_STATE) as i32,
+        g(PARTIAL_CHANGED) as i32,
+        g(DUPE_CUTOVER) as i32,
+        g(DUPE_NO_SOURCE_LOGGED) as i32,
+        g(DUPE_LEAD_DONOR_ID) as i32,
+        g(DUPE_LEAD_FAILURES) as i32,
+        g(DUPE_LEAD_SWITCHES) as i32,
+        g(DUPE_RECOVERED_ARTICLES) as i32,
+        g(DUPE_ATTEMPTED_ARTICLES) as i32,
+        g(TOTAL_ARTICLES) as i32,
+        g(MISSED_ARTICLES) as i32,
+        g(COMPLETED_ARTICLES) as i32,
+        g(SUCCESS_ARTICLES) as i32,
+        g(FAILED_ARTICLES) as i32,
+        g(ACTIVE_DOWNLOADS) as i32,
+        g(CACHED_ARTICLES) as i32,
+        g(CRC) as u32 as i32,
+    ];
+    *i64s = [
+        g(SIZE),
+        g(REMAINING_SIZE),
+        g(MISSED_SIZE),
+        g(SUCCESS_SIZE),
+        g(FAILED_SIZE),
+        g(DECODED_FILE_SIZE),
+        g(NZB),
+        g(TIME),
+    ];
+    {
+        let d = file.lock();
+        ints[10] = i32::from(!d.texts[text::HARD_LINK_PATH as usize].is_empty());
+    }
+    if let Some(out) = texts {
+        // the output name changes under the output lock while downloads run
+        let taken = file.output_lock();
+        {
+            let d = file.lock();
+            for (slot, id) in out.iter_mut().zip([
+                text::FILENAME,
+                text::SUBJECT,
+                text::OUTPUT_FILENAME,
+                text::HARD_LINK_PATH,
+                text::ORIGNAME,
+                text::HASH16K,
+                text::PAR_SET_ID,
+            ]) {
+                *slot = d.texts[id as usize].as_bytes().to_vec();
+            }
+        }
+        if taken {
+            file.output_unlock();
+        }
+    }
+    unsafe {
+        crate::qarticle::nzbget_rs_article_host(
+            file.articles,
+            ptr::null_mut(),
+            100,
+            0,
+            0,
+            ptr::null(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+        )
     }
 }
 

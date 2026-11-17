@@ -4005,6 +4005,89 @@ def scenario_persistdeadprimary(daemon, t):
     return ('persistdeadprimary', ok, '%s persistent_starts=%d fallbacks=%d' % (detail, started, fell_back))
 
 
+def scenario_persistrestart(daemon, t):
+    """RustyGet restarts while a persistent direct unpack is mid-member: the
+    next start adopts the member from its saved state and resumes it from the
+    committed output instead of starting over. Byte-identical result."""
+    seg = 300_000
+    movie = _payload(24_000_000, 4417)
+    vols = generators.rar3_store_volumes_valid('movie.mkv', movie, 1_400_000)
+    names = ['Rel.part%02d.rar' % (i + 1) for i in range(len(vols))]
+    for name, data in zip(names, vols):
+        t.write_file(os.path.join('data', 'PRA', name), data)
+    members = [('PRA/%s' % n, n, len(d), seg, set()) for n, d in zip(names, vols)]
+    par = generators.par2_index(list(zip(names, vols)))
+    t.write_file(os.path.join('data', 'PRA', 'Rel.par2'), par)
+    members.append(('PRA/Rel.par2', 'Rel.par2', len(par), seg, set()))
+    api = daemon.wait_ready()
+    daemon.append(api, 'RelPR', build_multi_nzb(members), False, 'pr-key', 100)
+    # Restart once direct unpack has read a few volumes of the member.
+    reached = _watch_wait(t, 'Extracting from Rel.part05.rar', timeout=120)
+    try:
+        api.shutdown()
+    except Exception:
+        pass
+    t.procs[-1].wait(timeout=60)
+    daemon.start()
+    api = daemon.wait_ready()
+    h = daemon.wait_history(api, 'RelPR', timeout=300)
+    ok = _verify_output(t, movie, '.mkv', dirs=(('main', 'dst'), ('main', 'inter')))
+    resumed = _grep_log(t, 'resuming movie.mkv')
+    started = _grep_log(t, 'direct unpack into persistent partial files')
+    detail = 'status=%s unpack=%s extracted_ok=%s reached_before_restart=%d persistent_starts=%d resumed=%d' % (
+        h['Status'], h['UnpackStatus'], ok, reached, started, resumed)
+    good = ok and h['Status'].startswith('SUCCESS') and reached >= 1 and resumed >= 1
+    return ('persistrestart', good, detail)
+
+
+def scenario_persistrestartdamaged(daemon, t):
+    """As persistrestart, with the second volume losing an article before the
+    restart and only par2 recovery data to repair it. The restart comes before
+    the repair: the saved list of volumes waiting for their repair puts the
+    volume back on hold, so the resumed extraction waits for the par2 repair
+    and refills the hole instead of extracting the whole set again."""
+    import subprocess as _sp
+    seg = 300_000
+    movie = _payload(24_000_000, 5521)
+    vols = generators.rar3_store_volumes_valid('movie.mkv', movie, 1_400_000)
+    work = t.path('data', 'PRD')
+    os.makedirs(work, exist_ok=True)
+    names = ['Rel.part%02d.rar' % (i + 1) for i in range(len(vols))]
+    for name, data in zip(names, vols):
+        t.write_file(os.path.join('data', 'PRD', name), data)
+    damage = {1: {3}}                       # bytes 900,000-1,199,999 of volume 2
+    members = [('PRD/%s' % n, n, len(d), seg, damage.get(i, set()))
+               for i, (n, d) in enumerate(zip(names, vols))]
+    _sp.run(['par2', 'create', '-q', '-q', '-s65536', '-c12', '-n1', '-a', 'Rel', 'Rel.par2'] + names,
+            cwd=work, check=True, capture_output=True)
+    for n in sorted(os.listdir(work)):
+        if n.endswith('.par2'):
+            members.append(('PRD/%s' % n, n, os.path.getsize(os.path.join(work, n)), seg, set()))
+    api = daemon.wait_ready()
+    daemon.append(api, 'RelPRD', build_multi_nzb(members), False, 'prd-key', 100)
+    reached = _watch_wait(t, 'Extracting from Rel.part05.rar', timeout=120)
+    try:
+        api.shutdown()
+    except Exception:
+        pass
+    t.procs[-1].wait(timeout=60)
+    before_fallbacks = _grep_log(t, 'progressive direct unpack (')
+    daemon.start()
+    api = daemon.wait_ready()
+    h = daemon.wait_history(api, 'RelPRD', timeout=300)
+    ok = _verify_output(t, movie, '.mkv', dirs=(('main', 'dst'), ('main', 'inter')))
+    resumed = _grep_log(t, 'resuming movie.mkv')
+    waiting = _grep_log(t, 'Rel.part02.rar is still waiting for its repair')
+    patched = _grep_log(t, 'repaired movie.mkv from the repaired volumes')
+    fallbacks = _grep_log(t, 'progressive direct unpack (') - before_fallbacks
+    detail = ('status=%s par=%s unpack=%s extracted_ok=%s reached_before_restart=%d resumed=%d '
+              'waiting=%d patched=%d fallbacks_after_restart=%d') % (
+        h['Status'], h['ParStatus'], h['UnpackStatus'], ok, reached, resumed, waiting, patched, fallbacks)
+    good = (ok and h['Status'].startswith('SUCCESS') and reached >= 1 and resumed >= 1
+            and waiting >= 1 and patched >= 1 and fallbacks == 0)
+    return ('persistrestartdamaged', good, detail)
+
+
 def scenario_skipholepar(daemon, t):
     """As skipholetwin with no duplicate: the hole stays open until the
     download ends, par2 repairs the volume, and the extracted file is patched
@@ -10380,6 +10463,8 @@ SCENARIOS = {
     'prodrarstream': scenario_prodrarstream,
     'skipholetwin': scenario_skipholetwin,
     'persistdeadprimary': scenario_persistdeadprimary,
+    'persistrestart': scenario_persistrestart,
+    'persistrestartdamaged': scenario_persistrestartdamaged,
     'rar4lzdirect': scenario_rar4lzdirect,
     'skipholepar': scenario_skipholepar,
     'wholefileonly': scenario_wholefileonly,
@@ -10732,6 +10817,8 @@ SCENARIO_OPTIONS = {
     'skipholetwin': PROD_OPTIONS + ['DownloadRate=1500'],
     'skipholepar': PROD_OPTIONS + ['DownloadRate=1500'],
     'persistdeadprimary': PROD_OPTIONS + ['DownloadRate=1500'],
+    'persistrestart': PROD_OPTIONS + ['DownloadRate=1500'],
+    'persistrestartdamaged': PROD_OPTIONS + ['DownloadRate=1500'],
     'wholefileonly': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'wholefilewrongdonor': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'wholefilenofirst': ['DupeArticleFallback=stream', 'ParCheck=auto'],

@@ -220,6 +220,53 @@ struct NzbData {
     s: NzbScalars,
     texts: Mutex<[Option<CString>; TEXTS]>,
     coll: Mutex<Coll>,
+    files: Mutex<Files>,
+    // (id, kind, time, text), oldest first (see `nzbget_rs_nzb_msgs`)
+    msgs: Mutex<std::collections::VecDeque<(u32, i32, i64, CString)>>,
+    // host handles (see `nzbget_rs_nzb_slot`)
+    slots: [std::sync::atomic::AtomicUsize; SLOTS],
+}
+
+const SLOTS: usize = 5;
+
+/// A file that finished downloading and left the file list.
+struct Completed {
+    id: i32,
+    // 0 none, 1 success, 2 partial, 3 failure
+    status: i32,
+    crc: u32,
+    par: bool,
+    filename: CString,
+    origname: CString,
+    hash16k: CString,
+    par_set_id: CString,
+}
+
+/// Byte ranges of a completed file no server could supply, kept for stream
+/// repair from a duplicate posting (see option DupeArticleFallback).
+struct RepairJob {
+    file_id: i32,
+    filename: CString,
+    decoded_size: i64,
+    // encoded failed size and missed size, captured while the file was queued
+    failed_size: i64,
+    missed_size: i64,
+    failed_articles: i32,
+    par: bool,
+    // (offset, size) pairs, as the host passes them
+    holes: Vec<[i64; 2]>,
+    steps_hash: u64,
+    // the live pass already tried this job once (not persisted)
+    live_attempted: bool,
+}
+
+/// Completed files and stream-repair jobs (see `nzbget_rs_nzb_files`).
+#[derive(Default)]
+struct Files {
+    completed: Vec<Completed>,
+    jobs: Vec<RepairJob>,
+    // archives unpacked so far (cleared when post-processing ends)
+    extracted: Vec<CString>,
 }
 
 /// A collection's small lists (see `nzbget_rs_nzb_coll`).
@@ -291,6 +338,9 @@ pub extern "C" fn nzbget_rs_nzb_scalars_new() -> *mut NzbScalars {
         s: NzbScalars::default(),
         texts: Mutex::new(texts),
         coll: Mutex::new(Coll::default()),
+        files: Mutex::new(Files::default()),
+        msgs: Mutex::new(std::collections::VecDeque::new()),
+        slots: std::array::from_fn(|_| std::sync::atomic::AtomicUsize::new(0)),
     });
     Box::into_raw(data).cast()
 }
@@ -508,6 +558,809 @@ pub unsafe extern "C" fn nzbget_rs_nzb_coll(
     }
 }
 
+fn owned(s: *const c_char) -> CString {
+    cstr(s).to_owned()
+}
+
+fn ranges(raw: *const i64, count: c_int) -> Vec<[i64; 2]> {
+    if raw.is_null() || count <= 0 {
+        return Vec::new();
+    }
+    let flat = unsafe { std::slice::from_raw_parts(raw, count as usize * 2) };
+    flat.chunks_exact(2).map(|r| [r[0], r[1]]).collect()
+}
+
+/// Completed files (ops 0-8) and stream-repair jobs (ops 20-27).
+/// Returned strings and hole pointers stay valid until the list changes;
+/// callers hold the queue lock.
+///
+/// Completed file: ints = id, status, par, crc; strs = filename, origname,
+/// hash16k, par set id.
+///  0 count; 1 read at a2; 2 add (ints = id, status, crc, par); 3 rename at a2 (s1 filename, s2 origname
+///  when not null); 4 rename by name s1 to s2, returns 1 when found;
+///  5 for id a2: ints[0]=1 mark success (returns 1 when it changed),
+///  ints[0]=2 failure becomes partial; 6 erase at a2; 7 clear;
+///  8 append and take p2's list.
+/// Job: ints = file id, failed articles, par, live attempted, hole count;
+/// i64s = decoded size, failed size, missed size, steps hash.
+///  20 count; 21 summary at a2 (ints[0] file id; i64s decoded size, hole
+///  total, failed+missed; strs[0] filename); 22 read at a2 (strs[0]
+///  filename, strs[1] holes); 23 add (s1 filename, `raw` a2 holes);
+///  24 mark live attempted at a2, returns the previous value; 25 erase at
+///  a2; 26 at a2 set decoded size i64s[0] when >= 0 and holes `raw`
+///  ints[1]; 27 clear.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_nzb_files(
+    p: *const NzbScalars,
+    op: c_int,
+    a2: c_int,
+    p2: *const NzbScalars,
+    s1: *const c_char,
+    s2: *const c_char,
+    ints: *mut c_int,
+    i64s: *mut i64,
+    strs: *mut *const c_char,
+    raw: *const i64,
+) -> i64 {
+    let taken = if op == 8 && !p2.is_null() && p2 != p {
+        let mut o = data(p2).files.lock().unwrap_or_else(|e| e.into_inner());
+        std::mem::take(&mut o.completed)
+    } else {
+        Vec::new()
+    };
+    let mut f = data(p).files.lock().unwrap_or_else(|e| e.into_inner());
+    let i = a2.max(0) as usize;
+    let int = |k: usize| unsafe { *ints.add(k) };
+    let put = |k: usize, v: c_int| unsafe { *ints.add(k) = v };
+    let put64 = |k: usize, v: i64| unsafe { *i64s.add(k) = v };
+    let put_s = |k: usize, v: *const c_char| unsafe { *strs.add(k) = v };
+    match op {
+        0 => f.completed.len() as i64,
+        1 => match f.completed.get(i) {
+            Some(c) if a2 >= 0 => {
+                put(0, c.id);
+                put(1, c.status);
+                put(2, i32::from(c.par));
+                put(3, c.crc as i32);
+                put_s(0, c.filename.as_ptr());
+                put_s(1, c.origname.as_ptr());
+                put_s(2, c.hash16k.as_ptr());
+                put_s(3, c.par_set_id.as_ptr());
+                0
+            }
+            _ => -1,
+        },
+        2 => {
+            let s = |k: usize| owned(unsafe { *strs.add(k) });
+            f.completed.push(Completed {
+                id: int(0),
+                status: int(1),
+                crc: int(2) as u32,
+                par: int(3) != 0,
+                filename: s(0),
+                origname: s(1),
+                hash16k: s(2),
+                par_set_id: s(3),
+            });
+            0
+        }
+        3 => {
+            if let Some(c) = f.completed.get_mut(i) {
+                if !s2.is_null() {
+                    c.origname = owned(s2);
+                }
+                c.filename = owned(s1);
+            }
+            0
+        }
+        4 => {
+            let (old, new) = (cstr(s1).to_bytes(), cstr(s2));
+            if old.is_empty() || new.to_bytes().is_empty() {
+                return 0;
+            }
+            for c in f.completed.iter_mut() {
+                if crate::downloadinfo::completed_same_filename(c.filename.to_bytes(), old) {
+                    if c.origname.to_bytes().is_empty() {
+                        c.origname = c.filename.clone();
+                    }
+                    c.filename = new.to_owned();
+                    return 1;
+                }
+            }
+            0
+        }
+        5 => {
+            let mode = int(0);
+            if let Some(c) = f.completed.iter_mut().find(|c| c.id == a2) {
+                if mode == 1 && c.status != 1 {
+                    c.status = 1;
+                    return 1;
+                }
+                if mode == 2 && c.status == 3 {
+                    c.status = 2;
+                }
+            }
+            0
+        }
+        6 => {
+            if a2 >= 0 && i < f.completed.len() {
+                f.completed.remove(i);
+            }
+            0
+        }
+        7 => {
+            f.completed.clear();
+            0
+        }
+        8 => {
+            f.completed.extend(taken);
+            0
+        }
+        20 => f.jobs.len() as i64,
+        21 | 22 => match f.jobs.get(i) {
+            Some(j) if a2 >= 0 => {
+                put_s(0, j.filename.as_ptr());
+                if op == 21 {
+                    put(0, j.file_id);
+                    put64(0, j.decoded_size);
+                    put64(1, j.holes.iter().map(|r| r[1]).sum());
+                    put64(2, j.failed_size + j.missed_size);
+                } else {
+                    put(0, j.file_id);
+                    put(1, j.failed_articles);
+                    put(2, i32::from(j.par));
+                    put(3, i32::from(j.live_attempted));
+                    put(4, j.holes.len() as c_int);
+                    put64(0, j.decoded_size);
+                    put64(1, j.failed_size);
+                    put64(2, j.missed_size);
+                    put64(3, j.steps_hash as i64);
+                    put_s(
+                        1,
+                        if j.holes.is_empty() {
+                            std::ptr::null()
+                        } else {
+                            j.holes.as_ptr().cast()
+                        },
+                    );
+                }
+                0
+            }
+            _ => -1,
+        },
+        23 => {
+            let g = |k: usize| unsafe { *i64s.add(k) };
+            f.jobs.push(RepairJob {
+                file_id: int(0),
+                filename: owned(s1),
+                decoded_size: g(0),
+                failed_size: g(1),
+                missed_size: g(2),
+                failed_articles: int(1),
+                par: int(2) != 0,
+                holes: ranges(raw, a2),
+                steps_hash: g(3) as u64,
+                live_attempted: false,
+            });
+            0
+        }
+        24 => match f.jobs.get_mut(i) {
+            Some(j) if a2 >= 0 => i64::from(std::mem::replace(&mut j.live_attempted, true)),
+            _ => 0,
+        },
+        25 => {
+            if a2 >= 0 && i < f.jobs.len() {
+                f.jobs.remove(i);
+            }
+            0
+        }
+        26 => {
+            let size = unsafe { *i64s };
+            let holes = ranges(raw, int(1));
+            if let Some(j) = f.jobs.get_mut(i) {
+                if size >= 0 {
+                    j.decoded_size = size;
+                }
+                j.holes = holes;
+            }
+            0
+        }
+        27 => {
+            f.jobs.clear();
+            0
+        }
+        30..=33 => list_op(&mut f.extracted, op - 30, a2, s1, strs),
+        _ => 0,
+    }
+}
+
+/// 0 count; 1 read at a2 into strs[0] (-1 when out of range); 2 add s1;
+/// 3 clear.
+fn list_op(
+    v: &mut Vec<CString>,
+    op: c_int,
+    a2: c_int,
+    s1: *const c_char,
+    strs: *mut *const c_char,
+) -> i64 {
+    match op {
+        0 => v.len() as i64,
+        1 => match v.get(a2.max(0) as usize) {
+            Some(e) if a2 >= 0 => {
+                unsafe { *strs = e.as_ptr() };
+                0
+            }
+            _ => -1,
+        },
+        2 => {
+            v.push(owned(s1));
+            0
+        }
+        3 => {
+            v.clear();
+            0
+        }
+        _ => 0,
+    }
+}
+
+/// Post-processing state of a collection (the C++ PostInfo is a thin owner).
+pub struct Post {
+    // scalar fields by id (see `nzbget_rs_post_op`)
+    vals: [std::sync::atomic::AtomicI64; POST_VALS],
+    lists: Mutex<PostLists>,
+}
+
+const POST_VALS: usize = 20;
+
+#[derive(Default)]
+struct PostLists {
+    label: CString,
+    parred: Vec<CString>,
+    // used only when the post job has no collection
+    extracted: Vec<CString>,
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nzbget_rs_post_new() -> *mut Post {
+    Box::into_raw(Box::new(Post {
+        vals: std::array::from_fn(|_| std::sync::atomic::AtomicI64::new(0)),
+        lists: Mutex::new(PostLists::default()),
+    }))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_post_free(p: *mut Post) {
+    if !p.is_null() {
+        drop(unsafe { Box::from_raw(p) });
+    }
+}
+
+/// A copy of the progress label: it may change on another thread.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_post_label(p: *const Post) -> crate::ffi::RsBuf {
+    let post = unsafe { &*p };
+    let l = post.lists.lock().unwrap_or_else(|e| e.into_inner());
+    crate::ffi::into_buf(l.label.as_bytes().to_vec())
+}
+
+/// Fields 0-19: 0 stage, 1 working, 2 deleted, 3 request par check,
+/// 4 force par full, 5 par cannot cover, 6 need par check, 7 need unpack,
+/// 8 force repair, 9 par repaired, 10 unpack tried, 11 pass list tried,
+/// 12 last unpack status, 13 file progress, 14 stage progress,
+/// 15 stream repair done, 16 stream repair recovered, 17 start time,
+/// 18 stage time, 19 post thread pointer.
+///  0 get field a2; 1 set field a2 to v;
+///  11 set the progress label to s1 (read it with `nzbget_rs_post_label`);
+///  20-23 parred files, 30-33 extracted archives (see `list_op`): strings
+///  returned stay valid until that list changes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_post_op(
+    p: *const Post,
+    op: c_int,
+    a2: c_int,
+    v: i64,
+    s1: *const c_char,
+    strs: *mut *const c_char,
+) -> i64 {
+    use std::sync::atomic::Ordering::SeqCst;
+    let post = unsafe { &*p };
+    let field = || post.vals.get(a2.max(0) as usize).filter(|_| a2 >= 0);
+    match op {
+        0 => field().map_or(0, |f| f.load(SeqCst)),
+        1 => {
+            if let Some(f) = field() {
+                f.store(v, SeqCst);
+            }
+            0
+        }
+        11 => {
+            post.lists.lock().unwrap_or_else(|e| e.into_inner()).label = owned(s1);
+            0
+        }
+        20..=23 | 30..=33 => {
+            let mut l = post.lists.lock().unwrap_or_else(|e| e.into_inner());
+            let list = if op < 30 {
+                &mut l.parred
+            } else {
+                &mut l.extracted
+            };
+            list_op(list, op % 10, a2, s1, strs)
+        }
+        _ => 0,
+    }
+}
+
+/// Writes a collection's download counters (what host op 33 did), in the
+/// same order: ints = file count, active downloads, full hash, filtered
+/// hash, paused file count, remaining par count, total, success, failed,
+/// current success, current failed articles, download seconds; i64s = size,
+/// remaining, paused, success, current success, failed, current failed,
+/// par size, par success, par current success, par failed, par current
+/// failed, min time, max time, downloaded size, download start time.
+///
+/// # Safety
+/// `p` is a live collection; the caller holds the queue lock.
+pub(crate) unsafe fn host_set_stats(p: *mut NzbScalars, ints: &[i32; 12], i64s: &[i64; 16]) {
+    let s = unsafe { &mut *p };
+    s.fileCount = ints[0];
+    // as SetActiveDownloads: account download time when downloads start or stop
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    let (sec, start_time, start_sec, changed) = crate::downloadinfo::calc_active_downloads_sec(
+        s.activeDownloads,
+        ints[1],
+        s.kind == 0,
+        now,
+        s.downloadSec,
+        s.downloadStartTime,
+        s.downloadStartSec,
+    );
+    s.downloadSec = sec;
+    s.downloadStartTime = start_time;
+    s.downloadStartSec = start_sec;
+    if changed {
+        s.changed = true;
+    }
+    s.activeDownloads = ints[1];
+    s.fullContentHash = ints[2] as u32;
+    s.filteredContentHash = ints[3] as u32;
+    s.size = i64s[0];
+    s.remainingSize = i64s[1];
+    s.pausedFileCount = ints[4];
+    s.pausedSize = i64s[2];
+    s.successSize = i64s[3];
+    s.currentSuccessSize = i64s[4];
+    s.failedSize = i64s[5];
+    s.currentFailedSize = i64s[6];
+    s.parSize = i64s[7];
+    s.parSuccessSize = i64s[8];
+    s.parCurrentSuccessSize = i64s[9];
+    s.parFailedSize = i64s[10];
+    s.parCurrentFailedSize = i64s[11];
+    s.remainingParCount = ints[5];
+    s.totalArticles = ints[6];
+    s.successArticles = ints[7];
+    s.failedArticles = ints[8];
+    s.currentSuccessArticles = ints[9];
+    s.currentFailedArticles = ints[10];
+    s.downloadSec = ints[11];
+    s.minTime = i64s[12];
+    s.maxTime = i64s[13];
+    s.downloadedSize = i64s[14];
+    s.downloadStartTime = i64s[15];
+}
+
+/// A collection's plain setters (host op 32 sub-op `a1`), as the C++ ones;
+/// false for the sub-ops the host still serves.
+///
+/// # Safety
+/// `p` is a live collection; the caller holds the queue lock.
+pub(crate) unsafe fn host_coll_set(
+    p: *mut NzbScalars,
+    a1: c_int,
+    a2: c_int,
+    s1: *const c_char,
+    i64s: *const i64,
+) -> bool {
+    let empty = c"".as_ptr();
+    let or_empty = |s: *const c_char| if s.is_null() { empty } else { s };
+    let v64 = || unsafe { *i64s };
+    let np: *const NzbScalars = std::ptr::null();
+    let ns: *const c_char = std::ptr::null();
+    let coll = move |op| unsafe {
+        nzbget_rs_nzb_coll(
+            p,
+            op,
+            0,
+            np,
+            ns,
+            ns,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    let files = move |op| unsafe {
+        nzbget_rs_nzb_files(
+            p,
+            op,
+            0,
+            np,
+            ns,
+            ns,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+        )
+    };
+    let s = unsafe { &mut *p };
+    match a1 {
+        2 => s.deletePaused = a2 != 0,
+        9 => s.changed = a2 != 0,
+        10 => s.allFirst = a2 != 0,
+        11 => s.healthPaused = a2 != 0,
+        12 => s.deadPickProbed = a2 != 0,
+        14 => s.dupeNoParNoted = a2 != 0,
+        25 => s.waitingPar = a2 != 0,
+        26 => s.loadingPar = a2 != 0,
+        27 => s.deleting = a2 != 0,
+        28 => s.parking = a2 != 0,
+        29 => s.avoidHistory = a2 != 0,
+        60 => s.cleanupDisk = a2 != 0,
+        68 => s.parFull = a2 != 0,
+        73 => s.unpackCleanedUpDisk = a2 != 0,
+        83 => s.addUrlPaused = a2 != 0,
+        84 => s.autoCategory = a2 != 0,
+        86 => s.skipScriptProcessing = a2 != 0,
+        87 => s.skipDiskWrite = a2 != 0,
+        89 => s.manyDupeFiles = a2 != 0,
+        91 => s.reprocess = a2 != 0,
+        92 => s.parRepaired = a2 != 0,
+        93 => s.unpackTried = a2 != 0,
+        1 => s.deleteStatus = a2,
+        3 => s.markStatus = a2,
+        4 => s.dupeHint = a2,
+        5 => s.dupeScore = a2,
+        6 => s.priority = a2,
+        13 => s.dupeParDeferState = a2,
+        15 => s.directRenameStatus = a2,
+        17 => s.currentSuccessArticles = a2,
+        18 => s.currentFailedArticles = a2,
+        19 => s.dupeRecoveredArticles = a2,
+        20 => s.dupeAttemptedArticles = a2,
+        21 => s.dupeUnsourcedArticles = a2,
+        22 => s.dupeFailedRun = a2,
+        23 => s.dupeFailoverChecked = a2,
+        24 => s.remainingParCount = a2,
+        61 => s.dupeMode = a2,
+        62 => s.parStatus = a2,
+        63 => s.unpackStatus = a2,
+        64 => s.directUnpackStatus = a2,
+        65 => s.postTotalSec = a2,
+        66 => s.urlStatus = a2,
+        67 => s.parSec = a2,
+        69 => s.repairSec = a2,
+        70 => s.extraParBlocks = a2,
+        71 => s.dupeRecoveredHoles = a2,
+        72 => s.parRenameStatus = a2,
+        74 => s.unpackSec = a2,
+        75 => s.moveStatus = a2,
+        76 => s.cleanupStatus = a2,
+        77 => s.rarRenameStatus = a2,
+        78 => s.postDownloadRenamingStatus = a2,
+        79 => s.postUnpackRenamingStatus = a2,
+        81 => s.kind = a2,
+        82 => s.feedId = a2,
+        85 => s.desiredServerId = a2,
+        88 => s.extraPriority = a2,
+        90 => s.parkedFileCount = a2,
+        94 => s.lastUnpackStatus = a2,
+        99 => s.downloadSec = a2,
+        100 => s.failedArticles = a2,
+        101 => s.successArticles = a2,
+        106 => s.fileCount = a2,
+        108 => s.totalArticles = a2,
+        7 => s.fullContentHash = a2 as u32,
+        8 => s.filteredContentHash = a2 as u32,
+        30 => s.remainingSize = v64(),
+        31 => s.pausedSize = v64(),
+        32 => s.currentSuccessSize = v64(),
+        33 => s.currentFailedSize = v64(),
+        34 => s.parCurrentSuccessSize = v64(),
+        35 => s.parCurrentFailedSize = v64(),
+        36 => s.downloadedSize = v64(),
+        37 => s.parSize = v64(),
+        38 => s.parFailedSize = v64(),
+        39 => s.dupeRecoveredBytes = v64(),
+        47 => s.failedSize = v64(),
+        48 => s.successSize = v64(),
+        49 => s.parSuccessSize = v64(),
+        102 => s.size = v64(),
+        103 => s.minTime = v64(),
+        104 => s.maxTime = v64(),
+        105 => s.queueScriptTime = v64(),
+        40 => unsafe { nzbget_rs_nzb_set_text(p, 2, s1, -1) },
+        42 => unsafe { nzbget_rs_nzb_set_text(p, 5, s1, -1) },
+        43 => unsafe { nzbget_rs_nzb_set_text(p, 3, s1, -1) },
+        44 => unsafe { nzbget_rs_nzb_set_text(p, 7, or_empty(s1), -1) },
+        45 => unsafe { nzbget_rs_nzb_set_text(p, 6, s1, -1) },
+        46 => unsafe { nzbget_rs_nzb_set_text(p, 8, or_empty(s1), -1) },
+        59 => unsafe { nzbget_rs_nzb_set_text(p, 4, or_empty(s1), -1) },
+        56 => {
+            coll(13);
+        }
+        57 => unsafe {
+            nzbget_rs_nzb_slot(p, 2, 1, 0);
+            nzbget_rs_nzb_slot(p, 3, 1, 0);
+        },
+        58 => unsafe {
+            nzbget_rs_nzb_slot(p, 3, 1, 0);
+        },
+        80 => unsafe {
+            nzbget_rs_nzb_slot(p, 2, 1, 0);
+        },
+        95 => {
+            files(33);
+        }
+        107 => unsafe {
+            nzbget_rs_nzb_slot(p, 4, 1, a2 as isize as usize);
+        },
+        111 => {
+            coll(5);
+        }
+        112 => {
+            files(27);
+        }
+        113 => {
+            files(7);
+        }
+        _ => return false,
+    }
+    true
+}
+
+/// A collection's list and text ops (host op 31), as the C++ host did them;
+/// None for the sub-ops the host still serves (3, 16, 22).
+///
+/// # Safety
+/// `p` is a live collection, `p2` one too where the op names it; output
+/// arrays are large enough for the op.
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn host_coll_op(
+    p: *const NzbScalars,
+    a1: c_int,
+    a2: c_int,
+    p2: usize,
+    s1: *const c_char,
+    s2: *const c_char,
+    ints: *mut c_int,
+    strs: *mut *const c_char,
+) -> Option<usize> {
+    let np: *const NzbScalars = std::ptr::null();
+    let ns: *const c_char = std::ptr::null();
+    let ni: *mut c_int = std::ptr::null_mut();
+    let nstr: *mut *const c_char = std::ptr::null_mut();
+    let empty = c"".as_ptr();
+    let or_empty = |s: *const c_char| if s.is_null() { empty } else { s };
+    let other = p2 as *const NzbScalars;
+    let coll = |op, a2, other, s1, s2, ints, strs| unsafe {
+        nzbget_rs_nzb_coll(p, op, a2, other, s1, s2, ints, strs)
+    };
+    let files = |op, a2, s1, s2, strs| unsafe {
+        nzbget_rs_nzb_files(
+            p,
+            op,
+            a2,
+            np,
+            s1,
+            s2,
+            ni,
+            std::ptr::null_mut(),
+            strs,
+            std::ptr::null(),
+        )
+    };
+    let log_buffer = || crate::options::active_options().map_or(0, |o| o.scalars().log_buffer);
+    let now = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as c_int)
+    };
+    Some(match a1 {
+        0 => usize::from(coll(0, 0, np, s1, ns, ni, strs) != 0),
+        1 => {
+            coll(1, 0, np, s1, s2, ni, nstr);
+            0
+        }
+        2 => {
+            coll(2, 0, other, ns, ns, ni, nstr);
+            0
+        }
+        4 => usize::from(coll(20, a2, np, ns, ns, ni, nstr) != 0),
+        5 => {
+            coll(21, a2, np, ns, ns, ni, nstr);
+            1
+        }
+        6 | 7 => {
+            unsafe { *strs = nzbget_rs_nzb_text(p, if a1 == 6 { 8 } else { 9 }) };
+            0
+        }
+        8 => {
+            if a2 < 0 {
+                return Some(coll(3, 0, np, ns, ns, ni, nstr) as usize);
+            }
+            coll(4, a2, np, ns, ns, ni, strs);
+            0
+        }
+        9 => {
+            if a2 < 0 {
+                return Some(coll(40, 0, np, ns, ns, ni, nstr) as usize);
+            }
+            coll(42, a2, np, ns, ns, ints, nstr);
+            0
+        }
+        10 => {
+            coll(10, a2, np, or_empty(s1), ns, ni, nstr);
+            0
+        }
+        11 => usize::from(files(4, 0, or_empty(s1), or_empty(s2), nstr) != 0),
+        12 => unsafe { nzbget_rs_nzb_slot(p, 2, 0, 0) },
+        13 => {
+            files(32, 0, or_empty(s1), ns, nstr);
+            0
+        }
+        14 => {
+            unsafe { nzbget_rs_nzb_set_text(p, 9, or_empty(s1), -1) };
+            0
+        }
+        15 => {
+            let lim = [now(), log_buffer()];
+            unsafe { nzbget_rs_nzb_msgs(p, 3, 0, other, ns, lim.as_ptr(), None, 0) };
+            0
+        }
+        17 => {
+            if a2 < 0 {
+                return Some(coll(11, 0, np, ns, ns, ni, nstr) as usize);
+            }
+            coll(12, a2, np, ns, ns, ints, strs);
+            0
+        }
+        18 => {
+            if a2 < 0 {
+                return Some(files(30, 0, ns, ns, nstr) as usize);
+            }
+            unsafe { *strs = empty };
+            files(31, a2, ns, ns, strs);
+            0
+        }
+        19 => {
+            if a2 == 0 {
+                coll(44, 0, np, ns, ns, ints, nstr);
+            } else {
+                coll(48, 0, np, ns, ns, ni, nstr);
+            }
+            0
+        }
+        20 => {
+            let visit: MsgVisit = unsafe { std::mem::transmute::<*const c_char, MsgVisit>(s1) };
+            unsafe { nzbget_rs_nzb_msgs(p, 4, 0, np, ns, ints, visit, p2) };
+            0
+        }
+        21 => {
+            if a2 < 0 {
+                return Some(coll(41, 0, np, ns, ns, ni, nstr) as usize);
+            }
+            coll(43, a2, np, ns, ns, ints, nstr);
+            0
+        }
+        3 | 16 | 22 => return None,
+        _ => 0,
+    })
+}
+
+/// Host handles kept with a collection: 0 file list, 1 post-processing info,
+/// 2 direct-unpack job, 3 live-repair job, 4 message count. The host owns
+/// what they point to. set != 0 stores v; returns the (previous) value.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_nzb_slot(
+    p: *const NzbScalars,
+    id: c_int,
+    set: c_int,
+    v: usize,
+) -> usize {
+    use std::sync::atomic::Ordering::SeqCst;
+    let Some(slot) = usize::try_from(id).ok().and_then(|i| data(p).slots.get(i)) else {
+        return 0;
+    };
+    if set != 0 {
+        slot.swap(v, SeqCst)
+    } else {
+        slot.load(SeqCst)
+    }
+}
+
+/// Called once per message, oldest first: (ctx, id, kind, time, text).
+pub type MsgVisit = Option<unsafe extern "C" fn(usize, c_int, c_int, c_int, *const c_char)>;
+
+/// A collection's message log. The caller prints; this keeps the messages.
+///  0 add kind a2, text s1, time ints[0]; keep at most ints[1] when > 0;
+///    the id comes from the collection's idMessageGen; returns the count
+///  1 count; 2 clear;
+///  3 add p2's messages (fresh ids, time now in ints[0], limit ints[1]);
+///  4 visit messages: from id ints[0] when > 0, else the last ints[1] when
+///    > 0, else none.
+/// cachedMessageCount follows every change.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_nzb_msgs(
+    p: *const NzbScalars,
+    op: c_int,
+    a2: c_int,
+    p2: *const NzbScalars,
+    s1: *const c_char,
+    ints: *const c_int,
+    visit: MsgVisit,
+    ctx: usize,
+) -> i64 {
+    let copied: Vec<(i32, CString)> = if op == 3 && !p2.is_null() && p2 != p {
+        let o = data(p2).msgs.lock().unwrap_or_else(|e| e.into_inner());
+        o.iter().map(|m| (m.1, m.3.clone())).collect()
+    } else {
+        Vec::new()
+    };
+    let mut m = data(p).msgs.lock().unwrap_or_else(|e| e.into_inner());
+    // the scalars are C++-owned plain memory; these two fields change only
+    // under this lock
+    let sp = p.cast_mut();
+    let int = |k: usize| unsafe { *ints.add(k) };
+    let push = |m: &mut std::collections::VecDeque<_>, kind: i32, text: CString| unsafe {
+        let id = (*sp).idMessageGen.wrapping_add(1);
+        (*sp).idMessageGen = id;
+        m.push_back((id as u32, kind, i64::from(int(0)), text));
+        let limit = int(1);
+        while limit > 0 && m.len() > limit as usize {
+            m.pop_front();
+        }
+    };
+    let ret = match op {
+        0 => {
+            push(&mut m, a2, owned(s1));
+            m.len() as i64
+        }
+        1 => return m.len() as i64,
+        2 => {
+            m.clear();
+            0
+        }
+        3 => {
+            for (kind, text) in copied {
+                push(&mut m, kind, text);
+            }
+            0
+        }
+        4 => {
+            let Some(f) = visit else { return 0 };
+            let sz = m.len();
+            let mut start = sz;
+            let (from_id, last) = (int(0), int(1));
+            if last > 0 {
+                start = sz - (last as usize).min(sz);
+            }
+            if from_id > 0 && sz > 0 {
+                start = (i64::from(from_id) - i64::from(m[0].0)).max(0) as usize;
+            }
+            for e in m.iter().skip(start) {
+                unsafe { f(ctx, e.0 as c_int, e.1, e.2 as c_int, e.3.as_ptr()) };
+            }
+            return 0;
+        }
+        _ => return 0,
+    };
+    unsafe { (*sp).cachedMessageCount = m.len() as i32 };
+    ret
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -576,6 +1429,249 @@ mod tests {
             assert_eq!(&ints[..3], &[1, 5, 2]);
             nzbget_rs_nzb_scalars_free(p);
             nzbget_rs_nzb_scalars_free(q);
+        }
+    }
+
+    #[test]
+    fn completed_files_and_jobs() {
+        let p = nzbget_rs_nzb_scalars_new();
+        let q = nzbget_rs_nzb_scalars_new();
+        let np: *const NzbScalars = std::ptr::null();
+        let ns: *const c_char = std::ptr::null();
+        let mut ints = [0 as c_int; 5];
+        let mut i64s = [0i64; 4];
+        let mut strs: [*const c_char; 4];
+        unsafe {
+            let call = |n,
+                        op,
+                        a2,
+                        p2,
+                        s1,
+                        s2,
+                        raw: *const i64,
+                        ints: &mut [c_int; 5],
+                        i64s: &mut [i64; 4],
+                        strs: &mut [*const c_char; 4]| {
+                nzbget_rs_nzb_files(
+                    n,
+                    op,
+                    a2,
+                    p2,
+                    s1,
+                    s2,
+                    ints.as_mut_ptr(),
+                    i64s.as_mut_ptr(),
+                    strs.as_mut_ptr(),
+                    raw,
+                )
+            };
+            let nr: *const i64 = std::ptr::null();
+            ints[..4].copy_from_slice(&[5, 3, 77, 0]);
+            strs = [
+                c"a.r00".as_ptr(),
+                c"".as_ptr(),
+                c"h".as_ptr(),
+                c"set".as_ptr(),
+            ];
+            call(q, 2, 0, np, ns, ns, nr, &mut ints, &mut i64s, &mut strs);
+            assert_eq!(
+                call(p, 8, 0, q, ns, ns, nr, &mut ints, &mut i64s, &mut strs),
+                0
+            );
+            assert_eq!(
+                call(q, 0, 0, np, ns, ns, nr, &mut ints, &mut i64s, &mut strs),
+                0
+            );
+            assert_eq!(
+                call(p, 0, 0, np, ns, ns, nr, &mut ints, &mut i64s, &mut strs),
+                1
+            );
+            assert_eq!(
+                call(
+                    p,
+                    4,
+                    0,
+                    np,
+                    c"a.r00".as_ptr(),
+                    c"b.r00".as_ptr(),
+                    nr,
+                    &mut ints,
+                    &mut i64s,
+                    &mut strs
+                ),
+                1
+            );
+            ints[0] = 2;
+            call(p, 5, 5, np, ns, ns, nr, &mut ints, &mut i64s, &mut strs);
+            call(p, 1, 0, np, ns, ns, nr, &mut ints, &mut i64s, &mut strs);
+            assert_eq!(&ints[..4], &[5, 2, 0, 77]);
+            assert_eq!(CStr::from_ptr(strs[0]).to_bytes(), b"b.r00");
+            assert_eq!(CStr::from_ptr(strs[1]).to_bytes(), b"a.r00");
+            ints[0] = 1;
+            assert_eq!(
+                call(p, 5, 5, np, ns, ns, nr, &mut ints, &mut i64s, &mut strs),
+                1
+            );
+            assert_eq!(
+                call(p, 5, 5, np, ns, ns, nr, &mut ints, &mut i64s, &mut strs),
+                0
+            );
+
+            let holes = [10i64, 5, 40, 7];
+            ints[..3].copy_from_slice(&[9, 4, 1]);
+            i64s = [100, 30, 2, 0xabc];
+            call(
+                p,
+                23,
+                2,
+                np,
+                c"m.mkv".as_ptr(),
+                ns,
+                holes.as_ptr(),
+                &mut ints,
+                &mut i64s,
+                &mut strs,
+            );
+            assert_eq!(
+                call(p, 20, 0, np, ns, ns, nr, &mut ints, &mut i64s, &mut strs),
+                1
+            );
+            call(p, 21, 0, np, ns, ns, nr, &mut ints, &mut i64s, &mut strs);
+            assert_eq!((ints[0], i64s[0], i64s[1], i64s[2]), (9, 100, 12, 32));
+            assert_eq!(
+                call(p, 24, 0, np, ns, ns, nr, &mut ints, &mut i64s, &mut strs),
+                0
+            );
+            assert_eq!(
+                call(p, 24, 0, np, ns, ns, nr, &mut ints, &mut i64s, &mut strs),
+                1
+            );
+            i64s[0] = 200;
+            ints[1] = 1;
+            call(
+                p,
+                26,
+                0,
+                np,
+                ns,
+                ns,
+                holes.as_ptr(),
+                &mut ints,
+                &mut i64s,
+                &mut strs,
+            );
+            call(p, 22, 0, np, ns, ns, nr, &mut ints, &mut i64s, &mut strs);
+            assert_eq!(&ints[..5], &[9, 4, 1, 1, 1]);
+            assert_eq!(i64s, [200, 30, 2, 0xabc]);
+            assert_eq!(*strs[1].cast::<[i64; 2]>(), [10, 5]);
+            call(p, 25, 0, np, ns, ns, nr, &mut ints, &mut i64s, &mut strs);
+            assert_eq!(
+                call(p, 20, 0, np, ns, ns, nr, &mut ints, &mut i64s, &mut strs),
+                0
+            );
+            nzbget_rs_nzb_scalars_free(p);
+            nzbget_rs_nzb_scalars_free(q);
+        }
+    }
+
+    #[test]
+    fn message_log() {
+        unsafe extern "C" fn collect(
+            ctx: usize,
+            id: c_int,
+            kind: c_int,
+            _t: c_int,
+            text: *const c_char,
+        ) {
+            let v = unsafe { &mut *(ctx as *mut Vec<(i32, i32, Vec<u8>)>) };
+            v.push((
+                id,
+                kind,
+                unsafe { CStr::from_ptr(text) }.to_bytes().to_vec(),
+            ));
+        }
+        let p = nzbget_rs_nzb_scalars_new();
+        let q = nzbget_rs_nzb_scalars_new();
+        let np: *const NzbScalars = std::ptr::null();
+        let ns: *const c_char = std::ptr::null();
+        unsafe {
+            let lim = [100, 2];
+            nzbget_rs_nzb_msgs(p, 0, 0, np, c"one".as_ptr(), lim.as_ptr(), None, 0);
+            nzbget_rs_nzb_msgs(p, 0, 1, np, c"two".as_ptr(), lim.as_ptr(), None, 0);
+            assert_eq!(
+                nzbget_rs_nzb_msgs(p, 0, 2, np, c"three".as_ptr(), lim.as_ptr(), None, 0),
+                2
+            );
+            assert_eq!((*p).cachedMessageCount, 2);
+            assert_eq!((*p).idMessageGen, 3);
+            let mut got: Vec<(i32, i32, Vec<u8>)> = Vec::new();
+            let all = [0, 10];
+            nzbget_rs_nzb_msgs(
+                p,
+                4,
+                0,
+                np,
+                ns,
+                all.as_ptr(),
+                Some(collect),
+                &mut got as *mut _ as usize,
+            );
+            assert_eq!(
+                got,
+                vec![(2, 1, b"two".to_vec()), (3, 2, b"three".to_vec())]
+            );
+            got.clear();
+            let from = [3, 0];
+            nzbget_rs_nzb_msgs(
+                p,
+                4,
+                0,
+                np,
+                ns,
+                from.as_ptr(),
+                Some(collect),
+                &mut got as *mut _ as usize,
+            );
+            assert_eq!(got.len(), 1);
+            let nolimit = [100, 0];
+            nzbget_rs_nzb_msgs(q, 3, 0, p, ns, nolimit.as_ptr(), None, 0);
+            assert_eq!(
+                nzbget_rs_nzb_msgs(q, 1, 0, np, ns, nolimit.as_ptr(), None, 0),
+                2
+            );
+            assert_eq!((*q).idMessageGen, 2);
+            nzbget_rs_nzb_msgs(p, 2, 0, np, ns, nolimit.as_ptr(), None, 0);
+            assert_eq!((*p).cachedMessageCount, 0);
+            nzbget_rs_nzb_scalars_free(p);
+            nzbget_rs_nzb_scalars_free(q);
+        }
+    }
+
+    #[test]
+    fn post_state_and_lists() {
+        let ns: *const c_char = std::ptr::null();
+        let mut out = ns;
+        unsafe {
+            let p = nzbget_rs_post_new();
+            nzbget_rs_post_op(p, 1, 14, 750, ns, &mut out);
+            assert_eq!(nzbget_rs_post_op(p, 0, 14, 0, ns, &mut out), 750);
+            assert_eq!(nzbget_rs_post_op(p, 0, 99, 0, ns, &mut out), 0);
+            nzbget_rs_post_op(p, 11, 0, 0, c"Unpacking".as_ptr(), &mut out);
+            let b = nzbget_rs_post_label(p);
+            assert_eq!(
+                std::slice::from_raw_parts(b.data.cast::<u8>(), b.len),
+                b"Unpacking"
+            );
+            crate::ffi::nzbget_rs_free(b);
+            nzbget_rs_post_op(p, 22, 0, 0, c"a.par2".as_ptr(), &mut out);
+            assert_eq!(nzbget_rs_post_op(p, 20, 0, 0, ns, &mut out), 1);
+            assert_eq!(nzbget_rs_post_op(p, 21, 0, 0, ns, &mut out), 0);
+            assert_eq!(CStr::from_ptr(out).to_bytes(), b"a.par2");
+            assert_eq!(nzbget_rs_post_op(p, 31, 0, 0, ns, &mut out), -1);
+            nzbget_rs_post_op(p, 32, 0, 0, c"x.rar".as_ptr(), &mut out);
+            nzbget_rs_post_op(p, 33, 0, 0, ns, &mut out);
+            assert_eq!(nzbget_rs_post_op(p, 30, 0, 0, ns, &mut out), 0);
+            nzbget_rs_post_free(p);
         }
     }
 }

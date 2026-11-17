@@ -74,17 +74,15 @@ template<typename Func>
 bool WithNzbInfo(int id, Func&& func)
 {
 	GuardedDownloadQueue queueGuard = DownloadQueue::Guard();
-	for (const auto& nzb : *queueGuard->GetQueue())
+	for (NzbInfo* nzbInfo : *queueGuard->GetQueue())
 	{
-		NzbInfo* nzbInfo = nzb.get();
 		if (nzbInfo->GetId() == id)
 		{
 			return func(nzbInfo);
 		}
 	}
-	for (const auto& history : *queueGuard->GetHistory())
+	for (HistoryInfo* historyInfo : *queueGuard->GetHistory())
 	{
-		HistoryInfo* historyInfo = history.get();
 		if (historyInfo->GetNzbInfo() && historyInfo->GetNzbInfo()->GetId() == id)
 		{
 			return func(historyInfo->GetNzbInfo());
@@ -398,7 +396,7 @@ BOOST_AUTO_TEST_CASE(DirectUnpackParFailureStillFinalizesUnpack)
 			{
 				return info->GetDirectUnpackStatus() == NzbInfo::nsSuccess &&
 					info->GetUnpackThread() == nullptr && info->GetPostInfo() &&
-					!info->GetPostInfo()->GetExtractedArchives()->empty();
+					info->GetPostInfo()->GetExtractedArchiveCount() > 0;
 			});
 		}));
 		BOOST_REQUIRE(fs::exists(workPath / "_unpack/testfile3.dat"));

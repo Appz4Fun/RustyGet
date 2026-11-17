@@ -1084,26 +1084,15 @@ where
             ) {
                 Ok(summary) => return Ok(summary),
                 Err(crate::progressive_unpack::Error::Failed(f)) => return Err(f.to_string()),
-                Err(crate::progressive_unpack::Error::Unsupported(why)) if rar4 => {
-                    tracking_cb(
-                        4,
-                        &format!("Unrar: using the RAR 1.5-4.x decoder ({})", why.0),
-                    );
-                }
+                // zipfast decodes every RAR version (1.5 to 5, PPMd, the standard VM filters,
+                // solid sets, encryption); what it still refuses has no other decoder here.
                 Err(crate::progressive_unpack::Error::Unsupported(why)) => {
-                    let msg = format!("Unrar: unsupported RAR5 archive: {}", why.0);
+                    let version = if rar4 { "RAR 1.5-4.x" } else { "RAR5" };
+                    let msg = format!("Unrar: unsupported {version} archive: {}", why.0);
                     tracking_cb(1, &msg);
                     return Err(msg);
                 }
             }
-            return crate::archive_native::extract_rar4_cancellable(
-                archive_path,
-                output_dir,
-                password,
-                overwrite_mode,
-                &mut tracking_cb,
-                is_cancelled,
-            );
         }
     }
 
@@ -1243,7 +1232,10 @@ pub fn may_be_archive_volume(fname: &[u8]) -> bool {
     if let Some(dot) = fname.iter().rposition(|&b| b == b'.') {
         let ext = &fname[dot + 1..];
         // .z01 ... split ZIP parts.
-        if ext.len() == 3 && ext[0].eq_ignore_ascii_case(&b'z') && ext[1..].iter().all(u8::is_ascii_digit) {
+        if ext.len() == 3
+            && ext[0].eq_ignore_ascii_case(&b'z')
+            && ext[1..].iter().all(u8::is_ascii_digit)
+        {
             return true;
         }
     }
@@ -2327,6 +2319,19 @@ pub fn direct_unpack_cleanup(
     log_cb: &mut dyn FnMut(i32, &[u8]),
 ) {
     let sep = crate::paths::PATH_SEPARATOR;
+    // Persistent direct-unpack state is kept across a shutdown; a cancelled or failed direct
+    // unpack has no use for it.
+    if !unpack_dir.is_empty() {
+        let mut state = unpack_dir.to_vec();
+        state.push(sep);
+        state.extend_from_slice(crate::progressive_unpack::PERSISTENT_STATE_DIR.as_bytes());
+        let mut ops = crate::fsops::PosixFsOps;
+        let mut errmsg = Vec::new();
+        if crate::fsops::directory_exists(&state, &crate::fsops::posix_stat) {
+            let _ =
+                crate::fsdelete::delete_directory_with_content(&mut ops, &state, sep, &mut errmsg);
+        }
+    }
     if use_temp_unpack_dir
         && !unpack_dir.is_empty()
         && crate::fsops::directory_exists(unpack_dir, &crate::fsops::posix_stat)
@@ -4061,5 +4066,26 @@ mod tests {
         assert_eq!(st2, 4);
 
         let _ = std::fs::remove_dir_all(&work_dir);
+    }
+}
+
+#[cfg(test)]
+mod persistent_state_cleanup_tests {
+    #[test]
+    fn direct_unpack_cleanup_removes_persistent_state() {
+        let dir = std::env::temp_dir().join(format!("rg-du-cleanup-{}", std::process::id()));
+        let state = dir
+            .join(crate::progressive_unpack::PERSISTENT_STATE_DIR)
+            .join("abc/out");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join("movie.mkv"), b"x").unwrap();
+        std::fs::write(dir.join("kept.txt"), b"y").unwrap();
+        let bytes = dir.as_os_str().as_encoded_bytes().to_vec();
+        super::direct_unpack_cleanup(false, &bytes, false, b"", &mut |_, _| {});
+        assert!(!dir
+            .join(crate::progressive_unpack::PERSISTENT_STATE_DIR)
+            .exists());
+        assert!(dir.join("kept.txt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

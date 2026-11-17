@@ -1380,12 +1380,15 @@ impl NzbgetRsQueueCoordinator {
         }
         let ctx_addr = host.ctx as usize;
         let cb = host.cb;
+        // keep a mock host a mock: only the real host answers ops in Rust
+        let use_active = host.use_active;
         let stopped = std::sync::Arc::clone(&self.par_loaders_stopped);
         if let Ok(handle) = std::thread::Builder::new().spawn(move || {
-            let loader_host = crate::queuesubsys_host::QueueSubsysHost::new(
-                ctx_addr as *mut std::ffi::c_void,
+            let loader_host = crate::queuesubsys_host::QueueSubsysHost {
+                ctx: ctx_addr as *mut std::ffi::c_void,
                 cb,
-            );
+                use_active,
+            };
             crate::directrenamer::run_par_loader(loader_host, &stopped, nzb_id, par_files);
         }) {
             alive.push(handle);
@@ -2083,12 +2086,14 @@ impl NzbgetRsQueueCoordinator {
         host.nzb_set_int(
             dest_ptr,
             crate::queuesubsys_host::NZB_INT_DUPE_RECOVERED_HOLES,
-            dest.dupe_recovered_holes.saturating_add(src.dupe_recovered_holes),
+            dest.dupe_recovered_holes
+                .saturating_add(src.dupe_recovered_holes),
         );
         host.nzb_set_i64(
             dest_ptr,
             crate::queuesubsys_host::NZB_I64_DUPE_RECOVERED_BYTES,
-            dest.dupe_recovered_bytes.saturating_add(src.dupe_recovered_bytes),
+            dest.dupe_recovered_bytes
+                .saturating_add(src.dupe_recovered_bytes),
         );
 
         host.disk_discard_files(src_ptr);
@@ -3850,8 +3855,11 @@ impl NzbgetRsQueueCoordinator {
                         &filename,
                         file_status == crate::queuesubsys_host::CF_SUCCESS,
                     ) {
-                        let message = Self::live_par_deferred_message(&error)
-                            .replacen("catch-up", "completion", 1);
+                        let message = Self::live_par_deferred_message(&error).replacen(
+                            "catch-up",
+                            "completion",
+                            1,
+                        );
                         host.nzb_print_message(
                             nzb.ptr,
                             crate::queuesubsys_host::MK_DETAIL,
@@ -4630,24 +4638,22 @@ impl NzbgetRsQueueCoordinator {
         if let Some((_, backup_nzb)) = backup {
             // A stretch of lost articles (whole volumes included) that a twin or a
             // borrowable alt can lend is borrowed too, keeping the extraction that runs.
-            let lendable = alt_covers_lost_articles(
-                false,
-                opts.dupe_article_fallback == crate::queuesubsys_host::DAF_LIVE
-                    && opts.direct_unpack,
-                crate::donorkind::DonorKind::from_param(
-                    host.nzb_get_param(nzb.ptr, crate::donorkind::KIND_PARAM).as_deref(),
-                ),
-                crate::donorkind::DonorKind::from_param(
-                    host.nzb_get_param(backup_nzb.ptr, crate::donorkind::KIND_PARAM)
-                        .as_deref(),
-                ),
-                nzb.health,
-                crate::postproc::dead_volume_borrow_underway(nzb.id),
-            ) && !download_hopeless(
-                nzb.total_articles,
-                nzb.current_success_articles,
-                failed,
-            );
+            let lendable =
+                alt_covers_lost_articles(
+                    false,
+                    opts.dupe_article_fallback == crate::queuesubsys_host::DAF_LIVE
+                        && opts.direct_unpack,
+                    crate::donorkind::DonorKind::from_param(
+                        host.nzb_get_param(nzb.ptr, crate::donorkind::KIND_PARAM)
+                            .as_deref(),
+                    ),
+                    crate::donorkind::DonorKind::from_param(
+                        host.nzb_get_param(backup_nzb.ptr, crate::donorkind::KIND_PARAM)
+                            .as_deref(),
+                    ),
+                    nzb.health,
+                    crate::postproc::dead_volume_borrow_underway(nzb.id),
+                ) && !download_hopeless(nzb.total_articles, nzb.current_success_articles, failed);
             if !light_damage
                 && !lendable
                 && crate::dupecoord::dupe_failover_warranted_inline(
@@ -4832,12 +4838,12 @@ impl NzbgetRsQueueCoordinator {
                 .as_deref(),
         );
         let own_kind = crate::donorkind::DonorKind::from_param(
-            host.nzb_get_param(nzb.ptr, crate::donorkind::KIND_PARAM).as_deref(),
+            host.nzb_get_param(nzb.ptr, crate::donorkind::KIND_PARAM)
+                .as_deref(),
         );
         if alt_covers_lost_articles(
             dead_rate,
-            opts.dupe_article_fallback == crate::queuesubsys_host::DAF_LIVE
-                && opts.direct_unpack,
+            opts.dupe_article_fallback == crate::queuesubsys_host::DAF_LIVE && opts.direct_unpack,
             own_kind,
             backup_kind,
             eval.projected,
@@ -6033,10 +6039,22 @@ pub(crate) fn note_dupe_par_article(
     let delta = if borrowed { 1 } else { -1 };
     let cur = host.nzb_get_param(nzb_ptr, PAR_ARTICLES_PARAM);
     let next = bumped_count(cur.as_deref(), delta);
-    host.nzb_set_param(nzb_ptr, PAR_ARTICLES_PARAM, Some(next.to_string().as_bytes()));
-    let mut files = par_files(host.nzb_get_param(nzb_ptr, PAR_FILES_PARAM).as_deref().unwrap_or(b""));
+    host.nzb_set_param(
+        nzb_ptr,
+        PAR_ARTICLES_PARAM,
+        Some(next.to_string().as_bytes()),
+    );
+    let mut files = par_files(
+        host.nzb_get_param(nzb_ptr, PAR_FILES_PARAM)
+            .as_deref()
+            .unwrap_or(b""),
+    );
     bump_par_file(&mut files, file_id, i64::from(delta));
-    host.nzb_set_param(nzb_ptr, PAR_FILES_PARAM, format_par_files(&files).as_deref());
+    host.nzb_set_param(
+        nzb_ptr,
+        PAR_FILES_PARAM,
+        format_par_files(&files).as_deref(),
+    );
 }
 
 /// Merge: the source's borrowed par2 articles and files move to the destination
@@ -6046,18 +6064,33 @@ fn merge_dupe_par_params(
     dest_ptr: usize,
     src_ptr: usize,
 ) {
-    let src_articles = bumped_count(host.nzb_get_param(src_ptr, PAR_ARTICLES_PARAM).as_deref(), 0);
+    let src_articles = bumped_count(
+        host.nzb_get_param(src_ptr, PAR_ARTICLES_PARAM).as_deref(),
+        0,
+    );
     if src_articles > 0 {
         let dest = host.nzb_get_param(dest_ptr, PAR_ARTICLES_PARAM);
         let total = bumped_count(dest.as_deref(), 0).saturating_add(src_articles);
-        host.nzb_set_param(dest_ptr, PAR_ARTICLES_PARAM, Some(total.to_string().as_bytes()));
+        host.nzb_set_param(
+            dest_ptr,
+            PAR_ARTICLES_PARAM,
+            Some(total.to_string().as_bytes()),
+        );
     }
     if let Some(src_files) = host.nzb_get_param(src_ptr, PAR_FILES_PARAM) {
-        let mut files = par_files(host.nzb_get_param(dest_ptr, PAR_FILES_PARAM).as_deref().unwrap_or(b""));
+        let mut files = par_files(
+            host.nzb_get_param(dest_ptr, PAR_FILES_PARAM)
+                .as_deref()
+                .unwrap_or(b""),
+        );
         for (id, n) in par_files(&src_files) {
             bump_par_file(&mut files, id, n);
         }
-        host.nzb_set_param(dest_ptr, PAR_FILES_PARAM, format_par_files(&files).as_deref());
+        host.nzb_set_param(
+            dest_ptr,
+            PAR_FILES_PARAM,
+            format_par_files(&files).as_deref(),
+        );
     }
 }
 
@@ -6149,7 +6182,10 @@ mod tests {
 
     #[test]
     fn par_files_parse_counts_and_skip_junk() {
-        assert_eq!(par_files(b"12:3, 15,x,,7:0,9:y,12:1"), vec![(12, 4), (15, 1)]);
+        assert_eq!(
+            par_files(b"12:3, 15,x,,7:0,9:y,12:1"),
+            vec![(12, 4), (15, 1)]
+        );
         assert_eq!(par_files(b""), Vec::<(i32, i64)>::new());
     }
 
@@ -6205,19 +6241,56 @@ mod tests {
     #[test]
     fn lost_articles_an_alt_can_lend_keep_the_download() {
         use crate::donorkind::DonorKind::*;
-        assert!(alt_covers_lost_articles(false, true, Borrowable, Borrowable, 952, false));
-        assert!(alt_covers_lost_articles(false, true, Unknown, Twin, 600, false));
+        assert!(alt_covers_lost_articles(
+            false, true, Borrowable, Borrowable, 952, false
+        ));
+        assert!(alt_covers_lost_articles(
+            false, true, Unknown, Twin, 600, false
+        ));
         // Mostly gone, no live borrowing, an unborrowable backup or download: fail over.
-        assert!(!alt_covers_lost_articles(true, true, Borrowable, Borrowable, 952, false));
-        assert!(!alt_covers_lost_articles(false, false, Borrowable, Borrowable, 952, false));
-        assert!(!alt_covers_lost_articles(false, true, Borrowable, Unborrowable, 952, false));
-        assert!(!alt_covers_lost_articles(false, true, Borrowable, Unknown, 952, false));
-        assert!(!alt_covers_lost_articles(false, true, Unborrowable, Borrowable, 952, false));
-        assert!(!alt_covers_lost_articles(false, true, Borrowable, Borrowable, 499, false));
+        assert!(!alt_covers_lost_articles(
+            true, true, Borrowable, Borrowable, 952, false
+        ));
+        assert!(!alt_covers_lost_articles(
+            false, false, Borrowable, Borrowable, 952, false
+        ));
+        assert!(!alt_covers_lost_articles(
+            false,
+            true,
+            Borrowable,
+            Unborrowable,
+            952,
+            false
+        ));
+        assert!(!alt_covers_lost_articles(
+            false, true, Borrowable, Unknown, 952, false
+        ));
+        assert!(!alt_covers_lost_articles(
+            false,
+            true,
+            Unborrowable,
+            Borrowable,
+            952,
+            false
+        ));
+        assert!(!alt_covers_lost_articles(
+            false, true, Borrowable, Borrowable, 499, false
+        ));
         // A backup of unknown kind lends once a borrow from it is underway, never otherwise.
-        assert!(alt_covers_lost_articles(false, true, Unknown, Unknown, 952, true));
-        assert!(!alt_covers_lost_articles(false, true, Unknown, Unborrowable, 952, true));
-        assert!(!alt_covers_lost_articles(true, true, Unknown, Unknown, 952, true));
+        assert!(alt_covers_lost_articles(
+            false, true, Unknown, Unknown, 952, true
+        ));
+        assert!(!alt_covers_lost_articles(
+            false,
+            true,
+            Unknown,
+            Unborrowable,
+            952,
+            true
+        ));
+        assert!(!alt_covers_lost_articles(
+            true, true, Unknown, Unknown, 952, true
+        ));
     }
 
     #[test]

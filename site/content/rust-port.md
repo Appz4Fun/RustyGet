@@ -9,7 +9,7 @@ lede = "RustyGet replaces NZBGet's C++ with Rust one module at a time, while the
 
 ## How the port works
 
-The Rust code lives in `rust/` as a library crate, `nzbget_rs`, that links into the `rustyget` binary. The remaining C++ calls it through the C interface declared in `rust/include/nzbget_rs.h`. Module by module, the program moved behind that interface, and today the C++ is little more than glue.
+The Rust code lives in `rust/`: the library crate `nzbget_rs` and the `rustyget` binary built from it by cargo. Module by module, the program moved from C++ into Rust behind a C interface, and once the last module moved, the C++ and that interface were deleted.
 
 <ol class="steps">
 <li><strong>Pick a module.</strong> Hot paths first, measured with real downloads. Whole modules are preferred over single functions.</li>
@@ -23,23 +23,15 @@ When a port finds a bug in the old code, the port keeps the bug, and the fix fol
 
 ## What's left
 
-On the main branch, about 222,000 lines of Rust in `rust/src/` do the work. What remains in C++:
+On the main branch, about 222,000 lines of Rust in `rust/src/` do the work, and no C++ is left: cargo builds the `rustyget` binary from Rust alone, with `rust/entry.rs` as its entry point. The last C++ files, the entry shim `daemon/main/rustyget.cpp`, the glue header `daemon/util/Util.h` and the C headers in `rust/include/`, are gone.
 
-| Code | Lines | What it is |
-|---|---|---|
-| `daemon/main/rustyget.cpp` | 308 | The program entry point, which hands over to Rust |
-| `daemon/util/Util.h` | 4,460 | Glue: the C++ classes and callbacks that still wrap Rust objects |
-| `rust/include/*.h` | 462 | C declarations of the Rust interface |
-| `tests/` | 772 | The daemon test runner and its test suites |
-| `rust/tests/*.cpp` | | Differential and ownership test harnesses |
-
-So the build still needs a C++20 compiler. Several dependencies are already gone, among them CMake, Boost, PAR2-Turbo, libxml2, zlib, ncurses, and the external `unrar` and `7z` programs. The binary links OpenSSL for TLS, and the Rust `zstd` crate builds the C zstd library. The macOS app in `platforms/macos/` is Objective-C.
+The build needs no C++ compiler. Several dependencies are already gone, among them CMake, Boost, PAR2-Turbo, libxml2, zlib, ncurses, and the external `unrar` and `7z` programs. The binary links OpenSSL for TLS, and the Rust `zstd` crate builds the C zstd library. The macOS app in `platforms/macos/` is Objective-C.
 
 The detailed inventories in the repository, [the migration status](https://github.com/Appz4Fun/RustyGet/blob/main/docs/RUST_MIGRATION_STATUS.md), [the caller boundary map](https://github.com/Appz4Fun/RustyGet/blob/main/docs/rust-migration/BOUNDARY_MAP.md), and [the dependency retirement audit](https://github.com/Appz4Fun/RustyGet/blob/main/docs/rust-migration/DEPENDENCY_RETIREMENT.md), date from before most of the C++ was removed, so they list far more open work than remains.
 
 ## Modules in Rust
 
-This table is generated from the crate's source on every build. Each module's first doc comment says what it does. The `ffi` module is the C interface that the C++ code calls.
+This table is generated from the crate's source on every build. Each module's first doc comment says what it does. The `ffi` module began as the C interface that the C++ code called.
 
 <!-- modules -->
 

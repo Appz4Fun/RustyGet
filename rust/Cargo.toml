@@ -4,10 +4,20 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.100"
 publish = false
+build = "build.rs"
 
 [lib]
 name = "nzbget_rs"
-crate-type = ["staticlib", "rlib"]
+crate-type = ["rlib"]
+
+# The daemon binary: rust/entry.rs owns `main` and links the tier check that
+# build.rs compiles (see rust/tiercheck.rs).
+[[bin]]
+name = "rustyget"
+path = "entry.rs"
+test = false
+bench = false
+doctest = false
 
 [dependencies]
 par-rs = { git = "https://github.com/xbmc4lyfe/par-rs", rev = "fa81b469f1a58187f89aef7ca4784fda88e44e20" }

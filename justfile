@@ -8,21 +8,18 @@ version := "27.0"
 default: build
 
 # Build rustyget (`profile` = "release" or "debug", `jobs` = max parallel jobs, capped at 3 per AGENTS.md).
+# Cargo builds the whole binary from Rust (rust/entry.rs is its `main`) into build/<profile>/rustyget.
 # `cpu` = the Rust target-cpu tier. Empty picks the supported floor for release builds
 # (x86-64-v3 on x86_64: Coffee Lake and newer; apple-m4 on Apple silicon) and the
 # compiler default for debug builds. "generic" forces the compiler default. A tier other
 # than the floor builds into build/<profile>-<cpu>/ so tiers can sit side by side.
 build profile="release" jobs="3" cpu="":
     #!/usr/bin/env python3
-    import concurrent.futures
-    import glob
-    import hashlib
     import os
     import platform
     import re
     import shutil
     import subprocess
-    import sys
 
     root = {{quote(root_dir)}}
     profile = {{quote(profile)}}
@@ -41,9 +38,7 @@ build profile="release" jobs="3" cpu="":
     cpu = cpu or default_cpu
     build_name = profile if cpu == default_cpu else f"{profile}-{cpu}"
     build_dir = os.path.join(root, "build", build_name)
-    obj_dir = os.path.join(build_dir, "obj")
     rust_target_dir = os.path.join(build_dir, "rust")
-    os.makedirs(obj_dir, exist_ok=True)
     os.makedirs(rust_target_dir, exist_ok=True)
 
     if system == "Darwin":
@@ -55,17 +50,23 @@ build profile="release" jobs="3" cpu="":
 
     env = os.environ.copy()
     env["CARGO_BUILD_JOBS"] = str(jobs)
-    cpu_flags = [] if cpu == "generic" else ["-C", f"target-cpu={cpu}"]
-    # The entry object stays at the compiler's default CPU and only learns the
-    # tier as a cfg, so its startup tier check can run on any CPU.
-    tier_cfg = [] if cpu == "generic" else ["--cfg", f'rustyget_tier="{cpu}"']
-    if cpu_flags:
-        env["RUSTFLAGS"] = " ".join([env.get("RUSTFLAGS", ""), *cpu_flags]).strip()
+    # The tier applies to every crate; rust/build.rs compiles the tier check
+    # for the default CPU so it can still run (and explain) on older CPUs.
+    if cpu != "generic":
+        env["RUSTFLAGS"] = " ".join([env.get("RUSTFLAGS", ""), "-C", f"target-cpu={cpu}"]).strip()
 
-    print(f"[1/4] Building Rust staticlib ({cargo_profile}, {rust_target}, cpu={cpu}, jobs={jobs})...")
+    # On macOS use the same OpenSSL the C++ build linked (Homebrew openssl@3
+    # first), so openssl-sys compiles and links against one library.
+    if system == "Darwin" and not env.get("OPENSSL_DIR"):
+        for prefix in ("/opt/homebrew/opt/openssl@3", "/opt/homebrew/opt/openssl", "/usr/local/opt/openssl@3", "/usr/local/opt/openssl"):
+            if os.path.isdir(os.path.join(prefix, "include")):
+                env["OPENSSL_DIR"] = prefix
+                break
+
+    print(f"[1/2] Building rustyget ({cargo_profile}, {rust_target}, cpu={cpu}, jobs={jobs})...")
     subprocess.run(
         [
-            "cargo", "rustc", "--lib", "--locked",
+            "cargo", "build", "--bin", "rustyget", "--locked",
             "--profile", cargo_profile,
             "--target", rust_target,
             "--manifest-path", os.path.join(root, "rust", "Cargo.toml"),
@@ -75,149 +76,13 @@ build profile="release" jobs="3" cpu="":
         env=env,
         check=True,
     )
-    rust_lib = os.path.join(rust_target_dir, rust_target, cargo_profile_dir, "libnzbget_rs.a")
-
-    entry_obj = os.path.join(rust_target_dir, "nzbget_rs_entry.o")
-    entry_src = os.path.join(root, "rust", "entry.rs")
-    # Rebuild when the source or the tier changed (the tier is baked in as a cfg).
-    entry_stamp = entry_obj + ".tier"
-    entry_tier_stale = not os.path.exists(entry_stamp) or open(entry_stamp).read() != cpu
-    if entry_tier_stale or not os.path.exists(entry_obj) or os.path.getmtime(entry_src) > os.path.getmtime(entry_obj):
-        print("[2/4] Building Rust entry point...")
-        subprocess.run(
-            [
-                "rustc", "--crate-name", "nzbget_rs_entry", "--crate-type", "lib",
-                "--emit=obj", "-C", "panic=abort", "-C", "opt-level=2", *tier_cfg,
-                "--target", rust_target, entry_src, "-o", entry_obj,
-            ],
-            cwd=os.path.join(root, "rust"),
-            env=env,
-            check=True,
-        )
-        with open(entry_stamp, "w") as f:
-            f.write(cpu)
-    else:
-        print("[2/4] Rust entry point up to date.")
-
-    cxx = env.get("CXX") or ("clang++" if shutil.which("clang++") else "g++")
-    ccache = shutil.which("ccache")
-
-    # Resolve OpenSSL include/lib flags
-    openssl_cflags = []
-    openssl_ldflags = ["-lssl", "-lcrypto"]
-    if system == "Darwin":
-        for prefix in ("/opt/homebrew/opt/openssl@3", "/opt/homebrew/opt/openssl", "/usr/local/opt/openssl@3", "/usr/local/opt/openssl"):
-            if os.path.isdir(os.path.join(prefix, "include")):
-                openssl_cflags = [f"-I{os.path.join(prefix, 'include')}"]
-                openssl_ldflags = [f"-L{os.path.join(prefix, 'lib')}", "-lssl", "-lcrypto"]
-                break
-    elif shutil.which("pkg-config"):
-        try:
-            cflags_out = subprocess.check_output(["pkg-config", "--cflags", "openssl"], text=True).strip()
-            libs_out = subprocess.check_output(["pkg-config", "--libs", "openssl"], text=True).strip()
-            if cflags_out:
-                openssl_cflags = cflags_out.split()
-            if libs_out:
-                openssl_ldflags = libs_out.split()
-        except Exception:
-            pass
-
-    daemon_Comparison_dirs = [
-        "connect", "extension", "feed", "frontend", "main",
-        "nntp", "postprocess", "queue", "dupesearch",
-        "remote", "util",
-    ]
-    include_flags = [f"-I{root}", f"-I{os.path.join(root, 'rust', 'include')}"]
-    for d in daemon_Comparison_dirs:
-        include_flags.append(f"-I{os.path.join(root, 'daemon', d)}")
-    include_flags.extend(openssl_cflags)
-
-    common_flags = [
-        "-std=c++20",
-        "-fvisibility=hidden",
-        "-fvisibility-inlines-hidden",
-        "-D_FILE_OFFSET_BITS=64",
-        "-D_LARGEFILE_SOURCE",
-        "-D_LARGE_FILES",
-        "-DNZBGET_USE_RUST=1",
-    ]
-    if is_debug:
-        common_flags.extend(["-O0", "-g", "-DDEBUG"])
-    else:
-        common_flags.extend([
-            "-O2", "-DNDEBUG", "-DOPENSSL_SUPPRESS_DEPRECATED",
-            "-fno-rtti", "-ffunction-sections", "-fdata-sections",
-        ])
-
-    def needs_rebuild(src, obj, depfile):
-        if not os.path.exists(obj) or not os.path.exists(depfile):
-            return True
-        obj_mtime = os.path.getmtime(obj)
-        if os.path.getmtime(src) > obj_mtime:
-            return True
-        try:
-            with open(depfile, "r", encoding="utf-8") as f:
-                content = f.read().replace("\\\n", " ")
-            parts = content.split(":", 1)
-            if len(parts) == 2:
-                for dep in parts[1].split():
-                    if not os.path.exists(dep) or os.path.getmtime(dep) > obj_mtime:
-                        return True
-        except Exception:
-            return True
-        return False
-
-    cpp_sources = sorted(glob.glob(os.path.join(root, "daemon", "*", "*.cpp")))
-    lib_sources = [s for s in cpp_sources if not s.endswith(os.path.join("daemon", "main", "rustyget.cpp"))]
-    main_source = os.path.join(root, "daemon", "main", "rustyget.cpp")
-
-    def obj_path_for(src):
-        rel = os.path.relpath(src, root).replace(os.sep, "__")
-        return os.path.join(obj_dir, rel + ".o")
-
-    def compile_one(src):
-        obj = obj_path_for(src)
-        dep = obj + ".d"
-        if not needs_rebuild(src, obj, dep):
-            return obj, False
-        cmd = ([ccache] if ccache else []) + [
-            cxx, *common_flags, *include_flags,
-            "-MMD", "-MF", dep, "-c", src, "-o", obj,
-        ]
-        subprocess.run(cmd, check=True)
-        return obj, True
-
-    print(f"[3/4] Compiling C++ daemon sources ({len(cpp_sources)} files, jobs={jobs})...")
-    all_objs = []
-    rebuilt_count = 0
-    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
-        futures = [pool.submit(compile_one, s) for s in lib_sources + [main_source]]
-        for fut in concurrent.futures.as_completed(futures):
-            obj, rebuilt = fut.result()
-            if rebuilt:
-                rebuilt_count += 1
-
-    lib_objs = [obj_path_for(s) for s in lib_sources]
-    main_obj = obj_path_for(main_source)
-
-    archive_path = os.path.join(build_dir, "librustyget.a")
-    if os.path.exists(archive_path):
-        os.remove(archive_path)
-    if lib_objs:
-        subprocess.run(["ar", "rcs", archive_path, *lib_objs], check=True)
 
     bin_path = os.path.join(build_dir, "rustyget")
-    link_flags = ["-pthread"]
-    if system == "Darwin":
-        link_flags.extend(["-Wl,-headerpad_max_install_names", "-Wl,-dead_strip", "-liconv", "-lresolv"])
-    else:
-        link_flags.extend(["-Wl,--gc-sections", "-Wl,-z,relro,-z,now", "-Wl,-z,noexecstack", "-ldl", "-lm"])
-
-    print(f"[4/4] Linking {bin_path}...")
-    subprocess.run(
-        [cxx, main_obj, entry_obj, *([archive_path] if lib_objs else []), rust_lib, *openssl_ldflags, *link_flags, "-o", bin_path],
-        check=True,
-    )
+    print(f"[2/2] Copying {bin_path}...")
+    built = os.path.join(rust_target_dir, rust_target, cargo_profile_dir, "rustyget")
+    tmp_path = bin_path + ".tmp"
+    shutil.copy2(built, tmp_path)
+    os.replace(tmp_path, bin_path)
     if not is_debug and shutil.which("strip"):
         subprocess.run(["strip", bin_path], check=True)
     print(f"Built {bin_path}")
@@ -245,7 +110,7 @@ release-tiers jobs="3":
 debug jobs="3":
     @just build debug {{jobs}}
 
-# Run all tests (Rust unit tests + C++ daemon/integration tests)
+# Run all tests (Rust unit tests + daemon end-to-end checks)
 test jobs="3": (test-rust jobs) (test-daemon jobs)
 
 # Run Rust library unit tests

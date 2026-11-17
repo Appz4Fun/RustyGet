@@ -27,10 +27,10 @@ Pull requests are squash-merged into a single signed commit.
 
 ## Port code to Rust
 
-Little C++ is left: the entry point in `daemon/main/rustyget.cpp` and the glue header `daemon/util/Util.h`. [Rust port status](rust-port.md#whats-left) lists what remains. The rules for moving it:
+No C++ is left: the daemon is built from Rust alone. [Rust port status](rust-port.md#whats-left) has the history. The rules ports followed, which still hold for changes:
 
 - A port keeps the behavior of the code it replaces, quirks included. If that code has a bug, the port keeps it, and the fix lands as its own commit.
-- Never move logic back into C++.
+- Never add C or C++ code to the daemon.
 - Measure before and after. Ports of hot paths report their speed-up.
 
 ## Tests

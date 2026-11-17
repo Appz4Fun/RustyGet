@@ -1,5 +1,5 @@
-# Required pre-merge check for main. Builds the Rust library and the C++ shim
-# daemon, then runs the Rust unit and integration tests, the daemon tests and a
+# Required pre-merge check for main. Builds the daemon (Rust only, with
+# cargo), then runs the Rust unit and integration tests, the daemon tests and a
 # short duplicate-recovery smoke on Linux and macOS. Branch protection requires
 # the aggregate job below, whose check name is exactly `build`.
 # No credentials are used; pull-request code runs with a read-only token.

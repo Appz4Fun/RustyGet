@@ -3344,8 +3344,6 @@ pub unsafe extern "C" fn nzbget_rs_alloc_buf(data: *const c_char, len: usize) ->
 struct BuildEnvRuntime {
     ssl_lib_name: CString,
     ssl_raw_version: CString,
-    tls_host_cb: crate::net::NzbgetRsConnHostFn,
-    write_stdout_cb: Option<unsafe extern "C" fn(*const c_char, usize, c_int)>,
 }
 
 static BUILD_FLAGS: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
@@ -3354,26 +3352,67 @@ static QUEUE_LOADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 #[cfg(unix)]
 static BUILD_ENV: std::sync::RwLock<Option<BuildEnvRuntime>> = std::sync::RwLock::new(None);
 
+/// The daemon's version (`VERSION`, also `version` in the justfile).
+pub(crate) const DAEMON_VERSION: &str = "27.0";
+
+/// Build flags: 1 debug build, 2 TLS disabled, 4 gzip disabled, 8 take the
+/// TLS version after the first space, 16 par-check disabled, 32 curses
+/// disabled. TLS, gzip, par-check and curses are always built in.
+const BUILD_FLAG_DEBUG: c_int = 1;
+const BUILD_FLAG_SSL_VERSION_AFTER_SPACE: c_int = 8;
+
+/// The TLS library's name and version text for SystemInfo, and whether the
+/// version is to be taken after the first space (a full "OpenSSL 1.1.1w ..."
+/// or "LibreSSL 3.9.0" text rather than OpenSSL 3's bare "3.5.0").
 #[cfg(unix)]
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_build_env_init(
-    flags: c_int,
-    version: *const c_char,
-    ssl_lib_name: *const c_char,
-    ssl_raw_version: *const c_char,
-    tls_host_cb: crate::net::NzbgetRsConnHostFn,
-    write_stdout_cb: Option<unsafe extern "C" fn(*const c_char, usize, c_int)>,
-) {
-    BUILD_FLAGS.store(flags, std::sync::atomic::Ordering::SeqCst);
-    let _ = BUILD_VERSION.set(to_nul_cvec(input(version)));
-    if let Ok(mut g) = BUILD_ENV.write() {
-        *g = Some(BuildEnvRuntime {
-            ssl_lib_name: to_nul_cvec(input(ssl_lib_name)),
-            ssl_raw_version: to_nul_cvec(input(ssl_raw_version)),
-            tls_host_cb,
-            write_stdout_cb,
-        });
+fn tls_library_version() -> (&'static [u8], Vec<u8>, bool) {
+    const OPENSSL_VERSION: c_int = 0;
+    const OPENSSL_FULL_VERSION_STRING: c_int = 7;
+    extern "C" {
+        fn OpenSSL_version(t: c_int) -> *const c_char;
     }
+    let text = |t: c_int| {
+        let p = unsafe { OpenSSL_version(t) };
+        if p.is_null() {
+            Vec::new()
+        } else {
+            unsafe { CStr::from_ptr(p) }.to_bytes().to_vec()
+        }
+    };
+    let full = text(OPENSSL_VERSION);
+    if full.starts_with(b"LibreSSL") {
+        (b"LibreSSL", full, true)
+    } else if openssl::version::number() >= 0x3000_0000 {
+        (b"OpenSSL", text(OPENSSL_FULL_VERSION_STRING), false)
+    } else {
+        (b"OpenSSL", full, true)
+    }
+}
+
+/// Sets the daemon's build environment once at start-up (the former C++
+/// `Util::Init`): the build flags, the version, the TLS library's version
+/// text, and with it the daemon's queue host.
+#[cfg(unix)]
+pub(crate) fn init_build_env() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let mut flags = 0;
+        if cfg!(debug_assertions) {
+            flags |= BUILD_FLAG_DEBUG;
+        }
+        let (ssl_lib, ssl_ver, after_space) = tls_library_version();
+        if after_space {
+            flags |= BUILD_FLAG_SSL_VERSION_AFTER_SPACE;
+        }
+        BUILD_FLAGS.store(flags, std::sync::atomic::Ordering::SeqCst);
+        let _ = BUILD_VERSION.set(unsafe { to_nul_cvec(DAEMON_VERSION.as_bytes()) });
+        if let Ok(mut g) = BUILD_ENV.write() {
+            *g = Some(BuildEnvRuntime {
+                ssl_lib_name: unsafe { to_nul_cvec(ssl_lib) },
+                ssl_raw_version: unsafe { to_nul_cvec(&ssl_ver) },
+            });
+        }
+    });
 }
 
 pub(crate) fn build_debug_enabled() -> bool {
@@ -3423,16 +3462,6 @@ pub(crate) fn tls_host_cb() -> crate::net::NzbgetRsConnHostFn {
     Some(crate::tlssock::conn_host)
 }
 
-/// The C++ callback registered at start-up. It now answers only operation 2:
-/// whether the current C++ `Thread` was stopped.
-#[cfg(unix)]
-pub(crate) fn cpp_thread_host_cb() -> crate::net::NzbgetRsConnHostFn {
-    BUILD_ENV
-        .read()
-        .ok()
-        .and_then(|g| g.as_ref().and_then(|e| e.tls_host_cb))
-}
-
 #[cfg(unix)]
 #[no_mangle]
 pub extern "C" fn nzbget_rs_tls_init() {
@@ -3473,23 +3502,25 @@ pub(crate) fn stop_ssl_thread() {
     }
 }
 
+/// Writes to the C library's stdout (which `printf` also uses, so output
+/// keeps its order), flushing when asked. Nothing is written before
+/// start-up set the build environment (nor in unit tests).
 #[cfg(unix)]
 pub(crate) fn write_stdout_bytes(bytes: &[u8], flush: bool) {
-    let cb = BUILD_ENV
-        .read()
-        .ok()
-        .and_then(|g| g.as_ref().and_then(|e| e.write_stdout_cb));
-    if let Some(f) = cb {
-        unsafe {
-            f(
-                if bytes.is_empty() {
-                    std::ptr::null()
-                } else {
-                    bytes.as_ptr().cast()
-                },
-                bytes.len(),
-                c_int::from(flush),
-            );
+    if !BUILD_ENV.read().is_ok_and(|g| g.is_some()) {
+        return;
+    }
+    extern "C" {
+        #[cfg_attr(target_vendor = "apple", link_name = "__stdoutp")]
+        static mut stdout: *mut libc::FILE;
+    }
+    unsafe {
+        let out = std::ptr::addr_of!(stdout).read();
+        if !bytes.is_empty() {
+            libc::fwrite(bytes.as_ptr().cast(), 1, bytes.len(), out);
+        }
+        if flush {
+            libc::fflush(out);
         }
     }
 }

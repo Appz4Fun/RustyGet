@@ -716,23 +716,6 @@ impl TlsSocket {
     }
 }
 
-fn cpp_thread_stopped() -> bool {
-    crate::ffi::cpp_thread_host_cb().is_some_and(|cb| unsafe {
-        cb(
-            ptr::null_mut(),
-            2,
-            0,
-            0,
-            0,
-            ptr::null(),
-            ptr::null(),
-            ptr::null(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-        ) != 0
-    })
-}
-
 /// Host callback for connections. Operations are documented on
 /// [`crate::net::NzbgetRsConnHostFn`].
 ///
@@ -769,9 +752,7 @@ pub unsafe extern "C" fn conn_host(
         }
         2 => {
             let deadline_stopped = unsafe { deadline_ref(p1) }.is_some_and(Deadline::stopped);
-            isize::from(
-                crate::ffi::is_rust_thread_stopped() || cpp_thread_stopped() || deadline_stopped,
-            )
+            isize::from(crate::ffi::is_rust_thread_stopped() || deadline_stopped)
         }
         3 => {
             let write = !out_int.is_null() && unsafe { *out_int } != 0;

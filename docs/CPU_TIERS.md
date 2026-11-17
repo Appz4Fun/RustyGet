@@ -32,9 +32,10 @@ The process name is therefore `rustyget-default` or `rustyget-x86-64-v4` (use
 
 A tier binary started on a CPU below its tier stops at once with a message naming the
 build to use, instead of crashing on an illegal instruction. The check lives in
-`rust/entry.rs`, which is always compiled for the compiler's default CPU and learns the
-tier only as `--cfg rustyget_tier="..."`: with `target-cpu` set, std's feature-detection
-macros answer "yes" at compile time and a check could never fire.
+`rust/tiercheck.rs`, which `rust/build.rs` compiles on its own for the compiler's default
+CPU, telling it the tier only as `--cfg rustyget_tier="..."`, and links into the binary
+that `rust/entry.rs` starts: with `target-cpu` set, std's feature-detection macros answer
+"yes" at compile time and a check could never fire.
 
 No `apple-m5` tier yet: in the current LLVM it adds only MTE over `apple-m4`, which
 RustyGet does not use.

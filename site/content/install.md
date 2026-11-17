@@ -2,7 +2,7 @@
 title = "Install and build"
 description = "Build RustyGet from source on Linux or macOS with Just and the pinned Rust toolchain, then run it as a service."
 eyebrow = "Get started"
-lede = "RustyGet runs on Linux and macOS, and builds from source with Just, a C++20 compiler, and Rust. Release packages come back once the build workflows are rebuilt for the rewrite."
+lede = "RustyGet runs on Linux and macOS, and builds from source with Just and Rust. Release packages come back once the build workflows are rebuilt for the rewrite."
 +++
 
 > [!IMPORTANT] No release packages yet
@@ -13,7 +13,7 @@ lede = "RustyGet runs on Linux and macOS, and builds from source with Just, a C+
 | Tool or library | Version | Notes |
 |---|---|---|
 | `just` | any current | Command runner used for building, testing, and packaging (`justfile`). |
-| C++ compiler | GCC 11+ or Clang 14+ | C++20 support is required for the entry point and the glue header that are still in C++. |
+| C compiler and linker | any current GCC or Clang | Rust links with it, and the `zstd` crate builds the C zstd library with it. No C++ is compiled. |
 | Rust | 1.99.0 | Pinned in `rust/rust-toolchain.toml`. With rustup, the right toolchain installs itself on the first build. |
 | OpenSSL | any current | For encrypted news-server and HTTPS connections |
 

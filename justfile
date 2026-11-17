@@ -252,133 +252,31 @@ test jobs="3": (test-rust jobs) (test-daemon jobs)
 test-rust jobs="3":
     CARGO_BUILD_JOBS={{jobs}} cargo test --manifest-path "{{root_dir}}/rust/Cargo.toml" --lib
 
-# Build and run the C++ daemon & integration tests (`PostprocessTest`, `ExitVersionTest`, `ExitHelpTest`, `ConnectTest`)
+# Build the daemon and run its end-to-end checks: `--version` and `--help` exit
+# cleanly, and the direct-unpack/post-processing scenarios (formerly the C++
+# PostprocessTest suite) pass against the fake news server in tests/functional/dupefallback
 test-daemon jobs="3": (debug jobs)
     #!/usr/bin/env python3
-    import concurrent.futures
     import os
-    import platform
-    import re
-    import shutil
     import subprocess
+    import sys
 
     root = {{quote(root_dir)}}
-    jobs = min(int({{quote(jobs)}}), 3)
-    build_dir = os.path.join(root, "build", "debug")
-    test_dir = os.path.join(build_dir, "tests")
-    test_obj_dir = os.path.join(test_dir, "obj")
-    os.makedirs(test_obj_dir, exist_ok=True)
+    rustyget_bin = os.path.join(root, "build", "debug", "rustyget")
 
-    system = platform.system()
-    machine = platform.machine()
-    if system == "Darwin":
-        rust_target = "aarch64-apple-darwin" if machine in ("arm64", "aarch64") else "x86_64-apple-darwin"
-    else:
-        out = subprocess.check_output(["rustc", "-vV"], cwd=os.path.join(root, "rust"), text=True)
-        host = re.search(r"^host:\s+(\S+)$", out, re.MULTILINE)
-        if not host:
-            raise RuntimeError("cannot determine the Rust compiler host for daemon tests")
-        rust_target = host.group(1)
-    rust_lib = os.path.join(build_dir, "rust", rust_target, "debug", "libnzbget_rs.a")
-    archive_path = os.path.join(build_dir, "librustyget.a")
-    rustyget_bin = os.path.join(build_dir, "rustyget")
-
-    cxx = os.environ.get("CXX") or ("clang++" if shutil.which("clang++") else "g++")
-    ccache = shutil.which("ccache")
-
-    openssl_cflags = []
-    openssl_ldflags = ["-lssl", "-lcrypto"]
-    if system == "Darwin":
-        for prefix in ("/opt/homebrew/opt/openssl@3", "/opt/homebrew/opt/openssl", "/usr/local/opt/openssl@3", "/usr/local/opt/openssl"):
-            if os.path.isdir(os.path.join(prefix, "include")):
-                openssl_cflags = [f"-I{os.path.join(prefix, 'include')}"]
-                openssl_ldflags = [f"-L{os.path.join(prefix, 'lib')}", "-lssl", "-lcrypto"]
-                break
-
-    daemon_dirs = [
-        "connect", "extension", "feed", "frontend", "main",
-        "nntp", "postprocess", "queue", "dupesearch",
-        "remote", "util",
-    ]
-    include_flags = [
-        f"-I{root}",
-        f"-I{os.path.join(root, 'tests')}",
-        f"-I{os.path.join(root, 'rust', 'include')}",
-    ]
-    for d in daemon_dirs:
-        include_flags.append(f"-I{os.path.join(root, 'daemon', d)}")
-    include_flags.extend(openssl_cflags)
-
-    flags = [
-        "-std=c++20", "-O0", "-g", "-DDEBUG",
-        "-fvisibility=hidden", "-fvisibility-inlines-hidden",
-        "-D_FILE_OFFSET_BITS=64", "-D_LARGEFILE_SOURCE", "-D_LARGE_FILES",
-        "-DNZBGET_USE_RUST=1",
-    ]
-
-    test_sources = [
-        os.path.join(root, "tests", "main.cpp"),
-    ]
-
-    def needs_rebuild(src, obj, depfile):
-        if not os.path.exists(obj) or not os.path.exists(depfile):
-            return True
-        obj_mtime = os.path.getmtime(obj)
-        if os.path.getmtime(src) > obj_mtime:
-            return True
-        try:
-            with open(depfile, "r", encoding="utf-8") as f:
-                content = f.read().replace("\\\n", " ")
-            parts = content.split(":", 1)
-            if len(parts) == 2:
-                for dep in parts[1].split():
-                    if not os.path.exists(dep) or os.path.getmtime(dep) > obj_mtime:
-                        return True
-        except Exception:
-            return True
-        return False
-
-    def compile_test(src):
-        rel = os.path.relpath(src, root).replace(os.sep, "__")
-        obj = os.path.join(test_obj_dir, rel + ".o")
-        dep = obj + ".d"
-        if needs_rebuild(src, obj, dep):
-            cmd = ([ccache] if ccache else []) + [
-                cxx, *flags, *include_flags, "-MMD", "-MF", dep, "-c", src, "-o", obj,
-            ]
-            subprocess.run(cmd, check=True)
-        return obj
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
-        test_objs = list(pool.map(compile_test, test_sources))
-
-    link_flags = ["-pthread"]
-    if system == "Darwin":
-        link_flags.extend(["-Wl,-headerpad_max_install_names", "-liconv", "-lresolv"])
-    else:
-        link_flags.extend(["-ldl", "-lm"])
-
-    test_bin = os.path.join(test_dir, "rustyget_tests")
-    subprocess.run(
-        [cxx, *test_objs, *([archive_path] if os.path.exists(archive_path) else []), rust_lib, *openssl_ldflags, *link_flags, "-o", test_bin],
-        check=True,
-    )
-
-    for td in ("dupematcher1", "dupematcher2", "parchecker", "parcheckerUtf8", "rarrenamer"):
-        src_td = os.path.join(root, "tests", "testdata", td)
-        dst_td = os.path.join(test_dir, td)
-        if not os.path.exists(dst_td):
-            shutil.copytree(src_td, dst_td)
-
-    print("Running PostprocessTest...")
-    subprocess.run([test_bin, "--run_test=PostprocessTest", "--log_level=message"], cwd=test_dir, check=True)
     print("Running ExitVersionTest...")
-    subprocess.run([rustyget_bin, "--version"], cwd=test_dir, check=True)
+    subprocess.run([rustyget_bin, "--version"], check=True)
     print("Running ExitHelpTest...")
-    subprocess.run([rustyget_bin, "--help"], stdout=subprocess.DEVNULL, cwd=test_dir, check=True)
-    print("Running ConnectTest...")
-    subprocess.run([test_bin, "--run_test=ConnectTest", "--log_level=message"], cwd=test_dir, check=True)
-    print("All 4 daemon test suites passed!")
+    subprocess.run([rustyget_bin, "--help"], stdout=subprocess.DEVNULL, check=True)
+    scenarios = [
+        "directunpacksimple", "directunpacktwoarchives", "directunpackparfailure",
+        "parfailurenodirectunpack", "parfailuredirectunpackfailed",
+    ]
+    for scenario in scenarios:
+        print(f"Running {scenario}...")
+        subprocess.run([sys.executable, "-B", os.path.join(root, "tests", "functional", "dupefallback", "harness.py"),
+                        "--nzbget", rustyget_bin, "--target", "local", "--scenario", scenario], check=True)
+    print(f"All {2 + len(scenarios)} daemon checks passed!")
 
 # Type-check the Rust crate
 check:

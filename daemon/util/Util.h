@@ -2412,51 +2412,6 @@ class UrlCoordinator;
 #endif
 
 
-// Caller holds the queue throughout this synchronous borrowed-field pass.
-// 0 = callback/limit refusal, 1 = complete, 2 = transient assembly/parking busy.
-// No strings escape the callback, and this visitor neither copies nor normalises.
-using LiveParNamespaceVisitor = bool (*)(void*, int, unsigned,
-    const char*, const char*, const char*, const char*);
-inline int live_par_visit_namespace(NzbInfo* nzb, LiveParNamespaceVisitor visit, void* context)
-{
-    if (!nzb || !visit) return 0;
-    if (nzb->GetParking() || nzb->GetDeleting()) return 2;
-    constexpr size_t limit = 32768;
-    const size_t queued = nzb->GetFileList()->size();
-    if (queued > limit || (size_t)nzb->GetCompletedFileCount() > limit - queued) return 0;
-    // CompleteFileParts can clear outputFilename outside the queue, even while
-    // its final downloader remains active. Do not borrow during that window.
-    for (const auto& file : *nzb->GetFileList())
-    {
-        const int64_t total = file->GetTotalArticles();
-        const int64_t completed = file->GetCompletedArticles();
-        const int64_t missed = file->GetMissedArticles();
-        if (total < 0 || completed < 0 || missed < 0) return 0;
-        if (total > 0 && completed + missed >= total) return 2;
-    }
-    const auto text = [](const char* value) { return value ? value : ""; };
-    for (const auto& file : *nzb->GetFileList())
-    {
-        // Active-count changes and mutex destruction require the queue. For
-        // remaining active files, this also stabilises their output string.
-        FileOutputGuard output = file->GuardOutputFile();
-        const unsigned flags = (file->GetParFile() ? 1u : 0u) | (file->GetDeleted() ? 2u : 0u);
-        if (!visit(context, file->GetId(), flags, text(file->GetFilename()),
-            text(file->GetOrigname()), text(file->GetHash16k()), file->GetOutputFilenameC()))
-            return 0;
-    }
-    const int completedCount = nzb->GetCompletedFileCount();
-    for (int i = 0; i < completedCount; i++)
-    {
-        int ints[4] = {};
-        const char* strs[4] = {};
-        if (nzb->NF(1, i, nullptr, nullptr, nullptr, ints, nullptr, strs) != 0) return 0;
-        const unsigned flags = 4u | (ints[2] ? 1u : 0u);
-        if (!visit(context, ints[0], flags, text(strs[0]), text(strs[1]), text(strs[2]), ""))
-            return 0;
-    }
-    return 1;
-}
 
 inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
 	const char* s1, const char* s2, int* ints, int64_t* i64s, const char** strs)
@@ -2729,12 +2684,8 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 		return 0;
 	}
 	case 43: {
-		if (a1 == 15)
-		{
-			auto visit = reinterpret_cast<LiveParNamespaceVisitor>(reinterpret_cast<uintptr_t>(s1));
-			return (uintptr_t)live_par_visit_namespace(reinterpret_cast<NzbInfo*>(p1), visit, reinterpret_cast<void*>(p2));
-		}
-		// other article ops are answered in Rust (rust/src/queuesubsys_host.rs native_op)
+		// article ops, and the live-par namespace walk (15), are answered in Rust
+		// (rust/src/queuesubsys_host.rs native_op)
 		return 0;
 	}
 	case 45: {

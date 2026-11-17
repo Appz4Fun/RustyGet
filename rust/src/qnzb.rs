@@ -966,7 +966,7 @@ fn ptr_list_op(l: usize, op: c_int, a: i64, item: usize, order: *const usize, ot
 }
 
 /// A collection's file list (slot 0).
-fn file_list(p: *const NzbScalars) -> usize {
+pub(crate) fn file_list(p: *const NzbScalars) -> usize {
     unsafe { nzbget_rs_nzb_slot(p, 0, 0, 0) }
 }
 

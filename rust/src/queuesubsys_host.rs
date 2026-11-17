@@ -6230,8 +6230,14 @@ unsafe fn native_op(
         (44, _) => {
             Some(unsafe { crate::qfile::host_cache_op(file, a1, a2, p2, s1, ints, i64s, strs) })
         }
-        // article ops (15, the live-par namespace walk, stays with the host)
-        (43, 15) => None,
+        // the live-par namespace walk over a collection (p1), visitor in s1, context in p2
+        (43, 15) => Some(unsafe {
+            live_namespace::live_par_visit_namespace(
+                p1 as *const crate::qnzb::NzbScalars,
+                std::mem::transmute::<*const c_char, Option<live_namespace::NamespaceVisitor>>(s1),
+                p2 as *mut c_void,
+            )
+        }),
         (43, _) => {
             // file-based ops take the file in p1 (and the article in p2 for 8 and 13)
             let file_op = matches!(a1, 0 | 7 | 8 | 10 | 11 | 12 | 13);

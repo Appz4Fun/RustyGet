@@ -852,7 +852,7 @@ impl QueueSubsysHost {
         strs: *mut *const c_char,
     ) -> usize {
         if self.use_active {
-            if let Some(r) = unsafe { native_op(op, a1, a2, p1, p2, s1, ints, i64s, strs) } {
+            if let Some(r) = unsafe { native_op(op, a1, a2, p1, p2, s1, s2, ints, i64s, strs) } {
                 return r;
             }
         }
@@ -6112,6 +6112,7 @@ unsafe fn native_op(
     p1: usize,
     p2: usize,
     s1: *const c_char,
+    s2: *const c_char,
     ints: *mut c_int,
     i64s: *mut i64,
     strs: *mut *const c_char,
@@ -6186,6 +6187,24 @@ unsafe fn native_op(
             unsafe { crate::qfile::host_file_set(file, a1, a2, p2, s1, i64s) };
             Some(0)
         }
+        // a collection's plain setters (the rest stay with the host)
+        (32, _) => unsafe {
+            crate::qnzb::host_coll_set(p1 as *mut crate::qnzb::NzbScalars, a1, a2, s1, i64s)
+                .then_some(0)
+        },
+        // a collection's lists and texts
+        (31, _) => unsafe {
+            crate::qnzb::host_coll_op(
+                p1 as *const crate::qnzb::NzbScalars,
+                a1,
+                a2,
+                p2,
+                s1,
+                s2,
+                ints,
+                strs,
+            )
+        },
         // article cache ops on a file
         (44, _) => {
             Some(unsafe { crate::qfile::host_cache_op(file, a1, a2, p2, s1, ints, i64s, strs) })

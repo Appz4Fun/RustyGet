@@ -2795,39 +2795,10 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 		return 0;
 	}
 	case 31: {
+		// other sub-ops are answered in Rust (rust/src/qnzb.rs host_coll_op)
 		NzbInfo* n = reinterpret_cast<NzbInfo*>(p1);
-		if (a1 == 0) return n->NC(0, 0, nullptr, s1, nullptr, nullptr, strs) ? 1 : 0;
-		if (a1 == 1) { n->NC(1, 0, nullptr, s1, s2); return 0; }
-		if (a1 == 2) { n->NC(2, 0, reinterpret_cast<NzbInfo*>(p2)); return 0; }
 		if (a1 == 3) { static thread_local CString s_finalDir; s_finalDir = n->BuildFinalDirName(); strs[0] = s_finalDir.Str(); return 0; }
-		if (a1 == 4) return n->NC(20, a2) ? 1 : 0;
-		if (a1 == 5) { n->NC(21, a2); return 1; }
-		if (a1 == 6) { strs[0] = n->GetHardLinkPathC(); return 0; }
-		if (a1 == 7) { strs[0] = n->GetMetaNameC(); return 0; }
-		if (a1 == 8) { if (a2 < 0) return n->NC(3); n->NC(4, a2, nullptr, nullptr, nullptr, nullptr, strs); return 0; }
-		if (a1 == 9) { if (a2 < 0) return n->NC(40); n->NC(42, a2, nullptr, nullptr, nullptr, ints); return 0; }
-		if (a1 == 10) { n->NC(10, a2, nullptr, s1 ? s1 : ""); return 0; }
-		if (a1 == 11) return n->RenameCompletedFile(s1 ? s1 : "", s2 ? s2 : "") ? 1 : 0;
-		if (a1 == 12) return reinterpret_cast<uintptr_t>(n->GetUnpackThread());
-		if (a1 == 13) { n->EA(2, 0, s1 ? s1 : ""); return 0; }
-		if (a1 == 14) { n->SetMetaName(s1 ? s1 : ""); return 0; }
-		if (a1 == 15)
-		{
-			const int lim[2] = { (int)Util::CurrentTime(), g_Options->GetLogBuffer() };
-			n->NM(3, 0, reinterpret_cast<NzbInfo*>(p2), nullptr, lim);
-			return 0;
-		}
 		if (a1 == 16) { static thread_local CString s_niceUrl; s_niceUrl = n->MakeNiceUrlName(s1 ? s1 : "", s2 ? s2 : ""); strs[0] = s_niceUrl.Str(); return 0; }
-		if (a1 == 17) { if (a2 < 0) return n->NC(11); n->NC(12, a2, nullptr, nullptr, nullptr, ints, strs); return 0; }
-		if (a1 == 18) { if (a2 < 0) return n->EA(0); strs[0] = ""; n->EA(1, a2, nullptr, strs); return 0; }
-		if (a1 == 19) { if (a2 == 0) n->NC(44, 0, nullptr, nullptr, nullptr, ints); else n->NC(48); return 0; }
-		if (a1 == 20)
-		{
-			auto pushFn = reinterpret_cast<void(*)(uintptr_t, int, int, int, const char*)>(reinterpret_cast<uintptr_t>(s1));
-			n->NM(4, 0, nullptr, nullptr, ints, pushFn, p2);
-			return 0;
-		}
-		if (a1 == 21) { if (a2 < 0) return n->NC(41); n->NC(43, a2, nullptr, nullptr, nullptr, ints); return 0; }
 		if (a1 == 22)
 		{
 			for (FileInfo* fi : n->GetFileList())
@@ -2841,123 +2812,24 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 		return 0;
 	}
 	case 32: {
+		// plain setters are answered in Rust (rust/src/qnzb.rs host_coll_set)
 		NzbInfo* n = reinterpret_cast<NzbInfo*>(p1);
 		switch (a1)
 		{
 		case 0: n->SetId(a2); break;
-		case 1: n->SetDeleteStatus((NzbInfo::EDeleteStatus)a2); break;
-		case 2: n->SetDeletePaused(a2 != 0); break;
-		case 3: n->SetMarkStatus((NzbInfo::EMarkStatus)a2); break;
-		case 4: n->SetDupeHint((NzbInfo::EDupeHint)a2); break;
-		case 5: n->SetDupeScore(a2); break;
-		case 6: n->SetPriority(a2); break;
-		case 7: n->SetFullContentHash((uint32)a2); break;
-		case 8: n->SetFilteredContentHash((uint32)a2); break;
-		case 9: n->SetChanged(a2 != 0); break;
-		case 10: n->SetAllFirst(a2 != 0); break;
-		case 11: n->SetHealthPaused(a2 != 0); break;
-		case 12: n->SetDeadPickProbed(a2 != 0); break;
-		case 13: n->SetDupeParDeferState((NzbInfo::EDupeParDeferState)a2); break;
-		case 14: n->SetDupeNoParNoted(a2 != 0); break;
-		case 15: n->SetDirectRenameStatus((NzbInfo::EDirectRenameStatus)a2); break;
 		case 16: n->SetActiveDownloads(a2); break;
-		case 17: n->SetCurrentSuccessArticles(a2); break;
-		case 18: n->SetCurrentFailedArticles(a2); break;
-		case 19: n->SetDupeRecoveredArticles(a2); break;
-		case 20: n->SetDupeAttemptedArticles(a2); break;
-		case 21: n->SetDupeUnsourcedArticles(a2); break;
-		case 22: n->SetDupeFailedRun(a2); break;
-		case 23: n->SetDupeFailoverChecked(a2); break;
-		case 24: n->SetRemainingParCount(a2); break;
-		case 25: n->SetWaitingPar(a2 != 0); break;
-		case 26: n->SetLoadingPar(a2 != 0); break;
-		case 27: n->SetDeleting(a2 != 0); break;
-		case 28: n->SetParking(a2 != 0); break;
-		case 29: n->SetAvoidHistory(a2 != 0); break;
-		case 30: n->SetRemainingSize(i64s[0]); break;
-		case 31: n->SetPausedSize(i64s[0]); break;
-		case 32: n->SetCurrentSuccessSize(i64s[0]); break;
-		case 33: n->SetCurrentFailedSize(i64s[0]); break;
-		case 34: n->SetParCurrentSuccessSize(i64s[0]); break;
-		case 35: n->SetParCurrentFailedSize(i64s[0]); break;
-		case 36: n->SetDownloadedSize(i64s[0]); break;
-		case 37: n->SetParSize(i64s[0]); break;
-		case 38: n->SetParFailedSize(i64s[0]); break;
-		case 39: n->SetDupeRecoveredBytes(i64s[0]); break;
-		case 40: n->SetName(s1); break;
 		case 41: n->SetFilename(s1); break;
-		case 42: n->SetCategory(s1); break;
-		case 43: n->SetDestDir(s1); break;
-		case 44: n->SetDupeKey(s1); break;
-		case 45: n->SetQueuedFilename(s1); break;
-		case 46: n->SetHardLinkPath(s1 ? s1 : ""); break;
-		case 47: n->SetFailedSize(i64s[0]); break;
-		case 48: n->SetSuccessSize(i64s[0]); break;
-		case 49: n->SetParSuccessSize(i64s[0]); break;
 		case 50: n->BuildDestDirName(); break;
 		case 51: n->UpdateMinMaxTime(); break;
 		case 52: n->UpdateCompletedStats(reinterpret_cast<FileInfo*>(p2)); break;
 		case 53: n->UpdateDeletedStats(reinterpret_cast<FileInfo*>(p2)); break;
 		case 54: n->EnterPostProcess(); break;
 		case 55: n->LeavePostProcess(); break;
-		case 56: n->NC(13); break;
-		case 57: n->SetUnpackThread(nullptr); n->SetLiveRepairThread(nullptr); break;
-		case 58: n->SetLiveRepairThread(nullptr); break;
-		case 59: n->SetFinalDir(s1 ? s1 : ""); break;
-		case 60: n->SetCleanupDisk(a2 != 0); break;
-		case 61: n->SetDupeMode((EDupeMode)a2); break;
-		case 62: n->SetParStatus((NzbInfo::EParStatus)a2); break;
-		case 63: n->SetUnpackStatus((NzbInfo::EPostUnpackStatus)a2); break;
-		case 64: n->SetDirectUnpackStatus((NzbInfo::EDirectUnpackStatus)a2); break;
-		case 65: n->SetPostTotalSec(a2); break;
-		case 66: n->SetUrlStatus((NzbInfo::EUrlStatus)a2); break;
-		case 67: n->SetParSec(a2); break;
-		case 68: n->SetParFull(a2 != 0); break;
-		case 69: n->SetRepairSec(a2); break;
-		case 70: n->SetExtraParBlocks(a2); break;
-		case 71: n->SetDupeRecoveredHoles(a2); break;
-		case 72: n->SetParRenameStatus((NzbInfo::EPostRenameStatus)a2); break;
-		case 73: n->SetUnpackCleanedUpDisk(a2 != 0); break;
-		case 74: n->SetUnpackSec(a2); break;
-		case 75: n->SetMoveStatus((NzbInfo::EMoveStatus)a2); break;
-		case 76: n->SetCleanupStatus((NzbInfo::ECleanupStatus)a2); break;
-		case 77: n->SetRarRenameStatus((NzbInfo::EPostRenameStatus)a2); break;
-		case 78: n->SetPostDownloadRenamingStatus((NzbInfo::PostDownloadRenamingStatus)a2); break;
-		case 79: n->SetPostUnpackRenamingStatus((NzbInfo::PostUnpackRenamingStatus)a2); break;
-		case 80: n->SetUnpackThread(nullptr); break;
-		case 81: n->SetKind((NzbInfo::EKind)a2); break;
-		case 82: n->SetFeedId(a2); break;
-		case 83: n->SetAddUrlPaused(a2 != 0); break;
-		case 84: n->SetAutoCategory(a2 != 0); break;
-		case 85: n->SetDesiredServerId(a2); break;
-		case 86: n->SetSkipScriptProcessing(a2 != 0); break;
-		case 87: n->SetSkipDiskWrite(a2 != 0); break;
-		case 88: n->SetExtraPriority(a2); break;
-		case 89: n->SetManyDupeFiles(a2 != 0); break;
-		case 90: n->SetParkedFileCount(a2); break;
-		case 91: n->SetReprocess(a2 != 0); break;
-		case 92: n->SetParRepaired(a2 != 0); break;
-		case 93: n->SetUnpackTried(a2 != 0); break;
-		case 94: n->SetLastUnpackStatus(a2); break;
-		case 95: n->EA(3); break;
 		case 96: n->SetUrl(s1); break;
 		case 97: n->GetFileList()->clear(); break;
 		case 98: n->UpdateCurrentStats(); break;
-		case 99: n->SetDownloadSec(a2); break;
-		case 100: n->SetFailedArticles(a2); break;
-		case 101: n->SetSuccessArticles(a2); break;
-		case 102: n->SetSize(i64s[0]); break;
-		case 103: n->SetMinTime((time_t)i64s[0]); break;
-		case 104: n->SetMaxTime((time_t)i64s[0]); break;
-		case 105: n->SetQueueScriptTime((time_t)i64s[0]); break;
-		case 106: n->SetFileCount(a2); break;
-		case 107: n->SetMessageCount(a2); break;
-		case 108: n->SetTotalArticles(a2); break;
 		case 109: if (n->GetPostInfo()) n->GetPostInfo()->SetStage((PostInfo::EStage)a2); break;
 		case 110: if (n->GetPostInfo()) { n->GetPostInfo()->SetForceParFull((a2 & 1) != 0); n->GetPostInfo()->SetForceRepair((a2 & 2) != 0); } break;
-		case 111: n->NC(5); break;
-		case 112: n->NF(27); break;
-		case 113: n->NF(7); break;
 		default: break;
 		}
 		return 0;

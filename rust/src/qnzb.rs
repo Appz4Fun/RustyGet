@@ -952,6 +952,314 @@ pub(crate) unsafe fn host_set_stats(p: *mut NzbScalars, ints: &[i32; 12], i64s: 
     s.downloadStartTime = i64s[15];
 }
 
+/// A collection's plain setters (host op 32 sub-op `a1`), as the C++ ones;
+/// false for the sub-ops the host still serves.
+///
+/// # Safety
+/// `p` is a live collection; the caller holds the queue lock.
+pub(crate) unsafe fn host_coll_set(
+    p: *mut NzbScalars,
+    a1: c_int,
+    a2: c_int,
+    s1: *const c_char,
+    i64s: *const i64,
+) -> bool {
+    let empty = c"".as_ptr();
+    let or_empty = |s: *const c_char| if s.is_null() { empty } else { s };
+    let v64 = || unsafe { *i64s };
+    let np: *const NzbScalars = std::ptr::null();
+    let ns: *const c_char = std::ptr::null();
+    let coll = move |op| unsafe {
+        nzbget_rs_nzb_coll(
+            p,
+            op,
+            0,
+            np,
+            ns,
+            ns,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    let files = move |op| unsafe {
+        nzbget_rs_nzb_files(
+            p,
+            op,
+            0,
+            np,
+            ns,
+            ns,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+        )
+    };
+    let s = unsafe { &mut *p };
+    match a1 {
+        2 => s.deletePaused = a2 != 0,
+        9 => s.changed = a2 != 0,
+        10 => s.allFirst = a2 != 0,
+        11 => s.healthPaused = a2 != 0,
+        12 => s.deadPickProbed = a2 != 0,
+        14 => s.dupeNoParNoted = a2 != 0,
+        25 => s.waitingPar = a2 != 0,
+        26 => s.loadingPar = a2 != 0,
+        27 => s.deleting = a2 != 0,
+        28 => s.parking = a2 != 0,
+        29 => s.avoidHistory = a2 != 0,
+        60 => s.cleanupDisk = a2 != 0,
+        68 => s.parFull = a2 != 0,
+        73 => s.unpackCleanedUpDisk = a2 != 0,
+        83 => s.addUrlPaused = a2 != 0,
+        84 => s.autoCategory = a2 != 0,
+        86 => s.skipScriptProcessing = a2 != 0,
+        87 => s.skipDiskWrite = a2 != 0,
+        89 => s.manyDupeFiles = a2 != 0,
+        91 => s.reprocess = a2 != 0,
+        92 => s.parRepaired = a2 != 0,
+        93 => s.unpackTried = a2 != 0,
+        1 => s.deleteStatus = a2,
+        3 => s.markStatus = a2,
+        4 => s.dupeHint = a2,
+        5 => s.dupeScore = a2,
+        6 => s.priority = a2,
+        13 => s.dupeParDeferState = a2,
+        15 => s.directRenameStatus = a2,
+        17 => s.currentSuccessArticles = a2,
+        18 => s.currentFailedArticles = a2,
+        19 => s.dupeRecoveredArticles = a2,
+        20 => s.dupeAttemptedArticles = a2,
+        21 => s.dupeUnsourcedArticles = a2,
+        22 => s.dupeFailedRun = a2,
+        23 => s.dupeFailoverChecked = a2,
+        24 => s.remainingParCount = a2,
+        61 => s.dupeMode = a2,
+        62 => s.parStatus = a2,
+        63 => s.unpackStatus = a2,
+        64 => s.directUnpackStatus = a2,
+        65 => s.postTotalSec = a2,
+        66 => s.urlStatus = a2,
+        67 => s.parSec = a2,
+        69 => s.repairSec = a2,
+        70 => s.extraParBlocks = a2,
+        71 => s.dupeRecoveredHoles = a2,
+        72 => s.parRenameStatus = a2,
+        74 => s.unpackSec = a2,
+        75 => s.moveStatus = a2,
+        76 => s.cleanupStatus = a2,
+        77 => s.rarRenameStatus = a2,
+        78 => s.postDownloadRenamingStatus = a2,
+        79 => s.postUnpackRenamingStatus = a2,
+        81 => s.kind = a2,
+        82 => s.feedId = a2,
+        85 => s.desiredServerId = a2,
+        88 => s.extraPriority = a2,
+        90 => s.parkedFileCount = a2,
+        94 => s.lastUnpackStatus = a2,
+        99 => s.downloadSec = a2,
+        100 => s.failedArticles = a2,
+        101 => s.successArticles = a2,
+        106 => s.fileCount = a2,
+        108 => s.totalArticles = a2,
+        7 => s.fullContentHash = a2 as u32,
+        8 => s.filteredContentHash = a2 as u32,
+        30 => s.remainingSize = v64(),
+        31 => s.pausedSize = v64(),
+        32 => s.currentSuccessSize = v64(),
+        33 => s.currentFailedSize = v64(),
+        34 => s.parCurrentSuccessSize = v64(),
+        35 => s.parCurrentFailedSize = v64(),
+        36 => s.downloadedSize = v64(),
+        37 => s.parSize = v64(),
+        38 => s.parFailedSize = v64(),
+        39 => s.dupeRecoveredBytes = v64(),
+        47 => s.failedSize = v64(),
+        48 => s.successSize = v64(),
+        49 => s.parSuccessSize = v64(),
+        102 => s.size = v64(),
+        103 => s.minTime = v64(),
+        104 => s.maxTime = v64(),
+        105 => s.queueScriptTime = v64(),
+        40 => unsafe { nzbget_rs_nzb_set_text(p, 2, s1, -1) },
+        42 => unsafe { nzbget_rs_nzb_set_text(p, 5, s1, -1) },
+        43 => unsafe { nzbget_rs_nzb_set_text(p, 3, s1, -1) },
+        44 => unsafe { nzbget_rs_nzb_set_text(p, 7, or_empty(s1), -1) },
+        45 => unsafe { nzbget_rs_nzb_set_text(p, 6, s1, -1) },
+        46 => unsafe { nzbget_rs_nzb_set_text(p, 8, or_empty(s1), -1) },
+        59 => unsafe { nzbget_rs_nzb_set_text(p, 4, or_empty(s1), -1) },
+        56 => {
+            coll(13);
+        }
+        57 => unsafe {
+            nzbget_rs_nzb_slot(p, 2, 1, 0);
+            nzbget_rs_nzb_slot(p, 3, 1, 0);
+        },
+        58 => unsafe {
+            nzbget_rs_nzb_slot(p, 3, 1, 0);
+        },
+        80 => unsafe {
+            nzbget_rs_nzb_slot(p, 2, 1, 0);
+        },
+        95 => {
+            files(33);
+        }
+        107 => unsafe {
+            nzbget_rs_nzb_slot(p, 4, 1, a2 as isize as usize);
+        },
+        111 => {
+            coll(5);
+        }
+        112 => {
+            files(27);
+        }
+        113 => {
+            files(7);
+        }
+        _ => return false,
+    }
+    true
+}
+
+/// A collection's list and text ops (host op 31), as the C++ host did them;
+/// None for the sub-ops the host still serves (3, 16, 22).
+///
+/// # Safety
+/// `p` is a live collection, `p2` one too where the op names it; output
+/// arrays are large enough for the op.
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn host_coll_op(
+    p: *const NzbScalars,
+    a1: c_int,
+    a2: c_int,
+    p2: usize,
+    s1: *const c_char,
+    s2: *const c_char,
+    ints: *mut c_int,
+    strs: *mut *const c_char,
+) -> Option<usize> {
+    let np: *const NzbScalars = std::ptr::null();
+    let ns: *const c_char = std::ptr::null();
+    let ni: *mut c_int = std::ptr::null_mut();
+    let nstr: *mut *const c_char = std::ptr::null_mut();
+    let empty = c"".as_ptr();
+    let or_empty = |s: *const c_char| if s.is_null() { empty } else { s };
+    let other = p2 as *const NzbScalars;
+    let coll = |op, a2, other, s1, s2, ints, strs| unsafe {
+        nzbget_rs_nzb_coll(p, op, a2, other, s1, s2, ints, strs)
+    };
+    let files = |op, a2, s1, s2, strs| unsafe {
+        nzbget_rs_nzb_files(
+            p,
+            op,
+            a2,
+            np,
+            s1,
+            s2,
+            ni,
+            std::ptr::null_mut(),
+            strs,
+            std::ptr::null(),
+        )
+    };
+    let log_buffer = || crate::options::active_options().map_or(0, |o| o.scalars().log_buffer);
+    let now = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as c_int)
+    };
+    Some(match a1 {
+        0 => usize::from(coll(0, 0, np, s1, ns, ni, strs) != 0),
+        1 => {
+            coll(1, 0, np, s1, s2, ni, nstr);
+            0
+        }
+        2 => {
+            coll(2, 0, other, ns, ns, ni, nstr);
+            0
+        }
+        4 => usize::from(coll(20, a2, np, ns, ns, ni, nstr) != 0),
+        5 => {
+            coll(21, a2, np, ns, ns, ni, nstr);
+            1
+        }
+        6 | 7 => {
+            unsafe { *strs = nzbget_rs_nzb_text(p, if a1 == 6 { 8 } else { 9 }) };
+            0
+        }
+        8 => {
+            if a2 < 0 {
+                return Some(coll(3, 0, np, ns, ns, ni, nstr) as usize);
+            }
+            coll(4, a2, np, ns, ns, ni, strs);
+            0
+        }
+        9 => {
+            if a2 < 0 {
+                return Some(coll(40, 0, np, ns, ns, ni, nstr) as usize);
+            }
+            coll(42, a2, np, ns, ns, ints, nstr);
+            0
+        }
+        10 => {
+            coll(10, a2, np, or_empty(s1), ns, ni, nstr);
+            0
+        }
+        11 => usize::from(files(4, 0, or_empty(s1), or_empty(s2), nstr) != 0),
+        12 => unsafe { nzbget_rs_nzb_slot(p, 2, 0, 0) },
+        13 => {
+            files(32, 0, or_empty(s1), ns, nstr);
+            0
+        }
+        14 => {
+            unsafe { nzbget_rs_nzb_set_text(p, 9, or_empty(s1), -1) };
+            0
+        }
+        15 => {
+            let lim = [now(), log_buffer()];
+            unsafe { nzbget_rs_nzb_msgs(p, 3, 0, other, ns, lim.as_ptr(), None, 0) };
+            0
+        }
+        17 => {
+            if a2 < 0 {
+                return Some(coll(11, 0, np, ns, ns, ni, nstr) as usize);
+            }
+            coll(12, a2, np, ns, ns, ints, strs);
+            0
+        }
+        18 => {
+            if a2 < 0 {
+                return Some(files(30, 0, ns, ns, nstr) as usize);
+            }
+            unsafe { *strs = empty };
+            files(31, a2, ns, ns, strs);
+            0
+        }
+        19 => {
+            if a2 == 0 {
+                coll(44, 0, np, ns, ns, ints, nstr);
+            } else {
+                coll(48, 0, np, ns, ns, ni, nstr);
+            }
+            0
+        }
+        20 => {
+            let visit: MsgVisit = unsafe { std::mem::transmute::<*const c_char, MsgVisit>(s1) };
+            unsafe { nzbget_rs_nzb_msgs(p, 4, 0, np, ns, ints, visit, p2) };
+            0
+        }
+        21 => {
+            if a2 < 0 {
+                return Some(coll(41, 0, np, ns, ns, ni, nstr) as usize);
+            }
+            coll(43, a2, np, ns, ns, ints, nstr);
+            0
+        }
+        3 | 16 | 22 => return None,
+        _ => 0,
+    })
+}
+
 /// Host handles kept with a collection: 0 file list, 1 post-processing info,
 /// 2 direct-unpack job, 3 live-repair job, 4 message count. The host owns
 /// what they point to. set != 0 stores v; returns the (previous) value.

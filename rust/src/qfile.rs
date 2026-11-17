@@ -375,6 +375,9 @@ pub(crate) unsafe fn host_file_set(
     i64s: *const i64,
 ) {
     use field::*;
+    if f.is_null() {
+        return;
+    }
     let file = unsafe { &*f };
     let flag = i64::from(a2 != 0);
     let v64 = || unsafe { *i64s };

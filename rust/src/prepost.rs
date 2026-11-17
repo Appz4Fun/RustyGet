@@ -400,6 +400,52 @@ fn damage_is_borrowed_volumes(
     absent_unnamed <= borrowed
 }
 
+/// True when par-check would only rebuild volumes that direct unpack already read borrowed:
+/// some data files never reached the disk, each of them is one of the `borrowed` dead volumes,
+/// and every damaged file on disk is an archive volume direct unpack extracted from (its outputs
+/// passed the archive's own checksums, with any hole patched from a repair). A damaged file
+/// direct unpack never read still needs par-check.
+fn direct_unpack_read_all_damage(
+    files: &[crate::queuesubsys_host::CompletedFileSnap],
+    extracted: &[Vec<u8>],
+    dest_dir: &[u8],
+    borrowed: usize,
+) -> bool {
+    const CF_SUCCESS: i32 = 1;
+    // Files that never reached the disk: each one must be a dead volume read borrowed.
+    let mut absent = 0usize;
+    for f in files
+        .iter()
+        .filter(|f| f.status != CF_SUCCESS && !f.par_file)
+    {
+        let read = extracted.iter().any(|e| e.eq_ignore_ascii_case(&f.filename));
+        let mut path = dest_dir.to_vec();
+        path.push(crate::paths::PATH_SEPARATOR);
+        path.extend_from_slice(&f.filename);
+        if crate::fsops::path(&path).exists() {
+            if read {
+                continue;
+            }
+            return false;
+        }
+        // A borrowed volume is read under its own name, so it is in `extracted` too: it still
+        // takes its place in `borrowed`. One under an obfuscated name has no known extension;
+        // a known file that never arrived (a sample, subtitles) was never borrowed.
+        if !read
+            && !crate::filetypes::is_rar_file(&f.filename)
+            && crate::filetypes::is_known_collection_ext(crate::filetypes::file_extension(
+                &f.filename,
+            ))
+        {
+            return false;
+        }
+        absent += 1;
+    }
+    // With every file on disk par-check only verifies (quickly, from the article checksums
+    // where it can): it is kept. It is skipped when it would rebuild borrowed volumes.
+    absent > 0 && absent <= borrowed
+}
+
 /// Classify skipped par-check health action in `PrePostProcessor::StartJob`:
 /// - `0`: no action
 /// - `1`: skip par-check due to health 0%
@@ -1970,6 +2016,36 @@ impl NzbgetRsPrePostProcessor {
                 }
             }
 
+            const NS_SUCCESS: i32 = 3;
+            if nzb.par_status == PAR_STATUS_NONE
+                && nzb.delete_status == DS_NONE
+                && opts.par_check == PC_AUTO
+                && nzb.direct_unpack_status == NS_SUCCESS
+                && direct_unpack_read_all_damage(
+                    &host.nzb_completed_files(nzb.ptr),
+                    &(0..host.nzb_extracted_archives_len(nzb.ptr))
+                        .map(|i| host.nzb_extracted_archive_at(nzb.ptr, i))
+                        .collect::<Vec<_>>(),
+                    &nzb.dest_dir,
+                    crate::postproc::dead_volumes_borrowed_count(nzb.id),
+                )
+            {
+                // Every extracted file already passed the archive checksums: par2 would only
+                // rebuild volumes nothing reads again.
+                const PAR_STATUS_SUCCESS: i32 = 3;
+                let mut msg = b"Skipping par-check for ".to_vec();
+                msg.extend_from_slice(&nzb.name);
+                msg.extend_from_slice(
+                    b": direct unpack verified every file against the archive checksums, \
+                      reading the missing volumes borrowed from duplicates",
+                );
+                host.nzb_print_message(nzb.ptr, MK_INFO, &msg);
+                host.nzb_set_int(nzb.ptr, NZB_INT_PAR_STATUS, PAR_STATUS_SUCCESS);
+                host.nzb_set_int(nzb.ptr, NZB_INT_CHANGED, 1);
+                let _ = crate::postproc::take_dead_volumes_borrowed(nzb.id);
+                return;
+            }
+
             if nzb.par_status == PAR_STATUS_NONE && nzb.delete_status == DS_NONE {
                 if has_main_pars(&nzb.dest_dir) {
                     if !allow_par {
@@ -2409,6 +2485,61 @@ mod tests {
             !ok(&present, &d, 3),
             "a damaged file on disk is not a borrowed volume"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn par_check_is_skipped_only_when_direct_unpack_read_every_damaged_file() {
+        use super::direct_unpack_read_all_damage as ok;
+        use crate::queuesubsys_host::CompletedFileSnap;
+        let dir = std::env::temp_dir().join(format!("rg-dureadall-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = dir.to_string_lossy().as_bytes().to_vec();
+        let f = |name: &str, status: i32, par: bool| CompletedFileSnap {
+            status,
+            par_file: par,
+            filename: name.as_bytes().to_vec(),
+            ..Default::default()
+        };
+        let extracted: Vec<Vec<u8>> = ["a.part01.rar", "a.part02.rar", "a.part03.rar"]
+            .iter()
+            .map(|n| n.as_bytes().to_vec())
+            .collect();
+        std::fs::write(dir.join("A.PART02.rar"), b"holed").unwrap();
+        // part02 lost articles (repaired and read), part04 never arrived and was borrowed
+        let files = vec![
+            f("a.part01.rar", 1, false),
+            f("A.PART02.rar", 2, false),
+            f("a.part03.rar", 1, false),
+            f("a.part04.rar", 3, false),
+            f("a.vol00+01.par2", 3, true),
+        ];
+        assert!(ok(&files, &extracted, &d, 1));
+        assert!(!ok(&files, &extracted, &d, 0), "a missing volume nobody borrowed");
+        let mut sample = files.clone();
+        std::fs::write(dir.join("a.sample.mkv"), b"partial").unwrap();
+        sample.push(f("a.sample.mkv", 2, false));
+        assert!(!ok(&sample, &extracted, &d, 5), "a damaged file direct unpack never read");
+        let mut other_set = files;
+        std::fs::write(dir.join("subs.rar"), b"partial").unwrap();
+        other_set.push(f("subs.rar", 2, false));
+        assert!(!ok(&other_set, &extracted, &d, 5), "an archive direct unpack did not extract");
+        assert!(!ok(&[f("a.part01.rar", 1, false)], &extracted, &d, 0), "nothing to rebuild");
+        assert!(
+            !ok(&[f("A.PART02.rar", 2, false)], &extracted, &d, 0),
+            "holes repaired in place: par-check only verifies"
+        );
+        // part03 never arrived and was read borrowed (so it is in `extracted`): it takes the
+        // one borrowed slot, and a missing obfuscated file has none left.
+        let borrowed_read = vec![f("a.part03.rar", 3, false)];
+        assert!(ok(&borrowed_read, &extracted, &d, 1));
+        let mut plus_obf = borrowed_read.clone();
+        plus_obf.push(f("q9z1m0", 3, false));
+        assert!(!ok(&plus_obf, &extracted, &d, 1), "one borrowed volume covers one file");
+        assert!(ok(&plus_obf, &extracted, &d, 2));
+        let mut plus_sample = borrowed_read;
+        plus_sample.push(f("a.sample.mkv", 3, false));
+        assert!(!ok(&plus_sample, &extracted, &d, 5), "a sample that never arrived");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

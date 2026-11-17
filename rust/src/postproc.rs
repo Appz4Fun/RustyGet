@@ -3205,6 +3205,12 @@ pub(crate) fn take_dead_volumes_borrowed(nzb_id: i32) -> usize {
     dead_volumes_borrowed().remove(&nzb_id).unwrap_or(0)
 }
 
+/// How many dead volumes of download `nzb_id` direct unpack read borrowed, without forgetting
+/// it (see [`take_dead_volumes_borrowed`]).
+pub(crate) fn dead_volumes_borrowed_count(nzb_id: i32) -> usize {
+    dead_volumes_borrowed().get(&nzb_id).copied().unwrap_or(0)
+}
+
 /// True while direct unpack of download `nzb_id` waits on a volume of which nothing is on disk
 /// and that has no rebuilt stand-in yet: a later live repair may be able to place and borrow it
 /// once the volumes before it have arrived.

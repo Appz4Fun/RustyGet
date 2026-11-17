@@ -8593,7 +8593,24 @@ fn plan_dead_fills(
         })
         .collect();
     let is_dead_job = |name: &[u8]| dead_jobs.iter().any(|t| t.filename.eq_ignore_ascii_case(name));
-    if dead_jobs.is_empty() {
+    // A volume of a stored set with holes that the regular map cannot reach: while the set is
+    // still downloading its packed sizes do not add up to the inner file yet, so only the
+    // volumes on disk so far can place the holes.
+    let unmapped: Vec<bool> = (0..set_members.len())
+        .map(|m| {
+            member_holes.get(m).is_some_and(|h| !h.is_empty())
+                && member_targets.get(m).is_some_and(|&t| t >= 0)
+                && !repair_sets
+                    .iter()
+                    .any(|r| r.map.is_some() && r.set.members.contains(&(m as i32)))
+        })
+        .collect();
+    let unmapped_holes = |m: usize| unmapped.get(m).copied().unwrap_or(false);
+    let any_unmapped_holes = set_members
+        .iter()
+        .enumerate()
+        .any(|(m, member)| rar_part_number(&member.name).is_some() && unmapped_holes(m));
+    if dead_jobs.is_empty() && !any_unmapped_holes {
         return Vec::new();
     }
     let all_arrived = ctx.pending_data_files == Some(0);
@@ -8760,7 +8777,9 @@ fn plan_dead_fills(
             );
             emit_msg(TargetMessageKind::Info, &msg);
         }
-        let Some((inner_name, inner_size)) = inner.filter(|_| usable && any_dead) else {
+        let holes_here = numbered.values().any(|&m| unmapped_holes(m as usize));
+        let Some((inner_name, inner_size)) = inner.filter(|_| usable && (any_dead || holes_here))
+        else {
             continue;
         };
         let (all_plans, stop) = crate::deadvolume::plan_with_stop(&states, inner_size);
@@ -8768,7 +8787,7 @@ fn plan_dead_fills(
             .into_iter()
             .filter(|p| !crate::postproc::direct_unpack_has_virtual(&path_of(&volume_name(p.index as u32 + 1))))
             .collect();
-        if plans.is_empty() {
+        if plans.is_empty() && any_dead {
             let mut msg = b"Dead volumes in ".to_vec();
             msg.extend_from_slice(&volume_name(1));
             msg.extend_from_slice(b" cannot be placed yet: ");
@@ -8788,7 +8807,9 @@ fn plan_dead_fills(
                 msg.extend_from_slice(format!("; {} of {max} volumes found)", numbered.len()).as_bytes());
             }
             emit_msg(TargetMessageKind::Info, &msg);
-            continue;
+            if !holes_here {
+                continue;
+            }
         }
         // The map: every volume up to the first one whose place is unknown.
         let mut map = ContentMap::default();
@@ -8869,7 +8890,7 @@ fn plan_dead_fills(
                 VolumeState::Unknown => break,
             }
         }
-        if set_fills.is_empty() {
+        if set_fills.is_empty() && !holes_here {
             continue;
         }
         let existing = repair_sets.iter().position(|r| {
@@ -8893,6 +8914,11 @@ fn plan_dead_fills(
             ));
         }
         let inner_holes = content_mapper_coalesce_ranges(&inner_holes);
+        if set_fills.is_empty() && inner_holes.is_empty() {
+            continue;
+        }
+        let holed: i64 = total_size(&inner_holes) - set_fills.iter().map(|d| d.packed).sum::<i64>();
+        let in_map = map.runs_mut().len();
         let data = RepairSetData {
             set: set.clone(),
             map: Some(map),
@@ -8903,6 +8929,25 @@ fn plan_dead_fills(
         match existing {
             Some(e) if repair_sets[e].map.is_none() => repair_sets[e] = data,
             _ => repair_sets.push(data),
+        }
+        if holes_here && holed > 0 {
+            let mut msg = b"Cross-packing repair of ".to_vec();
+            msg.extend_from_slice(&volume_name(1));
+            msg.extend_from_slice(
+                format!(
+                    ": {:.1} MB missing of inner file ",
+                    stream_repair_bytes_to_mb(holed.max(0))
+                )
+                .as_bytes(),
+            );
+            msg.extend_from_slice(&inner_name);
+            msg.extend_from_slice(
+                format!(", placed from volumes 1 to {in_map}").as_bytes(),
+            );
+            emit_msg(TargetMessageKind::Info, &msg);
+        }
+        if set_fills.is_empty() {
+            continue;
         }
         let borrowed: i64 = set_fills.iter().map(|d| d.packed).sum();
         let mut msg = b"Dead volumes in ".to_vec();
@@ -9511,7 +9556,13 @@ impl CrossPackRepairSession {
             }
             // The archive's last volume is the last member of the set (they are in data
             // order), which is not where the mapped file ends when other files follow it.
-            let final_member = *members.last().unwrap_or(&-1);
+            // A map of the volumes on disk so far (the set still downloading) does not reach the
+            // end of the inner file: its last member is not the archive's last volume.
+            let final_member = if last_inner >= map.inner_size() {
+                *members.last().unwrap_or(&-1)
+            } else {
+                -1
+            };
             let tail_of = |this: &Self, m: i32| -> Option<(i64, i64)> {
                 let size = this.set_members.get(m as usize)?.size;
                 let end = *data_end.get(&m)?;
@@ -17878,6 +17929,161 @@ mod dead_volume_fill_tests {
         crate::postproc::direct_unpack_forget_holds(nzb_id);
         assert!(!crate::postproc::dead_volume_borrow_underway(nzb_id));
         let _ = crate::postproc::take_dead_volumes_borrowed(nzb_id);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A volume lost a few articles while later volumes are still downloading: the packed
+    /// sizes on disk do not add up to the inner file yet, so the regular map cannot be built.
+    /// The volumes on disk so far still place the holes, and an alt in another packing fills
+    /// them in place, without par2.
+    #[test]
+    fn holes_in_a_volume_are_filled_from_an_alt_while_the_set_still_downloads() {
+        let root = std::env::temp_dir().join(format!("rg-livehole-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dl = root.join("dl");
+        std::fs::create_dir_all(&dl).unwrap();
+        let data: Vec<u8> = (0..1_000_000u64).map(|i| (i.wrapping_mul(2654435761) >> 11) as u8).collect();
+        let vols = rar5_set("Movie.2160p.mkv", &data, 100_000);
+        let name = |i: usize| format!("The.Set.part{:02}.rar", i + 1);
+        let on_disk = 6usize;
+        let holed = 3usize;
+        let hole = NzbgetRsByteRange { offset: 40_000, size: 2_304 };
+        for (i, v) in vols.iter().enumerate().take(on_disk) {
+            let mut v = v.clone();
+            if i == holed {
+                v[hole.offset as usize..(hole.offset + hole.size) as usize].fill(0);
+            }
+            std::fs::write(dl.join(name(i)), v).unwrap();
+        }
+        let nzb_id = -4_242_003;
+        let dest = crate::fsops::path_to_bytes(&dl).to_vec();
+        let names: Vec<Vec<u8>> = (0..vols.len()).map(|i| name(i).into_bytes()).collect();
+        let name_refs: Vec<&[u8]> = names.iter().map(|n| n.as_slice()).collect();
+        let targets = vec![CrossPackTargetInput {
+            filename: name(holed).into_bytes(),
+            decoded_file_size: vols[holed].len() as i64,
+            encoded_size: 2_304,
+            patch_eligible: true,
+            holes: vec![hole],
+            all_articles_failed: false,
+        }];
+        let mut init = Vec::new();
+        let mut emit = |_: TargetMessageKind, m: &[u8]| init.push(String::from_utf8_lossy(m).into_owned());
+        let mut session = CrossPackRepairSession::new_with_dead(
+            &dest,
+            &name_refs,
+            &targets,
+            None,
+            true,
+            None,
+            &mut emit,
+            None,
+            DeadVolumeContext { pending_data_files: Some(4), nzb_id: Some(nzb_id) },
+        )
+        .unwrap_or_else(|| panic!("holes placed: {init:?}"));
+        assert!(session.dead_fills.is_empty(), "{init:?}");
+        assert!(session.has_inner_holes(), "{init:?}");
+        assert!(
+            init.iter().any(|m| m.contains("placed from volumes 1 to 6")),
+            "{init:?}"
+        );
+        assert!(!init.iter().any(|m| m.contains("left to par-repair")), "{init:?}");
+        let mut env = BareDonor { bytes: data.clone(), messages: Vec::new() };
+        session.process_donor(
+            b"",
+            b"Movie.Alt",
+            b"",
+            &[b"Movie.2160p.mkv"],
+            &[data.len() as i64],
+            &[vec![data.len() as i32]],
+            false,
+            &mut env,
+        );
+        assert!(!session.has_inner_holes(), "{init:?} {:?}", env.messages);
+        assert!(session.target_holes()[0].is_empty(), "{:?}", env.messages);
+        assert_eq!(std::fs::read(dl.join(name(holed))).unwrap(), vols[holed]);
+        assert!(!crate::postproc::dead_volume_borrow_underway(nzb_id));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The newest volume on disk lost its last articles, end block included, while later
+    /// volumes download: its end block must keep saying that another volume follows.
+    #[test]
+    fn the_newest_volume_on_disk_keeps_its_next_volume_flag() {
+        let root = std::env::temp_dir().join(format!("rg-livetail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dl = root.join("dl");
+        std::fs::create_dir_all(&dl).unwrap();
+        let data: Vec<u8> = (0..1_000_000u64).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+        let vols = rar5_set("Movie.2160p.mkv", &data, 100_000);
+        let name = |i: usize| format!("The.Set.part{:02}.rar", i + 1);
+        let on_disk = 6usize;
+        let newest = on_disk - 1;
+        let len = vols[newest].len() as i64;
+        let hole = NzbgetRsByteRange { offset: len - 3_000, size: 3_000 };
+        for (i, v) in vols.iter().enumerate().take(on_disk) {
+            let mut v = v.clone();
+            if i == newest {
+                v[hole.offset as usize..].fill(0);
+            }
+            std::fs::write(dl.join(name(i)), v).unwrap();
+        }
+        let dest = crate::fsops::path_to_bytes(&dl).to_vec();
+        let names: Vec<Vec<u8>> = (0..vols.len()).map(|i| name(i).into_bytes()).collect();
+        let name_refs: Vec<&[u8]> = names.iter().map(|n| n.as_slice()).collect();
+        let targets = vec![CrossPackTargetInput {
+            filename: name(newest).into_bytes(),
+            decoded_file_size: len,
+            encoded_size: 3_000,
+            patch_eligible: true,
+            holes: vec![hole],
+            all_articles_failed: false,
+        }];
+        let mut init = Vec::new();
+        let mut emit = |_: TargetMessageKind, m: &[u8]| init.push(String::from_utf8_lossy(m).into_owned());
+        let mut session = CrossPackRepairSession::new_with_dead(
+            &dest,
+            &name_refs,
+            &targets,
+            None,
+            true,
+            None,
+            &mut emit,
+            None,
+            DeadVolumeContext { pending_data_files: Some(4), nzb_id: Some(-4_242_004) },
+        )
+        .unwrap_or_else(|| panic!("holes placed: {init:?}"));
+        let mut env = BareDonor { bytes: data.clone(), messages: Vec::new() };
+        session.process_donor(
+            b"",
+            b"Movie.Alt",
+            b"",
+            &[b"Movie.2160p.mkv"],
+            &[data.len() as i64],
+            &[vec![data.len() as i32]],
+            false,
+            &mut env,
+        );
+        let got = std::fs::read(dl.join(name(newest))).unwrap();
+        // The payload came back; the end block is either the original one or still missing,
+        // never rewritten as the archive's last.
+        let mut vol = crate::rarreader::Volume::default();
+        let src = DiskContentSource::new(std::fs::File::open(dl.join(name(newest))).unwrap(), len);
+        let mut adapter = ContentSourceRarAdapter(&src);
+        let mut files = Vec::new();
+        crate::rarreader::read_from(&mut vol, &mut adapter, None, &mut files);
+        let f = files.first().expect("member header");
+        let data_end = (f.data_offset + f.packed_size) as usize;
+        assert_eq!(&got[..data_end], &vols[newest][..data_end], "{:?}", env.messages);
+        let tail = &got[data_end..];
+        assert!(
+            tail == &vols[newest][data_end..] || tail.iter().all(|&b| b == 0),
+            "end block rewritten: {:?}",
+            env.messages
+        );
+        if tail.iter().all(|&b| b == 0) {
+            assert!(!session.target_holes()[0].is_empty(), "a hole left must stay a hole");
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 }

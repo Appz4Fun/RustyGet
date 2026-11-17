@@ -530,6 +530,190 @@ pub(crate) unsafe fn host_file_set(
     }
 }
 
+fn art(
+    list: *mut ArticleList,
+    article: usize,
+    op: c_int,
+    a2: c_int,
+    ints: *mut c_int,
+    i64s: *mut i64,
+    strs: *mut *const c_char,
+) -> usize {
+    unsafe {
+        crate::qarticle::nzbget_rs_article_host(
+            list,
+            article as *mut crate::qarticle::Article,
+            op,
+            a2,
+            0,
+            ptr::null(),
+            ints,
+            i64s,
+            strs,
+        )
+    }
+}
+
+thread_local! {
+    // the output name handed back by host op 44 sub-op 4 (valid until the
+    // next call on this thread, as the C++ thread_local string was)
+    static OUT_NAME: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The article cache's file ops (host op 44), as the C++ host did them.
+/// Returns what that op returned.
+///
+/// # Safety
+/// `f` is a live file; `p2` is a live article for 1, 2 and 6 (a2 != 0), the
+/// callback context for 5; output arrays are large enough for the op.
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn host_cache_op(
+    f: *const File,
+    a1: i32,
+    a2: i32,
+    p2: usize,
+    s1: *const c_char,
+    ints: *mut c_int,
+    i64s: *mut i64,
+    strs: *mut *const c_char,
+) -> usize {
+    use field::*;
+    if f.is_null() {
+        return 0;
+    }
+    let file = unsafe { &*f };
+    let null_i = ptr::null_mut();
+    let null_l = ptr::null_mut();
+    let null_s = ptr::null_mut();
+    let nzb = file.get(NZB) as usize as *const crate::qnzb::NzbScalars;
+    let opts = crate::options::active_options();
+    let skip_write = || {
+        let nzb_skip = !nzb.is_null() && unsafe { (*nzb).skipDiskWrite };
+        nzb_skip || opts.as_ref().is_some_and(|o| o.scalars().skip_write != 0)
+    };
+    // take the flush lock unless it is already taken
+    let try_flush_lock = || {
+        let mut d = file.lock();
+        if d.ints[FLUSH_LOCKED as usize] != 0 {
+            false
+        } else {
+            d.ints[FLUSH_LOCKED as usize] = 1;
+            true
+        }
+    };
+    match a1 {
+        // copy the article's cached data out
+        1 => {
+            let data = art(null_l, p2, 110, 0, null_i, null_l.cast(), null_s) as *const u8;
+            if file.get(FLUSH_LOCKED) == 0 && !data.is_null() && a2 > 0 {
+                unsafe { ptr::copy_nonoverlapping(data, *i64s as usize as *mut u8, a2 as usize) };
+                1
+            } else {
+                0
+            }
+        }
+        // drop the article's cached data once it is written
+        2 => {
+            let result = art(null_l, p2, 114, 0, null_i, null_l.cast(), null_s) as *const c_char;
+            if art(null_l, p2, 117, 0, null_i, null_l.cast(), null_s) > 0 && !result.is_null() {
+                unsafe { libc::unlink(result) };
+            }
+            if art(null_l, p2, 110, 0, null_i, null_l.cast(), null_s) == 0
+                || file.get(FLUSH_LOCKED) != 0
+            {
+                return 0;
+            }
+            art(null_l, p2, 111, 0, null_i, null_l.cast(), null_s);
+            file.set(CACHED_ARTICLES, file.get(CACHED_ARTICLES) - 1);
+            1
+        }
+        3 => {
+            if a2 != 0 {
+                usize::from(try_flush_lock())
+            } else {
+                file.set(FLUSH_LOCKED, 0);
+                1
+            }
+        }
+        // where and how the article writer should write
+        4 => {
+            let (out_init, name) = {
+                let taken = file.output_lock();
+                let r = {
+                    let d = file.lock();
+                    (
+                        d.ints[OUTPUT_INITIALIZED as usize] != 0,
+                        d.texts[text::OUTPUT_FILENAME as usize].as_bytes().to_vec(),
+                    )
+                };
+                if taken {
+                    file.output_unlock();
+                }
+                r
+            };
+            let direct = opts.as_ref().is_some_and(|o| o.scalars().direct_write != 0)
+                || file.get(FORCE_DIRECT_WRITE) != 0;
+            unsafe {
+                *ints = i32::from(direct && out_init);
+                *ints.add(1) = i32::from(skip_write());
+                *i64s = name.len() as i64;
+                *i64s.add(1) = nzb as usize as i64;
+            }
+            OUT_NAME.with(|n| {
+                let mut n = n.borrow_mut();
+                *n = name;
+                unsafe { *strs = n.as_ptr().cast() };
+            });
+            1
+        }
+        // hand every cached segment to the writer callback, under the flush lock
+        5 => {
+            if !try_flush_lock() {
+                return 0;
+            }
+            type PushSeg =
+                unsafe extern "C" fn(usize, usize, i64, c_int, *const c_char, *const c_char);
+            let push: PushSeg = unsafe { std::mem::transmute::<*const c_char, PushSeg>(s1) };
+            let list = file.articles;
+            let n = art(list, 0, 100, 0, null_i, null_l.cast(), null_s);
+            for i in 0..n {
+                let pa = art(list, 0, 106, i as c_int, null_i, null_l.cast(), null_s);
+                let mut ai = [0 as c_int; 5];
+                let mut ao = [0i64; 1];
+                let mut as_ = [ptr::null::<c_char>(); 2];
+                art(
+                    ptr::null_mut(),
+                    pa,
+                    120,
+                    0,
+                    ai.as_mut_ptr(),
+                    ao.as_mut_ptr(),
+                    as_.as_mut_ptr(),
+                );
+                if !as_[0].is_null() {
+                    unsafe { push(p2, pa, ao[0], ai[1], as_[0], as_[1]) };
+                }
+            }
+            1
+        }
+        6 => {
+            if a2 == 0 {
+                let parking = !nzb.is_null() && unsafe { (*nzb).parking };
+                return usize::from(file.get(DELETED) != 0 && !parking);
+            }
+            art(null_l, p2, 111, 0, null_i, null_l.cast(), null_s);
+            0
+        }
+        7 => {
+            file.set(CACHED_ARTICLES, file.get(CACHED_ARTICLES) - i64::from(a2));
+            file.set(FLUSH_LOCKED, 0);
+            unsafe { *ints = i32::from(skip_write()) };
+            0
+        }
+        _ => 0,
+    }
+}
+
 /// What the queue host reported for a file (host op 40), read directly:
 /// `ints` and `i64s` in that op's order, the seven texts (filename, subject,
 /// output filename, hard-link path, origname, hash16k, par set id) when

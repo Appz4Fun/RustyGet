@@ -6187,6 +6187,20 @@ unsafe fn native_op(
             unsafe { crate::qfile::host_file_set(file, a1, a2, p2, s1, i64s) };
             Some(0)
         }
+        // a collection's file list and completed files
+        (34, _) => Some(unsafe {
+            crate::qnzb::host_filelist_op(
+                p1 as *mut crate::qnzb::NzbScalars,
+                a1,
+                a2,
+                p2,
+                s1,
+                s2,
+                ints,
+                i64s,
+                strs,
+            )
+        }),
         // a collection's plain setters (the rest stay with the host)
         (32, _) => unsafe {
             crate::qnzb::host_coll_set(p1 as *mut crate::qnzb::NzbScalars, a1, a2, s1, i64s)

@@ -400,11 +400,11 @@ fn damage_is_borrowed_volumes(
     absent_unnamed <= borrowed
 }
 
-/// True when direct unpack read every damaged file of the download: each failed data file is
-/// either an archive volume direct unpack extracted from (its outputs passed the archive's own
-/// checksums, with any hole patched from a repair), or a file that never reached the disk and is
-/// one of the `borrowed` dead volumes. A damaged file direct unpack never read still needs
-/// par-check.
+/// True when par-check would only rebuild volumes that direct unpack already read borrowed:
+/// some data files never reached the disk, each of them is one of the `borrowed` dead volumes,
+/// and every damaged file on disk is an archive volume direct unpack extracted from (its outputs
+/// passed the archive's own checksums, with any hole patched from a repair). A damaged file
+/// direct unpack never read still needs par-check.
 fn direct_unpack_read_all_damage(
     files: &[crate::queuesubsys_host::CompletedFileSnap],
     extracted: &[Vec<u8>],
@@ -441,7 +441,9 @@ fn direct_unpack_read_all_damage(
         }
         absent += 1;
     }
-    absent <= borrowed
+    // With every file on disk par-check only verifies (quickly, from the article checksums
+    // where it can): it is kept. It is skipped when it would rebuild borrowed volumes.
+    absent > 0 && absent <= borrowed
 }
 
 /// Classify skipped par-check health action in `PrePostProcessor::StartJob`:
@@ -2035,7 +2037,7 @@ impl NzbgetRsPrePostProcessor {
                 msg.extend_from_slice(&nzb.name);
                 msg.extend_from_slice(
                     b": direct unpack verified every file against the archive checksums, \
-                      with its damage repaired or borrowed from duplicates",
+                      reading the missing volumes borrowed from duplicates",
                 );
                 host.nzb_print_message(nzb.ptr, MK_INFO, &msg);
                 host.nzb_set_int(nzb.ptr, NZB_INT_PAR_STATUS, PAR_STATUS_SUCCESS);
@@ -2522,7 +2524,11 @@ mod tests {
         std::fs::write(dir.join("subs.rar"), b"partial").unwrap();
         other_set.push(f("subs.rar", 2, false));
         assert!(!ok(&other_set, &extracted, &d, 5), "an archive direct unpack did not extract");
-        assert!(ok(&[f("a.part01.rar", 1, false)], &extracted, &d, 0), "no damage at all");
+        assert!(!ok(&[f("a.part01.rar", 1, false)], &extracted, &d, 0), "nothing to rebuild");
+        assert!(
+            !ok(&[f("A.PART02.rar", 2, false)], &extracted, &d, 0),
+            "holes repaired in place: par-check only verifies"
+        );
         // part03 never arrived and was read borrowed (so it is in `extracted`): it takes the
         // one borrowed slot, and a missing obfuscated file has none left.
         let borrowed_read = vec![f("a.part03.rar", 3, false)];

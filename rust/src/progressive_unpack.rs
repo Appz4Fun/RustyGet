@@ -84,6 +84,11 @@ pub trait VolumeFeed: Send + 'static {
     fn set_became_final(&self) -> bool {
         false
     }
+    /// True when some volume of the download was rebuilt around data borrowed from a duplicate
+    /// (see [`crate::deadvolume`]): it has no file, so the set on disk is not the whole set.
+    fn has_borrowed(&self) -> bool {
+        false
+    }
     /// Puts `path` back on hold with its lost ranges: an earlier run (before a restart) was
     /// handed it damaged and its repair had not happened yet, so `wait_repaired` must wait for
     /// it again. A feed that cannot hold a volume ignores this.
@@ -2123,6 +2128,19 @@ impl FeedProvider {
         if !became_final {
             return;
         }
+        // A dead volume borrowed from a duplicate has no file: the set on disk stops at it, and
+        // a declaration of that set would leave the borrowed (virtual) volumes out. zipfast
+        // asks for the declaration before it asks for the next volume, so this has to be known
+        // from the feed, not from the volumes handed out so far.
+        if self
+            .feed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .has_borrowed()
+        {
+            late.refused = true;
+            return;
+        }
         if late.members.is_none() {
             match set_members(&late.first, &late.password) {
                 Some(m) if !m.windows_names && !m.duplicate_names => late.members = Some(m),
@@ -2285,14 +2303,18 @@ impl VolumeSource for FeedProvider {
                 Ok(VolumeAnswer::Wait)
             }
             VolumeView::Missing => Ok(VolumeAnswer::Missing),
-            VolumeView::Virtual(v) => Ok(VolumeAnswer::Ready(Box::new(
-                VirtualSource::open(&path, v).map_err(|cause| {
-                    ProgressiveFailure::new(FailureKind::Input {
-                        operation: zipfast::progressive::InputOperation::Open,
-                        cause,
-                    })
-                })?,
-            ))),
+            VolumeView::Virtual(v) => {
+                // A virtual volume is no file of the set: never declare the set complete.
+                self.late.refused = true;
+                Ok(VolumeAnswer::Ready(Box::new(
+                    VirtualSource::open(&path, v).map_err(|cause| {
+                        ProgressiveFailure::new(FailureKind::Input {
+                            operation: zipfast::progressive::InputOperation::Open,
+                            cause,
+                        })
+                    })?,
+                )))
+            }
         }
     }
 
@@ -2448,7 +2470,9 @@ impl RangeSource for VirtualSource {
         self.info
     }
     fn backing_files(&self) -> &[std::fs::File] {
-        std::slice::from_ref(&self.data)
+        // The scratch file holds only the borrowed part, at other offsets than the volume's:
+        // it is not the volume's backing file.
+        &[]
     }
     fn read_at(
         &mut self,

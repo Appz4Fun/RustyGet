@@ -440,6 +440,9 @@ impl VolumeFeed for RememberedHoles {
     fn set_became_final(&self) -> bool {
         self.inner.set_became_final()
     }
+    fn has_borrowed(&self) -> bool {
+        self.inner.has_borrowed()
+    }
     fn remember_damaged(&mut self, path: &Path, holes: Vec<(u64, u64)>) {
         self.inner.remember_damaged(path, holes)
     }

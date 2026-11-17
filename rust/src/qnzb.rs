@@ -804,10 +804,13 @@ fn list_op(
     }
 }
 
-/// Post-processing state of a collection (the C++ PostInfo is a thin owner).
+/// Post-processing state of a collection. The C++ PostInfo is this
+/// allocation (a PostInfo* is a Post*): it has no members of its own.
 pub struct Post {
     // scalar fields by id (see `nzbget_rs_post_op`)
     vals: [std::sync::atomic::AtomicI64; POST_VALS],
+    // the collection being post-processed (an NzbScalars*), 0 for none
+    nzb: std::sync::atomic::AtomicUsize,
     lists: Mutex<PostLists>,
 }
 
@@ -825,6 +828,7 @@ struct PostLists {
 pub extern "C" fn nzbget_rs_post_new() -> *mut Post {
     Box::into_raw(Box::new(Post {
         vals: std::array::from_fn(|_| std::sync::atomic::AtomicI64::new(0)),
+        nzb: std::sync::atomic::AtomicUsize::new(0),
         lists: Mutex::new(PostLists::default()),
     }))
 }
@@ -847,13 +851,17 @@ pub unsafe extern "C" fn nzbget_rs_post_label(p: *const Post) -> crate::ffi::RsB
 /// Fields 0-19: 0 stage, 1 working, 2 deleted, 3 request par check,
 /// 4 force par full, 5 par cannot cover, 6 need par check, 7 need unpack,
 /// 8 force repair, 9 par repaired, 10 unpack tried, 11 pass list tried,
-/// 12 last unpack status, 13 file progress, 14 stage progress,
-/// 15 stream repair done, 16 stream repair recovered, 17 start time,
-/// 18 stage time, 19 post thread pointer.
+/// 12 last unpack status, 13 file progress, 14 stage progress (kept in
+/// 0..=1000), 15 stream repair done, 16 stream repair recovered,
+/// 17 start time, 18 stage time, 19 post thread pointer. Fields 9, 10 and
+/// 12 read the collection's own value when the post job has one, and a set
+/// writes both.
 ///  0 get field a2; 1 set field a2 to v;
+///  2 get the collection pointer; 3 set it to v;
 ///  11 set the progress label to s1 (read it with `nzbget_rs_post_label`);
-///  20-23 parred files, 30-33 extracted archives (see `list_op`): strings
-///  returned stay valid until that list changes.
+///  20-23 parred files, 30-33 extracted archives (see `list_op`; the
+///  collection's list when there is one): strings returned stay valid until
+///  that list changes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_post_op(
     p: *const Post,
@@ -866,18 +874,59 @@ pub unsafe extern "C" fn nzbget_rs_post_op(
     use std::sync::atomic::Ordering::SeqCst;
     let post = unsafe { &*p };
     let field = || post.vals.get(a2.max(0) as usize).filter(|_| a2 >= 0);
+    let nzb = post.nzb.load(SeqCst) as *mut NzbScalars;
     match op {
-        0 => field().map_or(0, |f| f.load(SeqCst)),
+        0 => {
+            if !nzb.is_null() {
+                let s = unsafe { &*nzb };
+                match a2 {
+                    9 => return i64::from(s.parRepaired),
+                    10 => return i64::from(s.unpackTried),
+                    12 => return i64::from(s.lastUnpackStatus),
+                    _ => {}
+                }
+            }
+            field().map_or(0, |f| f.load(SeqCst))
+        }
         1 => {
+            let v = if a2 == 14 { v.clamp(0, 1000) } else { v };
             if let Some(f) = field() {
                 f.store(v, SeqCst);
             }
+            if !nzb.is_null() {
+                let s = unsafe { &mut *nzb };
+                match a2 {
+                    9 => s.parRepaired = v != 0,
+                    10 => s.unpackTried = v != 0,
+                    12 => s.lastUnpackStatus = v as i32,
+                    _ => {}
+                }
+            }
+            0
+        }
+        2 => nzb as usize as i64,
+        3 => {
+            post.nzb.store(v as usize, SeqCst);
             0
         }
         11 => {
             post.lists.lock().unwrap_or_else(|e| e.into_inner()).label = owned(s1);
             0
         }
+        30..=33 if !nzb.is_null() => unsafe {
+            nzbget_rs_nzb_files(
+                nzb,
+                op,
+                a2,
+                std::ptr::null(),
+                s1,
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                strs,
+                std::ptr::null(),
+            )
+        },
         20..=23 | 30..=33 => {
             let mut l = post.lists.lock().unwrap_or_else(|e| e.into_inner());
             let list = if op < 30 {
@@ -889,6 +938,313 @@ pub unsafe extern "C" fn nzbget_rs_post_op(
         }
         _ => 0,
     }
+}
+
+/// Field 19 of a post job: its post-processing thread.
+fn post_thread(p: *const Post) -> *mut crate::jobthread::JobThread {
+    let ns = std::ptr::null_mut();
+    (unsafe { nzbget_rs_post_op(p, 0, 19, 0, std::ptr::null(), ns) }) as usize as *mut _
+}
+
+fn post_set(p: *const Post, id: c_int, v: i64) {
+    unsafe { nzbget_rs_post_op(p, 1, id, v, std::ptr::null(), std::ptr::null_mut()) };
+}
+
+fn post_get(p: *const Post, id: c_int) -> i64 {
+    unsafe { nzbget_rs_post_op(p, 0, id, 0, std::ptr::null(), std::ptr::null_mut()) }
+}
+
+/// Starts post-processing for a collection (host op 32 sub-op 54): a fresh
+/// post job replaces any earlier one.
+///
+/// # Safety
+/// `p` is a live collection; the caller holds the queue lock.
+pub(crate) unsafe fn enter_post_process(p: *mut NzbScalars) {
+    let post = nzbget_rs_post_new();
+    unsafe {
+        nzbget_rs_post_op(
+            post,
+            3,
+            0,
+            p as usize as i64,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+        )
+    };
+    let old = unsafe { nzbget_rs_nzb_slot(p, 1, 1, post as usize) };
+    unsafe { nzbget_rs_post_free(old as *mut Post) };
+}
+
+/// Ends post-processing for a collection (host op 32 sub-op 55): frees the
+/// post job and resets the per-run unpack state. Messages stay.
+///
+/// # Safety
+/// `p` is a live collection; the caller holds the queue lock.
+pub(crate) unsafe fn leave_post_process(p: *mut NzbScalars) {
+    let old = unsafe { nzbget_rs_nzb_slot(p, 1, 1, 0) };
+    unsafe { nzbget_rs_post_free(old as *mut Post) };
+    let s = unsafe { &mut *p };
+    s.unpackTried = false;
+    s.lastUnpackStatus = 0;
+    unsafe {
+        nzbget_rs_nzb_files(
+            p,
+            33,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+        )
+    };
+}
+
+thread_local! {
+    // the progress label host op 60 hands out: valid on this thread until
+    // the next snapshot
+    static POST_LABEL: std::cell::RefCell<CString> = std::cell::RefCell::new(CString::default());
+}
+
+/// Host op 60 on a post job `p` (sub-op `a1`), as the C++ host did:
+///  0 snapshot (ints[0..21], i64s[0..3], strs[0] the progress label);
+///  1 set field a2 (0-16) to p2; 2 start time = i64s[0];
+///  3 new stage at time i64s[0] (progress and label cleared);
+///  4 stage time = i64s[0]; 5 progress label = s1;
+///  6 parred files: add s1 when a2 < 0, else strs[0] = file a2;
+///  7 extracted archives: clear when a2 < 0, else strs[0] = archive a2.
+///
+/// # Safety
+/// `p` is null or a live post job; the arrays fit the sub-op.
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn host_post_op(
+    p: *const Post,
+    a1: c_int,
+    a2: c_int,
+    p2: usize,
+    s1: *const c_char,
+    ints: *mut c_int,
+    i64s: *mut i64,
+    strs: *mut *const c_char,
+) -> usize {
+    if p.is_null() {
+        return 0;
+    }
+    let ns: *const c_char = std::ptr::null();
+    let none: *mut *const c_char = std::ptr::null_mut();
+    let flag = |id| c_int::from(post_get(p, id) != 0);
+    match a1 {
+        0 => {
+            let ints = unsafe { std::slice::from_raw_parts_mut(ints, 21) };
+            let i64s = unsafe { std::slice::from_raw_parts_mut(i64s, 3) };
+            let pt = post_thread(p);
+            ints[0] = post_get(p, 0) as c_int;
+            for (slot, id) in [1, 2, 3, 4, 8, 15, 16, 5, 6, 7].into_iter().enumerate() {
+                ints[slot + 1] = flag(id);
+            }
+            ints[11] = c_int::from(!pt.is_null());
+            ints[12] = c_int::from(
+                !pt.is_null() && unsafe { crate::jobthread::nzbget_rs_job_op(pt, 4, 0, 0, 0) } != 0,
+            );
+            ints[13] = flag(10);
+            ints[14] = flag(9);
+            ints[15] = flag(11);
+            ints[16] = post_get(p, 12) as c_int;
+            ints[17] = unsafe { nzbget_rs_post_op(p, 30, 0, 0, ns, none) } as c_int;
+            ints[18] = unsafe { nzbget_rs_post_op(p, 20, 0, 0, ns, none) } as c_int;
+            ints[19] = post_get(p, 14) as c_int;
+            ints[20] = post_get(p, 13) as c_int;
+            i64s[0] = post_get(p, 17);
+            i64s[1] = unsafe { nzbget_rs_post_op(p, 2, 0, 0, ns, none) };
+            i64s[2] = post_get(p, 18);
+            if !strs.is_null() {
+                let label = unsafe { &*p }
+                    .lists
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .label
+                    .clone();
+                let ptr = POST_LABEL.with(|l| {
+                    *l.borrow_mut() = label;
+                    l.borrow().as_ptr()
+                });
+                unsafe { *strs = ptr };
+            }
+        }
+        1 => {
+            let v = p2 as c_int;
+            match a2 {
+                0 | 12 | 13 | 14 => post_set(p, a2, i64::from(v)),
+                1..=11 | 15 | 16 => post_set(p, a2, i64::from(v != 0)),
+                _ => {}
+            }
+        }
+        2 => post_set(p, 17, unsafe { *i64s }),
+        3 => {
+            post_set(p, 18, unsafe { *i64s });
+            post_set(p, 14, 0);
+            post_set(p, 13, 0);
+            unsafe { nzbget_rs_post_op(p, 11, 0, 0, c"".as_ptr(), none) };
+        }
+        4 => post_set(p, 18, unsafe { *i64s }),
+        5 => {
+            unsafe { nzbget_rs_post_op(p, 11, 0, 0, s1, none) };
+        }
+        6 | 7 => {
+            let base = if a1 == 6 { 20 } else { 30 };
+            if a2 < 0 {
+                // add a parred file, or clear the extracted archives
+                let (op, s) = if a1 == 6 { (22, s1) } else { (33, ns) };
+                unsafe { nzbget_rs_post_op(p, op, 0, 0, s, none) };
+            } else {
+                unsafe {
+                    *strs = c"".as_ptr();
+                    nzbget_rs_post_op(p, base + 1, a2, 0, ns, strs);
+                }
+            }
+        }
+        _ => {}
+    }
+    0
+}
+
+/// Starts a direct-unpack job for collection `p` (host op 62 sub-op 8): the
+/// job goes in slot 2 and the direct-unpack status becomes running (back to
+/// none, with the slot cleared, when the thread cannot start).
+///
+/// # Safety
+/// `p` is a live collection; the caller holds the queue lock.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_nzb_start_direct_unpack(p: *mut NzbScalars) {
+    use crate::jobthread::{nzbget_rs_job_free, nzbget_rs_job_new_unpack, nzbget_rs_job_start};
+    if p.is_null() {
+        return;
+    }
+    let job = nzbget_rs_job_new_unpack(unsafe { (*p).id });
+    unsafe { nzbget_rs_nzb_slot(p, 2, 1, job as usize) };
+    // NzbInfo::nsRunning
+    unsafe { (*p).directUnpackStatus = 1 };
+    if unsafe { nzbget_rs_job_start(job) } == 0 {
+        unsafe {
+            nzbget_rs_nzb_slot(p, 2, 1, 0);
+            (*p).directUnpackStatus = 0;
+            nzbget_rs_job_free(job, 0);
+        }
+    }
+}
+
+/// Host op 62: post-processing and direct-unpack job handles (sub-op `a1`):
+///  0 stop the post job p1's thread; 1 detach and free it; 2 kill and free it;
+///  3 is collection p1's direct unpack active (a2 != 0: any running one);
+///  4-7 direct-unpack ops on collection p2's job (4 stop, 5 collection
+///  downloaded, 6 deleted, 7 file i64s[0] downloaded; p1 the coordinator);
+///  8 start a direct unpack for collection p1;
+///  9 stop collection p1's live repair; 10 detach and stop it;
+///  11 add par file p2 (a2 deleted) to the post job p1's repair;
+///  12 start post job p1's controller of kind a2.
+///
+/// # Safety
+/// `p1`/`p2` are null or live objects of the kind the sub-op takes.
+pub(crate) unsafe fn host_post_job_op(
+    a1: c_int,
+    a2: c_int,
+    p1: usize,
+    p2: usize,
+    i64s: *const i64,
+) -> usize {
+    use crate::jobthread::{
+        nzbget_rs_job_free, nzbget_rs_job_new_post, nzbget_rs_job_op, nzbget_rs_job_start,
+    };
+    let post = p1 as *const Post;
+    let slot = |n: usize, id: c_int| -> *mut crate::jobthread::JobThread {
+        if n == 0 {
+            std::ptr::null_mut()
+        } else {
+            (unsafe { nzbget_rs_nzb_slot(n as *const NzbScalars, id, 0, 0) }) as *mut _
+        }
+    };
+    match a1 {
+        0 if !post.is_null() => {
+            let t = post_thread(post);
+            if !t.is_null() {
+                unsafe { nzbget_rs_job_op(t, 0, 0, 0, 0) };
+            }
+        }
+        1 | 2 if !post.is_null() => {
+            let t = post_thread(post);
+            if !t.is_null() {
+                post_set(post, 19, 0);
+                unsafe { nzbget_rs_job_free(t, c_int::from(a1 == 2)) };
+            }
+        }
+        3 => {
+            let du = slot(p1, 2);
+            if du.is_null() {
+                return 0;
+            }
+            let active = a2 != 0
+                || (unsafe { nzbget_rs_job_op(du, 15, 0, 0, 0) } != 0
+                    && unsafe { nzbget_rs_job_op(du, 16, 0, 0, 0) } == 0);
+            return usize::from(active);
+        }
+        4..=7 => {
+            let du = slot(p2, 2);
+            if !du.is_null() {
+                const DU_OP: [c_int; 4] = [11, 13, 14, 12];
+                let arg = if a1 == 7 {
+                    (unsafe { *i64s }) as usize
+                } else {
+                    p2
+                };
+                unsafe { nzbget_rs_job_op(du, DU_OP[(a1 - 4) as usize], 0, p1, arg) };
+            }
+        }
+        8 if p1 != 0 => unsafe { nzbget_rs_nzb_start_direct_unpack(p1 as *mut NzbScalars) },
+        9 => {
+            let t = slot(p1, 3);
+            if !t.is_null() {
+                unsafe { nzbget_rs_job_op(t, 0, 0, 0, 0) };
+            }
+        }
+        10 if p1 != 0 => {
+            let t = unsafe { nzbget_rs_nzb_slot(p1 as *const NzbScalars, 3, 1, 0) }
+                as *mut crate::jobthread::JobThread;
+            if !t.is_null() {
+                unsafe { nzbget_rs_job_op(t, 0, 0, 0, 0) };
+            }
+        }
+        11 if !post.is_null() && crate::ffi::build_parcheck_enabled() => {
+            let t = post_thread(post);
+            if !t.is_null() {
+                let added = unsafe { nzbget_rs_job_op(t, 5, c_int::from(a2 != 0), p2, 0) };
+                return usize::from(added != 0);
+            }
+        }
+        12 if !post.is_null() => {
+            // the repair controller needs par-check support
+            if a2 == 3 && !crate::ffi::build_parcheck_enabled() {
+                return 0;
+            }
+            let nzb =
+                unsafe { nzbget_rs_post_op(post, 2, 0, 0, std::ptr::null(), std::ptr::null_mut()) }
+                    as usize as *const NzbScalars;
+            if a2 == 9 && !nzb.is_null() && unsafe { (*nzb).skipScriptProcessing } {
+                return 0;
+            }
+            let job = unsafe { nzbget_rs_job_new_post(a2, p1, 0, 0) };
+            post_set(post, 19, job as usize as i64);
+            if unsafe { nzbget_rs_job_start(job) } == 0 {
+                // no worker will finish this stage: let the scheduler clean up and retry it
+                post_set(post, 19, 0);
+                post_set(post, 1, 0);
+                unsafe { nzbget_rs_job_free(job, 0) };
+            }
+        }
+        _ => {}
+    }
+    0
 }
 
 /// Writes a collection's download counters (what host op 33 did), in the
@@ -1450,6 +1806,19 @@ pub(crate) unsafe fn host_coll_set(
         113 => {
             files(7);
         }
+        54 => unsafe { enter_post_process(p) },
+        55 => unsafe { leave_post_process(p) },
+        109 | 110 => {
+            let post = unsafe { nzbget_rs_nzb_slot(p, 1, 0, 0) } as *const Post;
+            if !post.is_null() {
+                if a1 == 109 {
+                    post_set(post, 0, i64::from(a2));
+                } else {
+                    post_set(post, 4, i64::from(a2 & 1 != 0));
+                    post_set(post, 8, i64::from(a2 & 2 != 0));
+                }
+            }
+        }
         _ => return false,
     }
     true
@@ -2006,6 +2375,248 @@ mod tests {
             nzbget_rs_post_op(p, 33, 0, 0, ns, &mut out);
             assert_eq!(nzbget_rs_post_op(p, 30, 0, 0, ns, &mut out), 0);
             nzbget_rs_post_free(p);
+        }
+    }
+
+    #[test]
+    fn post_fields_follow_the_collection() {
+        let ns: *const c_char = std::ptr::null();
+        let mut out = ns;
+        unsafe {
+            let n = nzbget_rs_nzb_scalars_new();
+            let p = nzbget_rs_post_new();
+            // without a collection the post job keeps its own values
+            nzbget_rs_post_op(p, 1, 9, 1, ns, &mut out);
+            assert_eq!(nzbget_rs_post_op(p, 0, 9, 0, ns, &mut out), 1);
+            assert!(!(*n).parRepaired);
+            nzbget_rs_post_op(p, 3, 0, n as usize as i64, ns, &mut out);
+            assert_eq!(
+                nzbget_rs_post_op(p, 2, 0, 0, ns, &mut out),
+                n as usize as i64
+            );
+            // reads come from the collection, writes go to both
+            assert_eq!(nzbget_rs_post_op(p, 0, 9, 0, ns, &mut out), 0);
+            nzbget_rs_post_op(p, 1, 10, 1, ns, &mut out);
+            nzbget_rs_post_op(p, 1, 12, 2, ns, &mut out);
+            assert!((*n).unpackTried);
+            assert_eq!((*n).lastUnpackStatus, 2);
+            (*n).lastUnpackStatus = 3;
+            assert_eq!(nzbget_rs_post_op(p, 0, 12, 0, ns, &mut out), 3);
+            // stage progress stays in 0..=1000
+            nzbget_rs_post_op(p, 1, 14, 5000, ns, &mut out);
+            assert_eq!(nzbget_rs_post_op(p, 0, 14, 0, ns, &mut out), 1000);
+            nzbget_rs_post_op(p, 1, 14, -4, ns, &mut out);
+            assert_eq!(nzbget_rs_post_op(p, 0, 14, 0, ns, &mut out), 0);
+            // extracted archives are the collection's list
+            nzbget_rs_post_op(p, 32, 0, 0, c"a.rar".as_ptr(), &mut out);
+            let np: *const NzbScalars = std::ptr::null();
+            let nf = |op, a2, strs: *mut *const c_char| {
+                nzbget_rs_nzb_files(
+                    n,
+                    op,
+                    a2,
+                    np,
+                    ns,
+                    ns,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    strs,
+                    std::ptr::null(),
+                )
+            };
+            assert_eq!(nf(30, 0, std::ptr::null_mut()), 1);
+            assert_eq!(nzbget_rs_post_op(p, 31, 0, 0, ns, &mut out), 0);
+            assert_eq!(CStr::from_ptr(out).to_bytes(), b"a.rar");
+            nzbget_rs_post_op(p, 33, 0, 0, ns, &mut out);
+            assert_eq!(nf(30, 0, std::ptr::null_mut()), 0);
+            nzbget_rs_post_free(p);
+            nzbget_rs_nzb_scalars_free(n);
+        }
+    }
+
+    #[test]
+    fn coll_set_enters_and_leaves_post_process() {
+        let ns: *const c_char = std::ptr::null();
+        unsafe {
+            let n = nzbget_rs_nzb_scalars_new();
+            // stage and force flags need a post job
+            assert!(host_coll_set(n, 109, 4, ns, std::ptr::null()));
+            assert_eq!(nzbget_rs_nzb_slot(n, 1, 0, 0), 0);
+            assert!(host_coll_set(n, 54, 0, ns, std::ptr::null()));
+            let p = nzbget_rs_nzb_slot(n, 1, 0, 0) as *const Post;
+            assert!(!p.is_null());
+            assert_eq!(post_get(p, 2) as usize, 0);
+            assert_eq!(
+                nzbget_rs_post_op(p, 2, 0, 0, ns, std::ptr::null_mut()) as usize,
+                n as usize
+            );
+            assert!(host_coll_set(n, 109, 7, ns, std::ptr::null()));
+            assert!(host_coll_set(n, 110, 2, ns, std::ptr::null()));
+            assert_eq!(post_get(p, 0), 7);
+            assert_eq!(post_get(p, 4), 0);
+            assert_eq!(post_get(p, 8), 1);
+            // a second enter replaces the post job
+            assert!(host_coll_set(n, 54, 0, ns, std::ptr::null()));
+            let p2 = nzbget_rs_nzb_slot(n, 1, 0, 0) as *const Post;
+            assert_eq!(post_get(p2, 0), 0);
+            post_set(p2, 10, 1);
+            post_set(p2, 12, 2);
+            nzbget_rs_post_op(p2, 32, 0, 0, c"x.rar".as_ptr(), std::ptr::null_mut());
+            assert!(host_coll_set(n, 55, 0, ns, std::ptr::null()));
+            assert_eq!(nzbget_rs_nzb_slot(n, 1, 0, 0), 0);
+            assert!(!(*n).unpackTried);
+            assert_eq!((*n).lastUnpackStatus, 0);
+            let np: *const NzbScalars = std::ptr::null();
+            let count = nzbget_rs_nzb_files(
+                n,
+                30,
+                0,
+                np,
+                ns,
+                ns,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            );
+            assert_eq!(count, 0);
+            nzbget_rs_nzb_scalars_free(n);
+        }
+    }
+
+    #[test]
+    fn host_post_op_snapshot_and_setters() {
+        let ns: *const c_char = std::ptr::null();
+        let mut ints = [0 as c_int; 21];
+        let mut i64s = [0i64; 3];
+        let mut strs = [ns; 1];
+        unsafe {
+            // a null post job is ignored
+            assert_eq!(
+                host_post_op(
+                    std::ptr::null(),
+                    0,
+                    0,
+                    0,
+                    ns,
+                    ints.as_mut_ptr(),
+                    i64s.as_mut_ptr(),
+                    strs.as_mut_ptr()
+                ),
+                0
+            );
+            let p = nzbget_rs_post_new();
+            let op =
+                |a1, a2, p2: usize, s1: *const c_char, i64s: *mut i64, strs: *mut *const c_char| {
+                    host_post_op(p, a1, a2, p2, s1, std::ptr::null_mut(), i64s, strs)
+                };
+            let ni: *mut i64 = std::ptr::null_mut();
+            let nsn: *mut *const c_char = std::ptr::null_mut();
+            // flags are stored as 0/1, unknown fields ignored
+            op(1, 1, 5, ns, ni, nsn);
+            op(1, 8, 1, ns, ni, nsn);
+            op(1, 0, 7, ns, ni, nsn);
+            op(1, 12, 3, ns, ni, nsn);
+            op(1, 19, 99, ns, ni, nsn);
+            assert_eq!(post_get(p, 1), 1);
+            assert_eq!(post_get(p, 19), 0);
+            let mut t = [1234i64];
+            op(2, 0, 0, ns, t.as_mut_ptr(), nsn);
+            op(1, 14, 500, ns, ni, nsn);
+            op(5, 0, 0, c"Repairing".as_ptr(), ni, nsn);
+            op(6, -1, 0, c"a.par2".as_ptr(), ni, nsn);
+            op(6, -1, 0, ns, ni, nsn);
+            op(7, 0, 0, ns, ni, strs.as_mut_ptr());
+            assert_eq!(CStr::from_ptr(strs[0]).to_bytes(), b"");
+            op(6, 0, 0, ns, ni, strs.as_mut_ptr());
+            assert_eq!(CStr::from_ptr(strs[0]).to_bytes(), b"a.par2");
+            op(6, 1, 0, ns, ni, strs.as_mut_ptr());
+            assert_eq!(CStr::from_ptr(strs[0]).to_bytes(), b"");
+            op(6, 5, 0, ns, ni, strs.as_mut_ptr());
+            assert_eq!(CStr::from_ptr(strs[0]).to_bytes(), b"");
+            nzbget_rs_post_op(p, 32, 0, 0, c"b.rar".as_ptr(), nsn);
+            host_post_op(
+                p,
+                0,
+                0,
+                0,
+                ns,
+                ints.as_mut_ptr(),
+                i64s.as_mut_ptr(),
+                strs.as_mut_ptr(),
+            );
+            assert_eq!(ints[0], 7);
+            assert_eq!(ints[1], 1);
+            assert_eq!(ints[5], 1);
+            assert_eq!(ints[11], 0);
+            assert_eq!(ints[12], 0);
+            assert_eq!(ints[16], 3);
+            assert_eq!(ints[17], 1);
+            assert_eq!(ints[18], 2);
+            assert_eq!(ints[19], 500);
+            assert_eq!(i64s, [1234, 0, 0]);
+            assert_eq!(CStr::from_ptr(strs[0]).to_bytes(), b"Repairing");
+            // the label copy outlives a later change
+            let label = strs[0];
+            op(5, 0, 0, c"Unpacking".as_ptr(), ni, nsn);
+            assert_eq!(CStr::from_ptr(label).to_bytes(), b"Repairing");
+            // a new stage clears progress and label
+            t[0] = 99;
+            op(3, 0, 0, ns, t.as_mut_ptr(), nsn);
+            host_post_op(
+                p,
+                0,
+                0,
+                0,
+                ns,
+                ints.as_mut_ptr(),
+                i64s.as_mut_ptr(),
+                std::ptr::null_mut(),
+            );
+            assert_eq!((ints[19], ints[20], i64s[2]), (0, 0, 99));
+            assert_eq!(nzbget_rs_post_label(p).len, 0);
+            op(4, 0, 0, ns, [77i64].as_mut_ptr(), nsn);
+            assert_eq!(post_get(p, 18), 77);
+            op(7, -1, 0, ns, ni, nsn);
+            assert_eq!(nzbget_rs_post_op(p, 30, 0, 0, ns, nsn), 0);
+            nzbget_rs_post_free(p);
+        }
+    }
+
+    #[test]
+    fn host_post_job_op_without_jobs() {
+        unsafe {
+            let n = nzbget_rs_nzb_scalars_new();
+            let p = nzbget_rs_post_new();
+            let i64s = [0i64];
+            for a1 in [0, 1, 2, 11] {
+                assert_eq!(host_post_job_op(a1, 1, p as usize, 0, i64s.as_ptr()), 0);
+            }
+            for a1 in [3, 9, 10] {
+                assert_eq!(host_post_job_op(a1, 0, n as usize, 0, i64s.as_ptr()), 0);
+            }
+            for a1 in 4..=7 {
+                assert_eq!(host_post_job_op(a1, 0, 0, n as usize, i64s.as_ptr()), 0);
+            }
+            for a1 in [0, 1, 2, 3, 8, 9, 10, 11, 12] {
+                assert_eq!(host_post_job_op(a1, 0, 0, 0, i64s.as_ptr()), 0);
+            }
+            // direct unpack queries need a job
+            assert_eq!(host_post_job_op(3, 1, n as usize, 0, i64s.as_ptr()), 0);
+            // the script controller is skipped when the collection skips scripts
+            nzbget_rs_post_op(
+                p,
+                3,
+                0,
+                n as usize as i64,
+                std::ptr::null(),
+                std::ptr::null_mut(),
+            );
+            (*n).skipScriptProcessing = true;
+            assert_eq!(host_post_job_op(12, 9, p as usize, 0, i64s.as_ptr()), 0);
+            assert_eq!(post_get(p, 19), 0);
+            nzbget_rs_post_free(p);
+            nzbget_rs_nzb_scalars_free(n);
         }
     }
 }

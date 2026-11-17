@@ -520,6 +520,8 @@ RsPost* nzbget_rs_post_new(void);
 void nzbget_rs_post_free(RsPost* p);
 int64_t nzbget_rs_post_op(const RsPost* p, int op, int a2, int64_t v, const char* s1, const char** strs);
 NzbgetRsBuf nzbget_rs_post_label(const RsPost* p);
+// Starts a direct-unpack job for a collection (host op 62 sub-op 8).
+void nzbget_rs_nzb_start_direct_unpack(NzbgetRsNzbScalars* p);
 // A collection's message log (op codes in qnzb.rs).
 int64_t nzbget_rs_nzb_msgs(const NzbgetRsNzbScalars* p, int op, int a2, const NzbgetRsNzbScalars* p2,
     const char* s1, const int* ints, void (*visit)(uintptr_t, int, int, int, const char*), uintptr_t ctx);

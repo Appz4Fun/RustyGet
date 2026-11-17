@@ -160,11 +160,6 @@ with tempfile.TemporaryDirectory(prefix="nzbget-deobf-") as temp:
     binary = temp / "deobf"
     compiler = [*shlex.split(os.environ.get("CXX", "c++")), *shlex.split(get("CXX_FLAGS")),
                 *shlex.split(get("CXX_DEFINES")), f"-I{temp}", *shlex.split(get("CXX_INCLUDES"))]
-    ownership = temp / "ownership"
-    subprocess.run([*compiler, str(ROOT / "rust/tests/deobfuscation_ownership.cpp"),
-                    str(ROOT / "daemon/queue/Deobfuscation.cpp"), "-o", str(ownership), *libs], check=True, cwd=BUILD)
-    subprocess.run([str(ownership)], check=True)
-    print("C++ wrapper allocation-failure ownership passed", flush=True)
     subprocess.run([*compiler, str(temp / "main.cpp"), str(temp / "OldDeobfuscation.cpp"),
                     "-o", str(binary), *libs], check=True, cwd=BUILD)
     subprocess.run([str(binary), "x", *INPUTS], check=True, env=env)

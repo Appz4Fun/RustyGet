@@ -1,5 +1,7 @@
 # Duplicate-search filename port validation
 
+> **Retired.** `caller.cpp`, `run.py` and `mutations.py` were removed when the C++ daemon sources they compiled against were deleted. NZB summary parsing stays covered by the unit tests in `rust/src/dupesearch_nzb.rs`. The text below is kept as a historical record of the measured evidence.
+
 This bounded port replaces terminal unquoted yEnc subject parsing and PAR classification.
 The existing C++ quoted-filename fast path, message-ID checks, libxml2 parsing and complete
 summary/geometry construction remain in place. Rust-disabled builds keep the C++ implementation.

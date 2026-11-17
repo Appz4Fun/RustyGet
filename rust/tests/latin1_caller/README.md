@@ -1,5 +1,7 @@
 # Latin1 caller conversion
 
+> **Retired.** `driver.cpp`, `run.py` and `test_runner.py` were removed when the C++ daemon sources they compiled against were deleted. The byte-equality checks they made are kept as vectors in `rust/tests/cpp_harness_ports.rs`. The text below is kept as a historical record of the measured evidence.
+
 The candidate writes Latin1 conversion directly into one C++-owned CString allocation. The old Rust-owned compatibility API remains unchanged. Eight-byte SSSE3 blocks use runtime feature detection, with the portable scalar fallback preserving the same bytes. There is no JSON optimization.
 
 ## Complete caller matrix

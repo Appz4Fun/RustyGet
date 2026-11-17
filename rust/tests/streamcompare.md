@@ -1,5 +1,7 @@
 # RequiredCompareFloor qualification
 
+> **Retired.** `streamcompare_caller.cpp`, its two `.inc` reference files and `streamcompare_differential.py` were removed when the C++ daemon sources they compiled against were deleted. Stream comparison stays covered by the unit tests in `rust/src/streamcompare.rs`. The text below is kept as a historical record of the measured evidence.
+
 Reference: `c2316ef5e5ac7d5fb1c309e52de9e40dbc76c63e`. The reference include
 contains the exact TotalSize, SubtractCovered, RequiredCompareFloor,
 BaseCompareFloor and RangesIntersect bodies, with only the class name changed. The reference declaration is marked noinline

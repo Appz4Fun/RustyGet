@@ -183,54 +183,6 @@ int main(int argc, char** argv)
 }
 '''
 
-# Instrument the actual sources (including the Rust C++ callback wrapper), so
-# metadata outside the on-disk fixtures can be tested without touching files.
-probe_prelude = r"""
-#include "nzbget.h"
-#include "Util.h"
-#include <stdexcept>
-#include <clocale>
-""" + (ROOT / "daemon/postprocess/RarReader.h").read_text().replace("private:", "public:") + globals_block + r"""
-static std::vector<std::string> probeTrace;
-static int probeChecks, probeCollisions, probeFail, probeFailAt, probeFailureCalls;
-static bool ProbeFail(int kind)
-{
-    return probeFail == kind && ++probeFailureCalls == probeFailAt;
-}
-static bool ProbeExists(const char* path)
-{
-    probeTrace.push_back(std::string("exists:") + path);
-    if (ProbeFail(1)) throw std::runtime_error("exists");
-    return ++probeChecks <= probeCollisions;
-}
-static void ProbeRename(const char* src, const char* dest)
-{
-    probeTrace.push_back(std::string("rename:") + src + ">" + dest);
-    if (ProbeFail(2)) throw std::runtime_error("rename");
-}
-struct ProbeRegEx : RegEx
-{
-    using RegEx::RegEx;
-    bool Match(const char* name)
-    {
-        probeTrace.push_back(std::string("match:") + name);
-        if (ProbeFail(3)) throw std::runtime_error("match");
-        return RegEx::Match(name);
-    }
-};
-"""
-
-
-def instrument(src, hdr, prefix, fallback=False):
-    start = src.index("void RarRenamer::RenameFile(")
-    end = src.index("\n}", start) + 2
-    src = src[:start] + """void RarRenamer::RenameFile(const char* src, const char* dest)
-{ ProbeRename(src, dest); }""" + src[end:]
-    src = src.replace("FileSystem::FileExists(", "ProbeExists(")
-    src = src.replace("RegEx regExPart", "ProbeRegEx regExPart")
-    return renamed(src, hdr.replace("private:", "public:"), prefix, fallback)
-
-
 with tempfile.TemporaryDirectory(prefix="nzbget-rarrenamer-") as temp:
     temp = Path(temp)
     (temp / "main.cpp").write_text(main)
@@ -243,13 +195,3 @@ with tempfile.TemporaryDirectory(prefix="nzbget-rarrenamer-") as temp:
                         str(temp / "fallback.cpp"), "-o", str(binary),
                         *[str(BUILD / l) if not l.startswith(("-", "/")) else l for l in libs]], check=True, cwd=BUILD)
         subprocess.run([str(binary), rounds, str(temp / "t"), *volumes], check=True)
-        if "void RarRenamer::RenameFile(" in new_src:
-            probe_source = (probe_prelude + instrument(old_src, old_header, "ProbeOld")
-                            + instrument(new_src, header, "ProbeRust")
-                            + instrument(fallback_src, fallback_header, "ProbeFallback", fallback=True)
-                            + (ROOT / "rust/tests/rarrenamer_metadata.cpp").read_text())
-            (temp / "metadata.cpp").write_text(probe_source)
-            subprocess.run([*shlex.split(os.environ.get("CXX", "c++")), *shlex.split(get("CXX_FLAGS")), *shlex.split(get("CXX_DEFINES")),
-                            *extra, "-w", *shlex.split(get("CXX_INCLUDES")), str(temp / "metadata.cpp"), "-o", str(binary),
-                            *[str(BUILD / l) if not l.startswith(("-", "/")) else l for l in libs]], check=True, cwd=BUILD)
-            subprocess.run([str(binary)], check=True)

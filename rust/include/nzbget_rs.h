@@ -495,12 +495,18 @@ RsPtrList* nzbget_rs_ptrlist_new(void (*drop_fn)(uintptr_t));
 void nzbget_rs_ptrlist_free(RsPtrList* l);
 int64_t nzbget_rs_ptrlist_op(const RsPtrList* l, int op, int64_t a, uintptr_t p, const uintptr_t* order,
     const RsPtrList* other);
-// History-only duplicate record (rust/src/qdup.rs).
+// History-only duplicate record (rust/src/qdup.rs); a DupInfo* is an RsDup*.
 typedef struct RsDup RsDup;
 RsDup* nzbget_rs_dup_new(void);
 void nzbget_rs_dup_free(RsDup* d);
 void nzbget_rs_dup_get(const RsDup* d, int* ints, int64_t* i64s, const char** strs);
 void nzbget_rs_dup_set(const RsDup* d, int field, int64_t v, const char* s);
+// History entry (rust/src/qhist.rs): fields 0 kind, 1 time, 2 inner NzbInfo* or DupInfo*.
+typedef struct RsHist RsHist;
+RsHist* nzbget_rs_hist_new(void);
+void nzbget_rs_hist_free(RsHist* h);
+int64_t nzbget_rs_hist_get(const RsHist* h, int field);
+void nzbget_rs_hist_set(const RsHist* h, int field, int64_t v);
 // Post-processing state (op codes in qnzb.rs).
 typedef struct RsPost RsPost;
 RsPost* nzbget_rs_post_new(void);

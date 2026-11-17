@@ -972,6 +972,9 @@ fn file_list(p: *const NzbScalars) -> usize {
 
 /// Moves `src`'s files and download counters to `dst` (NzbInfo::MoveFileList).
 unsafe fn move_file_list(dst: *mut NzbScalars, src: *const NzbScalars) {
+    if std::ptr::eq(dst, src) {
+        return;
+    }
     let dl = file_list(dst);
     ptr_list_op(dl, 9, 0, 0, std::ptr::null(), 0);
     ptr_list_op(dl, 11, 0, 0, std::ptr::null(), file_list(src));

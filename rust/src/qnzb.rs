@@ -952,6 +952,337 @@ pub(crate) unsafe fn host_set_stats(p: *mut NzbScalars, ints: &[i32; 12], i64s: 
     s.downloadStartTime = i64s[15];
 }
 
+fn ptr_list_op(l: usize, op: c_int, a: i64, item: usize, order: *const usize, other: usize) -> i64 {
+    unsafe {
+        crate::qlist::nzbget_rs_ptrlist_op(
+            l as *const crate::qlist::PtrList,
+            op,
+            a,
+            item,
+            order,
+            other as *const crate::qlist::PtrList,
+        )
+    }
+}
+
+/// A collection's file list (slot 0).
+fn file_list(p: *const NzbScalars) -> usize {
+    unsafe { nzbget_rs_nzb_slot(p, 0, 0, 0) }
+}
+
+/// Moves `src`'s files and download counters to `dst` (NzbInfo::MoveFileList).
+unsafe fn move_file_list(dst: *mut NzbScalars, src: *const NzbScalars) {
+    let dl = file_list(dst);
+    ptr_list_op(dl, 9, 0, 0, std::ptr::null(), 0);
+    ptr_list_op(dl, 11, 0, 0, std::ptr::null(), file_list(src));
+    for i in 0..ptr_list_op(dl, 0, 0, 0, std::ptr::null(), 0) {
+        let f = ptr_list_op(dl, 1, i, 0, std::ptr::null(), 0);
+        unsafe {
+            crate::qfile::nzbget_rs_file_set(
+                f as *const crate::qfile::File,
+                crate::qfile::field::NZB,
+                dst as i64,
+            )
+        };
+    }
+    let (d, s) = unsafe { (&mut *dst, &*src) };
+    d.fullContentHash = s.fullContentHash;
+    d.filteredContentHash = s.filteredContentHash;
+    d.fileCount = s.fileCount;
+    d.pausedFileCount = s.pausedFileCount;
+    d.remainingParCount = s.remainingParCount;
+    d.size = s.size;
+    d.remainingSize = s.remainingSize;
+    d.pausedSize = s.pausedSize;
+    d.successSize = s.successSize;
+    d.currentSuccessSize = s.currentSuccessSize;
+    d.failedSize = s.failedSize;
+    d.currentFailedSize = s.currentFailedSize;
+    d.parSize = s.parSize;
+    d.parSuccessSize = s.parSuccessSize;
+    d.parCurrentSuccessSize = s.parCurrentSuccessSize;
+    d.parFailedSize = s.parFailedSize;
+    d.parCurrentFailedSize = s.parCurrentFailedSize;
+    d.totalArticles = s.totalArticles;
+    d.successArticles = s.successArticles;
+    d.failedArticles = s.failedArticles;
+    d.currentSuccessArticles = s.successArticles;
+    d.currentFailedArticles = s.failedArticles;
+    d.minTime = s.minTime;
+    d.maxTime = s.maxTime;
+}
+
+/// Adds a completed file, raising the file id floor (NzbInfo::AddCompletedFile).
+unsafe fn add_completed(p: *const NzbScalars, ints4: [c_int; 4], strs4: [*const c_char; 4]) {
+    crate::qfile::nzbget_rs_file_ids(3, ints4[0]);
+    let mut ints = ints4;
+    let mut strs = strs4;
+    unsafe {
+        nzbget_rs_nzb_files(
+            p,
+            2,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            ints.as_mut_ptr(),
+            std::ptr::null_mut(),
+            strs.as_mut_ptr(),
+            std::ptr::null(),
+        )
+    };
+}
+
+/// A collection's file-list and completed-file ops (host op 34), as the
+/// C++ host did them.
+///
+/// # Safety
+/// Pointers are live objects of the kinds each op names; output arrays are
+/// large enough for the op; the caller holds the queue lock.
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn host_filelist_op(
+    p: *mut NzbScalars,
+    a1: c_int,
+    a2: c_int,
+    p2: usize,
+    s1: *const c_char,
+    s2: *const c_char,
+    ints: *mut c_int,
+    i64s: *mut i64,
+    strs: *mut *const c_char,
+) -> usize {
+    use crate::qfile::{
+        field, nzbget_rs_file_get, nzbget_rs_file_set, nzbget_rs_file_set_text,
+        nzbget_rs_file_text, File,
+    };
+    let np: *const NzbScalars = std::ptr::null();
+    let ns: *const c_char = std::ptr::null();
+    let no: *const usize = std::ptr::null();
+    let empty = c"".as_ptr();
+    let or_empty = |s: *const c_char| if s.is_null() { empty } else { s };
+    let int = |k: usize| unsafe { *ints.add(k) };
+    let i64v = |k: usize| unsafe { *i64s.add(k) };
+    let fl = file_list(p);
+    let files = |op, a2, s1, s2, ints: *mut c_int, i64s: *mut i64, strs, raw: *const i64| unsafe {
+        nzbget_rs_nzb_files(p, op, a2, np, s1, s2, ints, i64s, strs, raw)
+    };
+    let coll = |p: *const NzbScalars, op, a2, other, ints| unsafe {
+        nzbget_rs_nzb_coll(p, op, a2, other, ns, ns, ints, std::ptr::null_mut())
+    };
+    let ni: *mut c_int = std::ptr::null_mut();
+    let nl: *mut i64 = std::ptr::null_mut();
+    let nstr: *mut *const c_char = std::ptr::null_mut();
+    let nraw: *const i64 = std::ptr::null();
+    let set = |f: usize, id, v: i64| unsafe { nzbget_rs_file_set(f as *const File, id, v) };
+    match a1 {
+        0 => ptr_list_op(fl, 0, 0, 0, no, 0) as usize,
+        1 => ptr_list_op(fl, 1, i64::from(a2), 0, no, 0) as usize,
+        2 => {
+            // removes the file from the list, dropping it (as the C++ unique_ptr did)
+            if ptr_list_op(fl, 6, 0, p2, no, 0) != 0 {
+                unsafe { crate::qfile::nzbget_rs_file_free(p2 as *mut File) };
+            }
+            0
+        }
+        3 => {
+            let dst = i64v(0) as usize as *mut NzbScalars;
+            if ptr_list_op(fl, 6, 0, p2, no, 0) != 0 {
+                ptr_list_op(file_list(dst), 3, 0, p2, no, 0);
+            }
+            set(p2, field::NZB, dst as i64);
+            unsafe {
+                crate::qfile::add_file_stats(p as usize, p2 as *const File, 1, 2);
+                crate::qfile::add_file_stats(dst as usize, p2 as *const File, 1, 1);
+            }
+            0
+        }
+        4 => {
+            let src = p2 as *const NzbScalars;
+            let sl = file_list(src);
+            for i in 0..ptr_list_op(sl, 0, 0, 0, no, 0) {
+                set(
+                    ptr_list_op(sl, 1, i, 0, no, 0) as usize,
+                    field::NZB,
+                    p as i64,
+                );
+            }
+            ptr_list_op(fl, 11, 0, 0, no, sl);
+            let mut lists = [0 as c_int, 0];
+            coll(p, 49, 1, src, lists.as_mut_ptr());
+            lists = [1, 1];
+            coll(p, 49, 1, src, lists.as_mut_ptr());
+            unsafe { nzbget_rs_nzb_files(p, 8, 0, src, ns, ns, ni, nl, nstr, nraw) };
+            0
+        }
+        5 => {
+            if a2 < 0 {
+                return files(0, 0, ns, ns, ni, nl, nstr, nraw) as usize;
+            }
+            files(1, a2, ns, ns, ints, nl, strs, nraw);
+            0
+        }
+        6 => {
+            let f = p2 as *const File;
+            let g = |id| unsafe { nzbget_rs_file_get(f, id) };
+            let t = |id| unsafe { nzbget_rs_file_text(f, id) };
+            unsafe {
+                add_completed(
+                    p,
+                    [
+                        g(field::ID) as c_int,
+                        a2,
+                        int(0),
+                        c_int::from(g(field::PAR_FILE) != 0),
+                    ],
+                    [
+                        s1,
+                        t(crate::qfile::text::ORIGNAME),
+                        t(crate::qfile::text::HASH16K),
+                        t(crate::qfile::text::PAR_SET_ID),
+                    ],
+                )
+            };
+            0
+        }
+        7 => {
+            files(3, a2, s1, s2, ni, nl, nstr, nraw);
+            0
+        }
+        8 => {
+            files(23, a2, s1, ns, ints, i64s, nstr, p2 as *const i64);
+            0
+        }
+        9 => {
+            // take the file out, tell the pre/post-processor, then drop it
+            let dq = i64v(0) as usize;
+            let released = ptr_list_op(fl, 6, 0, p2, no, 0) != 0;
+            crate::jobthread::nzbget_rs_prepost_queue_changed(a2, dq, p as usize, p2);
+            if released {
+                unsafe { crate::qfile::nzbget_rs_file_free(p2 as *mut File) };
+            }
+            0
+        }
+        10 => {
+            ptr_list_op(fl, 10, i64::from(a2), 0, p2 as *const usize, 0);
+            0
+        }
+        11 => {
+            if a2 < 0 {
+                return files(20, 0, ns, ns, ni, nl, nstr, nraw) as usize;
+            }
+            files(21, a2, ns, ns, ints, i64s, strs, nraw);
+            0
+        }
+        12 => files(5, a2, ns, ns, ints, nl, nstr, nraw) as usize,
+        13 => match int(0) {
+            1 => files(24, a2, ns, ns, ni, nl, nstr, nraw) as usize,
+            2 => {
+                files(25, a2, ns, ns, ni, nl, nstr, nraw);
+                if int(1) != 0 {
+                    unsafe { (*p).changed = true };
+                }
+                0
+            }
+            3 => {
+                files(26, a2, ns, ns, ints, i64s, nstr, p2 as *const i64);
+                0
+            }
+            _ => {
+                files(22, a2, ns, ns, ints, i64s, strs, nraw);
+                0
+            }
+        },
+        14 => {
+            let f = crate::qfile::nzbget_rs_file_new(-1);
+            let fp = f as usize;
+            let id = if int(0) != 0 {
+                int(0)
+            } else {
+                crate::qfile::nzbget_rs_file_ids(4, 0)
+            };
+            set(fp, field::ID, i64::from(id));
+            set(fp, field::NZB, p as i64);
+            unsafe {
+                nzbget_rs_file_set_text(f, crate::qfile::text::SUBJECT, or_empty(s1));
+                nzbget_rs_file_set_text(f, crate::qfile::text::FILENAME, or_empty(s2));
+            }
+            set(fp, field::TIME, i64::from(int(1)));
+            set(fp, field::SIZE, i64v(0));
+            set(fp, field::REMAINING_SIZE, i64v(1));
+            set(fp, field::MISSED_SIZE, i64v(2));
+            set(fp, field::TOTAL_ARTICLES, i64::from(int(2)));
+            set(fp, field::MISSED_ARTICLES, i64::from(int(3)));
+            set(fp, field::PAR_FILE, i64::from(int(4) != 0));
+            let groups = unsafe { *strs } as *const *const c_char;
+            for g in 0..int(5).max(0) as usize {
+                let name = unsafe { *groups.add(g) };
+                unsafe { crate::qfile::nzbget_rs_file_op(f, 2, 0, or_empty(name), ni, nstr) };
+            }
+            let mut art_args = [i64v(3), i64v(4)];
+            unsafe {
+                crate::qarticle::nzbget_rs_article_host(
+                    crate::qfile::nzbget_rs_file_articles(f),
+                    std::ptr::null_mut(),
+                    105,
+                    int(6),
+                    0,
+                    ns,
+                    ni,
+                    art_args.as_mut_ptr(),
+                    (*strs.add(1)) as *mut *const c_char,
+                )
+            };
+            ptr_list_op(fl, 3, 0, fp, no, 0);
+            fp
+        }
+        15 => {
+            files(7, 0, ns, ns, ni, nl, nstr, nraw);
+            files(27, 0, ns, ns, ni, nl, nstr, nraw);
+            coll(p, 46, 0, np, ni);
+            coll(p, 47, 0, np, ni);
+            unsafe { move_file_list(p, p2 as *const NzbScalars) };
+            0
+        }
+        16 => {
+            files(6, a2, ns, ns, ni, nl, nstr, nraw);
+            0
+        }
+        17 => {
+            ptr_list_op(fl, 3, 0, p2, no, 0);
+            0
+        }
+        18 => {
+            unsafe {
+                add_completed(
+                    p,
+                    [int(0), int(1), int(2), c_int::from(int(3) != 0)],
+                    [*strs, *strs.add(1), *strs.add(2), *strs.add(3)],
+                )
+            };
+            0
+        }
+        19 => {
+            let f = crate::qfile::nzbget_rs_file_new(-1) as usize;
+            // new FileInfo() takes a generated id before SetId replaces it
+            set(
+                f,
+                field::ID,
+                i64::from(crate::qfile::nzbget_rs_file_ids(4, 0)),
+            );
+            set(f, field::ID, i64::from(int(0)));
+            set(f, field::PAUSED, i64::from(int(1) != 0));
+            if a2 != 0 {
+                set(f, field::TIME, i64::from(int(2)));
+            }
+            set(f, field::EXTRA_PRIORITY, i64::from(int(3) != 0));
+            set(f, field::NZB, p as i64);
+            ptr_list_op(fl, 3, 0, f, no, 0);
+            0
+        }
+        _ => 0,
+    }
+}
+
 /// A collection's plain setters (host op 32 sub-op `a1`), as the C++ ones;
 /// false for the sub-ops the host still serves.
 ///

@@ -186,10 +186,17 @@ template <typename T>
 class RsList
 {
 public:
-	RsList() : m_rs(nzbget_rs_ptrlist_new([](uintptr_t p) { delete reinterpret_cast<T*>(p); })) {}
+	// the object's storage is the Rust list: an RsList<T>* is an RsPtrList*
+	static void* operator new(size_t)
+	{
+		return nzbget_rs_ptrlist_new([](uintptr_t p) { delete reinterpret_cast<T*>(p); });
+	}
+	static void operator delete(void* p) { nzbget_rs_ptrlist_free(static_cast<RsPtrList*>(p)); }
+	RsList() = default;
 	RsList(const RsList&) = delete;
 	RsList& operator=(const RsList&) = delete;
-	~RsList() { nzbget_rs_ptrlist_free(m_rs); }
+	~RsList() = default;
+	RsPtrList* Rs() const { return reinterpret_cast<RsPtrList*>(const_cast<RsList*>(this)); }
 
 	size_t size() const { return (size_t)Op(0); }
 	bool empty() const { return size() == 0; }
@@ -206,10 +213,10 @@ public:
 	// order: every current item once, in the new order (ignored otherwise)
 	void Reorder(const uintptr_t* order, size_t count)
 	{
-		nzbget_rs_ptrlist_op(m_rs, 10, (int64_t)count, 0, order, nullptr);
+		nzbget_rs_ptrlist_op(Rs(), 10, (int64_t)count, 0, order, nullptr);
 	}
 	// appends and takes every item of other
-	void TakeAll(RsList& other) { nzbget_rs_ptrlist_op(m_rs, 11, 0, 0, nullptr, other.m_rs); }
+	void TakeAll(RsList& other) { nzbget_rs_ptrlist_op(Rs(), 11, 0, 0, nullptr, other.Rs()); }
 	T* Find(int id) const
 	{
 		for (size_t i = 0, n = size(); i < n; i++)
@@ -232,10 +239,9 @@ public:
 	iterator end() const { return iterator{this, size()}; }
 
 private:
-	RsPtrList* m_rs;
 	int64_t Op(int op, int64_t a = 0, T* p = nullptr) const
 	{
-		return nzbget_rs_ptrlist_op(m_rs, op, a, reinterpret_cast<uintptr_t>(p), nullptr, nullptr);
+		return nzbget_rs_ptrlist_op(Rs(), op, a, reinterpret_cast<uintptr_t>(p), nullptr, nullptr);
 	}
 };
 template <typename T> typename RsList<T>::iterator begin(RsList<T>* c) { return c->begin(); }
@@ -1918,6 +1924,7 @@ inline void FileInfo::SetExtraPriority(bool extraPriority)
 // their own, and no vtable that would be written into the Rust storage
 static_assert(std::is_empty<FileInfo>::value && !std::is_polymorphic<FileInfo>::value);
 static_assert(std::is_empty<NzbInfo>::value && !std::is_polymorphic<NzbInfo>::value);
+static_assert(std::is_empty<FileList>::value && !std::is_polymorphic<FileList>::value);
 
 typedef RsList<NzbInfo> NzbList;
 
@@ -2182,8 +2189,8 @@ public:
 
 	static bool IsLoaded() { return g_Loaded; }
 	static GuardedDownloadQueue Guard() { return GuardedDownloadQueue(g_DownloadQueue, &g_DownloadQueue->m_lockMutex); }
-	NzbList* GetQueue() { return &m_queue; }
-	HistoryList* GetHistory() { return &m_history; }
+	NzbList* GetQueue() { return m_queue; }
+	HistoryList* GetHistory() { return m_history; }
 
 	// a reload creates the queue anew: until it is loaded again, threads
 	// waiting for IsLoaded() (the post-processor's queue sanitising, for
@@ -2193,10 +2200,14 @@ public:
 	static void Loaded() { g_Loaded = true; nzbget_rs_thread_count_op(3); }
 
 	DownloadQueue() = default;
+	DownloadQueue(const DownloadQueue&) = delete;
+	DownloadQueue& operator=(const DownloadQueue&) = delete;
+	~DownloadQueue() { delete m_history; delete m_queue; }
 
 private:
-	NzbList m_queue;
-	HistoryList m_history;
+	// Rust lists (see RsList)
+	NzbList* m_queue = new NzbList;
+	HistoryList* m_history = new HistoryList;
 	Mutex m_lockMutex;
 
 	inline static DownloadQueue* g_DownloadQueue = nullptr;
@@ -2714,156 +2725,6 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 		case 109: if (n->GetPostInfo()) n->GetPostInfo()->SetStage((PostInfo::EStage)a2); break;
 		case 110: if (n->GetPostInfo()) { n->GetPostInfo()->SetForceParFull((a2 & 1) != 0); n->GetPostInfo()->SetForceRepair((a2 & 2) != 0); } break;
 		default: break;
-		}
-		return 0;
-	}
-	case 34: {
-		if (a1 == 0) return reinterpret_cast<NzbInfo*>(p1)->GetFileList()->size();
-		if (a1 == 1) return reinterpret_cast<uintptr_t>(reinterpret_cast<NzbInfo*>(p1)->GetFileList()->at((size_t)a2));
-		if (a1 == 2) { reinterpret_cast<NzbInfo*>(p1)->GetFileList()->Remove(reinterpret_cast<FileInfo*>(p2)); return 0; }
-		if (a1 == 3)
-		{
-			NzbInfo* src = reinterpret_cast<NzbInfo*>(p1);
-			NzbInfo* dst = reinterpret_cast<NzbInfo*>((uintptr_t)i64s[0]);
-			FileInfo* f = reinterpret_cast<FileInfo*>(p2);
-			dst->GetFileList()->Add(src->GetFileList()->Remove(f));
-			f->SetNzbInfo(dst);
-			src->AddFileStats(f, 1, 2);
-			dst->AddFileStats(f, 1, 1);
-			return 0;
-		}
-		if (a1 == 4)
-		{
-			NzbInfo* dst = reinterpret_cast<NzbInfo*>(p1);
-			NzbInfo* src = reinterpret_cast<NzbInfo*>(p2);
-			for (FileInfo* fi : src->GetFileList()) fi->SetNzbInfo(dst);
-			dst->GetFileList()->TakeAll(*src->GetFileList());
-			int lists[2] = { 0, 0 };
-			dst->NC(49, 1, src, nullptr, nullptr, lists);
-			lists[0] = lists[1] = 1;
-			dst->NC(49, 1, src, nullptr, nullptr, lists);
-			dst->NF(8, 0, src);
-			return 0;
-		}
-		if (a1 == 5)
-		{
-			NzbInfo* n = reinterpret_cast<NzbInfo*>(p1);
-			if (a2 < 0) return n->NF(0);
-			n->NF(1, a2, nullptr, nullptr, nullptr, ints, nullptr, strs);
-			return 0;
-		}
-		if (a1 == 6)
-		{
-			NzbInfo* n = reinterpret_cast<NzbInfo*>(p1);
-			FileInfo* f = reinterpret_cast<FileInfo*>(p2);
-			n->AddCompletedFile(f->GetId(), s1, f->GetOrigname(), (CompletedFile::EStatus)a2,
-				(uint32)ints[0], f->GetParFile(), f->GetHash16k(), f->GetParSetId());
-			return 0;
-		}
-		if (a1 == 7)
-		{
-			NzbInfo* n = reinterpret_cast<NzbInfo*>(p1);
-			n->NF(3, a2, nullptr, s1, s2);
-			return 0;
-		}
-		if (a1 == 8)
-		{
-			NzbInfo* n = reinterpret_cast<NzbInfo*>(p1);
-			n->NF(23, a2, nullptr, s1, nullptr, ints, i64s, nullptr, reinterpret_cast<const int64_t*>(p2));
-			return 0;
-		}
-		if (a1 == 9)
-		{
-			NzbInfo* n = reinterpret_cast<NzbInfo*>(p1);
-			FileInfo* f = reinterpret_cast<FileInfo*>(p2);
-			auto* dq = reinterpret_cast<DownloadQueue*>((uintptr_t)i64s[0]);
-			std::unique_ptr<FileInfo> srcFi = n->GetFileList()->Remove(f);
-			DownloadQueue::Aspect aspect = { (DownloadQueue::EAspectAction)a2, dq, n, f };
-			dq->Notify(&aspect);
-			srcFi.reset();
-			return 0;
-		}
-		if (a1 == 10)
-		{
-			reinterpret_cast<NzbInfo*>(p1)->GetFileList()->Reorder(reinterpret_cast<const uintptr_t*>(p2), (size_t)a2);
-			return 0;
-		}
-		if (a1 == 11)
-		{
-			NzbInfo* n = reinterpret_cast<NzbInfo*>(p1);
-			if (a2 < 0) return n->NF(20);
-			n->NF(21, a2, nullptr, nullptr, nullptr, ints, i64s, strs);
-			return 0;
-		}
-		if (a1 == 12)
-		{
-			NzbInfo* n = reinterpret_cast<NzbInfo*>(p1);
-			return n->NF(5, a2, nullptr, nullptr, nullptr, ints);
-		}
-		if (a1 == 13)
-		{
-			NzbInfo* n = reinterpret_cast<NzbInfo*>(p1);
-			if (ints[0] == 1) return n->NF(24, a2);
-			if (ints[0] == 2)
-			{
-				n->NF(25, a2);
-				if (ints[1] != 0) n->SetChanged(true);
-				return 0;
-			}
-			if (ints[0] == 3)
-			{
-				n->NF(26, a2, nullptr, nullptr, nullptr, ints, i64s, nullptr, reinterpret_cast<const int64_t*>(p2));
-				return 0;
-			}
-			n->NF(22, a2, nullptr, nullptr, nullptr, ints, i64s, strs);
-			return 0;
-		}
-		if (a1 == 14)
-		{
-			NzbInfo* n = reinterpret_cast<NzbInfo*>(p1);
-			auto fi = std::make_unique<FileInfo>(ints[0]);
-			fi->SetNzbInfo(n); fi->SetSubject(s1 ? s1 : ""); fi->SetFilename(s2 ? s2 : "");
-			fi->SetTime((time_t)ints[1]); fi->SetSize(i64s[0]); fi->SetRemainingSize(i64s[1]); fi->SetMissedSize(i64s[2]);
-			fi->SetTotalArticles(ints[2]); fi->SetMissedArticles(ints[3]); fi->SetParFile(ints[4] != 0);
-			const auto* gPtrs = reinterpret_cast<const char* const*>(strs[0]);
-			for (int g = 0; g < ints[5]; g++) fi->AddGroup(gPtrs[g] ? gPtrs[g] : "");
-			const auto* aParts = reinterpret_cast<const int*>((uintptr_t)i64s[3]);
-			const auto* aSizes = reinterpret_cast<const int64_t*>((uintptr_t)i64s[4]);
-			const auto* aMids = reinterpret_cast<const char* const*>(strs[1]);
-			int64_t artArgs[2] = { (int64_t)(uintptr_t)aParts, (int64_t)(uintptr_t)aSizes };
-			ArtOp(fi->GetArticleList(), 0, 105, ints[6], 0, nullptr, nullptr, artArgs, const_cast<const char**>(aMids));
-			FileInfo* raw = fi.get();
-			n->GetFileList()->Add(std::move(fi));
-			return reinterpret_cast<uintptr_t>(raw);
-		}
-		if (a1 == 15)
-		{
-			NzbInfo* n = reinterpret_cast<NzbInfo*>(p1);
-			n->NF(7); n->NF(27);
-			n->NC(46); n->NC(47);
-			n->MoveFileList(reinterpret_cast<NzbInfo*>(p2));
-			return 0;
-		}
-		if (a1 == 16) { reinterpret_cast<NzbInfo*>(p1)->NF(6, a2); return 0; }
-		if (a1 == 17) { reinterpret_cast<NzbInfo*>(p1)->GetFileList()->Add(std::unique_ptr<FileInfo>(reinterpret_cast<FileInfo*>(p2)), false); return 0; }
-		if (a1 == 18)
-		{
-			NzbInfo* n = reinterpret_cast<NzbInfo*>(p1);
-			n->AddCompletedFile(ints[0], strs[0], strs[1], (CompletedFile::EStatus)ints[1],
-				(uint32)ints[2], ints[3] != 0, strs[2], strs[3]);
-			return 0;
-		}
-		if (a1 == 19)
-		{
-			NzbInfo* n = reinterpret_cast<NzbInfo*>(p1);
-			auto fi = std::make_unique<FileInfo>();
-			fi->SetId(ints[0]);
-			fi->SetPaused(ints[1] != 0);
-			if (a2 != 0) fi->SetTime((time_t)ints[2]);
-			fi->SetExtraPriority(ints[3] != 0);
-			fi->SetNzbInfo(n);
-			n->GetFileList()->Add(std::move(fi));
-			return 0;
 		}
 		return 0;
 	}

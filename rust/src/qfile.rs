@@ -360,6 +360,30 @@ pub unsafe extern "C" fn nzbget_rs_file_op(
     }
 }
 
+/// Applies a file's server stats to collection `nzb`'s totals (which 0)
+/// or current list (1) with `op` (0 set, 1 add, 2 subtract), as
+/// NzbInfo::AddFileStats did.
+///
+/// # Safety
+/// `nzb` is a live collection and `f` a live file.
+pub(crate) unsafe fn add_file_stats(nzb: usize, f: *const File, which: i32, op: i32) {
+    let stats = unsafe { &*f }.lock().server_stats.clone();
+    for mut v in stats {
+        unsafe {
+            crate::qnzb::nzbget_rs_nzb_coll(
+                nzb as *const crate::qnzb::NzbScalars,
+                44 + which,
+                op,
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                v.as_mut_ptr(),
+                ptr::null_mut(),
+            )
+        };
+    }
+}
+
 /// Applies a queue-host file setter (host op 42 sub-op `a1`) as the C++
 /// FileInfo did; `p2` is the collection where the op names one.
 ///
@@ -423,24 +447,7 @@ pub(crate) unsafe fn host_file_set(
     }
     let set_text = |id: i32, v: *const c_char| unsafe { nzbget_rs_file_set_text(f, id, v) };
     // the collection's copy of a file's server stats (NzbInfo::AddFileStats)
-    let add_stats = |which: i32, op: i32| {
-        let stats = file.lock().server_stats.clone();
-        for st in stats {
-            let mut v = st;
-            unsafe {
-                crate::qnzb::nzbget_rs_nzb_coll(
-                    p2 as *const crate::qnzb::NzbScalars,
-                    44 + which,
-                    op,
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null(),
-                    v.as_mut_ptr(),
-                    ptr::null_mut(),
-                )
-            };
-        }
-    };
+    let add_stats = |which: i32, op: i32| unsafe { add_file_stats(p2, f, which, op) };
     match a1 {
         0 => {
             let paused = a2 != 0;

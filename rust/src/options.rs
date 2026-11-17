@@ -4837,6 +4837,45 @@ pub unsafe extern "C" fn nzbget_rs_options_str(
         .map_or(std::ptr::null(), CStr::as_ptr)
 }
 
+/// The active options set (the daemon's, or the newest one created), borrowed:
+/// it stays valid until its owner frees it. Null when there is none.
+#[no_mangle]
+pub extern "C" fn nzbget_rs_options_active() -> *const NzbgetRsOptions {
+    active_options().map_or(std::ptr::null(), |arc| std::sync::Arc::as_ptr(&arc))
+}
+
+/// Makes `handle` the active options set again (a test restoring an outer set
+/// after an inner one was freed). Null clears it.
+///
+/// # Safety
+/// `handle` is null or a live handle from `nzbget_rs_options_new`.
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_options_set_active(handle: *const NzbgetRsOptions) {
+    let weak = if handle.is_null() {
+        None
+    } else {
+        std::sync::Arc::increment_strong_count(handle);
+        let arc = std::sync::Arc::from_raw(handle);
+        Some(std::sync::Arc::downgrade(&arc))
+    };
+    if let Ok(mut g) = ACTIVE_OPTIONS.write() {
+        *g = weak;
+    }
+}
+
+/// The parsed scalars of `handle`, borrowed like the handle. Null for a null handle.
+///
+/// # Safety
+/// `handle` is null or a live handle from `nzbget_rs_options_new`.
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_options_scalars(
+    handle: *const NzbgetRsOptions,
+) -> *const NzbgetRsParsedOptions {
+    handle.as_ref().map_or(std::ptr::null(), |opts| {
+        &opts.scalars as *const NzbgetRsParsedOptions
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_options_query(

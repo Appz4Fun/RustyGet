@@ -1,6 +1,6 @@
 //! Rust daemon entrypoint and pre-flight CLI routing (Milestone M5 — Requirement R2 & R4).
 
-use crate::lifecycle::{get_hooks, resolve_hooks, LifecycleManager};
+use crate::lifecycle::{get_hooks, LifecycleManager};
 use std::ffi::{c_char, c_int, CStr};
 use std::ptr;
 
@@ -86,7 +86,7 @@ pub unsafe fn init_platform(argc: c_int, argv: *mut *mut c_char, argp: *mut *mut
         g.argp = argp as usize;
     }
 
-    let hooks = get_hooks().or_else(resolve_hooks);
+    let hooks = get_hooks();
     if let Some(hooks) = hooks {
         if let Some(util_init) = hooks.util_init {
             util_init();
@@ -101,7 +101,7 @@ pub unsafe fn init_platform(argc: c_int, argv: *mut *mut c_char, argp: *mut *mut
 }
 
 /// Master C ABI daemon entrypoint exported from `nzbget_rs` staticlib.
-/// Called by main() in `daemon/main/nzbget.cpp`.
+/// Called by `main` in `rust/entry.rs`.
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_main(
     argc: c_int,
@@ -132,7 +132,7 @@ pub unsafe extern "C" fn nzbget_rs_main(
     init_platform(argc, argv, argp);
 
     if route == EntrypointRoute::NServ {
-        let hooks = get_hooks().or_else(resolve_hooks);
+        let hooks = get_hooks();
         if let Some(hooks) = hooks {
             if let Some(nserv) = hooks.nserv_main {
                 return nserv(argc, argv);

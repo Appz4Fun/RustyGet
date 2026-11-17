@@ -609,6 +609,26 @@ pub unsafe extern "C" fn nzbget_rs_log_emit(
     emit_message(lg, kind, lg.debug_build, options.as_ref(), cstr);
 }
 
+/// Emits `text` (a `Message::EKind`) to the active log with the active options,
+/// as the C++ `error`/`warn`/`info`/`detail`/`debug` functions do. Without an
+/// active log it does nothing.
+///
+/// # Safety
+/// `text` is null or NUL-terminated.
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_log_active_emit(kind: c_int, text: *const c_char) {
+    let Some(lg) = active_log() else {
+        return;
+    };
+    let cstr = if text.is_null() {
+        c""
+    } else {
+        CStr::from_ptr(text)
+    };
+    let opts = crate::options::active_options();
+    emit_message(&lg, kind, lg.debug_build, opts.as_deref(), cstr);
+}
+
 pub(crate) unsafe fn nzbget_rs_log_ctl(
     log: *const NzbgetRsLog,
     op: c_int,

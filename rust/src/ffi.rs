@@ -2978,15 +2978,6 @@ mod purge_snapshot_review_tests {
 // Daemon Lifecycle Coordination C ABI (Requirement R2, Milestone M5)
 // ============================================================================
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_register_lifecycle_hooks(
-    hooks: *const crate::lifecycle::LifecycleHooks,
-) {
-    if let Some(hooks) = hooks.as_ref() {
-        crate::lifecycle::register_hooks(*hooks);
-    }
-}
-
 #[cfg(test)]
 mod lifecycle_ffi_tests {
     #[test]
@@ -5178,9 +5169,7 @@ unsafe extern "C" fn web_rpc_action_bridge(
             1
         }
         4 => {
-            if let Some(hooks) =
-                crate::lifecycle::get_hooks().or_else(crate::lifecycle::resolve_hooks)
-            {
+            if let Some(hooks) = crate::lifecycle::get_hooks() {
                 if let Some(exit_fn) = hooks.exit_proc {
                     exit_fn();
                     return 1;
@@ -5189,9 +5178,7 @@ unsafe extern "C" fn web_rpc_action_bridge(
             0
         }
         5 => {
-            if let Some(hooks) =
-                crate::lifecycle::get_hooks().or_else(crate::lifecycle::resolve_hooks)
-            {
+            if let Some(hooks) = crate::lifecycle::get_hooks() {
                 if let Some(reload_fn) = hooks.reload {
                     reload_fn();
                     return 1;
@@ -6681,9 +6668,7 @@ pub(crate) unsafe fn serve_binrpc_conn(conn: &crate::net::NzbgetRsConn) {
                 });
             }
             if kind == 8 {
-                if let Some(hooks) =
-                    crate::lifecycle::get_hooks().or_else(crate::lifecycle::resolve_hooks)
-                {
+                if let Some(hooks) = crate::lifecycle::get_hooks() {
                     if let Some(exit_fn) = hooks.exit_proc {
                         exit_fn();
                     }
@@ -6691,9 +6676,7 @@ pub(crate) unsafe fn serve_binrpc_conn(conn: &crate::net::NzbgetRsConn) {
                 return true;
             }
             if kind == 9 {
-                if let Some(hooks) =
-                    crate::lifecycle::get_hooks().or_else(crate::lifecycle::resolve_hooks)
-                {
+                if let Some(hooks) = crate::lifecycle::get_hooks() {
                     if let Some(reload_fn) = hooks.reload {
                         reload_fn();
                     }

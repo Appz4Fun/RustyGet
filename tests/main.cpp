@@ -24,10 +24,6 @@ extern char** environ;
 char* (*g_EnvironmentVariables)[];
 int g_ArgumentCount;
 char* (*g_Arguments)[];
-Log* g_Log;
-Options* g_Options;
-WorkState* g_WorkState;
-ServerPool* g_ServerPool;
 QueueCoordinator* g_QueueCoordinator;
 UrlCoordinator* g_UrlCoordinator;
 StatMeter* g_StatMeter;
@@ -38,40 +34,92 @@ Scanner* g_Scanner;
 FeedCoordinator* g_FeedCoordinator;
 Maintenance* g_Maintenance;
 ArticleCache* g_ArticleCache;
-ServiceCoordinator* g_ServiceCoordinator;
 System::SystemInfo* g_SystemInfo;
 SystemHealth::Service* g_SystemHealth;
 
 void Reload(){}
 void ExitProc(){}
 
+// An options set built from command-line style entries, active while it lives
+// (the daemon builds its own in rust/src/daemon.rs). The set that was active
+// before is active again afterwards.
+class TestOptions final
+{
+public:
+	typedef std::vector<const char*> CmdOptList;
+
+	explicit TestOptions(CmdOptList* cmdOpts) : m_previous(nzbget_rs_options_active())
+	{
+		int stateFlags = 0;
+		m_rs = nzbget_rs_options_new("rustyget/rustyget", nullptr, 1, 1,
+			cmdOpts && !cmdOpts->empty() ? cmdOpts->data() : nullptr,
+			cmdOpts ? cmdOpts->size() : 0,
+			32 | 8, Util::VersionRevision(), nullptr, nullptr, nullptr, &stateFlags);
+	}
+
+	~TestOptions()
+	{
+		nzbget_rs_options_free(m_rs);
+		nzbget_rs_options_set_active(m_previous);
+	}
+
+	TestOptions(const TestOptions&) = delete;
+	TestOptions& operator=(const TestOptions&) = delete;
+
+private:
+	NzbgetRsOptions* m_rs = nullptr;
+	const NzbgetRsOptions* m_previous = nullptr;
+};
+
+// The pause flags the post-processing tests toggle (rust/src/ffi.rs work state).
+class TestWorkState final
+{
+public:
+	TestWorkState() : m_rs(nzbget_rs_workstate_new()) {}
+	~TestWorkState() { nzbget_rs_workstate_free(m_rs); }
+
+	void SetTempPausePostprocess(bool v) { nzbget_rs_workstate_ctl(m_rs, 5, 1, v ? 1 : 0); }
+	bool GetTempPausePostprocess() const { return nzbget_rs_workstate_ctl(m_rs, 5, 0, 0) != 0; }
+
+private:
+	NzbgetRsWorkState* m_rs = nullptr;
+};
+
+TestWorkState* g_WorkState;
+
 struct InitGlobals
 {
-	Options::CmdOptList m_cmdOpts;
+	TestOptions::CmdOptList m_cmdOpts;
+	NzbgetRsLog* m_log = nullptr;
+	TestOptions* m_options = nullptr;
+	NzbgetRsServerPool* m_serverPool = nullptr;
 
 	InitGlobals()
 	{
-		g_Log = new Log();
-		g_Options = new Options(&m_cmdOpts, nullptr);
+#ifdef DEBUG
+		m_log = nzbget_rs_log_new(1);
+#else
+		m_log = nzbget_rs_log_new(0);
+#endif
+		m_options = new TestOptions(&m_cmdOpts);
 		g_EnvironmentVariables = (char*(*)[])environ;
 		g_ArgumentCount = 0;
 		g_Arguments = nullptr;
-		g_WorkState = new WorkState();
+		g_WorkState = new TestWorkState();
 		g_DiskState = new DiskState();
-		g_ServerPool = new ServerPool();
-		g_ServiceCoordinator = new ServiceCoordinator();
+		InitRsBuildEnv();
+		m_serverPool = nzbget_rs_serverpool_new();
 		g_Scanner = new Scanner();
 	}
 
 	~InitGlobals()
 	{
-		delete g_ServerPool;
-		delete g_Log;
-		delete g_Options;
+		nzbget_rs_serverpool_free(m_serverPool);
+		nzbget_rs_log_free(m_log);
+		delete m_options;
 		delete g_WorkState;
 		delete g_DiskState;
 		delete g_Scanner;
-		delete g_ServiceCoordinator;
 	}
 };
 

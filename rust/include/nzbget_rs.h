@@ -266,11 +266,18 @@ int nzbget_rs_options_query(
     const NzbgetRsOptions* handle, int op, const char* s1, int a1,
     int* out_int, const char** out_strs, uintptr_t ctx,
     void (*cb)(uintptr_t, const char*, const char*, int));
+// The active options set, borrowed (NULL when none); set_active makes a live
+// handle active again (NULL clears); scalars borrow like the handle.
+const NzbgetRsOptions* nzbget_rs_options_active(void);
+void nzbget_rs_options_set_active(const NzbgetRsOptions* handle);
+const NzbgetRsParsedOptions* nzbget_rs_options_scalars(const NzbgetRsOptions* handle);
 
 NzbgetRsLog* nzbget_rs_log_new(int debug_build);
 void nzbget_rs_log_free(NzbgetRsLog* log);
 void nzbget_rs_log_emit(
     const NzbgetRsLog* log, int kind, const NzbgetRsOptions* options, const char* text);
+// Emits to the active log with the active options; nothing without a log.
+void nzbget_rs_log_active_emit(int kind, const char* text);
 
 uint32_t nzbget_rs_crc32_append(const uint8_t* block, uint32_t len, uint32_t init);
 

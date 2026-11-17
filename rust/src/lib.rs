@@ -135,6 +135,8 @@ pub mod dupepurge;
 mod allocation_probe;
 pub mod purgejournal;
 
+#[cfg(unix)]
+pub mod daemon;
 pub mod entrypoint;
 pub mod lifecycle;
 pub mod memory_pressure;

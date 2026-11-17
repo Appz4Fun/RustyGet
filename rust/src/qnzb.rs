@@ -345,6 +345,50 @@ pub extern "C" fn nzbget_rs_nzb_scalars_new() -> *mut NzbScalars {
     Box::into_raw(data).cast()
 }
 
+static NZB_ID_GEN: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+static NZB_ID_MAX: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+/// Id generation shared by all collections (was `NzbInfo::m_idGen` and
+/// `m_idMax`): 0 last generated id, 1 reset to the highest id seen, 2 reset
+/// to zero, 3 raise the floor to `v`, 4 generate the next id.
+#[unsafe(no_mangle)]
+pub extern "C" fn nzbget_rs_nzb_ids(op: c_int, v: c_int) -> c_int {
+    use std::sync::atomic::Ordering::SeqCst;
+    match op {
+        0 => NZB_ID_GEN.load(SeqCst),
+        1 => {
+            NZB_ID_GEN.store(NZB_ID_MAX.load(SeqCst), SeqCst);
+            0
+        }
+        2 => {
+            NZB_ID_GEN.store(0, SeqCst);
+            NZB_ID_MAX.store(0, SeqCst);
+            0
+        }
+        3 => {
+            NZB_ID_MAX.fetch_max(v, SeqCst);
+            0
+        }
+        4 => NZB_ID_GEN.fetch_add(1, SeqCst) + 1,
+        _ => 0,
+    }
+}
+
+unsafe extern "C" fn drop_file(p: usize) {
+    unsafe { crate::qfile::nzbget_rs_file_free(p as *mut crate::qfile::File) };
+}
+
+/// The `NzbInfo` constructor: the next id and an empty file list.
+///
+/// # Safety
+/// `p` is from `nzbget_rs_nzb_scalars_new` and not initialised yet.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_nzb_init(p: *mut NzbScalars) {
+    unsafe { (*p).id = nzbget_rs_nzb_ids(4, 0) };
+    let files = crate::qlist::nzbget_rs_ptrlist_new(drop_file);
+    unsafe { nzbget_rs_nzb_slot(p, 0, 1, files as usize) };
+}
+
 /// # Safety
 /// `p` is null or from `nzbget_rs_nzb_scalars_new`, freed once.
 #[unsafe(no_mangle)]

@@ -115,6 +115,7 @@ pub mod qdup;
 #[cfg(unix)]
 pub mod qhist;
 pub mod qlist;
+pub mod qqueue;
 pub mod queuecoord;
 pub(crate) mod queuesubsys_host;
 pub mod sevenzraw;

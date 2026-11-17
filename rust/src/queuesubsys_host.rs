@@ -6120,6 +6120,31 @@ unsafe fn native_op(
     use crate::qfile::{nzbget_rs_file_articles, nzbget_rs_file_op, File};
     let file = p1 as *const File;
     match (op, a1) {
+        // a collection's message, the live-repair job and the TLS cipher service
+        (2, _) => {
+            unsafe { crate::qqueue::host_nzb_message(a1, a2, p1, s1) };
+            Some(0)
+        }
+        (6, 5) => {
+            unsafe { crate::qqueue::host_start_live_repair(p1) };
+            Some(0)
+        }
+        (6, _) => Some(0),
+        (7, _) => Some(unsafe { crate::qqueue::host_tls_cipher(a1, p1, s1) }),
+        // the download queue (rust/src/qqueue.rs)
+        (20, _) => Some(unsafe { crate::qqueue::host_locked(p1, p2) }),
+        (21, _) => Some(crate::qqueue::host_queue_at(p1, a1)),
+        (22, _) => Some(unsafe { crate::qqueue::host_queue_op(a1, a2, p1, p2, ints, i64s) }),
+        (23, _) => Some(unsafe {
+            crate::qqueue::host_history_op(a1, a2, p1, p2, s1, s2, ints, i64s, strs)
+        }),
+        (24, 3) => {
+            crate::jobthread::nzbget_rs_prepost_queue_changed(a2, p1, p2, unsafe { *i64s }
+                as usize);
+            Some(0)
+        }
+        (24, _) => Some(0),
+        (25, _) => Some(crate::qqueue::host_daemon_queue(a1)),
         // file groups and server stats
         (41, 0) => Some(if a2 < 0 {
             unsafe { nzbget_rs_file_op(file, 0, 0, std::ptr::null(), ints, strs) as usize }

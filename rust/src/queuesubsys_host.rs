@@ -6186,6 +6186,10 @@ unsafe fn native_op(
             unsafe { crate::qfile::host_file_set(file, a1, a2, p2, s1, i64s) };
             Some(0)
         }
+        // article cache ops on a file
+        (44, _) => {
+            Some(unsafe { crate::qfile::host_cache_op(file, a1, a2, p2, s1, ints, i64s, strs) })
+        }
         // article ops (15, the live-par namespace walk, stays with the host)
         (43, 15) => None,
         (43, _) => {

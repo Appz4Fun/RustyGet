@@ -668,7 +668,7 @@ pub(crate) unsafe fn host_cache_op(
         }
         // hand every cached segment to the writer callback, under the flush lock
         5 => {
-            if !try_flush_lock() {
+            if s1.is_null() || !try_flush_lock() {
                 return 0;
             }
             type PushSeg =

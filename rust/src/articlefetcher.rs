@@ -254,7 +254,7 @@ pub const MAX_TRANSIENT_ATTEMPTS: i32 = 4;
 
 /// The longest a stream-repair fetch waits for the server to say anything. A borrow pass has
 /// `DupeStreamTimeout` in all, so one article that never answers must not use it up at
-/// `ArticleTimeout` per try: past this the try counts as timed out and goes to a fresh connection.
+/// `ArticleTimeout` per try: past this the try counts as timed out and goes to another connection.
 pub const STREAM_REPLY_TIMEOUT_SECS: i32 = 60;
 
 /// A read that failed after at least this long timed out rather than failed fast.
@@ -268,6 +268,13 @@ pub const MAX_TIMED_OUT_TRIES: i32 = 2;
 
 /// Waiting longer than this for a free connection is logged.
 const SLOW_CONNECTION_WAIT: Duration = Duration::from_secs(10);
+
+/// Whether a read that failed after `elapsed` timed out. The bar sits below the reply timeout,
+/// so a very short `ArticleTimeout` still counts as a timeout.
+fn read_timed_out(elapsed: Duration) -> bool {
+    let reply = Duration::from_secs(stream_reply_timeout_secs() as u64);
+    elapsed >= TIMED_OUT_AFTER.min(reply * 4 / 5)
+}
 
 /// `STREAM_REPLY_TIMEOUT_SECS`, or `ArticleTimeout` when that is shorter.
 fn stream_reply_timeout_secs() -> i32 {
@@ -677,8 +684,8 @@ impl ArticleFetcher {
                 continue;
             }
             if timed_out && !self.is_stopped() {
-                // a server that sits on one article is not unreachable, and a fresh
-                // connection is all a retry needs: the timed-out one was disconnected
+                // a server that sits on one article is not unreachable: retry once on
+                // another connection (the timed-out one was disconnected), then move on
                 let tries = timed_out_tries.entry(server_ptr).or_insert(0);
                 *tries += 1;
                 if *tries < MAX_TIMED_OUT_TRIES {
@@ -807,6 +814,7 @@ impl ArticleFetcher {
         };
 
         if join_group {
+            let join_started = Instant::now();
             let mut joined_resp: Option<Vec<u8>> = None;
             for group in groups {
                 let grp_c = to_c_bytes(group);
@@ -846,6 +854,7 @@ impl ArticleFetcher {
                 log.extend_from_slice(msg_slice);
                 emit_detail(self.host, &log);
                 result.transient = joined_resp.is_none();
+                result.timed_out = result.transient && read_timed_out(join_started.elapsed());
                 if result.transient {
                     disconnect();
                 }
@@ -882,7 +891,7 @@ impl ArticleFetcher {
             emit_detail(self.host, &log);
             disconnect();
             result.transient = true;
-            result.timed_out = requested.elapsed() >= TIMED_OUT_AFTER;
+            result.timed_out = read_timed_out(requested.elapsed());
             return result;
         }
         let resp_first = unsafe { *r_strs[0] as u8 };
@@ -962,7 +971,7 @@ impl ArticleFetcher {
                 disconnect();
                 return FetchedArticle {
                     transient: true,
-                    timed_out: read_started.elapsed() >= TIMED_OUT_AFTER,
+                    timed_out: read_timed_out(read_started.elapsed()),
                     ..Default::default()
                 };
             }
@@ -1495,7 +1504,7 @@ mod tests {
 
         assert!(!got.success);
         assert!(got.timed_out);
-        // one retry on a fresh connection, then the server is out for this article: no
+        // one retry on another connection, then the server is out for this article: no
         // max_connections stale retries and no growing retry delays
         assert_eq!(SILENT_REQUESTS.load(Ordering::SeqCst), MAX_TIMED_OUT_TRIES);
         assert!(started.elapsed() < Duration::from_secs(1));

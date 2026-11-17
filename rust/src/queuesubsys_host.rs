@@ -6226,11 +6226,26 @@ unsafe fn native_op(
                 strs,
             )
         }),
-        // a collection's plain setters (the rest stay with the host)
-        (32, _) => unsafe {
-            crate::qnzb::host_coll_set(p1 as *mut crate::qnzb::NzbScalars, a1, a2, s1, i64s)
-                .then_some(0)
-        },
+        // a collection's snapshot
+        (30, _) => {
+            unsafe {
+                crate::qnzb::host_coll_snapshot(
+                    p1 as *const crate::qnzb::NzbScalars,
+                    a1,
+                    ints,
+                    i64s,
+                    strs,
+                )
+            };
+            Some(0)
+        }
+        // a collection's setters
+        (32, _) => {
+            unsafe {
+                crate::qnzb::host_coll_set(p1 as *mut crate::qnzb::NzbScalars, a1, a2, p2, s1, i64s)
+            };
+            Some(0)
+        }
         // a collection's lists and texts
         (31, _) => unsafe {
             crate::qnzb::host_coll_op(

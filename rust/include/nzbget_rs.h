@@ -281,69 +281,10 @@ void nzbget_rs_log_active_emit(int kind, const char* text);
 
 uint32_t nzbget_rs_crc32_append(const uint8_t* block, uint32_t len, uint32_t init);
 
-NzbgetRsBuf nzbget_rs_nzb_format_name(
-    int op, const char* s1, const char* s2, const char* s3,
-    const char* s4, const char* s5, int flag, int nzb_id);
-int nzbget_rs_nzb_calc_health(
-    int is_critical, int64_t size, int64_t par_size,
-    int64_t current_failed_size, int64_t par_current_failed_size, int allow_estimation);
-int nzbget_rs_nzb_is_dupe_success(
-    int mark_status, int delete_status, int par_status, int unpack_status,
-    int url_status, int health, int critical_health_est, int critical_health_exact,
-    int health_check_dupe);
-const char* nzbget_rs_nzb_make_text_status(
-    int kind, int mark_status, int delete_status, int par_status, int unpack_status,
-    int move_status, int url_status, int script_status, int health, int critical_health);
 int nzbget_rs_nzb_completed_same_filename(const char* a, const char* b);
-void nzbget_rs_nzb_calc_active_downloads_sec(
-    int old_active, int new_active, int is_nzb_kind, int64_t cur_time,
-    int* inout_download_sec, int64_t* inout_download_start_time,
-    int* inout_download_start_sec, int* out_changed);
-void nzbget_rs_nzb_update_completed_stats(
-    int64_t file_success_size, int64_t file_failed_size,
-    int file_failed_articles, int file_success_articles,
-    int file_extra_priority, int file_par_file, int file_paused,
-    int64_t* inout_success_size, int64_t* inout_failed_size,
-    int* inout_failed_articles, int* inout_success_articles,
-    int* inout_extra_priority, int64_t* inout_par_success_size,
-    int64_t* inout_par_failed_size, int* inout_remaining_par_count,
-    int* inout_paused_file_count);
-void nzbget_rs_nzb_update_deleted_stats(
-    int64_t file_size, int64_t file_success_size, int64_t file_failed_size,
-    int64_t file_missed_size, int file_total_articles, int file_success_articles,
-    int file_failed_articles, int file_missed_articles, int64_t file_remaining_size,
-    int file_extra_priority, int file_par_file, int file_paused,
-    int* inout_file_count, int64_t* inout_size, int64_t* inout_cur_success_size,
-    int64_t* inout_failed_size, int* inout_failed_articles, int64_t* inout_cur_failed_size,
-    int* inout_total_articles, int* inout_cur_success_articles, int* inout_cur_failed_articles,
-    int64_t* inout_remaining_size, int* inout_extra_priority, int* inout_remaining_par_count,
-    int64_t* inout_par_size, int64_t* inout_par_cur_success_size, int64_t* inout_par_failed_size,
-    int64_t* inout_par_cur_failed_size, int* inout_paused_file_count, int64_t* inout_paused_size);
 
 void nzbget_rs_util_format_time(int64_t time_sec, char* buffer, int bufsize);
 
-typedef struct RsDownloadCurrentStatsAcc {
-    int64_t remaining_size;
-    int64_t current_success_size;
-    int64_t current_failed_size;
-    int64_t paused_size;
-    int64_t par_current_success_size;
-    int64_t par_current_failed_size;
-    int32_t current_success_articles;
-    int32_t current_failed_articles;
-    int32_t extra_priority;
-    int32_t paused_file_count;
-    int32_t remaining_par_count;
-    int32_t _pad;
-} RsDownloadCurrentStatsAcc;
-
-void nzbget_rs_nzb_update_current_stats_step(
-    RsDownloadCurrentStatsAcc* acc, int64_t file_remaining_size,
-    int file_success_articles, int file_failed_articles,
-    int64_t file_success_size, int64_t file_failed_size,
-    int file_extra_priority, int file_paused, int file_par_file);
-void nzbget_rs_nzb_calc_min_max_time(
-    const int64_t* times, size_t count, int64_t* out_min, int64_t* out_max);
 void nzbget_rs_server_stat_apply_op(
     int stat_op, int delta_success, int delta_failed,
     int* inout_success, int* inout_failed);
@@ -493,9 +434,6 @@ uintptr_t nzbget_rs_nzb_slot(const NzbgetRsNzbScalars* p, int id, int set, uintp
 // Small lists of a collection (op codes in qnzb.rs).
 int64_t nzbget_rs_nzb_coll(const NzbgetRsNzbScalars* p, int op, int a2, const NzbgetRsNzbScalars* p2,
     const char* s1, const char* s2, int* ints, const char** strs);
-// Completed files and stream-repair jobs of a collection (op codes in qnzb.rs).
-int64_t nzbget_rs_nzb_files(const NzbgetRsNzbScalars* p, int op, int a2, const NzbgetRsNzbScalars* p2,
-    const char* s1, const char* s2, int* ints, int64_t* i64s, const char** strs, const int64_t* raw);
 // Ordered list owning host objects (rust/src/qlist.rs).
 typedef struct RsPtrList RsPtrList;
 RsPtrList* nzbget_rs_ptrlist_new(void (*drop_fn)(uintptr_t));
@@ -523,17 +461,11 @@ RsHist* nzbget_rs_hist_new(void);
 void nzbget_rs_hist_free(RsHist* h);
 int64_t nzbget_rs_hist_get(const RsHist* h, int field);
 void nzbget_rs_hist_set(const RsHist* h, int field, int64_t v);
-// Post-processing state (op codes in qnzb.rs).
+// Post-processing state (rust/src/qnzb.rs), freed with its collection.
 typedef struct RsPost RsPost;
-RsPost* nzbget_rs_post_new(void);
 void nzbget_rs_post_free(RsPost* p);
-int64_t nzbget_rs_post_op(const RsPost* p, int op, int a2, int64_t v, const char* s1, const char** strs);
-NzbgetRsBuf nzbget_rs_post_label(const RsPost* p);
 // Starts a direct-unpack job for a collection (host op 62 sub-op 8).
 void nzbget_rs_nzb_start_direct_unpack(NzbgetRsNzbScalars* p);
-// A collection's message log (op codes in qnzb.rs).
-int64_t nzbget_rs_nzb_msgs(const NzbgetRsNzbScalars* p, int op, int a2, const NzbgetRsNzbScalars* p2,
-    const char* s1, const int* ints, void (*visit)(uintptr_t, int, int, int, const char*), uintptr_t ctx);
 // Job threads for post-processing, live repair and direct unpack (rust/src/jobthread.rs).
 typedef struct JobThread JobThread;
 JobThread* nzbget_rs_job_new_post(int kind, uintptr_t post_ptr, int nzb_id, int auto_destroy);

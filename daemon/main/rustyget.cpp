@@ -21,8 +21,8 @@
 
 
 // The daemon's start-up, reload and shutdown run in Rust (rust/src/daemon.rs).
-// What stays here registers the C++ queue model with Rust once at start-up:
-// the build flags and its host callback (InitRsBuildEnv in Util.h).
+// What stays here hands Rust the build flags, the TLS version text and the
+// stdout writer once at start-up (InitRsBuildEnv in Util.h).
 
 #include "Util.h"
 #include "nzbget_rs.h"

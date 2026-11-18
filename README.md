@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <a href="https://appz4fun.github.io/RustyGet/"><img alt="Documentation" src="https://img.shields.io/badge/docs-appz4fun.github.io%2FRustyGet-a8400f"></a>
+  <a href="https://rustyget.xbmc4lyfe.com/"><img alt="Documentation" src="https://img.shields.io/badge/docs-rustyget.xbmc4lyfe.com-a8400f"></a>
   <a href="https://github.com/Appz4Fun/RustyGet/actions/workflows/pages.yml"><img alt="Docs build" src="https://github.com/Appz4Fun/RustyGet/actions/workflows/pages.yml/badge.svg"></a>
   <img alt="Rust 1.99.0" src="https://img.shields.io/badge/rust-1.99.0-1d6f60">
   <img alt="Status: rewrite in progress" src="https://img.shields.io/badge/status-rewrite%20in%20progress-8a5a00">
@@ -15,10 +15,10 @@
 
 RustyGet is a Usenet downloader that started as a fork of [NZBGet](https://github.com/nzbgetcom/nzbget) and is being rewritten in Rust. It carries every improvement from NZBGet [pull request 850](https://github.com/nzbgetcom/nzbget/pull/850), which NZBGet never merged, and builds on them: RustyGet treats every copy of a release as one **fleet**, so an article that's missing on every news server comes from another copy instead of failing the download.
 
-**[Read the documentation](https://appz4fun.github.io/RustyGet/)**
+**[Read the documentation](https://rustyget.xbmc4lyfe.com/)**
 
 > [!IMPORTANT]
-> RustyGet is no longer a fork. The repository has left GitHub's fork network and is a standalone rewrite. It still speaks NZBGet's API today, but future versions may break NZBGet API compatibility, and may add a SABnzbd-compatible API. See [API and compatibility](https://appz4fun.github.io/RustyGet/api.html).
+> RustyGet is no longer a fork. The repository has left GitHub's fork network and is a standalone rewrite. It still speaks NZBGet's API today, but future versions may break NZBGet API compatibility, and may add a SABnzbd-compatible API. See [API and compatibility](https://rustyget.xbmc4lyfe.com/api.html).
 
 ## Contents
 
@@ -51,7 +51,7 @@ RustyGet is a Usenet downloader that started as a fork of [NZBGet](https://githu
 | Unpacking | External `unrar` and `7z` programs | Built in, with no external programs |
 | CI workflows | Builds and tests for every platform | Builds and tests on Linux x86-64 and macOS for every pull request and push to `main` |
 
-The new options are `DupeArticleFallback`, `DupeStreamDecompress`, `DupeStreamTimeout`, `DupeBorrowFirst`, `DupeWatch`, `DupeHealthPreset`, `DupeHealthPercent`, `DupeHealthMin`, `DupeHealthMax`, `DupeBodyChecks`, `DupeHealthBudget`, `DupeMinAlive`, `DupeBodyPercent`, `DupeCheckConcurrency`, and `DupeCheckConnections`, plus `JsonP` in the security settings. The full list of changes is in [Differences from NZBGet](https://appz4fun.github.io/RustyGet/differences.html).
+The new options are `DupeArticleFallback`, `DupeStreamDecompress`, `DupeStreamTimeout`, `DupeBorrowFirst`, `DupeWatch`, `DupeHealthPreset`, `DupeHealthPercent`, `DupeHealthMin`, `DupeHealthMax`, `DupeBodyChecks`, `DupeHealthBudget`, `DupeMinAlive`, `DupeBodyPercent`, `DupeCheckConcurrency`, and `DupeCheckConnections`, plus `JsonP` in the security settings. The full list of changes is in [Differences from NZBGet](https://rustyget.xbmc4lyfe.com/differences.html).
 
 ## How deduplication works
 
@@ -63,18 +63,18 @@ The same release usually exists as many postings: reposts, listings on several i
 2. **Rank by quality.** It parses each release name and ranks by resolution, HDR format, remux, preferred release-group tiers, audio format, and size. You pick a release, or let the add-on pick the top one.
 3. **Gather every copy.** It collects every row that's the same release as the pick: the same name, or a parsed name that agrees on title, year or episode, group, resolution, codec, HDR, audio, edition, and language. It also adds other uploads with the same title from NZBHydra2's answer, including ones your filters hid.
 4. **Drop the same posting twice.** Rows with the same size, posted within 120 seconds of each other, are one listing seen through several indexers. After it downloads the NZB files, the add-on compares fingerprints of every article's Message-ID; NZB files that share more than 1% of their articles are the same posting, and only one stays. A re-upload that shares none is kept, because it's the strongest backup there is.
-5. **Send the fleet.** It sends up to 50 copies in one [`appendfleet`](https://appz4fun.github.io/RustyGet/api.html#appendfleet) call under a duplicate key built from the content ID and the release name.
+5. **Send the fleet.** It sends up to 50 copies in one [`appendfleet`](https://rustyget.xbmc4lyfe.com/api.html#appendfleet) call under a duplicate key built from the content ID and the release name.
 
 ### RustyGet picks the copy and keeps the rest working
 
 1. **Check every copy on your servers.** RustyGet checks a sample of each posting's articles on all of your news servers at once, and downloads a few in full to verify their checksums. It marks copies of the same posting that the add-on couldn't see.
 2. **Rank.** Copies that are alive come first, then unknown, then dead. Within a group, the most complete copy wins, then the one whose size is closest to the fleet's median, which is usually the release's own packaging.
 3. **Queue the best, keep the rest.** The top copy downloads, and the others wait in history as scored backups, with their measured health.
-4. **Borrow, repair, fail over.** During the download, a missing article comes from a matching file in another copy. A yEnc article must fit its place in the file, and, where they're available, it's checked against its yEnc checksum and the download's par2 block checksums. [Duplicate fleets](https://appz4fun.github.io/RustyGet/duplicate-fleets.html#making-sure-the-bytes-are-right) lists when a check can't run. Holes are patched from verified bytes. If the copy can't complete, the best backup takes over within seconds, and the add-on follows the duplicate key to the new download.
+4. **Borrow, repair, fail over.** During the download, a missing article comes from a matching file in another copy. A yEnc article must fit its place in the file, and, where they're available, it's checked against its yEnc checksum and the download's par2 block checksums. [Duplicate fleets](https://rustyget.xbmc4lyfe.com/duplicate-fleets.html#making-sure-the-bytes-are-right) lists when a check can't run. Holes are patched from verified bytes. If the copy can't complete, the best backup takes over within seconds, and the add-on follows the duplicate key to the new download.
 
 The add-on decides *which release* you get. RustyGet decides *which copy* of it downloads, because only your news servers know which copies still exist. Fleet submission with `appendfleet` came in add-on pull requests [514](https://github.com/Appz4Fun/NeNeTeePee-Stream-Kodi/pull/514), [518](https://github.com/Appz4Fun/NeNeTeePee-Stream-Kodi/pull/518), and [519](https://github.com/Appz4Fun/NeNeTeePee-Stream-Kodi/pull/519), and shipped in the add-on's [2.0.0-beta.3](https://github.com/Appz4Fun/NeNeTeePee-Stream-Kodi/releases/tag/v2.0.0-beta.3) pre-release on 2026-10-11. With stock NZBGet, the add-on falls back to one `append` per copy.
 
-For more detail, see [Duplicate fleets](https://appz4fun.github.io/RustyGet/duplicate-fleets.html), [Streaming with Kodi](https://appz4fun.github.io/RustyGet/kodi.html), and [NZBHydra2](https://appz4fun.github.io/RustyGet/nzbhydra2.html).
+For more detail, see [Duplicate fleets](https://rustyget.xbmc4lyfe.com/duplicate-fleets.html), [Streaming with Kodi](https://rustyget.xbmc4lyfe.com/kodi.html), and [NZBHydra2](https://rustyget.xbmc4lyfe.com/nzbhydra2.html).
 
 ## Pull request 850
 
@@ -118,7 +118,7 @@ just build
 build/release/rustyget -c ~/.rustyget -o WebDir="$PWD/webui" -o ConfigTemplate="$PWD/rustyget.conf" -D
 ```
 
-The configuration template in the repository is `rustyget.conf`. `~/.rustyget` is where RustyGet saves your configuration, and the web interface writes your settings there. The test keeps an existing copy when you run these steps again to upgrade. Then open `http://<host>:6789`. The default login is `rustyget` with the password `tegbzn6789`. Change it first. See [Install and build](https://appz4fun.github.io/RustyGet/install.html) for the libraries each platform needs, and [Quick start](https://appz4fun.github.io/RustyGet/quick-start.html) for the first settings.
+The configuration template in the repository is `rustyget.conf`. `~/.rustyget` is where RustyGet saves your configuration, and the web interface writes your settings there. The test keeps an existing copy when you run these steps again to upgrade. Then open `http://<host>:6789`. The default login is `rustyget` with the password `tegbzn6789`. Change it first. See [Install and build](https://rustyget.xbmc4lyfe.com/install.html) for the libraries each platform needs, and [Quick start](https://rustyget.xbmc4lyfe.com/quick-start.html) for the first settings.
 
 To move from NZBGet, stop it, back up the queue directory and `nzbget.conf`, and start RustyGet with the same configuration file.
 
@@ -129,20 +129,20 @@ tracks job progress, records Linux resource observations, and saves bounded
 evidence when an active job stops showing progress. Its guide explains how to
 investigate downloading, storage, PAR repair, and unpacking symptoms.
 
-The **[documentation site](https://appz4fun.github.io/RustyGet/)** covers:
+The **[documentation site](https://rustyget.xbmc4lyfe.com/)** covers:
 
-- [Feature highlights](https://appz4fun.github.io/RustyGet/features.html) and [Differences from NZBGet](https://appz4fun.github.io/RustyGet/differences.html)
-- [Duplicate handling](https://appz4fun.github.io/RustyGet/duplicates.html) and [Duplicate fleets](https://appz4fun.github.io/RustyGet/duplicate-fleets.html)
-- [Check, repair, and unpack](https://appz4fun.github.io/RustyGet/post-processing.html), [Servers, RSS, and scheduling](https://appz4fun.github.io/RustyGet/automation.html), and [Performance tuning](https://appz4fun.github.io/RustyGet/performance.html)
-- [Configuration options](https://appz4fun.github.io/RustyGet/options.html), generated from `rustyget.conf`
-- [API and compatibility](https://appz4fun.github.io/RustyGet/api.html) and the [Design system](https://appz4fun.github.io/RustyGet/design-system.html)
+- [Feature highlights](https://rustyget.xbmc4lyfe.com/features.html) and [Differences from NZBGet](https://rustyget.xbmc4lyfe.com/differences.html)
+- [Duplicate handling](https://rustyget.xbmc4lyfe.com/duplicates.html) and [Duplicate fleets](https://rustyget.xbmc4lyfe.com/duplicate-fleets.html)
+- [Check, repair, and unpack](https://rustyget.xbmc4lyfe.com/post-processing.html), [Servers, RSS, and scheduling](https://rustyget.xbmc4lyfe.com/automation.html), and [Performance tuning](https://rustyget.xbmc4lyfe.com/performance.html)
+- [Configuration options](https://rustyget.xbmc4lyfe.com/options.html), generated from `rustyget.conf`
+- [API and compatibility](https://rustyget.xbmc4lyfe.com/api.html) and the [Design system](https://rustyget.xbmc4lyfe.com/design-system.html)
 - [Offline benchmark viewer and evidence](benchmarks/nanobench-poc.tar.gz), a fixture-only proof of concept with its production performance hold unchanged. Unpack it and open `nanobench-poc/index.html`.
 
 The site's source is in [`site/`](site). It deploys on every push to the default branch, after Vale checks the prose against the Google developer documentation style.
 
 ## Contribute
 
-Issues and pull requests are welcome in this repository. Write new code in Rust, keep ports byte-identical with the code they replace, and add tests that fail without your change. AI-assisted work is welcome if you say which tools you used and understand every line. See [Contributing](https://appz4fun.github.io/RustyGet/contributing.html).
+Issues and pull requests are welcome in this repository. Write new code in Rust, keep ports byte-identical with the code they replace, and add tests that fail without your change. AI-assisted work is welcome if you say which tools you used and understand every line. See [Contributing](https://rustyget.xbmc4lyfe.com/contributing.html).
 
 ## License and credits
 

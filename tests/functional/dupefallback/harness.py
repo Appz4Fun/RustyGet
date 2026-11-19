@@ -8443,8 +8443,11 @@ def scenario_xmlparamdecode(daemon, t):
 def _path_traversal(daemon, t, name):
     """A hostile NZB or article names a file outside the destination: the nzb
     subject is "../../../escape.bin", the article's yEnc name (rewritten by a
-    proxy) "../../ab.bin", and a rar member "../../escape2.bin". Every file
-    stays inside the destination folder."""
+    proxy) "../../ab.bin", and a rar member "../../escape2.bin". No file is
+    written outside the destination folder. The download names are made safe;
+    the rar member breaches the unpack limits (#453): post-processing fails
+    with the reason logged (zipfast refuses the name before the member starts
+    and does not report it, so the reason doesn't name the member)."""
     data = _payload(90_000, 9797)
     t.write_file(os.path.join('data', 'ptA/aaaaaaaa.bin'), data)
     inner = _payload(120_000, 9798)
@@ -8467,8 +8470,10 @@ def _path_traversal(daemon, t, name):
                     and not full.startswith(dst + os.sep) and os.path.getmtime(full) >= started:
                 outside.append(full)
     inside = sorted(os.path.basename(r) for r in t.find_files('main', 'dst'))
-    ok = not outside and bool(inside)
-    return (name, ok, 'status=%s outside_dst=%s inside=%s' % (h['Status'], outside, inside))
+    reason = _grep_log(t, 'Unpack limit: an archive entry or link would land outside the unpack folder')
+    ok = not outside and h['Status'] == 'FAILURE/UNPACK' and reason >= 1
+    return (name, ok, 'status=%s reason_logged=%d outside_dst=%s inside=%s' % (
+        h['Status'], reason, outside, inside))
 
 
 def scenario_pathtraversalnzb(daemon, t):

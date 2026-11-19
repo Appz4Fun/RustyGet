@@ -15,6 +15,17 @@
 /// The nzb parameter holding a fleet member's [`DonorKind`].
 pub const KIND_PARAM: &[u8] = b"DupeCopyKind";
 
+/// The nzb parameter a fleet sets (`yes`) on a copy whose archive headers are
+/// encrypted while its nzb carries no password: nothing in it can be extracted
+/// or borrowed, so it ranks below every copy that can, whatever its health,
+/// and is taken only when nothing else is alive (the user's rule, 2026-11-19).
+pub const LOCKED_PARAM: &[u8] = b"DupeLocked";
+
+/// Whether a [`LOCKED_PARAM`] value marks the copy locked.
+pub fn locked_param(value: Option<&[u8]>) -> bool {
+    value.is_some_and(|v| v.trim_ascii().eq_ignore_ascii_case(b"yes"))
+}
+
 /// How the posted bytes of a copy relate to its inner media file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Packing {
@@ -29,6 +40,10 @@ pub enum Packing {
     /// Compressed, encrypted without a known password, or a 7-Zip whose nzb
     /// carries a password (encrypted: borrowing means decrypting it whole).
     Unborrowable,
+    /// RAR headers encrypted and no password in the nzb: it can neither be
+    /// extracted nor borrowed from. Its kind is unborrowable; a fleet also
+    /// ranks it after every copy that can be extracted (see [`LOCKED_PARAM`]).
+    Locked,
 }
 
 /// Priority of a copy, lower first.
@@ -50,7 +65,7 @@ impl DonorKind {
         match packing {
             Packing::Borrowable => DonorKind::Borrowable,
             Packing::Unknown => DonorKind::Unknown,
-            Packing::Unborrowable => DonorKind::Unborrowable,
+            Packing::Unborrowable | Packing::Locked => DonorKind::Unborrowable,
         }
     }
 
@@ -155,8 +170,13 @@ fn rar_packing(data: &[u8], password_known: bool) -> Packing {
     if volume.encrypted {
         // encrypted headers: nothing about the content can be read here, so
         // it is never taken before a copy that is proven borrowable or
-        // simply plain (encryption keeps a penalty even with the password)
-        return Packing::Unborrowable;
+        // simply plain (encryption keeps a penalty even with the password);
+        // without a password nothing in it can be read at all
+        return if password_known {
+            Packing::Unborrowable
+        } else {
+            Packing::Locked
+        };
     }
     // the media file decides; a small nfo or sample in front of it says
     // nothing about how the movie is packed
@@ -356,10 +376,14 @@ mod tests {
             packing_of_head(&rar4_with_file(0x30, 0x04, 0), b"a.rar", true),
             Packing::Unknown
         );
-        // encrypted headers: last, password or not
+        // encrypted headers: last, password or not; locked without one
         assert_eq!(
             packing_of_head(&rar4_with_file(0x30, 0, 0x80), b"a.rar", false),
-            Packing::Unborrowable
+            Packing::Locked
+        );
+        assert_eq!(
+            DonorKind::of(false, Packing::Locked),
+            DonorKind::Unborrowable
         );
         assert_eq!(
             packing_of_head(&rar4_with_file(0x30, 0, 0x80), b"a.rar", true),

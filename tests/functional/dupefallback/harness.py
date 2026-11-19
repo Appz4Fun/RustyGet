@@ -4814,6 +4814,54 @@ def scenario_dupefailoverraw(daemon, t):
             % (hp['Status'], failed_over, probed, failed_articles, 6 * n * 4 // 5))
 
 
+def scenario_lockedfailover(daemon, t):
+    """HealthCheck=dupe, DirectUnpack=yes: the primary is a RAR5 set with
+    encrypted headers (rar -hp) and no password in its nzb; a plain copy waits
+    in history as its backup. Direct unpack stops at once ("password
+    required"), and the primary must fail over then, not after downloading
+    every volume (live South Park S23E05 downloaded 2.1 GB first). Needs the
+    rar tool; skipped (passes) without it."""
+    if not shutil.which('rar'):
+        return ('lockedfailover', True, 'skipped: no rar tool')
+    import tempfile
+    data = b'\x1a\x45\xdf\xa3' + _payload(4_000_000, 9601)
+    work = tempfile.mkdtemp(prefix='lockedfo-')
+    try:
+        with open(os.path.join(work, 'movie.mkv'), 'wb') as f:
+            f.write(data)
+        subprocess.run(['rar', 'a', '-ma5', '-m0', '-hpsecret', '-v200k', '-idq', 'lock.rar', 'movie.mkv'],
+                       cwd=work, check=True, stdout=subprocess.DEVNULL)
+        vols = sorted(n for n in os.listdir(work) if n.endswith('.rar'))
+        members = []
+        for name in vols:
+            with open(os.path.join(work, name), 'rb') as f:
+                vol = f.read()
+            members.append((_place_copy(t, 'lkA', vol, name), name, len(vol), 50_000, set()))
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    bp = _place_copy(t, 'lkB', data, 'movie.mkv')
+    backup = build_nzb(bp, 'movie.mkv', len(data), 100_000, set())
+    api = daemon.wait_ready()
+    daemon.append(api, 'Primary', build_multi_nzb(members), True, 'lk-key', 100)
+    daemon.append(api, 'Backup', backup, False, 'lk-key', 90)
+    daemon.wait_history(api, 'Backup', timeout=60)
+    api.editqueue('GroupResume', 0, '', [g['NZBID'] for g in api.listgroups()
+                                         if g['NZBName'] == 'Primary'])
+    hp = daemon.wait_history(api, 'Primary')
+    deadline = time.time() + 180
+    hb = daemon.wait_history(api, 'Backup')
+    while hb['Status'].startswith('DELETED') and time.time() < deadline:
+        time.sleep(0.5)
+        hb = daemon.wait_history(api, 'Backup')
+    failed_over = _grep_log(t, 'Failing over Primary to duplicate Backup: its archive needs a password')
+    got = int(hp.get('SuccessArticles', 0))
+    total = int(hp.get('TotalArticles', 0))
+    early = total > 0 and got < total * 6 // 10
+    ok = failed_over == 1 and early and hb['Status'].startswith('SUCCESS')
+    return ('lockedfailover', ok, 'primary=%s backup=%s failover_logs=%d articles=%d of %d'
+            % (hp['Status'], hb['Status'], failed_over, got, total))
+
+
 def scenario_dupefailover(daemon, t):
     """HealthCheck=dupe: the primary is a dead posting (every article of
     every file missing) and no duplicate carries its files, while a healthy
@@ -6482,6 +6530,38 @@ def scenario_fleetencryptedheadless(daemon, t):
              for n, g in items.items()}
     ok = (order[-1] == 'Show.S01E01.headless' and kinds.get('Show.S01E01.headless') == 'unborrowable')
     return ('fleetencryptedheadless', ok, 'order=%s kinds=%s' % (order, kinds))
+
+
+def scenario_fleetlockedlast(daemon, t):
+    """appendfleet: a copy whose rar headers are encrypted while its nzb has
+    no password can never be extracted or borrowed from, so it ranks after a
+    plain copy that can, even a whole locked copy behind one 85% alive (live
+    South Park S23E05: the locked copy was queued first and failed only after
+    downloading whole). It keeps DupeLocked=yes for failover and the rescue.
+    With its password in the nzb the same copy ranks by health as before."""
+    daemon.fake_nntp.alive = set()
+    enc = _rar4_head(0x30, main_flags=0x80)   # main header flag: encrypted headers
+    api = daemon.wait_ready()
+
+    def run(key, tag, ep, password):
+        locked = _fleet_copy(daemon, tag + 'k', 'a.rar', 400_000, enc, _payload(400_000, 7601))
+        if password:
+            locked = locked.replace('<file ', '<head><meta type="password">pw</meta></head><file ', 1)
+        plain = _fleet_copy(daemon, tag + 'p', 'b.rar', 400_000, _rar4_head(0x30), _payload(400_000, 7602), 34)
+        reply = _fleet(daemon, [(ep + '.enc', locked), (ep + '.plain', plain)], key=key)
+        order = [m['Name'] for m in sorted(reply['Members'], key=lambda m: m['Rank'])]
+        params = {g['NZBName']: {p['Name']: p['Value'] for p in g.get('Parameters', [])}
+                  for g in api.listgroups() + api.history() if g.get('DupeKey') == key}
+        return order, {n: p.get('DupeLocked') for n, p in params.items()}
+
+    order, locked = run('fleet:locked', 'l', 'Show.S01E01', False)
+    order_pw, locked_pw = run('fleet:lockedpw', 'w', 'Show.S01E02', True)
+    ok = (order == ['Show.S01E01.plain', 'Show.S01E01.enc']
+          and locked.get('Show.S01E01.enc') == 'yes' and locked.get('Show.S01E01.plain') is None
+          and order_pw == ['Show.S01E02.enc', 'Show.S01E02.plain']
+          and locked_pw.get('Show.S01E02.enc') is None)
+    return ('fleetlockedlast', ok, 'order=%s locked=%s order_pw=%s locked_pw=%s'
+            % (order, locked, order_pw, locked_pw))
 
 
 def scenario_fleettwinvolumes(daemon, t):
@@ -10337,6 +10417,7 @@ SCENARIOS = {
     'xdecomp_off': scenario_xdecomp_off,
     'wholefile': scenario_wholefile,
     'dupefailover': scenario_dupefailover,
+    'lockedfailover': scenario_lockedfailover,
     'dupefailoverraw': scenario_dupefailoverraw,
     'dupehopeless': scenario_dupehopeless,
     'dupehopelessretry': scenario_dupehopelessretry,
@@ -10411,6 +10492,7 @@ SCENARIOS = {
     'fleetintakelater': scenario_fleetintakelater,
     'fleetencryptedlast': scenario_fleetencryptedlast,
     'fleetencryptedheadless': scenario_fleetencryptedheadless,
+    'fleetlockedlast': scenario_fleetlockedlast,
     'fleettwinvolumes': scenario_fleettwinvolumes,
     'fleetkindslowcheck': scenario_fleetkindslowcheck,
     'watchforcepick': scenario_watchforcepick,
@@ -10754,6 +10836,8 @@ SCENARIO_OPTIONS = {
     # HealthCheck=none; article recovery stays on so the failover's
     # "duplicates were asked first" sample gate is exercised too
     'dupefailover': ['DupeArticleFallback=article', 'HealthCheck=dupe'],
+    'lockedfailover': ['DupeArticleFallback=no', 'HealthCheck=dupe', 'Unpack=yes', 'DirectUnpack=yes',
+                       'DownloadRate=300'],
     'dupefailoverraw': ['DupeArticleFallback=article', 'HealthCheck=dupe', 'RawArticle=yes'],
     'dupehopeless': ['DupeArticleFallback=article', 'HealthCheck=dupe'],
     'dupehopelessretry': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
@@ -11036,7 +11120,7 @@ SCENARIO_FIRST_FAIL_PROXY = {'recheckfailed': ((b'?5=', b'?10=', b'?15='),),
 # scenarios with a FakeNewznab indexer (DupeSearchUrl points to it)
 
 # scenarios with a FakeNntp news server in place of nserv
-SCENARIO_FAKE_NNTP = {'watchfleet', 'watchforcepick', 'watchdeadpick', 'watchswap', 'watchborrow', 'watchswaptwin', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetnodupecheck', 'fleetkindorder', 'fleetkindsingle', 'fleetkindlater', 'fleetintake', 'fleetintakelater', 'fleetencryptedlast', 'fleetencryptedheadless', 'fleetkindslowcheck', 'fleettwinvolumes', 'fleetalldead', 'fleetshutdown'}
+SCENARIO_FAKE_NNTP = {'watchfleet', 'watchforcepick', 'watchdeadpick', 'watchswap', 'watchborrow', 'watchswaptwin', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetnodupecheck', 'fleetkindorder', 'fleetkindsingle', 'fleetkindlater', 'fleetintake', 'fleetintakelater', 'fleetencryptedlast', 'fleetencryptedheadless', 'fleetlockedlast', 'fleetkindslowcheck', 'fleettwinvolumes', 'fleetalldead', 'fleetshutdown'}
 
 
 # --------------------------------------------------------------------------- #

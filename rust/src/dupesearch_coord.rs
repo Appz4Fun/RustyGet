@@ -2088,6 +2088,8 @@ struct SearchJob {
     known_files: Vec<Vec<u8>>,
     members: Vec<(i32, Vec<u8>)>,
     member_scores: Vec<i32>,
+    /// each member's [`crate::donorkind::LOCKED_PARAM`]
+    member_locked: Vec<bool>,
     score: i32,
 }
 
@@ -2366,6 +2368,13 @@ impl NzbgetRsDupeSearch {
             if add_member {
                 job.members.push((item.id, qf.clone()));
                 job.member_scores.push(item.dupe_score);
+                job.member_locked
+                    .push(crate::ffi::queue_host().is_some_and(|qh| {
+                        crate::donorkind::locked_param(
+                            qh.nzb_get_param(item.ptr, crate::donorkind::LOCKED_PARAM)
+                                .as_deref(),
+                        )
+                    }));
             }
         };
 
@@ -3554,10 +3563,11 @@ impl NzbgetRsDupeSearch {
             } else {
                 None
             };
-        let copy_kind = |info: &NzbSummaryData| -> (bool, crate::donorkind::DonorKind) {
+        // (twin, kind, locked: encrypted headers and no password)
+        let copy_kind = |info: &NzbSummaryData| -> (bool, crate::donorkind::DonorKind, bool) {
             use crate::donorkind::{DonorKind, Packing};
             let Some(pick_listed) = pick_listed.as_ref() else {
-                return (false, DonorKind::Unknown);
+                return (false, DonorKind::Unknown, false);
             };
             let (start, deadline) = kind_deadline();
             let (listed, packing) =
@@ -3567,7 +3577,11 @@ impl NzbgetRsDupeSearch {
             kind_spent(start);
             let twin =
                 crate::donorkind::twins(pick_listed, &listed, &pick.data_layout, &info.data_layout);
-            (twin, DonorKind::of(twin, packing))
+            (
+                twin,
+                DonorKind::of(twin, packing),
+                packing == Packing::Locked,
+            )
         };
         let alive_of = |h: &DonorHealthResult, s: &NzbSummaryData| -> f64 {
             effective_alive(
@@ -3775,7 +3789,7 @@ impl NzbgetRsDupeSearch {
 
             let place_one = |st: &mut PlaceMutable, i: usize, alive: f64, how: &[u8]| {
                 let ctx = ctx_addr as *mut c_void;
-                let (twin, kind) = copy_kind(&verified[i].info);
+                let (twin, kind, locked) = copy_kind(&verified[i].info);
                 let score = take_rank_set(&mut st.ranks_used, alive, twin);
                 let id = self.add_donor(
                     ctx,
@@ -3804,6 +3818,7 @@ impl NzbgetRsDupeSearch {
                             grabs: verified[i].listing.grabs,
                             kind: kind as u8,
                             cap: 0,
+                            locked,
                         },
                         title: verified[i].listing.title.clone(),
                         member: false,
@@ -4140,7 +4155,9 @@ impl NzbgetRsDupeSearch {
                     }
                     let member_title = base_file_name(&job.members[m_idx].1);
                     let old_sc = job.member_scores.get(m_idx).copied().unwrap_or(0);
-                    let (member_twin, member_kind) = copy_kind(summary);
+                    let (member_twin, member_kind, member_locked) = copy_kind(summary);
+                    let member_locked =
+                        member_locked || job.member_locked.get(m_idx).copied().unwrap_or(false);
                     let item = PlacedItem {
                         id: job.members[m_idx].0,
                         entry: crate::donorscore::Entry {
@@ -4159,6 +4176,7 @@ impl NzbgetRsDupeSearch {
                             } else {
                                 0
                             },
+                            locked: member_locked,
                         },
                         title: member_title.clone(),
                         member: true,
@@ -5828,6 +5846,9 @@ pub unsafe fn fleet_append(
         video: Option<bool>,
         // intake found another video in it
         video_different: bool,
+        // archive headers encrypted and no password in its nzb: never
+        // extractable, ranked after every copy that is
+        locked: bool,
     }
 
     let mut candidates: Vec<FleetCandidate> = Vec::with_capacity(members.len());
@@ -5845,6 +5866,7 @@ pub unsafe fn fleet_append(
             kind: crate::donorkind::DonorKind::Unknown,
             video: None,
             video_different: false,
+            locked: false,
         };
         if !members[i].url.is_empty() {
             let (ok, status, body) = slot.into_inner().unwrap_or_else(|e| e.into_inner());
@@ -6091,6 +6113,7 @@ pub unsafe fn fleet_append(
             let mut got = probe_copies(host_ctx, host_cb, &summaries, probe_deadline);
             earlier_probed = got.split_off(usable.len().min(got.len()));
             for (&i, p) in usable.iter().zip(got) {
+                candidates[i].locked |= p.1 == crate::donorkind::Packing::Locked;
                 probed[i] = Some(p);
             }
         }
@@ -6167,6 +6190,12 @@ pub unsafe fn fleet_append(
                         candidates[i].video = Some(false);
                         msg.extend_from_slice(b" unverified: ");
                         msg.extend_from_slice(why.as_bytes());
+                        // the intake read it with the nzb's password, if any
+                        if why == crate::streamrepair::ContentMapper::SKIP_ENCRYPTED_HEADERS
+                            && !summary_password_known(&candidates[i].summary)
+                        {
+                            candidates[i].locked = true;
+                        }
                     }
                 }
                 host_log(host_ctx, host_cb, MK_INFO, &msg);
@@ -6353,14 +6382,17 @@ pub unsafe fn fleet_append(
     let mut cand_alive = vec![0i32; candidates.len()];
     let mut cand_bytes = vec![0i64; candidates.len()];
     let mut cand_kind = vec![0u8; candidates.len()];
+    let mut cand_locked = vec![0u8; candidates.len()];
     for i in 0..candidates.len() {
         if candidates[i].same_as >= 0 {
             let orig = candidates[i].same_as as usize;
             candidates[i].alive = candidates[orig].alive;
             candidates[i].dead = candidates[orig].dead;
             candidates[i].kind = candidates[orig].kind;
+            candidates[i].locked = candidates[orig].locked;
         }
         cand_kind[i] = candidates[i].kind as u8;
+        cand_locked[i] = u8::from(candidates[i].locked);
         cand_err[i] = u8::from(!candidates[i].error.is_empty());
         cand_same_as[i] = candidates[i].same_as;
         cand_dead[i] = u8::from(candidates[i].dead);
@@ -6376,6 +6408,7 @@ pub unsafe fn fleet_append(
         &cand_alive,
         &cand_bytes,
         &cand_kind,
+        &cand_locked,
         &mut ranked_idx,
     );
     ranked_idx.truncate(ranked_count);
@@ -6484,6 +6517,9 @@ pub unsafe fn fleet_append(
             }
             if let Some(same) = cand.video {
                 params.push((VIDEO_PARAM, video_param_value(same)));
+            }
+            if cand.locked {
+                params.push((crate::donorkind::LOCKED_PARAM, b"yes"));
             }
             // the video inside, for TwinCheck to tell an alt from a different video
             let inner = intake_prints[idx]

@@ -432,10 +432,14 @@ where
             && match best_idx {
                 None => true,
                 Some(prev) => {
+                    // a locked backup (encrypted headers, no password) only
+                    // when no backup that can be extracted qualifies
                     let prev_h = &history[prev];
-                    candidate_score > prev_h.dupe_score
-                        || (candidate_score == prev_h.dupe_score
-                            && h.alive_permille > prev_h.alive_permille)
+                    h.locked < prev_h.locked
+                        || (h.locked == prev_h.locked
+                            && (candidate_score > prev_h.dupe_score
+                                || (candidate_score == prev_h.dupe_score
+                                    && h.alive_permille > prev_h.alive_permille)))
                 }
             };
 
@@ -465,7 +469,9 @@ where
 /// weak ones, then unmeasured ones; within each TWINs, then borrowable,
 /// unknown and unborrowable ALTs (`DupeCopyKind`, see
 /// [`crate::donorkind`]), each the wholest live backup by its measured
-/// `DupeAlive` share and then its score. Unlike
+/// `DupeAlive` share and then its score. A locked backup (archive headers
+/// encrypted, no password: [`crate::donorkind::LOCKED_PARAM`]) can never be
+/// extracted and goes after all of them, whatever its health. Unlike
 /// `select_dupe_backup` it takes backups in DupeMode FORCE and backups filed
 /// as copies, which failover skips. `-1` when a download of the key is
 /// queued, one already succeeded, or no backup is alive.
@@ -492,7 +498,7 @@ where
     if succeeded {
         return -1;
     }
-    let mut best: Option<(usize, (i32, i32, i32, i32))> = None;
+    let mut best: Option<(usize, (i32, i32, i32, i32, i32))> = None;
     for (idx, h) in history.iter().enumerate() {
         // healthy copies first, then weak, then unmeasured ones (as the fleet
         // ranks them); within each TWINs, then borrowable, unknown and
@@ -505,6 +511,7 @@ where
             2
         };
         let rank = (
+            -h.locked,
             health_tier,
             -h.donor_kind,
             h.alive_permille.max(-1),
@@ -984,6 +991,7 @@ pub(crate) fn no_backup_reason_host(
             critical_health: 0,
             same_name_or_key: 0,
             donor_kind: 2,
+            locked: 0,
         };
         let mut qfn = Vec::new();
         if hi.kind == crate::queuesubsys_host::HK_NZB && hi.inner_ptr != 0 {
@@ -996,6 +1004,10 @@ pub(crate) fn no_backup_reason_host(
                 host.nzb_get_param(item.ptr, crate::donorkind::KIND_PARAM)
                     .as_deref(),
             ) as i32;
+            c.locked = i32::from(crate::donorkind::locked_param(
+                host.nzb_get_param(item.ptr, crate::donorkind::LOCKED_PARAM)
+                    .as_deref(),
+            ));
             c.health = item.health;
             c.critical_health = item.critical_health_opt;
             c.same_name_or_key = i32::from(
@@ -1063,6 +1075,7 @@ fn collect_dupe_candidates(
             critical_health: 0,
             same_name_or_key: 0,
             donor_kind: 2,
+            locked: 0,
         };
         let mut qfn = Vec::new();
         if (hi.kind == crate::queuesubsys_host::HK_NZB
@@ -1081,6 +1094,10 @@ fn collect_dupe_candidates(
                 host.nzb_get_param(item.ptr, crate::donorkind::KIND_PARAM)
                     .as_deref(),
             ) as i32;
+            c.locked = i32::from(crate::donorkind::locked_param(
+                host.nzb_get_param(item.ptr, crate::donorkind::LOCKED_PARAM)
+                    .as_deref(),
+            ));
             c.health = item.health;
             c.critical_health = item.critical_health_opt;
             c.same_name_or_key = i32::from(same_name_or_key(
@@ -1958,6 +1975,7 @@ mod tests {
             critical_health: 900,
             same_name_or_key: 1,
             donor_kind: 2,
+            locked: 0,
         }
     }
 
@@ -2036,6 +2054,47 @@ mod tests {
         healthy.donor_kind = crate::donorkind::DonorKind::Unborrowable as i32;
         let queue = [rescue_self()];
         assert_eq!(select_rescue_backup(&[weak, healthy], &queue, |_| true), 1);
+    }
+
+    #[test]
+    fn a_locked_backup_goes_after_every_extractable_one() {
+        // live fleet 2026-11-19: a 100%-alive copy with encrypted headers and
+        // no password ranked ahead of an 84%-alive plain one
+        let mut locked = rescue_candidate(DUPE_MODE_SCORE, DELETE_STATUS_DUPE, 999_090, 1000);
+        locked.donor_kind = crate::donorkind::DonorKind::Unborrowable as i32;
+        locked.locked = 1;
+        let mut plain = rescue_candidate(DUPE_MODE_SCORE, DELETE_STATUS_DUPE, 999_010, 840);
+        plain.donor_kind = crate::donorkind::DonorKind::Borrowable as i32;
+        let unmeasured = rescue_candidate(DUPE_MODE_SCORE, DELETE_STATUS_DUPE, 999_000, -1);
+        let queue = [rescue_self()];
+        assert_eq!(select_rescue_backup(&[locked, plain], &queue, |_| true), 1);
+        assert_eq!(
+            select_rescue_backup(&[locked, unmeasured], &queue, |_| true),
+            1
+        );
+        // nothing else alive: the locked copy is the last resort
+        assert_eq!(select_rescue_backup(&[locked], &queue, |_| true), 0);
+        // the same password-less copy with its password known ranks by health
+        let mut with_password = locked;
+        with_password.locked = 0;
+        assert_eq!(
+            select_rescue_backup(&[with_password, plain], &queue, |_| true),
+            0
+        );
+        // failover too passes over it despite its higher score, and takes it
+        // when it is the only backup
+        assert_eq!(
+            select_dupe_backup(true, 0, true, &[locked, plain], &queue, |_| true),
+            1
+        );
+        assert_eq!(
+            select_dupe_backup(true, 0, true, &[plain, locked], &queue, |_| true),
+            0
+        );
+        assert_eq!(
+            select_dupe_backup(true, 0, true, &[locked], &queue, |_| true),
+            0
+        );
     }
 
     #[test]
@@ -2232,6 +2291,7 @@ mod tests {
                     b"imdb:1",
                 )),
                 donor_kind: 2,
+                locked: 0,
             }
         };
 

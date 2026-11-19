@@ -303,6 +303,76 @@ fn set_conn_io_timeout(host: NzbgetRsNntpFetchHostFn, conn: usize, secs: i32) {
     }
 }
 
+/// How many message-ids [`note_missing_everywhere`] keeps before it starts over.
+const KNOWN_MISSING_CAP: usize = 100_000;
+
+/// How long an article stays recorded as missing everywhere: a fresh post
+/// can be missing on a server for a while until it propagates there.
+const KNOWN_MISSING_TTL: Duration = Duration::from_secs(15 * 60);
+
+type KnownMissing = std::collections::HashMap<Vec<u8>, Instant>;
+
+fn known_missing() -> &'static Mutex<KnownMissing> {
+    static SET: OnceLock<Mutex<KnownMissing>> = OnceLock::new();
+    SET.get_or_init(|| Mutex::new(KnownMissing::new()))
+}
+
+fn bare_message_id(id: &[u8]) -> &[u8] {
+    let id = id.strip_prefix(b"<").unwrap_or(id);
+    id.strip_suffix(b">").unwrap_or(id)
+}
+
+fn note_missing_at(set: &mut KnownMissing, id: &[u8], now: Instant) {
+    if set.len() >= KNOWN_MISSING_CAP {
+        set.retain(|_, at| now.saturating_duration_since(*at) < KNOWN_MISSING_TTL);
+        // Free a tenth at least, so a full set isn't rescanned on every insert.
+        if set.len() >= KNOWN_MISSING_CAP - KNOWN_MISSING_CAP / 10 {
+            set.clear();
+        }
+    }
+    set.insert(id.to_vec(), now);
+}
+
+fn known_missing_at(set: &mut KnownMissing, id: &[u8], now: Instant) -> bool {
+    match set.get(id) {
+        Some(at) if now.saturating_duration_since(*at) < KNOWN_MISSING_TTL => true,
+        Some(_) => {
+            set.remove(id);
+            false
+        }
+        None => false,
+    }
+}
+
+/// Records an article that every server was asked for and answered `430 no
+/// such article`: a background check (TwinCheck sampling) that would only
+/// ask again need not hold a connection for it. Kept for
+/// [`KNOWN_MISSING_TTL`], up to [`KNOWN_MISSING_CAP`] ids.
+pub(crate) fn note_missing_everywhere(message_id: &[u8]) {
+    let id = bare_message_id(message_id);
+    if id.is_empty() {
+        return;
+    }
+    let mut set = known_missing().lock().unwrap_or_else(|e| e.into_inner());
+    note_missing_at(&mut set, id, Instant::now());
+}
+
+/// Forgets every recorded article, for when the servers change (a server
+/// activated or the config reloaded) and a missing article may exist after all.
+pub(crate) fn forget_missing_everywhere() {
+    known_missing()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+}
+
+/// Whether [`note_missing_everywhere`] recorded `message_id` (with or without
+/// angle brackets) less than [`KNOWN_MISSING_TTL`] ago.
+pub(crate) fn known_missing_everywhere(message_id: &[u8]) -> bool {
+    let mut set = known_missing().lock().unwrap_or_else(|e| e.into_inner());
+    known_missing_at(&mut set, bare_message_id(message_id), Instant::now())
+}
+
 #[inline]
 pub fn transient_retry_delay(attempt: i32) -> i32 {
     attempt
@@ -512,6 +582,9 @@ impl ArticleFetcher {
         let mut transient_attempts: BTreeMap<usize, i32> = BTreeMap::new();
         let mut stale_connections: BTreeMap<usize, i32> = BTreeMap::new();
         let mut timed_out_tries: BTreeMap<usize, i32> = BTreeMap::new();
+        // every server given up on answered 430
+        let mut gave_up = 0u32;
+        let mut only_430 = true;
 
         let mut level: i32 = 0;
         while !self.is_stopped() {
@@ -551,6 +624,10 @@ impl ArticleFetcher {
                 let ruled_out = crate::nntp::backbone_missing(&missing, s_ints[2], s_ints[6]);
                 if ruled_out && !excluded_ptrs.contains(&s_ptr) {
                     excluded_ptrs.push(s_ptr);
+                }
+                if s_ints[0] == 0 && !ruled_out {
+                    // an inactive server was never asked: the article may be there
+                    only_430 = false;
                 }
                 if s_ints[0] == 0 || s_ints[1] != level {
                     continue;
@@ -722,9 +799,14 @@ impl ArticleFetcher {
                     missing.push(miss);
                 }
             }
+            gave_up += 1;
+            only_430 &= result.not_found_430 && !result.transient && !result.timed_out;
             failed_ptrs.push(server_ptr);
         }
 
+        if gave_up > 0 && only_430 && !self.is_stopped() {
+            note_missing_everywhere(message_id);
+        }
         result
     }
 
@@ -1325,6 +1407,33 @@ pub fn parse_donor_nzb_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn articles_missing_everywhere_are_remembered_with_or_without_brackets() {
+        assert!(!known_missing_everywhere(b"<km-test-1@x>"));
+        note_missing_everywhere(b"<km-test-1@x>");
+        assert!(known_missing_everywhere(b"km-test-1@x"));
+        assert!(known_missing_everywhere(b"<km-test-1@x>"));
+        note_missing_everywhere(b"km-test-2@x");
+        assert!(known_missing_everywhere(b"<km-test-2@x>"));
+        assert!(!known_missing_everywhere(b"km-test-3@x"));
+        note_missing_everywhere(b"<>");
+        assert!(!known_missing_everywhere(b""));
+    }
+
+    #[test]
+    fn articles_missing_everywhere_expire() {
+        let mut set = KnownMissing::new();
+        let t0 = Instant::now();
+        note_missing_at(&mut set, b"a@x", t0);
+        assert!(known_missing_at(
+            &mut set,
+            b"a@x",
+            t0 + KNOWN_MISSING_TTL / 2
+        ));
+        assert!(!known_missing_at(&mut set, b"a@x", t0 + KNOWN_MISSING_TTL));
+        assert!(set.is_empty());
+    }
 
     fn yenc_encode_single_part(payload: &[u8]) -> Vec<u8> {
         let crc = unsafe { rust_yenc_crc(payload.as_ptr().cast(), payload.len(), 0) };

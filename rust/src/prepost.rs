@@ -5,7 +5,8 @@
 //! transitions, pause-state management, and direct-unpack triggers into a single module.
 
 use crate::status::{
-    CleanupStatus, DeleteStatus, DupeMode, MoveStatus, NzbParStatus, UnpackStatus,
+    CleanupStatus, DeleteStatus, DirectRenameStatus, DirectUnpackStatus, DupeMode, MoveStatus,
+    NzbParStatus, UnpackStatus,
 };
 
 #[repr(C)]
@@ -90,8 +91,7 @@ pub fn classify_file_event(
 #[allow(clippy::too_many_arguments)]
 pub fn should_complete_after_direct_rename(
     is_stopped: bool,
-    direct_rename_status: i32,
-    ts_success: i32,
+    direct_rename_status: DirectRenameStatus,
     has_post_info: bool,
     delete_status: DeleteStatus,
     completed_not_empty: bool,
@@ -101,7 +101,7 @@ pub fn should_complete_after_direct_rename(
     skip_disk_write: bool,
 ) -> bool {
     !is_stopped
-        && direct_rename_status == ts_success
+        && direct_rename_status == DirectRenameStatus::Success
         && !has_post_info
         && delete_status == DeleteStatus::None
         && completed_not_empty
@@ -442,8 +442,7 @@ fn dupe_post_gate_host(
     dq_ptr: usize,
     nzb: &crate::queuesubsys_host::NzbSnap,
 ) -> (GateVerdict, Vec<u8>) {
-    use crate::queuesubsys_host::{HC_DUPE, HC_PARK, NK_NZB, NS_RUNNING};
-    const NS_SUCCESS: i32 = 3;
+    use crate::queuesubsys_host::{HC_DUPE, HC_PARK, NK_NZB};
     let health_check = host.opts().health_check;
     if nzb.dupe_key.is_empty()
         || nzb.dupe_mode == DupeMode::Force
@@ -453,8 +452,8 @@ fn dupe_post_gate_host(
         return (GateVerdict::Pass, Vec::new());
     }
     let extracting = |n: &crate::queuesubsys_host::NzbSnap| {
-        n.direct_unpack_status == NS_RUNNING
-            || n.direct_unpack_status == NS_SUCCESS
+        n.direct_unpack_status == DirectUnpackStatus::Running
+            || n.direct_unpack_status == DirectUnpackStatus::Success
             || crate::postproc::direct_unpack_has_holds(n.id)
             || crate::postproc::direct_unpack_awaiting_repair(n.id)
     };
@@ -657,7 +656,7 @@ pub fn eval_post_stages(
     dest_dir: &[u8],
     inter_dir: &[u8],
     sep: u8,
-    direct_unpack_status: i32,
+    direct_unpack_status: DirectUnpackStatus,
     opt_post_download_rename: bool,
     post_download_renaming_status: i32,
     has_dest_dir: bool,
@@ -701,7 +700,7 @@ pub fn eval_post_stages_in_inter(
     health: i32,
     move_status: MoveStatus,
     in_inter_dir: bool,
-    direct_unpack_status: i32,
+    direct_unpack_status: DirectUnpackStatus,
     opt_post_download_rename: bool,
     post_download_renaming_status: i32,
     has_dest_dir: bool,
@@ -709,8 +708,6 @@ pub fn eval_post_stages_in_inter(
     opt_rename_after_unpack: bool,
     post_unpack_renaming_status: i32,
 ) -> RsPostStageDecision {
-    const NS_SUCCESS: i32 = 3;
-
     let mut unpack =
         want_unpack && unpack_status == UnpackStatus::None && delete_status == DeleteStatus::None;
     let par_failed = par_status == NzbParStatus::Failure
@@ -745,7 +742,7 @@ pub fn eval_post_stages_in_inter(
 
     let mut skip_unpack_due_to_par = false;
     let mut effective_unpack_status = unpack_status;
-    if unpack && par_failed && direct_unpack_status != NS_SUCCESS {
+    if unpack && par_failed && direct_unpack_status != DirectUnpackStatus::Success {
         skip_unpack_due_to_par = true;
         effective_unpack_status = UnpackStatus::Skipped;
         unpack = false;
@@ -814,19 +811,18 @@ pub fn classify_file_downloaded_direct_unpack(
     opt_raw_article: bool,
     opt_skip_write: bool,
     skip_disk_write: bool,
-    direct_unpack_status: i32,
-    ns_none: i32,
-    ns_running: i32,
-    direct_rename_status: i32,
-    ts_running: i32,
+    direct_unpack_status: DirectUnpackStatus,
+    direct_rename_status: DirectRenameStatus,
     has_unpack_thread: bool,
 ) -> i32 {
     if !opt_direct_unpack || opt_raw_article || opt_skip_write || skip_disk_write {
         return 0;
     }
-    if direct_unpack_status == ns_none && direct_rename_status != ts_running {
+    if direct_unpack_status == DirectUnpackStatus::None
+        && direct_rename_status != DirectRenameStatus::Running
+    {
         1
-    } else if direct_unpack_status == ns_running && has_unpack_thread {
+    } else if direct_unpack_status == DirectUnpackStatus::Running && has_unpack_thread {
         2
     } else {
         0
@@ -1282,9 +1278,8 @@ impl NzbgetRsPrePostProcessor {
 
     fn sanitise_post_queue(&self, host: &crate::queuesubsys_host::QueueSubsysHost) {
         use crate::queuesubsys_host::{
-            MK_INFO, NK_NZB, NS_NONE, NS_RUNNING, NZB_INT_DIRECT_UNPACK_STATUS,
-            POST_INT_REQUEST_PAR_CHECK, POST_INT_STAGE, POST_INT_WORKING, PT_EXECUTING_SCRIPT,
-            PT_FINISHED, PT_QUEUED,
+            MK_INFO, NK_NZB, POST_INT_REQUEST_PAR_CHECK, POST_INT_STAGE, POST_INT_WORKING,
+            PT_EXECUTING_SCRIPT, PT_FINISHED, PT_QUEUED,
         };
         use std::sync::atomic::Ordering;
 
@@ -1302,8 +1297,10 @@ impl NzbgetRsPrePostProcessor {
                     continue;
                 }
                 let mut nzb = host.nzb_snap(nzb_ptr, false);
-                if nzb.direct_unpack_status == NS_RUNNING && !nzb.has_unpack_thread {
-                    host.nzb_set_int(nzb_ptr, NZB_INT_DIRECT_UNPACK_STATUS, NS_NONE);
+                if nzb.direct_unpack_status == DirectUnpackStatus::Running
+                    && !nzb.has_unpack_thread
+                {
+                    host.nzb_set_direct_unpack_status(nzb_ptr, DirectUnpackStatus::None);
                 }
                 if nzb.post_info_ptr == 0
                     && nzb.kind == NK_NZB
@@ -1421,7 +1418,7 @@ impl NzbgetRsPrePostProcessor {
         dq_ptr: usize,
         nzb_ptr: usize,
     ) {
-        use crate::queuesubsys_host::{MK_INFO, TS_SUCCESS};
+        use crate::queuesubsys_host::MK_INFO;
 
         let opts = host.opts();
         let nzb = host.nzb_snap(nzb_ptr, false);
@@ -1429,7 +1426,6 @@ impl NzbgetRsPrePostProcessor {
         if should_complete_after_direct_rename(
             host.prepost_is_stopped(self.owner),
             nzb.direct_rename_status,
-            TS_SUCCESS,
             nzb.has_post_info,
             nzb.delete_status,
             completed_not_empty,
@@ -1855,8 +1851,6 @@ impl NzbgetRsPrePostProcessor {
         dq_ptr: usize,
         allow_par: bool,
     ) -> usize {
-        use crate::queuesubsys_host::NS_RUNNING;
-
         let active = self.active_jobs.lock().unwrap().clone();
         let qlen = host.queue_len(dq_ptr);
         let mut ptrs = Vec::with_capacity(qlen);
@@ -1882,7 +1876,7 @@ impl NzbgetRsPrePostProcessor {
                 working: u8::from(working),
                 has_queue_script_job: 0,
                 direct_unpack_running: u8::from(
-                    nzb.direct_unpack_status == NS_RUNNING
+                    nzb.direct_unpack_status == DirectUnpackStatus::Running
                         && !crate::postproc::direct_unpack_awaiting_repair(nzb.id),
                 ),
                 // Pending live work (a recovery volume still being folded, or a
@@ -2140,11 +2134,10 @@ impl NzbgetRsPrePostProcessor {
                 }
             }
 
-            const NS_SUCCESS: i32 = 3;
             if nzb.par_status == NzbParStatus::None
                 && nzb.delete_status == DeleteStatus::None
                 && opts.par_check == PC_AUTO
-                && nzb.direct_unpack_status == NS_SUCCESS
+                && nzb.direct_unpack_status == DirectUnpackStatus::Success
                 && direct_unpack_read_all_damage(
                     &host.nzb_completed_files(nzb.ptr),
                     &(0..host.nzb_extracted_archives_len(nzb.ptr))
@@ -2300,8 +2293,7 @@ impl NzbgetRsPrePostProcessor {
             return;
         }
 
-        const NS_SUCCESS: i32 = 3;
-        if nzb.direct_unpack_status == NS_SUCCESS
+        if nzb.direct_unpack_status == DirectUnpackStatus::Success
             && nzb.par_status == NzbParStatus::Failure
             && damage_is_borrowed_volumes(
                 &host.nzb_completed_files(nzb.ptr),
@@ -2528,8 +2520,6 @@ impl NzbgetRsPrePostProcessor {
         nzb_ptr: usize,
         file_ptr: usize,
     ) {
-        use crate::queuesubsys_host::{NS_NONE, NS_RUNNING, TS_RUNNING};
-
         let opts = host.opts();
         let nzb = host.nzb_snap(nzb_ptr, false);
         if opts.direct_unpack {
@@ -2565,10 +2555,7 @@ impl NzbgetRsPrePostProcessor {
             opts.skip_write,
             nzb.skip_disk_write,
             nzb.direct_unpack_status,
-            NS_NONE,
-            NS_RUNNING,
             nzb.direct_rename_status,
-            TS_RUNNING,
             nzb.has_unpack_thread,
         );
         if act == 1 {
@@ -2753,7 +2740,7 @@ mod tests {
             b"/inter/job1",
             b"/inter",
             b'/',
-            0,
+            DirectUnpackStatus::None,
             false,
             0,
             true,
@@ -2770,11 +2757,8 @@ mod tests {
         // DirectRenameSchedulesCompletedDownload, DirectRenameWaitsForRemainingData,
         // DirectRenameWaitsForActiveDownloads, DirectRenameWaitsForRenamerToFinish,
         // DirectRenameDoesNotCompleteHealthDeletion, DirectRenameSchedulesAfterPausedRequestsDrain
-        const TS_RUNNING: i32 = 1;
-        const TS_SUCCESS: i32 = 3;
-
         struct SimCompletionFixture {
-            direct_rename_status: i32,
+            direct_rename_status: DirectRenameStatus,
             has_post_info: bool,
             delete_status: DeleteStatus,
             completed_not_empty: bool,
@@ -2786,7 +2770,7 @@ mod tests {
         impl SimCompletionFixture {
             fn new() -> Self {
                 Self {
-                    direct_rename_status: TS_SUCCESS,
+                    direct_rename_status: DirectRenameStatus::Success,
                     has_post_info: false,
                     delete_status: DeleteStatus::None,
                     completed_not_empty: true,
@@ -2813,7 +2797,6 @@ mod tests {
                 if should_complete_after_direct_rename(
                     false,
                     self.direct_rename_status,
-                    TS_SUCCESS,
                     self.has_post_info,
                     self.delete_status,
                     self.completed_not_empty,
@@ -2869,7 +2852,7 @@ mod tests {
 
         // 4. DirectRenameWaitsForRenamerToFinish
         let mut f = SimCompletionFixture::new();
-        f.direct_rename_status = TS_RUNNING;
+        f.direct_rename_status = DirectRenameStatus::Running;
         f.check_download_completed();
         assert!(!f.has_post_info);
         assert_eq!(f.job_count, 0);

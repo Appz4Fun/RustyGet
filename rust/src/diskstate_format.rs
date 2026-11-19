@@ -3,7 +3,8 @@
 use crate::cstr;
 use crate::options::OptStr;
 use crate::status::{
-    DeleteStatus, MarkStatus, MoveStatus, NzbParStatus, ScriptStatus, UnpackStatus, UrlStatus,
+    DeleteStatus, DirectUnpackStatus, MarkStatus, MoveStatus, NzbParStatus, ScriptStatus,
+    UnpackStatus, UrlStatus,
 };
 use std::ffi::{c_char, c_int, c_void};
 use std::io::Write;
@@ -1452,12 +1453,11 @@ pub fn parse_unpack_state_lines(
     line1: &[u8],
     line2: &[u8],
     line3: &[u8],
-    ns_running: i32,
-    ns_none: i32,
 ) -> Option<(i32, bool, bool, i32)> {
     let mut direct_status = parse_prefixed_or_plain_int(line1, b"DirectUnpackStatus=")?;
-    if direct_status == ns_running {
-        direct_status = ns_none;
+    // An unpack that was running when the state was saved is not running now.
+    if DirectUnpackStatus::from(direct_status) == DirectUnpackStatus::Running {
+        direct_status = DirectUnpackStatus::None.into();
     }
     let unpack_tried_flags = parse_prefixed_or_plain_int(line2, b"UnpackTried=")?;
     let unpack_tried = (unpack_tried_flags & 1) != 0;
@@ -4115,8 +4115,6 @@ pub struct NzbgetRsDiskStateEnv {
     pub direct_write: c_int,
     pub continue_partial: c_int,
     pub pt_finished: c_int,
-    pub ns_running: c_int,
-    pub ns_none: c_int,
     pub a1: c_int,
     pub a2: c_int,
     pub a3: c_int,
@@ -4811,9 +4809,7 @@ unsafe fn parse_unpack_state_into_target(
     let Some(l3) = r.read_line(1024).map(|b| b.to_vec()) else {
         return false;
     };
-    let Some((direct, tried, repaired, last)) =
-        parse_unpack_state_lines(&l1, &l2, &l3, env.ns_running, env.ns_none)
-    else {
+    let Some((direct, tried, repaired, last)) = parse_unpack_state_lines(&l1, &l2, &l3) else {
         return false;
     };
     let Some(l4) = r.read_line(65536).map(|b| b.to_vec()) else {
@@ -7312,7 +7308,7 @@ unsafe extern "C" fn active_disk_export_nzb_cb(
         move_status: sn.move_status.into(),
         par_rename_status: sn.par_rename_status,
         rar_rename_status: sn.rar_rename_status,
-        direct_rename_status: sn.direct_rename_status,
+        direct_rename_status: sn.direct_rename_status.into(),
         delete_status: sn.delete_status.into(),
         mark_status: sn.mark_status.into(),
         url_status: sn.url_status.into(),
@@ -7500,7 +7496,7 @@ unsafe extern "C" fn active_disk_export_nzb_cb(
     exp.dupe_recovered_holes = sn.dupe_recovered_holes;
     exp.jobs = jobs.as_ptr();
     exp.jobs_len = jobs.len();
-    exp.direct_unpack_status = sn.direct_unpack_status;
+    exp.direct_unpack_status = sn.direct_unpack_status.into();
     exp.unpack_tried = c_int::from(sn.unpack_tried);
     exp.par_repaired = c_int::from(sn.par_repaired);
     exp.last_unpack_status = sn.last_unpack_status.into();
@@ -8235,8 +8231,6 @@ fn run_active_diskstate_exec(
         direct_write,
         continue_partial,
         pt_finished: crate::queuesubsys_host::PT_FINISHED,
-        ns_running: crate::queuesubsys_host::NS_RUNNING,
-        ns_none: crate::queuesubsys_host::NS_NONE,
         a1,
         a2,
         a3,
@@ -8927,8 +8921,6 @@ mod tests {
                 b"DirectUnpackStatus=1",
                 b"UnpackTried=3",
                 b"LastUnpackStatus=2",
-                1,
-                0
             ),
             Some((0, true, true, 2))
         );

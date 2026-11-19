@@ -3,8 +3,8 @@
 
 use crate::options::OptStr;
 use crate::status::{
-    CleanupStatus, DeleteStatus, DupStatus, DupeMode, MarkStatus, MoveStatus, NzbParStatus,
-    ScriptStatus, UnpackStatus, UrlStatus,
+    CleanupStatus, DeleteStatus, DirectRenameStatus, DirectUnpackStatus, DupStatus, DupeMode,
+    MarkStatus, MoveStatus, NzbParStatus, ScriptStatus, UnpackStatus, UrlStatus,
 };
 use std::ffi::{c_char, c_int, c_void, CStr};
 
@@ -54,14 +54,6 @@ pub(crate) const NK_NZB: i32 = 0;
 pub(crate) const NK_URL: i32 = 1;
 
 pub(crate) const RS_NONE: i32 = 0;
-
-pub(crate) const TS_NONE: i32 = 0;
-pub(crate) const TS_RUNNING: i32 = 1;
-pub(crate) const TS_FAILURE: i32 = 2;
-pub(crate) const TS_SUCCESS: i32 = 3;
-
-pub(crate) const NS_NONE: i32 = 0;
-pub(crate) const NS_RUNNING: i32 = 1;
 
 pub(crate) const PT_QUEUED: i32 = 0;
 pub(crate) const PT_LOADING_PARS: i32 = 1;
@@ -479,8 +471,8 @@ pub(crate) struct NzbSnap {
     pub delete_status: DeleteStatus,
     pub mark_status: MarkStatus,
     pub par_status: NzbParStatus,
-    pub direct_rename_status: i32,
-    pub direct_unpack_status: i32,
+    pub direct_rename_status: DirectRenameStatus,
+    pub direct_unpack_status: DirectUnpackStatus,
     pub dupe_par_defer_state: i32,
     pub deleting: bool,
     pub parking: bool,
@@ -2121,8 +2113,8 @@ impl QueueSubsysHost {
                 delete_status: DeleteStatus::from(ints[5]),
                 mark_status: MarkStatus::from(ints[6]),
                 par_status: NzbParStatus::from(ints[7]),
-                direct_rename_status: ints[8],
-                direct_unpack_status: ints[9],
+                direct_rename_status: DirectRenameStatus::from(ints[8]),
+                direct_unpack_status: DirectUnpackStatus::from(ints[9]),
                 dupe_par_defer_state: ints[10],
                 deleting: ints[11] != 0,
                 parking: ints[12] != 0,
@@ -2567,6 +2559,14 @@ impl QueueSubsysHost {
 
     pub fn nzb_set_delete_status(&self, nzb_ptr: usize, status: DeleteStatus) {
         self.nzb_set_int(nzb_ptr, NZB_INT_DELETE_STATUS, status.into());
+    }
+
+    pub fn nzb_set_direct_rename_status(&self, nzb_ptr: usize, status: DirectRenameStatus) {
+        self.nzb_set_int(nzb_ptr, NZB_INT_DIRECT_RENAME_STATUS, status.into());
+    }
+
+    pub fn nzb_set_direct_unpack_status(&self, nzb_ptr: usize, status: DirectUnpackStatus) {
+        self.nzb_set_int(nzb_ptr, NZB_INT_DIRECT_UNPACK_STATUS, status.into());
     }
 
     pub fn nzb_set_i64(&self, nzb_ptr: usize, field: i32, val: i64) {

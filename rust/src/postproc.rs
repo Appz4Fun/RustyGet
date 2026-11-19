@@ -11,7 +11,9 @@ use crate::parchecker::{
 use crate::options::OptStr;
 use crate::postrepair::NzbgetRsParSegment;
 use crate::queuesubsys_host::QueueSubsysHost;
-use crate::status::{DeleteStatus, NzbParStatus, ParCheckerStatus, UnpackStatus};
+use crate::status::{
+    DeleteStatus, DirectUnpackStatus, NzbParStatus, ParCheckerStatus, UnpackStatus,
+};
 use std::collections::VecDeque;
 use std::ffi::c_int;
 use std::ptr;
@@ -1499,7 +1501,7 @@ struct UnpackRunState {
     par_repaired: bool,
     prev_pass_list_tried: bool,
     last_unpack_status: UnpackStatus,
-    direct_unpack_status: i32,
+    direct_unpack_status: DirectUnpackStatus,
     par_status: NzbParStatus,
     par_rename_status: i32,
     use_temp_unpack_dir: bool,
@@ -1936,7 +1938,7 @@ impl NzbgetRsUnpackController {
 
             if st.has_rar_files {
                 if st.has_not_unpacked_rar_files || st.unpack_dir_created {
-                    if st.direct_unpack_status == 3 {
+                    if st.direct_unpack_status == DirectUnpackStatus::Success {
                         let (kind, txt): (i32, &[u8]) = if st.unpack_dir_created {
                             (
                                 MK_WARNING,
@@ -3563,10 +3565,10 @@ impl NzbgetRsDirectUnpack {
     }
 
     /// Clears the download's unpack thread and sets its direct unpack status.
-    fn finish_nzb(host: &QueueSubsysHost, nzb_ptr: usize, status: i32) {
-        use crate::queuesubsys_host::{NZB_ACT_CLEAR_UNPACK_THREAD, NZB_INT_DIRECT_UNPACK_STATUS};
+    fn finish_nzb(host: &QueueSubsysHost, nzb_ptr: usize, status: DirectUnpackStatus) {
+        use crate::queuesubsys_host::NZB_ACT_CLEAR_UNPACK_THREAD;
         host.nzb_action(nzb_ptr, NZB_ACT_CLEAR_UNPACK_THREAD, 0);
-        host.nzb_set_int(nzb_ptr, NZB_INT_DIRECT_UNPACK_STATUS, status);
+        host.nzb_set_direct_unpack_status(nzb_ptr, status);
     }
 
     fn add_extra_time(&self, host: &QueueSubsysHost, nzb_ptr: usize, clear_working: bool) {
@@ -3826,7 +3828,7 @@ impl NzbgetRsDirectUnpack {
             MK_DEBUG,
             &[b"NzbDeleted for ", nzb_name.as_slice()].concat(),
         );
-        Self::finish_nzb(host, nzb_ptr, 2);
+        Self::finish_nzb(host, nzb_ptr, DirectUnpackStatus::Failure);
         self.stop_with_nzb(host, nzb_ptr);
     }
 
@@ -4307,14 +4309,12 @@ impl NzbgetRsDirectUnpack {
             let nzb_ptr = nzb.ptr;
 
             let processed = self.processed.load(Ordering::Acquire);
-            let status = if !processed {
-                0 // nsNone
-            } else if local.unpack_ok && !interrupted && !cancelled {
-                3 // nsSuccess
-            } else if interrupted {
-                0 // nsNone
+            let status = if !processed || interrupted {
+                DirectUnpackStatus::None
+            } else if local.unpack_ok && !cancelled {
+                DirectUnpackStatus::Success
             } else {
-                2 // nsFailure
+                DirectUnpackStatus::Failure
             };
 
             if interrupted {
@@ -4326,15 +4326,15 @@ impl NzbgetRsDirectUnpack {
                     ]
                     .concat(),
                 );
-            } else if status == 3 || status == 2 {
-                let ok = status == 3;
+            } else if status != DirectUnpackStatus::None {
+                let ok = status == DirectUnpackStatus::Success;
                 let suffix: &[u8] = if ok { b" successful" } else { b" failed" };
                 let msg = trunc_1023([local.info_name_up.as_slice(), suffix].concat());
                 let c_msg = cstr::nul_terminated(&msg);
                 Self::nzb_message(host, nzb_ptr, if ok { MK_INFO } else { MK_WARNING }, &c_msg);
             }
 
-            if status == 3 || interrupted {
+            if status == DirectUnpackStatus::Success || interrupted {
                 for arch in &local.extracted_archives {
                     let c_arch = cstr::nul_terminated(arch);
                     host.nzb_push_extracted_archive(nzb_ptr, cstr::until_nul(&c_arch));

@@ -3504,6 +3504,9 @@ impl NzbgetRsServerPool {
 #[no_mangle]
 pub extern "C" fn nzbget_rs_serverpool_new() -> *mut NzbgetRsServerPool {
     let arc = Arc::new(NzbgetRsServerPool::new(crate::ffi::tls_host_cb()));
+    // A new pool (start-up or a config reload) may hold servers that have
+    // articles the old one lacked.
+    crate::articlefetcher::forget_missing_everywhere();
     if let Ok(mut g) = ACTIVE_SERVER_POOL.write() {
         *g = Some(Arc::downgrade(&arc));
     }

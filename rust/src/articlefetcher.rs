@@ -325,7 +325,8 @@ fn bare_message_id(id: &[u8]) -> &[u8] {
 fn note_missing_at(set: &mut KnownMissing, id: &[u8], now: Instant) {
     if set.len() >= KNOWN_MISSING_CAP {
         set.retain(|_, at| now.saturating_duration_since(*at) < KNOWN_MISSING_TTL);
-        if set.len() >= KNOWN_MISSING_CAP {
+        // Free a tenth at least, so a full set isn't rescanned on every insert.
+        if set.len() >= KNOWN_MISSING_CAP - KNOWN_MISSING_CAP / 10 {
             set.clear();
         }
     }

@@ -352,54 +352,20 @@ use crate::twin::{
     MAX_INDEX_SIZE,
 };
 
-use crate::log::{MK_INFO, MK_WARNING, MK_ERROR, MK_DETAIL};
+use crate::log::{MK_DEBUG, MK_DETAIL, MK_ERROR, MK_INFO, MK_WARNING};
+use crate::options::OptStr;
+#[cfg(unix)]
+use crate::postproc::JobQueue;
+use crate::queuesubsys_host::{
+    QueueSubsysHost, FILE_INT_EXTRA_PRIORITY, FILE_INT_PAUSED, HK_NZB, NK_NZB,
+    NZB_INT_EXTRA_PAR_BLOCKS, NZB_INT_PAR_FULL, NZB_INT_PAR_SEC, NZB_INT_PAR_STATUS,
+    NZB_INT_REPAIR_SEC, POST_INT_FILE_PROGRESS, POST_INT_PAR_REPAIRED, POST_INT_STAGE,
+    POST_INT_STAGE_PROGRESS, POST_INT_WORKING,
+};
 
 const MAX_TWIN_FETCH_SIZE: i64 = 1024 * 1024 * 1024;
 
-/// Host callback contract between [`NzbgetRsRepairController`] and `RepairController` in `Util.h`:
-/// - `op == 0`: acquire `DownloadQueue::Guard()` and invoke `reinterpret_cast<void(*)(uintptr_t, uintptr_t)>(p1)(p2, dq_ptr)`
-/// - `op == 1`: inspect controller / `m_parChecker` / `m_postInfo` / `g_Options` / `g_WorkState`:
-///   - `ints[0..12]`: `[checker_status, checker_stage, file_progress, stage_progress, par_full, is_stopped, par_quick_opt, par_time_limit, pause_post_process, force_par_full, force_repair, post_stage]`
-///   - `i64s[0..4]`: `[cur_time, block_size, post_stage_time, post_start_time]`
-///   - `strs[0..5]`: `[progress_label, info_name, par_filename, checker_dest_dir, unrar_cmd]`
-///   - returns `reinterpret_cast<uintptr_t>(m_postInfo->GetNzbInfo())`
-/// - `op == 2`: inspect `NzbInfo*` at `p1`:
-///   - `ints[0..14]`: `[id, kind, nk_nzb, download_sec, par_sec, repair_sec, par_status, reprocess, force_priority, extra_par_blocks, file_list_len, completed_len, jobs_len, dupe_mode]`
-///   - `i64s[0..2]`: `[dupe_recovered_bytes, expected_data_size]`
-///   - `strs[0..5]`: `[name, dest_dir, dupe_key, queued_filename, twin_files_param]`
-/// - `op == 3`: configure and run `m_parChecker` (`s1=dest_dir`, `s2=nzb_name`, `a1=par_quick`, `a2=force_repair`)
-/// - `op == 4`: `AddPar` helper:
-///   - `a1 == 0`: inspect `FileInfo*` `p1` -> `strs[0]=dest_dir`, `strs[1]=filename`, returns `1` if `sameCollection`
-///   - `a1 == 1`: `m_parChecker.AddParFile(s1)`
-///   - `a1 == 2`: `m_parChecker.QueueChanged()`
-/// - `op == 5`: apply `ParCheckCompleted` on `NzbInfo* p1`:
-///   - `ints[0..6]`: `[new_par_status, set_repaired, repaired_val, wait_time, par_sec, par_full]`
-/// - `op == 6`: `FileInfo` in `NzbInfo* p1` at index `a1`:
-///   - `a2 == 0`: inspect -> `ints[0..3]=[confirmed, paused, is_par_file]`, `i64s[0]=size`, `strs[0]=filename`, returns `file_ptr`
-///   - `a2 == 1`: unpause -> `SetPaused(false); SetExtraPriority(true);`
-/// - `op == 7`: message / debug / stop:
-///   - `a1 == 0..=4`: `m_postInfo->GetNzbInfo()->AddMessage((Message::EKind)a1, s1)`
-///   - `a1 == 5`: `debug("%s", s1)`
-///   - `a1 == 6`: `c->Stop()`
-/// - `op == 8`: apply progress / pause updates to `m_postInfo`:
-///   - `a1 == 0`: `if (s1) SetProgressLabel(s1)`, `SetFileProgress(ints[0])`, `SetStageProgress(ints[1])`,
-///     `if (ints[2] & 1) { SetStage(ints[3]); SetStageTime(i64s[0]); }`,
-///     `if (ints[2] & 8) { GetNzbInfo()->SetRepairSec(ints[4]); }`
-///   - `a1 == 1`: `if (i64s[0] > 0) SetStageTime(i64s[0]); if (i64s[1] > 0) SetStartTime(i64s[1]);`
-/// - `op == 9`: `ParredFiles`, `CompletedFiles`, `StreamRepairJobs`, and `DiskState::LoadFileState`:
-///   - `a1 == 1`: returns `m_postInfo->GetParredFiles()->size()`
-///   - `a1 == 2`: `strs[0] = (*m_postInfo->GetParredFiles())[a2]`
-///   - `a1 == 3`: inspect `CompletedFile` at `a2` on `NzbInfo* p1` -> `ints[0..3]=[id, status, crc_i32]`, `strs[0]=filename`, `strs[1]=origname`
-///   - `a1 == 4`: inspect `StreamRepairJob` at `a2` on `NzbInfo* p1` -> `ints[0]=file_id`, `strs[0]=filename`
-///   - `a1 == 5`: erase `StreamRepairJob` at `a2` on `NzbInfo* p1` and `nzb->SetChanged(true)`
-///   - `a1 == 6`: `LoadFileState` for `file_id = a2` into `SegmentList* p1` -> returns `0` on load failure, `1` if loaded empty, `2` if loaded non-empty
-/// - `op == 10`: `DownloadQueue*` / `DupeSourceList*` helpers:
-///   - `a1 == 0`: `DownloadQueue* p1` -> `ints[0]=queue_len`, `ints[1]=history_len`
-///   - `a1 == 1`: returns `NzbInfo*` at queue index `a2` on `DownloadQueue* p1`
-///   - `a1 == 2`: returns `NzbInfo*` at history index `a2` on `DownloadQueue* p1` if `hkNzb`, else `0`
-///   - `a1 == 5`: `DupeSourceList* p1` -> `emplace_back(a2, s1)`
-///   - `a1 == 6`: `DupeSourceList* p1` -> if `a2 < 0` returns `size()`, else `ints[0]=m_id`, `ints[1]=m_usedBlocks`
-///   - `a1 == 7`: `NzbInfo* p1` -> `SetExtraParBlocks(a2)`
+/// Opcode host callback still used by the stream-repair and direct-unpack controllers.
 pub type NzbgetRsRepairCtrlHostFn = unsafe extern "C" fn(
     ctx: *mut c_void,
     op: c_int,
@@ -414,44 +380,10 @@ pub type NzbgetRsRepairCtrlHostFn = unsafe extern "C" fn(
     strs: *mut *const c_char,
 ) -> usize;
 
+/// Message text as it used to reach the host: cut at the first NUL and at 1023 bytes.
 #[inline]
-fn to_c_msg_1024(bytes: &[u8]) -> Vec<u8> {
-    let cap = bytes.len().min(1023);
-    let end = bytes[..cap].iter().position(|&b| b == 0).unwrap_or(cap);
-    let mut out = Vec::with_capacity(end + 1);
-    out.extend_from_slice(&bytes[..end]);
-    out.push(0);
-    out
-}
-
-fn with_dq_guard<R, F: FnOnce(usize) -> R>(
-    ctx: *mut c_void,
-    host_cb: NzbgetRsRepairCtrlHostFn,
-    f: F,
-) -> R {
-    unsafe extern "C" fn trampoline<F: FnOnce(usize) -> R, R>(slot_ptr: usize, dq_ptr: usize) {
-        let slot = unsafe { &mut *(slot_ptr as *mut (Option<F>, Option<R>)) };
-        if let Some(cb) = slot.0.take() {
-            slot.1 = Some(cb(dq_ptr));
-        }
-    }
-    let mut slot: (Option<F>, Option<R>) = (Some(f), None);
-    unsafe {
-        host_cb(
-            ctx,
-            0,
-            0,
-            0,
-            trampoline::<F, R> as *const () as usize,
-            (&mut slot as *mut (Option<F>, Option<R>)) as usize,
-            ptr::null(),
-            ptr::null(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-        );
-    }
-    slot.1.expect("DownloadQueue::Guard callback must execute")
+fn msg_1023(bytes: &[u8]) -> &[u8] {
+    cstr::until_nul(&bytes[..bytes.len().min(1023)])
 }
 
 struct CtrlSnapshot {
@@ -509,166 +441,169 @@ struct NzbSnapshot {
     twin_files_param: Vec<u8>,
 }
 
-fn inspect_ctrl(
-    par_checker: &crate::postproc::NzbgetRsParChecker,
-    ctx: *mut c_void,
-    host_cb: NzbgetRsRepairCtrlHostFn,
-) -> CtrlSnapshot {
-    let mut ints = [0 as c_int; 12];
-    let mut i64s = [0i64; 3];
-    let mut strs = [ptr::null::<c_char>(); 2];
-    let nzb_ptr = unsafe {
-        host_cb(
-            ctx,
-            1,
-            0,
-            0,
-            0,
-            0,
-            ptr::null(),
-            ptr::null(),
-            ints.as_mut_ptr(),
-            i64s.as_mut_ptr(),
-            strs.as_mut_ptr(),
-        )
-    };
+/// One file of an nzb's file list, as `find_pars_pass` sees it.
+struct FileEntry {
+    ptr: usize,
+    confirmed: bool,
+    paused: bool,
+    par_file: bool,
+    size: i64,
+    filename: Vec<u8>,
+}
+
+/// One completed file of an nzb.
+struct CompletedEntry {
+    id: i32,
+    status: i32,
+    crc: u32,
+    filename: Vec<u8>,
+    origname: Vec<u8>,
+}
+
+#[cfg(unix)]
+fn inspect_ctrl(par_checker: &crate::postproc::NzbgetRsParChecker, q: JobQueue<'_>) -> CtrlSnapshot {
+    let ps = q.host.post_snap(q.post_ptr());
+    let opts = crate::options::active_options();
+    let sc = opts.as_ref().map(|o| o.scalars());
+    let opt = |id| cstr::until_nul(opts.as_ref().map_or(&b""[..], |o| o.str_bytes(id))).to_vec();
     CtrlSnapshot {
-        nzb_ptr,
+        nzb_ptr: ps.nzb_ptr,
         checker_status: par_checker.status(),
         checker_stage: par_checker.stage(),
         file_progress: par_checker.file_progress(),
         stage_progress: par_checker.stage_progress(),
         par_full: par_checker.par_full(),
-        is_stopped: ints[0] != 0,
-        par_quick_opt: ints[1] != 0,
-        par_time_limit: ints[2],
-        pause_post_process: ints[3] != 0,
-        force_par_full: ints[4] != 0,
-        force_repair: ints[5] != 0,
-        post_stage: ints[6],
-        par_buffer: ints[7],
-        has_memory_monitor: ints[8] != 0 || crate::articledl::memory_monitor_active(),
-        par_threads: ints[9],
-        par_scan: ints[10],
-        par_repair: ints[11] != 0,
-        cur_time: i64s[0],
+        is_stopped: q.is_stopped(),
+        par_quick_opt: sc.as_ref().is_some_and(|s| s.par_quick != 0),
+        par_time_limit: sc.as_ref().map_or(0, |s| s.par_time_limit),
+        pause_post_process: crate::ffi::active_workstate()
+            .as_ref()
+            .is_some_and(|w| w.pause_post_process()),
+        force_par_full: ps.force_par_full,
+        force_repair: ps.force_repair,
+        post_stage: ps.stage,
+        par_buffer: sc.as_ref().map_or(0, |s| s.par_buffer),
+        has_memory_monitor: crate::articledl::memory_monitor_active(),
+        par_threads: sc.as_ref().map_or(0, |s| s.par_threads),
+        par_scan: sc.as_ref().map_or(0, |s| s.par_scan),
+        par_repair: sc.as_ref().is_some_and(|s| s.par_repair != 0),
+        cur_time: crate::postproc::current_time_sec(),
         block_size: par_checker.block_size(),
-        post_stage_time: i64s[1],
-        post_start_time: i64s[2],
+        post_stage_time: ps.stage_time,
+        post_start_time: ps.start_time,
         progress_label: par_checker.progress_label(),
         info_name: par_checker.info_name(),
         par_filename: par_checker.par_filename(),
         checker_dest_dir: par_checker.dest_dir(),
-        unrar_cmd: unsafe { cstr::owned(strs[0]) },
-        par_ignore_ext: unsafe { cstr::owned(strs[1]) },
+        unrar_cmd: opt(OptStr::UnrarCmd),
+        par_ignore_ext: opt(OptStr::ParIgnoreExt),
     }
 }
 
-fn inspect_nzb(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn, nzb_ptr: usize) -> NzbSnapshot {
-    let mut ints = [0 as c_int; 14];
-    let mut i64s = [0i64; 2];
-    let mut strs = [ptr::null::<c_char>(); 5];
-    unsafe {
-        host_cb(
-            ctx,
-            2,
-            0,
-            0,
-            nzb_ptr,
-            0,
-            ptr::null(),
-            ptr::null(),
-            ints.as_mut_ptr(),
-            i64s.as_mut_ptr(),
-            strs.as_mut_ptr(),
-        );
-    }
+#[cfg(unix)]
+fn inspect_nzb(host: &QueueSubsysHost, nzb_ptr: usize) -> NzbSnapshot {
+    let ns = host.nzb_snap(nzb_ptr, false);
+    let twin_files = host.nzb_get_param(nzb_ptr, b"DupeFiles");
     NzbSnapshot {
-        id: ints[0],
-        kind: ints[1],
-        nk_nzb: ints[2],
-        download_sec: ints[3],
-        repair_sec: ints[5],
-        par_status: ints[6],
-        reprocess: ints[7] != 0,
-        force_priority: ints[8] != 0,
-        extra_par_blocks: ints[9],
-        file_list_len: ints[10].max(0) as usize,
-        completed_len: ints[11].max(0) as usize,
-        jobs_len: ints[12].max(0) as usize,
-        dupe_mode: ints[13],
-        dupe_recovered_bytes: i64s[0],
-        expected_data_size: i64s[1],
-        name: unsafe { cstr::owned(strs[0]) },
-        dest_dir: unsafe { cstr::owned(strs[1]) },
-        dupe_key: unsafe { cstr::owned(strs[2]) },
-        queued_filename: unsafe { cstr::owned(strs[3]) },
-        has_twin_files_param: !strs[4].is_null(),
-        twin_files_param: unsafe { cstr::owned(strs[4]) },
+        id: ns.id,
+        kind: ns.kind,
+        nk_nzb: NK_NZB,
+        download_sec: ns.download_sec,
+        repair_sec: ns.repair_sec,
+        par_status: ns.par_status,
+        reprocess: ns.reprocess,
+        force_priority: ns.force_priority,
+        extra_par_blocks: ns.extra_par_blocks,
+        file_list_len: host.nzb_file_len(nzb_ptr),
+        completed_len: host.nzb_completed_files_len(nzb_ptr),
+        jobs_len: host.nzb_stream_repair_jobs_len(nzb_ptr),
+        dupe_mode: ns.dupe_mode,
+        dupe_recovered_bytes: ns.dupe_recovered_bytes,
+        expected_data_size: ns.size - ns.par_size,
+        name: cstr::until_nul(&ns.name).to_vec(),
+        dest_dir: cstr::until_nul(&ns.dest_dir).to_vec(),
+        dupe_key: cstr::until_nul(&ns.dupe_key).to_vec(),
+        queued_filename: cstr::until_nul(&ns.queued_filename).to_vec(),
+        has_twin_files_param: twin_files.is_some(),
+        twin_files_param: twin_files.as_deref().map_or_else(Vec::new, |t| cstr::until_nul(t).to_vec()),
     }
 }
 
-fn emit_msg(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn, kind: c_int, text: &[u8]) {
-    let c_text = to_c_msg_1024(text);
-    unsafe {
-        host_cb(
-            ctx,
-            7,
-            kind,
-            0,
-            0,
-            0,
-            c_text.as_ptr() as *const c_char,
-            ptr::null(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-        );
+#[cfg(unix)]
+fn file_entry(host: &QueueSubsysHost, nzb_ptr: usize, idx: usize) -> FileEntry {
+    let ptr = host.nzb_file_at(nzb_ptr, idx);
+    let fs = host.file_snap(ptr);
+    FileEntry {
+        ptr,
+        confirmed: fs.filename_confirmed,
+        paused: fs.paused,
+        par_file: fs.par_file,
+        size: fs.size,
+        filename: cstr::until_nul(&fs.filename).to_vec(),
     }
 }
 
-fn emit_debug(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn, text: &[u8]) {
-    let c_text = cstr::nul_terminated(text);
-    unsafe {
-        host_cb(
-            ctx,
-            7,
-            5,
-            0,
-            0,
-            0,
-            c_text.as_ptr() as *const c_char,
-            ptr::null(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-        );
+/// Unpauses the file at `idx` of the nzb and gives it extra priority.
+#[cfg(unix)]
+fn unpause_file(host: &QueueSubsysHost, nzb_ptr: usize, idx: usize) {
+    let ptr = host.nzb_file_at(nzb_ptr, idx);
+    host.file_set_int(ptr, FILE_INT_PAUSED, 0);
+    host.file_set_int(ptr, FILE_INT_EXTRA_PRIORITY, 1);
+}
+
+#[cfg(unix)]
+fn completed_entry(host: &QueueSubsysHost, nzb_ptr: usize, idx: usize) -> CompletedEntry {
+    let cf = host.nzb_completed_file_at(nzb_ptr, idx);
+    CompletedEntry {
+        id: cf.id,
+        status: cf.status,
+        crc: cf.crc,
+        filename: cstr::until_nul(&cf.filename).to_vec(),
+        origname: cstr::until_nul(&cf.origname).to_vec(),
     }
 }
 
-fn emit_global_log(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn, kind: c_int, text: &[u8]) {
-    let sub = match kind {
-        0 => 7, // info
-        3 => 5, // debug
-        4 => 8, // detail
+/// The nzb at history index `idx`, or `0` when that history entry is not an nzb.
+#[cfg(unix)]
+fn history_nzb(host: &QueueSubsysHost, dq_ptr: usize, idx: usize) -> usize {
+    let h = host.history_at(dq_ptr, idx);
+    if h.kind == HK_NZB {
+        h.inner_ptr
+    } else {
+        0
+    }
+}
+
+/// A message for the job's nzb (`kind` 0..=4), or the old host's other message codes:
+/// 5 debug log, 6 stop the job, 7 info log, 8 detail log.
+#[cfg(unix)]
+fn emit_msg(q: JobQueue<'_>, kind: c_int, text: &[u8]) {
+    let msg = msg_1023(text);
+    match kind {
+        ..=4 => q.job_message(kind, msg),
+        5 => q.host.log(MK_DEBUG, msg),
+        6 => q.stop(),
+        7 => q.host.log(MK_INFO, msg),
+        8 => q.host.log(MK_DETAIL, msg),
+        _ => {}
+    }
+}
+
+#[cfg(unix)]
+fn emit_debug(q: JobQueue<'_>, text: &[u8]) {
+    q.host.log(MK_DEBUG, cstr::until_nul(text));
+}
+
+/// Global log only; message kinds other than info, debug and detail are dropped.
+#[cfg(unix)]
+fn emit_global_log(q: JobQueue<'_>, kind: c_int, text: &[u8]) {
+    let kind = match kind {
+        0 => MK_INFO,
+        3 => MK_DEBUG,
+        4 => MK_DETAIL,
         _ => return,
     };
-    let c_text = cstr::nul_terminated(text);
-    unsafe {
-        host_cb(
-            ctx,
-            7,
-            sub,
-            0,
-            0,
-            0,
-            c_text.as_ptr() as *const c_char,
-            ptr::null(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-        );
-    }
+    q.host.log(kind, cstr::until_nul(text));
 }
 
 #[derive(Default)]
@@ -689,6 +624,7 @@ pub struct NzbgetRsRepairController {
     state: std::sync::Mutex<RepairCtrlState>,
 }
 
+#[cfg(unix)]
 impl NzbgetRsRepairController {
     pub fn new(nntp_host: &'static dyn NntpHost) -> Self {
         Self {
@@ -704,8 +640,8 @@ impl NzbgetRsRepairController {
     }
 
     #[inline]
-    fn snap(&self, ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn) -> CtrlSnapshot {
-        inspect_ctrl(&self.par_checker, ctx, host_cb)
+    fn snap(&self, q: JobQueue<'_>) -> CtrlSnapshot {
+        inspect_ctrl(&self.par_checker, q)
     }
 
     pub fn stop(&self) {
@@ -730,11 +666,11 @@ impl NzbgetRsRepairController {
         }
     }
 
-    fn is_stopped(&self, ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn) -> bool {
-        self.snap(ctx, host_cb).is_stopped
+    fn is_stopped(&self, q: JobQueue<'_>) -> bool {
+        q.is_stopped()
     }
 
-    pub fn run(&self, ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn) {
+    pub(crate) fn run(&self, q: JobQueue<'_>) {
         let (
             nzb_name,
             dest_dir,
@@ -744,9 +680,9 @@ impl NzbgetRsRepairController {
             force_par_full,
             force_repair,
             cur_time,
-        ) = with_dq_guard(ctx, host_cb, |_dq| {
-            let ctrl = self.snap(ctx, host_cb);
-            let nzb = inspect_nzb(ctx, host_cb, ctrl.nzb_ptr);
+        ) = q.host.with_locked_queue(|_dq| {
+            let ctrl = self.snap(q);
+            let nzb = inspect_nzb(q.host, ctrl.nzb_ptr);
             (
                 nzb.name,
                 nzb.dest_dir,
@@ -771,45 +707,23 @@ impl NzbgetRsRepairController {
         self.par_checker.set_force_repair(force_repair);
         let mut msg = b"Checking pars for ".to_vec();
         msg.extend_from_slice(&nzb_name);
-        emit_msg(ctx, host_cb, MK_INFO, &msg);
-        let hooks = RepairParHooks {
-            ctrl: self,
-            ctx,
-            host_cb,
-        };
+        emit_msg(q, MK_INFO, &msg);
+        let hooks = RepairParHooks { ctrl: self, q };
         self.par_checker.execute(&hooks);
     }
 
-    pub fn add_par(
-        &self,
-        ctx: *mut c_void,
-        host_cb: NzbgetRsRepairCtrlHostFn,
-        file_ptr: usize,
-        deleted: bool,
-    ) -> bool {
-        let mut strs = [ptr::null::<c_char>(); 2];
-        let same_collection = unsafe {
-            host_cb(
-                ctx,
-                4,
-                0,
-                0,
-                file_ptr,
-                0,
-                ptr::null(),
-                ptr::null(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                strs.as_mut_ptr(),
-            ) != 0
-        };
+    /// A par file of the queue was downloaded (or deleted). Returns whether it belongs to
+    /// this job's nzb.
+    pub(crate) fn add_par(&self, q: JobQueue<'_>, file_ptr: usize, deleted: bool) -> bool {
+        let fs = q.host.file_snap(file_ptr);
+        let ps = q.host.post_snap(q.post_ptr());
+        let same_collection = fs.nzb_ptr == ps.nzb_ptr;
         if same_collection && !deleted {
-            let dest_dir = unsafe { cstr::owned(strs[0]) };
-            let filename = unsafe { cstr::owned(strs[1]) };
+            let ns = q.host.nzb_snap(fs.nzb_ptr, false);
             let full = crate::artwritercore::article_writer_format_dest_file_path(
-                &dest_dir,
+                cstr::until_nul(&ns.dest_dir),
                 crate::paths::PATH_SEPARATOR,
-                &filename,
+                cstr::until_nul(&fs.filename),
             );
             self.par_checker.add_par_file(full);
         } else {
@@ -818,15 +732,15 @@ impl NzbgetRsRepairController {
         same_collection
     }
 
-    pub fn par_check_completed(&self, ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn) {
+    fn par_check_completed(&self, q: JobQueue<'_>) {
         self.delete_twin_files();
         let (start_dl_sec, par_time) = {
             let st = self.lock_state();
             (st.download_sec, st.par_time)
         };
-        with_dq_guard(ctx, host_cb, |_dq| {
-            let ctrl = self.snap(ctx, host_cb);
-            let nzb = inspect_nzb(ctx, host_cb, ctrl.nzb_ptr);
+        q.host.with_locked_queue(|_dq| {
+            let ctrl = self.snap(q);
+            let nzb = inspect_nzb(q.host, ctrl.nzb_ptr);
             let (new_status, set_rep, rep_val, wait_time, par_sec) = complete_par_check(
                 ctrl.checker_status,
                 nzb.par_status,
@@ -842,35 +756,24 @@ impl NzbgetRsRepairController {
                 ctrl.cur_time,
                 par_time,
             );
-            let mut ints = [
-                new_status,
-                c_int::from(set_rep),
-                c_int::from(rep_val),
-                wait_time,
-                par_sec,
-                c_int::from(ctrl.par_full),
-            ];
-            unsafe {
-                host_cb(
-                    ctx,
-                    5,
-                    0,
-                    0,
-                    ctrl.nzb_ptr,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    ints.as_mut_ptr(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                );
+            let host = q.host;
+            let n = ctrl.nzb_ptr;
+            let pi = q.post_ptr();
+            let ps = host.post_snap(pi);
+            let ns = host.nzb_snap(n, false);
+            host.nzb_set_int(n, NZB_INT_PAR_STATUS, new_status);
+            if set_rep {
+                host.post_set_int(pi, POST_INT_PAR_REPAIRED, i32::from(rep_val));
             }
+            host.post_set_start_time(pi, ps.start_time + i64::from(wait_time));
+            host.nzb_set_int(n, NZB_INT_PAR_SEC, ns.par_sec + par_sec);
+            host.nzb_set_int(n, NZB_INT_PAR_FULL, i32::from(ctrl.par_full));
+            host.post_set_int(pi, POST_INT_WORKING, 0);
         });
     }
 
     fn find_pars_pass(
-        ctx: *mut c_void,
-        host_cb: NzbgetRsRepairCtrlHostFn,
+        q: JobQueue<'_>,
         nzb_ptr: usize,
         nzb_name: &[u8],
         file_list_len: usize,
@@ -885,7 +788,7 @@ impl NzbgetRsRepairController {
         let Some((main_base_len, _)) = crate::parparser::parse_par_filename(base_par, true) else {
             let mut msg = b"Internal error: could not parse filename ".to_vec();
             msg.extend_from_slice(base_par);
-            emit_msg(ctx, host_cb, MK_ERROR, &msg);
+            emit_msg(q, MK_ERROR, &msg);
             let _ = nzb_name;
             return 0;
         };
@@ -893,28 +796,14 @@ impl NzbgetRsRepairController {
         let mut found = 0i32;
 
         for idx in 0..file_list_len {
-            let mut f_ints = [0 as c_int; 3];
-            let mut f_i64s = [0i64; 1];
-            let mut f_strs = [ptr::null::<c_char>(); 1];
-            let file_ptr = unsafe {
-                host_cb(
-                    ctx,
-                    6,
-                    idx as c_int,
-                    0,
-                    nzb_ptr,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    f_ints.as_mut_ptr(),
-                    f_i64s.as_mut_ptr(),
-                    f_strs.as_mut_ptr(),
-                )
-            };
-            let confirmed = f_ints[0] != 0;
-            let paused = f_ints[1] != 0;
-            let file_size = f_i64s[0];
-            let filename = unsafe { cstr::owned(f_strs[0]) };
+            let FileEntry {
+                ptr: file_ptr,
+                confirmed,
+                paused,
+                size: file_size,
+                filename,
+                ..
+            } = file_entry(q.host, nzb_ptr, idx);
 
             let (parsed, raw_blocks) =
                 match crate::parparser::parse_par_filename(&filename, confirmed) {
@@ -941,55 +830,26 @@ impl NzbgetRsRepairController {
         found
     }
 
-    pub fn request_more_pars(
-        &self,
-        ctx: *mut c_void,
-        host_cb: NzbgetRsRepairCtrlHostFn,
-        block_needed: i32,
-    ) -> (bool, i32) {
-        with_dq_guard(ctx, host_cb, |_dq| {
-            let ctrl = self.snap(ctx, host_cb);
-            let nzb = inspect_nzb(ctx, host_cb, ctrl.nzb_ptr);
+    fn request_more_pars(&self, q: JobQueue<'_>, block_needed: i32) -> (bool, i32) {
+        q.host.with_locked_queue(|_dq| {
+            let ctrl = self.snap(q);
+            let nzb = inspect_nzb(q.host, ctrl.nzb_ptr);
             let mut available: Vec<(usize, usize, i32, bool, Vec<u8>)> = Vec::new();
-            let mut block_found = Self::find_pars_pass(
-                ctx,
-                host_cb,
-                ctrl.nzb_ptr,
-                &nzb.name,
-                nzb.file_list_len,
-                ctrl.block_size,
-                &ctrl.par_filename,
-                true,
-                true,
-                &mut available,
-            );
-            if block_found < block_needed {
-                block_found += Self::find_pars_pass(
-                    ctx,
-                    host_cb,
-                    ctrl.nzb_ptr,
-                    &nzb.name,
-                    nzb.file_list_len,
-                    ctrl.block_size,
-                    &ctrl.par_filename,
-                    true,
-                    false,
-                    &mut available,
-                );
-            }
-            if block_found < block_needed {
-                block_found += Self::find_pars_pass(
-                    ctx,
-                    host_cb,
-                    ctrl.nzb_ptr,
-                    &nzb.name,
-                    nzb.file_list_len,
-                    ctrl.block_size,
-                    &ctrl.par_filename,
-                    false,
-                    false,
-                    &mut available,
-                );
+            let mut block_found = 0;
+            for (strict, exact) in [(true, true), (true, false), (false, false)] {
+                if strict && exact || block_found < block_needed {
+                    block_found += Self::find_pars_pass(
+                        q,
+                        ctrl.nzb_ptr,
+                        &nzb.name,
+                        nzb.file_list_len,
+                        ctrl.block_size,
+                        &ctrl.par_filename,
+                        strict,
+                        exact,
+                        &mut available,
+                    );
+                }
             }
 
             available.sort_by_key(|b| b.2);
@@ -1007,67 +867,27 @@ impl NzbgetRsRepairController {
                         msg.push(crate::paths::PATH_SEPARATOR);
                         msg.extend_from_slice(fname);
                         msg.extend_from_slice(b" for par-recovery");
-                        emit_msg(ctx, host_cb, MK_INFO, &msg);
-                        unsafe {
-                            host_cb(
-                                ctx,
-                                6,
-                                file_idx as c_int,
-                                1,
-                                ctrl.nzb_ptr,
-                                0,
-                                ptr::null(),
-                                ptr::null(),
-                                ptr::null_mut(),
-                                ptr::null_mut(),
-                                ptr::null_mut(),
-                            );
-                        }
+                        emit_msg(q, MK_INFO, &msg);
+                        unpause_file(q.host, ctrl.nzb_ptr, file_idx);
                     }
                 }
             }
 
-            let mut has_unpaused_par = false;
-            for idx in 0..nzb.file_list_len {
-                let mut f_ints = [0 as c_int; 3];
-                let mut f_i64s = [0i64; 1];
-                let mut f_strs = [ptr::null::<c_char>(); 1];
-                unsafe {
-                    host_cb(
-                        ctx,
-                        6,
-                        idx as c_int,
-                        0,
-                        ctrl.nzb_ptr,
-                        0,
-                        ptr::null(),
-                        ptr::null(),
-                        f_ints.as_mut_ptr(),
-                        f_i64s.as_mut_ptr(),
-                        f_strs.as_mut_ptr(),
-                    );
-                }
-                if f_ints[2] != 0 && f_ints[1] == 0 {
-                    has_unpaused_par = true;
-                    break;
-                }
-            }
+            let has_unpaused_par = (0..nzb.file_list_len).any(|idx| {
+                let f = file_entry(q.host, ctrl.nzb_ptr, idx);
+                f.par_file && !f.paused
+            });
 
             (rem_needed <= 0 || has_unpaused_par, block_found)
         })
     }
 
-    pub fn update_par_check_progress(&self, ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn) {
+    fn update_par_check_progress(&self, q: JobQueue<'_>) {
         let cur_repair_time = self.lock_state().repair_time;
         let mut updated_repair_time = cur_repair_time;
-        with_dq_guard(ctx, host_cb, |_dq| {
-            let ctrl = self.snap(ctx, host_cb);
-            let nzb = inspect_nzb(ctx, host_cb, ctrl.nzb_ptr);
-            let label_c = if ctrl.file_progress == 0 {
-                Some(cstr::nul_terminated(&ctrl.progress_label))
-            } else {
-                None
-            };
+        q.host.with_locked_queue(|_dq| {
+            let ctrl = self.snap(q);
+            let nzb = inspect_nzb(q.host, ctrl.nzb_ptr);
             let (new_stage, changed, set_rt, new_rsec, cancel, est_sec, est_min) =
                 eval_par_progress_update(
                     ctrl.checker_stage,
@@ -1085,45 +905,33 @@ impl NzbgetRsRepairController {
                     ctrl.checker_stage == 2,
                     ctrl.stage_progress,
                 );
-            let mut flags = c_int::from(changed);
+            let mut set_repair_sec = false;
             if changed {
                 if set_rt {
                     updated_repair_time = ctrl.cur_time;
                 } else if new_stage == 4 {
-                    flags |= 8;
+                    set_repair_sec = true;
                 }
             }
-            let mut ints = [
-                ctrl.file_progress,
-                ctrl.stage_progress,
-                flags,
-                new_stage,
-                new_rsec,
-            ];
-            let mut i64s = [ctrl.cur_time];
-            unsafe {
-                host_cb(
-                    ctx,
-                    8,
-                    0,
-                    0,
-                    0,
-                    0,
-                    label_c
-                        .as_ref()
-                        .map_or(ptr::null(), |b| b.as_ptr() as *const c_char),
-                    ptr::null(),
-                    ints.as_mut_ptr(),
-                    i64s.as_mut_ptr(),
-                    ptr::null_mut(),
-                );
+
+            let host = q.host;
+            let pi = q.post_ptr();
+            if ctrl.file_progress == 0 {
+                host.post_set_progress_label(pi, cstr::until_nul(&ctrl.progress_label));
             }
+            host.post_set_int(pi, POST_INT_FILE_PROGRESS, ctrl.file_progress);
+            host.post_set_int(pi, POST_INT_STAGE_PROGRESS, ctrl.stage_progress);
+            if changed {
+                host.post_set_int(pi, POST_INT_STAGE, new_stage);
+                host.post_set_stage_time(pi, ctrl.cur_time);
+            }
+            if set_repair_sec {
+                let n = host.post_snap(pi).nzb_ptr;
+                host.nzb_set_int(n, NZB_INT_REPAIR_SEC, new_rsec);
+            }
+
             if cancel {
-                emit_debug(
-                    ctx,
-                    host_cb,
-                    format!("Estimated repair time {est_sec} seconds").as_bytes(),
-                );
+                emit_debug(q, format!("Estimated repair time {est_sec} seconds").as_bytes());
                 let mut msg = b"Cancelling par-repair for ".to_vec();
                 msg.extend_from_slice(&ctrl.info_name);
                 msg.extend_from_slice(
@@ -1132,33 +940,19 @@ impl NzbgetRsRepairController {
                     )
                     .as_bytes(),
                 );
-                emit_msg(ctx, host_cb, MK_WARNING, &msg);
-                unsafe {
-                    host_cb(
-                        ctx,
-                        7,
-                        6,
-                        0,
-                        0,
-                        0,
-                        ptr::null(),
-                        ptr::null(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                    );
-                }
+                emit_msg(q, MK_WARNING, &msg);
+                q.stop();
             }
         });
         if updated_repair_time != cur_repair_time {
             self.lock_state().repair_time = updated_repair_time;
         }
-        self.check_pause_state(ctx, host_cb);
+        self.check_pause_state(q);
     }
 
-    fn check_pause_state(&self, ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn) {
-        let ctrl0 = self.snap(ctx, host_cb);
-        let nzb0 = inspect_nzb(ctx, host_cb, ctrl0.nzb_ptr);
+    fn check_pause_state(&self, q: JobQueue<'_>) {
+        let ctrl0 = self.snap(q);
+        let nzb0 = inspect_nzb(q.host, ctrl0.nzb_ptr);
         if !ctrl0.pause_post_process || nzb0.force_priority {
             return;
         }
@@ -1171,13 +965,13 @@ impl NzbgetRsRepairController {
         let wait_time = ctrl0.cur_time;
 
         loop {
-            let c_check = self.snap(ctx, host_cb);
-            let n_check = inspect_nzb(ctx, host_cb, c_check.nzb_ptr);
+            let c_check = self.snap(q);
+            let n_check = inspect_nzb(q.host, c_check.nzb_ptr);
             if !c_check.pause_post_process || n_check.force_priority || c_check.is_stopped {
                 break;
             }
             std::thread::sleep(Duration::from_millis(50));
-            let c_after = self.snap(ctx, host_cb);
+            let c_after = self.snap(q);
             let (s_stage, s_start, s_par, s_rep) = calc_paused_timestamps(
                 c_after.cur_time,
                 wait_time,
@@ -1186,21 +980,12 @@ impl NzbgetRsRepairController {
                 par_time,
                 repair_time,
             );
-            let mut i64s = [s_stage, s_start];
-            unsafe {
-                host_cb(
-                    ctx,
-                    8,
-                    1,
-                    0,
-                    0,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null_mut(),
-                    i64s.as_mut_ptr(),
-                    ptr::null_mut(),
-                );
+            let pi = q.post_ptr();
+            if s_stage > 0 {
+                q.host.post_set_stage_time(pi, s_stage);
+            }
+            if s_start > 0 {
+                q.host.post_set_start_time(pi, s_start);
             }
             if s_par > 0 || s_rep > 0 {
                 let mut st = self.lock_state();
@@ -1214,57 +999,20 @@ impl NzbgetRsRepairController {
         }
     }
 
-    pub fn register_verified_file(
-        &self,
-        ctx: *mut c_void,
-        host_cb: NzbgetRsRepairCtrlHostFn,
-        filename: &[u8],
-    ) {
+    fn register_verified_file(&self, q: JobQueue<'_>, filename: &[u8]) {
         let verified_path =
             crate::fsops::get_real_path(filename).unwrap_or_else(|| filename.to_vec());
-        with_dq_guard(ctx, host_cb, |_dq| {
-            let ctrl = self.snap(ctx, host_cb);
-            let nzb = inspect_nzb(ctx, host_cb, ctrl.nzb_ptr);
+        q.host.with_locked_queue(|_dq| {
+            let ctrl = self.snap(q);
+            let nzb = inspect_nzb(q.host, ctrl.nzb_ptr);
             for job_idx in (0..nzb.jobs_len).rev() {
-                let mut j_ints = [0 as c_int; 1];
-                let mut j_strs = [ptr::null::<c_char>(); 1];
-                unsafe {
-                    host_cb(
-                        ctx,
-                        9,
-                        4,
-                        job_idx as c_int,
-                        ctrl.nzb_ptr,
-                        0,
-                        ptr::null(),
-                        ptr::null(),
-                        j_ints.as_mut_ptr(),
-                        ptr::null_mut(),
-                        j_strs.as_mut_ptr(),
-                    );
-                }
-                let job_file_id = j_ints[0];
-                let mut current_name = unsafe { cstr::owned(j_strs[0]) };
+                let job = q.host.nzb_stream_repair_job_detail(ctrl.nzb_ptr, job_idx);
+                let job_file_id = job.file_id;
+                let mut current_name = cstr::until_nul(&job.filename).to_vec();
                 for cf_idx in 0..nzb.completed_len {
-                    let mut c_ints = [0 as c_int; 3];
-                    let mut c_strs = [ptr::null::<c_char>(); 2];
-                    unsafe {
-                        host_cb(
-                            ctx,
-                            9,
-                            3,
-                            cf_idx as c_int,
-                            ctrl.nzb_ptr,
-                            0,
-                            ptr::null(),
-                            ptr::null(),
-                            c_ints.as_mut_ptr(),
-                            ptr::null_mut(),
-                            c_strs.as_mut_ptr(),
-                        );
-                    }
-                    if c_ints[0] == job_file_id {
-                        current_name = unsafe { cstr::owned(c_strs[0]) };
+                    let cf = completed_entry(q.host, ctrl.nzb_ptr, cf_idx);
+                    if cf.id == job_file_id {
+                        current_name = cf.filename;
                         break;
                     }
                 }
@@ -1275,114 +1023,33 @@ impl NzbgetRsRepairController {
                 );
                 let real_path = crate::fsops::get_real_path(&raw_path).unwrap_or(raw_path);
                 if real_path == verified_path {
-                    unsafe {
-                        host_cb(
-                            ctx,
-                            9,
-                            5,
-                            job_idx as c_int,
-                            ctrl.nzb_ptr,
-                            0,
-                            ptr::null(),
-                            ptr::null(),
-                            ptr::null_mut(),
-                            ptr::null_mut(),
-                            ptr::null_mut(),
-                        );
-                    }
+                    q.host.nzb_stream_repair_erase_job(ctrl.nzb_ptr, job_idx, true);
                 }
             }
         });
     }
 
-    pub fn is_parred_file(
-        &self,
-        ctx: *mut c_void,
-        host_cb: NzbgetRsRepairCtrlHostFn,
-        filename: &[u8],
-    ) -> bool {
-        let count = unsafe {
-            host_cb(
-                ctx,
-                9,
-                1,
-                0,
-                0,
-                0,
-                ptr::null(),
-                ptr::null(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            )
-        };
-        for idx in 0..count {
-            let mut strs = [ptr::null::<c_char>(); 1];
-            unsafe {
-                host_cb(
-                    ctx,
-                    9,
-                    2,
-                    idx as c_int,
-                    0,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    strs.as_mut_ptr(),
-                );
-            }
-            if !strs[0].is_null() {
-                let pf = unsafe { CStr::from_ptr(strs[0]).to_bytes() };
-                if pf.eq_ignore_ascii_case(filename) {
-                    return true;
-                }
-            }
-        }
-        false
+    fn is_parred_file(&self, q: JobQueue<'_>, filename: &[u8]) -> bool {
+        let post_ptr = q.post_ptr();
+        let count = q.host.post_snap(post_ptr).parred_files_len;
+        (0..count).any(|idx| {
+            let pf = q.host.post_parred_file_at(post_ptr, idx);
+            cstr::until_nul(&pf).eq_ignore_ascii_case(filename)
+        })
     }
 
-    pub fn find_file_quick_info(
+    fn find_file_quick_info(
         &self,
-        ctx: *mut c_void,
-        host_cb: NzbgetRsRepairCtrlHostFn,
+        q: JobQueue<'_>,
         filename: &[u8],
     ) -> Option<crate::parchecker::QuickInfo> {
-        let found = with_dq_guard(ctx, host_cb, |_dq| {
-            let ctrl = self.snap(ctx, host_cb);
-            let nzb = inspect_nzb(ctx, host_cb, ctrl.nzb_ptr);
-            for cf_idx in 0..nzb.completed_len {
-                let mut c_ints = [0 as c_int; 3];
-                let mut c_strs = [ptr::null::<c_char>(); 2];
-                unsafe {
-                    host_cb(
-                        ctx,
-                        9,
-                        3,
-                        cf_idx as c_int,
-                        ctrl.nzb_ptr,
-                        0,
-                        ptr::null(),
-                        ptr::null(),
-                        c_ints.as_mut_ptr(),
-                        ptr::null_mut(),
-                        c_strs.as_mut_ptr(),
-                    );
-                }
-                let cf_name = unsafe { cstr::owned(c_strs[0]) };
-                if cf_name.eq_ignore_ascii_case(filename) {
-                    return Some((
-                        c_ints[0],
-                        c_ints[1],
-                        c_ints[2] as u32,
-                        nzb.reprocess,
-                        nzb.id,
-                        nzb.dest_dir,
-                    ));
-                }
-            }
-            None
+        let found = q.host.with_locked_queue(|_dq| {
+            let ctrl = self.snap(q);
+            let nzb = inspect_nzb(q.host, ctrl.nzb_ptr);
+            (0..nzb.completed_len)
+                .map(|cf_idx| completed_entry(q.host, ctrl.nzb_ptr, cf_idx))
+                .find(|cf| cf.filename.eq_ignore_ascii_case(filename))
+                .map(|cf| (cf.id, cf.status, cf.crc, nzb.reprocess, nzb.id, nzb.dest_dir.clone()))
         });
 
         let (id, status, crc, reprocess, nzb_id, dest_dir) = found?;
@@ -1401,7 +1068,7 @@ impl NzbgetRsRepairController {
         let mut dbg = b"Found completed file: ".to_vec();
         dbg.extend_from_slice(filename);
         dbg.extend_from_slice(format!(", CRC: {crc:08x}, Status: {status}").as_bytes());
-        emit_debug(ctx, host_cb, &dbg);
+        emit_debug(q, &dbg);
 
         let mut raw_segs: Vec<crate::postrepair::NzbgetRsParSegment> = Vec::new();
         extern "C" fn push_seg(vec_ptr: usize, s: c_int, off: i64, sz: c_int, c: u32) {
@@ -1416,21 +1083,11 @@ impl NzbgetRsRepairController {
 
         let mut has_segments = false;
         if should_load_partial_segments(status, 2, id, reprocess) {
-            let loaded = unsafe {
-                host_cb(
-                    ctx,
-                    9,
-                    6,
-                    id,
-                    (&mut raw_segs as *mut Vec<crate::postrepair::NzbgetRsParSegment>) as usize,
-                    0,
-                    ptr::null(),
-                    push_seg as *const () as *const c_char,
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                )
-            };
+            let loaded = q.host.disk_load_completed_segments(
+                id,
+                (&mut raw_segs as *mut Vec<crate::postrepair::NzbgetRsParSegment>) as usize,
+                push_seg as *const () as usize,
+            );
             if loaded == 0 {
                 return None;
             }
@@ -1441,95 +1098,33 @@ impl NzbgetRsRepairController {
         crate::postproc::quick_info_from_status(st, crc, &raw_segs)
     }
 
-    pub fn find_file_origname(
-        &self,
-        ctx: *mut c_void,
-        host_cb: NzbgetRsRepairCtrlHostFn,
-        filename: &[u8],
-    ) -> Option<Vec<u8>> {
-        with_dq_guard(ctx, host_cb, |_dq| {
-            let ctrl = self.snap(ctx, host_cb);
-            let nzb = inspect_nzb(ctx, host_cb, ctrl.nzb_ptr);
-            for cf_idx in 0..nzb.completed_len {
-                let mut c_ints = [0 as c_int; 3];
-                let mut c_strs = [ptr::null::<c_char>(); 2];
-                unsafe {
-                    host_cb(
-                        ctx,
-                        9,
-                        3,
-                        cf_idx as c_int,
-                        ctrl.nzb_ptr,
-                        0,
-                        ptr::null(),
-                        ptr::null(),
-                        c_ints.as_mut_ptr(),
-                        ptr::null_mut(),
-                        c_strs.as_mut_ptr(),
-                    );
-                }
-                let cf_name = unsafe { cstr::owned(c_strs[0]) };
-                if cf_name.eq_ignore_ascii_case(filename) {
-                    if c_strs[1].is_null() {
-                        return None;
-                    }
-                    return Some(unsafe { cstr::owned(c_strs[1]) });
-                }
-            }
-            None
+    fn find_file_origname(&self, q: JobQueue<'_>, filename: &[u8]) -> Option<Vec<u8>> {
+        q.host.with_locked_queue(|_dq| {
+            let ctrl = self.snap(q);
+            let nzb = inspect_nzb(q.host, ctrl.nzb_ptr);
+            (0..nzb.completed_len)
+                .map(|cf_idx| completed_entry(q.host, ctrl.nzb_ptr, cf_idx))
+                .find(|cf| cf.filename.eq_ignore_ascii_case(filename))
+                .map(|cf| cf.origname)
         })
     }
 
-    pub fn request_dupe_sources(
-        &self,
-        ctx: *mut c_void,
-        host_cb: NzbgetRsRepairCtrlHostFn,
-    ) -> Vec<crate::postproc::ParDupeSource> {
+    fn request_dupe_sources(&self, q: JobQueue<'_>) -> Vec<crate::postproc::ParDupeSource> {
         let mut out = Vec::new();
-        with_dq_guard(ctx, host_cb, |dq_ptr| {
-            let ctrl = self.snap(ctx, host_cb);
-            let nzb = inspect_nzb(ctx, host_cb, ctrl.nzb_ptr);
+        q.host.with_locked_queue(|dq_ptr| {
+            let ctrl = self.snap(q);
+            let nzb = inspect_nzb(q.host, ctrl.nzb_ptr);
             if nzb.dupe_mode == crate::dupecoord::DUPE_MODE_FORCE {
                 return;
             }
-            let mut q_ints = [0 as c_int; 2];
-            unsafe {
-                host_cb(
-                    ctx,
-                    10,
-                    0,
-                    0,
-                    dq_ptr,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    q_ints.as_mut_ptr(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                );
-            }
-            let hist_len = q_ints[1].max(0) as usize;
+            let hist_len = q.host.history_len(dq_ptr);
             let mut dupes: Vec<(i32, Vec<u8>)> = Vec::new();
             for h_idx in 0..hist_len {
-                let item_ptr = unsafe {
-                    host_cb(
-                        ctx,
-                        10,
-                        2,
-                        h_idx as c_int,
-                        dq_ptr,
-                        0,
-                        ptr::null(),
-                        ptr::null(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                    )
-                };
+                let item_ptr = history_nzb(q.host, dq_ptr, h_idx);
                 if item_ptr == 0 {
                     continue;
                 }
-                let item = inspect_nzb(ctx, host_cb, item_ptr);
+                let item = inspect_nzb(q.host, item_ptr);
                 if item.dupe_mode != crate::dupecoord::DUPE_MODE_FORCE
                     && crate::dupecoord::same_name_or_key(
                         &item.name,
@@ -1553,12 +1148,7 @@ impl NzbgetRsRepairController {
                 &ctrl.unrar_cmd,
                 &dir_refs,
                 |kind, msg| {
-                    emit_msg(
-                        ctx,
-                        host_cb,
-                        if kind == 3 { MK_DETAIL } else { MK_INFO },
-                        msg,
-                    );
+                    emit_msg(q, if kind == 3 { MK_DETAIL } else { MK_INFO }, msg);
                 },
             );
             for u_idx in usable {
@@ -1573,106 +1163,44 @@ impl NzbgetRsRepairController {
         out
     }
 
-    pub fn stat_dupe_sources(
-        &self,
-        ctx: *mut c_void,
-        host_cb: NzbgetRsRepairCtrlHostFn,
-        sources: &[crate::postproc::ParDupeSource],
-    ) {
-        with_dq_guard(ctx, host_cb, |dq_ptr| {
-            let ctrl = self.snap(ctx, host_cb);
-            let nzb = inspect_nzb(ctx, host_cb, ctrl.nzb_ptr);
-            let mut q_ints = [0 as c_int; 2];
-            unsafe {
-                host_cb(
-                    ctx,
-                    10,
-                    0,
-                    0,
-                    dq_ptr,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    q_ints.as_mut_ptr(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                );
-            }
-            let hist_len = q_ints[1].max(0) as usize;
+    fn stat_dupe_sources(&self, q: JobQueue<'_>, sources: &[crate::postproc::ParDupeSource]) {
+        q.host.with_locked_queue(|dq_ptr| {
+            let ctrl = self.snap(q);
+            let nzb = inspect_nzb(q.host, ctrl.nzb_ptr);
+            let hist_len = q.host.history_len(dq_ptr);
 
             let mut total_extra = 0i32;
             for src in sources {
-                let ds_id = src.id;
-                let used_blocks = src.used_blocks;
-                if used_blocks > 0 {
+                if src.used_blocks > 0 {
                     for h_idx in 0..hist_len {
-                        let item_ptr = unsafe {
-                            host_cb(
-                                ctx,
-                                10,
-                                2,
-                                h_idx as c_int,
-                                dq_ptr,
-                                0,
-                                ptr::null(),
-                                ptr::null(),
-                                ptr::null_mut(),
-                                ptr::null_mut(),
-                                ptr::null_mut(),
-                            )
-                        };
+                        let item_ptr = history_nzb(q.host, dq_ptr, h_idx);
                         if item_ptr != 0 {
-                            let item = inspect_nzb(ctx, host_cb, item_ptr);
-                            if item.id == ds_id {
-                                unsafe {
-                                    host_cb(
-                                        ctx,
-                                        10,
-                                        7,
-                                        item.extra_par_blocks - used_blocks,
-                                        item_ptr,
-                                        0,
-                                        ptr::null(),
-                                        ptr::null(),
-                                        ptr::null_mut(),
-                                        ptr::null_mut(),
-                                        ptr::null_mut(),
-                                    );
-                                }
+                            let item = inspect_nzb(q.host, item_ptr);
+                            if item.id == src.id {
+                                q.host.nzb_set_int(
+                                    item_ptr,
+                                    NZB_INT_EXTRA_PAR_BLOCKS,
+                                    item.extra_par_blocks - src.used_blocks,
+                                );
                             }
                         }
                     }
                 }
-                total_extra += used_blocks;
+                total_extra += src.used_blocks;
             }
-            unsafe {
-                host_cb(
-                    ctx,
-                    10,
-                    7,
-                    nzb.extra_par_blocks + total_extra,
-                    ctrl.nzb_ptr,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                );
-            }
+            q.host.nzb_set_int(
+                ctrl.nzb_ptr,
+                NZB_INT_EXTRA_PAR_BLOCKS,
+                nzb.extra_par_blocks + total_extra,
+            );
         });
     }
 
-    fn fetch_twin_file(
-        &self,
-        ctx: *mut c_void,
-        host_cb: NzbgetRsRepairCtrlHostFn,
-        entry: &NzbEntry,
-    ) -> Option<(Vec<u8>, Vec<u8>)> {
+    fn fetch_twin_file(&self, q: JobQueue<'_>, entry: &NzbEntry) -> Option<(Vec<u8>, Vec<u8>)> {
         let data = fetch_entry(&self.twin_fetcher, entry, MAX_TWIN_FETCH_SIZE, || {
-            self.is_stopped(ctx, host_cb)
+            self.is_stopped(q)
         })?;
-        let ctrl = self.snap(ctx, host_cb);
+        let ctrl = self.snap(q);
         let count = self.lock_state().twin_files.len();
         let name = build_twin_filename(entry.filename.as_bytes(), count);
         let path = crate::artwritercore::article_writer_format_dest_file_path(
@@ -1689,12 +1217,8 @@ impl NzbgetRsRepairController {
         Some((path, data))
     }
 
-    pub fn request_twin_index(
-        &self,
-        ctx: *mut c_void,
-        host_cb: NzbgetRsRepairCtrlHostFn,
-    ) -> Vec<u8> {
-        let ctrl0 = self.snap(ctx, host_cb);
+    fn request_twin_index(&self, q: JobQueue<'_>) -> Vec<u8> {
+        let ctrl0 = self.snap(q);
         let c_par_fn = cstr::nul_terminated(&ctrl0.par_filename);
         let mut par_buf = Vec::new();
         if let Ok(cs) = CStr::from_bytes_with_nul(&c_par_fn) {
@@ -1717,34 +1241,18 @@ impl NzbgetRsRepairController {
             return Vec::new();
         }
 
-        let mut candidates: Vec<(Vec<u8>, Vec<u8>, bool)> = with_dq_guard(ctx, host_cb, |dq_ptr| {
-            let ctrl = self.snap(ctx, host_cb);
-            let nzb = inspect_nzb(ctx, host_cb, ctrl.nzb_ptr);
-            let mut q_ints = [0 as c_int; 2];
-            unsafe {
-                host_cb(
-                    ctx,
-                    10,
-                    0,
-                    0,
-                    dq_ptr,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    q_ints.as_mut_ptr(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                );
-            }
-            let q_len = q_ints[0].max(0) as usize;
-            let h_len = q_ints[1].max(0) as usize;
+        let mut candidates: Vec<(Vec<u8>, Vec<u8>, bool)> = q.host.with_locked_queue(|dq_ptr| {
+            let ctrl = self.snap(q);
+            let nzb = inspect_nzb(q.host, ctrl.nzb_ptr);
+            let q_len = q.host.queue_len(dq_ptr);
+            let h_len = q.host.history_len(dq_ptr);
             let mut out = Vec::new();
 
             let mut consider = |other_ptr: usize| {
                 if other_ptr == 0 {
                     return;
                 }
-                let other = inspect_nzb(ctx, host_cb, other_ptr);
+                let other = inspect_nzb(q.host, other_ptr);
                 let is_self = other_ptr == ctrl.nzb_ptr;
                 let same = !is_self
                     && other.kind == other.nk_nzb
@@ -1774,40 +1282,10 @@ impl NzbgetRsRepairController {
             };
 
             for idx in 0..q_len {
-                let p = unsafe {
-                    host_cb(
-                        ctx,
-                        10,
-                        1,
-                        idx as c_int,
-                        dq_ptr,
-                        0,
-                        ptr::null(),
-                        ptr::null(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                    )
-                };
-                consider(p);
+                consider(q.host.queue_at(dq_ptr, idx));
             }
             for idx in 0..h_len {
-                let p = unsafe {
-                    host_cb(
-                        ctx,
-                        10,
-                        2,
-                        idx as c_int,
-                        dq_ptr,
-                        0,
-                        ptr::null(),
-                        ptr::null(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                    )
-                };
-                consider(p);
+                consider(history_nzb(q.host, dq_ptr, idx));
             }
             out
         });
@@ -1818,7 +1296,7 @@ impl NzbgetRsRepairController {
         let own_md5s: Vec<[u8; 16]> = own.iter().map(|s| s.md5).collect();
 
         for (cand_name, cand_nzb_fn, _) in candidates {
-            if self.is_stopped(ctx, host_cb) {
+            if self.is_stopped(q) {
                 break;
             }
             let Ok(xml) = std::fs::read(crate::fsops::path(&cand_nzb_fn)) else {
@@ -1832,7 +1310,7 @@ impl NzbgetRsRepairController {
                 continue;
             };
             let index_entry = entries[best_idx].clone();
-            let Some((path, data)) = self.fetch_twin_file(ctx, host_cb, &index_entry) else {
+            let Some((path, data)) = self.fetch_twin_file(q, &index_entry) else {
                 continue;
             };
             let cmp =
@@ -1844,7 +1322,7 @@ impl NzbgetRsRepairController {
                 let mut msg = cand_name.clone();
                 msg.extend_from_slice(b": its par2 set ");
                 msg.extend_from_slice(&reason[..reason_end]);
-                emit_msg(ctx, host_cb, MK_DETAIL, &msg);
+                emit_msg(q, MK_DETAIL, &msg);
                 let c_del = cstr::nul_terminated(&path);
                 if let Ok(cs) = CStr::from_bytes_with_nul(&c_del) {
                     crate::fsops::delete_file(cs);
@@ -1858,7 +1336,7 @@ impl NzbgetRsRepairController {
             let mut msg = b"Trying the par2 set of twin ".to_vec();
             msg.extend_from_slice(&cand_name);
             msg.extend_from_slice(format!(" (blocks of {mb:.1} MB)").as_bytes());
-            emit_msg(ctx, host_cb, MK_INFO, &msg);
+            emit_msg(q, MK_INFO, &msg);
 
             let mut st = self.lock_state();
             st.twin_name = cand_name;
@@ -1871,12 +1349,7 @@ impl NzbgetRsRepairController {
         Vec::new()
     }
 
-    pub fn request_twin_volumes(
-        &self,
-        ctx: *mut c_void,
-        host_cb: NzbgetRsRepairCtrlHostFn,
-        block_needed: i32,
-    ) -> Vec<Vec<u8>> {
+    fn request_twin_volumes(&self, q: JobQueue<'_>, block_needed: i32) -> Vec<Vec<u8>> {
         let (twin_entries, twin_index, twin_block_size, twin_name) = {
             let st = self.lock_state();
             (
@@ -1915,13 +1388,13 @@ impl NzbgetRsRepairController {
                 format!(" holds {available} par-block(s), {block_needed} needed: not fetched")
                     .as_bytes(),
             );
-            emit_msg(ctx, host_cb, MK_INFO, &msg);
+            emit_msg(q, MK_INFO, &msg);
             return Vec::new();
         }
 
         let mut fetched_vols: Vec<Vec<u8>> = Vec::new();
         let mut left = block_needed;
-        while left > 0 && !volumes.is_empty() && !self.is_stopped(ctx, host_cb) {
+        while left > 0 && !volumes.is_empty() && !self.is_stopped(q) {
             let vol_blocks: Vec<i32> = volumes.iter().map(|v| v.1).collect();
             let pick_idx = pick_twin_volume(&vol_blocks, left).unwrap_or(volumes.len() - 1);
             let (entry, blocks) = volumes.remove(pick_idx);
@@ -1930,8 +1403,8 @@ impl NzbgetRsRepairController {
             msg.extend_from_slice(b" of twin ");
             msg.extend_from_slice(&twin_name);
             msg.extend_from_slice(format!(" for par-repair ({blocks} block(s))").as_bytes());
-            emit_msg(ctx, host_cb, MK_INFO, &msg);
-            if let Some((path, _)) = self.fetch_twin_file(ctx, host_cb, &entry) {
+            emit_msg(q, MK_INFO, &msg);
+            if let Some((path, _)) = self.fetch_twin_file(q, &entry) {
                 fetched_vols.push(path);
                 left -= blocks;
             }
@@ -1940,15 +1413,16 @@ impl NzbgetRsRepairController {
     }
 }
 
+#[cfg(unix)]
 struct RepairParHooks<'a> {
     ctrl: &'a NzbgetRsRepairController,
-    ctx: *mut c_void,
-    host_cb: NzbgetRsRepairCtrlHostFn,
+    q: JobQueue<'a>,
 }
 
+#[cfg(unix)]
 impl crate::postproc::ParCheckerHooks for RepairParHooks<'_> {
     fn read_options(&self) -> crate::postproc::ParCheckerOptions {
-        let ctrl = self.ctrl.snap(self.ctx, self.host_cb);
+        let ctrl = self.ctrl.snap(self.q);
         crate::postproc::ParCheckerOptions {
             par_buffer_mb: ctrl.par_buffer,
             has_memory_monitor: ctrl.has_memory_monitor,
@@ -1960,120 +1434,65 @@ impl crate::postproc::ParCheckerHooks for RepairParHooks<'_> {
     }
 
     fn is_stopped(&self) -> bool {
-        self.ctrl.is_stopped(self.ctx, self.host_cb)
+        self.ctrl.is_stopped(self.q)
     }
 
     fn request_more_pars(&self, block_needed: i32) -> (bool, i32) {
-        self.ctrl
-            .request_more_pars(self.ctx, self.host_cb, block_needed)
+        self.ctrl.request_more_pars(self.q, block_needed)
     }
 
     fn update_progress(&self) {
-        self.ctrl.update_par_check_progress(self.ctx, self.host_cb);
+        self.ctrl.update_par_check_progress(self.q);
     }
 
     fn completed(&self) {
-        self.ctrl.par_check_completed(self.ctx, self.host_cb);
+        self.ctrl.par_check_completed(self.q);
     }
 
     fn print_message(&self, kind: i32, msg: &[u8]) {
-        emit_msg(self.ctx, self.host_cb, kind, msg);
+        emit_msg(self.q, kind, msg);
     }
 
     fn global_log(&self, kind: i32, msg: &[u8]) {
-        emit_global_log(self.ctx, self.host_cb, kind, msg);
+        emit_global_log(self.q, kind, msg);
     }
 
     fn register_parred_file(&self, filename: &[u8]) {
-        let c_fn = cstr::nul_terminated(filename);
-        unsafe {
-            (self.host_cb)(
-                self.ctx,
-                9,
-                0,
-                0,
-                0,
-                0,
-                c_fn.as_ptr() as *const c_char,
-                ptr::null(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            );
-        }
+        self.q
+            .host
+            .post_push_parred_file(self.q.post_ptr(), cstr::until_nul(filename));
     }
 
     fn register_verified_file(&self, filename: &[u8]) {
-        self.ctrl
-            .register_verified_file(self.ctx, self.host_cb, filename);
+        self.ctrl.register_verified_file(self.q, filename);
     }
 
     fn is_parred_file(&self, filename: &[u8]) -> bool {
-        self.ctrl.is_parred_file(self.ctx, self.host_cb, filename)
+        self.ctrl.is_parred_file(self.q, filename)
     }
 
     fn find_file_quick_info(&self, filename: &[u8]) -> Option<crate::parchecker::QuickInfo> {
-        self.ctrl
-            .find_file_quick_info(self.ctx, self.host_cb, filename)
+        self.ctrl.find_file_quick_info(self.q, filename)
     }
 
     fn find_file_origname(&self, filename: &[u8]) -> Option<Vec<u8>> {
-        self.ctrl
-            .find_file_origname(self.ctx, self.host_cb, filename)
+        self.ctrl.find_file_origname(self.q, filename)
     }
 
     fn request_dupe_sources(&self) -> Vec<crate::postproc::ParDupeSource> {
-        self.ctrl.request_dupe_sources(self.ctx, self.host_cb)
+        self.ctrl.request_dupe_sources(self.q)
     }
 
     fn stat_dupe_sources(&self, sources: &[crate::postproc::ParDupeSource]) {
-        self.ctrl.stat_dupe_sources(self.ctx, self.host_cb, sources);
+        self.ctrl.stat_dupe_sources(self.q, sources);
     }
 
     fn request_twin_index(&self) -> Vec<u8> {
-        self.ctrl.request_twin_index(self.ctx, self.host_cb)
+        self.ctrl.request_twin_index(self.q)
     }
 
     fn request_twin_volumes(&self, block_needed: i32) -> Vec<Vec<u8>> {
-        self.ctrl
-            .request_twin_volumes(self.ctx, self.host_cb, block_needed)
-    }
-}
-
-/// Unified C-ABI dispatch entry point for [`NzbgetRsRepairController`]:
-/// - `op == 0`: `Stop()`
-/// - `op == 1`: `Run()`
-/// - `op == 2`: `AddPar(file_ptr=p1, deleted=a1 != 0)` -> returns `same_collection` (`0`/`1`)
-pub unsafe fn repair_ctrl_exec(
-    ctrl: *const NzbgetRsRepairController,
-    op: c_int,
-    a1: c_int,
-    p1: usize,
-    host_cb: Option<NzbgetRsRepairCtrlHostFn>,
-    ctx: *mut c_void,
-) -> c_int {
-    let Some(c) = (unsafe { ctrl.as_ref() }) else {
-        return 0;
-    };
-    match op {
-        0 => {
-            c.stop();
-            0
-        }
-        1 => {
-            if let Some(cb) = host_cb {
-                c.run(ctx, cb);
-            }
-            0
-        }
-        2 => {
-            if let Some(cb) = host_cb {
-                c_int::from(c.add_par(ctx, cb, p1, a1 != 0))
-            } else {
-                0
-            }
-        }
-        _ => 0,
+        self.ctrl.request_twin_volumes(self.q, block_needed)
     }
 }
 

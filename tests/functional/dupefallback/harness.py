@@ -8767,20 +8767,22 @@ def scenario_retentionnodate(daemon, t):
 
 
 def scenario_joingroupreconnect(daemon, t):
-    """JoinGroup=yes with a server that needs GROUP before BODY and drops the
-    connection every 2 articles: the connection kept its group across the
-    break, the reconnected one skipped GROUP, and the server answered 412 -
-    articles that exist counted as missing. Every article arrives now."""
+    """A server that drops the connection every 2 articles, with the removed
+    option Server1.JoinGroup=yes still in the config: once the reconnected
+    connection skipped GROUP and articles that exist counted as missing.
+    JoinGroup is gone now (articles are fetched by message-id, never with
+    GROUP; the option is dropped quietly), so the server here doesn't ask
+    for GROUP: every article arrives across the reconnects."""
     ids = ['jg%d@x' % i for i in range(8)]
     for mid, body in zip(ids, _uu_parts(_payload(45 * 80, 11013), 'jg.bin', 8)):
         daemon.fake_nntp.bodies_by_id[mid] = body
     daemon.fake_nntp.alive = set(ids)
-    daemon.fake_nntp.require_group = True
     daemon.fake_nntp.drop_every = 2
     api = daemon.wait_ready()
     daemon.append(api, 'RelJG', _fake_nzb_ids(ids, 45 * 80, name='jg.bin').decode(), False, 'jg-key', 100)
     h = daemon.wait_history(api, 'RelJG', timeout=90)
-    ok = h['Status'].startswith('SUCCESS') and daemon.fake_nntp.no_group_replies == 0
+    ok = (h['Status'].startswith('SUCCESS') and not h.get('FailedArticles')
+          and daemon.fake_nntp.sessions >= 4)
     return ('joingroupreconnect', ok, 'status=%s failed_articles=%s no_group_replies=%d sessions=%d' % (
         h['Status'], h.get('FailedArticles'), daemon.fake_nntp.no_group_replies, daemon.fake_nntp.sessions))
 

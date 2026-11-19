@@ -830,7 +830,10 @@ impl ArticleFetcher {
             }
 
             let read_started = Instant::now();
-            let Some(len) = self.host.read(conn, &mut recv_buf[..read_chunk]) else {
+            // A length past the buffer would make the decoder read out of bounds: treat it
+            // like a lost connection.
+            let read = self.host.read(conn, &mut recv_buf[..read_chunk]);
+            let Some(len) = read.filter(|&n| n <= read_chunk) else {
                 let mut log = b"Stream repair: connection to ".to_vec();
                 log.extend_from_slice(server_name);
                 log.extend_from_slice(b" lost while fetching ");

@@ -68,6 +68,9 @@ const DUPE_OPTIONS = ['DupeCheck', 'DupeWatch', 'DupeArticleFallback', 'DupeStre
         assert.equal(await tiles.count(), 6);
         const text = await page.locator('#ConfigOverview').innerText();
         assert.match(text, /2 \/ 2 active[\s\S]*40 connections/i);
+        // the tile's own text (its accessible name) keeps the parts apart
+        const servers = await page.locator('#ConfigOverview .config-overview-tile[data-target="NEWS-SERVERS"]').textContent();
+        assert.match(servers, /2 \/ 2 active\s+40 connections/i);
         assert.match(text, /\/mnt\/20tb\/rustyget\/dst/);
         assert.match(text, theme === 'dark' ? /Article swap/ : /Live repair/);
         assert.match(text, /While downloading/);

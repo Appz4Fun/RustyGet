@@ -12,7 +12,48 @@ use crate::xmlrpc_format::{NzbgetRsRpcLogEntry, NzbgetRsXmlRpcEmitFn};
 type BinRpcLogBeginFn = unsafe extern "C" fn(*mut c_void, c_int, u32, *mut c_int);
 type BinRpcLogPushFn = unsafe extern "C" fn(*mut c_void, u32, u32, u32, *const c_char);
 
-const MESSAGE_PREFIXES: [&[u8]; 5] = [b"INFO", b"WARNING", b"ERROR", b"DEBUG", b"DETAIL"];
+/// Severity of a log message. The discriminants are nzbget's
+/// `Message::EKind` values, which disk state, RPC and the remaining
+/// C-shaped callers still pass around as `i32`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(i32)]
+pub enum MessageKind {
+    Info = 0,
+    Warning = 1,
+    Error = 2,
+    Debug = 3,
+    Detail = 4,
+}
+
+impl MessageKind {
+    pub fn from_i32(kind: i32) -> Option<Self> {
+        Some(match kind {
+            0 => Self::Info,
+            1 => Self::Warning,
+            2 => Self::Error,
+            3 => Self::Debug,
+            4 => Self::Detail,
+            _ => return None,
+        })
+    }
+
+    /// The word written before the message in the log file.
+    pub fn prefix(self) -> &'static [u8] {
+        match self {
+            Self::Info => b"INFO",
+            Self::Warning => b"WARNING",
+            Self::Error => b"ERROR",
+            Self::Debug => b"DEBUG",
+            Self::Detail => b"DETAIL",
+        }
+    }
+}
+
+pub const MK_INFO: i32 = MessageKind::Info as i32;
+pub const MK_WARNING: i32 = MessageKind::Warning as i32;
+pub const MK_ERROR: i32 = MessageKind::Error as i32;
+pub const MK_DEBUG: i32 = MessageKind::Debug as i32;
+pub const MK_DETAIL: i32 = MessageKind::Detail as i32;
 
 #[inline]
 fn current_unix_time() -> i64 {
@@ -246,17 +287,18 @@ impl NzbgetRsLog {
 }
 
 fn target_for_kind(kind: i32, options: Option<&NzbgetRsOptions>) -> i32 {
+    let kind = MessageKind::from_i32(kind);
     if let Some(opts) = options {
         let sc = opts.scalars();
         match kind {
-            0 => sc.info_target,
-            1 => sc.warning_target,
-            2 => sc.error_target,
-            3 => sc.debug_target,
-            4 => sc.detail_target,
-            _ => 0,
+            Some(MessageKind::Info) => sc.info_target,
+            Some(MessageKind::Warning) => sc.warning_target,
+            Some(MessageKind::Error) => sc.error_target,
+            Some(MessageKind::Debug) => sc.debug_target,
+            Some(MessageKind::Detail) => sc.detail_target,
+            None => 0,
         }
-    } else if kind == 2 {
+    } else if kind == Some(MessageKind::Error) {
         3 // mtBoth
     } else {
         1 // mtScreen
@@ -264,10 +306,7 @@ fn target_for_kind(kind: i32, options: Option<&NzbgetRsOptions>) -> i32 {
 }
 
 fn prefix_for_kind(kind: i32) -> &'static [u8] {
-    MESSAGE_PREFIXES
-        .get(usize::try_from(kind).unwrap_or(0))
-        .copied()
-        .unwrap_or(b"INFO")
+    MessageKind::from_i32(kind).map_or(b"INFO", MessageKind::prefix)
 }
 
 fn format_truncated_1023(prefix: &[u8], text: &[u8]) -> Vec<u8> {
@@ -287,7 +326,7 @@ fn format_truncated_1023(prefix: &[u8], text: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 pub(crate) fn native_detail_record_for_test(text: &[u8]) -> Vec<u8> {
-    format_truncated_1023(prefix_for_kind(4), text)
+    format_truncated_1023(MessageKind::Detail.prefix(), text)
 }
 
 fn filelog_locked(
@@ -455,13 +494,13 @@ fn emit_message(
     options: Option<&NzbgetRsOptions>,
     text_cstr: &CStr,
 ) {
-    if kind == 3 && !debug_build {
+    if kind == MK_DEBUG && !debug_build {
         return;
     }
     let Ok(mut inner) = log.inner.lock() else {
         return;
     };
-    if kind == 3 && options.is_none() && inner.extra_debug {
+    if kind == MK_DEBUG && options.is_none() && inner.extra_debug {
         unsafe {
             libc::printf(c"%s\n".as_ptr(), text_cstr.as_ptr());
         }

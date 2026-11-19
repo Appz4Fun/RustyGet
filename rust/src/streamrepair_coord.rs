@@ -27,10 +27,7 @@ use crate::streamrepair::{
     TargetMessageKind,
 };
 
-const MK_INFO: c_int = 0;
-const MK_WARNING: c_int = 1;
-const MK_ERROR: c_int = 2;
-const MK_DETAIL: c_int = 4;
+use crate::log::{MK_INFO, MK_WARNING, MK_ERROR, MK_DETAIL};
 
 const DM_FORCE: i32 = 2;
 const RS_NONE: i32 = 0;

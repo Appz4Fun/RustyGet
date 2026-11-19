@@ -15,8 +15,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-const MK_INFO: i32 = 0;
-const MK_WARNING: i32 = 1;
+use crate::log::{MK_INFO, MK_WARNING};
 
 /// How long a resolved address list is used before the host is looked up again.
 const DNS_TTL: Duration = Duration::from_secs(10 * 60);

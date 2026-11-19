@@ -885,7 +885,7 @@ unsafe fn hc_move_to_queue(
     let post_total_sec = ints[1];
     let unpack_sec = ints[2];
     let par_sec = ints[3];
-    let move_status = MoveStatus::from_raw(ints[4]);
+    let move_status = MoveStatus::from(ints[4]);
     let live_unpack_sec = ints[6];
     let live_par_sec = ints[7];
     let file_count = ints[5];
@@ -1923,8 +1923,8 @@ pub unsafe fn history_coord_exec(op: c_int, env: *const NzbgetRsHistoryCoordEnv)
                 std::ptr::null_mut(),
                 0,
             );
-            let par_status = NzbParStatus::from_raw(ints[0]);
-            let unpack_status = UnpackStatus::from_raw(ints[1]);
+            let par_status = NzbParStatus::from(ints[0]);
+            let unpack_status = UnpackStatus::from(ints[1]);
             let delete_status = ints[2];
             let parking = ints[3];
             let unpack_cleaned_up = ints[4];
@@ -2214,8 +2214,8 @@ pub unsafe fn history_coord_exec(op: c_int, env: *const NzbgetRsHistoryCoordEnv)
                 let hist_len = ints[1];
                 let kind = ints[2];
                 let delete_status = ints[3];
-                let par_status = NzbParStatus::from_raw(ints[4]);
-                let unpack_status = UnpackStatus::from_raw(ints[5]);
+                let par_status = NzbParStatus::from(ints[4]);
+                let unpack_status = UnpackStatus::from(ints[5]);
                 let parked_count = ints[6];
                 let nzb_ptr = i64s[0] as usize;
                 let hist_name = hc_cstr_bytes(strs[0]).to_vec();
@@ -2620,7 +2620,7 @@ unsafe extern "C" fn hc_native_action_cb(
             nzb_ptr
         }
         13 => {
-            host.history_replace_with_dup(p1, p2, a2 as usize, DupStatus::from_raw(a1));
+            host.history_replace_with_dup(p1, p2, a2 as usize, DupStatus::from(a1));
             0
         }
         14 => {
@@ -2764,7 +2764,7 @@ unsafe extern "C" fn hc_native_action_cb(
             host.nzb_set_int(nzb_ptr, NZB_INT_MARK_STATUS, KS_NONE);
             host.nzb_action(nzb_ptr, NZB_ACT_CLEAR_SCRIPT_STATUSES, 0);
             host.nzb_set_int(nzb_ptr, NZB_INT_PARKED_FILE_COUNT, 0);
-            host.nzb_set_move_status(nzb_ptr, MoveStatus::from_raw(*ints.add(2)));
+            host.nzb_set_move_status(nzb_ptr, MoveStatus::from(*ints.add(2)));
             host.nzb_set_int(nzb_ptr, NZB_INT_REPROCESS, c_int::from(a2 != 0));
             host.nzb_set_str(nzb_ptr, NZB_STR_FINAL_DIR, b"");
             crate::postproc::forget_dead_volume_verdicts(nzb.id);
@@ -3184,6 +3184,14 @@ mod tests {
         assert!(!del(0, NzbParStatus::None, UnpackStatus::Space, true));
         assert!(del(2, NzbParStatus::None, UnpackStatus::None, true));
         assert!(!del(2, NzbParStatus::None, UnpackStatus::None, false));
+        // A stored value that names no status counts as none of them, as the raw value did.
+        assert!(!del(0, NzbParStatus::from(9), UnpackStatus::from(9), true));
+        assert!(!del(
+            0,
+            NzbParStatus::from(-1),
+            UnpackStatus::from(-1),
+            true
+        ));
         assert!(!should_delete_dest_dir(
             false,
             2,
@@ -3192,6 +3200,12 @@ mod tests {
             UnpackStatus::None,
             true
         ));
+    }
+
+    #[test]
+    fn move_to_queue_reset_keeps_unknown_move_status() {
+        let (_, ms) = calc_move_to_queue_reset(true, 0, 0, 0, false, 0, 0, MoveStatus::from(7));
+        assert_eq!(i32::from(ms), 7);
     }
 
     #[test]

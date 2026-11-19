@@ -4185,7 +4185,7 @@ mod tests {
                 direct_rename_status,
                 1,
                 false,
-                NzbParStatus::from_raw(par_status),
+                NzbParStatus::from(par_status),
                 par_size,
             );
             let should_defer = if header != 0 {
@@ -4248,7 +4248,7 @@ mod tests {
                 2,
                 1,
                 false,
-                NzbParStatus::from_raw(par_status),
+                NzbParStatus::from(par_status),
                 par_size,
             ) > 0;
             assert_eq!(has_par2 && !should_defer, par_failed);

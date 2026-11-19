@@ -7598,7 +7598,7 @@ unsafe extern "C" fn active_disk_apply_nzb_cb(
             NZB_INT_PAR_REPAIRED,
             c_int::from(inp.move_status != 0),
         );
-        qh.nzb_set_last_unpack_status(nzb_ptr, UnpackStatus::from_raw(inp.delete_status));
+        qh.nzb_set_last_unpack_status(nzb_ptr, UnpackStatus::from(inp.delete_status));
         qh.nzb_action(nzb_ptr, NZB_ACT_CLEAR_EXTRACTED_ARCHIVES, 0);
         return;
     }
@@ -7649,9 +7649,9 @@ unsafe extern "C" fn active_disk_apply_nzb_cb(
         qh.nzb_set_int(nzb_ptr, NZB_INT_POST_STAGE, inp.post_stage);
     }
     qh.nzb_set_int(nzb_ptr, NZB_INT_FEED_ID, inp.feed_id);
-    qh.nzb_set_par_status(nzb_ptr, NzbParStatus::from_raw(inp.par_status));
-    qh.nzb_set_unpack_status(nzb_ptr, UnpackStatus::from_raw(inp.unpack_status));
-    qh.nzb_set_move_status(nzb_ptr, MoveStatus::from_raw(inp.move_status));
+    qh.nzb_set_par_status(nzb_ptr, NzbParStatus::from(inp.par_status));
+    qh.nzb_set_unpack_status(nzb_ptr, UnpackStatus::from(inp.unpack_status));
+    qh.nzb_set_move_status(nzb_ptr, MoveStatus::from(inp.move_status));
     qh.nzb_set_int(nzb_ptr, NZB_INT_PAR_RENAME_STATUS, inp.par_rename_status);
     qh.nzb_set_int(nzb_ptr, NZB_INT_RAR_RENAME_STATUS, inp.rar_rename_status);
     qh.nzb_set_int(

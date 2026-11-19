@@ -4,6 +4,7 @@
 //! bytes. Times are cut to a C int and divided as C ints, as the C++ did; the
 //! C++ indexed the arrays with negative slots for times before 1970 or after
 //! 2038-01-19 (memory corruption): those writes are skipped here.
+use crate::options::OptStr;
 
 const DAYS_UP_TO_2013_JAN_1: i32 = 15706;
 const DAYS_IN_TWENTY_YEARS: i32 = 366 * 20;
@@ -1604,10 +1605,10 @@ mod runtime {
         let mut ds_env: NzbgetRsDiskStateEnv = std::mem::zeroed();
         ds_env.ctx = (&mut bridge as *mut StatDiskBridge<'_>).cast();
         ds_env.queue_dir = opt_ref
-            .and_then(|o| o.str_cstr(6))
+            .and_then(|o| o.str_cstr(OptStr::QueueDir))
             .map_or(ptr::null(), CStr::as_ptr);
         ds_env.temp_dir = opt_ref
-            .and_then(|o| o.str_cstr(5))
+            .and_then(|o| o.str_cstr(OptStr::TempDir))
             .map_or(ptr::null(), CStr::as_ptr);
         ds_env.line_ending = c"\n".as_ptr();
         ds_env.sep = c_int::from(crate::paths::PATH_SEPARATOR as u8);

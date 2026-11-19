@@ -1,6 +1,7 @@
 //! Shared host callback wrapper for `DupeArticleFallback`, `DupeCoordinator`,
 //! and `QueueCoordinator` orchestration in Rust.
 
+use crate::options::OptStr;
 use std::ffi::{c_char, c_int, c_void, CStr};
 
 mod live_namespace;
@@ -937,11 +938,11 @@ impl QueueSubsysHost {
                     unpack: sc.unpack != 0,
                     parcheck_enabled,
                     cur_time,
-                    queue_dir: o.str_bytes(6).to_vec(),
-                    par_ignore_ext: o.str_bytes(33).to_vec(),
-                    ext_cleanup_disk: o.str_bytes(32).to_vec(),
-                    inter_dir: o.str_bytes(4).to_vec(),
-                    hard_linking_ignore_ext: o.str_bytes(37).to_vec(),
+                    queue_dir: o.str_bytes(OptStr::QueueDir).to_vec(),
+                    par_ignore_ext: o.str_bytes(OptStr::ParIgnoreExt).to_vec(),
+                    ext_cleanup_disk: o.str_bytes(OptStr::ExtCleanupDisk).to_vec(),
+                    inter_dir: o.str_bytes(OptStr::InterDir).to_vec(),
+                    hard_linking_ignore_ext: o.str_bytes(OptStr::HardLinkingIgnoreExt).to_vec(),
                 };
             }
             return GlobalOptsSnap {

@@ -1,5 +1,6 @@
 //! DiskState record serialization and helpers (`daemon/queue/DiskState.cpp`).
 
+use crate::options::OptStr;
 use std::ffi::{c_char, c_int, c_void};
 use std::io::Write;
 
@@ -8204,10 +8205,10 @@ fn run_active_diskstate_exec(
     let opts = crate::options::active_options();
     let qdir_c = opts
         .as_ref()
-        .map(|o| bytes_to_cstring_trunc(o.str_bytes(6)));
+        .map(|o| bytes_to_cstring_trunc(o.str_bytes(OptStr::QueueDir)));
     let tdir_c = opts
         .as_ref()
-        .map(|o| bytes_to_cstring_trunc(o.str_bytes(5)));
+        .map(|o| bytes_to_cstring_trunc(o.str_bytes(OptStr::TempDir)));
     let (has_options, flush_queue, direct_write, continue_partial) = match opts.as_ref() {
         Some(o) => {
             let sc = o.scalars();

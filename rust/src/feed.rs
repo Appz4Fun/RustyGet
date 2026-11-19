@@ -1,6 +1,7 @@
 //! End-to-end Rust implementation of `daemon/feed/` (`FeedInfo`, `FeedItemInfo`,
 //! `FeedFile`, `NzbInfoCreator`, and `FeedCoordinator`).
 
+use crate::options::OptStr;
 use std::ffi::{c_char, c_int, CStr, CString};
 
 fn cstring_lossy(bytes: &[u8]) -> CString {
@@ -1538,8 +1539,8 @@ fn query_runtime_opts(env: &NzbgetRsFeedCoordEnv) -> RuntimeOpts {
             feed_history_days: sc.feed_history,
             flush_queue: sc.flush_queue != 0,
             path_sep: crate::paths::PATH_SEPARATOR as u8,
-            temp_dir: opts.str_bytes(5).to_vec(),
-            queue_dir: opts.str_bytes(6).to_vec(),
+            temp_dir: opts.str_bytes(OptStr::TempDir).to_vec(),
+            queue_dir: opts.str_bytes(OptStr::QueueDir).to_vec(),
         };
     }
     let mut ints = [0 as c_int; 8];

@@ -4,6 +4,7 @@
 //! `DeadPostings`, `NzbFetcher`, `DonorScore`, `DupeIdentity`, `DupeSearch`, and
 //! `Fleet` in `daemon/util/Util.h`.
 
+use crate::options::OptStr;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::ptr;
@@ -611,19 +612,19 @@ fn read_host_opts(host_ctx: *mut c_void, host_cb: DupeHostFn) -> HostOpts {
         now: now_unix_sec(),
         queue_dir: opts
             .as_deref()
-            .map_or_else(Vec::new, |o| o.str_bytes(6).to_vec()),
+            .map_or_else(Vec::new, |o| o.str_bytes(OptStr::QueueDir).to_vec()),
         temp_dir: opts
             .as_deref()
-            .map_or_else(Vec::new, |o| o.str_bytes(5).to_vec()),
+            .map_or_else(Vec::new, |o| o.str_bytes(OptStr::TempDir).to_vec()),
         search_url: opts
             .as_deref()
-            .map_or_else(Vec::new, |o| o.str_bytes(12).to_vec()),
+            .map_or_else(Vec::new, |o| o.str_bytes(OptStr::DupeSearchUrl).to_vec()),
         api_key: opts
             .as_deref()
-            .map_or_else(Vec::new, |o| o.str_bytes(13).to_vec()),
+            .map_or_else(Vec::new, |o| o.str_bytes(OptStr::DupeSearchApiKey).to_vec()),
         ext_cleanup_disk: opts
             .as_deref()
-            .map_or_else(Vec::new, |o| o.str_bytes(32).to_vec()),
+            .map_or_else(Vec::new, |o| o.str_bytes(OptStr::ExtCleanupDisk).to_vec()),
     }
 }
 

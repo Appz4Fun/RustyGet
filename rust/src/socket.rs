@@ -24,7 +24,6 @@ pub const CS_BROKEN: c_int = 4;
 
 pub const CONNECTION_READBUFFER_SIZE: usize = 1024;
 const BSTRING_MAX: usize = 1023;
-const REMOTE_ADDR_CAP: usize = 99; // BString<100>::Capacity()
 
 /// Sets `FD_CLOEXEC` on `fd` if valid (`SetCloseOnExec`).
 pub fn set_close_on_exec(fd: c_int) {
@@ -997,51 +996,32 @@ pub fn remote_addr(host: &[u8], fd: c_int) -> Vec<u8> {
     if !host.is_empty() && host[0] == b'/' {
         return b"-".to_vec();
     }
-    if fd == INVALID_SOCKET {
+    if fd < 0 {
         return Vec::new();
     }
-    extern "C" {
-        fn inet_ntop(
-            af: c_int,
-            src: *const libc::c_void,
-            dst: *mut c_char,
-            size: libc::socklen_t,
-        ) -> *const c_char;
+    // SAFETY: the stream is never dropped, so the caller keeps owning `fd`.
+    let stream = std::mem::ManuallyDrop::new(unsafe {
+        <std::net::TcpStream as std::os::unix::io::FromRawFd>::from_raw_fd(fd)
+    });
+    match stream.peer_addr() {
+        Ok(peer) => format_peer_ip(peer.ip()).into_bytes(),
+        Err(_) => Vec::new(),
     }
-    unsafe {
-        let mut peer: libc::sockaddr_storage = std::mem::zeroed();
-        let mut len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
-        if libc::getpeername(
-            fd,
-            (&mut peer as *mut libc::sockaddr_storage).cast(),
-            &mut len,
-        ) < 0
-        {
-            return Vec::new();
+}
+
+/// Formats a peer IP the way libc `inet_ntop` does. The one difference from
+/// `IpAddr`'s `Display` is the deprecated IPv4-compatible IPv6 form
+/// (`::a.b.c.d`), which `inet_ntop` keeps in dotted form. Authorized-IP
+/// patterns match against this text, so it must not change.
+fn format_peer_ip(ip: std::net::IpAddr) -> String {
+    if let std::net::IpAddr::V6(v6) = ip {
+        let s = v6.segments();
+        if s[..6] == [0; 6] && s[6] != 0 {
+            let [.., a, b, c, d] = v6.octets();
+            return format!("::{a}.{b}.{c}.{d}");
         }
-        let family = peer.ss_family as c_int;
-        let mut buf = [0u8; REMOTE_ADDR_CAP + 1];
-        let src: *const libc::c_void = if family == libc::AF_INET6 {
-            let sin6 = &*(&peer as *const libc::sockaddr_storage).cast::<libc::sockaddr_in6>();
-            (&sin6.sin6_addr as *const libc::in6_addr).cast()
-        } else {
-            let sin = &*(&peer as *const libc::sockaddr_storage).cast::<libc::sockaddr_in>();
-            (&sin.sin_addr as *const libc::in_addr).cast()
-        };
-        let res = inet_ntop(
-            family,
-            src,
-            buf.as_mut_ptr().cast(),
-            REMOTE_ADDR_CAP as libc::socklen_t,
-        );
-        if res.is_null() {
-            return Vec::new();
-        }
-        buf[REMOTE_ADDR_CAP] = 0;
-        CStr::from_bytes_until_nul(&buf)
-            .map(|c| c.to_bytes().to_vec())
-            .unwrap_or_default()
     }
+    ip.to_string()
 }
 
 /// Cancels an active or connecting socket (`Connection::Cancel`).
@@ -1265,6 +1245,26 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn peer_ip_text_matches_inet_ntop() {
+        let cases = [
+            ("192.0.2.1", "192.0.2.1"),
+            ("::1", "::1"),
+            ("::", "::"),
+            ("::5", "::5"),
+            ("::192.0.2.1", "::192.0.2.1"),
+            ("::1:2", "::0.1.0.2"),
+            ("::0.0.1.0", "::100"),
+            ("::ffff:192.0.2.1", "::ffff:192.0.2.1"),
+            ("2001:db8::1", "2001:db8::1"),
+            ("fe80::1:2", "fe80::1:2"),
+        ];
+        for (input, want) in cases {
+            let ip: std::net::IpAddr = input.parse().unwrap();
+            assert_eq!(format_peer_ip(ip), want, "{input}");
+        }
+    }
 
     #[test]
     fn tcp_loopback_bind_connect_accept_readline_recv() {

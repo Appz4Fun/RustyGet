@@ -414,10 +414,7 @@ fn bytes_to_path_buf(bytes: &[u8]) -> PathBuf {
 
 fn format_io_error(err: &std::io::Error) -> Vec<u8> {
     if let Some(code) = err.raw_os_error() {
-        unsafe extern "C" {
-            fn strerror(errnum: std::ffi::c_int) -> *const std::ffi::c_char;
-        }
-        let ptr = unsafe { strerror(code) };
+        let ptr = unsafe { libc::strerror(code) };
         if !ptr.is_null() {
             return unsafe { CStr::from_ptr(ptr) }.to_bytes().to_vec();
         }

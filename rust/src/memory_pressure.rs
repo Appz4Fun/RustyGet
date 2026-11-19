@@ -743,14 +743,10 @@ pub fn limit_malloc_arenas() {
         if std::env::var_os("MALLOC_ARENA_MAX").is_some() {
             return;
         }
-        const M_ARENA_MAX: std::ffi::c_int = -8;
-        unsafe extern "C" {
-            fn mallopt(param: std::ffi::c_int, value: std::ffi::c_int) -> std::ffi::c_int;
-        }
         // SAFETY: mallopt only changes allocator tuning; M_ARENA_MAX applies
         // to arenas created from now on.
         unsafe {
-            mallopt(M_ARENA_MAX, MALLOC_ARENA_LIMIT);
+            libc::mallopt(libc::M_ARENA_MAX, MALLOC_ARENA_LIMIT);
         }
     }
 }
@@ -758,10 +754,7 @@ pub fn limit_malloc_arenas() {
 pub fn trim_heap() {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     unsafe {
-        extern "C" {
-            fn malloc_trim(pad: usize) -> std::ffi::c_int;
-        }
-        malloc_trim(0);
+        libc::malloc_trim(0);
     }
     #[cfg(target_os = "macos")]
     unsafe {

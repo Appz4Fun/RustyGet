@@ -12,7 +12,7 @@ use crate::options::OptStr;
 use crate::postrepair::NzbgetRsParSegment;
 use crate::queuesubsys_host::QueueSubsysHost;
 use crate::status::{
-    DeleteStatus, DirectUnpackStatus, NzbParStatus, ParCheckerStatus, UnpackStatus,
+    DeleteStatus, DirectUnpackStatus, NzbParStatus, ParCheckerStatus, PostStage, UnpackStatus,
 };
 use std::collections::VecDeque;
 use std::ffi::c_int;
@@ -3034,7 +3034,7 @@ fn publish_live_holds(
 fn live_repair_may_start(nzb: &crate::queuesubsys_host::NzbSnap) -> bool {
     // Ordinary postprocessing owns all mutation once its queued stage is taken.
     !nzb.has_post_info
-        || (!nzb.post_working && nzb.post_stage == crate::queuesubsys_host::PT_QUEUED)
+        || (!nzb.post_working && nzb.post_stage == PostStage::Queued)
 }
 
 /// Post-processing waits (boundedly) while live work for `nzb_id` is still
@@ -4957,11 +4957,11 @@ impl NzbgetRsPostJob {
 /// Marks the post-processing of `post_ptr` as finished (`PostInfo::ptFinished`).
 #[cfg(unix)]
 fn finish_post_job(post_ptr: usize) {
-    use crate::queuesubsys_host::{POST_INT_STAGE, POST_INT_WORKING, PT_FINISHED};
+    use crate::queuesubsys_host::POST_INT_WORKING;
     let Some(host) = crate::ffi::queue_host() else {
         return;
     };
-    host.post_set_int(post_ptr, POST_INT_STAGE, PT_FINISHED);
+    host.post_set_stage(post_ptr, PostStage::Finished);
     host.post_set_int(post_ptr, POST_INT_WORKING, 0);
 }
 
@@ -5267,18 +5267,18 @@ mod live_hold_tests {
 
     #[test]
     fn normal_postprocessing_takeover_prevents_a_late_live_retry() {
-        use crate::queuesubsys_host::{NzbSnap, PT_LOADING_PARS, PT_QUEUED, PT_UNPACKING};
+        use crate::queuesubsys_host::NzbSnap;
         let mut nzb = NzbSnap::default();
         assert!(live_repair_may_start(&nzb));
         nzb.has_post_info = true;
-        nzb.post_stage = PT_QUEUED;
+        nzb.post_stage = PostStage::Queued;
         assert!(live_repair_may_start(&nzb));
         nzb.post_working = true;
         assert!(!live_repair_may_start(&nzb));
         nzb.post_working = false;
-        nzb.post_stage = PT_LOADING_PARS;
+        nzb.post_stage = PostStage::LoadingPars;
         assert!(!live_repair_may_start(&nzb));
-        nzb.post_stage = PT_UNPACKING;
+        nzb.post_stage = PostStage::Unpacking;
         assert!(!live_repair_may_start(&nzb));
     }
 

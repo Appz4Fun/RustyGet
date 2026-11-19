@@ -413,7 +413,8 @@ fn live_capture_final_busy_retries_real_preparation_then_gates_ram_copy() {
 
 #[test]
 fn live_capture_current_policy_root_and_ordinary_takeover_are_required() {
-    use crate::queuesubsys_host::{NzbSnap, PT_LOADING_PARS, PT_QUEUED};
+    use crate::queuesubsys_host::NzbSnap;
+    use crate::status::PostStage;
     let root = Path::new("/capture-root");
     let mut current = NzbSnap {
         dest_dir: b"/capture-root".to_vec(),
@@ -437,12 +438,12 @@ fn live_capture_current_policy_root_and_ordinary_takeover_are_required() {
     assert!(!matches(&current, true));
     current.many_dupe_files = false;
     current.has_post_info = true;
-    current.post_stage = PT_QUEUED;
+    current.post_stage = PostStage::Queued;
     assert!(matches(&current, true));
     current.post_working = true;
     assert!(!matches(&current, true));
     current.post_working = false;
-    current.post_stage = PT_LOADING_PARS;
+    current.post_stage = PostStage::LoadingPars;
     assert!(!matches(&current, true));
 }
 

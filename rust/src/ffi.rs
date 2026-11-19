@@ -5502,7 +5502,7 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                     emit_rpc_nzb(&qh, np, 0, |n, _, f, prms, scrs, sts| {
                         post_ptr = n.post_info_ptr;
                         let has_post = post_ptr != 0;
-                        let post_stage = if has_post { n.post_stage } else { 0 };
+                        let post_stage = if has_post { i32::from(n.post_stage) } else { 0 };
                         let flags = (if has_post { 1 } else { 0 })
                             | ((post_stage & 0xff) << 4)
                             | ((i32::from(n.direct_unpack_status) & 0xff) << 12)
@@ -5557,7 +5557,7 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                             emit_ctx,
                             6,
                             outer.id,
-                            pi.stage,
+                            pi.stage.into(),
                             pi.file_progress,
                             0,
                             0,
@@ -6223,7 +6223,7 @@ pub(crate) unsafe fn serve_binrpc_conn(conn: &crate::net::NzbgetRsConn) {
                     *nr_entries = nr_entries.wrapping_add(1);
                     let entry = crate::binrpc::PostEntry {
                         id: outer_id,
-                        stage: pi.stage as u32,
+                        stage: i32::from(pi.stage) as u32,
                         stage_progress: pi.stage_progress as u32,
                         file_progress: pi.file_progress as u32,
                         start_time: if pi.start_time != 0 {

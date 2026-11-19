@@ -4,7 +4,7 @@
 use crate::options::OptStr;
 use crate::status::{
     CleanupStatus, DeleteStatus, DirectRenameStatus, DirectUnpackStatus, DupStatus, DupeMode,
-    MarkStatus, MoveStatus, NzbParStatus, ScriptStatus, UnpackStatus, UrlStatus,
+    MarkStatus, MoveStatus, NzbParStatus, PostStage, ScriptStatus, UnpackStatus, UrlStatus,
 };
 use std::ffi::{c_char, c_int, c_void, CStr};
 
@@ -55,19 +55,6 @@ pub(crate) const NK_URL: i32 = 1;
 
 pub(crate) const RS_NONE: i32 = 0;
 
-pub(crate) const PT_QUEUED: i32 = 0;
-pub(crate) const PT_LOADING_PARS: i32 = 1;
-pub(crate) const PT_VERIFYING_REPAIRED: i32 = 4;
-pub(crate) const PT_PAR_RENAMING: i32 = 5;
-pub(crate) const PT_RAR_RENAMING: i32 = 6;
-pub(crate) const PT_UNPACKING: i32 = 7;
-pub(crate) const PT_CLEANING_UP: i32 = 8;
-pub(crate) const PT_MOVING: i32 = 9;
-pub(crate) const PT_POST_UNPACK_RENAMING: i32 = 10;
-pub(crate) const PT_EXECUTING_SCRIPT: i32 = 11;
-pub(crate) const PT_FINISHED: i32 = 12;
-pub(crate) const PT_POST_DOWNLOAD_RENAMING: i32 = 13;
-pub(crate) const PT_STREAM_REPAIRING: i32 = 14;
 
 pub(crate) const DH_NONE: i32 = 0;
 pub(crate) const DH_REDOWNLOAD_MANUAL: i32 = 1;
@@ -490,7 +477,7 @@ pub(crate) struct NzbSnap {
     pub dupe_no_par_noted: bool,
     pub has_post_info: bool,
     pub post_working: bool,
-    pub post_stage: i32,
+    pub post_stage: PostStage,
     pub has_live_repair_thread: bool,
     pub live_repair_thread_ptr: usize,
     pub has_unpack_thread: bool,
@@ -689,7 +676,7 @@ pub(crate) struct StreamRepairJobDetailSnap {
 pub(crate) struct PostSnap {
     pub ptr: usize,
     pub nzb_ptr: usize,
-    pub stage: i32,
+    pub stage: PostStage,
     pub working: bool,
     pub deleted: bool,
     pub request_par_check: bool,
@@ -2132,7 +2119,7 @@ impl QueueSubsysHost {
                 dupe_no_par_noted: ints[24] != 0,
                 has_post_info: ints[25] != 0,
                 post_working: ints[26] != 0,
-                post_stage: ints[27],
+                post_stage: PostStage::from(ints[27]),
                 has_live_repair_thread: ints[28] != 0,
                 live_repair_thread_ptr: i64s[19] as usize,
                 has_unpack_thread: ints[68] != 0,
@@ -3878,7 +3865,7 @@ impl QueueSubsysHost {
         PostSnap {
             ptr: post_ptr,
             nzb_ptr: i64s[1] as usize,
-            stage: ints[0],
+            stage: PostStage::from(ints[0]),
             working: ints[1] != 0,
             deleted: ints[2] != 0,
             request_par_check: ints[3] != 0,
@@ -3910,6 +3897,10 @@ impl QueueSubsysHost {
             return;
         }
         self.post_op(post_ptr, 1, OpArgs::NONE.a2(field).p2(val as usize));
+    }
+
+    pub fn post_set_stage(&self, post_ptr: usize, stage: PostStage) {
+        self.post_set_int(post_ptr, POST_INT_STAGE, stage.into());
     }
 
     pub fn post_set_start_time(&self, post_ptr: usize, start_time: i64) {

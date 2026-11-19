@@ -3,8 +3,8 @@
 use crate::cstr;
 use crate::options::OptStr;
 use crate::status::{
-    DeleteStatus, DirectUnpackStatus, MarkStatus, MoveStatus, NzbParStatus, ScriptStatus,
-    UnpackStatus, UrlStatus,
+    DeleteStatus, DirectUnpackStatus, MarkStatus, MoveStatus, NzbParStatus, PostStage,
+    ScriptStatus, UnpackStatus, UrlStatus,
 };
 use std::ffi::{c_char, c_int, c_void};
 use std::io::Write;
@@ -1472,14 +1472,15 @@ pub fn parse_unpack_state_lines(
 }
 
 /// `DiskState::LoadNzbInfo` post-stage migration and transient stage clamp.
-pub fn normalize_post_stage(mut post_stage: i32, format_version: i32, pt_finished: i32) -> i32 {
+pub fn normalize_post_stage(mut post_stage: i32, format_version: i32) -> i32 {
     if format_version < 59 && post_stage == 6 {
         post_stage += 1;
     } else if format_version < 59 && post_stage > 6 {
         post_stage += 2;
     }
-    if post_stage > pt_finished {
-        post_stage = pt_finished;
+    let finished = i32::from(PostStage::Finished);
+    if post_stage > finished {
+        post_stage = finished;
     }
     post_stage
 }
@@ -3027,7 +3028,6 @@ pub unsafe fn load_nzb_info(
     infile_ctx: *mut std::ffi::c_void,
     read_line_cb: ReadLineFn,
     format_version: c_int,
-    pt_finished: c_int,
     target_ctx: *mut std::ffi::c_void,
     on_loaded_cb: unsafe extern "C" fn(
         ctx: *mut std::ffi::c_void,
@@ -3111,7 +3111,7 @@ pub unsafe fn load_nzb_info(
     let (has_post_info, post_stage) = if raw_post_stage > 0 {
         (
             1,
-            normalize_post_stage(raw_post_stage, format_version, pt_finished),
+            normalize_post_stage(raw_post_stage, format_version),
         )
     } else {
         (0, 0)
@@ -4114,7 +4114,6 @@ pub struct NzbgetRsDiskStateEnv {
     pub flush_queue: c_int,
     pub direct_write: c_int,
     pub continue_partial: c_int,
-    pub pt_finished: c_int,
     pub a1: c_int,
     pub a2: c_int,
     pub a3: c_int,
@@ -4923,7 +4922,6 @@ unsafe fn load_nzb_info_into_target(
             r.as_ctx(),
             RsStateReader::read_line_cb,
             format_version,
-            env.pt_finished,
             (env as *const NzbgetRsDiskStateEnv).cast_mut().cast(),
             on_loaded,
         )
@@ -7299,7 +7297,7 @@ unsafe extern "C" fn active_disk_export_nzb_cb(
         category: cat_c.as_ptr(),
         priority: sn.priority,
         has_post_info: c_int::from(sn.has_post_info),
-        post_stage: sn.post_stage,
+        post_stage: sn.post_stage.into(),
         delete_paused: c_int::from(sn.delete_paused),
         many_dupe_files: c_int::from(sn.many_dupe_files),
         feed_id: sn.feed_id,
@@ -8230,7 +8228,6 @@ fn run_active_diskstate_exec(
         flush_queue,
         direct_write,
         continue_partial,
-        pt_finished: crate::queuesubsys_host::PT_FINISHED,
         a1,
         a2,
         a3,
@@ -8924,9 +8921,9 @@ mod tests {
             ),
             Some((0, true, true, 2))
         );
-        assert_eq!(normalize_post_stage(6, 58, 12), 7);
-        assert_eq!(normalize_post_stage(7, 58, 12), 9);
-        assert_eq!(normalize_post_stage(14, 64, 12), 12);
+        assert_eq!(normalize_post_stage(6, 58), 7);
+        assert_eq!(normalize_post_stage(7, 58), 9);
+        assert_eq!(normalize_post_stage(14, 64), 12);
     }
 
     #[test]

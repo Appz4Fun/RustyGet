@@ -648,6 +648,10 @@ impl ActiveStreamingSession {
 struct LiveParTime {
     verify: std::time::Duration,
     repair: std::time::Duration,
+    /// Whole seconds of par time (verify + repair) and of repair already moved into the
+    /// job's saved times by queue checkpoints.
+    taken_par: u64,
+    taken_repair: u64,
 }
 
 static LIVE_PAR_TIME: LazyLock<Mutex<HashMap<i32, LiveParTime>>> =
@@ -711,8 +715,15 @@ pub(crate) fn streaming_session_take_par_secs(nzb_id: i32) -> (i32, i32) {
         .unwrap_or_else(|e| e.into_inner())
         .remove(&nzb_id)
         .unwrap_or_default();
-    let secs = |d: std::time::Duration| d.as_secs_f64().round().min(i32::MAX as f64) as i32;
-    (secs(time.verify + time.repair), secs(time.repair))
+    let secs = |d: std::time::Duration, taken: u64| {
+        (d.as_secs_f64().round() as u64)
+            .saturating_sub(taken)
+            .min(i32::MAX as u64) as i32
+    };
+    (
+        secs(time.verify + time.repair, time.taken_par),
+        secs(time.repair, time.taken_repair),
+    )
 }
 
 /// Whether job `nzb_id` has live PAR time not yet in its times.
@@ -721,7 +732,7 @@ pub(crate) fn live_par_time_pending(nzb_id: i32) -> bool {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .get(&nzb_id)
-        .is_some_and(|time| time.verify + time.repair >= std::time::Duration::from_secs(1))
+        .is_some_and(|time| (time.verify + time.repair).as_secs() > time.taken_par)
 }
 
 /// Takes only the whole seconds of job `nzb_id`'s live PAR time (par time, which
@@ -732,14 +743,13 @@ pub(crate) fn streaming_session_take_whole_par_secs(nzb_id: i32) -> (i32, i32) {
     let Some(time) = times.get_mut(&nzb_id) else {
         return (0, 0);
     };
-    let whole = |d: std::time::Duration| d.as_secs().min(i32::MAX as u64);
-    let par = whole(time.verify + time.repair);
-    let repair = whole(time.repair).min(par);
-    // The par time keeps its exact fraction; the repair part of it never exceeds it.
-    let rest = (time.verify + time.repair) - std::time::Duration::from_secs(par);
-    time.repair = (time.repair - std::time::Duration::from_secs(repair)).min(rest);
-    time.verify = rest - time.repair;
-    (par as i32, repair as i32)
+    // Measured time is never reduced; only the whole seconds not yet taken move, so the
+    // repair seconds can never pass the par seconds and no fraction is lost.
+    let par = (time.verify + time.repair).as_secs().saturating_sub(time.taken_par);
+    let repair = time.repair.as_secs().saturating_sub(time.taken_repair);
+    time.taken_par += par;
+    time.taken_repair += repair;
+    (par.min(i32::MAX as u64) as i32, repair.min(i32::MAX as u64) as i32)
 }
 
 /// Charges live PAR time to job `nzb_id` as if it had been measured.
@@ -4469,9 +4479,14 @@ mod tests {
         // 0.3 s kept; 2.3 s more of which 0.9 s repair: 2.6 s, 1.2 s repair.
         live_par_time_add_for_test(nzb_id, 1_400, 900);
         assert_eq!(streaming_session_take_whole_par_secs(nzb_id), (2, 1));
-        // The remaining 0.6 s settles at history: 2 + 2 + 1 = 5 s for 4.6 s measured.
-        assert_eq!(streaming_session_take_par_secs(nzb_id), (1, 0));
+        // The rest settles at history, rounded: 5 s par for 4.6 s, 2 s repair for 1.5 s.
+        assert_eq!(streaming_session_take_par_secs(nzb_id), (1, 1));
         assert_eq!(streaming_session_take_whole_par_secs(nzb_id), (0, 0));
+        // A repair fraction larger than the par fraction is kept, not folded into verify:
+        // 3.7 s repair + 0.5 s verify checkpoints 4 s / 3 s and settles 0 s / 1 s.
+        live_par_time_add_for_test(nzb_id, 500, 3_700);
+        assert_eq!(streaming_session_take_whole_par_secs(nzb_id), (4, 3));
+        assert_eq!(streaming_session_take_par_secs(nzb_id), (0, 1));
     }
 
     /// Live PAR work is charged to the job's par time, once, nested calls included once,
@@ -4559,6 +4574,7 @@ mod tests {
             LiveParTime {
                 verify: std::time::Duration::from_millis(1400),
                 repair: std::time::Duration::from_millis(600),
+                ..Default::default()
             },
         );
         assert_eq!(streaming_session_take_par_secs(nzb_id), (2, 1));

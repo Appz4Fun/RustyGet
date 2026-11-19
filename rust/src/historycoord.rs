@@ -128,7 +128,8 @@ pub fn calc_move_to_queue_reset(
     } else {
         move_status
     };
-    (new_post_total_sec, new_move_status)
+    // Whole-second rounding of the stage times can pass PostTotalSec by a second.
+    (new_post_total_sec.max(0), new_move_status)
 }
 
 /// `HistoryCoordinator::HistoryRetry` log action labels.

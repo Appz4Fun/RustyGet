@@ -226,6 +226,20 @@ status_enum! {
     }
 }
 
+status_enum! {
+    /// Why a download was deleted (NzbInfo::EDeleteStatus).
+    DeleteStatus {
+        None = 0,
+        Manual = 1,
+        Health = 2,
+        Dupe = 3,
+        Bad = 4,
+        Good = 5,
+        Copy = 6,
+        Scan = 7,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,5 +329,15 @@ mod tests {
         assert_eq!(i32::from(ScriptStatus::Success), 2);
         assert_eq!(UrlStatus::from(7), UrlStatus::Other(7));
         assert_eq!(ScriptStatus::from(-1), ScriptStatus::Other(-1));
+    }
+
+    #[test]
+    fn delete_status_round_trip() {
+        round_trip(DeleteStatus::ALL);
+        assert_eq!(i32::from(DeleteStatus::Health), 2);
+        assert_eq!(i32::from(DeleteStatus::Copy), 6);
+        assert_eq!(i32::from(DeleteStatus::Scan), 7);
+        assert_eq!(DeleteStatus::from(8), DeleteStatus::Other(8));
+        assert!(DeleteStatus::None < DeleteStatus::Manual);
     }
 }

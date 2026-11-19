@@ -2,7 +2,9 @@
 //! `CompletedFile`, `ServerStatList`, and `ScriptStatusList`
 //! (`daemon/queue/DownloadInfo.cpp`).
 
-use crate::status::{MarkStatus, MoveStatus, NzbParStatus, ScriptStatus, UnpackStatus, UrlStatus};
+use crate::status::{
+    DeleteStatus, MarkStatus, MoveStatus, NzbParStatus, ScriptStatus, UnpackStatus, UrlStatus,
+};
 use std::ffi::CStr;
 
 #[inline]
@@ -359,7 +361,7 @@ pub fn calc_active_downloads_sec(
 #[allow(clippy::too_many_arguments)]
 pub fn is_dupe_success(
     mark_status: MarkStatus,
-    delete_status: i32,
+    delete_status: DeleteStatus,
     par_status: NzbParStatus,
     unpack_status: UnpackStatus,
     url_status: UrlStatus,
@@ -370,7 +372,7 @@ pub fn is_dupe_success(
 ) -> bool {
     let failure = mark_status != MarkStatus::Success
         && mark_status != MarkStatus::Good
-        && (delete_status != DELETE_NONE
+        && (delete_status != DeleteStatus::None
             || mark_status == MarkStatus::Bad
             || par_status == NzbParStatus::Failure
             || unpack_status == UnpackStatus::Failure
@@ -395,7 +397,7 @@ pub fn is_dupe_success(
 pub fn make_text_status_cstr(
     kind: i32,
     mark_status: MarkStatus,
-    delete_status: i32,
+    delete_status: DeleteStatus,
     par_status: NzbParStatus,
     unpack_status: UnpackStatus,
     move_status: MoveStatus,
@@ -411,19 +413,19 @@ pub fn make_text_status_cstr(
             return b"SUCCESS/GOOD\0";
         } else if mark_status == MarkStatus::Success {
             return b"SUCCESS/MARK\0";
-        } else if delete_status == DELETE_HEALTH {
+        } else if delete_status == DeleteStatus::Health {
             return b"FAILURE/HEALTH\0";
-        } else if delete_status == DELETE_MANUAL {
+        } else if delete_status == DeleteStatus::Manual {
             return b"DELETED/MANUAL\0";
-        } else if delete_status == DELETE_DUPE {
+        } else if delete_status == DeleteStatus::Dupe {
             return b"DELETED/DUPE\0";
-        } else if delete_status == DELETE_BAD {
+        } else if delete_status == DeleteStatus::Bad {
             return b"FAILURE/BAD\0";
-        } else if delete_status == DELETE_GOOD {
+        } else if delete_status == DeleteStatus::Good {
             return b"DELETED/GOOD\0";
-        } else if delete_status == DELETE_COPY {
+        } else if delete_status == DeleteStatus::Copy {
             return b"DELETED/COPY\0";
-        } else if delete_status == DELETE_SCAN {
+        } else if delete_status == DeleteStatus::Scan {
             return b"FAILURE/SCAN\0";
         } else if par_status == NzbParStatus::Failure {
             return b"FAILURE/PAR\0";
@@ -470,11 +472,11 @@ pub fn make_text_status_cstr(
             return b"WARNING/SCRIPT\0";
         }
     } else if kind == NZB_KIND_URL {
-        if delete_status == DELETE_MANUAL {
+        if delete_status == DeleteStatus::Manual {
             return b"DELETED/MANUAL\0";
-        } else if delete_status == DELETE_DUPE {
+        } else if delete_status == DeleteStatus::Dupe {
             return b"DELETED/DUPE\0";
-        } else if delete_status == DELETE_GOOD {
+        } else if delete_status == DeleteStatus::Good {
             return b"DELETED/GOOD\0";
         } else {
             return match url_status {

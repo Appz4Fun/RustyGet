@@ -11,7 +11,7 @@
 #![allow(non_snake_case)]
 
 use crate::options::OptStr;
-use crate::status::ScriptStatus;
+use crate::status::{DeleteStatus, ScriptStatus};
 use std::collections::BTreeSet;
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::sync::Mutex;
@@ -2442,7 +2442,7 @@ pub(crate) unsafe fn host_coll_snapshot(
         .is_some_and(|o| o.scalars().health_check == HEALTH_CHECK_DUPE);
     let dupe_success = crate::downloadinfo::is_dupe_success(
         crate::status::MarkStatus::from(s.markStatus),
-        s.deleteStatus,
+        DeleteStatus::from(s.deleteStatus),
         crate::status::NzbParStatus::from(s.parStatus),
         crate::status::UnpackStatus::from(s.unpackStatus),
         crate::status::UrlStatus::from(s.urlStatus),
@@ -2584,7 +2584,7 @@ pub(crate) unsafe fn host_coll_snapshot(
         1 | 2 => crate::downloadinfo::make_text_status_cstr(
             s.kind,
             crate::status::MarkStatus::from(s.markStatus),
-            s.deleteStatus,
+            DeleteStatus::from(s.deleteStatus),
             crate::status::NzbParStatus::from(s.parStatus),
             crate::status::UnpackStatus::from(s.unpackStatus),
             crate::status::MoveStatus::from(s.moveStatus),

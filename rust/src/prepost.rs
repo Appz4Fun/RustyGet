@@ -4,7 +4,9 @@
 //! workflows, PAR/stream-repair coverage decisions, job scheduling strategies, stage
 //! transitions, pause-state management, and direct-unpack triggers into a single module.
 
-use crate::status::{CleanupStatus, DupeMode, MoveStatus, NzbParStatus, UnpackStatus};
+use crate::status::{
+    CleanupStatus, DeleteStatus, DupeMode, MoveStatus, NzbParStatus, UnpackStatus,
+};
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
@@ -63,20 +65,18 @@ pub fn classify_file_event(
     is_file_completed: bool,
     is_file_deleted: bool,
     dupe_deleted: bool,
-    delete_status: i32,
-    ds_none: i32,
-    ds_health: i32,
+    delete_status: DeleteStatus,
     has_post_info: bool,
     download_completed_ignore_paused: bool,
     download_completed_all: bool,
 ) -> i32 {
     if (is_file_completed || dupe_deleted)
-        && delete_status != ds_health
+        && delete_status != DeleteStatus::Health
         && !has_post_info
         && download_completed_ignore_paused
     {
         1
-    } else if (is_file_deleted || (is_file_completed && delete_status > ds_none))
+    } else if (is_file_deleted || (is_file_completed && delete_status > DeleteStatus::None))
         && !has_post_info
         && download_completed_all
     {
@@ -93,8 +93,7 @@ pub fn should_complete_after_direct_rename(
     direct_rename_status: i32,
     ts_success: i32,
     has_post_info: bool,
-    delete_status: i32,
-    ds_none: i32,
+    delete_status: DeleteStatus,
     completed_not_empty: bool,
     download_completed: bool,
     raw_article: bool,
@@ -104,7 +103,7 @@ pub fn should_complete_after_direct_rename(
     !is_stopped
         && direct_rename_status == ts_success
         && !has_post_info
-        && delete_status == ds_none
+        && delete_status == DeleteStatus::None
         && completed_not_empty
         && download_completed
         && !raw_article
@@ -122,9 +121,7 @@ pub fn classify_nzb_downloaded_entry(
     skip_script_processing: bool,
     skip_disk_write: bool,
     opt_skip_write: bool,
-    delete_status: i32,
-    ds_health: i32,
-    ds_bad: i32,
+    delete_status: DeleteStatus,
     has_post_info: bool,
     opt_raw_article: bool,
     par_status: NzbParStatus,
@@ -135,7 +132,8 @@ pub fn classify_nzb_downloaded_entry(
     if skip_script_processing && (skip_disk_write || opt_skip_write) {
         return (1, false, false);
     }
-    let enqueue_deleted = delete_status == ds_health || delete_status == ds_bad;
+    let enqueue_deleted =
+        delete_status == DeleteStatus::Health || delete_status == DeleteStatus::Bad;
     if !has_post_info && !opt_raw_article && !opt_skip_write && !skip_disk_write {
         let set_par_skipped = par_status == NzbParStatus::None
             && par_check_opt != pc_always
@@ -148,19 +146,13 @@ pub fn classify_nzb_downloaded_entry(
 
 /// Resolve delete status and route in `PrePostProcessor::NzbDeleted`:
 /// Returns `(new_delete_status, call_nzb_downloaded)`.
-pub fn resolve_nzb_deleted_route(
-    delete_status: i32,
-    ds_none: i32,
-    ds_manual: i32,
-    ds_health: i32,
-    ds_bad: i32,
-) -> (i32, bool) {
-    let new_status = if delete_status == ds_none {
-        ds_manual
+pub fn resolve_nzb_deleted_route(delete_status: DeleteStatus) -> (DeleteStatus, bool) {
+    let new_status = if delete_status == DeleteStatus::None {
+        DeleteStatus::Manual
     } else {
         delete_status
     };
-    let call_downloaded = new_status == ds_health || new_status == ds_bad;
+    let call_downloaded = new_status == DeleteStatus::Health || new_status == DeleteStatus::Bad;
     (new_status, call_downloaded)
 }
 
@@ -175,24 +167,20 @@ pub fn eval_nzb_completed(
     dupe_check: bool,
     dupe_mode: DupeMode,
     fails_over: bool,
-    delete_status: i32,
-    ds_none: i32,
-    ds_health: i32,
-    ds_bad: i32,
-    ds_scan: i32,
-    ds_copy: i32,
+    delete_status: DeleteStatus,
 ) -> (bool, bool, bool, bool) {
     let download_dupe = dupe_hint == dh_redownload_auto;
     let add_to_history = keep_history > 0 && !avoid_history;
     let call_dupe_completed = dupe_check
         && (dupe_mode != DupeMode::Force || fails_over)
-        && (delete_status == ds_none
-            || delete_status == ds_health
-            || delete_status == ds_bad
-            || delete_status == ds_scan
-            || (delete_status == ds_copy && download_dupe));
-    let enqueue_deleted_script =
-        delete_status > ds_none && delete_status != ds_health && delete_status != ds_bad;
+        && (delete_status == DeleteStatus::None
+            || delete_status == DeleteStatus::Health
+            || delete_status == DeleteStatus::Bad
+            || delete_status == DeleteStatus::Scan
+            || (delete_status == DeleteStatus::Copy && download_dupe));
+    let enqueue_deleted_script = delete_status > DeleteStatus::None
+        && delete_status != DeleteStatus::Health
+        && delete_status != DeleteStatus::Bad;
     let need_save = true;
     (
         add_to_history,
@@ -208,13 +196,12 @@ pub fn eval_nzb_completed(
 /// - `2`: standard cleanup (delete completed files, `.out.tmp` files, and empty dirs)
 pub fn classify_delete_cleanup_mode(
     cleanup_disk: bool,
-    delete_status: i32,
-    ds_dupe: i32,
+    delete_status: DeleteStatus,
     parking: bool,
     skip_disk_write: bool,
     opt_skip_write: bool,
 ) -> i32 {
-    if cleanup_disk || (delete_status == ds_dupe && !parking) {
+    if cleanup_disk || (delete_status == DeleteStatus::Dupe && !parking) {
         if skip_disk_write || opt_skip_write {
             1
         } else {
@@ -644,14 +631,14 @@ pub fn eval_want_unpack_and_rar_rename(
     has_unpack_param: bool,
     unpack_param_val: &[u8],
     unpack_status: UnpackStatus,
-    delete_status: i32,
-    ds_none: i32,
+    delete_status: DeleteStatus,
     rar_rename_status: i32,
     rs_none: i32,
     opt_rar_rename: bool,
 ) -> (bool, bool, bool) {
     let want_unpack = !(has_unpack_param && unpack_param_val.eq_ignore_ascii_case(b"no"));
-    let unpack = want_unpack && unpack_status == UnpackStatus::None && delete_status == ds_none;
+    let unpack =
+        want_unpack && unpack_status == UnpackStatus::None && delete_status == DeleteStatus::None;
     let start_rar_rename = rar_rename_status == rs_none && unpack && opt_rar_rename;
     (want_unpack, unpack, start_rar_rename)
 }
@@ -661,7 +648,7 @@ pub fn eval_want_unpack_and_rar_rename(
 pub fn eval_post_stages(
     want_unpack: bool,
     unpack_status: UnpackStatus,
-    delete_status: i32,
+    delete_status: DeleteStatus,
     par_status: NzbParStatus,
     cleanup_status: CleanupStatus,
     has_ext_cleanup_disk: bool,
@@ -707,7 +694,7 @@ pub fn eval_post_stages(
 pub fn eval_post_stages_in_inter(
     want_unpack: bool,
     unpack_status: UnpackStatus,
-    delete_status: i32,
+    delete_status: DeleteStatus,
     par_status: NzbParStatus,
     cleanup_status: CleanupStatus,
     has_ext_cleanup_disk: bool,
@@ -722,10 +709,10 @@ pub fn eval_post_stages_in_inter(
     opt_rename_after_unpack: bool,
     post_unpack_renaming_status: i32,
 ) -> RsPostStageDecision {
-    const DS_NONE: i32 = 0;
     const NS_SUCCESS: i32 = 3;
 
-    let mut unpack = want_unpack && unpack_status == UnpackStatus::None && delete_status == DS_NONE;
+    let mut unpack =
+        want_unpack && unpack_status == UnpackStatus::None && delete_status == DeleteStatus::None;
     let par_failed = par_status == NzbParStatus::Failure
         || par_status == NzbParStatus::RepairPossible
         || par_status == NzbParStatus::Manual;
@@ -750,7 +737,7 @@ pub fn eval_post_stages_in_inter(
         && unpack_status != UnpackStatus::Password
         && par_status != NzbParStatus::Failure
         && par_status != NzbParStatus::Manual
-        && delete_status == DS_NONE
+        && delete_status == DeleteStatus::None
         && !((unpack_status == UnpackStatus::None || unpack_status == UnpackStatus::Skipped)
             && (par_status == NzbParStatus::None || par_status == NzbParStatus::Skipped)
             && health < 1000)
@@ -982,13 +969,12 @@ pub(crate) fn delete_cleanup_host(
     opts: &crate::queuesubsys_host::GlobalOptsSnap,
     nzb: &crate::queuesubsys_host::NzbSnap,
 ) {
-    use crate::queuesubsys_host::{c_bytes, DS_DUPE, MK_DETAIL, MK_ERROR};
+    use crate::queuesubsys_host::{c_bytes, MK_DETAIL, MK_ERROR};
     use std::ffi::{CStr, CString};
 
     let mode = classify_delete_cleanup_mode(
         nzb.cleanup_disk,
-        nzb.delete_status,
-        DS_DUPE,
+        DeleteStatus::from(nzb.delete_status),
         nzb.parking,
         nzb.skip_disk_write,
         opts.skip_write,
@@ -1433,7 +1419,7 @@ impl NzbgetRsPrePostProcessor {
         dq_ptr: usize,
         nzb_ptr: usize,
     ) {
-        use crate::queuesubsys_host::{DS_NONE, MK_INFO, TS_SUCCESS};
+        use crate::queuesubsys_host::{MK_INFO, TS_SUCCESS};
 
         let opts = host.opts();
         let nzb = host.nzb_snap(nzb_ptr, false);
@@ -1443,8 +1429,7 @@ impl NzbgetRsPrePostProcessor {
             nzb.direct_rename_status,
             TS_SUCCESS,
             nzb.has_post_info,
-            nzb.delete_status,
-            DS_NONE,
+            DeleteStatus::from(nzb.delete_status),
             completed_not_empty,
             nzb.is_download_completed,
             opts.raw_article,
@@ -1466,8 +1451,8 @@ impl NzbgetRsPrePostProcessor {
         nzb_ptr: usize,
     ) {
         use crate::queuesubsys_host::{
-            DS_HEALTH, MK_INFO, NZB_ACT_ENTER_POST_PROCESS, NZB_INT_CHANGED, NZB_INT_CLEANUP_DISK,
-            PC_FORCE, POST_INT_WORKING,
+            MK_INFO, NZB_ACT_ENTER_POST_PROCESS, NZB_INT_CHANGED, NZB_INT_CLEANUP_DISK, PC_FORCE,
+            POST_INT_WORKING,
         };
         use std::sync::atomic::Ordering;
 
@@ -1477,16 +1462,13 @@ impl NzbgetRsPrePostProcessor {
 
         let opts = host.opts();
         let nzb = host.nzb_snap(nzb_ptr, false);
-        const DS_BAD: i32 = 4;
         const PC_ALWAYS: i32 = 1;
 
         let (route, _, set_par_skipped) = classify_nzb_downloaded_entry(
             nzb.skip_script_processing,
             nzb.skip_disk_write,
             opts.skip_write,
-            nzb.delete_status,
-            DS_HEALTH,
-            DS_BAD,
+            DeleteStatus::from(nzb.delete_status),
             nzb.has_post_info,
             opts.raw_article,
             nzb.par_status,
@@ -1574,8 +1556,7 @@ impl NzbgetRsPrePostProcessor {
         use crate::queuesubsys_host::{
             ASPECT_FILE_COMPLETED, ASPECT_FILE_DELETED, ASPECT_NZB_ADDED, ASPECT_NZB_DELETED,
             ASPECT_NZB_FOUND, ASPECT_NZB_NAMED, ASPECT_URL_ADDED, ASPECT_URL_DELETED,
-            ASPECT_URL_FAILED, ASPECT_URL_FOUND, DS_HEALTH, DS_NONE, MK_INFO, PT_LOADING_PARS,
-            PT_VERIFYING_REPAIRED,
+            ASPECT_URL_FAILED, ASPECT_URL_FOUND, MK_INFO, PT_LOADING_PARS, PT_VERIFYING_REPAIRED,
         };
 
         if host.prepost_is_stopped(self.owner) {
@@ -1641,9 +1622,7 @@ impl NzbgetRsPrePostProcessor {
                 action == ASPECT_FILE_COMPLETED,
                 action == ASPECT_FILE_DELETED,
                 file.dupe_deleted,
-                file_nzb.delete_status,
-                DS_NONE,
-                DS_HEALTH,
+                DeleteStatus::from(file_nzb.delete_status),
                 nzb.has_post_info,
                 nzb.is_download_completed,
                 nzb.is_download_completed_strict,
@@ -1670,10 +1649,7 @@ impl NzbgetRsPrePostProcessor {
         dq_ptr: usize,
         nzb_ptr: usize,
     ) {
-        use crate::queuesubsys_host::{
-            DS_HEALTH, DS_MANUAL, DS_NONE, NZB_INT_DELETE_STATUS, NZB_INT_DELETING,
-        };
-        const DS_BAD: i32 = 4;
+        use crate::queuesubsys_host::{NZB_INT_DELETE_STATUS, NZB_INT_DELETING};
 
         let nzb = host.nzb_snap(nzb_ptr, false);
         if nzb.has_unpack_thread {
@@ -1685,8 +1661,8 @@ impl NzbgetRsPrePostProcessor {
 
         let nzb = host.nzb_snap(nzb_ptr, false);
         let (new_status, call_downloaded) =
-            resolve_nzb_deleted_route(nzb.delete_status, DS_NONE, DS_MANUAL, DS_HEALTH, DS_BAD);
-        host.nzb_set_int(nzb_ptr, NZB_INT_DELETE_STATUS, new_status);
+            resolve_nzb_deleted_route(DeleteStatus::from(nzb.delete_status));
+        host.nzb_set_int(nzb_ptr, NZB_INT_DELETE_STATUS, new_status.into());
         host.nzb_set_int(nzb_ptr, NZB_INT_DELETING, 0);
 
         let opts = host.opts();
@@ -1711,10 +1687,7 @@ impl NzbgetRsPrePostProcessor {
         nzb_ptr: usize,
         save_queue: bool,
     ) {
-        use crate::queuesubsys_host::{
-            DH_REDOWNLOAD_AUTO, DS_COPY, DS_HEALTH, DS_NONE, DS_SCAN, NZB_INT_AVOID_HISTORY,
-        };
-        const DS_BAD: i32 = 4;
+        use crate::queuesubsys_host::{DH_REDOWNLOAD_AUTO, NZB_INT_AVOID_HISTORY};
 
         let opts = host.opts();
         let nzb = host.nzb_snap(nzb_ptr, false);
@@ -1730,12 +1703,7 @@ impl NzbgetRsPrePostProcessor {
             opts.dupe_check,
             nzb.dupe_mode,
             fails_over,
-            nzb.delete_status,
-            DS_NONE,
-            DS_HEALTH,
-            DS_BAD,
-            DS_SCAN,
-            DS_COPY,
+            DeleteStatus::from(nzb.delete_status),
         );
 
         if add_to_history {
@@ -2355,8 +2323,7 @@ impl NzbgetRsPrePostProcessor {
             unpack_param.is_some(),
             unpack_param.as_deref().unwrap_or(b""),
             nzb.unpack_status,
-            nzb.delete_status,
-            DS_NONE,
+            DeleteStatus::from(nzb.delete_status),
             nzb.rar_rename_status,
             RS_NONE,
             opts.rar_rename,
@@ -2385,7 +2352,7 @@ impl NzbgetRsPrePostProcessor {
         let dec = eval_post_stages(
             want_unpack,
             nzb.unpack_status,
-            nzb.delete_status,
+            DeleteStatus::from(nzb.delete_status),
             nzb.par_status,
             nzb.cleanup_status,
             !opts.ext_cleanup_disk.is_empty(),
@@ -2775,7 +2742,7 @@ mod tests {
         let dec = eval_post_stages(
             false,
             UnpackStatus::None,
-            0,
+            DeleteStatus::None,
             NzbParStatus::Success,
             CleanupStatus::None,
             false,
@@ -2848,8 +2815,7 @@ mod tests {
                     self.direct_rename_status,
                     TS_SUCCESS,
                     self.has_post_info,
-                    self.delete_status,
-                    DS_NONE,
+                    DeleteStatus::from(self.delete_status),
                     self.completed_not_empty,
                     self.is_download_completed(true),
                     false,
@@ -2860,9 +2826,7 @@ mod tests {
                         false,
                         false,
                         false,
-                        self.delete_status,
-                        DS_HEALTH,
-                        4,
+                        DeleteStatus::from(self.delete_status),
                         self.has_post_info,
                         false,
                         NzbParStatus::None,

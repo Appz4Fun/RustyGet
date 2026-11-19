@@ -11,6 +11,7 @@
 //! queue directory, labels, and picking a duplicate's file by content. Par2
 //! packets, file signatures and fingerprints come from par-rs.
 
+use crate::status::DeleteStatus;
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
@@ -763,14 +764,12 @@ pub fn is_dupe_item(
     queued: bool,
     remaining_size: i64,
     paused_size: i64,
-    delete_status: i32,
-    ds_dupe: i32,
-    ds_copy: i32,
+    delete_status: DeleteStatus,
 ) -> bool {
     if queued {
         remaining_size > 0 && paused_size >= remaining_size
     } else {
-        delete_status == ds_dupe || delete_status == ds_copy
+        delete_status == DeleteStatus::Dupe || delete_status == DeleteStatus::Copy
     }
 }
 
@@ -1245,8 +1244,6 @@ fn run_service_work_locked(
 ) {
     let queue_len = qh.queue_len(dq_ptr);
     let history_len = qh.history_len(dq_ptr);
-    let ds_dupe = crate::queuesubsys_host::DS_DUPE;
-    let ds_copy = crate::queuesubsys_host::DS_COPY;
 
     if ctx.prune {
         TWIN_LAST_PRUNE.store(ctx.cur_time, std::sync::atomic::Ordering::SeqCst);
@@ -1281,9 +1278,7 @@ fn run_service_work_locked(
             queued,
             snap.remaining_size,
             snap.paused_size,
-            snap.delete_status,
-            ds_dupe,
-            ds_copy,
+            DeleteStatus::from(snap.delete_status),
         );
         let hinted = qh.nzb_get_param(nzb_ptr, b"DupeSameSize").is_some()
             || qh.nzb_get_param(nzb_ptr, b"DupeSameInner").is_some();

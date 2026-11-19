@@ -1,6 +1,6 @@
 //! Rust implementation of `QueueCoordinator` (`daemon/queue/QueueCoordinator.cpp`).
 
-use crate::status::DupeMode;
+use crate::status::{DeleteStatus, DupeMode};
 use std::ffi::CStr;
 
 #[inline]
@@ -810,8 +810,7 @@ pub fn should_skip_health_check(
     par_scan: i32,
     ps_dupe: i32,
     health_paused: bool,
-    delete_status: i32,
-    ds_health: i32,
+    delete_status: DeleteStatus,
     health: i32,
     critical_health: i32,
     success_articles: i32,
@@ -819,7 +818,7 @@ pub fn should_skip_health_check(
 ) -> bool {
     health_check == hc_none
         || health_paused
-        || delete_status == ds_health
+        || delete_status == DeleteStatus::Health
         || health >= critical_health
         || (par_scan == ps_dupe
             && health_check == hc_park
@@ -855,8 +854,7 @@ pub fn is_size_twin(
 #[inline]
 pub fn is_queued_dupe_active(
     deleting: bool,
-    delete_status: i32,
-    ds_none: i32,
+    delete_status: DeleteStatus,
     active_downloads: i32,
     has_post_info: bool,
     post_working: bool,
@@ -867,7 +865,7 @@ pub fn is_queued_dupe_active(
     direct_unpack_status: i32,
     ns_running: i32,
 ) -> bool {
-    if (deleting || delete_status != ds_none) && active_downloads == 0 {
+    if (deleting || delete_status != DeleteStatus::None) && active_downloads == 0 {
         return false;
     }
     let is_active_download = active_downloads > 0;
@@ -4455,8 +4453,7 @@ impl NzbgetRsQueueCoordinator {
             opts.par_scan,
             crate::queuesubsys_host::PS_DUPE,
             nzb.health_paused,
-            nzb.delete_status,
-            crate::queuesubsys_host::DS_HEALTH,
+            DeleteStatus::from(nzb.delete_status),
             nzb.health,
             dl_crit,
             nzb.success_articles,
@@ -4654,8 +4651,7 @@ impl NzbgetRsQueueCoordinator {
                 }
                 if is_queued_dupe_active(
                     queued.deleting,
-                    queued.delete_status,
-                    crate::queuesubsys_host::DS_NONE,
+                    DeleteStatus::from(queued.delete_status),
                     queued.active_downloads,
                     queued.has_post_info,
                     queued.post_working,

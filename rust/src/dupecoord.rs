@@ -5,7 +5,7 @@
 //! (`no_backup_reason`, `format_no_backup_reason`), skip message formatting
 //! (`format_dupe_skip_message`), and status classification (`status_from_text`).
 
-use crate::status::{DupStatus, DupeMode, MarkStatus};
+use crate::status::{DeleteStatus, DupStatus, DupeMode, MarkStatus};
 use std::collections::BTreeSet;
 use std::ffi::{c_char, CStr};
 use std::path::Path;
@@ -532,7 +532,7 @@ pub fn is_downloaded_on_disk_candidate(
     health_check: i32,
     self_dupe_key: &[u8],
     is_self: bool,
-    item_delete_status: i32,
+    item_delete_status: DeleteStatus,
     item_is_dupe_success: bool,
     item_mark_status: MarkStatus,
     item_dupe_key: &[u8],
@@ -544,7 +544,7 @@ pub fn is_downloaded_on_disk_candidate(
     if !dupe_health || self_dupe_key.is_empty() || is_self {
         return false;
     }
-    item_delete_status == DELETE_STATUS_NONE
+    item_delete_status == DeleteStatus::None
         && item_is_dupe_success
         && item_mark_status != MarkStatus::Bad
         && strcasecmp_bytes(item_dupe_key, self_dupe_key)
@@ -602,7 +602,7 @@ pub fn accumulate_history_dupe_status(
 pub fn should_cleanup_history_dupe(
     kind: i32,
     dupe_mode: DupeMode,
-    delete_status: i32,
+    delete_status: DeleteStatus,
     is_self: bool,
     item_name: &[u8],
     item_dupe_key: &[u8],
@@ -612,7 +612,7 @@ pub fn should_cleanup_history_dupe(
     !is_self
         && (kind == HISTORY_KIND_NZB || kind == HISTORY_KIND_URL)
         && dupe_mode != DupeMode::Force
-        && delete_status == DELETE_STATUS_DUPE
+        && delete_status == DeleteStatus::Dupe
         && same_name_or_key(item_name, item_dupe_key, target_name, target_dupe_key)
 }
 
@@ -708,7 +708,7 @@ pub fn accum_hc_dupe_same_content_outcome(
     self_filtered_hash: u32,
     item_full_hash: u32,
     item_filtered_hash: u32,
-    item_delete_status: i32,
+    item_delete_status: DeleteStatus,
     item_is_dupe_success: bool,
     item_dup_status: DupStatus,
     succeeded: &mut bool,
@@ -723,9 +723,9 @@ pub fn accum_hc_dupe_same_content_outcome(
         return;
     }
     if kind == HISTORY_KIND_NZB {
-        if item_delete_status != DELETE_STATUS_DUPE
-            && item_delete_status != DELETE_STATUS_COPY
-            && item_delete_status != DELETE_STATUS_MANUAL
+        if item_delete_status != DeleteStatus::Dupe
+            && item_delete_status != DeleteStatus::Copy
+            && item_delete_status != DeleteStatus::Manual
         {
             if item_is_dupe_success {
                 *succeeded = true;
@@ -775,7 +775,7 @@ pub fn should_skip_recent_history_score_dupe(
 #[allow(clippy::too_many_arguments)]
 pub fn eval_queue_score_dupe(
     is_self: bool,
-    queued_delete_status: i32,
+    queued_delete_status: DeleteStatus,
     queued_is_nzb: bool,
     both_are_url: bool,
     queued_dupe_mode: DupeMode,
@@ -793,7 +793,7 @@ pub fn eval_queue_score_dupe(
     queued_has_post_info: bool,
 ) -> i32 {
     if is_self
-        || queued_delete_status != DELETE_STATUS_NONE
+        || queued_delete_status != DeleteStatus::None
         || (!queued_is_nzb && !both_are_url)
         || queued_dupe_mode == DupeMode::Force
         || !same_name_or_key(queued_name, queued_dupe_key, self_name, self_dupe_key)
@@ -819,7 +819,7 @@ pub fn is_other_to_stop_on_completed(
     is_self: bool,
     queued_is_nzb: bool,
     queued_deleting: bool,
-    queued_delete_status: i32,
+    queued_delete_status: DeleteStatus,
     queued_dupe_mode: DupeMode,
     queued_dupe_key: &[u8],
     self_dupe_key: &[u8],
@@ -827,7 +827,7 @@ pub fn is_other_to_stop_on_completed(
     !is_self
         && queued_is_nzb
         && !queued_deleting
-        && queued_delete_status == DELETE_STATUS_NONE
+        && queued_delete_status == DeleteStatus::None
         && queued_dupe_mode != DupeMode::Force
         && strcasecmp_bytes(queued_dupe_key, self_dupe_key)
 }
@@ -2206,7 +2206,7 @@ mod tests {
             crate::downloadinfo::make_text_status_cstr(
                 0,
                 MarkStatus::None,
-                DELETE_STATUS_NONE,
+                DeleteStatus::None,
                 crate::status::NzbParStatus::Skipped,
                 crate::status::UnpackStatus::None,
                 crate::status::MoveStatus::None,
@@ -2219,7 +2219,7 @@ mod tests {
         );
         assert!(!crate::downloadinfo::is_dupe_success(
             MarkStatus::None,
-            DELETE_STATUS_NONE,
+            DeleteStatus::None,
             crate::status::NzbParStatus::Skipped,
             crate::status::UnpackStatus::None,
             crate::status::UrlStatus::None,
@@ -2231,7 +2231,7 @@ mod tests {
         // A verified repair (NzbParStatus::Success) or explicit good mark takes precedence
         assert!(crate::downloadinfo::is_dupe_success(
             MarkStatus::None,
-            DELETE_STATUS_NONE,
+            DeleteStatus::None,
             crate::status::NzbParStatus::Success,
             crate::status::UnpackStatus::None,
             crate::status::UrlStatus::None,
@@ -2242,7 +2242,7 @@ mod tests {
         ));
         assert!(crate::downloadinfo::is_dupe_success(
             MarkStatus::Good,
-            DELETE_STATUS_NONE,
+            DeleteStatus::None,
             crate::status::NzbParStatus::Skipped,
             crate::status::UnpackStatus::None,
             crate::status::UrlStatus::None,
@@ -2254,7 +2254,7 @@ mod tests {
         let full_health = crate::downloadinfo::calc_health(1000, 0, 0, 0);
         assert!(crate::downloadinfo::is_dupe_success(
             MarkStatus::None,
-            DELETE_STATUS_NONE,
+            DeleteStatus::None,
             crate::status::NzbParStatus::Skipped,
             crate::status::UnpackStatus::None,
             crate::status::UrlStatus::None,
@@ -2457,7 +2457,7 @@ mod tests {
         assert_eq!(
             eval_queue_score_dupe(
                 false,
-                DELETE_STATUS_NONE,
+                DeleteStatus::None,
                 true,
                 false,
                 DupeMode::Score,
@@ -2479,7 +2479,7 @@ mod tests {
         assert_eq!(
             eval_queue_score_dupe(
                 false,
-                DELETE_STATUS_NONE,
+                DeleteStatus::None,
                 true,
                 false,
                 DupeMode::Score,

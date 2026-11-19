@@ -7375,20 +7375,15 @@ unsafe extern "C" fn active_disk_export_nzb_cb(
         });
     }
 
-    let plen = qh.nzb_params_len(nzb_ptr);
-    let mut param_strs = Vec::with_capacity(plen * 2);
-    for i in 0..plen {
-        let (k, v) = qh.nzb_param_at(nzb_ptr, i);
-        param_strs.push(bytes_to_cstring_trunc(&k));
-        param_strs.push(bytes_to_cstring_trunc(&v));
-    }
-    let mut params = Vec::with_capacity(plen);
-    for i in 0..plen {
-        params.push(NzbgetRsDiskParam {
-            name: param_strs[i * 2].as_ptr(),
-            value: param_strs[i * 2 + 1].as_ptr(),
-        });
-    }
+    let param_strs: Vec<_> = qh
+        .nzb_params(nzb_ptr)
+        .iter()
+        .map(|(k, v)| (bytes_to_cstring_trunc(k), bytes_to_cstring_trunc(v)))
+        .collect();
+    let params: Vec<_> = param_strs
+        .iter()
+        .map(|(name, value)| NzbgetRsDiskParam { name: name.as_ptr(), value: value.as_ptr() })
+        .collect();
 
     let slen = qh.nzb_script_statuses_len(nzb_ptr);
     let mut script_strs = Vec::with_capacity(slen);

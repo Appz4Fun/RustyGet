@@ -509,6 +509,7 @@ pub fn split_param_assignment(text: &[u8]) -> Option<(&[u8], &[u8])> {
 
 use crate::status::{
     CleanupStatus, DupStatus, DupeMode, MarkStatus, MoveStatus, NzbParStatus, UnpackStatus,
+    UrlStatus,
 };
 use std::ffi::{c_char, c_int, c_void, CStr};
 
@@ -2451,10 +2452,9 @@ unsafe extern "C" fn hc_native_action_cb(
         EA_GROUP_PAUSE_EXTRA_PARS, FILE_ACT_CLEAR_ARTICLES, FILE_I64_FAILED_SIZE,
         FILE_I64_REMAINING_SIZE, FILE_I64_SUCCESS_SIZE, FILE_INT_COMPLETED_ARTICLES,
         FILE_INT_FAILED_ARTICLES, FILE_INT_PARTIAL_STATE, FILE_INT_PAUSED,
-        FILE_INT_SUCCESS_ARTICLES, FILE_STR_FILENAME, HK_DUP, HK_NZB, HK_URL, LS_NONE, MK_DETAIL,
-        MK_INFO, MK_WARNING, NS_NONE, NS_RUNNING, NZB_ACT_BUILD_DEST_DIR,
-        NZB_ACT_CLEAR_EXTRACTED_ARCHIVES, NZB_ACT_CLEAR_FILE_LIST,
-        NZB_ACT_CLEAR_LIVE_REPAIR_THREAD, NZB_ACT_CLEAR_SCRIPT_STATUSES,
+        FILE_INT_SUCCESS_ARTICLES, FILE_STR_FILENAME, HK_DUP, HK_NZB, HK_URL, MK_DETAIL, MK_INFO,
+        MK_WARNING, NS_NONE, NS_RUNNING, NZB_ACT_BUILD_DEST_DIR, NZB_ACT_CLEAR_EXTRACTED_ARCHIVES,
+        NZB_ACT_CLEAR_FILE_LIST, NZB_ACT_CLEAR_LIVE_REPAIR_THREAD, NZB_ACT_CLEAR_SCRIPT_STATUSES,
         NZB_ACT_UPDATE_COMPLETED_STATS, NZB_ACT_UPDATE_CURRENT_STATS, NZB_I64_DOWNLOADED_SIZE,
         NZB_I64_DUPE_RECOVERED_BYTES, NZB_I64_FAILED_SIZE, NZB_I64_PAR_FAILED_SIZE,
         NZB_I64_PAR_SUCCESS_SIZE, NZB_I64_SUCCESS_SIZE, NZB_INT_ALL_FIRST,
@@ -2469,9 +2469,9 @@ unsafe extern "C" fn hc_native_action_cb(
         NZB_INT_PAR_REPAIRED, NZB_INT_PAR_SEC, NZB_INT_POST_TOTAL_SEC, NZB_INT_RAR_RENAME_STATUS,
         NZB_INT_REMAINING_PAR_COUNT, NZB_INT_REPAIR_SEC, NZB_INT_REPROCESS,
         NZB_INT_SUCCESS_ARTICLES, NZB_INT_UNPACK_CLEANED_UP_DISK, NZB_INT_UNPACK_SEC,
-        NZB_INT_UNPACK_TRIED, NZB_INT_URL_STATUS, NZB_INT_WAITING_PAR, NZB_STR_CATEGORY,
-        NZB_STR_DUPE_KEY, NZB_STR_FINAL_DIR, NZB_STR_NAME, PARTIAL_COMPLETED, RS_NONE, TS_FAILURE,
-        TS_NONE, TS_RUNNING,
+        NZB_INT_UNPACK_TRIED, NZB_INT_WAITING_PAR, NZB_STR_CATEGORY, NZB_STR_DUPE_KEY,
+        NZB_STR_FINAL_DIR, NZB_STR_NAME, PARTIAL_COMPLETED, RS_NONE, TS_FAILURE, TS_NONE,
+        TS_RUNNING,
     };
 
     HC_STR_ARENA.with(|a| a.borrow_mut().clear());
@@ -2798,7 +2798,7 @@ unsafe extern "C" fn hc_native_action_cb(
             let hi = host.hist_item_snap(p2);
             let nzb_ptr = hi.inner_ptr;
             let nzb = host.nzb_snap(nzb_ptr, false);
-            host.nzb_set_int(nzb_ptr, NZB_INT_URL_STATUS, LS_NONE);
+            host.nzb_set_url_status(nzb_ptr, UrlStatus::None);
             host.nzb_set_int(nzb_ptr, NZB_INT_DELETE_STATUS, DS_NONE);
             if nzb.dupe_hint == DH_NONE {
                 host.nzb_set_int(nzb_ptr, NZB_INT_DUPE_HINT, DH_REDOWNLOAD_MANUAL);

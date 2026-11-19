@@ -2,7 +2,7 @@
 
 use crate::cstr;
 use crate::options::OptStr;
-use crate::status::{MarkStatus, MoveStatus, NzbParStatus, UnpackStatus};
+use crate::status::{MarkStatus, MoveStatus, NzbParStatus, ScriptStatus, UnpackStatus, UrlStatus};
 use std::ffi::{c_char, c_int, c_void};
 use std::io::Write;
 
@@ -7313,7 +7313,7 @@ unsafe extern "C" fn active_disk_export_nzb_cb(
         direct_rename_status: sn.direct_rename_status,
         delete_status: sn.delete_status,
         mark_status: sn.mark_status.into(),
-        url_status: sn.url_status,
+        url_status: sn.url_status.into(),
         unpack_cleaned_up_disk: c_int::from(sn.unpack_cleaned_up_disk),
         health_paused: c_int::from(sn.health_paused),
         add_url_paused: c_int::from(sn.add_url_paused),
@@ -7397,7 +7397,7 @@ unsafe extern "C" fn active_disk_export_nzb_cb(
     let mut script_statuses = Vec::with_capacity(slen);
     for i in 0..slen {
         let (st, nm) = qh.nzb_script_status_at(nzb_ptr, i);
-        script_statuses.push(st);
+        script_statuses.push(i32::from(st));
         script_strs.push(bytes_to_cstring_trunc(&nm));
     }
     let scripts: Vec<NzbgetRsDiskScriptStatus> = script_statuses
@@ -7661,8 +7661,8 @@ unsafe extern "C" fn active_disk_apply_nzb_cb(
     );
     qh.nzb_set_int(nzb_ptr, NZB_INT_DELETE_STATUS, inp.delete_status);
     qh.nzb_set_mark_status(nzb_ptr, MarkStatus::from(inp.mark_status));
-    if inp.kind == NK_NZB || inp.url_status >= LS_FAILED {
-        qh.nzb_set_int(nzb_ptr, NZB_INT_URL_STATUS, inp.url_status);
+    if inp.kind == NK_NZB || inp.url_status >= i32::from(UrlStatus::Failed) {
+        qh.nzb_set_url_status(nzb_ptr, UrlStatus::from(inp.url_status));
     }
     qh.nzb_set_int(
         nzb_ptr,
@@ -7761,7 +7761,11 @@ unsafe extern "C" fn active_disk_apply_nzb_cb(
     if !scripts.is_null() {
         for i in 0..scripts_len {
             let sc = unsafe { &*scripts.add(i) };
-            qh.nzb_push_script_status(nzb_ptr, unsafe { cstr::bytes(sc.name) }, sc.status);
+            qh.nzb_push_script_status(
+                nzb_ptr,
+                unsafe { cstr::bytes(sc.name) },
+                ScriptStatus::from(sc.status),
+            );
         }
     }
     if !stats.is_null() && stats_len > 0 {

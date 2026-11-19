@@ -4430,18 +4430,6 @@ pub unsafe extern "C" fn nzbget_rs_server_stat_apply_op(
     *inout_failed = f;
 }
 
-pub unsafe extern "C" fn nzbget_rs_script_calc_total_status(
-    statuses: *const c_int,
-    count: usize,
-) -> c_int {
-    let slice = if statuses.is_null() || count == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(statuses, count)
-    };
-    crate::downloadinfo::script_calc_total_status(slice)
-}
-
 #[cfg(unix)]
 static ACTIVE_PREPOST: std::sync::RwLock<
     Option<std::sync::Weak<crate::prepost::NzbgetRsPrePostProcessor>>,
@@ -4937,10 +4925,10 @@ unsafe fn emit_rpc_nzb(
         par_status: n.par_status.into(),
         unpack_status: n.unpack_status.into(),
         move_status: n.move_status.into(),
-        script_status: n.script_total_status,
+        script_status: n.script_total_status.into(),
         delete_status: n.delete_status,
         mark_status: n.mark_status.into(),
-        url_status: n.url_status,
+        url_status: n.url_status.into(),
         size: n.size,
         file_count: n.file_count,
         min_time: n.min_time as c_int,
@@ -4989,7 +4977,7 @@ unsafe fn emit_rpc_nzb(
     let mut scr_cvecs = Vec::with_capacity(slen);
     for i in 0..slen {
         let (st, sname) = qh.nzb_script_status_at(nzb_ptr, i);
-        scr_cvecs.push((cstr::to_cstring(&sname), st));
+        scr_cvecs.push((cstr::to_cstring(&sname), i32::from(st)));
     }
     let scrs: Vec<crate::xmlrpc_format::NzbgetRsRpcScriptItem> = scr_cvecs
         .iter()
@@ -6280,11 +6268,11 @@ pub(crate) unsafe fn serve_binrpc_conn(conn: &crate::net::NzbgetRsConn) {
                         size = n.size;
                         file_cnt = n.file_count as u32;
                         par_status = i32::from(n.par_status) as u32;
-                        script_status = n.script_total_status as u32;
+                        script_status = i32::from(n.script_total_status) as u32;
                     } else if h.kind == crate::queuesubsys_host::HK_DUP {
                         size = qh.dup_snap(h.inner_ptr).size;
                     } else if h.kind == crate::queuesubsys_host::HK_URL {
-                        url_status = qh.nzb_snap(h.inner_ptr, false).url_status as u32;
+                        url_status = i32::from(qh.nzb_snap(h.inner_ptr, false).url_status) as u32;
                     }
                     *nr_entries = nr_entries.wrapping_add(1);
                     let size_hi = ((size >> 32) & 0xffff_ffff) as u32;

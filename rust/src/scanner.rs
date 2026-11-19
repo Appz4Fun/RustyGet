@@ -1978,8 +1978,8 @@ unsafe extern "C" fn native_commit_nzb_cb(
         DS_SCAN, FILE_INT_PAUSED, MK_DETAIL, MK_WARNING, NZB_ACT_BUILD_DEST_DIR,
         NZB_INT_DELETE_STATUS, NZB_INT_DESIRED_SERVER_ID, NZB_INT_DUPE_HINT, NZB_INT_DUPE_MODE,
         NZB_INT_DUPE_SCORE, NZB_INT_FEED_ID, NZB_INT_PRIORITY, NZB_INT_SKIP_DISK_WRITE,
-        NZB_INT_SKIP_SCRIPT_PROCESSING, NZB_INT_URL_STATUS, NZB_STR_CATEGORY, NZB_STR_DUPE_KEY,
-        NZB_STR_FILENAME, NZB_STR_NAME, NZB_STR_QUEUED_FILENAME, NZB_STR_URL,
+        NZB_INT_SKIP_SCRIPT_PROCESSING, NZB_STR_CATEGORY, NZB_STR_DUPE_KEY, NZB_STR_FILENAME,
+        NZB_STR_NAME, NZB_STR_QUEUED_FILENAME, NZB_STR_URL,
     };
     if ctx.is_null() {
         return 0;
@@ -2052,7 +2052,7 @@ unsafe extern "C" fn native_commit_nzb_cb(
     if url_ptr != 0 {
         let us = host.nzb_snap(url_ptr, false);
         host.nzb_set_str(nzb_ptr, NZB_STR_URL, &us.url);
-        host.nzb_set_int(nzb_ptr, NZB_INT_URL_STATUS, us.url_status);
+        host.nzb_set_url_status(nzb_ptr, us.url_status);
         host.nzb_set_int(nzb_ptr, NZB_INT_FEED_ID, us.feed_id);
         host.nzb_set_int(nzb_ptr, NZB_INT_DUPE_HINT, us.dupe_hint);
         host.nzb_set_int(nzb_ptr, NZB_INT_DESIRED_SERVER_ID, us.desired_server_id);

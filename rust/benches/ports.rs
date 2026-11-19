@@ -401,34 +401,27 @@ fn main() {
         .collect();
     let mut log_scratch = [std::mem::MaybeUninit::<u8>::uninit(); 16 * 1024];
     bench(
-        "binrpc/encode_log_into 10 log entries (caller scratch)",
+        "binrpc/encode 10 log entries (caller scratch)",
         &mut || {
-            // The entries and text outlive the call; scratch is separate writable
-            // storage and includes room for the response's final NUL.
-            let response = unsafe {
-                nzbget_rs::ffi::nzbget_rs_binrpc_encode_log_into(
-                    black_box(logs.as_ptr()),
-                    10,
-                    black_box(log_scratch.as_mut_ptr()).cast(),
-                    log_scratch.len(),
-                )
-            };
-            assert_eq!(response.owned_capacity, 0);
-            black_box(response);
+            // SAFETY: the entries' texts point at `log_text`, which outlives the call,
+            // and the scratch holds far more than ten entries encode to.
+            let written = unsafe { binrpc::encode(black_box(&logs[..10]), &mut log_scratch) };
+            black_box(written);
             black_box(&log_scratch);
         },
     );
     bench(
-        "binrpc/encode_log 1,000 log entries (owned allocation)",
+        "binrpc/encode 1,000 log entries (owned allocation)",
         &mut || {
-            // The large-response fallback uses the same owned response builder.
-            let response = unsafe {
-                nzbget_rs::ffi::nzbget_rs_binrpc_encode_log(black_box(logs.as_ptr()), logs.len())
+            // SAFETY: as above; the buffer is sized by `encoded_len` first.
+            let out = unsafe {
+                let n = binrpc::encoded_len(black_box(&logs[..])) as usize;
+                let mut out: Vec<u8> = Vec::with_capacity(n);
+                let written = binrpc::encode(&logs, &mut out.spare_capacity_mut()[..n]);
+                out.set_len(written);
+                out
             };
-            black_box(&response);
-            unsafe {
-                nzbget_rs::ffi::nzbget_rs_free(response);
-            }
+            black_box(out);
         },
     );
     bench("urlcoord/dnzb_header 3 lines", &mut || {

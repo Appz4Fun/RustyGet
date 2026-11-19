@@ -7385,14 +7385,11 @@ unsafe extern "C" fn active_disk_export_nzb_cb(
         .map(|(name, value)| NzbgetRsDiskParam { name: name.as_ptr(), value: value.as_ptr() })
         .collect();
 
-    let slen = qh.nzb_script_statuses_len(nzb_ptr);
-    let mut script_strs = Vec::with_capacity(slen);
-    let mut script_statuses = Vec::with_capacity(slen);
-    for i in 0..slen {
-        let (st, nm) = qh.nzb_script_status_at(nzb_ptr, i);
-        script_statuses.push(i32::from(st));
-        script_strs.push(bytes_to_cstring_trunc(&nm));
-    }
+    let (script_statuses, script_strs): (Vec<i32>, Vec<_>) = qh
+        .nzb_script_statuses(nzb_ptr)
+        .iter()
+        .map(|(nm, st)| (i32::from(*st), bytes_to_cstring_trunc(nm)))
+        .unzip();
     let scripts: Vec<NzbgetRsDiskScriptStatus> = script_statuses
         .iter()
         .zip(script_strs.iter())

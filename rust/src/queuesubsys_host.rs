@@ -2352,8 +2352,16 @@ impl QueueSubsysHost {
         unsafe { read_cstr(strs[0]) }
     }
 
-    pub fn nzb_blocked_donor_op(&self, nzb_ptr: NzbRef, add: bool, donor_id: i32) -> bool {
-        self.coll_op(nzb_ptr, if add { 5 } else { 4 }, OpArgs::NONE.a2(donor_id)) != 0
+    /// Whether `nzb_ptr` must not borrow from donor `donor_id` again.
+    pub fn nzb_donor_blocked(&self, nzb_ptr: NzbRef, donor_id: i32) -> bool {
+        self.use_active && crate::qnzb::donor_blocked(nzb_ptr, donor_id)
+    }
+
+    /// Bars `nzb_ptr` from borrowing from donor `donor_id` again.
+    pub fn nzb_block_donor(&self, nzb_ptr: NzbRef, donor_id: i32) {
+        if self.use_active {
+            crate::qnzb::block_donor(nzb_ptr, donor_id);
+        }
     }
 
     pub fn nzb_hard_link_path(&self, nzb_ptr: NzbRef) -> Vec<u8> {
@@ -2533,25 +2541,12 @@ impl QueueSubsysHost {
         unsafe { read_cstr(strs[0]) }
     }
 
-    pub fn nzb_script_statuses_len(&self, nzb_ptr: NzbRef) -> usize {
-        if nzb_ptr.is_none() {
-            return 0;
+    /// The post-processing scripts that ran, as (script name, status), in run order.
+    pub fn nzb_script_statuses(&self, nzb_ptr: NzbRef) -> Vec<(Vec<u8>, ScriptStatus)> {
+        if !self.use_active {
+            return Vec::new();
         }
-        self.coll_op(nzb_ptr, 17, OpArgs::NONE.a2(-1))
-    }
-
-    pub fn nzb_script_status_at(&self, nzb_ptr: NzbRef, idx: usize) -> (ScriptStatus, Vec<u8>) {
-        let mut ints = [0i32; 1];
-        let mut strs = [std::ptr::null(); 1];
-        self.coll_op(
-            nzb_ptr,
-            17,
-            OpArgs::NONE
-                .a2(idx as i32)
-                .ints(ints.as_mut_ptr())
-                .strs(strs.as_mut_ptr()),
-        );
-        (ScriptStatus::from(ints[0]), unsafe { read_cstr(strs[0]) })
+        crate::qnzb::script_statuses(nzb_ptr)
     }
 
     pub fn nzb_extracted_archives_len(&self, nzb_ptr: NzbRef) -> usize {

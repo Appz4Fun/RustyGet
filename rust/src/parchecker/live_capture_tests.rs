@@ -1,5 +1,5 @@
 use super::*;
-use crate::queuesubsys_host::QueueSubsysHost;
+use crate::queuesubsys_host::{NzbRef, QueueSubsysHost};
 use std::ffi::{c_char, c_int, c_void};
 
 type Visitor = unsafe extern "C" fn(
@@ -61,7 +61,8 @@ fn capture(
     job: i32,
 ) -> Result<live_namespace::NamespaceFacts, RepairError> {
     let host = QueueSubsysHost::new_mock(std::ptr::from_mut(producer).cast(), capture_host);
-    host.live_namespace_capture(1, job, Path::new("/capture-root"), 8192, 500 << 20)
+    let root = Path::new("/capture-root");
+    host.live_namespace_capture(NzbRef::from_addr(1), job, root, 8192, 500 << 20)
 }
 
 #[test]
@@ -343,14 +344,15 @@ fn live_capture_final_busy_retries_real_preparation_then_gates_ram_copy() {
         let metadata = prepare_live_start(&file.path, &file.base_dir, 500 << 20, writers)?;
         let catalog = metadata.catalog_required_bytes()?;
         let facts = host.with_locked_queue(|_| {
-            host.live_namespace_capture(1, job, &file.base_dir, catalog, 500 << 20)
+            let nzb = NzbRef::from_addr(1);
+            host.live_namespace_capture(nzb, job, &file.base_dir, catalog, 500 << 20)
         })?;
         assert!(!producer.locked.get());
         let mut prepared = metadata.finish_tracked(&file.path, facts, &attempt)?;
         assert!(active_streaming_session(job).is_none());
         let installed = host.with_locked_queue(|_| {
             prepared.check_and_install(job, |proof| {
-                host.live_namespace_visit(1, |row| {
+                host.live_namespace_visit(NzbRef::from_addr(1), |row| {
                     proof.recheck_row(row.queue_id, row.flags, row.fields)
                 })
             })

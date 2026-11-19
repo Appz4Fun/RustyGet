@@ -4,6 +4,7 @@
 //! workflows, PAR/stream-repair coverage decisions, job scheduling strategies, stage
 //! transitions, pause-state management, and direct-unpack triggers into a single module.
 
+use crate::queuesubsys_host::NzbRef;
 use crate::queuesubsys_host::FileRef;
 use crate::status::{
     CleanupStatus, DeleteStatus, DirectRenameStatus, DirectUnpackStatus, DupeMode, MoveStatus,
@@ -463,7 +464,7 @@ fn dupe_post_gate_host(
     let mut names = Vec::new();
     for i in 0..host.queue_len(dq_ptr) {
         let qp = host.queue_at(dq_ptr, i);
-        if qp == 0 || qp == nzb.ptr {
+        if qp.is_none() || qp == nzb.ptr {
             continue;
         }
         let q = host.nzb_snap(qp, false);
@@ -850,7 +851,7 @@ fn has_main_pars(dest_dir: &[u8]) -> bool {
 #[cfg(unix)]
 fn has_completed_archive_files(
     host: &crate::queuesubsys_host::QueueSubsysHost,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
 ) -> bool {
     host.nzb_completed_files(nzb_ptr)
         .iter()
@@ -947,7 +948,7 @@ pub(crate) fn has_dupe_scan_sources_host(
     host: &crate::queuesubsys_host::QueueSubsysHost,
     opts: &crate::queuesubsys_host::GlobalOptsSnap,
     dq_ptr: usize,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
 ) -> bool {
     if opts.par_scan != crate::queuesubsys_host::PS_DUPE {
         return false;
@@ -1081,7 +1082,7 @@ fn fmt_tenths(val: i32) -> String {
 pub struct NzbgetRsPrePostProcessor {
     owner: usize,
     queued_jobs: std::sync::atomic::AtomicI32,
-    active_jobs: std::sync::Mutex<Vec<usize>>,
+    active_jobs: std::sync::Mutex<Vec<NzbRef>>,
     wait_mutex: std::sync::Mutex<()>,
     wait_cond: std::sync::Condvar,
 }
@@ -1135,11 +1136,12 @@ impl NzbgetRsPrePostProcessor {
                 }
             }
             6 => {
-                self.nzb_downloaded(&host, p1, p2);
+                self.nzb_downloaded(&host, p1, NzbRef::from_addr(p2));
                 0
             }
             8 => {
-                self.download_queue_update(&host, a1, p1, p2, FileRef::from_addr(p3));
+                let (nzb, file) = (NzbRef::from_addr(p2), FileRef::from_addr(p3));
+                self.download_queue_update(&host, a1, p1, nzb, file);
                 0
             }
             _ => 0,
@@ -1288,7 +1290,7 @@ impl NzbgetRsPrePostProcessor {
 
         host.with_locked_queue(|dq_ptr| {
             let qlen = host.queue_len(dq_ptr);
-            let entries: Vec<(i32, usize)> = (0..qlen)
+            let entries: Vec<(i32, NzbRef)> = (0..qlen)
                 .map(|i| {
                     let p = host.queue_at(dq_ptr, i);
                     (host.nzb_snap(p, false).id, p)
@@ -1378,7 +1380,7 @@ impl NzbgetRsPrePostProcessor {
         &self,
         host: &crate::queuesubsys_host::QueueSubsysHost,
         dq_ptr: usize,
-        nzb_ptr: usize,
+        nzb_ptr: NzbRef,
     ) {
         use crate::queuesubsys_host::{
             EA_GROUP_PAUSE_EXTRA_PARS, EA_GROUP_SORT_FILES, MK_INFO, PC_FORCE,
@@ -1415,7 +1417,7 @@ impl NzbgetRsPrePostProcessor {
         &self,
         host: &crate::queuesubsys_host::QueueSubsysHost,
         dq_ptr: usize,
-        nzb_ptr: usize,
+        nzb_ptr: NzbRef,
     ) {
         use crate::queuesubsys_host::MK_INFO;
 
@@ -1445,7 +1447,7 @@ impl NzbgetRsPrePostProcessor {
         &self,
         host: &crate::queuesubsys_host::QueueSubsysHost,
         dq_ptr: usize,
-        nzb_ptr: usize,
+        nzb_ptr: NzbRef,
     ) {
         use crate::queuesubsys_host::{
             MK_INFO, NZB_ACT_ENTER_POST_PROCESS, NZB_INT_CHANGED, NZB_INT_CLEANUP_DISK, PC_FORCE,
@@ -1453,7 +1455,7 @@ impl NzbgetRsPrePostProcessor {
         };
         use std::sync::atomic::Ordering;
 
-        if nzb_ptr == 0 {
+        if nzb_ptr.is_none() {
             return;
         }
 
@@ -1547,7 +1549,7 @@ impl NzbgetRsPrePostProcessor {
         host: &crate::queuesubsys_host::QueueSubsysHost,
         action: i32,
         dq_ptr: usize,
-        nzb_ptr: usize,
+        nzb_ptr: NzbRef,
         file_ptr: FileRef,
     ) {
         use crate::queuesubsys_host::{
@@ -1593,7 +1595,7 @@ impl NzbgetRsPrePostProcessor {
             if opts.parcheck_enabled {
                 let jobs = self.active_jobs.lock().unwrap().clone();
                 for job_ptr in jobs {
-                    if job_ptr != 0 && file.nzb_ptr == job_ptr {
+                    if job_ptr.is_some() && file.nzb_ptr == job_ptr {
                         let job_nzb = host.nzb_snap(job_ptr, false);
                         if job_nzb.post_info_ptr.is_some() {
                             let ps = host.post_snap(job_nzb.post_info_ptr);
@@ -1644,7 +1646,7 @@ impl NzbgetRsPrePostProcessor {
         &self,
         host: &crate::queuesubsys_host::QueueSubsysHost,
         dq_ptr: usize,
-        nzb_ptr: usize,
+        nzb_ptr: NzbRef,
     ) {
         use crate::queuesubsys_host::NZB_INT_DELETING;
 
@@ -1680,7 +1682,7 @@ impl NzbgetRsPrePostProcessor {
         &self,
         host: &crate::queuesubsys_host::QueueSubsysHost,
         dq_ptr: usize,
-        nzb_ptr: usize,
+        nzb_ptr: NzbRef,
         save_queue: bool,
     ) {
         use crate::queuesubsys_host::{DH_REDOWNLOAD_AUTO, NZB_INT_AVOID_HISTORY};
@@ -1837,7 +1839,7 @@ impl NzbgetRsPrePostProcessor {
         host: &crate::queuesubsys_host::QueueSubsysHost,
         dq_ptr: usize,
         allow_par: bool,
-    ) -> usize {
+    ) -> NzbRef {
         let active = self.active_jobs.lock().unwrap().clone();
         let qlen = host.queue_len(dq_ptr);
         let mut ptrs = Vec::with_capacity(qlen);
@@ -1893,7 +1895,7 @@ impl NzbgetRsPrePostProcessor {
         if idx >= 0 {
             ptrs[idx as usize]
         } else {
-            0
+            NzbRef::NONE
         }
     }
 
@@ -1911,7 +1913,7 @@ impl NzbgetRsPrePostProcessor {
                     break;
                 }
                 let post_job = self.pick_next_job(host, dq_ptr, allow_par);
-                if post_job == 0 {
+                if post_job.is_none() {
                     break;
                 }
                 self.active_jobs.lock().unwrap().push(post_job);
@@ -2392,7 +2394,7 @@ impl NzbgetRsPrePostProcessor {
         &self,
         host: &crate::queuesubsys_host::QueueSubsysHost,
         dq_ptr: usize,
-        nzb_ptr: usize,
+        nzb_ptr: NzbRef,
     ) {
         use crate::queuesubsys_host::NZB_ACT_LEAVE_POST_PROCESS;
         use std::sync::atomic::Ordering;
@@ -2449,7 +2451,7 @@ impl NzbgetRsPrePostProcessor {
 
         for &id in ids {
             let nzb_ptr = host.queue_find_by_id(dq_ptr, id);
-            if nzb_ptr == 0 {
+            if nzb_ptr.is_none() {
                 continue;
             }
             let nzb = host.nzb_snap(nzb_ptr, false);
@@ -2500,7 +2502,7 @@ impl NzbgetRsPrePostProcessor {
         &self,
         host: &crate::queuesubsys_host::QueueSubsysHost,
         dq_ptr: usize,
-        nzb_ptr: usize,
+        nzb_ptr: NzbRef,
         file_ptr: FileRef,
     ) {
         let opts = host.opts();

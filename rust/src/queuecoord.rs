@@ -1,5 +1,6 @@
 //! Rust implementation of `QueueCoordinator` (`daemon/queue/QueueCoordinator.cpp`).
 
+use crate::queuesubsys_host::NzbRef;
 use crate::queuesubsys_host::FileRef;
 use crate::status::{DeleteStatus, DirectRenameStatus, DirectUnpackStatus, DupeMode, PostStage};
 use std::ffi::CStr;
@@ -369,7 +370,7 @@ pub fn alt_covers_lost_articles(
 /// `donorkind::unknown_kind_is_labelled_alt`).
 pub(crate) fn backup_labelled_alt(
     host: &crate::queuesubsys_host::QueueSubsysHost,
-    backup_ptr: usize,
+    backup_ptr: NzbRef,
 ) -> bool {
     crate::donorkind::unknown_kind_is_labelled_alt(
         host.nzb_get_param(backup_ptr, crate::donorkind::KIND_PARAM).as_deref(),
@@ -1404,7 +1405,7 @@ fn join_path(dir: &[u8], name: &[u8]) -> Vec<u8> {
 }
 
 #[cfg(unix)]
-fn backup_alive_permille(host: &crate::queuesubsys_host::QueueSubsysHost, nzb_ptr: usize) -> i32 {
+fn backup_alive_permille(host: &crate::queuesubsys_host::QueueSubsysHost, nzb_ptr: NzbRef) -> i32 {
     let mut best = -1i32;
     for key in [b"DupeAlive".as_slice(), b"DupeHealth".as_slice()] {
         if let Some(val) = host.nzb_get_param(nzb_ptr, key) {
@@ -1781,19 +1782,19 @@ impl NzbgetRsQueueCoordinator {
         &self,
         host: &crate::queuesubsys_host::QueueSubsysHost,
         uptr_addr: usize,
-        url_ptr: usize,
+        url_ptr: NzbRef,
         add_first: bool,
-    ) -> usize {
+    ) -> NzbRef {
         host.log(
             crate::queuesubsys_host::MK_DEBUG,
             b"Adding NZBFile to queue",
         );
-        let mut out_ptr = 0usize;
+        let mut out_ptr = NzbRef::NONE;
         host.with_locked_queue(|dq_ptr| {
             let opts = host.opts();
             // Read raw NzbInfo* from std::unique_ptr<NzbInfo>* at uptr_addr
             let raw_nzb_ptr = unsafe { *(uptr_addr as *const usize) };
-            let mut added_nzb_ptr = raw_nzb_ptr;
+            let mut added_nzb_ptr = NzbRef::from_addr(raw_nzb_ptr);
 
             host.dq_notify(
                 dq_ptr,
@@ -1829,10 +1830,10 @@ impl NzbgetRsQueueCoordinator {
                 }
                 host.queue_insert_owned(dq_ptr, uptr_addr, url_ptr, add_first);
             } else {
-                host.queue_insert_owned(dq_ptr, uptr_addr, 0, true);
+                host.queue_insert_owned(dq_ptr, uptr_addr, NzbRef::NONE, true);
             }
 
-            if url_ptr != 0 {
+            if url_ptr.is_some() {
                 let url_snap = host.nzb_snap(url_ptr, false);
                 host.nzb_set_int(
                     added_nzb_ptr,
@@ -1863,7 +1864,7 @@ impl NzbgetRsQueueCoordinator {
                 let check_id = cur_nzb.id;
                 host.queue_remove(dq_ptr, added_nzb_ptr);
                 if host.history_find_by_id(dq_ptr, check_id) == 0 {
-                    added_nzb_ptr = 0;
+                    added_nzb_ptr = NzbRef::NONE;
                 }
             }
 
@@ -1876,10 +1877,10 @@ impl NzbgetRsQueueCoordinator {
     pub(crate) fn check_dupe_file_infos(
         &self,
         host: &crate::queuesubsys_host::QueueSubsysHost,
-        nzb_ptr: usize,
+        nzb_ptr: NzbRef,
     ) {
         host.log(crate::queuesubsys_host::MK_DEBUG, b"CheckDupeFileInfos");
-        if nzb_ptr == 0 {
+        if nzb_ptr.is_none() {
             return;
         }
         let flen = host.nzb_file_len(nzb_ptr);
@@ -1931,7 +1932,7 @@ impl NzbgetRsQueueCoordinator {
         recovered_at_start: i32,
     ) {
         let nzb_ptr = host.queue_find_by_id(dq_ptr, nzb_id);
-        if nzb_ptr == 0 {
+        if nzb_ptr.is_none() {
             return;
         }
         let nzb = host.nzb_snap(nzb_ptr, false);
@@ -2012,7 +2013,7 @@ impl NzbgetRsQueueCoordinator {
     pub(crate) fn set_queue_entry_category(
         &self,
         host: &crate::queuesubsys_host::QueueSubsysHost,
-        nzb_ptr: usize,
+        nzb_ptr: NzbRef,
         category: &[u8],
     ) -> bool {
         let nzb = host.nzb_snap(nzb_ptr, false);
@@ -2033,7 +2034,7 @@ impl NzbgetRsQueueCoordinator {
     pub(crate) fn set_queue_entry_name(
         &self,
         host: &crate::queuesubsys_host::QueueSubsysHost,
-        nzb_ptr: usize,
+        nzb_ptr: NzbRef,
         name: &[u8],
     ) -> bool {
         let nzb = host.nzb_snap(nzb_ptr, false);
@@ -2071,8 +2072,8 @@ impl NzbgetRsQueueCoordinator {
         &self,
         host: &crate::queuesubsys_host::QueueSubsysHost,
         dq_ptr: usize,
-        dest_ptr: usize,
-        src_ptr: usize,
+        dest_ptr: NzbRef,
+        src_ptr: NzbRef,
     ) -> bool {
         let dest = host.nzb_snap(dest_ptr, false);
         let src = host.nzb_snap(src_ptr, false);
@@ -2177,13 +2178,13 @@ impl NzbgetRsQueueCoordinator {
         file_ptrs: &[FileRef],
         name: &[u8],
     ) -> bool {
-        let mut src_nzb_ptr = 0usize;
+        let mut src_nzb_ptr = NzbRef::NONE;
         let mut file_snaps = Vec::with_capacity(file_ptrs.len());
 
         for &fp in file_ptrs {
             let f = host.file_snap(fp);
             let f_nzb = host.nzb_snap(f.nzb_ptr, false);
-            let same_src = src_nzb_ptr == 0 || f.nzb_ptr == src_nzb_ptr;
+            let same_src = src_nzb_ptr.is_none() || f.nzb_ptr == src_nzb_ptr;
             let v = validate_split_file_state(
                 f.active_downloads,
                 f.completed_articles,
@@ -2207,7 +2208,7 @@ impl NzbgetRsQueueCoordinator {
             file_snaps.push(f);
         }
 
-        if src_nzb_ptr == 0 {
+        if src_nzb_ptr.is_none() {
             return false;
         }
 
@@ -2597,7 +2598,7 @@ impl NzbgetRsQueueCoordinator {
 
     fn unpause_streaming_par_volumes(
         host: &crate::queuesubsys_host::QueueSubsysHost,
-        nzb_ptr: usize,
+        nzb_ptr: NzbRef,
         nzb_id: i32,
     ) {
         loop {
@@ -2709,7 +2710,7 @@ impl NzbgetRsQueueCoordinator {
         }
         host.with_locked_queue(|dq| {
             let nzb = host.queue_find_by_id(dq, nzb_id);
-            if nzb != 0 {
+            if nzb.is_some() {
                 let message = Self::live_par_deferred_message(error);
                 host.nzb_print_message(nzb, crate::queuesubsys_host::MK_DETAIL, message.as_bytes());
             }
@@ -2723,7 +2724,7 @@ impl NzbgetRsQueueCoordinator {
         let mut result = Err(crate::parchecker::RepairError::Cancelled);
         host.with_locked_queue(|dq| {
             let ptr = host.queue_find_by_id(dq, file.nzb_id);
-            if ptr == 0 || !live_par_syndromes(&host.opts()) {
+            if ptr.is_none() || !live_par_syndromes(&host.opts()) {
                 return;
             }
             let nzb = host.nzb_snap(ptr, false);
@@ -2773,13 +2774,13 @@ impl NzbgetRsQueueCoordinator {
         };
         let root = root_identity()?;
         let attempt = self.live_startups.begin()?;
-        let check_stamp = |dq| -> Result<usize, RepairError> {
+        let check_stamp = |dq| -> Result<NzbRef, RepairError> {
             attempt.ensure_current()?;
             if self.stopped.load(std::sync::atomic::Ordering::Acquire) || host.self_is_stopped() {
                 return Err(RepairError::Cancelled);
             }
             let ptr = host.queue_find_by_id(dq, file.nzb_id);
-            if ptr == 0 || !live_par_syndromes(&host.opts()) {
+            if ptr.is_none() || !live_par_syndromes(&host.opts()) {
                 return Err(RepairError::Cancelled);
             }
             let nzb = host.nzb_snap(ptr, false);
@@ -2843,7 +2844,7 @@ impl NzbgetRsQueueCoordinator {
             if !self.stopped.load(std::sync::atomic::Ordering::Acquire) {
                 host.with_locked_queue(|dq| {
                     let ptr = host.queue_find_by_id(dq, id);
-                    if ptr != 0 {
+                    if ptr.is_some() {
                         crate::postproc::direct_unpack_try_live_par_repair(
                             host,
                             &host.nzb_snap(ptr, false),
@@ -2861,7 +2862,7 @@ impl NzbgetRsQueueCoordinator {
         let mut live = false;
         host.with_locked_queue(|dq| {
             let ptr = host.queue_find_by_id(dq, id);
-            if ptr == 0 || !live_par_syndromes(&host.opts()) {
+            if ptr.is_none() || !live_par_syndromes(&host.opts()) {
                 return;
             }
             let nzb = host.nzb_snap(ptr, false);
@@ -2912,7 +2913,7 @@ impl NzbgetRsQueueCoordinator {
             let mut captured = Ok(false);
             host.with_locked_queue(|dq| {
                 let ptr = host.queue_find_by_id(dq, id);
-                if ptr == 0 || !live_par_syndromes(&host.opts()) {
+                if ptr.is_none() || !live_par_syndromes(&host.opts()) {
                     done = true;
                     return;
                 }
@@ -3009,7 +3010,7 @@ impl NzbgetRsQueueCoordinator {
         let mut ids = Vec::new();
         host.with_locked_queue(|dq| {
             let ptr = host.queue_find_by_id(dq, id);
-            if ptr == 0 {
+            if ptr.is_none() {
                 return;
             }
             for i in 0..host.nzb_file_len(ptr).min(32768) {
@@ -3028,7 +3029,7 @@ impl NzbgetRsQueueCoordinator {
                 let mut done = false;
                 host.with_locked_queue(|dq| {
                     let ptr = host.queue_find_by_id(dq, id);
-                    if ptr == 0 || !live_par_syndromes(&host.opts()) {
+                    if ptr.is_none() || !live_par_syndromes(&host.opts()) {
                         done = true;
                         return;
                     }
@@ -3086,7 +3087,7 @@ impl NzbgetRsQueueCoordinator {
 
     fn report_live_par_warning(
         host: &crate::queuesubsys_host::QueueSubsysHost,
-        nzb_ptr: usize,
+        nzb_ptr: NzbRef,
         nzb_id: i32,
     ) {
         if let Some(warning) = crate::parchecker::streaming_session_take_warning(nzb_id) {
@@ -3113,7 +3114,7 @@ impl NzbgetRsQueueCoordinator {
             crate::parchecker::streaming_session_kick_backfill(id);
             host.with_locked_queue(|dq| {
                 let ptr = host.queue_find_by_id(dq, id);
-                if ptr == 0 || !live_par_syndromes(&host.opts()) {
+                if ptr.is_none() || !live_par_syndromes(&host.opts()) {
                     crate::parchecker::streaming_session_forget(id);
                     return;
                 }
@@ -3814,7 +3815,7 @@ impl NzbgetRsQueueCoordinator {
             let nzb_id = nzb.id;
             self.delete_file_info(host, dq_ptr, file.ptr, file_completed);
             let found_nzb = host.queue_find_by_id(dq_ptr, nzb_id);
-            if found_nzb != 0 {
+            if found_nzb.is_some() {
                 host.nzb_set_int(found_nzb, crate::queuesubsys_host::NZB_INT_CHANGED, 1);
                 host.dq_save_changed(dq_ptr);
             }
@@ -4540,8 +4541,8 @@ impl NzbgetRsQueueCoordinator {
         if largest <= 0 {
             return false;
         }
-        let check_other = |other_ptr: usize| -> bool {
-            if other_ptr == 0 || other_ptr == nzb.ptr {
+        let check_other = |other_ptr: NzbRef| -> bool {
+            if other_ptr.is_none() || other_ptr == nzb.ptr {
                 return false;
             }
             let other = host.nzb_snap(other_ptr, false);
@@ -4575,7 +4576,7 @@ impl NzbgetRsQueueCoordinator {
         let hlen = host.history_len(dq_ptr);
         for i in 0..hlen {
             let hi = host.history_at(dq_ptr, i);
-            if hi.kind == crate::queuesubsys_host::HK_NZB && check_other(hi.inner_ptr) {
+            if hi.kind == crate::queuesubsys_host::HK_NZB && check_other(hi.nzb()) {
                 return true;
             }
         }
@@ -4601,7 +4602,7 @@ impl NzbgetRsQueueCoordinator {
         let qlen = host.queue_len(dq_ptr);
         for i in 0..qlen {
             let qp = host.queue_at(dq_ptr, i);
-            if qp == 0 || qp == nzb.ptr {
+            if qp.is_none() || qp == nzb.ptr {
                 continue;
             }
             let queued = host.nzb_snap(qp, false);
@@ -4793,7 +4794,7 @@ impl NzbgetRsQueueCoordinator {
         host: &crate::queuesubsys_host::QueueSubsysHost,
         opts: &crate::queuesubsys_host::GlobalOptsSnap,
         dq_ptr: usize,
-        nzb_ptr: usize,
+        nzb_ptr: NzbRef,
     ) {
         let nzb = host.nzb_snap(nzb_ptr, false);
         if opts.health_check != crate::queuesubsys_host::HC_DUPE
@@ -5046,7 +5047,7 @@ impl NzbgetRsQueueCoordinator {
         host: &crate::queuesubsys_host::QueueSubsysHost,
         opts: &crate::queuesubsys_host::GlobalOptsSnap,
         dq_ptr: usize,
-        nzb_ptr: usize,
+        nzb_ptr: NzbRef,
     ) {
         let nzb = host.nzb_snap(nzb_ptr, false);
         // the mark is taken first, so one this download cannot act on never
@@ -5123,7 +5124,7 @@ impl NzbgetRsQueueCoordinator {
         let qlen = host.queue_len(dq_ptr);
         for i in 0..qlen {
             let qp = host.queue_at(dq_ptr, i);
-            if qp == 0 || qp == nzb.ptr {
+            if qp.is_none() || qp == nzb.ptr {
                 continue;
             }
             let queued = host.nzb_snap(qp, false);
@@ -5336,7 +5337,7 @@ impl NzbgetRsQueueCoordinator {
         &self,
         host: &crate::queuesubsys_host::QueueSubsysHost,
         opts: &crate::queuesubsys_host::GlobalOptsSnap,
-        nzb_ptr: usize,
+        nzb_ptr: NzbRef,
     ) {
         discard_direct_rename_host(host, opts, nzb_ptr);
     }
@@ -5855,7 +5856,7 @@ pub(crate) fn direct_rename_completed_host(
     host: &crate::queuesubsys_host::QueueSubsysHost,
     opts: &crate::queuesubsys_host::GlobalOptsSnap,
     dq_ptr: usize,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
 ) {
     let flen = host.nzb_file_len(nzb_ptr);
     for i in 0..flen {
@@ -5914,7 +5915,7 @@ pub(crate) fn direct_rename_completed_host(
 fn discard_direct_rename_host(
     host: &crate::queuesubsys_host::QueueSubsysHost,
     opts: &crate::queuesubsys_host::GlobalOptsSnap,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
 ) {
     let mut discarded_size = 0i64;
     let mut discarded_count = 0i32;
@@ -5969,13 +5970,13 @@ fn discard_direct_rename_host(
 fn discard_downloaded_articles_host(
     host: &crate::queuesubsys_host::QueueSubsysHost,
     opts: &crate::queuesubsys_host::GlobalOptsSnap,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
     file_ptr: FileRef,
 ) {
     host.file_action(
         file_ptr,
         crate::queuesubsys_host::FILE_ACT_SUBTRACT_AND_CLEAR_SERVER_STATS,
-        nzb_ptr,
+        nzb_ptr.addr(),
     );
     let nzb = host.nzb_snap(nzb_ptr, false);
     let file = host.file_snap(file_ptr);
@@ -6175,7 +6176,7 @@ pub(crate) const PAR_FILES_PARAM: &[u8] = b"DupeParFiles";
 /// (`borrowed`), or taken back after it failed its check (`!borrowed`).
 pub(crate) fn note_dupe_par_article(
     host: &crate::queuesubsys_host::QueueSubsysHost,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
     file_id: i32,
     borrowed: bool,
 ) {
@@ -6204,8 +6205,8 @@ pub(crate) fn note_dupe_par_article(
 /// along with its files.
 fn merge_dupe_par_params(
     host: &crate::queuesubsys_host::QueueSubsysHost,
-    dest_ptr: usize,
-    src_ptr: usize,
+    dest_ptr: NzbRef,
+    src_ptr: NzbRef,
 ) {
     let src_articles = bumped_count(
         host.nzb_get_param(src_ptr, PAR_ARTICLES_PARAM).as_deref(),

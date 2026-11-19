@@ -3,6 +3,7 @@
 //! par2 set rename check (`need_rename_pars`), article hash16k / par-flag delta
 //! evaluation (`eval_direct_rename_article`), and full queue/loader orchestration.
 
+use crate::queuesubsys_host::NzbRef;
 use crate::queuesubsys_host::FileRef;
 use crate::cstr;
 use std::ffi::CStr;
@@ -346,7 +347,7 @@ pub(crate) fn file_downloaded_host(
     file_ptr: FileRef,
 ) {
     let file = host.file_snap(file_ptr);
-    if file.nzb_ptr != 0 {
+    if file.nzb_ptr.is_some() {
         check_state_host(coord, host, opts, dq_ptr, file.nzb_ptr);
     }
 }
@@ -357,11 +358,11 @@ fn check_state_host(
     host: &crate::queuesubsys_host::QueueSubsysHost,
     opts: &crate::queuesubsys_host::GlobalOptsSnap,
     dq_ptr: usize,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
 ) {
     use crate::queuesubsys_host::*;
 
-    if !opts.parcheck_enabled || nzb_ptr == 0 {
+    if !opts.parcheck_enabled || nzb_ptr.is_none() {
         return;
     }
 
@@ -423,7 +424,7 @@ fn check_state_host(
 #[cfg(unix)]
 fn unpause_pars_host(
     host: &crate::queuesubsys_host::QueueSubsysHost,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
     files: &[crate::queuesubsys_host::FileSnap],
     completed: &[crate::queuesubsys_host::CompletedFileSnap],
 ) {
@@ -494,7 +495,7 @@ fn start_par_loader_host(
     coord: &crate::queuecoord::NzbgetRsQueueCoordinator,
     host: &crate::queuesubsys_host::QueueSubsysHost,
     opts: &crate::queuesubsys_host::GlobalOptsSnap,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
 ) {
     use crate::queuesubsys_host::*;
 
@@ -548,7 +549,7 @@ pub(crate) fn run_par_loader(
             Some(entries) => {
                 host.with_locked_queue(|dq_ptr| {
                     let nzb_ptr = host.queue_find_by_id(dq_ptr, nzb_id);
-                    if nzb_ptr == 0 {
+                    if nzb_ptr.is_none() {
                         return;
                     }
                     let base = crate::queuecoord::base_file_name(par_file);
@@ -588,7 +589,7 @@ pub(crate) fn run_par_loader(
     host.with_locked_queue(|dq_ptr| {
         let opts = host.opts();
         let nzb_ptr = host.queue_find_by_id(dq_ptr, nzb_id);
-        if nzb_ptr != 0 {
+        if nzb_ptr.is_some() {
             let nzb = host.nzb_snap(nzb_ptr, false);
             if !nzb.skip_disk_write && !opts.skip_write {
                 rename_files_host(&host, &opts, dq_ptr, nzb_ptr, &par_hashes);
@@ -602,7 +603,7 @@ fn rename_files_host(
     host: &crate::queuesubsys_host::QueueSubsysHost,
     opts: &crate::queuesubsys_host::GlobalOptsSnap,
     dq_ptr: usize,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
     par_hashes: &[(std::ffi::CString, std::ffi::CString)],
 ) {
     use crate::queuesubsys_host::*;
@@ -634,7 +635,7 @@ fn rename_files_host(
 #[cfg(unix)]
 fn check_need_rename_pars_host(
     host: &crate::queuesubsys_host::QueueSubsysHost,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
 ) -> bool {
     let mut owned: Vec<(std::ffi::CString, std::ffi::CString)> = Vec::new();
     let flen = host.nzb_file_len(nzb_ptr);
@@ -698,7 +699,7 @@ fn resolve_new_name(
 #[cfg(unix)]
 fn try_create_hard_link_host(
     host: &crate::queuesubsys_host::QueueSubsysHost,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
     file_ptr: FileRef,
     filename: &[u8],
     old_output_filename: &[u8],
@@ -754,7 +755,7 @@ fn try_create_hard_link_host(
 fn rename_files_in_progress_host(
     host: &crate::queuesubsys_host::QueueSubsysHost,
     opts: &crate::queuesubsys_host::GlobalOptsSnap,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
     par_hashes: &[(std::ffi::CString, std::ffi::CString)],
     need_pars: bool,
     vol: &mut i32,
@@ -821,7 +822,7 @@ fn rename_files_in_progress_host(
 fn rename_completed_files_host(
     host: &crate::queuesubsys_host::QueueSubsysHost,
     opts: &crate::queuesubsys_host::GlobalOptsSnap,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
     par_hashes: &[(std::ffi::CString, std::ffi::CString)],
     need_pars: bool,
     vol: &mut i32,
@@ -889,7 +890,7 @@ fn rename_completed_files_host(
 #[cfg(unix)]
 fn rename_file_on_disk(
     host: &crate::queuesubsys_host::QueueSubsysHost,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
     old_full: &[u8],
     new_full: &[u8],
 ) -> bool {

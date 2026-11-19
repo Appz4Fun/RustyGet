@@ -4,6 +4,7 @@
 //! `DeadPostings`, `NzbFetcher`, `DonorScore`, `DupeIdentity`, `DupeSearch`, and
 //! `Fleet` in `daemon/util/Util.h`.
 
+use crate::queuesubsys_host::NzbRef;
 use crate::cstr;
 use crate::options::OptStr;
 use std::collections::{BTreeMap, BTreeSet};
@@ -493,20 +494,21 @@ pub(crate) unsafe extern "C" fn native_dupe_host(
             let Some(qh) = crate::ffi::queue_host() else {
                 return 0;
             };
+            let nzb = NzbRef::from_addr(p2);
             if a1 == 0 {
                 let s1_b = unsafe { cstr::owned(s1) };
-                qh.nzb_set_str(p2, crate::queuesubsys_host::NZB_STR_DUPE_KEY, &s1_b);
+                qh.nzb_set_str(nzb, crate::queuesubsys_host::NZB_STR_DUPE_KEY, &s1_b);
                 let s2_b = if s2.is_null() {
                     None
                 } else {
                     Some(unsafe { CStr::from_ptr(s2).to_bytes() })
                 };
-                qh.nzb_set_param(p2, OWNED_KEY_PARAM, s2_b);
+                qh.nzb_set_param(nzb, OWNED_KEY_PARAM, s2_b);
                 let primary = crate::dupewatch::primary_score();
-                if (a2 & 2) != 0 && qh.nzb_snap(p2, false).dupe_score < primary {
-                    qh.nzb_set_int(p2, crate::queuesubsys_host::NZB_INT_DUPE_SCORE, primary);
+                if (a2 & 2) != 0 && qh.nzb_snap(nzb, false).dupe_score < primary {
+                    qh.nzb_set_int(nzb, crate::queuesubsys_host::NZB_INT_DUPE_SCORE, primary);
                 }
-                qh.nzb_set_int(p2, crate::queuesubsys_host::NZB_INT_CHANGED, 1);
+                qh.nzb_set_int(nzb, crate::queuesubsys_host::NZB_INT_CHANGED, 1);
                 if (a2 & 1) != 0 {
                     qh.dq_history_changed(p1);
                     qh.dq_save(p1);
@@ -517,11 +519,11 @@ pub(crate) unsafe extern "C" fn native_dupe_host(
             }
             if a1 == 1 {
                 let s1_b = unsafe { cstr::owned(s1) };
-                qh.nzb_add_message(p2, a2, &s1_b);
+                qh.nzb_add_message(nzb, a2, &s1_b);
                 return 0;
             }
             if a1 == 2 {
-                let queued = qh.queue_find_by_id(p1, a2) != 0;
+                let queued = qh.queue_find_by_id(p1, a2).is_some();
                 let action = if queued {
                     crate::queuesubsys_host::EA_GROUP_FINAL_DELETE
                 } else {
@@ -661,7 +663,7 @@ fn with_guarded_queue<R, F: FnOnce(usize) -> R>(
 
 #[derive(Clone, Default)]
 struct NzbSnap {
-    ptr: usize,
+    ptr: NzbRef,
     id: i32,
     kind: i32,
     deleting: bool,
@@ -694,9 +696,9 @@ fn dq_counts(_host_ctx: *mut c_void, _host_cb: DupeHostFn, dq_ptr: usize) -> (us
     (qh.queue_len(dq_ptr), qh.history_len(dq_ptr))
 }
 
-fn dq_queue_at(_host_ctx: *mut c_void, _host_cb: DupeHostFn, dq_ptr: usize, idx: usize) -> usize {
+fn dq_queue_at(_host_ctx: *mut c_void, _host_cb: DupeHostFn, dq_ptr: usize, idx: usize) -> NzbRef {
     let Some(qh) = crate::ffi::queue_host() else {
-        return 0;
+        return NzbRef::NONE;
     };
     qh.queue_at(dq_ptr, idx)
 }
@@ -706,15 +708,15 @@ fn dq_history_at(
     _host_cb: DupeHostFn,
     dq_ptr: usize,
     idx: usize,
-) -> (i32, i32, i64, usize) {
+) -> (i32, i32, i64, NzbRef) {
     let Some(qh) = crate::ffi::queue_host() else {
-        return (0, 0, 0, 0);
+        return (0, 0, 0, NzbRef::NONE);
     };
     let h = qh.history_at(dq_ptr, idx);
     let nzb_ptr = if h.kind == crate::queuesubsys_host::HK_NZB {
-        h.inner_ptr
+        h.nzb()
     } else {
-        0
+        NzbRef::NONE
     };
     (h.id, h.kind, h.time, nzb_ptr)
 }
@@ -724,20 +726,20 @@ fn dq_find_nzb(
     _host_cb: DupeHostFn,
     dq_ptr: usize,
     nzb_id: i32,
-) -> Option<(usize, bool)> {
+) -> Option<(NzbRef, bool)> {
     let qh = crate::ffi::queue_host()?;
     let q_ptr = qh.queue_find_by_id(dq_ptr, nzb_id);
-    if q_ptr != 0 {
+    if q_ptr.is_some() {
         return Some((q_ptr, false));
     }
     let h_len = qh.history_len(dq_ptr);
     for idx in 0..h_len {
         let h = qh.history_at(dq_ptr, idx);
         if h.kind == crate::queuesubsys_host::HK_NZB
-            && h.inner_ptr != 0
-            && qh.nzb_snap(h.inner_ptr, false).id == nzb_id
+            && h.nzb().is_some()
+            && qh.nzb_snap(h.nzb(), false).id == nzb_id
         {
-            return Some((h.inner_ptr, true));
+            return Some((h.nzb(), true));
         }
     }
     None
@@ -746,7 +748,7 @@ fn dq_find_nzb(
 fn inspect_nzb(
     _host_ctx: *mut c_void,
     _host_cb: DupeHostFn,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
     with_health: bool,
 ) -> NzbSnap {
     let Some(qh) = crate::ffi::queue_host() else {
@@ -2285,16 +2287,16 @@ impl NzbgetRsDupeSearch {
         }
     }
 
-    pub fn download_queue_update(
+    pub(crate) fn download_queue_update(
         &self,
         action_kind: i32,
         dq_ptr: usize,
-        added_ptr: usize,
+        added_ptr: NzbRef,
         host_ctx: *mut c_void,
         host_cb: DupeHostFn,
     ) {
         // action_kind: 1 = eaNzbAdded, 2 = eaNzbNamed
-        if (action_kind != 1 && action_kind != 2) || added_ptr == 0 || dq_ptr == 0 {
+        if (action_kind != 1 && action_kind != 2) || added_ptr.is_none() || dq_ptr == 0 {
             return;
         }
         let opts = read_host_opts(host_ctx, host_cb);
@@ -2321,7 +2323,7 @@ impl NzbgetRsDupeSearch {
             let mut parent: Option<(i32, i32)> = None;
             for i in 0..q_len {
                 let item_ptr = dq_queue_at(host_ctx, host_cb, dq_ptr, i);
-                if item_ptr == 0 {
+                if item_ptr.is_none() {
                     continue;
                 }
                 let item = inspect_nzb(host_ctx, host_cb, item_ptr, false);
@@ -2362,7 +2364,7 @@ impl NzbgetRsDupeSearch {
             let mut found_ids = Vec::new();
             for i in 0..q_len {
                 let p = dq_queue_at(host_ctx, host_cb, dq_ptr, i);
-                if p != 0 {
+                if p.is_some() {
                     let s = inspect_nzb(host_ctx, host_cb, p, false);
                     if s.kind == 0 {
                         found_ids.push(s.id);
@@ -2372,7 +2374,7 @@ impl NzbgetRsDupeSearch {
             let recent = opts.now - RECENT_FAILURE_SEC;
             for i in 0..h_len {
                 let (_, h_kind, h_time, p) = dq_history_at(host_ctx, host_cb, dq_ptr, i);
-                if h_kind == 1 && h_time >= recent && p != 0 {
+                if h_kind == 1 && h_time >= recent && p.is_some() {
                     let s = inspect_nzb(host_ctx, host_cb, p, false);
                     if !s.dupe_success {
                         found_ids.push(s.id);
@@ -2466,14 +2468,14 @@ impl NzbgetRsDupeSearch {
         let (q_len, h_len) = dq_counts(host_ctx, host_cb, dq_ptr);
         for i in 0..q_len {
             let p = dq_queue_at(host_ctx, host_cb, dq_ptr, i);
-            if p != 0 {
+            if p.is_some() {
                 let item = inspect_nzb(host_ctx, host_cb, p, false);
                 consider_item(&item, false);
             }
         }
         for i in 0..h_len {
             let (_, h_kind, _, p) = dq_history_at(host_ctx, host_cb, dq_ptr, i);
-            if h_kind == 1 && p != 0 {
+            if h_kind == 1 && p.is_some() {
                 let item = inspect_nzb(host_ctx, host_cb, p, false);
                 consider_item(&item, true);
             }
@@ -2596,7 +2598,7 @@ impl NzbgetRsDupeSearch {
                         0,
                         c_int::from(history),
                         dq_ptr,
-                        pick.ptr,
+                        pick.ptr.addr(),
                         key_c.as_ptr() as *const c_char,
                         owned_c.as_ptr() as *const c_char,
                         ptr::null_mut(),
@@ -2671,7 +2673,7 @@ impl NzbgetRsDupeSearch {
         let (q_len, h_len) = dq_counts(host_ctx, host_cb, dq_ptr);
         for i in 0..q_len {
             let p = dq_queue_at(host_ctx, host_cb, dq_ptr, i);
-            if p != 0 && p != pick.ptr {
+            if p.is_some() && p != pick.ptr {
                 let s = inspect_nzb(host_ctx, host_cb, p, false);
                 if s.dupe_score > pick.dupe_score || s.has_dupe_fleet {
                     others.push((s, false));
@@ -2680,7 +2682,7 @@ impl NzbgetRsDupeSearch {
         }
         for i in 0..h_len {
             let (_, h_kind, _, p) = dq_history_at(host_ctx, host_cb, dq_ptr, i);
-            if h_kind == 1 && p != 0 && p != pick.ptr {
+            if h_kind == 1 && p.is_some() && p != pick.ptr {
                 let s = inspect_nzb(host_ctx, host_cb, p, false);
                 if s.dupe_score > pick.dupe_score || s.has_dupe_fleet {
                     others.push((s, true));
@@ -2830,7 +2832,7 @@ impl NzbgetRsDupeSearch {
                     0,
                     2, // !history (bit 0 = 0), bump_base_score (bit 1 = 2)
                     dq_ptr,
-                    pick.ptr,
+                    pick.ptr.addr(),
                     key_c.as_ptr() as *const c_char,
                     owned_c
                         .as_ref()
@@ -2879,7 +2881,7 @@ impl NzbgetRsDupeSearch {
                 1,
                 MK_INFO,
                 dq_ptr,
-                pick.ptr,
+                pick.ptr.addr(),
                 msg_c.as_ptr() as *const c_char,
                 ptr::null(),
                 ptr::null_mut(),
@@ -4563,7 +4565,7 @@ impl NzbgetRsDupeSearch {
                                 1,
                                 MK_INFO,
                                 dq_ptr,
-                                cur_ptr,
+                                cur_ptr.addr(),
                                 rmsg_c.as_ptr() as *const c_char,
                                 ptr::null(),
                                 ptr::null_mut(),
@@ -4600,7 +4602,7 @@ impl NzbgetRsDupeSearch {
                 return false;
             };
             let ptr = qh.queue_find_by_id(dq_ptr, job.nzb_id);
-            if ptr == 0 {
+            if ptr.is_none() {
                 return false;
             }
             let snap = qh.nzb_snap(ptr, false);
@@ -4818,7 +4820,7 @@ impl NzbgetRsDupeSearch {
                 return Err(&b"the queue is not available"[..]);
             };
             let pick_ptr = qh.queue_find_by_id(dq_ptr, job.nzb_id);
-            if pick_ptr == 0 {
+            if pick_ptr.is_none() {
                 return Err(&b"it already left the queue"[..]);
             }
             let snap = qh.nzb_snap(pick_ptr, false);
@@ -4851,7 +4853,7 @@ impl NzbgetRsDupeSearch {
                 return Err(&b"the backup is not in the history"[..]);
             };
             qh.nzb_set_int(
-                backup.inner_ptr,
+                backup.nzb(),
                 crate::queuesubsys_host::NZB_INT_DUPE_HINT,
                 crate::queuesubsys_host::DH_REDOWNLOAD_AUTO,
             );
@@ -5149,7 +5151,7 @@ impl NzbgetRsDupeSearch {
                     1,
                     kind,
                     dq_ptr,
-                    nzb_ptr,
+                    nzb_ptr.addr(),
                     msg_c.as_ptr() as *const c_char,
                     ptr::null(),
                     ptr::null_mut(),
@@ -5751,7 +5753,7 @@ pub(crate) fn notify_active_dupesearch_name_changed(nzb_id: i32) {
 pub(crate) fn notify_active_dupesearch_queue_update(
     action_kind: i32,
     dq_ptr: usize,
-    added_ptr: usize,
+    added_ptr: NzbRef,
 ) {
     let ds = DAEMON_DUPESEARCH
         .lock()
@@ -6052,14 +6054,14 @@ pub unsafe fn fleet_append(
         let (q_len, h_len) = dq_counts(host_ctx, host_cb, dq_ptr);
         for i in 0..q_len {
             let p = dq_queue_at(host_ctx, host_cb, dq_ptr, i);
-            if p != 0 {
+            if p.is_some() {
                 let s = inspect_nzb(host_ctx, host_cb, p, false);
                 consider(&s, true);
             }
         }
         for i in 0..h_len {
             let (_, h_kind, _, p) = dq_history_at(host_ctx, host_cb, dq_ptr, i);
-            if h_kind == 1 && p != 0 {
+            if h_kind == 1 && p.is_some() {
                 let s = inspect_nzb(host_ctx, host_cb, p, false);
                 consider(&s, false);
             }
@@ -6143,7 +6145,7 @@ pub unsafe fn fleet_append(
             let (_, h_len) = dq_counts(host_ctx, host_cb, dq_ptr);
             for i in 0..h_len {
                 let (_, h_kind, _, p) = dq_history_at(host_ctx, host_cb, dq_ptr, i);
-                if h_kind != 1 || p == 0 {
+                if h_kind != 1 || p.is_none() {
                     continue;
                 }
                 let item = inspect_nzb(host_ctx, host_cb, p, false);
@@ -6737,7 +6739,7 @@ pub unsafe fn fleet_append(
         let (_, h_len) = dq_counts(host_ctx, host_cb, dq_ptr);
         for i in 0..h_len {
             let (_, h_kind, _, p) = dq_history_at(host_ctx, host_cb, dq_ptr, i);
-            if h_kind != 1 || p == 0 {
+            if h_kind != 1 || p.is_none() {
                 continue;
             }
             let item = inspect_nzb(host_ctx, host_cb, p, false);

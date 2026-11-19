@@ -3308,8 +3308,15 @@ where
 /// `DupeStreamRepair::SelectExtractedInner`: walks `dir` recursively without following
 /// symlinks, returning `(selected_path, found_symlink)`.
 pub fn select_extracted_inner(dir: &[u8], inner_size: i64, inner_name: &[u8]) -> (Vec<u8>, bool) {
+    let (path, found_symlink, _) = pick_extracted_inner(dir, inner_size, inner_name);
+    (path, found_symlink)
+}
+
+/// [`select_extracted_inner`], also telling whether the walk saw every extracted file: only
+/// then does an empty pick mean no file has `inner_size`.
+fn pick_extracted_inner(dir: &[u8], inner_size: i64, inner_name: &[u8]) -> (Vec<u8>, bool, bool) {
     if dir.is_empty() || inner_size < 0 {
-        return (Vec::new(), false);
+        return (Vec::new(), false, false);
     }
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
@@ -3320,28 +3327,35 @@ pub fn select_extracted_inner(dir: &[u8], inner_size: i64, inner_name: &[u8]) ->
     let mut extracted_bytes: i64 = 0;
     let mut matches: Vec<Vec<u8>> = Vec::new();
     let mut stack = vec![PathBuf::from(OsStr::from_bytes(dir))];
+    let mut walked_all = true;
 
     while let Some(cur) = stack.pop() {
         let rd = match std::fs::read_dir(&cur) {
             Ok(rd) => rd,
-            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => continue,
-            Err(_) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                walked_all = false;
+                continue;
+            }
+            Err(_) => {
+                walked_all = false;
+                break;
+            }
         };
         for entry_res in rd {
             let Ok(entry) = entry_res else {
-                return (Vec::new(), false);
+                return (Vec::new(), false, false);
             };
             entry_count += 1;
             if entry_count > MAX_EXTRACTED_ENTRIES {
-                return (Vec::new(), false);
+                return (Vec::new(), false, false);
             }
             let path = entry.path();
             let Ok(sym_meta) = std::fs::symlink_metadata(&path) else {
-                return (Vec::new(), true);
+                return (Vec::new(), true, false);
             };
             let ft = sym_meta.file_type();
             if ft.is_symlink() {
-                return (Vec::new(), true);
+                return (Vec::new(), true, false);
             }
             if ft.is_dir() {
                 stack.push(path);
@@ -3355,7 +3369,7 @@ pub fn select_extracted_inner(dir: &[u8], inner_size: i64, inner_name: &[u8]) ->
                 || size > MAX_DECOMPRESS_BYTES
                 || extracted_bytes > MAX_DECOMPRESS_BYTES - size
             {
-                return (Vec::new(), false);
+                return (Vec::new(), false, false);
             }
             extracted_bytes += size;
             if size == inner_size {
@@ -3365,17 +3379,17 @@ pub fn select_extracted_inner(dir: &[u8], inner_size: i64, inner_name: &[u8]) ->
     }
 
     if matches.is_empty() {
-        return (Vec::new(), false);
+        return (Vec::new(), false, walked_all);
     }
     matches.sort();
     if !inner_name.is_empty() {
         for m in &matches {
             if locale_casecmp(base_file_name(m), inner_name) == std::cmp::Ordering::Equal {
-                return (m.clone(), false);
+                return (m.clone(), false, walked_all);
             }
         }
     }
-    (matches.into_iter().next().unwrap(), false)
+    (matches.into_iter().next().unwrap(), false, walked_all)
 }
 
 /// Port of `DupeStreamRepair::BuildDonorKey`: builds a length-prefixed canonical key for a donor NZB
@@ -5585,6 +5599,62 @@ pub enum TargetMessageKind {
     Detail = 3,
 }
 
+/// The set holding the most bytes, which is the media payload of a release.
+fn largest_set(members: &[SetMember], sets: &[MemberSet]) -> Option<usize> {
+    let set_bytes = |set: &MemberSet| -> i64 {
+        set.members
+            .iter()
+            .map(|&i| members.get(i as usize).map_or(0, |m| m.size.max(0)))
+            .sum()
+    };
+    (0..sets.len()).max_by_key(|&i| (set_bytes(&sets[i]), std::cmp::Reverse(i)))
+}
+
+/// Whether a donor's media payload of `donor_size` shows another video than this release's of
+/// `target_size`: only when the donor's media set mapped (`all_mapped`), so its size is known.
+fn media_size_differs(all_mapped: bool, donor_size: Option<i64>, target_size: Option<i64>) -> bool {
+    all_mapped && donor_size.is_some() && target_size.is_some() && donor_size != target_size
+}
+
+/// Whether a set failed to map only because its data is compressed (a zip entry or RAR file
+/// not stored): a fact of the archive, not a failed read. A 7z is told by its LZMA2 probe, as
+/// raw chunks in it can still be lent.
+fn is_compressed_skip(reason: &str) -> bool {
+    matches!(
+        reason,
+        "compressed zip entry (only stored maps)"
+            | "compressed archive (only store mode is mappable)"
+    )
+}
+
+/// Whether `target` differs from `donor` at a byte the target holds data in: a zero byte of the
+/// target may be one not written yet, so it never counts.
+fn differs_where_written(target: &[u8], donor: &[u8]) -> bool {
+    target.iter().zip(donor).any(|(&t, &d)| t != 0 && t != d)
+}
+
+/// What an identity probe of a donor against the target found (see
+/// `RepairSetData::check_plain_from_source`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DonorCheck {
+    /// The donor's bytes match the target's.
+    Same,
+    /// Bytes compared in full differ, or the donor's inner file has another size.
+    Differs,
+    /// The probe could not run in full; it says nothing.
+    Inconclusive,
+}
+
+impl DonorCheck {
+    fn same_or_inconclusive(same: bool) -> Self {
+        if same {
+            Self::Same
+        } else {
+            Self::Inconclusive
+        }
+    }
+}
+
 /// Target member files opened read-write on demand (`TargetSetFiles` in `StreamRepair.h`).
 pub trait TargetFileSet {
     fn is_stopped(&self) -> bool {
@@ -5694,20 +5764,35 @@ impl RepairSetData {
         target_files: &mut dyn TargetFileSet,
         windows: &[NzbgetRsByteRange],
     ) -> bool {
+        self.check_plain_from_source(plaintext, target_files, windows) == DonorCheck::Same
+    }
+
+    /// [`Self::verify_plain_from_source`] with its verdict told apart: `Differs` only when a
+    /// probe compared donor bytes that arrived in full with target bytes on disk that hold
+    /// data and they differ. A probe that could not run in full (no target bytes mapped near
+    /// the damage, a target volume not on disk yet or still unwritten there, a donor read cut
+    /// short, too few bytes compared) is `Inconclusive`: it says nothing about the video.
+    pub fn check_plain_from_source(
+        &self,
+        plaintext: &dyn ContentSource,
+        target_files: &mut dyn TargetFileSet,
+        windows: &[NzbgetRsByteRange],
+    ) -> DonorCheck {
         let Some(target_map) = &self.map else {
-            return false;
+            return DonorCheck::Inconclusive;
         };
         let required = self.plain_compare_floor(windows);
         if required < 0 {
-            return false;
+            return DonorCheck::Inconclusive;
         }
         let mut total_compared: i64 = 0;
         let mut saw_varied_data = false;
         let mut donor_data = Vec::new();
+        let mut target_data = Vec::new();
 
         for &window in windows {
             if target_files.is_stopped() {
-                return false;
+                return DonorCheck::Inconclusive;
             }
             if total_compared >= required && saw_varied_data {
                 break;
@@ -5729,13 +5814,22 @@ impl RepairSetData {
                 );
                 let has_file = target_files.has_file(piece.member_index);
                 if inner_pos.len() != 1 || !has_file {
-                    return false;
+                    return DonorCheck::Inconclusive;
                 }
                 let rel = (inner_pos[0].offset - window.offset) as usize;
                 let len = piece.size as usize;
                 let piece_data = &donor_data[rel..rel + len];
                 if !target_files.compare_file(piece.member_index, piece.offset, piece_data) {
-                    return false;
+                    // Differs only at a byte the target holds data in: a file written ahead
+                    // holds zeros where its articles have not arrived yet, also inside a piece
+                    // that is partly written.
+                    target_data.resize(len, 0);
+                    let read = target_files.read_file(piece.member_index, piece.offset, &mut target_data);
+                    return if read && differs_where_written(&target_data, piece_data) {
+                        DonorCheck::Differs
+                    } else {
+                        DonorCheck::Inconclusive
+                    };
                 }
                 total_compared += piece.size;
                 if !saw_varied_data && piece.size > 1 {
@@ -5744,7 +5838,11 @@ impl RepairSetData {
             }
         }
 
-        total_compared >= required && saw_varied_data
+        if total_compared >= required && saw_varied_data {
+            DonorCheck::Same
+        } else {
+            DonorCheck::Inconclusive
+        }
     }
 
     /// Encrypted-target probe in ciphertext space (`StreamRepairController::VerifyEncryptedFromSource`).
@@ -5872,6 +5970,29 @@ impl RepairSetData {
     ) -> bool {
         let plaintext = DonorInnerPlaintextSource::new(donor_map, donor_sources);
         self.verify_encrypted_from_source(&plaintext, target_files, windows)
+    }
+
+    /// [`Self::verify_donor_set`] with its verdict told apart (see
+    /// [`Self::check_plain_from_source`]); an encrypted target is never told `Differs`.
+    pub fn check_donor_set(
+        &self,
+        donor_map: &ContentMap,
+        donor_sources: &dyn ContentSourceSet,
+        target_files: &mut dyn TargetFileSet,
+    ) -> DonorCheck {
+        let Some(target_map) = &self.map else {
+            return DonorCheck::Inconclusive;
+        };
+        if target_map.encrypted() {
+            return DonorCheck::same_or_inconclusive(self.verify_donor_set(
+                donor_map,
+                donor_sources,
+                target_files,
+            ));
+        }
+        let windows = self.build_probe_windows();
+        let plaintext = DonorInnerPlaintextSource::new(donor_map, donor_sources);
+        self.check_plain_from_source(&plaintext, target_files, &windows)
     }
 
     /// Verifies a mapped donor set against this target set (`StreamRepairController::VerifyDonorSet`).
@@ -6190,6 +6311,32 @@ impl RepairSetData {
         }
         let windows = self.build_probe_windows();
         self.verify_encrypted_from_source(donor_inner, target_files, &windows)
+    }
+
+    /// [`Self::verify_donor_inner`] with its verdict told apart (see
+    /// [`Self::check_plain_from_source`]): an inner file of another size `Differs`; an
+    /// encrypted target is never told `Differs` by its bytes.
+    pub fn check_donor_inner(
+        &self,
+        donor_inner: &dyn ContentSource,
+        donor_inner_size: i64,
+        target_files: &mut dyn TargetFileSet,
+    ) -> DonorCheck {
+        let Some(target_map) = &self.map else {
+            return DonorCheck::Inconclusive;
+        };
+        if donor_inner_size != target_map.inner_size() {
+            return DonorCheck::Differs;
+        }
+        if target_map.encrypted() {
+            return DonorCheck::same_or_inconclusive(self.verify_donor_inner_file_encrypted(
+                donor_inner,
+                donor_inner_size,
+                target_files,
+            ));
+        }
+        let windows = self.build_probe_windows();
+        self.check_plain_from_source(donor_inner, target_files, &windows)
     }
 
     /// Unified M4 identity probe (dispatches to encrypted or plaintext verification).
@@ -8990,6 +9137,21 @@ pub struct CrossPackRepairSession {
     /// Dead volumes whose inner bytes are borrowed into scratch files (see `deadvolume`).
     dead_fills: Vec<DeadFill>,
     dead_nzb_id: i32,
+    /// What the donor of the last [`Self::process_donor`] call showed of the video: `Some(true)`
+    /// when its content identity was confirmed, `Some(false)` when a check that compared in
+    /// full did not match or its media payload has another size, `None` otherwise.
+    donor_identity: Option<bool>,
+    /// Whether the donor of the last [`Self::process_donor`] call holds its media payload
+    /// compressed, which only decompression can lend from (see [`Self::donor_compressed`]).
+    donor_compressed: bool,
+    /// Set by `exec_lzma2_raw_repair` when the 7z it probed has no raw chunks at all.
+    lzma2_compressed_throughout: bool,
+    /// The last raw-LZMA2 attempt read a 7z header whose inner file has another size than the
+    /// target's: the 7z holds another video.
+    lzma2_other_size: bool,
+    /// The repair set holding this release's media payload during the current
+    /// [`Self::process_donor`] call: only checks against it tell the donor's video apart.
+    media_repair_set: Option<usize>,
 }
 
 /// What live stream repair knows about the download beyond its repair jobs.
@@ -9190,6 +9352,11 @@ impl CrossPackRepairSession {
             tls_enabled,
             dead_fills,
             dead_nzb_id: dead_context.nzb_id.unwrap_or(0),
+            donor_identity: None,
+            donor_compressed: false,
+            lzma2_compressed_throughout: false,
+            lzma2_other_size: false,
+            media_repair_set: None,
         })
     }
 
@@ -9201,6 +9368,43 @@ impl CrossPackRepairSession {
 
     pub fn target_holes(&self) -> &[Vec<NzbgetRsByteRange>] {
         &self.target_holes
+    }
+
+    /// See `donor_identity`: what the donor of the last [`Self::process_donor`] call showed.
+    pub fn donor_identity(&self) -> Option<bool> {
+        self.donor_identity
+    }
+
+    /// True when the donor of the last [`Self::process_donor`] call ran without decompression
+    /// and holds its media payload compressed (a zip or RAR not stored, or a 7z whose LZMA2 data
+    /// has no raw chunks): its bytes cannot be lent until it is decompressed.
+    pub fn donor_compressed(&self) -> bool {
+        self.donor_compressed
+    }
+
+    /// True while a dead volume of the download still waits for its borrowed bytes.
+    pub fn has_pending_dead_fills(&self) -> bool {
+        self.dead_fills.iter().any(|d| !d.done)
+    }
+
+    /// Records a donor's identity check against repair set `repair_set_idx`: a confirmed one is
+    /// never undone by another set of the same donor that did not match, and an inconclusive
+    /// one records nothing. Only a check against the media payload counts: a matching sample or
+    /// subs set says nothing about the movie.
+    fn note_donor_identity(&mut self, repair_set_idx: usize, check: DonorCheck) {
+        if self
+            .media_repair_set
+            .is_some_and(|media| media != repair_set_idx)
+        {
+            return;
+        }
+        match check {
+            DonorCheck::Same => self.donor_identity = Some(true),
+            DonorCheck::Differs if self.donor_identity.is_none() => {
+                self.donor_identity = Some(false)
+            }
+            _ => {}
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -9215,6 +9419,8 @@ impl CrossPackRepairSession {
         allow_decompress: bool,
         env: &mut dyn CrossPackDonorEnv,
     ) {
+        self.donor_identity = None;
+        self.donor_compressed = false;
         {
             let mut label = b"Cross-packing repair from duplicate ".to_vec();
             label.extend_from_slice(donor_info_name);
@@ -9231,6 +9437,21 @@ impl CrossPackRepairSession {
         let env_cell = std::cell::RefCell::new(env);
         let donor_sources = DonorSetSources::new(&env_cell, donor_article_sizes.to_vec());
 
+        // The media payloads (largest sets) of the donor and of this release: only they are told
+        // apart by size, as a sample or extras set says nothing about the video.
+        let donor_media = largest_set(&donor_members, &donor_sets);
+        let target_sets = ContentMapper::group_sets(&self.set_members);
+        // (A repair set of dead volumes adds their scratch files to the members, so the set is
+        // found by its first volume.)
+        let target_media = largest_set(&self.set_members, &target_sets).and_then(|media| {
+            let first = target_sets[media].members.first()?;
+            self.repair_sets
+                .iter()
+                .position(|r| r.map.is_some() && r.set.members.contains(first))
+        });
+        self.media_repair_set = target_media;
+        let mut media_extracted_unsized = false;
+        let mut set_compressed: Vec<bool> = vec![false; donor_sets.len()];
         let mut set_maps: Vec<Option<ContentMap>> = vec![None; donor_sets.len()];
         let mut set_skips: Vec<String> = vec![String::new(); donor_sets.len()];
         let mut set_tried: Vec<bool> = vec![false; donor_sets.len()];
@@ -9300,6 +9521,8 @@ impl CrossPackRepairSession {
                         }
                     }
                     donor_sources.set_fetch_budget(None);
+                    set_compressed[set_index] = set_maps[set_index].is_none()
+                        && is_compressed_skip(&set_skips[set_index]);
                 }
 
                 let target_inner_size = self.repair_sets[repair_set_idx]
@@ -9312,7 +9535,9 @@ impl CrossPackRepairSession {
                 if !size_matches {
                     // A 7z whose LZMA2 coder stored the data in raw chunks holds the inner
                     // bytes in plain form: borrow just the articles around each hole.
-                    if donor_set.format == MemberFormat::SevenZip
+                    self.lzma2_compressed_throughout = false;
+                    self.lzma2_other_size = false;
+                    let raw_filled = donor_set.format == MemberFormat::SevenZip
                         && set_maps[set_index].is_none()
                         && self.exec_lzma2_raw_repair(
                             repair_set_idx,
@@ -9321,9 +9546,12 @@ impl CrossPackRepairSession {
                             &donor_sources,
                             donor_info_name,
                             &env_cell,
-                        )
-                        && self.repair_sets[repair_set_idx].inner_holes.is_empty()
-                    {
+                        );
+                    set_compressed[set_index] |= self.lzma2_compressed_throughout;
+                    media_extracted_unsized |= self.lzma2_other_size
+                        && donor_media == Some(set_index)
+                        && target_media == Some(repair_set_idx);
+                    if raw_filled && self.repair_sets[repair_set_idx].inner_holes.is_empty() {
                         // Everything is filled. Holes the raw chunks did not reach (stretches
                         // the coder compressed) are left to the decompression step below.
                         continue;
@@ -9339,7 +9567,7 @@ impl CrossPackRepairSession {
                         key.push(b'|');
                         key.extend_from_slice(first_donor_name);
                         if self.decompress_tried.insert((repair_set_idx, key)) {
-                            self.exec_decompress_repair(
+                            let none_sized = self.exec_decompress_repair(
                                 repair_set_idx,
                                 &donor_members,
                                 donor_set,
@@ -9348,24 +9576,29 @@ impl CrossPackRepairSession {
                                 donor_password,
                                 &env_cell,
                             );
+                            media_extracted_unsized |= none_sized
+                                && donor_media == Some(set_index)
+                                && target_media == Some(repair_set_idx);
                         }
                     }
                     continue;
                 }
 
                 let donor_map = set_maps[set_index].as_ref().unwrap();
-                let verified = {
+                let check = {
                     let mut target_adapter = DiskTargetFileSetAdapter {
                         files: &mut self.target_files,
                         members: &self.set_members,
                         env: &env_cell,
                     };
-                    self.repair_sets[repair_set_idx].verify_donor_set(
+                    self.repair_sets[repair_set_idx].check_donor_set(
                         donor_map,
                         &donor_sources,
                         &mut target_adapter,
                     )
                 };
+                self.note_donor_identity(repair_set_idx, check);
+                let verified = check == DonorCheck::Same;
                 if !verified {
                     let first_donor_name = &donor_members[donor_set.members[0] as usize].name;
                     let inner_name = self.repair_sets[repair_set_idx]
@@ -9424,6 +9657,19 @@ impl CrossPackRepairSession {
                         .emit_message_bytes(TargetMessageKind::Info, &msg);
                 }
             }
+        }
+        if let (Some(media), Some(target)) = (donor_media, target_media) {
+            // A media payload of another size is another video. Only the media set has to have
+            // mapped: an extra set (subs, a sample) that did not says nothing about the video.
+            let all_mapped = set_maps[media].is_some();
+            let donor_size = set_maps[media].as_ref().map(ContentMap::inner_size);
+            let target_size = self.repair_sets[target].map.as_ref().map(ContentMap::inner_size);
+            if media_extracted_unsized || media_size_differs(all_mapped, donor_size, target_size) {
+                self.note_donor_identity(target, DonorCheck::Differs);
+            }
+        }
+        if let Some(media) = donor_media {
+            self.donor_compressed = !allow_decompress && set_compressed[media];
         }
         self.rebuild_container_tails(&env_cell);
         self.finish_dead_fills(&env_cell);
@@ -9737,6 +9983,8 @@ impl CrossPackRepairSession {
             }
         };
         if layout.inner_size != target_map.inner_size() {
+            // The size comes from the 7z header, so this is as sure as a mapped size.
+            self.lzma2_other_size = true;
             skip(env_cell, b"its inner file has a different size");
             return false;
         }
@@ -9747,6 +9995,7 @@ impl CrossPackRepairSession {
             pack_size: layout.pack_size,
         };
         if !raw_layout.looks_raw() {
+            self.lzma2_compressed_throughout = true;
             skip(
                 env_cell,
                 b"its LZMA2 data is compressed throughout (no raw chunks to borrow)",
@@ -9860,18 +10109,20 @@ impl CrossPackRepairSession {
         }
         let inner_source = InnerSource(&source);
 
-        let verified = {
+        let check = {
             let mut target_adapter = DiskTargetFileSetAdapter {
                 files: &mut self.target_files,
                 members: &self.set_members,
                 env: env_cell,
             };
-            self.repair_sets[repair_set_idx].verify_donor_inner(
+            self.repair_sets[repair_set_idx].check_donor_inner(
                 &inner_source,
                 layout.inner_size,
                 &mut target_adapter,
             )
         };
+        self.note_donor_identity(repair_set_idx, check);
+        let verified = check == DonorCheck::Same;
         if !verified {
             skip(env_cell, b"content identity not confirmed");
             return false;
@@ -9912,6 +10163,9 @@ impl CrossPackRepairSession {
         written > 0
     }
 
+    /// Extracts the donor set and lends from its inner file. Returns true when the extraction
+    /// finished and none of the extracted files has the inner file's size: the set does not
+    /// hold that file. A failed or skipped extraction returns false, as it shows nothing.
     #[allow(clippy::too_many_arguments)]
     fn exec_decompress_repair(
         &mut self,
@@ -9922,7 +10176,7 @@ impl CrossPackRepairSession {
         donor_info_name: &[u8],
         donor_password: &[u8],
         env_cell: &std::cell::RefCell<&mut dyn CrossPackDonorEnv>,
-    ) {
+    ) -> bool {
         let set_name = &donor_members[donor_set.members[0] as usize].name;
         let mut main_volume: Option<&[u8]> = None;
         for &member_index in &donor_set.members {
@@ -9941,7 +10195,7 @@ impl CrossPackRepairSession {
             env_cell
                 .borrow_mut()
                 .emit_message_bytes(TargetMessageKind::Info, &msg);
-            return;
+            return false;
         };
 
         let mut temp_dir: Vec<u8>;
@@ -9974,7 +10228,7 @@ impl CrossPackRepairSession {
                 env_cell
                     .borrow_mut()
                     .emit_message_bytes(TargetMessageKind::Info, &msg);
-                return;
+                return false;
             }
             suffix += 1;
         }
@@ -10048,11 +10302,11 @@ impl CrossPackRepairSession {
             env_cell
                 .borrow_mut()
                 .emit_message_bytes(TargetMessageKind::Info, &msg);
-            return;
+            return false;
         }
 
         if env_cell.borrow_mut().is_stopped() {
-            return;
+            return false;
         }
         {
             let mut label = b"Decompressing duplicate ".to_vec();
@@ -10105,17 +10359,17 @@ impl CrossPackRepairSession {
             env_cell
                 .borrow_mut()
                 .emit_message_bytes(TargetMessageKind::Info, &msg);
-            return;
+            return false;
         }
 
         let (target_inner_size, target_inner_name) = {
             let Some(map) = &self.repair_sets[repair_set_idx].map else {
-                return;
+                return false;
             };
             (map.inner_size(), map.inner_name_bytes().to_vec())
         };
-        let (inner_path_bytes, found_symlink) =
-            select_extracted_inner(&extract_dir_bytes, target_inner_size, &target_inner_name);
+        let (inner_path_bytes, found_symlink, walked_all) =
+            pick_extracted_inner(&extract_dir_bytes, target_inner_size, &target_inner_name);
         if found_symlink {
             env_cell
                 .borrow_mut()
@@ -10131,7 +10385,8 @@ impl CrossPackRepairSession {
             env_cell
                 .borrow_mut()
                 .emit_message_bytes(TargetMessageKind::Info, &msg);
-            return;
+            // Every extracted file was seen and none has the inner file's size.
+            return walked_all;
         }
 
         let Ok(inner_file) = std::fs::File::open(crate::fsops::path(&inner_path_bytes)) else {
@@ -10143,23 +10398,25 @@ impl CrossPackRepairSession {
             env_cell
                 .borrow_mut()
                 .emit_message_bytes(TargetMessageKind::Info, &msg);
-            return;
+            return false;
         };
         let inner_size = file_size_bytes(&inner_path_bytes);
         let donor_source = DiskContentSource::new(inner_file, inner_size);
 
-        let verified = {
+        let check = {
             let mut target_adapter = DiskTargetFileSetAdapter {
                 files: &mut self.target_files,
                 members: &self.set_members,
                 env: env_cell,
             };
-            self.repair_sets[repair_set_idx].verify_donor_inner(
+            self.repair_sets[repair_set_idx].check_donor_inner(
                 &donor_source,
                 inner_size,
                 &mut target_adapter,
             )
         };
+        self.note_donor_identity(repair_set_idx, check);
+        let verified = check == DonorCheck::Same;
         if !verified {
             let mut msg = b"Skipping decompression of ".to_vec();
             msg.extend_from_slice(set_name);
@@ -10171,7 +10428,7 @@ impl CrossPackRepairSession {
             env_cell
                 .borrow_mut()
                 .emit_message_bytes(TargetMessageKind::Info, &msg);
-            return;
+            return false;
         }
 
         let donor_info_str = String::from_utf8_lossy(donor_info_name);
@@ -10203,6 +10460,7 @@ impl CrossPackRepairSession {
                 .borrow_mut()
                 .emit_message_bytes(TargetMessageKind::Info, &msg);
         }
+        false
     }
 }
 
@@ -15533,6 +15791,108 @@ mod tests {
         fn on_message(&mut self, kind: TargetMessageKind, text: &str) {
             self.messages.push((kind, text.to_string()));
         }
+    }
+
+    #[test]
+    fn a_donor_check_counts_as_differs_only_when_it_compared_in_full() {
+        let canonical: Vec<u8> = (0..512u32).map(|i| ((i * 37 + 11) & 0xff) as u8).collect();
+        let mut target_disk = canonical.clone();
+        target_disk[128..256].fill(0);
+        let members = vec![SetMember::new(b"movie.mkv", 512)];
+        let holes = vec![vec![NzbgetRsByteRange { offset: 128, size: 128 }]];
+        let mut target_src = MemorySourceSet::default();
+        target_src.push(target_disk.clone());
+        let repair_sets = ContentMapper::build_repair_sets(&members, &holes, &target_src, None);
+        let donor_members = vec![
+            SetMember::new(b"movie.mkv.001", 256),
+            SetMember::new(b"movie.mkv.002", 256),
+        ];
+        let donor_set = MemberSet { format: MemberFormat::Split, members: vec![0, 1] };
+        let donor = |first: Vec<u8>| {
+            let mut src = MemorySourceSet::default();
+            src.push(first);
+            src.push(canonical[256..].to_vec());
+            src
+        };
+        let good = donor(canonical[..256].to_vec());
+        let donor_map = ContentMapper::build_map(&donor_members, &donor_set, &good, None)
+            .expect("split donor should map");
+        let mut bad_first = canonical[..256].to_vec();
+        bad_first[0] ^= 0xff;
+        let bad = donor(bad_first);
+        let check = |src: &MemorySourceSet, disk: Vec<Vec<u8>>| {
+            repair_sets[0].check_donor_set(&donor_map, src, &mut MemTargetFileSet::new(disk))
+        };
+
+        assert_eq!(check(&good, vec![target_disk.clone()]), DonorCheck::Same);
+        assert_eq!(check(&bad, vec![target_disk.clone()]), DonorCheck::Differs);
+        // Not counted: the target volume the probe reads is not on disk yet ...
+        assert_eq!(check(&bad, vec![]), DonorCheck::Inconclusive);
+        // ... or is written ahead and holds nothing yet where the probe reads
+        let mut unwritten = target_disk.clone();
+        unwritten[..128].fill(0);
+        unwritten[256..].fill(0);
+        assert_eq!(check(&bad, vec![unwritten]), DonorCheck::Inconclusive);
+        // ... or the donor's bytes did not arrive
+        assert_eq!(check(&MemorySourceSet::default(), vec![target_disk.clone()]), DonorCheck::Inconclusive);
+        // A piece partly written holds zeros where its articles have not arrived: a donor that
+        // differs only there is not counted, one that differs where the target holds data is.
+        let mut partly = target_disk.clone();
+        partly[..64].fill(0);
+        assert_eq!(check(&bad, vec![partly.clone()]), DonorCheck::Inconclusive);
+        let mut bad_written = canonical[..256].to_vec();
+        bad_written[100] ^= 0xff;
+        assert_eq!(check(&donor(bad_written), vec![partly]), DonorCheck::Differs);
+        assert!(!differs_where_written(&[0, 5, 0], &[1, 5, 9]));
+        assert!(differs_where_written(&[0, 5, 0], &[0, 6, 0]));
+    }
+
+    #[test]
+    fn only_the_media_payload_of_another_size_tells_another_video() {
+        let members = |sizes: &[i64]| -> Vec<SetMember> {
+            sizes.iter().enumerate().map(|(i, &n)| SetMember::new(format!("f{i}"), n)).collect()
+        };
+        let set = |m: &[i32]| MemberSet { format: MemberFormat::Split, members: m.to_vec() };
+        // The video set (two volumes) outweighs a sample listed first.
+        let m = members(&[300, 1000, 1000]);
+        assert_eq!(largest_set(&m, &[set(&[0]), set(&[1, 2])]), Some(1));
+        assert_eq!(largest_set(&m, &[]), None);
+
+        // Another size counts only when every set of the donor mapped: an unmapped one (a
+        // compressed video beside a stored sample, say) could hold the video.
+        assert!(media_size_differs(true, Some(2000), Some(1999)));
+        assert!(!media_size_differs(false, Some(2000), Some(1999)));
+        assert!(!media_size_differs(true, Some(2000), Some(2000)));
+        assert!(!media_size_differs(true, None, Some(2000)));
+        assert!(!media_size_differs(true, Some(2000), None));
+    }
+
+    #[test]
+    fn only_a_compressed_payload_counts_as_one_live_repair_cannot_lend() {
+        assert!(is_compressed_skip("compressed zip entry (only stored maps)"));
+        assert!(is_compressed_skip("compressed archive (only store mode is mappable)"));
+        // A 7z is told by its LZMA2 probe (raw chunks can still be lent); a failed read or an
+        // encrypted header says nothing.
+        assert!(!is_compressed_skip("non-Copy 7z coder (only copy mode maps)"));
+        assert!(!is_compressed_skip("compressed 7z header"));
+        assert!(!is_compressed_skip(ContentMapper::SKIP_ENCRYPTED_HEADERS));
+        assert!(!is_compressed_skip(""));
+    }
+
+    #[test]
+    fn an_extraction_without_the_inner_size_is_told_only_after_a_full_walk() {
+        let dir = std::env::temp_dir().join(format!("pick-extracted-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub").join("movie.mkv"), vec![1u8; 1000]).unwrap();
+        let dir_bytes = dir.as_os_str().as_encoded_bytes().to_vec();
+        let (path, link, walked) = pick_extracted_inner(&dir_bytes, 1000, b"movie.mkv");
+        assert!(!path.is_empty() && !link && walked);
+        let (path, link, walked) = pick_extracted_inner(&dir_bytes, 999, b"movie.mkv");
+        assert!(path.is_empty() && !link && walked);
+        let (path, _, walked) = pick_extracted_inner(&dir_bytes.iter().chain(b"-gone").copied().collect::<Vec<u8>>(), 999, b"");
+        assert!(path.is_empty() && !walked);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

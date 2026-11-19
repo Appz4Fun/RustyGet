@@ -3181,6 +3181,84 @@ fn dead_volume_borrows() -> std::sync::MutexGuard<'static, std::collections::Has
         .unwrap_or_else(|e| e.into_inner())
 }
 
+/// What live repair runs found of each donor's video, by (download, donor's queued nzb file),
+/// while dead volumes waited for it: `Err(n)`, the runs in which it did not match;
+/// `Ok(())` once it matched (see [`note_dead_volume_donor_identity`]).
+fn dead_volume_donor_identities() -> std::sync::MutexGuard<
+    'static,
+    std::collections::HashMap<(i32, Vec<u8>), Result<(), u32>>,
+> {
+    static MAP: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<(i32, Vec<u8>), Result<(), u32>>>,
+    > = std::sync::OnceLock::new();
+    MAP.get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// Runs in which a donor must fail the identity check before it counts as unable to lend. Only
+/// a check that compared in full counts (`streamrepair::DonorCheck::Differs`: donor bytes that
+/// arrived whole against target bytes on disk, or a payload of another size); one that could not
+/// run in full counts for nothing and is retried by a later run.
+pub(crate) const DEAD_VOLUME_DONOR_MISMATCH_RUNS: u32 = 2;
+
+/// Records what a live repair run of download `nzb_id` found of the video in the donor whose
+/// queued nzb file is `donor` while dead volumes waited for it: `confirmed` is a check that
+/// matched, otherwise one that compared in full and differed (inconclusive checks are not
+/// recorded at all). A match is kept for good. Before any match, mismatches are counted.
+pub(crate) fn note_dead_volume_donor_identity(nzb_id: i32, donor: &[u8], confirmed: bool) {
+    let mut map = dead_volume_donor_identities();
+    let entry = map.entry((nzb_id, donor.to_vec())).or_insert(Err(0));
+    if confirmed {
+        *entry = Ok(());
+    } else if let Err(n) = entry {
+        *n += 1;
+    }
+}
+
+/// True when the donor whose queued nzb file is `donor` failed the identity check of
+/// download `nzb_id`'s dead volumes in [`DEAD_VOLUME_DONOR_MISMATCH_RUNS`] runs and never
+/// passed it: it holds another video and cannot lend them.
+pub(crate) fn dead_volume_donor_mismatched(nzb_id: i32, donor: &[u8]) -> bool {
+    !donor.is_empty()
+        && dead_volume_donor_identities()
+            .get(&(nzb_id, donor.to_vec()))
+            .is_some_and(|r| matches!(r, Err(n) if *n >= DEAD_VOLUME_DONOR_MISMATCH_RUNS))
+}
+
+/// True when some donor's video matched the one of download `nzb_id` while dead volumes waited
+/// for it: that donor lends them.
+pub(crate) fn dead_volume_any_donor_confirmed(nzb_id: i32) -> bool {
+    dead_volume_donor_identities()
+        .iter()
+        .any(|((id, _), r)| *id == nzb_id && r.is_ok())
+}
+
+/// True when the donor whose queued nzb file is `donor` cannot lend the dead volumes of
+/// download `nzb_id` (see [`dead_volume_donor_mismatched`]) and no other donor lends them
+/// either: none matched, and direct unpack holds no volume rebuilt from one. (A repair run
+/// under way says nothing of that: every run marks a borrow under way, also one that only
+/// checks the mismatched donor again, and runs follow each other closely.)
+pub(crate) fn dead_volume_donor_cannot_lend(nzb_id: i32, donor: &[u8]) -> bool {
+    dead_volume_donor_mismatched(nzb_id, donor)
+        && !dead_volume_rebuilt(nzb_id)
+        && !dead_volume_any_donor_confirmed(nzb_id)
+}
+
+/// True once direct unpack of download `nzb_id` holds a dead volume rebuilt from a duplicate.
+fn dead_volume_rebuilt(nzb_id: i32) -> bool {
+    direct_unpack_holds()
+        .get(&nzb_id)
+        .is_some_and(|st| !st.virtuals.is_empty())
+}
+
+/// Forgets what was found of the donors of download `nzb_id` and whether the queue kept it for
+/// them: it left the queue, or came back to it from history to start over.
+pub(crate) fn forget_dead_volume_verdicts(nzb_id: i32) {
+    dead_volume_donor_identities().retain(|(id, _), _| *id != nzb_id);
+    crate::queuecoord::forget_kept_for_borrowing(nzb_id);
+}
+
 /// Marks (or clears) a borrow of dead volumes of download `nzb_id` in progress.
 pub(crate) fn note_dead_volume_borrow(nzb_id: i32, underway: bool) {
     if underway {
@@ -3671,6 +3749,7 @@ fn direct_unpack_take_released(nzb_id: i32) -> (Vec<Vec<u8>>, bool) {
 
 pub(crate) fn direct_unpack_forget_holds(nzb_id: i32) {
     note_dead_volume_borrow(nzb_id, false);
+    forget_dead_volume_verdicts(nzb_id);
     let gone = direct_unpack_holds().remove(&nzb_id);
     // Borrowed data of rebuilt dead volumes is only read by direct unpack.
     for v in gone.iter().flat_map(|st| st.virtuals.values()) {
@@ -7595,6 +7674,79 @@ mod live_hold_tests {
 #[cfg(test)]
 mod dead_volume_case_tests {
     use super::*;
+
+    #[test]
+    fn a_donor_counts_as_another_video_only_after_repeated_mismatches() {
+        let (id, donor) = (-4_242_522, b"/q/backup.nzb".as_slice());
+        assert!(!dead_volume_donor_mismatched(id, donor));
+        note_dead_volume_donor_identity(id, donor, false);
+        // one failed check may be an article that could not be read just then
+        assert!(!dead_volume_donor_mismatched(id, donor));
+        note_dead_volume_donor_identity(id, donor, false);
+        assert!(dead_volume_donor_mismatched(id, donor));
+        assert!(!dead_volume_donor_mismatched(id, b"/q/other.nzb"));
+        // a confirmed check clears it, for good: later failed checks are probes landing on
+        // volumes still downloading
+        note_dead_volume_donor_identity(id, donor, true);
+        assert!(!dead_volume_donor_mismatched(id, donor));
+        for _ in 0..5 {
+            note_dead_volume_donor_identity(id, donor, false);
+        }
+        assert!(!dead_volume_donor_mismatched(id, donor));
+    }
+
+    #[test]
+    fn a_mismatched_donor_holds_nothing_back_only_while_no_other_lends() {
+        let (id, b1, b2) = (-4_242_523, b"/q/b1.nzb".as_slice(), b"/q/b2.nzb".as_slice());
+        for _ in 0..DEAD_VOLUME_DONOR_MISMATCH_RUNS {
+            note_dead_volume_donor_identity(id, b1, false);
+        }
+        assert!(dead_volume_donor_cannot_lend(id, b1));
+        // a repair run under way is no lender: every run marks one, also one checking b1 again
+        note_dead_volume_borrow(id, true);
+        assert!(dead_volume_donor_cannot_lend(id, b1));
+        note_dead_volume_borrow(id, false);
+        // another donor's volume was rebuilt and handed to direct unpack ...
+        direct_unpack_hold(id, b"/dl/Set.part07.rar");
+        direct_unpack_set_virtual(
+            id,
+            b"/dl/Set.part07.rar",
+            crate::deadvolume::VirtualVolume {
+                head: vec![1],
+                data: std::path::PathBuf::from("/dl/x"),
+                data_len: 0,
+                tail: Vec::new(),
+            },
+        );
+        assert!(!dead_volume_donor_cannot_lend(id, b1));
+        direct_unpack_forget_holds(id);
+        for _ in 0..DEAD_VOLUME_DONOR_MISMATCH_RUNS {
+            note_dead_volume_donor_identity(id, b1, false);
+        }
+        assert!(dead_volume_donor_cannot_lend(id, b1));
+        // ... or another donor's video matched
+        note_dead_volume_donor_identity(id, b2, true);
+        assert!(dead_volume_any_donor_confirmed(id));
+        assert!(!dead_volume_donor_cannot_lend(id, b1));
+        assert!(dead_volume_donor_mismatched(id, b1));
+        forget_dead_volume_verdicts(id);
+    }
+
+    #[test]
+    fn verdicts_on_donors_are_forgotten_when_the_download_leaves_the_queue() {
+        let (id, donor) = (-4_242_534, b"/q/b1.nzb".as_slice());
+        for _ in 0..DEAD_VOLUME_DONOR_MISMATCH_RUNS {
+            note_dead_volume_donor_identity(id, donor, false);
+        }
+        note_dead_volume_donor_identity(id + 1, donor, true);
+        assert!(dead_volume_donor_mismatched(id, donor));
+        // the post job ends (or the download is deleted, or returned from history)
+        direct_unpack_forget_holds(id);
+        assert!(!dead_volume_donor_mismatched(id, donor));
+        assert!(dead_volume_any_donor_confirmed(id + 1));
+        forget_dead_volume_verdicts(id + 1);
+        assert!(!dead_volume_any_donor_confirmed(id + 1));
+    }
 
     #[test]
     fn a_borrowed_volume_is_found_whatever_case_the_dead_job_used() {

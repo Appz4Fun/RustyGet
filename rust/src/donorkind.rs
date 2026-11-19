@@ -131,6 +131,34 @@ impl DonorKind {
     }
 }
 
+/// Whether a backup of [`DonorKind::Unknown`] carries a label that makes a borrow from it
+/// worth waiting for while the download's extraction runs: TwinCheck labelled it `alt` (another
+/// container, the same video inside) or `container` (another container, the video inside NOT
+/// verified yet), or a fleet stored an explicit `unknown` kind and found the same video inside
+/// (`video`, `DupeVideo=same`). `container` is no proof of the same video: a different encode
+/// posted nested, or compressed, under the same dupe key gets it too. It is accepted because
+/// failing over throws the running extraction away; the live dead-volume borrow checks the
+/// video inside, and once it finds it differs, or finds it compressed (live repair never
+/// decompresses, so such a backup cannot lend live), the download fails over, unless another
+/// donor lends the dead volumes (`postproc::dead_volume_donor_cannot_lend`). A backup the
+/// check can tell nothing of (its reads keep failing, say) holds the download until it ends.
+/// An unlabelled backup (a same-key grab of another release or encode) never qualifies, nor
+/// one TwinCheck labelled another video (`other`).
+pub fn unknown_kind_is_labelled_alt(
+    copy_kind: Option<&[u8]>,
+    dupe_kind: Option<&[u8]>,
+    video: Option<&[u8]>,
+) -> bool {
+    match dupe_kind.map(|v| v.trim_ascii()) {
+        Some(b"alt") | Some(b"container") => true,
+        Some(b"other") => false,
+        _ => {
+            copy_kind.map(|v| v.trim_ascii()) == Some(b"unknown")
+                && video.map(|v| v.trim_ascii()) == Some(b"same")
+        }
+    }
+}
+
 const MEDIA_EXTS: [&[u8]; 8] = [
     b"mkv", b"mp4", b"m4v", b"avi", b"ts", b"m2ts", b"wmv", b"mov",
 ];
@@ -372,6 +400,22 @@ mod tests {
 
     fn rar4_with_file(method: u8, file_flags: u16, main_flags: u16) -> Vec<u8> {
         rar4_named(b"movie.mkv", method, file_flags, main_flags)
+    }
+
+    #[test]
+    fn only_a_labelled_unknown_backup_counts_as_an_alt() {
+        let f = unknown_kind_is_labelled_alt;
+        // unlabelled: a same-key grab of anything
+        assert!(!f(None, None, None));
+        assert!(!f(Some(b"unknown"), None, None));
+        assert!(!f(Some(b"unknown"), None, Some(b"unverified")));
+        // TwinCheck: another container (same video, or not verified yet)
+        assert!(f(None, Some(b"container"), None));
+        assert!(f(Some(b"unknown"), Some(b"alt"), None));
+        // a fleet that found the same video inside
+        assert!(f(Some(b"unknown"), None, Some(b"same")));
+        // another video, whatever the fleet said
+        assert!(!f(Some(b"unknown"), Some(b"other"), Some(b"same")));
     }
 
     #[test]

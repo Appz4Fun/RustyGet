@@ -80,6 +80,7 @@ pub mod scheduler;
 #[cfg(unix)]
 pub mod socket;
 pub mod statmeter;
+pub mod status;
 pub mod certtools;
 pub mod systemhealth;
 pub mod backbones;

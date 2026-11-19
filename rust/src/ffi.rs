@@ -4934,7 +4934,7 @@ unsafe fn emit_rpc_nzb(
         dest_dir: c_dest_dir.as_ptr(),
         final_dir: c_final_dir.as_ptr(),
         category: c_category.as_ptr(),
-        par_status: n.par_status,
+        par_status: n.par_status.into(),
         unpack_status: n.unpack_status,
         move_status: n.move_status,
         script_status: n.script_total_status,
@@ -6279,7 +6279,7 @@ pub(crate) unsafe fn serve_binrpc_conn(conn: &crate::net::NzbgetRsConn) {
                         let n = qh.nzb_snap(h.inner_ptr, false);
                         size = n.size;
                         file_cnt = n.file_count as u32;
-                        par_status = n.par_status as u32;
+                        par_status = i32::from(n.par_status) as u32;
                         script_status = n.script_total_status as u32;
                     } else if h.kind == crate::queuesubsys_host::HK_DUP {
                         size = qh.dup_snap(h.inner_ptr).size;

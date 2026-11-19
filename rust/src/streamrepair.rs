@@ -9,6 +9,7 @@
 
 use crate::dupefallback::NzbgetRsByteRange;
 use crate::releasename::lower as c_lower_bytes;
+use crate::status::NzbParStatus;
 
 pub const MAX_DECOMPRESS_BYTES: i64 = 16 * 1024 * 1024 * 1024;
 
@@ -4167,24 +4168,21 @@ pub fn resolve_completion_par_action(
     holes_remain: bool,
     par_rename_status: i32,
     rs_none: i32,
-    par_status: i32,
-    ps_skipped: i32,
+    par_status: NzbParStatus,
     par_check_opt: i32,
     pc_manual: i32,
-    ps_manual: i32,
-    ps_none: i32,
-) -> (bool, bool, i32, bool, bool, bool) {
+) -> (bool, bool, NzbParStatus, bool, bool, bool) {
     let recovered = recovered_bytes > 0;
     if !recovered && !holes_remain {
         return (false, false, par_status, false, false, false);
     }
     let reset_par_rename = recovered && par_rename_status != rs_none;
-    if par_status > ps_skipped {
+    if par_status > NzbParStatus::Skipped {
         if recovered {
             let new_status = if par_check_opt == pc_manual {
-                ps_manual
+                NzbParStatus::Manual
             } else {
-                ps_none
+                NzbParStatus::None
             };
             (reset_par_rename, true, new_status, true, true, false)
         } else {

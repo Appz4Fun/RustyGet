@@ -33,9 +33,6 @@ use crate::postproc::JobQueue;
 
 const DM_FORCE: i32 = 2;
 const RS_NONE: i32 = 0;
-const PS_NONE: i32 = 0;
-const PS_SKIPPED: i32 = 1;
-const PS_MANUAL: i32 = 5;
 
 const SLOW_REPAIR_FACTOR: i32 = 3;
 const MAX_RUN_FACTOR: i32 = 5;
@@ -1794,9 +1791,8 @@ impl NzbgetRsStreamRepairCtrl {
             NZB_I64_FAILED_SIZE, NZB_I64_PAR_CUR_FAILED_SIZE, NZB_I64_PAR_CUR_SUCCESS_SIZE,
             NZB_I64_PAR_FAILED_SIZE, NZB_I64_PAR_SUCCESS_SIZE, NZB_I64_SUCCESS_SIZE,
             NZB_INT_DUPE_RECOVERED_ARTICLES, NZB_INT_DUPE_RECOVERED_HOLES,
-            NZB_INT_PAR_RENAME_STATUS, NZB_INT_PAR_STATUS, POST_INT_FORCE_PAR_FULL,
-            POST_INT_REQUEST_PAR_CHECK, POST_INT_STREAM_REPAIR_DONE,
-            POST_INT_STREAM_REPAIR_RECOVERED, POST_INT_WORKING,
+            NZB_INT_PAR_RENAME_STATUS, POST_INT_FORCE_PAR_FULL, POST_INT_REQUEST_PAR_CHECK,
+            POST_INT_STREAM_REPAIR_DONE, POST_INT_STREAM_REPAIR_RECOVERED, POST_INT_WORKING,
         };
         let interrupted = self.interrupted(q);
         let host = q.host;
@@ -1858,11 +1854,8 @@ impl NzbgetRsStreamRepairCtrl {
                 ns.par_rename_status,
                 RS_NONE,
                 ns.par_status,
-                PS_SKIPPED,
                 opts.par_check,
                 opts.pc_manual,
-                PS_MANUAL,
-                PS_NONE,
             );
             let request_par_check = check_main_pars
                 && crate::parparser::find_main_pars(crate::fsops::path(dest_dir), false, |_| {});
@@ -1920,7 +1913,7 @@ impl NzbgetRsStreamRepairCtrl {
                 host.nzb_set_int(nzb_ptr, NZB_INT_PAR_RENAME_STATUS, RS_NONE);
             }
             if set_par_status {
-                host.nzb_set_int(nzb_ptr, NZB_INT_PAR_STATUS, new_par_status);
+                host.nzb_set_par_status(nzb_ptr, new_par_status);
             }
             if set_force_par_full {
                 host.post_set_int(post_ptr, POST_INT_FORCE_PAR_FULL, 1);

@@ -2,6 +2,7 @@
 //! (`daemon/postprocess/UnpackController.cpp`) end-to-end Rust implementation.
 
 pub use crate::postrepair::NzbgetRsUnpackMessageInfo;
+use crate::status::NzbParStatus;
 
 #[inline]
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -2451,8 +2452,7 @@ pub fn try_passwords_from_file(
 pub fn eval_unpack_completed_failure(
     parcheck_enabled: bool,
     unpack_ok: bool,
-    par_status: i32,
-    ps_skipped: i32,
+    par_status: NzbParStatus,
     par_full: bool,
     unpack_start_error: bool,
     unpack_space_error: bool,
@@ -2476,7 +2476,7 @@ pub fn eval_unpack_completed_failure(
 
     if parcheck_enabled
         && !unpack_ok
-        && (par_status <= ps_skipped || !par_full)
+        && (par_status <= NzbParStatus::Skipped || !par_full)
         && !unpack_start_error
         && !unpack_space_error
         && !unpack_password_error
@@ -2488,7 +2488,7 @@ pub fn eval_unpack_completed_failure(
             || !has_unpack_pass_file
             || pass_list_tried
             || (!unpack_decrypt_error && !unpack_password_error))
-            && par_status > ps_skipped;
+            && par_status > NzbParStatus::Skipped;
         (true, force_repair, unpack_status)
     } else {
         (false, false, unpack_status)
@@ -4161,16 +4161,42 @@ mod tests {
         );
 
         let (req_par, force_rep, st) = eval_unpack_completed_failure(
-            true, false, 3, 1, false, false, false, false, true, false, false, false, true, true,
-            false, false,
+            true,
+            false,
+            NzbParStatus::Success,
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            false,
+            false,
+            true,
+            true,
+            false,
+            false,
         );
         assert!(req_par);
         assert!(force_rep);
         assert_eq!(st, 5);
 
         let (req_par2, _, st2) = eval_unpack_completed_failure(
-            true, false, 1, 1, false, false, true, false, false, false, false, false, true, false,
-            false, false,
+            true,
+            false,
+            NzbParStatus::Skipped,
+            false,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            false,
+            false,
         );
         assert!(!req_par2);
         assert_eq!(st2, 4);

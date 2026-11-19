@@ -7,6 +7,7 @@
 //! - `RenameController` (`daemon/postprocess/Rename.cpp`): PAR/RAR rename stage
 //!   configuration and completion state machine.
 
+use crate::status::NzbParStatus;
 use std::ffi::{CStr, OsStr};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -540,13 +541,13 @@ pub fn rename_complete_action(
     has_damaged_pars: bool,
     remaining_par_count: i32,
     has_missed_files: bool,
-    par_status: i32,
+    par_status: NzbParStatus,
 ) -> (i32, bool, bool) {
-    // NzbInfo::rsNothing = 2, NzbInfo::rsSuccess = 3, NzbInfo::psSkipped = 1
+    // NzbInfo::rsNothing = 2, NzbInfo::rsSuccess = 3
     let initial_status = if renamed_count > 0 { 3 } else { 2 };
     let request_extra_pars =
         kind == 0 && renamed_count == 0 && has_damaged_pars && remaining_par_count > 0;
-    let request_par_check = has_missed_files && par_status <= 1;
+    let request_par_check = has_missed_files && par_status <= NzbParStatus::Skipped;
     (initial_status, request_extra_pars, request_par_check)
 }
 
@@ -1421,7 +1422,7 @@ mod tests {
         assert_eq!(rename_classify_run_outcome(false, 0), 3);
         assert_eq!(rename_eval_par_config(3, 3, 0, false), (true, false));
         assert_eq!(
-            rename_complete_action(0, 0, true, 2, true, 0),
+            rename_complete_action(0, 0, true, 2, true, NzbParStatus::None),
             (2, true, true)
         );
         assert!(rename_should_reset_par_status(1024));

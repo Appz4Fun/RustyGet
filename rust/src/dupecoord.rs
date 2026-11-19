@@ -2212,7 +2212,7 @@ mod tests {
                 0,
                 MARK_STATUS_NONE,
                 DELETE_STATUS_NONE,
-                crate::downloadinfo::PAR_SKIPPED,
+                crate::status::NzbParStatus::Skipped,
                 crate::downloadinfo::UNPACK_NONE,
                 crate::downloadinfo::MOVE_NONE,
                 crate::downloadinfo::URL_NONE,
@@ -2225,7 +2225,7 @@ mod tests {
         assert!(!crate::downloadinfo::is_dupe_success(
             MARK_STATUS_NONE,
             DELETE_STATUS_NONE,
-            crate::downloadinfo::PAR_SKIPPED,
+            crate::status::NzbParStatus::Skipped,
             crate::downloadinfo::UNPACK_NONE,
             crate::downloadinfo::URL_NONE,
             health,
@@ -2237,7 +2237,7 @@ mod tests {
         assert!(crate::downloadinfo::is_dupe_success(
             MARK_STATUS_NONE,
             DELETE_STATUS_NONE,
-            crate::downloadinfo::PAR_SUCCESS,
+            crate::status::NzbParStatus::Success,
             crate::downloadinfo::UNPACK_NONE,
             crate::downloadinfo::URL_NONE,
             health,
@@ -2248,7 +2248,7 @@ mod tests {
         assert!(crate::downloadinfo::is_dupe_success(
             MARK_STATUS_GOOD,
             DELETE_STATUS_NONE,
-            crate::downloadinfo::PAR_SKIPPED,
+            crate::status::NzbParStatus::Skipped,
             crate::downloadinfo::UNPACK_NONE,
             crate::downloadinfo::URL_NONE,
             health,
@@ -2260,7 +2260,7 @@ mod tests {
         assert!(crate::downloadinfo::is_dupe_success(
             MARK_STATUS_NONE,
             DELETE_STATUS_NONE,
-            crate::downloadinfo::PAR_SKIPPED,
+            crate::status::NzbParStatus::Skipped,
             crate::downloadinfo::UNPACK_NONE,
             crate::downloadinfo::URL_NONE,
             full_health,

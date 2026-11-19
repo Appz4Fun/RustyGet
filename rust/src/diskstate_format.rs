@@ -2,6 +2,7 @@
 
 use crate::cstr;
 use crate::options::OptStr;
+use crate::status::NzbParStatus;
 use std::ffi::{c_char, c_int, c_void};
 use std::io::Write;
 
@@ -7304,7 +7305,7 @@ unsafe extern "C" fn active_disk_export_nzb_cb(
         delete_paused: c_int::from(sn.delete_paused),
         many_dupe_files: c_int::from(sn.many_dupe_files),
         feed_id: sn.feed_id,
-        par_status: sn.par_status,
+        par_status: sn.par_status.into(),
         unpack_status: sn.unpack_status,
         move_status: sn.move_status,
         par_rename_status: sn.par_rename_status,
@@ -7648,7 +7649,7 @@ unsafe extern "C" fn active_disk_apply_nzb_cb(
         qh.nzb_set_int(nzb_ptr, NZB_INT_POST_STAGE, inp.post_stage);
     }
     qh.nzb_set_int(nzb_ptr, NZB_INT_FEED_ID, inp.feed_id);
-    qh.nzb_set_int(nzb_ptr, NZB_INT_PAR_STATUS, inp.par_status);
+    qh.nzb_set_par_status(nzb_ptr, NzbParStatus::from_raw(inp.par_status));
     qh.nzb_set_int(nzb_ptr, NZB_INT_UNPACK_STATUS, inp.unpack_status);
     qh.nzb_set_int(nzb_ptr, NZB_INT_MOVE_STATUS, inp.move_status);
     qh.nzb_set_int(nzb_ptr, NZB_INT_PAR_RENAME_STATUS, inp.par_rename_status);

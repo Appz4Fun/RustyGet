@@ -11,6 +11,7 @@ use crate::parchecker::{
 use crate::options::OptStr;
 use crate::postrepair::NzbgetRsParSegment;
 use crate::queuesubsys_host::QueueSubsysHost;
+use crate::status::{NzbParStatus, ParCheckerStatus};
 use std::collections::VecDeque;
 use std::ffi::c_int;
 use std::ptr;
@@ -19,11 +20,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub use crate::log::{MK_INFO, MK_WARNING, MK_ERROR, MK_DEBUG, MK_DETAIL};
-
-pub const PAR_STATUS_FAILED: i32 = 0;
-pub const PAR_STATUS_REPAIR_POSSIBLE: i32 = 1;
-pub const PAR_STATUS_REPAIRED: i32 = 2;
-pub const PAR_STATUS_REPAIR_NOT_NEEDED: i32 = 3;
 
 pub const PAR_STAGE_LOADING_PARS: i32 = 0;
 pub const PAR_STAGE_VERIFYING_SOURCES: i32 = 1;
@@ -170,7 +166,7 @@ impl NzbgetRsParChecker {
             cancel_token: Mutex::new(None),
             verified_files: Mutex::new(Vec::new()),
             err_msg: Mutex::new(Vec::new()),
-            status: AtomicI32::new(PAR_STATUS_FAILED),
+            status: AtomicI32::new(ParCheckerStatus::Failed as i32),
             stage: AtomicI32::new(PAR_STAGE_LOADING_PARS),
             file_progress: AtomicI32::new(0),
             stage_progress: AtomicI32::new(0),
@@ -234,8 +230,8 @@ impl NzbgetRsParChecker {
     pub fn par_full(&self) -> bool {
         self.par_full.load(Ordering::Acquire)
     }
-    pub fn status(&self) -> i32 {
-        self.status.load(Ordering::Acquire)
+    pub fn status(&self) -> ParCheckerStatus {
+        ParCheckerStatus::from_raw(self.status.load(Ordering::Acquire))
     }
     pub fn stage(&self) -> i32 {
         self.stage.load(Ordering::Acquire)
@@ -303,9 +299,9 @@ impl NzbgetRsParChecker {
             .unwrap_or_else(|e| e.into_inner())
             .clear();
         let mut st = self.run_par_check_all(hooks);
-        self.status.store(st, Ordering::Release);
+        self.status.store(st.into(), Ordering::Release);
 
-        if st == PAR_STATUS_REPAIR_NOT_NEEDED
+        if st == ParCheckerStatus::RepairNotNeeded
             && self.par_quick()
             && self.force_repair.load(Ordering::Acquire)
             && !hooks.is_stopped()
@@ -321,7 +317,7 @@ impl NzbgetRsParChecker {
                 .unwrap_or_else(|e| e.into_inner())
                 .clear();
             st = self.run_par_check_all(hooks);
-            self.status.store(st, Ordering::Release);
+            self.status.store(st.into(), Ordering::Release);
         }
 
         let vf = self
@@ -335,7 +331,7 @@ impl NzbgetRsParChecker {
         hooks.completed();
     }
 
-    fn run_par_check_all(&self, hooks: &dyn ParCheckerHooks) -> i32 {
+    fn run_par_check_all(&self, hooks: &dyn ParCheckerHooks) -> ParCheckerStatus {
         let (dest_dir, nzb_name) = {
             let m = self.lock_meta();
             (m.dest_dir.clone(), m.nzb_name.clone())
@@ -353,10 +349,10 @@ impl NzbgetRsParChecker {
                 ]
                 .concat(),
             );
-            return PAR_STATUS_FAILED;
+            return ParCheckerStatus::Failed;
         }
 
-        let mut all_status = PAR_STATUS_REPAIR_NOT_NEEDED;
+        let mut all_status = ParCheckerStatus::RepairNotNeeded;
         self.set_par_full(true);
         let sep = crate::paths::PATH_SEPARATOR;
 
@@ -387,7 +383,11 @@ impl NzbgetRsParChecker {
         all_status
     }
 
-    fn run_par_check(&self, par_filename: Vec<u8>, hooks: &dyn ParCheckerHooks) -> i32 {
+    fn run_par_check(
+        &self,
+        par_filename: Vec<u8>,
+        hooks: &dyn ParCheckerHooks,
+    ) -> ParCheckerStatus {
         let mut repairer: Option<RustParRepairer> = None;
         let mut dupe_sources: Vec<ParDupeSource> = Vec::new();
         let mut threads_to_use = 1i32;
@@ -428,7 +428,7 @@ impl NzbgetRsParChecker {
         );
         if hooks.is_stopped() || res != PAR_RESULT_SUCCESS {
             self.cleanup(&mut repairer, &mut dupe_sources);
-            return PAR_STATUS_FAILED;
+            return ParCheckerStatus::Failed;
         }
 
         let creator = repairer
@@ -569,10 +569,10 @@ impl NzbgetRsParChecker {
 
         if hooks.is_stopped() {
             self.cleanup(&mut repairer, &mut dupe_sources);
-            return PAR_STATUS_FAILED;
+            return ParCheckerStatus::Failed;
         }
 
-        let mut status = PAR_STATUS_FAILED;
+        let mut status = ParCheckerStatus::Failed;
         let has_damaged = self.lock_signal().has_damaged_files;
 
         if res == PAR_RESULT_SUCCESS || !has_damaged {
@@ -580,9 +580,9 @@ impl NzbgetRsParChecker {
                 MK_INFO,
                 &[b"Repair not needed for ", info_name.as_slice()].concat(),
             );
-            status = PAR_STATUS_REPAIR_NOT_NEEDED;
+            status = ParCheckerStatus::RepairNotNeeded;
         } else if res == PAR_RESULT_REPAIR_POSSIBLE {
-            status = PAR_STATUS_REPAIR_POSSIBLE;
+            status = ParCheckerStatus::RepairPossible;
             if hooks.read_options().par_repair {
                 hooks.print_message(MK_INFO, &[b"Repairing ", info_name.as_slice()].concat());
                 self.lock_meta().progress_label = [b"Repairing ", info_name.as_slice()].concat();
@@ -609,14 +609,14 @@ impl NzbgetRsParChecker {
                         MK_INFO,
                         &[b"Successfully repaired ", info_name.as_slice()].concat(),
                     );
-                    status = PAR_STATUS_REPAIRED;
+                    status = ParCheckerStatus::Repaired;
                     hooks.stat_dupe_sources(&dupe_sources);
                     repairer
                         .as_ref()
                         .expect("repairer initialized")
                         .delete_leftovers(&mut |msg| hooks.print_message(MK_INFO, msg));
                 } else {
-                    status = PAR_STATUS_FAILED;
+                    status = ParCheckerStatus::Failed;
                 }
             } else {
                 hooks.print_message(
@@ -633,16 +633,16 @@ impl NzbgetRsParChecker {
                     &[b"Repair cancelled for ", info_name.as_slice()].concat(),
                 );
                 self.set_err_msg(b"repair cancelled".to_vec());
-                status = PAR_STATUS_REPAIR_POSSIBLE;
+                status = ParCheckerStatus::RepairPossible;
             } else {
                 hooks.print_message(
                     MK_WARNING,
                     &[b"Par-check cancelled for ", info_name.as_slice()].concat(),
                 );
                 self.set_err_msg(b"par-check cancelled".to_vec());
-                status = PAR_STATUS_FAILED;
+                status = ParCheckerStatus::Failed;
             }
-        } else if status == PAR_STATUS_FAILED {
+        } else if status == ParCheckerStatus::Failed {
             let mut err = self.get_err_msg();
             if err.is_empty() && (0..=8).contains(&res) {
                 let raw = crate::parchecker::cmdline_err_str(res);
@@ -663,7 +663,8 @@ impl NzbgetRsParChecker {
         }
 
         if let Some(ref r) = repairer {
-            let set_ok = status == PAR_STATUS_REPAIRED || status == PAR_STATUS_REPAIR_NOT_NEEDED;
+            let set_ok =
+                status == ParCheckerStatus::Repaired || status == ParCheckerStatus::RepairNotNeeded;
             let mut vf = self
                 .verified_files
                 .lock()
@@ -1499,7 +1500,7 @@ struct UnpackRunState {
     prev_pass_list_tried: bool,
     last_unpack_status: i32,
     direct_unpack_status: i32,
-    par_status: i32,
+    par_status: NzbParStatus,
     par_rename_status: i32,
     use_temp_unpack_dir: bool,
     unpack_cleanup_disk: bool,
@@ -1708,7 +1709,7 @@ impl JobQueue<'_> {
     }
 
     /// The job's par status and whether par was a full check.
-    fn par_info(self) -> (i32, bool) {
+    fn par_info(self) -> (NzbParStatus, bool) {
         let ns = self.host.nzb_snap(self.nzb_ptr(), false);
         (ns.par_status, ns.par_full)
     }
@@ -1973,7 +1974,7 @@ impl NzbgetRsUnpackController {
             st.joined_files.clear();
         } else if unpack {
             if st.parcheck_enabled
-                && st.par_status <= 1
+                && st.par_status <= NzbParStatus::Skipped
                 && st.par_rename_status <= 1
                 && st.has_par_files
             {
@@ -2061,7 +2062,10 @@ impl NzbgetRsUnpackController {
         if !st.unpack_tried || st.par_repaired {
             let pw = st.password.clone();
             self.execute_unpack(q, st, is_seven_zip, &pw, multi_volumes);
-            if !st.unpack_ok && st.has_par_files && !st.unpack_password_error && st.par_status <= 1
+            if !st.unpack_ok
+                && st.has_par_files
+                && !st.unpack_password_error
+                && st.par_status <= NzbParStatus::Skipped
             {
                 q.log(
                     MK_DEBUG,
@@ -2219,7 +2223,7 @@ impl NzbgetRsUnpackController {
 
         let dest_dir = st.dest_dir.clone();
         let unpack_dir = st.unpack_dir.clone();
-        let par_success = st.par_status == 3;
+        let par_success = st.par_status == NzbParStatus::Success;
         let write_buf = st.write_buffer_kb;
         let mut joined = std::mem::take(&mut st.joined_files);
         let guard = st.unpack_guard.clone();
@@ -2370,7 +2374,6 @@ impl NzbgetRsUnpackController {
                 st.parcheck_enabled,
                 st.unpack_ok,
                 par_status,
-                1,
                 par_full,
                 st.unpack_start_error || st.unpack_limit_error,
                 st.unpack_space_error,

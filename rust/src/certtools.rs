@@ -4,6 +4,7 @@
 //! store. Everything is written under `MainDir` (`https/` and `certs/`), never
 //! anywhere the request names.
 
+use crate::options::OptStr;
 use std::fmt::Write as _;
 use std::fs;
 use std::io::Write as _;
@@ -611,7 +612,7 @@ pub fn save_pem(kind: &str, name: &str, text: &str, main_dir: &Path) -> String {
 
 fn main_dir() -> PathBuf {
     crate::options::active_options()
-        .map(|o| PathBuf::from(String::from_utf8_lossy(o.str_bytes(2)).into_owned()))
+        .map(|o| PathBuf::from(String::from_utf8_lossy(o.str_bytes(OptStr::MainDir)).into_owned()))
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| PathBuf::from("."))
 }

@@ -10,6 +10,7 @@
 
 #![allow(non_snake_case)]
 
+use crate::options::OptStr;
 use std::collections::BTreeSet;
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::sync::Mutex;
@@ -2074,7 +2075,7 @@ unsafe fn final_dir_name(p: *const NzbScalars) -> Vec<u8> {
     let o = opts.as_deref();
     let category = text_bytes(p, 5);
     crate::downloadinfo::build_final_dir_name(
-        o.map_or(&[][..], |o| o.str_bytes(3)),
+        o.map_or(&[][..], |o| o.str_bytes(OptStr::DestDir)),
         &category_dest_dir(o, &category),
         &category,
         o.is_some_and(|o| o.scalars().append_category_dir != 0),
@@ -2087,7 +2088,7 @@ unsafe fn final_dir_name(p: *const NzbScalars) -> Vec<u8> {
 unsafe fn build_dest_dir_name(p: *mut NzbScalars) {
     let opts = crate::options::active_options();
     let o = opts.as_deref();
-    let inter_dir = o.map_or(&[][..], |o| o.str_bytes(4));
+    let inter_dir = o.map_or(&[][..], |o| o.str_bytes(OptStr::InterDir));
     let category = text_bytes(p, 5);
     let category_dest = if inter_dir.is_empty() {
         category_dest_dir(o, &category)
@@ -2096,7 +2097,7 @@ unsafe fn build_dest_dir_name(p: *mut NzbScalars) {
     };
     let dir = crate::downloadinfo::build_dest_dir_name(
         inter_dir,
-        o.map_or(&[][..], |o| o.str_bytes(3)),
+        o.map_or(&[][..], |o| o.str_bytes(OptStr::DestDir)),
         &category_dest,
         &category,
         o.is_some_and(|o| o.scalars().append_category_dir != 0),

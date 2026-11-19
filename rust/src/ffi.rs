@@ -3,6 +3,7 @@
 //! out as a buffer freed with `nzbget_rs_free`. They are being replaced by
 //! plain Rust APIs.
 
+use crate::options::OptStr;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 
 #[path = "tlscipher/native.rs"]
@@ -3092,28 +3093,28 @@ pub(crate) fn system_health_diagnose_bytes(format_mode: c_int) -> Vec<u8> {
     let sc = opts.scalars();
     let to_path = |b: &[u8]| crate::cleanup::bytes_to_path_buf(b);
 
-    let main_p = to_path(opts.str_bytes(2));
-    let dest_p = to_path(opts.str_bytes(3));
-    let inter_p = to_path(opts.str_bytes(4));
-    let nzb_p = to_path(opts.str_bytes(7));
-    let queue_p = to_path(opts.str_bytes(6));
-    let web_p = to_path(opts.str_bytes(8));
-    let temp_p = to_path(opts.str_bytes(5));
-    let cfg_tpl_p = to_path(opts.str_bytes(9));
+    let main_p = to_path(opts.str_bytes(OptStr::MainDir));
+    let dest_p = to_path(opts.str_bytes(OptStr::DestDir));
+    let inter_p = to_path(opts.str_bytes(OptStr::InterDir));
+    let nzb_p = to_path(opts.str_bytes(OptStr::NzbDir));
+    let queue_p = to_path(opts.str_bytes(OptStr::QueueDir));
+    let web_p = to_path(opts.str_bytes(OptStr::WebDir));
+    let temp_p = to_path(opts.str_bytes(OptStr::TempDir));
+    let cfg_tpl_p = to_path(opts.str_bytes(OptStr::ConfigTemplate));
     let log_bytes = log
         .as_ref()
         .map_or_else(Vec::new, |l| l.log_filename_bytes());
     let log_p = to_path(&log_bytes);
-    let opt_log_p = to_path(opts.str_bytes(27));
-    let cert_bytes = opts.str_bytes(23);
+    let opt_log_p = to_path(opts.str_bytes(OptStr::LogFile));
+    let cert_bytes = opts.str_bytes(OptStr::CertStore);
     let cert_p = to_path(cert_bytes);
-    let cfg_p = to_path(opts.str_bytes(0));
-    let lock_p = to_path(opts.str_bytes(25));
-    let secure_cert_p = to_path(opts.str_bytes(21));
-    let secure_key_p = to_path(opts.str_bytes(22));
-    let unrar_p = to_path(opts.str_bytes(38));
-    let seven_zip_p = to_path(opts.str_bytes(39));
-    let pass_p = to_path(opts.str_bytes(31));
+    let cfg_p = to_path(opts.str_bytes(OptStr::ConfigFile));
+    let lock_p = to_path(opts.str_bytes(OptStr::LockFile));
+    let secure_cert_p = to_path(opts.str_bytes(OptStr::SecureCert));
+    let secure_key_p = to_path(opts.str_bytes(OptStr::SecureKey));
+    let unrar_p = to_path(opts.str_bytes(OptStr::UnrarPath));
+    let seven_zip_p = to_path(opts.str_bytes(OptStr::SevenZipPath));
+    let pass_p = to_path(opts.str_bytes(OptStr::UnpackPassFile));
 
     let raw_servers = pool
         .as_ref()
@@ -3231,14 +3232,14 @@ pub(crate) fn system_health_diagnose_bytes(format_mode: c_int) -> Vec<u8> {
         skip_write: sc.skip_write != 0,
         raw_article: sc.raw_article != 0,
         security: crate::systemhealth::SecuritySectionInput {
-            control_ip: opts.str_bytes(14),
+            control_ip: opts.str_bytes(OptStr::ControlIp),
             control_port: sc.control_port,
-            control_username: opts.str_bytes(15),
-            control_password: opts.str_bytes(16),
-            restricted_username: opts.str_bytes(17),
-            restricted_password: opts.str_bytes(18),
-            add_username: opts.str_bytes(19),
-            add_password: opts.str_bytes(20),
+            control_username: opts.str_bytes(OptStr::ControlUsername),
+            control_password: opts.str_bytes(OptStr::ControlPassword),
+            restricted_username: opts.str_bytes(OptStr::RestrictedUsername),
+            restricted_password: opts.str_bytes(OptStr::RestrictedPassword),
+            add_username: opts.str_bytes(OptStr::AddUsername),
+            add_password: opts.str_bytes(OptStr::AddPassword),
             form_auth: sc.form_auth != 0,
             secure_control: sc.secure_control != 0,
             secure_cert: &secure_cert_p,
@@ -3247,7 +3248,7 @@ pub(crate) fn system_health_diagnose_bytes(format_mode: c_int) -> Vec<u8> {
             cert_check: sc.cert_check != 0,
             cert_store_path_empty: cert_bytes.is_empty(),
             daemon_mode,
-            daemon_username: opts.str_bytes(26),
+            daemon_username: opts.str_bytes(OptStr::DaemonUsername),
             umask: sc.umask,
         },
         append_category_dir: sc.append_category_dir != 0,
@@ -3272,9 +3273,9 @@ pub(crate) fn system_health_diagnose_bytes(format_mode: c_int) -> Vec<u8> {
         unpack_pause_queue: sc.unpack_pause_queue != 0,
         unrar_path: &unrar_p,
         seven_zip_path: &seven_zip_p,
-        ext_cleanup_disk: opts.str_bytes(32),
+        ext_cleanup_disk: opts.str_bytes(OptStr::ExtCleanupDisk),
         unpack_pass_file: &pass_p,
-        unpack_ignore_ext: opts.str_bytes(35),
+        unpack_ignore_ext: opts.str_bytes(OptStr::UnpackIgnoreExt),
         options_log_file: &opt_log_p,
         tasks: &tasks,
         categories: &categories,
@@ -3896,7 +3897,7 @@ static ACTIVE_SCRIPT_TEMPLATES: std::sync::Mutex<Vec<CString>> = std::sync::Mute
 
 fn load_script_template_cstrings() -> Option<Vec<CString>> {
     let opts = crate::options::active_options()?;
-    let path_bytes = opts.str_bytes(9);
+    let path_bytes = opts.str_bytes(OptStr::ConfigTemplate);
     if path_bytes.is_empty() {
         return None;
     }
@@ -4015,7 +4016,7 @@ pub unsafe extern "C" fn nzbget_rs_script_config_exec(
             let Some(opts) = crate::options::active_options() else {
                 return 0;
             };
-            let fn_bytes = opts.str_bytes(0);
+            let fn_bytes = opts.str_bytes(OptStr::ConfigFile);
             if fn_bytes.is_empty() {
                 return 0;
             }
@@ -4031,7 +4032,7 @@ pub unsafe extern "C" fn nzbget_rs_script_config_exec(
             let Some(opts) = crate::options::active_options() else {
                 return -1;
             };
-            let fn_bytes = opts.str_bytes(0);
+            let fn_bytes = opts.str_bytes(OptStr::ConfigFile);
             if fn_bytes.is_empty() {
                 return -1;
             }
@@ -4885,7 +4886,7 @@ unsafe extern "C" fn web_rpc_action_bridge(
         }
         18 => {
             let tdir =
-                crate::options::active_options().and_then(|o| o.str_cstr(5).map(|s| s.to_owned()));
+                crate::options::active_options().and_then(|o| o.str_cstr(OptStr::TempDir).map(|s| s.to_owned()));
             let tdir_ptr = tdir.as_ref().map_or(c"".as_ptr(), |s| s.as_ptr());
             let mut buf = RsBuf {
                 data: std::ptr::null_mut(),
@@ -5287,13 +5288,13 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                 s.calc_quota_usage(tz, opts.as_deref(), lg.as_deref())
             });
 
-            let (free_disk, total_disk) = match opts.as_deref().and_then(|o| o.str_cstr(3)) {
+            let (free_disk, total_disk) = match opts.as_deref().and_then(|o| o.str_cstr(OptStr::DestDir)) {
                 Some(p) if !p.to_bytes().is_empty() => {
                     crate::fsops::get_disk_state(p).unwrap_or((0, 0))
                 }
                 _ => (0, 0),
             };
-            let inter_cstr = opts.as_deref().and_then(|o| o.str_cstr(4));
+            let inter_cstr = opts.as_deref().and_then(|o| o.str_cstr(OptStr::InterDir));
             let inter_empty = inter_cstr.map_or(true, |p| p.to_bytes().is_empty());
             let (free_inter, total_inter) = match inter_cstr {
                 Some(p) if !inter_empty => crate::fsops::get_disk_state(p).unwrap_or((0, 0)),
@@ -5989,13 +5990,13 @@ unsafe extern "C" fn web_rpc_collect_bridge(
 pub(crate) unsafe fn serve_web_conn(conn: &crate::net::NzbgetRsConn, sig: &[u8; 4]) -> bool {
     let _cancel_guard = PosixCancelGuard::disable();
     let opts = crate::options::active_options();
-    let opt_str = |id: usize| -> Option<&[u8]> {
+    let opt_str = |id: OptStr| -> Option<&[u8]> {
         opts.as_deref()
             .and_then(|o| o.str_cstr(id).map(CStr::to_bytes))
     };
     let remote_addr = conn.remote_addr_bytes();
     let version = build_version_bytes();
-    let web_dir = opts.as_deref().map_or(&[][..], |o| o.str_bytes(8));
+    let web_dir = opts.as_deref().map_or(&[][..], |o| o.str_bytes(OptStr::WebDir));
     let control_port = opts.as_deref().map_or(0, |o| o.scalars().control_port);
     let form_auth = opts.as_deref().is_some_and(|o| o.scalars().form_auth != 0);
     let json_p = opts.as_deref().is_some_and(|o| o.scalars().json_p != 0);
@@ -6008,13 +6009,13 @@ pub(crate) unsafe fn serve_web_conn(conn: &crate::net::NzbgetRsConn, sig: &[u8; 
         version: &version,
         web_dir,
         credentials: crate::webserver::Credentials {
-            control_username: opt_str(15),
-            control_password: opt_str(16),
-            restricted_username: opt_str(17),
-            restricted_password: opt_str(18),
-            add_username: opt_str(19),
-            add_password: opt_str(20),
-            authorized_ip: opt_str(24),
+            control_username: opt_str(OptStr::ControlUsername),
+            control_password: opt_str(OptStr::ControlPassword),
+            restricted_username: opt_str(OptStr::RestrictedUsername),
+            restricted_password: opt_str(OptStr::RestrictedPassword),
+            add_username: opt_str(OptStr::AddUsername),
+            add_password: opt_str(OptStr::AddPassword),
+            authorized_ip: opt_str(OptStr::AuthorizedIp),
         },
         control_port,
         form_auth,
@@ -6052,7 +6053,7 @@ pub(crate) unsafe fn serve_web_conn(conn: &crate::net::NzbgetRsConn, sig: &[u8; 
                 debug_build,
                 url_c,
                 &version,
-                opt_str(0),
+                opt_str(OptStr::ConfigFile),
                 Some(web_rpc_log_bridge),
                 Some(web_rpc_action_bridge),
                 Some(web_rpc_collect_bridge),
@@ -6107,8 +6108,8 @@ pub(crate) unsafe fn serve_binrpc_conn(conn: &crate::net::NzbgetRsConn) {
 
     let opts = crate::options::active_options();
     let remote_addr = conn.remote_addr_bytes();
-    let control_user = opts.as_deref().map_or(&[][..], |o| o.str_bytes(15));
-    let control_password = opts.as_deref().map_or(&[][..], |o| o.str_bytes(16));
+    let control_user = opts.as_deref().map_or(&[][..], |o| o.str_bytes(OptStr::ControlUsername));
+    let control_password = opts.as_deref().map_or(&[][..], |o| o.str_bytes(OptStr::ControlPassword));
     let control_port = opts.as_deref().map_or(0, |o| o.scalars().control_port);
     let version = build_version_bytes();
 
@@ -6802,16 +6803,16 @@ fn run_frontend_thread(
         path_sep: crate::paths::PATH_SEPARATOR as u8,
         control_ip: opts
             .as_deref()
-            .and_then(|o| o.str_cstr(14))
+            .and_then(|o| o.str_cstr(OptStr::ControlIp))
             .map_or(std::ptr::null(), CStr::as_ptr),
         control_port: opts.as_deref().map_or(0, |o| o.scalars().control_port),
         control_username: opts
             .as_deref()
-            .and_then(|o| o.str_cstr(15))
+            .and_then(|o| o.str_cstr(OptStr::ControlUsername))
             .map_or(std::ptr::null(), CStr::as_ptr),
         control_password: opts
             .as_deref()
-            .and_then(|o| o.str_cstr(16))
+            .and_then(|o| o.str_cstr(OptStr::ControlPassword))
             .map_or(std::ptr::null(), CStr::as_ptr),
         write_stdout_cb: Some(fe_stdout_cb),
         action_cb: Some(fe_action_cb),

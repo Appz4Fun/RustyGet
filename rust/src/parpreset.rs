@@ -11,6 +11,7 @@
 //! download): measurements showed it costs RAM and disk reads without making
 //! the final repair faster, so it is its own switch.
 
+use crate::options::OptStr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -373,9 +374,9 @@ pub fn to_json(probe: Option<&Probe>, running: bool, cpus: usize) -> String {
 /// The folder whose disk "detect" tests: InterDir, or DestDir when InterDir
 /// is empty (downloads then go straight to DestDir).
 pub fn probe_dir(o: &crate::options::NzbgetRsOptions) -> Vec<u8> {
-    let inter = o.str_bytes(crate::options::OPT_STR_INTER_DIR);
+    let inter = o.str_bytes(OptStr::InterDir);
     if inter.is_empty() {
-        o.str_bytes(crate::options::OPT_STR_DEST_DIR).to_vec()
+        o.str_bytes(OptStr::DestDir).to_vec()
     } else {
         inter.to_vec()
     }

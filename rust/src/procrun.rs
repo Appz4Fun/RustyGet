@@ -1,6 +1,7 @@
 //! Child process execution (`ScriptController`) for the update scripts and the
 //! scheduler `Process` command.
 
+use crate::options::OptStr;
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
@@ -689,7 +690,7 @@ impl ScriptRunner {
 
         // PrepareArgs
         let shell_override = if ctx.is_null() {
-            crate::options::active_options().map_or_else(Vec::new, |o| o.str_bytes(40).to_vec())
+            crate::options::active_options().map_or_else(Vec::new, |o| o.str_bytes(OptStr::ShellOverride).to_vec())
         } else {
             let mut strs = [ptr::null() as *const c_char; 1];
             unsafe {

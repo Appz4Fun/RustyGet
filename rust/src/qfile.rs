@@ -11,6 +11,7 @@
 //! aliasing references), the cached-article count and decoded size are atomic,
 //! and the output-file lock is a separate lock held across host callbacks.
 
+use crate::options::OptStr;
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::ptr;
 use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
@@ -794,7 +795,7 @@ pub(crate) unsafe fn host_output_op(
     let or_empty = |s: *const c_char| if s.is_null() { c"".as_ptr() } else { s };
     let opts = crate::options::active_options();
     let direct_write = opts.as_ref().is_some_and(|o| o.scalars().direct_write != 0);
-    let inter_dir_empty = opts.as_ref().is_none_or(|o| o.str_bytes(4).is_empty());
+    let inter_dir_empty = opts.as_ref().is_none_or(|o| o.str_bytes(OptStr::InterDir).is_empty());
     let hard_linked = || file.lock().texts[text::HARD_LINK_PATH as usize].as_bytes() != b"";
     let flag = |b: bool| c_int::from(b);
     match a1 {

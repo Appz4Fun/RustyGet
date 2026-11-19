@@ -2,6 +2,7 @@
 //! (`daemon/postprocess/StreamRepair.cpp` / `daemon/util/Util.h`), covering both
 //! post-processing stream repair (`Run`) and download-concurrent live stream repair (`RunLive`).
 
+use crate::options::OptStr;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::ptr;
@@ -576,7 +577,7 @@ impl NzbgetRsStreamRepairCtrl {
             download_rate,
             par_ignore_ext: opts
                 .as_deref()
-                .map_or_else(Vec::new, |o| o.str_bytes(33).to_vec()),
+                .map_or_else(Vec::new, |o| o.str_bytes(OptStr::ParIgnoreExt).to_vec()),
         }
     }
 

@@ -183,18 +183,6 @@ pub unsafe extern "C" fn nzbget_rs_free(buf: RsBuf) {
     }
 }
 
-/// Crc32::Append: hardware-accelerated IEEE 802.3 CRC-32 update via `crc32fast`.
-///
-/// # Safety
-/// `block` is null with `len == 0`, or points to `len` readable bytes.
-pub unsafe extern "C" fn nzbget_rs_crc32_append(block: *const u8, len: u32, init: u32) -> u32 {
-    if block.is_null() || len == 0 {
-        return init;
-    }
-    let slice = std::slice::from_raw_parts(block, len as usize);
-    crate::crc::crc32_append(slice, init)
-}
-
 /// Runs an in-place text helper on the NUL-terminated `raw` and puts the NUL
 /// at the new end.
 #[cfg(test)]
@@ -3470,13 +3458,6 @@ pub extern "C" fn nzbget_rs_tls_final() {
 }
 
 #[cfg(unix)]
-pub extern "C" fn nzbget_rs_tls_thread_stop() {
-    if !build_tls_disabled() {
-        crate::tlssock::stop_ssl_thread();
-    }
-}
-
-#[cfg(unix)]
 pub(crate) fn stop_ssl_thread() {
     if !build_tls_disabled() {
         crate::tlssock::stop_ssl_thread();
@@ -3909,54 +3890,6 @@ pub unsafe extern "C" fn nzbget_rs_workstate_free(ws: *mut NzbgetRsWorkState) {
         }
         drop(arc);
     }
-}
-
-pub unsafe extern "C" fn nzbget_rs_workstate_ctl(
-    ws: *const NzbgetRsWorkState,
-    id: c_int,
-    write: c_int,
-    val: i64,
-) -> i64 {
-    let Some(s) = ws.as_ref() else {
-        return 0;
-    };
-    use std::sync::atomic::Ordering::SeqCst;
-    if write == 0 {
-        return match id {
-            0 => i64::from(s.pause_download.load(SeqCst)),
-            1 => i64::from(s.pause_post_process.load(SeqCst)),
-            2 => i64::from(s.pause_scan.load(SeqCst)),
-            3 => i64::from(s.temp_pause_download.load(SeqCst)),
-            4 => i64::from(s.download_held()),
-            5 => i64::from(s.temp_pause_postprocess.load(SeqCst)),
-            6 => i64::from(s.pause_frontend.load(SeqCst)),
-            7 => s.speed_limit.load(SeqCst) as i64,
-            8 => s.resume_time.load(SeqCst),
-            9 => s.local_time_offset.load(SeqCst) as i64,
-            10 => i64::from(s.quota_reached.load(SeqCst)),
-            11 => i64::from(s.downloading.load(SeqCst)),
-            _ => 0,
-        };
-    }
-    match id {
-        0 => s.pause_download.store(val != 0, SeqCst),
-        1 => s.pause_post_process.store(val != 0, SeqCst),
-        2 => s.pause_scan.store(val != 0, SeqCst),
-        3 => s.temp_pause_download.store(val != 0, SeqCst),
-        4 => {
-            s.fleet_hold
-                .fetch_add(if val != 0 { 1 } else { -1 }, SeqCst);
-        }
-        5 => s.temp_pause_postprocess.store(val != 0, SeqCst),
-        7 => s.speed_limit.store(val as i32, SeqCst),
-        8 => s.resume_time.store(val, SeqCst),
-        9 => s.local_time_offset.store(val as i32, SeqCst),
-        10 => s.quota_reached.store(val != 0, SeqCst),
-        11 => s.downloading.store(val != 0, SeqCst),
-        _ => return 0,
-    }
-    s.notify();
-    0
 }
 
 static ACTIVE_SCRIPT_TEMPLATES: std::sync::Mutex<Vec<CString>> = std::sync::Mutex::new(Vec::new());
@@ -4585,27 +4518,7 @@ pub(crate) unsafe fn nzbget_rs_cross_pack_session_process_donor(
     );
 }
 
-pub unsafe extern "C" fn nzbget_rs_nzb_completed_same_filename(
-    a: *const c_char,
-    b: *const c_char,
-) -> c_int {
-    c_int::from(crate::downloadinfo::completed_same_filename(
-        input(a),
-        input(b),
-    ))
-}
-
-pub unsafe extern "C" fn nzbget_rs_util_format_time(
-    time_sec: i64,
-    buffer: *mut c_char,
-    bufsize: c_int,
-) {
-    if !buffer.is_null() && bufsize > 0 {
-        let slice = std::slice::from_raw_parts_mut(buffer.cast::<u8>(), bufsize as usize);
-        crate::util::util_format_time(time_sec, slice);
-    }
-}
-
+#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_server_stat_apply_op(
     stat_op: c_int,
     delta_success: c_int,
@@ -4637,24 +4550,6 @@ pub unsafe extern "C" fn nzbget_rs_script_calc_total_status(
         std::slice::from_raw_parts(statuses, count)
     };
     crate::downloadinfo::script_calc_total_status(slice)
-}
-
-pub unsafe extern "C" fn nzbget_rs_socket_deadline_wait(
-    fd: c_int,
-    read: c_int,
-    write: c_int,
-    ctx: *mut c_void,
-    rem_cb: Option<unsafe extern "C" fn(*mut c_void) -> i64>,
-) -> c_int {
-    let Some(cb) = rem_cb else {
-        return 0;
-    };
-    c_int::from(crate::lifecycle::socket_deadline_wait(
-        fd,
-        read != 0,
-        write != 0,
-        || cb(ctx),
-    ))
 }
 
 #[cfg(unix)]

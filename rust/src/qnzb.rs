@@ -438,11 +438,6 @@ pub unsafe extern "C" fn nzbget_rs_nzb_set_text(
     }
 }
 
-/// Size of the struct, so C++ can check it matches its declaration.
-pub extern "C" fn nzbget_rs_nzb_scalars_size() -> usize {
-    std::mem::size_of::<NzbScalars>()
-}
-
 /// A collection's small lists. `p2` is another collection where noted.
 ///
 /// - Parameters: 0 find `s1` (value into `strs[0]`, returns 1 when found);

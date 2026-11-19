@@ -1,5 +1,6 @@
 //! `QueueEditor` and `GroupSorter` (`daemon/queue/QueueEditor.cpp`) end-to-end Rust implementation.
 
+use crate::queuesubsys_host::FileRef;
 use crate::queuecoord::strcasecmp_bytes;
 use crate::status::{DeleteStatus, DupeMode};
 
@@ -416,7 +417,7 @@ const MAX_ID: i32 = 1_000_000_000;
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug)]
 struct EditItem {
-    file_ptr: usize,
+    file_ptr: FileRef,
     nzb_ptr: usize,
     offset: i32,
 }
@@ -670,7 +671,7 @@ fn prepare_list(
                     clamp_move_offset(index, nr_entries, offset, last_dest_pos);
                 last_dest_pos = new_last;
                 items.push(EditItem {
-                    file_ptr: 0,
+                    file_ptr: FileRef::NONE,
                     nzb_ptr,
                     offset: work_offset,
                 });
@@ -727,7 +728,7 @@ fn prepare_list(
                 for &(nid, nptr) in &all_nzbs {
                     if id == nid {
                         items.push(EditItem {
-                            file_ptr: 0,
+                            file_ptr: FileRef::NONE,
                             nzb_ptr: nptr,
                             offset,
                         });
@@ -741,13 +742,13 @@ fn prepare_list(
 }
 
 #[cfg(unix)]
-fn move_entry(host: &crate::queuesubsys_host::QueueSubsysHost, file_ptr: usize, offset: i32) {
+fn move_entry(host: &crate::queuesubsys_host::QueueSubsysHost, file_ptr: FileRef, offset: i32) {
     let nzb_ptr = host.file_snap(file_ptr).nzb_ptr;
     let n = host.nzb_file_len(nzb_ptr);
     if n == 0 {
         return;
     }
-    let mut order: Vec<usize> = (0..n).map(|i| host.nzb_file_at(nzb_ptr, i)).collect();
+    let mut order: Vec<FileRef> = (0..n).map(|i| host.nzb_file_at(nzb_ptr, i)).collect();
     let Some(entry) = order.iter().position(|&p| p == file_ptr) else {
         return;
     };
@@ -787,7 +788,7 @@ fn delete_entry(
     coord: &crate::queuecoord::NzbgetRsQueueCoordinator,
     host: &crate::queuesubsys_host::QueueSubsysHost,
     dq_ptr: usize,
-    file_ptr: usize,
+    file_ptr: FileRef,
 ) {
     use crate::queuesubsys_host::{MK_DETAIL, MK_INFO};
     let file = host.file_snap(file_ptr);
@@ -1252,7 +1253,7 @@ fn reorder_files(host: &crate::queuesubsys_host::QueueSubsysHost, items: &[EditI
     if n == 0 {
         return;
     }
-    let mut order: Vec<usize> = (0..n).map(|i| host.nzb_file_at(nzb_ptr, i)).collect();
+    let mut order: Vec<FileRef> = (0..n).map(|i| host.nzb_file_at(nzb_ptr, i)).collect();
     let mut insert_pos = 0usize;
     for item in items {
         if let Some(pos) = order.iter().position(|&p| p == item.file_ptr) {
@@ -1302,7 +1303,7 @@ fn sort_group_files(host: &crate::queuesubsys_host::QueueSubsysHost, nzb_ptr: us
             same_par,
         )
     });
-    let new_ptrs: Vec<usize> = snaps.iter().map(|f| f.ptr).collect();
+    let new_ptrs: Vec<FileRef> = snaps.iter().map(|f| f.ptr).collect();
     host.nzb_reorder_files(nzb_ptr, &new_ptrs);
 }
 
@@ -1350,7 +1351,7 @@ fn split_group(
     if items.is_empty() {
         return false;
     }
-    let file_ptrs: Vec<usize> = items.iter().map(|it| it.file_ptr).collect();
+    let file_ptrs: Vec<FileRef> = items.iter().map(|it| it.file_ptr).collect();
     coord.split_queue_entries(host, dq_ptr, &file_ptrs, name.unwrap_or(b""))
 }
 
@@ -1422,7 +1423,7 @@ fn edit_group(
     );
 
     if is_group_del && host.queue_find_by_id(dq_ptr, nzb_id) != 0 {
-        host.dq_notify(dq_ptr, ASPECT_NZB_DELETED, nzb_ptr, 0);
+        host.dq_notify(dq_ptr, ASPECT_NZB_DELETED, nzb_ptr, FileRef::NONE);
     }
 
     ok

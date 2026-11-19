@@ -6610,7 +6610,7 @@ fn run_frontend_thread(
                 let f_len = qh.nzb_file_len(nzb_ptr);
                 for f_idx in 0..f_len {
                     let f_ptr = qh.nzb_file_at(nzb_ptr, f_idx);
-                    if f_ptr == 0 {
+                    if f_ptr.is_none() {
                         continue;
                     }
                     let fs = qh.file_snap(f_ptr);

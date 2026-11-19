@@ -1,5 +1,6 @@
 //! Rust implementation of `QueueCoordinator` (`daemon/queue/QueueCoordinator.cpp`).
 
+use crate::queuesubsys_host::FileRef;
 use crate::status::{DeleteStatus, DirectRenameStatus, DirectUnpackStatus, DupeMode, PostStage};
 use std::ffi::CStr;
 
@@ -1347,7 +1348,7 @@ pub(crate) fn live_start_context_matches(
 #[cfg(unix)]
 fn snapshot_file_articles(
     host: &crate::queuesubsys_host::QueueSubsysHost,
-    file_ptr: usize,
+    file_ptr: FileRef,
     len: usize,
 ) -> Vec<crate::queuesubsys_host::ArticleSnap> {
     let mut v = Vec::with_capacity(len);
@@ -1798,7 +1799,7 @@ impl NzbgetRsQueueCoordinator {
                 dq_ptr,
                 crate::queuesubsys_host::ASPECT_NZB_FOUND,
                 added_nzb_ptr,
-                0,
+                FileRef::NONE,
             );
 
             let nzb = host.nzb_snap(added_nzb_ptr, false);
@@ -1854,7 +1855,7 @@ impl NzbgetRsQueueCoordinator {
                     dq_ptr,
                     crate::queuesubsys_host::ASPECT_NZB_ADDED,
                     added_nzb_ptr,
-                    0,
+                    FileRef::NONE,
                 );
             }
 
@@ -1902,11 +1903,7 @@ impl NzbgetRsQueueCoordinator {
             msg.extend_from_slice(&f.filename);
             msg.extend_from_slice(b"\" appears twice in collection, adding only the biggest file");
             host.log(crate::queuesubsys_host::MK_WARNING, &msg);
-            host.nzb_action(
-                nzb_ptr,
-                crate::queuesubsys_host::NZB_ACT_UPDATE_DELETED_STATS,
-                f.ptr,
-            );
+            host.nzb_update_deleted_stats(nzb_ptr, f.ptr);
             host.nzb_remove_file(nzb_ptr, f.ptr);
             if opts.server_mode {
                 host.disk_discard_file(f.id, true, false, false);
@@ -1994,7 +1991,7 @@ impl NzbgetRsQueueCoordinator {
         &self,
         host: &crate::queuesubsys_host::QueueSubsysHost,
         dq_ptr: usize,
-        file_ptr: usize,
+        file_ptr: FileRef,
     ) -> bool {
         host.file_set_int(file_ptr, crate::queuesubsys_host::FILE_INT_DELETED, 1);
         let mut downloading = false;
@@ -2177,7 +2174,7 @@ impl NzbgetRsQueueCoordinator {
         &self,
         host: &crate::queuesubsys_host::QueueSubsysHost,
         dq_ptr: usize,
-        file_ptrs: &[usize],
+        file_ptrs: &[FileRef],
         name: &[u8],
     ) -> bool {
         let mut src_nzb_ptr = 0usize;
@@ -2390,7 +2387,7 @@ impl NzbgetRsQueueCoordinator {
         crate::queuesubsys_host::FileSnap,
         crate::queuesubsys_host::ArticleSnap,
     )> {
-        let mut checked_files: Vec<usize> = Vec::new();
+        let mut checked_files: Vec<FileRef> = Vec::new();
         let cur_date = opts.cur_time;
 
         loop {
@@ -3830,7 +3827,7 @@ impl NzbgetRsQueueCoordinator {
         &self,
         host: &crate::queuesubsys_host::QueueSubsysHost,
         dq_ptr: usize,
-        file_ptr: usize,
+        file_ptr: FileRef,
         completed: bool,
     ) {
         while host.article_cache_file_busy(file_ptr) {
@@ -3857,17 +3854,9 @@ impl NzbgetRsQueueCoordinator {
         }
 
         if completed || nzb.deleting {
-            host.nzb_action(
-                nzb.ptr,
-                crate::queuesubsys_host::NZB_ACT_UPDATE_COMPLETED_STATS,
-                file.ptr,
-            );
+            host.nzb_update_completed_stats(nzb.ptr, file.ptr);
         } else {
-            host.nzb_action(
-                nzb.ptr,
-                crate::queuesubsys_host::NZB_ACT_UPDATE_DELETED_STATS,
-                file.ptr,
-            );
+            host.nzb_update_deleted_stats(nzb.ptr, file.ptr);
         }
 
         let file_status = classify_completed_file_status(
@@ -4320,7 +4309,7 @@ impl NzbgetRsQueueCoordinator {
         });
     }
 
-    fn save_partial_state(&self, host: &crate::queuesubsys_host::QueueSubsysHost, file_ptr: usize) {
+    fn save_partial_state(&self, host: &crate::queuesubsys_host::QueueSubsysHost, file_ptr: FileRef) {
         save_partial_state_host(host, file_ptr);
     }
 
@@ -4334,7 +4323,7 @@ impl NzbgetRsQueueCoordinator {
         host: &crate::queuesubsys_host::QueueSubsysHost,
         opts: &crate::queuesubsys_host::GlobalOptsSnap,
         nzb: &crate::queuesubsys_host::NzbSnap,
-        file_ptr: usize,
+        file_ptr: FileRef,
     ) -> crate::queuesubsys_host::FileSnap {
         let file = host.file_snap(file_ptr);
         if file.articles_len > 0 || !opts.server_mode {
@@ -4350,7 +4339,7 @@ impl NzbgetRsQueueCoordinator {
         host: &crate::queuesubsys_host::QueueSubsysHost,
         opts: &crate::queuesubsys_host::GlobalOptsSnap,
         nzb: &crate::queuesubsys_host::NzbSnap,
-        file_ptr: usize,
+        file_ptr: FileRef,
     ) {
         let file = host.file_snap(file_ptr);
         if file.partial_state == crate::queuesubsys_host::PARTIAL_PARTIAL {
@@ -4425,7 +4414,7 @@ impl NzbgetRsQueueCoordinator {
         host: &crate::queuesubsys_host::QueueSubsysHost,
         opts: &crate::queuesubsys_host::GlobalOptsSnap,
         dq_ptr: usize,
-        file_ptr: usize,
+        file_ptr: FileRef,
     ) {
         let file = host.file_snap(file_ptr);
         let nzb = host.nzb_snap(file.nzb_ptr, false);
@@ -5514,7 +5503,7 @@ impl NzbgetRsQueueCoordinator {
             },
             None => crate::queuesubsys_host::RunningDownloadSnap {
                 ad_ptr: 0,
-                file_ptr: 0,
+                file_ptr: FileRef::NONE,
                 status: 0,
                 last_update_time: 0,
             },
@@ -5602,7 +5591,7 @@ impl NzbgetRsQueueCoordinator {
     pub(crate) fn spawn_article_download(
         self: &std::sync::Arc<Self>,
         host: &crate::queuesubsys_host::QueueSubsysHost,
-        file_ptr: usize,
+        file_ptr: FileRef,
         article_ptr: usize,
         conn_ptr: usize,
         with_analyzer: bool,
@@ -5917,7 +5906,7 @@ pub(crate) fn direct_rename_completed_host(
         dq_ptr,
         crate::queuesubsys_host::ASPECT_NZB_NAMED,
         nzb_ptr,
-        0,
+        FileRef::NONE,
     );
 }
 
@@ -5981,7 +5970,7 @@ fn discard_downloaded_articles_host(
     host: &crate::queuesubsys_host::QueueSubsysHost,
     opts: &crate::queuesubsys_host::GlobalOptsSnap,
     nzb_ptr: usize,
-    file_ptr: usize,
+    file_ptr: FileRef,
 ) {
     host.file_action(
         file_ptr,
@@ -6151,7 +6140,7 @@ fn discard_temp_files_host(
 }
 
 #[cfg(unix)]
-fn save_partial_state_host(host: &crate::queuesubsys_host::QueueSubsysHost, file_ptr: usize) {
+fn save_partial_state_host(host: &crate::queuesubsys_host::QueueSubsysHost, file_ptr: FileRef) {
     let file = host.file_snap(file_ptr);
     if file.partial_changed {
         let mut dbg = b"Saving partial state for ".to_vec();

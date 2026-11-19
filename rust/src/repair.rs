@@ -4,6 +4,7 @@
 //! for PAR2 recovery volume selection, twin PAR2 index/volume evaluation, file CRC
 //! status resolution, progress/stage transitions, and pause timestamp adjustment.
 
+use crate::queuesubsys_host::FileRef;
 use crate::cstr;
 use crate::status::{DupeMode, NzbParStatus, ParCheckerStatus, PostStage};
 use std::ffi::CStr;
@@ -418,7 +419,7 @@ struct NzbSnapshot {
 
 /// One file of an nzb's file list, as `find_pars_pass` sees it.
 struct FileEntry {
-    ptr: usize,
+    ptr: FileRef,
     confirmed: bool,
     paused: bool,
     par_file: bool,
@@ -689,7 +690,7 @@ impl NzbgetRsRepairController {
 
     /// A par file of the queue was downloaded (or deleted). Returns whether it belongs to
     /// this job's nzb.
-    pub(crate) fn add_par(&self, q: JobQueue<'_>, file_ptr: usize, deleted: bool) -> bool {
+    pub(crate) fn add_par(&self, q: JobQueue<'_>, file_ptr: FileRef, deleted: bool) -> bool {
         let fs = q.host.file_snap(file_ptr);
         let ps = q.host.post_snap(q.post_ptr());
         let same_collection = fs.nzb_ptr == ps.nzb_ptr;
@@ -749,7 +750,7 @@ impl NzbgetRsRepairController {
         par_filename: &[u8],
         strict_par_name: bool,
         exact_par_name: bool,
-        blocks: &mut Vec<(usize, usize, i32, bool, Vec<u8>)>,
+        blocks: &mut Vec<(usize, FileRef, i32, bool, Vec<u8>)>,
     ) -> i32 {
         let base_off = crate::paths::base_file_name(par_filename);
         let base_par = &par_filename[base_off..];
@@ -802,7 +803,7 @@ impl NzbgetRsRepairController {
         q.host.with_locked_queue(|_dq| {
             let ctrl = self.snap(q);
             let nzb = inspect_nzb(q.host, ctrl.nzb_ptr);
-            let mut available: Vec<(usize, usize, i32, bool, Vec<u8>)> = Vec::new();
+            let mut available: Vec<(usize, FileRef, i32, bool, Vec<u8>)> = Vec::new();
             let mut block_found = 0;
             for (strict, exact) in [(true, true), (true, false), (false, false)] {
                 if strict && exact || block_found < block_needed {

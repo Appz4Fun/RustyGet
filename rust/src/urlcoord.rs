@@ -133,6 +133,7 @@ pub fn format_temp_url_path(temp_dir: &[u8], sep: u8, id: i32) -> Vec<u8> {
 // End-to-End UrlCoordinator & UrlDownloader Engine (`NzbgetRsUrlCoord`)
 // ============================================================================
 
+use crate::queuesubsys_host::FileRef;
 use crate::queuesubsys_host::{
     QueueSubsysHost, ASPECT_URL_ADDED, ASPECT_URL_COMPLETED, ASPECT_URL_DELETED, ASPECT_URL_FAILED,
     ASPECT_URL_FOUND, ASPECT_URL_RETURNED, NZB_INT_ACTIVE_DOWNLOADS, NZB_INT_AVOID_HISTORY,
@@ -542,7 +543,7 @@ impl NzbgetRsUrlCoord {
             }
             host.nzb_set_url_status(nzb_ptr, new_url);
             if !retry {
-                host.dq_notify(dq_ptr, ASPECT_URL_COMPLETED, nzb_ptr, 0);
+                host.dq_notify(dq_ptr, ASPECT_URL_COMPLETED, nzb_ptr, FileRef::NONE);
             }
         });
 
@@ -591,7 +592,7 @@ impl NzbgetRsUrlCoord {
 
         host.with_locked_queue(|dq_ptr| {
             host.nzb_set_int(nzb_ptr, NZB_INT_ACTIVE_DOWNLOADS, 0);
-            host.dq_notify(dq_ptr, ASPECT_URL_FAILED, nzb_ptr, 0);
+            host.dq_notify(dq_ptr, ASPECT_URL_FAILED, nzb_ptr, FileRef::NONE);
         });
     }
 
@@ -625,19 +626,19 @@ impl NzbgetRsUrlCoord {
             host.nzb_set_delete_status(nzb_ptr, DeleteStatus::Manual);
         }
         host.nzb_set_url_status(nzb_ptr, UrlStatus::None);
-        host.dq_notify(dq_ptr, ASPECT_URL_DELETED, nzb_ptr, 0);
+        host.dq_notify(dq_ptr, ASPECT_URL_DELETED, nzb_ptr, FileRef::NONE);
         true
     }
 
     fn add_url_to_queue(&self, nzb_ptr: usize, holder_ptr: usize, add_first: bool) {
         url_emit_log(0, &[b"Adding URL to queue"]);
         with_dq_guard(|host, dq_ptr| {
-            host.dq_notify(dq_ptr, ASPECT_URL_FOUND, nzb_ptr, 0);
+            host.dq_notify(dq_ptr, ASPECT_URL_FOUND, nzb_ptr, FileRef::NONE);
             let snap = host.nzb_snap(nzb_ptr, false);
             let do_add = snap.delete_status != DeleteStatus::Manual;
             if do_add && holder_ptr != 0 {
                 host.queue_insert_owned(dq_ptr, holder_ptr, 0, add_first);
-                host.dq_notify(dq_ptr, ASPECT_URL_ADDED, nzb_ptr, 0);
+                host.dq_notify(dq_ptr, ASPECT_URL_ADDED, nzb_ptr, FileRef::NONE);
             }
             host.dq_save(dq_ptr);
         });

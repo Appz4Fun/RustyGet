@@ -1401,7 +1401,7 @@ impl NzbgetRsStreamRepairCtrl {
             }
             let pending = (0..host.nzb_file_len(nzb))
                 .map(|i| host.nzb_file_at(nzb, i))
-                .filter(|&f| f != 0 && !host.file_snap(f).par_file)
+                .filter(|&f| f.is_some() && !host.file_snap(f).par_file)
                 .count();
             (Some(pending), Some(host.nzb_snap(nzb, false).id))
         })

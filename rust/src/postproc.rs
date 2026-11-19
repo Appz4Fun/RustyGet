@@ -2,6 +2,7 @@
 //! `ParChecker`, `UnpackController`, `DirectUnpack`, `MoveController`,
 //! `CleanupController`, `RenameController`, and `PostRenamerController`.
 
+use crate::queuesubsys_host::FileRef;
 use crate::cstr;
 use crate::parchecker::{
     is_processed_file, ParRepairEvents, ParSegment, QuickInfo, RustParRepairer,
@@ -3682,7 +3683,7 @@ impl NzbgetRsDirectUnpack {
         }
     }
 
-    pub(crate) fn file_downloaded(&self, host: &QueueSubsysHost, fi_ptr: usize) {
+    pub(crate) fn file_downloaded(&self, host: &QueueSubsysHost, fi_ptr: FileRef) {
         let fs = host.file_snap(fi_ptr);
         let nzb_ptr = fs.nzb_ptr;
         let nzb_name = if nzb_ptr != 0 {
@@ -4386,7 +4387,7 @@ impl NzbgetRsDirectUnpack {
                 }
                 2 => {
                     let _ = p1;
-                    self.file_downloaded(host, p2);
+                    self.file_downloaded(host, FileRef::from_addr(p2));
                     0
                 }
                 3 => {
@@ -5126,7 +5127,11 @@ impl NzbgetRsPostJob {
             2 => {
                 if let PostJobInner::Repair(Some(ctrl)) = &self.inner {
                     crate::ffi::queue_host().map_or(0, |host| {
-                        c_int::from(ctrl.add_par(JobQueue { job: self, host: &host }, p1, a1 != 0))
+                        c_int::from(ctrl.add_par(
+                            JobQueue { job: self, host: &host },
+                            FileRef::from_addr(p1),
+                            a1 != 0,
+                        ))
                     })
                 } else {
                     0

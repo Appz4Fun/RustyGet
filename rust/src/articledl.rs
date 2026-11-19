@@ -1,6 +1,7 @@
 //! Full Rust runtime backing `MemoryMonitor`, `ArticleCache`,
 //! `ArticleWriter`, `RenameContentAnalyzer`, and `ArticleDownloader`.
 
+use crate::options::OptStr;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::io::{Seek, SeekFrom, Write};
 use std::os::fd::{FromRawFd, IntoRawFd, RawFd};
@@ -351,7 +352,7 @@ fn cache_alloc(size: i32) -> *mut u8 {
                         && opts.scalars().continue_partial != 0
                         && opts.scalars().skip_write == 0
                     {
-                        write_acache_flag(opts.str_bytes(6));
+                        write_acache_flag(opts.str_bytes(OptStr::QueueDir));
                     }
                 }
                 CACHE_ALLOC_LOCK.1.notify_all();
@@ -394,7 +395,7 @@ fn cache_free(ptr: *mut u8, cap: i32) {
         if next == 0 {
             if let Some(opts) = crate::options::active_options() {
                 if opts.server_mode() && opts.scalars().continue_partial != 0 {
-                    delete_acache_flag(opts.str_bytes(6));
+                    delete_acache_flag(opts.str_bytes(OptStr::QueueDir));
                 }
             }
         }
@@ -473,7 +474,7 @@ pub(crate) fn memory_monitor_init_options(reset_state: bool) {
     }
     if let Some(opts) = crate::options::active_options() {
         let path_opt = opts
-            .str_cstr(36)
+            .str_cstr(OptStr::MemoryPressurePath)
             .and_then(|c| c.to_str().ok())
             .filter(|s| !s.is_empty());
         crate::memory_pressure::set_mock_root(path_opt);
@@ -1406,7 +1407,7 @@ impl RsArticleWriter {
         let force_direct_write = ints[2] != 0;
         let output_initialized = ints[3] != 0;
         let (direct_write, tmp_dir) = match crate::options::active_options() {
-            Some(opts) => (opts.scalars().direct_write != 0, opts.str_bytes(5).to_vec()),
+            Some(opts) => (opts.scalars().direct_write != 0, opts.str_bytes(OptStr::TempDir).to_vec()),
             None => (false, Vec::new()),
         };
         let dest_dir = unsafe { cstr_or_empty(strs[0]) };
@@ -1673,7 +1674,7 @@ impl RsArticleWriter {
                 &self.temp_filename
             };
             let scratch_dir = crate::options::active_options()
-                .map(|opts| opts.str_bytes(5).to_vec())
+                .map(|opts| opts.str_bytes(OptStr::TempDir).to_vec())
                 .unwrap_or_default();
             if !direct_write {
                 // An article temporary is attested against the job's source

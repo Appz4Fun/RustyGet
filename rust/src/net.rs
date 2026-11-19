@@ -2262,7 +2262,6 @@ pub unsafe extern "C" fn nserv_default_conn_cb(
 // FFI entry points
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_tls_suppressed(slot: usize) -> c_int {
     if slot == 0 {
         0
@@ -3501,7 +3500,6 @@ impl NzbgetRsServerPool {
     }
 }
 
-#[no_mangle]
 pub extern "C" fn nzbget_rs_serverpool_new() -> *mut NzbgetRsServerPool {
     let arc = Arc::new(NzbgetRsServerPool::new(crate::ffi::tls_host_cb()));
     // A new pool (start-up or a config reload) may hold servers that have
@@ -3516,7 +3514,6 @@ pub extern "C" fn nzbget_rs_serverpool_new() -> *mut NzbgetRsServerPool {
     Arc::into_raw(arc).cast_mut()
 }
 
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_serverpool_free(pool: *mut NzbgetRsServerPool) {
     if !pool.is_null() {
         if let Some(lg) = crate::log::active_log() {
@@ -3868,7 +3865,6 @@ pub struct NzbgetTlsServer {
     pub password: *const c_char,
 }
 
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_serverpool_probe_tls(
     server: *const NzbgetTlsServer,
     cipher: *const c_char,

@@ -279,14 +279,12 @@ impl ArticleList {
     }
 }
 
-#[unsafe(no_mangle)]
 pub extern "C" fn nzbget_rs_artlist_new() -> *mut ArticleList {
     Box::into_raw(Box::default())
 }
 
 /// # Safety
 /// `list` is null or from `nzbget_rs_artlist_new`, freed once.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_artlist_free(list: *mut ArticleList) {
     if !list.is_null() {
         drop(unsafe { Box::from_raw(list) });
@@ -329,7 +327,6 @@ pub unsafe extern "C" fn nzbget_rs_artlist_free(list: *mut ArticleList) {
 /// the operation. Operations that change the list (11, 12, 101, 105) need the
 /// queue lock, as in the C++ code; article operations lock the article.
 #[allow(clippy::too_many_arguments)]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_article_host(
     list: *mut ArticleList,
     article: *mut Article,

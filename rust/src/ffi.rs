@@ -1,12 +1,13 @@
-//! C ABI. Strings come in as NUL-terminated C strings; results go out as a
-//! buffer the caller copies and then frees with nzbget_rs_free.
+//! C-shaped helpers left from the C++ port. Nothing outside this crate calls
+//! them any more: strings come in as NUL-terminated C strings and results go
+//! out as a buffer freed with `nzbget_rs_free`. They are being replaced by
+//! plain Rust APIs.
 
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 
 #[path = "tlscipher/native.rs"]
 pub(crate) mod tls_cipher_native;
 
-#[no_mangle]
 pub extern "C" fn nzbget_rs_tls_cipher_pin(protocol: c_int, bits: u32, flags: u32) -> c_int {
     use crate::tlscipher::{eligible, Protocol, Suite};
     let version = match protocol {
@@ -51,7 +52,6 @@ fn cipher_response(result: Result<String, crate::tlscipher::Error>) -> RsBuf {
 /// backend is null (built-in backend) or points to a complete callback table. Its context transfers
 /// to Rust exactly once, including rejected/duplicate starts. Callbacks are
 /// thread-safe for the documented single-worker use and must never unwind.
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_tls_cipher_start(
     backend: *const tls_cipher_native::Io,
 ) -> RsBuf {
@@ -65,7 +65,6 @@ pub unsafe extern "C" fn nzbget_rs_tls_cipher_start(
 }
 /// Starts the built-in backend for one saved server (`ServerN`), leaving the
 /// other servers' ciphers alone. A server ID below 1 means every server.
-#[no_mangle]
 pub extern "C" fn nzbget_rs_tls_cipher_start_server(server: c_int) -> RsBuf {
     let only = u32::try_from(server).ok().filter(|id| *id > 0);
     cipher_response(tls_cipher_native::start(
@@ -75,7 +74,6 @@ pub extern "C" fn nzbget_rs_tls_cipher_start_server(server: c_int) -> RsBuf {
 }
 /// # Safety
 /// id is null or a readable NUL-terminated string; null/empty queries current job.
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_tls_cipher_status(id: *const c_char) -> RsBuf {
     let id = if id.is_null() {
         None
@@ -89,7 +87,6 @@ pub unsafe extern "C" fn nzbget_rs_tls_cipher_status(id: *const c_char) -> RsBuf
 }
 /// # Safety
 /// id points to a readable NUL-terminated string.
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_tls_cipher_cancel(id: *const c_char) -> RsBuf {
     if id.is_null() {
         return cipher_response(Err(crate::tlscipher::Error("Missing cipher job ID.")));
@@ -103,7 +100,6 @@ pub unsafe extern "C" fn nzbget_rs_tls_cipher_cancel(id: *const c_char) -> RsBuf
             .and_then(|()| tls_cipher_native::service().status(Some(id))),
     )
 }
-#[no_mangle]
 pub extern "C" fn nzbget_rs_tls_cipher_shutdown() {
     tls_cipher_native::service().shutdown();
 }
@@ -177,7 +173,6 @@ unsafe fn bytes_arg<'a>(data: *const u8, len: usize) -> &'a [u8] {
 
 /// # Safety
 /// `buf` came from an nzbget_rs_* function and wasn't freed yet.
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_free(buf: RsBuf) {
     if !buf.data.is_null() {
         drop(Vec::from_raw_parts(
@@ -192,7 +187,6 @@ pub unsafe extern "C" fn nzbget_rs_free(buf: RsBuf) {
 ///
 /// # Safety
 /// `block` is null with `len == 0`, or points to `len` readable bytes.
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_crc32_append(block: *const u8, len: u32, init: u32) -> u32 {
     if block.is_null() || len == 0 {
         return init;
@@ -250,7 +244,7 @@ pub(super) unsafe extern "C" fn nzbget_rs_is_excessively_obfuscated(
     crate::deobfuscation::is_excessively_obfuscated(bytes(s, len)) as c_int
 }
 
-/// FileTypes' name checks (rust/src/filetypes.rs), by number (see nzbget_rs.h).
+/// FileTypes' name checks (rust/src/filetypes.rs), by number.
 ///
 /// # Safety
 /// `s` is null or readable for `len` bytes.
@@ -303,7 +297,6 @@ pub(super) unsafe extern "C" fn nzbget_rs_file_type(
 /// `s` is null or readable for `len` bytes within one allocation, with
 /// `len <= isize::MAX`. Null means empty regardless of `len`. Panics abort
 /// rather than unwinding across the ABI.
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_path_text(
     op: c_int,
     s: *const c_char,
@@ -327,7 +320,6 @@ pub unsafe extern "C" fn nzbget_rs_path_text(
 /// # Safety
 /// `s` is null or readable for `len` bytes within one allocation, with
 /// `len <= isize::MAX`. Null means empty regardless of `len`.
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_path_position(op: c_int, s: *const c_char, len: usize) -> usize {
     let b = bytes(s, len);
     match op {
@@ -436,7 +428,6 @@ pub(super) unsafe extern "C" fn nzbget_rs_split_command_line(s: *const c_char) -
 /// # Safety
 /// `path` is null or NUL-terminated.
 #[cfg(unix)]
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_file_exists(path: *const c_char) -> c_int {
     (!path.is_null() && crate::fsops::file_exists(input(path), &crate::fsops::posix_stat)) as c_int
 }
@@ -446,7 +437,6 @@ pub unsafe extern "C" fn nzbget_rs_file_exists(path: *const c_char) -> c_int {
 /// # Safety
 /// `path` is null or NUL-terminated.
 #[cfg(unix)]
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_directory_exists(path: *const c_char) -> c_int {
     (!path.is_null() && crate::fsops::directory_exists(input(path), &crate::fsops::posix_stat))
         as c_int
@@ -479,7 +469,6 @@ unsafe fn nzbget_rs_force_directories(path: *const c_char, errmsg: *mut RsBuf) -
 ///
 /// # Safety
 /// `dir` is null or NUL-terminated; `errmsg` is null or writable.
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_delete_directory_with_content(
     dir: *const c_char,
     separator: c_char,
@@ -1832,7 +1821,6 @@ unsafe fn purge_snapshot(x: &PurgeSnapshotC) -> Result<purge::Snapshot, purge::P
 /// descriptors must be aligned, initialized and accessible for their count and
 /// immutable until return. On success the owned opaque handle must be destroyed
 /// exactly once, after all users have stopped. No borrowed storage is retained.
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_purge_prepare(
     snapshot: *const PurgeSnapshotC,
     request: *const u8,
@@ -1873,7 +1861,6 @@ pub unsafe extern "C" fn nzbget_rs_purge_prepare(
 /// # Safety
 /// A nonnull pointer must be the live handle from prepare, with no concurrent
 /// users; destroying a handle twice or passing another pointer is invalid.
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_purge_destroy(handle: *mut std::ffi::c_void) {
     if !handle.is_null() {
         let p = handle.cast::<purge::Plan>();
@@ -2410,7 +2397,6 @@ unsafe fn purge_registry_allocate(
 /// Domain covers 16 bytes; ops and output are valid versioned records. Output
 /// may be ops.registry; its fixed record is copied before output mutation. The host
 /// owns an empty private descriptor domain and all callbacks catch exceptions.
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_purge_registry_create(
     domain: *const u8,
     ops: *const PurgeHostOpsC,
@@ -2441,7 +2427,6 @@ pub unsafe extern "C" fn nzbget_rs_purge_registry_create(
 /// scan_complete=1 asserts that contract, not checksum authentication. Output
 /// may be ops.registry, but must not overlap frame/byte storage or callback
 /// pointer targets, which remain valid and immutable through this call.
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_purge_registry_recover(
     domain: *const u8,
     frames: *const PurgeBytesC,
@@ -2488,7 +2473,6 @@ pub unsafe extern "C" fn nzbget_rs_purge_registry_recover(
 }
 /// # Safety
 /// Nonnull handle is a live registry from create/recover with all users stopped.
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_purge_registry_destroy(p: *mut PurgeRegistryC) {
     if !p.is_null() {
         std::ptr::drop_in_place(p);
@@ -2506,7 +2490,6 @@ unsafe fn purge_result(result: Result<(), purge::PurgeError>, out_error: *mut i3
 /// handle is live prepare output. Registry is exclusively borrowed for this
 /// entire call; callbacks cannot reenter or retain its views. No global lock is
 /// acquired by Rust. Host must not hold queue/provider/global locks while waiting.
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_purge_tick(
     handle: *const std::ffi::c_void,
     ops: *const PurgeHostOpsC,
@@ -2596,7 +2579,6 @@ pub unsafe extern "C" fn nzbget_rs_purge_tick(
 /// # Safety
 /// Binding/delta are accessible immutable records for the call; registry and
 /// callback lifetimes/serialization follow tick. Only a durable ACK returns 0.
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_purge_inventory_store(
     binding: *const PurgeBindingC,
     delta: *const PurgeOutputDeltaC,
@@ -3335,7 +3317,6 @@ pub(crate) fn system_health_diagnose_bytes(format_mode: c_int) -> Vec<u8> {
 // and TwinCheck (`twin.rs`) FFI
 // =========================================================================
 
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_alloc_buf(data: *const c_char, len: usize) -> RsBuf {
     into_buf(bytes(data, len).to_vec())
 }
@@ -3463,7 +3444,6 @@ pub(crate) fn tls_host_cb() -> crate::net::NzbgetRsConnHostFn {
 }
 
 #[cfg(unix)]
-#[no_mangle]
 pub extern "C" fn nzbget_rs_tls_init() {
     crate::tlssock::init();
 }
@@ -3471,7 +3451,6 @@ pub extern "C" fn nzbget_rs_tls_init() {
 /// # Safety
 /// cert_store is null or a NUL-terminated path; empty or null loads no store.
 #[cfg(unix)]
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_tls_init_options(cert_store: *const c_char) {
     let path = if cert_store.is_null() {
         &[][..]
@@ -3482,13 +3461,11 @@ pub unsafe extern "C" fn nzbget_rs_tls_init_options(cert_store: *const c_char) {
 }
 
 #[cfg(unix)]
-#[no_mangle]
 pub extern "C" fn nzbget_rs_tls_final() {
     crate::tlssock::final_cleanup();
 }
 
 #[cfg(unix)]
-#[no_mangle]
 pub extern "C" fn nzbget_rs_tls_thread_stop() {
     if !build_tls_disabled() {
         crate::tlssock::stop_ssl_thread();
@@ -3569,7 +3546,6 @@ impl Drop for RustThreadGuard {
     }
 }
 
-#[no_mangle]
 pub extern "C" fn nzbget_rs_thread_count_op(op: c_int) -> c_int {
     match op {
         1 => THREAD_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1,
@@ -3906,7 +3882,6 @@ impl NzbgetRsWorkState {
     }
 }
 
-#[no_mangle]
 pub extern "C" fn nzbget_rs_workstate_new() -> *mut NzbgetRsWorkState {
     let arc = std::sync::Arc::new(NzbgetRsWorkState {
         resume_time: std::sync::atomic::AtomicI64::new(0),
@@ -3929,7 +3904,6 @@ pub extern "C" fn nzbget_rs_workstate_new() -> *mut NzbgetRsWorkState {
     std::sync::Arc::into_raw(arc).cast_mut()
 }
 
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_workstate_free(ws: *mut NzbgetRsWorkState) {
     if !ws.is_null() {
         let arc = std::sync::Arc::from_raw(ws.cast_const());
@@ -3945,7 +3919,6 @@ pub unsafe extern "C" fn nzbget_rs_workstate_free(ws: *mut NzbgetRsWorkState) {
     }
 }
 
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_workstate_ctl(
     ws: *const NzbgetRsWorkState,
     id: c_int,
@@ -4086,7 +4059,6 @@ pub(crate) unsafe fn script_config_emit_templates(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_script_config_exec(
     op: c_int,
     p1: *const c_char,
@@ -4621,7 +4593,6 @@ pub(crate) unsafe fn nzbget_rs_cross_pack_session_process_donor(
     );
 }
 
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_nzb_completed_same_filename(
     a: *const c_char,
     b: *const c_char,
@@ -4632,7 +4603,6 @@ pub unsafe extern "C" fn nzbget_rs_nzb_completed_same_filename(
     ))
 }
 
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_util_format_time(
     time_sec: i64,
     buffer: *mut c_char,
@@ -4644,7 +4614,6 @@ pub unsafe extern "C" fn nzbget_rs_util_format_time(
     }
 }
 
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_server_stat_apply_op(
     stat_op: c_int,
     delta_success: c_int,
@@ -4666,7 +4635,6 @@ pub unsafe extern "C" fn nzbget_rs_server_stat_apply_op(
     *inout_failed = f;
 }
 
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_script_calc_total_status(
     statuses: *const c_int,
     count: usize,
@@ -4679,7 +4647,6 @@ pub unsafe extern "C" fn nzbget_rs_script_calc_total_status(
     crate::downloadinfo::script_calc_total_status(slice)
 }
 
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_socket_deadline_wait(
     fd: c_int,
     read: c_int,
@@ -4731,13 +4698,11 @@ pub(crate) fn clear_active_prepost(pp: &std::sync::Arc<crate::prepost::NzbgetRsP
 }
 
 #[cfg(unix)]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_par_checker_new() -> *mut crate::postproc::NzbgetRsParChecker {
     Box::into_raw(Box::new(crate::postproc::NzbgetRsParChecker::new()))
 }
 
 #[cfg(unix)]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_par_checker_free(
     ctrl: *mut crate::postproc::NzbgetRsParChecker,
 ) {
@@ -4747,7 +4712,6 @@ pub unsafe extern "C" fn nzbget_rs_par_checker_free(
 }
 
 #[cfg(unix)]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_par_checker_exec(
     ctrl: *const crate::postproc::NzbgetRsParChecker,
     op: c_int,

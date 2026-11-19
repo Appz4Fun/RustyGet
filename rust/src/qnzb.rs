@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::sync::Mutex;
 
-/// Field order and types must match `NzbgetRsNzbScalars` in `nzbget_rs.h`.
+/// Shared by pointer between queue modules, hence `#[repr(C)]`.
 #[repr(C)]
 pub struct NzbScalars {
     pub id: i32,
@@ -330,7 +330,6 @@ fn data<'a>(p: *const NzbScalars) -> &'a NzbData {
     unsafe { &*p.cast::<NzbData>() }
 }
 
-#[unsafe(no_mangle)]
 pub extern "C" fn nzbget_rs_nzb_scalars_new() -> *mut NzbScalars {
     let mut texts: [Option<CString>; TEXTS] = Default::default();
     for (i, t) in texts.iter_mut().enumerate() {
@@ -355,7 +354,6 @@ static NZB_ID_MAX: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::
 /// Id generation shared by all collections (was `NzbInfo::m_idGen` and
 /// `m_idMax`): 0 last generated id, 1 reset to the highest id seen, 2 reset
 /// to zero, 3 raise the floor to `v`, 4 generate the next id.
-#[unsafe(no_mangle)]
 pub extern "C" fn nzbget_rs_nzb_ids(op: c_int, v: c_int) -> c_int {
     use std::sync::atomic::Ordering::SeqCst;
     match op {
@@ -386,7 +384,6 @@ unsafe extern "C" fn drop_file(p: usize) {
 ///
 /// # Safety
 /// `p` is from `nzbget_rs_nzb_scalars_new` and not initialised yet.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_nzb_init(p: *mut NzbScalars) {
     unsafe { (*p).id = nzbget_rs_nzb_ids(4, 0) };
     let files = crate::qlist::nzbget_rs_ptrlist_new(drop_file);
@@ -395,7 +392,6 @@ pub unsafe extern "C" fn nzbget_rs_nzb_init(p: *mut NzbScalars) {
 
 /// # Safety
 /// `p` is null or from `nzbget_rs_nzb_scalars_new`, freed once.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_nzb_scalars_free(p: *mut NzbScalars) {
     if !p.is_null() {
         drop(unsafe { Box::from_raw(p.cast::<NzbData>()) });
@@ -406,7 +402,6 @@ pub unsafe extern "C" fn nzbget_rs_nzb_scalars_free(p: *mut NzbScalars) {
 ///
 /// # Safety
 /// `p` is from `nzbget_rs_nzb_scalars_new`.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_nzb_text(p: *const NzbScalars, id: c_int) -> *const c_char {
     let data = unsafe { &*p.cast::<NzbData>() };
     let texts = data.texts.lock().unwrap_or_else(|e| e.into_inner());
@@ -421,7 +416,6 @@ pub unsafe extern "C" fn nzbget_rs_nzb_text(p: *const NzbScalars, id: c_int) -> 
 ///
 /// # Safety
 /// `p` is from `nzbget_rs_nzb_scalars_new`; `s` is null or readable as stated.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_nzb_set_text(
     p: *const NzbScalars,
     id: c_int,
@@ -445,7 +439,6 @@ pub unsafe extern "C" fn nzbget_rs_nzb_set_text(
 }
 
 /// Size of the struct, so C++ can check it matches its declaration.
-#[unsafe(no_mangle)]
 pub extern "C" fn nzbget_rs_nzb_scalars_size() -> usize {
     std::mem::size_of::<NzbScalars>()
 }
@@ -467,7 +460,6 @@ pub extern "C" fn nzbget_rs_nzb_scalars_size() -> usize {
 /// `p` (and `p2` where used) come from `nzbget_rs_nzb_scalars_new`; output
 /// arrays are large enough; strings are null or NUL-terminated.
 #[allow(clippy::too_many_arguments)]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_nzb_coll(
     p: *const NzbScalars,
     op: c_int,
@@ -637,7 +629,6 @@ fn ranges(raw: *const i64, count: c_int) -> Vec<[i64; 2]> {
 ///  24 mark live attempted at a2, returns the previous value; 25 erase at
 ///  a2; 26 at a2 set decoded size i64s[0] when >= 0 and holes `raw`
 ///  ints[1]; 27 clear.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_nzb_files(
     p: *const NzbScalars,
     op: c_int,
@@ -872,7 +863,6 @@ struct PostLists {
     extracted: Vec<CString>,
 }
 
-#[unsafe(no_mangle)]
 pub extern "C" fn nzbget_rs_post_new() -> *mut Post {
     Box::into_raw(Box::new(Post {
         vals: std::array::from_fn(|_| std::sync::atomic::AtomicI64::new(0)),
@@ -881,7 +871,6 @@ pub extern "C" fn nzbget_rs_post_new() -> *mut Post {
     }))
 }
 
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_post_free(p: *mut Post) {
     if !p.is_null() {
         drop(unsafe { Box::from_raw(p) });
@@ -889,7 +878,6 @@ pub unsafe extern "C" fn nzbget_rs_post_free(p: *mut Post) {
 }
 
 /// A copy of the progress label: it may change on another thread.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_post_label(p: *const Post) -> crate::ffi::RsBuf {
     let post = unsafe { &*p };
     let l = post.lists.lock().unwrap_or_else(|e| e.into_inner());
@@ -910,7 +898,6 @@ pub unsafe extern "C" fn nzbget_rs_post_label(p: *const Post) -> crate::ffi::RsB
 ///  20-23 parred files, 30-33 extracted archives (see `list_op`; the
 ///  collection's list when there is one): strings returned stay valid until
 ///  that list changes.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_post_op(
     p: *const Post,
     op: c_int,
@@ -1164,7 +1151,6 @@ pub(crate) unsafe fn host_post_op(
 ///
 /// # Safety
 /// `p` is a live collection; the caller holds the queue lock.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_nzb_start_direct_unpack(p: *mut NzbScalars) {
     use crate::jobthread::{nzbget_rs_job_free, nzbget_rs_job_new_unpack, nzbget_rs_job_start};
     if p.is_null() {
@@ -2619,7 +2605,6 @@ pub(crate) unsafe fn host_coll_snapshot(
 /// Host handles kept with a collection: 0 file list, 1 post-processing info,
 /// 2 direct-unpack job, 3 live-repair job, 4 message count. The host owns
 /// what they point to. set != 0 stores v; returns the (previous) value.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_nzb_slot(
     p: *const NzbScalars,
     id: c_int,
@@ -2648,7 +2633,6 @@ pub type MsgVisit = Option<unsafe extern "C" fn(usize, c_int, c_int, c_int, *con
 ///  4 visit messages: from id ints[0] when > 0, else the last ints[1] when
 ///    > 0, else none.
 /// cachedMessageCount follows every change.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_nzb_msgs(
     p: *const NzbScalars,
     op: c_int,

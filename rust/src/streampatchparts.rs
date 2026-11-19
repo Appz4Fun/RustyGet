@@ -129,7 +129,6 @@ pub fn select(donors: &[Range], holes: &[Range], margin: i32, output: &mut [i32]
 /// They must not overlap. NULL is permitted only for an empty corresponding
 /// slice. Counts must fit Rust slices, donor_count must fit i32, and the
 /// arithmetic parity domain documented on `select` applies.
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_stream_patch_parts(
     donors: *const Range,
     donor_count: usize,

@@ -102,7 +102,6 @@ pub unsafe fn init_platform(argc: c_int, argv: *mut *mut c_char, argp: *mut *mut
 
 /// Master C ABI daemon entrypoint of the `nzbget_rs` library.
 /// Called by `main` in `rust/entry.rs`.
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_main(
     argc: c_int,
     argv: *mut *mut c_char,

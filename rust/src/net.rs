@@ -2,6 +2,7 @@
 //! runtime (`Connection`, `CancelRegistry`, `NntpConnection`, `WebDownloader`,
 //! `RemoteServer`, and `RequestProcessor::Execute`).
 
+use crate::options::OptStr;
 use std::cell::{RefCell, UnsafeCell};
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::ptr;
@@ -1692,9 +1693,9 @@ impl RemoteSrvInstance {
                             sc.control_port
                         },
                         sc.remote_timeout,
-                        o.str_bytes(14).to_vec(),
-                        o.str_bytes(21).to_vec(),
-                        o.str_bytes(22).to_vec(),
+                        o.str_bytes(OptStr::ControlIp).to_vec(),
+                        o.str_bytes(OptStr::SecureCert).to_vec(),
+                        o.str_bytes(OptStr::SecureKey).to_vec(),
                     )
                 },
             );
@@ -1980,8 +1981,8 @@ unsafe fn exec_request_processor(conn: &mut NzbgetRsConn, tls: bool) {
             && !crate::ffi::build_tls_disabled()
             && peek_first_byte(conn) == Some(TLS_HANDSHAKE_RECORD));
     if tls && !crate::ffi::build_tls_disabled() {
-        let cert = opts.as_deref().and_then(|o| o.str_cstr(21)).unwrap_or(c"");
-        let key = opts.as_deref().and_then(|o| o.str_cstr(22)).unwrap_or(c"");
+        let cert = opts.as_deref().and_then(|o| o.str_cstr(OptStr::SecureCert)).unwrap_or(c"");
+        let key = opts.as_deref().and_then(|o| o.str_cstr(OptStr::SecureKey)).unwrap_or(c"");
         let started = conn.session.get_mut().core.start_tls(false, cert, key);
         if !started {
             emit(

@@ -11,6 +11,7 @@
 //! and frees them in the order the C++ class did: runner, global cleanup,
 //! server pool, work state, options, log.
 
+use crate::options::OptStr;
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
@@ -323,7 +324,7 @@ unsafe extern "C" fn phase1_init(reload: bool) -> c_int {
     if !crate::ffi::build_tls_disabled() {
         let opts = &*options;
         let cert_store = if opts.scalars().cert_check != 0 {
-            opts.str_cstr(23).unwrap_or(c"")
+            opts.str_cstr(OptStr::CertStore).unwrap_or(c"")
         } else {
             c""
         };

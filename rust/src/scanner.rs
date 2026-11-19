@@ -198,6 +198,7 @@ pub fn normalize_external_nzb_name(nzb_name: &[u8], valid_name: &[u8], is_nzb: b
 }
 
 use crate::cstr;
+use crate::options::OptStr;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
@@ -409,10 +410,10 @@ fn resolve_runtime_opts(env: &NzbgetRsScannerEnv) -> ScannerRuntimeOpts {
     ScannerRuntimeOpts {
         nzb_dir: opts
             .as_deref()
-            .map_or_else(Vec::new, |o| o.str_bytes(7).to_vec()),
+            .map_or_else(Vec::new, |o| o.str_bytes(OptStr::NzbDir).to_vec()),
         temp_dir: opts
             .as_deref()
-            .map_or_else(Vec::new, |o| o.str_bytes(5).to_vec()),
+            .map_or_else(Vec::new, |o| o.str_bytes(OptStr::TempDir).to_vec()),
         nzb_dir_interval: opts.as_deref().map_or(0, |o| o.scalars().nzb_dir_interval),
         nzb_dir_file_age: opts.as_deref().map_or(0, |o| o.scalars().nzb_dir_file_age),
         archive_scan: opts

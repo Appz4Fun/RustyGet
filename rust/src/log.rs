@@ -2,6 +2,7 @@
 //! backing `Log` (`daemon/util/Log.h` / `Log.cpp`) and `CommandScriptLog`.
 
 use crate::cstr;
+use crate::options::OptStr;
 use std::collections::VecDeque;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::ptr;
@@ -381,7 +382,7 @@ fn filelog_locked(
             Some(guard) => {
                 unsafe {
                     if libc::getuid() == 0 || libc::geteuid() == 0 {
-                        if let Some(user) = options.and_then(|o| o.str_cstr(26)) {
+                        if let Some(user) = options.and_then(|o| o.str_cstr(OptStr::DaemonUsername)) {
                             let pwd = libc::getpwnam(user.as_ptr());
                             let fd = libc::fileno(guard.0);
                             if !pwd.is_null() && fd >= 0 {
@@ -683,7 +684,7 @@ pub(crate) unsafe fn nzbget_rs_log_ctl(
             let debug_build = lg.debug_build;
             if let Some(o) = opts {
                 if !remote_mode && !direct_mode && o.scalars().write_log != 0 {
-                    if let Some(lf) = o.str_cstr(27) {
+                    if let Some(lf) = o.str_cstr(OptStr::LogFile) {
                         if let Ok(mut pg) = lg.path.lock() {
                             *pg = lf.to_owned();
                         }
@@ -737,7 +738,7 @@ pub(crate) unsafe fn nzbget_rs_log_ctl(
             }
         }
         3 => {
-            if let Some(lf) = opts.and_then(|o| o.str_cstr(27)) {
+            if let Some(lf) = opts.and_then(|o| o.str_cstr(OptStr::LogFile)) {
                 let _ = libc::unlink(lf.as_ptr());
             }
         }

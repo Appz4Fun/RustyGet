@@ -1,6 +1,7 @@
 //! Self-update support (`Maintenance`: check for updates, run the update script,
 //! verify package signatures).
 
+use crate::options::OptStr;
 use std::ffi::{c_char, c_int, c_void};
 use std::path::PathBuf;
 
@@ -416,12 +417,12 @@ pub(crate) unsafe fn start_update_active(branch: c_int) -> bool {
         return false;
     }
     let sep = crate::paths::PATH_SEPARATOR as u8;
-    let Some(mut script_path) = read_pkg_info_active(opts.str_bytes(8), sep, b"install-script")
+    let Some(mut script_path) = read_pkg_info_active(opts.str_bytes(OptStr::WebDir), sep, b"install-script")
     else {
         return false;
     };
     if script_path.first().copied() != Some(sep) {
-        let app_dir = opts.str_bytes(1);
+        let app_dir = opts.str_bytes(OptStr::AppDir);
         let mut full = Vec::with_capacity(app_dir.len() + 1 + script_path.len());
         full.extend_from_slice(app_dir);
         full.push(sep);
@@ -458,7 +459,7 @@ pub(crate) unsafe fn check_updates_active() -> Option<Vec<u8>> {
         return None;
     };
     let sep = crate::paths::PATH_SEPARATOR as u8;
-    let info_script = read_pkg_info_active(opts.str_bytes(8), sep, b"update-info-script")?;
+    let info_script = read_pkg_info_active(opts.str_bytes(OptStr::WebDir), sep, b"update-info-script")?;
     let base = &info_script[crate::paths::base_file_name(&info_script)..];
     let mut det = b"Executing update-info-script ".to_vec();
     det.extend_from_slice(base);

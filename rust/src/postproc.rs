@@ -8,6 +8,7 @@ use crate::parchecker::{
     PAR_RESULT_INVALID_ARGS, PAR_RESULT_REPAIR_FAILED, PAR_RESULT_REPAIR_NOT_POSSIBLE,
     PAR_RESULT_REPAIR_POSSIBLE, PAR_RESULT_SUCCESS,
 };
+use crate::options::OptStr;
 use crate::postrepair::NzbgetRsParSegment;
 use crate::repair::NzbgetRsRepairCtrlHostFn;
 use std::collections::VecDeque;
@@ -5165,7 +5166,7 @@ unsafe extern "C" fn direct_unpack_host_cb(
                 str_out[0] = arena_cstr(&ns.name);
                 str_out[1] = arena_cstr(&ns.dest_dir);
                 str_out[2] = arena_opt_cstr(pw.as_deref());
-                str_out[3] = arena_cstr(opts.as_ref().map_or(b"", |o| o.str_bytes(4)));
+                str_out[3] = arena_cstr(opts.as_ref().map_or(b"", |o| o.str_bytes(OptStr::InterDir)));
                 if p2 != 0 && !s2.is_null() {
                     let fin = host.nzb_build_final_dir_name(n);
                     let c_fin = cstr::nul_terminated(&fin);
@@ -6429,8 +6430,8 @@ unsafe extern "C" fn repair_job_host_cb(
             i64_out[0] = current_time_sec();
             i64_out[1] = ps.stage_time;
             i64_out[2] = ps.start_time;
-            str_out[0] = arena_cstr(opts.as_ref().map_or(b"", |o| o.str_bytes(30)));
-            str_out[1] = arena_cstr(opts.as_ref().map_or(b"", |o| o.str_bytes(33)));
+            str_out[0] = arena_cstr(opts.as_ref().map_or(b"", |o| o.str_bytes(OptStr::UnrarCmd)));
+            str_out[1] = arena_cstr(opts.as_ref().map_or(b"", |o| o.str_bytes(OptStr::ParIgnoreExt)));
             ps.nzb_ptr
         }
         2 => {
@@ -7018,9 +7019,9 @@ unsafe extern "C" fn unpack_job_host_cb(
                 str_out[1] = arena_cstr(&ns.final_dir);
                 str_out[2] = arena_cstr(&ns.name);
                 str_out[3] = arena_opt_cstr(pw.as_deref());
-                str_out[4] = arena_cstr(opts.as_ref().map_or(b"", |o| o.str_bytes(31)));
-                str_out[5] = arena_cstr(opts.as_ref().map_or(b"", |o| o.str_bytes(35)));
-                str_out[6] = arena_cstr(opts.as_ref().map_or(b"", |o| o.str_bytes(4)));
+                str_out[4] = arena_cstr(opts.as_ref().map_or(b"", |o| o.str_bytes(OptStr::UnpackPassFile)));
+                str_out[5] = arena_cstr(opts.as_ref().map_or(b"", |o| o.str_bytes(OptStr::UnpackIgnoreExt)));
+                str_out[6] = arena_cstr(opts.as_ref().map_or(b"", |o| o.str_bytes(OptStr::InterDir)));
                 return 0;
             }
             if a1 == 1 {
@@ -7263,7 +7264,7 @@ unsafe extern "C" fn cleanup_job_host_cb(
             str_out[0] = arena_cstr(&ns.name);
             str_out[1] = arena_cstr(&ns.dest_dir);
             str_out[2] = arena_cstr(&ns.final_dir);
-            str_out[3] = arena_cstr(opts.as_ref().map_or(b"", |o| o.str_bytes(32)));
+            str_out[3] = arena_cstr(opts.as_ref().map_or(b"", |o| o.str_bytes(OptStr::ExtCleanupDisk)));
             0
         }
         2 => {
@@ -7332,8 +7333,8 @@ unsafe extern "C" fn rename_job_host_cb(
             str_out[1] = arena_cstr(&ns.dest_dir);
             str_out[2] = arena_cstr(&ns.final_dir);
             str_out[3] = arena_opt_cstr(pw.as_deref());
-            str_out[4] = arena_cstr(opts.as_ref().map_or(b"", |o| o.str_bytes(33)));
-            str_out[5] = arena_cstr(opts.as_ref().map_or(b"", |o| o.str_bytes(35)));
+            str_out[4] = arena_cstr(opts.as_ref().map_or(b"", |o| o.str_bytes(OptStr::ParIgnoreExt)));
+            str_out[5] = arena_cstr(opts.as_ref().map_or(b"", |o| o.str_bytes(OptStr::UnpackIgnoreExt)));
             0
         }
         2 => {
@@ -7427,7 +7428,7 @@ unsafe extern "C" fn post_renamer_job_host_cb(
             str_out[0] = arena_cstr(&meta);
             str_out[1] = arena_cstr(&ns.name);
             str_out[2] = arena_cstr(&ns.dest_dir);
-            str_out[3] = arena_cstr(opts.as_ref().map_or(b"", |o| o.str_bytes(34)));
+            str_out[3] = arena_cstr(opts.as_ref().map_or(b"", |o| o.str_bytes(OptStr::RenameIgnoreExt)));
             0
         }
         2 => {

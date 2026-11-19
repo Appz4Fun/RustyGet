@@ -228,221 +228,6 @@ pub(crate) fn last_errno() -> i32 {
 }
 
 #[allow(dead_code)]
-pub(crate) mod sys {
-    use std::ffi::{c_char, c_int, c_void};
-
-    pub const O_RDONLY: c_int = 0;
-    pub const O_WRONLY: c_int = 1;
-    pub const O_RDWR: c_int = 2;
-
-    #[cfg(any(
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "freebsd",
-        target_os = "openbsd",
-        target_os = "netbsd"
-    ))]
-    pub const O_APPEND: c_int = 0x0008;
-    #[cfg(not(any(
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "freebsd",
-        target_os = "openbsd",
-        target_os = "netbsd"
-    )))]
-    pub const O_APPEND: c_int = 0o2000;
-
-    #[cfg(any(
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "freebsd",
-        target_os = "openbsd",
-        target_os = "netbsd"
-    ))]
-    pub const O_CREAT: c_int = 0x0200;
-    #[cfg(not(any(
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "freebsd",
-        target_os = "openbsd",
-        target_os = "netbsd"
-    )))]
-    pub const O_CREAT: c_int = 0o100;
-
-    #[cfg(any(
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "freebsd",
-        target_os = "openbsd",
-        target_os = "netbsd"
-    ))]
-    pub const O_TRUNC: c_int = 0x0400;
-    #[cfg(not(any(
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "freebsd",
-        target_os = "openbsd",
-        target_os = "netbsd"
-    )))]
-    pub const O_TRUNC: c_int = 0o1000;
-
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
-    pub const O_CLOEXEC: c_int = 0x1000000;
-    #[cfg(any(target_os = "freebsd"))]
-    pub const O_CLOEXEC: c_int = 0x00100000;
-    #[cfg(any(target_os = "openbsd"))]
-    pub const O_CLOEXEC: c_int = 0x10000;
-    #[cfg(any(target_os = "netbsd"))]
-    pub const O_CLOEXEC: c_int = 0x00400000;
-    #[cfg(not(any(
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "freebsd",
-        target_os = "openbsd",
-        target_os = "netbsd"
-    )))]
-    pub const O_CLOEXEC: c_int = 0o2000000;
-
-    pub const F_GETFD: c_int = 1;
-    pub const FD_CLOEXEC: c_int = 1;
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
-    pub const F_FULLFSYNC: c_int = 51;
-
-    pub const EIO: c_int = 5;
-    pub const EEXIST: c_int = 17;
-    pub const EXDEV: c_int = 18;
-    pub const EINVAL: c_int = 22;
-    #[cfg(any(
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "freebsd",
-        target_os = "openbsd",
-        target_os = "netbsd"
-    ))]
-    pub const ENAMETOOLONG: c_int = 63;
-    #[cfg(not(any(
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "freebsd",
-        target_os = "openbsd",
-        target_os = "netbsd"
-    )))]
-    pub const ENAMETOOLONG: c_int = 36;
-
-    pub const RLIMIT_FSIZE: c_int = 1;
-    pub const SIGXFSZ: c_int = 25;
-    pub const SIG_IGN: usize = 1;
-
-    #[repr(C)]
-    pub struct rlimit {
-        pub rlim_cur: u64,
-        pub rlim_max: u64,
-    }
-
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
-    #[repr(C)]
-    pub struct statvfs {
-        pub f_bsize: u64,
-        pub f_frsize: u64,
-        pub f_blocks: u32,
-        pub f_bfree: u32,
-        pub f_bavail: u32,
-        pub f_files: u32,
-        pub f_ffree: u32,
-        pub f_favail: u32,
-        pub f_fsid: u64,
-        pub f_flag: u64,
-        pub f_namemax: u64,
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
-    #[repr(C)]
-    pub struct statvfs {
-        pub f_bsize: usize,
-        pub f_frsize: usize,
-        pub f_blocks: u64,
-        pub f_bfree: u64,
-        pub f_bavail: u64,
-        pub f_files: u64,
-        pub f_ffree: u64,
-        pub f_favail: u64,
-        pub f_fsid: usize,
-        pub f_flag: usize,
-        pub f_namemax: usize,
-        pub __f_spare: [c_int; 6],
-    }
-
-    extern "C" {
-        pub fn remove(filename: *const c_char) -> c_int;
-        pub fn mkdir(path: *const c_char, mode: u32) -> c_int;
-        pub fn rmdir(path: *const c_char) -> c_int;
-        #[cfg_attr(
-            all(target_os = "linux", target_env = "gnu", target_pointer_width = "32"),
-            link_name = "open64"
-        )]
-        pub fn open(path: *const c_char, oflag: c_int, ...) -> c_int;
-        pub fn close(fd: c_int) -> c_int;
-        pub fn dup(fd: c_int) -> c_int;
-        pub fn read(fd: c_int, buf: *mut c_void, count: usize) -> isize;
-        pub fn write(fd: c_int, buf: *const c_void, count: usize) -> isize;
-        #[cfg_attr(
-            all(
-                any(all(target_os = "linux", target_env = "gnu"), target_os = "android"),
-                target_pointer_width = "32"
-            ),
-            link_name = "truncate64"
-        )]
-        pub fn truncate(path: *const c_char, length: i64) -> c_int;
-        pub fn rename(old: *const c_char, new: *const c_char) -> c_int;
-        pub fn fcntl(fd: c_int, cmd: c_int, ...) -> c_int;
-        #[cfg(any(target_os = "linux", target_os = "android"))]
-        pub fn fdatasync(fd: c_int) -> c_int;
-        #[cfg(not(any(
-            target_os = "macos",
-            target_os = "ios",
-            target_os = "linux",
-            target_os = "android"
-        )))]
-        pub fn fsync(fd: c_int) -> c_int;
-        #[cfg_attr(
-            all(target_os = "linux", target_env = "gnu", target_pointer_width = "32"),
-            link_name = "statvfs64"
-        )]
-        pub fn statvfs(path: *const c_char, buf: *mut statvfs) -> c_int;
-        pub fn fork() -> c_int;
-        pub fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int;
-        pub fn execl(path: *const c_char, arg0: *const c_char, ...) -> c_int;
-        pub fn _exit(status: c_int) -> !;
-        pub fn getrlimit(resource: c_int, rlp: *mut rlimit) -> c_int;
-        pub fn setrlimit(resource: c_int, rlp: *const rlimit) -> c_int;
-        pub fn signal(sig: c_int, func: usize) -> usize;
-
-        #[cfg(any(
-            target_os = "macos",
-            target_os = "ios",
-            target_os = "freebsd",
-            target_os = "openbsd",
-            target_os = "netbsd"
-        ))]
-        pub fn __error() -> *mut c_int;
-        #[cfg(not(any(
-            target_os = "macos",
-            target_os = "ios",
-            target_os = "freebsd",
-            target_os = "openbsd",
-            target_os = "netbsd"
-        )))]
-        pub fn __errno_location() -> *mut c_int;
-    }
-
-    pub fn wifexited(status: c_int) -> bool {
-        (status & 0x7f) == 0
-    }
-
-    pub fn wexitstatus(status: c_int) -> c_int {
-        (status >> 8) & 0xff
-    }
-}
 
 /// `FileSystem::FileSize` (`daemon/util/FileSystem.cpp`):
 /// Returns `stat(filename).st_size` on success, or `-1` on failure.
@@ -460,13 +245,13 @@ pub fn delete_file(filename: &CStr) -> bool {
 /// `FileSystem::CreateDirectoryExclusive` (`daemon/util/FileSystem.cpp`):
 /// Creates `dir_filename` via `mkdir(..., 0o777)`, failing if it already exists or is a symlink.
 pub fn create_directory_exclusive(dir_filename: &CStr) -> bool {
-    unsafe { sys::mkdir(dir_filename.as_ptr(), 0o777) == 0 }
+    unsafe { libc::mkdir(dir_filename.as_ptr(), 0o777) == 0 }
 }
 
 /// `FileSystem::RemoveDirectory` (`daemon/util/FileSystem.cpp`):
 /// Removes an empty directory via `rmdir`.
 pub fn remove_directory(dir_filename: &CStr) -> bool {
-    unsafe { sys::rmdir(dir_filename.as_ptr()) == 0 }
+    unsafe { libc::rmdir(dir_filename.as_ptr()) == 0 }
 }
 
 /// `DiskFile::Open` (`daemon/util/FileSystem.cpp`):
@@ -479,15 +264,15 @@ pub fn open_cloexec_fd(
     om_write: i32,
 ) -> i32 {
     let flags = if mode == om_read {
-        sys::O_RDONLY
+        libc::O_RDONLY
     } else if mode == om_read_write {
-        sys::O_RDWR
+        libc::O_RDWR
     } else if mode == om_write {
-        sys::O_WRONLY | sys::O_CREAT | sys::O_TRUNC
+        libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC
     } else {
-        sys::O_WRONLY | sys::O_CREAT | sys::O_APPEND
+        libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND
     };
-    unsafe { sys::open(filename.as_ptr(), flags | sys::O_CLOEXEC, 0o666u32) }
+    unsafe { libc::open(filename.as_ptr(), flags | libc::O_CLOEXEC, 0o666 as libc::c_uint) }
 }
 
 /// `FileSystem::FlushFileBuffers` (`daemon/util/FileSystem.cpp`):
@@ -495,21 +280,21 @@ pub fn open_cloexec_fd(
 pub fn flush_file_buffers(file_descriptor: i32, errmsg: &mut Vec<u8>) -> bool {
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     let ret = unsafe {
-        if sys::fcntl(file_descriptor, sys::F_FULLFSYNC) == -1 {
+        if libc::fcntl(file_descriptor, libc::F_FULLFSYNC) == -1 {
             1
         } else {
             0
         }
     };
     #[cfg(any(target_os = "linux", target_os = "android"))]
-    let ret = unsafe { sys::fdatasync(file_descriptor) };
+    let ret = unsafe { libc::fdatasync(file_descriptor) };
     #[cfg(not(any(
         target_os = "macos",
         target_os = "ios",
         target_os = "linux",
         target_os = "android"
     )))]
-    let ret = unsafe { sys::fsync(file_descriptor) };
+    let ret = unsafe { libc::fsync(file_descriptor) };
 
     if ret != 0 {
         *errmsg = error_message(last_errno());
@@ -525,7 +310,7 @@ pub fn flush_dir_buffers(filename: &CStr, path_sep: u8, errmsg: &mut Vec<u8>) ->
     let mut parent = crate::util::fs_extract_parent_dir_path(filename.to_bytes(), path_sep);
     parent.push(0);
     let Ok(parent_cstr) = CStr::from_bytes_with_nul(&parent) else {
-        *errmsg = error_message(sys::EINVAL);
+        *errmsg = error_message(libc::EINVAL);
         return false;
     };
     let fd = open_cloexec_fd(parent_cstr, 0, 0, 1, 2);
@@ -534,7 +319,7 @@ pub fn flush_dir_buffers(filename: &CStr, path_sep: u8, errmsg: &mut Vec<u8>) ->
         return false;
     }
     let ok = flush_file_buffers(fd, errmsg);
-    unsafe { sys::close(fd) };
+    unsafe { libc::close(fd) };
     ok
 }
 
@@ -547,12 +332,12 @@ pub fn allocate_file(filename: &CStr, size: i64, errmsg: &mut Vec<u8>) -> bool {
         *errmsg = error_message(last_errno());
         return false;
     }
-    unsafe { sys::close(fd) };
+    unsafe { libc::close(fd) };
 
-    unsafe { sys::truncate(filename.as_ptr(), size) };
+    unsafe { libc::truncate(filename.as_ptr(), size) };
     let mut ok = file_size(filename) == size;
     if !ok {
-        unsafe { sys::truncate(filename.as_ptr(), 0) };
+        unsafe { libc::truncate(filename.as_ptr(), 0) };
         let fd = open_cloexec_fd(filename, 3, 0, 1, 2);
         if fd == -1 {
             *errmsg = error_message(last_errno());
@@ -562,15 +347,15 @@ pub fn allocate_file(filename: &CStr, size: i64, errmsg: &mut Vec<u8>) -> bool {
         let mut remaining = size;
         while remaining > 0 {
             let need = crate::util::fs_calc_allocate_chunk_size(remaining, zeros.len() as i64);
-            let written = unsafe { sys::write(fd, zeros.as_ptr().cast(), need as usize) as i64 };
+            let written = unsafe { libc::write(fd, zeros.as_ptr().cast(), need as usize) as i64 };
             if written != need {
                 *errmsg = error_message(last_errno());
-                unsafe { sys::close(fd) };
+                unsafe { libc::close(fd) };
                 return false;
             }
             remaining -= written;
         }
-        unsafe { sys::close(fd) };
+        unsafe { libc::close(fd) };
         ok = file_size(filename) == size;
         if !ok {
             *errmsg = b"created file has wrong size".to_vec();
@@ -590,7 +375,7 @@ pub fn copy_file(src_filename: &CStr, dst_filename: &CStr) -> bool {
     let out_fd = open_cloexec_fd(dst_filename, 2, 0, 1, 2);
     if out_fd == -1 {
         let err = last_errno();
-        unsafe { sys::close(in_fd) };
+        unsafe { libc::close(in_fd) };
         set_last_errno(err);
         return false;
     }
@@ -600,7 +385,7 @@ pub fn copy_file(src_filename: &CStr, dst_filename: &CStr) -> bool {
     let mut copied: i64 = 0;
     let mut write_errno: i32 = 0;
     loop {
-        let cnt = unsafe { sys::read(in_fd, buffer.as_mut_ptr().cast(), buffer.len()) as i64 };
+        let cnt = unsafe { libc::read(in_fd, buffer.as_mut_ptr().cast(), buffer.len()) as i64 };
         if cnt < 0 {
             let err = last_errno();
             if err == libc::EINTR {
@@ -617,7 +402,7 @@ pub fn copy_file(src_filename: &CStr, dst_filename: &CStr) -> bool {
         let mut write_failed = false;
         while off < cnt as usize {
             let w =
-                unsafe { sys::write(out_fd, buffer[off..].as_ptr().cast(), (cnt as usize) - off) };
+                unsafe { libc::write(out_fd, buffer[off..].as_ptr().cast(), (cnt as usize) - off) };
             if w < 0 {
                 let err = last_errno();
                 if err == libc::EINTR {
@@ -628,7 +413,7 @@ pub fn copy_file(src_filename: &CStr, dst_filename: &CStr) -> bool {
                 break;
             }
             if w == 0 {
-                write_errno = sys::EIO;
+                write_errno = libc::EIO;
                 write_failed = true;
                 break;
             }
@@ -641,8 +426,8 @@ pub fn copy_file(src_filename: &CStr, dst_filename: &CStr) -> bool {
         copied += cnt;
     }
 
-    unsafe { sys::close(in_fd) };
-    let close_ok = unsafe { sys::close(out_fd) == 0 };
+    unsafe { libc::close(in_fd) };
+    let close_ok = unsafe { libc::close(out_fd) == 0 };
     if !close_ok && write_errno == 0 {
         write_errno = last_errno();
     }
@@ -658,33 +443,28 @@ pub fn copy_file(src_filename: &CStr, dst_filename: &CStr) -> bool {
     ok
 }
 
-#[cfg(any(
-    target_os = "macos",
-    target_os = "ios",
-    target_os = "freebsd",
-    target_os = "openbsd",
-    target_os = "netbsd"
-))]
 pub(crate) fn set_last_errno(err: i32) {
-    unsafe { *sys::__error() = err };
-}
-
-#[cfg(not(any(
-    target_os = "macos",
-    target_os = "ios",
-    target_os = "freebsd",
-    target_os = "openbsd",
-    target_os = "netbsd"
-)))]
-pub(crate) fn set_last_errno(err: i32) {
-    unsafe { *sys::__errno_location() = err };
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))]
+    let errno = unsafe { libc::__error() };
+    #[cfg(any(target_os = "openbsd", target_os = "netbsd", target_os = "android"))]
+    let errno = unsafe { libc::__errno() };
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "android"
+    )))]
+    let errno = unsafe { libc::__errno_location() };
+    unsafe { *errno = err };
 }
 
 /// `FileSystem::MoveFile` (`daemon/util/FileSystem.cpp`):
 /// Renames `src_filename` to `dst_filename`, falling back to `copy_file` + `delete_file` on `EXDEV`.
 pub fn move_file(src_filename: &CStr, dst_filename: &CStr) -> bool {
-    let mut ok = unsafe { sys::rename(src_filename.as_ptr(), dst_filename.as_ptr()) == 0 };
-    if crate::util::fs_should_fallback_move_to_copy(ok, last_errno(), sys::EXDEV) {
+    let mut ok = unsafe { libc::rename(src_filename.as_ptr(), dst_filename.as_ptr()) == 0 };
+    if crate::util::fs_should_fallback_move_to_copy(ok, last_errno(), libc::EXDEV) {
         ok = copy_file(src_filename, dst_filename) && delete_file(src_filename);
     }
     ok
@@ -702,8 +482,8 @@ pub(crate) fn move_file_no_overwrite_exdev(
     let src_meta = match std::fs::metadata(path(src_filename.to_bytes())) {
         Ok(m) => m,
         Err(e) => {
-            let meta_err = e.raw_os_error().unwrap_or(sys::EIO);
-            let meta_err = if meta_err == 0 { sys::EIO } else { meta_err };
+            let meta_err = e.raw_os_error().unwrap_or(libc::EIO);
+            let meta_err = if meta_err == 0 { libc::EIO } else { meta_err };
             set_last_errno(meta_err);
             return Err(meta_err);
         }
@@ -714,7 +494,7 @@ pub(crate) fn move_file_no_overwrite_exdev(
     let in_fd = unsafe { libc::open(src_filename.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
     if in_fd == -1 {
         let e = last_errno();
-        let open_err = if e == 0 { sys::EIO } else { e };
+        let open_err = if e == 0 { libc::EIO } else { e };
         set_last_errno(open_err);
         return Err(open_err);
     }
@@ -728,8 +508,8 @@ pub(crate) fn move_file_no_overwrite_exdev(
     };
     if out_fd == -1 {
         let e = last_errno();
-        let open_err = if e == 0 { sys::EIO } else { e };
-        unsafe { sys::close(in_fd) };
+        let open_err = if e == 0 { libc::EIO } else { e };
+        unsafe { libc::close(in_fd) };
         set_last_errno(open_err);
         return Err(open_err);
     }
@@ -738,13 +518,13 @@ pub(crate) fn move_file_no_overwrite_exdev(
     let mut total_copied: i64 = 0;
     let mut copy_err: i32 = 0;
     loop {
-        let r = unsafe { sys::read(in_fd, buf.as_mut_ptr().cast(), buf.len()) };
+        let r = unsafe { libc::read(in_fd, buf.as_mut_ptr().cast(), buf.len()) };
         if r < 0 {
             let e = last_errno();
             if e == libc::EINTR {
                 continue;
             }
-            copy_err = if e == 0 { sys::EIO } else { e };
+            copy_err = if e == 0 { libc::EIO } else { e };
             break;
         }
         if r == 0 {
@@ -753,17 +533,17 @@ pub(crate) fn move_file_no_overwrite_exdev(
         let r_len = r as usize;
         let mut off = 0usize;
         while off < r_len {
-            let w = unsafe { sys::write(out_fd, buf[off..r_len].as_ptr().cast(), r_len - off) };
+            let w = unsafe { libc::write(out_fd, buf[off..r_len].as_ptr().cast(), r_len - off) };
             if w < 0 {
                 let e = last_errno();
                 if e == libc::EINTR {
                     continue;
                 }
-                copy_err = if e == 0 { sys::EIO } else { e };
+                copy_err = if e == 0 { libc::EIO } else { e };
                 break;
             }
             if w == 0 {
-                copy_err = sys::EIO;
+                copy_err = libc::EIO;
                 break;
             }
             off += w as usize;
@@ -774,17 +554,17 @@ pub(crate) fn move_file_no_overwrite_exdev(
         }
     }
 
-    unsafe { sys::close(in_fd) };
-    if unsafe { sys::close(out_fd) } != 0 && copy_err == 0 {
+    unsafe { libc::close(in_fd) };
+    if unsafe { libc::close(out_fd) } != 0 && copy_err == 0 {
         let e = last_errno();
-        copy_err = if e == 0 { sys::EIO } else { e };
+        copy_err = if e == 0 { libc::EIO } else { e };
     }
     if copy_err == 0 && total_copied != src_size {
-        copy_err = sys::EIO;
+        copy_err = libc::EIO;
     }
     if copy_err == 0 && unsafe { libc::chmod(dst_filename.as_ptr(), src_mode) } != 0 {
         let e = last_errno();
-        copy_err = if e == 0 { sys::EIO } else { e };
+        copy_err = if e == 0 { libc::EIO } else { e };
     }
     if copy_err != 0 {
         unsafe { libc::unlink(dst_filename.as_ptr()) };
@@ -793,7 +573,7 @@ pub(crate) fn move_file_no_overwrite_exdev(
     }
     if unsafe { libc::unlink(src_filename.as_ptr()) } != 0 {
         let e = last_errno();
-        let rm_err = if e == 0 { sys::EIO } else { e };
+        let rm_err = if e == 0 { libc::EIO } else { e };
         unsafe { libc::unlink(dst_filename.as_ptr()) };
         set_last_errno(rm_err);
         return Err(rm_err);
@@ -807,21 +587,21 @@ pub(crate) fn move_file_no_overwrite_exdev(
 pub fn move_file_no_overwrite(src_filename: &CStr, dst_filename: &CStr) -> Result<(), i32> {
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     if unsafe { libc::stat(dst_filename.as_ptr(), &mut st) } == 0 {
-        set_last_errno(sys::EEXIST);
-        return Err(sys::EEXIST);
+        set_last_errno(libc::EEXIST);
+        return Err(libc::EEXIST);
     }
     let stat_err = last_errno();
     if stat_err != ENOENT {
-        let err = if stat_err == 0 { sys::EIO } else { stat_err };
+        let err = if stat_err == 0 { libc::EIO } else { stat_err };
         set_last_errno(err);
         return Err(err);
     }
-    if unsafe { sys::rename(src_filename.as_ptr(), dst_filename.as_ptr()) == 0 } {
+    if unsafe { libc::rename(src_filename.as_ptr(), dst_filename.as_ptr()) == 0 } {
         return Ok(());
     }
     let err = last_errno();
-    if err != sys::EXDEV {
-        let err = if err == 0 { sys::EIO } else { err };
+    if err != libc::EXDEV {
+        let err = if err == 0 { libc::EIO } else { err };
         set_last_errno(err);
         return Err(err);
     }
@@ -844,8 +624,8 @@ pub fn get_disk_state_with(
 
 fn default_statvfs(path: &CStr) -> Option<(u64, u64, u64)> {
     unsafe {
-        let mut diskdata: sys::statvfs = std::mem::zeroed();
-        if sys::statvfs(path.as_ptr(), &mut diskdata) == 0 {
+        let mut diskdata: libc::statvfs = std::mem::zeroed();
+        if libc::statvfs(path.as_ptr(), &mut diskdata) == 0 {
             Some((
                 diskdata.f_bavail as u64,
                 diskdata.f_blocks as u64,
@@ -871,8 +651,8 @@ pub fn statvfs_available_bytes(dir: &[u8]) -> Result<u64, String> {
         return Err("Invalid path".to_string());
     };
     unsafe {
-        let mut sv: sys::statvfs = std::mem::zeroed();
-        if sys::statvfs(cpath.as_ptr(), &mut sv) == 0 {
+        let mut sv: libc::statvfs = std::mem::zeroed();
+        if libc::statvfs(cpath.as_ptr(), &mut sv) == 0 {
             Ok((sv.f_bavail as u64).saturating_mul(sv.f_frsize as u64))
         } else {
             Err(std::io::Error::last_os_error().to_string())
@@ -986,7 +766,7 @@ pub fn save_buffer_into_file(filename: &CStr, buffer: &[u8]) -> bool {
     let mut ok = true;
     while written < buffer.len() {
         let w = unsafe {
-            sys::write(
+            libc::write(
                 fd,
                 buffer[written..].as_ptr().cast(),
                 buffer.len() - written,
@@ -1005,7 +785,7 @@ pub fn save_buffer_into_file(filename: &CStr, buffer: &[u8]) -> bool {
         }
         written += w as usize;
     }
-    let close_ok = unsafe { sys::close(fd) == 0 };
+    let close_ok = unsafe { libc::close(fd) == 0 };
     ok && close_ok && written == buffer.len()
 }
 
@@ -1155,40 +935,40 @@ pub fn load_file_into_buffer(
     }
     let file_size = unsafe { libc::lseek(fd, 0, libc::SEEK_END) as i64 };
     if unsafe { libc::lseek(fd, 0, libc::SEEK_SET) } < 0 {
-        unsafe { sys::close(fd) };
+        unsafe { libc::close(fd) };
         return false;
     }
     let Some((size, buf_size)) =
         crate::util::fs_validate_load_file_size(file_size, i32::from(add_trailing_null))
     else {
-        unsafe { sys::close(fd) };
+        unsafe { libc::close(fd) };
         return false;
     };
     let ptr = reserve_fn(buf_size);
     if buf_size > 0 && ptr.is_null() {
-        unsafe { sys::close(fd) };
+        unsafe { libc::close(fd) };
         return false;
     }
     if size > 0 {
         let target = size as usize;
         let mut read_total = 0usize;
         while read_total < target {
-            let n = unsafe { sys::read(fd, ptr.add(read_total).cast(), target - read_total) };
+            let n = unsafe { libc::read(fd, ptr.add(read_total).cast(), target - read_total) };
             if n < 0 {
                 if last_errno() == libc::EINTR {
                     continue;
                 }
-                unsafe { sys::close(fd) };
+                unsafe { libc::close(fd) };
                 return false;
             }
             if n == 0 {
-                unsafe { sys::close(fd) };
+                unsafe { libc::close(fd) };
                 return false;
             }
             read_total += n as usize;
         }
     }
-    unsafe { sys::close(fd) };
+    unsafe { libc::close(fd) };
     if add_trailing_null && !ptr.is_null() {
         unsafe { *ptr.add(size as usize) = 0 };
     }
@@ -1296,7 +1076,7 @@ impl crate::fsdelete::Ops for PosixFsOps {
         Ok(error_message(last_errno()))
     }
     fn too_long(&mut self) -> crate::fsdelete::R<()> {
-        set_last_errno(sys::ENAMETOOLONG);
+        set_last_errno(libc::ENAMETOOLONG);
         Ok(())
     }
 }
@@ -1421,28 +1201,28 @@ mod tests {
         let sh_arg = c"sh";
         let c_arg = c"-c";
         unsafe {
-            let pid = sys::fork();
+            let pid = libc::fork();
             if pid == -1 {
                 return -1;
             }
             if pid == 0 {
-                sys::execl(
+                libc::execl(
                     sh.as_ptr(),
                     sh_arg.as_ptr(),
                     c_arg.as_ptr(),
                     script.as_ptr(),
                     std::ptr::null::<c_char>(),
                 );
-                sys::_exit(127);
+                libc::_exit(127);
             }
             let mut status: c_int = 0;
-            if sys::waitpid(pid, &mut status, 0) != pid
-                || !sys::wifexited(status)
-                || sys::wexitstatus(status) == 127
+            if libc::waitpid(pid, &mut status, 0) != pid
+                || !libc::WIFEXITED(status)
+                || libc::WEXITSTATUS(status) == 127
             {
                 return -1;
             }
-            if sys::wexitstatus(status) == 0 {
+            if libc::WEXITSTATUS(status) == 0 {
                 1
             } else {
                 0
@@ -1636,21 +1416,21 @@ mod tests {
             ] {
                 let fd = open_cloexec_fd(target, mode, 0, 1, 2);
                 assert!(fd >= 0);
-                let flags = unsafe { sys::fcntl(fd, sys::F_GETFD) };
+                let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
                 assert_ne!(flags, -1);
-                assert_ne!(flags & sys::FD_CLOEXEC, 0);
-                unsafe { sys::close(fd) };
+                assert_ne!(flags & libc::FD_CLOEXEC, 0);
+                unsafe { libc::close(fd) };
             }
 
             std::fs::write(&temp_file, b"cloexec-probe\n").unwrap();
             let fd = open_cloexec_fd(&temp_file_c, 0, 0, 1, 2);
             assert!(fd >= 0);
-            let inherited = unsafe { sys::dup(fd) };
+            let inherited = unsafe { libc::dup(fd) };
             assert!(inherited >= 0);
             assert_eq!(child_sees_descriptor(inherited), 1);
-            unsafe { sys::close(inherited) };
+            unsafe { libc::close(inherited) };
             assert_eq!(child_sees_descriptor(fd), 0);
-            unsafe { sys::close(fd) };
+            unsafe { libc::close(fd) };
         }
 
         // 10. AllocateAndFlushDirBuffersTest
@@ -1746,25 +1526,25 @@ mod tests {
             let dst_c = CString::new(dst.as_os_str().as_bytes()).unwrap();
 
             unsafe {
-                let pid = sys::fork();
+                let pid = libc::fork();
                 assert!(pid >= 0);
                 if pid == 0 {
-                    let mut limit: sys::rlimit = std::mem::zeroed();
-                    sys::getrlimit(sys::RLIMIT_FSIZE, &mut limit);
+                    let mut limit: libc::rlimit = std::mem::zeroed();
+                    libc::getrlimit(libc::RLIMIT_FSIZE, &mut limit);
                     limit.rlim_cur = 64 * 1024;
-                    sys::signal(sys::SIGXFSZ, sys::SIG_IGN);
-                    sys::setrlimit(sys::RLIMIT_FSIZE, &limit);
+                    libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+                    libc::setrlimit(libc::RLIMIT_FSIZE, &limit);
                     let copied = copy_file(&src_c, &dst_c);
-                    sys::_exit(if !copied { 0 } else { 1 });
+                    libc::_exit(if !copied { 0 } else { 1 });
                 }
                 let mut status: c_int = 0;
-                assert_eq!(sys::waitpid(pid, &mut status, 0), pid);
-                assert!(sys::wifexited(status) && sys::wexitstatus(status) == 0);
+                assert_eq!(libc::waitpid(pid, &mut status, 0), pid);
+                assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0);
             }
             assert!(!dst.exists());
             assert!(copy_file(&src_c, &dst_c));
             assert_eq!(std::fs::metadata(&dst).unwrap().len(), 300 * 1024);
-            assert_eq!(move_file_no_overwrite(&src_c, &dst_c), Err(sys::EEXIST));
+            assert_eq!(move_file_no_overwrite(&src_c, &dst_c), Err(libc::EEXIST));
 
             let shm_src_dir = std::path::Path::new("/dev/shm")
                 .join(format!("nzbget-move-src-{}", std::process::id()));
@@ -1801,20 +1581,20 @@ mod tests {
                     let shm_src_c = CString::new(shm_src.as_os_str().as_bytes()).unwrap();
                     let move_dst_c = CString::new(move_dst.as_os_str().as_bytes()).unwrap();
                     unsafe {
-                        let pid = sys::fork();
+                        let pid = libc::fork();
                         assert!(pid >= 0);
                         if pid == 0 {
-                            let mut limit: sys::rlimit = std::mem::zeroed();
-                            sys::getrlimit(sys::RLIMIT_FSIZE, &mut limit);
+                            let mut limit: libc::rlimit = std::mem::zeroed();
+                            libc::getrlimit(libc::RLIMIT_FSIZE, &mut limit);
                             limit.rlim_cur = 64 * 1024;
-                            sys::signal(sys::SIGXFSZ, sys::SIG_IGN);
-                            sys::setrlimit(sys::RLIMIT_FSIZE, &limit);
+                            libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+                            libc::setrlimit(libc::RLIMIT_FSIZE, &limit);
                             let moved = move_file_no_overwrite(&shm_src_c, &move_dst_c);
-                            sys::_exit(if moved.is_err() { 0 } else { 1 });
+                            libc::_exit(if moved.is_err() { 0 } else { 1 });
                         }
                         let mut status: c_int = 0;
-                        assert_eq!(sys::waitpid(pid, &mut status, 0), pid);
-                        assert!(sys::wifexited(status) && sys::wexitstatus(status) == 0);
+                        assert_eq!(libc::waitpid(pid, &mut status, 0), pid);
+                        assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0);
                     }
                     assert!(!move_dst.exists());
                     assert!(shm_src.exists());
@@ -1881,7 +1661,7 @@ mod tests {
             let exdev_dst_c = CString::new(exdev_dst.as_os_str().as_bytes()).unwrap();
             assert_eq!(
                 move_file_no_overwrite_exdev(&exdev_src_c, &exdev_dst_c),
-                Err(sys::EEXIST)
+                Err(libc::EEXIST)
             );
             assert_eq!(std::fs::read(&exdev_dst).unwrap(), b"existing-content");
             assert_eq!(std::fs::read(&exdev_src).unwrap(), b"new-content");

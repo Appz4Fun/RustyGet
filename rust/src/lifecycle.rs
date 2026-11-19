@@ -1,5 +1,6 @@
 //! Subsystem lifecycle coordination and phase state machine (Milestone M5 — Requirement R2).
 
+use crate::options::OptStr;
 use std::ffi::{c_char, c_int};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::RwLock;
@@ -896,10 +897,10 @@ unsafe fn daemon_process_direct(cmd: &crate::cmdline::CmdlineHandle) {
 
     if cmd.client_operation != 0 {
         let opts = crate::options::active_options();
-        let ctrl_ip = opts.as_deref().map_or(&[][..], |o| o.str_bytes(14));
+        let ctrl_ip = opts.as_deref().map_or(&[][..], |o| o.str_bytes(OptStr::ControlIp));
         let ctrl_port = opts.as_deref().map_or(0, |o| o.scalars().control_port);
-        let ctrl_user = opts.as_deref().map_or(&[][..], |o| o.str_bytes(15));
-        let ctrl_pass = opts.as_deref().map_or(&[][..], |o| o.str_bytes(16));
+        let ctrl_user = opts.as_deref().map_or(&[][..], |o| o.str_bytes(OptStr::ControlUsername));
+        let ctrl_pass = opts.as_deref().map_or(&[][..], |o| o.str_bytes(OptStr::ControlPassword));
         let ok = cmd.execute_client(
             ctrl_ip,
             ctrl_port,
@@ -1103,10 +1104,10 @@ pub(crate) fn disk_service_work_active() {
     let downloading = ws.as_ref().is_some_and(|w| w.downloading());
     if disk_space > 0 && downloading {
         dm_emit_active_log(0, b"Disk service work: check disk space");
-        let dest_c = opts.as_ref().and_then(|o| o.str_cstr(3)).unwrap_or(c"");
-        let dest_b = opts.as_ref().map_or(&[][..], |o| o.str_bytes(3));
-        let inter_c = opts.as_ref().and_then(|o| o.str_cstr(4));
-        let inter_b = opts.as_ref().map_or(&[][..], |o| o.str_bytes(4));
+        let dest_c = opts.as_ref().and_then(|o| o.str_cstr(OptStr::DestDir)).unwrap_or(c"");
+        let dest_b = opts.as_ref().map_or(&[][..], |o| o.str_bytes(OptStr::DestDir));
+        let inter_c = opts.as_ref().and_then(|o| o.str_cstr(OptStr::InterDir));
+        let inter_b = opts.as_ref().map_or(&[][..], |o| o.str_bytes(OptStr::InterDir));
         let (dest_low, inter_low) =
             crate::fsops::disk_service_check_disk_space(dest_c, inter_c, disk_space);
         if dest_low {
@@ -1138,7 +1139,7 @@ pub(crate) fn disk_service_work_active() {
     };
     if waiting_req {
         dm_emit_active_log(0, b"Disk service work: check required dir");
-        let req_b = opts.as_ref().map_or(&[][..], |o| o.str_bytes(11));
+        let req_b = opts.as_ref().map_or(&[][..], |o| o.str_bytes(OptStr::RequiredDir));
         let (all_exist, next_reported) =
             crate::fsops::disk_service_check_required_dirs(req_b, prev_reported, |dir_cstr| {
                 let mut im = b"Waiting for required directory ".to_vec();
@@ -1378,11 +1379,11 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
                 let sc = opts.scalars();
                 (
                     crate::ffi::build_version_bytes(),
-                    opts.str_cstr(25).unwrap_or(c""),
-                    opts.str_cstr(26).unwrap_or(c""),
+                    opts.str_cstr(OptStr::LockFile).unwrap_or(c""),
+                    opts.str_cstr(OptStr::DaemonUsername).unwrap_or(c""),
                     opts.server_mode(),
-                    opts.str_bytes(0),
-                    opts.str_bytes(14),
+                    opts.str_bytes(OptStr::ConfigFile),
+                    opts.str_bytes(OptStr::ControlIp),
                     sc.control_port,
                     sc.crash_dump != 0,
                     crate::ffi::build_debug_enabled() && sc.crash_trace != 0,
@@ -1939,7 +1940,7 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
                 } else {
                     #[cfg(unix)]
                     if let Some(opts) = crate::options::active_options() {
-                        if let Some(lf) = opts.str_cstr(25) {
+                        if let Some(lf) = opts.str_cstr(OptStr::LockFile) {
                             crate::fsops::delete_file(lf);
                         }
                     }

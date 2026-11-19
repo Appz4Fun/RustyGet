@@ -3968,17 +3968,83 @@ pub type NzbgetRsOptionsHostFn = Option<
     ),
 >;
 
-pub const OPT_STR_COUNT: usize = 41;
-/// `strs` index of the checked `InterDir`.
-pub const OPT_STR_INTER_DIR: usize = 4;
-pub const OPT_STR_DEST_DIR: usize = 3;
+const OPT_STR_COUNT: usize = 41;
+
+/// The string options `NzbgetRsOptions` keeps after init, by slot. The
+/// discriminants are the slot numbers (10, 28 and 29 are unused).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OptStr {
+    /// Path of the loaded config file.
+    ConfigFile = 0,
+    /// Directory of the running binary.
+    AppDir = 1,
+    MainDir = 2,
+    DestDir = 3,
+    InterDir = 4,
+    TempDir = 5,
+    QueueDir = 6,
+    NzbDir = 7,
+    WebDir = 8,
+    ConfigTemplate = 9,
+    RequiredDir = 11,
+    /// `DupeSearchUrl`.
+    DupeSearchUrl = 12,
+    /// `DupeSearchApiKey`.
+    DupeSearchApiKey = 13,
+    ControlIp = 14,
+    ControlUsername = 15,
+    ControlPassword = 16,
+    RestrictedUsername = 17,
+    RestrictedPassword = 18,
+    AddUsername = 19,
+    AddPassword = 20,
+    SecureCert = 21,
+    SecureKey = 22,
+    CertStore = 23,
+    AuthorizedIp = 24,
+    LockFile = 25,
+    DaemonUsername = 26,
+    LogFile = 27,
+    UnrarCmd = 30,
+    UnpackPassFile = 31,
+    ExtCleanupDisk = 32,
+    ParIgnoreExt = 33,
+    RenameIgnoreExt = 34,
+    UnpackIgnoreExt = 35,
+    /// `MemoryPressurePath`.
+    MemoryPressurePath = 36,
+    /// `HardLinkingIgnoreExt`.
+    HardLinkingIgnoreExt = 37,
+    /// `UnrarCmd` with its tool path resolved.
+    UnrarPath = 38,
+    /// `SevenZipCmd` with its tool path resolved.
+    SevenZipPath = 39,
+    ShellOverride = 40,
+}
+
+/// The string option slots, indexed by `OptStr`.
+struct OptStrs([Option<CString>; OPT_STR_COUNT]);
+
+impl std::ops::Index<OptStr> for OptStrs {
+    type Output = Option<CString>;
+    fn index(&self, k: OptStr) -> &Option<CString> {
+        &self.0[k as usize]
+    }
+}
+
+impl std::ops::IndexMut<OptStr> for OptStrs {
+    fn index_mut(&mut self, k: OptStr) -> &mut Option<CString> {
+        &mut self.0[k as usize]
+    }
+}
+
 
 /// Heap-backed daemon `Options` instance (`NzbgetRsOptions`) driving full initialization,
 /// string storage, and runtime scheduler task creation.
 pub struct NzbgetRsOptions {
     opt_entries: Vec<RustOptEntry>,
     categories: Vec<RustCategory>,
-    strs: [Option<CString>; OPT_STR_COUNT],
+    strs: OptStrs,
     no_disk_access: bool,
     no_config: bool,
     daemon_subsystems: bool,
@@ -4058,11 +4124,11 @@ impl NzbgetRsOptions {
         }
     }
 
-    pub(crate) fn str_cstr(&self, id: usize) -> Option<&CStr> {
-        self.strs.get(id).and_then(|s| s.as_deref())
+    pub(crate) fn str_cstr(&self, id: OptStr) -> Option<&CStr> {
+        self.strs[id].as_deref()
     }
 
-    pub(crate) fn str_bytes(&self, id: usize) -> &[u8] {
+    pub(crate) fn str_bytes(&self, id: OptStr) -> &[u8] {
         self.str_cstr(id).map_or(&[], CStr::to_bytes)
     }
 
@@ -4148,7 +4214,7 @@ impl NzbgetRsOptions {
         if trunc.len() > 1023 {
             trunc.truncate(1023);
         }
-        let base: &[u8] = match self.strs[0].as_deref() {
+        let base: &[u8] = match self.strs[OptStr::ConfigFile].as_deref() {
             Some(cf) => {
                 let raw = cf.to_bytes();
                 &raw[crate::paths::base_file_name(raw)..]
@@ -4179,7 +4245,7 @@ impl NzbgetRsOptions {
 
         self.no_disk_access = no_disk_access;
         self.no_config = no_config;
-        self.strs[0] = config_filename.map(CStr::to_owned);
+        self.strs[OptStr::ConfigFile] = config_filename.map(CStr::to_owned);
 
         self.set_option(c"ConfigFile", c"");
 
@@ -4199,7 +4265,7 @@ impl NzbgetRsOptions {
         }
         let app_dir = cstring(filename);
         self.set_option(c"AppDir", &app_dir);
-        self.strs[1] = Some(app_dir);
+        self.strs[OptStr::AppDir] = Some(app_dir);
 
         self.set_option(c"Version", version);
 
@@ -4214,7 +4280,7 @@ impl NzbgetRsOptions {
             self.set_option_string(opt);
         }
 
-        if self.strs[0].is_none() && !no_config {
+        if self.strs[OptStr::ConfigFile].is_none() && !no_config {
             let p0 = [c"No configuration-file found".as_ptr()];
             self.emit_host(0, &[], &p0, 1);
             let p1 = [
@@ -4240,12 +4306,12 @@ impl NzbgetRsOptions {
         self.check_dirs_daemon();
         self.init_options_daemon();
 
-        let mut ct = self.strs[9].clone();
-        let web_dir = self.strs[8]
+        let mut ct = self.strs[OptStr::ConfigTemplate].clone();
+        let web_dir = self.strs[OptStr::WebDir]
             .as_deref()
             .map_or_else(Vec::new, |s| s.to_bytes().to_vec());
-        let upf = self.strs[31].clone();
-        let cert_store_empty = self.strs[23]
+        let upf = self.strs[OptStr::UnpackPassFile].clone();
+        let cert_store_empty = self.strs[OptStr::CertStore]
             .as_deref()
             .map_or(true, |s| s.to_bytes().is_empty());
         let mut scalars = self.scalars;
@@ -4265,14 +4331,14 @@ impl NzbgetRsOptions {
         );
         self.scalars = scalars;
         self.sync_scalars_to_host();
-        self.strs[9] = ct;
+        self.strs[OptStr::ConfigTemplate] = ct;
 
         let mut scalars = self.scalars;
         init_servers_host(self, disable_tls, &mut scalars);
         self.scalars = scalars;
         self.sync_scalars_to_host();
 
-        let dest_dir = self.strs[3].clone();
+        let dest_dir = self.strs[OptStr::DestDir].clone();
         let no_disk = self.no_disk_access;
         init_categories_host(self, no_disk, dest_dir.as_deref());
         init_scheduler_host(self);
@@ -4281,22 +4347,22 @@ impl NzbgetRsOptions {
 
     fn init_opt_file(&mut self) {
         let mut found_by_search = false;
-        if self.strs[0].is_none() && !self.no_config {
-            let app_dir_bytes = self.strs[1]
+        if self.strs[OptStr::ConfigFile].is_none() && !self.no_config {
+            let app_dir_bytes = self.strs[OptStr::AppDir]
                 .as_deref()
                 .map_or_else(Vec::new, |s| s.to_bytes().to_vec());
             if let Some(found) =
                 find_default_config_file(&app_dir_bytes, b'/', |p| self.file_exists(p))
             {
-                self.strs[0] = Some(cstring(found));
+                self.strs[OptStr::ConfigFile] = Some(cstring(found));
                 found_by_search = true;
             }
         }
 
-        if let Some(cf) = self.strs[0].clone() {
+        if let Some(cf) = self.strs[OptStr::ConfigFile].clone() {
             let exp1 = cstring(crate::fsops::expand_file_name(cf.to_bytes()));
             let exp2 = cstring(crate::fsops::expand_home_path_auto(Some(&exp1)));
-            self.strs[0] = Some(exp2.clone());
+            self.strs[OptStr::ConfigFile] = Some(exp2.clone());
             self.set_option(c"ConfigFile", &exp2);
             self.load_config_file(&exp2);
             if found_by_search && is_legacy_config_path(exp2.to_bytes()) {
@@ -4373,59 +4439,59 @@ impl NzbgetRsOptions {
     }
 
     fn check_dirs_daemon(&mut self) {
-        self.strs[2] = self.get_option(c"MainDir");
-        let main_dir = self.strs[2].clone();
+        self.strs[OptStr::MainDir] = self.get_option(c"MainDir");
+        let main_dir = self.strs[OptStr::MainDir].clone();
         let no_disk = self.no_disk_access;
-        self.strs[3] = check_dir_host(self, no_disk, c"DestDir", main_dir.as_deref(), false, true);
-        self.strs[4] = check_dir_host(self, no_disk, c"InterDir", main_dir.as_deref(), true, true);
-        self.strs[5] = check_dir_host(self, no_disk, c"TempDir", main_dir.as_deref(), false, true);
-        self.strs[6] = check_dir_host(self, no_disk, c"QueueDir", main_dir.as_deref(), false, true);
-        self.strs[8] = check_dir_host(self, no_disk, c"WebDir", None, true, false);
-        self.strs[7] = check_dir_host(self, no_disk, c"NzbDir", main_dir.as_deref(), false, true);
+        self.strs[OptStr::DestDir] = check_dir_host(self, no_disk, c"DestDir", main_dir.as_deref(), false, true);
+        self.strs[OptStr::InterDir] = check_dir_host(self, no_disk, c"InterDir", main_dir.as_deref(), true, true);
+        self.strs[OptStr::TempDir] = check_dir_host(self, no_disk, c"TempDir", main_dir.as_deref(), false, true);
+        self.strs[OptStr::QueueDir] = check_dir_host(self, no_disk, c"QueueDir", main_dir.as_deref(), false, true);
+        self.strs[OptStr::WebDir] = check_dir_host(self, no_disk, c"WebDir", None, true, false);
+        self.strs[OptStr::NzbDir] = check_dir_host(self, no_disk, c"NzbDir", main_dir.as_deref(), false, true);
     }
 
     fn init_options_daemon(&mut self) {
-        self.strs[11] = self.get_option(c"RequiredDir");
-        self.strs[9] = self.get_option(c"ConfigTemplate");
-        self.strs[14] = self.get_option(c"ControlIP");
-        self.strs[15] = self.get_option(c"ControlUsername");
-        self.strs[16] = self.get_option(c"ControlPassword");
-        self.strs[17] = self.get_option(c"RestrictedUsername");
-        self.strs[18] = self.get_option(c"RestrictedPassword");
-        self.strs[19] = self.get_option(c"AddUsername");
-        self.strs[20] = self.get_option(c"AddPassword");
-        self.strs[21] = self.get_option(c"SecureCert");
-        self.strs[22] = self.get_option(c"SecureKey");
-        self.strs[23] = self.get_option(c"CertStore");
-        self.strs[24] = self.get_option(c"AuthorizedIP");
-        self.strs[25] = self.get_option(c"LockFile");
-        self.strs[26] = self.get_option(c"DaemonUsername");
-        self.strs[27] = self.get_option(c"LogFile");
-        self.strs[30] = self.get_option(c"UnrarCmd");
+        self.strs[OptStr::RequiredDir] = self.get_option(c"RequiredDir");
+        self.strs[OptStr::ConfigTemplate] = self.get_option(c"ConfigTemplate");
+        self.strs[OptStr::ControlIp] = self.get_option(c"ControlIP");
+        self.strs[OptStr::ControlUsername] = self.get_option(c"ControlUsername");
+        self.strs[OptStr::ControlPassword] = self.get_option(c"ControlPassword");
+        self.strs[OptStr::RestrictedUsername] = self.get_option(c"RestrictedUsername");
+        self.strs[OptStr::RestrictedPassword] = self.get_option(c"RestrictedPassword");
+        self.strs[OptStr::AddUsername] = self.get_option(c"AddUsername");
+        self.strs[OptStr::AddPassword] = self.get_option(c"AddPassword");
+        self.strs[OptStr::SecureCert] = self.get_option(c"SecureCert");
+        self.strs[OptStr::SecureKey] = self.get_option(c"SecureKey");
+        self.strs[OptStr::CertStore] = self.get_option(c"CertStore");
+        self.strs[OptStr::AuthorizedIp] = self.get_option(c"AuthorizedIP");
+        self.strs[OptStr::LockFile] = self.get_option(c"LockFile");
+        self.strs[OptStr::DaemonUsername] = self.get_option(c"DaemonUsername");
+        self.strs[OptStr::LogFile] = self.get_option(c"LogFile");
+        self.strs[OptStr::UnrarCmd] = self.get_option(c"UnrarCmd");
         let seven_zip_cmd = self.get_option(c"SevenZipCmd");
-        self.strs[31] = self.get_option(c"UnpackPassFile");
-        self.strs[32] = self.get_option(c"ExtCleanupDisk");
-        self.strs[33] = self.get_option(c"ParIgnoreExt");
-        self.strs[35] = self.get_option(c"UnpackIgnoreExt");
+        self.strs[OptStr::UnpackPassFile] = self.get_option(c"UnpackPassFile");
+        self.strs[OptStr::ExtCleanupDisk] = self.get_option(c"ExtCleanupDisk");
+        self.strs[OptStr::ParIgnoreExt] = self.get_option(c"ParIgnoreExt");
+        self.strs[OptStr::UnpackIgnoreExt] = self.get_option(c"UnpackIgnoreExt");
 
-        let unrar_bytes = self.strs[30].as_deref().map_or(&[][..], CStr::to_bytes);
-        self.strs[38] = Some(if unrar_bytes.is_empty() {
+        let unrar_bytes = self.strs[OptStr::UnrarCmd].as_deref().map_or(&[][..], CStr::to_bytes);
+        self.strs[OptStr::UnrarPath] = Some(if unrar_bytes.is_empty() {
             c"".to_owned()
         } else {
             cstring(resolve_tool_path_option(unrar_bytes))
         });
         let sz_bytes = seven_zip_cmd.as_deref().map_or(&[][..], CStr::to_bytes);
-        self.strs[39] = Some(if sz_bytes.is_empty() {
+        self.strs[OptStr::SevenZipPath] = Some(if sz_bytes.is_empty() {
             c"".to_owned()
         } else {
             cstring(resolve_tool_path_option(sz_bytes))
         });
 
-        self.strs[40] = Some(
+        self.strs[OptStr::ShellOverride] = Some(
             self.get_option(c"ShellOverride")
                 .unwrap_or_else(|| c"".to_owned()),
         );
-        self.strs[34] = self.get_option(c"RenameIgnoreExt");
+        self.strs[OptStr::RenameIgnoreExt] = self.get_option(c"RenameIgnoreExt");
 
         let mut mem_path = None;
         let mut hl_ext = None;
@@ -4440,10 +4506,10 @@ impl NzbgetRsOptions {
             &mut dupe_key,
             &mut warn_no_url,
         );
-        self.strs[36] = mem_path;
-        self.strs[37] = hl_ext;
-        self.strs[12] = dupe_url;
-        self.strs[13] = dupe_key;
+        self.strs[OptStr::MemoryPressurePath] = mem_path;
+        self.strs[OptStr::HardLinkingIgnoreExt] = hl_ext;
+        self.strs[OptStr::DupeSearchUrl] = dupe_url;
+        self.strs[OptStr::DupeSearchApiKey] = dupe_key;
         self.sync_scalars_to_host();
 
         if warn_no_url {
@@ -4777,7 +4843,7 @@ pub unsafe extern "C" fn nzbget_rs_options_new(
     let mut opts = NzbgetRsOptions {
         opt_entries: Vec::new(),
         categories: Vec::new(),
-        strs: std::array::from_fn(|_| None),
+        strs: OptStrs(std::array::from_fn(|_| None)),
         no_disk_access: no_disk_access != 0,
         no_config: eff_no_config,
         daemon_subsystems: eff_daemon_subsys,

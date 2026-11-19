@@ -906,18 +906,28 @@ pub fn is_queued_dupe_active(
 /// Whether a copy in post-processing lets the other copies of its duplicate key download: with
 /// HealthCheck=dupe (or park), one that is stream-repairing its lost articles from duplicates
 /// does. The repair can take long (a slow duplicate), and a copy downloading whole meanwhile
-/// that finishes first wins: it stops the repair and the repairing copy is kept as a backup (see
-/// `dupecoord::nzb_completed_host`). If the repair finishes first, it stops the other copy the
-/// same way, so the two never both post-process into the same folder.
+/// may finish first. Only one of them goes on past the repair to unpack and move: the post
+/// stages after it are gated by duplicate key (`prepost::dupe_post_gate`), and the copy that
+/// finishes on disk first stops the other, which stays in history as a backup (see
+/// `dupecoord::nzb_completed_host`).
+///
+/// Never when the two share a download folder (`separate_dirs` false: the same name and
+/// category with no InterDir): the other copy would write into the folder holding the
+/// repairing copy's files, and with DupeCheck its articles' files would be taken for
+/// duplicates of those and discarded.
 pub fn repair_lets_other_copies_download(
-    health_check: i32,
     has_post_info: bool,
     post_stage: i32,
+    separate_dirs: bool,
+    health_check: impl FnOnce() -> i32,
 ) -> bool {
-    (health_check == crate::queuesubsys_host::HC_DUPE
-        || health_check == crate::queuesubsys_host::HC_PARK)
-        && has_post_info
+    has_post_info
         && post_stage == crate::queuesubsys_host::PT_STREAM_REPAIRING
+        && separate_dirs
+        && matches!(
+            health_check(),
+            crate::queuesubsys_host::HC_DUPE | crate::queuesubsys_host::HC_PARK
+        )
 }
 
 /// Determines whether `QueueCoordinator::CheckDupeFailover` should defer failover and whether `DupeFailoverChecked` should be updated.
@@ -4660,13 +4670,12 @@ impl NzbgetRsQueueCoordinator {
             }
             let queued = host.nzb_snap(qp, false);
             if !queued.dupe_key.is_empty() && queued.dupe_key.eq_ignore_ascii_case(&nzb.dupe_key) {
-                if queued.has_post_info
-                    && repair_lets_other_copies_download(
-                        host.opts().health_check,
-                        queued.has_post_info,
-                        queued.post_stage,
-                    )
-                {
+                if repair_lets_other_copies_download(
+                    queued.has_post_info,
+                    queued.post_stage,
+                    queued.dest_dir != nzb.dest_dir,
+                    || host.opts().health_check,
+                ) {
                     continue;
                 }
                 if is_queued_dupe_active(
@@ -5531,14 +5540,17 @@ impl NzbgetRsQueueCoordinator {
         action: i32,
         args: Option<&[u8]>,
     ) -> bool {
-        self.mass_edit
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        // (Nested in an outer edit list, as when a post job deleted from one completes and
+        // stops another copy: the outer one's mass edit stays on.)
+        let outer = self
+            .mass_edit
+            .swap(true, std::sync::atomic::Ordering::SeqCst);
         let ret = crate::queueeditor::edit_list_host(
             self, host, dq_ptr, ids, names, match_mode, action, args,
         );
         self.mass_edit
-            .store(false, std::sync::atomic::Ordering::SeqCst);
-        if self.want_save.load(std::sync::atomic::Ordering::SeqCst) {
+            .store(outer, std::sync::atomic::Ordering::SeqCst);
+        if !outer && self.want_save.load(std::sync::atomic::Ordering::SeqCst) {
             self.dq_save(host, dq_ptr);
         }
         ret
@@ -6589,12 +6601,17 @@ mod tests {
     #[test]
     fn a_copy_in_stream_repair_lets_other_copies_download_with_dupe_health() {
         use crate::queuesubsys_host::{HC_DUPE, HC_PARK, PT_STREAM_REPAIRING, PT_UNPACKING};
-        assert!(repair_lets_other_copies_download(HC_DUPE, true, PT_STREAM_REPAIRING));
-        assert!(repair_lets_other_copies_download(HC_PARK, true, PT_STREAM_REPAIRING));
-        // any other stage still holds them back, as does a health check without dupes
-        assert!(!repair_lets_other_copies_download(HC_DUPE, true, PT_UNPACKING));
-        assert!(!repair_lets_other_copies_download(HC_DUPE, false, PT_STREAM_REPAIRING));
-        assert!(!repair_lets_other_copies_download(crate::queuesubsys_host::HC_NONE, true, PT_STREAM_REPAIRING));
+        let lets = |post, stage, separate, hc: i32| {
+            repair_lets_other_copies_download(post, stage, separate, || hc)
+        };
+        assert!(lets(true, PT_STREAM_REPAIRING, true, HC_DUPE));
+        assert!(lets(true, PT_STREAM_REPAIRING, true, HC_PARK));
+        // any other stage still holds them back, as does a health check without dupes ...
+        assert!(!lets(true, PT_UNPACKING, true, HC_DUPE));
+        assert!(!lets(false, PT_STREAM_REPAIRING, true, HC_DUPE));
+        assert!(!lets(true, PT_STREAM_REPAIRING, true, crate::queuesubsys_host::HC_NONE));
+        // ... or a download folder shared with the repairing copy
+        assert!(!lets(true, PT_STREAM_REPAIRING, false, HC_DUPE));
     }
 
     #[test]

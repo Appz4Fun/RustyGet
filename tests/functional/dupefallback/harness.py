@@ -7966,6 +7966,72 @@ def scenario_ondiskstoprepairfirst(daemon, t):
             % (hd['Status'], hc['Status'], stopped, landed))
 
 
+def _ondiskstop_same_name(daemon, t, label, tag, shared_dir):
+    """Two copies of one release under the same name and dupe key: copy A, a
+    stored rar set, loses articles in two volumes; direct unpack reads past the
+    holes, and after the download a stream repair fills them from a slow
+    duplicate. Meanwhile copy B, whole, is added and (each copy in its own
+    InterDir folder) downloads while A still repairs. Only one copy may go on
+    to unpack and move: B is held before unpacking, as A's extraction is under
+    way; A finishes and stops B, which stays in history as a backup. With
+    ``shared_dir`` (no InterDir: the two would download into one folder) B
+    must not download while A repairs, nor be discarded for A's files.
+    Either way exactly one movie lands in the destination."""
+    seg = 300_000
+    movie = _payload(5_000_000, 9981)
+    vols = generators.rar3_store_volumes_valid('movie.mkv', movie, 1_400_000)
+    names = ['Rel.part%02d.rar' % (i + 1) for i in range(len(vols))]
+    damage = {1: {1, 2, 3, 4}, 2: {1, 2, 3}}
+    for sub in ('A', 'B', 'C'):
+        for n, d in zip(names, vols):
+            t.write_file(os.path.join('data', tag + sub, n), d)
+    def copy(sub, dmg, article):
+        return build_multi_nzb([('%s%s/%s' % (tag, sub, n), n, len(d), article, dmg.get(i, set()))
+                                for i, (n, d) in enumerate(zip(names, vols))])
+    api = daemon.wait_ready()
+    _ds_append(api, 'Don' + tag, copy('B', {}, 200_000), tag + '-key', 50,
+               params=[{'Name': 'DupeAlive', 'Value': '0'}])
+    daemon.append(api, 'RelSame', copy('A', damage, seg), False, tag + '-key', 100)
+    deadline = time.time() + 60
+    while time.time() < deadline and _grep_log(t, 'Queueing RelSame for post-processing') == 0:
+        time.sleep(0.2)
+    # (once A's repair took its duplicates: B, whole, would otherwise lend it quickly)
+    time.sleep(1.0)
+    # B: another posting of the same release, under the same name
+    daemon.append(api, 'RelSame', copy('C', {}, seg), False, tag + '-key', 110)
+    deadline = time.time() + 240
+    hist = []
+    while time.time() < deadline:
+        hist = [h for h in api.history() if h.get('NZBName') == 'RelSame']
+        if len(hist) == 2:
+            break
+        time.sleep(0.5)
+    statuses = sorted(h['Status'] for h in hist)
+    movies = [f for f in t.find_files('main', 'dst') if f.endswith('.mkv')]
+    intact = len(movies) == 1 and t.read_file(movies[0]) == movie
+    held = _grep_log(t, 'Holding RelSame before unpacking')
+    stopped = _grep_log(t, 'Stopping RelSame: RelSame is downloaded and on disk')
+    completed = _grep_log(t, 'Collection RelSame completely downloaded')
+    repaired = _grep_log(t, 'from duplicate Don' + tag)
+    ok = (statuses == ['DELETED/DUPE', 'SUCCESS/UNPACK'] and intact and stopped == 1 and repaired >= 1)
+    if shared_dir:
+        # B never downloaded into the folder while A repaired (no overlap, no hold)
+        ok = ok and held == 0
+    else:
+        ok = ok and held == 1 and completed == 2
+    return (label, ok, 'statuses=%s movies_in_dst=%d intact=%s held_logs=%d stop_logs=%d '
+            'completed_logs=%d repair_logs=%d'
+            % (statuses, len(movies), intact, held, stopped, completed, repaired))
+
+
+def scenario_ondiskstopsamename(daemon, t):
+    return _ondiskstop_same_name(daemon, t, 'ondiskstopsamename', 'osn', False)
+
+
+def scenario_ondiskstopsamenamenointer(daemon, t):
+    return _ondiskstop_same_name(daemon, t, 'ondiskstopsamenamenointer', 'osi', True)
+
+
 def scenario_repairlast(daemon, t):
     """B78: stream repair is the last option. A download is damaged beyond its
     par2 (none here) while a whole backup waits in history: it isn't repaired
@@ -10703,6 +10769,8 @@ SCENARIOS = {
     'ondiskgone': scenario_ondiskgone,
     'ondiskstop': scenario_ondiskstop,
     'ondiskstoprepairfirst': scenario_ondiskstoprepairfirst,
+    'ondiskstopsamename': scenario_ondiskstopsamename,
+    'ondiskstopsamenamenointer': scenario_ondiskstopsamenamenointer,
     'repairlast': scenario_repairlast,
     'recheckwholefail': scenario_recheckwholefail,
     'samepostingrepair': scenario_samepostingrepair,
@@ -11124,6 +11192,8 @@ SCENARIO_OPTIONS = {
     'ondiskskip': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
     'ondiskgone': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
     'ondiskstop': ['DupeArticleFallback=stream', 'ParCheck=auto', 'HealthCheck=dupe', 'DupeStreamTimeout=60', 'PostStrategy=rocket'],
+    'ondiskstopsamename': [o for o in PROD_OPTIONS if not o.startswith('DupeArticleFallback=')] + ['DupeArticleFallback=stream', 'DupeStreamTimeout=60'],
+    'ondiskstopsamenamenointer': [o for o in PROD_OPTIONS if not o.startswith('DupeArticleFallback=')] + ['DupeArticleFallback=stream', 'DupeStreamTimeout=60', 'InterDir='],
     'ondiskstoprepairfirst': ['DupeArticleFallback=stream', 'ParCheck=auto', 'HealthCheck=dupe', 'DupeStreamTimeout=60', 'PostStrategy=rocket'],
     'repairlast': ['DupeArticleFallback=stream', 'ParCheck=auto', 'HealthCheck=dupe'],
     # Let both files complete so this isolates history's failed-article
@@ -11354,6 +11424,8 @@ SCENARIO_DELAY_PROXY = {'clientthreads': [(b'ctA/', 3.0)], 'xdecomp_slow': [(b'x
                         'restartfailover': [(b'rfA/', 0.4)],
                         'ondiskstop': [(b'odB/', 1.0)],
                         'ondiskstoprepairfirst': [(b'ocC/', 0.5)],
+                        'ondiskstopsamename': [(b'osnB/', 1.5)],
+                        'ondiskstopsamenamenointer': [(b'osiB/', 1.5)],
                         'streamstarved': [(b'busy/', 2.0)],
                         'keepreturned': [(b'krA/', 0.4)],
                         'streamtimeout': [(b'slowB/', 8.0)],

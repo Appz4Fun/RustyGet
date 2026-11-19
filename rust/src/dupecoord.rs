@@ -1733,6 +1733,11 @@ pub(crate) fn nzb_found_host(
     }
 }
 
+thread_local! {
+    /// Set while [`nzb_completed_host`] stops the other copies of a release on disk.
+    static STOPPING_FOR_ON_DISK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 #[cfg(unix)]
 pub(crate) fn nzb_completed_host(
     host: &crate::queuesubsys_host::QueueSubsysHost,
@@ -1749,7 +1754,9 @@ pub(crate) fn nzb_completed_host(
     dbg.extend_from_slice(&nzb.name);
     host.log(crate::queuesubsys_host::MK_DEBUG, &dbg);
 
-    if fails_over_snap(&opts, &nzb) && !nzb.is_dupe_success {
+    // A copy stopped because another one of its release is downloaded and on disk (its queued
+    // post job ends right inside that stop) never fetches a backup from history.
+    if fails_over_snap(&opts, &nzb) && !nzb.is_dupe_success && !STOPPING_FOR_ON_DISK.get() {
         return_best_dupe_host(host, &opts, dq_ptr, nzb.ptr, &nzb.name, &nzb.dupe_key);
     }
 
@@ -1794,6 +1801,7 @@ pub(crate) fn nzb_completed_host(
                 others.push((queued.id, queued.has_post_info));
             }
         }
+        let outer = STOPPING_FOR_ON_DISK.replace(true);
         for (other_id, in_post) in others {
             if in_post {
                 // A post job is cancelled through the post-processor: only the edit-list route
@@ -1809,6 +1817,7 @@ pub(crate) fn nzb_completed_host(
                 host.dq_edit_entry(dq_ptr, other_id, delete_action, None);
             }
         }
+        STOPPING_FOR_ON_DISK.set(outer);
     }
 }
 

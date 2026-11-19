@@ -199,6 +199,7 @@ pub fn normalize_external_nzb_name(nzb_name: &[u8], valid_name: &[u8], is_nzb: b
 
 use crate::cstr;
 use crate::options::OptStr;
+use crate::status::DeleteStatus;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
@@ -1975,11 +1976,11 @@ unsafe extern "C" fn native_commit_nzb_cb(
     raw_url_info: *mut c_void,
 ) -> c_int {
     use crate::queuesubsys_host::{
-        DS_SCAN, FILE_INT_PAUSED, MK_DETAIL, MK_WARNING, NZB_ACT_BUILD_DEST_DIR,
-        NZB_INT_DELETE_STATUS, NZB_INT_DESIRED_SERVER_ID, NZB_INT_DUPE_HINT, NZB_INT_DUPE_MODE,
-        NZB_INT_DUPE_SCORE, NZB_INT_FEED_ID, NZB_INT_PRIORITY, NZB_INT_SKIP_DISK_WRITE,
-        NZB_INT_SKIP_SCRIPT_PROCESSING, NZB_STR_CATEGORY, NZB_STR_DUPE_KEY, NZB_STR_FILENAME,
-        NZB_STR_NAME, NZB_STR_QUEUED_FILENAME, NZB_STR_URL,
+        FILE_INT_PAUSED, MK_DETAIL, MK_WARNING, NZB_ACT_BUILD_DEST_DIR, NZB_INT_DESIRED_SERVER_ID,
+        NZB_INT_DUPE_HINT, NZB_INT_DUPE_MODE, NZB_INT_DUPE_SCORE, NZB_INT_FEED_ID,
+        NZB_INT_PRIORITY, NZB_INT_SKIP_DISK_WRITE, NZB_INT_SKIP_SCRIPT_PROCESSING,
+        NZB_STR_CATEGORY, NZB_STR_DUPE_KEY, NZB_STR_FILENAME, NZB_STR_NAME,
+        NZB_STR_QUEUED_FILENAME, NZB_STR_URL,
     };
     if ctx.is_null() {
         return 0;
@@ -2091,7 +2092,7 @@ unsafe extern "C" fn native_commit_nzb_cb(
         host.nzb_copy_cached_messages_silent(url_ptr, nzb_ptr);
         0
     } else {
-        host.nzb_set_int(nzb_ptr, NZB_INT_DELETE_STATUS, DS_SCAN);
+        host.nzb_set_delete_status(nzb_ptr, DeleteStatus::Scan);
         crate::ffi::active_queue_coord_and_host().map_or(0, |(qc, qh)| {
             qc.add_nzb_file_to_queue(&qh, parsed.uptr_addr, url_ptr, add_top != 0)
         })

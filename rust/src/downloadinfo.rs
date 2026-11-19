@@ -15,15 +15,6 @@ fn c_lower(b: u8) -> u8 {
 pub const NZB_KIND_NZB: i32 = 0;
 pub const NZB_KIND_URL: i32 = 1;
 
-pub const DELETE_NONE: i32 = 0;
-pub const DELETE_MANUAL: i32 = 1;
-pub const DELETE_HEALTH: i32 = 2;
-pub const DELETE_DUPE: i32 = 3;
-pub const DELETE_BAD: i32 = 4;
-pub const DELETE_GOOD: i32 = 5;
-pub const DELETE_COPY: i32 = 6;
-pub const DELETE_SCAN: i32 = 7;
-
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RsDownloadCurrentStatsAcc {

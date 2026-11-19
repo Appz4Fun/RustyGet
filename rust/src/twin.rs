@@ -1278,7 +1278,7 @@ fn run_service_work_locked(
             queued,
             snap.remaining_size,
             snap.paused_size,
-            DeleteStatus::from(snap.delete_status),
+            snap.delete_status,
         );
         let hinted = qh.nzb_get_param(nzb_ptr, b"DupeSameSize").is_some()
             || qh.nzb_get_param(nzb_ptr, b"DupeSameInner").is_some();

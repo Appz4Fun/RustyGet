@@ -25,15 +25,6 @@ pub fn find_subslice_ci(haystack: &[u8], needle: &[u8]) -> bool {
 // Status Constants Shared with HistoryCoordinator
 // ============================================================================
 
-pub const DELETE_NONE: i32 = 0;
-pub const DELETE_MANUAL: i32 = 1;
-pub const DELETE_HEALTH: i32 = 2;
-pub const DELETE_DUPE: i32 = 3;
-pub const DELETE_BAD: i32 = 4;
-pub const DELETE_GOOD: i32 = 5;
-pub const DELETE_COPY: i32 = 6;
-pub const DELETE_SCAN: i32 = 7;
-
 pub const ARTICLE_UNDEFINED: i32 = 0;
 pub const ARTICLE_RUNNING: i32 = 1;
 pub const ARTICLE_FINISHED: i32 = 2;
@@ -1812,7 +1803,7 @@ impl NzbgetRsQueueCoordinator {
             let nzb = host.nzb_snap(added_nzb_ptr, false);
             let delete_status = nzb.delete_status;
 
-            if delete_status != crate::queuesubsys_host::DS_NONE {
+            if delete_status != DeleteStatus::None {
                 let flen = host.nzb_file_len(added_nzb_ptr);
                 let mut all_paused = flen > 0;
                 for i in 0..flen {
@@ -1830,7 +1821,7 @@ impl NzbgetRsQueueCoordinator {
                 );
             }
 
-            if delete_status == crate::queuesubsys_host::DS_NONE {
+            if delete_status == DeleteStatus::None {
                 if opts.dupe_check && nzb.dupe_mode != DupeMode::Force {
                     self.check_dupe_file_infos(host, added_nzb_ptr);
                 }
@@ -1850,14 +1841,14 @@ impl NzbgetRsQueueCoordinator {
             }
 
             let cur_nzb = host.nzb_snap(added_nzb_ptr, false);
-            if delete_status == crate::queuesubsys_host::DS_NONE {
+            if delete_status == DeleteStatus::None {
                 let mut msg = b"Collection ".to_vec();
                 msg.extend_from_slice(&cur_nzb.name);
                 msg.extend_from_slice(b" added to queue");
                 host.nzb_print_message(added_nzb_ptr, crate::queuesubsys_host::MK_INFO, &msg);
             }
 
-            if delete_status != crate::queuesubsys_host::DS_MANUAL {
+            if delete_status != DeleteStatus::Manual {
                 host.dq_notify(
                     dq_ptr,
                     crate::queuesubsys_host::ASPECT_NZB_ADDED,
@@ -1866,7 +1857,7 @@ impl NzbgetRsQueueCoordinator {
                 );
             }
 
-            if delete_status != crate::queuesubsys_host::DS_NONE {
+            if delete_status != DeleteStatus::None {
                 let check_id = cur_nzb.id;
                 host.queue_remove(dq_ptr, added_nzb_ptr);
                 if host.history_find_by_id(dq_ptr, check_id) == 0 {
@@ -1946,7 +1937,7 @@ impl NzbgetRsQueueCoordinator {
             return;
         }
         let nzb = host.nzb_snap(nzb_ptr, false);
-        if nzb.deleting || nzb.parking || nzb.delete_status != crate::queuesubsys_host::DS_NONE {
+        if nzb.deleting || nzb.parking || nzb.delete_status != DeleteStatus::None {
             return;
         }
         let own_success = nzb.current_success_articles
@@ -1989,11 +1980,7 @@ impl NzbgetRsQueueCoordinator {
             .as_bytes(),
         );
         host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
-        host.nzb_set_int(
-            nzb.ptr,
-            crate::queuesubsys_host::NZB_INT_DELETE_STATUS,
-            crate::queuesubsys_host::DS_HEALTH,
-        );
+        host.nzb_set_delete_status(nzb.ptr, DeleteStatus::Health);
         host.dq_edit_entry(
             dq_ptr,
             nzb.id,
@@ -4453,7 +4440,7 @@ impl NzbgetRsQueueCoordinator {
             opts.par_scan,
             crate::queuesubsys_host::PS_DUPE,
             nzb.health_paused,
-            DeleteStatus::from(nzb.delete_status),
+            nzb.delete_status,
             nzb.health,
             dl_crit,
             nzb.success_articles,
@@ -4495,11 +4482,7 @@ impl NzbgetRsQueueCoordinator {
                 .as_bytes(),
             );
             host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
-            host.nzb_set_int(
-                nzb.ptr,
-                crate::queuesubsys_host::NZB_INT_DELETE_STATUS,
-                crate::queuesubsys_host::DS_HEALTH,
-            );
+            host.nzb_set_delete_status(nzb.ptr, DeleteStatus::Health);
             host.dq_edit_entry(
                 dq_ptr,
                 nzb.id,
@@ -4651,7 +4634,7 @@ impl NzbgetRsQueueCoordinator {
                 }
                 if is_queued_dupe_active(
                     queued.deleting,
-                    DeleteStatus::from(queued.delete_status),
+                    queued.delete_status,
                     queued.active_downloads,
                     queued.has_post_info,
                     queued.post_working,
@@ -4776,11 +4759,7 @@ impl NzbgetRsQueueCoordinator {
                     .as_bytes(),
                 );
                 host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
-                host.nzb_set_int(
-                    nzb.ptr,
-                    crate::queuesubsys_host::NZB_INT_DELETE_STATUS,
-                    crate::queuesubsys_host::DS_HEALTH,
-                );
+                host.nzb_set_delete_status(nzb.ptr, DeleteStatus::Health);
                 host.dq_edit_entry(
                     dq_ptr,
                     nzb.id,
@@ -4815,11 +4794,7 @@ impl NzbgetRsQueueCoordinator {
             msg.extend_from_slice(&reason);
             msg.push(b')');
             host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
-            host.nzb_set_int(
-                nzb.ptr,
-                crate::queuesubsys_host::NZB_INT_DELETE_STATUS,
-                crate::queuesubsys_host::DS_HEALTH,
-            );
+            host.nzb_set_delete_status(nzb.ptr, DeleteStatus::Health);
             host.dq_edit_entry(
                 dq_ptr,
                 nzb.id,
@@ -4843,7 +4818,7 @@ impl NzbgetRsQueueCoordinator {
             || nzb.kind != crate::queuesubsys_host::NK_NZB
             || nzb.deleting
             || nzb.parking
-            || nzb.delete_status != crate::queuesubsys_host::DS_NONE
+            || nzb.delete_status != DeleteStatus::None
         {
             return;
         }
@@ -4876,11 +4851,7 @@ impl NzbgetRsQueueCoordinator {
                         b": it was kept to borrow its dead volumes, but the duplicate holds another video",
                     );
                     host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
-                    host.nzb_set_int(
-                        nzb.ptr,
-                        crate::queuesubsys_host::NZB_INT_DELETE_STATUS,
-                        crate::queuesubsys_host::DS_HEALTH,
-                    );
+                    host.nzb_set_delete_status(nzb.ptr, DeleteStatus::Health);
                     host.dq_edit_entry(
                         dq_ptr,
                         nzb.id,
@@ -4961,11 +4932,7 @@ impl NzbgetRsQueueCoordinator {
                 msg.extend_from_slice(&reason);
                 msg.push(b')');
                 host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
-                host.nzb_set_int(
-                    nzb.ptr,
-                    crate::queuesubsys_host::NZB_INT_DELETE_STATUS,
-                    crate::queuesubsys_host::DS_HEALTH,
-                );
+                host.nzb_set_delete_status(nzb.ptr, DeleteStatus::Health);
                 host.dq_edit_entry(
                     dq_ptr,
                     nzb.id,
@@ -5078,11 +5045,7 @@ impl NzbgetRsQueueCoordinator {
             );
             host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
         }
-        host.nzb_set_int(
-            nzb.ptr,
-            crate::queuesubsys_host::NZB_INT_DELETE_STATUS,
-            crate::queuesubsys_host::DS_HEALTH,
-        );
+        host.nzb_set_delete_status(nzb.ptr, DeleteStatus::Health);
         host.dq_edit_entry(
             dq_ptr,
             nzb.id,
@@ -5110,7 +5073,7 @@ impl NzbgetRsQueueCoordinator {
             || nzb.kind != crate::queuesubsys_host::NK_NZB
             || nzb.deleting
             || nzb.parking
-            || nzb.delete_status != crate::queuesubsys_host::DS_NONE
+            || nzb.delete_status != DeleteStatus::None
         {
             return;
         }
@@ -5138,11 +5101,7 @@ impl NzbgetRsQueueCoordinator {
             b": its archive needs a password its nzb does not carry, so it can never be extracted",
         );
         host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
-        host.nzb_set_int(
-            nzb.ptr,
-            crate::queuesubsys_host::NZB_INT_DELETE_STATUS,
-            crate::queuesubsys_host::DS_HEALTH,
-        );
+        host.nzb_set_delete_status(nzb.ptr, DeleteStatus::Health);
         host.dq_edit_entry(
             dq_ptr,
             nzb.id,
@@ -5242,11 +5201,7 @@ impl NzbgetRsQueueCoordinator {
         msg.extend_from_slice(b", par-repair can't fix it");
         host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
         crate::dupefallback::par_damage_forget_all(nzb.id);
-        host.nzb_set_int(
-            nzb.ptr,
-            crate::queuesubsys_host::NZB_INT_DELETE_STATUS,
-            crate::queuesubsys_host::DS_HEALTH,
-        );
+        host.nzb_set_delete_status(nzb.ptr, DeleteStatus::Health);
         host.dq_edit_entry(
             dq_ptr,
             nzb.id,
@@ -5285,7 +5240,7 @@ impl NzbgetRsQueueCoordinator {
             || nzb.kind != crate::queuesubsys_host::NK_NZB
             || nzb.deleting
             || nzb.parking
-            || nzb.delete_status != crate::queuesubsys_host::DS_NONE
+            || nzb.delete_status != DeleteStatus::None
         {
             return;
         }

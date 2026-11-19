@@ -49,8 +49,6 @@ const AD_FINISHED: i32 = 2;
 const AD_FAILED: i32 = 3;
 const AD_RETRY: i32 = 4;
 /// `NzbInfo::EUrlStatus` and `EDeleteStatus` values it sets.
-const DS_NONE: i32 = 0;
-const DS_MANUAL: i32 = 1;
 
 /// The statuses `UrlCoordinator::UrlCompleted` leaves on the NZB for the
 /// downloader's status: `(url_status, delete_status, retry)`.
@@ -58,14 +56,14 @@ pub fn completed(
     downloader: i32,
     deleting: bool,
     url_status: UrlStatus,
-    delete_status: i32,
-) -> (UrlStatus, i32, bool) {
+    delete_status: DeleteStatus,
+) -> (UrlStatus, DeleteStatus, bool) {
     let retry = downloader == AD_RETRY && !deleting;
     if deleting {
         return (
             UrlStatus::None,
-            if delete_status == DS_NONE {
-                DS_MANUAL
+            if delete_status == DeleteStatus::None {
+                DeleteStatus::Manual
             } else {
                 delete_status
             },
@@ -86,10 +84,9 @@ pub fn completed(
 pub fn select_next_url(
     kinds: &[i32],
     url_statuses: &[UrlStatus],
-    delete_statuses: &[i32],
+    delete_statuses: &[DeleteStatus],
     priorities: &[i32],
     nk_url: i32,
-    ds_none: i32,
 ) -> i32 {
     let count = kinds
         .len()
@@ -101,7 +98,7 @@ pub fn select_next_url(
     for i in 0..count {
         if kinds[i] == nk_url
             && url_statuses[i] == UrlStatus::None
-            && delete_statuses[i] == ds_none
+            && delete_statuses[i] == DeleteStatus::None
             && (best_idx < 0 || priorities[i] > best_prio)
         {
             best_idx = i as i32;
@@ -139,10 +136,10 @@ pub fn format_temp_url_path(temp_dir: &[u8], sep: u8, id: i32) -> Vec<u8> {
 use crate::queuesubsys_host::{
     QueueSubsysHost, ASPECT_URL_ADDED, ASPECT_URL_COMPLETED, ASPECT_URL_DELETED, ASPECT_URL_FAILED,
     ASPECT_URL_FOUND, ASPECT_URL_RETURNED, NZB_INT_ACTIVE_DOWNLOADS, NZB_INT_AVOID_HISTORY,
-    NZB_INT_DELETE_STATUS, NZB_INT_DELETING,
+    NZB_INT_DELETING,
 };
 use crate::options::OptStr;
-use crate::status::{DupeMode, UrlStatus};
+use crate::status::{DeleteStatus, DupeMode, UrlStatus};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -357,8 +354,7 @@ impl NzbgetRsUrlCoord {
                             ids.push(snap.id);
                             ptrs.push(nzb_ptr);
                         }
-                        let sel =
-                            select_next_url(&kinds, &url_st, &del_st, &prios, NK_URL, DS_NONE);
+                        let sel = select_next_url(&kinds, &url_st, &del_st, &prios, NK_URL);
                         if sel >= 0 && (sel as usize) < count {
                             chosen_nzb = ptrs[sel as usize];
                             chosen_id = ids[sel as usize];
@@ -540,7 +536,7 @@ impl NzbgetRsUrlCoord {
             retry = r;
             final_url_status = new_url;
 
-            host.nzb_set_int(nzb_ptr, NZB_INT_DELETE_STATUS, new_del);
+            host.nzb_set_delete_status(nzb_ptr, new_del);
             if cur_snap.deleting {
                 host.nzb_set_int(nzb_ptr, NZB_INT_DELETING, 0);
             }
@@ -625,8 +621,8 @@ impl NzbgetRsUrlCoord {
         }
 
         url_emit_log(2, &[b"Deleting URL ", &snap.name]);
-        if snap.delete_status == DS_NONE {
-            host.nzb_set_int(nzb_ptr, NZB_INT_DELETE_STATUS, DS_MANUAL);
+        if snap.delete_status == DeleteStatus::None {
+            host.nzb_set_delete_status(nzb_ptr, DeleteStatus::Manual);
         }
         host.nzb_set_url_status(nzb_ptr, UrlStatus::None);
         host.dq_notify(dq_ptr, ASPECT_URL_DELETED, nzb_ptr, 0);
@@ -638,7 +634,7 @@ impl NzbgetRsUrlCoord {
         with_dq_guard(|host, dq_ptr| {
             host.dq_notify(dq_ptr, ASPECT_URL_FOUND, nzb_ptr, 0);
             let snap = host.nzb_snap(nzb_ptr, false);
-            let do_add = snap.delete_status != DS_MANUAL;
+            let do_add = snap.delete_status != DeleteStatus::Manual;
             if do_add && holder_ptr != 0 {
                 host.queue_insert_owned(dq_ptr, holder_ptr, 0, add_first);
                 host.dq_notify(dq_ptr, ASPECT_URL_ADDED, nzb_ptr, 0);
@@ -1019,41 +1015,46 @@ mod tests {
     #[test]
     fn statuses() {
         assert_eq!(
-            completed(AD_FINISHED, false, UrlStatus::Running, 0),
-            (UrlStatus::Finished, 0, false)
+            completed(AD_FINISHED, false, UrlStatus::Running, DeleteStatus::None),
+            (UrlStatus::Finished, DeleteStatus::None, false)
         );
         assert_eq!(
-            completed(AD_FAILED, false, UrlStatus::Running, 0),
-            (UrlStatus::Failed, 0, false)
+            completed(AD_FAILED, false, UrlStatus::Running, DeleteStatus::None),
+            (UrlStatus::Failed, DeleteStatus::None, false)
         );
         assert_eq!(
-            completed(AD_RETRY, false, UrlStatus::Running, 0),
-            (UrlStatus::None, 0, true)
+            completed(AD_RETRY, false, UrlStatus::Running, DeleteStatus::None),
+            (UrlStatus::None, DeleteStatus::None, true)
         );
         assert_eq!(
-            completed(8, false, UrlStatus::Running, 0),
-            (UrlStatus::Running, 0, false)
+            completed(8, false, UrlStatus::Running, DeleteStatus::None),
+            (UrlStatus::Running, DeleteStatus::None, false)
         );
         assert_eq!(
-            completed(AD_RETRY, true, UrlStatus::Running, 0),
-            (UrlStatus::None, DS_MANUAL, false)
+            completed(AD_RETRY, true, UrlStatus::Running, DeleteStatus::None),
+            (UrlStatus::None, DeleteStatus::Manual, false)
         );
         assert_eq!(
-            completed(AD_FINISHED, true, UrlStatus::Running, 3),
-            (UrlStatus::None, 3, false)
+            completed(AD_FINISHED, true, UrlStatus::Running, DeleteStatus::Dupe),
+            (UrlStatus::None, DeleteStatus::Dupe, false)
         );
         assert_eq!(
-            select_next_url(&[1, 1], &[UrlStatus::None; 2], &[0, 0], &[10, 50], 1, 0),
+            select_next_url(
+                &[1, 1],
+                &[UrlStatus::None; 2],
+                &[DeleteStatus::None; 2],
+                &[10, 50],
+                1
+            ),
             1
         );
         assert_eq!(
             select_next_url(
                 &[1, 1],
                 &[UrlStatus::None, UrlStatus::Running],
-                &[0, 0],
+                &[DeleteStatus::None; 2],
                 &[10, 50],
-                1,
-                0
+                1
             ),
             0
         );

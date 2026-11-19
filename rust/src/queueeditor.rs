@@ -1,7 +1,7 @@
 //! `QueueEditor` and `GroupSorter` (`daemon/queue/QueueEditor.cpp`) end-to-end Rust implementation.
 
 use crate::queuecoord::strcasecmp_bytes;
-use crate::status::DupeMode;
+use crate::status::{DeleteStatus, DupeMode};
 
 pub const SORT_CRITERIA_NAME: i32 = 0;
 pub const SORT_CRITERIA_SIZE: i32 = 1;
@@ -1364,9 +1364,9 @@ fn edit_group(
     args: Option<&[u8]>,
 ) -> bool {
     use crate::queuesubsys_host::{
-        ASPECT_NZB_DELETED, DS_DUPE, EA_GROUP_DELETE, EA_GROUP_DUPE_DELETE, EA_GROUP_FINAL_DELETE,
+        ASPECT_NZB_DELETED, EA_GROUP_DELETE, EA_GROUP_DUPE_DELETE, EA_GROUP_FINAL_DELETE,
         EA_GROUP_PARK_DELETE, NZB_INT_AVOID_HISTORY, NZB_INT_CLEANUP_DISK, NZB_INT_DELETE_PAUSED,
-        NZB_INT_DELETE_STATUS, NZB_INT_DELETING, NZB_INT_PARKING,
+        NZB_INT_DELETING, NZB_INT_PARKING,
     };
 
     let nzb = host.nzb_snap(nzb_ptr, false);
@@ -1406,7 +1406,7 @@ fn edit_group(
         host.nzb_set_int(nzb_ptr, NZB_INT_AVOID_HISTORY, i32::from(avoid_history));
         host.nzb_set_int(nzb_ptr, NZB_INT_DELETE_PAUSED, i32::from(all_paused));
         if set_dupe_status {
-            host.nzb_set_int(nzb_ptr, NZB_INT_DELETE_STATUS, DS_DUPE);
+            host.nzb_set_delete_status(nzb_ptr, DeleteStatus::Dupe);
         }
         host.nzb_set_int(nzb_ptr, NZB_INT_CLEANUP_DISK, i32::from(cleanup_disk));
     }

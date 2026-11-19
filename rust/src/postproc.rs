@@ -5327,145 +5327,100 @@ fn job_is_stopped(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn) -> bool {
     }
 }
 
-fn run_move_job(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn) {
-    let (nzb_name, inter_dir, dest_dir) = with_dq_guard(ctx, host_cb, |_| {
-        let mut strs = [ptr::null() as *const c_char; 3];
-        let mut built_final = Vec::new();
-        extern "C" fn set_vec(vec_ptr: usize, s: *const c_char) {
-            let v = unsafe { &mut *(vec_ptr as *mut Vec<u8>) };
-            *v = unsafe { cstr::owned(s) };
-        }
-        unsafe {
-            host_cb(
-                ctx,
-                1,
-                0,
-                0,
-                (&mut built_final as *mut Vec<u8>) as usize,
-                set_vec as *const () as usize,
-                ptr::null(),
-                ptr::null(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                strs.as_mut_ptr(),
-            );
-        }
-        let name = trunc_1023(unsafe { cstr::owned(strs[0]) });
-        let inter = unsafe { cstr::owned(strs[1]) };
-        let fin = unsafe { cstr::owned(strs[2]) };
-        let dst = if fin.is_empty() { built_final } else { fin };
-        (name, inter, dst)
-    });
-
-    emit_job_msg(
-        ctx,
-        host_cb,
-        MK_INFO,
-        &[b"Moving completed files for ", nzb_name.as_slice()].concat(),
-    );
-
-    let inter_path = crate::cleanup::bytes_to_path_buf(&inter_dir);
-    let dest_path = crate::cleanup::bytes_to_path_buf(&dest_dir);
-    let ok = crate::cleanup::move_files(
-        &inter_path,
-        &dest_path,
-        || job_is_stopped(ctx, host_cb),
-        |kind, msg| emit_job_msg(ctx, host_cb, map_cleanup_kind(kind), msg),
-        |old_rel, new_rel| {
-            let c_old = cstr::nul_terminated(old_rel);
-            let c_new = cstr::nul_terminated(new_rel);
-            with_dq_guard(ctx, host_cb, |_| unsafe {
-                host_cb(
-                    ctx,
-                    2,
-                    2,
-                    0,
-                    0,
-                    0,
-                    c_old.as_ptr() as *const c_char,
-                    c_new.as_ptr() as *const c_char,
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                );
-            });
-        },
-    );
-
-    let up_info_name = trunc_1023([b"Move for ", nzb_name.as_slice()].concat());
-
-    if ok {
-        let mut s = [ptr::null() as *const c_char; 1];
-        unsafe {
-            host_cb(
-                ctx,
-                1,
-                1,
-                0,
-                0,
-                0,
-                ptr::null(),
-                ptr::null(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                s.as_mut_ptr(),
-            );
-        }
-        let hl_bytes = unsafe { cstr::owned(s[0]) };
-        if !hl_bytes.is_empty() {
-            let hl_path = crate::cleanup::bytes_to_path_buf(&hl_bytes);
-            crate::cleanup::remove_stale_hardlinks(&hl_path, &dest_path, |kind, msg| {
-                emit_job_msg(ctx, host_cb, map_cleanup_kind(kind), msg);
-            });
-        }
+#[cfg(unix)]
+impl NzbgetRsPostJob {
+    fn nzb_ptr(&self, host: &crate::queuesubsys_host::QueueSubsysHost) -> usize {
+        host.post_snap(self.post_ptr).nzb_ptr
     }
 
-    with_dq_guard(ctx, host_cb, |_| {
-        let has_nzb = unsafe {
-            host_cb(
-                ctx,
-                1,
-                2,
-                0,
-                0,
-                0,
-                ptr::null(),
-                ptr::null(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            ) != 0
+    fn add_message(&self, host: &crate::queuesubsys_host::QueueSubsysHost, kind: i32, msg: &[u8]) {
+        host.nzb_add_message(self.nzb_ptr(host), kind, msg);
+    }
+
+    fn run_move(&self) {
+        use crate::queuesubsys_host::{
+            NZB_INT_MOVE_STATUS, NZB_STR_DEST_DIR, NZB_STR_FINAL_DIR, POST_INT_WORKING,
         };
-        if has_nzb {
+        let Some(host) = crate::ffi::queue_host() else {
+            return;
+        };
+        let host = &host;
+        let (nzb_name, inter_dir, dest_dir) = host.with_locked_queue(|_| {
+            let n = self.nzb_ptr(host);
+            let ns = host.nzb_snap(n, false);
+            let dest = if ns.final_dir.is_empty() {
+                host.nzb_build_final_dir_name(n)
+            } else {
+                ns.final_dir
+            };
+            (trunc_1023(ns.name), ns.dest_dir, dest)
+        });
+
+        self.add_message(
+            host,
+            MK_INFO,
+            &[b"Moving completed files for ", nzb_name.as_slice()].concat(),
+        );
+
+        let inter_path = crate::cleanup::bytes_to_path_buf(&inter_dir);
+        let dest_path = crate::cleanup::bytes_to_path_buf(&dest_dir);
+        let is_stopped = || host.thread_is_stopped(self.thread_ptr);
+        let ok = crate::cleanup::move_files(
+            &inter_path,
+            &dest_path,
+            is_stopped,
+            |kind, msg| self.add_message(host, map_cleanup_kind(kind), msg),
+            |old_rel, new_rel| {
+                host.with_locked_queue(|_| {
+                    if self.post_ptr == 0 {
+                        return;
+                    }
+                    let n = self.nzb_ptr(host);
+                    if n != 0 {
+                        host.nzb_rename_completed_file(
+                            n,
+                            cstr::until_nul(old_rel),
+                            cstr::until_nul(new_rel),
+                        );
+                    }
+                });
+            },
+        );
+
+        let up_info_name = trunc_1023([b"Move for ", nzb_name.as_slice()].concat());
+
+        if ok {
+            let hard_links = host.nzb_hard_link_path(self.nzb_ptr(host));
+            if !hard_links.is_empty() {
+                let hl_path = crate::cleanup::bytes_to_path_buf(&hard_links);
+                crate::cleanup::remove_stale_hardlinks(&hl_path, &dest_path, |kind, msg| {
+                    self.add_message(host, map_cleanup_kind(kind), msg);
+                });
+            }
+        }
+
+        host.with_locked_queue(|_| {
+            if self.post_ptr == 0 {
+                return;
+            }
+            let n = self.nzb_ptr(host);
+            if n == 0 {
+                return;
+            }
             let (outcome, move_status) =
-                crate::cleanup::decide_move_outcome(ok, job_is_stopped(ctx, host_cb));
+                crate::cleanup::decide_move_outcome(ok, is_stopped());
             if outcome == 1 {
-                emit_job_msg(
-                    ctx,
-                    host_cb,
+                self.add_message(
+                    host,
                     MK_INFO,
                     &[up_info_name.as_slice(), b" successful"].concat(),
                 );
-                let c_dst = cstr::nul_terminated(&dest_dir);
-                unsafe {
-                    host_cb(
-                        ctx,
-                        3,
-                        1,
-                        move_status,
-                        0,
-                        0,
-                        c_dst.as_ptr() as *const c_char,
-                        ptr::null(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                    );
-                }
+                host.nzb_set_str(n, NZB_STR_DEST_DIR, cstr::until_nul(&dest_dir));
+                host.nzb_set_str(n, NZB_STR_FINAL_DIR, b"");
+                host.nzb_set_int(n, NZB_INT_MOVE_STATUS, move_status);
             } else if outcome == 2 {
-                emit_job_msg(
-                    ctx,
-                    host_cb,
+                self.add_message(
+                    host,
                     MK_INFO,
                     &[
                         up_info_name.as_slice(),
@@ -5474,125 +5429,63 @@ fn run_move_job(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn) {
                     .concat(),
                 );
             } else {
-                emit_job_msg(
-                    ctx,
-                    host_cb,
+                self.add_message(
+                    host,
                     MK_ERROR,
                     &[up_info_name.as_slice(), b" failed"].concat(),
                 );
-                unsafe {
-                    host_cb(
-                        ctx,
-                        3,
-                        0,
-                        move_status,
-                        0,
-                        0,
-                        ptr::null(),
-                        ptr::null(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                    );
-                }
+                host.nzb_set_int(n, NZB_INT_MOVE_STATUS, move_status);
             }
-            unsafe {
-                host_cb(
-                    ctx,
-                    3,
-                    2,
-                    0,
-                    0,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                );
-            }
-        }
-    });
-}
-
-fn run_cleanup_job(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn) {
-    let (nzb_name, dest_dir, final_dir, ext_cleanup_disk) = with_dq_guard(ctx, host_cb, |_| {
-        let mut strs = [ptr::null() as *const c_char; 4];
-        unsafe {
-            host_cb(
-                ctx,
-                1,
-                0,
-                0,
-                0,
-                0,
-                ptr::null(),
-                ptr::null(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                strs.as_mut_ptr(),
-            );
-        }
-        (
-            trunc_1023(unsafe { cstr::owned(strs[0]) }),
-            unsafe { cstr::owned(strs[1]) },
-            unsafe { cstr::owned(strs[2]) },
-            unsafe { cstr::owned(strs[3]) },
-        )
-    });
-
-    emit_job_msg(
-        ctx,
-        host_cb,
-        MK_INFO,
-        &[b"Cleaning up ", nzb_name.as_slice()].concat(),
-    );
-
-    let dst_path = crate::cleanup::bytes_to_path_buf(&dest_dir);
-    let fin_path = crate::cleanup::bytes_to_path_buf(&final_dir);
-    let (outcome, cleanup_status) =
-        crate::cleanup::run_cleanup(&dst_path, &fin_path, &ext_cleanup_disk, |kind, msg| {
-            emit_job_msg(ctx, host_cb, map_cleanup_kind(kind), msg);
+            host.post_set_int(self.post_ptr, POST_INT_WORKING, 0);
         });
-
-    let up_info_name = trunc_1023([b"Cleanup for ", nzb_name.as_slice()].concat());
-    if outcome == 1 {
-        emit_job_msg(
-            ctx,
-            host_cb,
-            MK_INFO,
-            &[up_info_name.as_slice(), b" successful"].concat(),
-        );
-    } else if outcome == 2 {
-        emit_job_msg(
-            ctx,
-            host_cb,
-            MK_INFO,
-            &[b"Nothing to cleanup for ", nzb_name.as_slice()].concat(),
-        );
-    } else {
-        emit_job_msg(
-            ctx,
-            host_cb,
-            MK_ERROR,
-            &[up_info_name.as_slice(), b" failed"].concat(),
-        );
     }
 
-    unsafe {
-        host_cb(
-            ctx,
-            3,
-            0,
-            cleanup_status,
-            0,
-            0,
-            ptr::null(),
-            ptr::null(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-        );
+    fn run_cleanup(&self) {
+        use crate::queuesubsys_host::{NZB_INT_CLEANUP_STATUS, POST_INT_WORKING};
+        let Some(host) = crate::ffi::queue_host() else {
+            return;
+        };
+        let host = &host;
+        let (nzb_name, dest_dir, final_dir, ext_cleanup_disk) = host.with_locked_queue(|_| {
+            let ns = host.nzb_snap(self.nzb_ptr(host), false);
+            let ext = crate::options::active_options()
+                .map(|o| o.str_bytes(OptStr::ExtCleanupDisk).to_vec())
+                .unwrap_or_default();
+            (trunc_1023(ns.name), ns.dest_dir, ns.final_dir, ext)
+        });
+
+        self.add_message(host, MK_INFO, &[b"Cleaning up ", nzb_name.as_slice()].concat());
+
+        let dst_path = crate::cleanup::bytes_to_path_buf(&dest_dir);
+        let fin_path = crate::cleanup::bytes_to_path_buf(&final_dir);
+        let (outcome, cleanup_status) =
+            crate::cleanup::run_cleanup(&dst_path, &fin_path, &ext_cleanup_disk, |kind, msg| {
+                self.add_message(host, map_cleanup_kind(kind), msg);
+            });
+
+        let up_info_name = trunc_1023([b"Cleanup for ", nzb_name.as_slice()].concat());
+        if outcome == 1 {
+            self.add_message(
+                host,
+                MK_INFO,
+                &[up_info_name.as_slice(), b" successful"].concat(),
+            );
+        } else if outcome == 2 {
+            self.add_message(
+                host,
+                MK_INFO,
+                &[b"Nothing to cleanup for ", nzb_name.as_slice()].concat(),
+            );
+        } else {
+            self.add_message(
+                host,
+                MK_ERROR,
+                &[up_info_name.as_slice(), b" failed"].concat(),
+            );
+        }
+
+        host.nzb_set_int(self.nzb_ptr(host), NZB_INT_CLEANUP_STATUS, cleanup_status);
+        host.post_set_int(self.post_ptr, POST_INT_WORKING, 0);
     }
 }
 
@@ -6319,11 +6212,11 @@ impl NzbgetRsPostJob {
                         unpack_ctrl_exec(ctrl, 0, Some(unpack_job_host_cb), ctx)
                     }
                     PostJobInner::Cleanup => {
-                        run_cleanup_job(ctx, cleanup_job_host_cb);
+                        self.run_cleanup();
                         0
                     }
                     PostJobInner::Move => {
-                        run_move_job(ctx, move_job_host_cb);
+                        self.run_move();
                         0
                     }
                     PostJobInner::PostRenamer(post_unpack) => {
@@ -7134,150 +7027,6 @@ unsafe extern "C" fn unpack_job_host_cb(
             if a1 == 6 {
                 host.nzb_set_str(n, NZB_STR_FINAL_DIR, &unsafe { cstr::owned(s1) });
             }
-            0
-        }
-        _ => 0,
-    }
-}
-
-#[cfg(unix)]
-unsafe extern "C" fn move_job_host_cb(
-    raw_ctx: *mut c_void,
-    op: c_int,
-    a1: c_int,
-    a2: c_int,
-    p1: usize,
-    p2: usize,
-    s1: *const c_char,
-    s2: *const c_char,
-    _ints: *mut c_int,
-    _i64s: *mut i64,
-    strs: *mut *const c_char,
-) -> usize {
-    use crate::queuesubsys_host::{
-        NZB_INT_MOVE_STATUS, NZB_STR_DEST_DIR, NZB_STR_FINAL_DIR, POST_INT_WORKING,
-    };
-    if op != 0 {
-        reset_call_arena();
-    }
-    let Some(host) = crate::ffi::queue_host() else {
-        return 0;
-    };
-    let job = unsafe { &*(raw_ctx as *const NzbgetRsPostJob) };
-    match op {
-        0 => {
-            unsafe { invoke_dq_guard_cb(&host, p1, p2) };
-            0
-        }
-        1 => {
-            if a1 == 2 {
-                return usize::from(job.post_ptr != 0 && host.post_snap(job.post_ptr).nzb_ptr != 0);
-            }
-            let n = host.post_snap(job.post_ptr).nzb_ptr;
-            if a1 == 1 {
-                let hl = host.nzb_hard_link_path(n);
-                unsafe { *strs = arena_cstr(&hl) };
-                return 0;
-            }
-            let ns = host.nzb_snap(n, false);
-            let str_out = unsafe { std::slice::from_raw_parts_mut(strs, 3) };
-            str_out[0] = arena_cstr(&ns.name);
-            str_out[1] = arena_cstr(&ns.dest_dir);
-            str_out[2] = arena_cstr(&ns.final_dir);
-            if ns.final_dir.is_empty() {
-                let fin = host.nzb_build_final_dir_name(n);
-                let c_fin = cstr::nul_terminated(&fin);
-                let cb_fn: extern "C" fn(usize, *const c_char) = unsafe { std::mem::transmute(p2) };
-                cb_fn(p1, c_fin.as_ptr() as *const c_char);
-            }
-            0
-        }
-        2 => {
-            if a1 == 0 {
-                return usize::from(host.thread_is_stopped(job.thread_ptr));
-            }
-            if a1 == 1 {
-                let n = host.post_snap(job.post_ptr).nzb_ptr;
-                host.nzb_add_message(n, a2, &unsafe { cstr::owned(s1) });
-                return 0;
-            }
-            if a1 == 2 && job.post_ptr != 0 {
-                let n = host.post_snap(job.post_ptr).nzb_ptr;
-                if n != 0 {
-                    host.nzb_rename_completed_file(n, &unsafe { cstr::owned(s1) }, &unsafe {
-                        cstr::owned(s2)
-                    });
-                }
-            }
-            0
-        }
-        3 => {
-            if a1 == 0 {
-                let n = host.post_snap(job.post_ptr).nzb_ptr;
-                host.nzb_set_int(n, NZB_INT_MOVE_STATUS, a2);
-            } else if a1 == 1 {
-                let n = host.post_snap(job.post_ptr).nzb_ptr;
-                host.nzb_set_str(n, NZB_STR_DEST_DIR, &unsafe { cstr::owned(s1) });
-                host.nzb_set_str(n, NZB_STR_FINAL_DIR, b"");
-                host.nzb_set_int(n, NZB_INT_MOVE_STATUS, a2);
-            } else if a1 == 2 {
-                host.post_set_int(job.post_ptr, POST_INT_WORKING, 0);
-            }
-            0
-        }
-        _ => 0,
-    }
-}
-
-#[cfg(unix)]
-unsafe extern "C" fn cleanup_job_host_cb(
-    raw_ctx: *mut c_void,
-    op: c_int,
-    a1: c_int,
-    a2: c_int,
-    p1: usize,
-    p2: usize,
-    s1: *const c_char,
-    _s2: *const c_char,
-    _ints: *mut c_int,
-    _i64s: *mut i64,
-    strs: *mut *const c_char,
-) -> usize {
-    use crate::queuesubsys_host::{NZB_INT_CLEANUP_STATUS, POST_INT_WORKING};
-    if op != 0 {
-        reset_call_arena();
-    }
-    let Some(host) = crate::ffi::queue_host() else {
-        return 0;
-    };
-    let job = unsafe { &*(raw_ctx as *const NzbgetRsPostJob) };
-    match op {
-        0 => {
-            unsafe { invoke_dq_guard_cb(&host, p1, p2) };
-            0
-        }
-        1 => {
-            let n = host.post_snap(job.post_ptr).nzb_ptr;
-            let ns = host.nzb_snap(n, false);
-            let opts = crate::options::active_options();
-            let str_out = unsafe { std::slice::from_raw_parts_mut(strs, 4) };
-            str_out[0] = arena_cstr(&ns.name);
-            str_out[1] = arena_cstr(&ns.dest_dir);
-            str_out[2] = arena_cstr(&ns.final_dir);
-            str_out[3] = arena_cstr(opts.as_ref().map_or(b"", |o| o.str_bytes(OptStr::ExtCleanupDisk)));
-            0
-        }
-        2 => {
-            if a1 == 1 {
-                let n = host.post_snap(job.post_ptr).nzb_ptr;
-                host.nzb_add_message(n, a2, &unsafe { cstr::owned(s1) });
-            }
-            0
-        }
-        3 => {
-            let n = host.post_snap(job.post_ptr).nzb_ptr;
-            host.nzb_set_int(n, NZB_INT_CLEANUP_STATUS, a2);
-            host.post_set_int(job.post_ptr, POST_INT_WORKING, 0);
             0
         }
         _ => 0,

@@ -2676,6 +2676,8 @@ struct DlWorker {
     content_rejected: bool,
     /// the last fetch was answered `430 no such article` (not 411/420/451)
     last_430: bool,
+    /// the message-id the last fetch asked for
+    message_id: Vec<u8>,
     downloaded_size: i32,
     decoded_file_size: i64,
 }
@@ -2738,6 +2740,7 @@ impl NzbgetRsArticleDownloader {
                 local_write_error: false,
                 content_rejected: false,
                 last_430: false,
+                message_id: Vec::new(),
                 downloaded_size: 0,
                 decoded_file_size: 0,
             }),
@@ -3285,6 +3288,7 @@ impl NzbgetRsArticleDownloader {
         };
         let skip_disk_write = nzb_skip || opt_skip_write;
         let message_id = art.message_id;
+        w.message_id.clone_from(&message_id);
 
         if join_group && !groups.is_empty() {
             let mut last_resp: Option<Vec<u8>> = None;
@@ -3500,6 +3504,9 @@ impl NzbgetRsArticleDownloader {
             let mut failed_servers: Vec<usize> = Vec::with_capacity(servers_cap);
             // backbones that answered 430 for this article (see `BackboneMiss`)
             let mut missing: Vec<BackboneMiss> = Vec::new();
+            // every server asked answered 430 (none failed another way)
+            let mut asked_430 = 0u32;
+            let mut only_430 = true;
             let mut want_server: usize = 0;
             let mut level = 0i32;
             let mut status = AD_FAILED;
@@ -3682,8 +3689,16 @@ impl NzbgetRsArticleDownloader {
                 }
 
                 let (st_after_conn, _, _, _, _, _, _) = runtime_flags();
+                if !connected {
+                    only_430 = false;
+                }
                 if connected && !st_after_conn {
                     status = self.download_article(&mut w, &host, join_group);
+                    if status == AD_NOT_FOUND && w.last_430 {
+                        asked_430 += 1;
+                    } else {
+                        only_430 = false;
+                    }
                     if status == AD_TRANSIENT_ERROR {
                         if transient_retries.register(last_server, now_sec()) {
                             status = AD_CONNECT_ERROR;
@@ -3921,6 +3936,20 @@ impl NzbgetRsArticleDownloader {
                                 b" @ all servers failed",
                             ]),
                         );
+                        // missing everywhere only when every server could be asked
+                        // (none inactive, without connections or blocked) and each
+                        // answered 430, itself or through its backbone
+                        if only_430
+                            && asked_430 > 0
+                            && cands.iter().all(|c| c.available)
+                            && cands.iter().all(|c| {
+                                article_dl_all_servers_on_level_failed(
+                                    c.level, &cands, &f_ids, &missing,
+                                )
+                            })
+                        {
+                            crate::articlefetcher::note_missing_everywhere(&w.message_id);
+                        }
                         status = AD_FAILED;
                         break;
                     }

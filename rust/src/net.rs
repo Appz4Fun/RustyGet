@@ -3360,6 +3360,8 @@ impl NzbgetRsServerPool {
 
     pub fn changed(&self) {
         crate::log::log_active_bytes(3, b"Server config has been changed");
+        // An article missing on the old set of servers may exist on the new one.
+        crate::articlefetcher::forget_missing_everywhere();
         self.init_connections();
         self.close_unused_connections();
     }
@@ -3502,6 +3504,9 @@ impl NzbgetRsServerPool {
 #[no_mangle]
 pub extern "C" fn nzbget_rs_serverpool_new() -> *mut NzbgetRsServerPool {
     let arc = Arc::new(NzbgetRsServerPool::new(crate::ffi::tls_host_cb()));
+    // A new pool (start-up or a config reload) may hold servers that have
+    // articles the old one lacked.
+    crate::articlefetcher::forget_missing_everywhere();
     if let Ok(mut g) = ACTIVE_SERVER_POOL.write() {
         *g = Some(Arc::downgrade(&arc));
     }

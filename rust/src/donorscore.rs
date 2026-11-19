@@ -53,6 +53,10 @@ pub struct Entry {
     /// `eval_member_rerank`); the entries ranked after it must then fall
     /// below that, or they would overtake it.
     pub cap: i32,
+    /// Archive headers encrypted and no password (see
+    /// [`crate::donorkind::LOCKED_PARAM`]): never extractable, so ranked after
+    /// every entry that is, whatever its health.
+    pub locked: bool,
 }
 
 impl Entry {
@@ -69,8 +73,9 @@ impl Entry {
 /// The offsets for the live entries once every check is in, in the order a
 /// fleet ranks its copies: healthy ones first (at least
 /// [`crate::dupesearch_nzb::FLEET_HEALTHY_ALIVE_PERMILLE`] alive), then weak
-/// ones, then those not measured; within each tier TWINs first, then
-/// borrowable, unknown and unborrowable ALTs (`Entry::kind`); within each, most
+/// ones, then those not measured, then locked ones (`Entry::locked`); within
+/// each tier TWINs first, then borrowable, unknown and unborrowable ALTs
+/// (`Entry::kind`); within each, most
 /// alive first (whole percent), then closest to `pick_bytes`, most grabbed; strictly
 /// falling, each at most its target. Entries scored DEAD (or less) keep their
 /// score. Parallel to `entries`.
@@ -89,7 +94,9 @@ pub fn rerank(entries: &[Entry], pick_bytes: i64) -> Vec<i32> {
         }
     };
     let tier = |e: &Entry| -> u8 {
-        if e.alive < 0.0 {
+        if e.locked {
+            3
+        } else if e.alive < 0.0 {
             2
         } else if percent(e) * 10 < crate::dupesearch_nzb::FLEET_HEALTHY_ALIVE_PERMILLE {
             1
@@ -133,7 +140,28 @@ mod tests {
             grabs,
             kind: 2,
             cap: 0,
+            locked: false,
         }
+    }
+
+    #[test]
+    fn a_locked_copy_goes_after_every_extractable_one() {
+        // encrypted headers, no password: whole but never extractable
+        let locked = Entry {
+            kind: 3,
+            locked: true,
+            ..e(50, 1.0, false, 1000, 0)
+        };
+        let weak = Entry {
+            kind: 1,
+            ..e(50, 0.84, false, 1000, 0)
+        };
+        let unmeasured = e(50, -1.0, false, 1000, 0);
+        let got = rerank(&[locked, weak, unmeasured], 1000);
+        assert!(got[1] > got[2] && got[2] > got[0], "{got:?}");
+        // alone it still gets a live score
+        let got = rerank(&[locked], 1000);
+        assert!(got[0] > DEAD, "{got:?}");
     }
 
     #[test]

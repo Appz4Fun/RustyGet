@@ -1827,6 +1827,16 @@ pub fn dupe_borrow_first() -> bool {
     DUPE_BORROW_FIRST.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Whether option `UnpackPassFile` names a file: an archive that needs a
+/// password its nzb lacks may still be opened by one from that file.
+pub static UNPACK_PASS_FILE_SET: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Current value of [`UNPACK_PASS_FILE_SET`].
+pub fn unpack_pass_file_set() -> bool {
+    UNPACK_PASS_FILE_SET.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// `ParPreset` as parsed (see [`crate::parpreset`]).
 pub static PAR_PRESET: std::sync::atomic::AtomicI32 =
     std::sync::atomic::AtomicI32::new(crate::parpreset::CUSTOM);
@@ -2394,6 +2404,12 @@ pub fn init_scalar_options_host<H: OptionsHost>(
     );
     DUPE_WATCH.store(
         host.parse_bool_value(c"DupeWatch"),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    UNPACK_PASS_FILE_SET.store(
+        host.find_entry(c"UnpackPassFile")
+            .and_then(|(value, _, _)| value)
+            .is_some_and(|v| !v.to_bytes().trim_ascii().is_empty()),
         std::sync::atomic::Ordering::Relaxed,
     );
     // Dupes arrive only through the API, trusted as dupes: the indexer search

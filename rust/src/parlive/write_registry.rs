@@ -169,7 +169,9 @@ impl SourceWriteContext {
     ) -> std::io::Result<(std::fs::File, Self, AttestedWritePermit)> {
         let expected = self.identity_path()?;
         let own_output = match &self.identity {
-            WriterIdentity::FileAndPath(id, _) => actual.parent() == expected.parent()
+            // `<id>.out.tmp` is written in the download's root, also for a file named into a
+            // subfolder (DirectRename of a file in progress to a par2's "Sub/name").
+            WriterIdentity::FileAndPath(id, _) => actual.parent() == Some(self.root.as_path())
                 && actual.file_name().is_some_and(|leaf| leaf.as_encoded_bytes() == format!("{id}.out.tmp").as_bytes()),
             _ => false,
         };

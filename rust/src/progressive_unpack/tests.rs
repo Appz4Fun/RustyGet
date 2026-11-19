@@ -3963,6 +3963,32 @@ fn a_rar_member_over_the_unpack_limits_is_refused_before_it_is_written() {
     expect_ok(r, &log);
 }
 
+/// A member named outside the destination ("../") breaches the job's unpack limits with the
+/// reason; nothing is written outside. (zipfast refuses the name before the member starts, so
+/// the reason does not name it.)
+#[test]
+fn a_rar_member_with_an_unsafe_path_breaches_the_unpack_limits() {
+    let t = TestDir::new("limitescape");
+    let data = pattern(70_000);
+    let first = write_set(
+        &t.dl(),
+        &rar4_store_volumes("..\\..\\escape.bin", &data, 1 << 30),
+    );
+    let guard = crate::unpacklimits::Guard::shared(&t.out(), &[]);
+    let (r, log) = {
+        let _scope = crate::unpacklimits::Scope::enter(&guard);
+        run_with(&first, &t.out(), Box::new(CompleteSet), Overwrite::Always)
+    };
+    assert!(r.is_err(), "{log:?}");
+    let why = crate::unpacklimits::breach_of(&guard).unwrap();
+    assert!(
+        why.starts_with(crate::unpacklimits::LIMIT_PREFIX)
+            && why.contains("would land outside the unpack folder (zipfast: unsafe path"),
+        "{why}"
+    );
+    assert!(!t.out().join("..").join("..").join("escape.bin").exists());
+}
+
 /// Dead volumes (nothing on disk) read as virtual volumes rebuilt from a sibling's headers
 /// around borrowed data: the extraction runs through them as if they had arrived.
 struct WithVirtual {

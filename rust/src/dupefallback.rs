@@ -4,6 +4,7 @@
 //! NNTP article fetch/download bounds and response classification (`ArticleFetcher`,
 //! `ArticleDownloader`).
 
+use crate::queuesubsys_host::NzbRef;
 use crate::queuesubsys_host::FileRef;
 use crate::status::{DeleteStatus, DirectRenameStatus, DupeMode, NzbParStatus};
 use std::collections::{BTreeMap, BTreeSet};
@@ -1672,7 +1673,7 @@ pub(crate) fn file_is_par_snap(f: &crate::queuesubsys_host::FileSnap) -> bool {
 #[cfg(unix)]
 pub(crate) fn prioritize_par_index_host(
     host: &crate::queuesubsys_host::QueueSubsysHost,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
 ) {
     let flen = host.nzb_file_len(nzb_ptr);
     for i in 0..flen {
@@ -1715,9 +1716,9 @@ pub(crate) fn has_par2_host(
 #[cfg(unix)]
 pub(crate) fn should_defer_to_par_host(
     host: &crate::queuesubsys_host::QueueSubsysHost,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
 ) -> bool {
-    if nzb_ptr == 0 {
+    if nzb_ptr.is_none() {
         return false;
     }
     let nzb = host.nzb_snap(nzb_ptr, false);
@@ -1734,7 +1735,7 @@ pub(crate) fn should_defer_to_par_snap(
     host: &crate::queuesubsys_host::QueueSubsysHost,
     nzb: &crate::queuesubsys_host::NzbSnap,
 ) -> bool {
-    if nzb.ptr == 0 {
+    if nzb.ptr.is_none() {
         return false;
     }
     if nzb.direct_rename_status == DirectRenameStatus::Running && !nzb.all_first {
@@ -1830,7 +1831,7 @@ pub(crate) fn build_repair_job_host(
         || ends_with_par2
         || disk_basename.is_empty()
         || articles.is_empty()
-        || nzb.ptr == 0
+        || nzb.ptr.is_none()
         || nzb.has_post_info
     {
         return false;
@@ -2409,7 +2410,7 @@ pub(crate) fn collect_donors_host(
     let qlen = host.queue_len(dq_ptr);
     for i in 0..qlen {
         let q_ptr = host.queue_at(dq_ptr, i);
-        if q_ptr == 0 || q_ptr == nzb.ptr {
+        if q_ptr.is_none() || q_ptr == nzb.ptr {
             continue;
         }
         let q = host.nzb_snap(q_ptr, false);
@@ -2424,8 +2425,8 @@ pub(crate) fn collect_donors_host(
     let hlen = host.history_len(dq_ptr);
     for i in 0..hlen {
         let hi = host.history_at(dq_ptr, i);
-        if hi.kind == crate::queuesubsys_host::HK_NZB && hi.inner_ptr != 0 {
-            let hn = host.nzb_snap(hi.inner_ptr, false);
+        if hi.kind == crate::queuesubsys_host::HK_NZB && hi.nzb().is_some() {
+            let hn = host.nzb_snap(hi.nzb(), false);
             if hn.dupe_mode != DupeMode::Force
                 && crate::dupecoord::same_name_or_key(
                     &hn.name,
@@ -2462,7 +2463,7 @@ pub(crate) fn collect_donors_host(
         }
     }
 
-    let ranks: std::collections::HashMap<usize, DonorRank> = donors
+    let ranks: std::collections::HashMap<NzbRef, DonorRank> = donors
         .iter()
         .map(|d| {
             let rank = DonorRank {
@@ -2541,7 +2542,7 @@ fn match_donor_file_parsed<'a>(
     if file_is_par_snap(target_file) {
         return None;
     }
-    let own_identity = if own_nzb.ptr != 0 {
+    let own_identity = if own_nzb.ptr.is_some() {
         twin_identity_of(host, own_nzb)
     } else {
         Vec::new()
@@ -2627,7 +2628,7 @@ fn pin_sources_host(
     // VacateGhostLead
     if file.dupe_lead_donor_id != 0 {
         let lead_id = file.dupe_lead_donor_id;
-        let barred = nzb.ptr != 0 && host.nzb_blocked_donor_op(nzb.ptr, false, lead_id);
+        let barred = nzb.ptr.is_some() && host.nzb_donor_blocked(nzb.ptr, lead_id);
         let present = donors.iter().any(|d| d.id == lead_id);
         if barred || !present {
             file.dupe_lead_donor_id = 0;
@@ -2743,7 +2744,7 @@ fn pin_sources_host(
     };
 
     for donor in &donors {
-        if host.nzb_blocked_donor_op(nzb.ptr, false, donor.id) {
+        if host.nzb_donor_blocked(nzb.ptr, donor.id) {
             continue;
         }
         if nzb.full_content_hash > 0 && nzb.full_content_hash == donor.full_content_hash {
@@ -3003,7 +3004,7 @@ pub(crate) fn try_fallback_host(
     while round >= 0
         && (round as usize) < sources.len()
         && (round as usize) < source_donors.len()
-        && host.nzb_blocked_donor_op(nzb.ptr, false, source_donors[round as usize])
+        && host.nzb_donor_blocked(nzb.ptr, source_donors[round as usize])
     {
         round += 1;
     }

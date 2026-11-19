@@ -67,7 +67,7 @@ impl QueueSubsysHost {
     /// Existing completed-record ABI, inspected without owning any strings.
     pub(crate) fn live_completed_matches(
         &self,
-        nzb: usize,
+        nzb: crate::queuesubsys_host::NzbRef,
         id: u64,
         name: &[u8],
         successful: bool,
@@ -97,7 +97,7 @@ impl QueueSubsysHost {
     /// Pointers are valid only during their callback; no queue reentry or GF work.
     pub(crate) fn live_namespace_visit<F>(
         &self,
-        nzb_ptr: usize,
+        nzb_ptr: crate::queuesubsys_host::NzbRef,
         callback: F,
     ) -> Result<(), RepairError>
     where
@@ -110,7 +110,7 @@ impl QueueSubsysHost {
         let status = if self.use_active {
             unsafe {
                 live_par_visit_namespace(
-                    nzb_ptr as *const crate::qnzb::NzbScalars,
+                    nzb_ptr.addr() as *const crate::qnzb::NzbScalars,
                     Some(visit::<F>),
                     std::ptr::from_mut(&mut state).cast(),
                 )
@@ -120,7 +120,7 @@ impl QueueSubsysHost {
                 43,
                 15,
                 0,
-                nzb_ptr,
+                nzb_ptr.addr(),
                 std::ptr::from_mut(&mut state) as usize,
                 visit::<F> as *const () as *const c_char,
                 std::ptr::null(),
@@ -150,7 +150,7 @@ impl QueueSubsysHost {
     /// owns no source strings; the existing control pool admits all later copies.
     pub(crate) fn live_namespace_capture(
         &self,
-        nzb_ptr: usize,
+        nzb_ptr: crate::queuesubsys_host::NzbRef,
         nzb_id: i32,
         root: &Path,
         catalog_bytes: usize,

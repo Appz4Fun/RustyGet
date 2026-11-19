@@ -2,6 +2,7 @@
 //! (`daemon/postprocess/StreamRepair.cpp` / `daemon/util/Util.h`), covering both
 //! post-processing stream repair (`Run`) and download-concurrent live stream repair (`RunLive`).
 
+use crate::queuesubsys_host::NzbRef;
 use crate::cstr;
 use crate::options::OptStr;
 use std::collections::{BTreeMap, BTreeSet};
@@ -55,7 +56,7 @@ fn stream_fetch_worker_count(primary_connections: i32) -> i32 {
 
 /// The target download as read under the queue lock.
 struct TargetSnap {
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
     has_par_files: bool,
     completed_count: usize,
     job_count: usize,
@@ -368,13 +369,13 @@ impl NzbgetRsStreamRepairCtrl {
         if self.live_mode {
             host.with_locked_queue(|dq| {
                 let nzb = host.queue_find_by_id(dq, q.nzb_id());
-                if nzb != 0 {
+                if nzb.is_some() {
                     host.nzb_add_message(nzb, kind, text);
                 }
             });
         } else if q.post_ptr().is_some() {
             let nzb = host.post_snap(q.post_ptr()).nzb_ptr;
-            if nzb != 0 {
+            if nzb.is_some() {
                 host.nzb_add_message(nzb, kind, text);
             }
         }
@@ -418,7 +419,7 @@ impl NzbgetRsStreamRepairCtrl {
         let host = q.host;
         let nzb = if self.live_mode {
             let n = host.queue_find_by_id(dq_ptr, q.nzb_id());
-            if n == 0 || host.nzb_snap(n, false).live_repair_thread_ptr != q.thread_ptr() {
+            if n.is_none() || host.nzb_snap(n, false).live_repair_thread_ptr != q.thread_ptr() {
                 return None;
             }
             n
@@ -428,7 +429,7 @@ impl NzbgetRsStreamRepairCtrl {
                 return None;
             }
             let n = host.post_snap(post_ptr).nzb_ptr;
-            if n == 0 {
+            if n.is_none() {
                 return None;
             }
             if set_init_label {
@@ -455,7 +456,7 @@ impl NzbgetRsStreamRepairCtrl {
     }
 
     /// Id, par flag and name of the completed file at `idx` of `nzb`.
-    fn completed_file(q: JobQueue<'_>, nzb: usize, idx: usize) -> (i32, bool, Vec<u8>) {
+    fn completed_file(q: JobQueue<'_>, nzb: NzbRef, idx: usize) -> (i32, bool, Vec<u8>) {
         let cf = q.host.nzb_completed_file_at(nzb, idx);
         (cf.id, cf.par_file, cstr::until_nul(&cf.filename).to_vec())
     }
@@ -463,7 +464,7 @@ impl NzbgetRsStreamRepairCtrl {
     /// The stream-repair job at `idx` of `nzb`.
     fn repair_job(
         q: JobQueue<'_>,
-        nzb: usize,
+        nzb: NzbRef,
         idx: usize,
     ) -> crate::queuesubsys_host::StreamRepairJobDetailSnap {
         let mut jd = q.host.nzb_stream_repair_job_detail(nzb, idx);
@@ -478,18 +479,18 @@ impl NzbgetRsStreamRepairCtrl {
         dq_ptr: usize,
         from_history: bool,
         idx: usize,
-    ) -> Option<(usize, CandSnap)> {
+    ) -> Option<(NzbRef, CandSnap)> {
         use crate::queuesubsys_host::{HK_NZB, NK_NZB};
         let host = q.host;
         let cand = if from_history {
             let h = host.history_at(dq_ptr, idx);
-            if h.kind != HK_NZB || h.inner_ptr == 0 {
+            if h.kind != HK_NZB || h.nzb().is_none() {
                 return None;
             }
-            h.inner_ptr
+            h.nzb()
         } else {
             let c = host.queue_at(dq_ptr, idx);
-            if c == 0 || host.nzb_snap(c, false).kind != NK_NZB {
+            if c.is_none() || host.nzb_snap(c, false).kind != NK_NZB {
                 return None;
             }
             c
@@ -515,7 +516,7 @@ impl NzbgetRsStreamRepairCtrl {
     /// Sets a job's hole list and, when `new_decoded_size >= 0`, its decoded size.
     fn update_job_holes(
         q: JobQueue<'_>,
-        nzb: usize,
+        nzb: NzbRef,
         idx: usize,
         new_decoded_size: i64,
         holes: &[NzbgetRsByteRange],
@@ -1394,9 +1395,9 @@ impl NzbgetRsStreamRepairCtrl {
             } else if q.post_ptr().is_some() {
                 host.post_snap(q.post_ptr()).nzb_ptr
             } else {
-                0
+                NzbRef::NONE
             };
-            if nzb == 0 {
+            if nzb.is_none() {
                 return (None, None);
             }
             let pending = (0..host.nzb_file_len(nzb))
@@ -1948,12 +1949,12 @@ impl NzbgetRsStreamRepairCtrl {
         dq_ptr: usize,
         targets: &[RepairTarget],
         counters: &RunCounters,
-    ) -> usize {
+    ) -> NzbRef {
         use crate::queuesubsys_host::{NZB_I64_DUPE_RECOVERED_BYTES, NZB_INT_DUPE_RECOVERED_HOLES};
         let host = q.host;
         let nzb_ptr = host.queue_find_by_id(dq_ptr, q.nzb_id());
-        if nzb_ptr == 0 {
-            return 0;
+        if nzb_ptr.is_none() {
+            return NzbRef::NONE;
         }
         let ns = host.nzb_snap(nzb_ptr, false);
         let rec_bytes = counters.recovered_bytes;
@@ -1964,7 +1965,7 @@ impl NzbgetRsStreamRepairCtrl {
                 NZB_I64_DUPE_RECOVERED_BYTES,
                 ns.dupe_recovered_bytes + rec_bytes,
             );
-            return 0;
+            return NzbRef::NONE;
         }
         let rec_holes = counters.recovered_holes;
         if rec_bytes > 0 || rec_holes > 0 {
@@ -2008,7 +2009,7 @@ impl NzbgetRsStreamRepairCtrl {
         let host = q.host;
         host.with_locked_queue(|dq_ptr| {
             let nzb_ptr = self.record_live_pass(q, dq_ptr, &[], &RunCounters::default());
-            if nzb_ptr == 0 {
+            if nzb_ptr.is_none() {
                 return;
             }
             host.nzb_action(nzb_ptr, NZB_ACT_CLEAR_LIVE_REPAIR_THREAD, 0);

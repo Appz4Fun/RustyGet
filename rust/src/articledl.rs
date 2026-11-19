@@ -1,6 +1,7 @@
 //! Full Rust runtime backing `MemoryMonitor`, `ArticleCache`,
 //! `ArticleWriter`, `RenameContentAnalyzer`, and `ArticleDownloader`.
 
+use crate::queuesubsys_host::NzbRef;
 use crate::cstr;
 use crate::options::OptStr;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
@@ -155,8 +156,8 @@ impl DlHost<'_> {
         crate::log::log_active_bytes(kind, msg);
     }
 
-    fn log_nzb(&self, nzb_ptr: usize, kind: i32, msg: &[u8]) {
-        if nzb_ptr == 0 {
+    fn log_nzb(&self, nzb_ptr: NzbRef, kind: i32, msg: &[u8]) {
+        if nzb_ptr.is_none() {
             crate::log::log_active_bytes(kind, msg);
         } else {
             self.qh.nzb_print_message(nzb_ptr, kind, msg);
@@ -720,7 +721,7 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
         || qh.file_cache_is_deleted_unparked(file_ptr),
         |idx| qh.file_cache_discard_article_segment(file_ptr, metas[idx].0),
         |msg| {
-            if nzb_ptr != 0 {
+            if nzb_ptr.is_some() {
                 qh.nzb_print_message(nzb_ptr, MK_ERROR, msg);
             } else {
                 crate::log::log_active_bytes(MK_ERROR, msg);
@@ -868,7 +869,7 @@ impl MockDlHost {
         crate::log::log_active_bytes(kind, msg);
     }
 
-    fn log_nzb(&self, _nzb_ptr: usize, kind: i32, msg: &[u8]) {
+    fn log_nzb(&self, _nzb_ptr: NzbRef, kind: i32, msg: &[u8]) {
         crate::log::log_active_bytes(kind, msg);
     }
 }
@@ -943,7 +944,7 @@ fn article_cache_check_flush(host: &MockDlHost, allocated: usize, flush_everythi
         let direct_write = ints[0] != 0;
         let skip_disk_write = ints[1] != 0;
         let count = ints[2].max(0) as usize;
-        let nzb_ptr = i64s[1] as usize;
+        let nzb_ptr = NzbRef::from_addr(i64s[1] as usize);
         let output_filename = unsafe {
             if fstrs[0].is_null() || i64s[0] <= 0 {
                 Vec::new()
@@ -1853,7 +1854,7 @@ impl RsArticleWriter {
 
     fn report_completion_status(
         host: &DlHost<'_>,
-        nzb_ptr: usize,
+        nzb_ptr: NzbRef,
         total_articles: i32,
         success_articles: i32,
         missed_articles: i32,
@@ -1894,7 +1895,7 @@ impl RsArticleWriter {
     fn cleanup_old_data(
         &self,
         host: &DlHost<'_>,
-        nzb_ptr: usize,
+        nzb_ptr: NzbRef,
         articles_len: usize,
         is_hard_linked: bool,
         inter_dir_empty: bool,
@@ -2015,7 +2016,7 @@ impl RsArticleWriter {
     fn process_articles_locked(&mut self, host: &DlHost<'_>) {
         let mut meta_ints = [0i32; 16];
         let mut meta_strs = [std::ptr::null::<c_char>(); 4];
-        let nzb_ptr = host.op45(
+        let nzb_ptr = NzbRef::from_addr(host.op45(
             9,
             0,
             0,
@@ -2024,7 +2025,7 @@ impl RsArticleWriter {
             meta_ints.as_mut_ptr(),
             std::ptr::null_mut(),
             meta_strs.as_mut_ptr(),
-        );
+        ));
         let total_articles = meta_ints[15].max(0) as usize;
 
         struct FinArtMeta {
@@ -2163,7 +2164,7 @@ impl RsArticleWriter {
         let cur_path_c = nul_vec(&self.post_final_path);
         let mut ints = [0i32; 2];
         let mut strs = [std::ptr::null::<c_char>(); 3];
-        let nzb_ptr = host.op45(
+        let nzb_ptr = NzbRef::from_addr(host.op45(
             9,
             8,
             self.post_crc as usize,
@@ -2172,7 +2173,7 @@ impl RsArticleWriter {
             ints.as_mut_ptr(),
             std::ptr::null_mut(),
             strs.as_mut_ptr(),
-        );
+        ));
         let is_hard_linked = ints[0] != 0;
         let inter_dir_empty = ints[1] != 0;
         let cur_filename = unsafe { cstr_or_empty(strs[0]) };
@@ -2245,7 +2246,7 @@ impl RsArticleWriter {
 
         let mut ints = [0i32; 16];
         let mut strs = [std::ptr::null::<c_char>(); 4];
-        let nzb_ptr = host.op45(
+        let nzb_ptr = NzbRef::from_addr(host.op45(
             9,
             0,
             0,
@@ -2254,7 +2255,7 @@ impl RsArticleWriter {
             ints.as_mut_ptr(),
             std::ptr::null_mut(),
             strs.as_mut_ptr(),
-        );
+        ));
         let nzb_name = unsafe { cstr_or_empty(strs[0]) };
         let nzb_dest_dir = unsafe { cstr_or_empty(strs[1]) };
         let filename = unsafe { cstr_or_empty(strs[2]) };
@@ -2631,10 +2632,10 @@ impl RsArticleWriter {
 
 pub(crate) fn move_completed_files_on_qh(
     qh: &QueueSubsysHost,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
     old_dest_dir: &[u8],
 ) -> bool {
-    if nzb_ptr == 0 {
+    if nzb_ptr.is_none() {
         return true;
     }
     let nzb = qh.nzb_snap(nzb_ptr, false);
@@ -3253,7 +3254,7 @@ impl NzbgetRsArticleDownloader {
         let (nzb_skip, art) = host.qh.with_locked_queue(|_| {
             let fsnap = host.qh.file_snap(host.file_ptr);
             let nzb_skip =
-                fsnap.nzb_ptr != 0 && host.qh.nzb_snap(fsnap.nzb_ptr, false).skip_disk_write;
+                fsnap.nzb_ptr.is_some() && host.qh.nzb_snap(fsnap.nzb_ptr, false).skip_disk_write;
             (nzb_skip, host.qh.article_snap(host.article_ptr))
         });
         let groups = if join_group {

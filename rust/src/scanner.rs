@@ -197,6 +197,7 @@ pub fn normalize_external_nzb_name(nzb_name: &[u8], valid_name: &[u8], is_nzb: b
     name
 }
 
+use crate::queuesubsys_host::NzbRef;
 use crate::cstr;
 use crate::options::OptStr;
 use crate::status::DeleteStatus;
@@ -2005,7 +2006,7 @@ unsafe extern "C" fn native_commit_nzb_cb(
     }
     let _uptr_guard = UptrGuard(&host, parsed.uptr_addr);
     let nzb_ptr = parsed.nzb_ptr;
-    if nzb_ptr == 0 {
+    if nzb_ptr.is_none() {
         return 0;
     }
 
@@ -2049,8 +2050,8 @@ unsafe extern "C" fn native_commit_nzb_cb(
     host.nzb_set_int(nzb_ptr, NZB_INT_DUPE_SCORE, dupe_score);
     host.nzb_set_int(nzb_ptr, NZB_INT_DUPE_MODE, dupe_mode);
     host.nzb_set_int(nzb_ptr, NZB_INT_PRIORITY, priority);
-    let url_ptr = raw_url_info as usize;
-    if url_ptr != 0 {
+    let url_ptr = NzbRef::from_addr(raw_url_info as usize);
+    if url_ptr.is_some() {
         let us = host.nzb_snap(url_ptr, false);
         host.nzb_set_str(nzb_ptr, NZB_STR_URL, &us.url);
         host.nzb_set_url_status(nzb_ptr, us.url_status);
@@ -2085,19 +2086,19 @@ unsafe extern "C" fn native_commit_nzb_cb(
     }
 
     let added = if ok_flag != 0 {
-        crate::ffi::active_queue_coord_and_host().map_or(0, |(qc, qh)| {
+        crate::ffi::active_queue_coord_and_host().map_or(NzbRef::NONE, |(qc, qh)| {
             qc.add_nzb_file_to_queue(&qh, parsed.uptr_addr, url_ptr, add_top != 0)
         })
-    } else if url_ptr != 0 {
+    } else if url_ptr.is_some() {
         host.nzb_copy_cached_messages_silent(url_ptr, nzb_ptr);
-        0
+        NzbRef::NONE
     } else {
         host.nzb_set_delete_status(nzb_ptr, DeleteStatus::Scan);
-        crate::ffi::active_queue_coord_and_host().map_or(0, |(qc, qh)| {
+        crate::ffi::active_queue_coord_and_host().map_or(NzbRef::NONE, |(qc, qh)| {
             qc.add_nzb_file_to_queue(&qh, parsed.uptr_addr, url_ptr, add_top != 0)
         })
     };
-    if added != 0 {
+    if added.is_some() {
         host.nzb_snap(added, false).id
     } else {
         0
@@ -2138,7 +2139,7 @@ pub(crate) fn shutdown_daemon_scanner() {
 
 #[cfg(unix)]
 pub(crate) fn add_url_file_active(
-    url_ptr: usize,
+    url_ptr: NzbRef,
     is_archive: bool,
     eff_name: &[u8],
     eff_cat: &[u8],
@@ -2151,12 +2152,11 @@ pub(crate) fn add_url_file_active(
         return AS_FAILED;
     };
     let snap = host.nzb_snap(url_ptr, false);
-    let plen = host.nzb_params_len(url_ptr);
-    let mut captured_params = Vec::with_capacity(plen);
-    for idx in 0..plen {
-        let (k, v) = host.nzb_param_at(url_ptr, idx);
-        captured_params.push((to_cstr_sanitized(&k), to_cstr_sanitized(&v)));
-    }
+    let captured_params: Vec<_> = host
+        .nzb_params(url_ptr)
+        .iter()
+        .map(|(k, v)| (to_cstr_sanitized(k), to_cstr_sanitized(v)))
+        .collect();
     let name_c = to_cstr_sanitized(eff_name);
     let cat_c = to_cstr_sanitized(eff_cat);
     let out_c = to_cstr_sanitized(out_file);
@@ -2170,7 +2170,7 @@ pub(crate) fn add_url_file_active(
     env.add_top = 0;
     env.add_paused = c_int::from(snap.add_url_paused);
     env.parameters = std::ptr::null_mut();
-    env.url_info = url_ptr as *mut c_void;
+    env.url_info = url_ptr.addr() as *mut c_void;
     env.buf_ptr = std::ptr::null();
     env.buf_len = 0;
     env.out_nzb_id = std::ptr::null_mut();
@@ -2206,7 +2206,7 @@ pub(crate) unsafe fn add_cli_nzb_file_active(
         }
     }
     let _uptr_guard = UptrGuard(&host, parsed.uptr_addr);
-    if !parsed.ok || parsed.nzb_ptr == 0 {
+    if !parsed.ok || parsed.nzb_ptr.is_none() {
         let disp = if filename_ptr.is_null() {
             c"N/A".as_ptr()
         } else {
@@ -2226,7 +2226,7 @@ pub(crate) unsafe fn add_cli_nzb_file_active(
             };
             host.nzb_set_param(nzb_ptr, b"*Unpack:", Some(v));
         }
-        qc.add_nzb_file_to_queue(&qh, parsed.uptr_addr, 0, false);
+        qc.add_nzb_file_to_queue(&qh, parsed.uptr_addr, NzbRef::NONE, false);
     }
     true
 }

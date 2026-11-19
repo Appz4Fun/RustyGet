@@ -503,9 +503,38 @@ impl FileRef {
     }
 }
 
+/// Typed handle for a queued (or history) NZB job.
+///
+/// Wraps the queue's object address like [`PostRef`]; only the queue host turns it back
+/// into an address.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[repr(transparent)]
+pub(crate) struct NzbRef(usize);
+
+impl NzbRef {
+    /// No NZB.
+    pub const NONE: Self = Self(0);
+
+    pub(crate) fn from_addr(addr: usize) -> Self {
+        Self(addr)
+    }
+
+    pub(crate) fn addr(self) -> usize {
+        self.0
+    }
+
+    pub fn is_none(self) -> bool {
+        self.0 == 0
+    }
+
+    pub fn is_some(self) -> bool {
+        self.0 != 0
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct NzbSnap {
-    pub ptr: usize,
+    pub ptr: NzbRef,
     pub post_info_ptr: PostRef,
     pub id: i32,
     pub kind: i32,
@@ -630,7 +659,7 @@ pub(crate) struct NzbSnap {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct FileSnap {
     pub ptr: FileRef,
-    pub nzb_ptr: usize,
+    pub nzb_ptr: NzbRef,
     pub id: i32,
     pub paused: bool,
     pub deleted: bool,
@@ -732,7 +761,7 @@ pub(crate) struct StreamRepairJobDetailSnap {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct PostSnap {
     pub ptr: PostRef,
-    pub nzb_ptr: usize,
+    pub nzb_ptr: NzbRef,
     pub stage: PostStage,
     pub working: bool,
     pub deleted: bool,
@@ -779,6 +808,17 @@ pub(crate) struct HistEntrySnap {
     pub inner_ptr: usize,
     pub time: i64,
     pub name: Vec<u8>,
+}
+
+impl HistEntrySnap {
+    /// The NZB this entry holds, or [`NzbRef::NONE`] for a duplicate record.
+    pub fn nzb(&self) -> NzbRef {
+        if self.kind == HK_DUP {
+            NzbRef::NONE
+        } else {
+            NzbRef::from_addr(self.inner_ptr)
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -927,36 +967,36 @@ impl QueueSubsysHost {
     // no test mock answers them, so on a mock host they do nothing and read
     // as 0 (output arrays untouched), as the mock callbacks did.
 
-    fn coll_snapshot(&self, nzb: usize, which: i32, x: OpArgs) -> usize {
+    fn coll_snapshot(&self, nzb: NzbRef, which: i32, x: OpArgs) -> usize {
         if self.use_active {
-            let nzb = nzb as *const crate::qnzb::NzbScalars;
+            let nzb = nzb.addr() as *const crate::qnzb::NzbScalars;
             unsafe { crate::qnzb::host_coll_snapshot(nzb, which, x.ints, x.i64s, x.strs) };
         }
         0
     }
 
-    fn coll_op(&self, nzb: usize, op: i32, x: OpArgs) -> usize {
+    fn coll_op(&self, nzb: NzbRef, op: i32, x: OpArgs) -> usize {
         if !self.use_active {
             return 0;
         }
-        let nzb = nzb as *const crate::qnzb::NzbScalars;
+        let nzb = nzb.addr() as *const crate::qnzb::NzbScalars;
         unsafe { crate::qnzb::host_coll_op(nzb, op, x.a2, x.p2, x.s1, x.s2, x.ints, x.strs) }
             .unwrap_or(0)
     }
 
-    fn coll_set(&self, nzb: usize, field: i32, x: OpArgs) -> usize {
+    fn coll_set(&self, nzb: NzbRef, field: i32, x: OpArgs) -> usize {
         if self.use_active {
-            let nzb = nzb as *mut crate::qnzb::NzbScalars;
+            let nzb = nzb.addr() as *mut crate::qnzb::NzbScalars;
             unsafe { crate::qnzb::host_coll_set(nzb, field, x.a2, x.p2, x.s1, x.i64s) };
         }
         0
     }
 
-    fn filelist_op(&self, nzb: usize, op: i32, x: OpArgs) -> usize {
+    fn filelist_op(&self, nzb: NzbRef, op: i32, x: OpArgs) -> usize {
         if !self.use_active {
             return 0;
         }
-        let nzb = nzb as *mut crate::qnzb::NzbScalars;
+        let nzb = nzb.addr() as *mut crate::qnzb::NzbScalars;
         unsafe {
             crate::qnzb::host_filelist_op(nzb, op, x.a2, x.p2, x.s1, x.s2, x.ints, x.i64s, x.strs)
         }
@@ -1195,21 +1235,21 @@ impl QueueSubsysHost {
         }
     }
 
-    pub fn nzb_print_message(&self, nzb_ptr: usize, kind: i32, msg: &[u8]) {
-        if nzb_ptr == 0 {
+    pub fn nzb_print_message(&self, nzb_ptr: NzbRef, kind: i32, msg: &[u8]) {
+        if nzb_ptr.is_none() {
             return;
         }
         if self.use_active {
-            unsafe { crate::qqueue::nzb_message(nzb_ptr, kind, false, msg) };
+            unsafe { crate::qqueue::nzb_message(nzb_ptr.addr(), kind, false, msg) };
         }
     }
 
-    pub fn nzb_add_message(&self, nzb_ptr: usize, kind: i32, msg: &[u8]) {
-        if nzb_ptr == 0 {
+    pub fn nzb_add_message(&self, nzb_ptr: NzbRef, kind: i32, msg: &[u8]) {
+        if nzb_ptr.is_none() {
             return;
         }
         if self.use_active {
-            unsafe { crate::qqueue::nzb_message(nzb_ptr, kind, true, msg) };
+            unsafe { crate::qqueue::nzb_message(nzb_ptr.addr(), kind, true, msg) };
         }
     }
 
@@ -1420,11 +1460,11 @@ impl QueueSubsysHost {
         }
     }
 
-    pub fn disk_discard_files(&self, nzb_ptr: usize) {
+    pub fn disk_discard_files(&self, nzb_ptr: NzbRef) {
         self.disk_discard_files_ex(nzb_ptr, true);
     }
 
-    pub fn disk_discard_files_ex(&self, nzb_ptr: usize, delete_log: bool) {
+    pub fn disk_discard_files_ex(&self, nzb_ptr: NzbRef, delete_log: bool) {
         #[cfg(unix)]
         if self.use_active {
             crate::diskstate_format::active_disk_discard_files(self, nzb_ptr, delete_log);
@@ -1510,7 +1550,7 @@ impl QueueSubsysHost {
     }
 
     // Subsystems (op = 6)
-    pub fn history_delete_disk_files(&self, nzb_ptr: usize) {
+    pub fn history_delete_disk_files(&self, nzb_ptr: NzbRef) {
         #[cfg(unix)]
         if self.use_active {
             crate::historycoord::delete_disk_files_active(nzb_ptr);
@@ -1531,7 +1571,7 @@ impl QueueSubsysHost {
         }
     }
 
-    pub fn prepost_check_download_completed(&self, dq_ptr: usize, nzb_ptr: usize) {
+    pub fn prepost_check_download_completed(&self, dq_ptr: usize, nzb_ptr: NzbRef) {
         if self.use_active {
             if let Some(pp) = crate::ffi::active_prepost() {
                 pp.check_download_completed(self, dq_ptr, nzb_ptr);
@@ -1539,8 +1579,8 @@ impl QueueSubsysHost {
         }
     }
 
-    pub fn stream_repair_start_live(&self, nzb_ptr: usize) {
-        if nzb_ptr == 0 {
+    pub fn stream_repair_start_live(&self, nzb_ptr: NzbRef) {
+        if nzb_ptr.is_none() {
             return;
         }
         #[cfg(unix)]
@@ -1548,11 +1588,11 @@ impl QueueSubsysHost {
             return;
         }
         if self.use_active {
-            unsafe { crate::qqueue::start_live_repair(nzb_ptr) };
+            unsafe { crate::qqueue::start_live_repair(nzb_ptr.addr()) };
         }
     }
 
-    pub fn move_completed_files(&self, nzb_ptr: usize, old_dest_dir: &[u8]) -> bool {
+    pub fn move_completed_files(&self, nzb_ptr: NzbRef, old_dest_dir: &[u8]) -> bool {
         #[cfg(unix)]
         if self.use_active {
             return crate::articledl::move_completed_files_on_qh(self, nzb_ptr, old_dest_dir);
@@ -1560,7 +1600,7 @@ impl QueueSubsysHost {
         false
     }
 
-    pub fn history_add_to_history(&self, dq_ptr: usize, nzb_ptr: usize) {
+    pub fn history_add_to_history(&self, dq_ptr: usize, nzb_ptr: NzbRef) {
         #[cfg(unix)]
         if self.use_active {
             crate::historycoord::add_to_history_active(dq_ptr, nzb_ptr);
@@ -1598,7 +1638,7 @@ impl QueueSubsysHost {
     pub fn url_delete_queue_entry(
         &self,
         dq_ptr: usize,
-        nzb_ptr: usize,
+        nzb_ptr: NzbRef,
         avoid_history: bool,
     ) -> bool {
         if self.use_active {
@@ -1641,7 +1681,7 @@ impl QueueSubsysHost {
 
     pub fn scanner_add_url_file(
         &self,
-        nzb_ptr: usize,
+        nzb_ptr: NzbRef,
         is_archive: bool,
         eff_name: &[u8],
         eff_cat: &[u8],
@@ -1687,23 +1727,23 @@ impl QueueSubsysHost {
         0
     }
 
-    pub fn queue_at(&self, dq_ptr: usize, idx: usize) -> usize {
+    pub fn queue_at(&self, dq_ptr: usize, idx: usize) -> NzbRef {
         if self.use_active {
-            return crate::qqueue::queue_at(dq_ptr, idx);
+            return NzbRef::from_addr(crate::qqueue::queue_at(dq_ptr, idx));
         }
-        0
+        NzbRef::NONE
     }
 
-    pub fn queue_find_by_id(&self, dq_ptr: usize, nzb_id: i32) -> usize {
+    pub fn queue_find_by_id(&self, dq_ptr: usize, nzb_id: i32) -> NzbRef {
         if self.use_active {
-            return crate::qqueue::queue_find_by_id(dq_ptr, nzb_id);
+            return NzbRef::from_addr(crate::qqueue::queue_find_by_id(dq_ptr, nzb_id));
         }
-        0
+        NzbRef::NONE
     }
 
-    pub fn queue_remove(&self, dq_ptr: usize, nzb_ptr: usize) {
+    pub fn queue_remove(&self, dq_ptr: usize, nzb_ptr: NzbRef) {
         if self.use_active {
-            crate::qqueue::queue_remove(dq_ptr, nzb_ptr);
+            crate::qqueue::queue_remove(dq_ptr, nzb_ptr.addr());
         }
     }
 
@@ -1711,19 +1751,22 @@ impl QueueSubsysHost {
         &self,
         dq_ptr: usize,
         uptr_addr: usize,
-        url_ptr: usize,
+        url_ptr: NzbRef,
         add_first: bool,
     ) {
         if self.use_active {
-            unsafe { crate::qqueue::queue_insert_handle(dq_ptr, uptr_addr, url_ptr, add_first) };
+            unsafe {
+                crate::qqueue::queue_insert_handle(dq_ptr, uptr_addr, url_ptr.addr(), add_first)
+            };
         }
     }
 
-    pub fn alloc_new_nzb_uptr(&self) -> (usize, usize) {
+    pub fn alloc_new_nzb_uptr(&self) -> (usize, NzbRef) {
         if self.use_active {
-            return crate::qqueue::new_nzb_handle();
+            let (handle, nzb) = crate::qqueue::new_nzb_handle();
+            return (handle, NzbRef::from_addr(nzb));
         }
-        (0, 0)
+        (0, NzbRef::NONE)
     }
 
     pub fn finish_new_nzb_uptr(&self, dq_ptr: usize, uptr_addr: usize) {
@@ -1732,12 +1775,13 @@ impl QueueSubsysHost {
         }
     }
 
-    pub fn queue_reorder(&self, dq_ptr: usize, new_order: &[usize]) {
+    pub fn queue_reorder(&self, dq_ptr: usize, new_order: &[NzbRef]) {
         if dq_ptr == 0 || new_order.is_empty() {
             return;
         }
         if self.use_active {
-            crate::qqueue::queue_reorder(dq_ptr, new_order);
+            let addrs: Vec<usize> = new_order.iter().map(|nzb| nzb.addr()).collect();
+            crate::qqueue::queue_reorder(dq_ptr, &addrs);
         }
     }
 
@@ -1810,9 +1854,9 @@ impl QueueSubsysHost {
         }
     }
 
-    pub fn history_move_queue_item(&self, dq_ptr: usize, nzb_ptr: usize) {
+    pub fn history_move_queue_item(&self, dq_ptr: usize, nzb_ptr: NzbRef) {
         if self.use_active {
-            crate::qqueue::history_move_queue_item(dq_ptr, nzb_ptr);
+            crate::qqueue::history_move_queue_item(dq_ptr, nzb_ptr.addr());
         }
     }
 
@@ -1841,11 +1885,12 @@ impl QueueSubsysHost {
         }
     }
 
-    pub fn history_return_to_queue(&self, dq_ptr: usize, hi_ptr: usize, idx: usize) -> usize {
+    pub fn history_return_to_queue(&self, dq_ptr: usize, hi_ptr: usize, idx: usize) -> NzbRef {
         if self.use_active {
-            return unsafe { crate::qqueue::history_return_to_queue(dq_ptr, hi_ptr, idx as i32) };
+            let nzb = unsafe { crate::qqueue::history_return_to_queue(dq_ptr, hi_ptr, idx as i32) };
+            return NzbRef::from_addr(nzb);
         }
-        0
+        NzbRef::NONE
     }
 
     pub fn history_len(&self, dq_ptr: usize) -> usize {
@@ -1856,21 +1901,21 @@ impl QueueSubsysHost {
     }
 
     /// The download with `nzb_id`, in the queue or (once it is done) in history; 0 if neither.
-    pub fn nzb_find_in_queue_or_history(&self, dq_ptr: usize, nzb_id: i32) -> usize {
+    pub fn nzb_find_in_queue_or_history(&self, dq_ptr: usize, nzb_id: i32) -> NzbRef {
         let np = self.queue_find_by_id(dq_ptr, nzb_id);
-        if np != 0 {
+        if np.is_some() {
             return np;
         }
         let hi_ptr = self.history_find_by_id(dq_ptr, nzb_id);
         if hi_ptr == 0 {
-            return 0;
+            return NzbRef::NONE;
         }
         // a URL that failed to fetch or scan keeps its messages on its NzbInfo too
         let hi = self.hist_item_snap(hi_ptr);
         if hi.kind == HK_NZB || hi.kind == HK_URL {
-            hi.inner_ptr
+            NzbRef::from_addr(hi.inner_ptr)
         } else {
-            0
+            NzbRef::NONE
         }
     }
 
@@ -1966,24 +2011,24 @@ impl QueueSubsysHost {
         &self,
         dq_ptr: usize,
         aspect_action: i32,
-        nzb_ptr: usize,
+        nzb_ptr: NzbRef,
         file_ptr: FileRef,
     ) {
         if self.use_active {
             crate::jobthread::nzbget_rs_prepost_queue_changed(
                 aspect_action,
                 dq_ptr,
-                nzb_ptr,
+                nzb_ptr.addr(),
                 file_ptr.addr(),
             );
         }
     }
 
-    pub fn dq_notify(&self, dq_ptr: usize, aspect_action: i32, nzb_ptr: usize, file_ptr: FileRef) {
+    pub fn dq_notify(&self, dq_ptr: usize, aspect_action: i32, nzb_ptr: NzbRef, file_ptr: FileRef) {
         self.prepost_queue_changed(dq_ptr, aspect_action, nzb_ptr, file_ptr);
         #[cfg(unix)]
         if self.use_active {
-            let url_opt = if aspect_action == ASPECT_URL_COMPLETED && nzb_ptr != 0 {
+            let url_opt = if aspect_action == ASPECT_URL_COMPLETED && nzb_ptr.is_some() {
                 Some(self.nzb_snap(nzb_ptr, false).url)
             } else {
                 None
@@ -1991,12 +2036,12 @@ impl QueueSubsysHost {
             crate::feed::notify_active_feed_queue_aspect(aspect_action, url_opt.as_deref());
             crate::urlcoord::notify_active_urlcoord_queue_update(aspect_action);
             if aspect_action == ASPECT_NZB_ADDED
-                && nzb_ptr != 0
+                && nzb_ptr.is_some()
                 && !self.nzb_snap(nzb_ptr, false).dupe_key.is_empty()
             {
                 crate::twin::nudge_and_wake_active();
             }
-            if nzb_ptr != 0
+            if nzb_ptr.is_some()
                 && (aspect_action == ASPECT_NZB_ADDED || aspect_action == ASPECT_NZB_NAMED)
             {
                 crate::dupesearch_coord::notify_active_dupesearch_queue_update(
@@ -2126,12 +2171,12 @@ impl QueueSubsysHost {
     }
 
     // NzbInfo ops (op = 30..=35)
-    pub fn nzb_snap(&self, nzb_ptr: usize, with_text_status: bool) -> NzbSnap {
+    pub fn nzb_snap(&self, nzb_ptr: NzbRef, with_text_status: bool) -> NzbSnap {
         self.nzb_snap_mode(nzb_ptr, i32::from(with_text_status))
     }
 
-    pub fn nzb_snap_mode(&self, nzb_ptr: usize, text_status_mode: i32) -> NzbSnap {
-        if nzb_ptr == 0 {
+    pub fn nzb_snap_mode(&self, nzb_ptr: NzbRef, text_status_mode: i32) -> NzbSnap {
+        if nzb_ptr.is_none() {
             return NzbSnap::default();
         }
         let mut ints = [0i32; 90];
@@ -2271,48 +2316,35 @@ impl QueueSubsysHost {
         }
     }
 
-    pub fn nzb_get_param(&self, nzb_ptr: usize, name: &[u8]) -> Option<Vec<u8>> {
-        if nzb_ptr == 0 {
+    pub fn nzb_get_param(&self, nzb_ptr: NzbRef, name: &[u8]) -> Option<Vec<u8>> {
+        if !self.use_active {
             return None;
         }
-        let c = c_bytes(name);
-        let mut strs = [std::ptr::null(); 1];
-        let found = self.coll_op(
-            nzb_ptr,
-            0,
-            OpArgs::NONE
-                .s1(c.as_ptr() as *const c_char)
-                .strs(strs.as_mut_ptr()),
-        );
-        if found == 0 {
-            None
-        } else {
-            Some(unsafe { read_cstr(strs[0]) })
+        crate::qnzb::param(nzb_ptr, name)
+    }
+
+    pub fn nzb_set_param(&self, nzb_ptr: NzbRef, name: &[u8], val: Option<&[u8]>) {
+        if self.use_active {
+            crate::qnzb::set_param(nzb_ptr, name, val);
         }
     }
 
-    pub fn nzb_set_param(&self, nzb_ptr: usize, name: &[u8], val: Option<&[u8]>) {
-        if nzb_ptr == 0 {
-            return;
+    pub fn nzb_copy_params(&self, dest_nzb: NzbRef, src_nzb: NzbRef) {
+        if self.use_active {
+            crate::qnzb::copy_params(dest_nzb, src_nzb);
         }
-        let cn = c_bytes(name);
-        let cv = val.map(c_bytes);
-        let s2 = cv
-            .as_ref()
-            .map_or(std::ptr::null(), |v| v.as_ptr() as *const c_char);
-        self.coll_op(
-            nzb_ptr,
-            1,
-            OpArgs::NONE.s1(cn.as_ptr() as *const c_char).s2(s2),
-        );
     }
 
-    pub fn nzb_copy_params(&self, dest_nzb: usize, src_nzb: usize) {
-        self.coll_op(dest_nzb, 2, OpArgs::NONE.p2(src_nzb));
+    /// All post-processing parameters as (name, value), in the order they were added.
+    pub fn nzb_params(&self, nzb_ptr: NzbRef) -> Vec<(Vec<u8>, Vec<u8>)> {
+        if !self.use_active {
+            return Vec::new();
+        }
+        crate::qnzb::params(nzb_ptr)
     }
 
-    pub fn nzb_build_final_dir_name(&self, nzb_ptr: usize) -> Vec<u8> {
-        if nzb_ptr == 0 {
+    pub fn nzb_build_final_dir_name(&self, nzb_ptr: NzbRef) -> Vec<u8> {
+        if nzb_ptr.is_none() {
             return Vec::new();
         }
         let mut strs = [std::ptr::null(); 1];
@@ -2320,12 +2352,20 @@ impl QueueSubsysHost {
         unsafe { read_cstr(strs[0]) }
     }
 
-    pub fn nzb_blocked_donor_op(&self, nzb_ptr: usize, add: bool, donor_id: i32) -> bool {
-        self.coll_op(nzb_ptr, if add { 5 } else { 4 }, OpArgs::NONE.a2(donor_id)) != 0
+    /// Whether `nzb_ptr` must not borrow from donor `donor_id` again.
+    pub fn nzb_donor_blocked(&self, nzb_ptr: NzbRef, donor_id: i32) -> bool {
+        self.use_active && crate::qnzb::donor_blocked(nzb_ptr, donor_id)
     }
 
-    pub fn nzb_hard_link_path(&self, nzb_ptr: usize) -> Vec<u8> {
-        if nzb_ptr == 0 {
+    /// Bars `nzb_ptr` from borrowing from donor `donor_id` again.
+    pub fn nzb_block_donor(&self, nzb_ptr: NzbRef, donor_id: i32) {
+        if self.use_active {
+            crate::qnzb::block_donor(nzb_ptr, donor_id);
+        }
+    }
+
+    pub fn nzb_hard_link_path(&self, nzb_ptr: NzbRef) -> Vec<u8> {
+        if nzb_ptr.is_none() {
             return Vec::new();
         }
         let mut strs = [std::ptr::null(); 1];
@@ -2333,8 +2373,8 @@ impl QueueSubsysHost {
         unsafe { read_cstr(strs[0]) }
     }
 
-    pub fn nzb_meta_name(&self, nzb_ptr: usize) -> Vec<u8> {
-        if nzb_ptr == 0 {
+    pub fn nzb_meta_name(&self, nzb_ptr: NzbRef) -> Vec<u8> {
+        if nzb_ptr.is_none() {
             return Vec::new();
         }
         let mut strs = [std::ptr::null(); 1];
@@ -2342,38 +2382,21 @@ impl QueueSubsysHost {
         unsafe { read_cstr(strs[0]) }
     }
 
-    pub fn nzb_has_busy_output_file(&self, nzb_ptr: usize) -> bool {
-        if nzb_ptr == 0 {
+    pub fn nzb_has_busy_output_file(&self, nzb_ptr: NzbRef) -> bool {
+        if nzb_ptr.is_none() {
             return false;
         }
         self.coll_op(nzb_ptr, 22, OpArgs::NONE) != 0
     }
 
-    pub fn nzb_params_len(&self, nzb_ptr: usize) -> usize {
-        if nzb_ptr == 0 {
-            return 0;
-        }
-        self.coll_op(nzb_ptr, 8, OpArgs::NONE.a2(-1))
-    }
-
-    pub fn nzb_param_at(&self, nzb_ptr: usize, idx: usize) -> (Vec<u8>, Vec<u8>) {
-        let mut strs = [std::ptr::null(); 2];
-        self.coll_op(
-            nzb_ptr,
-            8,
-            OpArgs::NONE.a2(idx as i32).strs(strs.as_mut_ptr()),
-        );
-        unsafe { (read_cstr(strs[0]), read_cstr(strs[1])) }
-    }
-
-    pub fn nzb_server_stats_len(&self, nzb_ptr: usize) -> usize {
-        if nzb_ptr == 0 {
+    pub fn nzb_server_stats_len(&self, nzb_ptr: NzbRef) -> usize {
+        if nzb_ptr.is_none() {
             return 0;
         }
         self.coll_op(nzb_ptr, 9, OpArgs::NONE.a2(-1))
     }
 
-    pub fn nzb_server_stat_at(&self, nzb_ptr: usize, idx: usize) -> (i32, i32, i32) {
+    pub fn nzb_server_stat_at(&self, nzb_ptr: NzbRef, idx: usize) -> (i32, i32, i32) {
         let mut ints = [0i32; 3];
         self.coll_op(
             nzb_ptr,
@@ -2383,14 +2406,14 @@ impl QueueSubsysHost {
         (ints[0], ints[1], ints[2])
     }
 
-    pub fn nzb_current_server_stats_len(&self, nzb_ptr: usize) -> usize {
-        if nzb_ptr == 0 {
+    pub fn nzb_current_server_stats_len(&self, nzb_ptr: NzbRef) -> usize {
+        if nzb_ptr.is_none() {
             return 0;
         }
         self.coll_op(nzb_ptr, 21, OpArgs::NONE.a2(-1))
     }
 
-    pub fn nzb_current_server_stat_at(&self, nzb_ptr: usize, idx: usize) -> (i32, i32, i32) {
+    pub fn nzb_current_server_stat_at(&self, nzb_ptr: NzbRef, idx: usize) -> (i32, i32, i32) {
         let mut ints = [0i32; 3];
         self.coll_op(
             nzb_ptr,
@@ -2402,11 +2425,11 @@ impl QueueSubsysHost {
 
     pub fn nzb_cached_messages_slice(
         &self,
-        nzb_ptr: usize,
+        nzb_ptr: NzbRef,
         id_from: i32,
         max_entries: i32,
     ) -> Vec<(i32, i32, i32, std::ffi::CString)> {
-        if nzb_ptr == 0 {
+        if nzb_ptr.is_none() {
             return Vec::new();
         }
         unsafe extern "C" fn push_msg(
@@ -2442,7 +2465,7 @@ impl QueueSubsysHost {
         out
     }
 
-    pub fn nzb_push_script_status(&self, nzb_ptr: usize, name: &[u8], status: ScriptStatus) {
+    pub fn nzb_push_script_status(&self, nzb_ptr: NzbRef, name: &[u8], status: ScriptStatus) {
         let cn = c_bytes(name);
         self.coll_op(
             nzb_ptr,
@@ -2455,7 +2478,7 @@ impl QueueSubsysHost {
 
     pub fn nzb_rename_completed_file(
         &self,
-        nzb_ptr: usize,
+        nzb_ptr: NzbRef,
         old_name: &[u8],
         new_name: &[u8],
     ) -> bool {
@@ -2470,38 +2493,38 @@ impl QueueSubsysHost {
         ) != 0
     }
 
-    pub fn nzb_unpack_thread_ptr(&self, nzb_ptr: usize) -> usize {
-        if nzb_ptr == 0 {
+    pub fn nzb_unpack_thread_ptr(&self, nzb_ptr: NzbRef) -> usize {
+        if nzb_ptr.is_none() {
             return 0;
         }
         self.coll_op(nzb_ptr, 12, OpArgs::NONE)
     }
 
-    pub fn nzb_push_extracted_archive(&self, nzb_ptr: usize, name: &[u8]) {
-        if nzb_ptr == 0 {
+    pub fn nzb_push_extracted_archive(&self, nzb_ptr: NzbRef, name: &[u8]) {
+        if nzb_ptr.is_none() {
             return;
         }
         let cn = c_bytes(name);
         self.coll_op(nzb_ptr, 13, OpArgs::NONE.s1(cn.as_ptr() as *const c_char));
     }
 
-    pub fn nzb_set_meta_name(&self, nzb_ptr: usize, meta_name: &[u8]) {
-        if nzb_ptr == 0 {
+    pub fn nzb_set_meta_name(&self, nzb_ptr: NzbRef, meta_name: &[u8]) {
+        if nzb_ptr.is_none() {
             return;
         }
         let cn = c_bytes(meta_name);
         self.coll_op(nzb_ptr, 14, OpArgs::NONE.s1(cn.as_ptr() as *const c_char));
     }
 
-    pub fn nzb_copy_cached_messages_silent(&self, dst_nzb: usize, src_nzb: usize) {
-        if dst_nzb == 0 || src_nzb == 0 {
+    pub fn nzb_copy_cached_messages_silent(&self, dst_nzb: NzbRef, src_nzb: NzbRef) {
+        if dst_nzb.is_none() || src_nzb.is_none() {
             return;
         }
-        self.coll_op(dst_nzb, 15, OpArgs::NONE.p2(src_nzb));
+        self.coll_op(dst_nzb, 15, OpArgs::NONE.p2(src_nzb.addr()));
     }
 
-    pub fn nzb_make_nice_url_name(&self, nzb_ptr: usize, url: &[u8], filename: &[u8]) -> Vec<u8> {
-        if nzb_ptr == 0 {
+    pub fn nzb_make_nice_url_name(&self, nzb_ptr: NzbRef, url: &[u8], filename: &[u8]) -> Vec<u8> {
+        if nzb_ptr.is_none() {
             return Vec::new();
         }
         let cu = c_bytes(url);
@@ -2518,35 +2541,22 @@ impl QueueSubsysHost {
         unsafe { read_cstr(strs[0]) }
     }
 
-    pub fn nzb_script_statuses_len(&self, nzb_ptr: usize) -> usize {
-        if nzb_ptr == 0 {
-            return 0;
+    /// The post-processing scripts that ran, as (script name, status), in run order.
+    pub fn nzb_script_statuses(&self, nzb_ptr: NzbRef) -> Vec<(Vec<u8>, ScriptStatus)> {
+        if !self.use_active {
+            return Vec::new();
         }
-        self.coll_op(nzb_ptr, 17, OpArgs::NONE.a2(-1))
+        crate::qnzb::script_statuses(nzb_ptr)
     }
 
-    pub fn nzb_script_status_at(&self, nzb_ptr: usize, idx: usize) -> (ScriptStatus, Vec<u8>) {
-        let mut ints = [0i32; 1];
-        let mut strs = [std::ptr::null(); 1];
-        self.coll_op(
-            nzb_ptr,
-            17,
-            OpArgs::NONE
-                .a2(idx as i32)
-                .ints(ints.as_mut_ptr())
-                .strs(strs.as_mut_ptr()),
-        );
-        (ScriptStatus::from(ints[0]), unsafe { read_cstr(strs[0]) })
-    }
-
-    pub fn nzb_extracted_archives_len(&self, nzb_ptr: usize) -> usize {
-        if nzb_ptr == 0 {
+    pub fn nzb_extracted_archives_len(&self, nzb_ptr: NzbRef) -> usize {
+        if nzb_ptr.is_none() {
             return 0;
         }
         self.coll_op(nzb_ptr, 18, OpArgs::NONE.a2(-1))
     }
 
-    pub fn nzb_extracted_archive_at(&self, nzb_ptr: usize, idx: usize) -> Vec<u8> {
+    pub fn nzb_extracted_archive_at(&self, nzb_ptr: NzbRef, idx: usize) -> Vec<u8> {
         let mut strs = [std::ptr::null(); 1];
         self.coll_op(
             nzb_ptr,
@@ -2556,73 +2566,73 @@ impl QueueSubsysHost {
         unsafe { read_cstr(strs[0]) }
     }
 
-    pub fn nzb_server_stat_set(&self, nzb_ptr: usize, server_id: i32, succ: i32, fail: i32) {
+    pub fn nzb_server_stat_set(&self, nzb_ptr: NzbRef, server_id: i32, succ: i32, fail: i32) {
         let mut ints = [server_id, succ, fail];
         self.coll_op(nzb_ptr, 19, OpArgs::NONE.ints(ints.as_mut_ptr()));
     }
 
-    pub fn nzb_sync_current_server_stats(&self, nzb_ptr: usize) {
+    pub fn nzb_sync_current_server_stats(&self, nzb_ptr: NzbRef) {
         self.coll_op(nzb_ptr, 19, OpArgs::NONE.a2(1));
     }
 
-    pub fn nzb_set_int(&self, nzb_ptr: usize, field: i32, val: i32) {
+    pub fn nzb_set_int(&self, nzb_ptr: NzbRef, field: i32, val: i32) {
         self.coll_set(nzb_ptr, field, OpArgs::NONE.a2(val));
     }
 
-    pub fn nzb_set_par_status(&self, nzb_ptr: usize, status: NzbParStatus) {
+    pub fn nzb_set_par_status(&self, nzb_ptr: NzbRef, status: NzbParStatus) {
         self.nzb_set_int(nzb_ptr, NZB_INT_PAR_STATUS, status.into());
     }
 
-    pub fn nzb_set_unpack_status(&self, nzb_ptr: usize, status: UnpackStatus) {
+    pub fn nzb_set_unpack_status(&self, nzb_ptr: NzbRef, status: UnpackStatus) {
         self.nzb_set_int(nzb_ptr, NZB_INT_UNPACK_STATUS, status.into());
     }
 
-    pub fn nzb_set_move_status(&self, nzb_ptr: usize, status: MoveStatus) {
+    pub fn nzb_set_move_status(&self, nzb_ptr: NzbRef, status: MoveStatus) {
         self.nzb_set_int(nzb_ptr, NZB_INT_MOVE_STATUS, status.into());
     }
 
-    pub fn nzb_set_cleanup_status(&self, nzb_ptr: usize, status: CleanupStatus) {
+    pub fn nzb_set_cleanup_status(&self, nzb_ptr: NzbRef, status: CleanupStatus) {
         self.nzb_set_int(nzb_ptr, NZB_INT_CLEANUP_STATUS, status.into());
     }
 
-    pub fn nzb_set_last_unpack_status(&self, nzb_ptr: usize, status: UnpackStatus) {
+    pub fn nzb_set_last_unpack_status(&self, nzb_ptr: NzbRef, status: UnpackStatus) {
         self.nzb_set_int(nzb_ptr, NZB_INT_LAST_UNPACK_STATUS, status.into());
     }
 
-    pub fn nzb_set_dupe_mode(&self, nzb_ptr: usize, mode: DupeMode) {
+    pub fn nzb_set_dupe_mode(&self, nzb_ptr: NzbRef, mode: DupeMode) {
         self.nzb_set_int(nzb_ptr, NZB_INT_DUPE_MODE, mode.into());
     }
 
-    pub fn nzb_set_mark_status(&self, nzb_ptr: usize, status: MarkStatus) {
+    pub fn nzb_set_mark_status(&self, nzb_ptr: NzbRef, status: MarkStatus) {
         self.nzb_set_int(nzb_ptr, NZB_INT_MARK_STATUS, status.into());
     }
 
-    pub fn nzb_set_url_status(&self, nzb_ptr: usize, status: UrlStatus) {
+    pub fn nzb_set_url_status(&self, nzb_ptr: NzbRef, status: UrlStatus) {
         self.nzb_set_int(nzb_ptr, NZB_INT_URL_STATUS, status.into());
     }
 
-    pub fn nzb_set_delete_status(&self, nzb_ptr: usize, status: DeleteStatus) {
+    pub fn nzb_set_delete_status(&self, nzb_ptr: NzbRef, status: DeleteStatus) {
         self.nzb_set_int(nzb_ptr, NZB_INT_DELETE_STATUS, status.into());
     }
 
-    pub fn nzb_set_direct_rename_status(&self, nzb_ptr: usize, status: DirectRenameStatus) {
+    pub fn nzb_set_direct_rename_status(&self, nzb_ptr: NzbRef, status: DirectRenameStatus) {
         self.nzb_set_int(nzb_ptr, NZB_INT_DIRECT_RENAME_STATUS, status.into());
     }
 
-    pub fn nzb_set_direct_unpack_status(&self, nzb_ptr: usize, status: DirectUnpackStatus) {
+    pub fn nzb_set_direct_unpack_status(&self, nzb_ptr: NzbRef, status: DirectUnpackStatus) {
         self.nzb_set_int(nzb_ptr, NZB_INT_DIRECT_UNPACK_STATUS, status.into());
     }
 
-    pub fn nzb_set_i64(&self, nzb_ptr: usize, field: i32, val: i64) {
+    pub fn nzb_set_i64(&self, nzb_ptr: NzbRef, field: i32, val: i64) {
         let mut i64s = [val];
         self.coll_set(nzb_ptr, field, OpArgs::NONE.i64s(i64s.as_mut_ptr()));
     }
 
-    pub fn nzb_set_str(&self, nzb_ptr: usize, field: i32, val: &[u8]) {
+    pub fn nzb_set_str(&self, nzb_ptr: NzbRef, field: i32, val: &[u8]) {
         self.nzb_set_str_opt(nzb_ptr, field, Some(val));
     }
 
-    pub fn nzb_set_str_opt(&self, nzb_ptr: usize, field: i32, val: Option<&[u8]>) {
+    pub fn nzb_set_str_opt(&self, nzb_ptr: NzbRef, field: i32, val: Option<&[u8]>) {
         let cv = val.map(c_bytes);
         let s1 = cv
             .as_ref()
@@ -2630,23 +2640,23 @@ impl QueueSubsysHost {
         self.coll_set(nzb_ptr, field, OpArgs::NONE.s1(s1));
     }
 
-    pub fn nzb_action(&self, nzb_ptr: usize, action: i32, p2: usize) {
+    pub fn nzb_action(&self, nzb_ptr: NzbRef, action: i32, p2: usize) {
         self.coll_set(nzb_ptr, action, OpArgs::NONE.p2(p2));
     }
 
     /// Adds `file`'s sizes and article counts to the download's completed totals.
-    pub fn nzb_update_completed_stats(&self, nzb_ptr: usize, file: FileRef) {
+    pub fn nzb_update_completed_stats(&self, nzb_ptr: NzbRef, file: FileRef) {
         self.nzb_action(nzb_ptr, NZB_ACT_UPDATE_COMPLETED_STATS, file.addr());
     }
 
     /// Adds `file`'s sizes and article counts to the download's deleted totals.
-    pub fn nzb_update_deleted_stats(&self, nzb_ptr: usize, file: FileRef) {
+    pub fn nzb_update_deleted_stats(&self, nzb_ptr: NzbRef, file: FileRef) {
         self.nzb_action(nzb_ptr, NZB_ACT_UPDATE_DELETED_STATS, file.addr());
     }
 
     pub fn nzb_apply_merge_split_counters(
         &self,
-        nzb_ptr: usize,
+        nzb_ptr: NzbRef,
         c: &crate::queuecoord::NzbgetRsNzbMergeSplitCounters,
     ) {
         if !self.use_active {
@@ -2685,26 +2695,26 @@ impl QueueSubsysHost {
             c.download_start_time,
         ];
         // the collection is the Rust object itself
-        let nzb = nzb_ptr as *mut crate::qnzb::NzbScalars;
+        let nzb = nzb_ptr.addr() as *mut crate::qnzb::NzbScalars;
         unsafe { crate::qnzb::host_set_stats(nzb, &ints, &i64s) };
     }
 
-    pub fn nzb_file_len(&self, nzb_ptr: usize) -> usize {
+    pub fn nzb_file_len(&self, nzb_ptr: NzbRef) -> usize {
         self.filelist_op(nzb_ptr, 0, OpArgs::NONE)
     }
 
-    pub fn nzb_file_at(&self, nzb_ptr: usize, idx: usize) -> FileRef {
+    pub fn nzb_file_at(&self, nzb_ptr: NzbRef, idx: usize) -> FileRef {
         FileRef::from_addr(self.filelist_op(nzb_ptr, 1, OpArgs::NONE.a2(idx as i32)))
     }
 
-    pub fn nzb_remove_file(&self, nzb_ptr: usize, file_ptr: FileRef) {
+    pub fn nzb_remove_file(&self, nzb_ptr: NzbRef, file_ptr: FileRef) {
         self.filelist_op(nzb_ptr, 2, OpArgs::NONE.p2(file_ptr.addr()));
     }
 
     pub fn nzb_remove_file_and_notify(
         &self,
         dq_ptr: usize,
-        nzb_ptr: usize,
+        nzb_ptr: NzbRef,
         file_ptr: FileRef,
         aspect_action: i32,
     ) {
@@ -2724,8 +2734,8 @@ impl QueueSubsysHost {
         }
     }
 
-    pub fn nzb_transfer_split_file(&self, src_nzb: usize, dest_nzb: usize, file_ptr: FileRef) {
-        let mut i64s = [dest_nzb as i64];
+    pub fn nzb_transfer_split_file(&self, src_nzb: NzbRef, dest_nzb: NzbRef, file_ptr: FileRef) {
+        let mut i64s = [dest_nzb.addr() as i64];
         self.filelist_op(
             src_nzb,
             3,
@@ -2733,15 +2743,15 @@ impl QueueSubsysHost {
         );
     }
 
-    pub fn nzb_merge_lists_and_stats(&self, dest_nzb: usize, src_nzb: usize) {
-        self.filelist_op(dest_nzb, 4, OpArgs::NONE.p2(src_nzb));
+    pub fn nzb_merge_lists_and_stats(&self, dest_nzb: NzbRef, src_nzb: NzbRef) {
+        self.filelist_op(dest_nzb, 4, OpArgs::NONE.p2(src_nzb.addr()));
     }
 
-    pub fn nzb_completed_files_len(&self, nzb_ptr: usize) -> usize {
+    pub fn nzb_completed_files_len(&self, nzb_ptr: NzbRef) -> usize {
         self.filelist_op(nzb_ptr, 5, OpArgs::NONE.a2(-1))
     }
 
-    pub fn nzb_completed_file_at(&self, nzb_ptr: usize, idx: usize) -> CompletedFileSnap {
+    pub fn nzb_completed_file_at(&self, nzb_ptr: NzbRef, idx: usize) -> CompletedFileSnap {
         let mut ints = [0i32; 4];
         let mut strs = [std::ptr::null(); 4];
         self.filelist_op(
@@ -2766,7 +2776,7 @@ impl QueueSubsysHost {
         }
     }
 
-    pub fn nzb_completed_files(&self, nzb_ptr: usize) -> Vec<CompletedFileSnap> {
+    pub fn nzb_completed_files(&self, nzb_ptr: NzbRef) -> Vec<CompletedFileSnap> {
         let n = self.nzb_completed_files_len(nzb_ptr);
         let mut out = Vec::with_capacity(n);
         for i in 0..n {
@@ -2777,7 +2787,7 @@ impl QueueSubsysHost {
 
     pub fn nzb_push_completed_file(
         &self,
-        nzb_ptr: usize,
+        nzb_ptr: NzbRef,
         file_ptr: FileRef,
         filename: &[u8],
         file_status: i32,
@@ -2798,7 +2808,7 @@ impl QueueSubsysHost {
 
     pub fn nzb_update_completed_file(
         &self,
-        nzb_ptr: usize,
+        nzb_ptr: NzbRef,
         idx: usize,
         filename: &[u8],
         origname: Option<&[u8]>,
@@ -2820,7 +2830,7 @@ impl QueueSubsysHost {
 
     pub fn nzb_push_stream_repair_job(
         &self,
-        nzb_ptr: usize,
+        nzb_ptr: NzbRef,
         file_id: i32,
         filename: &[u8],
         decoded_file_size: i64,
@@ -2855,8 +2865,8 @@ impl QueueSubsysHost {
         );
     }
 
-    pub fn nzb_reorder_files(&self, nzb_ptr: usize, new_order: &[FileRef]) {
-        if nzb_ptr == 0 || new_order.is_empty() {
+    pub fn nzb_reorder_files(&self, nzb_ptr: NzbRef, new_order: &[FileRef]) {
+        if nzb_ptr.is_none() || new_order.is_empty() {
             return;
         }
         self.filelist_op(
@@ -2868,8 +2878,8 @@ impl QueueSubsysHost {
         );
     }
 
-    pub fn nzb_stream_repair_jobs(&self, nzb_ptr: usize) -> Vec<StreamRepairJobSnap> {
-        if nzb_ptr == 0 {
+    pub fn nzb_stream_repair_jobs(&self, nzb_ptr: NzbRef) -> Vec<StreamRepairJobSnap> {
+        if nzb_ptr.is_none() {
             return Vec::new();
         }
         let n = self.filelist_op(nzb_ptr, 11, OpArgs::NONE.a2(-1));
@@ -2898,14 +2908,19 @@ impl QueueSubsysHost {
         out
     }
 
-    pub fn nzb_stream_repair_jobs_len(&self, nzb_ptr: usize) -> usize {
-        if nzb_ptr == 0 {
+    pub fn nzb_stream_repair_jobs_len(&self, nzb_ptr: NzbRef) -> usize {
+        if nzb_ptr.is_none() {
             return 0;
         }
         self.filelist_op(nzb_ptr, 11, OpArgs::NONE.a2(-1))
     }
 
-    pub fn nzb_stream_repair_update_completed_file(&self, nzb_ptr: usize, file_id: i32, mode: i32) {
+    pub fn nzb_stream_repair_update_completed_file(
+        &self,
+        nzb_ptr: NzbRef,
+        file_id: i32,
+        mode: i32,
+    ) {
         let mut ints = [mode];
         if self.filelist_op(
             nzb_ptr,
@@ -2919,7 +2934,7 @@ impl QueueSubsysHost {
 
     pub fn nzb_stream_repair_job_detail(
         &self,
-        nzb_ptr: usize,
+        nzb_ptr: NzbRef,
         idx: usize,
     ) -> StreamRepairJobDetailSnap {
         let mut ints = [0i32; 5];
@@ -2959,7 +2974,7 @@ impl QueueSubsysHost {
         }
     }
 
-    pub fn nzb_stream_repair_mark_live_attempted(&self, nzb_ptr: usize, idx: usize) -> bool {
+    pub fn nzb_stream_repair_mark_live_attempted(&self, nzb_ptr: NzbRef, idx: usize) -> bool {
         let mut ints = [1i32];
         self.filelist_op(
             nzb_ptr,
@@ -2968,7 +2983,7 @@ impl QueueSubsysHost {
         ) != 0
     }
 
-    pub fn nzb_stream_repair_erase_job(&self, nzb_ptr: usize, idx: usize, set_changed: bool) {
+    pub fn nzb_stream_repair_erase_job(&self, nzb_ptr: NzbRef, idx: usize, set_changed: bool) {
         let mut ints = [2i32, i32::from(set_changed)];
         self.filelist_op(
             nzb_ptr,
@@ -2979,7 +2994,7 @@ impl QueueSubsysHost {
 
     pub fn nzb_stream_repair_update_job_holes(
         &self,
-        nzb_ptr: usize,
+        nzb_ptr: NzbRef,
         idx: usize,
         new_decoded_size: i64,
         holes_ptr: usize,
@@ -3001,7 +3016,7 @@ impl QueueSubsysHost {
     #[allow(clippy::too_many_arguments)]
     pub fn nzb_add_parsed_file(
         &self,
-        nzb_ptr: usize,
+        nzb_ptr: NzbRef,
         id: i32,
         subject: *const c_char,
         filename: *const c_char,
@@ -3065,22 +3080,22 @@ impl QueueSubsysHost {
         ))
     }
 
-    pub fn nzb_redownload_replace_files(&self, nzb_ptr: usize, src_nzb_ptr: usize) {
-        self.filelist_op(nzb_ptr, 15, OpArgs::NONE.p2(src_nzb_ptr));
+    pub fn nzb_redownload_replace_files(&self, nzb_ptr: NzbRef, src_nzb_ptr: NzbRef) {
+        self.filelist_op(nzb_ptr, 15, OpArgs::NONE.p2(src_nzb_ptr.addr()));
     }
 
-    pub fn nzb_erase_completed_file(&self, nzb_ptr: usize, idx: usize) {
+    pub fn nzb_erase_completed_file(&self, nzb_ptr: NzbRef, idx: usize) {
         self.filelist_op(nzb_ptr, 16, OpArgs::NONE.a2(idx as i32));
     }
 
-    pub fn nzb_add_requeued_file(&self, nzb_ptr: usize, file_ptr: FileRef) {
+    pub fn nzb_add_requeued_file(&self, nzb_ptr: NzbRef, file_ptr: FileRef) {
         self.filelist_op(nzb_ptr, 17, OpArgs::NONE.p2(file_ptr.addr()));
     }
 
     #[allow(clippy::too_many_arguments)]
     pub fn nzb_push_completed_file_raw(
         &self,
-        nzb_ptr: usize,
+        nzb_ptr: NzbRef,
         id: i32,
         status: i32,
         crc: u32,
@@ -3101,7 +3116,7 @@ impl QueueSubsysHost {
 
     pub fn nzb_add_stub_file(
         &self,
-        nzb_ptr: usize,
+        nzb_ptr: NzbRef,
         id: i32,
         paused: bool,
         time_opt: Option<i32>,
@@ -3294,12 +3309,12 @@ impl QueueSubsysHost {
         }
     }
 
-    pub fn file_set_nzb_info(&self, file_ptr: FileRef, nzb_ptr: usize) {
-        self.file_set_op(file_ptr, 58, OpArgs::NONE.p2(nzb_ptr));
+    pub fn file_set_nzb_info(&self, file_ptr: FileRef, nzb_ptr: NzbRef) {
+        self.file_set_op(file_ptr, 58, OpArgs::NONE.p2(nzb_ptr.addr()));
     }
 
-    pub fn file_subtract_server_stats_from_nzb_total(&self, file_ptr: FileRef, nzb_ptr: usize) {
-        self.file_set_op(file_ptr, 59, OpArgs::NONE.p2(nzb_ptr));
+    pub fn file_subtract_server_stats_from_nzb_total(&self, file_ptr: FileRef, nzb_ptr: NzbRef) {
+        self.file_set_op(file_ptr, 59, OpArgs::NONE.p2(nzb_ptr.addr()));
     }
 
     pub fn file_new_standalone(&self, id: i32, bump_gen: bool) -> FileRef {
@@ -3653,7 +3668,7 @@ impl QueueSubsysHost {
         });
     }
 
-    pub fn file_cache_flush_prepare(&self, file_ptr: FileRef) -> (bool, bool, usize, Vec<u8>) {
+    pub fn file_cache_flush_prepare(&self, file_ptr: FileRef) -> (bool, bool, NzbRef, Vec<u8>) {
         let mut ints = [0i32; 2];
         let mut i64s = [0i64; 2];
         let mut strs = [std::ptr::null(); 1];
@@ -3672,7 +3687,7 @@ impl QueueSubsysHost {
                 std::slice::from_raw_parts(strs[0].cast::<u8>(), i64s[0] as usize).to_vec()
             }
         };
-        (ints[0] != 0, ints[1] != 0, i64s[1] as usize, out_fn)
+        (ints[0] != 0, ints[1] != 0, NzbRef::from_addr(i64s[1] as usize), out_fn)
     }
 
     pub fn file_cache_flush_lock_collect(
@@ -3931,7 +3946,7 @@ impl QueueSubsysHost {
         );
         PostSnap {
             ptr: post_ptr,
-            nzb_ptr: i64s[1] as usize,
+            nzb_ptr: NzbRef::from_addr(i64s[1] as usize),
             stage: PostStage::from(ints[0]),
             working: ints[1] != 0,
             deleted: ints[2] != 0,
@@ -4073,41 +4088,41 @@ impl QueueSubsysHost {
         self.post_job_op(2, post_ptr.addr(), OpArgs::NONE);
     }
 
-    pub fn direct_unpack_is_active(&self, nzb_ptr: usize, include_waiting_volume: bool) -> bool {
+    pub fn direct_unpack_is_active(&self, nzb_ptr: NzbRef, include_waiting_volume: bool) -> bool {
         self.post_job_op(
             3,
-            nzb_ptr,
+            nzb_ptr.addr(),
             OpArgs::NONE.a2(i32::from(include_waiting_volume)),
         ) != 0
     }
 
-    pub fn direct_unpack_stop(&self, dq_ptr: usize, nzb_ptr: usize) {
-        self.post_job_op(4, dq_ptr, OpArgs::NONE.p2(nzb_ptr));
+    pub fn direct_unpack_stop(&self, dq_ptr: usize, nzb_ptr: NzbRef) {
+        self.post_job_op(4, dq_ptr, OpArgs::NONE.p2(nzb_ptr.addr()));
     }
 
-    pub fn direct_unpack_nzb_downloaded(&self, dq_ptr: usize, nzb_ptr: usize) {
-        self.post_job_op(5, dq_ptr, OpArgs::NONE.p2(nzb_ptr));
+    pub fn direct_unpack_nzb_downloaded(&self, dq_ptr: usize, nzb_ptr: NzbRef) {
+        self.post_job_op(5, dq_ptr, OpArgs::NONE.p2(nzb_ptr.addr()));
     }
 
-    pub fn direct_unpack_nzb_deleted(&self, dq_ptr: usize, nzb_ptr: usize) {
-        self.post_job_op(6, dq_ptr, OpArgs::NONE.p2(nzb_ptr));
+    pub fn direct_unpack_nzb_deleted(&self, dq_ptr: usize, nzb_ptr: NzbRef) {
+        self.post_job_op(6, dq_ptr, OpArgs::NONE.p2(nzb_ptr.addr()));
     }
 
-    pub fn direct_unpack_file_downloaded(&self, dq_ptr: usize, nzb_ptr: usize, file_ptr: FileRef) {
+    pub fn direct_unpack_file_downloaded(&self, dq_ptr: usize, nzb_ptr: NzbRef, file_ptr: FileRef) {
         let mut i64s = [file_ptr.addr() as i64];
-        self.post_job_op(7, dq_ptr, OpArgs::NONE.p2(nzb_ptr).i64s(i64s.as_mut_ptr()));
+        self.post_job_op(7, dq_ptr, OpArgs::NONE.p2(nzb_ptr.addr()).i64s(i64s.as_mut_ptr()));
     }
 
-    pub fn direct_unpack_start_job(&self, nzb_ptr: usize) {
-        self.post_job_op(8, nzb_ptr, OpArgs::NONE);
+    pub fn direct_unpack_start_job(&self, nzb_ptr: NzbRef) {
+        self.post_job_op(8, nzb_ptr.addr(), OpArgs::NONE);
     }
 
-    pub fn live_repair_stop(&self, nzb_ptr: usize) {
-        self.post_job_op(9, nzb_ptr, OpArgs::NONE);
+    pub fn live_repair_stop(&self, nzb_ptr: NzbRef) {
+        self.post_job_op(9, nzb_ptr.addr(), OpArgs::NONE);
     }
 
-    pub fn live_repair_detach_and_stop(&self, nzb_ptr: usize) {
-        self.post_job_op(10, nzb_ptr, OpArgs::NONE);
+    pub fn live_repair_detach_and_stop(&self, nzb_ptr: NzbRef) {
+        self.post_job_op(10, nzb_ptr.addr(), OpArgs::NONE);
     }
 
     pub fn repair_add_par(&self, post_ptr: PostRef, file_ptr: FileRef, deleted: bool) -> bool {
@@ -4132,7 +4147,7 @@ fn file_snap_from(
 ) -> FileSnap {
     FileSnap {
         ptr: file_ptr,
-        nzb_ptr: i64s[6] as usize,
+        nzb_ptr: NzbRef::from_addr(i64s[6] as usize),
         id: ints[0],
         paused: ints[1] != 0,
         deleted: ints[2] != 0,

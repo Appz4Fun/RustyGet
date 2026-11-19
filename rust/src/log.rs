@@ -566,7 +566,6 @@ pub(crate) fn log_active_bytes(kind: i32, bytes: &[u8]) {
     emit_message(&lg, kind, lg.debug_build, opts.as_deref(), &cs);
 }
 
-#[no_mangle]
 pub extern "C" fn nzbget_rs_log_new(debug_build: c_int) -> *mut NzbgetRsLog {
     let arc = std::sync::Arc::new(NzbgetRsLog::with_debug_cb(debug_build != 0, None));
     if let Ok(mut g) = ACTIVE_LOG.write() {
@@ -575,7 +574,6 @@ pub extern "C" fn nzbget_rs_log_new(debug_build: c_int) -> *mut NzbgetRsLog {
     std::sync::Arc::into_raw(arc).cast_mut()
 }
 
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_log_free(log: *mut NzbgetRsLog) {
     if !log.is_null() {
         let arc = std::sync::Arc::from_raw(log.cast_const());
@@ -591,7 +589,6 @@ pub unsafe extern "C" fn nzbget_rs_log_free(log: *mut NzbgetRsLog) {
     }
 }
 
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_log_emit(
     log: *const NzbgetRsLog,
     kind: c_int,
@@ -615,7 +612,6 @@ pub unsafe extern "C" fn nzbget_rs_log_emit(
 ///
 /// # Safety
 /// `text` is null or NUL-terminated.
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_log_active_emit(kind: c_int, text: *const c_char) {
     let Some(lg) = active_log() else {
         return;

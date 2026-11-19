@@ -213,14 +213,12 @@ impl File {
 }
 
 /// A new file with `id` (0: the next generated id).
-#[unsafe(no_mangle)]
 pub extern "C" fn nzbget_rs_file_new(id: c_int) -> *mut File {
     Box::into_raw(Box::new(File::new(id)))
 }
 
 /// # Safety
 /// `f` is null or from `nzbget_rs_file_new`, freed once.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_file_free(f: *mut File) {
     if !f.is_null() {
         drop(unsafe { Box::from_raw(f) });
@@ -230,7 +228,6 @@ pub unsafe extern "C" fn nzbget_rs_file_free(f: *mut File) {
 /// Id generation shared by all files: 0 last generated id, 1 reset to the
 /// highest id seen, 2 reset to zero, 3 raise the floor to `v`, 4 generate
 /// the next id.
-#[unsafe(no_mangle)]
 pub extern "C" fn nzbget_rs_file_ids(op: c_int, v: c_int) -> c_int {
     match op {
         0 => ID_GEN.load(Ordering::SeqCst),
@@ -254,14 +251,12 @@ pub extern "C" fn nzbget_rs_file_ids(op: c_int, v: c_int) -> c_int {
 
 /// # Safety
 /// `f` is a live file.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_file_get(f: *const File, id: c_int) -> i64 {
     unsafe { &*f }.get(id)
 }
 
 /// # Safety
 /// `f` is a live file.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_file_set(f: *const File, id: c_int, v: i64) {
     unsafe { &*f }.set(id, v);
 }
@@ -270,7 +265,6 @@ pub unsafe extern "C" fn nzbget_rs_file_set(f: *const File, id: c_int, v: i64) {
 ///
 /// # Safety
 /// `f` is a live file.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_file_text(f: *const File, id: c_int) -> *const c_char {
     let d = unsafe { &*f }.lock();
     d.texts.get(id as usize).map_or(ptr::null(), |s| s.as_ptr())
@@ -280,7 +274,6 @@ pub unsafe extern "C" fn nzbget_rs_file_text(f: *const File, id: c_int) -> *cons
 ///
 /// # Safety
 /// `f` is a live file; `s` is null or NUL-terminated.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_file_set_text(f: *const File, id: c_int, s: *const c_char) {
     if let Some(slot) = unsafe { &*f }.lock().texts.get_mut(id as usize) {
         *slot = cstring(s);
@@ -291,7 +284,6 @@ pub unsafe extern "C" fn nzbget_rs_file_set_text(f: *const File, id: c_int, s: *
 ///
 /// # Safety
 /// `f` is a live file.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_file_articles(f: *const File) -> *mut ArticleList {
     unsafe { &*f }.articles
 }
@@ -303,7 +295,6 @@ pub unsafe extern "C" fn nzbget_rs_file_articles(f: *const File) -> *mut Article
 ///
 /// # Safety
 /// `f` is a live file; output arrays are large enough for the operation.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_file_op(
     f: *const File,
     op: c_int,

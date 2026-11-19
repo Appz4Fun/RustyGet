@@ -8661,7 +8661,6 @@ pub(crate) unsafe fn append_active_nzb_message(nzb_id: i32, kind: i32, text: *co
 }
 
 #[cfg(unix)]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_diskstate_op(
     op: c_int,
     p1: usize,

@@ -1184,7 +1184,6 @@ pub(crate) fn disk_service_work_active() {
 /// - `10`: `ExitProc()`
 /// - `11`: `Phase4Shutdown`
 /// - `12`: `CleanupLockFile`
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDaemonEnv) -> c_int {
     let Some(e) = env.as_ref() else {
         return 0;

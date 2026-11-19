@@ -5,7 +5,7 @@
 //! status resolution, progress/stage transitions, and pause timestamp adjustment.
 
 use crate::cstr;
-use crate::status::{DupeMode, NzbParStatus, ParCheckerStatus};
+use crate::status::{DupeMode, NzbParStatus, ParCheckerStatus, PostStage};
 use std::ffi::CStr;
 
 pub use crate::postrepair::{check_par_time_limit, pick_twin_volume, select_more_pars};
@@ -239,11 +239,7 @@ pub fn match_strict_par_name(filename: &[u8], main_base: &[u8]) -> bool {
 #[allow(clippy::too_many_arguments)]
 pub fn eval_par_progress_update(
     par_stage: i32,
-    cur_post_stage: i32,
-    pt_loading_pars: i32,
-    pt_verifying_sources: i32,
-    pt_repairing: i32,
-    pt_verifying_repaired: i32,
+    cur_post_stage: PostStage,
     current_time: i64,
     stage_time: i64,
     repair_time: i64,
@@ -252,17 +248,16 @@ pub fn eval_par_progress_update(
     par_time_limit_min: i32,
     is_par_repairing_stage: bool,
     stage_progress: i32,
-) -> (i32, bool, bool, i32, bool, i32, i32) {
+) -> (PostStage, bool, bool, i32, bool, i32, i32) {
     let new_post_stage = match par_stage {
-        0 => pt_loading_pars,
-        1 => pt_verifying_sources,
-        2 => pt_repairing,
-        3 => pt_verifying_repaired,
-        _ => pt_loading_pars,
+        1 => PostStage::VerifyingSources,
+        2 => PostStage::Repairing,
+        3 => PostStage::VerifyingRepaired,
+        _ => PostStage::LoadingPars,
     };
     let stage_changed = cur_post_stage != new_post_stage;
-    let set_repair_time = stage_changed && new_post_stage == pt_repairing;
-    let new_repair_sec = if stage_changed && new_post_stage == pt_verifying_repaired {
+    let set_repair_time = stage_changed && new_post_stage == PostStage::Repairing;
+    let new_repair_sec = if stage_changed && new_post_stage == PostStage::VerifyingRepaired {
         cur_repair_sec + (current_time - repair_time) as i32
     } else {
         cur_repair_sec
@@ -354,7 +349,7 @@ use crate::postproc::JobQueue;
 use crate::queuesubsys_host::{
     QueueSubsysHost, FILE_INT_EXTRA_PRIORITY, FILE_INT_PAUSED, HK_NZB, NK_NZB,
     NZB_INT_EXTRA_PAR_BLOCKS, NZB_INT_PAR_FULL, NZB_INT_PAR_SEC, NZB_INT_REPAIR_SEC,
-    POST_INT_FILE_PROGRESS, POST_INT_PAR_REPAIRED, POST_INT_STAGE, POST_INT_STAGE_PROGRESS,
+    POST_INT_FILE_PROGRESS, POST_INT_PAR_REPAIRED, POST_INT_STAGE_PROGRESS,
     POST_INT_WORKING,
 };
 
@@ -379,7 +374,7 @@ struct CtrlSnapshot {
     pause_post_process: bool,
     force_par_full: bool,
     force_repair: bool,
-    post_stage: i32,
+    post_stage: PostStage,
     par_buffer: i32,
     has_memory_monitor: bool,
     par_threads: i32,
@@ -865,10 +860,6 @@ impl NzbgetRsRepairController {
                 eval_par_progress_update(
                     ctrl.checker_stage,
                     ctrl.post_stage,
-                    1,
-                    2,
-                    3,
-                    4,
                     ctrl.cur_time,
                     ctrl.post_stage_time,
                     cur_repair_time,
@@ -882,7 +873,7 @@ impl NzbgetRsRepairController {
             if changed {
                 if set_rt {
                     updated_repair_time = ctrl.cur_time;
-                } else if new_stage == 4 {
+                } else if new_stage == PostStage::VerifyingRepaired {
                     set_repair_sec = true;
                 }
             }
@@ -895,7 +886,7 @@ impl NzbgetRsRepairController {
             host.post_set_int(pi, POST_INT_FILE_PROGRESS, ctrl.file_progress);
             host.post_set_int(pi, POST_INT_STAGE_PROGRESS, ctrl.stage_progress);
             if changed {
-                host.post_set_int(pi, POST_INT_STAGE, new_stage);
+                host.post_set_stage(pi, new_stage);
                 host.post_set_stage_time(pi, ctrl.cur_time);
             }
             if set_repair_sec {
@@ -1549,9 +1540,18 @@ mod tests {
 
         let (new_stage, changed, set_rt, new_rsec, cancel, est_sec, est_min) =
             eval_par_progress_update(
-                2, 1, 10, 20, 30, 40, 2000, 1000, 0, 5, false, 10, false, 500,
+                2,
+                PostStage::LoadingPars,
+                2000,
+                1000,
+                0,
+                5,
+                false,
+                10,
+                false,
+                500,
             );
-        assert_eq!(new_stage, 30);
+        assert_eq!(new_stage, PostStage::Repairing);
         assert!(changed);
         assert!(set_rt);
         assert_eq!(new_rsec, 5);

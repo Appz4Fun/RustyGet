@@ -1,6 +1,6 @@
 //! Rust implementation of `QueueCoordinator` (`daemon/queue/QueueCoordinator.cpp`).
 
-use crate::status::{DeleteStatus, DirectRenameStatus, DirectUnpackStatus, DupeMode};
+use crate::status::{DeleteStatus, DirectRenameStatus, DirectUnpackStatus, DupeMode, PostStage};
 use std::ffi::CStr;
 
 #[inline]
@@ -849,8 +849,7 @@ pub fn is_queued_dupe_active(
     active_downloads: i32,
     has_post_info: bool,
     post_working: bool,
-    post_stage: i32,
-    pt_queued: i32,
+    post_stage: PostStage,
     extra_priority: bool,
     self_completed_empty: bool,
     direct_unpack_status: DirectUnpackStatus,
@@ -860,7 +859,10 @@ pub fn is_queued_dupe_active(
     }
     let is_active_download = active_downloads > 0;
     let is_post_processing = has_post_info
-        && (post_working || post_stage != pt_queued || extra_priority || self_completed_empty);
+        && (post_working
+            || post_stage != PostStage::Queued
+            || extra_priority
+            || self_completed_empty);
     let is_direct_unpacking = direct_unpack_status == DirectUnpackStatus::Running;
     is_active_download || is_post_processing || is_direct_unpacking
 }
@@ -880,12 +882,12 @@ pub fn is_queued_dupe_active(
 /// under another name both copies' files would end up in the destination.
 pub fn repair_lets_other_copies_download(
     has_post_info: bool,
-    post_stage: i32,
+    post_stage: PostStage,
     repairing_dir: &[u8],
     own_dir: &[u8],
     opts: impl FnOnce() -> (i32, Vec<u8>),
 ) -> bool {
-    if !has_post_info || post_stage != crate::queuesubsys_host::PT_STREAM_REPAIRING {
+    if !has_post_info || post_stage != PostStage::StreamRepairing {
         return false;
     }
     let (health_check, inter_dir) = opts();
@@ -1339,7 +1341,7 @@ pub(crate) fn live_start_context_matches(
         && !nzb.many_dupe_files
         && crate::fsops::path(&nzb.dest_dir) == root
         && (!nzb.has_post_info
-            || !nzb.post_working && nzb.post_stage == crate::queuesubsys_host::PT_QUEUED)
+            || !nzb.post_working && nzb.post_stage == PostStage::Queued)
 }
 
 #[cfg(unix)]
@@ -4602,7 +4604,7 @@ impl NzbgetRsQueueCoordinator {
         }
         if nzb.has_extra_priority
             || (nzb.has_post_info
-                && (nzb.post_working || nzb.post_stage != crate::queuesubsys_host::PT_QUEUED))
+                && (nzb.post_working || nzb.post_stage != PostStage::Queued))
         {
             return false;
         }
@@ -4634,7 +4636,6 @@ impl NzbgetRsQueueCoordinator {
                     queued.has_post_info,
                     queued.post_working,
                     queued.post_stage,
-                    crate::queuesubsys_host::PT_QUEUED,
                     queued.has_extra_priority,
                     self_completed_empty,
                     queued.direct_unpack_status,
@@ -6514,24 +6515,31 @@ mod tests {
 
     #[test]
     fn a_copy_in_stream_repair_lets_other_copies_download_with_dupe_health() {
-        use crate::queuesubsys_host::{HC_DUPE, HC_PARK, PT_STREAM_REPAIRING, PT_UNPACKING};
+        use crate::queuesubsys_host::{HC_DUPE, HC_PARK};
         let lets = |post, stage, a: &str, b: &str, inter: &str, hc: i32| {
             repair_lets_other_copies_download(post, stage, a.as_bytes(), b.as_bytes(), || {
                 (hc, inter.as_bytes().to_vec())
             })
         };
         let (a, b, inter) = ("/i/Rel.#1", "/i/Rel.#2", "/i");
-        assert!(lets(true, PT_STREAM_REPAIRING, a, b, inter, HC_DUPE));
-        assert!(lets(true, PT_STREAM_REPAIRING, a, b, inter, HC_PARK));
+        assert!(lets(true, PostStage::StreamRepairing, a, b, inter, HC_DUPE));
+        assert!(lets(true, PostStage::StreamRepairing, a, b, inter, HC_PARK));
         // any other stage still holds them back, as does a health check without dupes ...
-        assert!(!lets(true, PT_UNPACKING, a, b, inter, HC_DUPE));
-        assert!(!lets(false, PT_STREAM_REPAIRING, a, b, inter, HC_DUPE));
-        assert!(!lets(true, PT_STREAM_REPAIRING, a, b, inter, crate::queuesubsys_host::HC_NONE));
+        assert!(!lets(true, PostStage::Unpacking, a, b, inter, HC_DUPE));
+        assert!(!lets(false, PostStage::StreamRepairing, a, b, inter, HC_DUPE));
+        assert!(!lets(
+            true,
+            PostStage::StreamRepairing,
+            a,
+            b,
+            inter,
+            crate::queuesubsys_host::HC_NONE
+        ));
         // ... or folders not both under InterDir: shared (the same name, no InterDir), or
         // final folders that would both land files in the destination
-        assert!(!lets(true, PT_STREAM_REPAIRING, "/d/Rel", "/d/Rel", "", HC_DUPE));
-        assert!(!lets(true, PT_STREAM_REPAIRING, "/d/RelA", "/d/RelB", "", HC_DUPE));
-        assert!(!lets(true, PT_STREAM_REPAIRING, a, "/d/RelB", inter, HC_DUPE));
+        assert!(!lets(true, PostStage::StreamRepairing, "/d/Rel", "/d/Rel", "", HC_DUPE));
+        assert!(!lets(true, PostStage::StreamRepairing, "/d/RelA", "/d/RelB", "", HC_DUPE));
+        assert!(!lets(true, PostStage::StreamRepairing, a, "/d/RelB", inter, HC_DUPE));
     }
 
     #[test]

@@ -241,6 +241,28 @@ status_enum! {
 }
 
 status_enum! {
+    /// A post-processing job's stage (PostInfo::EStage, plus RustyGet's
+    /// post-download renaming and stream repair stages after Finished).
+    PostStage {
+        Queued = 0,
+        LoadingPars = 1,
+        VerifyingSources = 2,
+        Repairing = 3,
+        VerifyingRepaired = 4,
+        ParRenaming = 5,
+        RarRenaming = 6,
+        Unpacking = 7,
+        CleaningUp = 8,
+        Moving = 9,
+        PostUnpackRenaming = 10,
+        ExecutingScript = 11,
+        Finished = 12,
+        PostDownloadRenaming = 13,
+        StreamRepairing = 14,
+    }
+}
+
+status_enum! {
     /// Where the direct rename of a download's files stands
     /// (NzbInfo::EDirectRenameStatus).
     DirectRenameStatus {
@@ -371,5 +393,15 @@ mod tests {
         assert_eq!(i32::from(DirectUnpackStatus::Running), 1);
         assert!(DirectRenameStatus::Running < DirectRenameStatus::Failure);
         assert_eq!(DirectUnpackStatus::from(4), DirectUnpackStatus::Other(4));
+    }
+
+    #[test]
+    fn post_stage_round_trip() {
+        round_trip(PostStage::ALL);
+        assert_eq!(i32::from(PostStage::Repairing), 3);
+        assert_eq!(i32::from(PostStage::Finished), 12);
+        assert_eq!(i32::from(PostStage::StreamRepairing), 14);
+        assert!(PostStage::LoadingPars < PostStage::VerifyingRepaired);
+        assert_eq!(PostStage::from(15), PostStage::Other(15));
     }
 }

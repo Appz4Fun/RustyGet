@@ -6,7 +6,7 @@
 
 use crate::status::{
     CleanupStatus, DeleteStatus, DirectRenameStatus, DirectUnpackStatus, DupeMode, MoveStatus,
-    NzbParStatus, UnpackStatus,
+    NzbParStatus, PostStage, UnpackStatus,
 };
 
 #[repr(C)]
@@ -40,19 +40,16 @@ pub struct RsPostStageDecision {
 
 /// `PrePostProcessor::SanitisePostQueue` stage & `RequestParCheck` transition.
 pub fn sanitise_post_stage(
-    stage: i32,
-    pt_executing_script: i32,
-    pt_finished: i32,
-    pt_queued: i32,
+    stage: PostStage,
     dest_dir_exists: bool,
     unpack_tried: bool,
     par_status: NzbParStatus,
-) -> (i32, bool) {
-    if stage == pt_executing_script || !dest_dir_exists {
-        (pt_finished, false)
+) -> (PostStage, bool) {
+    if stage == PostStage::ExecutingScript || !dest_dir_exists {
+        (PostStage::Finished, false)
     } else {
         let request_par = unpack_tried && par_status <= NzbParStatus::Skipped;
-        (pt_queued, request_par)
+        (PostStage::Queued, request_par)
     }
 }
 
@@ -255,8 +252,7 @@ pub fn classify_request_par_action(
 pub fn eval_cleanup_job_state(
     working: bool,
     has_running_thread: bool,
-    stage: i32,
-    pt_finished: i32,
+    stage: PostStage,
     deleted: bool,
     start_time: i64,
     cur_time: i64,
@@ -272,7 +268,7 @@ pub fn eval_cleanup_job_state(
     } else {
         prev_post_total_sec
     };
-    let is_completed = stage == pt_finished || deleted;
+    let is_completed = stage == PostStage::Finished || deleted;
     (true, update_total_sec, is_completed, new_total_sec)
 }
 
@@ -280,10 +276,7 @@ pub fn eval_cleanup_job_state(
 /// `post_strategy`: `0` = `ppSequential`, `1` = `ppBalanced`, `2` = `ppAggressive`, `3` = `ppRocket`.
 /// Returns `(can_run, allow_par)`.
 pub fn can_run_more_jobs(
-    job_stages: &[i32],
-    pt_loading_pars: i32,
-    pt_verifying_repaired: i32,
-    pt_repairing: i32,
+    job_stages: &[PostStage],
     post_strategy: i32,
 ) -> (bool, bool) {
     let total_jobs = job_stages.len() as i32;
@@ -292,8 +285,8 @@ pub fn can_run_more_jobs(
     let mut repair_jobs = false;
 
     for &stage in job_stages {
-        let par_job = stage >= pt_loading_pars && stage <= pt_verifying_repaired;
-        repair_jobs |= stage == pt_repairing;
+        let par_job = stage >= PostStage::LoadingPars && stage <= PostStage::VerifyingRepaired;
+        repair_jobs |= stage == PostStage::Repairing;
         if par_job {
             par_jobs += 1;
         } else {
@@ -784,7 +777,7 @@ pub fn eval_post_stages_in_inter(
 
 /// `PrePostProcessor::UpdatePauseState` pause-download evaluator.
 pub fn calc_post_pause_state(
-    job_stages: &[i32],
+    job_stages: &[PostStage],
     par_pause_queue: bool,
     unpack_pause_queue: bool,
     script_pause_queue: bool,
@@ -792,10 +785,20 @@ pub fn calc_post_pause_state(
     let mut need_pause = false;
     for &stage in job_stages {
         match stage {
-            1..=5 | 14 => need_pause |= par_pause_queue,
-            6..=10 | 13 => need_pause |= unpack_pause_queue,
-            11 => need_pause |= script_pause_queue,
-            _ => {}
+            PostStage::LoadingPars
+            | PostStage::VerifyingSources
+            | PostStage::Repairing
+            | PostStage::VerifyingRepaired
+            | PostStage::ParRenaming
+            | PostStage::StreamRepairing => need_pause |= par_pause_queue,
+            PostStage::RarRenaming
+            | PostStage::Unpacking
+            | PostStage::CleaningUp
+            | PostStage::Moving
+            | PostStage::PostUnpackRenaming
+            | PostStage::PostDownloadRenaming => need_pause |= unpack_pause_queue,
+            PostStage::ExecutingScript => need_pause |= script_pause_queue,
+            PostStage::Queued | PostStage::Finished | PostStage::Other(_) => {}
         }
     }
     need_pause
@@ -1278,8 +1281,7 @@ impl NzbgetRsPrePostProcessor {
 
     fn sanitise_post_queue(&self, host: &crate::queuesubsys_host::QueueSubsysHost) {
         use crate::queuesubsys_host::{
-            MK_INFO, NK_NZB, POST_INT_REQUEST_PAR_CHECK, POST_INT_STAGE, POST_INT_WORKING,
-            PT_EXECUTING_SCRIPT, PT_FINISHED, PT_QUEUED,
+            MK_INFO, NK_NZB, POST_INT_REQUEST_PAR_CHECK, POST_INT_WORKING,
         };
         use std::sync::atomic::Ordering;
 
@@ -1328,14 +1330,11 @@ impl NzbgetRsPrePostProcessor {
                         crate::fsops::directory_exists(&nzb.dest_dir, &crate::fsops::posix_stat);
                     let (new_stage, req_par) = sanitise_post_stage(
                         ps.stage,
-                        PT_EXECUTING_SCRIPT,
-                        PT_FINISHED,
-                        PT_QUEUED,
                         dest_exists,
                         nzb.unpack_tried,
                         nzb.par_status,
                     );
-                    host.post_set_int(nzb.post_info_ptr, POST_INT_STAGE, new_stage);
+                    host.post_set_stage(nzb.post_info_ptr, new_stage);
                     if req_par {
                         host.post_set_int(nzb.post_info_ptr, POST_INT_REQUEST_PAR_CHECK, 1);
                     }
@@ -1351,12 +1350,11 @@ impl NzbgetRsPrePostProcessor {
         dq_ptr: usize,
         include_waiting_volume: bool,
     ) -> bool {
-        use crate::queuesubsys_host::PT_UNPACKING;
 
         let jobs = self.active_jobs.lock().unwrap().clone();
         for job_ptr in jobs {
             let nzb = host.nzb_snap(job_ptr, false);
-            if nzb.has_post_info && nzb.post_stage == PT_UNPACKING {
+            if nzb.has_post_info && nzb.post_stage == PostStage::Unpacking {
                 return true;
             }
         }
@@ -1554,7 +1552,7 @@ impl NzbgetRsPrePostProcessor {
         use crate::queuesubsys_host::{
             ASPECT_FILE_COMPLETED, ASPECT_FILE_DELETED, ASPECT_NZB_ADDED, ASPECT_NZB_DELETED,
             ASPECT_NZB_FOUND, ASPECT_NZB_NAMED, ASPECT_URL_ADDED, ASPECT_URL_DELETED,
-            ASPECT_URL_FAILED, ASPECT_URL_FOUND, MK_INFO, PT_LOADING_PARS, PT_VERIFYING_REPAIRED,
+            ASPECT_URL_FAILED, ASPECT_URL_FOUND, MK_INFO,
         };
 
         if host.prepost_is_stopped(self.owner) {
@@ -1599,8 +1597,8 @@ impl NzbgetRsPrePostProcessor {
                         if job_nzb.post_info_ptr != 0 {
                             let ps = host.post_snap(job_nzb.post_info_ptr);
                             if ps.has_post_thread
-                                && ps.stage >= PT_LOADING_PARS
-                                && ps.stage <= PT_VERIFYING_REPAIRED
+                                && ps.stage >= PostStage::LoadingPars
+                                && ps.stage <= PostStage::VerifyingRepaired
                                 && host.repair_add_par(
                                     job_nzb.post_info_ptr,
                                     file_ptr,
@@ -1725,8 +1723,7 @@ impl NzbgetRsPrePostProcessor {
     fn check_request_par(&self, host: &crate::queuesubsys_host::QueueSubsysHost, dq_ptr: usize) {
         use crate::queuesubsys_host::{
             EA_GROUP_RESUME, MK_INFO, NZB_ACT_CLEAR_SCRIPT_STATUSES, PC_MANUAL,
-            POST_INT_FORCE_PAR_FULL, POST_INT_REQUEST_PAR_CHECK, POST_INT_STAGE, POST_INT_WORKING,
-            PT_FINISHED, PT_QUEUED,
+            POST_INT_FORCE_PAR_FULL, POST_INT_REQUEST_PAR_CHECK, POST_INT_WORKING,
         };
 
         let opts = host.opts();
@@ -1756,7 +1753,7 @@ impl NzbgetRsPrePostProcessor {
                 host.nzb_set_par_status(nzb.ptr, NzbParStatus::None);
                 host.post_set_int(ps.ptr, POST_INT_REQUEST_PAR_CHECK, 0);
                 host.nzb_action(nzb.ptr, NZB_ACT_CLEAR_SCRIPT_STATUSES, 0);
-                host.post_set_int(ps.ptr, POST_INT_STAGE, PT_QUEUED);
+                host.post_set_stage(ps.ptr, PostStage::Queued);
                 host.post_set_int(ps.ptr, POST_INT_WORKING, 0);
             } else if act == 2 || act == 3 {
                 host.post_set_int(ps.ptr, POST_INT_REQUEST_PAR_CHECK, 0);
@@ -1767,7 +1764,7 @@ impl NzbgetRsPrePostProcessor {
                     msg.extend_from_slice(&nzb.name);
                     host.nzb_print_message(nzb.ptr, MK_INFO, &msg);
                     host.dq_edit_entry(dq_ptr, nzb.id, EA_GROUP_RESUME, None);
-                    host.post_set_int(ps.ptr, POST_INT_STAGE, PT_FINISHED);
+                    host.post_set_stage(ps.ptr, PostStage::Finished);
                 } else {
                     let mut msg = b"There are no par-files remain for download for ".to_vec();
                     msg.extend_from_slice(&nzb.name);
@@ -1779,9 +1776,7 @@ impl NzbgetRsPrePostProcessor {
     }
 
     fn cleanup_jobs(&self, host: &crate::queuesubsys_host::QueueSubsysHost, dq_ptr: usize) {
-        use crate::queuesubsys_host::{
-            NZB_INT_POST_TOTAL_SEC, POST_INT_STAGE, PT_FINISHED, PT_QUEUED,
-        };
+        use crate::queuesubsys_host::NZB_INT_POST_TOTAL_SEC;
 
         let jobs = self.active_jobs.lock().unwrap().clone();
         let cur_time = host.opts().cur_time;
@@ -1796,7 +1791,6 @@ impl NzbgetRsPrePostProcessor {
                 ps.working,
                 ps.has_post_thread && ps.post_thread_running,
                 ps.stage,
-                PT_FINISHED,
                 ps.deleted,
                 ps.start_time,
                 cur_time,
@@ -1813,13 +1807,13 @@ impl NzbgetRsPrePostProcessor {
                 if is_comp {
                     self.job_completed(host, dq_ptr, job_ptr);
                 } else {
-                    host.post_set_int(ps.ptr, POST_INT_STAGE, PT_QUEUED);
+                    host.post_set_stage(ps.ptr, PostStage::Queued);
                 }
             }
         }
     }
 
-    fn active_job_stages(&self, host: &crate::queuesubsys_host::QueueSubsysHost) -> Vec<i32> {
+    fn active_job_stages(&self, host: &crate::queuesubsys_host::QueueSubsysHost) -> Vec<PostStage> {
         let jobs = self.active_jobs.lock().unwrap().clone();
         let mut stages = Vec::with_capacity(jobs.len());
         for job_ptr in jobs {
@@ -1832,17 +1826,9 @@ impl NzbgetRsPrePostProcessor {
     }
 
     fn can_run_more_jobs(&self, host: &crate::queuesubsys_host::QueueSubsysHost) -> (bool, bool) {
-        use crate::queuesubsys_host::{PT_LOADING_PARS, PT_VERIFYING_REPAIRED};
-        const PT_REPAIRING: i32 = 3;
-        let stages = self.active_job_stages(host);
+                let stages = self.active_job_stages(host);
         let opts = host.opts();
-        can_run_more_jobs(
-            &stages,
-            PT_LOADING_PARS,
-            PT_VERIFYING_REPAIRED,
-            PT_REPAIRING,
-            opts.post_strategy,
-        )
+        can_run_more_jobs(&stages, opts.post_strategy)
     }
 
     fn pick_next_job(
@@ -1911,7 +1897,6 @@ impl NzbgetRsPrePostProcessor {
     }
 
     fn check_post_queue(&self, host: &crate::queuesubsys_host::QueueSubsysHost) {
-        use crate::queuesubsys_host::PT_QUEUED;
 
         host.with_locked_queue(|dq_ptr| {
             let count_before = self.active_jobs.lock().unwrap().len();
@@ -1934,7 +1919,7 @@ impl NzbgetRsPrePostProcessor {
                 if nzb.post_info_ptr != 0 {
                     let ps = host.post_snap(nzb.post_info_ptr);
                     let pause_post = host.opts().pause_post_process;
-                    if ps.stage == PT_QUEUED && (!pause_post || nzb.force_priority) {
+                    if ps.stage == PostStage::Queued && (!pause_post || nzb.force_priority) {
                         self.start_job(host, dq_ptr, nzb.post_info_ptr, allow_par);
                         self.check_request_par(host, dq_ptr);
                         self.cleanup_jobs(host, dq_ptr);
@@ -1957,11 +1942,11 @@ impl NzbgetRsPrePostProcessor {
         &self,
         host: &crate::queuesubsys_host::QueueSubsysHost,
         post_ptr: usize,
-        stage: i32,
+        stage: PostStage,
     ) {
-        use crate::queuesubsys_host::{POST_INT_STAGE, POST_INT_WORKING};
+        use crate::queuesubsys_host::POST_INT_WORKING;
         host.post_set_int(post_ptr, POST_INT_WORKING, 1);
-        host.post_set_int(post_ptr, POST_INT_STAGE, stage);
+        host.post_set_stage(post_ptr, stage);
     }
 
     fn start_job(
@@ -1976,10 +1961,7 @@ impl NzbgetRsPrePostProcessor {
             CTRL_POST_SCRIPT, CTRL_RENAME_PAR, CTRL_RENAME_RAR, CTRL_REPAIR, CTRL_STREAM_REPAIR,
             CTRL_UNPACK, DAF_STREAM, FILE_INT_EXTRA_PRIORITY, FILE_INT_PAUSED, HC_DUPE, MK_INFO,
             MK_WARNING, NZB_INT_CHANGED, PC_AUTO, POST_INT_NEED_PAR_CHECK, POST_INT_NEED_UNPACK,
-            POST_INT_PAR_CANNOT_COVER, POST_INT_REQUEST_PAR_CHECK, PS_DUPE, PT_CLEANING_UP,
-            PT_EXECUTING_SCRIPT, PT_LOADING_PARS, PT_MOVING, PT_PAR_RENAMING,
-            PT_POST_DOWNLOAD_RENAMING, PT_POST_UNPACK_RENAMING, PT_RAR_RENAMING,
-            PT_STREAM_REPAIRING, PT_UNPACKING, RS_NONE,
+            POST_INT_PAR_CANNOT_COVER, POST_INT_REQUEST_PAR_CHECK, PS_DUPE, RS_NONE,
         };
 
         let opts = host.opts();
@@ -2001,7 +1983,7 @@ impl NzbgetRsPrePostProcessor {
             && nzb.delete_status == DeleteStatus::None
             && opts.par_rename
         {
-            self.enter_stage(host, post_ptr, PT_PAR_RENAMING);
+            self.enter_stage(host, post_ptr, PostStage::ParRenaming);
             host.post_controller_start_job(post_ptr, CTRL_RENAME_PAR);
             return;
         }
@@ -2066,7 +2048,7 @@ impl NzbgetRsPrePostProcessor {
                 msg.extend_from_slice(b"%), recovering from duplicates before par-check");
                 host.nzb_print_message(nzb.ptr, MK_INFO, &msg);
                 host.post_set_int(post_ptr, POST_INT_PAR_CANNOT_COVER, 1);
-                self.enter_stage(host, post_ptr, PT_STREAM_REPAIRING);
+                self.enter_stage(host, post_ptr, PostStage::StreamRepairing);
                 host.post_controller_start_job(post_ptr, CTRL_STREAM_REPAIR);
                 return;
             }
@@ -2168,7 +2150,7 @@ impl NzbgetRsPrePostProcessor {
                         host.post_set_int(post_ptr, POST_INT_NEED_PAR_CHECK, 1);
                         return;
                     }
-                    self.enter_stage(host, post_ptr, PT_LOADING_PARS);
+                    self.enter_stage(host, post_ptr, PostStage::LoadingPars);
                     host.post_set_int(post_ptr, POST_INT_NEED_PAR_CHECK, 0);
                     host.post_controller_start_job(post_ptr, CTRL_REPAIR);
                 } else {
@@ -2229,7 +2211,7 @@ impl NzbgetRsPrePostProcessor {
             && nzb.par_status != NzbParStatus::RepairPossible
             && nzb.par_status != NzbParStatus::Manual
         {
-            self.enter_stage(host, post_ptr, PT_STREAM_REPAIRING);
+            self.enter_stage(host, post_ptr, PostStage::StreamRepairing);
             host.post_controller_start_job(post_ptr, CTRL_STREAM_REPAIR);
             return;
         }
@@ -2325,7 +2307,7 @@ impl NzbgetRsPrePostProcessor {
             opts.rar_rename,
         );
         if start_rar_rename {
-            self.enter_stage(host, post_ptr, PT_RAR_RENAMING);
+            self.enter_stage(host, post_ptr, PostStage::RarRenaming);
             host.post_controller_start_job(post_ptr, CTRL_RENAME_RAR);
             return;
         }
@@ -2385,22 +2367,22 @@ impl NzbgetRsPrePostProcessor {
                 return;
             }
             host.post_set_int(post_ptr, POST_INT_NEED_UNPACK, 0);
-            self.enter_stage(host, post_ptr, PT_UNPACKING);
+            self.enter_stage(host, post_ptr, PostStage::Unpacking);
             host.post_controller_start_job(post_ptr, CTRL_UNPACK);
         } else if dec.cleanup != 0 {
-            self.enter_stage(host, post_ptr, PT_CLEANING_UP);
+            self.enter_stage(host, post_ptr, PostStage::CleaningUp);
             host.post_controller_start_job(post_ptr, CTRL_CLEANUP);
         } else if dec.move_inter != 0 {
-            self.enter_stage(host, post_ptr, PT_MOVING);
+            self.enter_stage(host, post_ptr, PostStage::Moving);
             host.post_controller_start_job(post_ptr, CTRL_MOVE);
         } else if dec.post_download_renaming != 0 {
-            self.enter_stage(host, post_ptr, PT_POST_DOWNLOAD_RENAMING);
+            self.enter_stage(host, post_ptr, PostStage::PostDownloadRenaming);
             host.post_controller_start_job(post_ptr, CTRL_POST_RENAME_DL);
         } else if dec.post_unpack_renaming != 0 {
-            self.enter_stage(host, post_ptr, PT_POST_UNPACK_RENAMING);
+            self.enter_stage(host, post_ptr, PostStage::PostUnpackRenaming);
             host.post_controller_start_job(post_ptr, CTRL_POST_RENAME_UNPACK);
         } else {
-            self.enter_stage(host, post_ptr, PT_EXECUTING_SCRIPT);
+            self.enter_stage(host, post_ptr, PostStage::ExecutingScript);
             host.post_controller_start_job(post_ptr, CTRL_POST_SCRIPT);
         }
     }
@@ -2715,15 +2697,15 @@ mod tests {
     #[test]
     fn test_prepost_stage_and_pause() {
         assert_eq!(
-            sanitise_post_stage(11, 11, 12, 0, true, false, NzbParStatus::None),
-            (12, false)
+            sanitise_post_stage(PostStage::ExecutingScript, true, false, NzbParStatus::None),
+            (PostStage::Finished, false)
         );
         assert_eq!(
-            sanitise_post_stage(2, 11, 12, 0, true, true, NzbParStatus::Skipped),
-            (0, true)
+            sanitise_post_stage(PostStage::VerifyingSources, true, true, NzbParStatus::Skipped),
+            (PostStage::Queued, true)
         );
-        assert!(calc_post_pause_state(&[2], true, false, false));
-        assert!(!calc_post_pause_state(&[2], false, true, true));
+        assert!(calc_post_pause_state(&[PostStage::VerifyingSources], true, false, false));
+        assert!(!calc_post_pause_state(&[PostStage::VerifyingSources], false, true, true));
     }
 
     #[test]

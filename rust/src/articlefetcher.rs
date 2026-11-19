@@ -73,9 +73,9 @@ pub trait NntpHost: Send + Sync {
     fn join_group(&self, conn: usize, group: &[u8]) -> Option<Vec<u8>>;
     /// Reply to a request line (`cmd` ends in CRLF), or `None` when the connection failed.
     fn request(&self, conn: usize, cmd: &[u8]) -> Option<Vec<u8>>;
-    /// The next chunk of the article body, either data the connection already
-    /// buffered or a fresh read into `buf`. `None` when the connection is lost.
-    fn read<'a>(&'a self, conn: usize, buf: &'a mut [u8]) -> Option<&'a mut [u8]>;
+    /// Reads the next chunk of the article body into `buf`, data the connection
+    /// already buffered first. Returns its length; `None` when the connection is lost.
+    fn read(&self, conn: usize, buf: &mut [u8]) -> Option<usize>;
     fn disconnect(&self, conn: usize);
     /// Stops a fetch in flight on `conn`, without logging its errors.
     fn cancel(&self, conn: usize);
@@ -204,24 +204,20 @@ impl NntpHost for NativeNntpHost {
         (!resp.is_null()).then(|| unsafe { cstr::owned(resp) })
     }
 
-    fn read<'a>(&'a self, conn: usize, buf: &'a mut [u8]) -> Option<&'a mut [u8]> {
+    fn read(&self, conn: usize, buf: &mut [u8]) -> Option<usize> {
         let c = unsafe { Self::conn(conn) }?;
-        let (buffered, avail) = unsafe { c.drain_read_buffer() };
-        let data: &'a mut [u8] = if avail > 0 && !buffered.is_null() {
-            // SAFETY: the connection's buffer stays put until its next read,
-            // and the caller consumes it before reading again.
-            unsafe { std::slice::from_raw_parts_mut(buffered, avail) }
-        } else {
-            let len = unsafe { c.try_recv(buf) };
-            if len <= 0 {
+        let mut len = unsafe { c.read_buffered(buf) };
+        if len == 0 {
+            let got = unsafe { c.try_recv(buf) };
+            if got <= 0 {
                 return None;
             }
-            &mut buf[..len as usize]
-        };
-        if let Some(sm) = crate::statmeter::active_statmeter() {
-            sm.add_speed_reading_locked(data.len() as c_int);
+            len = got as usize;
         }
-        Some(data)
+        if let Some(sm) = crate::statmeter::active_statmeter() {
+            sm.add_speed_reading_locked(len as c_int);
+        }
+        Some(len)
     }
 
     fn disconnect(&self, conn: usize) {
@@ -811,7 +807,7 @@ impl ArticleFetcher {
             }
 
             let read_started = Instant::now();
-            let Some(chunk) = self.host.read(conn, &mut recv_buf[..read_chunk]) else {
+            let Some(len) = self.host.read(conn, &mut recv_buf[..read_chunk]) else {
                 let mut log = b"Stream repair: connection to ".to_vec();
                 log.extend_from_slice(server_name);
                 log.extend_from_slice(b" lost while fetching ");
@@ -824,7 +820,6 @@ impl ArticleFetcher {
                     ..Default::default()
                 };
             };
-            let len = chunk.len();
 
             if !article_fetch_add_raw_bytes(&mut raw_bytes, len as i64) {
                 let mut log = b"Stream repair: article ".to_vec();
@@ -837,8 +832,8 @@ impl ArticleFetcher {
                 return result;
             }
 
-            let buffer_ptr = chunk.as_mut_ptr();
-            let decoded_len = unsafe { decoder.decode_buffer(buffer_ptr, len as usize) };
+            let buffer_ptr = recv_buf.as_mut_ptr();
+            let decoded_len = unsafe { decoder.decode_buffer(buffer_ptr, len) };
             let declared_range_known =
                 decoder.begin_pos > 0 && decoder.end_pos >= decoder.begin_pos && decoder.size > 0;
             if !article_fetch_header_within_limit(raw_bytes, declared_range_known) {
@@ -1278,7 +1273,7 @@ mod tests {
         fn request(&self, _conn: usize, _cmd: &[u8]) -> Option<Vec<u8>> {
             Some(b"222 0 <seg1@test> body".to_vec())
         }
-        fn read<'a>(&'a self, _conn: usize, buf: &'a mut [u8]) -> Option<&'a mut [u8]> {
+        fn read(&self, _conn: usize, buf: &mut [u8]) -> Option<usize> {
             let wire = TEST_WIRE_PAYLOAD.get().unwrap();
             let pos = TEST_READ_POS.load(Ordering::SeqCst) as usize;
             if pos >= wire.len() {
@@ -1287,7 +1282,7 @@ mod tests {
             let take = (wire.len() - pos).min(buf.len());
             buf[..take].copy_from_slice(&wire[pos..pos + take]);
             TEST_READ_POS.store((pos + take) as i32, Ordering::SeqCst);
-            Some(&mut buf[..take])
+            Some(take)
         }
         fn disconnect(&self, _conn: usize) {}
         fn cancel(&self, _conn: usize) {}
@@ -1349,7 +1344,7 @@ mod tests {
             std::thread::sleep(TIMED_OUT_AFTER + Duration::from_millis(30));
             None
         }
-        fn read<'a>(&'a self, conn: usize, buf: &'a mut [u8]) -> Option<&'a mut [u8]> {
+        fn read(&self, conn: usize, buf: &mut [u8]) -> Option<usize> {
             MockHost.read(conn, buf)
         }
         fn disconnect(&self, _conn: usize) {}

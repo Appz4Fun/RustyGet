@@ -512,16 +512,16 @@ pub fn host_daemon_queue(a1: i32) -> usize {
             let old = DAEMON.swap(alloc_queue() as usize, Ordering::SeqCst);
             unsafe { free_queue(old as *mut Queue) };
             // a reload creates the queue anew: not loaded until it is again
-            crate::ffi::nzbget_rs_thread_count_op(4);
+            crate::ffi::set_queue_loaded(false);
             0
         }
         2 => {
-            crate::ffi::nzbget_rs_thread_count_op(3);
+            crate::ffi::set_queue_loaded(true);
             0
         }
         3 => {
             let old = DAEMON.swap(0, Ordering::SeqCst);
-            crate::ffi::nzbget_rs_thread_count_op(4);
+            crate::ffi::set_queue_loaded(false);
             unsafe { free_queue(old as *mut Queue) };
             0
         }

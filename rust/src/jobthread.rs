@@ -237,7 +237,7 @@ pub unsafe extern "C" fn nzbget_rs_job_free(t: *mut JobThread, kill: c_int) {
         if pt != 0 && thread.running.load(Ordering::SeqCst) {
             let cancelled = unsafe { libc::pthread_cancel(pt as libc::pthread_t) } == 0;
             if cancelled {
-                crate::ffi::nzbget_rs_thread_count_op(-1);
+                crate::ffi::note_thread_cancelled();
             }
         }
     }

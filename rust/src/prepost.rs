@@ -1192,7 +1192,7 @@ impl NzbgetRsPrePostProcessor {
             let jobs = self.active_jobs.lock().unwrap().clone();
             for job_ptr in jobs {
                 let nzb = host.nzb_snap(job_ptr, false);
-                if nzb.post_info_ptr != 0 {
+                if nzb.post_info_ptr.is_some() {
                     host.post_stop_thread(nzb.post_info_ptr);
                 }
             }
@@ -1237,7 +1237,7 @@ impl NzbgetRsPrePostProcessor {
             let jobs = self.active_jobs.lock().unwrap().clone();
             for job_ptr in jobs {
                 let nzb = host.nzb_snap(job_ptr, false);
-                if nzb.post_info_ptr != 0 {
+                if nzb.post_info_ptr.is_some() {
                     let ps = host.post_snap(nzb.post_info_ptr);
                     if ps.has_post_thread {
                         let mut msg = b"Terminating active post-process job for ".to_vec();
@@ -1304,7 +1304,7 @@ impl NzbgetRsPrePostProcessor {
                 {
                     host.nzb_set_direct_unpack_status(nzb_ptr, DirectUnpackStatus::None);
                 }
-                if nzb.post_info_ptr == 0
+                if nzb.post_info_ptr.is_none()
                     && nzb.kind == NK_NZB
                     && !host.nzb_completed_files(nzb_ptr).is_empty()
                     && nzb.delete_status == DeleteStatus::None
@@ -1319,11 +1319,11 @@ impl NzbgetRsPrePostProcessor {
                         continue;
                     }
                     nzb = host.nzb_snap(nzb_ptr, false);
-                    if nzb.post_info_ptr != 0 {
+                    if nzb.post_info_ptr.is_some() {
                         self.queued_jobs.fetch_sub(1, Ordering::AcqRel);
                     }
                 }
-                if nzb.post_info_ptr != 0 {
+                if nzb.post_info_ptr.is_some() {
                     self.queued_jobs.fetch_add(1, Ordering::AcqRel);
                     let ps = host.post_snap(nzb.post_info_ptr);
                     let dest_exists =
@@ -1498,7 +1498,7 @@ impl NzbgetRsPrePostProcessor {
 
             let nzb2 = host.nzb_snap(nzb_ptr, false);
             if nzb2.has_unpack_thread || nzb2.has_live_repair_thread {
-                if nzb2.post_info_ptr != 0 {
+                if nzb2.post_info_ptr.is_some() {
                     host.post_set_int(nzb2.post_info_ptr, POST_INT_WORKING, 1);
                 }
                 self.active_jobs.lock().unwrap().push(nzb_ptr);
@@ -1594,7 +1594,7 @@ impl NzbgetRsPrePostProcessor {
                 for job_ptr in jobs {
                     if job_ptr != 0 && file.nzb_ptr == job_ptr {
                         let job_nzb = host.nzb_snap(job_ptr, false);
-                        if job_nzb.post_info_ptr != 0 {
+                        if job_nzb.post_info_ptr.is_some() {
                             let ps = host.post_snap(job_nzb.post_info_ptr);
                             if ps.has_post_thread
                                 && ps.stage >= PostStage::LoadingPars
@@ -1734,7 +1734,7 @@ impl NzbgetRsPrePostProcessor {
         let jobs = self.active_jobs.lock().unwrap().clone();
         for job_ptr in jobs {
             let nzb = host.nzb_snap(job_ptr, false);
-            if nzb.post_info_ptr == 0 {
+            if nzb.post_info_ptr.is_none() {
                 continue;
             }
             let ps = host.post_snap(nzb.post_info_ptr);
@@ -1782,7 +1782,7 @@ impl NzbgetRsPrePostProcessor {
         let cur_time = host.opts().cur_time;
         for job_ptr in jobs {
             let nzb = host.nzb_snap(job_ptr, false);
-            if nzb.post_info_ptr == 0 {
+            if nzb.post_info_ptr.is_none() {
                 self.active_jobs.lock().unwrap().retain(|&p| p != job_ptr);
                 continue;
             }
@@ -1844,7 +1844,7 @@ impl NzbgetRsPrePostProcessor {
         for qi in 0..qlen {
             let nzb_ptr = host.queue_at(dq_ptr, qi);
             let nzb = host.nzb_snap(nzb_ptr, false);
-            let (working, need_par, need_unpack) = if nzb.post_info_ptr != 0 {
+            let (working, need_par, need_unpack) = if nzb.post_info_ptr.is_some() {
                 let ps = host.post_snap(nzb.post_info_ptr);
                 (ps.working, ps.need_par_check, ps.need_unpack)
             } else {
@@ -1852,13 +1852,13 @@ impl NzbgetRsPrePostProcessor {
             };
             ptrs.push(nzb_ptr);
             // A copy held at the post gate is picked again once the gate lets it through.
-            let dupe_gate_held = nzb.post_info_ptr != 0
+            let dupe_gate_held = nzb.post_info_ptr.is_some()
                 && !working
                 && dupe_gate_has(&DUPE_GATE_HELD, nzb.id)
                 && dupe_post_gate_host(host, dq_ptr, &nzb).0 != GateVerdict::Pass;
             cands.push(RsPostJobCandidate {
                 dupe_gate_held: u8::from(dupe_gate_held),
-                has_post_info: u8::from(nzb.post_info_ptr != 0),
+                has_post_info: u8::from(nzb.post_info_ptr.is_some()),
                 working: u8::from(working),
                 has_queue_script_job: 0,
                 direct_unpack_running: u8::from(
@@ -1916,7 +1916,7 @@ impl NzbgetRsPrePostProcessor {
                 self.active_jobs.lock().unwrap().push(post_job);
 
                 let nzb = host.nzb_snap(post_job, false);
-                if nzb.post_info_ptr != 0 {
+                if nzb.post_info_ptr.is_some() {
                     let ps = host.post_snap(nzb.post_info_ptr);
                     let pause_post = host.opts().pause_post_process;
                     if ps.stage == PostStage::Queued && (!pause_post || nzb.force_priority) {
@@ -1941,7 +1941,7 @@ impl NzbgetRsPrePostProcessor {
     fn enter_stage(
         &self,
         host: &crate::queuesubsys_host::QueueSubsysHost,
-        post_ptr: usize,
+        post_ptr: crate::queuesubsys_host::PostRef,
         stage: PostStage,
     ) {
         use crate::queuesubsys_host::POST_INT_WORKING;
@@ -1953,7 +1953,7 @@ impl NzbgetRsPrePostProcessor {
         &self,
         host: &crate::queuesubsys_host::QueueSubsysHost,
         dq_ptr: usize,
-        post_ptr: usize,
+        post_ptr: crate::queuesubsys_host::PostRef,
         allow_par: bool,
     ) {
         use crate::queuesubsys_host::{
@@ -2452,7 +2452,7 @@ impl NzbgetRsPrePostProcessor {
                 continue;
             }
             let nzb = host.nzb_snap(nzb_ptr, false);
-            if nzb.post_info_ptr == 0 {
+            if nzb.post_info_ptr.is_none() {
                 continue;
             }
             let ps = host.post_snap(nzb.post_info_ptr);

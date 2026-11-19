@@ -372,7 +372,7 @@ impl NzbgetRsStreamRepairCtrl {
                     host.nzb_add_message(nzb, kind, text);
                 }
             });
-        } else if q.post_ptr() != 0 {
+        } else if q.post_ptr().is_some() {
             let nzb = host.post_snap(q.post_ptr()).nzb_ptr;
             if nzb != 0 {
                 host.nzb_add_message(nzb, kind, text);
@@ -396,7 +396,7 @@ impl NzbgetRsStreamRepairCtrl {
     fn set_post_progress(&self, q: JobQueue<'_>, label: &[u8], stage_progress: i32) {
         use crate::queuesubsys_host::POST_INT_STAGE_PROGRESS;
         let post_ptr = q.post_ptr();
-        if post_ptr == 0 {
+        if post_ptr.is_none() {
             return;
         }
         let label = cstr::until_nul(label);
@@ -424,7 +424,7 @@ impl NzbgetRsStreamRepairCtrl {
             n
         } else {
             let post_ptr = q.post_ptr();
-            if post_ptr == 0 {
+            if post_ptr.is_none() {
                 return None;
             }
             let n = host.post_snap(post_ptr).nzb_ptr;
@@ -1391,7 +1391,7 @@ impl NzbgetRsStreamRepairCtrl {
         host.with_locked_queue(|dq_ptr| {
             let nzb = if self.live_mode {
                 host.queue_find_by_id(dq_ptr, q.nzb_id())
-            } else if q.post_ptr() != 0 {
+            } else if q.post_ptr().is_some() {
                 host.post_snap(q.post_ptr()).nzb_ptr
             } else {
                 0
@@ -2015,7 +2015,7 @@ impl NzbgetRsStreamRepairCtrl {
             let ns = host.nzb_snap(nzb_ptr, false);
             // A volume arrived while this pass ran and direct unpack still waits on a dead
             // volume: one more pass may now place it for the borrow.
-            if ns.post_info_ptr == 0
+            if ns.post_info_ptr.is_none()
                 && take_dead_volume_rerun(ns.id)
                 && direct_unpack_waits_on_dead_volume(ns.id)
             {
@@ -2023,7 +2023,7 @@ impl NzbgetRsStreamRepairCtrl {
             }
             // A direct unpack parked on damaged volumes waits for post-processing itself, so
             // it will not release the job: the ending live repair has to.
-            if ns.post_info_ptr != 0
+            if ns.post_info_ptr.is_some()
                 && (!ns.has_unpack_thread || direct_unpack_awaiting_repair(ns.id))
             {
                 host.post_set_int(ns.post_info_ptr, POST_INT_WORKING, 0);

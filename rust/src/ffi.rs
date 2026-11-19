@@ -3418,11 +3418,6 @@ pub(crate) fn set_queue_loaded(loaded: bool) {
     QUEUE_LOADED.store(loaded, std::sync::atomic::Ordering::SeqCst);
 }
 
-#[cfg(unix)]
-pub(crate) fn script_host_cb() -> Option<crate::procrun::NzbgetRsScriptHostFn> {
-    Some(crate::procrun::active_script_host_cb)
-}
-
 pub(crate) fn build_version_cstr() -> &'static CStr {
     BUILD_VERSION.get().map_or(c"", CString::as_c_str)
 }

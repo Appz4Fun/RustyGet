@@ -11,6 +11,7 @@
 //! queue directory, labels, and picking a duplicate's file by content. Par2
 //! packets, file signatures and fingerprints come from par-rs.
 
+use crate::queuesubsys_host::NzbRef;
 use crate::status::DeleteStatus;
 use std::collections::HashMap;
 use std::fs::OpenOptions;
@@ -1206,7 +1207,7 @@ fn twin_attempts(nzb_id: i32) -> i32 {
 
 #[cfg(unix)]
 struct TwinQueueItem {
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
     id: i32,
     queued: bool,
     rank: i32,
@@ -1253,8 +1254,8 @@ fn run_service_work_locked(
     let mut keys: std::collections::BTreeMap<Vec<u8>, Vec<TwinQueueItem>> =
         std::collections::BTreeMap::new();
 
-    let mut fetch_item = |nzb_ptr: usize, queued: bool, rank: i32| {
-        if nzb_ptr == 0 {
+    let mut fetch_item = |nzb_ptr: NzbRef, queued: bool, rank: i32| {
+        if nzb_ptr.is_none() {
             return;
         }
         let snap = qh.nzb_snap(nzb_ptr, false);
@@ -1323,7 +1324,7 @@ fn run_service_work_locked(
     for idx in 0..history_len {
         let hi = qh.history_at(dq_ptr, idx);
         if hi.kind == crate::queuesubsys_host::HK_NZB {
-            fetch_item(hi.inner_ptr, false, (idx + 1) as i32);
+            fetch_item(hi.nzb(), false, (idx + 1) as i32);
         }
     }
 
@@ -1626,7 +1627,7 @@ fn set_inner_params(param: &[u8], digests: &[(i32, String)]) {
         let mut any = false;
         for (id, digest) in digests {
             let nzb_ptr = find_nzb_in_queue_or_history(&qh, dq_ptr, *id);
-            if nzb_ptr != 0 {
+            if nzb_ptr.is_some() {
                 qh.nzb_set_param(nzb_ptr, param, Some(digest.as_bytes()));
                 any = true;
             }
@@ -1646,22 +1647,22 @@ fn find_nzb_in_queue_or_history(
     qh: &crate::queuesubsys_host::QueueSubsysHost,
     dq_ptr: usize,
     nzb_id: i32,
-) -> usize {
+) -> NzbRef {
     let q = qh.queue_find_by_id(dq_ptr, nzb_id);
-    if q != 0 {
+    if q.is_some() {
         return q;
     }
     let hlen = qh.history_len(dq_ptr);
     for idx in 0..hlen {
         let hi = qh.history_at(dq_ptr, idx);
         if hi.kind == crate::queuesubsys_host::HK_NZB
-            && hi.inner_ptr != 0
-            && qh.nzb_snap(hi.inner_ptr, false).id == nzb_id
+            && hi.nzb().is_some()
+            && qh.nzb_snap(hi.nzb(), false).id == nzb_id
         {
-            return hi.inner_ptr;
+            return hi.nzb();
         }
     }
-    0
+    NzbRef::NONE
 }
 
 #[cfg(unix)]
@@ -1771,7 +1772,7 @@ fn run_twin_job(token: usize, qdir: &[u8]) {
             };
             qh.with_locked_queue(|dq_ptr| {
                 let nzb_ptr = find_nzb_in_queue_or_history(&qh, dq_ptr, spec.nzb_id);
-                if nzb_ptr == 0 {
+                if nzb_ptr.is_none() {
                     return false;
                 }
                 qh.nzb_set_param(nzb_ptr, b"DupeSampled", Some(val));
@@ -2185,7 +2186,7 @@ fn run_twin_job(token: usize, qdir: &[u8]) {
     let stored_ok = if let Some(qh) = crate::ffi::queue_host() {
         qh.with_locked_queue(|dq_ptr| {
             let nzb_ptr = find_nzb_in_queue_or_history(&qh, dq_ptr, spec.nzb_id);
-            if nzb_ptr == 0 {
+            if nzb_ptr.is_none() {
                 return false;
             }
             let name = qh.nzb_snap(nzb_ptr, false).name;

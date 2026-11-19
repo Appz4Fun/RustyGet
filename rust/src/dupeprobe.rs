@@ -715,7 +715,7 @@ impl NzbgetRsDupeProbe {
                 if outcome == 3 {
                     qh.with_locked_queue(|dq_ptr| {
                         let nzb_ptr = qh.queue_find_by_id(dq_ptr, nzb_id);
-                        if nzb_ptr != 0 {
+                        if nzb_ptr.is_some() {
                             qh.nzb_set_int(
                                 nzb_ptr,
                                 crate::queuesubsys_host::NZB_INT_DEAD_PICK_PROBED,
@@ -731,7 +731,7 @@ impl NzbgetRsDupeProbe {
                 } else {
                     qh.with_locked_queue(|dq_ptr| {
                         let nzb_ptr = qh.queue_find_by_id(dq_ptr, nzb_id);
-                        if nzb_ptr != 0 {
+                        if nzb_ptr.is_some() {
                             qh.nzb_print_message(nzb_ptr, crate::queuesubsys_host::MK_INFO, &text);
                         } else {
                             let mut d = format!("Dupe probe of download {nzb_id}: ").into_bytes();
@@ -808,8 +808,8 @@ fn probe_recheck_host(
     let mut found_nzb = None;
     for i in 0..hist_len {
         let hi = qh.history_at(dq_ptr, i);
-        if hi.kind == crate::queuesubsys_host::HK_NZB && hi.inner_ptr != 0 {
-            let snap = qh.nzb_snap(hi.inner_ptr, false);
+        if hi.kind == crate::queuesubsys_host::HK_NZB && hi.nzb().is_some() {
+            let snap = qh.nzb_snap(hi.nzb(), false);
             if snap.id == nzb_id {
                 found_hi = Some(hi);
                 found_nzb = Some(snap);
@@ -833,9 +833,9 @@ fn probe_recheck_host(
         }
     }
     let (action, text) = eval_recheck_outcome(existing, sampled, reached_servers, &dup_name);
-    qh.nzb_print_message(hi.inner_ptr, crate::queuesubsys_host::MK_INFO, &text);
+    qh.nzb_print_message(hi.nzb(), crate::queuesubsys_host::MK_INFO, &text);
     if action == 1 {
-        qh.nzb_set_param(hi.inner_ptr, b"*DupeRecheck", None);
+        qh.nzb_set_param(hi.nzb(), b"*DupeRecheck", None);
     } else if action == 3 {
         qh.dq_edit_list_single_id(
             dq_ptr,

@@ -4,6 +4,7 @@
 //! for PAR2 recovery volume selection, twin PAR2 index/volume evaluation, file CRC
 //! status resolution, progress/stage transitions, and pause timestamp adjustment.
 
+use crate::queuesubsys_host::NzbRef;
 use crate::queuesubsys_host::FileRef;
 use crate::cstr;
 use crate::status::{DupeMode, NzbParStatus, ParCheckerStatus, PostStage};
@@ -363,7 +364,7 @@ fn msg_1023(bytes: &[u8]) -> &[u8] {
 }
 
 struct CtrlSnapshot {
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
     checker_status: ParCheckerStatus,
     checker_stage: i32,
     file_progress: i32,
@@ -477,7 +478,7 @@ fn inspect_ctrl(par_checker: &crate::postproc::NzbgetRsParChecker, q: JobQueue<'
 }
 
 #[cfg(unix)]
-fn inspect_nzb(host: &QueueSubsysHost, nzb_ptr: usize) -> NzbSnapshot {
+fn inspect_nzb(host: &QueueSubsysHost, nzb_ptr: NzbRef) -> NzbSnapshot {
     let ns = host.nzb_snap(nzb_ptr, false);
     let twin_files = host.nzb_get_param(nzb_ptr, b"DupeFiles");
     NzbSnapshot {
@@ -506,7 +507,7 @@ fn inspect_nzb(host: &QueueSubsysHost, nzb_ptr: usize) -> NzbSnapshot {
 }
 
 #[cfg(unix)]
-fn file_entry(host: &QueueSubsysHost, nzb_ptr: usize, idx: usize) -> FileEntry {
+fn file_entry(host: &QueueSubsysHost, nzb_ptr: NzbRef, idx: usize) -> FileEntry {
     let ptr = host.nzb_file_at(nzb_ptr, idx);
     let fs = host.file_snap(ptr);
     FileEntry {
@@ -521,14 +522,14 @@ fn file_entry(host: &QueueSubsysHost, nzb_ptr: usize, idx: usize) -> FileEntry {
 
 /// Unpauses the file at `idx` of the nzb and gives it extra priority.
 #[cfg(unix)]
-fn unpause_file(host: &QueueSubsysHost, nzb_ptr: usize, idx: usize) {
+fn unpause_file(host: &QueueSubsysHost, nzb_ptr: NzbRef, idx: usize) {
     let ptr = host.nzb_file_at(nzb_ptr, idx);
     host.file_set_int(ptr, FILE_INT_PAUSED, 0);
     host.file_set_int(ptr, FILE_INT_EXTRA_PRIORITY, 1);
 }
 
 #[cfg(unix)]
-fn completed_entry(host: &QueueSubsysHost, nzb_ptr: usize, idx: usize) -> CompletedEntry {
+fn completed_entry(host: &QueueSubsysHost, nzb_ptr: NzbRef, idx: usize) -> CompletedEntry {
     let cf = host.nzb_completed_file_at(nzb_ptr, idx);
     CompletedEntry {
         id: cf.id,
@@ -539,14 +540,14 @@ fn completed_entry(host: &QueueSubsysHost, nzb_ptr: usize, idx: usize) -> Comple
     }
 }
 
-/// The nzb at history index `idx`, or `0` when that history entry is not an nzb.
+/// The nzb at history index `idx`, or [`NzbRef::NONE`] when that history entry is not an nzb.
 #[cfg(unix)]
-fn history_nzb(host: &QueueSubsysHost, dq_ptr: usize, idx: usize) -> usize {
+fn history_nzb(host: &QueueSubsysHost, dq_ptr: usize, idx: usize) -> NzbRef {
     let h = host.history_at(dq_ptr, idx);
     if h.kind == HK_NZB {
-        h.inner_ptr
+        h.nzb()
     } else {
-        0
+        NzbRef::NONE
     }
 }
 
@@ -743,7 +744,7 @@ impl NzbgetRsRepairController {
 
     fn find_pars_pass(
         q: JobQueue<'_>,
-        nzb_ptr: usize,
+        nzb_ptr: NzbRef,
         nzb_name: &[u8],
         file_list_len: usize,
         block_size: i64,
@@ -1086,7 +1087,7 @@ impl NzbgetRsRepairController {
             let mut dupes: Vec<(i32, Vec<u8>)> = Vec::new();
             for h_idx in 0..hist_len {
                 let item_ptr = history_nzb(q.host, dq_ptr, h_idx);
-                if item_ptr == 0 {
+                if item_ptr.is_none() {
                     continue;
                 }
                 let item = inspect_nzb(q.host, item_ptr);
@@ -1139,7 +1140,7 @@ impl NzbgetRsRepairController {
                 if src.used_blocks > 0 {
                     for h_idx in 0..hist_len {
                         let item_ptr = history_nzb(q.host, dq_ptr, h_idx);
-                        if item_ptr != 0 {
+                        if item_ptr.is_some() {
                             let item = inspect_nzb(q.host, item_ptr);
                             if item.id == src.id {
                                 q.host.nzb_set_int(
@@ -1213,8 +1214,8 @@ impl NzbgetRsRepairController {
             let h_len = q.host.history_len(dq_ptr);
             let mut out = Vec::new();
 
-            let mut consider = |other_ptr: usize| {
-                if other_ptr == 0 {
+            let mut consider = |other_ptr: NzbRef| {
+                if other_ptr.is_none() {
                     return;
                 }
                 let other = inspect_nzb(q.host, other_ptr);

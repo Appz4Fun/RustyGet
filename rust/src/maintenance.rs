@@ -207,7 +207,7 @@ pub(crate) struct NzbgetRsMaintenanceEnv {
     pub s1: *const c_char,
     pub s2: *const c_char,
     pub s3: *const c_char,
-    pub out_buf: *mut crate::ffi::RsBuf,
+    pub out_buf: *mut Vec<u8>,
     pub emit_ctx: *mut c_void,
     pub emit_cb: Option<crate::xmlrpc_format::NzbgetRsXmlRpcEmitFn>,
     pub script_host: Option<&'static dyn crate::procrun::ScriptHost>,
@@ -1094,7 +1094,7 @@ pub(crate) unsafe fn nzbget_rs_maintenance_exec(
                     return 0;
                 }
                 if !e.out_buf.is_null() {
-                    *e.out_buf = crate::ffi::into_buf(acc);
+                    *e.out_buf = acc;
                 }
                 1
             }
@@ -1270,11 +1270,7 @@ mod tests {
 
                 let mut web_dir_c = dir.to_str().unwrap().as_bytes().to_vec();
                 web_dir_c.push(0);
-                let mut out_buf = crate::ffi::RsBuf {
-                    data: std::ptr::null_mut(),
-                    len: 0,
-                    cap: 0,
-                };
+                let mut out_buf = Vec::new();
                 let mut sentinel = 1u8;
                 let check_env = NzbgetRsMaintenanceEnv {
                     ctx: (&mut sentinel as *mut u8).cast(),
@@ -1304,9 +1300,7 @@ mod tests {
                         && m.as_slice() == b"Command [UPDATEINFO]version=27.0 detected"),
                     "CheckUpdates must log through the script host"
                 );
-                let out_str =
-                    std::slice::from_raw_parts(out_buf.data.cast::<u8>(), out_buf.len).to_vec();
-                crate::ffi::nzbget_rs_free(out_buf);
+                let out_str = out_buf;
                 assert!(
                     out_str
                         .windows(b"version=27.0".len())

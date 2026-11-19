@@ -3,7 +3,7 @@
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::io::Write;
 
-use crate::ffi::{input, nzbget_rs_free, RsBuf};
+use crate::ffi::input;
 
 #[repr(C)]
 pub struct NzbgetRsRpcStatusInput {
@@ -245,7 +245,7 @@ pub type NzbgetRsXmlRpcActionFn = unsafe extern "C" fn(
     params_len: usize,
     out_u32: *mut u32,
     out_f64: *mut f64,
-    out_buf: *mut RsBuf,
+    out_buf: *mut Vec<u8>,
 ) -> c_int;
 
 pub type NzbgetRsXmlRpcEmitFn = unsafe extern "C" fn(
@@ -4719,18 +4719,6 @@ fn to_c_vec(bytes: &[u8]) -> Vec<u8> {
     out
 }
 
-unsafe fn take_rs_buf(buf: RsBuf) -> Vec<u8> {
-    let out = if !buf.data.is_null() && buf.len > 0 {
-        unsafe { std::slice::from_raw_parts(buf.data.cast::<u8>(), buf.len).to_vec() }
-    } else {
-        Vec::new()
-    };
-    unsafe {
-        nzbget_rs_free(buf);
-    }
-    out
-}
-
 struct XmlRpcHost<'a> {
     ctx: *mut c_void,
     debug_build: bool,
@@ -4785,7 +4773,7 @@ impl<'a> XmlRpcHost<'a> {
         params: &[NzbgetRsRpcParamItem],
         out_u32: *mut u32,
         out_f64: *mut f64,
-        out_buf: *mut RsBuf,
+        out_buf: *mut Vec<u8>,
     ) -> c_int {
         let Some(cb) = self.action_cb else {
             return 0;
@@ -5327,11 +5315,7 @@ unsafe fn execute_xml_command(
         }
         // sysinfo
         9 => {
-            let mut out_buf = RsBuf {
-                data: std::ptr::null_mut(),
-                len: 0,
-                cap: 0,
-            };
+            let mut out_buf = Vec::new();
             unsafe {
                 host.call_action(
                     8,
@@ -5351,16 +5335,12 @@ unsafe fn execute_xml_command(
                     std::ptr::null_mut(),
                     &mut out_buf,
                 );
-                (false, take_rs_buf(out_buf))
+                (false, out_buf)
             }
         }
         // systemhealth
         10 => {
-            let mut out_buf = RsBuf {
-                data: std::ptr::null_mut(),
-                len: 0,
-                cap: 0,
-            };
+            let mut out_buf = Vec::new();
             let rc = unsafe {
                 host.call_action(
                     9,
@@ -5381,7 +5361,7 @@ unsafe fn execute_xml_command(
                     &mut out_buf,
                 )
             };
-            let bytes = unsafe { take_rs_buf(out_buf) };
+            let bytes = out_buf;
             if rc == 0 {
                 err_resp(1, b"System health check is disabled in configuration")
             } else {
@@ -5996,11 +5976,7 @@ unsafe fn execute_xml_command(
                 return err_resp(2, b"Invalid parameter (InfoName)");
             };
             let info_c = to_c_vec(&cur.decode_at(info_off, is_json));
-            let mut out_buf = RsBuf {
-                data: std::ptr::null_mut(),
-                len: 0,
-                cap: 0,
-            };
+            let mut out_buf = Vec::new();
             let ok = unsafe {
                 host.call_action(
                     18,
@@ -6021,7 +5997,7 @@ unsafe fn execute_xml_command(
                     &mut out_buf,
                 )
             };
-            let bytes = unsafe { take_rs_buf(out_buf) };
+            let bytes = out_buf;
             if ok == 0 {
                 err_resp(3, b"Could not read url")
             } else {
@@ -6033,11 +6009,7 @@ unsafe fn execute_xml_command(
         }
         // checkupdates
         43 => {
-            let mut out_buf = RsBuf {
-                data: std::ptr::null_mut(),
-                len: 0,
-                cap: 0,
-            };
+            let mut out_buf = Vec::new();
             let ok = unsafe {
                 host.call_action(
                     19,
@@ -6058,7 +6030,7 @@ unsafe fn execute_xml_command(
                     &mut out_buf,
                 )
             };
-            let bytes = unsafe { take_rs_buf(out_buf) };
+            let bytes = out_buf;
             if ok == 0 {
                 err_resp(3, b"Could not read update info from update-info-script")
             } else {
@@ -6195,11 +6167,7 @@ unsafe fn execute_xml_command(
                 RPC_JSON_LIMITS,
                 |op_kind, job_id| {
                     let j_c = job_id.map(to_c_vec);
-                    let mut out_buf = RsBuf {
-                        data: std::ptr::null_mut(),
-                        len: 0,
-                        cap: 0,
-                    };
+                    let mut out_buf = Vec::new();
                     unsafe {
                         host.call_action(
                             22,
@@ -6219,7 +6187,7 @@ unsafe fn execute_xml_command(
                             std::ptr::null_mut(),
                             &mut out_buf,
                         );
-                        take_rs_buf(out_buf)
+                        out_buf
                     }
                 },
             )
@@ -6247,11 +6215,7 @@ unsafe fn execute_xml_command(
                     let pass_c = to_c_vec(&ts.password);
                     let cipher_c = to_c_vec(&ts.cipher);
                     let address_c = to_c_vec(&ts.address);
-                    let mut out_buf = RsBuf {
-                        data: std::ptr::null_mut(),
-                        len: 0,
-                        cap: 0,
-                    };
+                    let mut out_buf = Vec::new();
                     let ok = unsafe {
                         host.call_action(
                             23,
@@ -6272,7 +6236,7 @@ unsafe fn execute_xml_command(
                             &mut out_buf,
                         )
                     };
-                    let err_bytes = unsafe { take_rs_buf(out_buf) };
+                    let err_bytes = out_buf;
                     let text: &[u8] = if ok != 0 {
                         b""
                     } else if err_bytes.is_empty() {
@@ -6293,11 +6257,7 @@ unsafe fn execute_xml_command(
             let Some(server_id) = cur.next_int() else {
                 return err_resp(2, b"Invalid parameter: Server ID");
             };
-            let mut out_buf = RsBuf {
-                data: std::ptr::null_mut(),
-                len: 0,
-                cap: 0,
-            };
+            let mut out_buf = Vec::new();
             let ok = unsafe {
                 host.call_action(
                     24,
@@ -6318,7 +6278,7 @@ unsafe fn execute_xml_command(
                     &mut out_buf,
                 )
             };
-            let err_bytes = unsafe { take_rs_buf(out_buf) };
+            let err_bytes = out_buf;
             if ok == 0 {
                 err_resp(2, &err_bytes)
             } else {
@@ -7032,7 +6992,7 @@ mod remote_xmlrpc_tests {
                                         id_opt.and_then(|s| std::ffi::CString::new(s).ok());
                                     let id_ptr =
                                         id_cstr.as_ref().map_or(std::ptr::null(), |c| c.as_ptr());
-                                    let buf = unsafe {
+                                    unsafe {
                                         match op_kind {
                                             0 => match id_opt.and_then(|s| std::str::from_utf8(s).ok()?.parse().ok()) {
                                                 Some(server) => crate::ffi::nzbget_rs_tls_cipher_start_server(server),
@@ -7041,13 +7001,7 @@ mod remote_xmlrpc_tests {
                                             1 => crate::ffi::nzbget_rs_tls_cipher_status(id_ptr),
                                             _ => crate::ffi::nzbget_rs_tls_cipher_cancel(id_ptr),
                                         }
-                                    };
-                                    let out = unsafe {
-                                        std::slice::from_raw_parts(buf.data as *const u8, buf.len)
-                                            .to_vec()
-                                    };
-                                    unsafe { crate::ffi::nzbget_rs_free(buf) };
-                                    out
+                                    }
                                 },
                             )
                         }
@@ -7718,7 +7672,7 @@ mod remote_xmlrpc_tests {
             _params_len: usize,
             out_u32: *mut u32,
             _out_f64: *mut f64,
-            _out_buf: *mut RsBuf,
+            _out_buf: *mut Vec<u8>,
         ) -> c_int {
             let state = unsafe { &mut *(ctx as *mut (i32, Vec<u8>, bool)) };
             match op {

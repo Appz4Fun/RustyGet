@@ -874,10 +874,13 @@ pub unsafe extern "C" fn nzbget_rs_post_free(p: *mut Post) {
 }
 
 /// A copy of the progress label: it may change on another thread.
-pub unsafe extern "C" fn nzbget_rs_post_label(p: *const Post) -> crate::ffi::RsBuf {
+///
+/// # Safety
+/// `p` points to a live post job.
+pub unsafe fn nzbget_rs_post_label(p: *const Post) -> Vec<u8> {
     let post = unsafe { &*p };
     let l = post.lists.lock().unwrap_or_else(|e| e.into_inner());
-    crate::ffi::into_buf(l.label.as_bytes().to_vec())
+    l.label.as_bytes().to_vec()
 }
 
 /// Fields 0-19: 0 stage, 1 working, 2 deleted, 3 request par check,
@@ -2993,12 +2996,7 @@ mod tests {
             assert_eq!(nzbget_rs_post_op(p, 0, 14, 0, ns, &mut out), 750);
             assert_eq!(nzbget_rs_post_op(p, 0, 99, 0, ns, &mut out), 0);
             nzbget_rs_post_op(p, 11, 0, 0, c"Unpacking".as_ptr(), &mut out);
-            let b = nzbget_rs_post_label(p);
-            assert_eq!(
-                std::slice::from_raw_parts(b.data.cast::<u8>(), b.len),
-                b"Unpacking"
-            );
-            crate::ffi::nzbget_rs_free(b);
+            assert_eq!(nzbget_rs_post_label(p), b"Unpacking");
             nzbget_rs_post_op(p, 22, 0, 0, c"a.par2".as_ptr(), &mut out);
             assert_eq!(nzbget_rs_post_op(p, 20, 0, 0, ns, &mut out), 1);
             assert_eq!(nzbget_rs_post_op(p, 21, 0, 0, ns, &mut out), 0);
@@ -3207,7 +3205,7 @@ mod tests {
                 std::ptr::null_mut(),
             );
             assert_eq!((ints[19], ints[20], i64s[2]), (0, 0, 99));
-            assert_eq!(nzbget_rs_post_label(p).len, 0);
+            assert!(nzbget_rs_post_label(p).is_empty());
             op(4, 0, 0, ns, [77i64].as_mut_ptr(), nsn);
             assert_eq!(post_get(p, 18), 77);
             op(7, -1, 0, ns, ni, nsn);

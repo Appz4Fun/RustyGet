@@ -16,8 +16,7 @@ Main documentation is available on the NZBGet.com website - [https://nzbget.com/
 
 NZBGet natively supports for multiple platforms and build options, so each platform has their own development documenation, including:
 
-- [POSIX](POSIX.md)
-- [macOS](MACOS.md)
+- [Linux and macOS](../README.md#build-and-run)
 - [Docker](https://github.com/nzbgetcom/nzbget/blob/develop/docker/README.md)
 
 ### Branches naming policy ###
@@ -44,8 +43,8 @@ After the release has been published (from the `main` branch), the minor version
 
 List of files to change version:
 
-1. CMakeLists.txt - `project` block
-2. platforms/macos/NZBGet-Info.plist - `CFBundleShortVersionString` block
+1. rust/src/ffi.rs - `DAEMON_VERSION` constant (the version the daemon reports)
+2. justfile - `version` line
 
 ### WebUI Internationalization (i18n)
 

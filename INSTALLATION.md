@@ -1,9 +1,6 @@
 ## Platforms
 
-Articles below provide detailed information on manual compilation of NZBGet for specific platforms:
-
- - [Linux](docs/POSIX.md)
- - [macOS](docs/MACOS.md)
+RustyGet builds from source on Linux and macOS with `just` and Rust. See [Build and run](README.md#build-and-run).
 
 ## Server location data
 

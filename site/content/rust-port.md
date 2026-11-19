@@ -25,7 +25,7 @@ When a port finds a bug in the old code, the port keeps the bug, and the fix fol
 
 On the main branch, about 222,000 lines of Rust in `rust/src/` do the work, and no C++ is left: Cargo builds the `rustyget` binary from Rust alone, with `rust/entry.rs` as its entry point. The last C++ files, the entry shim `daemon/main/rustyget.cpp`, the glue header `daemon/util/Util.h` and the C headers in `rust/include/`, are gone.
 
-The build needs no C++ compiler. Several dependencies are already gone, among them CMake, Boost, PAR2-Turbo, libxml2, zlib, ncurses, and the external `unrar` and `7z` programs. The binary links OpenSSL for TLS, and the Rust `zstd` crate builds the C zstd library. The macOS app in `platforms/macos/` is Objective-C.
+The build needs no C++ compiler. Several dependencies are already gone, among them CMake, Boost, PAR2-Turbo, libxml2, zlib, ncurses, and the external `unrar` and `7z` programs. The binary links OpenSSL for TLS, and the Rust `zstd` crate builds the C zstd library.
 
 The detailed inventories in the repository, [the migration status](https://github.com/Appz4Fun/RustyGet/blob/main/docs/RUST_MIGRATION_STATUS.md), [the caller boundary map](https://github.com/Appz4Fun/RustyGet/blob/main/docs/rust-migration/BOUNDARY_MAP.md), and [the dependency retirement audit](https://github.com/Appz4Fun/RustyGet/blob/main/docs/rust-migration/DEPENDENCY_RETIREMENT.md), date from before most of the C++ was removed, so they list far more open work than remains.
 

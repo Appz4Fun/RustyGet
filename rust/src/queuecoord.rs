@@ -1264,6 +1264,17 @@ pub fn discard_downloaded_articles_counters(
 const DUPE_FAILOVER_SAMPLE: i32 = 32;
 #[cfg(unix)]
 const BACKUP_LEAD: i32 = 100;
+
+/// How long a backup that just reached history may stay of unknown kind before a download
+/// that only looks doomed fails over to it: classifying it (a nested alt, say) takes a few
+/// seconds, and failing over first throws away an extraction the backup could have fed.
+const BACKUP_CLASSIFY_GRACE_SEC: i64 = 120;
+
+/// Whether a backup parked at `parked_at` (Unix seconds) is still too new to tell whether it
+/// lends: its kind is unknown and it arrived under [`BACKUP_CLASSIFY_GRACE_SEC`] ago.
+fn backup_still_unclassified(kind: crate::donorkind::DonorKind, parked_at: i64, now: i64) -> bool {
+    kind == crate::donorkind::DonorKind::Unknown && now - parked_at < BACKUP_CLASSIFY_GRACE_SEC
+}
 #[cfg(unix)]
 const DUPE_PROBE_SAMPLE_COUNT: i32 = 10;
 #[cfg(unix)]
@@ -4820,7 +4831,9 @@ impl NzbgetRsQueueCoordinator {
                 &nzb.name,
                 &nzb.dupe_key,
             ) {
-                if backup_cannot_lend(host, &nzb, &backup_nzb) {
+                if backup_cannot_lend(host, &nzb, &backup_nzb)
+                    && !crate::dupecoord::locked_host(host, backup_nzb.ptr)
+                {
                     if let Some(g) = KEPT_FOR_BORROWING
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
@@ -4878,6 +4891,8 @@ impl NzbgetRsQueueCoordinator {
             return;
         }
 
+        // A copy whose archive needs a password nobody has can never be extracted: failing over
+        // to it would throw this download away for nothing.
         let backup = crate::dupecoord::find_dupe_backup_host(
             host,
             opts,
@@ -4885,8 +4900,9 @@ impl NzbgetRsQueueCoordinator {
             nzb.ptr,
             &nzb.name,
             &nzb.dupe_key,
-        );
-        let Some((_, backup_nzb)) = backup else {
+        )
+        .filter(|(_, b)| !crate::dupecoord::locked_host(host, b.ptr));
+        let Some((backup_hi, backup_nzb)) = backup else {
             let attempted = nzb.dupe_attempted_articles + nzb.dupe_unsourced_articles;
             if should_park_dead_without_backup(
                 opts.dupe_article_fallback != crate::queuesubsys_host::DAF_NONE,
@@ -4997,6 +5013,12 @@ impl NzbgetRsQueueCoordinator {
             }
             host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
         } else {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs() as i64);
+            if backup_still_unclassified(backup_kind, backup_hi.time, now) {
+                return;
+            }
             let backup_alive = backup_alive_permille(host, backup_nzb.ptr);
             if backup_alive < eval.projected + BACKUP_LEAD
                 || backup_alive < critical
@@ -5069,7 +5091,8 @@ impl NzbgetRsQueueCoordinator {
             nzb.ptr,
             &nzb.name,
             &nzb.dupe_key,
-        ) else {
+        )
+        .filter(|(_, b)| !crate::dupecoord::locked_host(host, b.ptr)) else {
             let mut msg = b"Downloading ".to_vec();
             msg.extend_from_slice(&nzb.name);
             msg.extend_from_slice(
@@ -6311,6 +6334,18 @@ fn downloaded_ranges(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn late_backup_waits_until_classified() {
+        use crate::donorkind::DonorKind;
+        let parked = 1_000;
+        assert!(super::backup_still_unclassified(DonorKind::Unknown, parked, parked + 2));
+        assert!(super::backup_still_unclassified(DonorKind::Unknown, parked, parked + 119));
+        assert!(!super::backup_still_unclassified(DonorKind::Unknown, parked, parked + 120));
+        for kind in [DonorKind::Twin, DonorKind::Borrowable, DonorKind::Unborrowable] {
+            assert!(!super::backup_still_unclassified(kind, parked, parked + 2));
+        }
+    }
 
     #[test]
     fn bumped_count_starts_from_zero_and_never_goes_negative() {

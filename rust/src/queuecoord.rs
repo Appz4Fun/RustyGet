@@ -3501,6 +3501,7 @@ impl NzbgetRsQueueCoordinator {
 
             self.check_health(host, &opts, dq_ptr, file.ptr);
             self.check_dead_download(host, &opts, dq_ptr, nzb.ptr);
+            self.check_locked_archive(host, &opts, dq_ptr, nzb.ptr);
 
             file = host.file_snap(file.ptr);
             nzb = host.nzb_snap(file.nzb_ptr, false);
@@ -4932,6 +4933,66 @@ impl NzbgetRsQueueCoordinator {
             );
             host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
         }
+        host.nzb_set_int(
+            nzb.ptr,
+            crate::queuesubsys_host::NZB_INT_DELETE_STATUS,
+            crate::queuesubsys_host::DS_HEALTH,
+        );
+        host.dq_edit_entry(
+            dq_ptr,
+            nzb.id,
+            crate::queuesubsys_host::EA_GROUP_PARK_DELETE,
+            None,
+        );
+    }
+
+    /// Direct unpack found the download's archive needs a password that neither its nzb nor
+    /// `UnpackPassFile` gives (encrypted headers, say): it can never be extracted, so it fails
+    /// over to the best duplicate in history now rather than downloading whole first.
+    fn check_locked_archive(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        opts: &crate::queuesubsys_host::GlobalOptsSnap,
+        dq_ptr: usize,
+        nzb_ptr: usize,
+    ) {
+        let nzb = host.nzb_snap(nzb_ptr, false);
+        // the mark is taken first, so one this download cannot act on never
+        // lingers to fail it over later (a history return reuses the id)
+        if !crate::postproc::take_direct_unpack_locked(nzb.id)
+            || opts.health_check != crate::queuesubsys_host::HC_DUPE
+            || !crate::dupecoord::fails_over_snap(opts, &nzb)
+            || nzb.kind != crate::queuesubsys_host::NK_NZB
+            || nzb.deleting
+            || nzb.parking
+            || nzb.delete_status != crate::queuesubsys_host::DS_NONE
+        {
+            return;
+        }
+        let Some((_, backup_nzb)) = crate::dupecoord::find_dupe_backup_host(
+            host,
+            opts,
+            dq_ptr,
+            nzb.ptr,
+            &nzb.name,
+            &nzb.dupe_key,
+        ) else {
+            let mut msg = b"Downloading ".to_vec();
+            msg.extend_from_slice(&nzb.name);
+            msg.extend_from_slice(
+                b" on: its archive needs a password its nzb does not carry, and no duplicate in history to fail over to",
+            );
+            host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
+            return;
+        };
+        let mut msg = b"Failing over ".to_vec();
+        msg.extend_from_slice(&nzb.name);
+        msg.extend_from_slice(b" to duplicate ");
+        msg.extend_from_slice(&backup_nzb.name);
+        msg.extend_from_slice(
+            b": its archive needs a password its nzb does not carry, so it can never be extracted",
+        );
+        host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
         host.nzb_set_int(
             nzb.ptr,
             crate::queuesubsys_host::NZB_INT_DELETE_STATUS,

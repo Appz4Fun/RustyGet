@@ -139,6 +139,18 @@ pub fn swap_backup(candidates: &[(i32, f64, u8)], need: f64) -> Option<(i32, f64
         .map(|(id, alive, _)| (id, alive))
 }
 
+/// [`swap_backup`], but a backup in `locked` (archive headers encrypted and no
+/// password, see [`crate::donorkind::locked`]) only when no other backup is
+/// whole enough: it can never be extracted, however alive it is.
+pub fn swap_backup_locked_last(
+    candidates: &[(i32, f64, u8)],
+    locked: &[i32],
+    need: f64,
+) -> Option<(i32, f64)> {
+    let (open, shut): (Vec<_>, Vec<_>) = candidates.iter().partition(|c| !locked.contains(&c.0));
+    swap_backup(&open, need).or_else(|| swap_backup(&shut, need))
+}
+
 /// The DupeMode name for its value (`dmScore = 0, dmAll = 1, dmForce = 2`).
 pub fn dupe_mode_name(mode: i32) -> &'static [u8] {
     match mode {
@@ -625,6 +637,22 @@ mod tests {
         // a twin not whole enough does not count
         let low_twin = [(1, 0.9, 0), (2, 0.96, 3)];
         assert_eq!(swap_backup(&low_twin, SWAP_BACKUP_ALIVE), Some((2, 0.96)));
+        // a whole locked backup (encrypted headers, no password) goes after a
+        // 96% plain one, and is still taken when it is the only one
+        let c = [(1, 1.0, 3), (2, 0.96, 1)];
+        assert_eq!(swap_backup(&c, SWAP_BACKUP_ALIVE), Some((1, 1.0)));
+        assert_eq!(
+            swap_backup_locked_last(&c, &[1], SWAP_BACKUP_ALIVE),
+            Some((2, 0.96))
+        );
+        assert_eq!(
+            swap_backup_locked_last(&c[..1], &[1], SWAP_BACKUP_ALIVE),
+            Some((1, 1.0))
+        );
+        assert_eq!(
+            swap_backup_locked_last(&c, &[], SWAP_BACKUP_ALIVE),
+            Some((1, 1.0))
+        );
     }
 
     #[test]

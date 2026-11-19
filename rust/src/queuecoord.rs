@@ -4957,13 +4957,15 @@ impl NzbgetRsQueueCoordinator {
         nzb_ptr: usize,
     ) {
         let nzb = host.nzb_snap(nzb_ptr, false);
-        if opts.health_check != crate::queuesubsys_host::HC_DUPE
+        // the mark is taken first, so one this download cannot act on never
+        // lingers to fail it over later (a history return reuses the id)
+        if !crate::postproc::take_direct_unpack_locked(nzb.id)
+            || opts.health_check != crate::queuesubsys_host::HC_DUPE
             || !crate::dupecoord::fails_over_snap(opts, &nzb)
             || nzb.kind != crate::queuesubsys_host::NK_NZB
             || nzb.deleting
             || nzb.parking
             || nzb.delete_status != crate::queuesubsys_host::DS_NONE
-            || !crate::postproc::take_direct_unpack_locked(nzb.id)
         {
             return;
         }

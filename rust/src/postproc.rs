@@ -4702,6 +4702,8 @@ impl NzbgetRsDirectUnpack {
             MK_DEBUG,
             format!("Entering DirectUnpack-loop for {}", self.nzb_id).as_bytes(),
         );
+        // a mark from an earlier run (before a password was set) is stale
+        locked_archives().remove(&self.nzb_id);
 
         let mut local = DirectUnpackRunLocal {
             name: Vec::new(),

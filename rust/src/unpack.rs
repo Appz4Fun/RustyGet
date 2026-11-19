@@ -2,7 +2,7 @@
 //! (`daemon/postprocess/UnpackController.cpp`) end-to-end Rust implementation.
 
 pub use crate::postrepair::NzbgetRsUnpackMessageInfo;
-use crate::status::NzbParStatus;
+use crate::status::{NzbParStatus, UnpackStatus};
 
 #[inline]
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -2465,13 +2465,13 @@ pub fn eval_unpack_completed_failure(
     has_password: bool,
     has_unpack_pass_file: bool,
     pass_list_tried: bool,
-) -> (bool, bool, i32) {
+) -> (bool, bool, UnpackStatus) {
     let unpack_status = if unpack_space_error {
-        4 // NzbInfo::usSpace
+        UnpackStatus::Space
     } else if unpack_password_error || unpack_decrypt_error {
-        5 // NzbInfo::usPassword
+        UnpackStatus::Password
     } else {
-        2 // NzbInfo::usFailure
+        UnpackStatus::Failure
     };
 
     if parcheck_enabled
@@ -4179,7 +4179,7 @@ mod tests {
         );
         assert!(req_par);
         assert!(force_rep);
-        assert_eq!(st, 5);
+        assert_eq!(st, UnpackStatus::Password);
 
         let (req_par2, _, st2) = eval_unpack_completed_failure(
             true,
@@ -4199,7 +4199,7 @@ mod tests {
             false,
         );
         assert!(!req_par2);
-        assert_eq!(st2, 4);
+        assert_eq!(st2, UnpackStatus::Space);
 
         let _ = std::fs::remove_dir_all(&work_dir);
     }

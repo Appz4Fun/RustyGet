@@ -2441,7 +2441,7 @@ pub(crate) unsafe fn host_coll_snapshot(
         s.markStatus,
         s.deleteStatus,
         crate::status::NzbParStatus::from_raw(s.parStatus),
-        s.unpackStatus,
+        crate::status::UnpackStatus::from_raw(s.unpackStatus),
         s.urlStatus,
         health,
         critical_est,
@@ -2583,8 +2583,8 @@ pub(crate) unsafe fn host_coll_snapshot(
             s.markStatus,
             s.deleteStatus,
             crate::status::NzbParStatus::from_raw(s.parStatus),
-            s.unpackStatus,
-            s.moveStatus,
+            crate::status::UnpackStatus::from_raw(s.unpackStatus),
+            crate::status::MoveStatus::from_raw(s.moveStatus),
             s.urlStatus,
             if a1 == 1 {
                 SCRIPT_STATUS_SUCCESS

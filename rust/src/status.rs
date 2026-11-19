@@ -73,6 +73,37 @@ status_enum! {
     }
 }
 
+status_enum! {
+    /// A download's unpack outcome (NzbInfo::EUnpackStatus).
+    UnpackStatus {
+        None = 0,
+        Skipped = 1,
+        Failure = 2,
+        Success = 3,
+        Space = 4,
+        Password = 5,
+    }
+}
+
+status_enum! {
+    /// Whether the files were moved to the final directory
+    /// (NzbInfo::EMoveStatus).
+    MoveStatus {
+        None = 0,
+        Failure = 1,
+        Success = 2,
+    }
+}
+
+status_enum! {
+    /// Whether the extension cleanup ran (NzbInfo::ECleanupStatus).
+    CleanupStatus {
+        None = 0,
+        Failure = 1,
+        Success = 2,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,5 +128,16 @@ mod tests {
         assert_eq!(i32::from(NzbParStatus::RepairPossible), 4);
         assert_eq!(i32::from(ParCheckerStatus::RepairNotNeeded), 3);
         assert_eq!(NzbParStatus::from_raw(99), NzbParStatus::None);
+    }
+
+    #[test]
+    fn unpack_move_cleanup_statuses_round_trip() {
+        round_trip(UnpackStatus::ALL);
+        round_trip(MoveStatus::ALL);
+        round_trip(CleanupStatus::ALL);
+        assert_eq!(i32::from(UnpackStatus::Password), 5);
+        assert_eq!(i32::from(MoveStatus::Success), 2);
+        assert_eq!(i32::from(CleanupStatus::Failure), 1);
+        assert_eq!(UnpackStatus::from_raw(-3), UnpackStatus::None);
     }
 }

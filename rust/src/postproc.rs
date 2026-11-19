@@ -11,7 +11,7 @@ use crate::parchecker::{
 use crate::options::OptStr;
 use crate::postrepair::NzbgetRsParSegment;
 use crate::queuesubsys_host::QueueSubsysHost;
-use crate::status::{NzbParStatus, ParCheckerStatus};
+use crate::status::{NzbParStatus, ParCheckerStatus, UnpackStatus};
 use std::collections::VecDeque;
 use std::ffi::c_int;
 use std::ptr;
@@ -1498,7 +1498,7 @@ struct UnpackRunState {
     unpack_tried: bool,
     par_repaired: bool,
     prev_pass_list_tried: bool,
-    last_unpack_status: i32,
+    last_unpack_status: UnpackStatus,
     direct_unpack_status: i32,
     par_status: NzbParStatus,
     par_rename_status: i32,
@@ -1662,19 +1662,16 @@ impl JobQueue<'_> {
             .is_some_and(|v| v.eq_ignore_ascii_case(b"no"))
     }
 
-    fn set_unpack_status(self, status: i32) {
-        use crate::queuesubsys_host::NZB_INT_UNPACK_STATUS;
-        self.host
-            .nzb_set_int(self.nzb_ptr(), NZB_INT_UNPACK_STATUS, status);
+    fn set_unpack_status(self, status: UnpackStatus) {
+        self.host.nzb_set_unpack_status(self.nzb_ptr(), status);
     }
 
     fn unpack_succeeded(self, cleaned_up_disk: bool, par_rename: bool) {
         use crate::queuesubsys_host::{
-            NZB_INT_PAR_RENAME_STATUS, NZB_INT_UNPACK_CLEANED_UP_DISK, NZB_INT_UNPACK_STATUS,
-            RS_NONE, US_SUCCESS,
+            NZB_INT_PAR_RENAME_STATUS, NZB_INT_UNPACK_CLEANED_UP_DISK, RS_NONE,
         };
         let n = self.nzb_ptr();
-        self.host.nzb_set_int(n, NZB_INT_UNPACK_STATUS, US_SUCCESS);
+        self.host.nzb_set_unpack_status(n, UnpackStatus::Success);
         self.host
             .nzb_set_int(n, NZB_INT_UNPACK_CLEANED_UP_DISK, i32::from(cleaned_up_disk));
         if par_rename {
@@ -1682,7 +1679,12 @@ impl JobQueue<'_> {
         }
     }
 
-    fn request_par_check(self, force_repair: bool, pass_list_tried: bool, last_status: i32) {
+    fn request_par_check(
+        self,
+        force_repair: bool,
+        pass_list_tried: bool,
+        last_status: UnpackStatus,
+    ) {
         use crate::queuesubsys_host::{
             POST_INT_FORCE_REPAIR, POST_INT_LAST_UNPACK_STATUS, POST_INT_PASS_LIST_TRIED,
             POST_INT_REQUEST_PAR_CHECK, POST_INT_UNPACK_TRIED,
@@ -1695,7 +1697,7 @@ impl JobQueue<'_> {
         self.host
             .post_set_int(pi, POST_INT_PASS_LIST_TRIED, i32::from(pass_list_tried));
         self.host
-            .post_set_int(pi, POST_INT_LAST_UNPACK_STATUS, last_status);
+            .post_set_int(pi, POST_INT_LAST_UNPACK_STATUS, last_status.into());
     }
 
     /// Adds `elapsed_sec` to the job's unpack time and ends the stage.
@@ -1897,7 +1899,7 @@ impl NzbgetRsUnpackController {
             ]
             .concat();
             self.print_message(q, &mut st, MK_INFO, &m1);
-            let m2 = if st.last_unpack_status == 5 {
+            let m2 = if st.last_unpack_status == UnpackStatus::Password {
                 [
                     st.info_name_up.as_slice(),
                     b" failed: checksum error in the encrypted file. Corrupt file or wrong password.",
@@ -1989,16 +1991,16 @@ impl NzbgetRsUnpackController {
                 ]
                 .concat();
                 self.print_message(q, &mut st, MK_ERROR, &m);
-                q.set_unpack_status(2);
+                q.set_unpack_status(UnpackStatus::Failure);
             } else {
                 let m = [b"Nothing to unpack for ", st.name.as_slice()].concat();
                 self.print_message(q, &mut st, MK_INFO, &m);
-                q.set_unpack_status(1);
+                q.set_unpack_status(UnpackStatus::Skipped);
             }
         } else {
             let m = [b"Unpack for ", st.name.as_slice(), b" skipped"].concat();
             self.print_message(q, &mut st, MK_INFO, &m);
-            q.set_unpack_status(1);
+            q.set_unpack_status(UnpackStatus::Skipped);
         }
 
         let elapsed = (current_time_sec() - start) as c_int;
@@ -2075,7 +2077,7 @@ impl NzbgetRsUnpackController {
             }
         } else {
             st.unpack_ok = false;
-            st.unpack_decrypt_error = st.last_unpack_status == 5;
+            st.unpack_decrypt_error = st.last_unpack_status == UnpackStatus::Password;
         }
 
         if !st.unpack_ok
@@ -2411,11 +2413,11 @@ impl NzbgetRsUnpackController {
         let m = [st.info_name_up.as_slice(), suffix].concat();
         self.print_message(q, st, MK_INFO, &m);
         let last_status = if st.unpack_space_error {
-            4
+            UnpackStatus::Space
         } else if st.unpack_password_error || st.unpack_decrypt_error {
-            5
+            UnpackStatus::Password
         } else {
-            2
+            UnpackStatus::Failure
         };
         q.request_par_check(force_repair, st.pass_list_tried, last_status);
     }
@@ -4436,9 +4438,7 @@ impl NzbgetRsPostJob {
     }
 
     fn run_move(&self) {
-        use crate::queuesubsys_host::{
-            NZB_INT_MOVE_STATUS, NZB_STR_DEST_DIR, NZB_STR_FINAL_DIR, POST_INT_WORKING,
-        };
+        use crate::queuesubsys_host::{NZB_STR_DEST_DIR, NZB_STR_FINAL_DIR, POST_INT_WORKING};
         let Some(host) = crate::ffi::queue_host() else {
             return;
         };
@@ -4515,7 +4515,7 @@ impl NzbgetRsPostJob {
                 );
                 host.nzb_set_str(n, NZB_STR_DEST_DIR, cstr::until_nul(&dest_dir));
                 host.nzb_set_str(n, NZB_STR_FINAL_DIR, b"");
-                host.nzb_set_int(n, NZB_INT_MOVE_STATUS, move_status);
+                host.nzb_set_move_status(n, move_status);
             } else if outcome == 2 {
                 self.add_message(
                     host,
@@ -4532,14 +4532,14 @@ impl NzbgetRsPostJob {
                     MK_ERROR,
                     &[up_info_name.as_slice(), b" failed"].concat(),
                 );
-                host.nzb_set_int(n, NZB_INT_MOVE_STATUS, move_status);
+                host.nzb_set_move_status(n, move_status);
             }
             host.post_set_int(self.post_ptr, POST_INT_WORKING, 0);
         });
     }
 
     fn run_cleanup(&self) {
-        use crate::queuesubsys_host::{NZB_INT_CLEANUP_STATUS, POST_INT_WORKING};
+        use crate::queuesubsys_host::POST_INT_WORKING;
         let Some(host) = crate::ffi::queue_host() else {
             return;
         };
@@ -4582,7 +4582,7 @@ impl NzbgetRsPostJob {
             );
         }
 
-        host.nzb_set_int(self.nzb_ptr(host), NZB_INT_CLEANUP_STATUS, cleanup_status);
+        host.nzb_set_cleanup_status(self.nzb_ptr(host), cleanup_status);
         host.post_set_int(self.post_ptr, POST_INT_WORKING, 0);
     }
 }
@@ -4726,12 +4726,8 @@ impl NzbgetRsPostJob {
 
         if kind == 0 {
             if parcheck_enabled {
-                let (use_final, detect_missing) = crate::cleanup::rename_eval_par_config(
-                    unpack_status,
-                    3,
-                    0,
-                    final_dir.is_empty(),
-                );
+                let (use_final, detect_missing) =
+                    crate::cleanup::rename_eval_par_config(unpack_status, final_dir.is_empty());
                 let target_dir = if use_final { &final_dir } else { &dest_dir };
                 let mut renamed_to: Vec<Vec<u8>> = Vec::new();
                 let state = crate::parrenamer::execute_all(
@@ -4756,7 +4752,7 @@ impl NzbgetRsPostJob {
                 has_damaged_par_files = state.has_damaged_par_files;
                 // After an unpack, names are ASCII only (`unpacklimits`): a par rename back to a
                 // non-ASCII name is renamed again.
-                if unpack_status == 3 {
+                if unpack_status == UnpackStatus::Success {
                     for rel in renamed_to {
                         self.ascii_rename(host, target_dir, &rel, &mut renamed_count);
                     }

@@ -38,20 +38,6 @@ pub const DELETE_GOOD: i32 = 5;
 pub const DELETE_COPY: i32 = 6;
 pub const DELETE_SCAN: i32 = 7;
 
-pub const PAR_NONE: i32 = 0;
-pub const PAR_SKIPPED: i32 = 1;
-pub const PAR_FAILURE: i32 = 2;
-pub const PAR_SUCCESS: i32 = 3;
-pub const PAR_REPAIR_POSSIBLE: i32 = 4;
-pub const PAR_MANUAL: i32 = 5;
-
-pub const UNPACK_NONE: i32 = 0;
-pub const UNPACK_SKIPPED: i32 = 1;
-pub const UNPACK_FAILURE: i32 = 2;
-pub const UNPACK_SUCCESS: i32 = 3;
-pub const UNPACK_SPACE: i32 = 4;
-pub const UNPACK_PASSWORD: i32 = 5;
-
 pub const DUP_STATUS_UNDEFINED: i32 = 0;
 pub const DUP_STATUS_SUCCESS: i32 = 1;
 pub const DUP_STATUS_FAILED: i32 = 2;

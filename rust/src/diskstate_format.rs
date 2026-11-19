@@ -2,7 +2,7 @@
 
 use crate::cstr;
 use crate::options::OptStr;
-use crate::status::NzbParStatus;
+use crate::status::{MoveStatus, NzbParStatus, UnpackStatus};
 use std::ffi::{c_char, c_int, c_void};
 use std::io::Write;
 
@@ -7306,8 +7306,8 @@ unsafe extern "C" fn active_disk_export_nzb_cb(
         many_dupe_files: c_int::from(sn.many_dupe_files),
         feed_id: sn.feed_id,
         par_status: sn.par_status.into(),
-        unpack_status: sn.unpack_status,
-        move_status: sn.move_status,
+        unpack_status: sn.unpack_status.into(),
+        move_status: sn.move_status.into(),
         par_rename_status: sn.par_rename_status,
         rar_rename_status: sn.rar_rename_status,
         direct_rename_status: sn.direct_rename_status,
@@ -7501,7 +7501,7 @@ unsafe extern "C" fn active_disk_export_nzb_cb(
     exp.direct_unpack_status = sn.direct_unpack_status;
     exp.unpack_tried = c_int::from(sn.unpack_tried);
     exp.par_repaired = c_int::from(sn.par_repaired);
-    exp.last_unpack_status = sn.last_unpack_status;
+    exp.last_unpack_status = sn.last_unpack_status.into();
     exp.archives = archive_ptrs.as_ptr();
     exp.archives_len = archive_ptrs.len();
     unsafe { sink_fn(sink_ctx, &exp) };
@@ -7598,7 +7598,7 @@ unsafe extern "C" fn active_disk_apply_nzb_cb(
             NZB_INT_PAR_REPAIRED,
             c_int::from(inp.move_status != 0),
         );
-        qh.nzb_set_int(nzb_ptr, NZB_INT_LAST_UNPACK_STATUS, inp.delete_status);
+        qh.nzb_set_last_unpack_status(nzb_ptr, UnpackStatus::from_raw(inp.delete_status));
         qh.nzb_action(nzb_ptr, NZB_ACT_CLEAR_EXTRACTED_ARCHIVES, 0);
         return;
     }
@@ -7650,8 +7650,8 @@ unsafe extern "C" fn active_disk_apply_nzb_cb(
     }
     qh.nzb_set_int(nzb_ptr, NZB_INT_FEED_ID, inp.feed_id);
     qh.nzb_set_par_status(nzb_ptr, NzbParStatus::from_raw(inp.par_status));
-    qh.nzb_set_int(nzb_ptr, NZB_INT_UNPACK_STATUS, inp.unpack_status);
-    qh.nzb_set_int(nzb_ptr, NZB_INT_MOVE_STATUS, inp.move_status);
+    qh.nzb_set_unpack_status(nzb_ptr, UnpackStatus::from_raw(inp.unpack_status));
+    qh.nzb_set_move_status(nzb_ptr, MoveStatus::from_raw(inp.move_status));
     qh.nzb_set_int(nzb_ptr, NZB_INT_PAR_RENAME_STATUS, inp.par_rename_status);
     qh.nzb_set_int(nzb_ptr, NZB_INT_RAR_RENAME_STATUS, inp.rar_rename_status);
     qh.nzb_set_int(

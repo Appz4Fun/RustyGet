@@ -3196,14 +3196,16 @@ fn dead_volume_donor_identities() -> std::sync::MutexGuard<
         .unwrap_or_else(|e| e.into_inner())
 }
 
-/// Runs in which a donor must fail the identity check before it counts as unable to lend: one
-/// failed check may be a donor article that could not be read just then.
+/// Runs in which a donor must fail the identity check before it counts as unable to lend. Only
+/// a check that compared in full counts (`streamrepair::DonorCheck::Differs`: donor bytes that
+/// arrived whole against target bytes on disk, or a payload of another size); one that could not
+/// run in full counts for nothing and is retried by a later run.
 pub(crate) const DEAD_VOLUME_DONOR_MISMATCH_RUNS: u32 = 2;
 
 /// Records what a live repair run of download `nzb_id` found of the video in the donor whose
-/// queued nzb file is `donor` while dead volumes waited for it. A match is kept for good: a
-/// failed check after it is the probe landing on a volume still downloading, not another
-/// video. Before any match, mismatches are counted.
+/// queued nzb file is `donor` while dead volumes waited for it: `confirmed` is a check that
+/// matched, otherwise one that compared in full and differed (inconclusive checks are not
+/// recorded at all). A match is kept for good. Before any match, mismatches are counted.
 pub(crate) fn note_dead_volume_donor_identity(nzb_id: i32, donor: &[u8], confirmed: bool) {
     let mut map = dead_volume_donor_identities();
     let entry = map.entry((nzb_id, donor.to_vec())).or_insert(Err(0));

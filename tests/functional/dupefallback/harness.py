@@ -3980,14 +3980,14 @@ def _skiphole_rar(daemon, t, tag, donor, recovery, damage=None):
     return good, detail
 
 
-def _dead_volume_nested(daemon, t, tag, labels, donor_seed=None, donor_volumes=3):
+def _dead_volume_nested(daemon, t, tag, labels, donor_seed=None, donor_volumes=3, donor_size=None):
     """A plain stored rar set without par2 (articles of 20 KB, so direct rename
     hashes each volume's first article) loses three middle volumes entirely;
     its backup in history holds the same movie nested in another container (a
     stored rar holding a rar holding movie.mkv), its first article telling
     nothing about the packing. ``labels``: the backup's nzb parameters (what a
     fleet and TwinCheck stored). ``donor_seed``: the backup holds another
-    video of the same size. ``donor_volumes``: how many volumes the backup's
+    video (of ``donor_size`` bytes, the same size by default). ``donor_volumes``: how many volumes the backup's
     outer rar has (as many as the primary's lets TwinCheck sample the two
     posts against each other). Returns (primary, backup, movie)."""
     seg = 20_000
@@ -4002,7 +4002,7 @@ def _dead_volume_nested(daemon, t, tag, labels, donor_seed=None, donor_volumes=3
         parts = (len(data) + seg - 1) // seg
         members.append((rel, name, len(data), seg,
                         set(range(1, parts + 1)) if i in dead else set()))
-    donor_movie = movie if donor_seed is None else _payload(len(movie), donor_seed)
+    donor_movie = movie if donor_seed is None else _payload(donor_size or len(movie), donor_seed)
     inner = generators.rar3_store_volumes_valid('movie.mkv', donor_movie, len(donor_movie) + 1)
     assert len(inner) == 1
     outer = generators.rar3_store_volumes_valid('Show.rar', inner[0],
@@ -4091,13 +4091,9 @@ def scenario_deadvolumetwincheck(daemon, t):
             % (hp['Status'], hb['Status'], labelled, failed_over, kept, du_ok, integ))
 
 
-def scenario_deadvolumeothervideo(daemon, t):
-    """TwinCheck labels the backup another container (its sampled articles
-    differ, as any other container's would), but it holds another video:
-    the dead-volume borrow cannot place the dead volumes in it, so the
-    download fails over as soon as that is known, long before its last
-    volume, instead of downloading to the end first."""
-    hp, hb, movie = _dead_volume_nested(daemon, t, 'dvo', [], donor_seed=23071, donor_volumes=15)
+def _dead_volume_other_video(daemon, t, label, tag, donor_size):
+    hp, hb, movie = _dead_volume_nested(daemon, t, tag, [], donor_seed=23071, donor_volumes=15,
+                                        donor_size=donor_size)
     labelled = _grep_log(t, 'Backup is in another container than Primary')
     failed_over = _grep_log(t, 'Failing over Primary to duplicate Backup')
     gave_up = _grep_log(t, 'cannot lend its dead volumes')
@@ -4105,9 +4101,26 @@ def scenario_deadvolumeothervideo(daemon, t):
     late = sorted(set(re.findall(r'Successfully downloaded Primary/Show\.part(1[0-5])\.rar\n', log)))
     ok = (labelled >= 1 and failed_over == 1 and gave_up >= 1 and len(late) < 6 and
           hp['Status'].startswith('FAILURE'))
-    return ('deadvolumeothervideo', ok,
+    return (label, ok,
             'status=%s backup=%s labelled_logs=%d failover_logs=%d gave_up_logs=%d late_volumes_done=%s'
             % (hp['Status'], hb['Status'], labelled, failed_over, gave_up, late))
+
+
+def scenario_deadvolumeothervideo(daemon, t):
+    """TwinCheck labels the backup another container (its sampled articles
+    differ, as any other container's would), but it holds another video:
+    the dead-volume borrow cannot place the dead volumes in it, so the
+    download fails over as soon as that is known, long before its last
+    volume, instead of downloading to the end first."""
+    return _dead_volume_other_video(daemon, t, 'deadvolumeothervideo', 'dvo', None)
+
+
+def scenario_deadvolumeothersize(daemon, t):
+    """deadvolumeothervideo with another encode of another size: no payload
+    of the backup has the size of the movie the dead volumes belong to, so
+    the borrow never gets to compare bytes. That counts as another video
+    too, and the download fails over before its last volumes."""
+    return _dead_volume_other_video(daemon, t, 'deadvolumeothersize', 'dvs', 14_250_000)
 
 
 def scenario_skipholetwin(daemon, t):
@@ -10711,6 +10724,7 @@ SCENARIOS = {
     'deadvolumeunlabelled': scenario_deadvolumeunlabelled,
     'deadvolumetwincheck': scenario_deadvolumetwincheck,
     'deadvolumeothervideo': scenario_deadvolumeothervideo,
+    'deadvolumeothersize': scenario_deadvolumeothersize,
     'persistdeadprimary': scenario_persistdeadprimary,
     'persistrestart': scenario_persistrestart,
     'persistrestartdamaged': scenario_persistrestartdamaged,
@@ -11073,6 +11087,7 @@ SCENARIO_OPTIONS = {
     'deadvolumeunlabelled': PROD_OPTIONS + ['DownloadRate=4000'],
     'deadvolumetwincheck': PROD_OPTIONS + ['DownloadRate=1000'],
     'deadvolumeothervideo': PROD_OPTIONS + ['DownloadRate=1000'],
+    'deadvolumeothersize': PROD_OPTIONS + ['DownloadRate=1000'],
     'skipholepar': PROD_OPTIONS + ['DownloadRate=1500'],
     'persistdeadprimary': PROD_OPTIONS + ['DownloadRate=1500'],
     'persistrestart': PROD_OPTIONS + ['DownloadRate=1500'],

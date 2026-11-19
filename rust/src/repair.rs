@@ -341,7 +341,7 @@ pub fn calc_paused_timestamps(
 // Stateful RepairController Coordinator (`NzbgetRsRepairController`)
 // ============================================================================
 
-use std::ffi::{c_char, c_int, c_void};
+use std::ffi::c_int;
 use std::path::Path;
 use std::ptr;
 use std::time::Duration;
@@ -364,21 +364,6 @@ use crate::queuesubsys_host::{
 };
 
 const MAX_TWIN_FETCH_SIZE: i64 = 1024 * 1024 * 1024;
-
-/// Opcode host callback still used by the stream-repair and direct-unpack controllers.
-pub type NzbgetRsRepairCtrlHostFn = unsafe extern "C" fn(
-    ctx: *mut c_void,
-    op: c_int,
-    a1: c_int,
-    a2: c_int,
-    p1: usize,
-    p2: usize,
-    s1: *const c_char,
-    s2: *const c_char,
-    ints: *mut c_int,
-    i64s: *mut i64,
-    strs: *mut *const c_char,
-) -> usize;
 
 /// Message text as it used to reach the host: cut at the first NUL and at 1023 bytes.
 #[inline]

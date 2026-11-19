@@ -9880,7 +9880,7 @@ def scenario_twinaltsampled(daemon, t):
         hist = {h['Name']: h for h in api.history()}
         kinds = {n: param(hist.get(n, {}), 'DupeKind') for n in ('Twin', 'Alt', 'Other')}
         sampled = {n: param(hist.get(n, {}), 'DupeSampled') for n in ('Twin', 'Alt', 'Other')}
-        if all(sampled.values()) and kinds['Twin'] and kinds['Alt']:
+        if all(sampled.values()) and kinds['Twin'] and kinds['Alt'] and kinds['Other']:
             break
         time.sleep(2)
     ok = (kinds == {'Twin': 'twin', 'Alt': 'container', 'Other': 'alt'}

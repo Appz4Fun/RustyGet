@@ -810,7 +810,7 @@ pub(crate) struct QueueSubsysHost {
 /// The optional arguments of a queue-object op, built from `OpArgs::NONE`
 /// (all 0 and null) with the setters.
 #[derive(Clone, Copy)]
-struct OpArgs {
+pub(crate) struct OpArgs {
     a2: i32,
     p2: usize,
     s1: *const c_char,
@@ -821,7 +821,7 @@ struct OpArgs {
 }
 
 impl OpArgs {
-    const NONE: Self = Self {
+    pub(crate) const NONE: Self = Self {
         a2: 0,
         p2: 0,
         s1: std::ptr::null(),
@@ -831,31 +831,31 @@ impl OpArgs {
         strs: std::ptr::null_mut(),
     };
 
-    const fn a2(self, a2: i32) -> Self {
+    pub(crate) const fn a2(self, a2: i32) -> Self {
         Self { a2, ..self }
     }
 
-    const fn p2(self, p2: usize) -> Self {
+    pub(crate) const fn p2(self, p2: usize) -> Self {
         Self { p2, ..self }
     }
 
-    const fn s1(self, s1: *const c_char) -> Self {
+    pub(crate) const fn s1(self, s1: *const c_char) -> Self {
         Self { s1, ..self }
     }
 
-    const fn s2(self, s2: *const c_char) -> Self {
+    pub(crate) const fn s2(self, s2: *const c_char) -> Self {
         Self { s2, ..self }
     }
 
-    const fn ints(self, ints: *mut c_int) -> Self {
+    pub(crate) const fn ints(self, ints: *mut c_int) -> Self {
         Self { ints, ..self }
     }
 
-    const fn i64s(self, i64s: *mut i64) -> Self {
+    pub(crate) const fn i64s(self, i64s: *mut i64) -> Self {
         Self { i64s, ..self }
     }
 
-    const fn strs(self, strs: *mut *const c_char) -> Self {
+    pub(crate) const fn strs(self, strs: *mut *const c_char) -> Self {
         Self { strs, ..self }
     }
 }
@@ -988,6 +988,33 @@ impl QueueSubsysHost {
             crate::qarticle::nzbget_rs_article_host(
                 list, article, op, x.a2, x.p2, x.s1, x.ints, x.i64s, x.strs,
             )
+        }
+    }
+
+    fn file_set_op(&self, file: usize, op: i32, x: OpArgs) -> usize {
+        if self.use_active {
+            let file = file as *const crate::qfile::File;
+            unsafe { crate::qfile::host_file_set(file, op, x.a2, x.p2, x.s1, x.i64s) };
+        }
+        0
+    }
+
+    fn cache_op(&self, file: usize, op: i32, x: OpArgs) -> usize {
+        if !self.use_active {
+            return 0;
+        }
+        let file = file as *const crate::qfile::File;
+        unsafe { crate::qfile::host_cache_op(file, op, x.a2, x.p2, x.s1, x.ints, x.i64s, x.strs) }
+    }
+
+    /// The article writer's and downloader's op `op` on a file.
+    pub(crate) fn output_op(&self, file: usize, op: i32, x: OpArgs) -> usize {
+        if !self.use_active {
+            return 0;
+        }
+        let file = file as *const crate::qfile::File;
+        unsafe {
+            crate::qfile::host_output_op(file, op, x.a2, x.p2, x.s1, x.s2, x.ints, x.i64s, x.strs)
         }
     }
 
@@ -1160,21 +1187,7 @@ impl QueueSubsysHost {
     pub fn log(&self, kind: i32, msg: &[u8]) {
         if self.use_active {
             crate::log::log_active_bytes(kind, msg);
-            return;
         }
-        let c = c_bytes(msg);
-        self.raw(
-            2,
-            kind,
-            0,
-            0,
-            0,
-            c.as_ptr() as *const c_char,
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn nzb_print_message(&self, nzb_ptr: usize, kind: i32, msg: &[u8]) {
@@ -1183,21 +1196,7 @@ impl QueueSubsysHost {
         }
         if self.use_active {
             unsafe { crate::qqueue::nzb_message(nzb_ptr, kind, false, msg) };
-            return;
         }
-        let c = c_bytes(msg);
-        self.raw(
-            2,
-            kind,
-            0,
-            nzb_ptr,
-            0,
-            c.as_ptr() as *const c_char,
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn nzb_add_message(&self, nzb_ptr: usize, kind: i32, msg: &[u8]) {
@@ -1206,21 +1205,7 @@ impl QueueSubsysHost {
         }
         if self.use_active {
             unsafe { crate::qqueue::nzb_message(nzb_ptr, kind, true, msg) };
-            return;
         }
-        let c = c_bytes(msg);
-        self.raw(
-            2,
-            kind,
-            1,
-            nzb_ptr,
-            0,
-            c.as_ptr() as *const c_char,
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn sleep_ms(&self, ms: i32) {
@@ -1956,60 +1941,21 @@ impl QueueSubsysHost {
         #[cfg(unix)]
         if self.use_active {
             crate::historycoord::delete_disk_files_active(nzb_ptr);
-            return;
         }
-        self.raw(
-            6,
-            0,
-            0,
-            nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn history_redownload(&self, dq_ptr: usize, hi_ptr: usize) {
         #[cfg(unix)]
         if self.use_active {
             crate::historycoord::redownload_active(dq_ptr, hi_ptr);
-            return;
         }
-        self.raw(
-            6,
-            1,
-            0,
-            dq_ptr,
-            hi_ptr,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn history_hide(&self, dq_ptr: usize, hi_ptr: usize, rindex: i32) {
         #[cfg(unix)]
         if self.use_active {
             crate::historycoord::history_hide_active(dq_ptr, hi_ptr, rindex);
-            return;
         }
-        self.raw(
-            6,
-            2,
-            rindex,
-            dq_ptr,
-            hi_ptr,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn prepost_check_download_completed(&self, dq_ptr: usize, nzb_ptr: usize) {
@@ -2017,20 +1963,7 @@ impl QueueSubsysHost {
             if let Some(pp) = crate::ffi::active_prepost() {
                 pp.check_download_completed(self, dq_ptr, nzb_ptr);
             }
-            return;
         }
-        self.raw(
-            6,
-            3,
-            0,
-            dq_ptr,
-            nzb_ptr,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn stream_repair_start_live(&self, nzb_ptr: usize) {
@@ -2043,20 +1976,7 @@ impl QueueSubsysHost {
         }
         if self.use_active {
             unsafe { crate::qqueue::start_live_repair(nzb_ptr) };
-            return;
         }
-        self.raw(
-            6,
-            5,
-            0,
-            nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn move_completed_files(&self, nzb_ptr: usize, old_dest_dir: &[u8]) -> bool {
@@ -2064,39 +1984,14 @@ impl QueueSubsysHost {
         if self.use_active {
             return crate::articledl::move_completed_files_on_qh(self, nzb_ptr, old_dest_dir);
         }
-        let c = c_bytes(old_dest_dir);
-        self.raw(
-            6,
-            6,
-            0,
-            nzb_ptr,
-            0,
-            c.as_ptr() as *const c_char,
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        ) != 0
+        false
     }
 
     pub fn history_add_to_history(&self, dq_ptr: usize, nzb_ptr: usize) {
         #[cfg(unix)]
         if self.use_active {
             crate::historycoord::add_to_history_active(dq_ptr, nzb_ptr);
-            return;
         }
-        self.raw(
-            6,
-            8,
-            0,
-            dq_ptr,
-            nzb_ptr,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn history_edit_list(
@@ -2110,27 +2005,7 @@ impl QueueSubsysHost {
         if self.use_active {
             return crate::historycoord::edit_list_active(dq_ptr, ids, action, args);
         }
-        let c_args = args.map(c_bytes);
-        let s1 = c_args
-            .as_ref()
-            .map_or(std::ptr::null(), |v| v.as_ptr() as *const c_char);
-        let mut id_buf = ids.to_vec();
-        self.raw(
-            6,
-            9,
-            id_buf.len() as i32,
-            dq_ptr,
-            action as usize,
-            s1,
-            std::ptr::null(),
-            if id_buf.is_empty() {
-                std::ptr::null_mut()
-            } else {
-                id_buf.as_mut_ptr()
-            },
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        ) != 0
+        false
     }
 
     pub fn prepost_edit_list(
@@ -2144,27 +2019,7 @@ impl QueueSubsysHost {
             return crate::ffi::active_prepost()
                 .is_some_and(|pp| pp.edit_list(self, dq_ptr, ids, action, args));
         }
-        let c_args = args.map(c_bytes);
-        let s1 = c_args
-            .as_ref()
-            .map_or(std::ptr::null(), |v| v.as_ptr() as *const c_char);
-        let mut id_buf = ids.to_vec();
-        self.raw(
-            6,
-            10,
-            id_buf.len() as i32,
-            dq_ptr,
-            action as usize,
-            s1,
-            std::ptr::null(),
-            if id_buf.is_empty() {
-                std::ptr::null_mut()
-            } else {
-                id_buf.as_mut_ptr()
-            },
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        ) != 0
+        false
     }
 
     pub fn url_delete_queue_entry(
@@ -2177,38 +2032,14 @@ impl QueueSubsysHost {
             return crate::urlcoord::active_url_coord()
                 .is_some_and(|uc| uc.delete_queue_entry_active(dq_ptr, nzb_ptr, avoid_history));
         }
-        self.raw(
-            6,
-            11,
-            i32::from(avoid_history),
-            dq_ptr,
-            nzb_ptr,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        ) != 0
+        false
     }
 
     pub fn dupe_search_notify_name_changed(&self, nzb_id: i32) {
         #[cfg(unix)]
         if self.use_active {
             crate::dupesearch_coord::notify_active_dupesearch_name_changed(nzb_id);
-            return;
         }
-        self.raw(
-            6,
-            12,
-            nzb_id,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2232,33 +2063,7 @@ impl QueueSubsysHost {
                 feed_id, url, filename, category, priority, add_paused, dupe_key, dupe_score,
                 dupe_mode, size, time,
             );
-            return;
         }
-        let c_url = c_bytes(url);
-        let c_fn = c_bytes(filename);
-        let c_cat = c_bytes(category);
-        let c_dk = c_bytes(dupe_key);
-        let packed_flags = i32::from(add_paused) | ((dupe_mode & 0xff) << 1);
-        let mut ints = [feed_id, packed_flags, priority, dupe_score];
-        let mut i64s = [size, time];
-        let mut strs = [
-            c_url.as_ptr() as *const c_char,
-            c_fn.as_ptr() as *const c_char,
-            c_cat.as_ptr() as *const c_char,
-            c_dk.as_ptr() as *const c_char,
-        ];
-        self.raw(
-            6,
-            14,
-            0,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            i64s.as_mut_ptr(),
-            strs.as_mut_ptr(),
-        );
     }
 
     pub fn scanner_add_url_file(
@@ -2275,22 +2080,7 @@ impl QueueSubsysHost {
                 nzb_ptr, is_archive, eff_name, eff_cat, out_file,
             );
         }
-        let c_name = c_bytes(eff_name);
-        let c_cat = c_bytes(eff_cat);
-        let c_out = c_bytes(out_file);
-        let mut strs = [c_out.as_ptr() as *const c_char];
-        self.raw(
-            6,
-            15,
-            i32::from(is_archive),
-            nzb_ptr,
-            0,
-            c_name.as_ptr() as *const c_char,
-            c_cat.as_ptr() as *const c_char,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            strs.as_mut_ptr(),
-        ) as i32
+        0
     }
 
     // DownloadQueue & CoordinatorDownloadQueue ops (op = 20..=25)
@@ -2321,73 +2111,27 @@ impl QueueSubsysHost {
         if self.use_active {
             return crate::qqueue::queue_len(dq_ptr);
         }
-        self.raw(
-            21,
-            -1,
-            0,
-            dq_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
+        0
     }
 
     pub fn queue_at(&self, dq_ptr: usize, idx: usize) -> usize {
         if self.use_active {
             return crate::qqueue::queue_at(dq_ptr, idx);
         }
-        self.raw(
-            21,
-            idx as i32,
-            0,
-            dq_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
+        0
     }
 
     pub fn queue_find_by_id(&self, dq_ptr: usize, nzb_id: i32) -> usize {
         if self.use_active {
             return crate::qqueue::queue_find_by_id(dq_ptr, nzb_id);
         }
-        self.raw(
-            22,
-            0,
-            nzb_id,
-            dq_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
+        0
     }
 
     pub fn queue_remove(&self, dq_ptr: usize, nzb_ptr: usize) {
         if self.use_active {
             crate::qqueue::queue_remove(dq_ptr, nzb_ptr);
-            return;
         }
-        self.raw(
-            22,
-            1,
-            0,
-            dq_ptr,
-            nzb_ptr,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn queue_insert_owned(
@@ -2399,60 +2143,20 @@ impl QueueSubsysHost {
     ) {
         if self.use_active {
             unsafe { crate::qqueue::queue_insert_handle(dq_ptr, uptr_addr, url_ptr, add_first) };
-            return;
         }
-        let mut i64s = [url_ptr as i64];
-        self.raw(
-            22,
-            2,
-            i32::from(add_first),
-            dq_ptr,
-            uptr_addr,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            i64s.as_mut_ptr(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn alloc_new_nzb_uptr(&self) -> (usize, usize) {
         if self.use_active {
             return crate::qqueue::new_nzb_handle();
         }
-        let mut i64s = [0i64];
-        let uptr_addr = self.raw(
-            22,
-            3,
-            0,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            i64s.as_mut_ptr(),
-            std::ptr::null_mut(),
-        );
-        (uptr_addr, i64s[0] as usize)
+        (0, 0)
     }
 
     pub fn finish_new_nzb_uptr(&self, dq_ptr: usize, uptr_addr: usize) {
         if self.use_active {
             unsafe { crate::qqueue::queue_add_handle(dq_ptr, uptr_addr) };
-            return;
         }
-        self.raw(
-            22,
-            4,
-            0,
-            dq_ptr,
-            uptr_addr,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn queue_reorder(&self, dq_ptr: usize, new_order: &[usize]) {
@@ -2461,20 +2165,7 @@ impl QueueSubsysHost {
         }
         if self.use_active {
             crate::qqueue::queue_reorder(dq_ptr, new_order);
-            return;
         }
-        self.raw(
-            22,
-            5,
-            new_order.len() as i32,
-            dq_ptr,
-            new_order.as_ptr() as usize,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn destroy_nzb_uptr(&self, uptr_addr: usize) {
@@ -2483,79 +2174,26 @@ impl QueueSubsysHost {
         }
         if self.use_active {
             unsafe { crate::qqueue::free_nzb_handle(uptr_addr) };
-            return;
         }
-        self.raw(
-            22,
-            6,
-            0,
-            0,
-            uptr_addr,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn id_gen_last(&self) -> (i32, i32) {
         if self.use_active {
             return crate::qqueue::id_gen_last();
         }
-        let mut ints = [0i32; 2];
-        self.raw(
-            22,
-            7,
-            0,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
-        (ints[0], ints[1])
+        (0, 0)
     }
 
     pub fn id_gen_raise_and_reset(&self, nzb_id: i32, file_id: i32) {
         if self.use_active {
             crate::qqueue::id_gen_raise_and_reset(nzb_id, file_id);
-            return;
         }
-        let mut ints = [nzb_id, file_id];
-        self.raw(
-            22,
-            7,
-            1,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn history_push_nzb_uptr(&self, dq_ptr: usize, uptr_addr: usize, hist_time: i32) {
         if self.use_active {
             unsafe { crate::qqueue::history_push_handle(dq_ptr, uptr_addr, hist_time) };
-            return;
         }
-        self.raw(
-            23,
-            -7,
-            hist_time,
-            dq_ptr,
-            uptr_addr,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2596,49 +2234,13 @@ impl QueueSubsysHost {
                     dupe_key: text(dupe_key),
                 },
             );
-            return;
         }
-        let mut ints = [
-            id,
-            hist_time,
-            status,
-            full_hash as i32,
-            filt_hash as i32,
-            dupe_score,
-            dupe_mode,
-        ];
-        let mut i64s = [size];
-        self.raw(
-            23,
-            -8,
-            0,
-            dq_ptr,
-            0,
-            name,
-            dupe_key,
-            ints.as_mut_ptr(),
-            i64s.as_mut_ptr(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn history_move_queue_item(&self, dq_ptr: usize, nzb_ptr: usize) {
         if self.use_active {
             crate::qqueue::history_move_queue_item(dq_ptr, nzb_ptr);
-            return;
         }
-        self.raw(
-            23,
-            -3,
-            0,
-            dq_ptr,
-            nzb_ptr,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn history_replace_with_dup(
@@ -2652,76 +2254,27 @@ impl QueueSubsysHost {
             unsafe {
                 crate::qqueue::history_replace_with_dup(dq_ptr, hi_ptr, rindex as i32, dup_status)
             };
-            return;
         }
-        let mut ints = [rindex as i32];
-        self.raw(
-            23,
-            -4,
-            dup_status,
-            dq_ptr,
-            hi_ptr,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn history_erase_at(&self, dq_ptr: usize, idx: usize) {
         if self.use_active {
             crate::qqueue::history_erase_at(dq_ptr, idx as i32);
-            return;
         }
-        self.raw(
-            23,
-            -5,
-            idx as i32,
-            dq_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn history_return_to_queue(&self, dq_ptr: usize, hi_ptr: usize, idx: usize) -> usize {
         if self.use_active {
             return unsafe { crate::qqueue::history_return_to_queue(dq_ptr, hi_ptr, idx as i32) };
         }
-        self.raw(
-            23,
-            -6,
-            idx as i32,
-            dq_ptr,
-            hi_ptr,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
+        0
     }
 
     pub fn history_len(&self, dq_ptr: usize) -> usize {
         if self.use_active {
             return crate::qqueue::history_len(dq_ptr);
         }
-        self.raw(
-            23,
-            -1,
-            0,
-            dq_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
+        0
     }
 
     /// The download with `nzb_id`, in the queue or (once it is done) in history; 0 if neither.
@@ -2747,18 +2300,7 @@ impl QueueSubsysHost {
         if self.use_active {
             return crate::qqueue::history_find_by_id(dq_ptr, id);
         }
-        self.raw(
-            23,
-            -2,
-            id,
-            dq_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
+        0
     }
 
     pub fn history_at(&self, dq_ptr: usize, idx: usize) -> HistEntrySnap {
@@ -2775,31 +2317,7 @@ impl QueueSubsysHost {
                 },
             );
         }
-        let mut ints = [0i32; 2];
-        let mut i64s = [0i64; 2];
-        let mut strs = [std::ptr::null(); 1];
-        let hi_ptr = self.raw(
-            23,
-            idx as i32,
-            0,
-            dq_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            i64s.as_mut_ptr(),
-            strs.as_mut_ptr(),
-        );
-        unsafe {
-            HistEntrySnap {
-                hi_ptr,
-                id: ints[1],
-                kind: ints[0],
-                inner_ptr: i64s[0] as usize,
-                time: i64s[1],
-                name: read_cstr(strs[0]),
-            }
-        }
+        HistEntrySnap::default()
     }
 
     pub fn dq_save(&self, dq_ptr: usize) {
@@ -2808,20 +2326,7 @@ impl QueueSubsysHost {
             if let Some(qc) = crate::ffi::active_queue_coord() {
                 qc.dq_save(self, dq_ptr);
             }
-            return;
         }
-        self.raw(
-            24,
-            0,
-            0,
-            dq_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn dq_save_changed(&self, dq_ptr: usize) {
@@ -2830,20 +2335,7 @@ impl QueueSubsysHost {
             if let Some(qc) = crate::ffi::active_queue_coord() {
                 qc.dq_save_changed(self, dq_ptr);
             }
-            return;
         }
-        self.raw(
-            24,
-            1,
-            0,
-            dq_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn dq_edit_entry(&self, dq_ptr: usize, id: i32, action: i32, args: Option<&[u8]>) -> bool {
@@ -2852,23 +2344,7 @@ impl QueueSubsysHost {
             return crate::ffi::active_queue_coord()
                 .is_some_and(|qc| qc.dq_edit_entry(self, dq_ptr, id, action, args));
         }
-        let mut ints = [action];
-        let c_args = args.map(c_bytes);
-        let s1 = c_args
-            .as_ref()
-            .map_or(std::ptr::null(), |v| v.as_ptr() as *const c_char);
-        self.raw(
-            24,
-            2,
-            id,
-            dq_ptr,
-            0,
-            s1,
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        ) != 0
+        false
     }
 
     pub fn dq_edit_list_single_id(
@@ -2885,23 +2361,7 @@ impl QueueSubsysHost {
                 qc.dq_edit_list(self, dq_ptr, Some(&ids), None, 1, action, args)
             });
         }
-        let mut ints = [action];
-        let c_args = args.map(c_bytes);
-        let s1 = c_args
-            .as_ref()
-            .map_or(std::ptr::null(), |v| v.as_ptr() as *const c_char);
-        self.raw(
-            24,
-            6,
-            id,
-            dq_ptr,
-            0,
-            s1,
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        ) != 0
+        false
     }
 
     pub fn dq_edit_list(
@@ -2919,40 +2379,7 @@ impl QueueSubsysHost {
                 qc.dq_edit_list(self, dq_ptr, ids, names, match_mode, action, Some(args))
             });
         }
-        let c_args = c_bytes(args);
-        let id_slice = ids.unwrap_or(&[]);
-        let name_cvecs: Vec<Vec<u8>> = names.unwrap_or(&[]).iter().map(|n| c_bytes(n)).collect();
-        let mut name_ptrs: Vec<*const c_char> = name_cvecs
-            .iter()
-            .map(|v| v.as_ptr() as *const c_char)
-            .collect();
-        let flags = i32::from(ids.is_some()) | (i32::from(names.is_some()) << 1);
-        let mut ints = [
-            action,
-            match_mode,
-            id_slice.len() as i32,
-            name_ptrs.len() as i32,
-        ];
-        self.raw(
-            24,
-            7,
-            flags,
-            dq_ptr,
-            if id_slice.is_empty() {
-                0
-            } else {
-                id_slice.as_ptr() as usize
-            },
-            c_args.as_ptr() as *const c_char,
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            std::ptr::null_mut(),
-            if name_ptrs.is_empty() {
-                std::ptr::null_mut()
-            } else {
-                name_ptrs.as_mut_ptr()
-            },
-        ) != 0
+        false
     }
 
     /// Tells post-processing that the queue changed (`aspect_action` on
@@ -2971,21 +2398,7 @@ impl QueueSubsysHost {
                 nzb_ptr,
                 file_ptr,
             );
-            return;
         }
-        let mut i64s = [file_ptr as i64];
-        self.raw(
-            24,
-            3,
-            aspect_action,
-            dq_ptr,
-            nzb_ptr,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            i64s.as_mut_ptr(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn dq_notify(&self, dq_ptr: usize, aspect_action: i32, nzb_ptr: usize, file_ptr: usize) {
@@ -3044,29 +2457,14 @@ impl QueueSubsysHost {
                     let fp = self.nzb_file_at(nzb_ptr, j);
                     let mut f_ints = [0i32; 28];
                     let mut f_i64s = [0i64; 8];
-                    if self.use_active {
-                        unsafe {
-                            crate::qfile::host_snapshot(
-                                fp as *const crate::qfile::File,
-                                &mut f_ints,
-                                &mut f_i64s,
-                                None,
-                            )
-                        };
-                    } else {
-                        self.raw(
-                            40,
-                            0,
-                            0,
-                            fp,
-                            0,
-                            std::ptr::null(),
-                            std::ptr::null(),
-                            f_ints.as_mut_ptr(),
-                            f_i64s.as_mut_ptr(),
-                            std::ptr::null_mut(),
-                        );
-                    }
+                    unsafe {
+                        crate::qfile::host_snapshot(
+                            fp as *const crate::qfile::File,
+                            &mut f_ints,
+                            &mut f_i64s,
+                            None,
+                        )
+                    };
                     if f_ints[1] == 0 && f_ints[2] == 0 {
                         rem += f_i64s[1];
                         if force {
@@ -3077,42 +2475,16 @@ impl QueueSubsysHost {
             }
             return (rem, rem_forced);
         }
-        let mut i64s = [0i64; 2];
-        self.raw(
-            24,
-            4,
-            0,
-            dq_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            i64s.as_mut_ptr(),
-            std::ptr::null_mut(),
-        );
-        (i64s[0], i64s[1])
+        (0, 0)
     }
 
-    pub fn dq_history_changed(&self, dq_ptr: usize) {
+    pub fn dq_history_changed(&self, _dq_ptr: usize) {
         #[cfg(unix)]
         if self.use_active {
             if let Some(qc) = crate::ffi::active_queue_coord() {
                 qc.dq_history_changed();
             }
-            return;
         }
-        self.raw(
-            24,
-            5,
-            0,
-            dq_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     // CoordinatorDownloadQueue & QueueCoordinator C++ shell ops (op = 25)
@@ -3120,75 +2492,25 @@ impl QueueSubsysHost {
         if self.use_active {
             return crate::qqueue::daemon_queue();
         }
-        self.raw(
-            25,
-            0,
-            0,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
+        0
     }
 
     pub fn coord_dq_init(&self) {
         if self.use_active {
             crate::qqueue::daemon_queue_init();
-            return;
         }
-        self.raw(
-            25,
-            1,
-            0,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn coord_dq_loaded(&self) {
         if self.use_active {
             crate::qqueue::daemon_queue_loaded();
-            return;
         }
-        self.raw(
-            25,
-            2,
-            0,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn coord_dq_final(&self) {
         if self.use_active {
             crate::qqueue::daemon_queue_final();
-            return;
         }
-        self.raw(
-            25,
-            3,
-            0,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn coord_dq_state_changed(&self) -> bool {
@@ -3196,18 +2518,7 @@ impl QueueSubsysHost {
         if self.use_active {
             return crate::ffi::active_queue_coord().is_some_and(|qc| qc.dq_state_changed());
         }
-        self.raw(
-            25,
-            4,
-            0,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        ) != 0
+        false
     }
 
     pub fn self_set_has_more_jobs(&self, more: bool) {
@@ -3216,20 +2527,7 @@ impl QueueSubsysHost {
             if let Some(qc) = crate::ffi::active_queue_coord() {
                 qc.set_has_more_jobs(more);
             }
-            return;
         }
-        self.raw(
-            25,
-            6,
-            i32::from(more),
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn self_is_stopped(&self) -> bool {
@@ -3237,18 +2535,7 @@ impl QueueSubsysHost {
         if self.use_active {
             return crate::ffi::active_queue_coord().map_or(true, |qc| qc.is_stopped());
         }
-        self.raw(
-            25,
-            7,
-            0,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        ) != 0
+        false
     }
 
     pub fn self_standby_wait(&self, wait_ms: i32) {
@@ -3257,20 +2544,7 @@ impl QueueSubsysHost {
             if let Some(qc) = crate::ffi::active_queue_coord() {
                 qc.standby_wait(wait_ms);
             }
-            return;
         }
-        self.raw(
-            25,
-            8,
-            wait_ms,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     // NzbInfo ops (op = 30..=35)
@@ -4327,36 +3601,7 @@ impl QueueSubsysHost {
         if self.use_active {
             return unsafe { crate::qfile::groups(file_ptr as *const crate::qfile::File) };
         }
-        let n = self.raw(
-            41,
-            0,
-            -1,
-            file_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
-        let mut out = Vec::with_capacity(n);
-        let mut strs = [std::ptr::null(); 1];
-        for i in 0..n {
-            self.raw(
-                41,
-                0,
-                i as i32,
-                file_ptr,
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                strs.as_mut_ptr(),
-            );
-            out.push(unsafe { read_cstr(strs[0]) });
-        }
-        out
+        Vec::new()
     }
 
     pub fn file_server_stats_len(&self, file_ptr: usize) -> usize {
@@ -4368,18 +3613,7 @@ impl QueueSubsysHost {
                 crate::qfile::server_stat_count(file_ptr as *const crate::qfile::File)
             };
         }
-        self.raw(
-            41,
-            1,
-            -1,
-            file_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
+        0
     }
 
     pub fn file_server_stat_at(&self, file_ptr: usize, idx: usize) -> (i32, i32, i32) {
@@ -4389,20 +3623,7 @@ impl QueueSubsysHost {
                     .unwrap_or([0; 3]);
             return (id, ok, bad);
         }
-        let mut ints = [0i32; 3];
-        self.raw(
-            41,
-            1,
-            idx as i32,
-            file_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
-        (ints[0], ints[1], ints[2])
+        (0, 0, 0)
     }
 
     pub fn file_server_stat_set(&self, file_ptr: usize, server_id: i32, succ: i32, fail: i32) {
@@ -4415,21 +3636,7 @@ impl QueueSubsysHost {
                     fail,
                 )
             };
-            return;
         }
-        let mut ints = [server_id, succ, fail];
-        self.raw(
-            41,
-            2,
-            0,
-            file_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn file_push_group(&self, file_ptr: usize, group: *const c_char) {
@@ -4440,83 +3647,16 @@ impl QueueSubsysHost {
                 unsafe { CStr::from_ptr(group) }
             };
             unsafe { crate::qfile::push_group(file_ptr as *const crate::qfile::File, group) };
-            return;
         }
-        self.raw(
-            41,
-            3,
-            0,
-            file_ptr,
-            0,
-            group,
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn file_set_int(&self, file_ptr: usize, field: i32, val: i32) {
-        if self.use_active {
-            {
-                unsafe {
-                    crate::qfile::host_file_set(
-                        file_ptr as *const crate::qfile::File,
-                        field,
-                        val,
-                        0,
-                        std::ptr::null(),
-                        std::ptr::null_mut(),
-                    )
-                };
-                0
-            }
-        } else {
-            self.raw(
-                42,
-                field,
-                val,
-                file_ptr,
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
+        self.file_set_op(file_ptr, field, OpArgs::NONE.a2(val));
     }
 
     pub fn file_set_i64(&self, file_ptr: usize, field: i32, val: i64) {
         let mut i64s = [val];
-        if self.use_active {
-            {
-                unsafe {
-                    crate::qfile::host_file_set(
-                        file_ptr as *const crate::qfile::File,
-                        field,
-                        0,
-                        0,
-                        std::ptr::null(),
-                        i64s.as_mut_ptr(),
-                    )
-                };
-                0
-            }
-        } else {
-            self.raw(
-                42,
-                field,
-                0,
-                file_ptr,
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                i64s.as_mut_ptr(),
-                std::ptr::null_mut(),
-            )
-        };
+        self.file_set_op(file_ptr, field, OpArgs::NONE.i64s(i64s.as_mut_ptr()));
     }
 
     pub fn file_set_str(&self, file_ptr: usize, field: i32, val: Option<&[u8]>) {
@@ -4524,83 +3664,18 @@ impl QueueSubsysHost {
         let s1 = cv
             .as_ref()
             .map_or(std::ptr::null(), |v| v.as_ptr() as *const c_char);
-        if self.use_active {
-            {
-                unsafe {
-                    crate::qfile::host_file_set(
-                        file_ptr as *const crate::qfile::File,
-                        field,
-                        0,
-                        0,
-                        s1,
-                        std::ptr::null_mut(),
-                    )
-                };
-                0
-            }
-        } else {
-            self.raw(
-                42,
-                field,
-                0,
-                file_ptr,
-                0,
-                s1,
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
+        self.file_set_op(file_ptr, field, OpArgs::NONE.s1(s1));
     }
 
     pub fn file_action(&self, file_ptr: usize, action: i32, p2: usize) {
-        if self.use_active {
-            {
-                unsafe {
-                    crate::qfile::host_file_set(
-                        file_ptr as *const crate::qfile::File,
-                        action,
-                        0,
-                        p2,
-                        std::ptr::null(),
-                        std::ptr::null_mut(),
-                    )
-                };
-                0
-            }
-        } else {
-            self.raw(
-                42,
-                action,
-                0,
-                file_ptr,
-                p2,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
+        self.file_set_op(file_ptr, action, OpArgs::NONE.p2(p2));
     }
 
     pub fn alloc_file_id(&self) -> i32 {
         if self.use_active {
             return crate::qfile::alloc_file_id();
         }
-        self.raw(
-            42,
-            56,
-            0,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        ) as i32
+        0
     }
 
     pub fn delete_file_info(&self, file_ptr: usize) {
@@ -4609,100 +3684,22 @@ impl QueueSubsysHost {
         }
         if self.use_active {
             unsafe { crate::qfile::nzbget_rs_file_free(file_ptr as *mut crate::qfile::File) };
-            return;
         }
-        self.raw(
-            42,
-            57,
-            0,
-            file_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn file_set_nzb_info(&self, file_ptr: usize, nzb_ptr: usize) {
-        if self.use_active {
-            {
-                unsafe {
-                    crate::qfile::host_file_set(
-                        file_ptr as *const crate::qfile::File,
-                        58,
-                        0,
-                        nzb_ptr,
-                        std::ptr::null(),
-                        std::ptr::null_mut(),
-                    )
-                };
-                0
-            }
-        } else {
-            self.raw(
-                42,
-                58,
-                0,
-                file_ptr,
-                nzb_ptr,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
+        self.file_set_op(file_ptr, 58, OpArgs::NONE.p2(nzb_ptr));
     }
 
     pub fn file_subtract_server_stats_from_nzb_total(&self, file_ptr: usize, nzb_ptr: usize) {
-        if self.use_active {
-            {
-                unsafe {
-                    crate::qfile::host_file_set(
-                        file_ptr as *const crate::qfile::File,
-                        59,
-                        0,
-                        nzb_ptr,
-                        std::ptr::null(),
-                        std::ptr::null_mut(),
-                    )
-                };
-                0
-            }
-        } else {
-            self.raw(
-                42,
-                59,
-                0,
-                file_ptr,
-                nzb_ptr,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
+        self.file_set_op(file_ptr, 59, OpArgs::NONE.p2(nzb_ptr));
     }
 
     pub fn file_new_standalone(&self, id: i32, bump_gen: bool) -> usize {
         if self.use_active {
             return crate::qfile::new_standalone(id, bump_gen) as usize;
         }
-        self.raw(
-            42,
-            60,
-            i32::from(bump_gen),
-            0,
-            id as usize,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
+        0
     }
 
     pub fn file_article_raw_at(&self, file_ptr: usize, idx: usize) -> (ArticleSnap, bool) {
@@ -5015,33 +4012,14 @@ impl QueueSubsysHost {
         let mut buf = vec![0u8; len];
         let mut i64s = [buf.as_mut_ptr() as usize as i64];
         let copied = crate::articledl::with_cache_content_lock(|| {
-            if self.use_active {
-                unsafe {
-                    crate::qfile::host_cache_op(
-                        file_ptr as *const crate::qfile::File,
-                        1,
-                        len as i32,
-                        article_ptr,
-                        std::ptr::null(),
-                        std::ptr::null_mut(),
-                        i64s.as_mut_ptr(),
-                        std::ptr::null_mut(),
-                    )
-                }
-            } else {
-                self.raw(
-                    44,
-                    1,
-                    len as i32,
-                    file_ptr,
-                    article_ptr,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    i64s.as_mut_ptr(),
-                    std::ptr::null_mut(),
-                )
-            }
+            self.cache_op(
+                file_ptr,
+                1,
+                OpArgs::NONE
+                    .a2(len as i32)
+                    .p2(article_ptr)
+                    .i64s(i64s.as_mut_ptr()),
+            )
         });
         if copied != 0 {
             Some(buf)
@@ -5052,97 +4030,19 @@ impl QueueSubsysHost {
 
     pub fn article_cache_discard_segment(&self, file_ptr: usize, article_ptr: usize) {
         crate::articledl::with_cache_content_lock(|| {
-            if self.use_active {
-                unsafe {
-                    crate::qfile::host_cache_op(
-                        file_ptr as *const crate::qfile::File,
-                        2,
-                        0,
-                        article_ptr,
-                        std::ptr::null(),
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                    )
-                }
-            } else {
-                self.raw(
-                    44,
-                    2,
-                    0,
-                    file_ptr,
-                    article_ptr,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                )
-            };
+            self.cache_op(file_ptr, 2, OpArgs::NONE.p2(article_ptr));
         });
     }
 
     pub fn file_try_acquire_flush_lock(&self, file_ptr: usize) -> bool {
         crate::articledl::with_cache_content_lock(|| {
-            (if self.use_active {
-                unsafe {
-                    crate::qfile::host_cache_op(
-                        file_ptr as *const crate::qfile::File,
-                        3,
-                        1,
-                        0,
-                        std::ptr::null(),
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                    )
-                }
-            } else {
-                self.raw(
-                    44,
-                    3,
-                    1,
-                    file_ptr,
-                    0,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                )
-            }) != 0
+            self.cache_op(file_ptr, 3, OpArgs::NONE.a2(1)) != 0
         })
     }
 
     pub fn file_release_flush_lock(&self, file_ptr: usize) {
         crate::articledl::with_cache_content_lock(|| {
-            if self.use_active {
-                unsafe {
-                    crate::qfile::host_cache_op(
-                        file_ptr as *const crate::qfile::File,
-                        3,
-                        0,
-                        0,
-                        std::ptr::null(),
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                    )
-                }
-            } else {
-                self.raw(
-                    44,
-                    3,
-                    0,
-                    file_ptr,
-                    0,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                )
-            };
+            self.cache_op(file_ptr, 3, OpArgs::NONE);
         });
     }
 
@@ -5150,33 +4050,14 @@ impl QueueSubsysHost {
         let mut ints = [0i32; 2];
         let mut i64s = [0i64; 2];
         let mut strs = [std::ptr::null(); 1];
-        if self.use_active {
-            unsafe {
-                crate::qfile::host_cache_op(
-                    file_ptr as *const crate::qfile::File,
-                    4,
-                    0,
-                    0,
-                    std::ptr::null(),
-                    ints.as_mut_ptr(),
-                    i64s.as_mut_ptr(),
-                    strs.as_mut_ptr(),
-                )
-            }
-        } else {
-            self.raw(
-                44,
-                4,
-                0,
-                file_ptr,
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                ints.as_mut_ptr(),
-                i64s.as_mut_ptr(),
-                strs.as_mut_ptr(),
-            )
-        };
+        self.cache_op(
+            file_ptr,
+            4,
+            OpArgs::NONE
+                .ints(ints.as_mut_ptr())
+                .i64s(i64s.as_mut_ptr())
+                .strs(strs.as_mut_ptr()),
+        );
         let out_fn = unsafe {
             if strs[0].is_null() || i64s[0] <= 0 {
                 Vec::new()
@@ -5209,34 +4090,16 @@ impl QueueSubsysHost {
         }
         crate::articledl::with_cache_content_lock(|| {
             let mut out: Vec<(usize, i64, i32, *const u8, Option<Vec<u8>>)> = Vec::new();
-            let ok = (if self.use_active {
-                unsafe {
-                    crate::qfile::host_cache_op(
-                        file_ptr as *const crate::qfile::File,
-                        5,
-                        0,
+            let ok = self.cache_op(
+                file_ptr,
+                5,
+                OpArgs::NONE
+                    .p2(
                         (&mut out as *mut Vec<(usize, i64, i32, *const u8, Option<Vec<u8>>)>)
                             as usize,
-                        push_seg as *const () as *const c_char,
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
                     )
-                }
-            } else {
-                self.raw(
-                    44,
-                    5,
-                    0,
-                    file_ptr,
-                    (&mut out as *mut Vec<(usize, i64, i32, *const u8, Option<Vec<u8>>)>) as usize,
-                    push_seg as *const () as *const c_char,
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                )
-            }) != 0;
+                    .s1(push_seg as *const () as *const c_char),
+            ) != 0;
             if ok {
                 Some(out)
             } else {
@@ -5246,95 +4109,21 @@ impl QueueSubsysHost {
     }
 
     pub fn file_cache_is_deleted_unparked(&self, file_ptr: usize) -> bool {
-        (if self.use_active {
-            unsafe {
-                crate::qfile::host_cache_op(
-                    file_ptr as *const crate::qfile::File,
-                    6,
-                    0,
-                    0,
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                )
-            }
-        } else {
-            self.raw(
-                44,
-                6,
-                0,
-                file_ptr,
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        }) != 0
+        self.cache_op(file_ptr, 6, OpArgs::NONE) != 0
     }
 
     pub fn file_cache_discard_article_segment(&self, file_ptr: usize, article_ptr: usize) {
-        if self.use_active {
-            unsafe {
-                crate::qfile::host_cache_op(
-                    file_ptr as *const crate::qfile::File,
-                    6,
-                    1,
-                    article_ptr,
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                )
-            }
-        } else {
-            self.raw(
-                44,
-                6,
-                1,
-                file_ptr,
-                article_ptr,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
+        self.cache_op(file_ptr, 6, OpArgs::NONE.a2(1).p2(article_ptr));
     }
 
     pub fn file_cache_flush_finish(&self, file_ptr: usize, flushed_articles: i32) -> bool {
         crate::articledl::with_cache_content_lock(|| {
             let mut ints = [0i32; 1];
-            if self.use_active {
-                unsafe {
-                    crate::qfile::host_cache_op(
-                        file_ptr as *const crate::qfile::File,
-                        7,
-                        flushed_articles,
-                        0,
-                        std::ptr::null(),
-                        ints.as_mut_ptr(),
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                    )
-                }
-            } else {
-                self.raw(
-                    44,
-                    7,
-                    flushed_articles,
-                    file_ptr,
-                    0,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    ints.as_mut_ptr(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                )
-            };
+            self.cache_op(
+                file_ptr,
+                7,
+                OpArgs::NONE.a2(flushed_articles).ints(ints.as_mut_ptr()),
+            );
             ints[0] != 0
         })
     }

@@ -6533,35 +6533,52 @@ def scenario_fleetencryptedheadless(daemon, t):
 
 
 def scenario_fleetlockedlast(daemon, t):
-    """appendfleet: a copy whose rar headers are encrypted while its nzb has
-    no password can never be extracted or borrowed from, so it ranks after a
+    """appendfleet: a copy whose rar headers are encrypted while no password
+    is at hand can never be extracted or borrowed from, so it ranks after a
     plain copy that can, even a whole locked copy behind one 85% alive (live
     South Park S23E05: the locked copy was queued first and failed only after
-    downloading whole). It keeps DupeLocked=yes for failover and the rescue.
-    With its password in the nzb the same copy ranks by health as before."""
+    downloading whole). DupeLocked=yes records the encrypted headers for
+    failover and the rescue, which decide when they rank whether a password
+    is at hand. With its password in the nzb, or as {{password}} in its name,
+    the same copy ranks by health as before. A copy queued before the fleet
+    (the same posting as a member) gets DupeLocked too."""
     daemon.fake_nntp.alive = set()
     enc = _rar4_head(0x30, main_flags=0x80)   # main header flag: encrypted headers
     api = daemon.wait_ready()
 
-    def run(key, tag, ep, password):
+    def params_of(key):
+        return {g['NZBName']: {p['Name']: p['Value'] for p in g.get('Parameters', [])}
+                for g in api.listgroups() + api.history() if g.get('DupeKey') == key}
+
+    def copies(tag, password):
         locked = _fleet_copy(daemon, tag + 'k', 'a.rar', 400_000, enc, _payload(400_000, 7601))
         if password:
             locked = locked.replace('<file ', '<head><meta type="password">pw</meta></head><file ', 1)
         plain = _fleet_copy(daemon, tag + 'p', 'b.rar', 400_000, _rar4_head(0x30), _payload(400_000, 7602), 34)
-        reply = _fleet(daemon, [(ep + '.enc', locked), (ep + '.plain', plain)], key=key)
+        return locked, plain
+
+    def run(key, tag, ep, password, enc_name='.enc'):
+        locked, plain = copies(tag, password)
+        reply = _fleet(daemon, [(ep + enc_name, locked), (ep + '.plain', plain)], key=key)
         order = [m['Name'] for m in sorted(reply['Members'], key=lambda m: m['Rank'])]
-        params = {g['NZBName']: {p['Name']: p['Value'] for p in g.get('Parameters', [])}
-                  for g in api.listgroups() + api.history() if g.get('DupeKey') == key}
-        return order, {n: p.get('DupeLocked') for n, p in params.items()}
+        return order, {n: p.get('DupeLocked') for n, p in params_of(key).items()}
 
     order, locked = run('fleet:locked', 'l', 'Show.S01E01', False)
     order_pw, locked_pw = run('fleet:lockedpw', 'w', 'Show.S01E02', True)
+    order_nm, locked_nm = run('fleet:lockedname', 'n', 'Show.S01E03', False, '.{{pw}}.enc')
+    # queued on its own first: the fleet finds it the same posting as a member
+    old, plain = copies('o', False)
+    daemon.append(api, 'Show.S01E04.old', old, True, 'fleet:lockedold', 50)
+    _fleet(daemon, [('Show.S01E04.enc', old), ('Show.S01E04.plain', plain)], key='fleet:lockedold')
+    old_locked = params_of('fleet:lockedold').get('Show.S01E04.old', {}).get('DupeLocked')
     ok = (order == ['Show.S01E01.plain', 'Show.S01E01.enc']
           and locked.get('Show.S01E01.enc') == 'yes' and locked.get('Show.S01E01.plain') is None
           and order_pw == ['Show.S01E02.enc', 'Show.S01E02.plain']
-          and locked_pw.get('Show.S01E02.enc') is None)
-    return ('fleetlockedlast', ok, 'order=%s locked=%s order_pw=%s locked_pw=%s'
-            % (order, locked, order_pw, locked_pw))
+          and locked_pw.get('Show.S01E02.enc') == 'yes'
+          and order_nm == ['Show.S01E03.{{pw}}.enc', 'Show.S01E03.plain']
+          and old_locked == 'yes')
+    return ('fleetlockedlast', ok, 'order=%s locked=%s order_pw=%s locked_pw=%s order_name=%s locked_name=%s old=%s'
+            % (order, locked, order_pw, locked_pw, order_nm, locked_nm, old_locked))
 
 
 def scenario_fleettwinvolumes(daemon, t):

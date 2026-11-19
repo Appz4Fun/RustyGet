@@ -163,6 +163,90 @@ fn kind_upgrades(stored: crate::donorkind::DonorKind, found: crate::donorkind::D
         && (stored == DonorKind::Unknown || found == DonorKind::Twin)
 }
 
+/// Records on a copy already queued, or parked in history as a backup, that its
+/// archive headers are encrypted ([`crate::donorkind::LOCKED_PARAM`]), so the
+/// failover and rescue picks rank it last while no password is at hand.
+fn fleet_mark_encrypted(host_ctx: *mut c_void, host_cb: DupeHostFn, nzb_id: i32) {
+    use crate::donorkind::LOCKED_PARAM;
+    if nzb_id <= 0 {
+        return;
+    }
+    with_guarded_queue(host_ctx, host_cb, |dq_ptr| {
+        let Some(qh) = crate::ffi::queue_host() else {
+            return;
+        };
+        let Some((nzb_ptr, in_history)) = dq_find_nzb(host_ctx, host_cb, dq_ptr, nzb_id) else {
+            return;
+        };
+        if in_history
+            && inspect_nzb(host_ctx, host_cb, nzb_ptr, false).delete_status
+                != crate::dupecoord::DELETE_STATUS_DUPE
+        {
+            return;
+        }
+        if crate::donorkind::encrypted_param(qh.nzb_get_param(nzb_ptr, LOCKED_PARAM).as_deref()) {
+            return;
+        }
+        qh.nzb_set_param(nzb_ptr, LOCKED_PARAM, Some(b"yes"));
+        qh.nzb_set_int(nzb_ptr, crate::queuesubsys_host::NZB_INT_CHANGED, 1);
+        if in_history {
+            qh.dq_history_changed(dq_ptr);
+            qh.dq_save(dq_ptr);
+        } else {
+            qh.dq_save_changed(dq_ptr);
+        }
+    });
+}
+
+/// For each copy already queued or in history (`id` 0 or not found: `None`):
+/// whether its headers are stored as encrypted, and whether it has a password
+/// now (`*Unpack:Password`, which the user may have set since).
+fn fleet_stored_locks(
+    host_ctx: *mut c_void,
+    host_cb: DupeHostFn,
+    ids: &[i32],
+) -> Vec<Option<(bool, bool)>> {
+    if ids.iter().all(|&id| id == 0) {
+        return vec![None; ids.len()];
+    }
+    with_guarded_queue(host_ctx, host_cb, |dq_ptr| {
+        let Some(qh) = crate::ffi::queue_host() else {
+            return vec![None; ids.len()];
+        };
+        ids.iter()
+            .map(|&id| {
+                if id == 0 {
+                    return None;
+                }
+                let (ptr_, _) = dq_find_nzb(host_ctx, host_cb, dq_ptr, id)?;
+                Some((
+                    crate::donorkind::encrypted_param(
+                        qh.nzb_get_param(ptr_, crate::donorkind::LOCKED_PARAM)
+                            .as_deref(),
+                    ),
+                    qh.nzb_get_param(ptr_, crate::donorkind::PASSWORD_PARAM)
+                        .is_some_and(|p| !p.trim_ascii().is_empty()),
+                ))
+            })
+            .collect()
+    })
+}
+
+/// A `{{password}}` in a fleet member's name is its password, as the scanner
+/// reads it into `*Unpack:Password` when the copy is added; a password in the
+/// nzb's meta wins. Kept in the summary's meta so the probe, the intake and
+/// the ranking all see it.
+fn summary_take_name_password(info: &mut NzbSummaryData, name: &[u8]) {
+    if summary_password_known(info) {
+        return;
+    }
+    if let Some(pw) = crate::nzbfile::extract_password_from_filename(name) {
+        if !pw.trim_ascii().is_empty() {
+            info.meta.insert(b"password".to_vec(), pw.to_vec());
+        }
+    }
+}
+
 /// Records the intake verdict on a copy already in the queue or history.
 fn fleet_mark_video(host_ctx: *mut c_void, host_cb: DupeHostFn, nzb_id: i32, same: bool) {
     fleet_set_video(host_ctx, host_cb, nzb_id, video_param_value(same));
@@ -1456,6 +1540,13 @@ fn fleet_phase_secs(left_ms: i64, share: i64, max_sec: i64) -> i64 {
     (left_ms.max(0) / (1000 * share.max(1))).min(max_sec)
 }
 
+/// Whether a fleet copy ranks as locked: headers encrypted and no password,
+/// neither in its nzb (meta or `{{password}}` name) nor set on the copy
+/// already queued, nor `UnpackPassFile` (see [`crate::donorkind::locked`]).
+fn fleet_candidate_locked(encrypted: bool, nzb_password: bool, stored_password: bool) -> bool {
+    crate::donorkind::locked(encrypted, nzb_password || stored_password)
+}
+
 fn summary_password_known(info: &NzbSummaryData) -> bool {
     info.meta
         .iter()
@@ -2088,8 +2179,10 @@ struct SearchJob {
     known_files: Vec<Vec<u8>>,
     members: Vec<(i32, Vec<u8>)>,
     member_scores: Vec<i32>,
-    /// each member's [`crate::donorkind::LOCKED_PARAM`]
+    /// whether each member is locked now (see [`crate::dupecoord::locked_host`])
     member_locked: Vec<bool>,
+    /// whether each member has a password now (`*Unpack:Password`)
+    member_password: Vec<bool>,
     score: i32,
 }
 
@@ -2368,13 +2461,15 @@ impl NzbgetRsDupeSearch {
             if add_member {
                 job.members.push((item.id, qf.clone()));
                 job.member_scores.push(item.dupe_score);
-                job.member_locked
-                    .push(crate::ffi::queue_host().is_some_and(|qh| {
-                        crate::donorkind::locked_param(
-                            qh.nzb_get_param(item.ptr, crate::donorkind::LOCKED_PARAM)
-                                .as_deref(),
-                        )
-                    }));
+                let qh = crate::ffi::queue_host();
+                job.member_locked.push(
+                    qh.as_ref()
+                        .is_some_and(|qh| crate::dupecoord::locked_host(qh, item.ptr)),
+                );
+                job.member_password.push(qh.as_ref().is_some_and(|qh| {
+                    qh.nzb_get_param(item.ptr, crate::donorkind::PASSWORD_PARAM)
+                        .is_some_and(|p| !p.trim_ascii().is_empty())
+                }));
             }
         };
 
@@ -3563,7 +3658,7 @@ impl NzbgetRsDupeSearch {
             } else {
                 None
             };
-        // (twin, kind, locked: encrypted headers and no password)
+        // (twin, kind, archive headers encrypted)
         let copy_kind = |info: &NzbSummaryData| -> (bool, crate::donorkind::DonorKind, bool) {
             use crate::donorkind::{DonorKind, Packing};
             let Some(pick_listed) = pick_listed.as_ref() else {
@@ -3580,7 +3675,7 @@ impl NzbgetRsDupeSearch {
             (
                 twin,
                 DonorKind::of(twin, packing),
-                packing == Packing::Locked,
+                packing == Packing::HeadersEncrypted,
             )
         };
         let alive_of = |h: &DonorHealthResult, s: &NzbSummaryData| -> f64 {
@@ -3610,6 +3705,9 @@ impl NzbgetRsDupeSearch {
         struct PlacedItem {
             id: i32,
             entry: crate::donorscore::Entry,
+            // a member whose probe found its archive headers encrypted: the
+            // rescore records it (DupeLocked) for failover and the rescue
+            encrypted: bool,
             title: Vec<u8>,
             member: bool,
             valid: bool,
@@ -3789,7 +3887,9 @@ impl NzbgetRsDupeSearch {
 
             let place_one = |st: &mut PlaceMutable, i: usize, alive: f64, how: &[u8]| {
                 let ctx = ctx_addr as *mut c_void;
-                let (twin, kind, locked) = copy_kind(&verified[i].info);
+                let (twin, kind, encrypted) = copy_kind(&verified[i].info);
+                let locked =
+                    crate::donorkind::locked(encrypted, summary_password_known(&verified[i].info));
                 let score = take_rank_set(&mut st.ranks_used, alive, twin);
                 let id = self.add_donor(
                     ctx,
@@ -3810,6 +3910,7 @@ impl NzbgetRsDupeSearch {
                     i,
                     PlacedItem {
                         id,
+                        encrypted: false,
                         entry: crate::donorscore::Entry {
                             score,
                             alive,
@@ -4155,11 +4256,14 @@ impl NzbgetRsDupeSearch {
                     }
                     let member_title = base_file_name(&job.members[m_idx].1);
                     let old_sc = job.member_scores.get(m_idx).copied().unwrap_or(0);
-                    let (member_twin, member_kind, member_locked) = copy_kind(summary);
-                    let member_locked =
-                        member_locked || job.member_locked.get(m_idx).copied().unwrap_or(false);
+                    let (member_twin, member_kind, member_encrypted) = copy_kind(summary);
+                    let member_password = summary_password_known(summary)
+                        || job.member_password.get(m_idx).copied().unwrap_or(false);
+                    let member_locked = crate::donorkind::locked(member_encrypted, member_password)
+                        || job.member_locked.get(m_idx).copied().unwrap_or(false);
                     let item = PlacedItem {
                         id: job.members[m_idx].0,
+                        encrypted: member_encrypted,
                         entry: crate::donorscore::Entry {
                             score: if is_dead {
                                 crate::donorscore::DEAD
@@ -4228,6 +4332,7 @@ impl NzbgetRsDupeSearch {
                         donor_alive,
                         donor_title,
                         donor_kind,
+                        donor_encrypted,
                     ) = {
                         let d = &st.placed[&slot_key];
                         (
@@ -4238,6 +4343,7 @@ impl NzbgetRsDupeSearch {
                             d.entry.alive,
                             d.title.clone(),
                             d.entry.kind,
+                            d.encrypted,
                         )
                     };
                     if wanted[n] == donor_entry_score && !donor_member {
@@ -4266,6 +4372,11 @@ impl NzbgetRsDupeSearch {
                         }
                         if add_zero {
                             params.push(b"DupeAlive=0".to_vec());
+                        }
+                        if donor_encrypted {
+                            let mut lp = crate::donorkind::LOCKED_PARAM.to_vec();
+                            lp.extend_from_slice(b"=yes");
+                            params.push(lp);
                         }
                     }
                     if self.set_score(host_ctx, host_cb, donor_id, score, &params) {
@@ -4643,13 +4754,27 @@ impl NzbgetRsDupeSearch {
                 hc_dupe,
             )
         };
-        let usable: Vec<(i32, f64, u8)> = with_guarded_queue(host_ctx, host_cb, |dq_ptr| {
-            candidates
-                .iter()
-                .copied()
-                .filter(|&(id, _, _)| eligible(dq_ptr, id))
-                .collect()
-        });
+        // backups locked now (encrypted headers, no password) only last
+        let (usable, locked): (Vec<(i32, f64, u8)>, Vec<i32>) =
+            with_guarded_queue(host_ctx, host_cb, |dq_ptr| {
+                let usable: Vec<(i32, f64, u8)> = candidates
+                    .iter()
+                    .copied()
+                    .filter(|&(id, _, _)| eligible(dq_ptr, id))
+                    .collect();
+                let qh = crate::ffi::queue_host();
+                let locked = usable
+                    .iter()
+                    .map(|c| c.0)
+                    .filter(|&id| {
+                        qh.as_ref().is_some_and(|qh| {
+                            dq_find_nzb(host_ctx, host_cb, dq_ptr, id)
+                                .is_some_and(|(p, _)| crate::dupecoord::locked_host(qh, p))
+                        })
+                    })
+                    .collect();
+                (usable, locked)
+            });
         // With DupeBorrowFirst and live article fallback, a backup the pick
         // can borrow from (a TWIN, a borrowable ALT, or one whose packing is
         // not known yet) fills the pick's holes while it downloads: the pick
@@ -4680,7 +4805,9 @@ impl NzbgetRsDupeSearch {
                 return;
             }
         }
-        let Some((backup_id, backup_alive)) = crate::dupewatch::swap_backup(&usable, need) else {
+        let Some((backup_id, backup_alive)) =
+            crate::dupewatch::swap_backup_locked_last(&usable, &locked, need)
+        else {
             msg.extend_from_slice(
                 b" and will likely fail, but no backup is whole enough to swap in",
             );
@@ -5846,9 +5973,12 @@ pub unsafe fn fleet_append(
         video: Option<bool>,
         // intake found another video in it
         video_different: bool,
-        // archive headers encrypted and no password in its nzb: never
-        // extractable, ranked after every copy that is
-        locked: bool,
+        // archive headers encrypted (stored as DupeLocked); without a
+        // password it is locked: never extractable, ranked after every copy
+        // that is
+        encrypted: bool,
+        // the copy already queued has a password now (*Unpack:Password)
+        stored_password: bool,
     }
 
     let mut candidates: Vec<FleetCandidate> = Vec::with_capacity(members.len());
@@ -5866,7 +5996,8 @@ pub unsafe fn fleet_append(
             kind: crate::donorkind::DonorKind::Unknown,
             video: None,
             video_different: false,
-            locked: false,
+            encrypted: false,
+            stored_password: false,
         };
         if !members[i].url.is_empty() {
             let (ok, status, body) = slot.into_inner().unwrap_or_else(|e| e.into_inner());
@@ -5880,6 +6011,7 @@ pub unsafe fn fleet_append(
         match parse_nzb_summary(&members[i].data) {
             Some(parsed) if !parsed.message_ids.is_empty() => {
                 cand.summary = parsed;
+                summary_take_name_password(&mut cand.summary, &members[i].name);
             }
             _ => {
                 cand.error = b"the nzb-file is unreadable".to_vec();
@@ -6007,6 +6139,20 @@ pub unsafe fn fleet_append(
         host_cb,
         &candidates.iter().map(|c| c.existing_id).collect::<Vec<_>>(),
     );
+    // what is stored of its headers, and whether it has a password now: a
+    // probe that runs out of time must not forget the one, and a password
+    // set since unlocks it
+    let member_locks = fleet_stored_locks(
+        host_ctx,
+        host_cb,
+        &candidates.iter().map(|c| c.existing_id).collect::<Vec<_>>(),
+    );
+    for (cand, stored) in candidates.iter_mut().zip(&member_locks) {
+        if let Some((encrypted, password)) = *stored {
+            cand.encrypted |= encrypted;
+            cand.stored_password = password;
+        }
+    }
 
     let already_downloaded_name: Option<Vec<u8>> =
         with_guarded_queue(host_ctx, host_cb, |dq_ptr| {
@@ -6113,7 +6259,7 @@ pub unsafe fn fleet_append(
             let mut got = probe_copies(host_ctx, host_cb, &summaries, probe_deadline);
             earlier_probed = got.split_off(usable.len().min(got.len()));
             for (&i, p) in usable.iter().zip(got) {
-                candidates[i].locked |= p.1 == crate::donorkind::Packing::Locked;
+                candidates[i].encrypted |= p.1 == crate::donorkind::Packing::HeadersEncrypted;
                 probed[i] = Some(p);
             }
         }
@@ -6190,11 +6336,11 @@ pub unsafe fn fleet_append(
                         candidates[i].video = Some(false);
                         msg.extend_from_slice(b" unverified: ");
                         msg.extend_from_slice(why.as_bytes());
-                        // the intake read it with the nzb's password, if any
-                        if why == crate::streamrepair::ContentMapper::SKIP_ENCRYPTED_HEADERS
-                            && !summary_password_known(&candidates[i].summary)
-                        {
-                            candidates[i].locked = true;
+                        // read with the nzb's password, if any: a wrong one
+                        // leaves the headers encrypted too, but whether that
+                        // locks the copy is told when it is ranked
+                        if why == crate::streamrepair::ContentMapper::SKIP_ENCRYPTED_HEADERS {
+                            candidates[i].encrypted = true;
                         }
                     }
                 }
@@ -6389,10 +6535,14 @@ pub unsafe fn fleet_append(
             candidates[i].alive = candidates[orig].alive;
             candidates[i].dead = candidates[orig].dead;
             candidates[i].kind = candidates[orig].kind;
-            candidates[i].locked = candidates[orig].locked;
+            candidates[i].encrypted = candidates[orig].encrypted;
         }
         cand_kind[i] = candidates[i].kind as u8;
-        cand_locked[i] = u8::from(candidates[i].locked);
+        cand_locked[i] = u8::from(fleet_candidate_locked(
+            candidates[i].encrypted,
+            summary_password_known(&candidates[i].summary),
+            candidates[i].stored_password,
+        ));
         cand_err[i] = u8::from(!candidates[i].error.is_empty());
         cand_same_as[i] = candidates[i].same_as;
         cand_dead[i] = u8::from(candidates[i].dead);
@@ -6480,6 +6630,9 @@ pub unsafe fn fleet_append(
             if let (true, Some(same)) = (cand.existing_id != 0, cand.video) {
                 fleet_mark_video(host_ctx, host_cb, cand.existing_id, same);
             }
+            if cand.existing_id != 0 && cand.encrypted {
+                fleet_mark_encrypted(host_ctx, host_cb, cand.existing_id);
+            }
             entry.same_as = if cand.existing_id != 0 {
                 cand.existing_id
             } else {
@@ -6518,7 +6671,7 @@ pub unsafe fn fleet_append(
             if let Some(same) = cand.video {
                 params.push((VIDEO_PARAM, video_param_value(same)));
             }
-            if cand.locked {
+            if cand.encrypted {
                 params.push((crate::donorkind::LOCKED_PARAM, b"yes"));
             }
             // the video inside, for TwinCheck to tell an alt from a different video
@@ -6568,6 +6721,9 @@ pub unsafe fn fleet_append(
                 .any(|&p| added[p] != 0 || member_stored[p].is_some());
         let kind = crate::donorkind::DonorKind::of(partner_queued, w.packing);
         fleet_upgrade_kind(host_ctx, host_cb, w.nzb_id, kind);
+        if w.packing == crate::donorkind::Packing::HeadersEncrypted {
+            fleet_mark_encrypted(host_ctx, host_cb, w.nzb_id);
+        }
     }
 
     let mut chosen = 0i32;
@@ -6794,5 +6950,38 @@ mod tests {
                 .unwrap()
                 .retryable
         );
+    }
+}
+
+#[cfg(test)]
+mod locked_copy_tests {
+    use super::*;
+
+    #[test]
+    fn a_name_password_is_the_copys_password() {
+        let mut info = NzbSummaryData::default();
+        summary_take_name_password(&mut info, b"Show.S01E01.{{secret}}.nzb");
+        assert!(summary_password_known(&info));
+        assert_eq!(info.meta.get(b"password".as_slice()).unwrap(), b"secret");
+        // the nzb's own password wins, as in the scanner
+        let mut info = NzbSummaryData::default();
+        info.meta.insert(b"Password".to_vec(), b"meta".to_vec());
+        summary_take_name_password(&mut info, b"Show.S01E01.{{other}}");
+        assert!(!info.meta.contains_key(b"password".as_slice()));
+        // no braces, no password
+        let mut info = NzbSummaryData::default();
+        summary_take_name_password(&mut info, b"Show.S01E01");
+        assert!(!summary_password_known(&info));
+    }
+
+    #[test]
+    fn an_encrypted_copy_is_locked_only_without_a_password() {
+        // (no test sets UnpackPassFile)
+        assert!(fleet_candidate_locked(true, false, false));
+        // in its nzb (meta or name)
+        assert!(!fleet_candidate_locked(true, true, false));
+        // set on the queued copy after intake
+        assert!(!fleet_candidate_locked(true, false, true));
+        assert!(!fleet_candidate_locked(false, false, false));
     }
 }

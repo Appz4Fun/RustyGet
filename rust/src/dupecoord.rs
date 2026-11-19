@@ -919,6 +919,19 @@ pub(crate) fn alive_permille_host(
     }
 }
 
+/// Whether a queued or parked item is locked now: its archive headers are
+/// encrypted ([`crate::donorkind::LOCKED_PARAM`]) and no password is at hand
+/// (its `*Unpack:Password`, or `UnpackPassFile`), see [`crate::donorkind::locked`].
+#[cfg(unix)]
+pub(crate) fn locked_host(host: &crate::queuesubsys_host::QueueSubsysHost, nzb_ptr: usize) -> bool {
+    crate::donorkind::locked_params(
+        host.nzb_get_param(nzb_ptr, crate::donorkind::LOCKED_PARAM)
+            .as_deref(),
+        host.nzb_get_param(nzb_ptr, crate::donorkind::PASSWORD_PARAM)
+            .as_deref(),
+    )
+}
+
 #[cfg(unix)]
 pub(crate) fn fails_over_snap(
     opts: &crate::queuesubsys_host::GlobalOptsSnap,
@@ -1004,10 +1017,7 @@ pub(crate) fn no_backup_reason_host(
                 host.nzb_get_param(item.ptr, crate::donorkind::KIND_PARAM)
                     .as_deref(),
             ) as i32;
-            c.locked = i32::from(crate::donorkind::locked_param(
-                host.nzb_get_param(item.ptr, crate::donorkind::LOCKED_PARAM)
-                    .as_deref(),
-            ));
+            c.locked = i32::from(locked_host(host, item.ptr));
             c.health = item.health;
             c.critical_health = item.critical_health_opt;
             c.same_name_or_key = i32::from(
@@ -1094,10 +1104,7 @@ fn collect_dupe_candidates(
                 host.nzb_get_param(item.ptr, crate::donorkind::KIND_PARAM)
                     .as_deref(),
             ) as i32;
-            c.locked = i32::from(crate::donorkind::locked_param(
-                host.nzb_get_param(item.ptr, crate::donorkind::LOCKED_PARAM)
-                    .as_deref(),
-            ));
+            c.locked = i32::from(locked_host(host, item.ptr));
             c.health = item.health;
             c.critical_health = item.critical_health_opt;
             c.same_name_or_key = i32::from(same_name_or_key(

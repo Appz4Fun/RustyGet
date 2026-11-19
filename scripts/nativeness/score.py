@@ -111,8 +111,27 @@ def match_brace(code, open_idx, open_ch='{', close_ch='}'):
     return len(code)
 
 
-CFG_TEST_PAT = r'#\[cfg\((?:test|all\((?:[^\]]*?[(,]\s*)?test\s*[,)][^\]]*)\)\]'
-CFG_TEST = re.compile(CFG_TEST_PAT)
+CFG_OPEN = re.compile(r'#\[cfg\(')
+
+
+def is_test_only_cfg(pred):
+    """`test`, or `all(..)` with `test` as one of its direct arguments.
+    `not(test)` and `any(.., test)` are not test-only."""
+    pred = pred.strip()
+    if pred == 'test':
+        return True
+    if pred.startswith('all(') and pred.endswith(')'):
+        return 'test' in split_top_level(pred[4:-1])
+    return False
+
+
+def find_test_cfg(code, pos=0):
+    """(start, end) of the next test-only `#[cfg(..)]` attribute, or None."""
+    for m in CFG_OPEN.finditer(code, pos):
+        close = match_brace(code, m.end() - 1, '(', ')')
+        if code.startswith(']', close) and is_test_only_cfg(code[m.end():close - 1]):
+            return m.start(), close + 1
+    return None
 ITEM_START = re.compile(r'(?:pub(?:\([\w:\s]+\))?\s+)?(?:(?:unsafe|async|const|default|extern(?:\s+"[^"]*")?)\s+)*'
                         r'(?:mod|fn|impl|struct|enum|union|trait|type|use|const|static|macro_rules!|extern)\b')
 
@@ -120,10 +139,10 @@ ITEM_START = re.compile(r'(?:pub(?:\([\w:\s]+\))?\s+)?(?:(?:unsafe|async|const|d
 def blank_test_items(code):
     """Blank every item annotated #[cfg(test)] (usually `mod tests {..}`)."""
     while True:
-        m = CFG_TEST.search(code)
-        if not m:
+        found = find_test_cfg(code)
+        if not found:
             return code
-        j = m.end()
+        start, j = found
         # skip further attributes and whitespace
         while True:
             rest = code[j:]
@@ -142,7 +161,7 @@ def blank_test_items(code):
                 end = match_brace(code, brace) if brace != -1 else len(code)
         else:
             end = end_of_element(code, j)
-        code = code[:m.start()] + ''.join('\n' if c == '\n' else ' ' for c in code[m.start():end]) + code[end:]
+        code = code[:start] + ''.join('\n' if c == '\n' else ' ' for c in code[start:end]) + code[end:]
 
 
 def end_of_element(code, j):
@@ -166,6 +185,9 @@ def end_of_element(code, j):
                     r += 1
                 if r < n and code[r] in ',;':
                     return r + 1
+                if code.startswith('else', r):
+                    k = r + 4
+                    continue
                 if r >= n or code[r] not in '.?)]':
                     return k + 1
         elif ch in ',;' and depth == 0:
@@ -531,7 +553,20 @@ def add(into, other):
         into[k] = into.get(k, 0) + v
 
 
-TEST_GATED_MOD = re.compile(CFG_TEST_PAT + r'\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([\w:]+\))?\s+)?mod\s+(\w+)\s*;')
+GATED_MOD_TAIL = re.compile(r'\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([\w:]+\))?\s+)?mod\s+(\w+)\s*;')
+
+
+def test_gated_mod_names(code):
+    """Names in `#[cfg(test)] mod name;` declarations (file-level only)."""
+    names, pos = [], 0
+    while True:
+        found = find_test_cfg(code, pos)
+        if not found:
+            return names
+        m = GATED_MOD_TAIL.match(code, found[1])
+        if m:
+            names.append(m.group(1))
+        pos = found[1]
 
 
 def test_gated_files(src_root):
@@ -539,7 +574,7 @@ def test_gated_files(src_root):
     gated = set()
     for path in src_root.rglob('*.rs'):
         code = blank_comments_and_strings(path.read_text(encoding='utf-8', errors='replace'))
-        names = TEST_GATED_MOD.findall(code)
+        names = test_gated_mod_names(code)
         if not names:
             continue
         base = path.parent if path.name in ('lib.rs', 'main.rs', 'mod.rs') else path.parent / path.stem

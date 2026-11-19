@@ -37,8 +37,14 @@ class Lexer(unittest.TestCase):
 
     def test_cfg_all_with_test_anywhere_is_ignored(self):
         src = ('#[cfg(all(unix, test))]\nfn t() { a.unwrap(); }\n'
-               '#[cfg(not(test))]\nfn real() { b.unwrap(); }\n')
-        self.assertEqual(scan(src)['unwrap'], 1)
+               '#[cfg(not(test))]\nfn real() { b.unwrap(); }\n'
+               '#[cfg(all(unix, not(test)))]\nfn real2() { c.unwrap(); }\n'
+               '#[cfg(all(any(unix, test), x))]\nfn real3() { d.unwrap(); }\n')
+        self.assertEqual(scan(src)['unwrap'], 3)
+
+    def test_cfg_test_arm_with_else_is_fully_blanked(self):
+        src = 'fn f(x: u8) { match x {\n #[cfg(test)]\n 1 => if a { b } else { c.unwrap() },\n _ => 0 } }\n'
+        self.assertEqual(scan(src)['unwrap'], 0)
 
     def test_cfg_test_module_is_ignored(self):
         src = 'fn a() { x.unwrap(); }\n#[cfg(test)]\nmod tests {\n  fn b() { y.unwrap(); z.unwrap(); }\n}\n'

@@ -86,7 +86,7 @@ score is moving, CI can fail a PR that lowers it by more than `N`.
 ## Limits
 
 The analysis is lexical, not a parser. Counts are close but not exact:
-integer-literal match arms include genuine byte parsing, `bool` action
+integer-literal match arms include genuine byte parsing, `#[cfg(test)] mod x;` inside an inline module or with `#[path]` is not resolved, `bool` action
 functions include a few legitimate ones, and a renamed C type escapes the
 `c_types` count. The aim is a stable trend line and a ranking, not a proof.
 Tools considered: `cargo-geiger` counts unsafe in dependencies too (ours is

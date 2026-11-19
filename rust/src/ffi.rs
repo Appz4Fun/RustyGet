@@ -3412,6 +3412,10 @@ pub(crate) fn is_queue_loaded() -> bool {
     QUEUE_LOADED.load(std::sync::atomic::Ordering::SeqCst)
 }
 
+pub(crate) fn set_queue_loaded(loaded: bool) {
+    QUEUE_LOADED.store(loaded, std::sync::atomic::Ordering::SeqCst);
+}
+
 #[cfg(unix)]
 pub(crate) fn script_host_cb() -> Option<crate::procrun::NzbgetRsScriptHostFn> {
     Some(crate::procrun::active_script_host_cb)
@@ -3527,22 +3531,10 @@ impl Drop for RustThreadGuard {
     }
 }
 
-pub extern "C" fn nzbget_rs_thread_count_op(op: c_int) -> c_int {
-    match op {
-        1 => THREAD_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1,
-        -1 => THREAD_COUNT.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) - 1,
-        2 => c_int::from(is_rust_thread_stopped()),
-        3 => {
-            QUEUE_LOADED.store(true, std::sync::atomic::Ordering::SeqCst);
-            1
-        }
-        4 => {
-            QUEUE_LOADED.store(false, std::sync::atomic::Ordering::SeqCst);
-            0
-        }
-        5 => c_int::from(is_queue_loaded()),
-        _ => current_thread_count(),
-    }
+/// Accounts for a worker thread that was cancelled and so never runs its
+/// `RustThreadGuard` drop.
+pub(crate) fn note_thread_cancelled() {
+    THREAD_COUNT.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
 }
 
 #[cfg(unix)]

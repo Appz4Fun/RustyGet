@@ -10,9 +10,9 @@ use crate::parchecker::{
 };
 use crate::options::OptStr;
 use crate::postrepair::NzbgetRsParSegment;
-use crate::repair::NzbgetRsRepairCtrlHostFn;
+use crate::queuesubsys_host::QueueSubsysHost;
 use std::collections::VecDeque;
-use std::ffi::{c_char, c_int, c_void};
+use std::ffi::c_int;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -54,47 +54,6 @@ fn trunc_1023(mut v: Vec<u8>) -> Vec<u8> {
         v.truncate(1023);
     }
     v
-}
-
-#[inline]
-fn with_dq_guard<R, F: FnOnce(usize) -> R>(
-    ctx: *mut c_void,
-    host_cb: NzbgetRsRepairCtrlHostFn,
-    f: F,
-) -> R {
-    struct Call<F, R> {
-        f: Option<F>,
-        out: Option<R>,
-    }
-    extern "C" fn tramp<F: FnOnce(usize) -> R, R>(state_ptr: usize, dq_ptr: usize) {
-        let st = unsafe { &mut *(state_ptr as *mut Call<F, R>) };
-        if let Some(func) = st.f.take() {
-            st.out = Some(func(dq_ptr));
-        }
-    }
-    let mut call = Call {
-        f: Some(f),
-        out: None,
-    };
-    let fn_ptr = tramp::<F, R> as extern "C" fn(usize, usize) as usize;
-    let state_ptr = (&mut call as *mut Call<F, R>) as usize;
-    unsafe {
-        host_cb(
-            ctx,
-            0,
-            0,
-            0,
-            fn_ptr,
-            state_ptr,
-            ptr::null(),
-            ptr::null(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-        );
-    }
-    call.out
-        .expect("DownloadQueue::Guard callback must execute")
 }
 
 // ============================================================================
@@ -3467,6 +3426,21 @@ impl BusyTime {
     }
 }
 
+/// What direct unpack reads from its download in the queue.
+#[cfg(unix)]
+struct DirectUnpackNzb {
+    ptr: usize,
+    name: Vec<u8>,
+    dest_dir: Vec<u8>,
+    password: Option<Vec<u8>>,
+    inter_dir_opt: Vec<u8>,
+    use_temp_unpack_dir: bool,
+    unpack_cleanup_disk: bool,
+    /// The download's unpack thread is this direct unpack's.
+    owned: bool,
+    has_post_info: bool,
+}
+
 pub struct NzbgetRsDirectUnpack {
     nzb_id: i32,
     thread_ptr: usize,
@@ -3525,63 +3499,76 @@ impl NzbgetRsDirectUnpack {
     fn account_busy(&self, flag: &AtomicBool, value: bool) {
         let mut busy = self.busy.lock().unwrap_or_else(|e| e.into_inner());
         flag.store(value, Ordering::Release);
-        let active = self.unpacking.load(Ordering::Acquire)
-            && !self.waiting_volume.load(Ordering::Acquire);
+        let active =
+            self.unpacking.load(Ordering::Acquire) && !self.waiting_volume.load(Ordering::Acquire);
         busy.set_active(active, std::time::Instant::now());
     }
 
-    fn is_stopped(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn) -> bool {
-        unsafe {
-            host_cb(
-                ctx,
-                2,
-                0,
-                0,
-                0,
-                0,
-                ptr::null(),
-                ptr::null(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            ) != 0
+    fn is_stopped(&self, host: &QueueSubsysHost) -> bool {
+        host.thread_is_stopped(self.thread_ptr)
+    }
+
+    fn is_stopped_or_terminated(&self, host: &QueueSubsysHost) -> bool {
+        self.is_stopped(host) || self.terminated.load(Ordering::Acquire)
+    }
+
+    /// Writes to the global log only.
+    fn global_log(kind: i32, msg: &[u8]) {
+        crate::log::log_active_bytes(kind, cstr::until_nul(msg));
+    }
+
+    /// Adds a message to the download's message list.
+    fn nzb_message(host: &QueueSubsysHost, nzb_ptr: usize, kind: i32, msg: &[u8]) {
+        host.nzb_add_message(nzb_ptr, kind, cstr::until_nul(msg));
+    }
+
+    /// Shows `label` as the post-processing progress, when the download has post info.
+    fn post_progress_label(host: &QueueSubsysHost, nzb_ptr: usize, label: &[u8]) {
+        let ns = host.nzb_snap(nzb_ptr, false);
+        if ns.post_info_ptr != 0 {
+            host.post_set_progress_label(ns.post_info_ptr, cstr::until_nul(label));
         }
     }
 
-    fn is_stopped_or_terminated(
-        &self,
-        ctx: *mut c_void,
-        host_cb: NzbgetRsRepairCtrlHostFn,
-    ) -> bool {
-        Self::is_stopped(ctx, host_cb) || self.terminated.load(Ordering::Acquire)
-    }
-
-    fn global_log(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn, kind: i32, msg: &[u8]) {
-        let c_msg = cstr::nul_terminated(msg);
-        unsafe {
-            host_cb(
-                ctx,
-                2,
-                3,
-                kind,
-                0,
-                0,
-                c_msg.as_ptr() as *const c_char,
-                ptr::null(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            );
+    /// The direct unpack's download in the locked queue `dq_ptr`.
+    fn find_nzb(&self, host: &QueueSubsysHost, dq_ptr: usize) -> Option<DirectUnpackNzb> {
+        let n = host.queue_find_by_id(dq_ptr, self.nzb_id);
+        if n == 0 {
+            return None;
         }
+        let ns = host.nzb_snap(n, false);
+        let password = host.nzb_get_param(n, b"*Unpack:Password");
+        let opts = crate::options::active_options();
+        let sc = opts.as_ref().map(|o| o.scalars());
+        Some(DirectUnpackNzb {
+            ptr: n,
+            name: cstr::until_nul(&ns.name).to_vec(),
+            dest_dir: cstr::until_nul(&ns.dest_dir).to_vec(),
+            password: password.map(|p| cstr::until_nul(&p).to_vec()),
+            inter_dir_opt: cstr::until_nul(
+                opts.as_ref()
+                    .map_or(&b""[..], |o| o.str_bytes(OptStr::InterDir)),
+            )
+            .to_vec(),
+            use_temp_unpack_dir: sc.as_ref().is_some_and(|s| s.use_temp_unpack_dir != 0),
+            unpack_cleanup_disk: sc.as_ref().is_some_and(|s| s.unpack_cleanup_disk != 0),
+            owned: host.nzb_unpack_thread_ptr(n) == self.thread_ptr,
+            has_post_info: ns.has_post_info,
+        })
     }
 
-    fn add_extra_time(
-        &self,
-        ctx: *mut c_void,
-        host_cb: NzbgetRsRepairCtrlHostFn,
-        nzb_ptr: usize,
-        clear_working: bool,
-    ) {
+    fn final_dir_name(host: &QueueSubsysHost, nzb_ptr: usize) -> Vec<u8> {
+        cstr::until_nul(&host.nzb_build_final_dir_name(nzb_ptr)).to_vec()
+    }
+
+    /// Clears the download's unpack thread and sets its direct unpack status.
+    fn finish_nzb(host: &QueueSubsysHost, nzb_ptr: usize, status: i32) {
+        use crate::queuesubsys_host::{NZB_ACT_CLEAR_UNPACK_THREAD, NZB_INT_DIRECT_UNPACK_STATUS};
+        host.nzb_action(nzb_ptr, NZB_ACT_CLEAR_UNPACK_THREAD, 0);
+        host.nzb_set_int(nzb_ptr, NZB_INT_DIRECT_UNPACK_STATUS, status);
+    }
+
+    fn add_extra_time(&self, host: &QueueSubsysHost, nzb_ptr: usize, clear_working: bool) {
         let start = self.extra_start_time.swap(0, Ordering::AcqRel);
         let extra_sec = if start != 0 {
             (current_time_sec() - start) as c_int
@@ -3595,55 +3582,44 @@ impl NzbgetRsDirectUnpack {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take_secs(std::time::Instant::now());
-        let mut unpack_sec = [busy_sec, live_sec];
-        if start != 0 || clear_working || unpack_sec[0] != 0 {
-            unsafe {
-                host_cb(
-                    ctx,
-                    1,
-                    5,
-                    extra_sec,
+        if start != 0 || clear_working || busy_sec != 0 {
+            use crate::queuesubsys_host::{
+                NZB_INT_LIVE_UNPACK_SEC, NZB_INT_POST_TOTAL_SEC, NZB_INT_UNPACK_SEC,
+                POST_INT_WORKING,
+            };
+            // busy_sec: seconds spent unpacking (while downloading too), live_sec: the part
+            // of it while downloading; extra_sec: the wait after the download, which
+            // post-processing spent on direct unpack.
+            let ns = host.nzb_snap(nzb_ptr, false);
+            if busy_sec != 0 {
+                host.nzb_set_int(nzb_ptr, NZB_INT_UNPACK_SEC, ns.unpack_sec + busy_sec);
+            }
+            if live_sec != 0 {
+                host.nzb_set_int(
                     nzb_ptr,
-                    usize::from(clear_working) | (if start != 0 { 2 } else { 0 }),
-                    ptr::null(),
-                    ptr::null(),
-                    unpack_sec.as_mut_ptr(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
+                    NZB_INT_LIVE_UNPACK_SEC,
+                    ns.live_unpack_sec + live_sec,
                 );
+            }
+            if start != 0 {
+                host.nzb_set_int(
+                    nzb_ptr,
+                    NZB_INT_POST_TOTAL_SEC,
+                    ns.post_total_sec + extra_sec,
+                );
+            }
+            if clear_working && ns.post_info_ptr != 0 && !ns.has_live_repair_thread {
+                host.post_set_int(ns.post_info_ptr, POST_INT_WORKING, 0);
             }
         }
     }
 
-    pub fn stop_with_nzb(
-        &self,
-        ctx: *mut c_void,
-        host_cb: NzbgetRsRepairCtrlHostFn,
-        nzb_ptr: usize,
-    ) {
+    pub(crate) fn stop_with_nzb(&self, host: &QueueSubsysHost, nzb_ptr: usize) {
         let info_name = self.lock_vol().info_name.clone();
-        Self::global_log(
-            ctx,
-            host_cb,
-            MK_DEBUG,
-            &[b"Stopping ", info_name.as_slice()].concat(),
-        );
+        Self::global_log(MK_DEBUG, &[b"Stopping ", info_name.as_slice()].concat());
 
-        let pp_stopped = unsafe {
-            host_cb(
-                ctx,
-                2,
-                2,
-                0,
-                0,
-                0,
-                ptr::null(),
-                ptr::null(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            ) != 0
-        };
+        let pp_stopped =
+            crate::ffi::active_prepost().is_some_and(|pp| host.prepost_is_stopped(pp.owner_ptr()));
         if !pp_stopped {
             self.cancelled.store(true, Ordering::Release);
         }
@@ -3652,45 +3628,17 @@ impl NzbgetRsDirectUnpack {
             let cancel_msg = trunc_1023([b"Cancelling ", info_name.as_slice()].concat());
             if nzb_ptr != 0 {
                 let c_msg = cstr::nul_terminated(&cancel_msg);
-                unsafe {
-                    host_cb(
-                        ctx,
-                        1,
-                        3,
-                        MK_WARNING,
-                        nzb_ptr,
-                        0,
-                        c_msg.as_ptr() as *const c_char,
-                        ptr::null(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                    );
-                }
+                Self::nzb_message(host, nzb_ptr, MK_WARNING, &c_msg);
             } else {
-                Self::global_log(ctx, host_cb, MK_WARNING, &cancel_msg);
+                Self::global_log(MK_WARNING, &cancel_msg);
             }
         }
 
         if nzb_ptr != 0 {
-            self.add_extra_time(ctx, host_cb, nzb_ptr, true);
+            self.add_extra_time(host, nzb_ptr, true);
         }
 
-        unsafe {
-            host_cb(
-                ctx,
-                2,
-                1,
-                0,
-                0,
-                0,
-                ptr::null(),
-                ptr::null(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            );
-        }
+        host.thread_stop(self.thread_ptr);
 
         if self.unpacking.load(Ordering::Acquire) {
             self.terminated.store(true, Ordering::Release);
@@ -3700,24 +3648,10 @@ impl NzbgetRsDirectUnpack {
     /// Picks up volumes released by a repair: a released volume the extractor is waiting for
     /// ends the wait, a released first volume is queued for extraction. A failed repair stops
     /// the thread.
-    fn apply_releases(&self, ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn) {
+    fn apply_releases(&self, host: &QueueSubsysHost) {
         let (released, abandoned) = direct_unpack_take_released(self.nzb_id);
         if abandoned && !self.cancelled.swap(true, Ordering::AcqRel) {
-            unsafe {
-                host_cb(
-                    ctx,
-                    2,
-                    1,
-                    0,
-                    0,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                );
-            }
+            host.thread_stop(self.thread_ptr);
             if self.unpacking.load(Ordering::Acquire) {
                 self.terminated.store(true, Ordering::Release);
             }
@@ -3729,8 +3663,6 @@ impl NzbgetRsDirectUnpack {
         let mut v = self.lock_vol();
         for filename in released {
             Self::global_log(
-                ctx,
-                host_cb,
                 MK_DEBUG,
                 &[b"Released repaired volume ".as_slice(), filename.as_slice()].concat(),
             );
@@ -3747,36 +3679,18 @@ impl NzbgetRsDirectUnpack {
         }
     }
 
-    pub fn file_downloaded(
-        &self,
-        ctx: *mut c_void,
-        host_cb: NzbgetRsRepairCtrlHostFn,
-        fi_ptr: usize,
-    ) {
-        let mut ints = [0 as c_int; 1];
-        let mut strs = [ptr::null() as *const c_char; 2];
-        let nzb_ptr = unsafe {
-            host_cb(
-                ctx,
-                1,
-                1,
-                0,
-                fi_ptr,
-                0,
-                ptr::null(),
-                ptr::null(),
-                ints.as_mut_ptr(),
-                ptr::null_mut(),
-                strs.as_mut_ptr(),
-            )
+    pub(crate) fn file_downloaded(&self, host: &QueueSubsysHost, fi_ptr: usize) {
+        let fs = host.file_snap(fi_ptr);
+        let nzb_ptr = fs.nzb_ptr;
+        let nzb_name = if nzb_ptr != 0 {
+            cstr::until_nul(&host.nzb_snap(nzb_ptr, false).name).to_vec()
+        } else {
+            Vec::new()
         };
-        let nzb_name = unsafe { cstr::owned(strs[0]) };
-        let filename = unsafe { cstr::owned(strs[1]) };
-        let failed_articles = ints[0];
+        let filename = cstr::until_nul(&fs.filename).to_vec();
+        let failed_articles = fs.failed_articles;
 
         Self::global_log(
-            ctx,
-            host_cb,
             MK_DEBUG,
             &[
                 b"FileDownloaded for ",
@@ -3789,13 +3703,9 @@ impl NzbgetRsDirectUnpack {
 
         if crate::filetypes::is_rar_file(&filename) && failed_articles > 0 {
             // A damaged volume pauses extraction until it is repaired; nothing is cancelled.
-            let dest_dir = if nzb_ptr != 0 {
-                crate::ffi::queue_host().map(|host| host.nzb_snap(nzb_ptr, false).dest_dir)
-            } else {
-                None
-            };
+            let dest_dir = (nzb_ptr != 0).then(|| host.nzb_snap(nzb_ptr, false).dest_dir);
             let Some(dest_dir) = dest_dir else {
-                self.stop_with_nzb(ctx, host_cb, nzb_ptr);
+                self.stop_with_nzb(host, nzb_ptr);
                 return;
             };
             let full = [
@@ -3831,21 +3741,7 @@ impl NzbgetRsDirectUnpack {
                 .concat(),
             );
             let c_msg = cstr::nul_terminated(&msg);
-            unsafe {
-                host_cb(
-                    ctx,
-                    1,
-                    3,
-                    MK_INFO,
-                    nzb_ptr,
-                    0,
-                    c_msg.as_ptr() as *const c_char,
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                );
-            }
+            Self::nzb_message(host, nzb_ptr, MK_INFO, &c_msg);
             return;
         }
 
@@ -3863,39 +3759,17 @@ impl NzbgetRsDirectUnpack {
         }
     }
 
-    pub fn nzb_downloaded(
-        &self,
-        ctx: *mut c_void,
-        host_cb: NzbgetRsRepairCtrlHostFn,
-        nzb_ptr: usize,
-    ) {
+    pub(crate) fn nzb_downloaded(&self, host: &QueueSubsysHost, nzb_ptr: usize) {
         // Extraction from here on is post-download work, also when it resumes after a
         // repair releases volumes parked below.
         self.busy
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .mark_download_done(std::time::Instant::now());
-        let mut ints = [0 as c_int; 2];
-        let mut strs = [ptr::null() as *const c_char; 2];
-        unsafe {
-            host_cb(
-                ctx,
-                1,
-                2,
-                0,
-                nzb_ptr,
-                0,
-                ptr::null(),
-                ptr::null(),
-                ints.as_mut_ptr(),
-                ptr::null_mut(),
-                strs.as_mut_ptr(),
-            );
-        }
-        let nzb_name = unsafe { cstr::owned(strs[0]) };
+        let ns = host.nzb_snap(nzb_ptr, false);
+        let nzb_name = cstr::until_nul(&ns.name).to_vec();
+        let has_post_info = ns.has_post_info;
         Self::global_log(
-            ctx,
-            host_cb,
             MK_DEBUG,
             &[b"NzbDownloaded for ", nzb_name.as_slice()].concat(),
         );
@@ -3917,22 +3791,8 @@ impl NzbgetRsDirectUnpack {
                     .concat(),
                 );
                 let c_msg = cstr::nul_terminated(&msg);
-                unsafe {
-                    host_cb(
-                        ctx,
-                        1,
-                        3,
-                        MK_INFO,
-                        nzb_ptr,
-                        0,
-                        c_msg.as_ptr() as *const c_char,
-                        ptr::null(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                    );
-                }
-                self.add_extra_time(ctx, host_cb, nzb_ptr, true);
+                Self::nzb_message(host, nzb_ptr, MK_INFO, &c_msg);
+                self.add_extra_time(host, nzb_ptr, true);
                 return;
             }
             if let Some(ref wf) = v.waiting_file {
@@ -3945,99 +3805,38 @@ impl NzbgetRsDirectUnpack {
         if let Some(wf) = waiting_missing {
             let msg = trunc_1023([b"Could not find volume ", wf.as_slice()].concat());
             let c_msg = cstr::nul_terminated(&msg);
-            unsafe {
-                host_cb(
-                    ctx,
-                    1,
-                    3,
-                    MK_WARNING,
-                    nzb_ptr,
-                    0,
-                    c_msg.as_ptr() as *const c_char,
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                );
-            }
-            self.stop_with_nzb(ctx, host_cb, nzb_ptr);
+            Self::nzb_message(host, nzb_ptr, MK_WARNING, &c_msg);
+            self.stop_with_nzb(host, nzb_ptr);
             return;
         }
 
         self.extra_start_time
             .store(current_time_sec(), Ordering::Release);
-        if ints[0] != 0 {
+        if has_post_info {
             let c_lbl = cstr::nul_terminated(&progress_label);
-            unsafe {
-                host_cb(
-                    ctx,
-                    1,
-                    4,
-                    0,
-                    nzb_ptr,
-                    0,
-                    c_lbl.as_ptr() as *const c_char,
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                );
-            }
+            Self::post_progress_label(host, nzb_ptr, &c_lbl);
         }
     }
 
-    pub fn nzb_deleted(&self, ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn, nzb_ptr: usize) {
-        let mut ints = [0 as c_int; 2];
-        let mut strs = [ptr::null() as *const c_char; 2];
-        unsafe {
-            host_cb(
-                ctx,
-                1,
-                2,
-                0,
-                nzb_ptr,
-                0,
-                ptr::null(),
-                ptr::null(),
-                ints.as_mut_ptr(),
-                ptr::null_mut(),
-                strs.as_mut_ptr(),
-            );
-        }
-        let nzb_name = unsafe { cstr::owned(strs[0]) };
+    pub(crate) fn nzb_deleted(&self, host: &QueueSubsysHost, nzb_ptr: usize) {
+        let ns = host.nzb_snap(nzb_ptr, false);
+        let nzb_name = cstr::until_nul(&ns.name).to_vec();
         Self::global_log(
-            ctx,
-            host_cb,
             MK_DEBUG,
             &[b"NzbDeleted for ", nzb_name.as_slice()].concat(),
         );
-        unsafe {
-            host_cb(
-                ctx,
-                1,
-                6,
-                0,
-                nzb_ptr,
-                0,
-                ptr::null(),
-                ptr::null(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            );
-        }
-        self.stop_with_nzb(ctx, host_cb, nzb_ptr);
+        Self::finish_nzb(host, nzb_ptr, 2);
+        self.stop_with_nzb(host, nzb_ptr);
     }
 
     fn add_message(
         &self,
-        ctx: *mut c_void,
-        host_cb: NzbgetRsRepairCtrlHostFn,
+        host: &QueueSubsysHost,
         kind: i32,
         text: &[u8],
         local: &mut DirectUnpackRunLocal,
     ) {
-        Self::global_log(ctx, host_cb, MK_DEBUG, text);
+        Self::global_log(MK_DEBUG, text);
 
         let info = crate::unpack::parse_unpack_message(text, &local.unpack_dir, false);
         let msg_text: Vec<u8> = if info.strip_extracting_dir != 0 {
@@ -4058,105 +3857,49 @@ impl NzbgetRsDirectUnpack {
             } else {
                 Vec::new()
             };
-            self.wait_next_volume(ctx, host_cb, &filename, local);
+            self.wait_next_volume(host, &filename, local);
             return;
         }
 
-        with_dq_guard(ctx, host_cb, |dq_ptr| {
-            let mut ints = [0 as c_int; 6];
-            let mut strs = [ptr::null() as *const c_char; 4];
-            let nzb_ptr = unsafe {
-                host_cb(
-                    ctx,
-                    1,
-                    0,
-                    self.nzb_id,
-                    dq_ptr,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    ints.as_mut_ptr(),
-                    ptr::null_mut(),
-                    strs.as_mut_ptr(),
-                )
-            };
+        host.with_locked_queue(|dq_ptr| {
+            let nzb = self.find_nzb(host, dq_ptr);
+            let nzb_ptr = nzb.as_ref().map_or(0, |n| n.ptr);
+            let has_post_info = nzb.as_ref().is_some_and(|n| n.has_post_info);
 
             let c_msg = cstr::nul_terminated(&msg_text);
             if nzb_ptr != 0 {
-                unsafe {
-                    host_cb(
-                        ctx,
-                        1,
-                        3,
-                        kind,
-                        nzb_ptr,
-                        0,
-                        c_msg.as_ptr() as *const c_char,
-                        ptr::null(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                    );
-                }
+                Self::nzb_message(host, nzb_ptr, kind, &c_msg);
             } else {
-                Self::global_log(ctx, host_cb, kind, &msg_text);
+                Self::global_log(kind, &msg_text);
             }
 
             if info.has_extracting_progress != 0 && nzb_ptr != 0 && msg_text.len() >= 7 {
                 let lbl = msg_text[7..].to_vec();
                 self.lock_vol().progress_label = lbl.clone();
-                if ints[4] != 0 {
+                if has_post_info {
                     let c_lbl = cstr::nul_terminated(&lbl);
-                    unsafe {
-                        host_cb(
-                            ctx,
-                            1,
-                            4,
-                            0,
-                            nzb_ptr,
-                            0,
-                            c_lbl.as_ptr() as *const c_char,
-                            ptr::null(),
-                            ptr::null_mut(),
-                            ptr::null_mut(),
-                            ptr::null_mut(),
-                        );
-                    }
+                    Self::post_progress_label(host, nzb_ptr, &c_lbl);
                 }
             }
 
             if info.has_extracting_from != 0 && nzb_ptr != 0 && text.len() >= 7 {
                 let lbl = text[7..].to_vec();
                 self.lock_vol().progress_label = lbl.clone();
-                if ints[4] != 0 {
+                if has_post_info {
                     let c_lbl = cstr::nul_terminated(&lbl);
-                    unsafe {
-                        host_cb(
-                            ctx,
-                            1,
-                            4,
-                            0,
-                            nzb_ptr,
-                            0,
-                            c_lbl.as_ptr() as *const c_char,
-                            ptr::null(),
-                            ptr::null_mut(),
-                            ptr::null_mut(),
-                            ptr::null_mut(),
-                        );
-                    }
+                    Self::post_progress_label(host, nzb_ptr, &c_lbl);
                 }
                 if text.len() >= 23 {
                     local.extracted_archives.push(text[23..].to_vec());
                 }
             }
 
-            if !Self::is_stopped(ctx, host_cb)
+            if !self.is_stopped(host)
                 && (info.decrypt_error != 0
                     || info.direct_password_error != 0
                     || info.crc_or_volume_error != 0)
             {
-                self.stop_with_nzb(ctx, host_cb, nzb_ptr);
+                self.stop_with_nzb(host, nzb_ptr);
             }
         });
 
@@ -4167,45 +3910,18 @@ impl NzbgetRsDirectUnpack {
 
     fn wait_next_volume(
         &self,
-        ctx: *mut c_void,
-        host_cb: NzbgetRsRepairCtrlHostFn,
+        host: &QueueSubsysHost,
         filename: &[u8],
         local: &mut DirectUnpackRunLocal,
     ) {
-        Self::global_log(
-            ctx,
-            host_cb,
-            MK_DEBUG,
-            &[b"WaitNextVolume for ", filename].concat(),
-        );
+        Self::global_log(MK_DEBUG, &[b"WaitNextVolume for ", filename].concat());
 
-        with_dq_guard(ctx, host_cb, |dq_ptr| {
-            let mut ints = [0 as c_int; 6];
-            let mut strs = [ptr::null() as *const c_char; 4];
-            let mut cur_final = Vec::new();
-            extern "C" fn set_vec(vec_ptr: usize, s: *const c_char) {
-                let v = unsafe { &mut *(vec_ptr as *mut Vec<u8>) };
-                *v = unsafe { cstr::owned(s) };
-            }
-            let nzb_ptr = unsafe {
-                host_cb(
-                    ctx,
-                    1,
-                    0,
-                    self.nzb_id,
-                    dq_ptr,
-                    (&mut cur_final as *mut Vec<u8>) as usize,
-                    ptr::null(),
-                    set_vec as *const () as *const c_char,
-                    ints.as_mut_ptr(),
-                    ptr::null_mut(),
-                    strs.as_mut_ptr(),
-                )
-            };
-            if nzb_ptr != 0 {
-                let cur_dest = unsafe { cstr::owned(strs[1]) };
-                if cur_dest != local.dest_dir || cur_final != local.final_dir {
-                    let cur_name = unsafe { cstr::owned(strs[0]) };
+        host.with_locked_queue(|dq_ptr| {
+            if let Some(nzb) = self.find_nzb(host, dq_ptr) {
+                let nzb_ptr = nzb.ptr;
+                let cur_final = Self::final_dir_name(host, nzb_ptr);
+                if nzb.dest_dir != local.dest_dir || cur_final != local.final_dir {
+                    let cur_name = nzb.name;
                     let msg = trunc_1023(
                         [
                             b"Stopping direct unpack for ",
@@ -4215,22 +3931,8 @@ impl NzbgetRsDirectUnpack {
                         .concat(),
                     );
                     let c_msg = cstr::nul_terminated(&msg);
-                    unsafe {
-                        host_cb(
-                            ctx,
-                            1,
-                            3,
-                            MK_WARNING,
-                            nzb_ptr,
-                            0,
-                            c_msg.as_ptr() as *const c_char,
-                            ptr::null(),
-                            ptr::null_mut(),
-                            ptr::null_mut(),
-                            ptr::null_mut(),
-                        );
-                    }
-                    self.stop_with_nzb(ctx, host_cb, nzb_ptr);
+                    Self::nzb_message(host, nzb_ptr, MK_WARNING, &c_msg);
+                    self.stop_with_nzb(host, nzb_ptr);
                 }
             }
         });
@@ -4249,26 +3951,10 @@ impl NzbgetRsDirectUnpack {
             };
             if nzb_completed && !on_hold {
                 let msg = [b"Could not find volume ", filename].concat();
-                self.add_message(ctx, host_cb, MK_WARNING, &msg, local);
-                with_dq_guard(ctx, host_cb, |dq_ptr| {
-                    let mut ints = [0 as c_int; 6];
-                    let mut strs = [ptr::null() as *const c_char; 4];
-                    let nzb_ptr = unsafe {
-                        host_cb(
-                            ctx,
-                            1,
-                            0,
-                            self.nzb_id,
-                            dq_ptr,
-                            0,
-                            ptr::null(),
-                            ptr::null(),
-                            ints.as_mut_ptr(),
-                            ptr::null_mut(),
-                            strs.as_mut_ptr(),
-                        )
-                    };
-                    self.stop_with_nzb(ctx, host_cb, nzb_ptr);
+                self.add_message(host, MK_WARNING, &msg, local);
+                host.with_locked_queue(|dq_ptr| {
+                    let nzb_ptr = self.find_nzb(host, dq_ptr).map_or(0, |n| n.ptr);
+                    self.stop_with_nzb(host, nzb_ptr);
                 });
             }
         }
@@ -4278,46 +3964,22 @@ impl NzbgetRsDirectUnpack {
     /// that could not be repaired); post-processing takes over as before.
     fn stop_for_failure(
         &self,
-        ctx: *mut c_void,
-        host_cb: NzbgetRsRepairCtrlHostFn,
+        host: &QueueSubsysHost,
         failure: &crate::progressive_unpack::Failure,
     ) {
         Self::global_log(
-            ctx,
-            host_cb,
             MK_DEBUG,
             format!("Direct unpack stopped: {failure}").as_bytes(),
         );
-        with_dq_guard(ctx, host_cb, |dq_ptr| {
-            let mut ints = [0 as c_int; 6];
-            let mut strs = [ptr::null() as *const c_char; 4];
-            let nzb_ptr = unsafe {
-                host_cb(
-                    ctx,
-                    1,
-                    0,
-                    self.nzb_id,
-                    dq_ptr,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    ints.as_mut_ptr(),
-                    ptr::null_mut(),
-                    strs.as_mut_ptr(),
-                )
-            };
-            if !Self::is_stopped(ctx, host_cb) {
-                self.stop_with_nzb(ctx, host_cb, nzb_ptr);
+        host.with_locked_queue(|dq_ptr| {
+            let nzb_ptr = self.find_nzb(host, dq_ptr).map_or(0, |n| n.ptr);
+            if !self.is_stopped(host) {
+                self.stop_with_nzb(host, nzb_ptr);
             }
         });
     }
 
-    fn create_unpack_dir(
-        &self,
-        ctx: *mut c_void,
-        host_cb: NzbgetRsRepairCtrlHostFn,
-        local: &mut DirectUnpackRunLocal,
-    ) {
+    fn create_unpack_dir(&self, host: &QueueSubsysHost, local: &mut DirectUnpackRunLocal) {
         let sep = crate::paths::PATH_SEPARATOR;
         let use_inter_dir =
             crate::unpack::use_inter_dir(&local.dest_dir, &local.inter_dir_opt, sep);
@@ -4336,8 +3998,6 @@ impl NzbgetRsDirectUnpack {
         };
 
         Self::global_log(
-            ctx,
-            host_cb,
             MK_DETAIL,
             &[b"Unpacking into ", local.unpack_dir.as_slice()].concat(),
         );
@@ -4355,19 +4015,12 @@ impl NzbgetRsDirectUnpack {
                 errmsg.as_slice(),
             ]
             .concat();
-            self.add_message(ctx, host_cb, MK_ERROR, &m, local);
+            self.add_message(host, MK_ERROR, &m, local);
         }
     }
 
-    fn cleanup(
-        &self,
-        ctx: *mut c_void,
-        host_cb: NzbgetRsRepairCtrlHostFn,
-        local: &mut DirectUnpackRunLocal,
-    ) {
+    fn cleanup(&self, host: &QueueSubsysHost, local: &mut DirectUnpackRunLocal) {
         Self::global_log(
-            ctx,
-            host_cb,
             MK_DEBUG,
             &[b"Cleanup for ", local.info_name.as_slice()].concat(),
         );
@@ -4383,22 +4036,21 @@ impl NzbgetRsDirectUnpack {
             &final_dir,
             &mut |kind, msg| {
                 let mk = if kind == 1 { MK_ERROR } else { MK_INFO };
-                self.add_message(ctx, host_cb, mk, msg, local);
+                self.add_message(host, mk, msg, local);
             },
         );
     }
 
     fn execute_unrar(
         &self,
-        ctx: *mut c_void,
-        host_cb: NzbgetRsRepairCtrlHostFn,
+        host: &QueueSubsysHost,
         archive_name: &[u8],
         local: &mut DirectUnpackRunLocal,
     ) {
         local.all_ok_received = false;
 
         let _unpack_guard = UNPACK_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        if Self::is_stopped(ctx, host_cb) {
+        if self.is_stopped(host) {
             return;
         }
         self.set_waiting(false);
@@ -4446,19 +4098,19 @@ impl NzbgetRsDirectUnpack {
                     2 => MK_WARNING,
                     _ => MK_DETAIL,
                 };
-                self.add_message(ctx, host_cb, msg_kind, msg.as_bytes(), local);
+                self.add_message(host, msg_kind, msg.as_bytes(), local);
                 // A volume wait signalled through a log line holds the extractor here; RAR sets
                 // read by the progressive session wait in the session and never block here.
                 while self.waiting_volume.load(Ordering::Acquire)
-                    && !self.is_stopped_or_terminated(ctx, host_cb)
+                    && !self.is_stopped_or_terminated(host)
                 {
                     std::thread::sleep(Duration::from_millis(20));
-                    self.apply_releases(ctx, host_cb);
+                    self.apply_releases(host);
                 }
             },
             &mut || {
-                self.apply_releases(ctx, host_cb);
-                self.is_stopped_or_terminated(ctx, host_cb)
+                self.apply_releases(host);
+                self.is_stopped_or_terminated(host)
             },
             crate::unpack::RarFeed {
                 feed: Some(feed),
@@ -4474,7 +4126,7 @@ impl NzbgetRsDirectUnpack {
                 locked_archives().insert(self.nzb_id);
             }
             if f.is_password() || f.is_damage() {
-                self.stop_for_failure(ctx, host_cb, f);
+                self.stop_for_failure(host, f);
             }
         }
 
@@ -4486,13 +4138,11 @@ impl NzbgetRsDirectUnpack {
         local.unpack_ok = res.is_ok()
             && local.all_ok_received
             && !self.terminated.load(Ordering::Acquire)
-            && !Self::is_stopped(ctx, host_cb);
+            && !self.is_stopped(host);
     }
 
-    pub fn run(&self, ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn) {
+    pub(crate) fn run(&self, host: &QueueSubsysHost) {
         Self::global_log(
-            ctx,
-            host_cb,
             MK_DEBUG,
             format!("Entering DirectUnpack-loop for {}", self.nzb_id).as_bytes(),
         );
@@ -4518,44 +4168,23 @@ impl NzbgetRsDirectUnpack {
             unpack_guard: None,
         };
 
-        let found = with_dq_guard(ctx, host_cb, |dq_ptr| {
-            let mut ints = [0 as c_int; 6];
-            let mut strs = [ptr::null() as *const c_char; 4];
-            let mut built_final = Vec::new();
-            extern "C" fn set_vec(vec_ptr: usize, s: *const c_char) {
-                let v = unsafe { &mut *(vec_ptr as *mut Vec<u8>) };
-                *v = unsafe { cstr::owned(s) };
-            }
-            let nzb_ptr = unsafe {
-                host_cb(
-                    ctx,
-                    1,
-                    0,
-                    self.nzb_id,
-                    dq_ptr,
-                    (&mut built_final as *mut Vec<u8>) as usize,
-                    ptr::null(),
-                    set_vec as *const () as *const c_char,
-                    ints.as_mut_ptr(),
-                    ptr::null_mut(),
-                    strs.as_mut_ptr(),
-                )
-            };
-            if nzb_ptr == 0 {
+        let found = host.with_locked_queue(|dq_ptr| {
+            let Some(nzb) = self.find_nzb(host, dq_ptr) else {
                 return false;
+            };
+            let nzb_ptr = nzb.ptr;
+            local.name = nzb.name;
+            local.dest_dir = nzb.dest_dir;
+            local.final_dir = Self::final_dir_name(host, nzb_ptr);
+            if let Some(pw) = nzb.password {
+                local.password = pw;
             }
-            local.name = unsafe { cstr::owned(strs[0]) };
-            local.dest_dir = unsafe { cstr::owned(strs[1]) };
-            local.final_dir = built_final;
-            if ints[0] != 0 {
-                local.password = unsafe { cstr::owned(strs[2]) };
-            }
-            local.inter_dir_opt = unsafe { cstr::owned(strs[3]) };
-            local.use_temp_unpack_dir = ints[1] != 0;
-            local.unpack_cleanup_disk = ints[2] != 0;
+            local.inter_dir_opt = nzb.inter_dir_opt;
+            local.use_temp_unpack_dir = nzb.use_temp_unpack_dir;
+            local.unpack_cleanup_disk = nzb.unpack_cleanup_disk;
             // The set is still downloading: count every RAR file the queue
             // knows of, so the session's volume budget covers the whole set.
-            if let Some(host) = crate::ffi::queue_host() {
+            {
                 let queued = (0..host.nzb_file_len(nzb_ptr))
                     .map(|i| host.file_snap(host.nzb_file_at(nzb_ptr, i)))
                     .filter(|f| !f.deleted && crate::filetypes::is_rar_file(&f.filename))
@@ -4571,8 +4200,6 @@ impl NzbgetRsDirectUnpack {
 
         if !found {
             Self::global_log(
-                ctx,
-                host_cb,
                 MK_DEBUG,
                 format!("Could not find NzbInfo for {}", self.nzb_id).as_bytes(),
             );
@@ -4600,7 +4227,7 @@ impl NzbgetRsDirectUnpack {
         }
 
         let mut started: Vec<Vec<u8>> = Vec::new();
-        while !Self::is_stopped(ctx, host_cb) {
+        while !self.is_stopped(host) {
             let next_archive = self.lock_vol().archives.pop_front();
             if let Some(archive) = next_archive {
                 // A main volume extracted past its damage is queued again when its repair
@@ -4612,14 +4239,14 @@ impl NzbgetRsDirectUnpack {
                 self.set_waiting(false);
                 if !self.processed.load(Ordering::Acquire) {
                     let m = [b"Directly unpacking ", local.name.as_slice()].concat();
-                    self.add_message(ctx, host_cb, MK_INFO, &m, &mut local);
-                    self.cleanup(ctx, host_cb, &mut local);
-                    self.create_unpack_dir(ctx, host_cb, &mut local);
+                    self.add_message(host, MK_INFO, &m, &mut local);
+                    self.cleanup(host, &mut local);
+                    self.create_unpack_dir(host, &mut local);
                     self.processed.store(true, Ordering::Release);
                 }
 
                 let committed = local.extracted_archives.len();
-                self.execute_unrar(ctx, host_cb, &archive, &mut local);
+                self.execute_unrar(host, &archive, &mut local);
                 if !local.unpack_ok {
                     local.extracted_archives.truncate(committed);
                     break;
@@ -4628,7 +4255,7 @@ impl NzbgetRsDirectUnpack {
                 if self.lock_vol().nzb_completed && !direct_unpack_has_holds(self.nzb_id) {
                     // Nothing queued, nothing on hold: one last look for a volume released
                     // right now, then done.
-                    self.apply_releases(ctx, host_cb);
+                    self.apply_releases(host);
                     if self.lock_vol().archives.is_empty() {
                         break;
                     }
@@ -4636,7 +4263,7 @@ impl NzbgetRsDirectUnpack {
                 }
                 self.set_waiting(true);
                 std::thread::sleep(Duration::from_millis(100));
-                self.apply_releases(ctx, host_cb);
+                self.apply_releases(host);
             }
         }
 
@@ -4644,7 +4271,7 @@ impl NzbgetRsDirectUnpack {
         self.set_waiting(false);
 
         let cancelled = self.cancelled.load(Ordering::Acquire);
-        let interrupted = !cancelled && self.is_stopped_or_terminated(ctx, host_cb);
+        let interrupted = !cancelled && self.is_stopped_or_terminated(host);
         // Names are ASCII only. A temporary unpack folder is renamed by post-processing, which
         // counts what is in it; files unpacked next to the download are renamed now.
         if local.unpack_ok && !interrupted && !cancelled {
@@ -4661,7 +4288,7 @@ impl NzbgetRsDirectUnpack {
                 });
                 for (k, m) in lines {
                     let kind = if k == 1 { MK_ERROR } else { MK_INFO };
-                    self.add_message(ctx, host_cb, kind, m.as_bytes(), &mut local);
+                    self.add_message(host, kind, m.as_bytes(), &mut local);
                 }
                 if named.is_err() {
                     local.unpack_ok = false;
@@ -4669,30 +4296,14 @@ impl NzbgetRsDirectUnpack {
             }
         }
         if (!local.unpack_ok && !interrupted) || cancelled {
-            self.cleanup(ctx, host_cb, &mut local);
+            self.cleanup(host, &mut local);
         }
 
-        let valid_owner = with_dq_guard(ctx, host_cb, |dq_ptr| {
-            let mut ints = [0 as c_int; 6];
-            let mut strs = [ptr::null() as *const c_char; 4];
-            let nzb_ptr = unsafe {
-                host_cb(
-                    ctx,
-                    1,
-                    0,
-                    self.nzb_id,
-                    dq_ptr,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    ints.as_mut_ptr(),
-                    ptr::null_mut(),
-                    strs.as_mut_ptr(),
-                )
-            };
-            if nzb_ptr == 0 || ints[3] == 0 {
+        let valid_owner = host.with_locked_queue(|dq_ptr| {
+            let Some(nzb) = self.find_nzb(host, dq_ptr).filter(|n| n.owned) else {
                 return false;
-            }
+            };
+            let nzb_ptr = nzb.ptr;
 
             let processed = self.processed.load(Ordering::Acquire);
             let status = if !processed {
@@ -4707,8 +4318,6 @@ impl NzbgetRsDirectUnpack {
 
             if interrupted {
                 Self::global_log(
-                    ctx,
-                    host_cb,
                     MK_DEBUG,
                     &[
                         local.info_name.as_slice(),
@@ -4721,68 +4330,24 @@ impl NzbgetRsDirectUnpack {
                 let suffix: &[u8] = if ok { b" successful" } else { b" failed" };
                 let msg = trunc_1023([local.info_name_up.as_slice(), suffix].concat());
                 let c_msg = cstr::nul_terminated(&msg);
-                unsafe {
-                    host_cb(
-                        ctx,
-                        1,
-                        3,
-                        if ok { MK_INFO } else { MK_WARNING },
-                        nzb_ptr,
-                        0,
-                        c_msg.as_ptr() as *const c_char,
-                        ptr::null(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                    );
-                }
+                Self::nzb_message(host, nzb_ptr, if ok { MK_INFO } else { MK_WARNING }, &c_msg);
             }
 
             if status == 3 || interrupted {
                 for arch in &local.extracted_archives {
                     let c_arch = cstr::nul_terminated(arch);
-                    unsafe {
-                        host_cb(
-                            ctx,
-                            1,
-                            8,
-                            0,
-                            nzb_ptr,
-                            0,
-                            c_arch.as_ptr() as *const c_char,
-                            ptr::null(),
-                            ptr::null_mut(),
-                            ptr::null_mut(),
-                            ptr::null_mut(),
-                        );
-                    }
+                    host.nzb_push_extracted_archive(nzb_ptr, cstr::until_nul(&c_arch));
                 }
             }
 
-            self.add_extra_time(ctx, host_cb, nzb_ptr, true);
+            self.add_extra_time(host, nzb_ptr, true);
 
-            unsafe {
-                host_cb(
-                    ctx,
-                    1,
-                    7,
-                    status,
-                    nzb_ptr,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                );
-            }
+            Self::finish_nzb(host, nzb_ptr, status);
             true
         });
 
         if !valid_owner {
             Self::global_log(
-                ctx,
-                host_cb,
                 MK_DEBUG,
                 &[b"Could not find NzbInfo for ", local.info_name.as_slice()].concat(),
             );
@@ -4791,8 +4356,6 @@ impl NzbgetRsDirectUnpack {
 
         direct_unpack_forget_holds(self.nzb_id);
         Self::global_log(
-            ctx,
-            host_cb,
             MK_DEBUG,
             format!("Exiting DirectUnpack-loop for {}", self.nzb_id).as_bytes(),
         );
@@ -4806,31 +4369,33 @@ impl NzbgetRsDirectUnpack {
         }
         #[cfg(unix)]
         {
-            let _arena = PostJobArenaGuard::enter();
-            let ctx = (self as *const Self) as *mut c_void;
+            let Some(host) = crate::ffi::queue_host() else {
+                return 0;
+            };
+            let host = &host;
             match op {
                 0 => {
-                    self.run(ctx, direct_unpack_host_cb);
+                    self.run(host);
                     0
                 }
                 1 => {
                     let _ = p1;
-                    self.stop_with_nzb(ctx, direct_unpack_host_cb, p2);
+                    self.stop_with_nzb(host, p2);
                     0
                 }
                 2 => {
                     let _ = p1;
-                    self.file_downloaded(ctx, direct_unpack_host_cb, p2);
+                    self.file_downloaded(host, p2);
                     0
                 }
                 3 => {
                     let _ = p1;
-                    self.nzb_downloaded(ctx, direct_unpack_host_cb, p2);
+                    self.nzb_downloaded(host, p2);
                     0
                 }
                 4 => {
                     let _ = p1;
-                    self.nzb_deleted(ctx, direct_unpack_host_cb, p2);
+                    self.nzb_deleted(host, p2);
                     0
                 }
                 _ => 0,
@@ -4841,172 +4406,6 @@ impl NzbgetRsDirectUnpack {
             let _ = (p1, p2);
             0
         }
-    }
-}
-
-#[cfg(unix)]
-unsafe extern "C" fn direct_unpack_host_cb(
-    raw_ctx: *mut c_void,
-    op: c_int,
-    a1: c_int,
-    a2: c_int,
-    p1: usize,
-    p2: usize,
-    s1: *const c_char,
-    s2: *const c_char,
-    ints: *mut c_int,
-    _i64s: *mut i64,
-    strs: *mut *const c_char,
-) -> usize {
-    use crate::queuesubsys_host::{
-        NZB_ACT_CLEAR_UNPACK_THREAD, NZB_INT_DIRECT_UNPACK_STATUS, NZB_INT_POST_TOTAL_SEC,
-        NZB_INT_LIVE_UNPACK_SEC, NZB_INT_UNPACK_SEC, POST_INT_WORKING,
-    };
-    if op != 0 {
-        reset_call_arena();
-    }
-    let Some(host) = crate::ffi::queue_host() else {
-        return 0;
-    };
-    let c = unsafe { &*(raw_ctx as *const NzbgetRsDirectUnpack) };
-    match op {
-        0 => {
-            unsafe { invoke_dq_guard_cb(&host, p1, p2) };
-            0
-        }
-        1 => {
-            if a1 == 0 {
-                let n = host.queue_find_by_id(p1, a2);
-                if n == 0 {
-                    return 0;
-                }
-                let ns = host.nzb_snap(n, false);
-                let pw = host.nzb_get_param(n, b"*Unpack:Password");
-                let opts = crate::options::active_options();
-                let sc = opts.as_ref().map(|o| o.scalars());
-                let ins = unsafe { std::slice::from_raw_parts_mut(ints, 6) };
-                let str_out = unsafe { std::slice::from_raw_parts_mut(strs, 4) };
-                ins[0] = i32::from(pw.is_some());
-                ins[1] = sc
-                    .as_ref()
-                    .map_or(0, |s| i32::from(s.use_temp_unpack_dir != 0));
-                ins[2] = sc
-                    .as_ref()
-                    .map_or(0, |s| i32::from(s.unpack_cleanup_disk != 0));
-                ins[3] = i32::from(host.nzb_unpack_thread_ptr(n) == c.thread_ptr);
-                ins[4] = i32::from(ns.has_post_info);
-                ins[5] = 0;
-                str_out[0] = arena_cstr(&ns.name);
-                str_out[1] = arena_cstr(&ns.dest_dir);
-                str_out[2] = arena_opt_cstr(pw.as_deref());
-                str_out[3] = arena_cstr(opts.as_ref().map_or(b"", |o| o.str_bytes(OptStr::InterDir)));
-                if p2 != 0 && !s2.is_null() {
-                    let fin = host.nzb_build_final_dir_name(n);
-                    let c_fin = cstr::nul_terminated(&fin);
-                    let cb_fn: extern "C" fn(usize, *const c_char) =
-                        unsafe { std::mem::transmute(s2 as usize) };
-                    cb_fn(p2, c_fin.as_ptr() as *const c_char);
-                }
-                return n;
-            }
-            if a1 == 1 {
-                let fs = host.file_snap(p1);
-                let nzb_name = if fs.nzb_ptr != 0 {
-                    host.nzb_snap(fs.nzb_ptr, false).name
-                } else {
-                    Vec::new()
-                };
-                unsafe { *ints = fs.failed_articles };
-                let str_out = unsafe { std::slice::from_raw_parts_mut(strs, 2) };
-                str_out[0] = arena_cstr(&nzb_name);
-                str_out[1] = arena_cstr(&fs.filename);
-                return fs.nzb_ptr;
-            }
-            if a1 == 2 {
-                let ns = host.nzb_snap(p1, false);
-                let ins = unsafe { std::slice::from_raw_parts_mut(ints, 2) };
-                ins[0] = i32::from(ns.has_post_info);
-                ins[1] = 0;
-                let str_out = unsafe { std::slice::from_raw_parts_mut(strs, 2) };
-                str_out[0] = arena_cstr(&ns.name);
-                str_out[1] = ptr::null();
-                return 0;
-            }
-            if a1 == 3 {
-                host.nzb_add_message(p1, a2, &unsafe { cstr::owned(s1) });
-                return 0;
-            }
-            if a1 == 4 {
-                let ns = host.nzb_snap(p1, false);
-                if ns.post_info_ptr != 0 {
-                    host.post_set_progress_label(ns.post_info_ptr, &unsafe { cstr::owned(s1) });
-                }
-                return 0;
-            }
-            if a1 == 5 {
-                let ns = host.nzb_snap(p1, false);
-                // ints[0]: seconds spent unpacking (while downloading too), ints[1]: the
-                // part of it while downloading; a2: the wait after the download, which
-                // post-processing spent on direct unpack.
-                let (unpack_sec, live_unpack_sec) = if ints.is_null() {
-                    (0, 0)
-                } else {
-                    unsafe { (*ints, *ints.add(1)) }
-                };
-                if unpack_sec != 0 {
-                    host.nzb_set_int(p1, NZB_INT_UNPACK_SEC, ns.unpack_sec + unpack_sec);
-                }
-                if live_unpack_sec != 0 {
-                    host.nzb_set_int(
-                        p1,
-                        NZB_INT_LIVE_UNPACK_SEC,
-                        ns.live_unpack_sec + live_unpack_sec,
-                    );
-                }
-                if (p2 & 2) != 0 {
-                    host.nzb_set_int(p1, NZB_INT_POST_TOTAL_SEC, ns.post_total_sec + a2);
-                }
-                if (p2 & 1) != 0 && ns.post_info_ptr != 0 && !ns.has_live_repair_thread {
-                    host.post_set_int(ns.post_info_ptr, POST_INT_WORKING, 0);
-                }
-                return 0;
-            }
-            if a1 == 6 {
-                host.nzb_action(p1, NZB_ACT_CLEAR_UNPACK_THREAD, 0);
-                host.nzb_set_int(p1, NZB_INT_DIRECT_UNPACK_STATUS, 2);
-                return 0;
-            }
-            if a1 == 7 {
-                host.nzb_action(p1, NZB_ACT_CLEAR_UNPACK_THREAD, 0);
-                host.nzb_set_int(p1, NZB_INT_DIRECT_UNPACK_STATUS, a2);
-                return 0;
-            }
-            if a1 == 8 {
-                host.nzb_push_extracted_archive(p1, &unsafe { cstr::owned(s1) });
-                return 0;
-            }
-            0
-        }
-        2 => {
-            if a1 == 0 {
-                return usize::from(host.thread_is_stopped(c.thread_ptr));
-            }
-            if a1 == 1 {
-                host.thread_stop(c.thread_ptr);
-                return 0;
-            }
-            if a1 == 2 {
-                return usize::from(
-                    crate::ffi::active_prepost()
-                        .is_some_and(|pp| host.prepost_is_stopped(pp.owner_ptr())),
-                );
-            }
-            if a1 == 3 {
-                crate::log::log_active_bytes(a2, &unsafe { cstr::owned(s1) });
-            }
-            0
-        }
-        _ => 0,
     }
 }
 
@@ -5560,66 +4959,6 @@ impl NzbgetRsPostJob {
     }
 }
 
-#[cfg(unix)]
-thread_local! {
-    static POST_JOB_ARENA_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static POST_JOB_STR_ARENA: std::cell::RefCell<Vec<std::ffi::CString>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
-#[cfg(unix)]
-struct PostJobArenaGuard;
-
-#[cfg(unix)]
-impl PostJobArenaGuard {
-    fn enter() -> Self {
-        POST_JOB_ARENA_DEPTH.with(|d| d.set(d.get() + 1));
-        Self
-    }
-}
-
-#[cfg(unix)]
-impl Drop for PostJobArenaGuard {
-    fn drop(&mut self) {
-        POST_JOB_ARENA_DEPTH.with(|d| {
-            let next = d.get().saturating_sub(1);
-            d.set(next);
-            if next == 0 {
-                reset_call_arena();
-            }
-        });
-    }
-}
-
-#[cfg(unix)]
-#[inline]
-fn reset_call_arena() {
-    POST_JOB_STR_ARENA.with(|a| {
-        let mut v = a.borrow_mut();
-        v.clear();
-        if v.capacity() > 16 {
-            v.shrink_to(16);
-        }
-    });
-}
-
-#[cfg(unix)]
-fn arena_cstr(bytes: &[u8]) -> *const c_char {
-    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    // SAFETY: `bytes[..end]` contains no interior NUL bytes.
-    let cs = unsafe { std::ffi::CString::from_vec_unchecked(bytes[..end].to_vec()) };
-    let p = cs.as_ptr();
-    POST_JOB_STR_ARENA.with(|a| a.borrow_mut().push(cs));
-    p
-}
-
-#[cfg(unix)]
-fn arena_opt_cstr(opt: Option<&[u8]>) -> *const c_char {
-    match opt {
-        Some(b) => arena_cstr(b),
-        None => ptr::null(),
-    }
-}
-
 /// Marks the post-processing of `post_ptr` as finished (`PostInfo::ptFinished`).
 #[cfg(unix)]
 fn finish_post_job(post_ptr: usize) {
@@ -5742,7 +5081,6 @@ impl NzbgetRsPostJob {
                 0
             }
             1 => {
-                let _arena = PostJobArenaGuard::enter();
                 match &self.inner {
                     PostJobInner::Rename(rk) => {
                         self.run_rename(*rk);
@@ -5786,7 +5124,6 @@ impl NzbgetRsPostJob {
                 }
             }
             2 => {
-                let _arena = PostJobArenaGuard::enter();
                 if let PostJobInner::Repair(Some(ctrl)) = &self.inner {
                     crate::ffi::queue_host().map_or(0, |host| {
                         c_int::from(ctrl.add_par(JobQueue { job: self, host: &host }, p1, a1 != 0))
@@ -5797,65 +5134,6 @@ impl NzbgetRsPostJob {
             }
             _ => 0,
         }
-    }
-}
-
-#[cfg(unix)]
-struct DqGuardArenaCleanup;
-
-#[cfg(unix)]
-impl Drop for DqGuardArenaCleanup {
-    fn drop(&mut self) {
-        reset_call_arena();
-    }
-}
-
-#[cfg(unix)]
-#[inline]
-unsafe fn invoke_dq_guard_cb(
-    host: &crate::queuesubsys_host::QueueSubsysHost,
-    p1: usize,
-    p2: usize,
-) {
-    let _cleanup = DqGuardArenaCleanup;
-    host.with_locked_queue(|dq_ptr| unsafe {
-        let cb_fn: extern "C" fn(usize, usize) = std::mem::transmute(p1);
-        cb_fn(p2, dq_ptr);
-    });
-}
-
-#[cfg(all(test, unix))]
-mod post_job_arena_tests {
-    use super::*;
-
-    #[test]
-    fn repeated_callback_snapshots_remain_bounded() {
-        let guard = PostJobArenaGuard::enter();
-        for tick in 0..512usize {
-            let mut strs = [ptr::null::<c_char>(); 5];
-            unsafe {
-                let _ = direct_unpack_host_cb(
-                    ptr::null_mut(),
-                    1,
-                    0,
-                    0,
-                    0,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    strs.as_mut_ptr(),
-                );
-            }
-            let p0 = arena_cstr(format!("name-{tick}").as_bytes());
-            let p1 = arena_cstr(b"/tmp/dest");
-            assert!(!p0.is_null() && !p1.is_null());
-            let str_len = POST_JOB_STR_ARENA.with(|a| a.borrow().len());
-            assert_eq!(str_len, 2);
-        }
-        drop(guard);
-        assert_eq!(POST_JOB_STR_ARENA.with(|a| a.borrow().len()), 0);
     }
 }
 

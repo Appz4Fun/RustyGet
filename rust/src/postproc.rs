@@ -4313,6 +4313,12 @@ impl NzbgetRsDirectUnpack {
         host_cb: NzbgetRsRepairCtrlHostFn,
         nzb_ptr: usize,
     ) {
+        // Extraction from here on is post-download work, also when it resumes after a
+        // repair releases volumes parked below.
+        self.busy
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .mark_download_done(std::time::Instant::now());
         let mut ints = [0 as c_int; 2];
         let mut strs = [ptr::null() as *const c_char; 2];
         unsafe {
@@ -4404,10 +4410,6 @@ impl NzbgetRsDirectUnpack {
 
         self.extra_start_time
             .store(current_time_sec(), Ordering::Release);
-        self.busy
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .mark_download_done(std::time::Instant::now());
         if ints[0] != 0 {
             let c_lbl = to_c_buf(&progress_label);
             unsafe {

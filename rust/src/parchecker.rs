@@ -2281,7 +2281,18 @@ pub(crate) fn streaming_session_kick_backfill(nzb_id: i32) {
             // A shared back-fill error is expected while verified slices still
             // sit in the article cache, so it is retried, never reported: the
             // strict back-fill inside repair surfaces any error that persists.
-            if worker.session.backfill_pending().is_ok() {
+            // Back-fill rereads and folds verified data: verification time for the job.
+            // Charged directly, not through `timed`, whose repair-stat delta could pick up a
+            // foreground repair running at the same time.
+            let started = std::time::Instant::now();
+            let backfilled = worker.session.backfill_pending().is_ok();
+            LIVE_PAR_TIME
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .entry(nzb_id)
+                .or_default()
+                .verify += started.elapsed();
+            if backfilled {
                 *retry_at() = None;
             }
         });

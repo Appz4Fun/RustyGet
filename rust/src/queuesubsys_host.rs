@@ -1213,39 +1213,13 @@ impl QueueSubsysHost {
             if ms > 0 {
                 std::thread::sleep(std::time::Duration::from_millis(ms as u64));
             }
-            return;
         }
-        self.raw(
-            3,
-            0,
-            ms,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn set_standby_mode(&self, standby: bool) {
         if self.use_active {
             let _ = standby;
-            return;
         }
-        self.raw(
-            3,
-            1,
-            i32::from(standby),
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn stat_meter_load(&self) -> (bool, bool) {
@@ -1255,100 +1229,35 @@ impl QueueSubsysHost {
             let loaded = crate::statmeter::load_active_statmeter(&mut perfect);
             return (loaded, perfect);
         }
-        let mut ints = [1i32, 1i32];
-        self.raw(
-            3,
-            2,
-            0,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
-        (ints[0] != 0, ints[1] != 0)
+        (true, true)
     }
 
     pub fn stat_meter_save(&self) {
         #[cfg(unix)]
         if self.use_active {
             crate::statmeter::save_active_statmeter();
-            return;
         }
-        self.raw(
-            3,
-            2,
-            1,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn stat_meter_interval_check(&self) {
         #[cfg(unix)]
         if self.use_active {
             crate::statmeter::interval_check_active_statmeter();
-            return;
         }
-        self.raw(
-            3,
-            2,
-            2,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn stat_meter_enter_leave_standby(&self, enter: bool) {
         #[cfg(unix)]
         if self.use_active {
             crate::statmeter::enter_leave_standby_active_statmeter(enter);
-            return;
         }
-        self.raw(
-            3,
-            2,
-            3,
-            usize::from(enter),
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn stat_meter_add_zero_speed(&self) {
         #[cfg(unix)]
         if self.use_active {
             crate::statmeter::add_speed_reading_active_statmeter(0);
-            return;
         }
-        self.raw(
-            3,
-            2,
-            4,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn log_interval_check(&self) {
@@ -1356,20 +1265,7 @@ impl QueueSubsysHost {
             if let Some(lg) = crate::log::active_log() {
                 lg.interval_check_active();
             }
-            return;
         }
-        self.raw(
-            3,
-            3,
-            0,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn work_state_set_downloading(&self, downloading: bool) {
@@ -1377,38 +1273,14 @@ impl QueueSubsysHost {
             if let Some(ws) = crate::ffi::active_workstate() {
                 ws.set_downloading(downloading);
             }
-            return;
         }
-        self.raw(
-            3,
-            4,
-            0,
-            usize::from(downloading),
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn effective_downloads_limit(&self, limit: i32) -> i32 {
         if self.use_active {
             return crate::articledl::memory_monitor_effective_downloads_limit(limit);
         }
-        self.raw(
-            3,
-            5,
-            limit,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        ) as i32
+        0
     }
 
     pub fn work_state_set_temp_pause_download(&self, pause: bool) {
@@ -1416,20 +1288,7 @@ impl QueueSubsysHost {
             if let Some(ws) = crate::ffi::active_workstate() {
                 ws.set_temp_pause_download(pause);
             }
-            return;
         }
-        self.raw(
-            3,
-            4,
-            2,
-            usize::from(pause),
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     /// Returns the `Unpack` setting of category `cat_name`, if the category exists.
@@ -1440,44 +1299,14 @@ impl QueueSubsysHost {
             return crate::options::active_options()
                 .and_then(|o| o.find_category(cs, false).map(|cat| cat.unpack));
         }
-        let c = c_bytes(cat_name);
-        let mut ints = [0i32; 1];
-        let mut strs = [std::ptr::null(); 1];
-        let found = self.raw(
-            3,
-            6,
-            0,
-            0,
-            0,
-            c.as_ptr() as *const c_char,
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            std::ptr::null_mut(),
-            strs.as_mut_ptr(),
-        );
-        if found == 0 {
-            None
-        } else {
-            Some(ints[0] != 0)
-        }
+        None
     }
 
     pub fn dq_is_loaded(&self) -> bool {
         if self.use_active {
             return crate::ffi::is_queue_loaded();
         }
-        self.raw(
-            3,
-            7,
-            0,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        ) != 0
+        false
     }
 
     pub fn server_pool_generation(&self) -> i32 {
@@ -1485,38 +1314,14 @@ impl QueueSubsysHost {
         if let Some(pool) = crate::net::active_server_pool() {
             return pool.generation();
         }
-        self.raw(
-            4,
-            0,
-            0,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        ) as i32
+        0
     }
 
     pub fn server_pool_close_unused(&self) {
         #[cfg(unix)]
         if let Some(pool) = crate::net::active_server_pool() {
             pool.close_unused_connections();
-            return;
         }
-        self.raw(
-            4,
-            1,
-            0,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn server_pool_servers(&self) -> (Vec<i32>, Vec<u8>, Vec<i32>) {
@@ -1533,40 +1338,7 @@ impl QueueSubsysHost {
             }
             return (levels, actives, conns);
         }
-        let n = self.raw(
-            4,
-            2,
-            -1,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
-        let mut levels = Vec::with_capacity(n);
-        let mut actives = Vec::with_capacity(n);
-        let mut conns = Vec::with_capacity(n);
-        let mut ints = [0i32; 3];
-        for i in 0..n {
-            self.raw(
-                4,
-                2,
-                i as i32,
-                0,
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                ints.as_mut_ptr(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            );
-            levels.push(ints[0]);
-            actives.push(ints[1] as u8);
-            conns.push(ints[2]);
-        }
-        (levels, actives, conns)
+        (Vec::new(), Vec::new(), Vec::new())
     }
 
     pub fn server_pool_get_connection(&self, has_desired: bool, desired_id: i32) -> usize {
@@ -1594,18 +1366,7 @@ impl QueueSubsysHost {
                 &[],
             ) as usize;
         }
-        self.raw(
-            4,
-            3,
-            i32::from(has_desired),
-            desired_id as usize,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
+        0
     }
 
     // DiskState ops (op = 5)
@@ -1614,18 +1375,7 @@ impl QueueSubsysHost {
         if self.use_active {
             return crate::diskstate_format::active_disk_queue_exists();
         }
-        self.raw(
-            5,
-            0,
-            0,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        ) != 0
+        false
     }
 
     pub fn disk_load_queue(&self, dq_ptr: usize) -> bool {
@@ -1633,38 +1383,14 @@ impl QueueSubsysHost {
         if self.use_active {
             return crate::diskstate_format::active_disk_load_queue(self, dq_ptr);
         }
-        self.raw(
-            5,
-            1,
-            0,
-            dq_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        ) != 0
+        false
     }
 
     pub fn disk_discard_queue(&self) {
         #[cfg(unix)]
         if self.use_active {
             crate::diskstate_format::active_disk_discard_queue();
-            return;
         }
-        self.raw(
-            5,
-            2,
-            0,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn disk_legacy_queue_read(&self) -> bool {
@@ -1672,58 +1398,21 @@ impl QueueSubsysHost {
         if self.use_active {
             return crate::diskstate_format::active_legacy_queue_read();
         }
-        self.raw(
-            5,
-            3,
-            0,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        ) != 0
+        false
     }
 
     pub fn disk_cleanup_temp_dir(&self, dq_ptr: usize) {
         #[cfg(unix)]
         if self.use_active {
             crate::diskstate_format::active_disk_cleanup_temp_dir(self, dq_ptr);
-            return;
         }
-        self.raw(
-            5,
-            4,
-            0,
-            dq_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn disk_save_all_file_infos(&self, dq_ptr: usize) {
         #[cfg(unix)]
         if self.use_active {
             crate::diskstate_format::active_disk_save_all_file_infos(self, dq_ptr);
-            return;
         }
-        self.raw(
-            5,
-            5,
-            0,
-            dq_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn disk_discard_files(&self, nzb_ptr: usize) {
@@ -1734,20 +1423,7 @@ impl QueueSubsysHost {
         #[cfg(unix)]
         if self.use_active {
             crate::diskstate_format::active_disk_discard_files(self, nzb_ptr, delete_log);
-            return;
         }
-        self.raw(
-            5,
-            6,
-            i32::from(!delete_log),
-            nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn disk_discard_file(&self, file_id: i32, del_data: bool, del_part: bool, del_compl: bool) {
@@ -1756,65 +1432,21 @@ impl QueueSubsysHost {
             crate::diskstate_format::active_disk_discard_file(
                 file_id, del_data, del_part, del_compl,
             );
-            return;
         }
-        let mut ints = [
-            i32::from(del_data),
-            i32::from(del_part),
-            i32::from(del_compl),
-        ];
-        self.raw(
-            5,
-            7,
-            file_id,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn disk_save_file(&self, file_ptr: usize) {
         #[cfg(unix)]
         if self.use_active {
             crate::diskstate_format::active_disk_save_file(self, file_ptr, false);
-            return;
         }
-        self.raw(
-            5,
-            8,
-            0,
-            file_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn disk_save_file_state(&self, file_ptr: usize, completed: bool) {
         #[cfg(unix)]
         if self.use_active {
             crate::diskstate_format::active_disk_save_file_state(self, file_ptr, completed, false);
-            return;
         }
-        self.raw(
-            5,
-            9,
-            i32::from(completed),
-            file_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn disk_load_file_state(&self, file_ptr: usize, completed: bool) -> bool {
@@ -1822,58 +1454,21 @@ impl QueueSubsysHost {
         if self.use_active {
             return crate::diskstate_format::active_disk_load_file_state(self, file_ptr, completed);
         }
-        self.raw(
-            5,
-            10,
-            i32::from(completed),
-            file_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        ) != 0
+        false
     }
 
     pub fn disk_resave_completed_file_state(&self, file_id: i32) {
         #[cfg(unix)]
         if self.use_active {
             crate::diskstate_format::active_disk_resave_completed_file_state(self, file_id);
-            return;
         }
-        self.raw(
-            5,
-            12,
-            file_id,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn disk_load_articles(&self, file_ptr: usize) {
         #[cfg(unix)]
         if self.use_active {
             crate::diskstate_format::active_disk_load_file(self, file_ptr, false, true);
-            return;
         }
-        self.raw(
-            5,
-            11,
-            0,
-            file_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn disk_load_completed_segments(
@@ -1888,18 +1483,7 @@ impl QueueSubsysHost {
                 self, file_id, push_ctx, push_fn,
             );
         }
-        self.raw(
-            5,
-            13,
-            file_id,
-            push_ctx,
-            push_fn,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
+        0
     }
 
     pub fn disk_load_file_for_inspect(
@@ -1917,23 +1501,7 @@ impl QueueSubsysHost {
                 try_load_completed_state,
             );
         }
-        let mut ints = [
-            i32::from(load_info_data),
-            i32::from(try_load_completed_state),
-        ];
-        let ptr = self.raw(
-            5,
-            14,
-            file_id,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
-        (ptr, ints[0] != 0)
+        (0, load_info_data)
     }
 
     // Subsystems (op = 6)
@@ -3015,7 +2583,10 @@ impl QueueSubsysHost {
         nzb_ptr: usize,
         c: &crate::queuecoord::NzbgetRsNzbMergeSplitCounters,
     ) {
-        let mut ints = [
+        if !self.use_active {
+            return;
+        }
+        let ints = [
             c.file_count,
             c.active_downloads,
             c.full_content_hash as i32,
@@ -3029,7 +2600,7 @@ impl QueueSubsysHost {
             c.current_failed_articles,
             c.download_sec,
         ];
-        let mut i64s = [
+        let i64s = [
             c.size,
             c.remaining_size,
             c.paused_size,
@@ -3047,25 +2618,9 @@ impl QueueSubsysHost {
             c.downloaded_size,
             c.download_start_time,
         ];
-        if self.use_active {
-            // the collection is the Rust object itself
-            unsafe {
-                crate::qnzb::host_set_stats(nzb_ptr as *mut crate::qnzb::NzbScalars, &ints, &i64s)
-            };
-            return;
-        }
-        self.raw(
-            33,
-            0,
-            0,
-            nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            i64s.as_mut_ptr(),
-            std::ptr::null_mut(),
-        );
+        // the collection is the Rust object itself
+        let nzb = nzb_ptr as *mut crate::qnzb::NzbScalars;
+        unsafe { crate::qnzb::host_set_stats(nzb, &ints, &i64s) };
     }
 
     pub fn nzb_file_len(&self, nzb_ptr: usize) -> usize {
@@ -3580,21 +3135,7 @@ impl QueueSubsysHost {
             };
             return file_snap_from(file_ptr, &ints, &i64s, articles_len, texts);
         }
-        let mut strs = [std::ptr::null(); 7];
-        let articles_len = self.raw(
-            40,
-            0,
-            0,
-            file_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            i64s.as_mut_ptr(),
-            strs.as_mut_ptr(),
-        );
-        let texts: [Vec<u8>; 7] = std::array::from_fn(|k| unsafe { read_cstr(strs[k]) });
-        file_snap_from(file_ptr, &ints, &i64s, articles_len, texts)
+        file_snap_from(file_ptr, &ints, &i64s, 0, Default::default())
     }
 
     pub fn file_groups(&self, file_ptr: usize) -> Vec<Vec<u8>> {
@@ -4285,22 +3826,7 @@ impl QueueSubsysHost {
                     info_name,
                 );
             }
-            return;
         }
-        let c = c_bytes(info_name);
-        let mut i64s = [conn_ptr as i64];
-        self.raw(
-            52,
-            i32::from(with_content_analyzer),
-            0,
-            file_ptr,
-            article_ptr,
-            c.as_ptr() as *const c_char,
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            i64s.as_mut_ptr(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn remove_active_download(&self, ad_ptr: usize) {
@@ -4309,20 +3835,7 @@ impl QueueSubsysHost {
             if let Some(qc) = crate::ffi::active_queue_coord() {
                 qc.remove_active_download(ad_ptr);
             }
-            return;
         }
-        self.raw(
-            53,
-            0,
-            0,
-            ad_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     pub fn delete_all_active_downloads(&self) {
@@ -4331,20 +3844,7 @@ impl QueueSubsysHost {
             if let Some(qc) = crate::ffi::active_queue_coord() {
                 qc.delete_all_active_downloads();
             }
-            return;
         }
-        self.raw(
-            53,
-            1,
-            0,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 
     // PostInfo & PrePostProcessor ops (op = 60..=62)

@@ -1889,10 +1889,12 @@ var Config = (new function($)
 		var tile = $('<a class="details-tile details-tile-link config-overview-tile" href="#"></a>').attr('data-target', target);
 		tile.append($('<span class="details-tile-label"></span>').text(label)
 			.append(icon ? $('<i class="material-icon" aria-hidden="true"></i>').text(icon) : null));
-		tile.append($('<span class="details-tile-value"></span>').text(value).addClass(tone ? 'is-' + tone : ''));
+		// The parts are stacked lines; the spaces between them don't show but keep the tile's
+		// text (its accessible name, a copy) from running words together ("active60").
+		tile.append(' ', $('<span class="details-tile-value"></span>').text(value).addClass(tone ? 'is-' + tone : ''));
 		if (sub)
 		{
-			tile.append($('<span class="details-tile-sub"></span>').text(sub));
+			tile.append(' ', $('<span class="details-tile-sub"></span>').text(sub));
 		}
 		return tile;
 	}

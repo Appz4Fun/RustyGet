@@ -719,28 +719,6 @@ thread_local! {
     static WRITER_NAMES: std::cell::RefCell<[CString; 4]> = std::cell::RefCell::new(Default::default());
 }
 
-/// Holds the current queue's lock while it lives (the C++
-/// `GuardedDownloadQueue`); no lock when there is no current queue.
-struct QueueGuard(usize);
-
-impl QueueGuard {
-    fn lock() -> Self {
-        let q = crate::qqueue::nzbget_rs_queue_op(0, 9);
-        if q != 0 {
-            crate::qqueue::nzbget_rs_queue_op(q, 3);
-        }
-        Self(q)
-    }
-}
-
-impl Drop for QueueGuard {
-    fn drop(&mut self) {
-        if self.0 != 0 {
-            crate::qqueue::nzbget_rs_queue_op(self.0, 4);
-        }
-    }
-}
-
 /// Holds a file's output lock while it lives (the C++ `FileOutputGuard`).
 struct OutputGuard<'a>(&'a File, bool);
 
@@ -955,7 +933,7 @@ pub(crate) unsafe fn host_output_op(
                     }
                 };
                 let (n_name, n_dest, f_name) = {
-                    let _g = QueueGuard::lock();
+                    let _g = crate::qqueue::CurrentQueueLock::acquire();
                     (
                         cstr(nzb_text(2)),
                         cstr(nzb_text(3)),
@@ -1001,7 +979,7 @@ pub(crate) unsafe fn host_output_op(
                 nzb as usize
             }
             2 => {
-                let _g = QueueGuard::lock();
+                let _g = crate::qqueue::CurrentQueueLock::acquire();
                 file.set(CRC, 0);
                 set_text(text::OUTPUT_FILENAME, c"".as_ptr());
                 0

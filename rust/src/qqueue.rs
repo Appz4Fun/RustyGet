@@ -129,28 +129,30 @@ fn current() -> *const Queue {
     DAEMON.load(Ordering::SeqCst) as *const Queue
 }
 
-/// Queue operations for the host's `DownloadQueue` (`q` a queue, or 0):
-///  1 its queue list; 2 its history list; 3 lock; 4 unlock; 9 the current
-///  (daemon) queue.
-pub extern "C" fn nzbget_rs_queue_op(q: usize, op: c_int) -> usize {
-    let queue = || unsafe { resolve(q).as_ref() };
-    match op {
-        1 => queue().map_or(0, |q| q.queue() as usize),
-        2 => queue().map_or(0, |q| q.history() as usize),
-        3 => {
-            if let Some(q) = queue() {
-                q.lock.lock();
-            }
-            0
+/// Holds the current (daemon) queue's lock while it lives, as the C++
+/// `GuardedDownloadQueue` did. Takes no lock when there is no current queue.
+pub(crate) struct CurrentQueueLock(*const Queue);
+
+impl CurrentQueueLock {
+    pub(crate) fn acquire() -> Self {
+        let q = current();
+        if let Some(q) = unsafe { q.as_ref() } {
+            q.lock.lock();
         }
-        4 => {
-            if let Some(q) = queue() {
-                q.lock.unlock();
-            }
-            0
+        Self(q)
+    }
+
+    /// The locked queue's handle, or 0 when there is no current queue.
+    pub(crate) fn key(&self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl Drop for CurrentQueueLock {
+    fn drop(&mut self) {
+        if let Some(q) = unsafe { self.0.as_ref() } {
+            q.lock.unlock();
         }
-        9 => current() as usize,
-        _ => 0,
     }
 }
 
@@ -247,20 +249,8 @@ pub unsafe fn host_locked(f: usize, ctx: usize) -> usize {
         return 0;
     }
     let f: unsafe extern "C" fn(*mut c_void, usize) = unsafe { std::mem::transmute(f) };
-    let q = current();
-    struct Unlock(*const Queue);
-    impl Drop for Unlock {
-        fn drop(&mut self) {
-            if let Some(q) = unsafe { self.0.as_ref() } {
-                q.lock.unlock();
-            }
-        }
-    }
-    if let Some(q) = unsafe { q.as_ref() } {
-        q.lock.lock();
-    }
-    let _unlock = Unlock(q);
-    unsafe { f(ctx as *mut c_void, q as usize) };
+    let lock = CurrentQueueLock::acquire();
+    unsafe { f(ctx as *mut c_void, lock.key()) };
     0
 }
 
@@ -512,16 +502,16 @@ pub fn host_daemon_queue(a1: i32) -> usize {
             let old = DAEMON.swap(alloc_queue() as usize, Ordering::SeqCst);
             unsafe { free_queue(old as *mut Queue) };
             // a reload creates the queue anew: not loaded until it is again
-            crate::ffi::nzbget_rs_thread_count_op(4);
+            crate::ffi::set_queue_loaded(false);
             0
         }
         2 => {
-            crate::ffi::nzbget_rs_thread_count_op(3);
+            crate::ffi::set_queue_loaded(true);
             0
         }
         3 => {
             let old = DAEMON.swap(0, Ordering::SeqCst);
-            crate::ffi::nzbget_rs_thread_count_op(4);
+            crate::ffi::set_queue_loaded(false);
             unsafe { free_queue(old as *mut Queue) };
             0
         }
@@ -665,9 +655,9 @@ mod tests {
     #[test]
     fn queue_lists_are_distinct_and_free() {
         let q = alloc_queue() as usize;
-        let (ql, hl) = (nzbget_rs_queue_op(q, 1), nzbget_rs_queue_op(q, 2));
-        assert!(ql != 0 && hl != 0 && ql != hl);
-        assert_eq!(nzbget_rs_queue_op(0, 1), 0);
+        let queue = unsafe { &*(q as *const Queue) };
+        let (ql, hl) = (queue.queue(), queue.history());
+        assert!(!ql.is_null() && !hl.is_null() && ql != hl);
         unsafe { free_queue(q as *mut Queue) };
     }
 
@@ -846,7 +836,7 @@ mod tests {
         assert_eq!(host_daemon_queue(0), 0);
         host_daemon_queue(1);
         let q = host_daemon_queue(0);
-        assert_eq!(nzbget_rs_queue_op(0, 9), q);
+        assert_eq!(current() as usize, q);
         let ctx = 5usize;
         unsafe {
             host_locked(
@@ -860,7 +850,7 @@ mod tests {
         assert!(crate::ffi::is_queue_loaded());
         host_daemon_queue(3);
         assert_eq!(host_daemon_queue(0), 0);
-        assert_eq!(nzbget_rs_queue_op(0, 9), 0);
+        assert_eq!(current() as usize, 0);
         assert!(!crate::ffi::is_queue_loaded());
     }
 

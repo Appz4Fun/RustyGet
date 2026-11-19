@@ -2228,7 +2228,8 @@ impl RsArticleWriter {
         self.write_context = host.qh.with_locked_queue(|_| {
             let file = host.qh.file_snap(host.file_ptr);
             let nzb = host.qh.nzb_snap(file.nzb_ptr, false);
-            if file.deleted || nzb.deleting {
+            // A parked download keeps its partly downloaded files: assemble them too.
+            if (file.deleted || nzb.deleting) && !nzb.parking {
                 return None;
             }
             crate::parlive::source_write_context(

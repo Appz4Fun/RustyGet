@@ -5950,7 +5950,7 @@ impl NzbgetRsPostJob {
                 crate::streamrepair_coord::NzbgetRsStreamRepairCtrl::new(
                     kind == 10,
                     nzb_id,
-                    crate::articlefetcher::native_nntp_fetch_host,
+                    &crate::articlefetcher::NativeNntpHost,
                     !crate::ffi::build_tls_disabled(),
                     crate::ffi::build_debug_enabled(),
                 ),
@@ -5959,7 +5959,7 @@ impl NzbgetRsPostJob {
                 crate::log::log_active_bytes(MK_DEBUG, b"Creating RepairController");
                 let ctrl = if crate::ffi::build_parcheck_enabled() {
                     Some(crate::repair::NzbgetRsRepairController::new(
-                        crate::articlefetcher::native_nntp_fetch_host,
+                        &crate::articlefetcher::NativeNntpHost,
                     ))
                 } else {
                     None

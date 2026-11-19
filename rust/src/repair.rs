@@ -346,7 +346,7 @@ use std::path::Path;
 use std::ptr;
 use std::time::Duration;
 
-use crate::articlefetcher::{fetch_entry, ArticleFetcher, NzbgetRsNntpFetchHostFn};
+use crate::articlefetcher::{fetch_entry, ArticleFetcher, NntpHost};
 use crate::twin::{
     block_size as par2_block_size, fingerprint as twin_fingerprint, par2_sigs, read_nzb, NzbEntry,
     MAX_INDEX_SIZE,
@@ -690,7 +690,7 @@ pub struct NzbgetRsRepairController {
 }
 
 impl NzbgetRsRepairController {
-    pub fn new(nntp_host: NzbgetRsNntpFetchHostFn) -> Self {
+    pub fn new(nntp_host: &'static dyn NntpHost) -> Self {
         Self {
             twin_fetcher: ArticleFetcher::new(nntp_host),
             par_checker: crate::postproc::NzbgetRsParChecker::new(),

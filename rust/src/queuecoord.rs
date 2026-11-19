@@ -4810,7 +4810,7 @@ impl NzbgetRsQueueCoordinator {
                         eval.own,
                         eval.tried,
                         (eval.projected as f64) / 10.0,
-                        if far_below { "far below" } else { "below" },
+                        if far_below { "under half the" } else { "below" },
                         (critical as f64) / 10.0
                     )
                     .as_bytes(),
@@ -4923,7 +4923,7 @@ impl NzbgetRsQueueCoordinator {
                     if eval.projected < critical {
                         "below"
                     } else {
-                        "near"
+                        "too close to"
                     },
                     (critical as f64) / 10.0,
                     (backup_alive as f64) / 10.0

@@ -1835,10 +1835,8 @@ pub(crate) fn build_repair_job_host(
     {
         return false;
     }
-    let health_cancel = nzb.delete_status == crate::queuesubsys_host::DS_HEALTH;
-    if !health_cancel
-        && (nzb.deleting || nzb.parking || nzb.delete_status != crate::queuesubsys_host::DS_NONE)
-    {
+    let health_cancel = nzb.delete_status == DeleteStatus::Health;
+    if !health_cancel && (nzb.deleting || nzb.parking || nzb.delete_status != DeleteStatus::None) {
         return false;
     }
 
@@ -2907,7 +2905,7 @@ pub(crate) fn try_fallback_host(
         file.deleted,
         nzb.deleting,
         nzb.parking,
-        DeleteStatus::from(nzb.delete_status),
+        nzb.delete_status,
         nzb.dupe_mode,
     ) {
         return false;

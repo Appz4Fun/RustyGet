@@ -90,7 +90,7 @@ fn fleet_queued_kinds(
                 let (ptr_, in_history) = dq_find_nzb(host_ctx, host_cb, dq_ptr, id)?;
                 if in_history {
                     let item = inspect_nzb(host_ctx, host_cb, ptr_, false);
-                    if item.delete_status != crate::dupecoord::DELETE_STATUS_DUPE {
+                    if item.delete_status != DeleteStatus::Dupe {
                         return None;
                     }
                 }
@@ -132,8 +132,7 @@ fn fleet_upgrade_kind(
         };
         // it may have failed or died while the fleet was checked
         if in_history
-            && inspect_nzb(host_ctx, host_cb, nzb_ptr, false).delete_status
-                != crate::dupecoord::DELETE_STATUS_DUPE
+            && inspect_nzb(host_ctx, host_cb, nzb_ptr, false).delete_status != DeleteStatus::Dupe
         {
             return;
         }
@@ -182,8 +181,7 @@ fn fleet_mark_encrypted(host_ctx: *mut c_void, host_cb: DupeHostFn, nzb_id: i32)
             return;
         };
         if in_history
-            && inspect_nzb(host_ctx, host_cb, nzb_ptr, false).delete_status
-                != crate::dupecoord::DELETE_STATUS_DUPE
+            && inspect_nzb(host_ctx, host_cb, nzb_ptr, false).delete_status != DeleteStatus::Dupe
         {
             return;
         }
@@ -667,7 +665,7 @@ struct NzbSnap {
     id: i32,
     kind: i32,
     deleting: bool,
-    delete_status: i32,
+    delete_status: DeleteStatus,
     mark_status: MarkStatus,
     dupe_mode: DupeMode,
     dupe_hint: i32,
@@ -816,7 +814,7 @@ fn check_placement_available(
         true,
         backup.kind == 0,
         backup.deleting,
-        DeleteStatus::from(backup.delete_status),
+        backup.delete_status,
         backup.mark_status,
         backup.dupe_mode,
         in_history,
@@ -1948,7 +1946,7 @@ fn fleet_intake_later(host_ctx: *mut c_void, host_cb: DupeHostFn, job: IntakeLat
                         return false;
                     };
                     let item = inspect_nzb(host_ctx, host_cb, ptr_, false);
-                    if item.delete_status != crate::dupecoord::DELETE_STATUS_DUPE
+                    if item.delete_status != DeleteStatus::Dupe
                         || item.dupe_success
                         || !item.dupe_key.eq_ignore_ascii_case(key)
                     {
@@ -2333,7 +2331,7 @@ impl NzbgetRsDupeSearch {
                     item.kind,
                     0,
                     item.deleting,
-                    DeleteStatus::from(item.delete_status),
+                    item.delete_status,
                     item.has_post_info,
                     item_key == added_key,
                     item.dupe_score,
@@ -2415,7 +2413,7 @@ impl NzbgetRsDupeSearch {
             let qf = &item.queued_filename;
             let add_known = item.kind == 0
                 && !qf.is_empty()
-                && item.delete_status != 1
+                && item.delete_status != DeleteStatus::Manual
                 && (same_key || same_rel);
             let add_member = if !in_history {
                 dupesearch_is_rank_only_queued_member(
@@ -2425,7 +2423,7 @@ impl NzbgetRsDupeSearch {
                     0,
                     item.dupe_mode,
                     item.has_post_info,
-                    DeleteStatus::from(item.delete_status),
+                    item.delete_status,
                     item.dupe_score,
                     pick.dupe_score,
                 ) && same_key
@@ -2437,7 +2435,7 @@ impl NzbgetRsDupeSearch {
                     && saved_history_backup(
                         true,
                         pick.full_hash,
-                        DeleteStatus::from(item.delete_status),
+                        item.delete_status,
                         item.full_hash,
                     )
                     && same_key
@@ -2619,7 +2617,7 @@ impl NzbgetRsDupeSearch {
                 in_hist,
                 item.dupe_success,
                 item.deleting,
-                DeleteStatus::from(item.delete_status),
+                item.delete_status,
                 item.has_post_info,
                 item.dupe_mode,
                 item.is_donor,
@@ -4537,7 +4535,7 @@ impl NzbgetRsDupeSearch {
                 }
                 let current = inspect_nzb(host_ctx, host_cb, cur_ptr, false);
                 if !current.deleting
-                    && current.delete_status == 0
+                    && current.delete_status == DeleteStatus::None
                     && !current.has_post_info
                     && lower_key(&effective_key(&current.dupe_key, &current.name)) == low_job_key
                     && crate::releasename::normalize(&current.name) == norm_job_name
@@ -4607,7 +4605,7 @@ impl NzbgetRsDupeSearch {
             }
             let snap = qh.nzb_snap(ptr, false);
             if snap.deleting
-                || snap.delete_status != crate::queuesubsys_host::DS_NONE
+                || snap.delete_status != DeleteStatus::None
                 || snap.has_post_info
                 || snap.dupe_score <= score
                 || lower_key(&effective_key(&snap.dupe_key, &snap.name)) != lower_key(&job.dupe_key)
@@ -4824,10 +4822,7 @@ impl NzbgetRsDupeSearch {
                 return Err(&b"it already left the queue"[..]);
             }
             let snap = qh.nzb_snap(pick_ptr, false);
-            if snap.deleting
-                || snap.delete_status != crate::queuesubsys_host::DS_NONE
-                || snap.has_post_info
-            {
+            if snap.deleting || snap.delete_status != DeleteStatus::None || snap.has_post_info {
                 return Err(&b"it is already finishing"[..]);
             }
             // The key or name may have changed during the health checks.
@@ -4917,7 +4912,9 @@ impl NzbgetRsDupeSearch {
             let code = eval_pick_gone(
                 found.is_some(),
                 found.as_ref().is_some_and(|p| p.deleting),
-                DeleteStatus::from(found.as_ref().map(|p| p.delete_status).unwrap_or(0)),
+                found
+                    .as_ref()
+                    .map_or(DeleteStatus::None, |p| p.delete_status),
                 &eff_key,
                 &job.dupe_key,
                 &pick_norm,
@@ -6036,7 +6033,7 @@ pub unsafe fn fleet_append(
                 any_seen,
                 queued,
                 snap.deleting,
-                DeleteStatus::from(snap.delete_status),
+                snap.delete_status,
                 running_id,
                 running_score,
                 snap.id,
@@ -6150,7 +6147,7 @@ pub unsafe fn fleet_append(
                     continue;
                 }
                 let item = inspect_nzb(host_ctx, host_cb, p, false);
-                if item.delete_status != 0
+                if item.delete_status != DeleteStatus::None
                     || !item.dupe_success
                     || item.mark_status == MarkStatus::Bad
                     || !crate::releasename::readable(&item.name)
@@ -6744,7 +6741,7 @@ pub unsafe fn fleet_append(
                 continue;
             }
             let item = inspect_nzb(host_ctx, host_cb, p, false);
-            if item.delete_status == 6 {
+            if item.delete_status == DeleteStatus::Copy {
                 for entry in &mut out_entries {
                     if entry.nzb_id == item.id {
                         entry.status = b"COPY".to_vec();
@@ -6755,7 +6752,7 @@ pub unsafe fn fleet_append(
             }
             if !disk_found
                 && check_disk
-                && item.delete_status == 0
+                && item.delete_status == DeleteStatus::None
                 && item.dupe_success
                 && item.mark_status != MarkStatus::Bad
                 && item.dupe_key.eq_ignore_ascii_case(&dupe_key)

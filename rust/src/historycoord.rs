@@ -482,11 +482,11 @@ pub fn reset_articles_batch(
 }
 
 /// Parses the `eaHistorySetDupeBackup` argument into `NzbInfo::dsDupe` or `NzbInfo::dsManual`.
-pub fn parse_dupe_backup_flag(text: &[u8], ds_dupe: i32, ds_manual: i32) -> i32 {
+pub fn parse_dupe_backup_flag(text: &[u8]) -> DeleteStatus {
     if text.eq_ignore_ascii_case(b"YES") || text.eq_ignore_ascii_case(b"TRUE") || text == b"1" {
-        ds_dupe
+        DeleteStatus::Dupe
     } else {
-        ds_manual
+        DeleteStatus::Manual
     }
 }
 
@@ -1700,7 +1700,7 @@ unsafe fn hc_set_dupe_param(
     env: &NzbgetRsHistoryCoordEnv,
     hist_ptr: usize,
     kind: c_int,
-    delete_status: c_int,
+    delete_status: DeleteStatus,
     hist_name: &[u8],
     action: c_int,
     text_ptr: *const c_char,
@@ -1798,19 +1798,19 @@ unsafe fn hc_set_dupe_param(
                     hc_log(env, 4, &em);
                     return;
                 }
-                if delete_status != 3 && delete_status != 1 {
+                if delete_status != DeleteStatus::Dupe && delete_status != DeleteStatus::Manual {
                     let mut em = b"Could not set duplicate parameter for ".to_vec();
                     em.extend_from_slice(hist_name);
                     em.extend_from_slice(b": history item has wrong delete status");
                     hc_log(env, 4, &em);
                     return;
                 }
-                let new_ds = parse_dupe_backup_flag(text, 3, 1);
+                let new_ds = parse_dupe_backup_flag(text);
                 cb(
                     env.ctx,
                     36,
                     6,
-                    new_ds,
+                    new_ds.into(),
                     0,
                     hist_ptr,
                     std::ptr::null(),
@@ -1928,7 +1928,7 @@ pub unsafe fn history_coord_exec(op: c_int, env: *const NzbgetRsHistoryCoordEnv)
             );
             let par_status = NzbParStatus::from(ints[0]);
             let unpack_status = UnpackStatus::from(ints[1]);
-            let delete_status = ints[2];
+            let delete_status = DeleteStatus::from(ints[2]);
             let parking = ints[3];
             let unpack_cleaned_up = ints[4];
             let mut completed_count = ints[5];
@@ -1941,7 +1941,7 @@ pub unsafe fn history_coord_exec(op: c_int, env: *const NzbgetRsHistoryCoordEnv)
                 || (par_status == NzbParStatus::None
                     && unpack_status == UnpackStatus::None
                     && (failed_size - par_failed_size) == 0)
-                || (delete_status != 0 && parking == 0)
+                || (delete_status != DeleteStatus::None && parking == 0)
                 || unpack_cleaned_up != 0;
             if cleanup {
                 cb(
@@ -2216,7 +2216,7 @@ pub unsafe fn history_coord_exec(op: c_int, env: *const NzbgetRsHistoryCoordEnv)
                 let hidx = ints[0];
                 let hist_len = ints[1];
                 let kind = ints[2];
-                let delete_status = ints[3];
+                let delete_status = DeleteStatus::from(ints[3]);
                 let par_status = NzbParStatus::from(ints[4]);
                 let unpack_status = UnpackStatus::from(ints[5]);
                 let parked_count = ints[6];
@@ -2241,7 +2241,7 @@ pub unsafe fn history_coord_exec(op: c_int, env: *const NzbgetRsHistoryCoordEnv)
                             );
                             if should_delete_dest_dir(
                                 true,
-                                DeleteStatus::from(delete_status),
+                                delete_status,
                                 par_status,
                                 unpack_status,
                                 dir_exists,
@@ -2446,24 +2446,24 @@ unsafe extern "C" fn hc_native_action_cb(
 ) -> usize {
     use crate::queuesubsys_host::{
         QueueSubsysHost, AI_FAILED, AI_UNDEFINED, ASPECT_NZB_RETURNED, ASPECT_URL_RETURNED,
-        CF_FAILURE, CF_NONE, CF_PARTIAL, DH_NONE, DH_REDOWNLOAD_MANUAL, DP_NONE, DS_NONE,
-        DUP_INT_DUPE_MODE, DUP_INT_DUPE_SCORE, DUP_STR_DUPE_KEY, DUP_STR_NAME,
-        EA_GROUP_PAUSE_EXTRA_PARS, FILE_ACT_CLEAR_ARTICLES, FILE_I64_FAILED_SIZE,
-        FILE_I64_REMAINING_SIZE, FILE_I64_SUCCESS_SIZE, FILE_INT_COMPLETED_ARTICLES,
-        FILE_INT_FAILED_ARTICLES, FILE_INT_PARTIAL_STATE, FILE_INT_PAUSED,
-        FILE_INT_SUCCESS_ARTICLES, FILE_STR_FILENAME, HK_DUP, HK_NZB, HK_URL, MK_DETAIL, MK_INFO,
-        MK_WARNING, NS_NONE, NS_RUNNING, NZB_ACT_BUILD_DEST_DIR, NZB_ACT_CLEAR_EXTRACTED_ARCHIVES,
-        NZB_ACT_CLEAR_FILE_LIST, NZB_ACT_CLEAR_LIVE_REPAIR_THREAD, NZB_ACT_CLEAR_SCRIPT_STATUSES,
+        CF_FAILURE, CF_NONE, CF_PARTIAL, DH_NONE, DH_REDOWNLOAD_MANUAL, DP_NONE, DUP_INT_DUPE_MODE,
+        DUP_INT_DUPE_SCORE, DUP_STR_DUPE_KEY, DUP_STR_NAME, EA_GROUP_PAUSE_EXTRA_PARS,
+        FILE_ACT_CLEAR_ARTICLES, FILE_I64_FAILED_SIZE, FILE_I64_REMAINING_SIZE,
+        FILE_I64_SUCCESS_SIZE, FILE_INT_COMPLETED_ARTICLES, FILE_INT_FAILED_ARTICLES,
+        FILE_INT_PARTIAL_STATE, FILE_INT_PAUSED, FILE_INT_SUCCESS_ARTICLES, FILE_STR_FILENAME,
+        HK_DUP, HK_NZB, HK_URL, MK_DETAIL, MK_INFO, MK_WARNING, NS_NONE, NS_RUNNING,
+        NZB_ACT_BUILD_DEST_DIR, NZB_ACT_CLEAR_EXTRACTED_ARCHIVES, NZB_ACT_CLEAR_FILE_LIST,
+        NZB_ACT_CLEAR_LIVE_REPAIR_THREAD, NZB_ACT_CLEAR_SCRIPT_STATUSES,
         NZB_ACT_UPDATE_COMPLETED_STATS, NZB_ACT_UPDATE_CURRENT_STATS, NZB_I64_DOWNLOADED_SIZE,
         NZB_I64_DUPE_RECOVERED_BYTES, NZB_I64_FAILED_SIZE, NZB_I64_PAR_FAILED_SIZE,
         NZB_I64_PAR_SUCCESS_SIZE, NZB_I64_SUCCESS_SIZE, NZB_INT_ALL_FIRST,
-        NZB_INT_DEAD_PICK_PROBED, NZB_INT_DELETE_PAUSED, NZB_INT_DELETE_STATUS,
-        NZB_INT_DIRECT_RENAME_STATUS, NZB_INT_DIRECT_UNPACK_STATUS, NZB_INT_DOWNLOAD_SEC,
-        NZB_INT_DUPE_ATTEMPTED_ARTICLES, NZB_INT_DUPE_FAILED_RUN, NZB_INT_DUPE_FAILOVER_CHECKED,
-        NZB_INT_DUPE_HINT, NZB_INT_DUPE_NO_PAR_NOTED, NZB_INT_DUPE_PAR_DEFER_STATE,
-        NZB_INT_DUPE_RECOVERED_ARTICLES, NZB_INT_DUPE_RECOVERED_HOLES, NZB_INT_DUPE_SCORE,
-        NZB_INT_DUPE_UNSOURCED_ARTICLES, NZB_INT_EXTRA_PAR_BLOCKS, NZB_INT_FAILED_ARTICLES,
-        NZB_INT_HEALTH_PAUSED, NZB_INT_LIVE_PAR_SEC, NZB_INT_LIVE_UNPACK_SEC, NZB_INT_LOADING_PAR,
+        NZB_INT_DEAD_PICK_PROBED, NZB_INT_DELETE_PAUSED, NZB_INT_DIRECT_RENAME_STATUS,
+        NZB_INT_DIRECT_UNPACK_STATUS, NZB_INT_DOWNLOAD_SEC, NZB_INT_DUPE_ATTEMPTED_ARTICLES,
+        NZB_INT_DUPE_FAILED_RUN, NZB_INT_DUPE_FAILOVER_CHECKED, NZB_INT_DUPE_HINT,
+        NZB_INT_DUPE_NO_PAR_NOTED, NZB_INT_DUPE_PAR_DEFER_STATE, NZB_INT_DUPE_RECOVERED_ARTICLES,
+        NZB_INT_DUPE_RECOVERED_HOLES, NZB_INT_DUPE_SCORE, NZB_INT_DUPE_UNSOURCED_ARTICLES,
+        NZB_INT_EXTRA_PAR_BLOCKS, NZB_INT_FAILED_ARTICLES, NZB_INT_HEALTH_PAUSED,
+        NZB_INT_LIVE_PAR_SEC, NZB_INT_LIVE_UNPACK_SEC, NZB_INT_LOADING_PAR,
         NZB_INT_PARKED_FILE_COUNT, NZB_INT_PARKING, NZB_INT_PAR_FULL, NZB_INT_PAR_RENAME_STATUS,
         NZB_INT_PAR_REPAIRED, NZB_INT_PAR_SEC, NZB_INT_POST_TOTAL_SEC, NZB_INT_RAR_RENAME_STATUS,
         NZB_INT_REMAINING_PAR_COUNT, NZB_INT_REPAIR_SEC, NZB_INT_REPROCESS,
@@ -2510,7 +2510,7 @@ unsafe extern "C" fn hc_native_action_cb(
             let cfs_len = host.nzb_completed_files_len(p2) as c_int;
             *ints.add(0) = nzb.par_status.into();
             *ints.add(1) = nzb.unpack_status.into();
-            *ints.add(2) = nzb.delete_status;
+            *ints.add(2) = nzb.delete_status.into();
             *ints.add(3) = c_int::from(nzb.parking);
             *ints.add(4) = c_int::from(nzb.unpack_cleaned_up_disk);
             *ints.add(5) = cfs_len;
@@ -2619,7 +2619,7 @@ unsafe extern "C" fn hc_native_action_cb(
             let nzb_ptr = hi.inner_ptr;
             let nzb = host.nzb_snap(nzb_ptr, false);
             *ints.add(0) = nzb.mark_status.into();
-            *ints.add(1) = nzb.delete_status;
+            *ints.add(1) = nzb.delete_status.into();
             *ints.add(2) = c_int::from(nzb.is_dupe_success);
             *strs.add(0) = hc_stash_str(&hi.name);
             nzb_ptr
@@ -2703,7 +2703,7 @@ unsafe extern "C" fn hc_native_action_cb(
             *ints.add(0) = idx as c_int;
             *ints.add(1) = hl_len as c_int;
             *ints.add(2) = found_hi.kind;
-            *ints.add(3) = nzb.as_ref().map_or(0, |n| n.delete_status);
+            *ints.add(3) = nzb.as_ref().map_or(0, |n| n.delete_status.into());
             *ints.add(4) = nzb.as_ref().map_or(0, |n| n.par_status.into());
             *ints.add(5) = nzb.as_ref().map_or(0, |n| n.unpack_status.into());
             *ints.add(6) = nzb.as_ref().map_or(0, |n| n.parked_file_count);
@@ -2758,7 +2758,7 @@ unsafe extern "C" fn hc_native_action_cb(
                     host.nzb_set_int(nzb_ptr, NZB_INT_PAR_FULL, 0);
                 }
             }
-            host.nzb_set_int(nzb_ptr, NZB_INT_DELETE_STATUS, DS_NONE);
+            host.nzb_set_delete_status(nzb_ptr, DeleteStatus::None);
             host.nzb_set_int(nzb_ptr, NZB_INT_DELETE_PAUSED, 0);
             host.nzb_set_int(nzb_ptr, NZB_INT_DUPE_FAILOVER_CHECKED, -1);
             host.nzb_set_int(nzb_ptr, NZB_INT_DEAD_PICK_PROBED, 0);
@@ -2798,7 +2798,7 @@ unsafe extern "C" fn hc_native_action_cb(
             let nzb_ptr = hi.inner_ptr;
             let nzb = host.nzb_snap(nzb_ptr, false);
             host.nzb_set_url_status(nzb_ptr, UrlStatus::None);
-            host.nzb_set_int(nzb_ptr, NZB_INT_DELETE_STATUS, DS_NONE);
+            host.nzb_set_delete_status(nzb_ptr, DeleteStatus::None);
             if nzb.dupe_hint == DH_NONE {
                 host.nzb_set_int(nzb_ptr, NZB_INT_DUPE_HINT, DH_REDOWNLOAD_MANUAL);
             }
@@ -3009,7 +3009,7 @@ unsafe extern "C" fn hc_native_action_cb(
                 }
                 4 => host.nzb_set_int(hi.inner_ptr, NZB_INT_DUPE_SCORE, a2),
                 5 => host.nzb_set_dupe_mode(hi.inner_ptr, DupeMode::from(a2)),
-                6 => host.nzb_set_int(hi.inner_ptr, NZB_INT_DELETE_STATUS, a2),
+                6 => host.nzb_set_delete_status(hi.inner_ptr, DeleteStatus::from(a2)),
                 7 => host.dup_set_str(hi.inner_ptr, DUP_STR_DUPE_KEY, hc_cstr_bytes(s1)),
                 8 => host.dup_set_int(hi.inner_ptr, DUP_INT_DUPE_SCORE, a2),
                 9 => host.dup_set_int(hi.inner_ptr, DUP_INT_DUPE_MODE, a2),
@@ -3179,21 +3179,68 @@ mod tests {
     #[test]
     fn delete_dest_dir_only_for_failed_jobs() {
         let del = |delete_status, par, unpack, exists| {
-            should_delete_dest_dir(true, DeleteStatus::from(delete_status), par, unpack, exists)
+            should_delete_dest_dir(true, delete_status, par, unpack, exists)
         };
-        assert!(!del(0, NzbParStatus::Success, UnpackStatus::Success, true));
-        assert!(del(0, NzbParStatus::Failure, UnpackStatus::None, true));
-        assert!(del(0, NzbParStatus::None, UnpackStatus::Failure, true));
-        assert!(del(0, NzbParStatus::None, UnpackStatus::Password, true));
-        assert!(!del(0, NzbParStatus::None, UnpackStatus::Space, true));
-        assert!(del(2, NzbParStatus::None, UnpackStatus::None, true));
-        assert!(!del(2, NzbParStatus::None, UnpackStatus::None, false));
-        // A stored value that names no status counts as none of them, as the raw value did.
-        assert!(!del(0, NzbParStatus::from(9), UnpackStatus::from(9), true));
         assert!(!del(
-            0,
+            DeleteStatus::None,
+            NzbParStatus::Success,
+            UnpackStatus::Success,
+            true
+        ));
+        assert!(del(
+            DeleteStatus::None,
+            NzbParStatus::Failure,
+            UnpackStatus::None,
+            true
+        ));
+        assert!(del(
+            DeleteStatus::None,
+            NzbParStatus::None,
+            UnpackStatus::Failure,
+            true
+        ));
+        assert!(del(
+            DeleteStatus::None,
+            NzbParStatus::None,
+            UnpackStatus::Password,
+            true
+        ));
+        assert!(!del(
+            DeleteStatus::None,
+            NzbParStatus::None,
+            UnpackStatus::Space,
+            true
+        ));
+        assert!(del(
+            DeleteStatus::Health,
+            NzbParStatus::None,
+            UnpackStatus::None,
+            true
+        ));
+        assert!(!del(
+            DeleteStatus::Health,
+            NzbParStatus::None,
+            UnpackStatus::None,
+            false
+        ));
+        // A stored value that names no status counts as none of them, as the raw value did.
+        assert!(!del(
+            DeleteStatus::None,
+            NzbParStatus::from(9),
+            UnpackStatus::from(9),
+            true
+        ));
+        assert!(!del(
+            DeleteStatus::None,
             NzbParStatus::from(-1),
             UnpackStatus::from(-1),
+            true
+        ));
+        // An unknown delete status is still not None, so the directory goes.
+        assert!(del(
+            DeleteStatus::from(9),
+            NzbParStatus::None,
+            UnpackStatus::None,
             true
         ));
         assert!(!should_delete_dest_dir(
@@ -3209,6 +3256,13 @@ mod tests {
     fn move_to_queue_reset_keeps_unknown_move_status() {
         let (_, ms) = calc_move_to_queue_reset(true, 0, 0, 0, false, 0, 0, MoveStatus::from(7));
         assert_eq!(i32::from(ms), 7);
+    }
+
+    #[test]
+    fn dupe_backup_flag_sets_dupe_or_manual() {
+        assert_eq!(parse_dupe_backup_flag(b"yes"), DeleteStatus::Dupe);
+        assert_eq!(parse_dupe_backup_flag(b"1"), DeleteStatus::Dupe);
+        assert_eq!(parse_dupe_backup_flag(b"no"), DeleteStatus::Manual);
     }
 
     #[test]

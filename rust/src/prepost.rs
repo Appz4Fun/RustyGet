@@ -442,12 +442,12 @@ fn dupe_post_gate_host(
     dq_ptr: usize,
     nzb: &crate::queuesubsys_host::NzbSnap,
 ) -> (GateVerdict, Vec<u8>) {
-    use crate::queuesubsys_host::{DS_NONE, HC_DUPE, HC_PARK, NK_NZB, NS_RUNNING};
+    use crate::queuesubsys_host::{HC_DUPE, HC_PARK, NK_NZB, NS_RUNNING};
     const NS_SUCCESS: i32 = 3;
     let health_check = host.opts().health_check;
     if nzb.dupe_key.is_empty()
         || nzb.dupe_mode == DupeMode::Force
-        || nzb.delete_status != DS_NONE
+        || nzb.delete_status != DeleteStatus::None
         || (health_check != HC_DUPE && health_check != HC_PARK)
     {
         return (GateVerdict::Pass, Vec::new());
@@ -476,7 +476,7 @@ fn dupe_post_gate_host(
         let q = host.nzb_snap(qp, false);
         if q.kind == NK_NZB
             && !q.deleting
-            && q.delete_status == DS_NONE
+            && q.delete_status == DeleteStatus::None
             && q.dupe_mode != DupeMode::Force
             && q.dupe_key.eq_ignore_ascii_case(&nzb.dupe_key)
         {
@@ -974,7 +974,7 @@ pub(crate) fn delete_cleanup_host(
 
     let mode = classify_delete_cleanup_mode(
         nzb.cleanup_disk,
-        DeleteStatus::from(nzb.delete_status),
+        nzb.delete_status,
         nzb.parking,
         nzb.skip_disk_write,
         opts.skip_write,
@@ -1282,7 +1282,7 @@ impl NzbgetRsPrePostProcessor {
 
     fn sanitise_post_queue(&self, host: &crate::queuesubsys_host::QueueSubsysHost) {
         use crate::queuesubsys_host::{
-            DS_NONE, MK_INFO, NK_NZB, NS_NONE, NS_RUNNING, NZB_INT_DIRECT_UNPACK_STATUS,
+            MK_INFO, NK_NZB, NS_NONE, NS_RUNNING, NZB_INT_DIRECT_UNPACK_STATUS,
             POST_INT_REQUEST_PAR_CHECK, POST_INT_STAGE, POST_INT_WORKING, PT_EXECUTING_SCRIPT,
             PT_FINISHED, PT_QUEUED,
         };
@@ -1308,7 +1308,7 @@ impl NzbgetRsPrePostProcessor {
                 if nzb.post_info_ptr == 0
                     && nzb.kind == NK_NZB
                     && !host.nzb_completed_files(nzb_ptr).is_empty()
-                    && nzb.delete_status == DS_NONE
+                    && nzb.delete_status == DeleteStatus::None
                     && nzb.is_download_completed
                 {
                     let mut msg = b"Collection ".to_vec();
@@ -1385,8 +1385,7 @@ impl NzbgetRsPrePostProcessor {
         nzb_ptr: usize,
     ) {
         use crate::queuesubsys_host::{
-            DS_COPY, DS_DUPE, DS_GOOD, DS_NONE, DS_SCAN, EA_GROUP_PAUSE_EXTRA_PARS,
-            EA_GROUP_SORT_FILES, MK_INFO, PC_FORCE,
+            EA_GROUP_PAUSE_EXTRA_PARS, EA_GROUP_SORT_FILES, MK_INFO, PC_FORCE,
         };
 
         let opts = host.opts();
@@ -1396,19 +1395,22 @@ impl NzbgetRsPrePostProcessor {
             host.dq_edit_entry(dq_ptr, nzb.id, EA_GROUP_PAUSE_EXTRA_PARS, None);
         }
 
-        if opts.reorder_files && nzb.delete_status == DS_NONE {
+        if opts.reorder_files && nzb.delete_status == DeleteStatus::None {
             let mut msg = b"Reordering files for ".to_vec();
             msg.extend_from_slice(&nzb.name);
             host.nzb_print_message(nzb_ptr, MK_INFO, &msg);
             host.dq_edit_entry(dq_ptr, nzb.id, EA_GROUP_SORT_FILES, None);
         }
         #[cfg(unix)]
-        if nzb.delete_status == DS_NONE {
+        if nzb.delete_status == DeleteStatus::None {
             crate::dupefallback::prioritize_par_index_host(host, nzb_ptr);
         }
 
         let nzb = host.nzb_snap(nzb_ptr, false);
-        if matches!(nzb.delete_status, DS_DUPE | DS_COPY | DS_GOOD | DS_SCAN) {
+        if matches!(
+            nzb.delete_status,
+            DeleteStatus::Dupe | DeleteStatus::Copy | DeleteStatus::Good | DeleteStatus::Scan
+        ) {
             self.nzb_completed(host, dq_ptr, nzb_ptr, false);
         }
     }
@@ -1429,7 +1431,7 @@ impl NzbgetRsPrePostProcessor {
             nzb.direct_rename_status,
             TS_SUCCESS,
             nzb.has_post_info,
-            DeleteStatus::from(nzb.delete_status),
+            nzb.delete_status,
             completed_not_empty,
             nzb.is_download_completed,
             opts.raw_article,
@@ -1468,7 +1470,7 @@ impl NzbgetRsPrePostProcessor {
             nzb.skip_script_processing,
             nzb.skip_disk_write,
             opts.skip_write,
-            DeleteStatus::from(nzb.delete_status),
+            nzb.delete_status,
             nzb.has_post_info,
             opts.raw_article,
             nzb.par_status,
@@ -1622,7 +1624,7 @@ impl NzbgetRsPrePostProcessor {
                 action == ASPECT_FILE_COMPLETED,
                 action == ASPECT_FILE_DELETED,
                 file.dupe_deleted,
-                DeleteStatus::from(file_nzb.delete_status),
+                file_nzb.delete_status,
                 nzb.has_post_info,
                 nzb.is_download_completed,
                 nzb.is_download_completed_strict,
@@ -1649,7 +1651,7 @@ impl NzbgetRsPrePostProcessor {
         dq_ptr: usize,
         nzb_ptr: usize,
     ) {
-        use crate::queuesubsys_host::{NZB_INT_DELETE_STATUS, NZB_INT_DELETING};
+        use crate::queuesubsys_host::NZB_INT_DELETING;
 
         let nzb = host.nzb_snap(nzb_ptr, false);
         if nzb.has_unpack_thread {
@@ -1660,9 +1662,8 @@ impl NzbgetRsPrePostProcessor {
         }
 
         let nzb = host.nzb_snap(nzb_ptr, false);
-        let (new_status, call_downloaded) =
-            resolve_nzb_deleted_route(DeleteStatus::from(nzb.delete_status));
-        host.nzb_set_int(nzb_ptr, NZB_INT_DELETE_STATUS, new_status.into());
+        let (new_status, call_downloaded) = resolve_nzb_deleted_route(nzb.delete_status);
+        host.nzb_set_delete_status(nzb_ptr, new_status.into());
         host.nzb_set_int(nzb_ptr, NZB_INT_DELETING, 0);
 
         let opts = host.opts();
@@ -1703,7 +1704,7 @@ impl NzbgetRsPrePostProcessor {
             opts.dupe_check,
             nzb.dupe_mode,
             fails_over,
-            DeleteStatus::from(nzb.delete_status),
+            nzb.delete_status,
         );
 
         if add_to_history {
@@ -1979,10 +1980,10 @@ impl NzbgetRsPrePostProcessor {
         use crate::queuesubsys_host::{
             CTRL_CLEANUP, CTRL_MOVE, CTRL_POST_RENAME_DL, CTRL_POST_RENAME_UNPACK,
             CTRL_POST_SCRIPT, CTRL_RENAME_PAR, CTRL_RENAME_RAR, CTRL_REPAIR, CTRL_STREAM_REPAIR,
-            CTRL_UNPACK, DAF_STREAM, DS_NONE, FILE_INT_EXTRA_PRIORITY, FILE_INT_PAUSED, HC_DUPE,
-            MK_INFO, MK_WARNING, NZB_INT_CHANGED, PC_AUTO, POST_INT_NEED_PAR_CHECK,
-            POST_INT_NEED_UNPACK, POST_INT_PAR_CANNOT_COVER, POST_INT_REQUEST_PAR_CHECK, PS_DUPE,
-            PT_CLEANING_UP, PT_EXECUTING_SCRIPT, PT_LOADING_PARS, PT_MOVING, PT_PAR_RENAMING,
+            CTRL_UNPACK, DAF_STREAM, FILE_INT_EXTRA_PRIORITY, FILE_INT_PAUSED, HC_DUPE, MK_INFO,
+            MK_WARNING, NZB_INT_CHANGED, PC_AUTO, POST_INT_NEED_PAR_CHECK, POST_INT_NEED_UNPACK,
+            POST_INT_PAR_CANNOT_COVER, POST_INT_REQUEST_PAR_CHECK, PS_DUPE, PT_CLEANING_UP,
+            PT_EXECUTING_SCRIPT, PT_LOADING_PARS, PT_MOVING, PT_PAR_RENAMING,
             PT_POST_DOWNLOAD_RENAMING, PT_POST_UNPACK_RENAMING, PT_RAR_RENAMING,
             PT_STREAM_REPAIRING, PT_UNPACKING, RS_NONE,
         };
@@ -2002,7 +2003,10 @@ impl NzbgetRsPrePostProcessor {
         }
         host.post_reset_stage_progress(post_ptr, opts.cur_time);
 
-        if nzb.par_rename_status == RS_NONE && nzb.delete_status == DS_NONE && opts.par_rename {
+        if nzb.par_rename_status == RS_NONE
+            && nzb.delete_status == DeleteStatus::None
+            && opts.par_rename
+        {
             self.enter_stage(host, post_ptr, PT_PAR_RENAMING);
             host.post_controller_start_job(post_ptr, CTRL_RENAME_PAR);
             return;
@@ -2010,7 +2014,7 @@ impl NzbgetRsPrePostProcessor {
 
         let mut stream_repair = opts.dupe_article_fallback >= DAF_STREAM
             && nzb.has_stream_repair_jobs
-            && nzb.delete_status == DS_NONE;
+            && nzb.delete_status == DeleteStatus::None;
 
         if stream_repair
             && !ps.stream_repair_done
@@ -2079,7 +2083,7 @@ impl NzbgetRsPrePostProcessor {
                 && nzb.dupe_recovered_bytes <= 0
                 && opts.par_check == PC_AUTO
                 && nzb.par_status <= NzbParStatus::None
-                && nzb.delete_status == DS_NONE
+                && nzb.delete_status == DeleteStatus::None
                 && !has_dupe_scan_sources_host(host, &opts, dq_ptr, nzb.ptr)
                 && has_main_pars(&nzb.dest_dir)
             {
@@ -2106,7 +2110,7 @@ impl NzbgetRsPrePostProcessor {
             }
 
             if (nzb.par_status == NzbParStatus::None || nzb.par_status == NzbParStatus::Skipped)
-                && nzb.delete_status == DS_NONE
+                && nzb.delete_status == DeleteStatus::None
                 && nzb.health < 1000
                 && !has_main_pars(&nzb.dest_dir)
             {
@@ -2138,7 +2142,7 @@ impl NzbgetRsPrePostProcessor {
 
             const NS_SUCCESS: i32 = 3;
             if nzb.par_status == NzbParStatus::None
-                && nzb.delete_status == DS_NONE
+                && nzb.delete_status == DeleteStatus::None
                 && opts.par_check == PC_AUTO
                 && nzb.direct_unpack_status == NS_SUCCESS
                 && direct_unpack_read_all_damage(
@@ -2165,7 +2169,7 @@ impl NzbgetRsPrePostProcessor {
                 return;
             }
 
-            if nzb.par_status == NzbParStatus::None && nzb.delete_status == DS_NONE {
+            if nzb.par_status == NzbParStatus::None && nzb.delete_status == DeleteStatus::None {
                 if has_main_pars(&nzb.dest_dir) {
                     if !allow_par {
                         host.post_set_int(post_ptr, POST_INT_NEED_PAR_CHECK, 1);
@@ -2323,7 +2327,7 @@ impl NzbgetRsPrePostProcessor {
             unpack_param.is_some(),
             unpack_param.as_deref().unwrap_or(b""),
             nzb.unpack_status,
-            DeleteStatus::from(nzb.delete_status),
+            nzb.delete_status,
             nzb.rar_rename_status,
             RS_NONE,
             opts.rar_rename,
@@ -2336,7 +2340,7 @@ impl NzbgetRsPrePostProcessor {
 
         if opts.parcheck_enabled
             && nzb.par_status == NzbParStatus::Skipped
-            && nzb.delete_status == DS_NONE
+            && nzb.delete_status == DeleteStatus::None
             && opts.par_check == PC_AUTO
             && !has_completed_archive_files(host, nzb.ptr)
             && has_main_pars(&nzb.dest_dir)
@@ -2352,7 +2356,7 @@ impl NzbgetRsPrePostProcessor {
         let dec = eval_post_stages(
             want_unpack,
             nzb.unpack_status,
-            DeleteStatus::from(nzb.delete_status),
+            nzb.delete_status,
             nzb.par_status,
             nzb.cleanup_status,
             !opts.ext_cleanup_disk.is_empty(),
@@ -2420,9 +2424,7 @@ impl NzbgetRsPrePostProcessor {
 
         host.nzb_action(nzb_ptr, NZB_ACT_LEAVE_POST_PROCESS, 0);
         let nzb = host.nzb_snap(nzb_ptr, false);
-        if dupe_gate_has(&DUPE_STOPPED_IN_POST, nzb.id)
-            && nzb.delete_status == crate::queuesubsys_host::DS_DUPE
-        {
+        if dupe_gate_has(&DUPE_STOPPED_IN_POST, nzb.id) && nzb.delete_status == DeleteStatus::Dupe {
             let opts = host.opts();
             if opts.health_check != crate::queuesubsys_host::HC_PARK {
                 delete_cleanup_host(host, &opts, &nzb);
@@ -2770,13 +2772,11 @@ mod tests {
         // DirectRenameDoesNotCompleteHealthDeletion, DirectRenameSchedulesAfterPausedRequestsDrain
         const TS_RUNNING: i32 = 1;
         const TS_SUCCESS: i32 = 3;
-        const DS_NONE: i32 = 0;
-        const DS_HEALTH: i32 = 2;
 
         struct SimCompletionFixture {
             direct_rename_status: i32,
             has_post_info: bool,
-            delete_status: i32,
+            delete_status: DeleteStatus,
             completed_not_empty: bool,
             par_file_only_remaining: bool,
             active_downloads: i32,
@@ -2788,7 +2788,7 @@ mod tests {
                 Self {
                     direct_rename_status: TS_SUCCESS,
                     has_post_info: false,
-                    delete_status: DS_NONE,
+                    delete_status: DeleteStatus::None,
                     completed_not_empty: true,
                     par_file_only_remaining: true,
                     active_downloads: 0,
@@ -2815,7 +2815,7 @@ mod tests {
                     self.direct_rename_status,
                     TS_SUCCESS,
                     self.has_post_info,
-                    DeleteStatus::from(self.delete_status),
+                    self.delete_status,
                     self.completed_not_empty,
                     self.is_download_completed(true),
                     false,
@@ -2826,7 +2826,7 @@ mod tests {
                         false,
                         false,
                         false,
-                        DeleteStatus::from(self.delete_status),
+                        self.delete_status,
                         self.has_post_info,
                         false,
                         NzbParStatus::None,
@@ -2876,7 +2876,7 @@ mod tests {
 
         // 5. DirectRenameDoesNotCompleteHealthDeletion
         let mut f = SimCompletionFixture::new();
-        f.delete_status = DS_HEALTH;
+        f.delete_status = DeleteStatus::Health;
         f.check_download_completed();
         assert!(!f.has_post_info);
         assert_eq!(f.job_count, 0);

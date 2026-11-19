@@ -1,7 +1,7 @@
 //! Rust hot-path port for `DupeCoordinator`, `DupeMatcher`, `StreamCrypto`,
 //! `RepairController`, `ParChecker`, `DirectUnpack`, and `UnpackController`.
 
-use crate::status::{DupStatus, DupeMode, MarkStatus};
+use crate::status::{DeleteStatus, DupStatus, DupeMode, MarkStatus};
 use std::collections::{BTreeSet, VecDeque};
 use std::ffi::{c_char, c_int, CStr};
 
@@ -37,11 +37,6 @@ pub fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 pub const HEALTH_CHECK_PARK: i32 = 2;
 pub const HEALTH_CHECK_NONE: i32 = 3;
 pub const HEALTH_CHECK_DUPE: i32 = 4;
-
-pub const DELETE_STATUS_MANUAL: i32 = 1;
-pub const DELETE_STATUS_HEALTH: i32 = 2;
-pub const DELETE_STATUS_DUPE: i32 = 3;
-pub const DELETE_STATUS_COPY: i32 = 6;
 
 pub const HISTORY_KIND_NZB: i32 = 1;
 pub const HISTORY_KIND_URL: i32 = 2;
@@ -86,7 +81,7 @@ pub struct NzbgetRsDupeHistoryCandidate {
     pub is_dupe_success: i32,
     pub mark_status: MarkStatus,
     pub dup_status: DupStatus,
-    pub delete_status: i32,
+    pub delete_status: DeleteStatus,
     pub full_content_hash: u32,
     pub alive_permille: i32,
     pub health: i32,
@@ -182,9 +177,9 @@ where
             if h.kind == HISTORY_KIND_NZB
                 && h.full_content_hash > 0
                 && h.is_dupe_success == 0
-                && h.delete_status != DELETE_STATUS_DUPE
-                && h.delete_status != DELETE_STATUS_COPY
-                && h.delete_status != DELETE_STATUS_MANUAL
+                && h.delete_status != DeleteStatus::Dupe
+                && h.delete_status != DeleteStatus::Copy
+                && h.delete_status != DeleteStatus::Manual
             {
                 failed_content.insert(h.full_content_hash);
             }
@@ -195,10 +190,10 @@ where
     for (idx, h) in history.iter().enumerate() {
         let has_candidate = h.kind == HISTORY_KIND_NZB || h.kind == HISTORY_KIND_URL;
         let backup_status = has_candidate
-            && (h.delete_status == DELETE_STATUS_DUPE
+            && (h.delete_status == DeleteStatus::Dupe
                 || (dupe_health
                     && h.kind == HISTORY_KIND_NZB
-                    && h.delete_status == DELETE_STATUS_COPY))
+                    && h.delete_status == DeleteStatus::Copy))
             && !(dupe_health
                 && h.full_content_hash > 0
                 && failed_content.contains(&h.full_content_hash));
@@ -623,7 +618,7 @@ mod tests {
                 is_dupe_success: 0,
                 mark_status: MarkStatus::None,
                 dup_status: DupStatus::Undefined,
-                delete_status: DELETE_STATUS_HEALTH,
+                delete_status: DeleteStatus::Health,
                 full_content_hash: 42,
                 alive_permille: 900,
                 health: 500,
@@ -640,7 +635,7 @@ mod tests {
                 is_dupe_success: 0,
                 mark_status: MarkStatus::None,
                 dup_status: DupStatus::Undefined,
-                delete_status: DELETE_STATUS_COPY,
+                delete_status: DeleteStatus::Copy,
                 full_content_hash: 42,
                 alive_permille: 1000,
                 health: 1000,
@@ -657,7 +652,7 @@ mod tests {
                 is_dupe_success: 0,
                 mark_status: MarkStatus::None,
                 dup_status: DupStatus::Undefined,
-                delete_status: DELETE_STATUS_DUPE,
+                delete_status: DeleteStatus::Dupe,
                 full_content_hash: 77,
                 alive_permille: 950,
                 health: 1000,
@@ -674,7 +669,7 @@ mod tests {
                 is_dupe_success: 0,
                 mark_status: MarkStatus::None,
                 dup_status: DupStatus::Undefined,
-                delete_status: DELETE_STATUS_DUPE,
+                delete_status: DeleteStatus::Dupe,
                 full_content_hash: 88,
                 alive_permille: 980,
                 health: 1000,

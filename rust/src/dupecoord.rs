@@ -87,15 +87,6 @@ pub const HEALTH_CHECK_PARK: i32 = 2;
 pub const HEALTH_CHECK_NONE: i32 = 3;
 pub const HEALTH_CHECK_DUPE: i32 = 4;
 
-pub const DELETE_STATUS_NONE: i32 = 0;
-pub const DELETE_STATUS_MANUAL: i32 = 1;
-pub const DELETE_STATUS_HEALTH: i32 = 2;
-pub const DELETE_STATUS_DUPE: i32 = 3;
-pub const DELETE_STATUS_BAD: i32 = 4;
-pub const DELETE_STATUS_GOOD: i32 = 5;
-pub const DELETE_STATUS_COPY: i32 = 6;
-pub const DELETE_STATUS_SCAN: i32 = 7;
-
 pub const HISTORY_KIND_UNKNOWN: i32 = 0;
 pub const HISTORY_KIND_NZB: i32 = 1;
 pub const HISTORY_KIND_URL: i32 = 2;
@@ -246,7 +237,7 @@ where
             continue;
         }
         total += 1;
-        if h.delete_status != DELETE_STATUS_DUPE && h.delete_status != DELETE_STATUS_COPY {
+        if h.delete_status != DeleteStatus::Dupe && h.delete_status != DeleteStatus::Copy {
             not_backup += 1;
         } else if h.dupe_mode == DupeMode::Force {
             forced += 1;
@@ -390,9 +381,9 @@ where
             if h.kind == HISTORY_KIND_NZB
                 && h.full_content_hash > 0
                 && h.is_dupe_success == 0
-                && h.delete_status != DELETE_STATUS_DUPE
-                && h.delete_status != DELETE_STATUS_COPY
-                && h.delete_status != DELETE_STATUS_MANUAL
+                && h.delete_status != DeleteStatus::Dupe
+                && h.delete_status != DeleteStatus::Copy
+                && h.delete_status != DeleteStatus::Manual
             {
                 failed_content.insert(h.full_content_hash);
             }
@@ -403,10 +394,10 @@ where
     for (idx, h) in history.iter().enumerate() {
         let has_candidate = h.kind == HISTORY_KIND_NZB || h.kind == HISTORY_KIND_URL;
         let backup_status = has_candidate
-            && (h.delete_status == DELETE_STATUS_DUPE
+            && (h.delete_status == DeleteStatus::Dupe
                 || (dupe_health
                     && h.kind == HISTORY_KIND_NZB
-                    && h.delete_status == DELETE_STATUS_COPY))
+                    && h.delete_status == DeleteStatus::Copy))
             && !(dupe_health
                 && h.full_content_hash > 0
                 && failed_content.contains(&h.full_content_hash));
@@ -503,7 +494,7 @@ where
         );
         if h.kind == HISTORY_KIND_NZB
             && h.same_name_or_key != 0
-            && (h.delete_status == DELETE_STATUS_DUPE || h.delete_status == DELETE_STATUS_COPY)
+            && (h.delete_status == DeleteStatus::Dupe || h.delete_status == DeleteStatus::Copy)
             && h.alive_permille != 0
             && h.health >= h.critical_health
             && h.mark_status != MarkStatus::Bad
@@ -950,7 +941,7 @@ fn downloaded_on_disk_host(
             continue;
         }
         let item = host.nzb_snap(hi.inner_ptr, false);
-        if item.delete_status == crate::queuesubsys_host::DS_NONE
+        if item.delete_status == DeleteStatus::None
             && item.is_dupe_success
             && item.mark_status != MarkStatus::Bad
             && item.dupe_key.eq_ignore_ascii_case(&nzb.dupe_key)
@@ -980,7 +971,7 @@ pub(crate) fn no_backup_reason_host(
             dupe_score: 0,
             is_dupe_success: 0,
             mark_status: MarkStatus::None,
-            delete_status: 0,
+            delete_status: DeleteStatus::None,
             dup_status: DupStatus::Undefined,
             full_content_hash: 0,
             alive_permille: 0,
@@ -1061,7 +1052,7 @@ fn collect_dupe_candidates(
             dupe_score: 0,
             is_dupe_success: 0,
             mark_status: MarkStatus::None,
-            delete_status: 0,
+            delete_status: DeleteStatus::None,
             dup_status: DupStatus::Undefined,
             full_content_hash: 0,
             alive_permille: 0,
@@ -1229,7 +1220,7 @@ pub(crate) fn rescue_on_health_failure_host(
     if !host.opts().dupe_check
         || nzb.kind != crate::queuesubsys_host::NK_NZB
         || nzb.is_dupe_success
-        || nzb.delete_status != crate::queuesubsys_host::DS_HEALTH
+        || nzb.delete_status != DeleteStatus::Health
         || nzb.dupe_key.is_empty()
         || !(crate::options::dupe_watch()
             || crate::options::active_options().is_some_and(|o| o.scalars().dupe_search != 0))
@@ -1317,7 +1308,7 @@ fn history_cleanup_host(
         if is_nzb_or_url && hi.inner_ptr != 0 && hi.hi_ptr != mark_hi_ptr {
             let item = host.nzb_snap(hi.inner_ptr, false);
             if item.dupe_mode != DupeMode::Force
-                && item.delete_status == crate::queuesubsys_host::DS_DUPE
+                && item.delete_status == DeleteStatus::Dupe
                 && same_name_or_key(&item.name, &item.dupe_key, nzb_name, dupe_key)
             {
                 host.history_hide(dq_ptr, hi.hi_ptr, rindex as i32);
@@ -1358,11 +1349,7 @@ pub(crate) fn nzb_found_host(
             msg.extend_from_slice(&downloaded.name);
             msg.extend_from_slice(b" is downloaded and on disk");
             host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_INFO, &msg);
-            host.nzb_set_int(
-                nzb.ptr,
-                crate::queuesubsys_host::NZB_INT_DELETE_STATUS,
-                crate::queuesubsys_host::DS_DUPE,
-            );
+            host.nzb_set_delete_status(nzb.ptr, DeleteStatus::Dupe);
             return;
         }
     }
@@ -1382,18 +1369,10 @@ pub(crate) fn nzb_found_host(
             let message = format_dupe_skip_message(&nzb.name, &q.name, false, true, false);
             if nzb.feed_id != 0 {
                 host.log(crate::queuesubsys_host::MK_WARNING, &message);
-                host.nzb_set_int(
-                    nzb.ptr,
-                    crate::queuesubsys_host::NZB_INT_DELETE_STATUS,
-                    crate::queuesubsys_host::DS_MANUAL,
-                );
+                host.nzb_set_delete_status(nzb.ptr, DeleteStatus::Manual);
                 host.history_delete_disk_files(nzb.ptr);
             } else {
-                host.nzb_set_int(
-                    nzb.ptr,
-                    crate::queuesubsys_host::NZB_INT_DELETE_STATUS,
-                    crate::queuesubsys_host::DS_COPY,
-                );
+                host.nzb_set_delete_status(nzb.ptr, DeleteStatus::Copy);
                 host.nzb_add_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &message);
             }
             return;
@@ -1530,9 +1509,9 @@ pub(crate) fn nzb_found_host(
                     || (item.filtered_content_hash > 0
                         && item.filtered_content_hash == nzb.filtered_content_hash)
                 {
-                    if item.delete_status != crate::queuesubsys_host::DS_DUPE
-                        && item.delete_status != crate::queuesubsys_host::DS_COPY
-                        && item.delete_status != crate::queuesubsys_host::DS_MANUAL
+                    if item.delete_status != DeleteStatus::Dupe
+                        && item.delete_status != DeleteStatus::Copy
+                        && item.delete_status != DeleteStatus::Manual
                     {
                         if item.is_dupe_success {
                             succeeded = true;
@@ -1571,7 +1550,7 @@ pub(crate) fn nzb_found_host(
                     continue;
                 }
                 let q = host.nzb_snap(qp, false);
-                if q.delete_status == crate::queuesubsys_host::DS_NONE
+                if q.delete_status == DeleteStatus::None
                     && same_name_or_key(&q.name, &q.dupe_key, &nzb.name, &nzb.dupe_key)
                 {
                     any_queued = true;
@@ -1599,11 +1578,7 @@ pub(crate) fn nzb_found_host(
                     && nzb.dupe_score <= item.dupe_score
                     && item.is_dupe_success
                 {
-                    host.nzb_set_int(
-                        nzb.ptr,
-                        crate::queuesubsys_host::NZB_INT_DELETE_STATUS,
-                        crate::queuesubsys_host::DS_DUPE,
-                    );
+                    host.nzb_set_delete_status(nzb.ptr, DeleteStatus::Dupe);
                     let mut msg = b"Collection ".to_vec();
                     msg.extend_from_slice(&nzb.name);
                     msg.extend_from_slice(b" is a duplicate to ");
@@ -1618,20 +1593,16 @@ pub(crate) fn nzb_found_host(
     if skip {
         let message = format_dupe_skip_message(&nzb.name, &dupe_name, true, same_content, good);
         if nzb.feed_id != 0 && nzb.dupe_hint == crate::queuesubsys_host::DH_NONE {
-            host.nzb_set_int(
-                nzb.ptr,
-                crate::queuesubsys_host::NZB_INT_DELETE_STATUS,
-                crate::queuesubsys_host::DS_MANUAL,
-            );
+            host.nzb_set_delete_status(nzb.ptr, DeleteStatus::Manual);
             host.log(crate::queuesubsys_host::MK_WARNING, &message);
             host.history_delete_disk_files(nzb.ptr);
         } else {
             let ds = if same_content {
-                crate::queuesubsys_host::DS_COPY
+                DeleteStatus::Copy
             } else {
-                crate::queuesubsys_host::DS_GOOD
+                DeleteStatus::Good
             };
-            host.nzb_set_int(nzb.ptr, crate::queuesubsys_host::NZB_INT_DELETE_STATUS, ds);
+            host.nzb_set_delete_status(nzb.ptr, ds);
             host.nzb_add_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &message);
         }
 
@@ -1659,7 +1630,7 @@ pub(crate) fn nzb_found_host(
                 continue;
             }
             let q = host.nzb_snap(qp, false);
-            if q.delete_status == crate::queuesubsys_host::DS_NONE
+            if q.delete_status == DeleteStatus::None
                 && (q.kind == crate::queuesubsys_host::NK_NZB
                     || (q.kind == crate::queuesubsys_host::NK_URL
                         && nzb.kind == crate::queuesubsys_host::NK_URL))
@@ -1671,11 +1642,7 @@ pub(crate) fn nzb_found_host(
                     && q.current_success_articles > 0
                     && q.health >= q.critical_health_opt;
                 if nzb.dupe_score <= q.dupe_score || keep_returned {
-                    host.nzb_set_int(
-                        nzb.ptr,
-                        crate::queuesubsys_host::NZB_INT_DELETE_STATUS,
-                        crate::queuesubsys_host::DS_DUPE,
-                    );
+                    host.nzb_set_delete_status(nzb.ptr, DeleteStatus::Dupe);
                     let mut msg = b"Collection ".to_vec();
                     msg.extend_from_slice(&nzb.name);
                     msg.extend_from_slice(b" is a duplicate to ");
@@ -1687,11 +1654,7 @@ pub(crate) fn nzb_found_host(
                     msg.extend_from_slice(&q.name);
                     msg.extend_from_slice(b" with lower duplicate score to history");
                     host.log(crate::queuesubsys_host::MK_INFO, &msg);
-                    host.nzb_set_int(
-                        q.ptr,
-                        crate::queuesubsys_host::NZB_INT_DELETE_STATUS,
-                        crate::queuesubsys_host::DS_DUPE,
-                    );
+                    host.nzb_set_delete_status(q.ptr, DeleteStatus::Dupe);
                     let old_size = cur_qlen;
                     host.dq_edit_entry(
                         dq_ptr,
@@ -1735,7 +1698,7 @@ pub(crate) fn nzb_completed_host(
         || opts.health_check == crate::queuesubsys_host::HC_PARK;
     if dupe_health
         && !nzb.dupe_key.is_empty()
-        && nzb.delete_status == crate::queuesubsys_host::DS_NONE
+        && nzb.delete_status == DeleteStatus::None
         && nzb.is_dupe_success
         && files_on_disk(&nzb.final_dir, &nzb.dest_dir, &opts.ext_cleanup_disk)
     {
@@ -1754,7 +1717,7 @@ pub(crate) fn nzb_completed_host(
             let queued = host.nzb_snap(qp, false);
             if queued.kind == crate::queuesubsys_host::NK_NZB
                 && !queued.deleting
-                && queued.delete_status == crate::queuesubsys_host::DS_NONE
+                && queued.delete_status == DeleteStatus::None
                 && queued.dupe_mode != DupeMode::Force
                 && queued.dupe_key.eq_ignore_ascii_case(&nzb.dupe_key)
             {
@@ -1764,11 +1727,7 @@ pub(crate) fn nzb_completed_host(
                 msg.extend_from_slice(&nzb.name);
                 msg.extend_from_slice(b" is downloaded and on disk");
                 host.nzb_print_message(queued.ptr, crate::queuesubsys_host::MK_INFO, &msg);
-                host.nzb_set_int(
-                    queued.ptr,
-                    crate::queuesubsys_host::NZB_INT_DELETE_STATUS,
-                    crate::queuesubsys_host::DS_DUPE,
-                );
+                host.nzb_set_delete_status(queued.ptr, DeleteStatus::Dupe);
                 // Its own folder only: without InterDir two copies of the same name share one,
                 // and the stopped copy's completed files there may be this copy's release.
                 let own_folder = queued.dest_dir != nzb.dest_dir
@@ -1971,7 +1930,7 @@ mod tests {
 
     fn rescue_candidate(
         mode: DupeMode,
-        status: i32,
+        status: DeleteStatus,
         score: i32,
         alive_permille: i32,
     ) -> NzbgetRsDupeHistoryCandidate {
@@ -2007,10 +1966,10 @@ mod tests {
     fn rescue_takes_force_backups_and_copies() {
         let history = [
             // the failed pick itself
-            rescue_candidate(DupeMode::Force, DELETE_STATUS_HEALTH, 1_000_000, 300),
-            rescue_candidate(DupeMode::Force, DELETE_STATUS_DUPE, 999_080, 900),
-            rescue_candidate(DupeMode::Score, DELETE_STATUS_COPY, 999_050, 990),
-            rescue_candidate(DupeMode::Force, DELETE_STATUS_DUPE, 999_001, 0),
+            rescue_candidate(DupeMode::Force, DeleteStatus::Health, 1_000_000, 300),
+            rescue_candidate(DupeMode::Force, DeleteStatus::Dupe, 999_080, 900),
+            rescue_candidate(DupeMode::Score, DeleteStatus::Copy, 999_050, 990),
+            rescue_candidate(DupeMode::Force, DeleteStatus::Dupe, 999_001, 0),
         ];
         let queue = [rescue_self()];
         // failover skips FORCE backups and (without HealthCheck=dupe) copies
@@ -2029,9 +1988,9 @@ mod tests {
     #[test]
     fn rescue_orders_by_alive_then_score() {
         let history = [
-            rescue_candidate(DupeMode::Score, DELETE_STATUS_DUPE, 999_090, -1),
-            rescue_candidate(DupeMode::Score, DELETE_STATUS_DUPE, 999_020, 500),
-            rescue_candidate(DupeMode::Score, DELETE_STATUS_DUPE, 999_030, 500),
+            rescue_candidate(DupeMode::Score, DeleteStatus::Dupe, 999_090, -1),
+            rescue_candidate(DupeMode::Score, DeleteStatus::Dupe, 999_020, 500),
+            rescue_candidate(DupeMode::Score, DeleteStatus::Dupe, 999_030, 500),
         ];
         let queue = [rescue_self()];
         assert_eq!(select_rescue_backup(&history, &queue, |_| true), 2);
@@ -2041,11 +2000,11 @@ mod tests {
 
     #[test]
     fn rescue_orders_twins_then_borrowable_alts() {
-        let mut twin = rescue_candidate(DupeMode::Score, DELETE_STATUS_DUPE, 999_010, 980);
+        let mut twin = rescue_candidate(DupeMode::Score, DeleteStatus::Dupe, 999_010, 980);
         twin.donor_kind = crate::donorkind::DonorKind::Twin as i32;
-        let mut borrowable = rescue_candidate(DupeMode::Score, DELETE_STATUS_DUPE, 999_090, 990);
+        let mut borrowable = rescue_candidate(DupeMode::Score, DeleteStatus::Dupe, 999_090, 990);
         borrowable.donor_kind = crate::donorkind::DonorKind::Borrowable as i32;
-        let mut unborrowable = rescue_candidate(DupeMode::Score, DELETE_STATUS_DUPE, 999_095, 1000);
+        let mut unborrowable = rescue_candidate(DupeMode::Score, DeleteStatus::Dupe, 999_095, 1000);
         unborrowable.donor_kind = crate::donorkind::DonorKind::Unborrowable as i32;
         let queue = [rescue_self()];
         let history = [unborrowable, borrowable, twin];
@@ -2062,9 +2021,9 @@ mod tests {
     fn rescue_takes_a_healthy_copy_before_a_weak_cheaper_kind() {
         // as the fleet ranks them: a 13%-alive copy of unknown packaging never
         // goes ahead of a 100%-alive unborrowable one
-        let mut weak = rescue_candidate(DupeMode::Score, DELETE_STATUS_DUPE, 999_090, 130);
+        let mut weak = rescue_candidate(DupeMode::Score, DeleteStatus::Dupe, 999_090, 130);
         weak.donor_kind = crate::donorkind::DonorKind::Unknown as i32;
-        let mut healthy = rescue_candidate(DupeMode::Score, DELETE_STATUS_DUPE, 999_010, 1000);
+        let mut healthy = rescue_candidate(DupeMode::Score, DeleteStatus::Dupe, 999_010, 1000);
         healthy.donor_kind = crate::donorkind::DonorKind::Unborrowable as i32;
         let queue = [rescue_self()];
         assert_eq!(select_rescue_backup(&[weak, healthy], &queue, |_| true), 1);
@@ -2074,12 +2033,12 @@ mod tests {
     fn a_locked_backup_goes_after_every_extractable_one() {
         // live fleet 2026-11-19: a 100%-alive copy with encrypted headers and
         // no password ranked ahead of an 84%-alive plain one
-        let mut locked = rescue_candidate(DupeMode::Score, DELETE_STATUS_DUPE, 999_090, 1000);
+        let mut locked = rescue_candidate(DupeMode::Score, DeleteStatus::Dupe, 999_090, 1000);
         locked.donor_kind = crate::donorkind::DonorKind::Unborrowable as i32;
         locked.locked = 1;
-        let mut plain = rescue_candidate(DupeMode::Score, DELETE_STATUS_DUPE, 999_010, 840);
+        let mut plain = rescue_candidate(DupeMode::Score, DeleteStatus::Dupe, 999_010, 840);
         plain.donor_kind = crate::donorkind::DonorKind::Borrowable as i32;
-        let unmeasured = rescue_candidate(DupeMode::Score, DELETE_STATUS_DUPE, 999_000, -1);
+        let unmeasured = rescue_candidate(DupeMode::Score, DeleteStatus::Dupe, 999_000, -1);
         let queue = [rescue_self()];
         assert_eq!(select_rescue_backup(&[locked, plain], &queue, |_| true), 1);
         assert_eq!(
@@ -2113,14 +2072,14 @@ mod tests {
 
     #[test]
     fn rescue_leaves_a_key_that_is_queued_or_done() {
-        let backup = rescue_candidate(DupeMode::Force, DELETE_STATUS_DUPE, 999_080, 900);
+        let backup = rescue_candidate(DupeMode::Force, DeleteStatus::Dupe, 999_080, 900);
         let mut queued = rescue_self();
         queued.is_self = 0;
         assert_eq!(
             select_rescue_backup(&[backup], &[rescue_self(), queued], |_| true),
             -1
         );
-        let mut done = rescue_candidate(DupeMode::Score, DELETE_STATUS_NONE, 999_000, -1);
+        let mut done = rescue_candidate(DupeMode::Score, DeleteStatus::None, 999_000, -1);
         done.is_dupe_success = 1;
         assert_eq!(
             select_rescue_backup(&[backup, done], &[rescue_self()], |_| true),
@@ -2145,11 +2104,11 @@ mod tests {
 
     #[test]
     fn rescue_skips_bad_or_unhealthy_backups() {
-        let mut bad = rescue_candidate(DupeMode::Score, DELETE_STATUS_DUPE, 999_080, 900);
+        let mut bad = rescue_candidate(DupeMode::Score, DeleteStatus::Dupe, 999_080, 900);
         bad.mark_status = MarkStatus::Bad;
-        let mut sick = rescue_candidate(DupeMode::Score, DELETE_STATUS_DUPE, 999_070, 900);
+        let mut sick = rescue_candidate(DupeMode::Score, DeleteStatus::Dupe, 999_070, 900);
         sick.health = 800;
-        let mut manual = rescue_candidate(DupeMode::Score, DELETE_STATUS_MANUAL, 999_060, 900);
+        let mut manual = rescue_candidate(DupeMode::Score, DeleteStatus::Manual, 999_060, 900);
         manual.health = 1000;
         assert_eq!(
             select_rescue_backup(&[bad, sick, manual], &[rescue_self()], |_| true),
@@ -2292,7 +2251,7 @@ mod tests {
                 dupe_score: score,
                 is_dupe_success: 0,
                 mark_status: MarkStatus::None,
-                delete_status: DELETE_STATUS_DUPE,
+                delete_status: DeleteStatus::Dupe,
                 dup_status: DupStatus::Undefined,
                 full_content_hash: 0,
                 alive_permille: -1,
@@ -2369,7 +2328,7 @@ mod tests {
 
         // a good-duplicate in history ends the search
         let mut good = make_backup(b"Rel.2026.1080p-G", b"imdb:1", 1);
-        good.delete_status = DELETE_STATUS_NONE;
+        good.delete_status = DeleteStatus::None;
         good.mark_status = MarkStatus::Good;
         good.is_dupe_success = 1;
         history.insert(0, (good, true));

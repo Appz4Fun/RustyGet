@@ -4926,7 +4926,7 @@ unsafe fn emit_rpc_nzb(
         unpack_status: n.unpack_status.into(),
         move_status: n.move_status.into(),
         script_status: n.script_total_status.into(),
-        delete_status: n.delete_status,
+        delete_status: n.delete_status.into(),
         mark_status: n.mark_status.into(),
         url_status: n.url_status.into(),
         size: n.size,

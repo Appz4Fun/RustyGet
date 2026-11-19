@@ -11,7 +11,7 @@ use crate::parchecker::{
 use crate::options::OptStr;
 use crate::postrepair::NzbgetRsParSegment;
 use crate::queuesubsys_host::QueueSubsysHost;
-use crate::status::{NzbParStatus, ParCheckerStatus, UnpackStatus};
+use crate::status::{DeleteStatus, NzbParStatus, ParCheckerStatus, UnpackStatus};
 use std::collections::VecDeque;
 use std::ffi::c_int;
 use std::ptr;
@@ -3075,7 +3075,7 @@ pub(crate) fn direct_unpack_try_live_par_repair(
     let nzb_id = nzb.id;
     if host.self_is_stopped()
         || nzb.deleting
-        || nzb.delete_status != 0
+        || nzb.delete_status != DeleteStatus::None
         || !live_repair_may_start(nzb)
         || host.opts().par_check == crate::queuesubsys_host::PC_MANUAL
         || !crate::options::active_options()
@@ -3289,13 +3289,11 @@ pub(crate) fn live_par_time_settle(
     nzb_ptr: usize,
     keep: bool,
 ) {
-    use crate::queuesubsys_host::{
-        DS_NONE, NZB_INT_LIVE_PAR_SEC, NZB_INT_PAR_SEC, NZB_INT_REPAIR_SEC,
-    };
+    use crate::queuesubsys_host::{NZB_INT_LIVE_PAR_SEC, NZB_INT_PAR_SEC, NZB_INT_REPAIR_SEC};
     let nzb = host.nzb_snap(nzb_ptr, false);
     let taken = crate::parchecker::streaming_session_take_par_secs(nzb.id);
     let current = (nzb.par_sec, nzb.live_par_sec, nzb.repair_sec);
-    let deleted = !keep || nzb.delete_status != DS_NONE;
+    let deleted = !keep || nzb.delete_status != DeleteStatus::None;
     if let Some((par, live, repair)) = live_par_time_charge(deleted, current, taken) {
         host.nzb_set_int(nzb_ptr, NZB_INT_PAR_SEC, par);
         host.nzb_set_int(nzb_ptr, NZB_INT_LIVE_PAR_SEC, live);
@@ -3310,11 +3308,9 @@ pub(crate) fn live_par_time_checkpoint(
     host: &crate::queuesubsys_host::QueueSubsysHost,
     nzb_ptr: usize,
 ) {
-    use crate::queuesubsys_host::{
-        DS_NONE, NZB_INT_LIVE_PAR_SEC, NZB_INT_PAR_SEC, NZB_INT_REPAIR_SEC,
-    };
+    use crate::queuesubsys_host::{NZB_INT_LIVE_PAR_SEC, NZB_INT_PAR_SEC, NZB_INT_REPAIR_SEC};
     let nzb = host.nzb_snap(nzb_ptr, false);
-    if nzb.delete_status != DS_NONE {
+    if nzb.delete_status != DeleteStatus::None {
         return; // dropped at history
     }
     let taken = crate::parchecker::streaming_session_take_whole_par_secs(nzb.id);

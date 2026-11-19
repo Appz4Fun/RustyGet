@@ -2,7 +2,9 @@
 
 use crate::cstr;
 use crate::options::OptStr;
-use crate::status::{MarkStatus, MoveStatus, NzbParStatus, ScriptStatus, UnpackStatus, UrlStatus};
+use crate::status::{
+    DeleteStatus, MarkStatus, MoveStatus, NzbParStatus, ScriptStatus, UnpackStatus, UrlStatus,
+};
 use std::ffi::{c_char, c_int, c_void};
 use std::io::Write;
 
@@ -7311,7 +7313,7 @@ unsafe extern "C" fn active_disk_export_nzb_cb(
         par_rename_status: sn.par_rename_status,
         rar_rename_status: sn.rar_rename_status,
         direct_rename_status: sn.direct_rename_status,
-        delete_status: sn.delete_status,
+        delete_status: sn.delete_status.into(),
         mark_status: sn.mark_status.into(),
         url_status: sn.url_status.into(),
         unpack_cleaned_up_disk: c_int::from(sn.unpack_cleaned_up_disk),
@@ -7659,7 +7661,7 @@ unsafe extern "C" fn active_disk_apply_nzb_cb(
         NZB_INT_DIRECT_RENAME_STATUS,
         inp.direct_rename_status,
     );
-    qh.nzb_set_int(nzb_ptr, NZB_INT_DELETE_STATUS, inp.delete_status);
+    qh.nzb_set_delete_status(nzb_ptr, DeleteStatus::from(inp.delete_status));
     qh.nzb_set_mark_status(nzb_ptr, MarkStatus::from(inp.mark_status));
     if inp.kind == NK_NZB || inp.url_status >= i32::from(UrlStatus::Failed) {
         qh.nzb_set_url_status(nzb_ptr, UrlStatus::from(inp.url_status));

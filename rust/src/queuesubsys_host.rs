@@ -3,8 +3,8 @@
 
 use crate::options::OptStr;
 use crate::status::{
-    CleanupStatus, DupStatus, DupeMode, MarkStatus, MoveStatus, NzbParStatus, ScriptStatus,
-    UnpackStatus, UrlStatus,
+    CleanupStatus, DeleteStatus, DupStatus, DupeMode, MarkStatus, MoveStatus, NzbParStatus,
+    ScriptStatus, UnpackStatus, UrlStatus,
 };
 use std::ffi::{c_char, c_int, c_void, CStr};
 
@@ -52,14 +52,6 @@ pub(crate) const NF_ARTICLE: i32 = 1;
 // NzbInfo enums
 pub(crate) const NK_NZB: i32 = 0;
 pub(crate) const NK_URL: i32 = 1;
-
-pub(crate) const DS_NONE: i32 = 0;
-pub(crate) const DS_MANUAL: i32 = 1;
-pub(crate) const DS_HEALTH: i32 = 2;
-pub(crate) const DS_DUPE: i32 = 3;
-pub(crate) const DS_GOOD: i32 = 5;
-pub(crate) const DS_COPY: i32 = 6;
-pub(crate) const DS_SCAN: i32 = 7;
 
 pub(crate) const RS_NONE: i32 = 0;
 
@@ -484,7 +476,7 @@ pub(crate) struct NzbSnap {
     pub dupe_mode: DupeMode,
     pub dupe_score: i32,
     pub dupe_hint: i32,
-    pub delete_status: i32,
+    pub delete_status: DeleteStatus,
     pub mark_status: MarkStatus,
     pub par_status: NzbParStatus,
     pub direct_rename_status: i32,
@@ -2126,7 +2118,7 @@ impl QueueSubsysHost {
                 dupe_mode: DupeMode::from(ints[2]),
                 dupe_score: ints[3],
                 dupe_hint: ints[4],
-                delete_status: ints[5],
+                delete_status: DeleteStatus::from(ints[5]),
                 mark_status: MarkStatus::from(ints[6]),
                 par_status: NzbParStatus::from(ints[7]),
                 direct_rename_status: ints[8],
@@ -2571,6 +2563,10 @@ impl QueueSubsysHost {
 
     pub fn nzb_set_url_status(&self, nzb_ptr: usize, status: UrlStatus) {
         self.nzb_set_int(nzb_ptr, NZB_INT_URL_STATUS, status.into());
+    }
+
+    pub fn nzb_set_delete_status(&self, nzb_ptr: usize, status: DeleteStatus) {
+        self.nzb_set_int(nzb_ptr, NZB_INT_DELETE_STATUS, status.into());
     }
 
     pub fn nzb_set_i64(&self, nzb_ptr: usize, field: i32, val: i64) {

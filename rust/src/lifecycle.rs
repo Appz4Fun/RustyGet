@@ -1954,25 +1954,37 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
             crate::articledl::create_daemon_article_cache();
             crate::queuecoord::create_daemon_queue_coord();
             dm_emit_active_log(0, b"Parsing command line");
-            let (argc, argv) = if e.ctx.is_null() {
-                let (c, v, _) = crate::entrypoint::process_args();
-                (c, v.cast::<*const c_char>())
+            let args = if e.ctx.is_null() {
+                crate::entrypoint::process_argv()
             } else {
-                (e.a1, e.ctx.cast::<*const c_char>())
+                let argv = e.ctx.cast::<*const c_char>();
+                let parsed: Option<Vec<std::ffi::OsString>> = (0..usize::try_from(e.a1)
+                    .unwrap_or(0))
+                    .map(|i| {
+                        let p = *argv.add(i);
+                        (!p.is_null()).then(|| {
+                            crate::entrypoint::os_string_from_bytes(
+                                std::ffi::CStr::from_ptr(p).to_bytes(),
+                            )
+                        })
+                    })
+                    .collect();
+                // a null entry inside argc fails the parse, as before
+                let Some(parsed) = parsed else {
+                    return -2;
+                };
+                parsed
             };
-            if argc < 1 || argv.is_null() {
+            let argc = args.len();
+            if argc < 1 {
                 return -1;
             }
-            let Some(cmd) = crate::cmdline::CmdlineHandle::parse_argv(argc, argv, |bytes| {
+            let Some(cmd) = crate::cmdline::CmdlineHandle::parse_args(&args, |bytes| {
                 crate::ffi::write_stdout_bytes(bytes, false);
             }) else {
                 return -2;
             };
-            let arg0 = if (*argv).is_null() {
-                Vec::new()
-            } else {
-                std::ffi::CStr::from_ptr(*argv).to_bytes().to_vec()
-            };
+            let arg0 = crate::cleanup::os_str_to_bytes(&args[0]).to_vec();
             if cmd.print_version {
                 libc::printf(
                     c"RustyGet version: %s\n".as_ptr(),

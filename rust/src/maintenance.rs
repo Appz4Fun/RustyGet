@@ -1244,7 +1244,7 @@ mod tests {
                             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         Vec::new()
                     }
-                    fn args(&self) -> Vec<Vec<u8>> {
+                    fn args(&self) -> Vec<std::ffi::OsString> {
                         Vec::new()
                     }
                     fn exit_proc(&self) {}

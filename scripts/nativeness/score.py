@@ -111,7 +111,10 @@ def match_brace(code, open_idx, open_ch='{', close_ch='}'):
     return len(code)
 
 
-CFG_TEST = re.compile(r'#\[cfg\((?:test|all\(test[^\]]*\))\)\]')
+CFG_TEST_PAT = r'#\[cfg\((?:test|all\((?:[^\]]*?[(,]\s*)?test\s*[,)][^\]]*)\)\]'
+CFG_TEST = re.compile(CFG_TEST_PAT)
+ITEM_START = re.compile(r'(?:pub(?:\([\w:\s]+\))?\s+)?(?:(?:unsafe|async|const|default|extern(?:\s+"[^"]*")?)\s+)*'
+                        r'(?:mod|fn|impl|struct|enum|union|trait|type|use|const|static|macro_rules!|extern)\b')
 
 
 def blank_test_items(code):
@@ -130,13 +133,45 @@ def blank_test_items(code):
                 j = match_brace(code, j + 1, '[', ']')
                 continue
             break
-        brace = code.find('{', j)
-        semi = code.find(';', j)
-        if semi != -1 and (brace == -1 or semi < brace):
-            end = semi + 1
+        if ITEM_START.match(code, j):
+            brace = code.find('{', j)
+            semi = code.find(';', j)
+            if semi != -1 and (brace == -1 or semi < brace):
+                end = semi + 1
+            else:
+                end = match_brace(code, brace) if brace != -1 else len(code)
         else:
-            end = match_brace(code, brace) if brace != -1 else len(code)
+            end = end_of_element(code, j)
         code = code[:m.start()] + ''.join('\n' if c == '\n' else ' ' for c in code[m.start():end]) + code[end:]
+
+
+def end_of_element(code, j):
+    """End of a field, variant, match arm or statement starting at j: through
+    the next `,`/`;` at depth 0, before an unmatched closing bracket, or right
+    after a `{..}` block that is not followed by more of the expression."""
+    depth = 0
+    n = len(code)
+    k = j
+    while k < n:
+        ch = code[k]
+        if ch in '([{':
+            depth += 1
+        elif ch in ')]}':
+            if depth == 0:
+                return k
+            depth -= 1
+            if depth == 0 and ch == '}':
+                r = k + 1
+                while r < n and code[r] in ' \t\r\n':
+                    r += 1
+                if r < n and code[r] in ',;':
+                    return r + 1
+                if r >= n or code[r] not in '.?)]':
+                    return k + 1
+        elif ch in ',;' and depth == 0:
+            return k + 1
+        k += 1
+    return n
 
 
 def split_top_level(s, sep=','):
@@ -168,8 +203,8 @@ CODE_FIELD = re.compile(r'(?<![\w.])(?:pub(?:\([\w:]+\))?\s+)?(?:\w+_)?' + CODE_
 MAGIC_ARM = re.compile(r'^[ \t]*-?\d+(?:_\d+)*[ \t]*(?:\|[ \t]*-?\d+[ \t]*)*(?:\.\.=?[ \t]*-?\d+[ \t]*)?=>', re.M)
 SENTINEL = re.compile(r'\breturn\s+-1\b|=>\s*-1\s*,|\bOk\(-1\)|\belse\s*\{\s*-1\s*\}')
 # String literals are blanked before matching, so `extern "C"` reads `extern " "`.
-EXTERN_C_FN = re.compile(r'\bextern\s+"\s?"\s+fn\b')
-EXTERN_C_BLOCK = re.compile(r'\bextern\s+"\s?"\s*\{')
+EXTERN_C_FN = re.compile(r'\bextern\s+"\s{0,8}"\s+fn\b')
+EXTERN_C_BLOCK = re.compile(r'\bextern\s+"\s{0,8}"\s*\{')
 NO_MANGLE = re.compile(r'\bno_mangle\b')
 RAW_PTR = re.compile(r'\*(?:const|mut)\s+[\w:<\[(]')
 C_TYPES = re.compile(r'\b(?:c_int|c_uint|c_char|c_uchar|c_long|c_ulong|c_short|c_void|size_t|ssize_t|CStr|CString)\b')
@@ -190,9 +225,36 @@ ALLOW_CLIPPY = re.compile(r'allow\(\s*clippy::(\w+)')
 REF_OWNED = re.compile(r':\s*&(?:mut\s+)?(?:String|Vec<|Box<|PathBuf)\b')
 PATHY = r'(?:path|dir|directory|file|filename|filepath|dest|dst|src|folder|dirname|root|\w+_path|\w+_dir|\w+_file|\w+_filename|\w+_folder)'
 PATH_AS_STR = re.compile(r'(?<![\w.])' + PATHY + r'\s*:\s*(?:&(?:\'\w+\s+)?str|String)\b')
-RESULT_STRINGY = re.compile(r'\bResult<[^;{]*?,\s*(?:String|\(\)|&\'?\w*\s*str|i32|c_int)\s*>')
+RESULT_HEAD = re.compile(r'\bResult\s*<')
+STRINGY_ERR = re.compile(r"^(?:String|\(\)|&(?:'\w+\s+)?str|i32|c_int)$")
+
+
+def count_stringy_results(code):
+    n = 0
+    for m in RESULT_HEAD.finditer(code):
+        end = match_angle(code, m.end() - 1)
+        args = split_top_level(code[m.end():end - 1])
+        if len(args) == 2 and STRINGY_ERR.match(args[1]):
+            n += 1
+    return n
+
+
+def match_angle(code, open_idx):
+    """Index past the `>` matching code[open_idx] == '<'; `->` is not a bracket."""
+    depth = 0
+    for k in range(open_idx, len(code)):
+        ch = code[k]
+        if ch == '<':
+            depth += 1
+        elif ch == '>' and code[k - 1] != '-':
+            depth -= 1
+            if depth == 0:
+                return k + 1
+        elif ch in ';{' and depth:
+            return k
+    return len(code)
 QUESTION = re.compile(r'[\w)\]]\?(?=[\s.;),\]}])')
-FN_HEAD = re.compile(r'\bfn\s+(\w+)\s*(?:<[^(]*?>)?\s*\(')
+FN_HEAD = re.compile(r'\bfn\s+(\w+)\s*')
 STRUCT_HEAD = re.compile(r'\bstruct\s+(\w+)\s*(?:<[^{;]*?>)?\s*(?:where[^{;]*)?\{')
 # C++ `bool Load()` style: an action verb that reports success as a bool.
 ACTION_BOOL = re.compile(r'^(?:load|save|read|write|open|close|init|initialize|start|stop|create|delete|remove|rename|move|copy|parse|process|send|recv|receive|connect|apply|execute|exec|run|do|handle|prepare|update|commit|flush|lock|unlock|register|add|insert|put|append|extract|unpack|download|fetch|decode|encode|repair|verify|cleanup|clean|make|build|try|restore|resume|finish|complete|bind|listen|accept|flush|sync|truncate|seek|alloc|allocate|reserve|reload|import|export|scan)(?:_|$)')
@@ -209,7 +271,13 @@ def analyze_functions(code):
     fns = []
     for m in FN_HEAD.finditer(code):
         name = m.group(1)
-        po = m.end() - 1
+        po = m.end()
+        if code.startswith('<', po):
+            po = match_angle(code, po)
+            while po < len(code) and code[po] in ' \t\r\n':
+                po += 1
+        if not code.startswith('(', po):
+            continue
         pc = match_brace(code, po, '(', ')')
         params = split_top_level(code[po + 1:pc - 1])
         # signature tail up to body or ;
@@ -228,7 +296,7 @@ def analyze_functions(code):
             body_lines = sum(1 for ln in body.split('\n') if ln.strip())
         non_self = [p for p in params if not re.match(r"^(?:&(?:'\w+\s+)?(?:mut\s+)?)?(?:mut\s+)?self\b", p)]
         fns.append({'name': name, 'params': non_self, 'ret': ret, 'lines': body_lines,
-                    'extern_c': bool(re.search(r'extern\s+"\s?"\s*$', code[max(0, m.start() - 40):m.start()]))})
+                    'extern_c': bool(re.search(r'extern\s+"\s{0,8}"\s*$', code[max(0, m.start() - 40):m.start()]))})
     return fns
 
 
@@ -273,7 +341,7 @@ def scan_file(text):
     s['allow_clippy'] = len(allows)
     s['ref_owned_param'] = len(REF_OWNED.findall(code))
     s['path_as_str'] = len(PATH_AS_STR.findall(code))
-    s['result_stringy_err'] = len(RESULT_STRINGY.findall(code))
+    s['result_stringy_err'] = count_stringy_results(code)
     s['question_mark'] = len(QUESTION.findall(code))
 
     fns = analyze_functions(code)
@@ -367,10 +435,27 @@ def run_clippy(rust_dir):
            '-W', 'clippy::correctness']
     print('running: ' + ' '.join(cmd), file=sys.stderr)
     proc = subprocess.run(cmd, cwd=rust_dir, capture_output=True, text=True)
-    if proc.returncode not in (0, 101):
+    if proc.returncode != 0:
+        # A failed build means clippy never saw some code; scoring it would
+        # read as an improvement.
         sys.stderr.write(proc.stderr[-4000:])
-        raise SystemExit('clippy failed')
+        raise SystemExit(f'clippy failed with exit {proc.returncode}; not scoring partial output')
     return proc.stdout.splitlines()
+
+
+def require_complete_clippy(lines):
+    """Refuse clippy output that does not end in a successful build."""
+    for line in reversed(lines):
+        line = line.strip()
+        if line.startswith('{') and '"build-finished"' in line:
+            try:
+                if json.loads(line).get('success') is True:
+                    return
+            except ValueError:
+                pass
+            break
+    raise SystemExit('clippy output has no successful build-finished record; '
+                     'the run failed or was cut short, so it cannot be scored')
 
 
 GROUP_NOTE = re.compile(r'(?:implied by `-W clippy::(\w+)`|#\[(?:warn|deny)\(clippy::[\w-]+\)\]` on by default)')
@@ -446,12 +531,34 @@ def add(into, other):
         into[k] = into.get(k, 0) + v
 
 
+TEST_GATED_MOD = re.compile(CFG_TEST_PAT + r'\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([\w:]+\))?\s+)?mod\s+(\w+)\s*;')
+
+
+def test_gated_files(src_root):
+    """Files reached only through `#[cfg(test)] mod name;` declarations."""
+    gated = set()
+    for path in src_root.rglob('*.rs'):
+        code = blank_comments_and_strings(path.read_text(encoding='utf-8', errors='replace'))
+        names = TEST_GATED_MOD.findall(code)
+        if not names:
+            continue
+        base = path.parent if path.name in ('lib.rs', 'main.rs', 'mod.rs') else path.parent / path.stem
+        for name in names:
+            gated.add((base / (name + '.rs')).resolve())
+            gated.add((base / name).resolve())
+    return gated
+
+
 def build(src_root, clippy_lines):
     modules = {}
     allow_clippy = {}
+    gated = test_gated_files(src_root)
     for path in sorted(src_root.rglob('*.rs')):
         rel = path.relative_to(src_root)
         if is_test_path(rel):
+            continue
+        rp = path.resolve()
+        if rp in gated or any(parent in gated for parent in rp.parents):
             continue
         sig, allows = scan_file(path.read_text(encoding='utf-8', errors='replace'))
         mod = module_name(rel)
@@ -467,6 +574,7 @@ def build(src_root, clippy_lines):
     have_clippy = clippy_lines is not None
     clippy_by_lint, clippy_groups = {}, {}
     if have_clippy:
+        require_complete_clippy(clippy_lines)
         per_mod, clippy_groups = parse_clippy(clippy_lines, src_root)
         for mod, lints in per_mod.items():
             if mod not in modules:
@@ -541,7 +649,8 @@ def to_markdown(rep, base=None, top=25):
     for k, v in h.items():
         if k == 'score':
             continue
-        out.append(f'| {k.replace("_", " ")} | {v}{fmt_delta(v, bh.get(k), k not in lower_better)} |')
+        delta = '' if k == 'code_lines' else fmt_delta(v, bh.get(k), k not in lower_better)
+        out.append(f'| {k.replace("_", " ")} | {v}{delta} |')
     out += ['', '## Categories', '', '| Category | Weight | Count (weighted) | Per KLOC | Score |', '|---|---|---|---|---|']
     bc = (base or {}).get('categories', {})
     for key, c in rep['categories'].items():
@@ -625,7 +734,11 @@ def main(argv=None):
     rep = build(src, clippy_lines)
     base = json.loads(Path(args.compare).read_text()) if args.compare else None
     if base is not None and (base.get('clippy') is None) != (rep.get('clippy') is None):
-        print('note: one report has clippy data and the other does not; scores are not comparable', file=sys.stderr)
+        print('note: one report has clippy data and the other does not; scores are not comparable, '
+              'ignoring --compare', file=sys.stderr)
+        if args.fail_on_drop is not None:
+            raise SystemExit('--fail-on-drop needs both reports made the same way (with or without clippy)')
+        base = None
     md = to_markdown(rep, base, args.top)
     if args.json:
         Path(args.json).write_text(dump_json(rep))

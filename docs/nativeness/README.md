@@ -13,21 +13,24 @@ scripts/nativeness/score.py --run-clippy --json out.json --markdown out.md \
     --compare docs/nativeness/baseline.json
 ```
 
-The `nativeness` workflow runs the full version on every pull request and push
-to `main` and puts the report in the job summary. It is informational and not
+The `nativeness` workflow runs the full version on every push to `main` and on
+pull requests that touch `rust/`, the scorecard or its docs, and puts the
+report in the job summary. It is informational and not
 a required check.
 
 ## What is counted
 
-Only non-test library code under `rust/src` counts. `#[cfg(test)]` items,
-`tests.rs` files and anything under a `tests/` directory are skipped. Comments
+Only non-test library code under `rust/src` counts. Items, fields, variants
+and match arms under `#[cfg(test)]` (or `cfg(all(.., test, ..))`), files
+reached only through a `#[cfg(test)] mod name;` declaration, `tests.rs` files
+and anything under a `tests/` directory are skipped. Comments
 and string literals are blanked before matching. A module is a top-level file
 plus everything in its directory (`progressive_unpack.rs` and
 `progressive_unpack/*`).
 
 | Category | Weight | Signals (multiplier) | Idiomatic fix |
 |---|---|---|---|
-| FFI and C ABI leftovers | 15 | `extern "C" fn` / block (3), `no_mangle` (3), raw pointer types (1), `c_int`/`c_char`/`CStr`/`CString` (0.5), `Box::into_raw`/`from_raw`/`as_ptr` (1) | Plain Rust functions taking references, owned types or `&[u8]`; no C ABI between Rust modules |
+| FFI and C ABI leftovers | 15 | `extern "C" fn` / block (3), `no_mangle` (3), raw pointer types (1), `c_int`/`c_char`/`CStr`/`CString` (0.5), `Box::into_raw`/`from_raw`/`leak`, `.as_ptr()` (1) | Plain Rust functions taking references, owned types or `&[u8]`; no C ABI between Rust modules |
 | unsafe | 10 | each `unsafe` keyword | Safe wrappers; delete unsafe that only existed for the C ABI |
 | Integers where enums belong | 15 | integer fields/params named like codes (`status`, `kind`, `mode`, `op`, `*_kind`...) (2), integer-literal match arms (1), `-1` sentinels (2), non-count functions returning `i32`/`c_int` (1) | `enum`s, `Option`, `Result` |
 | C++ API shape | 10 | `get_*`/`set_*` methods (1), `&mut` out-parameters on functions returning `()`/`bool`/int (2), 7+ parameters (1), `&String`/`&Vec`/`&Box`/`&PathBuf` params (1) | Field access or plain-noun getters, return tuples or structs, parameter structs, `&str`/`&[T]`/`&Path` |
@@ -41,7 +44,9 @@ plus everything in its directory (`progressive_unpack.rs` and
 | Clippy | 15 | warnings from default, `pedantic` and `nursery`, minus pure doc/attribute lints | Whatever the lint says |
 
 The clippy run passes `-W clippy::correctness` so the few deny-by-default
-lints are counted instead of stopping the run. Lints ignored for scoring
+lints are counted instead of stopping the run. A clippy run that does not end
+in a successful build (a compile error, a bad manifest) is refused rather than
+scored, since missing warnings would read as an improvement. Lints ignored for scoring
 (still listed in the report): `missing_errors_doc`, `missing_panics_doc`,
 `must_use_candidate`, `doc_markdown`, `module_name_repetitions`,
 `missing_const_for_fn`, `too_long_first_doc_paragraph`, `doc_link_with_quotes`,
@@ -64,7 +69,9 @@ top modules by debt and, separately, the lowest scores among modules of 300+
 lines.
 
 Scores with and without clippy data are not comparable (the clippy category is
-dropped and weights renormalise when it is missing). Compare like with like.
+dropped and weights renormalise when it is missing). `--compare` against a
+report made the other way is ignored with a note, and `--fail-on-drop` refuses
+to run. `just nativeness no` therefore prints no deltas.
 
 ## Tracking progress
 

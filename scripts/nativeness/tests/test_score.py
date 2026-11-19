@@ -26,6 +26,20 @@ class Lexer(unittest.TestCase):
         self.assertIn("<'a>", out)
         self.assertNotIn("'{'", out)
 
+    def test_cfg_test_on_field_variant_and_arm_blanks_only_that_element(self):
+        src = ('struct S { a: u8, #[cfg(test)] b: u8 }\n'
+               'enum E { A, #[cfg(test)] B(i32), C }\n'
+               'fn g(x: u8) { match x { 0 => {}\n #[cfg(test)]\n 1 => { t.unwrap(); }\n _ => {} } }\n'
+               'impl S { fn f() { x.unwrap(); } }\n')
+        s = scan(src)
+        self.assertEqual(s['unwrap'], 1)
+        self.assertEqual(s['fn_count'], 2)
+
+    def test_cfg_all_with_test_anywhere_is_ignored(self):
+        src = ('#[cfg(all(unix, test))]\nfn t() { a.unwrap(); }\n'
+               '#[cfg(not(test))]\nfn real() { b.unwrap(); }\n')
+        self.assertEqual(scan(src)['unwrap'], 1)
+
     def test_cfg_test_module_is_ignored(self):
         src = 'fn a() { x.unwrap(); }\n#[cfg(test)]\nmod tests {\n  fn b() { y.unwrap(); z.unwrap(); }\n}\n'
         self.assertEqual(scan(src)['unwrap'], 1)
@@ -75,6 +89,18 @@ class Signals(unittest.TestCase):
         self.assertEqual(s['as_cast'], 1)
         self.assertEqual(s['static_shared'], 1)
         self.assertEqual(s['static_mut'], 1)
+
+    def test_fn_with_closure_bound_generics_is_found(self):
+        fns = score.analyze_functions('fn with<R, F: FnOnce() -> R>(a: u8, f: F) -> R { f() }')
+        self.assertEqual([f['name'] for f in fns], ['with'])
+        self.assertEqual(len(fns[0]['params']), 2)
+
+    def test_stringy_result_respects_nesting(self):
+        self.assertEqual(scan('fn a() -> Result<HashMap<u32, String>, io::Error> { todo() }')['result_stringy_err'], 0)
+        self.assertEqual(scan('fn b() -> Result<Vec<u8>, String> { todo() }')['result_stringy_err'], 1)
+
+    def test_extern_c_unwind(self):
+        self.assertEqual(scan('pub extern "C-unwind" fn f() {}')['extern_c_fn'], 1)
 
     def test_long_fn_and_many_params(self):
         body = '\n'.join(f'  let x{i} = {i};' for i in range(score.LONG_FN + 5))
@@ -135,10 +161,32 @@ class EndToEnd(unittest.TestCase):
                 'children': [{'message': '`-W clippy::cast-lossless` implied by `-W clippy::pedantic`'}],
                 'spans': [{'is_primary': True, 'file_name': 'src/a.rs'}]}}
             cj = Path(tmp) / 'c.json'
-            cj.write_text(json.dumps(msg) + '\n')
+            done = {'reason': 'build-finished', 'success': True}
+            cj.write_text(json.dumps(msg) + '\n' + json.dumps(done) + '\n')
             rep = score.build(src, cj.read_text().splitlines())
             self.assertEqual(rep['modules']['a']['signals']['clippy_scored'], 1)
             self.assertEqual(rep['clippy']['by_group'], {'pedantic': 1})
+
+    def test_failed_clippy_run_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / 'src'
+            src.mkdir()
+            (src / 'a.rs').write_text('pub fn f() {}\n')
+            for lines in ([], [json.dumps({'reason': 'build-finished', 'success': False})]):
+                with self.assertRaises(SystemExit):
+                    score.build(src, lines)
+
+    def test_test_gated_external_modules_are_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / 'src'
+            (src / 'outer').mkdir(parents=True)
+            (src / 'lib.rs').write_text('pub mod outer;\n#[cfg(test)]\nmod probe;\n')
+            (src / 'probe.rs').write_text('fn p() { x.unwrap(); }\n')
+            (src / 'outer.rs').write_text('#[cfg(test)]\nmod fixtures;\npub fn f() {}\n')
+            (src / 'outer' / 'fixtures.rs').write_text('fn q() { y.unwrap(); }\n')
+            rep = score.build(src, None)
+            self.assertNotIn('probe', rep['modules'])
+            self.assertEqual(rep['totals'].get('unwrap', 0), 0)
 
 
 if __name__ == '__main__':

@@ -1,5 +1,6 @@
 //! DiskState record serialization and helpers (`daemon/queue/DiskState.cpp`).
 
+use crate::queuesubsys_host::FileRef;
 use crate::cstr;
 use crate::options::OptStr;
 use crate::status::{
@@ -6882,10 +6883,10 @@ struct ActiveDiskExecCtx<'a> {
     qh: Option<&'a crate::queuesubsys_host::QueueSubsysHost>,
     dq_ptr: usize,
     messages: Vec<(i32, i32, i32, std::ffi::CString)>,
-    target_file_ptr: usize,
+    target_file_ptr: FileRef,
     target_nzb_ptr: usize,
     pending_nzb_uptr: usize,
-    staged_file_ptr: usize,
+    staged_file_ptr: FileRef,
     snap_success_articles: i32,
     snap_failed_articles: i32,
     snap_remaining_size: i64,
@@ -6900,10 +6901,10 @@ impl<'a> ActiveDiskExecCtx<'a> {
             qh,
             dq_ptr: 0,
             messages: Vec::new(),
-            target_file_ptr: 0,
+            target_file_ptr: FileRef::NONE,
             target_nzb_ptr: 0,
             pending_nzb_uptr: 0,
-            staged_file_ptr: 0,
+            staged_file_ptr: FileRef::NONE,
             snap_success_articles: 0,
             snap_failed_articles: 0,
             snap_remaining_size: 0,
@@ -6931,9 +6932,9 @@ impl Drop for ActiveDiskExecCtx<'_> {
                 qh.destroy_nzb_uptr(self.pending_nzb_uptr);
                 self.pending_nzb_uptr = 0;
             }
-            if self.staged_file_ptr != 0 {
+            if self.staged_file_ptr.is_some() {
                 qh.delete_file_info(self.staged_file_ptr);
-                self.staged_file_ptr = 0;
+                self.staged_file_ptr = FileRef::NONE;
             }
         }
     }
@@ -6973,7 +6974,7 @@ fn apply_active_server_stats_nzb(
 #[cfg(unix)]
 fn apply_active_server_stats_file(
     qh: &crate::queuesubsys_host::QueueSubsysHost,
-    file_ptr: usize,
+    file_ptr: FileRef,
     stats: &[NzbgetRsDiskServerStat],
 ) {
     let Some(sp) = crate::net::active_server_pool() else {
@@ -7186,9 +7187,9 @@ unsafe extern "C" fn active_disk_ctrl_cb(
             0
         }
         17 => {
-            if c.staged_file_ptr != 0 {
+            if c.staged_file_ptr.is_some() {
                 qh.delete_file_info(c.staged_file_ptr);
-                c.staged_file_ptr = 0;
+                c.staged_file_ptr = FileRef::NONE;
             }
             let fp = qh.file_new_standalone(a1, true);
             c.staged_file_ptr = fp;
@@ -7798,7 +7799,7 @@ unsafe extern "C" fn active_disk_export_file_cb(
     let Some(qh) = qh_opt else {
         return;
     };
-    if fp == 0 {
+    if fp.is_none() {
         return;
     }
     let fs = qh.file_snap(fp);
@@ -7961,7 +7962,7 @@ unsafe extern "C" fn active_disk_apply_file_cb(
     let Some(qh) = qh_opt else {
         return 0;
     };
-    if fp == 0 {
+    if fp.is_none() {
         return 0;
     }
     if mode == 0 {
@@ -8446,7 +8447,7 @@ pub(crate) fn active_disk_cleanup_temp_dir(
 #[cfg(unix)]
 pub(crate) fn active_disk_save_file(
     qh: &crate::queuesubsys_host::QueueSubsysHost,
-    file_ptr: usize,
+    file_ptr: FileRef,
     replace: bool,
 ) -> bool {
     let mut ctx = ActiveDiskExecCtx::new(Some(qh));
@@ -8467,7 +8468,7 @@ pub(crate) fn active_disk_save_file(
 #[cfg(unix)]
 pub(crate) fn active_disk_load_file(
     qh: &crate::queuesubsys_host::QueueSubsysHost,
-    file_ptr: usize,
+    file_ptr: FileRef,
     file_summary: bool,
     articles: bool,
 ) -> bool {
@@ -8489,7 +8490,7 @@ pub(crate) fn active_disk_load_file(
 #[cfg(unix)]
 pub(crate) fn active_disk_save_file_state(
     qh: &crate::queuesubsys_host::QueueSubsysHost,
-    file_ptr: usize,
+    file_ptr: FileRef,
     completed: bool,
     replace: bool,
 ) -> bool {
@@ -8511,7 +8512,7 @@ pub(crate) fn active_disk_save_file_state(
 #[cfg(unix)]
 pub(crate) fn active_disk_load_file_state(
     qh: &crate::queuesubsys_host::QueueSubsysHost,
-    file_ptr: usize,
+    file_ptr: FileRef,
     completed: bool,
 ) -> bool {
     let mut ctx = ActiveDiskExecCtx::new(Some(qh));
@@ -8535,10 +8536,10 @@ pub(crate) fn active_disk_resave_completed_file_state(
     file_id: i32,
 ) {
     let fi_ptr = qh.file_new_standalone(file_id, false);
-    if fi_ptr == 0 {
+    if fi_ptr.is_none() {
         return;
     }
-    struct FiGuard<'a>(&'a crate::queuesubsys_host::QueueSubsysHost, usize);
+    struct FiGuard<'a>(&'a crate::queuesubsys_host::QueueSubsysHost, FileRef);
     impl Drop for FiGuard<'_> {
         fn drop(&mut self) {
             self.0.delete_file_info(self.1);
@@ -8558,10 +8559,10 @@ pub(crate) fn active_disk_load_completed_segments(
     push_fn: usize,
 ) -> usize {
     let fi_ptr = qh.file_new_standalone(file_id, false);
-    if fi_ptr == 0 {
+    if fi_ptr.is_none() {
         return 0;
     }
-    struct FiGuard<'a>(&'a crate::queuesubsys_host::QueueSubsysHost, usize);
+    struct FiGuard<'a>(&'a crate::queuesubsys_host::QueueSubsysHost, FileRef);
     impl Drop for FiGuard<'_> {
         fn drop(&mut self) {
             self.0.delete_file_info(self.1);
@@ -8601,14 +8602,14 @@ pub(crate) fn active_disk_load_file_for_inspect(
     file_id: i32,
     load_info_data: bool,
     try_load_completed_state: bool,
-) -> (usize, bool) {
+) -> (FileRef, bool) {
     let fi_ptr = qh.file_new_standalone(file_id, load_info_data);
-    if fi_ptr == 0 {
-        return (0, false);
+    if fi_ptr.is_none() {
+        return (FileRef::NONE, false);
     }
     if !active_disk_load_file(qh, fi_ptr, load_info_data, true) {
         qh.delete_file_info(fi_ptr);
-        return (0, false);
+        return (FileRef::NONE, false);
     }
     let state_ok = try_load_completed_state && active_disk_load_file_state(qh, fi_ptr, true);
     (fi_ptr, state_ok)

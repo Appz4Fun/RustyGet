@@ -32,6 +32,7 @@ use crate::nntp::{
     article_dl_should_advance_server_list, BackboneMiss, LevelCandidate, TransientRetries,
 };
 use crate::queuesubsys_host::{
+    FileRef,
     ActiveDownloadSnap, OpArgs, QueueSubsysHost, AD_FAILED, AD_FATAL_ERROR, AD_FINISHED, AD_RETRY,
     AD_RUNNING, MK_DEBUG, MK_DETAIL, MK_ERROR, MK_INFO, MK_WARNING,
 };
@@ -91,7 +92,7 @@ unsafe fn cstr_or_empty(p: *const c_char) -> Vec<u8> {
 
 struct DlHost<'a> {
     qh: &'a QueueSubsysHost,
-    file_ptr: usize,
+    file_ptr: FileRef,
     article_ptr: usize,
     stopped: &'a AtomicBool,
 }
@@ -654,7 +655,7 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
                     ) else {
                         continue;
                     };
-                    CACHE_FILE_INFO.store(fp, Ordering::SeqCst);
+                    CACHE_FILE_INFO.store(fp.addr(), Ordering::SeqCst);
                     let info_name = article_writer_format_info_path(
                         &nzb.name,
                         crate::paths::PATH_SEPARATOR,
@@ -680,7 +681,7 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
             CACHE_FILE_INFO.store(0, Ordering::SeqCst);
         }
     }
-    debug_assert_eq!(CACHE_FILE_INFO.load(Ordering::SeqCst), file_ptr);
+    debug_assert_eq!(CACHE_FILE_INFO.load(Ordering::SeqCst), file_ptr.addr());
     let _busy_guard = ClearBusyGuard;
     crate::log::log_active_bytes(
         MK_DETAIL,
@@ -885,7 +886,7 @@ fn article_cache_check_flush(host: &MockDlHost, allocated: usize, flush_everythi
     );
 
     let mut strs = [std::ptr::null::<c_char>(); 2];
-    let file_ptr = host.raw(
+    let file_ptr = FileRef::from_addr(host.raw(
         2,
         5,
         i32::from(flush_everything),
@@ -896,8 +897,8 @@ fn article_cache_check_flush(host: &MockDlHost, allocated: usize, flush_everythi
         std::ptr::null_mut(),
         std::ptr::null_mut(),
         strs.as_mut_ptr(),
-    );
-    if file_ptr == 0 {
+    ));
+    if file_ptr.is_none() {
         CACHE_FILE_INFO.store(0, Ordering::SeqCst);
         host.log(MK_DEBUG, b"Checking cache... nothing to flush");
         return false;
@@ -910,7 +911,7 @@ fn article_cache_check_flush(host: &MockDlHost, allocated: usize, flush_everythi
         }
     }
     // Selection callback (op 2, 5) publishes CACHE_FILE_INFO while holding DownloadQueue::Guard().
-    debug_assert_eq!(CACHE_FILE_INFO.load(Ordering::SeqCst), file_ptr);
+    debug_assert_eq!(CACHE_FILE_INFO.load(Ordering::SeqCst), file_ptr.addr());
     let _busy_guard = ClearBusyGuard;
     let info_name = unsafe { cstr_or_empty(strs[0]) };
     host.log(
@@ -926,7 +927,7 @@ fn article_cache_check_flush(host: &MockDlHost, allocated: usize, flush_everythi
         2,
         7,
         0,
-        file_ptr,
+        file_ptr.addr(),
         0,
         std::ptr::null(),
         std::ptr::null(),
@@ -966,7 +967,7 @@ fn article_cache_check_flush(host: &MockDlHost, allocated: usize, flush_everythi
                 2,
                 8,
                 idx as i32,
-                file_ptr,
+                file_ptr.addr(),
                 0,
                 std::ptr::null(),
                 std::ptr::null(),
@@ -1008,7 +1009,7 @@ fn article_cache_check_flush(host: &MockDlHost, allocated: usize, flush_everythi
                     2,
                     9,
                     -1,
-                    file_ptr,
+                    file_ptr.addr(),
                     0,
                     std::ptr::null(),
                     std::ptr::null(),
@@ -1022,7 +1023,7 @@ fn article_cache_check_flush(host: &MockDlHost, allocated: usize, flush_everythi
                     2,
                     9,
                     idx as i32,
-                    file_ptr,
+                    file_ptr.addr(),
                     0,
                     std::ptr::null(),
                     std::ptr::null(),
@@ -1039,7 +1040,7 @@ fn article_cache_check_flush(host: &MockDlHost, allocated: usize, flush_everythi
             2,
             10,
             flushed_articles,
-            file_ptr,
+            file_ptr.addr(),
             0,
             std::ptr::null(),
             std::ptr::null(),
@@ -2683,7 +2684,7 @@ struct DlWorker {
 const AD_UNDEFINED: i32 = 0;
 
 pub struct NzbgetRsArticleDownloader {
-    pub(crate) file_ptr: usize,
+    pub(crate) file_ptr: FileRef,
     pub(crate) article_ptr: usize,
     pub(crate) stopped: AtomicBool,
     info_name: Vec<u8>,
@@ -2701,7 +2702,7 @@ impl Drop for NzbgetRsArticleDownloader {
 
 impl NzbgetRsArticleDownloader {
     pub(crate) fn new_for_queue(
-        file_ptr: usize,
+        file_ptr: FileRef,
         article_ptr: usize,
         has_analyzer: bool,
         parcheck_enabled: bool,
@@ -3442,7 +3443,7 @@ impl NzbgetRsArticleDownloader {
 
         self.set_status(AD_RUNNING, false);
 
-        if self.file_ptr != 0 && self.article_ptr != 0 {
+        if self.file_ptr.is_some() && self.article_ptr != 0 {
             host.with_output_guard(false, || {
                 let mut w = self.worker.lock().unwrap_or_else(|e| e.into_inner());
                 w.writer.build_filenames_locked(&host);

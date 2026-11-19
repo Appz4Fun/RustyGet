@@ -4,6 +4,7 @@
 //! workflows, PAR/stream-repair coverage decisions, job scheduling strategies, stage
 //! transitions, pause-state management, and direct-unpack triggers into a single module.
 
+use crate::queuesubsys_host::FileRef;
 use crate::status::{
     CleanupStatus, DeleteStatus, DirectRenameStatus, DirectUnpackStatus, DupeMode, MoveStatus,
     NzbParStatus, PostStage, UnpackStatus,
@@ -1138,7 +1139,7 @@ impl NzbgetRsPrePostProcessor {
                 0
             }
             8 => {
-                self.download_queue_update(&host, a1, p1, p2, p3);
+                self.download_queue_update(&host, a1, p1, p2, FileRef::from_addr(p3));
                 0
             }
             _ => 0,
@@ -1547,7 +1548,7 @@ impl NzbgetRsPrePostProcessor {
         action: i32,
         dq_ptr: usize,
         nzb_ptr: usize,
-        file_ptr: usize,
+        file_ptr: FileRef,
     ) {
         use crate::queuesubsys_host::{
             ASPECT_FILE_COMPLETED, ASPECT_FILE_DELETED, ASPECT_NZB_ADDED, ASPECT_NZB_DELETED,
@@ -2500,7 +2501,7 @@ impl NzbgetRsPrePostProcessor {
         host: &crate::queuesubsys_host::QueueSubsysHost,
         dq_ptr: usize,
         nzb_ptr: usize,
-        file_ptr: usize,
+        file_ptr: FileRef,
     ) {
         let opts = host.opts();
         let nzb = host.nzb_snap(nzb_ptr, false);

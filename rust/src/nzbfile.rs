@@ -6,6 +6,7 @@
 //! content-hash calculation (`calc_nzb_hashes`), and `{{password}}` / metadata
 //! extraction and sanitization (`ProcessFiles`).
 
+use crate::queuesubsys_host::FileRef;
 use crate::cstr;
 use std::collections::HashMap;
 use std::ffi::{c_char, c_int, CStr, CString};
@@ -1133,7 +1134,7 @@ impl NzbFileParser {
 
 #[cfg(unix)]
 pub(crate) struct ParsedMaterializedFile {
-    pub file_ptr: usize,
+    pub file_ptr: FileRef,
     pub total_articles: i32,
     pub missed_articles: i32,
     pub cut_short: bool,

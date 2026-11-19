@@ -474,6 +474,35 @@ impl PostRef {
     }
 }
 
+/// A file (`FileInfo`) of a download in the queue, or none.
+///
+/// Wraps the queue's object address like [`PostRef`]; only the queue host turns it back
+/// into an address.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[repr(transparent)]
+pub(crate) struct FileRef(usize);
+
+impl FileRef {
+    /// No file.
+    pub const NONE: Self = Self(0);
+
+    pub(crate) fn from_addr(addr: usize) -> Self {
+        Self(addr)
+    }
+
+    pub(crate) fn addr(self) -> usize {
+        self.0
+    }
+
+    pub fn is_none(self) -> bool {
+        self.0 == 0
+    }
+
+    pub fn is_some(self) -> bool {
+        self.0 != 0
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct NzbSnap {
     pub ptr: usize,
@@ -600,7 +629,7 @@ pub(crate) struct NzbSnap {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct FileSnap {
-    pub ptr: usize,
+    pub ptr: FileRef,
     pub nzb_ptr: usize,
     pub id: i32,
     pub paused: bool,
@@ -755,14 +784,14 @@ pub(crate) struct HistEntrySnap {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RunningDownloadSnap {
     pub ad_ptr: usize,
-    pub file_ptr: usize,
+    pub file_ptr: FileRef,
     pub status: i32,
     pub last_update_time: i64,
 }
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ActiveDownloadSnap {
-    pub file_ptr: usize,
+    pub file_ptr: FileRef,
     pub article_ptr: usize,
     pub status: i32,
     pub has_content_analyzer: bool,
@@ -967,28 +996,28 @@ impl QueueSubsysHost {
         }
     }
 
-    fn file_set_op(&self, file: usize, op: i32, x: OpArgs) -> usize {
+    fn file_set_op(&self, file: FileRef, op: i32, x: OpArgs) -> usize {
         if self.use_active {
-            let file = file as *const crate::qfile::File;
+            let file = file.addr() as *const crate::qfile::File;
             unsafe { crate::qfile::host_file_set(file, op, x.a2, x.p2, x.s1, x.i64s) };
         }
         0
     }
 
-    fn cache_op(&self, file: usize, op: i32, x: OpArgs) -> usize {
+    fn cache_op(&self, file: FileRef, op: i32, x: OpArgs) -> usize {
         if !self.use_active {
             return 0;
         }
-        let file = file as *const crate::qfile::File;
+        let file = file.addr() as *const crate::qfile::File;
         unsafe { crate::qfile::host_cache_op(file, op, x.a2, x.p2, x.s1, x.ints, x.i64s, x.strs) }
     }
 
     /// The article writer's and downloader's op `op` on a file.
-    pub(crate) fn output_op(&self, file: usize, op: i32, x: OpArgs) -> usize {
+    pub(crate) fn output_op(&self, file: FileRef, op: i32, x: OpArgs) -> usize {
         if !self.use_active {
             return 0;
         }
-        let file = file as *const crate::qfile::File;
+        let file = file.addr() as *const crate::qfile::File;
         unsafe {
             crate::qfile::host_output_op(file, op, x.a2, x.p2, x.s1, x.s2, x.ints, x.i64s, x.strs)
         }
@@ -1411,21 +1440,21 @@ impl QueueSubsysHost {
         }
     }
 
-    pub fn disk_save_file(&self, file_ptr: usize) {
+    pub fn disk_save_file(&self, file_ptr: FileRef) {
         #[cfg(unix)]
         if self.use_active {
             crate::diskstate_format::active_disk_save_file(self, file_ptr, false);
         }
     }
 
-    pub fn disk_save_file_state(&self, file_ptr: usize, completed: bool) {
+    pub fn disk_save_file_state(&self, file_ptr: FileRef, completed: bool) {
         #[cfg(unix)]
         if self.use_active {
             crate::diskstate_format::active_disk_save_file_state(self, file_ptr, completed, false);
         }
     }
 
-    pub fn disk_load_file_state(&self, file_ptr: usize, completed: bool) -> bool {
+    pub fn disk_load_file_state(&self, file_ptr: FileRef, completed: bool) -> bool {
         #[cfg(unix)]
         if self.use_active {
             return crate::diskstate_format::active_disk_load_file_state(self, file_ptr, completed);
@@ -1440,7 +1469,7 @@ impl QueueSubsysHost {
         }
     }
 
-    pub fn disk_load_articles(&self, file_ptr: usize) {
+    pub fn disk_load_articles(&self, file_ptr: FileRef) {
         #[cfg(unix)]
         if self.use_active {
             crate::diskstate_format::active_disk_load_file(self, file_ptr, false, true);
@@ -1467,7 +1496,7 @@ impl QueueSubsysHost {
         file_id: i32,
         load_info_data: bool,
         try_load_completed_state: bool,
-    ) -> (usize, bool) {
+    ) -> (FileRef, bool) {
         #[cfg(unix)]
         if self.use_active {
             return crate::diskstate_format::active_disk_load_file_for_inspect(
@@ -1477,7 +1506,7 @@ impl QueueSubsysHost {
                 try_load_completed_state,
             );
         }
-        (0, load_info_data)
+        (FileRef::NONE, load_info_data)
     }
 
     // Subsystems (op = 6)
@@ -1938,19 +1967,19 @@ impl QueueSubsysHost {
         dq_ptr: usize,
         aspect_action: i32,
         nzb_ptr: usize,
-        file_ptr: usize,
+        file_ptr: FileRef,
     ) {
         if self.use_active {
             crate::jobthread::nzbget_rs_prepost_queue_changed(
                 aspect_action,
                 dq_ptr,
                 nzb_ptr,
-                file_ptr,
+                file_ptr.addr(),
             );
         }
     }
 
-    pub fn dq_notify(&self, dq_ptr: usize, aspect_action: i32, nzb_ptr: usize, file_ptr: usize) {
+    pub fn dq_notify(&self, dq_ptr: usize, aspect_action: i32, nzb_ptr: usize, file_ptr: FileRef) {
         self.prepost_queue_changed(dq_ptr, aspect_action, nzb_ptr, file_ptr);
         #[cfg(unix)]
         if self.use_active {
@@ -2008,7 +2037,7 @@ impl QueueSubsysHost {
                     let mut f_i64s = [0i64; 8];
                     unsafe {
                         crate::qfile::host_snapshot(
-                            fp as *const crate::qfile::File,
+                            fp.addr() as *const crate::qfile::File,
                             &mut f_ints,
                             &mut f_i64s,
                             None,
@@ -2605,6 +2634,16 @@ impl QueueSubsysHost {
         self.coll_set(nzb_ptr, action, OpArgs::NONE.p2(p2));
     }
 
+    /// Adds `file`'s sizes and article counts to the download's completed totals.
+    pub fn nzb_update_completed_stats(&self, nzb_ptr: usize, file: FileRef) {
+        self.nzb_action(nzb_ptr, NZB_ACT_UPDATE_COMPLETED_STATS, file.addr());
+    }
+
+    /// Adds `file`'s sizes and article counts to the download's deleted totals.
+    pub fn nzb_update_deleted_stats(&self, nzb_ptr: usize, file: FileRef) {
+        self.nzb_action(nzb_ptr, NZB_ACT_UPDATE_DELETED_STATS, file.addr());
+    }
+
     pub fn nzb_apply_merge_split_counters(
         &self,
         nzb_ptr: usize,
@@ -2654,19 +2693,19 @@ impl QueueSubsysHost {
         self.filelist_op(nzb_ptr, 0, OpArgs::NONE)
     }
 
-    pub fn nzb_file_at(&self, nzb_ptr: usize, idx: usize) -> usize {
-        self.filelist_op(nzb_ptr, 1, OpArgs::NONE.a2(idx as i32))
+    pub fn nzb_file_at(&self, nzb_ptr: usize, idx: usize) -> FileRef {
+        FileRef::from_addr(self.filelist_op(nzb_ptr, 1, OpArgs::NONE.a2(idx as i32)))
     }
 
-    pub fn nzb_remove_file(&self, nzb_ptr: usize, file_ptr: usize) {
-        self.filelist_op(nzb_ptr, 2, OpArgs::NONE.p2(file_ptr));
+    pub fn nzb_remove_file(&self, nzb_ptr: usize, file_ptr: FileRef) {
+        self.filelist_op(nzb_ptr, 2, OpArgs::NONE.p2(file_ptr.addr()));
     }
 
     pub fn nzb_remove_file_and_notify(
         &self,
         dq_ptr: usize,
         nzb_ptr: usize,
-        file_ptr: usize,
+        file_ptr: FileRef,
         aspect_action: i32,
     ) {
         let mut i64s = [dq_ptr as i64];
@@ -2675,7 +2714,7 @@ impl QueueSubsysHost {
             9,
             OpArgs::NONE
                 .a2(aspect_action)
-                .p2(file_ptr)
+                .p2(file_ptr.addr())
                 .i64s(i64s.as_mut_ptr()),
         );
         #[cfg(unix)]
@@ -2685,12 +2724,12 @@ impl QueueSubsysHost {
         }
     }
 
-    pub fn nzb_transfer_split_file(&self, src_nzb: usize, dest_nzb: usize, file_ptr: usize) {
+    pub fn nzb_transfer_split_file(&self, src_nzb: usize, dest_nzb: usize, file_ptr: FileRef) {
         let mut i64s = [dest_nzb as i64];
         self.filelist_op(
             src_nzb,
             3,
-            OpArgs::NONE.p2(file_ptr).i64s(i64s.as_mut_ptr()),
+            OpArgs::NONE.p2(file_ptr.addr()).i64s(i64s.as_mut_ptr()),
         );
     }
 
@@ -2739,7 +2778,7 @@ impl QueueSubsysHost {
     pub fn nzb_push_completed_file(
         &self,
         nzb_ptr: usize,
-        file_ptr: usize,
+        file_ptr: FileRef,
         filename: &[u8],
         file_status: i32,
         file_crc: u32,
@@ -2751,7 +2790,7 @@ impl QueueSubsysHost {
             6,
             OpArgs::NONE
                 .a2(file_status)
-                .p2(file_ptr)
+                .p2(file_ptr.addr())
                 .s1(c.as_ptr() as *const c_char)
                 .ints(ints.as_mut_ptr()),
         );
@@ -2816,7 +2855,7 @@ impl QueueSubsysHost {
         );
     }
 
-    pub fn nzb_reorder_files(&self, nzb_ptr: usize, new_order: &[usize]) {
+    pub fn nzb_reorder_files(&self, nzb_ptr: usize, new_order: &[FileRef]) {
         if nzb_ptr == 0 || new_order.is_empty() {
             return;
         }
@@ -2977,7 +3016,7 @@ impl QueueSubsysHost {
         article_parts: &[i32],
         article_sizes: &[i64],
         article_msg_ids: &[*const c_char],
-    ) -> usize {
+    ) -> FileRef {
         let mut ints = [
             id,
             time,
@@ -3014,7 +3053,7 @@ impl QueueSubsysHost {
                 article_msg_ids.as_ptr() as *const c_char
             },
         ];
-        self.filelist_op(
+        FileRef::from_addr(self.filelist_op(
             nzb_ptr,
             14,
             OpArgs::NONE
@@ -3023,7 +3062,7 @@ impl QueueSubsysHost {
                 .ints(ints.as_mut_ptr())
                 .i64s(i64s.as_mut_ptr())
                 .strs(strs.as_mut_ptr()),
-        )
+        ))
     }
 
     pub fn nzb_redownload_replace_files(&self, nzb_ptr: usize, src_nzb_ptr: usize) {
@@ -3034,8 +3073,8 @@ impl QueueSubsysHost {
         self.filelist_op(nzb_ptr, 16, OpArgs::NONE.a2(idx as i32));
     }
 
-    pub fn nzb_add_requeued_file(&self, nzb_ptr: usize, file_ptr: usize) {
-        self.filelist_op(nzb_ptr, 17, OpArgs::NONE.p2(file_ptr));
+    pub fn nzb_add_requeued_file(&self, nzb_ptr: usize, file_ptr: FileRef) {
+        self.filelist_op(nzb_ptr, 17, OpArgs::NONE.p2(file_ptr.addr()));
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3144,8 +3183,8 @@ impl QueueSubsysHost {
     }
 
     // FileInfo & ArticleInfo ops (op = 40..=44)
-    pub fn file_snap(&self, file_ptr: usize) -> FileSnap {
-        if file_ptr == 0 {
+    pub fn file_snap(&self, file_ptr: FileRef) -> FileSnap {
+        if file_ptr.is_none() {
             return FileSnap::default();
         }
         let mut ints = [0i32; 28];
@@ -3154,7 +3193,7 @@ impl QueueSubsysHost {
             let mut texts: [Vec<u8>; 7] = Default::default();
             let articles_len = unsafe {
                 crate::qfile::host_snapshot(
-                    file_ptr as *const crate::qfile::File,
+                    file_ptr.addr() as *const crate::qfile::File,
                     &mut ints,
                     &mut i64s,
                     Some(&mut texts),
@@ -3165,40 +3204,40 @@ impl QueueSubsysHost {
         file_snap_from(file_ptr, &ints, &i64s, 0, Default::default())
     }
 
-    pub fn file_groups(&self, file_ptr: usize) -> Vec<Vec<u8>> {
+    pub fn file_groups(&self, file_ptr: FileRef) -> Vec<Vec<u8>> {
         if self.use_active {
-            return unsafe { crate::qfile::groups(file_ptr as *const crate::qfile::File) };
+            return unsafe { crate::qfile::groups(file_ptr.addr() as *const crate::qfile::File) };
         }
         Vec::new()
     }
 
-    pub fn file_server_stats_len(&self, file_ptr: usize) -> usize {
-        if file_ptr == 0 {
+    pub fn file_server_stats_len(&self, file_ptr: FileRef) -> usize {
+        if file_ptr.is_none() {
             return 0;
         }
         if self.use_active {
             return unsafe {
-                crate::qfile::server_stat_count(file_ptr as *const crate::qfile::File)
+                crate::qfile::server_stat_count(file_ptr.addr() as *const crate::qfile::File)
             };
         }
         0
     }
 
-    pub fn file_server_stat_at(&self, file_ptr: usize, idx: usize) -> (i32, i32, i32) {
+    pub fn file_server_stat_at(&self, file_ptr: FileRef, idx: usize) -> (i32, i32, i32) {
         if self.use_active {
             let [id, ok, bad] =
-                unsafe { crate::qfile::server_stat_at(file_ptr as *const crate::qfile::File, idx) }
+                unsafe { crate::qfile::server_stat_at(file_ptr.addr() as *const crate::qfile::File, idx) }
                     .unwrap_or([0; 3]);
             return (id, ok, bad);
         }
         (0, 0, 0)
     }
 
-    pub fn file_server_stat_set(&self, file_ptr: usize, server_id: i32, succ: i32, fail: i32) {
+    pub fn file_server_stat_set(&self, file_ptr: FileRef, server_id: i32, succ: i32, fail: i32) {
         if self.use_active {
             unsafe {
                 crate::qfile::set_server_stat(
-                    file_ptr as *const crate::qfile::File,
+                    file_ptr.addr() as *const crate::qfile::File,
                     server_id,
                     succ,
                     fail,
@@ -3207,27 +3246,27 @@ impl QueueSubsysHost {
         }
     }
 
-    pub fn file_push_group(&self, file_ptr: usize, group: *const c_char) {
+    pub fn file_push_group(&self, file_ptr: FileRef, group: *const c_char) {
         if self.use_active {
             let group = if group.is_null() {
                 c""
             } else {
                 unsafe { CStr::from_ptr(group) }
             };
-            unsafe { crate::qfile::push_group(file_ptr as *const crate::qfile::File, group) };
+            unsafe { crate::qfile::push_group(file_ptr.addr() as *const crate::qfile::File, group) };
         }
     }
 
-    pub fn file_set_int(&self, file_ptr: usize, field: i32, val: i32) {
+    pub fn file_set_int(&self, file_ptr: FileRef, field: i32, val: i32) {
         self.file_set_op(file_ptr, field, OpArgs::NONE.a2(val));
     }
 
-    pub fn file_set_i64(&self, file_ptr: usize, field: i32, val: i64) {
+    pub fn file_set_i64(&self, file_ptr: FileRef, field: i32, val: i64) {
         let mut i64s = [val];
         self.file_set_op(file_ptr, field, OpArgs::NONE.i64s(i64s.as_mut_ptr()));
     }
 
-    pub fn file_set_str(&self, file_ptr: usize, field: i32, val: Option<&[u8]>) {
+    pub fn file_set_str(&self, file_ptr: FileRef, field: i32, val: Option<&[u8]>) {
         let cv = val.map(c_bytes);
         let s1 = cv
             .as_ref()
@@ -3235,7 +3274,7 @@ impl QueueSubsysHost {
         self.file_set_op(file_ptr, field, OpArgs::NONE.s1(s1));
     }
 
-    pub fn file_action(&self, file_ptr: usize, action: i32, p2: usize) {
+    pub fn file_action(&self, file_ptr: FileRef, action: i32, p2: usize) {
         self.file_set_op(file_ptr, action, OpArgs::NONE.p2(p2));
     }
 
@@ -3246,36 +3285,36 @@ impl QueueSubsysHost {
         0
     }
 
-    pub fn delete_file_info(&self, file_ptr: usize) {
-        if file_ptr == 0 {
+    pub fn delete_file_info(&self, file_ptr: FileRef) {
+        if file_ptr.is_none() {
             return;
         }
         if self.use_active {
-            unsafe { crate::qfile::nzbget_rs_file_free(file_ptr as *mut crate::qfile::File) };
+            unsafe { crate::qfile::nzbget_rs_file_free(file_ptr.addr() as *mut crate::qfile::File) };
         }
     }
 
-    pub fn file_set_nzb_info(&self, file_ptr: usize, nzb_ptr: usize) {
+    pub fn file_set_nzb_info(&self, file_ptr: FileRef, nzb_ptr: usize) {
         self.file_set_op(file_ptr, 58, OpArgs::NONE.p2(nzb_ptr));
     }
 
-    pub fn file_subtract_server_stats_from_nzb_total(&self, file_ptr: usize, nzb_ptr: usize) {
+    pub fn file_subtract_server_stats_from_nzb_total(&self, file_ptr: FileRef, nzb_ptr: usize) {
         self.file_set_op(file_ptr, 59, OpArgs::NONE.p2(nzb_ptr));
     }
 
-    pub fn file_new_standalone(&self, id: i32, bump_gen: bool) -> usize {
+    pub fn file_new_standalone(&self, id: i32, bump_gen: bool) -> FileRef {
         if self.use_active {
-            return crate::qfile::new_standalone(id, bump_gen) as usize;
+            return FileRef::from_addr(crate::qfile::new_standalone(id, bump_gen) as usize);
         }
-        0
+        FileRef::NONE
     }
 
-    pub fn file_article_raw_at(&self, file_ptr: usize, idx: usize) -> (ArticleSnap, bool) {
+    pub fn file_article_raw_at(&self, file_ptr: FileRef, idx: usize) -> (ArticleSnap, bool) {
         let mut ints = [0i32; 7];
         let mut i64s = [0i64; 1];
         let mut strs = [std::ptr::null(); 2];
         self.article_op(
-            file_ptr,
+            file_ptr.addr(),
             10,
             OpArgs::NONE
                 .a2(idx as i32)
@@ -3305,13 +3344,13 @@ impl QueueSubsysHost {
 
     pub fn file_push_article_basic(
         &self,
-        file_ptr: usize,
+        file_ptr: FileRef,
         part_number: i32,
         size: i32,
         message_id: *const c_char,
     ) {
         self.article_op(
-            file_ptr,
+            file_ptr.addr(),
             11,
             OpArgs::NONE
                 .a2(part_number)
@@ -3323,7 +3362,7 @@ impl QueueSubsysHost {
     #[allow(clippy::too_many_arguments)]
     pub fn file_article_disk_op(
         &self,
-        file_ptr: usize,
+        file_ptr: FileRef,
         idx: i32,
         apply: bool,
         extra_i32: i32,
@@ -3337,7 +3376,7 @@ impl QueueSubsysHost {
         let mut ints = [extra_i32, seg_size, crc as i32, dupe_round, status];
         let mut i64s = [seg_offset];
         self.article_op(
-            file_ptr,
+            file_ptr.addr(),
             12,
             OpArgs::NONE
                 .a2(idx)
@@ -3348,12 +3387,12 @@ impl QueueSubsysHost {
         ) as i32
     }
 
-    pub fn article_at(&self, file_ptr: usize, idx: usize) -> ArticleSnap {
+    pub fn article_at(&self, file_ptr: FileRef, idx: usize) -> ArticleSnap {
         let mut ints = [0i32; 12];
         let mut i64s = [0i64; 1];
         let mut strs = [std::ptr::null(); 2];
         let ptr = self.article_op(
-            file_ptr,
+            file_ptr.addr(),
             0,
             OpArgs::NONE
                 .a2(idx as i32)
@@ -3379,12 +3418,12 @@ impl QueueSubsysHost {
         Self::decode_article_snap(ptr, &ints, &i64s, &strs)
     }
 
-    pub fn file_first_undefined_article(&self, file_ptr: usize) -> Option<(usize, ArticleSnap)> {
+    pub fn file_first_undefined_article(&self, file_ptr: FileRef) -> Option<(usize, ArticleSnap)> {
         let mut ints = [0i32; 12];
         let mut i64s = [0i64; 1];
         let mut strs = [std::ptr::null(); 2];
         let ptr = self.article_op(
-            file_ptr,
+            file_ptr.addr(),
             7,
             OpArgs::NONE
                 .ints(ints.as_mut_ptr())
@@ -3403,14 +3442,14 @@ impl QueueSubsysHost {
 
     pub fn file_find_article(
         &self,
-        file_ptr: usize,
+        file_ptr: FileRef,
         article_ptr: usize,
     ) -> Option<(usize, ArticleSnap)> {
         let mut ints = [0i32; 12];
         let mut i64s = [0i64; 1];
         let mut strs = [std::ptr::null(); 2];
         let ptr = self.article_op(
-            file_ptr,
+            file_ptr.addr(),
             8,
             OpArgs::NONE
                 .p2(article_ptr)
@@ -3530,21 +3569,21 @@ impl QueueSubsysHost {
     /// Caller holds the queue; dedicated claims include running articles.
     pub fn claim_source_header(
         &self,
-        file_ptr: usize,
+        file_ptr: FileRef,
         article_ptr: usize,
         begin: i64,
         end: i64,
     ) -> bool {
         let mut range = [begin, end];
         self.article_op(
-            file_ptr,
+            file_ptr.addr(),
             13,
             OpArgs::NONE.p2(article_ptr).i64s(range.as_mut_ptr()),
         ) != 0
     }
     /// Cancel/latch before an accepted source is demoted or its history reset.
     /// This is metadata-only and requires the caller's queue lock.
-    pub fn invalidate_source_replacement(&self, file_ptr: usize, article_ptr: usize) {
+    pub fn invalidate_source_replacement(&self, file_ptr: FileRef, article_ptr: usize) {
         let claimed = self.article_op(article_ptr, 14, OpArgs::NONE) != 0;
         if claimed {
             let file = self.file_snap(file_ptr);
@@ -3564,13 +3603,13 @@ impl QueueSubsysHost {
     }
 
     // ArticleCache & flush lock ops (op = 44)
-    pub fn article_cache_file_busy(&self, file_ptr: usize) -> bool {
-        crate::articledl::cache_file_busy(file_ptr)
+    pub fn article_cache_file_busy(&self, file_ptr: FileRef) -> bool {
+        crate::articledl::cache_file_busy(file_ptr.addr())
     }
 
     pub fn article_cache_snapshot_segment(
         &self,
-        file_ptr: usize,
+        file_ptr: FileRef,
         article_ptr: usize,
         len: usize,
     ) -> Option<Vec<u8>> {
@@ -3596,25 +3635,25 @@ impl QueueSubsysHost {
         }
     }
 
-    pub fn article_cache_discard_segment(&self, file_ptr: usize, article_ptr: usize) {
+    pub fn article_cache_discard_segment(&self, file_ptr: FileRef, article_ptr: usize) {
         crate::articledl::with_cache_content_lock(|| {
             self.cache_op(file_ptr, 2, OpArgs::NONE.p2(article_ptr));
         });
     }
 
-    pub fn file_try_acquire_flush_lock(&self, file_ptr: usize) -> bool {
+    pub fn file_try_acquire_flush_lock(&self, file_ptr: FileRef) -> bool {
         crate::articledl::with_cache_content_lock(|| {
             self.cache_op(file_ptr, 3, OpArgs::NONE.a2(1)) != 0
         })
     }
 
-    pub fn file_release_flush_lock(&self, file_ptr: usize) {
+    pub fn file_release_flush_lock(&self, file_ptr: FileRef) {
         crate::articledl::with_cache_content_lock(|| {
             self.cache_op(file_ptr, 3, OpArgs::NONE);
         });
     }
 
-    pub fn file_cache_flush_prepare(&self, file_ptr: usize) -> (bool, bool, usize, Vec<u8>) {
+    pub fn file_cache_flush_prepare(&self, file_ptr: FileRef) -> (bool, bool, usize, Vec<u8>) {
         let mut ints = [0i32; 2];
         let mut i64s = [0i64; 2];
         let mut strs = [std::ptr::null(); 1];
@@ -3638,7 +3677,7 @@ impl QueueSubsysHost {
 
     pub fn file_cache_flush_lock_collect(
         &self,
-        file_ptr: usize,
+        file_ptr: FileRef,
     ) -> Option<Vec<(usize, i64, i32, *const u8, Option<Vec<u8>>)>> {
         unsafe extern "C" fn push_seg(
             ctx: usize,
@@ -3676,15 +3715,15 @@ impl QueueSubsysHost {
         })
     }
 
-    pub fn file_cache_is_deleted_unparked(&self, file_ptr: usize) -> bool {
+    pub fn file_cache_is_deleted_unparked(&self, file_ptr: FileRef) -> bool {
         self.cache_op(file_ptr, 6, OpArgs::NONE) != 0
     }
 
-    pub fn file_cache_discard_article_segment(&self, file_ptr: usize, article_ptr: usize) {
+    pub fn file_cache_discard_article_segment(&self, file_ptr: FileRef, article_ptr: usize) {
         self.cache_op(file_ptr, 6, OpArgs::NONE.a2(1).p2(article_ptr));
     }
 
-    pub fn file_cache_flush_finish(&self, file_ptr: usize, flushed_articles: i32) -> bool {
+    pub fn file_cache_flush_finish(&self, file_ptr: FileRef, flushed_articles: i32) -> bool {
         crate::articledl::with_cache_content_lock(|| {
             let mut ints = [0i32; 1];
             self.cache_op(
@@ -3722,7 +3761,7 @@ impl QueueSubsysHost {
             return crate::ffi::active_queue_coord().map_or(
                 RunningDownloadSnap {
                     ad_ptr: 0,
-                    file_ptr: 0,
+                    file_ptr: FileRef::NONE,
                     status: 0,
                     last_update_time: 0,
                 },
@@ -3745,7 +3784,7 @@ impl QueueSubsysHost {
         );
         RunningDownloadSnap {
             ad_ptr,
-            file_ptr: i64s[0] as usize,
+            file_ptr: FileRef::from_addr(i64s[0] as usize),
             status: ints[0],
             last_update_time: i64s[1],
         }
@@ -3774,7 +3813,7 @@ impl QueueSubsysHost {
         );
         unsafe {
             ActiveDownloadSnap {
-                file_ptr: i64s[0] as usize,
+                file_ptr: FileRef::from_addr(i64s[0] as usize),
                 article_ptr: i64s[1] as usize,
                 status: ints[0],
                 has_content_analyzer: ints[1] != 0,
@@ -3835,7 +3874,7 @@ impl QueueSubsysHost {
 
     pub fn start_article_download(
         &self,
-        file_ptr: usize,
+        file_ptr: FileRef,
         article_ptr: usize,
         conn_ptr: usize,
         with_content_analyzer: bool,
@@ -4054,8 +4093,8 @@ impl QueueSubsysHost {
         self.post_job_op(6, dq_ptr, OpArgs::NONE.p2(nzb_ptr));
     }
 
-    pub fn direct_unpack_file_downloaded(&self, dq_ptr: usize, nzb_ptr: usize, file_ptr: usize) {
-        let mut i64s = [file_ptr as i64];
+    pub fn direct_unpack_file_downloaded(&self, dq_ptr: usize, nzb_ptr: usize, file_ptr: FileRef) {
+        let mut i64s = [file_ptr.addr() as i64];
         self.post_job_op(7, dq_ptr, OpArgs::NONE.p2(nzb_ptr).i64s(i64s.as_mut_ptr()));
     }
 
@@ -4071,11 +4110,11 @@ impl QueueSubsysHost {
         self.post_job_op(10, nzb_ptr, OpArgs::NONE);
     }
 
-    pub fn repair_add_par(&self, post_ptr: PostRef, file_ptr: usize, deleted: bool) -> bool {
+    pub fn repair_add_par(&self, post_ptr: PostRef, file_ptr: FileRef, deleted: bool) -> bool {
         self.post_job_op(
             11,
             post_ptr.addr(),
-            OpArgs::NONE.a2(i32::from(deleted)).p2(file_ptr),
+            OpArgs::NONE.a2(i32::from(deleted)).p2(file_ptr.addr()),
         ) != 0
     }
 
@@ -4085,7 +4124,7 @@ impl QueueSubsysHost {
 }
 
 fn file_snap_from(
-    file_ptr: usize,
+    file_ptr: FileRef,
     ints: &[i32; 28],
     i64s: &[i64; 8],
     articles_len: usize,

@@ -4,6 +4,7 @@
 //! NNTP article fetch/download bounds and response classification (`ArticleFetcher`,
 //! `ArticleDownloader`).
 
+use crate::queuesubsys_host::FileRef;
 use crate::status::{DeleteStatus, DirectRenameStatus, DupeMode, NzbParStatus};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
@@ -1997,7 +1998,7 @@ pub(crate) fn unpause_pars_for_damage_host(
         return 0;
     }
     let mut have: i64 = 0;
-    let mut paused: Vec<(usize, i32, Vec<u8>)> = Vec::new();
+    let mut paused: Vec<(FileRef, i32, Vec<u8>)> = Vec::new();
     let flen = host.nzb_file_len(nzb.ptr);
     for i in 0..flen {
         let f = host.file_snap(host.nzb_file_at(nzb.ptr, i));
@@ -2077,7 +2078,7 @@ pub(crate) fn par_damage_forget_all(nzb_id: i32) {
 #[cfg(unix)]
 pub(crate) fn expected_segment_offset_at(
     host: &crate::queuesubsys_host::QueueSubsysHost,
-    file_ptr: usize,
+    file_ptr: FileRef,
     articles_len: usize,
     index: usize,
     art: &crate::queuesubsys_host::ArticleSnap,
@@ -2102,7 +2103,7 @@ pub(crate) fn expected_segment_offset_at(
 #[cfg(unix)]
 pub(crate) fn expected_segment_end_at(
     host: &crate::queuesubsys_host::QueueSubsysHost,
-    file_ptr: usize,
+    file_ptr: FileRef,
     articles_len: usize,
     index: usize,
     art: &crate::queuesubsys_host::ArticleSnap,
@@ -2132,7 +2133,7 @@ pub(crate) fn expected_segment_end_at(
 #[cfg(unix)]
 pub(crate) fn segment_aligned_at(
     host: &crate::queuesubsys_host::QueueSubsysHost,
-    file_ptr: usize,
+    file_ptr: FileRef,
     articles_len: usize,
     index: usize,
     art: &crate::queuesubsys_host::ArticleSnap,
@@ -2488,7 +2489,7 @@ fn nzb_filename_of_host(
     host: &crate::queuesubsys_host::QueueSubsysHost,
     opts: &crate::queuesubsys_host::GlobalOptsSnap,
     own_nzb: &crate::queuesubsys_host::NzbSnap,
-    file_ptr: usize,
+    file_ptr: FileRef,
     articles_len: usize,
 ) -> Vec<u8> {
     if articles_len == 0 {

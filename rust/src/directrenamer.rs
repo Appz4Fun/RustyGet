@@ -3,6 +3,7 @@
 //! par2 set rename check (`need_rename_pars`), article hash16k / par-flag delta
 //! evaluation (`eval_direct_rename_article`), and full queue/loader orchestration.
 
+use crate::queuesubsys_host::FileRef;
 use crate::cstr;
 use std::ffi::CStr;
 
@@ -235,7 +236,7 @@ pub(crate) fn article_downloaded_host(
     host: &crate::queuesubsys_host::QueueSubsysHost,
     opts: &crate::queuesubsys_host::GlobalOptsSnap,
     dq_ptr: usize,
-    file_ptr: usize,
+    file_ptr: FileRef,
     article_size: i32,
     ad_ptr: usize,
 ) {
@@ -342,7 +343,7 @@ pub(crate) fn file_downloaded_host(
     host: &crate::queuesubsys_host::QueueSubsysHost,
     opts: &crate::queuesubsys_host::GlobalOptsSnap,
     dq_ptr: usize,
-    file_ptr: usize,
+    file_ptr: FileRef,
 ) {
     let file = host.file_snap(file_ptr);
     if file.nzb_ptr != 0 {
@@ -698,7 +699,7 @@ fn resolve_new_name(
 fn try_create_hard_link_host(
     host: &crate::queuesubsys_host::QueueSubsysHost,
     nzb_ptr: usize,
-    file_ptr: usize,
+    file_ptr: FileRef,
     filename: &[u8],
     old_output_filename: &[u8],
     new_name: &[u8],
@@ -730,7 +731,7 @@ fn try_create_hard_link_host(
     let c_final = cstr::to_cstring(&final_output_filename);
     let mut errmsg = Vec::new();
     if crate::fsops::create_hard_link(&c_old, &c_final, &crate::fsops::posix_stat, &mut errmsg) {
-        if file_ptr != 0 {
+        if file_ptr.is_some() {
             host.file_set_str(
                 file_ptr,
                 FILE_STR_HARD_LINK_PATH,
@@ -863,7 +864,7 @@ fn rename_completed_files_host(
             try_create_hard_link_host(
                 host,
                 nzb_ptr,
-                0,
+                FileRef::NONE,
                 &cf.filename,
                 &old_output_filename,
                 &new_name,

@@ -2445,7 +2445,7 @@ unsafe extern "C" fn hc_native_action_cb(
     len: usize,
 ) -> usize {
     use crate::queuesubsys_host::{
-        QueueSubsysHost, AI_FAILED, AI_UNDEFINED, ASPECT_NZB_RETURNED, ASPECT_URL_RETURNED,
+        FileRef, QueueSubsysHost, AI_FAILED, AI_UNDEFINED, ASPECT_NZB_RETURNED, ASPECT_URL_RETURNED,
         CF_FAILURE, CF_NONE, CF_PARTIAL, DH_NONE, DH_REDOWNLOAD_MANUAL, DP_NONE, DUP_INT_DUPE_MODE,
         DUP_INT_DUPE_SCORE, DUP_STR_DUPE_KEY, DUP_STR_NAME, EA_GROUP_PAUSE_EXTRA_PARS,
         FILE_ACT_CLEAR_ARTICLES, FILE_I64_FAILED_SIZE, FILE_I64_REMAINING_SIZE,
@@ -2454,7 +2454,7 @@ unsafe extern "C" fn hc_native_action_cb(
         HK_DUP, HK_NZB, HK_URL, MK_DETAIL, MK_INFO, MK_WARNING, NZB_ACT_BUILD_DEST_DIR,
         NZB_ACT_CLEAR_EXTRACTED_ARCHIVES, NZB_ACT_CLEAR_FILE_LIST,
         NZB_ACT_CLEAR_LIVE_REPAIR_THREAD, NZB_ACT_CLEAR_SCRIPT_STATUSES,
-        NZB_ACT_UPDATE_COMPLETED_STATS, NZB_ACT_UPDATE_CURRENT_STATS, NZB_I64_DOWNLOADED_SIZE,
+        NZB_ACT_UPDATE_CURRENT_STATS, NZB_I64_DOWNLOADED_SIZE,
         NZB_I64_DUPE_RECOVERED_BYTES, NZB_I64_FAILED_SIZE, NZB_I64_PAR_FAILED_SIZE,
         NZB_I64_PAR_SUCCESS_SIZE, NZB_I64_SUCCESS_SIZE, NZB_INT_ALL_FIRST,
         NZB_INT_DEAD_PICK_PROBED, NZB_INT_DELETE_PAUSED, NZB_INT_DOWNLOAD_SEC,
@@ -2501,7 +2501,7 @@ unsafe extern "C" fn hc_native_action_cb(
             for i in 0..fn_len {
                 let fp = host.nzb_file_at(p2, i);
                 let fs = host.file_snap(fp);
-                host.nzb_action(p2, NZB_ACT_UPDATE_COMPLETED_STATS, fp);
+                host.nzb_update_completed_stats(p2, fp);
                 host.nzb_push_completed_file(p2, fp, &fs.filename, CF_NONE, 0);
             }
             let nzb = host.nzb_snap(p2, false);
@@ -2574,7 +2574,7 @@ unsafe extern "C" fn hc_native_action_cb(
                 }
                 let partial = cf.status == CF_PARTIAL;
                 let (fi_ptr, state_loaded) = host.disk_load_file_for_inspect(cf.id, false, partial);
-                if fi_ptr == 0 {
+                if fi_ptr.is_none() {
                     continue;
                 }
                 if partial && !state_loaded {
@@ -2782,7 +2782,7 @@ unsafe extern "C" fn hc_native_action_cb(
                     pp.nzb_downloaded(host, p1, p2);
                 }
             }
-            host.prepost_queue_changed(p1, ASPECT_NZB_RETURNED, p2, 0);
+            host.prepost_queue_changed(p1, ASPECT_NZB_RETURNED, p2, FileRef::NONE);
             0
         }
         24 => {
@@ -2801,7 +2801,7 @@ unsafe extern "C" fn hc_native_action_cb(
                 host.nzb_set_int(nzb_ptr, NZB_INT_DUPE_HINT, DH_REDOWNLOAD_MANUAL);
             }
             host.history_return_to_queue(p1, p2, a1 as usize);
-            host.prepost_queue_changed(p1, ASPECT_URL_RETURNED, nzb_ptr, 0);
+            host.prepost_queue_changed(p1, ASPECT_URL_RETURNED, nzb_ptr, FileRef::NONE);
             0
         }
         26 => {
@@ -2873,7 +2873,7 @@ unsafe extern "C" fn hc_native_action_cb(
         30 => {
             let try_state = a2 == CF_PARTIAL;
             let (fi_ptr, state_loaded) = host.disk_load_file_for_inspect(a1, true, try_state);
-            if fi_ptr == 0 {
+            if fi_ptr.is_none() {
                 return 0;
             }
             host.file_set_nzb_info(fi_ptr, p2);
@@ -2901,27 +2901,30 @@ unsafe extern "C" fn hc_native_action_cb(
             *i64s.add(7) = nzb.par_failed_size;
             *i64s.add(8) = nzb.par_success_size;
             *strs.add(0) = hc_stash_str(&fs.filename);
-            fi_ptr
+            fi_ptr.addr()
         }
         31 => {
+            let file = FileRef::from_addr(p2);
             if a1 == 0 {
-                host.delete_file_info(p2);
+                host.delete_file_info(file);
             } else {
-                host.file_set_str(p2, FILE_STR_FILENAME, Some(hc_cstr_bytes(s1)));
+                host.file_set_str(file, FILE_STR_FILENAME, Some(hc_cstr_bytes(s1)));
             }
             0
         }
         32 => {
+            let file = FileRef::from_addr(p2);
             for idx in 0..len {
-                let art = host.article_at(p2, idx);
+                let art = host.article_at(file, idx);
                 *ints.add(idx) = art.status;
                 *ints.add(len + idx) = art.size;
             }
             0
         }
         33 => {
-            host.file_set_int(p1, FILE_INT_PARTIAL_STATE, a2);
-            host.file_subtract_server_stats_from_nzb_total(p1, p2);
+            let file = FileRef::from_addr(p1);
+            host.file_set_int(file, FILE_INT_PARTIAL_STATE, a2);
+            host.file_subtract_server_stats_from_nzb_total(file, p2);
             host.nzb_set_i64(p2, NZB_I64_FAILED_SIZE, *i64s.add(3));
             host.nzb_set_i64(p2, NZB_I64_SUCCESS_SIZE, *i64s.add(4));
             host.nzb_set_int(p2, NZB_INT_FAILED_ARTICLES, *ints.add(3));
@@ -2931,28 +2934,28 @@ unsafe extern "C" fn hc_native_action_cb(
             if !bytes.is_null() {
                 for idx in 0..len {
                     if *bytes.add(idx) != 0 {
-                        let art = host.article_at(p1, idx);
+                        let art = host.article_at(file, idx);
                         if art.ptr != 0 {
-                            host.invalidate_source_replacement(p1, art.ptr);
+                            host.invalidate_source_replacement(file, art.ptr);
                             host.article_reset_for_retry(art.ptr);
                         }
                     }
                 }
             }
-            host.file_set_i64(p1, FILE_I64_FAILED_SIZE, *i64s.add(0));
-            host.file_set_i64(p1, FILE_I64_REMAINING_SIZE, *i64s.add(1));
-            host.file_set_i64(p1, FILE_I64_SUCCESS_SIZE, *i64s.add(2));
-            host.file_set_int(p1, FILE_INT_FAILED_ARTICLES, *ints.add(0));
-            host.file_set_int(p1, FILE_INT_COMPLETED_ARTICLES, *ints.add(1));
-            host.file_set_int(p1, FILE_INT_SUCCESS_ARTICLES, *ints.add(2));
-            let fs = host.file_snap(p1);
+            host.file_set_i64(file, FILE_I64_FAILED_SIZE, *i64s.add(0));
+            host.file_set_i64(file, FILE_I64_REMAINING_SIZE, *i64s.add(1));
+            host.file_set_i64(file, FILE_I64_SUCCESS_SIZE, *i64s.add(2));
+            host.file_set_int(file, FILE_INT_FAILED_ARTICLES, *ints.add(0));
+            host.file_set_int(file, FILE_INT_COMPLETED_ARTICLES, *ints.add(1));
+            host.file_set_int(file, FILE_INT_SUCCESS_ARTICLES, *ints.add(2));
+            let fs = host.file_snap(file);
             host.disk_discard_file(fs.id, false, true, a2 != PARTIAL_COMPLETED);
             if a2 == PARTIAL_COMPLETED {
-                host.disk_save_file_state(p1, true);
+                host.disk_save_file_state(file, true);
             }
-            host.file_action(p1, FILE_ACT_CLEAR_ARTICLES, 0);
+            host.file_action(file, FILE_ACT_CLEAR_ARTICLES, 0);
             let fid = fs.id;
-            host.nzb_add_requeued_file(p2, p1);
+            host.nzb_add_requeued_file(p2, file);
             host.nzb_erase_completed_file(p2, a1 as usize);
             fid as usize
         }

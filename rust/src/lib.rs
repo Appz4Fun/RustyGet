@@ -6,9 +6,9 @@
 
 pub mod archive_native;
 #[cfg(unix)]
-pub mod articledl;
+pub(crate) mod articledl;
 #[cfg(unix)]
-pub mod articlefetcher;
+pub(crate) mod articlefetcher;
 pub mod binrpc;
 pub mod bytes;
 pub(crate) mod cstr;
@@ -16,36 +16,36 @@ pub(crate) mod cstr;
 mod callback_metrics;
 pub mod cleanup;
 pub mod cmdline;
-pub mod collection;
+pub(crate) mod collection;
 pub mod configfile;
 pub mod crc;
 pub mod decode;
 pub mod deadvolume;
 pub mod decoder;
 pub mod deobfuscation;
-pub mod directrenamer;
-pub mod donorscore;
+pub(crate) mod directrenamer;
+pub(crate) mod donorscore;
 pub mod downloadinfo;
 pub mod dupecoord;
-pub mod dupeprobe;
-pub mod dupesearch_coord;
+pub(crate) mod dupeprobe;
+pub(crate) mod dupesearch_coord;
 pub mod dupesearch_nzb;
 pub mod escape;
 pub mod feed;
-pub mod feedfilter;
+pub(crate) mod feedfilter;
 pub mod ffi;
 pub mod filetypes;
 pub mod fsdelete;
 #[cfg(unix)]
-pub mod fsops;
-pub mod historycoord;
+pub(crate) mod fsops;
+pub(crate) mod historycoord;
 #[cfg(unix)]
-pub mod jobthread;
+pub(crate) mod jobthread;
 pub mod json;
 #[cfg(unix)]
 pub mod log;
 #[cfg(unix)]
-pub mod maintenance;
+pub(crate) mod maintenance;
 #[cfg(unix)]
 pub mod net;
 pub mod nntp;
@@ -53,80 +53,80 @@ pub mod nserv;
 pub mod nzbfile;
 pub mod options;
 pub mod parchecker;
-pub mod liveparlog;
-pub mod pardamage;
-pub mod parpreset;
+pub(crate) mod liveparlog;
+pub(crate) mod pardamage;
+pub(crate) mod parpreset;
 mod parlive;
 pub mod parparser;
 pub mod parrenamer;
 pub mod paths;
-pub mod posting;
+pub(crate) mod posting;
 #[cfg(unix)]
 pub mod postproc;
-pub mod prepost;
-pub mod progressive_unpack;
+pub(crate) mod prepost;
+pub(crate) mod progressive_unpack;
 #[cfg(unix)]
-pub mod procrun;
-pub mod queueeditor;
-pub mod rarreader;
-pub mod rarrenamer;
+pub(crate) mod procrun;
+pub(crate) mod queueeditor;
+pub(crate) mod rarreader;
+pub(crate) mod rarrenamer;
 pub mod releasename;
 pub mod renameanalyzer;
-pub mod repair;
+pub(crate) mod repair;
 pub mod rpcparams;
-pub mod rpcroute;
-pub mod scanner;
-pub mod scheduler;
+pub(crate) mod rpcroute;
+pub(crate) mod scanner;
+pub(crate) mod scheduler;
 #[cfg(unix)]
 pub mod socket;
 pub mod statmeter;
 pub mod status;
-pub mod certtools;
+pub(crate) mod certtools;
 pub mod systemhealth;
 pub mod backbones;
-pub mod addrpick;
+pub(crate) mod addrpick;
 pub mod hostlookup;
-pub mod sysmetrics;
+pub(crate) mod sysmetrics;
 pub mod text;
 pub mod tlscipher;
 #[cfg(unix)]
-pub mod tlssock;
+pub(crate) mod tlssock;
 pub mod twin;
-pub mod twinfields;
+pub(crate) mod twinfields;
 pub mod unpack;
-pub mod unpacklimits;
-pub mod url;
+pub(crate) mod unpacklimits;
+pub(crate) mod url;
 pub mod urlcoord;
 pub mod util;
-pub mod webdownload;
+pub(crate) mod webdownload;
 pub mod webserver;
 pub mod webutil;
 pub mod wildmask;
 
 pub mod artwritercore;
 pub mod diskstate_format;
-pub mod donorkind;
+pub(crate) mod donorkind;
 pub mod dupefallback;
 pub mod dupeidentity;
-pub mod ncurses_format;
+pub(crate) mod ncurses_format;
 pub mod postrepair;
 #[cfg(unix)]
-pub mod qarticle;
+pub(crate) mod qarticle;
 #[cfg(unix)]
-pub mod qfile;
+pub(crate) mod qfile;
 #[cfg(unix)]
 pub mod qnzb;
-pub mod qdup;
+pub(crate) mod qdup;
 #[cfg(unix)]
 pub mod qhist;
-pub mod qlist;
-pub mod qqueue;
+pub(crate) mod qlist;
+pub(crate) mod qqueue;
 pub mod queuecoord;
 pub(crate) mod queuesubsys_host;
 pub mod sevenzraw;
 pub mod streamrepair;
 #[cfg(unix)]
-pub mod streamrepair_coord;
+pub(crate) mod streamrepair_coord;
 pub mod xmlrpc_format;
 
 pub mod deadpostings;

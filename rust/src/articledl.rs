@@ -110,8 +110,13 @@ impl DlHost<'_> {
         i64s: *mut i64,
         strs: *mut *const c_char,
     ) -> usize {
-        self.qh
-            .raw(45, a1, a2, self.file_ptr, p2, s1, s2, ints, i64s, strs)
+        if self.qh.use_active {
+            let file = self.file_ptr as *const crate::qfile::File;
+            unsafe { crate::qfile::host_output_op(file, a1, a2, p2, s1, s2, ints, i64s, strs) }
+        } else {
+            self.qh
+                .raw(45, a1, a2, self.file_ptr, p2, s1, s2, ints, i64s, strs)
+        }
     }
 
     fn with_output_guard<R, F: FnOnce() -> R>(&self, always_lock: bool, f: F) -> R {
@@ -2825,18 +2830,34 @@ impl NzbgetRsArticleDownloader {
         let w = self.worker.lock().unwrap_or_else(|e| e.into_inner());
         for &(sid, s, f) in &w.server_stats {
             let mut arr = [sid, s, f];
-            qh.raw(
-                45,
-                10,
-                0,
-                self.file_ptr,
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                arr.as_mut_ptr(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            );
+            if qh.use_active {
+                unsafe {
+                    crate::qfile::host_output_op(
+                        self.file_ptr as *const crate::qfile::File,
+                        10,
+                        0,
+                        0,
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        arr.as_mut_ptr(),
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                    )
+                }
+            } else {
+                qh.raw(
+                    45,
+                    10,
+                    0,
+                    self.file_ptr,
+                    0,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    arr.as_mut_ptr(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            };
         }
     }
 

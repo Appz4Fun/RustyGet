@@ -503,6 +503,31 @@ pub fn extract_7z_cancellable<F>(
 where
     F: FnMut(i32, &str),
 {
+    extract_7z_reporting(
+        archive_path,
+        output_dir,
+        password,
+        overwrite_mode,
+        log_cb,
+        is_cancelled,
+        None,
+    )
+}
+
+/// [`extract_7z_cancellable`]; a file that is no archive at all is reported in `not_archive`
+/// (when given) instead of being logged as an error ([`NotAnArchive`]).
+pub(crate) fn extract_7z_reporting<F>(
+    archive_path: &Path,
+    output_dir: &Path,
+    password: &str,
+    overwrite_mode: i32,
+    log_cb: &mut F,
+    is_cancelled: &mut dyn FnMut() -> bool,
+    mut not_archive: NotAnArchiveSlot<'_>,
+) -> Result<zipfast::extract::Summary, String>
+where
+    F: FnMut(i32, &str),
+{
     use std::sync::mpsc;
     use std::sync::{Arc, Mutex};
 
@@ -821,10 +846,17 @@ where
                 | (_, Some(SevenZipError::PasswordRequired))
                 | (_, Some(SevenZipError::WrongPassword)) => SZ_WRONG_PASSWORD.to_string(),
                 (_, Some(SevenZipError::Canceled)) => return Err("7-Zip: Aborted".to_string()),
-                (_, Some(e @ SevenZipError::Map(zipfast::map::MapError::NotArchive))) => {
-                    format!("{NOT_AN_ARCHIVE_PREFIX}7-Zip: {e}")
+                (_, Some(SevenZipError::Map(zipfast::map::MapError::NotArchive)))
+                | (zipfast::Error::NotAnArchive, _) => {
+                    let msg = match SevenZipError::of(&err) {
+                        Some(e) => format!("7-Zip: {e}"),
+                        None => format!("7-Zip: {err}"),
+                    };
+                    if report_not_archive(&mut not_archive, archive_path, &msg) {
+                        return Err(msg);
+                    }
+                    msg
                 }
-                (zipfast::Error::NotAnArchive, _) => format!("{NOT_AN_ARCHIVE_PREFIX}7-Zip: {err}"),
                 (_, Some(e)) => format!("7-Zip: {e}"),
                 (e, None) => format!("7-Zip: {e}"),
             };
@@ -886,10 +918,52 @@ fn set_file_mtime(file: &std::fs::File, mtime: Option<i64>, nanos: u32) {
     }
 }
 
-/// The start of the message of an extraction that failed because zipfast found no archive of the
-/// format it was asked to read (`zipfast::Error::NotAnArchive`, a 7z map's `NotArchive`), as
-/// opposed to a damaged one.
-pub const NOT_AN_ARCHIVE_PREFIX: &str = "Not an archive: ";
+/// zipfast found no archive where an extractor expected one (`zipfast::Error::NotAnArchive`, a 7z
+/// map's `NotArchive`) and the file starts with none of the ZIP, RAR or 7z signatures: a plain
+/// file named like an archive, not a damaged archive. Holds the message the extraction failed
+/// with; it is not logged.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NotAnArchive(pub String);
+
+/// Where an extraction reports [`NotAnArchive`]; `None` treats it as any other failure.
+pub type NotAnArchiveSlot<'a> = Option<&'a mut Option<NotAnArchive>>;
+
+/// Whether the file starts with a ZIP (local header, end record, spanned marker), RAR 1.5-4.x,
+/// RAR 5.0 or 7z signature.
+fn has_archive_signature(path: &Path) -> bool {
+    let mut head = [0u8; 8];
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return true;
+    };
+    let mut n = 0;
+    while n < head.len() {
+        match f.read(&mut head[n..]) {
+            Ok(0) => break,
+            Ok(k) => n += k,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return true,
+        }
+    }
+    let head = &head[..n];
+    // zipfast does not export its 7z magic.
+    const SEVEN_ZIP: [u8; 6] = [b'7', b'z', 0xbc, 0xaf, 0x27, 0x1c];
+    zipfast::zip::sniff(head)
+        || head.starts_with(zipfast::rar5::SIGNATURE_V4)
+        || head.starts_with(zipfast::rar5::SIGNATURE)
+        || head.starts_with(&SEVEN_ZIP)
+}
+
+/// Reports a "not an archive" failure (`msg`) in `slot` when one is given and the file carries
+/// no archive signature; returns whether it did.
+fn report_not_archive(slot: &mut NotAnArchiveSlot<'_>, path: &Path, msg: &str) -> bool {
+    match slot.as_deref_mut() {
+        Some(s) if !has_archive_signature(path) => {
+            *s = Some(NotAnArchive(msg.to_string()));
+            true
+        }
+        _ => false,
+    }
+}
 
 /// Extracts ZIP, TAR, or single-stream (`.gz`, `.bz2`, `.xz`, `.zst`) archives in-process
 /// while polling `is_cancelled` on every block/chunk read and output write.
@@ -900,6 +974,31 @@ pub fn extract_zipfast_cancellable<F>(
     overwrite_mode: i32,
     log_cb: &mut F,
     is_cancelled: &mut dyn FnMut() -> bool,
+) -> Result<zipfast::extract::Summary, String>
+where
+    F: FnMut(i32, &str),
+{
+    extract_zipfast_reporting(
+        archive_path,
+        output_dir,
+        password,
+        overwrite_mode,
+        log_cb,
+        is_cancelled,
+        None,
+    )
+}
+
+/// [`extract_zipfast_cancellable`]; a file that is no archive at all is reported in
+/// `not_archive` (when given) instead of being logged as an error ([`NotAnArchive`]).
+pub(crate) fn extract_zipfast_reporting<F>(
+    archive_path: &Path,
+    output_dir: &Path,
+    password: &str,
+    overwrite_mode: i32,
+    log_cb: &mut F,
+    is_cancelled: &mut dyn FnMut() -> bool,
+    not_archive: NotAnArchiveSlot<'_>,
 ) -> Result<zipfast::extract::Summary, String>
 where
     F: FnMut(i32, &str),
@@ -925,13 +1024,14 @@ where
     let head_slice = &head[..head_len];
 
     if zipfast::zip::sniff(head_slice) {
-        return extract_zip_cancellable(
+        return extract_zip_reporting(
             archive_path,
             output_dir,
             password,
             overwrite_mode,
             log_cb,
             is_cancelled,
+            not_archive,
         );
     }
     if zipfast::stream::Codec::sniff(head_slice).is_some() || zipfast::tar::sniff_tar(head_slice) {
@@ -946,13 +1046,14 @@ where
 
     // RAR sets are read by `crate::progressive_unpack` before this point; anything else that
     // is not a stream or tar is tried as ZIP.
-    extract_zip_cancellable(
+    extract_zip_reporting(
         archive_path,
         output_dir,
         password,
         overwrite_mode,
         log_cb,
         is_cancelled,
+        not_archive,
     )
 }
 
@@ -1230,6 +1331,7 @@ fn zip_read_member(
 /// mtime rules. A member that would be refused (no password, unsupported method) is refused
 /// before its destination is opened. Output of a member that fails is removed when this run
 /// created the file, and the first failure stops the run.
+#[cfg(test)]
 fn extract_zip_cancellable<F>(
     archive_path: &Path,
     output_dir: &Path,
@@ -1241,16 +1343,43 @@ fn extract_zip_cancellable<F>(
 where
     F: FnMut(i32, &str),
 {
+    extract_zip_reporting(
+        archive_path,
+        output_dir,
+        password,
+        overwrite_mode,
+        log_cb,
+        is_cancelled,
+        None,
+    )
+}
+
+/// Extracts a ZIP as described for `extract_zip_cancellable`; a file that is no archive at all
+/// is reported in `not_archive` (when given) instead of being logged as an error
+/// ([`NotAnArchive`]).
+fn extract_zip_reporting<F>(
+    archive_path: &Path,
+    output_dir: &Path,
+    password: &str,
+    overwrite_mode: i32,
+    log_cb: &mut F,
+    is_cancelled: &mut dyn FnMut() -> bool,
+    mut not_archive: NotAnArchiveSlot<'_>,
+) -> Result<zipfast::extract::Summary, String>
+where
+    F: FnMut(i32, &str),
+{
     use std::io::{Seek, SeekFrom};
 
     // The central directory is read first so links and unreadable names refuse the whole
     // archive before anything is written.
     let archive = zipfast::zip::Archive::open(archive_path).map_err(|e| {
-        let msg = match e {
-            zipfast::Error::NotAnArchive => format!("{NOT_AN_ARCHIVE_PREFIX}{e}"),
-            e => e.to_string(),
-        };
-        log_cb(1, &msg);
+        let msg = e.to_string();
+        if !(matches!(e, zipfast::Error::NotAnArchive)
+            && report_not_archive(&mut not_archive, archive_path, &msg))
+        {
+            log_cb(1, &msg);
+        }
         msg
     })?;
     if archive.entries.iter().any(|e| e.is_link()) {

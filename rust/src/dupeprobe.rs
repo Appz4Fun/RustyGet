@@ -190,7 +190,7 @@ pub fn eval_recheck_outcome(
         return (2, out);
     }
     let suffix = if retry {
-        ": retrying failed articles"
+        "; retrying them"
     } else {
         "; not retrying"
     };
@@ -894,7 +894,7 @@ mod tests {
         assert_eq!(code, 3);
         assert_eq!(
             msg,
-            b"6 of 10 failed articles exist on the servers: retrying failed articles"
+            b"6 of 10 failed articles exist on the servers; retrying them"
         );
     }
 

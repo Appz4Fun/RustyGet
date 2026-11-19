@@ -605,17 +605,16 @@ fn atoi(s: &[u8]) -> c_int {
 
 /// Host op 7: the TLS cipher service (a1 0 start, with s1 a server id when
 /// not empty; 1 status of job s1; else cancel job s1). The JSON reply goes
-/// to `*out` (an `RsBuf`) when `out` is not null. Returns 1.
+/// to `*out` (a `Vec<u8>`) when `out` is not null. Returns 1.
 ///
 /// # Safety
-/// `s1` is null or NUL-terminated; `out` is null or a writable `RsBuf`.
+/// `s1` is null or NUL-terminated; `out` is null or points to a live `Vec<u8>`.
 pub unsafe fn host_tls_cipher(a1: i32, out: usize, s1: *const c_char) -> usize {
-    use crate::ffi::RsBuf;
     let available = !crate::ffi::build_tls_disabled()
         && (cfg!(target_os = "macos") || cfg!(target_os = "linux"));
-    let buf: RsBuf = if !available {
+    let buf: Vec<u8> = if !available {
         let msg = r#"{"Available":false,"State":"unavailable","Message":"TLS cipher optimization requires a TLS-enabled Rust backend and a supported atomic configuration adapter."}"#;
-        unsafe { crate::ffi::nzbget_rs_alloc_buf(msg.as_ptr().cast(), msg.len()) }
+        msg.as_bytes().to_vec()
     } else if a1 == 0 {
         let id = (!s1.is_null()).then(|| unsafe { CStr::from_ptr(s1) }.to_bytes());
         match id {
@@ -630,9 +629,7 @@ pub unsafe fn host_tls_cipher(a1: i32, out: usize, s1: *const c_char) -> usize {
         }
     };
     if out != 0 {
-        unsafe { std::ptr::write(out as *mut RsBuf, buf) };
-    } else {
-        unsafe { crate::ffi::nzbget_rs_free(buf) };
+        unsafe { *(out as *mut Vec<u8>) = buf };
     }
     1
 }

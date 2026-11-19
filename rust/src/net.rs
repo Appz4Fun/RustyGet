@@ -3751,7 +3751,7 @@ pub(crate) unsafe fn nzbget_rs_serverpool_test(
     timeout: c_int,
     cert_verif_level: u32,
     address: &[u8],
-    out_err: *mut crate::ffi::RsBuf,
+    out_err: &mut Vec<u8>,
 ) -> c_int {
     let conn_host_cb = crate::ffi::tls_host_cb();
     let srv = RsNewsServer::new(
@@ -3801,9 +3801,7 @@ pub(crate) unsafe fn nzbget_rs_serverpool_test(
     if !address.is_empty() {
         // a per-address check: connect there, keeping the host name for TLS
         let Some(addr) = crate::addrpick::normalize(&String::from_utf8_lossy(address)) else {
-            if !out_err.is_null() {
-                *out_err = crate::ffi::into_buf(b"Not an IP address".to_vec());
-            }
+            *out_err = b"Not an IP address".to_vec();
             return 0;
         };
         conn.session.get_mut().core.resolved_addrs = vec![addr.into_bytes()];
@@ -3835,8 +3833,8 @@ pub(crate) unsafe fn nzbget_rs_serverpool_test(
     }
     if !ok {
         if let Some(err) = trap.first_err.take() {
-            if !err.is_empty() && !out_err.is_null() {
-                *out_err = crate::ffi::into_buf(err);
+            if !err.is_empty() {
+                *out_err = err;
             }
         }
     }
@@ -4000,7 +3998,7 @@ pub(crate) unsafe fn nzbget_rs_webdl_read_temp_url(
     url: *const c_char,
     info_name: *const c_char,
     temp_dir: *const c_char,
-    out_buf: *mut crate::ffi::RsBuf,
+    out_buf: &mut Vec<u8>,
 ) -> c_int {
     let tdir = opt_bytes(temp_dir);
     let sep = crate::paths::PATH_SEPARATOR as u8;
@@ -4025,16 +4023,16 @@ pub(crate) unsafe fn nzbget_rs_webdl_read_temp_url(
     );
     let ok = dl.download_sync(5) == (WebDlStatus::AdFinished as c_int);
 
-    if ok && !out_buf.is_null() {
+    if ok {
         #[cfg(unix)]
         {
             use std::os::unix::ffi::OsStrExt;
             let os_p = std::path::Path::new(std::ffi::OsStr::from_bytes(&tmp_path));
             if let Ok(bytes) = std::fs::read(os_p) {
                 let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-                out_buf.write(crate::ffi::into_buf(bytes[..end].to_vec()));
+                *out_buf = bytes[..end].to_vec();
             } else {
-                out_buf.write(crate::ffi::into_buf(Vec::new()));
+                *out_buf = Vec::new();
             }
         }
     }

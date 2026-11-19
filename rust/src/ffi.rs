@@ -1,7 +1,6 @@
 //! C-shaped helpers left from the C++ port. Nothing outside this crate calls
 //! them any more: strings come in as NUL-terminated C strings and results go
-//! out as a buffer freed with `nzbget_rs_free`. They are being replaced by
-//! plain Rust APIs.
+//! out as a `Vec<u8>`. They are being replaced by plain Rust APIs.
 
 use crate::cstr;
 use crate::options::OptStr;
@@ -36,16 +35,16 @@ pub extern "C" fn nzbget_rs_tls_cipher_pin(protocol: c_int, bits: u32, flags: u3
     }
 }
 
-fn cipher_response(result: Result<String, crate::tlscipher::Error>) -> RsBuf {
+fn cipher_response(result: Result<String, crate::tlscipher::Error>) -> Vec<u8> {
     match result {
-        Ok(json) => into_buf(json.into_bytes()),
+        Ok(json) => json.into_bytes(),
         Err(error) => {
             let mut message = Vec::new();
             crate::escape::json_encode(error.0.as_bytes(), &mut message);
             let mut out = b"{\"Error\":\"".to_vec();
             out.extend(message);
             out.extend_from_slice(b"\"}");
-            into_buf(out)
+            out
         }
     }
 }
@@ -54,9 +53,7 @@ fn cipher_response(result: Result<String, crate::tlscipher::Error>) -> RsBuf {
 /// backend is null (built-in backend) or points to a complete callback table. Its context transfers
 /// to Rust exactly once, including rejected/duplicate starts. Callbacks are
 /// thread-safe for the documented single-worker use and must never unwind.
-pub unsafe extern "C" fn nzbget_rs_tls_cipher_start(
-    backend: *const tls_cipher_native::Io,
-) -> RsBuf {
+pub unsafe fn nzbget_rs_tls_cipher_start(backend: *const tls_cipher_native::Io) -> Vec<u8> {
     // A null table selects the built-in OpenSSL backend.
     let io = if backend.is_null() {
         crate::tlssock::cipher::backend()
@@ -67,7 +64,7 @@ pub unsafe extern "C" fn nzbget_rs_tls_cipher_start(
 }
 /// Starts the built-in backend for one saved server (`ServerN`), leaving the
 /// other servers' ciphers alone. A server ID below 1 means every server.
-pub extern "C" fn nzbget_rs_tls_cipher_start_server(server: c_int) -> RsBuf {
+pub fn nzbget_rs_tls_cipher_start_server(server: c_int) -> Vec<u8> {
     let only = u32::try_from(server).ok().filter(|id| *id > 0);
     cipher_response(tls_cipher_native::start(
         crate::tlssock::cipher::backend(),
@@ -76,7 +73,7 @@ pub extern "C" fn nzbget_rs_tls_cipher_start_server(server: c_int) -> RsBuf {
 }
 /// # Safety
 /// id is null or a readable NUL-terminated string; null/empty queries current job.
-pub unsafe extern "C" fn nzbget_rs_tls_cipher_status(id: *const c_char) -> RsBuf {
+pub unsafe fn nzbget_rs_tls_cipher_status(id: *const c_char) -> Vec<u8> {
     let id = if id.is_null() {
         None
     } else {
@@ -89,7 +86,7 @@ pub unsafe extern "C" fn nzbget_rs_tls_cipher_status(id: *const c_char) -> RsBuf
 }
 /// # Safety
 /// id points to a readable NUL-terminated string.
-pub unsafe extern "C" fn nzbget_rs_tls_cipher_cancel(id: *const c_char) -> RsBuf {
+pub unsafe fn nzbget_rs_tls_cipher_cancel(id: *const c_char) -> Vec<u8> {
     if id.is_null() {
         return cipher_response(Err(crate::tlscipher::Error("Missing cipher job ID.")));
     }
@@ -128,29 +125,7 @@ mod tls_cipher_abi_tests {
     fn invalid_utf8_status_id_is_an_error_instead_of_current_job() {
         let bytes = [255u8, 0];
         let response = unsafe { nzbget_rs_tls_cipher_status(bytes.as_ptr().cast()) };
-        let text = unsafe { std::slice::from_raw_parts(response.data.cast::<u8>(), response.len) };
-        assert!(text.starts_with(b"{\"Error\":"));
-        unsafe {
-            nzbget_rs_free(response);
-        }
-    }
-}
-
-#[repr(C)]
-pub struct RsBuf {
-    pub data: *mut c_char,
-    pub len: usize,
-    pub(crate) cap: usize,
-}
-
-pub(crate) fn into_buf(mut v: Vec<u8>) -> RsBuf {
-    v.push(0);
-    let len = v.len() - 1;
-    let mut v = std::mem::ManuallyDrop::new(v);
-    RsBuf {
-        data: v.as_mut_ptr() as *mut c_char,
-        len,
-        cap: v.capacity(),
+        assert!(response.starts_with(b"{\"Error\":"));
     }
 }
 
@@ -163,27 +138,6 @@ pub(crate) unsafe fn input<'a>(raw: *const c_char) -> &'a [u8] {
 }
 
 // ---- twins and alts (twin.rs); lists cross the ABI as text lines ----
-
-#[cfg(test)]
-unsafe fn bytes_arg<'a>(data: *const u8, len: usize) -> &'a [u8] {
-    if data.is_null() {
-        &[]
-    } else {
-        std::slice::from_raw_parts(data, len)
-    }
-}
-
-/// # Safety
-/// `buf` came from an nzbget_rs_* function and wasn't freed yet.
-pub unsafe extern "C" fn nzbget_rs_free(buf: RsBuf) {
-    if !buf.data.is_null() {
-        drop(Vec::from_raw_parts(
-            buf.data as *mut u8,
-            buf.len + 1,
-            buf.cap,
-        ));
-    }
-}
 
 /// Runs an in-place text helper on the NUL-terminated `raw` and puts the NUL
 /// at the new end.
@@ -281,26 +235,20 @@ pub(super) unsafe extern "C" fn nzbget_rs_file_type(
 
 /// FileSystem's path texts (rust/src/paths.rs): 0 MakeValidFilename (`flag`:
 /// allow slashes), 1 SanitizePathSegment, 2 SanitizeRelativePath,
-/// 3 EscapePathForShell; free the result with nzbget_rs_free.
+/// 3 EscapePathForShell.
 ///
 /// # Safety
 /// `s` is null or readable for `len` bytes within one allocation, with
-/// `len <= isize::MAX`. Null means empty regardless of `len`. Panics abort
-/// rather than unwinding across the ABI.
-pub unsafe extern "C" fn nzbget_rs_path_text(
-    op: c_int,
-    s: *const c_char,
-    len: usize,
-    flag: c_int,
-) -> RsBuf {
+/// `len <= isize::MAX`. Null means empty regardless of `len`.
+pub unsafe fn nzbget_rs_path_text(op: c_int, s: *const c_char, len: usize, flag: c_int) -> Vec<u8> {
     let b = bytes(s, len);
-    into_buf(match op {
+    match op {
         0 => crate::paths::make_valid_filename(b, flag != 0),
         1 => crate::paths::sanitize_path_segment(b),
         2 => crate::paths::sanitize_relative_path(b),
         3 => crate::paths::escape_path_for_shell(b),
         _ => Vec::new(),
-    })
+    }
 }
 
 /// FileSystem's path positions (rust/src/paths.rs): 0 BaseFileName (where
@@ -399,18 +347,18 @@ pub(super) unsafe extern "C" fn nzbget_rs_scheduler_check(
 }
 
 /// Util::SplitCommandLine: the words, each NUL-terminated, one after the
-/// other (`len` covers them all); free with nzbget_rs_free.
+/// other.
 ///
 /// # Safety
 /// `s` is null or NUL-terminated.
 #[cfg(test)]
-pub(super) unsafe extern "C" fn nzbget_rs_split_command_line(s: *const c_char) -> RsBuf {
+pub(super) unsafe fn nzbget_rs_split_command_line(s: *const c_char) -> Vec<u8> {
     let mut v = Vec::new();
     for word in crate::util::split_command_line(input(s)) {
         v.extend_from_slice(&word);
         v.push(0);
     }
-    into_buf(v)
+    v
 }
 
 /// FileSystem::FileExists (0 for null).
@@ -433,44 +381,40 @@ pub unsafe extern "C" fn nzbget_rs_directory_exists(path: *const c_char) -> c_in
 }
 
 /// FileSystem::ForceDirectories: 1 created or there, else 0 with the message
-/// in `*errmsg` (free with nzbget_rs_free; empty on success).
+/// in `errmsg` (empty on success).
 ///
 /// # Safety
-/// `path` is null or NUL-terminated; `errmsg` is null or writable and disjoint
-/// from the input. Every non-null output is initialized, including on failure.
+/// `path` is null or NUL-terminated.
 #[cfg(all(unix, test))]
-unsafe fn nzbget_rs_force_directories(path: *const c_char, errmsg: *mut RsBuf) -> c_int {
-    if errmsg.is_null() {
+unsafe fn nzbget_rs_force_directories(path: *const c_char, errmsg: Option<&mut Vec<u8>>) -> c_int {
+    let Some(errmsg) = errmsg else {
         return 0;
-    }
+    };
     if path.is_null() {
-        errmsg.write(into_buf(Vec::new()));
+        *errmsg = Vec::new();
         return 0;
     }
     let mut msg = Vec::new();
     let ok = crate::fsops::force_directories(input(path), &mut msg, &crate::fsops::posix_stat);
-    errmsg.write(into_buf(msg));
+    *errmsg = msg;
     ok as c_int
 }
 
 /// FileSystem::DeleteDirectoryWithContent: 1 all deleted, 0 not.
-/// `errmsg` (null: not written) gets the error, empty when cleared; free it
-/// with nzbget_rs_free.
+/// `errmsg` (None: not written) gets the error, empty when cleared.
 ///
 /// # Safety
-/// `dir` is null or NUL-terminated; `errmsg` is null or writable.
-pub unsafe extern "C" fn nzbget_rs_delete_directory_with_content(
+/// `dir` is null or NUL-terminated.
+pub unsafe fn nzbget_rs_delete_directory_with_content(
     dir: *const c_char,
     separator: c_char,
-    errmsg: *mut RsBuf,
+    errmsg: Option<&mut Vec<u8>>,
 ) -> c_int {
     if dir.is_null() {
         crate::fsops::set_last_errno(libc::EFAULT);
-        if !errmsg.is_null() {
+        if let Some(errmsg) = errmsg {
             let last_err = crate::fsops::error_message(libc::EFAULT);
-            errmsg.write(into_buf(crate::util::fs_format_null_delete_errmsg(
-                &last_err,
-            )));
+            *errmsg = crate::util::fs_format_null_delete_errmsg(&last_err);
         }
         return 0;
     }
@@ -482,15 +426,11 @@ pub unsafe extern "C" fn nzbget_rs_delete_directory_with_content(
         &mut text,
     )
     .unwrap_or(false);
-    if !errmsg.is_null() {
-        errmsg.write(into_buf(text));
+    if let Some(errmsg) = errmsg {
+        *errmsg = text;
     }
     done as c_int
 }
-
-/// FileSystem::RenameBak: 1 moved, 0 not.
-/// `new_name` (null: not written) gets the name tried last; free it with
-/// nzbget_rs_free.
 
 #[cfg(test)]
 mod tests {
@@ -498,26 +438,15 @@ mod tests {
 
     #[test]
     fn fsdelete_null_inputs_initialize_outputs() {
-        use std::ptr::{null, null_mut};
-        // Poison rather than zero the output: a caller need not initialize
-        // an out parameter, even when the operation fails.
-        let poison = || RsBuf {
-            data: null_mut(),
-            len: usize::MAX,
-            cap: usize::MAX,
-        };
+        use std::ptr::null;
         unsafe {
-            let mut error = poison();
+            let mut error = b"stale".to_vec();
             assert_eq!(
-                nzbget_rs_delete_directory_with_content(null(), b'/' as c_char, &mut error),
+                nzbget_rs_delete_directory_with_content(null(), b'/' as c_char, Some(&mut error)),
                 0
             );
-            assert!(input(error.data).starts_with(b"could not delete (null): "));
-            nzbget_rs_free(error);
-            assert_eq!(
-                nzbget_rs_delete_directory_with_content(null(), 0, null_mut()),
-                0
-            );
+            assert!(error.starts_with(b"could not delete (null): "));
+            assert_eq!(nzbget_rs_delete_directory_with_content(null(), 0, None), 0);
             assert!(crate::fsdelete::file_extension(b"").is_none());
             assert_eq!(
                 crate::fsdelete::file_extension(b"a.\0b.c"),
@@ -612,19 +541,10 @@ mod tests {
     #[test]
     fn fsops_null_outputs_and_ownership() {
         unsafe {
-            let mut msg = std::mem::MaybeUninit::uninit();
-            assert_eq!(
-                nzbget_rs_force_directories(std::ptr::null(), msg.as_mut_ptr()),
-                0
-            );
-            let msg = msg.assume_init();
-            assert_eq!(msg.len, 0);
-            assert_eq!(CStr::from_ptr(msg.data), c"");
-            nzbget_rs_free(msg);
-            assert_eq!(
-                nzbget_rs_force_directories(c".".as_ptr(), std::ptr::null_mut()),
-                0
-            );
+            let mut msg = b"stale".to_vec();
+            assert_eq!(nzbget_rs_force_directories(std::ptr::null(), Some(&mut msg)), 0);
+            assert!(msg.is_empty());
+            assert_eq!(nzbget_rs_force_directories(c".".as_ptr(), None), 0);
             assert_eq!(nzbget_rs_file_exists(std::ptr::null()), 0);
             assert_eq!(nzbget_rs_directory_exists(std::ptr::null()), 0);
             assert_eq!(nzbget_rs_directory_exists(c".".as_ptr()), 1);
@@ -642,15 +562,11 @@ mod tests {
     fn textutil_in_place_ranges_nulls_and_ownership() {
         unsafe {
             let null = std::ptr::null_mut();
-            let buf = nzbget_rs_split_command_line(null);
-            assert_eq!(buf.len, 0);
-            assert_eq!(*buf.data, 0);
-            nzbget_rs_free(buf);
+            assert!(nzbget_rs_split_command_line(null).is_empty());
             let mut source = b"a 'b c'\0".to_vec();
             let words = nzbget_rs_split_command_line(source.as_ptr().cast());
             source.fill(b'x');
-            assert_eq!(bytes_arg(words.data.cast(), words.len), b"a\0b c\0");
-            nzbget_rs_free(words);
+            assert_eq!(words, b"a\0b c\0");
         }
     }
 
@@ -918,10 +834,7 @@ mod tests {
         unsafe {
             for len in [0, 42, usize::MAX] {
                 for op in -1..=4 {
-                    let result = nzbget_rs_path_text(op, std::ptr::null(), len, 0);
-                    assert_eq!(result.len, 0);
-                    assert_eq!(*result.data, 0);
-                    nzbget_rs_free(result);
+                    assert!(nzbget_rs_path_text(op, std::ptr::null(), len, 0).is_empty());
                 }
                 for (op, expected) in [(0, 0), (1, usize::MAX), (2, 0)] {
                     assert_eq!(nzbget_rs_path_position(op, std::ptr::null(), len), expected);
@@ -929,19 +842,14 @@ mod tests {
             }
 
             // Length-bounded input need not have a terminator. The result
-            // owns its bytes, including embedded NULs, and an extra terminator.
+            // owns its bytes, including embedded NULs.
             let mut input = b"a\0b".to_vec();
             let first = nzbget_rs_path_text(3, input.as_ptr().cast(), input.len(), 0);
             let second = nzbget_rs_path_text(1, input.as_ptr().cast(), input.len(), 0);
             input.fill(b'x');
             drop(input);
-            assert_eq!(
-                std::slice::from_raw_parts(first.data.cast::<u8>(), first.len + 1),
-                b"\"a\0b\"\0"
-            );
-            assert_eq!(CStr::from_ptr(second.data), c"a");
-            nzbget_rs_free(second);
-            nzbget_rs_free(first);
+            assert_eq!(first, b"\"a\0b\"");
+            assert_eq!(second.split(|&b| b == 0).next(), Some(&b"a"[..]));
             let path = b"a/b";
             assert_eq!(
                 nzbget_rs_path_position(0, path.as_ptr().cast(), path.len()),
@@ -1058,17 +966,6 @@ mod tests {
             assert_eq!(&json[..8], b"\xf0\x9f\x98\x80\xef\xbf\xbd\0");
             assert_eq!(json[19], b'!');
         }
-    }
-
-    #[test]
-    fn null_buffer_can_be_freed() {
-        unsafe {
-            nzbget_rs_free(RsBuf {
-                data: std::ptr::null_mut(),
-                len: 0,
-                cap: 0,
-            })
-        };
     }
 }
 
@@ -3307,10 +3204,6 @@ pub(crate) fn system_health_diagnose_bytes(format_mode: c_int) -> Vec<u8> {
 // and TwinCheck (`twin.rs`) FFI
 // =========================================================================
 
-pub unsafe extern "C" fn nzbget_rs_alloc_buf(data: *const c_char, len: usize) -> RsBuf {
-    into_buf(bytes(data, len).to_vec())
-}
-
 #[cfg(unix)]
 struct BuildEnvRuntime {
     ssl_lib_name: CString,
@@ -3989,7 +3882,7 @@ pub unsafe extern "C" fn nzbget_rs_script_config_exec(
     n2: usize,
     ctx: *mut std::ffi::c_void,
     cancel_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
-    out_buf: *mut RsBuf,
+    out_buf: *mut Vec<u8>,
 ) -> c_int {
     match op {
         0 => match load_script_template_cstrings() {
@@ -4018,7 +3911,7 @@ pub unsafe extern "C" fn nzbget_rs_script_config_exec(
             }
             match crate::configfile::script_config_read_cipher_snapshot(fn_bytes) {
                 Some(buf) => {
-                    *out_buf = into_buf(buf);
+                    *out_buf = buf;
                     1
                 }
                 None => 0,
@@ -4657,7 +4550,7 @@ unsafe extern "C" fn web_rpc_action_bridge(
     params_len: usize,
     out_u32: *mut u32,
     out_f64: *mut f64,
-    out_buf: *mut RsBuf,
+    out_buf: *mut Vec<u8>,
 ) -> c_int {
     match op {
         1 => {
@@ -4723,7 +4616,7 @@ unsafe extern "C" fn web_rpc_action_bridge(
         }
         8 => {
             if !out_buf.is_null() {
-                *out_buf = into_buf(format_system_info_bytes(if a1 != 0 { 1 } else { 2 }, true));
+                *out_buf = format_system_info_bytes(if a1 != 0 { 1 } else { 2 }, true);
             }
             1
         }
@@ -4734,7 +4627,7 @@ unsafe extern "C" fn web_rpc_action_bridge(
                 return 0;
             }
             if !out_buf.is_null() {
-                *out_buf = into_buf(system_health_diagnose_bytes(if a1 != 0 { 1 } else { 2 }));
+                *out_buf = system_health_diagnose_bytes(if a1 != 0 { 1 } else { 2 });
             }
             1
         }
@@ -4879,11 +4772,7 @@ unsafe extern "C" fn web_rpc_action_bridge(
             let tdir =
                 crate::options::active_options().and_then(|o| o.str_cstr(OptStr::TempDir).map(|s| s.to_owned()));
             let tdir_ptr = tdir.as_ref().map_or(c"".as_ptr(), |s| s.as_ptr());
-            let mut buf = RsBuf {
-                data: std::ptr::null_mut(),
-                len: 0,
-                cap: 0,
-            };
+            let mut buf = Vec::new();
             let ok = crate::net::nzbget_rs_webdl_read_temp_url(
                 if s1.is_null() { c"".as_ptr() } else { s1 },
                 if s2.is_null() { c"".as_ptr() } else { s2 },
@@ -4892,8 +4781,6 @@ unsafe extern "C" fn web_rpc_action_bridge(
             );
             if ok != 0 && !out_buf.is_null() {
                 *out_buf = buf;
-            } else {
-                nzbget_rs_free(buf);
             }
             c_int::from(ok != 0)
         }
@@ -4901,7 +4788,7 @@ unsafe extern "C" fn web_rpc_action_bridge(
             Some(info) => {
                 let nul = info.iter().position(|&b| b == 0).unwrap_or(info.len());
                 if !out_buf.is_null() {
-                    *out_buf = into_buf(info[..nul].to_vec());
+                    *out_buf = info[..nul].to_vec();
                 }
                 1
             }
@@ -4927,11 +4814,7 @@ unsafe extern "C" fn web_rpc_action_bridge(
             )
         }
         23 => {
-            let mut err = RsBuf {
-                data: std::ptr::null_mut(),
-                len: 0,
-                cap: 0,
-            };
+            let mut err = Vec::new();
             let ok = crate::net::nzbget_rs_serverpool_test(
                 if s1.is_null() { c"".as_ptr() } else { s1 },
                 a1,
@@ -4948,10 +4831,8 @@ unsafe extern "C" fn web_rpc_action_bridge(
                 },
                 &mut err,
             );
-            if ok == 0 && !err.data.is_null() && !out_buf.is_null() {
+            if ok == 0 && !err.is_empty() && !out_buf.is_null() {
                 *out_buf = err;
-            } else {
-                nzbget_rs_free(err);
             }
             ok
         }
@@ -4970,7 +4851,7 @@ unsafe extern "C" fn web_rpc_action_bridge(
             ) == 0
             {
                 if !out_buf.is_null() && !err_ptr.is_null() {
-                    *out_buf = into_buf(CStr::from_ptr(err_ptr).to_bytes().to_vec());
+                    *out_buf = CStr::from_ptr(err_ptr).to_bytes().to_vec();
                 }
                 return 0;
             }

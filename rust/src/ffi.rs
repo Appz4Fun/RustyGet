@@ -2,6 +2,7 @@
 //! them any more: strings come in as NUL-terminated C strings and results go
 //! out as a `Vec<u8>`. They are being replaced by plain Rust APIs.
 
+use crate::queuesubsys_host::NzbRef;
 use crate::cstr;
 use crate::options::OptStr;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
@@ -4882,7 +4883,7 @@ unsafe extern "C" fn web_rpc_action_bridge(
 #[cfg(unix)]
 unsafe fn emit_rpc_nzb(
     qh: &crate::queuesubsys_host::QueueSubsysHost,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
     text_status_mode: i32,
     f_cb: impl FnOnce(
         &crate::queuesubsys_host::NzbSnap,
@@ -4959,12 +4960,11 @@ unsafe fn emit_rpc_nzb(
         extra_par_blocks: n.extra_par_blocks,
     };
 
-    let plen = qh.nzb_params_len(nzb_ptr);
-    let mut prm_cvecs = Vec::with_capacity(plen);
-    for i in 0..plen {
-        let (k, v) = qh.nzb_param_at(nzb_ptr, i);
-        prm_cvecs.push((cstr::to_cstring(&k), cstr::to_cstring(&v)));
-    }
+    let prm_cvecs: Vec<_> = qh
+        .nzb_params(nzb_ptr)
+        .iter()
+        .map(|(k, v)| (cstr::to_cstring(k), cstr::to_cstring(v)))
+        .collect();
     let prms: Vec<crate::xmlrpc_format::NzbgetRsRpcParamItem> = prm_cvecs
         .iter()
         .map(|(k, v)| crate::xmlrpc_format::NzbgetRsRpcParamItem {
@@ -4973,12 +4973,11 @@ unsafe fn emit_rpc_nzb(
         })
         .collect();
 
-    let slen = qh.nzb_script_statuses_len(nzb_ptr);
-    let mut scr_cvecs = Vec::with_capacity(slen);
-    for i in 0..slen {
-        let (st, sname) = qh.nzb_script_status_at(nzb_ptr, i);
-        scr_cvecs.push((cstr::to_cstring(&sname), i32::from(st)));
-    }
+    let scr_cvecs: Vec<_> = qh
+        .nzb_script_statuses(nzb_ptr)
+        .iter()
+        .map(|(sname, st)| (cstr::to_cstring(sname), i32::from(*st)))
+        .collect();
     let scrs: Vec<crate::xmlrpc_format::NzbgetRsRpcScriptItem> = scr_cvecs
         .iter()
         .map(|(sname, st)| crate::xmlrpc_format::NzbgetRsRpcScriptItem {
@@ -5257,7 +5256,7 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                     };
                     let cached_msgs = qh.with_locked_queue(|dq_ptr| {
                         let np = qh.nzb_find_in_queue_or_history(dq_ptr, a2);
-                        if np == 0 {
+                        if np.is_none() {
                             Vec::new()
                         } else {
                             qh.nzb_cached_messages_slice(np, a3, a4)
@@ -5307,7 +5306,7 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                     let offset = disk_msgs.iter().map(|m| m.0).max().unwrap_or(0);
                     let cached_msgs = qh.with_locked_queue(|dq_ptr| {
                         let np = qh.nzb_find_in_queue_or_history(dq_ptr, a2);
-                        if np == 0 {
+                        if np.is_none() {
                             Vec::new()
                         } else {
                             qh.nzb_cached_messages_slice(np, 0, i32::MAX)
@@ -5600,8 +5599,8 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                         || h.kind == crate::queuesubsys_host::HK_URL
                     {
                         let has_completed =
-                            c_int::from(qh.nzb_completed_files_len(h.inner_ptr) > 0);
-                        emit_rpc_nzb(&qh, h.inner_ptr, 2, |n, status_ptr, f, prms, scrs, sts| {
+                            c_int::from(qh.nzb_completed_files_len(h.nzb()) > 0);
+                        emit_rpc_nzb(&qh, h.nzb(), 2, |n, status_ptr, f, prms, scrs, sts| {
                             emit_cb(
                                 emit_ctx,
                                 7,
@@ -6107,9 +6106,7 @@ pub(crate) unsafe fn serve_binrpc_conn(conn: &crate::net::NzbgetRsConn) {
                                     &n.category,
                                     &n.queued_filename,
                                 );
-                                let plen = qh.nzb_params_len(np);
-                                for pi in 0..plen {
-                                    let (pname, pval) = qh.nzb_param_at(np, pi);
+                                for (pname, pval) in qh.nzb_params(np) {
                                     builder.push_param(owner_index, &pname, &pval);
                                 }
                                 let flen = qh.nzb_file_len(np);
@@ -6264,7 +6261,7 @@ pub(crate) unsafe fn serve_binrpc_conn(conn: &crate::net::NzbgetRsConn) {
                     let mut script_status: u32 = 0;
                     let mut url_status: u32 = 0;
                     if h.kind == crate::queuesubsys_host::HK_NZB {
-                        let n = qh.nzb_snap(h.inner_ptr, false);
+                        let n = qh.nzb_snap(h.nzb(), false);
                         size = n.size;
                         file_cnt = n.file_count as u32;
                         par_status = i32::from(n.par_status) as u32;
@@ -6272,7 +6269,7 @@ pub(crate) unsafe fn serve_binrpc_conn(conn: &crate::net::NzbgetRsConn) {
                     } else if h.kind == crate::queuesubsys_host::HK_DUP {
                         size = qh.dup_snap(h.inner_ptr).size;
                     } else if h.kind == crate::queuesubsys_host::HK_URL {
-                        url_status = i32::from(qh.nzb_snap(h.inner_ptr, false).url_status) as u32;
+                        url_status = i32::from(qh.nzb_snap(h.nzb(), false).url_status) as u32;
                     }
                     *nr_entries = nr_entries.wrapping_add(1);
                     let size_hi = ((size >> 32) & 0xffff_ffff) as u32;
@@ -6541,7 +6538,7 @@ fn run_frontend_thread(
                 let mut post_jobs = 0;
                 for idx in 0..q_len {
                     let nzb_ptr = qh.queue_at(dq_ptr, idx);
-                    if nzb_ptr != 0 && qh.nzb_snap(nzb_ptr, false).has_post_info {
+                    if nzb_ptr.is_some() && qh.nzb_snap(nzb_ptr, false).has_post_info {
                         post_jobs += 1;
                     }
                 }
@@ -6590,7 +6587,7 @@ fn run_frontend_thread(
             let q_len = qh.queue_len(dq_ptr);
             for idx in 0..q_len {
                 let nzb_ptr = qh.queue_at(dq_ptr, idx);
-                if nzb_ptr == 0 {
+                if nzb_ptr.is_none() {
                     continue;
                 }
                 let ns = qh.nzb_snap(nzb_ptr, false);

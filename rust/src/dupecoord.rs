@@ -5,6 +5,7 @@
 //! (`no_backup_reason`, `format_no_backup_reason`), skip message formatting
 //! (`format_dupe_skip_message`), and status classification (`status_from_text`).
 
+use crate::queuesubsys_host::NzbRef;
 use crate::status::{DeleteStatus, DupStatus, DupeMode, MarkStatus};
 use std::collections::BTreeSet;
 use std::ffi::{c_char, CStr};
@@ -886,7 +887,7 @@ pub(crate) fn parse_alive_permille_bytes(bytes: &[u8]) -> i32 {
 #[cfg(unix)]
 pub(crate) fn alive_permille_host(
     host: &crate::queuesubsys_host::QueueSubsysHost,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
 ) -> i32 {
     match host.nzb_get_param(nzb_ptr, b"DupeAlive") {
         Some(v) => parse_alive_permille_bytes(&v),
@@ -898,7 +899,10 @@ pub(crate) fn alive_permille_host(
 /// encrypted ([`crate::donorkind::LOCKED_PARAM`]) and no password is at hand
 /// (its `*Unpack:Password`, or `UnpackPassFile`), see [`crate::donorkind::locked`].
 #[cfg(unix)]
-pub(crate) fn locked_host(host: &crate::queuesubsys_host::QueueSubsysHost, nzb_ptr: usize) -> bool {
+pub(crate) fn locked_host(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    nzb_ptr: NzbRef,
+) -> bool {
     crate::donorkind::locked_params(
         host.nzb_get_param(nzb_ptr, crate::donorkind::LOCKED_PARAM)
             .as_deref(),
@@ -934,13 +938,13 @@ fn downloaded_on_disk_host(
     let hlen = host.history_len(dq_ptr);
     for i in 0..hlen {
         let hi = host.history_at(dq_ptr, i);
-        if hi.kind != crate::queuesubsys_host::HK_NZB || hi.inner_ptr == 0 {
+        if hi.kind != crate::queuesubsys_host::HK_NZB || hi.nzb().is_none() {
             continue;
         }
-        if hi.inner_ptr == nzb.ptr {
+        if hi.nzb() == nzb.ptr {
             continue;
         }
-        let item = host.nzb_snap(hi.inner_ptr, false);
+        let item = host.nzb_snap(hi.nzb(), false);
         if item.delete_status == DeleteStatus::None
             && item.is_dupe_success
             && item.mark_status != MarkStatus::Bad
@@ -982,8 +986,8 @@ pub(crate) fn no_backup_reason_host(
             locked: 0,
         };
         let mut qfn = Vec::new();
-        if hi.kind == crate::queuesubsys_host::HK_NZB && hi.inner_ptr != 0 {
-            let item = host.nzb_snap(hi.inner_ptr, false);
+        if hi.kind == crate::queuesubsys_host::HK_NZB && hi.nzb().is_some() {
+            let item = host.nzb_snap(hi.nzb(), false);
             c.dupe_mode = item.dupe_mode;
             c.mark_status = item.mark_status;
             c.delete_status = item.delete_status;
@@ -1031,11 +1035,11 @@ struct DupeCandidates {
 fn collect_dupe_candidates(
     host: &crate::queuesubsys_host::QueueSubsysHost,
     dq_ptr: usize,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
     nzb_name: &[u8],
     dupe_key: &[u8],
 ) -> DupeCandidates {
-    let self_snap = if nzb_ptr != 0 {
+    let self_snap = if nzb_ptr.is_some() {
         Some(host.nzb_snap(nzb_ptr, false))
     } else {
         None
@@ -1067,7 +1071,7 @@ fn collect_dupe_candidates(
             || hi.kind == crate::queuesubsys_host::HK_URL)
             && hi.inner_ptr != 0
         {
-            let item = host.nzb_snap(hi.inner_ptr, false);
+            let item = host.nzb_snap(hi.nzb(), false);
             c.dupe_mode = item.dupe_mode;
             c.dupe_score = item.dupe_score;
             c.is_dupe_success = i32::from(item.is_dupe_success);
@@ -1112,7 +1116,7 @@ fn collect_dupe_candidates(
         let qp = host.queue_at(dq_ptr, i);
         let q = host.nzb_snap(qp, false);
         queue_candidates.push(NzbgetRsDupeQueueCandidate {
-            is_self: i32::from(qp == nzb_ptr && nzb_ptr != 0),
+            is_self: i32::from(qp == nzb_ptr && nzb_ptr.is_some()),
             is_nzb_kind: i32::from(q.kind == crate::queuesubsys_host::NK_NZB),
             dupe_mode: q.dupe_mode,
             dupe_score: q.dupe_score,
@@ -1134,7 +1138,7 @@ pub(crate) fn find_dupe_backup_host(
     host: &crate::queuesubsys_host::QueueSubsysHost,
     opts: &crate::queuesubsys_host::GlobalOptsSnap,
     dq_ptr: usize,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
     nzb_name: &[u8],
     dupe_key: &[u8],
 ) -> Option<(
@@ -1164,7 +1168,7 @@ pub(crate) fn find_dupe_backup_host(
     if winner >= 0 && (winner as usize) < history_entries.len() {
         let hi = history_entries[winner as usize].clone();
         let nzb_snap = if hi.inner_ptr != 0 {
-            host.nzb_snap(hi.inner_ptr, false)
+            host.nzb_snap(hi.nzb(), false)
         } else {
             crate::queuesubsys_host::NzbSnap::default()
         };
@@ -1179,7 +1183,7 @@ fn return_best_dupe_host(
     host: &crate::queuesubsys_host::QueueSubsysHost,
     opts: &crate::queuesubsys_host::GlobalOptsSnap,
     dq_ptr: usize,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
     nzb_name: &[u8],
     dupe_key: &[u8],
 ) {
@@ -1211,9 +1215,9 @@ fn return_best_dupe_host(
 pub(crate) fn rescue_on_health_failure_host(
     host: &crate::queuesubsys_host::QueueSubsysHost,
     dq_ptr: usize,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
 ) {
-    if dq_ptr == 0 || nzb_ptr == 0 {
+    if dq_ptr == 0 || nzb_ptr.is_none() {
         return;
     }
     let nzb = host.nzb_snap(nzb_ptr, false);
@@ -1257,7 +1261,7 @@ fn rescue_dupe_host(
     if hi.inner_ptr == 0 {
         return;
     }
-    let backup = host.nzb_snap(hi.inner_ptr, false);
+    let backup = host.nzb_snap(hi.nzb(), false);
     let alive = history_candidates[winner as usize].alive_permille;
     // DupeSearchDryRun only covers what DupeSearch itself would do.
     let dry_run = crate::options::active_options()
@@ -1306,7 +1310,7 @@ fn history_cleanup_host(
         let is_nzb_or_url = hi.kind == crate::queuesubsys_host::HK_NZB
             || hi.kind == crate::queuesubsys_host::HK_URL;
         if is_nzb_or_url && hi.inner_ptr != 0 && hi.hi_ptr != mark_hi_ptr {
-            let item = host.nzb_snap(hi.inner_ptr, false);
+            let item = host.nzb_snap(hi.nzb(), false);
             if item.dupe_mode != DupeMode::Force
                 && item.delete_status == DeleteStatus::Dupe
                 && same_name_or_key(&item.name, &item.dupe_key, nzb_name, dupe_key)
@@ -1329,9 +1333,9 @@ fn history_cleanup_host(
 pub(crate) fn nzb_found_host(
     host: &crate::queuesubsys_host::QueueSubsysHost,
     dq_ptr: usize,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
 ) {
-    if dq_ptr == 0 || nzb_ptr == 0 {
+    if dq_ptr == 0 || nzb_ptr.is_none() {
         return;
     }
     let opts = host.opts();
@@ -1357,7 +1361,7 @@ pub(crate) fn nzb_found_host(
     let qlen = host.queue_len(dq_ptr);
     for i in 0..qlen {
         let qp = host.queue_at(dq_ptr, i);
-        if qp == 0 || qp == nzb.ptr {
+        if qp.is_none() || qp == nzb.ptr {
             continue;
         }
         let q = host.nzb_snap(qp, false);
@@ -1424,8 +1428,8 @@ pub(crate) fn nzb_found_host(
         let hlen = host.history_len(dq_ptr);
         for i in 0..hlen {
             let hi = host.history_at(dq_ptr, i);
-            if hi.kind == crate::queuesubsys_host::HK_NZB && hi.inner_ptr != 0 {
-                let hn = host.nzb_snap(hi.inner_ptr, false);
+            if hi.kind == crate::queuesubsys_host::HK_NZB && hi.nzb().is_some() {
+                let hn = host.nzb_snap(hi.nzb(), false);
                 if try_inherit(&mut nzb, &hn.name, &hn.dupe_key, hn.dupe_score, b"history") {
                     break;
                 }
@@ -1446,8 +1450,8 @@ pub(crate) fn nzb_found_host(
     let hlen = host.history_len(dq_ptr);
     for i in 0..hlen {
         let hi = host.history_at(dq_ptr, i);
-        if hi.kind == crate::queuesubsys_host::HK_NZB && hi.inner_ptr != 0 {
-            let item = host.nzb_snap(hi.inner_ptr, false);
+        if hi.kind == crate::queuesubsys_host::HK_NZB && hi.nzb().is_some() {
+            let item = host.nzb_snap(hi.nzb(), false);
             if (item.full_content_hash > 0 && item.full_content_hash == nzb.full_content_hash)
                 || (item.filtered_content_hash > 0
                     && item.filtered_content_hash == nzb.filtered_content_hash)
@@ -1503,8 +1507,8 @@ pub(crate) fn nzb_found_host(
         let mut failed = false;
         for i in 0..hlen {
             let hi = host.history_at(dq_ptr, i);
-            if hi.kind == crate::queuesubsys_host::HK_NZB && hi.inner_ptr != 0 {
-                let item = host.nzb_snap(hi.inner_ptr, false);
+            if hi.kind == crate::queuesubsys_host::HK_NZB && hi.nzb().is_some() {
+                let item = host.nzb_snap(hi.nzb(), false);
                 if (item.full_content_hash > 0 && item.full_content_hash == nzb.full_content_hash)
                     || (item.filtered_content_hash > 0
                         && item.filtered_content_hash == nzb.filtered_content_hash)
@@ -1546,7 +1550,7 @@ pub(crate) fn nzb_found_host(
             let cur_qlen = host.queue_len(dq_ptr);
             for i in 0..cur_qlen {
                 let qp = host.queue_at(dq_ptr, i);
-                if qp == 0 || qp == nzb.ptr {
+                if qp.is_none() || qp == nzb.ptr {
                     continue;
                 }
                 let q = host.nzb_snap(qp, false);
@@ -1572,7 +1576,7 @@ pub(crate) fn nzb_found_host(
                 || hi.kind == crate::queuesubsys_host::HK_URL)
                 && hi.inner_ptr != 0
             {
-                let item = host.nzb_snap(hi.inner_ptr, false);
+                let item = host.nzb_snap(hi.nzb(), false);
                 if item.dupe_mode != DupeMode::Force
                     && same_name_or_key(&item.name, &item.dupe_key, &nzb.name, &nzb.dupe_key)
                     && nzb.dupe_score <= item.dupe_score
@@ -1625,7 +1629,7 @@ pub(crate) fn nzb_found_host(
                 break;
             }
             let qp = host.queue_at(dq_ptr, index);
-            if qp == 0 || qp == nzb.ptr {
+            if qp.is_none() || qp == nzb.ptr {
                 index += 1;
                 continue;
             }
@@ -1678,9 +1682,9 @@ pub(crate) fn nzb_found_host(
 pub(crate) fn nzb_completed_host(
     host: &crate::queuesubsys_host::QueueSubsysHost,
     dq_ptr: usize,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
 ) {
-    if dq_ptr == 0 || nzb_ptr == 0 {
+    if dq_ptr == 0 || nzb_ptr.is_none() {
         return;
     }
     let opts = host.opts();
@@ -1711,7 +1715,7 @@ pub(crate) fn nzb_completed_host(
         let qlen = host.queue_len(dq_ptr);
         for i in 0..qlen {
             let qp = host.queue_at(dq_ptr, i);
-            if qp == 0 || qp == nzb.ptr {
+            if qp.is_none() || qp == nzb.ptr {
                 continue;
             }
             let queued = host.nzb_snap(qp, false);
@@ -1787,9 +1791,9 @@ pub(crate) fn history_mark_host(
     host.log(crate::queuesubsys_host::MK_INFO, &msg);
 
     let (dupe_mode, dupe_key, item_name) =
-        if hi.kind == crate::queuesubsys_host::HK_NZB && hi.inner_ptr != 0 {
-            let nzb = host.nzb_snap(hi.inner_ptr, false);
-            host.nzb_set_mark_status(hi.inner_ptr, mark_status);
+        if hi.kind == crate::queuesubsys_host::HK_NZB && hi.nzb().is_some() {
+            let nzb = host.nzb_snap(hi.nzb(), false);
+            host.nzb_set_mark_status(hi.nzb(), mark_status);
             (nzb.dupe_mode, nzb.dupe_key, nzb.name)
         } else if hi.kind == crate::queuesubsys_host::HK_DUP && hi.inner_ptr != 0 {
             let dup = host.dup_snap(hi.inner_ptr);
@@ -1817,7 +1821,7 @@ pub(crate) fn history_mark_host(
     if mark_status == MarkStatus::Good {
         history_cleanup_host(host, dq_ptr, hi.hi_ptr, &item_name, &dupe_key);
     } else if mark_status == MarkStatus::Bad {
-        return_best_dupe_host(host, &opts, dq_ptr, 0, &hi.name, &dupe_key);
+        return_best_dupe_host(host, &opts, dq_ptr, NzbRef::NONE, &hi.name, &dupe_key);
     }
 }
 
@@ -1849,8 +1853,8 @@ pub(crate) fn get_dupe_status_host(
     let hlen = host.history_len(dq_ptr);
     for i in 0..hlen {
         let hi = host.history_at(dq_ptr, i);
-        if hi.kind == crate::queuesubsys_host::HK_NZB && hi.inner_ptr != 0 {
-            let item = host.nzb_snap(hi.inner_ptr, true);
+        if hi.kind == crate::queuesubsys_host::HK_NZB && hi.nzb().is_some() {
+            let item = host.nzb_snap(hi.nzb(), true);
             if same_name_or_key(name, dupe_key, &item.name, &item.dupe_key) {
                 statuses |= status_from_text(&item.text_status);
             }
@@ -1873,10 +1877,10 @@ pub(crate) fn get_dupe_status_host(
 pub(crate) fn list_history_dupes_host(
     host: &crate::queuesubsys_host::QueueSubsysHost,
     dq_ptr: usize,
-    nzb_ptr: usize,
-) -> Vec<usize> {
+    nzb_ptr: NzbRef,
+) -> Vec<NzbRef> {
     let mut out = Vec::new();
-    if dq_ptr == 0 || nzb_ptr == 0 {
+    if dq_ptr == 0 || nzb_ptr.is_none() {
         return out;
     }
     let nzb = host.nzb_snap(nzb_ptr, false);
@@ -1886,12 +1890,12 @@ pub(crate) fn list_history_dupes_host(
     let hlen = host.history_len(dq_ptr);
     for i in 0..hlen {
         let hi = host.history_at(dq_ptr, i);
-        if hi.kind == crate::queuesubsys_host::HK_NZB && hi.inner_ptr != 0 {
-            let item = host.nzb_snap(hi.inner_ptr, false);
+        if hi.kind == crate::queuesubsys_host::HK_NZB && hi.nzb().is_some() {
+            let item = host.nzb_snap(hi.nzb(), false);
             if item.dupe_mode != DupeMode::Force
                 && same_name_or_key(&item.name, &item.dupe_key, &nzb.name, &nzb.dupe_key)
             {
-                out.push(hi.inner_ptr);
+                out.push(hi.nzb());
             }
         }
     }

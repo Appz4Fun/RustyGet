@@ -1,5 +1,6 @@
 //! `HistoryCoordinator` (`daemon/queue/HistoryCoordinator.cpp`) end-to-end Rust implementation.
 
+use crate::queuesubsys_host::NzbRef;
 use crate::queuecoord::{ARTICLE_FAILED, ARTICLE_FINISHED, ARTICLE_UNDEFINED, PARTIAL_STATE_NONE};
 
 /// `HistoryCoordinator::ServiceWork` minimum history retention timestamp (`cur_time - keep_days * 86400`).
@@ -571,7 +572,7 @@ unsafe fn hc_log(env: &NzbgetRsHistoryCoordEnv, level: c_int, msg: &[u8]) {
     }
 }
 
-unsafe fn hc_nzb_msg(env: &NzbgetRsHistoryCoordEnv, nzb_ptr: usize, kind: c_int, msg: &[u8]) {
+unsafe fn hc_nzb_msg(env: &NzbgetRsHistoryCoordEnv, nzb_ptr: NzbRef, kind: c_int, msg: &[u8]) {
     if let Some(cb) = env.action_cb {
         let c = hc_cbuf(msg);
         cb(
@@ -580,7 +581,7 @@ unsafe fn hc_nzb_msg(env: &NzbgetRsHistoryCoordEnv, nzb_ptr: usize, kind: c_int,
             kind,
             0,
             0,
-            nzb_ptr,
+            nzb_ptr.addr(),
             c.as_ptr() as *const c_char,
             std::ptr::null(),
             std::ptr::null_mut(),
@@ -594,14 +595,14 @@ unsafe fn hc_nzb_msg(env: &NzbgetRsHistoryCoordEnv, nzb_ptr: usize, kind: c_int,
 
 unsafe fn hc_delete_disk_files(
     env: &NzbgetRsHistoryCoordEnv,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
     server_mode: bool,
     nzb_cleanup_disk: bool,
 ) {
     let Some(cb) = env.action_cb else {
         return;
     };
-    if nzb_ptr == 0 {
+    if nzb_ptr.is_none() {
         return;
     }
     if server_mode {
@@ -611,7 +612,7 @@ unsafe fn hc_delete_disk_files(
             1,
             0,
             0,
-            nzb_ptr,
+            nzb_ptr.addr(),
             std::ptr::null(),
             std::ptr::null(),
             std::ptr::null_mut(),
@@ -628,7 +629,7 @@ unsafe fn hc_delete_disk_files(
         0,
         0,
         0,
-        nzb_ptr,
+        nzb_ptr.addr(),
         std::ptr::null(),
         std::ptr::null(),
         std::ptr::null_mut(),
@@ -722,7 +723,11 @@ unsafe extern "C" fn hc_emit_failed_sample(
     });
 }
 
-unsafe fn hc_recheck_failed_articles(env: &NzbgetRsHistoryCoordEnv, dq_ptr: usize, nzb_ptr: usize) {
+unsafe fn hc_recheck_failed_articles(
+    env: &NzbgetRsHistoryCoordEnv,
+    dq_ptr: usize,
+    nzb_ptr: NzbRef,
+) {
     let Some(cb) = env.action_cb else {
         return;
     };
@@ -769,7 +774,7 @@ unsafe fn hc_recheck_failed_articles(env: &NzbgetRsHistoryCoordEnv, dq_ptr: usiz
             0,
             0,
             std::ptr::addr_of_mut!(failed) as usize,
-            nzb_ptr,
+            nzb_ptr.addr(),
             hc_emit_failed_sample as *const c_void as *const c_char,
             std::ptr::null(),
             std::ptr::null_mut(),
@@ -802,7 +807,7 @@ unsafe fn hc_history_hide(
     };
     let mut ints = [0i32; 3];
     let mut strs: [*const c_char; 1] = [std::ptr::null()];
-    let nzb_ptr = cb(
+    let nzb_ptr = NzbRef::from_addr(cb(
         env.ctx,
         12,
         0,
@@ -816,7 +821,7 @@ unsafe fn hc_history_hide(
         strs.as_mut_ptr(),
         std::ptr::null_mut(),
         0,
-    );
+    ));
     let hist_name = hc_cstr_bytes(strs[0]).to_vec();
     let dup_status = classify_dup_status(
         MarkStatus::from(ints[0]),
@@ -853,7 +858,7 @@ unsafe fn hc_move_to_queue(
     dq_ptr: usize,
     hist_ptr: usize,
     hidx: c_int,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
     hist_name: &[u8],
     reprocess: bool,
 ) {
@@ -875,7 +880,7 @@ unsafe fn hc_move_to_queue(
         -1,
         0,
         0,
-        nzb_ptr,
+        nzb_ptr.addr(),
         std::ptr::null(),
         std::ptr::null(),
         ints.as_mut_ptr(),
@@ -902,7 +907,7 @@ unsafe fn hc_move_to_queue(
             fidx,
             0,
             0,
-            nzb_ptr,
+            nzb_ptr.addr(),
             std::ptr::null(),
             std::ptr::null(),
             std::ptr::null_mut(),
@@ -976,7 +981,7 @@ unsafe fn hc_move_to_queue(
             0,
             0,
             dq_ptr,
-            nzb_ptr,
+            nzb_ptr.addr(),
             std::ptr::null(),
             std::ptr::null(),
             std::ptr::null_mut(),
@@ -999,7 +1004,7 @@ unsafe fn hc_history_redownload(
     hist_ptr: usize,
     hidx: c_int,
     kind: c_int,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
     hist_name: &[u8],
     restore_pause_state: bool,
 ) {
@@ -1045,7 +1050,7 @@ unsafe fn hc_history_redownload(
         0,
         0,
         0,
-        nzb_ptr,
+        nzb_ptr.addr(),
         std::ptr::null(),
         std::ptr::null(),
         ints.as_mut_ptr(),
@@ -1106,7 +1111,7 @@ unsafe fn hc_history_redownload(
         0,
         0,
         0,
-        nzb_ptr,
+        nzb_ptr.addr(),
         std::ptr::null(),
         std::ptr::null(),
         std::ptr::null_mut(),
@@ -1124,7 +1129,7 @@ unsafe fn hc_history_redownload(
         c_int::from(paused),
         0,
         new_nzb_ptr,
-        nzb_ptr,
+        nzb_ptr.addr(),
         std::ptr::null(),
         std::ptr::null(),
         std::ptr::null_mut(),
@@ -1142,7 +1147,7 @@ unsafe fn hc_history_redownload(
         1,
         0,
         dq_ptr,
-        nzb_ptr,
+        nzb_ptr.addr(),
         std::ptr::null(),
         std::ptr::null(),
         std::ptr::null_mut(),
@@ -1165,7 +1170,7 @@ unsafe fn hc_history_retry(
     hist_ptr: usize,
     hidx: c_int,
     kind: c_int,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
     hist_name: &[u8],
     reset_failed: bool,
     reprocess: bool,
@@ -1192,7 +1197,7 @@ unsafe fn hc_history_retry(
         0,
         0,
         0,
-        nzb_ptr,
+        nzb_ptr.addr(),
         std::ptr::null(),
         std::ptr::null(),
         ints.as_mut_ptr(),
@@ -1234,7 +1239,7 @@ unsafe fn hc_history_retry(
             cidx,
             0,
             0,
-            nzb_ptr,
+            nzb_ptr.addr(),
             std::ptr::null(),
             std::ptr::null(),
             cf_ints.as_mut_ptr(),
@@ -1260,7 +1265,7 @@ unsafe fn hc_history_retry(
                 cf_id,
                 cf_status,
                 0,
-                nzb_ptr,
+                nzb_ptr.addr(),
                 std::ptr::null(),
                 std::ptr::null(),
                 f_ints.as_mut_ptr(),
@@ -1447,7 +1452,7 @@ unsafe fn hc_history_retry(
                         cidx,
                         prep.new_partial_state,
                         file_ptr,
-                        nzb_ptr,
+                        nzb_ptr.addr(),
                         std::ptr::null(),
                         std::ptr::null(),
                         out_ints.as_mut_ptr(),
@@ -1487,7 +1492,7 @@ unsafe fn hc_history_retry(
         c_int::from(!reset_failed && !reprocess),
         0,
         0,
-        nzb_ptr,
+        nzb_ptr.addr(),
         std::ptr::null(),
         std::ptr::null(),
         requeued.as_mut_ptr(),
@@ -1532,7 +1537,7 @@ unsafe fn hc_set_parameter(
     env: &NzbgetRsHistoryCoordEnv,
     hist_ptr: usize,
     kind: c_int,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
     hist_name: &[u8],
     text_ptr: *const c_char,
 ) -> bool {
@@ -1586,7 +1591,7 @@ unsafe fn hc_set_parameter(
         0,
         0,
         0,
-        nzb_ptr,
+        nzb_ptr.addr(),
         std::ptr::null(),
         std::ptr::null(),
         ints.as_mut_ptr(),
@@ -1904,7 +1909,7 @@ pub unsafe fn history_coord_exec(op: c_int, env: *const NzbgetRsHistoryCoordEnv)
     };
     match op {
         0 => {
-            hc_delete_disk_files(e, e.p2, e.a1 != 0, e.a2 != 0);
+            hc_delete_disk_files(e, NzbRef::from_addr(e.p2), e.a1 != 0, e.a2 != 0);
             1
         }
         1 => {
@@ -1985,7 +1990,7 @@ pub unsafe fn history_coord_exec(op: c_int, env: *const NzbgetRsHistoryCoordEnv)
                 if should_park_completed_file(cf_ints[0], 0, 2, is_last) {
                     let mut pm = b"Parking file ".to_vec();
                     pm.extend_from_slice(hc_cstr_bytes(cf_strs[0]));
-                    hc_nzb_msg(e, e.p2, 1, &pm);
+                    hc_nzb_msg(e, NzbRef::from_addr(e.p2), 1, &pm);
                     parked_count += 1;
                 }
             }
@@ -2009,9 +2014,9 @@ pub unsafe fn history_coord_exec(op: c_int, env: *const NzbgetRsHistoryCoordEnv)
             let mut added = b"Collection ".to_vec();
             added.extend_from_slice(&nzb_name);
             added.extend_from_slice(b" added to history");
-            hc_nzb_msg(e, e.p2, 2, &added);
+            hc_nzb_msg(e, NzbRef::from_addr(e.p2), 2, &added);
 
-            hc_recheck_failed_articles(e, e.p1, e.p2);
+            hc_recheck_failed_articles(e, e.p1, NzbRef::from_addr(e.p2));
 
             cb(
                 e.ctx,
@@ -2074,7 +2079,7 @@ pub unsafe fn history_coord_exec(op: c_int, env: *const NzbgetRsHistoryCoordEnv)
                         if act == 2 {
                             hc_delete_disk_files(
                                 e,
-                                i64s[1] as usize,
+                                NzbRef::from_addr(i64s[1] as usize),
                                 server_mode,
                                 nzb_cleanup_disk,
                             );
@@ -2151,7 +2156,7 @@ pub unsafe fn history_coord_exec(op: c_int, env: *const NzbgetRsHistoryCoordEnv)
                     found,
                     ints[0],
                     ints[2],
-                    i64s[0] as usize,
+                    NzbRef::from_addr(i64s[0] as usize),
                     &hist_name,
                     true,
                 );
@@ -2220,7 +2225,7 @@ pub unsafe fn history_coord_exec(op: c_int, env: *const NzbgetRsHistoryCoordEnv)
                 let par_status = NzbParStatus::from(ints[4]);
                 let unpack_status = UnpackStatus::from(ints[5]);
                 let parked_count = ints[6];
-                let nzb_ptr = i64s[0] as usize;
+                let nzb_ptr = NzbRef::from_addr(i64s[0] as usize);
                 let hist_name = hc_cstr_bytes(strs[0]).to_vec();
                 let dest_dir = hc_cstr_bytes(strs[1]).to_vec();
 
@@ -2478,34 +2483,36 @@ unsafe extern "C" fn hc_native_action_cb(
     let host = &*(ctx as *const QueueSubsysHost);
     match sub {
         0 => {
-            host.disk_discard_files_ex(p2, a1 != 0);
+            host.disk_discard_files_ex(NzbRef::from_addr(p2), a1 != 0);
             0
         }
         1 => {
-            let nzb = host.nzb_snap(p2, false);
-            host.nzb_action(p2, NZB_ACT_CLEAR_FILE_LIST, 0);
+            let job = NzbRef::from_addr(p2);
+            let nzb = host.nzb_snap(job, false);
+            host.nzb_action(job, NZB_ACT_CLEAR_FILE_LIST, 0);
             *strs.add(0) = hc_stash_str(&nzb.queued_filename);
             0
         }
         2 => {
-            let nzb0 = host.nzb_snap(p2, false);
+            let job = NzbRef::from_addr(p2);
+            let nzb0 = host.nzb_snap(job, false);
             if nzb0.has_live_repair_thread {
                 let t = nzb0.live_repair_thread_ptr;
-                host.nzb_action(p2, NZB_ACT_CLEAR_LIVE_REPAIR_THREAD, 0);
+                host.nzb_action(job, NZB_ACT_CLEAR_LIVE_REPAIR_THREAD, 0);
                 host.thread_stop(t);
             }
-            crate::postproc::live_par_time_settle(host, p2, true);
-            host.history_move_queue_item(p1, p2);
+            crate::postproc::live_par_time_settle(host, job, true);
+            host.history_move_queue_item(p1, job);
             host.dq_history_changed(p1);
-            let fn_len = host.nzb_file_len(p2);
+            let fn_len = host.nzb_file_len(job);
             for i in 0..fn_len {
-                let fp = host.nzb_file_at(p2, i);
+                let fp = host.nzb_file_at(job, i);
                 let fs = host.file_snap(fp);
-                host.nzb_update_completed_stats(p2, fp);
-                host.nzb_push_completed_file(p2, fp, &fs.filename, CF_NONE, 0);
+                host.nzb_update_completed_stats(job, fp);
+                host.nzb_push_completed_file(job, fp, &fs.filename, CF_NONE, 0);
             }
-            let nzb = host.nzb_snap(p2, false);
-            let cfs_len = host.nzb_completed_files_len(p2) as c_int;
+            let nzb = host.nzb_snap(job, false);
+            let cfs_len = host.nzb_completed_files_len(job) as c_int;
             *ints.add(0) = nzb.par_status.into();
             *ints.add(1) = nzb.unpack_status.into();
             *ints.add(2) = nzb.delete_status.into();
@@ -2518,11 +2525,12 @@ unsafe extern "C" fn hc_native_action_cb(
             0
         }
         3 => {
-            let cfs_len = host.nzb_completed_files_len(p2);
+            let job = NzbRef::from_addr(p2);
+            let cfs_len = host.nzb_completed_files_len(job);
             if a1 < 0 || (a1 as usize) >= cfs_len {
                 return 0;
             }
-            let cf = host.nzb_completed_file_at(p2, a1 as usize);
+            let cf = host.nzb_completed_file_at(job, a1 as usize);
             *ints.add(0) = cf.status;
             *ints.add(1) = cf.id;
             *strs.add(0) = hc_stash_str(&cf.filename);
@@ -2536,38 +2544,40 @@ unsafe extern "C" fn hc_native_action_cb(
             } else {
                 MK_INFO
             };
-            host.nzb_print_message(p2, mk, hc_cstr_bytes(s1));
+            host.nzb_print_message(NzbRef::from_addr(p2), mk, hc_cstr_bytes(s1));
             0
         }
         5 => {
-            let nzb = host.nzb_snap(p2, false);
-            host.nzb_set_int(p2, NZB_INT_PARKED_FILE_COUNT, a1);
-            host.nzb_action(p2, NZB_ACT_CLEAR_FILE_LIST, 0);
-            host.nzb_set_int(p2, NZB_INT_REMAINING_PAR_COUNT, 0);
-            host.nzb_set_int(p2, NZB_INT_PARKING, 0);
+            let job = NzbRef::from_addr(p2);
+            let nzb = host.nzb_snap(job, false);
+            host.nzb_set_int(job, NZB_INT_PARKED_FILE_COUNT, a1);
+            host.nzb_action(job, NZB_ACT_CLEAR_FILE_LIST, 0);
+            host.nzb_set_int(job, NZB_INT_REMAINING_PAR_COUNT, 0);
+            host.nzb_set_int(job, NZB_INT_PARKING, 0);
             if nzb.direct_rename_status == DirectRenameStatus::Running {
-                host.nzb_set_direct_rename_status(p2, DirectRenameStatus::Failure);
+                host.nzb_set_direct_rename_status(job, DirectRenameStatus::Failure);
             }
             if nzb.direct_unpack_status == DirectUnpackStatus::Running {
-                host.nzb_set_direct_unpack_status(p2, DirectUnpackStatus::None);
+                host.nzb_set_direct_unpack_status(job, DirectUnpackStatus::None);
             }
-            host.nzb_set_int(p2, NZB_INT_DUPE_HINT, DH_NONE);
+            host.nzb_set_int(job, NZB_INT_DUPE_HINT, DH_NONE);
             0
         }
         6 => {
-            let nzb = host.nzb_snap(p2, false);
+            let nzb = host.nzb_snap(NzbRef::from_addr(p2), false);
             crate::dupefallback::par_damage_forget_all(nzb.id);
             0
         }
         10 => {
-            host.nzb_set_param(p2, b"*DupeRecheck", Some(b"1"));
+            let job = NzbRef::from_addr(p2);
+            host.nzb_set_param(job, b"*DupeRecheck", Some(b"1"));
             let emit: unsafe extern "C" fn(
                 *mut c_void,
                 *const c_char,
                 *const *const c_char,
                 usize,
             ) = std::mem::transmute(s1 as usize);
-            let cfs = host.nzb_completed_files(p2);
+            let cfs = host.nzb_completed_files(job);
             for cf in cfs {
                 if (cf.status != CF_PARTIAL && cf.status != CF_FAILURE) || cf.id <= 0 {
                     continue;
@@ -2614,13 +2624,13 @@ unsafe extern "C" fn hc_native_action_cb(
         }
         12 => {
             let hi = host.hist_item_snap(p2);
-            let nzb_ptr = hi.inner_ptr;
+            let nzb_ptr = hi.nzb();
             let nzb = host.nzb_snap(nzb_ptr, false);
             *ints.add(0) = nzb.mark_status.into();
             *ints.add(1) = nzb.delete_status.into();
             *ints.add(2) = c_int::from(nzb.is_dupe_success);
             *strs.add(0) = hc_stash_str(&hi.name);
-            nzb_ptr
+            nzb_ptr.addr()
         }
         13 => {
             host.history_replace_with_dup(p1, p2, a2 as usize, DupStatus::from(a1));
@@ -2662,8 +2672,8 @@ unsafe extern "C" fn hc_native_action_cb(
             let hi_ptr = host.history_find_by_id(p1, a1);
             if hi_ptr != 0 {
                 let hi = host.hist_item_snap(hi_ptr);
-                if hi.kind == HK_NZB && hi.inner_ptr != 0 {
-                    host.nzb_set_mark_status(hi.inner_ptr, MarkStatus::Bad);
+                if hi.kind == HK_NZB && hi.nzb().is_some() {
+                    host.nzb_set_mark_status(hi.nzb(), MarkStatus::Bad);
                 }
             }
             0
@@ -2688,12 +2698,8 @@ unsafe extern "C" fn hc_native_action_cb(
             let Some(idx) = found_idx else {
                 return 0;
             };
-            let nzb_ptr = if found_hi.kind == HK_NZB || found_hi.kind == HK_URL {
-                found_hi.inner_ptr
-            } else {
-                0
-            };
-            let nzb = if nzb_ptr != 0 {
+            let nzb_ptr = found_hi.nzb();
+            let nzb = if nzb_ptr.is_some() {
                 Some(host.nzb_snap(nzb_ptr, false))
             } else {
                 None
@@ -2705,25 +2711,26 @@ unsafe extern "C" fn hc_native_action_cb(
             *ints.add(4) = nzb.as_ref().map_or(0, |n| n.par_status.into());
             *ints.add(5) = nzb.as_ref().map_or(0, |n| n.unpack_status.into());
             *ints.add(6) = nzb.as_ref().map_or(0, |n| n.parked_file_count);
-            *i64s.add(0) = nzb_ptr as i64;
+            *i64s.add(0) = nzb_ptr.addr() as i64;
             *strs.add(0) = hc_stash_str(&found_hi.name);
             *strs.add(1) = hc_stash_str(nzb.as_ref().map_or(b"", |n| n.dest_dir.as_slice()));
             found_hi.hi_ptr
         }
         21 => {
+            let job = NzbRef::from_addr(p2);
             if a1 < 0 {
-                let nzb = host.nzb_snap(p2, false);
+                let nzb = host.nzb_snap(job, false);
                 *ints.add(0) = c_int::from(nzb.unpack_cleaned_up_disk);
                 *ints.add(1) = nzb.post_total_sec;
                 *ints.add(2) = nzb.unpack_sec;
                 *ints.add(3) = nzb.par_sec;
                 *ints.add(4) = nzb.move_status.into();
-                *ints.add(5) = host.nzb_file_len(p2) as c_int;
+                *ints.add(5) = host.nzb_file_len(job) as c_int;
                 *ints.add(6) = nzb.live_unpack_sec;
                 *ints.add(7) = nzb.live_par_sec;
                 *strs.add(0) = hc_stash_str(&nzb.dest_dir);
             } else {
-                let fp = host.nzb_file_at(p2, a1 as usize);
+                let fp = host.nzb_file_at(job, a1 as usize);
                 let fs = host.file_snap(fp);
                 *strs.add(0) = hc_stash_str(&fs.filename);
             }
@@ -2731,7 +2738,7 @@ unsafe extern "C" fn hc_native_action_cb(
         }
         22 => {
             let hi = host.hist_item_snap(p2);
-            let nzb_ptr = hi.inner_ptr;
+            let nzb_ptr = hi.nzb();
             let nzb = host.nzb_snap(nzb_ptr, false);
             // Live work that ended after the job reached history is no part of it.
             crate::postproc::live_par_time_discard(nzb.id);
@@ -2775,25 +2782,27 @@ unsafe extern "C" fn hc_native_action_cb(
             0
         }
         23 => {
+            let job = NzbRef::from_addr(p2);
             if let Some(pp) = crate::ffi::active_prepost() {
                 if a1 != 0 {
-                    pp.nzb_added(host, p1, p2);
+                    pp.nzb_added(host, p1, job);
                 } else {
-                    pp.nzb_downloaded(host, p1, p2);
+                    pp.nzb_downloaded(host, p1, job);
                 }
             }
-            host.prepost_queue_changed(p1, ASPECT_NZB_RETURNED, p2, FileRef::NONE);
+            host.prepost_queue_changed(p1, ASPECT_NZB_RETURNED, job, FileRef::NONE);
             0
         }
         24 => {
-            host.nzb_action(p2, NZB_ACT_BUILD_DEST_DIR, 0);
-            let nzb = host.nzb_snap(p2, false);
+            let job = NzbRef::from_addr(p2);
+            host.nzb_action(job, NZB_ACT_BUILD_DEST_DIR, 0);
+            let nzb = host.nzb_snap(job, false);
             *strs.add(0) = hc_stash_str(&nzb.dest_dir);
             0
         }
         25 => {
             let hi = host.hist_item_snap(p2);
-            let nzb_ptr = hi.inner_ptr;
+            let nzb_ptr = hi.nzb();
             let nzb = host.nzb_snap(nzb_ptr, false);
             host.nzb_set_url_status(nzb_ptr, UrlStatus::None);
             host.nzb_set_delete_status(nzb_ptr, DeleteStatus::None);
@@ -2805,7 +2814,7 @@ unsafe extern "C" fn hc_native_action_cb(
             0
         }
         26 => {
-            let nzb = host.nzb_snap(p2, false);
+            let nzb = host.nzb_snap(NzbRef::from_addr(p2), false);
             *ints.add(0) = c_int::from(nzb.delete_paused);
             *strs.add(0) = hc_stash_str(&nzb.name);
             *strs.add(1) = hc_stash_str(&nzb.queued_filename);
@@ -2821,8 +2830,9 @@ unsafe extern "C" fn hc_native_action_cb(
             parsed.uptr_addr
         }
         28 => {
-            let src_nzb_ptr = if p1 != 0 { *(p1 as *const usize) } else { 0 };
-            if src_nzb_ptr != 0 {
+            let job = NzbRef::from_addr(p2);
+            let src_nzb_ptr = NzbRef::from_addr(if p1 != 0 { *(p1 as *const usize) } else { 0 });
+            if src_nzb_ptr.is_some() {
                 let n = host.nzb_file_len(src_nzb_ptr);
                 let paused_val = c_int::from(a1 != 0);
                 for idx in 0..n {
@@ -2830,55 +2840,56 @@ unsafe extern "C" fn hc_native_action_cb(
                     host.file_set_int(fp, FILE_INT_PAUSED, paused_val);
                 }
             }
-            host.disk_discard_files(p2);
-            crate::postproc::live_par_time_discard(host.nzb_snap(p2, false).id);
-            host.nzb_set_move_status(p2, MoveStatus::None);
-            host.nzb_set_int(p2, NZB_INT_UNPACK_CLEANED_UP_DISK, 0);
-            host.nzb_set_par_status(p2, NzbParStatus::None);
-            host.nzb_set_int(p2, NZB_INT_PAR_RENAME_STATUS, RS_NONE);
-            host.nzb_set_int(p2, NZB_INT_RAR_RENAME_STATUS, RS_NONE);
-            host.nzb_set_direct_rename_status(p2, DirectRenameStatus::None);
-            host.nzb_set_direct_unpack_status(p2, DirectUnpackStatus::None);
-            host.nzb_set_int(p2, NZB_INT_PAR_REPAIRED, 0);
-            host.nzb_set_int(p2, NZB_INT_UNPACK_TRIED, 0);
-            host.nzb_set_last_unpack_status(p2, UnpackStatus::None);
-            host.nzb_action(p2, NZB_ACT_CLEAR_EXTRACTED_ARCHIVES, 0);
-            host.nzb_set_int(p2, NZB_INT_HEALTH_PAUSED, 0);
-            host.nzb_set_i64(p2, NZB_I64_DOWNLOADED_SIZE, 0);
-            host.nzb_set_int(p2, NZB_INT_DOWNLOAD_SEC, 0);
-            host.nzb_set_int(p2, NZB_INT_POST_TOTAL_SEC, 0);
-            host.nzb_set_int(p2, NZB_INT_PAR_SEC, 0);
-            host.nzb_set_int(p2, NZB_INT_REPAIR_SEC, 0);
-            host.nzb_set_int(p2, NZB_INT_UNPACK_SEC, 0);
-            host.nzb_set_int(p2, NZB_INT_LIVE_UNPACK_SEC, 0);
-            host.nzb_set_int(p2, NZB_INT_LIVE_PAR_SEC, 0);
-            host.nzb_set_int(p2, NZB_INT_EXTRA_PAR_BLOCKS, 0);
-            host.nzb_set_int(p2, NZB_INT_ALL_FIRST, 0);
-            host.nzb_set_int(p2, NZB_INT_WAITING_PAR, 0);
-            host.nzb_set_int(p2, NZB_INT_LOADING_PAR, 0);
-            host.nzb_set_int(p2, NZB_INT_DUPE_RECOVERED_ARTICLES, 0);
-            host.nzb_set_i64(p2, NZB_I64_DUPE_RECOVERED_BYTES, 0);
-            host.nzb_set_int(p2, NZB_INT_DUPE_RECOVERED_HOLES, 0);
-            host.nzb_set_param(p2, crate::queuecoord::PAR_ARTICLES_PARAM, None);
-            host.nzb_set_param(p2, crate::queuecoord::PAR_FILES_PARAM, None);
-            host.nzb_set_int(p2, NZB_INT_DUPE_PAR_DEFER_STATE, DP_NONE);
-            host.nzb_set_int(p2, NZB_INT_DUPE_NO_PAR_NOTED, 0);
-            host.nzb_redownload_replace_files(p2, src_nzb_ptr);
+            host.disk_discard_files(job);
+            crate::postproc::live_par_time_discard(host.nzb_snap(job, false).id);
+            host.nzb_set_move_status(job, MoveStatus::None);
+            host.nzb_set_int(job, NZB_INT_UNPACK_CLEANED_UP_DISK, 0);
+            host.nzb_set_par_status(job, NzbParStatus::None);
+            host.nzb_set_int(job, NZB_INT_PAR_RENAME_STATUS, RS_NONE);
+            host.nzb_set_int(job, NZB_INT_RAR_RENAME_STATUS, RS_NONE);
+            host.nzb_set_direct_rename_status(job, DirectRenameStatus::None);
+            host.nzb_set_direct_unpack_status(job, DirectUnpackStatus::None);
+            host.nzb_set_int(job, NZB_INT_PAR_REPAIRED, 0);
+            host.nzb_set_int(job, NZB_INT_UNPACK_TRIED, 0);
+            host.nzb_set_last_unpack_status(job, UnpackStatus::None);
+            host.nzb_action(job, NZB_ACT_CLEAR_EXTRACTED_ARCHIVES, 0);
+            host.nzb_set_int(job, NZB_INT_HEALTH_PAUSED, 0);
+            host.nzb_set_i64(job, NZB_I64_DOWNLOADED_SIZE, 0);
+            host.nzb_set_int(job, NZB_INT_DOWNLOAD_SEC, 0);
+            host.nzb_set_int(job, NZB_INT_POST_TOTAL_SEC, 0);
+            host.nzb_set_int(job, NZB_INT_PAR_SEC, 0);
+            host.nzb_set_int(job, NZB_INT_REPAIR_SEC, 0);
+            host.nzb_set_int(job, NZB_INT_UNPACK_SEC, 0);
+            host.nzb_set_int(job, NZB_INT_LIVE_UNPACK_SEC, 0);
+            host.nzb_set_int(job, NZB_INT_LIVE_PAR_SEC, 0);
+            host.nzb_set_int(job, NZB_INT_EXTRA_PAR_BLOCKS, 0);
+            host.nzb_set_int(job, NZB_INT_ALL_FIRST, 0);
+            host.nzb_set_int(job, NZB_INT_WAITING_PAR, 0);
+            host.nzb_set_int(job, NZB_INT_LOADING_PAR, 0);
+            host.nzb_set_int(job, NZB_INT_DUPE_RECOVERED_ARTICLES, 0);
+            host.nzb_set_i64(job, NZB_I64_DUPE_RECOVERED_BYTES, 0);
+            host.nzb_set_int(job, NZB_INT_DUPE_RECOVERED_HOLES, 0);
+            host.nzb_set_param(job, crate::queuecoord::PAR_ARTICLES_PARAM, None);
+            host.nzb_set_param(job, crate::queuecoord::PAR_FILES_PARAM, None);
+            host.nzb_set_int(job, NZB_INT_DUPE_PAR_DEFER_STATE, DP_NONE);
+            host.nzb_set_int(job, NZB_INT_DUPE_NO_PAR_NOTED, 0);
+            host.nzb_redownload_replace_files(job, src_nzb_ptr);
             host.destroy_nzb_uptr(p1);
             if let Some((qc, qh)) = crate::ffi::active_queue_coord_and_host() {
-                qc.check_dupe_file_infos(&qh, p2);
+                qc.check_dupe_file_infos(&qh, job);
             }
             0
         }
         30 => {
+            let job = NzbRef::from_addr(p2);
             let try_state = a2 == CF_PARTIAL;
             let (fi_ptr, state_loaded) = host.disk_load_file_for_inspect(a1, true, try_state);
             if fi_ptr.is_none() {
                 return 0;
             }
-            host.file_set_nzb_info(fi_ptr, p2);
+            host.file_set_nzb_info(fi_ptr, job);
             let fs = host.file_snap(fi_ptr);
-            let nzb = host.nzb_snap(p2, false);
+            let nzb = host.nzb_snap(job, false);
             *ints.add(0) = c_int::from(state_loaded);
             *ints.add(1) = fs.success_articles;
             *ints.add(2) = fs.partial_state;
@@ -2922,15 +2933,16 @@ unsafe extern "C" fn hc_native_action_cb(
             0
         }
         33 => {
+            let job = NzbRef::from_addr(p2);
             let file = FileRef::from_addr(p1);
             host.file_set_int(file, FILE_INT_PARTIAL_STATE, a2);
-            host.file_subtract_server_stats_from_nzb_total(file, p2);
-            host.nzb_set_i64(p2, NZB_I64_FAILED_SIZE, *i64s.add(3));
-            host.nzb_set_i64(p2, NZB_I64_SUCCESS_SIZE, *i64s.add(4));
-            host.nzb_set_int(p2, NZB_INT_FAILED_ARTICLES, *ints.add(3));
-            host.nzb_set_int(p2, NZB_INT_SUCCESS_ARTICLES, *ints.add(4));
-            host.nzb_set_i64(p2, NZB_I64_PAR_FAILED_SIZE, *i64s.add(5));
-            host.nzb_set_i64(p2, NZB_I64_PAR_SUCCESS_SIZE, *i64s.add(6));
+            host.file_subtract_server_stats_from_nzb_total(file, job);
+            host.nzb_set_i64(job, NZB_I64_FAILED_SIZE, *i64s.add(3));
+            host.nzb_set_i64(job, NZB_I64_SUCCESS_SIZE, *i64s.add(4));
+            host.nzb_set_int(job, NZB_INT_FAILED_ARTICLES, *ints.add(3));
+            host.nzb_set_int(job, NZB_INT_SUCCESS_ARTICLES, *ints.add(4));
+            host.nzb_set_i64(job, NZB_I64_PAR_FAILED_SIZE, *i64s.add(5));
+            host.nzb_set_i64(job, NZB_I64_PAR_SUCCESS_SIZE, *i64s.add(6));
             if !bytes.is_null() {
                 for idx in 0..len {
                     if *bytes.add(idx) != 0 {
@@ -2955,25 +2967,26 @@ unsafe extern "C" fn hc_native_action_cb(
             }
             host.file_action(file, FILE_ACT_CLEAR_ARTICLES, 0);
             let fid = fs.id;
-            host.nzb_add_requeued_file(p2, file);
-            host.nzb_erase_completed_file(p2, a1 as usize);
+            host.nzb_add_requeued_file(job, file);
+            host.nzb_erase_completed_file(job, a1 as usize);
             fid as usize
         }
         34 => {
+            let job = NzbRef::from_addr(p2);
             if len > 0 && !ints.is_null() {
                 let req = std::slice::from_raw_parts(ints, len);
-                let jobs = host.nzb_stream_repair_jobs(p2);
+                let jobs = host.nzb_stream_repair_jobs(job);
                 for j in (0..jobs.len()).rev() {
                     if req.contains(&jobs[j].file_id) {
-                        host.nzb_stream_repair_erase_job(p2, j, false);
+                        host.nzb_stream_repair_erase_job(job, j, false);
                     }
                 }
             }
-            host.nzb_action(p2, NZB_ACT_UPDATE_CURRENT_STATS, 0);
+            host.nzb_action(job, NZB_ACT_UPDATE_CURRENT_STATS, 0);
             if a1 != 0 {
-                host.nzb_set_int(p2, NZB_INT_HEALTH_PAUSED, 1);
+                host.nzb_set_int(job, NZB_INT_HEALTH_PAUSED, 1);
             }
-            let nzb = host.nzb_snap(p2, false);
+            let nzb = host.nzb_snap(job, false);
             *i64s.add(0) = i64::from(nzb.is_download_completed);
             *i64s.add(1) = i64::from(nzb.id);
             let _ = AI_UNDEFINED;
@@ -2987,16 +3000,16 @@ unsafe extern "C" fn hc_native_action_cb(
             let hi = host.hist_item_snap(p2);
             match a1 {
                 0 => {
-                    host.nzb_set_param(hi.inner_ptr, hc_cstr_bytes(s1), Some(hc_cstr_bytes(s2)));
+                    host.nzb_set_param(hi.nzb(), hc_cstr_bytes(s1), Some(hc_cstr_bytes(s2)));
                 }
                 1 => {
-                    host.nzb_set_str(hi.inner_ptr, NZB_STR_CATEGORY, hc_cstr_bytes(s1));
+                    host.nzb_set_str(hi.nzb(), NZB_STR_CATEGORY, hc_cstr_bytes(s1));
                 }
                 2 => {
                     if hi.kind == HK_NZB || hi.kind == HK_URL {
-                        let prev = host.nzb_snap(hi.inner_ptr, false).name;
-                        host.nzb_set_str(hi.inner_ptr, NZB_STR_NAME, hc_cstr_bytes(s1));
-                        let after = host.nzb_snap(hi.inner_ptr, false);
+                        let prev = host.nzb_snap(hi.nzb(), false).name;
+                        host.nzb_set_str(hi.nzb(), NZB_STR_NAME, hc_cstr_bytes(s1));
+                        let after = host.nzb_snap(hi.nzb(), false);
                         if hi.kind == HK_NZB && prev != after.name {
                             return after.id as usize;
                         }
@@ -3005,12 +3018,12 @@ unsafe extern "C" fn hc_native_action_cb(
                     }
                 }
                 3 => {
-                    host.nzb_set_param(hi.inner_ptr, b"DupeSearchOwnedKey", None);
-                    host.nzb_set_str(hi.inner_ptr, NZB_STR_DUPE_KEY, hc_cstr_bytes(s1));
+                    host.nzb_set_param(hi.nzb(), b"DupeSearchOwnedKey", None);
+                    host.nzb_set_str(hi.nzb(), NZB_STR_DUPE_KEY, hc_cstr_bytes(s1));
                 }
-                4 => host.nzb_set_int(hi.inner_ptr, NZB_INT_DUPE_SCORE, a2),
-                5 => host.nzb_set_dupe_mode(hi.inner_ptr, DupeMode::from(a2)),
-                6 => host.nzb_set_delete_status(hi.inner_ptr, DeleteStatus::from(a2)),
+                4 => host.nzb_set_int(hi.nzb(), NZB_INT_DUPE_SCORE, a2),
+                5 => host.nzb_set_dupe_mode(hi.nzb(), DupeMode::from(a2)),
+                6 => host.nzb_set_delete_status(hi.nzb(), DeleteStatus::from(a2)),
                 7 => host.dup_set_str(hi.inner_ptr, DUP_STR_DUPE_KEY, hc_cstr_bytes(s1)),
                 8 => host.dup_set_int(hi.inner_ptr, DUP_INT_DUPE_SCORE, a2),
                 9 => host.dup_set_int(hi.inner_ptr, DUP_INT_DUPE_MODE, a2),
@@ -3049,14 +3062,14 @@ fn hc_nzb_cleanup_disk() -> c_int {
 }
 
 #[cfg(unix)]
-pub(crate) fn delete_disk_files_active(nzb_ptr: usize) {
+pub(crate) fn delete_disk_files_active(nzb_ptr: NzbRef) {
     let Some(host) = crate::ffi::queue_host() else {
         return;
     };
     let _guard = HcArenaGuard;
     let opts = host.opts();
     let mut env = hc_make_native_env(&host);
-    env.p2 = nzb_ptr;
+    env.p2 = nzb_ptr.addr();
     env.a1 = c_int::from(opts.server_mode);
     env.a2 = hc_nzb_cleanup_disk();
     unsafe {
@@ -3065,14 +3078,14 @@ pub(crate) fn delete_disk_files_active(nzb_ptr: usize) {
 }
 
 #[cfg(unix)]
-pub(crate) fn add_to_history_active(dq_ptr: usize, nzb_ptr: usize) {
+pub(crate) fn add_to_history_active(dq_ptr: usize, nzb_ptr: NzbRef) {
     let Some(host) = crate::ffi::queue_host() else {
         return;
     };
     let _guard = HcArenaGuard;
     let mut env = hc_make_native_env(&host);
     env.p1 = dq_ptr;
-    env.p2 = nzb_ptr;
+    env.p2 = nzb_ptr.addr();
     unsafe {
         history_coord_exec(1, &env);
     }

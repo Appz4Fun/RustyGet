@@ -1,5 +1,6 @@
 //! `QueueEditor` and `GroupSorter` (`daemon/queue/QueueEditor.cpp`) end-to-end Rust implementation.
 
+use crate::queuesubsys_host::NzbRef;
 use crate::queuesubsys_host::FileRef;
 use crate::queuecoord::strcasecmp_bytes;
 use crate::status::{DeleteStatus, DupeMode};
@@ -418,7 +419,7 @@ const MAX_ID: i32 = 1_000_000_000;
 #[derive(Clone, Copy, Debug)]
 struct EditItem {
     file_ptr: FileRef,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
     offset: i32,
 }
 
@@ -644,7 +645,7 @@ fn prepare_list(
                     last_dest_pos = new_last;
                     items.push(EditItem {
                         file_ptr,
-                        nzb_ptr: 0,
+                        nzb_ptr: NzbRef::NONE,
                         offset: work_offset,
                     });
                 }
@@ -702,7 +703,7 @@ fn prepare_list(
                 if let Some(&(_, fptr)) = all_files.iter().find(|&&(fid, _)| fid == id) {
                     items.push(EditItem {
                         file_ptr: fptr,
-                        nzb_ptr: 0,
+                        nzb_ptr: NzbRef::NONE,
                         offset,
                     });
                 }
@@ -764,14 +765,14 @@ fn move_entry(host: &crate::queuesubsys_host::QueueSubsysHost, file_ptr: FileRef
 fn move_group(
     host: &crate::queuesubsys_host::QueueSubsysHost,
     dq_ptr: usize,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
     offset: i32,
 ) {
     let n = host.queue_len(dq_ptr);
     if n == 0 {
         return;
     }
-    let mut order: Vec<usize> = (0..n).map(|i| host.queue_at(dq_ptr, i)).collect();
+    let mut order: Vec<NzbRef> = (0..n).map(|i| host.queue_at(dq_ptr, i)).collect();
     let Some(entry) = order.iter().position(|&p| p == nzb_ptr) else {
         return;
     };
@@ -866,7 +867,7 @@ fn pause_pars(
 #[cfg(unix)]
 fn set_nzb_priority(
     host: &crate::queuesubsys_host::QueueSubsysHost,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
     priority: Option<&[u8]>,
 ) {
     use crate::queuesubsys_host::{MK_DEBUG, NZB_INT_PRIORITY};
@@ -897,7 +898,7 @@ fn resolve_category_settings(
 fn set_nzb_category(
     coord: &crate::queuecoord::NzbgetRsQueueCoordinator,
     host: &crate::queuesubsys_host::QueueSubsysHost,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
     category: Option<&[u8]>,
     apply_params: bool,
 ) {
@@ -941,7 +942,7 @@ fn set_nzb_category(
 fn set_nzb_name(
     coord: &crate::queuecoord::NzbgetRsQueueCoordinator,
     host: &crate::queuesubsys_host::QueueSubsysHost,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
     name: Option<&[u8]>,
 ) {
     use crate::queuesubsys_host::MK_DEBUG;
@@ -967,7 +968,7 @@ fn set_nzb_name(
 #[cfg(unix)]
 fn set_nzb_parameter(
     host: &crate::queuesubsys_host::QueueSubsysHost,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
     param_string: Option<&[u8]>,
 ) {
     use crate::queuesubsys_host::{MK_DEBUG, MK_ERROR};
@@ -1000,7 +1001,7 @@ fn set_nzb_parameter(
 #[cfg(unix)]
 fn set_nzb_dupe_param(
     host: &crate::queuesubsys_host::QueueSubsysHost,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
     action: i32,
     text: Option<&[u8]>,
 ) {
@@ -1058,7 +1059,7 @@ fn align_groups(
     if n == 0 {
         return;
     }
-    let mut order: Vec<usize> = (0..n).map(|i| host.queue_at(dq_ptr, i)).collect();
+    let mut order: Vec<NzbRef> = (0..n).map(|i| host.queue_at(dq_ptr, i)).collect();
     let mut has_last = false;
     let mut last_num: usize = 0;
     let mut num: usize = 0;
@@ -1174,7 +1175,7 @@ fn sort_groups(
         run_sort(&mut sorted, sort_order);
     }
 
-    let new_ptrs: Vec<usize> = sorted.iter().map(|s| s.ptr).collect();
+    let new_ptrs: Vec<NzbRef> = sorted.iter().map(|s| s.ptr).collect();
     host.queue_reorder(dq_ptr, &new_ptrs);
     true
 }
@@ -1200,7 +1201,7 @@ fn move_groups_to(
     let mut target_id = crate::util::parse_c_atoi(args_bytes);
     let mut offset = 0i32;
 
-    if host.queue_find_by_id(dq_ptr, target_id) == 0 {
+    if host.queue_find_by_id(dq_ptr, target_id).is_none() {
         return false;
     }
 
@@ -1266,7 +1267,7 @@ fn reorder_files(host: &crate::queuesubsys_host::QueueSubsysHost, items: &[EditI
 }
 
 #[cfg(unix)]
-fn sort_group_files(host: &crate::queuesubsys_host::QueueSubsysHost, nzb_ptr: usize) {
+fn sort_group_files(host: &crate::queuesubsys_host::QueueSubsysHost, nzb_ptr: NzbRef) {
     use crate::queuesubsys_host::MK_DEBUG;
     let nzb = host.nzb_snap(nzb_ptr, false);
     let dbg = push_bytes_msg(
@@ -1360,7 +1361,7 @@ fn edit_group(
     coord: &crate::queuecoord::NzbgetRsQueueCoordinator,
     host: &crate::queuesubsys_host::QueueSubsysHost,
     dq_ptr: usize,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
     action: i32,
     args: Option<&[u8]>,
 ) -> bool {
@@ -1381,7 +1382,7 @@ fn edit_group(
         all_paused &= f.paused;
         group_items.push(EditItem {
             file_ptr: fptr,
-            nzb_ptr: 0,
+            nzb_ptr: NzbRef::NONE,
             offset: 0,
         });
     }
@@ -1422,7 +1423,7 @@ fn edit_group(
         args,
     );
 
-    if is_group_del && host.queue_find_by_id(dq_ptr, nzb_id) != 0 {
+    if is_group_del && host.queue_find_by_id(dq_ptr, nzb_id).is_some() {
         host.dq_notify(dq_ptr, ASPECT_NZB_DELETED, nzb_ptr, FileRef::NONE);
     }
 

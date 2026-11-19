@@ -2,6 +2,7 @@
 //! `ParChecker`, `UnpackController`, `DirectUnpack`, `MoveController`,
 //! `CleanupController`, `RenameController`, and `PostRenamerController`.
 
+use crate::queuesubsys_host::NzbRef;
 use crate::queuesubsys_host::FileRef;
 use crate::cstr;
 use crate::parchecker::{
@@ -1556,7 +1557,7 @@ impl JobQueue<'_> {
         self.job.stop_from_rust(self.host);
     }
 
-    fn nzb_ptr(self) -> usize {
+    fn nzb_ptr(self) -> NzbRef {
         self.job.nzb_ptr(self.host)
     }
 
@@ -3289,7 +3290,7 @@ fn live_par_time_charge(
 /// par-check ran. A deleted job's, or one leaving without history, is dropped.
 pub(crate) fn live_par_time_settle(
     host: &crate::queuesubsys_host::QueueSubsysHost,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
     keep: bool,
 ) {
     use crate::queuesubsys_host::{NZB_INT_LIVE_PAR_SEC, NZB_INT_PAR_SEC, NZB_INT_REPAIR_SEC};
@@ -3309,7 +3310,7 @@ pub(crate) fn live_par_time_settle(
 /// rest is settled at history. Nothing is counted twice.
 pub(crate) fn live_par_time_checkpoint(
     host: &crate::queuesubsys_host::QueueSubsysHost,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
 ) {
     use crate::queuesubsys_host::{NZB_INT_LIVE_PAR_SEC, NZB_INT_PAR_SEC, NZB_INT_REPAIR_SEC};
     let nzb = host.nzb_snap(nzb_ptr, false);
@@ -3433,7 +3434,7 @@ impl BusyTime {
 /// What direct unpack reads from its download in the queue.
 #[cfg(unix)]
 struct DirectUnpackNzb {
-    ptr: usize,
+    ptr: NzbRef,
     name: Vec<u8>,
     dest_dir: Vec<u8>,
     password: Option<Vec<u8>>,
@@ -3522,12 +3523,12 @@ impl NzbgetRsDirectUnpack {
     }
 
     /// Adds a message to the download's message list.
-    fn nzb_message(host: &QueueSubsysHost, nzb_ptr: usize, kind: i32, msg: &[u8]) {
+    fn nzb_message(host: &QueueSubsysHost, nzb_ptr: NzbRef, kind: i32, msg: &[u8]) {
         host.nzb_add_message(nzb_ptr, kind, cstr::until_nul(msg));
     }
 
     /// Shows `label` as the post-processing progress, when the download has post info.
-    fn post_progress_label(host: &QueueSubsysHost, nzb_ptr: usize, label: &[u8]) {
+    fn post_progress_label(host: &QueueSubsysHost, nzb_ptr: NzbRef, label: &[u8]) {
         let ns = host.nzb_snap(nzb_ptr, false);
         if ns.post_info_ptr.is_some() {
             host.post_set_progress_label(ns.post_info_ptr, cstr::until_nul(label));
@@ -3537,7 +3538,7 @@ impl NzbgetRsDirectUnpack {
     /// The direct unpack's download in the locked queue `dq_ptr`.
     fn find_nzb(&self, host: &QueueSubsysHost, dq_ptr: usize) -> Option<DirectUnpackNzb> {
         let n = host.queue_find_by_id(dq_ptr, self.nzb_id);
-        if n == 0 {
+        if n.is_none() {
             return None;
         }
         let ns = host.nzb_snap(n, false);
@@ -3561,18 +3562,18 @@ impl NzbgetRsDirectUnpack {
         })
     }
 
-    fn final_dir_name(host: &QueueSubsysHost, nzb_ptr: usize) -> Vec<u8> {
+    fn final_dir_name(host: &QueueSubsysHost, nzb_ptr: NzbRef) -> Vec<u8> {
         cstr::until_nul(&host.nzb_build_final_dir_name(nzb_ptr)).to_vec()
     }
 
     /// Clears the download's unpack thread and sets its direct unpack status.
-    fn finish_nzb(host: &QueueSubsysHost, nzb_ptr: usize, status: DirectUnpackStatus) {
+    fn finish_nzb(host: &QueueSubsysHost, nzb_ptr: NzbRef, status: DirectUnpackStatus) {
         use crate::queuesubsys_host::NZB_ACT_CLEAR_UNPACK_THREAD;
         host.nzb_action(nzb_ptr, NZB_ACT_CLEAR_UNPACK_THREAD, 0);
         host.nzb_set_direct_unpack_status(nzb_ptr, status);
     }
 
-    fn add_extra_time(&self, host: &QueueSubsysHost, nzb_ptr: usize, clear_working: bool) {
+    fn add_extra_time(&self, host: &QueueSubsysHost, nzb_ptr: NzbRef, clear_working: bool) {
         let start = self.extra_start_time.swap(0, Ordering::AcqRel);
         let extra_sec = if start != 0 {
             (current_time_sec() - start) as c_int
@@ -3618,7 +3619,7 @@ impl NzbgetRsDirectUnpack {
         }
     }
 
-    pub(crate) fn stop_with_nzb(&self, host: &QueueSubsysHost, nzb_ptr: usize) {
+    pub(crate) fn stop_with_nzb(&self, host: &QueueSubsysHost, nzb_ptr: NzbRef) {
         let info_name = self.lock_vol().info_name.clone();
         Self::global_log(MK_DEBUG, &[b"Stopping ", info_name.as_slice()].concat());
 
@@ -3630,7 +3631,7 @@ impl NzbgetRsDirectUnpack {
 
         if self.processed.load(Ordering::Acquire) {
             let cancel_msg = trunc_1023([b"Cancelling ", info_name.as_slice()].concat());
-            if nzb_ptr != 0 {
+            if nzb_ptr.is_some() {
                 let c_msg = cstr::nul_terminated(&cancel_msg);
                 Self::nzb_message(host, nzb_ptr, MK_WARNING, &c_msg);
             } else {
@@ -3638,7 +3639,7 @@ impl NzbgetRsDirectUnpack {
             }
         }
 
-        if nzb_ptr != 0 {
+        if nzb_ptr.is_some() {
             self.add_extra_time(host, nzb_ptr, true);
         }
 
@@ -3686,7 +3687,7 @@ impl NzbgetRsDirectUnpack {
     pub(crate) fn file_downloaded(&self, host: &QueueSubsysHost, fi_ptr: FileRef) {
         let fs = host.file_snap(fi_ptr);
         let nzb_ptr = fs.nzb_ptr;
-        let nzb_name = if nzb_ptr != 0 {
+        let nzb_name = if nzb_ptr.is_some() {
             cstr::until_nul(&host.nzb_snap(nzb_ptr, false).name).to_vec()
         } else {
             Vec::new()
@@ -3707,7 +3708,7 @@ impl NzbgetRsDirectUnpack {
 
         if crate::filetypes::is_rar_file(&filename) && failed_articles > 0 {
             // A damaged volume pauses extraction until it is repaired; nothing is cancelled.
-            let dest_dir = (nzb_ptr != 0).then(|| host.nzb_snap(nzb_ptr, false).dest_dir);
+            let dest_dir = (nzb_ptr.is_some()).then(|| host.nzb_snap(nzb_ptr, false).dest_dir);
             let Some(dest_dir) = dest_dir else {
                 self.stop_with_nzb(host, nzb_ptr);
                 return;
@@ -3763,7 +3764,7 @@ impl NzbgetRsDirectUnpack {
         }
     }
 
-    pub(crate) fn nzb_downloaded(&self, host: &QueueSubsysHost, nzb_ptr: usize) {
+    pub(crate) fn nzb_downloaded(&self, host: &QueueSubsysHost, nzb_ptr: NzbRef) {
         // Extraction from here on is post-download work, also when it resumes after a
         // repair releases volumes parked below.
         self.busy
@@ -3822,7 +3823,7 @@ impl NzbgetRsDirectUnpack {
         }
     }
 
-    pub(crate) fn nzb_deleted(&self, host: &QueueSubsysHost, nzb_ptr: usize) {
+    pub(crate) fn nzb_deleted(&self, host: &QueueSubsysHost, nzb_ptr: NzbRef) {
         let ns = host.nzb_snap(nzb_ptr, false);
         let nzb_name = cstr::until_nul(&ns.name).to_vec();
         Self::global_log(
@@ -3867,17 +3868,17 @@ impl NzbgetRsDirectUnpack {
 
         host.with_locked_queue(|dq_ptr| {
             let nzb = self.find_nzb(host, dq_ptr);
-            let nzb_ptr = nzb.as_ref().map_or(0, |n| n.ptr);
+            let nzb_ptr = nzb.as_ref().map_or(NzbRef::NONE, |n| n.ptr);
             let has_post_info = nzb.as_ref().is_some_and(|n| n.has_post_info);
 
             let c_msg = cstr::nul_terminated(&msg_text);
-            if nzb_ptr != 0 {
+            if nzb_ptr.is_some() {
                 Self::nzb_message(host, nzb_ptr, kind, &c_msg);
             } else {
                 Self::global_log(kind, &msg_text);
             }
 
-            if info.has_extracting_progress != 0 && nzb_ptr != 0 && msg_text.len() >= 7 {
+            if info.has_extracting_progress != 0 && nzb_ptr.is_some() && msg_text.len() >= 7 {
                 let lbl = msg_text[7..].to_vec();
                 self.lock_vol().progress_label = lbl.clone();
                 if has_post_info {
@@ -3886,7 +3887,7 @@ impl NzbgetRsDirectUnpack {
                 }
             }
 
-            if info.has_extracting_from != 0 && nzb_ptr != 0 && text.len() >= 7 {
+            if info.has_extracting_from != 0 && nzb_ptr.is_some() && text.len() >= 7 {
                 let lbl = text[7..].to_vec();
                 self.lock_vol().progress_label = lbl.clone();
                 if has_post_info {
@@ -3957,7 +3958,7 @@ impl NzbgetRsDirectUnpack {
                 let msg = [b"Could not find volume ", filename].concat();
                 self.add_message(host, MK_WARNING, &msg, local);
                 host.with_locked_queue(|dq_ptr| {
-                    let nzb_ptr = self.find_nzb(host, dq_ptr).map_or(0, |n| n.ptr);
+                    let nzb_ptr = self.find_nzb(host, dq_ptr).map_or(NzbRef::NONE, |n| n.ptr);
                     self.stop_with_nzb(host, nzb_ptr);
                 });
             }
@@ -3976,7 +3977,7 @@ impl NzbgetRsDirectUnpack {
             format!("Direct unpack stopped: {failure}").as_bytes(),
         );
         host.with_locked_queue(|dq_ptr| {
-            let nzb_ptr = self.find_nzb(host, dq_ptr).map_or(0, |n| n.ptr);
+            let nzb_ptr = self.find_nzb(host, dq_ptr).map_or(NzbRef::NONE, |n| n.ptr);
             if !self.is_stopped(host) {
                 self.stop_with_nzb(host, nzb_ptr);
             }
@@ -4382,7 +4383,7 @@ impl NzbgetRsDirectUnpack {
                 }
                 1 => {
                     let _ = p1;
-                    self.stop_with_nzb(host, p2);
+                    self.stop_with_nzb(host, NzbRef::from_addr(p2));
                     0
                 }
                 2 => {
@@ -4392,12 +4393,12 @@ impl NzbgetRsDirectUnpack {
                 }
                 3 => {
                     let _ = p1;
-                    self.nzb_downloaded(host, p2);
+                    self.nzb_downloaded(host, NzbRef::from_addr(p2));
                     0
                 }
                 4 => {
                     let _ = p1;
-                    self.nzb_deleted(host, p2);
+                    self.nzb_deleted(host, NzbRef::from_addr(p2));
                     0
                 }
                 _ => 0,
@@ -4426,7 +4427,7 @@ fn map_cleanup_kind(kind: crate::cleanup::CleanupLogKind) -> i32 {
 
 #[cfg(unix)]
 impl NzbgetRsPostJob {
-    fn nzb_ptr(&self, host: &crate::queuesubsys_host::QueueSubsysHost) -> usize {
+    fn nzb_ptr(&self, host: &crate::queuesubsys_host::QueueSubsysHost) -> NzbRef {
         host.post_snap(self.post_ptr).nzb_ptr
     }
 
@@ -4471,7 +4472,7 @@ impl NzbgetRsPostJob {
                         return;
                     }
                     let n = self.nzb_ptr(host);
-                    if n != 0 {
+                    if n.is_some() {
                         host.nzb_rename_completed_file(
                             n,
                             cstr::until_nul(old_rel),
@@ -4499,7 +4500,7 @@ impl NzbgetRsPostJob {
                 return;
             }
             let n = self.nzb_ptr(host);
-            if n == 0 {
+            if n.is_none() {
                 return;
             }
             let (outcome, move_status) =
@@ -4931,7 +4932,7 @@ impl NzbgetRsPostJob {
                         return;
                     }
                     let n = self.nzb_ptr(host);
-                    if n != 0 {
+                    if n.is_some() {
                         host.nzb_rename_completed_file(
                             n,
                             cstr::until_nul(old_name),

@@ -133,6 +133,7 @@ pub fn format_temp_url_path(temp_dir: &[u8], sep: u8, id: i32) -> Vec<u8> {
 // End-to-End UrlCoordinator & UrlDownloader Engine (`NzbgetRsUrlCoord`)
 // ============================================================================
 
+use crate::queuesubsys_host::NzbRef;
 use crate::queuesubsys_host::FileRef;
 use crate::queuesubsys_host::{
     QueueSubsysHost, ASPECT_URL_ADDED, ASPECT_URL_COMPLETED, ASPECT_URL_DELETED, ASPECT_URL_FAILED,
@@ -155,7 +156,7 @@ struct ActiveUrlSlot {
     dl: Arc<crate::net::NzbgetRsWebDl>,
     #[cfg(not(unix))]
     dl_ptr: usize,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
     category: Vec<u8>,
 }
 
@@ -333,7 +334,7 @@ impl NzbgetRsUrlCoord {
                     url_runtime_opts();
 
                 let active_len = self.active.lock().map(|g| g.len() as i32).unwrap_or(0);
-                let mut chosen_nzb: usize = 0;
+                let mut chosen_nzb = NzbRef::NONE;
                 let mut chosen_id: i32 = 0;
 
                 if active_len < url_connections {
@@ -362,7 +363,7 @@ impl NzbgetRsUrlCoord {
                         }
                     }
 
-                    if chosen_nzb != 0 && (!pause_download || url_force) {
+                    if chosen_nzb.is_some() && (!pause_download || url_force) {
                         url_emit_log(0, &[b"Starting new UrlDownloader"]);
                         let tmp_path = format_temp_url_path(&temp_dir, sep, chosen_id);
                         let snap = host.nzb_snap(chosen_nzb, false);
@@ -411,7 +412,7 @@ impl NzbgetRsUrlCoord {
 
                 let active_nonempty = self.active.lock().map(|g| !g.is_empty()).unwrap_or(false);
                 self.has_more_jobs
-                    .store(active_nonempty || chosen_nzb != 0, Ordering::SeqCst);
+                    .store(active_nonempty || chosen_nzb.is_some(), Ordering::SeqCst);
             });
 
             let now = url_now_sec();
@@ -470,7 +471,7 @@ impl NzbgetRsUrlCoord {
     }
 
     #[cfg(unix)]
-    fn on_webdl_header(&self, dl: &crate::net::NzbgetRsWebDl, nzb_ptr: usize, line: &[u8]) {
+    fn on_webdl_header(&self, dl: &crate::net::NzbgetRsWebDl, nzb_ptr: NzbRef, line: &[u8]) {
         let dl_key = dl as *const crate::net::NzbgetRsWebDl;
         match dnzb_header(line) {
             Dnzb::None => {}
@@ -494,7 +495,7 @@ impl NzbgetRsUrlCoord {
     }
 
     #[cfg(unix)]
-    fn on_webdl_status(&self, dl: &crate::net::NzbgetRsWebDl, nzb_ptr: usize, status: i32) {
+    fn on_webdl_status(&self, dl: &crate::net::NzbgetRsWebDl, nzb_ptr: NzbRef, status: i32) {
         url_emit_log(0, &[b"Notification from UrlDownloader received"]);
         let Some(host) = crate::ffi::queue_host() else {
             return;
@@ -596,7 +597,7 @@ impl NzbgetRsUrlCoord {
         });
     }
 
-    fn delete_queue_entry(&self, dq_ptr: usize, nzb_ptr: usize, avoid_history: bool) -> bool {
+    fn delete_queue_entry(&self, dq_ptr: usize, nzb_ptr: NzbRef, avoid_history: bool) -> bool {
         let Some(host) = crate::ffi::queue_host() else {
             return false;
         };
@@ -630,14 +631,14 @@ impl NzbgetRsUrlCoord {
         true
     }
 
-    fn add_url_to_queue(&self, nzb_ptr: usize, holder_ptr: usize, add_first: bool) {
+    fn add_url_to_queue(&self, nzb_ptr: NzbRef, holder_ptr: usize, add_first: bool) {
         url_emit_log(0, &[b"Adding URL to queue"]);
         with_dq_guard(|host, dq_ptr| {
             host.dq_notify(dq_ptr, ASPECT_URL_FOUND, nzb_ptr, FileRef::NONE);
             let snap = host.nzb_snap(nzb_ptr, false);
             let do_add = snap.delete_status != DeleteStatus::Manual;
             if do_add && holder_ptr != 0 {
-                host.queue_insert_owned(dq_ptr, holder_ptr, 0, add_first);
+                host.queue_insert_owned(dq_ptr, holder_ptr, NzbRef::NONE, add_first);
                 host.dq_notify(dq_ptr, ASPECT_URL_ADDED, nzb_ptr, FileRef::NONE);
             }
             host.dq_save(dq_ptr);
@@ -676,7 +677,7 @@ impl NzbgetRsUrlCoord {
     pub(crate) fn delete_queue_entry_active(
         &self,
         dq_ptr: usize,
-        nzb_ptr: usize,
+        nzb_ptr: NzbRef,
         avoid_history: bool,
     ) -> bool {
         self.delete_queue_entry(dq_ptr, nzb_ptr, avoid_history)
@@ -817,7 +818,7 @@ pub(crate) fn add_feed_url_active(
         return;
     };
     let (uptr_addr, nzb_ptr) = host.alloc_new_nzb_uptr();
-    if uptr_addr == 0 || nzb_ptr == 0 {
+    if uptr_addr == 0 || nzb_ptr.is_none() {
         host.destroy_nzb_uptr(uptr_addr);
         return;
     }
@@ -864,7 +865,7 @@ pub(crate) fn add_rpc_url_active(
         return None;
     };
     let (uptr_addr, nzb_ptr) = host.alloc_new_nzb_uptr();
-    if uptr_addr == 0 || nzb_ptr == 0 {
+    if uptr_addr == 0 || nzb_ptr.is_none() {
         host.destroy_nzb_uptr(uptr_addr);
         return None;
     }
@@ -914,7 +915,7 @@ pub(crate) fn add_binrpc_url_active(
         return false;
     };
     let (uptr_addr, nzb_ptr) = host.alloc_new_nzb_uptr();
-    if uptr_addr == 0 || nzb_ptr == 0 {
+    if uptr_addr == 0 || nzb_ptr.is_none() {
         host.destroy_nzb_uptr(uptr_addr);
         return false;
     }
@@ -944,7 +945,7 @@ pub(crate) fn add_testserver_url_active(server_id: i32, url: &[u8]) -> bool {
         return false;
     };
     let (uptr_addr, nzb_ptr) = host.alloc_new_nzb_uptr();
-    if uptr_addr == 0 || nzb_ptr == 0 {
+    if uptr_addr == 0 || nzb_ptr.is_none() {
         host.destroy_nzb_uptr(uptr_addr);
         return false;
     }

@@ -1,5 +1,6 @@
 //! DiskState record serialization and helpers (`daemon/queue/DiskState.cpp`).
 
+use crate::queuesubsys_host::NzbRef;
 use crate::queuesubsys_host::FileRef;
 use crate::cstr;
 use crate::options::OptStr;
@@ -6884,7 +6885,7 @@ struct ActiveDiskExecCtx<'a> {
     dq_ptr: usize,
     messages: Vec<(i32, i32, i32, std::ffi::CString)>,
     target_file_ptr: FileRef,
-    target_nzb_ptr: usize,
+    target_nzb_ptr: NzbRef,
     pending_nzb_uptr: usize,
     staged_file_ptr: FileRef,
     snap_success_articles: i32,
@@ -6902,7 +6903,7 @@ impl<'a> ActiveDiskExecCtx<'a> {
             dq_ptr: 0,
             messages: Vec::new(),
             target_file_ptr: FileRef::NONE,
-            target_nzb_ptr: 0,
+            target_nzb_ptr: NzbRef::NONE,
             pending_nzb_uptr: 0,
             staged_file_ptr: FileRef::NONE,
             snap_success_articles: 0,
@@ -6956,7 +6957,7 @@ unsafe extern "C" fn active_disk_log_cb(_ctx: *mut c_void, level: c_int, msg: *c
 #[cfg(unix)]
 fn apply_active_server_stats_nzb(
     qh: &crate::queuesubsys_host::QueueSubsysHost,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
     stats: &[NzbgetRsDiskServerStat],
 ) {
     let Some(sp) = crate::net::active_server_pool() else {
@@ -7064,7 +7065,7 @@ unsafe extern "C" fn active_disk_ctrl_cb(
         10 => {
             let uptr = c.pending_nzb_uptr;
             c.pending_nzb_uptr = 0;
-            c.target_nzb_ptr = 0;
+            c.target_nzb_ptr = NzbRef::NONE;
             if uptr != 0 {
                 qh.finish_new_nzb_uptr(c.dq_ptr, uptr);
             }
@@ -7072,7 +7073,7 @@ unsafe extern "C" fn active_disk_ctrl_cb(
         }
         11 => {
             let found = qh.queue_find_by_id(c.dq_ptr, a1);
-            if found != 0 {
+            if found.is_some() {
                 c.target_nzb_ptr = found;
                 1
             } else {
@@ -7081,7 +7082,7 @@ unsafe extern "C" fn active_disk_ctrl_cb(
             }
         }
         12 => {
-            if a1 == crate::queuesubsys_host::HK_NZB && c.target_nzb_ptr != 0 {
+            if a1 == crate::queuesubsys_host::HK_NZB && c.target_nzb_ptr.is_some() {
                 qh.nzb_action(
                     c.target_nzb_ptr,
                     crate::queuesubsys_host::NZB_ACT_LEAVE_POST_PROCESS,
@@ -7090,14 +7091,14 @@ unsafe extern "C" fn active_disk_ctrl_cb(
             }
             let uptr = c.pending_nzb_uptr;
             c.pending_nzb_uptr = 0;
-            c.target_nzb_ptr = 0;
+            c.target_nzb_ptr = NzbRef::NONE;
             if uptr != 0 {
                 qh.history_push_nzb_uptr(c.dq_ptr, uptr, a2);
             }
             0
         }
         13 => {
-            let mut found = 0usize;
+            let mut found = NzbRef::NONE;
             if a1 == 0 {
                 found = qh.queue_find_by_id(c.dq_ptr, a2);
             } else {
@@ -7108,12 +7109,12 @@ unsafe extern "C" fn active_disk_ctrl_cb(
                         || hi.kind == crate::queuesubsys_host::HK_URL)
                         && hi.id == a2
                     {
-                        found = hi.inner_ptr;
+                        found = hi.nzb();
                         break;
                     }
                 }
             }
-            if found != 0 {
+            if found.is_some() {
                 c.target_nzb_ptr = found;
                 1
             } else {
@@ -7236,7 +7237,7 @@ unsafe extern "C" fn active_disk_export_nzb_cb(
         return;
     };
     let mut exp: NzbgetRsDiskNzbExport = unsafe { std::mem::zeroed() };
-    let nzb_ptr: usize;
+    let nzb_ptr: NzbRef;
     if source == 1 {
         let hi = qh.history_at(dq_ptr, idx);
         exp.hist_id = hi.id;
@@ -7262,7 +7263,7 @@ unsafe extern "C" fn active_disk_export_nzb_cb(
             unsafe { sink_fn(sink_ctx, &exp) };
             return;
         }
-        nzb_ptr = hi.inner_ptr;
+        nzb_ptr = hi.nzb();
     } else {
         nzb_ptr = qh.queue_at(dq_ptr, idx);
         let changed = qh.nzb_snap(nzb_ptr, false).changed;
@@ -7374,29 +7375,21 @@ unsafe extern "C" fn active_disk_export_nzb_cb(
         });
     }
 
-    let plen = qh.nzb_params_len(nzb_ptr);
-    let mut param_strs = Vec::with_capacity(plen * 2);
-    for i in 0..plen {
-        let (k, v) = qh.nzb_param_at(nzb_ptr, i);
-        param_strs.push(bytes_to_cstring_trunc(&k));
-        param_strs.push(bytes_to_cstring_trunc(&v));
-    }
-    let mut params = Vec::with_capacity(plen);
-    for i in 0..plen {
-        params.push(NzbgetRsDiskParam {
-            name: param_strs[i * 2].as_ptr(),
-            value: param_strs[i * 2 + 1].as_ptr(),
-        });
-    }
+    let param_strs: Vec<_> = qh
+        .nzb_params(nzb_ptr)
+        .iter()
+        .map(|(k, v)| (bytes_to_cstring_trunc(k), bytes_to_cstring_trunc(v)))
+        .collect();
+    let params: Vec<_> = param_strs
+        .iter()
+        .map(|(name, value)| NzbgetRsDiskParam { name: name.as_ptr(), value: value.as_ptr() })
+        .collect();
 
-    let slen = qh.nzb_script_statuses_len(nzb_ptr);
-    let mut script_strs = Vec::with_capacity(slen);
-    let mut script_statuses = Vec::with_capacity(slen);
-    for i in 0..slen {
-        let (st, nm) = qh.nzb_script_status_at(nzb_ptr, i);
-        script_statuses.push(i32::from(st));
-        script_strs.push(bytes_to_cstring_trunc(&nm));
-    }
+    let (script_statuses, script_strs): (Vec<i32>, Vec<_>) = qh
+        .nzb_script_statuses(nzb_ptr)
+        .iter()
+        .map(|(nm, st)| (i32::from(*st), bytes_to_cstring_trunc(nm)))
+        .unzip();
     let scripts: Vec<NzbgetRsDiskScriptStatus> = script_statuses
         .iter()
         .zip(script_strs.iter())
@@ -7548,7 +7541,7 @@ unsafe extern "C" fn active_disk_apply_nzb_cb(
         );
         return;
     }
-    if nzb_ptr == 0 {
+    if nzb_ptr.is_none() {
         return;
     }
     if mode == 1 {
@@ -7812,7 +7805,7 @@ unsafe extern "C" fn active_disk_export_file_cb(
     let fn_c = bytes_to_cstring_trunc(&fs.filename);
     let out_c = bytes_to_cstring_trunc(&fs.output_filename);
     if mode == 4 {
-        let dest_c = if fs.nzb_ptr != 0 {
+        let dest_c = if fs.nzb_ptr.is_some() {
             Some(bytes_to_cstring_trunc(
                 &qh.nzb_snap(fs.nzb_ptr, false).dest_dir,
             ))
@@ -8123,7 +8116,7 @@ unsafe extern "C" fn active_disk_aux_cb(
     let Some(qh) = qh_opt else {
         return;
     };
-    let emit_nzb = |n: usize| unsafe {
+    let emit_nzb = |n: NzbRef| unsafe {
         let sn = qh.nzb_snap(n, false);
         sink_fn(
             sink_ctx,
@@ -8180,7 +8173,7 @@ unsafe extern "C" fn active_disk_aux_cb(
         let hi = qh.history_at(dq_ptr, i);
         if hi.kind == crate::queuesubsys_host::HK_NZB || hi.kind == crate::queuesubsys_host::HK_URL
         {
-            emit_nzb(hi.inner_ptr);
+            emit_nzb(hi.nzb());
         }
     }
 }
@@ -8302,7 +8295,7 @@ pub(crate) fn active_disk_discard_file(
 #[cfg(unix)]
 pub(crate) fn active_disk_discard_files(
     qh: &crate::queuesubsys_host::QueueSubsysHost,
-    nzb_ptr: usize,
+    nzb_ptr: NzbRef,
     delete_log: bool,
 ) {
     let flen = qh.nzb_file_len(nzb_ptr);

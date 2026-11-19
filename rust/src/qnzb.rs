@@ -11,6 +11,7 @@
 #![allow(non_snake_case)]
 
 use crate::options::OptStr;
+use crate::queuesubsys_host::NzbRef;
 use crate::status::{DeleteStatus, ScriptStatus};
 use std::collections::BTreeSet;
 use std::ffi::{c_char, c_int, CStr, CString};
@@ -289,6 +290,13 @@ struct Coll {
 }
 
 impl Coll {
+    fn param(&self, name: &[u8]) -> Option<&CStr> {
+        self.params
+            .iter()
+            .find(|(n, _)| n.to_bytes().eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_c_str())
+    }
+
     fn set_param(&mut self, name: &CStr, value: &CStr) {
         let pos = self
             .params
@@ -330,6 +338,81 @@ fn cstr<'a>(p: *const c_char) -> &'a CStr {
 
 fn data<'a>(p: *const NzbScalars) -> &'a NzbData {
     unsafe { &*p.cast::<NzbData>() }
+}
+
+/// The model object behind a queue handle; `None` for [`NzbRef::NONE`].
+fn nzb_data<'a>(nzb: NzbRef) -> Option<&'a NzbData> {
+    // A live handle always names an NZB the queue owns, as for the raw ops.
+    nzb.is_some().then(|| data(nzb.addr() as *const NzbScalars))
+}
+
+impl NzbData {
+    fn coll(&self) -> std::sync::MutexGuard<'_, Coll> {
+        self.coll.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// `bytes` up to its first NUL, as a C string (names and values never hold NULs).
+fn c_string(bytes: &[u8]) -> CString {
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    CString::new(&bytes[..end]).unwrap_or_default()
+}
+
+/// The post-processing parameter `name` (compared case-insensitively).
+pub(crate) fn param(nzb: NzbRef, name: &[u8]) -> Option<Vec<u8>> {
+    let coll = nzb_data(nzb)?.coll();
+    coll.param(name).map(|v| v.to_bytes().to_vec())
+}
+
+/// Sets `name` to `value`; an empty or missing value removes it.
+pub(crate) fn set_param(nzb: NzbRef, name: &[u8], value: Option<&[u8]>) {
+    if let Some(d) = nzb_data(nzb) {
+        d.coll().set_param(&c_string(name), &c_string(value.unwrap_or_default()));
+    }
+}
+
+/// Copies every parameter of `src` onto `dest`, overwriting same-named ones.
+pub(crate) fn copy_params(dest: NzbRef, src: NzbRef) {
+    let (Some(dest), Some(src)) = (nzb_data(dest), nzb_data(src)) else {
+        return;
+    };
+    // `src` may be `dest`: copy before taking the destination's lock.
+    let params = src.coll().params.clone();
+    let mut coll = dest.coll();
+    for (n, v) in &params {
+        coll.set_param(n, v);
+    }
+}
+
+/// Whether `nzb` must not borrow from donor `donor_id` again.
+pub(crate) fn donor_blocked(nzb: NzbRef, donor_id: i32) -> bool {
+    nzb_data(nzb).is_some_and(|d| d.coll().blocked_donors.contains(&donor_id))
+}
+
+/// Bars `nzb` from borrowing from donor `donor_id` again.
+pub(crate) fn block_donor(nzb: NzbRef, donor_id: i32) {
+    if let Some(d) = nzb_data(nzb) {
+        d.coll().blocked_donors.insert(donor_id);
+    }
+}
+
+/// The post-processing scripts that ran, as (script name, status), in run order.
+pub(crate) fn script_statuses(nzb: NzbRef) -> Vec<(Vec<u8>, ScriptStatus)> {
+    nzb_data(nzb).map_or_else(Vec::new, |d| {
+        let coll = d.coll();
+        coll.script_statuses
+            .iter()
+            .map(|(n, st)| (n.to_bytes().to_vec(), ScriptStatus::from(*st)))
+            .collect()
+    })
+}
+
+/// All parameters as (name, value), in the order they were added.
+pub(crate) fn params(nzb: NzbRef) -> Vec<(Vec<u8>, Vec<u8>)> {
+    nzb_data(nzb).map_or_else(Vec::new, |d| {
+        let coll = d.coll();
+        coll.params.iter().map(|(n, v)| (n.to_bytes().to_vec(), v.to_bytes().to_vec())).collect()
+    })
 }
 
 pub extern "C" fn nzbget_rs_nzb_scalars_new() -> *mut NzbScalars {
@@ -481,20 +564,13 @@ pub unsafe extern "C" fn nzbget_rs_nzb_coll(
     };
     let mut c = data(p).coll.lock().unwrap_or_else(|e| e.into_inner());
     match op {
-        0 => {
-            let name = cstr(s1).to_bytes();
-            match c
-                .params
-                .iter()
-                .find(|(n, _)| n.to_bytes().eq_ignore_ascii_case(name))
-            {
-                Some((_, v)) => {
-                    unsafe { *strs = v.as_ptr() };
-                    1
-                }
-                None => 0,
+        0 => match c.param(cstr(s1).to_bytes()) {
+            Some(v) => {
+                unsafe { *strs = v.as_ptr() };
+                1
             }
-        }
+            None => 0,
+        },
         1 => {
             c.set_param(cstr(s1), cstr(s2));
             0
@@ -1909,29 +1985,8 @@ pub(crate) unsafe fn host_coll_op(
             .map_or(0, |d| d.as_secs() as c_int)
     };
     Some(match a1 {
-        0 => usize::from(coll(0, 0, np, s1, ns, ni, strs) != 0),
-        1 => {
-            coll(1, 0, np, s1, s2, ni, nstr);
-            0
-        }
-        2 => {
-            coll(2, 0, other, ns, ns, ni, nstr);
-            0
-        }
-        4 => usize::from(coll(20, a2, np, ns, ns, ni, nstr) != 0),
-        5 => {
-            coll(21, a2, np, ns, ns, ni, nstr);
-            1
-        }
         6 | 7 => {
             unsafe { *strs = nzbget_rs_nzb_text(p, if a1 == 6 { 8 } else { 9 }) };
-            0
-        }
-        8 => {
-            if a2 < 0 {
-                return Some(coll(3, 0, np, ns, ns, ni, nstr) as usize);
-            }
-            coll(4, a2, np, ns, ns, ni, strs);
             0
         }
         9 => {
@@ -1958,13 +2013,6 @@ pub(crate) unsafe fn host_coll_op(
         15 => {
             let lim = [now(), log_buffer()];
             unsafe { nzbget_rs_nzb_msgs(p, 3, 0, other, ns, lim.as_ptr(), None, 0) };
-            0
-        }
-        17 => {
-            if a2 < 0 {
-                return Some(coll(11, 0, np, ns, ns, ni, nstr) as usize);
-            }
-            coll(12, a2, np, ns, ns, ints, strs);
             0
         }
         18 => {
@@ -2726,6 +2774,45 @@ mod tests {
             (*p).id = 7;
             assert_eq!((*p).id, 7);
             nzbget_rs_nzb_scalars_free(p);
+        }
+    }
+
+    #[test]
+    fn params_through_the_typed_api() {
+        let (p, q) = (nzbget_rs_nzb_scalars_new(), nzbget_rs_nzb_scalars_new());
+        let (pn, qn) = (NzbRef::from_addr(p as usize), NzbRef::from_addr(q as usize));
+        set_param(pn, b"Category", Some(b"tv"));
+        assert_eq!(param(pn, b"category").as_deref(), Some(&b"tv"[..]));
+        set_param(pn, b"CATEGORY", None);
+        assert!(params(pn).is_empty());
+        set_param(qn, b"a", Some(b"1"));
+        set_param(pn, b"A", Some(b"0"));
+        set_param(pn, b"b", Some(b"2"));
+        copy_params(pn, qn);
+        assert_eq!(params(pn), [(b"A".to_vec(), b"1".to_vec()), (b"b".to_vec(), b"2".to_vec())]);
+        copy_params(pn, pn);
+        assert_eq!(params(pn).len(), 2);
+        assert_eq!(param(NzbRef::NONE, b"a"), None);
+        assert!(!donor_blocked(pn, 7));
+        block_donor(pn, 7);
+        assert!(donor_blocked(pn, 7) && !donor_blocked(qn, 7));
+        let mut ints = [0 as c_int; 1];
+        unsafe {
+            nzbget_rs_nzb_coll(
+                p,
+                10,
+                2,
+                std::ptr::null(),
+                c"script.py".as_ptr(),
+                std::ptr::null(),
+                ints.as_mut_ptr(),
+                std::ptr::null_mut(),
+            );
+        }
+        assert_eq!(script_statuses(pn), [(b"script.py".to_vec(), ScriptStatus::from(2))]);
+        unsafe {
+            nzbget_rs_nzb_scalars_free(p);
+            nzbget_rs_nzb_scalars_free(q);
         }
     }
 

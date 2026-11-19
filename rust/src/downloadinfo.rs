@@ -2,7 +2,7 @@
 //! `CompletedFile`, `ServerStatList`, and `ScriptStatusList`
 //! (`daemon/queue/DownloadInfo.cpp`).
 
-use crate::status::NzbParStatus;
+use crate::status::{MoveStatus, NzbParStatus, UnpackStatus};
 use std::ffi::CStr;
 
 #[inline]
@@ -30,17 +30,6 @@ pub const DELETE_BAD: i32 = 4;
 pub const DELETE_GOOD: i32 = 5;
 pub const DELETE_COPY: i32 = 6;
 pub const DELETE_SCAN: i32 = 7;
-
-pub const UNPACK_NONE: i32 = 0;
-pub const UNPACK_SKIPPED: i32 = 1;
-pub const UNPACK_FAILURE: i32 = 2;
-pub const UNPACK_SUCCESS: i32 = 3;
-pub const UNPACK_SPACE: i32 = 4;
-pub const UNPACK_PASSWORD: i32 = 5;
-
-pub const MOVE_NONE: i32 = 0;
-pub const MOVE_FAILURE: i32 = 1;
-pub const MOVE_SUCCESS: i32 = 2;
 
 pub const URL_NONE: i32 = 0;
 pub const URL_RUNNING: i32 = 1;
@@ -389,7 +378,7 @@ pub fn is_dupe_success(
     mark_status: i32,
     delete_status: i32,
     par_status: NzbParStatus,
-    unpack_status: i32,
+    unpack_status: UnpackStatus,
     url_status: i32,
     health: i32,
     critical_health_est: i32,
@@ -401,17 +390,18 @@ pub fn is_dupe_success(
         && (delete_status != DELETE_NONE
             || mark_status == MARK_BAD
             || par_status == NzbParStatus::Failure
-            || unpack_status == UNPACK_FAILURE
-            || unpack_status == UNPACK_PASSWORD
+            || unpack_status == UnpackStatus::Failure
+            || unpack_status == UnpackStatus::Password
             || url_status == URL_FAILED
             || url_status == URL_SCAN_SKIPPED
             || url_status == URL_SCAN_FAILED
             || (par_status == NzbParStatus::Skipped
-                && unpack_status == UNPACK_SKIPPED
+                && unpack_status == UnpackStatus::Skipped
                 && health < critical_health_est)
             || (health_check_dupe
                 && (par_status == NzbParStatus::None || par_status == NzbParStatus::Skipped)
-                && (unpack_status == UNPACK_NONE || unpack_status == UNPACK_SKIPPED)
+                && (unpack_status == UnpackStatus::None
+                    || unpack_status == UnpackStatus::Skipped)
                 && health < critical_health_exact));
     !failure
 }
@@ -424,8 +414,8 @@ pub fn make_text_status_cstr(
     mark_status: i32,
     delete_status: i32,
     par_status: NzbParStatus,
-    unpack_status: i32,
-    move_status: i32,
+    unpack_status: UnpackStatus,
+    move_status: MoveStatus,
     url_status: i32,
     script_status: i32,
     health: i32,
@@ -454,42 +444,42 @@ pub fn make_text_status_cstr(
             return b"FAILURE/SCAN\0";
         } else if par_status == NzbParStatus::Failure {
             return b"FAILURE/PAR\0";
-        } else if unpack_status == UNPACK_FAILURE {
+        } else if unpack_status == UnpackStatus::Failure {
             return b"FAILURE/UNPACK\0";
-        } else if move_status == MOVE_FAILURE {
+        } else if move_status == MoveStatus::Failure {
             return b"FAILURE/MOVE\0";
         } else if par_status == NzbParStatus::Manual {
             return b"WARNING/DAMAGED\0";
         } else if par_status == NzbParStatus::RepairPossible {
             return b"WARNING/REPAIRABLE\0";
         } else if (par_status == NzbParStatus::None || par_status == NzbParStatus::Skipped)
-            && (unpack_status == UNPACK_NONE || unpack_status == UNPACK_SKIPPED)
+            && (unpack_status == UnpackStatus::None || unpack_status == UnpackStatus::Skipped)
             && health < critical_health
         {
             return b"FAILURE/HEALTH\0";
         } else if (par_status == NzbParStatus::None || par_status == NzbParStatus::Skipped)
-            && (unpack_status == UNPACK_NONE || unpack_status == UNPACK_SKIPPED)
+            && (unpack_status == UnpackStatus::None || unpack_status == UnpackStatus::Skipped)
             && health < 1000
             && health >= critical_health
         {
             return b"WARNING/HEALTH\0";
         } else if (par_status == NzbParStatus::None || par_status == NzbParStatus::Skipped)
-            && (unpack_status == UNPACK_NONE || unpack_status == UNPACK_SKIPPED)
+            && (unpack_status == UnpackStatus::None || unpack_status == UnpackStatus::Skipped)
             && script_status != SCRIPT_STATUS_FAILURE
             && health == 1000
         {
             return b"SUCCESS/HEALTH\0";
-        } else if unpack_status == UNPACK_SPACE {
+        } else if unpack_status == UnpackStatus::Space {
             return b"WARNING/SPACE\0";
-        } else if unpack_status == UNPACK_PASSWORD {
+        } else if unpack_status == UnpackStatus::Password {
             return b"WARNING/PASSWORD\0";
-        } else if (unpack_status == UNPACK_SUCCESS
-            || ((unpack_status == UNPACK_NONE || unpack_status == UNPACK_SKIPPED)
+        } else if (unpack_status == UnpackStatus::Success
+            || ((unpack_status == UnpackStatus::None || unpack_status == UnpackStatus::Skipped)
                 && par_status == NzbParStatus::Success))
             && script_status == SCRIPT_STATUS_SUCCESS
         {
             return b"SUCCESS/ALL\0";
-        } else if unpack_status == UNPACK_SUCCESS && script_status == SCRIPT_STATUS_NONE {
+        } else if unpack_status == UnpackStatus::Success && script_status == SCRIPT_STATUS_NONE {
             return b"SUCCESS/UNPACK\0";
         } else if par_status == NzbParStatus::Success && script_status == SCRIPT_STATUS_NONE {
             return b"SUCCESS/PAR\0";

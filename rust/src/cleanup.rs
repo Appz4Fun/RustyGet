@@ -7,7 +7,7 @@
 //! - `RenameController` (`daemon/postprocess/Rename.cpp`): PAR/RAR rename stage
 //!   configuration and completion state machine.
 
-use crate::status::NzbParStatus;
+use crate::status::{CleanupStatus, MoveStatus, NzbParStatus, UnpackStatus};
 use std::ffi::{CStr, OsStr};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -375,18 +375,18 @@ where
     }
 }
 
-/// Determines the outcome and `NzbInfo::EMoveStatus` in `MoveController::Run`:
-/// - `(1, 2)`: move succeeded -> `msSuccess` (`2`)
-/// - `(2, 0)`: interrupted by stop -> keep `msNone` (`0`)
-/// - `(3, 1)`: move failed -> `msFailure` (`1`)
+/// Determines the outcome and move status in `MoveController::Run`:
+/// - `1`: move succeeded -> `MoveStatus::Success`
+/// - `2`: interrupted by stop -> keep `MoveStatus::None`
+/// - `3`: move failed -> `MoveStatus::Failure`
 #[inline]
-pub fn decide_move_outcome(ok: bool, is_stopped: bool) -> (i32, i32) {
+pub fn decide_move_outcome(ok: bool, is_stopped: bool) -> (i32, MoveStatus) {
     if ok {
-        (1, 2)
+        (1, MoveStatus::Success)
     } else if is_stopped {
-        (2, 0)
+        (2, MoveStatus::None)
     } else {
-        (3, 1)
+        (3, MoveStatus::Failure)
     }
 }
 
@@ -455,18 +455,18 @@ where
     ok
 }
 
-/// Determines the outcome and `NzbInfo::ECleanupStatus` in `CleanupController::Run`:
-/// - `(1, 2)`: cleanup succeeded and deleted files -> `csSuccess` (`2`)
-/// - `(2, 2)`: cleanup succeeded with nothing to delete -> `csSuccess` (`2`)
-/// - `(3, 1)`: cleanup failed -> `csFailure` (`1`)
+/// Determines the outcome and cleanup status in `CleanupController::Run`:
+/// - `1`: cleanup succeeded and deleted files -> `CleanupStatus::Success`
+/// - `2`: cleanup succeeded with nothing to delete -> `CleanupStatus::Success`
+/// - `3`: cleanup failed -> `CleanupStatus::Failure`
 #[inline]
-pub fn decide_cleanup_outcome(ok: bool, deleted: bool) -> (i32, i32) {
+pub fn decide_cleanup_outcome(ok: bool, deleted: bool) -> (i32, CleanupStatus) {
     if ok && deleted {
-        (1, 2)
+        (1, CleanupStatus::Success)
     } else if ok {
-        (2, 2)
+        (2, CleanupStatus::Success)
     } else {
-        (3, 1)
+        (3, CleanupStatus::Failure)
     }
 }
 
@@ -477,7 +477,7 @@ pub fn run_cleanup<L>(
     final_dir: &Path,
     ext_cleanup_disk: &[u8],
     mut on_log: L,
-) -> (i32, i32)
+) -> (i32, CleanupStatus)
 where
     L: FnMut(CleanupLogKind, &[u8]),
 {
@@ -521,14 +521,9 @@ pub fn rename_classify_run_outcome(is_stopped: bool, renamed_count: i32) -> i32 
 /// Evaluates whether `m_parRenamer` should use `finalDir` instead of `destDir`
 /// and whether `DetectMissing` should be enabled in `RenameController::ExecRename`.
 #[inline]
-pub fn rename_eval_par_config(
-    unpack_status: i32,
-    us_success: i32,
-    us_none: i32,
-    final_dir_empty: bool,
-) -> (bool, bool) {
-    let use_final_dir = unpack_status == us_success && !final_dir_empty;
-    let detect_missing = unpack_status == us_none;
+pub fn rename_eval_par_config(unpack_status: UnpackStatus, final_dir_empty: bool) -> (bool, bool) {
+    let use_final_dir = unpack_status == UnpackStatus::Success && !final_dir_empty;
+    let detect_missing = unpack_status == UnpackStatus::None;
     (use_final_dir, detect_missing)
 }
 
@@ -1388,9 +1383,9 @@ mod tests {
             renames,
             vec![("video.mkv".to_string(), "video (1).mkv".to_string())]
         );
-        assert_eq!(decide_move_outcome(true, false), (1, 2));
-        assert_eq!(decide_move_outcome(false, true), (2, 0));
-        assert_eq!(decide_move_outcome(false, false), (3, 1));
+        assert_eq!(decide_move_outcome(true, false), (1, MoveStatus::Success));
+        assert_eq!(decide_move_outcome(false, true), (2, MoveStatus::None));
+        assert_eq!(decide_move_outcome(false, false), (3, MoveStatus::Failure));
 
         let _ = std::fs::remove_dir_all(&work_dir);
     }
@@ -1411,7 +1406,7 @@ mod tests {
             run_cleanup(&work_dir, Path::new(""), b".nfo, .sfv", |kind, msg| {
                 logs.push((kind, String::from_utf8_lossy(msg).into_owned()))
             });
-        assert_eq!((outcome, status), (1, 2));
+        assert_eq!((outcome, status), (1, CleanupStatus::Success));
         assert!(work_dir.join("keep.mkv").exists());
         assert!(!work_dir.join("trash.nfo").exists());
 
@@ -1420,7 +1415,18 @@ mod tests {
         assert_eq!(rename_classify_run_outcome(true, 5), 1);
         assert_eq!(rename_classify_run_outcome(false, 5), 2);
         assert_eq!(rename_classify_run_outcome(false, 0), 3);
-        assert_eq!(rename_eval_par_config(3, 3, 0, false), (true, false));
+        assert_eq!(
+            rename_eval_par_config(UnpackStatus::Success, false),
+            (true, false)
+        );
+        assert_eq!(
+            rename_eval_par_config(UnpackStatus::Success, true),
+            (false, false)
+        );
+        assert_eq!(
+            rename_eval_par_config(UnpackStatus::None, false),
+            (false, true)
+        );
         assert_eq!(
             rename_complete_action(0, 0, true, 2, true, NzbParStatus::None),
             (2, true, true)

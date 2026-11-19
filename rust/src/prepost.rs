@@ -4,7 +4,7 @@
 //! workflows, PAR/stream-repair coverage decisions, job scheduling strategies, stage
 //! transitions, pause-state management, and direct-unpack triggers into a single module.
 
-use crate::status::NzbParStatus;
+use crate::status::{CleanupStatus, MoveStatus, NzbParStatus, UnpackStatus};
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
@@ -475,11 +475,9 @@ fn dupe_post_gate_host(
     // Past the gate is also what a copy's state on disk says (its unpack or move already
     // started), as the gate's record does not survive a restart.
     let passed = |n: &crate::queuesubsys_host::NzbSnap| {
-        const US_NONE: i32 = 0;
-        const MS_NONE: i32 = 0;
         dupe_gate_has(&DUPE_GATE_PASSED, n.id)
-            || n.unpack_status != US_NONE
-            || n.move_status != MS_NONE
+            || n.unpack_status != UnpackStatus::None
+            || n.move_status != MoveStatus::None
     };
     let own = GateCopy { passed: passed(nzb), extracting: extracting(nzb) };
     let mut others = Vec::new();
@@ -646,8 +644,7 @@ pub fn classify_skipped_par_health(
 pub fn eval_want_unpack_and_rar_rename(
     has_unpack_param: bool,
     unpack_param_val: &[u8],
-    unpack_status: i32,
-    us_none: i32,
+    unpack_status: UnpackStatus,
     delete_status: i32,
     ds_none: i32,
     rar_rename_status: i32,
@@ -655,7 +652,7 @@ pub fn eval_want_unpack_and_rar_rename(
     opt_rar_rename: bool,
 ) -> (bool, bool, bool) {
     let want_unpack = !(has_unpack_param && unpack_param_val.eq_ignore_ascii_case(b"no"));
-    let unpack = want_unpack && unpack_status == us_none && delete_status == ds_none;
+    let unpack = want_unpack && unpack_status == UnpackStatus::None && delete_status == ds_none;
     let start_rar_rename = rar_rename_status == rs_none && unpack && opt_rar_rename;
     (want_unpack, unpack, start_rar_rename)
 }
@@ -664,13 +661,13 @@ pub fn eval_want_unpack_and_rar_rename(
 #[allow(clippy::too_many_arguments)]
 pub fn eval_post_stages(
     want_unpack: bool,
-    unpack_status: i32,
+    unpack_status: UnpackStatus,
     delete_status: i32,
     par_status: NzbParStatus,
-    cleanup_status: i32,
+    cleanup_status: CleanupStatus,
     has_ext_cleanup_disk: bool,
     health: i32,
-    move_status: i32,
+    move_status: MoveStatus,
     dest_dir: &[u8],
     inter_dir: &[u8],
     sep: u8,
@@ -710,13 +707,13 @@ pub fn eval_post_stages(
 #[allow(clippy::too_many_arguments)]
 pub fn eval_post_stages_in_inter(
     want_unpack: bool,
-    unpack_status: i32,
+    unpack_status: UnpackStatus,
     delete_status: i32,
     par_status: NzbParStatus,
-    cleanup_status: i32,
+    cleanup_status: CleanupStatus,
     has_ext_cleanup_disk: bool,
     health: i32,
-    move_status: i32,
+    move_status: MoveStatus,
     in_inter_dir: bool,
     direct_unpack_status: i32,
     opt_post_download_rename: bool,
@@ -727,44 +724,35 @@ pub fn eval_post_stages_in_inter(
     post_unpack_renaming_status: i32,
 ) -> RsPostStageDecision {
     const DS_NONE: i32 = 0;
-    const US_NONE: i32 = 0;
-    const US_SKIPPED: i32 = 1;
-    const US_FAILURE: i32 = 2;
-    const US_SUCCESS: i32 = 3;
-    const US_SPACE: i32 = 4;
-    const US_PASSWORD: i32 = 5;
-    const CS_NONE: i32 = 0;
-    const MS_NONE: i32 = 0;
-    const MS_SUCCESS: i32 = 2;
     const NS_SUCCESS: i32 = 3;
 
-    let mut unpack = want_unpack && unpack_status == US_NONE && delete_status == DS_NONE;
+    let mut unpack = want_unpack && unpack_status == UnpackStatus::None && delete_status == DS_NONE;
     let par_failed = par_status == NzbParStatus::Failure
         || par_status == NzbParStatus::RepairPossible
         || par_status == NzbParStatus::Manual;
 
     let cleanup = !unpack
         && want_unpack
-        && cleanup_status == CS_NONE
+        && cleanup_status == CleanupStatus::None
         && has_ext_cleanup_disk
         && ((par_status == NzbParStatus::Success
-            && unpack_status != US_FAILURE
-            && unpack_status != US_SPACE
-            && unpack_status != US_PASSWORD)
-            || (unpack_status == US_SUCCESS && par_status != NzbParStatus::Failure)
-            || ((unpack_status == US_NONE || unpack_status == US_SKIPPED)
+            && unpack_status != UnpackStatus::Failure
+            && unpack_status != UnpackStatus::Space
+            && unpack_status != UnpackStatus::Password)
+            || (unpack_status == UnpackStatus::Success && par_status != NzbParStatus::Failure)
+            || ((unpack_status == UnpackStatus::None || unpack_status == UnpackStatus::Skipped)
                 && (par_status == NzbParStatus::None || par_status == NzbParStatus::Skipped)
                 && health == 1000));
 
     let move_inter = !unpack
-        && move_status == MS_NONE
-        && unpack_status != US_FAILURE
-        && unpack_status != US_SPACE
-        && unpack_status != US_PASSWORD
+        && move_status == MoveStatus::None
+        && unpack_status != UnpackStatus::Failure
+        && unpack_status != UnpackStatus::Space
+        && unpack_status != UnpackStatus::Password
         && par_status != NzbParStatus::Failure
         && par_status != NzbParStatus::Manual
         && delete_status == DS_NONE
-        && !((unpack_status == US_NONE || unpack_status == US_SKIPPED)
+        && !((unpack_status == UnpackStatus::None || unpack_status == UnpackStatus::Skipped)
             && (par_status == NzbParStatus::None || par_status == NzbParStatus::Skipped)
             && health < 1000)
         && in_inter_dir;
@@ -773,7 +761,7 @@ pub fn eval_post_stages_in_inter(
     let mut effective_unpack_status = unpack_status;
     if unpack && par_failed && direct_unpack_status != NS_SUCCESS {
         skip_unpack_due_to_par = true;
-        effective_unpack_status = US_SKIPPED;
+        effective_unpack_status = UnpackStatus::Skipped;
         unpack = false;
     }
 
@@ -781,24 +769,25 @@ pub fn eval_post_stages_in_inter(
         && post_download_renaming_status == 0
         && has_dest_dir
         && has_name
-        && (effective_unpack_status == US_NONE || effective_unpack_status == US_SKIPPED)
-        && effective_unpack_status != US_FAILURE
-        && effective_unpack_status != US_SPACE
-        && effective_unpack_status != US_PASSWORD
+        && (effective_unpack_status == UnpackStatus::None
+            || effective_unpack_status == UnpackStatus::Skipped)
+        && effective_unpack_status != UnpackStatus::Failure
+        && effective_unpack_status != UnpackStatus::Space
+        && effective_unpack_status != UnpackStatus::Password
         && par_status != NzbParStatus::Failure
         && par_status != NzbParStatus::Manual
         && !move_inter
-        && (move_status == MS_SUCCESS || move_status == MS_NONE);
+        && (move_status == MoveStatus::Success || move_status == MoveStatus::None);
 
     let post_unpack_renaming = opt_rename_after_unpack
         && post_unpack_renaming_status == 0
         && has_dest_dir
         && has_name
-        && effective_unpack_status == US_SUCCESS
+        && effective_unpack_status == UnpackStatus::Success
         && par_status != NzbParStatus::Failure
         && par_status != NzbParStatus::Manual
         && !move_inter
-        && (move_status == MS_SUCCESS || move_status == MS_NONE);
+        && (move_status == MoveStatus::Success || move_status == MoveStatus::None);
 
     RsPostStageDecision {
         unpack: if unpack { 1 } else { 0 },
@@ -2026,12 +2015,11 @@ impl NzbgetRsPrePostProcessor {
             CTRL_CLEANUP, CTRL_MOVE, CTRL_POST_RENAME_DL, CTRL_POST_RENAME_UNPACK,
             CTRL_POST_SCRIPT, CTRL_RENAME_PAR, CTRL_RENAME_RAR, CTRL_REPAIR, CTRL_STREAM_REPAIR,
             CTRL_UNPACK, DAF_STREAM, DS_NONE, FILE_INT_EXTRA_PRIORITY, FILE_INT_PAUSED, HC_DUPE,
-            MK_INFO, MK_WARNING, NZB_INT_CHANGED, NZB_INT_UNPACK_STATUS, PC_AUTO,
-            POST_INT_NEED_PAR_CHECK, POST_INT_NEED_UNPACK, POST_INT_PAR_CANNOT_COVER,
-            POST_INT_REQUEST_PAR_CHECK, PS_DUPE, PT_CLEANING_UP, PT_EXECUTING_SCRIPT,
-            PT_LOADING_PARS, PT_MOVING, PT_PAR_RENAMING, PT_POST_DOWNLOAD_RENAMING,
-            PT_POST_UNPACK_RENAMING, PT_RAR_RENAMING, PT_STREAM_REPAIRING, PT_UNPACKING, RS_NONE,
-            US_SKIPPED,
+            MK_INFO, MK_WARNING, NZB_INT_CHANGED, PC_AUTO, POST_INT_NEED_PAR_CHECK,
+            POST_INT_NEED_UNPACK, POST_INT_PAR_CANNOT_COVER, POST_INT_REQUEST_PAR_CHECK, PS_DUPE,
+            PT_CLEANING_UP, PT_EXECUTING_SCRIPT, PT_LOADING_PARS, PT_MOVING, PT_PAR_RENAMING,
+            PT_POST_DOWNLOAD_RENAMING, PT_POST_UNPACK_RENAMING, PT_RAR_RENAMING,
+            PT_STREAM_REPAIRING, PT_UNPACKING, RS_NONE,
         };
 
         let opts = host.opts();
@@ -2365,13 +2353,11 @@ impl NzbgetRsPrePostProcessor {
             return;
         }
 
-        const US_NONE: i32 = 0;
         let unpack_param = host.nzb_get_param(nzb.ptr, b"*Unpack:");
         let (want_unpack, _unpack, start_rar_rename) = eval_want_unpack_and_rar_rename(
             unpack_param.is_some(),
             unpack_param.as_deref().unwrap_or(b""),
             nzb.unpack_status,
-            US_NONE,
             nzb.delete_status,
             DS_NONE,
             nzb.rar_rename_status,
@@ -2430,7 +2416,7 @@ impl NzbgetRsPrePostProcessor {
             msg.extend_from_slice(b" due to ");
             msg.extend_from_slice(reason);
             host.nzb_print_message(nzb.ptr, MK_WARNING, &msg);
-            host.nzb_set_int(nzb.ptr, NZB_INT_UNPACK_STATUS, US_SKIPPED);
+            host.nzb_set_unpack_status(nzb.ptr, UnpackStatus::Skipped);
         }
 
         if dec.unpack != 0 {
@@ -2791,13 +2777,13 @@ mod tests {
     fn test_eval_post_stages_inter_dir() {
         let dec = eval_post_stages(
             false,
-            0,
+            UnpackStatus::None,
             0,
             NzbParStatus::Success,
-            0,
+            CleanupStatus::None,
             false,
             1000,
-            0,
+            MoveStatus::None,
             b"/inter/job1",
             b"/inter",
             b'/',

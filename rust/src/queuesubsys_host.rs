@@ -2,7 +2,7 @@
 //! and `QueueCoordinator` orchestration in Rust.
 
 use crate::options::OptStr;
-use crate::status::NzbParStatus;
+use crate::status::{CleanupStatus, MoveStatus, NzbParStatus, UnpackStatus};
 use std::ffi::{c_char, c_int, c_void, CStr};
 
 mod live_namespace;
@@ -66,14 +66,9 @@ pub(crate) const KS_GOOD: i32 = 2;
 pub(crate) const KS_SUCCESS: i32 = 3;
 
 pub(crate) const RS_NONE: i32 = 0;
-pub(crate) const US_NONE: i32 = 0;
-pub(crate) const US_SKIPPED: i32 = 1;
-pub(crate) const US_SUCCESS: i32 = 3;
 
 pub(crate) const LS_NONE: i32 = 0;
 pub(crate) const LS_FAILED: i32 = 3;
-pub(crate) const MS_NONE: i32 = 0;
-pub(crate) const CS_NONE: i32 = 0;
 
 pub(crate) const TS_NONE: i32 = 0;
 pub(crate) const TS_RUNNING: i32 = 1;
@@ -560,15 +555,15 @@ pub(crate) struct NzbSnap {
     pub force_par_full: bool,
     pub force_repair: bool,
     pub par_repaired: bool,
-    pub last_unpack_status: i32,
+    pub last_unpack_status: UnpackStatus,
     pub message_count: i32,
     pub cached_message_count: i32,
     pub post_total_sec: i32,
     pub par_rename_status: i32,
     pub rar_rename_status: i32,
-    pub unpack_status: i32,
-    pub cleanup_status: i32,
-    pub move_status: i32,
+    pub unpack_status: UnpackStatus,
+    pub cleanup_status: CleanupStatus,
+    pub move_status: MoveStatus,
     pub post_download_renaming_status: i32,
     pub post_unpack_renaming_status: i32,
     pub file_count: i32,
@@ -738,7 +733,7 @@ pub(crate) struct PostSnap {
     pub unpack_tried: bool,
     pub par_repaired: bool,
     pub pass_list_tried: bool,
-    pub last_unpack_status: i32,
+    pub last_unpack_status: UnpackStatus,
     pub extracted_archives_len: usize,
     pub parred_files_len: usize,
     pub stage_progress: i32,
@@ -2197,15 +2192,15 @@ impl QueueSubsysHost {
                 force_par_full: ints[83] != 0,
                 force_repair: ints[84] != 0,
                 par_repaired: ints[85] != 0,
-                last_unpack_status: ints[86],
+                last_unpack_status: UnpackStatus::from_raw(ints[86]),
                 message_count: ints[82],
                 cached_message_count: ints[87],
                 post_total_sec: ints[60],
                 par_rename_status: ints[61],
                 rar_rename_status: ints[62],
-                unpack_status: ints[63],
-                cleanup_status: ints[64],
-                move_status: ints[65],
+                unpack_status: UnpackStatus::from_raw(ints[63]),
+                cleanup_status: CleanupStatus::from_raw(ints[64]),
+                move_status: MoveStatus::from_raw(ints[65]),
                 post_download_renaming_status: ints[66],
                 post_unpack_renaming_status: ints[67],
                 file_count: ints[34],
@@ -2553,6 +2548,22 @@ impl QueueSubsysHost {
 
     pub fn nzb_set_par_status(&self, nzb_ptr: usize, status: NzbParStatus) {
         self.nzb_set_int(nzb_ptr, NZB_INT_PAR_STATUS, status.into());
+    }
+
+    pub fn nzb_set_unpack_status(&self, nzb_ptr: usize, status: UnpackStatus) {
+        self.nzb_set_int(nzb_ptr, NZB_INT_UNPACK_STATUS, status.into());
+    }
+
+    pub fn nzb_set_move_status(&self, nzb_ptr: usize, status: MoveStatus) {
+        self.nzb_set_int(nzb_ptr, NZB_INT_MOVE_STATUS, status.into());
+    }
+
+    pub fn nzb_set_cleanup_status(&self, nzb_ptr: usize, status: CleanupStatus) {
+        self.nzb_set_int(nzb_ptr, NZB_INT_CLEANUP_STATUS, status.into());
+    }
+
+    pub fn nzb_set_last_unpack_status(&self, nzb_ptr: usize, status: UnpackStatus) {
+        self.nzb_set_int(nzb_ptr, NZB_INT_LAST_UNPACK_STATUS, status.into());
     }
 
     pub fn nzb_set_i64(&self, nzb_ptr: usize, field: i32, val: i64) {
@@ -3880,7 +3891,7 @@ impl QueueSubsysHost {
             unpack_tried: ints[13] != 0,
             par_repaired: ints[14] != 0,
             pass_list_tried: ints[15] != 0,
-            last_unpack_status: ints[16],
+            last_unpack_status: UnpackStatus::from_raw(ints[16]),
             extracted_archives_len: ints[17].max(0) as usize,
             parred_files_len: ints[18].max(0) as usize,
             stage_progress: ints[19],

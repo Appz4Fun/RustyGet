@@ -240,6 +240,28 @@ status_enum! {
     }
 }
 
+status_enum! {
+    /// Where the direct rename of a download's files stands
+    /// (NzbInfo::EDirectRenameStatus).
+    DirectRenameStatus {
+        None = 0,
+        Running = 1,
+        Failure = 2,
+        Success = 3,
+    }
+}
+
+status_enum! {
+    /// Where the unpack-while-downloading of a download stands
+    /// (NzbInfo::EDirectUnpackStatus).
+    DirectUnpackStatus {
+        None = 0,
+        Running = 1,
+        Failure = 2,
+        Success = 3,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -339,5 +361,15 @@ mod tests {
         assert_eq!(i32::from(DeleteStatus::Scan), 7);
         assert_eq!(DeleteStatus::from(8), DeleteStatus::Other(8));
         assert!(DeleteStatus::None < DeleteStatus::Manual);
+    }
+
+    #[test]
+    fn direct_rename_and_unpack_statuses_round_trip() {
+        round_trip(DirectRenameStatus::ALL);
+        round_trip(DirectUnpackStatus::ALL);
+        assert_eq!(i32::from(DirectRenameStatus::Success), 3);
+        assert_eq!(i32::from(DirectUnpackStatus::Running), 1);
+        assert!(DirectRenameStatus::Running < DirectRenameStatus::Failure);
+        assert_eq!(DirectUnpackStatus::from(4), DirectUnpackStatus::Other(4));
     }
 }

@@ -4,7 +4,7 @@
 //! NNTP article fetch/download bounds and response classification (`ArticleFetcher`,
 //! `ArticleDownloader`).
 
-use crate::status::{DeleteStatus, DupeMode, NzbParStatus};
+use crate::status::{DeleteStatus, DirectRenameStatus, DupeMode, NzbParStatus};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -1105,8 +1105,7 @@ pub fn completed_file_is_par2(par_file: bool, filename: &[u8]) -> bool {
 /// - `0`: check file list and completed files for PAR2 entries
 pub fn should_defer_to_par_header(
     has_nzb_info: bool,
-    direct_rename_status: i32,
-    ts_running: i32,
+    direct_rename_status: DirectRenameStatus,
     all_first: bool,
     par_status: NzbParStatus,
     par_size: i64,
@@ -1114,7 +1113,7 @@ pub fn should_defer_to_par_header(
     if !has_nzb_info {
         return -1;
     }
-    if direct_rename_status == ts_running && !all_first {
+    if direct_rename_status == DirectRenameStatus::Running && !all_first {
         return 1;
     }
     if par_status == NzbParStatus::Failure {
@@ -1724,7 +1723,7 @@ pub(crate) fn should_defer_to_par_host(
     if crate::options::dupe_borrow_first() {
         // Live donor recovery runs alongside the par2 set; it only waits while direct rename
         // still identifies obfuscated files.
-        return nzb.direct_rename_status == crate::queuesubsys_host::TS_RUNNING && !nzb.all_first;
+        return nzb.direct_rename_status == DirectRenameStatus::Running && !nzb.all_first;
     }
     should_defer_to_par_snap(host, &nzb)
 }
@@ -1737,7 +1736,7 @@ pub(crate) fn should_defer_to_par_snap(
     if nzb.ptr == 0 {
         return false;
     }
-    if nzb.direct_rename_status == crate::queuesubsys_host::TS_RUNNING && !nzb.all_first {
+    if nzb.direct_rename_status == DirectRenameStatus::Running && !nzb.all_first {
         return true;
     }
     if nzb.par_status == NzbParStatus::Failure {
@@ -2940,7 +2939,7 @@ pub(crate) fn try_fallback_host(
         // (a few MB, no repair pass); the par2 set stays the final check. Names are still
         // unknown while direct rename runs, so that case keeps deferring.
         let rename_pending =
-            nzb.direct_rename_status == crate::queuesubsys_host::TS_RUNNING && !nzb.all_first;
+            nzb.direct_rename_status == DirectRenameStatus::Running && !nzb.all_first;
         defer = par_defer
             && (rename_pending || !crate::options::dupe_borrow_first())
             && art.part_number != 1
@@ -3399,23 +3398,53 @@ mod tests {
         assert!(!completed_file_is_par2(false, b"vol01.rar"));
 
         assert_eq!(
-            should_defer_to_par_header(false, 0, 1, false, NzbParStatus::None, 100),
+            should_defer_to_par_header(
+                false,
+                DirectRenameStatus::None,
+                false,
+                NzbParStatus::None,
+                100
+            ),
             -1
         );
         assert_eq!(
-            should_defer_to_par_header(true, 1, 1, false, NzbParStatus::None, 0),
+            should_defer_to_par_header(
+                true,
+                DirectRenameStatus::Running,
+                false,
+                NzbParStatus::None,
+                0
+            ),
             1
         );
         assert_eq!(
-            should_defer_to_par_header(true, 0, 1, false, NzbParStatus::Failure, 100),
+            should_defer_to_par_header(
+                true,
+                DirectRenameStatus::None,
+                false,
+                NzbParStatus::Failure,
+                100
+            ),
             -1
         );
         assert_eq!(
-            should_defer_to_par_header(true, 0, 1, false, NzbParStatus::None, 100),
+            should_defer_to_par_header(
+                true,
+                DirectRenameStatus::None,
+                false,
+                NzbParStatus::None,
+                100
+            ),
             1
         );
         assert_eq!(
-            should_defer_to_par_header(true, 0, 1, false, NzbParStatus::None, 0),
+            should_defer_to_par_header(
+                true,
+                DirectRenameStatus::None,
+                false,
+                NzbParStatus::None,
+                0
+            ),
             0
         );
 
@@ -4157,7 +4186,11 @@ mod tests {
         // 9. DupeArticleFallbackDefersDataToAvailableParTest
         for kind in 0..10 {
             let par_size = if kind == 0 || kind >= 6 { 500000 } else { 0 };
-            let direct_rename_status = if kind == 5 { 1 } else { 0 };
+            let direct_rename_status = if kind == 5 {
+                DirectRenameStatus::Running
+            } else {
+                DirectRenameStatus::None
+            };
             let par_status = match kind {
                 6 => 3, // psSkipped
                 7 => 4, // psRepairPossible
@@ -4168,7 +4201,6 @@ mod tests {
             let header = should_defer_to_par_header(
                 true,
                 direct_rename_status,
-                1,
                 false,
                 NzbParStatus::from(par_status),
                 par_size,
@@ -4211,15 +4243,33 @@ mod tests {
         }
         // DirectRename running vs AllFirst vs ParSize
         assert_eq!(
-            should_defer_to_par_header(true, 1, 1, false, NzbParStatus::None, 0),
+            should_defer_to_par_header(
+                true,
+                DirectRenameStatus::Running,
+                false,
+                NzbParStatus::None,
+                0
+            ),
             1
         );
         assert_eq!(
-            should_defer_to_par_header(true, 1, 1, true, NzbParStatus::None, 0),
+            should_defer_to_par_header(
+                true,
+                DirectRenameStatus::Running,
+                true,
+                NzbParStatus::None,
+                0
+            ),
             0
         );
         assert_eq!(
-            should_defer_to_par_header(true, 1, 1, true, NzbParStatus::None, 500000),
+            should_defer_to_par_header(
+                true,
+                DirectRenameStatus::Running,
+                true,
+                NzbParStatus::None,
+                500000
+            ),
             1
         );
 
@@ -4230,8 +4280,7 @@ mod tests {
             let has_par2 = par_size > 0;
             let should_defer = should_defer_to_par_header(
                 true,
-                2,
-                1,
+                DirectRenameStatus::Failure,
                 false,
                 NzbParStatus::from(par_status),
                 par_size,
@@ -4246,8 +4295,13 @@ mod tests {
             (480001, true),
             (2000000, true),
         ] {
-            let should_defer =
-                should_defer_to_par_header(true, 2, 1, false, NzbParStatus::None, 500000) > 0;
+            let should_defer = should_defer_to_par_header(
+                true,
+                DirectRenameStatus::Failure,
+                false,
+                NzbParStatus::None,
+                500000,
+            ) > 0;
             assert!(should_defer);
             let cannot_cover = par_cannot_cover(500000, 20000, failed + 20000, 0, 0, 0, 0, 0, true);
             assert_eq!(cannot_cover, expect_fallback);

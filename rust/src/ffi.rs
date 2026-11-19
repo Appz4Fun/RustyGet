@@ -5505,7 +5505,7 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                         let post_stage = if has_post { n.post_stage } else { 0 };
                         let flags = (if has_post { 1 } else { 0 })
                             | ((post_stage & 0xff) << 4)
-                            | ((n.direct_unpack_status & 0xff) << 12)
+                            | ((i32::from(n.direct_unpack_status) & 0xff) << 12)
                             | ((n.kind & 0xff) << 20);
                         emit_cb(
                             emit_ctx,

@@ -1,6 +1,6 @@
 //! Rust implementation of `QueueCoordinator` (`daemon/queue/QueueCoordinator.cpp`).
 
-use crate::status::{DeleteStatus, DupeMode};
+use crate::status::{DeleteStatus, DirectRenameStatus, DirectUnpackStatus, DupeMode};
 use std::ffi::CStr;
 
 #[inline]
@@ -853,8 +853,7 @@ pub fn is_queued_dupe_active(
     pt_queued: i32,
     extra_priority: bool,
     self_completed_empty: bool,
-    direct_unpack_status: i32,
-    ns_running: i32,
+    direct_unpack_status: DirectUnpackStatus,
 ) -> bool {
     if (deleting || delete_status != DeleteStatus::None) && active_downloads == 0 {
         return false;
@@ -862,7 +861,7 @@ pub fn is_queued_dupe_active(
     let is_active_download = active_downloads > 0;
     let is_post_processing = has_post_info
         && (post_working || post_stage != pt_queued || extra_priority || self_completed_empty);
-    let is_direct_unpacking = direct_unpack_status == ns_running;
+    let is_direct_unpacking = direct_unpack_status == DirectUnpackStatus::Running;
     is_active_download || is_post_processing || is_direct_unpacking
 }
 
@@ -2494,7 +2493,7 @@ impl NzbgetRsQueueCoordinator {
             };
 
             if opts.direct_rename
-                && nzb.direct_rename_status <= crate::queuesubsys_host::TS_RUNNING
+                && nzb.direct_rename_status <= DirectRenameStatus::Running
                 && !nzb.all_first
             {
                 if let Some((f1, a1)) = self.get_next_first_article(host, opts, &nzb) {
@@ -2560,11 +2559,7 @@ impl NzbgetRsQueueCoordinator {
                 if f.articles_len > 0 {
                     let a0 = host.article_at(fp, 0);
                     if a0.status == crate::queuesubsys_host::AI_UNDEFINED {
-                        host.nzb_set_int(
-                            nzb.ptr,
-                            crate::queuesubsys_host::NZB_INT_DIRECT_RENAME_STATUS,
-                            crate::queuesubsys_host::TS_RUNNING,
-                        );
+                        host.nzb_set_direct_rename_status(nzb.ptr, DirectRenameStatus::Running);
                         return Some((f, a0));
                     }
                 }
@@ -4059,7 +4054,7 @@ impl NzbgetRsQueueCoordinator {
         }
 
         let check_nzb = host.nzb_snap(nzb.ptr, false);
-        if check_nzb.direct_rename_status == crate::queuesubsys_host::TS_RUNNING
+        if check_nzb.direct_rename_status == DirectRenameStatus::Running
             && !check_nzb.deleting
             && check_nzb.is_download_completed
         {
@@ -4643,7 +4638,6 @@ impl NzbgetRsQueueCoordinator {
                     queued.has_extra_priority,
                     self_completed_empty,
                     queued.direct_unpack_status,
-                    crate::queuesubsys_host::NS_RUNNING,
                 ) {
                     return true;
                 }
@@ -4732,7 +4726,7 @@ impl NzbgetRsQueueCoordinator {
                     ),
                     nzb.health,
                     crate::postproc::dead_volume_borrow_underway(nzb.id),
-                    nzb.direct_unpack_status == crate::queuesubsys_host::NS_RUNNING,
+                    nzb.direct_unpack_status == DirectUnpackStatus::Running,
                     backup_labelled_alt(host, backup_nzb.ptr),
                     backup_cannot_lend(host, nzb, &backup_nzb),
                 ) && !download_hopeless(nzb.total_articles, nzb.current_success_articles, failed);
@@ -4958,7 +4952,7 @@ impl NzbgetRsQueueCoordinator {
             backup_kind,
             eval.projected,
             crate::postproc::dead_volume_borrow_underway(nzb.id),
-            nzb.direct_unpack_status == crate::queuesubsys_host::NS_RUNNING,
+            nzb.direct_unpack_status == DirectUnpackStatus::Running,
             backup_labelled_alt(host, backup_nzb.ptr),
             backup_cannot_lend(host, &nzb, &backup_nzb),
         ) {
@@ -5885,11 +5879,7 @@ pub(crate) fn direct_rename_completed_host(
     discard_direct_rename_host(host, opts, nzb_ptr);
 
     let nzb = host.nzb_snap(nzb_ptr, false);
-    host.nzb_set_int(
-        nzb_ptr,
-        crate::queuesubsys_host::NZB_INT_DIRECT_RENAME_STATUS,
-        crate::queuesubsys_host::TS_SUCCESS,
-    );
+    host.nzb_set_direct_rename_status(nzb_ptr, DirectRenameStatus::Success);
 
     if opts.par_check != crate::queuesubsys_host::PC_FORCE {
         host.dq_edit_entry(

@@ -365,7 +365,7 @@ fn check_state_host(
     }
 
     let nzb = host.nzb_snap(nzb_ptr, false);
-    if nzb.direct_rename_status > TS_RUNNING {
+    if nzb.direct_rename_status > crate::status::DirectRenameStatus::Running {
         return;
     }
 

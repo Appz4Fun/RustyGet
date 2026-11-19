@@ -4697,33 +4697,6 @@ pub(crate) fn clear_active_prepost(pp: &std::sync::Arc<crate::prepost::NzbgetRsP
     }
 }
 
-#[cfg(unix)]
-pub unsafe extern "C" fn nzbget_rs_par_checker_new() -> *mut crate::postproc::NzbgetRsParChecker {
-    Box::into_raw(Box::new(crate::postproc::NzbgetRsParChecker::new()))
-}
-
-#[cfg(unix)]
-pub unsafe extern "C" fn nzbget_rs_par_checker_free(
-    ctrl: *mut crate::postproc::NzbgetRsParChecker,
-) {
-    if !ctrl.is_null() {
-        drop(Box::from_raw(ctrl));
-    }
-}
-
-#[cfg(unix)]
-pub unsafe extern "C" fn nzbget_rs_par_checker_exec(
-    ctrl: *const crate::postproc::NzbgetRsParChecker,
-    op: c_int,
-    a1: c_int,
-    s1: *const c_char,
-    host_cb: Option<crate::repair::NzbgetRsRepairCtrlHostFn>,
-    ctx: *mut c_void,
-) -> c_int {
-    let _cancel_guard = PosixCancelGuard::disable();
-    crate::postproc::par_checker_exec(ctrl, op, a1, s1, host_cb, ctx)
-}
-
 // The `libc` crate exports these only for Apple targets; the values differ per platform.
 #[cfg(all(unix, target_vendor = "apple"))]
 const PTHREAD_CANCEL_ENABLE: c_int = 1;

@@ -1,39 +1,29 @@
-//! PAR2 verify and repair through the par checker C ABI, against the fixture in
-//! `tests/testdata/parchecker`. Ported from the C++ unit test
-//! `tests/postprocess/ParCheckerTest.h`, which drove the same ABI through the
-//! C++ `ParChecker` wrapper.
+//! PAR2 verify and repair through `postproc::NzbgetRsParChecker`, against the
+//! fixture in `tests/testdata/parchecker`. Ported from the C++ unit test
+//! `tests/postprocess/ParCheckerTest.h`.
 #![cfg(unix)]
 
-use std::ffi::{c_char, c_int, c_void, CStr, CString};
+use std::cell::RefCell;
 use std::fs;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use nzbget_rs::ffi::{
-    nzbget_rs_par_checker_exec, nzbget_rs_par_checker_free, nzbget_rs_par_checker_new,
-};
+use nzbget_rs::postproc::{NzbgetRsParChecker, ParCheckerHooks, ParCheckerOptions};
+use par_rs::QuickInfo;
 
-const PS_FAILED: c_int = 0;
-const PS_REPAIR_POSSIBLE: c_int = 1;
-const PS_REPAIRED: c_int = 2;
-const PS_REPAIR_NOT_NEEDED: c_int = 3;
+const PS_FAILED: i32 = 0;
+const PS_REPAIR_POSSIBLE: i32 = 1;
+const PS_REPAIRED: i32 = 2;
+const PS_REPAIR_NOT_NEEDED: i32 = 3;
 
-const FS_UNKNOWN: usize = 0;
-const FS_SUCCESS: usize = 1;
-
-/// Option values the daemon hands over in host operation 0.
-struct Config {
-    repair: bool,
-    ignore_ext: CString,
-}
-
-/// One copy of the fixture in a fresh directory, plus what the host callback
-/// records.
+/// One copy of the fixture in a fresh directory, plus what the checker
+/// reports back through its hooks.
 struct Checker {
     dir: PathBuf,
-    config: Config,
-    verified: Vec<String>,
+    repair: bool,
+    ignore_ext: String,
+    verified: RefCell<Vec<String>>,
 }
 
 fn fixture_dir() -> PathBuf {
@@ -57,16 +47,14 @@ impl Checker {
         }
         Self {
             dir,
-            config: Config {
-                repair,
-                ignore_ext: CString::default(),
-            },
-            verified: Vec::new(),
+            repair,
+            ignore_ext: String::new(),
+            verified: RefCell::default(),
         }
     }
 
     fn ignore_ext(mut self, value: &str) -> Self {
-        self.config.ignore_ext = CString::new(value).unwrap();
+        self.ignore_ext = value.to_owned();
         self
     }
 
@@ -80,46 +68,16 @@ impl Checker {
     }
 
     /// Runs verification (and repair when enabled). Returns (status, par_full).
-    fn execute(&mut self, quick: bool) -> (c_int, bool) {
-        let dest = CString::new(self.dir.to_str().unwrap()).unwrap();
-        unsafe {
-            let ctrl = nzbget_rs_par_checker_new();
-            nzbget_rs_par_checker_exec(ctrl, 1, 0, dest.as_ptr(), None, std::ptr::null_mut());
-            nzbget_rs_par_checker_exec(
-                ctrl,
-                2,
-                c_int::from(quick),
-                std::ptr::null(),
-                None,
-                std::ptr::null_mut(),
-            );
-            nzbget_rs_par_checker_exec(
-                ctrl,
-                0,
-                0,
-                std::ptr::null(),
-                Some(host),
-                (self as *mut Checker).cast(),
-            );
-            let full = nzbget_rs_par_checker_exec(
-                ctrl,
-                3,
-                0,
-                std::ptr::null(),
-                None,
-                std::ptr::null_mut(),
-            ) != 0;
-            let status = nzbget_rs_par_checker_exec(
-                ctrl,
-                4,
-                0,
-                std::ptr::null(),
-                None,
-                std::ptr::null_mut(),
-            );
-            nzbget_rs_par_checker_free(ctrl);
-            (status, full)
-        }
+    fn execute(&self, quick: bool) -> (i32, bool) {
+        let checker = NzbgetRsParChecker::new();
+        checker.set_dest_dir(self.dir.to_str().unwrap().as_bytes().to_vec());
+        checker.set_par_quick(quick);
+        checker.execute(self);
+        (checker.status(), checker.par_full())
+    }
+
+    fn verified(&self) -> Vec<String> {
+        self.verified.borrow().clone()
     }
 
     /// The CRC `crc.txt` lists for `name`, and whether the file still matches it.
@@ -137,82 +95,56 @@ impl Checker {
     }
 }
 
+/// The daemon's side of the checker, as the C++ test wrapper answered it:
+/// fixed options, no extra pars to fetch, verified files recorded, and a
+/// known CRC only for files that still match `crc.txt`.
+impl ParCheckerHooks for Checker {
+    fn read_options(&self) -> ParCheckerOptions {
+        ParCheckerOptions {
+            par_buffer_mb: 250, // ParBuffer default
+            has_memory_monitor: false,
+            par_threads: 0, // ParThreads default
+            par_scan: 1,    // ParScan=extended
+            par_repair: self.repair,
+            par_ignore_ext: self.ignore_ext.as_bytes().to_vec(),
+        }
+    }
+
+    fn request_more_pars(&self, _block_needed: i32) -> (bool, i32) {
+        (false, 0)
+    }
+
+    fn register_verified_file(&self, filename: &[u8]) {
+        let name = String::from_utf8_lossy(filename);
+        let base = Path::new(name.as_ref())
+            .file_name()
+            .map_or_else(|| name.to_string(), |b| b.to_string_lossy().into_owned());
+        self.verified.borrow_mut().push(base);
+    }
+
+    fn find_file_quick_info(&self, filename: &[u8]) -> Option<QuickInfo> {
+        match self.find_crc(std::str::from_utf8(filename).ok()?) {
+            Some((crc, true)) => Some(QuickInfo::Success { crc }),
+            _ => None,
+        }
+    }
+}
+
 impl Drop for Checker {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.dir);
     }
 }
 
-unsafe fn text<'a>(p: *const c_char) -> &'a str {
-    if p.is_null() {
-        ""
-    } else {
-        unsafe { CStr::from_ptr(p) }.to_str().unwrap_or("")
-    }
-}
-
-/// Host callback, as the C++ wrapper answered it: 0 options, 1 request more
-/// pars (none available), 2 verified file, 3 known file CRC, 4 log.
-unsafe extern "C" fn host(
-    ctx: *mut c_void,
-    op: c_int,
-    _a1: c_int,
-    _a2: c_int,
-    p1: usize,
-    _p2: usize,
-    s1: *const c_char,
-    _s2: *const c_char,
-    ints: *mut c_int,
-    _i64s: *mut i64,
-    strs: *mut *const c_char,
-) -> usize {
-    let checker = unsafe { &mut *ctx.cast::<Checker>() };
-    match op {
-        0 => unsafe {
-            *ints = 250; // ParBuffer default
-            *ints.add(1) = 0;
-            *ints.add(2) = 0; // ParThreads default
-            *ints.add(3) = 1; // ParScan=extended
-            *ints.add(4) = c_int::from(checker.config.repair);
-            *strs = checker.config.ignore_ext.as_ptr();
-            0
-        },
-        1 => {
-            unsafe { *ints = 0 };
-            0
-        }
-        2 => {
-            let name = unsafe { text(s1) };
-            let base = Path::new(name)
-                .file_name()
-                .map_or_else(|| name.to_owned(), |b| b.to_string_lossy().into_owned());
-            checker.verified.push(base);
-            0
-        }
-        3 => match checker.find_crc(unsafe { text(s1) }) {
-            Some((crc, matches)) => {
-                unsafe { *(p1 as *mut u32) = crc };
-                if matches {
-                    FS_SUCCESS
-                } else {
-                    FS_UNKNOWN
-                }
-            }
-            None => FS_UNKNOWN,
-        },
-        _ => 0,
-    }
-}
-
 #[test]
 fn repair_not_needed() {
-    let mut c = Checker::new("noneed", false);
+    let c = Checker::new("noneed", false);
     assert_eq!(c.execute(false), (PS_REPAIR_NOT_NEEDED, true));
 }
 
 #[test]
 fn verified_targets_exclude_unprotected_files() {
-    let mut c = Checker::new("unprotected", true);
+    let c = Checker::new("unprotected", true);
     fs::write(
         c.dir.join("unprotected.bin"),
         b"This file has no matching PAR member",
@@ -220,7 +152,7 @@ fn verified_targets_exclude_unprotected_files() {
     .unwrap();
     c.corrupt("testfile.dat", 20000);
     assert_eq!(c.execute(false).0, PS_REPAIRED);
-    let mut verified = c.verified.clone();
+    let mut verified = c.verified();
     verified.sort();
     assert_eq!(verified, ["testfile.dat", "testfile.nfo"]);
 }
@@ -229,22 +161,22 @@ fn verified_targets_exclude_unprotected_files() {
 fn verified_targets_exclude_ignored_damage() {
     // libpar2 may report an empty name for damaged files. A wildcard keeps
     // this fixture about verified membership, independent of that callback.
-    let mut c = Checker::new("ignored", false).ignore_ext("*");
+    let c = Checker::new("ignored", false).ignore_ext("*");
     c.corrupt("testfile.dat", 20000);
     assert_eq!(c.execute(false).0, PS_REPAIR_NOT_NEEDED);
-    assert_eq!(c.verified, ["testfile.nfo"]);
+    assert_eq!(c.verified(), ["testfile.nfo"]);
 }
 
 #[test]
 fn repair_possible() {
-    let mut c = Checker::new("possible", false);
+    let c = Checker::new("possible", false);
     c.corrupt("testfile.dat", 20000);
     assert_eq!(c.execute(false), (PS_REPAIR_POSSIBLE, true));
 }
 
 #[test]
 fn repair_successful() {
-    let mut c = Checker::new("successful", true);
+    let c = Checker::new("successful", true);
     c.corrupt("testfile.dat", 20000);
     assert_eq!(c.execute(false), (PS_REPAIRED, true));
 }
@@ -257,7 +189,7 @@ fn corrupt_beyond_repair(c: &Checker) {
 
 #[test]
 fn repair_failed() {
-    let mut c = Checker::new("failed", false);
+    let c = Checker::new("failed", false);
     corrupt_beyond_repair(&c);
     assert_eq!(c.execute(false), (PS_FAILED, true));
 }
@@ -266,20 +198,20 @@ fn repair_failed() {
 fn repair_failed_even_with_repair_enabled() {
     // Was ParIgnoreExtDatTest / ExtCleanupDiskDatTest: ExtCleanupDisk is not
     // part of the checker's options, so both only proved this.
-    let mut c = Checker::new("failedrepair", true);
+    let c = Checker::new("failedrepair", true);
     corrupt_beyond_repair(&c);
     assert_eq!(c.execute(false).0, PS_FAILED);
 }
 
 #[test]
 fn quick_verification_repair_not_needed() {
-    let mut c = Checker::new("quicknoneed", false);
+    let c = Checker::new("quicknoneed", false);
     assert_eq!(c.execute(true), (PS_REPAIR_NOT_NEEDED, false));
 }
 
 #[test]
 fn quick_verification_repair_successful() {
-    let mut c = Checker::new("quickrepair", true);
+    let c = Checker::new("quickrepair", true);
     c.corrupt("testfile.dat", 20000);
     assert_eq!(c.execute(true), (PS_REPAIRED, false));
 }
@@ -287,7 +219,7 @@ fn quick_verification_repair_successful() {
 #[test]
 fn quick_full_verification_repair_successful() {
     // Every file is damaged, so quick verification falls back to a full one.
-    let mut c = Checker::new("quickfull", true);
+    let c = Checker::new("quickfull", true);
     c.corrupt("testfile.dat", 20000);
     c.corrupt("testfile.nfo", 100);
     assert_eq!(c.execute(true), (PS_REPAIRED, true));

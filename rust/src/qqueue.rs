@@ -227,7 +227,7 @@ fn hist_new_dup(dup: *mut Dup, time: i64) -> usize {
 /// `DupInfo::SetId`: the id also raises the collection id floor.
 unsafe fn dup_set_id(d: *const Dup, id: i32) {
     unsafe { nzbget_rs_dup_set(d, 5, i64::from(id), std::ptr::null()) };
-    crate::qnzb::nzbget_rs_nzb_ids(3, id);
+    crate::idgen::NZB_IDS.raise_floor(id);
 }
 
 fn now() -> i64 {
@@ -357,24 +357,22 @@ pub unsafe fn free_nzb_handle(handle: usize) {
 
 /// The last collection and file ids handed out.
 pub fn id_gen_last() -> (i32, i32) {
-    use crate::qfile::nzbget_rs_file_ids;
-    use crate::qnzb::nzbget_rs_nzb_ids;
-    (nzbget_rs_nzb_ids(0, 0), nzbget_rs_file_ids(0, 0))
+    use crate::idgen::{FILE_IDS, NZB_IDS};
+    (NZB_IDS.last(), FILE_IDS.last())
 }
 
 /// Raises the id floors (a negative id leaves its floor) and resets both
 /// generators to them.
 pub fn id_gen_raise_and_reset(nzb: i32, file: i32) {
-    use crate::qfile::nzbget_rs_file_ids;
-    use crate::qnzb::nzbget_rs_nzb_ids;
+    use crate::idgen::{FILE_IDS, NZB_IDS};
     if nzb >= 0 {
-        nzbget_rs_nzb_ids(3, nzb);
+        NZB_IDS.raise_floor(nzb);
     }
     if file >= 0 {
-        nzbget_rs_file_ids(3, file);
+        FILE_IDS.raise_floor(file);
     }
-    nzbget_rs_nzb_ids(1, 0);
-    nzbget_rs_file_ids(1, 0);
+    NZB_IDS.reset_to_floor();
+    FILE_IDS.reset_to_floor();
 }
 
 /// Pushes a handle's collection to the history front of queue `key` (or

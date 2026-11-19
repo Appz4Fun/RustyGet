@@ -11,6 +11,7 @@
 //! aliasing references), the cached-article count and decoded size are atomic,
 //! and the output-file lock is a separate lock held across host callbacks.
 
+use crate::idgen::FILE_IDS;
 use crate::options::OptStr;
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::ptr;
@@ -19,8 +20,6 @@ use std::sync::{Condvar, Mutex, MutexGuard};
 
 use crate::qarticle::{nzbget_rs_artlist_free, nzbget_rs_artlist_new, ArticleList};
 
-static ID_GEN: AtomicI32 = AtomicI32::new(0);
-static ID_MAX: AtomicI32 = AtomicI32::new(0);
 
 /// Integer fields, by the id the C ABI uses.
 pub mod field {
@@ -141,7 +140,7 @@ impl File {
     fn new(id: i32) -> Self {
         // < 0: storage for a host object whose constructor sets the id
         let id = match id {
-            0 => ID_GEN.fetch_add(1, Ordering::SeqCst) + 1,
+            0 => FILE_IDS.next(),
             i if i < 0 => 0,
             i => i,
         };
@@ -176,7 +175,7 @@ impl File {
             field::DECODED_FILE_SIZE => self.decoded_file_size.store(v, Ordering::SeqCst),
             field::ID => {
                 self.lock().ints[0] = v;
-                ID_MAX.fetch_max(v as i32, Ordering::SeqCst);
+                FILE_IDS.raise_floor(v as i32);
             }
             field::SIZE => {
                 // setting the size also resets what remains (as C++ SetSize did)
@@ -223,30 +222,6 @@ pub extern "C" fn nzbget_rs_file_new(id: c_int) -> *mut File {
 pub unsafe extern "C" fn nzbget_rs_file_free(f: *mut File) {
     if !f.is_null() {
         drop(unsafe { Box::from_raw(f) });
-    }
-}
-
-/// Id generation shared by all files: 0 last generated id, 1 reset to the
-/// highest id seen, 2 reset to zero, 3 raise the floor to `v`, 4 generate
-/// the next id.
-pub extern "C" fn nzbget_rs_file_ids(op: c_int, v: c_int) -> c_int {
-    match op {
-        0 => ID_GEN.load(Ordering::SeqCst),
-        1 => {
-            ID_GEN.store(ID_MAX.load(Ordering::SeqCst), Ordering::SeqCst);
-            0
-        }
-        2 => {
-            ID_GEN.store(0, Ordering::SeqCst);
-            ID_MAX.store(0, Ordering::SeqCst);
-            0
-        }
-        3 => {
-            ID_MAX.fetch_max(v, Ordering::SeqCst);
-            0
-        }
-        4 => ID_GEN.fetch_add(1, Ordering::SeqCst) + 1,
-        _ => 0,
     }
 }
 
@@ -336,8 +311,8 @@ pub(crate) unsafe fn set_server_stat(f: *const File, server_id: i32, success: i3
 
 /// The id a new file would get (the id is used up, no file is made).
 pub(crate) fn alloc_file_id() -> i32 {
-    let id = nzbget_rs_file_ids(4, 0);
-    nzbget_rs_file_ids(3, id);
+    let id = FILE_IDS.next();
+    FILE_IDS.raise_floor(id);
     id
 }
 
@@ -347,13 +322,13 @@ pub(crate) fn new_standalone(id: i32, bump_gen: bool) -> *mut File {
     let f = nzbget_rs_file_new(-1);
     unsafe {
         if bump_gen {
-            nzbget_rs_file_set(f, field::ID, i64::from(nzbget_rs_file_ids(4, 0)));
+            nzbget_rs_file_set(f, field::ID, i64::from(FILE_IDS.next()));
             nzbget_rs_file_set(f, field::ID, i64::from(id));
         } else {
             let id = if id != 0 {
                 id
             } else {
-                nzbget_rs_file_ids(4, 0)
+                FILE_IDS.next()
             };
             nzbget_rs_file_set(f, field::ID, i64::from(id));
         }
@@ -1396,8 +1371,8 @@ mod tests {
             nzbget_rs_file_set(f, field::ID, 9000);
             nzbget_rs_file_free(f);
         }
-        nzbget_rs_file_ids(1, 0);
-        assert!(nzbget_rs_file_ids(0, 0) >= 9000);
+        FILE_IDS.reset_to_floor();
+        assert!(FILE_IDS.last() >= 9000);
     }
 
     #[test]

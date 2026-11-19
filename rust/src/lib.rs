@@ -86,6 +86,7 @@ pub mod systemhealth;
 pub mod backbones;
 pub mod addrpick;
 pub mod hostlookup;
+pub(crate) mod idgen;
 pub mod sysmetrics;
 pub mod text;
 pub mod tlscipher;

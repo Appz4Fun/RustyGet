@@ -5,6 +5,7 @@
 //! (`no_backup_reason`, `format_no_backup_reason`), skip message formatting
 //! (`format_dupe_skip_message`), and status classification (`status_from_text`).
 
+use crate::status::DupStatus;
 use std::collections::BTreeSet;
 use std::ffi::{c_char, CStr};
 use std::path::Path;
@@ -103,14 +104,6 @@ pub const MARK_STATUS_NONE: i32 = 0;
 pub const MARK_STATUS_BAD: i32 = 1;
 pub const MARK_STATUS_GOOD: i32 = 2;
 pub const MARK_STATUS_SUCCESS: i32 = 3;
-
-pub const DUP_STATUS_UNDEFINED: i32 = 0;
-pub const DUP_STATUS_SUCCESS: i32 = 1;
-pub const DUP_STATUS_FAILED: i32 = 2;
-pub const DUP_STATUS_DELETED: i32 = 3;
-pub const DUP_STATUS_DUPE: i32 = 4;
-pub const DUP_STATUS_BAD: i32 = 5;
-pub const DUP_STATUS_GOOD: i32 = 6;
 
 pub const HISTORY_KIND_UNKNOWN: i32 = 0;
 pub const HISTORY_KIND_NZB: i32 = 1;
@@ -368,14 +361,14 @@ where
 
         if h.kind == HISTORY_KIND_DUP
             && h.dupe_mode != DUPE_MODE_FORCE
-            && (h.dup_status == DUP_STATUS_SUCCESS || h.dup_status == DUP_STATUS_GOOD)
+            && (h.dup_status == DupStatus::Success || h.dup_status == DupStatus::Good)
             && h.same_name_or_key != 0
         {
             if !dupe_found || h.dupe_score > history_score {
                 history_score = h.dupe_score;
             }
             dupe_found = true;
-            good_dupe = h.dup_status == DUP_STATUS_GOOD;
+            good_dupe = h.dup_status == DupStatus::Good;
         }
 
         if good_dupe {
@@ -493,7 +486,7 @@ where
         h.same_name_or_key != 0
             && ((h.kind == HISTORY_KIND_NZB && h.is_dupe_success != 0)
                 || (h.kind == HISTORY_KIND_DUP
-                    && (h.dup_status == DUP_STATUS_SUCCESS || h.dup_status == DUP_STATUS_GOOD)))
+                    && (h.dup_status == DupStatus::Success || h.dup_status == DupStatus::Good)))
     });
     if succeeded {
         return -1;
@@ -597,16 +590,16 @@ pub fn accumulate_history_dupe_status(
     item_name: &[u8],
     item_dupe_key: &[u8],
     text_status: &[u8],
-    dup_status: i32,
+    dup_status: DupStatus,
 ) -> i32 {
     if kind == HISTORY_KIND_NZB && same_name_or_key(name, dupe_key, item_name, item_dupe_key) {
         return current_statuses | status_from_text(text_status);
     }
     if kind == HISTORY_KIND_DUP && same_name_or_key(name, dupe_key, item_name, item_dupe_key) {
-        if dup_status == DUP_STATUS_SUCCESS || dup_status == DUP_STATUS_GOOD {
+        if dup_status == DupStatus::Success || dup_status == DupStatus::Good {
             return current_statuses | DUPE_STATUS_SUCCESS;
         }
-        if dup_status == DUP_STATUS_FAILED || dup_status == DUP_STATUS_BAD {
+        if dup_status == DupStatus::Failed || dup_status == DupStatus::Bad {
             return current_statuses | DUPE_STATUS_FAILURE;
         }
     }
@@ -681,7 +674,7 @@ pub fn eval_history_dupe_match(
     item_filtered_hash: u32,
     item_dupe_mode: i32,
     item_mark_status: i32,
-    item_dup_status: i32,
+    item_dup_status: DupStatus,
     item_dupe_score: i32,
     item_name: &[u8],
     item_dupe_key: &[u8],
@@ -705,13 +698,13 @@ pub fn eval_history_dupe_match(
     }
     if kind == HISTORY_KIND_DUP
         && item_dupe_mode != DUPE_MODE_FORCE
-        && (item_dup_status == DUP_STATUS_GOOD
+        && (item_dup_status == DupStatus::Good
             || (self_dupe_mode == DUPE_MODE_SCORE
-                && item_dup_status == DUP_STATUS_SUCCESS
+                && item_dup_status == DupStatus::Success
                 && self_dupe_score <= item_dupe_score))
         && same_name_or_key(item_name, item_dupe_key, self_name, self_dupe_key)
     {
-        return Some((false, item_dup_status == DUP_STATUS_GOOD));
+        return Some((false, item_dup_status == DupStatus::Good));
     }
     None
 }
@@ -726,7 +719,7 @@ pub fn accum_hc_dupe_same_content_outcome(
     item_filtered_hash: u32,
     item_delete_status: i32,
     item_is_dupe_success: bool,
-    item_dup_status: i32,
+    item_dup_status: DupStatus,
     succeeded: &mut bool,
     failed: &mut bool,
 ) {
@@ -750,9 +743,9 @@ pub fn accum_hc_dupe_same_content_outcome(
             }
         }
     } else if kind == HISTORY_KIND_DUP {
-        if item_dup_status == DUP_STATUS_SUCCESS || item_dup_status == DUP_STATUS_GOOD {
+        if item_dup_status == DupStatus::Success || item_dup_status == DupStatus::Good {
             *succeeded = true;
-        } else if item_dup_status == DUP_STATUS_FAILED || item_dup_status == DUP_STATUS_BAD {
+        } else if item_dup_status == DupStatus::Failed || item_dup_status == DupStatus::Bad {
             *failed = true;
         }
     }
@@ -854,7 +847,7 @@ pub fn resolve_history_mark(
     dupe_check: bool,
     kind: i32,
     dupe_mode: i32,
-) -> (&'static [u8], i32, i32) {
+) -> (&'static [u8], DupStatus, i32) {
     let mark_name: &'static [u8] = if mark_status == MARK_STATUS_BAD {
         b"bad\0"
     } else if mark_status == MARK_STATUS_GOOD {
@@ -865,11 +858,11 @@ pub fn resolve_history_mark(
         b"NONE\0"
     };
     let dup_status = if mark_status == MARK_STATUS_GOOD {
-        DUP_STATUS_GOOD
+        DupStatus::Good
     } else if mark_status == MARK_STATUS_SUCCESS {
-        DUP_STATUS_SUCCESS
+        DupStatus::Success
     } else {
-        DUP_STATUS_BAD
+        DupStatus::Bad
     };
     if !dupe_check
         || ((kind == HISTORY_KIND_NZB || kind == HISTORY_KIND_DUP) && dupe_mode == DUPE_MODE_FORCE)
@@ -997,7 +990,7 @@ pub(crate) fn no_backup_reason_host(
             is_dupe_success: 0,
             mark_status: 0,
             delete_status: 0,
-            dup_status: 0,
+            dup_status: DupStatus::Undefined,
             full_content_hash: 0,
             alive_permille: 0,
             health: 0,
@@ -1078,7 +1071,7 @@ fn collect_dupe_candidates(
             is_dupe_success: 0,
             mark_status: 0,
             delete_status: 0,
-            dup_status: 0,
+            dup_status: DupStatus::Undefined,
             full_content_hash: 0,
             alive_permille: 0,
             health: 0,
@@ -1518,13 +1511,13 @@ pub(crate) fn nzb_found_host(
             }
             if dup.dupe_mode != crate::queuesubsys_host::DM_FORCE
                 && same_name_or_key(&dup.name, &dup.dupe_key, &nzb.name, &nzb.dupe_key)
-                && (dup.status == crate::queuesubsys_host::DUP_GOOD
+                && (dup.status == DupStatus::Good
                     || (nzb.dupe_mode == crate::queuesubsys_host::DM_SCORE
-                        && dup.status == crate::queuesubsys_host::DUP_SUCCESS
+                        && dup.status == DupStatus::Success
                         && nzb.dupe_score <= dup.dupe_score))
             {
                 skip = true;
-                good = dup.status == crate::queuesubsys_host::DUP_GOOD;
+                good = dup.status == DupStatus::Good;
                 dupe_name = dup.name;
                 break;
             }
@@ -1565,13 +1558,9 @@ pub(crate) fn nzb_found_host(
                     || (dup.filtered_content_hash > 0
                         && dup.filtered_content_hash == nzb.filtered_content_hash)
                 {
-                    if dup.status == crate::queuesubsys_host::DUP_SUCCESS
-                        || dup.status == crate::queuesubsys_host::DUP_GOOD
-                    {
+                    if dup.status == DupStatus::Success || dup.status == DupStatus::Good {
                         succeeded = true;
-                    } else if dup.status == crate::queuesubsys_host::DUP_FAILED
-                        || dup.status == crate::queuesubsys_host::DUP_BAD
-                    {
+                    } else if dup.status == DupStatus::Failed || dup.status == DupStatus::Bad {
                         failed = true;
                     }
                 }
@@ -1861,11 +1850,11 @@ pub(crate) fn history_mark_host(
         } else if hi.kind == crate::queuesubsys_host::HK_DUP && hi.inner_ptr != 0 {
             let dup = host.dup_snap(hi.inner_ptr);
             let ds = if mark_status == crate::queuesubsys_host::KS_GOOD {
-                crate::queuesubsys_host::DUP_GOOD
+                DupStatus::Good
             } else if mark_status == crate::queuesubsys_host::KS_SUCCESS {
-                crate::queuesubsys_host::DUP_SUCCESS
+                DupStatus::Success
             } else {
-                crate::queuesubsys_host::DUP_BAD
+                DupStatus::Bad
             };
             host.dup_set_status(hi.inner_ptr, ds);
             (dup.dupe_mode, dup.dupe_key, dup.name)
@@ -1924,13 +1913,9 @@ pub(crate) fn get_dupe_status_host(
         } else if hi.kind == crate::queuesubsys_host::HK_DUP && hi.inner_ptr != 0 {
             let dup = host.dup_snap(hi.inner_ptr);
             if same_name_or_key(name, dupe_key, &dup.name, &dup.dupe_key) {
-                if dup.status == crate::queuesubsys_host::DUP_SUCCESS
-                    || dup.status == crate::queuesubsys_host::DUP_GOOD
-                {
+                if dup.status == DupStatus::Success || dup.status == DupStatus::Good {
                     statuses |= DUPE_STATUS_SUCCESS;
-                } else if dup.status == crate::queuesubsys_host::DUP_FAILED
-                    || dup.status == crate::queuesubsys_host::DUP_BAD
-                {
+                } else if dup.status == DupStatus::Failed || dup.status == DupStatus::Bad {
                     statuses |= DUPE_STATUS_FAILURE;
                 }
             }
@@ -1987,7 +1972,7 @@ mod tests {
             is_dupe_success: 0,
             mark_status: MARK_STATUS_NONE,
             delete_status: status,
-            dup_status: DUP_STATUS_UNDEFINED,
+            dup_status: DupStatus::Undefined,
             full_content_hash: 0,
             alive_permille,
             health: 1000,
@@ -2134,7 +2119,7 @@ mod tests {
         let mut dup = done;
         dup.kind = HISTORY_KIND_DUP;
         dup.is_dupe_success = 0;
-        dup.dup_status = DUP_STATUS_SUCCESS;
+        dup.dup_status = DupStatus::Success;
         assert_eq!(
             select_rescue_backup(&[backup, dup], &[rescue_self()], |_| true),
             -1
@@ -2298,7 +2283,7 @@ mod tests {
                 is_dupe_success: 0,
                 mark_status: MARK_STATUS_NONE,
                 delete_status: DELETE_STATUS_DUPE,
-                dup_status: DUP_STATUS_UNDEFINED,
+                dup_status: DupStatus::Undefined,
                 full_content_hash: 0,
                 alive_permille: -1,
                 health: 1000,
@@ -2452,7 +2437,7 @@ mod tests {
                 0,
                 DUPE_MODE_SCORE,
                 MARK_STATUS_NONE,
-                0,
+                DupStatus::Undefined,
                 10,
                 b"B",
                 b"k2"
@@ -2505,11 +2490,11 @@ mod tests {
         );
         assert_eq!(
             resolve_history_mark(MARK_STATUS_GOOD, true, HISTORY_KIND_NZB, DUPE_MODE_SCORE),
-            (&b"good\0"[..], DUP_STATUS_GOOD, 1)
+            (&b"good\0"[..], DupStatus::Good, 1)
         );
         assert_eq!(
             resolve_history_mark(MARK_STATUS_BAD, true, HISTORY_KIND_DUP, DUPE_MODE_SCORE),
-            (&b"bad\0"[..], DUP_STATUS_BAD, 2)
+            (&b"bad\0"[..], DupStatus::Bad, 2)
         );
     }
 }

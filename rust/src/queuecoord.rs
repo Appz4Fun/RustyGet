@@ -38,14 +38,6 @@ pub const DELETE_GOOD: i32 = 5;
 pub const DELETE_COPY: i32 = 6;
 pub const DELETE_SCAN: i32 = 7;
 
-pub const DUP_STATUS_UNDEFINED: i32 = 0;
-pub const DUP_STATUS_SUCCESS: i32 = 1;
-pub const DUP_STATUS_FAILED: i32 = 2;
-pub const DUP_STATUS_DELETED: i32 = 3;
-pub const DUP_STATUS_DUPE: i32 = 4;
-pub const DUP_STATUS_BAD: i32 = 5;
-pub const DUP_STATUS_GOOD: i32 = 6;
-
 pub const ARTICLE_UNDEFINED: i32 = 0;
 pub const ARTICLE_RUNNING: i32 = 1;
 pub const ARTICLE_FINISHED: i32 = 2;

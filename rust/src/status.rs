@@ -104,6 +104,19 @@ status_enum! {
     }
 }
 
+status_enum! {
+    /// A hidden history record's dupe outcome (DupInfo::EStatus).
+    DupStatus {
+        Undefined = 0,
+        Success = 1,
+        Failed = 2,
+        Deleted = 3,
+        Dupe = 4,
+        Bad = 5,
+        Good = 6,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,5 +152,14 @@ mod tests {
         assert_eq!(i32::from(MoveStatus::Success), 2);
         assert_eq!(i32::from(CleanupStatus::Failure), 1);
         assert_eq!(UnpackStatus::from_raw(-3), UnpackStatus::None);
+    }
+
+    #[test]
+    fn dup_status_round_trip() {
+        round_trip(DupStatus::ALL);
+        assert_eq!(i32::from(DupStatus::Undefined), 0);
+        assert_eq!(i32::from(DupStatus::Dupe), 4);
+        assert_eq!(i32::from(DupStatus::Good), 6);
+        assert_eq!(DupStatus::from_raw(7), DupStatus::Undefined);
     }
 }

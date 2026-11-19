@@ -1,6 +1,7 @@
 //! Rust hot-path port for `DupeCoordinator`, `DupeMatcher`, `StreamCrypto`,
 //! `RepairController`, `ParChecker`, `DirectUnpack`, and `UnpackController`.
 
+use crate::status::DupStatus;
 use std::collections::{BTreeSet, VecDeque};
 use std::ffi::{c_char, c_int, CStr};
 
@@ -49,9 +50,6 @@ pub const MARK_STATUS_NONE: i32 = 0;
 pub const MARK_STATUS_BAD: i32 = 1;
 pub const MARK_STATUS_GOOD: i32 = 2;
 
-pub const DUP_STATUS_SUCCESS: i32 = 1;
-pub const DUP_STATUS_GOOD: i32 = 6;
-
 pub const HISTORY_KIND_NZB: i32 = 1;
 pub const HISTORY_KIND_URL: i32 = 2;
 pub const HISTORY_KIND_DUP: i32 = 3;
@@ -94,7 +92,7 @@ pub struct NzbgetRsDupeHistoryCandidate {
     pub dupe_score: i32,
     pub is_dupe_success: i32,
     pub mark_status: i32,
-    pub dup_status: i32,
+    pub dup_status: DupStatus,
     pub delete_status: i32,
     pub full_content_hash: u32,
     pub alive_permille: i32,
@@ -153,14 +151,14 @@ where
 
         if h.kind == HISTORY_KIND_DUP
             && h.dupe_mode != DUPE_MODE_FORCE
-            && (h.dup_status == DUP_STATUS_SUCCESS || h.dup_status == DUP_STATUS_GOOD)
+            && (h.dup_status == DupStatus::Success || h.dup_status == DupStatus::Good)
             && h.same_name_or_key != 0
         {
             if !dupe_found || h.dupe_score > history_score {
                 history_score = h.dupe_score;
             }
             dupe_found = true;
-            good_dupe = h.dup_status == DUP_STATUS_GOOD;
+            good_dupe = h.dup_status == DupStatus::Good;
         }
 
         if good_dupe {
@@ -631,7 +629,7 @@ mod tests {
                 dupe_score: 500,
                 is_dupe_success: 0,
                 mark_status: MARK_STATUS_NONE,
-                dup_status: 0,
+                dup_status: DupStatus::Undefined,
                 delete_status: DELETE_STATUS_HEALTH,
                 full_content_hash: 42,
                 alive_permille: 900,
@@ -648,7 +646,7 @@ mod tests {
                 dupe_score: 500,
                 is_dupe_success: 0,
                 mark_status: MARK_STATUS_NONE,
-                dup_status: 0,
+                dup_status: DupStatus::Undefined,
                 delete_status: DELETE_STATUS_COPY,
                 full_content_hash: 42,
                 alive_permille: 1000,
@@ -665,7 +663,7 @@ mod tests {
                 dupe_score: 100,
                 is_dupe_success: 0,
                 mark_status: MARK_STATUS_NONE,
-                dup_status: 0,
+                dup_status: DupStatus::Undefined,
                 delete_status: DELETE_STATUS_DUPE,
                 full_content_hash: 77,
                 alive_permille: 950,
@@ -682,7 +680,7 @@ mod tests {
                 dupe_score: 100,
                 is_dupe_success: 0,
                 mark_status: MARK_STATUS_NONE,
-                dup_status: 0,
+                dup_status: DupStatus::Undefined,
                 delete_status: DELETE_STATUS_DUPE,
                 full_content_hash: 88,
                 alive_permille: 980,

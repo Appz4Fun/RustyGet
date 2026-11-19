@@ -2,7 +2,7 @@
 //! and `QueueCoordinator` orchestration in Rust.
 
 use crate::options::OptStr;
-use crate::status::{CleanupStatus, MoveStatus, NzbParStatus, UnpackStatus};
+use crate::status::{CleanupStatus, DupStatus, MoveStatus, NzbParStatus, UnpackStatus};
 use std::ffi::{c_char, c_int, c_void, CStr};
 
 mod live_namespace;
@@ -130,11 +130,6 @@ pub(crate) const AD_FATAL_ERROR: i32 = 10;
 pub(crate) const HK_NZB: i32 = 1;
 pub(crate) const HK_URL: i32 = 2;
 pub(crate) const HK_DUP: i32 = 3;
-
-pub(crate) const DUP_SUCCESS: i32 = 1;
-pub(crate) const DUP_FAILED: i32 = 2;
-pub(crate) const DUP_BAD: i32 = 5;
-pub(crate) const DUP_GOOD: i32 = 6;
 
 pub(crate) const DUP_STR_NAME: i32 = 3;
 pub(crate) const DUP_STR_DUPE_KEY: i32 = 4;
@@ -747,7 +742,7 @@ pub(crate) struct PostSnap {
 pub(crate) struct DupSnap {
     pub dupe_mode: i32,
     pub dupe_score: i32,
-    pub status: i32,
+    pub status: DupStatus,
     pub size: i64,
     pub full_content_hash: u32,
     pub filtered_content_hash: u32,
@@ -1805,11 +1800,16 @@ impl QueueSubsysHost {
         dq_ptr: usize,
         hi_ptr: usize,
         rindex: usize,
-        dup_status: i32,
+        dup_status: DupStatus,
     ) {
         if self.use_active {
             unsafe {
-                crate::qqueue::history_replace_with_dup(dq_ptr, hi_ptr, rindex as i32, dup_status)
+                crate::qqueue::history_replace_with_dup(
+                    dq_ptr,
+                    hi_ptr,
+                    rindex as i32,
+                    dup_status.into(),
+                )
             };
         }
     }
@@ -3084,7 +3084,7 @@ impl QueueSubsysHost {
             DupSnap {
                 dupe_mode: ints[0],
                 dupe_score: ints[1],
-                status: ints[2],
+                status: DupStatus::from_raw(ints[2]),
                 size: i64s[0],
                 full_content_hash: ints[3] as u32,
                 filtered_content_hash: ints[4] as u32,
@@ -3094,8 +3094,8 @@ impl QueueSubsysHost {
         }
     }
 
-    pub fn dup_set_status(&self, dup_ptr: usize, status: i32) {
-        self.record_op(dup_ptr, 1, OpArgs::NONE.a2(status));
+    pub fn dup_set_status(&self, dup_ptr: usize, status: DupStatus) {
+        self.record_op(dup_ptr, 1, OpArgs::NONE.a2(status.into()));
     }
 
     pub fn dup_set_str(&self, dup_ptr: usize, field: i32, val: &[u8]) {

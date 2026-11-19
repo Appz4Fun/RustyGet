@@ -1,12 +1,12 @@
 //! The download queue: the queue and history lists, the queue lock, and the
 //! daemon's queue, which is the current one. The C++ `DownloadQueue` object is this allocation
-//! (host op 25 creates it), so a `DownloadQueue*` is a `*mut Queue`.
+//! (`daemon_queue_init` creates it), so a `DownloadQueue*` is a `*mut Queue`.
 //!
 //! The queue owns its collections and the history its entries. Both are
 //! freed here: a collection with its post job and files, a history entry
 //! after its inner record, as the C++ destructors did.
 
-use std::ffi::{c_char, c_int, c_void, CStr};
+use std::ffi::{c_char, c_int, CStr};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard};
 
@@ -98,7 +98,7 @@ impl Queue {
     }
 }
 
-/// The daemon's queue (host op 25), also the current one; 0 when none.
+/// The daemon's queue, also the current one; 0 when none.
 static DAEMON: AtomicUsize = AtomicUsize::new(0);
 
 fn alloc_queue() -> *mut Queue {
@@ -178,7 +178,7 @@ pub fn new_nzb() -> usize {
     n as usize
 }
 
-/// Host op 22 sub-op 3 hands out an owning handle (a C++
+/// `new_nzb_handle` hands out an owning handle (a C++
 /// `std::unique_ptr<NzbInfo>*` before): a box holding the collection, or 0
 /// once it was moved out.
 fn handle_new(nzb: usize) -> usize {
@@ -240,301 +240,350 @@ fn hist_id(h: usize) -> i32 {
     ints[1]
 }
 
-/// Host op 20: runs `f(ctx, queue)` holding the current queue's lock.
-///
-/// # Safety
-/// `f` is a callable `void(void*, uintptr_t)`.
-pub unsafe fn host_locked(f: usize, ctx: usize) -> usize {
-    if f == 0 {
-        return 0;
-    }
-    let f: unsafe extern "C" fn(*mut c_void, usize) = unsafe { std::mem::transmute(f) };
+/// Runs `f` with the current queue's key (0 when there is none), holding
+/// its lock until `f` returns. The lock is not reentrant.
+pub fn with_current_locked<R>(f: impl FnOnce(usize) -> R) -> R {
     let lock = CurrentQueueLock::acquire();
-    unsafe { f(ctx as *mut c_void, lock.key()) };
-    0
+    f(lock.key())
 }
 
-/// Host op 21: the queue's length (a1 < 0) or its item at a1.
-pub fn host_queue_at(key: usize, a1: i32) -> usize {
-    let Some(q) = (unsafe { resolve(key).as_ref() }) else {
-        return 0;
-    };
-    if a1 < 0 {
-        list_len(q.queue())
-    } else {
-        list_at(q.queue(), a1 as usize)
-    }
+fn queue_ref<'a>(key: usize) -> Option<&'a Queue> {
+    unsafe { resolve(key).as_ref() }
 }
 
-/// Host op 22: queue edits and id generation (sub-ops in
-/// `QueueSubsysHost`: 0 find, 1 remove and delete, 2 insert a handle's
-/// collection, 3 new handle, 4 add a handle's collection and free the
-/// handle, 5 reorder, 6 free a handle, 7 id generator state).
-///
-/// # Safety
-/// Pointers are as the host op documents them.
-pub unsafe fn host_queue_op(
-    a1: i32,
-    a2: i32,
-    p1: usize,
-    p2: usize,
-    ints: *mut c_int,
-    i64s: *mut i64,
-) -> usize {
-    use crate::qfile::nzbget_rs_file_ids;
-    use crate::qnzb::nzbget_rs_nzb_ids;
-    match a1 {
-        7 => {
-            if a2 == 0 {
-                unsafe {
-                    *ints = nzbget_rs_nzb_ids(0, 0);
-                    *ints.add(1) = nzbget_rs_file_ids(0, 0);
-                }
-            } else {
-                let (nzb, file) = unsafe { (*ints, *ints.add(1)) };
-                if nzb >= 0 {
-                    nzbget_rs_nzb_ids(3, nzb);
-                }
-                if file >= 0 {
-                    nzbget_rs_file_ids(3, file);
-                }
-                nzbget_rs_nzb_ids(1, 0);
-                nzbget_rs_file_ids(1, 0);
-            }
-            return 0;
-        }
-        3 => {
-            let nzb = new_nzb();
-            unsafe { *i64s = nzb as i64 };
-            return handle_new(nzb);
-        }
-        6 => {
-            unsafe { handle_free(p2) };
-            return 0;
-        }
-        _ => {}
-    }
-    let Some(q) = (unsafe { resolve(p1).as_ref() }) else {
+/// The number of collections in queue `key`.
+pub fn queue_len(key: usize) -> usize {
+    queue_ref(key).map_or(0, |q| list_len(q.queue()))
+}
+
+/// The collection at `idx` in queue `key`, or 0.
+pub fn queue_at(key: usize, idx: usize) -> usize {
+    queue_ref(key).map_or(0, |q| list_at(q.queue(), idx))
+}
+
+/// The queued collection with `id`, or 0.
+pub fn queue_find_by_id(key: usize, id: i32) -> usize {
+    let Some(q) = queue_ref(key) else {
         return 0;
     };
     let list = q.queue();
-    match a1 {
-        0 => (0..list_len(list))
-            .map(|i| list_at(list, i))
-            .find(|&n| n != 0 && unsafe { (*(n as *const NzbScalars)).id } == a2)
-            .unwrap_or(0),
-        1 => {
-            // the C++ Remove returned the owner, which was dropped at once
-            let gone = list_op(list, 6, 0, p2) as usize;
-            drop_nzb(gone);
-            0
-        }
-        2 => {
-            let nzb = unsafe { handle_take(p2) };
-            if nzb != 0 {
-                let url = unsafe { *i64s } as usize;
-                if url != 0 {
-                    let at = list_op(list, 2, 0, url);
-                    list_op(list, 5, at, nzb);
-                } else {
-                    list_op(list, if a2 != 0 { 4 } else { 3 }, 0, nzb);
-                }
-            }
-            0
-        }
-        4 => {
-            if p2 != 0 {
-                let nzb = unsafe { handle_take(p2) };
-                if nzb != 0 {
-                    list_op(list, 3, 0, nzb);
-                }
-                unsafe { handle_free(p2) };
-            }
-            0
-        }
-        5 => {
-            if p2 != 0 && a2 >= 0 {
-                unsafe {
-                    nzbget_rs_ptrlist_op(
-                        list,
-                        10,
-                        i64::from(a2),
-                        0,
-                        p2 as *const usize,
-                        std::ptr::null(),
-                    )
-                };
-            }
-            0
-        }
-        _ => 0,
+    (0..list_len(list))
+        .map(|i| list_at(list, i))
+        .find(|&n| n != 0 && unsafe { (*(n as *const NzbScalars)).id } == id)
+        .unwrap_or(0)
+}
+
+/// Removes `nzb` from queue `key` and frees it.
+pub fn queue_remove(key: usize, nzb: usize) {
+    if let Some(q) = queue_ref(key) {
+        // the C++ Remove returned the owner, which was dropped at once
+        let gone = list_op(q.queue(), 6, 0, nzb) as usize;
+        drop_nzb(gone);
     }
 }
 
-/// Host op 23: history (a1 >= 0 the entry at a1 with its summary; -1 count,
-/// -2 find by id, -3 move a queued collection to the front of history,
-/// -4 replace an entry with a duplicate record, -5 erase, -6 return an
-/// entry's collection to the queue front, -7 push a handle's collection,
-/// -8 push a duplicate record).
+/// Moves a handle's collection into queue `key`: before `url` when it is
+/// not 0, else at the front (`add_first`) or the back. The handle stays
+/// allocated (empty) for `free_nzb_handle`.
 ///
 /// # Safety
-/// Pointers are as the host op documents them.
-#[allow(clippy::too_many_arguments)]
-pub unsafe fn host_history_op(
-    a1: i32,
-    a2: i32,
-    p1: usize,
-    p2: usize,
-    s1: *const c_char,
-    s2: *const c_char,
-    ints: *mut c_int,
-    i64s: *mut i64,
-    strs: *mut *const c_char,
-) -> usize {
-    let q = unsafe { resolve(p1).as_ref() };
-    if a1 == -7 {
-        let nzb = unsafe { handle_take(p2) };
-        if nzb != 0 {
-            if let Some(q) = q {
-                list_op(q.history(), 3, 0, hist_new_nzb(nzb, i64::from(a2)));
-            } else {
-                drop_nzb(nzb);
-            }
+/// `handle` is 0 or a live handle from `new_nzb_handle`.
+pub unsafe fn queue_insert_handle(key: usize, handle: usize, url: usize, add_first: bool) {
+    let Some(q) = queue_ref(key) else {
+        return;
+    };
+    let list = q.queue();
+    let nzb = unsafe { handle_take(handle) };
+    if nzb != 0 {
+        if url != 0 {
+            let at = list_op(list, 2, 0, url);
+            list_op(list, 5, at, nzb);
+        } else {
+            list_op(list, if add_first { 4 } else { 3 }, 0, nzb);
         }
-        unsafe { handle_free(p2) };
-        return 0;
     }
-    let Some(q) = q else {
+}
+
+/// A new collection in an owning handle: (handle, collection).
+pub fn new_nzb_handle() -> (usize, usize) {
+    let nzb = new_nzb();
+    (handle_new(nzb), nzb)
+}
+
+/// Adds a handle's collection at the back of queue `key` and frees the
+/// handle.
+///
+/// # Safety
+/// `handle` is 0 or a live handle from `new_nzb_handle`.
+pub unsafe fn queue_add_handle(key: usize, handle: usize) {
+    let Some(q) = queue_ref(key) else {
+        return;
+    };
+    if handle != 0 {
+        let nzb = unsafe { handle_take(handle) };
+        if nzb != 0 {
+            list_op(q.queue(), 3, 0, nzb);
+        }
+        unsafe { handle_free(handle) };
+    }
+}
+
+/// Puts queue `key` in `order` (the same collections, reordered).
+pub fn queue_reorder(key: usize, order: &[usize]) {
+    let Some(q) = queue_ref(key) else {
+        return;
+    };
+    if !order.is_empty() {
+        unsafe {
+            nzbget_rs_ptrlist_op(
+                q.queue(),
+                10,
+                order.len() as i64,
+                0,
+                order.as_ptr(),
+                std::ptr::null(),
+            )
+        };
+    }
+}
+
+/// Frees a handle and the collection still in it.
+///
+/// # Safety
+/// `handle` is 0 or a live handle from `new_nzb_handle`.
+pub unsafe fn free_nzb_handle(handle: usize) {
+    unsafe { handle_free(handle) };
+}
+
+/// The last collection and file ids handed out.
+pub fn id_gen_last() -> (i32, i32) {
+    use crate::qfile::nzbget_rs_file_ids;
+    use crate::qnzb::nzbget_rs_nzb_ids;
+    (nzbget_rs_nzb_ids(0, 0), nzbget_rs_file_ids(0, 0))
+}
+
+/// Raises the id floors (a negative id leaves its floor) and resets both
+/// generators to them.
+pub fn id_gen_raise_and_reset(nzb: i32, file: i32) {
+    use crate::qfile::nzbget_rs_file_ids;
+    use crate::qnzb::nzbget_rs_nzb_ids;
+    if nzb >= 0 {
+        nzbget_rs_nzb_ids(3, nzb);
+    }
+    if file >= 0 {
+        nzbget_rs_file_ids(3, file);
+    }
+    nzbget_rs_nzb_ids(1, 0);
+    nzbget_rs_file_ids(1, 0);
+}
+
+/// Pushes a handle's collection to the history front of queue `key` (or
+/// frees it when there is no queue), then frees the handle.
+///
+/// # Safety
+/// `handle` is 0 or a live handle from `new_nzb_handle`.
+pub unsafe fn history_push_handle(key: usize, handle: usize, time: i32) {
+    let nzb = unsafe { handle_take(handle) };
+    if nzb != 0 {
+        if let Some(q) = queue_ref(key) {
+            list_op(q.history(), 3, 0, hist_new_nzb(nzb, i64::from(time)));
+        } else {
+            drop_nzb(nzb);
+        }
+    }
+    unsafe { handle_free(handle) };
+}
+
+/// A duplicate record's fields, as `history_push_dup` stores them.
+pub struct DupRecord<'a> {
+    pub id: i32,
+    pub time: i32,
+    pub status: i32,
+    pub full_hash: u32,
+    pub filtered_hash: u32,
+    pub dupe_score: i32,
+    pub dupe_mode: i32,
+    pub size: i64,
+    pub name: &'a CStr,
+    pub dupe_key: &'a CStr,
+}
+
+/// Pushes a duplicate record to the history front of queue `key`.
+pub fn history_push_dup(key: usize, rec: &DupRecord<'_>) {
+    let Some(q) = queue_ref(key) else {
+        return;
+    };
+    let d = nzbget_rs_dup_new();
+    unsafe {
+        nzbget_rs_dup_set(d, 2, i64::from(rec.status), std::ptr::null());
+        nzbget_rs_dup_set(d, 3, i64::from(rec.full_hash), std::ptr::null());
+        nzbget_rs_dup_set(d, 4, i64::from(rec.filtered_hash), std::ptr::null());
+        nzbget_rs_dup_set(d, 6, rec.size, std::ptr::null());
+        nzbget_rs_dup_set(d, 1, i64::from(rec.dupe_score), std::ptr::null());
+        nzbget_rs_dup_set(d, 0, i64::from(rec.dupe_mode), std::ptr::null());
+        nzbget_rs_dup_set(d, 7, 0, rec.name.as_ptr());
+        nzbget_rs_dup_set(d, 8, 0, rec.dupe_key.as_ptr());
+        dup_set_id(d, rec.id);
+    }
+    list_op(q.history(), 3, 0, hist_new_dup(d, i64::from(rec.time)));
+}
+
+/// Moves queued `nzb` to the history front of queue `key`.
+pub fn history_move_queue_item(key: usize, nzb: usize) {
+    let Some(q) = queue_ref(key) else {
+        return;
+    };
+    let nzb = list_op(q.queue(), 6, 0, nzb) as usize;
+    if nzb != 0 {
+        list_op(q.history(), 4, 0, hist_new_nzb(nzb, now()));
+    }
+}
+
+/// Replaces history entry `old` (at reverse index `rindex`) with a
+/// duplicate record of its collection, with `status`.
+///
+/// # Safety
+/// `old` is a live history entry holding a collection.
+pub unsafe fn history_replace_with_dup(key: usize, old: usize, rindex: i32, status: i32) {
+    let Some(q) = queue_ref(key) else {
+        return;
+    };
+    let hist = q.history();
+    let old = old as *const Hist;
+    let n = unsafe { nzbget_rs_hist_get(old, hfield::INFO) } as *const NzbScalars;
+    let d = nzbget_rs_dup_new();
+    unsafe {
+        let s = &*n;
+        dup_set_id(d, s.id);
+        nzbget_rs_dup_set(d, 7, 0, nzbget_rs_nzb_text(n, 2));
+        nzbget_rs_dup_set(d, 8, 0, nzbget_rs_nzb_text(n, 7));
+        nzbget_rs_dup_set(d, 1, i64::from(s.dupeScore), std::ptr::null());
+        nzbget_rs_dup_set(d, 0, i64::from(s.dupeMode), std::ptr::null());
+        nzbget_rs_dup_set(d, 6, s.size, std::ptr::null());
+        nzbget_rs_dup_set(d, 3, i64::from(s.fullContentHash), std::ptr::null());
+        nzbget_rs_dup_set(d, 4, i64::from(s.filteredContentHash), std::ptr::null());
+        nzbget_rs_dup_set(d, 2, i64::from(status), std::ptr::null());
+    }
+    let time = unsafe { nzbget_rs_hist_get(old, hfield::TIME) };
+    let new = hist_new_dup(d, time);
+    let at = (list_len(hist) as i64) - 1 - i64::from(rindex);
+    if list_op(hist, 1, at, 0) != 0 {
+        list_op(hist, 8, at, new);
+    } else {
+        unsafe { hist_drop_fn(new) };
+    }
+}
+
+/// Erases (and frees) the history entry at `idx`.
+pub fn history_erase_at(key: usize, idx: i32) {
+    if let Some(q) = queue_ref(key) {
+        list_op(q.history(), 7, i64::from(idx), 0);
+    }
+}
+
+/// Returns entry `hi`'s collection to the queue front and erases the entry
+/// at `idx`; the collection, or 0.
+///
+/// # Safety
+/// `hi` is a live history entry holding a collection.
+pub unsafe fn history_return_to_queue(key: usize, hi: usize, idx: i32) -> usize {
+    let Some(q) = queue_ref(key) else {
+        return 0;
+    };
+    let h = hi as *const Hist;
+    let nzb = unsafe { nzbget_rs_hist_get(h, hfield::INFO) } as usize;
+    unsafe { nzbget_rs_hist_set(h, hfield::INFO, 0) };
+    list_op(q.queue(), 4, 0, nzb);
+    list_op(q.history(), 7, i64::from(idx), 0);
+    nzb
+}
+
+/// The number of history entries in queue `key`.
+pub fn history_len(key: usize) -> usize {
+    queue_ref(key).map_or(0, |q| list_len(q.history()))
+}
+
+/// The history entry with `id`, or 0.
+pub fn history_find_by_id(key: usize, id: i32) -> usize {
+    let Some(q) = queue_ref(key) else {
         return 0;
     };
     let hist = q.history();
-    match a1 {
-        -8 => {
-            let d = nzbget_rs_dup_new();
-            let int = |i: usize| i64::from(unsafe { *ints.add(i) });
-            let text = |s: *const c_char| if s.is_null() { c"".as_ptr() } else { s };
-            unsafe {
-                nzbget_rs_dup_set(d, 2, int(2), std::ptr::null());
-                nzbget_rs_dup_set(d, 3, int(3) as u32 as i64, std::ptr::null());
-                nzbget_rs_dup_set(d, 4, int(4) as u32 as i64, std::ptr::null());
-                nzbget_rs_dup_set(d, 6, *i64s, std::ptr::null());
-                nzbget_rs_dup_set(d, 1, int(5), std::ptr::null());
-                nzbget_rs_dup_set(d, 0, int(6), std::ptr::null());
-                nzbget_rs_dup_set(d, 7, 0, text(s1));
-                nzbget_rs_dup_set(d, 8, 0, text(s2));
-                dup_set_id(d, *ints);
-            }
-            list_op(hist, 3, 0, hist_new_dup(d, int(1)));
-            0
-        }
-        -1 => list_len(hist),
-        -2 => (0..list_len(hist))
-            .map(|i| list_at(hist, i))
-            .find(|&h| h != 0 && hist_id(h) == a2)
-            .unwrap_or(0),
-        -3 => {
-            let nzb = list_op(q.queue(), 6, 0, p2) as usize;
-            if nzb != 0 {
-                list_op(hist, 4, 0, hist_new_nzb(nzb, now()));
-            }
-            0
-        }
-        -4 => {
-            let old = p2 as *const Hist;
-            let n = unsafe { nzbget_rs_hist_get(old, hfield::INFO) } as *const NzbScalars;
-            let d = nzbget_rs_dup_new();
-            unsafe {
-                let s = &*n;
-                dup_set_id(d, s.id);
-                nzbget_rs_dup_set(d, 7, 0, nzbget_rs_nzb_text(n, 2));
-                nzbget_rs_dup_set(d, 8, 0, nzbget_rs_nzb_text(n, 7));
-                nzbget_rs_dup_set(d, 1, i64::from(s.dupeScore), std::ptr::null());
-                nzbget_rs_dup_set(d, 0, i64::from(s.dupeMode), std::ptr::null());
-                nzbget_rs_dup_set(d, 6, s.size, std::ptr::null());
-                nzbget_rs_dup_set(d, 3, i64::from(s.fullContentHash), std::ptr::null());
-                nzbget_rs_dup_set(d, 4, i64::from(s.filteredContentHash), std::ptr::null());
-                nzbget_rs_dup_set(d, 2, i64::from(a2), std::ptr::null());
-            }
-            let time = unsafe { nzbget_rs_hist_get(old, hfield::TIME) };
-            let new = hist_new_dup(d, time);
-            let at = (list_len(hist) as i64) - 1 - i64::from(unsafe { *ints });
-            if list_op(hist, 1, at, 0) != 0 {
-                list_op(hist, 8, at, new);
-            } else {
-                unsafe { hist_drop_fn(new) };
-            }
-            0
-        }
-        -5 => {
-            list_op(hist, 7, i64::from(a2), 0);
-            0
-        }
-        -6 => {
-            let h = p2 as *const Hist;
-            let nzb = unsafe { nzbget_rs_hist_get(h, hfield::INFO) } as usize;
-            unsafe { nzbget_rs_hist_set(h, hfield::INFO, 0) };
-            list_op(q.queue(), 4, 0, nzb);
-            list_op(hist, 7, i64::from(a2), 0);
-            nzb
-        }
-        _ if a1 >= 0 => {
-            let h = list_at(hist, a1 as usize);
-            if h == 0 {
-                return 0;
-            }
-            let inner = unsafe { host_hist_summary(h as *const Hist, ints, strs) };
-            unsafe {
-                *i64s = inner as i64;
-                *i64s.add(1) = nzbget_rs_hist_get(h as *const Hist, hfield::TIME);
-            }
-            h
-        }
-        _ => 0,
-    }
+    (0..list_len(hist))
+        .map(|i| list_at(hist, i))
+        .find(|&h| h != 0 && hist_id(h) == id)
+        .unwrap_or(0)
 }
 
-/// Host op 25: the daemon's queue (0 get, 1 create anew and make current,
-/// 2 mark loaded, 3 no current queue and free it).
-pub fn host_daemon_queue(a1: i32) -> usize {
-    match a1 {
-        0 => DAEMON.load(Ordering::SeqCst),
-        1 => {
-            let old = DAEMON.swap(alloc_queue() as usize, Ordering::SeqCst);
-            unsafe { free_queue(old as *mut Queue) };
-            // a reload creates the queue anew: not loaded until it is again
-            crate::ffi::set_queue_loaded(false);
-            0
-        }
-        2 => {
-            crate::ffi::set_queue_loaded(true);
-            0
-        }
-        3 => {
-            let old = DAEMON.swap(0, Ordering::SeqCst);
-            crate::ffi::set_queue_loaded(false);
-            unsafe { free_queue(old as *mut Queue) };
-            0
-        }
-        _ => 0,
-    }
+/// A history entry with its summary.
+pub struct HistoryEntry {
+    pub hi: usize,
+    pub kind: i32,
+    pub id: i32,
+    pub inner: usize,
+    pub time: i64,
+    /// The entry's name, owned by the entry (null when it has none).
+    pub name: *const c_char,
 }
 
-/// Host op 2: a message for a collection, printed to the log and kept with
-/// it (a2 == 1 `AddMessage`, else `PrintMessage`, which first cuts the text
-/// to 1023 bytes).
+/// The history entry at `idx` with its summary, or None.
+pub fn history_at(key: usize, idx: usize) -> Option<HistoryEntry> {
+    let q = queue_ref(key)?;
+    let h = list_at(q.history(), idx);
+    if h == 0 {
+        return None;
+    }
+    let mut ints = [0 as c_int; 2];
+    let mut strs = [std::ptr::null::<c_char>(); 1];
+    let inner =
+        unsafe { host_hist_summary(h as *const Hist, ints.as_mut_ptr(), strs.as_mut_ptr()) };
+    Some(HistoryEntry {
+        hi: h,
+        kind: ints[0],
+        id: ints[1],
+        inner,
+        time: unsafe { nzbget_rs_hist_get(h as *const Hist, hfield::TIME) },
+        name: strs[0],
+    })
+}
+
+/// The daemon's queue, or 0.
+pub fn daemon_queue() -> usize {
+    DAEMON.load(Ordering::SeqCst)
+}
+
+/// Creates the daemon's queue anew (freeing the old one) and makes it
+/// current; it is not loaded until marked so again.
+pub fn daemon_queue_init() {
+    let old = DAEMON.swap(alloc_queue() as usize, Ordering::SeqCst);
+    unsafe { free_queue(old as *mut Queue) };
+    crate::ffi::set_queue_loaded(false);
+}
+
+/// Marks the daemon's queue loaded.
+pub fn daemon_queue_loaded() {
+    crate::ffi::set_queue_loaded(true);
+}
+
+/// Leaves no current queue and frees the daemon's.
+pub fn daemon_queue_final() {
+    let old = DAEMON.swap(0, Ordering::SeqCst);
+    crate::ffi::set_queue_loaded(false);
+    unsafe { free_queue(old as *mut Queue) };
+}
+
+/// A message for collection `nzb` (0: none), printed to the log and kept
+/// with it. `add` is `AddMessage`; else `PrintMessage`, which first cuts
+/// the text to 1023 bytes. Text after a NUL is ignored.
 ///
 /// # Safety
-/// `nzb` is 0 or a live collection; `s1` is null or NUL-terminated.
-pub unsafe fn host_nzb_message(kind: i32, a2: i32, nzb: usize, s1: *const c_char) {
+/// `nzb` is 0 or a live collection.
+pub unsafe fn nzb_message(nzb: usize, kind: i32, add: bool, msg: &[u8]) {
     if nzb == 0 {
         return;
     }
-    let full = if s1.is_null() {
-        &[][..]
-    } else {
-        unsafe { CStr::from_ptr(s1) }.to_bytes()
-    };
-    let text = if a2 == 1 {
+    let full = &msg[..msg.iter().position(|&b| b == 0).unwrap_or(msg.len())];
+    let text = if add {
         full
     } else {
         &full[..full.len().min(1023)]
@@ -565,11 +614,11 @@ pub unsafe fn host_nzb_message(kind: i32, a2: i32, nzb: usize, s1: *const c_char
     };
 }
 
-/// Host op 6 sub-op 5: starts a collection's live-repair job.
+/// Starts a collection's live-repair job.
 ///
 /// # Safety
 /// `nzb` is 0 or a live collection.
-pub unsafe fn host_start_live_repair(nzb: usize) {
+pub unsafe fn start_live_repair(nzb: usize) {
     use crate::jobthread::{nzbget_rs_job_free, nzbget_rs_job_new_post, nzbget_rs_job_start};
     if nzb == 0 {
         return;
@@ -603,35 +652,31 @@ fn atoi(s: &[u8]) -> c_int {
     (if neg { -v } else { v }) as c_int
 }
 
-/// Host op 7: the TLS cipher service (a1 0 start, with s1 a server id when
-/// not empty; 1 status of job s1; else cancel job s1). The JSON reply goes
-/// to `*out` (a `Vec<u8>`) when `out` is not null. Returns 1.
-///
-/// # Safety
-/// `s1` is null or NUL-terminated; `out` is null or points to a live `Vec<u8>`.
-pub unsafe fn host_tls_cipher(a1: i32, out: usize, s1: *const c_char) -> usize {
+/// The TLS cipher service's JSON reply: `action` 0 starts (on server
+/// `arg` when it is not empty), 1 reports job `arg`'s status, else cancels
+/// job `arg`.
+pub fn tls_cipher(action: i32, arg: &[u8]) -> Vec<u8> {
     let available = !crate::ffi::build_tls_disabled()
         && (cfg!(target_os = "macos") || cfg!(target_os = "linux"));
-    let buf: Vec<u8> = if !available {
+    if !available {
         let msg = r#"{"Available":false,"State":"unavailable","Message":"TLS cipher optimization requires a TLS-enabled Rust backend and a supported atomic configuration adapter."}"#;
-        msg.as_bytes().to_vec()
-    } else if a1 == 0 {
-        let id = (!s1.is_null()).then(|| unsafe { CStr::from_ptr(s1) }.to_bytes());
-        match id {
-            Some(id) if !id.is_empty() => crate::ffi::nzbget_rs_tls_cipher_start_server(atoi(id)),
-            _ => unsafe { crate::ffi::nzbget_rs_tls_cipher_start(std::ptr::null()) },
-        }
-    } else if a1 == 1 {
-        unsafe { crate::ffi::nzbget_rs_tls_cipher_status(s1) }
-    } else {
-        unsafe {
-            crate::ffi::nzbget_rs_tls_cipher_cancel(if s1.is_null() { c"".as_ptr() } else { s1 })
-        }
-    };
-    if out != 0 {
-        unsafe { *(out as *mut Vec<u8>) = buf };
+        return msg.as_bytes().to_vec();
     }
-    1
+    let arg = &arg[..arg.iter().position(|&b| b == 0).unwrap_or(arg.len())];
+    if action == 0 {
+        if arg.is_empty() {
+            unsafe { crate::ffi::nzbget_rs_tls_cipher_start(std::ptr::null()) }
+        } else {
+            crate::ffi::nzbget_rs_tls_cipher_start_server(atoi(arg))
+        }
+    } else {
+        let arg = std::ffi::CString::new(arg).unwrap_or_default();
+        if action == 1 {
+            unsafe { crate::ffi::nzbget_rs_tls_cipher_status(arg.as_ptr()) }
+        } else {
+            unsafe { crate::ffi::nzbget_rs_tls_cipher_cancel(arg.as_ptr()) }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -662,59 +707,39 @@ mod tests {
     fn queue_ops_insert_find_remove_reorder() {
         let _s = serial();
         let q = alloc_queue() as usize;
-        let mut made = Vec::new();
-        for _ in 0..3 {
-            let mut i64s = [0i64];
-            let h = unsafe { host_queue_op(3, 0, 0, 0, std::ptr::null_mut(), i64s.as_mut_ptr()) };
-            made.push((h, i64s[0] as usize));
-        }
+        let made: Vec<(usize, usize)> = (0..3).map(|_| new_nzb_handle()).collect();
         let ids: Vec<i32> = made.iter().map(|&(_, n)| nzb_id(n)).collect();
         assert!(ids[0] < ids[1] && ids[1] < ids[2]);
         // add at the back, at the front, then before the first
-        let (ni, nl, ns): (*mut c_int, *mut i64, *mut *const c_char) = (
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
-        let _ = ns;
         unsafe {
-            let mut url = [0i64];
-            host_queue_op(2, 0, q, made[0].0, ni, url.as_mut_ptr());
-            host_queue_op(2, 1, q, made[1].0, ni, url.as_mut_ptr());
-            let mut url = [made[1].1 as i64];
-            host_queue_op(2, 0, q, made[2].0, ni, url.as_mut_ptr());
+            queue_insert_handle(q, made[0].0, 0, false);
+            queue_insert_handle(q, made[1].0, 0, true);
+            queue_insert_handle(q, made[2].0, made[1].1, false);
             // moved-out handles are freed without touching the collections
             for &(h, _) in &made {
                 assert_eq!(*(h as *const usize), 0);
-                host_queue_op(6, 0, 0, h, ni, nl);
+                free_nzb_handle(h);
             }
         }
-        let order: Vec<usize> = (0..host_queue_at(q, -1))
-            .map(|i| host_queue_at(q, i as i32))
-            .collect();
+        let order: Vec<usize> = (0..queue_len(q)).map(|i| queue_at(q, i)).collect();
         assert_eq!(order, vec![made[2].1, made[1].1, made[0].1]);
-        assert_eq!(unsafe { host_queue_op(0, ids[1], q, 0, ni, nl) }, made[1].1);
-        assert_eq!(unsafe { host_queue_op(0, -5, q, 0, ni, nl) }, 0);
+        assert_eq!(queue_find_by_id(q, ids[1]), made[1].1);
+        assert_eq!(queue_find_by_id(q, -5), 0);
         let rev: Vec<usize> = order.iter().rev().copied().collect();
-        unsafe { host_queue_op(5, 3, q, rev.as_ptr() as usize, ni, nl) };
-        assert_eq!(host_queue_at(q, 0), made[0].1);
-        unsafe { host_queue_op(1, 0, q, made[0].1, ni, nl) };
-        assert_eq!(host_queue_at(q, -1), 2);
-        assert_eq!(unsafe { host_queue_op(0, ids[0], q, 0, ni, nl) }, 0);
+        queue_reorder(q, &rev);
+        assert_eq!(queue_at(q, 0), made[0].1);
+        queue_remove(q, made[0].1);
+        assert_eq!(queue_len(q), 2);
+        assert_eq!(queue_find_by_id(q, ids[0]), 0);
         unsafe { free_queue(q as *mut Queue) };
     }
 
     #[test]
     fn id_generator_state_round_trips() {
         let _s = serial();
-        let nl: *mut i64 = std::ptr::null_mut();
-        let mut ints = [0i32; 2];
-        unsafe { host_queue_op(7, 0, 0, 0, ints.as_mut_ptr(), nl) };
-        let base = ints[0];
-        let mut raise = [base + 1_000_000, -1];
-        unsafe { host_queue_op(7, 1, 0, 0, raise.as_mut_ptr(), nl) };
-        unsafe { host_queue_op(7, 0, 0, 0, ints.as_mut_ptr(), nl) };
-        assert_eq!(ints[0], base + 1_000_000);
+        let (base, _) = id_gen_last();
+        id_gen_raise_and_reset(base + 1_000_000, -1);
+        assert_eq!(id_gen_last().0, base + 1_000_000);
         let n = new_nzb();
         assert_eq!(nzb_id(n), base + 1_000_001);
         drop_nzb(n);
@@ -724,129 +749,73 @@ mod tests {
     fn history_ops() {
         let _s = serial();
         let q = alloc_queue() as usize;
-        let (ni, nl, ns): (*mut c_int, *mut i64, *mut *const c_char) = (
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
-        let _ = ns;
-        let (mut ints, mut i64s, mut strs) = ([0i32; 7], [0i64; 2], [std::ptr::null(); 1]);
         // push a handle's collection, and a duplicate record
-        let mut tmp = [0i64];
-        let h = unsafe { host_queue_op(3, 0, 0, 0, ni, tmp.as_mut_ptr()) };
-        let nzb = tmp[0] as usize;
+        let (h, nzb) = new_nzb_handle();
         let id = nzb_id(nzb);
-        unsafe {
-            host_history_op(
-                -7,
-                1234,
-                q,
-                h,
-                std::ptr::null(),
-                std::ptr::null(),
-                ni,
-                nl,
-                ns,
-            )
-        };
-        let mut dup_ints = [777, 99, 2, 5, 6, 10, 1];
-        let mut size = [4096i64];
-        unsafe {
-            host_history_op(
-                -8,
-                0,
-                q,
-                0,
-                c"dup name".as_ptr(),
-                c"key".as_ptr(),
-                dup_ints.as_mut_ptr(),
-                size.as_mut_ptr(),
-                ns,
-            )
-        };
-        let hist = |a1: i32,
-                    a2: i32,
-                    p2: usize,
-                    ints: &mut [i32],
-                    i64s: &mut [i64],
-                    strs: &mut [*const c_char]| unsafe {
-            host_history_op(
-                a1,
-                a2,
-                q,
-                p2,
-                std::ptr::null(),
-                std::ptr::null(),
-                ints.as_mut_ptr(),
-                i64s.as_mut_ptr(),
-                strs.as_mut_ptr(),
-            )
-        };
-        assert_eq!(hist(-1, 0, 0, &mut ints, &mut i64s, &mut strs), 2);
-        let first = hist(0, 0, 0, &mut ints, &mut i64s, &mut strs);
+        unsafe { history_push_handle(q, h, 1234) };
+        history_push_dup(
+            q,
+            &DupRecord {
+                id: 777,
+                time: 99,
+                status: 2,
+                full_hash: 5,
+                filtered_hash: 6,
+                dupe_score: 10,
+                dupe_mode: 1,
+                size: 4096,
+                name: c"dup name",
+                dupe_key: c"key",
+            },
+        );
+        assert_eq!(history_len(q), 2);
+        let first = history_at(q, 0).unwrap();
         assert_eq!(
-            (ints[0], ints[1], i64s[0] as usize, i64s[1]),
+            (first.kind, first.id, first.inner, first.time),
             (KIND_NZB, nzb_id(nzb), nzb, 1234)
         );
-        let second = hist(1, 0, 0, &mut ints, &mut i64s, &mut strs);
-        assert_eq!((ints[0], ints[1], i64s[1]), (KIND_DUP, 777, 99));
-        assert_eq!(unsafe { CStr::from_ptr(strs[0]) }, c"dup name");
-        assert_eq!(hist(-2, 777, 0, &mut ints, &mut i64s, &mut strs), second);
-        assert_eq!(
-            hist(-2, nzb_id(nzb), 0, &mut ints, &mut i64s, &mut strs),
-            first
-        );
+        let second = history_at(q, 1).unwrap();
+        assert_eq!((second.kind, second.id, second.time), (KIND_DUP, 777, 99));
+        assert_eq!(unsafe { CStr::from_ptr(second.name) }, c"dup name");
+        assert_eq!(history_find_by_id(q, 777), second.hi);
+        assert_eq!(history_find_by_id(q, nzb_id(nzb)), first.hi);
         // replace the collection entry (reverse index 1) with a dup record
-        ints[0] = 1;
-        hist(-4, 3, first, &mut ints, &mut i64s, &mut strs);
-        hist(0, 0, 0, &mut ints, &mut i64s, &mut strs);
-        assert_eq!((ints[0], ints[1], i64s[1]), (KIND_DUP, id, 1234));
+        unsafe { history_replace_with_dup(q, first.hi, 1, 3) };
+        let e = history_at(q, 0).unwrap();
+        assert_eq!((e.kind, e.id, e.time), (KIND_DUP, id, 1234));
         // a queued collection moves to the history front, then back
-        let mut tmp = [0i64];
-        let h2 = unsafe { host_queue_op(3, 0, 0, 0, ni, tmp.as_mut_ptr()) };
-        unsafe { host_queue_op(4, 0, q, h2, ni, nl) };
-        let n2 = tmp[0] as usize;
-        hist(-3, 0, n2, &mut ints, &mut i64s, &mut strs);
-        assert_eq!(host_queue_at(q, -1), 0);
-        let front = hist(0, 0, 0, &mut ints, &mut i64s, &mut strs);
-        assert_eq!(i64s[0] as usize, n2);
-        assert_eq!(hist(-6, 0, front, &mut ints, &mut i64s, &mut strs), n2);
-        assert_eq!(host_queue_at(q, 0), n2);
-        assert_eq!(hist(-1, 0, 0, &mut ints, &mut i64s, &mut strs), 2);
-        hist(-5, 0, 0, &mut ints, &mut i64s, &mut strs);
-        assert_eq!(hist(-1, 0, 0, &mut ints, &mut i64s, &mut strs), 1);
+        let (h2, n2) = new_nzb_handle();
+        unsafe { queue_add_handle(q, h2) };
+        history_move_queue_item(q, n2);
+        assert_eq!(queue_len(q), 0);
+        let front = history_at(q, 0).unwrap();
+        assert_eq!(front.inner, n2);
+        assert_eq!(unsafe { history_return_to_queue(q, front.hi, 0) }, n2);
+        assert_eq!(queue_at(q, 0), n2);
+        assert_eq!(history_len(q), 2);
+        history_erase_at(q, 0);
+        assert_eq!(history_len(q), 1);
         unsafe { free_queue(q as *mut Queue) };
-    }
-
-    static CALLS: AtomicUsize = AtomicUsize::new(0);
-
-    unsafe extern "C" fn locked_cb(ctx: *mut c_void, q: usize) {
-        let q = q as *const Queue;
-        // the lock is held while the callback runs
-        assert!(*unsafe { &*q }.lock.state());
-        CALLS.fetch_add(unsafe { *(ctx as *const usize) }, Ordering::SeqCst);
     }
 
     #[test]
     fn locked_closure_runs_under_the_current_queue_lock() {
         let _s = serial();
-        assert_eq!(host_daemon_queue(0), 0);
-        host_daemon_queue(1);
-        let q = host_daemon_queue(0);
+        assert_eq!(daemon_queue(), 0);
+        daemon_queue_init();
+        let q = daemon_queue();
         assert_eq!(current() as usize, q);
-        let ctx = 5usize;
-        unsafe {
-            host_locked(
-                locked_cb as *const () as usize,
-                &ctx as *const usize as usize,
-            )
-        };
-        assert_eq!(CALLS.load(Ordering::SeqCst), 5);
+        let seen = with_current_locked(|key| {
+            // the lock is held while the closure runs
+            assert!(*unsafe { &*(key as *const Queue) }.lock.state());
+            key
+        });
+        assert_eq!(seen, q);
         assert!(!*unsafe { &*(q as *const Queue) }.lock.state());
-        host_daemon_queue(2);
+        daemon_queue_loaded();
         assert!(crate::ffi::is_queue_loaded());
-        host_daemon_queue(3);
-        assert_eq!(host_daemon_queue(0), 0);
+        daemon_queue_final();
+        assert_eq!(daemon_queue(), 0);
         assert_eq!(current() as usize, 0);
         assert!(!crate::ffi::is_queue_loaded());
     }

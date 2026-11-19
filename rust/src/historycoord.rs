@@ -2784,19 +2784,7 @@ unsafe extern "C" fn hc_native_action_cb(
                     pp.nzb_downloaded(host, p1, p2);
                 }
             }
-            let mut notify_i64s = [0i64];
-            host.raw(
-                24,
-                3,
-                ASPECT_NZB_RETURNED,
-                p1,
-                p2,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                notify_i64s.as_mut_ptr(),
-                std::ptr::null_mut(),
-            );
+            host.prepost_queue_changed(p1, ASPECT_NZB_RETURNED, p2, 0);
             0
         }
         24 => {
@@ -2815,19 +2803,7 @@ unsafe extern "C" fn hc_native_action_cb(
                 host.nzb_set_int(nzb_ptr, NZB_INT_DUPE_HINT, DH_REDOWNLOAD_MANUAL);
             }
             host.history_return_to_queue(p1, p2, a1 as usize);
-            let mut notify_i64s = [0i64];
-            host.raw(
-                24,
-                3,
-                ASPECT_URL_RETURNED,
-                p1,
-                nzb_ptr,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                notify_i64s.as_mut_ptr(),
-                std::ptr::null_mut(),
-            );
+            host.prepost_queue_changed(p1, ASPECT_URL_RETURNED, nzb_ptr, 0);
             0
         }
         26 => {

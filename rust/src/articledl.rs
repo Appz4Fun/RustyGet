@@ -1675,6 +1675,20 @@ impl RsArticleWriter {
             let scratch_dir = crate::options::active_options()
                 .map(|opts| opts.str_bytes(5).to_vec())
                 .unwrap_or_default();
+            if !direct_write {
+                // An article temporary is attested against the job's source
+                // root, which direct write would have created with the output
+                // file. Without direct write nothing has created it yet.
+                let mut errmsg = Vec::new();
+                if !crate::fsops::force_directories(&dest_dir, &mut errmsg, &crate::fsops::posix_stat) {
+                    host.log_nzb(
+                        nzb_ptr,
+                        MK_ERROR,
+                        &join_c_slices(&[b"Could not create directory ", &dest_dir, b": ", &errmsg]),
+                    );
+                    return false;
+                }
+            }
             let context = match prepare_article_write_context(
                 self.write_context.as_ref().unwrap().clone(),
                 direct_write,

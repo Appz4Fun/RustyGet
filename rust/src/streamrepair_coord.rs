@@ -5,8 +5,7 @@
 use crate::cstr;
 use crate::options::OptStr;
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::{c_char, c_int, c_void, CStr};
-use std::ptr;
+use std::ffi::{c_int, CStr};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -29,7 +28,8 @@ use crate::streamrepair::{
     TargetMessageKind,
 };
 
-use crate::log::{MK_INFO, MK_WARNING, MK_ERROR, MK_DETAIL};
+use crate::log::{MK_DEBUG, MK_DETAIL, MK_ERROR, MK_INFO, MK_WARNING};
+use crate::postproc::JobQueue;
 
 const DM_FORCE: i32 = 2;
 const RS_NONE: i32 = 0;
@@ -41,59 +41,6 @@ const SLOW_REPAIR_FACTOR: i32 = 3;
 const MAX_RUN_FACTOR: i32 = 5;
 const MAX_CONNECTION_WAIT_SEC: i32 = 1800;
 const DONOR_CHECK_SEC: i32 = 20;
-
-/// Host callback (`StreamRepairController::HostCb` in `Util.h`):
-/// - `op == 0`: `DownloadQueue::Guard()` trampoline (`p1 = fn_ptr`, `p2 = slot_ptr`)
-/// - `op == 1`: `IsStopped()` -> `0` / `1`
-/// - `op == 2`: `Stop()` (invoked by watchdog on timeout after setting `timed_out = true`)
-/// - `op == 3`: `SetInfoName(s1)`
-/// - `op == 4`: `PrintMessage((Message::EKind)a1, "%s", s1)`
-/// - `op == 5`: global log (`a1`: `0 => info`, `1 => error`, `2 => warn`, `3 => detail`, `4 => debug`)
-/// - `op == 6`: query options/stats/servers ->
-///   `ints[0]=dupe_stream_timeout`, `ints[1]=dupe_stream_decompress`,
-///   `ints[2]=primary_connections`, `ints[3]=par_check`, `ints[4]=pc_manual`,
-///   `i64s[0]=download_rate`, `strs[0]=par_ignore_ext`
-/// - `op == 7`: inspect target `NzbInfo` under `dq` (`p1 = dq_ptr`, `a1 = set_init_label`) ->
-///   returns `nzb_ptr` (`0` if missing or live ownership lost),
-///   `ints[0]=id`, `ints[1]=has_par_files`, `ints[2]=completed_count`, `ints[3]=job_count`,
-///   `ints[4]=queue_count`, `ints[5]=history_count`, `i64s[0]=full_content_hash`,
-///   `strs[0]=name`, `strs[1]=dest_dir`, `strs[2]=dupe_key`, `strs[3]=unpack_password`
-/// - `op == 8`: read `CompletedFile` at `a1` of `nzb` (`p1 = nzb_ptr`) ->
-///   `ints[0]=id`, `ints[1]=par_file`, `ints[2]=status`, `strs[0]=filename`
-/// - `op == 9`: read/mark `StreamRepairJob` at `a1` of `nzb` (`p1 = nzb_ptr`):
-///   if `a2 == 1`, marks `SetLiveAttempted(true)` and returns previous `GetLiveAttempted()`;
-///   if `a2 == 0`, fills `ints[0]=file_id`, `ints[1]=failed_articles`, `ints[2]=par_file`,
-///   `ints[3]=live_attempted`, `ints[4]=hole_count`, `i64s[0]=decoded_file_size`,
-///   `i64s[1]=failed_size`, `i64s[2]=missed_size`, `i64s[3]=steps_hash`,
-///   `strs[0]=filename`, `strs[1]=holes_ptr`
-/// - `op == 10`: read candidate donor `NzbInfo` under `dq` (`p1 = dq_ptr`, `a1 = 0` queue / `1` history, `a2 = idx`) ->
-///   returns `cand_nzb_ptr` (`0` if not NZB), `ints[0]=id`, `ints[1]=dupe_score`, `ints[2]=dupe_mode`,
-///   `i64s[0]=full_content_hash`, `strs[0]=name`, `strs[1]=dupe_key`, `strs[2]=queued_filename`,
-///   `strs[3]=unpack_password`
-/// - `op == 11`: set `PostInfo` progress (`s1 = label`, `a1 = stage_progress`)
-/// - `op == 12`: mark `CompletedFile` on `nzb` (`p1 = nzb_ptr`, `a1 = file_id`, `a2 = 1` repaired / `2` recreated)
-/// - `op == 13`: mutate `StreamRepairJob` at `a1` of `nzb` (`p1 = nzb_ptr`):
-///   `a2 == 0` erases job; `a2 == 1` sets `DecodedFileSize` (if `i64s[0] >= 0`) and `Holes` (`p2`, `ints[0]`)
-/// - `op == 14`: post-process `RepairCompleted` (`p1 = dq_ptr`, `p2 = nzb_ptr`):
-///   `a2 == 0` reads `ints[0]=par_rename_status`, `ints[1]=par_status`, `i64s[0..8]=sizes`;
-///   `a2 == 1` writes counters/flags (`a1 = write_sizes`), `dq->Save()`, `SetWorking(false)`
-/// - `op == 16`: data files (par2 left out) of the target still queued (`p1 = dq_ptr`) ->
-///   `ints[0]` (`-1` when the target is gone), `ints[1]` = the target's id
-/// - `op == 15`: live-mode `RepairCompletedLive` (`p1 = dq_ptr`, `p2 = nzb_ptr`):
-///   `a2 == 0` checks live ownership, credits recovered bytes/holes, fills `ints[0]=job_count`, returns `nzb_ptr`;
-///   `a2 == 1` clears `LiveRepairThread`, clears `PostInfo::Working` if `!UnpackThread`, `dq->Save()`
-pub type NzbgetRsStreamRepairHostFn = unsafe extern "C" fn(
-    ctx: *mut c_void,
-    op: c_int,
-    a1: c_int,
-    a2: c_int,
-    p1: usize,
-    p2: usize,
-    s1: *const c_char,
-    ints: *mut c_int,
-    i64s: *mut i64,
-    strs: *mut *const c_char,
-) -> usize;
 
 #[inline]
 fn map_target_msg_kind(kind: TargetMessageKind) -> c_int {
@@ -109,40 +56,31 @@ fn stream_fetch_worker_count(primary_connections: i32) -> i32 {
     (primary_connections / 4).clamp(4, 16)
 }
 
-unsafe fn with_dq_guard<R, F: FnOnce(usize) -> R>(
-    ctx: *mut c_void,
-    cb: NzbgetRsStreamRepairHostFn,
-    f: F,
-) -> R {
-    struct Slot<F, R> {
-        f: Option<F>,
-        out: Option<R>,
-    }
-    unsafe extern "C" fn tramp<F: FnOnce(usize) -> R, R>(slot_ptr: usize, dq_ptr: usize) {
-        let slot = unsafe { &mut *(slot_ptr as *mut Slot<F, R>) };
-        if let Some(f) = slot.f.take() {
-            slot.out = Some(f(dq_ptr));
-        }
-    }
-    let mut slot = Slot {
-        f: Some(f),
-        out: None,
-    };
-    unsafe {
-        cb(
-            ctx,
-            0,
-            0,
-            0,
-            tramp::<F, R> as *const () as usize,
-            (&mut slot as *mut Slot<F, R>) as usize,
-            ptr::null(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-        );
-    }
-    slot.out.expect("DownloadQueue::Guard callback must run")
+/// The target download as read under the queue lock.
+struct TargetSnap {
+    nzb_ptr: usize,
+    has_par_files: bool,
+    completed_count: usize,
+    job_count: usize,
+    queue_count: usize,
+    history_count: usize,
+    full_hash: i64,
+    name: Vec<u8>,
+    dest_dir: Vec<u8>,
+    dupe_key: Vec<u8>,
+    password: Option<Vec<u8>>,
+}
+
+/// A possible donor download as read under the queue lock.
+struct CandSnap {
+    id: i32,
+    dupe_score: i32,
+    dupe_mode: i32,
+    full_hash: i64,
+    name: Vec<u8>,
+    dupe_key: Vec<u8>,
+    queued_filename: Vec<u8>,
+    password: Vec<u8>,
 }
 
 #[derive(Clone, Debug)]
@@ -414,127 +352,193 @@ impl NzbgetRsStreamRepairCtrl {
         self.fetcher.stop();
     }
 
-    #[inline]
-    unsafe fn host_is_stopped(&self, ctx: *mut c_void, cb: NzbgetRsStreamRepairHostFn) -> bool {
-        unsafe {
-            cb(
-                ctx,
-                1,
-                0,
-                0,
-                0,
-                0,
-                ptr::null(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            ) != 0
-        }
+    fn host_is_stopped(&self, q: JobQueue<'_>) -> bool {
+        q.is_stopped()
     }
 
-    #[inline]
-    unsafe fn interrupted(&self, ctx: *mut c_void, cb: NzbgetRsStreamRepairHostFn) -> bool {
-        unsafe { self.host_is_stopped(ctx, cb) && !self.timed_out.load(Ordering::SeqCst) }
+    fn interrupted(&self, q: JobQueue<'_>) -> bool {
+        self.host_is_stopped(q) && !self.timed_out.load(Ordering::SeqCst)
     }
 
-    unsafe fn set_info_name(&self, ctx: *mut c_void, cb: NzbgetRsStreamRepairHostFn, name: &[u8]) {
-        let name_c = cstr::nul_terminated(name);
-        unsafe {
-            cb(
-                ctx,
-                3,
-                0,
-                0,
-                0,
-                0,
-                name_c.as_ptr() as *const c_char,
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            );
-        }
-    }
-
-    unsafe fn print_message(
-        &self,
-        ctx: *mut c_void,
-        cb: NzbgetRsStreamRepairHostFn,
-        kind: c_int,
-        text: &[u8],
-    ) {
+    /// Adds a message to the job's download: the queued one with this job's id in live
+    /// mode (under the queue lock), else the post job's.
+    fn print_message(&self, q: JobQueue<'_>, kind: c_int, text: &[u8]) {
         if self.live_mode && repeats_recent_dead_volume_line(self.nzb_id, text) {
             return;
         }
-        let text_c = cstr::nul_terminated(text);
-        unsafe {
-            cb(
-                ctx,
-                4,
-                kind,
-                0,
-                0,
-                0,
-                text_c.as_ptr() as *const c_char,
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            );
+        let text = cstr::until_nul(text);
+        let host = q.host;
+        if self.live_mode {
+            host.with_locked_queue(|dq| {
+                let nzb = host.queue_find_by_id(dq, q.nzb_id());
+                if nzb != 0 {
+                    host.nzb_add_message(nzb, kind, text);
+                }
+            });
+        } else if q.post_ptr() != 0 {
+            let nzb = host.post_snap(q.post_ptr()).nzb_ptr;
+            if nzb != 0 {
+                host.nzb_add_message(nzb, kind, text);
+            }
         }
     }
 
-    unsafe fn global_log(
+    /// Writes to the global log (`kind`: 0 info, 1 error, 2 warning, 3 detail, 4 debug).
+    fn global_log(&self, q: JobQueue<'_>, kind: c_int, text: &[u8]) {
+        let kind = match kind {
+            0 => MK_INFO,
+            1 => MK_ERROR,
+            2 => MK_WARNING,
+            3 => MK_DETAIL,
+            4 => MK_DEBUG,
+            _ => return,
+        };
+        q.host.log(kind, cstr::until_nul(text));
+    }
+
+    fn set_post_progress(&self, q: JobQueue<'_>, label: &[u8], stage_progress: i32) {
+        use crate::queuesubsys_host::POST_INT_STAGE_PROGRESS;
+        let post_ptr = q.post_ptr();
+        if post_ptr == 0 {
+            return;
+        }
+        let label = cstr::until_nul(label);
+        q.host.with_locked_queue(|_| {
+            q.host.post_set_progress_label(post_ptr, label);
+            q.host.post_set_int(post_ptr, POST_INT_STAGE_PROGRESS, stage_progress);
+        });
+    }
+
+    /// The target download, read under the queue lock (`dq_ptr`); `None` when it is gone or,
+    /// in live mode, this thread no longer holds it. `set_init_label` sets the post job's
+    /// first progress label.
+    fn inspect_target(
         &self,
-        ctx: *mut c_void,
-        cb: NzbgetRsStreamRepairHostFn,
-        kind: c_int,
-        text: &[u8],
+        q: JobQueue<'_>,
+        dq_ptr: usize,
+        set_init_label: bool,
+    ) -> Option<TargetSnap> {
+        let host = q.host;
+        let nzb = if self.live_mode {
+            let n = host.queue_find_by_id(dq_ptr, q.nzb_id());
+            if n == 0 || host.nzb_snap(n, false).live_repair_thread_ptr != q.thread_ptr() {
+                return None;
+            }
+            n
+        } else {
+            let post_ptr = q.post_ptr();
+            if post_ptr == 0 {
+                return None;
+            }
+            let n = host.post_snap(post_ptr).nzb_ptr;
+            if n == 0 {
+                return None;
+            }
+            if set_init_label {
+                host.post_set_progress_label(post_ptr, b"Repairing files from duplicates");
+            }
+            n
+        };
+        let ns = host.nzb_snap(nzb, false);
+        Some(TargetSnap {
+            nzb_ptr: nzb,
+            has_par_files: ns.par_size > 0,
+            completed_count: host.nzb_completed_files_len(nzb),
+            job_count: host.nzb_stream_repair_jobs_len(nzb),
+            queue_count: host.queue_len(dq_ptr),
+            history_count: host.history_len(dq_ptr),
+            full_hash: i64::from(ns.full_content_hash),
+            name: cstr::until_nul(&ns.name).to_vec(),
+            dest_dir: cstr::until_nul(&ns.dest_dir).to_vec(),
+            dupe_key: cstr::until_nul(&ns.dupe_key).to_vec(),
+            password: host
+                .nzb_get_param(nzb, b"*Unpack:Password")
+                .map(|p| cstr::until_nul(&p).to_vec()),
+        })
+    }
+
+    /// Id, par flag and name of the completed file at `idx` of `nzb`.
+    fn completed_file(q: JobQueue<'_>, nzb: usize, idx: usize) -> (i32, bool, Vec<u8>) {
+        let cf = q.host.nzb_completed_file_at(nzb, idx);
+        (cf.id, cf.par_file, cstr::until_nul(&cf.filename).to_vec())
+    }
+
+    /// The stream-repair job at `idx` of `nzb`.
+    fn repair_job(
+        q: JobQueue<'_>,
+        nzb: usize,
+        idx: usize,
+    ) -> crate::queuesubsys_host::StreamRepairJobDetailSnap {
+        let mut jd = q.host.nzb_stream_repair_job_detail(nzb, idx);
+        jd.filename = cstr::until_nul(&jd.filename).to_vec();
+        jd
+    }
+
+    /// A queued (`from_history` false) or history download at `idx` that may donate, `None`
+    /// when it is no plain download.
+    fn candidate(
+        q: JobQueue<'_>,
+        dq_ptr: usize,
+        from_history: bool,
+        idx: usize,
+    ) -> Option<(usize, CandSnap)> {
+        use crate::queuesubsys_host::{HK_NZB, NK_NZB};
+        let host = q.host;
+        let cand = if from_history {
+            let h = host.history_at(dq_ptr, idx);
+            if h.kind != HK_NZB || h.inner_ptr == 0 {
+                return None;
+            }
+            h.inner_ptr
+        } else {
+            let c = host.queue_at(dq_ptr, idx);
+            if c == 0 || host.nzb_snap(c, false).kind != NK_NZB {
+                return None;
+            }
+            c
+        };
+        let cs = host.nzb_snap(cand, false);
+        Some((
+            cand,
+            CandSnap {
+                id: cs.id,
+                dupe_score: cs.dupe_score,
+                dupe_mode: cs.dupe_mode,
+                full_hash: i64::from(cs.full_content_hash),
+                name: cstr::until_nul(&cs.name).to_vec(),
+                dupe_key: cstr::until_nul(&cs.dupe_key).to_vec(),
+                queued_filename: cstr::until_nul(&cs.queued_filename).to_vec(),
+                password: host
+                    .nzb_get_param(cand, b"*Unpack:Password")
+                    .map_or_else(Vec::new, |p| cstr::until_nul(&p).to_vec()),
+            },
+        ))
+    }
+
+    /// Sets a job's hole list and, when `new_decoded_size >= 0`, its decoded size.
+    fn update_job_holes(
+        q: JobQueue<'_>,
+        nzb: usize,
+        idx: usize,
+        new_decoded_size: i64,
+        holes: &[NzbgetRsByteRange],
     ) {
-        let text_c = cstr::nul_terminated(text);
-        unsafe {
-            cb(
-                ctx,
-                5,
-                kind,
-                0,
-                0,
-                0,
-                text_c.as_ptr() as *const c_char,
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            );
-        }
+        q.host.nzb_stream_repair_update_job_holes(
+            nzb,
+            idx,
+            new_decoded_size,
+            if holes.is_empty() {
+                0
+            } else {
+                holes.as_ptr() as usize
+            },
+            holes.len() as c_int,
+        );
     }
 
-    unsafe fn set_post_progress(
+    fn query_host_options(
         &self,
-        ctx: *mut c_void,
-        cb: NzbgetRsStreamRepairHostFn,
-        label: &[u8],
-        stage_progress: i32,
-    ) {
-        let label_c = cstr::nul_terminated(label);
-        unsafe {
-            cb(
-                ctx,
-                11,
-                stage_progress,
-                0,
-                0,
-                0,
-                label_c.as_ptr() as *const c_char,
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            );
-        }
-    }
-
-    unsafe fn query_host_options(
-        &self,
-        _ctx: *mut c_void,
-        _cb: NzbgetRsStreamRepairHostFn,
-    ) -> HostOptions {
+        ) -> HostOptions {
         let opts = crate::options::active_options();
         let primary_connections = crate::net::active_server_pool().map_or(0, |p| unsafe {
             crate::net::nzbget_rs_serverpool_ctl(Arc::as_ptr(&p), 6, 0, 0, 0, 0) as c_int
@@ -564,10 +568,9 @@ impl NzbgetRsStreamRepairCtrl {
         }
     }
 
-    unsafe fn collect_targets_and_donors(
+    fn collect_targets_and_donors(
         &self,
-        ctx: *mut c_void,
-        cb: NzbgetRsStreamRepairHostFn,
+        q: JobQueue<'_>,
         dq_ptr: usize,
         set_init_label: bool,
         mark_live_attempted: bool,
@@ -579,105 +582,47 @@ impl NzbgetRsStreamRepairCtrl {
         Vec<DonorSource>,
         Vec<Vec<u8>>,
     )> {
-        let mut ints = [0 as c_int; 6];
-        let mut i64s = [0i64; 1];
-        let mut strs = [ptr::null::<c_char>(); 4];
-        let nzb_ptr = unsafe {
-            cb(
-                ctx,
-                7,
-                c_int::from(set_init_label),
-                0,
-                dq_ptr,
-                0,
-                ptr::null(),
-                ints.as_mut_ptr(),
-                i64s.as_mut_ptr(),
-                strs.as_mut_ptr(),
-            )
-        };
-        if nzb_ptr == 0 {
-            return None;
-        }
+        let target = self.inspect_target(q, dq_ptr, set_init_label)?;
+        let nzb_ptr = target.nzb_ptr;
         let own_nzb_ptr = nzb_ptr;
-        counters.has_par_files = ints[1] != 0;
-        let completed_count = ints[2].max(0) as usize;
-        let job_count = ints[3].max(0) as usize;
-        let queue_count = ints[4].max(0) as usize;
-        let history_count = ints[5].max(0) as usize;
-        let own_full_hash = i64s[0];
-        let nzb_name = unsafe { cstr::owned(strs[0]) };
-        let dest_dir = unsafe { cstr::owned(strs[1]) };
-        let own_dupe_key = unsafe { cstr::owned(strs[2]) };
-        if !strs[3].is_null() {
-            counters.target_password = unsafe { cstr::owned(strs[3]) };
+        counters.has_par_files = target.has_par_files;
+        let completed_count = target.completed_count;
+        let job_count = target.job_count;
+        let queue_count = target.queue_count;
+        let history_count = target.history_count;
+        let own_full_hash = target.full_hash;
+        let nzb_name = target.name;
+        let dest_dir = target.dest_dir;
+        let own_dupe_key = target.dupe_key;
+        if let Some(password) = target.password {
+            counters.target_password = password;
         }
 
         let mut completed_files: Vec<(i32, bool, Vec<u8>)> = Vec::with_capacity(completed_count);
         let mut member_names: Vec<Vec<u8>> = Vec::with_capacity(completed_count);
         for idx in 0..completed_count {
-            let mut cf_ints = [0 as c_int; 3];
-            let mut cf_strs = [ptr::null::<c_char>(); 1];
-            unsafe {
-                cb(
-                    ctx,
-                    8,
-                    idx as c_int,
-                    0,
-                    nzb_ptr,
-                    0,
-                    ptr::null(),
-                    cf_ints.as_mut_ptr(),
-                    ptr::null_mut(),
-                    cf_strs.as_mut_ptr(),
-                );
-            }
-            let fname = unsafe { cstr::owned(cf_strs[0]) };
+            let (cf_id, cf_par, fname) = Self::completed_file(q, nzb_ptr, idx);
             member_names.push(fname.clone());
-            completed_files.push((cf_ints[0], cf_ints[1] != 0, fname));
+            completed_files.push((cf_id, cf_par, fname));
         }
 
         let mut job_file_ids: Vec<i32> = Vec::with_capacity(job_count);
         let mut targets: Vec<RepairTarget> = Vec::new();
         for idx in 0..job_count {
-            let mut j_ints = [0 as c_int; 5];
-            let mut j_i64s = [0i64; 4];
-            let mut j_strs = [ptr::null::<c_char>(); 2];
-            unsafe {
-                cb(
-                    ctx,
-                    9,
-                    idx as c_int,
-                    0,
-                    nzb_ptr,
-                    0,
-                    ptr::null(),
-                    j_ints.as_mut_ptr(),
-                    j_i64s.as_mut_ptr(),
-                    j_strs.as_mut_ptr(),
-                );
-            }
-            let file_id = j_ints[0];
+            let jd = Self::repair_job(q, nzb_ptr, idx);
+            let file_id = jd.file_id;
             job_file_ids.push(file_id);
-            let failed_articles = j_ints[1];
-            let mut is_par_file = j_ints[2] != 0;
-            let hole_count = j_ints[4].max(0) as usize;
-            let decoded_file_size = j_i64s[0];
-            let failed_size = j_i64s[1];
-            let missed_size = j_i64s[2];
-            let steps_hash = j_i64s[3] as u64;
-            let mut filename = unsafe { cstr::owned(j_strs[0]) };
+            let failed_articles = jd.failed_articles;
+            let mut is_par_file = jd.par_file;
+            let decoded_file_size = jd.decoded_file_size;
+            let failed_size = jd.failed_size;
+            let missed_size = jd.missed_size;
+            let steps_hash = jd.steps_hash;
+            let mut filename = jd.filename;
             if is_par2_job_or_file(is_par_file, &filename) {
                 continue;
             }
-            let holes: Vec<NzbgetRsByteRange> = if hole_count > 0 && !j_strs[1].is_null() {
-                unsafe {
-                    std::slice::from_raw_parts(j_strs[1] as *const NzbgetRsByteRange, hole_count)
-                        .to_vec()
-                }
-            } else {
-                Vec::new()
-            };
+            let holes = jd.holes;
             for (cf_id, cf_par, cf_name) in &completed_files {
                 if *cf_id == file_id {
                     filename = cf_name.clone();
@@ -717,44 +662,27 @@ impl NzbgetRsStreamRepairCtrl {
             password: Vec<u8>,
         }
         let mut cand_rows: Vec<CandRow> = Vec::new();
-        for (src_kind, count) in [(0 as c_int, queue_count), (1 as c_int, history_count)] {
+        for (from_history, count) in [(false, queue_count), (true, history_count)] {
             for idx in 0..count {
-                let mut c_ints = [0 as c_int; 3];
-                let mut c_i64s = [0i64; 1];
-                let mut c_strs = [ptr::null::<c_char>(); 4];
-                let cand_ptr = unsafe {
-                    cb(
-                        ctx,
-                        10,
-                        src_kind,
-                        idx as c_int,
-                        dq_ptr,
-                        0,
-                        ptr::null(),
-                        c_ints.as_mut_ptr(),
-                        c_i64s.as_mut_ptr(),
-                        c_strs.as_mut_ptr(),
-                    )
+                let Some((cand_ptr, cand)) = Self::candidate(q, dq_ptr, from_history, idx) else {
+                    continue;
                 };
-                if cand_ptr == 0 || (src_kind == 0 && cand_ptr == own_nzb_ptr) {
+                if !from_history && cand_ptr == own_nzb_ptr {
                     continue;
                 }
-                let dupe_mode = c_ints[2];
-                if dupe_mode == DM_FORCE {
+                if cand.dupe_mode == DM_FORCE {
                     continue;
                 }
-                let cand_name = unsafe { cstr::owned(c_strs[0]) };
-                let cand_key = unsafe { cstr::owned(c_strs[1]) };
-                if !same_name_or_key(&cand_name, &cand_key, &nzb_name, &own_dupe_key) {
+                if !same_name_or_key(&cand.name, &cand.dupe_key, &nzb_name, &own_dupe_key) {
                     continue;
                 }
                 cand_rows.push(CandRow {
-                    dupe_score: c_ints[1],
-                    id: c_ints[0],
-                    full_hash: c_i64s[0],
-                    queued_filename: unsafe { cstr::owned(c_strs[2]) },
-                    info_name: cand_name,
-                    password: unsafe { cstr::owned(c_strs[3]) },
+                    dupe_score: cand.dupe_score,
+                    id: cand.id,
+                    full_hash: cand.full_hash,
+                    queued_filename: cand.queued_filename,
+                    info_name: cand.name,
+                    password: cand.password,
                 });
             }
         }
@@ -788,20 +716,8 @@ impl NzbgetRsStreamRepairCtrl {
             for target in &mut targets {
                 for (j_idx, &jf_id) in job_file_ids.iter().enumerate() {
                     if jf_id == target.file_id {
-                        let was_attempted = unsafe {
-                            cb(
-                                ctx,
-                                9,
-                                j_idx as c_int,
-                                1,
-                                nzb_ptr,
-                                0,
-                                ptr::null(),
-                                ptr::null_mut(),
-                                ptr::null_mut(),
-                                ptr::null_mut(),
-                            ) != 0
-                        };
+                        let was_attempted =
+                            q.host.nzb_stream_repair_mark_live_attempted(nzb_ptr, j_idx);
                         target.patch_eligible = !was_attempted;
                         target.tried_before = was_attempted;
                         break;
@@ -813,120 +729,50 @@ impl NzbgetRsStreamRepairCtrl {
         Some((nzb_name, dest_dir, targets, donors, member_names))
     }
 
-    unsafe fn refresh_live_names(
+    fn refresh_live_names(
         &self,
-        ctx: *mut c_void,
-        cb: NzbgetRsStreamRepairHostFn,
+        q: JobQueue<'_>,
         targets: &mut [RepairTarget],
         member_names: &mut Vec<Vec<u8>>,
     ) {
-        unsafe {
-            with_dq_guard(ctx, cb, |dq_ptr| {
-                let mut ints = [0 as c_int; 6];
-                let mut i64s = [0i64; 1];
-                let mut strs = [ptr::null::<c_char>(); 4];
-                let nzb_ptr = cb(
-                    ctx,
-                    7,
-                    0,
-                    0,
-                    dq_ptr,
-                    0,
-                    ptr::null(),
-                    ints.as_mut_ptr(),
-                    i64s.as_mut_ptr(),
-                    strs.as_mut_ptr(),
-                );
-                if nzb_ptr == 0 {
-                    return;
+        q.host.with_locked_queue(|dq_ptr| {
+            let Some(t) = self.inspect_target(q, dq_ptr, false) else {
+                return;
+            };
+            let completed_files: Vec<(i32, bool, Vec<u8>)> = (0..t.completed_count)
+                .map(|idx| Self::completed_file(q, t.nzb_ptr, idx))
+                .collect();
+            for target in targets.iter_mut() {
+                if let Some((_, cf_par, cf_name)) =
+                    completed_files.iter().find(|(id, _, _)| *id == target.file_id)
+                {
+                    target.filename = cf_name.clone();
+                    target.is_par_file = target.is_par_file || *cf_par;
                 }
-                let completed_count = ints[2].max(0) as usize;
-                let mut completed_files: Vec<(i32, bool, Vec<u8>)> =
-                    Vec::with_capacity(completed_count);
-                for idx in 0..completed_count {
-                    let mut cf_ints = [0 as c_int; 3];
-                    let mut cf_strs = [ptr::null::<c_char>(); 1];
-                    cb(
-                        ctx,
-                        8,
-                        idx as c_int,
-                        0,
-                        nzb_ptr,
-                        0,
-                        ptr::null(),
-                        cf_ints.as_mut_ptr(),
-                        ptr::null_mut(),
-                        cf_strs.as_mut_ptr(),
-                    );
-                    completed_files.push((cf_ints[0], cf_ints[1] != 0, cstr::owned(cf_strs[0])));
-                }
-                for target in targets.iter_mut() {
-                    for (cf_id, cf_par, cf_name) in &completed_files {
-                        if *cf_id == target.file_id {
-                            target.filename = cf_name.clone();
-                            target.is_par_file = target.is_par_file || *cf_par;
-                            break;
-                        }
-                    }
-                }
-                member_names.clear();
-                for (_, _, cf_name) in completed_files {
-                    member_names.push(cf_name);
-                }
-            });
-        }
+            }
+            member_names.clear();
+            member_names.extend(completed_files.into_iter().map(|(_, _, name)| name));
+        });
     }
 
-    unsafe fn refresh_live_target_name(
+    fn refresh_live_target_name(
         &self,
-        ctx: *mut c_void,
-        cb: NzbgetRsStreamRepairHostFn,
+        q: JobQueue<'_>,
         file_id: i32,
         cur_filename: &mut Vec<u8>,
     ) {
-        unsafe {
-            with_dq_guard(ctx, cb, |dq_ptr| {
-                let mut ints = [0 as c_int; 6];
-                let mut i64s = [0i64; 1];
-                let mut strs = [ptr::null::<c_char>(); 4];
-                let nzb_ptr = cb(
-                    ctx,
-                    7,
-                    0,
-                    0,
-                    dq_ptr,
-                    0,
-                    ptr::null(),
-                    ints.as_mut_ptr(),
-                    i64s.as_mut_ptr(),
-                    strs.as_mut_ptr(),
-                );
-                if nzb_ptr == 0 {
-                    return;
+        q.host.with_locked_queue(|dq_ptr| {
+            let Some(t) = self.inspect_target(q, dq_ptr, false) else {
+                return;
+            };
+            for idx in 0..t.completed_count {
+                let (id, _, name) = Self::completed_file(q, t.nzb_ptr, idx);
+                if id == file_id {
+                    *cur_filename = name;
+                    break;
                 }
-                let completed_count = ints[2].max(0) as usize;
-                for idx in 0..completed_count {
-                    let mut cf_ints = [0 as c_int; 3];
-                    let mut cf_strs = [ptr::null::<c_char>(); 1];
-                    cb(
-                        ctx,
-                        8,
-                        idx as c_int,
-                        0,
-                        nzb_ptr,
-                        0,
-                        ptr::null(),
-                        cf_ints.as_mut_ptr(),
-                        ptr::null_mut(),
-                        cf_strs.as_mut_ptr(),
-                    );
-                    if cf_ints[0] == file_id {
-                        *cur_filename = cstr::owned(cf_strs[0]);
-                        break;
-                    }
-                }
-            });
-        }
+            }
+        });
     }
 
     fn compute_positional_ranks(
@@ -961,8 +807,7 @@ impl NzbgetRsStreamRepairCtrl {
 
     fn start_watchdog(
         &self,
-        ctx: *mut c_void,
-        cb: NzbgetRsStreamRepairHostFn,
+        q: JobQueue<'_>,
         opts: &HostOptions,
         targets: &[RepairTarget],
     ) -> Option<JoinHandle<()>> {
@@ -997,7 +842,7 @@ impl NzbgetRsStreamRepairCtrl {
         let materializing = Arc::clone(&self.materializing);
         let waiting_for_connection = Arc::clone(&self.waiting_for_connection);
         let slow_reason = Arc::clone(&self.slow_reason);
-        let ctx_addr = ctx as usize;
+        let stop_job = q.stop_handle();
 
         Some(std::thread::spawn(move || {
             let (lock, cvar) = &*pair;
@@ -1068,28 +913,16 @@ impl NzbgetRsStreamRepairCtrl {
             if !*done_guard {
                 timed_out.store(true, Ordering::SeqCst);
                 drop(done_guard);
-                unsafe {
-                    cb(
-                        ctx_addr as *mut c_void,
-                        2,
-                        0,
-                        0,
-                        0,
-                        0,
-                        ptr::null(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                    );
-                }
+                // SAFETY: stop_watchdog joins this thread before the run (and so the
+                // job) can end.
+                unsafe { stop_job.stop() };
             }
         }))
     }
 
-    unsafe fn stop_watchdog(
+    fn stop_watchdog(
         &self,
-        ctx: *mut c_void,
-        cb: NzbgetRsStreamRepairHostFn,
+        q: JobQueue<'_>,
         handle: Option<JoinHandle<()>>,
         nzb_name: &[u8],
         targets: &[RepairTarget],
@@ -1131,7 +964,7 @@ impl NzbgetRsStreamRepairCtrl {
             );
             msg.extend_from_slice(&suffix);
             msg.extend_from_slice(b" still missing");
-            unsafe { self.print_message(ctx, cb, MK_WARNING, &msg) };
+            self.print_message(q, MK_WARNING, &msg);
         }
     }
 
@@ -1182,10 +1015,9 @@ impl NzbgetRsStreamRepairCtrl {
         )
     }
 
-    unsafe fn donor_dead(
+    fn donor_dead(
         &self,
-        ctx: *mut c_void,
-        cb: NzbgetRsStreamRepairHostFn,
+        q: JobQueue<'_>,
         donor: &DonorSource,
         donor_nzb: &DonorParsedNzb,
         counters: &mut RunCounters,
@@ -1231,7 +1063,7 @@ impl NzbgetRsStreamRepairCtrl {
         }
 
         let mut dead = false;
-        if sample_cnt >= MIN_ARTICLES && unsafe { !self.host_is_stopped(ctx, cb) } {
+        if sample_cnt >= MIN_ARTICLES && !self.host_is_stopped(q) {
             self.checking_donor.fetch_add(1, Ordering::SeqCst);
             dead = probe.check(DONOR_CHECK_SEC);
             self.checking_donor.fetch_sub(1, Ordering::SeqCst);
@@ -1244,7 +1076,7 @@ impl NzbgetRsStreamRepairCtrl {
                     )
                     .as_bytes(),
                 );
-                unsafe { self.print_message(ctx, cb, MK_INFO, &msg) };
+                self.print_message(q, MK_INFO, &msg);
             }
         }
 
@@ -1254,22 +1086,20 @@ impl NzbgetRsStreamRepairCtrl {
         dead
     }
 
-    unsafe fn parse_donor(
+    fn parse_donor(
         &self,
-        ctx: *mut c_void,
-        cb: NzbgetRsStreamRepairHostFn,
+        q: JobQueue<'_>,
         queued_filename: &[u8],
         par_ignore_ext: &[u8],
     ) -> Option<DonorParsedNzb> {
-        parse_donor_nzb_file(queued_filename, par_ignore_ext, |msg| unsafe {
-            self.global_log(ctx, cb, 3, msg);
+        parse_donor_nzb_file(queued_filename, par_ignore_ext, |msg| {
+            self.global_log(q, 3, msg);
         })
     }
 
-    unsafe fn exec_repair(
+    fn exec_repair(
         &self,
-        ctx: *mut c_void,
-        cb: NzbgetRsStreamRepairHostFn,
+        q: JobQueue<'_>,
         opts: &HostOptions,
         dest_dir: &[u8],
         targets: &mut [RepairTarget],
@@ -1297,11 +1127,11 @@ impl NzbgetRsStreamRepairCtrl {
             let mut msg = b"Leaving dead volume ".to_vec();
             msg.extend_from_slice(&t.filename);
             msg.extend_from_slice(b" to be borrowed from a duplicate; direct unpack keeps going");
-            unsafe { self.print_message(ctx, cb, MK_INFO, &msg) };
+            self.print_message(q, MK_INFO, &msg);
         }
 
         for donor in donors {
-            if unsafe { self.host_is_stopped(ctx, cb) } {
+            if self.host_is_stopped(q) {
                 break;
             }
             let any_holes = targets
@@ -1312,26 +1142,25 @@ impl NzbgetRsStreamRepairCtrl {
                 break;
             }
 
-            let Some(donor_nzb) = (unsafe {
-                self.parse_donor(ctx, cb, &donor.queued_filename, &opts.par_ignore_ext)
-            }) else {
+            let Some(donor_nzb) = self.parse_donor(q, &donor.queued_filename, &opts.par_ignore_ext)
+            else {
                 continue;
             };
             let donor_key = Self::build_parsed_donor_key(&donor_nzb, &donor.password);
             if !tried_postings.insert(donor_key) {
                 let mut msg = b"Skipping another copy of duplicate posting ".to_vec();
                 msg.extend_from_slice(&donor.info_name);
-                unsafe { self.print_message(ctx, cb, MK_INFO, &msg) };
+                self.print_message(q, MK_INFO, &msg);
                 continue;
             }
-            if unsafe { self.donor_dead(ctx, cb, donor, &donor_nzb, counters) } {
+            if self.donor_dead(q, donor, &donor_nzb, counters) {
                 continue;
             }
 
             if !self.live_mode {
                 let mut label = b"Repairing from duplicate ".to_vec();
                 label.extend_from_slice(&donor.info_name);
-                unsafe { self.set_post_progress(ctx, cb, &label, 0) };
+                self.set_post_progress(q, &label, 0);
             }
 
             let member_name_refs: Vec<&[u8]> = member_names.iter().map(|m| m.as_slice()).collect();
@@ -1377,8 +1206,7 @@ impl NzbgetRsStreamRepairCtrl {
 
             struct NativeM1Env<'a> {
                 ctrl: &'a NzbgetRsStreamRepairCtrl,
-                ctx: *mut c_void,
-                cb: NzbgetRsStreamRepairHostFn,
+                q: JobQueue<'a>,
                 donor_files: &'a [DonorParsedFile],
                 target_file_ids: &'a [i32],
                 live_filenames: &'a mut [Vec<u8>],
@@ -1387,21 +1215,19 @@ impl NzbgetRsStreamRepairCtrl {
 
             impl M1DonorEnv for NativeM1Env<'_> {
                 fn is_stopped(&self) -> bool {
-                    unsafe { self.ctrl.host_is_stopped(self.ctx, self.cb) }
+                    self.ctrl.host_is_stopped(self.q)
                 }
 
                 fn refresh_live_target_name(&mut self, target_index: usize) -> Option<Vec<u8>> {
                     if target_index >= self.target_file_ids.len() {
                         return None;
                     }
-                    unsafe {
-                        self.ctrl.refresh_live_target_name(
-                            self.ctx,
-                            self.cb,
-                            self.target_file_ids[target_index],
-                            &mut self.live_filenames[target_index],
-                        );
-                    }
+                    self.ctrl.refresh_live_target_name(
+                        self.q,
+                        self.target_file_ids[target_index],
+                        &mut self.live_filenames[target_index],
+                    );
+                
                     Some(self.live_filenames[target_index].clone())
                 }
 
@@ -1449,17 +1275,15 @@ impl NzbgetRsStreamRepairCtrl {
                 }
 
                 fn emit_message_bytes(&mut self, kind: TargetMessageKind, text: &[u8]) {
-                    unsafe {
-                        self.ctrl
-                            .print_message(self.ctx, self.cb, map_target_msg_kind(kind), text);
-                    }
+                    self.ctrl
+                        .print_message(self.q, map_target_msg_kind(kind), text);
+                
                 }
             }
 
             let mut env = NativeM1Env {
                 ctrl: self,
-                ctx,
-                cb,
+                q,
                 donor_files: &donor_nzb.files,
                 target_file_ids: &target_file_ids,
                 live_filenames: &mut live_filenames,
@@ -1496,10 +1320,9 @@ impl NzbgetRsStreamRepairCtrl {
     /// Runs the whole-file recreation for the dead volumes left to the borrow that it did not
     /// rebuild, and for nothing else.
     #[allow(clippy::too_many_arguments)]
-    unsafe fn recreate_unborrowed(
+    fn recreate_unborrowed(
         &self,
-        ctx: *mut c_void,
-        cb: NzbgetRsStreamRepairHostFn,
+        q: JobQueue<'_>,
         opts: &HostOptions,
         dest_dir: &[u8],
         targets: &mut [RepairTarget],
@@ -1533,24 +1356,22 @@ impl NzbgetRsStreamRepairCtrl {
                 let mut msg = b"Could not borrow dead volume ".to_vec();
                 msg.extend_from_slice(&t.filename);
                 msg.extend_from_slice(b"; recreating it from a byte-identical duplicate");
-                unsafe { self.print_message(ctx, cb, MK_INFO, &msg) };
+                self.print_message(q, MK_INFO, &msg);
             } else {
                 t.patch_eligible = false;
             }
         }
-        unsafe {
-            self.exec_repair(
-                ctx,
-                cb,
-                opts,
-                dest_dir,
-                targets,
-                donors,
-                member_names,
-                counters,
-                &[],
-            );
-        }
+        self.exec_repair(
+            q,
+            opts,
+            dest_dir,
+            targets,
+            donors,
+            member_names,
+            counters,
+            &[],
+        );
+    
         for ((t, s), r) in targets.iter_mut().zip(saved).zip(&retry) {
             t.patch_eligible = s;
             if *r && t.needs_repair() {
@@ -1559,45 +1380,39 @@ impl NzbgetRsStreamRepairCtrl {
                 msg.extend_from_slice(
                     b" either; a later run may still borrow it, else par2 rebuilds it",
                 );
-                unsafe { self.print_message(ctx, cb, MK_INFO, &msg) };
+                self.print_message(q, MK_INFO, &msg);
             }
         }
     }
 
     /// Data files of the download still queued and the download's id (`op == 16`), each
     /// `None` when the host cannot tell.
-    unsafe fn pending_data_files(
-        &self,
-        ctx: *mut c_void,
-        cb: NzbgetRsStreamRepairHostFn,
-    ) -> (Option<usize>, Option<i32>) {
-        let mut ints = [-1 as c_int; 2];
-        unsafe {
-            with_dq_guard(ctx, cb, |dq_ptr| {
-                cb(
-                    ctx,
-                    16,
-                    0,
-                    0,
-                    dq_ptr,
-                    0,
-                    ptr::null(),
-                    ints.as_mut_ptr(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                );
-            });
-        }
-        (
-            usize::try_from(ints[0]).ok(),
-            (ints[0] >= 0).then_some(ints[1]),
-        )
+    /// The number of data files still queued in the target download, and its id; both
+    /// `None` when the download is gone.
+    fn pending_data_files(&self, q: JobQueue<'_>) -> (Option<usize>, Option<i32>) {
+        let host = q.host;
+        host.with_locked_queue(|dq_ptr| {
+            let nzb = if self.live_mode {
+                host.queue_find_by_id(dq_ptr, q.nzb_id())
+            } else if q.post_ptr() != 0 {
+                host.post_snap(q.post_ptr()).nzb_ptr
+            } else {
+                0
+            };
+            if nzb == 0 {
+                return (None, None);
+            }
+            let pending = (0..host.nzb_file_len(nzb))
+                .map(|i| host.nzb_file_at(nzb, i))
+                .filter(|&f| f != 0 && !host.file_snap(f).par_file)
+                .count();
+            (Some(pending), Some(host.nzb_snap(nzb, false).id))
+        })
     }
 
-    unsafe fn exec_cross_pack_repair(
+    fn exec_cross_pack_repair(
         &self,
-        ctx: *mut c_void,
-        cb: NzbgetRsStreamRepairHostFn,
+        q: JobQueue<'_>,
         opts: &HostOptions,
         dest_dir: &[u8],
         targets: &mut [RepairTarget],
@@ -1623,15 +1438,15 @@ impl NzbgetRsStreamRepairCtrl {
         let pw =
             (!counters.target_password.is_empty()).then_some(counters.target_password.as_slice());
 
-        let aborted = || unsafe { self.host_is_stopped(ctx, cb) };
-        let mut emit_msg = |kind: TargetMessageKind, text: &[u8]| unsafe {
-            self.print_message(ctx, cb, map_target_msg_kind(kind), text);
+        let aborted = || self.host_is_stopped(q);
+        let mut emit_msg = |kind: TargetMessageKind, text: &[u8]| {
+            self.print_message(q, map_target_msg_kind(kind), text);
         };
         let rar_vol_cb = |member_name: &[u8],
                           vol: &crate::rarreader::Volume,
                           files: &[crate::rarreader::RarFile]| {
             for line in format_rar_volume_debug_lines(member_name, vol, files) {
-                unsafe { self.global_log(ctx, cb, 4, &line) };
+                self.global_log(q, 4, &line);
             }
         };
         let rar_vol_ref: Option<
@@ -1640,7 +1455,7 @@ impl NzbgetRsStreamRepairCtrl {
             &rar_vol_cb as &dyn Fn(&[u8], &crate::rarreader::Volume, &[crate::rarreader::RarFile]),
         );
 
-        let (pending_data_files, nzb_id) = unsafe { self.pending_data_files(ctx, cb) };
+        let (pending_data_files, nzb_id) = self.pending_data_files(q);
         // Only direct unpack reads a rebuilt dead volume: without it nothing is borrowed.
         let nzb_id = nzb_id.filter(|_| direct_unpack_on());
         let dead_nzb_id = nzb_id;
@@ -1666,23 +1481,22 @@ impl NzbgetRsStreamRepairCtrl {
         let allow_decompress = !self.live_mode && opts.allow_decompress_opt;
 
         for donor in donors {
-            if unsafe { self.host_is_stopped(ctx, cb) } || !session.has_inner_holes() {
+            if self.host_is_stopped(q) || !session.has_inner_holes() {
                 break;
             }
 
-            let Some(donor_nzb) = (unsafe {
-                self.parse_donor(ctx, cb, &donor.queued_filename, &opts.par_ignore_ext)
-            }) else {
+            let Some(donor_nzb) = self.parse_donor(q, &donor.queued_filename, &opts.par_ignore_ext)
+            else {
                 continue;
             };
             let donor_key = Self::build_parsed_donor_key(&donor_nzb, &donor.password);
             if !tried_postings.insert(donor_key) {
                 let mut msg = b"Skipping another copy of duplicate posting ".to_vec();
                 msg.extend_from_slice(&donor.info_name);
-                unsafe { self.print_message(ctx, cb, MK_INFO, &msg) };
+                self.print_message(q, MK_INFO, &msg);
                 continue;
             }
-            if unsafe { self.donor_dead(ctx, cb, donor, &donor_nzb, counters) } {
+            if self.donor_dead(q, donor, &donor_nzb, counters) {
                 continue;
             }
 
@@ -1700,8 +1514,7 @@ impl NzbgetRsStreamRepairCtrl {
 
             struct NativeCrossPackEnv<'a> {
                 ctrl: &'a NzbgetRsStreamRepairCtrl,
-                ctx: *mut c_void,
-                cb: NzbgetRsStreamRepairHostFn,
+                q: JobQueue<'a>,
                 donor_files: &'a [DonorParsedFile],
                 targets: &'a mut [RepairTarget],
                 recovered_bytes: &'a mut i64,
@@ -1710,7 +1523,7 @@ impl NzbgetRsStreamRepairCtrl {
 
             impl CrossPackDonorEnv for NativeCrossPackEnv<'_> {
                 fn is_stopped(&mut self) -> bool {
-                    unsafe { self.ctrl.host_is_stopped(self.ctx, self.cb) }
+                    self.ctrl.host_is_stopped(self.q)
                 }
 
                 fn fetch_donor_part(
@@ -1795,10 +1608,9 @@ impl NzbgetRsStreamRepairCtrl {
 
                 fn set_progress(&mut self, label: &[u8], stage_progress: i32) {
                     if !self.ctrl.live_mode {
-                        unsafe {
-                            self.ctrl
-                                .set_post_progress(self.ctx, self.cb, label, stage_progress);
-                        }
+                        self.ctrl
+                            .set_post_progress(self.q, label, stage_progress);
+                    
                     }
                 }
 
@@ -1819,10 +1631,9 @@ impl NzbgetRsStreamRepairCtrl {
                 }
 
                 fn emit_message_bytes(&mut self, kind: TargetMessageKind, text: &[u8]) {
-                    unsafe {
-                        self.ctrl
-                            .print_message(self.ctx, self.cb, map_target_msg_kind(kind), text);
-                    }
+                    self.ctrl
+                        .print_message(self.q, map_target_msg_kind(kind), text);
+                
                 }
 
                 fn emit_extractor_log(&mut self, kind: i32, msg: &str) {
@@ -1832,10 +1643,9 @@ impl NzbgetRsStreamRepairCtrl {
                         2 => 2,
                         _ => 3,
                     };
-                    unsafe {
-                        self.ctrl
-                            .global_log(self.ctx, self.cb, log_kind, msg.as_bytes());
-                    }
+                    self.ctrl
+                        .global_log(self.q, log_kind, msg.as_bytes());
+                
                 }
 
                 fn on_rar_volume_parsed(
@@ -1846,7 +1656,7 @@ impl NzbgetRsStreamRepairCtrl {
                 ) {
                     if self.ctrl.debug_enabled {
                         for line in format_rar_volume_debug_lines(member_name, vol, files) {
-                            unsafe { self.ctrl.global_log(self.ctx, self.cb, 4, &line) };
+                            self.ctrl.global_log(self.q, 4, &line);
                         }
                     }
                 }
@@ -1854,8 +1664,7 @@ impl NzbgetRsStreamRepairCtrl {
 
             let mut env = NativeCrossPackEnv {
                 ctrl: self,
-                ctx,
-                cb,
+                q,
                 donor_files: &donor_nzb.files,
                 targets,
                 recovered_bytes: &mut counters.recovered_bytes,
@@ -1891,14 +1700,13 @@ impl NzbgetRsStreamRepairCtrl {
         }
     }
 
-    unsafe fn report_remaining_holes(
+    fn report_remaining_holes(
         &self,
-        ctx: *mut c_void,
-        cb: NzbgetRsStreamRepairHostFn,
+        q: JobQueue<'_>,
         targets: &[RepairTarget],
         counters: &mut RunCounters,
     ) {
-        let interrupted = unsafe { self.interrupted(ctx, cb) };
+        let interrupted = self.interrupted(q);
         if interrupted {
             let unfinished = targets
                 .iter()
@@ -1907,7 +1715,7 @@ impl NzbgetRsStreamRepairCtrl {
             counters.holes_remain |= unfinished > 0;
             let msg =
                 format!("Stream repair interrupted with {unfinished} file(s) still incomplete");
-            unsafe { self.print_message(ctx, cb, MK_INFO, msg.as_bytes()) };
+            self.print_message(q, MK_INFO, msg.as_bytes());
         }
 
         let par_disposition: &[u8] = if counters.has_par_files {
@@ -1943,7 +1751,7 @@ impl NzbgetRsStreamRepairCtrl {
                 msg.extend_from_slice(b": no duplicate could supply the file (");
                 msg.extend_from_slice(par_disposition);
                 msg.push(b')');
-                unsafe { self.print_message(ctx, cb, MK_INFO, &msg) };
+                self.print_message(q, MK_INFO, &msg);
             } else {
                 let missing = total_size(&target.holes);
                 let miss_mb = stream_repair_bytes_to_mb(missing);
@@ -1954,7 +1762,7 @@ impl NzbgetRsStreamRepairCtrl {
                 );
                 msg.extend_from_slice(par_disposition);
                 msg.push(b')');
-                unsafe { self.print_message(ctx, cb, MK_INFO, &msg) };
+                self.print_message(q, MK_INFO, &msg);
 
                 if is_incomplete_nzb_hole(missing, target.encoded_size) {
                     let dec_mb = stream_repair_bytes_to_mb(target.decoded_file_size);
@@ -1967,488 +1775,343 @@ impl NzbgetRsStreamRepairCtrl {
                         )
                         .as_bytes(),
                     );
-                    unsafe { self.print_message(ctx, cb, MK_WARNING, &warn_msg) };
+                    self.print_message(q, MK_WARNING, &warn_msg);
                 }
             }
         }
     }
 
-    unsafe fn repair_completed_post(
+    fn repair_completed_post(
         &self,
-        ctx: *mut c_void,
-        cb: NzbgetRsStreamRepairHostFn,
+        q: JobQueue<'_>,
         opts: &HostOptions,
         dest_dir: &[u8],
         targets: &[RepairTarget],
         counters: &RunCounters,
     ) {
-        let interrupted = unsafe { self.interrupted(ctx, cb) };
-        unsafe {
-            with_dq_guard(ctx, cb, |dq_ptr| {
-                let mut ints = [0 as c_int; 6];
-                let mut i64s = [0i64; 1];
-                let mut strs = [ptr::null::<c_char>(); 4];
-                let nzb_ptr = cb(
-                    ctx,
-                    7,
-                    0,
-                    0,
-                    dq_ptr,
-                    0,
-                    ptr::null(),
-                    ints.as_mut_ptr(),
-                    i64s.as_mut_ptr(),
-                    strs.as_mut_ptr(),
-                );
-                if nzb_ptr == 0 {
-                    return;
-                }
-                let mut job_count = ints[3].max(0) as usize;
+        use crate::queuesubsys_host::{
+            NZB_I64_CUR_FAILED_SIZE, NZB_I64_CUR_SUCCESS_SIZE, NZB_I64_DUPE_RECOVERED_BYTES,
+            NZB_I64_FAILED_SIZE, NZB_I64_PAR_CUR_FAILED_SIZE, NZB_I64_PAR_CUR_SUCCESS_SIZE,
+            NZB_I64_PAR_FAILED_SIZE, NZB_I64_PAR_SUCCESS_SIZE, NZB_I64_SUCCESS_SIZE,
+            NZB_INT_DUPE_RECOVERED_ARTICLES, NZB_INT_DUPE_RECOVERED_HOLES,
+            NZB_INT_PAR_RENAME_STATUS, NZB_INT_PAR_STATUS, POST_INT_FORCE_PAR_FULL,
+            POST_INT_REQUEST_PAR_CHECK, POST_INT_STREAM_REPAIR_DONE,
+            POST_INT_STREAM_REPAIR_RECOVERED, POST_INT_WORKING,
+        };
+        let interrupted = self.interrupted(q);
+        let host = q.host;
+        host.with_locked_queue(|dq_ptr| {
+            let Some(snap) = self.inspect_target(q, dq_ptr, false) else {
+                return;
+            };
+            let nzb_ptr = snap.nzb_ptr;
+            let mut job_count = snap.job_count;
 
-                for target in targets {
-                    if target.decoded_file_size > 0 && target.holes.is_empty() {
-                        cb(
-                            ctx,
-                            12,
-                            target.file_id,
-                            1,
-                            nzb_ptr,
-                            0,
-                            ptr::null(),
-                            ptr::null_mut(),
-                            ptr::null_mut(),
-                            ptr::null_mut(),
-                        );
-                    } else if target.recreated {
-                        cb(
-                            ctx,
-                            12,
-                            target.file_id,
-                            2,
-                            nzb_ptr,
-                            0,
-                            ptr::null(),
-                            ptr::null_mut(),
-                            ptr::null_mut(),
-                            ptr::null_mut(),
-                        );
-                    }
+            for target in targets {
+                if target.decoded_file_size > 0 && target.holes.is_empty() {
+                    host.nzb_stream_repair_update_completed_file(nzb_ptr, target.file_id, 1);
+                } else if target.recreated {
+                    host.nzb_stream_repair_update_completed_file(nzb_ptr, target.file_id, 2);
+                }
+            }
+
+            let mut job_idx = 0usize;
+            while job_idx < job_count {
+                if !interrupted {
+                    host.nzb_stream_repair_erase_job(nzb_ptr, job_idx, false);
+                    job_count -= 1;
+                    continue;
                 }
 
-                let mut job_idx = 0usize;
-                while job_idx < job_count {
-                    if !interrupted {
-                        cb(
-                            ctx,
-                            13,
-                            job_idx as c_int,
-                            0,
-                            nzb_ptr,
-                            0,
-                            ptr::null(),
-                            ptr::null_mut(),
-                            ptr::null_mut(),
-                            ptr::null_mut(),
-                        );
+                let jd = Self::repair_job(q, nzb_ptr, job_idx);
+                let mut erased = false;
+                if let Some(target) = targets.iter().find(|t| t.file_id == jd.file_id) {
+                    if target.holes.is_empty() && target.decoded_file_size > 0 {
+                        host.nzb_stream_repair_erase_job(nzb_ptr, job_idx, false);
                         job_count -= 1;
-                        continue;
-                    }
-
-                    let mut j_ints = [0 as c_int; 5];
-                    let mut j_i64s = [0i64; 4];
-                    let mut j_strs = [ptr::null::<c_char>(); 2];
-                    cb(
-                        ctx,
-                        9,
-                        job_idx as c_int,
-                        0,
-                        nzb_ptr,
-                        0,
-                        ptr::null(),
-                        j_ints.as_mut_ptr(),
-                        j_i64s.as_mut_ptr(),
-                        j_strs.as_mut_ptr(),
-                    );
-                    let jf_id = j_ints[0];
-                    let j_dec_size = j_i64s[0];
-
-                    let mut erased = false;
-                    for target in targets {
-                        if target.file_id == jf_id {
-                            if target.holes.is_empty() && target.decoded_file_size > 0 {
-                                cb(
-                                    ctx,
-                                    13,
-                                    job_idx as c_int,
-                                    0,
-                                    nzb_ptr,
-                                    0,
-                                    ptr::null(),
-                                    ptr::null_mut(),
-                                    ptr::null_mut(),
-                                    ptr::null_mut(),
-                                );
-                                job_count -= 1;
-                                erased = true;
-                            } else {
-                                let new_dec = if j_dec_size <= 0 && target.decoded_file_size > 0 {
-                                    target.decoded_file_size
-                                } else {
-                                    -1
-                                };
-                                let mut upd_ints = [target.holes.len() as c_int];
-                                let mut upd_i64s = [new_dec];
-                                cb(
-                                    ctx,
-                                    13,
-                                    job_idx as c_int,
-                                    1,
-                                    nzb_ptr,
-                                    if target.holes.is_empty() {
-                                        0
-                                    } else {
-                                        target.holes.as_ptr() as usize
-                                    },
-                                    ptr::null(),
-                                    upd_ints.as_mut_ptr(),
-                                    upd_i64s.as_mut_ptr(),
-                                    ptr::null_mut(),
-                                );
-                            }
-                            break;
-                        }
-                    }
-                    if !erased {
-                        job_idx += 1;
+                        erased = true;
+                    } else {
+                        let new_dec = if jd.decoded_file_size <= 0 && target.decoded_file_size > 0 {
+                            target.decoded_file_size
+                        } else {
+                            -1
+                        };
+                        Self::update_job_holes(q, nzb_ptr, job_idx, new_dec, &target.holes);
                     }
                 }
+                if !erased {
+                    job_idx += 1;
+                }
+            }
 
-                let mut st_ints = [0 as c_int; 2];
-                let mut sz_i64s = [0i64; 8];
-                cb(
-                    ctx,
-                    14,
-                    0,
-                    0,
-                    dq_ptr,
+            let ns = host.nzb_snap(nzb_ptr, false);
+            let (
+                reset_par_rename,
+                set_par_status,
+                new_par_status,
+                set_force_par_full,
+                clear_req_par_check,
+                check_main_pars,
+            ) = resolve_completion_par_action(
+                counters.recovered_bytes,
+                counters.holes_remain,
+                ns.par_rename_status,
+                RS_NONE,
+                ns.par_status,
+                PS_SKIPPED,
+                opts.par_check,
+                opts.pc_manual,
+                PS_MANUAL,
+                PS_NONE,
+            );
+            let request_par_check = check_main_pars
+                && crate::parparser::find_main_pars(crate::fsops::path(dest_dir), false, |_| {});
+
+            if counters.recovered_articles > 0
+                || counters.recovered_bytes > 0
+                || counters.recovered_holes > 0
+            {
+                host.nzb_set_int(
                     nzb_ptr,
-                    ptr::null(),
-                    st_ints.as_mut_ptr(),
-                    sz_i64s.as_mut_ptr(),
-                    ptr::null_mut(),
+                    NZB_INT_DUPE_RECOVERED_ARTICLES,
+                    ns.dupe_recovered_articles + counters.recovered_articles,
                 );
-
-                let write_sizes = counters.recovered_failed_size > 0;
-                let mut out_i64s = [0i64; 9];
-                if write_sizes {
-                    let (f, s, cf, cs, pf, ps, pcf, pcs) = credit_repaired_sizes(
-                        counters.recovered_failed_size,
-                        counters.recovered_failed_par_size,
-                        sz_i64s[0],
-                        sz_i64s[1],
-                        sz_i64s[2],
-                        sz_i64s[3],
-                        sz_i64s[4],
-                        sz_i64s[5],
-                        sz_i64s[6],
-                        sz_i64s[7],
-                    );
-                    out_i64s[0] = f;
-                    out_i64s[1] = s;
-                    out_i64s[2] = cf;
-                    out_i64s[3] = cs;
-                    out_i64s[4] = pf;
-                    out_i64s[5] = ps;
-                    out_i64s[6] = pcf;
-                    out_i64s[7] = pcs;
-                }
-                out_i64s[8] = counters.recovered_bytes;
-
-                let (
-                    reset_par_rename,
-                    set_par_status,
-                    new_par_status,
-                    set_force_par_full,
-                    clear_req_par_check,
-                    check_main_pars,
-                ) = resolve_completion_par_action(
-                    counters.recovered_bytes,
-                    counters.holes_remain,
-                    st_ints[0],
-                    RS_NONE,
-                    st_ints[1],
-                    PS_SKIPPED,
-                    opts.par_check,
-                    opts.pc_manual,
-                    PS_MANUAL,
-                    PS_NONE,
-                );
-                let mut par_flags: c_int = 0;
-                if reset_par_rename {
-                    par_flags |= 1;
-                }
-                if set_par_status {
-                    par_flags |= 2;
-                }
-                if set_force_par_full {
-                    par_flags |= 4;
-                }
-                if clear_req_par_check {
-                    par_flags |= 8;
-                }
-                if check_main_pars
-                    && crate::parparser::find_main_pars(crate::fsops::path(dest_dir), false, |_| {})
-                {
-                    par_flags |= 16;
-                }
-
-                let mut fin_ints = [
-                    counters.recovered_articles,
-                    counters.recovered_holes,
-                    par_flags,
-                    new_par_status,
-                ];
-                cb(
-                    ctx,
-                    14,
-                    c_int::from(write_sizes),
-                    1,
-                    dq_ptr,
+                host.nzb_set_i64(
                     nzb_ptr,
-                    ptr::null(),
-                    fin_ints.as_mut_ptr(),
-                    out_i64s.as_mut_ptr(),
-                    ptr::null_mut(),
+                    NZB_I64_DUPE_RECOVERED_BYTES,
+                    ns.dupe_recovered_bytes + counters.recovered_bytes,
                 );
-            });
-        }
+                host.nzb_set_int(
+                    nzb_ptr,
+                    NZB_INT_DUPE_RECOVERED_HOLES,
+                    ns.dupe_recovered_holes + counters.recovered_holes,
+                );
+            }
+            if counters.recovered_failed_size > 0 {
+                let (f, s, cf, cs, pf, ps, pcf, pcs) = credit_repaired_sizes(
+                    counters.recovered_failed_size,
+                    counters.recovered_failed_par_size,
+                    ns.failed_size,
+                    ns.success_size,
+                    ns.current_failed_size,
+                    ns.current_success_size,
+                    ns.par_failed_size,
+                    ns.par_success_size,
+                    ns.par_current_failed_size,
+                    ns.par_current_success_size,
+                );
+                host.nzb_set_i64(nzb_ptr, NZB_I64_FAILED_SIZE, f);
+                host.nzb_set_i64(nzb_ptr, NZB_I64_SUCCESS_SIZE, s);
+                host.nzb_set_i64(nzb_ptr, NZB_I64_CUR_FAILED_SIZE, cf);
+                host.nzb_set_i64(nzb_ptr, NZB_I64_CUR_SUCCESS_SIZE, cs);
+                host.nzb_set_i64(nzb_ptr, NZB_I64_PAR_FAILED_SIZE, pf);
+                host.nzb_set_i64(nzb_ptr, NZB_I64_PAR_SUCCESS_SIZE, ps);
+                host.nzb_set_i64(nzb_ptr, NZB_I64_PAR_CUR_FAILED_SIZE, pcf);
+                host.nzb_set_i64(nzb_ptr, NZB_I64_PAR_CUR_SUCCESS_SIZE, pcs);
+            }
+            let post_ptr = q.post_ptr();
+            host.post_set_int(post_ptr, POST_INT_STREAM_REPAIR_DONE, 1);
+            host.post_set_int(
+                post_ptr,
+                POST_INT_STREAM_REPAIR_RECOVERED,
+                i32::from(counters.recovered_bytes > 0),
+            );
+            if reset_par_rename {
+                host.nzb_set_int(nzb_ptr, NZB_INT_PAR_RENAME_STATUS, RS_NONE);
+            }
+            if set_par_status {
+                host.nzb_set_int(nzb_ptr, NZB_INT_PAR_STATUS, new_par_status);
+            }
+            if set_force_par_full {
+                host.post_set_int(post_ptr, POST_INT_FORCE_PAR_FULL, 1);
+            }
+            if clear_req_par_check {
+                host.post_set_int(post_ptr, POST_INT_REQUEST_PAR_CHECK, 0);
+            }
+            if request_par_check {
+                host.post_set_int(post_ptr, POST_INT_REQUEST_PAR_CHECK, 1);
+            }
+            host.dq_save(dq_ptr);
+            host.post_set_int(post_ptr, POST_INT_WORKING, 0);
+        });
     }
 
-    unsafe fn repair_completed_live(
+    fn repair_completed_live(
         &self,
-        ctx: *mut c_void,
-        cb: NzbgetRsStreamRepairHostFn,
+        q: JobQueue<'_>,
         targets: &[RepairTarget],
         counters: &RunCounters,
     ) {
-        unsafe {
-            with_dq_guard(ctx, cb, |dq_ptr| {
-                self.record_live_pass(ctx, cb, dq_ptr, targets, counters);
-            });
-        }
+        q.host.with_locked_queue(|dq_ptr| {
+            self.record_live_pass(q, dq_ptr, targets, counters);
+        });
     }
 
     /// Writes one live pass's results to the job; returns the job, 0 when this thread no
     /// longer holds it.
-    unsafe fn record_live_pass(
+    fn record_live_pass(
         &self,
-        ctx: *mut c_void,
-        cb: NzbgetRsStreamRepairHostFn,
+        q: JobQueue<'_>,
         dq_ptr: usize,
         targets: &[RepairTarget],
         counters: &RunCounters,
     ) -> usize {
-        unsafe {
-            {
-                let mut ints = [0, counters.recovered_holes];
-                let mut i64s = [counters.recovered_bytes];
-                let nzb_ptr = cb(
-                    ctx,
-                    15,
-                    0,
-                    0,
-                    dq_ptr,
-                    0,
-                    ptr::null(),
-                    ints.as_mut_ptr(),
-                    i64s.as_mut_ptr(),
-                    ptr::null_mut(),
-                );
-                if nzb_ptr == 0 {
-                    return 0;
-                }
-                let job_count = ints[0].max(0) as usize;
-                let mut job_ids = Vec::with_capacity(job_count);
-                for j_idx in 0..job_count {
-                    let mut j_ints = [0 as c_int; 5];
-                    let mut j_i64s = [0i64; 4];
-                    let mut j_strs = [ptr::null::<c_char>(); 2];
-                    cb(
-                        ctx,
-                        9,
-                        j_idx as c_int,
-                        0,
-                        nzb_ptr,
-                        0,
-                        ptr::null(),
-                        j_ints.as_mut_ptr(),
-                        j_i64s.as_mut_ptr(),
-                        j_strs.as_mut_ptr(),
-                    );
-                    job_ids.push(j_ints[0]);
-                }
+        use crate::queuesubsys_host::{NZB_I64_DUPE_RECOVERED_BYTES, NZB_INT_DUPE_RECOVERED_HOLES};
+        let host = q.host;
+        let nzb_ptr = host.queue_find_by_id(dq_ptr, q.nzb_id());
+        if nzb_ptr == 0 {
+            return 0;
+        }
+        let ns = host.nzb_snap(nzb_ptr, false);
+        let rec_bytes = counters.recovered_bytes;
+        if ns.live_repair_thread_ptr != q.thread_ptr() {
+            // Another live repair took the job over: keep only the byte count.
+            host.nzb_set_i64(
+                nzb_ptr,
+                NZB_I64_DUPE_RECOVERED_BYTES,
+                ns.dupe_recovered_bytes + rec_bytes,
+            );
+            return 0;
+        }
+        let rec_holes = counters.recovered_holes;
+        if rec_bytes > 0 || rec_holes > 0 {
+            host.nzb_set_i64(
+                nzb_ptr,
+                NZB_I64_DUPE_RECOVERED_BYTES,
+                ns.dupe_recovered_bytes + rec_bytes,
+            );
+            host.nzb_set_int(
+                nzb_ptr,
+                NZB_INT_DUPE_RECOVERED_HOLES,
+                ns.dupe_recovered_holes + rec_holes,
+            );
+        }
+        let job_ids: Vec<i32> = (0..host.nzb_stream_repair_jobs_len(nzb_ptr))
+            .map(|j_idx| Self::repair_job(q, nzb_ptr, j_idx).file_id)
+            .collect();
 
-                for target in targets {
-                    if !target.patch_eligible {
-                        continue;
-                    }
-                    for (j_idx, &jf_id) in job_ids.iter().enumerate() {
-                        if jf_id == target.file_id {
-                            let new_dec = if target.recreated {
-                                cb(
-                                    ctx,
-                                    12,
-                                    target.file_id,
-                                    2,
-                                    nzb_ptr,
-                                    0,
-                                    ptr::null(),
-                                    ptr::null_mut(),
-                                    ptr::null_mut(),
-                                    ptr::null_mut(),
-                                );
-                                target.decoded_file_size
-                            } else {
-                                -1
-                            };
-                            let mut upd_ints = [target.holes.len() as c_int];
-                            let mut upd_i64s = [new_dec];
-                            cb(
-                                ctx,
-                                13,
-                                j_idx as c_int,
-                                1,
-                                nzb_ptr,
-                                if target.holes.is_empty() {
-                                    0
-                                } else {
-                                    target.holes.as_ptr() as usize
-                                },
-                                ptr::null(),
-                                upd_ints.as_mut_ptr(),
-                                upd_i64s.as_mut_ptr(),
-                                ptr::null_mut(),
-                            );
-                            break;
-                        }
-                    }
-                }
-                nzb_ptr
+        for target in targets.iter().filter(|t| t.patch_eligible) {
+            if let Some(j_idx) = job_ids.iter().position(|&id| id == target.file_id) {
+                let new_dec = if target.recreated {
+                    host.nzb_stream_repair_update_completed_file(nzb_ptr, target.file_id, 2);
+                    target.decoded_file_size
+                } else {
+                    -1
+                };
+                Self::update_job_holes(q, nzb_ptr, j_idx, new_dec, &target.holes);
             }
         }
+        nzb_ptr
     }
 
     /// Ends the live repair: gives the job back (clears the live-repair thread, lets a waiting
     /// post-processing go on). Called once, after the last pass.
-    unsafe fn release_live_job(&self, ctx: *mut c_void, cb: NzbgetRsStreamRepairHostFn) {
-        unsafe {
-            with_dq_guard(ctx, cb, |dq_ptr| {
-                let nzb_ptr = self.record_live_pass(ctx, cb, dq_ptr, &[], &RunCounters::default());
-                if nzb_ptr == 0 {
-                    return;
-                }
-                cb(
-                    ctx,
-                    15,
-                    0,
-                    1,
-                    dq_ptr,
-                    nzb_ptr,
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                );
-            });
-        }
+    fn release_live_job(&self, q: JobQueue<'_>) {
+        use crate::postproc::{
+            direct_unpack_awaiting_repair, direct_unpack_waits_on_dead_volume,
+            take_dead_volume_rerun,
+        };
+        use crate::queuesubsys_host::{NZB_ACT_CLEAR_LIVE_REPAIR_THREAD, POST_INT_WORKING};
+        let host = q.host;
+        host.with_locked_queue(|dq_ptr| {
+            let nzb_ptr = self.record_live_pass(q, dq_ptr, &[], &RunCounters::default());
+            if nzb_ptr == 0 {
+                return;
+            }
+            host.nzb_action(nzb_ptr, NZB_ACT_CLEAR_LIVE_REPAIR_THREAD, 0);
+            let ns = host.nzb_snap(nzb_ptr, false);
+            // A volume arrived while this pass ran and direct unpack still waits on a dead
+            // volume: one more pass may now place it for the borrow.
+            if ns.post_info_ptr == 0
+                && take_dead_volume_rerun(ns.id)
+                && direct_unpack_waits_on_dead_volume(ns.id)
+            {
+                host.stream_repair_start_live(nzb_ptr);
+            }
+            // A direct unpack parked on damaged volumes waits for post-processing itself, so
+            // it will not release the job: the ending live repair has to.
+            if ns.post_info_ptr != 0
+                && (!ns.has_unpack_thread || direct_unpack_awaiting_repair(ns.id))
+            {
+                host.post_set_int(ns.post_info_ptr, POST_INT_WORKING, 0);
+            }
+            host.dq_save(dq_ptr);
+        });
     }
 
-    pub unsafe fn run(&self, ctx: *mut c_void, cb: NzbgetRsStreamRepairHostFn) {
+    pub(crate) fn run(&self, q: JobQueue<'_>) {
         if self.live_mode {
-            unsafe { self.run_live(ctx, cb) };
+            self.run_live(q);
         } else {
-            unsafe { self.run_post(ctx, cb) };
+            self.run_post(q);
         }
     }
 
-    unsafe fn run_post(&self, ctx: *mut c_void, cb: NzbgetRsStreamRepairHostFn) {
+    fn run_post(&self, q: JobQueue<'_>) {
         // (self.nzb_id is set for a live repair only)
-        let _running = unsafe { self.pending_data_files(ctx, cb) }
-            .1
-            .map(RunningRepair::mark);
+        let _running = self.pending_data_files(q).1.map(RunningRepair::mark);
         let mut counters = RunCounters::default();
-        let Some((nzb_name, dest_dir, mut targets, donors, member_names)) = (unsafe {
-            with_dq_guard(ctx, cb, |dq_ptr| {
-                self.collect_targets_and_donors(ctx, cb, dq_ptr, true, false, &mut counters)
+        let Some((nzb_name, dest_dir, mut targets, donors, member_names)) =
+            q.host.with_locked_queue(|dq_ptr| {
+                self.collect_targets_and_donors(q, dq_ptr, true, false, &mut counters)
             })
-        }) else {
+        else {
             return;
         };
 
-        let mut info_name = b"stream repair for ".to_vec();
-        info_name.extend_from_slice(&nzb_name);
-        unsafe { self.set_info_name(ctx, cb, &info_name) };
-
-        let opts = unsafe { self.query_host_options(ctx, cb) };
+        let opts = self.query_host_options();
 
         if targets.is_empty() {
             let mut msg = b"Nothing to stream-repair for ".to_vec();
             msg.extend_from_slice(&nzb_name);
-            unsafe { self.print_message(ctx, cb, MK_INFO, &msg) };
+            self.print_message(q, MK_INFO, &msg);
         } else if donors.is_empty() {
             let mut msg = b"No duplicate collections found for stream repair of ".to_vec();
             msg.extend_from_slice(&nzb_name);
-            unsafe { self.print_message(ctx, cb, MK_INFO, &msg) };
+            self.print_message(q, MK_INFO, &msg);
         } else {
-            let wd_handle = self.start_watchdog(ctx, cb, &opts, &targets);
+            let wd_handle = self.start_watchdog(q, &opts, &targets);
             self.compute_positional_ranks(&dest_dir, &mut targets, &member_names);
-            unsafe {
-                self.exec_repair(
-                    ctx,
-                    cb,
+            self.exec_repair(
+                q,
+                &opts,
+                &dest_dir,
+                &mut targets,
+                &donors,
+                &member_names,
+                &mut counters,
+                &[],
+            );
+        
+            let any_holes = targets.iter().any(|t| t.needs_repair());
+            if any_holes && !self.host_is_stopped(q) {
+                self.exec_cross_pack_repair(
+                    q,
                     &opts,
                     &dest_dir,
                     &mut targets,
                     &donors,
                     &member_names,
                     &mut counters,
-                    &[],
                 );
+            
             }
-            let any_holes = targets.iter().any(|t| t.needs_repair());
-            if any_holes && unsafe { !self.host_is_stopped(ctx, cb) } {
-                unsafe {
-                    self.exec_cross_pack_repair(
-                        ctx,
-                        cb,
-                        &opts,
-                        &dest_dir,
-                        &mut targets,
-                        &donors,
-                        &member_names,
-                        &mut counters,
-                    );
-                }
-            }
-            unsafe {
-                self.stop_watchdog(
-                    ctx,
-                    cb,
-                    wd_handle,
-                    &nzb_name,
-                    &targets,
-                    counters.recovered_bytes,
-                );
-            }
+            self.stop_watchdog(
+                q,
+                wd_handle,
+                &nzb_name,
+                &targets,
+                counters.recovered_bytes,
+            );
+        
         }
 
-        unsafe { self.report_remaining_holes(ctx, cb, &targets, &mut counters) };
-        unsafe {
-            self.repair_completed_post(ctx, cb, &opts, &dest_dir, &targets, &counters);
-        }
+        self.report_remaining_holes(q, &targets, &mut counters);
+        self.repair_completed_post(q, &opts, &dest_dir, &targets, &counters);
+    
     }
 
-    unsafe fn run_live(&self, ctx: *mut c_void, cb: NzbgetRsStreamRepairHostFn) {
+    fn run_live(&self, q: JobQueue<'_>) {
         // Volumes can go dead while a pass borrows another one (a run of dead volumes arrives
         // over a minute or two): look again after each pass, while this thread still holds the
         // job, and borrow the new ones before post-processing takes over and par2 rebuilds them.
@@ -2457,36 +2120,33 @@ impl NzbgetRsStreamRepairCtrl {
         let mut tried: std::collections::BTreeSet<Vec<u8>> = Default::default();
         let mut ran = false;
         for _ in 0..MAX_LIVE_BORROW_PASSES {
-            let Some(left) = (unsafe { self.run_live_pass(ctx, cb) }) else {
+            let Some(left) = self.run_live_pass(q) else {
                 break;
             };
             ran = true;
             tried.extend(left);
-            if unsafe { self.host_is_stopped(ctx, cb) } {
+            if self.host_is_stopped(q) {
                 break;
             }
-            let fresh = unsafe { self.dead_volumes_left_to_borrow(ctx, cb) };
+            let fresh = self.dead_volumes_left_to_borrow(q);
             if fresh.iter().all(|n| tried.contains(n)) {
                 break;
             }
         }
         if ran {
-            unsafe { self.release_live_job(ctx, cb) };
+            self.release_live_job(q);
         }
     }
 
     /// Names of the dead volumes a pass would leave to the borrow now.
-    unsafe fn dead_volumes_left_to_borrow(
+    fn dead_volumes_left_to_borrow(
         &self,
-        ctx: *mut c_void,
-        cb: NzbgetRsStreamRepairHostFn,
+        q: JobQueue<'_>,
     ) -> Vec<Vec<u8>> {
         let mut counters = RunCounters::default();
         // Only looks: the live-attempted marks belong to the pass that repairs the files.
-        let Some((_, dest_dir, targets, _, _)) = (unsafe {
-            with_dq_guard(ctx, cb, |dq_ptr| {
-                self.collect_targets_and_donors(ctx, cb, dq_ptr, false, false, &mut counters)
-            })
+        let Some((_, dest_dir, targets, _, _)) = q.host.with_locked_queue(|dq_ptr| {
+            self.collect_targets_and_donors(q, dq_ptr, false, false, &mut counters)
         }) else {
             return Vec::new();
         };
@@ -2499,23 +2159,18 @@ impl NzbgetRsStreamRepairCtrl {
 
     /// One live pass; returns the dead volumes it left to the borrow, None when there was
     /// nothing to look at.
-    unsafe fn run_live_pass(
+    fn run_live_pass(
         &self,
-        ctx: *mut c_void,
-        cb: NzbgetRsStreamRepairHostFn,
+        q: JobQueue<'_>,
     ) -> Option<Vec<Vec<u8>>> {
         let mut counters = RunCounters::default();
-        let Some((nzb_name, dest_dir, mut targets, donors, mut member_names)) = (unsafe {
-            with_dq_guard(ctx, cb, |dq_ptr| {
-                self.collect_targets_and_donors(ctx, cb, dq_ptr, false, true, &mut counters)
+        let Some((nzb_name, dest_dir, mut targets, donors, mut member_names)) =
+            q.host.with_locked_queue(|dq_ptr| {
+                self.collect_targets_and_donors(q, dq_ptr, false, true, &mut counters)
             })
-        }) else {
+        else {
             return None;
         };
-
-        let mut info_name = b"live stream repair for ".to_vec();
-        info_name.extend_from_slice(&nzb_name);
-        unsafe { self.set_info_name(ctx, cb, &info_name) };
 
         // A dead volume is offered to the borrow on every run, also after an earlier one could
         // not place it yet: volumes arriving since may let it be placed now. Planning costs no
@@ -2530,9 +2185,9 @@ impl NzbgetRsStreamRepairCtrl {
         if any_eligible && !donors.is_empty() {
             let mut msg = b"Starting live stream repair for ".to_vec();
             msg.extend_from_slice(&nzb_name);
-            unsafe { self.print_message(ctx, cb, MK_INFO, &msg) };
+            self.print_message(q, MK_INFO, &msg);
 
-            let opts = unsafe { self.query_host_options(ctx, cb) };
+            let opts = self.query_host_options();
             // Keep the queue from failing over while the repair works towards borrowing a dead
             // volume: the switch would throw away the extraction already done.
             for t in &targets {
@@ -2541,32 +2196,30 @@ impl NzbgetRsStreamRepairCtrl {
                     msg.extend_from_slice(&t.filename);
                     msg.extend_from_slice(b": ");
                     msg.extend_from_slice(why.as_bytes());
-                    unsafe { self.print_message(ctx, cb, MK_INFO, &msg) };
+                    self.print_message(q, MK_INFO, &msg);
                 }
             }
             let borrowing = left_to_borrow.iter().any(|l| *l);
             let borrow_note = BorrowNote::mark(if borrowing {
-                unsafe { self.pending_data_files(ctx, cb) }.1
+                self.pending_data_files(q).1
             } else {
                 None
             });
-            let wd_handle = self.start_watchdog(ctx, cb, &opts, &targets);
+            let wd_handle = self.start_watchdog(q, &opts, &targets);
             self.compute_positional_ranks(&dest_dir, &mut targets, &member_names);
-            unsafe {
-                self.exec_repair(
-                    ctx,
-                    cb,
-                    &opts,
-                    &dest_dir,
-                    &mut targets,
-                    &donors,
-                    &member_names,
-                    &mut counters,
-                    &left_to_borrow,
-                );
-            }
+            self.exec_repair(
+                q,
+                &opts,
+                &dest_dir,
+                &mut targets,
+                &donors,
+                &member_names,
+                &mut counters,
+                &left_to_borrow,
+            );
+        
             let any_holes = targets.iter().any(|t| t.patch_eligible && t.needs_repair());
-            if any_holes && unsafe { !self.host_is_stopped(ctx, cb) } {
+            if any_holes && !self.host_is_stopped(q) {
                 // Live repairs fetch one article at a time so they never crowd out the download.
                 // Direct unpack stands still until a dead volume is borrowed, so from here on
                 // this live repair (the borrow, the recreation fallback and any later pass)
@@ -2578,52 +2231,46 @@ impl NzbgetRsStreamRepairCtrl {
                     self.batch_fetcher
                         .set_worker_count(stream_fetch_worker_count(opts.primary_connections));
                 }
-                unsafe {
-                    self.refresh_live_names(ctx, cb, &mut targets, &mut member_names);
-                    self.exec_cross_pack_repair(
-                        ctx,
-                        cb,
-                        &opts,
-                        &dest_dir,
-                        &mut targets,
-                        &donors,
-                        &member_names,
-                        &mut counters,
-                    );
-                }
+                self.refresh_live_names(q, &mut targets, &mut member_names);
+                self.exec_cross_pack_repair(
+                    q,
+                    &opts,
+                    &dest_dir,
+                    &mut targets,
+                    &donors,
+                    &member_names,
+                    &mut counters,
+                );
+            
             }
             drop(borrow_note);
             // Dead volumes the borrow could not rebuild (a compressed set, a volume that cannot
             // be placed yet, the real last one...) still get the whole-file recreation from a
             // byte-identical duplicate, as before.
-            if borrowing && unsafe { !self.host_is_stopped(ctx, cb) } {
-                unsafe {
-                    self.recreate_unborrowed(
-                        ctx,
-                        cb,
-                        &opts,
-                        &dest_dir,
-                        &mut targets,
-                        &donors,
-                        &member_names,
-                        &mut counters,
-                        &left_to_borrow,
-                    );
-                }
-            }
-            unsafe {
-                self.stop_watchdog(
-                    ctx,
-                    cb,
-                    wd_handle,
-                    &nzb_name,
-                    &targets,
-                    counters.recovered_bytes,
+            if borrowing && !self.host_is_stopped(q) {
+                self.recreate_unborrowed(
+                    q,
+                    &opts,
+                    &dest_dir,
+                    &mut targets,
+                    &donors,
+                    &member_names,
+                    &mut counters,
+                    &left_to_borrow,
                 );
+            
             }
+            self.stop_watchdog(
+                q,
+                wd_handle,
+                &nzb_name,
+                &targets,
+                counters.recovered_bytes,
+            );
+        
         }
 
-        unsafe { self.repair_completed_live(ctx, cb, &targets, &counters) };
+        self.repair_completed_live(q, &targets, &counters);
         // A volume the live repair completed can be read by a paused direct unpack again.
         #[cfg(unix)]
         for t in targets.iter().filter(|t| !t.needs_repair()) {
@@ -2647,30 +2294,6 @@ impl NzbgetRsStreamRepairCtrl {
 
 /// Bounds the borrow passes one live repair makes for volumes that go dead while it runs.
 const MAX_LIVE_BORROW_PASSES: usize = 8;
-
-pub unsafe fn stream_repair_ctrl_exec(
-    ctrl: *const NzbgetRsStreamRepairCtrl,
-    op: c_int,
-    host_cb: Option<NzbgetRsStreamRepairHostFn>,
-    ctx: *mut c_void,
-) -> c_int {
-    let Some(c) = (unsafe { ctrl.as_ref() }) else {
-        return 0;
-    };
-    match op {
-        0 => {
-            c.stop();
-            0
-        }
-        1 => {
-            if let Some(cb) = host_cb {
-                unsafe { c.run(ctx, cb) };
-            }
-            0
-        }
-        _ => 0,
-    }
-}
 
 #[cfg(test)]
 mod tests {

@@ -1558,6 +1558,25 @@ pub(crate) struct JobQueue<'a> {
     pub(crate) host: &'a crate::queuesubsys_host::QueueSubsysHost,
 }
 
+/// The address of a post job, for stopping it from a helper thread.
+#[cfg(unix)]
+pub(crate) struct JobStopHandle(usize);
+
+#[cfg(unix)]
+impl JobStopHandle {
+    /// Stops the job, as the job's own stop path does.
+    ///
+    /// # Safety
+    /// The job must still be alive.
+    pub(crate) unsafe fn stop(&self) {
+        let Some(host) = crate::ffi::queue_host() else {
+            return;
+        };
+        let job = unsafe { &*(self.0 as *const NzbgetRsPostJob) };
+        job.stop_from_rust(&host);
+    }
+}
+
 #[cfg(unix)]
 impl JobQueue<'_> {
     pub(crate) fn post_ptr(self) -> usize {
@@ -1576,6 +1595,20 @@ impl JobQueue<'_> {
 
     fn nzb_ptr(self) -> usize {
         self.job.nzb_ptr(self.host)
+    }
+
+    pub(crate) fn nzb_id(self) -> i32 {
+        self.job.nzb_id
+    }
+
+    pub(crate) fn thread_ptr(self) -> usize {
+        self.job.thread_ptr
+    }
+
+    /// A handle another thread can use to stop this job. The caller must not use it
+    /// after the job is gone (the stream-repair watchdog is joined before its run returns).
+    pub(crate) fn stop_handle(self) -> JobStopHandle {
+        JobStopHandle(self.job as *const NzbgetRsPostJob as usize)
     }
 
     pub(crate) fn is_stopped(self) -> bool {
@@ -5531,7 +5564,6 @@ impl NzbgetRsPostJob {
 thread_local! {
     static POST_JOB_ARENA_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static POST_JOB_STR_ARENA: std::cell::RefCell<Vec<std::ffi::CString>> = const { std::cell::RefCell::new(Vec::new()) };
-    static POST_JOB_RANGE_ARENA: std::cell::RefCell<Vec<Vec<crate::dupefallback::NzbgetRsByteRange>>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 #[cfg(unix)]
@@ -5568,13 +5600,6 @@ fn reset_call_arena() {
             v.shrink_to(16);
         }
     });
-    POST_JOB_RANGE_ARENA.with(|a| {
-        let mut v = a.borrow_mut();
-        v.clear();
-        if v.capacity() > 4 {
-            v.shrink_to(4);
-        }
-    });
 }
 
 #[cfg(unix)]
@@ -5593,16 +5618,6 @@ fn arena_opt_cstr(opt: Option<&[u8]>) -> *const c_char {
         Some(b) => arena_cstr(b),
         None => ptr::null(),
     }
-}
-
-#[cfg(unix)]
-fn arena_ranges(ranges: Vec<crate::dupefallback::NzbgetRsByteRange>) -> *const c_char {
-    if ranges.is_empty() {
-        return ptr::null();
-    }
-    let p = ranges.as_ptr() as *const c_char;
-    POST_JOB_RANGE_ARENA.with(|a| a.borrow_mut().push(ranges));
-    p
 }
 
 /// Marks the post-processing of `post_ptr` as finished (`PostInfo::ptFinished`).
@@ -5631,7 +5646,6 @@ enum PostJobInner {
 
 #[cfg(unix)]
 pub struct NzbgetRsPostJob {
-    kind: c_int,
     thread_ptr: usize,
     post_ptr: usize,
     nzb_id: i32,
@@ -5674,7 +5688,6 @@ impl NzbgetRsPostJob {
             _ => PostJobInner::Cleanup,
         };
         Self {
-            kind,
             thread_ptr,
             post_ptr,
             nzb_id,
@@ -5690,9 +5703,7 @@ impl NzbgetRsPostJob {
                     ctrl.stop();
                 }
             }
-            PostJobInner::StreamRepair(ctrl) => unsafe {
-                crate::streamrepair_coord::stream_repair_ctrl_exec(ctrl, 0, None, ptr::null_mut());
-            },
+            PostJobInner::StreamRepair(ctrl) => ctrl.stop(),
             PostJobInner::Unpack(ctrl) => {
                 crate::log::log_active_bytes(MK_DEBUG, b"Stopping unpack");
                 ctrl.stop();
@@ -5725,7 +5736,6 @@ impl NzbgetRsPostJob {
     }
 
     pub unsafe fn exec(&self, op: c_int, a1: c_int, p1: usize) -> c_int {
-        let ctx = (self as *const Self).cast_mut().cast::<c_void>();
         match op {
             0 => {
                 self.stop_from_cpp();
@@ -5739,12 +5749,10 @@ impl NzbgetRsPostJob {
                         0
                     }
                     PostJobInner::StreamRepair(ctrl) => {
-                        crate::streamrepair_coord::stream_repair_ctrl_exec(
-                            ctrl,
-                            1,
-                            Some(stream_repair_job_host_cb),
-                            ctx,
-                        )
+                        if let Some(host) = crate::ffi::queue_host() {
+                            ctrl.run(JobQueue { job: self, host: &host });
+                        }
+                        0
                     }
                     PostJobInner::Repair(Some(ctrl)) => {
                         if let Some(host) = crate::ffi::queue_host() {
@@ -5816,348 +5824,6 @@ unsafe fn invoke_dq_guard_cb(
     });
 }
 
-#[cfg(unix)]
-unsafe extern "C" fn stream_repair_job_host_cb(
-    raw_ctx: *mut c_void,
-    op: c_int,
-    a1: c_int,
-    a2: c_int,
-    p1: usize,
-    p2: usize,
-    s1: *const c_char,
-    ints: *mut c_int,
-    i64s: *mut i64,
-    strs: *mut *const c_char,
-) -> usize {
-    use crate::queuesubsys_host::{
-        HK_NZB, NK_NZB, NZB_ACT_CLEAR_LIVE_REPAIR_THREAD, NZB_I64_CUR_FAILED_SIZE,
-        NZB_I64_CUR_SUCCESS_SIZE, NZB_I64_DUPE_RECOVERED_BYTES, NZB_I64_FAILED_SIZE,
-        NZB_I64_PAR_CUR_FAILED_SIZE, NZB_I64_PAR_CUR_SUCCESS_SIZE, NZB_I64_PAR_FAILED_SIZE,
-        NZB_I64_PAR_SUCCESS_SIZE, NZB_I64_SUCCESS_SIZE, NZB_INT_DUPE_RECOVERED_ARTICLES,
-        NZB_INT_DUPE_RECOVERED_HOLES, NZB_INT_PAR_RENAME_STATUS, NZB_INT_PAR_STATUS,
-        POST_INT_FORCE_PAR_FULL, POST_INT_REQUEST_PAR_CHECK, POST_INT_STAGE_PROGRESS,
-        POST_INT_STREAM_REPAIR_DONE, POST_INT_STREAM_REPAIR_RECOVERED, POST_INT_WORKING, RS_NONE,
-    };
-    if op != 0 {
-        reset_call_arena();
-    }
-    let Some(host) = crate::ffi::queue_host() else {
-        return 0;
-    };
-    let job = unsafe { &*(raw_ctx as *const NzbgetRsPostJob) };
-    let live_mode = job.kind == 10;
-    match op {
-        0 => {
-            unsafe { invoke_dq_guard_cb(&host, p1, p2) };
-            0
-        }
-        1 => usize::from(host.thread_is_stopped(job.thread_ptr)),
-        2 => {
-            job.stop_from_rust(&host);
-            0
-        }
-        3 => 0,
-        4 => {
-            let msg = unsafe { cstr::owned(s1) };
-            if live_mode {
-                host.with_locked_queue(|dq| {
-                    let nzb = host.queue_find_by_id(dq, job.nzb_id);
-                    if nzb != 0 {
-                        host.nzb_add_message(nzb, a1, &msg);
-                    }
-                });
-            } else if job.post_ptr != 0 {
-                let ps = host.post_snap(job.post_ptr);
-                if ps.nzb_ptr != 0 {
-                    host.nzb_add_message(ps.nzb_ptr, a1, &msg);
-                }
-            }
-            0
-        }
-        5 => {
-            if s1.is_null() {
-                return 0;
-            }
-            let kind = match a1 {
-                0 => MK_INFO,
-                1 => MK_ERROR,
-                2 => MK_WARNING,
-                3 => MK_DETAIL,
-                4 => MK_DEBUG,
-                _ => return 0,
-            };
-            host.log(kind, &unsafe { cstr::owned(s1) });
-            0
-        }
-        7 => {
-            let nzb = if live_mode {
-                let n = host.queue_find_by_id(p1, job.nzb_id);
-                if n == 0 || host.nzb_snap(n, false).live_repair_thread_ptr != job.thread_ptr {
-                    return 0;
-                }
-                n
-            } else {
-                if job.post_ptr == 0 {
-                    return 0;
-                }
-                let ps = host.post_snap(job.post_ptr);
-                if ps.nzb_ptr == 0 {
-                    return 0;
-                }
-                if a1 != 0 {
-                    host.post_set_progress_label(job.post_ptr, b"Repairing files from duplicates");
-                }
-                ps.nzb_ptr
-            };
-            let ns = host.nzb_snap(nzb, false);
-            let pw = host.nzb_get_param(nzb, b"*Unpack:Password");
-            let ins = unsafe { std::slice::from_raw_parts_mut(ints, 6) };
-            let str_out = unsafe { std::slice::from_raw_parts_mut(strs, 4) };
-            ins[0] = ns.id;
-            ins[1] = i32::from(ns.par_size > 0);
-            ins[2] = host.nzb_completed_files_len(nzb) as c_int;
-            ins[3] = host.nzb_stream_repair_jobs_len(nzb) as c_int;
-            ins[4] = host.queue_len(p1) as c_int;
-            ins[5] = host.history_len(p1) as c_int;
-            unsafe { *i64s = i64::from(ns.full_content_hash) };
-            str_out[0] = arena_cstr(&ns.name);
-            str_out[1] = arena_cstr(&ns.dest_dir);
-            str_out[2] = arena_cstr(&ns.dupe_key);
-            str_out[3] = arena_opt_cstr(pw.as_deref());
-            nzb
-        }
-        8 => {
-            let cf = host.nzb_completed_file_at(p1, a1 as usize);
-            let ins = unsafe { std::slice::from_raw_parts_mut(ints, 3) };
-            ins[0] = cf.id;
-            ins[1] = i32::from(cf.par_file);
-            ins[2] = cf.status;
-            unsafe { *strs = arena_cstr(&cf.filename) };
-            0
-        }
-        9 => {
-            if a2 == 1 {
-                return usize::from(host.nzb_stream_repair_mark_live_attempted(p1, a1 as usize));
-            }
-            let jd = host.nzb_stream_repair_job_detail(p1, a1 as usize);
-            let ins = unsafe { std::slice::from_raw_parts_mut(ints, 5) };
-            let i64_out = unsafe { std::slice::from_raw_parts_mut(i64s, 4) };
-            let str_out = unsafe { std::slice::from_raw_parts_mut(strs, 2) };
-            ins[0] = jd.file_id;
-            ins[1] = jd.failed_articles;
-            ins[2] = i32::from(jd.par_file);
-            ins[3] = i32::from(jd.live_attempted);
-            ins[4] = jd.holes.len() as c_int;
-            i64_out[0] = jd.decoded_file_size;
-            i64_out[1] = jd.failed_size;
-            i64_out[2] = jd.missed_size;
-            i64_out[3] = jd.steps_hash as i64;
-            str_out[0] = arena_cstr(&jd.filename);
-            str_out[1] = arena_ranges(jd.holes);
-            0
-        }
-        10 => {
-            let cand = if a1 == 0 {
-                let c = host.queue_at(p1, a2 as usize);
-                if c == 0 || host.nzb_snap(c, false).kind != NK_NZB {
-                    return 0;
-                }
-                c
-            } else {
-                let h = host.history_at(p1, a2 as usize);
-                if h.kind != HK_NZB || h.inner_ptr == 0 {
-                    return 0;
-                }
-                h.inner_ptr
-            };
-            let cs = host.nzb_snap(cand, false);
-            let pw = host.nzb_get_param(cand, b"*Unpack:Password");
-            let ins = unsafe { std::slice::from_raw_parts_mut(ints, 3) };
-            let str_out = unsafe { std::slice::from_raw_parts_mut(strs, 4) };
-            ins[0] = cs.id;
-            ins[1] = cs.dupe_score;
-            ins[2] = cs.dupe_mode;
-            unsafe { *i64s = i64::from(cs.full_content_hash) };
-            str_out[0] = arena_cstr(&cs.name);
-            str_out[1] = arena_cstr(&cs.dupe_key);
-            str_out[2] = arena_cstr(&cs.queued_filename);
-            str_out[3] = arena_opt_cstr(pw.as_deref());
-            cand
-        }
-        11 => {
-            if job.post_ptr != 0 {
-                let lbl = unsafe { cstr::owned(s1) };
-                host.with_locked_queue(|_| {
-                    host.post_set_progress_label(job.post_ptr, &lbl);
-                    host.post_set_int(job.post_ptr, POST_INT_STAGE_PROGRESS, a1);
-                });
-            }
-            0
-        }
-        12 => {
-            host.nzb_stream_repair_update_completed_file(p1, a1, a2);
-            0
-        }
-        13 => {
-            if a2 == 0 {
-                host.nzb_stream_repair_erase_job(p1, a1 as usize, false);
-                return 0;
-            }
-            let new_dec = unsafe { *i64s };
-            let holes_len = unsafe { *ints };
-            host.nzb_stream_repair_update_job_holes(p1, a1 as usize, new_dec, p2, holes_len);
-            0
-        }
-        14 => {
-            if a2 == 0 {
-                let ns = host.nzb_snap(p2, false);
-                let ins = unsafe { std::slice::from_raw_parts_mut(ints, 2) };
-                let i64_out = unsafe { std::slice::from_raw_parts_mut(i64s, 8) };
-                ins[0] = ns.par_rename_status;
-                ins[1] = ns.par_status;
-                i64_out[0] = ns.failed_size;
-                i64_out[1] = ns.success_size;
-                i64_out[2] = ns.current_failed_size;
-                i64_out[3] = ns.current_success_size;
-                i64_out[4] = ns.par_failed_size;
-                i64_out[5] = ns.par_success_size;
-                i64_out[6] = ns.par_current_failed_size;
-                i64_out[7] = ns.par_current_success_size;
-                return 0;
-            }
-            let ns = host.nzb_snap(p2, false);
-            let ins = unsafe { std::slice::from_raw_parts(ints, 4) };
-            let i64_in = unsafe { std::slice::from_raw_parts(i64s, 9) };
-            if ins[0] > 0 || i64_in[8] > 0 || ins[1] > 0 {
-                host.nzb_set_int(
-                    p2,
-                    NZB_INT_DUPE_RECOVERED_ARTICLES,
-                    ns.dupe_recovered_articles + ins[0],
-                );
-                host.nzb_set_i64(
-                    p2,
-                    NZB_I64_DUPE_RECOVERED_BYTES,
-                    ns.dupe_recovered_bytes + i64_in[8],
-                );
-                host.nzb_set_int(
-                    p2,
-                    NZB_INT_DUPE_RECOVERED_HOLES,
-                    ns.dupe_recovered_holes + ins[1],
-                );
-            }
-            if a1 != 0 {
-                host.nzb_set_i64(p2, NZB_I64_FAILED_SIZE, i64_in[0]);
-                host.nzb_set_i64(p2, NZB_I64_SUCCESS_SIZE, i64_in[1]);
-                host.nzb_set_i64(p2, NZB_I64_CUR_FAILED_SIZE, i64_in[2]);
-                host.nzb_set_i64(p2, NZB_I64_CUR_SUCCESS_SIZE, i64_in[3]);
-                host.nzb_set_i64(p2, NZB_I64_PAR_FAILED_SIZE, i64_in[4]);
-                host.nzb_set_i64(p2, NZB_I64_PAR_SUCCESS_SIZE, i64_in[5]);
-                host.nzb_set_i64(p2, NZB_I64_PAR_CUR_FAILED_SIZE, i64_in[6]);
-                host.nzb_set_i64(p2, NZB_I64_PAR_CUR_SUCCESS_SIZE, i64_in[7]);
-            }
-            let pi = job.post_ptr;
-            host.post_set_int(pi, POST_INT_STREAM_REPAIR_DONE, 1);
-            host.post_set_int(
-                pi,
-                POST_INT_STREAM_REPAIR_RECOVERED,
-                i32::from(i64_in[8] > 0),
-            );
-            let pf = ins[2];
-            if (pf & 1) != 0 {
-                host.nzb_set_int(p2, NZB_INT_PAR_RENAME_STATUS, RS_NONE);
-            }
-            if (pf & 2) != 0 {
-                host.nzb_set_int(p2, NZB_INT_PAR_STATUS, ins[3]);
-            }
-            if (pf & 4) != 0 {
-                host.post_set_int(pi, POST_INT_FORCE_PAR_FULL, 1);
-            }
-            if (pf & 8) != 0 {
-                host.post_set_int(pi, POST_INT_REQUEST_PAR_CHECK, 0);
-            }
-            if (pf & 16) != 0 {
-                host.post_set_int(pi, POST_INT_REQUEST_PAR_CHECK, 1);
-            }
-            host.dq_save(p1);
-            host.post_set_int(pi, POST_INT_WORKING, 0);
-            0
-        }
-        16 => {
-            let out = unsafe { std::slice::from_raw_parts_mut(ints, 2) };
-            out[0] = -1;
-            let nzb = if live_mode {
-                host.queue_find_by_id(p1, job.nzb_id)
-            } else if job.post_ptr != 0 {
-                host.post_snap(job.post_ptr).nzb_ptr
-            } else {
-                0
-            };
-            if nzb != 0 {
-                let pending = (0..host.nzb_file_len(nzb))
-                    .map(|i| host.nzb_file_at(nzb, i))
-                    .filter(|&f| f != 0 && !host.file_snap(f).par_file)
-                    .count();
-                out[0] = pending as c_int;
-                out[1] = host.nzb_snap(nzb, false).id;
-            }
-            0
-        }
-        15 => {
-            if a2 == 0 {
-                let nzb = host.queue_find_by_id(p1, job.nzb_id);
-                if nzb == 0 {
-                    return 0;
-                }
-                let ns = host.nzb_snap(nzb, false);
-                let rec_bytes = unsafe { *i64s };
-                if ns.live_repair_thread_ptr != job.thread_ptr {
-                    host.nzb_set_i64(
-                        nzb,
-                        NZB_I64_DUPE_RECOVERED_BYTES,
-                        ns.dupe_recovered_bytes + rec_bytes,
-                    );
-                    return 0;
-                }
-                let rec_holes = unsafe { *ints.add(1) };
-                if rec_bytes > 0 || rec_holes > 0 {
-                    host.nzb_set_i64(
-                        nzb,
-                        NZB_I64_DUPE_RECOVERED_BYTES,
-                        ns.dupe_recovered_bytes + rec_bytes,
-                    );
-                    host.nzb_set_int(
-                        nzb,
-                        NZB_INT_DUPE_RECOVERED_HOLES,
-                        ns.dupe_recovered_holes + rec_holes,
-                    );
-                }
-                unsafe { *ints = host.nzb_stream_repair_jobs_len(nzb) as c_int };
-                return nzb;
-            }
-            host.nzb_action(p2, NZB_ACT_CLEAR_LIVE_REPAIR_THREAD, 0);
-            let ns = host.nzb_snap(p2, false);
-            // A volume arrived while this pass ran and direct unpack still waits on a dead
-            // volume: one more pass may now place it for the borrow.
-            if ns.post_info_ptr == 0
-                && take_dead_volume_rerun(ns.id)
-                && direct_unpack_waits_on_dead_volume(ns.id)
-            {
-                host.stream_repair_start_live(p2);
-            }
-            // A direct unpack parked on damaged volumes waits for post-processing itself, so
-            // it will not release the job: the ending live repair has to.
-            if ns.post_info_ptr != 0
-                && (!ns.has_unpack_thread || direct_unpack_awaiting_repair(ns.id))
-            {
-                host.post_set_int(ns.post_info_ptr, POST_INT_WORKING, 0);
-            }
-            host.dq_save(p1);
-            0
-        }
-        _ => 0,
-    }
-}
-
 #[cfg(all(test, unix))]
 mod post_job_arena_tests {
     use super::*;
@@ -6168,13 +5834,14 @@ mod post_job_arena_tests {
         for tick in 0..512usize {
             let mut strs = [ptr::null::<c_char>(); 5];
             unsafe {
-                let _ = stream_repair_job_host_cb(
+                let _ = direct_unpack_host_cb(
                     ptr::null_mut(),
                     1,
                     0,
                     0,
                     0,
                     0,
+                    ptr::null(),
                     ptr::null(),
                     ptr::null_mut(),
                     ptr::null_mut(),
@@ -6183,19 +5850,12 @@ mod post_job_arena_tests {
             }
             let p0 = arena_cstr(format!("name-{tick}").as_bytes());
             let p1 = arena_cstr(b"/tmp/dest");
-            let p2 = arena_ranges(vec![crate::dupefallback::NzbgetRsByteRange {
-                offset: tick as i64,
-                size: 64,
-            }]);
-            assert!(!p0.is_null() && !p1.is_null() && !p2.is_null());
+            assert!(!p0.is_null() && !p1.is_null());
             let str_len = POST_JOB_STR_ARENA.with(|a| a.borrow().len());
-            let range_len = POST_JOB_RANGE_ARENA.with(|a| a.borrow().len());
             assert_eq!(str_len, 2);
-            assert_eq!(range_len, 1);
         }
         drop(guard);
         assert_eq!(POST_JOB_STR_ARENA.with(|a| a.borrow().len()), 0);
-        assert_eq!(POST_JOB_RANGE_ARENA.with(|a| a.borrow().len()), 0);
     }
 }
 

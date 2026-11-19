@@ -23,7 +23,6 @@ pub const CS_BROKEN: c_int = 4;
 
 pub const CONNECTION_READBUFFER_SIZE: usize = 1024;
 const BSTRING_MAX: usize = 1023;
-const REMOTE_ADDR_CAP: usize = 99; // BString<100>::Capacity()
 
 /// Sets `FD_CLOEXEC` on `fd` if valid (`SetCloseOnExec`).
 pub fn set_close_on_exec(fd: c_int) {
@@ -1002,50 +1001,16 @@ pub fn remote_addr(host: &[u8], fd: c_int) -> Vec<u8> {
     if !host.is_empty() && host[0] == b'/' {
         return b"-".to_vec();
     }
-    if fd == INVALID_SOCKET {
+    if fd < 0 {
         return Vec::new();
     }
-    extern "C" {
-        fn inet_ntop(
-            af: c_int,
-            src: *const libc::c_void,
-            dst: *mut c_char,
-            size: libc::socklen_t,
-        ) -> *const c_char;
-    }
-    unsafe {
-        let mut peer: libc::sockaddr_storage = std::mem::zeroed();
-        let mut len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
-        if libc::getpeername(
-            fd,
-            (&mut peer as *mut libc::sockaddr_storage).cast(),
-            &mut len,
-        ) < 0
-        {
-            return Vec::new();
-        }
-        let family = peer.ss_family as c_int;
-        let mut buf = [0u8; REMOTE_ADDR_CAP + 1];
-        let src: *const libc::c_void = if family == libc::AF_INET6 {
-            let sin6 = &*(&peer as *const libc::sockaddr_storage).cast::<libc::sockaddr_in6>();
-            (&sin6.sin6_addr as *const libc::in6_addr).cast()
-        } else {
-            let sin = &*(&peer as *const libc::sockaddr_storage).cast::<libc::sockaddr_in>();
-            (&sin.sin_addr as *const libc::in_addr).cast()
-        };
-        let res = inet_ntop(
-            family,
-            src,
-            buf.as_mut_ptr().cast(),
-            REMOTE_ADDR_CAP as libc::socklen_t,
-        );
-        if res.is_null() {
-            return Vec::new();
-        }
-        buf[REMOTE_ADDR_CAP] = 0;
-        CStr::from_bytes_until_nul(&buf)
-            .map(|c| c.to_bytes().to_vec())
-            .unwrap_or_default()
+    // SAFETY: the stream is never dropped, so the caller keeps owning `fd`.
+    let stream = std::mem::ManuallyDrop::new(unsafe {
+        <std::net::TcpStream as std::os::unix::io::FromRawFd>::from_raw_fd(fd)
+    });
+    match stream.peer_addr() {
+        Ok(peer) => peer.ip().to_string().into_bytes(),
+        Err(_) => Vec::new(),
     }
 }
 

@@ -4,19 +4,6 @@ use crate::lifecycle::{get_hooks, LifecycleManager};
 use std::ffi::{c_char, c_int, CStr};
 use std::ptr;
 
-#[cfg(unix)]
-extern "C" {
-    fn setlocale(category: c_int, locale: *const c_char) -> *mut c_char;
-    fn time(tloc: *mut i64) -> i64;
-    fn srand(seed: std::ffi::c_uint);
-}
-
-#[cfg(target_os = "macos")]
-const LC_CTYPE: c_int = 2;
-
-#[cfg(all(unix, not(target_os = "macos")))]
-const LC_CTYPE: c_int = 0;
-
 #[derive(Debug, PartialEq, Eq)]
 pub enum EntrypointRoute {
     TlsCipherResolve,
@@ -77,7 +64,7 @@ pub unsafe fn init_platform(argc: c_int, argv: *mut *mut c_char, argp: *mut *mut
 
     #[cfg(unix)]
     {
-        setlocale(LC_CTYPE, c"".as_ptr());
+        libc::setlocale(libc::LC_CTYPE, c"".as_ptr());
     }
 
     if let Ok(mut g) = PROCESS_ARGS.write() {
@@ -95,8 +82,8 @@ pub unsafe fn init_platform(argc: c_int, argv: *mut *mut c_char, argp: *mut *mut
 
     #[cfg(unix)]
     {
-        let seed = time(ptr::null_mut()) as std::ffi::c_uint;
-        srand(seed);
+        let seed = libc::time(ptr::null_mut()) as std::ffi::c_uint;
+        libc::srand(seed);
     }
 }
 
@@ -196,18 +183,5 @@ mod tests {
                 EntrypointRoute::NServ
             );
         }
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn test_lc_ctype_platform_mapping() {
-        #[cfg(target_os = "macos")]
-        assert_eq!(
-            LC_CTYPE, 2,
-            "Darwin libc locale.h defines LC_CTYPE as 2 (LC_ALL is 0)"
-        );
-
-        #[cfg(target_os = "linux")]
-        assert_eq!(LC_CTYPE, 0, "Linux glibc locale.h defines LC_CTYPE as 0");
     }
 }

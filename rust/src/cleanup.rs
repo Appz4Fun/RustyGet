@@ -151,11 +151,8 @@ pub fn move_single_file(src: &Path, dest: &Path) -> Result<(), MoveFileError> {
 fn format_io_error(err: &io::Error) -> Vec<u8> {
     #[cfg(unix)]
     if let Some(code) = err.raw_os_error() {
-        unsafe extern "C" {
-            fn strerror(errnum: std::ffi::c_int) -> *const std::ffi::c_char;
-        }
         unsafe {
-            let ptr = strerror(code);
+            let ptr = libc::strerror(code);
             if !ptr.is_null() {
                 return CStr::from_ptr(ptr).to_bytes().to_vec();
             }

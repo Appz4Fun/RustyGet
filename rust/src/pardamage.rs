@@ -467,18 +467,13 @@ fn format_dupe_matcher_detail_msg(filename_buf: &[u8], max_size: i64, ok: bool) 
     msg
 }
 
-#[cfg(unix)]
-extern "C" {
-    fn kill(pid: std::ffi::c_int, sig: std::ffi::c_int) -> std::ffi::c_int;
-}
-
 fn kill_process_tree(child: &mut std::process::Child) {
     #[cfg(unix)]
     {
         let pid = child.id() as std::ffi::c_int;
         if pid > 0 {
             unsafe {
-                kill(-pid, 9);
+                libc::kill(-pid, libc::SIGKILL);
             }
         }
     }

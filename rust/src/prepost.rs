@@ -4,7 +4,7 @@
 //! workflows, PAR/stream-repair coverage decisions, job scheduling strategies, stage
 //! transitions, pause-state management, and direct-unpack triggers into a single module.
 
-use crate::status::{CleanupStatus, MoveStatus, NzbParStatus, UnpackStatus};
+use crate::status::{CleanupStatus, DupeMode, MoveStatus, NzbParStatus, UnpackStatus};
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
@@ -173,8 +173,7 @@ pub fn eval_nzb_completed(
     keep_history: i32,
     avoid_history: bool,
     dupe_check: bool,
-    dupe_mode: i32,
-    dm_force: i32,
+    dupe_mode: DupeMode,
     fails_over: bool,
     delete_status: i32,
     ds_none: i32,
@@ -186,7 +185,7 @@ pub fn eval_nzb_completed(
     let download_dupe = dupe_hint == dh_redownload_auto;
     let add_to_history = keep_history > 0 && !avoid_history;
     let call_dupe_completed = dupe_check
-        && (dupe_mode != dm_force || fails_over)
+        && (dupe_mode != DupeMode::Force || fails_over)
         && (delete_status == ds_none
             || delete_status == ds_health
             || delete_status == ds_bad
@@ -456,11 +455,11 @@ fn dupe_post_gate_host(
     dq_ptr: usize,
     nzb: &crate::queuesubsys_host::NzbSnap,
 ) -> (GateVerdict, Vec<u8>) {
-    use crate::queuesubsys_host::{DM_FORCE, DS_NONE, HC_DUPE, HC_PARK, NK_NZB, NS_RUNNING};
+    use crate::queuesubsys_host::{DS_NONE, HC_DUPE, HC_PARK, NK_NZB, NS_RUNNING};
     const NS_SUCCESS: i32 = 3;
     let health_check = host.opts().health_check;
     if nzb.dupe_key.is_empty()
-        || nzb.dupe_mode == DM_FORCE
+        || nzb.dupe_mode == DupeMode::Force
         || nzb.delete_status != DS_NONE
         || (health_check != HC_DUPE && health_check != HC_PARK)
     {
@@ -491,7 +490,7 @@ fn dupe_post_gate_host(
         if q.kind == NK_NZB
             && !q.deleting
             && q.delete_status == DS_NONE
-            && q.dupe_mode != DM_FORCE
+            && q.dupe_mode != DupeMode::Force
             && q.dupe_key.eq_ignore_ascii_case(&nzb.dupe_key)
         {
             others.push(GateCopy {
@@ -1575,8 +1574,8 @@ impl NzbgetRsPrePostProcessor {
         use crate::queuesubsys_host::{
             ASPECT_FILE_COMPLETED, ASPECT_FILE_DELETED, ASPECT_NZB_ADDED, ASPECT_NZB_DELETED,
             ASPECT_NZB_FOUND, ASPECT_NZB_NAMED, ASPECT_URL_ADDED, ASPECT_URL_DELETED,
-            ASPECT_URL_FAILED, ASPECT_URL_FOUND, DM_FORCE, DS_HEALTH, DS_NONE, MK_INFO,
-            PT_LOADING_PARS, PT_VERIFYING_REPAIRED,
+            ASPECT_URL_FAILED, ASPECT_URL_FOUND, DS_HEALTH, DS_NONE, MK_INFO, PT_LOADING_PARS,
+            PT_VERIFYING_REPAIRED,
         };
 
         if host.prepost_is_stopped(self.owner) {
@@ -1586,7 +1585,7 @@ impl NzbgetRsPrePostProcessor {
         if action == ASPECT_NZB_FOUND || action == ASPECT_URL_FOUND {
             let opts = host.opts();
             let nzb = host.nzb_snap(nzb_ptr, false);
-            if opts.dupe_check && nzb.dupe_mode != DM_FORCE {
+            if opts.dupe_check && nzb.dupe_mode != DupeMode::Force {
                 crate::dupecoord::nzb_found_host(host, dq_ptr, nzb_ptr);
             }
         } else if action == ASPECT_NZB_ADDED || action == ASPECT_URL_ADDED {
@@ -1713,8 +1712,7 @@ impl NzbgetRsPrePostProcessor {
         save_queue: bool,
     ) {
         use crate::queuesubsys_host::{
-            DH_REDOWNLOAD_AUTO, DM_FORCE, DS_COPY, DS_HEALTH, DS_NONE, DS_SCAN,
-            NZB_INT_AVOID_HISTORY,
+            DH_REDOWNLOAD_AUTO, DS_COPY, DS_HEALTH, DS_NONE, DS_SCAN, NZB_INT_AVOID_HISTORY,
         };
         const DS_BAD: i32 = 4;
 
@@ -1731,7 +1729,6 @@ impl NzbgetRsPrePostProcessor {
             nzb.avoid_history,
             opts.dupe_check,
             nzb.dupe_mode,
-            DM_FORCE,
             fails_over,
             nzb.delete_status,
             DS_NONE,

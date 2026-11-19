@@ -507,7 +507,7 @@ pub fn split_param_assignment(text: &[u8]) -> Option<(&[u8], &[u8])> {
 // End-to-end `HistoryCoordinator` FFI coordinator (`daemon/queue/HistoryCoordinator.cpp`)
 // ============================================================================
 
-use crate::status::{CleanupStatus, DupStatus, MoveStatus, NzbParStatus, UnpackStatus};
+use crate::status::{CleanupStatus, DupStatus, DupeMode, MoveStatus, NzbParStatus, UnpackStatus};
 use std::ffi::{c_char, c_int, c_void, CStr};
 
 #[repr(C)]
@@ -750,7 +750,7 @@ unsafe fn hc_recheck_failed_articles(env: &NzbgetRsHistoryCoordEnv, dq_ptr: usiz
             }
         }
         if opts.dupe_check
-            && nzb.dupe_mode == crate::queuesubsys_host::DM_SCORE
+            && nzb.dupe_mode == DupeMode::Score
             && crate::dupecoord::find_dupe_backup_host(
                 &qh,
                 &opts,
@@ -1713,7 +1713,7 @@ unsafe fn hc_set_dupe_param(
     dm.push(b'\'');
     hc_log(env, 0, &dm);
 
-    let mut mode = 0i32;
+    let mut mode = DupeMode::Score;
     if action == 45 {
         let Some(parsed) = crate::queueeditor::parse_dupe_mode(text) else {
             let mut em = b"Could not set duplicate mode for ".to_vec();
@@ -1775,7 +1775,7 @@ unsafe fn hc_set_dupe_param(
                     env.ctx,
                     36,
                     5,
-                    mode,
+                    mode.into(),
                     0,
                     hist_ptr,
                     std::ptr::null(),
@@ -1862,7 +1862,7 @@ unsafe fn hc_set_dupe_param(
                     env.ctx,
                     36,
                     9,
-                    mode,
+                    mode.into(),
                     0,
                     hist_ptr,
                     std::ptr::null(),
@@ -2454,18 +2454,17 @@ unsafe extern "C" fn hc_native_action_cb(
         NZB_INT_DEAD_PICK_PROBED, NZB_INT_DELETE_PAUSED, NZB_INT_DELETE_STATUS,
         NZB_INT_DIRECT_RENAME_STATUS, NZB_INT_DIRECT_UNPACK_STATUS, NZB_INT_DOWNLOAD_SEC,
         NZB_INT_DUPE_ATTEMPTED_ARTICLES, NZB_INT_DUPE_FAILED_RUN, NZB_INT_DUPE_FAILOVER_CHECKED,
-        NZB_INT_DUPE_HINT, NZB_INT_DUPE_MODE, NZB_INT_DUPE_NO_PAR_NOTED,
-        NZB_INT_DUPE_PAR_DEFER_STATE, NZB_INT_DUPE_RECOVERED_ARTICLES,
-        NZB_INT_DUPE_RECOVERED_HOLES, NZB_INT_DUPE_SCORE, NZB_INT_DUPE_UNSOURCED_ARTICLES,
-        NZB_INT_EXTRA_PAR_BLOCKS, NZB_INT_FAILED_ARTICLES, NZB_INT_HEALTH_PAUSED,
-        NZB_INT_LIVE_PAR_SEC, NZB_INT_LIVE_UNPACK_SEC, NZB_INT_LOADING_PAR, NZB_INT_MARK_STATUS,
-        NZB_INT_PARKED_FILE_COUNT, NZB_INT_PARKING, NZB_INT_PAR_FULL, NZB_INT_PAR_RENAME_STATUS,
-        NZB_INT_PAR_REPAIRED, NZB_INT_PAR_SEC, NZB_INT_POST_TOTAL_SEC, NZB_INT_RAR_RENAME_STATUS,
-        NZB_INT_REMAINING_PAR_COUNT, NZB_INT_REPAIR_SEC, NZB_INT_REPROCESS,
-        NZB_INT_SUCCESS_ARTICLES, NZB_INT_UNPACK_CLEANED_UP_DISK, NZB_INT_UNPACK_SEC,
-        NZB_INT_UNPACK_TRIED, NZB_INT_URL_STATUS, NZB_INT_WAITING_PAR, NZB_STR_CATEGORY,
-        NZB_STR_DUPE_KEY, NZB_STR_FINAL_DIR, NZB_STR_NAME, PARTIAL_COMPLETED, RS_NONE, TS_FAILURE,
-        TS_NONE, TS_RUNNING,
+        NZB_INT_DUPE_HINT, NZB_INT_DUPE_NO_PAR_NOTED, NZB_INT_DUPE_PAR_DEFER_STATE,
+        NZB_INT_DUPE_RECOVERED_ARTICLES, NZB_INT_DUPE_RECOVERED_HOLES, NZB_INT_DUPE_SCORE,
+        NZB_INT_DUPE_UNSOURCED_ARTICLES, NZB_INT_EXTRA_PAR_BLOCKS, NZB_INT_FAILED_ARTICLES,
+        NZB_INT_HEALTH_PAUSED, NZB_INT_LIVE_PAR_SEC, NZB_INT_LIVE_UNPACK_SEC, NZB_INT_LOADING_PAR,
+        NZB_INT_MARK_STATUS, NZB_INT_PARKED_FILE_COUNT, NZB_INT_PARKING, NZB_INT_PAR_FULL,
+        NZB_INT_PAR_RENAME_STATUS, NZB_INT_PAR_REPAIRED, NZB_INT_PAR_SEC, NZB_INT_POST_TOTAL_SEC,
+        NZB_INT_RAR_RENAME_STATUS, NZB_INT_REMAINING_PAR_COUNT, NZB_INT_REPAIR_SEC,
+        NZB_INT_REPROCESS, NZB_INT_SUCCESS_ARTICLES, NZB_INT_UNPACK_CLEANED_UP_DISK,
+        NZB_INT_UNPACK_SEC, NZB_INT_UNPACK_TRIED, NZB_INT_URL_STATUS, NZB_INT_WAITING_PAR,
+        NZB_STR_CATEGORY, NZB_STR_DUPE_KEY, NZB_STR_FINAL_DIR, NZB_STR_NAME, PARTIAL_COMPLETED,
+        RS_NONE, TS_FAILURE, TS_NONE, TS_RUNNING,
     };
 
     HC_STR_ARENA.with(|a| a.borrow_mut().clear());
@@ -3003,7 +3002,7 @@ unsafe extern "C" fn hc_native_action_cb(
                     host.nzb_set_str(hi.inner_ptr, NZB_STR_DUPE_KEY, hc_cstr_bytes(s1));
                 }
                 4 => host.nzb_set_int(hi.inner_ptr, NZB_INT_DUPE_SCORE, a2),
-                5 => host.nzb_set_int(hi.inner_ptr, NZB_INT_DUPE_MODE, a2),
+                5 => host.nzb_set_dupe_mode(hi.inner_ptr, DupeMode::from(a2)),
                 6 => host.nzb_set_int(hi.inner_ptr, NZB_INT_DELETE_STATUS, a2),
                 7 => host.dup_set_str(hi.inner_ptr, DUP_STR_DUPE_KEY, hc_cstr_bytes(s1)),
                 8 => host.dup_set_int(hi.inner_ptr, DUP_INT_DUPE_SCORE, a2),

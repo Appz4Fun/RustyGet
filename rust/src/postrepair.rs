@@ -1,7 +1,7 @@
 //! Rust hot-path port for `DupeCoordinator`, `DupeMatcher`, `StreamCrypto`,
 //! `RepairController`, `ParChecker`, `DirectUnpack`, and `UnpackController`.
 
-use crate::status::DupStatus;
+use crate::status::{DupStatus, DupeMode};
 use std::collections::{BTreeSet, VecDeque};
 use std::ffi::{c_char, c_int, CStr};
 
@@ -33,9 +33,6 @@ pub fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 // ============================================================================
 // 1. DupeCoordinator (`daemon/queue/DupeCoordinator.cpp`)
 // ============================================================================
-
-pub const DUPE_MODE_SCORE: i32 = 0;
-pub const DUPE_MODE_FORCE: i32 = 2;
 
 pub const HEALTH_CHECK_PARK: i32 = 2;
 pub const HEALTH_CHECK_NONE: i32 = 3;
@@ -78,17 +75,17 @@ pub unsafe fn parse_alive_permille_cstr(value: *const c_char) -> i32 {
 }
 
 /// `DupeCoordinator::FailsOver`
-pub fn fails_over(dupe_check: bool, dupe_mode: i32, health_check: i32) -> bool {
+pub fn fails_over(dupe_check: bool, dupe_mode: DupeMode, health_check: i32) -> bool {
     dupe_check
-        && (dupe_mode == DUPE_MODE_SCORE
-            || (dupe_mode == DUPE_MODE_FORCE && health_check == HEALTH_CHECK_DUPE))
+        && (dupe_mode == DupeMode::Score
+            || (dupe_mode == DupeMode::Force && health_check == HEALTH_CHECK_DUPE))
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct NzbgetRsDupeHistoryCandidate {
     pub kind: i32,
-    pub dupe_mode: i32,
+    pub dupe_mode: DupeMode,
     pub dupe_score: i32,
     pub is_dupe_success: i32,
     pub mark_status: i32,
@@ -112,7 +109,7 @@ pub struct NzbgetRsDupeHistoryCandidate {
 pub struct NzbgetRsDupeQueueCandidate {
     pub is_self: i32,
     pub is_nzb_kind: i32,
-    pub dupe_mode: i32,
+    pub dupe_mode: DupeMode,
     pub dupe_score: i32,
     pub same_name_or_key: i32,
 }
@@ -138,7 +135,7 @@ where
         let mut good_dupe = false;
 
         if h.kind == HISTORY_KIND_NZB
-            && h.dupe_mode != DUPE_MODE_FORCE
+            && h.dupe_mode != DupeMode::Force
             && h.is_dupe_success != 0
             && h.same_name_or_key != 0
         {
@@ -150,7 +147,7 @@ where
         }
 
         if h.kind == HISTORY_KIND_DUP
-            && h.dupe_mode != DUPE_MODE_FORCE
+            && h.dupe_mode != DupeMode::Force
             && (h.dup_status == DupStatus::Success || h.dup_status == DupStatus::Good)
             && h.same_name_or_key != 0
         {
@@ -171,7 +168,7 @@ where
     for q in queue {
         if q.is_self == 0
             && q.is_nzb_kind != 0
-            && q.dupe_mode != DUPE_MODE_FORCE
+            && q.dupe_mode != DupeMode::Force
             && q.same_name_or_key != 0
             && (!queue_dupe || q.dupe_score > queue_score)
         {
@@ -223,7 +220,7 @@ where
             };
 
         if has_candidate
-            && h.dupe_mode != DUPE_MODE_FORCE
+            && h.dupe_mode != DupeMode::Force
             && backup_status
             && better
             && !(dupe_health && h.alive_permille == 0)
@@ -600,10 +597,10 @@ mod tests {
         assert!(failover_warranted(1000, 300, 300));
         assert!(!failover_warranted(1000, 300, 299));
 
-        assert!(fails_over(true, DUPE_MODE_SCORE, HEALTH_CHECK_NONE));
-        assert!(fails_over(true, DUPE_MODE_FORCE, HEALTH_CHECK_DUPE));
-        assert!(!fails_over(true, DUPE_MODE_FORCE, HEALTH_CHECK_PARK));
-        assert!(!fails_over(false, DUPE_MODE_SCORE, HEALTH_CHECK_DUPE));
+        assert!(fails_over(true, DupeMode::Score, HEALTH_CHECK_NONE));
+        assert!(fails_over(true, DupeMode::Force, HEALTH_CHECK_DUPE));
+        assert!(!fails_over(true, DupeMode::Force, HEALTH_CHECK_PARK));
+        assert!(!fails_over(false, DupeMode::Score, HEALTH_CHECK_DUPE));
     }
 
     #[test]
@@ -625,7 +622,7 @@ mod tests {
             // Index 0: failed copy with hash 42
             NzbgetRsDupeHistoryCandidate {
                 kind: HISTORY_KIND_NZB,
-                dupe_mode: DUPE_MODE_SCORE,
+                dupe_mode: DupeMode::Score,
                 dupe_score: 500,
                 is_dupe_success: 0,
                 mark_status: MARK_STATUS_NONE,
@@ -642,7 +639,7 @@ mod tests {
             // Index 1: dsCopy of hash 42 -> should be skipped because hash 42 failed
             NzbgetRsDupeHistoryCandidate {
                 kind: HISTORY_KIND_NZB,
-                dupe_mode: DUPE_MODE_SCORE,
+                dupe_mode: DupeMode::Score,
                 dupe_score: 500,
                 is_dupe_success: 0,
                 mark_status: MARK_STATUS_NONE,
@@ -659,7 +656,7 @@ mod tests {
             // Index 2: dsDupe with score 100, alive 950
             NzbgetRsDupeHistoryCandidate {
                 kind: HISTORY_KIND_NZB,
-                dupe_mode: DUPE_MODE_SCORE,
+                dupe_mode: DupeMode::Score,
                 dupe_score: 100,
                 is_dupe_success: 0,
                 mark_status: MARK_STATUS_NONE,
@@ -676,7 +673,7 @@ mod tests {
             // Index 3: dsDupe with equal score 100, higher alive 980 -> wins
             NzbgetRsDupeHistoryCandidate {
                 kind: HISTORY_KIND_NZB,
-                dupe_mode: DUPE_MODE_SCORE,
+                dupe_mode: DupeMode::Score,
                 dupe_score: 100,
                 is_dupe_success: 0,
                 mark_status: MARK_STATUS_NONE,

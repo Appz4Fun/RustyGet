@@ -2164,7 +2164,7 @@ pub(crate) fn add_url_file_active(
     env.dupe_key = dk_c.as_ptr();
     env.priority = snap.priority;
     env.dupe_score = snap.dupe_score;
-    env.dupe_mode = snap.dupe_mode;
+    env.dupe_mode = snap.dupe_mode.into();
     env.auto_category = c_int::from(snap.auto_category);
     env.add_top = 0;
     env.add_paused = c_int::from(snap.add_url_paused);

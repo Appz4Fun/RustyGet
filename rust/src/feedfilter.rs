@@ -8,6 +8,7 @@
 //! as the C library's strcasecmp/strncasecmp and numbers parse as its
 //! atof/atoi, in the current locale; regular expressions use the C++ RegEx.
 
+use crate::status::DupeMode;
 use crate::wildmask::{wild_match, Lower};
 
 fn case_eq(a: &[u8], lit: &str) -> bool {
@@ -165,14 +166,6 @@ fn field_of(name: Option<&[u8]>) -> Option<Field> {
         return Some(f);
     }
     case_prefix(n, "attr-").then_some(Field::Attr)
-}
-
-/// Pause, dupe mode: as the C++ enums.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum DupeMode {
-    Score = 0,
-    All = 1,
-    Force = 2,
 }
 
 /// What the matcher needs of the C++ side.

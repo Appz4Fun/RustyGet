@@ -2,7 +2,7 @@
 //! and `QueueCoordinator` orchestration in Rust.
 
 use crate::options::OptStr;
-use crate::status::{CleanupStatus, DupStatus, MoveStatus, NzbParStatus, UnpackStatus};
+use crate::status::{CleanupStatus, DupStatus, DupeMode, MoveStatus, NzbParStatus, UnpackStatus};
 use std::ffi::{c_char, c_int, c_void, CStr};
 
 mod live_namespace;
@@ -45,8 +45,6 @@ pub(crate) const NF_AUTO: i32 = 0;
 pub(crate) const NF_ARTICLE: i32 = 1;
 
 // EDupeMode
-pub(crate) const DM_SCORE: i32 = 0;
-pub(crate) const DM_FORCE: i32 = 2;
 
 // NzbInfo enums
 pub(crate) const NK_NZB: i32 = 0;
@@ -488,7 +486,7 @@ pub(crate) struct NzbSnap {
     pub post_info_ptr: usize,
     pub id: i32,
     pub kind: i32,
-    pub dupe_mode: i32,
+    pub dupe_mode: DupeMode,
     pub dupe_score: i32,
     pub dupe_hint: i32,
     pub delete_status: i32,
@@ -740,7 +738,7 @@ pub(crate) struct PostSnap {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct DupSnap {
-    pub dupe_mode: i32,
+    pub dupe_mode: DupeMode,
     pub dupe_score: i32,
     pub status: DupStatus,
     pub size: i64,
@@ -2130,7 +2128,7 @@ impl QueueSubsysHost {
                 post_info_ptr: i64s[18] as usize,
                 id: ints[0],
                 kind: ints[1],
-                dupe_mode: ints[2],
+                dupe_mode: DupeMode::from(ints[2]),
                 dupe_score: ints[3],
                 dupe_hint: ints[4],
                 delete_status: ints[5],
@@ -2564,6 +2562,10 @@ impl QueueSubsysHost {
 
     pub fn nzb_set_last_unpack_status(&self, nzb_ptr: usize, status: UnpackStatus) {
         self.nzb_set_int(nzb_ptr, NZB_INT_LAST_UNPACK_STATUS, status.into());
+    }
+
+    pub fn nzb_set_dupe_mode(&self, nzb_ptr: usize, mode: DupeMode) {
+        self.nzb_set_int(nzb_ptr, NZB_INT_DUPE_MODE, mode.into());
     }
 
     pub fn nzb_set_i64(&self, nzb_ptr: usize, field: i32, val: i64) {
@@ -3082,7 +3084,7 @@ impl QueueSubsysHost {
         );
         unsafe {
             DupSnap {
-                dupe_mode: ints[0],
+                dupe_mode: DupeMode::from(ints[0]),
                 dupe_score: ints[1],
                 status: DupStatus::from(ints[2]),
                 size: i64s[0],

@@ -1,5 +1,6 @@
 //! Pure queue/history discovery policy. Callers hold their queue lock, supply a
 //! stable time and persist search stamps only after a Search decision.
+use crate::status::DupeMode;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub const ENABLED: u32 = 1 << 0;
@@ -151,13 +152,13 @@ pub fn swap_backup_locked_last(
     swap_backup(&open, need).or_else(|| swap_backup(&shut, need))
 }
 
-/// The DupeMode name for its value (`dmScore = 0, dmAll = 1, dmForce = 2`).
-pub fn dupe_mode_name(mode: i32) -> &'static [u8] {
+/// The DupeMode name, as the RPC writes it.
+pub fn dupe_mode_name(mode: DupeMode) -> &'static [u8] {
     match mode {
-        0 => b"SCORE",
-        1 => b"ALL",
-        2 => b"FORCE",
-        _ => b"UNKNOWN",
+        DupeMode::Score => b"SCORE",
+        DupeMode::All => b"ALL",
+        DupeMode::Force => b"FORCE",
+        DupeMode::Other(_) => b"UNKNOWN",
     }
 }
 
@@ -466,7 +467,7 @@ pub fn build_item_flags(
     deleting: bool,
     delete_status: i32,
     has_post_info: bool,
-    dupe_mode: i32,
+    dupe_mode: DupeMode,
     is_donor: bool,
     dupe_hint: i32,
     has_dupe_fleet: bool,
@@ -497,8 +498,7 @@ pub fn build_item_flags(
     if has_post_info {
         value |= POST_PROCESS;
     }
-    // dmScore = 0
-    if dupe_mode == 0 {
+    if dupe_mode == DupeMode::Score {
         value |= SCORE_MODE;
     }
     if is_donor {
@@ -576,9 +576,9 @@ mod tests {
             decide(force, BASE_PICK_SCORE, None, 100, None, false),
             Decision::Skip
         );
-        assert_eq!(dupe_mode_name(0), b"SCORE");
-        assert_eq!(dupe_mode_name(1), b"ALL");
-        assert_eq!(dupe_mode_name(2), b"FORCE");
+        assert_eq!(dupe_mode_name(DupeMode::Score), b"SCORE");
+        assert_eq!(dupe_mode_name(DupeMode::All), b"ALL");
+        assert_eq!(dupe_mode_name(DupeMode::Force), b"FORCE");
     }
 
     #[test]
@@ -946,7 +946,18 @@ mod tests {
 
     #[test]
     fn item_flags_and_state_line() {
-        let f = build_item_flags(0, false, false, false, 0, false, 0, false, 0, true);
+        let f = build_item_flags(
+            0,
+            false,
+            false,
+            false,
+            0,
+            false,
+            DupeMode::Score,
+            false,
+            0,
+            true,
+        );
         assert_eq!(f, LIVE | MANAGED_FLEET);
         assert!(is_live_fleet_peer(b"k1", b"k1", f));
         assert!(!is_live_fleet_peer(b"k1", b"k1", f | HISTORY));

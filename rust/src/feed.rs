@@ -1375,7 +1375,7 @@ impl crate::feedfilter::Item for FilterItemAdapter<'_, '_> {
             self.item.append_dupe_key(adk.unwrap_or(b""));
         }
         if let Some(dm) = o.dupe_mode {
-            self.item.dupe_mode = dm as i32;
+            self.item.dupe_mode = dm.into();
         }
     }
 

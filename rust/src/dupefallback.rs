@@ -4,7 +4,7 @@
 //! NNTP article fetch/download bounds and response classification (`ArticleFetcher`,
 //! `ArticleDownloader`).
 
-use crate::status::NzbParStatus;
+use crate::status::{DupeMode, NzbParStatus};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -1145,8 +1145,7 @@ pub fn check_try_preconditions(
     nzb_parking: bool,
     delete_status: i32,
     ds_none: i32,
-    dupe_mode: i32,
-    dm_force: i32,
+    dupe_mode: DupeMode,
 ) -> bool {
     if fallback_mode == daf_none || raw_article || par_file {
         return false;
@@ -1160,7 +1159,7 @@ pub fn check_try_preconditions(
         || nzb_deleting
         || nzb_parking
         || delete_status != ds_none
-        || dupe_mode == dm_force
+        || dupe_mode == DupeMode::Force
     {
         return false;
     }
@@ -1299,10 +1298,9 @@ pub fn is_donor_eligible(
     is_self: bool,
     kind: i32,
     expected_kind: i32,
-    dupe_mode: i32,
-    dm_force: i32,
+    dupe_mode: DupeMode,
 ) -> bool {
-    !is_self && kind == expected_kind && dupe_mode != dm_force
+    !is_self && kind == expected_kind && dupe_mode != DupeMode::Force
 }
 
 /// `DupeArticleFallback::CollectDonors` / `MatchDonorFile`:
@@ -2419,7 +2417,7 @@ pub(crate) fn collect_donors_host(
         }
         let q = host.nzb_snap(q_ptr, false);
         if q.kind == crate::queuesubsys_host::NK_NZB
-            && q.dupe_mode != crate::queuesubsys_host::DM_FORCE
+            && q.dupe_mode != DupeMode::Force
             && crate::dupecoord::same_name_or_key(&q.name, &q.dupe_key, &nzb.name, &nzb.dupe_key)
         {
             donors.push(q);
@@ -2431,7 +2429,7 @@ pub(crate) fn collect_donors_host(
         let hi = host.history_at(dq_ptr, i);
         if hi.kind == crate::queuesubsys_host::HK_NZB && hi.inner_ptr != 0 {
             let hn = host.nzb_snap(hi.inner_ptr, false);
-            if hn.dupe_mode != crate::queuesubsys_host::DM_FORCE
+            if hn.dupe_mode != DupeMode::Force
                 && crate::dupecoord::same_name_or_key(
                     &hn.name,
                     &hn.dupe_key,
@@ -2913,7 +2911,6 @@ pub(crate) fn try_fallback_host(
         nzb.delete_status,
         crate::queuesubsys_host::DS_NONE,
         nzb.dupe_mode,
-        crate::queuesubsys_host::DM_FORCE,
     ) {
         return false;
     }
@@ -3441,8 +3438,7 @@ mod tests {
             false,
             0,
             0,
-            0,
-            2
+            DupeMode::Score
         ));
         assert!(!check_try_preconditions(
             1,
@@ -3459,8 +3455,7 @@ mod tests {
             false,
             0,
             0,
-            0,
-            2
+            DupeMode::Score
         ));
         assert!(check_try_preconditions(
             1,
@@ -3477,8 +3472,7 @@ mod tests {
             false,
             0,
             0,
-            0,
-            2
+            DupeMode::Score
         ));
 
         assert_eq!(
@@ -3530,8 +3524,8 @@ mod tests {
         ));
         assert!(!own_article_matches(3, 3, b"<orig@id>", b"", b"<sub@id>"));
 
-        assert!(is_donor_eligible(false, 1, 1, 0, 2));
-        assert!(!is_donor_eligible(true, 1, 1, 0, 2));
+        assert!(is_donor_eligible(false, 1, 1, DupeMode::Score));
+        assert!(!is_donor_eligible(true, 1, 1, DupeMode::Score));
         assert!(is_twin_kind(b"fp1", b"fp2", b"twin 16/18"));
         assert!(!is_twin_kind(b"fp1", b"fp2", b"alt"));
         assert!(compare_donors(true, 10, 5, false, 100, 1));
@@ -4164,8 +4158,7 @@ mod tests {
                 false,
                 0,
                 0,
-                0,
-                2,
+                DupeMode::Score,
             ));
         }
 
@@ -4300,8 +4293,7 @@ mod tests {
                 false,
                 0,
                 0,
-                0,
-                2,
+                DupeMode::Score,
             );
             assert_eq!(allowed, kind == 0);
         }

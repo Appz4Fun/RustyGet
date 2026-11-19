@@ -30,8 +30,8 @@ use crate::streamrepair::{
 
 use crate::log::{MK_DEBUG, MK_DETAIL, MK_ERROR, MK_INFO, MK_WARNING};
 use crate::postproc::JobQueue;
+use crate::status::DupeMode;
 
-const DM_FORCE: i32 = 2;
 const RS_NONE: i32 = 0;
 
 const SLOW_REPAIR_FACTOR: i32 = 3;
@@ -72,7 +72,7 @@ struct TargetSnap {
 struct CandSnap {
     id: i32,
     dupe_score: i32,
-    dupe_mode: i32,
+    dupe_mode: DupeMode,
     full_hash: i64,
     name: Vec<u8>,
     dupe_key: Vec<u8>,
@@ -667,7 +667,7 @@ impl NzbgetRsStreamRepairCtrl {
                 if !from_history && cand_ptr == own_nzb_ptr {
                     continue;
                 }
-                if cand.dupe_mode == DM_FORCE {
+                if cand.dupe_mode == DupeMode::Force {
                     continue;
                 }
                 if !same_name_or_key(&cand.name, &cand.dupe_key, &nzb_name, &own_dupe_key) {

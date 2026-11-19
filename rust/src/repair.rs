@@ -5,7 +5,7 @@
 //! status resolution, progress/stage transitions, and pause timestamp adjustment.
 
 use crate::cstr;
-use crate::status::{NzbParStatus, ParCheckerStatus};
+use crate::status::{DupeMode, NzbParStatus, ParCheckerStatus};
 use std::ffi::CStr;
 
 pub use crate::postrepair::{check_par_time_limit, pick_twin_volume, select_more_pars};
@@ -410,7 +410,7 @@ struct NzbSnapshot {
     file_list_len: usize,
     completed_len: usize,
     jobs_len: usize,
-    dupe_mode: i32,
+    dupe_mode: DupeMode,
     dupe_recovered_bytes: i64,
     expected_data_size: i64,
     name: Vec<u8>,
@@ -1087,7 +1087,7 @@ impl NzbgetRsRepairController {
         q.host.with_locked_queue(|dq_ptr| {
             let ctrl = self.snap(q);
             let nzb = inspect_nzb(q.host, ctrl.nzb_ptr);
-            if nzb.dupe_mode == crate::dupecoord::DUPE_MODE_FORCE {
+            if nzb.dupe_mode == DupeMode::Force {
                 return;
             }
             let hist_len = q.host.history_len(dq_ptr);
@@ -1098,7 +1098,7 @@ impl NzbgetRsRepairController {
                     continue;
                 }
                 let item = inspect_nzb(q.host, item_ptr);
-                if item.dupe_mode != crate::dupecoord::DUPE_MODE_FORCE
+                if item.dupe_mode != DupeMode::Force
                     && crate::dupecoord::same_name_or_key(
                         &item.name,
                         &item.dupe_key,

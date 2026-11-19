@@ -1,6 +1,7 @@
 //! Native Rust implementation of `ArticleFetcher`, `ArticleBatchFetcher` pool,
 //! `TwinCheck::FetchEntry`, and in-memory donor NZB parsing (`ParseDonorNzb`).
 
+use crate::cstr;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{c_char, c_int, CStr};
 use std::ptr;
@@ -415,24 +416,6 @@ pub fn set_server_unreachable(server_id: i32, unreachable: bool) {
     }
 }
 
-#[inline]
-fn to_c_bytes(bytes: &[u8]) -> Vec<u8> {
-    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    let mut out = Vec::with_capacity(end + 1);
-    out.extend_from_slice(&bytes[..end]);
-    out.push(0);
-    out
-}
-
-#[inline]
-unsafe fn ptr_to_bytes(p: *const c_char) -> Vec<u8> {
-    if p.is_null() {
-        Vec::new()
-    } else {
-        unsafe { CStr::from_ptr(p).to_bytes().to_vec() }
-    }
-}
-
 #[derive(Clone, Copy)]
 struct HostStatus {
     max_norm_level: i32,
@@ -473,7 +456,7 @@ fn query_host_status(host: NzbgetRsNntpFetchHostFn) -> HostStatus {
 }
 
 pub fn emit_detail(host: NzbgetRsNntpFetchHostFn, msg: &[u8]) {
-    let c = to_c_bytes(msg);
+    let c = cstr::nul_terminated(msg);
     unsafe {
         host(
             10,
@@ -701,7 +684,7 @@ impl ArticleFetcher {
                     server_group_of_conn = c_ints[4];
                     server_ptr = c_i64s[0] as usize;
                     server_retention = c_ints[5];
-                    server_name = unsafe { ptr_to_bytes(c_strs[0]) };
+                    server_name = unsafe { cstr::owned(c_strs[0]) };
                 } else {
                     std::thread::sleep(Duration::from_millis(5));
                 }
@@ -851,7 +834,7 @@ impl ArticleFetcher {
         let (server_name, join_group): (&[u8], bool) = match known_meta {
             Some((name, jg)) => (name, jg),
             None => {
-                owned_name = unsafe { ptr_to_bytes(c_strs[0]) };
+                owned_name = unsafe { cstr::owned(c_strs[0]) };
                 (&owned_name, c_ints[0] != 0)
             }
         };
@@ -899,7 +882,7 @@ impl ArticleFetcher {
             let join_started = Instant::now();
             let mut joined_resp: Option<Vec<u8>> = None;
             for group in groups {
-                let grp_c = to_c_bytes(group);
+                let grp_c = cstr::nul_terminated(group);
                 let mut g_strs = [ptr::null::<c_char>(); 1];
                 let ok = unsafe {
                     (self.host)(
@@ -916,7 +899,7 @@ impl ArticleFetcher {
                     )
                 };
                 if ok != 0 && !g_strs[0].is_null() {
-                    let resp = unsafe { ptr_to_bytes(g_strs[0]) };
+                    let resp = unsafe { cstr::owned(g_strs[0]) };
                     let is_ok = resp.first() == Some(&b'2');
                     joined_resp = Some(resp);
                     if is_ok {

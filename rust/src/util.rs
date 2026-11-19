@@ -2,6 +2,7 @@
 //! ReduceStr, the Tokenizer's tokens and MatchFileExt. Each matches the C++
 //! code it replaces, quirks included.
 
+use crate::cstr;
 use crate::wildmask::Lower;
 use std::ffi::{c_char, c_int, CStr};
 
@@ -845,7 +846,6 @@ pub fn log_should_close_idle(cur_time: i64, last_written: i64) -> bool {
     cur_time.wrapping_sub(last_written).saturating_abs() > 1
 }
 
-
 /// Evaluates whether `Log::Filelog` should rotate the log file on a day boundary.
 pub fn log_should_rotate(rawtime: i64, last_written: i64, write_log_mode: i32) -> bool {
     const DAY: i32 = 86400;
@@ -1239,13 +1239,9 @@ pub const fn util_is_control_char(c: u8) -> bool {
     c < 32 || c == 127
 }
 
-fn truncate_nul(s: &[u8]) -> &[u8] {
-    &s[..s.iter().position(|&b| b == 0).unwrap_or(s.len())]
-}
-
 /// Port of `Util::StrToNum<T>` for floating-point types.
 pub fn util_str_to_f64_checked(s: &[u8], min_val: f64, max_val: f64) -> Option<f64> {
-    let val = crate::dupecoord::parse_f64_prefix(truncate_nul(s))?;
+    let val = crate::dupecoord::parse_f64_prefix(cstr::until_nul(s))?;
     if val < min_val || val > max_val || val.is_nan() {
         None
     } else {
@@ -1255,7 +1251,7 @@ pub fn util_str_to_f64_checked(s: &[u8], min_val: f64, max_val: f64) -> Option<f
 
 /// Port of `Util::StrToNum<T>` for signed integral types.
 pub fn util_str_to_i64_checked(s: &[u8], min_val: i64, max_val: i64) -> Option<i64> {
-    let bytes = truncate_nul(s);
+    let bytes = cstr::until_nul(s);
     let mut i = 0;
     while i < bytes.len() && c_is_space(bytes[i]) {
         i += 1;
@@ -1299,7 +1295,7 @@ pub fn util_str_to_i64_checked(s: &[u8], min_val: i64, max_val: i64) -> Option<i
 
 /// Port of `Util::StrToNum<T>` for unsigned integral types.
 pub fn util_str_to_u64_checked(s: &[u8], max_val: u64) -> Option<u64> {
-    let bytes = truncate_nul(s);
+    let bytes = cstr::until_nul(s);
     let mut i = 0;
     while i < bytes.len() && c_is_space(bytes[i]) {
         i += 1;

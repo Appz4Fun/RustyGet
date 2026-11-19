@@ -1,6 +1,7 @@
 //! The main configuration file reader/writer (`ScriptConfig`): load, merge-save
 //! with the TLS cipher baseline check, and atomic cipher patching.
 
+use crate::cstr;
 use std::collections::BTreeMap;
 use std::ffi::{c_int, CStr, CString};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -15,14 +16,6 @@ fn bytes_to_path(bytes: &[u8]) -> PathBuf {
 #[cfg(not(unix))]
 fn bytes_to_path(bytes: &[u8]) -> PathBuf {
     PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
-}
-
-fn cstring_lossy(bytes: &[u8]) -> CString {
-    if let Some(nul) = bytes.iter().position(|&b| b == 0) {
-        CString::new(&bytes[..nul]).unwrap_or_default()
-    } else {
-        CString::new(bytes).unwrap_or_default()
-    }
 }
 
 static CONFIG_WRITE_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -63,8 +56,8 @@ pub fn script_config_parse_bytes(raw: &[u8]) -> Vec<(CString, CString)> {
             continue;
         }
         if let Some((raw_name, raw_val)) = crate::options::options_split_option_string(line) {
-            let name_c = cstring_lossy(raw_name);
-            let val_c = cstring_lossy(raw_val);
+            let name_c = cstr::to_cstring(raw_name);
+            let val_c = cstr::to_cstring(raw_val);
             let (conv_name, conv_val) = crate::options::convert_old_option(&name_c, &val_c);
             entries.push((conv_name, conv_val));
         }
@@ -128,8 +121,8 @@ pub fn script_config_merge_bytes(raw: &[u8], entries: &[(&[u8], &[u8])]) -> Vec<
             }
             if let Some((raw_name, raw_val)) = crate::options::options_split_option_string(trimmed)
             {
-                let name_c = cstring_lossy(raw_name);
-                let val_c = cstring_lossy(raw_val);
+                let name_c = cstr::to_cstring(raw_name);
+                let val_c = cstr::to_cstring(raw_val);
                 let (conv_name, _) = crate::options::convert_old_option(&name_c, &val_c);
                 let opt_bytes = conv_name.to_bytes();
                 if let Some(&(canon_name, latest_val)) = values
@@ -392,7 +385,7 @@ mod cipher_atomic {
     }
 
     pub fn read_snapshot_unlocked(filename: &[u8]) -> Option<Vec<u8>> {
-        let path_c = cstring_lossy(filename);
+        let path_c = cstr::to_cstring(filename);
         let fd = unsafe {
             open(
                 path_c.as_ptr(),
@@ -435,8 +428,8 @@ mod cipher_atomic {
             .map_or(&b"."[..], |p| {
                 crate::cleanup::os_str_to_bytes(p.as_os_str())
             });
-        let parent_c = cstring_lossy(parent_bytes);
-        let leaf_c = cstring_lossy(leaf_bytes);
+        let parent_c = cstr::to_cstring(parent_bytes);
+        let leaf_c = cstr::to_cstring(leaf_bytes);
 
         let parent_fd = unsafe { open(parent_c.as_ptr(), O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0) };
         if parent_fd < 0 {
@@ -476,7 +469,7 @@ mod cipher_atomic {
             tmp_name.push(b'.');
             tmp_name.extend_from_slice(leaf_bytes);
             tmp_name.extend_from_slice(format!(".tls-{pid}-{seq}").as_bytes());
-            temp_c = cstring_lossy(&tmp_name);
+            temp_c = cstr::to_cstring(&tmp_name);
             out_fd = unsafe {
                 openat(
                     parent_file.as_raw_fd(),

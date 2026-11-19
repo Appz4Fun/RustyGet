@@ -5,6 +5,7 @@
 //! data length. Integers on the wire are big-endian (htonl/ntohl). Reading
 //! from and writing to the connection, and what each command does, stay C++.
 
+use crate::cstr;
 use std::ffi::CStr;
 use std::mem::MaybeUninit;
 
@@ -961,14 +962,6 @@ fn push_hms(out: &mut Vec<u8>, total_sec: i64) {
     push_two_digits(out, s);
 }
 
-unsafe fn cstr_bytes<'a>(ptr: *const u8) -> &'a [u8] {
-    if ptr.is_null() {
-        b""
-    } else {
-        std::ffi::CStr::from_ptr(ptr.cast()).to_bytes()
-    }
-}
-
 /// Format the `files` section of `RemoteClient::RequestServerList`.
 pub fn file_listing(entries: &[FileListingEntry], has_pattern: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(
@@ -1000,9 +993,9 @@ pub fn file_listing(entries: &[FileListingEntry], has_pattern: bool) -> Vec<u8> 
             push_listing(&mut out, b'[');
             push_int(&mut out, e.id);
             append_listing(&mut out, b"] ");
-            append_listing(&mut out, unsafe { cstr_bytes(e.nzb_name) });
+            append_listing(&mut out, unsafe { cstr::bytes(e.nzb_name.cast()) });
             push_listing(&mut out, b'/');
-            append_listing(&mut out, unsafe { cstr_bytes(e.filename) });
+            append_listing(&mut out, unsafe { cstr::bytes(e.filename.cast()) });
             append_listing(&mut out, b" (");
             crate::util::format_size_into(&mut out, e.size);
             if completed_pct >= 0 {
@@ -1108,7 +1101,7 @@ pub fn group_listing(entries: &[GroupListingEntry], has_pattern: bool) -> Vec<u8
                 push_int(&mut out, e.priority);
                 append_listing(&mut out, b"] ");
             }
-            append_listing(&mut out, unsafe { cstr_bytes(e.name) });
+            append_listing(&mut out, unsafe { cstr::bytes(e.name.cast()) });
             append_listing(&mut out, b" (");
             if e.kind == 1 {
                 // NzbInfo::nkUrl == 1
@@ -1144,7 +1137,7 @@ pub fn group_listing(entries: &[GroupListingEntry], has_pattern: bool) -> Vec<u8
                 );
             }
             push_listing(&mut out, b')');
-            let cat = unsafe { cstr_bytes(e.category) };
+            let cat = unsafe { cstr::bytes(e.category.cast()) };
             if !cat.is_empty() {
                 append_listing(&mut out, b" (");
                 append_listing(&mut out, cat);
@@ -1155,9 +1148,9 @@ pub fn group_listing(entries: &[GroupListingEntry], has_pattern: bool) -> Vec<u8
                 let mut param_buf = Vec::new();
                 for (idx, p) in params.iter().enumerate() {
                     param_buf.extend_from_slice(if idx == 0 { b" (" } else { b", " });
-                    param_buf.extend_from_slice(unsafe { cstr_bytes(p.name) });
+                    param_buf.extend_from_slice(unsafe { cstr::bytes(p.name.cast()) });
                     param_buf.push(b'=');
-                    param_buf.extend_from_slice(unsafe { cstr_bytes(p.value) });
+                    param_buf.extend_from_slice(unsafe { cstr::bytes(p.value.cast()) });
                 }
                 // Match BString<1024> truncation semantics for parameters
                 if param_buf.len() > 1023 {
@@ -1451,13 +1444,13 @@ fn parse_wire_queue(
         };
         let name_ptr = e.texts[0].data;
         let value_ptr = e.texts[1].data;
-        let name_bytes = unsafe { cstr_bytes(name_ptr) };
-        let value_bytes = unsafe { cstr_bytes(value_ptr) };
+        let name_bytes = unsafe { cstr::bytes(name_ptr.cast()) };
+        let value_bytes = unsafe { cstr::bytes(value_ptr.cast()) };
         let empty_val = value_bytes.is_empty();
         let pos = nzb
             .params
             .iter()
-            .position(|p| unsafe { cstr_bytes(p.name) }.eq_ignore_ascii_case(name_bytes));
+            .position(|p| unsafe { cstr::bytes(p.name.cast()) }.eq_ignore_ascii_case(name_bytes));
         if empty_val {
             if let Some(idx) = pos {
                 nzb.params.remove(idx);
@@ -3073,10 +3066,6 @@ fn join_i64(hi: u32, lo: u32) -> i64 {
     ((hi as i64) << 32) | (lo as u64 as i64)
 }
 
-fn c_slice(buf: &[u8]) -> &[u8] {
-    &buf[..buf.iter().position(|&b| b == 0).unwrap_or(buf.len())]
-}
-
 /// Accumulates wire-encoded `Entry` items safely while string slices are live,
 /// returning an empty slice if total length exceeds `MAX_RESPONSE`.
 pub struct WireEntryEncoder {
@@ -3445,14 +3434,14 @@ pub fn serve_binrpc<RV, SD, LG, ACT, LST, LOGT, POSTT, HISTT>(
             extra[511] = 0;
             extra[512 + 511] = 0;
             extra[1044 + 511] = 0;
-            let nzb_filename = c_slice(&extra[0..512]);
-            let category = c_slice(&extra[512..1024]);
+            let nzb_filename = cstr::until_nul(&extra[0..512]);
+            let category = cstr::until_nul(&extra[512..1024]);
             let add_first = i32::from_be_bytes(extra[1024..1028].try_into().unwrap());
             let add_paused = i32::from_be_bytes(extra[1028..1032].try_into().unwrap());
             let priority = i32::from_be_bytes(extra[1032..1036].try_into().unwrap());
             let dupe_score = i32::from_be_bytes(extra[1036..1040].try_into().unwrap());
             let dupe_mode = i32::from_be_bytes(extra[1040..1044].try_into().unwrap());
-            let dupe_key = c_slice(&extra[1044..1556]);
+            let dupe_key = cstr::until_nul(&extra[1044..1556]);
             let buf_len = i32::from_be_bytes(extra[1556..1560].try_into().unwrap());
             let auto_category = i32::from_be_bytes(extra[1560..1564].try_into().unwrap());
 
@@ -3541,7 +3530,7 @@ pub fn serve_binrpc<RV, SD, LG, ACT, LST, LOGT, POSTT, HISTT>(
             let match_mode = i32::from_be_bytes(extra[8..12].try_into().unwrap());
             let match_group = i32::from_be_bytes(extra[12..16].try_into().unwrap()) != 0;
             extra[16 + 511] = 0;
-            let pattern = c_slice(&extra[16..528]);
+            let pattern = cstr::until_nul(&extra[16..528]);
 
             let mut builder = BinRpcListBuilder::new(match_mode, match_group, pattern);
             collect_list(want_files, want_state, &mut builder);
@@ -3673,7 +3662,7 @@ pub fn serve_binrpc<RV, SD, LG, ACT, LST, LOGT, POSTT, HISTT>(
                 offset_text = offset.to_string().into_bytes();
                 &offset_text
             } else if text_len > 0 {
-                c_slice(&buf[..text_len as usize])
+                cstr::until_nul(&buf[..text_len as usize])
             } else {
                 b""
             };
@@ -3766,7 +3755,7 @@ pub fn serve_binrpc<RV, SD, LG, ACT, LST, LOGT, POSTT, HISTT>(
                 return;
             };
             let ok = if (0..=4).contains(&msg_kind) {
-                log_msg(msg_kind, c_slice(&buf));
+                log_msg(msg_kind, cstr::until_nul(&buf));
                 true
             } else {
                 false
@@ -4099,7 +4088,7 @@ where
                     false
                 } else {
                     if p.verbose {
-                        let txt = c_slice(&text_buf);
+                        let txt = cstr::until_nul(&text_buf);
                         let mut line = Vec::with_capacity(18 + txt.len());
                         line.extend_from_slice(b"server returned: ");
                         line.extend_from_slice(txt);
@@ -4435,7 +4424,7 @@ where
                 );
                 vprint(hdr.as_bytes(), &mut write_stdout);
                 let listing = log_listing(&trailing, count);
-                vprint(c_slice(&listing), &mut write_stdout);
+                vprint(cstr::until_nul(&listing), &mut write_stdout);
                 vprint(b"-----------------------------------\n", &mut write_stdout);
             }
             true
@@ -4468,7 +4457,7 @@ where
                     &mut write_stdout,
                 );
                 let listing = post_queue_listing(&trailing, count);
-                vprint(c_slice(&listing), &mut write_stdout);
+                vprint(cstr::until_nul(&listing), &mut write_stdout);
                 vprint(b"-----------------------------------\n", &mut write_stdout);
             }
             true
@@ -4547,7 +4536,7 @@ where
                     &mut write_stdout,
                 );
                 let listing = history_listing(&trailing, count);
-                vprint(c_slice(&listing), &mut write_stdout);
+                vprint(cstr::until_nul(&listing), &mut write_stdout);
                 let footer = format!(
                     "-----------------------------------\nItems: {}\n",
                     count as i32

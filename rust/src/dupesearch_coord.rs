@@ -4,6 +4,7 @@
 //! `DeadPostings`, `NzbFetcher`, `DonorScore`, `DupeIdentity`, `DupeSearch`, and
 //! `Fleet` in `daemon/util/Util.h`.
 
+use crate::cstr;
 use crate::options::OptStr;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{c_char, c_int, c_void, CStr};
@@ -321,15 +322,6 @@ fn truncate_note(mut msg: Vec<u8>) -> Vec<u8> {
 }
 
 #[inline]
-unsafe fn ptr_bytes(p: *const c_char) -> Vec<u8> {
-    if p.is_null() {
-        Vec::new()
-    } else {
-        unsafe { CStr::from_ptr(p).to_bytes().to_vec() }
-    }
-}
-
-#[inline]
 fn path_join(dir: &[u8], sep: u8, leaf: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(dir.len() + 1 + leaf.len());
     out.extend_from_slice(dir);
@@ -503,7 +495,7 @@ pub(crate) unsafe extern "C" fn native_dupe_host(
                 return 0;
             };
             if a1 == 0 {
-                let s1_b = unsafe { ptr_bytes(s1) };
+                let s1_b = unsafe { cstr::owned(s1) };
                 qh.nzb_set_str(p2, crate::queuesubsys_host::NZB_STR_DUPE_KEY, &s1_b);
                 let s2_b = if s2.is_null() {
                     None
@@ -525,7 +517,7 @@ pub(crate) unsafe extern "C" fn native_dupe_host(
                 return 0;
             }
             if a1 == 1 {
-                let s1_b = unsafe { ptr_bytes(s1) };
+                let s1_b = unsafe { cstr::owned(s1) };
                 qh.nzb_add_message(p2, a2, &s1_b);
                 return 0;
             }
@@ -5896,7 +5888,7 @@ pub unsafe fn fleet_append(
     let raw_slice = unsafe { std::slice::from_raw_parts(req_members, req_members_len) };
     let mut members = Vec::with_capacity(req_members_len);
     for rm in raw_slice {
-        let name = unsafe { ptr_bytes(rm.name) };
+        let name = unsafe { cstr::owned(rm.name) };
         let payload = if rm.data.is_null() || rm.data_len == 0 {
             Vec::new()
         } else {
@@ -5917,8 +5909,8 @@ pub unsafe fn fleet_append(
         }
     }
 
-    let mut dupe_key = unsafe { ptr_bytes(dupe_key_ptr) };
-    let category = unsafe { ptr_bytes(category_ptr) };
+    let mut dupe_key = unsafe { cstr::owned(dupe_key_ptr) };
+    let category = unsafe { cstr::owned(category_ptr) };
     if dupe_key.is_empty() {
         dupe_key = make_dupe_key(&members[0].name);
     }

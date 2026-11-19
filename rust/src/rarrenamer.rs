@@ -4,6 +4,8 @@
 //! (FindMainFile) with new volume names (GenNewVolumeFilename) that don't
 //! overwrite other files.
 
+use crate::cstr;
+
 /// A file of a volume.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct File {
@@ -38,7 +40,7 @@ pub trait Env {
 /// Matches `RegEx(".*.part([0-9]+)\\.rar$")` (`REG_EXTENDED | REG_ICASE`, without `REG_NEWLINE`)
 /// on `name` (up to its first NUL), returning capture group 1's `(start, len)`.
 pub fn match_part_regex(name: &[u8]) -> Option<(usize, usize)> {
-    let s = c(name);
+    let s = cstr::until_nul(name);
     if s.len() < 9 || !s[s.len() - 4..].eq_ignore_ascii_case(b".rar") {
         return None;
     }
@@ -76,7 +78,7 @@ pub fn execute_all(
     renamed_count: &mut i32,
     cb: &mut dyn RunCallbacks,
 ) -> Result<(), ()> {
-    let init_label = cut(&[b"Checkingrar-files for ", c(info_name)].concat()).to_vec();
+    let init_label = cut(&[b"Checkingrar-files for ", cstr::until_nul(info_name)].concat()).to_vec();
     cb.progress(&init_label, 0)?;
 
     let mut dir_list: Vec<Vec<u8>> = Vec::new();
@@ -89,11 +91,11 @@ pub fn execute_all(
         file_count: &mut i32,
         cb: &mut dyn RunCallbacks,
     ) -> Result<(), ()> {
-        dir_list.push(c(dir).to_vec());
+        dir_list.push(cstr::until_nul(dir).to_vec());
         for filename in crate::fsops::list_dir_entries(dir) {
             if !cb.stopped()? {
                 let full =
-                    cut(&[c(dir), &[crate::paths::PATH_SEPARATOR], c(&filename)].concat()).to_vec();
+                    cut(&[cstr::until_nul(dir), &[crate::paths::PATH_SEPARATOR], cstr::until_nul(&filename)].concat()).to_vec();
                 if crate::fsops::directory_exists(&full, &crate::fsops::posix_stat) {
                     build_dir_list(&full, dir_list, file_count, cb)?;
                 } else {
@@ -106,17 +108,17 @@ pub fn execute_all(
 
     build_dir_list(dest_dir, &mut dir_list, &mut file_count, cb)?;
 
-    let ignore_c = c(ignore_ext);
-    let pass_c = c(password);
+    let ignore_c = cstr::until_nul(ignore_ext);
+    let pass_c = cstr::until_nul(password);
 
     for dir in dir_list {
         let mut volumes: Vec<Volume> = Vec::new();
         for filename in crate::fsops::list_dir_entries(&dir) {
             if !cb.stopped()? {
-                let full = cut(&[c(&dir), &[crate::paths::PATH_SEPARATOR], c(&filename)].concat())
+                let full = cut(&[cstr::until_nul(&dir), &[crate::paths::PATH_SEPARATOR], cstr::until_nul(&filename)].concat())
                     .to_vec();
                 if !crate::fsops::directory_exists(&full, &crate::fsops::posix_stat) {
-                    let label = cut(&[b"Checking file ", c(&filename)].concat()).to_vec();
+                    let label = cut(&[b"Checking file ", cstr::until_nul(&filename)].concat()).to_vec();
                     let stage = if file_count > 0 {
                         cur_file.wrapping_mul(1000) / file_count
                     } else {
@@ -195,12 +197,12 @@ pub fn execute_all(
                         self.aborted = true;
                         return;
                     }
-                    let src_c = std::ffi::CString::new(c(src)).unwrap_or_default();
-                    let dst_c = std::ffi::CString::new(c(dest)).unwrap_or_default();
+                    let src_c = std::ffi::CString::new(cstr::until_nul(src)).unwrap_or_default();
+                    let dst_c = std::ffi::CString::new(cstr::until_nul(dest)).unwrap_or_default();
                     if !crate::fsops::move_file(&src_c, &dst_c) {
                         let err = crate::fsops::error_message(crate::fsops::last_errno());
                         let err_msg =
-                            [b"Could not rename ", c(src), b" to ", c(dest), b": ", &err].concat();
+                            [b"Could not rename ", cstr::until_nul(src), b" to ", cstr::until_nul(dest), b": ", &err].concat();
                         if self.cb.message(2, &err_msg).is_err() {
                             self.aborted = true;
                         }
@@ -238,13 +240,8 @@ fn cut(s: &[u8]) -> &[u8] {
     &s[..s.len().min(BSTRING_MAX)]
 }
 
-/// The C string of a std::string: up to its first NUL.
-fn c(s: &[u8]) -> &[u8] {
-    &s[..s.iter().position(|&b| b == 0).unwrap_or(s.len())]
-}
-
 fn base_name(path: &[u8]) -> &[u8] {
-    let p = c(path);
+    let p = cstr::until_nul(path);
     &p[crate::paths::base_file_name(p)..]
 }
 
@@ -254,7 +251,7 @@ fn rfind(s: &[u8], b: u8) -> Option<usize> {
 
 /// strncmp(a, b, n) == 0 on C strings
 fn strncmp_eq(a: &[u8], b: &[u8], n: usize) -> bool {
-    let (a, b) = (c(a), c(b));
+    let (a, b) = (cstr::until_nul(a), cstr::until_nul(b));
     for i in 0..n {
         let x = a.get(i).copied().unwrap_or(0);
         let y = b.get(i).copied().unwrap_or(0);
@@ -283,7 +280,7 @@ pub fn old_extension(volume_no: i32) -> Vec<u8> {
     let mut v = vec![ch];
     v.extend_from_slice(format!("{:02}", n % 100).as_bytes());
     // "%c" of a NUL ends the C string there
-    c(&v).to_vec()
+    cstr::until_nul(&v).to_vec()
 }
 
 fn new_volume_filename(dir: &[u8], base: &[u8], v: &Volume) -> Vec<u8> {
@@ -293,12 +290,12 @@ fn new_volume_filename(dir: &[u8], base: &[u8], v: &Volume) -> Vec<u8> {
     } else {
         old_extension(v.volume_no as i32)
     };
-    [c(dir), &[crate::paths::PATH_SEPARATOR], c(base), b".", &ext].concat()
+    [cstr::until_nul(dir), &[crate::paths::PATH_SEPARATOR], cstr::until_nul(base), b".", &ext].concat()
 }
 
 /// SameArchiveName
 pub fn same_archive_name(f1: &[u8], f2: &[u8], new_naming: bool) -> bool {
-    let (f1, f2) = (c(f1), c(f2));
+    let (f1, f2) = (cstr::until_nul(f1), cstr::until_nul(f2));
     if f1.len() != f2.len() {
         return false;
     }
@@ -348,7 +345,7 @@ pub fn make_sets(volumes: &[Volume]) -> Vec<Vec<usize>> {
                         && last.has_next_volume
                         && ((v.files[0].split_before
                             && last.files.last().is_some_and(|f| f.split_after)
-                            && c(&v.files[0].name) == c(&last.files.last().expect("checked").name))
+                            && cstr::until_nul(&v.files[0].name) == cstr::until_nul(&last.files.last().expect("checked").name))
                             || (!v.files[0].split_before
                                 && !last.files.last().is_some_and(|f| f.split_after)))
                 })
@@ -461,7 +458,7 @@ pub fn rename_files(dir: &[u8], volumes: &[Volume], env: &mut dyn Env) {
             num += 1;
             let overwrite = set.iter().any(|&i| {
                 let dest = new_volume_filename(dir, &new_base, &volumes[i]);
-                c(&volumes[i].filename) != &dest[..] && env.file_exists(&dest)
+                cstr::until_nul(&volumes[i].filename) != &dest[..] && env.file_exists(&dest)
             });
             if !overwrite {
                 break;
@@ -469,7 +466,7 @@ pub fn rename_files(dir: &[u8], volumes: &[Volume], env: &mut dyn Env) {
         }
         for &i in &set {
             let dest = new_volume_filename(dir, &new_base, &volumes[i]);
-            if c(&volumes[i].filename) != &dest[..] {
+            if cstr::until_nul(&volumes[i].filename) != &dest[..] {
                 env.rename(i, &dest);
             }
         }
@@ -880,18 +877,18 @@ mod tests {
         }
         impl Env for ProbeEnv<'_> {
             fn file_exists(&mut self, path: &[u8]) -> bool {
-                self.trace.push([b"exists:".as_slice(), c(path)].concat());
+                self.trace.push([b"exists:".as_slice(), cstr::until_nul(path)].concat());
                 self.checks += 1;
                 self.checks <= self.collisions
             }
             fn match_part(&mut self, name: &[u8]) -> Option<(usize, usize)> {
-                self.trace.push([b"match:".as_slice(), c(name)].concat());
+                self.trace.push([b"match:".as_slice(), cstr::until_nul(name)].concat());
                 match_part_regex(name)
             }
             fn rename(&mut self, index: usize, dest: &[u8]) {
-                let src = c(&self.volumes[index].filename);
+                let src = cstr::until_nul(&self.volumes[index].filename);
                 self.trace
-                    .push([b"rename:".as_slice(), src, b">", c(dest)].concat());
+                    .push([b"rename:".as_slice(), src, b">", cstr::until_nul(dest)].concat());
             }
         }
 

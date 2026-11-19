@@ -7,11 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
-pub const MK_INFO: c_int = 0;
-pub const MK_WARNING: c_int = 1;
-pub const MK_ERROR: c_int = 2;
-pub const MK_DEBUG: c_int = 3;
-pub const MK_DETAIL: c_int = 4;
+pub use crate::log::{MK_INFO, MK_WARNING, MK_ERROR, MK_DEBUG, MK_DETAIL};
 
 pub const FORK_ERROR_EXIT_CODE: c_int = 254;
 const MAX_LINE_CHUNK: usize = 1024 * 10 - 1;

@@ -16,11 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicUsize, Ordering}
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-pub const MK_INFO: i32 = 0;
-pub const MK_WARNING: i32 = 1;
-pub const MK_ERROR: i32 = 2;
-pub const MK_DEBUG: i32 = 3;
-pub const MK_DETAIL: i32 = 4;
+pub use crate::log::{MK_INFO, MK_WARNING, MK_ERROR, MK_DEBUG, MK_DETAIL};
 
 pub const PAR_STATUS_FAILED: i32 = 0;
 pub const PAR_STATUS_REPAIR_POSSIBLE: i32 = 1;

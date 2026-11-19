@@ -278,10 +278,7 @@ fn fleet_set_video(host_ctx: *mut c_void, host_cb: DupeHostFn, nzb_id: i32, valu
     });
 }
 
-const MK_INFO: c_int = 0;
-const MK_WARNING: c_int = 1;
-const MK_DEBUG: c_int = 3;
-const MK_DETAIL: c_int = 4;
+use crate::log::{MK_INFO, MK_WARNING, MK_DEBUG, MK_DETAIL};
 
 pub type DupeHostFn = unsafe extern "C" fn(
     ctx: *mut c_void,

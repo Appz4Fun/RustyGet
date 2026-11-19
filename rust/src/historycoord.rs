@@ -2753,6 +2753,7 @@ unsafe extern "C" fn hc_native_action_cb(
             host.nzb_set_int(nzb_ptr, NZB_INT_MOVE_STATUS, *ints.add(2));
             host.nzb_set_int(nzb_ptr, NZB_INT_REPROCESS, c_int::from(a2 != 0));
             host.nzb_set_str(nzb_ptr, NZB_STR_FINAL_DIR, b"");
+            crate::postproc::forget_dead_volume_verdicts(nzb.id);
             host.history_return_to_queue(p1, p2, a1 as usize);
             0
         }

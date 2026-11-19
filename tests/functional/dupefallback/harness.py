@@ -3980,7 +3980,26 @@ def _skiphole_rar(daemon, t, tag, donor, recovery, damage=None):
     return good, detail
 
 
-def _dead_volume_nested(daemon, t, tag, labels, donor_seed=None, donor_volumes=3, donor_size=None):
+def _nested_donor(t, sub, movie, volumes):
+    """Writes ``movie`` nested in another container (a stored rar of
+    ``volumes`` volumes holding a rar holding movie.mkv) under data/``sub``;
+    returns its nzb members."""
+    inner = generators.rar3_store_volumes_valid('movie.mkv', movie, len(movie) + 1)
+    assert len(inner) == 1
+    outer = generators.rar3_store_volumes_valid('Show.rar', inner[0],
+                                                (len(inner[0]) + volumes - 1) // volumes)
+    assert len(outer) == volumes
+    donor_members = []
+    for i, data in enumerate(outer):
+        name = 'Other.part%02d.rar' % (i + 1)
+        rel = '%s/%s' % (sub, name)
+        t.write_file(os.path.join('data', rel), data)
+        donor_members.append((rel, name, len(data), 100_000, set()))
+    return donor_members
+
+
+def _dead_volume_nested(daemon, t, tag, labels, donor_seed=None, donor_volumes=3, donor_size=None,
+                        extra_backups=()):
     """A plain stored rar set without par2 (articles of 20 KB, so direct rename
     hashes each volume's first article) loses three middle volumes entirely;
     its backup in history holds the same movie nested in another container (a
@@ -3989,7 +4008,9 @@ def _dead_volume_nested(daemon, t, tag, labels, donor_seed=None, donor_volumes=3
     fleet and TwinCheck stored). ``donor_seed``: the backup holds another
     video (of ``donor_size`` bytes, the same size by default). ``donor_volumes``: how many volumes the backup's
     outer rar has (as many as the primary's lets TwinCheck sample the two
-    posts against each other). Returns (primary, backup, movie)."""
+    posts against each other). ``extra_backups``: (name, members, score,
+    params) of more backups, added to history before it. Returns (primary,
+    backup, movie)."""
     seg = 20_000
     movie = _payload(15_000_000, 23070)
     vols = generators.rar3_store_volumes_valid('movie.mkv', movie, 1_000_000)
@@ -4003,21 +4024,15 @@ def _dead_volume_nested(daemon, t, tag, labels, donor_seed=None, donor_volumes=3
         members.append((rel, name, len(data), seg,
                         set(range(1, parts + 1)) if i in dead else set()))
     donor_movie = movie if donor_seed is None else _payload(donor_size or len(movie), donor_seed)
-    inner = generators.rar3_store_volumes_valid('movie.mkv', donor_movie, len(donor_movie) + 1)
-    assert len(inner) == 1
-    outer = generators.rar3_store_volumes_valid('Show.rar', inner[0],
-                                                (len(inner[0]) + donor_volumes - 1) // donor_volumes)
-    assert len(outer) == donor_volumes
-    donor_members = []
-    for i, data in enumerate(outer):
-        name = 'Other.part%02d.rar' % (i + 1)
-        rel = '%sB/%s' % (tag, name)
-        t.write_file(os.path.join('data', rel), data)
-        donor_members.append((rel, name, len(data), 100_000, set()))
+    donor_members = _nested_donor(t, tag + 'B', donor_movie, donor_volumes)
     api = daemon.wait_ready()
     # the primary is queued paused first, so the lower-scored backup is
     # deleted as duplicate into history instead of downloading
     daemon.append(api, 'Primary', build_multi_nzb(members), True, tag + '-key', 100)
+    for name, nzb_members, score, params in extra_backups:
+        _ds_append(api, name, build_multi_nzb(nzb_members), tag + '-key', score, paused=False,
+                   params=[{'Name': k, 'Value': v} for k, v in params])
+        daemon.wait_history(api, name, timeout=60)
     _ds_append(api, 'Backup', build_multi_nzb(donor_members), tag + '-key', 90, paused=False,
                params=[{'Name': k, 'Value': v} for k, v in labels])
     daemon.wait_history(api, 'Backup', timeout=60)
@@ -4121,6 +4136,34 @@ def scenario_deadvolumeothersize(daemon, t):
     the borrow never gets to compare bytes. That counts as another video
     too, and the download fails over before its last volumes."""
     return _dead_volume_other_video(daemon, t, 'deadvolumeothersize', 'dvs', 14_250_000)
+
+
+def scenario_deadvolumetwolenders(daemon, t):
+    """Two backups in history: the higher-scored one, which TwinCheck labels
+    another container (its outer rar has as many volumes as the primary),
+    holds another video; the other holds the same movie nested, labelled by
+    the fleet the same video. The borrow finds the first one's video differs,
+    but the second lends the dead volumes: the download must not fail over to
+    the first while the second lends, and its extraction carries on to the
+    end from the borrowed volumes."""
+    other = _nested_donor(t, 'dv2O', _payload(15_000_000, 23071), 15)
+    hp, hb, movie = _dead_volume_nested(
+        daemon, t, 'dv2', [('DupeCopyKind', 'unknown'), ('DupeVideo', 'same')],
+        extra_backups=[('OtherVideo', other, 95, [])])
+    api = daemon.wait_ready()
+    ho = daemon.wait_history(api, 'OtherVideo')
+    failed_over = _grep_log(t, 'Failing over Primary')
+    cancelled = _grep_log(t, 'Cancelling direct unpack')
+    du_ok = _grep_log(t, 'Direct unpack for Primary successful')
+    lent = _grep_log(t, 'from duplicate Backup')
+    integ = _verify_output(t, movie, '.mkv', dirs=(('main', 'dst'), ('main', 'inter')))
+    ok = (failed_over == 0 and cancelled == 0 and du_ok == 1 and lent >= 1 and integ and
+          hp['Status'].startswith('SUCCESS') and ho['Status'].startswith('DELETED'))
+    return ('deadvolumetwolenders', ok,
+            'status=%s other=%s backup=%s failover_logs=%d du_cancelled=%d lent_logs=%d '
+            'cannot_lend_logs=%d du_ok=%d extracted_ok=%s'
+            % (hp['Status'], ho['Status'], hb['Status'], failed_over, cancelled, lent,
+               _grep_log(t, 'cannot lend its dead volumes'), du_ok, integ))
 
 
 def scenario_skipholetwin(daemon, t):
@@ -10725,6 +10768,7 @@ SCENARIOS = {
     'deadvolumetwincheck': scenario_deadvolumetwincheck,
     'deadvolumeothervideo': scenario_deadvolumeothervideo,
     'deadvolumeothersize': scenario_deadvolumeothersize,
+    'deadvolumetwolenders': scenario_deadvolumetwolenders,
     'persistdeadprimary': scenario_persistdeadprimary,
     'persistrestart': scenario_persistrestart,
     'persistrestartdamaged': scenario_persistrestartdamaged,
@@ -11088,6 +11132,7 @@ SCENARIO_OPTIONS = {
     'deadvolumetwincheck': PROD_OPTIONS + ['DownloadRate=1000'],
     'deadvolumeothervideo': PROD_OPTIONS + ['DownloadRate=1000'],
     'deadvolumeothersize': PROD_OPTIONS + ['DownloadRate=1000'],
+    'deadvolumetwolenders': PROD_OPTIONS + ['DownloadRate=1000'],
     'skipholepar': PROD_OPTIONS + ['DownloadRate=1500'],
     'persistdeadprimary': PROD_OPTIONS + ['DownloadRate=1500'],
     'persistrestart': PROD_OPTIONS + ['DownloadRate=1500'],

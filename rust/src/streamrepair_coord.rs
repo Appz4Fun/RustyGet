@@ -1848,8 +1848,13 @@ impl NzbgetRsStreamRepairCtrl {
                 &mut env,
             );
             // A donor whose video was checked while dead volumes waited for it: the queue
-            // stops keeping the download for it once it fails the check in a few runs.
-            if let (Some(id), Some(confirmed)) = (dead_nzb_id, session.donor_identity()) {
+            // stops keeping the download for it once it fails the check in a few runs. Live
+            // repair never decompresses, so a donor holding its video compressed cannot lend
+            // live and counts as one that failed it.
+            let identity = session
+                .donor_identity()
+                .or_else(|| (self.live_mode && session.donor_compressed()).then_some(false));
+            if let (Some(id), Some(confirmed)) = (dead_nzb_id, identity) {
                 if session.has_pending_dead_fills() || confirmed {
                     crate::postproc::note_dead_volume_donor_identity(
                         id,

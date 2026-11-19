@@ -1557,6 +1557,7 @@ impl NzbgetRsPrePostProcessor {
         let opts = host.opts();
         let nzb2 = host.nzb_snap(nzb_ptr, false);
         crate::parlive::forget_download_writes(nzb2.id);
+        crate::postproc::forget_dead_volume_verdicts(nzb2.id);
         crate::postproc::direct_unpack_join_live_par_repair(nzb2.id);
         delete_cleanup_host(host, &opts, &nzb2);
 
@@ -1923,7 +1924,7 @@ impl NzbgetRsPrePostProcessor {
                 // Direct unpack paused at damaged volumes keeps going only if they are borrowed:
                 // switching to a backup that could lend them would start the extraction over.
                 !(crate::postproc::direct_unpack_has_holds(nzb.id)
-                    && !crate::postproc::dead_volume_donor_mismatched(
+                    && !crate::postproc::dead_volume_donor_cannot_lend(
                         nzb.id,
                         &backup.queued_filename,
                     )

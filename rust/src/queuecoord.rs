@@ -372,8 +372,9 @@ pub fn eval_dead_download(
 ///
 /// A label is no proof of the same video ("another container" says nothing of what is
 /// inside), so a backup whose video the live dead-volume borrow checked and found to differ
-/// (`backup_mismatched`, see `postproc::dead_volume_donor_mismatched`) lends nothing, whatever
-/// its kind: the download fails over then, instead of downloading to its end first.
+/// (`backup_mismatched`, see `postproc::dead_volume_donor_cannot_lend`) lends nothing, whatever
+/// its kind: the download fails over then, instead of downloading to its end first. It is not
+/// called mismatched while another donor lends the dead volumes.
 #[allow(clippy::too_many_arguments)]
 pub fn alt_covers_lost_articles(
     dead_rate: bool,
@@ -414,6 +415,20 @@ pub(crate) fn backup_labelled_alt(
 static KEPT_FOR_BORROWING: std::sync::Mutex<Option<std::collections::HashSet<i32>>> =
     std::sync::Mutex::new(None);
 
+/// (download, backup) pairs already told they cannot lend (see [`backup_cannot_lend`]).
+static TOLD_CANNOT_LEND: std::sync::Mutex<Option<std::collections::HashSet<(i32, i32)>>> =
+    std::sync::Mutex::new(None);
+
+/// Forgets that download `nzb_id` was kept for borrowing and what it was told of its backups.
+pub(crate) fn forget_kept_for_borrowing(nzb_id: i32) {
+    if let Some(g) = KEPT_FOR_BORROWING.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        g.remove(&nzb_id);
+    }
+    if let Some(g) = TOLD_CANNOT_LEND.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        g.retain(|&(id, _)| id != nzb_id);
+    }
+}
+
 /// Logs "keeping for borrowing" once per download.
 fn note_kept_for_borrowing(nzb_id: i32) -> bool {
     let mut g = KEPT_FOR_BORROWING.lock().unwrap_or_else(|e| e.into_inner());
@@ -431,19 +446,18 @@ fn was_kept_for_borrowing(nzb_id: i32) -> bool {
 }
 
 /// True when the live dead-volume borrow of download `nzb` found the video of `backup`
-/// to differ (see `postproc::dead_volume_donor_mismatched`). Says so once.
+/// to differ and no other donor lends the dead volumes (see
+/// `postproc::dead_volume_donor_cannot_lend`). Says so once.
 fn backup_cannot_lend(
     host: &crate::queuesubsys_host::QueueSubsysHost,
     nzb: &crate::queuesubsys_host::NzbSnap,
     backup: &crate::queuesubsys_host::NzbSnap,
 ) -> bool {
-    if !crate::postproc::dead_volume_donor_mismatched(nzb.id, &backup.queued_filename) {
+    if !crate::postproc::dead_volume_donor_cannot_lend(nzb.id, &backup.queued_filename) {
         return false;
     }
     let was_kept = was_kept_for_borrowing(nzb.id);
-    static TOLD: std::sync::Mutex<Option<std::collections::HashSet<(i32, i32)>>> =
-        std::sync::Mutex::new(None);
-    let first = TOLD
+    let first = TOLD_CANNOT_LEND
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .get_or_insert_with(Default::default)
@@ -455,7 +469,7 @@ fn backup_cannot_lend(
         msg.extend_from_slice(&backup.name);
         msg.extend_from_slice(
             format!(
-                " cannot lend its dead volumes (the video inside did not match in {} borrow attempts: content identity not confirmed)",
+                " cannot lend its dead volumes (in {} borrow attempts the video inside did not match, or was compressed, which live repair cannot lend from)",
                 crate::postproc::DEAD_VOLUME_DONOR_MISMATCH_RUNS
             )
             .as_bytes(),
@@ -6362,6 +6376,23 @@ mod tests {
         assert_eq!(r[0], crate::parchecker::ByteRange::new(0, 100 * art));
         assert_eq!(r[1].offset, 101 * art);
         assert!(r.capacity() == r.len());
+    }
+
+    #[test]
+    fn keeping_for_borrowing_is_forgotten_when_the_download_leaves_the_queue() {
+        let id = -5_220_005;
+        assert!(note_kept_for_borrowing(id));
+        assert!(!note_kept_for_borrowing(id)); // said once
+        TOLD_CANNOT_LEND
+            .lock()
+            .unwrap()
+            .get_or_insert_with(Default::default)
+            .insert((id, 7));
+        crate::postproc::forget_dead_volume_verdicts(id);
+        assert!(!was_kept_for_borrowing(id));
+        assert!(!TOLD_CANNOT_LEND.lock().unwrap().as_ref().is_some_and(|g| g.contains(&(id, 7))));
+        assert!(note_kept_for_borrowing(id)); // a new stay in the queue says it again
+        forget_kept_for_borrowing(id);
     }
 
     #[test]

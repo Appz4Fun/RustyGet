@@ -91,11 +91,14 @@ impl DonorKind {
 /// container, the same video inside) or `container` (another container, the video inside NOT
 /// verified yet), or a fleet stored an explicit `unknown` kind and found the same video inside
 /// (`video`, `DupeVideo=same`). `container` is no proof of the same video: a different encode
-/// posted nested, or as a compressed 7z, under the same dupe key gets it too. It is accepted
-/// because failing over throws the running extraction away; the live dead-volume borrow checks
-/// the video inside, and once it finds it differs the download fails over at once
-/// (`postproc::dead_volume_donor_mismatched`). An unlabelled backup (a same-key grab of another
-/// release or encode) never qualifies, nor one TwinCheck labelled another video (`other`).
+/// posted nested, or compressed, under the same dupe key gets it too. It is accepted because
+/// failing over throws the running extraction away; the live dead-volume borrow checks the
+/// video inside, and once it finds it differs, or finds it compressed (live repair never
+/// decompresses, so such a backup cannot lend live), the download fails over, unless another
+/// donor lends the dead volumes (`postproc::dead_volume_donor_cannot_lend`). A backup the
+/// check can tell nothing of (its reads keep failing, say) holds the download until it ends.
+/// An unlabelled backup (a same-key grab of another release or encode) never qualifies, nor
+/// one TwinCheck labelled another video (`other`).
 pub fn unknown_kind_is_labelled_alt(
     copy_kind: Option<&[u8]>,
     dupe_kind: Option<&[u8]>,

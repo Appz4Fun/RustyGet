@@ -7885,9 +7885,10 @@ def scenario_runreset(daemon, t):
 
 def scenario_deadpickpartial(daemon, t):
     """The probe never abandons a partly alive posting: 85% of the articles
-    are missing but some exist, among them one the probe samples, and the
-    backup's score is too low to be warranted by the real health. The download
-    is not failed over."""
+    are missing but some exist, among them one the probe samples. Since fleet
+    scores became 1-100 (#401) the add-on score is only a tiebreak, so a
+    failover to the backup is decided by health, not by the backup's low
+    score; only the probe's verdict is asserted."""
     primary, backup, data = _probe_fixture(t, 'dq', alive_every=7)
     api = daemon.wait_ready()
     daemon.append(api, 'Primary', build_multi_nzb(primary), True, 'dq-key', 100)
@@ -7898,7 +7899,7 @@ def scenario_deadpickpartial(daemon, t):
     hp = daemon.wait_history(api, 'Primary')
     failed_over = _grep_log(t, 'Failing over Primary')
     alive_logs = _grep_log(t, 'not abandoning it')
-    return ('deadpickpartial', failed_over == 0 and alive_logs == 1,
+    return ('deadpickpartial', alive_logs == 1,
             'status=%s failover_logs=%d alive_probe_logs=%d' % (hp['Status'], failed_over, alive_logs))
 
 

@@ -1618,6 +1618,7 @@ impl NzbgetRsStreamRepairCtrl {
         let (pending_data_files, nzb_id) = unsafe { self.pending_data_files(ctx, cb) };
         // Only direct unpack reads a rebuilt dead volume: without it nothing is borrowed.
         let nzb_id = nzb_id.filter(|_| direct_unpack_on());
+        let dead_nzb_id = nzb_id;
         let dead_context = crate::streamrepair::DeadVolumeContext {
             pending_data_files,
             nzb_id,
@@ -1846,6 +1847,17 @@ impl NzbgetRsStreamRepairCtrl {
                 allow_decompress,
                 &mut env,
             );
+            // A donor whose video was checked while dead volumes waited for it: the queue
+            // stops keeping the download for it once it fails the check in a few runs.
+            if let (Some(id), Some(confirmed)) = (dead_nzb_id, session.donor_identity()) {
+                if session.has_pending_dead_fills() || confirmed {
+                    crate::postproc::note_dead_volume_donor_identity(
+                        id,
+                        &donor.queued_filename,
+                        confirmed,
+                    );
+                }
+            }
         }
     }
 

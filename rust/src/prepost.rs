@@ -1923,6 +1923,10 @@ impl NzbgetRsPrePostProcessor {
                 // Direct unpack paused at damaged volumes keeps going only if they are borrowed:
                 // switching to a backup that could lend them would start the extraction over.
                 !(crate::postproc::direct_unpack_has_holds(nzb.id)
+                    && !crate::postproc::dead_volume_donor_mismatched(
+                        nzb.id,
+                        &backup.queued_filename,
+                    )
                     && backup_can_lend(
                         host.nzb_get_param(nzb.ptr, crate::donorkind::KIND_PARAM)
                             .as_deref(),

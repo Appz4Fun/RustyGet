@@ -8982,6 +8982,10 @@ pub struct CrossPackRepairSession {
     /// Dead volumes whose inner bytes are borrowed into scratch files (see `deadvolume`).
     dead_fills: Vec<DeadFill>,
     dead_nzb_id: i32,
+    /// What the donor of the last [`Self::process_donor`] call showed of the video: `Some(true)`
+    /// when its content identity was confirmed, `Some(false)` when it was checked and did not
+    /// match, `None` when it was never checked.
+    donor_identity: Option<bool>,
 }
 
 /// What live stream repair knows about the download beyond its repair jobs.
@@ -9182,6 +9186,7 @@ impl CrossPackRepairSession {
             tls_enabled,
             dead_fills,
             dead_nzb_id: dead_context.nzb_id.unwrap_or(0),
+            donor_identity: None,
         })
     }
 
@@ -9193,6 +9198,22 @@ impl CrossPackRepairSession {
 
     pub fn target_holes(&self) -> &[Vec<NzbgetRsByteRange>] {
         &self.target_holes
+    }
+
+    /// See `donor_identity`: what the donor of the last [`Self::process_donor`] call showed.
+    pub fn donor_identity(&self) -> Option<bool> {
+        self.donor_identity
+    }
+
+    /// True while a dead volume of the download still waits for its borrowed bytes.
+    pub fn has_pending_dead_fills(&self) -> bool {
+        self.dead_fills.iter().any(|d| !d.done)
+    }
+
+    /// Records a donor's identity check: a confirmed one is never undone by another set of
+    /// the same donor that did not match.
+    fn note_donor_identity(&mut self, confirmed: bool) {
+        self.donor_identity = Some(confirmed || self.donor_identity == Some(true));
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -9207,6 +9228,7 @@ impl CrossPackRepairSession {
         allow_decompress: bool,
         env: &mut dyn CrossPackDonorEnv,
     ) {
+        self.donor_identity = None;
         {
             let mut label = b"Cross-packing repair from duplicate ".to_vec();
             label.extend_from_slice(donor_info_name);
@@ -9358,6 +9380,7 @@ impl CrossPackRepairSession {
                         &mut target_adapter,
                     )
                 };
+                self.note_donor_identity(verified);
                 if !verified {
                     let first_donor_name = &donor_members[donor_set.members[0] as usize].name;
                     let inner_name = self.repair_sets[repair_set_idx]
@@ -9864,6 +9887,7 @@ impl CrossPackRepairSession {
                 &mut target_adapter,
             )
         };
+        self.note_donor_identity(verified);
         if !verified {
             skip(env_cell, b"content identity not confirmed");
             return false;
@@ -10152,6 +10176,7 @@ impl CrossPackRepairSession {
                 &mut target_adapter,
             )
         };
+        self.note_donor_identity(verified);
         if !verified {
             let mut msg = b"Skipping decompression of ".to_vec();
             msg.extend_from_slice(set_name);

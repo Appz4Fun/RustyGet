@@ -369,6 +369,12 @@ pub fn eval_dead_download(
 /// first dead volume fails many articles in a row before it ends, which is before any borrow
 /// can start, and failing over then would throw the running extraction away. An unlabelled
 /// backup still fails over.
+///
+/// A label is no proof of the same video ("another container" says nothing of what is
+/// inside), so a backup whose video the live dead-volume borrow checked and found to differ
+/// (`backup_mismatched`, see `postproc::dead_volume_donor_mismatched`) lends nothing, whatever
+/// its kind: the download fails over then, instead of downloading to its end first.
+#[allow(clippy::too_many_arguments)]
 pub fn alt_covers_lost_articles(
     dead_rate: bool,
     live_borrowing: bool,
@@ -378,12 +384,14 @@ pub fn alt_covers_lost_articles(
     borrow_underway: bool,
     extracting: bool,
     labelled_alt: bool,
+    backup_mismatched: bool,
 ) -> bool {
     use crate::donorkind::DonorKind;
     let backup_lends = matches!(backup_kind, DonorKind::Twin | DonorKind::Borrowable)
         || ((borrow_underway || (extracting && labelled_alt))
             && backup_kind != DonorKind::Unborrowable);
-    !dead_rate
+    !backup_mismatched
+        && !dead_rate
         && live_borrowing
         && own_kind != DonorKind::Unborrowable
         && backup_lends
@@ -403,12 +411,58 @@ pub(crate) fn backup_labelled_alt(
     )
 }
 
+static KEPT_FOR_BORROWING: std::sync::Mutex<Option<std::collections::HashSet<i32>>> =
+    std::sync::Mutex::new(None);
+
 /// Logs "keeping for borrowing" once per download.
 fn note_kept_for_borrowing(nzb_id: i32) -> bool {
-    static NOTED: std::sync::Mutex<Option<std::collections::HashSet<i32>>> =
-        std::sync::Mutex::new(None);
-    let mut g = NOTED.lock().unwrap_or_else(|e| e.into_inner());
+    let mut g = KEPT_FOR_BORROWING.lock().unwrap_or_else(|e| e.into_inner());
     g.get_or_insert_with(Default::default).insert(nzb_id)
+}
+
+/// True while download `nzb_id` is kept to borrow its lost parts (see
+/// [`note_kept_for_borrowing`]).
+fn was_kept_for_borrowing(nzb_id: i32) -> bool {
+    KEPT_FOR_BORROWING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .is_some_and(|g| g.contains(&nzb_id))
+}
+
+/// True when the live dead-volume borrow of download `nzb` found the video of `backup`
+/// to differ (see `postproc::dead_volume_donor_mismatched`). Says so once.
+fn backup_cannot_lend(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    nzb: &crate::queuesubsys_host::NzbSnap,
+    backup: &crate::queuesubsys_host::NzbSnap,
+) -> bool {
+    if !crate::postproc::dead_volume_donor_mismatched(nzb.id, &backup.queued_filename) {
+        return false;
+    }
+    let was_kept = was_kept_for_borrowing(nzb.id);
+    static TOLD: std::sync::Mutex<Option<std::collections::HashSet<(i32, i32)>>> =
+        std::sync::Mutex::new(None);
+    let first = TOLD
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_with(Default::default)
+        .insert((nzb.id, backup.id));
+    if first {
+        let mut msg = if was_kept { b"No longer keeping ".to_vec() } else { b"Not keeping ".to_vec() };
+        msg.extend_from_slice(&nzb.name);
+        msg.extend_from_slice(b" for borrowing: duplicate ");
+        msg.extend_from_slice(&backup.name);
+        msg.extend_from_slice(
+            format!(
+                " cannot lend its dead volumes (the video inside did not match in {} borrow attempts: content identity not confirmed)",
+                crate::postproc::DEAD_VOLUME_DONOR_MISMATCH_RUNS
+            )
+            .as_bytes(),
+        );
+        host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
+    }
+    true
 }
 
 /// `QueueCoordinator::SideFile` (`QueueCoordinator.cpp`).
@@ -4677,6 +4731,7 @@ impl NzbgetRsQueueCoordinator {
                     crate::postproc::dead_volume_borrow_underway(nzb.id),
                     nzb.direct_unpack_status == crate::queuesubsys_host::NS_RUNNING,
                     backup_labelled_alt(host, backup_nzb.ptr),
+                    backup_cannot_lend(host, nzb, &backup_nzb),
                 ) && !download_hopeless(nzb.total_articles, nzb.current_success_articles, failed);
             if !light_damage
                 && !lendable
@@ -4771,6 +4826,50 @@ impl NzbgetRsQueueCoordinator {
             || nzb.delete_status != crate::queuesubsys_host::DS_NONE
         {
             return;
+        }
+
+        // Kept to borrow its dead volumes from a backup whose video then turned out to differ:
+        // nothing else would fail it over before its end (its later volumes arrive whole), so
+        // it fails over now.
+        if was_kept_for_borrowing(nzb.id) {
+            if let Some((_, backup_nzb)) = crate::dupecoord::find_dupe_backup_host(
+                host,
+                opts,
+                dq_ptr,
+                nzb.ptr,
+                &nzb.name,
+                &nzb.dupe_key,
+            ) {
+                if backup_cannot_lend(host, &nzb, &backup_nzb) {
+                    if let Some(g) = KEPT_FOR_BORROWING
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .as_mut()
+                    {
+                        g.remove(&nzb.id);
+                    }
+                    let mut msg = b"Failing over ".to_vec();
+                    msg.extend_from_slice(&nzb.name);
+                    msg.extend_from_slice(b" to duplicate ");
+                    msg.extend_from_slice(&backup_nzb.name);
+                    msg.extend_from_slice(
+                        b": it was kept to borrow its dead volumes, but the duplicate holds another video",
+                    );
+                    host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
+                    host.nzb_set_int(
+                        nzb.ptr,
+                        crate::queuesubsys_host::NZB_INT_DELETE_STATUS,
+                        crate::queuesubsys_host::DS_HEALTH,
+                    );
+                    host.dq_edit_entry(
+                        dq_ptr,
+                        nzb.id,
+                        crate::queuesubsys_host::EA_GROUP_PARK_DELETE,
+                        None,
+                    );
+                    return;
+                }
+            }
         }
 
         let critical = self.download_critical_health(host, opts, dq_ptr, &nzb);
@@ -4874,6 +4973,7 @@ impl NzbgetRsQueueCoordinator {
             crate::postproc::dead_volume_borrow_underway(nzb.id),
             nzb.direct_unpack_status == crate::queuesubsys_host::NS_RUNNING,
             backup_labelled_alt(host, backup_nzb.ptr),
+            backup_cannot_lend(host, &nzb, &backup_nzb),
         ) {
             if note_kept_for_borrowing(nzb.id) {
                 let mut msg = b"Keeping ".to_vec();
@@ -6268,17 +6368,17 @@ mod tests {
     fn lost_articles_an_alt_can_lend_keep_the_download() {
         use crate::donorkind::DonorKind::*;
         assert!(alt_covers_lost_articles(
-            false, true, Borrowable, Borrowable, 952, false, false, true
+            false, true, Borrowable, Borrowable, 952, false, false, true, false
         ));
         assert!(alt_covers_lost_articles(
-            false, true, Unknown, Twin, 600, false, false, true
+            false, true, Unknown, Twin, 600, false, false, true, false
         ));
         // Mostly gone, no live borrowing, an unborrowable backup or download: fail over.
         assert!(!alt_covers_lost_articles(
-            true, true, Borrowable, Borrowable, 952, false, false, true
+            true, true, Borrowable, Borrowable, 952, false, false, true, false
         ));
         assert!(!alt_covers_lost_articles(
-            false, false, Borrowable, Borrowable, 952, false, false, true
+            false, false, Borrowable, Borrowable, 952, false, false, true, false
         ));
         assert!(!alt_covers_lost_articles(
             false,
@@ -6288,10 +6388,11 @@ mod tests {
             952,
             false,
             false,
-            true
+            true,
+            false
         ));
         assert!(!alt_covers_lost_articles(
-            false, true, Borrowable, Unknown, 952, false, false, true
+            false, true, Borrowable, Unknown, 952, false, false, true, false
         ));
         assert!(!alt_covers_lost_articles(
             false,
@@ -6301,14 +6402,15 @@ mod tests {
             952,
             false,
             false,
-            true
+            true,
+            false
         ));
         assert!(!alt_covers_lost_articles(
-            false, true, Borrowable, Borrowable, 499, false, false, true
+            false, true, Borrowable, Borrowable, 499, false, false, true, false
         ));
         // A backup of unknown kind lends once a borrow from it is underway ...
         assert!(alt_covers_lost_articles(
-            false, true, Unknown, Unknown, 952, true, false, true
+            false, true, Unknown, Unknown, 952, true, false, true, false
         ));
         assert!(!alt_covers_lost_articles(
             false,
@@ -6318,30 +6420,39 @@ mod tests {
             952,
             true,
             false,
-            true
+            true,
+            false
         ));
         assert!(!alt_covers_lost_articles(
-            true, true, Unknown, Unknown, 952, true, false, true
+            true, true, Unknown, Unknown, 952, true, false, true, false
         ));
         // ... or while direct unpack runs if labelled an alt (no par2: the first dead volume
         // trips the failed-in-a-row check before it ends), but never an unborrowable one, nor
         // when live borrowing is off or the download is mostly gone.
         assert!(alt_covers_lost_articles(
-            false, true, Borrowable, Unknown, 952, false, true, true
+            false, true, Borrowable, Unknown, 952, false, true, true, false
         ));
         assert!(!alt_covers_lost_articles(
-            false, true, Borrowable, Unborrowable, 952, false, true, true
+            false, true, Borrowable, Unborrowable, 952, false, true, true, false
         ));
         assert!(!alt_covers_lost_articles(
-            false, false, Borrowable, Unknown, 952, false, true, true
+            false, false, Borrowable, Unknown, 952, false, true, true, false
         ));
         assert!(!alt_covers_lost_articles(
-            true, true, Borrowable, Unknown, 952, false, true, true
+            true, true, Borrowable, Unknown, 952, false, true, true, false
         ));
         // An unlabelled backup (not classed the same video in another container) still
         // fails over while extracting.
         assert!(!alt_covers_lost_articles(
-            false, true, Borrowable, Unknown, 952, false, true, false
+            false, true, Borrowable, Unknown, 952, false, true, false, false
+        ));
+        // A backup whose video the dead-volume borrow found to differ lends nothing, a
+        // labelled alt with a borrow underway or a borrowable one included.
+        assert!(!alt_covers_lost_articles(
+            false, true, Borrowable, Unknown, 952, true, true, true, true
+        ));
+        assert!(!alt_covers_lost_articles(
+            false, true, Borrowable, Borrowable, 952, false, false, true, true
         ));
     }
 

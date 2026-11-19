@@ -3980,13 +3980,16 @@ def _skiphole_rar(daemon, t, tag, donor, recovery, damage=None):
     return good, detail
 
 
-def _dead_volume_nested(daemon, t, tag, labels):
+def _dead_volume_nested(daemon, t, tag, labels, donor_seed=None, donor_volumes=3):
     """A plain stored rar set without par2 (articles of 20 KB, so direct rename
     hashes each volume's first article) loses three middle volumes entirely;
     its backup in history holds the same movie nested in another container (a
     stored rar holding a rar holding movie.mkv), its first article telling
     nothing about the packing. ``labels``: the backup's nzb parameters (what a
-    fleet and TwinCheck stored). Returns (primary, backup, movie)."""
+    fleet and TwinCheck stored). ``donor_seed``: the backup holds another
+    video of the same size. ``donor_volumes``: how many volumes the backup's
+    outer rar has (as many as the primary's lets TwinCheck sample the two
+    posts against each other). Returns (primary, backup, movie)."""
     seg = 20_000
     movie = _payload(15_000_000, 23070)
     vols = generators.rar3_store_volumes_valid('movie.mkv', movie, 1_000_000)
@@ -3999,9 +4002,12 @@ def _dead_volume_nested(daemon, t, tag, labels):
         parts = (len(data) + seg - 1) // seg
         members.append((rel, name, len(data), seg,
                         set(range(1, parts + 1)) if i in dead else set()))
-    inner = generators.rar3_store_volumes_valid('movie.mkv', movie, len(movie) + 1)
+    donor_movie = movie if donor_seed is None else _payload(len(movie), donor_seed)
+    inner = generators.rar3_store_volumes_valid('movie.mkv', donor_movie, len(donor_movie) + 1)
     assert len(inner) == 1
-    outer = generators.rar3_store_volumes_valid('Show.rar', inner[0], 5_000_000)
+    outer = generators.rar3_store_volumes_valid('Show.rar', inner[0],
+                                                (len(inner[0]) + donor_volumes - 1) // donor_volumes)
+    assert len(outer) == donor_volumes
     donor_members = []
     for i, data in enumerate(outer):
         name = 'Other.part%02d.rar' % (i + 1)
@@ -4028,15 +4034,15 @@ def _dead_volume_nested(daemon, t, tag, labels):
 def scenario_deadvolumenestednopar(daemon, t):
     """South Park S23E07, under the production options (DirectRename=yes): a
     plain stored rar set without par2 loses three middle volumes entirely,
-    while its backup in history, labelled by the fleet as in another
-    container of unknown packing, holds the same movie nested in another
-    container. The first dead volume failed 40 articles in a row before it
+    while its backup in history holds the same movie nested in another
+    container, labelled by the fleet as of unknown packing with the same video
+    inside. The first dead volume failed 40 articles in a row before it
     ended, which failed the download over, cancelling direct unpack and
     fetching the backup from its first byte. Now the download is kept: the
     dead volumes are borrowed from the backup's inner movie while direct
     unpack waits, and the extraction carries on to the end."""
     hp, hb, movie = _dead_volume_nested(daemon, t, 'dvn', [('DupeCopyKind', 'unknown'),
-                                                          ('DupeKind', 'container')])
+                                                          ('DupeVideo', 'same')])
     failed_over = _grep_log(t, 'Failing over Primary')
     cancelled = _grep_log(t, 'Cancelling direct unpack')
     kept = _grep_log(t, 'lends the lost parts')
@@ -4050,17 +4056,58 @@ def scenario_deadvolumenestednopar(daemon, t):
 
 
 def scenario_deadvolumeunlabelled(daemon, t):
-    """The same release, but nothing classed the backup (no fleet labels: a
-    same-key grab that may be another release or encode). Its unknown kind
-    is no reason to keep the download: it fails over to the backup."""
-    hp, hb, movie = _dead_volume_nested(daemon, t, 'dvu', [])
+    """The same release, but nothing classed the backup (no fleet labels, and
+    TwinCheck cannot sample three volumes against fifteen): a same-key grab,
+    here another encode. Direct unpack running is no reason to keep the
+    download for it: it fails over (at the dead run, or, if a borrow got
+    underway first, once the borrow finds the video differs), never
+    downloading to its end, and the backup completes."""
+    hp, hb, movie = _dead_volume_nested(daemon, t, 'dvu', [], donor_seed=23072)
     failed_over = _grep_log(t, 'Failing over Primary to duplicate Backup')
+    log = t.read_file('nzbget.log').decode(errors='replace')
+    late = sorted(set(re.findall(r'Successfully downloaded Primary/Show\.part(1[0-5])\.rar\n', log)))
+    ok = (failed_over == 1 and len(late) < 6 and hp['Status'].startswith('FAILURE') and
+          hb['Status'].startswith('SUCCESS'))
+    return ('deadvolumeunlabelled', ok, 'status=%s backup=%s failover_logs=%d kept_logs=%d late_volumes_done=%s'
+            % (hp['Status'], hb['Status'], failed_over, _grep_log(t, 'lends the lost parts'), late))
+
+
+def scenario_deadvolumetwincheck(daemon, t):
+    """deadvolumenestednopar without injected labels: TwinCheck itself must
+    label the nested backup (another container, by its sampled articles: its
+    outer rar has as many volumes as the primary, cut into other article
+    sizes) before the dead run, so the download is kept and its extraction
+    carries on."""
+    hp, hb, movie = _dead_volume_nested(daemon, t, 'dvt', [], donor_volumes=15)
+    labelled = _grep_log(t, 'Backup is in another container than Primary')
+    failed_over = _grep_log(t, 'Failing over Primary')
     kept = _grep_log(t, 'lends the lost parts')
+    du_ok = _grep_log(t, 'Direct unpack for Primary successful')
     integ = _verify_output(t, movie, '.mkv', dirs=(('main', 'dst'), ('main', 'inter')))
-    ok = (failed_over == 1 and kept == 0 and hp['Status'].startswith('FAILURE') and
-          hb['Status'].startswith('SUCCESS') and integ)
-    return ('deadvolumeunlabelled', ok, 'status=%s backup=%s failover_logs=%d kept_logs=%d extracted_ok=%s'
-            % (hp['Status'], hb['Status'], failed_over, kept, integ))
+    ok = (labelled >= 1 and failed_over == 0 and kept == 1 and du_ok == 1 and integ and
+          hp['Status'].startswith('SUCCESS'))
+    return ('deadvolumetwincheck', ok,
+            'status=%s backup=%s labelled_logs=%d failover_logs=%d kept_logs=%d du_ok=%d extracted_ok=%s'
+            % (hp['Status'], hb['Status'], labelled, failed_over, kept, du_ok, integ))
+
+
+def scenario_deadvolumeothervideo(daemon, t):
+    """TwinCheck labels the backup another container (its sampled articles
+    differ, as any other container's would), but it holds another video:
+    the dead-volume borrow cannot place the dead volumes in it, so the
+    download fails over as soon as that is known, long before its last
+    volume, instead of downloading to the end first."""
+    hp, hb, movie = _dead_volume_nested(daemon, t, 'dvo', [], donor_seed=23071, donor_volumes=15)
+    labelled = _grep_log(t, 'Backup is in another container than Primary')
+    failed_over = _grep_log(t, 'Failing over Primary to duplicate Backup')
+    gave_up = _grep_log(t, 'cannot lend its dead volumes')
+    log = t.read_file('nzbget.log').decode(errors='replace')
+    late = sorted(set(re.findall(r'Successfully downloaded Primary/Show\.part(1[0-5])\.rar\n', log)))
+    ok = (labelled >= 1 and failed_over == 1 and gave_up >= 1 and len(late) < 6 and
+          hp['Status'].startswith('FAILURE'))
+    return ('deadvolumeothervideo', ok,
+            'status=%s backup=%s labelled_logs=%d failover_logs=%d gave_up_logs=%d late_volumes_done=%s'
+            % (hp['Status'], hb['Status'], labelled, failed_over, gave_up, late))
 
 
 def scenario_skipholetwin(daemon, t):
@@ -10662,6 +10709,8 @@ SCENARIOS = {
     'skipholetwin': scenario_skipholetwin,
     'deadvolumenestednopar': scenario_deadvolumenestednopar,
     'deadvolumeunlabelled': scenario_deadvolumeunlabelled,
+    'deadvolumetwincheck': scenario_deadvolumetwincheck,
+    'deadvolumeothervideo': scenario_deadvolumeothervideo,
     'persistdeadprimary': scenario_persistdeadprimary,
     'persistrestart': scenario_persistrestart,
     'persistrestartdamaged': scenario_persistrestartdamaged,
@@ -11022,6 +11071,8 @@ SCENARIO_OPTIONS = {
     'skipholetwin': PROD_OPTIONS + ['DownloadRate=1500'],
     'deadvolumenestednopar': PROD_OPTIONS + ['DownloadRate=4000'],
     'deadvolumeunlabelled': PROD_OPTIONS + ['DownloadRate=4000'],
+    'deadvolumetwincheck': PROD_OPTIONS + ['DownloadRate=1000'],
+    'deadvolumeothervideo': PROD_OPTIONS + ['DownloadRate=1000'],
     'skipholepar': PROD_OPTIONS + ['DownloadRate=1500'],
     'persistdeadprimary': PROD_OPTIONS + ['DownloadRate=1500'],
     'persistrestart': PROD_OPTIONS + ['DownloadRate=1500'],

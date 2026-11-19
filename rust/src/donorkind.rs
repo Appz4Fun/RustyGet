@@ -86,24 +86,29 @@ impl DonorKind {
     }
 }
 
-/// Whether a backup of [`DonorKind::Unknown`] was classed by a fleet or TwinCheck as the same
-/// video in another container, so a borrow from it is worth waiting for while the download's
-/// extraction runs: TwinCheck labelled it `alt` or `container` (`dupe_kind`, the `DupeKind`
-/// param), or a fleet stored an explicit `unknown` kind (`copy_kind`, [`KIND_PARAM`]) and found
-/// the same video inside (`video`, `DupeVideo=same`). An unlabelled backup (a same-key grab of
-/// another release or encode) never qualifies, nor one labelled another video.
+/// Whether a backup of [`DonorKind::Unknown`] carries a label that makes a borrow from it
+/// worth waiting for while the download's extraction runs: TwinCheck labelled it `alt` (another
+/// container, the same video inside) or `container` (another container, the video inside NOT
+/// verified yet), or a fleet stored an explicit `unknown` kind and found the same video inside
+/// (`video`, `DupeVideo=same`). `container` is no proof of the same video: a different encode
+/// posted nested, or as a compressed 7z, under the same dupe key gets it too. It is accepted
+/// because failing over throws the running extraction away; the live dead-volume borrow checks
+/// the video inside, and once it finds it differs the download fails over at once
+/// (`postproc::dead_volume_donor_mismatched`). An unlabelled backup (a same-key grab of another
+/// release or encode) never qualifies, nor one TwinCheck labelled another video (`other`).
 pub fn unknown_kind_is_labelled_alt(
     copy_kind: Option<&[u8]>,
     dupe_kind: Option<&[u8]>,
     video: Option<&[u8]>,
 ) -> bool {
-    let dupe_kind = dupe_kind.map(|v| v.trim_ascii());
-    let video = video.map(|v| v.trim_ascii());
-    if dupe_kind == Some(b"other") || video == Some(b"different") {
-        return false;
+    match dupe_kind.map(|v| v.trim_ascii()) {
+        Some(b"alt") | Some(b"container") => true,
+        Some(b"other") => false,
+        _ => {
+            copy_kind.map(|v| v.trim_ascii()) == Some(b"unknown")
+                && video.map(|v| v.trim_ascii()) == Some(b"same")
+        }
     }
-    matches!(dupe_kind, Some(b"alt") | Some(b"container"))
-        || (copy_kind.map(|v| v.trim_ascii()) == Some(b"unknown") && video == Some(b"same"))
 }
 
 const MEDIA_EXTS: [&[u8]; 8] = [
@@ -360,9 +365,8 @@ mod tests {
         assert!(f(Some(b"unknown"), Some(b"alt"), None));
         // a fleet that found the same video inside
         assert!(f(Some(b"unknown"), None, Some(b"same")));
-        // another video, whatever else says so
+        // another video, whatever the fleet said
         assert!(!f(Some(b"unknown"), Some(b"other"), Some(b"same")));
-        assert!(!f(None, Some(b"container"), Some(b"different")));
     }
 
     #[test]

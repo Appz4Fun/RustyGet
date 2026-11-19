@@ -7249,7 +7249,7 @@ unsafe extern "C" fn active_disk_export_nzb_cb(
             let d = qh.dup_snap(hi.inner_ptr);
             let name_c = bytes_to_cstring_trunc(&d.name);
             let dupe_key_c = bytes_to_cstring_trunc(&d.dupe_key);
-            exp.info.par_status = d.status;
+            exp.info.par_status = d.status.into();
             exp.info.size = d.size;
             exp.info.full_content_hash = d.full_content_hash;
             exp.info.filtered_content_hash = d.filtered_content_hash;

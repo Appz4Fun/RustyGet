@@ -5650,7 +5650,7 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                             h.time as c_int,
                             d.dupe_score,
                             d.dupe_mode,
-                            d.status,
+                            d.status.into(),
                             0,
                             d.size,
                             0,

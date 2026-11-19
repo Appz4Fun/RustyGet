@@ -2,8 +2,7 @@
 
 use crate::queuecoord::{
     ARTICLE_FAILED, ARTICLE_FINISHED, ARTICLE_UNDEFINED, DELETE_COPY, DELETE_DUPE, DELETE_GOOD,
-    DELETE_MANUAL, DUP_STATUS_BAD, DUP_STATUS_DELETED, DUP_STATUS_DUPE, DUP_STATUS_FAILED,
-    DUP_STATUS_GOOD, DUP_STATUS_SUCCESS, MARK_BAD, MARK_GOOD, MARK_SUCCESS, PARTIAL_STATE_NONE,
+    DELETE_MANUAL, MARK_BAD, MARK_GOOD, MARK_SUCCESS, PARTIAL_STATE_NONE,
 };
 
 /// `HistoryCoordinator::ServiceWork` minimum history retention timestamp (`cur_time - keep_days * 86400`).
@@ -56,24 +55,28 @@ pub fn should_recheck_failed_articles(
 
 /// `HistoryCoordinator::HistoryHide` (`HistoryCoordinator.cpp`):
 /// Maps `NzbInfo` mark/delete/success statuses to `DupInfo::EStatus`.
-pub fn classify_dup_status(mark_status: i32, delete_status: i32, is_dupe_success: bool) -> i32 {
+pub fn classify_dup_status(
+    mark_status: i32,
+    delete_status: i32,
+    is_dupe_success: bool,
+) -> DupStatus {
     if mark_status == MARK_GOOD {
-        DUP_STATUS_GOOD
+        DupStatus::Good
     } else if mark_status == MARK_BAD {
-        DUP_STATUS_BAD
+        DupStatus::Bad
     } else if mark_status == MARK_SUCCESS {
-        DUP_STATUS_SUCCESS
+        DupStatus::Success
     } else if delete_status == DELETE_DUPE {
-        DUP_STATUS_DUPE
+        DupStatus::Dupe
     } else if delete_status == DELETE_MANUAL
         || delete_status == DELETE_GOOD
         || delete_status == DELETE_COPY
     {
-        DUP_STATUS_DELETED
+        DupStatus::Deleted
     } else if is_dupe_success {
-        DUP_STATUS_SUCCESS
+        DupStatus::Success
     } else {
-        DUP_STATUS_FAILED
+        DupStatus::Failed
     }
 }
 
@@ -504,7 +507,7 @@ pub fn split_param_assignment(text: &[u8]) -> Option<(&[u8], &[u8])> {
 // End-to-end `HistoryCoordinator` FFI coordinator (`daemon/queue/HistoryCoordinator.cpp`)
 // ============================================================================
 
-use crate::status::{CleanupStatus, MoveStatus, NzbParStatus, UnpackStatus};
+use crate::status::{CleanupStatus, DupStatus, MoveStatus, NzbParStatus, UnpackStatus};
 use std::ffi::{c_char, c_int, c_void, CStr};
 
 #[repr(C)]
@@ -828,7 +831,7 @@ unsafe fn hc_history_hide(
     cb(
         env.ctx,
         13,
-        dup_status,
+        dup_status.into(),
         rindex,
         dq_ptr,
         hist_ptr,
@@ -2617,7 +2620,7 @@ unsafe extern "C" fn hc_native_action_cb(
             nzb_ptr
         }
         13 => {
-            host.history_replace_with_dup(p1, p2, a2 as usize, a1);
+            host.history_replace_with_dup(p1, p2, a2 as usize, DupStatus::from_raw(a1));
             0
         }
         14 => {
@@ -3221,11 +3224,11 @@ mod tests {
         assert_eq!(calc_min_time(100_000, 1), 13_600);
         assert_eq!(
             classify_dup_status(MARK_GOOD, DELETE_NONE, false),
-            DUP_STATUS_GOOD
+            DupStatus::Good
         );
         assert_eq!(
             classify_dup_status(MARK_BAD, DELETE_NONE, true),
-            DUP_STATUS_BAD
+            DupStatus::Bad
         );
         assert!(is_temporary_output_name(b"42.out.tmp"));
         assert!(!is_temporary_output_name(b"movie.mkv"));

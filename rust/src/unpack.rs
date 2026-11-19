@@ -1590,12 +1590,19 @@ where
             );
             let volumes = collect_nested_archive_volumes(&nested_arch);
             let mut sub_extracted = Vec::new();
+            let not_archive = crate::archive_native::NOT_AN_ARCHIVE_PREFIX;
+            // A member named like an archive that zipfast finds is none is not an error here.
+            let mut nested_log = |kind: i32, msg: &str| {
+                if !(kind == 1 && msg.starts_with(not_archive)) {
+                    log_cb(kind, msg);
+                }
+            };
             let sub = extract_single_archive_in_process(
                 &nested_arch,
                 &target_dir,
                 password,
                 overwrite_mode,
-                &mut log_cb,
+                &mut nested_log,
                 is_cancelled,
                 &mut sub_extracted,
                 RarFeed::default(),
@@ -1603,7 +1610,19 @@ where
             if let Some(why) = breached(&mut log_cb) {
                 return Err(why);
             }
-            let sub_summary = sub?;
+            let sub_summary = match sub {
+                Err(why) if why.starts_with(not_archive) => {
+                    log_cb(
+                        4,
+                        &format!(
+                            "Extended Unpacker (depth {depth}): {nested_name} is not an archive, kept as is ({})",
+                            &why[not_archive.len()..]
+                        ),
+                    );
+                    continue;
+                }
+                sub => sub?,
+            };
             let consumed_count = (sub_summary.volumes.max(1) as usize).min(volumes.len());
             let consumed_volumes = &volumes[..consumed_count];
             for v in consumed_volumes {
@@ -2481,6 +2500,45 @@ pub fn eval_unpack_completed_failure(
 mod tests {
 
     use super::*;
+
+    /// A member named like an archive that zipfast finds is no archive at all stays as it is
+    /// and the unpack succeeds; a damaged real archive still fails (see the corrupt nested 7z
+    /// in `unpack_util_full_suite_port_from_cpp`).
+    #[test]
+    fn a_nested_member_that_is_no_archive_is_kept() {
+        let dir = std::env::temp_dir().join(format!("rg_nested_plain_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let random: Vec<u8> = (0..4096u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect();
+        let outer = dir.join("outer.zip");
+        std::fs::write(
+            &outer,
+            build_test_zip(&[
+                ("setup.7z", &random, Some(0o100644), 0, None),
+                ("data.zip", &random[7..], Some(0o100644), 0, None),
+            ]),
+        )
+        .unwrap();
+        let out = dir.join("out");
+        let mut logs = Vec::new();
+        let r = extract_archive_with_zipfast(&outer, &out, "", 1, |k, m| {
+            logs.push((k, m.to_string()))
+        });
+        assert!(r.is_ok(), "{r:?} {logs:?}");
+        assert_eq!(std::fs::read(out.join("setup.7z")).unwrap(), random);
+        assert_eq!(std::fs::read(out.join("data.zip")).unwrap(), &random[7..]);
+        assert!(!logs.iter().any(|(k, _)| *k == 1), "{logs:?}");
+        for name in ["setup.7z", "data.zip"] {
+            assert!(
+                logs.iter()
+                    .any(|(k, m)| *k == 4 && m.contains(&format!("{name} is not an archive"))),
+                "{name}: {logs:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn unpack_util_full_suite_port_from_cpp() {

@@ -821,6 +821,10 @@ where
                 | (_, Some(SevenZipError::PasswordRequired))
                 | (_, Some(SevenZipError::WrongPassword)) => SZ_WRONG_PASSWORD.to_string(),
                 (_, Some(SevenZipError::Canceled)) => return Err("7-Zip: Aborted".to_string()),
+                (_, Some(e @ SevenZipError::Map(zipfast::map::MapError::NotArchive))) => {
+                    format!("{NOT_AN_ARCHIVE_PREFIX}7-Zip: {e}")
+                }
+                (zipfast::Error::NotAnArchive, _) => format!("{NOT_AN_ARCHIVE_PREFIX}7-Zip: {err}"),
                 (_, Some(e)) => format!("7-Zip: {e}"),
                 (e, None) => format!("7-Zip: {e}"),
             };
@@ -881,6 +885,11 @@ fn set_file_mtime(file: &std::fs::File, mtime: Option<i64>, nanos: u32) {
         }
     }
 }
+
+/// The start of the message of an extraction that failed because zipfast found no archive of the
+/// format it was asked to read (`zipfast::Error::NotAnArchive`, a 7z map's `NotArchive`), as
+/// opposed to a damaged one.
+pub const NOT_AN_ARCHIVE_PREFIX: &str = "Not an archive: ";
 
 /// Extracts ZIP, TAR, or single-stream (`.gz`, `.bz2`, `.xz`, `.zst`) archives in-process
 /// while polling `is_cancelled` on every block/chunk read and output write.
@@ -1237,7 +1246,10 @@ where
     // The central directory is read first so links and unreadable names refuse the whole
     // archive before anything is written.
     let archive = zipfast::zip::Archive::open(archive_path).map_err(|e| {
-        let msg = e.to_string();
+        let msg = match e {
+            zipfast::Error::NotAnArchive => format!("{NOT_AN_ARCHIVE_PREFIX}{e}"),
+            e => e.to_string(),
+        };
         log_cb(1, &msg);
         msg
     })?;

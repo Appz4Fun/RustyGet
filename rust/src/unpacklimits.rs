@@ -229,6 +229,14 @@ impl Guard {
         self.breach.as_deref()
     }
 
+    /// Records an unsafe path zipfast refused (`why` says what) as the job's breach, unless
+    /// one is recorded already. Returns the breach message.
+    pub fn refuse_unsafe(&mut self, why: &str) -> String {
+        self.breach
+            .get_or_insert_with(|| format!("{LIMIT_PREFIX}{why}"))
+            .clone()
+    }
+
     /// Admits `path`, a file or folder about to be created. Once a limit is breached every
     /// later path is refused with the same message.
     pub fn admit(&mut self, path: &Path, is_dir: bool) -> Result<(), String> {
@@ -577,6 +585,16 @@ fn guard_for(path: &Path) -> Option<SharedGuard> {
 pub fn check(path: &Path, is_dir: bool) -> Result<(), String> {
     match guard_for(path) {
         Some(g) => lock(&g).admit(path, is_dir),
+        None => Ok(()),
+    }
+}
+
+/// An unsafe path zipfast refused while unpacking under `dest` (`why` says what): a breach of
+/// the job's limits ([`Guard::refuse_unsafe`]). Without an active [`Scope`] for `dest` it
+/// passes, and zipfast's own failure stands.
+pub fn refuse_unsafe(dest: &Path, why: &str) -> Result<(), String> {
+    match guard_for(dest) {
+        Some(g) => Err(lock(&g).refuse_unsafe(why)),
         None => Ok(()),
     }
 }

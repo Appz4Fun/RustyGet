@@ -2,7 +2,9 @@
 //! and `QueueCoordinator` orchestration in Rust.
 
 use crate::options::OptStr;
-use crate::status::{CleanupStatus, DupStatus, DupeMode, MoveStatus, NzbParStatus, UnpackStatus};
+use crate::status::{
+    CleanupStatus, DupStatus, DupeMode, MarkStatus, MoveStatus, NzbParStatus, UnpackStatus,
+};
 use std::ffi::{c_char, c_int, c_void, CStr};
 
 mod live_namespace;
@@ -57,11 +59,6 @@ pub(crate) const DS_DUPE: i32 = 3;
 pub(crate) const DS_GOOD: i32 = 5;
 pub(crate) const DS_COPY: i32 = 6;
 pub(crate) const DS_SCAN: i32 = 7;
-
-pub(crate) const KS_NONE: i32 = 0;
-pub(crate) const KS_BAD: i32 = 1;
-pub(crate) const KS_GOOD: i32 = 2;
-pub(crate) const KS_SUCCESS: i32 = 3;
 
 pub(crate) const RS_NONE: i32 = 0;
 
@@ -490,7 +487,7 @@ pub(crate) struct NzbSnap {
     pub dupe_score: i32,
     pub dupe_hint: i32,
     pub delete_status: i32,
-    pub mark_status: i32,
+    pub mark_status: MarkStatus,
     pub par_status: NzbParStatus,
     pub direct_rename_status: i32,
     pub direct_unpack_status: i32,
@@ -2132,7 +2129,7 @@ impl QueueSubsysHost {
                 dupe_score: ints[3],
                 dupe_hint: ints[4],
                 delete_status: ints[5],
-                mark_status: ints[6],
+                mark_status: MarkStatus::from(ints[6]),
                 par_status: NzbParStatus::from(ints[7]),
                 direct_rename_status: ints[8],
                 direct_unpack_status: ints[9],
@@ -2566,6 +2563,10 @@ impl QueueSubsysHost {
 
     pub fn nzb_set_dupe_mode(&self, nzb_ptr: usize, mode: DupeMode) {
         self.nzb_set_int(nzb_ptr, NZB_INT_DUPE_MODE, mode.into());
+    }
+
+    pub fn nzb_set_mark_status(&self, nzb_ptr: usize, status: MarkStatus) {
+        self.nzb_set_int(nzb_ptr, NZB_INT_MARK_STATUS, status.into());
     }
 
     pub fn nzb_set_i64(&self, nzb_ptr: usize, field: i32, val: i64) {

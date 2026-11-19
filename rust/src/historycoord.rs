@@ -2,7 +2,7 @@
 
 use crate::queuecoord::{
     ARTICLE_FAILED, ARTICLE_FINISHED, ARTICLE_UNDEFINED, DELETE_COPY, DELETE_DUPE, DELETE_GOOD,
-    DELETE_MANUAL, MARK_BAD, MARK_GOOD, MARK_SUCCESS, PARTIAL_STATE_NONE,
+    DELETE_MANUAL, PARTIAL_STATE_NONE,
 };
 
 /// `HistoryCoordinator::ServiceWork` minimum history retention timestamp (`cur_time - keep_days * 86400`).
@@ -56,15 +56,15 @@ pub fn should_recheck_failed_articles(
 /// `HistoryCoordinator::HistoryHide` (`HistoryCoordinator.cpp`):
 /// Maps `NzbInfo` mark/delete/success statuses to `DupInfo::EStatus`.
 pub fn classify_dup_status(
-    mark_status: i32,
+    mark_status: MarkStatus,
     delete_status: i32,
     is_dupe_success: bool,
 ) -> DupStatus {
-    if mark_status == MARK_GOOD {
+    if mark_status == MarkStatus::Good {
         DupStatus::Good
-    } else if mark_status == MARK_BAD {
+    } else if mark_status == MarkStatus::Bad {
         DupStatus::Bad
-    } else if mark_status == MARK_SUCCESS {
+    } else if mark_status == MarkStatus::Success {
         DupStatus::Success
     } else if delete_status == DELETE_DUPE {
         DupStatus::Dupe
@@ -507,7 +507,9 @@ pub fn split_param_assignment(text: &[u8]) -> Option<(&[u8], &[u8])> {
 // End-to-end `HistoryCoordinator` FFI coordinator (`daemon/queue/HistoryCoordinator.cpp`)
 // ============================================================================
 
-use crate::status::{CleanupStatus, DupStatus, DupeMode, MoveStatus, NzbParStatus, UnpackStatus};
+use crate::status::{
+    CleanupStatus, DupStatus, DupeMode, MarkStatus, MoveStatus, NzbParStatus, UnpackStatus,
+};
 use std::ffi::{c_char, c_int, c_void, CStr};
 
 #[repr(C)]
@@ -819,7 +821,7 @@ unsafe fn hc_history_hide(
         0,
     );
     let hist_name = hc_cstr_bytes(strs[0]).to_vec();
-    let dup_status = classify_dup_status(ints[0], ints[1], ints[2] != 0);
+    let dup_status = classify_dup_status(MarkStatus::from(ints[0]), ints[1], ints[2] != 0);
 
     hc_delete_disk_files(env, nzb_ptr, server_mode, nzb_cleanup_disk);
 
@@ -2345,7 +2347,12 @@ pub unsafe fn history_coord_exec(op: c_int, env: *const NzbgetRsHistoryCoordEnv)
                     {
                         #[cfg(unix)]
                         if let Some(qh) = crate::ffi::queue_host() {
-                            crate::dupecoord::history_mark_host(&qh, e.p1, hist_ptr, action - 46);
+                            crate::dupecoord::history_mark_host(
+                                &qh,
+                                e.p1,
+                                hist_ptr,
+                                MarkStatus::from(action - 46),
+                            );
                         }
                     }
                     _ => {}
@@ -2444,8 +2451,8 @@ unsafe extern "C" fn hc_native_action_cb(
         EA_GROUP_PAUSE_EXTRA_PARS, FILE_ACT_CLEAR_ARTICLES, FILE_I64_FAILED_SIZE,
         FILE_I64_REMAINING_SIZE, FILE_I64_SUCCESS_SIZE, FILE_INT_COMPLETED_ARTICLES,
         FILE_INT_FAILED_ARTICLES, FILE_INT_PARTIAL_STATE, FILE_INT_PAUSED,
-        FILE_INT_SUCCESS_ARTICLES, FILE_STR_FILENAME, HK_DUP, HK_NZB, HK_URL, KS_BAD, KS_NONE,
-        LS_NONE, MK_DETAIL, MK_INFO, MK_WARNING, NS_NONE, NS_RUNNING, NZB_ACT_BUILD_DEST_DIR,
+        FILE_INT_SUCCESS_ARTICLES, FILE_STR_FILENAME, HK_DUP, HK_NZB, HK_URL, LS_NONE, MK_DETAIL,
+        MK_INFO, MK_WARNING, NS_NONE, NS_RUNNING, NZB_ACT_BUILD_DEST_DIR,
         NZB_ACT_CLEAR_EXTRACTED_ARCHIVES, NZB_ACT_CLEAR_FILE_LIST,
         NZB_ACT_CLEAR_LIVE_REPAIR_THREAD, NZB_ACT_CLEAR_SCRIPT_STATUSES,
         NZB_ACT_UPDATE_COMPLETED_STATS, NZB_ACT_UPDATE_CURRENT_STATS, NZB_I64_DOWNLOADED_SIZE,
@@ -2458,13 +2465,13 @@ unsafe extern "C" fn hc_native_action_cb(
         NZB_INT_DUPE_RECOVERED_ARTICLES, NZB_INT_DUPE_RECOVERED_HOLES, NZB_INT_DUPE_SCORE,
         NZB_INT_DUPE_UNSOURCED_ARTICLES, NZB_INT_EXTRA_PAR_BLOCKS, NZB_INT_FAILED_ARTICLES,
         NZB_INT_HEALTH_PAUSED, NZB_INT_LIVE_PAR_SEC, NZB_INT_LIVE_UNPACK_SEC, NZB_INT_LOADING_PAR,
-        NZB_INT_MARK_STATUS, NZB_INT_PARKED_FILE_COUNT, NZB_INT_PARKING, NZB_INT_PAR_FULL,
-        NZB_INT_PAR_RENAME_STATUS, NZB_INT_PAR_REPAIRED, NZB_INT_PAR_SEC, NZB_INT_POST_TOTAL_SEC,
-        NZB_INT_RAR_RENAME_STATUS, NZB_INT_REMAINING_PAR_COUNT, NZB_INT_REPAIR_SEC,
-        NZB_INT_REPROCESS, NZB_INT_SUCCESS_ARTICLES, NZB_INT_UNPACK_CLEANED_UP_DISK,
-        NZB_INT_UNPACK_SEC, NZB_INT_UNPACK_TRIED, NZB_INT_URL_STATUS, NZB_INT_WAITING_PAR,
-        NZB_STR_CATEGORY, NZB_STR_DUPE_KEY, NZB_STR_FINAL_DIR, NZB_STR_NAME, PARTIAL_COMPLETED,
-        RS_NONE, TS_FAILURE, TS_NONE, TS_RUNNING,
+        NZB_INT_PARKED_FILE_COUNT, NZB_INT_PARKING, NZB_INT_PAR_FULL, NZB_INT_PAR_RENAME_STATUS,
+        NZB_INT_PAR_REPAIRED, NZB_INT_PAR_SEC, NZB_INT_POST_TOTAL_SEC, NZB_INT_RAR_RENAME_STATUS,
+        NZB_INT_REMAINING_PAR_COUNT, NZB_INT_REPAIR_SEC, NZB_INT_REPROCESS,
+        NZB_INT_SUCCESS_ARTICLES, NZB_INT_UNPACK_CLEANED_UP_DISK, NZB_INT_UNPACK_SEC,
+        NZB_INT_UNPACK_TRIED, NZB_INT_URL_STATUS, NZB_INT_WAITING_PAR, NZB_STR_CATEGORY,
+        NZB_STR_DUPE_KEY, NZB_STR_FINAL_DIR, NZB_STR_NAME, PARTIAL_COMPLETED, RS_NONE, TS_FAILURE,
+        TS_NONE, TS_RUNNING,
     };
 
     HC_STR_ARENA.with(|a| a.borrow_mut().clear());
@@ -2612,7 +2619,7 @@ unsafe extern "C" fn hc_native_action_cb(
             let hi = host.hist_item_snap(p2);
             let nzb_ptr = hi.inner_ptr;
             let nzb = host.nzb_snap(nzb_ptr, false);
-            *ints.add(0) = nzb.mark_status;
+            *ints.add(0) = nzb.mark_status.into();
             *ints.add(1) = nzb.delete_status;
             *ints.add(2) = c_int::from(nzb.is_dupe_success);
             *strs.add(0) = hc_stash_str(&hi.name);
@@ -2659,7 +2666,7 @@ unsafe extern "C" fn hc_native_action_cb(
             if hi_ptr != 0 {
                 let hi = host.hist_item_snap(hi_ptr);
                 if hi.kind == HK_NZB && hi.inner_ptr != 0 {
-                    host.nzb_set_int(hi.inner_ptr, NZB_INT_MARK_STATUS, KS_BAD);
+                    host.nzb_set_mark_status(hi.inner_ptr, MarkStatus::Bad);
                 }
             }
             0
@@ -2760,7 +2767,7 @@ unsafe extern "C" fn hc_native_action_cb(
             host.nzb_set_int(nzb_ptr, NZB_INT_DUPE_UNSOURCED_ARTICLES, 0);
             host.nzb_set_int(nzb_ptr, NZB_INT_DUPE_FAILED_RUN, 0);
             host.nzb_set_int(nzb_ptr, NZB_INT_DUPE_PAR_DEFER_STATE, DP_NONE);
-            host.nzb_set_int(nzb_ptr, NZB_INT_MARK_STATUS, KS_NONE);
+            host.nzb_set_mark_status(nzb_ptr, MarkStatus::None);
             host.nzb_action(nzb_ptr, NZB_ACT_CLEAR_SCRIPT_STATUSES, 0);
             host.nzb_set_int(nzb_ptr, NZB_INT_PARKED_FILE_COUNT, 0);
             host.nzb_set_move_status(nzb_ptr, MoveStatus::from(*ints.add(2)));
@@ -3236,11 +3243,11 @@ mod tests {
     fn test_history_coord_reset_and_dup_status() {
         assert_eq!(calc_min_time(100_000, 1), 13_600);
         assert_eq!(
-            classify_dup_status(MARK_GOOD, DELETE_NONE, false),
+            classify_dup_status(MarkStatus::Good, DELETE_NONE, false),
             DupStatus::Good
         );
         assert_eq!(
-            classify_dup_status(MARK_BAD, DELETE_NONE, true),
+            classify_dup_status(MarkStatus::Bad, DELETE_NONE, true),
             DupStatus::Bad
         );
         assert!(is_temporary_output_name(b"42.out.tmp"));

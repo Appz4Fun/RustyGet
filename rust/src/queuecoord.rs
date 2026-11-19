@@ -25,11 +25,6 @@ pub fn find_subslice_ci(haystack: &[u8], needle: &[u8]) -> bool {
 // Status Constants Shared with HistoryCoordinator
 // ============================================================================
 
-pub const MARK_NONE: i32 = 0;
-pub const MARK_BAD: i32 = 1;
-pub const MARK_GOOD: i32 = 2;
-pub const MARK_SUCCESS: i32 = 3;
-
 pub const DELETE_NONE: i32 = 0;
 pub const DELETE_MANUAL: i32 = 1;
 pub const DELETE_HEALTH: i32 = 2;

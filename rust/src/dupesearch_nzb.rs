@@ -1,7 +1,7 @@
 //! Terminal unquoted filename parsing and PAR classification for duplicate search.
 
 use crate::cstr;
-use crate::status::DupeMode;
+use crate::status::{DupeMode, MarkStatus};
 
 fn trim_range(bytes: &[u8], mut start: usize, mut end: usize) -> (usize, usize) {
     let trim = |b| matches!(b, b' ' | b'\t' | b'\r' | b'\n');
@@ -480,8 +480,7 @@ pub fn placement_available(
     ds_manual: i32,
     ds_dupe: i32,
     ds_copy: i32,
-    mark_status: i32,
-    ks_bad: i32,
+    mark_status: MarkStatus,
     dupe_mode: DupeMode,
     in_history: bool,
     whole_backup: bool,
@@ -501,7 +500,7 @@ pub fn placement_available(
         || !is_nzb_kind
         || deleting
         || delete_status == ds_manual
-        || mark_status == ks_bad
+        || mark_status == MarkStatus::Bad
         || dupe_mode == DupeMode::Force
     {
         return false;

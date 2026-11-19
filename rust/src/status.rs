@@ -194,6 +194,16 @@ impl PartialEq for DupeMode {
 
 impl Eq for DupeMode {}
 
+status_enum! {
+    /// How the user marked a download (NzbInfo::EMarkStatus).
+    MarkStatus {
+        None = 0,
+        Bad = 1,
+        Good = 2,
+        Success = 3,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,5 +274,13 @@ mod tests {
             assert!(DupeMode::ALL.iter().all(|&known| known != m));
         }
         assert_eq!(DupeMode::default(), DupeMode::Score);
+    }
+
+    #[test]
+    fn mark_status_round_trip() {
+        round_trip(MarkStatus::ALL);
+        assert_eq!(i32::from(MarkStatus::Bad), 1);
+        assert_eq!(i32::from(MarkStatus::Success), 3);
+        assert_eq!(MarkStatus::from(4), MarkStatus::Other(4));
     }
 }

@@ -4939,7 +4939,7 @@ unsafe fn emit_rpc_nzb(
         move_status: n.move_status.into(),
         script_status: n.script_total_status,
         delete_status: n.delete_status,
-        mark_status: n.mark_status,
+        mark_status: n.mark_status.into(),
         url_status: n.url_status,
         size: n.size,
         file_count: n.file_count,

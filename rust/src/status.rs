@@ -2,50 +2,79 @@
 //!
 //! The queue objects, the disk state and the RPC structs keep these as
 //! `i32` with NZBGet's numeric values; Rust code passes the enums and
-//! converts only at those boundaries (`i32::from`, `TryFrom<i32>`, or
-//! `from_raw` where an unknown stored value reads as the zero variant, as
-//! the RPC name tables already do).
-
-/// An `i32` that names no variant of the enum.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct UnknownStatus(pub i32);
+//! converts only at those boundaries, with `From` both ways. The
+//! conversion is lossless: a stored value that names no variant (from an
+//! old or hand-edited disk state, or a binary RPC client) becomes
+//! `Other(value)`, matches none of the named variants, orders by its
+//! number as the raw value did, and is written back unchanged.
 
 macro_rules! status_enum {
     (
         $(#[$meta:meta])*
-        $name:ident { $($(#[$vmeta:meta])* $variant:ident = $value:literal,)+ }
+        $name:ident { $first:ident = $first_value:literal, $($(#[$vmeta:meta])* $variant:ident = $value:literal,)* }
     ) => {
         $(#[$meta])*
-        #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        #[repr(i32)]
+        #[derive(Clone, Copy, Debug)]
         pub enum $name {
-            #[default]
-            $($(#[$vmeta])* $variant = $value,)+
+            $first,
+            $($(#[$vmeta])* $variant,)*
+            /// A stored value that names no variant, kept as it is.
+            Other(i32),
         }
 
         impl $name {
-            pub const ALL: &'static [Self] = &[$(Self::$variant,)+];
+            pub const ALL: &'static [Self] = &[Self::$first, $(Self::$variant,)*];
+        }
 
-            /// The stored value as an enum; an unknown value reads as the
-            /// zero variant.
-            pub fn from_raw(v: i32) -> Self {
-                Self::try_from(v).unwrap_or_default()
+        impl Default for $name {
+            fn default() -> Self {
+                Self::$first
+            }
+        }
+
+        impl From<i32> for $name {
+            fn from(v: i32) -> Self {
+                match v {
+                    $first_value => Self::$first,
+                    $($value => Self::$variant,)*
+                    _ => Self::Other(v),
+                }
             }
         }
 
         impl From<$name> for i32 {
             fn from(v: $name) -> i32 {
-                v as i32
+                match v {
+                    $name::$first => $first_value,
+                    $($name::$variant => $value,)*
+                    $name::Other(v) => v,
+                }
             }
         }
 
-        impl TryFrom<i32> for $name {
-            type Error = UnknownStatus;
-            fn try_from(v: i32) -> Result<Self, UnknownStatus> {
-                match v {
-                    $($value => Ok(Self::$variant),)+
-                    _ => Err(UnknownStatus(v)),
-                }
+        impl PartialEq for $name {
+            fn eq(&self, other: &Self) -> bool {
+                i32::from(*self) == i32::from(*other)
+            }
+        }
+
+        impl Eq for $name {}
+
+        impl PartialOrd for $name {
+            fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+
+        impl Ord for $name {
+            fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+                i32::from(*self).cmp(&i32::from(*other))
+            }
+        }
+
+        impl std::hash::Hash for $name {
+            fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+                i32::from(*self).hash(state);
             }
         }
     };
@@ -121,17 +150,24 @@ status_enum! {
 mod tests {
     use super::*;
 
+    /// Every variant, and values that name none, survive `i32 -> enum -> i32`;
+    /// an unknown value equals no variant and orders by its number.
     fn round_trip<T>(all: &[T])
     where
-        T: Copy + std::fmt::Debug + PartialEq + Into<i32> + TryFrom<i32, Error = UnknownStatus>,
+        T: Copy + std::fmt::Debug + Ord + Into<i32> + From<i32>,
     {
         for &v in all {
             let raw: i32 = v.into();
-            assert_eq!(T::try_from(raw), Ok(v));
+            assert_eq!(T::from(raw), v);
         }
         let max = all.iter().map(|&v| v.into()).max().unwrap();
-        assert_eq!(T::try_from(max + 1), Err(UnknownStatus(max + 1)));
-        assert_eq!(T::try_from(-1), Err(UnknownStatus(-1)));
+        for raw in [max + 1, -1, 99] {
+            let v = T::from(raw);
+            assert_eq!(v.into(), raw);
+            assert!(all.iter().all(|&known| known != v));
+        }
+        assert!(T::from(max + 1) > T::from(max));
+        assert!(T::from(-1) < T::from(0));
     }
 
     #[test]
@@ -140,7 +176,9 @@ mod tests {
         round_trip(ParCheckerStatus::ALL);
         assert_eq!(i32::from(NzbParStatus::RepairPossible), 4);
         assert_eq!(i32::from(ParCheckerStatus::RepairNotNeeded), 3);
-        assert_eq!(NzbParStatus::from_raw(99), NzbParStatus::None);
+        assert_eq!(NzbParStatus::from(99), NzbParStatus::Other(99));
+        assert_eq!(NzbParStatus::Other(3), NzbParStatus::Success);
+        assert_eq!(NzbParStatus::default(), NzbParStatus::None);
     }
 
     #[test]
@@ -151,7 +189,7 @@ mod tests {
         assert_eq!(i32::from(UnpackStatus::Password), 5);
         assert_eq!(i32::from(MoveStatus::Success), 2);
         assert_eq!(i32::from(CleanupStatus::Failure), 1);
-        assert_eq!(UnpackStatus::from_raw(-3), UnpackStatus::None);
+        assert_eq!(i32::from(UnpackStatus::from(-3)), -3);
     }
 
     #[test]
@@ -160,6 +198,6 @@ mod tests {
         assert_eq!(i32::from(DupStatus::Undefined), 0);
         assert_eq!(i32::from(DupStatus::Dupe), 4);
         assert_eq!(i32::from(DupStatus::Good), 6);
-        assert_eq!(DupStatus::from_raw(7), DupStatus::Undefined);
+        assert_eq!(i32::from(DupStatus::from(7)), 7);
     }
 }

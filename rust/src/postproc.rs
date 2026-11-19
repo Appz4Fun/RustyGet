@@ -166,7 +166,7 @@ impl NzbgetRsParChecker {
             cancel_token: Mutex::new(None),
             verified_files: Mutex::new(Vec::new()),
             err_msg: Mutex::new(Vec::new()),
-            status: AtomicI32::new(ParCheckerStatus::Failed as i32),
+            status: AtomicI32::new(ParCheckerStatus::Failed.into()),
             stage: AtomicI32::new(PAR_STAGE_LOADING_PARS),
             file_progress: AtomicI32::new(0),
             stage_progress: AtomicI32::new(0),
@@ -231,7 +231,7 @@ impl NzbgetRsParChecker {
         self.par_full.load(Ordering::Acquire)
     }
     pub fn status(&self) -> ParCheckerStatus {
-        ParCheckerStatus::from_raw(self.status.load(Ordering::Acquire))
+        ParCheckerStatus::from(self.status.load(Ordering::Acquire))
     }
     pub fn stage(&self) -> i32 {
         self.stage.load(Ordering::Acquire)

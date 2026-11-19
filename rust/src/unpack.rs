@@ -4201,6 +4201,27 @@ mod tests {
         assert!(!req_par2);
         assert_eq!(st2, UnpackStatus::Space);
 
+        // An unknown stored par status orders above Skipped, as the raw value did, so a
+        // full par check counts as done and no new one is requested.
+        let (req_par3, _, _) = eval_unpack_completed_failure(
+            true,
+            false,
+            NzbParStatus::from(9),
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            true,
+            false,
+            false,
+        );
+        assert!(!req_par3);
+
         let _ = std::fs::remove_dir_all(&work_dir);
     }
 }

@@ -554,10 +554,10 @@ class Daemon:
         port then closes until the new instance listens. Wait for the new
         instance's start-up line in the log, which it writes after the old one
         has stopped, before asking whether it is ready."""
-        started = _grep_log(self.t, 'nzbget runs on')
+        started = _grep_log(self.t, 'RustyGet runs on')
         api.reload()
         deadline = time.time() + timeout
-        while _grep_log(self.t, 'nzbget runs on') <= started:
+        while _grep_log(self.t, 'RustyGet runs on') <= started:
             if time.time() > deadline:
                 raise RuntimeError('nzbget did not start again after the reload')
             time.sleep(0.2)

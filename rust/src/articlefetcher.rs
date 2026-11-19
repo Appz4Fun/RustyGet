@@ -30,11 +30,34 @@ pub struct HostStatus {
     pub mom_speed: i64,
 }
 
+/// A pooled connection. Outside this module it can only be made with the unsafe
+/// [`ConnHandle::from_pooled`], so safe code cannot hand a host a made-up connection.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ConnHandle(usize);
+
+impl ConnHandle {
+    /// # Safety
+    /// `conn` must be a connection the active server pool handed out and has not freed
+    /// yet, and must stay so while the handle is in use.
+    pub unsafe fn from_pooled(conn: *mut crate::net::PooledNntpConn) -> Self {
+        Self(conn as usize)
+    }
+
+    fn is_none(self) -> bool {
+        self.0 == 0
+    }
+}
+
+/// A news server, as named in [`NntpHost::get_connection`]'s exclusion list. Only a
+/// host makes these, from servers it reported.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ServerHandle(usize);
+
 /// One configured news server.
 #[derive(Clone, Debug, Default)]
 pub struct ServerInfo {
     /// Identifies the server in [`NntpHost::get_connection`]'s exclusion list.
-    pub handle: usize,
+    pub handle: ServerHandle,
     pub active: bool,
     pub norm_level: i32,
     pub group: i32,
@@ -48,39 +71,39 @@ pub struct ServerInfo {
 /// A pooled connection handed out by [`NntpHost::get_connection`].
 #[derive(Clone, Debug, Default)]
 pub struct ConnInfo {
-    pub conn: usize,
+    pub conn: ConnHandle,
     /// The connection was already open (it may have gone stale).
     pub reused: bool,
     pub server: ServerInfo,
 }
 
 /// The server pool, connections, speed meter and log an [`ArticleFetcher`]
-/// works through. Connections are passed around as opaque `usize` handles.
+/// works through. Connections and servers are passed around as opaque handles.
 pub trait NntpHost: Send + Sync {
     fn status(&self) -> HostStatus;
     /// The server at `index` (`0..status().server_count`).
     fn server(&self, index: usize) -> Option<ServerInfo>;
     /// A free connection at `level`, skipping the servers in `excluded`.
-    fn get_connection(&self, level: i32, excluded: &[usize]) -> Option<ConnInfo>;
+    fn get_connection(&self, level: i32, excluded: &[ServerHandle]) -> Option<ConnInfo>;
     /// Books the connection's traffic and returns it to the pool, disconnecting
     /// it unless `keep_connected` (or when it was cancelled).
-    fn release(&self, conn: usize, keep_connected: bool);
+    fn release(&self, conn: ConnHandle, keep_connected: bool);
     /// The server `conn` belongs to.
-    fn conn_server(&self, conn: usize) -> Option<ServerInfo>;
+    fn conn_server(&self, conn: ConnHandle) -> Option<ServerInfo>;
     /// Connects `conn` if it is not connected yet.
-    fn connect(&self, conn: usize) -> bool;
+    fn connect(&self, conn: ConnHandle) -> bool;
     /// `GROUP` reply, or `None` when the connection failed.
-    fn join_group(&self, conn: usize, group: &[u8]) -> Option<Vec<u8>>;
+    fn join_group(&self, conn: ConnHandle, group: &[u8]) -> Option<Vec<u8>>;
     /// Reply to a request line (`cmd` ends in CRLF), or `None` when the connection failed.
-    fn request(&self, conn: usize, cmd: &[u8]) -> Option<Vec<u8>>;
+    fn request(&self, conn: ConnHandle, cmd: &[u8]) -> Option<Vec<u8>>;
     /// Reads the next chunk of the article body into `buf`, data the connection
     /// already buffered first. Returns its length; `None` when the connection is lost.
-    fn read(&self, conn: usize, buf: &mut [u8]) -> Option<usize>;
-    fn disconnect(&self, conn: usize);
+    fn read(&self, conn: ConnHandle, buf: &mut [u8]) -> Option<usize>;
+    fn disconnect(&self, conn: ConnHandle);
     /// Stops a fetch in flight on `conn`, without logging its errors.
-    fn cancel(&self, conn: usize);
+    fn cancel(&self, conn: ConnHandle);
     /// Read/write timeout for `conn`; `secs <= 0` restores the connection's own.
-    fn set_io_timeout(&self, conn: usize, secs: i32);
+    fn set_io_timeout(&self, conn: ConnHandle, secs: i32);
     fn detail(&self, msg: &[u8]);
 }
 
@@ -91,14 +114,14 @@ pub struct NativeNntpHost;
 impl NativeNntpHost {
     /// # Safety
     /// `conn` must be a live connection handle from [`NntpHost::get_connection`].
-    unsafe fn conn<'a>(conn: usize) -> Option<&'a crate::net::PooledNntpConn> {
-        unsafe { (conn as *const crate::net::PooledNntpConn).as_ref() }
+    unsafe fn conn<'a>(conn: ConnHandle) -> Option<&'a crate::net::PooledNntpConn> {
+        unsafe { (conn.0 as *const crate::net::PooledNntpConn).as_ref() }
     }
 }
 
 fn server_info(s: &Arc<crate::net::RsNewsServer>) -> ServerInfo {
     ServerInfo {
-        handle: Arc::as_ptr(s) as usize,
+        handle: ServerHandle(Arc::as_ptr(s) as usize),
         active: s.active.load(Ordering::SeqCst),
         norm_level: s.norm_level.load(Ordering::SeqCst),
         group: s.group,
@@ -143,27 +166,27 @@ impl NntpHost for NativeNntpHost {
         servers.get(index).map(server_info)
     }
 
-    fn get_connection(&self, level: i32, excluded: &[usize]) -> Option<ConnInfo> {
+    fn get_connection(&self, level: i32, excluded: &[ServerHandle]) -> Option<ConnInfo> {
         let pool = crate::net::active_server_pool()?;
         // SAFETY: server handles come from `server`/`get_connection` and the
         // pool keeps its servers alive.
         let failed: Vec<&crate::net::RsNewsServer> = excluded
             .iter()
-            .filter(|&&h| h != 0)
-            .map(|&h| unsafe { &*(h as *const crate::net::RsNewsServer) })
+            .filter(|h| h.0 != 0)
+            .map(|h| unsafe { &*(h.0 as *const crate::net::RsNewsServer) })
             .collect();
         let conn_ptr = pool.get_connection(level, None, &failed);
         // SAFETY: a non-null connection from the pool stays valid until freed.
         let conn = unsafe { conn_ptr.as_ref() }?;
         Some(ConnInfo {
-            conn: conn_ptr as usize,
+            conn: ConnHandle(conn_ptr as usize),
             reused: conn.is_connected(),
             server: server_info(&conn.server),
         })
     }
 
-    fn release(&self, conn: usize, keep_connected: bool) {
-        let conn_ptr = conn as *mut crate::net::PooledNntpConn;
+    fn release(&self, conn: ConnHandle, keep_connected: bool) {
+        let conn_ptr = conn.0 as *mut crate::net::PooledNntpConn;
         let Some(c) = (unsafe { Self::conn(conn) }) else {
             return;
         };
@@ -182,29 +205,29 @@ impl NntpHost for NativeNntpHost {
         }
     }
 
-    fn conn_server(&self, conn: usize) -> Option<ServerInfo> {
+    fn conn_server(&self, conn: ConnHandle) -> Option<ServerInfo> {
         unsafe { Self::conn(conn) }.map(|c| server_info(&c.server))
     }
 
-    fn connect(&self, conn: usize) -> bool {
+    fn connect(&self, conn: ConnHandle) -> bool {
         unsafe { Self::conn(conn) }.is_some_and(|c| unsafe { c.connect() })
     }
 
-    fn join_group(&self, conn: usize, group: &[u8]) -> Option<Vec<u8>> {
+    fn join_group(&self, conn: ConnHandle, group: &[u8]) -> Option<Vec<u8>> {
         let c = unsafe { Self::conn(conn) }?;
         let group = cstr::to_cstring(group);
         let resp = unsafe { c.join_group(group.as_ptr()) };
         (!resp.is_null()).then(|| unsafe { cstr::owned(resp) })
     }
 
-    fn request(&self, conn: usize, cmd: &[u8]) -> Option<Vec<u8>> {
+    fn request(&self, conn: ConnHandle, cmd: &[u8]) -> Option<Vec<u8>> {
         let c = unsafe { Self::conn(conn) }?;
         let cmd = cstr::to_cstring(cmd);
         let resp = unsafe { c.request(cmd.as_ptr()) };
         (!resp.is_null()).then(|| unsafe { cstr::owned(resp) })
     }
 
-    fn read(&self, conn: usize, buf: &mut [u8]) -> Option<usize> {
+    fn read(&self, conn: ConnHandle, buf: &mut [u8]) -> Option<usize> {
         let c = unsafe { Self::conn(conn) }?;
         let mut len = unsafe { c.read_buffered(buf) };
         if len == 0 {
@@ -220,20 +243,20 @@ impl NntpHost for NativeNntpHost {
         Some(len)
     }
 
-    fn disconnect(&self, conn: usize) {
+    fn disconnect(&self, conn: ConnHandle) {
         if let Some(c) = unsafe { Self::conn(conn) } {
             unsafe { c.disconnect() };
         }
     }
 
-    fn cancel(&self, conn: usize) {
+    fn cancel(&self, conn: ConnHandle) {
         if let Some(c) = unsafe { Self::conn(conn) } {
             c.set_suppress_errors(true);
             c.cancel();
         }
     }
 
-    fn set_io_timeout(&self, conn: usize, secs: i32) {
+    fn set_io_timeout(&self, conn: ConnHandle, secs: i32) {
         if let Some(c) = unsafe { Self::conn(conn) } {
             c.set_io_timeout(secs);
         }
@@ -396,7 +419,7 @@ pub struct ArticleFetcher {
     host: &'static dyn NntpHost,
     wait_counter: Mutex<Option<Arc<AtomicI32>>>,
     stopped: AtomicBool,
-    conn_ptr: Mutex<usize>,
+    conn_ptr: Mutex<ConnHandle>,
 }
 
 impl ArticleFetcher {
@@ -405,7 +428,7 @@ impl ArticleFetcher {
             host,
             wait_counter: Mutex::new(None),
             stopped: AtomicBool::new(false),
-            conn_ptr: Mutex::new(0),
+            conn_ptr: Mutex::new(ConnHandle::default()),
         }
     }
 
@@ -424,7 +447,7 @@ impl ArticleFetcher {
         self.stopped.store(true, Ordering::SeqCst);
         if let Ok(guard) = self.conn_ptr.lock() {
             let conn = *guard;
-            if conn != 0 {
+            if !conn.is_none() {
                 self.host.cancel(conn);
             }
         }
@@ -440,11 +463,11 @@ impl ArticleFetcher {
         !self.is_stopped()
     }
 
-    fn release_connection(&self, conn: usize, keep_connected: bool) {
+    fn release_connection(&self, conn: ConnHandle, keep_connected: bool) {
         let mut guard = self.conn_ptr.lock().unwrap();
         self.host.release(conn, keep_connected);
         if *guard == conn {
-            *guard = 0;
+            *guard = ConnHandle::default();
         }
     }
 
@@ -452,12 +475,12 @@ impl ArticleFetcher {
         let mut result = FetchedArticle::default();
         // servers this article failed on (only those: a login error or "too many
         // connections" says nothing about a server's backbone siblings) ...
-        let mut failed_ptrs: Vec<usize> = Vec::new();
+        let mut failed_ptrs: Vec<ServerHandle> = Vec::new();
         // ... and backbones that answered 430 for it
         let mut missing: Vec<crate::nntp::BackboneMiss> = Vec::new();
-        let mut transient_attempts: BTreeMap<usize, i32> = BTreeMap::new();
-        let mut stale_connections: BTreeMap<usize, i32> = BTreeMap::new();
-        let mut timed_out_tries: BTreeMap<usize, i32> = BTreeMap::new();
+        let mut transient_attempts: BTreeMap<ServerHandle, i32> = BTreeMap::new();
+        let mut stale_connections: BTreeMap<ServerHandle, i32> = BTreeMap::new();
+        let mut timed_out_tries: BTreeMap<ServerHandle, i32> = BTreeMap::new();
         // every server given up on answered 430
         let mut gave_up = 0u32;
         let mut only_430 = true;
@@ -517,18 +540,18 @@ impl ArticleFetcher {
             }
             let wait_guard = WaitGuard(wc);
 
-            let mut conn: usize = 0;
+            let mut conn = ConnHandle::default();
             let mut reused = false;
             let mut server_id: i32 = 0;
             let mut max_connections: i32 = 0;
             let mut join_group = false;
-            let mut server_ptr: usize = 0;
+            let mut server_ptr = ServerHandle::default();
             let mut server_group_of_conn: i32 = 0;
             let mut server_retention: i32 = 0;
             let mut server_name: Vec<u8> = Vec::new();
 
             let wait_started = Instant::now();
-            while conn == 0 && !self.is_stopped() {
+            while conn.is_none() && !self.is_stopped() {
                 let cur_st = self.host.status();
                 if cur_st.quota_reached {
                     std::thread::sleep(Duration::from_millis(100));
@@ -550,7 +573,7 @@ impl ArticleFetcher {
             }
             drop(wait_guard);
 
-            if conn == 0 {
+            if conn.is_none() {
                 level += 1;
                 continue;
             }
@@ -654,7 +677,7 @@ impl ArticleFetcher {
 
     pub fn fetch_from_connection(
         &self,
-        conn: usize,
+        conn: ConnHandle,
         message_id: &[u8],
         groups: &[Vec<u8>],
     ) -> FetchedArticle {
@@ -663,13 +686,13 @@ impl ArticleFetcher {
 
     fn fetch_from_connection_with_meta(
         &self,
-        conn: usize,
+        conn: ConnHandle,
         known_meta: Option<(&[u8], bool)>,
         message_id: &[u8],
         groups: &[Vec<u8>],
     ) -> FetchedArticle {
         let mut result = FetchedArticle::default();
-        if self.is_stopped() || conn == 0 {
+        if self.is_stopped() || conn.is_none() {
             return result;
         }
 
@@ -699,7 +722,7 @@ impl ArticleFetcher {
         }
 
         // the connection goes back to the pool with its own timeout
-        struct IoTimeout(&'static dyn NntpHost, usize);
+        struct IoTimeout(&'static dyn NntpHost, ConnHandle);
         impl Drop for IoTimeout {
             fn drop(&mut self) {
                 self.0.set_io_timeout(self.1, 0);
@@ -1230,7 +1253,7 @@ mod tests {
 
     fn mock_server() -> ServerInfo {
         ServerInfo {
-            handle: 0x1000,
+            handle: ServerHandle(0x1000),
             active: true,
             id: 7,
             max_connections: 4,
@@ -1253,27 +1276,27 @@ mod tests {
         fn server(&self, _index: usize) -> Option<ServerInfo> {
             Some(mock_server())
         }
-        fn get_connection(&self, _level: i32, _excluded: &[usize]) -> Option<ConnInfo> {
+        fn get_connection(&self, _level: i32, _excluded: &[ServerHandle]) -> Option<ConnInfo> {
             Some(ConnInfo {
-                conn: 0x2000,
+                conn: ConnHandle(0x2000),
                 reused: false,
                 server: mock_server(),
             })
         }
-        fn release(&self, _conn: usize, _keep_connected: bool) {}
-        fn conn_server(&self, _conn: usize) -> Option<ServerInfo> {
+        fn release(&self, _conn: ConnHandle, _keep_connected: bool) {}
+        fn conn_server(&self, _conn: ConnHandle) -> Option<ServerInfo> {
             Some(mock_server())
         }
-        fn connect(&self, _conn: usize) -> bool {
+        fn connect(&self, _conn: ConnHandle) -> bool {
             true
         }
-        fn join_group(&self, _conn: usize, _group: &[u8]) -> Option<Vec<u8>> {
+        fn join_group(&self, _conn: ConnHandle, _group: &[u8]) -> Option<Vec<u8>> {
             None
         }
-        fn request(&self, _conn: usize, _cmd: &[u8]) -> Option<Vec<u8>> {
+        fn request(&self, _conn: ConnHandle, _cmd: &[u8]) -> Option<Vec<u8>> {
             Some(b"222 0 <seg1@test> body".to_vec())
         }
-        fn read(&self, _conn: usize, buf: &mut [u8]) -> Option<usize> {
+        fn read(&self, _conn: ConnHandle, buf: &mut [u8]) -> Option<usize> {
             let wire = TEST_WIRE_PAYLOAD.get().unwrap();
             let pos = TEST_READ_POS.load(Ordering::SeqCst) as usize;
             if pos >= wire.len() {
@@ -1284,9 +1307,9 @@ mod tests {
             TEST_READ_POS.store((pos + take) as i32, Ordering::SeqCst);
             Some(take)
         }
-        fn disconnect(&self, _conn: usize) {}
-        fn cancel(&self, _conn: usize) {}
-        fn set_io_timeout(&self, _conn: usize, _secs: i32) {}
+        fn disconnect(&self, _conn: ConnHandle) {}
+        fn cancel(&self, _conn: ConnHandle) {}
+        fn set_io_timeout(&self, _conn: ConnHandle, _secs: i32) {}
         fn detail(&self, _msg: &[u8]) {}
     }
 
@@ -1323,33 +1346,33 @@ mod tests {
                 ..mock_server()
             })
         }
-        fn get_connection(&self, level: i32, excluded: &[usize]) -> Option<ConnInfo> {
+        fn get_connection(&self, level: i32, excluded: &[ServerHandle]) -> Option<ConnInfo> {
             let mut got = MockHost.get_connection(level, excluded)?;
             got.reused = true;
             got.server.id = 9;
             Some(got)
         }
-        fn release(&self, _conn: usize, _keep_connected: bool) {}
-        fn conn_server(&self, conn: usize) -> Option<ServerInfo> {
+        fn release(&self, _conn: ConnHandle, _keep_connected: bool) {}
+        fn conn_server(&self, conn: ConnHandle) -> Option<ServerInfo> {
             MockHost.conn_server(conn)
         }
-        fn connect(&self, _conn: usize) -> bool {
+        fn connect(&self, _conn: ConnHandle) -> bool {
             true
         }
-        fn join_group(&self, _conn: usize, _group: &[u8]) -> Option<Vec<u8>> {
+        fn join_group(&self, _conn: ConnHandle, _group: &[u8]) -> Option<Vec<u8>> {
             None
         }
-        fn request(&self, _conn: usize, _cmd: &[u8]) -> Option<Vec<u8>> {
+        fn request(&self, _conn: ConnHandle, _cmd: &[u8]) -> Option<Vec<u8>> {
             SILENT_REQUESTS.fetch_add(1, Ordering::SeqCst);
             std::thread::sleep(TIMED_OUT_AFTER + Duration::from_millis(30));
             None
         }
-        fn read(&self, conn: usize, buf: &mut [u8]) -> Option<usize> {
+        fn read(&self, conn: ConnHandle, buf: &mut [u8]) -> Option<usize> {
             MockHost.read(conn, buf)
         }
-        fn disconnect(&self, _conn: usize) {}
-        fn cancel(&self, _conn: usize) {}
-        fn set_io_timeout(&self, _conn: usize, secs: i32) {
+        fn disconnect(&self, _conn: ConnHandle) {}
+        fn cancel(&self, _conn: ConnHandle) {}
+        fn set_io_timeout(&self, _conn: ConnHandle, secs: i32) {
             SILENT_TIMEOUTS.lock().unwrap().push(secs);
         }
         fn detail(&self, _msg: &[u8]) {}

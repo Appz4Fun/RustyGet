@@ -715,6 +715,33 @@ pub(crate) fn streaming_session_take_par_secs(nzb_id: i32) -> (i32, i32) {
     (secs(time.verify + time.repair), secs(time.repair))
 }
 
+/// Whether job `nzb_id` has live PAR time not yet in its times.
+pub(crate) fn live_par_time_pending(nzb_id: i32) -> bool {
+    LIVE_PAR_TIME
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&nzb_id)
+        .is_some_and(|time| time.verify + time.repair >= std::time::Duration::from_secs(1))
+}
+
+/// Takes only the whole seconds of job `nzb_id`'s live PAR time (par time, which
+/// includes the repair, and repair alone) and keeps the fraction for later, so
+/// repeated checkpoints neither lose nor add time.
+pub(crate) fn streaming_session_take_whole_par_secs(nzb_id: i32) -> (i32, i32) {
+    let mut times = LIVE_PAR_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(time) = times.get_mut(&nzb_id) else {
+        return (0, 0);
+    };
+    let whole = |d: std::time::Duration| d.as_secs().min(i32::MAX as u64);
+    let par = whole(time.verify + time.repair);
+    let repair = whole(time.repair).min(par);
+    // The par time keeps its exact fraction; the repair part of it never exceeds it.
+    let rest = (time.verify + time.repair) - std::time::Duration::from_secs(par);
+    time.repair = (time.repair - std::time::Duration::from_secs(repair)).min(rest);
+    time.verify = rest - time.repair;
+    (par as i32, repair as i32)
+}
+
 /// Charges live PAR time to job `nzb_id` as if it had been measured.
 #[cfg(test)]
 pub(crate) fn live_par_time_add_for_test(nzb_id: i32, verify_ms: u64, repair_ms: u64) {
@@ -4428,6 +4455,25 @@ mod tests {
         assert_eq!(split_live_time(ms(3), 0, 0), (ms(3), ms(0)));
     }
 
+    /// Checkpoints take whole seconds and keep the fraction: however often the queue
+    /// is saved, the saved and the settled time add up to what was measured.
+    #[test]
+    fn live_par_time_checkpoints_take_whole_seconds_once() {
+        let nzb_id = 0x6a0f_0021;
+        let _ = streaming_session_take_par_secs(nzb_id);
+        live_par_time_add_for_test(nzb_id, 1_700, 600); // 2.3 s, 0.6 s repair
+        assert!(live_par_time_pending(nzb_id));
+        assert_eq!(streaming_session_take_whole_par_secs(nzb_id), (2, 0));
+        assert_eq!(streaming_session_take_whole_par_secs(nzb_id), (0, 0));
+        assert!(!live_par_time_pending(nzb_id));
+        // 0.3 s kept; 2.3 s more of which 0.9 s repair: 2.6 s, 1.2 s repair.
+        live_par_time_add_for_test(nzb_id, 1_400, 900);
+        assert_eq!(streaming_session_take_whole_par_secs(nzb_id), (2, 1));
+        // The remaining 0.6 s settles at history: 2 + 2 + 1 = 5 s for 4.6 s measured.
+        assert_eq!(streaming_session_take_par_secs(nzb_id), (1, 0));
+        assert_eq!(streaming_session_take_whole_par_secs(nzb_id), (0, 0));
+    }
+
     /// Live PAR work is charged to the job's par time, once, nested calls included once,
     /// and survives the session until the job reaches history and takes it.
     #[test]
@@ -4458,7 +4504,9 @@ mod tests {
         .unwrap();
         let index_path = dir.join("time.par2");
         std::fs::write(&index_path, &built.index).unwrap();
-        streaming_session_start(
+        let pool = Arc::new(crate::parlive::BudgetPool::with_size(500 << 20));
+        streaming_session_start_in_pool(
+            &pool,
             nzb_id,
             &index_path,
             &dir,

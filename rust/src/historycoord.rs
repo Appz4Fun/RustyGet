@@ -2734,6 +2734,8 @@ unsafe extern "C" fn hc_native_action_cb(
             let hi = host.hist_item_snap(p2);
             let nzb_ptr = hi.inner_ptr;
             let nzb = host.nzb_snap(nzb_ptr, false);
+            // Live work that ended after the job reached history is no part of it.
+            crate::postproc::live_par_time_discard(nzb.id);
             if !nzb.unpack_cleaned_up_disk {
                 host.nzb_set_int(nzb_ptr, NZB_INT_UNPACK_STATUS, US_NONE);
                 host.nzb_set_int(nzb_ptr, NZB_INT_DIRECT_UNPACK_STATUS, NS_NONE);
@@ -2854,6 +2856,7 @@ unsafe extern "C" fn hc_native_action_cb(
                 }
             }
             host.disk_discard_files(p2);
+            crate::postproc::live_par_time_discard(host.nzb_snap(p2, false).id);
             host.nzb_set_int(p2, NZB_INT_MOVE_STATUS, MS_NONE);
             host.nzb_set_int(p2, NZB_INT_UNPACK_CLEANED_UP_DISK, 0);
             host.nzb_set_int(p2, NZB_INT_PAR_STATUS, PAR_STATUS_NONE);

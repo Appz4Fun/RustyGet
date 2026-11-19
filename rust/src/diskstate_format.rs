@@ -8372,6 +8372,10 @@ pub(crate) fn active_disk_save_queue(
     dq_ptr: usize,
     save_history: bool,
 ) -> bool {
+    // Live PAR time so far goes into the saved times, so a restart keeps it.
+    for idx in 0..qh.queue_len(dq_ptr) {
+        crate::postproc::live_par_time_checkpoint(qh, qh.queue_at(dq_ptr, idx));
+    }
     let mut ctx = ActiveDiskExecCtx::new(Some(qh));
     ctx.dq_ptr = dq_ptr;
     run_active_diskstate_exec(

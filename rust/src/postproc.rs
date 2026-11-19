@@ -2,6 +2,7 @@
 //! `ParChecker`, `UnpackController`, `DirectUnpack`, `MoveController`,
 //! `CleanupController`, `RenameController`, and `PostRenamerController`.
 
+use crate::cstr;
 use crate::parchecker::{
     is_processed_file, ParRepairEvents, ParSegment, QuickInfo, RustParRepairer,
     PAR_RESULT_INVALID_ARGS, PAR_RESULT_REPAIR_FAILED, PAR_RESULT_REPAIR_NOT_POSSIBLE,
@@ -10,7 +11,7 @@ use crate::parchecker::{
 use crate::postrepair::NzbgetRsParSegment;
 use crate::repair::NzbgetRsRepairCtrlHostFn;
 use std::collections::VecDeque;
-use std::ffi::{c_char, c_int, c_void, CStr};
+use std::ffi::{c_char, c_int, c_void};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -44,24 +45,6 @@ pub(crate) fn current_time_sec() -> i64 {
 fn current_thread_key() -> usize {
     // SAFETY: `pthread_self` returns the calling POSIX thread identifier.
     unsafe { libc::pthread_self() as usize }
-}
-
-#[inline]
-pub(crate) fn to_c_buf(bytes: &[u8]) -> Vec<u8> {
-    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    let mut out = Vec::with_capacity(end + 1);
-    out.extend_from_slice(&bytes[..end]);
-    out.push(0);
-    out
-}
-
-#[inline]
-pub(crate) unsafe fn ptr_bytes(p: *const c_char) -> Vec<u8> {
-    if p.is_null() {
-        Vec::new()
-    } else {
-        unsafe { CStr::from_ptr(p).to_bytes().to_vec() }
-    }
 }
 
 #[inline]
@@ -1618,7 +1601,7 @@ impl NzbgetRsUnpackController {
     }
 
     fn set_progress_label(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn, label: &[u8]) {
-        let c_lbl = to_c_buf(label);
+        let c_lbl = cstr::nul_terminated(label);
         unsafe {
             host_cb(
                 ctx,
@@ -1637,7 +1620,7 @@ impl NzbgetRsUnpackController {
     }
 
     fn global_log(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn, kind: i32, msg: &[u8]) {
-        let c_msg = to_c_buf(msg);
+        let c_msg = cstr::nul_terminated(msg);
         unsafe {
             host_cb(
                 ctx,
@@ -1686,7 +1669,7 @@ impl NzbgetRsUnpackController {
             trunc_1023(text.to_vec())
         };
 
-        let c_msg = to_c_buf(&msg_text);
+        let c_msg = cstr::nul_terminated(&msg_text);
         unsafe {
             host_cb(
                 ctx,
@@ -1768,7 +1751,7 @@ impl NzbgetRsUnpackController {
                 let warn_msg = trunc_1023(
                     [b"Cancelling ", st.info_name.as_slice(), b" due to errors"].concat(),
                 );
-                let c_warn = to_c_buf(&warn_msg);
+                let c_warn = cstr::nul_terminated(&warn_msg);
                 unsafe {
                     host_cb(
                         ctx,
@@ -1833,15 +1816,15 @@ impl NzbgetRsUnpackController {
                     strs.as_mut_ptr(),
                 );
             }
-            st.dest_dir = unsafe { ptr_bytes(strs[0]) };
-            st.final_dir = unsafe { ptr_bytes(strs[1]) };
-            st.name = unsafe { ptr_bytes(strs[2]) };
+            st.dest_dir = unsafe { cstr::owned(strs[0]) };
+            st.final_dir = unsafe { cstr::owned(strs[1]) };
+            st.name = unsafe { cstr::owned(strs[2]) };
             if ints[1] != 0 {
-                st.password = unsafe { ptr_bytes(strs[3]) };
+                st.password = unsafe { cstr::owned(strs[3]) };
             }
-            st.unpack_pass_file = unsafe { ptr_bytes(strs[4]) };
-            st.unpack_ignore_ext = unsafe { ptr_bytes(strs[5]) };
-            st.inter_dir_opt = unsafe { ptr_bytes(strs[6]) };
+            st.unpack_pass_file = unsafe { cstr::owned(strs[4]) };
+            st.unpack_ignore_ext = unsafe { cstr::owned(strs[5]) };
+            st.inter_dir_opt = unsafe { cstr::owned(strs[6]) };
 
             let dl_count = ints[2].max(0) as usize;
             let ex_count = ints[3].max(0) as usize;
@@ -1863,7 +1846,7 @@ impl NzbgetRsUnpackController {
                         s.as_mut_ptr(),
                     );
                 }
-                st.downloaded_files.push(unsafe { ptr_bytes(s[0]) });
+                st.downloaded_files.push(unsafe { cstr::owned(s[0]) });
             }
             st.extracted_archives.reserve(ex_count);
             for i in 0..ex_count {
@@ -1883,7 +1866,7 @@ impl NzbgetRsUnpackController {
                         s.as_mut_ptr(),
                     );
                 }
-                st.extracted_archives.push(unsafe { ptr_bytes(s[0]) });
+                st.extracted_archives.push(unsafe { cstr::owned(s[0]) });
             }
 
             st.unpack_tried = ints[4] != 0;
@@ -2150,7 +2133,7 @@ impl NzbgetRsUnpackController {
             let mut built = Vec::new();
             extern "C" fn set_vec(vec_ptr: usize, s: *const c_char) {
                 let v = unsafe { &mut *(vec_ptr as *mut Vec<u8>) };
-                *v = unsafe { ptr_bytes(s) };
+                *v = unsafe { cstr::owned(s) };
             }
             unsafe {
                 host_cb(
@@ -2168,7 +2151,7 @@ impl NzbgetRsUnpackController {
                 );
             }
             st.final_dir = built;
-            let c_fin = to_c_buf(&st.final_dir);
+            let c_fin = cstr::nul_terminated(&st.final_dir);
             with_dq_guard(ctx, host_cb, |_| unsafe {
                 host_cb(
                     ctx,
@@ -3840,7 +3823,7 @@ impl NzbgetRsDirectUnpack {
     }
 
     fn global_log(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn, kind: i32, msg: &[u8]) {
-        let c_msg = to_c_buf(msg);
+        let c_msg = cstr::nul_terminated(msg);
         unsafe {
             host_cb(
                 ctx,
@@ -3934,7 +3917,7 @@ impl NzbgetRsDirectUnpack {
         if self.processed.load(Ordering::Acquire) {
             let cancel_msg = trunc_1023([b"Cancelling ", info_name.as_slice()].concat());
             if nzb_ptr != 0 {
-                let c_msg = to_c_buf(&cancel_msg);
+                let c_msg = cstr::nul_terminated(&cancel_msg);
                 unsafe {
                     host_cb(
                         ctx,
@@ -4053,8 +4036,8 @@ impl NzbgetRsDirectUnpack {
                 strs.as_mut_ptr(),
             )
         };
-        let nzb_name = unsafe { ptr_bytes(strs[0]) };
-        let filename = unsafe { ptr_bytes(strs[1]) };
+        let nzb_name = unsafe { cstr::owned(strs[0]) };
+        let filename = unsafe { cstr::owned(strs[1]) };
         let failed_articles = ints[0];
 
         Self::global_log(
@@ -4113,7 +4096,7 @@ impl NzbgetRsDirectUnpack {
                 ]
                 .concat(),
             );
-            let c_msg = to_c_buf(&msg);
+            let c_msg = cstr::nul_terminated(&msg);
             unsafe {
                 host_cb(
                     ctx,
@@ -4175,7 +4158,7 @@ impl NzbgetRsDirectUnpack {
                 strs.as_mut_ptr(),
             );
         }
-        let nzb_name = unsafe { ptr_bytes(strs[0]) };
+        let nzb_name = unsafe { cstr::owned(strs[0]) };
         Self::global_log(
             ctx,
             host_cb,
@@ -4199,7 +4182,7 @@ impl NzbgetRsDirectUnpack {
                     ]
                     .concat(),
                 );
-                let c_msg = to_c_buf(&msg);
+                let c_msg = cstr::nul_terminated(&msg);
                 unsafe {
                     host_cb(
                         ctx,
@@ -4227,7 +4210,7 @@ impl NzbgetRsDirectUnpack {
 
         if let Some(wf) = waiting_missing {
             let msg = trunc_1023([b"Could not find volume ", wf.as_slice()].concat());
-            let c_msg = to_c_buf(&msg);
+            let c_msg = cstr::nul_terminated(&msg);
             unsafe {
                 host_cb(
                     ctx,
@@ -4250,7 +4233,7 @@ impl NzbgetRsDirectUnpack {
         self.extra_start_time
             .store(current_time_sec(), Ordering::Release);
         if ints[0] != 0 {
-            let c_lbl = to_c_buf(&progress_label);
+            let c_lbl = cstr::nul_terminated(&progress_label);
             unsafe {
                 host_cb(
                     ctx,
@@ -4287,7 +4270,7 @@ impl NzbgetRsDirectUnpack {
                 strs.as_mut_ptr(),
             );
         }
-        let nzb_name = unsafe { ptr_bytes(strs[0]) };
+        let nzb_name = unsafe { cstr::owned(strs[0]) };
         Self::global_log(
             ctx,
             host_cb,
@@ -4364,7 +4347,7 @@ impl NzbgetRsDirectUnpack {
                 )
             };
 
-            let c_msg = to_c_buf(&msg_text);
+            let c_msg = cstr::nul_terminated(&msg_text);
             if nzb_ptr != 0 {
                 unsafe {
                     host_cb(
@@ -4389,7 +4372,7 @@ impl NzbgetRsDirectUnpack {
                 let lbl = msg_text[7..].to_vec();
                 self.lock_vol().progress_label = lbl.clone();
                 if ints[4] != 0 {
-                    let c_lbl = to_c_buf(&lbl);
+                    let c_lbl = cstr::nul_terminated(&lbl);
                     unsafe {
                         host_cb(
                             ctx,
@@ -4412,7 +4395,7 @@ impl NzbgetRsDirectUnpack {
                 let lbl = text[7..].to_vec();
                 self.lock_vol().progress_label = lbl.clone();
                 if ints[4] != 0 {
-                    let c_lbl = to_c_buf(&lbl);
+                    let c_lbl = cstr::nul_terminated(&lbl);
                     unsafe {
                         host_cb(
                             ctx,
@@ -4468,7 +4451,7 @@ impl NzbgetRsDirectUnpack {
             let mut cur_final = Vec::new();
             extern "C" fn set_vec(vec_ptr: usize, s: *const c_char) {
                 let v = unsafe { &mut *(vec_ptr as *mut Vec<u8>) };
-                *v = unsafe { ptr_bytes(s) };
+                *v = unsafe { cstr::owned(s) };
             }
             let nzb_ptr = unsafe {
                 host_cb(
@@ -4486,9 +4469,9 @@ impl NzbgetRsDirectUnpack {
                 )
             };
             if nzb_ptr != 0 {
-                let cur_dest = unsafe { ptr_bytes(strs[1]) };
+                let cur_dest = unsafe { cstr::owned(strs[1]) };
                 if cur_dest != local.dest_dir || cur_final != local.final_dir {
-                    let cur_name = unsafe { ptr_bytes(strs[0]) };
+                    let cur_name = unsafe { cstr::owned(strs[0]) };
                     let msg = trunc_1023(
                         [
                             b"Stopping direct unpack for ",
@@ -4497,7 +4480,7 @@ impl NzbgetRsDirectUnpack {
                         ]
                         .concat(),
                     );
-                    let c_msg = to_c_buf(&msg);
+                    let c_msg = cstr::nul_terminated(&msg);
                     unsafe {
                         host_cb(
                             ctx,
@@ -4807,7 +4790,7 @@ impl NzbgetRsDirectUnpack {
             let mut built_final = Vec::new();
             extern "C" fn set_vec(vec_ptr: usize, s: *const c_char) {
                 let v = unsafe { &mut *(vec_ptr as *mut Vec<u8>) };
-                *v = unsafe { ptr_bytes(s) };
+                *v = unsafe { cstr::owned(s) };
             }
             let nzb_ptr = unsafe {
                 host_cb(
@@ -4827,13 +4810,13 @@ impl NzbgetRsDirectUnpack {
             if nzb_ptr == 0 {
                 return false;
             }
-            local.name = unsafe { ptr_bytes(strs[0]) };
-            local.dest_dir = unsafe { ptr_bytes(strs[1]) };
+            local.name = unsafe { cstr::owned(strs[0]) };
+            local.dest_dir = unsafe { cstr::owned(strs[1]) };
             local.final_dir = built_final;
             if ints[0] != 0 {
-                local.password = unsafe { ptr_bytes(strs[2]) };
+                local.password = unsafe { cstr::owned(strs[2]) };
             }
-            local.inter_dir_opt = unsafe { ptr_bytes(strs[3]) };
+            local.inter_dir_opt = unsafe { cstr::owned(strs[3]) };
             local.use_temp_unpack_dir = ints[1] != 0;
             local.unpack_cleanup_disk = ints[2] != 0;
             // The set is still downloading: count every RAR file the queue
@@ -5003,7 +4986,7 @@ impl NzbgetRsDirectUnpack {
                 let ok = status == 3;
                 let suffix: &[u8] = if ok { b" successful" } else { b" failed" };
                 let msg = trunc_1023([local.info_name_up.as_slice(), suffix].concat());
-                let c_msg = to_c_buf(&msg);
+                let c_msg = cstr::nul_terminated(&msg);
                 unsafe {
                     host_cb(
                         ctx,
@@ -5023,7 +5006,7 @@ impl NzbgetRsDirectUnpack {
 
             if status == 3 || interrupted {
                 for arch in &local.extracted_archives {
-                    let c_arch = to_c_buf(arch);
+                    let c_arch = cstr::nul_terminated(arch);
                     unsafe {
                         host_cb(
                             ctx,
@@ -5185,7 +5168,7 @@ unsafe extern "C" fn direct_unpack_host_cb(
                 str_out[3] = arena_cstr(opts.as_ref().map_or(b"", |o| o.str_bytes(4)));
                 if p2 != 0 && !s2.is_null() {
                     let fin = host.nzb_build_final_dir_name(n);
-                    let c_fin = to_c_buf(&fin);
+                    let c_fin = cstr::nul_terminated(&fin);
                     let cb_fn: extern "C" fn(usize, *const c_char) =
                         unsafe { std::mem::transmute(s2 as usize) };
                     cb_fn(p2, c_fin.as_ptr() as *const c_char);
@@ -5216,13 +5199,13 @@ unsafe extern "C" fn direct_unpack_host_cb(
                 return 0;
             }
             if a1 == 3 {
-                host.nzb_add_message(p1, a2, &unsafe { ptr_bytes(s1) });
+                host.nzb_add_message(p1, a2, &unsafe { cstr::owned(s1) });
                 return 0;
             }
             if a1 == 4 {
                 let ns = host.nzb_snap(p1, false);
                 if ns.post_info_ptr != 0 {
-                    host.post_set_progress_label(ns.post_info_ptr, &unsafe { ptr_bytes(s1) });
+                    host.post_set_progress_label(ns.post_info_ptr, &unsafe { cstr::owned(s1) });
                 }
                 return 0;
             }
@@ -5265,7 +5248,7 @@ unsafe extern "C" fn direct_unpack_host_cb(
                 return 0;
             }
             if a1 == 8 {
-                host.nzb_push_extracted_archive(p1, &unsafe { ptr_bytes(s1) });
+                host.nzb_push_extracted_archive(p1, &unsafe { cstr::owned(s1) });
                 return 0;
             }
             0
@@ -5285,7 +5268,7 @@ unsafe extern "C" fn direct_unpack_host_cb(
                 );
             }
             if a1 == 3 {
-                crate::log::log_active_bytes(a2, &unsafe { ptr_bytes(s1) });
+                crate::log::log_active_bytes(a2, &unsafe { cstr::owned(s1) });
             }
             0
         }
@@ -5307,7 +5290,7 @@ fn map_cleanup_kind(kind: crate::cleanup::CleanupLogKind) -> i32 {
 }
 
 fn emit_job_msg(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn, kind: i32, msg: &[u8]) {
-    let c_msg = to_c_buf(msg);
+    let c_msg = cstr::nul_terminated(msg);
     unsafe {
         host_cb(
             ctx,
@@ -5349,7 +5332,7 @@ fn run_move_job(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn) {
         let mut built_final = Vec::new();
         extern "C" fn set_vec(vec_ptr: usize, s: *const c_char) {
             let v = unsafe { &mut *(vec_ptr as *mut Vec<u8>) };
-            *v = unsafe { ptr_bytes(s) };
+            *v = unsafe { cstr::owned(s) };
         }
         unsafe {
             host_cb(
@@ -5366,9 +5349,9 @@ fn run_move_job(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn) {
                 strs.as_mut_ptr(),
             );
         }
-        let name = trunc_1023(unsafe { ptr_bytes(strs[0]) });
-        let inter = unsafe { ptr_bytes(strs[1]) };
-        let fin = unsafe { ptr_bytes(strs[2]) };
+        let name = trunc_1023(unsafe { cstr::owned(strs[0]) });
+        let inter = unsafe { cstr::owned(strs[1]) };
+        let fin = unsafe { cstr::owned(strs[2]) };
         let dst = if fin.is_empty() { built_final } else { fin };
         (name, inter, dst)
     });
@@ -5388,8 +5371,8 @@ fn run_move_job(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn) {
         || job_is_stopped(ctx, host_cb),
         |kind, msg| emit_job_msg(ctx, host_cb, map_cleanup_kind(kind), msg),
         |old_rel, new_rel| {
-            let c_old = to_c_buf(old_rel);
-            let c_new = to_c_buf(new_rel);
+            let c_old = cstr::nul_terminated(old_rel);
+            let c_new = cstr::nul_terminated(new_rel);
             with_dq_guard(ctx, host_cb, |_| unsafe {
                 host_cb(
                     ctx,
@@ -5427,7 +5410,7 @@ fn run_move_job(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn) {
                 s.as_mut_ptr(),
             );
         }
-        let hl_bytes = unsafe { ptr_bytes(s[0]) };
+        let hl_bytes = unsafe { cstr::owned(s[0]) };
         if !hl_bytes.is_empty() {
             let hl_path = crate::cleanup::bytes_to_path_buf(&hl_bytes);
             crate::cleanup::remove_stale_hardlinks(&hl_path, &dest_path, |kind, msg| {
@@ -5462,7 +5445,7 @@ fn run_move_job(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn) {
                     MK_INFO,
                     &[up_info_name.as_slice(), b" successful"].concat(),
                 );
-                let c_dst = to_c_buf(&dest_dir);
+                let c_dst = cstr::nul_terminated(&dest_dir);
                 unsafe {
                     host_cb(
                         ctx,
@@ -5550,10 +5533,10 @@ fn run_cleanup_job(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn) {
             );
         }
         (
-            trunc_1023(unsafe { ptr_bytes(strs[0]) }),
-            unsafe { ptr_bytes(strs[1]) },
-            unsafe { ptr_bytes(strs[2]) },
-            unsafe { ptr_bytes(strs[3]) },
+            trunc_1023(unsafe { cstr::owned(strs[0]) }),
+            unsafe { cstr::owned(strs[1]) },
+            unsafe { cstr::owned(strs[2]) },
+            unsafe { cstr::owned(strs[3]) },
         )
     });
 
@@ -5624,7 +5607,7 @@ impl crate::rarrenamer::RunCallbacks for RenameRarCallbacks {
     }
 
     fn progress(&mut self, label: &[u8], stage_progress: i32) -> Result<(), ()> {
-        let c_lbl = to_c_buf(label);
+        let c_lbl = cstr::nul_terminated(label);
         with_dq_guard(self.ctx, self.host_cb, |_| unsafe {
             (self.host_cb)(
                 self.ctx,
@@ -5672,8 +5655,8 @@ fn register_renamed_helper(
     new_fn: &[u8],
     renamed_count: &mut i32,
 ) {
-    let c_old = to_c_buf(old_fn);
-    let c_new = to_c_buf(new_fn);
+    let c_old = cstr::nul_terminated(old_fn);
+    let c_new = cstr::nul_terminated(new_fn);
     let found = with_dq_guard(ctx, host_cb, |_| unsafe {
         host_cb(
             ctx,
@@ -5730,16 +5713,16 @@ fn run_rename_job(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn, kind: i32
                 );
             }
             (
-                trunc_1023(unsafe { ptr_bytes(strs[0]) }),
-                unsafe { ptr_bytes(strs[1]) },
-                unsafe { ptr_bytes(strs[2]) },
+                trunc_1023(unsafe { cstr::owned(strs[0]) }),
+                unsafe { cstr::owned(strs[1]) },
+                unsafe { cstr::owned(strs[2]) },
                 if ints[0] != 0 {
-                    unsafe { ptr_bytes(strs[3]) }
+                    unsafe { cstr::owned(strs[3]) }
                 } else {
                     Vec::new()
                 },
-                unsafe { ptr_bytes(strs[4]) },
-                unsafe { ptr_bytes(strs[5]) },
+                unsafe { cstr::owned(strs[4]) },
+                unsafe { cstr::owned(strs[5]) },
                 ints[1],
             )
         });
@@ -5769,7 +5752,7 @@ fn run_rename_job(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn, kind: i32
             let target_dir = if use_final { &final_dir } else { &dest_dir };
             let mut stop_fn = || job_is_stopped(ctx, host_cb);
             let mut prog_fn = |label: &[u8], stage: i32| {
-                let c_lbl = to_c_buf(label);
+                let c_lbl = cstr::nul_terminated(label);
                 with_dq_guard(ctx, host_cb, |_| unsafe {
                     host_cb(
                         ctx,
@@ -5795,7 +5778,7 @@ fn run_rename_job(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn, kind: i32
                 emit_job_msg(ctx, host_cb, m, text);
             };
             let mut parred_fn = |name: &[u8]| {
-                let c_name = to_c_buf(name);
+                let c_name = cstr::nul_terminated(name);
                 unsafe {
                     host_cb(
                         ctx,
@@ -6041,10 +6024,10 @@ fn run_post_renamer_job(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn, is_
             );
         }
         (
-            unsafe { ptr_bytes(strs[0]) },
-            unsafe { ptr_bytes(strs[1]) },
-            unsafe { ptr_bytes(strs[2]) },
-            unsafe { ptr_bytes(strs[3]) },
+            unsafe { cstr::owned(strs[0]) },
+            unsafe { cstr::owned(strs[1]) },
+            unsafe { cstr::owned(strs[2]) },
+            unsafe { cstr::owned(strs[3]) },
         )
     });
 
@@ -6059,8 +6042,8 @@ fn run_post_renamer_job(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn, is_
         || job_is_stopped(ctx, host_cb),
         |kind, msg| emit_job_msg(ctx, host_cb, map_cleanup_kind(kind), msg),
         |old_name, new_name| {
-            let c_old = to_c_buf(old_name);
-            let c_new = to_c_buf(new_name);
+            let c_old = cstr::nul_terminated(old_name);
+            let c_new = cstr::nul_terminated(new_name);
             with_dq_guard(ctx, host_cb, |_| unsafe {
                 host_cb(
                     ctx,
@@ -6520,7 +6503,7 @@ unsafe extern "C" fn repair_job_host_cb(
             0
         }
         7 => {
-            let msg = unsafe { ptr_bytes(s1) };
+            let msg = unsafe { cstr::owned(s1) };
             if a1 <= 4 {
                 let ps = host.post_snap(job.post_ptr);
                 host.nzb_add_message(ps.nzb_ptr, a1, &msg);
@@ -6539,7 +6522,7 @@ unsafe extern "C" fn repair_job_host_cb(
             let pi = job.post_ptr;
             if a1 == 0 {
                 if !s1.is_null() {
-                    host.post_set_progress_label(pi, &unsafe { ptr_bytes(s1) });
+                    host.post_set_progress_label(pi, &unsafe { cstr::owned(s1) });
                 }
                 let ins = unsafe { std::slice::from_raw_parts(ints, 5) };
                 host.post_set_int(pi, POST_INT_FILE_PROGRESS, ins[0]);
@@ -6566,7 +6549,7 @@ unsafe extern "C" fn repair_job_host_cb(
         }
         9 => {
             if a1 == 0 {
-                host.post_push_parred_file(job.post_ptr, &unsafe { ptr_bytes(s1) });
+                host.post_push_parred_file(job.post_ptr, &unsafe { cstr::owned(s1) });
                 return 0;
             }
             if a1 == 1 {
@@ -6665,7 +6648,7 @@ unsafe extern "C" fn stream_repair_job_host_cb(
         }
         3 => 0,
         4 => {
-            let msg = unsafe { ptr_bytes(s1) };
+            let msg = unsafe { cstr::owned(s1) };
             if live_mode {
                 host.with_locked_queue(|dq| {
                     let nzb = host.queue_find_by_id(dq, job.nzb_id);
@@ -6693,7 +6676,7 @@ unsafe extern "C" fn stream_repair_job_host_cb(
                 4 => MK_DEBUG,
                 _ => return 0,
             };
-            host.log(kind, &unsafe { ptr_bytes(s1) });
+            host.log(kind, &unsafe { cstr::owned(s1) });
             0
         }
         7 => {
@@ -6793,7 +6776,7 @@ unsafe extern "C" fn stream_repair_job_host_cb(
         }
         11 => {
             if job.post_ptr != 0 {
-                let lbl = unsafe { ptr_bytes(s1) };
+                let lbl = unsafe { cstr::owned(s1) };
                 host.with_locked_queue(|_| {
                     host.post_set_progress_label(job.post_ptr, &lbl);
                     host.post_set_int(job.post_ptr, POST_INT_STAGE_PROGRESS, a1);
@@ -7070,12 +7053,12 @@ unsafe extern "C" fn unpack_job_host_cb(
             if a1 == 3 {
                 if job.post_ptr != 0 {
                     let ps = host.post_snap(job.post_ptr);
-                    host.nzb_add_message(ps.nzb_ptr, a2, &unsafe { ptr_bytes(s1) });
+                    host.nzb_add_message(ps.nzb_ptr, a2, &unsafe { cstr::owned(s1) });
                 }
                 return 0;
             }
             if a1 == 4 {
-                let lbl = unsafe { ptr_bytes(s1) };
+                let lbl = unsafe { cstr::owned(s1) };
                 host.with_locked_queue(|_| host.post_set_progress_label(job.post_ptr, &lbl));
                 return 0;
             }
@@ -7093,7 +7076,7 @@ unsafe extern "C" fn unpack_job_host_cb(
             }
             if a1 == 7 {
                 if a2 == 3 || a2 == 4 {
-                    host.log(a2, &unsafe { ptr_bytes(s1) });
+                    host.log(a2, &unsafe { cstr::owned(s1) });
                 }
                 return 0;
             }
@@ -7142,13 +7125,13 @@ unsafe extern "C" fn unpack_job_host_cb(
             }
             if a1 == 5 {
                 let fin = host.nzb_build_final_dir_name(n);
-                let c_fin = to_c_buf(&fin);
+                let c_fin = cstr::nul_terminated(&fin);
                 let cb_fn: extern "C" fn(usize, *const c_char) = unsafe { std::mem::transmute(p2) };
                 cb_fn(p1, c_fin.as_ptr() as *const c_char);
                 return 0;
             }
             if a1 == 6 {
-                host.nzb_set_str(n, NZB_STR_FINAL_DIR, &unsafe { ptr_bytes(s1) });
+                host.nzb_set_str(n, NZB_STR_FINAL_DIR, &unsafe { cstr::owned(s1) });
             }
             0
         }
@@ -7202,7 +7185,7 @@ unsafe extern "C" fn move_job_host_cb(
             str_out[2] = arena_cstr(&ns.final_dir);
             if ns.final_dir.is_empty() {
                 let fin = host.nzb_build_final_dir_name(n);
-                let c_fin = to_c_buf(&fin);
+                let c_fin = cstr::nul_terminated(&fin);
                 let cb_fn: extern "C" fn(usize, *const c_char) = unsafe { std::mem::transmute(p2) };
                 cb_fn(p1, c_fin.as_ptr() as *const c_char);
             }
@@ -7214,14 +7197,14 @@ unsafe extern "C" fn move_job_host_cb(
             }
             if a1 == 1 {
                 let n = host.post_snap(job.post_ptr).nzb_ptr;
-                host.nzb_add_message(n, a2, &unsafe { ptr_bytes(s1) });
+                host.nzb_add_message(n, a2, &unsafe { cstr::owned(s1) });
                 return 0;
             }
             if a1 == 2 && job.post_ptr != 0 {
                 let n = host.post_snap(job.post_ptr).nzb_ptr;
                 if n != 0 {
-                    host.nzb_rename_completed_file(n, &unsafe { ptr_bytes(s1) }, &unsafe {
-                        ptr_bytes(s2)
+                    host.nzb_rename_completed_file(n, &unsafe { cstr::owned(s1) }, &unsafe {
+                        cstr::owned(s2)
                     });
                 }
             }
@@ -7233,7 +7216,7 @@ unsafe extern "C" fn move_job_host_cb(
                 host.nzb_set_int(n, NZB_INT_MOVE_STATUS, a2);
             } else if a1 == 1 {
                 let n = host.post_snap(job.post_ptr).nzb_ptr;
-                host.nzb_set_str(n, NZB_STR_DEST_DIR, &unsafe { ptr_bytes(s1) });
+                host.nzb_set_str(n, NZB_STR_DEST_DIR, &unsafe { cstr::owned(s1) });
                 host.nzb_set_str(n, NZB_STR_FINAL_DIR, b"");
                 host.nzb_set_int(n, NZB_INT_MOVE_STATUS, a2);
             } else if a1 == 2 {
@@ -7286,7 +7269,7 @@ unsafe extern "C" fn cleanup_job_host_cb(
         2 => {
             if a1 == 1 {
                 let n = host.post_snap(job.post_ptr).nzb_ptr;
-                host.nzb_add_message(n, a2, &unsafe { ptr_bytes(s1) });
+                host.nzb_add_message(n, a2, &unsafe { cstr::owned(s1) });
             }
             0
         }
@@ -7359,24 +7342,24 @@ unsafe extern "C" fn rename_job_host_cb(
             }
             if a1 == 1 {
                 let n = host.post_snap(job.post_ptr).nzb_ptr;
-                host.nzb_add_message(n, a2, &unsafe { ptr_bytes(s1) });
+                host.nzb_add_message(n, a2, &unsafe { cstr::owned(s1) });
                 return 0;
             }
             if a1 == 2 {
                 let n = host.post_snap(job.post_ptr).nzb_ptr;
                 return usize::from(host.nzb_rename_completed_file(
                     n,
-                    &unsafe { ptr_bytes(s1) },
-                    &unsafe { ptr_bytes(s2) },
+                    &unsafe { cstr::owned(s1) },
+                    &unsafe { cstr::owned(s2) },
                 ));
             }
             if a1 == 3 {
-                host.post_set_progress_label(job.post_ptr, &unsafe { ptr_bytes(s1) });
+                host.post_set_progress_label(job.post_ptr, &unsafe { cstr::owned(s1) });
                 host.post_set_int(job.post_ptr, POST_INT_STAGE_PROGRESS, a2);
                 return 0;
             }
             if a1 == 4 {
-                host.post_push_parred_file(job.post_ptr, &unsafe { ptr_bytes(s1) });
+                host.post_push_parred_file(job.post_ptr, &unsafe { cstr::owned(s1) });
             }
             0
         }
@@ -7453,14 +7436,14 @@ unsafe extern "C" fn post_renamer_job_host_cb(
             }
             if a1 == 1 {
                 let n = host.post_snap(job.post_ptr).nzb_ptr;
-                host.nzb_add_message(n, a2, &unsafe { ptr_bytes(s1) });
+                host.nzb_add_message(n, a2, &unsafe { cstr::owned(s1) });
                 return 0;
             }
             if a1 == 2 && job.post_ptr != 0 {
                 let n = host.post_snap(job.post_ptr).nzb_ptr;
                 if n != 0 {
-                    host.nzb_rename_completed_file(n, &unsafe { ptr_bytes(s1) }, &unsafe {
-                        ptr_bytes(s2)
+                    host.nzb_rename_completed_file(n, &unsafe { cstr::owned(s1) }, &unsafe {
+                        cstr::owned(s2)
                     });
                 }
             }

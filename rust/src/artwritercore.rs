@@ -1,6 +1,8 @@
 //! Rust domain logic for `ArticleWriter`, `ArticleCache`, and `MemoryMonitor`
 //! (`daemon/nntp/ArticleWriter.cpp`).
 
+use crate::cstr;
+
 /// Formats `<tmp_dir><sep><file_id>.<part_num:03>` as in `ArticleWriter::BuildOutputFilename`.
 pub fn article_writer_format_result_filename(
     tmp_dir: &[u8],
@@ -664,16 +666,11 @@ pub fn article_writer_execute_cleanup_old_data(
     }
 }
 
-fn c_bytes(bytes: &[u8]) -> &[u8] {
-    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    &bytes[..end]
-}
-
 pub(crate) fn join_c_slices(slices: &[&[u8]]) -> Vec<u8> {
-    let total: usize = slices.iter().map(|s| c_bytes(s).len()).sum();
+    let total: usize = slices.iter().map(|s| cstr::until_nul(s).len()).sum();
     let mut out = Vec::with_capacity(total);
     for &s in slices {
-        out.extend_from_slice(c_bytes(s));
+        out.extend_from_slice(cstr::until_nul(s));
     }
     out
 }
@@ -718,7 +715,7 @@ pub(crate) fn article_writer_create_output_file_guarded(
     size: i64,
     context: &crate::parlive::SourceWriteContext,
 ) -> Result<(), Vec<u8>> {
-    let path = crate::fsops::path(c_bytes(output_filename));
+    let path = crate::fsops::path(cstr::until_nul(output_filename));
     // As in the unguarded path, the destination may not exist yet; the
     // physical root is attested only after it does.
     let base_off = crate::paths::base_file_name(output_filename).min(1023);
@@ -1090,7 +1087,7 @@ pub fn article_writer_flush_cache(
                     match std::fs::OpenOptions::new()
                         .read(true)
                         .write(true)
-                        .open(crate::fsops::path(c_bytes(output_filename)))
+                        .open(crate::fsops::path(cstr::until_nul(output_filename)))
                     {
                         Ok(f) => direct_file = Some(f),
                         Err(e) => {
@@ -1156,7 +1153,7 @@ pub fn article_writer_flush_cache(
                 let moved = match (
                     std::ffi::CString::new(dest_file.as_slice()),
                     item.result_filename
-                        .and_then(|rf| std::ffi::CString::new(c_bytes(rf)).ok()),
+                        .and_then(|rf| std::ffi::CString::new(cstr::until_nul(rf)).ok()),
                 ) {
                     (Ok(c_src), Some(c_dst)) => crate::fsops::move_file(&c_src, &c_dst),
                     _ => false,
@@ -1239,7 +1236,7 @@ pub(crate) fn article_writer_flush_cache_guarded(
                         std::fs::OpenOptions::new()
                             .read(true)
                             .write(true)
-                            .open(crate::fsops::path(c_bytes(output_filename)))?,
+                            .open(crate::fsops::path(cstr::until_nul(output_filename)))?,
                     );
                 }
                 let file = direct_file.as_mut().unwrap();
@@ -1261,7 +1258,7 @@ pub(crate) fn article_writer_flush_cache_guarded(
                 drop(file);
                 let source = std::ffi::CString::new(temporary)
                     .map_err(|_| std::io::ErrorKind::InvalidInput)?;
-                let target = std::ffi::CString::new(c_bytes(destination))
+                let target = std::ffi::CString::new(cstr::until_nul(destination))
                     .map_err(|_| std::io::ErrorKind::InvalidInput)?;
                 if !crate::fsops::move_file(&source, &target) {
                     return Err(std::io::Error::last_os_error());
@@ -1307,13 +1304,13 @@ pub fn article_writer_post_process_rename_and_hardlink(
     mut log_err_fn: impl FnMut(&[u8]),
 ) -> (Option<Vec<u8>>, bool) {
     let mut updated_output_filename = None;
-    if c_bytes(original_filename) != c_bytes(current_filename) {
-        let c_dir = std::ffi::CString::new(c_bytes(nzb_dest_dir)).unwrap_or_default();
-        let c_fn = std::ffi::CString::new(c_bytes(current_filename)).unwrap_or_default();
+    if cstr::until_nul(original_filename) != cstr::until_nul(current_filename) {
+        let c_dir = std::ffi::CString::new(cstr::until_nul(nzb_dest_dir)).unwrap_or_default();
+        let c_fn = std::ffi::CString::new(cstr::until_nul(current_filename)).unwrap_or_default();
         let new_ofn = crate::fsops::make_unique_filename(&c_dir, &c_fn, &crate::fsops::posix_stat);
         let moved = match (
-            std::ffi::CString::new(c_bytes(file_output_filename)),
-            std::ffi::CString::new(c_bytes(&new_ofn)),
+            std::ffi::CString::new(cstr::until_nul(file_output_filename)),
+            std::ffi::CString::new(cstr::until_nul(&new_ofn)),
         ) {
             (Ok(c_src), Ok(c_dst)) => crate::fsops::move_file(&c_src, &c_dst),
             _ => false,
@@ -1334,7 +1331,7 @@ pub fn article_writer_post_process_rename_and_hardlink(
     }
 
     if is_hard_linked && inter_dir_empty {
-        let deleted = std::ffi::CString::new(c_bytes(writer_output_filename))
+        let deleted = std::ffi::CString::new(cstr::until_nul(writer_output_filename))
             .is_ok_and(|c| crate::fsops::delete_file(&c));
         if deleted {
             return (updated_output_filename, true);
@@ -1361,10 +1358,10 @@ pub fn article_writer_finish_disk_ops(
 ) {
     if !success {
         if !skip_disk_write {
-            if let Ok(c_tmp) = std::ffi::CString::new(c_bytes(temp_filename)) {
+            if let Ok(c_tmp) = std::ffi::CString::new(cstr::until_nul(temp_filename)) {
                 crate::fsops::delete_file(&c_tmp);
             }
-            if let Ok(c_res) = std::ffi::CString::new(c_bytes(result_filename)) {
+            if let Ok(c_res) = std::ffi::CString::new(cstr::until_nul(result_filename)) {
                 crate::fsops::delete_file(&c_res);
             }
         }
@@ -1373,8 +1370,8 @@ pub fn article_writer_finish_disk_ops(
 
     if !raw_article {
         if !direct_write && !has_cached_data && !skip_disk_write {
-            let c_tmp_opt = std::ffi::CString::new(c_bytes(temp_filename)).ok();
-            let c_res_opt = std::ffi::CString::new(c_bytes(result_filename)).ok();
+            let c_tmp_opt = std::ffi::CString::new(cstr::until_nul(temp_filename)).ok();
+            let c_res_opt = std::ffi::CString::new(cstr::until_nul(result_filename)).ok();
             let moved = match (c_tmp_opt.as_ref(), c_res_opt.as_ref()) {
                 (Some(c_src), Some(c_dst)) => crate::fsops::move_file(c_src, c_dst),
                 _ => false,
@@ -1397,8 +1394,8 @@ pub fn article_writer_finish_disk_ops(
         }
     } else if !skip_disk_write {
         let moved = match (
-            std::ffi::CString::new(c_bytes(temp_filename)),
-            std::ffi::CString::new(c_bytes(result_filename)),
+            std::ffi::CString::new(cstr::until_nul(temp_filename)),
+            std::ffi::CString::new(cstr::until_nul(result_filename)),
         ) {
             (Ok(c_src), Ok(c_dst)) => crate::fsops::move_file(&c_src, &c_dst),
             _ => false,

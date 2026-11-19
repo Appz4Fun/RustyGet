@@ -1,6 +1,7 @@
 //! Full Rust runtime backing `MemoryMonitor`, `ArticleCache`,
 //! `ArticleWriter`, `RenameContentAnalyzer`, and `ArticleDownloader`.
 
+use crate::cstr;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::io::{Seek, SeekFrom, Write};
 use std::os::fd::{FromRawFd, IntoRawFd, RawFd};
@@ -63,13 +64,8 @@ fn sleep_ms(ms: i32) {
     }
 }
 
-fn c_bytes(bytes: &[u8]) -> &[u8] {
-    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    &bytes[..end]
-}
-
 fn nul_vec(bytes: &[u8]) -> Vec<u8> {
-    let clean = c_bytes(bytes);
+    let clean = cstr::until_nul(bytes);
     let mut v = Vec::with_capacity(clean.len() + 1);
     v.extend_from_slice(clean);
     v.push(0);
@@ -301,7 +297,7 @@ fn cache_effective_limit() -> usize {
 fn write_acache_flag(qdir: &[u8]) {
     let flag_p =
         article_writer_format_dest_file_path(qdir, crate::paths::PATH_SEPARATOR, b"acache");
-    if let Ok(flag_c) = CString::new(c_bytes(&flag_p)) {
+    if let Ok(flag_c) = CString::new(cstr::until_nul(&flag_p)) {
         let fd = crate::fsops::open_cloexec_fd(&flag_c, 2, 0, 1, 2);
         if fd == -1 {
             crate::log::log_active_bytes(
@@ -1127,7 +1123,7 @@ impl BufferedDiskFile {
     ) -> Result<Self, i32> {
         let (file, write_context) = if let Some(context) = write_context {
             let (file, context, _permit) = context
-                .open_attested(crate::fsops::path(c_bytes(path)), !read_write)
+                .open_attested(crate::fsops::path(cstr::until_nul(path)), !read_write)
                 .map_err(|error| error.raw_os_error().unwrap_or(libc::ECANCELED))?;
             if !read_write {
                 file.set_len(0).map_err(|error| {
@@ -1137,7 +1133,7 @@ impl BufferedDiskFile {
             }
             (file, Some(context))
         } else {
-            let clean = c_bytes(path);
+            let clean = cstr::until_nul(path);
             let Ok(c_path) = CString::new(clean) else {
                 return Err(libc::EINVAL);
             };
@@ -1939,15 +1935,15 @@ impl RsArticleWriter {
             crate::paths::PATH_SEPARATOR,
             crate::paths::ALT_PATH_SEPARATOR,
             &refs,
-            |a, b| c_bytes(a) == c_bytes(b),
+            |a, b| cstr::until_nul(a) == cstr::until_nul(b),
             |p| crate::fsops::file_exists(p, &crate::fsops::posix_stat),
             |p| {
                 context
-                    .perform_io(|| std::fs::remove_file(crate::fsops::path(c_bytes(p))))
+                    .perform_io(|| std::fs::remove_file(crate::fsops::path(cstr::until_nul(p))))
                     .is_ok()
             },
             |from_b, to_b| {
-                let (Ok(cf), Ok(ct)) = (CString::new(c_bytes(from_b)), CString::new(c_bytes(to_b)))
+                let (Ok(cf), Ok(ct)) = (CString::new(cstr::until_nul(from_b)), CString::new(cstr::until_nul(to_b)))
                 else {
                     return false;
                 };
@@ -1968,13 +1964,13 @@ impl RsArticleWriter {
                 }
             },
             |dir_b| {
-                let c_dir = CString::new(c_bytes(dir_b)).ok();
+                let c_dir = CString::new(cstr::until_nul(dir_b)).ok();
                 let mut browser = crate::fsops::PosixDirBrowser::new(c_dir.as_deref(), true);
                 browser.next_ptr().is_null()
             },
             |dir_b| {
                 context
-                    .perform_io(|| std::fs::remove_dir(crate::fsops::path(c_bytes(dir_b))))
+                    .perform_io(|| std::fs::remove_dir(crate::fsops::path(cstr::until_nul(dir_b))))
                     .is_ok()
             },
         );
@@ -2216,7 +2212,7 @@ impl RsArticleWriter {
             );
             return Ok(());
         }
-        if c_bytes(&self.post_nzb_dest_dir) != c_bytes(&cur_nzb_dest_dir) {
+        if cstr::until_nul(&self.post_nzb_dest_dir) != cstr::until_nul(&cur_nzb_dest_dir) {
             let _ = move_completed_files_on_qh(host.qh, nzb_ptr, &self.post_nzb_dest_dir);
         }
         Ok(())
@@ -2427,10 +2423,10 @@ impl RsArticleWriter {
             direct_write,
             force_direct_write,
             &self.output_filename,
-            |a, b| c_bytes(a) == c_bytes(b),
+            |a, b| cstr::until_nul(a) == cstr::until_nul(b),
             |dir_b, fn_b| {
-                let cd = CString::new(c_bytes(dir_b)).unwrap_or_default();
-                let cf = CString::new(c_bytes(fn_b)).unwrap_or_default();
+                let cd = CString::new(cstr::until_nul(dir_b)).unwrap_or_default();
+                let cf = CString::new(cstr::until_nul(fn_b)).unwrap_or_default();
                 crate::fsops::make_unique_filename(&cd, &cf, &crate::fsops::posix_stat)
             },
             |p| crate::fsops::file_exists(p, &crate::fsops::posix_stat),
@@ -2439,7 +2435,7 @@ impl RsArticleWriter {
                 self.write_context
                     .as_ref()
                     .unwrap()
-                    .perform_io(|| std::fs::remove_file(crate::fsops::path(c_bytes(p))))
+                    .perform_io(|| std::fs::remove_file(crate::fsops::path(cstr::until_nul(p))))
                     .is_ok()
             },
             |p, rw| match BufferedDiskFile::open_guarded(
@@ -2459,7 +2455,7 @@ impl RsArticleWriter {
                 }
             },
             |p| {
-                if let Ok(cp) = CString::new(c_bytes(p)) {
+                if let Ok(cp) = CString::new(cstr::until_nul(p)) {
                     let _ = unsafe {
                         libc::mkdir(cp.as_ptr(), libc::S_IRWXU | libc::S_IRWXG | libc::S_IRWXO)
                     };
@@ -2562,8 +2558,8 @@ impl RsArticleWriter {
                     .unwrap()
                     .perform_io(|| {
                         match (
-                            CString::new(c_bytes(&temp_dest_path)),
-                            CString::new(c_bytes(&final_output_path)),
+                            CString::new(cstr::until_nul(&temp_dest_path)),
+                            CString::new(cstr::until_nul(&final_output_path)),
                         ) {
                             (Ok(source), Ok(target))
                                 if crate::fsops::move_file(&source, &target) =>
@@ -2642,7 +2638,7 @@ pub(crate) fn move_completed_files_on_qh(
     if nzb.skip_disk_write {
         return true;
     }
-    if c_bytes(old_dest_dir) != c_bytes(&nzb.dest_dir) {
+    if cstr::until_nul(old_dest_dir) != cstr::until_nul(&nzb.dest_dir) {
         crate::parlive::forget_download_writes(nzb.id);
         crate::postproc::direct_unpack_join_live_par_repair(nzb.id);
         crate::parchecker::streaming_session_forget(nzb.id);
@@ -2654,7 +2650,7 @@ pub(crate) fn move_completed_files_on_qh(
     let refs: Vec<&[u8]> = cfs.iter().map(|c| c.filename.as_slice()).collect();
     article_writer_move_completed_files(
         &nzb.dest_dir,
-        c_bytes(old_dest_dir),
+        cstr::until_nul(old_dest_dir),
         &refs,
         |msg| qh.nzb_print_message(nzb_ptr, MK_ERROR, msg),
         || qh.nzb_has_busy_output_file(nzb_ptr),
@@ -2771,7 +2767,7 @@ impl NzbgetRsArticleDownloader {
     pub(crate) fn snap_for_coord(&self) -> ActiveDownloadSnap {
         let w = self.worker.lock().unwrap_or_else(|e| e.into_inner());
         let (has_afn, afn) = match w.article_filename_c.as_ref() {
-            Some(v) => (true, c_bytes(v).to_vec()),
+            Some(v) => (true, cstr::until_nul(v).to_vec()),
             None => (false, Vec::new()),
         };
         ActiveDownloadSnap {
@@ -2806,8 +2802,8 @@ impl NzbgetRsArticleDownloader {
         }
         Some((
             par_out,
-            c_bytes(&w.hash16k_c).to_vec(),
-            c_bytes(&w.par_set_id_c).to_vec(),
+            cstr::until_nul(&w.hash16k_c).to_vec(),
+            cstr::until_nul(&w.par_set_id_c).to_vec(),
         ))
     }
 
@@ -2816,7 +2812,7 @@ impl NzbgetRsArticleDownloader {
         let lut = self.last_update_time.load(Ordering::SeqCst);
         let mut tbuf = [0u8; 64];
         crate::util::util_format_time(lut, &mut tbuf);
-        let tslice = c_bytes(&tbuf);
+        let tslice = cstr::until_nul(&tbuf);
         let prefix = format!("      Download: status={st}, LastUpdateTime=");
         crate::log::log_active_bytes(
             MK_INFO,
@@ -3018,7 +3014,7 @@ impl NzbgetRsArticleDownloader {
             let mut article_size = 0i32;
 
             if !raw_article {
-                art_filename_opt = Some(c_bytes(&w.decoder.article_filename).to_vec());
+                art_filename_opt = Some(cstr::until_nul(&w.decoder.article_filename).to_vec());
                 if w.decoder.format == Format::Yenc {
                     let begin_pos = w.decoder.begin_pos;
                     let end_pos = w.decoder.end_pos;

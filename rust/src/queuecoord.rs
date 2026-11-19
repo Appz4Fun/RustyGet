@@ -1,6 +1,6 @@
 //! Rust implementation of `QueueCoordinator` (`daemon/queue/QueueCoordinator.cpp`).
 
-use std::ffi::{c_char, CStr};
+use std::ffi::CStr;
 
 #[inline]
 pub fn strcasecmp_bytes(a: &[u8], b: &[u8]) -> bool {
@@ -1293,18 +1293,6 @@ pub fn discard_downloaded_articles_counters(
         next_nzb_par_cur_fail_size,
         next_file_rem_size,
     )
-}
-
-/// Helper to convert a `*const c_char` into `&[u8]`.
-///
-/// # Safety
-/// `ptr` must be null or a valid null-terminated C string.
-pub unsafe fn cstr_to_bytes<'a>(ptr: *const c_char) -> &'a [u8] {
-    if ptr.is_null() {
-        &[]
-    } else {
-        unsafe { CStr::from_ptr(ptr).to_bytes() }
-    }
 }
 
 #[cfg(unix)]

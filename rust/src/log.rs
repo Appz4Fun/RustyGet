@@ -1,6 +1,7 @@
 //! Stateful Rust log engine (`NzbgetRsLog`)
 //! backing `Log` (`daemon/util/Log.h` / `Log.cpp`) and `CommandScriptLog`.
 
+use crate::cstr;
 use std::collections::VecDeque;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::ptr;
@@ -58,14 +59,6 @@ pub const MK_DETAIL: i32 = MessageKind::Detail as i32;
 #[inline]
 fn current_unix_time() -> i64 {
     unsafe { libc::time(ptr::null_mut()) as i64 }
-}
-
-fn cstring_lossless(bytes: &[u8]) -> CString {
-    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    let mut v = Vec::with_capacity(end + 1);
-    v.extend_from_slice(&bytes[..end]);
-    v.push(0);
-    unsafe { CString::from_vec_with_nul_unchecked(v) }
 }
 
 struct LogFileGuard(*mut libc::FILE);
@@ -138,7 +131,7 @@ impl LogInner {
             id: self.id_gen,
             kind,
             time: current_unix_time(),
-            text: cstring_lossless(text),
+            text: cstr::to_cstring(text),
         });
         if self.opt_init {
             // LogBuffer 0 keeps every message
@@ -261,7 +254,7 @@ impl NzbgetRsLog {
     }
 
     pub(crate) fn emit_bytes(&self, kind: i32, options: Option<&NzbgetRsOptions>, text: &[u8]) {
-        let cstr = cstring_lossless(text);
+        let cstr = cstr::to_cstring(text);
         emit_message(self, kind, self.debug_build, options, &cstr);
     }
 
@@ -601,7 +594,7 @@ pub(crate) fn log_active_bytes(kind: i32, bytes: &[u8]) {
         return;
     };
     let opts = crate::options::active_options();
-    let cs = cstring_lossless(bytes);
+    let cs = cstr::to_cstring(bytes);
     emit_message(&lg, kind, lg.debug_build, opts.as_deref(), &cs);
 }
 

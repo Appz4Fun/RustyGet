@@ -2,6 +2,7 @@
 //! (CheckResponse), the response headers it acts on (ProcessHeader) and the
 //! URL a redirect leads to (ParseRedirect).
 
+use crate::cstr;
 use std::ffi::CStr;
 
 use crate::url::{parse_url, Part};
@@ -541,11 +542,6 @@ fn unlink_broken_output(output_filename: &[u8]) {
     }
 }
 
-fn cstring_lossless_truncate(bytes: &[u8]) -> std::ffi::CString {
-    let nul = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    unsafe { std::ffi::CString::from_vec_unchecked(bytes[..nul].to_vec()) }
-}
-
 fn url_encode_vec(raw: &[u8]) -> Vec<u8> {
     let nul = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
     let mut out = Vec::with_capacity(nul);
@@ -562,7 +558,7 @@ pub fn webdl_download<I: WebDlIo>(
 ) -> WebDlStatus {
     use crate::artwritercore::join_c_slices;
 
-    let url_c = cstring_lossless_truncate(current_url);
+    let url_c = cstr::to_cstring(current_url);
     let u = parse_url(&url_c);
     let addr_bytes = url_c.to_bytes();
 
@@ -617,7 +613,7 @@ pub fn webdl_download<I: WebDlIo>(
         return WebDlStatus::AdFatalError;
     }
 
-    let host_c = cstring_lossless_truncate(host);
+    let host_c = cstr::to_cstring(host);
     let connected = io.connect(&host_c, conn_port, tls);
     if !connected || io.is_stopped() {
         io.free_conn();
@@ -631,13 +627,13 @@ pub fn webdl_download<I: WebDlIo>(
 
     // SendHeaders: keep unlimited length so long signed URLs never lose HTTP/1.0\r\n.
     let req_line =
-        cstring_lossless_truncate(&join_c_slices(&[b"GET ", resource, b" HTTP/1.0\r\n"]));
+        cstr::to_cstring(&join_c_slices(&[b"GET ", resource, b" HTTP/1.0\r\n"]));
     io.write_line(&req_line);
 
     let ua_line =
-        cstring_lossless_truncate(&join_c_slices(&[b"User-Agent: ", HTTP_USER_AGENT, b"\r\n"]));
+        cstr::to_cstring(&join_c_slices(&[b"User-Agent: ", HTTP_USER_AGENT, b"\r\n"]));
     io.write_line(&ua_line);
-    let ua_ext_line = cstring_lossless_truncate(&join_c_slices(&[
+    let ua_ext_line = cstr::to_cstring(&join_c_slices(&[
         b"UserAgentExtended: ",
         HTTP_USER_AGENT_EXTENDED,
         b"\r\n",
@@ -646,10 +642,10 @@ pub fn webdl_download<I: WebDlIo>(
 
     let host_line = if raw_port == 0 || (raw_port == 80 && is_http) || (raw_port == 443 && is_https)
     {
-        cstring_lossless_truncate(&join_c_slices(&[b"Host: ", host, b"\r\n"]))
+        cstr::to_cstring(&join_c_slices(&[b"Host: ", host, b"\r\n"]))
     } else {
         let port_str = raw_port.to_string();
-        cstring_lossless_truncate(&join_c_slices(&[
+        cstr::to_cstring(&join_c_slices(&[
             b"Host: ",
             host,
             b":",
@@ -796,7 +792,7 @@ pub fn webdl_download<I: WebDlIo>(
             4 => {
                 let loc_off = (hdr_val as usize).min(trimmed_end);
                 if let Ok(loc_cstr) = CStr::from_bytes_with_nul(&line_buf[loc_off..=trimmed_end]) {
-                    let old_c = cstring_lossless_truncate(current_url);
+                    let old_c = cstr::to_cstring(current_url);
                     let new_loc = redirect(&old_c, loc_cstr);
                     let old_bytes = old_c.to_bytes();
                     let old_no_q = &old_bytes[..old_bytes

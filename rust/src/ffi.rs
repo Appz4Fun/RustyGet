@@ -3,6 +3,7 @@
 //! out as a buffer freed with `nzbget_rs_free`. They are being replaced by
 //! plain Rust APIs.
 
+use crate::cstr;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 
 #[path = "tlscipher/native.rs"]
@@ -3374,11 +3375,11 @@ pub(crate) fn init_build_env() {
             flags |= BUILD_FLAG_SSL_VERSION_AFTER_SPACE;
         }
         BUILD_FLAGS.store(flags, std::sync::atomic::Ordering::SeqCst);
-        let _ = BUILD_VERSION.set(unsafe { to_nul_cvec(DAEMON_VERSION.as_bytes()) });
+        let _ = BUILD_VERSION.set(cstr::to_cstring(DAEMON_VERSION.as_bytes()));
         if let Ok(mut g) = BUILD_ENV.write() {
             *g = Some(BuildEnvRuntime {
-                ssl_lib_name: unsafe { to_nul_cvec(ssl_lib) },
-                ssl_raw_version: unsafe { to_nul_cvec(&ssl_ver) },
+                ssl_lib_name: cstr::to_cstring(ssl_lib),
+                ssl_raw_version: cstr::to_cstring(&ssl_ver),
             });
         }
     });
@@ -4625,11 +4626,6 @@ impl Drop for PosixCancelGuard {
 
 // ---- WebProcessor / BinRpcProcessor / RemoteClient / Frontend FFI ----
 
-unsafe fn to_nul_cvec(bytes: &[u8]) -> std::ffi::CString {
-    let nul = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    std::ffi::CString::from_vec_unchecked(bytes[..nul].to_vec())
-}
-
 #[cfg(unix)]
 unsafe extern "C" fn web_rpc_log_bridge(_ctx: *mut c_void, lvl: c_int, msg: *const c_char) {
     if lvl == 0 && !build_debug_enabled() {
@@ -5050,14 +5046,14 @@ unsafe fn emit_rpc_nzb(
     } else {
         0
     };
-    let c_name = to_nul_cvec(&n.name);
-    let c_url = to_nul_cvec(&n.url);
-    let c_filename = to_nul_cvec(&n.filename);
-    let c_dest_dir = to_nul_cvec(&n.dest_dir);
-    let c_final_dir = to_nul_cvec(&n.final_dir);
-    let c_category = to_nul_cvec(&n.category);
-    let c_dupe_key = to_nul_cvec(&n.dupe_key);
-    let c_text_status = to_nul_cvec(&n.text_status);
+    let c_name = cstr::to_cstring(&n.name);
+    let c_url = cstr::to_cstring(&n.url);
+    let c_filename = cstr::to_cstring(&n.filename);
+    let c_dest_dir = cstr::to_cstring(&n.dest_dir);
+    let c_final_dir = cstr::to_cstring(&n.final_dir);
+    let c_category = cstr::to_cstring(&n.category);
+    let c_dupe_key = cstr::to_cstring(&n.dupe_key);
+    let c_text_status = cstr::to_cstring(&n.text_status);
 
     let f = crate::xmlrpc_format::NzbgetRsRpcNzbInfoInput {
         id: n.id,
@@ -5109,7 +5105,7 @@ unsafe fn emit_rpc_nzb(
     let mut prm_cvecs = Vec::with_capacity(plen);
     for i in 0..plen {
         let (k, v) = qh.nzb_param_at(nzb_ptr, i);
-        prm_cvecs.push((to_nul_cvec(&k), to_nul_cvec(&v)));
+        prm_cvecs.push((cstr::to_cstring(&k), cstr::to_cstring(&v)));
     }
     let prms: Vec<crate::xmlrpc_format::NzbgetRsRpcParamItem> = prm_cvecs
         .iter()
@@ -5123,7 +5119,7 @@ unsafe fn emit_rpc_nzb(
     let mut scr_cvecs = Vec::with_capacity(slen);
     for i in 0..slen {
         let (st, sname) = qh.nzb_script_status_at(nzb_ptr, i);
-        scr_cvecs.push((to_nul_cvec(&sname), st));
+        scr_cvecs.push((cstr::to_cstring(&sname), st));
     }
     let scrs: Vec<crate::xmlrpc_format::NzbgetRsRpcScriptItem> = scr_cvecs
         .iter()
@@ -5186,7 +5182,7 @@ unsafe fn emit_rpc_post(
     }
     let pi = qh.post_snap(post_ptr);
     let cur_time = libc::time(std::ptr::null_mut()) as i64;
-    let c_label = to_nul_cvec(&pi.progress_label);
+    let c_label = cstr::to_cstring(&pi.progress_label);
     let msgs = if log_entries > 0 {
         qh.nzb_cached_messages_slice(pi.nzb_ptr, 0, log_entries)
     } else {
@@ -5542,10 +5538,10 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                 for qi in 0..qlen {
                     let np = qh.queue_at(dq_ptr, qi);
                     let outer_n = qh.nzb_snap(np, false);
-                    let c_outer_name = to_nul_cvec(&outer_n.name);
-                    let c_outer_fn = to_nul_cvec(&outer_n.filename);
-                    let c_outer_dest = to_nul_cvec(&outer_n.dest_dir);
-                    let c_outer_cat = to_nul_cvec(&outer_n.category);
+                    let c_outer_name = cstr::to_cstring(&outer_n.name);
+                    let c_outer_fn = cstr::to_cstring(&outer_n.filename);
+                    let c_outer_dest = cstr::to_cstring(&outer_n.dest_dir);
+                    let c_outer_cat = cstr::to_cstring(&outer_n.category);
                     let flen = qh.nzb_file_len(np);
                     for fi in 0..flen {
                         let fp = qh.nzb_file_at(np, fi);
@@ -5570,15 +5566,15 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                         };
                         let alt_c = alt_n.as_ref().map(|an| {
                             (
-                                to_nul_cvec(&an.name),
-                                to_nul_cvec(&an.filename),
-                                to_nul_cvec(&an.dest_dir),
-                                to_nul_cvec(&an.category),
+                                cstr::to_cstring(&an.name),
+                                cstr::to_cstring(&an.filename),
+                                cstr::to_cstring(&an.dest_dir),
+                                cstr::to_cstring(&an.category),
                                 an.priority,
                             )
                         });
-                        let c_subj = to_nul_cvec(&f.subject);
-                        let c_ffn = to_nul_cvec(&f.filename);
+                        let c_subj = cstr::to_cstring(&f.subject);
+                        let c_ffn = cstr::to_cstring(&f.filename);
                         let item = crate::xmlrpc_format::NzbgetRsRpcFileItem {
                             id: f.id,
                             file_size: f.size,
@@ -5698,7 +5694,7 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                     }
                     let pi = qh.post_snap(outer.post_info_ptr);
                     emit_rpc_nzb(&qh, pi.nzb_ptr, 0, |pn, _, f, prms, scrs, sts| {
-                        let c_pname = to_nul_cvec(&pn.name);
+                        let c_pname = cstr::to_cstring(&pn.name);
                         emit_cb(
                             emit_ctx,
                             6,
@@ -5741,7 +5737,7 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                     if h.kind == crate::queuesubsys_host::HK_DUP && a1 == 0 {
                         continue;
                     }
-                    let c_hname = to_nul_cvec(&h.name);
+                    let c_hname = cstr::to_cstring(&h.name);
                     if h.kind == crate::queuesubsys_host::HK_NZB
                         || h.kind == crate::queuesubsys_host::HK_URL
                     {
@@ -5776,7 +5772,7 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                         });
                     } else if h.kind == crate::queuesubsys_host::HK_DUP {
                         let d = qh.dup_snap(h.inner_ptr);
-                        let c_dkey = to_nul_cvec(&d.dupe_key);
+                        let c_dkey = cstr::to_cstring(&d.dupe_key);
                         emit_cb(
                             emit_ctx,
                             8,
@@ -5817,10 +5813,10 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                     let np = qh.queue_at(dq_ptr, qi);
                     let n = qh.nzb_snap(np, false);
                     if n.kind == crate::queuesubsys_host::NK_URL {
-                        let c_fn = to_nul_cvec(&n.filename);
-                        let c_url = to_nul_cvec(&n.url);
-                        let c_name = to_nul_cvec(&n.name);
-                        let c_cat = to_nul_cvec(&n.category);
+                        let c_fn = cstr::to_cstring(&n.filename);
+                        let c_url = cstr::to_cstring(&n.url);
+                        let c_name = cstr::to_cstring(&n.name);
+                        let c_cat = cstr::to_cstring(&n.category);
                         emit_cb(
                             emit_ctx,
                             9,
@@ -6740,7 +6736,7 @@ fn run_frontend_thread(
                     continue;
                 }
                 let ns = qh.nzb_snap(nzb_ptr, false);
-                let name_c = to_nul_cvec(&ns.name);
+                let name_c = cstr::to_cstring(&ns.name);
                 emit_nzb(
                     emit_ctx,
                     ns.id,
@@ -6760,7 +6756,7 @@ fn run_frontend_thread(
                         continue;
                     }
                     let fs = qh.file_snap(f_ptr);
-                    let fname_c = to_nul_cvec(&fs.filename);
+                    let fname_c = cstr::to_cstring(&fs.filename);
                     emit_file(
                         emit_ctx,
                         idx,

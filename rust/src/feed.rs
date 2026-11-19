@@ -1,15 +1,8 @@
 //! End-to-end Rust implementation of `daemon/feed/` (`FeedInfo`, `FeedItemInfo`,
 //! `FeedFile`, `NzbInfoCreator`, and `FeedCoordinator`).
 
+use crate::cstr;
 use std::ffi::{c_char, c_int, CStr, CString};
-
-fn cstring_lossy(bytes: &[u8]) -> CString {
-    if let Some(nul) = bytes.iter().position(|&b| b == 0) {
-        CString::new(&bytes[..nul]).unwrap_or_default()
-    } else {
-        CString::new(bytes).unwrap_or_default()
-    }
-}
 
 fn truncate_at_nul(bytes: &[u8]) -> Vec<u8> {
     if let Some(nul) = bytes.iter().position(|&b| b == 0) {
@@ -406,7 +399,7 @@ impl FeedFileParser {
                 for &(attr_name, attr_val) in atts {
                     if attr_name == b"url" {
                         let decoded = truncate_at_nul(attr_val);
-                        item.url = cstring_lossy(&decoded);
+                        item.url = cstr::to_cstring(&decoded);
                     } else if attr_name == b"length" {
                         item.size = c_atoll_bytes(attr_val);
                     }
@@ -424,8 +417,8 @@ impl FeedFileParser {
             let key = atts[0].1;
             let val = atts[1].1;
             if let Some(item) = self.items.last_mut() {
-                let name_cstr = cstring_lossy(key);
-                let val_cstr = cstring_lossy(val);
+                let name_cstr = cstr::to_cstring(key);
+                let val_cstr = cstr::to_cstring(val);
                 item.attr_names.push(name_cstr);
                 item.attr_values.push(val_cstr);
 
@@ -446,11 +439,11 @@ impl FeedFileParser {
                         item.tvmaze_id = c_atoi_bytes(val);
                     }
                     b"episode" => {
-                        item.episode = cstring_lossy(val);
+                        item.episode = cstr::to_cstring(val);
                         item.has_episode = true;
                     }
                     b"season" => {
-                        item.season = cstring_lossy(val);
+                        item.season = cstr::to_cstring(val);
                         item.has_season = true;
                     }
                     _ => {}
@@ -468,16 +461,16 @@ impl FeedFileParser {
                     b"title" => {
                         let title_bytes = truncate_at_nul(&self.tag_content);
                         let filename_bytes = parse_feed_subject(&title_bytes);
-                        item.title = cstring_lossy(&title_bytes);
-                        item.filename = cstring_lossy(&filename_bytes);
+                        item.title = cstr::to_cstring(&title_bytes);
+                        item.filename = cstr::to_cstring(&filename_bytes);
                         self.tag_content.clear();
                     }
                     b"link" if item.url.as_bytes().is_empty() => {
-                        item.url = cstring_lossy(&self.tag_content);
+                        item.url = cstr::to_cstring(&self.tag_content);
                         self.tag_content.clear();
                     }
                     b"category" => {
-                        item.category = cstring_lossy(&self.tag_content);
+                        item.category = cstr::to_cstring(&self.tag_content);
                         self.tag_content.clear();
                     }
                     b"description" => {
@@ -487,11 +480,11 @@ impl FeedFileParser {
                         desc.truncate(len1);
                         let len2 = crate::text::xml_remove_entities(&mut desc, &xml_entity_alpha);
                         desc.truncate(len2);
-                        item.description = cstring_lossy(&desc);
+                        item.description = cstr::to_cstring(&desc);
                         self.tag_content.clear();
                     }
                     b"pubDate" => {
-                        let date_cstr = cstring_lossy(&self.tag_content);
+                        let date_cstr = cstr::to_cstring(&self.tag_content);
                         let unixtime = crate::util::parse_rfc822_date_time(&date_cstr) as isize;
                         if unixtime > 0 {
                             item.time = unixtime as i64;

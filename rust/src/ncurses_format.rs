@@ -2,6 +2,8 @@
 //! status bar, top header with uptime/download-time suffix, file queue header and rows,
 //! and group queue header, column width calculation, and rows.
 
+use crate::cstr;
+
 const MAX_SCREEN_WIDTH: usize = 512;
 const BSTRING_1024_CAP: usize = 1023;
 
@@ -389,14 +391,6 @@ pub struct NcursesFileRowSpec {
     pub remaining_size: i64,
 }
 
-unsafe fn cstr_bytes<'a>(ptr: *const u8) -> &'a [u8] {
-    if ptr.is_null() {
-        b""
-    } else {
-        std::ffi::CStr::from_ptr(ptr.cast()).to_bytes()
-    }
-}
-
 /// Format a single file row in `NCursesFrontend::PrintFilename`, returning `(text, color)`.
 pub fn format_file_row(spec: &NcursesFileRowSpec) -> (Vec<u8>, i32) {
     let (color, brace1, brace2) = ncurses_select_row_highlight(
@@ -428,12 +422,12 @@ pub fn format_file_row(spec: &NcursesFileRowSpec) -> (Vec<u8>, i32) {
     out.push(b' ');
     if spec.show_nzbname != 0 {
         let mut nzb_nice = Vec::new();
-        nzb_nice.extend_from_slice(unsafe { cstr_bytes(spec.nzb_name) });
+        nzb_nice.extend_from_slice(unsafe { cstr::bytes(spec.nzb_name.cast()) });
         nzb_nice.push(spec.path_sep);
         nzb_nice = truncate_bstring_1024(nzb_nice);
         out.extend_from_slice(&nzb_nice);
     }
-    out.extend_from_slice(unsafe { cstr_bytes(spec.filename) });
+    out.extend_from_slice(unsafe { cstr::bytes(spec.filename.cast()) });
     out.extend_from_slice(b" (");
     crate::util::format_size_into(&mut out, spec.size);
 
@@ -500,7 +494,7 @@ pub fn format_group_row(
         *col_width_left,
     );
 
-    let name_bytes = unsafe { cstr_bytes(spec.name) };
+    let name_bytes = unsafe { cstr::bytes(spec.name.cast()) };
     if name_len > 20 {
         let mut files = Vec::with_capacity(24);
         files.extend_from_slice(spec.file_count.to_string().as_bytes());
@@ -1626,7 +1620,7 @@ fn fe_collect_local_messages(
             id,
             kind,
             time,
-            text: cstr_bytes(text.cast()).to_vec(),
+            text: cstr::bytes(text).to_vec(),
         });
     }
     let mut skipped: std::ffi::c_int = 0;
@@ -1715,10 +1709,10 @@ fn fe_make_remote_params<'a>(
     ids: &'a [i32],
 ) -> crate::binrpc::BinRpcClientParams<'a> {
     crate::binrpc::BinRpcClientParams {
-        control_ip: unsafe { cstr_bytes(env.control_ip.cast()) },
+        control_ip: unsafe { cstr::bytes(env.control_ip) },
         control_port: env.control_port,
-        control_username: unsafe { cstr_bytes(env.control_username.cast()) },
-        control_password: unsafe { cstr_bytes(env.control_password.cast()) },
+        control_username: unsafe { cstr::bytes(env.control_username) },
+        control_password: unsafe { cstr::bytes(env.control_password) },
         verbose: false,
         match_mode: 1,
         set_rate: 0,
@@ -1781,7 +1775,7 @@ fn fe_prepare_remote(
                 id,
                 kind: kind as i32,
                 time: i64::from(time),
-                text: unsafe { cstr_bytes(txt) }.to_vec(),
+                text: unsafe { cstr::bytes(txt.cast()) }.to_vec(),
             });
         },
         |_, _, _, _, _, _, _, _, _, _, _, _, _| {},
@@ -1837,7 +1831,7 @@ fn fe_prepare_remote(
     }
 
     if !ok {
-        let ctrl_ip = unsafe { cstr_bytes(env.control_ip.cast()) };
+        let ctrl_ip = unsafe { cstr::bytes(env.control_ip) };
         let effective_ip: &[u8] = if ctrl_ip == b"0.0.0.0" {
             b"127.0.0.1"
         } else {

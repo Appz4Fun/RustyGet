@@ -1356,7 +1356,7 @@ impl DonorServerExchange for NntpHealthTransportShared {
                         .map(|g| g.as_bytes().to_vec())
                         .collect();
                     let art = crate::articlefetcher::ArticleFetcher::new(
-                        crate::articlefetcher::native_nntp_fetch_host,
+                        &crate::articlefetcher::NativeNntpHost,
                     )
                     .fetch_from_connection(conn_ptr, &bracketed, &bg_vecs);
                     if art.success {
@@ -1400,10 +1400,10 @@ impl DonorServerExchange for NntpHealthTransportShared {
 fn get_nntp_fetch_host(
     _host_ctx: *mut c_void,
     _host_cb: DupeHostFn,
-) -> Option<crate::articlefetcher::NzbgetRsNntpFetchHostFn> {
+) -> Option<&'static dyn crate::articlefetcher::NntpHost> {
     #[cfg(unix)]
     if crate::net::active_server_pool().is_some() {
-        return Some(crate::articlefetcher::native_nntp_fetch_host);
+        return Some(&crate::articlefetcher::NativeNntpHost);
     }
     None
 }

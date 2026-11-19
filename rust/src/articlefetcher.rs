@@ -4,7 +4,6 @@
 use crate::cstr;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{c_char, c_int, CStr};
-use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -18,236 +17,234 @@ use crate::nntp::{ArticleBatchFetcher, BatchFetchedArticle, BatchRequest};
 use crate::nzbfile::{Ctype, NzbFileParser};
 use crate::twin::NzbEntry;
 
-/// Shared C++ NNTP host callback (`NzbgetCArticleFetchHost` in `Util.h`):
-/// - `op == 0`: global limits/status -> `ints[0]=max_norm_level`, `ints[1]=quota_reached`,
-///   `ints[2]=read_chunk`, `ints[3]=server_count`; `i64s[0]=speed_limit`,
-///   `i64s[1]=cur_speed` (if `speed_limit > 0`), `i64s[2]=mom_speed` (if `speed_limit > 0`)
-/// - `op == 1`: server at index `a1` -> `ints[0]=active`, `ints[1]=norm_level`, `ints[2]=group`,
-///   `ints[3]=id`, `ints[4]=max_connections`, `ints[5]=join_group`, `ints[6]=retention`,
-///   `strs[0]=name`; returns `server_ptr`
-/// - `op == 2`: `GetConnection(level=a1, nullptr, failed_ptrs=buf[..a2])` -> returns `conn_ptr` (0 if none),
-///   `ints[0]=reused`, `ints[1]=server_id`, `ints[2]=max_connections`, `ints[3]=join_group`,
-///   `ints[4]=group`, `ints[5]=retention`,
-///   `i64s[0]=server_ptr`, `strs[0]=server_name`
-/// - `op == 3`: release connection `p1` (`a1=keep_connected`) -> `AddServerStats`, `Disconnect` if `!a1`
-///   or `csCancelled`, `FreeConnection(conn, true)`
-/// - `op == 4`: connect `p1` -> fills `strs[0]=server_name`, `ints[0]=join_group`, returns `1` on `Connect()`
-/// - `op == 5`: `JoinGroup(s1)` on `p1` -> `strs[0]=response`, returns `1` if non-null
-/// - `op == 6`: `Request(s1)` on `p1` -> `strs[0]=response`, returns `1` if non-null
-/// - `op == 7`: `ReadBuffer` / `TryRecv(buf, buf_len)` on `p1` + `AddSpeedReading` ->
-///   `ints[0]=len`, `strs[0]=buffer_ptr`, returns `1` if `len > 0`
-/// - `op == 8`: `Disconnect()` on `p1`
-/// - `op == 9`: `SetSuppressErrors(true); Cancel();` on `p1`
-/// - `op == 11`: socket read/write timeout of `p1` to `a1` seconds (`a1 <= 0` restores its own)
-/// - `op == 10`: `detail("%s", s1)`
-pub type NzbgetRsNntpFetchHostFn = unsafe extern "C" fn(
-    op: c_int,
-    a1: c_int,
-    a2: c_int,
-    p1: usize,
-    s1: *const c_char,
-    ints: *mut c_int,
-    i64s: *mut i64,
-    strs: *mut *const c_char,
-    buf: *mut u8,
-    buf_len: usize,
-) -> usize;
+/// Global download limits and state, read before and during each fetch.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HostStatus {
+    pub max_norm_level: i32,
+    pub quota_reached: bool,
+    pub read_chunk: usize,
+    pub server_count: usize,
+    pub speed_limit: i64,
+    /// Current and momentary speed; only filled in when `speed_limit > 0`.
+    pub cur_speed: i64,
+    pub mom_speed: i64,
+}
 
-/// Pure-Rust NNTP fetch host driving `NzbgetRsServerPool`, `PooledNntpConn`,
-/// `NzbgetRsStatMeter`, `NzbgetRsWorkState`, `NzbgetRsOptions`, and `NzbgetRsLog`.
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn native_nntp_fetch_host(
-    op: c_int,
-    a1: c_int,
-    a2: c_int,
-    p1: usize,
-    s1: *const c_char,
-    ints: *mut c_int,
-    i64s: *mut i64,
-    strs: *mut *const c_char,
-    buf: *mut u8,
-    buf_len: usize,
-) -> usize {
-    match op {
-        0 => {
-            let pool = crate::net::active_server_pool();
-            let ws = crate::ffi::active_workstate();
-            let opts = crate::options::active_options();
-            let sm = crate::statmeter::active_statmeter();
-            *ints.add(0) = pool.as_ref().map_or(0, |p| p.max_norm_level());
-            *ints.add(1) = c_int::from(ws.as_ref().is_some_and(|w| w.quota_reached()));
-            *ints.add(2) = opts
+/// One configured news server.
+#[derive(Clone, Debug, Default)]
+pub struct ServerInfo {
+    /// Identifies the server in [`NntpHost::get_connection`]'s exclusion list.
+    pub handle: usize,
+    pub active: bool,
+    pub norm_level: i32,
+    pub group: i32,
+    pub id: i32,
+    pub max_connections: i32,
+    pub join_group: bool,
+    pub retention: i32,
+    pub name: Vec<u8>,
+}
+
+/// A pooled connection handed out by [`NntpHost::get_connection`].
+#[derive(Clone, Debug, Default)]
+pub struct ConnInfo {
+    pub conn: usize,
+    /// The connection was already open (it may have gone stale).
+    pub reused: bool,
+    pub server: ServerInfo,
+}
+
+/// The server pool, connections, speed meter and log an [`ArticleFetcher`]
+/// works through. Connections are passed around as opaque `usize` handles.
+pub trait NntpHost: Send + Sync {
+    fn status(&self) -> HostStatus;
+    /// The server at `index` (`0..status().server_count`).
+    fn server(&self, index: usize) -> Option<ServerInfo>;
+    /// A free connection at `level`, skipping the servers in `excluded`.
+    fn get_connection(&self, level: i32, excluded: &[usize]) -> Option<ConnInfo>;
+    /// Books the connection's traffic and returns it to the pool, disconnecting
+    /// it unless `keep_connected` (or when it was cancelled).
+    fn release(&self, conn: usize, keep_connected: bool);
+    /// The server `conn` belongs to.
+    fn conn_server(&self, conn: usize) -> Option<ServerInfo>;
+    /// Connects `conn` if it is not connected yet.
+    fn connect(&self, conn: usize) -> bool;
+    /// `GROUP` reply, or `None` when the connection failed.
+    fn join_group(&self, conn: usize, group: &[u8]) -> Option<Vec<u8>>;
+    /// Reply to a request line (`cmd` ends in CRLF), or `None` when the connection failed.
+    fn request(&self, conn: usize, cmd: &[u8]) -> Option<Vec<u8>>;
+    /// The next chunk of the article body, either data the connection already
+    /// buffered or a fresh read into `buf`. `None` when the connection is lost.
+    fn read<'a>(&'a self, conn: usize, buf: &'a mut [u8]) -> Option<&'a mut [u8]>;
+    fn disconnect(&self, conn: usize);
+    /// Stops a fetch in flight on `conn`, without logging its errors.
+    fn cancel(&self, conn: usize);
+    /// Read/write timeout for `conn`; `secs <= 0` restores the connection's own.
+    fn set_io_timeout(&self, conn: usize, secs: i32);
+    fn detail(&self, msg: &[u8]);
+}
+
+/// The daemon's [`NntpHost`]: the active server pool, stat meter, work state,
+/// options and log.
+pub struct NativeNntpHost;
+
+impl NativeNntpHost {
+    /// # Safety
+    /// `conn` must be a live connection handle from [`NntpHost::get_connection`].
+    unsafe fn conn<'a>(conn: usize) -> Option<&'a crate::net::PooledNntpConn> {
+        unsafe { (conn as *const crate::net::PooledNntpConn).as_ref() }
+    }
+}
+
+fn server_info(s: &Arc<crate::net::RsNewsServer>) -> ServerInfo {
+    ServerInfo {
+        handle: Arc::as_ptr(s) as usize,
+        active: s.active.load(Ordering::SeqCst),
+        norm_level: s.norm_level.load(Ordering::SeqCst),
+        group: s.group,
+        id: s.id,
+        max_connections: s.max_connections,
+        join_group: s.join_group,
+        retention: s.retention,
+        name: s.name.to_bytes().to_vec(),
+    }
+}
+
+impl NntpHost for NativeNntpHost {
+    fn status(&self) -> HostStatus {
+        let pool = crate::net::active_server_pool();
+        let ws = crate::ffi::active_workstate();
+        let opts = crate::options::active_options();
+        let sm = crate::statmeter::active_statmeter();
+        let speed_limit = ws.as_ref().map_or(0, |w| i64::from(w.speed_limit()));
+        let (cur_speed, mom_speed) = match sm.as_ref() {
+            Some(s) if speed_limit > 0 => {
+                (s.current_download_speed(), s.momentary_download_speed())
+            }
+            _ => (0, 0),
+        };
+        HostStatus {
+            max_norm_level: pool.as_ref().map_or(0, |p| p.max_norm_level()),
+            quota_reached: ws.as_ref().is_some_and(|w| w.quota_reached()),
+            read_chunk: opts
                 .as_ref()
-                .map_or(4, |o| o.scalars().article_read_chunk_size);
-            *ints.add(3) = pool.as_ref().map_or(0, |p| p.server_count() as c_int);
-            let speed_limit = ws.as_ref().map_or(0, |w| i64::from(w.speed_limit()));
-            *i64s.add(0) = speed_limit;
-            *i64s.add(1) = if speed_limit > 0 {
-                sm.as_ref().map_or(0, |s| s.current_download_speed())
-            } else {
-                0
-            };
-            *i64s.add(2) = if speed_limit > 0 {
-                sm.as_ref().map_or(0, |s| s.momentary_download_speed())
-            } else {
-                0
-            };
-            0
+                .map_or(4, |o| o.scalars().article_read_chunk_size)
+                .max(1) as usize,
+            server_count: pool.as_ref().map_or(0, |p| p.server_count()),
+            speed_limit,
+            cur_speed,
+            mom_speed,
         }
-        1 => {
-            let Some(pool) = crate::net::active_server_pool() else {
-                return 0;
-            };
-            let srvs = pool.servers_snapshot();
-            let Some(s) = srvs.get(a1 as usize) else {
-                return 0;
-            };
-            *ints.add(0) = c_int::from(s.active.load(Ordering::SeqCst));
-            *ints.add(1) = s.norm_level.load(Ordering::SeqCst);
-            *ints.add(2) = s.group;
-            *ints.add(3) = s.id;
-            *ints.add(4) = s.max_connections;
-            *ints.add(5) = c_int::from(s.join_group);
-            *ints.add(6) = s.retention;
-            *strs.add(0) = s.name.as_ptr();
-            Arc::as_ptr(s) as usize
-        }
-        2 => {
-            let Some(pool) = crate::net::active_server_pool() else {
-                return 0;
-            };
-            let mut failed: Vec<&crate::net::RsNewsServer> = Vec::new();
-            if !buf.is_null() && a2 > 0 {
-                let ptrs = std::slice::from_raw_parts(buf.cast::<usize>(), a2 as usize);
-                failed.reserve(ptrs.len());
-                for &raw in ptrs {
-                    if raw != 0 {
-                        failed.push(&*(raw as *const crate::net::RsNewsServer));
-                    }
-                }
-            }
-            let conn_ptr = pool.get_connection(a1, None, &failed);
-            if conn_ptr.is_null() {
-                return 0;
-            }
-            let conn = &*conn_ptr;
-            let s = &conn.server;
-            *ints.add(0) = c_int::from(conn.is_connected());
-            *ints.add(1) = s.id;
-            *ints.add(2) = s.max_connections;
-            *ints.add(3) = c_int::from(s.join_group);
-            *ints.add(4) = s.group;
-            *ints.add(5) = s.retention;
-            *i64s.add(0) = (Arc::as_ptr(s) as usize) as i64;
-            *strs.add(0) = s.name.as_ptr();
-            conn_ptr as usize
-        }
-        3 => {
-            let conn_ptr = p1 as *mut crate::net::PooledNntpConn;
-            if conn_ptr.is_null() {
-                return 0;
-            }
-            let conn = &*conn_ptr;
-            let bytes_read = conn.fetch_total_bytes_read();
-            if bytes_read > 0 {
-                if let Some(sm) = crate::statmeter::active_statmeter() {
-                    let off = crate::ffi::active_workstate().map_or(0, |w| w.local_time_offset());
-                    sm.add_server_stats(bytes_read, 0, 0, conn.server.id, off);
-                }
-            }
-            if a1 == 0 || conn.is_cancelled() {
-                conn.disconnect();
-            }
-            if let Some(pool) = crate::net::active_server_pool() {
-                pool.free_connection(conn_ptr, true);
-            }
-            0
-        }
-        4 => {
-            if p1 == 0 {
-                return 0;
-            }
-            let conn = &*(p1 as *const crate::net::PooledNntpConn);
-            *strs.add(0) = conn.server.name.as_ptr();
-            *ints.add(0) = c_int::from(conn.server.join_group);
-            usize::from(conn.connect())
-        }
-        5 => {
-            if p1 == 0 {
-                return 0;
-            }
-            let conn = &*(p1 as *const crate::net::PooledNntpConn);
-            let resp = conn.join_group(if s1.is_null() { c"".as_ptr() } else { s1 });
-            *strs.add(0) = resp;
-            usize::from(!resp.is_null())
-        }
-        6 => {
-            if p1 == 0 {
-                return 0;
-            }
-            let conn = &*(p1 as *const crate::net::PooledNntpConn);
-            let resp = conn.request(if s1.is_null() { c"".as_ptr() } else { s1 });
-            *strs.add(0) = resp;
-            usize::from(!resp.is_null())
-        }
-        7 => {
-            if p1 == 0 {
-                return 0;
-            }
-            let conn = &*(p1 as *const crate::net::PooledNntpConn);
-            let (mut buffer, avail) = conn.drain_read_buffer();
-            let mut len = avail as c_int;
-            if len == 0 {
-                let dst = if buf.is_null() || buf_len == 0 {
-                    &mut [][..]
-                } else {
-                    std::slice::from_raw_parts_mut(buf, buf_len)
-                };
-                len = conn.try_recv(dst);
-                buffer = buf;
-            }
-            if len <= 0 {
-                *ints.add(0) = len;
-                *strs.add(0) = ptr::null();
-                return 0;
-            }
+    }
+
+    fn server(&self, index: usize) -> Option<ServerInfo> {
+        let pool = crate::net::active_server_pool()?;
+        let servers = pool.servers_snapshot();
+        servers.get(index).map(server_info)
+    }
+
+    fn get_connection(&self, level: i32, excluded: &[usize]) -> Option<ConnInfo> {
+        let pool = crate::net::active_server_pool()?;
+        // SAFETY: server handles come from `server`/`get_connection` and the
+        // pool keeps its servers alive.
+        let failed: Vec<&crate::net::RsNewsServer> = excluded
+            .iter()
+            .filter(|&&h| h != 0)
+            .map(|&h| unsafe { &*(h as *const crate::net::RsNewsServer) })
+            .collect();
+        let conn_ptr = pool.get_connection(level, None, &failed);
+        // SAFETY: a non-null connection from the pool stays valid until freed.
+        let conn = unsafe { conn_ptr.as_ref() }?;
+        Some(ConnInfo {
+            conn: conn_ptr as usize,
+            reused: conn.is_connected(),
+            server: server_info(&conn.server),
+        })
+    }
+
+    fn release(&self, conn: usize, keep_connected: bool) {
+        let conn_ptr = conn as *mut crate::net::PooledNntpConn;
+        let Some(c) = (unsafe { Self::conn(conn) }) else {
+            return;
+        };
+        let bytes_read = c.fetch_total_bytes_read();
+        if bytes_read > 0 {
             if let Some(sm) = crate::statmeter::active_statmeter() {
-                sm.add_speed_reading_locked(len);
+                let off = crate::ffi::active_workstate().map_or(0, |w| w.local_time_offset());
+                sm.add_server_stats(bytes_read, 0, 0, c.server.id, off);
             }
-            *ints.add(0) = len;
-            *strs.add(0) = buffer.cast::<c_char>();
-            1
         }
-        8 => {
-            if p1 != 0 {
-                (*(p1 as *const crate::net::PooledNntpConn)).disconnect();
+        if !keep_connected || c.is_cancelled() {
+            unsafe { c.disconnect() };
+        }
+        if let Some(pool) = crate::net::active_server_pool() {
+            pool.free_connection(conn_ptr, true);
+        }
+    }
+
+    fn conn_server(&self, conn: usize) -> Option<ServerInfo> {
+        unsafe { Self::conn(conn) }.map(|c| server_info(&c.server))
+    }
+
+    fn connect(&self, conn: usize) -> bool {
+        unsafe { Self::conn(conn) }.is_some_and(|c| unsafe { c.connect() })
+    }
+
+    fn join_group(&self, conn: usize, group: &[u8]) -> Option<Vec<u8>> {
+        let c = unsafe { Self::conn(conn) }?;
+        let group = cstr::to_cstring(group);
+        let resp = unsafe { c.join_group(group.as_ptr()) };
+        (!resp.is_null()).then(|| unsafe { cstr::owned(resp) })
+    }
+
+    fn request(&self, conn: usize, cmd: &[u8]) -> Option<Vec<u8>> {
+        let c = unsafe { Self::conn(conn) }?;
+        let cmd = cstr::to_cstring(cmd);
+        let resp = unsafe { c.request(cmd.as_ptr()) };
+        (!resp.is_null()).then(|| unsafe { cstr::owned(resp) })
+    }
+
+    fn read<'a>(&'a self, conn: usize, buf: &'a mut [u8]) -> Option<&'a mut [u8]> {
+        let c = unsafe { Self::conn(conn) }?;
+        let (buffered, avail) = unsafe { c.drain_read_buffer() };
+        let data: &'a mut [u8] = if avail > 0 && !buffered.is_null() {
+            // SAFETY: the connection's buffer stays put until its next read,
+            // and the caller consumes it before reading again.
+            unsafe { std::slice::from_raw_parts_mut(buffered, avail) }
+        } else {
+            let len = unsafe { c.try_recv(buf) };
+            if len <= 0 {
+                return None;
             }
-            0
+            &mut buf[..len as usize]
+        };
+        if let Some(sm) = crate::statmeter::active_statmeter() {
+            sm.add_speed_reading_locked(data.len() as c_int);
         }
-        9 => {
-            if p1 != 0 {
-                let conn = &*(p1 as *const crate::net::PooledNntpConn);
-                conn.set_suppress_errors(true);
-                conn.cancel();
-            }
-            0
+        Some(data)
+    }
+
+    fn disconnect(&self, conn: usize) {
+        if let Some(c) = unsafe { Self::conn(conn) } {
+            unsafe { c.disconnect() };
         }
-        11 => {
-            if p1 != 0 {
-                (*(p1 as *const crate::net::PooledNntpConn)).set_io_timeout(a1);
-            }
-            0
+    }
+
+    fn cancel(&self, conn: usize) {
+        if let Some(c) = unsafe { Self::conn(conn) } {
+            c.set_suppress_errors(true);
+            c.cancel();
         }
-        10 => {
-            let msg = if s1.is_null() {
-                &[][..]
-            } else {
-                CStr::from_ptr(s1).to_bytes()
-            };
-            crate::log::log_active_bytes(4, msg);
-            0
+    }
+
+    fn set_io_timeout(&self, conn: usize, secs: i32) {
+        if let Some(c) = unsafe { Self::conn(conn) } {
+            c.set_io_timeout(secs);
         }
-        _ => 0,
+    }
+
+    fn detail(&self, msg: &[u8]) {
+        crate::log::log_active_bytes(crate::log::MK_DETAIL, msg);
     }
 }
 
@@ -284,23 +281,6 @@ fn stream_reply_timeout_secs() -> i32 {
         article.min(STREAM_REPLY_TIMEOUT_SECS)
     } else {
         STREAM_REPLY_TIMEOUT_SECS
-    }
-}
-
-fn set_conn_io_timeout(host: NzbgetRsNntpFetchHostFn, conn: usize, secs: i32) {
-    unsafe {
-        host(
-            11,
-            secs,
-            0,
-            conn,
-            ptr::null(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            0,
-        );
     }
 }
 
@@ -416,72 +396,15 @@ pub fn set_server_unreachable(server_id: i32, unreachable: bool) {
     }
 }
 
-#[derive(Clone, Copy)]
-struct HostStatus {
-    max_norm_level: i32,
-    quota_reached: bool,
-    read_chunk: usize,
-    server_count: usize,
-    speed_limit: i64,
-    cur_speed: i64,
-    mom_speed: i64,
-}
-
-fn query_host_status(host: NzbgetRsNntpFetchHostFn) -> HostStatus {
-    let mut ints = [0 as c_int; 4];
-    let mut i64s = [0i64; 3];
-    unsafe {
-        host(
-            0,
-            0,
-            0,
-            0,
-            ptr::null(),
-            ints.as_mut_ptr(),
-            i64s.as_mut_ptr(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            0,
-        );
-    }
-    HostStatus {
-        max_norm_level: ints[0],
-        quota_reached: ints[1] != 0,
-        read_chunk: ints[2].max(1) as usize,
-        server_count: ints[3].max(0) as usize,
-        speed_limit: i64s[0],
-        cur_speed: i64s[1],
-        mom_speed: i64s[2],
-    }
-}
-
-pub fn emit_detail(host: NzbgetRsNntpFetchHostFn, msg: &[u8]) {
-    let c = cstr::nul_terminated(msg);
-    unsafe {
-        host(
-            10,
-            0,
-            0,
-            0,
-            c.as_ptr() as *const c_char,
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            0,
-        );
-    }
-}
-
 pub struct ArticleFetcher {
-    host: NzbgetRsNntpFetchHostFn,
+    host: &'static dyn NntpHost,
     wait_counter: Mutex<Option<Arc<AtomicI32>>>,
     stopped: AtomicBool,
     conn_ptr: Mutex<usize>,
 }
 
 impl ArticleFetcher {
-    pub fn new(host: NzbgetRsNntpFetchHostFn) -> Self {
+    pub fn new(host: &'static dyn NntpHost) -> Self {
         Self {
             host,
             wait_counter: Mutex::new(None),
@@ -506,20 +429,7 @@ impl ArticleFetcher {
         if let Ok(guard) = self.conn_ptr.lock() {
             let conn = *guard;
             if conn != 0 {
-                unsafe {
-                    (self.host)(
-                        9,
-                        0,
-                        0,
-                        conn,
-                        ptr::null(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        0,
-                    );
-                }
+                self.host.cancel(conn);
             }
         }
     }
@@ -536,20 +446,7 @@ impl ArticleFetcher {
 
     fn release_connection(&self, conn: usize, keep_connected: bool) {
         let mut guard = self.conn_ptr.lock().unwrap();
-        unsafe {
-            (self.host)(
-                3,
-                c_int::from(keep_connected),
-                0,
-                conn,
-                ptr::null(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                0,
-            );
-        }
+        self.host.release(conn, keep_connected);
         if *guard == conn {
             *guard = 0;
         }
@@ -571,48 +468,34 @@ impl ArticleFetcher {
 
         let mut level: i32 = 0;
         while !self.is_stopped() {
-            let mut st = query_host_status(self.host);
+            let mut st = self.host.status();
             if level > st.max_norm_level {
                 break;
             }
             while st.quota_reached && !self.is_stopped() {
                 std::thread::sleep(Duration::from_millis(100));
-                st = query_host_status(self.host);
+                st = self.host.status();
             }
             if self.is_stopped() {
                 break;
             }
 
-            st = query_host_status(self.host);
+            st = self.host.status();
             let mut eligible = 0i32;
             // the failed servers plus every server a backbone miss rules out, at any level
             let mut excluded_ptrs = failed_ptrs.clone();
             for idx in 0..st.server_count {
-                let mut s_ints = [0 as c_int; 7];
-                let mut s_strs = [ptr::null::<c_char>(); 1];
-                let s_ptr = unsafe {
-                    (self.host)(
-                        1,
-                        idx as c_int,
-                        0,
-                        0,
-                        ptr::null(),
-                        s_ints.as_mut_ptr(),
-                        ptr::null_mut(),
-                        s_strs.as_mut_ptr(),
-                        ptr::null_mut(),
-                        0,
-                    )
-                };
-                let ruled_out = crate::nntp::backbone_missing(&missing, s_ints[2], s_ints[6]);
+                let srv = self.host.server(idx).unwrap_or_default();
+                let s_ptr = srv.handle;
+                let ruled_out = crate::nntp::backbone_missing(&missing, srv.group, srv.retention);
                 if ruled_out && !excluded_ptrs.contains(&s_ptr) {
                     excluded_ptrs.push(s_ptr);
                 }
-                if s_ints[0] == 0 && !ruled_out {
+                if !srv.active && !ruled_out {
                     // an inactive server was never asked: the article may be there
                     only_430 = false;
                 }
-                if s_ints[0] == 0 || s_ints[1] != level {
+                if !srv.active || srv.norm_level != level {
                     continue;
                 }
                 if !ruled_out && !failed_ptrs.contains(&s_ptr) {
@@ -650,41 +533,21 @@ impl ArticleFetcher {
 
             let wait_started = Instant::now();
             while conn == 0 && !self.is_stopped() {
-                let cur_st = query_host_status(self.host);
+                let cur_st = self.host.status();
                 if cur_st.quota_reached {
                     std::thread::sleep(Duration::from_millis(100));
                     continue;
                 }
-                let mut c_ints = [0 as c_int; 6];
-                let mut c_i64s = [0i64; 1];
-                let mut c_strs = [ptr::null::<c_char>(); 1];
-                conn = unsafe {
-                    (self.host)(
-                        2,
-                        level,
-                        excluded_ptrs.len() as c_int,
-                        0,
-                        ptr::null(),
-                        c_ints.as_mut_ptr(),
-                        c_i64s.as_mut_ptr(),
-                        c_strs.as_mut_ptr(),
-                        if excluded_ptrs.is_empty() {
-                            ptr::null_mut()
-                        } else {
-                            excluded_ptrs.as_mut_ptr() as *mut u8
-                        },
-                        excluded_ptrs.len(),
-                    )
-                };
-                if conn != 0 {
-                    reused = c_ints[0] != 0;
-                    server_id = c_ints[1];
-                    max_connections = c_ints[2];
-                    join_group = c_ints[3] != 0;
-                    server_group_of_conn = c_ints[4];
-                    server_ptr = c_i64s[0] as usize;
-                    server_retention = c_ints[5];
-                    server_name = unsafe { cstr::owned(c_strs[0]) };
+                if let Some(got) = self.host.get_connection(level, &excluded_ptrs) {
+                    conn = got.conn;
+                    reused = got.reused;
+                    server_id = got.server.id;
+                    max_connections = got.server.max_connections;
+                    join_group = got.server.join_group;
+                    server_group_of_conn = got.server.group;
+                    server_ptr = got.server.handle;
+                    server_retention = got.server.retention;
+                    server_name = got.server.name;
                 } else {
                     std::thread::sleep(Duration::from_millis(5));
                 }
@@ -709,7 +572,7 @@ impl ArticleFetcher {
                 log.extend_from_slice(&server_name);
                 log.extend_from_slice(b" for ");
                 log.extend_from_slice(&message_id[..msg_end]);
-                emit_detail(self.host, &log);
+                self.host.detail(&log);
             }
 
             let stopped_now = {
@@ -738,7 +601,7 @@ impl ArticleFetcher {
                 return result;
             }
             if result.retry {
-                while query_host_status(self.host).quota_reached && !self.is_stopped() {
+                while self.host.status().quota_reached && !self.is_stopped() {
                     std::thread::sleep(Duration::from_millis(100));
                 }
                 continue;
@@ -814,30 +677,16 @@ impl ArticleFetcher {
             return result;
         }
 
-        let mut c_ints = [0 as c_int; 1];
-        let mut c_strs = [ptr::null::<c_char>(); 1];
-        let connected = unsafe {
-            (self.host)(
-                4,
-                0,
-                0,
-                conn,
-                ptr::null(),
-                c_ints.as_mut_ptr(),
-                ptr::null_mut(),
-                c_strs.as_mut_ptr(),
-                ptr::null_mut(),
-                0,
-            )
-        };
         let owned_name;
         let (server_name, join_group): (&[u8], bool) = match known_meta {
             Some((name, jg)) => (name, jg),
             None => {
-                owned_name = unsafe { cstr::owned(c_strs[0]) };
-                (&owned_name, c_ints[0] != 0)
+                let srv = self.host.conn_server(conn).unwrap_or_default();
+                owned_name = srv.name;
+                (&owned_name, srv.join_group)
             }
         };
+        let connected = self.host.connect(conn);
 
         let msg_clean_end = message_id
             .iter()
@@ -845,61 +694,31 @@ impl ArticleFetcher {
             .unwrap_or(message_id.len());
         let msg_slice = &message_id[..msg_clean_end];
 
-        if connected == 0 {
+        if !connected {
             let mut log = b"Stream repair: could not connect to ".to_vec();
             log.extend_from_slice(server_name);
-            emit_detail(self.host, &log);
+            self.host.detail(&log);
             result.transient = true;
             return result;
         }
 
         // the connection goes back to the pool with its own timeout
-        struct IoTimeout(NzbgetRsNntpFetchHostFn, usize);
+        struct IoTimeout(&'static dyn NntpHost, usize);
         impl Drop for IoTimeout {
             fn drop(&mut self) {
-                set_conn_io_timeout(self.0, self.1, 0);
+                self.0.set_io_timeout(self.1, 0);
             }
         }
-        set_conn_io_timeout(self.host, conn, stream_reply_timeout_secs());
+        self.host.set_io_timeout(conn, stream_reply_timeout_secs());
         let _io_timeout = IoTimeout(self.host, conn);
 
-        let disconnect = || unsafe {
-            (self.host)(
-                8,
-                0,
-                0,
-                conn,
-                ptr::null(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                0,
-            );
-        };
+        let disconnect = || self.host.disconnect(conn);
 
         if join_group {
             let join_started = Instant::now();
             let mut joined_resp: Option<Vec<u8>> = None;
             for group in groups {
-                let grp_c = cstr::nul_terminated(group);
-                let mut g_strs = [ptr::null::<c_char>(); 1];
-                let ok = unsafe {
-                    (self.host)(
-                        5,
-                        0,
-                        0,
-                        conn,
-                        grp_c.as_ptr() as *const c_char,
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        g_strs.as_mut_ptr(),
-                        ptr::null_mut(),
-                        0,
-                    )
-                };
-                if ok != 0 && !g_strs[0].is_null() {
-                    let resp = unsafe { cstr::owned(g_strs[0]) };
+                if let Some(resp) = self.host.join_group(conn, group) {
                     let is_ok = resp.first() == Some(&b'2');
                     joined_resp = Some(resp);
                     if is_ok {
@@ -917,7 +736,7 @@ impl ArticleFetcher {
                 log.extend_from_slice(server_name);
                 log.extend_from_slice(b" for ");
                 log.extend_from_slice(msg_slice);
-                emit_detail(self.host, &log);
+                self.host.detail(&log);
                 result.transient = joined_resp.is_none();
                 result.timed_out = result.transient && read_timed_out(join_started.elapsed());
                 if result.transient {
@@ -930,45 +749,27 @@ impl ArticleFetcher {
         let mut body_cmd = Vec::with_capacity(msg_slice.len() + 8);
         body_cmd.extend_from_slice(b"BODY ");
         body_cmd.extend_from_slice(msg_slice);
-        body_cmd.extend_from_slice(b"\r\n\0");
-        let mut r_strs = [ptr::null::<c_char>(); 1];
+        body_cmd.extend_from_slice(b"\r\n");
         let requested = Instant::now();
-        let req_ok = unsafe {
-            (self.host)(
-                6,
-                0,
-                0,
-                conn,
-                body_cmd.as_ptr() as *const c_char,
-                ptr::null_mut(),
-                ptr::null_mut(),
-                r_strs.as_mut_ptr(),
-                ptr::null_mut(),
-                0,
-            )
-        };
-        if req_ok == 0 || r_strs[0].is_null() {
+        let Some(resp) = self.host.request(conn, &body_cmd) else {
             let mut log = b"Stream repair: no response from ".to_vec();
             log.extend_from_slice(server_name);
             log.extend_from_slice(b" for ");
             log.extend_from_slice(msg_slice);
             log.extend_from_slice(format!(" after {}s", requested.elapsed().as_secs()).as_bytes());
-            emit_detail(self.host, &log);
+            self.host.detail(&log);
             disconnect();
             result.transient = true;
             result.timed_out = read_timed_out(requested.elapsed());
             return result;
-        }
-        let resp_first = unsafe { *r_strs[0] as u8 };
-        if resp_first != b'2' {
-            result.not_found_430 = unsafe { CStr::from_ptr(r_strs[0]) }
-                .to_bytes()
-                .starts_with(b"430");
+        };
+        if resp.first() != Some(&b'2') {
+            result.not_found_430 = resp.starts_with(b"430");
             let mut log = b"Stream repair: article ".to_vec();
             log.extend_from_slice(msg_slice);
             log.extend_from_slice(b" not available on ");
             log.extend_from_slice(server_name);
-            emit_detail(self.host, &log);
+            self.host.detail(&log);
             return result;
         }
 
@@ -977,20 +778,20 @@ impl ArticleFetcher {
         decoder.crc_check = true;
         decoder.raw_mode = false;
 
-        let read_chunk = query_host_status(self.host).read_chunk;
+        let read_chunk = self.host.status().read_chunk;
         let mut recv_buf = vec![0u8; read_chunk + 128];
         let mut raw_bytes: i64 = 0;
         let mut decoded_bytes: i64 = 0;
 
         while !self.is_stopped() && !decoder.eof {
-            let st0 = query_host_status(self.host);
+            let st0 = self.host.status();
             if st0.quota_reached {
                 disconnect();
                 result.retry = true;
                 return result;
             }
             while !self.is_stopped() {
-                let st_lim = query_host_status(self.host);
+                let st_lim = self.host.status();
                 if st_lim.quota_reached
                     || st_lim.speed_limit <= 0
                     || (st_lim.cur_speed <= st_lim.speed_limit
@@ -1000,7 +801,7 @@ impl ArticleFetcher {
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
-            if query_host_status(self.host).quota_reached {
+            if self.host.status().quota_reached {
                 disconnect();
                 result.retry = true;
                 return result;
@@ -1009,37 +810,21 @@ impl ArticleFetcher {
                 break;
             }
 
-            let mut rd_ints = [0 as c_int; 1];
-            let mut rd_strs = [ptr::null::<c_char>(); 1];
             let read_started = Instant::now();
-            let rd_ok = unsafe {
-                (self.host)(
-                    7,
-                    0,
-                    0,
-                    conn,
-                    ptr::null(),
-                    rd_ints.as_mut_ptr(),
-                    ptr::null_mut(),
-                    rd_strs.as_mut_ptr(),
-                    recv_buf.as_mut_ptr(),
-                    read_chunk,
-                )
-            };
-            let len = rd_ints[0];
-            if rd_ok == 0 || len <= 0 || rd_strs[0].is_null() {
+            let Some(chunk) = self.host.read(conn, &mut recv_buf[..read_chunk]) else {
                 let mut log = b"Stream repair: connection to ".to_vec();
                 log.extend_from_slice(server_name);
                 log.extend_from_slice(b" lost while fetching ");
                 log.extend_from_slice(msg_slice);
-                emit_detail(self.host, &log);
+                self.host.detail(&log);
                 disconnect();
                 return FetchedArticle {
                     transient: true,
                     timed_out: read_timed_out(read_started.elapsed()),
                     ..Default::default()
                 };
-            }
+            };
+            let len = chunk.len();
 
             if !article_fetch_add_raw_bytes(&mut raw_bytes, len as i64) {
                 let mut log = b"Stream repair: article ".to_vec();
@@ -1047,12 +832,12 @@ impl ArticleFetcher {
                 log.extend_from_slice(b" from ");
                 log.extend_from_slice(server_name);
                 log.extend_from_slice(b" exceeded the wire-size limit");
-                emit_detail(self.host, &log);
+                self.host.detail(&log);
                 disconnect();
                 return result;
             }
 
-            let buffer_ptr = rd_strs[0] as *mut u8;
+            let buffer_ptr = chunk.as_mut_ptr();
             let decoded_len = unsafe { decoder.decode_buffer(buffer_ptr, len as usize) };
             let declared_range_known =
                 decoder.begin_pos > 0 && decoder.end_pos >= decoder.begin_pos && decoder.size > 0;
@@ -1062,7 +847,7 @@ impl ArticleFetcher {
                 log.extend_from_slice(b" from ");
                 log.extend_from_slice(server_name);
                 log.extend_from_slice(b" exceeded the yEnc-header limit");
-                emit_detail(self.host, &log);
+                self.host.detail(&log);
                 disconnect();
                 return result;
             }
@@ -1080,7 +865,7 @@ impl ArticleFetcher {
                 log.extend_from_slice(b" from ");
                 log.extend_from_slice(server_name);
                 log.extend_from_slice(b" exceeded its declared decoded range");
-                emit_detail(self.host, &log);
+                self.host.detail(&log);
                 disconnect();
                 return result;
             }
@@ -1106,7 +891,7 @@ impl ArticleFetcher {
             log.extend_from_slice(b" from ");
             log.extend_from_slice(server_name);
             log.extend_from_slice(b" failed decoding");
-            emit_detail(self.host, &log);
+            self.host.detail(&log);
             return result;
         }
 
@@ -1127,13 +912,13 @@ struct BatchPoolState {
 /// Native Rust equivalent of `ArticleBatchFetcher` in `Util.h`, pairing
 /// [`crate::nntp::ArticleBatchFetcher`] with a pool of [`ArticleFetcher`]s.
 pub struct BatchFetcherPool {
-    host: NzbgetRsNntpFetchHostFn,
+    host: &'static dyn NntpHost,
     state: Arc<Mutex<BatchPoolState>>,
     batch: ArticleBatchFetcher,
 }
 
 impl BatchFetcherPool {
-    pub fn new(host: NzbgetRsNntpFetchHostFn) -> Self {
+    pub fn new(host: &'static dyn NntpHost) -> Self {
         let state = Arc::new(Mutex::new(BatchPoolState {
             worker_count: 0,
             wait_counter: None,
@@ -1448,81 +1233,66 @@ mod tests {
     static TEST_WIRE_PAYLOAD: OnceLock<Vec<u8>> = OnceLock::new();
     static TEST_READ_POS: AtomicI32 = AtomicI32::new(0);
 
-    unsafe extern "C" fn mock_nntp_host(
-        op: c_int,
-        _a1: c_int,
-        _a2: c_int,
-        _p1: usize,
-        _s1: *const c_char,
-        ints: *mut c_int,
-        i64s: *mut i64,
-        strs: *mut *const c_char,
-        buf: *mut u8,
-        buf_len: usize,
-    ) -> usize {
-        match op {
-            0 => {
-                let s = unsafe { std::slice::from_raw_parts_mut(ints, 4) };
-                s[0] = 0;
-                s[1] = 0;
-                s[2] = 64;
-                s[3] = 1;
-                let l = unsafe { std::slice::from_raw_parts_mut(i64s, 3) };
-                l[0] = 0;
-                l[1] = 0;
-                l[2] = 0;
-                0
-            }
-            1 => {
-                let s = unsafe { std::slice::from_raw_parts_mut(ints, 6) };
-                s[0] = 1;
-                s[1] = 0;
-                s[2] = 0;
-                s[3] = 7;
-                s[4] = 4;
-                s[5] = 0;
-                unsafe { *strs = c"mock.nntp".as_ptr() };
-                0x1000
-            }
-            2 => {
-                let s = unsafe { std::slice::from_raw_parts_mut(ints, 5) };
-                s[0] = 0;
-                s[1] = 7;
-                s[2] = 4;
-                s[3] = 0;
-                s[4] = 0;
-                unsafe { *i64s = 0x1000 };
-                unsafe { *strs = c"mock.nntp".as_ptr() };
-                0x2000
-            }
-            3 | 8 | 9 | 10 => 0,
-            4 => {
-                unsafe { *ints = 0 };
-                unsafe { *strs = c"mock.nntp".as_ptr() };
-                1
-            }
-            6 => {
-                unsafe { *strs = c"222 0 <seg1@test> body".as_ptr() };
-                1
-            }
-            7 => {
-                let wire = TEST_WIRE_PAYLOAD.get().unwrap();
-                let pos = TEST_READ_POS.load(Ordering::SeqCst) as usize;
-                if pos >= wire.len() {
-                    unsafe { *ints = 0 };
-                    return 0;
-                }
-                let take = (wire.len() - pos).min(buf_len);
-                unsafe {
-                    ptr::copy_nonoverlapping(wire.as_ptr().add(pos), buf, take);
-                    *ints = take as c_int;
-                    *strs = buf as *const c_char;
-                }
-                TEST_READ_POS.store((pos + take) as i32, Ordering::SeqCst);
-                1
-            }
-            _ => 0,
+    fn mock_server() -> ServerInfo {
+        ServerInfo {
+            handle: 0x1000,
+            active: true,
+            id: 7,
+            max_connections: 4,
+            name: b"mock.nntp".to_vec(),
+            ..Default::default()
         }
+    }
+
+    /// One server whose single article streams `TEST_WIRE_PAYLOAD`.
+    struct MockHost;
+
+    impl NntpHost for MockHost {
+        fn status(&self) -> HostStatus {
+            HostStatus {
+                read_chunk: 64,
+                server_count: 1,
+                ..Default::default()
+            }
+        }
+        fn server(&self, _index: usize) -> Option<ServerInfo> {
+            Some(mock_server())
+        }
+        fn get_connection(&self, _level: i32, _excluded: &[usize]) -> Option<ConnInfo> {
+            Some(ConnInfo {
+                conn: 0x2000,
+                reused: false,
+                server: mock_server(),
+            })
+        }
+        fn release(&self, _conn: usize, _keep_connected: bool) {}
+        fn conn_server(&self, _conn: usize) -> Option<ServerInfo> {
+            Some(mock_server())
+        }
+        fn connect(&self, _conn: usize) -> bool {
+            true
+        }
+        fn join_group(&self, _conn: usize, _group: &[u8]) -> Option<Vec<u8>> {
+            None
+        }
+        fn request(&self, _conn: usize, _cmd: &[u8]) -> Option<Vec<u8>> {
+            Some(b"222 0 <seg1@test> body".to_vec())
+        }
+        fn read<'a>(&'a self, _conn: usize, buf: &'a mut [u8]) -> Option<&'a mut [u8]> {
+            let wire = TEST_WIRE_PAYLOAD.get().unwrap();
+            let pos = TEST_READ_POS.load(Ordering::SeqCst) as usize;
+            if pos >= wire.len() {
+                return None;
+            }
+            let take = (wire.len() - pos).min(buf.len());
+            buf[..take].copy_from_slice(&wire[pos..pos + take]);
+            TEST_READ_POS.store((pos + take) as i32, Ordering::SeqCst);
+            Some(&mut buf[..take])
+        }
+        fn disconnect(&self, _conn: usize) {}
+        fn cancel(&self, _conn: usize) {}
+        fn set_io_timeout(&self, _conn: usize, _secs: i32) {}
+        fn detail(&self, _msg: &[u8]) {}
     }
 
     #[test]
@@ -1531,7 +1301,7 @@ mod tests {
         let _ = TEST_WIRE_PAYLOAD.set(yenc_encode_single_part(expected));
         TEST_READ_POS.store(0, Ordering::SeqCst);
 
-        let fetcher = ArticleFetcher::new(mock_nntp_host);
+        let fetcher = ArticleFetcher::new(&MockHost);
         let entry = NzbEntry {
             subject: "\"test.bin\" yEnc (1/1)".to_string(),
             filename: "test.bin".to_string(),
@@ -1546,51 +1316,53 @@ mod tests {
     static SILENT_TIMEOUTS: Mutex<Vec<c_int>> = Mutex::new(Vec::new());
 
     /// One server whose connections are reused and never answer `BODY`.
-    unsafe extern "C" fn silent_nntp_host(
-        op: c_int,
-        a1: c_int,
-        a2: c_int,
-        p1: usize,
-        s1: *const c_char,
-        ints: *mut c_int,
-        i64s: *mut i64,
-        strs: *mut *const c_char,
-        buf: *mut u8,
-        buf_len: usize,
-    ) -> usize {
-        match op {
-            1 => {
-                let r =
-                    unsafe { mock_nntp_host(op, a1, a2, p1, s1, ints, i64s, strs, buf, buf_len) };
-                unsafe { *ints.add(3) = 9 };
-                r
-            }
-            2 => {
-                let r =
-                    unsafe { mock_nntp_host(op, a1, a2, p1, s1, ints, i64s, strs, buf, buf_len) };
-                unsafe {
-                    *ints = 1; // reused
-                    *ints.add(1) = 9;
-                }
-                r
-            }
-            6 => {
-                SILENT_REQUESTS.fetch_add(1, Ordering::SeqCst);
-                std::thread::sleep(TIMED_OUT_AFTER + Duration::from_millis(30));
-                unsafe { *strs = ptr::null() };
-                0
-            }
-            11 => {
-                SILENT_TIMEOUTS.lock().unwrap().push(a1);
-                0
-            }
-            _ => unsafe { mock_nntp_host(op, a1, a2, p1, s1, ints, i64s, strs, buf, buf_len) },
+    struct SilentHost;
+
+    impl NntpHost for SilentHost {
+        fn status(&self) -> HostStatus {
+            MockHost.status()
         }
+        fn server(&self, _index: usize) -> Option<ServerInfo> {
+            Some(ServerInfo {
+                id: 9,
+                ..mock_server()
+            })
+        }
+        fn get_connection(&self, level: i32, excluded: &[usize]) -> Option<ConnInfo> {
+            let mut got = MockHost.get_connection(level, excluded)?;
+            got.reused = true;
+            got.server.id = 9;
+            Some(got)
+        }
+        fn release(&self, _conn: usize, _keep_connected: bool) {}
+        fn conn_server(&self, conn: usize) -> Option<ServerInfo> {
+            MockHost.conn_server(conn)
+        }
+        fn connect(&self, _conn: usize) -> bool {
+            true
+        }
+        fn join_group(&self, _conn: usize, _group: &[u8]) -> Option<Vec<u8>> {
+            None
+        }
+        fn request(&self, _conn: usize, _cmd: &[u8]) -> Option<Vec<u8>> {
+            SILENT_REQUESTS.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(TIMED_OUT_AFTER + Duration::from_millis(30));
+            None
+        }
+        fn read<'a>(&'a self, conn: usize, buf: &'a mut [u8]) -> Option<&'a mut [u8]> {
+            MockHost.read(conn, buf)
+        }
+        fn disconnect(&self, _conn: usize) {}
+        fn cancel(&self, _conn: usize) {}
+        fn set_io_timeout(&self, _conn: usize, secs: i32) {
+            SILENT_TIMEOUTS.lock().unwrap().push(secs);
+        }
+        fn detail(&self, _msg: &[u8]) {}
     }
 
     #[test]
     fn an_article_that_never_answers_gets_two_tries_not_a_stale_retry_per_connection() {
-        let fetcher = ArticleFetcher::new(silent_nntp_host);
+        let fetcher = ArticleFetcher::new(&SilentHost);
         let started = Instant::now();
         let got = fetcher.fetch(b"<silent@test>", &[b"alt.binaries.test".to_vec()]);
 

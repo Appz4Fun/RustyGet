@@ -1,7 +1,7 @@
 //! Rust daemon entrypoint and pre-flight CLI routing (Milestone M5 — Requirement R2 & R4).
 
 use crate::lifecycle::{get_hooks, LifecycleManager};
-use std::ffi::{c_char, c_int, CStr};
+use std::ffi::{c_char, c_int, CStr, OsString};
 use std::ptr;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -28,28 +28,55 @@ pub unsafe fn inspect_preflight(argc: c_int, argv: *const *mut c_char) -> Entryp
     EntrypointRoute::DaemonLifecycle
 }
 
+/// The daemon's command line and the environment block passed to `main`,
+/// copied once at startup.
 struct ProcessArgs {
-    argc: c_int,
-    argv: usize,
-    argp: usize,
+    argv: Vec<OsString>,
+    envp: Option<Vec<OsString>>,
 }
 
 static PROCESS_ARGS: std::sync::RwLock<ProcessArgs> = std::sync::RwLock::new(ProcessArgs {
-    argc: 0,
-    argv: 0,
-    argp: 0,
+    argv: Vec::new(),
+    envp: None,
 });
 
-pub(crate) fn process_args() -> (c_int, *mut *mut c_char, *mut *mut c_char) {
+/// Copies a NULL-terminated array of C strings (at most `limit` entries).
+unsafe fn os_strings(arr: *const *mut c_char, limit: usize) -> Vec<OsString> {
+    let mut out = Vec::new();
+    if arr.is_null() {
+        return out;
+    }
+    for i in 0..limit {
+        let p = *arr.add(i);
+        if p.is_null() {
+            break;
+        }
+        out.push(os_string_from_bytes(CStr::from_ptr(p).to_bytes()));
+    }
+    out
+}
+
+#[cfg(unix)]
+pub(crate) fn os_string_from_bytes(bytes: &[u8]) -> OsString {
+    use std::os::unix::ffi::OsStringExt;
+    OsString::from_vec(bytes.to_vec())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn os_string_from_bytes(bytes: &[u8]) -> OsString {
+    OsString::from(String::from_utf8_lossy(bytes).into_owned())
+}
+
+/// The daemon's own command line (`argv`), empty before [`init_platform`].
+pub(crate) fn process_argv() -> Vec<OsString> {
     PROCESS_ARGS
         .read()
-        .map_or((0, ptr::null_mut(), ptr::null_mut()), |g| {
-            (
-                g.argc,
-                g.argv as *mut *mut c_char,
-                g.argp as *mut *mut c_char,
-            )
-        })
+        .map_or_else(|_| Vec::new(), |g| g.argv.clone())
+}
+
+/// The environment block `main` received (`envp`), if the platform passed one.
+pub(crate) fn process_envp() -> Option<Vec<OsString>> {
+    PROCESS_ARGS.read().ok().and_then(|g| g.envp.clone())
 }
 
 /// Initializes platform, locale, RNG, rapidyenc, and argument globals.
@@ -68,9 +95,8 @@ pub unsafe fn init_platform(argc: c_int, argv: *mut *mut c_char, argp: *mut *mut
     }
 
     if let Ok(mut g) = PROCESS_ARGS.write() {
-        g.argc = argc;
-        g.argv = argv as usize;
-        g.argp = argp as usize;
+        g.argv = os_strings(argv, usize::try_from(argc).unwrap_or(0));
+        g.envp = (!argp.is_null()).then(|| os_strings(argp, usize::MAX));
     }
 
     let hooks = get_hooks();

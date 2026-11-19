@@ -1506,6 +1506,23 @@ pub struct CmdlineHandle {
 }
 
 impl CmdlineHandle {
+    /// Parses a command line (`args[0]` is the program) under `GETOPT_MUTEX`,
+    /// emitting parse error lines via `on_error_line`. None when `args` is
+    /// empty or an argument holds a NUL byte.
+    pub fn parse_args(
+        args: &[std::ffi::OsString],
+        on_error_line: impl FnMut(&[u8]),
+    ) -> Option<Self> {
+        let cstrings = args
+            .iter()
+            .map(|a| std::ffi::CString::new(crate::cleanup::os_str_to_bytes(a)).ok())
+            .collect::<Option<Vec<_>>>()?;
+        let ptrs: Vec<*const c_char> = cstrings.iter().map(|c| c.as_ptr()).collect();
+        let argc = c_int::try_from(ptrs.len()).ok()?;
+        // SAFETY: `ptrs` holds `argc` NUL-terminated strings owned by `cstrings`.
+        unsafe { Self::parse_argv(argc, ptrs.as_ptr(), on_error_line) }
+    }
+
     /// Parses `argc`/`argv` under `GETOPT_MUTEX`, emitting parse error lines via `on_error_line`.
     ///
     /// # Safety
@@ -1854,6 +1871,17 @@ mod tests {
             let bad = [c"nzbget".as_ptr(), std::ptr::null()];
             assert!(CmdlineHandle::parse_argv(2, bad.as_ptr(), |_| {}).is_none());
         }
+
+        // the OsString front end parses the same way and rejects empty or NUL args
+        let os_args: Vec<std::ffi::OsString> = ["nzbget", "-E", "G", "D", "2-4"]
+            .iter()
+            .map(std::ffi::OsString::from)
+            .collect();
+        let oh = CmdlineHandle::parse_args(&os_args, |_| {}).unwrap();
+        assert_eq!(oh.edit_queue_id_list, vec![2, 3, 4]);
+        assert!(CmdlineHandle::parse_args(&[], |_| {}).is_none());
+        let nul = [std::ffi::OsString::from("nz\0bget")];
+        assert!(CmdlineHandle::parse_args(&nul, |_| {}).is_none());
 
         // Verify Sink callback failure halts parsing immediately
         struct FailAtSink {

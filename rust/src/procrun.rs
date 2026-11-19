@@ -2,7 +2,7 @@
 //! scheduler `Process` command.
 
 use crate::options::OptStr;
-use std::ffi::{c_char, c_int, CStr};
+use std::ffi::{c_char, c_int, CStr, OsStr, OsString};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
@@ -28,7 +28,7 @@ pub(crate) trait ScriptHost: Send + Sync {
     /// All options as `(name, value)` pairs, in definition order.
     fn options(&self) -> Vec<(Vec<u8>, Vec<u8>)>;
     /// The daemon's own command line (`argv`).
-    fn args(&self) -> Vec<Vec<u8>>;
+    fn args(&self) -> Vec<OsString>;
     /// Asks the daemon to shut down (`ExitProc`).
     fn exit_proc(&self);
 }
@@ -63,9 +63,8 @@ impl ScriptHost for NativeScriptHost {
     }
 
     fn environment(&self) -> Vec<Vec<u8>> {
-        let (_, _, argp) = crate::entrypoint::process_args();
-        if !argp.is_null() {
-            return unsafe { c_str_array(argp.cast()) };
+        if let Some(envp) = crate::entrypoint::process_envp() {
+            return envp.iter().map(|e| os_bytes(e).to_vec()).collect();
         }
         #[cfg(target_os = "macos")]
         unsafe {
@@ -103,14 +102,8 @@ impl ScriptHost for NativeScriptHost {
         out
     }
 
-    fn args(&self) -> Vec<Vec<u8>> {
-        let (argc, argv, _) = crate::entrypoint::process_args();
-        if argv.is_null() || argc <= 0 {
-            return Vec::new();
-        }
-        (0..argc as usize)
-            .map(|i| unsafe { opt_bytes((*argv.add(i)).cast_const()) })
-            .collect()
+    fn args(&self) -> Vec<OsString> {
+        crate::entrypoint::process_argv()
     }
 
     fn exit_proc(&self) {
@@ -119,6 +112,12 @@ impl ScriptHost for NativeScriptHost {
             unsafe { exit_fn() };
         }
     }
+}
+
+/// The raw bytes of an argument (non-UTF-8 safe on unix).
+#[inline]
+fn os_bytes(s: &OsStr) -> &[u8] {
+    crate::cleanup::os_str_to_bytes(s)
 }
 
 #[inline]
@@ -365,7 +364,7 @@ impl Drop for ChildWatchDogGuard {
 /// Environment and argument builder matching `EnvironmentStrings` + `NzbScriptController`.
 #[derive(Default)]
 pub struct ScriptExecEnv {
-    pub args: Vec<Vec<u8>>,
+    pub args: Vec<OsString>,
     pub log_prefix: Option<Vec<u8>>,
     pub env_strings: Vec<Vec<u8>>,
     pub modified_options: Vec<(Vec<u8>, Vec<u8>)>,
@@ -674,15 +673,15 @@ impl ScriptRunner {
 
         let mut cmd_args_prefix: Vec<Vec<u8>> = Vec::new();
         let cmd_line: Vec<u8> = if cfg.args.len() == 1 {
-            let arg0 = &cfg.args[0];
+            let arg0 = os_bytes(&cfg.args[0]);
             let found = crate::util::util_find_executor_program(arg0, &shell_override);
             let chosen = match &found {
                 Some(f) => f.as_slice(),
-                None => arg0.as_slice(),
+                None => arg0,
             };
             let cl = trunc_bytes(chosen.to_vec(), 2047);
             if let Some(f) = found {
-                if f.as_slice() != arg0.as_slice() {
+                if f.as_slice() != arg0 {
                     cmd_args_prefix.push(f);
                 }
             }
@@ -692,7 +691,10 @@ impl ScriptRunner {
             );
             cl
         } else {
-            trunc_bytes(cfg.args.first().map_or_else(Vec::new, Clone::clone), 2047)
+            trunc_bytes(
+                cfg.args.first().map_or(&[][..], |a| os_bytes(a)).to_vec(),
+                2047,
+            )
         };
 
         self.completed.store(false, Ordering::Release);
@@ -707,7 +709,7 @@ impl ScriptRunner {
 
         while !child_confirmed && !self.terminated.load(Ordering::Acquire) {
             let working_dir = crate::fsops::get_current_directory();
-            let script_arg0 = cfg.args.first().map_or(&[][..], Vec::as_slice);
+            let script_arg0 = cfg.args.first().map_or(&[][..], |a| os_bytes(a));
 
             let mut pin = [-1, -1];
             if let Err(e) = unsafe { make_cloexec_pipe(&mut pin) } {
@@ -732,7 +734,7 @@ impl ScriptRunner {
                 arg_c_bufs.push(c_buf(a));
             }
             for a in &cfg.args {
-                arg_c_bufs.push(c_buf(a));
+                arg_c_bufs.push(c_buf(os_bytes(a)));
             }
             let mut arg_ptrs: Vec<*mut c_char> = arg_c_bufs
                 .iter_mut()
@@ -953,7 +955,10 @@ impl Drop for ScriptRunner {
 /// tracks active background scripts accurately through daemon shutdown.
 pub enum BackgroundScriptJob {
     /// Scheduler `Process` command: runs an external program.
-    SchedulerProcess { task_id: c_int, words: Vec<Vec<u8>> },
+    SchedulerProcess {
+        task_id: c_int,
+        words: Vec<OsString>,
+    },
     MaintenanceUpdate {
         maint: Arc<crate::maintenance::NzbgetRsMaintenance>,
         runner: Arc<ScriptRunner>,
@@ -971,14 +976,14 @@ pub(crate) fn spawn_background_job(
 }
 fn run_scheduler_process_job(
     task_id: c_int,
-    words: Vec<Vec<u8>>,
+    words: Vec<OsString>,
     host: &'static dyn ScriptHost,
 ) {
     let runner = ScriptRunner::new(true);
     let mut cfg = ScriptExecEnv::new(host);
     let mut add_msg = |kind: c_int, text: &[u8]| host.log(kind, text);
     cfg.args = words;
-    let script0 = cfg.args.first().map_or(&[][..], Vec::as_slice);
+    let script0 = cfg.args.first().map_or(&[][..], |a| os_bytes(a));
     let (exec_msg, info_name, log_prefix) =
         crate::scheduler::format_scheduler_script_labels(true, task_id, script0, b"");
     host.log(MK_INFO, &exec_msg);
@@ -999,7 +1004,7 @@ fn run_maintenance_update_job(
     let maint = maint.as_ref();
 
     let mut cfg = ScriptExecEnv::new(host);
-    cfg.args = vec![script_path.clone()];
+    cfg.args = vec![crate::entrypoint::os_string_from_bytes(&script_path)];
 
     let base = &script_path[crate::paths::base_file_name(&script_path)..];
     let exec_msg = [b"Executing update-script ", script_path.as_slice()].concat();
@@ -1036,7 +1041,7 @@ fn run_maintenance_update_job(
 
     for (i, arg) in host.args().iter().enumerate() {
         let key = format!("NZBUP_CMDLINE{i}");
-        cfg.set_env_var(key.as_bytes(), arg);
+        cfg.set_env_var(key.as_bytes(), os_bytes(arg));
     }
 
     let branch_s: &[u8] = match branch {
@@ -1070,7 +1075,7 @@ pub(crate) fn run_maint_info_script(
     let runner = ScriptRunner::new(true);
     runner.set_info_name(info_name);
     let mut cfg = ScriptExecEnv::new(host);
-    cfg.args = vec![info_script.to_vec()];
+    cfg.args = vec![crate::entrypoint::os_string_from_bytes(info_script)];
     cfg.log_prefix = Some(log_prefix.to_vec());
 
     let mut acc = Vec::new();
@@ -1128,7 +1133,7 @@ pub(crate) unsafe fn scheduler_process_start_active(
     let mut argv = Vec::with_capacity(word_count);
     if !words.is_null() {
         for i in 0..word_count {
-            argv.push(opt_bytes(*words.add(i)));
+            argv.push(crate::entrypoint::os_string_from_bytes(&opt_bytes(*words.add(i))));
         }
     }
     spawn_background_job(
@@ -1223,7 +1228,7 @@ mod tests {
         fn options(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
             self.opts.iter().map(|(k, v)| (k.to_vec(), v.to_vec())).collect()
         }
-        fn args(&self) -> Vec<Vec<u8>> {
+        fn args(&self) -> Vec<OsString> {
             Vec::new()
         }
         fn exit_proc(&self) {}
@@ -1280,8 +1285,7 @@ mod tests {
         let runner = ScriptRunner::new(true);
         runner.set_info_name(b"test_ext");
         let mut cfg = ScriptExecEnv::new(host);
-        let sp_bytes = crate::cleanup::os_str_to_bytes(script_path.as_os_str()).to_vec();
-        cfg.args = vec![sp_bytes, b"hello".to_vec()];
+        cfg.args = vec![script_path.clone().into_os_string(), OsString::from("hello")];
         cfg.log_prefix = Some(b"TestExt".to_vec());
         cfg.prepare_env_options(None, host);
 
@@ -1312,7 +1316,7 @@ mod tests {
         let runner = ScriptRunner::new(true);
         runner.set_info_name(b"crash_ext");
         let mut cfg = ScriptExecEnv::new(host);
-        cfg.args = vec![crate::cleanup::os_str_to_bytes(script_path.as_os_str()).to_vec()];
+        cfg.args = vec![script_path.clone().into_os_string()];
 
         let mut captured = Vec::new();
         let rc = runner.execute(&mut cfg, host, &mut |kind, line| {

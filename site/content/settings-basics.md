@@ -48,7 +48,7 @@ Key options: [`MainDir`](options.md#maindir), [`DestDir`](options.md#destdir), [
 
 Lower levels have priority: a level 0 server is tried before level 1 fill servers. `Active` enables or disables an entry. `Retention` can avoid requests for articles older than the provider keeps. Open option help before changing `Optional` or `Group`, which affect retry and server selection behavior.
 
-Key options: [`ServerN.Host`](options.md#servern-host), [`ServerN.Encryption`](options.md#servern-encryption), [`ServerN.CertVerification`](options.md#servern-certverification), [`ServerN.Connections`](options.md#servern-connections), [`ServerN.Level`](options.md#servern-level), [`ServerN.Retention`](options.md#servern-retention).
+Key options: [`ServerN.Host`](options.md#servern-host), [`ServerN.Encryption`](options.md#servern-encryption), [`ServerN.CertVerification`](options.md#servern-certverification), [`ServerN.Connections`](options.md#servern-connections), [`ServerN.Priority`](options.md#servern-priority), [`ServerN.Retention`](options.md#servern-retention).
 
 <figure class="settings-figure">
 <a class="settings-shot" href="assets/settings/servers.jpg" aria-label="Open full-size picture: News-server list with host, active state, and connection count"><img src="assets/settings/servers.jpg" width="1280" height="908" loading="lazy" alt="News-server list with host, active state, and connection count"></a>

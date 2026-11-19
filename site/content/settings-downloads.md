@@ -29,7 +29,7 @@ Review queue persistence and partial-download continuation before changing cache
 
 Use [Performance](performance.md) for measured tuning guidance. Keep `SkipWrite` and `RawArticle` for their documented diagnostic uses.
 
-Key options: [`ContinuePartial`](options.md#continuepartial), [`ArticleCache`](options.md#articlecache), [`WriteBuffer`](options.md#writebuffer), [`DiskSpace`](options.md#diskspace), [`KeepHistory`](options.md#keephistory), [`NzbCleanupDisk`](options.md#nzbcleanupdisk).
+Key options: [`ArticleCache`](options.md#articlecache), [`WriteBuffer`](options.md#writebuffer), [`DiskSpace`](options.md#diskspace), [`KeepHistory`](options.md#keephistory), [`NzbCleanupDisk`](options.md#nzbcleanupdisk).
 
 <figure class="settings-figure">
 <a class="settings-shot" href="assets/settings/download-queue.jpg" aria-label="Open full-size picture: Download queue persistence, memory, disk, and cleanup settings"><img src="assets/settings/download-queue.jpg" width="1280" height="1410" loading="lazy" alt="Download queue persistence, memory, disk, and cleanup settings"></a>

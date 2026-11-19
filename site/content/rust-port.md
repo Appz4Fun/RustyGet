@@ -9,7 +9,7 @@ lede = "RustyGet replaces NZBGet's C++ with Rust one module at a time, while the
 
 ## How the port works
 
-The Rust code lives in `rust/`: the library crate `nzbget_rs` and the `rustyget` binary built from it by cargo. Module by module, the program moved from C++ into Rust behind a C interface, and once the last module moved, the C++ and that interface were deleted.
+The Rust code lives in `rust/`: the library crate `nzbget_rs` and the `rustyget` binary built from it by Cargo. Module by module, the program moved from C++ into Rust behind a C interface, and once the last module moved, the C++ and that interface were deleted.
 
 <ol class="steps">
 <li><strong>Pick a module.</strong> Hot paths first, measured with real downloads. Whole modules are preferred over single functions.</li>
@@ -23,7 +23,7 @@ When a port finds a bug in the old code, the port keeps the bug, and the fix fol
 
 ## What's left
 
-On the main branch, about 222,000 lines of Rust in `rust/src/` do the work, and no C++ is left: cargo builds the `rustyget` binary from Rust alone, with `rust/entry.rs` as its entry point. The last C++ files, the entry shim `daemon/main/rustyget.cpp`, the glue header `daemon/util/Util.h` and the C headers in `rust/include/`, are gone.
+On the main branch, about 222,000 lines of Rust in `rust/src/` do the work, and no C++ is left: Cargo builds the `rustyget` binary from Rust alone, with `rust/entry.rs` as its entry point. The last C++ files, the entry shim `daemon/main/rustyget.cpp`, the glue header `daemon/util/Util.h` and the C headers in `rust/include/`, are gone.
 
 The build needs no C++ compiler. Several dependencies are already gone, among them CMake, Boost, PAR2-Turbo, libxml2, zlib, ncurses, and the external `unrar` and `7z` programs. The binary links OpenSSL for TLS, and the Rust `zstd` crate builds the C zstd library. The macOS app in `platforms/macos/` is Objective-C.
 

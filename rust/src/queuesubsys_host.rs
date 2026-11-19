@@ -1043,6 +1043,10 @@ impl QueueSubsysHost {
         if nzb_ptr == 0 {
             return;
         }
+        if self.use_active {
+            unsafe { crate::qqueue::nzb_message(nzb_ptr, kind, false, msg) };
+            return;
+        }
         let c = c_bytes(msg);
         self.raw(
             2,
@@ -1060,6 +1064,10 @@ impl QueueSubsysHost {
 
     pub fn nzb_add_message(&self, nzb_ptr: usize, kind: i32, msg: &[u8]) {
         if nzb_ptr == 0 {
+            return;
+        }
+        if self.use_active {
+            unsafe { crate::qqueue::nzb_message(nzb_ptr, kind, true, msg) };
             return;
         }
         let c = c_bytes(msg);
@@ -1895,6 +1903,10 @@ impl QueueSubsysHost {
         if self.use_active && crate::dupefallback::should_defer_to_par_host(self, nzb_ptr) {
             return;
         }
+        if self.use_active {
+            unsafe { crate::qqueue::start_live_repair(nzb_ptr) };
+            return;
+        }
         self.raw(
             6,
             5,
@@ -2145,6 +2157,9 @@ impl QueueSubsysHost {
 
     // DownloadQueue & CoordinatorDownloadQueue ops (op = 20..=25)
     pub fn with_locked_queue<R, F: FnOnce(usize) -> R>(&self, f: F) -> R {
+        if self.use_active {
+            return crate::qqueue::with_current_locked(f);
+        }
         let mut call = LockedQueueCall {
             f: Some(f),
             out: None,
@@ -2165,6 +2180,9 @@ impl QueueSubsysHost {
     }
 
     pub fn queue_len(&self, dq_ptr: usize) -> usize {
+        if self.use_active {
+            return crate::qqueue::queue_len(dq_ptr);
+        }
         self.raw(
             21,
             -1,
@@ -2180,6 +2198,9 @@ impl QueueSubsysHost {
     }
 
     pub fn queue_at(&self, dq_ptr: usize, idx: usize) -> usize {
+        if self.use_active {
+            return crate::qqueue::queue_at(dq_ptr, idx);
+        }
         self.raw(
             21,
             idx as i32,
@@ -2195,6 +2216,9 @@ impl QueueSubsysHost {
     }
 
     pub fn queue_find_by_id(&self, dq_ptr: usize, nzb_id: i32) -> usize {
+        if self.use_active {
+            return crate::qqueue::queue_find_by_id(dq_ptr, nzb_id);
+        }
         self.raw(
             22,
             0,
@@ -2210,6 +2234,10 @@ impl QueueSubsysHost {
     }
 
     pub fn queue_remove(&self, dq_ptr: usize, nzb_ptr: usize) {
+        if self.use_active {
+            crate::qqueue::queue_remove(dq_ptr, nzb_ptr);
+            return;
+        }
         self.raw(
             22,
             1,
@@ -2231,6 +2259,10 @@ impl QueueSubsysHost {
         url_ptr: usize,
         add_first: bool,
     ) {
+        if self.use_active {
+            unsafe { crate::qqueue::queue_insert_handle(dq_ptr, uptr_addr, url_ptr, add_first) };
+            return;
+        }
         let mut i64s = [url_ptr as i64];
         self.raw(
             22,
@@ -2247,6 +2279,9 @@ impl QueueSubsysHost {
     }
 
     pub fn alloc_new_nzb_uptr(&self) -> (usize, usize) {
+        if self.use_active {
+            return crate::qqueue::new_nzb_handle();
+        }
         let mut i64s = [0i64];
         let uptr_addr = self.raw(
             22,
@@ -2264,6 +2299,10 @@ impl QueueSubsysHost {
     }
 
     pub fn finish_new_nzb_uptr(&self, dq_ptr: usize, uptr_addr: usize) {
+        if self.use_active {
+            unsafe { crate::qqueue::queue_add_handle(dq_ptr, uptr_addr) };
+            return;
+        }
         self.raw(
             22,
             4,
@@ -2280,6 +2319,10 @@ impl QueueSubsysHost {
 
     pub fn queue_reorder(&self, dq_ptr: usize, new_order: &[usize]) {
         if dq_ptr == 0 || new_order.is_empty() {
+            return;
+        }
+        if self.use_active {
+            crate::qqueue::queue_reorder(dq_ptr, new_order);
             return;
         }
         self.raw(
@@ -2300,6 +2343,10 @@ impl QueueSubsysHost {
         if uptr_addr == 0 {
             return;
         }
+        if self.use_active {
+            unsafe { crate::qqueue::free_nzb_handle(uptr_addr) };
+            return;
+        }
         self.raw(
             22,
             6,
@@ -2315,6 +2362,9 @@ impl QueueSubsysHost {
     }
 
     pub fn id_gen_last(&self) -> (i32, i32) {
+        if self.use_active {
+            return crate::qqueue::id_gen_last();
+        }
         let mut ints = [0i32; 2];
         self.raw(
             22,
@@ -2332,6 +2382,10 @@ impl QueueSubsysHost {
     }
 
     pub fn id_gen_raise_and_reset(&self, nzb_id: i32, file_id: i32) {
+        if self.use_active {
+            crate::qqueue::id_gen_raise_and_reset(nzb_id, file_id);
+            return;
+        }
         let mut ints = [nzb_id, file_id];
         self.raw(
             22,
@@ -2348,6 +2402,10 @@ impl QueueSubsysHost {
     }
 
     pub fn history_push_nzb_uptr(&self, dq_ptr: usize, uptr_addr: usize, hist_time: i32) {
+        if self.use_active {
+            unsafe { crate::qqueue::history_push_handle(dq_ptr, uptr_addr, hist_time) };
+            return;
+        }
         self.raw(
             23,
             -7,
@@ -2377,6 +2435,31 @@ impl QueueSubsysHost {
         name: *const c_char,
         dupe_key: *const c_char,
     ) {
+        if self.use_active {
+            let text = |p: *const c_char| {
+                if p.is_null() {
+                    c""
+                } else {
+                    unsafe { CStr::from_ptr(p) }
+                }
+            };
+            crate::qqueue::history_push_dup(
+                dq_ptr,
+                &crate::qqueue::DupRecord {
+                    id,
+                    time: hist_time,
+                    status,
+                    full_hash,
+                    filtered_hash: filt_hash,
+                    dupe_score,
+                    dupe_mode,
+                    size,
+                    name: text(name),
+                    dupe_key: text(dupe_key),
+                },
+            );
+            return;
+        }
         let mut ints = [
             id,
             hist_time,
@@ -2402,6 +2485,10 @@ impl QueueSubsysHost {
     }
 
     pub fn history_move_queue_item(&self, dq_ptr: usize, nzb_ptr: usize) {
+        if self.use_active {
+            crate::qqueue::history_move_queue_item(dq_ptr, nzb_ptr);
+            return;
+        }
         self.raw(
             23,
             -3,
@@ -2423,6 +2510,12 @@ impl QueueSubsysHost {
         rindex: usize,
         dup_status: i32,
     ) {
+        if self.use_active {
+            unsafe {
+                crate::qqueue::history_replace_with_dup(dq_ptr, hi_ptr, rindex as i32, dup_status)
+            };
+            return;
+        }
         let mut ints = [rindex as i32];
         self.raw(
             23,
@@ -2439,6 +2532,10 @@ impl QueueSubsysHost {
     }
 
     pub fn history_erase_at(&self, dq_ptr: usize, idx: usize) {
+        if self.use_active {
+            crate::qqueue::history_erase_at(dq_ptr, idx as i32);
+            return;
+        }
         self.raw(
             23,
             -5,
@@ -2454,6 +2551,9 @@ impl QueueSubsysHost {
     }
 
     pub fn history_return_to_queue(&self, dq_ptr: usize, hi_ptr: usize, idx: usize) -> usize {
+        if self.use_active {
+            return unsafe { crate::qqueue::history_return_to_queue(dq_ptr, hi_ptr, idx as i32) };
+        }
         self.raw(
             23,
             -6,
@@ -2469,6 +2569,9 @@ impl QueueSubsysHost {
     }
 
     pub fn history_len(&self, dq_ptr: usize) -> usize {
+        if self.use_active {
+            return crate::qqueue::history_len(dq_ptr);
+        }
         self.raw(
             23,
             -1,
@@ -2503,6 +2606,9 @@ impl QueueSubsysHost {
     }
 
     pub fn history_find_by_id(&self, dq_ptr: usize, id: i32) -> usize {
+        if self.use_active {
+            return crate::qqueue::history_find_by_id(dq_ptr, id);
+        }
         self.raw(
             23,
             -2,
@@ -2518,6 +2624,19 @@ impl QueueSubsysHost {
     }
 
     pub fn history_at(&self, dq_ptr: usize, idx: usize) -> HistEntrySnap {
+        if self.use_active {
+            return crate::qqueue::history_at(dq_ptr, idx).map_or_else(
+                HistEntrySnap::default,
+                |e| HistEntrySnap {
+                    hi_ptr: e.hi,
+                    id: e.id,
+                    kind: e.kind,
+                    inner_ptr: e.inner,
+                    time: e.time,
+                    name: unsafe { read_cstr(e.name) },
+                },
+            );
+        }
         let mut ints = [0i32; 2];
         let mut i64s = [0i64; 2];
         let mut strs = [std::ptr::null(); 1];
@@ -2698,7 +2817,24 @@ impl QueueSubsysHost {
         ) != 0
     }
 
-    pub fn dq_notify(&self, dq_ptr: usize, aspect_action: i32, nzb_ptr: usize, file_ptr: usize) {
+    /// Tells post-processing that the queue changed (`aspect_action` on
+    /// `nzb_ptr`, and `file_ptr` for a file aspect).
+    pub fn prepost_queue_changed(
+        &self,
+        dq_ptr: usize,
+        aspect_action: i32,
+        nzb_ptr: usize,
+        file_ptr: usize,
+    ) {
+        if self.use_active {
+            crate::jobthread::nzbget_rs_prepost_queue_changed(
+                aspect_action,
+                dq_ptr,
+                nzb_ptr,
+                file_ptr,
+            );
+            return;
+        }
         let mut i64s = [file_ptr as i64];
         self.raw(
             24,
@@ -2712,6 +2848,10 @@ impl QueueSubsysHost {
             i64s.as_mut_ptr(),
             std::ptr::null_mut(),
         );
+    }
+
+    pub fn dq_notify(&self, dq_ptr: usize, aspect_action: i32, nzb_ptr: usize, file_ptr: usize) {
+        self.prepost_queue_changed(dq_ptr, aspect_action, nzb_ptr, file_ptr);
         #[cfg(unix)]
         if self.use_active {
             let url_opt = if aspect_action == ASPECT_URL_COMPLETED && nzb_ptr != 0 {
@@ -2844,6 +2984,9 @@ impl QueueSubsysHost {
 
     // CoordinatorDownloadQueue & QueueCoordinator C++ shell ops (op = 25)
     pub fn self_download_queue_ptr(&self) -> usize {
+        if self.use_active {
+            return crate::qqueue::daemon_queue();
+        }
         self.raw(
             25,
             0,
@@ -2859,6 +3002,10 @@ impl QueueSubsysHost {
     }
 
     pub fn coord_dq_init(&self) {
+        if self.use_active {
+            crate::qqueue::daemon_queue_init();
+            return;
+        }
         self.raw(
             25,
             1,
@@ -2874,6 +3021,10 @@ impl QueueSubsysHost {
     }
 
     pub fn coord_dq_loaded(&self) {
+        if self.use_active {
+            crate::qqueue::daemon_queue_loaded();
+            return;
+        }
         self.raw(
             25,
             2,
@@ -2889,6 +3040,10 @@ impl QueueSubsysHost {
     }
 
     pub fn coord_dq_final(&self) {
+        if self.use_active {
+            crate::qqueue::daemon_queue_final();
+            return;
+        }
         self.raw(
             25,
             3,
@@ -6130,31 +6285,6 @@ unsafe fn native_op(
     use crate::qfile::{nzbget_rs_file_articles, nzbget_rs_file_op, File};
     let file = p1 as *const File;
     match (op, a1) {
-        // a collection's message, the live-repair job and the TLS cipher service
-        (2, _) => {
-            unsafe { crate::qqueue::host_nzb_message(a1, a2, p1, s1) };
-            Some(0)
-        }
-        (6, 5) => {
-            unsafe { crate::qqueue::host_start_live_repair(p1) };
-            Some(0)
-        }
-        (6, _) => Some(0),
-        (7, _) => Some(unsafe { crate::qqueue::host_tls_cipher(a1, p1, s1) }),
-        // the download queue (rust/src/qqueue.rs)
-        (20, _) => Some(unsafe { crate::qqueue::host_locked(p1, p2) }),
-        (21, _) => Some(crate::qqueue::host_queue_at(p1, a1)),
-        (22, _) => Some(unsafe { crate::qqueue::host_queue_op(a1, a2, p1, p2, ints, i64s) }),
-        (23, _) => Some(unsafe {
-            crate::qqueue::host_history_op(a1, a2, p1, p2, s1, s2, ints, i64s, strs)
-        }),
-        (24, 3) => {
-            crate::jobthread::nzbget_rs_prepost_queue_changed(a2, p1, p2, unsafe { *i64s }
-                as usize);
-            Some(0)
-        }
-        (24, _) => Some(0),
-        (25, _) => Some(crate::qqueue::host_daemon_queue(a1)),
         // file groups and server stats
         (41, 0) => Some(if a2 < 0 {
             unsafe { nzbget_rs_file_op(file, 0, 0, std::ptr::null(), ints, strs) as usize }

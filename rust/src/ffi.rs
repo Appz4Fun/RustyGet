@@ -4877,21 +4877,14 @@ unsafe extern "C" fn web_rpc_action_bridge(
             }))
         }
         22 => {
-            let Some(qh) = queue_host() else {
+            if queue_host().is_none() {
                 return 0;
-            };
-            qh.raw(
-                7,
-                a1,
-                0,
-                out_buf as usize,
-                0,
-                s1,
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            ) as c_int
+            }
+            let reply = crate::qqueue::tls_cipher(a1, input(s1));
+            if !out_buf.is_null() {
+                *out_buf = reply;
+            }
+            1
         }
         25 => crate::net::nzbget_rs_net_speedtest_iter(body, body_len, a1, out_u32, out_f64),
         _ => 0,

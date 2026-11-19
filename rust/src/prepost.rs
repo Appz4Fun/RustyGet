@@ -429,10 +429,23 @@ fn dupe_gate_has(set: &std::sync::Mutex<Option<std::collections::HashSet<i32>>>,
         .is_some_and(|g| g.contains(&id))
 }
 
+/// Downloads whose post job was stopped because another copy of the release is on disk.
+static DUPE_STOPPED_IN_POST: std::sync::Mutex<Option<std::collections::HashSet<i32>>> =
+    std::sync::Mutex::new(None);
+
+/// Marks download `id`, in post-processing, as stopped because another copy of its release is
+/// downloaded and on disk: when its job ends its files are removed (unless HealthCheck=park
+/// parks it), as the delete route removes a copy stopped in the queue (see
+/// [`classify_delete_cleanup_mode`]: DeleteStatus DUPE, not parking).
+pub(crate) fn note_stopped_for_on_disk(id: i32) {
+    dupe_gate_set(&DUPE_STOPPED_IN_POST, id, true);
+}
+
 /// Forgets the post gate's record of download `id`: its job ended or it left the queue.
 fn dupe_gate_forget(id: i32) {
     dupe_gate_set(&DUPE_GATE_PASSED, id, false);
     dupe_gate_set(&DUPE_GATE_HELD, id, false);
+    dupe_gate_set(&DUPE_STOPPED_IN_POST, id, false);
 }
 
 /// The post gate's verdict for queued download `nzb`, with the name of the copy it waits for.
@@ -458,7 +471,16 @@ fn dupe_post_gate_host(
             || crate::postproc::direct_unpack_has_holds(n.id)
             || crate::postproc::direct_unpack_awaiting_repair(n.id)
     };
-    let own = GateCopy { passed: dupe_gate_has(&DUPE_GATE_PASSED, nzb.id), extracting: extracting(nzb) };
+    // Past the gate is also what a copy's state on disk says (its unpack or move already
+    // started), as the gate's record does not survive a restart.
+    let passed = |n: &crate::queuesubsys_host::NzbSnap| {
+        const US_NONE: i32 = 0;
+        const MS_NONE: i32 = 0;
+        dupe_gate_has(&DUPE_GATE_PASSED, n.id)
+            || n.unpack_status != US_NONE
+            || n.move_status != MS_NONE
+    };
+    let own = GateCopy { passed: passed(nzb), extracting: extracting(nzb) };
     let mut others = Vec::new();
     let mut names = Vec::new();
     for i in 0..host.queue_len(dq_ptr) {
@@ -474,7 +496,7 @@ fn dupe_post_gate_host(
             && q.dupe_key.eq_ignore_ascii_case(&nzb.dupe_key)
         {
             others.push(GateCopy {
-                passed: dupe_gate_has(&DUPE_GATE_PASSED, q.id),
+                passed: passed(&q),
                 extracting: extracting(&q),
             });
             names.push(q.name);
@@ -2459,6 +2481,14 @@ impl NzbgetRsPrePostProcessor {
 
         host.nzb_action(nzb_ptr, NZB_ACT_LEAVE_POST_PROCESS, 0);
         let nzb = host.nzb_snap(nzb_ptr, false);
+        if dupe_gate_has(&DUPE_STOPPED_IN_POST, nzb.id)
+            && nzb.delete_status == crate::queuesubsys_host::DS_DUPE
+        {
+            let opts = host.opts();
+            if opts.health_check != crate::queuesubsys_host::HC_PARK {
+                delete_cleanup_host(host, &opts, &nzb);
+            }
+        }
         dupe_gate_forget(nzb.id);
         if nzb.is_download_completed {
             self.nzb_completed(host, dq_ptr, nzb_ptr, false);

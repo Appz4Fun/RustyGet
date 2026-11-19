@@ -8639,48 +8639,6 @@ pub(crate) fn load_active_nzb_messages(nzb_id: i32) -> Vec<(i32, i32, i32, std::
     std::mem::take(&mut ctx.messages)
 }
 
-#[cfg(unix)]
-pub(crate) unsafe fn append_active_nzb_message(nzb_id: i32, kind: i32, text: *const c_char) {
-    let tm = unsafe { libc::time(std::ptr::null_mut()) } as i64;
-    let corr =
-        crate::options::active_options().map_or(0i64, |o| i64::from(o.scalars().time_correction));
-    let mut time_buf = [0u8; 100];
-    crate::util::util_format_time(tm + corr, &mut time_buf);
-    let mut ctx = ActiveDiskExecCtx::new(None);
-    run_active_diskstate_exec(
-        6,
-        &mut ctx,
-        nzb_id,
-        tm as c_int,
-        kind,
-        0,
-        time_buf.as_ptr().cast(),
-        text,
-        std::ptr::null_mut(),
-    );
-}
-
-#[cfg(unix)]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_diskstate_op(
-    op: c_int,
-    p1: usize,
-    a1: c_int,
-    s1: *const c_char,
-) -> c_int {
-    match op {
-        2 => {
-            unsafe { append_active_nzb_message(p1 as i32, a1, s1) };
-            1
-        }
-        99 => {
-            crate::articledl::cache_free_raw(p1 as *mut u8, a1);
-            0
-        }
-        _ => 0,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

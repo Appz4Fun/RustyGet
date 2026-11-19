@@ -4717,6 +4717,9 @@ impl QueueSubsysHost {
     }
 
     pub fn file_groups(&self, file_ptr: usize) -> Vec<Vec<u8>> {
+        if self.use_active {
+            return unsafe { crate::qfile::groups(file_ptr as *const crate::qfile::File) };
+        }
         let n = self.raw(
             41,
             0,
@@ -4753,6 +4756,11 @@ impl QueueSubsysHost {
         if file_ptr == 0 {
             return 0;
         }
+        if self.use_active {
+            return unsafe {
+                crate::qfile::server_stat_count(file_ptr as *const crate::qfile::File)
+            };
+        }
         self.raw(
             41,
             1,
@@ -4768,6 +4776,12 @@ impl QueueSubsysHost {
     }
 
     pub fn file_server_stat_at(&self, file_ptr: usize, idx: usize) -> (i32, i32, i32) {
+        if self.use_active {
+            let [id, ok, bad] =
+                unsafe { crate::qfile::server_stat_at(file_ptr as *const crate::qfile::File, idx) }
+                    .unwrap_or([0; 3]);
+            return (id, ok, bad);
+        }
         let mut ints = [0i32; 3];
         self.raw(
             41,
@@ -4785,6 +4799,17 @@ impl QueueSubsysHost {
     }
 
     pub fn file_server_stat_set(&self, file_ptr: usize, server_id: i32, succ: i32, fail: i32) {
+        if self.use_active {
+            unsafe {
+                crate::qfile::set_server_stat(
+                    file_ptr as *const crate::qfile::File,
+                    server_id,
+                    succ,
+                    fail,
+                )
+            };
+            return;
+        }
         let mut ints = [server_id, succ, fail];
         self.raw(
             41,
@@ -4801,6 +4826,15 @@ impl QueueSubsysHost {
     }
 
     pub fn file_push_group(&self, file_ptr: usize, group: *const c_char) {
+        if self.use_active {
+            let group = if group.is_null() {
+                c""
+            } else {
+                unsafe { CStr::from_ptr(group) }
+            };
+            unsafe { crate::qfile::push_group(file_ptr as *const crate::qfile::File, group) };
+            return;
+        }
         self.raw(
             41,
             3,
@@ -4816,34 +4850,66 @@ impl QueueSubsysHost {
     }
 
     pub fn file_set_int(&self, file_ptr: usize, field: i32, val: i32) {
-        self.raw(
-            42,
-            field,
-            val,
-            file_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        if self.use_active {
+            {
+                unsafe {
+                    crate::qfile::host_file_set(
+                        file_ptr as *const crate::qfile::File,
+                        field,
+                        val,
+                        0,
+                        std::ptr::null(),
+                        std::ptr::null_mut(),
+                    )
+                };
+                0
+            }
+        } else {
+            self.raw(
+                42,
+                field,
+                val,
+                file_ptr,
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
     }
 
     pub fn file_set_i64(&self, file_ptr: usize, field: i32, val: i64) {
         let mut i64s = [val];
-        self.raw(
-            42,
-            field,
-            0,
-            file_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            i64s.as_mut_ptr(),
-            std::ptr::null_mut(),
-        );
+        if self.use_active {
+            {
+                unsafe {
+                    crate::qfile::host_file_set(
+                        file_ptr as *const crate::qfile::File,
+                        field,
+                        0,
+                        0,
+                        std::ptr::null(),
+                        i64s.as_mut_ptr(),
+                    )
+                };
+                0
+            }
+        } else {
+            self.raw(
+                42,
+                field,
+                0,
+                file_ptr,
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                i64s.as_mut_ptr(),
+                std::ptr::null_mut(),
+            )
+        };
     }
 
     pub fn file_set_str(&self, file_ptr: usize, field: i32, val: Option<&[u8]>) {
@@ -4851,36 +4917,71 @@ impl QueueSubsysHost {
         let s1 = cv
             .as_ref()
             .map_or(std::ptr::null(), |v| v.as_ptr() as *const c_char);
-        self.raw(
-            42,
-            field,
-            0,
-            file_ptr,
-            0,
-            s1,
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        if self.use_active {
+            {
+                unsafe {
+                    crate::qfile::host_file_set(
+                        file_ptr as *const crate::qfile::File,
+                        field,
+                        0,
+                        0,
+                        s1,
+                        std::ptr::null_mut(),
+                    )
+                };
+                0
+            }
+        } else {
+            self.raw(
+                42,
+                field,
+                0,
+                file_ptr,
+                0,
+                s1,
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
     }
 
     pub fn file_action(&self, file_ptr: usize, action: i32, p2: usize) {
-        self.raw(
-            42,
-            action,
-            0,
-            file_ptr,
-            p2,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        if self.use_active {
+            {
+                unsafe {
+                    crate::qfile::host_file_set(
+                        file_ptr as *const crate::qfile::File,
+                        action,
+                        0,
+                        p2,
+                        std::ptr::null(),
+                        std::ptr::null_mut(),
+                    )
+                };
+                0
+            }
+        } else {
+            self.raw(
+                42,
+                action,
+                0,
+                file_ptr,
+                p2,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
     }
 
     pub fn alloc_file_id(&self) -> i32 {
+        if self.use_active {
+            return crate::qfile::alloc_file_id();
+        }
         self.raw(
             42,
             56,
@@ -4899,6 +5000,10 @@ impl QueueSubsysHost {
         if file_ptr == 0 {
             return;
         }
+        if self.use_active {
+            unsafe { crate::qfile::nzbget_rs_file_free(file_ptr as *mut crate::qfile::File) };
+            return;
+        }
         self.raw(
             42,
             57,
@@ -4914,36 +5019,71 @@ impl QueueSubsysHost {
     }
 
     pub fn file_set_nzb_info(&self, file_ptr: usize, nzb_ptr: usize) {
-        self.raw(
-            42,
-            58,
-            0,
-            file_ptr,
-            nzb_ptr,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        if self.use_active {
+            {
+                unsafe {
+                    crate::qfile::host_file_set(
+                        file_ptr as *const crate::qfile::File,
+                        58,
+                        0,
+                        nzb_ptr,
+                        std::ptr::null(),
+                        std::ptr::null_mut(),
+                    )
+                };
+                0
+            }
+        } else {
+            self.raw(
+                42,
+                58,
+                0,
+                file_ptr,
+                nzb_ptr,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
     }
 
     pub fn file_subtract_server_stats_from_nzb_total(&self, file_ptr: usize, nzb_ptr: usize) {
-        self.raw(
-            42,
-            59,
-            0,
-            file_ptr,
-            nzb_ptr,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        if self.use_active {
+            {
+                unsafe {
+                    crate::qfile::host_file_set(
+                        file_ptr as *const crate::qfile::File,
+                        59,
+                        0,
+                        nzb_ptr,
+                        std::ptr::null(),
+                        std::ptr::null_mut(),
+                    )
+                };
+                0
+            }
+        } else {
+            self.raw(
+                42,
+                59,
+                0,
+                file_ptr,
+                nzb_ptr,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
     }
 
     pub fn file_new_standalone(&self, id: i32, bump_gen: bool) -> usize {
+        if self.use_active {
+            return crate::qfile::new_standalone(id, bump_gen) as usize;
+        }
         self.raw(
             42,
             60,
@@ -5372,18 +5512,33 @@ impl QueueSubsysHost {
         let mut buf = vec![0u8; len];
         let mut i64s = [buf.as_mut_ptr() as usize as i64];
         let copied = crate::articledl::with_cache_content_lock(|| {
-            self.raw(
-                44,
-                1,
-                len as i32,
-                file_ptr,
-                article_ptr,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                i64s.as_mut_ptr(),
-                std::ptr::null_mut(),
-            )
+            if self.use_active {
+                unsafe {
+                    crate::qfile::host_cache_op(
+                        file_ptr as *const crate::qfile::File,
+                        1,
+                        len as i32,
+                        article_ptr,
+                        std::ptr::null(),
+                        std::ptr::null_mut(),
+                        i64s.as_mut_ptr(),
+                        std::ptr::null_mut(),
+                    )
+                }
+            } else {
+                self.raw(
+                    44,
+                    1,
+                    len as i32,
+                    file_ptr,
+                    article_ptr,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    i64s.as_mut_ptr(),
+                    std::ptr::null_mut(),
+                )
+            }
         });
         if copied != 0 {
             Some(buf)
@@ -5394,52 +5549,97 @@ impl QueueSubsysHost {
 
     pub fn article_cache_discard_segment(&self, file_ptr: usize, article_ptr: usize) {
         crate::articledl::with_cache_content_lock(|| {
-            self.raw(
-                44,
-                2,
-                0,
-                file_ptr,
-                article_ptr,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            );
+            if self.use_active {
+                unsafe {
+                    crate::qfile::host_cache_op(
+                        file_ptr as *const crate::qfile::File,
+                        2,
+                        0,
+                        article_ptr,
+                        std::ptr::null(),
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                    )
+                }
+            } else {
+                self.raw(
+                    44,
+                    2,
+                    0,
+                    file_ptr,
+                    article_ptr,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            };
         });
     }
 
     pub fn file_try_acquire_flush_lock(&self, file_ptr: usize) -> bool {
         crate::articledl::with_cache_content_lock(|| {
-            self.raw(
-                44,
-                3,
-                1,
-                file_ptr,
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            ) != 0
+            (if self.use_active {
+                unsafe {
+                    crate::qfile::host_cache_op(
+                        file_ptr as *const crate::qfile::File,
+                        3,
+                        1,
+                        0,
+                        std::ptr::null(),
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                    )
+                }
+            } else {
+                self.raw(
+                    44,
+                    3,
+                    1,
+                    file_ptr,
+                    0,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            }) != 0
         })
     }
 
     pub fn file_release_flush_lock(&self, file_ptr: usize) {
         crate::articledl::with_cache_content_lock(|| {
-            self.raw(
-                44,
-                3,
-                0,
-                file_ptr,
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            );
+            if self.use_active {
+                unsafe {
+                    crate::qfile::host_cache_op(
+                        file_ptr as *const crate::qfile::File,
+                        3,
+                        0,
+                        0,
+                        std::ptr::null(),
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                    )
+                }
+            } else {
+                self.raw(
+                    44,
+                    3,
+                    0,
+                    file_ptr,
+                    0,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            };
         });
     }
 
@@ -5447,18 +5647,33 @@ impl QueueSubsysHost {
         let mut ints = [0i32; 2];
         let mut i64s = [0i64; 2];
         let mut strs = [std::ptr::null(); 1];
-        self.raw(
-            44,
-            4,
-            0,
-            file_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            i64s.as_mut_ptr(),
-            strs.as_mut_ptr(),
-        );
+        if self.use_active {
+            unsafe {
+                crate::qfile::host_cache_op(
+                    file_ptr as *const crate::qfile::File,
+                    4,
+                    0,
+                    0,
+                    std::ptr::null(),
+                    ints.as_mut_ptr(),
+                    i64s.as_mut_ptr(),
+                    strs.as_mut_ptr(),
+                )
+            }
+        } else {
+            self.raw(
+                44,
+                4,
+                0,
+                file_ptr,
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+                ints.as_mut_ptr(),
+                i64s.as_mut_ptr(),
+                strs.as_mut_ptr(),
+            )
+        };
         let out_fn = unsafe {
             if strs[0].is_null() || i64s[0] <= 0 {
                 Vec::new()
@@ -5491,18 +5706,34 @@ impl QueueSubsysHost {
         }
         crate::articledl::with_cache_content_lock(|| {
             let mut out: Vec<(usize, i64, i32, *const u8, Option<Vec<u8>>)> = Vec::new();
-            let ok = self.raw(
-                44,
-                5,
-                0,
-                file_ptr,
-                (&mut out as *mut Vec<(usize, i64, i32, *const u8, Option<Vec<u8>>)>) as usize,
-                push_seg as *const () as *const c_char,
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            ) != 0;
+            let ok = (if self.use_active {
+                unsafe {
+                    crate::qfile::host_cache_op(
+                        file_ptr as *const crate::qfile::File,
+                        5,
+                        0,
+                        (&mut out as *mut Vec<(usize, i64, i32, *const u8, Option<Vec<u8>>)>)
+                            as usize,
+                        push_seg as *const () as *const c_char,
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                    )
+                }
+            } else {
+                self.raw(
+                    44,
+                    5,
+                    0,
+                    file_ptr,
+                    (&mut out as *mut Vec<(usize, i64, i32, *const u8, Option<Vec<u8>>)>) as usize,
+                    push_seg as *const () as *const c_char,
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            }) != 0;
             if ok {
                 Some(out)
             } else {
@@ -5512,50 +5743,95 @@ impl QueueSubsysHost {
     }
 
     pub fn file_cache_is_deleted_unparked(&self, file_ptr: usize) -> bool {
-        self.raw(
-            44,
-            6,
-            0,
-            file_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        ) != 0
+        (if self.use_active {
+            unsafe {
+                crate::qfile::host_cache_op(
+                    file_ptr as *const crate::qfile::File,
+                    6,
+                    0,
+                    0,
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            }
+        } else {
+            self.raw(
+                44,
+                6,
+                0,
+                file_ptr,
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        }) != 0
     }
 
     pub fn file_cache_discard_article_segment(&self, file_ptr: usize, article_ptr: usize) {
-        self.raw(
-            44,
-            6,
-            1,
-            file_ptr,
-            article_ptr,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        if self.use_active {
+            unsafe {
+                crate::qfile::host_cache_op(
+                    file_ptr as *const crate::qfile::File,
+                    6,
+                    1,
+                    article_ptr,
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            }
+        } else {
+            self.raw(
+                44,
+                6,
+                1,
+                file_ptr,
+                article_ptr,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
     }
 
     pub fn file_cache_flush_finish(&self, file_ptr: usize, flushed_articles: i32) -> bool {
         crate::articledl::with_cache_content_lock(|| {
             let mut ints = [0i32; 1];
-            self.raw(
-                44,
-                7,
-                flushed_articles,
-                file_ptr,
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                ints.as_mut_ptr(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            );
+            if self.use_active {
+                unsafe {
+                    crate::qfile::host_cache_op(
+                        file_ptr as *const crate::qfile::File,
+                        7,
+                        flushed_articles,
+                        0,
+                        std::ptr::null(),
+                        ints.as_mut_ptr(),
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                    )
+                }
+            } else {
+                self.raw(
+                    44,
+                    7,
+                    flushed_articles,
+                    file_ptr,
+                    0,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    ints.as_mut_ptr(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            };
             ints[0] != 0
         })
     }
@@ -6282,76 +6558,9 @@ unsafe fn native_op(
     i64s: *mut i64,
     strs: *mut *const c_char,
 ) -> Option<usize> {
-    use crate::qfile::{nzbget_rs_file_articles, nzbget_rs_file_op, File};
+    use crate::qfile::{nzbget_rs_file_articles, File};
     let file = p1 as *const File;
     match (op, a1) {
-        // file groups and server stats
-        (41, 0) => Some(if a2 < 0 {
-            unsafe { nzbget_rs_file_op(file, 0, 0, std::ptr::null(), ints, strs) as usize }
-        } else {
-            unsafe { nzbget_rs_file_op(file, 1, a2, std::ptr::null(), ints, strs) };
-            0
-        }),
-        (41, 1) => Some(if a2 < 0 {
-            unsafe { nzbget_rs_file_op(file, 10, 0, std::ptr::null(), ints, strs) as usize }
-        } else {
-            unsafe { nzbget_rs_file_op(file, 11, a2, std::ptr::null(), ints, strs) };
-            0
-        }),
-        // set a server's stats (soSet)
-        (41, 2) => {
-            unsafe { nzbget_rs_file_op(file, 12, 0, std::ptr::null(), ints, strs) };
-            Some(0)
-        }
-        (41, 3) => {
-            let empty = c"".as_ptr();
-            unsafe {
-                nzbget_rs_file_op(
-                    file,
-                    2,
-                    0,
-                    if s1.is_null() { empty } else { s1 },
-                    ints,
-                    strs,
-                )
-            };
-            Some(0)
-        }
-        (41, _) => Some(0),
-        // file setters, creation and deletion
-        (42, 56) => {
-            // the id a new file would get (the file itself is not kept)
-            let id = crate::qfile::nzbget_rs_file_ids(4, 0);
-            crate::qfile::nzbget_rs_file_ids(3, id);
-            Some(id as usize)
-        }
-        (42, 60) => {
-            use crate::qfile::{field, nzbget_rs_file_ids, nzbget_rs_file_new, nzbget_rs_file_set};
-            let f = nzbget_rs_file_new(-1);
-            let given = p2 as i32;
-            unsafe {
-                if a2 != 0 {
-                    nzbget_rs_file_set(f, field::ID, i64::from(nzbget_rs_file_ids(4, 0)));
-                    nzbget_rs_file_set(f, field::ID, i64::from(given));
-                } else {
-                    let id = if given != 0 {
-                        given
-                    } else {
-                        nzbget_rs_file_ids(4, 0)
-                    };
-                    nzbget_rs_file_set(f, field::ID, i64::from(id));
-                }
-            }
-            Some(f as usize)
-        }
-        (42, 57) => {
-            unsafe { crate::qfile::nzbget_rs_file_free(p1 as *mut File) };
-            Some(0)
-        }
-        (42, _) => {
-            unsafe { crate::qfile::host_file_set(file, a1, a2, p2, s1, i64s) };
-            Some(0)
-        }
         // a collection's file list and completed files
         (34, _) => Some(unsafe {
             crate::qnzb::host_filelist_op(
@@ -6420,14 +6629,6 @@ unsafe fn native_op(
             )
         }),
         (62, _) => Some(unsafe { crate::qnzb::host_post_job_op(a1, a2, p1, p2, i64s) }),
-        // the article writer's and downloader's file ops
-        (45, _) => Some(unsafe {
-            crate::qfile::host_output_op(file, a1, a2, p2, s1, s2, ints, i64s, strs)
-        }),
-        // article cache ops on a file
-        (44, _) => {
-            Some(unsafe { crate::qfile::host_cache_op(file, a1, a2, p2, s1, ints, i64s, strs) })
-        }
         // the live-par namespace walk over a collection (p1), visitor in s1, context in p2
         (43, 15) => Some(unsafe {
             live_namespace::live_par_visit_namespace(

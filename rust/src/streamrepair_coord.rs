@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use crate::articlefetcher::{
     parse_donor_nzb_file, ArticleFetcher, BatchFetcherPool, DonorParsedFile, DonorParsedNzb,
-    NzbgetRsNntpFetchHostFn,
+    NntpHost,
 };
 use crate::dupecoord::same_name_or_key;
 use crate::dupefallback::NzbgetRsByteRange;
@@ -387,7 +387,7 @@ impl NzbgetRsStreamRepairCtrl {
     pub fn new(
         live_mode: bool,
         nzb_id: i32,
-        nntp_host: NzbgetRsNntpFetchHostFn,
+        nntp_host: &'static dyn NntpHost,
         tls_enabled: bool,
         debug_enabled: bool,
     ) -> Self {

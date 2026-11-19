@@ -1560,7 +1560,7 @@ pub(crate) fn service_work_active() {
             let token = NEXT_TWIN_JOB_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let fetcher = std::sync::Arc::new(crate::articlefetcher::ArticleFetcher::new(
-                crate::articlefetcher::native_nntp_fetch_host,
+                &crate::articlefetcher::NativeNntpHost,
             ));
             let nzb_id = job.nzb_id;
             guard.jobs.insert(

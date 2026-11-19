@@ -2875,6 +2875,17 @@ impl PooledNntpConn {
         (p, avail)
     }
 
+    /// Moves up to `dst.len()` already-buffered bytes into `dst`; the rest
+    /// stays buffered for the next call.
+    pub unsafe fn read_buffered(&self, dst: &mut [u8]) -> usize {
+        let core = &mut (*self.conn.session.get()).core;
+        let n = core.buf_avail.min(dst.len());
+        dst[..n].copy_from_slice(&core.read_buf[core.buf_offset..core.buf_offset + n]);
+        core.buf_offset += n;
+        core.buf_avail -= n;
+        n
+    }
+
     pub unsafe fn try_recv(&self, dst: &mut [u8]) -> c_int {
         (*self.conn.session.get()).core.try_recv_slice(dst)
     }

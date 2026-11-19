@@ -3268,6 +3268,33 @@ pub(crate) fn note_dead_volume_borrow(nzb_id: i32, underway: bool) {
     }
 }
 
+fn locked_archives() -> std::sync::MutexGuard<'static, std::collections::HashSet<i32>> {
+    static SET: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<i32>>> =
+        std::sync::OnceLock::new();
+    SET.get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// Whether direct unpack of download `nzb_id` stopped because its archive needs a password
+/// that neither its nzb nor `UnpackPassFile` can give (encrypted headers, say): the download
+/// can never be extracted, so the queue fails it over now instead of downloading it whole.
+/// Answered once: the mark is cleared as it is read.
+pub(crate) fn take_direct_unpack_locked(nzb_id: i32) -> bool {
+    locked_archives().remove(&nzb_id)
+}
+
+/// Whether a direct unpack failure means the download can never be extracted.
+fn failure_locks_archive(
+    failure: &crate::progressive_unpack::Failure,
+    password: &[u8],
+    pass_file_set: bool,
+) -> bool {
+    *failure == crate::progressive_unpack::Failure::PasswordRequired
+        && password.is_empty()
+        && !pass_file_set
+}
+
 /// True while dead volumes of download `nzb_id` are being borrowed from a duplicate, or once
 /// direct unpack reads one rebuilt: replacing the download would throw that away.
 pub(crate) fn dead_volume_borrow_underway(nzb_id: i32) -> bool {
@@ -4728,6 +4755,9 @@ impl NzbgetRsDirectUnpack {
             },
         );
         if let Some(f) = &failure {
+            if failure_locks_archive(f, &local.password, crate::options::unpack_pass_file_set()) {
+                locked_archives().insert(self.nzb_id);
+            }
             if f.is_password() || f.is_damage() {
                 self.stop_for_failure(ctx, host_cb, f);
             }
@@ -4751,6 +4781,8 @@ impl NzbgetRsDirectUnpack {
             MK_DEBUG,
             format!("Entering DirectUnpack-loop for {}", self.nzb_id).as_bytes(),
         );
+        // a mark from an earlier run (before a password was set) is stale
+        locked_archives().remove(&self.nzb_id);
 
         let mut local = DirectUnpackRunLocal {
             name: Vec::new(),
@@ -7733,5 +7765,32 @@ mod dead_volume_case_tests {
         assert_eq!(direct_unpack_virtual(id, extractor), Some(v));
         assert!(direct_unpack_has_virtual(extractor));
         direct_unpack_holds().remove(&id);
+    }
+}
+
+#[cfg(test)]
+mod locked_archive_tests {
+    use super::*;
+    use crate::progressive_unpack::Failure;
+
+    #[test]
+    fn a_password_the_nzb_lacks_locks_the_archive() {
+        let locks =
+            |f: Failure, password: &[u8], pass_file| failure_locks_archive(&f, password, pass_file);
+        assert!(locks(Failure::PasswordRequired, b"", false));
+        // a password from the nzb or the pass file may still open it
+        assert!(!locks(Failure::PasswordRequired, b"pw", false));
+        assert!(!locks(Failure::PasswordRequired, b"", true));
+        // damage is the dupe fallback's business, not this
+        assert!(!locks(Failure::WrongPassword, b"pw", false));
+        assert!(!locks(Failure::Damaged(String::new()), b"", false));
+    }
+
+    #[test]
+    fn the_locked_mark_is_answered_once() {
+        let id = -4_242_472;
+        locked_archives().insert(id);
+        assert!(take_direct_unpack_locked(id));
+        assert!(!take_direct_unpack_locked(id));
     }
 }

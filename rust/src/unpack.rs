@@ -1022,6 +1022,7 @@ fn extract_single_archive_in_process<F>(
     is_cancelled: &mut dyn FnMut() -> bool,
     extracted_paths: &mut Vec<std::path::PathBuf>,
     rar: RarFeed<'_>,
+    not_archive: crate::archive_native::NotAnArchiveSlot<'_>,
 ) -> Result<zipfast::extract::Summary, String>
 where
     F: FnMut(i32, &str),
@@ -1053,13 +1054,14 @@ where
                     log_cb(kind, msg);
                 }
             };
-            return crate::archive_native::extract_7z_cancellable(
+            return crate::archive_native::extract_7z_reporting(
                 archive_path,
                 output_dir,
                 password,
                 overwrite_mode,
                 &mut tracking_cb,
                 is_cancelled,
+                not_archive,
             );
         }
         let rar4 = n >= 7 && &sig[..7] == b"Rar!\x1a\x07\x00";
@@ -1107,13 +1109,14 @@ where
                 log_cb(kind, msg);
             }
         };
-        return crate::archive_native::extract_7z_cancellable(
+        return crate::archive_native::extract_7z_reporting(
             archive_path,
             output_dir,
             password,
             overwrite_mode,
             &mut tracking_cb,
             is_cancelled,
+            not_archive,
         );
     }
 
@@ -1166,13 +1169,14 @@ where
             log_cb(kind, msg);
         }
     };
-    let summary = crate::archive_native::extract_zipfast_cancellable(
+    let summary = crate::archive_native::extract_zipfast_reporting(
         archive_path,
         output_dir,
         password,
         overwrite_mode,
         &mut tracking_cb,
         is_cancelled,
+        not_archive,
     )?;
 
     log_cb(
@@ -1554,6 +1558,7 @@ where
         is_cancelled,
         &mut extracted_paths,
         rar,
+        None,
     );
     if let Some(why) = breached(&mut log_cb) {
         return Err(why);
@@ -1590,6 +1595,8 @@ where
             );
             let volumes = collect_nested_archive_volumes(&nested_arch);
             let mut sub_extracted = Vec::new();
+            // A member named like an archive that is none at all is output, kept as it is.
+            let mut not_archive = None;
             let sub = extract_single_archive_in_process(
                 &nested_arch,
                 &target_dir,
@@ -1599,9 +1606,19 @@ where
                 is_cancelled,
                 &mut sub_extracted,
                 RarFeed::default(),
+                Some(&mut not_archive),
             );
             if let Some(why) = breached(&mut log_cb) {
                 return Err(why);
+            }
+            if let (Err(_), Some(crate::archive_native::NotAnArchive(why))) = (&sub, not_archive) {
+                log_cb(
+                    4,
+                    &format!(
+                        "Extended Unpacker (depth {depth}): {nested_name} is not an archive, kept as is ({why})"
+                    ),
+                );
+                continue;
             }
             let sub_summary = sub?;
             let consumed_count = (sub_summary.volumes.max(1) as usize).min(volumes.len());
@@ -1676,6 +1693,7 @@ where
         is_cancelled,
         &mut extracted_paths,
         RarFeed::default(),
+        None,
     )?;
     log_cb(4, "Unrar: All OK");
     log_cb(4, "7-Zip: Everything is Ok");
@@ -2481,6 +2499,98 @@ pub fn eval_unpack_completed_failure(
 mod tests {
 
     use super::*;
+
+    /// Unpacks an outer zip holding `members` with the Extended Unpacker; returns the result,
+    /// the output folder and the log.
+    fn unpack_outer(
+        tag: &str,
+        members: &[(&str, &[u8])],
+    ) -> (
+        Result<zipfast::extract::Summary, String>,
+        std::path::PathBuf,
+        Vec<(i32, String)>,
+    ) {
+        let dir = std::env::temp_dir().join(format!("rg_nested_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let entries: Vec<(&str, &[u8], Option<u32>, u16, Option<&[u8]>)> = members
+            .iter()
+            .map(|&(n, d)| (n, d, Some(0o100644), 0, None))
+            .collect();
+        let outer = dir.join("outer.zip");
+        std::fs::write(&outer, build_test_zip(&entries)).unwrap();
+        let out = dir.join("out");
+        let mut logs = Vec::new();
+        let r = extract_archive_with_zipfast(&outer, &out, "", 1, |k, m| {
+            logs.push((k, m.to_string()))
+        });
+        (r, out, logs)
+    }
+
+    fn noise(len: u32) -> Vec<u8> {
+        (0..len)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect()
+    }
+
+    /// A member named like an archive that starts with no archive signature and that zipfast
+    /// finds is no archive stays as it is; the unpack succeeds without an error line.
+    #[test]
+    fn a_nested_member_that_is_no_archive_is_kept() {
+        let random = noise(4096);
+        let (r, out, logs) =
+            unpack_outer("plain", &[("setup.7z", &random), ("data.zip", &random[7..])]);
+        assert!(r.is_ok(), "{r:?} {logs:?}");
+        assert_eq!(std::fs::read(out.join("setup.7z")).unwrap(), random);
+        assert_eq!(std::fs::read(out.join("data.zip")).unwrap(), &random[7..]);
+        assert!(!logs.iter().any(|(k, _)| *k == 1), "{logs:?}");
+        for name in ["setup.7z", "data.zip"] {
+            assert!(
+                logs.iter()
+                    .any(|(k, m)| *k == 4 && m.contains(&format!("{name} is not an archive"))),
+                "{name}: {logs:?}"
+            );
+        }
+    }
+
+    /// A cut-short zip (no end record: zipfast says "not an archive") starts with a ZIP
+    /// signature: it is damaged, and the unpack fails. So does a real zip named .7z.
+    #[test]
+    fn a_damaged_or_misnamed_nested_archive_still_fails() {
+        let inner = build_test_zip(&[("movie.mkv", &noise(20_000), Some(0o100644), 0, None)]);
+        let half = &inner[..inner.len() / 2];
+        for (tag, name, bytes) in [
+            ("cut", "data.zip", half),
+            ("cut7z", "data.7z", half),
+            ("zipas7z", "data.7z", &inner[..]),
+        ] {
+            let (r, _, logs) = unpack_outer(tag, &[(name, bytes)]);
+            assert!(r.is_err(), "{tag}: {logs:?}");
+            assert!(logs.iter().any(|(k, _)| *k == 1), "{tag}: {logs:?}");
+            assert!(
+                !logs.iter().any(|(_, m)| m.contains("is not an archive, kept")),
+                "{tag}: {logs:?}"
+            );
+        }
+    }
+
+    /// A failing member whose name reads like a "not an archive" message is a failure.
+    #[test]
+    fn a_nested_member_named_like_the_message_still_fails() {
+        let inner = build_test_zip(&[(
+            "Not an archive: x",
+            b"hello",
+            Some(0o100644),
+            0,
+            Some(b"hellp"),
+        )]);
+        let (r, _, logs) = unpack_outer("named", &[("inner.zip", &inner)]);
+        assert!(r.is_err(), "{logs:?}");
+        assert!(
+            !logs.iter().any(|(_, m)| m.contains("is not an archive, kept")),
+            "{logs:?}"
+        );
+    }
 
     #[test]
     fn unpack_util_full_suite_port_from_cpp() {

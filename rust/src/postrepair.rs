@@ -103,6 +103,10 @@ pub struct NzbgetRsDupeHistoryCandidate {
     pub same_name_or_key: i32,
     /// the item's [`crate::donorkind::DonorKind`] as `u8` (lower first)
     pub donor_kind: i32,
+    /// 1: archive headers encrypted and no password
+    /// ([`crate::donorkind::LOCKED_PARAM`]), ranked after every backup that
+    /// can be extracted
+    pub locked: i32,
 }
 
 #[repr(C)]
@@ -635,6 +639,7 @@ mod tests {
                 critical_health: 900,
                 same_name_or_key: 1,
                 donor_kind: 2,
+                locked: 0,
             },
             // Index 1: dsCopy of hash 42 -> should be skipped because hash 42 failed
             NzbgetRsDupeHistoryCandidate {
@@ -651,6 +656,7 @@ mod tests {
                 critical_health: 900,
                 same_name_or_key: 1,
                 donor_kind: 2,
+                locked: 0,
             },
             // Index 2: dsDupe with score 100, alive 950
             NzbgetRsDupeHistoryCandidate {
@@ -667,6 +673,7 @@ mod tests {
                 critical_health: 900,
                 same_name_or_key: 1,
                 donor_kind: 2,
+                locked: 0,
             },
             // Index 3: dsDupe with equal score 100, higher alive 980 -> wins
             NzbgetRsDupeHistoryCandidate {
@@ -683,6 +690,7 @@ mod tests {
                 critical_health: 900,
                 same_name_or_key: 1,
                 donor_kind: 2,
+                locked: 0,
             },
         ];
         let winner = select_dupe_backup(true, 99, true, &history, &[], |_| true);

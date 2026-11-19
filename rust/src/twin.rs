@@ -1717,6 +1717,13 @@ fn run_twin_job(token: usize, qdir: &[u8]) {
     let is_stopped =
         || -> bool { fetcher.is_stopped() || stopped.load(std::sync::atomic::Ordering::SeqCst) };
 
+    // the primary's stream repair needs every connection (its watchdog takes
+    // a fetch waiting for one as no progress): a round meanwhile is held,
+    // not counted as an attempt, and runs again once the repair is done
+    let held = || crate::streamrepair_coord::stream_repair_running(spec.primary_id);
+    if spec.primary_id != 0 && held() {
+        return;
+    }
     if spec.primary_id != 0 {
         let load_data_files = |nzb_path: &[u8]| -> Vec<NzbEntry> {
             let mut files: Vec<NzbEntry> = read_nzb_entries_from_disk(nzb_path)
@@ -1786,12 +1793,45 @@ fn run_twin_job(token: usize, qdir: &[u8]) {
             })
         };
 
+        // an article the download found missing on every server is not
+        // asked for again: it only held a connection the download or the
+        // stream repair needs (and came back 430 anyway)
+        let known_missing = |e: &NzbEntry, seg: usize| {
+            e.segments
+                .get(seg)
+                .is_some_and(|s| crate::articlefetcher::known_missing_everywhere(s.1.as_bytes()))
+        };
         let fetch_part =
             |e: &NzbEntry, seg: usize| -> Option<crate::articlefetcher::FetchedArticle> {
                 let id = e.segments.get(seg)?.1.as_bytes();
+                if known_missing(e, seg) {
+                    return Some(crate::articlefetcher::FetchedArticle {
+                        not_found_430: true,
+                        ..Default::default()
+                    });
+                }
                 let groups: Vec<Vec<u8>> = e.groups.iter().map(|g| g.as_bytes().to_vec()).collect();
+                // (a fetch that every server answers 430 for is recorded, so
+                // the next attempt skips it too)
                 Some(fetcher.fetch(id, &groups))
             };
+        // both articles of a pair; the second only when the first was read,
+        // since the pair can't be compared otherwise
+        let fetch_pair = |a: &NzbEntry,
+                          seg_a: usize,
+                          b: &NzbEntry,
+                          seg_b: usize|
+         -> (
+            Option<crate::articlefetcher::FetchedArticle>,
+            Option<crate::articlefetcher::FetchedArticle>,
+        ) {
+            let part_a = fetch_part(a, seg_a);
+            if part_a.as_ref().is_some_and(|p| p.success) {
+                (part_a, fetch_part(b, seg_b))
+            } else {
+                (part_a, None)
+            }
+        };
         // Articles at the same places of both posts; for posts with other
         // article sizes, where both start an article at the same offset.
         let mut first_pair: Option<(
@@ -1813,7 +1853,14 @@ fn run_twin_job(token: usize, qdir: &[u8]) {
                 // a file both cut into two or more
                 let probe = (0..primary.len())
                     .find(|&f| primary[f].segments.len() > 1 && dupe[f].segments.len() > 1);
-                match probe.map(|f| (f, fetch_part(&primary[f], 0), fetch_part(&dupe[f], 0))) {
+                if held() {
+                    return;
+                }
+                let probed = probe.map(|f| {
+                    let (a, b) = fetch_pair(&primary[f], 0, &dupe[f], 0);
+                    (f, a, b)
+                });
+                match probed {
                     Some((f, Some(a), Some(b))) if a.success && b.success => {
                         let (pa, pb) = (a.data.len() as u64, b.data.len() as u64);
                         let plan = if pa == pb && p_counts == d_counts {
@@ -1869,6 +1916,9 @@ fn run_twin_job(token: usize, qdir: &[u8]) {
         let mut creation_note = String::new();
         let mut tail_files: Vec<usize> = Vec::new();
         for pair in &plan {
+            if held() {
+                return;
+            }
             if is_stopped() || tally.settled() {
                 break;
             }
@@ -1878,10 +1928,7 @@ fn run_twin_job(token: usize, qdir: &[u8]) {
                 Some((f, a, b)) if pair.file == f && pair.seg_a == 0 && pair.seg_b == 0 => (a, b),
                 other => {
                     first_pair = other;
-                    match (
-                        fetch_part(a_entry, pair.seg_a),
-                        fetch_part(b_entry, pair.seg_b),
-                    ) {
+                    match fetch_pair(a_entry, pair.seg_a, b_entry, pair.seg_b) {
                         (Some(a), Some(b)) => (a, b),
                         _ => continue,
                     }
@@ -1921,6 +1968,9 @@ fn run_twin_job(token: usize, qdir: &[u8]) {
             }
         }
 
+        if held() {
+            return;
+        }
         let mut verdict = crate::twinfields::judge(&tally, is_stopped(), same_layout);
         if verdict == crate::twinfields::SampleVerdict::Retry {
             if is_stopped() {
@@ -1939,7 +1989,7 @@ fn run_twin_job(token: usize, qdir: &[u8]) {
             // Whether article `k` of file `f` differs between the copies;
             // None when it could not be read now.
             let pair_at = |f: usize, k: usize| -> Option<bool> {
-                match (fetch_part(&primary[f], k), fetch_part(&dupe[f], k)) {
+                match fetch_pair(&primary[f], k, &dupe[f], k) {
                     (Some(a), Some(b)) if a.success && b.success => {
                         Some(crate::twinfields::pair_differs(
                             &crate::twinfields::SamplePair {
@@ -1992,7 +2042,7 @@ fn run_twin_job(token: usize, qdir: &[u8]) {
                                 .max(1);
                             let mut settled = false;
                             for k in (lowest..n - 1).rev() {
-                                if is_stopped() {
+                                if is_stopped() || held() {
                                     return;
                                 }
                                 match pair_at(f, k) {
@@ -2045,7 +2095,7 @@ fn run_twin_job(token: usize, qdir: &[u8]) {
                     _ => unread = true,
                 }
             }
-            if is_stopped() {
+            if is_stopped() || held() {
                 return;
             }
             if unread {

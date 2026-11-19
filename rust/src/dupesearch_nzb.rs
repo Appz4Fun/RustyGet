@@ -742,8 +742,10 @@ pub const FLEET_HEALTHY_ALIVE_PERMILLE: i32 = 975;
 
 /// `Fleet::Append` candidate ranking and copy interleaving.
 /// Healthy members (at least [`FLEET_HEALTHY_ALIVE_PERMILLE`] alive) come first,
-/// then weak ones, then members whose health is not known, then dead and
-/// broken ones; within each, TWINs
+/// then weak ones, then members whose health is not known, then locked ones
+/// (`locked`: archive headers encrypted and no password, see
+/// [`crate::donorkind::LOCKED_PARAM`]; never extractable, so only a last
+/// resort whatever their health), then dead and broken ones; within each, TWINs
 /// go first, then borrowable ALTs, ALTs of unknown packaging and unborrowable
 /// ALTs (`kind`, a [`crate::donorkind::DonorKind`] as `u8`), each kind ordered
 /// by health and then by closeness to the typical size.
@@ -755,6 +757,7 @@ pub fn rank_fleet_candidates(
     alive: &[i32],
     total_bytes: &[i64],
     kind: &[u8],
+    locked: &[u8],
     out_ranked: &mut [usize],
 ) -> usize {
     let n = has_error
@@ -763,7 +766,8 @@ pub fn rank_fleet_candidates(
         .min(dead.len())
         .min(alive.len())
         .min(total_bytes.len())
-        .min(kind.len());
+        .min(kind.len())
+        .min(locked.len());
     let mut sizes: Vec<i64> = Vec::with_capacity(n);
     for i in 0..n {
         if has_error[i] == 0 {
@@ -779,10 +783,14 @@ pub fn rank_fleet_candidates(
 
     // A copy known to miss many articles is no candidate for the lead however
     // cheap its packaging: kind orders only copies with a high health check.
+    // A locked copy can never be extracted: it goes after every live copy
+    // that can, however whole it is.
     let tier = |i: usize| -> i32 {
         if has_error[i] != 0 {
-            4
+            5
         } else if dead[i] != 0 {
+            4
+        } else if locked[i] != 0 {
             3
         } else if alive[i] < 0 {
             2
@@ -4366,6 +4374,7 @@ mod tests {
             &[90, 90, 100],
             &[1000, 1000, 1000],
             &[2, 2, 2],
+            &[0, 0, 0],
             &mut ranked,
         );
         assert_eq!(count, 3);
@@ -4383,6 +4392,7 @@ mod tests {
             &[100, 70, 90, 99, 80, -1],
             &[1000, 1000, 1000, 1000, 1000, 1000],
             &[3, 0, 0, 1, 0, 0],
+            &[0, 0, 0, 0, 0, 0],
             &mut ranked,
         );
         assert_eq!(count, 6);
@@ -4398,10 +4408,56 @@ mod tests {
             &[13, 100, 100],
             &[1000, 1000, 1000],
             &[2, 3, 3],
+            &[0, 0, 0],
             &mut ranked,
         );
         assert_eq!(count, 3);
         assert_eq!(ranked, [1, 2, 0]);
+
+        // live fleet 2026-11-19 (South Park S23E05): a 100%-alive copy with
+        // encrypted headers and no password led an 84%-alive plain twin and
+        // failed only after downloading whole. Locked goes after every copy
+        // that can be extracted, unmeasured ones included, ahead of dead ones.
+        let mut ranked = [0usize; 2];
+        let count = rank_fleet_candidates(
+            &[0, 0],
+            &[-1, -1],
+            &[0, 0],
+            &[100, 84],
+            &[1000, 1000],
+            &[3, 1],
+            &[1, 0],
+            &mut ranked,
+        );
+        assert_eq!(count, 2);
+        assert_eq!(ranked, [1, 0]);
+        let mut ranked = [0usize; 4];
+        let count = rank_fleet_candidates(
+            &[0, 0, 0, 0],
+            &[-1, -1, -1, -1],
+            &[0, 0, 1, 0],
+            &[100, -1, 0, 30],
+            &[1000, 1000, 1000, 1000],
+            &[0, 2, 1, 3],
+            &[1, 0, 0, 0],
+            &mut ranked,
+        );
+        assert_eq!(count, 4);
+        assert_eq!(ranked, [3, 1, 0, 2]);
+        // with nothing else alive the locked copy still leads, a last resort
+        let mut ranked = [0usize; 2];
+        let count = rank_fleet_candidates(
+            &[0, 0],
+            &[-1, -1],
+            &[0, 1],
+            &[100, 0],
+            &[1000, 1000],
+            &[3, 1],
+            &[1, 0],
+            &mut ranked,
+        );
+        assert_eq!(count, 2);
+        assert_eq!(ranked, [0, 1]);
 
         assert_eq!(donor_sample_count(5000, 2, 20, 300), 100);
         assert_eq!(adjust_pipeline_depth(4, 500, 32), 8);

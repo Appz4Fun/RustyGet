@@ -15,6 +15,47 @@
 /// The nzb parameter holding a fleet member's [`DonorKind`].
 pub const KIND_PARAM: &[u8] = b"DupeCopyKind";
 
+/// The nzb parameter a fleet sets (`yes`) on a copy whose archive headers are
+/// encrypted. Whether that locks the copy is decided when it is ranked (see
+/// [`locked`]): only while no password is at hand.
+pub const LOCKED_PARAM: &[u8] = b"DupeLocked";
+
+/// The nzb parameter holding the archive password (from the nzb's meta, a
+/// `{{password}}` in its name, or set later by the user).
+pub const PASSWORD_PARAM: &[u8] = b"*Unpack:Password";
+
+/// Whether a [`LOCKED_PARAM`] value says the headers are encrypted.
+pub fn encrypted_param(value: Option<&[u8]>) -> bool {
+    value.is_some_and(|v| v.trim_ascii().eq_ignore_ascii_case(b"yes"))
+}
+
+/// Whether a copy is locked: its archive headers are encrypted and no password
+/// is at hand, neither its own (`password_known`) nor one `UnpackPassFile` may
+/// give. A locked copy can neither be extracted nor borrowed from, so it ranks
+/// below every copy that can, whatever its health, and is taken only when
+/// nothing else is alive (the user's rule, 2026-11-19).
+pub fn locked(headers_encrypted: bool, password_known: bool) -> bool {
+    locked_with(
+        headers_encrypted,
+        password_known,
+        crate::options::unpack_pass_file_set(),
+    )
+}
+
+/// [`locked`] with the `UnpackPassFile` state given.
+pub fn locked_with(headers_encrypted: bool, password_known: bool, pass_file_set: bool) -> bool {
+    headers_encrypted && !password_known && !pass_file_set
+}
+
+/// [`locked`] for a queued item from its [`LOCKED_PARAM`] and
+/// [`PASSWORD_PARAM`] values.
+pub fn locked_params(locked_value: Option<&[u8]>, password_value: Option<&[u8]>) -> bool {
+    locked(
+        encrypted_param(locked_value),
+        password_value.is_some_and(|p| !p.trim_ascii().is_empty()),
+    )
+}
+
 /// How the posted bytes of a copy relate to its inner media file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Packing {
@@ -29,6 +70,10 @@ pub enum Packing {
     /// Compressed, encrypted without a known password, or a 7-Zip whose nzb
     /// carries a password (encrypted: borrowing means decrypting it whole).
     Unborrowable,
+    /// RAR headers encrypted (password or not). Its kind is unborrowable;
+    /// without a password it is also [`locked`]: never extractable, ranked
+    /// after every copy that can be extracted (see [`LOCKED_PARAM`]).
+    HeadersEncrypted,
 }
 
 /// Priority of a copy, lower first.
@@ -50,7 +95,7 @@ impl DonorKind {
         match packing {
             Packing::Borrowable => DonorKind::Borrowable,
             Packing::Unknown => DonorKind::Unknown,
-            Packing::Unborrowable => DonorKind::Unborrowable,
+            Packing::Unborrowable | Packing::HeadersEncrypted => DonorKind::Unborrowable,
         }
     }
 
@@ -183,8 +228,9 @@ fn rar_packing(data: &[u8], password_known: bool) -> Packing {
     if volume.encrypted {
         // encrypted headers: nothing about the content can be read here, so
         // it is never taken before a copy that is proven borrowable or
-        // simply plain (encryption keeps a penalty even with the password)
-        return Packing::Unborrowable;
+        // simply plain (encryption keeps a penalty even with the password);
+        // whether a missing password locks it is told when it is ranked
+        return Packing::HeadersEncrypted;
     }
     // the media file decides; a small nfo or sample in front of it says
     // nothing about how the movie is packed
@@ -381,6 +427,22 @@ mod tests {
     }
 
     #[test]
+    fn locked_only_while_no_password_is_at_hand() {
+        assert!(locked_with(true, false, false));
+        // its own password, or a pass file to try, unlocks it
+        assert!(!locked_with(true, true, false));
+        assert!(!locked_with(true, false, true));
+        assert!(!locked_with(false, false, false));
+        // the stored fact and the password a queued item has now
+        // (no test sets UnpackPassFile)
+        assert!(locked_params(Some(b"yes"), None));
+        assert!(!locked_params(Some(b"yes"), Some(b"pw")));
+        assert!(locked_params(Some(b"yes"), Some(b"  ")));
+        assert!(!locked_params(None, None));
+        assert!(!locked_params(Some(b"no"), None));
+    }
+
+    #[test]
     fn rar_store_compressed_and_encrypted() {
         assert_eq!(
             packing_of_head(&rar4_with_file(0x30, 0, 0), b"a.rar", false),
@@ -403,11 +465,15 @@ mod tests {
         // encrypted headers: last, password or not
         assert_eq!(
             packing_of_head(&rar4_with_file(0x30, 0, 0x80), b"a.rar", false),
-            Packing::Unborrowable
+            Packing::HeadersEncrypted
         );
         assert_eq!(
             packing_of_head(&rar4_with_file(0x30, 0, 0x80), b"a.rar", true),
-            Packing::Unborrowable
+            Packing::HeadersEncrypted
+        );
+        assert_eq!(
+            DonorKind::of(false, Packing::HeadersEncrypted),
+            DonorKind::Unborrowable
         );
         // a header cut short tells nothing
         assert_eq!(

@@ -1220,6 +1220,8 @@ struct SevenZipStreams {
     folder_aes: Vec<Option<SevenZipAes>>,
     /// Per folder: the size of the decrypted stream (the AES coder's output).
     folder_aes_out_sizes: Vec<u64>,
+    /// Per folder: one of its coders is 7zAES, whether or not the chain is one the map reads.
+    folder_has_aes: Vec<bool>,
 }
 
 const SZ_CODER_COPY: u8 = 0;
@@ -1316,6 +1318,7 @@ impl Default for SevenZipStreams {
             folder_props: Vec::new(),
             folder_aes: Vec::new(),
             folder_aes_out_sizes: Vec::new(),
+            folder_has_aes: Vec::new(),
         }
     }
 }
@@ -1473,6 +1476,9 @@ fn parse_seven_zip_streams_info(
             streams.folder_coder.push(folder_kind);
             streams.folder_props.push(folder_props);
             streams.folder_aes.push(aes);
+            streams
+                .folder_has_aes
+                .push(coders.iter().any(|c| c.0 == SZ_CODER_AES));
             // Remembered until the unpack sizes are read: (outputs, main output, AES output).
             streams.folder_aes_out_sizes.push(0);
             folder_outs.push((total_out, main_out, aes_out));
@@ -1811,7 +1817,9 @@ where
         let header_coder = header_streams.folder_coder[0];
         let header_aes = header_streams.folder_aes.first().cloned().flatten();
         if header_coder != SZ_CODER_COPY && header_coder != SZ_CODER_LZMA {
-            return Err(if header_coder == SZ_CODER_OTHER {
+            // only a 7zAES coder makes the headers encrypted; another chain (BCJ, PPMd)
+            // is merely a header compression the map does not read
+            return Err(if header_streams.folder_has_aes.first() == Some(&true) {
                 ContentMapper::SKIP_ENCRYPTED_HEADERS
             } else {
                 "compressed 7z header"
@@ -18423,5 +18431,36 @@ mod dead_volume_fill_tests {
             assert!(!session.target_holes()[0].is_empty(), "a hole left must stay a hole");
         }
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod seven_zip_header_coder_tests {
+    use super::*;
+
+    /// Streams info of one packed stream and one folder with the single coder `coder`
+    /// (flags byte then id bytes).
+    fn one_folder(coder: &[u8]) -> SevenZipStreams {
+        let mut bytes = vec![
+            0x06, 0x00, 0x01, 0x09, 0x0a, 0x00, 0x07, 0x0b, 0x01, 0x00, 0x01,
+        ];
+        bytes.extend_from_slice(coder);
+        bytes.extend_from_slice(&[0x0c, 0x10, 0x00, 0x00]);
+        let mut streams = SevenZipStreams::default();
+        let mut reader = SevenZipReader::new(&bytes);
+        assert!(parse_seven_zip_streams_info(&mut reader, &mut streams));
+        streams
+    }
+
+    #[test]
+    fn only_a_7zaes_coder_counts_as_encrypted_headers() {
+        // PPMd: a header compression the map does not read, not encryption
+        let ppmd = one_folder(&[0x03, 0x03, 0x04, 0x01]);
+        assert_eq!(ppmd.folder_coder, vec![SZ_CODER_OTHER]);
+        assert_eq!(ppmd.folder_has_aes, vec![false]);
+        // 7zAES whose properties the map cannot use: still encrypted
+        let aes = one_folder(&[0x04, 0x06, 0xf1, 0x07, 0x01]);
+        assert_eq!(aes.folder_coder, vec![SZ_CODER_OTHER]);
+        assert_eq!(aes.folder_has_aes, vec![true]);
     }
 }

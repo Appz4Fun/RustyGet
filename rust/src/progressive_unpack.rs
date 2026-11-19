@@ -576,7 +576,17 @@ where
                     undo_for_fallback(req, &published);
                     return Err(Error::Unsupported(Unsupported(format!("{:?}", e.kind))));
                 }
-                return Err(Failure::from_progressive(&e).into());
+                let failure = Failure::from_progressive(&e);
+                // zipfast refuses an unsafe path (an entry's name, a link's target, an output
+                // through a symlink or onto a volume) without naming the member.
+                if matches!(e.kind, FailureKind::UnsafePath) {
+                    let why = format!(
+                        "an archive entry or link would land outside the unpack folder (zipfast: {failure})"
+                    );
+                    crate::unpacklimits::refuse_unsafe(req.dest, &why)
+                        .map_err(|why| Failure::UnsafePath(format!(": {why}")))?;
+                }
+                return Err(failure.into());
             }
         };
         match event {
@@ -1485,14 +1495,16 @@ fn publish_copy(
 }
 
 /// Checks a member against the job's unpack limits (`unpacklimits`) before it is written
-/// under `dest`. A name zipfast's path rules refuse is left for zipfast to refuse.
+/// under `dest`. A name zipfast's path rules refuse (`..`, absolute) breaches them; with no
+/// job's limits active, zipfast refuses it.
 fn admit_member(dest: &Path, name: &[u8], meta: MemberMeta) -> Result<(), Failure> {
-    let Ok(rel) = zipfast::path::sanitize(&String::from_utf8_lossy(name), meta.windows_names)
-    else {
-        return Ok(());
+    let limit = |e: String| Failure::UnsafePath(format!(": {e}"));
+    let shown = String::from_utf8_lossy(name);
+    let Ok(rel) = zipfast::path::sanitize(&shown, meta.windows_names) else {
+        let why = format!("{shown:?} is not a safe path inside the unpack folder");
+        return crate::unpacklimits::refuse_unsafe(dest, &why).map_err(limit);
     };
     let is_dir = meta.is_dir || name.ends_with(b"/") || name.ends_with(b"\\");
-    let limit = |e: String| Failure::UnsafePath(format!(": {e}"));
     crate::unpacklimits::check(&dest.join(&rel), is_dir).map_err(limit)?;
     // zipfast publishes under the member's own path rules, the copy path under Unix rules:
     // both names are checked when they differ.

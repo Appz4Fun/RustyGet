@@ -9852,8 +9852,11 @@ def scenario_twinparrepair(daemon, t):
 def scenario_twinaltsampled(daemon, t):
     """Postings without par2 can't be fingerprinted: a duplicate with the
     primary's article layout is compared by 6 articles at the same places.
-    The same bytes make a twin, other bytes an alt; another layout (other
-    article sizes) can't be told and stays a plain duplicate."""
+    The same bytes make a twin, other bytes an alt. Another layout (other
+    article sizes) is compared where both posts start an article at the same
+    offset: the same bytes there prove the same files (DupeSampled
+    "samefiles", an alt that needs no further check), never a twin, since
+    the article counts differ."""
     size, seg = 3_000_000, 100_000
     data = _payload(size, 13000)
     members = {}
@@ -9880,7 +9883,8 @@ def scenario_twinaltsampled(daemon, t):
         if all(sampled.values()) and kinds['Twin'] and kinds['Alt']:
             break
         time.sleep(2)
-    ok = kinds == {'Twin': 'twin', 'Alt': 'container', 'Other': ''} and sampled.get('Other') == 'none'
+    ok = (kinds == {'Twin': 'twin', 'Alt': 'container', 'Other': 'alt'}
+          and sampled == {'Twin': 'twin:hdr', 'Alt': 'alt', 'Other': 'samefiles'})
     return ('twinaltsampled', ok, 'kinds=%s sampled=%s' % (kinds, sampled))
 
 

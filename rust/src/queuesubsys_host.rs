@@ -2,6 +2,7 @@
 //! and `QueueCoordinator` orchestration in Rust.
 
 use crate::options::OptStr;
+use crate::status::NzbParStatus;
 use std::ffi::{c_char, c_int, c_void, CStr};
 
 mod live_namespace;
@@ -63,13 +64,6 @@ pub(crate) const KS_NONE: i32 = 0;
 pub(crate) const KS_BAD: i32 = 1;
 pub(crate) const KS_GOOD: i32 = 2;
 pub(crate) const KS_SUCCESS: i32 = 3;
-
-pub(crate) const PS_FAILURE: i32 = 2;
-pub(crate) const PAR_STATUS_NONE: i32 = 0;
-pub(crate) const PAR_STATUS_SKIPPED: i32 = 1;
-pub(crate) const PAR_STATUS_FAILURE: i32 = 2;
-pub(crate) const PAR_STATUS_REPAIR_POSSIBLE: i32 = 4;
-pub(crate) const PAR_STATUS_MANUAL: i32 = 5;
 
 pub(crate) const RS_NONE: i32 = 0;
 pub(crate) const US_NONE: i32 = 0;
@@ -509,7 +503,7 @@ pub(crate) struct NzbSnap {
     pub dupe_hint: i32,
     pub delete_status: i32,
     pub mark_status: i32,
-    pub par_status: i32,
+    pub par_status: NzbParStatus,
     pub direct_rename_status: i32,
     pub direct_unpack_status: i32,
     pub dupe_par_defer_state: i32,
@@ -2146,7 +2140,7 @@ impl QueueSubsysHost {
                 dupe_hint: ints[4],
                 delete_status: ints[5],
                 mark_status: ints[6],
-                par_status: ints[7],
+                par_status: NzbParStatus::from_raw(ints[7]),
                 direct_rename_status: ints[8],
                 direct_unpack_status: ints[9],
                 dupe_par_defer_state: ints[10],
@@ -2555,6 +2549,10 @@ impl QueueSubsysHost {
 
     pub fn nzb_set_int(&self, nzb_ptr: usize, field: i32, val: i32) {
         self.coll_set(nzb_ptr, field, OpArgs::NONE.a2(val));
+    }
+
+    pub fn nzb_set_par_status(&self, nzb_ptr: usize, status: NzbParStatus) {
+        self.nzb_set_int(nzb_ptr, NZB_INT_PAR_STATUS, status.into());
     }
 
     pub fn nzb_set_i64(&self, nzb_ptr: usize, field: i32, val: i64) {

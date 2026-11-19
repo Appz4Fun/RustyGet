@@ -5,6 +5,7 @@
 //! status resolution, progress/stage transitions, and pause timestamp adjustment.
 
 use crate::cstr;
+use crate::status::{NzbParStatus, ParCheckerStatus};
 use std::ffi::CStr;
 
 pub use crate::postrepair::{check_par_time_limit, pick_twin_volume, select_more_pars};
@@ -151,30 +152,24 @@ pub fn should_use_par_quick(
 /// returns `(new_par_status, set_par_repaired, par_repaired_val, wait_time, par_sec)`.
 #[allow(clippy::too_many_arguments)]
 pub fn complete_par_check(
-    checker_status: i32,
-    cur_par_status: i32,
-    ps_repaired: i32,
-    ps_repair_not_needed: i32,
-    ps_repair_possible: i32,
-    nzb_ps_skipped: i32,
-    nzb_ps_success: i32,
-    nzb_ps_repair_possible: i32,
-    nzb_ps_failure: i32,
+    checker_status: ParCheckerStatus,
+    cur_par_status: NzbParStatus,
     cur_dl_sec: i32,
     start_dl_sec: i32,
     cur_time: i64,
     par_time: i64,
-) -> (i32, bool, bool, i32, i32) {
-    let (new_par_status, set_par_repaired, par_repaired_val) = if (checker_status == ps_repaired
-        || checker_status == ps_repair_not_needed)
-        && cur_par_status <= nzb_ps_skipped
-    {
-        (nzb_ps_success, true, checker_status == ps_repaired)
-    } else if checker_status == ps_repair_possible && cur_par_status != nzb_ps_failure {
-        (nzb_ps_repair_possible, false, false)
-    } else {
-        (nzb_ps_failure, false, false)
-    };
+) -> (NzbParStatus, bool, bool, i32, i32) {
+    use ParCheckerStatus::{RepairNotNeeded, RepairPossible, Repaired};
+    let (new_par_status, set_par_repaired, par_repaired_val) =
+        if matches!(checker_status, Repaired | RepairNotNeeded)
+            && cur_par_status <= NzbParStatus::Skipped
+        {
+            (NzbParStatus::Success, true, checker_status == Repaired)
+        } else if checker_status == RepairPossible && cur_par_status != NzbParStatus::Failure {
+            (NzbParStatus::RepairPossible, false, false)
+        } else {
+            (NzbParStatus::Failure, false, false)
+        };
     let wait_time = cur_dl_sec.wrapping_sub(start_dl_sec);
     let par_sec = (cur_time.wrapping_sub(par_time) as i32).wrapping_sub(wait_time);
     (
@@ -358,9 +353,9 @@ use crate::options::OptStr;
 use crate::postproc::JobQueue;
 use crate::queuesubsys_host::{
     QueueSubsysHost, FILE_INT_EXTRA_PRIORITY, FILE_INT_PAUSED, HK_NZB, NK_NZB,
-    NZB_INT_EXTRA_PAR_BLOCKS, NZB_INT_PAR_FULL, NZB_INT_PAR_SEC, NZB_INT_PAR_STATUS,
-    NZB_INT_REPAIR_SEC, POST_INT_FILE_PROGRESS, POST_INT_PAR_REPAIRED, POST_INT_STAGE,
-    POST_INT_STAGE_PROGRESS, POST_INT_WORKING,
+    NZB_INT_EXTRA_PAR_BLOCKS, NZB_INT_PAR_FULL, NZB_INT_PAR_SEC, NZB_INT_REPAIR_SEC,
+    POST_INT_FILE_PROGRESS, POST_INT_PAR_REPAIRED, POST_INT_STAGE, POST_INT_STAGE_PROGRESS,
+    POST_INT_WORKING,
 };
 
 const MAX_TWIN_FETCH_SIZE: i64 = 1024 * 1024 * 1024;
@@ -373,7 +368,7 @@ fn msg_1023(bytes: &[u8]) -> &[u8] {
 
 struct CtrlSnapshot {
     nzb_ptr: usize,
-    checker_status: i32,
+    checker_status: ParCheckerStatus,
     checker_stage: i32,
     file_progress: i32,
     stage_progress: i32,
@@ -408,7 +403,7 @@ struct NzbSnapshot {
     nk_nzb: i32,
     download_sec: i32,
     repair_sec: i32,
-    par_status: i32,
+    par_status: NzbParStatus,
     reprocess: bool,
     force_priority: bool,
     extra_par_blocks: i32,
@@ -729,13 +724,6 @@ impl NzbgetRsRepairController {
             let (new_status, set_rep, rep_val, wait_time, par_sec) = complete_par_check(
                 ctrl.checker_status,
                 nzb.par_status,
-                2,
-                3,
-                1,
-                1,
-                3,
-                4,
-                2,
                 nzb.download_sec,
                 start_dl_sec,
                 ctrl.cur_time,
@@ -746,7 +734,7 @@ impl NzbgetRsRepairController {
             let pi = q.post_ptr();
             let ps = host.post_snap(pi);
             let ns = host.nzb_snap(n, false);
-            host.nzb_set_int(n, NZB_INT_PAR_STATUS, new_status);
+            host.nzb_set_par_status(n, new_status);
             if set_rep {
                 host.post_set_int(pi, POST_INT_PAR_REPAIRED, i32::from(rep_val));
             }
@@ -1520,13 +1508,44 @@ mod tests {
 
     #[test]
     fn test_complete_par_check_and_progress() {
-        let (status, set_rep, rep_val, wait, par_sec) =
-            complete_par_check(1, 0, 1, 2, 3, 1, 2, 3, 4, 30, 10, 1100, 1000);
-        assert_eq!(status, 2);
+        let (status, set_rep, rep_val, wait, par_sec) = complete_par_check(
+            ParCheckerStatus::Repaired,
+            NzbParStatus::None,
+            30,
+            10,
+            1100,
+            1000,
+        );
+        assert_eq!(status, NzbParStatus::Success);
         assert!(set_rep);
         assert!(rep_val);
         assert_eq!(wait, 20);
         assert_eq!(par_sec, 80);
+        let outcome = |checker, cur| {
+            let (status, set_rep, rep_val, _, _) = complete_par_check(checker, cur, 0, 0, 0, 0);
+            (status, set_rep, rep_val)
+        };
+        use ParCheckerStatus as C;
+        assert_eq!(
+            outcome(C::RepairNotNeeded, NzbParStatus::Skipped),
+            (NzbParStatus::Success, true, false)
+        );
+        assert_eq!(
+            outcome(C::Repaired, NzbParStatus::Failure),
+            (NzbParStatus::Failure, false, false)
+        );
+        assert_eq!(
+            outcome(C::RepairPossible, NzbParStatus::None),
+            (NzbParStatus::RepairPossible, false, false)
+        );
+        assert_eq!(
+            outcome(C::RepairPossible, NzbParStatus::Failure),
+            (NzbParStatus::Failure, false, false)
+        );
+        assert_eq!(
+            outcome(C::Failed, NzbParStatus::None),
+            (NzbParStatus::Failure, false, false)
+        );
 
         let (new_stage, changed, set_rt, new_rsec, cancel, est_sec, est_min) =
             eval_par_progress_update(

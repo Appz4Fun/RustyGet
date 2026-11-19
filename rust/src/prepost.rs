@@ -4,6 +4,8 @@
 //! workflows, PAR/stream-repair coverage decisions, job scheduling strategies, stage
 //! transitions, pause-state management, and direct-unpack triggers into a single module.
 
+use crate::status::NzbParStatus;
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RsPostJobCandidate {
@@ -41,13 +43,12 @@ pub fn sanitise_post_stage(
     pt_queued: i32,
     dest_dir_exists: bool,
     unpack_tried: bool,
-    par_status: i32,
-    ps_skipped: i32,
+    par_status: NzbParStatus,
 ) -> (i32, bool) {
     if stage == pt_executing_script || !dest_dir_exists {
         (pt_finished, false)
     } else {
-        let request_par = unpack_tried && par_status <= ps_skipped;
+        let request_par = unpack_tried && par_status <= NzbParStatus::Skipped;
         (pt_queued, request_par)
     }
 }
@@ -126,8 +127,7 @@ pub fn classify_nzb_downloaded_entry(
     ds_bad: i32,
     has_post_info: bool,
     opt_raw_article: bool,
-    par_status: i32,
-    ps_none: i32,
+    par_status: NzbParStatus,
     par_check_opt: i32,
     pc_always: i32,
     pc_force: i32,
@@ -137,8 +137,9 @@ pub fn classify_nzb_downloaded_entry(
     }
     let enqueue_deleted = delete_status == ds_health || delete_status == ds_bad;
     if !has_post_info && !opt_raw_article && !opt_skip_write && !skip_disk_write {
-        let set_par_skipped =
-            par_status == ps_none && par_check_opt != pc_always && par_check_opt != pc_force;
+        let set_par_skipped = par_status == NzbParStatus::None
+            && par_check_opt != pc_always
+            && par_check_opt != pc_force;
         (2, enqueue_deleted, set_par_skipped)
     } else {
         (3, enqueue_deleted, false)
@@ -234,8 +235,7 @@ pub fn classify_delete_cleanup_mode(
 #[allow(clippy::too_many_arguments)]
 pub fn classify_request_par_action(
     request_par_check: bool,
-    par_status: i32,
-    ps_skipped: i32,
+    par_status: NzbParStatus,
     force_repair: bool,
     par_full: bool,
     par_check_opt: i32,
@@ -244,12 +244,13 @@ pub fn classify_request_par_action(
     file_list_empty: bool,
 ) -> (i32, bool) {
     if request_par_check
-        && (par_status <= ps_skipped || (force_repair && !par_full))
+        && (par_status <= NzbParStatus::Skipped || (force_repair && !par_full))
         && par_check_opt != pc_manual
     {
-        let new_force_par_full = cur_force_par_full || par_status > ps_skipped;
+        let new_force_par_full = cur_force_par_full || par_status > NzbParStatus::Skipped;
         (1, new_force_par_full)
-    } else if request_par_check && par_status <= ps_skipped && par_check_opt == pc_manual {
+    } else if request_par_check && par_status <= NzbParStatus::Skipped && par_check_opt == pc_manual
+    {
         if !file_list_empty {
             (2, cur_force_par_full)
         } else {
@@ -614,8 +615,7 @@ fn direct_unpack_read_all_damage(
 /// - `3`: request par-check due to failed non-par bytes
 #[allow(clippy::too_many_arguments)]
 pub fn classify_skipped_par_health(
-    par_status: i32,
-    ps_skipped: i32,
+    par_status: NzbParStatus,
     par_scan_opt: i32,
     ps_dupe: i32,
     health: i32,
@@ -623,7 +623,7 @@ pub fn classify_skipped_par_health(
     failed_size: i64,
     par_failed_size: i64,
 ) -> i32 {
-    if par_status != ps_skipped {
+    if par_status != NzbParStatus::Skipped {
         return 0;
     }
     if (par_scan_opt != ps_dupe && health < critical_health && critical_health < 1000)
@@ -666,7 +666,7 @@ pub fn eval_post_stages(
     want_unpack: bool,
     unpack_status: i32,
     delete_status: i32,
-    par_status: i32,
+    par_status: NzbParStatus,
     cleanup_status: i32,
     has_ext_cleanup_disk: bool,
     health: i32,
@@ -712,7 +712,7 @@ pub fn eval_post_stages_in_inter(
     want_unpack: bool,
     unpack_status: i32,
     delete_status: i32,
-    par_status: i32,
+    par_status: NzbParStatus,
     cleanup_status: i32,
     has_ext_cleanup_disk: bool,
     health: i32,
@@ -727,12 +727,6 @@ pub fn eval_post_stages_in_inter(
     post_unpack_renaming_status: i32,
 ) -> RsPostStageDecision {
     const DS_NONE: i32 = 0;
-    const PS_NONE: i32 = 0;
-    const PS_SKIPPED: i32 = 1;
-    const PS_FAILURE: i32 = 2;
-    const PS_SUCCESS: i32 = 3;
-    const PS_REPAIR_POSSIBLE: i32 = 4;
-    const PS_MANUAL: i32 = 5;
     const US_NONE: i32 = 0;
     const US_SKIPPED: i32 = 1;
     const US_FAILURE: i32 = 2;
@@ -745,20 +739,21 @@ pub fn eval_post_stages_in_inter(
     const NS_SUCCESS: i32 = 3;
 
     let mut unpack = want_unpack && unpack_status == US_NONE && delete_status == DS_NONE;
-    let par_failed =
-        par_status == PS_FAILURE || par_status == PS_REPAIR_POSSIBLE || par_status == PS_MANUAL;
+    let par_failed = par_status == NzbParStatus::Failure
+        || par_status == NzbParStatus::RepairPossible
+        || par_status == NzbParStatus::Manual;
 
     let cleanup = !unpack
         && want_unpack
         && cleanup_status == CS_NONE
         && has_ext_cleanup_disk
-        && ((par_status == PS_SUCCESS
+        && ((par_status == NzbParStatus::Success
             && unpack_status != US_FAILURE
             && unpack_status != US_SPACE
             && unpack_status != US_PASSWORD)
-            || (unpack_status == US_SUCCESS && par_status != PS_FAILURE)
+            || (unpack_status == US_SUCCESS && par_status != NzbParStatus::Failure)
             || ((unpack_status == US_NONE || unpack_status == US_SKIPPED)
-                && (par_status == PS_NONE || par_status == PS_SKIPPED)
+                && (par_status == NzbParStatus::None || par_status == NzbParStatus::Skipped)
                 && health == 1000));
 
     let move_inter = !unpack
@@ -766,11 +761,11 @@ pub fn eval_post_stages_in_inter(
         && unpack_status != US_FAILURE
         && unpack_status != US_SPACE
         && unpack_status != US_PASSWORD
-        && par_status != PS_FAILURE
-        && par_status != PS_MANUAL
+        && par_status != NzbParStatus::Failure
+        && par_status != NzbParStatus::Manual
         && delete_status == DS_NONE
         && !((unpack_status == US_NONE || unpack_status == US_SKIPPED)
-            && (par_status == PS_NONE || par_status == PS_SKIPPED)
+            && (par_status == NzbParStatus::None || par_status == NzbParStatus::Skipped)
             && health < 1000)
         && in_inter_dir;
 
@@ -790,8 +785,8 @@ pub fn eval_post_stages_in_inter(
         && effective_unpack_status != US_FAILURE
         && effective_unpack_status != US_SPACE
         && effective_unpack_status != US_PASSWORD
-        && par_status != PS_FAILURE
-        && par_status != PS_MANUAL
+        && par_status != NzbParStatus::Failure
+        && par_status != NzbParStatus::Manual
         && !move_inter
         && (move_status == MS_SUCCESS || move_status == MS_NONE);
 
@@ -800,8 +795,8 @@ pub fn eval_post_stages_in_inter(
         && has_dest_dir
         && has_name
         && effective_unpack_status == US_SUCCESS
-        && par_status != PS_FAILURE
-        && par_status != PS_MANUAL
+        && par_status != NzbParStatus::Failure
+        && par_status != NzbParStatus::Manual
         && !move_inter
         && (move_status == MS_SUCCESS || move_status == MS_NONE);
 
@@ -1314,8 +1309,8 @@ impl NzbgetRsPrePostProcessor {
     fn sanitise_post_queue(&self, host: &crate::queuesubsys_host::QueueSubsysHost) {
         use crate::queuesubsys_host::{
             DS_NONE, MK_INFO, NK_NZB, NS_NONE, NS_RUNNING, NZB_INT_DIRECT_UNPACK_STATUS,
-            PAR_STATUS_SKIPPED, POST_INT_REQUEST_PAR_CHECK, POST_INT_STAGE, POST_INT_WORKING,
-            PT_EXECUTING_SCRIPT, PT_FINISHED, PT_QUEUED,
+            POST_INT_REQUEST_PAR_CHECK, POST_INT_STAGE, POST_INT_WORKING, PT_EXECUTING_SCRIPT,
+            PT_FINISHED, PT_QUEUED,
         };
         use std::sync::atomic::Ordering;
 
@@ -1368,7 +1363,6 @@ impl NzbgetRsPrePostProcessor {
                         dest_exists,
                         nzb.unpack_tried,
                         nzb.par_status,
-                        PAR_STATUS_SKIPPED,
                     );
                     host.post_set_int(nzb.post_info_ptr, POST_INT_STAGE, new_stage);
                     if req_par {
@@ -1485,7 +1479,7 @@ impl NzbgetRsPrePostProcessor {
     ) {
         use crate::queuesubsys_host::{
             DS_HEALTH, MK_INFO, NZB_ACT_ENTER_POST_PROCESS, NZB_INT_CHANGED, NZB_INT_CLEANUP_DISK,
-            NZB_INT_PAR_STATUS, PAR_STATUS_NONE, PAR_STATUS_SKIPPED, PC_FORCE, POST_INT_WORKING,
+            PC_FORCE, POST_INT_WORKING,
         };
         use std::sync::atomic::Ordering;
 
@@ -1508,7 +1502,6 @@ impl NzbgetRsPrePostProcessor {
             nzb.has_post_info,
             opts.raw_article,
             nzb.par_status,
-            PAR_STATUS_NONE,
             opts.par_check,
             PC_ALWAYS,
             PC_FORCE,
@@ -1534,7 +1527,7 @@ impl NzbgetRsPrePostProcessor {
             host.nzb_print_message(nzb_ptr, MK_INFO, &msg);
             host.nzb_action(nzb_ptr, NZB_ACT_ENTER_POST_PROCESS, 0);
             if set_par_skipped {
-                host.nzb_set_int(nzb_ptr, NZB_INT_PAR_STATUS, PAR_STATUS_SKIPPED);
+                host.nzb_set_par_status(nzb_ptr, NzbParStatus::Skipped);
             }
 
             let nzb2 = host.nzb_snap(nzb_ptr, false);
@@ -1780,8 +1773,7 @@ impl NzbgetRsPrePostProcessor {
 
     fn check_request_par(&self, host: &crate::queuesubsys_host::QueueSubsysHost, dq_ptr: usize) {
         use crate::queuesubsys_host::{
-            EA_GROUP_RESUME, MK_INFO, NZB_ACT_CLEAR_SCRIPT_STATUSES, NZB_INT_PAR_STATUS,
-            PAR_STATUS_MANUAL, PAR_STATUS_NONE, PAR_STATUS_SKIPPED, PC_MANUAL,
+            EA_GROUP_RESUME, MK_INFO, NZB_ACT_CLEAR_SCRIPT_STATUSES, PC_MANUAL,
             POST_INT_FORCE_PAR_FULL, POST_INT_REQUEST_PAR_CHECK, POST_INT_STAGE, POST_INT_WORKING,
             PT_FINISHED, PT_QUEUED,
         };
@@ -1801,7 +1793,6 @@ impl NzbgetRsPrePostProcessor {
             let (act, new_force_full) = classify_request_par_action(
                 ps.request_par_check,
                 nzb.par_status,
-                PAR_STATUS_SKIPPED,
                 ps.force_repair,
                 nzb.par_full,
                 opts.par_check,
@@ -1811,14 +1802,14 @@ impl NzbgetRsPrePostProcessor {
             );
             if act == 1 {
                 host.post_set_int(ps.ptr, POST_INT_FORCE_PAR_FULL, i32::from(new_force_full));
-                host.nzb_set_int(nzb.ptr, NZB_INT_PAR_STATUS, PAR_STATUS_NONE);
+                host.nzb_set_par_status(nzb.ptr, NzbParStatus::None);
                 host.post_set_int(ps.ptr, POST_INT_REQUEST_PAR_CHECK, 0);
                 host.nzb_action(nzb.ptr, NZB_ACT_CLEAR_SCRIPT_STATUSES, 0);
                 host.post_set_int(ps.ptr, POST_INT_STAGE, PT_QUEUED);
                 host.post_set_int(ps.ptr, POST_INT_WORKING, 0);
             } else if act == 2 || act == 3 {
                 host.post_set_int(ps.ptr, POST_INT_REQUEST_PAR_CHECK, 0);
-                host.nzb_set_int(nzb.ptr, NZB_INT_PAR_STATUS, PAR_STATUS_MANUAL);
+                host.nzb_set_par_status(nzb.ptr, NzbParStatus::Manual);
                 if act == 2 {
                     let mut msg =
                         b"Downloading all remaining files for manual par-check for ".to_vec();
@@ -2035,13 +2026,12 @@ impl NzbgetRsPrePostProcessor {
             CTRL_CLEANUP, CTRL_MOVE, CTRL_POST_RENAME_DL, CTRL_POST_RENAME_UNPACK,
             CTRL_POST_SCRIPT, CTRL_RENAME_PAR, CTRL_RENAME_RAR, CTRL_REPAIR, CTRL_STREAM_REPAIR,
             CTRL_UNPACK, DAF_STREAM, DS_NONE, FILE_INT_EXTRA_PRIORITY, FILE_INT_PAUSED, HC_DUPE,
-            MK_INFO, MK_WARNING, NZB_INT_CHANGED, NZB_INT_PAR_STATUS, NZB_INT_UNPACK_STATUS,
-            PAR_STATUS_FAILURE, PAR_STATUS_MANUAL, PAR_STATUS_NONE, PAR_STATUS_REPAIR_POSSIBLE,
-            PAR_STATUS_SKIPPED, PC_AUTO, POST_INT_NEED_PAR_CHECK, POST_INT_NEED_UNPACK,
-            POST_INT_PAR_CANNOT_COVER, POST_INT_REQUEST_PAR_CHECK, PS_DUPE, PT_CLEANING_UP,
-            PT_EXECUTING_SCRIPT, PT_LOADING_PARS, PT_MOVING, PT_PAR_RENAMING,
-            PT_POST_DOWNLOAD_RENAMING, PT_POST_UNPACK_RENAMING, PT_RAR_RENAMING,
-            PT_STREAM_REPAIRING, PT_UNPACKING, RS_NONE, US_SKIPPED,
+            MK_INFO, MK_WARNING, NZB_INT_CHANGED, NZB_INT_UNPACK_STATUS, PC_AUTO,
+            POST_INT_NEED_PAR_CHECK, POST_INT_NEED_UNPACK, POST_INT_PAR_CANNOT_COVER,
+            POST_INT_REQUEST_PAR_CHECK, PS_DUPE, PT_CLEANING_UP, PT_EXECUTING_SCRIPT,
+            PT_LOADING_PARS, PT_MOVING, PT_PAR_RENAMING, PT_POST_DOWNLOAD_RENAMING,
+            PT_POST_UNPACK_RENAMING, PT_RAR_RENAMING, PT_STREAM_REPAIRING, PT_UNPACKING, RS_NONE,
+            US_SKIPPED,
         };
 
         let opts = host.opts();
@@ -2109,7 +2099,7 @@ impl NzbgetRsPrePostProcessor {
         if opts.parcheck_enabled {
             if stream_repair
                 && !ps.stream_repair_done
-                && nzb.par_status == PAR_STATUS_SKIPPED
+                && nzb.par_status == NzbParStatus::Skipped
                 && opts.par_check == PC_AUTO
                 && par_cannot_cover_host(host, &nzb)
                 && has_main_pars(&nzb.dest_dir)
@@ -2135,7 +2125,7 @@ impl NzbgetRsPrePostProcessor {
                 && !ps.stream_repair_recovered
                 && nzb.dupe_recovered_bytes <= 0
                 && opts.par_check == PC_AUTO
-                && nzb.par_status <= PAR_STATUS_NONE
+                && nzb.par_status <= NzbParStatus::None
                 && nzb.delete_status == DS_NONE
                 && !has_dupe_scan_sources_host(host, &opts, dq_ptr, nzb.ptr)
                 && has_main_pars(&nzb.dest_dir)
@@ -2150,17 +2140,19 @@ impl NzbgetRsPrePostProcessor {
                 msg.extend_from_slice(c_s.as_bytes());
                 msg.extend_from_slice(b"%) and duplicates recovered nothing");
                 host.nzb_print_message(nzb.ptr, MK_WARNING, &msg);
-                host.nzb_set_int(nzb.ptr, NZB_INT_PAR_STATUS, PAR_STATUS_FAILURE);
+                host.nzb_set_par_status(nzb.ptr, NzbParStatus::Failure);
                 return;
             }
 
-            if stream_repair && nzb.par_status == PAR_STATUS_SKIPPED && has_main_pars(&nzb.dest_dir)
+            if stream_repair
+                && nzb.par_status == NzbParStatus::Skipped
+                && has_main_pars(&nzb.dest_dir)
             {
                 host.post_set_int(post_ptr, POST_INT_REQUEST_PAR_CHECK, 1);
                 return;
             }
 
-            if (nzb.par_status == PAR_STATUS_NONE || nzb.par_status == PAR_STATUS_SKIPPED)
+            if (nzb.par_status == NzbParStatus::None || nzb.par_status == NzbParStatus::Skipped)
                 && nzb.delete_status == DS_NONE
                 && nzb.health < 1000
                 && !has_main_pars(&nzb.dest_dir)
@@ -2192,7 +2184,7 @@ impl NzbgetRsPrePostProcessor {
             }
 
             const NS_SUCCESS: i32 = 3;
-            if nzb.par_status == PAR_STATUS_NONE
+            if nzb.par_status == NzbParStatus::None
                 && nzb.delete_status == DS_NONE
                 && opts.par_check == PC_AUTO
                 && nzb.direct_unpack_status == NS_SUCCESS
@@ -2207,7 +2199,6 @@ impl NzbgetRsPrePostProcessor {
             {
                 // Every extracted file already passed the archive checksums: par2 would only
                 // rebuild volumes nothing reads again.
-                const PAR_STATUS_SUCCESS: i32 = 3;
                 let mut msg = b"Skipping par-check for ".to_vec();
                 msg.extend_from_slice(&nzb.name);
                 msg.extend_from_slice(
@@ -2215,13 +2206,13 @@ impl NzbgetRsPrePostProcessor {
                       reading the missing volumes borrowed from duplicates",
                 );
                 host.nzb_print_message(nzb.ptr, MK_INFO, &msg);
-                host.nzb_set_int(nzb.ptr, NZB_INT_PAR_STATUS, PAR_STATUS_SUCCESS);
+                host.nzb_set_par_status(nzb.ptr, NzbParStatus::Success);
                 host.nzb_set_int(nzb.ptr, NZB_INT_CHANGED, 1);
                 let _ = crate::postproc::take_dead_volumes_borrowed(nzb.id);
                 return;
             }
 
-            if nzb.par_status == PAR_STATUS_NONE && nzb.delete_status == DS_NONE {
+            if nzb.par_status == NzbParStatus::None && nzb.delete_status == DS_NONE {
                 if has_main_pars(&nzb.dest_dir) {
                     if !allow_par {
                         host.post_set_int(post_ptr, POST_INT_NEED_PAR_CHECK, 1);
@@ -2234,15 +2225,14 @@ impl NzbgetRsPrePostProcessor {
                     let mut msg = b"Nothing to par-check for ".to_vec();
                     msg.extend_from_slice(&nzb.name);
                     host.nzb_print_message(nzb.ptr, MK_INFO, &msg);
-                    host.nzb_set_int(nzb.ptr, NZB_INT_PAR_STATUS, PAR_STATUS_SKIPPED);
+                    host.nzb_set_par_status(nzb.ptr, NzbParStatus::Skipped);
                 }
                 return;
             }
 
-            if nzb.par_status == PAR_STATUS_SKIPPED {
+            if nzb.par_status == NzbParStatus::Skipped {
                 let h_act = classify_skipped_par_health(
                     nzb.par_status,
-                    PAR_STATUS_SKIPPED,
                     opts.par_scan,
                     PS_DUPE,
                     nzb.health,
@@ -2269,7 +2259,7 @@ impl NzbgetRsPrePostProcessor {
                             msg.push(b'%');
                             host.nzb_print_message(nzb.ptr, MK_WARNING, &msg);
                         }
-                        host.nzb_set_int(nzb.ptr, NZB_INT_PAR_STATUS, PAR_STATUS_FAILURE);
+                        host.nzb_set_par_status(nzb.ptr, NzbParStatus::Failure);
                     } else {
                         let h_s = fmt_tenths(nzb.health);
                         let mut msg = b"Collection ".to_vec();
@@ -2286,8 +2276,8 @@ impl NzbgetRsPrePostProcessor {
         }
 
         if stream_repair
-            && nzb.par_status != PAR_STATUS_REPAIR_POSSIBLE
-            && nzb.par_status != PAR_STATUS_MANUAL
+            && nzb.par_status != NzbParStatus::RepairPossible
+            && nzb.par_status != NzbParStatus::Manual
         {
             self.enter_stage(host, post_ptr, PT_STREAM_REPAIRING);
             host.post_controller_start_job(post_ptr, CTRL_STREAM_REPAIR);
@@ -2322,12 +2312,11 @@ impl NzbgetRsPrePostProcessor {
         if crate::postproc::direct_unpack_awaiting_repair(nzb.id) {
             // Direct unpack paused at a damaged volume and the repair stages are over: let it
             // continue from where it stopped (or give up when the repair failed), then come back.
-            const PAR_STATUS_SUCCESS: i32 = 3;
-            let repaired = nzb.par_status == PAR_STATUS_SUCCESS
+            let repaired = nzb.par_status == NzbParStatus::Success
                 || (nzb.health >= 1000
-                    && nzb.par_status != PAR_STATUS_FAILURE
-                    && nzb.par_status != PAR_STATUS_REPAIR_POSSIBLE
-                    && nzb.par_status != PAR_STATUS_MANUAL);
+                    && nzb.par_status != NzbParStatus::Failure
+                    && nzb.par_status != NzbParStatus::RepairPossible
+                    && nzb.par_status != NzbParStatus::Manual);
             // Only obfuscated files that never arrived are held: they may not be volumes at all.
             let stand_ins_only =
                 !repaired && crate::postproc::direct_unpack_holds_only_absent_stand_ins(nzb.id);
@@ -2355,9 +2344,8 @@ impl NzbgetRsPrePostProcessor {
         }
 
         const NS_SUCCESS: i32 = 3;
-        const PAR_STATUS_SUCCESS: i32 = 3;
         if nzb.direct_unpack_status == NS_SUCCESS
-            && nzb.par_status == PAR_STATUS_FAILURE
+            && nzb.par_status == NzbParStatus::Failure
             && damage_is_borrowed_volumes(
                 &host.nzb_completed_files(nzb.ptr),
                 &nzb.dest_dir,
@@ -2372,7 +2360,7 @@ impl NzbgetRsPrePostProcessor {
                 b" verified the volumes borrowed from a duplicate: par-check result set to success",
             );
             host.nzb_print_message(nzb.ptr, MK_INFO, &msg);
-            host.nzb_set_int(nzb.ptr, NZB_INT_PAR_STATUS, PAR_STATUS_SUCCESS);
+            host.nzb_set_par_status(nzb.ptr, NzbParStatus::Success);
             host.nzb_set_int(nzb.ptr, NZB_INT_CHANGED, 1);
             return;
         }
@@ -2397,7 +2385,7 @@ impl NzbgetRsPrePostProcessor {
         }
 
         if opts.parcheck_enabled
-            && nzb.par_status == PAR_STATUS_SKIPPED
+            && nzb.par_status == NzbParStatus::Skipped
             && nzb.delete_status == DS_NONE
             && opts.par_check == PC_AUTO
             && !has_completed_archive_files(host, nzb.ptr)
@@ -2432,7 +2420,7 @@ impl NzbgetRsPrePostProcessor {
             nzb.post_unpack_renaming_status,
         );
         if dec.skip_unpack_due_to_par != 0 {
-            let reason: &[u8] = if nzb.par_status == PAR_STATUS_MANUAL {
+            let reason: &[u8] = if nzb.par_status == NzbParStatus::Manual {
                 b"required par-repair"
             } else {
                 b"par-failure"
@@ -2788,11 +2776,11 @@ mod tests {
     #[test]
     fn test_prepost_stage_and_pause() {
         assert_eq!(
-            sanitise_post_stage(11, 11, 12, 0, true, false, 0, 1),
+            sanitise_post_stage(11, 11, 12, 0, true, false, NzbParStatus::None),
             (12, false)
         );
         assert_eq!(
-            sanitise_post_stage(2, 11, 12, 0, true, true, 1, 1),
+            sanitise_post_stage(2, 11, 12, 0, true, true, NzbParStatus::Skipped),
             (0, true)
         );
         assert!(calc_post_pause_state(&[2], true, false, false));
@@ -2805,7 +2793,7 @@ mod tests {
             false,
             0,
             0,
-            3,
+            NzbParStatus::Success,
             0,
             false,
             1000,
@@ -2894,8 +2882,7 @@ mod tests {
                         4,
                         self.has_post_info,
                         false,
-                        0,
-                        0,
+                        NzbParStatus::None,
                         0,
                         2,
                         3,

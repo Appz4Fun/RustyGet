@@ -4,6 +4,7 @@
 //! NNTP article fetch/download bounds and response classification (`ArticleFetcher`,
 //! `ArticleDownloader`).
 
+use crate::status::NzbParStatus;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -1107,8 +1108,7 @@ pub fn should_defer_to_par_header(
     direct_rename_status: i32,
     ts_running: i32,
     all_first: bool,
-    par_status: i32,
-    ps_failure: i32,
+    par_status: NzbParStatus,
     par_size: i64,
 ) -> i32 {
     if !has_nzb_info {
@@ -1117,7 +1117,7 @@ pub fn should_defer_to_par_header(
     if direct_rename_status == ts_running && !all_first {
         return 1;
     }
-    if par_status == ps_failure {
+    if par_status == NzbParStatus::Failure {
         return -1;
     }
     if par_size > 0 {
@@ -1743,7 +1743,7 @@ pub(crate) fn should_defer_to_par_snap(
     if nzb.direct_rename_status == crate::queuesubsys_host::TS_RUNNING && !nzb.all_first {
         return true;
     }
-    if nzb.par_status == crate::queuesubsys_host::PS_FAILURE {
+    if nzb.par_status == NzbParStatus::Failure {
         return false;
     }
     if nzb.par_size > 0 {
@@ -3406,13 +3406,25 @@ mod tests {
         assert!(!completed_file_is_par2(false, b"vol01.rar"));
 
         assert_eq!(
-            should_defer_to_par_header(false, 0, 1, false, 0, 2, 100),
+            should_defer_to_par_header(false, 0, 1, false, NzbParStatus::None, 100),
             -1
         );
-        assert_eq!(should_defer_to_par_header(true, 1, 1, false, 0, 2, 0), 1);
-        assert_eq!(should_defer_to_par_header(true, 0, 1, false, 2, 2, 100), -1);
-        assert_eq!(should_defer_to_par_header(true, 0, 1, false, 0, 2, 100), 1);
-        assert_eq!(should_defer_to_par_header(true, 0, 1, false, 0, 2, 0), 0);
+        assert_eq!(
+            should_defer_to_par_header(true, 1, 1, false, NzbParStatus::None, 0),
+            1
+        );
+        assert_eq!(
+            should_defer_to_par_header(true, 0, 1, false, NzbParStatus::Failure, 100),
+            -1
+        );
+        assert_eq!(
+            should_defer_to_par_header(true, 0, 1, false, NzbParStatus::None, 100),
+            1
+        );
+        assert_eq!(
+            should_defer_to_par_header(true, 0, 1, false, NzbParStatus::None, 0),
+            0
+        );
 
         assert!(check_try_preconditions(
             1,
@@ -4173,8 +4185,7 @@ mod tests {
                 direct_rename_status,
                 1,
                 false,
-                par_status,
-                2, // psFailure
+                NzbParStatus::from_raw(par_status),
                 par_size,
             );
             let should_defer = if header != 0 {
@@ -4214,10 +4225,16 @@ mod tests {
             assert!(!defer);
         }
         // DirectRename running vs AllFirst vs ParSize
-        assert_eq!(should_defer_to_par_header(true, 1, 1, false, 0, 2, 0), 1);
-        assert_eq!(should_defer_to_par_header(true, 1, 1, true, 0, 2, 0), 0);
         assert_eq!(
-            should_defer_to_par_header(true, 1, 1, true, 0, 2, 500000),
+            should_defer_to_par_header(true, 1, 1, false, NzbParStatus::None, 0),
+            1
+        );
+        assert_eq!(
+            should_defer_to_par_header(true, 1, 1, true, NzbParStatus::None, 0),
+            0
+        );
+        assert_eq!(
+            should_defer_to_par_header(true, 1, 1, true, NzbParStatus::None, 500000),
             1
         );
 
@@ -4226,8 +4243,14 @@ mod tests {
             let par_size = if par_failed { 500000 } else { 0 };
             let par_status = if par_failed { 2 } else { 0 };
             let has_par2 = par_size > 0;
-            let should_defer =
-                should_defer_to_par_header(true, 2, 1, false, par_status, 2, par_size) > 0;
+            let should_defer = should_defer_to_par_header(
+                true,
+                2,
+                1,
+                false,
+                NzbParStatus::from_raw(par_status),
+                par_size,
+            ) > 0;
             assert_eq!(has_par2 && !should_defer, par_failed);
         }
 
@@ -4238,7 +4261,8 @@ mod tests {
             (480001, true),
             (2000000, true),
         ] {
-            let should_defer = should_defer_to_par_header(true, 2, 1, false, 0, 2, 500000) > 0;
+            let should_defer =
+                should_defer_to_par_header(true, 2, 1, false, NzbParStatus::None, 500000) > 0;
             assert!(should_defer);
             let cannot_cover = par_cannot_cover(500000, 20000, failed + 20000, 0, 0, 0, 0, 0, true);
             assert_eq!(cannot_cover, expect_fallback);

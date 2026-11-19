@@ -83,8 +83,7 @@ pub fn should_delete_dest_dir(
     is_nzb: bool,
     delete_status: i32,
     ds_none: i32,
-    par_status: i32,
-    ps_failure: i32,
+    par_status: NzbParStatus,
     unpack_status: i32,
     us_failure: i32,
     us_password: i32,
@@ -92,7 +91,7 @@ pub fn should_delete_dest_dir(
 ) -> bool {
     is_nzb
         && (delete_status != ds_none
-            || par_status == ps_failure
+            || par_status == NzbParStatus::Failure
             || unpack_status == us_failure
             || unpack_status == us_password)
         && dir_exists
@@ -509,6 +508,7 @@ pub fn split_param_assignment(text: &[u8]) -> Option<(&[u8], &[u8])> {
 // End-to-end `HistoryCoordinator` FFI coordinator (`daemon/queue/HistoryCoordinator.cpp`)
 // ============================================================================
 
+use crate::status::NzbParStatus;
 use std::ffi::{c_char, c_int, c_void, CStr};
 
 #[repr(C)]
@@ -2241,8 +2241,7 @@ pub unsafe fn history_coord_exec(op: c_int, env: *const NzbgetRsHistoryCoordEnv)
                                 true,
                                 delete_status,
                                 0,
-                                par_status,
-                                2,
+                                NzbParStatus::from_raw(par_status),
                                 unpack_status,
                                 2,
                                 5,
@@ -2462,15 +2461,15 @@ unsafe extern "C" fn hc_native_action_cb(
         NZB_INT_DUPE_PAR_DEFER_STATE, NZB_INT_DUPE_RECOVERED_ARTICLES,
         NZB_INT_DUPE_RECOVERED_HOLES, NZB_INT_DUPE_SCORE, NZB_INT_DUPE_UNSOURCED_ARTICLES,
         NZB_INT_EXTRA_PAR_BLOCKS, NZB_INT_FAILED_ARTICLES, NZB_INT_HEALTH_PAUSED,
-        NZB_INT_LAST_UNPACK_STATUS, NZB_INT_LOADING_PAR, NZB_INT_MARK_STATUS, NZB_INT_MOVE_STATUS,
-        NZB_INT_PARKED_FILE_COUNT, NZB_INT_PARKING, NZB_INT_PAR_FULL, NZB_INT_PAR_RENAME_STATUS,
-        NZB_INT_PAR_REPAIRED, NZB_INT_PAR_SEC, NZB_INT_PAR_STATUS, NZB_INT_POST_TOTAL_SEC,
-        NZB_INT_RAR_RENAME_STATUS, NZB_INT_REMAINING_PAR_COUNT, NZB_INT_REPAIR_SEC,
-        NZB_INT_REPROCESS, NZB_INT_SUCCESS_ARTICLES, NZB_INT_UNPACK_CLEANED_UP_DISK,
-        NZB_INT_UNPACK_SEC, NZB_INT_LIVE_UNPACK_SEC, NZB_INT_LIVE_PAR_SEC, NZB_INT_UNPACK_STATUS,
-        NZB_INT_UNPACK_TRIED, NZB_INT_URL_STATUS,
-        NZB_INT_WAITING_PAR, NZB_STR_CATEGORY, NZB_STR_DUPE_KEY, NZB_STR_FINAL_DIR, NZB_STR_NAME,
-        PARTIAL_COMPLETED, PAR_STATUS_NONE, RS_NONE, TS_FAILURE, TS_NONE, TS_RUNNING, US_NONE,
+        NZB_INT_LAST_UNPACK_STATUS, NZB_INT_LIVE_PAR_SEC, NZB_INT_LIVE_UNPACK_SEC,
+        NZB_INT_LOADING_PAR, NZB_INT_MARK_STATUS, NZB_INT_MOVE_STATUS, NZB_INT_PARKED_FILE_COUNT,
+        NZB_INT_PARKING, NZB_INT_PAR_FULL, NZB_INT_PAR_RENAME_STATUS, NZB_INT_PAR_REPAIRED,
+        NZB_INT_PAR_SEC, NZB_INT_POST_TOTAL_SEC, NZB_INT_RAR_RENAME_STATUS,
+        NZB_INT_REMAINING_PAR_COUNT, NZB_INT_REPAIR_SEC, NZB_INT_REPROCESS,
+        NZB_INT_SUCCESS_ARTICLES, NZB_INT_UNPACK_CLEANED_UP_DISK, NZB_INT_UNPACK_SEC,
+        NZB_INT_UNPACK_STATUS, NZB_INT_UNPACK_TRIED, NZB_INT_URL_STATUS, NZB_INT_WAITING_PAR,
+        NZB_STR_CATEGORY, NZB_STR_DUPE_KEY, NZB_STR_FINAL_DIR, NZB_STR_NAME, PARTIAL_COMPLETED,
+        RS_NONE, TS_FAILURE, TS_NONE, TS_RUNNING, US_NONE,
     };
 
     HC_STR_ARENA.with(|a| a.borrow_mut().clear());
@@ -2508,7 +2507,7 @@ unsafe extern "C" fn hc_native_action_cb(
             }
             let nzb = host.nzb_snap(p2, false);
             let cfs_len = host.nzb_completed_files_len(p2) as c_int;
-            *ints.add(0) = nzb.par_status;
+            *ints.add(0) = nzb.par_status.into();
             *ints.add(1) = nzb.unpack_status;
             *ints.add(2) = nzb.delete_status;
             *ints.add(3) = c_int::from(nzb.parking);
@@ -2704,7 +2703,7 @@ unsafe extern "C" fn hc_native_action_cb(
             *ints.add(1) = hl_len as c_int;
             *ints.add(2) = found_hi.kind;
             *ints.add(3) = nzb.as_ref().map_or(0, |n| n.delete_status);
-            *ints.add(4) = nzb.as_ref().map_or(0, |n| n.par_status);
+            *ints.add(4) = nzb.as_ref().map_or(0, |n| n.par_status.into());
             *ints.add(5) = nzb.as_ref().map_or(0, |n| n.unpack_status);
             *ints.add(6) = nzb.as_ref().map_or(0, |n| n.parked_file_count);
             *i64s.add(0) = nzb_ptr as i64;
@@ -2751,7 +2750,7 @@ unsafe extern "C" fn hc_native_action_cb(
                 host.nzb_set_int(nzb_ptr, NZB_INT_UNPACK_SEC, 0);
                 host.nzb_set_int(nzb_ptr, NZB_INT_LIVE_UNPACK_SEC, 0);
                 if *ints.add(0) != 0 {
-                    host.nzb_set_int(nzb_ptr, NZB_INT_PAR_STATUS, PAR_STATUS_NONE);
+                    host.nzb_set_par_status(nzb_ptr, NzbParStatus::None);
                     host.nzb_set_int(nzb_ptr, NZB_INT_PAR_SEC, 0);
                     host.nzb_set_int(nzb_ptr, NZB_INT_LIVE_PAR_SEC, 0);
                     host.nzb_set_int(nzb_ptr, NZB_INT_REPAIR_SEC, 0);
@@ -2836,7 +2835,7 @@ unsafe extern "C" fn hc_native_action_cb(
             crate::postproc::live_par_time_discard(host.nzb_snap(p2, false).id);
             host.nzb_set_int(p2, NZB_INT_MOVE_STATUS, MS_NONE);
             host.nzb_set_int(p2, NZB_INT_UNPACK_CLEANED_UP_DISK, 0);
-            host.nzb_set_int(p2, NZB_INT_PAR_STATUS, PAR_STATUS_NONE);
+            host.nzb_set_par_status(p2, NzbParStatus::None);
             host.nzb_set_int(p2, NZB_INT_PAR_RENAME_STATUS, RS_NONE);
             host.nzb_set_int(p2, NZB_INT_RAR_RENAME_STATUS, RS_NONE);
             host.nzb_set_int(p2, NZB_INT_DIRECT_RENAME_STATUS, TS_NONE);

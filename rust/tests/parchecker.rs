@@ -10,12 +10,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use nzbget_rs::postproc::{NzbgetRsParChecker, ParCheckerHooks, ParCheckerOptions};
+use nzbget_rs::status::ParCheckerStatus;
 use par_rs::QuickInfo;
-
-const PS_FAILED: i32 = 0;
-const PS_REPAIR_POSSIBLE: i32 = 1;
-const PS_REPAIRED: i32 = 2;
-const PS_REPAIR_NOT_NEEDED: i32 = 3;
 
 /// One copy of the fixture in a fresh directory, plus what the checker
 /// reports back through its hooks.
@@ -68,7 +64,7 @@ impl Checker {
     }
 
     /// Runs verification (and repair when enabled). Returns (status, par_full).
-    fn execute(&self, quick: bool) -> (i32, bool) {
+    fn execute(&self, quick: bool) -> (ParCheckerStatus, bool) {
         let checker = NzbgetRsParChecker::new();
         checker.set_dest_dir(self.dir.to_str().unwrap().as_bytes().to_vec());
         checker.set_par_quick(quick);
@@ -139,7 +135,7 @@ impl Drop for Checker {
 #[test]
 fn repair_not_needed() {
     let c = Checker::new("noneed", false);
-    assert_eq!(c.execute(false), (PS_REPAIR_NOT_NEEDED, true));
+    assert_eq!(c.execute(false), (ParCheckerStatus::RepairNotNeeded, true));
 }
 
 #[test]
@@ -151,7 +147,7 @@ fn verified_targets_exclude_unprotected_files() {
     )
     .unwrap();
     c.corrupt("testfile.dat", 20000);
-    assert_eq!(c.execute(false).0, PS_REPAIRED);
+    assert_eq!(c.execute(false).0, ParCheckerStatus::Repaired);
     let mut verified = c.verified();
     verified.sort();
     assert_eq!(verified, ["testfile.dat", "testfile.nfo"]);
@@ -163,7 +159,7 @@ fn verified_targets_exclude_ignored_damage() {
     // this fixture about verified membership, independent of that callback.
     let c = Checker::new("ignored", false).ignore_ext("*");
     c.corrupt("testfile.dat", 20000);
-    assert_eq!(c.execute(false).0, PS_REPAIR_NOT_NEEDED);
+    assert_eq!(c.execute(false).0, ParCheckerStatus::RepairNotNeeded);
     assert_eq!(c.verified(), ["testfile.nfo"]);
 }
 
@@ -171,14 +167,14 @@ fn verified_targets_exclude_ignored_damage() {
 fn repair_possible() {
     let c = Checker::new("possible", false);
     c.corrupt("testfile.dat", 20000);
-    assert_eq!(c.execute(false), (PS_REPAIR_POSSIBLE, true));
+    assert_eq!(c.execute(false), (ParCheckerStatus::RepairPossible, true));
 }
 
 #[test]
 fn repair_successful() {
     let c = Checker::new("successful", true);
     c.corrupt("testfile.dat", 20000);
-    assert_eq!(c.execute(false), (PS_REPAIRED, true));
+    assert_eq!(c.execute(false), (ParCheckerStatus::Repaired, true));
 }
 
 fn corrupt_beyond_repair(c: &Checker) {
@@ -191,7 +187,7 @@ fn corrupt_beyond_repair(c: &Checker) {
 fn repair_failed() {
     let c = Checker::new("failed", false);
     corrupt_beyond_repair(&c);
-    assert_eq!(c.execute(false), (PS_FAILED, true));
+    assert_eq!(c.execute(false), (ParCheckerStatus::Failed, true));
 }
 
 #[test]
@@ -200,20 +196,20 @@ fn repair_failed_even_with_repair_enabled() {
     // part of the checker's options, so both only proved this.
     let c = Checker::new("failedrepair", true);
     corrupt_beyond_repair(&c);
-    assert_eq!(c.execute(false).0, PS_FAILED);
+    assert_eq!(c.execute(false).0, ParCheckerStatus::Failed);
 }
 
 #[test]
 fn quick_verification_repair_not_needed() {
     let c = Checker::new("quicknoneed", false);
-    assert_eq!(c.execute(true), (PS_REPAIR_NOT_NEEDED, false));
+    assert_eq!(c.execute(true), (ParCheckerStatus::RepairNotNeeded, false));
 }
 
 #[test]
 fn quick_verification_repair_successful() {
     let c = Checker::new("quickrepair", true);
     c.corrupt("testfile.dat", 20000);
-    assert_eq!(c.execute(true), (PS_REPAIRED, false));
+    assert_eq!(c.execute(true), (ParCheckerStatus::Repaired, false));
 }
 
 #[test]
@@ -222,5 +218,5 @@ fn quick_full_verification_repair_successful() {
     let c = Checker::new("quickfull", true);
     c.corrupt("testfile.dat", 20000);
     c.corrupt("testfile.nfo", 100);
-    assert_eq!(c.execute(true), (PS_REPAIRED, true));
+    assert_eq!(c.execute(true), (ParCheckerStatus::Repaired, true));
 }

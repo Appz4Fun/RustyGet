@@ -2440,7 +2440,7 @@ pub(crate) unsafe fn host_coll_snapshot(
     let dupe_success = crate::downloadinfo::is_dupe_success(
         s.markStatus,
         s.deleteStatus,
-        s.parStatus,
+        crate::status::NzbParStatus::from_raw(s.parStatus),
         s.unpackStatus,
         s.urlStatus,
         health,
@@ -2582,7 +2582,7 @@ pub(crate) unsafe fn host_coll_snapshot(
             s.kind,
             s.markStatus,
             s.deleteStatus,
-            s.parStatus,
+            crate::status::NzbParStatus::from_raw(s.parStatus),
             s.unpackStatus,
             s.moveStatus,
             s.urlStatus,

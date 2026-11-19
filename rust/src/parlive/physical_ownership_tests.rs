@@ -228,6 +228,27 @@ fn article_temporary_has_exact_owner_number_and_independent_physical_gate() {
 }
 
 #[test]
+fn own_output_of_a_file_named_into_a_subfolder_is_in_the_root() {
+    use std::io::Write;
+    let f = Fixture::new();
+    // DirectRename named the file in progress "Sub/dr.bin"; its data is still in the
+    // root's "<id>.out.tmp".
+    let context = f.context(b"Sub/dr.bin");
+    let (mut file, context, permit) = context
+        .open_attested(&f.root.join("40.out.tmp"), true)
+        .unwrap();
+    file.write_all(b"data").unwrap();
+    drop(permit);
+    assert_eq!(std::fs::read(f.root.join("40.out.tmp")).unwrap(), b"data");
+    assert!(context
+        .open_attested(&f.root.join("Sub").join("40.out.tmp"), true)
+        .is_err());
+    drop(file);
+    drop(context);
+    f.finish();
+}
+
+#[test]
 fn scratch_alias_cannot_replace_a_different_cohorts_certified_input() {
     let source = Fixture::new();
     let destination = Fixture::new();

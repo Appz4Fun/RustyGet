@@ -431,16 +431,18 @@ impl ActiveStreamingSession {
     /// RAM staging or the snapshot queue ran out while many files arrive at
     /// once: lend it free ParBuffer, up to half of the pool, so later
     /// articles are verified from RAM instead of being replayed
-    /// from disk. The refused article itself is replayed when its file
-    /// completes. The memory returns with the session's budget.
-    fn lend_memory(&self, error: &RepairError) {
+    /// from disk. A refused staging article is folded again at once when the
+    /// loan makes room for it (`drain_live_articles_locked`); otherwise it is
+    /// replayed when its file completes. The memory returns with the
+    /// session's budget. Returns whether the limit now holds `required_bytes`.
+    fn lend_memory(&self, error: &RepairError) -> bool {
         let RepairError::StreamingMemoryLimit {
             context,
             required_bytes,
             limit_bytes,
         } = error
         else {
-            return;
+            return false;
         };
         let staging = *context == "RAM-only partial staging";
         // Only a byte shortfall: the snapshot queue's article-count limit
@@ -452,18 +454,18 @@ impl ActiveStreamingSession {
             || (staging && self.session.max_staging_bytes() == 0)
             || self.session.is_cancelled()
         {
-            return;
+            return false;
         }
         let unit = self.session.slice_size();
         let pool = effective_live_pool_bytes();
         // Callers may hold the daemon queue lock; growth of repair slots holds
         // the budget across volume absorbs, so never wait for it here.
         let Ok(mut lease) = self.budget.try_lock() else {
-            return;
+            return false;
         };
         let before = self.lent_memory.load(Ordering::Relaxed);
         if unit == 0 {
-            return;
+            return false;
         }
         // Cover the whole shortfall at once: every refusal drops data. With
         // many files downloading at once staging holds the received part of
@@ -483,17 +485,18 @@ impl ActiveStreamingSession {
         };
         let units = lease.grow_by_units(unit, wanted.min(room), pool.saturating_sub(keep_free));
         if units == 0 {
-            return;
+            return false;
         }
         let grant = units * unit;
         let lent = before + grant;
         self.lent_memory.store(lent, Ordering::Relaxed);
-        if staging {
-            self.session
-                .set_max_staging_bytes(self.session.max_staging_bytes().saturating_add(grant));
+        let limit = if staging {
+            let limit = self.session.max_staging_bytes().saturating_add(grant);
+            self.session.set_max_staging_bytes(limit);
+            limit
         } else {
-            self.article_byte_limit.fetch_add(grant, Ordering::AcqRel);
-        }
+            self.article_byte_limit.fetch_add(grant, Ordering::AcqRel) + grant
+        };
         drop(lease);
         // Log the first loan, then each doubling.
         if before / unit == 0 || (lent / unit).ilog2() > (before / unit).ilog2() {
@@ -507,6 +510,7 @@ impl ActiveStreamingSession {
             );
             crate::log::log_active_bytes(crate::queuesubsys_host::MK_DETAIL, msg.as_bytes());
         }
+        limit >= *required_bytes
     }
 
     /// Log once why this session stopped taking work.
@@ -695,7 +699,19 @@ pub(crate) fn streaming_session_defer_article_for_queue(
         }
         let mut queue = entry.articles.lock().unwrap_or_else(|e| e.into_inner());
         let next = queue.bytes.checked_add(size);
-        let limit = entry.article_byte_limit.load(Ordering::Acquire);
+        let mut limit = entry.article_byte_limit.load(Ordering::Acquire);
+        // Many files arriving at once fill the first byte limit; a loan of free
+        // ParBuffer that covers the shortfall takes the snapshot, not a refusal.
+        if let Some(required_bytes) = next.filter(|&n| n > limit && queue.pending.len() < 4096) {
+            let shortfall = RepairError::StreamingMemoryLimit {
+                context: "live article snapshots",
+                required_bytes,
+                limit_bytes: limit,
+            };
+            // A short loan still raises the limit, so the refusal reports the new one.
+            entry.lend_memory(&shortfall);
+            limit = entry.article_byte_limit.load(Ordering::Acquire);
+        }
         if queue.pending.len() >= 4096 || next.is_none_or(|n| n > limit) {
             return Err(RepairError::StreamingMemoryLimit {
                 context: "live article snapshots",
@@ -835,7 +851,12 @@ fn drain_live_articles_locked(
             let Some(article) = take_live_article(entry) else {
                 return Ok(count);
             };
-            let result = article.fold();
+            let mut result = article.fold();
+            // Staging that a loan of free ParBuffer enlarges enough takes the article after
+            // all: not a refusal. A shortfall no loan covers is refused and reported.
+            if matches!(&result, Err(error) if entry.lend_memory(error)) {
+                result = article.fold();
+            }
             drop(article);
             let outcome = result?;
             ensure_current_generation(nzb_id, entry)?;
@@ -4096,6 +4117,207 @@ mod tests {
         assert_eq!(entry.session.max_staging_bytes(), 8192 + 3 * 4096);
         streaming_session_cancel(nzb_id);
         drop(entry);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Many files arriving at once overrun the first staging cap: the loan of free
+    /// ParBuffer that follows takes the refused article at once, so the drain neither
+    /// drops it nor leaves an error to report.
+    #[test]
+    fn live_staging_overrun_that_a_loan_covers_is_not_a_refusal() {
+        use par_rs::create::{build_set, SetOptions, VolumeScheme};
+
+        let nzb_id = 0x6a0f_0011;
+        let dir = std::env::temp_dir().join(format!(
+            "rustyget-parchecker-lend-retry-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f0 = make_deterministic_bytes(8 * 4096, 406);
+        let built = build_set(
+            "retry",
+            &[("part01.rar", &f0)],
+            &SetOptions {
+                slice_size: 4096,
+                recovery_blocks: 2,
+                first_exponent: 0,
+                volumes: VolumeScheme::Single,
+                creator: "rustyget-test".to_string(),
+                unicode_names: false,
+                kernel: Kernel::detect(),
+            },
+        )
+        .unwrap();
+        let index_path = dir.join("retry.par2");
+        std::fs::write(&index_path, &built.index).unwrap();
+        // Other tests' sessions share the process-wide ParBuffer pool and may leave no
+        // room for a loan; then the overrun must be refused and reported, and the test
+        // tries again until a loan can be made.
+        for attempt in 0.. {
+            let started = streaming_session_start(
+                nzb_id,
+                &index_path,
+                &dir,
+                SessionOptions {
+                    preallocated_syndrome_slots: 1,
+                    max_syndrome_slots: 1,
+                    max_syndrome_bytes: 4096,
+                    max_working_bytes: 4 << 20,
+                    max_staging_bytes: 4096,
+                    solve_mem_limit_bytes: 16 << 20,
+                    ..SessionOptions::default()
+                },
+            );
+            if attempt < 200
+                && matches!(
+                    started,
+                    Err(RepairError::StreamingMemoryLimit {
+                        context: "shared live PAR reservation",
+                        ..
+                    })
+                )
+            {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                continue;
+            }
+            started.unwrap();
+            // The first 3000 bytes of three slices: each piece stays partial, 9000 bytes
+            // staged against a 4096-byte cap.
+            for slice in 0..3u64 {
+                let offset = slice * 4096;
+                let piece = f0[offset as usize..offset as usize + 3000].to_vec();
+                let crc = crc32fast::hash(&piece);
+                streaming_session_defer_article(
+                    nzb_id,
+                    (b"part01.rar", &[]),
+                    offset,
+                    3000,
+                    crc,
+                    || Some(piece),
+                )
+                .unwrap()
+                .unwrap();
+            }
+            let drained = streaming_session_drain_articles(nzb_id).unwrap();
+            let entry = active_streaming_session(nzb_id).unwrap();
+            // Two loans are needed; a parallel test can fill the shared pool
+            // before either, so any staging refusal means try again.
+            let pool_was_full = matches!(
+                drained,
+                Err(RepairError::StreamingMemoryLimit {
+                    context: "RAM-only partial staging",
+                    ..
+                })
+            );
+            if pool_was_full && attempt < 200 {
+                streaming_session_forget(nzb_id);
+                drop(entry);
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                continue;
+            }
+            assert_eq!(drained.unwrap(), 3);
+            assert!(entry.session.max_staging_bytes() >= 9000);
+            assert!(entry.refusals.lock().unwrap().is_empty());
+            assert!(streaming_session_take_warning(nzb_id).is_none());
+            streaming_session_forget(nzb_id);
+            break;
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The snapshot queue's first byte limit, overrun by many files arriving at once,
+    /// takes the snapshot when a loan of free ParBuffer covers it: no refusal to report.
+    #[test]
+    fn live_snapshot_overrun_that_a_loan_covers_is_not_a_refusal() {
+        use par_rs::create::{build_set, SetOptions, VolumeScheme};
+
+        let nzb_id = 0x6a0f_0013;
+        let dir = std::env::temp_dir().join(format!(
+            "rustyget-parchecker-lend-queue-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f0 = make_deterministic_bytes(8 * 4096, 408);
+        let built = build_set(
+            "queue",
+            &[("part01.rar", &f0)],
+            &SetOptions {
+                slice_size: 4096,
+                recovery_blocks: 2,
+                first_exponent: 0,
+                volumes: VolumeScheme::Single,
+                creator: "rustyget-test".to_string(),
+                unicode_names: false,
+                kernel: Kernel::detect(),
+            },
+        )
+        .unwrap();
+        let index_path = dir.join("queue.par2");
+        std::fs::write(&index_path, &built.index).unwrap();
+        // Other tests' sessions share the process-wide ParBuffer pool; when it has no
+        // room the overrun must be refused, and the test tries again.
+        for attempt in 0.. {
+            let started = streaming_session_start(
+                nzb_id,
+                &index_path,
+                &dir,
+                SessionOptions {
+                    preallocated_syndrome_slots: 1,
+                    max_syndrome_slots: 1,
+                    max_syndrome_bytes: 4096,
+                    max_working_bytes: 4 << 20,
+                    max_staging_bytes: 4096,
+                    solve_mem_limit_bytes: 16 << 20,
+                    ..SessionOptions::default()
+                },
+            );
+            if attempt < 200 && started.is_err() {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                continue;
+            }
+            started.unwrap();
+            let entry = active_streaming_session(nzb_id).unwrap();
+            entry.article_byte_limit.store(4096, Ordering::Release);
+            let mut results = Vec::new();
+            for slice in 0..2u64 {
+                let offset = slice * 4096;
+                let piece = f0[offset as usize..offset as usize + 4096].to_vec();
+                let crc = crc32fast::hash(&piece);
+                results.push(
+                    streaming_session_defer_article(
+                        nzb_id,
+                        (b"part01.rar", &[]),
+                        offset,
+                        4096,
+                        crc,
+                        || Some(piece),
+                    )
+                    .unwrap(),
+                );
+            }
+            if entry.lent_memory.load(Ordering::Relaxed) == 0 && attempt < 200 {
+                assert!(matches!(
+                    results[1],
+                    Err(RepairError::StreamingMemoryLimit {
+                        context: "live article snapshots",
+                        ..
+                    })
+                ));
+                streaming_session_forget(nzb_id);
+                drop(entry);
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                continue;
+            }
+            assert!(results.iter().all(Result::is_ok), "{results:?}");
+            assert_eq!(entry.article_byte_limit.load(Ordering::Relaxed), 2 * 4096);
+            assert!(entry.refusals.lock().unwrap().is_empty());
+            assert!(streaming_session_take_warning(nzb_id).is_none());
+            assert_eq!(streaming_session_drain_articles(nzb_id).unwrap().unwrap(), 2);
+            streaming_session_forget(nzb_id);
+            break;
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

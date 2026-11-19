@@ -361,6 +361,12 @@ pub fn eval_dead_download(
 /// included, see `deadvolume`), and the extraction already running is kept; a failover would
 /// delete it and download and extract the backup from its first byte. A download whose
 /// articles are mostly gone (`dead_rate`) still fails over.
+///
+/// A backup whose kind is not known yet (an alt nested in another container, say: its first
+/// file is an archive, not the video) lends too once a borrow from it is underway, or while
+/// direct unpack of the download runs (`extracting`): the first dead volume fails many
+/// articles in a row before it ends, which is before any borrow can start, and failing over
+/// then would throw the running extraction away.
 pub fn alt_covers_lost_articles(
     dead_rate: bool,
     live_borrowing: bool,
@@ -368,12 +374,11 @@ pub fn alt_covers_lost_articles(
     backup_kind: crate::donorkind::DonorKind,
     projected_permille: i32,
     borrow_underway: bool,
+    extracting: bool,
 ) -> bool {
     use crate::donorkind::DonorKind;
-    // A backup whose kind is not known yet still lends once a borrow from it is underway
-    // (dead volumes were placed in its video, or one was handed to the extraction).
     let backup_lends = matches!(backup_kind, DonorKind::Twin | DonorKind::Borrowable)
-        || (borrow_underway && backup_kind != DonorKind::Unborrowable);
+        || ((borrow_underway || extracting) && backup_kind != DonorKind::Unborrowable);
     !dead_rate
         && live_borrowing
         && own_kind != DonorKind::Unborrowable
@@ -4653,6 +4658,7 @@ impl NzbgetRsQueueCoordinator {
                     ),
                     nzb.health,
                     crate::postproc::dead_volume_borrow_underway(nzb.id),
+                    nzb.direct_unpack_status == crate::queuesubsys_host::NS_RUNNING,
                 ) && !download_hopeless(nzb.total_articles, nzb.current_success_articles, failed);
             if !light_damage
                 && !lendable
@@ -4848,6 +4854,7 @@ impl NzbgetRsQueueCoordinator {
             backup_kind,
             eval.projected,
             crate::postproc::dead_volume_borrow_underway(nzb.id),
+            nzb.direct_unpack_status == crate::queuesubsys_host::NS_RUNNING,
         ) {
             if note_kept_for_borrowing(nzb.id) {
                 let mut msg = b"Keeping ".to_vec();
@@ -6242,17 +6249,17 @@ mod tests {
     fn lost_articles_an_alt_can_lend_keep_the_download() {
         use crate::donorkind::DonorKind::*;
         assert!(alt_covers_lost_articles(
-            false, true, Borrowable, Borrowable, 952, false
+            false, true, Borrowable, Borrowable, 952, false, false
         ));
         assert!(alt_covers_lost_articles(
-            false, true, Unknown, Twin, 600, false
+            false, true, Unknown, Twin, 600, false, false
         ));
         // Mostly gone, no live borrowing, an unborrowable backup or download: fail over.
         assert!(!alt_covers_lost_articles(
-            true, true, Borrowable, Borrowable, 952, false
+            true, true, Borrowable, Borrowable, 952, false, false
         ));
         assert!(!alt_covers_lost_articles(
-            false, false, Borrowable, Borrowable, 952, false
+            false, false, Borrowable, Borrowable, 952, false, false
         ));
         assert!(!alt_covers_lost_articles(
             false,
@@ -6260,10 +6267,11 @@ mod tests {
             Borrowable,
             Unborrowable,
             952,
+            false,
             false
         ));
         assert!(!alt_covers_lost_articles(
-            false, true, Borrowable, Unknown, 952, false
+            false, true, Borrowable, Unknown, 952, false, false
         ));
         assert!(!alt_covers_lost_articles(
             false,
@@ -6271,14 +6279,15 @@ mod tests {
             Unborrowable,
             Borrowable,
             952,
+            false,
             false
         ));
         assert!(!alt_covers_lost_articles(
-            false, true, Borrowable, Borrowable, 499, false
+            false, true, Borrowable, Borrowable, 499, false, false
         ));
-        // A backup of unknown kind lends once a borrow from it is underway, never otherwise.
+        // A backup of unknown kind lends once a borrow from it is underway ...
         assert!(alt_covers_lost_articles(
-            false, true, Unknown, Unknown, 952, true
+            false, true, Unknown, Unknown, 952, true, false
         ));
         assert!(!alt_covers_lost_articles(
             false,
@@ -6286,10 +6295,26 @@ mod tests {
             Unknown,
             Unborrowable,
             952,
-            true
+            true,
+            false
         ));
         assert!(!alt_covers_lost_articles(
-            true, true, Unknown, Unknown, 952, true
+            true, true, Unknown, Unknown, 952, true, false
+        ));
+        // ... or while direct unpack runs (no par2: the first dead volume trips the
+        // failed-in-a-row check before it ends), but never an unborrowable one, nor when
+        // live borrowing is off or the download is mostly gone.
+        assert!(alt_covers_lost_articles(
+            false, true, Borrowable, Unknown, 952, false, true
+        ));
+        assert!(!alt_covers_lost_articles(
+            false, true, Borrowable, Unborrowable, 952, false, true
+        ));
+        assert!(!alt_covers_lost_articles(
+            false, false, Borrowable, Unknown, 952, false, true
+        ));
+        assert!(!alt_covers_lost_articles(
+            true, true, Borrowable, Unknown, 952, false, true
         ));
     }
 

@@ -356,15 +356,13 @@ pub fn pick_next_post_job(
     best_idx
 }
 
-/// True when a backup of kind `backup_kind` can lend a download of kind `own_kind` its lost
-/// volumes (see `queuecoord::alt_covers_lost_articles`).
+/// True when a backup of kind `backup_kind` can lend a download of kind `own_kind`, whose
+/// direct unpack holds volumes, its lost volumes (see `queuecoord::alt_covers_lost_articles`:
+/// with an extraction running, a backup of unknown kind, such as a nested alt, lends too).
 fn backup_can_lend(own_kind: Option<&[u8]>, backup_kind: Option<&[u8]>) -> bool {
     use crate::donorkind::DonorKind;
     DonorKind::from_param(own_kind) != DonorKind::Unborrowable
-        && matches!(
-            DonorKind::from_param(backup_kind),
-            DonorKind::Twin | DonorKind::Borrowable
-        )
+        && DonorKind::from_param(backup_kind) != DonorKind::Unborrowable
 }
 
 /// True when a download that direct unpack extracted and verified has no damage outside its
@@ -2548,7 +2546,9 @@ mod tests {
         use super::backup_can_lend as can;
         assert!(can(None, Some(b"borrowable")));
         assert!(can(Some(b"twin"), Some(b"twin")));
-        assert!(!can(None, None));
+        // unknown (an alt nested in another container): the extraction is kept
+        assert!(can(None, None));
+        assert!(can(Some(b"borrowable"), Some(b"unknown")));
         assert!(!can(Some(b"borrowable"), Some(b"unborrowable")));
         assert!(!can(Some(b"unborrowable"), Some(b"twin")));
     }

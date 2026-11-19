@@ -2,17 +2,13 @@
 //! `CompletedFile`, `ServerStatList`, and `ScriptStatusList`
 //! (`daemon/queue/DownloadInfo.cpp`).
 
-use crate::status::{MarkStatus, MoveStatus, NzbParStatus, UnpackStatus};
+use crate::status::{MarkStatus, MoveStatus, NzbParStatus, ScriptStatus, UnpackStatus, UrlStatus};
 use std::ffi::CStr;
 
 #[inline]
 fn c_lower(b: u8) -> u8 {
     b.to_ascii_lowercase()
 }
-
-pub const SCRIPT_STATUS_NONE: i32 = 0;
-pub const SCRIPT_STATUS_FAILURE: i32 = 1;
-pub const SCRIPT_STATUS_SUCCESS: i32 = 2;
 
 pub const NZB_KIND_NZB: i32 = 0;
 pub const NZB_KIND_URL: i32 = 1;
@@ -25,14 +21,6 @@ pub const DELETE_BAD: i32 = 4;
 pub const DELETE_GOOD: i32 = 5;
 pub const DELETE_COPY: i32 = 6;
 pub const DELETE_SCAN: i32 = 7;
-
-pub const URL_NONE: i32 = 0;
-pub const URL_RUNNING: i32 = 1;
-pub const URL_FINISHED: i32 = 2;
-pub const URL_FAILED: i32 = 3;
-pub const URL_RETRY: i32 = 4;
-pub const URL_SCAN_SKIPPED: i32 = 5;
-pub const URL_SCAN_FAILED: i32 = 6;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -53,11 +41,11 @@ pub struct RsDownloadCurrentStatsAcc {
 
 /// `ScriptStatusList::CalcTotalStatus` (`DownloadInfo.cpp`):
 /// Failure overrides Success; Success overrides None.
-pub fn script_calc_total_status(statuses: &[i32]) -> i32 {
-    let mut status = SCRIPT_STATUS_NONE;
-    for &s in statuses {
-        if (s == SCRIPT_STATUS_SUCCESS && status == SCRIPT_STATUS_NONE)
-            || s == SCRIPT_STATUS_FAILURE
+pub fn script_calc_total_status(statuses: impl IntoIterator<Item = ScriptStatus>) -> ScriptStatus {
+    let mut status = ScriptStatus::None;
+    for s in statuses {
+        if (s == ScriptStatus::Success && status == ScriptStatus::None)
+            || s == ScriptStatus::Failure
         {
             status = s;
         }
@@ -374,7 +362,7 @@ pub fn is_dupe_success(
     delete_status: i32,
     par_status: NzbParStatus,
     unpack_status: UnpackStatus,
-    url_status: i32,
+    url_status: UrlStatus,
     health: i32,
     critical_health_est: i32,
     critical_health_exact: i32,
@@ -387,9 +375,9 @@ pub fn is_dupe_success(
             || par_status == NzbParStatus::Failure
             || unpack_status == UnpackStatus::Failure
             || unpack_status == UnpackStatus::Password
-            || url_status == URL_FAILED
-            || url_status == URL_SCAN_SKIPPED
-            || url_status == URL_SCAN_FAILED
+            || url_status == UrlStatus::Failed
+            || url_status == UrlStatus::ScanSkipped
+            || url_status == UrlStatus::ScanFailed
             || (par_status == NzbParStatus::Skipped
                 && unpack_status == UnpackStatus::Skipped
                 && health < critical_health_est)
@@ -411,8 +399,8 @@ pub fn make_text_status_cstr(
     par_status: NzbParStatus,
     unpack_status: UnpackStatus,
     move_status: MoveStatus,
-    url_status: i32,
-    script_status: i32,
+    url_status: UrlStatus,
+    script_status: ScriptStatus,
     health: i32,
     critical_health: i32,
 ) -> &'static [u8] {
@@ -460,7 +448,7 @@ pub fn make_text_status_cstr(
             return b"WARNING/HEALTH\0";
         } else if (par_status == NzbParStatus::None || par_status == NzbParStatus::Skipped)
             && (unpack_status == UnpackStatus::None || unpack_status == UnpackStatus::Skipped)
-            && script_status != SCRIPT_STATUS_FAILURE
+            && script_status != ScriptStatus::Failure
             && health == 1000
         {
             return b"SUCCESS/HEALTH\0";
@@ -471,14 +459,14 @@ pub fn make_text_status_cstr(
         } else if (unpack_status == UnpackStatus::Success
             || ((unpack_status == UnpackStatus::None || unpack_status == UnpackStatus::Skipped)
                 && par_status == NzbParStatus::Success))
-            && script_status == SCRIPT_STATUS_SUCCESS
+            && script_status == ScriptStatus::Success
         {
             return b"SUCCESS/ALL\0";
-        } else if unpack_status == UnpackStatus::Success && script_status == SCRIPT_STATUS_NONE {
+        } else if unpack_status == UnpackStatus::Success && script_status == ScriptStatus::None {
             return b"SUCCESS/UNPACK\0";
-        } else if par_status == NzbParStatus::Success && script_status == SCRIPT_STATUS_NONE {
+        } else if par_status == NzbParStatus::Success && script_status == ScriptStatus::None {
             return b"SUCCESS/PAR\0";
-        } else if script_status == SCRIPT_STATUS_FAILURE {
+        } else if script_status == ScriptStatus::Failure {
             return b"WARNING/SCRIPT\0";
         }
     } else if kind == NZB_KIND_URL {
@@ -490,9 +478,9 @@ pub fn make_text_status_cstr(
             return b"DELETED/GOOD\0";
         } else {
             return match url_status {
-                URL_FAILED => b"FAILURE/FETCH\0",
-                URL_SCAN_SKIPPED => b"WARNING/SKIPPED\0",
-                URL_SCAN_FAILED => b"FAILURE/SCAN\0",
+                UrlStatus::Failed => b"FAILURE/FETCH\0",
+                UrlStatus::ScanSkipped => b"WARNING/SKIPPED\0",
+                UrlStatus::ScanFailed => b"FAILURE/SCAN\0",
                 _ => b"FAILURE/INTERNAL_ERROR\0",
             };
         }
@@ -798,9 +786,14 @@ mod tests {
         assert_eq!(calc_health(1000, 100, 90, 0), 900);
         assert_eq!(calc_critical_health(1100, 100, 0, true), 900);
         assert_eq!(
-            script_calc_total_status(&[SCRIPT_STATUS_SUCCESS, SCRIPT_STATUS_FAILURE]),
-            SCRIPT_STATUS_FAILURE
+            script_calc_total_status([ScriptStatus::Success, ScriptStatus::Failure]),
+            ScriptStatus::Failure
         );
+        assert_eq!(
+            script_calc_total_status([ScriptStatus::Success, ScriptStatus::None]),
+            ScriptStatus::Success
+        );
+        assert_eq!(script_calc_total_status([]), ScriptStatus::None);
         assert!(completed_same_filename(b"sub\\file.rar", b"SUB/FILE.RAR"));
     }
 

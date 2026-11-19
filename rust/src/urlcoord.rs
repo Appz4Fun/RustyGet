@@ -49,9 +49,6 @@ const AD_FINISHED: i32 = 2;
 const AD_FAILED: i32 = 3;
 const AD_RETRY: i32 = 4;
 /// `NzbInfo::EUrlStatus` and `EDeleteStatus` values it sets.
-const LS_NONE: i32 = 0;
-const LS_FINISHED: i32 = 2;
-const LS_FAILED: i32 = 3;
 const DS_NONE: i32 = 0;
 const DS_MANUAL: i32 = 1;
 
@@ -60,13 +57,13 @@ const DS_MANUAL: i32 = 1;
 pub fn completed(
     downloader: i32,
     deleting: bool,
-    url_status: i32,
+    url_status: UrlStatus,
     delete_status: i32,
-) -> (i32, i32, bool) {
+) -> (UrlStatus, i32, bool) {
     let retry = downloader == AD_RETRY && !deleting;
     if deleting {
         return (
-            LS_NONE,
+            UrlStatus::None,
             if delete_status == DS_NONE {
                 DS_MANUAL
             } else {
@@ -76,9 +73,9 @@ pub fn completed(
         );
     }
     let url_status = match downloader {
-        AD_FINISHED => LS_FINISHED,
-        AD_FAILED => LS_FAILED,
-        AD_RETRY => LS_NONE,
+        AD_FINISHED => UrlStatus::Finished,
+        AD_FAILED => UrlStatus::Failed,
+        AD_RETRY => UrlStatus::None,
         _ => url_status,
     };
     (url_status, delete_status, retry)
@@ -88,11 +85,10 @@ pub fn completed(
 /// Returns `-1` if no eligible URL entry exists.
 pub fn select_next_url(
     kinds: &[i32],
-    url_statuses: &[i32],
+    url_statuses: &[UrlStatus],
     delete_statuses: &[i32],
     priorities: &[i32],
     nk_url: i32,
-    ls_none: i32,
     ds_none: i32,
 ) -> i32 {
     let count = kinds
@@ -104,7 +100,7 @@ pub fn select_next_url(
     let mut best_prio: i32 = i32::MIN;
     for i in 0..count {
         if kinds[i] == nk_url
-            && url_statuses[i] == ls_none
+            && url_statuses[i] == UrlStatus::None
             && delete_statuses[i] == ds_none
             && (best_idx < 0 || priorities[i] > best_prio)
         {
@@ -143,18 +139,15 @@ pub fn format_temp_url_path(temp_dir: &[u8], sep: u8, id: i32) -> Vec<u8> {
 use crate::queuesubsys_host::{
     QueueSubsysHost, ASPECT_URL_ADDED, ASPECT_URL_COMPLETED, ASPECT_URL_DELETED, ASPECT_URL_FAILED,
     ASPECT_URL_FOUND, ASPECT_URL_RETURNED, NZB_INT_ACTIVE_DOWNLOADS, NZB_INT_AVOID_HISTORY,
-    NZB_INT_DELETE_STATUS, NZB_INT_DELETING, NZB_INT_URL_STATUS,
+    NZB_INT_DELETE_STATUS, NZB_INT_DELETING,
 };
 use crate::options::OptStr;
-use crate::status::DupeMode;
+use crate::status::{DupeMode, UrlStatus};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 const AD_RUNNING: i32 = 1;
-const LS_RUNNING: i32 = 1;
-const LS_SCAN_SKIPPED: i32 = 5;
-const LS_SCAN_FAILED: i32 = 6;
 const NK_URL: i32 = 1;
 const AS_SUCCESS: i32 = 1;
 const AS_FAILED: i32 = 2;
@@ -364,9 +357,8 @@ impl NzbgetRsUrlCoord {
                             ids.push(snap.id);
                             ptrs.push(nzb_ptr);
                         }
-                        let sel = select_next_url(
-                            &kinds, &url_st, &del_st, &prios, NK_URL, LS_NONE, DS_NONE,
-                        );
+                        let sel =
+                            select_next_url(&kinds, &url_st, &del_st, &prios, NK_URL, DS_NONE);
                         if sel >= 0 && (sel as usize) < count {
                             chosen_nzb = ptrs[sel as usize];
                             chosen_id = ids[sel as usize];
@@ -381,7 +373,7 @@ impl NzbgetRsUrlCoord {
                         let info_name =
                             crate::downloadinfo::make_nice_url_name(Some(&url_c), &snap.filename);
                         host.nzb_set_int(chosen_nzb, NZB_INT_ACTIVE_DOWNLOADS, 1);
-                        host.nzb_set_int(chosen_nzb, NZB_INT_URL_STATUS, LS_RUNNING);
+                        host.nzb_set_url_status(chosen_nzb, UrlStatus::Running);
                         #[cfg(unix)]
                         {
                             let weak_s =
@@ -528,7 +520,7 @@ impl NzbgetRsUrlCoord {
 
         let mut retry = false;
         let mut dnzb_cat = Vec::new();
-        let mut final_url_status = LS_NONE;
+        let mut final_url_status = UrlStatus::None;
 
         host.with_locked_queue(|dq_ptr| {
             if let Ok(mut g) = self.active.lock() {
@@ -552,7 +544,7 @@ impl NzbgetRsUrlCoord {
             if cur_snap.deleting {
                 host.nzb_set_int(nzb_ptr, NZB_INT_DELETING, 0);
             }
-            host.nzb_set_int(nzb_ptr, NZB_INT_URL_STATUS, new_url);
+            host.nzb_set_url_status(nzb_ptr, new_url);
             if !retry {
                 host.dq_notify(dq_ptr, ASPECT_URL_COMPLETED, nzb_ptr, 0);
             }
@@ -563,7 +555,7 @@ impl NzbgetRsUrlCoord {
             return;
         }
 
-        if final_url_status == LS_FINISHED {
+        if final_url_status == UrlStatus::Finished {
             let cur_snap = host.nzb_snap(nzb_ptr, false);
             let eff_name = if !cur_snap.filename.is_empty() {
                 cur_snap.filename
@@ -594,11 +586,11 @@ impl NzbgetRsUrlCoord {
             }
 
             let scan_st = if add_status == AS_FAILED {
-                LS_SCAN_FAILED
+                UrlStatus::ScanFailed
             } else {
-                LS_SCAN_SKIPPED
+                UrlStatus::ScanSkipped
             };
-            host.nzb_set_int(nzb_ptr, NZB_INT_URL_STATUS, scan_st);
+            host.nzb_set_url_status(nzb_ptr, scan_st);
         }
 
         host.with_locked_queue(|dq_ptr| {
@@ -636,7 +628,7 @@ impl NzbgetRsUrlCoord {
         if snap.delete_status == DS_NONE {
             host.nzb_set_int(nzb_ptr, NZB_INT_DELETE_STATUS, DS_MANUAL);
         }
-        host.nzb_set_int(nzb_ptr, NZB_INT_URL_STATUS, LS_NONE);
+        host.nzb_set_url_status(nzb_ptr, UrlStatus::None);
         host.dq_notify(dq_ptr, ASPECT_URL_DELETED, nzb_ptr, 0);
         true
     }
@@ -1026,15 +1018,44 @@ mod tests {
 
     #[test]
     fn statuses() {
-        assert_eq!(completed(AD_FINISHED, false, 1, 0), (LS_FINISHED, 0, false));
-        assert_eq!(completed(AD_FAILED, false, 1, 0), (LS_FAILED, 0, false));
-        assert_eq!(completed(AD_RETRY, false, 1, 0), (LS_NONE, 0, true));
-        assert_eq!(completed(8, false, 1, 0), (1, 0, false));
-        assert_eq!(completed(AD_RETRY, true, 1, 0), (LS_NONE, DS_MANUAL, false));
-        assert_eq!(completed(AD_FINISHED, true, 1, 3), (LS_NONE, 3, false));
         assert_eq!(
-            select_next_url(&[1, 1], &[0, 0], &[0, 0], &[10, 50], 1, 0, 0),
+            completed(AD_FINISHED, false, UrlStatus::Running, 0),
+            (UrlStatus::Finished, 0, false)
+        );
+        assert_eq!(
+            completed(AD_FAILED, false, UrlStatus::Running, 0),
+            (UrlStatus::Failed, 0, false)
+        );
+        assert_eq!(
+            completed(AD_RETRY, false, UrlStatus::Running, 0),
+            (UrlStatus::None, 0, true)
+        );
+        assert_eq!(
+            completed(8, false, UrlStatus::Running, 0),
+            (UrlStatus::Running, 0, false)
+        );
+        assert_eq!(
+            completed(AD_RETRY, true, UrlStatus::Running, 0),
+            (UrlStatus::None, DS_MANUAL, false)
+        );
+        assert_eq!(
+            completed(AD_FINISHED, true, UrlStatus::Running, 3),
+            (UrlStatus::None, 3, false)
+        );
+        assert_eq!(
+            select_next_url(&[1, 1], &[UrlStatus::None; 2], &[0, 0], &[10, 50], 1, 0),
             1
+        );
+        assert_eq!(
+            select_next_url(
+                &[1, 1],
+                &[UrlStatus::None, UrlStatus::Running],
+                &[0, 0],
+                &[10, 50],
+                1,
+                0
+            ),
+            0
         );
         assert!(is_hanging_url_download(100, 50, 30, 1, 1));
         assert_eq!(format_temp_url_path(b"/tmp", b'/', 42), b"/tmp/url-42.tmp");

@@ -3,7 +3,8 @@
 
 use crate::options::OptStr;
 use crate::status::{
-    CleanupStatus, DupStatus, DupeMode, MarkStatus, MoveStatus, NzbParStatus, UnpackStatus,
+    CleanupStatus, DupStatus, DupeMode, MarkStatus, MoveStatus, NzbParStatus, ScriptStatus,
+    UnpackStatus, UrlStatus,
 };
 use std::ffi::{c_char, c_int, c_void, CStr};
 
@@ -61,9 +62,6 @@ pub(crate) const DS_COPY: i32 = 6;
 pub(crate) const DS_SCAN: i32 = 7;
 
 pub(crate) const RS_NONE: i32 = 0;
-
-pub(crate) const LS_NONE: i32 = 0;
-pub(crate) const LS_FAILED: i32 = 3;
 
 pub(crate) const TS_NONE: i32 = 0;
 pub(crate) const TS_RUNNING: i32 = 1;
@@ -513,7 +511,7 @@ pub(crate) struct NzbSnap {
     pub live_repair_thread_ptr: usize,
     pub has_unpack_thread: bool,
     pub has_stream_repair_jobs: bool,
-    pub url_status: i32,
+    pub url_status: UrlStatus,
     pub par_sec: i32,
     pub repair_sec: i32,
     pub unpack_sec: i32,
@@ -522,7 +520,7 @@ pub(crate) struct NzbSnap {
     pub reprocess: bool,
     pub extra_par_blocks: i32,
     pub dupe_recovered_holes: i32,
-    pub script_total_status: i32,
+    pub script_total_status: ScriptStatus,
     pub parked_file_count: i32,
     pub delete_paused: bool,
     pub auto_category: bool,
@@ -2155,7 +2153,7 @@ impl QueueSubsysHost {
                 live_repair_thread_ptr: i64s[19] as usize,
                 has_unpack_thread: ints[68] != 0,
                 has_stream_repair_jobs: ints[69] != 0,
-                url_status: ints[70],
+                url_status: UrlStatus::from(ints[70]),
                 par_sec: ints[71],
                 repair_sec: ints[72],
                 unpack_sec: ints[73],
@@ -2164,7 +2162,7 @@ impl QueueSubsysHost {
                 reprocess: ints[74] != 0,
                 extra_par_blocks: ints[75],
                 dupe_recovered_holes: ints[76],
-                script_total_status: ints[77],
+                script_total_status: ScriptStatus::from(ints[77]),
                 parked_file_count: ints[78],
                 delete_paused: ints[79] != 0,
                 auto_category: ints[80] != 0,
@@ -2416,12 +2414,14 @@ impl QueueSubsysHost {
         out
     }
 
-    pub fn nzb_push_script_status(&self, nzb_ptr: usize, name: &[u8], status: i32) {
+    pub fn nzb_push_script_status(&self, nzb_ptr: usize, name: &[u8], status: ScriptStatus) {
         let cn = c_bytes(name);
         self.coll_op(
             nzb_ptr,
             10,
-            OpArgs::NONE.a2(status).s1(cn.as_ptr() as *const c_char),
+            OpArgs::NONE
+                .a2(status.into())
+                .s1(cn.as_ptr() as *const c_char),
         );
     }
 
@@ -2497,7 +2497,7 @@ impl QueueSubsysHost {
         self.coll_op(nzb_ptr, 17, OpArgs::NONE.a2(-1))
     }
 
-    pub fn nzb_script_status_at(&self, nzb_ptr: usize, idx: usize) -> (i32, Vec<u8>) {
+    pub fn nzb_script_status_at(&self, nzb_ptr: usize, idx: usize) -> (ScriptStatus, Vec<u8>) {
         let mut ints = [0i32; 1];
         let mut strs = [std::ptr::null(); 1];
         self.coll_op(
@@ -2508,7 +2508,7 @@ impl QueueSubsysHost {
                 .ints(ints.as_mut_ptr())
                 .strs(strs.as_mut_ptr()),
         );
-        (ints[0], unsafe { read_cstr(strs[0]) })
+        (ScriptStatus::from(ints[0]), unsafe { read_cstr(strs[0]) })
     }
 
     pub fn nzb_extracted_archives_len(&self, nzb_ptr: usize) -> usize {
@@ -2567,6 +2567,10 @@ impl QueueSubsysHost {
 
     pub fn nzb_set_mark_status(&self, nzb_ptr: usize, status: MarkStatus) {
         self.nzb_set_int(nzb_ptr, NZB_INT_MARK_STATUS, status.into());
+    }
+
+    pub fn nzb_set_url_status(&self, nzb_ptr: usize, status: UrlStatus) {
+        self.nzb_set_int(nzb_ptr, NZB_INT_URL_STATUS, status.into());
     }
 
     pub fn nzb_set_i64(&self, nzb_ptr: usize, field: i32, val: i64) {

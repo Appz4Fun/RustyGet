@@ -204,6 +204,28 @@ status_enum! {
     }
 }
 
+status_enum! {
+    /// A URL download's state (NzbInfo::EUrlStatus).
+    UrlStatus {
+        None = 0,
+        Running = 1,
+        Finished = 2,
+        Failed = 3,
+        Retry = 4,
+        ScanSkipped = 5,
+        ScanFailed = 6,
+    }
+}
+
+status_enum! {
+    /// A post-processing script's outcome (ScriptStatus::EStatus).
+    ScriptStatus {
+        None = 0,
+        Failure = 1,
+        Success = 2,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -282,5 +304,16 @@ mod tests {
         assert_eq!(i32::from(MarkStatus::Bad), 1);
         assert_eq!(i32::from(MarkStatus::Success), 3);
         assert_eq!(MarkStatus::from(4), MarkStatus::Other(4));
+    }
+
+    #[test]
+    fn url_and_script_statuses_round_trip() {
+        round_trip(UrlStatus::ALL);
+        round_trip(ScriptStatus::ALL);
+        assert_eq!(i32::from(UrlStatus::Retry), 4);
+        assert_eq!(i32::from(UrlStatus::ScanFailed), 6);
+        assert_eq!(i32::from(ScriptStatus::Success), 2);
+        assert_eq!(UrlStatus::from(7), UrlStatus::Other(7));
+        assert_eq!(ScriptStatus::from(-1), ScriptStatus::Other(-1));
     }
 }

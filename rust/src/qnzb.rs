@@ -11,6 +11,7 @@
 #![allow(non_snake_case)]
 
 use crate::options::OptStr;
+use crate::status::ScriptStatus;
 use std::collections::BTreeSet;
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::sync::Mutex;
@@ -541,10 +542,13 @@ pub unsafe extern "C" fn nzbget_rs_nzb_coll(
             0
         }
         14 => {
-            let all: Vec<c_int> = c.script_statuses.iter().map(|(_, s)| *s).collect();
-            i64::from(unsafe {
-                crate::ffi::nzbget_rs_script_calc_total_status(all.as_ptr(), all.len())
-            })
+            let all = c
+                .script_statuses
+                .iter()
+                .map(|&(_, s)| ScriptStatus::from(s));
+            i64::from(i32::from(crate::downloadinfo::script_calc_total_status(
+                all,
+            )))
         }
         20 => i64::from(c.blocked_donors.contains(&a2)),
         21 => i64::from(c.blocked_donors.insert(a2) || true),
@@ -2380,7 +2384,6 @@ const HEALTH_CHECK_DUPE: i32 = 4;
 /// Priority at and above which a collection is forced.
 const FORCE_PRIORITY: i32 = 900;
 /// `ScriptStatus::srSuccess`.
-const SCRIPT_STATUS_SUCCESS: i32 = 2;
 
 /// A collection's snapshot (host op 30): 90 ints, 21 i64s and, when `strs`
 /// is not null, 9 strings, in the order the C++ host wrote them. `a1` 1 or 2
@@ -2442,7 +2445,7 @@ pub(crate) unsafe fn host_coll_snapshot(
         s.deleteStatus,
         crate::status::NzbParStatus::from(s.parStatus),
         crate::status::UnpackStatus::from(s.unpackStatus),
-        s.urlStatus,
+        crate::status::UrlStatus::from(s.urlStatus),
         health,
         critical_est,
         critical_exact,
@@ -2585,11 +2588,11 @@ pub(crate) unsafe fn host_coll_snapshot(
             crate::status::NzbParStatus::from(s.parStatus),
             crate::status::UnpackStatus::from(s.unpackStatus),
             crate::status::MoveStatus::from(s.moveStatus),
-            s.urlStatus,
+            crate::status::UrlStatus::from(s.urlStatus),
             if a1 == 1 {
-                SCRIPT_STATUS_SUCCESS
+                ScriptStatus::Success
             } else {
-                script_total
+                ScriptStatus::from(script_total)
             },
             health,
             critical_exact,

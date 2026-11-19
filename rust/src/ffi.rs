@@ -3,6 +3,8 @@
 //! out as a buffer freed with `nzbget_rs_free`. They are being replaced by
 //! plain Rust APIs.
 
+use crate::cstr;
+use crate::options::OptStr;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 
 #[path = "tlscipher/native.rs"]
@@ -3092,28 +3094,28 @@ pub(crate) fn system_health_diagnose_bytes(format_mode: c_int) -> Vec<u8> {
     let sc = opts.scalars();
     let to_path = |b: &[u8]| crate::cleanup::bytes_to_path_buf(b);
 
-    let main_p = to_path(opts.str_bytes(2));
-    let dest_p = to_path(opts.str_bytes(3));
-    let inter_p = to_path(opts.str_bytes(4));
-    let nzb_p = to_path(opts.str_bytes(7));
-    let queue_p = to_path(opts.str_bytes(6));
-    let web_p = to_path(opts.str_bytes(8));
-    let temp_p = to_path(opts.str_bytes(5));
-    let cfg_tpl_p = to_path(opts.str_bytes(9));
+    let main_p = to_path(opts.str_bytes(OptStr::MainDir));
+    let dest_p = to_path(opts.str_bytes(OptStr::DestDir));
+    let inter_p = to_path(opts.str_bytes(OptStr::InterDir));
+    let nzb_p = to_path(opts.str_bytes(OptStr::NzbDir));
+    let queue_p = to_path(opts.str_bytes(OptStr::QueueDir));
+    let web_p = to_path(opts.str_bytes(OptStr::WebDir));
+    let temp_p = to_path(opts.str_bytes(OptStr::TempDir));
+    let cfg_tpl_p = to_path(opts.str_bytes(OptStr::ConfigTemplate));
     let log_bytes = log
         .as_ref()
         .map_or_else(Vec::new, |l| l.log_filename_bytes());
     let log_p = to_path(&log_bytes);
-    let opt_log_p = to_path(opts.str_bytes(27));
-    let cert_bytes = opts.str_bytes(23);
+    let opt_log_p = to_path(opts.str_bytes(OptStr::LogFile));
+    let cert_bytes = opts.str_bytes(OptStr::CertStore);
     let cert_p = to_path(cert_bytes);
-    let cfg_p = to_path(opts.str_bytes(0));
-    let lock_p = to_path(opts.str_bytes(25));
-    let secure_cert_p = to_path(opts.str_bytes(21));
-    let secure_key_p = to_path(opts.str_bytes(22));
-    let unrar_p = to_path(opts.str_bytes(38));
-    let seven_zip_p = to_path(opts.str_bytes(39));
-    let pass_p = to_path(opts.str_bytes(31));
+    let cfg_p = to_path(opts.str_bytes(OptStr::ConfigFile));
+    let lock_p = to_path(opts.str_bytes(OptStr::LockFile));
+    let secure_cert_p = to_path(opts.str_bytes(OptStr::SecureCert));
+    let secure_key_p = to_path(opts.str_bytes(OptStr::SecureKey));
+    let unrar_p = to_path(opts.str_bytes(OptStr::UnrarPath));
+    let seven_zip_p = to_path(opts.str_bytes(OptStr::SevenZipPath));
+    let pass_p = to_path(opts.str_bytes(OptStr::UnpackPassFile));
 
     let raw_servers = pool
         .as_ref()
@@ -3231,14 +3233,14 @@ pub(crate) fn system_health_diagnose_bytes(format_mode: c_int) -> Vec<u8> {
         skip_write: sc.skip_write != 0,
         raw_article: sc.raw_article != 0,
         security: crate::systemhealth::SecuritySectionInput {
-            control_ip: opts.str_bytes(14),
+            control_ip: opts.str_bytes(OptStr::ControlIp),
             control_port: sc.control_port,
-            control_username: opts.str_bytes(15),
-            control_password: opts.str_bytes(16),
-            restricted_username: opts.str_bytes(17),
-            restricted_password: opts.str_bytes(18),
-            add_username: opts.str_bytes(19),
-            add_password: opts.str_bytes(20),
+            control_username: opts.str_bytes(OptStr::ControlUsername),
+            control_password: opts.str_bytes(OptStr::ControlPassword),
+            restricted_username: opts.str_bytes(OptStr::RestrictedUsername),
+            restricted_password: opts.str_bytes(OptStr::RestrictedPassword),
+            add_username: opts.str_bytes(OptStr::AddUsername),
+            add_password: opts.str_bytes(OptStr::AddPassword),
             form_auth: sc.form_auth != 0,
             secure_control: sc.secure_control != 0,
             secure_cert: &secure_cert_p,
@@ -3247,7 +3249,7 @@ pub(crate) fn system_health_diagnose_bytes(format_mode: c_int) -> Vec<u8> {
             cert_check: sc.cert_check != 0,
             cert_store_path_empty: cert_bytes.is_empty(),
             daemon_mode,
-            daemon_username: opts.str_bytes(26),
+            daemon_username: opts.str_bytes(OptStr::DaemonUsername),
             umask: sc.umask,
         },
         append_category_dir: sc.append_category_dir != 0,
@@ -3272,9 +3274,9 @@ pub(crate) fn system_health_diagnose_bytes(format_mode: c_int) -> Vec<u8> {
         unpack_pause_queue: sc.unpack_pause_queue != 0,
         unrar_path: &unrar_p,
         seven_zip_path: &seven_zip_p,
-        ext_cleanup_disk: opts.str_bytes(32),
+        ext_cleanup_disk: opts.str_bytes(OptStr::ExtCleanupDisk),
         unpack_pass_file: &pass_p,
-        unpack_ignore_ext: opts.str_bytes(35),
+        unpack_ignore_ext: opts.str_bytes(OptStr::UnpackIgnoreExt),
         options_log_file: &opt_log_p,
         tasks: &tasks,
         categories: &categories,
@@ -3374,11 +3376,11 @@ pub(crate) fn init_build_env() {
             flags |= BUILD_FLAG_SSL_VERSION_AFTER_SPACE;
         }
         BUILD_FLAGS.store(flags, std::sync::atomic::Ordering::SeqCst);
-        let _ = BUILD_VERSION.set(unsafe { to_nul_cvec(DAEMON_VERSION.as_bytes()) });
+        let _ = BUILD_VERSION.set(cstr::to_cstring(DAEMON_VERSION.as_bytes()));
         if let Ok(mut g) = BUILD_ENV.write() {
             *g = Some(BuildEnvRuntime {
-                ssl_lib_name: unsafe { to_nul_cvec(ssl_lib) },
-                ssl_raw_version: unsafe { to_nul_cvec(&ssl_ver) },
+                ssl_lib_name: cstr::to_cstring(ssl_lib),
+                ssl_raw_version: cstr::to_cstring(&ssl_ver),
             });
         }
     });
@@ -3896,7 +3898,7 @@ static ACTIVE_SCRIPT_TEMPLATES: std::sync::Mutex<Vec<CString>> = std::sync::Mute
 
 fn load_script_template_cstrings() -> Option<Vec<CString>> {
     let opts = crate::options::active_options()?;
-    let path_bytes = opts.str_bytes(9);
+    let path_bytes = opts.str_bytes(OptStr::ConfigTemplate);
     if path_bytes.is_empty() {
         return None;
     }
@@ -4015,7 +4017,7 @@ pub unsafe extern "C" fn nzbget_rs_script_config_exec(
             let Some(opts) = crate::options::active_options() else {
                 return 0;
             };
-            let fn_bytes = opts.str_bytes(0);
+            let fn_bytes = opts.str_bytes(OptStr::ConfigFile);
             if fn_bytes.is_empty() {
                 return 0;
             }
@@ -4031,7 +4033,7 @@ pub unsafe extern "C" fn nzbget_rs_script_config_exec(
             let Some(opts) = crate::options::active_options() else {
                 return -1;
             };
-            let fn_bytes = opts.str_bytes(0);
+            let fn_bytes = opts.str_bytes(OptStr::ConfigFile);
             if fn_bytes.is_empty() {
                 return -1;
             }
@@ -4625,11 +4627,6 @@ impl Drop for PosixCancelGuard {
 
 // ---- WebProcessor / BinRpcProcessor / RemoteClient / Frontend FFI ----
 
-unsafe fn to_nul_cvec(bytes: &[u8]) -> std::ffi::CString {
-    let nul = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    std::ffi::CString::from_vec_unchecked(bytes[..nul].to_vec())
-}
-
 #[cfg(unix)]
 unsafe extern "C" fn web_rpc_log_bridge(_ctx: *mut c_void, lvl: c_int, msg: *const c_char) {
     if lvl == 0 && !build_debug_enabled() {
@@ -4885,7 +4882,7 @@ unsafe extern "C" fn web_rpc_action_bridge(
         }
         18 => {
             let tdir =
-                crate::options::active_options().and_then(|o| o.str_cstr(5).map(|s| s.to_owned()));
+                crate::options::active_options().and_then(|o| o.str_cstr(OptStr::TempDir).map(|s| s.to_owned()));
             let tdir_ptr = tdir.as_ref().map_or(c"".as_ptr(), |s| s.as_ptr());
             let mut buf = RsBuf {
                 data: std::ptr::null_mut(),
@@ -5050,14 +5047,14 @@ unsafe fn emit_rpc_nzb(
     } else {
         0
     };
-    let c_name = to_nul_cvec(&n.name);
-    let c_url = to_nul_cvec(&n.url);
-    let c_filename = to_nul_cvec(&n.filename);
-    let c_dest_dir = to_nul_cvec(&n.dest_dir);
-    let c_final_dir = to_nul_cvec(&n.final_dir);
-    let c_category = to_nul_cvec(&n.category);
-    let c_dupe_key = to_nul_cvec(&n.dupe_key);
-    let c_text_status = to_nul_cvec(&n.text_status);
+    let c_name = cstr::to_cstring(&n.name);
+    let c_url = cstr::to_cstring(&n.url);
+    let c_filename = cstr::to_cstring(&n.filename);
+    let c_dest_dir = cstr::to_cstring(&n.dest_dir);
+    let c_final_dir = cstr::to_cstring(&n.final_dir);
+    let c_category = cstr::to_cstring(&n.category);
+    let c_dupe_key = cstr::to_cstring(&n.dupe_key);
+    let c_text_status = cstr::to_cstring(&n.text_status);
 
     let f = crate::xmlrpc_format::NzbgetRsRpcNzbInfoInput {
         id: n.id,
@@ -5109,7 +5106,7 @@ unsafe fn emit_rpc_nzb(
     let mut prm_cvecs = Vec::with_capacity(plen);
     for i in 0..plen {
         let (k, v) = qh.nzb_param_at(nzb_ptr, i);
-        prm_cvecs.push((to_nul_cvec(&k), to_nul_cvec(&v)));
+        prm_cvecs.push((cstr::to_cstring(&k), cstr::to_cstring(&v)));
     }
     let prms: Vec<crate::xmlrpc_format::NzbgetRsRpcParamItem> = prm_cvecs
         .iter()
@@ -5123,7 +5120,7 @@ unsafe fn emit_rpc_nzb(
     let mut scr_cvecs = Vec::with_capacity(slen);
     for i in 0..slen {
         let (st, sname) = qh.nzb_script_status_at(nzb_ptr, i);
-        scr_cvecs.push((to_nul_cvec(&sname), st));
+        scr_cvecs.push((cstr::to_cstring(&sname), st));
     }
     let scrs: Vec<crate::xmlrpc_format::NzbgetRsRpcScriptItem> = scr_cvecs
         .iter()
@@ -5186,7 +5183,7 @@ unsafe fn emit_rpc_post(
     }
     let pi = qh.post_snap(post_ptr);
     let cur_time = libc::time(std::ptr::null_mut()) as i64;
-    let c_label = to_nul_cvec(&pi.progress_label);
+    let c_label = cstr::to_cstring(&pi.progress_label);
     let msgs = if log_entries > 0 {
         qh.nzb_cached_messages_slice(pi.nzb_ptr, 0, log_entries)
     } else {
@@ -5287,13 +5284,13 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                 s.calc_quota_usage(tz, opts.as_deref(), lg.as_deref())
             });
 
-            let (free_disk, total_disk) = match opts.as_deref().and_then(|o| o.str_cstr(3)) {
+            let (free_disk, total_disk) = match opts.as_deref().and_then(|o| o.str_cstr(OptStr::DestDir)) {
                 Some(p) if !p.to_bytes().is_empty() => {
                     crate::fsops::get_disk_state(p).unwrap_or((0, 0))
                 }
                 _ => (0, 0),
             };
-            let inter_cstr = opts.as_deref().and_then(|o| o.str_cstr(4));
+            let inter_cstr = opts.as_deref().and_then(|o| o.str_cstr(OptStr::InterDir));
             let inter_empty = inter_cstr.map_or(true, |p| p.to_bytes().is_empty());
             let (free_inter, total_inter) = match inter_cstr {
                 Some(p) if !inter_empty => crate::fsops::get_disk_state(p).unwrap_or((0, 0)),
@@ -5542,10 +5539,10 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                 for qi in 0..qlen {
                     let np = qh.queue_at(dq_ptr, qi);
                     let outer_n = qh.nzb_snap(np, false);
-                    let c_outer_name = to_nul_cvec(&outer_n.name);
-                    let c_outer_fn = to_nul_cvec(&outer_n.filename);
-                    let c_outer_dest = to_nul_cvec(&outer_n.dest_dir);
-                    let c_outer_cat = to_nul_cvec(&outer_n.category);
+                    let c_outer_name = cstr::to_cstring(&outer_n.name);
+                    let c_outer_fn = cstr::to_cstring(&outer_n.filename);
+                    let c_outer_dest = cstr::to_cstring(&outer_n.dest_dir);
+                    let c_outer_cat = cstr::to_cstring(&outer_n.category);
                     let flen = qh.nzb_file_len(np);
                     for fi in 0..flen {
                         let fp = qh.nzb_file_at(np, fi);
@@ -5570,15 +5567,15 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                         };
                         let alt_c = alt_n.as_ref().map(|an| {
                             (
-                                to_nul_cvec(&an.name),
-                                to_nul_cvec(&an.filename),
-                                to_nul_cvec(&an.dest_dir),
-                                to_nul_cvec(&an.category),
+                                cstr::to_cstring(&an.name),
+                                cstr::to_cstring(&an.filename),
+                                cstr::to_cstring(&an.dest_dir),
+                                cstr::to_cstring(&an.category),
                                 an.priority,
                             )
                         });
-                        let c_subj = to_nul_cvec(&f.subject);
-                        let c_ffn = to_nul_cvec(&f.filename);
+                        let c_subj = cstr::to_cstring(&f.subject);
+                        let c_ffn = cstr::to_cstring(&f.filename);
                         let item = crate::xmlrpc_format::NzbgetRsRpcFileItem {
                             id: f.id,
                             file_size: f.size,
@@ -5698,7 +5695,7 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                     }
                     let pi = qh.post_snap(outer.post_info_ptr);
                     emit_rpc_nzb(&qh, pi.nzb_ptr, 0, |pn, _, f, prms, scrs, sts| {
-                        let c_pname = to_nul_cvec(&pn.name);
+                        let c_pname = cstr::to_cstring(&pn.name);
                         emit_cb(
                             emit_ctx,
                             6,
@@ -5741,7 +5738,7 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                     if h.kind == crate::queuesubsys_host::HK_DUP && a1 == 0 {
                         continue;
                     }
-                    let c_hname = to_nul_cvec(&h.name);
+                    let c_hname = cstr::to_cstring(&h.name);
                     if h.kind == crate::queuesubsys_host::HK_NZB
                         || h.kind == crate::queuesubsys_host::HK_URL
                     {
@@ -5776,7 +5773,7 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                         });
                     } else if h.kind == crate::queuesubsys_host::HK_DUP {
                         let d = qh.dup_snap(h.inner_ptr);
-                        let c_dkey = to_nul_cvec(&d.dupe_key);
+                        let c_dkey = cstr::to_cstring(&d.dupe_key);
                         emit_cb(
                             emit_ctx,
                             8,
@@ -5817,10 +5814,10 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                     let np = qh.queue_at(dq_ptr, qi);
                     let n = qh.nzb_snap(np, false);
                     if n.kind == crate::queuesubsys_host::NK_URL {
-                        let c_fn = to_nul_cvec(&n.filename);
-                        let c_url = to_nul_cvec(&n.url);
-                        let c_name = to_nul_cvec(&n.name);
-                        let c_cat = to_nul_cvec(&n.category);
+                        let c_fn = cstr::to_cstring(&n.filename);
+                        let c_url = cstr::to_cstring(&n.url);
+                        let c_name = cstr::to_cstring(&n.name);
+                        let c_cat = cstr::to_cstring(&n.category);
                         emit_cb(
                             emit_ctx,
                             9,
@@ -5989,13 +5986,13 @@ unsafe extern "C" fn web_rpc_collect_bridge(
 pub(crate) unsafe fn serve_web_conn(conn: &crate::net::NzbgetRsConn, sig: &[u8; 4]) -> bool {
     let _cancel_guard = PosixCancelGuard::disable();
     let opts = crate::options::active_options();
-    let opt_str = |id: usize| -> Option<&[u8]> {
+    let opt_str = |id: OptStr| -> Option<&[u8]> {
         opts.as_deref()
             .and_then(|o| o.str_cstr(id).map(CStr::to_bytes))
     };
     let remote_addr = conn.remote_addr_bytes();
     let version = build_version_bytes();
-    let web_dir = opts.as_deref().map_or(&[][..], |o| o.str_bytes(8));
+    let web_dir = opts.as_deref().map_or(&[][..], |o| o.str_bytes(OptStr::WebDir));
     let control_port = opts.as_deref().map_or(0, |o| o.scalars().control_port);
     let form_auth = opts.as_deref().is_some_and(|o| o.scalars().form_auth != 0);
     let json_p = opts.as_deref().is_some_and(|o| o.scalars().json_p != 0);
@@ -6008,13 +6005,13 @@ pub(crate) unsafe fn serve_web_conn(conn: &crate::net::NzbgetRsConn, sig: &[u8; 
         version: &version,
         web_dir,
         credentials: crate::webserver::Credentials {
-            control_username: opt_str(15),
-            control_password: opt_str(16),
-            restricted_username: opt_str(17),
-            restricted_password: opt_str(18),
-            add_username: opt_str(19),
-            add_password: opt_str(20),
-            authorized_ip: opt_str(24),
+            control_username: opt_str(OptStr::ControlUsername),
+            control_password: opt_str(OptStr::ControlPassword),
+            restricted_username: opt_str(OptStr::RestrictedUsername),
+            restricted_password: opt_str(OptStr::RestrictedPassword),
+            add_username: opt_str(OptStr::AddUsername),
+            add_password: opt_str(OptStr::AddPassword),
+            authorized_ip: opt_str(OptStr::AuthorizedIp),
         },
         control_port,
         form_auth,
@@ -6052,7 +6049,7 @@ pub(crate) unsafe fn serve_web_conn(conn: &crate::net::NzbgetRsConn, sig: &[u8; 
                 debug_build,
                 url_c,
                 &version,
-                opt_str(0),
+                opt_str(OptStr::ConfigFile),
                 Some(web_rpc_log_bridge),
                 Some(web_rpc_action_bridge),
                 Some(web_rpc_collect_bridge),
@@ -6107,8 +6104,8 @@ pub(crate) unsafe fn serve_binrpc_conn(conn: &crate::net::NzbgetRsConn) {
 
     let opts = crate::options::active_options();
     let remote_addr = conn.remote_addr_bytes();
-    let control_user = opts.as_deref().map_or(&[][..], |o| o.str_bytes(15));
-    let control_password = opts.as_deref().map_or(&[][..], |o| o.str_bytes(16));
+    let control_user = opts.as_deref().map_or(&[][..], |o| o.str_bytes(OptStr::ControlUsername));
+    let control_password = opts.as_deref().map_or(&[][..], |o| o.str_bytes(OptStr::ControlPassword));
     let control_port = opts.as_deref().map_or(0, |o| o.scalars().control_port);
     let version = build_version_bytes();
 
@@ -6740,7 +6737,7 @@ fn run_frontend_thread(
                     continue;
                 }
                 let ns = qh.nzb_snap(nzb_ptr, false);
-                let name_c = to_nul_cvec(&ns.name);
+                let name_c = cstr::to_cstring(&ns.name);
                 emit_nzb(
                     emit_ctx,
                     ns.id,
@@ -6760,7 +6757,7 @@ fn run_frontend_thread(
                         continue;
                     }
                     let fs = qh.file_snap(f_ptr);
-                    let fname_c = to_nul_cvec(&fs.filename);
+                    let fname_c = cstr::to_cstring(&fs.filename);
                     emit_file(
                         emit_ctx,
                         idx,
@@ -6802,16 +6799,16 @@ fn run_frontend_thread(
         path_sep: crate::paths::PATH_SEPARATOR as u8,
         control_ip: opts
             .as_deref()
-            .and_then(|o| o.str_cstr(14))
+            .and_then(|o| o.str_cstr(OptStr::ControlIp))
             .map_or(std::ptr::null(), CStr::as_ptr),
         control_port: opts.as_deref().map_or(0, |o| o.scalars().control_port),
         control_username: opts
             .as_deref()
-            .and_then(|o| o.str_cstr(15))
+            .and_then(|o| o.str_cstr(OptStr::ControlUsername))
             .map_or(std::ptr::null(), CStr::as_ptr),
         control_password: opts
             .as_deref()
-            .and_then(|o| o.str_cstr(16))
+            .and_then(|o| o.str_cstr(OptStr::ControlPassword))
             .map_or(std::ptr::null(), CStr::as_ptr),
         write_stdout_cb: Some(fe_stdout_cb),
         action_cb: Some(fe_action_cb),

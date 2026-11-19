@@ -3,6 +3,7 @@
 //! par2 set rename check (`need_rename_pars`), article hash16k / par-flag delta
 //! evaluation (`eval_direct_rename_article`), and full queue/loader orchestration.
 
+use crate::cstr;
 use std::ffi::CStr;
 
 /// `BuildNewRegularName`: the par2 file name the first par2 hash equal to
@@ -226,19 +227,6 @@ pub fn resolve_old_output_path(
     out.push(sep);
     out.extend_from_slice(filename);
     out
-}
-
-#[cfg(unix)]
-#[inline]
-fn cut_nul(bytes: &[u8]) -> &[u8] {
-    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    &bytes[..end]
-}
-
-#[cfg(unix)]
-#[inline]
-fn to_cstring(bytes: &[u8]) -> std::ffi::CString {
-    std::ffi::CString::new(cut_nul(bytes)).unwrap_or_default()
 }
 
 #[cfg(unix)]
@@ -549,7 +537,7 @@ pub(crate) fn run_par_loader(
 
     for par_file in &par_files {
         use std::os::unix::ffi::OsStrExt;
-        let p = std::path::Path::new(std::ffi::OsStr::from_bytes(cut_nul(par_file)));
+        let p = std::path::Path::new(std::ffi::OsStr::from_bytes(cstr::until_nul(par_file)));
         match crate::parrenamer::load_par_entries_from_file(p) {
             None => {
                 let mut w = b"Could not load par2-file ".to_vec();
@@ -580,14 +568,14 @@ pub(crate) fn run_par_loader(
                                 break;
                             }
                             crate::parrenamer::ParEntry::File { name, hash } => {
-                                let n = cut_nul(&name);
-                                let h = cut_nul(&hash);
+                                let n = cstr::until_nul(&name);
+                                let h = cstr::until_nul(&hash);
                                 let mut dbg = b"file: ".to_vec();
                                 dbg.extend_from_slice(n);
                                 dbg.extend_from_slice(b", hash-16k: ");
                                 dbg.extend_from_slice(h);
                                 host.log(MK_DEBUG, &dbg);
-                                par_hashes.push((to_cstring(n), to_cstring(h)));
+                                par_hashes.push((cstr::to_cstring(n), cstr::to_cstring(h)));
                             }
                         }
                     }
@@ -652,12 +640,12 @@ fn check_need_rename_pars_host(
     for i in 0..flen {
         let f = host.file_snap(host.nzb_file_at(nzb_ptr, i));
         if f.par_file {
-            owned.push((to_cstring(&f.filename), to_cstring(&f.par_set_id)));
+            owned.push((cstr::to_cstring(&f.filename), cstr::to_cstring(&f.par_set_id)));
         }
     }
     for cf in host.nzb_completed_files(nzb_ptr) {
         if cf.par_file {
-            owned.push((to_cstring(&cf.filename), to_cstring(&cf.par_set_id)));
+            owned.push((cstr::to_cstring(&cf.filename), cstr::to_cstring(&cf.par_set_id)));
         }
     }
     let refs: Vec<(Option<&CStr>, &CStr)> = owned
@@ -687,8 +675,8 @@ fn resolve_new_name(
     } else if par_file && need_pars {
         par_name_on_disk(filename, dest_dir, par_set_id, b'/', vol)
     } else if !par_file {
-        let c_old = to_cstring(filename);
-        let c_hash = to_cstring(hash16k);
+        let c_old = cstr::to_cstring(filename);
+        let c_hash = cstr::to_cstring(hash16k);
         match regular_name(
             &c_old,
             &c_hash,
@@ -738,8 +726,8 @@ fn try_create_hard_link_host(
     host.nzb_print_message(nzb_ptr, MK_INFO, &info_msg);
 
     crate::postproc::direct_unpack_join_live_par_repair(host.nzb_snap(nzb_ptr, false).id);
-    let c_old = to_cstring(old_output_filename);
-    let c_final = to_cstring(&final_output_filename);
+    let c_old = cstr::to_cstring(old_output_filename);
+    let c_final = cstr::to_cstring(&final_output_filename);
     let mut errmsg = Vec::new();
     if crate::fsops::create_hard_link(&c_old, &c_final, &crate::fsops::posix_stat, &mut errmsg) {
         if file_ptr != 0 {
@@ -926,8 +914,8 @@ fn rename_file_on_disk(
         }
     }
 
-    let c_old = to_cstring(old_full);
-    let c_new = to_cstring(new_full);
+    let c_old = cstr::to_cstring(old_full);
+    let c_new = cstr::to_cstring(new_full);
     if !crate::fsops::move_file(&c_old, &c_new) {
         let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
         let sys_err = crate::fsops::error_message(errno);

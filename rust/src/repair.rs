@@ -4,6 +4,7 @@
 //! for PAR2 recovery volume selection, twin PAR2 index/volume evaluation, file CRC
 //! status resolution, progress/stage transitions, and pause timestamp adjustment.
 
+use crate::cstr;
 use std::ffi::CStr;
 
 pub use crate::postrepair::{check_par_time_limit, pick_twin_volume, select_more_pars};
@@ -414,15 +415,6 @@ pub type NzbgetRsRepairCtrlHostFn = unsafe extern "C" fn(
 ) -> usize;
 
 #[inline]
-fn to_c_buf(bytes: &[u8]) -> Vec<u8> {
-    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    let mut out = Vec::with_capacity(end + 1);
-    out.extend_from_slice(&bytes[..end]);
-    out.push(0);
-    out
-}
-
-#[inline]
 fn to_c_msg_1024(bytes: &[u8]) -> Vec<u8> {
     let cap = bytes.len().min(1023);
     let end = bytes[..cap].iter().position(|&b| b == 0).unwrap_or(cap);
@@ -430,15 +422,6 @@ fn to_c_msg_1024(bytes: &[u8]) -> Vec<u8> {
     out.extend_from_slice(&bytes[..end]);
     out.push(0);
     out
-}
-
-#[inline]
-unsafe fn ptr_bytes(p: *const c_char) -> Vec<u8> {
-    if p.is_null() {
-        Vec::new()
-    } else {
-        unsafe { CStr::from_ptr(p).to_bytes().to_vec() }
-    }
 }
 
 fn with_dq_guard<R, F: FnOnce(usize) -> R>(
@@ -576,8 +559,8 @@ fn inspect_ctrl(
         info_name: par_checker.info_name(),
         par_filename: par_checker.par_filename(),
         checker_dest_dir: par_checker.dest_dir(),
-        unrar_cmd: unsafe { ptr_bytes(strs[0]) },
-        par_ignore_ext: unsafe { ptr_bytes(strs[1]) },
+        unrar_cmd: unsafe { cstr::owned(strs[0]) },
+        par_ignore_ext: unsafe { cstr::owned(strs[1]) },
     }
 }
 
@@ -616,12 +599,12 @@ fn inspect_nzb(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn, nzb_ptr: usi
         dupe_mode: ints[13],
         dupe_recovered_bytes: i64s[0],
         expected_data_size: i64s[1],
-        name: unsafe { ptr_bytes(strs[0]) },
-        dest_dir: unsafe { ptr_bytes(strs[1]) },
-        dupe_key: unsafe { ptr_bytes(strs[2]) },
-        queued_filename: unsafe { ptr_bytes(strs[3]) },
+        name: unsafe { cstr::owned(strs[0]) },
+        dest_dir: unsafe { cstr::owned(strs[1]) },
+        dupe_key: unsafe { cstr::owned(strs[2]) },
+        queued_filename: unsafe { cstr::owned(strs[3]) },
         has_twin_files_param: !strs[4].is_null(),
-        twin_files_param: unsafe { ptr_bytes(strs[4]) },
+        twin_files_param: unsafe { cstr::owned(strs[4]) },
     }
 }
 
@@ -645,7 +628,7 @@ fn emit_msg(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn, kind: c_int, te
 }
 
 fn emit_debug(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn, text: &[u8]) {
-    let c_text = to_c_buf(text);
+    let c_text = cstr::nul_terminated(text);
     unsafe {
         host_cb(
             ctx,
@@ -670,7 +653,7 @@ fn emit_global_log(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn, kind: c_
         4 => 8, // detail
         _ => return,
     };
-    let c_text = to_c_buf(text);
+    let c_text = cstr::nul_terminated(text);
     unsafe {
         host_cb(
             ctx,
@@ -740,7 +723,7 @@ impl NzbgetRsRepairController {
             std::mem::take(&mut st.twin_files)
         };
         for path in &paths {
-            let c_path = to_c_buf(path);
+            let c_path = cstr::nul_terminated(path);
             if let Ok(cs) = CStr::from_bytes_with_nul(&c_path) {
                 crate::fsops::delete_file(cs);
             }
@@ -821,8 +804,8 @@ impl NzbgetRsRepairController {
             ) != 0
         };
         if same_collection && !deleted {
-            let dest_dir = unsafe { ptr_bytes(strs[0]) };
-            let filename = unsafe { ptr_bytes(strs[1]) };
+            let dest_dir = unsafe { cstr::owned(strs[0]) };
+            let filename = unsafe { cstr::owned(strs[1]) };
             let full = crate::artwritercore::article_writer_format_dest_file_path(
                 &dest_dir,
                 crate::paths::PATH_SEPARATOR,
@@ -931,7 +914,7 @@ impl NzbgetRsRepairController {
             let confirmed = f_ints[0] != 0;
             let paused = f_ints[1] != 0;
             let file_size = f_i64s[0];
-            let filename = unsafe { ptr_bytes(f_strs[0]) };
+            let filename = unsafe { cstr::owned(f_strs[0]) };
 
             let (parsed, raw_blocks) =
                 match crate::parparser::parse_par_filename(&filename, confirmed) {
@@ -1081,7 +1064,7 @@ impl NzbgetRsRepairController {
             let ctrl = self.snap(ctx, host_cb);
             let nzb = inspect_nzb(ctx, host_cb, ctrl.nzb_ptr);
             let label_c = if ctrl.file_progress == 0 {
-                Some(to_c_buf(&ctrl.progress_label))
+                Some(cstr::nul_terminated(&ctrl.progress_label))
             } else {
                 None
             };
@@ -1261,7 +1244,7 @@ impl NzbgetRsRepairController {
                     );
                 }
                 let job_file_id = j_ints[0];
-                let mut current_name = unsafe { ptr_bytes(j_strs[0]) };
+                let mut current_name = unsafe { cstr::owned(j_strs[0]) };
                 for cf_idx in 0..nzb.completed_len {
                     let mut c_ints = [0 as c_int; 3];
                     let mut c_strs = [ptr::null::<c_char>(); 2];
@@ -1281,7 +1264,7 @@ impl NzbgetRsRepairController {
                         );
                     }
                     if c_ints[0] == job_file_id {
-                        current_name = unsafe { ptr_bytes(c_strs[0]) };
+                        current_name = unsafe { cstr::owned(c_strs[0]) };
                         break;
                     }
                 }
@@ -1387,7 +1370,7 @@ impl NzbgetRsRepairController {
                         c_strs.as_mut_ptr(),
                     );
                 }
-                let cf_name = unsafe { ptr_bytes(c_strs[0]) };
+                let cf_name = unsafe { cstr::owned(c_strs[0]) };
                 if cf_name.eq_ignore_ascii_case(filename) {
                     return Some((
                         c_ints[0],
@@ -1485,12 +1468,12 @@ impl NzbgetRsRepairController {
                         c_strs.as_mut_ptr(),
                     );
                 }
-                let cf_name = unsafe { ptr_bytes(c_strs[0]) };
+                let cf_name = unsafe { cstr::owned(c_strs[0]) };
                 if cf_name.eq_ignore_ascii_case(filename) {
                     if c_strs[1].is_null() {
                         return None;
                     }
-                    return Some(unsafe { ptr_bytes(c_strs[1]) });
+                    return Some(unsafe { cstr::owned(c_strs[1]) });
                 }
             }
             None
@@ -1697,7 +1680,7 @@ impl NzbgetRsRepairController {
             crate::paths::PATH_SEPARATOR,
             &name,
         );
-        let c_path = to_c_buf(&path);
+        let c_path = cstr::nul_terminated(&path);
         let cs_path = CStr::from_bytes_with_nul(&c_path).ok()?;
         if !crate::fsops::save_buffer_into_file(cs_path, &data) {
             return None;
@@ -1712,7 +1695,7 @@ impl NzbgetRsRepairController {
         host_cb: NzbgetRsRepairCtrlHostFn,
     ) -> Vec<u8> {
         let ctrl0 = self.snap(ctx, host_cb);
-        let c_par_fn = to_c_buf(&ctrl0.par_filename);
+        let c_par_fn = cstr::nul_terminated(&ctrl0.par_filename);
         let mut par_buf = Vec::new();
         if let Ok(cs) = CStr::from_bytes_with_nul(&c_par_fn) {
             crate::fsops::load_file_into_buffer(cs, false, &crate::fsops::posix_stat, |buf_size| {
@@ -1862,7 +1845,7 @@ impl NzbgetRsRepairController {
                 msg.extend_from_slice(b": its par2 set ");
                 msg.extend_from_slice(&reason[..reason_end]);
                 emit_msg(ctx, host_cb, MK_DETAIL, &msg);
-                let c_del = to_c_buf(&path);
+                let c_del = cstr::nul_terminated(&path);
                 if let Ok(cs) = CStr::from_bytes_with_nul(&c_del) {
                     crate::fsops::delete_file(cs);
                 }
@@ -2002,7 +1985,7 @@ impl crate::postproc::ParCheckerHooks for RepairParHooks<'_> {
     }
 
     fn register_parred_file(&self, filename: &[u8]) {
-        let c_fn = to_c_buf(filename);
+        let c_fn = cstr::nul_terminated(filename);
         unsafe {
             (self.host_cb)(
                 self.ctx,

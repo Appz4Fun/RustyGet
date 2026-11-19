@@ -1,8 +1,9 @@
 //! The main configuration file reader/writer (`ScriptConfig`): load, merge-save
 //! with the TLS cipher baseline check, and atomic cipher patching.
 
+use crate::cstr;
 use std::collections::BTreeMap;
-use std::ffi::{c_char, c_int, CStr, CString};
+use std::ffi::{c_int, CStr, CString};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
@@ -15,14 +16,6 @@ fn bytes_to_path(bytes: &[u8]) -> PathBuf {
 #[cfg(not(unix))]
 fn bytes_to_path(bytes: &[u8]) -> PathBuf {
     PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
-}
-
-fn cstring_lossy(bytes: &[u8]) -> CString {
-    if let Some(nul) = bytes.iter().position(|&b| b == 0) {
-        CString::new(&bytes[..nul]).unwrap_or_default()
-    } else {
-        CString::new(bytes).unwrap_or_default()
-    }
 }
 
 static CONFIG_WRITE_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -63,8 +56,8 @@ pub fn script_config_parse_bytes(raw: &[u8]) -> Vec<(CString, CString)> {
             continue;
         }
         if let Some((raw_name, raw_val)) = crate::options::options_split_option_string(line) {
-            let name_c = cstring_lossy(raw_name);
-            let val_c = cstring_lossy(raw_val);
+            let name_c = cstr::to_cstring(raw_name);
+            let val_c = cstr::to_cstring(raw_val);
             let (conv_name, conv_val) = crate::options::convert_old_option(&name_c, &val_c);
             entries.push((conv_name, conv_val));
         }
@@ -128,8 +121,8 @@ pub fn script_config_merge_bytes(raw: &[u8], entries: &[(&[u8], &[u8])]) -> Vec<
             }
             if let Some((raw_name, raw_val)) = crate::options::options_split_option_string(trimmed)
             {
-                let name_c = cstring_lossy(raw_name);
-                let val_c = cstring_lossy(raw_val);
+                let name_c = cstr::to_cstring(raw_name);
+                let val_c = cstr::to_cstring(raw_val);
                 let (conv_name, _) = crate::options::convert_old_option(&name_c, &val_c);
                 let opt_bytes = conv_name.to_bytes();
                 if let Some(&(canon_name, latest_val)) = values
@@ -236,120 +229,14 @@ mod cipher_atomic {
     use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    pub const O_RDONLY: c_int = 0;
-    pub const O_WRONLY: c_int = 1;
+    pub use libc::{
+        close, fchmod, fchown, open, openat, renameat, unlinkat, EEXIST, O_CLOEXEC, O_CREAT,
+        O_DIRECTORY, O_EXCL, O_NOFOLLOW, O_NONBLOCK, O_RDONLY, O_WRONLY,
+    };
+    #[cfg(any(target_os = "linux", test))]
+    pub use libc::{ENOTSUP, EOPNOTSUPP};
     #[cfg(test)]
-    pub const O_ACCMODE: c_int = 3;
-
-    #[cfg(target_os = "macos")]
-    pub const O_NONBLOCK: c_int = 0x0004;
-    #[cfg(target_os = "macos")]
-    pub const O_NOFOLLOW: c_int = 0x0100;
-    #[cfg(target_os = "macos")]
-    pub const O_CREAT: c_int = 0x0200;
-    #[cfg(target_os = "macos")]
-    pub const O_EXCL: c_int = 0x0800;
-    #[cfg(target_os = "macos")]
-    pub const O_DIRECTORY: c_int = 0x100000;
-    #[cfg(target_os = "macos")]
-    pub const O_CLOEXEC: c_int = 0x1000000;
-    #[cfg(all(target_os = "macos", test))]
-    pub const ENOTSUP: i32 = 45;
-    #[cfg(all(target_os = "macos", test))]
-    pub const EOPNOTSUPP: i32 = 102;
-
-    #[cfg(target_os = "linux")]
-    pub const O_CREAT: c_int = 0o100;
-    #[cfg(target_os = "linux")]
-    pub const O_EXCL: c_int = 0o200;
-    #[cfg(target_os = "linux")]
-    pub const O_NONBLOCK: c_int = 0o4000;
-    #[cfg(all(
-        target_os = "linux",
-        any(
-            target_arch = "aarch64",
-            target_arch = "arm",
-            target_arch = "powerpc",
-            target_arch = "powerpc64",
-            target_arch = "m68k"
-        )
-    ))]
-    pub const O_DIRECTORY: c_int = 0o40000;
-    #[cfg(all(
-        target_os = "linux",
-        any(
-            target_arch = "aarch64",
-            target_arch = "arm",
-            target_arch = "powerpc",
-            target_arch = "powerpc64",
-            target_arch = "m68k"
-        )
-    ))]
-    pub const O_NOFOLLOW: c_int = 0o100000;
-    #[cfg(all(
-        target_os = "linux",
-        not(any(
-            target_arch = "aarch64",
-            target_arch = "arm",
-            target_arch = "powerpc",
-            target_arch = "powerpc64",
-            target_arch = "m68k"
-        ))
-    ))]
-    pub const O_DIRECTORY: c_int = 0o200000;
-    #[cfg(all(
-        target_os = "linux",
-        not(any(
-            target_arch = "aarch64",
-            target_arch = "arm",
-            target_arch = "powerpc",
-            target_arch = "powerpc64",
-            target_arch = "m68k"
-        ))
-    ))]
-    pub const O_NOFOLLOW: c_int = 0o400000;
-    #[cfg(target_os = "linux")]
-    pub const O_CLOEXEC: c_int = 0o2000000;
-    #[cfg(target_os = "linux")]
-    pub const ENOTSUP: i32 = 95;
-    #[cfg(target_os = "linux")]
-    pub const EOPNOTSUPP: i32 = 95;
-
-    pub const EEXIST: i32 = 17;
-
-    extern "C" {
-        pub fn open(path: *const c_char, oflag: c_int, ...) -> c_int;
-        pub fn openat(dirfd: c_int, pathname: *const c_char, flags: c_int, ...) -> c_int;
-        pub fn close(fd: c_int) -> c_int;
-        pub fn fchown(fd: c_int, owner: u32, group: u32) -> c_int;
-        pub fn fchmod(fd: c_int, mode: u32) -> c_int;
-        pub fn renameat(
-            olddirfd: c_int,
-            oldpath: *const c_char,
-            newdirfd: c_int,
-            newpath: *const c_char,
-        ) -> c_int;
-        pub fn unlinkat(dirfd: c_int, pathname: *const c_char, flags: c_int) -> c_int;
-        #[cfg(target_os = "macos")]
-        fn fcopyfile(from: c_int, to: c_int, state: *mut std::ffi::c_void, flags: u32) -> c_int;
-        #[cfg(target_os = "linux")]
-        fn flistxattr(fd: c_int, list: *mut c_char, size: usize) -> isize;
-        #[cfg(target_os = "linux")]
-        fn fgetxattr(
-            fd: c_int,
-            name: *const c_char,
-            value: *mut std::ffi::c_void,
-            size: usize,
-        ) -> isize;
-        #[cfg(target_os = "linux")]
-        fn fsetxattr(
-            fd: c_int,
-            name: *const c_char,
-            value: *const std::ffi::c_void,
-            size: usize,
-            flags: c_int,
-        ) -> c_int;
-    }
+    pub use libc::O_ACCMODE;
 
     pub fn same_cipher_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
         a.dev() == b.dev()
@@ -445,13 +332,12 @@ mod cipher_atomic {
     pub fn copy_cipher_attributes(source: c_int, target: c_int) -> bool {
         #[cfg(target_os = "macos")]
         {
-            const COPYFILE_SECURITY_AND_XATTR: u32 = (1 << 0) | (1 << 1) | (1 << 2);
             unsafe {
-                fcopyfile(
+                libc::fcopyfile(
                     source,
                     target,
                     std::ptr::null_mut(),
-                    COPYFILE_SECURITY_AND_XATTR,
+                    libc::COPYFILE_METADATA,
                 ) == 0
             }
         }
@@ -461,7 +347,7 @@ mod cipher_atomic {
                 source,
                 target,
                 |fd, buf, size| {
-                    let res = unsafe { flistxattr(fd, buf.cast::<c_char>(), size) };
+                    let res = unsafe { libc::flistxattr(fd, buf.cast(), size) };
                     if res < 0 {
                         Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(0))
                     } else {
@@ -470,7 +356,7 @@ mod cipher_atomic {
                 },
                 |fd, name, buf, size| {
                     let res = unsafe {
-                        fgetxattr(fd, name.as_ptr(), buf.cast::<std::ffi::c_void>(), size)
+                        libc::fgetxattr(fd, name.as_ptr(), buf.cast::<std::ffi::c_void>(), size)
                     };
                     if res < 0 {
                         Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(0))
@@ -480,7 +366,7 @@ mod cipher_atomic {
                 },
                 |fd, name, buf, size, flags| {
                     let res = unsafe {
-                        fsetxattr(
+                        libc::fsetxattr(
                             fd,
                             name.as_ptr(),
                             buf.cast::<std::ffi::c_void>(),
@@ -499,7 +385,7 @@ mod cipher_atomic {
     }
 
     pub fn read_snapshot_unlocked(filename: &[u8]) -> Option<Vec<u8>> {
-        let path_c = cstring_lossy(filename);
+        let path_c = cstr::to_cstring(filename);
         let fd = unsafe {
             open(
                 path_c.as_ptr(),
@@ -542,8 +428,8 @@ mod cipher_atomic {
             .map_or(&b"."[..], |p| {
                 crate::cleanup::os_str_to_bytes(p.as_os_str())
             });
-        let parent_c = cstring_lossy(parent_bytes);
-        let leaf_c = cstring_lossy(leaf_bytes);
+        let parent_c = cstr::to_cstring(parent_bytes);
+        let leaf_c = cstr::to_cstring(leaf_bytes);
 
         let parent_fd = unsafe { open(parent_c.as_ptr(), O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0) };
         if parent_fd < 0 {
@@ -583,7 +469,7 @@ mod cipher_atomic {
             tmp_name.push(b'.');
             tmp_name.extend_from_slice(leaf_bytes);
             tmp_name.extend_from_slice(format!(".tls-{pid}-{seq}").as_bytes());
-            temp_c = cstring_lossy(&tmp_name);
+            temp_c = cstr::to_cstring(&tmp_name);
             out_fd = unsafe {
                 openat(
                     parent_file.as_raw_fd(),
@@ -638,7 +524,7 @@ mod cipher_atomic {
         let raw_out_fd = output_file.as_raw_fd();
         if !copy_attrs(raw_orig_fd, raw_out_fd)
             || unsafe { fchown(raw_out_fd, before.uid(), before.gid()) } != 0
-            || unsafe { fchmod(raw_out_fd, before.mode() & 0o7777) } != 0
+            || unsafe { fchmod(raw_out_fd, (before.mode() & 0o7777) as libc::mode_t) } != 0
             || output_file.sync_all().is_err()
         {
             return RsCipherCommit::Failed;

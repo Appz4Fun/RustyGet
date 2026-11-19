@@ -6,6 +6,7 @@
 //! `GetRemoteAddr`, `Cancel`, `WriteLine`, `Send`, `ReadLine`, `Recv`, and
 //! `ReportError`).
 
+use crate::cstr;
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::ptr;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -198,12 +199,6 @@ fn ip_version_family(ip_version: c_int) -> c_int {
     }
 }
 
-fn to_c_bytes(bytes: &[u8]) -> CString {
-    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    // Safety: truncated at first NUL byte.
-    unsafe { CString::from_vec_unchecked(bytes[..end].to_vec()) }
-}
-
 /// Binds and listens on a Unix domain path or TCP `(host, port)` (`Connection::Bind`).
 #[allow(clippy::too_many_arguments)]
 pub fn bind_listener<E>(
@@ -261,7 +256,7 @@ where
                 );
                 return false;
             }
-            let host_c = to_c_bytes(host);
+            let host_c = cstr::to_cstring(host);
             libc::unlink(host_c.as_ptr());
             if libc::bind(
                 sock,
@@ -281,7 +276,7 @@ where
             hints.ai_socktype = libc::SOCK_STREAM;
             hints.ai_flags = libc::AI_PASSIVE;
 
-            let host_c = to_c_bytes(host);
+            let host_c = cstr::to_cstring(host);
             let port_c = CString::new(port.to_string()).unwrap();
             let mut addr_list: *mut libc::addrinfo = ptr::null_mut();
             let res = libc::getaddrinfo(host_c.as_ptr(), port_c.as_ptr(), &hints, &mut addr_list);
@@ -640,7 +635,7 @@ where
             if !resolved_addresses.is_empty() {
                 hints.ai_flags |= libc::AI_NUMERICHOST;
                 for &numeric in resolved_addresses {
-                    let num_c = to_c_bytes(numeric);
+                    let num_c = cstr::to_cstring(numeric);
                     let mut list: *mut libc::addrinfo = ptr::null_mut();
                     if libc::getaddrinfo(num_c.as_ptr(), port_c.as_ptr(), &hints, &mut list) == 0
                         && !list.is_null()
@@ -658,7 +653,7 @@ where
                 // Probe DNS must never fall back to blocking resolution.
                 return false;
             } else {
-                let host_c = to_c_bytes(host);
+                let host_c = cstr::to_cstring(host);
                 let mut list: *mut libc::addrinfo = ptr::null_mut();
                 res = libc::getaddrinfo(host_c.as_ptr(), port_c.as_ptr(), &hints, &mut list);
                 if res != 0 {
@@ -823,7 +818,7 @@ pub fn disconnect_socket(
                 ) == 0
                     && is_listening != 0;
                 if was_listener || sock_listening {
-                    let host_c = to_c_bytes(host);
+                    let host_c = cstr::to_cstring(host);
                     libc::unlink(host_c.as_ptr());
                 }
             }

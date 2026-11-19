@@ -197,6 +197,8 @@ pub fn normalize_external_nzb_name(nzb_name: &[u8], valid_name: &[u8], is_nzb: b
     name
 }
 
+use crate::cstr;
+use crate::options::OptStr;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
@@ -389,8 +391,8 @@ struct ScannerRuntimeOpts {
 fn resolve_runtime_opts(env: &NzbgetRsScannerEnv) -> ScannerRuntimeOpts {
     if !env.nzb_dir.is_null() {
         return ScannerRuntimeOpts {
-            nzb_dir: cstr_bytes(env.nzb_dir).to_vec(),
-            temp_dir: cstr_bytes(env.temp_dir).to_vec(),
+            nzb_dir: unsafe { cstr::bytes(env.nzb_dir) }.to_vec(),
+            temp_dir: unsafe { cstr::bytes(env.temp_dir) }.to_vec(),
             nzb_dir_interval: env.nzb_dir_interval,
             nzb_dir_file_age: env.nzb_dir_file_age,
             archive_scan: env.archive_scan != 0,
@@ -408,10 +410,10 @@ fn resolve_runtime_opts(env: &NzbgetRsScannerEnv) -> ScannerRuntimeOpts {
     ScannerRuntimeOpts {
         nzb_dir: opts
             .as_deref()
-            .map_or_else(Vec::new, |o| o.str_bytes(7).to_vec()),
+            .map_or_else(Vec::new, |o| o.str_bytes(OptStr::NzbDir).to_vec()),
         temp_dir: opts
             .as_deref()
-            .map_or_else(Vec::new, |o| o.str_bytes(5).to_vec()),
+            .map_or_else(Vec::new, |o| o.str_bytes(OptStr::TempDir).to_vec()),
         nzb_dir_interval: opts.as_deref().map_or(0, |o| o.scalars().nzb_dir_interval),
         nzb_dir_file_age: opts.as_deref().map_or(0, |o| o.scalars().nzb_dir_file_age),
         archive_scan: opts
@@ -423,14 +425,6 @@ fn resolve_runtime_opts(env: &NzbgetRsScannerEnv) -> ScannerRuntimeOpts {
         queue_loaded: crate::ffi::is_queue_loaded(),
         pause_scan: crate::ffi::active_workstate().is_some_and(|ws| ws.pause_scan()),
         sep: crate::paths::PATH_SEPARATOR as u8,
-    }
-}
-
-fn cstr_bytes<'a>(ptr: *const c_char) -> &'a [u8] {
-    if ptr.is_null() {
-        b""
-    } else {
-        unsafe { CStr::from_ptr(ptr).to_bytes() }
     }
 }
 
@@ -482,8 +476,8 @@ fn capture_params(env: &NzbgetRsScannerEnv) -> Vec<(CString, CString)> {
     unsafe extern "C" fn push_param(raw: *mut c_void, name: *const c_char, val: *const c_char) {
         let out = unsafe { &mut *raw.cast::<Vec<(CString, CString)>>() };
         out.push((
-            to_cstr_sanitized(cstr_bytes(name)),
-            to_cstr_sanitized(cstr_bytes(val)),
+            to_cstr_sanitized(unsafe { cstr::bytes(name) }),
+            to_cstr_sanitized(unsafe { cstr::bytes(val) }),
         ));
     }
     let mut list: Vec<(CString, CString)> = Vec::new();
@@ -505,7 +499,7 @@ fn find_matched_category(env: &NzbgetRsScannerEnv, cat_c: &CStr) -> Option<Vec<u
     if let Some(find_cb) = env.find_category_cb {
         let matched_ptr = unsafe { find_cb(env.ctx, cat_c.as_ptr(), 1) };
         if !matched_ptr.is_null() {
-            return Some(cstr_bytes(matched_ptr).to_vec());
+            return Some(unsafe { cstr::bytes(matched_ptr) }.to_vec());
         }
         return None;
     }
@@ -834,7 +828,7 @@ fn add_file_to_queue(
     } else {
         false
     };
-    let detected_cat = cstr_bytes(detected_cat_ptr).to_vec();
+    let detected_cat = unsafe { cstr::bytes(detected_cat_ptr) }.to_vec();
     if !ok {
         let mut err_msg = b"Could not add collection ".to_vec();
         err_msg.extend_from_slice(basename);
@@ -1275,7 +1269,7 @@ impl NzbgetRsScanner {
                 val: *const c_char,
             ) {
                 let st = unsafe { &mut *raw.cast::<ScriptStrings<'_>>() };
-                let bytes = cstr_bytes(val).to_vec();
+                let bytes = unsafe { cstr::bytes(val) }.to_vec();
                 match field {
                     0 => *st.nzb_name = bytes,
                     1 => *st.nzb_category = bytes,
@@ -1427,7 +1421,7 @@ impl NzbgetRsScanner {
         env: &NzbgetRsScannerEnv,
         captured_params: Vec<(CString, CString)>,
     ) -> c_int {
-        let filename = cstr_bytes(env.filename);
+        let filename = unsafe { cstr::bytes(env.filename) };
         if filename.is_empty() {
             emit_log(
                 env,
@@ -1506,8 +1500,8 @@ impl NzbgetRsScanner {
             return AS_SKIPPED;
         }
 
-        let category_bytes = cstr_bytes(env.category);
-        let dupe_key_bytes = cstr_bytes(env.dupe_key);
+        let category_bytes = unsafe { cstr::bytes(env.category) };
+        let dupe_key_bytes = unsafe { cstr::bytes(env.dupe_key) };
         let slots: Vec<ResultSlot>;
         {
             let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -1568,7 +1562,7 @@ impl NzbgetRsScanner {
         env: &NzbgetRsScannerEnv,
         captured_params: Vec<(CString, CString)>,
     ) -> c_int {
-        let tmp_bytes = cstr_bytes(env.nzb_name);
+        let tmp_bytes = unsafe { cstr::bytes(env.nzb_name) };
         let tmp_c = to_cstr_sanitized(tmp_bytes);
         let mut buf: Vec<u8> = Vec::new();
         let loaded =
@@ -1618,9 +1612,9 @@ impl NzbgetRsScanner {
         let sep = rt.sep;
         let nzb_dir = rt.nzb_dir.as_slice();
         let temp_dir = rt.temp_dir.as_slice();
-        let nzb_name = cstr_bytes(env.nzb_name);
-        let category = cstr_bytes(env.category);
-        let dupe_key = cstr_bytes(env.dupe_key);
+        let nzb_name = unsafe { cstr::bytes(env.nzb_name) };
+        let category = unsafe { cstr::bytes(env.category) };
+        let dupe_key = unsafe { cstr::bytes(env.dupe_key) };
         let has_disk_file = !env.filename.is_null();
         let buf_slice: &[u8] = if env.buf_ptr.is_null() || env.buf_len <= 0 {
             &[]
@@ -1632,7 +1626,7 @@ impl NzbgetRsScanner {
         {
             let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             let (temp_file_name, is_nzb) = if has_disk_file {
-                (cstr_bytes(env.filename).to_vec(), false)
+                (unsafe { cstr::bytes(env.filename) }.to_vec(), false)
             } else {
                 let mut num = SCANNER_ID_GEN
                     .fetch_add(1, Ordering::Relaxed)
@@ -1910,11 +1904,11 @@ unsafe extern "C" fn native_work_params_cb(
             let v = if s2.is_null() {
                 None
             } else {
-                Some(cstr_bytes(s2))
+                Some(cstr::bytes(s2))
             };
-            set_param_list(&mut wp, cstr_bytes(s1), v);
+            set_param_list(&mut wp, cstr::bytes(s1), v);
         }
-        2 | 3 => sc.init_work_params_pp(cstr_bytes(s1)),
+        2 | 3 => sc.init_work_params_pp(cstr::bytes(s1)),
         _ => {}
     }
 }
@@ -1943,8 +1937,8 @@ unsafe extern "C" fn native_parse_nzb_cb(
     }
     let parsed = crate::nzbfile::parse_and_materialize_nzb(
         &host,
-        cstr_bytes(filename),
-        cstr_bytes(category),
+        unsafe { cstr::bytes(filename) },
+        unsafe { cstr::bytes(category) },
     );
     let ok = parsed.ok;
     {
@@ -2014,11 +2008,11 @@ unsafe extern "C" fn native_commit_nzb_cb(
         return 0;
     }
 
-    host.nzb_set_str(nzb_ptr, NZB_STR_QUEUED_FILENAME, cstr_bytes(queued));
+    host.nzb_set_str(nzb_ptr, NZB_STR_QUEUED_FILENAME, unsafe { cstr::bytes(queued) });
     if has_auto != 0 && !auto_cat.is_null() {
-        host.nzb_set_str(nzb_ptr, NZB_STR_CATEGORY, cstr_bytes(auto_cat));
+        host.nzb_set_str(nzb_ptr, NZB_STR_CATEGORY, unsafe { cstr::bytes(auto_cat) });
     }
-    let name_bytes = cstr_bytes(nzb_name);
+    let name_bytes = unsafe { cstr::bytes(nzb_name) };
     if !name_bytes.is_empty() {
         host.nzb_set_str_opt(nzb_ptr, NZB_STR_NAME, None);
         host.nzb_set_str(nzb_ptr, NZB_STR_FILENAME, name_bytes);
@@ -2050,7 +2044,7 @@ unsafe extern "C" fn native_commit_nzb_cb(
             }
         }
     }
-    host.nzb_set_str(nzb_ptr, NZB_STR_DUPE_KEY, cstr_bytes(dupe_key));
+    host.nzb_set_str(nzb_ptr, NZB_STR_DUPE_KEY, unsafe { cstr::bytes(dupe_key) });
     host.nzb_set_int(nzb_ptr, NZB_INT_DUPE_SCORE, dupe_score);
     host.nzb_set_int(nzb_ptr, NZB_INT_DUPE_MODE, dupe_mode);
     host.nzb_set_int(nzb_ptr, NZB_INT_PRIORITY, priority);
@@ -2201,8 +2195,8 @@ pub(crate) unsafe fn add_cli_nzb_file_active(
     ) else {
         return false;
     };
-    let cat_bytes = cstr_bytes(category_ptr);
-    let fn_bytes = cstr_bytes(filename_ptr);
+    let cat_bytes = unsafe { cstr::bytes(category_ptr) };
+    let fn_bytes = unsafe { cstr::bytes(filename_ptr) };
     let parsed = crate::nzbfile::parse_and_materialize_nzb(&host, fn_bytes, cat_bytes);
     struct UptrGuard<'a>(&'a crate::queuesubsys_host::QueueSubsysHost, usize);
     impl Drop for UptrGuard<'_> {

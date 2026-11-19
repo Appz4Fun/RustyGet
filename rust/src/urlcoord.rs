@@ -145,6 +145,7 @@ use crate::queuesubsys_host::{
     ASPECT_URL_FOUND, ASPECT_URL_RETURNED, NZB_INT_ACTIVE_DOWNLOADS, NZB_INT_AVOID_HISTORY,
     NZB_INT_DELETE_STATUS, NZB_INT_DELETING, NZB_INT_URL_STATUS,
 };
+use crate::options::OptStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -232,7 +233,7 @@ fn url_runtime_opts() -> (i32, bool, bool, i32, u8, Vec<u8>) {
             sc.url_force != 0,
             sc.url_timeout,
             crate::paths::PATH_SEPARATOR as u8,
-            opts.str_bytes(5).to_vec(),
+            opts.str_bytes(OptStr::TempDir).to_vec(),
         );
     }
     (

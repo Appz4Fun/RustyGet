@@ -6,16 +6,9 @@
 //! content-hash calculation (`calc_nzb_hashes`), and `{{password}}` / metadata
 //! extraction and sanitization (`ProcessFiles`).
 
+use crate::cstr;
 use std::collections::HashMap;
 use std::ffi::{c_char, c_int, CStr, CString};
-
-fn cstring_lossy(bytes: &[u8]) -> CString {
-    if let Some(nul) = bytes.iter().position(|&b| b == 0) {
-        CString::new(&bytes[..nul]).unwrap_or_default()
-    } else {
-        CString::new(bytes).unwrap_or_default()
-    }
-}
 
 fn truncate_at_nul(bytes: &[u8]) -> Vec<u8> {
     if let Some(nul) = bytes.iter().position(|&b| b == 0) {
@@ -430,7 +423,7 @@ pub struct NzbFileParser {
 impl NzbFileParser {
     pub fn new(file_name: &[u8]) -> Self {
         Self {
-            file_name: cstring_lossy(file_name),
+            file_name: cstr::to_cstring(file_name),
             category: CString::default(),
             password: CString::default(),
             meta_name: CString::default(),
@@ -468,14 +461,14 @@ impl NzbFileParser {
     fn push_warning(&mut self, msg: Vec<u8>) {
         self.messages.push(ParsedNzbMessage {
             kind: 1,
-            text: cstring_lossy(&msg),
+            text: cstr::to_cstring(&msg),
         });
     }
 
     fn push_error(&mut self, msg: Vec<u8>) {
         self.messages.push(ParsedNzbMessage {
             kind: 2,
-            text: cstring_lossy(&msg),
+            text: cstr::to_cstring(&msg),
         });
     }
 
@@ -518,7 +511,7 @@ impl NzbFileParser {
             if let Some(file) = self.current_file.as_mut() {
                 for &(attr_name, attr_val) in attrs {
                     if attr_name == b"subject" {
-                        file.subject = attr_val.map(cstring_lossy);
+                        file.subject = attr_val.map(cstr::to_cstring);
                     } else if attr_name == b"date" {
                         file.time = crate::feed::c_atoi_bytes(attr_val.unwrap_or(b""));
                     }
@@ -572,8 +565,8 @@ impl NzbFileParser {
                 let Some(val) = attr_val else {
                     break;
                 };
-                let n_cstr = cstring_lossy(attr_name);
-                let v_cstr = cstring_lossy(val);
+                let n_cstr = cstr::to_cstring(attr_name);
+                let v_cstr = cstr::to_cstring(val);
                 match classify_meta_type(&n_cstr, &v_cstr) {
                     1 => self.has_password = true,
                     2 => self.has_category = true,
@@ -593,7 +586,7 @@ impl NzbFileParser {
             self.current_article_idx = None;
         } else if name == b"group" {
             if let Some(file) = self.current_file.as_mut() {
-                file.groups.push(cstring_lossy(&self.tag_content));
+                file.groups.push(cstr::to_cstring(&self.tag_content));
                 self.tag_content.clear();
             }
         } else if name == b"segment" {
@@ -603,11 +596,11 @@ impl NzbFileParser {
                 let tag_bytes = truncate_at_nul(&self.tag_content);
                 let sanitized = sanitize_segment_message_id(&tag_bytes);
                 if let Some(article) = file.articles.get_mut(idx) {
-                    article.message_id = cstring_lossy(&sanitized);
+                    article.message_id = cstr::to_cstring(&sanitized);
                 }
             }
         } else if name == b"meta" {
-            let content = cstring_lossy(&self.tag_content);
+            let content = cstr::to_cstring(&self.tag_content);
             if self.has_password {
                 self.password = content;
             } else if self.has_category {
@@ -743,11 +736,11 @@ impl NzbFileParser {
         for (opt_subj, cur_filename, file) in &mut parsed_files {
             if let Some(subj) = opt_subj {
                 let deobf = crate::deobfuscation::deobfuscate(subj.as_bytes());
-                *cur_filename = cstring_lossy(&deobf);
+                *cur_filename = cstr::to_cstring(&deobf);
                 file.subject = subj.clone();
                 on_parsed_subject(&file.subject, cur_filename);
             } else {
-                let fallback = cstring_lossy(format!("{}", file.id).as_bytes());
+                let fallback = cstr::to_cstring(format!("{}", file.id).as_bytes());
                 *opt_subj = Some(fallback.clone());
                 file.subject = fallback;
             }
@@ -765,7 +758,7 @@ impl NzbFileParser {
             // Second pass: ParseSubject(fileInfo, false)
             for (_, cur_filename, file) in &mut parsed_files {
                 let deobf = crate::deobfuscation::deobfuscate(file.subject.as_bytes());
-                *cur_filename = cstring_lossy(&deobf);
+                *cur_filename = cstr::to_cstring(&deobf);
                 on_parsed_subject(&file.subject, cur_filename);
             }
         }
@@ -781,7 +774,7 @@ impl NzbFileParser {
         self.files.reserve(parsed_files.len());
         for (_, cur_filename, mut file) in parsed_files {
             let valid_name = crate::paths::make_valid_filename(cur_filename.as_bytes(), false);
-            file.filename = cstring_lossy(&valid_name);
+            file.filename = cstr::to_cstring(&valid_name);
             file.par_file = accumulate_file_stats(
                 file.filename.as_bytes(),
                 file.total_articles,
@@ -849,22 +842,22 @@ impl NzbFileParser {
         // 5. Password & meta sanitization
         if self.password.as_bytes().is_empty() {
             if let Some(pw) = extract_password_from_filename(self.file_name.as_bytes()) {
-                self.password = cstring_lossy(pw);
+                self.password = cstr::to_cstring(pw);
             }
         }
 
         let san_meta_name = crate::paths::sanitize_path_segment(self.meta_name.as_bytes());
         let san_meta_title = crate::paths::sanitize_path_segment(self.meta_title.as_bytes());
         self.meta_name = if san_meta_name.is_empty() && !san_meta_title.is_empty() {
-            cstring_lossy(&san_meta_title)
+            cstr::to_cstring(&san_meta_title)
         } else {
-            cstring_lossy(&san_meta_name)
+            cstr::to_cstring(&san_meta_name)
         };
-        self.meta_title = cstring_lossy(&san_meta_title);
+        self.meta_title = cstr::to_cstring(&san_meta_title);
 
         let mut cat_bytes = self.category.as_bytes().to_vec();
         let (cat_start, cat_end) = crate::util::sanitize_line(&mut cat_bytes, text_right_space);
-        self.category = cstring_lossy(&cat_bytes[cat_start..cat_end]);
+        self.category = cstr::to_cstring(&cat_bytes[cat_start..cat_end]);
 
         true
     }

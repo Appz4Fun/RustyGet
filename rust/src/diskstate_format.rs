@@ -1,5 +1,7 @@
 //! DiskState record serialization and helpers (`daemon/queue/DiskState.cpp`).
 
+use crate::cstr;
+use crate::options::OptStr;
 use std::ffi::{c_char, c_int, c_void};
 use std::io::Write;
 
@@ -1109,14 +1111,6 @@ pub fn diskstate_select_original_or_current_msg_id<'a>(
     } else {
         cur_msg_id
     }
-}
-
-/// Convert a C string pointer safely to a byte slice.
-pub unsafe fn cstr_to_bytes<'a>(ptr: *const c_char) -> &'a [u8] {
-    if ptr.is_null() {
-        return &[];
-    }
-    unsafe { std::ffi::CStr::from_ptr(ptr).to_bytes() }
 }
 
 #[inline]
@@ -3360,12 +3354,12 @@ pub unsafe fn load_nzb_info(
         {
             return false;
         }
-        let h_slice = unsafe { cstr_to_bytes(cf_h16k) };
+        let h_slice = unsafe { cstr::bytes(cf_h16k) };
         let mut h_c = Vec::with_capacity(h_slice.len() + 1);
         h_c.extend_from_slice(h_slice);
         h_c.push(0);
 
-        let p_slice = unsafe { cstr_to_bytes(cf_pset) };
+        let p_slice = unsafe { cstr::bytes(cf_pset) };
         let mut p_c = Vec::with_capacity(p_slice.len() + 1);
         p_c.extend_from_slice(p_slice);
         p_c.push(0);
@@ -3379,7 +3373,7 @@ pub unsafe fn load_nzb_info(
             };
             (f_c, o_c)
         } else {
-            let f_slice = unsafe { cstr_to_bytes(cf_fname) };
+            let f_slice = unsafe { cstr::bytes(cf_fname) };
             let mut f_c = Vec::with_capacity(f_slice.len() + 1);
             f_c.extend_from_slice(f_slice);
             f_c.push(0);
@@ -5223,9 +5217,9 @@ unsafe fn query_target_file_meta(env: &NzbgetRsDiskStateEnv) -> QueriedFileMeta 
         m.articles_len = exp.articles_len_count;
         m.force_direct_write = exp.force_direct_write;
         m.output_initialized = exp.info.output_initialized;
-        m.dest_dir = unsafe { cstr_to_bytes(exp.info.subject) }.to_vec();
-        m.filename = unsafe { cstr_to_bytes(exp.info.filename) }.to_vec();
-        m.output_filename = unsafe { cstr_to_bytes(exp.info.output_filename) }.to_vec();
+        m.dest_dir = unsafe { cstr::bytes(exp.info.subject) }.to_vec();
+        m.filename = unsafe { cstr::bytes(exp.info.filename) }.to_vec();
+        m.output_filename = unsafe { cstr::bytes(exp.info.output_filename) }.to_vec();
     }
     if let Some(cb) = env.export_file_cb {
         unsafe { cb(env.ctx, 4, (&mut meta as *mut QueriedFileMeta).cast(), sink) };
@@ -5908,9 +5902,9 @@ unsafe fn set_aside_queue_files_op(env: &NzbgetRsDiskStateEnv, qdir: &[u8], sep:
                 4,
                 &[
                     b"Diskstate file ",
-                    cstr_to_bytes(name),
+                    cstr::bytes(name),
                     b" could not be read; it is kept as ",
-                    cstr_to_bytes(kept_base),
+                    cstr::bytes(kept_base),
                 ],
             );
         }
@@ -5949,8 +5943,8 @@ unsafe fn set_aside_queue_files_op(env: &NzbgetRsDiskStateEnv, qdir: &[u8], sep:
 /// - `15`: `SaveDownloadQueue` (`a1=0, a2=saveHistory`) / `SaveDownloadProgress` (`a1=1`) / `SaveAllFileInfos` (`a1=2`)
 /// - `16`: `LoadDownloadQueue`
 pub unsafe fn diskstate_exec(op: c_int, env: &NzbgetRsDiskStateEnv) -> c_int {
-    let qdir = unsafe { cstr_to_bytes(env.queue_dir) };
-    let tdir = unsafe { cstr_to_bytes(env.temp_dir) };
+    let qdir = unsafe { cstr::bytes(env.queue_dir) };
+    let tdir = unsafe { cstr::bytes(env.temp_dir) };
     let sep = env.sep as u8;
     let mut o1 = 0;
     let mut o2 = 0;
@@ -5983,7 +5977,7 @@ pub unsafe fn diskstate_exec(op: c_int, env: &NzbgetRsDiskStateEnv) -> c_int {
                 }
                 0
             } else {
-                unsafe { crate::fsops::sys::close(fd) };
+                unsafe { libc::close(fd) };
                 1
             }
         }
@@ -6090,7 +6084,7 @@ pub unsafe fn diskstate_exec(op: c_int, env: &NzbgetRsDiskStateEnv) -> c_int {
                 _vol_len: usize,
             ) {
                 let fo = unsafe { &mut *sink_ctx.cast::<FeedOut>() };
-                let c = bytes_to_cstring_trunc(unsafe { cstr_to_bytes(s1) });
+                let c = bytes_to_cstring_trunc(unsafe { cstr::bytes(s1) });
                 if kind == 0 {
                     fo.urls.push(c);
                     fo.hashes.push(u1);
@@ -6418,9 +6412,9 @@ pub unsafe fn diskstate_exec(op: c_int, env: &NzbgetRsDiskStateEnv) -> c_int {
                         vec.push(SrvMeta {
                             id: s.id,
                             port: s.port,
-                            name: unsafe { cstr_to_bytes(s.name) }.to_vec(),
-                            host: unsafe { cstr_to_bytes(s.host) }.to_vec(),
-                            user: unsafe { cstr_to_bytes(s.user) }.to_vec(),
+                            name: unsafe { cstr::bytes(s.name) }.to_vec(),
+                            host: unsafe { cstr::bytes(s.host) }.to_vec(),
+                            user: unsafe { cstr::bytes(s.user) }.to_vec(),
                         });
                     }
                 }
@@ -6958,7 +6952,7 @@ unsafe extern "C" fn active_disk_log_cb(_ctx: *mut c_void, level: c_int, msg: *c
         4 => 2,
         _ => return,
     };
-    crate::log::log_active_bytes(kind, unsafe { cstr_to_bytes(msg) });
+    crate::log::log_active_bytes(kind, unsafe { cstr::bytes(msg) });
 }
 
 #[cfg(unix)]
@@ -7008,7 +7002,7 @@ unsafe extern "C" fn active_disk_ctrl_cb(
 ) -> c_int {
     let c = unsafe { &mut *raw_ctx.cast::<ActiveDiskExecCtx<'_>>() };
     if cmd == 19 {
-        let txt = bytes_to_cstring_trunc(unsafe { cstr_to_bytes(s1) });
+        let txt = bytes_to_cstring_trunc(unsafe { cstr::bytes(s1) });
         c.messages.push((a1, a2, a3 as i32, txt));
         return 0;
     }
@@ -7580,7 +7574,7 @@ unsafe extern "C" fn active_disk_apply_nzb_cb(
         qh.nzb_push_stream_repair_job(
             nzb_ptr,
             jb.file_id,
-            unsafe { cstr_to_bytes(jb.filename) },
+            unsafe { cstr::bytes(jb.filename) },
             jb.decoded_file_size,
             jb.failed_size,
             jb.missed_size,
@@ -7619,32 +7613,32 @@ unsafe extern "C" fn active_disk_apply_nzb_cb(
 
     qh.nzb_set_int(nzb_ptr, NZB_INT_ID, inp.id);
     qh.nzb_set_int(nzb_ptr, NZB_INT_KIND, inp.kind);
-    qh.nzb_set_str(nzb_ptr, NZB_STR_URL, unsafe { cstr_to_bytes(inp.url) });
+    qh.nzb_set_str(nzb_ptr, NZB_STR_URL, unsafe { cstr::bytes(inp.url) });
     qh.nzb_set_str(nzb_ptr, NZB_STR_FILENAME, unsafe {
-        cstr_to_bytes(inp.filename)
+        cstr::bytes(inp.filename)
     });
     qh.nzb_set_str(nzb_ptr, NZB_STR_DEST_DIR, unsafe {
-        cstr_to_bytes(inp.dest_dir)
+        cstr::bytes(inp.dest_dir)
     });
     qh.nzb_set_str(nzb_ptr, NZB_STR_FINAL_DIR, unsafe {
-        cstr_to_bytes(inp.final_dir)
+        cstr::bytes(inp.final_dir)
     });
     if !inp.hard_link_path.is_null() {
         qh.nzb_set_str(nzb_ptr, NZB_STR_HARD_LINK_PATH, unsafe {
-            cstr_to_bytes(inp.hard_link_path)
+            cstr::bytes(inp.hard_link_path)
         });
     }
     if !inp.meta_name.is_null() {
-        qh.nzb_set_meta_name(nzb_ptr, unsafe { cstr_to_bytes(inp.meta_name) });
+        qh.nzb_set_meta_name(nzb_ptr, unsafe { cstr::bytes(inp.meta_name) });
     }
     qh.nzb_set_str(nzb_ptr, NZB_STR_QUEUED_FILENAME, unsafe {
-        cstr_to_bytes(inp.queued_filename)
+        cstr::bytes(inp.queued_filename)
     });
     if !inp.name.is_null() {
-        qh.nzb_set_str(nzb_ptr, NZB_STR_NAME, unsafe { cstr_to_bytes(inp.name) });
+        qh.nzb_set_str(nzb_ptr, NZB_STR_NAME, unsafe { cstr::bytes(inp.name) });
     }
     qh.nzb_set_str(nzb_ptr, NZB_STR_CATEGORY, unsafe {
-        cstr_to_bytes(inp.category)
+        cstr::bytes(inp.category)
     });
     qh.nzb_set_int(nzb_ptr, NZB_INT_PRIORITY, inp.priority);
     qh.nzb_set_int(nzb_ptr, NZB_INT_DELETE_PAUSED, inp.delete_paused);
@@ -7710,7 +7704,7 @@ unsafe extern "C" fn active_disk_apply_nzb_cb(
     qh.nzb_set_int(nzb_ptr, NZB_INT_CUR_SUCCESS_ARTICLES, inp.success_articles);
     qh.nzb_set_int(nzb_ptr, NZB_INT_CUR_FAILED_ARTICLES, inp.failed_articles);
     qh.nzb_set_str(nzb_ptr, NZB_STR_DUPE_KEY, unsafe {
-        cstr_to_bytes(inp.dupe_key)
+        cstr::bytes(inp.dupe_key)
     });
     qh.nzb_set_int(nzb_ptr, NZB_INT_DUPE_MODE, inp.dupe_mode);
     qh.nzb_set_int(nzb_ptr, NZB_INT_DUPE_SCORE, inp.dupe_score);
@@ -7757,8 +7751,8 @@ unsafe extern "C" fn active_disk_apply_nzb_cb(
             let p = unsafe { &*params.add(i) };
             qh.nzb_set_param(
                 nzb_ptr,
-                unsafe { cstr_to_bytes(p.name) },
-                Some(unsafe { cstr_to_bytes(p.value) }),
+                unsafe { cstr::bytes(p.name) },
+                Some(unsafe { cstr::bytes(p.value) }),
             );
         }
     }
@@ -7766,7 +7760,7 @@ unsafe extern "C" fn active_disk_apply_nzb_cb(
     if !scripts.is_null() {
         for i in 0..scripts_len {
             let sc = unsafe { &*scripts.add(i) };
-            qh.nzb_push_script_status(nzb_ptr, unsafe { cstr_to_bytes(sc.name) }, sc.status);
+            qh.nzb_push_script_status(nzb_ptr, unsafe { cstr::bytes(sc.name) }, sc.status);
         }
     }
     if !stats.is_null() && stats_len > 0 {
@@ -7975,19 +7969,19 @@ unsafe extern "C" fn active_disk_apply_file_cb(
             qh.file_set_str(
                 fp,
                 FILE_STR_OUTPUT_FILENAME,
-                Some(unsafe { cstr_to_bytes(finfo.output_filename) }),
+                Some(unsafe { cstr::bytes(finfo.output_filename) }),
             );
         }
         if extra_i32 != 0 {
-            let subj = unsafe { cstr_to_bytes(finfo.subject) };
+            let subj = unsafe { cstr::bytes(finfo.subject) };
             if !subj.is_empty() {
                 qh.file_set_str(fp, FILE_STR_SUBJECT, Some(subj));
             }
-            let fn_b = unsafe { cstr_to_bytes(finfo.filename) };
+            let fn_b = unsafe { cstr::bytes(finfo.filename) };
             if !fn_b.is_empty() {
                 qh.file_set_str(fp, FILE_STR_FILENAME, Some(fn_b));
             }
-            let orig_b = unsafe { cstr_to_bytes(finfo.origname) };
+            let orig_b = unsafe { cstr::bytes(finfo.origname) };
             if !orig_b.is_empty() {
                 qh.file_set_str(fp, FILE_STR_ORIGNAME, Some(orig_b));
             }
@@ -8062,11 +8056,11 @@ unsafe extern "C" fn active_disk_apply_file_cb(
             qh.file_set_str(
                 fp,
                 FILE_STR_FILENAME,
-                Some(unsafe { cstr_to_bytes(fst.filename) }),
+                Some(unsafe { cstr::bytes(fst.filename) }),
             );
         }
         if (idx_or_flags & 4) != 0 {
-            let h16 = unsafe { cstr_to_bytes(fst.hash16k) };
+            let h16 = unsafe { cstr::bytes(fst.hash16k) };
             qh.file_set_str(
                 fp,
                 FILE_STR_HASH16K,
@@ -8075,7 +8069,7 @@ unsafe extern "C" fn active_disk_apply_file_cb(
             qh.file_set_int(fp, FILE_INT_PAR_FILE, fst.par_file);
         }
         if (idx_or_flags & 8) != 0 {
-            let psid = unsafe { cstr_to_bytes(fst.par_set_id) };
+            let psid = unsafe { cstr::bytes(fst.par_set_id) };
             qh.file_set_str(
                 fp,
                 FILE_STR_PAR_SET_ID,
@@ -8094,7 +8088,7 @@ unsafe extern "C" fn active_disk_apply_file_cb(
             qh.file_set_str(
                 fp,
                 FILE_STR_OUTPUT_FILENAME,
-                Some(unsafe { cstr_to_bytes(str_arg) }),
+                Some(unsafe { cstr::bytes(str_arg) }),
             );
         }
     }
@@ -8204,10 +8198,10 @@ fn run_active_diskstate_exec(
     let opts = crate::options::active_options();
     let qdir_c = opts
         .as_ref()
-        .map(|o| bytes_to_cstring_trunc(o.str_bytes(6)));
+        .map(|o| bytes_to_cstring_trunc(o.str_bytes(OptStr::QueueDir)));
     let tdir_c = opts
         .as_ref()
-        .map(|o| bytes_to_cstring_trunc(o.str_bytes(5)));
+        .map(|o| bytes_to_cstring_trunc(o.str_bytes(OptStr::TempDir)));
     let (has_options, flush_queue, direct_write, continue_partial) = match opts.as_ref() {
         Some(o) => {
             let sc = o.scalars();
@@ -8818,7 +8812,7 @@ mod tests {
         unsafe extern "C" fn log_cb(ctx: *mut c_void, level: c_int, msg: *const c_char) {
             let v = unsafe { &*ctx.cast::<std::cell::RefCell<Vec<(c_int, Vec<u8>)>>>() };
             v.borrow_mut()
-                .push((level, unsafe { cstr_to_bytes(msg) }.to_vec()));
+                .push((level, unsafe { cstr::bytes(msg) }.to_vec()));
         }
 
         let mut env: NzbgetRsDiskStateEnv = unsafe { std::mem::zeroed() };

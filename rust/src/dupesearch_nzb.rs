@@ -1,5 +1,7 @@
 //! Terminal unquoted filename parsing and PAR classification for duplicate search.
 
+use crate::cstr;
+
 fn trim_range(bytes: &[u8], mut start: usize, mut end: usize) -> (usize, usize) {
     let trim = |b| matches!(b, b' ' | b'\t' | b'\r' | b'\n');
     while start < end && trim(bytes[start]) {
@@ -200,11 +202,11 @@ fn par_list_from_volumes(parity_heads: &[NzbSummaryHead]) -> NzbSummaryHead {
     let Some(first) = parity_heads.first() else {
         return NzbSummaryHead::default();
     };
-    let first_c = cstring_trunc(&first.name);
+    let first_c = cstr::to_cstring(&first.name);
     let one_set = parity_heads.iter().all(|h| {
         crate::parparser::same_par_collection(
             first_c.as_bytes(),
-            cstring_trunc(&h.name).as_bytes(),
+            cstr::to_cstring(&h.name).as_bytes(),
             true,
         )
     });
@@ -3638,11 +3640,6 @@ fn declared_parts_c_locale(subject: &[u8]) -> i32 {
     }
 }
 
-fn cstring_trunc(bytes: &[u8]) -> std::ffi::CString {
-    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    std::ffi::CString::new(&bytes[..end]).unwrap_or_default()
-}
-
 /// Parses an NZB XML document into an `NzbSummaryData` (`NzbReader::Parse` in `NzbReader.cpp`).
 pub fn parse_nzb_summary(xml: &[u8]) -> Option<NzbSummaryData> {
     use quick_xml::events::Event;
@@ -3998,13 +3995,13 @@ pub fn parse_nzb_summary(xml: &[u8]) -> Option<NzbSummaryData> {
     out.data_message_ids = data_ids.into_iter().collect();
 
     for head in &parity_heads {
-        let head_c = cstring_trunc(&head.name);
+        let head_c = cstr::to_cstring(&head.name);
         if let Some((base_len, _blocks)) =
             crate::parparser::parse_par_filename(head_c.as_bytes(), true)
         {
             if base_len + 5 == head.name.len() {
                 if !out.par_index.id.is_empty() {
-                    let idx_c = cstring_trunc(&out.par_index.name);
+                    let idx_c = cstr::to_cstring(&out.par_index.name);
                     if !crate::parparser::same_par_collection(
                         idx_c.as_bytes(),
                         head_c.as_bytes(),
@@ -4026,9 +4023,9 @@ pub fn parse_nzb_summary(xml: &[u8]) -> Option<NzbSummaryData> {
         par_list_from_volumes(&parity_heads)
     };
     if !out.par_index.id.is_empty() {
-        let idx_c = cstring_trunc(&out.par_index.name);
+        let idx_c = cstr::to_cstring(&out.par_index.name);
         for head in &parity_heads {
-            let head_c = cstring_trunc(&head.name);
+            let head_c = cstr::to_cstring(&head.name);
             if let Some((base_len, _blocks)) =
                 crate::parparser::parse_par_filename(head_c.as_bytes(), true)
             {

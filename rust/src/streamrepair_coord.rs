@@ -2,6 +2,8 @@
 //! (`daemon/postprocess/StreamRepair.cpp` / `daemon/util/Util.h`), covering both
 //! post-processing stream repair (`Run`) and download-concurrent live stream repair (`RunLive`).
 
+use crate::cstr;
+use crate::options::OptStr;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::ptr;
@@ -92,24 +94,6 @@ pub type NzbgetRsStreamRepairHostFn = unsafe extern "C" fn(
     i64s: *mut i64,
     strs: *mut *const c_char,
 ) -> usize;
-
-#[inline]
-fn to_c_bytes(bytes: &[u8]) -> Vec<u8> {
-    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    let mut out = Vec::with_capacity(end + 1);
-    out.extend_from_slice(&bytes[..end]);
-    out.push(0);
-    out
-}
-
-#[inline]
-unsafe fn ptr_to_bytes(p: *const c_char) -> Vec<u8> {
-    if p.is_null() {
-        Vec::new()
-    } else {
-        unsafe { CStr::from_ptr(p).to_bytes().to_vec() }
-    }
-}
 
 #[inline]
 fn map_target_msg_kind(kind: TargetMessageKind) -> c_int {
@@ -454,7 +438,7 @@ impl NzbgetRsStreamRepairCtrl {
     }
 
     unsafe fn set_info_name(&self, ctx: *mut c_void, cb: NzbgetRsStreamRepairHostFn, name: &[u8]) {
-        let name_c = to_c_bytes(name);
+        let name_c = cstr::nul_terminated(name);
         unsafe {
             cb(
                 ctx,
@@ -481,7 +465,7 @@ impl NzbgetRsStreamRepairCtrl {
         if self.live_mode && repeats_recent_dead_volume_line(self.nzb_id, text) {
             return;
         }
-        let text_c = to_c_bytes(text);
+        let text_c = cstr::nul_terminated(text);
         unsafe {
             cb(
                 ctx,
@@ -505,7 +489,7 @@ impl NzbgetRsStreamRepairCtrl {
         kind: c_int,
         text: &[u8],
     ) {
-        let text_c = to_c_bytes(text);
+        let text_c = cstr::nul_terminated(text);
         unsafe {
             cb(
                 ctx,
@@ -529,7 +513,7 @@ impl NzbgetRsStreamRepairCtrl {
         label: &[u8],
         stage_progress: i32,
     ) {
-        let label_c = to_c_bytes(label);
+        let label_c = cstr::nul_terminated(label);
         unsafe {
             cb(
                 ctx,
@@ -576,7 +560,7 @@ impl NzbgetRsStreamRepairCtrl {
             download_rate,
             par_ignore_ext: opts
                 .as_deref()
-                .map_or_else(Vec::new, |o| o.str_bytes(33).to_vec()),
+                .map_or_else(Vec::new, |o| o.str_bytes(OptStr::ParIgnoreExt).to_vec()),
         }
     }
 
@@ -622,11 +606,11 @@ impl NzbgetRsStreamRepairCtrl {
         let queue_count = ints[4].max(0) as usize;
         let history_count = ints[5].max(0) as usize;
         let own_full_hash = i64s[0];
-        let nzb_name = unsafe { ptr_to_bytes(strs[0]) };
-        let dest_dir = unsafe { ptr_to_bytes(strs[1]) };
-        let own_dupe_key = unsafe { ptr_to_bytes(strs[2]) };
+        let nzb_name = unsafe { cstr::owned(strs[0]) };
+        let dest_dir = unsafe { cstr::owned(strs[1]) };
+        let own_dupe_key = unsafe { cstr::owned(strs[2]) };
         if !strs[3].is_null() {
-            counters.target_password = unsafe { ptr_to_bytes(strs[3]) };
+            counters.target_password = unsafe { cstr::owned(strs[3]) };
         }
 
         let mut completed_files: Vec<(i32, bool, Vec<u8>)> = Vec::with_capacity(completed_count);
@@ -648,7 +632,7 @@ impl NzbgetRsStreamRepairCtrl {
                     cf_strs.as_mut_ptr(),
                 );
             }
-            let fname = unsafe { ptr_to_bytes(cf_strs[0]) };
+            let fname = unsafe { cstr::owned(cf_strs[0]) };
             member_names.push(fname.clone());
             completed_files.push((cf_ints[0], cf_ints[1] != 0, fname));
         }
@@ -682,7 +666,7 @@ impl NzbgetRsStreamRepairCtrl {
             let failed_size = j_i64s[1];
             let missed_size = j_i64s[2];
             let steps_hash = j_i64s[3] as u64;
-            let mut filename = unsafe { ptr_to_bytes(j_strs[0]) };
+            let mut filename = unsafe { cstr::owned(j_strs[0]) };
             if is_par2_job_or_file(is_par_file, &filename) {
                 continue;
             }
@@ -759,8 +743,8 @@ impl NzbgetRsStreamRepairCtrl {
                 if dupe_mode == DM_FORCE {
                     continue;
                 }
-                let cand_name = unsafe { ptr_to_bytes(c_strs[0]) };
-                let cand_key = unsafe { ptr_to_bytes(c_strs[1]) };
+                let cand_name = unsafe { cstr::owned(c_strs[0]) };
+                let cand_key = unsafe { cstr::owned(c_strs[1]) };
                 if !same_name_or_key(&cand_name, &cand_key, &nzb_name, &own_dupe_key) {
                     continue;
                 }
@@ -768,9 +752,9 @@ impl NzbgetRsStreamRepairCtrl {
                     dupe_score: c_ints[1],
                     id: c_ints[0],
                     full_hash: c_i64s[0],
-                    queued_filename: unsafe { ptr_to_bytes(c_strs[2]) },
+                    queued_filename: unsafe { cstr::owned(c_strs[2]) },
                     info_name: cand_name,
-                    password: unsafe { ptr_to_bytes(c_strs[3]) },
+                    password: unsafe { cstr::owned(c_strs[3]) },
                 });
             }
         }
@@ -874,7 +858,7 @@ impl NzbgetRsStreamRepairCtrl {
                         ptr::null_mut(),
                         cf_strs.as_mut_ptr(),
                     );
-                    completed_files.push((cf_ints[0], cf_ints[1] != 0, ptr_to_bytes(cf_strs[0])));
+                    completed_files.push((cf_ints[0], cf_ints[1] != 0, cstr::owned(cf_strs[0])));
                 }
                 for target in targets.iter_mut() {
                     for (cf_id, cf_par, cf_name) in &completed_files {
@@ -937,7 +921,7 @@ impl NzbgetRsStreamRepairCtrl {
                         cf_strs.as_mut_ptr(),
                     );
                     if cf_ints[0] == file_id {
-                        *cur_filename = ptr_to_bytes(cf_strs[0]);
+                        *cur_filename = cstr::owned(cf_strs[0]);
                         break;
                     }
                 }
@@ -957,7 +941,7 @@ impl NzbgetRsStreamRepairCtrl {
         for m in member_names {
             let full_path =
                 crate::artwritercore::article_writer_format_dest_file_path(dest_dir, sep, m);
-            let full_c = to_c_bytes(&full_path);
+            let full_c = cstr::nul_terminated(&full_path);
             let sz =
                 crate::fsops::file_size(unsafe { CStr::from_bytes_with_nul_unchecked(&full_c) });
             sizes.push(sz);

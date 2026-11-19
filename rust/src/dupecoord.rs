@@ -1766,7 +1766,7 @@ pub(crate) fn nzb_completed_host(
         } else {
             crate::queuesubsys_host::EA_GROUP_DUPE_DELETE
         };
-        let mut others: Vec<(i32, bool)> = Vec::new();
+        let mut others: Vec<(i32, bool, bool)> = Vec::new();
         let qlen = host.queue_len(dq_ptr);
         for i in 0..qlen {
             let qp = host.queue_at(dq_ptr, i);
@@ -1791,20 +1791,32 @@ pub(crate) fn nzb_completed_host(
                     crate::queuesubsys_host::NZB_INT_DELETE_STATUS,
                     crate::queuesubsys_host::DS_DUPE,
                 );
-                others.push((queued.id, queued.has_post_info));
+                // Its own folder only: without InterDir two copies of the same name share one,
+                // and the stopped copy's completed files there may be this copy's release.
+                let own_folder = queued.dest_dir != nzb.dest_dir
+                    && queued.dest_dir != nzb.final_dir;
+                others.push((queued.id, queued.has_post_info, own_folder));
             }
         }
-        for (other_id, in_post) in others {
-            host.dq_edit_entry(
-                dq_ptr,
-                other_id,
-                if in_post {
-                    crate::queuesubsys_host::EA_POST_DELETE
-                } else {
-                    delete_action
-                },
-                None,
-            );
+        for (other_id, in_post, own_folder) in others {
+            if in_post {
+                // Its files go when its job ends, as the delete route would remove them (see
+                // `prepost::note_stopped_for_on_disk`).
+                if own_folder {
+                    crate::prepost::note_stopped_for_on_disk(other_id);
+                }
+                // A post job is cancelled through the post-processor: only the edit-list route
+                // hands EA_POST_DELETE to it (a single-entry edit drops it, and the repair of
+                // the stopped copy ran on to its end).
+                host.dq_edit_list_single_id(
+                    dq_ptr,
+                    other_id,
+                    crate::queuesubsys_host::EA_POST_DELETE,
+                    None,
+                );
+            } else {
+                host.dq_edit_entry(dq_ptr, other_id, delete_action, None);
+            }
         }
     }
 }

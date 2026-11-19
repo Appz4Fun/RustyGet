@@ -7,6 +7,8 @@
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RsPostJobCandidate {
+    /// Held at the post gate of its duplicate key (see [`dupe_post_gate`]).
+    pub dupe_gate_held: u8,
     pub has_post_info: u8,
     pub working: u8,
     pub has_queue_script_job: u8,
@@ -347,6 +349,7 @@ pub fn pick_next_post_job(
             && (!has_active_unpack || c.need_unpack == 0)
             && c.in_active_jobs == 0
             && c.download_completed != 0
+            && c.dupe_gate_held == 0
         {
             best_idx = idx as i32;
             best_priority = c.priority;
@@ -354,6 +357,157 @@ pub fn pick_next_post_job(
     }
 
     best_idx
+}
+
+/// A copy of a release in the queue, as the post gate of its duplicate key sees it (see
+/// [`dupe_post_gate`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GateCopy {
+    /// It went past the gate: it is unpacking, moving or finishing.
+    pub passed: bool,
+    /// Its direct unpack made progress (it extracted part of the release, or waits on
+    /// volumes being repaired to carry on).
+    pub extracting: bool,
+}
+
+/// What the post gate of a duplicate key tells a copy about to go past its repair stages.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GateVerdict {
+    Pass,
+    /// Another copy (its index in `others`) went past the gate first; whichever ends on disk
+    /// first stops the other.
+    WaitPassed(usize),
+    /// Another copy's extraction is under way and this one's is not: it carries on, as
+    /// starting over from a whole copy throws that extraction away.
+    WaitExtracting(usize),
+}
+
+/// The post gate of a duplicate key (HealthCheck=dupe or park, where a copy may download while
+/// another is stream-repairing): only one copy goes past its repair stages into unpack and
+/// move, so two copies never both land files in the destination. The first copy to reach the
+/// gate goes, unless another copy's extraction made progress and its own did not.
+pub fn dupe_post_gate(own: GateCopy, others: &[GateCopy]) -> GateVerdict {
+    if own.passed {
+        return GateVerdict::Pass;
+    }
+    if let Some(i) = others.iter().position(|o| o.passed) {
+        return GateVerdict::WaitPassed(i);
+    }
+    if !own.extracting {
+        if let Some(i) = others.iter().position(|o| o.extracting) {
+            return GateVerdict::WaitExtracting(i);
+        }
+    }
+    GateVerdict::Pass
+}
+
+/// Downloads that went past the post gate of their duplicate key, and those held at it (told
+/// once), by id (see [`dupe_post_gate`]).
+static DUPE_GATE_PASSED: std::sync::Mutex<Option<std::collections::HashSet<i32>>> =
+    std::sync::Mutex::new(None);
+static DUPE_GATE_HELD: std::sync::Mutex<Option<std::collections::HashSet<i32>>> =
+    std::sync::Mutex::new(None);
+
+fn dupe_gate_set(
+    set: &std::sync::Mutex<Option<std::collections::HashSet<i32>>>,
+    id: i32,
+    on: bool,
+) -> bool {
+    let mut g = set.lock().unwrap_or_else(|e| e.into_inner());
+    let g = g.get_or_insert_with(Default::default);
+    if on {
+        g.insert(id)
+    } else {
+        g.remove(&id)
+    }
+}
+
+fn dupe_gate_has(set: &std::sync::Mutex<Option<std::collections::HashSet<i32>>>, id: i32) -> bool {
+    set.lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .is_some_and(|g| g.contains(&id))
+}
+
+/// Downloads whose post job was stopped because another copy of the release is on disk.
+static DUPE_STOPPED_IN_POST: std::sync::Mutex<Option<std::collections::HashSet<i32>>> =
+    std::sync::Mutex::new(None);
+
+/// Marks download `id`, in post-processing, as stopped because another copy of its release is
+/// downloaded and on disk: when its job ends its files are removed (unless HealthCheck=park
+/// parks it), as the delete route removes a copy stopped in the queue (see
+/// [`classify_delete_cleanup_mode`]: DeleteStatus DUPE, not parking).
+pub(crate) fn note_stopped_for_on_disk(id: i32) {
+    dupe_gate_set(&DUPE_STOPPED_IN_POST, id, true);
+}
+
+/// Forgets the post gate's record of download `id`: its job ended or it left the queue.
+fn dupe_gate_forget(id: i32) {
+    dupe_gate_set(&DUPE_GATE_PASSED, id, false);
+    dupe_gate_set(&DUPE_GATE_HELD, id, false);
+    dupe_gate_set(&DUPE_STOPPED_IN_POST, id, false);
+}
+
+/// The post gate's verdict for queued download `nzb`, with the name of the copy it waits for.
+#[cfg(unix)]
+fn dupe_post_gate_host(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    dq_ptr: usize,
+    nzb: &crate::queuesubsys_host::NzbSnap,
+) -> (GateVerdict, Vec<u8>) {
+    use crate::queuesubsys_host::{DM_FORCE, DS_NONE, HC_DUPE, HC_PARK, NK_NZB, NS_RUNNING};
+    const NS_SUCCESS: i32 = 3;
+    let health_check = host.opts().health_check;
+    if nzb.dupe_key.is_empty()
+        || nzb.dupe_mode == DM_FORCE
+        || nzb.delete_status != DS_NONE
+        || (health_check != HC_DUPE && health_check != HC_PARK)
+    {
+        return (GateVerdict::Pass, Vec::new());
+    }
+    let extracting = |n: &crate::queuesubsys_host::NzbSnap| {
+        n.direct_unpack_status == NS_RUNNING
+            || n.direct_unpack_status == NS_SUCCESS
+            || crate::postproc::direct_unpack_has_holds(n.id)
+            || crate::postproc::direct_unpack_awaiting_repair(n.id)
+    };
+    // Past the gate is also what a copy's state on disk says (its unpack or move already
+    // started), as the gate's record does not survive a restart.
+    let passed = |n: &crate::queuesubsys_host::NzbSnap| {
+        const US_NONE: i32 = 0;
+        const MS_NONE: i32 = 0;
+        dupe_gate_has(&DUPE_GATE_PASSED, n.id)
+            || n.unpack_status != US_NONE
+            || n.move_status != MS_NONE
+    };
+    let own = GateCopy { passed: passed(nzb), extracting: extracting(nzb) };
+    let mut others = Vec::new();
+    let mut names = Vec::new();
+    for i in 0..host.queue_len(dq_ptr) {
+        let qp = host.queue_at(dq_ptr, i);
+        if qp == 0 || qp == nzb.ptr {
+            continue;
+        }
+        let q = host.nzb_snap(qp, false);
+        if q.kind == NK_NZB
+            && !q.deleting
+            && q.delete_status == DS_NONE
+            && q.dupe_mode != DM_FORCE
+            && q.dupe_key.eq_ignore_ascii_case(&nzb.dupe_key)
+        {
+            others.push(GateCopy {
+                passed: passed(&q),
+                extracting: extracting(&q),
+            });
+            names.push(q.name);
+        }
+    }
+    let verdict = dupe_post_gate(own, &others);
+    let name = match verdict {
+        GateVerdict::WaitPassed(i) | GateVerdict::WaitExtracting(i) => names.swap_remove(i),
+        GateVerdict::Pass => Vec::new(),
+    };
+    (verdict, name)
 }
 
 /// True when a backup of kind `backup_kind` can lend a download of kind `own_kind`, whose
@@ -1558,6 +1712,7 @@ impl NzbgetRsPrePostProcessor {
         let nzb2 = host.nzb_snap(nzb_ptr, false);
         crate::parlive::forget_download_writes(nzb2.id);
         crate::postproc::forget_dead_volume_verdicts(nzb2.id);
+        dupe_gate_forget(nzb2.id);
         crate::postproc::direct_unpack_join_live_par_repair(nzb2.id);
         delete_cleanup_host(host, &opts, &nzb2);
 
@@ -1769,7 +1924,13 @@ impl NzbgetRsPrePostProcessor {
                 (false, false, false)
             };
             ptrs.push(nzb_ptr);
+            // A copy held at the post gate is picked again once the gate lets it through.
+            let dupe_gate_held = nzb.post_info_ptr != 0
+                && !working
+                && dupe_gate_has(&DUPE_GATE_HELD, nzb.id)
+                && dupe_post_gate_host(host, dq_ptr, &nzb).0 != GateVerdict::Pass;
             cands.push(RsPostJobCandidate {
+                dupe_gate_held: u8::from(dupe_gate_held),
                 has_post_info: u8::from(nzb.post_info_ptr != 0),
                 working: u8::from(working),
                 has_queue_script_job: 0,
@@ -2132,6 +2293,31 @@ impl NzbgetRsPrePostProcessor {
             return;
         }
 
+        // Past the repair stages only one copy of a release goes on to unpack and move.
+        match dupe_post_gate_host(host, dq_ptr, &nzb) {
+            (GateVerdict::Pass, _) => {
+                if !nzb.dupe_key.is_empty() {
+                    dupe_gate_set(&DUPE_GATE_PASSED, nzb.id, true);
+                }
+            }
+            (verdict, other) => {
+                if dupe_gate_set(&DUPE_GATE_HELD, nzb.id, true) {
+                    let mut msg = b"Holding ".to_vec();
+                    msg.extend_from_slice(&nzb.name);
+                    msg.extend_from_slice(b" before unpacking: ");
+                    msg.extend_from_slice(&other);
+                    msg.extend_from_slice(if matches!(verdict, GateVerdict::WaitPassed(_)) {
+                        b" is already unpacking or moving the release" as &[u8]
+                    } else {
+                        b" is extracting it already"
+                    });
+                    msg.extend_from_slice(b"; it goes on only if that copy fails");
+                    host.nzb_print_message(nzb.ptr, MK_INFO, &msg);
+                }
+                return;
+            }
+        }
+
         if crate::postproc::direct_unpack_awaiting_repair(nzb.id) {
             // Direct unpack paused at a damaged volume and the repair stages are over: let it
             // continue from where it stopped (or give up when the repair failed), then come back.
@@ -2295,6 +2481,15 @@ impl NzbgetRsPrePostProcessor {
 
         host.nzb_action(nzb_ptr, NZB_ACT_LEAVE_POST_PROCESS, 0);
         let nzb = host.nzb_snap(nzb_ptr, false);
+        if dupe_gate_has(&DUPE_STOPPED_IN_POST, nzb.id)
+            && nzb.delete_status == crate::queuesubsys_host::DS_DUPE
+        {
+            let opts = host.opts();
+            if opts.health_check != crate::queuesubsys_host::HC_PARK {
+                delete_cleanup_host(host, &opts, &nzb);
+            }
+        }
+        dupe_gate_forget(nzb.id);
         if nzb.is_download_completed {
             self.nzb_completed(host, dq_ptr, nzb_ptr, false);
         }
@@ -2457,6 +2652,23 @@ impl NzbgetRsPrePostProcessor {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_one_copy_of_a_release_goes_past_its_repair() {
+        use super::{dupe_post_gate as gate, GateCopy, GateVerdict::*};
+        let copy = |passed, extracting| GateCopy { passed, extracting };
+        // the first copy at the gate goes; one arriving after it waits
+        assert_eq!(gate(copy(false, false), &[copy(false, false)]), Pass);
+        assert_eq!(gate(copy(false, false), &[copy(false, false), copy(true, false)]), WaitPassed(1));
+        // even a copy whose extraction is under way waits for one already unpacking or moving
+        assert_eq!(gate(copy(false, true), &[copy(true, false)]), WaitPassed(0));
+        // a whole copy starting from scratch waits for a copy whose extraction carries on
+        assert_eq!(gate(copy(false, false), &[copy(false, true)]), WaitExtracting(0));
+        assert_eq!(gate(copy(false, true), &[copy(false, true)]), Pass);
+        // once through, it stays through
+        assert_eq!(gate(copy(true, false), &[copy(true, true)]), Pass);
+        assert_eq!(gate(copy(false, false), &[]), Pass);
+    }
+
     #[test]
     fn par_failure_is_overridden_only_for_borrowed_volume_damage() {
         use super::damage_is_borrowed_volumes as ok;

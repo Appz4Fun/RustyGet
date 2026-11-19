@@ -79,18 +79,11 @@ impl QueueSubsysHost {
         for index in 0..count {
             let mut ints = [0; 4];
             let mut strings = [std::ptr::null(); 4];
-            self.raw(
-                34,
-                5,
-                index as i32,
-                nzb,
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                ints.as_mut_ptr(),
-                std::ptr::null_mut(),
-                strings.as_mut_ptr(),
-            );
+            let x = OpArgs::NONE
+                .a2(index as i32)
+                .ints(ints.as_mut_ptr())
+                .strs(strings.as_mut_ptr());
+            self.filelist_op(nzb, 5, x);
             if ints[0] as u64 != id {
                 continue;
             }
@@ -114,18 +107,28 @@ impl QueueSubsysHost {
             callback,
             error: None,
         };
-        let status = self.raw(
-            43,
-            15,
-            0,
-            nzb_ptr,
-            std::ptr::from_mut(&mut state) as usize,
-            visit::<F> as *const () as *const c_char,
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        let status = if self.use_active {
+            unsafe {
+                live_par_visit_namespace(
+                    nzb_ptr as *const crate::qnzb::NzbScalars,
+                    Some(visit::<F>),
+                    std::ptr::from_mut(&mut state).cast(),
+                )
+            }
+        } else {
+            self.raw(
+                43,
+                15,
+                0,
+                nzb_ptr,
+                std::ptr::from_mut(&mut state) as usize,
+                visit::<F> as *const () as *const c_char,
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
         if let Some(error) = state.error {
             return Err(error);
         }
@@ -420,23 +423,6 @@ mod tests {
             }
             f
         }
-        fn host(&self, ctx: *mut c_void, v: NamespaceVisitor) -> usize {
-            unsafe {
-                native_op(
-                    43,
-                    15,
-                    0,
-                    self.0 as usize,
-                    ctx as usize,
-                    v as *const () as *const c_char,
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                )
-            }
-            .expect("op 43/15 is answered in Rust")
-        }
         fn walk(&self, ctx: *mut c_void, v: NamespaceVisitor) -> usize {
             unsafe { live_par_visit_namespace(self.0, Some(v), ctx) }
         }
@@ -545,7 +531,7 @@ mod tests {
         assert_ne!(rows[2].flags & 4, 0);
         rows.clear();
         let ctx = std::ptr::from_mut(&mut rows).cast::<c_void>();
-        assert_eq!(nzb.host(ctx, collect), 1);
+        assert_eq!(nzb.walk(ctx, collect), 1);
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].output, "/fixture/40.out.tmp");
     }
@@ -560,7 +546,7 @@ mod tests {
         assert_eq!(nzb.walk(ctx, stop), 0);
         assert_eq!(visits, 1);
         visits = 0;
-        assert_eq!(nzb.host(ctx, stop), 0);
+        assert_eq!(nzb.walk(ctx, stop), 0);
         assert_eq!(visits, 1);
         // Assembly may still have its final downloader registered. Neither
         // active count makes borrowing its changing output string safe.
@@ -573,7 +559,7 @@ mod tests {
             visits = 0;
             assert_eq!(nzb.walk(ctx, stop), 2);
             assert_eq!(visits, 0);
-            assert_eq!(nzb.host(ctx, stop), 2);
+            assert_eq!(nzb.walk(ctx, stop), 2);
             assert_eq!(visits, 0);
         }
         unsafe {

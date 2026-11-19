@@ -241,6 +241,12 @@ pub(crate) fn effective_live_pool_bytes() -> u64 {
     crate::articledl::memory_monitor_effective_par_buffer_mb(configured).max(0) as u64 * 1024 * 1024
 }
 
+/// The size of the pool a session's lease draws from: the effective ParBuffer for the
+/// daemon's shared pool.
+fn lease_pool_bytes(lease: &SessionBudgetLease) -> u64 {
+    lease.pool().size().unwrap_or_else(effective_live_pool_bytes)
+}
+
 fn acquire_session_budget(bytes: u64, limit: u64) -> Result<SessionBudgetLease, RepairError> {
     LIVE_BUDGET
         .acquire(bytes, limit)
@@ -457,12 +463,12 @@ impl ActiveStreamingSession {
             return false;
         }
         let unit = self.session.slice_size();
-        let pool = effective_live_pool_bytes();
         // Callers may hold the daemon queue lock; growth of repair slots holds
         // the budget across volume absorbs, so never wait for it here.
         let Ok(mut lease) = self.budget.try_lock() else {
             return false;
         };
+        let pool = lease_pool_bytes(&lease);
         let before = self.lent_memory.load(Ordering::Relaxed);
         if unit == 0 {
             return false;
@@ -582,7 +588,7 @@ impl ActiveStreamingSession {
         if want <= cap {
             return;
         }
-        let pool = effective_live_pool_bytes();
+        let pool = lease_pool_bytes(&lease);
         let granted = lease.grow_by_units(unit, (want - cap) as u64, pool);
         if granted == 0 {
             return;
@@ -635,6 +641,126 @@ impl ActiveStreamingSession {
     }
 }
 
+/// Wall time live PAR spent on each job's work, verifying and repairing, kept past the
+/// session (a job may have several) until the job reaches history
+/// (`postproc::live_par_time_settle`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct LiveParTime {
+    verify: std::time::Duration,
+    repair: std::time::Duration,
+    /// Whole seconds of par time (verify + repair) and of repair already moved into the
+    /// job's saved times by queue checkpoints.
+    taken_par: u64,
+    taken_repair: u64,
+}
+
+static LIVE_PAR_TIME: LazyLock<Mutex<HashMap<i32, LiveParTime>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+thread_local! {
+    static LIVE_PAR_TIMING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+impl ActiveStreamingSession {
+    /// Runs live PAR work for `nzb_id` and charges its wall time to the job: the part
+    /// par-rs spent in target repair calls is repair, the rest verification. Nested
+    /// calls are charged by the outermost one only.
+    fn timed<T>(&self, nzb_id: i32, f: impl FnOnce() -> T) -> T {
+        if LIVE_PAR_TIMING.with(|timing| timing.replace(true)) {
+            return f();
+        }
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                LIVE_PAR_TIMING.with(|timing| timing.set(false));
+            }
+        }
+        let _reset = Reset;
+        let started = std::time::Instant::now();
+        let before = self.session.repair_phase_stats();
+        let result = f();
+        let elapsed = started.elapsed();
+        let after = self.session.repair_phase_stats();
+        let (verify, repair) = split_live_time(
+            elapsed,
+            after.total_ns.saturating_sub(before.total_ns),
+            after.payload_wait_ns.saturating_sub(before.payload_wait_ns),
+        );
+        let mut times = LIVE_PAR_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let time = times.entry(nzb_id).or_default();
+        time.verify += verify;
+        time.repair += repair;
+        result
+    }
+}
+
+/// Splits an operation's wall time into verification and repair: par-rs's target
+/// repair calls (`repair_ns`) are repair, except their wait for exclusive payload
+/// admission (`wait_ns`), which is neither; the rest is verification.
+fn split_live_time(
+    elapsed: std::time::Duration,
+    repair_ns: u64,
+    wait_ns: u64,
+) -> (std::time::Duration, std::time::Duration) {
+    let in_repair = std::time::Duration::from_nanos(repair_ns).min(elapsed);
+    let wait = std::time::Duration::from_nanos(wait_ns).min(in_repair);
+    (elapsed - in_repair, in_repair - wait)
+}
+
+/// Takes the seconds live PAR spent on job `nzb_id` since the last take: verifying and
+/// repairing (par time, which includes the repair) and repairing alone.
+pub(crate) fn streaming_session_take_par_secs(nzb_id: i32) -> (i32, i32) {
+    let time = LIVE_PAR_TIME
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&nzb_id)
+        .unwrap_or_default();
+    let secs = |d: std::time::Duration, taken: u64| {
+        (d.as_secs_f64().round() as u64)
+            .saturating_sub(taken)
+            .min(i32::MAX as u64) as i32
+    };
+    (
+        secs(time.verify + time.repair, time.taken_par),
+        secs(time.repair, time.taken_repair),
+    )
+}
+
+/// Whether job `nzb_id` has live PAR time not yet in its times.
+pub(crate) fn live_par_time_pending(nzb_id: i32) -> bool {
+    LIVE_PAR_TIME
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&nzb_id)
+        .is_some_and(|time| (time.verify + time.repair).as_secs() > time.taken_par)
+}
+
+/// Takes only the whole seconds of job `nzb_id`'s live PAR time (par time, which
+/// includes the repair, and repair alone) and keeps the fraction for later, so
+/// repeated checkpoints neither lose nor add time.
+pub(crate) fn streaming_session_take_whole_par_secs(nzb_id: i32) -> (i32, i32) {
+    let mut times = LIVE_PAR_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(time) = times.get_mut(&nzb_id) else {
+        return (0, 0);
+    };
+    // Measured time is never reduced; only the whole seconds not yet taken move, so the
+    // repair seconds can never pass the par seconds and no fraction is lost.
+    let par = (time.verify + time.repair).as_secs().saturating_sub(time.taken_par);
+    let repair = time.repair.as_secs().saturating_sub(time.taken_repair);
+    time.taken_par += par;
+    time.taken_repair += repair;
+    (par.min(i32::MAX as u64) as i32, repair.min(i32::MAX as u64) as i32)
+}
+
+/// Charges live PAR time to job `nzb_id` as if it had been measured.
+#[cfg(test)]
+pub(crate) fn live_par_time_add_for_test(nzb_id: i32, verify_ms: u64, repair_ms: u64) {
+    let mut times = LIVE_PAR_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let time = times.entry(nzb_id).or_default();
+    time.verify += std::time::Duration::from_millis(verify_ms);
+    time.repair += std::time::Duration::from_millis(repair_ms);
+}
+
 fn with_live_session<T>(
     nzb_id: i32,
     f: impl FnOnce(&ActiveStreamingSession) -> Result<T, RepairError>,
@@ -649,12 +775,14 @@ fn with_live_entry<T>(
     f: impl FnOnce(&ActiveStreamingSession) -> Result<T, RepairError>,
 ) -> Result<T, RepairError> {
     let _operation = entry.operation.lock().unwrap_or_else(|e| e.into_inner());
-    entry.record((|| {
-        ensure_current_generation(nzb_id, entry)?;
-        let result = f(entry)?;
-        ensure_current_generation(nzb_id, entry)?;
-        Ok(result)
-    })())
+    entry.timed(nzb_id, || {
+        entry.record((|| {
+            ensure_current_generation(nzb_id, entry)?;
+            let result = f(entry)?;
+            ensure_current_generation(nzb_id, entry)?;
+            Ok(result)
+        })())
+    })
 }
 
 /// Reserve before taking an owned snapshot. This capture path performs no source I/O,
@@ -851,11 +979,11 @@ fn drain_live_articles_locked(
             let Some(article) = take_live_article(entry) else {
                 return Ok(count);
             };
-            let mut result = article.fold();
+            let mut result = entry.timed(nzb_id, || article.fold());
             // Staging that a loan of free ParBuffer enlarges enough takes the article after
             // all: not a refusal. A shortfall no loan covers is refused and reported.
             if matches!(&result, Err(error) if entry.lend_memory(error)) {
-                result = article.fold();
+                result = entry.timed(nzb_id, || article.fold());
             }
             drop(article);
             let outcome = result?;
@@ -1672,6 +1800,37 @@ pub fn streaming_session_start(
 ) -> Result<(), RepairError> {
     let budget =
         acquire_session_budget(options_reservation(&options)?, effective_live_pool_bytes())?;
+    start_streaming_session_with(nzb_id, par2_path, base_dir, options, budget)
+}
+
+/// Starts a session charged to a pool of its own (fixed size), so what it lends does
+/// not depend on what other tests' sessions hold in the shared one.
+#[cfg(test)]
+pub(crate) fn streaming_session_start_in_pool(
+    pool: &Arc<crate::parlive::BudgetPool>,
+    nzb_id: i32,
+    par2_path: &Path,
+    base_dir: &Path,
+    options: SessionOptions,
+) -> Result<(), RepairError> {
+    let bytes = options_reservation(&options)?;
+    let budget = pool.acquire(bytes, pool.size().unwrap_or(u64::MAX)).ok_or(
+        RepairError::StreamingMemoryLimit {
+            context: "test live PAR reservation",
+            required_bytes: bytes,
+            limit_bytes: pool.size().unwrap_or(u64::MAX),
+        },
+    )?;
+    start_streaming_session_with(nzb_id, par2_path, base_dir, options, budget)
+}
+
+fn start_streaming_session_with(
+    nzb_id: i32,
+    par2_path: &Path,
+    base_dir: &Path,
+    options: SessionOptions,
+    budget: SessionBudgetLease,
+) -> Result<(), RepairError> {
     let writers = download_writes(nzb_id, base_dir).map_err(|_| RepairError::Cancelled)?;
     let set = load_par2_set(par2_path)?;
     let entry = build_streaming_session(&set, base_dir, options, budget, writers)?;
@@ -2122,7 +2281,18 @@ pub(crate) fn streaming_session_kick_backfill(nzb_id: i32) {
             // A shared back-fill error is expected while verified slices still
             // sit in the article cache, so it is retried, never reported: the
             // strict back-fill inside repair surfaces any error that persists.
-            if worker.session.backfill_pending().is_ok() {
+            // Back-fill rereads and folds verified data: verification time for the job.
+            // Charged directly, not through `timed`, whose repair-stat delta could pick up a
+            // foreground repair running at the same time.
+            let started = std::time::Instant::now();
+            let backfilled = worker.session.backfill_pending().is_ok();
+            LIVE_PAR_TIME
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .entry(nzb_id)
+                .or_default()
+                .verify += started.elapsed();
+            if backfilled {
                 *retry_at() = None;
             }
         });
@@ -2374,11 +2544,11 @@ impl TargetWriteLease {
         drain_live_articles_locked(nzb_id, &entry)?;
         let par_ids: Vec<_> = ids.iter().map(|(_, id)| *id).collect();
         targets_current()?;
-        let (report, hashes) = entry.record(
+        let (report, hashes) = entry.record(entry.timed(nzb_id, || {
             entry
                 .session
-                .repair_available_targets_with_files_and_hashes_now(&par_ids, &files),
-        )?;
+                .repair_available_targets_with_files_and_hashes_now(&par_ids, &files)
+        }))?;
         ensure_current_generation(nzb_id, &entry)?;
         targets_current()?;
         // The library checks both the whole-file MD5 and actual file length under our lease.
@@ -2457,8 +2627,8 @@ pub fn streaming_session_early_repair(
     }
     Some(
         entry.record(
-            session
-                .repair_available_targets_now(&ids)
+            entry
+                .timed(nzb_id, || session.repair_available_targets_now(&ids))
                 .and_then(|report| {
                     ensure_current_generation(nzb_id, &entry)?;
                     let done = names
@@ -4019,7 +4189,10 @@ mod tests {
         .unwrap();
         let index_path = dir.join("lend.par2");
         std::fs::write(&index_path, &built.index).unwrap();
-        streaming_session_start(
+        // A pool of its own, so other tests' sessions cannot take the room it lends.
+        let pool = Arc::new(crate::parlive::BudgetPool::with_size(500 << 20));
+        streaming_session_start_in_pool(
+            &pool,
             nzb_id,
             &index_path,
             &dir,
@@ -4108,7 +4281,7 @@ mod tests {
         // Never more than half of the pool.
         entry
             .lent_memory
-            .store(effective_live_pool_bytes() / 2, Ordering::Relaxed);
+            .store(pool.size().unwrap() / 2, Ordering::Relaxed);
         let _ = entry.record::<()>(Err(RepairError::StreamingMemoryLimit {
             context: "RAM-only partial staging",
             required_bytes: 1,
@@ -4151,78 +4324,44 @@ mod tests {
         .unwrap();
         let index_path = dir.join("retry.par2");
         std::fs::write(&index_path, &built.index).unwrap();
-        // Other tests' sessions share the process-wide ParBuffer pool and may leave no
-        // room for a loan; then the overrun must be refused and reported, and the test
-        // tries again until a loan can be made.
-        for attempt in 0.. {
-            let started = streaming_session_start(
-                nzb_id,
-                &index_path,
-                &dir,
-                SessionOptions {
-                    preallocated_syndrome_slots: 1,
-                    max_syndrome_slots: 1,
-                    max_syndrome_bytes: 4096,
-                    max_working_bytes: 4 << 20,
-                    max_staging_bytes: 4096,
-                    solve_mem_limit_bytes: 16 << 20,
-                    ..SessionOptions::default()
-                },
-            );
-            if attempt < 200
-                && matches!(
-                    started,
-                    Err(RepairError::StreamingMemoryLimit {
-                        context: "shared live PAR reservation",
-                        ..
-                    })
-                )
-            {
-                std::thread::sleep(std::time::Duration::from_millis(20));
-                continue;
-            }
-            started.unwrap();
-            // The first 3000 bytes of three slices: each piece stays partial, 9000 bytes
-            // staged against a 4096-byte cap.
-            for slice in 0..3u64 {
-                let offset = slice * 4096;
-                let piece = f0[offset as usize..offset as usize + 3000].to_vec();
-                let crc = crc32fast::hash(&piece);
-                streaming_session_defer_article(
-                    nzb_id,
-                    (b"part01.rar", &[]),
-                    offset,
-                    3000,
-                    crc,
-                    || Some(piece),
-                )
-                .unwrap()
-                .unwrap();
-            }
-            let drained = streaming_session_drain_articles(nzb_id).unwrap();
-            let entry = active_streaming_session(nzb_id).unwrap();
-            // Two loans are needed; a parallel test can fill the shared pool
-            // before either, so any staging refusal means try again.
-            let pool_was_full = matches!(
-                drained,
-                Err(RepairError::StreamingMemoryLimit {
-                    context: "RAM-only partial staging",
-                    ..
-                })
-            );
-            if pool_was_full && attempt < 200 {
-                streaming_session_forget(nzb_id);
-                drop(entry);
-                std::thread::sleep(std::time::Duration::from_millis(20));
-                continue;
-            }
-            assert_eq!(drained.unwrap(), 3);
-            assert!(entry.session.max_staging_bytes() >= 9000);
-            assert!(entry.refusals.lock().unwrap().is_empty());
-            assert!(streaming_session_take_warning(nzb_id).is_none());
-            streaming_session_forget(nzb_id);
-            break;
+        // A pool of its own: what other tests' sessions hold in the shared one must
+        // not decide whether the loan is made.
+        let pool = Arc::new(crate::parlive::BudgetPool::with_size(500 << 20));
+        streaming_session_start_in_pool(
+            &pool,
+            nzb_id,
+            &index_path,
+            &dir,
+            SessionOptions {
+                preallocated_syndrome_slots: 1,
+                max_syndrome_slots: 1,
+                max_syndrome_bytes: 4096,
+                max_working_bytes: 4 << 20,
+                max_staging_bytes: 4096,
+                solve_mem_limit_bytes: 16 << 20,
+                ..SessionOptions::default()
+            },
+        )
+        .unwrap();
+        // The first 3000 bytes of three slices: each piece stays partial, 9000 bytes
+        // staged against a 4096-byte cap.
+        for slice in 0..3u64 {
+            let offset = slice * 4096;
+            let piece = f0[offset as usize..offset as usize + 3000].to_vec();
+            let crc = crc32fast::hash(&piece);
+            streaming_session_defer_article(nzb_id, (b"part01.rar", &[]), offset, 3000, crc, || {
+                Some(piece)
+            })
+            .unwrap()
+            .unwrap();
         }
+        assert_eq!(streaming_session_drain_articles(nzb_id).unwrap().unwrap(), 3);
+        let entry = active_streaming_session(nzb_id).unwrap();
+        assert!(entry.session.max_staging_bytes() >= 9000);
+        assert!(entry.refusals.lock().unwrap_or_else(|e| e.into_inner()).is_empty());
+        assert!(streaming_session_take_warning(nzb_id).is_none());
+        streaming_session_forget(nzb_id);
+        drop(entry);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4256,68 +4395,201 @@ mod tests {
         .unwrap();
         let index_path = dir.join("queue.par2");
         std::fs::write(&index_path, &built.index).unwrap();
-        // Other tests' sessions share the process-wide ParBuffer pool; when it has no
-        // room the overrun must be refused, and the test tries again.
-        for attempt in 0.. {
-            let started = streaming_session_start(
-                nzb_id,
-                &index_path,
-                &dir,
-                SessionOptions {
-                    preallocated_syndrome_slots: 1,
-                    max_syndrome_slots: 1,
-                    max_syndrome_bytes: 4096,
-                    max_working_bytes: 4 << 20,
-                    max_staging_bytes: 4096,
-                    solve_mem_limit_bytes: 16 << 20,
-                    ..SessionOptions::default()
-                },
-            );
-            if attempt < 200 && started.is_err() {
-                std::thread::sleep(std::time::Duration::from_millis(20));
-                continue;
-            }
-            started.unwrap();
-            let entry = active_streaming_session(nzb_id).unwrap();
-            entry.article_byte_limit.store(4096, Ordering::Release);
-            let mut results = Vec::new();
-            for slice in 0..2u64 {
+        // A pool of its own: what other tests' sessions hold in the shared one must
+        // not decide whether the loan is made.
+        let pool = Arc::new(crate::parlive::BudgetPool::with_size(500 << 20));
+        streaming_session_start_in_pool(
+            &pool,
+            nzb_id,
+            &index_path,
+            &dir,
+            SessionOptions {
+                preallocated_syndrome_slots: 1,
+                max_syndrome_slots: 1,
+                max_syndrome_bytes: 4096,
+                max_working_bytes: 4 << 20,
+                max_staging_bytes: 4096,
+                solve_mem_limit_bytes: 16 << 20,
+                ..SessionOptions::default()
+            },
+        )
+        .unwrap();
+        let entry = active_streaming_session(nzb_id).unwrap();
+        entry.article_byte_limit.store(4096, Ordering::Release);
+        let results: Vec<_> = (0..2u64)
+            .map(|slice| {
                 let offset = slice * 4096;
                 let piece = f0[offset as usize..offset as usize + 4096].to_vec();
                 let crc = crc32fast::hash(&piece);
-                results.push(
-                    streaming_session_defer_article(
-                        nzb_id,
-                        (b"part01.rar", &[]),
-                        offset,
-                        4096,
-                        crc,
-                        || Some(piece),
-                    )
-                    .unwrap(),
-                );
-            }
-            if entry.lent_memory.load(Ordering::Relaxed) == 0 && attempt < 200 {
-                assert!(matches!(
-                    results[1],
-                    Err(RepairError::StreamingMemoryLimit {
-                        context: "live article snapshots",
-                        ..
-                    })
-                ));
-                streaming_session_forget(nzb_id);
-                drop(entry);
-                std::thread::sleep(std::time::Duration::from_millis(20));
-                continue;
-            }
-            assert!(results.iter().all(Result::is_ok), "{results:?}");
-            assert_eq!(entry.article_byte_limit.load(Ordering::Relaxed), 2 * 4096);
-            assert!(entry.refusals.lock().unwrap().is_empty());
-            assert!(streaming_session_take_warning(nzb_id).is_none());
-            assert_eq!(streaming_session_drain_articles(nzb_id).unwrap().unwrap(), 2);
-            streaming_session_forget(nzb_id);
-            break;
-        }
+                streaming_session_defer_article(
+                    nzb_id,
+                    (b"part01.rar", &[]),
+                    offset,
+                    4096,
+                    crc,
+                    || Some(piece),
+                )
+                .unwrap()
+            })
+            .collect();
+        assert!(results.iter().all(Result::is_ok), "{results:?}");
+        assert_eq!(entry.article_byte_limit.load(Ordering::Relaxed), 2 * 4096);
+        assert!(entry.refusals.lock().unwrap_or_else(|e| e.into_inner()).is_empty());
+        assert!(streaming_session_take_warning(nzb_id).is_none());
+        assert_eq!(streaming_session_drain_articles(nzb_id).unwrap().unwrap(), 2);
+        // An overrun no loan can cover is still refused: the pool is full.
+        let full = *pool.reserved_for_test();
+        let filler = pool.acquire(pool.size().unwrap() - full, u64::MAX).unwrap();
+        entry.article_byte_limit.store(4096, Ordering::Release);
+        let piece = f0[8192..12288].to_vec();
+        let crc = crc32fast::hash(&piece);
+        streaming_session_defer_article(nzb_id, (b"part01.rar", &[]), 8192, 4096, crc, || {
+            Some(piece.clone())
+        })
+        .unwrap()
+        .unwrap();
+        let piece2 = f0[12288..16384].to_vec();
+        let crc2 = crc32fast::hash(&piece2);
+        assert!(matches!(
+            streaming_session_defer_article(nzb_id, (b"part01.rar", &[]), 12288, 4096, crc2, || {
+                Some(piece2)
+            })
+            .unwrap(),
+            Err(RepairError::StreamingMemoryLimit {
+                context: "live article snapshots",
+                ..
+            })
+        ));
+        drop(filler);
+        streaming_session_forget(nzb_id);
+        drop(entry);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn live_time_split_leaves_payload_wait_out_of_repair() {
+        let ms = std::time::Duration::from_millis;
+        // 10 ms in all, 6 ms in repair calls of which 1 ms waiting for admission.
+        assert_eq!(split_live_time(ms(10), 6_000_000, 1_000_000), (ms(4), ms(5)));
+        // Library timers can overshoot the caller's: never more than the wall time.
+        assert_eq!(split_live_time(ms(10), 12_000_000, 20_000_000), (ms(0), ms(0)));
+        assert_eq!(split_live_time(ms(3), 0, 0), (ms(3), ms(0)));
+    }
+
+    /// Checkpoints take whole seconds and keep the fraction: however often the queue
+    /// is saved, the saved and the settled time add up to what was measured.
+    #[test]
+    fn live_par_time_checkpoints_take_whole_seconds_once() {
+        let nzb_id = 0x6a0f_0021;
+        let _ = streaming_session_take_par_secs(nzb_id);
+        live_par_time_add_for_test(nzb_id, 1_700, 600); // 2.3 s, 0.6 s repair
+        assert!(live_par_time_pending(nzb_id));
+        assert_eq!(streaming_session_take_whole_par_secs(nzb_id), (2, 0));
+        assert_eq!(streaming_session_take_whole_par_secs(nzb_id), (0, 0));
+        assert!(!live_par_time_pending(nzb_id));
+        // 0.3 s kept; 2.3 s more of which 0.9 s repair: 2.6 s, 1.2 s repair.
+        live_par_time_add_for_test(nzb_id, 1_400, 900);
+        assert_eq!(streaming_session_take_whole_par_secs(nzb_id), (2, 1));
+        // The rest settles at history, rounded: 5 s par for 4.6 s, 2 s repair for 1.5 s.
+        assert_eq!(streaming_session_take_par_secs(nzb_id), (1, 1));
+        assert_eq!(streaming_session_take_whole_par_secs(nzb_id), (0, 0));
+        // A repair fraction larger than the par fraction is kept, not folded into verify:
+        // 3.7 s repair + 0.5 s verify checkpoints 4 s / 3 s and settles 0 s / 1 s.
+        live_par_time_add_for_test(nzb_id, 500, 3_700);
+        assert_eq!(streaming_session_take_whole_par_secs(nzb_id), (4, 3));
+        assert_eq!(streaming_session_take_par_secs(nzb_id), (0, 1));
+    }
+
+    /// Live PAR work is charged to the job's par time, once, nested calls included once,
+    /// and survives the session until the job reaches history and takes it.
+    #[test]
+    fn live_par_time_is_charged_once_and_taken_once() {
+        use par_rs::create::{build_set, SetOptions, VolumeScheme};
+
+        let nzb_id = 0x6a0f_0012;
+        let dir = std::env::temp_dir().join(format!(
+            "rustyget-parchecker-time-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f0 = make_deterministic_bytes(8 * 4096, 407);
+        let built = build_set(
+            "time",
+            &[("part01.rar", &f0)],
+            &SetOptions {
+                slice_size: 4096,
+                recovery_blocks: 2,
+                first_exponent: 0,
+                volumes: VolumeScheme::Single,
+                creator: "rustyget-test".to_string(),
+                unicode_names: false,
+                kernel: Kernel::detect(),
+            },
+        )
+        .unwrap();
+        let index_path = dir.join("time.par2");
+        std::fs::write(&index_path, &built.index).unwrap();
+        let pool = Arc::new(crate::parlive::BudgetPool::with_size(500 << 20));
+        streaming_session_start_in_pool(
+            &pool,
+            nzb_id,
+            &index_path,
+            &dir,
+            SessionOptions {
+                preallocated_syndrome_slots: 1,
+                max_syndrome_slots: 1,
+                max_syndrome_bytes: 4096,
+                max_working_bytes: 4 << 20,
+                max_staging_bytes: 4096,
+                solve_mem_limit_bytes: 16 << 20,
+                ..SessionOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(streaming_session_take_par_secs(nzb_id), (0, 0));
+        let entry = active_streaming_session(nzb_id).unwrap();
+        let times = || LIVE_PAR_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let value = entry.timed(nzb_id, || {
+            let inner = entry.timed(nzb_id, || {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                7
+            });
+            // The nested call charged nothing of its own: the outer one charges it.
+            assert!(!times().contains_key(&nzb_id));
+            inner
+        });
+        assert_eq!(value, 7);
+        let time = times()[&nzb_id];
+        assert!(time.verify >= std::time::Duration::from_millis(100));
+        assert_eq!(time.repair, std::time::Duration::ZERO);
+        // Ordinary article work goes through the same accounting.
+        let piece = f0[..4096].to_vec();
+        let crc = crc32fast::hash(&piece);
+        streaming_session_on_article_finished_by_name(
+            nzb_id,
+            b"part01.rar",
+            0,
+            4096,
+            crc,
+            Some(&piece),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(times()[&nzb_id].verify > time.verify);
+        streaming_session_forget(nzb_id);
+        drop(entry);
+        // Kept past the session; par time includes the repair; whole seconds.
+        times().insert(
+            nzb_id,
+            LiveParTime {
+                verify: std::time::Duration::from_millis(1400),
+                repair: std::time::Duration::from_millis(600),
+                ..Default::default()
+            },
+        );
+        assert_eq!(streaming_session_take_par_secs(nzb_id), (2, 1));
+        assert_eq!(streaming_session_take_par_secs(nzb_id), (0, 0));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4409,6 +4681,16 @@ mod tests {
             .unwrap();
         assert_eq!(report.repaired_slices.len(), 3);
         assert_eq!(std::fs::read(dir.join("part01.rar")).unwrap(), f0);
+        // The repair is charged as repair time, the feeding as verification.
+        let time = LIVE_PAR_TIME.lock().unwrap_or_else(|e| e.into_inner())[&nzb_id];
+        assert!(time.repair > std::time::Duration::ZERO);
+        assert!(time.verify > std::time::Duration::ZERO);
+        let stats = entry.session.repair_phase_stats();
+        assert_eq!(
+            time.repair.as_nanos() as u64,
+            stats.total_ns - stats.payload_wait_ns
+        );
+        let _ = streaming_session_take_par_secs(nzb_id);
         streaming_session_cancel(nzb_id);
         let _ = std::fs::remove_dir_all(&dir);
     }

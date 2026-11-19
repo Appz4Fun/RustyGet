@@ -1768,6 +1768,7 @@ impl NzbgetRsPrePostProcessor {
         }
         crate::dupecoord::rescue_on_health_failure_host(host, dq_ptr, nzb_ptr);
         if !add_to_history {
+            crate::postproc::live_par_time_settle(host, nzb_ptr, false);
             host.history_delete_disk_files(nzb_ptr);
             crate::dupefallback::par_damage_forget_all(nzb.id);
             host.queue_remove(dq_ptr, nzb_ptr);

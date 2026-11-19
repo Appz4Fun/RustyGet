@@ -3747,6 +3747,71 @@ fn direct_unpack_take_released(nzb_id: i32) -> (Vec<Vec<u8>>, bool) {
     }
 }
 
+/// New `(ParSec, live part of ParSec, RepairSec)` once live PAR's `(par, repair)`
+/// seconds are charged; `None` when nothing changes. A deleted job's time is dropped.
+fn live_par_time_charge(
+    deleted: bool,
+    (par_sec, live_par_sec, repair_sec): (i32, i32, i32),
+    (live_par, live_repair): (i32, i32),
+) -> Option<(i32, i32, i32)> {
+    (!deleted && (live_par, live_repair) != (0, 0)).then_some((
+        par_sec.saturating_add(live_par),
+        live_par_sec.saturating_add(live_par),
+        repair_sec.saturating_add(live_repair),
+    ))
+}
+
+/// The job reaches history (or leaves the queue without it): live PAR's verification
+/// and repair while downloading is charged to its times, once, whether or not a
+/// par-check ran. A deleted job's, or one leaving without history, is dropped.
+pub(crate) fn live_par_time_settle(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    nzb_ptr: usize,
+    keep: bool,
+) {
+    use crate::queuesubsys_host::{
+        DS_NONE, NZB_INT_LIVE_PAR_SEC, NZB_INT_PAR_SEC, NZB_INT_REPAIR_SEC,
+    };
+    let nzb = host.nzb_snap(nzb_ptr, false);
+    let taken = crate::parchecker::streaming_session_take_par_secs(nzb.id);
+    let current = (nzb.par_sec, nzb.live_par_sec, nzb.repair_sec);
+    let deleted = !keep || nzb.delete_status != DS_NONE;
+    if let Some((par, live, repair)) = live_par_time_charge(deleted, current, taken) {
+        host.nzb_set_int(nzb_ptr, NZB_INT_PAR_SEC, par);
+        host.nzb_set_int(nzb_ptr, NZB_INT_LIVE_PAR_SEC, live);
+        host.nzb_set_int(nzb_ptr, NZB_INT_REPAIR_SEC, repair);
+    }
+}
+
+/// Queue checkpoint: moves the whole seconds of a queued job's live PAR time into its
+/// saved times now, so a restart keeps them; the fraction stays for later, and the
+/// rest is settled at history. Nothing is counted twice.
+pub(crate) fn live_par_time_checkpoint(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    nzb_ptr: usize,
+) {
+    use crate::queuesubsys_host::{
+        DS_NONE, NZB_INT_LIVE_PAR_SEC, NZB_INT_PAR_SEC, NZB_INT_REPAIR_SEC,
+    };
+    let nzb = host.nzb_snap(nzb_ptr, false);
+    if nzb.delete_status != DS_NONE {
+        return; // dropped at history
+    }
+    let taken = crate::parchecker::streaming_session_take_whole_par_secs(nzb.id);
+    let current = (nzb.par_sec, nzb.live_par_sec, nzb.repair_sec);
+    if let Some((par, live, repair)) = live_par_time_charge(false, current, taken) {
+        host.nzb_set_int(nzb_ptr, NZB_INT_PAR_SEC, par);
+        host.nzb_set_int(nzb_ptr, NZB_INT_LIVE_PAR_SEC, live);
+        host.nzb_set_int(nzb_ptr, NZB_INT_REPAIR_SEC, repair);
+    }
+}
+
+/// Drops job `nzb_id`'s unsettled live PAR time: live work that ended after the job
+/// reached history, or a job that merge/split removed, belongs to no job's times.
+pub(crate) fn live_par_time_discard(nzb_id: i32) {
+    let _ = crate::parchecker::streaming_session_take_par_secs(nzb_id);
+}
+
 pub(crate) fn direct_unpack_forget_holds(nzb_id: i32) {
     note_dead_volume_borrow(nzb_id, false);
     forget_dead_volume_verdicts(nzb_id);
@@ -3788,11 +3853,71 @@ struct DirectUnpackRunLocal {
     unpack_guard: Option<crate::unpacklimits::SharedGuard>,
 }
 
+/// Wall time a job spends in one activity, which starts and stops as it goes.
+#[derive(Default)]
+struct BusyTime {
+    since: Option<std::time::Instant>,
+    /// Not yet reported.
+    total: Duration,
+    /// The part of `total` from before the download completed.
+    live: Duration,
+    download_done: bool,
+}
+
+impl BusyTime {
+    fn set_active(&mut self, active: bool, now: std::time::Instant) {
+        match (active, self.since) {
+            (true, None) => self.since = Some(now),
+            (false, Some(since)) => {
+                self.total += now.saturating_duration_since(since);
+                self.since = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Folds an open period into `total` up to `now`, and keeps it open.
+    fn fold_open(&mut self, now: std::time::Instant) {
+        if let Some(since) = self.since.as_mut() {
+            self.total += now.saturating_duration_since(*since);
+            *since = now;
+        }
+    }
+
+    /// The download completed: what was busy so far ran while downloading. Idle time
+    /// after this (waiting for a volume or the unpack lock) is not busy, so it never
+    /// shifts the split.
+    fn mark_download_done(&mut self, now: std::time::Instant) {
+        if !self.download_done {
+            self.fold_open(now);
+            self.live = self.total;
+            self.download_done = true;
+        }
+    }
+
+    /// Whole seconds so far (an open period included) that no earlier take reported,
+    /// and the part of them from before the download completed.
+    fn take_secs(&mut self, now: std::time::Instant) -> (i32, i32) {
+        self.fold_open(now);
+        if !self.download_done {
+            self.live = self.total;
+        }
+        let secs = |d: Duration| d.as_secs_f64().round().min(i32::MAX as f64);
+        let total = secs(self.total);
+        let live = secs(self.live).min(total);
+        self.total = self.total.saturating_sub(Duration::from_secs_f64(total));
+        self.live = self.live.saturating_sub(Duration::from_secs_f64(live));
+        (total as i32, live as i32)
+    }
+}
+
 pub struct NzbgetRsDirectUnpack {
     nzb_id: i32,
     thread_ptr: usize,
     vol: Mutex<DirectUnpackVolumeState>,
     extra_start_time: AtomicI64,
+    /// Time spent unpacking (not waiting for a volume), for the job's UnpackSec.
+    busy: Mutex<BusyTime>,
     processed: AtomicBool,
     cancelled: AtomicBool,
     waiting_volume: AtomicBool,
@@ -3808,6 +3933,7 @@ impl NzbgetRsDirectUnpack {
             thread_ptr,
             vol: Mutex::new(DirectUnpackVolumeState::default()),
             extra_start_time: AtomicI64::new(0),
+            busy: Mutex::new(BusyTime::default()),
             processed: AtomicBool::new(false),
             cancelled: AtomicBool::new(false),
             waiting_volume: AtomicBool::new(false),
@@ -3827,6 +3953,25 @@ impl NzbgetRsDirectUnpack {
 
     pub fn is_waiting_volume(&self) -> bool {
         self.waiting_volume.load(Ordering::Acquire)
+    }
+
+    fn set_waiting(&self, waiting: bool) {
+        self.account_busy(&self.waiting_volume, waiting);
+    }
+
+    fn set_unpacking(&self, unpacking: bool) {
+        self.account_busy(&self.unpacking, unpacking);
+    }
+
+    /// Sets `flag`; unpacking counts while an archive is being extracted and no volume
+    /// is awaited. The store and the reading of both flags happen under the busy lock,
+    /// so transitions from the downloader and the extractor apply in order.
+    fn account_busy(&self, flag: &AtomicBool, value: bool) {
+        let mut busy = self.busy.lock().unwrap_or_else(|e| e.into_inner());
+        flag.store(value, Ordering::Release);
+        let active = self.unpacking.load(Ordering::Acquire)
+            && !self.waiting_volume.load(Ordering::Acquire);
+        busy.set_active(active, std::time::Instant::now());
     }
 
     fn is_stopped(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn) -> bool {
@@ -3887,7 +4032,15 @@ impl NzbgetRsDirectUnpack {
         } else {
             0
         };
-        if start != 0 || clear_working {
+        // The unpacking done so far, while downloading and after, and the part while
+        // downloading (split when the download completed); reported once.
+        let (busy_sec, live_sec) = self
+            .busy
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take_secs(std::time::Instant::now());
+        let mut unpack_sec = [busy_sec, live_sec];
+        if start != 0 || clear_working || unpack_sec[0] != 0 {
             unsafe {
                 host_cb(
                     ctx,
@@ -3898,7 +4051,7 @@ impl NzbgetRsDirectUnpack {
                     usize::from(clear_working) | (if start != 0 { 2 } else { 0 }),
                     ptr::null(),
                     ptr::null(),
-                    ptr::null_mut(),
+                    unpack_sec.as_mut_ptr(),
                     ptr::null_mut(),
                     ptr::null_mut(),
                 );
@@ -4030,7 +4183,7 @@ impl NzbgetRsDirectUnpack {
                 .is_some_and(|wf| wf.eq_ignore_ascii_case(&filename))
             {
                 v.waiting_file = None;
-                self.waiting_volume.store(false, Ordering::Release);
+                self.set_waiting(false);
             }
             if crate::unpack::direct_unpack_is_main_archive(&filename) {
                 v.archives.push_back(filename);
@@ -4105,7 +4258,7 @@ impl NzbgetRsDirectUnpack {
                     .is_some_and(|wf| wf.eq_ignore_ascii_case(&filename))
                 {
                     v.waiting_file = None;
-                    self.waiting_volume.store(false, Ordering::Release);
+                    self.set_waiting(false);
                 }
                 if crate::unpack::direct_unpack_is_main_archive(&filename) {
                     v.archives.push_back(filename);
@@ -4146,7 +4299,7 @@ impl NzbgetRsDirectUnpack {
             .is_some_and(|wf| wf.eq_ignore_ascii_case(&filename))
         {
             v.waiting_file = None;
-            self.waiting_volume.store(false, Ordering::Release);
+            self.set_waiting(false);
         }
 
         if crate::unpack::direct_unpack_is_main_archive(&filename) {
@@ -4160,6 +4313,12 @@ impl NzbgetRsDirectUnpack {
         host_cb: NzbgetRsRepairCtrlHostFn,
         nzb_ptr: usize,
     ) {
+        // Extraction from here on is post-download work, also when it resumes after a
+        // repair releases volumes parked below.
+        self.busy
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .mark_download_done(std::time::Instant::now());
         let mut ints = [0 as c_int; 2];
         let mut strs = [ptr::null() as *const c_char; 2];
         unsafe {
@@ -4524,12 +4683,12 @@ impl NzbgetRsDirectUnpack {
         let full_filename = [local.dest_dir.as_slice(), &[sep], filename].concat();
         let on_hold = direct_unpack_is_held_path(&full_filename);
         if !on_hold && crate::fsops::file_exists(&full_filename, &crate::fsops::posix_stat) {
-            self.waiting_volume.store(false, Ordering::Release);
+            self.set_waiting(false);
         } else {
             let nzb_completed = {
                 let mut v = self.lock_vol();
                 v.waiting_file = Some(filename.to_vec());
-                self.waiting_volume.store(true, Ordering::Release);
+                self.set_waiting(true);
                 v.nzb_completed
             };
             if nzb_completed && !on_hold {
@@ -4686,10 +4845,10 @@ impl NzbgetRsDirectUnpack {
         if Self::is_stopped(ctx, host_cb) {
             return;
         }
-        self.waiting_volume.store(false, Ordering::Release);
+        self.set_waiting(false);
         self.exec_thread_key
             .store(current_thread_key(), Ordering::Release);
-        self.unpacking.store(true, Ordering::Release);
+        self.set_unpacking(true);
 
         let sep = crate::paths::PATH_SEPARATOR;
         let full_archive_path =
@@ -4750,7 +4909,7 @@ impl NzbgetRsDirectUnpack {
                 failure: Some(&mut failure),
                 // A parked session counts as waiting, as the volume handshake did, so reloads
                 // are not deferred behind it.
-                on_wait: Some(&|waiting| self.waiting_volume.store(waiting, Ordering::Release)),
+                on_wait: Some(&|waiting| self.set_waiting(waiting)),
                 guard: Some(&guard),
             },
         );
@@ -4763,9 +4922,9 @@ impl NzbgetRsDirectUnpack {
             }
         }
 
-        self.unpacking.store(false, Ordering::Release);
+        self.set_unpacking(false);
         self.exec_thread_key.store(0, Ordering::Release);
-        self.waiting_volume.store(false, Ordering::Release);
+        self.set_waiting(false);
         drop(_unpack_guard);
 
         local.unpack_ok = res.is_ok()
@@ -4861,7 +5020,7 @@ impl NzbgetRsDirectUnpack {
                 MK_DEBUG,
                 format!("Could not find NzbInfo for {}", self.nzb_id).as_bytes(),
             );
-            self.unpacking.store(false, Ordering::Release);
+            self.set_unpacking(false);
             return;
         }
 
@@ -4894,7 +5053,7 @@ impl NzbgetRsDirectUnpack {
                     continue;
                 }
                 started.push(archive.clone());
-                self.waiting_volume.store(false, Ordering::Release);
+                self.set_waiting(false);
                 if !self.processed.load(Ordering::Acquire) {
                     let m = [b"Directly unpacking ", local.name.as_slice()].concat();
                     self.add_message(ctx, host_cb, MK_INFO, &m, &mut local);
@@ -4919,14 +5078,14 @@ impl NzbgetRsDirectUnpack {
                     }
                     continue;
                 }
-                self.waiting_volume.store(true, Ordering::Release);
+                self.set_waiting(true);
                 std::thread::sleep(Duration::from_millis(100));
                 self.apply_releases(ctx, host_cb);
             }
         }
 
-        self.unpacking.store(false, Ordering::Release);
-        self.waiting_volume.store(false, Ordering::Release);
+        self.set_unpacking(false);
+        self.set_waiting(false);
 
         let cancelled = self.cancelled.load(Ordering::Acquire);
         let interrupted = !cancelled && self.is_stopped_or_terminated(ctx, host_cb);
@@ -5145,7 +5304,7 @@ unsafe extern "C" fn direct_unpack_host_cb(
 ) -> usize {
     use crate::queuesubsys_host::{
         NZB_ACT_CLEAR_UNPACK_THREAD, NZB_INT_DIRECT_UNPACK_STATUS, NZB_INT_POST_TOTAL_SEC,
-        NZB_INT_UNPACK_SEC, POST_INT_WORKING,
+        NZB_INT_LIVE_UNPACK_SEC, NZB_INT_UNPACK_SEC, POST_INT_WORKING,
     };
     if op != 0 {
         reset_call_arena();
@@ -5230,8 +5389,25 @@ unsafe extern "C" fn direct_unpack_host_cb(
             }
             if a1 == 5 {
                 let ns = host.nzb_snap(p1, false);
+                // ints[0]: seconds spent unpacking (while downloading too), ints[1]: the
+                // part of it while downloading; a2: the wait after the download, which
+                // post-processing spent on direct unpack.
+                let (unpack_sec, live_unpack_sec) = if ints.is_null() {
+                    (0, 0)
+                } else {
+                    unsafe { (*ints, *ints.add(1)) }
+                };
+                if unpack_sec != 0 {
+                    host.nzb_set_int(p1, NZB_INT_UNPACK_SEC, ns.unpack_sec + unpack_sec);
+                }
+                if live_unpack_sec != 0 {
+                    host.nzb_set_int(
+                        p1,
+                        NZB_INT_LIVE_UNPACK_SEC,
+                        ns.live_unpack_sec + live_unpack_sec,
+                    );
+                }
                 if (p2 & 2) != 0 {
-                    host.nzb_set_int(p1, NZB_INT_UNPACK_SEC, ns.unpack_sec + a2);
                     host.nzb_set_int(p1, NZB_INT_POST_TOTAL_SEC, ns.post_total_sec + a2);
                 }
                 if (p2 & 1) != 0 && ns.post_info_ptr != 0 && !ns.has_live_repair_thread {
@@ -7668,6 +7844,95 @@ mod live_hold_tests {
         assert!(direct_unpack_has_holds(id));
         assert!(direct_unpack_awaiting_repair(id));
         direct_unpack_forget_holds(id);
+    }
+}
+
+#[cfg(test)]
+mod live_par_time_tests {
+    use super::live_par_time_charge;
+
+    #[test]
+    fn live_par_time_is_charged_at_history_unless_deleted() {
+        // A job whose par-check was skipped (ParSec 0) still gets its live time.
+        assert_eq!(live_par_time_charge(false, (0, 0, 0), (7, 3)), Some((7, 7, 3)));
+        // Added to an ordinary par-check's times.
+        assert_eq!(live_par_time_charge(false, (4, 0, 2), (7, 3)), Some((11, 7, 5)));
+        // Deleted, or leaving the queue without history: dropped.
+        assert_eq!(live_par_time_charge(true, (4, 0, 2), (7, 3)), None);
+        // Nothing to charge.
+        assert_eq!(live_par_time_charge(false, (4, 1, 2), (0, 0)), None);
+    }
+
+    /// Time from live work that ended after the job reached history (or of a job
+    /// merge/split removed) is dropped, so a return from history never adds it.
+    #[test]
+    fn orphaned_live_par_time_is_discarded() {
+        let nzb_id = 0x6a0f_0022;
+        let _ = crate::parchecker::streaming_session_take_par_secs(nzb_id);
+        crate::parchecker::live_par_time_add_for_test(nzb_id, 5_000, 2_000);
+        super::live_par_time_discard(nzb_id);
+        let after_return = crate::parchecker::streaming_session_take_par_secs(nzb_id);
+        assert_eq!(live_par_time_charge(false, (4, 0, 1), after_return), None);
+    }
+
+    /// The job's live time is taken once: a second settle (a job returned from
+    /// history and completed again) never adds the first download's time again.
+    #[test]
+    fn live_par_time_is_taken_once() {
+        let nzb_id = 0x6a0f_0020;
+        assert_eq!(crate::parchecker::streaming_session_take_par_secs(nzb_id), (0, 0));
+        crate::parchecker::live_par_time_add_for_test(nzb_id, 2_400, 900);
+        let first = crate::parchecker::streaming_session_take_par_secs(nzb_id);
+        assert_eq!(first, (3, 1));
+        assert_eq!(live_par_time_charge(false, (0, 0, 0), first), Some((3, 3, 1)));
+        let again = crate::parchecker::streaming_session_take_par_secs(nzb_id);
+        assert_eq!(live_par_time_charge(false, (0, 0, 0), again), None);
+    }
+}
+
+#[cfg(test)]
+mod busy_time_tests {
+    use super::BusyTime;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn counts_only_active_periods_and_reports_each_second_once() {
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let mut busy = BusyTime::default();
+        busy.set_active(true, at(0));
+        busy.set_active(true, at(1)); // already active: no restart
+        busy.set_active(false, at(3));
+        busy.set_active(false, at(10)); // idle time is not counted
+        busy.set_active(true, at(20));
+        // Still downloading: all of it is live.
+        assert_eq!(busy.take_secs(at(22)), (5, 5)); // 3 closed + 2 open
+        assert_eq!(busy.take_secs(at(22)), (0, 0));
+        busy.set_active(false, at(25));
+        assert_eq!(busy.take_secs(at(30)), (3, 3));
+        assert_eq!(BusyTime::default().take_secs(at(5)), (0, 0));
+    }
+
+    /// 60 s unpacking while downloading, 90 s waiting after the download (for the
+    /// unpack lock), then 10 s unpacking: 70 s in all, 60 s of it live.
+    #[test]
+    fn splits_at_download_completion_not_by_the_wait_after_it() {
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let mut busy = BusyTime::default();
+        busy.set_active(true, at(0));
+        busy.set_active(false, at(60));
+        busy.mark_download_done(at(60));
+        busy.set_active(true, at(150));
+        busy.set_active(false, at(160));
+        assert_eq!(busy.take_secs(at(160)), (70, 60));
+        // Download completing mid-extraction splits the open period there.
+        let mut busy = BusyTime::default();
+        busy.set_active(true, at(0));
+        busy.mark_download_done(at(40));
+        busy.mark_download_done(at(45)); // once
+        assert_eq!(busy.take_secs(at(50)), (50, 40));
+        assert_eq!(busy.take_secs(at(55)), (5, 0));
     }
 }
 

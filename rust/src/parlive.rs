@@ -86,6 +86,8 @@ pub(crate) fn resources(
 #[derive(Default)]
 pub(crate) struct BudgetPool {
     reserved: Mutex<u64>,
+    /// A fixed size instead of the effective ParBuffer (tests' own pools).
+    size: Option<u64>,
 }
 
 pub(crate) struct SessionBudgetLease {
@@ -94,6 +96,25 @@ pub(crate) struct SessionBudgetLease {
 }
 
 impl BudgetPool {
+    /// A pool of its own with a fixed size, apart from the daemon's shared one.
+    #[cfg(test)]
+    pub fn with_size(bytes: u64) -> Self {
+        Self {
+            reserved: Mutex::new(0),
+            size: Some(bytes),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn reserved_for_test(&self) -> std::sync::MutexGuard<'_, u64> {
+        self.reserved.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The fixed size, if this pool has one.
+    pub fn size(&self) -> Option<u64> {
+        self.size
+    }
+
     pub fn acquire(self: &Arc<Self>, bytes: u64, limit: u64) -> Option<SessionBudgetLease> {
         if bytes == 0 {
             return None;
@@ -119,6 +140,11 @@ impl Drop for SessionBudgetLease {
 }
 
 impl SessionBudgetLease {
+    /// The pool this lease draws from.
+    pub fn pool(&self) -> &Arc<BudgetPool> {
+        &self.pool
+    }
+
     #[cfg(test)]
     pub fn reserved_bytes(&self) -> u64 {
         self.bytes

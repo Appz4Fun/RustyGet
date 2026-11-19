@@ -2221,6 +2221,7 @@ impl NzbgetRsQueueCoordinator {
 
         host.disk_discard_files(src_ptr);
         crate::dupefallback::par_damage_forget_all(src.id);
+        crate::postproc::live_par_time_discard(src.id);
         host.queue_remove(dq_ptr, src_ptr);
         true
     }
@@ -2370,6 +2371,7 @@ impl NzbgetRsQueueCoordinator {
         if host.nzb_file_len(src_nzb_ptr) == 0 {
             host.disk_discard_files(src_nzb_ptr);
             crate::dupefallback::par_damage_forget_all(src_snap.id);
+            crate::postproc::live_par_time_discard(src_snap.id);
             host.queue_remove(dq_ptr, src_nzb_ptr);
         }
 
@@ -4348,7 +4350,8 @@ impl NzbgetRsQueueCoordinator {
             let mut has_changes = false;
             for i in 0..qlen {
                 let nzb = host.nzb_snap(host.queue_at(dq_ptr, i), false);
-                has_changes |= nzb.changed;
+                // Live PAR time not yet in the saved times would be lost on restart.
+                has_changes |= nzb.changed || crate::parchecker::live_par_time_pending(nzb.id);
             }
             if has_changes {
                 host.dq_save(dq_ptr);

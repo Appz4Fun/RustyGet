@@ -2,7 +2,7 @@
 
 use crate::cstr;
 use crate::options::OptStr;
-use crate::status::{MoveStatus, NzbParStatus, UnpackStatus};
+use crate::status::{MarkStatus, MoveStatus, NzbParStatus, UnpackStatus};
 use std::ffi::{c_char, c_int, c_void};
 use std::io::Write;
 
@@ -7312,7 +7312,7 @@ unsafe extern "C" fn active_disk_export_nzb_cb(
         rar_rename_status: sn.rar_rename_status,
         direct_rename_status: sn.direct_rename_status,
         delete_status: sn.delete_status,
-        mark_status: sn.mark_status,
+        mark_status: sn.mark_status.into(),
         url_status: sn.url_status,
         unpack_cleaned_up_disk: c_int::from(sn.unpack_cleaned_up_disk),
         health_paused: c_int::from(sn.health_paused),
@@ -7660,7 +7660,7 @@ unsafe extern "C" fn active_disk_apply_nzb_cb(
         inp.direct_rename_status,
     );
     qh.nzb_set_int(nzb_ptr, NZB_INT_DELETE_STATUS, inp.delete_status);
-    qh.nzb_set_int(nzb_ptr, NZB_INT_MARK_STATUS, inp.mark_status);
+    qh.nzb_set_mark_status(nzb_ptr, MarkStatus::from(inp.mark_status));
     if inp.kind == NK_NZB || inp.url_status >= LS_FAILED {
         qh.nzb_set_int(nzb_ptr, NZB_INT_URL_STATUS, inp.url_status);
     }

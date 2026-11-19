@@ -5,7 +5,7 @@
 //! (`no_backup_reason`, `format_no_backup_reason`), skip message formatting
 //! (`format_dupe_skip_message`), and status classification (`status_from_text`).
 
-use crate::status::{DupStatus, DupeMode};
+use crate::status::{DupStatus, DupeMode, MarkStatus};
 use std::collections::BTreeSet;
 use std::ffi::{c_char, CStr};
 use std::path::Path;
@@ -95,11 +95,6 @@ pub const DELETE_STATUS_BAD: i32 = 4;
 pub const DELETE_STATUS_GOOD: i32 = 5;
 pub const DELETE_STATUS_COPY: i32 = 6;
 pub const DELETE_STATUS_SCAN: i32 = 7;
-
-pub const MARK_STATUS_NONE: i32 = 0;
-pub const MARK_STATUS_BAD: i32 = 1;
-pub const MARK_STATUS_GOOD: i32 = 2;
-pub const MARK_STATUS_SUCCESS: i32 = 3;
 
 pub const HISTORY_KIND_UNKNOWN: i32 = 0;
 pub const HISTORY_KIND_NZB: i32 = 1;
@@ -259,7 +254,7 @@ where
             no_file += 1;
         } else if h.health < h.critical_health {
             unhealthy += 1;
-        } else if h.mark_status == MARK_STATUS_BAD {
+        } else if h.mark_status == MarkStatus::Bad {
             bad += 1;
         } else if h.alive_permille == 0 {
             dead += 1;
@@ -352,7 +347,7 @@ where
                 history_score = h.dupe_score;
             }
             dupe_found = true;
-            good_dupe = h.mark_status == MARK_STATUS_GOOD;
+            good_dupe = h.mark_status == MarkStatus::Good;
         }
 
         if h.kind == HISTORY_KIND_DUP
@@ -439,7 +434,7 @@ where
             && !(dupe_health && h.alive_permille == 0)
             && (h.kind != HISTORY_KIND_NZB || file_exists_cb(idx))
             && h.health >= h.critical_health
-            && h.mark_status != MARK_STATUS_BAD
+            && h.mark_status != MarkStatus::Bad
             && (!dupe_found || h.dupe_score > history_score)
             && (!queue_dupe || h.dupe_score > queue_score)
             && h.same_name_or_key != 0
@@ -511,7 +506,7 @@ where
             && (h.delete_status == DELETE_STATUS_DUPE || h.delete_status == DELETE_STATUS_COPY)
             && h.alive_permille != 0
             && h.health >= h.critical_health
-            && h.mark_status != MARK_STATUS_BAD
+            && h.mark_status != MarkStatus::Bad
             && best.is_none_or(|(_, b)| rank > b)
             && file_exists_cb(idx)
         {
@@ -539,7 +534,7 @@ pub fn is_downloaded_on_disk_candidate(
     is_self: bool,
     item_delete_status: i32,
     item_is_dupe_success: bool,
-    item_mark_status: i32,
+    item_mark_status: MarkStatus,
     item_dupe_key: &[u8],
     item_final_dir: &[u8],
     item_dest_dir: &[u8],
@@ -551,7 +546,7 @@ pub fn is_downloaded_on_disk_candidate(
     }
     item_delete_status == DELETE_STATUS_NONE
         && item_is_dupe_success
-        && item_mark_status != MARK_STATUS_BAD
+        && item_mark_status != MarkStatus::Bad
         && strcasecmp_bytes(item_dupe_key, self_dupe_key)
         && files_on_disk(item_final_dir, item_dest_dir, ext_cleanup_disk)
 }
@@ -669,7 +664,7 @@ pub fn eval_history_dupe_match(
     item_full_hash: u32,
     item_filtered_hash: u32,
     item_dupe_mode: DupeMode,
-    item_mark_status: i32,
+    item_mark_status: MarkStatus,
     item_dup_status: DupStatus,
     item_dupe_score: i32,
     item_name: &[u8],
@@ -687,7 +682,7 @@ pub fn eval_history_dupe_match(
     }
     if kind == HISTORY_KIND_NZB
         && item_dupe_mode != DupeMode::Force
-        && item_mark_status == MARK_STATUS_GOOD
+        && item_mark_status == MarkStatus::Good
         && same_name_or_key(item_name, item_dupe_key, self_name, self_dupe_key)
     {
         return Some((false, true));
@@ -839,23 +834,23 @@ pub fn is_other_to_stop_on_completed(
 
 /// `DupeCoordinator::HistoryMark` status/action resolver.
 pub fn resolve_history_mark(
-    mark_status: i32,
+    mark_status: MarkStatus,
     dupe_check: bool,
     kind: i32,
     dupe_mode: DupeMode,
 ) -> (&'static [u8], DupStatus, i32) {
-    let mark_name: &'static [u8] = if mark_status == MARK_STATUS_BAD {
+    let mark_name: &'static [u8] = if mark_status == MarkStatus::Bad {
         b"bad\0"
-    } else if mark_status == MARK_STATUS_GOOD {
+    } else if mark_status == MarkStatus::Good {
         b"good\0"
-    } else if mark_status == MARK_STATUS_SUCCESS {
+    } else if mark_status == MarkStatus::Success {
         b"success\0"
     } else {
         b"NONE\0"
     };
-    let dup_status = if mark_status == MARK_STATUS_GOOD {
+    let dup_status = if mark_status == MarkStatus::Good {
         DupStatus::Good
-    } else if mark_status == MARK_STATUS_SUCCESS {
+    } else if mark_status == MarkStatus::Success {
         DupStatus::Success
     } else {
         DupStatus::Bad
@@ -865,9 +860,9 @@ pub fn resolve_history_mark(
     {
         return (mark_name, dup_status, 0);
     }
-    let post_action = if mark_status == MARK_STATUS_GOOD {
+    let post_action = if mark_status == MarkStatus::Good {
         1
-    } else if mark_status == MARK_STATUS_BAD {
+    } else if mark_status == MarkStatus::Bad {
         2
     } else {
         0
@@ -957,7 +952,7 @@ fn downloaded_on_disk_host(
         let item = host.nzb_snap(hi.inner_ptr, false);
         if item.delete_status == crate::queuesubsys_host::DS_NONE
             && item.is_dupe_success
-            && item.mark_status != crate::queuesubsys_host::KS_BAD
+            && item.mark_status != MarkStatus::Bad
             && item.dupe_key.eq_ignore_ascii_case(&nzb.dupe_key)
             && files_on_disk(&item.final_dir, &item.dest_dir, &opts.ext_cleanup_disk)
         {
@@ -984,7 +979,7 @@ pub(crate) fn no_backup_reason_host(
             dupe_mode: DupeMode::Score,
             dupe_score: 0,
             is_dupe_success: 0,
-            mark_status: 0,
+            mark_status: MarkStatus::None,
             delete_status: 0,
             dup_status: DupStatus::Undefined,
             full_content_hash: 0,
@@ -1065,7 +1060,7 @@ fn collect_dupe_candidates(
             dupe_mode: DupeMode::Score,
             dupe_score: 0,
             is_dupe_success: 0,
-            mark_status: 0,
+            mark_status: MarkStatus::None,
             delete_status: 0,
             dup_status: DupStatus::Undefined,
             full_content_hash: 0,
@@ -1484,7 +1479,7 @@ pub(crate) fn nzb_found_host(
                 break;
             }
             if item.dupe_mode != DupeMode::Force
-                && item.mark_status == crate::queuesubsys_host::KS_GOOD
+                && item.mark_status == MarkStatus::Good
                 && same_name_or_key(&item.name, &item.dupe_key, &nzb.name, &nzb.dupe_key)
             {
                 skip = true;
@@ -1809,7 +1804,7 @@ pub(crate) fn history_mark_host(
     host: &crate::queuesubsys_host::QueueSubsysHost,
     dq_ptr: usize,
     hi_ptr: usize,
-    mark_status: i32,
+    mark_status: MarkStatus,
 ) {
     if dq_ptr == 0 || hi_ptr == 0 {
         return;
@@ -1817,11 +1812,11 @@ pub(crate) fn history_mark_host(
     let opts = host.opts();
     let hi = host.hist_item_snap(hi_ptr);
 
-    let mark_status_name: &[u8] = if mark_status == crate::queuesubsys_host::KS_BAD {
+    let mark_status_name: &[u8] = if mark_status == MarkStatus::Bad {
         b"bad"
-    } else if mark_status == crate::queuesubsys_host::KS_GOOD {
+    } else if mark_status == MarkStatus::Good {
         b"good"
-    } else if mark_status == crate::queuesubsys_host::KS_SUCCESS {
+    } else if mark_status == MarkStatus::Success {
         b"success"
     } else {
         b"NONE"
@@ -1835,17 +1830,13 @@ pub(crate) fn history_mark_host(
     let (dupe_mode, dupe_key, item_name) =
         if hi.kind == crate::queuesubsys_host::HK_NZB && hi.inner_ptr != 0 {
             let nzb = host.nzb_snap(hi.inner_ptr, false);
-            host.nzb_set_int(
-                hi.inner_ptr,
-                crate::queuesubsys_host::NZB_INT_MARK_STATUS,
-                mark_status,
-            );
+            host.nzb_set_mark_status(hi.inner_ptr, mark_status);
             (nzb.dupe_mode, nzb.dupe_key, nzb.name)
         } else if hi.kind == crate::queuesubsys_host::HK_DUP && hi.inner_ptr != 0 {
             let dup = host.dup_snap(hi.inner_ptr);
-            let ds = if mark_status == crate::queuesubsys_host::KS_GOOD {
+            let ds = if mark_status == MarkStatus::Good {
                 DupStatus::Good
-            } else if mark_status == crate::queuesubsys_host::KS_SUCCESS {
+            } else if mark_status == MarkStatus::Success {
                 DupStatus::Success
             } else {
                 DupStatus::Bad
@@ -1864,9 +1855,9 @@ pub(crate) fn history_mark_host(
         return;
     }
 
-    if mark_status == crate::queuesubsys_host::KS_GOOD {
+    if mark_status == MarkStatus::Good {
         history_cleanup_host(host, dq_ptr, hi.hi_ptr, &item_name, &dupe_key);
-    } else if mark_status == crate::queuesubsys_host::KS_BAD {
+    } else if mark_status == MarkStatus::Bad {
         return_best_dupe_host(host, &opts, dq_ptr, 0, &hi.name, &dupe_key);
     }
 }
@@ -1962,7 +1953,7 @@ mod tests {
             // gets its post action and the reason names DupeMode all.
             assert!(!fails_over(true, mode, HEALTH_CHECK_DUPE));
             assert_eq!(
-                resolve_history_mark(MARK_STATUS_GOOD, true, HISTORY_KIND_NZB, mode).2,
+                resolve_history_mark(MarkStatus::Good, true, HISTORY_KIND_NZB, mode).2,
                 1
             );
             assert_eq!(
@@ -1973,7 +1964,7 @@ mod tests {
         assert!(fails_over(true, DupeMode::Score, 0));
         assert!(fails_over(true, DupeMode::Force, HEALTH_CHECK_DUPE));
         assert_eq!(
-            resolve_history_mark(MARK_STATUS_GOOD, true, HISTORY_KIND_NZB, DupeMode::Force).2,
+            resolve_history_mark(MarkStatus::Good, true, HISTORY_KIND_NZB, DupeMode::Force).2,
             0
         );
     }
@@ -1989,7 +1980,7 @@ mod tests {
             dupe_mode: mode,
             dupe_score: score,
             is_dupe_success: 0,
-            mark_status: MARK_STATUS_NONE,
+            mark_status: MarkStatus::None,
             delete_status: status,
             dup_status: DupStatus::Undefined,
             full_content_hash: 0,
@@ -2155,7 +2146,7 @@ mod tests {
     #[test]
     fn rescue_skips_bad_or_unhealthy_backups() {
         let mut bad = rescue_candidate(DupeMode::Score, DELETE_STATUS_DUPE, 999_080, 900);
-        bad.mark_status = MARK_STATUS_BAD;
+        bad.mark_status = MarkStatus::Bad;
         let mut sick = rescue_candidate(DupeMode::Score, DELETE_STATUS_DUPE, 999_070, 900);
         sick.health = 800;
         let mut manual = rescue_candidate(DupeMode::Score, DELETE_STATUS_MANUAL, 999_060, 900);
@@ -2214,7 +2205,7 @@ mod tests {
         assert_eq!(
             crate::downloadinfo::make_text_status_cstr(
                 0,
-                MARK_STATUS_NONE,
+                MarkStatus::None,
                 DELETE_STATUS_NONE,
                 crate::status::NzbParStatus::Skipped,
                 crate::status::UnpackStatus::None,
@@ -2227,7 +2218,7 @@ mod tests {
             b"FAILURE/HEALTH\0"
         );
         assert!(!crate::downloadinfo::is_dupe_success(
-            MARK_STATUS_NONE,
+            MarkStatus::None,
             DELETE_STATUS_NONE,
             crate::status::NzbParStatus::Skipped,
             crate::status::UnpackStatus::None,
@@ -2239,7 +2230,7 @@ mod tests {
         ));
         // A verified repair (NzbParStatus::Success) or explicit good mark takes precedence
         assert!(crate::downloadinfo::is_dupe_success(
-            MARK_STATUS_NONE,
+            MarkStatus::None,
             DELETE_STATUS_NONE,
             crate::status::NzbParStatus::Success,
             crate::status::UnpackStatus::None,
@@ -2250,7 +2241,7 @@ mod tests {
             true,
         ));
         assert!(crate::downloadinfo::is_dupe_success(
-            MARK_STATUS_GOOD,
+            MarkStatus::Good,
             DELETE_STATUS_NONE,
             crate::status::NzbParStatus::Skipped,
             crate::status::UnpackStatus::None,
@@ -2262,7 +2253,7 @@ mod tests {
         ));
         let full_health = crate::downloadinfo::calc_health(1000, 0, 0, 0);
         assert!(crate::downloadinfo::is_dupe_success(
-            MARK_STATUS_NONE,
+            MarkStatus::None,
             DELETE_STATUS_NONE,
             crate::status::NzbParStatus::Skipped,
             crate::status::UnpackStatus::None,
@@ -2300,7 +2291,7 @@ mod tests {
                 dupe_mode: DupeMode::Score,
                 dupe_score: score,
                 is_dupe_success: 0,
-                mark_status: MARK_STATUS_NONE,
+                mark_status: MarkStatus::None,
                 delete_status: DELETE_STATUS_DUPE,
                 dup_status: DupStatus::Undefined,
                 full_content_hash: 0,
@@ -2354,7 +2345,7 @@ mod tests {
         history[0].0.same_name_or_key = 0;
 
         // a backup marked bad is no candidate
-        history[2].0.mark_status = MARK_STATUS_BAD;
+        history[2].0.mark_status = MarkStatus::Bad;
         let winner = run_find(&history, &queue);
         assert!(winner >= 0);
         assert_eq!(history[winner as usize].0.dupe_score, 50);
@@ -2379,7 +2370,7 @@ mod tests {
         // a good-duplicate in history ends the search
         let mut good = make_backup(b"Rel.2026.1080p-G", b"imdb:1", 1);
         good.delete_status = DELETE_STATUS_NONE;
-        good.mark_status = MARK_STATUS_GOOD;
+        good.mark_status = MarkStatus::Good;
         good.is_dupe_success = 1;
         history.insert(0, (good, true));
         assert_eq!(run_find(&history, &queue), -1);
@@ -2455,7 +2446,7 @@ mod tests {
                 100,
                 0,
                 DupeMode::Score,
-                MARK_STATUS_NONE,
+                MarkStatus::None,
                 DupStatus::Undefined,
                 10,
                 b"B",
@@ -2508,11 +2499,11 @@ mod tests {
             2
         );
         assert_eq!(
-            resolve_history_mark(MARK_STATUS_GOOD, true, HISTORY_KIND_NZB, DupeMode::Score),
+            resolve_history_mark(MarkStatus::Good, true, HISTORY_KIND_NZB, DupeMode::Score),
             (&b"good\0"[..], DupStatus::Good, 1)
         );
         assert_eq!(
-            resolve_history_mark(MARK_STATUS_BAD, true, HISTORY_KIND_DUP, DupeMode::Score),
+            resolve_history_mark(MarkStatus::Bad, true, HISTORY_KIND_DUP, DupeMode::Score),
             (&b"bad\0"[..], DupStatus::Bad, 2)
         );
     }

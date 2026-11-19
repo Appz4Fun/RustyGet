@@ -40,7 +40,7 @@ use crate::dupewatch::{
     is_live_fleet_peer, par_doomed, unlisted_missing, whole_bytes, Decision, FetchBudget,
     SearchStamp, Snapshot, BASE_PICK_SCORE, MANAGED_FLEET,
 };
-use crate::status::DupeMode;
+use crate::status::{DupeMode, MarkStatus};
 use crate::xmlrpc_format::{
     NzbgetRsRpcFleetMember, NzbgetRsRpcFleetReqMember, NzbgetRsXmlRpcEmitFn,
 };
@@ -668,7 +668,7 @@ struct NzbSnap {
     kind: i32,
     deleting: bool,
     delete_status: i32,
-    mark_status: i32,
+    mark_status: MarkStatus,
     dupe_mode: DupeMode,
     dupe_hint: i32,
     dupe_score: i32,
@@ -822,7 +822,6 @@ fn check_placement_available(
         3,
         6,
         backup.mark_status,
-        1,
         backup.dupe_mode,
         in_history,
         whole_backup,
@@ -6164,7 +6163,7 @@ pub unsafe fn fleet_append(
                 let item = inspect_nzb(host_ctx, host_cb, p, false);
                 if item.delete_status != 0
                     || !item.dupe_success
-                    || item.mark_status == 1
+                    || item.mark_status == MarkStatus::Bad
                     || !crate::releasename::readable(&item.name)
                 {
                     continue;
@@ -6769,7 +6768,7 @@ pub unsafe fn fleet_append(
                 && check_disk
                 && item.delete_status == 0
                 && item.dupe_success
-                && item.mark_status != 1
+                && item.mark_status != MarkStatus::Bad
                 && item.dupe_key.eq_ignore_ascii_case(&dupe_key)
                 && crate::dupecoord::files_on_disk(
                     &item.final_dir,

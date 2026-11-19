@@ -2,7 +2,7 @@
 //! `CompletedFile`, `ServerStatList`, and `ScriptStatusList`
 //! (`daemon/queue/DownloadInfo.cpp`).
 
-use crate::status::{MoveStatus, NzbParStatus, UnpackStatus};
+use crate::status::{MarkStatus, MoveStatus, NzbParStatus, UnpackStatus};
 use std::ffi::CStr;
 
 #[inline]
@@ -16,11 +16,6 @@ pub const SCRIPT_STATUS_SUCCESS: i32 = 2;
 
 pub const NZB_KIND_NZB: i32 = 0;
 pub const NZB_KIND_URL: i32 = 1;
-
-pub const MARK_NONE: i32 = 0;
-pub const MARK_BAD: i32 = 1;
-pub const MARK_GOOD: i32 = 2;
-pub const MARK_SUCCESS: i32 = 3;
 
 pub const DELETE_NONE: i32 = 0;
 pub const DELETE_MANUAL: i32 = 1;
@@ -375,7 +370,7 @@ pub fn calc_active_downloads_sec(
 /// `NzbInfo::IsDupeSuccess` (`DownloadInfo.cpp`).
 #[allow(clippy::too_many_arguments)]
 pub fn is_dupe_success(
-    mark_status: i32,
+    mark_status: MarkStatus,
     delete_status: i32,
     par_status: NzbParStatus,
     unpack_status: UnpackStatus,
@@ -385,10 +380,10 @@ pub fn is_dupe_success(
     critical_health_exact: i32,
     health_check_dupe: bool,
 ) -> bool {
-    let failure = mark_status != MARK_SUCCESS
-        && mark_status != MARK_GOOD
+    let failure = mark_status != MarkStatus::Success
+        && mark_status != MarkStatus::Good
         && (delete_status != DELETE_NONE
-            || mark_status == MARK_BAD
+            || mark_status == MarkStatus::Bad
             || par_status == NzbParStatus::Failure
             || unpack_status == UnpackStatus::Failure
             || unpack_status == UnpackStatus::Password
@@ -411,7 +406,7 @@ pub fn is_dupe_success(
 #[allow(clippy::too_many_arguments)]
 pub fn make_text_status_cstr(
     kind: i32,
-    mark_status: i32,
+    mark_status: MarkStatus,
     delete_status: i32,
     par_status: NzbParStatus,
     unpack_status: UnpackStatus,
@@ -422,11 +417,11 @@ pub fn make_text_status_cstr(
     critical_health: i32,
 ) -> &'static [u8] {
     if kind == NZB_KIND_NZB {
-        if mark_status == MARK_BAD {
+        if mark_status == MarkStatus::Bad {
             return b"FAILURE/BAD\0";
-        } else if mark_status == MARK_GOOD {
+        } else if mark_status == MarkStatus::Good {
             return b"SUCCESS/GOOD\0";
-        } else if mark_status == MARK_SUCCESS {
+        } else if mark_status == MarkStatus::Success {
             return b"SUCCESS/MARK\0";
         } else if delete_status == DELETE_HEALTH {
             return b"FAILURE/HEALTH\0";

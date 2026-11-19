@@ -2438,7 +2438,7 @@ pub(crate) unsafe fn host_coll_snapshot(
     let health_check_dupe = crate::options::active_options()
         .is_some_and(|o| o.scalars().health_check == HEALTH_CHECK_DUPE);
     let dupe_success = crate::downloadinfo::is_dupe_success(
-        s.markStatus,
+        crate::status::MarkStatus::from(s.markStatus),
         s.deleteStatus,
         crate::status::NzbParStatus::from(s.parStatus),
         crate::status::UnpackStatus::from(s.unpackStatus),
@@ -2580,7 +2580,7 @@ pub(crate) unsafe fn host_coll_snapshot(
     strs[7] = match a1 {
         1 | 2 => crate::downloadinfo::make_text_status_cstr(
             s.kind,
-            s.markStatus,
+            crate::status::MarkStatus::from(s.markStatus),
             s.deleteStatus,
             crate::status::NzbParStatus::from(s.parStatus),
             crate::status::UnpackStatus::from(s.unpackStatus),

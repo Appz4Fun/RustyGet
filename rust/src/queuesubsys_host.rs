@@ -2317,43 +2317,30 @@ impl QueueSubsysHost {
     }
 
     pub fn nzb_get_param(&self, nzb_ptr: NzbRef, name: &[u8]) -> Option<Vec<u8>> {
-        if nzb_ptr.is_none() {
+        if !self.use_active {
             return None;
         }
-        let c = c_bytes(name);
-        let mut strs = [std::ptr::null(); 1];
-        let found = self.coll_op(
-            nzb_ptr,
-            0,
-            OpArgs::NONE
-                .s1(c.as_ptr() as *const c_char)
-                .strs(strs.as_mut_ptr()),
-        );
-        if found == 0 {
-            None
-        } else {
-            Some(unsafe { read_cstr(strs[0]) })
-        }
+        crate::qnzb::param(nzb_ptr, name)
     }
 
     pub fn nzb_set_param(&self, nzb_ptr: NzbRef, name: &[u8], val: Option<&[u8]>) {
-        if nzb_ptr.is_none() {
-            return;
+        if self.use_active {
+            crate::qnzb::set_param(nzb_ptr, name, val);
         }
-        let cn = c_bytes(name);
-        let cv = val.map(c_bytes);
-        let s2 = cv
-            .as_ref()
-            .map_or(std::ptr::null(), |v| v.as_ptr() as *const c_char);
-        self.coll_op(
-            nzb_ptr,
-            1,
-            OpArgs::NONE.s1(cn.as_ptr() as *const c_char).s2(s2),
-        );
     }
 
     pub fn nzb_copy_params(&self, dest_nzb: NzbRef, src_nzb: NzbRef) {
-        self.coll_op(dest_nzb, 2, OpArgs::NONE.p2(src_nzb.addr()));
+        if self.use_active {
+            crate::qnzb::copy_params(dest_nzb, src_nzb);
+        }
+    }
+
+    /// All post-processing parameters as (name, value), in the order they were added.
+    pub fn nzb_params(&self, nzb_ptr: NzbRef) -> Vec<(Vec<u8>, Vec<u8>)> {
+        if !self.use_active {
+            return Vec::new();
+        }
+        crate::qnzb::params(nzb_ptr)
     }
 
     pub fn nzb_build_final_dir_name(&self, nzb_ptr: NzbRef) -> Vec<u8> {
@@ -2392,23 +2379,6 @@ impl QueueSubsysHost {
             return false;
         }
         self.coll_op(nzb_ptr, 22, OpArgs::NONE) != 0
-    }
-
-    pub fn nzb_params_len(&self, nzb_ptr: NzbRef) -> usize {
-        if nzb_ptr.is_none() {
-            return 0;
-        }
-        self.coll_op(nzb_ptr, 8, OpArgs::NONE.a2(-1))
-    }
-
-    pub fn nzb_param_at(&self, nzb_ptr: NzbRef, idx: usize) -> (Vec<u8>, Vec<u8>) {
-        let mut strs = [std::ptr::null(); 2];
-        self.coll_op(
-            nzb_ptr,
-            8,
-            OpArgs::NONE.a2(idx as i32).strs(strs.as_mut_ptr()),
-        );
-        unsafe { (read_cstr(strs[0]), read_cstr(strs[1])) }
     }
 
     pub fn nzb_server_stats_len(&self, nzb_ptr: NzbRef) -> usize {

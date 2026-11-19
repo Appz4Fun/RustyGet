@@ -4960,12 +4960,11 @@ unsafe fn emit_rpc_nzb(
         extra_par_blocks: n.extra_par_blocks,
     };
 
-    let plen = qh.nzb_params_len(nzb_ptr);
-    let mut prm_cvecs = Vec::with_capacity(plen);
-    for i in 0..plen {
-        let (k, v) = qh.nzb_param_at(nzb_ptr, i);
-        prm_cvecs.push((cstr::to_cstring(&k), cstr::to_cstring(&v)));
-    }
+    let prm_cvecs: Vec<_> = qh
+        .nzb_params(nzb_ptr)
+        .iter()
+        .map(|(k, v)| (cstr::to_cstring(k), cstr::to_cstring(v)))
+        .collect();
     let prms: Vec<crate::xmlrpc_format::NzbgetRsRpcParamItem> = prm_cvecs
         .iter()
         .map(|(k, v)| crate::xmlrpc_format::NzbgetRsRpcParamItem {
@@ -6108,9 +6107,7 @@ pub(crate) unsafe fn serve_binrpc_conn(conn: &crate::net::NzbgetRsConn) {
                                     &n.category,
                                     &n.queued_filename,
                                 );
-                                let plen = qh.nzb_params_len(np);
-                                for pi in 0..plen {
-                                    let (pname, pval) = qh.nzb_param_at(np, pi);
+                                for (pname, pval) in qh.nzb_params(np) {
                                     builder.push_param(owner_index, &pname, &pval);
                                 }
                                 let flen = qh.nzb_file_len(np);

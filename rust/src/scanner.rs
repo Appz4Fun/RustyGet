@@ -2152,12 +2152,11 @@ pub(crate) fn add_url_file_active(
         return AS_FAILED;
     };
     let snap = host.nzb_snap(url_ptr, false);
-    let plen = host.nzb_params_len(url_ptr);
-    let mut captured_params = Vec::with_capacity(plen);
-    for idx in 0..plen {
-        let (k, v) = host.nzb_param_at(url_ptr, idx);
-        captured_params.push((to_cstr_sanitized(&k), to_cstr_sanitized(&v)));
-    }
+    let captured_params: Vec<_> = host
+        .nzb_params(url_ptr)
+        .iter()
+        .map(|(k, v)| (to_cstr_sanitized(k), to_cstr_sanitized(v)))
+        .collect();
     let name_c = to_cstr_sanitized(eff_name);
     let cat_c = to_cstr_sanitized(eff_cat);
     let out_c = to_cstr_sanitized(out_file);

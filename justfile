@@ -151,6 +151,11 @@ check:
 clippy:
     cargo clippy --manifest-path "{{root_dir}}/rust/Cargo.toml" --lib
 
+# Score how idiomatic the Rust is (docs/nativeness/README.md); `clippy`="no" skips the slow clippy pass
+nativeness clippy="yes":
+    python3 "{{root_dir}}/scripts/nativeness/score.py" {{ if clippy == "yes" { "--run-clippy" } else { "" } }} \
+        --compare "{{root_dir}}/docs/nativeness/baseline.json"
+
 # Format the Rust crate
 fmt:
     cargo fmt --manifest-path "{{root_dir}}/rust/Cargo.toml"

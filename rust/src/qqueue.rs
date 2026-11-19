@@ -541,8 +541,7 @@ pub unsafe fn host_nzb_message(kind: i32, a2: i32, nzb: usize, s1: *const c_char
     };
     // detail()/info()/warn()/error() cut at 1023 bytes; debug() printed
     // nothing without DEBUG
-    const MK_DEBUG: i32 = 3;
-    if kind != MK_DEBUG || crate::ffi::build_debug_enabled() {
+    if kind != crate::log::MK_DEBUG || crate::ffi::build_debug_enabled() {
         let logged = std::ffi::CString::new(&text[..text.len().min(1023)]).unwrap_or_default();
         unsafe { crate::log::nzbget_rs_log_active_emit(kind, logged.as_ptr()) };
     }

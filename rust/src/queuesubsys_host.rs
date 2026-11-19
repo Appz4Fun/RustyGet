@@ -20,11 +20,7 @@ pub type NzbgetRsQueueSubsysHostFn = unsafe extern "C" fn(
 ) -> usize;
 
 // Message / Log kinds (Message::EKind)
-pub(crate) const MK_INFO: i32 = 0;
-pub(crate) const MK_WARNING: i32 = 1;
-pub(crate) const MK_ERROR: i32 = 2;
-pub(crate) const MK_DEBUG: i32 = 3;
-pub(crate) const MK_DETAIL: i32 = 4;
+pub(crate) use crate::log::{MK_INFO, MK_WARNING, MK_ERROR, MK_DEBUG, MK_DETAIL};
 
 // Options enums
 pub(crate) const DAF_NONE: i32 = 0;

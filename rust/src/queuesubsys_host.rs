@@ -446,10 +446,38 @@ pub(crate) struct GlobalOptsSnap {
     pub hard_linking_ignore_ext: Vec<u8>,
 }
 
+/// A download's post-processing job (`PostInfo`) in the queue, or none.
+///
+/// Wraps the queue's object address so it can't be mixed up with a download, a file or a
+/// plain number; only the queue host turns it back into an address.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub(crate) struct PostRef(usize);
+
+impl PostRef {
+    /// No post-processing job.
+    pub const NONE: Self = Self(0);
+
+    pub(crate) fn from_addr(addr: usize) -> Self {
+        Self(addr)
+    }
+
+    pub(crate) fn addr(self) -> usize {
+        self.0
+    }
+
+    pub fn is_none(self) -> bool {
+        self.0 == 0
+    }
+
+    pub fn is_some(self) -> bool {
+        self.0 != 0
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct NzbSnap {
     pub ptr: usize,
-    pub post_info_ptr: usize,
+    pub post_info_ptr: PostRef,
     pub id: i32,
     pub kind: i32,
     pub dupe_mode: DupeMode,
@@ -674,7 +702,7 @@ pub(crate) struct StreamRepairJobDetailSnap {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct PostSnap {
-    pub ptr: usize,
+    pub ptr: PostRef,
     pub nzb_ptr: usize,
     pub stage: PostStage,
     pub working: bool,
@@ -966,11 +994,11 @@ impl QueueSubsysHost {
         }
     }
 
-    fn post_op(&self, post: usize, op: i32, x: OpArgs) -> usize {
+    fn post_op(&self, post: PostRef, op: i32, x: OpArgs) -> usize {
         if !self.use_active {
             return 0;
         }
-        let post = post as *const crate::qnzb::Post;
+        let post = post.addr() as *const crate::qnzb::Post;
         unsafe { crate::qnzb::host_post_op(post, op, x.a2, x.p2, x.s1, x.ints, x.i64s, x.strs) }
     }
 
@@ -2091,7 +2119,7 @@ impl QueueSubsysHost {
         unsafe {
             NzbSnap {
                 ptr: nzb_ptr,
-                post_info_ptr: i64s[18] as usize,
+                post_info_ptr: PostRef::from_addr(i64s[18] as usize),
                 id: ints[0],
                 kind: ints[1],
                 dupe_mode: DupeMode::from(ints[2]),
@@ -3847,8 +3875,8 @@ impl QueueSubsysHost {
     }
 
     // PostInfo & PrePostProcessor ops (op = 60..=62)
-    pub fn post_snap(&self, post_ptr: usize) -> PostSnap {
-        if post_ptr == 0 {
+    pub fn post_snap(&self, post_ptr: PostRef) -> PostSnap {
+        if post_ptr.is_none() {
             return PostSnap::default();
         }
         let mut ints = [0i32; 21];
@@ -3892,51 +3920,51 @@ impl QueueSubsysHost {
         }
     }
 
-    pub fn post_set_int(&self, post_ptr: usize, field: i32, val: i32) {
-        if post_ptr == 0 {
+    pub fn post_set_int(&self, post_ptr: PostRef, field: i32, val: i32) {
+        if post_ptr.is_none() {
             return;
         }
         self.post_op(post_ptr, 1, OpArgs::NONE.a2(field).p2(val as usize));
     }
 
-    pub fn post_set_stage(&self, post_ptr: usize, stage: PostStage) {
+    pub fn post_set_stage(&self, post_ptr: PostRef, stage: PostStage) {
         self.post_set_int(post_ptr, POST_INT_STAGE, stage.into());
     }
 
-    pub fn post_set_start_time(&self, post_ptr: usize, start_time: i64) {
-        if post_ptr == 0 {
+    pub fn post_set_start_time(&self, post_ptr: PostRef, start_time: i64) {
+        if post_ptr.is_none() {
             return;
         }
         let mut i64s = [start_time];
         self.post_op(post_ptr, 2, OpArgs::NONE.i64s(i64s.as_mut_ptr()));
     }
 
-    pub fn post_reset_stage_progress(&self, post_ptr: usize, stage_time: i64) {
-        if post_ptr == 0 {
+    pub fn post_reset_stage_progress(&self, post_ptr: PostRef, stage_time: i64) {
+        if post_ptr.is_none() {
             return;
         }
         let mut i64s = [stage_time];
         self.post_op(post_ptr, 3, OpArgs::NONE.i64s(i64s.as_mut_ptr()));
     }
 
-    pub fn post_set_stage_time(&self, post_ptr: usize, stage_time: i64) {
-        if post_ptr == 0 {
+    pub fn post_set_stage_time(&self, post_ptr: PostRef, stage_time: i64) {
+        if post_ptr.is_none() {
             return;
         }
         let mut i64s = [stage_time];
         self.post_op(post_ptr, 4, OpArgs::NONE.i64s(i64s.as_mut_ptr()));
     }
 
-    pub fn post_set_progress_label(&self, post_ptr: usize, label: &[u8]) {
-        if post_ptr == 0 {
+    pub fn post_set_progress_label(&self, post_ptr: PostRef, label: &[u8]) {
+        if post_ptr.is_none() {
             return;
         }
         let c = c_bytes(label);
         self.post_op(post_ptr, 5, OpArgs::NONE.s1(c.as_ptr() as *const c_char));
     }
 
-    pub fn post_push_parred_file(&self, post_ptr: usize, name: &[u8]) {
-        if post_ptr == 0 {
+    pub fn post_push_parred_file(&self, post_ptr: PostRef, name: &[u8]) {
+        if post_ptr.is_none() {
             return;
         }
         let c = c_bytes(name);
@@ -3947,7 +3975,7 @@ impl QueueSubsysHost {
         );
     }
 
-    pub fn post_parred_file_at(&self, post_ptr: usize, idx: usize) -> Vec<u8> {
+    pub fn post_parred_file_at(&self, post_ptr: PostRef, idx: usize) -> Vec<u8> {
         let mut strs = [std::ptr::null(); 1];
         self.post_op(
             post_ptr,
@@ -3957,14 +3985,14 @@ impl QueueSubsysHost {
         unsafe { read_cstr(strs[0]) }
     }
 
-    pub fn post_clear_extracted_archives(&self, post_ptr: usize) {
-        if post_ptr == 0 {
+    pub fn post_clear_extracted_archives(&self, post_ptr: PostRef) {
+        if post_ptr.is_none() {
             return;
         }
         self.post_op(post_ptr, 7, OpArgs::NONE.a2(-1));
     }
 
-    pub fn post_extracted_archive_at(&self, post_ptr: usize, idx: usize) -> Vec<u8> {
+    pub fn post_extracted_archive_at(&self, post_ptr: PostRef, idx: usize) -> Vec<u8> {
         let mut strs = [std::ptr::null(); 1];
         self.post_op(
             post_ptr,
@@ -3994,16 +4022,16 @@ impl QueueSubsysHost {
         unsafe { crate::jobthread::nzbget_rs_job_op(thread_ptr as *const _, 3, 0, 0, 0) };
     }
 
-    pub fn post_stop_thread(&self, post_ptr: usize) {
-        self.post_job_op(0, post_ptr, OpArgs::NONE);
+    pub fn post_stop_thread(&self, post_ptr: PostRef) {
+        self.post_job_op(0, post_ptr.addr(), OpArgs::NONE);
     }
 
-    pub fn post_delete_thread(&self, post_ptr: usize) {
-        self.post_job_op(1, post_ptr, OpArgs::NONE);
+    pub fn post_delete_thread(&self, post_ptr: PostRef) {
+        self.post_job_op(1, post_ptr.addr(), OpArgs::NONE);
     }
 
-    pub fn post_kill_and_delete_thread(&self, post_ptr: usize) {
-        self.post_job_op(2, post_ptr, OpArgs::NONE);
+    pub fn post_kill_and_delete_thread(&self, post_ptr: PostRef) {
+        self.post_job_op(2, post_ptr.addr(), OpArgs::NONE);
     }
 
     pub fn direct_unpack_is_active(&self, nzb_ptr: usize, include_waiting_volume: bool) -> bool {
@@ -4043,16 +4071,16 @@ impl QueueSubsysHost {
         self.post_job_op(10, nzb_ptr, OpArgs::NONE);
     }
 
-    pub fn repair_add_par(&self, post_ptr: usize, file_ptr: usize, deleted: bool) -> bool {
+    pub fn repair_add_par(&self, post_ptr: PostRef, file_ptr: usize, deleted: bool) -> bool {
         self.post_job_op(
             11,
-            post_ptr,
+            post_ptr.addr(),
             OpArgs::NONE.a2(i32::from(deleted)).p2(file_ptr),
         ) != 0
     }
 
-    pub fn post_controller_start_job(&self, post_ptr: usize, controller_kind: i32) {
-        self.post_job_op(12, post_ptr, OpArgs::NONE.a2(controller_kind));
+    pub fn post_controller_start_job(&self, post_ptr: PostRef, controller_kind: i32) {
+        self.post_job_op(12, post_ptr.addr(), OpArgs::NONE.a2(controller_kind));
     }
 }
 

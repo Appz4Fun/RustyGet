@@ -148,7 +148,8 @@ pub unsafe extern "C" fn nzbget_rs_job_new_post(
     auto_destroy: c_int,
 ) -> *mut JobThread {
     let t = JobThread::alloc(kind, auto_destroy != 0);
-    let job = NzbgetRsPostJob::new(kind, t as usize, post_ptr, nzb_id);
+    let post = crate::queuesubsys_host::PostRef::from_addr(post_ptr);
+    let job = NzbgetRsPostJob::new(kind, t as usize, post, nzb_id);
     unsafe { (*t).work = Some(Work::Post(Box::new(job))) };
     t
 }

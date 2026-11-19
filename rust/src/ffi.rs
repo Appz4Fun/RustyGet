@@ -4894,7 +4894,7 @@ unsafe fn emit_rpc_nzb(
     ),
 ) {
     let n = qh.nzb_snap_mode(nzb_ptr, text_status_mode);
-    let post_start_time = if n.post_info_ptr != 0 {
+    let post_start_time = if n.post_info_ptr.is_some() {
         qh.post_snap(n.post_info_ptr).start_time
     } else {
         0
@@ -5004,13 +5004,13 @@ unsafe fn emit_rpc_nzb(
 #[cfg(unix)]
 unsafe fn emit_rpc_post(
     qh: &crate::queuesubsys_host::QueueSubsysHost,
-    post_ptr: usize,
+    post_ptr: crate::queuesubsys_host::PostRef,
     log_entries: c_int,
     post_queue: bool,
     emit_ctx: *mut c_void,
     emit_cb: crate::xmlrpc_format::NzbgetRsXmlRpcEmitFn,
 ) {
-    if post_ptr == 0 {
+    if post_ptr.is_none() {
         emit_cb(
             emit_ctx,
             5,
@@ -5498,10 +5498,10 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                 for qi in 0..qlen {
                     let np = qh.queue_at(dq_ptr, qi);
                     let flen = qh.nzb_file_len(np) as c_int;
-                    let mut post_ptr = 0usize;
+                    let mut post_ptr = crate::queuesubsys_host::PostRef::NONE;
                     emit_rpc_nzb(&qh, np, 0, |n, _, f, prms, scrs, sts| {
                         post_ptr = n.post_info_ptr;
-                        let has_post = post_ptr != 0;
+                        let has_post = post_ptr.is_some();
                         let post_stage = if has_post { i32::from(n.post_stage) } else { 0 };
                         let flags = (if has_post { 1 } else { 0 })
                             | ((post_stage & 0xff) << 4)
@@ -5547,7 +5547,7 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                 for qi in 0..qlen {
                     let np = qh.queue_at(dq_ptr, qi);
                     let outer = qh.nzb_snap(np, false);
-                    if outer.post_info_ptr == 0 {
+                    if outer.post_info_ptr.is_none() {
                         continue;
                     }
                     let pi = qh.post_snap(outer.post_info_ptr);
@@ -6210,7 +6210,7 @@ pub(crate) unsafe fn serve_binrpc_conn(conn: &crate::net::NzbgetRsConn) {
                 for i in 0..qlen {
                     let np = qh.queue_at(dq_ptr, i);
                     let outer = qh.nzb_snap(np, false);
-                    if outer.post_info_ptr == 0 {
+                    if outer.post_info_ptr.is_none() {
                         continue;
                     }
                     let outer_id = outer.id as u32;

@@ -1541,7 +1541,7 @@ impl JobStopHandle {
 
 #[cfg(unix)]
 impl JobQueue<'_> {
-    pub(crate) fn post_ptr(self) -> usize {
+    pub(crate) fn post_ptr(self) -> crate::queuesubsys_host::PostRef {
         self.job.post_ptr
     }
 
@@ -1578,11 +1578,11 @@ impl JobQueue<'_> {
     }
 
     fn is_deleted(self) -> bool {
-        self.job.post_ptr != 0 && self.host.post_snap(self.job.post_ptr).deleted
+        self.job.post_ptr.is_some() && self.host.post_snap(self.job.post_ptr).deleted
     }
 
     fn add_message(self, kind: i32, msg: &[u8]) {
-        if self.job.post_ptr != 0 {
+        if self.job.post_ptr.is_some() {
             self.job.add_message(self.host, kind, cstr::until_nul(msg));
         }
     }
@@ -1601,14 +1601,14 @@ impl JobQueue<'_> {
 
     fn set_stage_progress(self, stage_progress: i32) {
         use crate::queuesubsys_host::POST_INT_STAGE_PROGRESS;
-        if self.job.post_ptr != 0 {
+        if self.job.post_ptr.is_some() {
             self.host
                 .post_set_int(self.job.post_ptr, POST_INT_STAGE_PROGRESS, stage_progress);
         }
     }
 
     fn reset_stage_time(self) {
-        if self.job.post_ptr != 0 {
+        if self.job.post_ptr.is_some() {
             self.host
                 .post_set_stage_time(self.job.post_ptr, current_time_sec());
         }
@@ -3528,7 +3528,7 @@ impl NzbgetRsDirectUnpack {
     /// Shows `label` as the post-processing progress, when the download has post info.
     fn post_progress_label(host: &QueueSubsysHost, nzb_ptr: usize, label: &[u8]) {
         let ns = host.nzb_snap(nzb_ptr, false);
-        if ns.post_info_ptr != 0 {
+        if ns.post_info_ptr.is_some() {
             host.post_set_progress_label(ns.post_info_ptr, cstr::until_nul(label));
         }
     }
@@ -3611,7 +3611,7 @@ impl NzbgetRsDirectUnpack {
                     ns.post_total_sec + extra_sec,
                 );
             }
-            if clear_working && ns.post_info_ptr != 0 && !ns.has_live_repair_thread {
+            if clear_working && ns.post_info_ptr.is_some() && !ns.has_live_repair_thread {
                 host.post_set_int(ns.post_info_ptr, POST_INT_WORKING, 0);
             }
         }
@@ -4466,7 +4466,7 @@ impl NzbgetRsPostJob {
             |kind, msg| self.add_message(host, map_cleanup_kind(kind), msg),
             |old_rel, new_rel| {
                 host.with_locked_queue(|_| {
-                    if self.post_ptr == 0 {
+                    if self.post_ptr.is_none() {
                         return;
                     }
                     let n = self.nzb_ptr(host);
@@ -4494,7 +4494,7 @@ impl NzbgetRsPostJob {
         }
 
         host.with_locked_queue(|_| {
-            if self.post_ptr == 0 {
+            if self.post_ptr.is_none() {
                 return;
             }
             let n = self.nzb_ptr(host);
@@ -4926,7 +4926,7 @@ impl NzbgetRsPostJob {
             |kind, msg| self.add_message(host, map_cleanup_kind(kind), msg),
             |old_name, new_name| {
                 host.with_locked_queue(|_| {
-                    if self.post_ptr == 0 {
+                    if self.post_ptr.is_none() {
                         return;
                     }
                     let n = self.nzb_ptr(host);
@@ -4956,7 +4956,7 @@ impl NzbgetRsPostJob {
 
 /// Marks the post-processing of `post_ptr` as finished (`PostInfo::ptFinished`).
 #[cfg(unix)]
-fn finish_post_job(post_ptr: usize) {
+fn finish_post_job(post_ptr: crate::queuesubsys_host::PostRef) {
     use crate::queuesubsys_host::POST_INT_WORKING;
     let Some(host) = crate::ffi::queue_host() else {
         return;
@@ -4981,14 +4981,19 @@ enum PostJobInner {
 #[cfg(unix)]
 pub struct NzbgetRsPostJob {
     thread_ptr: usize,
-    post_ptr: usize,
+    post_ptr: crate::queuesubsys_host::PostRef,
     nzb_id: i32,
     inner: PostJobInner,
 }
 
 #[cfg(unix)]
 impl NzbgetRsPostJob {
-    pub fn new(kind: c_int, thread_ptr: usize, post_ptr: usize, nzb_id: c_int) -> Self {
+    pub(crate) fn new(
+        kind: c_int,
+        thread_ptr: usize,
+        post_ptr: crate::queuesubsys_host::PostRef,
+        nzb_id: c_int,
+    ) -> Self {
         let inner = match kind {
             0 | 1 => {
                 crate::log::log_active_bytes(MK_DEBUG, b"Creating RenameController");

@@ -32,7 +32,7 @@ use crate::nntp::{
     article_dl_should_advance_server_list, BackboneMiss, LevelCandidate, TransientRetries,
 };
 use crate::queuesubsys_host::{
-    ActiveDownloadSnap, QueueSubsysHost, AD_FAILED, AD_FATAL_ERROR, AD_FINISHED, AD_RETRY,
+    ActiveDownloadSnap, OpArgs, QueueSubsysHost, AD_FAILED, AD_FATAL_ERROR, AD_FINISHED, AD_RETRY,
     AD_RUNNING, MK_DEBUG, MK_DETAIL, MK_ERROR, MK_INFO, MK_WARNING,
 };
 use crate::renameanalyzer::Analyzer;
@@ -110,13 +110,9 @@ impl DlHost<'_> {
         i64s: *mut i64,
         strs: *mut *const c_char,
     ) -> usize {
-        if self.qh.use_active {
-            let file = self.file_ptr as *const crate::qfile::File;
-            unsafe { crate::qfile::host_output_op(file, a1, a2, p2, s1, s2, ints, i64s, strs) }
-        } else {
-            self.qh
-                .raw(45, a1, a2, self.file_ptr, p2, s1, s2, ints, i64s, strs)
-        }
+        let x = OpArgs::NONE.a2(a2).p2(p2).s1(s1).s2(s2);
+        let x = x.ints(ints).i64s(i64s).strs(strs);
+        self.qh.output_op(self.file_ptr, a1, x)
     }
 
     fn with_output_guard<R, F: FnOnce() -> R>(&self, always_lock: bool, f: F) -> R {
@@ -2830,34 +2826,7 @@ impl NzbgetRsArticleDownloader {
         let w = self.worker.lock().unwrap_or_else(|e| e.into_inner());
         for &(sid, s, f) in &w.server_stats {
             let mut arr = [sid, s, f];
-            if qh.use_active {
-                unsafe {
-                    crate::qfile::host_output_op(
-                        self.file_ptr as *const crate::qfile::File,
-                        10,
-                        0,
-                        0,
-                        std::ptr::null(),
-                        std::ptr::null(),
-                        arr.as_mut_ptr(),
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                    )
-                }
-            } else {
-                qh.raw(
-                    45,
-                    10,
-                    0,
-                    self.file_ptr,
-                    0,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    arr.as_mut_ptr(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                )
-            };
+            qh.output_op(self.file_ptr, 10, OpArgs::NONE.ints(arr.as_mut_ptr()));
         }
     }
 

@@ -807,6 +807,59 @@ pub(crate) struct QueueSubsysHost {
     pub use_active: bool,
 }
 
+/// The optional arguments of a queue-object op, built from `OpArgs::NONE`
+/// (all 0 and null) with the setters.
+#[derive(Clone, Copy)]
+struct OpArgs {
+    a2: i32,
+    p2: usize,
+    s1: *const c_char,
+    s2: *const c_char,
+    ints: *mut c_int,
+    i64s: *mut i64,
+    strs: *mut *const c_char,
+}
+
+impl OpArgs {
+    const NONE: Self = Self {
+        a2: 0,
+        p2: 0,
+        s1: std::ptr::null(),
+        s2: std::ptr::null(),
+        ints: std::ptr::null_mut(),
+        i64s: std::ptr::null_mut(),
+        strs: std::ptr::null_mut(),
+    };
+
+    const fn a2(self, a2: i32) -> Self {
+        Self { a2, ..self }
+    }
+
+    const fn p2(self, p2: usize) -> Self {
+        Self { p2, ..self }
+    }
+
+    const fn s1(self, s1: *const c_char) -> Self {
+        Self { s1, ..self }
+    }
+
+    const fn s2(self, s2: *const c_char) -> Self {
+        Self { s2, ..self }
+    }
+
+    const fn ints(self, ints: *mut c_int) -> Self {
+        Self { ints, ..self }
+    }
+
+    const fn i64s(self, i64s: *mut i64) -> Self {
+        Self { i64s, ..self }
+    }
+
+    const fn strs(self, strs: *mut *const c_char) -> Self {
+        Self { strs, ..self }
+    }
+}
+
 struct LockedQueueCall<F, R> {
     f: Option<F>,
     out: Option<R>,
@@ -858,14 +911,99 @@ impl QueueSubsysHost {
         i64s: *mut i64,
         strs: *mut *const c_char,
     ) -> usize {
-        if self.use_active {
-            // an op Rust does not answer was a no-op in the C++ host too
-            return unsafe { native_op(op, a1, a2, p1, p2, s1, s2, ints, i64s, strs) }.unwrap_or(0);
-        }
+        // the daemon's host never gets here: its wrappers call Rust directly
         match self.cb {
             Some(cb) => unsafe { cb(self.ctx, op, a1, a2, p1, p2, s1, s2, ints, i64s, strs) },
             None => 0,
         }
+    }
+
+    // Queue-object ops. The daemon's host runs them on the live Rust objects;
+    // no test mock answers them, so on a mock host they do nothing and read
+    // as 0 (output arrays untouched), as the mock callbacks did.
+
+    fn coll_snapshot(&self, nzb: usize, which: i32, x: OpArgs) -> usize {
+        if self.use_active {
+            let nzb = nzb as *const crate::qnzb::NzbScalars;
+            unsafe { crate::qnzb::host_coll_snapshot(nzb, which, x.ints, x.i64s, x.strs) };
+        }
+        0
+    }
+
+    fn coll_op(&self, nzb: usize, op: i32, x: OpArgs) -> usize {
+        if !self.use_active {
+            return 0;
+        }
+        let nzb = nzb as *const crate::qnzb::NzbScalars;
+        unsafe { crate::qnzb::host_coll_op(nzb, op, x.a2, x.p2, x.s1, x.s2, x.ints, x.strs) }
+            .unwrap_or(0)
+    }
+
+    fn coll_set(&self, nzb: usize, field: i32, x: OpArgs) -> usize {
+        if self.use_active {
+            let nzb = nzb as *mut crate::qnzb::NzbScalars;
+            unsafe { crate::qnzb::host_coll_set(nzb, field, x.a2, x.p2, x.s1, x.i64s) };
+        }
+        0
+    }
+
+    fn filelist_op(&self, nzb: usize, op: i32, x: OpArgs) -> usize {
+        if !self.use_active {
+            return 0;
+        }
+        let nzb = nzb as *mut crate::qnzb::NzbScalars;
+        unsafe {
+            crate::qnzb::host_filelist_op(nzb, op, x.a2, x.p2, x.s1, x.s2, x.ints, x.i64s, x.strs)
+        }
+    }
+
+    /// A duplicate record's op, or (op 2) a history entry's summary.
+    fn record_op(&self, record: usize, op: i32, x: OpArgs) -> usize {
+        if !self.use_active {
+            return 0;
+        }
+        if op == 2 {
+            let hist = record as *const crate::qhist::Hist;
+            return unsafe { crate::qhist::host_hist_summary(hist, x.ints, x.strs) };
+        }
+        let dup = record as *const crate::qdup::Dup;
+        unsafe { crate::qdup::host_dup_op(dup, op, x.a2, x.s1, x.ints, x.i64s, x.strs) }
+    }
+
+    /// An article op: on file `p1`'s article list (with the article in p2
+    /// for 8 and 13) for the file ops, else on article `p1`.
+    fn article_op(&self, p1: usize, op: i32, x: OpArgs) -> usize {
+        if !self.use_active {
+            return 0;
+        }
+        let file_op = matches!(op, 0 | 7 | 8 | 10 | 11 | 12 | 13);
+        let (list, article) = if file_op {
+            let list = unsafe { crate::qfile::nzbget_rs_file_articles(p1 as *const _) };
+            (list, if op == 8 || op == 13 { x.p2 } else { 0 })
+        } else {
+            (std::ptr::null_mut(), p1)
+        };
+        let article = article as *mut crate::qarticle::Article;
+        unsafe {
+            crate::qarticle::nzbget_rs_article_host(
+                list, article, op, x.a2, x.p2, x.s1, x.ints, x.i64s, x.strs,
+            )
+        }
+    }
+
+    fn post_op(&self, post: usize, op: i32, x: OpArgs) -> usize {
+        if !self.use_active {
+            return 0;
+        }
+        let post = post as *const crate::qnzb::Post;
+        unsafe { crate::qnzb::host_post_op(post, op, x.a2, x.p2, x.s1, x.ints, x.i64s, x.strs) }
+    }
+
+    fn post_job_op(&self, op: i32, p1: usize, x: OpArgs) -> usize {
+        if !self.use_active {
+            return 0;
+        }
+        unsafe { crate::qnzb::host_post_job_op(op, x.a2, p1, x.p2, x.i64s) }
     }
 
     pub fn opts(&self) -> GlobalOptsSnap {
@@ -2893,17 +3031,12 @@ impl QueueSubsysHost {
                 let nzb_ptr = self.queue_at(dq_ptr, i);
                 let mut n_ints = [0i32; 90];
                 let mut n_i64s = [0i64; 21];
-                self.raw(
-                    30,
-                    0,
-                    0,
+                self.coll_snapshot(
                     nzb_ptr,
                     0,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    n_ints.as_mut_ptr(),
-                    n_i64s.as_mut_ptr(),
-                    std::ptr::null_mut(),
+                    OpArgs::NONE
+                        .ints(n_ints.as_mut_ptr())
+                        .i64s(n_i64s.as_mut_ptr()),
                 );
                 let force = n_ints[14] != 0;
                 let flen = self.nzb_file_len(nzb_ptr);
@@ -3152,17 +3285,13 @@ impl QueueSubsysHost {
         let mut ints = [0i32; 90];
         let mut i64s = [0i64; 21];
         let mut strs = [std::ptr::null(); 9];
-        self.raw(
-            30,
-            text_status_mode,
-            0,
+        self.coll_snapshot(
             nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            i64s.as_mut_ptr(),
-            strs.as_mut_ptr(),
+            text_status_mode,
+            OpArgs::NONE
+                .ints(ints.as_mut_ptr())
+                .i64s(i64s.as_mut_ptr())
+                .strs(strs.as_mut_ptr()),
         );
         unsafe {
             NzbSnap {
@@ -3296,17 +3425,12 @@ impl QueueSubsysHost {
         }
         let c = c_bytes(name);
         let mut strs = [std::ptr::null(); 1];
-        let found = self.raw(
-            31,
-            0,
-            0,
+        let found = self.coll_op(
             nzb_ptr,
             0,
-            c.as_ptr() as *const c_char,
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            strs.as_mut_ptr(),
+            OpArgs::NONE
+                .s1(c.as_ptr() as *const c_char)
+                .strs(strs.as_mut_ptr()),
         );
         if found == 0 {
             None
@@ -3324,33 +3448,15 @@ impl QueueSubsysHost {
         let s2 = cv
             .as_ref()
             .map_or(std::ptr::null(), |v| v.as_ptr() as *const c_char);
-        self.raw(
-            31,
-            1,
-            0,
+        self.coll_op(
             nzb_ptr,
-            0,
-            cn.as_ptr() as *const c_char,
-            s2,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
+            1,
+            OpArgs::NONE.s1(cn.as_ptr() as *const c_char).s2(s2),
         );
     }
 
     pub fn nzb_copy_params(&self, dest_nzb: usize, src_nzb: usize) {
-        self.raw(
-            31,
-            2,
-            0,
-            dest_nzb,
-            src_nzb,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        self.coll_op(dest_nzb, 2, OpArgs::NONE.p2(src_nzb));
     }
 
     pub fn nzb_build_final_dir_name(&self, nzb_ptr: usize) -> Vec<u8> {
@@ -3358,34 +3464,12 @@ impl QueueSubsysHost {
             return Vec::new();
         }
         let mut strs = [std::ptr::null(); 1];
-        self.raw(
-            31,
-            3,
-            0,
-            nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            strs.as_mut_ptr(),
-        );
+        self.coll_op(nzb_ptr, 3, OpArgs::NONE.strs(strs.as_mut_ptr()));
         unsafe { read_cstr(strs[0]) }
     }
 
     pub fn nzb_blocked_donor_op(&self, nzb_ptr: usize, add: bool, donor_id: i32) -> bool {
-        self.raw(
-            31,
-            if add { 5 } else { 4 },
-            donor_id,
-            nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        ) != 0
+        self.coll_op(nzb_ptr, if add { 5 } else { 4 }, OpArgs::NONE.a2(donor_id)) != 0
     }
 
     pub fn nzb_hard_link_path(&self, nzb_ptr: usize) -> Vec<u8> {
@@ -3393,18 +3477,7 @@ impl QueueSubsysHost {
             return Vec::new();
         }
         let mut strs = [std::ptr::null(); 1];
-        self.raw(
-            31,
-            6,
-            0,
-            nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            strs.as_mut_ptr(),
-        );
+        self.coll_op(nzb_ptr, 6, OpArgs::NONE.strs(strs.as_mut_ptr()));
         unsafe { read_cstr(strs[0]) }
     }
 
@@ -3413,18 +3486,7 @@ impl QueueSubsysHost {
             return Vec::new();
         }
         let mut strs = [std::ptr::null(); 1];
-        self.raw(
-            31,
-            7,
-            0,
-            nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            strs.as_mut_ptr(),
-        );
+        self.coll_op(nzb_ptr, 7, OpArgs::NONE.strs(strs.as_mut_ptr()));
         unsafe { read_cstr(strs[0]) }
     }
 
@@ -3432,51 +3494,22 @@ impl QueueSubsysHost {
         if nzb_ptr == 0 {
             return false;
         }
-        self.raw(
-            31,
-            22,
-            0,
-            nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        ) != 0
+        self.coll_op(nzb_ptr, 22, OpArgs::NONE) != 0
     }
 
     pub fn nzb_params_len(&self, nzb_ptr: usize) -> usize {
         if nzb_ptr == 0 {
             return 0;
         }
-        self.raw(
-            31,
-            8,
-            -1,
-            nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
+        self.coll_op(nzb_ptr, 8, OpArgs::NONE.a2(-1))
     }
 
     pub fn nzb_param_at(&self, nzb_ptr: usize, idx: usize) -> (Vec<u8>, Vec<u8>) {
         let mut strs = [std::ptr::null(); 2];
-        self.raw(
-            31,
-            8,
-            idx as i32,
+        self.coll_op(
             nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            strs.as_mut_ptr(),
+            8,
+            OpArgs::NONE.a2(idx as i32).strs(strs.as_mut_ptr()),
         );
         unsafe { (read_cstr(strs[0]), read_cstr(strs[1])) }
     }
@@ -3485,33 +3518,15 @@ impl QueueSubsysHost {
         if nzb_ptr == 0 {
             return 0;
         }
-        self.raw(
-            31,
-            9,
-            -1,
-            nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
+        self.coll_op(nzb_ptr, 9, OpArgs::NONE.a2(-1))
     }
 
     pub fn nzb_server_stat_at(&self, nzb_ptr: usize, idx: usize) -> (i32, i32, i32) {
         let mut ints = [0i32; 3];
-        self.raw(
-            31,
-            9,
-            idx as i32,
+        self.coll_op(
             nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
+            9,
+            OpArgs::NONE.a2(idx as i32).ints(ints.as_mut_ptr()),
         );
         (ints[0], ints[1], ints[2])
     }
@@ -3520,33 +3535,15 @@ impl QueueSubsysHost {
         if nzb_ptr == 0 {
             return 0;
         }
-        self.raw(
-            31,
-            21,
-            -1,
-            nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
+        self.coll_op(nzb_ptr, 21, OpArgs::NONE.a2(-1))
     }
 
     pub fn nzb_current_server_stat_at(&self, nzb_ptr: usize, idx: usize) -> (i32, i32, i32) {
         let mut ints = [0i32; 3];
-        self.raw(
-            31,
-            21,
-            idx as i32,
+        self.coll_op(
             nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
+            21,
+            OpArgs::NONE.a2(idx as i32).ints(ints.as_mut_ptr()),
         );
         (ints[0], ints[1], ints[2])
     }
@@ -3582,34 +3579,23 @@ impl QueueSubsysHost {
         }
         let mut out: Vec<(i32, i32, i32, std::ffi::CString)> = Vec::new();
         let mut ints = [id_from, max_entries];
-        self.raw(
-            31,
-            20,
-            0,
+        self.coll_op(
             nzb_ptr,
-            (&mut out as *mut Vec<(i32, i32, i32, std::ffi::CString)>) as usize,
-            push_msg as *const () as *const c_char,
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
+            20,
+            OpArgs::NONE
+                .p2((&mut out as *mut Vec<(i32, i32, i32, std::ffi::CString)>) as usize)
+                .s1(push_msg as *const () as *const c_char)
+                .ints(ints.as_mut_ptr()),
         );
         out
     }
 
     pub fn nzb_push_script_status(&self, nzb_ptr: usize, name: &[u8], status: i32) {
         let cn = c_bytes(name);
-        self.raw(
-            31,
-            10,
-            status,
+        self.coll_op(
             nzb_ptr,
-            0,
-            cn.as_ptr() as *const c_char,
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
+            10,
+            OpArgs::NONE.a2(status).s1(cn.as_ptr() as *const c_char),
         );
     }
 
@@ -3621,17 +3607,12 @@ impl QueueSubsysHost {
     ) -> bool {
         let co = c_bytes(old_name);
         let cn = c_bytes(new_name);
-        self.raw(
-            31,
-            11,
-            0,
+        self.coll_op(
             nzb_ptr,
-            0,
-            co.as_ptr() as *const c_char,
-            cn.as_ptr() as *const c_char,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
+            11,
+            OpArgs::NONE
+                .s1(co.as_ptr() as *const c_char)
+                .s2(cn.as_ptr() as *const c_char),
         ) != 0
     }
 
@@ -3639,18 +3620,7 @@ impl QueueSubsysHost {
         if nzb_ptr == 0 {
             return 0;
         }
-        self.raw(
-            31,
-            12,
-            0,
-            nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
+        self.coll_op(nzb_ptr, 12, OpArgs::NONE)
     }
 
     pub fn nzb_push_extracted_archive(&self, nzb_ptr: usize, name: &[u8]) {
@@ -3658,18 +3628,7 @@ impl QueueSubsysHost {
             return;
         }
         let cn = c_bytes(name);
-        self.raw(
-            31,
-            13,
-            0,
-            nzb_ptr,
-            0,
-            cn.as_ptr() as *const c_char,
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        self.coll_op(nzb_ptr, 13, OpArgs::NONE.s1(cn.as_ptr() as *const c_char));
     }
 
     pub fn nzb_set_meta_name(&self, nzb_ptr: usize, meta_name: &[u8]) {
@@ -3677,36 +3636,14 @@ impl QueueSubsysHost {
             return;
         }
         let cn = c_bytes(meta_name);
-        self.raw(
-            31,
-            14,
-            0,
-            nzb_ptr,
-            0,
-            cn.as_ptr() as *const c_char,
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        self.coll_op(nzb_ptr, 14, OpArgs::NONE.s1(cn.as_ptr() as *const c_char));
     }
 
     pub fn nzb_copy_cached_messages_silent(&self, dst_nzb: usize, src_nzb: usize) {
         if dst_nzb == 0 || src_nzb == 0 {
             return;
         }
-        self.raw(
-            31,
-            15,
-            0,
-            dst_nzb,
-            src_nzb,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        self.coll_op(dst_nzb, 15, OpArgs::NONE.p2(src_nzb));
     }
 
     pub fn nzb_make_nice_url_name(&self, nzb_ptr: usize, url: &[u8], filename: &[u8]) -> Vec<u8> {
@@ -3716,17 +3653,13 @@ impl QueueSubsysHost {
         let cu = c_bytes(url);
         let cf = c_bytes(filename);
         let mut strs = [std::ptr::null(); 1];
-        self.raw(
-            31,
-            16,
-            0,
+        self.coll_op(
             nzb_ptr,
-            0,
-            cu.as_ptr() as *const c_char,
-            cf.as_ptr() as *const c_char,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            strs.as_mut_ptr(),
+            16,
+            OpArgs::NONE
+                .s1(cu.as_ptr() as *const c_char)
+                .s2(cf.as_ptr() as *const c_char)
+                .strs(strs.as_mut_ptr()),
         );
         unsafe { read_cstr(strs[0]) }
     }
@@ -3735,34 +3668,19 @@ impl QueueSubsysHost {
         if nzb_ptr == 0 {
             return 0;
         }
-        self.raw(
-            31,
-            17,
-            -1,
-            nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
+        self.coll_op(nzb_ptr, 17, OpArgs::NONE.a2(-1))
     }
 
     pub fn nzb_script_status_at(&self, nzb_ptr: usize, idx: usize) -> (i32, Vec<u8>) {
         let mut ints = [0i32; 1];
         let mut strs = [std::ptr::null(); 1];
-        self.raw(
-            31,
-            17,
-            idx as i32,
+        self.coll_op(
             nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            std::ptr::null_mut(),
-            strs.as_mut_ptr(),
+            17,
+            OpArgs::NONE
+                .a2(idx as i32)
+                .ints(ints.as_mut_ptr())
+                .strs(strs.as_mut_ptr()),
         );
         (ints[0], unsafe { read_cstr(strs[0]) })
     }
@@ -3771,97 +3689,35 @@ impl QueueSubsysHost {
         if nzb_ptr == 0 {
             return 0;
         }
-        self.raw(
-            31,
-            18,
-            -1,
-            nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
+        self.coll_op(nzb_ptr, 18, OpArgs::NONE.a2(-1))
     }
 
     pub fn nzb_extracted_archive_at(&self, nzb_ptr: usize, idx: usize) -> Vec<u8> {
         let mut strs = [std::ptr::null(); 1];
-        self.raw(
-            31,
-            18,
-            idx as i32,
+        self.coll_op(
             nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            strs.as_mut_ptr(),
+            18,
+            OpArgs::NONE.a2(idx as i32).strs(strs.as_mut_ptr()),
         );
         unsafe { read_cstr(strs[0]) }
     }
 
     pub fn nzb_server_stat_set(&self, nzb_ptr: usize, server_id: i32, succ: i32, fail: i32) {
         let mut ints = [server_id, succ, fail];
-        self.raw(
-            31,
-            19,
-            0,
-            nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        self.coll_op(nzb_ptr, 19, OpArgs::NONE.ints(ints.as_mut_ptr()));
     }
 
     pub fn nzb_sync_current_server_stats(&self, nzb_ptr: usize) {
-        self.raw(
-            31,
-            19,
-            1,
-            nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        self.coll_op(nzb_ptr, 19, OpArgs::NONE.a2(1));
     }
 
     pub fn nzb_set_int(&self, nzb_ptr: usize, field: i32, val: i32) {
-        self.raw(
-            32,
-            field,
-            val,
-            nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        self.coll_set(nzb_ptr, field, OpArgs::NONE.a2(val));
     }
 
     pub fn nzb_set_i64(&self, nzb_ptr: usize, field: i32, val: i64) {
         let mut i64s = [val];
-        self.raw(
-            32,
-            field,
-            0,
-            nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            i64s.as_mut_ptr(),
-            std::ptr::null_mut(),
-        );
+        self.coll_set(nzb_ptr, field, OpArgs::NONE.i64s(i64s.as_mut_ptr()));
     }
 
     pub fn nzb_set_str(&self, nzb_ptr: usize, field: i32, val: &[u8]) {
@@ -3873,33 +3729,11 @@ impl QueueSubsysHost {
         let s1 = cv
             .as_ref()
             .map_or(std::ptr::null(), |v| v.as_ptr() as *const c_char);
-        self.raw(
-            32,
-            field,
-            0,
-            nzb_ptr,
-            0,
-            s1,
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        self.coll_set(nzb_ptr, field, OpArgs::NONE.s1(s1));
     }
 
     pub fn nzb_action(&self, nzb_ptr: usize, action: i32, p2: usize) {
-        self.raw(
-            32,
-            action,
-            0,
-            nzb_ptr,
-            p2,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        self.coll_set(nzb_ptr, action, OpArgs::NONE.p2(p2));
     }
 
     pub fn nzb_apply_merge_split_counters(
@@ -3961,48 +3795,15 @@ impl QueueSubsysHost {
     }
 
     pub fn nzb_file_len(&self, nzb_ptr: usize) -> usize {
-        self.raw(
-            34,
-            0,
-            0,
-            nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
+        self.filelist_op(nzb_ptr, 0, OpArgs::NONE)
     }
 
     pub fn nzb_file_at(&self, nzb_ptr: usize, idx: usize) -> usize {
-        self.raw(
-            34,
-            1,
-            idx as i32,
-            nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
+        self.filelist_op(nzb_ptr, 1, OpArgs::NONE.a2(idx as i32))
     }
 
     pub fn nzb_remove_file(&self, nzb_ptr: usize, file_ptr: usize) {
-        self.raw(
-            34,
-            2,
-            0,
-            nzb_ptr,
-            file_ptr,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        self.filelist_op(nzb_ptr, 2, OpArgs::NONE.p2(file_ptr));
     }
 
     pub fn nzb_remove_file_and_notify(
@@ -4013,17 +3814,13 @@ impl QueueSubsysHost {
         aspect_action: i32,
     ) {
         let mut i64s = [dq_ptr as i64];
-        self.raw(
-            34,
-            9,
-            aspect_action,
+        self.filelist_op(
             nzb_ptr,
-            file_ptr,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            i64s.as_mut_ptr(),
-            std::ptr::null_mut(),
+            9,
+            OpArgs::NONE
+                .a2(aspect_action)
+                .p2(file_ptr)
+                .i64s(i64s.as_mut_ptr()),
         );
         #[cfg(unix)]
         if self.use_active {
@@ -4034,64 +3831,31 @@ impl QueueSubsysHost {
 
     pub fn nzb_transfer_split_file(&self, src_nzb: usize, dest_nzb: usize, file_ptr: usize) {
         let mut i64s = [dest_nzb as i64];
-        self.raw(
-            34,
-            3,
-            0,
+        self.filelist_op(
             src_nzb,
-            file_ptr,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            i64s.as_mut_ptr(),
-            std::ptr::null_mut(),
+            3,
+            OpArgs::NONE.p2(file_ptr).i64s(i64s.as_mut_ptr()),
         );
     }
 
     pub fn nzb_merge_lists_and_stats(&self, dest_nzb: usize, src_nzb: usize) {
-        self.raw(
-            34,
-            4,
-            0,
-            dest_nzb,
-            src_nzb,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        self.filelist_op(dest_nzb, 4, OpArgs::NONE.p2(src_nzb));
     }
 
     pub fn nzb_completed_files_len(&self, nzb_ptr: usize) -> usize {
-        self.raw(
-            34,
-            5,
-            -1,
-            nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
+        self.filelist_op(nzb_ptr, 5, OpArgs::NONE.a2(-1))
     }
 
     pub fn nzb_completed_file_at(&self, nzb_ptr: usize, idx: usize) -> CompletedFileSnap {
         let mut ints = [0i32; 4];
         let mut strs = [std::ptr::null(); 4];
-        self.raw(
-            34,
-            5,
-            idx as i32,
+        self.filelist_op(
             nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            std::ptr::null_mut(),
-            strs.as_mut_ptr(),
+            5,
+            OpArgs::NONE
+                .a2(idx as i32)
+                .ints(ints.as_mut_ptr())
+                .strs(strs.as_mut_ptr()),
         );
         unsafe {
             CompletedFileSnap {
@@ -4126,17 +3890,14 @@ impl QueueSubsysHost {
     ) {
         let c = c_bytes(filename);
         let mut ints = [file_crc as i32];
-        self.raw(
-            34,
-            6,
-            file_status,
+        self.filelist_op(
             nzb_ptr,
-            file_ptr,
-            c.as_ptr() as *const c_char,
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
+            6,
+            OpArgs::NONE
+                .a2(file_status)
+                .p2(file_ptr)
+                .s1(c.as_ptr() as *const c_char)
+                .ints(ints.as_mut_ptr()),
         );
     }
 
@@ -4152,17 +3913,13 @@ impl QueueSubsysHost {
         let s2 = c_orig
             .as_ref()
             .map_or(std::ptr::null(), |v| v.as_ptr() as *const c_char);
-        self.raw(
-            34,
-            7,
-            idx as i32,
+        self.filelist_op(
             nzb_ptr,
-            0,
-            c_fn.as_ptr() as *const c_char,
-            s2,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
+            7,
+            OpArgs::NONE
+                .a2(idx as i32)
+                .s1(c_fn.as_ptr() as *const c_char)
+                .s2(s2),
         );
     }
 
@@ -4187,21 +3944,19 @@ impl QueueSubsysHost {
             missed_size,
             steps_hash as i64,
         ];
-        self.raw(
-            34,
-            8,
-            holes.len() as i32,
+        self.filelist_op(
             nzb_ptr,
-            if holes.is_empty() {
-                0
-            } else {
-                holes.as_ptr() as usize
-            },
-            c.as_ptr() as *const c_char,
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            i64s.as_mut_ptr(),
-            std::ptr::null_mut(),
+            8,
+            OpArgs::NONE
+                .a2(holes.len() as i32)
+                .p2(if holes.is_empty() {
+                    0
+                } else {
+                    holes.as_ptr() as usize
+                })
+                .s1(c.as_ptr() as *const c_char)
+                .ints(ints.as_mut_ptr())
+                .i64s(i64s.as_mut_ptr()),
         );
     }
 
@@ -4209,17 +3964,12 @@ impl QueueSubsysHost {
         if nzb_ptr == 0 || new_order.is_empty() {
             return;
         }
-        self.raw(
-            34,
-            10,
-            new_order.len() as i32,
+        self.filelist_op(
             nzb_ptr,
-            new_order.as_ptr() as usize,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
+            10,
+            OpArgs::NONE
+                .a2(new_order.len() as i32)
+                .p2(new_order.as_ptr() as usize),
         );
     }
 
@@ -4227,34 +3977,20 @@ impl QueueSubsysHost {
         if nzb_ptr == 0 {
             return Vec::new();
         }
-        let n = self.raw(
-            34,
-            11,
-            -1,
-            nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        let n = self.filelist_op(nzb_ptr, 11, OpArgs::NONE.a2(-1));
         let mut out = Vec::with_capacity(n);
         let mut ints = [0i32; 1];
         let mut i64s = [0i64; 3];
         let mut strs = [std::ptr::null(); 1];
         for i in 0..n {
-            self.raw(
-                34,
-                11,
-                i as i32,
+            self.filelist_op(
                 nzb_ptr,
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                ints.as_mut_ptr(),
-                i64s.as_mut_ptr(),
-                strs.as_mut_ptr(),
+                11,
+                OpArgs::NONE
+                    .a2(i as i32)
+                    .ints(ints.as_mut_ptr())
+                    .i64s(i64s.as_mut_ptr())
+                    .strs(strs.as_mut_ptr()),
             );
             out.push(StreamRepairJobSnap {
                 file_id: ints[0],
@@ -4271,33 +4007,15 @@ impl QueueSubsysHost {
         if nzb_ptr == 0 {
             return 0;
         }
-        self.raw(
-            34,
-            11,
-            -1,
-            nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
+        self.filelist_op(nzb_ptr, 11, OpArgs::NONE.a2(-1))
     }
 
     pub fn nzb_stream_repair_update_completed_file(&self, nzb_ptr: usize, file_id: i32, mode: i32) {
         let mut ints = [mode];
-        if self.raw(
-            34,
-            12,
-            file_id,
+        if self.filelist_op(
             nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
+            12,
+            OpArgs::NONE.a2(file_id).ints(ints.as_mut_ptr()),
         ) != 0
         {
             self.disk_discard_file(file_id, true, true, true);
@@ -4312,17 +4030,14 @@ impl QueueSubsysHost {
         let mut ints = [0i32; 5];
         let mut i64s = [0i64; 4];
         let mut strs = [std::ptr::null(); 2];
-        self.raw(
-            34,
-            13,
-            idx as i32,
+        self.filelist_op(
             nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            i64s.as_mut_ptr(),
-            strs.as_mut_ptr(),
+            13,
+            OpArgs::NONE
+                .a2(idx as i32)
+                .ints(ints.as_mut_ptr())
+                .i64s(i64s.as_mut_ptr())
+                .strs(strs.as_mut_ptr()),
         );
         let holes_len = ints[4].max(0) as usize;
         let holes = if holes_len == 0 || strs[1].is_null() {
@@ -4351,33 +4066,19 @@ impl QueueSubsysHost {
 
     pub fn nzb_stream_repair_mark_live_attempted(&self, nzb_ptr: usize, idx: usize) -> bool {
         let mut ints = [1i32];
-        self.raw(
-            34,
-            13,
-            idx as i32,
+        self.filelist_op(
             nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
+            13,
+            OpArgs::NONE.a2(idx as i32).ints(ints.as_mut_ptr()),
         ) != 0
     }
 
     pub fn nzb_stream_repair_erase_job(&self, nzb_ptr: usize, idx: usize, set_changed: bool) {
         let mut ints = [2i32, i32::from(set_changed)];
-        self.raw(
-            34,
-            13,
-            idx as i32,
+        self.filelist_op(
             nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
+            13,
+            OpArgs::NONE.a2(idx as i32).ints(ints.as_mut_ptr()),
         );
     }
 
@@ -4391,17 +4092,14 @@ impl QueueSubsysHost {
     ) {
         let mut ints = [3i32, holes_len];
         let mut i64s = [new_decoded_size];
-        self.raw(
-            34,
-            13,
-            idx as i32,
+        self.filelist_op(
             nzb_ptr,
-            holes_ptr,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            i64s.as_mut_ptr(),
-            std::ptr::null_mut(),
+            13,
+            OpArgs::NONE
+                .a2(idx as i32)
+                .p2(holes_ptr)
+                .ints(ints.as_mut_ptr())
+                .i64s(i64s.as_mut_ptr()),
         );
     }
 
@@ -4460,63 +4158,28 @@ impl QueueSubsysHost {
                 article_msg_ids.as_ptr() as *const c_char
             },
         ];
-        self.raw(
-            34,
-            14,
-            0,
+        self.filelist_op(
             nzb_ptr,
-            0,
-            subject,
-            filename,
-            ints.as_mut_ptr(),
-            i64s.as_mut_ptr(),
-            strs.as_mut_ptr(),
+            14,
+            OpArgs::NONE
+                .s1(subject)
+                .s2(filename)
+                .ints(ints.as_mut_ptr())
+                .i64s(i64s.as_mut_ptr())
+                .strs(strs.as_mut_ptr()),
         )
     }
 
     pub fn nzb_redownload_replace_files(&self, nzb_ptr: usize, src_nzb_ptr: usize) {
-        self.raw(
-            34,
-            15,
-            0,
-            nzb_ptr,
-            src_nzb_ptr,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        self.filelist_op(nzb_ptr, 15, OpArgs::NONE.p2(src_nzb_ptr));
     }
 
     pub fn nzb_erase_completed_file(&self, nzb_ptr: usize, idx: usize) {
-        self.raw(
-            34,
-            16,
-            idx as i32,
-            nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        self.filelist_op(nzb_ptr, 16, OpArgs::NONE.a2(idx as i32));
     }
 
     pub fn nzb_add_requeued_file(&self, nzb_ptr: usize, file_ptr: usize) {
-        self.raw(
-            34,
-            17,
-            0,
-            nzb_ptr,
-            file_ptr,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        self.filelist_op(nzb_ptr, 17, OpArgs::NONE.p2(file_ptr));
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4534,17 +4197,10 @@ impl QueueSubsysHost {
     ) {
         let mut ints = [id, status, crc as i32, i32::from(par_file)];
         let mut strs = [filename, origname, hash16k, par_set_id];
-        self.raw(
-            34,
-            18,
-            0,
+        self.filelist_op(
             nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            std::ptr::null_mut(),
-            strs.as_mut_ptr(),
+            18,
+            OpArgs::NONE.ints(ints.as_mut_ptr()).strs(strs.as_mut_ptr()),
         );
     }
 
@@ -4562,17 +4218,12 @@ impl QueueSubsysHost {
             time_opt.unwrap_or(0),
             i32::from(extra_priority),
         ];
-        self.raw(
-            34,
-            19,
-            i32::from(time_opt.is_some()),
+        self.filelist_op(
             nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
+            19,
+            OpArgs::NONE
+                .a2(i32::from(time_opt.is_some()))
+                .ints(ints.as_mut_ptr()),
         );
     }
 
@@ -4583,17 +4234,13 @@ impl QueueSubsysHost {
         let mut ints = [0i32; 5];
         let mut i64s = [0i64; 1];
         let mut strs = [std::ptr::null(); 2];
-        self.raw(
-            35,
-            0,
-            0,
+        self.record_op(
             dup_ptr,
             0,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            i64s.as_mut_ptr(),
-            strs.as_mut_ptr(),
+            OpArgs::NONE
+                .ints(ints.as_mut_ptr())
+                .i64s(i64s.as_mut_ptr())
+                .strs(strs.as_mut_ptr()),
         );
         unsafe {
             DupSnap {
@@ -4610,65 +4257,25 @@ impl QueueSubsysHost {
     }
 
     pub fn dup_set_status(&self, dup_ptr: usize, status: i32) {
-        self.raw(
-            35,
-            1,
-            status,
-            dup_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        self.record_op(dup_ptr, 1, OpArgs::NONE.a2(status));
     }
 
     pub fn dup_set_str(&self, dup_ptr: usize, field: i32, val: &[u8]) {
         let c = c_bytes(val);
-        self.raw(
-            35,
-            field,
-            0,
-            dup_ptr,
-            0,
-            c.as_ptr() as *const c_char,
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        self.record_op(dup_ptr, field, OpArgs::NONE.s1(c.as_ptr() as *const c_char));
     }
 
     pub fn dup_set_int(&self, dup_ptr: usize, field: i32, val: i32) {
-        self.raw(
-            35,
-            field,
-            val,
-            dup_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        self.record_op(dup_ptr, field, OpArgs::NONE.a2(val));
     }
 
     pub fn hist_item_snap(&self, hi_ptr: usize) -> HistEntrySnap {
         let mut ints = [0i32; 2];
         let mut strs = [std::ptr::null(); 1];
-        let inner_ptr = self.raw(
-            35,
-            2,
-            0,
+        let inner_ptr = self.record_op(
             hi_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            std::ptr::null_mut(),
-            strs.as_mut_ptr(),
+            2,
+            OpArgs::NONE.ints(ints.as_mut_ptr()).strs(strs.as_mut_ptr()),
         );
         HistEntrySnap {
             hi_ptr,
@@ -5102,17 +4709,14 @@ impl QueueSubsysHost {
         let mut ints = [0i32; 7];
         let mut i64s = [0i64; 1];
         let mut strs = [std::ptr::null(); 2];
-        self.raw(
-            43,
-            10,
-            idx as i32,
+        self.article_op(
             file_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            i64s.as_mut_ptr(),
-            strs.as_mut_ptr(),
+            10,
+            OpArgs::NONE
+                .a2(idx as i32)
+                .ints(ints.as_mut_ptr())
+                .i64s(i64s.as_mut_ptr())
+                .strs(strs.as_mut_ptr()),
         );
         unsafe {
             (
@@ -5141,17 +4745,13 @@ impl QueueSubsysHost {
         size: i32,
         message_id: *const c_char,
     ) {
-        self.raw(
-            43,
-            11,
-            part_number,
+        self.article_op(
             file_ptr,
-            size as usize,
-            message_id,
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
+            11,
+            OpArgs::NONE
+                .a2(part_number)
+                .p2(size as usize)
+                .s1(message_id),
         );
     }
 
@@ -5171,17 +4771,15 @@ impl QueueSubsysHost {
     ) -> i32 {
         let mut ints = [extra_i32, seg_size, crc as i32, dupe_round, status];
         let mut i64s = [seg_offset];
-        self.raw(
-            43,
-            12,
-            idx,
+        self.article_op(
             file_ptr,
-            usize::from(apply),
-            result_filename,
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            i64s.as_mut_ptr(),
-            std::ptr::null_mut(),
+            12,
+            OpArgs::NONE
+                .a2(idx)
+                .p2(usize::from(apply))
+                .s1(result_filename)
+                .ints(ints.as_mut_ptr())
+                .i64s(i64s.as_mut_ptr()),
         ) as i32
     }
 
@@ -5189,17 +4787,14 @@ impl QueueSubsysHost {
         let mut ints = [0i32; 12];
         let mut i64s = [0i64; 1];
         let mut strs = [std::ptr::null(); 2];
-        let ptr = self.raw(
-            43,
-            0,
-            idx as i32,
+        let ptr = self.article_op(
             file_ptr,
             0,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            i64s.as_mut_ptr(),
-            strs.as_mut_ptr(),
+            OpArgs::NONE
+                .a2(idx as i32)
+                .ints(ints.as_mut_ptr())
+                .i64s(i64s.as_mut_ptr())
+                .strs(strs.as_mut_ptr()),
         );
         Self::decode_article_snap(ptr, &ints, &i64s, &strs)
     }
@@ -5208,17 +4803,13 @@ impl QueueSubsysHost {
         let mut ints = [0i32; 12];
         let mut i64s = [0i64; 1];
         let mut strs = [std::ptr::null(); 2];
-        let ptr = self.raw(
-            43,
-            1,
-            0,
+        let ptr = self.article_op(
             article_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            i64s.as_mut_ptr(),
-            strs.as_mut_ptr(),
+            1,
+            OpArgs::NONE
+                .ints(ints.as_mut_ptr())
+                .i64s(i64s.as_mut_ptr())
+                .strs(strs.as_mut_ptr()),
         );
         Self::decode_article_snap(ptr, &ints, &i64s, &strs)
     }
@@ -5227,17 +4818,13 @@ impl QueueSubsysHost {
         let mut ints = [0i32; 12];
         let mut i64s = [0i64; 1];
         let mut strs = [std::ptr::null(); 2];
-        let ptr = self.raw(
-            43,
-            7,
-            0,
+        let ptr = self.article_op(
             file_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            i64s.as_mut_ptr(),
-            strs.as_mut_ptr(),
+            7,
+            OpArgs::NONE
+                .ints(ints.as_mut_ptr())
+                .i64s(i64s.as_mut_ptr())
+                .strs(strs.as_mut_ptr()),
         );
         if ptr == 0 {
             None
@@ -5257,17 +4844,14 @@ impl QueueSubsysHost {
         let mut ints = [0i32; 12];
         let mut i64s = [0i64; 1];
         let mut strs = [std::ptr::null(); 2];
-        let ptr = self.raw(
-            43,
-            8,
-            0,
+        let ptr = self.article_op(
             file_ptr,
-            article_ptr,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            i64s.as_mut_ptr(),
-            strs.as_mut_ptr(),
+            8,
+            OpArgs::NONE
+                .p2(article_ptr)
+                .ints(ints.as_mut_ptr())
+                .i64s(i64s.as_mut_ptr())
+                .strs(strs.as_mut_ptr()),
         );
         if ptr == 0 {
             None
@@ -5307,34 +4891,19 @@ impl QueueSubsysHost {
     }
 
     pub fn article_pinned_sources(&self, article_ptr: usize) -> (Vec<Vec<u8>>, Vec<i32>) {
-        let n = self.raw(
-            43,
-            3,
-            -1,
-            article_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        let n = self.article_op(article_ptr, 3, OpArgs::NONE.a2(-1));
         let mut sources = Vec::with_capacity(n);
         let mut donors = Vec::with_capacity(n);
         let mut ints = [0i32; 2];
         let mut strs = [std::ptr::null(); 1];
         for i in 0..n {
-            self.raw(
-                43,
-                3,
-                i as i32,
+            self.article_op(
                 article_ptr,
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                ints.as_mut_ptr(),
-                std::ptr::null_mut(),
-                strs.as_mut_ptr(),
+                3,
+                OpArgs::NONE
+                    .a2(i as i32)
+                    .ints(ints.as_mut_ptr())
+                    .strs(strs.as_mut_ptr()),
             );
             sources.push(unsafe { read_cstr(strs[0]) });
             if ints[1] != 0 {
@@ -5362,53 +4931,27 @@ impl QueueSubsysHost {
         ints.push(donor_count);
         ints.push(contributors.len() as i32);
         ints.extend_from_slice(contributors);
-        self.raw(
-            43,
-            4,
-            c_ptrs.len() as i32,
+        self.article_op(
             article_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            std::ptr::null_mut(),
-            if c_ptrs.is_empty() {
-                std::ptr::null_mut()
-            } else {
-                c_ptrs.as_mut_ptr()
-            },
+            4,
+            OpArgs::NONE
+                .a2(c_ptrs.len() as i32)
+                .ints(ints.as_mut_ptr())
+                .strs(if c_ptrs.is_empty() {
+                    std::ptr::null_mut()
+                } else {
+                    c_ptrs.as_mut_ptr()
+                }),
         );
     }
 
     pub fn article_set_int(&self, article_ptr: usize, field: i32, val: i32) {
-        self.raw(
-            43,
-            2,
-            field,
-            article_ptr,
-            val as usize,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        self.article_op(article_ptr, 2, OpArgs::NONE.a2(field).p2(val as usize));
     }
 
     pub fn article_set_i64_pair(&self, article_ptr: usize, exp_offset: i64, exp_end: i64) {
         let mut i64s = [exp_offset, exp_end];
-        self.raw(
-            43,
-            5,
-            0,
-            article_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            i64s.as_mut_ptr(),
-            std::ptr::null_mut(),
-        );
+        self.article_op(article_ptr, 5, OpArgs::NONE.i64s(i64s.as_mut_ptr()));
     }
 
     pub fn article_set_str(&self, article_ptr: usize, field: i32, val: Option<&[u8]>) {
@@ -5416,18 +4959,7 @@ impl QueueSubsysHost {
         let s1 = cv
             .as_ref()
             .map_or(std::ptr::null(), |v| v.as_ptr() as *const c_char);
-        self.raw(
-            43,
-            6,
-            field,
-            article_ptr,
-            0,
-            s1,
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        self.article_op(article_ptr, 6, OpArgs::NONE.a2(field).s1(s1));
     }
 
     /// Caller holds the queue; dedicated claims include running articles.
@@ -5439,34 +4971,16 @@ impl QueueSubsysHost {
         end: i64,
     ) -> bool {
         let mut range = [begin, end];
-        self.raw(
-            43,
-            13,
-            0,
+        self.article_op(
             file_ptr,
-            article_ptr,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            range.as_mut_ptr(),
-            std::ptr::null_mut(),
+            13,
+            OpArgs::NONE.p2(article_ptr).i64s(range.as_mut_ptr()),
         ) != 0
     }
     /// Cancel/latch before an accepted source is demoted or its history reset.
     /// This is metadata-only and requires the caller's queue lock.
     pub fn invalidate_source_replacement(&self, file_ptr: usize, article_ptr: usize) {
-        let claimed = self.raw(
-            43,
-            14,
-            0,
-            article_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        ) != 0;
+        let claimed = self.article_op(article_ptr, 14, OpArgs::NONE) != 0;
         if claimed {
             let file = self.file_snap(file_ptr);
             let nzb = self.nzb_snap(file.nzb_ptr, false);
@@ -5481,18 +4995,7 @@ impl QueueSubsysHost {
         }
     }
     pub fn article_reset_for_retry(&self, article_ptr: usize) {
-        self.raw(
-            43,
-            9,
-            0,
-            article_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        self.article_op(article_ptr, 9, OpArgs::NONE);
     }
 
     // ArticleCache & flush lock ops (op = 44)
@@ -6063,17 +5566,13 @@ impl QueueSubsysHost {
         let mut ints = [0i32; 21];
         let mut i64s = [0i64; 3];
         let mut strs = [std::ptr::null(); 1];
-        self.raw(
-            60,
-            0,
-            0,
+        self.post_op(
             post_ptr,
             0,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            i64s.as_mut_ptr(),
-            strs.as_mut_ptr(),
+            OpArgs::NONE
+                .ints(ints.as_mut_ptr())
+                .i64s(i64s.as_mut_ptr())
+                .strs(strs.as_mut_ptr()),
         );
         PostSnap {
             ptr: post_ptr,
@@ -6109,18 +5608,7 @@ impl QueueSubsysHost {
         if post_ptr == 0 {
             return;
         }
-        self.raw(
-            60,
-            1,
-            field,
-            post_ptr,
-            val as usize,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        self.post_op(post_ptr, 1, OpArgs::NONE.a2(field).p2(val as usize));
     }
 
     pub fn post_set_start_time(&self, post_ptr: usize, start_time: i64) {
@@ -6128,18 +5616,7 @@ impl QueueSubsysHost {
             return;
         }
         let mut i64s = [start_time];
-        self.raw(
-            60,
-            2,
-            0,
-            post_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            i64s.as_mut_ptr(),
-            std::ptr::null_mut(),
-        );
+        self.post_op(post_ptr, 2, OpArgs::NONE.i64s(i64s.as_mut_ptr()));
     }
 
     pub fn post_reset_stage_progress(&self, post_ptr: usize, stage_time: i64) {
@@ -6147,18 +5624,7 @@ impl QueueSubsysHost {
             return;
         }
         let mut i64s = [stage_time];
-        self.raw(
-            60,
-            3,
-            0,
-            post_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            i64s.as_mut_ptr(),
-            std::ptr::null_mut(),
-        );
+        self.post_op(post_ptr, 3, OpArgs::NONE.i64s(i64s.as_mut_ptr()));
     }
 
     pub fn post_set_stage_time(&self, post_ptr: usize, stage_time: i64) {
@@ -6166,18 +5632,7 @@ impl QueueSubsysHost {
             return;
         }
         let mut i64s = [stage_time];
-        self.raw(
-            60,
-            4,
-            0,
-            post_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            i64s.as_mut_ptr(),
-            std::ptr::null_mut(),
-        );
+        self.post_op(post_ptr, 4, OpArgs::NONE.i64s(i64s.as_mut_ptr()));
     }
 
     pub fn post_set_progress_label(&self, post_ptr: usize, label: &[u8]) {
@@ -6185,18 +5640,7 @@ impl QueueSubsysHost {
             return;
         }
         let c = c_bytes(label);
-        self.raw(
-            60,
-            5,
-            0,
-            post_ptr,
-            0,
-            c.as_ptr() as *const c_char,
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        self.post_op(post_ptr, 5, OpArgs::NONE.s1(c.as_ptr() as *const c_char));
     }
 
     pub fn post_push_parred_file(&self, post_ptr: usize, name: &[u8]) {
@@ -6204,33 +5648,19 @@ impl QueueSubsysHost {
             return;
         }
         let c = c_bytes(name);
-        self.raw(
-            60,
-            6,
-            -1,
+        self.post_op(
             post_ptr,
-            0,
-            c.as_ptr() as *const c_char,
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
+            6,
+            OpArgs::NONE.a2(-1).s1(c.as_ptr() as *const c_char),
         );
     }
 
     pub fn post_parred_file_at(&self, post_ptr: usize, idx: usize) -> Vec<u8> {
         let mut strs = [std::ptr::null(); 1];
-        self.raw(
-            60,
-            6,
-            idx as i32,
+        self.post_op(
             post_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            strs.as_mut_ptr(),
+            6,
+            OpArgs::NONE.a2(idx as i32).strs(strs.as_mut_ptr()),
         );
         unsafe { read_cstr(strs[0]) }
     }
@@ -6239,33 +5669,15 @@ impl QueueSubsysHost {
         if post_ptr == 0 {
             return;
         }
-        self.raw(
-            60,
-            7,
-            -1,
-            post_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        self.post_op(post_ptr, 7, OpArgs::NONE.a2(-1));
     }
 
     pub fn post_extracted_archive_at(&self, post_ptr: usize, idx: usize) -> Vec<u8> {
         let mut strs = [std::ptr::null(); 1];
-        self.raw(
-            60,
-            7,
-            idx as i32,
+        self.post_op(
             post_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            strs.as_mut_ptr(),
+            7,
+            OpArgs::NONE.a2(idx as i32).strs(strs.as_mut_ptr()),
         );
         unsafe { read_cstr(strs[0]) }
     }
@@ -6291,199 +5703,64 @@ impl QueueSubsysHost {
     }
 
     pub fn post_stop_thread(&self, post_ptr: usize) {
-        self.raw(
-            62,
-            0,
-            0,
-            post_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        self.post_job_op(0, post_ptr, OpArgs::NONE);
     }
 
     pub fn post_delete_thread(&self, post_ptr: usize) {
-        self.raw(
-            62,
-            1,
-            0,
-            post_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        self.post_job_op(1, post_ptr, OpArgs::NONE);
     }
 
     pub fn post_kill_and_delete_thread(&self, post_ptr: usize) {
-        self.raw(
-            62,
-            2,
-            0,
-            post_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        self.post_job_op(2, post_ptr, OpArgs::NONE);
     }
 
     pub fn direct_unpack_is_active(&self, nzb_ptr: usize, include_waiting_volume: bool) -> bool {
-        self.raw(
-            62,
+        self.post_job_op(
             3,
-            i32::from(include_waiting_volume),
             nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
+            OpArgs::NONE.a2(i32::from(include_waiting_volume)),
         ) != 0
     }
 
     pub fn direct_unpack_stop(&self, dq_ptr: usize, nzb_ptr: usize) {
-        self.raw(
-            62,
-            4,
-            0,
-            dq_ptr,
-            nzb_ptr,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        self.post_job_op(4, dq_ptr, OpArgs::NONE.p2(nzb_ptr));
     }
 
     pub fn direct_unpack_nzb_downloaded(&self, dq_ptr: usize, nzb_ptr: usize) {
-        self.raw(
-            62,
-            5,
-            0,
-            dq_ptr,
-            nzb_ptr,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        self.post_job_op(5, dq_ptr, OpArgs::NONE.p2(nzb_ptr));
     }
 
     pub fn direct_unpack_nzb_deleted(&self, dq_ptr: usize, nzb_ptr: usize) {
-        self.raw(
-            62,
-            6,
-            0,
-            dq_ptr,
-            nzb_ptr,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        self.post_job_op(6, dq_ptr, OpArgs::NONE.p2(nzb_ptr));
     }
 
     pub fn direct_unpack_file_downloaded(&self, dq_ptr: usize, nzb_ptr: usize, file_ptr: usize) {
         let mut i64s = [file_ptr as i64];
-        self.raw(
-            62,
-            7,
-            0,
-            dq_ptr,
-            nzb_ptr,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            i64s.as_mut_ptr(),
-            std::ptr::null_mut(),
-        );
+        self.post_job_op(7, dq_ptr, OpArgs::NONE.p2(nzb_ptr).i64s(i64s.as_mut_ptr()));
     }
 
     pub fn direct_unpack_start_job(&self, nzb_ptr: usize) {
-        self.raw(
-            62,
-            8,
-            0,
-            nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        self.post_job_op(8, nzb_ptr, OpArgs::NONE);
     }
 
     pub fn live_repair_stop(&self, nzb_ptr: usize) {
-        self.raw(
-            62,
-            9,
-            0,
-            nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        self.post_job_op(9, nzb_ptr, OpArgs::NONE);
     }
 
     pub fn live_repair_detach_and_stop(&self, nzb_ptr: usize) {
-        self.raw(
-            62,
-            10,
-            0,
-            nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        self.post_job_op(10, nzb_ptr, OpArgs::NONE);
     }
 
     pub fn repair_add_par(&self, post_ptr: usize, file_ptr: usize, deleted: bool) -> bool {
-        self.raw(
-            62,
+        self.post_job_op(
             11,
-            i32::from(deleted),
             post_ptr,
-            file_ptr,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
+            OpArgs::NONE.a2(i32::from(deleted)).p2(file_ptr),
         ) != 0
     }
 
     pub fn post_controller_start_job(&self, post_ptr: usize, controller_kind: i32) {
-        self.raw(
-            62,
-            12,
-            controller_kind,
-            post_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        self.post_job_op(12, post_ptr, OpArgs::NONE.a2(controller_kind));
     }
 }
 
@@ -6540,134 +5817,5 @@ fn file_snap_from(
         origname: std::mem::take(&mut texts[4]),
         hash16k: std::mem::take(&mut texts[5]),
         par_set_id: std::mem::take(&mut texts[6]),
-    }
-}
-
-/// Host ops answered in Rust: the queue objects they name are Rust objects
-/// (a file is a `qfile::File`). None = an op no host answers (it reads as 0).
-#[allow(clippy::too_many_arguments)]
-unsafe fn native_op(
-    op: i32,
-    a1: i32,
-    a2: i32,
-    p1: usize,
-    p2: usize,
-    s1: *const c_char,
-    s2: *const c_char,
-    ints: *mut c_int,
-    i64s: *mut i64,
-    strs: *mut *const c_char,
-) -> Option<usize> {
-    use crate::qfile::{nzbget_rs_file_articles, File};
-    let file = p1 as *const File;
-    match (op, a1) {
-        // a collection's file list and completed files
-        (34, _) => Some(unsafe {
-            crate::qnzb::host_filelist_op(
-                p1 as *mut crate::qnzb::NzbScalars,
-                a1,
-                a2,
-                p2,
-                s1,
-                s2,
-                ints,
-                i64s,
-                strs,
-            )
-        }),
-        // a collection's snapshot
-        (30, _) => {
-            unsafe {
-                crate::qnzb::host_coll_snapshot(
-                    p1 as *const crate::qnzb::NzbScalars,
-                    a1,
-                    ints,
-                    i64s,
-                    strs,
-                )
-            };
-            Some(0)
-        }
-        // a collection's setters
-        (32, _) => {
-            unsafe {
-                crate::qnzb::host_coll_set(p1 as *mut crate::qnzb::NzbScalars, a1, a2, p2, s1, i64s)
-            };
-            Some(0)
-        }
-        // a collection's lists and texts
-        (31, _) => unsafe {
-            crate::qnzb::host_coll_op(
-                p1 as *const crate::qnzb::NzbScalars,
-                a1,
-                a2,
-                p2,
-                s1,
-                s2,
-                ints,
-                strs,
-            )
-        },
-        // a history entry's summary, and a duplicate record's fields
-        (35, 2) => Some(unsafe {
-            crate::qhist::host_hist_summary(p1 as *const crate::qhist::Hist, ints, strs)
-        }),
-        (35, _) => Some(unsafe {
-            crate::qdup::host_dup_op(p1 as *const crate::qdup::Dup, a1, a2, s1, ints, i64s, strs)
-        }),
-        // post-processing state and job handles
-        (60, _) => Some(unsafe {
-            crate::qnzb::host_post_op(
-                p1 as *const crate::qnzb::Post,
-                a1,
-                a2,
-                p2,
-                s1,
-                ints,
-                i64s,
-                strs,
-            )
-        }),
-        (62, _) => Some(unsafe { crate::qnzb::host_post_job_op(a1, a2, p1, p2, i64s) }),
-        // the live-par namespace walk over a collection (p1), visitor in s1, context in p2
-        (43, 15) => Some(unsafe {
-            live_namespace::live_par_visit_namespace(
-                p1 as *const crate::qnzb::NzbScalars,
-                std::mem::transmute::<*const c_char, Option<live_namespace::NamespaceVisitor>>(s1),
-                p2 as *mut c_void,
-            )
-        }),
-        (43, _) => {
-            // file-based ops take the file in p1 (and the article in p2 for 8 and 13)
-            let file_op = matches!(a1, 0 | 7 | 8 | 10 | 11 | 12 | 13);
-            let list = if file_op {
-                unsafe { nzbget_rs_file_articles(file) }
-            } else {
-                std::ptr::null_mut()
-            };
-            let article = if file_op {
-                if a1 == 8 || a1 == 13 {
-                    p2
-                } else {
-                    0
-                }
-            } else {
-                p1
-            };
-            Some(unsafe {
-                crate::qarticle::nzbget_rs_article_host(
-                    list,
-                    article as *mut crate::qarticle::Article,
-                    a1,
-                    a2,
-                    p2,
-                    s1,
-                    ints,
-                    i64s,
-                    strs,
-                )
-            })
-        }
-        _ => None,
     }
 }

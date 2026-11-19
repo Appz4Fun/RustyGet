@@ -2,7 +2,7 @@
 //! with the TLS cipher baseline check, and atomic cipher patching.
 
 use std::collections::BTreeMap;
-use std::ffi::{c_char, c_int, CStr, CString};
+use std::ffi::{c_int, CStr, CString};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
@@ -354,7 +354,7 @@ mod cipher_atomic {
                 source,
                 target,
                 |fd, buf, size| {
-                    let res = unsafe { libc::flistxattr(fd, buf.cast::<c_char>(), size) };
+                    let res = unsafe { libc::flistxattr(fd, buf.cast(), size) };
                     if res < 0 {
                         Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(0))
                     } else {

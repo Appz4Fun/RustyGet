@@ -7938,6 +7938,34 @@ def scenario_ondiskstop(daemon, t):
     return ('ondiskstop', ok, 'clean=%s damaged=%s stop_logs=%d' % (hc['Status'], hd['Status'], stopped))
 
 
+def scenario_ondiskstoprepairfirst(daemon, t):
+    """ondiskstop the other way round: the repair (from a quick duplicate)
+    finishes before the other copy, slow to download, is whole. The repaired
+    copy wins and the other copy is stopped and kept in history as a backup;
+    the two never both post-process into the destination."""
+    size, seg = 40_000_000, 500_000
+    data = _payload(size, 7174)
+    damaged = build_nzb(_place_copy(t, 'ocA', data, 'file.mkv'), 'ocA.mkv', size, seg, set(range(2, 80, 2)))
+    donor = build_nzb(_place_copy(t, 'ocB', data, 'file.mkv'), 'obf-oc.mkv', size, 250_000, set())
+    clean = build_nzb(_place_copy(t, 'ocC', data, 'file.mkv'), 'ocC.mkv', size, seg, set())
+    api = daemon.wait_ready()
+    _ds_append(api, 'DonOc', donor, 'oc-key', 50, params=[{'Name': 'DupeAlive', 'Value': '0'}])
+    daemon.append(api, 'DamagedOc', damaged, False, 'oc-key', 100)
+    deadline = time.time() + 60
+    while time.time() < deadline and _grep_log(t, 'Queueing DamagedOc for post-processing') == 0:
+        time.sleep(0.2)
+    daemon.append(api, 'CleanOc', clean, False, 'oc-key', 110)
+    hd = daemon.wait_history(api, 'DamagedOc', timeout=120)
+    hc = daemon.wait_history(api, 'CleanOc', timeout=120)
+    stopped = _grep_log(t, 'Stopping CleanOc')
+    landed = sorted(os.path.basename(f) for f in t.find_files('main', 'dst')
+                    if os.path.basename(f).startswith('oc'))
+    ok = (hd['Status'].startswith('SUCCESS') and hc['Status'] == 'DELETED/DUPE' and stopped == 1
+          and landed == ['ocA.mkv'])
+    return ('ondiskstoprepairfirst', ok, 'damaged=%s clean=%s stop_logs=%d in_dst=%s'
+            % (hd['Status'], hc['Status'], stopped, landed))
+
+
 def scenario_repairlast(daemon, t):
     """B78: stream repair is the last option. A download is damaged beyond its
     par2 (none here) while a whole backup waits in history: it isn't repaired
@@ -10674,6 +10702,7 @@ SCENARIOS = {
     'ondiskskip': scenario_ondiskskip,
     'ondiskgone': scenario_ondiskgone,
     'ondiskstop': scenario_ondiskstop,
+    'ondiskstoprepairfirst': scenario_ondiskstoprepairfirst,
     'repairlast': scenario_repairlast,
     'recheckwholefail': scenario_recheckwholefail,
     'samepostingrepair': scenario_samepostingrepair,
@@ -11095,6 +11124,7 @@ SCENARIO_OPTIONS = {
     'ondiskskip': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
     'ondiskgone': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
     'ondiskstop': ['DupeArticleFallback=stream', 'ParCheck=auto', 'HealthCheck=dupe', 'DupeStreamTimeout=60', 'PostStrategy=rocket'],
+    'ondiskstoprepairfirst': ['DupeArticleFallback=stream', 'ParCheck=auto', 'HealthCheck=dupe', 'DupeStreamTimeout=60', 'PostStrategy=rocket'],
     'repairlast': ['DupeArticleFallback=stream', 'ParCheck=auto', 'HealthCheck=dupe'],
     # Let both files complete so this isolates history's failed-article
     # recheck, rather than the separate early health-cancellation path.
@@ -11323,6 +11353,7 @@ SCENARIO_DELAY_PROXY = {'clientthreads': [(b'ctA/', 3.0)], 'xdecomp_slow': [(b'x
                         'streamrestartcredit': [(b'srSlow/', 3.0)],
                         'restartfailover': [(b'rfA/', 0.4)],
                         'ondiskstop': [(b'odB/', 1.0)],
+                        'ondiskstoprepairfirst': [(b'ocC/', 0.5)],
                         'streamstarved': [(b'busy/', 2.0)],
                         'keepreturned': [(b'krA/', 0.4)],
                         'streamtimeout': [(b'slowB/', 8.0)],

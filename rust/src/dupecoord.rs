@@ -1795,16 +1795,19 @@ pub(crate) fn nzb_completed_host(
             }
         }
         for (other_id, in_post) in others {
-            host.dq_edit_entry(
-                dq_ptr,
-                other_id,
-                if in_post {
-                    crate::queuesubsys_host::EA_POST_DELETE
-                } else {
-                    delete_action
-                },
-                None,
-            );
+            if in_post {
+                // A post job is cancelled through the post-processor: only the edit-list route
+                // hands EA_POST_DELETE to it (a single-entry edit drops it, and the repair of
+                // the stopped copy ran on to its end).
+                host.dq_edit_list_single_id(
+                    dq_ptr,
+                    other_id,
+                    crate::queuesubsys_host::EA_POST_DELETE,
+                    None,
+                );
+            } else {
+                host.dq_edit_entry(dq_ptr, other_id, delete_action, None);
+            }
         }
     }
 }

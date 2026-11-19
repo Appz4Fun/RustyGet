@@ -903,6 +903,23 @@ pub fn is_queued_dupe_active(
     is_active_download || is_post_processing || is_direct_unpacking
 }
 
+/// Whether a copy in post-processing lets the other copies of its duplicate key download: with
+/// HealthCheck=dupe (or park), one that is stream-repairing its lost articles from duplicates
+/// does. The repair can take long (a slow duplicate), and a copy downloading whole meanwhile
+/// that finishes first wins: it stops the repair and the repairing copy is kept as a backup (see
+/// `dupecoord::nzb_completed_host`). If the repair finishes first, it stops the other copy the
+/// same way, so the two never both post-process into the same folder.
+pub fn repair_lets_other_copies_download(
+    health_check: i32,
+    has_post_info: bool,
+    post_stage: i32,
+) -> bool {
+    (health_check == crate::queuesubsys_host::HC_DUPE
+        || health_check == crate::queuesubsys_host::HC_PARK)
+        && has_post_info
+        && post_stage == crate::queuesubsys_host::PT_STREAM_REPAIRING
+}
+
 /// Determines whether `QueueCoordinator::CheckDupeFailover` should defer failover and whether `DupeFailoverChecked` should be updated.
 #[allow(clippy::too_many_arguments)]
 #[inline]
@@ -4643,6 +4660,15 @@ impl NzbgetRsQueueCoordinator {
             }
             let queued = host.nzb_snap(qp, false);
             if !queued.dupe_key.is_empty() && queued.dupe_key.eq_ignore_ascii_case(&nzb.dupe_key) {
+                if queued.has_post_info
+                    && repair_lets_other_copies_download(
+                        host.opts().health_check,
+                        queued.has_post_info,
+                        queued.post_stage,
+                    )
+                {
+                    continue;
+                }
                 if is_queued_dupe_active(
                     queued.deleting,
                     queued.delete_status,
@@ -6559,6 +6585,17 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_copy_in_stream_repair_lets_other_copies_download_with_dupe_health() {
+        use crate::queuesubsys_host::{HC_DUPE, HC_PARK, PT_STREAM_REPAIRING, PT_UNPACKING};
+        assert!(repair_lets_other_copies_download(HC_DUPE, true, PT_STREAM_REPAIRING));
+        assert!(repair_lets_other_copies_download(HC_PARK, true, PT_STREAM_REPAIRING));
+        // any other stage still holds them back, as does a health check without dupes
+        assert!(!repair_lets_other_copies_download(HC_DUPE, true, PT_UNPACKING));
+        assert!(!repair_lets_other_copies_download(HC_DUPE, false, PT_STREAM_REPAIRING));
+        assert!(!repair_lets_other_copies_download(crate::queuesubsys_host::HC_NONE, true, PT_STREAM_REPAIRING));
+    }
 
     #[test]
     fn test_queue_coordinator_helpers() {

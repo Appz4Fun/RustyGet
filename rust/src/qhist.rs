@@ -30,7 +30,6 @@ pub struct Hist {
     info: AtomicUsize,
 }
 
-#[unsafe(no_mangle)]
 pub extern "C" fn nzbget_rs_hist_new() -> *mut Hist {
     Box::into_raw(Box::default())
 }
@@ -39,7 +38,6 @@ pub extern "C" fn nzbget_rs_hist_new() -> *mut Hist {
 ///
 /// # Safety
 /// `h` is null or from `nzbget_rs_hist_new`, freed once.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_hist_free(h: *mut Hist) {
     if !h.is_null() {
         drop(unsafe { Box::from_raw(h) });
@@ -50,7 +48,6 @@ pub unsafe extern "C" fn nzbget_rs_hist_free(h: *mut Hist) {
 ///
 /// # Safety
 /// `h` is from `nzbget_rs_hist_new`.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_hist_get(h: *const Hist, field: c_int) -> i64 {
     let h = unsafe { &*h };
     match field {
@@ -65,7 +62,6 @@ pub unsafe extern "C" fn nzbget_rs_hist_get(h: *const Hist, field: c_int) -> i64
 ///
 /// # Safety
 /// `h` is from `nzbget_rs_hist_new`.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_hist_set(h: *const Hist, field: c_int, v: i64) {
     let h = unsafe { &*h };
     match field {

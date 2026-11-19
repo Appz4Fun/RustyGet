@@ -141,7 +141,6 @@ static START_LOCK: Mutex<()> = Mutex::new(());
 /// # Safety
 /// `post_ptr` is null or a live `PostInfo`; ownership of the returned thread is
 /// the caller's until it is started with auto-destroy.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_job_new_post(
     kind: c_int,
     post_ptr: usize,
@@ -155,7 +154,6 @@ pub unsafe extern "C" fn nzbget_rs_job_new_post(
 }
 
 /// A direct-unpack thread for the collection `nzb_id`; frees itself when done.
-#[unsafe(no_mangle)]
 pub extern "C" fn nzbget_rs_job_new_unpack(nzb_id: c_int) -> *mut JobThread {
     let t = JobThread::alloc(-1, true);
     let du = NzbgetRsDirectUnpack::new(nzb_id, t as usize);
@@ -168,7 +166,6 @@ pub extern "C" fn nzbget_rs_job_new_unpack(nzb_id: c_int) -> *mut JobThread {
 ///
 /// # Safety
 /// `t` comes from `nzbget_rs_job_new_*` and has not been started.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_job_start(t: *mut JobThread) -> c_int {
     c_int::from(unsafe { start(t) })
 }
@@ -181,7 +178,6 @@ pub unsafe extern "C" fn nzbget_rs_job_start(t: *mut JobThread) -> c_int {
 ///
 /// # Safety
 /// `t` is null or a live job thread.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_job_op(
     t: *const JobThread,
     op: c_int,
@@ -230,7 +226,6 @@ pub unsafe extern "C" fn nzbget_rs_job_op(
 ///
 /// # Safety
 /// `t` is null or a job thread no one else frees and no running thread uses.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_job_free(t: *mut JobThread, kill: c_int) {
     if t.is_null() {
         return;
@@ -285,7 +280,6 @@ impl PrePostRunner {
 
 /// Creates the daemon's pre/post-processor (stopped, not started) and makes it
 /// the active one. Returns an opaque handle for the other runner calls.
-#[unsafe(no_mangle)]
 pub extern "C" fn nzbget_rs_prepost_runner_new() -> *const PrePostRunner {
     let stopped = Box::new(AtomicBool::new(false));
     let owner = (&*stopped as *const AtomicBool) as usize;
@@ -307,7 +301,6 @@ pub extern "C" fn nzbget_rs_prepost_runner_new() -> *const PrePostRunner {
 ///
 /// # Safety
 /// `r` is null or a handle from `nzbget_rs_prepost_runner_new` not yet freed.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_prepost_runner_op(
     r: *const PrePostRunner,
     op: c_int,
@@ -365,7 +358,6 @@ pub unsafe extern "C" fn nzbget_rs_prepost_runner_op(
 ///
 /// # Safety
 /// `r` is null or a handle from `nzbget_rs_prepost_runner_new`, freed once.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_prepost_runner_free(r: *const PrePostRunner) {
     if r.is_null() {
         return;
@@ -393,7 +385,6 @@ pub unsafe extern "C" fn nzbget_rs_prepost_runner_free(r: *const PrePostRunner) 
 
 /// Forwards a download-queue change to the active pre/post-processor
 /// (was its `Observer::Update` on the C++ `DownloadQueue`).
-#[unsafe(no_mangle)]
 pub extern "C" fn nzbget_rs_prepost_queue_changed(
     action: c_int,
     dq: usize,

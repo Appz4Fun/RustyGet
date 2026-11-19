@@ -28,7 +28,6 @@ fn drop_all(drop_fn: DropFn, items: impl IntoIterator<Item = usize>) {
     }
 }
 
-#[unsafe(no_mangle)]
 pub extern "C" fn nzbget_rs_ptrlist_new(drop_fn: DropFn) -> *mut PtrList {
     Box::into_raw(Box::new(PtrList {
         items: Mutex::new(VecDeque::new()),
@@ -36,7 +35,6 @@ pub extern "C" fn nzbget_rs_ptrlist_new(drop_fn: DropFn) -> *mut PtrList {
     }))
 }
 
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_ptrlist_free(l: *mut PtrList) {
     if l.is_null() {
         return;
@@ -56,7 +54,6 @@ pub unsafe extern "C" fn nzbget_rs_ptrlist_free(l: *mut PtrList) {
 ///  10 reorder: `order` holds a items, a permutation of the current ones
 ///     (ignored otherwise);
 ///  11 append and release every item of list `other` (returns how many).
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_ptrlist_op(
     l: *const PtrList,
     op: c_int,

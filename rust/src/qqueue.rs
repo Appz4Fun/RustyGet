@@ -132,7 +132,6 @@ fn current() -> *const Queue {
 /// Queue operations for the host's `DownloadQueue` (`q` a queue, or 0):
 ///  1 its queue list; 2 its history list; 3 lock; 4 unlock; 9 the current
 ///  (daemon) queue.
-#[unsafe(no_mangle)]
 pub extern "C" fn nzbget_rs_queue_op(q: usize, op: c_int) -> usize {
     let queue = || unsafe { resolve(q).as_ref() };
     match op {

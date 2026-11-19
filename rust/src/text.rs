@@ -114,7 +114,7 @@ pub fn xml_strip_tags(buf: &mut [u8]) {
 
 /// WebUtil::XmlRemoveEntities: "&name;" / "&#123;" become one space.
 /// `is_alpha` classifies each byte in the caller's locale and char signedness
-/// (see nzbget_rs.h), including locale-specific ASCII letters.
+/// including locale-specific ASCII letters.
 pub fn xml_remove_entities(buf: &mut [u8], is_alpha: &dyn Fn(u8) -> bool) -> usize {
     let len = buf.len();
     let (mut p, mut o) = (0, 0);

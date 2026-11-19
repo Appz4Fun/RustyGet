@@ -5984,7 +5984,7 @@ pub unsafe fn diskstate_exec(op: c_int, env: &NzbgetRsDiskStateEnv) -> c_int {
                 }
                 0
             } else {
-                unsafe { crate::fsops::sys::close(fd) };
+                unsafe { libc::close(fd) };
                 1
             }
         }

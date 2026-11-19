@@ -10215,7 +10215,7 @@ impl CrossPackRepairSession {
                 }
             }
             let errno = crate::fsops::last_errno();
-            if errno != crate::fsops::sys::EEXIST {
+            if errno != libc::EEXIST {
                 let err_msg = crate::fsops::error_message(errno);
                 let mut msg = b"Skipping decompression of ".to_vec();
                 msg.extend_from_slice(set_name);

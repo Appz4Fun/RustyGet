@@ -23,7 +23,7 @@ Key options: [`NzbDirInterval`](options.md#nzbdirinterval), [`NzbDirFileAge`](op
 
 ## Download queue
 
-Review queue persistence and partial-download continuation before changing cache or disk behavior. `ArticleCache` and `WriteBuffer` affect memory and write buffering. `DiskSpace` controls the free-space pause threshold.
+Review queue persistence before changing cache or disk behavior. `ArticleCache` and `WriteBuffer` affect memory and write buffering. `DiskSpace` controls the free-space pause threshold.
 
 `KeepHistory` sets history retention. `NzbCleanupDisk` controls whether the original NZB remains on disk. Duplicate fleets can need those original NZBs as sources, so follow the fleet guide when choosing cleanup behavior.
 

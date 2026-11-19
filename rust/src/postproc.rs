@@ -5290,43 +5290,6 @@ fn map_cleanup_kind(kind: crate::cleanup::CleanupLogKind) -> i32 {
     }
 }
 
-fn emit_job_msg(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn, kind: i32, msg: &[u8]) {
-    let c_msg = cstr::nul_terminated(msg);
-    unsafe {
-        host_cb(
-            ctx,
-            2,
-            1,
-            kind,
-            0,
-            0,
-            c_msg.as_ptr() as *const c_char,
-            ptr::null(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-        );
-    }
-}
-
-fn job_is_stopped(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn) -> bool {
-    unsafe {
-        host_cb(
-            ctx,
-            2,
-            0,
-            0,
-            0,
-            0,
-            ptr::null(),
-            ptr::null(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-        ) != 0
-    }
-}
-
 #[cfg(unix)]
 impl NzbgetRsPostJob {
     fn nzb_ptr(&self, host: &crate::queuesubsys_host::QueueSubsysHost) -> usize {
@@ -5489,488 +5452,379 @@ impl NzbgetRsPostJob {
     }
 }
 
-struct RenameRarCallbacks {
-    ctx: *mut c_void,
-    host_cb: NzbgetRsRepairCtrlHostFn,
+#[cfg(unix)]
+struct RenameRarCallbacks<'a> {
+    job: &'a NzbgetRsPostJob,
+    host: &'a crate::queuesubsys_host::QueueSubsysHost,
     renamed_count: i32,
 }
 
-impl crate::rarrenamer::RunCallbacks for RenameRarCallbacks {
+#[cfg(unix)]
+impl crate::rarrenamer::RunCallbacks for RenameRarCallbacks<'_> {
     fn stopped(&mut self) -> Result<bool, ()> {
-        Ok(job_is_stopped(self.ctx, self.host_cb))
+        Ok(self.host.thread_is_stopped(self.job.thread_ptr))
     }
 
     fn progress(&mut self, label: &[u8], stage_progress: i32) -> Result<(), ()> {
-        let c_lbl = cstr::nul_terminated(label);
-        with_dq_guard(self.ctx, self.host_cb, |_| unsafe {
-            (self.host_cb)(
-                self.ctx,
-                2,
-                3,
-                stage_progress,
-                0,
-                0,
-                c_lbl.as_ptr() as *const c_char,
-                ptr::null(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            );
-        });
+        self.job.set_progress(self.host, label, stage_progress);
         Ok(())
     }
 
     fn message(&mut self, kind: i32, text: &[u8]) -> Result<(), ()> {
-        let mk = match kind {
-            0 => MK_INFO,
-            1 => MK_WARNING,
-            _ => MK_ERROR,
-        };
-        emit_job_msg(self.ctx, self.host_cb, mk, text);
+        self.job.add_message(self.host, renamer_msg_kind(kind), text);
         Ok(())
     }
 
     fn register_renamed(&mut self, old_base: &[u8], new_base: &[u8]) -> Result<(), ()> {
-        register_renamed_helper(
-            self.ctx,
-            self.host_cb,
-            old_base,
-            new_base,
-            &mut self.renamed_count,
-        );
+        self.job
+            .register_renamed(self.host, old_base, new_base, &mut self.renamed_count);
         Ok(())
     }
 }
 
-fn register_renamed_helper(
-    ctx: *mut c_void,
-    host_cb: NzbgetRsRepairCtrlHostFn,
-    old_fn: &[u8],
-    new_fn: &[u8],
-    renamed_count: &mut i32,
-) {
-    let c_old = cstr::nul_terminated(old_fn);
-    let c_new = cstr::nul_terminated(new_fn);
-    let found = with_dq_guard(ctx, host_cb, |_| unsafe {
-        host_cb(
-            ctx,
-            2,
-            2,
-            0,
-            0,
-            0,
-            c_old.as_ptr() as *const c_char,
-            c_new.as_ptr() as *const c_char,
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-        ) != 0
-    });
-    if !found {
-        emit_job_msg(
-            ctx,
-            host_cb,
-            MK_WARNING,
+/// Maps a renamer message level (0 info, 1 warning, else error) to a message kind.
+fn renamer_msg_kind(kind: i32) -> i32 {
+    match kind {
+        0 => MK_INFO,
+        1 => MK_WARNING,
+        _ => MK_ERROR,
+    }
+}
+
+#[cfg(unix)]
+impl NzbgetRsPostJob {
+    fn is_stopped(&self, host: &crate::queuesubsys_host::QueueSubsysHost) -> bool {
+        host.thread_is_stopped(self.thread_ptr)
+    }
+
+    fn set_progress(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        label: &[u8],
+        stage_progress: i32,
+    ) {
+        use crate::queuesubsys_host::POST_INT_STAGE_PROGRESS;
+        host.with_locked_queue(|_| {
+            host.post_set_progress_label(self.post_ptr, cstr::until_nul(label));
+            host.post_set_int(self.post_ptr, POST_INT_STAGE_PROGRESS, stage_progress);
+        });
+    }
+
+    /// Records a renamed completed file, warning when the queue has no entry for it.
+    fn register_renamed(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        old_fn: &[u8],
+        new_fn: &[u8],
+        renamed_count: &mut i32,
+    ) {
+        let found = host.with_locked_queue(|_| {
+            host.nzb_rename_completed_file(
+                self.nzb_ptr(host),
+                cstr::until_nul(old_fn),
+                cstr::until_nul(new_fn),
+            )
+        });
+        if !found {
+            self.add_message(
+                host,
+                MK_WARNING,
+                &[
+                    b"Could not find completed-file entry for ",
+                    old_fn,
+                    b" while renaming to ",
+                    new_fn,
+                ]
+                .concat(),
+            );
+        }
+        *renamed_count += 1;
+    }
+
+    /// Par-rename (`kind` 0) or rar-rename (`kind` 1) of the downloaded files.
+    fn run_rename(&self, kind: i32) {
+        use crate::queuesubsys_host::{
+            EA_GROUP_PAUSE_EXTRA_PARS, EA_GROUP_RESUME, NZB_INT_PAR_RENAME_STATUS,
+            NZB_INT_RAR_RENAME_STATUS, POST_INT_REQUEST_PAR_CHECK, POST_INT_WORKING,
+        };
+        let Some(host) = crate::ffi::queue_host() else {
+            return;
+        };
+        let host = &host;
+        let parcheck_enabled = crate::ffi::build_parcheck_enabled();
+        let tls_enabled = !crate::ffi::build_tls_disabled();
+
+        let (nzb_name, dest_dir, final_dir, password, par_ignore_ext, unpack_ignore_ext, unpack_status) =
+            host.with_locked_queue(|_| {
+                let n = self.nzb_ptr(host);
+                let ns = host.nzb_snap(n, false);
+                let password = host.nzb_get_param(n, b"*Unpack:Password").unwrap_or_default();
+                let opts = crate::options::active_options();
+                let opt = |id| opts.as_ref().map_or(&b""[..], |o| o.str_bytes(id)).to_vec();
+                (
+                    trunc_1023(ns.name),
+                    ns.dest_dir,
+                    ns.final_dir,
+                    cstr::until_nul(&password).to_vec(),
+                    opt(OptStr::ParIgnoreExt),
+                    opt(OptStr::UnpackIgnoreExt),
+                    ns.unpack_status,
+                )
+            });
+
+        let archive_prefix: &[u8] = if kind == 1 { b"archive " } else { b"" };
+        self.add_message(
+            host,
+            MK_INFO,
             &[
-                b"Could not find completed-file entry for ",
-                old_fn,
-                b" while renaming to ",
-                new_fn,
+                b"Checking renamed ",
+                archive_prefix,
+                b"files for ",
+                nzb_name.as_slice(),
             ]
             .concat(),
         );
-    }
-    *renamed_count += 1;
-}
 
-fn run_rename_job(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn, kind: i32, flags: i32) {
-    let parcheck_enabled = (flags & 1) != 0;
-    let tls_enabled = (flags & 2) != 0;
+        let mut renamed_count = 0i32;
+        let mut has_missed_files = false;
+        let mut has_damaged_par_files = false;
 
-    let (nzb_name, dest_dir, final_dir, password, par_ignore_ext, unpack_ignore_ext, unpack_status) =
-        with_dq_guard(ctx, host_cb, |_| {
-            let mut ints = [0 as c_int; 2];
-            let mut strs = [ptr::null() as *const c_char; 6];
-            unsafe {
-                host_cb(
-                    ctx,
-                    1,
+        if kind == 0 {
+            if parcheck_enabled {
+                let (use_final, detect_missing) = crate::cleanup::rename_eval_par_config(
+                    unpack_status,
+                    3,
                     0,
-                    0,
-                    0,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    ints.as_mut_ptr(),
-                    ptr::null_mut(),
-                    strs.as_mut_ptr(),
+                    final_dir.is_empty(),
                 );
-            }
-            (
-                trunc_1023(unsafe { cstr::owned(strs[0]) }),
-                unsafe { cstr::owned(strs[1]) },
-                unsafe { cstr::owned(strs[2]) },
-                if ints[0] != 0 {
-                    unsafe { cstr::owned(strs[3]) }
-                } else {
-                    Vec::new()
-                },
-                unsafe { cstr::owned(strs[4]) },
-                unsafe { cstr::owned(strs[5]) },
-                ints[1],
-            )
-        });
-
-    let archive_prefix: &[u8] = if kind == 1 { b"archive " } else { b"" };
-    emit_job_msg(
-        ctx,
-        host_cb,
-        MK_INFO,
-        &[
-            b"Checking renamed ",
-            archive_prefix,
-            b"files for ",
-            nzb_name.as_slice(),
-        ]
-        .concat(),
-    );
-
-    let mut renamed_count = 0i32;
-    let mut has_missed_files = false;
-    let mut has_damaged_par_files = false;
-
-    if kind == 0 {
-        if parcheck_enabled {
-            let (use_final, detect_missing) =
-                crate::cleanup::rename_eval_par_config(unpack_status, 3, 0, final_dir.is_empty());
-            let target_dir = if use_final { &final_dir } else { &dest_dir };
-            let mut stop_fn = || job_is_stopped(ctx, host_cb);
-            let mut prog_fn = |label: &[u8], stage: i32| {
-                let c_lbl = cstr::nul_terminated(label);
-                with_dq_guard(ctx, host_cb, |_| unsafe {
-                    host_cb(
-                        ctx,
-                        2,
-                        3,
-                        stage,
-                        0,
-                        0,
-                        c_lbl.as_ptr() as *const c_char,
-                        ptr::null(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                    );
-                });
-            };
-            let mut msg_fn = |mk: crate::parrenamer::Kind, text: &[u8]| {
-                let m = match mk as i32 {
-                    0 => MK_INFO,
-                    1 => MK_WARNING,
-                    _ => MK_ERROR,
-                };
-                emit_job_msg(ctx, host_cb, m, text);
-            };
-            let mut parred_fn = |name: &[u8]| {
-                let c_name = cstr::nul_terminated(name);
-                unsafe {
-                    host_cb(
-                        ctx,
-                        2,
-                        4,
-                        0,
-                        0,
-                        0,
-                        c_name.as_ptr() as *const c_char,
-                        ptr::null(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                    );
-                }
-            };
-            let mut renamed_to: Vec<Vec<u8>> = Vec::new();
-            let mut ren_fn = |old_rel: &[u8], new_rel: &[u8]| {
-                register_renamed_helper(ctx, host_cb, old_rel, new_rel, &mut renamed_count);
-                renamed_to.push(new_rel.to_vec());
-            };
-
-            let state = crate::parrenamer::execute_all(
-                &nzb_name,
-                target_dir,
-                &par_ignore_ext,
-                detect_missing,
-                &mut stop_fn,
-                &mut prog_fn,
-                &mut msg_fn,
-                &mut parred_fn,
-                &mut ren_fn,
-            );
-            has_missed_files = state.has_missed_files;
-            has_damaged_par_files = state.has_damaged_par_files;
-            // After an unpack, names are ASCII only (`unpacklimits`): a par rename back to a
-            // non-ASCII name is renamed again.
-            if unpack_status == 3 {
-                for rel in renamed_to {
-                    let sep = crate::paths::PATH_SEPARATOR;
-                    let full = [target_dir.as_slice(), &[sep], rel.as_slice()].concat();
-                    match crate::unpacklimits::ascii_rename(crate::fsops::path(&full)) {
-                        Ok(Some(new)) => {
-                            let new_rel = new
-                                .strip_prefix(crate::fsops::path(target_dir))
-                                .map(|p| crate::fsops::path_to_bytes(p).to_vec())
-                                .unwrap_or_default();
-                            if !new_rel.is_empty() {
-                                register_renamed_helper(
-                                    ctx,
-                                    host_cb,
-                                    &rel,
-                                    &new_rel,
-                                    &mut renamed_count,
-                                );
-                            }
-                            let m = format!(
-                                "Renamed {} to {} (names are ASCII only)",
-                                String::from_utf8_lossy(&full),
-                                new.display()
-                            );
-                            emit_job_msg(ctx, host_cb, MK_INFO, m.as_bytes());
-                        }
-                        Ok(None) => {}
-                        Err(e) => {
-                            let m = format!(
-                                "Could not rename {} to an ASCII name: {e}",
-                                String::from_utf8_lossy(&full)
-                            );
-                            emit_job_msg(ctx, host_cb, MK_ERROR, m.as_bytes());
-                        }
+                let target_dir = if use_final { &final_dir } else { &dest_dir };
+                let mut renamed_to: Vec<Vec<u8>> = Vec::new();
+                let state = crate::parrenamer::execute_all(
+                    &nzb_name,
+                    target_dir,
+                    &par_ignore_ext,
+                    detect_missing,
+                    &mut || self.is_stopped(host),
+                    &mut |label: &[u8], stage: i32| self.set_progress(host, label, stage),
+                    &mut |mk: crate::parrenamer::Kind, text: &[u8]| {
+                        self.add_message(host, renamer_msg_kind(mk as i32), text);
+                    },
+                    &mut |name: &[u8]| {
+                        host.post_push_parred_file(self.post_ptr, cstr::until_nul(name));
+                    },
+                    &mut |old_rel: &[u8], new_rel: &[u8]| {
+                        self.register_renamed(host, old_rel, new_rel, &mut renamed_count);
+                        renamed_to.push(new_rel.to_vec());
+                    },
+                );
+                has_missed_files = state.has_missed_files;
+                has_damaged_par_files = state.has_damaged_par_files;
+                // After an unpack, names are ASCII only (`unpacklimits`): a par rename back to a
+                // non-ASCII name is renamed again.
+                if unpack_status == 3 {
+                    for rel in renamed_to {
+                        self.ascii_rename(host, target_dir, &rel, &mut renamed_count);
                     }
                 }
             }
+        } else if kind == 1 {
+            let mut cbs = RenameRarCallbacks {
+                job: self,
+                host,
+                renamed_count: 0,
+            };
+            let mut ignored_out = 0;
+            let _ = crate::rarrenamer::execute_all(
+                &dest_dir,
+                &nzb_name,
+                &password,
+                &unpack_ignore_ext,
+                tls_enabled,
+                &mut ignored_out,
+                &mut cbs,
+            );
+            renamed_count = cbs.renamed_count;
         }
-    } else if kind == 1 {
-        let mut cbs = RenameRarCallbacks {
-            ctx,
-            host_cb,
-            renamed_count: 0,
-        };
-        let mut ignored_out = 0;
-        let _ = crate::rarrenamer::execute_all(
-            &dest_dir,
-            &nzb_name,
-            &password,
-            &unpack_ignore_ext,
-            tls_enabled,
-            &mut ignored_out,
-            &mut cbs,
-        );
-        renamed_count = cbs.renamed_count;
-    }
 
-    let run_outcome =
-        crate::cleanup::rename_classify_run_outcome(job_is_stopped(ctx, host_cb), renamed_count);
-    if run_outcome == 1 {
-        emit_job_msg(
-            ctx,
-            host_cb,
-            MK_WARNING,
-            &[b"Renaming cancelled for ", nzb_name.as_slice()].concat(),
-        );
-    } else if run_outcome == 2 {
-        emit_job_msg(
-            ctx,
-            host_cb,
-            MK_INFO,
-            &[
+        let run_outcome =
+            crate::cleanup::rename_classify_run_outcome(self.is_stopped(host), renamed_count);
+        let summary = match run_outcome {
+            1 => [b"Renaming cancelled for ", nzb_name.as_slice()].concat(),
+            2 => [
                 format!("Successfully renamed {renamed_count} ").as_bytes(),
                 archive_prefix,
                 b"file(s) for ",
                 nzb_name.as_slice(),
             ]
             .concat(),
-        );
-    } else {
-        emit_job_msg(
-            ctx,
-            host_cb,
-            MK_INFO,
-            &[
+            _ => [
                 b"No renamed ",
                 archive_prefix,
                 b"files found for ",
                 nzb_name.as_slice(),
             ]
             .concat(),
-        );
+        };
+        self.add_message(host, if run_outcome == 1 { MK_WARNING } else { MK_INFO }, &summary);
+
+        host.with_locked_queue(|dq_ptr| {
+            let n = self.nzb_ptr(host);
+            let ns = host.nzb_snap(n, false);
+            let (initial_status, req_extra, req_par_check) = crate::cleanup::rename_complete_action(
+                kind,
+                renamed_count,
+                has_damaged_par_files,
+                ns.remaining_par_count,
+                has_missed_files,
+                ns.par_status,
+            );
+
+            let mut final_status = initial_status;
+            if kind == 0 && parcheck_enabled && req_extra {
+                self.add_message(
+                    host,
+                    MK_INFO,
+                    &[
+                        b"Requesting extra par2-files for ",
+                        nzb_name.as_slice(),
+                        b" to perform par-rename",
+                    ]
+                    .concat(),
+                );
+                host.nzb_set_int(n, NZB_INT_PAR_RENAME_STATUS, initial_status);
+                host.dq_edit_entry(dq_ptr, ns.id, EA_GROUP_RESUME, None);
+                host.dq_edit_entry(dq_ptr, ns.id, EA_GROUP_PAUSE_EXTRA_PARS, None);
+                let rem_sz = host.nzb_snap(n, false).remaining_size;
+                if crate::cleanup::rename_should_reset_par_status(rem_sz) {
+                    final_status = 0; // rsNone
+                }
+            }
+
+            let do_req_par = parcheck_enabled && req_par_check;
+            if do_req_par {
+                self.add_message(
+                    host,
+                    MK_INFO,
+                    &[
+                        b"Requesting par-check/repair for ",
+                        nzb_name.as_slice(),
+                        b" to restore missing files ",
+                    ]
+                    .concat(),
+                );
+            }
+
+            match kind {
+                0 => host.nzb_set_int(n, NZB_INT_PAR_RENAME_STATUS, final_status),
+                1 => host.nzb_set_int(n, NZB_INT_RAR_RENAME_STATUS, final_status),
+                _ => {}
+            }
+            if do_req_par {
+                host.post_set_int(self.post_ptr, POST_INT_REQUEST_PAR_CHECK, 1);
+            }
+            host.post_set_int(self.post_ptr, POST_INT_WORKING, 0);
+        });
     }
 
-    with_dq_guard(ctx, host_cb, |dq_ptr| {
-        let mut ints = [0 as c_int; 2];
-        unsafe {
-            host_cb(
-                ctx,
-                1,
-                1,
-                0,
-                0,
-                0,
-                ptr::null(),
-                ptr::null(),
-                ints.as_mut_ptr(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            );
-        }
-        let rem_par_count = ints[0];
-        let par_status = ints[1];
-        let (initial_status, req_extra, req_par_check) = crate::cleanup::rename_complete_action(
-            kind,
-            renamed_count,
-            has_damaged_par_files,
-            rem_par_count,
-            has_missed_files,
-            par_status,
-        );
-
-        let mut final_status = initial_status;
-        if kind == 0 && parcheck_enabled && req_extra {
-            emit_job_msg(
-                ctx,
-                host_cb,
-                MK_INFO,
-                &[
-                    b"Requesting extra par2-files for ",
-                    nzb_name.as_slice(),
-                    b" to perform par-rename",
-                ]
-                .concat(),
-            );
-            let mut rem_sz = 0i64;
-            unsafe {
-                host_cb(
-                    ctx,
-                    3,
-                    1,
-                    initial_status,
-                    dq_ptr,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null_mut(),
-                    &mut rem_sz,
-                    ptr::null_mut(),
+    /// Renames a par-renamed file under `target_dir` again when its name is not ASCII.
+    fn ascii_rename(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        target_dir: &[u8],
+        rel: &[u8],
+        renamed_count: &mut i32,
+    ) {
+        let sep = crate::paths::PATH_SEPARATOR;
+        let full = [target_dir, &[sep], rel].concat();
+        match crate::unpacklimits::ascii_rename(crate::fsops::path(&full)) {
+            Ok(Some(new)) => {
+                let new_rel = new
+                    .strip_prefix(crate::fsops::path(target_dir))
+                    .map(|p| crate::fsops::path_to_bytes(p).to_vec())
+                    .unwrap_or_default();
+                if !new_rel.is_empty() {
+                    self.register_renamed(host, rel, &new_rel, renamed_count);
+                }
+                let m = format!(
+                    "Renamed {} to {} (names are ASCII only)",
+                    String::from_utf8_lossy(&full),
+                    new.display()
                 );
+                self.add_message(host, MK_INFO, m.as_bytes());
             }
-            if crate::cleanup::rename_should_reset_par_status(rem_sz) {
-                final_status = 0; // rsNone
+            Ok(None) => {}
+            Err(e) => {
+                let m = format!(
+                    "Could not rename {} to an ASCII name: {e}",
+                    String::from_utf8_lossy(&full)
+                );
+                self.add_message(host, MK_ERROR, m.as_bytes());
             }
         }
+    }
 
-        let do_req_par = parcheck_enabled && req_par_check;
-        if do_req_par {
-            emit_job_msg(
-                ctx,
-                host_cb,
-                MK_INFO,
-                &[
-                    b"Requesting par-check/repair for ",
-                    nzb_name.as_slice(),
-                    b" to restore missing files ",
-                ]
-                .concat(),
-            );
-        }
+    /// Post-download (`is_post_unpack` false) or post-unpack renaming of obfuscated files.
+    fn run_post_renamer(&self, is_post_unpack: bool) {
+        use crate::queuesubsys_host::{
+            NZB_INT_POST_DOWNLOAD_RENAMING_STATUS, NZB_INT_POST_UNPACK_RENAMING_STATUS,
+            POST_INT_WORKING,
+        };
+        let Some(host) = crate::ffi::queue_host() else {
+            return;
+        };
+        let host = &host;
+        let (meta_name, nzb_name, dst_dir, ignore_ext) = host.with_locked_queue(|_| {
+            let n = self.nzb_ptr(host);
+            let ns = host.nzb_snap(n, false);
+            let opts = crate::options::active_options();
+            (
+                host.nzb_meta_name(n),
+                ns.name,
+                ns.dest_dir,
+                opts.as_ref()
+                    .map_or(&b""[..], |o| o.str_bytes(OptStr::RenameIgnoreExt))
+                    .to_vec(),
+            )
+        });
 
-        unsafe {
-            host_cb(
-                ctx,
-                3,
-                0,
-                kind,
-                final_status as usize,
-                usize::from(do_req_par),
-                ptr::null(),
-                ptr::null(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            );
-        }
-    });
-}
-
-fn run_post_renamer_job(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn, is_post_unpack: bool) {
-    let (meta_name, nzb_name, dst_dir, ignore_ext) = with_dq_guard(ctx, host_cb, |_| {
-        let mut strs = [ptr::null() as *const c_char; 4];
-        unsafe {
-            host_cb(
-                ctx,
-                1,
-                0,
-                0,
-                0,
-                0,
-                ptr::null(),
-                ptr::null(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                strs.as_mut_ptr(),
-            );
-        }
-        (
-            unsafe { cstr::owned(strs[0]) },
-            unsafe { cstr::owned(strs[1]) },
-            unsafe { cstr::owned(strs[2]) },
-            unsafe { cstr::owned(strs[3]) },
-        )
-    });
-
-    let dst_path = crate::cleanup::bytes_to_path_buf(&dst_dir);
-    let status = crate::cleanup::run_post_renamer(
-        is_post_unpack,
-        &meta_name,
-        &nzb_name,
-        &dst_path,
-        &ignore_ext,
-        |_| {},
-        || job_is_stopped(ctx, host_cb),
-        |kind, msg| emit_job_msg(ctx, host_cb, map_cleanup_kind(kind), msg),
-        |old_name, new_name| {
-            let c_old = cstr::nul_terminated(old_name);
-            let c_new = cstr::nul_terminated(new_name);
-            with_dq_guard(ctx, host_cb, |_| unsafe {
-                host_cb(
-                    ctx,
-                    2,
-                    2,
-                    0,
-                    0,
-                    0,
-                    c_old.as_ptr() as *const c_char,
-                    c_new.as_ptr() as *const c_char,
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                );
-            });
-        },
-    );
-
-    with_dq_guard(ctx, host_cb, |_| unsafe {
-        host_cb(
-            ctx,
-            3,
-            c_int::from(is_post_unpack),
-            status,
-            0,
-            0,
-            ptr::null(),
-            ptr::null(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
+        let dst_path = crate::cleanup::bytes_to_path_buf(&dst_dir);
+        let status = crate::cleanup::run_post_renamer(
+            is_post_unpack,
+            &meta_name,
+            &nzb_name,
+            &dst_path,
+            &ignore_ext,
+            |_| {},
+            || self.is_stopped(host),
+            |kind, msg| self.add_message(host, map_cleanup_kind(kind), msg),
+            |old_name, new_name| {
+                host.with_locked_queue(|_| {
+                    if self.post_ptr == 0 {
+                        return;
+                    }
+                    let n = self.nzb_ptr(host);
+                    if n != 0 {
+                        host.nzb_rename_completed_file(
+                            n,
+                            cstr::until_nul(old_name),
+                            cstr::until_nul(new_name),
+                        );
+                    }
+                });
+            },
         );
-    });
+
+        host.with_locked_queue(|_| {
+            let n = self.nzb_ptr(host);
+            let field = if is_post_unpack {
+                NZB_INT_POST_UNPACK_RENAMING_STATUS
+            } else {
+                NZB_INT_POST_DOWNLOAD_RENAMING_STATUS
+            };
+            host.nzb_set_int(n, field, status);
+            host.post_set_int(self.post_ptr, POST_INT_WORKING, 0);
+        });
+    }
 }
 
 #[cfg(unix)]
@@ -6181,14 +6035,7 @@ impl NzbgetRsPostJob {
                 let _arena = PostJobArenaGuard::enter();
                 match &self.inner {
                     PostJobInner::Rename(rk) => {
-                        let mut flags = 0;
-                        if crate::ffi::build_parcheck_enabled() {
-                            flags |= 1;
-                        }
-                        if !crate::ffi::build_tls_disabled() {
-                            flags |= 2;
-                        }
-                        run_rename_job(ctx, rename_job_host_cb, *rk, flags);
+                        self.run_rename(*rk);
                         0
                     }
                     PostJobInner::StreamRepair(ctrl) => {
@@ -6220,7 +6067,7 @@ impl NzbgetRsPostJob {
                         0
                     }
                     PostJobInner::PostRenamer(post_unpack) => {
-                        run_post_renamer_job(ctx, post_renamer_job_host_cb, *post_unpack);
+                        self.run_post_renamer(*post_unpack);
                         0
                     }
                     PostJobInner::Finish => {
@@ -7027,186 +6874,6 @@ unsafe extern "C" fn unpack_job_host_cb(
             if a1 == 6 {
                 host.nzb_set_str(n, NZB_STR_FINAL_DIR, &unsafe { cstr::owned(s1) });
             }
-            0
-        }
-        _ => 0,
-    }
-}
-
-#[cfg(unix)]
-unsafe extern "C" fn rename_job_host_cb(
-    raw_ctx: *mut c_void,
-    op: c_int,
-    a1: c_int,
-    a2: c_int,
-    p1: usize,
-    p2: usize,
-    s1: *const c_char,
-    s2: *const c_char,
-    ints: *mut c_int,
-    i64s: *mut i64,
-    strs: *mut *const c_char,
-) -> usize {
-    use crate::queuesubsys_host::{
-        EA_GROUP_PAUSE_EXTRA_PARS, EA_GROUP_RESUME, NZB_INT_PAR_RENAME_STATUS,
-        NZB_INT_RAR_RENAME_STATUS, POST_INT_REQUEST_PAR_CHECK, POST_INT_STAGE_PROGRESS,
-        POST_INT_WORKING,
-    };
-    if op != 0 {
-        reset_call_arena();
-    }
-    let Some(host) = crate::ffi::queue_host() else {
-        return 0;
-    };
-    let job = unsafe { &*(raw_ctx as *const NzbgetRsPostJob) };
-    match op {
-        0 => {
-            unsafe { invoke_dq_guard_cb(&host, p1, p2) };
-            0
-        }
-        1 => {
-            let n = host.post_snap(job.post_ptr).nzb_ptr;
-            let ns = host.nzb_snap(n, false);
-            let ins = unsafe { std::slice::from_raw_parts_mut(ints, 2) };
-            if a1 == 1 {
-                ins[0] = ns.remaining_par_count;
-                ins[1] = ns.par_status;
-                return 0;
-            }
-            let pw = host.nzb_get_param(n, b"*Unpack:Password");
-            let opts = crate::options::active_options();
-            let str_out = unsafe { std::slice::from_raw_parts_mut(strs, 6) };
-            ins[0] = i32::from(pw.is_some());
-            ins[1] = ns.unpack_status;
-            str_out[0] = arena_cstr(&ns.name);
-            str_out[1] = arena_cstr(&ns.dest_dir);
-            str_out[2] = arena_cstr(&ns.final_dir);
-            str_out[3] = arena_opt_cstr(pw.as_deref());
-            str_out[4] = arena_cstr(opts.as_ref().map_or(b"", |o| o.str_bytes(OptStr::ParIgnoreExt)));
-            str_out[5] = arena_cstr(opts.as_ref().map_or(b"", |o| o.str_bytes(OptStr::UnpackIgnoreExt)));
-            0
-        }
-        2 => {
-            if a1 == 0 {
-                return usize::from(host.thread_is_stopped(job.thread_ptr));
-            }
-            if a1 == 1 {
-                let n = host.post_snap(job.post_ptr).nzb_ptr;
-                host.nzb_add_message(n, a2, &unsafe { cstr::owned(s1) });
-                return 0;
-            }
-            if a1 == 2 {
-                let n = host.post_snap(job.post_ptr).nzb_ptr;
-                return usize::from(host.nzb_rename_completed_file(
-                    n,
-                    &unsafe { cstr::owned(s1) },
-                    &unsafe { cstr::owned(s2) },
-                ));
-            }
-            if a1 == 3 {
-                host.post_set_progress_label(job.post_ptr, &unsafe { cstr::owned(s1) });
-                host.post_set_int(job.post_ptr, POST_INT_STAGE_PROGRESS, a2);
-                return 0;
-            }
-            if a1 == 4 {
-                host.post_push_parred_file(job.post_ptr, &unsafe { cstr::owned(s1) });
-            }
-            0
-        }
-        3 => {
-            let n = host.post_snap(job.post_ptr).nzb_ptr;
-            if a1 == 1 {
-                let ns = host.nzb_snap(n, false);
-                host.nzb_set_int(n, NZB_INT_PAR_RENAME_STATUS, a2);
-                host.dq_edit_entry(p1, ns.id, EA_GROUP_RESUME, None);
-                host.dq_edit_entry(p1, ns.id, EA_GROUP_PAUSE_EXTRA_PARS, None);
-                unsafe { *i64s = host.nzb_snap(n, false).remaining_size };
-                return 0;
-            }
-            if a2 == 0 {
-                host.nzb_set_int(n, NZB_INT_PAR_RENAME_STATUS, p1 as c_int);
-            } else if a2 == 1 {
-                host.nzb_set_int(n, NZB_INT_RAR_RENAME_STATUS, p1 as c_int);
-            }
-            if crate::ffi::build_parcheck_enabled() && p2 != 0 {
-                host.post_set_int(job.post_ptr, POST_INT_REQUEST_PAR_CHECK, 1);
-            }
-            host.post_set_int(job.post_ptr, POST_INT_WORKING, 0);
-            0
-        }
-        _ => 0,
-    }
-}
-
-#[cfg(unix)]
-unsafe extern "C" fn post_renamer_job_host_cb(
-    raw_ctx: *mut c_void,
-    op: c_int,
-    a1: c_int,
-    a2: c_int,
-    p1: usize,
-    p2: usize,
-    s1: *const c_char,
-    s2: *const c_char,
-    _ints: *mut c_int,
-    _i64s: *mut i64,
-    strs: *mut *const c_char,
-) -> usize {
-    use crate::queuesubsys_host::{
-        NZB_INT_POST_DOWNLOAD_RENAMING_STATUS, NZB_INT_POST_UNPACK_RENAMING_STATUS,
-        POST_INT_WORKING,
-    };
-    if op != 0 {
-        reset_call_arena();
-    }
-    let Some(host) = crate::ffi::queue_host() else {
-        return 0;
-    };
-    let job = unsafe { &*(raw_ctx as *const NzbgetRsPostJob) };
-    match op {
-        0 => {
-            unsafe { invoke_dq_guard_cb(&host, p1, p2) };
-            0
-        }
-        1 => {
-            let n = host.post_snap(job.post_ptr).nzb_ptr;
-            let ns = host.nzb_snap(n, false);
-            let meta = host.nzb_meta_name(n);
-            let opts = crate::options::active_options();
-            let str_out = unsafe { std::slice::from_raw_parts_mut(strs, 4) };
-            str_out[0] = arena_cstr(&meta);
-            str_out[1] = arena_cstr(&ns.name);
-            str_out[2] = arena_cstr(&ns.dest_dir);
-            str_out[3] = arena_cstr(opts.as_ref().map_or(b"", |o| o.str_bytes(OptStr::RenameIgnoreExt)));
-            0
-        }
-        2 => {
-            if a1 == 0 {
-                return usize::from(host.thread_is_stopped(job.thread_ptr));
-            }
-            if a1 == 1 {
-                let n = host.post_snap(job.post_ptr).nzb_ptr;
-                host.nzb_add_message(n, a2, &unsafe { cstr::owned(s1) });
-                return 0;
-            }
-            if a1 == 2 && job.post_ptr != 0 {
-                let n = host.post_snap(job.post_ptr).nzb_ptr;
-                if n != 0 {
-                    host.nzb_rename_completed_file(n, &unsafe { cstr::owned(s1) }, &unsafe {
-                        cstr::owned(s2)
-                    });
-                }
-            }
-            0
-        }
-        3 => {
-            let n = host.post_snap(job.post_ptr).nzb_ptr;
-            if a1 != 0 {
-                host.nzb_set_int(n, NZB_INT_POST_UNPACK_RENAMING_STATUS, a2);
-            } else {
-                host.nzb_set_int(n, NZB_INT_POST_DOWNLOAD_RENAMING_STATUS, a2);
-            }
-            host.post_set_int(job.post_ptr, POST_INT_WORKING, 0);
             0
         }
         _ => 0,

@@ -5611,8 +5611,7 @@ fn largest_set(members: &[SetMember], sets: &[MemberSet]) -> Option<usize> {
 }
 
 /// Whether a donor's media payload of `donor_size` shows another video than this release's of
-/// `target_size`: only when every set of the donor mapped (`all_mapped`), as one that did not
-/// could hold the video.
+/// `target_size`: only when the donor's media set mapped (`all_mapped`), so its size is known.
 fn media_size_differs(all_mapped: bool, donor_size: Option<i64>, target_size: Option<i64>) -> bool {
     all_mapped && donor_size.is_some() && target_size.is_some() && donor_size != target_size
 }
@@ -9147,6 +9146,12 @@ pub struct CrossPackRepairSession {
     donor_compressed: bool,
     /// Set by `exec_lzma2_raw_repair` when the 7z it probed has no raw chunks at all.
     lzma2_compressed_throughout: bool,
+    /// The last raw-LZMA2 attempt read a 7z header whose inner file has another size than the
+    /// target's: the 7z holds another video.
+    lzma2_other_size: bool,
+    /// The repair set holding this release's media payload during the current
+    /// [`Self::process_donor`] call: only checks against it tell the donor's video apart.
+    media_repair_set: Option<usize>,
 }
 
 /// What live stream repair knows about the download beyond its repair jobs.
@@ -9350,6 +9355,8 @@ impl CrossPackRepairSession {
             donor_identity: None,
             donor_compressed: false,
             lzma2_compressed_throughout: false,
+            lzma2_other_size: false,
+            media_repair_set: None,
         })
     }
 
@@ -9380,9 +9387,17 @@ impl CrossPackRepairSession {
         self.dead_fills.iter().any(|d| !d.done)
     }
 
-    /// Records a donor's identity check: a confirmed one is never undone by another set of
-    /// the same donor that did not match, and an inconclusive one records nothing.
-    fn note_donor_identity(&mut self, check: DonorCheck) {
+    /// Records a donor's identity check against repair set `repair_set_idx`: a confirmed one is
+    /// never undone by another set of the same donor that did not match, and an inconclusive
+    /// one records nothing. Only a check against the media payload counts: a matching sample or
+    /// subs set says nothing about the movie.
+    fn note_donor_identity(&mut self, repair_set_idx: usize, check: DonorCheck) {
+        if self
+            .media_repair_set
+            .is_some_and(|media| media != repair_set_idx)
+        {
+            return;
+        }
         match check {
             DonorCheck::Same => self.donor_identity = Some(true),
             DonorCheck::Differs if self.donor_identity.is_none() => {
@@ -9434,6 +9449,7 @@ impl CrossPackRepairSession {
                 .iter()
                 .position(|r| r.map.is_some() && r.set.members.contains(first))
         });
+        self.media_repair_set = target_media;
         let mut media_extracted_unsized = false;
         let mut set_compressed: Vec<bool> = vec![false; donor_sets.len()];
         let mut set_maps: Vec<Option<ContentMap>> = vec![None; donor_sets.len()];
@@ -9520,6 +9536,7 @@ impl CrossPackRepairSession {
                     // A 7z whose LZMA2 coder stored the data in raw chunks holds the inner
                     // bytes in plain form: borrow just the articles around each hole.
                     self.lzma2_compressed_throughout = false;
+                    self.lzma2_other_size = false;
                     let raw_filled = donor_set.format == MemberFormat::SevenZip
                         && set_maps[set_index].is_none()
                         && self.exec_lzma2_raw_repair(
@@ -9531,6 +9548,9 @@ impl CrossPackRepairSession {
                             &env_cell,
                         );
                     set_compressed[set_index] |= self.lzma2_compressed_throughout;
+                    media_extracted_unsized |= self.lzma2_other_size
+                        && donor_media == Some(set_index)
+                        && target_media == Some(repair_set_idx);
                     if raw_filled && self.repair_sets[repair_set_idx].inner_holes.is_empty() {
                         // Everything is filled. Holes the raw chunks did not reach (stretches
                         // the coder compressed) are left to the decompression step below.
@@ -9577,7 +9597,7 @@ impl CrossPackRepairSession {
                         &mut target_adapter,
                     )
                 };
-                self.note_donor_identity(check);
+                self.note_donor_identity(repair_set_idx, check);
                 let verified = check == DonorCheck::Same;
                 if !verified {
                     let first_donor_name = &donor_members[donor_set.members[0] as usize].name;
@@ -9639,13 +9659,13 @@ impl CrossPackRepairSession {
             }
         }
         if let (Some(media), Some(target)) = (donor_media, target_media) {
-            // A media payload of another size is another video, but only when every set of
-            // the donor mapped: one that did not could hold the video.
-            let all_mapped = set_tried.iter().all(|&t| t) && set_maps.iter().all(Option::is_some);
+            // A media payload of another size is another video. Only the media set has to have
+            // mapped: an extra set (subs, a sample) that did not says nothing about the video.
+            let all_mapped = set_maps[media].is_some();
             let donor_size = set_maps[media].as_ref().map(ContentMap::inner_size);
             let target_size = self.repair_sets[target].map.as_ref().map(ContentMap::inner_size);
             if media_extracted_unsized || media_size_differs(all_mapped, donor_size, target_size) {
-                self.note_donor_identity(DonorCheck::Differs);
+                self.note_donor_identity(target, DonorCheck::Differs);
             }
         }
         if let Some(media) = donor_media {
@@ -9963,6 +9983,8 @@ impl CrossPackRepairSession {
             }
         };
         if layout.inner_size != target_map.inner_size() {
+            // The size comes from the 7z header, so this is as sure as a mapped size.
+            self.lzma2_other_size = true;
             skip(env_cell, b"its inner file has a different size");
             return false;
         }
@@ -10099,7 +10121,7 @@ impl CrossPackRepairSession {
                 &mut target_adapter,
             )
         };
-        self.note_donor_identity(check);
+        self.note_donor_identity(repair_set_idx, check);
         let verified = check == DonorCheck::Same;
         if !verified {
             skip(env_cell, b"content identity not confirmed");
@@ -10393,7 +10415,7 @@ impl CrossPackRepairSession {
                 &mut target_adapter,
             )
         };
-        self.note_donor_identity(check);
+        self.note_donor_identity(repair_set_idx, check);
         let verified = check == DonorCheck::Same;
         if !verified {
             let mut msg = b"Skipping decompression of ".to_vec();

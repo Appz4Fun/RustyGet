@@ -210,10 +210,7 @@ pub(crate) struct NzbgetRsMaintenanceEnv {
     pub out_buf: *mut crate::ffi::RsBuf,
     pub emit_ctx: *mut c_void,
     pub emit_cb: Option<crate::xmlrpc_format::NzbgetRsXmlRpcEmitFn>,
-    #[cfg(unix)]
-    pub script_host_cb: Option<crate::procrun::NzbgetRsScriptHostFn>,
-    #[cfg(not(unix))]
-    pub script_host_cb: usize,
+    pub script_host: Option<&'static dyn crate::procrun::ScriptHost>,
     pub action_cb: Option<
         unsafe extern "C" fn(
             *mut c_void,
@@ -282,9 +279,7 @@ pub(crate) fn shutdown_daemon_maintenance() {
                 .unwrap_or_else(|err| err.into_inner())
                 .clone();
             if let Some(runner) = active {
-                if let Some(hcb) = crate::ffi::script_host_cb() {
-                    runner.detach(std::ptr::null_mut(), hcb);
-                }
+                runner.detach(&crate::procrun::NATIVE_SCRIPT_HOST);
                 while m
                     .controller
                     .lock()
@@ -401,11 +396,7 @@ pub(crate) unsafe fn collect_maint_messages_active(
 
 #[cfg(unix)]
 pub(crate) unsafe fn start_update_active(branch: c_int) -> bool {
-    let (Some(m), Some(hcb), Some(opts)) = (
-        active_maintenance(),
-        crate::ffi::script_host_cb(),
-        crate::options::active_options(),
-    ) else {
+    let (Some(m), Some(opts)) = (active_maintenance(), crate::options::active_options()) else {
         return false;
     };
     let mut ctrl = m.controller.lock().unwrap_or_else(|err| err.into_inner());
@@ -444,20 +435,14 @@ pub(crate) unsafe fn start_update_active(branch: c_int) -> bool {
             branch,
             daemon_mode: opts.daemon_mode(),
         },
-        std::ptr::null_mut(),
-        hcb,
+        &crate::procrun::NATIVE_SCRIPT_HOST,
     );
     true
 }
 
 #[cfg(unix)]
 pub(crate) unsafe fn check_updates_active() -> Option<Vec<u8>> {
-    let (Some(hcb), Some(opts)) = (
-        crate::ffi::script_host_cb(),
-        crate::options::active_options(),
-    ) else {
-        return None;
-    };
+    let opts = crate::options::active_options()?;
     let sep = crate::paths::PATH_SEPARATOR as u8;
     let info_script = read_pkg_info_active(opts.str_bytes(OptStr::WebDir), sep, b"update-info-script")?;
     let base = &info_script[crate::paths::base_file_name(&info_script)..];
@@ -471,8 +456,7 @@ pub(crate) unsafe fn check_updates_active() -> Option<Vec<u8>> {
         &info_name,
         &log_prefix,
         prefix_len.max(0) as usize,
-        std::ptr::null_mut(),
-        hcb,
+        &crate::procrun::NATIVE_SCRIPT_HOST,
     );
     if acc.is_empty() {
         None
@@ -818,14 +802,10 @@ pub(crate) fn verify_signature_active(
 
 #[cfg(test)]
 unsafe fn emit_maint_log(env: &NzbgetRsMaintenanceEnv, kind: c_int, msg: &[u8]) {
-    #[cfg(unix)]
-    if let Some(hcb) = env.script_host_cb {
-        crate::procrun::host_log(std::ptr::null_mut(), hcb, kind, msg);
-    } else {
-        crate::log::log_active_bytes(kind, msg);
+    match env.script_host {
+        Some(host) => host.log(kind, msg),
+        None => crate::log::log_active_bytes(kind, msg),
     }
-    #[cfg(not(unix))]
-    let _ = (env, kind, msg);
 }
 
 #[cfg(test)]
@@ -942,8 +922,8 @@ pub(crate) unsafe fn nzbget_rs_maintenance_exec(
                     .clone();
                 if let Some(runner) = active {
                     if let Some(e) = env.as_ref() {
-                        if let Some(hcb) = e.script_host_cb {
-                            runner.detach(std::ptr::null_mut(), hcb);
+                        if let Some(host) = e.script_host {
+                            runner.detach(host);
                         }
                     }
                     while m
@@ -1028,7 +1008,7 @@ pub(crate) unsafe fn nzbget_rs_maintenance_exec(
                 let Some(e) = env.as_ref() else {
                     return 0;
                 };
-                let Some(hcb) = e.script_host_cb else {
+                let Some(host) = e.script_host else {
                     return 0;
                 };
                 let mut ctrl = m.controller.lock().unwrap_or_else(|err| err.into_inner());
@@ -1071,8 +1051,7 @@ pub(crate) unsafe fn nzbget_rs_maintenance_exec(
                         branch: e.a1,
                         daemon_mode: e.a3 != 0,
                     },
-                    std::ptr::null_mut(),
-                    hcb,
+                    host,
                 );
                 1
             }
@@ -1088,7 +1067,7 @@ pub(crate) unsafe fn nzbget_rs_maintenance_exec(
                 let Some(e) = env.as_ref() else {
                     return 0;
                 };
-                let Some(hcb) = e.script_host_cb else {
+                let Some(host) = e.script_host else {
                     return 0;
                 };
                 let sep = e.a2 as u8;
@@ -1109,8 +1088,7 @@ pub(crate) unsafe fn nzbget_rs_maintenance_exec(
                     &info_name,
                     &log_prefix,
                     prefix_len.max(0) as usize,
-                    std::ptr::null_mut(),
-                    hcb,
+                    host,
                 );
                 if acc.is_empty() {
                     return 0;
@@ -1226,10 +1204,7 @@ mod tests {
                 out_buf: std::ptr::null_mut(),
                 emit_ctx: std::ptr::null_mut(),
                 emit_cb: None,
-                #[cfg(unix)]
-                script_host_cb: None,
-                #[cfg(not(unix))]
-                script_host_cb: 0,
+                script_host: None,
                 action_cb: Some(mock_maint_action),
             };
             assert_eq!(nzbget_rs_maintenance_exec(m, 2, &menv), 1);
@@ -1250,25 +1225,34 @@ mod tests {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                static LEGACY_HOST_OP_CALLED: std::sync::atomic::AtomicBool =
-                    std::sync::atomic::AtomicBool::new(false);
-                unsafe extern "C" fn strict_prod_script_host_cb(
-                    _ctx: *mut c_void,
-                    op: c_int,
-                    _a1: c_int,
-                    _a2: c_int,
-                    _p1: usize,
-                    _p2: usize,
-                    _s1: *const c_char,
-                    _s2: *const c_char,
-                    _ints: *mut c_int,
-                    _strs: *mut *const c_char,
-                ) -> usize {
-                    if op == 0 || op == 2 {
-                        LEGACY_HOST_OP_CALLED.store(true, std::sync::atomic::Ordering::SeqCst);
-                    }
-                    0
+                struct RecordingHost {
+                    logs: std::sync::Mutex<Vec<(c_int, Vec<u8>)>>,
+                    options_calls: std::sync::atomic::AtomicUsize,
                 }
+                impl crate::procrun::ScriptHost for RecordingHost {
+                    fn log(&self, kind: c_int, msg: &[u8]) {
+                        self.logs.lock().unwrap().push((kind, msg.to_vec()));
+                    }
+                    fn environment(&self) -> Vec<Vec<u8>> {
+                        Vec::new()
+                    }
+                    fn shell_override(&self) -> Vec<u8> {
+                        Vec::new()
+                    }
+                    fn options(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
+                        self.options_calls
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Vec::new()
+                    }
+                    fn args(&self) -> Vec<Vec<u8>> {
+                        Vec::new()
+                    }
+                    fn exit_proc(&self) {}
+                }
+                let host: &'static RecordingHost = Box::leak(Box::new(RecordingHost {
+                    logs: std::sync::Mutex::new(Vec::new()),
+                    options_calls: std::sync::atomic::AtomicUsize::new(0),
+                }));
 
                 let script_path = dir.join("update-info.sh");
                 std::fs::write(
@@ -1292,7 +1276,6 @@ mod tests {
                     cap: 0,
                 };
                 let mut sentinel = 1u8;
-                LEGACY_HOST_OP_CALLED.store(false, std::sync::atomic::Ordering::SeqCst);
                 let check_env = NzbgetRsMaintenanceEnv {
                     ctx: (&mut sentinel as *mut u8).cast(),
                     p1: 0,
@@ -1307,13 +1290,19 @@ mod tests {
                     out_buf: &mut out_buf,
                     emit_ctx: std::ptr::null_mut(),
                     emit_cb: None,
-                    script_host_cb: Some(strict_prod_script_host_cb),
+                    script_host: Some(host),
                     action_cb: None,
                 };
                 assert_eq!(nzbget_rs_maintenance_exec(m, 5, &check_env), 1);
+                assert_eq!(
+                    host.options_calls.load(std::sync::atomic::Ordering::SeqCst),
+                    1,
+                    "CheckUpdates must read script options through the script host"
+                );
                 assert!(
-                    !LEGACY_HOST_OP_CALLED.load(std::sync::atomic::Ordering::SeqCst),
-                    "CheckUpdates must use active runtime options/logging even with non-null env.ctx"
+                    host.logs.lock().unwrap().iter().any(|(k, m)| *k == crate::procrun::MK_DEBUG
+                        && m.as_slice() == b"Command [UPDATEINFO]version=27.0 detected"),
+                    "CheckUpdates must log through the script host"
                 );
                 let out_str =
                     std::slice::from_raw_parts(out_buf.data.cast::<u8>(), out_buf.len).to_vec();

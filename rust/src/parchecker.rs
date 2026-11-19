@@ -708,9 +708,9 @@ pub(crate) fn streaming_session_defer_article_for_queue(
                 required_bytes,
                 limit_bytes: limit,
             };
-            if entry.lend_memory(&shortfall) {
-                limit = entry.article_byte_limit.load(Ordering::Acquire);
-            }
+            // A short loan still raises the limit, so the refusal reports the new one.
+            entry.lend_memory(&shortfall);
+            limit = entry.article_byte_limit.load(Ordering::Acquire);
         }
         if queue.pending.len() >= 4096 || next.is_none_or(|n| n > limit) {
             return Err(RepairError::StreamingMemoryLimit {
@@ -4201,14 +4201,16 @@ mod tests {
             }
             let drained = streaming_session_drain_articles(nzb_id).unwrap();
             let entry = active_streaming_session(nzb_id).unwrap();
-            if entry.lent_memory.load(Ordering::Relaxed) == 0 && attempt < 200 {
-                assert!(matches!(
-                    drained,
-                    Err(RepairError::StreamingMemoryLimit {
-                        context: "RAM-only partial staging",
-                        ..
-                    })
-                ));
+            // Two loans are needed; a parallel test can fill the shared pool
+            // before either, so any staging refusal means try again.
+            let pool_was_full = matches!(
+                drained,
+                Err(RepairError::StreamingMemoryLimit {
+                    context: "RAM-only partial staging",
+                    ..
+                })
+            );
+            if pool_was_full && attempt < 200 {
                 streaming_session_forget(nzb_id);
                 drop(entry);
                 std::thread::sleep(std::time::Duration::from_millis(20));

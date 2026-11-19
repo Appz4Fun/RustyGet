@@ -4,7 +4,7 @@
 //! NNTP article fetch/download bounds and response classification (`ArticleFetcher`,
 //! `ArticleDownloader`).
 
-use crate::status::{DupeMode, NzbParStatus};
+use crate::status::{DeleteStatus, DupeMode, NzbParStatus};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -1143,8 +1143,7 @@ pub fn check_try_preconditions(
     file_deleted: bool,
     nzb_deleting: bool,
     nzb_parking: bool,
-    delete_status: i32,
-    ds_none: i32,
+    delete_status: DeleteStatus,
     dupe_mode: DupeMode,
 ) -> bool {
     if fallback_mode == daf_none || raw_article || par_file {
@@ -1158,7 +1157,7 @@ pub fn check_try_preconditions(
     if file_deleted
         || nzb_deleting
         || nzb_parking
-        || delete_status != ds_none
+        || delete_status != DeleteStatus::None
         || dupe_mode == DupeMode::Force
     {
         return false;
@@ -2908,8 +2907,7 @@ pub(crate) fn try_fallback_host(
         file.deleted,
         nzb.deleting,
         nzb.parking,
-        nzb.delete_status,
-        crate::queuesubsys_host::DS_NONE,
+        DeleteStatus::from(nzb.delete_status),
         nzb.dupe_mode,
     ) {
         return false;
@@ -3436,8 +3434,7 @@ mod tests {
             false,
             false,
             false,
-            0,
-            0,
+            DeleteStatus::None,
             DupeMode::Score
         ));
         assert!(!check_try_preconditions(
@@ -3453,8 +3450,7 @@ mod tests {
             false,
             false,
             false,
-            0,
-            0,
+            DeleteStatus::None,
             DupeMode::Score
         ));
         assert!(check_try_preconditions(
@@ -3470,8 +3466,7 @@ mod tests {
             false,
             false,
             false,
-            0,
-            0,
+            DeleteStatus::None,
             DupeMode::Score
         ));
 
@@ -4156,8 +4151,7 @@ mod tests {
                 false,
                 false,
                 false,
-                0,
-                0,
+                DeleteStatus::None,
                 DupeMode::Score,
             ));
         }
@@ -4291,8 +4285,7 @@ mod tests {
                 false,
                 false,
                 false,
-                0,
-                0,
+                DeleteStatus::None,
                 DupeMode::Score,
             );
             assert_eq!(allowed, kind == 0);

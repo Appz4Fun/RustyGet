@@ -1,7 +1,7 @@
 //! Terminal unquoted filename parsing and PAR classification for duplicate search.
 
 use crate::cstr;
-use crate::status::{DupeMode, MarkStatus};
+use crate::status::{DeleteStatus, DupeMode, MarkStatus};
 
 fn trim_range(bytes: &[u8], mut start: usize, mut end: usize) -> (usize, usize) {
     let trim = |b| matches!(b, b' ' | b'\t' | b'\r' | b'\n');
@@ -331,9 +331,7 @@ pub fn dupesearch_is_rank_only_queued_member(
     nk_nzb_val: i32,
     dupe_mode: DupeMode,
     has_post_info: bool,
-    delete_status: i32,
-    ds_none_val: i32,
-    ds_dupe_val: i32,
+    delete_status: DeleteStatus,
     item_score: i32,
     pick_score: i32,
 ) -> bool {
@@ -342,7 +340,7 @@ pub fn dupesearch_is_rank_only_queued_member(
         && kind == nk_nzb_val
         && dupe_mode == DupeMode::Score
         && !has_post_info
-        && (delete_status == ds_none_val || delete_status == ds_dupe_val)
+        && (delete_status == DeleteStatus::None || delete_status == DeleteStatus::Dupe)
         && item_score < pick_score
 }
 
@@ -460,13 +458,13 @@ pub fn lower_key(key: &[u8]) -> Vec<u8> {
 pub fn saved_history_backup(
     has_pick: bool,
     pick_full_hash: u32,
-    candidate_delete_status: i32,
+    candidate_delete_status: DeleteStatus,
     candidate_full_hash: u32,
-    ds_dupe: i32,
-    ds_copy: i32,
 ) -> bool {
-    candidate_delete_status == ds_dupe
-        || (has_pick && candidate_delete_status == ds_copy && candidate_full_hash != pick_full_hash)
+    candidate_delete_status == DeleteStatus::Dupe
+        || (has_pick
+            && candidate_delete_status == DeleteStatus::Copy
+            && candidate_full_hash != pick_full_hash)
 }
 
 /// `PlacementAvailable` in `DupeSearch.cpp`.
@@ -475,11 +473,7 @@ pub fn placement_available(
     has_backup: bool,
     is_nzb_kind: bool,
     deleting: bool,
-    delete_status: i32,
-    ds_none: i32,
-    ds_manual: i32,
-    ds_dupe: i32,
-    ds_copy: i32,
+    delete_status: DeleteStatus,
     mark_status: MarkStatus,
     dupe_mode: DupeMode,
     in_history: bool,
@@ -499,27 +493,20 @@ pub fn placement_available(
     if !has_backup
         || !is_nzb_kind
         || deleting
-        || delete_status == ds_manual
+        || delete_status == DeleteStatus::Manual
         || mark_status == MarkStatus::Bad
         || dupe_mode == DupeMode::Force
     {
         return false;
     }
-    if !in_history && delete_status == ds_none && (!whole_backup || !has_post_info) {
+    if !in_history && delete_status == DeleteStatus::None && (!whole_backup || !has_post_info) {
         return true;
     }
     if in_history && is_dupe_success {
         return true;
     }
     (!whole_backup || !has_post_info)
-        && saved_history_backup(
-            has_pick,
-            pick_full_hash,
-            delete_status,
-            backup_full_hash,
-            ds_dupe,
-            ds_copy,
-        )
+        && saved_history_backup(has_pick, pick_full_hash, delete_status, backup_full_hash)
         && queued_file_exists
         && (!whole_backup || health >= critical_health)
         && !(health_check_is_dupe && has_marked_alive && marked_alive_val == 0)
@@ -579,14 +566,13 @@ pub fn eval_member_rerank(
 pub fn eval_pick_gone(
     has_pick: bool,
     deleting: bool,
-    delete_status: i32,
-    ds_manual: i32,
+    delete_status: DeleteStatus,
     pick_eff_key: &[u8],
     job_dupe_key: &[u8],
     pick_norm_name: &[u8],
     job_norm_name: &[u8],
 ) -> i32 {
-    if !has_pick || deleting || delete_status == ds_manual {
+    if !has_pick || deleting || delete_status == DeleteStatus::Manual {
         return 1;
     }
     if lower_key(pick_eff_key) != lower_key(job_dupe_key) {
@@ -2704,8 +2690,7 @@ pub fn fleet_update_key_score_bounds(
     any_seen: bool,
     queued: bool,
     deleting: bool,
-    delete_status: i32,
-    ds_none_val: i32,
+    delete_status: DeleteStatus,
     cur_running_id: i32,
     cur_running_score: i32,
     item_id: i32,
@@ -2719,7 +2704,7 @@ pub fn fleet_update_key_score_bounds(
     };
     let (new_running_id, new_running_score) = if queued
         && !deleting
-        && delete_status == ds_none_val
+        && delete_status == DeleteStatus::None
         && (cur_running_id == 0 || item_score > cur_running_score)
     {
         (item_id, item_score)
@@ -2849,8 +2834,7 @@ pub fn dupesearch_is_better_parent_candidate(
     kind: i32,
     nk_nzb: i32,
     deleting: bool,
-    delete_status: i32,
-    ds_none: i32,
+    delete_status: DeleteStatus,
     has_post_info: bool,
     same_lower_key: bool,
     item_score: i32,
@@ -2861,7 +2845,7 @@ pub fn dupesearch_is_better_parent_candidate(
     !is_same_item
         && kind == nk_nzb
         && !deleting
-        && delete_status == ds_none
+        && delete_status == DeleteStatus::None
         && !has_post_info
         && same_lower_key
         && item_score > added_score
@@ -4294,9 +4278,9 @@ mod tests {
     #[test]
     fn test_dupesearch_helpers() {
         assert_eq!(lower_key(b"Dupes:My.Release\t\n"), b"dupes:my.release  ");
-        assert!(saved_history_backup(true, 100, 3, 200, 3, 6));
-        assert!(saved_history_backup(true, 100, 6, 200, 3, 6));
-        assert!(!saved_history_backup(true, 100, 6, 100, 3, 6));
+        assert!(saved_history_backup(true, 100, DeleteStatus::Dupe, 200));
+        assert!(saved_history_backup(true, 100, DeleteStatus::Copy, 200));
+        assert!(!saved_history_backup(true, 100, DeleteStatus::Copy, 100));
 
         let mut order = [0usize; 3];
         sort_verified_postings(

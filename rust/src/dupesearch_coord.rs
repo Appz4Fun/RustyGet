@@ -40,7 +40,7 @@ use crate::dupewatch::{
     is_live_fleet_peer, par_doomed, unlisted_missing, whole_bytes, Decision, FetchBudget,
     SearchStamp, Snapshot, BASE_PICK_SCORE, MANAGED_FLEET,
 };
-use crate::status::{DupeMode, MarkStatus};
+use crate::status::{DeleteStatus, DupeMode, MarkStatus};
 use crate::xmlrpc_format::{
     NzbgetRsRpcFleetMember, NzbgetRsRpcFleetReqMember, NzbgetRsXmlRpcEmitFn,
 };
@@ -816,11 +816,7 @@ fn check_placement_available(
         true,
         backup.kind == 0,
         backup.deleting,
-        backup.delete_status,
-        0,
-        1,
-        3,
-        6,
+        DeleteStatus::from(backup.delete_status),
         backup.mark_status,
         backup.dupe_mode,
         in_history,
@@ -2337,8 +2333,7 @@ impl NzbgetRsDupeSearch {
                     item.kind,
                     0,
                     item.deleting,
-                    item.delete_status,
-                    0,
+                    DeleteStatus::from(item.delete_status),
                     item.has_post_info,
                     item_key == added_key,
                     item.dupe_score,
@@ -2430,9 +2425,7 @@ impl NzbgetRsDupeSearch {
                     0,
                     item.dupe_mode,
                     item.has_post_info,
-                    item.delete_status,
-                    0,
-                    3,
+                    DeleteStatus::from(item.delete_status),
                     item.dupe_score,
                     pick.dupe_score,
                 ) && same_key
@@ -2444,10 +2437,8 @@ impl NzbgetRsDupeSearch {
                     && saved_history_backup(
                         true,
                         pick.full_hash,
-                        item.delete_status,
+                        DeleteStatus::from(item.delete_status),
                         item.full_hash,
-                        3,
-                        6,
                     )
                     && same_key
                     && same_rel
@@ -2628,7 +2619,7 @@ impl NzbgetRsDupeSearch {
                 in_hist,
                 item.dupe_success,
                 item.deleting,
-                item.delete_status,
+                DeleteStatus::from(item.delete_status),
                 item.has_post_info,
                 item.dupe_mode,
                 item.is_donor,
@@ -4926,8 +4917,7 @@ impl NzbgetRsDupeSearch {
             let code = eval_pick_gone(
                 found.is_some(),
                 found.as_ref().is_some_and(|p| p.deleting),
-                found.as_ref().map(|p| p.delete_status).unwrap_or(0),
-                1,
+                DeleteStatus::from(found.as_ref().map(|p| p.delete_status).unwrap_or(0)),
                 &eff_key,
                 &job.dupe_key,
                 &pick_norm,
@@ -6046,8 +6036,7 @@ pub unsafe fn fleet_append(
                 any_seen,
                 queued,
                 snap.deleting,
-                snap.delete_status,
-                0,
+                DeleteStatus::from(snap.delete_status),
                 running_id,
                 running_score,
                 snap.id,

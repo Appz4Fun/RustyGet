@@ -1,9 +1,6 @@
 //! `HistoryCoordinator` (`daemon/queue/HistoryCoordinator.cpp`) end-to-end Rust implementation.
 
-use crate::queuecoord::{
-    ARTICLE_FAILED, ARTICLE_FINISHED, ARTICLE_UNDEFINED, DELETE_COPY, DELETE_DUPE, DELETE_GOOD,
-    DELETE_MANUAL, PARTIAL_STATE_NONE,
-};
+use crate::queuecoord::{ARTICLE_FAILED, ARTICLE_FINISHED, ARTICLE_UNDEFINED, PARTIAL_STATE_NONE};
 
 /// `HistoryCoordinator::ServiceWork` minimum history retention timestamp (`cur_time - keep_days * 86400`).
 pub fn calc_min_time(cur_time: i64, keep_history_days: i32) -> i64 {
@@ -57,7 +54,7 @@ pub fn should_recheck_failed_articles(
 /// Maps `NzbInfo` mark/delete/success statuses to `DupInfo::EStatus`.
 pub fn classify_dup_status(
     mark_status: MarkStatus,
-    delete_status: i32,
+    delete_status: DeleteStatus,
     is_dupe_success: bool,
 ) -> DupStatus {
     if mark_status == MarkStatus::Good {
@@ -66,11 +63,11 @@ pub fn classify_dup_status(
         DupStatus::Bad
     } else if mark_status == MarkStatus::Success {
         DupStatus::Success
-    } else if delete_status == DELETE_DUPE {
+    } else if delete_status == DeleteStatus::Dupe {
         DupStatus::Dupe
-    } else if delete_status == DELETE_MANUAL
-        || delete_status == DELETE_GOOD
-        || delete_status == DELETE_COPY
+    } else if delete_status == DeleteStatus::Manual
+        || delete_status == DeleteStatus::Good
+        || delete_status == DeleteStatus::Copy
     {
         DupStatus::Deleted
     } else if is_dupe_success {
@@ -84,14 +81,13 @@ pub fn classify_dup_status(
 #[allow(clippy::too_many_arguments)]
 pub fn should_delete_dest_dir(
     is_nzb: bool,
-    delete_status: i32,
-    ds_none: i32,
+    delete_status: DeleteStatus,
     par_status: NzbParStatus,
     unpack_status: UnpackStatus,
     dir_exists: bool,
 ) -> bool {
     is_nzb
-        && (delete_status != ds_none
+        && (delete_status != DeleteStatus::None
             || par_status == NzbParStatus::Failure
             || unpack_status == UnpackStatus::Failure
             || unpack_status == UnpackStatus::Password)
@@ -508,8 +504,8 @@ pub fn split_param_assignment(text: &[u8]) -> Option<(&[u8], &[u8])> {
 // ============================================================================
 
 use crate::status::{
-    CleanupStatus, DupStatus, DupeMode, MarkStatus, MoveStatus, NzbParStatus, UnpackStatus,
-    UrlStatus,
+    CleanupStatus, DeleteStatus, DupStatus, DupeMode, MarkStatus, MoveStatus, NzbParStatus,
+    UnpackStatus, UrlStatus,
 };
 use std::ffi::{c_char, c_int, c_void, CStr};
 
@@ -822,7 +818,11 @@ unsafe fn hc_history_hide(
         0,
     );
     let hist_name = hc_cstr_bytes(strs[0]).to_vec();
-    let dup_status = classify_dup_status(MarkStatus::from(ints[0]), ints[1], ints[2] != 0);
+    let dup_status = classify_dup_status(
+        MarkStatus::from(ints[0]),
+        DeleteStatus::from(ints[1]),
+        ints[2] != 0,
+    );
 
     hc_delete_disk_files(env, nzb_ptr, server_mode, nzb_cleanup_disk);
 
@@ -2241,8 +2241,7 @@ pub unsafe fn history_coord_exec(op: c_int, env: *const NzbgetRsHistoryCoordEnv)
                             );
                             if should_delete_dest_dir(
                                 true,
-                                delete_status,
-                                0,
+                                DeleteStatus::from(delete_status),
                                 par_status,
                                 unpack_status,
                                 dir_exists,
@@ -3174,14 +3173,13 @@ mod tests {
         NzbgetRsDiskFileInfoInput, NzbgetRsDiskFileStateInput,
     };
     use crate::downloadinfo::is_download_completed;
-    use crate::queuecoord::DELETE_NONE;
     use crate::queuecoord::PARTIAL_STATE_COMPLETED;
     use std::ffi::CString;
 
     #[test]
     fn delete_dest_dir_only_for_failed_jobs() {
         let del = |delete_status, par, unpack, exists| {
-            should_delete_dest_dir(true, delete_status, 0, par, unpack, exists)
+            should_delete_dest_dir(true, DeleteStatus::from(delete_status), par, unpack, exists)
         };
         assert!(!del(0, NzbParStatus::Success, UnpackStatus::Success, true));
         assert!(del(0, NzbParStatus::Failure, UnpackStatus::None, true));
@@ -3200,8 +3198,7 @@ mod tests {
         ));
         assert!(!should_delete_dest_dir(
             false,
-            2,
-            0,
+            DeleteStatus::Health,
             NzbParStatus::Failure,
             UnpackStatus::None,
             true
@@ -3243,11 +3240,11 @@ mod tests {
     fn test_history_coord_reset_and_dup_status() {
         assert_eq!(calc_min_time(100_000, 1), 13_600);
         assert_eq!(
-            classify_dup_status(MarkStatus::Good, DELETE_NONE, false),
+            classify_dup_status(MarkStatus::Good, DeleteStatus::None, false),
             DupStatus::Good
         );
         assert_eq!(
-            classify_dup_status(MarkStatus::Bad, DELETE_NONE, true),
+            classify_dup_status(MarkStatus::Bad, DeleteStatus::None, true),
             DupStatus::Bad
         );
         assert!(is_temporary_output_name(b"42.out.tmp"));

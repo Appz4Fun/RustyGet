@@ -9,7 +9,7 @@
 
 use crate::dupefallback::NzbgetRsByteRange;
 use crate::releasename::lower as c_lower_bytes;
-use crate::status::NzbParStatus;
+use crate::status::{DeleteStatus, NzbParStatus};
 
 pub const MAX_DECOMPRESS_BYTES: i64 = 16 * 1024 * 1024 * 1024;
 
@@ -3575,9 +3575,7 @@ pub fn eval_build_repair_job(
     is_par_file: bool,
     disk_basename: &[u8],
     has_nzb: bool,
-    delete_status: i32,
-    ds_none: i32,
-    ds_health: i32,
+    delete_status: DeleteStatus,
     deleting: bool,
     parking: bool,
     has_post_info: bool,
@@ -3597,8 +3595,8 @@ pub fn eval_build_repair_job(
     {
         return 0;
     }
-    let health_cancel = delete_status == ds_health;
-    if !health_cancel && (deleting || parking || delete_status != ds_none) {
+    let health_cancel = delete_status == DeleteStatus::Health;
+    if !health_cancel && (deleting || parking || delete_status != DeleteStatus::None) {
         return 0;
     }
     if success_articles == 0 {
@@ -12046,9 +12044,7 @@ mod tests {
                 false,
                 b"movie.mkv",
                 true,
-                0,
-                0,
-                3,
+                DeleteStatus::None,
                 false,
                 false,
                 false,
@@ -12067,9 +12063,7 @@ mod tests {
                 false,
                 b"movie.mkv",
                 true,
-                0,
-                0,
-                3,
+                DeleteStatus::None,
                 false,
                 false,
                 false,
@@ -12088,9 +12082,7 @@ mod tests {
                 false,
                 b"movie.par2",
                 true,
-                0,
-                0,
-                3,
+                DeleteStatus::None,
                 false,
                 false,
                 false,
@@ -16666,9 +16658,7 @@ mod tests {
                 false,
                 b"movie.mkv",
                 true,
-                0,
-                0,
-                3,
+                DeleteStatus::None,
                 false,
                 false,
                 false,
@@ -16687,9 +16677,7 @@ mod tests {
                 false,
                 b"release.r01",
                 true,
-                0,
-                0,
-                3,
+                DeleteStatus::None,
                 false,
                 false,
                 false,
@@ -16709,9 +16697,7 @@ mod tests {
                 false,
                 b"late.par2",
                 true,
-                0,
-                0,
-                3,
+                DeleteStatus::None,
                 false,
                 false,
                 true,
@@ -16731,9 +16717,7 @@ mod tests {
                 false,
                 b"movie.mkv",
                 true,
-                0,
-                0,
-                3,
+                DeleteStatus::None,
                 false,
                 false,
                 false,
@@ -16753,9 +16737,7 @@ mod tests {
                 false,
                 b"ZGWRiqtR4jt2nswwN.part03.rar",
                 true,
-                0,
-                0,
-                3,
+                DeleteStatus::None,
                 false,
                 false,
                 false,
@@ -16769,7 +16751,20 @@ mod tests {
         // Sizeless whole file -> 0
         assert_eq!(
             eval_build_repair_job(
-                2, 2, false, false, b"x.r00", true, 0, 0, 3, false, false, false, false, 0, 0, 0
+                2,
+                2,
+                false,
+                false,
+                b"x.r00",
+                true,
+                DeleteStatus::None,
+                false,
+                false,
+                false,
+                false,
+                0,
+                0,
+                0
             ),
             0
         );
@@ -16782,9 +16777,7 @@ mod tests {
                 true,
                 b"obfuscated.bin",
                 true,
-                0,
-                0,
-                3,
+                DeleteStatus::None,
                 false,
                 false,
                 false,
@@ -16803,9 +16796,7 @@ mod tests {
                 false,
                 b"release.PaR2",
                 true,
-                0,
-                0,
-                3,
+                DeleteStatus::None,
                 false,
                 false,
                 false,
@@ -16824,9 +16815,7 @@ mod tests {
                 false,
                 b"release.vol01+02.PAR2",
                 true,
-                0,
-                0,
-                3,
+                DeleteStatus::None,
                 false,
                 false,
                 false,

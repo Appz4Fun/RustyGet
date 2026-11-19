@@ -1,6 +1,6 @@
 //! Pure queue/history discovery policy. Callers hold their queue lock, supply a
 //! stable time and persist search stamps only after a Search decision.
-use crate::status::DupeMode;
+use crate::status::{DeleteStatus, DupeMode};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub const ENABLED: u32 = 1 << 0;
@@ -465,7 +465,7 @@ pub fn build_item_flags(
     in_history: bool,
     dupe_success: bool,
     deleting: bool,
-    delete_status: i32,
+    delete_status: DeleteStatus,
     has_post_info: bool,
     dupe_mode: DupeMode,
     is_donor: bool,
@@ -486,13 +486,12 @@ pub fn build_item_flags(
     if deleting {
         value |= DELETING;
     }
-    // dsNone = 0, dsManual = 1, dsDupe = 3, dsGood = 5, dsCopy = 6
     match delete_status {
-        0 => value |= DELETE_NONE,
-        1 => value |= DELETE_MANUAL,
-        3 => value |= DELETE_DUPE,
-        6 => value |= DELETE_COPY,
-        5 => value |= DELETE_GOOD,
+        DeleteStatus::None => value |= DELETE_NONE,
+        DeleteStatus::Manual => value |= DELETE_MANUAL,
+        DeleteStatus::Dupe => value |= DELETE_DUPE,
+        DeleteStatus::Copy => value |= DELETE_COPY,
+        DeleteStatus::Good => value |= DELETE_GOOD,
         _ => {}
     }
     if has_post_info {
@@ -951,7 +950,7 @@ mod tests {
             false,
             false,
             false,
-            0,
+            DeleteStatus::None,
             false,
             DupeMode::Score,
             false,

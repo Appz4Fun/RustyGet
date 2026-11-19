@@ -1750,7 +1750,6 @@ fn run_nntp_server_instance(
 ///
 /// # Safety
 /// `argv` (when `argc > 0`) and `env` must be valid for the duration of the call.
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_nserv_run(
     argc: std::ffi::c_int,
     argv: *const *const std::ffi::c_char,

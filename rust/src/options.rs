@@ -1974,7 +1974,7 @@ pub struct NzbgetRsParsedOptions {
     pub detail_target: i32,
     pub write_log: i32,
     pub tls: i32,
-    // Appended last: the C header (`nzbget_rs.h`) mirrors this layout.
+    // Appended last.
     /// Most files one job may unpack; 0 means no limit (`unpacklimits`).
     pub unpack_max_files: i32,
     /// Deepest folder nesting one job may unpack; 0 means no limit.
@@ -4710,7 +4710,6 @@ impl OptionsHost for NzbgetRsOptions {
     }
 }
 
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_options_new(
     exe_name: *const c_char,
     config_filename: *const c_char,
@@ -4824,7 +4823,6 @@ pub unsafe extern "C" fn nzbget_rs_options_new(
     std::sync::Arc::into_raw(arc).cast_mut()
 }
 
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_options_free(handle: *mut NzbgetRsOptions) {
     if !handle.is_null() {
         let arc = std::sync::Arc::from_raw(handle.cast_const());
@@ -4840,7 +4838,6 @@ pub unsafe extern "C" fn nzbget_rs_options_free(handle: *mut NzbgetRsOptions) {
     }
 }
 
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_options_str(
     handle: *const NzbgetRsOptions,
     id: c_int,
@@ -4855,7 +4852,6 @@ pub unsafe extern "C" fn nzbget_rs_options_str(
 
 /// The active options set (the daemon's, or the newest one created), borrowed:
 /// it stays valid until its owner frees it. Null when there is none.
-#[no_mangle]
 pub extern "C" fn nzbget_rs_options_active() -> *const NzbgetRsOptions {
     active_options().map_or(std::ptr::null(), |arc| std::sync::Arc::as_ptr(&arc))
 }
@@ -4865,7 +4861,6 @@ pub extern "C" fn nzbget_rs_options_active() -> *const NzbgetRsOptions {
 ///
 /// # Safety
 /// `handle` is null or a live handle from `nzbget_rs_options_new`.
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_options_set_active(handle: *const NzbgetRsOptions) {
     let weak = if handle.is_null() {
         None
@@ -4883,7 +4878,6 @@ pub unsafe extern "C" fn nzbget_rs_options_set_active(handle: *const NzbgetRsOpt
 ///
 /// # Safety
 /// `handle` is null or a live handle from `nzbget_rs_options_new`.
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_options_scalars(
     handle: *const NzbgetRsOptions,
 ) -> *const NzbgetRsParsedOptions {
@@ -4893,7 +4887,6 @@ pub unsafe extern "C" fn nzbget_rs_options_scalars(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_options_query(
     handle: *const NzbgetRsOptions,
     op: c_int,

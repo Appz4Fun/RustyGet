@@ -152,7 +152,6 @@ fn subtract_exact(holes: &[Range], donors: &[Range], probes: &[i32]) -> i64 {
 /// readable for their counts and borrowed for this call. Counts fit isize::MAX
 /// bytes. Empty arrays may be null. All probe indexes are valid donor indexes.
 /// Panics abort with the production profile; none may unwind into C++.
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_stream_compare_floor(
     decoded: i64,
     holes: *const Range,

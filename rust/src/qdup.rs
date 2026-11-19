@@ -23,12 +23,10 @@ struct Fields {
 
 pub struct Dup(Mutex<Fields>);
 
-#[unsafe(no_mangle)]
 pub extern "C" fn nzbget_rs_dup_new() -> *mut Dup {
     Box::into_raw(Box::new(Dup(Mutex::new(Fields::default()))))
 }
 
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_dup_free(d: *mut Dup) {
     if !d.is_null() {
         drop(unsafe { Box::from_raw(d) });
@@ -38,7 +36,6 @@ pub unsafe extern "C" fn nzbget_rs_dup_free(d: *mut Dup) {
 /// Reads every field: ints = mode, score, status, full hash, filtered hash,
 /// id; i64s[0] = size (when not null); strs = name, dupe key (valid until
 /// the record changes).
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_dup_get(
     d: *const Dup,
     ints: *mut c_int,
@@ -70,7 +67,6 @@ pub unsafe extern "C" fn nzbget_rs_dup_get(
 
 /// Sets one field: 0 mode, 1 score, 2 status, 3 full hash, 4 filtered hash,
 /// 5 id, 6 size (from v); 7 name, 8 dupe key (from s, null = empty).
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_dup_set(d: *const Dup, field: c_int, v: i64, s: *const c_char) {
     let mut f = unsafe { &*d }.0.lock().unwrap_or_else(|e| e.into_inner());
     let text = || {

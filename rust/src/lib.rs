@@ -1,5 +1,8 @@
-//! Rust parts of nzbget, called from C++ through a C ABI (see nzbget_rs.h).
-//! Each module replaces one C++ routine and must match its output byte for byte.
+//! RustyGet: a Usenet downloader descended from nzbget, written in Rust.
+//!
+//! The `rustyget` binary (`rust/entry.rs`) is a thin `main` over this crate.
+//! Many modules still keep nzbget's behavior byte for byte and some keep
+//! C-shaped signatures from the port; those are being made idiomatic.
 
 pub mod archive_native;
 #[cfg(unix)]

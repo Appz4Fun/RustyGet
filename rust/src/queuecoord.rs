@@ -4892,7 +4892,9 @@ impl NzbgetRsQueueCoordinator {
         }
 
         // A copy whose archive needs a password nobody has can never be extracted: failing over
-        // to it would throw this download away for nothing.
+        // to it would throw this download away for nothing. The selector only picks a locked copy
+        // when nothing better qualifies, so keep downloading this one rather than parking it,
+        // since parking would hand the slot to that same locked copy.
         let backup = crate::dupecoord::find_dupe_backup_host(
             host,
             opts,
@@ -4900,8 +4902,13 @@ impl NzbgetRsQueueCoordinator {
             nzb.ptr,
             &nzb.name,
             &nzb.dupe_key,
-        )
-        .filter(|(_, b)| !crate::dupecoord::locked_host(host, b.ptr));
+        );
+        if backup
+            .as_ref()
+            .is_some_and(|(_, b)| crate::dupecoord::locked_host(host, b.ptr))
+        {
+            return;
+        }
         let Some((backup_hi, backup_nzb)) = backup else {
             let attempted = nzb.dupe_attempted_articles + nzb.dupe_unsourced_articles;
             if should_park_dead_without_backup(

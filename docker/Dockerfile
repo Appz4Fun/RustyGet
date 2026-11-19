@@ -7,7 +7,7 @@ ARG TARGETPLATFORM
 # install build packages
 RUN \
   echo "**** install build packages ****" && \
-  apk add --no-cache bash python3 pkgconf g++ gcc git just cargo rust openssl-dev curl
+  apk add --no-cache bash python3 pkgconf gcc git just cargo rust openssl-dev curl
 
 # build rustyget
 COPY ./ /rustyget
@@ -56,7 +56,7 @@ ENV TERM=linux
 COPY --from=build /app/rustyget/ /app/rustyget/
 RUN \
   echo "**** install packages ****" && \
-  apk add --no-cache --update libstdc++ libgcc shadow su-exec openssl tzdata && \
+  apk add --no-cache --update libgcc shadow su-exec openssl tzdata && \
   ln -sf /app/rustyget /app/nzbget && \
   echo "**** cleanup ****" && \
   rm -rf /root/.cache /root/.cargo /tmp/*

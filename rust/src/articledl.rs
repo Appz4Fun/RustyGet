@@ -36,13 +36,13 @@ use crate::queuesubsys_host::{
     AD_RUNNING, MK_DEBUG, MK_DETAIL, MK_ERROR, MK_INFO, MK_WARNING,
 };
 use crate::renameanalyzer::Analyzer;
+use crate::status::DupeMode;
 
 const AD_WAITING: i32 = 2;
 const AD_CRC_ERROR: i32 = 6;
 const AD_NOT_FOUND: i32 = 7;
 const AD_CONNECT_ERROR: i32 = 8;
 const AD_TRANSIENT_ERROR: i32 = 9;
-const DM_FORCE: i32 = 2;
 
 #[inline]
 fn now_sec() -> i64 {
@@ -1548,7 +1548,7 @@ impl RsArticleWriter {
         self.article_ptr = 0;
 
         if self.format == Format::Yenc {
-            if dupe_check && dupe_mode != DM_FORCE && !many_dupe_files {
+            if dupe_check && dupe_mode != DupeMode::Force && !many_dupe_files {
                 let dest_file_path = filename.map(|fn_bytes| {
                     article_writer_format_dest_file_path(
                         &dest_dir,

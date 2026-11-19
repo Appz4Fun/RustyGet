@@ -146,6 +146,54 @@ status_enum! {
     }
 }
 
+/// How a download takes part in duplicate handling (NzbInfo::EDupeMode).
+///
+/// The RPC, binary RPC and feed entry points store whatever number they are
+/// given, so `Other` keeps a value that names no mode: it matches none of
+/// the mode checks and converts back unchanged.
+#[derive(Clone, Copy, Debug, Default)]
+pub enum DupeMode {
+    #[default]
+    Score,
+    All,
+    Force,
+    Other(i32),
+}
+
+impl DupeMode {
+    pub const ALL: &'static [Self] = &[Self::Score, Self::All, Self::Force];
+}
+
+impl From<i32> for DupeMode {
+    fn from(v: i32) -> Self {
+        match v {
+            0 => Self::Score,
+            1 => Self::All,
+            2 => Self::Force,
+            _ => Self::Other(v),
+        }
+    }
+}
+
+impl From<DupeMode> for i32 {
+    fn from(v: DupeMode) -> i32 {
+        match v {
+            DupeMode::Score => 0,
+            DupeMode::All => 1,
+            DupeMode::Force => 2,
+            DupeMode::Other(v) => v,
+        }
+    }
+}
+
+impl PartialEq for DupeMode {
+    fn eq(&self, other: &Self) -> bool {
+        i32::from(*self) == i32::from(*other)
+    }
+}
+
+impl Eq for DupeMode {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,5 +247,22 @@ mod tests {
         assert_eq!(i32::from(DupStatus::Dupe), 4);
         assert_eq!(i32::from(DupStatus::Good), 6);
         assert_eq!(i32::from(DupStatus::from(7)), 7);
+    }
+
+    #[test]
+    fn dupe_mode_round_trip() {
+        for &m in DupeMode::ALL {
+            assert_eq!(DupeMode::from(i32::from(m)), m);
+        }
+        assert_eq!(i32::from(DupeMode::Score), 0);
+        assert_eq!(i32::from(DupeMode::All), 1);
+        assert_eq!(i32::from(DupeMode::Force), 2);
+        for raw in [3, -1] {
+            let m = DupeMode::from(raw);
+            assert_eq!(m, DupeMode::Other(raw));
+            assert_eq!(i32::from(m), raw);
+            assert!(DupeMode::ALL.iter().all(|&known| known != m));
+        }
+        assert_eq!(DupeMode::default(), DupeMode::Score);
     }
 }

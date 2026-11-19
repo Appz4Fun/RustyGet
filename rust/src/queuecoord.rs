@@ -1,5 +1,6 @@
 //! Rust implementation of `QueueCoordinator` (`daemon/queue/QueueCoordinator.cpp`).
 
+use crate::status::DupeMode;
 use std::ffi::CStr;
 
 #[inline]
@@ -970,8 +971,7 @@ pub fn should_park_dead_without_backup(
 pub fn should_wait_for_borrowing_on_par_damage(
     fallback_enabled: bool,
     raw_article: bool,
-    dupe_mode: i32,
-    dm_force: i32,
+    dupe_mode: DupeMode,
     has_par2: bool,
     defer_state: i32,
     dp_deferred: i32,
@@ -979,7 +979,7 @@ pub fn should_wait_for_borrowing_on_par_damage(
     failover_sample: i32,
     recovered: i32,
 ) -> bool {
-    if fallback_enabled && !raw_article && dupe_mode != dm_force && has_par2 {
+    if fallback_enabled && !raw_article && dupe_mode != DupeMode::Force && has_par2 {
         defer_state == dp_deferred
             || attempted < failover_sample
             || recovered.saturating_mul(2) >= attempted
@@ -1838,7 +1838,7 @@ impl NzbgetRsQueueCoordinator {
             }
 
             if delete_status == crate::queuesubsys_host::DS_NONE {
-                if opts.dupe_check && nzb.dupe_mode != crate::queuesubsys_host::DM_FORCE {
+                if opts.dupe_check && nzb.dupe_mode != DupeMode::Force {
                     self.check_dupe_file_infos(host, added_nzb_ptr);
                 }
                 host.queue_insert_owned(dq_ptr, uptr_addr, url_ptr, add_first);
@@ -3533,7 +3533,7 @@ impl NzbgetRsQueueCoordinator {
                 );
                 let mut dupe_file_exists = false;
                 if opts.dupe_check
-                    && nzb.dupe_mode != crate::queuesubsys_host::DM_FORCE
+                    && nzb.dupe_mode != DupeMode::Force
                     && !nzb.many_dupe_files
                 {
                     let check_path = join_path(&nzb.dest_dir, &file.filename);
@@ -5176,7 +5176,6 @@ impl NzbgetRsQueueCoordinator {
             opts.dupe_article_fallback != crate::queuesubsys_host::DAF_NONE,
             opts.raw_article,
             nzb.dupe_mode,
-            crate::queuesubsys_host::DM_FORCE,
             crate::dupefallback::has_par2_host(host, nzb),
             nzb.dupe_par_defer_state,
             crate::queuesubsys_host::DP_DEFERRED,

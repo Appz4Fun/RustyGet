@@ -7254,7 +7254,7 @@ unsafe extern "C" fn active_disk_export_nzb_cb(
             exp.info.full_content_hash = d.full_content_hash;
             exp.info.filtered_content_hash = d.filtered_content_hash;
             exp.info.dupe_score = d.dupe_score;
-            exp.info.dupe_mode = d.dupe_mode;
+            exp.info.dupe_mode = d.dupe_mode.into();
             exp.info.name = name_c.as_ptr();
             exp.info.dupe_key = dupe_key_c.as_ptr();
             unsafe { sink_fn(sink_ctx, &exp) };
@@ -7338,7 +7338,7 @@ unsafe extern "C" fn active_disk_export_nzb_cb(
         success_articles: sn.success_articles,
         failed_articles: sn.failed_articles,
         dupe_key: dkey_c.as_ptr(),
-        dupe_mode: sn.dupe_mode,
+        dupe_mode: sn.dupe_mode.into(),
         dupe_score: sn.dupe_score,
         dupe_hint: sn.dupe_hint,
         downloaded_size: sn.downloaded_size,

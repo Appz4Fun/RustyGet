@@ -40,6 +40,7 @@ use crate::dupewatch::{
     is_live_fleet_peer, par_doomed, unlisted_missing, whole_bytes, Decision, FetchBudget,
     SearchStamp, Snapshot, BASE_PICK_SCORE, MANAGED_FLEET,
 };
+use crate::status::DupeMode;
 use crate::xmlrpc_format::{
     NzbgetRsRpcFleetMember, NzbgetRsRpcFleetReqMember, NzbgetRsXmlRpcEmitFn,
 };
@@ -668,7 +669,7 @@ struct NzbSnap {
     deleting: bool,
     delete_status: i32,
     mark_status: i32,
-    dupe_mode: i32,
+    dupe_mode: DupeMode,
     dupe_hint: i32,
     dupe_score: i32,
     has_post_info: bool,
@@ -823,7 +824,6 @@ fn check_placement_available(
         backup.mark_status,
         1,
         backup.dupe_mode,
-        2,
         in_history,
         whole_backup,
         backup.has_post_info,
@@ -2319,7 +2319,10 @@ impl NzbgetRsDupeSearch {
         // queued primary, so it checks the new backup (and can swap to it);
         // fleet_append has already scored it, so it needs no rerank.
         let fleet_backup = added.has_dupe_fleet;
-        if action_kind == 1 && added.dupe_mode == 0 && (fleet_backup || !added.is_donor) {
+        if action_kind == 1
+            && added.dupe_mode == DupeMode::Score
+            && (fleet_backup || !added.is_donor)
+        {
             let added_key = lower_key(&effective_key(&added.dupe_key, &added.name));
             let (q_len, _) = dq_counts(host_ctx, host_cb, dq_ptr);
             let mut parent: Option<(i32, i32)> = None;
@@ -2427,7 +2430,6 @@ impl NzbgetRsDupeSearch {
                     item.kind,
                     0,
                     item.dupe_mode,
-                    0,
                     item.has_post_info,
                     item.delete_status,
                     0,
@@ -2811,11 +2813,7 @@ impl NzbgetRsDupeSearch {
                 msg.extend_from_slice(mode);
                 msg.extend_from_slice(b" set to SCORE, so it can fail over to a backup");
                 if let Some(qh) = crate::ffi::queue_host() {
-                    qh.nzb_set_int(
-                        pick.ptr,
-                        crate::queuesubsys_host::NZB_INT_DUPE_MODE,
-                        crate::queuesubsys_host::DM_SCORE,
-                    );
+                    qh.nzb_set_dupe_mode(pick.ptr, DupeMode::Score);
                     qh.nzb_set_int(pick.ptr, crate::queuesubsys_host::NZB_INT_CHANGED, 1);
                     if history {
                         qh.dq_history_changed(dq_ptr);
@@ -2824,7 +2822,7 @@ impl NzbgetRsDupeSearch {
                         qh.dq_save_changed(dq_ptr);
                     }
                 }
-                pick.dupe_mode = crate::queuesubsys_host::DM_SCORE;
+                pick.dupe_mode = DupeMode::Score;
             }
             host_log(host_ctx, host_cb, MK_INFO, &msg);
         }

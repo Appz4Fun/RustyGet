@@ -146,6 +146,7 @@ use crate::queuesubsys_host::{
     NZB_INT_DELETE_STATUS, NZB_INT_DELETING, NZB_INT_URL_STATUS,
 };
 use crate::options::OptStr;
+use crate::status::DupeMode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -946,9 +947,9 @@ pub(crate) fn add_binrpc_url_active(
 #[cfg(unix)]
 pub(crate) fn add_testserver_url_active(server_id: i32, url: &[u8]) -> bool {
     use crate::queuesubsys_host::{
-        DM_FORCE, NK_URL, NZB_FORCE_PRIORITY, NZB_INT_ADD_URL_PAUSED, NZB_INT_DESIRED_SERVER_ID,
-        NZB_INT_DUPE_MODE, NZB_INT_EXTRA_PRIORITY, NZB_INT_KIND, NZB_INT_PRIORITY,
-        NZB_INT_SKIP_DISK_WRITE, NZB_INT_SKIP_SCRIPT_PROCESSING, NZB_STR_FILENAME, NZB_STR_URL,
+        NK_URL, NZB_FORCE_PRIORITY, NZB_INT_ADD_URL_PAUSED, NZB_INT_DESIRED_SERVER_ID,
+        NZB_INT_EXTRA_PRIORITY, NZB_INT_KIND, NZB_INT_PRIORITY, NZB_INT_SKIP_DISK_WRITE,
+        NZB_INT_SKIP_SCRIPT_PROCESSING, NZB_STR_FILENAME, NZB_STR_URL,
     };
     let (Some(host), Some(uc)) = (crate::ffi::queue_host(), active_url_coord()) else {
         return false;
@@ -964,7 +965,7 @@ pub(crate) fn add_testserver_url_active(server_id: i32, url: &[u8]) -> bool {
     host.nzb_set_int(nzb_ptr, NZB_INT_PRIORITY, NZB_FORCE_PRIORITY);
     host.nzb_set_int(nzb_ptr, NZB_INT_EXTRA_PRIORITY, NZB_FORCE_PRIORITY);
     host.nzb_set_int(nzb_ptr, NZB_INT_ADD_URL_PAUSED, 0);
-    host.nzb_set_int(nzb_ptr, NZB_INT_DUPE_MODE, DM_FORCE);
+    host.nzb_set_dupe_mode(nzb_ptr, DupeMode::Force);
     host.nzb_set_int(nzb_ptr, NZB_INT_DESIRED_SERVER_ID, server_id);
     host.nzb_set_int(nzb_ptr, NZB_INT_SKIP_SCRIPT_PROCESSING, 1);
     host.nzb_set_int(nzb_ptr, NZB_INT_SKIP_DISK_WRITE, 1);

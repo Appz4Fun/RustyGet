@@ -1,6 +1,7 @@
 //! Terminal unquoted filename parsing and PAR classification for duplicate search.
 
 use crate::cstr;
+use crate::status::DupeMode;
 
 fn trim_range(bytes: &[u8], mut start: usize, mut end: usize) -> (usize, usize) {
     let trim = |b| matches!(b, b' ' | b'\t' | b'\r' | b'\n');
@@ -328,8 +329,7 @@ pub fn dupesearch_is_rank_only_queued_member(
     is_self: bool,
     kind: i32,
     nk_nzb_val: i32,
-    dupe_mode: i32,
-    dm_score_val: i32,
+    dupe_mode: DupeMode,
     has_post_info: bool,
     delete_status: i32,
     ds_none_val: i32,
@@ -340,7 +340,7 @@ pub fn dupesearch_is_rank_only_queued_member(
     rank_only
         && !is_self
         && kind == nk_nzb_val
-        && dupe_mode == dm_score_val
+        && dupe_mode == DupeMode::Score
         && !has_post_info
         && (delete_status == ds_none_val || delete_status == ds_dupe_val)
         && item_score < pick_score
@@ -482,8 +482,7 @@ pub fn placement_available(
     ds_copy: i32,
     mark_status: i32,
     ks_bad: i32,
-    dupe_mode: i32,
-    dm_force: i32,
+    dupe_mode: DupeMode,
     in_history: bool,
     whole_backup: bool,
     has_post_info: bool,
@@ -503,7 +502,7 @@ pub fn placement_available(
         || deleting
         || delete_status == ds_manual
         || mark_status == ks_bad
-        || dupe_mode == dm_force
+        || dupe_mode == DupeMode::Force
     {
         return false;
     }

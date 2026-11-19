@@ -1,6 +1,7 @@
 //! `QueueEditor` and `GroupSorter` (`daemon/queue/QueueEditor.cpp`) end-to-end Rust implementation.
 
 use crate::queuecoord::strcasecmp_bytes;
+use crate::status::DupeMode;
 
 pub const SORT_CRITERIA_NAME: i32 = 0;
 pub const SORT_CRITERIA_SIZE: i32 = 1;
@@ -12,10 +13,6 @@ pub const SORT_CRITERIA_PRIORITY: i32 = 5;
 pub const SORT_ORDER_ASCENDING: i32 = 0;
 pub const SORT_ORDER_DESCENDING: i32 = 1;
 pub const SORT_ORDER_AUTO: i32 = 2;
-
-pub const DUPE_MODE_SCORE: i32 = 0;
-pub const DUPE_MODE_ALL: i32 = 1;
-pub const DUPE_MODE_FORCE: i32 = 2;
 
 /// `GroupSorter::Execute` (`QueueEditor.cpp`):
 /// Parses sort specification (`name[+-]`, `size[+-]`, `left[+-]`, `age[+-]`, `category[+-]`, `priority[+-]`).
@@ -356,13 +353,13 @@ pub fn compare_inner_files(
 
 /// `QueueEditor::SetNzbDupeParam` & `HistoryCoordinator::HistorySetDupeParam`:
 /// Parses `"SCORE"`, `"ALL"`, `"FORCE"` case-insensitively.
-pub fn parse_dupe_mode(text: &[u8]) -> Option<i32> {
+pub fn parse_dupe_mode(text: &[u8]) -> Option<DupeMode> {
     if strcasecmp_bytes(text, b"SCORE") {
-        Some(DUPE_MODE_SCORE)
+        Some(DupeMode::Score)
     } else if strcasecmp_bytes(text, b"ALL") {
-        Some(DUPE_MODE_ALL)
+        Some(DupeMode::All)
     } else if strcasecmp_bytes(text, b"FORCE") {
-        Some(DUPE_MODE_FORCE)
+        Some(DupeMode::Force)
     } else {
         None
     }
@@ -1008,7 +1005,7 @@ fn set_nzb_dupe_param(
 ) {
     use crate::queuesubsys_host::{
         EA_GROUP_SET_DUPE_KEY, EA_GROUP_SET_DUPE_MODE, EA_GROUP_SET_DUPE_SCORE, MK_DEBUG, MK_ERROR,
-        NZB_INT_DUPE_MODE, NZB_INT_DUPE_SCORE, NZB_STR_DUPE_KEY,
+        NZB_INT_DUPE_SCORE, NZB_STR_DUPE_KEY,
     };
     let nzb = host.nzb_snap(nzb_ptr, false);
     let text_disp = text.unwrap_or(b"(null)");
@@ -1034,7 +1031,7 @@ fn set_nzb_dupe_param(
         }
         EA_GROUP_SET_DUPE_MODE => {
             if let Some(mode) = text.and_then(parse_dupe_mode) {
-                host.nzb_set_int(nzb_ptr, NZB_INT_DUPE_MODE, mode);
+                host.nzb_set_dupe_mode(nzb_ptr, mode);
             } else {
                 let err = push_bytes_msg(
                     b"Could not set duplicate mode for ",

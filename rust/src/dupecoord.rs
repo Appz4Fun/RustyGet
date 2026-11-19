@@ -5,7 +5,7 @@
 //! (`no_backup_reason`, `format_no_backup_reason`), skip message formatting
 //! (`format_dupe_skip_message`), and status classification (`status_from_text`).
 
-use crate::status::DupStatus;
+use crate::status::{DupStatus, DupeMode};
 use std::collections::BTreeSet;
 use std::ffi::{c_char, CStr};
 use std::path::Path;
@@ -80,10 +80,6 @@ pub fn strcasecmp_bytes(a: &[u8], b: &[u8]) -> bool {
 pub fn strncasecmp_prefix(haystack: &[u8], prefix: &[u8]) -> bool {
     haystack.len() >= prefix.len() && haystack[..prefix.len()].eq_ignore_ascii_case(prefix)
 }
-
-pub const DUPE_MODE_SCORE: i32 = 0;
-pub const DUPE_MODE_ALL: i32 = 1;
-pub const DUPE_MODE_FORCE: i32 = 2;
 
 pub const HEALTH_CHECK_PAUSE: i32 = 0;
 pub const HEALTH_CHECK_DELETE: i32 = 1;
@@ -202,10 +198,10 @@ pub unsafe fn parse_alive_permille_cstr(value: *const c_char) -> i32 {
 }
 
 /// `DupeCoordinator::FailsOver`
-pub fn fails_over(dupe_check: bool, dupe_mode: i32, health_check: i32) -> bool {
+pub fn fails_over(dupe_check: bool, dupe_mode: DupeMode, health_check: i32) -> bool {
     dupe_check
-        && (dupe_mode == DUPE_MODE_SCORE
-            || (dupe_mode == DUPE_MODE_FORCE && health_check == HEALTH_CHECK_DUPE))
+        && (dupe_mode == DupeMode::Score
+            || (dupe_mode == DupeMode::Force && health_check == HEALTH_CHECK_DUPE))
 }
 
 /// `DupeCoordinator::NoBackupReason` formatter
@@ -229,7 +225,7 @@ successful duplicate, or were copies of this download"
 /// `DupeCoordinator::NoBackupReason` end-to-end evaluator.
 pub fn no_backup_reason<F>(
     fails_over_flag: bool,
-    dupe_mode: i32,
+    dupe_mode: DupeMode,
     history: &[NzbgetRsDupeHistoryCandidate],
     mut file_exists_cb: F,
 ) -> Vec<u8>
@@ -237,7 +233,7 @@ where
     F: FnMut(usize) -> bool,
 {
     if !fails_over_flag {
-        return if dupe_mode == DUPE_MODE_FORCE {
+        return if dupe_mode == DupeMode::Force {
             b"its DupeMode is force".to_vec()
         } else {
             b"its DupeMode is all".to_vec()
@@ -257,7 +253,7 @@ where
         total += 1;
         if h.delete_status != DELETE_STATUS_DUPE && h.delete_status != DELETE_STATUS_COPY {
             not_backup += 1;
-        } else if h.dupe_mode == DUPE_MODE_FORCE {
+        } else if h.dupe_mode == DupeMode::Force {
             forced += 1;
         } else if !file_exists_cb(idx) {
             no_file += 1;
@@ -348,7 +344,7 @@ where
         let mut good_dupe = false;
 
         if h.kind == HISTORY_KIND_NZB
-            && h.dupe_mode != DUPE_MODE_FORCE
+            && h.dupe_mode != DupeMode::Force
             && h.is_dupe_success != 0
             && h.same_name_or_key != 0
         {
@@ -360,7 +356,7 @@ where
         }
 
         if h.kind == HISTORY_KIND_DUP
-            && h.dupe_mode != DUPE_MODE_FORCE
+            && h.dupe_mode != DupeMode::Force
             && (h.dup_status == DupStatus::Success || h.dup_status == DupStatus::Good)
             && h.same_name_or_key != 0
         {
@@ -381,7 +377,7 @@ where
     for q in queue {
         if q.is_self == 0
             && q.is_nzb_kind != 0
-            && q.dupe_mode != DUPE_MODE_FORCE
+            && q.dupe_mode != DupeMode::Force
             && q.same_name_or_key != 0
             && (!queue_dupe || q.dupe_score > queue_score)
         {
@@ -437,7 +433,7 @@ where
             };
 
         if has_candidate
-            && h.dupe_mode != DUPE_MODE_FORCE
+            && h.dupe_mode != DupeMode::Force
             && backup_status
             && better
             && !(dupe_health && h.alive_permille == 0)
@@ -610,7 +606,7 @@ pub fn accumulate_history_dupe_status(
 #[allow(clippy::too_many_arguments)]
 pub fn should_cleanup_history_dupe(
     kind: i32,
-    dupe_mode: i32,
+    dupe_mode: DupeMode,
     delete_status: i32,
     is_self: bool,
     item_name: &[u8],
@@ -620,24 +616,24 @@ pub fn should_cleanup_history_dupe(
 ) -> bool {
     !is_self
         && (kind == HISTORY_KIND_NZB || kind == HISTORY_KIND_URL)
-        && dupe_mode != DUPE_MODE_FORCE
+        && dupe_mode != DupeMode::Force
         && delete_status == DELETE_STATUS_DUPE
         && same_name_or_key(item_name, item_dupe_key, target_name, target_dupe_key)
 }
 
 /// `DupeCoordinator::ListHistoryDupes` candidate predicate.
 pub fn should_list_history_dupe(
-    self_dupe_mode: i32,
+    self_dupe_mode: DupeMode,
     kind: i32,
-    item_dupe_mode: i32,
+    item_dupe_mode: DupeMode,
     item_name: &[u8],
     item_dupe_key: &[u8],
     self_name: &[u8],
     self_dupe_key: &[u8],
 ) -> bool {
-    self_dupe_mode != DUPE_MODE_FORCE
+    self_dupe_mode != DupeMode::Force
         && kind == HISTORY_KIND_NZB
-        && item_dupe_mode != DUPE_MODE_FORCE
+        && item_dupe_mode != DupeMode::Force
         && same_name_or_key(item_name, item_dupe_key, self_name, self_dupe_key)
 }
 
@@ -666,13 +662,13 @@ pub fn eval_history_dupe_match(
     kind: i32,
     self_full_hash: u32,
     self_filtered_hash: u32,
-    self_dupe_mode: i32,
+    self_dupe_mode: DupeMode,
     self_dupe_score: i32,
     self_name: &[u8],
     self_dupe_key: &[u8],
     item_full_hash: u32,
     item_filtered_hash: u32,
-    item_dupe_mode: i32,
+    item_dupe_mode: DupeMode,
     item_mark_status: i32,
     item_dup_status: DupStatus,
     item_dupe_score: i32,
@@ -690,16 +686,16 @@ pub fn eval_history_dupe_match(
         return Some((true, false));
     }
     if kind == HISTORY_KIND_NZB
-        && item_dupe_mode != DUPE_MODE_FORCE
+        && item_dupe_mode != DupeMode::Force
         && item_mark_status == MARK_STATUS_GOOD
         && same_name_or_key(item_name, item_dupe_key, self_name, self_dupe_key)
     {
         return Some((false, true));
     }
     if kind == HISTORY_KIND_DUP
-        && item_dupe_mode != DUPE_MODE_FORCE
+        && item_dupe_mode != DupeMode::Force
         && (item_dup_status == DupStatus::Good
-            || (self_dupe_mode == DUPE_MODE_SCORE
+            || (self_dupe_mode == DupeMode::Score
                 && item_dup_status == DupStatus::Success
                 && self_dupe_score <= item_dupe_score))
         && same_name_or_key(item_name, item_dupe_key, self_name, self_dupe_key)
@@ -756,12 +752,12 @@ pub fn accum_hc_dupe_same_content_outcome(
 pub fn should_skip_recent_history_score_dupe(
     same_content: bool,
     good: bool,
-    self_dupe_mode: i32,
+    self_dupe_mode: DupeMode,
     self_dupe_score: i32,
     self_name: &[u8],
     self_dupe_key: &[u8],
     kind: i32,
-    item_dupe_mode: i32,
+    item_dupe_mode: DupeMode,
     item_dupe_score: i32,
     item_is_dupe_success: bool,
     item_name: &[u8],
@@ -769,9 +765,9 @@ pub fn should_skip_recent_history_score_dupe(
 ) -> bool {
     !same_content
         && !good
-        && self_dupe_mode == DUPE_MODE_SCORE
+        && self_dupe_mode == DupeMode::Score
         && (kind == HISTORY_KIND_NZB || kind == HISTORY_KIND_URL)
-        && item_dupe_mode != DUPE_MODE_FORCE
+        && item_dupe_mode != DupeMode::Force
         && same_name_or_key(item_name, item_dupe_key, self_name, self_dupe_key)
         && self_dupe_score <= item_dupe_score
         && item_is_dupe_success
@@ -787,7 +783,7 @@ pub fn eval_queue_score_dupe(
     queued_delete_status: i32,
     queued_is_nzb: bool,
     both_are_url: bool,
-    queued_dupe_mode: i32,
+    queued_dupe_mode: DupeMode,
     queued_name: &[u8],
     queued_dupe_key: &[u8],
     self_name: &[u8],
@@ -804,7 +800,7 @@ pub fn eval_queue_score_dupe(
     if is_self
         || queued_delete_status != DELETE_STATUS_NONE
         || (!queued_is_nzb && !both_are_url)
-        || queued_dupe_mode == DUPE_MODE_FORCE
+        || queued_dupe_mode == DupeMode::Force
         || !same_name_or_key(queued_name, queued_dupe_key, self_name, self_dupe_key)
     {
         return 0;
@@ -829,7 +825,7 @@ pub fn is_other_to_stop_on_completed(
     queued_is_nzb: bool,
     queued_deleting: bool,
     queued_delete_status: i32,
-    queued_dupe_mode: i32,
+    queued_dupe_mode: DupeMode,
     queued_dupe_key: &[u8],
     self_dupe_key: &[u8],
 ) -> bool {
@@ -837,7 +833,7 @@ pub fn is_other_to_stop_on_completed(
         && queued_is_nzb
         && !queued_deleting
         && queued_delete_status == DELETE_STATUS_NONE
-        && queued_dupe_mode != DUPE_MODE_FORCE
+        && queued_dupe_mode != DupeMode::Force
         && strcasecmp_bytes(queued_dupe_key, self_dupe_key)
 }
 
@@ -846,7 +842,7 @@ pub fn resolve_history_mark(
     mark_status: i32,
     dupe_check: bool,
     kind: i32,
-    dupe_mode: i32,
+    dupe_mode: DupeMode,
 ) -> (&'static [u8], DupStatus, i32) {
     let mark_name: &'static [u8] = if mark_status == MARK_STATUS_BAD {
         b"bad\0"
@@ -865,7 +861,7 @@ pub fn resolve_history_mark(
         DupStatus::Bad
     };
     if !dupe_check
-        || ((kind == HISTORY_KIND_NZB || kind == HISTORY_KIND_DUP) && dupe_mode == DUPE_MODE_FORCE)
+        || ((kind == HISTORY_KIND_NZB || kind == HISTORY_KIND_DUP) && dupe_mode == DupeMode::Force)
     {
         return (mark_name, dup_status, 0);
     }
@@ -931,8 +927,8 @@ pub(crate) fn fails_over_snap(
     nzb: &crate::queuesubsys_host::NzbSnap,
 ) -> bool {
     opts.dupe_check
-        && (nzb.dupe_mode == crate::queuesubsys_host::DM_SCORE
-            || (nzb.dupe_mode == crate::queuesubsys_host::DM_FORCE
+        && (nzb.dupe_mode == DupeMode::Score
+            || (nzb.dupe_mode == DupeMode::Force
                 && opts.health_check == crate::queuesubsys_host::HC_DUPE))
 }
 
@@ -985,7 +981,7 @@ pub(crate) fn no_backup_reason_host(
         let hi = host.history_at(dq_ptr, i);
         let mut c = NzbgetRsDupeHistoryCandidate {
             kind: hi.kind,
-            dupe_mode: 0,
+            dupe_mode: DupeMode::Score,
             dupe_score: 0,
             is_dupe_success: 0,
             mark_status: 0,
@@ -1066,7 +1062,7 @@ fn collect_dupe_candidates(
         let hi = host.history_at(dq_ptr, i);
         let mut c = NzbgetRsDupeHistoryCandidate {
             kind: hi.kind,
-            dupe_mode: 0,
+            dupe_mode: DupeMode::Score,
             dupe_score: 0,
             is_dupe_success: 0,
             mark_status: 0,
@@ -1325,7 +1321,7 @@ fn history_cleanup_host(
             || hi.kind == crate::queuesubsys_host::HK_URL;
         if is_nzb_or_url && hi.inner_ptr != 0 && hi.hi_ptr != mark_hi_ptr {
             let item = host.nzb_snap(hi.inner_ptr, false);
-            if item.dupe_mode != crate::queuesubsys_host::DM_FORCE
+            if item.dupe_mode != DupeMode::Force
                 && item.delete_status == crate::queuesubsys_host::DS_DUPE
                 && same_name_or_key(&item.name, &item.dupe_key, nzb_name, dupe_key)
             {
@@ -1359,9 +1355,7 @@ pub(crate) fn nzb_found_host(
     dbg.extend_from_slice(&nzb.name);
     host.log(crate::queuesubsys_host::MK_DEBUG, &dbg);
 
-    if nzb.kind == crate::queuesubsys_host::NK_NZB
-        && nzb.dupe_mode != crate::queuesubsys_host::DM_FORCE
-    {
+    if nzb.kind == crate::queuesubsys_host::NK_NZB && nzb.dupe_mode != DupeMode::Force {
         if let Some(downloaded) = downloaded_on_disk_host(host, &opts, dq_ptr, &nzb) {
             let mut msg = b"Not downloading ".to_vec();
             msg.extend_from_slice(&nzb.name);
@@ -1489,7 +1483,7 @@ pub(crate) fn nzb_found_host(
                 dupe_name = item.name;
                 break;
             }
-            if item.dupe_mode != crate::queuesubsys_host::DM_FORCE
+            if item.dupe_mode != DupeMode::Force
                 && item.mark_status == crate::queuesubsys_host::KS_GOOD
                 && same_name_or_key(&item.name, &item.dupe_key, &nzb.name, &nzb.dupe_key)
             {
@@ -1509,10 +1503,10 @@ pub(crate) fn nzb_found_host(
                 dupe_name = dup.name;
                 break;
             }
-            if dup.dupe_mode != crate::queuesubsys_host::DM_FORCE
+            if dup.dupe_mode != DupeMode::Force
                 && same_name_or_key(&dup.name, &dup.dupe_key, &nzb.name, &nzb.dupe_key)
                 && (dup.status == DupStatus::Good
-                    || (nzb.dupe_mode == crate::queuesubsys_host::DM_SCORE
+                    || (nzb.dupe_mode == DupeMode::Score
                         && dup.status == DupStatus::Success
                         && nzb.dupe_score <= dup.dupe_score))
             {
@@ -1597,7 +1591,7 @@ pub(crate) fn nzb_found_host(
         return;
     }
 
-    if !same_content && !good && nzb.dupe_mode == crate::queuesubsys_host::DM_SCORE {
+    if !same_content && !good && nzb.dupe_mode == DupeMode::Score {
         for i in 0..hlen {
             let hi = host.history_at(dq_ptr, i);
             if (hi.kind == crate::queuesubsys_host::HK_NZB
@@ -1605,7 +1599,7 @@ pub(crate) fn nzb_found_host(
                 && hi.inner_ptr != 0
             {
                 let item = host.nzb_snap(hi.inner_ptr, false);
-                if item.dupe_mode != crate::queuesubsys_host::DM_FORCE
+                if item.dupe_mode != DupeMode::Force
                     && same_name_or_key(&item.name, &item.dupe_key, &nzb.name, &nzb.dupe_key)
                     && nzb.dupe_score <= item.dupe_score
                     && item.is_dupe_success
@@ -1657,7 +1651,7 @@ pub(crate) fn nzb_found_host(
         return;
     }
 
-    if nzb.dupe_mode == crate::queuesubsys_host::DM_SCORE {
+    if nzb.dupe_mode == DupeMode::Score {
         let mut index = 0usize;
         loop {
             let cur_qlen = host.queue_len(dq_ptr);
@@ -1674,7 +1668,7 @@ pub(crate) fn nzb_found_host(
                 && (q.kind == crate::queuesubsys_host::NK_NZB
                     || (q.kind == crate::queuesubsys_host::NK_URL
                         && nzb.kind == crate::queuesubsys_host::NK_URL))
-                && q.dupe_mode != crate::queuesubsys_host::DM_FORCE
+                && q.dupe_mode != DupeMode::Force
                 && same_name_or_key(&q.name, &q.dupe_key, &nzb.name, &nzb.dupe_key)
             {
                 let keep_returned = opts.health_check == crate::queuesubsys_host::HC_DUPE
@@ -1766,7 +1760,7 @@ pub(crate) fn nzb_completed_host(
             if queued.kind == crate::queuesubsys_host::NK_NZB
                 && !queued.deleting
                 && queued.delete_status == crate::queuesubsys_host::DS_NONE
-                && queued.dupe_mode != crate::queuesubsys_host::DM_FORCE
+                && queued.dupe_mode != DupeMode::Force
                 && queued.dupe_key.eq_ignore_ascii_case(&nzb.dupe_key)
             {
                 let mut msg = b"Stopping ".to_vec();
@@ -1866,7 +1860,7 @@ pub(crate) fn history_mark_host(
             return;
         };
 
-    if !opts.dupe_check || dupe_mode == crate::queuesubsys_host::DM_FORCE {
+    if !opts.dupe_check || dupe_mode == DupeMode::Force {
         return;
     }
 
@@ -1936,7 +1930,7 @@ pub(crate) fn list_history_dupes_host(
         return out;
     }
     let nzb = host.nzb_snap(nzb_ptr, false);
-    if nzb.dupe_mode == crate::queuesubsys_host::DM_FORCE {
+    if nzb.dupe_mode == DupeMode::Force {
         return out;
     }
     let hlen = host.history_len(dq_ptr);
@@ -1944,7 +1938,7 @@ pub(crate) fn list_history_dupes_host(
         let hi = host.history_at(dq_ptr, i);
         if hi.kind == crate::queuesubsys_host::HK_NZB && hi.inner_ptr != 0 {
             let item = host.nzb_snap(hi.inner_ptr, false);
-            if item.dupe_mode != crate::queuesubsys_host::DM_FORCE
+            if item.dupe_mode != DupeMode::Force
                 && same_name_or_key(&item.name, &item.dupe_key, &nzb.name, &nzb.dupe_key)
             {
                 out.push(hi.inner_ptr);
@@ -1959,8 +1953,33 @@ mod tests {
     use super::*;
     use std::ffi::CString;
 
+    #[test]
+    fn unknown_dupe_mode_matches_no_mode_check() {
+        for raw in [3, -1] {
+            let mode = DupeMode::from(raw);
+            assert_eq!(i32::from(mode), raw);
+            // Not Score, so it never fails over; not Force, so a mark still
+            // gets its post action and the reason names DupeMode all.
+            assert!(!fails_over(true, mode, HEALTH_CHECK_DUPE));
+            assert_eq!(
+                resolve_history_mark(MARK_STATUS_GOOD, true, HISTORY_KIND_NZB, mode).2,
+                1
+            );
+            assert_eq!(
+                no_backup_reason(false, mode, &[], |_| true),
+                b"its DupeMode is all".to_vec()
+            );
+        }
+        assert!(fails_over(true, DupeMode::Score, 0));
+        assert!(fails_over(true, DupeMode::Force, HEALTH_CHECK_DUPE));
+        assert_eq!(
+            resolve_history_mark(MARK_STATUS_GOOD, true, HISTORY_KIND_NZB, DupeMode::Force).2,
+            0
+        );
+    }
+
     fn rescue_candidate(
-        mode: i32,
+        mode: DupeMode,
         status: i32,
         score: i32,
         alive_permille: i32,
@@ -1987,7 +2006,7 @@ mod tests {
         NzbgetRsDupeQueueCandidate {
             is_self: 1,
             is_nzb_kind: 1,
-            dupe_mode: DUPE_MODE_FORCE,
+            dupe_mode: DupeMode::Force,
             dupe_score: 1_000_000,
             same_name_or_key: 1,
         }
@@ -1997,10 +2016,10 @@ mod tests {
     fn rescue_takes_force_backups_and_copies() {
         let history = [
             // the failed pick itself
-            rescue_candidate(DUPE_MODE_FORCE, DELETE_STATUS_HEALTH, 1_000_000, 300),
-            rescue_candidate(DUPE_MODE_FORCE, DELETE_STATUS_DUPE, 999_080, 900),
-            rescue_candidate(DUPE_MODE_SCORE, DELETE_STATUS_COPY, 999_050, 990),
-            rescue_candidate(DUPE_MODE_FORCE, DELETE_STATUS_DUPE, 999_001, 0),
+            rescue_candidate(DupeMode::Force, DELETE_STATUS_HEALTH, 1_000_000, 300),
+            rescue_candidate(DupeMode::Force, DELETE_STATUS_DUPE, 999_080, 900),
+            rescue_candidate(DupeMode::Score, DELETE_STATUS_COPY, 999_050, 990),
+            rescue_candidate(DupeMode::Force, DELETE_STATUS_DUPE, 999_001, 0),
         ];
         let queue = [rescue_self()];
         // failover skips FORCE backups and (without HealthCheck=dupe) copies
@@ -2019,9 +2038,9 @@ mod tests {
     #[test]
     fn rescue_orders_by_alive_then_score() {
         let history = [
-            rescue_candidate(DUPE_MODE_SCORE, DELETE_STATUS_DUPE, 999_090, -1),
-            rescue_candidate(DUPE_MODE_SCORE, DELETE_STATUS_DUPE, 999_020, 500),
-            rescue_candidate(DUPE_MODE_SCORE, DELETE_STATUS_DUPE, 999_030, 500),
+            rescue_candidate(DupeMode::Score, DELETE_STATUS_DUPE, 999_090, -1),
+            rescue_candidate(DupeMode::Score, DELETE_STATUS_DUPE, 999_020, 500),
+            rescue_candidate(DupeMode::Score, DELETE_STATUS_DUPE, 999_030, 500),
         ];
         let queue = [rescue_self()];
         assert_eq!(select_rescue_backup(&history, &queue, |_| true), 2);
@@ -2031,11 +2050,11 @@ mod tests {
 
     #[test]
     fn rescue_orders_twins_then_borrowable_alts() {
-        let mut twin = rescue_candidate(DUPE_MODE_SCORE, DELETE_STATUS_DUPE, 999_010, 980);
+        let mut twin = rescue_candidate(DupeMode::Score, DELETE_STATUS_DUPE, 999_010, 980);
         twin.donor_kind = crate::donorkind::DonorKind::Twin as i32;
-        let mut borrowable = rescue_candidate(DUPE_MODE_SCORE, DELETE_STATUS_DUPE, 999_090, 990);
+        let mut borrowable = rescue_candidate(DupeMode::Score, DELETE_STATUS_DUPE, 999_090, 990);
         borrowable.donor_kind = crate::donorkind::DonorKind::Borrowable as i32;
-        let mut unborrowable = rescue_candidate(DUPE_MODE_SCORE, DELETE_STATUS_DUPE, 999_095, 1000);
+        let mut unborrowable = rescue_candidate(DupeMode::Score, DELETE_STATUS_DUPE, 999_095, 1000);
         unborrowable.donor_kind = crate::donorkind::DonorKind::Unborrowable as i32;
         let queue = [rescue_self()];
         let history = [unborrowable, borrowable, twin];
@@ -2052,9 +2071,9 @@ mod tests {
     fn rescue_takes_a_healthy_copy_before_a_weak_cheaper_kind() {
         // as the fleet ranks them: a 13%-alive copy of unknown packaging never
         // goes ahead of a 100%-alive unborrowable one
-        let mut weak = rescue_candidate(DUPE_MODE_SCORE, DELETE_STATUS_DUPE, 999_090, 130);
+        let mut weak = rescue_candidate(DupeMode::Score, DELETE_STATUS_DUPE, 999_090, 130);
         weak.donor_kind = crate::donorkind::DonorKind::Unknown as i32;
-        let mut healthy = rescue_candidate(DUPE_MODE_SCORE, DELETE_STATUS_DUPE, 999_010, 1000);
+        let mut healthy = rescue_candidate(DupeMode::Score, DELETE_STATUS_DUPE, 999_010, 1000);
         healthy.donor_kind = crate::donorkind::DonorKind::Unborrowable as i32;
         let queue = [rescue_self()];
         assert_eq!(select_rescue_backup(&[weak, healthy], &queue, |_| true), 1);
@@ -2064,12 +2083,12 @@ mod tests {
     fn a_locked_backup_goes_after_every_extractable_one() {
         // live fleet 2026-11-19: a 100%-alive copy with encrypted headers and
         // no password ranked ahead of an 84%-alive plain one
-        let mut locked = rescue_candidate(DUPE_MODE_SCORE, DELETE_STATUS_DUPE, 999_090, 1000);
+        let mut locked = rescue_candidate(DupeMode::Score, DELETE_STATUS_DUPE, 999_090, 1000);
         locked.donor_kind = crate::donorkind::DonorKind::Unborrowable as i32;
         locked.locked = 1;
-        let mut plain = rescue_candidate(DUPE_MODE_SCORE, DELETE_STATUS_DUPE, 999_010, 840);
+        let mut plain = rescue_candidate(DupeMode::Score, DELETE_STATUS_DUPE, 999_010, 840);
         plain.donor_kind = crate::donorkind::DonorKind::Borrowable as i32;
-        let unmeasured = rescue_candidate(DUPE_MODE_SCORE, DELETE_STATUS_DUPE, 999_000, -1);
+        let unmeasured = rescue_candidate(DupeMode::Score, DELETE_STATUS_DUPE, 999_000, -1);
         let queue = [rescue_self()];
         assert_eq!(select_rescue_backup(&[locked, plain], &queue, |_| true), 1);
         assert_eq!(
@@ -2103,14 +2122,14 @@ mod tests {
 
     #[test]
     fn rescue_leaves_a_key_that_is_queued_or_done() {
-        let backup = rescue_candidate(DUPE_MODE_FORCE, DELETE_STATUS_DUPE, 999_080, 900);
+        let backup = rescue_candidate(DupeMode::Force, DELETE_STATUS_DUPE, 999_080, 900);
         let mut queued = rescue_self();
         queued.is_self = 0;
         assert_eq!(
             select_rescue_backup(&[backup], &[rescue_self(), queued], |_| true),
             -1
         );
-        let mut done = rescue_candidate(DUPE_MODE_SCORE, DELETE_STATUS_NONE, 999_000, -1);
+        let mut done = rescue_candidate(DupeMode::Score, DELETE_STATUS_NONE, 999_000, -1);
         done.is_dupe_success = 1;
         assert_eq!(
             select_rescue_backup(&[backup, done], &[rescue_self()], |_| true),
@@ -2135,11 +2154,11 @@ mod tests {
 
     #[test]
     fn rescue_skips_bad_or_unhealthy_backups() {
-        let mut bad = rescue_candidate(DUPE_MODE_SCORE, DELETE_STATUS_DUPE, 999_080, 900);
+        let mut bad = rescue_candidate(DupeMode::Score, DELETE_STATUS_DUPE, 999_080, 900);
         bad.mark_status = MARK_STATUS_BAD;
-        let mut sick = rescue_candidate(DUPE_MODE_SCORE, DELETE_STATUS_DUPE, 999_070, 900);
+        let mut sick = rescue_candidate(DupeMode::Score, DELETE_STATUS_DUPE, 999_070, 900);
         sick.health = 800;
-        let mut manual = rescue_candidate(DUPE_MODE_SCORE, DELETE_STATUS_MANUAL, 999_060, 900);
+        let mut manual = rescue_candidate(DupeMode::Score, DELETE_STATUS_MANUAL, 999_060, 900);
         manual.health = 1000;
         assert_eq!(
             select_rescue_backup(&[bad, sick, manual], &[rescue_self()], |_| true),
@@ -2278,7 +2297,7 @@ mod tests {
         let make_backup = |name: &[u8], key: &[u8], score: i32| -> NzbgetRsDupeHistoryCandidate {
             NzbgetRsDupeHistoryCandidate {
                 kind: HISTORY_KIND_NZB,
-                dupe_mode: DUPE_MODE_SCORE,
+                dupe_mode: DupeMode::Score,
                 dupe_score: score,
                 is_dupe_success: 0,
                 mark_status: MARK_STATUS_NONE,
@@ -2303,7 +2322,7 @@ mod tests {
         let mut queue = vec![NzbgetRsDupeQueueCandidate {
             is_self: 1,
             is_nzb_kind: 1,
-            dupe_mode: DUPE_MODE_SCORE,
+            dupe_mode: DupeMode::Score,
             dupe_score: 10,
             same_name_or_key: 1,
         }];
@@ -2344,7 +2363,7 @@ mod tests {
         queue.push(NzbgetRsDupeQueueCandidate {
             is_self: 0,
             is_nzb_kind: 1,
-            dupe_mode: DUPE_MODE_SCORE,
+            dupe_mode: DupeMode::Score,
             dupe_score: 60,
             same_name_or_key: 1,
         });
@@ -2404,15 +2423,15 @@ mod tests {
         assert!(crate::queuecoord::download_hopeless(1000, 5, 95));
         assert_eq!(
             crate::queueeditor::parse_dupe_mode(b"score"),
-            Some(DUPE_MODE_SCORE)
+            Some(DupeMode::Score)
         );
         assert_eq!(
             crate::queueeditor::parse_dupe_mode(b"all"),
-            Some(DUPE_MODE_ALL)
+            Some(DupeMode::All)
         );
         assert_eq!(
             crate::queueeditor::parse_dupe_mode(b"force"),
-            Some(DUPE_MODE_FORCE)
+            Some(DupeMode::Force)
         );
         assert_eq!(crate::queueeditor::parse_dupe_mode(b"bad"), None);
 
@@ -2429,13 +2448,13 @@ mod tests {
                 HISTORY_KIND_NZB,
                 100,
                 0,
-                DUPE_MODE_SCORE,
+                DupeMode::Score,
                 10,
                 b"A",
                 b"k",
                 100,
                 0,
-                DUPE_MODE_SCORE,
+                DupeMode::Score,
                 MARK_STATUS_NONE,
                 DupStatus::Undefined,
                 10,
@@ -2450,7 +2469,7 @@ mod tests {
                 DELETE_STATUS_NONE,
                 true,
                 false,
-                DUPE_MODE_SCORE,
+                DupeMode::Score,
                 b"Show.B",
                 b"imdb:1",
                 b"Show.A",
@@ -2472,7 +2491,7 @@ mod tests {
                 DELETE_STATUS_NONE,
                 true,
                 false,
-                DUPE_MODE_SCORE,
+                DupeMode::Score,
                 b"Show.B",
                 b"imdb:1",
                 b"Show.A",
@@ -2489,11 +2508,11 @@ mod tests {
             2
         );
         assert_eq!(
-            resolve_history_mark(MARK_STATUS_GOOD, true, HISTORY_KIND_NZB, DUPE_MODE_SCORE),
+            resolve_history_mark(MARK_STATUS_GOOD, true, HISTORY_KIND_NZB, DupeMode::Score),
             (&b"good\0"[..], DupStatus::Good, 1)
         );
         assert_eq!(
-            resolve_history_mark(MARK_STATUS_BAD, true, HISTORY_KIND_DUP, DUPE_MODE_SCORE),
+            resolve_history_mark(MARK_STATUS_BAD, true, HISTORY_KIND_DUP, DupeMode::Score),
             (&b"bad\0"[..], DupStatus::Bad, 2)
         );
     }

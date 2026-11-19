@@ -384,6 +384,29 @@ pub(crate) fn copy_params(dest: NzbRef, src: NzbRef) {
     }
 }
 
+/// Whether `nzb` must not borrow from donor `donor_id` again.
+pub(crate) fn donor_blocked(nzb: NzbRef, donor_id: i32) -> bool {
+    nzb_data(nzb).is_some_and(|d| d.coll().blocked_donors.contains(&donor_id))
+}
+
+/// Bars `nzb` from borrowing from donor `donor_id` again.
+pub(crate) fn block_donor(nzb: NzbRef, donor_id: i32) {
+    if let Some(d) = nzb_data(nzb) {
+        d.coll().blocked_donors.insert(donor_id);
+    }
+}
+
+/// The post-processing scripts that ran, as (script name, status), in run order.
+pub(crate) fn script_statuses(nzb: NzbRef) -> Vec<(Vec<u8>, ScriptStatus)> {
+    nzb_data(nzb).map_or_else(Vec::new, |d| {
+        let coll = d.coll();
+        coll.script_statuses
+            .iter()
+            .map(|(n, st)| (n.to_bytes().to_vec(), ScriptStatus::from(*st)))
+            .collect()
+    })
+}
+
 /// All parameters as (name, value), in the order they were added.
 pub(crate) fn params(nzb: NzbRef) -> Vec<(Vec<u8>, Vec<u8>)> {
     nzb_data(nzb).map_or_else(Vec::new, |d| {
@@ -1962,11 +1985,6 @@ pub(crate) unsafe fn host_coll_op(
             .map_or(0, |d| d.as_secs() as c_int)
     };
     Some(match a1 {
-        4 => usize::from(coll(20, a2, np, ns, ns, ni, nstr) != 0),
-        5 => {
-            coll(21, a2, np, ns, ns, ni, nstr);
-            1
-        }
         6 | 7 => {
             unsafe { *strs = nzbget_rs_nzb_text(p, if a1 == 6 { 8 } else { 9 }) };
             0
@@ -1995,13 +2013,6 @@ pub(crate) unsafe fn host_coll_op(
         15 => {
             let lim = [now(), log_buffer()];
             unsafe { nzbget_rs_nzb_msgs(p, 3, 0, other, ns, lim.as_ptr(), None, 0) };
-            0
-        }
-        17 => {
-            if a2 < 0 {
-                return Some(coll(11, 0, np, ns, ns, ni, nstr) as usize);
-            }
-            coll(12, a2, np, ns, ns, ints, strs);
             0
         }
         18 => {
@@ -2782,6 +2793,23 @@ mod tests {
         copy_params(pn, pn);
         assert_eq!(params(pn).len(), 2);
         assert_eq!(param(NzbRef::NONE, b"a"), None);
+        assert!(!donor_blocked(pn, 7));
+        block_donor(pn, 7);
+        assert!(donor_blocked(pn, 7) && !donor_blocked(qn, 7));
+        let mut ints = [0 as c_int; 1];
+        unsafe {
+            nzbget_rs_nzb_coll(
+                p,
+                10,
+                2,
+                std::ptr::null(),
+                c"script.py".as_ptr(),
+                std::ptr::null(),
+                ints.as_mut_ptr(),
+                std::ptr::null_mut(),
+            );
+        }
+        assert_eq!(script_statuses(pn), [(b"script.py".to_vec(), ScriptStatus::from(2))]);
         unsafe {
             nzbget_rs_nzb_scalars_free(p);
             nzbget_rs_nzb_scalars_free(q);

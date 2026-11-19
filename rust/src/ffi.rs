@@ -4973,12 +4973,11 @@ unsafe fn emit_rpc_nzb(
         })
         .collect();
 
-    let slen = qh.nzb_script_statuses_len(nzb_ptr);
-    let mut scr_cvecs = Vec::with_capacity(slen);
-    for i in 0..slen {
-        let (st, sname) = qh.nzb_script_status_at(nzb_ptr, i);
-        scr_cvecs.push((cstr::to_cstring(&sname), i32::from(st)));
-    }
+    let scr_cvecs: Vec<_> = qh
+        .nzb_script_statuses(nzb_ptr)
+        .iter()
+        .map(|(sname, st)| (cstr::to_cstring(sname), i32::from(*st)))
+        .collect();
     let scrs: Vec<crate::xmlrpc_format::NzbgetRsRpcScriptItem> = scr_cvecs
         .iter()
         .map(|(sname, st)| crate::xmlrpc_format::NzbgetRsRpcScriptItem {

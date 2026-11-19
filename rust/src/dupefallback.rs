@@ -2628,7 +2628,7 @@ fn pin_sources_host(
     // VacateGhostLead
     if file.dupe_lead_donor_id != 0 {
         let lead_id = file.dupe_lead_donor_id;
-        let barred = nzb.ptr.is_some() && host.nzb_blocked_donor_op(nzb.ptr, false, lead_id);
+        let barred = nzb.ptr.is_some() && host.nzb_donor_blocked(nzb.ptr, lead_id);
         let present = donors.iter().any(|d| d.id == lead_id);
         if barred || !present {
             file.dupe_lead_donor_id = 0;
@@ -2744,7 +2744,7 @@ fn pin_sources_host(
     };
 
     for donor in &donors {
-        if host.nzb_blocked_donor_op(nzb.ptr, false, donor.id) {
+        if host.nzb_donor_blocked(nzb.ptr, donor.id) {
             continue;
         }
         if nzb.full_content_hash > 0 && nzb.full_content_hash == donor.full_content_hash {
@@ -3004,7 +3004,7 @@ pub(crate) fn try_fallback_host(
     while round >= 0
         && (round as usize) < sources.len()
         && (round as usize) < source_donors.len()
-        && host.nzb_blocked_donor_op(nzb.ptr, false, source_donors[round as usize])
+        && host.nzb_donor_blocked(nzb.ptr, source_donors[round as usize])
     {
         round += 1;
     }

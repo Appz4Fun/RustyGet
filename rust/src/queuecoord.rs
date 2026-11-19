@@ -3772,7 +3772,7 @@ impl NzbgetRsQueueCoordinator {
         }
         let (unique_ids, formatted_names) = format_donor_id_list(&donor_ids);
         for id in unique_ids {
-            host.nzb_blocked_donor_op(nzb.ptr, true, id);
+            host.nzb_block_donor(nzb.ptr, id);
         }
         let mut msg = format!("{} article(s) of ", rejected_count).into_bytes();
         msg.extend_from_slice(&file.filename);

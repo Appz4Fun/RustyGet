@@ -358,11 +358,20 @@ pub fn pick_next_post_job(
 
 /// True when a backup of kind `backup_kind` can lend a download of kind `own_kind`, whose
 /// direct unpack holds volumes, its lost volumes (see `queuecoord::alt_covers_lost_articles`:
-/// with an extraction running, a backup of unknown kind, such as a nested alt, lends too).
-fn backup_can_lend(own_kind: Option<&[u8]>, backup_kind: Option<&[u8]>) -> bool {
+/// with an extraction running, a backup of unknown kind lends too when it was labelled the
+/// same video in another container, `labelled_alt`, such as a nested alt).
+fn backup_can_lend(
+    own_kind: Option<&[u8]>,
+    backup_kind: Option<&[u8]>,
+    labelled_alt: bool,
+) -> bool {
     use crate::donorkind::DonorKind;
     DonorKind::from_param(own_kind) != DonorKind::Unborrowable
-        && DonorKind::from_param(backup_kind) != DonorKind::Unborrowable
+        && match DonorKind::from_param(backup_kind) {
+            DonorKind::Twin | DonorKind::Borrowable => true,
+            DonorKind::Unknown => labelled_alt,
+            DonorKind::Unborrowable => false,
+        }
 }
 
 /// True when a download that direct unpack extracted and verified has no damage outside its
@@ -1919,6 +1928,7 @@ impl NzbgetRsPrePostProcessor {
                             .as_deref(),
                         host.nzb_get_param(backup.ptr, crate::donorkind::KIND_PARAM)
                             .as_deref(),
+                        crate::queuecoord::backup_labelled_alt(host, backup.ptr),
                     ))
             })
         {
@@ -2544,13 +2554,15 @@ mod tests {
     #[test]
     fn borrowing_beats_a_backup_only_when_it_can_lend() {
         use super::backup_can_lend as can;
-        assert!(can(None, Some(b"borrowable")));
-        assert!(can(Some(b"twin"), Some(b"twin")));
-        // unknown (an alt nested in another container): the extraction is kept
-        assert!(can(None, None));
-        assert!(can(Some(b"borrowable"), Some(b"unknown")));
-        assert!(!can(Some(b"borrowable"), Some(b"unborrowable")));
-        assert!(!can(Some(b"unborrowable"), Some(b"twin")));
+        assert!(can(None, Some(b"borrowable"), false));
+        assert!(can(Some(b"twin"), Some(b"twin"), false));
+        // unknown: only when labelled an alt (nested in another container), never unlabelled
+        assert!(!can(None, None, false));
+        assert!(!can(Some(b"borrowable"), Some(b"unknown"), false));
+        assert!(can(None, None, true));
+        assert!(can(Some(b"borrowable"), Some(b"unknown"), true));
+        assert!(!can(Some(b"borrowable"), Some(b"unborrowable"), true));
+        assert!(!can(Some(b"unborrowable"), Some(b"twin"), true));
     }
 
     use super::*;

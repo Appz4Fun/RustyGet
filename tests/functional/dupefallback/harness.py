@@ -3980,46 +3980,63 @@ def _skiphole_rar(daemon, t, tag, donor, recovery, damage=None):
     return good, detail
 
 
-def scenario_deadvolumenestednopar(daemon, t):
-    """South Park S23E07: a plain stored rar set without par2 loses three
-    middle volumes entirely (no articles anywhere), while its backup in
-    history holds the same movie nested in another container (a stored rar
-    holding a rar holding movie.mkv), whose kind the fleet could not tell
-    from its first article. The first dead volume failed 40 articles in a row
-    before it ended, which failed the download over, cancelling direct unpack
-    and fetching the backup from its first byte. Now the download is kept:
-    the dead volumes are borrowed from the backup's inner movie while direct
-    unpack waits, and the extraction carries on to the end."""
-    seg = 8_000
-    movie = _payload(6_000_000, 23070)
-    vols = generators.rar3_store_volumes_valid('movie.mkv', movie, 400_000)
+def _dead_volume_nested(daemon, t, tag, labels):
+    """A plain stored rar set without par2 (articles of 20 KB, so direct rename
+    hashes each volume's first article) loses three middle volumes entirely;
+    its backup in history holds the same movie nested in another container (a
+    stored rar holding a rar holding movie.mkv), its first article telling
+    nothing about the packing. ``labels``: the backup's nzb parameters (what a
+    fleet and TwinCheck stored). Returns (primary, backup, movie)."""
+    seg = 20_000
+    movie = _payload(15_000_000, 23070)
+    vols = generators.rar3_store_volumes_valid('movie.mkv', movie, 1_000_000)
     dead = {6, 7, 8}
     members = []
     for i, data in enumerate(vols):
         name = 'Show.part%02d.rar' % (i + 1)
-        rel = 'dvnA/' + name
+        rel = '%sA/%s' % (tag, name)
         t.write_file(os.path.join('data', rel), data)
         parts = (len(data) + seg - 1) // seg
         members.append((rel, name, len(data), seg,
                         set(range(1, parts + 1)) if i in dead else set()))
     inner = generators.rar3_store_volumes_valid('movie.mkv', movie, len(movie) + 1)
     assert len(inner) == 1
-    outer = generators.rar3_store_volumes_valid('Show.rar', inner[0], 2_500_000)
+    outer = generators.rar3_store_volumes_valid('Show.rar', inner[0], 5_000_000)
     donor_members = []
     for i, data in enumerate(outer):
         name = 'Other.part%02d.rar' % (i + 1)
-        rel = 'dvnB/' + name
+        rel = '%sB/%s' % (tag, name)
         t.write_file(os.path.join('data', rel), data)
         donor_members.append((rel, name, len(data), 100_000, set()))
     api = daemon.wait_ready()
     # the primary is queued paused first, so the lower-scored backup is
     # deleted as duplicate into history instead of downloading
-    daemon.append(api, 'Primary', build_multi_nzb(members), True, 'dvn-key', 100)
-    daemon.append(api, 'Backup', build_multi_nzb(donor_members), False, 'dvn-key', 90)
+    daemon.append(api, 'Primary', build_multi_nzb(members), True, tag + '-key', 100)
+    _ds_append(api, 'Backup', build_multi_nzb(donor_members), tag + '-key', 90, paused=False,
+               params=[{'Name': k, 'Value': v} for k, v in labels])
     daemon.wait_history(api, 'Backup', timeout=60)
     api.editqueue('GroupResume', 0, '', [g['NZBID'] for g in api.listgroups() if g['NZBName'] == 'Primary'])
     hp = daemon.wait_history(api, 'Primary', timeout=300)
+    deadline = time.time() + 180
     hb = daemon.wait_history(api, 'Backup')
+    while hp['Status'].startswith('FAILURE') and hb['Status'].startswith('DELETED') and time.time() < deadline:
+        time.sleep(0.5)
+        hb = daemon.wait_history(api, 'Backup')
+    return hp, hb, movie
+
+
+def scenario_deadvolumenestednopar(daemon, t):
+    """South Park S23E07, under the production options (DirectRename=yes): a
+    plain stored rar set without par2 loses three middle volumes entirely,
+    while its backup in history, labelled by the fleet as in another
+    container of unknown packing, holds the same movie nested in another
+    container. The first dead volume failed 40 articles in a row before it
+    ended, which failed the download over, cancelling direct unpack and
+    fetching the backup from its first byte. Now the download is kept: the
+    dead volumes are borrowed from the backup's inner movie while direct
+    unpack waits, and the extraction carries on to the end."""
+    hp, hb, movie = _dead_volume_nested(daemon, t, 'dvn', [('DupeCopyKind', 'unknown'),
+                                                          ('DupeKind', 'container')])
     failed_over = _grep_log(t, 'Failing over Primary')
     cancelled = _grep_log(t, 'Cancelling direct unpack')
     kept = _grep_log(t, 'lends the lost parts')
@@ -4030,6 +4047,20 @@ def scenario_deadvolumenestednopar(daemon, t):
     return ('deadvolumenestednopar', ok,
             'status=%s backup=%s failover_logs=%d du_cancelled=%d kept_logs=%d du_ok=%d extracted_ok=%s'
             % (hp['Status'], hb['Status'], failed_over, cancelled, kept, du_ok, integ))
+
+
+def scenario_deadvolumeunlabelled(daemon, t):
+    """The same release, but nothing classed the backup (no fleet labels: a
+    same-key grab that may be another release or encode). Its unknown kind
+    is no reason to keep the download: it fails over to the backup."""
+    hp, hb, movie = _dead_volume_nested(daemon, t, 'dvu', [])
+    failed_over = _grep_log(t, 'Failing over Primary to duplicate Backup')
+    kept = _grep_log(t, 'lends the lost parts')
+    integ = _verify_output(t, movie, '.mkv', dirs=(('main', 'dst'), ('main', 'inter')))
+    ok = (failed_over == 1 and kept == 0 and hp['Status'].startswith('FAILURE') and
+          hb['Status'].startswith('SUCCESS') and integ)
+    return ('deadvolumeunlabelled', ok, 'status=%s backup=%s failover_logs=%d kept_logs=%d extracted_ok=%s'
+            % (hp['Status'], hb['Status'], failed_over, kept, integ))
 
 
 def scenario_skipholetwin(daemon, t):
@@ -10630,6 +10661,7 @@ SCENARIOS = {
     'prodrarstream': scenario_prodrarstream,
     'skipholetwin': scenario_skipholetwin,
     'deadvolumenestednopar': scenario_deadvolumenestednopar,
+    'deadvolumeunlabelled': scenario_deadvolumeunlabelled,
     'persistdeadprimary': scenario_persistdeadprimary,
     'persistrestart': scenario_persistrestart,
     'persistrestartdamaged': scenario_persistrestartdamaged,
@@ -10988,9 +11020,8 @@ SCENARIO_OPTIONS = {
     'rar4lzdirect': ['Unpack=yes', 'DirectUnpack=yes', 'ParCheck=auto', 'DownloadRate=2'],
     # throttled so direct unpack reaches the damaged volume before its repair lands
     'skipholetwin': PROD_OPTIONS + ['DownloadRate=1500'],
-    # DirectRename=no: here direct rename (no par2, the dead volumes' first articles failed)
-    # does not finish before the dead volumes, so direct unpack would not be running yet
-    'deadvolumenestednopar': PROD_OPTIONS + ['DownloadRate=1500', 'DirectRename=no'],
+    'deadvolumenestednopar': PROD_OPTIONS + ['DownloadRate=4000'],
+    'deadvolumeunlabelled': PROD_OPTIONS + ['DownloadRate=4000'],
     'skipholepar': PROD_OPTIONS + ['DownloadRate=1500'],
     'persistdeadprimary': PROD_OPTIONS + ['DownloadRate=1500'],
     'persistrestart': PROD_OPTIONS + ['DownloadRate=1500'],

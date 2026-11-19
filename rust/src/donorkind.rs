@@ -86,6 +86,26 @@ impl DonorKind {
     }
 }
 
+/// Whether a backup of [`DonorKind::Unknown`] was classed by a fleet or TwinCheck as the same
+/// video in another container, so a borrow from it is worth waiting for while the download's
+/// extraction runs: TwinCheck labelled it `alt` or `container` (`dupe_kind`, the `DupeKind`
+/// param), or a fleet stored an explicit `unknown` kind (`copy_kind`, [`KIND_PARAM`]) and found
+/// the same video inside (`video`, `DupeVideo=same`). An unlabelled backup (a same-key grab of
+/// another release or encode) never qualifies, nor one labelled another video.
+pub fn unknown_kind_is_labelled_alt(
+    copy_kind: Option<&[u8]>,
+    dupe_kind: Option<&[u8]>,
+    video: Option<&[u8]>,
+) -> bool {
+    let dupe_kind = dupe_kind.map(|v| v.trim_ascii());
+    let video = video.map(|v| v.trim_ascii());
+    if dupe_kind == Some(b"other") || video == Some(b"different") {
+        return false;
+    }
+    matches!(dupe_kind, Some(b"alt") | Some(b"container"))
+        || (copy_kind.map(|v| v.trim_ascii()) == Some(b"unknown") && video == Some(b"same"))
+}
+
 const MEDIA_EXTS: [&[u8]; 8] = [
     b"mkv", b"mp4", b"m4v", b"avi", b"ts", b"m2ts", b"wmv", b"mov",
 ];
@@ -326,6 +346,23 @@ mod tests {
 
     fn rar4_with_file(method: u8, file_flags: u16, main_flags: u16) -> Vec<u8> {
         rar4_named(b"movie.mkv", method, file_flags, main_flags)
+    }
+
+    #[test]
+    fn only_a_labelled_unknown_backup_counts_as_an_alt() {
+        let f = unknown_kind_is_labelled_alt;
+        // unlabelled: a same-key grab of anything
+        assert!(!f(None, None, None));
+        assert!(!f(Some(b"unknown"), None, None));
+        assert!(!f(Some(b"unknown"), None, Some(b"unverified")));
+        // TwinCheck: another container (same video, or not verified yet)
+        assert!(f(None, Some(b"container"), None));
+        assert!(f(Some(b"unknown"), Some(b"alt"), None));
+        // a fleet that found the same video inside
+        assert!(f(Some(b"unknown"), None, Some(b"same")));
+        // another video, whatever else says so
+        assert!(!f(Some(b"unknown"), Some(b"other"), Some(b"same")));
+        assert!(!f(None, Some(b"container"), Some(b"different")));
     }
 
     #[test]

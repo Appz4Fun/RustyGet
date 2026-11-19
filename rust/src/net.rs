@@ -3360,6 +3360,8 @@ impl NzbgetRsServerPool {
 
     pub fn changed(&self) {
         crate::log::log_active_bytes(3, b"Server config has been changed");
+        // An article missing on the old set of servers may exist on the new one.
+        crate::articlefetcher::forget_missing_everywhere();
         self.init_connections();
         self.close_unused_connections();
     }

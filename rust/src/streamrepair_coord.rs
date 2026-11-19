@@ -279,6 +279,50 @@ fn dead_volumes_to_borrow(dest_dir: &[u8], targets: &[RepairTarget]) -> Vec<bool
         .collect()
 }
 
+/// Downloads whose stream repair after the download runs now, by NZB id (a
+/// count: a job runs once, but a mark must never outlive its repair).
+fn running_repairs() -> &'static Mutex<std::collections::BTreeMap<i32, u32>> {
+    static RUNNING: std::sync::OnceLock<Mutex<std::collections::BTreeMap<i32, u32>>> =
+        std::sync::OnceLock::new();
+    RUNNING.get_or_init(|| Mutex::new(std::collections::BTreeMap::new()))
+}
+
+/// Whether the stream repair after the download of `nzb_id` runs now:
+/// TwinCheck holds its sampling against that copy meanwhile.
+pub(crate) fn stream_repair_running(nzb_id: i32) -> bool {
+    running_repairs()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains_key(&nzb_id)
+}
+
+/// Marks the stream repair of a download running for as long as it lives
+/// (also on unwind).
+struct RunningRepair(i32);
+
+impl RunningRepair {
+    fn mark(nzb_id: i32) -> Self {
+        *running_repairs()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(nzb_id)
+            .or_insert(0) += 1;
+        Self(nzb_id)
+    }
+}
+
+impl Drop for RunningRepair {
+    fn drop(&mut self) {
+        let mut running = running_repairs().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = running.get_mut(&self.0) {
+            *n -= 1;
+            if *n == 0 {
+                running.remove(&self.0);
+            }
+        }
+    }
+}
+
 /// Marks a borrow of dead volumes of a download underway for as long as it lives, so the
 /// queue does not fail over meanwhile; dropping it (also on unwind) clears the mark.
 struct BorrowNote(Option<i32>);
@@ -2330,6 +2374,10 @@ impl NzbgetRsStreamRepairCtrl {
     }
 
     unsafe fn run_post(&self, ctx: *mut c_void, cb: NzbgetRsStreamRepairHostFn) {
+        // (self.nzb_id is set for a live repair only)
+        let _running = unsafe { self.pending_data_files(ctx, cb) }
+            .1
+            .map(RunningRepair::mark);
         let mut counters = RunCounters::default();
         let Some((nzb_name, dest_dir, mut targets, donors, member_names)) = (unsafe {
             with_dq_guard(ctx, cb, |dq_ptr| {
@@ -2629,6 +2677,19 @@ pub unsafe fn stream_repair_ctrl_exec(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_running_repair_is_marked_until_its_last_mark_drops() {
+        let id = -7_301_101;
+        assert!(!stream_repair_running(id));
+        let a = RunningRepair::mark(id);
+        let b = RunningRepair::mark(id);
+        assert!(stream_repair_running(id));
+        drop(a);
+        assert!(stream_repair_running(id));
+        drop(b);
+        assert!(!stream_repair_running(id));
+    }
 
     fn target(name: &str, decoded: i64, holes: Vec<NzbgetRsByteRange>) -> RepairTarget {
         RepairTarget {

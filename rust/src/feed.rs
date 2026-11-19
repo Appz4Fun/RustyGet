@@ -340,15 +340,6 @@ pub fn extract_size_from_description(description: &[u8]) -> i64 {
     size.round() as i64
 }
 
-/// Computes the length of `err_msg` after stripping trailing `'\n'`, `'\r'`, and `' '` bytes (`FeedFile::SAX_error`).
-pub fn trim_sax_error_len(err_msg: &[u8]) -> usize {
-    let mut end = err_msg.len();
-    while end > 0 && matches!(err_msg[end - 1], b'\n' | b'\r' | b' ') {
-        end -= 1;
-    }
-    end
-}
-
 /// A parsed RSS feed item produced by [`FeedFileParser`].
 #[derive(Default, Debug, Clone)]
 pub struct ParsedFeedItem {

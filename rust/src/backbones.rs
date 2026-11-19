@@ -225,11 +225,6 @@ impl Catalog {
     }
 }
 
-/// [`Catalog::lookup`] on the bundled list.
-pub fn lookup(host: &str) -> Lookup {
-    catalog().lookup(host)
-}
-
 fn interned() -> &'static Mutex<Vec<String>> {
     static NAMES: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
     NAMES.get_or_init(|| Mutex::new(Vec::new()))

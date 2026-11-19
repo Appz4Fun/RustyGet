@@ -14,7 +14,6 @@ pub enum PathType {
     File,
     Directory,
     Link,
-    DirectoryLink,
 }
 
 /// A C++ exception in a callback: the operation ends, the caller rethrows it.
@@ -102,7 +101,7 @@ pub fn normalize_root(dir: &[u8], sep: u8) -> &[u8] {
 }
 
 fn is_link(t: PathType) -> bool {
-    matches!(t, PathType::Link | PathType::DirectoryLink)
+    t == PathType::Link
 }
 
 /// "could not delete %s: %s" with the last error.
@@ -234,7 +233,7 @@ fn delete_directory_with_content_inner<O: Ops>(
                     delete_directory_with_content_inner(ops, &full, sep, errmsg, too_long)?
                 }
             }
-            PathType::Link | PathType::DirectoryLink => ops.delete_link(&full, kind)?,
+            PathType::Link => ops.delete_link(&full, kind)?,
             PathType::File => ops.delete_file(&full)?,
             PathType::Error => false,
         };

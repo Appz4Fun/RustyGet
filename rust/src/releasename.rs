@@ -741,46 +741,6 @@ pub fn same_release(a_name: &[u8], b_name: &[u8]) -> bool {
         && compatible(&a.edition, &b.edition)
 }
 
-/// Parse's attributes as bytes for the C ABI: each set as a u32 count and its
-/// strings, each string as a u32 length and its bytes (LE), in Attrs order; then
-/// title, group, the seasons and episodes (u32 count, i32 each), year, repack, proper.
-pub fn encode(a: &Attrs) -> Vec<u8> {
-    let mut out = Vec::new();
-    let n = |out: &mut Vec<u8>, v: usize| out.extend_from_slice(&(v as u32).to_le_bytes());
-    let string = |out: &mut Vec<u8>, s: &[u8]| {
-        out.extend_from_slice(&(s.len() as u32).to_le_bytes());
-        out.extend_from_slice(s);
-    };
-    for set in [
-        &a.resolution,
-        &a.quality,
-        &a.codec,
-        &a.bit_depth,
-        &a.audio,
-        &a.channels,
-        &a.network,
-        &a.edition,
-        &a.hdr,
-    ] {
-        n(&mut out, set.len());
-        for v in set {
-            string(&mut out, v);
-        }
-    }
-    string(&mut out, &a.title);
-    string(&mut out, &a.group);
-    for list in [&a.seasons, &a.episodes] {
-        n(&mut out, list.len());
-        for v in list {
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-    }
-    out.extend_from_slice(&a.year.to_le_bytes());
-    out.push(a.repack as u8);
-    out.push(a.proper as u8);
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

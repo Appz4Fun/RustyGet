@@ -268,11 +268,6 @@ pub fn rpc_reply(is_json: bool, host: &[u8], port: i32) -> Vec<u8> {
     }
 }
 
-/// Whether the databases were found, and where RustyGet looks for them.
-pub fn geoip_dirs() -> Vec<PathBuf> {
-    search_dirs()
-}
-
 /// A small reader for MaxMind DB files (the format DB-IP Lite ships in).
 pub mod mmdb {
     use std::collections::BTreeMap;

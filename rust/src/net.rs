@@ -3273,14 +3273,6 @@ impl NzbgetRsServerPool {
         }
     }
 
-    pub fn get_connection_by_server_id(&self, server_id: i32) -> *mut PooledNntpConn {
-        let Some(srv) = self.server_by_id(server_id) else {
-            return ptr::null_mut();
-        };
-        let nl = srv.norm_level.load(Ordering::SeqCst);
-        self.get_connection(nl, Some(&srv), &[])
-    }
-
     pub fn free_connection(&self, conn_ptr: *mut PooledNntpConn, used: bool) {
         if conn_ptr.is_null() {
             return;

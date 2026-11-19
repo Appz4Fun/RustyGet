@@ -164,15 +164,6 @@ impl<'a> Lzma2RawSource<'a> {
         self.layout.inner_size
     }
 
-    /// Packed bytes fetched so far (a measure of what the borrow cost).
-    pub fn packed_bytes_read(&self) -> i64 {
-        *self.packed_bytes_read.borrow()
-    }
-
-    pub fn sync_count(&self) -> usize {
-        self.syncs.borrow().len()
-    }
-
     fn read_packed_clamped(&self, offset: i64, len: usize) -> Option<Vec<u8>> {
         if offset < 0 || offset >= self.layout.pack_size {
             return None;

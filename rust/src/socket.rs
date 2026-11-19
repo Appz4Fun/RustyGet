@@ -25,18 +25,6 @@ pub const CS_BROKEN: c_int = 4;
 pub const CONNECTION_READBUFFER_SIZE: usize = 1024;
 const BSTRING_MAX: usize = 1023;
 
-/// Sets `FD_CLOEXEC` on `fd` if valid (`SetCloseOnExec`).
-pub fn set_close_on_exec(fd: c_int) {
-    if fd != INVALID_SOCKET {
-        unsafe {
-            let flags = libc::fcntl(fd, libc::F_GETFD, 0);
-            if flags >= 0 {
-                libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
-            }
-        }
-    }
-}
-
 unsafe fn socket_cloexec(domain: c_int, ty: c_int, protocol: c_int) -> c_int {
     #[cfg(any(
         target_os = "linux",

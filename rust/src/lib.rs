@@ -86,7 +86,7 @@ pub mod systemhealth;
 pub mod backbones;
 pub(crate) mod addrpick;
 pub mod hostlookup;
-pub(crate) mod sysmetrics;
+pub mod sysmetrics;
 pub mod text;
 pub mod tlscipher;
 #[cfg(unix)]

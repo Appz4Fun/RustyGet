@@ -1129,11 +1129,7 @@ pub(crate) mod cipher {
         data: *mut *const u8,
         length: *mut usize,
     ) -> c_int {
-        let mut buf = crate::ffi::RsBuf {
-            data: ptr::null_mut(),
-            len: 0,
-            cap: 0,
-        };
+        let mut buf = Vec::new();
         let ok = unsafe {
             crate::ffi::nzbget_rs_script_config_exec(
                 1,
@@ -1150,12 +1146,7 @@ pub(crate) mod cipher {
             return 0;
         }
         let ctx = unsafe { &mut *context.cast::<Context>() };
-        ctx.snapshot = if buf.data.is_null() {
-            Vec::new()
-        } else {
-            unsafe { std::slice::from_raw_parts(buf.data.cast::<u8>(), buf.len) }.to_vec()
-        };
-        unsafe { crate::ffi::nzbget_rs_free(buf) };
+        ctx.snapshot = buf;
         unsafe {
             *data = ctx.snapshot.as_ptr();
             *length = ctx.snapshot.len();

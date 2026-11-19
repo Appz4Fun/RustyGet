@@ -23,13 +23,13 @@ Key options: [`NzbDirInterval`](options.md#nzbdirinterval), [`NzbDirFileAge`](op
 
 ## Download queue
 
-Review queue persistence and partial-download continuation before changing cache or disk behavior. `ArticleCache` and `WriteBuffer` affect memory and write buffering. `DiskSpace` controls the free-space pause threshold.
+Review queue persistence before changing cache or disk behavior. `ArticleCache` and `WriteBuffer` affect memory and write buffering. `DiskSpace` controls the free-space pause threshold.
 
 `KeepHistory` sets history retention. `NzbCleanupDisk` controls whether the original NZB remains on disk. Duplicate fleets can need those original NZBs as sources, so follow the fleet guide when choosing cleanup behavior.
 
 Use [Performance](performance.md) for measured tuning guidance. Keep `SkipWrite` and `RawArticle` for their documented diagnostic uses.
 
-Key options: [`ContinuePartial`](options.md#continuepartial), [`ArticleCache`](options.md#articlecache), [`WriteBuffer`](options.md#writebuffer), [`DiskSpace`](options.md#diskspace), [`KeepHistory`](options.md#keephistory), [`NzbCleanupDisk`](options.md#nzbcleanupdisk).
+Key options: [`ArticleCache`](options.md#articlecache), [`WriteBuffer`](options.md#writebuffer), [`DiskSpace`](options.md#diskspace), [`KeepHistory`](options.md#keephistory), [`NzbCleanupDisk`](options.md#nzbcleanupdisk).
 
 <figure class="settings-figure">
 <a class="settings-shot" href="assets/settings/download-queue.jpg" aria-label="Open full-size picture: Download queue persistence, memory, disk, and cleanup settings"><img src="assets/settings/download-queue.jpg" width="1280" height="1410" loading="lazy" alt="Download queue persistence, memory, disk, and cleanup settings"></a>

@@ -289,6 +289,78 @@ pub unsafe extern "C" fn nzbget_rs_file_articles(f: *const File) -> *mut Article
     unsafe { &*f }.articles
 }
 
+/// A file's newsgroups (none for a null file).
+///
+/// # Safety
+/// `f` is null or a live file.
+pub(crate) unsafe fn groups(f: *const File) -> Vec<Vec<u8>> {
+    let Some(file) = (unsafe { f.as_ref() }) else {
+        return Vec::new();
+    };
+    let d = file.lock();
+    d.groups.iter().map(|g| g.as_bytes().to_vec()).collect()
+}
+
+/// Appends a newsgroup to a file.
+///
+/// # Safety
+/// `f` is a live file.
+pub(crate) unsafe fn push_group(f: *const File, group: &CStr) {
+    unsafe { &*f }.lock().groups.push(group.to_owned());
+}
+
+/// The number of per-server stats a file keeps.
+///
+/// # Safety
+/// `f` is a live file.
+pub(crate) unsafe fn server_stat_count(f: *const File) -> usize {
+    unsafe { &*f }.lock().server_stats.len()
+}
+
+/// A file's stat `idx` as (server id, successes, failures).
+///
+/// # Safety
+/// `f` is a live file.
+pub(crate) unsafe fn server_stat_at(f: *const File, idx: usize) -> Option<[i32; 3]> {
+    unsafe { &*f }.lock().server_stats.get(idx).copied()
+}
+
+/// Sets a file's stats for `server_id`.
+///
+/// # Safety
+/// `f` is a live file.
+pub(crate) unsafe fn set_server_stat(f: *const File, server_id: i32, success: i32, failed: i32) {
+    let mut d = unsafe { &*f }.lock();
+    stat_op(&mut d.server_stats, server_id, success, failed, 0);
+}
+
+/// The id a new file would get (the id is used up, no file is made).
+pub(crate) fn alloc_file_id() -> i32 {
+    let id = nzbget_rs_file_ids(4, 0);
+    nzbget_rs_file_ids(3, id);
+    id
+}
+
+/// A new file outside any collection: with `id` (0: the next generated
+/// one); `bump_gen` also uses up the next generated id first.
+pub(crate) fn new_standalone(id: i32, bump_gen: bool) -> *mut File {
+    let f = nzbget_rs_file_new(-1);
+    unsafe {
+        if bump_gen {
+            nzbget_rs_file_set(f, field::ID, i64::from(nzbget_rs_file_ids(4, 0)));
+            nzbget_rs_file_set(f, field::ID, i64::from(id));
+        } else {
+            let id = if id != 0 {
+                id
+            } else {
+                nzbget_rs_file_ids(4, 0)
+            };
+            nzbget_rs_file_set(f, field::ID, i64::from(id));
+        }
+    }
+    f
+}
+
 /// Collections: 0 group count, 1 group `a2` (into `strs[0]`), 2 append group
 /// `s1`; 10 server-stat count, 11 server stat `a2` into `ints[0..3]`, 12
 /// stat op `a2` (0 set, 1 add, 2 subtract) with `ints[0..3]`, 13 clear stats;

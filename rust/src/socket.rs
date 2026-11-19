@@ -1009,9 +1009,24 @@ pub fn remote_addr(host: &[u8], fd: c_int) -> Vec<u8> {
         <std::net::TcpStream as std::os::unix::io::FromRawFd>::from_raw_fd(fd)
     });
     match stream.peer_addr() {
-        Ok(peer) => peer.ip().to_string().into_bytes(),
+        Ok(peer) => format_peer_ip(peer.ip()).into_bytes(),
         Err(_) => Vec::new(),
     }
+}
+
+/// Formats a peer IP the way libc `inet_ntop` does. The one difference from
+/// `IpAddr`'s `Display` is the deprecated IPv4-compatible IPv6 form
+/// (`::a.b.c.d`), which `inet_ntop` keeps in dotted form. Authorized-IP
+/// patterns match against this text, so it must not change.
+fn format_peer_ip(ip: std::net::IpAddr) -> String {
+    if let std::net::IpAddr::V6(v6) = ip {
+        let s = v6.segments();
+        if s[..6] == [0; 6] && s[6] != 0 {
+            let [.., a, b, c, d] = v6.octets();
+            return format!("::{a}.{b}.{c}.{d}");
+        }
+    }
+    ip.to_string()
 }
 
 /// Cancels an active or connecting socket (`Connection::Cancel`).
@@ -1235,6 +1250,26 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn peer_ip_text_matches_inet_ntop() {
+        let cases = [
+            ("192.0.2.1", "192.0.2.1"),
+            ("::1", "::1"),
+            ("::", "::"),
+            ("::5", "::5"),
+            ("::192.0.2.1", "::192.0.2.1"),
+            ("::1:2", "::0.1.0.2"),
+            ("::0.0.1.0", "::100"),
+            ("::ffff:192.0.2.1", "::ffff:192.0.2.1"),
+            ("2001:db8::1", "2001:db8::1"),
+            ("fe80::1:2", "fe80::1:2"),
+        ];
+        for (input, want) in cases {
+            let ip: std::net::IpAddr = input.parse().unwrap();
+            assert_eq!(format_peer_ip(ip), want, "{input}");
+        }
+    }
 
     #[test]
     fn tcp_loopback_bind_connect_accept_readline_recv() {

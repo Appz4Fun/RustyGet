@@ -3788,11 +3788,44 @@ struct DirectUnpackRunLocal {
     unpack_guard: Option<crate::unpacklimits::SharedGuard>,
 }
 
+/// Wall time a job spends in one activity, which starts and stops as it goes.
+#[derive(Default)]
+struct BusyTime {
+    since: Option<std::time::Instant>,
+    total: Duration,
+}
+
+impl BusyTime {
+    fn set_active(&mut self, active: bool, now: std::time::Instant) {
+        match (active, self.since) {
+            (true, None) => self.since = Some(now),
+            (false, Some(since)) => {
+                self.total += now.saturating_duration_since(since);
+                self.since = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Whole seconds so far (an open period included) that no earlier take reported.
+    fn take_secs(&mut self, now: std::time::Instant) -> i32 {
+        if let Some(since) = self.since.as_mut() {
+            self.total += now.saturating_duration_since(*since);
+            *since = now;
+        }
+        let secs = self.total.as_secs_f64().round();
+        self.total = self.total.saturating_sub(Duration::from_secs_f64(secs));
+        secs.min(i32::MAX as f64) as i32
+    }
+}
+
 pub struct NzbgetRsDirectUnpack {
     nzb_id: i32,
     thread_ptr: usize,
     vol: Mutex<DirectUnpackVolumeState>,
     extra_start_time: AtomicI64,
+    /// Time spent unpacking (not waiting for a volume), for the job's UnpackSec.
+    busy: Mutex<BusyTime>,
     processed: AtomicBool,
     cancelled: AtomicBool,
     waiting_volume: AtomicBool,
@@ -3808,6 +3841,7 @@ impl NzbgetRsDirectUnpack {
             thread_ptr,
             vol: Mutex::new(DirectUnpackVolumeState::default()),
             extra_start_time: AtomicI64::new(0),
+            busy: Mutex::new(BusyTime::default()),
             processed: AtomicBool::new(false),
             cancelled: AtomicBool::new(false),
             waiting_volume: AtomicBool::new(false),
@@ -3827,6 +3861,26 @@ impl NzbgetRsDirectUnpack {
 
     pub fn is_waiting_volume(&self) -> bool {
         self.waiting_volume.load(Ordering::Acquire)
+    }
+
+    fn set_waiting(&self, waiting: bool) {
+        self.waiting_volume.store(waiting, Ordering::Release);
+        self.account_busy();
+    }
+
+    fn set_unpacking(&self, unpacking: bool) {
+        self.unpacking.store(unpacking, Ordering::Release);
+        self.account_busy();
+    }
+
+    /// Unpacking counts while an archive is being extracted and no volume is awaited.
+    fn account_busy(&self) {
+        let active = self.unpacking.load(Ordering::Acquire)
+            && !self.waiting_volume.load(Ordering::Acquire);
+        self.busy
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .set_active(active, std::time::Instant::now());
     }
 
     fn is_stopped(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn) -> bool {
@@ -3887,7 +3941,13 @@ impl NzbgetRsDirectUnpack {
         } else {
             0
         };
-        if start != 0 || clear_working {
+        // The unpacking done so far, while downloading and after; reported once.
+        let mut unpack_sec = [self
+            .busy
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take_secs(std::time::Instant::now())];
+        if start != 0 || clear_working || unpack_sec[0] != 0 {
             unsafe {
                 host_cb(
                     ctx,
@@ -3898,7 +3958,7 @@ impl NzbgetRsDirectUnpack {
                     usize::from(clear_working) | (if start != 0 { 2 } else { 0 }),
                     ptr::null(),
                     ptr::null(),
-                    ptr::null_mut(),
+                    unpack_sec.as_mut_ptr(),
                     ptr::null_mut(),
                     ptr::null_mut(),
                 );
@@ -4030,7 +4090,7 @@ impl NzbgetRsDirectUnpack {
                 .is_some_and(|wf| wf.eq_ignore_ascii_case(&filename))
             {
                 v.waiting_file = None;
-                self.waiting_volume.store(false, Ordering::Release);
+                self.set_waiting(false);
             }
             if crate::unpack::direct_unpack_is_main_archive(&filename) {
                 v.archives.push_back(filename);
@@ -4105,7 +4165,7 @@ impl NzbgetRsDirectUnpack {
                     .is_some_and(|wf| wf.eq_ignore_ascii_case(&filename))
                 {
                     v.waiting_file = None;
-                    self.waiting_volume.store(false, Ordering::Release);
+                    self.set_waiting(false);
                 }
                 if crate::unpack::direct_unpack_is_main_archive(&filename) {
                     v.archives.push_back(filename);
@@ -4146,7 +4206,7 @@ impl NzbgetRsDirectUnpack {
             .is_some_and(|wf| wf.eq_ignore_ascii_case(&filename))
         {
             v.waiting_file = None;
-            self.waiting_volume.store(false, Ordering::Release);
+            self.set_waiting(false);
         }
 
         if crate::unpack::direct_unpack_is_main_archive(&filename) {
@@ -4524,12 +4584,12 @@ impl NzbgetRsDirectUnpack {
         let full_filename = [local.dest_dir.as_slice(), &[sep], filename].concat();
         let on_hold = direct_unpack_is_held_path(&full_filename);
         if !on_hold && crate::fsops::file_exists(&full_filename, &crate::fsops::posix_stat) {
-            self.waiting_volume.store(false, Ordering::Release);
+            self.set_waiting(false);
         } else {
             let nzb_completed = {
                 let mut v = self.lock_vol();
                 v.waiting_file = Some(filename.to_vec());
-                self.waiting_volume.store(true, Ordering::Release);
+                self.set_waiting(true);
                 v.nzb_completed
             };
             if nzb_completed && !on_hold {
@@ -4686,10 +4746,10 @@ impl NzbgetRsDirectUnpack {
         if Self::is_stopped(ctx, host_cb) {
             return;
         }
-        self.waiting_volume.store(false, Ordering::Release);
+        self.set_waiting(false);
         self.exec_thread_key
             .store(current_thread_key(), Ordering::Release);
-        self.unpacking.store(true, Ordering::Release);
+        self.set_unpacking(true);
 
         let sep = crate::paths::PATH_SEPARATOR;
         let full_archive_path =
@@ -4750,7 +4810,7 @@ impl NzbgetRsDirectUnpack {
                 failure: Some(&mut failure),
                 // A parked session counts as waiting, as the volume handshake did, so reloads
                 // are not deferred behind it.
-                on_wait: Some(&|waiting| self.waiting_volume.store(waiting, Ordering::Release)),
+                on_wait: Some(&|waiting| self.set_waiting(waiting)),
                 guard: Some(&guard),
             },
         );
@@ -4763,9 +4823,9 @@ impl NzbgetRsDirectUnpack {
             }
         }
 
-        self.unpacking.store(false, Ordering::Release);
+        self.set_unpacking(false);
         self.exec_thread_key.store(0, Ordering::Release);
-        self.waiting_volume.store(false, Ordering::Release);
+        self.set_waiting(false);
         drop(_unpack_guard);
 
         local.unpack_ok = res.is_ok()
@@ -4861,7 +4921,7 @@ impl NzbgetRsDirectUnpack {
                 MK_DEBUG,
                 format!("Could not find NzbInfo for {}", self.nzb_id).as_bytes(),
             );
-            self.unpacking.store(false, Ordering::Release);
+            self.set_unpacking(false);
             return;
         }
 
@@ -4894,7 +4954,7 @@ impl NzbgetRsDirectUnpack {
                     continue;
                 }
                 started.push(archive.clone());
-                self.waiting_volume.store(false, Ordering::Release);
+                self.set_waiting(false);
                 if !self.processed.load(Ordering::Acquire) {
                     let m = [b"Directly unpacking ", local.name.as_slice()].concat();
                     self.add_message(ctx, host_cb, MK_INFO, &m, &mut local);
@@ -4919,14 +4979,14 @@ impl NzbgetRsDirectUnpack {
                     }
                     continue;
                 }
-                self.waiting_volume.store(true, Ordering::Release);
+                self.set_waiting(true);
                 std::thread::sleep(Duration::from_millis(100));
                 self.apply_releases(ctx, host_cb);
             }
         }
 
-        self.unpacking.store(false, Ordering::Release);
-        self.waiting_volume.store(false, Ordering::Release);
+        self.set_unpacking(false);
+        self.set_waiting(false);
 
         let cancelled = self.cancelled.load(Ordering::Acquire);
         let interrupted = !cancelled && self.is_stopped_or_terminated(ctx, host_cb);
@@ -5230,8 +5290,13 @@ unsafe extern "C" fn direct_unpack_host_cb(
             }
             if a1 == 5 {
                 let ns = host.nzb_snap(p1, false);
+                // ints[0]: seconds spent unpacking (while downloading too); a2: the wait
+                // after the download, which post-processing spent on direct unpack.
+                let unpack_sec = if ints.is_null() { 0 } else { unsafe { *ints } };
+                if unpack_sec != 0 {
+                    host.nzb_set_int(p1, NZB_INT_UNPACK_SEC, ns.unpack_sec + unpack_sec);
+                }
                 if (p2 & 2) != 0 {
-                    host.nzb_set_int(p1, NZB_INT_UNPACK_SEC, ns.unpack_sec + a2);
                     host.nzb_set_int(p1, NZB_INT_POST_TOTAL_SEC, ns.post_total_sec + a2);
                 }
                 if (p2 & 1) != 0 && ns.post_info_ptr != 0 && !ns.has_live_repair_thread {
@@ -6483,7 +6548,13 @@ unsafe extern "C" fn repair_job_host_cb(
                 host.post_set_int(pi, POST_INT_PAR_REPAIRED, i32::from(ins[2] != 0));
             }
             host.post_set_start_time(pi, ps.start_time + i64::from(ins[3]));
-            host.nzb_set_int(p1, NZB_INT_PAR_SEC, ns.par_sec + ins[4]);
+            // Live PAR verified (and maybe repaired) while downloading: that counts too.
+            let (live_par_sec, live_repair_sec) =
+                crate::parchecker::streaming_session_take_par_secs(ns.id);
+            host.nzb_set_int(p1, NZB_INT_PAR_SEC, ns.par_sec + ins[4] + live_par_sec);
+            if live_repair_sec != 0 {
+                host.nzb_set_int(p1, NZB_INT_REPAIR_SEC, ns.repair_sec + live_repair_sec);
+            }
             host.nzb_set_int(p1, NZB_INT_PAR_FULL, i32::from(ins[5] != 0));
             host.post_set_int(pi, POST_INT_WORKING, 0);
             0
@@ -7668,6 +7739,29 @@ mod live_hold_tests {
         assert!(direct_unpack_has_holds(id));
         assert!(direct_unpack_awaiting_repair(id));
         direct_unpack_forget_holds(id);
+    }
+}
+
+#[cfg(test)]
+mod busy_time_tests {
+    use super::BusyTime;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn counts_only_active_periods_and_reports_each_second_once() {
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let mut busy = BusyTime::default();
+        busy.set_active(true, at(0));
+        busy.set_active(true, at(1)); // already active: no restart
+        busy.set_active(false, at(3));
+        busy.set_active(false, at(10)); // idle time is not counted
+        busy.set_active(true, at(20));
+        assert_eq!(busy.take_secs(at(22)), 5); // 3 closed + 2 open
+        assert_eq!(busy.take_secs(at(22)), 0);
+        busy.set_active(false, at(25));
+        assert_eq!(busy.take_secs(at(30)), 3);
+        assert_eq!(BusyTime::default().take_secs(at(5)), 0);
     }
 }
 

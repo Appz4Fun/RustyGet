@@ -117,6 +117,9 @@ pub fn calc_move_to_queue_reset(
             new_post_total_sec -= par_sec;
         }
     }
+    // Direct unpack and live PAR also run while downloading, so their time can exceed the
+    // post-processing total it is taken from.
+    let new_post_total_sec = new_post_total_sec.max(0);
     let new_move_status = if move_status == ms_failure {
         ms_none
     } else {
@@ -3178,6 +3181,13 @@ mod tests {
     use crate::queuecoord::DELETE_NONE;
     use crate::queuecoord::PARTIAL_STATE_COMPLETED;
     use std::ffi::CString;
+
+    #[test]
+    fn move_to_queue_reset_never_leaves_negative_post_total() {
+        // 30 s unpacking while downloading, 10 s of post-processing in all.
+        assert_eq!(calc_move_to_queue_reset(false, 10, 30, true, 5, 0, 1, 0), (0, 0));
+        assert_eq!(calc_move_to_queue_reset(false, 50, 30, true, 5, 0, 1, 0), (15, 0));
+    }
 
     #[test]
     fn test_history_coord_reset_and_dup_status() {

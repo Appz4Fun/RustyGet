@@ -635,6 +635,67 @@ impl ActiveStreamingSession {
     }
 }
 
+/// Wall time live PAR spent on each job's work, verifying and repairing, kept past the
+/// session (a job may have several) until par-check adds it to the job's times.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct LiveParTime {
+    verify: std::time::Duration,
+    repair: std::time::Duration,
+}
+
+static LIVE_PAR_TIME: LazyLock<Mutex<HashMap<i32, LiveParTime>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+thread_local! {
+    static LIVE_PAR_TIMING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+impl ActiveStreamingSession {
+    /// Runs live PAR work for `nzb_id` and charges its wall time to the job: the part
+    /// par-rs spent in target repair calls is repair, the rest verification. Nested
+    /// calls are charged by the outermost one only.
+    fn timed<T>(&self, nzb_id: i32, f: impl FnOnce() -> T) -> T {
+        if LIVE_PAR_TIMING.with(|timing| timing.replace(true)) {
+            return f();
+        }
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                LIVE_PAR_TIMING.with(|timing| timing.set(false));
+            }
+        }
+        let _reset = Reset;
+        let started = std::time::Instant::now();
+        let repair_before = self.session.repair_phase_stats().total_ns;
+        let result = f();
+        let elapsed = started.elapsed();
+        let repair = std::time::Duration::from_nanos(
+            self.session
+                .repair_phase_stats()
+                .total_ns
+                .saturating_sub(repair_before),
+        )
+        .min(elapsed);
+        let mut times = LIVE_PAR_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let time = times.entry(nzb_id).or_default();
+        time.verify += elapsed - repair;
+        time.repair += repair;
+        result
+    }
+}
+
+/// Takes the seconds live PAR spent on job `nzb_id` since the last take: verifying and
+/// repairing (par time, which includes the repair) and repairing alone.
+pub(crate) fn streaming_session_take_par_secs(nzb_id: i32) -> (i32, i32) {
+    let time = LIVE_PAR_TIME
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&nzb_id)
+        .unwrap_or_default();
+    let secs = |d: std::time::Duration| d.as_secs_f64().round().min(i32::MAX as f64) as i32;
+    (secs(time.verify + time.repair), secs(time.repair))
+}
+
 fn with_live_session<T>(
     nzb_id: i32,
     f: impl FnOnce(&ActiveStreamingSession) -> Result<T, RepairError>,
@@ -649,12 +710,14 @@ fn with_live_entry<T>(
     f: impl FnOnce(&ActiveStreamingSession) -> Result<T, RepairError>,
 ) -> Result<T, RepairError> {
     let _operation = entry.operation.lock().unwrap_or_else(|e| e.into_inner());
-    entry.record((|| {
-        ensure_current_generation(nzb_id, entry)?;
-        let result = f(entry)?;
-        ensure_current_generation(nzb_id, entry)?;
-        Ok(result)
-    })())
+    entry.timed(nzb_id, || {
+        entry.record((|| {
+            ensure_current_generation(nzb_id, entry)?;
+            let result = f(entry)?;
+            ensure_current_generation(nzb_id, entry)?;
+            Ok(result)
+        })())
+    })
 }
 
 /// Reserve before taking an owned snapshot. This capture path performs no source I/O,
@@ -851,11 +914,11 @@ fn drain_live_articles_locked(
             let Some(article) = take_live_article(entry) else {
                 return Ok(count);
             };
-            let mut result = article.fold();
+            let mut result = entry.timed(nzb_id, || article.fold());
             // Staging that a loan of free ParBuffer enlarges enough takes the article after
             // all: not a refusal. A shortfall no loan covers is refused and reported.
             if matches!(&result, Err(error) if entry.lend_memory(error)) {
-                result = article.fold();
+                result = entry.timed(nzb_id, || article.fold());
             }
             drop(article);
             let outcome = result?;
@@ -2374,11 +2437,11 @@ impl TargetWriteLease {
         drain_live_articles_locked(nzb_id, &entry)?;
         let par_ids: Vec<_> = ids.iter().map(|(_, id)| *id).collect();
         targets_current()?;
-        let (report, hashes) = entry.record(
+        let (report, hashes) = entry.record(entry.timed(nzb_id, || {
             entry
                 .session
-                .repair_available_targets_with_files_and_hashes_now(&par_ids, &files),
-        )?;
+                .repair_available_targets_with_files_and_hashes_now(&par_ids, &files)
+        }))?;
         ensure_current_generation(nzb_id, &entry)?;
         targets_current()?;
         // The library checks both the whole-file MD5 and actual file length under our lease.
@@ -2457,8 +2520,8 @@ pub fn streaming_session_early_repair(
     }
     Some(
         entry.record(
-            session
-                .repair_available_targets_now(&ids)
+            entry
+                .timed(nzb_id, || session.repair_available_targets_now(&ids))
                 .and_then(|report| {
                     ensure_current_generation(nzb_id, &entry)?;
                     let done = names
@@ -4321,6 +4384,93 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Live PAR work is charged to the job's par time, once, nested calls included once,
+    /// and survives the session until par-check takes it.
+    #[test]
+    fn live_par_time_is_charged_once_and_taken_once() {
+        use par_rs::create::{build_set, SetOptions, VolumeScheme};
+
+        let nzb_id = 0x6a0f_0012;
+        let dir = std::env::temp_dir().join(format!(
+            "rustyget-parchecker-time-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f0 = make_deterministic_bytes(8 * 4096, 407);
+        let built = build_set(
+            "time",
+            &[("part01.rar", &f0)],
+            &SetOptions {
+                slice_size: 4096,
+                recovery_blocks: 2,
+                first_exponent: 0,
+                volumes: VolumeScheme::Single,
+                creator: "rustyget-test".to_string(),
+                unicode_names: false,
+                kernel: Kernel::detect(),
+            },
+        )
+        .unwrap();
+        let index_path = dir.join("time.par2");
+        std::fs::write(&index_path, &built.index).unwrap();
+        streaming_session_start(
+            nzb_id,
+            &index_path,
+            &dir,
+            SessionOptions {
+                preallocated_syndrome_slots: 1,
+                max_syndrome_slots: 1,
+                max_syndrome_bytes: 4096,
+                max_working_bytes: 4 << 20,
+                max_staging_bytes: 4096,
+                solve_mem_limit_bytes: 16 << 20,
+                ..SessionOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(streaming_session_take_par_secs(nzb_id), (0, 0));
+        let entry = active_streaming_session(nzb_id).unwrap();
+        let value = entry.timed(nzb_id, || {
+            entry.timed(nzb_id, || {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                7
+            })
+        });
+        assert_eq!(value, 7);
+        let time = LIVE_PAR_TIME.lock().unwrap()[&nzb_id];
+        assert!(time.verify >= std::time::Duration::from_millis(100));
+        assert!(time.verify < std::time::Duration::from_millis(200), "{time:?}");
+        assert_eq!(time.repair, std::time::Duration::ZERO);
+        // Ordinary article work goes through the same accounting.
+        let piece = f0[..4096].to_vec();
+        let crc = crc32fast::hash(&piece);
+        streaming_session_on_article_finished_by_name(
+            nzb_id,
+            b"part01.rar",
+            0,
+            4096,
+            crc,
+            Some(&piece),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(LIVE_PAR_TIME.lock().unwrap()[&nzb_id].verify > time.verify);
+        streaming_session_forget(nzb_id);
+        drop(entry);
+        // Kept past the session; par time includes the repair; whole seconds.
+        LIVE_PAR_TIME.lock().unwrap().insert(
+            nzb_id,
+            LiveParTime {
+                verify: std::time::Duration::from_millis(1400),
+                repair: std::time::Duration::from_millis(600),
+            },
+        );
+        assert_eq!(streaming_session_take_par_secs(nzb_id), (2, 1));
+        assert_eq!(streaming_session_take_par_secs(nzb_id), (0, 0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn live_session_grows_into_blocks_turned_away_before_new_damage() {
         use par_rs::create::{build_set, SetOptions, VolumeScheme};
@@ -4409,6 +4559,15 @@ mod tests {
             .unwrap();
         assert_eq!(report.repaired_slices.len(), 3);
         assert_eq!(std::fs::read(dir.join("part01.rar")).unwrap(), f0);
+        // The repair is charged as repair time, the feeding as verification.
+        let time = LIVE_PAR_TIME.lock().unwrap()[&nzb_id];
+        assert!(time.repair > std::time::Duration::ZERO);
+        assert!(time.verify > std::time::Duration::ZERO);
+        assert_eq!(
+            time.repair.as_nanos() as u64,
+            entry.session.repair_phase_stats().total_ns
+        );
+        let _ = streaming_session_take_par_secs(nzb_id);
         streaming_session_cancel(nzb_id);
         let _ = std::fs::remove_dir_all(&dir);
     }

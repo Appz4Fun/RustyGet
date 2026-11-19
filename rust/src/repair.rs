@@ -351,10 +351,7 @@ use crate::twin::{
     MAX_INDEX_SIZE,
 };
 
-const MK_INFO: c_int = 0;
-const MK_WARNING: c_int = 1;
-const MK_ERROR: c_int = 2;
-const MK_DETAIL: c_int = 4;
+use crate::log::{MK_INFO, MK_WARNING, MK_ERROR, MK_DETAIL};
 
 const MAX_TWIN_FETCH_SIZE: i64 = 1024 * 1024 * 1024;
 

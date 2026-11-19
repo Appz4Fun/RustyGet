@@ -1550,18 +1550,189 @@ struct UnpackRunState {
     parcheck_enabled: bool,
 }
 
+/// A post job together with the queue host it reports to.
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+struct JobQueue<'a> {
+    job: &'a NzbgetRsPostJob,
+    host: &'a crate::queuesubsys_host::QueueSubsysHost,
+}
+
+#[cfg(unix)]
+impl JobQueue<'_> {
+    fn nzb_ptr(self) -> usize {
+        self.job.nzb_ptr(self.host)
+    }
+
+    fn is_stopped(self) -> bool {
+        self.host.thread_is_stopped(self.job.thread_ptr)
+    }
+
+    fn is_deleted(self) -> bool {
+        self.job.post_ptr != 0 && self.host.post_snap(self.job.post_ptr).deleted
+    }
+
+    fn add_message(self, kind: i32, msg: &[u8]) {
+        if self.job.post_ptr != 0 {
+            self.job.add_message(self.host, kind, cstr::until_nul(msg));
+        }
+    }
+
+    /// Writes to the global log only (not the job's message list).
+    fn log(self, kind: i32, msg: &[u8]) {
+        self.host.log(kind, cstr::until_nul(msg));
+    }
+
+    fn set_progress_label(self, label: &[u8]) {
+        self.host.with_locked_queue(|_| {
+            self.host
+                .post_set_progress_label(self.job.post_ptr, cstr::until_nul(label));
+        });
+    }
+
+    fn set_stage_progress(self, stage_progress: i32) {
+        use crate::queuesubsys_host::POST_INT_STAGE_PROGRESS;
+        if self.job.post_ptr != 0 {
+            self.host
+                .post_set_int(self.job.post_ptr, POST_INT_STAGE_PROGRESS, stage_progress);
+        }
+    }
+
+    fn reset_stage_time(self) {
+        if self.job.post_ptr != 0 {
+            self.host
+                .post_set_stage_time(self.job.post_ptr, current_time_sec());
+        }
+    }
+
+    /// Fills `st` from the job and the options; returns whether unpacking is enabled.
+    /// The caller holds the queue lock.
+    fn read_unpack_settings(self, st: &mut UnpackRunState) -> bool {
+        let host = self.host;
+        let post_ptr = self.job.post_ptr;
+        let ps = host.post_snap(post_ptr);
+        let n = ps.nzb_ptr;
+        let ns = host.nzb_snap(n, false);
+        let unpack_param = host.nzb_get_param(n, b"*Unpack:");
+        let password = host.nzb_get_param(n, b"*Unpack:Password");
+        let opts = crate::options::active_options();
+        let opt = |id| {
+            cstr::until_nul(opts.as_ref().map_or(&b""[..], |o| o.str_bytes(id))).to_vec()
+        };
+        let sc = opts.as_ref().map(|o| o.scalars());
+
+        st.dest_dir = ns.dest_dir;
+        st.final_dir = ns.final_dir;
+        st.name = ns.name;
+        st.password = password
+            .as_deref()
+            .map_or_else(Vec::new, |p| cstr::until_nul(p).to_vec());
+        st.unpack_pass_file = opt(OptStr::UnpackPassFile);
+        st.unpack_ignore_ext = opt(OptStr::UnpackIgnoreExt);
+        st.inter_dir_opt = opt(OptStr::InterDir);
+        st.downloaded_files = (0..host.nzb_completed_files_len(n))
+            .map(|i| cstr::until_nul(&host.nzb_completed_file_at(n, i).filename).to_vec())
+            .collect();
+        st.extracted_archives = (0..ps.extracted_archives_len)
+            .map(|i| cstr::until_nul(&host.post_extracted_archive_at(post_ptr, i)).to_vec())
+            .collect();
+        st.unpack_tried = ps.unpack_tried;
+        st.par_repaired = ps.par_repaired;
+        st.prev_pass_list_tried = ps.pass_list_tried;
+        st.last_unpack_status = ps.last_unpack_status;
+        st.direct_unpack_status = ns.direct_unpack_status;
+        st.par_status = ns.par_status;
+        st.par_rename_status = ns.par_rename_status;
+        st.use_temp_unpack_dir = sc.as_ref().is_some_and(|s| s.use_temp_unpack_dir != 0);
+        st.unpack_cleanup_disk = sc.as_ref().is_some_and(|s| s.unpack_cleanup_disk != 0);
+        st.write_buffer_kb = sc.as_ref().map_or(0, |s| s.write_buffer);
+        st.par_rename_opt = sc.as_ref().is_some_and(|s| s.par_rename != 0);
+        st.umask = crate::lifecycle::active_umask() as u32;
+        st.parcheck_enabled = crate::ffi::build_parcheck_enabled();
+
+        !unpack_param
+            .as_deref()
+            .is_some_and(|v| v.eq_ignore_ascii_case(b"no"))
+    }
+
+    fn set_unpack_status(self, status: i32) {
+        use crate::queuesubsys_host::NZB_INT_UNPACK_STATUS;
+        self.host
+            .nzb_set_int(self.nzb_ptr(), NZB_INT_UNPACK_STATUS, status);
+    }
+
+    fn unpack_succeeded(self, cleaned_up_disk: bool, par_rename: bool) {
+        use crate::queuesubsys_host::{
+            NZB_INT_PAR_RENAME_STATUS, NZB_INT_UNPACK_CLEANED_UP_DISK, NZB_INT_UNPACK_STATUS,
+            RS_NONE, US_SUCCESS,
+        };
+        let n = self.nzb_ptr();
+        self.host.nzb_set_int(n, NZB_INT_UNPACK_STATUS, US_SUCCESS);
+        self.host
+            .nzb_set_int(n, NZB_INT_UNPACK_CLEANED_UP_DISK, i32::from(cleaned_up_disk));
+        if par_rename {
+            self.host.nzb_set_int(n, NZB_INT_PAR_RENAME_STATUS, RS_NONE);
+        }
+    }
+
+    fn request_par_check(self, force_repair: bool, pass_list_tried: bool, last_status: i32) {
+        use crate::queuesubsys_host::{
+            POST_INT_FORCE_REPAIR, POST_INT_LAST_UNPACK_STATUS, POST_INT_PASS_LIST_TRIED,
+            POST_INT_REQUEST_PAR_CHECK, POST_INT_UNPACK_TRIED,
+        };
+        let pi = self.job.post_ptr;
+        self.host.post_set_int(pi, POST_INT_REQUEST_PAR_CHECK, 1);
+        self.host
+            .post_set_int(pi, POST_INT_FORCE_REPAIR, i32::from(force_repair));
+        self.host.post_set_int(pi, POST_INT_UNPACK_TRIED, 1);
+        self.host
+            .post_set_int(pi, POST_INT_PASS_LIST_TRIED, i32::from(pass_list_tried));
+        self.host
+            .post_set_int(pi, POST_INT_LAST_UNPACK_STATUS, last_status);
+    }
+
+    /// Adds `elapsed_sec` to the job's unpack time and ends the stage.
+    fn finish(self, elapsed_sec: i32) {
+        use crate::queuesubsys_host::{NZB_INT_UNPACK_SEC, POST_INT_WORKING};
+        let n = self.nzb_ptr();
+        let ns = self.host.nzb_snap(n, false);
+        self.host
+            .nzb_set_int(n, NZB_INT_UNPACK_SEC, ns.unpack_sec + elapsed_sec);
+        self.host.post_set_int(self.job.post_ptr, POST_INT_WORKING, 0);
+    }
+
+    /// The job's par status and whether par was a full check.
+    fn par_info(self) -> (i32, bool) {
+        let ns = self.host.nzb_snap(self.nzb_ptr(), false);
+        (ns.par_status, ns.par_full)
+    }
+
+    fn build_final_dir_name(self) -> Vec<u8> {
+        cstr::until_nul(&self.host.nzb_build_final_dir_name(self.nzb_ptr())).to_vec()
+    }
+
+    fn set_final_dir(self, final_dir: &[u8]) {
+        use crate::queuesubsys_host::NZB_STR_FINAL_DIR;
+        self.host
+            .nzb_set_str(self.nzb_ptr(), NZB_STR_FINAL_DIR, cstr::until_nul(final_dir));
+    }
+}
+
+#[cfg(unix)]
 pub struct NzbgetRsUnpackController {
     terminated: AtomicBool,
     unpacking: AtomicBool,
     exec_thread_key: AtomicUsize,
 }
 
+#[cfg(unix)]
 impl Default for NzbgetRsUnpackController {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(unix)]
 impl NzbgetRsUnpackController {
     pub fn new() -> Self {
         Self {
@@ -1575,90 +1746,28 @@ impl NzbgetRsUnpackController {
         self.terminated.store(true, Ordering::Release);
     }
 
-    fn is_stopped(&self, ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn) -> bool {
-        unsafe {
-            host_cb(
-                ctx,
-                2,
-                0,
-                0,
-                0,
-                0,
-                ptr::null(),
-                ptr::null(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            ) != 0
-        }
-    }
-
-    fn is_stopped_or_terminated(
-        &self,
-        ctx: *mut c_void,
-        host_cb: NzbgetRsRepairCtrlHostFn,
-    ) -> bool {
-        self.is_stopped(ctx, host_cb) || self.terminated.load(Ordering::Acquire)
-    }
-
-    fn set_progress_label(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn, label: &[u8]) {
-        let c_lbl = cstr::nul_terminated(label);
-        unsafe {
-            host_cb(
-                ctx,
-                2,
-                4,
-                0,
-                0,
-                0,
-                c_lbl.as_ptr() as *const c_char,
-                ptr::null(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            );
-        }
-    }
-
-    fn global_log(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn, kind: i32, msg: &[u8]) {
-        let c_msg = cstr::nul_terminated(msg);
-        unsafe {
-            host_cb(
-                ctx,
-                2,
-                7,
-                kind,
-                0,
-                0,
-                c_msg.as_ptr() as *const c_char,
-                ptr::null(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            );
-        }
+    fn is_stopped_or_terminated(&self, q: JobQueue<'_>) -> bool {
+        q.is_stopped() || self.terminated.load(Ordering::Acquire)
     }
 
     fn print_message(
         &self,
-        ctx: *mut c_void,
-        host_cb: NzbgetRsRepairCtrlHostFn,
+        q: JobQueue<'_>,
         st: &mut UnpackRunState,
         kind: i32,
         msg: &[u8],
     ) {
         if let Some(prefix) = st.log_prefix {
             let full = [prefix, b": ", msg].concat();
-            self.add_message(ctx, host_cb, st, kind, &full);
+            self.add_message(q, st, kind, &full);
         } else {
-            self.add_message(ctx, host_cb, st, kind, msg);
+            self.add_message(q, st, kind, msg);
         }
     }
 
     fn add_message(
         &self,
-        ctx: *mut c_void,
-        host_cb: NzbgetRsRepairCtrlHostFn,
+        q: JobQueue<'_>,
         st: &mut UnpackRunState,
         kind: i32,
         text: &[u8],
@@ -1670,56 +1779,24 @@ impl NzbgetRsUnpackController {
             trunc_1023(text.to_vec())
         };
 
-        let c_msg = cstr::nul_terminated(&msg_text);
-        unsafe {
-            host_cb(
-                ctx,
-                2,
-                3,
-                kind,
-                0,
-                0,
-                c_msg.as_ptr() as *const c_char,
-                ptr::null(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            );
-        }
+        q.add_message(kind, &msg_text);
 
         if !st.is_seven_zip && info.reset_stage_time != 0 {
-            let mut now = current_time_sec();
-            unsafe {
-                host_cb(
-                    ctx,
-                    2,
-                    6,
-                    0,
-                    0,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null_mut(),
-                    &mut now,
-                    ptr::null_mut(),
-                );
-            }
+            q.reset_stage_time();
         }
 
         if !st.is_seven_zip && info.has_extracting_progress != 0 && msg_text.len() >= 7 {
-            Self::set_progress_label(ctx, host_cb, &msg_text[7..]);
+            q.set_progress_label(&msg_text[7..]);
         }
 
         if !st.is_seven_zip && info.has_extracting_from != 0 && text.len() >= 7 {
             if text.len() >= 23 {
-                Self::global_log(
-                    ctx,
-                    host_cb,
+                q.log(
                     MK_DEBUG,
                     &[b"Filename: ", &text[23..]].concat(),
                 );
             }
-            Self::set_progress_label(ctx, host_cb, &text[7..]);
+            q.set_progress_label(&text[7..]);
         }
 
         if info.decrypt_error != 0 {
@@ -1740,7 +1817,7 @@ impl NzbgetRsUnpackController {
             st.unpack_limit_error = true;
         }
 
-        if !self.is_stopped(ctx, host_cb)
+        if !q.is_stopped()
             && (st.unpack_decrypt_error
                 || st.unpack_password_error
                 || info.crc_or_volume_error != 0)
@@ -1752,39 +1829,10 @@ impl NzbgetRsUnpackController {
                 let warn_msg = trunc_1023(
                     [b"Cancelling ", st.info_name.as_slice(), b" due to errors"].concat(),
                 );
-                let c_warn = cstr::nul_terminated(&warn_msg);
-                unsafe {
-                    host_cb(
-                        ctx,
-                        2,
-                        3,
-                        MK_WARNING,
-                        0,
-                        0,
-                        c_warn.as_ptr() as *const c_char,
-                        ptr::null(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                    );
-                }
+                q.add_message(MK_WARNING, &warn_msg);
             }
             st.auto_terminated = true;
-            unsafe {
-                host_cb(
-                    ctx,
-                    2,
-                    1,
-                    0,
-                    0,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                );
-            }
+            q.job.stop_from_rust(q.host);
         }
 
         if info.all_ok != 0 {
@@ -1792,100 +1840,14 @@ impl NzbgetRsUnpackController {
         }
     }
 
-    pub fn run(&self, ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn) {
+    fn run(&self, q: JobQueue<'_>) {
         let start = current_time_sec();
         let mut st = UnpackRunState {
             unpack_ok: true,
             ..UnpackRunState::default()
         };
 
-        let unpack = with_dq_guard(ctx, host_cb, |_| {
-            let mut ints = [0 as c_int; 18];
-            let mut strs = [ptr::null() as *const c_char; 7];
-            unsafe {
-                host_cb(
-                    ctx,
-                    1,
-                    0,
-                    0,
-                    0,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    ints.as_mut_ptr(),
-                    ptr::null_mut(),
-                    strs.as_mut_ptr(),
-                );
-            }
-            st.dest_dir = unsafe { cstr::owned(strs[0]) };
-            st.final_dir = unsafe { cstr::owned(strs[1]) };
-            st.name = unsafe { cstr::owned(strs[2]) };
-            if ints[1] != 0 {
-                st.password = unsafe { cstr::owned(strs[3]) };
-            }
-            st.unpack_pass_file = unsafe { cstr::owned(strs[4]) };
-            st.unpack_ignore_ext = unsafe { cstr::owned(strs[5]) };
-            st.inter_dir_opt = unsafe { cstr::owned(strs[6]) };
-
-            let dl_count = ints[2].max(0) as usize;
-            let ex_count = ints[3].max(0) as usize;
-            st.downloaded_files.reserve(dl_count);
-            for i in 0..dl_count {
-                let mut s = [ptr::null() as *const c_char; 1];
-                unsafe {
-                    host_cb(
-                        ctx,
-                        1,
-                        1,
-                        i as c_int,
-                        0,
-                        0,
-                        ptr::null(),
-                        ptr::null(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        s.as_mut_ptr(),
-                    );
-                }
-                st.downloaded_files.push(unsafe { cstr::owned(s[0]) });
-            }
-            st.extracted_archives.reserve(ex_count);
-            for i in 0..ex_count {
-                let mut s = [ptr::null() as *const c_char; 1];
-                unsafe {
-                    host_cb(
-                        ctx,
-                        1,
-                        2,
-                        i as c_int,
-                        0,
-                        0,
-                        ptr::null(),
-                        ptr::null(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        s.as_mut_ptr(),
-                    );
-                }
-                st.extracted_archives.push(unsafe { cstr::owned(s[0]) });
-            }
-
-            st.unpack_tried = ints[4] != 0;
-            st.par_repaired = ints[5] != 0;
-            st.prev_pass_list_tried = ints[6] != 0;
-            st.last_unpack_status = ints[7];
-            st.direct_unpack_status = ints[8];
-            st.par_status = ints[9];
-            st.par_rename_status = ints[10];
-            st.use_temp_unpack_dir = ints[12] != 0;
-            st.unpack_cleanup_disk = ints[13] != 0;
-            st.write_buffer_kb = ints[14];
-            st.par_rename_opt = ints[15] != 0;
-            st.umask = ints[16] as u32;
-            st.parcheck_enabled = ints[17] != 0;
-
-            ints[0] != 0
-        });
+        let unpack = q.host.with_locked_queue(|_| q.read_unpack_settings(&mut st));
 
         st.info_name = [b"unpack for ", st.name.as_slice()].concat();
         st.info_name_up = [b"Unpack for ", st.name.as_slice()].concat();
@@ -1927,7 +1889,7 @@ impl NzbgetRsUnpackController {
                 b" due to par-check not repaired anything",
             ]
             .concat();
-            self.print_message(ctx, host_cb, &mut st, MK_INFO, &m1);
+            self.print_message(q, &mut st, MK_INFO, &m1);
             let m2 = if st.last_unpack_status == 5 {
                 [
                     st.info_name_up.as_slice(),
@@ -1937,26 +1899,12 @@ impl NzbgetRsUnpackController {
             } else {
                 [st.info_name_up.as_slice(), b" failed."].concat()
             };
-            self.print_message(ctx, host_cb, &mut st, MK_ERROR, &m2);
-            unsafe {
-                host_cb(
-                    ctx,
-                    3,
-                    0,
-                    st.last_unpack_status,
-                    0,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                );
-            }
+            self.print_message(q, &mut st, MK_ERROR, &m2);
+            q.set_unpack_status(st.last_unpack_status);
         } else if unpack && has_files {
             let m = [b"Unpacking ", st.name.as_slice()].concat();
-            self.print_message(ctx, host_cb, &mut st, MK_INFO, &m);
-            self.create_unpack_dir(ctx, host_cb, &mut st);
+            self.print_message(q, &mut st, MK_INFO, &m);
+            self.create_unpack_dir(q, &mut st);
             // One guard for the job's unpack limits, continuing the count of the job's direct
             // unpack. Without one (after a restart), a temporary unpack folder that was there
             // already holds what direct unpack wrote for this job: it counts too.
@@ -1991,28 +1939,13 @@ impl NzbgetRsUnpackController {
                                 b"Found archive files not processed by direct unpack, unpacking all files again",
                             )
                         };
-                        self.print_message(ctx, host_cb, &mut st, kind, txt);
+                        self.print_message(q, &mut st, kind, txt);
                     }
-                    unsafe {
-                        host_cb(
-                            ctx,
-                            1,
-                            3,
-                            0,
-                            0,
-                            0,
-                            ptr::null(),
-                            ptr::null(),
-                            ptr::null_mut(),
-                            ptr::null_mut(),
-                            ptr::null_mut(),
-                        );
-                    }
-                    self.unpack_archives(ctx, host_cb, &mut st, false, false);
+                    q.host.post_clear_extracted_archives(q.job.post_ptr);
+                    self.unpack_archives(q, &mut st, false, false);
                 } else {
                     self.print_message(
-                        ctx,
-                        host_cb,
+                        q,
                         &mut st,
                         MK_INFO,
                         b"Using directly unpacked files",
@@ -2021,16 +1954,16 @@ impl NzbgetRsUnpackController {
             }
 
             if st.has_seven_zip_files && st.unpack_ok {
-                self.unpack_archives(ctx, host_cb, &mut st, true, false);
+                self.unpack_archives(q, &mut st, true, false);
             }
             if st.has_seven_zip_multi_files && st.unpack_ok {
-                self.unpack_archives(ctx, host_cb, &mut st, true, true);
+                self.unpack_archives(q, &mut st, true, true);
             }
             if st.has_splitted_files && st.unpack_ok {
-                self.join_splitted_files(ctx, host_cb, &mut st);
+                self.join_splitted_files(q, &mut st);
             }
 
-            self.completed(ctx, host_cb, &mut st);
+            self.completed(q, &mut st);
             st.joined_files.clear();
         } else if unpack {
             if st.parcheck_enabled
@@ -2039,8 +1972,8 @@ impl NzbgetRsUnpackController {
                 && st.has_par_files
             {
                 let m = [b"Nothing to unpack for ", st.name.as_slice()].concat();
-                self.print_message(ctx, host_cb, &mut st, MK_INFO, &m);
-                self.request_par_check(ctx, host_cb, &mut st, false);
+                self.print_message(q, &mut st, MK_INFO, &m);
+                self.request_par_check(q, &mut st, false);
             } else if st.has_renamed_archive_files {
                 let m = [
                     b"Could not unpack ",
@@ -2048,126 +1981,34 @@ impl NzbgetRsUnpackController {
                     b" due to renamed archive files",
                 ]
                 .concat();
-                self.print_message(ctx, host_cb, &mut st, MK_ERROR, &m);
-                unsafe {
-                    host_cb(
-                        ctx,
-                        3,
-                        0,
-                        2,
-                        0,
-                        0,
-                        ptr::null(),
-                        ptr::null(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                    );
-                }
+                self.print_message(q, &mut st, MK_ERROR, &m);
+                q.set_unpack_status(2);
             } else {
                 let m = [b"Nothing to unpack for ", st.name.as_slice()].concat();
-                self.print_message(ctx, host_cb, &mut st, MK_INFO, &m);
-                unsafe {
-                    host_cb(
-                        ctx,
-                        3,
-                        0,
-                        1,
-                        0,
-                        0,
-                        ptr::null(),
-                        ptr::null(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                    );
-                }
+                self.print_message(q, &mut st, MK_INFO, &m);
+                q.set_unpack_status(1);
             }
         } else {
             let m = [b"Unpack for ", st.name.as_slice(), b" skipped"].concat();
-            self.print_message(ctx, host_cb, &mut st, MK_INFO, &m);
-            unsafe {
-                host_cb(
-                    ctx,
-                    3,
-                    0,
-                    1,
-                    0,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                );
-            }
+            self.print_message(q, &mut st, MK_INFO, &m);
+            q.set_unpack_status(1);
         }
 
         let elapsed = (current_time_sec() - start) as c_int;
-        unsafe {
-            host_cb(
-                ctx,
-                3,
-                3,
-                elapsed,
-                0,
-                0,
-                ptr::null(),
-                ptr::null(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            );
-        }
+        q.finish(elapsed);
     }
 
     fn create_unpack_dir(
         &self,
-        ctx: *mut c_void,
-        host_cb: NzbgetRsRepairCtrlHostFn,
+        q: JobQueue<'_>,
         st: &mut UnpackRunState,
     ) {
         let sep = crate::paths::PATH_SEPARATOR;
         st.inter_dir = crate::unpack::use_inter_dir(&st.dest_dir, &st.inter_dir_opt, sep);
 
         if st.inter_dir && st.final_dir.is_empty() {
-            let mut built = Vec::new();
-            extern "C" fn set_vec(vec_ptr: usize, s: *const c_char) {
-                let v = unsafe { &mut *(vec_ptr as *mut Vec<u8>) };
-                *v = unsafe { cstr::owned(s) };
-            }
-            unsafe {
-                host_cb(
-                    ctx,
-                    3,
-                    5,
-                    0,
-                    (&mut built as *mut Vec<u8>) as usize,
-                    set_vec as *const () as usize,
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                );
-            }
-            st.final_dir = built;
-            let c_fin = cstr::nul_terminated(&st.final_dir);
-            with_dq_guard(ctx, host_cb, |_| unsafe {
-                host_cb(
-                    ctx,
-                    3,
-                    6,
-                    0,
-                    0,
-                    0,
-                    c_fin.as_ptr() as *const c_char,
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                );
-            });
+            st.final_dir = q.build_final_dir_name();
+            q.host.with_locked_queue(|_| q.set_final_dir(&st.final_dir));
             st.final_dir_created =
                 !crate::fsops::directory_exists(&st.final_dir, &crate::fsops::posix_stat);
         }
@@ -2185,9 +2026,7 @@ impl NzbgetRsUnpackController {
         st.unpack_dir_created =
             !crate::fsops::directory_exists(&st.unpack_dir, &crate::fsops::posix_stat);
 
-        Self::global_log(
-            ctx,
-            host_cb,
+        q.log(
             MK_DETAIL,
             &[b"Unpacking into ", st.unpack_dir.as_slice()].concat(),
         );
@@ -2202,26 +2041,23 @@ impl NzbgetRsUnpackController {
                 errmsg.as_slice(),
             ]
             .concat();
-            self.print_message(ctx, host_cb, st, MK_ERROR, &m);
+            self.print_message(q, st, MK_ERROR, &m);
         }
     }
 
     fn unpack_archives(
         &self,
-        ctx: *mut c_void,
-        host_cb: NzbgetRsRepairCtrlHostFn,
+        q: JobQueue<'_>,
         st: &mut UnpackRunState,
         is_seven_zip: bool,
         multi_volumes: bool,
     ) {
         if !st.unpack_tried || st.par_repaired {
             let pw = st.password.clone();
-            self.execute_unpack(ctx, host_cb, st, is_seven_zip, &pw, multi_volumes);
+            self.execute_unpack(q, st, is_seven_zip, &pw, multi_volumes);
             if !st.unpack_ok && st.has_par_files && !st.unpack_password_error && st.par_status <= 1
             {
-                Self::global_log(
-                    ctx,
-                    host_cb,
+                q.log(
                     MK_DEBUG,
                     b"For rar4- or 7z-archives try par-check first, before trying password file",
                 );
@@ -2253,48 +2089,33 @@ impl NzbgetRsUnpackController {
                 },
                 |pw| {
                     let mut s = state_cell.borrow_mut();
-                    Self::global_log(ctx, host_cb, MK_DEBUG, &[b"Password line: ", pw].concat());
-                    if self.is_stopped(ctx, host_cb) && s.auto_terminated {
+                    q.log(MK_DEBUG, &[b"Password line: ", pw].concat());
+                    if q.is_stopped() && s.auto_terminated {
                         self.terminated.store(false, Ordering::Release);
-                        unsafe {
-                            host_cb(
-                                ctx,
-                                2,
-                                2,
-                                0,
-                                0,
-                                0,
-                                ptr::null(),
-                                ptr::null(),
-                                ptr::null_mut(),
-                                ptr::null_mut(),
-                                ptr::null_mut(),
-                            );
-                        }
+                        q.host.thread_resume(q.job.thread_ptr);
                     }
                     s.unpack_decrypt_error = false;
                     s.unpack_password_error = false;
                     s.auto_terminated = false;
                     let m = [b"Trying password ", pw, b" for ", s.name.as_slice()].concat();
-                    self.print_message(ctx, host_cb, &mut s, MK_INFO, &m);
-                    self.execute_unpack(ctx, host_cb, &mut s, is_seven_zip, pw, multi_volumes);
+                    self.print_message(q, &mut s, MK_INFO, &m);
+                    self.execute_unpack(q, &mut s, is_seven_zip, pw, multi_volumes);
                 },
             );
 
             if !opened {
                 let m = [b"Could not open file ", pass_file.as_slice()].concat();
-                self.print_message(ctx, host_cb, st, MK_ERROR, &m);
+                self.print_message(q, st, MK_ERROR, &m);
                 return;
             }
 
-            st.pass_list_tried = !self.is_stopped(ctx, host_cb) || st.auto_terminated;
+            st.pass_list_tried = !q.is_stopped() || st.auto_terminated;
         }
     }
 
     fn execute_unpack(
         &self,
-        ctx: *mut c_void,
-        host_cb: NzbgetRsRepairCtrlHostFn,
+        q: JobQueue<'_>,
         st: &mut UnpackRunState,
         is_seven_zip: bool,
         password: &[u8],
@@ -2306,10 +2127,10 @@ impl NzbgetRsUnpackController {
         st.is_seven_zip = is_seven_zip;
 
         if is_seven_zip {
-            self.print_message(ctx, host_cb, st, MK_INFO, b"Executing 7-Zip");
+            self.print_message(q, st, MK_INFO, b"Executing 7-Zip");
             st.log_prefix = Some(b"7-Zip");
         }
-        Self::set_progress_label(ctx, host_cb, b"");
+        q.set_progress_label(b"");
 
         let _unpack_guard = UNPACK_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         self.exec_thread_key
@@ -2358,14 +2179,13 @@ impl NzbgetRsUnpackController {
                     _ => MK_DETAIL,
                 };
                 self.add_message(
-                    ctx,
-                    host_cb,
+                    q,
                     &mut st_cell.borrow_mut(),
                     msg_kind,
                     msg.as_bytes(),
                 );
             },
-            &mut || self.is_stopped_or_terminated(ctx, host_cb),
+            &mut || self.is_stopped_or_terminated(q),
         );
 
         self.unpacking.store(false, Ordering::Release);
@@ -2373,38 +2193,23 @@ impl NzbgetRsUnpackController {
         drop(_unpack_guard);
 
         st.log_prefix = None;
-        Self::set_progress_label(ctx, host_cb, b"");
+        q.set_progress_label(b"");
 
         st.unpack_ok = all_ok
             && st.all_ok_received
             && !self.terminated.load(Ordering::Acquire)
-            && !self.is_stopped(ctx, host_cb);
+            && !q.is_stopped();
         st.unpack_start_error = false;
     }
 
     fn join_splitted_files(
         &self,
-        ctx: *mut c_void,
-        host_cb: NzbgetRsRepairCtrlHostFn,
+        q: JobQueue<'_>,
         st: &mut UnpackRunState,
     ) {
         st.log_prefix = Some(b"Join");
-        Self::set_progress_label(ctx, host_cb, b"");
-        unsafe {
-            host_cb(
-                ctx,
-                2,
-                5,
-                0,
-                0,
-                0,
-                ptr::null(),
-                ptr::null(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            );
-        }
+        q.set_progress_label(b"");
+        q.set_stage_progress(0);
 
         let dest_dir = st.dest_dir.clone();
         let unpack_dir = st.unpack_dir.clone();
@@ -2427,28 +2232,14 @@ impl NzbgetRsUnpackController {
                     2 => MK_WARNING,
                     _ => MK_DETAIL,
                 };
-                self.print_message(ctx, host_cb, st, msg_kind, msg);
+                self.print_message(q, st, msg_kind, msg);
             },
             &mut |label, stage_progress| {
                 if let Some(lbl) = label {
-                    Self::set_progress_label(ctx, host_cb, lbl);
+                    q.set_progress_label(lbl);
                 }
                 if stage_progress >= 0 {
-                    unsafe {
-                        host_cb(
-                            ctx,
-                            2,
-                            5,
-                            stage_progress,
-                            0,
-                            0,
-                            ptr::null(),
-                            ptr::null(),
-                            ptr::null_mut(),
-                            ptr::null_mut(),
-                            ptr::null_mut(),
-                        );
-                    }
+                    q.set_stage_progress(stage_progress);
                 }
             },
         );
@@ -2457,7 +2248,7 @@ impl NzbgetRsUnpackController {
         if ok {
             if let Some(g) = &guard {
                 if let Err(why) = crate::unpacklimits::settle(g) {
-                    self.print_message(ctx, host_cb, st, MK_ERROR, why.as_bytes());
+                    self.print_message(q, st, MK_ERROR, why.as_bytes());
                 }
             }
         }
@@ -2469,13 +2260,12 @@ impl NzbgetRsUnpackController {
             }
         }
         st.log_prefix = None;
-        Self::set_progress_label(ctx, host_cb, b"");
+        q.set_progress_label(b"");
     }
 
     fn cleanup(
         &self,
-        ctx: *mut c_void,
-        host_cb: NzbgetRsRepairCtrlHostFn,
+        q: JobQueue<'_>,
         st: &mut UnpackRunState,
     ) -> bool {
         let dest_dir = st.dest_dir.clone();
@@ -2513,7 +2303,7 @@ impl NzbgetRsUnpackController {
                     2 => MK_WARNING,
                     _ => MK_DETAIL,
                 };
-                self.print_message(ctx, host_cb, st, msg_kind, msg);
+                self.print_message(q, st, msg_kind, msg);
             },
         );
         st.cleaned_up_disk = cleaned;
@@ -2522,29 +2312,12 @@ impl NzbgetRsUnpackController {
 
     fn completed(
         &self,
-        ctx: *mut c_void,
-        host_cb: NzbgetRsRepairCtrlHostFn,
+        q: JobQueue<'_>,
         st: &mut UnpackRunState,
     ) {
-        let deleted = unsafe {
-            host_cb(
-                ctx,
-                2,
-                8,
-                0,
-                0,
-                0,
-                ptr::null(),
-                ptr::null(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            ) != 0
-        };
-        if !st.auto_terminated && !deleted && self.is_stopped_or_terminated(ctx, host_cb) {
-            Self::global_log(
-                ctx,
-                host_cb,
+        let deleted = q.is_deleted();
+        if !st.auto_terminated && !deleted && self.is_stopped_or_terminated(q) {
+            q.log(
                 MK_DEBUG,
                 b"Unpack stopped due to reload/shutdown, preserving _unpack directory",
             );
@@ -2556,7 +2329,7 @@ impl NzbgetRsUnpackController {
         if st.unpack_ok {
             if let Some(guard) = st.unpack_guard.clone() {
                 if let Err(why) = crate::unpacklimits::settle_job(&guard) {
-                    self.print_message(ctx, host_cb, st, MK_ERROR, why.as_bytes());
+                    self.print_message(q, st, MK_ERROR, why.as_bytes());
                     st.unpack_ok = false;
                     st.unpack_limit_error = true;
                 }
@@ -2570,7 +2343,7 @@ impl NzbgetRsUnpackController {
                 });
                 for (k, m) in lines {
                     let kind = if k == 1 { MK_ERROR } else { MK_INFO };
-                    self.print_message(ctx, host_cb, st, kind, m.as_bytes());
+                    self.print_message(q, st, kind, m.as_bytes());
                 }
                 if named.is_err() {
                     // A file system error: a par repair cannot help.
@@ -2580,54 +2353,25 @@ impl NzbgetRsUnpackController {
             }
         }
 
-        let cleanup_success = self.cleanup(ctx, host_cb, st);
+        let cleanup_success = self.cleanup(q, st);
         if st.unpack_ok && cleanup_success {
             let m = [st.info_name_up.as_slice(), b" successful"].concat();
-            self.print_message(ctx, host_cb, st, MK_INFO, &m);
-            unsafe {
-                host_cb(
-                    ctx,
-                    3,
-                    1,
-                    c_int::from(st.cleaned_up_disk),
-                    usize::from(st.par_rename_opt),
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                );
-            }
+            self.print_message(q, st, MK_INFO, &m);
+            q.unpack_succeeded(st.cleaned_up_disk, st.par_rename_opt);
         } else {
-            let mut par_info = [0 as c_int; 2];
-            unsafe {
-                host_cb(
-                    ctx,
-                    3,
-                    4,
-                    0,
-                    0,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    par_info.as_mut_ptr(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                );
-            }
+            let (par_status, par_full) = q.par_info();
             let (req_par, force_rep, unpack_status) = crate::unpack::eval_unpack_completed_failure(
                 st.parcheck_enabled,
                 st.unpack_ok,
-                par_info[0],
+                par_status,
                 1,
-                par_info[1] != 0,
+                par_full,
                 st.unpack_start_error || st.unpack_limit_error,
                 st.unpack_space_error,
                 st.unpack_password_error,
                 st.unpack_decrypt_error,
                 self.terminated.load(Ordering::Acquire),
-                self.is_stopped(ctx, host_cb),
+                q.is_stopped(),
                 st.auto_terminated,
                 st.has_par_files,
                 !st.password.is_empty(),
@@ -2635,33 +2379,18 @@ impl NzbgetRsUnpackController {
                 st.pass_list_tried,
             );
             if st.parcheck_enabled && req_par {
-                self.request_par_check(ctx, host_cb, st, force_rep);
+                self.request_par_check(q, st, force_rep);
             } else {
                 let m = [st.info_name_up.as_slice(), b" failed"].concat();
-                self.print_message(ctx, host_cb, st, MK_ERROR, &m);
-                unsafe {
-                    host_cb(
-                        ctx,
-                        3,
-                        0,
-                        unpack_status,
-                        0,
-                        0,
-                        ptr::null(),
-                        ptr::null(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                    );
-                }
+                self.print_message(q, st, MK_ERROR, &m);
+                q.set_unpack_status(unpack_status);
             }
         }
     }
 
     fn request_par_check(
         &self,
-        ctx: *mut c_void,
-        host_cb: NzbgetRsRepairCtrlHostFn,
+        q: JobQueue<'_>,
         st: &mut UnpackRunState,
         force_repair: bool,
     ) {
@@ -2671,7 +2400,7 @@ impl NzbgetRsUnpackController {
             b" requested par-check/repair"
         };
         let m = [st.info_name_up.as_slice(), suffix].concat();
-        self.print_message(ctx, host_cb, st, MK_INFO, &m);
+        self.print_message(q, st, MK_INFO, &m);
         let last_status = if st.unpack_space_error {
             4
         } else if st.unpack_password_error || st.unpack_decrypt_error {
@@ -2679,50 +2408,7 @@ impl NzbgetRsUnpackController {
         } else {
             2
         };
-        let mut ints = [
-            c_int::from(force_repair),
-            c_int::from(st.pass_list_tried),
-            last_status,
-        ];
-        unsafe {
-            host_cb(
-                ctx,
-                3,
-                2,
-                0,
-                0,
-                0,
-                ptr::null(),
-                ptr::null(),
-                ints.as_mut_ptr(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            );
-        }
-    }
-}
-
-pub unsafe fn unpack_ctrl_exec(
-    ctrl: *const NzbgetRsUnpackController,
-    op: c_int,
-    host_cb: Option<NzbgetRsRepairCtrlHostFn>,
-    ctx: *mut c_void,
-) -> c_int {
-    let Some(c) = (unsafe { ctrl.as_ref() }) else {
-        return 0;
-    };
-    match op {
-        0 => {
-            if let Some(cb) = host_cb {
-                c.run(ctx, cb);
-            }
-            0
-        }
-        1 => {
-            c.stop();
-            0
-        }
-        _ => 0,
+        q.request_par_check(force_repair, st.pass_list_tried, last_status);
     }
 }
 
@@ -6056,7 +5742,10 @@ impl NzbgetRsPostJob {
                     ),
                     PostJobInner::Repair(None) => 0,
                     PostJobInner::Unpack(ctrl) => {
-                        unpack_ctrl_exec(ctrl, 0, Some(unpack_job_host_cb), ctx)
+                        if let Some(host) = crate::ffi::queue_host() {
+                            ctrl.run(JobQueue { job: self, host: &host });
+                        }
+                        0
                     }
                     PostJobInner::Cleanup => {
                         self.run_cleanup();
@@ -6683,197 +6372,6 @@ unsafe extern "C" fn stream_repair_job_host_cb(
                 host.post_set_int(ns.post_info_ptr, POST_INT_WORKING, 0);
             }
             host.dq_save(p1);
-            0
-        }
-        _ => 0,
-    }
-}
-
-#[cfg(unix)]
-unsafe extern "C" fn unpack_job_host_cb(
-    raw_ctx: *mut c_void,
-    op: c_int,
-    a1: c_int,
-    a2: c_int,
-    p1: usize,
-    p2: usize,
-    s1: *const c_char,
-    _s2: *const c_char,
-    ints: *mut c_int,
-    i64s: *mut i64,
-    strs: *mut *const c_char,
-) -> usize {
-    use crate::queuesubsys_host::{
-        NZB_INT_PAR_RENAME_STATUS, NZB_INT_UNPACK_CLEANED_UP_DISK, NZB_INT_UNPACK_SEC,
-        NZB_INT_UNPACK_STATUS, NZB_STR_FINAL_DIR, POST_INT_FORCE_REPAIR,
-        POST_INT_LAST_UNPACK_STATUS, POST_INT_PASS_LIST_TRIED, POST_INT_REQUEST_PAR_CHECK,
-        POST_INT_STAGE_PROGRESS, POST_INT_UNPACK_TRIED, POST_INT_WORKING, RS_NONE, US_SUCCESS,
-    };
-    if op != 0 {
-        reset_call_arena();
-    }
-    let Some(host) = crate::ffi::queue_host() else {
-        return 0;
-    };
-    let job = unsafe { &*(raw_ctx as *const NzbgetRsPostJob) };
-    match op {
-        0 => {
-            unsafe { invoke_dq_guard_cb(&host, p1, p2) };
-            0
-        }
-        1 => {
-            let pi = job.post_ptr;
-            let ps = host.post_snap(pi);
-            let n = ps.nzb_ptr;
-            if a1 == 0 {
-                let ns = host.nzb_snap(n, false);
-                let up = host.nzb_get_param(n, b"*Unpack:");
-                let pw = host.nzb_get_param(n, b"*Unpack:Password");
-                let opts = crate::options::active_options();
-                let sc = opts.as_ref().map(|o| o.scalars());
-                let ins = unsafe { std::slice::from_raw_parts_mut(ints, 18) };
-                let str_out = unsafe { std::slice::from_raw_parts_mut(strs, 7) };
-                ins[0] = i32::from(!up.as_deref().is_some_and(|v| v.eq_ignore_ascii_case(b"no")));
-                ins[1] = i32::from(pw.is_some());
-                ins[2] = host.nzb_completed_files_len(n) as c_int;
-                ins[3] = ps.extracted_archives_len as c_int;
-                ins[4] = i32::from(ps.unpack_tried);
-                ins[5] = i32::from(ps.par_repaired);
-                ins[6] = i32::from(ps.pass_list_tried);
-                ins[7] = ps.last_unpack_status;
-                ins[8] = ns.direct_unpack_status;
-                ins[9] = ns.par_status;
-                ins[10] = ns.par_rename_status;
-                ins[11] = 0;
-                ins[12] = sc
-                    .as_ref()
-                    .map_or(0, |s| i32::from(s.use_temp_unpack_dir != 0));
-                ins[13] = sc
-                    .as_ref()
-                    .map_or(0, |s| i32::from(s.unpack_cleanup_disk != 0));
-                ins[14] = sc.as_ref().map_or(0, |s| s.write_buffer);
-                ins[15] = sc.as_ref().map_or(0, |s| i32::from(s.par_rename != 0));
-                ins[16] = crate::lifecycle::active_umask() as c_int;
-                ins[17] = i32::from(crate::ffi::build_parcheck_enabled());
-                str_out[0] = arena_cstr(&ns.dest_dir);
-                str_out[1] = arena_cstr(&ns.final_dir);
-                str_out[2] = arena_cstr(&ns.name);
-                str_out[3] = arena_opt_cstr(pw.as_deref());
-                str_out[4] = arena_cstr(opts.as_ref().map_or(b"", |o| o.str_bytes(OptStr::UnpackPassFile)));
-                str_out[5] = arena_cstr(opts.as_ref().map_or(b"", |o| o.str_bytes(OptStr::UnpackIgnoreExt)));
-                str_out[6] = arena_cstr(opts.as_ref().map_or(b"", |o| o.str_bytes(OptStr::InterDir)));
-                return 0;
-            }
-            if a1 == 1 {
-                let cf = host.nzb_completed_file_at(n, a2 as usize);
-                unsafe { *strs = arena_cstr(&cf.filename) };
-                return 0;
-            }
-            if a1 == 2 {
-                let ea = host.post_extracted_archive_at(pi, a2 as usize);
-                unsafe { *strs = arena_cstr(&ea) };
-                return 0;
-            }
-            if a1 == 3 {
-                host.post_clear_extracted_archives(pi);
-            }
-            0
-        }
-        2 => {
-            if a1 == 0 {
-                return usize::from(host.thread_is_stopped(job.thread_ptr));
-            }
-            if a1 == 1 {
-                job.stop_from_rust(&host);
-                return 0;
-            }
-            if a1 == 2 {
-                host.thread_resume(job.thread_ptr);
-                return 0;
-            }
-            if a1 == 3 {
-                if job.post_ptr != 0 {
-                    let ps = host.post_snap(job.post_ptr);
-                    host.nzb_add_message(ps.nzb_ptr, a2, &unsafe { cstr::owned(s1) });
-                }
-                return 0;
-            }
-            if a1 == 4 {
-                let lbl = unsafe { cstr::owned(s1) };
-                host.with_locked_queue(|_| host.post_set_progress_label(job.post_ptr, &lbl));
-                return 0;
-            }
-            if a1 == 5 {
-                if job.post_ptr != 0 {
-                    host.post_set_int(job.post_ptr, POST_INT_STAGE_PROGRESS, a2);
-                }
-                return 0;
-            }
-            if a1 == 6 {
-                if job.post_ptr != 0 {
-                    host.post_set_stage_time(job.post_ptr, unsafe { *i64s });
-                }
-                return 0;
-            }
-            if a1 == 7 {
-                if a2 == 3 || a2 == 4 {
-                    host.log(a2, &unsafe { cstr::owned(s1) });
-                }
-                return 0;
-            }
-            if a1 == 8 {
-                return usize::from(job.post_ptr != 0 && host.post_snap(job.post_ptr).deleted);
-            }
-            0
-        }
-        3 => {
-            let pi = job.post_ptr;
-            let ps = host.post_snap(pi);
-            let n = ps.nzb_ptr;
-            if a1 == 0 {
-                host.nzb_set_int(n, NZB_INT_UNPACK_STATUS, a2);
-                return 0;
-            }
-            if a1 == 1 {
-                host.nzb_set_int(n, NZB_INT_UNPACK_STATUS, US_SUCCESS);
-                host.nzb_set_int(n, NZB_INT_UNPACK_CLEANED_UP_DISK, i32::from(a2 != 0));
-                if p1 != 0 {
-                    host.nzb_set_int(n, NZB_INT_PAR_RENAME_STATUS, RS_NONE);
-                }
-                return 0;
-            }
-            if a1 == 2 {
-                let ins = unsafe { std::slice::from_raw_parts(ints, 3) };
-                host.post_set_int(pi, POST_INT_REQUEST_PAR_CHECK, 1);
-                host.post_set_int(pi, POST_INT_FORCE_REPAIR, i32::from(ins[0] != 0));
-                host.post_set_int(pi, POST_INT_UNPACK_TRIED, 1);
-                host.post_set_int(pi, POST_INT_PASS_LIST_TRIED, i32::from(ins[1] != 0));
-                host.post_set_int(pi, POST_INT_LAST_UNPACK_STATUS, ins[2]);
-                return 0;
-            }
-            if a1 == 3 {
-                let ns = host.nzb_snap(n, false);
-                host.nzb_set_int(n, NZB_INT_UNPACK_SEC, ns.unpack_sec + a2);
-                host.post_set_int(pi, POST_INT_WORKING, 0);
-                return 0;
-            }
-            if a1 == 4 {
-                let ns = host.nzb_snap(n, false);
-                let ins = unsafe { std::slice::from_raw_parts_mut(ints, 2) };
-                ins[0] = ns.par_status;
-                ins[1] = i32::from(ns.par_full);
-                return 0;
-            }
-            if a1 == 5 {
-                let fin = host.nzb_build_final_dir_name(n);
-                let c_fin = cstr::nul_terminated(&fin);
-                let cb_fn: extern "C" fn(usize, *const c_char) = unsafe { std::mem::transmute(p2) };
-                cb_fn(p1, c_fin.as_ptr() as *const c_char);
-                return 0;
-            }
-            if a1 == 6 {
-                host.nzb_set_str(n, NZB_STR_FINAL_DIR, &unsafe { cstr::owned(s1) });
-            }
             0
         }
         _ => 0,

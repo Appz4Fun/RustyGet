@@ -297,6 +297,11 @@ pub(crate) const NZB_INT_DUPE_RECOVERED_HOLES: i32 = 71;
 pub(crate) const NZB_INT_PAR_RENAME_STATUS: i32 = 72;
 pub(crate) const NZB_INT_UNPACK_CLEANED_UP_DISK: i32 = 73;
 pub(crate) const NZB_INT_UNPACK_SEC: i32 = 74;
+/// The part of `UnpackSec` spent while still downloading (direct unpack), which
+/// `PostTotalSec` does not include.
+pub(crate) const NZB_INT_LIVE_UNPACK_SEC: i32 = 114;
+/// The part of `ParSec` spent while still downloading (live PAR), likewise.
+pub(crate) const NZB_INT_LIVE_PAR_SEC: i32 = 115;
 pub(crate) const NZB_INT_MOVE_STATUS: i32 = 75;
 pub(crate) const NZB_INT_CLEANUP_STATUS: i32 = 76;
 pub(crate) const NZB_INT_RAR_RENAME_STATUS: i32 = 77;
@@ -536,6 +541,8 @@ pub(crate) struct NzbSnap {
     pub par_sec: i32,
     pub repair_sec: i32,
     pub unpack_sec: i32,
+    pub live_unpack_sec: i32,
+    pub live_par_sec: i32,
     pub reprocess: bool,
     pub extra_par_blocks: i32,
     pub dupe_recovered_holes: i32,
@@ -2748,7 +2755,7 @@ impl QueueSubsysHost {
             let qlen = self.queue_len(dq_ptr);
             for i in 0..qlen {
                 let nzb_ptr = self.queue_at(dq_ptr, i);
-                let mut n_ints = [0i32; 88];
+                let mut n_ints = [0i32; 90];
                 let mut n_i64s = [0i64; 21];
                 self.raw(
                     30,
@@ -2991,7 +2998,7 @@ impl QueueSubsysHost {
         if nzb_ptr == 0 {
             return NzbSnap::default();
         }
-        let mut ints = [0i32; 88];
+        let mut ints = [0i32; 90];
         let mut i64s = [0i64; 21];
         let mut strs = [std::ptr::null(); 9];
         self.raw(
@@ -3046,6 +3053,8 @@ impl QueueSubsysHost {
                 par_sec: ints[71],
                 repair_sec: ints[72],
                 unpack_sec: ints[73],
+                live_unpack_sec: ints[88],
+                live_par_sec: ints[89],
                 reprocess: ints[74] != 0,
                 extra_par_blocks: ints[75],
                 dupe_recovered_holes: ints[76],

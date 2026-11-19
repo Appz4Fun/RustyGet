@@ -104,6 +104,10 @@ pub struct NzbgetRsDiskNzbInfoInput {
     pub par_sec: c_int,
     pub repair_sec: c_int,
     pub unpack_sec: c_int,
+    /// Parts of `unpack_sec` and `par_sec` spent while downloading. Written after the
+    /// other times on their line; files without them read as 0.
+    pub live_unpack_sec: c_int,
+    pub live_par_sec: c_int,
     pub skip_script_processing: c_int,
     pub skip_disk_write: c_int,
     pub desired_server_id: c_int,
@@ -323,8 +327,16 @@ pub unsafe fn format_nzb_info_bytes(
     let (dl_hi, dl_lo) = split_i64(n.downloaded_size);
     let _ = writeln!(
         out,
-        "{},{},{},{},{},{},{}",
-        dl_hi, dl_lo, n.download_sec, n.post_total_sec, n.par_sec, n.repair_sec, n.unpack_sec
+        "{},{},{},{},{},{},{},{},{}",
+        dl_hi,
+        dl_lo,
+        n.download_sec,
+        n.post_total_sec,
+        n.par_sec,
+        n.repair_sec,
+        n.unpack_sec,
+        n.live_unpack_sec,
+        n.live_par_sec
     );
 
     let comp_slice = if completed.is_null() || completed_len == 0 {
@@ -3275,6 +3287,8 @@ pub unsafe fn load_nzb_info(
     let mut par_sec = 0;
     let mut repair_sec = 0;
     let mut unpack_sec = 0;
+    let mut live_unpack_sec = 0;
+    let mut live_par_sec = 0;
     if format_version >= 48 {
         flags |= 2;
         let Some(dl_line) = (unsafe { read_line_bytes(infile_ctx, read_line_cb, 1024) }) else {
@@ -3298,6 +3312,11 @@ pub unsafe fn load_nzb_info(
         par_sec = psec;
         repair_sec = rsec;
         unpack_sec = usec;
+        // Optional: older files end after the unpack time.
+        if let (Some(lusec), Some(lpsec)) = (dlc.i32(true), dlc.i32(true)) {
+            live_unpack_sec = lusec;
+            live_par_sec = lpsec;
+        }
     }
 
     let Some(comp_count) = (unsafe { scan_one_i32(infile_ctx, read_line_cb) }) else {
@@ -3577,6 +3596,8 @@ pub unsafe fn load_nzb_info(
         par_sec,
         repair_sec,
         unpack_sec,
+        live_unpack_sec,
+        live_par_sec,
         skip_script_processing,
         skip_disk_write,
         desired_server_id,
@@ -7331,6 +7352,8 @@ unsafe extern "C" fn active_disk_export_nzb_cb(
         par_sec: sn.par_sec,
         repair_sec: sn.repair_sec,
         unpack_sec: sn.unpack_sec,
+        live_unpack_sec: sn.live_unpack_sec,
+        live_par_sec: sn.live_par_sec,
         skip_script_processing: c_int::from(sn.skip_script_processing),
         skip_disk_write: c_int::from(sn.skip_disk_write),
         desired_server_id: sn.desired_server_id,
@@ -7699,6 +7722,8 @@ unsafe extern "C" fn active_disk_apply_nzb_cb(
         qh.nzb_set_int(nzb_ptr, NZB_INT_PAR_SEC, inp.par_sec);
         qh.nzb_set_int(nzb_ptr, NZB_INT_REPAIR_SEC, inp.repair_sec);
         qh.nzb_set_int(nzb_ptr, NZB_INT_UNPACK_SEC, inp.unpack_sec);
+        qh.nzb_set_int(nzb_ptr, NZB_INT_LIVE_UNPACK_SEC, inp.live_unpack_sec);
+        qh.nzb_set_int(nzb_ptr, NZB_INT_LIVE_PAR_SEC, inp.live_par_sec);
     }
     qh.nzb_action(nzb_ptr, NZB_ACT_CLEAR_COMPLETED_FILES, 0);
     if !completed.is_null() {

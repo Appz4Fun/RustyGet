@@ -95,6 +95,8 @@ pub struct NzbScalars {
     pub parSec: i32,
     pub repairSec: i32,
     pub unpackSec: i32,
+    pub liveUnpackSec: i32,
+    pub liveParSec: i32,
     pub reprocess: bool,
     pub changed: bool,
     pub queueScriptTime: i64,
@@ -191,6 +193,8 @@ impl Default for NzbScalars {
             parSec: 0,
             repairSec: 0,
             unpackSec: 0,
+            liveUnpackSec: 0,
+            liveParSec: 0,
             reprocess: false,
             changed: false,
             queueScriptTime: 0,
@@ -1763,6 +1767,8 @@ pub(crate) unsafe fn host_coll_set(
         71 => s.dupeRecoveredHoles = a2,
         72 => s.parRenameStatus = a2,
         74 => s.unpackSec = a2,
+        114 => s.liveUnpackSec = a2,
+        115 => s.liveParSec = a2,
         75 => s.moveStatus = a2,
         76 => s.cleanupStatus = a2,
         77 => s.rarRenameStatus = a2,
@@ -2391,13 +2397,13 @@ const FORCE_PRIORITY: i32 = 900;
 /// `ScriptStatus::srSuccess`.
 const SCRIPT_STATUS_SUCCESS: i32 = 2;
 
-/// A collection's snapshot (host op 30): 88 ints, 21 i64s and, when `strs`
+/// A collection's snapshot (host op 30): 90 ints, 21 i64s and, when `strs`
 /// is not null, 9 strings, in the order the C++ host wrote them. `a1` 1 or 2
 /// adds the text status (ignoring, or not, the script status).
 ///
 /// # Safety
 /// `p` is a live collection; `ints`, `i64s` and `strs` (if not null) hold
-/// 88, 21 and 9 entries; the caller holds the queue lock.
+/// 90, 21 and 9 entries; the caller holds the queue lock.
 pub(crate) unsafe fn host_coll_snapshot(
     p: *const NzbScalars,
     a1: c_int,
@@ -2406,7 +2412,7 @@ pub(crate) unsafe fn host_coll_snapshot(
     strs: *mut *const c_char,
 ) {
     let s = unsafe { &*p };
-    let ints = unsafe { std::slice::from_raw_parts_mut(ints, 88) };
+    let ints = unsafe { std::slice::from_raw_parts_mut(ints, 90) };
     let i64s = unsafe { std::slice::from_raw_parts_mut(i64s, 21) };
     let ns: *const c_char = std::ptr::null();
     let coll = |op| unsafe {
@@ -2550,6 +2556,8 @@ pub(crate) unsafe fn host_coll_snapshot(
     ints[85] = b(s.parRepaired);
     ints[86] = s.lastUnpackStatus;
     ints[87] = s.cachedMessageCount;
+    ints[88] = s.liveUnpackSec;
+    ints[89] = s.liveParSec;
     i64s[0] = s.size;
     i64s[1] = s.remainingSize;
     i64s[2] = s.pausedSize;
@@ -3580,7 +3588,7 @@ mod tests {
             nzbget_rs_nzb_set_text(n, 2, c"Name".as_ptr(), -1);
             nzbget_rs_nzb_set_text(n, 0, c"http://u".as_ptr(), -1);
             add_test_file(n, &[(field::PAR_FILE, 1), (field::PAUSED, 1)]);
-            let mut ints = [0; 88];
+            let mut ints = [0; 90];
             let mut i64s = [0i64; 21];
             let mut strs = [std::ptr::null(); 9];
             host_coll_snapshot(

@@ -3747,6 +3747,42 @@ fn direct_unpack_take_released(nzb_id: i32) -> (Vec<Vec<u8>>, bool) {
     }
 }
 
+/// New `(ParSec, live part of ParSec, RepairSec)` once live PAR's `(par, repair)`
+/// seconds are charged; `None` when nothing changes. A deleted job's time is dropped.
+fn live_par_time_charge(
+    deleted: bool,
+    (par_sec, live_par_sec, repair_sec): (i32, i32, i32),
+    (live_par, live_repair): (i32, i32),
+) -> Option<(i32, i32, i32)> {
+    (!deleted && (live_par, live_repair) != (0, 0)).then_some((
+        par_sec.saturating_add(live_par),
+        live_par_sec.saturating_add(live_par),
+        repair_sec.saturating_add(live_repair),
+    ))
+}
+
+/// The job reaches history (or leaves the queue without it): live PAR's verification
+/// and repair while downloading is charged to its times, once, whether or not a
+/// par-check ran. A deleted job's, or one leaving without history, is dropped.
+pub(crate) fn live_par_time_settle(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    nzb_ptr: usize,
+    keep: bool,
+) {
+    use crate::queuesubsys_host::{
+        DS_NONE, NZB_INT_LIVE_PAR_SEC, NZB_INT_PAR_SEC, NZB_INT_REPAIR_SEC,
+    };
+    let nzb = host.nzb_snap(nzb_ptr, false);
+    let taken = crate::parchecker::streaming_session_take_par_secs(nzb.id);
+    let current = (nzb.par_sec, nzb.live_par_sec, nzb.repair_sec);
+    let deleted = !keep || nzb.delete_status != DS_NONE;
+    if let Some((par, live, repair)) = live_par_time_charge(deleted, current, taken) {
+        host.nzb_set_int(nzb_ptr, NZB_INT_PAR_SEC, par);
+        host.nzb_set_int(nzb_ptr, NZB_INT_LIVE_PAR_SEC, live);
+        host.nzb_set_int(nzb_ptr, NZB_INT_REPAIR_SEC, repair);
+    }
+}
+
 pub(crate) fn direct_unpack_forget_holds(nzb_id: i32) {
     note_dead_volume_borrow(nzb_id, false);
     forget_dead_volume_verdicts(nzb_id);
@@ -3864,23 +3900,22 @@ impl NzbgetRsDirectUnpack {
     }
 
     fn set_waiting(&self, waiting: bool) {
-        self.waiting_volume.store(waiting, Ordering::Release);
-        self.account_busy();
+        self.account_busy(&self.waiting_volume, waiting);
     }
 
     fn set_unpacking(&self, unpacking: bool) {
-        self.unpacking.store(unpacking, Ordering::Release);
-        self.account_busy();
+        self.account_busy(&self.unpacking, unpacking);
     }
 
-    /// Unpacking counts while an archive is being extracted and no volume is awaited.
-    fn account_busy(&self) {
+    /// Sets `flag`; unpacking counts while an archive is being extracted and no volume
+    /// is awaited. The store and the reading of both flags happen under the busy lock,
+    /// so transitions from the downloader and the extractor apply in order.
+    fn account_busy(&self, flag: &AtomicBool, value: bool) {
+        let mut busy = self.busy.lock().unwrap_or_else(|e| e.into_inner());
+        flag.store(value, Ordering::Release);
         let active = self.unpacking.load(Ordering::Acquire)
             && !self.waiting_volume.load(Ordering::Acquire);
-        self.busy
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .set_active(active, std::time::Instant::now());
+        busy.set_active(active, std::time::Instant::now());
     }
 
     fn is_stopped(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn) -> bool {
@@ -3941,12 +3976,15 @@ impl NzbgetRsDirectUnpack {
         } else {
             0
         };
-        // The unpacking done so far, while downloading and after; reported once.
-        let mut unpack_sec = [self
+        // The unpacking done so far, while downloading and after; reported once. At
+        // most the wait after the download (`extra_sec`, in PostTotalSec) of it was
+        // post-processing; the rest ran while downloading.
+        let busy_sec = self
             .busy
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .take_secs(std::time::Instant::now())];
+            .take_secs(std::time::Instant::now());
+        let mut unpack_sec = [busy_sec, (busy_sec - extra_sec).max(0)];
         if start != 0 || clear_working || unpack_sec[0] != 0 {
             unsafe {
                 host_cb(
@@ -5205,7 +5243,7 @@ unsafe extern "C" fn direct_unpack_host_cb(
 ) -> usize {
     use crate::queuesubsys_host::{
         NZB_ACT_CLEAR_UNPACK_THREAD, NZB_INT_DIRECT_UNPACK_STATUS, NZB_INT_POST_TOTAL_SEC,
-        NZB_INT_UNPACK_SEC, POST_INT_WORKING,
+        NZB_INT_LIVE_UNPACK_SEC, NZB_INT_UNPACK_SEC, POST_INT_WORKING,
     };
     if op != 0 {
         reset_call_arena();
@@ -5290,11 +5328,23 @@ unsafe extern "C" fn direct_unpack_host_cb(
             }
             if a1 == 5 {
                 let ns = host.nzb_snap(p1, false);
-                // ints[0]: seconds spent unpacking (while downloading too); a2: the wait
-                // after the download, which post-processing spent on direct unpack.
-                let unpack_sec = if ints.is_null() { 0 } else { unsafe { *ints } };
+                // ints[0]: seconds spent unpacking (while downloading too), ints[1]: the
+                // part of it while downloading; a2: the wait after the download, which
+                // post-processing spent on direct unpack.
+                let (unpack_sec, live_unpack_sec) = if ints.is_null() {
+                    (0, 0)
+                } else {
+                    unsafe { (*ints, *ints.add(1)) }
+                };
                 if unpack_sec != 0 {
                     host.nzb_set_int(p1, NZB_INT_UNPACK_SEC, ns.unpack_sec + unpack_sec);
+                }
+                if live_unpack_sec != 0 {
+                    host.nzb_set_int(
+                        p1,
+                        NZB_INT_LIVE_UNPACK_SEC,
+                        ns.live_unpack_sec + live_unpack_sec,
+                    );
                 }
                 if (p2 & 2) != 0 {
                     host.nzb_set_int(p1, NZB_INT_POST_TOTAL_SEC, ns.post_total_sec + a2);
@@ -6548,13 +6598,7 @@ unsafe extern "C" fn repair_job_host_cb(
                 host.post_set_int(pi, POST_INT_PAR_REPAIRED, i32::from(ins[2] != 0));
             }
             host.post_set_start_time(pi, ps.start_time + i64::from(ins[3]));
-            // Live PAR verified (and maybe repaired) while downloading: that counts too.
-            let (live_par_sec, live_repair_sec) =
-                crate::parchecker::streaming_session_take_par_secs(ns.id);
-            host.nzb_set_int(p1, NZB_INT_PAR_SEC, ns.par_sec + ins[4] + live_par_sec);
-            if live_repair_sec != 0 {
-                host.nzb_set_int(p1, NZB_INT_REPAIR_SEC, ns.repair_sec + live_repair_sec);
-            }
+            host.nzb_set_int(p1, NZB_INT_PAR_SEC, ns.par_sec + ins[4]);
             host.nzb_set_int(p1, NZB_INT_PAR_FULL, i32::from(ins[5] != 0));
             host.post_set_int(pi, POST_INT_WORKING, 0);
             0
@@ -7739,6 +7783,37 @@ mod live_hold_tests {
         assert!(direct_unpack_has_holds(id));
         assert!(direct_unpack_awaiting_repair(id));
         direct_unpack_forget_holds(id);
+    }
+}
+
+#[cfg(test)]
+mod live_par_time_tests {
+    use super::live_par_time_charge;
+
+    #[test]
+    fn live_par_time_is_charged_at_history_unless_deleted() {
+        // A job whose par-check was skipped (ParSec 0) still gets its live time.
+        assert_eq!(live_par_time_charge(false, (0, 0, 0), (7, 3)), Some((7, 7, 3)));
+        // Added to an ordinary par-check's times.
+        assert_eq!(live_par_time_charge(false, (4, 0, 2), (7, 3)), Some((11, 7, 5)));
+        // Deleted, or leaving the queue without history: dropped.
+        assert_eq!(live_par_time_charge(true, (4, 0, 2), (7, 3)), None);
+        // Nothing to charge.
+        assert_eq!(live_par_time_charge(false, (4, 1, 2), (0, 0)), None);
+    }
+
+    /// The job's live time is taken once: a second settle (a job returned from
+    /// history and completed again) never adds the first download's time again.
+    #[test]
+    fn live_par_time_is_taken_once() {
+        let nzb_id = 0x6a0f_0020;
+        assert_eq!(crate::parchecker::streaming_session_take_par_secs(nzb_id), (0, 0));
+        crate::parchecker::live_par_time_add_for_test(nzb_id, 2_400, 900);
+        let first = crate::parchecker::streaming_session_take_par_secs(nzb_id);
+        assert_eq!(first, (3, 1));
+        assert_eq!(live_par_time_charge(false, (0, 0, 0), first), Some((3, 3, 1)));
+        let again = crate::parchecker::streaming_session_take_par_secs(nzb_id);
+        assert_eq!(live_par_time_charge(false, (0, 0, 0), again), None);
     }
 }
 

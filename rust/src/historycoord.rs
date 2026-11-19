@@ -99,27 +99,30 @@ pub fn should_delete_dest_dir(
 }
 
 /// Calculate reset `PostTotalSec` and normalized `MoveStatus` in `HistoryCoordinator::MoveToQueue`.
+///
+/// `live_unpack_sec` and `live_par_sec` are the parts of `unpack_sec` and `par_sec`
+/// spent while downloading (direct unpack, live PAR): `PostTotalSec` never held them,
+/// so only the rest is taken from it.
 #[allow(clippy::too_many_arguments)]
 pub fn calc_move_to_queue_reset(
     unpack_cleaned_up_disk: bool,
     post_total_sec: i32,
     unpack_sec: i32,
+    live_unpack_sec: i32,
     has_main_pars: bool,
     par_sec: i32,
+    live_par_sec: i32,
     move_status: i32,
     ms_failure: i32,
     ms_none: i32,
 ) -> (i32, i32) {
     let mut new_post_total_sec = post_total_sec;
     if !unpack_cleaned_up_disk {
-        new_post_total_sec -= unpack_sec;
+        new_post_total_sec -= unpack_sec - live_unpack_sec;
         if has_main_pars {
-            new_post_total_sec -= par_sec;
+            new_post_total_sec -= par_sec - live_par_sec;
         }
     }
-    // Direct unpack and live PAR also run while downloading, so their time can exceed the
-    // post-processing total it is taken from.
-    let new_post_total_sec = new_post_total_sec.max(0);
     let new_move_status = if move_status == ms_failure {
         ms_none
     } else {
@@ -861,7 +864,7 @@ unsafe fn hc_move_to_queue(
 
     let nicename = hist_name.to_vec();
 
-    let mut ints = [0i32; 6];
+    let mut ints = [0i32; 8];
     let mut strs: [*const c_char; 1] = [std::ptr::null()];
     cb(
         env.ctx,
@@ -883,6 +886,8 @@ unsafe fn hc_move_to_queue(
     let unpack_sec = ints[2];
     let par_sec = ints[3];
     let move_status = ints[4];
+    let live_unpack_sec = ints[6];
+    let live_par_sec = ints[7];
     let file_count = ints[5];
     let dest_dir = hc_cstr_bytes(strs[0]).to_vec();
 
@@ -927,8 +932,10 @@ unsafe fn hc_move_to_queue(
         unpack_cleaned_up_disk,
         post_total_sec,
         unpack_sec,
+        live_unpack_sec,
         has_main_pars,
         par_sec,
+        live_par_sec,
         move_status,
         1,
         0,
@@ -2459,7 +2466,8 @@ unsafe extern "C" fn hc_native_action_cb(
         NZB_INT_PAR_REPAIRED, NZB_INT_PAR_SEC, NZB_INT_PAR_STATUS, NZB_INT_POST_TOTAL_SEC,
         NZB_INT_RAR_RENAME_STATUS, NZB_INT_REMAINING_PAR_COUNT, NZB_INT_REPAIR_SEC,
         NZB_INT_REPROCESS, NZB_INT_SUCCESS_ARTICLES, NZB_INT_UNPACK_CLEANED_UP_DISK,
-        NZB_INT_UNPACK_SEC, NZB_INT_UNPACK_STATUS, NZB_INT_UNPACK_TRIED, NZB_INT_URL_STATUS,
+        NZB_INT_UNPACK_SEC, NZB_INT_LIVE_UNPACK_SEC, NZB_INT_LIVE_PAR_SEC, NZB_INT_UNPACK_STATUS,
+        NZB_INT_UNPACK_TRIED, NZB_INT_URL_STATUS,
         NZB_INT_WAITING_PAR, NZB_STR_CATEGORY, NZB_STR_DUPE_KEY, NZB_STR_FINAL_DIR, NZB_STR_NAME,
         PARTIAL_COMPLETED, PAR_STATUS_NONE, RS_NONE, TS_FAILURE, TS_NONE, TS_RUNNING, US_NONE,
     };
@@ -2487,6 +2495,7 @@ unsafe extern "C" fn hc_native_action_cb(
                 host.nzb_action(p2, NZB_ACT_CLEAR_LIVE_REPAIR_THREAD, 0);
                 host.thread_stop(t);
             }
+            crate::postproc::live_par_time_settle(host, p2, true);
             host.history_move_queue_item(p1, p2);
             host.dq_history_changed(p1);
             let fn_len = host.nzb_file_len(p2);
@@ -2711,6 +2720,8 @@ unsafe extern "C" fn hc_native_action_cb(
                 *ints.add(3) = nzb.par_sec;
                 *ints.add(4) = nzb.move_status;
                 *ints.add(5) = host.nzb_file_len(p2) as c_int;
+                *ints.add(6) = nzb.live_unpack_sec;
+                *ints.add(7) = nzb.live_par_sec;
                 *strs.add(0) = hc_stash_str(&nzb.dest_dir);
             } else {
                 let fp = host.nzb_file_at(p2, a1 as usize);
@@ -2735,9 +2746,11 @@ unsafe extern "C" fn hc_native_action_cb(
                 host.nzb_set_int(nzb_ptr, NZB_INT_RAR_RENAME_STATUS, RS_NONE);
                 host.nzb_set_int(nzb_ptr, NZB_INT_POST_TOTAL_SEC, *ints.add(1));
                 host.nzb_set_int(nzb_ptr, NZB_INT_UNPACK_SEC, 0);
+                host.nzb_set_int(nzb_ptr, NZB_INT_LIVE_UNPACK_SEC, 0);
                 if *ints.add(0) != 0 {
                     host.nzb_set_int(nzb_ptr, NZB_INT_PAR_STATUS, PAR_STATUS_NONE);
                     host.nzb_set_int(nzb_ptr, NZB_INT_PAR_SEC, 0);
+                    host.nzb_set_int(nzb_ptr, NZB_INT_LIVE_PAR_SEC, 0);
                     host.nzb_set_int(nzb_ptr, NZB_INT_REPAIR_SEC, 0);
                     host.nzb_set_int(nzb_ptr, NZB_INT_PAR_FULL, 0);
                 }
@@ -2859,6 +2872,8 @@ unsafe extern "C" fn hc_native_action_cb(
             host.nzb_set_int(p2, NZB_INT_PAR_SEC, 0);
             host.nzb_set_int(p2, NZB_INT_REPAIR_SEC, 0);
             host.nzb_set_int(p2, NZB_INT_UNPACK_SEC, 0);
+            host.nzb_set_int(p2, NZB_INT_LIVE_UNPACK_SEC, 0);
+            host.nzb_set_int(p2, NZB_INT_LIVE_PAR_SEC, 0);
             host.nzb_set_int(p2, NZB_INT_EXTRA_PAR_BLOCKS, 0);
             host.nzb_set_int(p2, NZB_INT_ALL_FIRST, 0);
             host.nzb_set_int(p2, NZB_INT_WAITING_PAR, 0);
@@ -3183,10 +3198,16 @@ mod tests {
     use std::ffi::CString;
 
     #[test]
-    fn move_to_queue_reset_never_leaves_negative_post_total() {
-        // 30 s unpacking while downloading, 10 s of post-processing in all.
-        assert_eq!(calc_move_to_queue_reset(false, 10, 30, true, 5, 0, 1, 0), (0, 0));
-        assert_eq!(calc_move_to_queue_reset(false, 50, 30, true, 5, 0, 1, 0), (15, 0));
+    fn move_to_queue_reset_takes_only_post_download_stage_time() {
+        // 60 s of post-processing; UnpackSec 40 of which 35 ran while downloading
+        // (direct unpack), ParSec 12 of which 9 ran while downloading (live PAR).
+        assert_eq!(calc_move_to_queue_reset(false, 60, 40, 35, true, 12, 9, 0, 1, 0), (52, 0));
+        // Without main pars only the unpack part is redone.
+        assert_eq!(calc_move_to_queue_reset(false, 60, 40, 35, false, 12, 9, 0, 1, 0), (55, 0));
+        // Nothing while downloading: the whole stage times, as before.
+        assert_eq!(calc_move_to_queue_reset(false, 60, 40, 0, true, 12, 0, 1, 1, 0), (8, 0));
+        // Cleaned-up disk: nothing is redone.
+        assert_eq!(calc_move_to_queue_reset(true, 60, 40, 35, true, 12, 9, 2, 1, 0), (60, 2));
     }
 
     #[test]

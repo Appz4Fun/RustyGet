@@ -98,6 +98,13 @@ pub trait VolumeFeed: Send + 'static {
     fn still_held(&self, _path: &Path) -> bool {
         true
     }
+    /// Asked only of a volume this feed handed out with holes: true once it was repaired in
+    /// place and released while the download goes on (not given up). Its lost ranges can then be read back into the output at once,
+    /// while extraction carries on, instead of after the whole set. A feed that does not track
+    /// repairs says false, and the holes are refilled after the set as before.
+    fn repaired(&self, _path: &Path) -> bool {
+        false
+    }
 }
 
 /// Volume bytes at the start and end that hold archive headers. A hole there cannot be read
@@ -1771,6 +1778,17 @@ impl<'s> Driver<'s> {
         &mut self,
         is_cancelled: &mut dyn FnMut() -> bool,
     ) -> ProgressiveResult<Option<ProgressiveEvent>> {
+        self.next_event_or_tick(is_cancelled, &mut || {})
+    }
+
+    /// As `next_event`, calling `tick` each time the session has nothing to report yet
+    /// (parked on a volume, or between steps), so work that must not wait for the next event,
+    /// such as patching holes from a volume repaired meanwhile, still runs.
+    fn next_event_or_tick(
+        &mut self,
+        is_cancelled: &mut dyn FnMut() -> bool,
+        tick: &mut dyn FnMut(),
+    ) -> ProgressiveResult<Option<ProgressiveEvent>> {
         let waker = Waker::from(self.parker.clone());
         let mut cx = Context::from_waker(&waker);
         let mut cancel_sent = false;
@@ -1796,6 +1814,7 @@ impl<'s> Driver<'s> {
                         std::thread::park_timeout(PARK_SLICE);
                     }
                     self.recheck_pending();
+                    tick();
                 }
             }
         }

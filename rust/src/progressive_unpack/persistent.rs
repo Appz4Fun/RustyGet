@@ -449,6 +449,9 @@ impl VolumeFeed for RememberedHoles {
     fn still_held(&self, path: &Path) -> bool {
         self.inner.still_held(path)
     }
+    fn repaired(&self, path: &Path) -> bool {
+        self.inner.repaired(path)
+    }
 }
 
 /// Volume provider of a persistent session: every expected volume is declared up front as a
@@ -551,6 +554,135 @@ struct Run<'a> {
     /// Every member zipfast adopted from an earlier run's state.
     adopted: Vec<MemberKey>,
     anchors: Option<Arc<DurableAnchors>>,
+    /// Holes of this run not read back yet, patched as soon as their volume is repaired.
+    inline: InlineRefill,
+}
+
+/// The holes of a running session whose volumes have not been repaired yet. Each one is read
+/// back into its member as soon as the live repair releases its volume, while extraction goes
+/// on, so the output is whole when the session reaches the end of the set (see
+/// `refill_released`).
+#[derive(Default)]
+struct InlineRefill {
+    /// (member, volume, packed range) of every reported hole not refilled yet.
+    pending: Vec<(MemberKey, u32, std::ops::Range<u64>)>,
+    /// A refill here failed: what is left waits for the refill after the set, which reports
+    /// the failure as it always did.
+    failed: bool,
+    /// When the volumes were last asked about (asked at most every `INLINE_CHECK`).
+    checked: Option<std::time::Instant>,
+}
+
+/// How often a running session asks whether the volumes of its holes were repaired.
+const INLINE_CHECK: Duration = Duration::from_millis(100);
+
+impl InlineRefill {
+    /// True when every hole this run reported was patched while extracting.
+    fn all_patched(&self) -> bool {
+        self.pending.is_empty() && !self.failed
+    }
+}
+
+/// Reads the holes of `inline` whose volume the repair has released back into their members.
+/// `force` skips the rate limit (the session ended). Runs on the session's own thread,
+/// between its steps and while it is parked. zipfast takes a fill on a member's handle while
+/// the session is still writing that member: it commits the open group first, and only bytes
+/// that are still holes are read.
+fn refill_released<F>(
+    inline: &mut InlineRefill,
+    handles: &mut [(MemberKey, PartialFile, Member)],
+    damaged: &HandedHoles,
+    plan: &Plan,
+    feed: &Mutex<Box<dyn VolumeFeed>>,
+    log_cb: &mut F,
+    force: bool,
+) where
+    F: FnMut(i32, &str),
+{
+    if inline.pending.is_empty() || inline.failed {
+        return;
+    }
+    let now = std::time::Instant::now();
+    if !force && inline.checked.is_some_and(|t| now.duration_since(t) < INLINE_CHECK) {
+        return;
+    }
+    inline.checked = Some(now);
+    let mut volumes: Vec<u32> = inline.pending.iter().map(|(_, v, _)| *v).collect();
+    volumes.sort_unstable();
+    volumes.dedup();
+    let repaired: Vec<(u32, PathBuf)> = {
+        let feed = feed.lock().unwrap_or_else(|e| e.into_inner());
+        volumes
+            .into_iter()
+            .filter_map(|v| {
+                let path = plan.dir.join(plan.names.get(v as usize)?);
+                feed.repaired(&path).then_some((v, path))
+            })
+            .collect()
+    };
+    for (v, path) in repaired {
+        let volume = path.file_name().unwrap_or_default().to_string_lossy();
+        let mut f = match std::fs::File::open(&path) {
+            Ok(f) => f,
+            Err(e) => {
+                log_cb(
+                    2,
+                    &format!("Unrar: cannot read repaired {volume} while extracting ({e}); its holes are filled after the set"),
+                );
+                inline.failed = true;
+                return;
+            }
+        };
+        let mut patched: Vec<(String, u64)> = Vec::new();
+        let mut left = Vec::new();
+        for (key, hv, range) in std::mem::take(&mut inline.pending) {
+            if hv != v || inline.failed {
+                left.push((key, hv, range));
+                continue;
+            }
+            let Some((_, file, member)) = handles.iter_mut().find(|(k, _, _)| *k == key) else {
+                left.push((key, hv, range));
+                continue;
+            };
+            match file.refill_from_packed(v, range.clone(), &mut f) {
+                Ok(r) => {
+                    let name = String::from_utf8_lossy(&member.name).into_owned();
+                    let bytes: u64 = r.applied.iter().map(|a| a.end - a.start).sum();
+                    match patched.iter_mut().find(|(n, _)| *n == name) {
+                        Some((_, b)) => *b += bytes,
+                        None => patched.push((name, bytes)),
+                    }
+                }
+                Err(e) => {
+                    log_cb(
+                        2,
+                        &format!(
+                            "Unrar: patching {} from {volume} while extracting failed ({:?}); its holes are filled after the set",
+                            String::from_utf8_lossy(&member.name),
+                            e.kind
+                        ),
+                    );
+                    inline.failed = true;
+                    left.push((key, hv, range));
+                }
+            }
+        }
+        inline.pending = left;
+        if inline.failed {
+            return;
+        }
+        // Nothing of this volume waits any more: a fallback must not hand it out holed again.
+        damaged
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&path);
+        for (name, bytes) in patched {
+            log_cb(
+                0,
+                &format!("Unrar: patched {name} from repaired {volume} while extracting ({bytes} bytes)"),
+            );
+        }
+    }
 }
 
 impl<'a> Run<'a> {
@@ -565,6 +697,7 @@ impl<'a> Run<'a> {
             adopted_holed: Vec::new(),
             adopted: Vec::new(),
             anchors: None,
+            inline: InlineRefill::default(),
         }
     }
 
@@ -656,7 +789,27 @@ impl<'a> Run<'a> {
             let mut current_volume = self.req.first_volume.to_path_buf();
             let mut meta_cache = MetaCache::default();
             loop {
-                let event = drive.next_event(is_cancelled);
+                let event = drive.next_event_or_tick(is_cancelled, &mut || {
+                    refill_released(
+                        &mut self.inline,
+                        &mut self.handles,
+                        &self.damaged,
+                        self.plan,
+                        &self.feed,
+                        log_cb,
+                        false,
+                    )
+                });
+                // Also between steps: a session that never parks still patches as it goes.
+                refill_released(
+                    &mut self.inline,
+                    &mut self.handles,
+                    &self.damaged,
+                    self.plan,
+                    &self.feed,
+                    log_cb,
+                    false,
+                );
                 match event {
                     Ok(None) => break,
                     Ok(Some(ProgressiveEvent::VolumeOpened { index, .. })) => {
@@ -721,12 +874,18 @@ impl<'a> Run<'a> {
                         log_cb(
                             3,
                             &format!(
-                                "Unrar: {} has a hole at {}..{} ({:?}); filled after the repair",
+                                "Unrar: {} has a hole at {}..{} ({:?}); patched once its volume is repaired",
                                 String::from_utf8_lossy(&report.name),
                                 report.out.start,
                                 report.out.end,
                                 report.cause
                             ),
+                        );
+                        self.inline.pending.extend(
+                            report
+                                .packed
+                                .iter()
+                                .map(|s| (report.member.clone(), s.volume, s.range.clone())),
                         );
                         self.holes.push(report);
                     }
@@ -775,6 +934,16 @@ impl<'a> Run<'a> {
             }
         }
         drop(session);
+        // Volumes repaired since the last look: patch them now, before deciding to wait.
+        refill_released(
+            &mut self.inline,
+            &mut self.handles,
+            &self.damaged,
+            self.plan,
+            &self.feed,
+            log_cb,
+            true,
+        );
         // A resumed member that was mid-extraction may have been finished by this run: check
         // every adopted member for holes now. Holes this run reported do not name the volumes
         // of holes the earlier run reported, so an adopted member with any hole left is
@@ -862,6 +1031,18 @@ impl<'a> Run<'a> {
     where
         F: FnMut(i32, &str),
     {
+        if self.adopted_holed.is_empty() && self.inline.all_patched() {
+            // Every hole was patched from its repaired volume while extracting: nothing to
+            // wait for (verify still checks every member).
+            log_cb(
+                0,
+                "Unrar: every hole was patched while extracting; nothing waits for a repair",
+            );
+            let mut damaged = self.damaged.lock().unwrap_or_else(|e| e.into_inner());
+            damaged.clear();
+            save_pending_repair(&self.plan.root.join(PENDING_REPAIR), &damaged);
+            return Ok(());
+        }
         let mut damaged: Vec<String> = self
             .holes
             .iter()
@@ -1021,7 +1202,9 @@ impl<'a> Run<'a> {
         let mut keep = std::collections::HashSet::new();
         for i in 0..self.handles.len() {
             let key = self.handles[i].0.clone();
-            if self.holes.iter().any(|h| h.member == key) {
+            // A member whose holes were all patched from repaired volumes while extracting is
+            // judged like any other below; one with a hole still pending is not intact.
+            if self.inline.pending.iter().any(|(k, _, _)| *k == key) {
                 continue;
             }
             let intact = match self.verify_one(i, is_cancelled) {

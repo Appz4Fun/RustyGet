@@ -2935,6 +2935,122 @@ fn holes_in_a_persistent_output_are_refilled_from_the_repaired_volumes() {
     assert!(!t.out().join(persistent::STATE_DIR).exists());
 }
 
+/// A download whose volume 2 lost a range. While the session waits for volume 4, the live
+/// repair writes the lost bytes back into volume 2 and releases it.
+struct RepairedMidway {
+    damaged: PathBuf,
+    holes: Vec<(u64, u64)>,
+    original: Vec<u8>,
+    park_on: PathBuf,
+    parks: u32,
+    repaired: bool,
+    waited: Arc<AtomicBool>,
+    volumes: u64,
+}
+
+impl VolumeFeed for RepairedMidway {
+    fn volume(&mut self, path: &Path) -> VolumeView {
+        // About a second parked (the driver asks again every 50 ms).
+        if path == self.park_on && self.parks < 20 {
+            self.parks += 1;
+            if !self.repaired {
+                std::fs::write(&self.damaged, &self.original).unwrap();
+                self.repaired = true;
+            }
+            return VolumeView::NotYet;
+        }
+        if path == self.damaged && !self.repaired {
+            return VolumeView::Ready {
+                holes: self.holes.clone(),
+            };
+        }
+        if path.is_file() {
+            VolumeView::Ready { holes: Vec::new() }
+        } else {
+            VolumeView::Missing
+        }
+    }
+    fn wait_repaired(&mut self, _c: &mut dyn FnMut() -> bool) -> bool {
+        self.waited.store(true, Ordering::SeqCst);
+        self.repaired
+    }
+    fn expected_volumes(&self) -> u64 {
+        self.volumes
+    }
+    fn still_held(&self, path: &Path) -> bool {
+        path == self.damaged && !self.repaired
+    }
+    fn repaired(&self, path: &Path) -> bool {
+        path == self.damaged && self.repaired
+    }
+}
+
+#[test]
+fn holes_are_patched_inline_as_soon_as_their_volume_is_repaired() {
+    // The user's rule: borrowed bytes go into the output while extraction runs, never after
+    // the whole set. The hole in volume 2 is patched while the session is parked on volume 4,
+    // before anything of volume 4 is read, and nothing waits for a repair at the end.
+    let t = TestDir::new("persist_inline");
+    let data = pattern(600_000);
+    let chunk = 100_000;
+    let vols = rar5_volumes("movie.mkv", &data, chunk);
+    let first = write_set(&t.dl(), &vols);
+    let v2 = t.dl().join(volume_name(1, vols.len()));
+    let p2 = payload_offset(&vols[1], chunk) as u64;
+    let mut dmg = vols[1].clone();
+    dmg[(p2 + 10_000) as usize..(p2 + 30_000) as usize].fill(0);
+    std::fs::write(&v2, &dmg).unwrap();
+    let park_name = volume_name(3, vols.len());
+    let waited = Arc::new(AtomicBool::new(false));
+    let feed = RepairedMidway {
+        damaged: v2,
+        holes: vec![(p2 + 10_000, 20_000)],
+        original: vols[1].clone(),
+        park_on: t.dl().join(&park_name),
+        parks: 0,
+        repaired: false,
+        waited: waited.clone(),
+        volumes: vols.len() as u64,
+    };
+    let mut log = Vec::new();
+    let req = Request {
+        first_volume: &first,
+        dest: &t.out(),
+        password: "",
+        overwrite: Overwrite::Always,
+        on_wait: None,
+    };
+    let r = extract(
+        &req,
+        Box::new(feed),
+        &mut |_, m: &str| log.push(m.to_string()),
+        &mut || false,
+    );
+    expect_ok(r, &log);
+    assert!(persistent(&log), "{log:?}");
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+    let patched = log
+        .iter()
+        .position(|l| l.contains("patched movie.mkv from repaired") && l.contains("20000 bytes"))
+        .unwrap_or_else(|| panic!("not patched inline: {log:?}"));
+    let reached = log
+        .iter()
+        .position(|l| l.contains("Extracting from") && l.contains(&park_name))
+        .unwrap_or_else(|| panic!("volume 4 never read: {log:?}"));
+    assert!(patched < reached, "patched only after volume 4: {log:?}");
+    assert!(
+        log.iter()
+            .any(|l| l.contains("every hole was patched while extracting")),
+        "{log:?}"
+    );
+    assert!(
+        !log.iter().any(|l| l.contains("waiting for the volumes")),
+        "{log:?}"
+    );
+    assert!(!waited.load(Ordering::SeqCst), "waited at the end: {log:?}");
+    assert!(!t.out().join(persistent::STATE_DIR).exists());
+}
+
 #[test]
 fn an_unknown_volume_count_uses_the_progressive_path() {
     let t = TestDir::new("persist_nocount");
@@ -3687,6 +3803,103 @@ fn an_unrepaired_set_places_its_intact_members_as_the_progressive_path_does() {
     );
     assert_eq!(std::fs::read(t.out().join("b.bin")).unwrap(), b);
     assert!(!t.out().join("a.bin").exists());
+    assert!(!t.out().join(persistent::STATE_DIR).exists());
+}
+
+#[test]
+fn a_member_patched_inline_is_placed_when_another_repair_is_given_up() {
+    // a.bin (volume 1) loses a range that the live repair puts back while the session waits
+    // for volume 2; b.bin's hole in volume 2 is never repaired. a.bin is whole and must be
+    // placed, as the progressive path places intact members, though it once had a hole.
+    struct Feed {
+        v1: PathBuf,
+        v2: PathBuf,
+        h1: Vec<(u64, u64)>,
+        h2: Vec<(u64, u64)>,
+        original1: Vec<u8>,
+        parks: u32,
+        repaired: bool,
+    }
+    impl VolumeFeed for Feed {
+        fn volume(&mut self, path: &Path) -> VolumeView {
+            if path == self.v2 {
+                if self.parks < 20 {
+                    self.parks += 1;
+                    if !self.repaired {
+                        std::fs::write(&self.v1, &self.original1).unwrap();
+                        self.repaired = true;
+                    }
+                    return VolumeView::NotYet;
+                }
+                return VolumeView::Ready {
+                    holes: self.h2.clone(),
+                };
+            }
+            if path == self.v1 && !self.repaired {
+                return VolumeView::Ready {
+                    holes: self.h1.clone(),
+                };
+            }
+            if path.is_file() {
+                VolumeView::Ready { holes: Vec::new() }
+            } else {
+                VolumeView::Missing
+            }
+        }
+        fn wait_repaired(&mut self, _c: &mut dyn FnMut() -> bool) -> bool {
+            false
+        }
+        fn expected_volumes(&self) -> u64 {
+            2
+        }
+        fn repaired(&self, path: &Path) -> bool {
+            path == self.v1 && self.repaired
+        }
+    }
+    let t = TestDir::new("persist_inline_giveup");
+    let a = pattern(200_000);
+    let b: Vec<u8> = pattern(150_000).iter().map(|x| x ^ 0x5a).collect();
+    let mut vol1 = SIG.to_vec();
+    vol1.extend(main_block(true, None));
+    let fa = file_block("a.bin", a.len() as u64, &a, crc32fast::hash(&a), false, false);
+    let a_off = vol1.len() + fa.len() - a.len();
+    vol1.extend(fa);
+    vol1.extend(end_block(true));
+    let mut vol2 = SIG.to_vec();
+    vol2.extend(main_block(true, Some(1)));
+    let fb = file_block("b.bin", b.len() as u64, &b, crc32fast::hash(&b), false, false);
+    let b_off = vol2.len() + fb.len() - b.len();
+    vol2.extend(fb);
+    vol2.extend(end_block(false));
+    let first = write_set(&t.dl(), &[vol1.clone(), vol2.clone()]);
+    let v2 = t.dl().join(volume_name(1, 2));
+    let mut d1 = vol1.clone();
+    d1[a_off + 80_000..a_off + 90_000].fill(0);
+    std::fs::write(&first, &d1).unwrap();
+    let mut d2 = vol2.clone();
+    d2[b_off + 80_000..b_off + 90_000].fill(0);
+    std::fs::write(&v2, &d2).unwrap();
+    let feed = Feed {
+        v1: first.clone(),
+        v2,
+        h1: vec![((a_off + 80_000) as u64, 10_000)],
+        h2: vec![((b_off + 80_000) as u64, 10_000)],
+        original1: vol1,
+        parks: 0,
+        repaired: false,
+    };
+    let (r, log) = run(&first, &t.out(), Box::new(feed));
+    assert!(
+        matches!(r, Err(Error::Failed(Failure::Damaged(_)))),
+        "{log:?}"
+    );
+    assert!(persistent(&log), "{log:?}");
+    assert!(
+        log.iter().any(|l| l.contains("patched a.bin from repaired")),
+        "{log:?}"
+    );
+    assert_eq!(std::fs::read(t.out().join("a.bin")).unwrap(), a, "{log:?}");
+    assert!(!t.out().join("b.bin").exists());
     assert!(!t.out().join(persistent::STATE_DIR).exists());
 }
 

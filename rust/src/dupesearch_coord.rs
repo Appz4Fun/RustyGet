@@ -1854,52 +1854,49 @@ struct IntakeLater {
     seed: u64,
 }
 
-/// Nzb ids the background intake is still reading: a failover waits for such
-/// a backup to be told instead of switching to a copy it has not checked.
-static INTAKE_PENDING: Mutex<Vec<i32>> = Mutex::new(Vec::new());
+/// What a failover waits on while the fleet intake reads a backup: the nzb ids
+/// the background check is reading, and the dupe keys (lowercase) whose lone
+/// backup is being added, from before it is queued until its id is listed.
+/// One lock, so a reader never sees the handoff between the two half done.
+struct IntakeHolds {
+    ids: Vec<i32>,
+    keys: Vec<Vec<u8>>,
+}
 
-/// Dupe keys (lowercase) whose lone backup is being added: from before it is
-/// queued until its id is in [`INTAKE_PENDING`], so no failover slips between.
-static INTAKE_PENDING_KEYS: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+static INTAKE_PENDING: Mutex<IntakeHolds> = Mutex::new(IntakeHolds {
+    ids: Vec::new(),
+    keys: Vec::new(),
+});
+
+fn intake_holds() -> std::sync::MutexGuard<'static, IntakeHolds> {
+    INTAKE_PENDING.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// Whether the background intake is still reading the copy `id`, or a lone
 /// backup of `dupe_key` is being added to be read.
 pub(crate) fn intake_pending(id: i32, dupe_key: &[u8]) -> bool {
-    if INTAKE_PENDING
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .contains(&id)
-    {
-        return true;
-    }
-    !dupe_key.is_empty()
-        && INTAKE_PENDING_KEYS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .any(|k| k.eq_ignore_ascii_case(dupe_key))
+    let holds = intake_holds();
+    holds.ids.contains(&id)
+        || (!dupe_key.is_empty() && holds.keys.iter().any(|k| k.eq_ignore_ascii_case(dupe_key)))
 }
 
-/// Holds failovers for a dupe key while its lone backup is added (see
-/// [`INTAKE_PENDING_KEYS`]), until it is dropped.
+/// Holds failovers for a dupe key while its lone backup is added, until it is
+/// dropped.
 struct IntakeKeyGuard(Vec<u8>);
 
 impl IntakeKeyGuard {
     fn enter(dupe_key: &[u8]) -> Self {
         let key = dupe_key.to_ascii_lowercase();
-        INTAKE_PENDING_KEYS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(key.clone());
+        intake_holds().keys.push(key.clone());
         Self(key)
     }
 }
 
 impl Drop for IntakeKeyGuard {
     fn drop(&mut self) {
-        let mut keys = INTAKE_PENDING_KEYS.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(at) = keys.iter().position(|k| *k == self.0) {
-            keys.swap_remove(at);
+        let mut holds = intake_holds();
+        if let Some(at) = holds.keys.iter().position(|k| *k == self.0) {
+            holds.keys.swap_remove(at);
         }
     }
 }
@@ -1909,20 +1906,17 @@ struct IntakePendingGuard(Vec<i32>);
 
 impl IntakePendingGuard {
     fn enter(ids: Vec<i32>) -> Self {
-        INTAKE_PENDING
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .extend_from_slice(&ids);
+        intake_holds().ids.extend_from_slice(&ids);
         Self(ids)
     }
 }
 
 impl Drop for IntakePendingGuard {
     fn drop(&mut self) {
-        let mut pending = INTAKE_PENDING.lock().unwrap_or_else(|e| e.into_inner());
+        let mut holds = intake_holds();
         for id in &self.0 {
-            if let Some(at) = pending.iter().position(|p| p == id) {
-                pending.swap_remove(at);
+            if let Some(at) = holds.ids.iter().position(|p| p == id) {
+                holds.ids.swap_remove(at);
             }
         }
     }

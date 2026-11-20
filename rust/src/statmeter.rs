@@ -470,9 +470,7 @@ mod runtime {
     };
     use crate::log::NzbgetRsLog;
     use crate::options::NzbgetRsOptions;
-    use crate::xmlrpc_format::{
-        NzbgetRsRpcArticlePair, NzbgetRsRpcServerVolumeItem, NzbgetRsXmlRpcEmitFn,
-    };
+    use crate::xmlrpc_format::{NzbgetRsRpcArticlePair, NzbgetRsRpcServerVolumeItem, RpcEmit};
 
     #[inline]
     fn current_unix_time() -> i64 {
@@ -1658,8 +1656,7 @@ mod runtime {
         a3: c_int,
         a4: c_int,
         a5: c_int,
-        emit_ctx: *mut c_void,
-        emit_cb: Option<NzbgetRsXmlRpcEmitFn>,
+        out: Option<&mut dyn RpcEmit>,
     ) -> c_int {
         let Some(s) = sm.as_ref() else {
             return 0;
@@ -1690,7 +1687,7 @@ mod runtime {
                 c_int::from(ok)
             }
             1 => {
-                let Some(cb) = emit_cb else {
+                let Some(out) = out else {
                     return 0;
                 };
                 for (index, sv) in vols.iter().enumerate() {
@@ -1732,31 +1729,7 @@ mod runtime {
                         articles_per_days: art_ptr,
                         articles_per_days_len: art_len,
                     };
-                    cb(
-                        emit_ctx,
-                        14,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        ptr::null(),
-                        ptr::null(),
-                        ptr::null(),
-                        ptr::null(),
-                        (&vf as *const NzbgetRsRpcServerVolumeItem).cast(),
-                        0,
-                        ptr::null(),
-                        0,
-                        ptr::null(),
-                        0,
-                        ptr::null(),
-                        0,
-                    );
+                    out.server_volume(&vf);
                 }
                 1
             }
@@ -2013,8 +1986,8 @@ mod tests {
         use crate::options::{
             nzbget_rs_options_free, nzbget_rs_options_new, NzbgetRsParsedOptions,
         };
-        use crate::xmlrpc_format::NzbgetRsRpcServerVolumeItem;
-        use std::ffi::{c_char, c_int, c_void, CString};
+        use crate::xmlrpc_format::{NzbgetRsRpcServerVolumeItem, RpcEmit};
+        use std::ffi::CString;
         use std::ptr;
 
         let dir =
@@ -2168,38 +2141,14 @@ mod tests {
             );
             crate::net::nzbget_rs_serverpool_free(pool);
 
-            unsafe extern "C" fn capture_vols(
-                ctx: *mut c_void,
-                kind: c_int,
-                _a1: c_int,
-                _a2: c_int,
-                _a3: c_int,
-                _a4: c_int,
-                _a5: c_int,
-                _a6: c_int,
-                _i1: i64,
-                _i2: i64,
-                _i3: i64,
-                _s1: *const c_char,
-                _s2: *const c_char,
-                _s3: *const c_char,
-                _s4: *const c_char,
-                p1: *const c_void,
-                _len1: usize,
-                _p2: *const c_void,
-                _len2: usize,
-                _p3: *const c_void,
-                _len3: usize,
-                _p4: *const c_void,
-                _len4: usize,
-            ) {
-                assert_eq!(kind, 14);
-                let vf = &*(p1 as *const NzbgetRsRpcServerVolumeItem);
-                let out = &mut *(ctx as *mut Vec<(i32, i64, i64)>);
-                out.push((vf.server_id, vf.total_bytes, vf.custom_bytes));
+            struct CaptureVols(Vec<(i32, i64, i64)>);
+            impl RpcEmit for CaptureVols {
+                fn server_volume(&mut self, vf: &NzbgetRsRpcServerVolumeItem) {
+                    self.0.push((vf.server_id, vf.total_bytes, vf.custom_bytes));
+                }
             }
 
-            let mut vols_out: Vec<(i32, i64, i64)> = Vec::new();
+            let mut vols_out = CaptureVols(Vec::new());
             assert_eq!(
                 nzbget_rs_statmeter_rpc(
                     sm2,
@@ -2210,19 +2159,18 @@ mod tests {
                     1,
                     1,
                     1,
-                    (&mut vols_out as *mut Vec<_>).cast(),
-                    Some(capture_vols),
+                    Some(&mut vols_out),
                 ),
                 1
             );
-            assert_eq!(vols_out, vec![(0, 4096, 4096), (1, 4096, 4096)]);
+            assert_eq!(vols_out.0, vec![(0, 4096, 4096), (1, 4096, 4096)]);
 
             // Custom reset on server 1 only
             assert_eq!(
-                nzbget_rs_statmeter_rpc(sm2, 0, init_off, 1, 1, 0, 0, 0, ptr::null_mut(), None),
+                nzbget_rs_statmeter_rpc(sm2, 0, init_off, 1, 1, 0, 0, 0, None),
                 1
             );
-            vols_out.clear();
+            vols_out.0.clear();
             nzbget_rs_statmeter_rpc(
                 sm2,
                 1,
@@ -2232,10 +2180,9 @@ mod tests {
                 0,
                 0,
                 0,
-                (&mut vols_out as *mut Vec<_>).cast(),
-                Some(capture_vols),
+                Some(&mut vols_out),
             );
-            assert_eq!(vols_out, vec![(0, 4096, 4096), (1, 4096, 0)]);
+            assert_eq!(vols_out.0, vec![(0, 4096, 4096), (1, 4096, 0)]);
 
             nzbget_rs_statmeter_free(sm2);
             nzbget_rs_statmeter_free(sm);

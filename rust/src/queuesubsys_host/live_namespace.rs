@@ -277,9 +277,8 @@ pub(crate) unsafe fn live_par_visit_namespace(
     let queued = op(0, 0).max(0) as usize;
     let none = std::ptr::null_mut();
     let ns: *mut *const c_char = std::ptr::null_mut();
-    let completed =
-        crate::qnzb::completed_files(crate::queuesubsys_host::NzbRef::from_addr(nzb as usize));
-    let completed_count = completed.len();
+    let nzb_ref = crate::queuesubsys_host::NzbRef::from_addr(nzb as usize);
+    let completed_count = crate::qnzb::completed_file_count(nzb_ref);
     if queued > MAX_ROWS || completed_count > MAX_ROWS - queued {
         return 0;
     }
@@ -321,7 +320,11 @@ pub(crate) unsafe fn live_par_visit_namespace(
             return 0;
         }
     }
-    for c in completed {
+    // one entry at a time: nothing is copied past the row limit
+    for i in 0..completed_count {
+        let Some(c) = crate::qnzb::completed_file(nzb_ref, i) else {
+            return 0;
+        };
         let text = |b: Vec<u8>| std::ffi::CString::new(b).unwrap_or_default();
         let (filename, origname, hash16k) = (text(c.filename), text(c.origname), text(c.hash16k));
         let flags = 4 | u32::from(c.par_file);

@@ -1569,75 +1569,65 @@ struct DiskBridgeCtx<'a> {
     env: &'a NzbgetRsFeedCoordEnv,
 }
 
-fn feed_disk_log_cb(raw: *mut c_void, level: crate::diskstate_format::DiskLogLevel, msg: &[u8]) {
-    let bridge = unsafe { &*raw.cast::<DiskBridgeCtx<'_>>() };
-    feed_emit_log(bridge.env, level as i32, &[msg]);
-}
-
-fn feed_disk_export_cb(
-    raw: *mut c_void,
-    sink: &mut dyn FnMut(crate::diskstate_format::FeedRecord<'_>),
-) {
-    use crate::diskstate_format::FeedRecord;
-    let bridge = unsafe { &mut *raw.cast::<DiskBridgeCtx<'_>>() };
-    for fi in &bridge.inner.feeds {
-        sink(FeedRecord::Status {
-            url: fi.cfg.url.as_bytes(),
-            filter_hash: fi.cfg.filter_hash,
-            last_update: fi.last_update as i32,
-        });
+impl crate::diskstate_format::DiskStateHost for DiskBridgeCtx<'_> {
+    fn log(&mut self, level: crate::diskstate_format::DiskLogLevel, msg: &[u8]) {
+        feed_emit_log(self.env, level as i32, &[msg]);
     }
-    for h in &bridge.inner.history {
-        sink(FeedRecord::History {
-            url: &h.url,
-            status: h.status as i32,
-            last_seen: h.last_seen as i32,
-        });
-    }
-}
 
-fn feed_disk_load_status_cb(
-    raw: *mut c_void,
-    url: &[u8],
-    matching: crate::diskstate_format::FeedMatch<'_>,
-    last_update: i32,
-) {
-    use crate::diskstate_format::FeedMatch;
-    let bridge = unsafe { &mut *raw.cast::<DiskBridgeCtx<'_>>() };
-    for fi in &mut bridge.inner.feeds {
-        let same = match matching {
-            FeedMatch::Url => true,
-            FeedMatch::Filter(filter) => fi.cfg.filter == filter,
-            FeedMatch::FilterHash(hash) => fi.cfg.filter_hash == hash,
-        };
-        if fi.cfg.url.as_bytes() == url && same {
-            fi.last_update = i64::from(last_update);
+    fn export_feeds(&mut self, sink: &mut dyn FnMut(crate::diskstate_format::FeedRecord<'_>)) {
+        use crate::diskstate_format::FeedRecord;
+        for fi in &self.inner.feeds {
+            sink(FeedRecord::Status {
+                url: fi.cfg.url.as_bytes(),
+                filter_hash: fi.cfg.filter_hash,
+                last_update: fi.last_update as i32,
+            });
+        }
+        for h in &self.inner.history {
+            sink(FeedRecord::History {
+                url: &h.url,
+                status: h.status as i32,
+                last_seen: h.last_seen as i32,
+            });
         }
     }
-}
 
-fn feed_disk_load_history_cb(raw: *mut c_void, url: &[u8], status: i32, last_seen: i32) {
-    let bridge = unsafe { &mut *raw.cast::<DiskBridgeCtx<'_>>() };
-    bridge.inner.history.push(RsFeedHistoryEntry {
-        url: url.to_vec(),
-        status,
-        last_seen: i64::from(last_seen),
-    });
+    fn load_feed_status(
+        &mut self,
+        url: &[u8],
+        matching: crate::diskstate_format::FeedMatch<'_>,
+        last_update: i32,
+    ) {
+        use crate::diskstate_format::FeedMatch;
+        for fi in &mut self.inner.feeds {
+            let same = match matching {
+                FeedMatch::Url => true,
+                FeedMatch::Filter(filter) => fi.cfg.filter == filter,
+                FeedMatch::FilterHash(hash) => fi.cfg.filter_hash == hash,
+            };
+            if fi.cfg.url.as_bytes() == url && same {
+                fi.last_update = i64::from(last_update);
+            }
+        }
+    }
+
+    fn load_feed_history(&mut self, url: &[u8], status: i32, last_seen: i32) {
+        self.inner.history.push(RsFeedHistoryEntry {
+            url: url.to_vec(),
+            status,
+            last_seen: i64::from(last_seen),
+        });
+    }
 }
 
 fn run_diskstate_feeds(inner: &mut FeedCoordInner, env: &NzbgetRsFeedCoordEnv, save: bool) {
     let opts = query_runtime_opts(env);
     let qdir_c = feed_bytes_to_cstr(&opts.queue_dir);
     let mut bridge = DiskBridgeCtx { inner, env };
-    let mut ds_env: crate::diskstate_format::NzbgetRsDiskStateEnv = unsafe { std::mem::zeroed() };
-    ds_env.ctx = (&mut bridge as *mut DiskBridgeCtx<'_>).cast();
+    let mut ds_env = crate::diskstate_format::NzbgetRsDiskStateEnv::new(&mut bridge);
     ds_env.queue_dir = qdir_c.as_ptr();
     ds_env.sep = c_int::from(opts.path_sep);
     ds_env.flush_queue = c_int::from(opts.flush_queue);
-    ds_env.log_cb = Some(feed_disk_log_cb);
-    ds_env.export_feeds_cb = Some(feed_disk_export_cb);
-    ds_env.load_feed_status_cb = Some(feed_disk_load_status_cb);
-    ds_env.load_feed_history_cb = Some(feed_disk_load_history_cb);
     unsafe {
         crate::diskstate_format::diskstate_exec(
             if save {

@@ -4037,7 +4037,6 @@ impl DiskLogLevel {
     }
 }
 
-pub type DiskLogFn = fn(ctx: *mut c_void, level: DiskLogLevel, msg: &[u8]);
 /// A request from the disk-state code to the queue it is loading into or
 /// saving from. Ids are nzb or file ids, indexes are queue positions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4095,7 +4094,6 @@ pub enum DiskCtrl<'a> {
     ChangedNzbCount,
 }
 
-pub type DiskCtrlFn = fn(ctx: *mut c_void, cmd: DiskCtrl<'_>) -> i32;
 /// Which list an nzb export walks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NzbSource {
@@ -4107,14 +4105,6 @@ pub enum NzbSource {
     ChangedQueue,
 }
 
-/// Exports entry `idx` of `source` and hands it to `sink`, which is not
-/// called when the entry is skipped.
-pub type DiskExportNzbFn = fn(
-    ctx: *mut c_void,
-    source: NzbSource,
-    idx: usize,
-    sink: &mut dyn FnMut(&NzbgetRsDiskNzbExport),
-);
 /// Borrows `len` items at `ptr` as a slice; null or zero length is empty.
 ///
 /// # Safety
@@ -4170,7 +4160,6 @@ pub enum NzbApply<'a> {
     DupHistory(crate::qqueue::DupRecord<'a>),
 }
 
-pub type DiskApplyNzbFn = fn(ctx: *mut c_void, what: NzbApply<'_>);
 /// What a file export fills in for the target file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FileExport {
@@ -4186,10 +4175,6 @@ pub enum FileExport {
     Meta,
 }
 
-/// Exports the target file as `what` and hands it to `sink`, which is not
-/// called when there is no target file.
-pub type DiskExportFileFn =
-    fn(ctx: *mut c_void, what: FileExport, sink: &mut dyn FnMut(&NzbgetRsDiskFileExport));
 /// Borrows a C string; null reads as `None`.
 ///
 /// # Safety
@@ -4243,8 +4228,6 @@ pub enum FileApply<'a> {
     },
 }
 
-/// Applies `what` to the target file; only `ArticleInfo` returns a value.
-pub type DiskApplyFileFn = fn(ctx: *mut c_void, what: FileApply<'_>) -> i32;
 /// Nzb and file ids still referenced by the queue and history; disk-state
 /// files for any other id are orphans.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -4252,8 +4235,6 @@ pub struct LiveIds {
     pub nzb_ids: Vec<i32>,
     pub file_ids: Vec<i32>,
 }
-
-pub type DiskLiveIdsFn = fn(ctx: *mut c_void) -> LiveIds;
 
 /// One record of the feeds state file as the feed coordinator saves it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4284,11 +4265,6 @@ pub enum FeedMatch<'a> {
     FilterHash(u32),
 }
 
-/// Hands every feed record to the sink, statuses first.
-pub type DiskExportFeedsFn = fn(ctx: *mut c_void, sink: &mut dyn FnMut(FeedRecord<'_>));
-/// Applies one loaded feed status to every configured feed `matching` it.
-pub type DiskLoadFeedStatusFn =
-    fn(ctx: *mut c_void, url: &[u8], matching: FeedMatch<'_>, last_update: i32);
 /// Which volume a loaded volume-stat record belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VolumeSlot {
@@ -4298,29 +4274,67 @@ pub enum VolumeSlot {
     Server(i32),
 }
 
-/// Hands the current news servers, and the volume stats when
-/// `with_volumes`, to the sink once.
-pub type DiskExportStatsFn = fn(
-    ctx: *mut c_void,
-    with_volumes: bool,
-    sink: &mut dyn FnMut(&[NzbgetRsServerMatchItem], &[NzbgetRsDiskVolumeStatInput]),
-);
-/// Records the saved state id matched to the server at index `server`.
-pub type DiskSetServerStateIdFn = fn(ctx: *mut c_void, server: usize, state_id: i32);
-/// Applies one loaded volume-stat record.
-pub type DiskLoadVolumeFn = fn(
-    ctx: *mut c_void,
-    slot: VolumeSlot,
-    vol: &NzbgetRsDiskVolumeStatInput,
-    format_version: i32,
-    has_custom_times: bool,
-);
-/// Adds one loaded feed history record.
-pub type DiskLoadFeedHistoryFn = fn(ctx: *mut c_void, url: &[u8], status: i32, last_seen: i32);
+/// The side of a disk-state operation that owns the live queue, feeds or
+/// stats. Every method has a no-op default so a host only implements what
+/// its operations use.
+pub trait DiskStateHost {
+    /// Writes a log line.
+    fn log(&mut self, _level: DiskLogLevel, _msg: &[u8]) {}
+    /// Answers a queue request; 0 when unsupported.
+    fn ctrl(&mut self, _cmd: DiskCtrl<'_>) -> i32 {
+        0
+    }
+    /// Exports entry `idx` of `source` to `sink`, unless it is skipped.
+    fn export_nzb(
+        &mut self,
+        _source: NzbSource,
+        _idx: usize,
+        _sink: &mut dyn FnMut(&NzbgetRsDiskNzbExport),
+    ) {
+    }
+    /// Applies a loaded record to the target nzb or to history.
+    fn apply_nzb(&mut self, _what: NzbApply<'_>) {}
+    /// Exports the target file as `what` to `sink`, if there is one.
+    fn export_file(&mut self, _what: FileExport, _sink: &mut dyn FnMut(&NzbgetRsDiskFileExport)) {}
+    /// Applies a loaded record to the target file; only `ArticleInfo`
+    /// returns a value.
+    fn apply_file(&mut self, _what: FileApply<'_>) -> i32 {
+        0
+    }
+    /// Ids still referenced by the queue and history.
+    fn live_ids(&mut self) -> LiveIds {
+        LiveIds::default()
+    }
+    /// Hands every feed record to `sink`, statuses first.
+    fn export_feeds(&mut self, _sink: &mut dyn FnMut(FeedRecord<'_>)) {}
+    /// Applies a loaded feed status to every configured feed `matching` it.
+    fn load_feed_status(&mut self, _url: &[u8], _matching: FeedMatch<'_>, _last_update: i32) {}
+    /// Adds a loaded feed history record.
+    fn load_feed_history(&mut self, _url: &[u8], _status: i32, _last_seen: i32) {}
+    /// Hands the news servers, and the volume stats when `with_volumes`,
+    /// to `sink` once.
+    fn export_stats(
+        &mut self,
+        _with_volumes: bool,
+        _sink: &mut dyn FnMut(&[NzbgetRsServerMatchItem], &[NzbgetRsDiskVolumeStatInput]),
+    ) {
+    }
+    /// Records the saved state id matched to the server at index `server`.
+    fn set_server_state_id(&mut self, _server: usize, _state_id: i32) {}
+    /// Applies a loaded volume-stat record.
+    fn load_volume(
+        &mut self,
+        _slot: VolumeSlot,
+        _vol: &NzbgetRsDiskVolumeStatInput,
+        _format_version: i32,
+        _has_custom_times: bool,
+    ) {
+    }
+}
 
-#[repr(C)]
-pub struct NzbgetRsDiskStateEnv {
-    pub ctx: *mut c_void,
+/// Inputs and host for one disk-state operation.
+pub struct NzbgetRsDiskStateEnv<'a> {
+    host: std::cell::RefCell<&'a mut dyn DiskStateHost>,
     pub queue_dir: *const c_char,
     pub temp_dir: *const c_char,
     pub line_ending: *const c_char,
@@ -4337,19 +4351,37 @@ pub struct NzbgetRsDiskStateEnv {
     pub a4: c_int,
     pub now: i64,
     pub out_flag: *mut c_int,
-    pub log_cb: Option<DiskLogFn>,
-    pub ctrl_cb: Option<DiskCtrlFn>,
-    pub export_nzb_cb: Option<DiskExportNzbFn>,
-    pub apply_nzb_cb: Option<DiskApplyNzbFn>,
-    pub export_file_cb: Option<DiskExportFileFn>,
-    pub apply_file_cb: Option<DiskApplyFileFn>,
-    pub live_ids_cb: Option<DiskLiveIdsFn>,
-    pub export_feeds_cb: Option<DiskExportFeedsFn>,
-    pub load_feed_status_cb: Option<DiskLoadFeedStatusFn>,
-    pub load_feed_history_cb: Option<DiskLoadFeedHistoryFn>,
-    pub export_stats_cb: Option<DiskExportStatsFn>,
-    pub set_server_state_id_cb: Option<DiskSetServerStateIdFn>,
-    pub load_volume_cb: Option<DiskLoadVolumeFn>,
+}
+
+impl<'a> NzbgetRsDiskStateEnv<'a> {
+    /// An env for `host` with empty paths and every option off.
+    pub fn new(host: &'a mut dyn DiskStateHost) -> Self {
+        Self {
+            host: std::cell::RefCell::new(host),
+            queue_dir: std::ptr::null(),
+            temp_dir: std::ptr::null(),
+            line_ending: std::ptr::null(),
+            time_str: std::ptr::null(),
+            text: std::ptr::null(),
+            sep: 0,
+            has_options: 0,
+            flush_queue: 0,
+            direct_write: 0,
+            continue_partial: 0,
+            a1: 0,
+            a2: 0,
+            a3: 0,
+            a4: 0,
+            now: 0,
+            out_flag: std::ptr::null_mut(),
+        }
+    }
+
+    /// The host, borrowed for one call. Host methods never call back into
+    /// the env, so the borrow cannot overlap another.
+    fn host(&self) -> std::cell::RefMut<'_, &'a mut dyn DiskStateHost> {
+        self.host.borrow_mut()
+    }
 }
 
 fn bytes_to_cstring_trunc(raw: &[u8]) -> std::ffi::CString {
@@ -4358,10 +4390,8 @@ fn bytes_to_cstring_trunc(raw: &[u8]) -> std::ffi::CString {
 }
 
 fn emit_log(env: &NzbgetRsDiskStateEnv, level: DiskLogLevel, msg: &[u8]) {
-    if let Some(cb) = env.log_cb {
-        let end = msg.iter().position(|&b| b == 0).unwrap_or(msg.len());
-        cb(env.ctx, level, &msg[..end]);
-    }
+    let end = msg.iter().position(|&b| b == 0).unwrap_or(msg.len());
+    env.host().log(level, &msg[..end]);
 }
 
 fn emit_log_parts(env: &NzbgetRsDiskStateEnv, level: DiskLogLevel, parts: &[&[u8]]) {
@@ -4369,7 +4399,7 @@ fn emit_log_parts(env: &NzbgetRsDiskStateEnv, level: DiskLogLevel, parts: &[&[u8
 }
 
 fn call_ctrl(env: &NzbgetRsDiskStateEnv, cmd: DiskCtrl<'_>) -> i32 {
-    env.ctrl_cb.map_or(0, |cb| cb(env.ctx, cmd))
+    env.host().ctrl(cmd)
 }
 
 struct RsStateReader {
@@ -4785,9 +4815,6 @@ unsafe fn save_nzb_section(
     source: NzbSource,
     header_count: i32,
 ) {
-    let Some(export_cb) = env.export_nzb_cb else {
-        return;
-    };
     let iter_len = if source == NzbSource::History {
         call_ctrl(env, DiskCtrl::HistoryLen) as usize
     } else {
@@ -4887,7 +4914,8 @@ unsafe fn save_nzb_section(
         trailer: TrailerAccum::default(),
     };
     for idx in 0..iter_len {
-        export_cb(env.ctx, source, idx, &mut |exp| sink_cb(&mut state, exp));
+        env.host()
+            .export_nzb(source, idx, &mut |exp| sink_cb(&mut state, exp));
     }
     state.trailer.write_to(state.w);
 }
@@ -4904,21 +4932,18 @@ unsafe fn load_dupe_extras_into_target(
         rec_holes: c_int,
     ) {
         let env = unsafe { &*ctx.cast::<NzbgetRsDiskStateEnv>() };
-        if let Some(cb) = env.apply_nzb_cb {
-            cb(
-                env.ctx,
-                NzbApply::DupeRecovered {
-                    articles: rec_articles,
-                    bytes: rec_bytes,
-                    holes: rec_holes,
-                },
-            );
+        {
+            env.host().apply_nzb(NzbApply::DupeRecovered {
+                articles: rec_articles,
+                bytes: rec_bytes,
+                holes: rec_holes,
+            });
         }
     }
     unsafe extern "C" fn on_job(ctx: *mut c_void, job: *const NzbgetRsDiskRepairJob) {
         let env = unsafe { &*ctx.cast::<NzbgetRsDiskStateEnv>() };
-        if let (Some(cb), Some(job)) = (env.apply_nzb_cb, unsafe { job.as_ref() }) {
-            cb(env.ctx, NzbApply::RepairJob(job));
+        if let Some(job) = unsafe { job.as_ref() } {
+            env.host().apply_nzb(NzbApply::RepairJob(job));
         }
     }
     unsafe {
@@ -4952,23 +4977,18 @@ unsafe fn parse_unpack_state_into_target(
     let Some(l4) = r.read_line(65536).map(|b| b.to_vec()) else {
         return false;
     };
-    if let Some(cb) = env.apply_nzb_cb {
-        cb(
-            env.ctx,
-            NzbApply::UnpackState {
-                direct_unpack_status: direct,
-                unpack_tried: tried,
-                par_repaired: repaired,
-                last_unpack_status: last,
-            },
-        );
+    {
+        env.host().apply_nzb(NzbApply::UnpackState {
+            direct_unpack_status: direct,
+            unpack_tried: tried,
+            par_repaired: repaired,
+            last_unpack_status: last,
+        });
         let archives = l4.strip_prefix(b"ExtractedArchives=").unwrap_or(&l4);
         let mut cursor = 0;
         while let Some((start, len, next)) = diskstate_next_comma_token(archives, cursor) {
-            cb(
-                env.ctx,
-                NzbApply::ExtractedArchive(&archives[start..start + len]),
-            );
+            env.host()
+                .apply_nzb(NzbApply::ExtractedArchive(&archives[start..start + len]));
             cursor = next;
         }
     }
@@ -4997,7 +5017,7 @@ unsafe fn load_nzb_info_into_target(
         files_len: usize,
     ) {
         let env = unsafe { &*ctx.cast::<NzbgetRsDiskStateEnv>() };
-        let (Some(cb), Some(info)) = (env.apply_nzb_cb, unsafe { inp.as_ref() }) else {
+        let Some(info) = (unsafe { inp.as_ref() }) else {
             return;
         };
         let rec = unsafe {
@@ -5012,7 +5032,7 @@ unsafe fn load_nzb_info_into_target(
                 file_times: raw_slice(file_times, files_len),
             }
         };
-        cb(env.ctx, NzbApply::Info(rec));
+        env.host().apply_nzb(NzbApply::Info(rec));
     }
 
     let ok = unsafe {
@@ -5219,8 +5239,8 @@ unsafe fn load_history_section(
                     },
                 );
             } else if kindval == 3 {
-                struct DupCtx<'a> {
-                    env: &'a NzbgetRsDiskStateEnv,
+                struct DupCtx<'a, 'h> {
+                    env: &'a NzbgetRsDiskStateEnv<'h>,
                     id: c_int,
                     time: c_int,
                 }
@@ -5235,8 +5255,8 @@ unsafe fn load_history_section(
                     name: *const c_char,
                     dupe_key: *const c_char,
                 ) {
-                    let dc = unsafe { &*ctx.cast::<DupCtx<'_>>() };
-                    if let Some(cb) = dc.env.apply_nzb_cb {
+                    let dc = unsafe { &*ctx.cast::<DupCtx<'_, '_>>() };
+                    {
                         let text = |p: *const c_char| {
                             if p.is_null() {
                                 c""
@@ -5244,9 +5264,9 @@ unsafe fn load_history_section(
                                 unsafe { std::ffi::CStr::from_ptr(p) }
                             }
                         };
-                        cb(
-                            dc.env.ctx,
-                            NzbApply::DupHistory(crate::qqueue::DupRecord {
+                        dc.env
+                            .host()
+                            .apply_nzb(NzbApply::DupHistory(crate::qqueue::DupRecord {
                                 id: dc.id,
                                 time: dc.time,
                                 status,
@@ -5257,8 +5277,7 @@ unsafe fn load_history_section(
                                 size,
                                 name: text(name),
                                 dupe_key: text(dupe_key),
-                            }),
-                        );
+                            }));
                     }
                 }
                 let mut dc = DupCtx { env, id, time };
@@ -5271,7 +5290,7 @@ unsafe fn load_history_section(
                         &[],
                         0,
                         0,
-                        (&mut dc as *mut DupCtx<'_>).cast(),
+                        (&mut dc as *mut DupCtx<'_, '_>).cast(),
                         on_dup,
                     )
                 } {
@@ -5336,8 +5355,8 @@ unsafe fn query_target_file_meta(env: &NzbgetRsDiskStateEnv) -> QueriedFileMeta 
         m.filename = unsafe { cstr::bytes(exp.info.filename) }.to_vec();
         m.output_filename = unsafe { cstr::bytes(exp.info.output_filename) }.to_vec();
     };
-    if let Some(cb) = env.export_file_cb {
-        cb(env.ctx, FileExport::Meta, &mut sink);
+    {
+        env.host().export_file(FileExport::Meta, &mut sink);
     }
     meta
 }
@@ -5371,8 +5390,8 @@ unsafe fn format_target_file_bytes(env: &NzbgetRsDiskStateEnv, what: FileExport)
             };
         }
     };
-    if let Some(cb) = env.export_file_cb {
-        cb(env.ctx, what, &mut sink);
+    {
+        env.host().export_file(what, &mut sink);
     }
     (file_id, bytes)
 }
@@ -5385,8 +5404,8 @@ unsafe fn load_file_info_from_reader(
     articles: bool,
 ) -> bool {
     let meta = unsafe { query_target_file_meta(env) };
-    struct Ctx<'a> {
-        env: &'a NzbgetRsDiskStateEnv,
+    struct Ctx<'a, 'h> {
+        env: &'a NzbgetRsDiskStateEnv<'h>,
         summary: c_int,
     }
     unsafe extern "C" fn on_sum(
@@ -5394,16 +5413,13 @@ unsafe fn load_file_info_from_reader(
         fields: *const NzbgetRsDiskFileInfoInput,
         flags: c_int,
     ) {
-        let c = unsafe { &*ctx.cast::<Ctx<'_>>() };
-        if let (Some(cb), Some(info)) = (c.env.apply_file_cb, unsafe { fields.as_ref() }) {
-            cb(
-                c.env.ctx,
-                FileApply::Info {
-                    info,
-                    flags,
-                    summary: c.summary != 0,
-                },
-            );
+        let c = unsafe { &*ctx.cast::<Ctx<'_, '_>>() };
+        if let Some(info) = unsafe { fields.as_ref() } {
+            c.env.host().apply_file(FileApply::Info {
+                info,
+                flags,
+                summary: c.summary != 0,
+            });
         }
     }
     unsafe extern "C" fn on_item(
@@ -5411,15 +5427,12 @@ unsafe fn load_file_info_from_reader(
         grp: *const c_char,
         art: *const NzbgetRsDiskArticleInfo,
     ) {
-        let c = unsafe { &*ctx.cast::<Ctx<'_>>() };
-        if let Some(cb) = c.env.apply_file_cb {
-            cb(
-                c.env.ctx,
-                FileApply::Item {
-                    group: unsafe { opt_cstr(grp) },
-                    article: unsafe { art.as_ref() },
-                },
-            );
+        let c = unsafe { &*ctx.cast::<Ctx<'_, '_>>() };
+        {
+            c.env.host().apply_file(FileApply::Item {
+                group: unsafe { opt_cstr(grp) },
+                article: unsafe { art.as_ref() },
+            });
         }
     }
     let mut fctx = Ctx {
@@ -5440,7 +5453,7 @@ unsafe fn load_file_info_from_reader(
             &meta.dest_dir,
             &meta.filename,
             &meta.output_filename,
-            (&mut fctx as *mut Ctx<'_>).cast(),
+            (&mut fctx as *mut Ctx<'_, '_>).cast(),
             on_sum,
             on_item,
         )
@@ -5463,8 +5476,8 @@ unsafe fn load_file_state_from_reader(
     temp_dir: &[u8],
 ) -> bool {
     let meta = unsafe { query_target_file_meta(env) };
-    struct Ctx<'a> {
-        env: &'a NzbgetRsDiskStateEnv,
+    struct Ctx<'a, 'h> {
+        env: &'a NzbgetRsDiskStateEnv<'h>,
         ver: i32,
     }
     unsafe extern "C" fn art_cb(
@@ -5478,26 +5491,21 @@ unsafe fn load_file_state_from_reader(
         fb_round: c_int,
         res_fn: *const c_char,
     ) -> c_int {
-        let c = unsafe { &*ctx.cast::<Ctx<'_>>() };
-        let Some(cb) = c.env.apply_file_cb else {
-            return 0;
-        };
+        let c = unsafe { &*ctx.cast::<Ctx<'_, '_>>() };
+
         if op == 0 {
-            cb(c.env.ctx, FileApply::ArticleInfo { idx })
+            c.env.host().apply_file(FileApply::ArticleInfo { idx })
         } else {
-            cb(
-                c.env.ctx,
-                FileApply::ArticleState {
-                    idx,
-                    format_version: c.ver,
-                    status,
-                    seg_offset,
-                    seg_size,
-                    crc,
-                    dupe_round: fb_round,
-                    result_filename: unsafe { opt_cstr(res_fn) },
-                },
-            )
+            c.env.host().apply_file(FileApply::ArticleState {
+                idx,
+                format_version: c.ver,
+                status,
+                seg_offset,
+                seg_size,
+                crc,
+                dupe_round: fb_round,
+                result_filename: unsafe { opt_cstr(res_fn) },
+            })
         }
     }
     unsafe extern "C" fn sum_cb(
@@ -5509,18 +5517,15 @@ unsafe fn load_file_state_from_reader(
         stats: *const NzbgetRsDiskServerStat,
         stats_len: usize,
     ) {
-        let c = unsafe { &*ctx.cast::<Ctx<'_>>() };
-        if let (Some(cb), Some(state)) = (c.env.apply_file_cb, unsafe { fields.as_ref() }) {
-            cb(
-                c.env.ctx,
-                FileApply::State {
-                    state,
-                    flags,
-                    completed_articles,
-                    output_filename: unsafe { opt_cstr(new_out_fn) },
-                    stats: unsafe { raw_slice(stats, stats_len) },
-                },
-            );
+        let c = unsafe { &*ctx.cast::<Ctx<'_, '_>>() };
+        if let Some(state) = unsafe { fields.as_ref() } {
+            c.env.host().apply_file(FileApply::State {
+                state,
+                flags,
+                completed_articles,
+                output_filename: unsafe { opt_cstr(new_out_fn) },
+                stats: unsafe { raw_slice(stats, stats_len) },
+            });
         }
     }
     let mut sctx = Ctx {
@@ -5545,7 +5550,7 @@ unsafe fn load_file_state_from_reader(
             &meta.dest_dir,
             &meta.filename,
             &meta.output_filename,
-            (&mut sctx as *mut Ctx<'_>).cast(),
+            (&mut sctx as *mut Ctx<'_, '_>).cast(),
             art_cb,
             sum_cb,
         )
@@ -5719,9 +5724,7 @@ unsafe fn load_all_file_infos_op(env: &NzbgetRsDiskStateEnv, qdir: &[u8], sep: u
 }
 
 unsafe fn cleanup_queue_dir_op(env: &NzbgetRsDiskStateEnv, qdir: &[u8], sep: u8) {
-    let mut lists = env
-        .live_ids_cb
-        .map_or_else(LiveIds::default, |cb| cb(env.ctx));
+    let mut lists = env.host().live_ids();
     lists.nzb_ids.sort_unstable();
     lists.file_ids.sort_unstable();
 
@@ -6106,8 +6109,8 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                 seens: Vec::new(),
                 hist_urls: Vec::new(),
             };
-            if let Some(cb) = env.export_feeds_cb {
-                cb(env.ctx, &mut |rec| match rec {
+            {
+                env.host().export_feeds(&mut |rec| match rec {
                     FeedRecord::Status {
                         url,
                         filter_hash,
@@ -6197,16 +6200,15 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                 filter: *const c_char,
             ) {
                 let env = unsafe { &*ctx.cast::<NzbgetRsDiskStateEnv>() };
-                let Some(cb) = env.load_feed_status_cb else {
-                    return;
-                };
+
                 let matching = match ver {
                     1 => FeedMatch::Url,
                     2 => FeedMatch::Filter(unsafe { cstr::bytes(filter) }),
                     v if v >= 3 => FeedMatch::FilterHash(filter_hash),
                     _ => return,
                 };
-                cb(env.ctx, unsafe { cstr::bytes(url) }, matching, last_update);
+                env.host()
+                    .load_feed_status(unsafe { cstr::bytes(url) }, matching, last_update);
             }
             unsafe extern "C" fn on_feed_hist(
                 ctx: *mut c_void,
@@ -6220,8 +6222,9 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                 _s2: *const c_char,
             ) {
                 let env = unsafe { &*ctx.cast::<NzbgetRsDiskStateEnv>() };
-                if let Some(cb) = env.load_feed_history_cb {
-                    cb(env.ctx, unsafe { cstr::bytes(url) }, status, last_seen);
+                {
+                    env.host()
+                        .load_feed_history(unsafe { cstr::bytes(url) }, status, last_seen);
                 }
             }
             let env_ptr: *mut c_void = (env as *const NzbgetRsDiskStateEnv).cast_mut().cast();
@@ -6293,8 +6296,8 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                 vol_count: 0,
                 vol_bytes: Vec::new(),
             };
-            if let Some(cb) = env.export_stats_cb {
-                cb(env.ctx, true, &mut |srvs, vols| {
+            {
+                env.host().export_stats(true, &mut |srvs, vols| {
                     if srvs.is_empty() {
                         return;
                     }
@@ -6369,8 +6372,8 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                 user: Vec<u8>,
             }
             let mut srvs: Vec<SrvMeta> = Vec::new();
-            if let Some(cb) = env.export_stats_cb {
-                cb(env.ctx, false, &mut |items, _| {
+            {
+                env.host().export_stats(false, &mut |items, _| {
                     for s in items {
                         srvs.push(SrvMeta {
                             id: s.id,
@@ -6415,9 +6418,9 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
             if !env.out_flag.is_null() {
                 unsafe { *env.out_flag = c_int::from(perfect) };
             }
-            if let Some(cb) = env.set_server_state_id_cb {
+            {
                 for (idx, &st_id) in state_ids.iter().enumerate() {
-                    cb(env.ctx, idx, st_id);
+                    env.host().set_server_state_id(idx, st_id);
                 }
             }
             emit_log(
@@ -6458,8 +6461,8 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
 
             if ver >= 2 {
                 emit_log(env, DiskLogLevel::Debug, b"Loading volume stats from disk");
-                struct VolCtx<'a> {
-                    env: &'a NzbgetRsDiskStateEnv,
+                struct VolCtx<'a, 'h> {
+                    env: &'a NzbgetRsDiskStateEnv<'h>,
                     ver: i32,
                 }
                 unsafe extern "C" fn on_vol(
@@ -6468,10 +6471,8 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                     item: *const NzbgetRsDiskVolumeStatInput,
                     has_custom_times: c_int,
                 ) {
-                    let vc = unsafe { &*ctx.cast::<VolCtx<'_>>() };
-                    let Some(cb) = vc.env.load_volume_cb else {
-                        return;
-                    };
+                    let vc = unsafe { &*ctx.cast::<VolCtx<'_, '_>>() };
+
                     let Some(vol) = (unsafe { item.as_ref() }) else {
                         return;
                     };
@@ -6480,7 +6481,9 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                     } else {
                         VolumeSlot::Server(slot_idx)
                     };
-                    cb(vc.env.ctx, slot, vol, vc.ver, (has_custom_times & 1) != 0);
+                    vc.env
+                        .host()
+                        .load_volume(slot, vol, vc.ver, (has_custom_times & 1) != 0);
                 }
                 let mut vc = VolCtx { env, ver };
                 if !unsafe {
@@ -6488,7 +6491,7 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                         r.as_ctx(),
                         RsStateReader::read_line_cb,
                         ver,
-                        (&mut vc as *mut VolCtx<'_>).cast(),
+                        (&mut vc as *mut VolCtx<'_, '_>).cast(),
                         on_vol,
                     )
                 } {
@@ -6888,7 +6891,37 @@ impl Drop for ActiveDiskExecCtx<'_> {
 }
 
 #[cfg(unix)]
-fn active_disk_log_cb(_ctx: *mut c_void, level: DiskLogLevel, msg: &[u8]) {
+impl DiskStateHost for ActiveDiskExecCtx<'_> {
+    fn log(&mut self, level: DiskLogLevel, msg: &[u8]) {
+        active_disk_log_cb(level, msg);
+    }
+    fn ctrl(&mut self, cmd: DiskCtrl<'_>) -> i32 {
+        active_disk_ctrl_cb(self, cmd)
+    }
+    fn export_nzb(
+        &mut self,
+        source: NzbSource,
+        idx: usize,
+        sink: &mut dyn FnMut(&NzbgetRsDiskNzbExport),
+    ) {
+        active_disk_export_nzb_cb(self, source, idx, sink);
+    }
+    fn apply_nzb(&mut self, what: NzbApply<'_>) {
+        active_disk_apply_nzb_cb(self, what);
+    }
+    fn export_file(&mut self, what: FileExport, sink: &mut dyn FnMut(&NzbgetRsDiskFileExport)) {
+        active_disk_export_file_cb(self, what, sink);
+    }
+    fn apply_file(&mut self, what: FileApply<'_>) -> i32 {
+        active_disk_apply_file_cb(self, what)
+    }
+    fn live_ids(&mut self) -> LiveIds {
+        active_disk_live_ids_cb(self)
+    }
+}
+
+#[cfg(unix)]
+fn active_disk_log_cb(level: DiskLogLevel, msg: &[u8]) {
     crate::log::log_active_bytes(level.kind() as i32, msg);
 }
 
@@ -6929,8 +6962,7 @@ fn apply_active_server_stats_file(
 }
 
 #[cfg(unix)]
-fn active_disk_ctrl_cb(raw_ctx: *mut c_void, cmd: DiskCtrl<'_>) -> i32 {
-    let c = unsafe { &mut *raw_ctx.cast::<ActiveDiskExecCtx<'_>>() };
+fn active_disk_ctrl_cb(c: &mut ActiveDiskExecCtx<'_>, cmd: DiskCtrl<'_>) -> i32 {
     if let DiskCtrl::AddMessage {
         nzb_id,
         kind,
@@ -7159,15 +7191,12 @@ fn active_disk_ctrl_cb(raw_ctx: *mut c_void, cmd: DiskCtrl<'_>) -> i32 {
 
 #[cfg(unix)]
 fn active_disk_export_nzb_cb(
-    raw_ctx: *mut c_void,
+    c: &ActiveDiskExecCtx<'_>,
     source: NzbSource,
     idx: usize,
     sink: &mut dyn FnMut(&NzbgetRsDiskNzbExport),
 ) {
-    let (qh_opt, dq_ptr) = {
-        let c = unsafe { &*raw_ctx.cast::<ActiveDiskExecCtx<'_>>() };
-        (c.qh, c.dq_ptr)
-    };
+    let (qh_opt, dq_ptr) = { (c.qh, c.dq_ptr) };
     let Some(qh) = qh_opt else {
         return;
     };
@@ -7430,12 +7459,9 @@ fn active_disk_export_nzb_cb(
 }
 
 #[cfg(unix)]
-fn active_disk_apply_nzb_cb(raw_ctx: *mut c_void, what: NzbApply<'_>) {
+fn active_disk_apply_nzb_cb(c: &ActiveDiskExecCtx<'_>, what: NzbApply<'_>) {
     use crate::queuesubsys_host::*;
-    let (qh_opt, dq_ptr, nzb_ptr) = {
-        let c = unsafe { &*raw_ctx.cast::<ActiveDiskExecCtx<'_>>() };
-        (c.qh, c.dq_ptr, c.target_nzb_ptr)
-    };
+    let (qh_opt, dq_ptr, nzb_ptr) = { (c.qh, c.dq_ptr, c.target_nzb_ptr) };
     let Some(qh) = qh_opt else {
         return;
     };
@@ -7693,14 +7719,11 @@ fn active_disk_apply_nzb_cb(raw_ctx: *mut c_void, what: NzbApply<'_>) {
 
 #[cfg(unix)]
 fn active_disk_export_file_cb(
-    raw_ctx: *mut c_void,
+    c: &ActiveDiskExecCtx<'_>,
     what: FileExport,
     sink: &mut dyn FnMut(&NzbgetRsDiskFileExport),
 ) {
-    let (qh_opt, fp) = {
-        let c = unsafe { &*raw_ctx.cast::<ActiveDiskExecCtx<'_>>() };
-        (c.qh, c.target_file_ptr)
-    };
+    let (qh_opt, fp) = { (c.qh, c.target_file_ptr) };
     let Some(qh) = qh_opt else {
         return;
     };
@@ -7845,12 +7868,9 @@ fn active_disk_export_file_cb(
 }
 
 #[cfg(unix)]
-fn active_disk_apply_file_cb(raw_ctx: *mut c_void, what: FileApply<'_>) -> i32 {
+fn active_disk_apply_file_cb(c: &ActiveDiskExecCtx<'_>, what: FileApply<'_>) -> i32 {
     use crate::queuesubsys_host::*;
-    let (qh_opt, fp) = {
-        let c = unsafe { &*raw_ctx.cast::<ActiveDiskExecCtx<'_>>() };
-        (c.qh, c.target_file_ptr)
-    };
+    let (qh_opt, fp) = { (c.qh, c.target_file_ptr) };
     let Some(qh) = qh_opt else {
         return 0;
     };
@@ -7989,11 +8009,8 @@ fn active_disk_apply_file_cb(raw_ctx: *mut c_void, what: FileApply<'_>) -> i32 {
 }
 
 #[cfg(unix)]
-fn active_disk_live_ids_cb(raw_ctx: *mut c_void) -> LiveIds {
-    let (qh_opt, dq_ptr) = {
-        let c = unsafe { &*raw_ctx.cast::<ActiveDiskExecCtx<'_>>() };
-        (c.qh, c.dq_ptr)
-    };
+fn active_disk_live_ids_cb(c: &ActiveDiskExecCtx<'_>) -> LiveIds {
+    let (qh_opt, dq_ptr) = { (c.qh, c.dq_ptr) };
     let mut ids = LiveIds::default();
     let Some(qh) = qh_opt else {
         return ids;
@@ -8052,38 +8069,23 @@ fn run_active_diskstate_exec(
         None => (0, 0, 0, 0),
     };
     let now = unsafe { libc::time(std::ptr::null_mut()) } as i64;
-    let env = NzbgetRsDiskStateEnv {
-        ctx: (ctx as *mut ActiveDiskExecCtx<'_>).cast(),
-        queue_dir: qdir_c.as_ref().map_or(std::ptr::null(), |s| s.as_ptr()),
-        temp_dir: tdir_c.as_ref().map_or(std::ptr::null(), |s| s.as_ptr()),
-        line_ending: c"\n".as_ptr(),
-        time_str,
-        text,
-        sep: c_int::from(crate::paths::PATH_SEPARATOR as u8),
-        has_options,
-        flush_queue,
-        direct_write,
-        continue_partial,
-        a1,
-        a2,
-        a3,
-        a4,
-        now,
-        out_flag,
-        log_cb: Some(active_disk_log_cb),
-        ctrl_cb: Some(active_disk_ctrl_cb),
-        export_nzb_cb: Some(active_disk_export_nzb_cb),
-        apply_nzb_cb: Some(active_disk_apply_nzb_cb),
-        export_file_cb: Some(active_disk_export_file_cb),
-        apply_file_cb: Some(active_disk_apply_file_cb),
-        live_ids_cb: Some(active_disk_live_ids_cb),
-        export_feeds_cb: None,
-        load_feed_status_cb: None,
-        load_feed_history_cb: None,
-        export_stats_cb: None,
-        set_server_state_id_cb: None,
-        load_volume_cb: None,
-    };
+    let mut env = NzbgetRsDiskStateEnv::new(ctx);
+    env.queue_dir = qdir_c.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
+    env.temp_dir = tdir_c.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
+    env.line_ending = c"\n".as_ptr();
+    env.time_str = time_str;
+    env.text = text;
+    env.sep = c_int::from(crate::paths::PATH_SEPARATOR as u8);
+    env.has_options = has_options;
+    env.flush_queue = flush_queue;
+    env.direct_write = direct_write;
+    env.continue_partial = continue_partial;
+    env.a1 = a1;
+    env.a2 = a2;
+    env.a3 = a3;
+    env.a4 = a4;
+    env.now = now;
+    env.out_flag = out_flag;
     unsafe { diskstate_exec(op, &env) }
 }
 
@@ -8647,21 +8649,20 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let qdir_bytes = dir.as_os_str().as_bytes().to_vec();
         let qdir_c = bytes_to_cstring_trunc(&qdir_bytes);
-        let logs: std::cell::RefCell<Vec<(DiskLogLevel, Vec<u8>)>> =
-            std::cell::RefCell::new(Vec::new());
-
-        fn log_cb(ctx: *mut c_void, level: DiskLogLevel, msg: &[u8]) {
-            let v = unsafe { &*ctx.cast::<std::cell::RefCell<Vec<(DiskLogLevel, Vec<u8>)>>>() };
-            v.borrow_mut().push((level, msg.to_vec()));
+        #[derive(Default)]
+        struct Logs(Vec<(DiskLogLevel, Vec<u8>)>);
+        impl DiskStateHost for Logs {
+            fn log(&mut self, level: DiskLogLevel, msg: &[u8]) {
+                self.0.push((level, msg.to_vec()));
+            }
         }
+        let mut logs = Logs::default();
 
-        let mut env: NzbgetRsDiskStateEnv = unsafe { std::mem::zeroed() };
-        env.ctx = &logs as *const _ as *mut c_void;
+        let mut env = NzbgetRsDiskStateEnv::new(&mut logs);
         env.queue_dir = qdir_c.as_ptr();
         env.sep = b'/' as c_int;
         env.flush_queue = 1;
         env.now = 1700000099;
-        env.log_cb = Some(log_cb);
 
         // 1. Transactional write, fsync, and read-only destination overwrite (replace=true)
         unsafe {
@@ -8856,31 +8857,30 @@ mod tests {
             loaded_status: Vec<(Vec<u8>, String, i32)>,
             loaded_history: Vec<(Vec<u8>, i32, i32)>,
         }
-        fn export(ctx: *mut c_void, sink: &mut dyn FnMut(FeedRecord<'_>)) {
-            let f = unsafe { &*ctx.cast::<Feeds>() };
-            for (url, filter_hash, last_update) in &f.statuses {
-                sink(FeedRecord::Status {
-                    url,
-                    filter_hash: *filter_hash,
-                    last_update: *last_update,
-                });
+        impl DiskStateHost for Feeds {
+            fn export_feeds(&mut self, sink: &mut dyn FnMut(FeedRecord<'_>)) {
+                for (url, filter_hash, last_update) in &self.statuses {
+                    sink(FeedRecord::Status {
+                        url,
+                        filter_hash: *filter_hash,
+                        last_update: *last_update,
+                    });
+                }
+                for (url, status, last_seen) in &self.history {
+                    sink(FeedRecord::History {
+                        url,
+                        status: *status,
+                        last_seen: *last_seen,
+                    });
+                }
             }
-            for (url, status, last_seen) in &f.history {
-                sink(FeedRecord::History {
-                    url,
-                    status: *status,
-                    last_seen: *last_seen,
-                });
+            fn load_feed_status(&mut self, url: &[u8], matching: FeedMatch<'_>, last_update: i32) {
+                self.loaded_status
+                    .push((url.to_vec(), format!("{matching:?}"), last_update));
             }
-        }
-        fn load_status(ctx: *mut c_void, url: &[u8], matching: FeedMatch<'_>, last_update: i32) {
-            let f = unsafe { &mut *ctx.cast::<Feeds>() };
-            f.loaded_status
-                .push((url.to_vec(), format!("{matching:?}"), last_update));
-        }
-        fn load_history(ctx: *mut c_void, url: &[u8], status: i32, last_seen: i32) {
-            let f = unsafe { &mut *ctx.cast::<Feeds>() };
-            f.loaded_history.push((url.to_vec(), status, last_seen));
+            fn load_feed_history(&mut self, url: &[u8], status: i32, last_seen: i32) {
+                self.loaded_history.push((url.to_vec(), status, last_seen));
+            }
         }
 
         let dir = std::env::temp_dir().join(format!("rustyget_feeds_rt_{}", std::process::id()));
@@ -8892,15 +8892,12 @@ mod tests {
             history: vec![(b"http://a/item1".to_vec(), 2, 1_700_000_100)],
             ..Feeds::default()
         };
-        let mut env: NzbgetRsDiskStateEnv = unsafe { std::mem::zeroed() };
-        env.ctx = (&mut feeds as *mut Feeds).cast();
+        let mut env = NzbgetRsDiskStateEnv::new(&mut feeds);
         env.queue_dir = qdir_c.as_ptr();
         env.sep = b'/' as c_int;
-        env.export_feeds_cb = Some(export);
-        env.load_feed_status_cb = Some(load_status);
-        env.load_feed_history_cb = Some(load_history);
         assert_eq!(unsafe { diskstate_exec(DiskOp::SaveFeeds, &env) }, 1);
         assert_eq!(unsafe { diskstate_exec(DiskOp::LoadFeeds, &env) }, 1);
+        drop(env);
         assert_eq!(
             feeds.loaded_status,
             vec![(

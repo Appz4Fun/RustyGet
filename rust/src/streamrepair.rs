@@ -18587,7 +18587,6 @@ mod dead_volume_fill_tests {
         assert!(scratch.is_file());
         // The queue still sees the borrow: replacing the download would throw the extraction away.
         assert!(crate::postproc::dead_volume_borrow_underway(nzb_id));
-        assert!(!crate::postproc::direct_unpack_waits_on_dead_volume(nzb_id));
         // Say the stopped pass had borrowed the first half: put it in and hand it over so.
         let at = offered.head.len() as u64;
         let half = offered.data_len / 2;

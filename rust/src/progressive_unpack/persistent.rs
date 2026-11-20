@@ -590,12 +590,15 @@ fn open_repaired(
     feed: &Mutex<Box<dyn VolumeFeed>>,
     path: &Path,
 ) -> Option<std::io::Result<Box<dyn ReadSeek>>> {
-    if path.is_file() {
-        return Some(std::fs::File::open(path).map(|f| Box::new(f) as Box<dyn ReadSeek>));
-    }
+    // A stand-in wins over a file at the volume's path (a dead or placeholder one), as it does
+    // when the extraction asks for the volume: the holes were recorded against its layout.
     match feed.lock().unwrap_or_else(|e| e.into_inner()).volume(path) {
         VolumeView::Virtual(v) if v.holes.is_empty() => {
             Some(super::VirtualFile::open(&v).map(|f| Box::new(f) as Box<dyn ReadSeek>))
+        }
+        VolumeView::Virtual(_) => None,
+        _ if path.is_file() => {
+            Some(std::fs::File::open(path).map(|f| Box::new(f) as Box<dyn ReadSeek>))
         }
         _ => None,
     }

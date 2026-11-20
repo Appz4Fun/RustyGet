@@ -1470,6 +1470,13 @@ impl NzbgetRsStreamRepairCtrl {
         ) else {
             return;
         };
+        // A volume that lost only its headers is rebuilt and written back as the session
+        // starts, before any donor pass would report it: it is repaired already.
+        for (t, holes) in targets.iter_mut().zip(session.target_holes()) {
+            if holes.is_empty() {
+                t.holes.clear();
+            }
+        }
 
         let mut tried_postings: BTreeSet<Vec<u8>> = BTreeSet::new();
         let allow_decompress = !self.live_mode && opts.allow_decompress_opt;

@@ -4125,7 +4125,7 @@ def scenario_deadvolumeencrypted(daemon, t):
             % (hp['Status'], hb['Status'], failed_over, cancelled, kept, du_ok, integ))
 
 
-def _headlost_volume(daemon, t, name, rar5):
+def _headlost_volume(daemon, t, name, rar5, par=False):
     """A plain stored rar set without par2 loses the first articles of one
     middle volume (its headers and the start of its data) and a few in its
     middle; the rest of that volume arrives. Its backup in history holds the
@@ -4152,6 +4152,16 @@ def _headlost_volume(daemon, t, name, rar5):
         rel = '%sA/%s' % (tag, vname)
         t.write_file(os.path.join('data', rel), data)
         members.append((rel, vname, len(data), seg, set(lost) if i == 6 else set()))
+    if par:
+        import subprocess as _sp
+        # An index without recovery blocks, as a par set whose volumes are paused: par
+        # verification sees the damage but cannot repair it.
+        work = t.path('data', '%sA' % tag)
+        names = ['Show.part%02d.rar' % (i + 1) for i in range(len(vols))]
+        _sp.run(['par2', 'create', '-q', '-q', '-s65536', '-c2', '-n1', '-a', 'Show', 'Show.par2'] + names,
+                cwd=work, check=True, capture_output=True)
+        members.append(('%sA/Show.par2' % tag, 'Show.par2',
+                        os.path.getsize(os.path.join(work, 'Show.par2')), seg, set()))
     with tempfile.TemporaryDirectory(prefix='hlv-') as workdir:
         enc = generators.rar5_store_volumes_hp('movie.mkv', movie, 5_000_000, password, workdir)
     donor_members = []
@@ -4172,13 +4182,17 @@ def _headlost_volume(daemon, t, name, rar5):
     failed_over = _grep_log(t, 'Failing over Primary')
     cancelled = _grep_log(t, 'Cancelling direct unpack')
     rebuilt = _grep_log(t, 'Volume Show.part07.rar lost its headers')
+    # Written back over the file on disk, byte for byte: par verification finds it whole
+    # (RAR5 only: RAR 1.5-4 headers are rebuilt, not restored).
+    on_disk = _grep_log(t, 'Rebuilt Show.part07.rar on disk')
+    par_failed = _grep_log(t, 'Repair failed for Primary')
     du_ok = _grep_log(t, 'Direct unpack for Primary successful')
     integ = _verify_output(t, movie, '.mkv', dirs=(('main', 'dst'), ('main', 'inter')))
-    ok = (failed_over == 0 and cancelled == 0 and rebuilt >= 1 and du_ok == 1 and integ and
-          hp['Status'].startswith('SUCCESS'))
+    ok = (failed_over == 0 and cancelled == 0 and rebuilt >= 1 and on_disk == (1 if rar5 else 0) and
+          par_failed == 0 and du_ok == 1 and integ and hp['Status'].startswith('SUCCESS'))
     return (name, ok,
-            'status=%s failover_logs=%d du_cancelled=%d headers_rebuilt=%d du_ok=%d extracted_ok=%s'
-            % (hp['Status'], failed_over, cancelled, rebuilt, du_ok, integ))
+            'status=%s failover_logs=%d du_cancelled=%d headers_rebuilt=%d on_disk=%d par_failed=%d du_ok=%d extracted_ok=%s'
+            % (hp['Status'], failed_over, cancelled, rebuilt, on_disk, par_failed, du_ok, integ))
 
 
 def scenario_headlostvolume(daemon, t):
@@ -4187,6 +4201,13 @@ def scenario_headlostvolume(daemon, t):
 
 def scenario_headlostvolume5(daemon, t):
     return _headlost_volume(daemon, t, 'headlostvolume5', rar5=True)
+
+
+def scenario_headlostvolumepar(daemon, t):
+    """headlostvolume5 with a par2 index but no recovery blocks (6790 job 354):
+    the rebuilt volume has to count as repaired, or par verification finds
+    the volume still damaged and direct unpack is not resumed."""
+    return _headlost_volume(daemon, t, 'headlostvolumepar', rar5=True, par=True)
 
 
 def scenario_deadvolumeunlabelled(daemon, t):
@@ -11136,6 +11157,7 @@ SCENARIOS = {
     'deadvolumeencrypted': scenario_deadvolumeencrypted,
     'headlostvolume': scenario_headlostvolume,
     'headlostvolume5': scenario_headlostvolume5,
+    'headlostvolumepar': scenario_headlostvolumepar,
     'deadvolumeunlabelled': scenario_deadvolumeunlabelled,
     'deadvolumetwincheck': scenario_deadvolumetwincheck,
     'deadvolumeothervideo': scenario_deadvolumeothervideo,
@@ -11509,6 +11531,7 @@ SCENARIO_OPTIONS = {
     'deadvolumeencrypted': PROD_OPTIONS + ['DownloadRate=4000'],
     'headlostvolume': PROD_OPTIONS + ['DownloadRate=4000'],
     'headlostvolume5': PROD_OPTIONS + ['DownloadRate=4000'],
+    'headlostvolumepar': PROD_OPTIONS + ['DownloadRate=4000'],
     'deadvolumeunlabelled': PROD_OPTIONS + ['DownloadRate=4000'],
     'deadvolumetwincheck': PROD_OPTIONS + ['DownloadRate=1000'],
     'deadvolumeothervideo': PROD_OPTIONS + ['DownloadRate=1000'],

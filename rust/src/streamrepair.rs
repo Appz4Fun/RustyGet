@@ -9118,6 +9118,12 @@ fn plan_dead_fills(
                             done: false,
                             offered,
                             offer_failed: false,
+                            // Restored exactly only in RAR5 (see `write_back_volume`).
+                            on_disk_target: (template.version == 5 && head_lost.contains_key(&i))
+                                .then(|| member_targets.get(members_by_index[i] as usize).copied())
+                                .flatten()
+                                .filter(|&t| t >= 0)
+                                .map(|t| t as usize),
                         });
                     }
                     // A dead volume handed over earlier keeps its place in the map.
@@ -9345,6 +9351,10 @@ struct DeadFill {
     offered: Option<i64>,
     /// Handing it over before its borrow finishes failed: not tried again.
     offer_failed: bool,
+    /// For a volume on disk that lost its headers, its own repair target: once rebuilt, the
+    /// volume is written back over the file on disk, so par verification and the repair's
+    /// report find it whole.
+    on_disk_target: Option<usize>,
 }
 
 impl CrossPackRepairSession {
@@ -9829,6 +9839,8 @@ impl CrossPackRepairSession {
         self.finish_dead_fills_with(&mut |kind, msg| {
             env_cell.borrow_mut().emit_message_bytes(kind, msg)
         });
+        // A volume written back cleared its own holes: the caller's targets see it repaired.
+        env_cell.borrow_mut().sync_target_holes(&self.target_holes);
     }
 
     /// [`Self::finish_dead_fills`] reporting through `emit`: also run when the session starts,
@@ -9851,6 +9863,25 @@ impl CrossPackRepairSession {
             match result {
                 Ok(v) => {
                     let mb = stream_repair_bytes_to_mb(d.packed);
+                    if let Some(t) = d.on_disk_target {
+                        match self.write_back_volume(&d) {
+                            Ok(()) => {
+                                if let Some(h) = self.target_holes.get_mut(t) {
+                                    h.clear();
+                                }
+                                let mut msg = b"Rebuilt ".to_vec();
+                                msg.extend_from_slice(name);
+                                msg.extend_from_slice(b" on disk: its headers and borrowed holes are written back");
+                                emit(TargetMessageKind::Info, &msg);
+                            }
+                            Err(e) => {
+                                let mut msg = b"Cannot write rebuilt ".to_vec();
+                                msg.extend_from_slice(name);
+                                msg.extend_from_slice(format!(" back to disk: {e}").as_bytes());
+                                emit(TargetMessageKind::Warning, &msg);
+                            }
+                        }
+                    }
                     crate::postproc::direct_unpack_set_virtual(self.dead_nzb_id, &d.volume_path, v);
                     let mut msg = format!("Borrowed {mb:.1} MB for dead volume ").into_bytes();
                     msg.extend_from_slice(name);
@@ -9922,6 +9953,181 @@ impl CrossPackRepairSession {
                 }
             }
         }
+    }
+
+    /// Writes the volume that lost its headers, fill `d` (borrowed in full), back over its
+    /// file: its headers and tail as the sibling's but for its number and part checksum
+    /// ([`crate::deadvolume::faithful_frame`]), and the borrowed holes of its data. Only when
+    /// the result has the file's size and matches every byte that arrived, so nothing on disk
+    /// moves. Streams in chunks: volumes run to hundreds of MB.
+    fn write_back_volume(&self, d: &DeadFill) -> Result<(), String> {
+        use std::io::{Read, Seek, SeekFrom, Write};
+        const CHUNK: usize = 1 << 20;
+        let path_of = |m: i32| {
+            crate::artwritercore::article_writer_format_dest_file_path(
+                &self.dest_dir,
+                std::path::MAIN_SEPARATOR as u8,
+                &self.set_members[m as usize].name,
+            )
+        };
+        if d.version != 5 {
+            return Err("only RAR5 headers are restored exactly".into());
+        }
+        if d.packed != d.template_packed {
+            return Err("its part is not the size of the sibling's".into());
+        }
+        fn io(what: &'static str) -> impl Fn(std::io::Error) -> String {
+            move |e| format!("{what}: {e}")
+        }
+        let mut data = std::fs::File::open(crate::fsops::path(&path_of(d.member)))
+            .map_err(io("borrowed data"))?;
+        if data.metadata().map_err(io("borrowed data"))?.len() != d.packed as u64 {
+            return Err("the borrowed data is not the part's size".into());
+        }
+        let mut buf = vec![0u8; CHUNK];
+        let mut hasher = crc32fast::Hasher::new();
+        loop {
+            let n = data.read(&mut buf).map_err(io("borrowed data"))?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        let part_crc = hasher.finalize();
+        let at = d.template_data_offset as u64;
+        let end = at + d.template_packed as u64;
+        let mut sibling = std::fs::File::open(crate::fsops::path(&path_of(d.template_member)))
+            .map_err(io("sibling volume"))?;
+        let sibling_len = sibling.metadata().map_err(io("sibling volume"))?.len();
+        if end > sibling_len || sibling_len - end > 1 << 24 {
+            return Err("sibling volume changed".into());
+        }
+        // The sibling's framing is copied: none of it may be a hole of its own.
+        let sibling_holes = self
+            .member_targets
+            .get(d.template_member as usize)
+            .filter(|&&t| t >= 0)
+            .and_then(|&t| self.target_holes.get(t as usize))
+            .map_or(&[][..], |h| h.as_slice());
+        if sibling_holes.iter().any(|h| {
+            h.size > 0 && (h.offset < at as i64 || h.offset + h.size > end as i64)
+        }) {
+            return Err("the sibling's headers or tail are not all there".into());
+        }
+        let mut sib_head = vec![0u8; at as usize];
+        sibling.read_exact(&mut sib_head).map_err(io("sibling volume"))?;
+        let mut sib_tail = Vec::new();
+        sibling.seek(SeekFrom::Start(end)).map_err(io("sibling volume"))?;
+        sibling.read_to_end(&mut sib_tail).map_err(io("sibling volume"))?;
+        let (head, tail) = crate::deadvolume::faithful_frame(
+            5,
+            &sib_head,
+            &sib_tail,
+            d.template_index,
+            d.index,
+            part_crc,
+        )
+        .map_err(|e| e.to_string())?;
+        if head.len() as u64 != at {
+            return Err(format!("rebuilt headers are {} bytes, the sibling's {at}", head.len()));
+        }
+        let mut f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(crate::fsops::path(&d.volume_path))
+            .map_err(|e| e.to_string())?;
+        // The same barrier as every donor write: no write to a file live PAR has sealed, and
+        // its verified state is dropped before the bytes change. Held from the comparison on.
+        let context = self
+            .target_files
+            .write_root
+            .as_ref()
+            .map(|root| root.for_path(crate::fsops::path(&d.volume_path)))
+            .ok_or("no write permission for the volume")?;
+        let _permit = context.descriptor_permit(&f).map_err(|e| e.to_string())?;
+        let have = f.metadata().map_err(|e| e.to_string())?.len();
+        let data_at = at;
+        let tail_at = at + d.packed as u64;
+        if have != tail_at + tail.len() as u64 {
+            return Err(format!(
+                "the file is {have} bytes, the rebuilt volume {}",
+                tail_at + tail.len() as u64
+            ));
+        }
+        let holes = d
+            .on_disk_target
+            .and_then(|t| self.target_holes.get(t))
+            .cloned()
+            .unwrap_or_default();
+        // Lost bytes behind the part are rebuilt only where the tail holds nothing but the
+        // quick-open copy: a recovery record there belongs to the sibling.
+        if holes.iter().any(|h| h.size > 0 && h.offset + h.size > tail_at as i64)
+            && !crate::deadvolume::rar5_tail_is_rebuilt(&tail)
+        {
+            return Err("its lost tail holds records that cannot be rebuilt".into());
+        }
+        let in_hole = |i: u64| {
+            holes
+                .iter()
+                .any(|h| (i as i64) >= h.offset && (i as i64) < h.offset + h.size)
+        };
+        // What arrived of the volume must match the rebuilt one where both have bytes: a
+        // volume laid out otherwise is left alone.
+        let mut disk = vec![0u8; CHUNK];
+        let mut want = vec![0u8; CHUNK];
+        data.seek(SeekFrom::Start(0)).map_err(io("borrowed data"))?;
+        let mut pos = 0u64;
+        while pos < have {
+            let n = (CHUNK as u64).min(have - pos) as usize;
+            f.read_exact(&mut disk[..n]).map_err(|e| e.to_string())?;
+            // The rebuilt bytes for [pos, pos+n): head, data (from the scratch file), tail.
+            for k in 0..n {
+                let i = pos + k as u64;
+                if i < data_at {
+                    want[k] = head[i as usize];
+                } else if i >= tail_at {
+                    want[k] = tail[(i - tail_at) as usize];
+                }
+            }
+            let (ds, de) = (pos.max(data_at), (pos + n as u64).min(tail_at));
+            if ds < de {
+                let (a, b) = ((ds - pos) as usize, (de - pos) as usize);
+                data.read_exact(&mut want[a..b]).map_err(io("borrowed data"))?;
+            }
+            if let Some(k) = (0..n).find(|&k| disk[k] != want[k] && !in_hole(pos + k as u64)) {
+                return Err(format!(
+                    "the rebuilt volume differs from the bytes that arrived at {}",
+                    pos + k as u64
+                ));
+            }
+            pos += n as u64;
+        }
+        // Headers and tail whole; of the data only its holes (the rest arrived and matched).
+        context.invalidate_identity();
+        let written = (|| -> std::io::Result<()> {
+            f.seek(SeekFrom::Start(0))?;
+            f.write_all(&head)?;
+            for h in &holes {
+                let s = (h.offset.max(0) as u64).max(data_at);
+                let e = ((h.offset + h.size).max(0) as u64).min(tail_at);
+                let mut p = s;
+                while p < e {
+                    let n = (CHUNK as u64).min(e - p) as usize;
+                    data.seek(SeekFrom::Start(p - data_at))?;
+                    data.read_exact(&mut buf[..n])?;
+                    f.seek(SeekFrom::Start(p))?;
+                    f.write_all(&buf[..n])?;
+                    p += n as u64;
+                }
+            }
+            f.seek(SeekFrom::Start(tail_at))?;
+            f.write_all(&tail)?;
+            f.sync_data()
+        })();
+        if written.is_err() {
+            context.invalidate();
+        }
+        written.map_err(|e| e.to_string())
     }
 
     /// The scratch file a dead volume's borrowed bytes are written to.

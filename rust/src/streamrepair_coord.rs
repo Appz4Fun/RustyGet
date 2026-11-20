@@ -2035,6 +2035,19 @@ impl NzbgetRsStreamRepairCtrl {
     fn run_post(&self, q: JobQueue<'_>) {
         // (self.nzb_id is set for a live repair only)
         let _running = self.pending_data_files(q).1.map(RunningRepair::mark);
+        // Direct unpack already extracted the whole archive (dead volumes read in place from
+        // what the live repair borrowed): borrowing those volumes again into files nothing
+        // reads only spends downloads.
+        let already_unpacked = q.host.with_locked_queue(|_| {
+            let post_ptr = q.post_ptr();
+            if post_ptr.is_none() {
+                return false;
+            }
+            let nzb = q.host.post_snap(post_ptr).nzb_ptr;
+            !nzb.is_none()
+                && q.host.nzb_snap(nzb, false).direct_unpack_status
+                    == crate::status::DirectUnpackStatus::Success
+        });
         let mut counters = RunCounters::default();
         let Some((nzb_name, dest_dir, mut targets, donors, member_names)) =
             q.host.with_locked_queue(|dq_ptr| {
@@ -2046,10 +2059,27 @@ impl NzbgetRsStreamRepairCtrl {
 
         let opts = self.query_host_options();
 
-        if targets.is_empty() {
-            let mut msg = b"Nothing to stream-repair for ".to_vec();
+        // Direct unpack reads RAR volumes only: a damaged file of another kind (a 7z, a
+        // standalone file) is still repaired.
+        let skipped = if already_unpacked {
+            let before = targets.len();
+            targets.retain(|t| !crate::filetypes::is_rar_file(&t.filename));
+            before - targets.len()
+        } else {
+            0
+        };
+        if skipped > 0 {
+            let mut msg = format!("Not stream-repairing {skipped} RAR volume(s) of ").into_bytes();
             msg.extend_from_slice(&nzb_name);
+            msg.extend_from_slice(b": direct unpack already extracted them");
             self.print_message(q, MK_INFO, &msg);
+        }
+        if targets.is_empty() {
+            if skipped == 0 {
+                let mut msg = b"Nothing to stream-repair for ".to_vec();
+                msg.extend_from_slice(&nzb_name);
+                self.print_message(q, MK_INFO, &msg);
+            }
         } else if donors.is_empty() {
             let mut msg = b"No duplicate collections found for stream repair of ".to_vec();
             msg.extend_from_slice(&nzb_name);

@@ -2,7 +2,9 @@
 //! and `QueueCoordinator` orchestration in Rust.
 
 use crate::options::OptStr;
-use crate::qnzb::{MessageRange, ServerStat, StatList};
+use crate::qnzb::{
+    FileTotals, MessageRange, NzbAction, NzbI64, NzbInt, NzbStr, ServerStat, StatList,
+};
 use crate::status::{
     CleanupStatus, DeleteStatus, DirectRenameStatus, DirectUnpackStatus, DupStatus, DupeMode,
     MarkStatus, MoveStatus, NzbParStatus, PostStage, ScriptStatus, UnpackStatus, UrlStatus,
@@ -164,128 +166,126 @@ pub(crate) const MM_NAME: i32 = 2;
 pub(crate) const MM_REGEX: i32 = 3;
 
 // NzbInfo field indices (op = 32)
-pub(crate) const NZB_INT_ID: i32 = 0;
-pub(crate) const NZB_INT_DELETE_STATUS: i32 = 1;
-pub(crate) const NZB_INT_DELETE_PAUSED: i32 = 2;
-pub(crate) const NZB_INT_MARK_STATUS: i32 = 3;
-pub(crate) const NZB_INT_DUPE_HINT: i32 = 4;
-pub(crate) const NZB_INT_DUPE_SCORE: i32 = 5;
-pub(crate) const NZB_INT_PRIORITY: i32 = 6;
-pub(crate) const NZB_INT_FULL_HASH: i32 = 7;
-pub(crate) const NZB_INT_FILTERED_HASH: i32 = 8;
-pub(crate) const NZB_INT_CHANGED: i32 = 9;
-pub(crate) const NZB_INT_ALL_FIRST: i32 = 10;
-pub(crate) const NZB_INT_HEALTH_PAUSED: i32 = 11;
-pub(crate) const NZB_INT_DEAD_PICK_PROBED: i32 = 12;
-pub(crate) const NZB_INT_DUPE_PAR_DEFER_STATE: i32 = 13;
-pub(crate) const NZB_INT_DUPE_NO_PAR_NOTED: i32 = 14;
-pub(crate) const NZB_INT_DIRECT_RENAME_STATUS: i32 = 15;
-pub(crate) const NZB_INT_ACTIVE_DOWNLOADS: i32 = 16;
-pub(crate) const NZB_INT_CUR_SUCCESS_ARTICLES: i32 = 17;
-pub(crate) const NZB_INT_CUR_FAILED_ARTICLES: i32 = 18;
-pub(crate) const NZB_INT_DUPE_RECOVERED_ARTICLES: i32 = 19;
-pub(crate) const NZB_INT_DUPE_ATTEMPTED_ARTICLES: i32 = 20;
-pub(crate) const NZB_INT_DUPE_UNSOURCED_ARTICLES: i32 = 21;
-pub(crate) const NZB_INT_DUPE_FAILED_RUN: i32 = 22;
-pub(crate) const NZB_INT_DUPE_FAILOVER_CHECKED: i32 = 23;
-pub(crate) const NZB_INT_REMAINING_PAR_COUNT: i32 = 24;
-pub(crate) const NZB_INT_WAITING_PAR: i32 = 25;
-pub(crate) const NZB_INT_LOADING_PAR: i32 = 26;
-pub(crate) const NZB_INT_DELETING: i32 = 27;
-pub(crate) const NZB_INT_PARKING: i32 = 28;
-pub(crate) const NZB_INT_AVOID_HISTORY: i32 = 29;
+pub(crate) const NZB_INT_ID: NzbInt = NzbInt::Id;
+pub(crate) const NZB_INT_DELETE_STATUS: NzbInt = NzbInt::DeleteStatus;
+pub(crate) const NZB_INT_DELETE_PAUSED: NzbInt = NzbInt::DeletePaused;
+pub(crate) const NZB_INT_MARK_STATUS: NzbInt = NzbInt::MarkStatus;
+pub(crate) const NZB_INT_DUPE_HINT: NzbInt = NzbInt::DupeHint;
+pub(crate) const NZB_INT_DUPE_SCORE: NzbInt = NzbInt::DupeScore;
+pub(crate) const NZB_INT_PRIORITY: NzbInt = NzbInt::Priority;
+pub(crate) const NZB_INT_FULL_HASH: NzbInt = NzbInt::FullHash;
+pub(crate) const NZB_INT_FILTERED_HASH: NzbInt = NzbInt::FilteredHash;
+pub(crate) const NZB_INT_CHANGED: NzbInt = NzbInt::Changed;
+pub(crate) const NZB_INT_ALL_FIRST: NzbInt = NzbInt::AllFirst;
+pub(crate) const NZB_INT_HEALTH_PAUSED: NzbInt = NzbInt::HealthPaused;
+pub(crate) const NZB_INT_DEAD_PICK_PROBED: NzbInt = NzbInt::DeadPickProbed;
+pub(crate) const NZB_INT_DUPE_PAR_DEFER_STATE: NzbInt = NzbInt::DupeParDeferState;
+pub(crate) const NZB_INT_DUPE_NO_PAR_NOTED: NzbInt = NzbInt::DupeNoParNoted;
+pub(crate) const NZB_INT_DIRECT_RENAME_STATUS: NzbInt = NzbInt::DirectRenameStatus;
+pub(crate) const NZB_INT_ACTIVE_DOWNLOADS: NzbInt = NzbInt::ActiveDownloads;
+pub(crate) const NZB_INT_CUR_SUCCESS_ARTICLES: NzbInt = NzbInt::CurSuccessArticles;
+pub(crate) const NZB_INT_CUR_FAILED_ARTICLES: NzbInt = NzbInt::CurFailedArticles;
+pub(crate) const NZB_INT_DUPE_RECOVERED_ARTICLES: NzbInt = NzbInt::DupeRecoveredArticles;
+pub(crate) const NZB_INT_DUPE_ATTEMPTED_ARTICLES: NzbInt = NzbInt::DupeAttemptedArticles;
+pub(crate) const NZB_INT_DUPE_UNSOURCED_ARTICLES: NzbInt = NzbInt::DupeUnsourcedArticles;
+pub(crate) const NZB_INT_DUPE_FAILED_RUN: NzbInt = NzbInt::DupeFailedRun;
+pub(crate) const NZB_INT_DUPE_FAILOVER_CHECKED: NzbInt = NzbInt::DupeFailoverChecked;
+pub(crate) const NZB_INT_REMAINING_PAR_COUNT: NzbInt = NzbInt::RemainingParCount;
+pub(crate) const NZB_INT_WAITING_PAR: NzbInt = NzbInt::WaitingPar;
+pub(crate) const NZB_INT_LOADING_PAR: NzbInt = NzbInt::LoadingPar;
+pub(crate) const NZB_INT_DELETING: NzbInt = NzbInt::Deleting;
+pub(crate) const NZB_INT_PARKING: NzbInt = NzbInt::Parking;
+pub(crate) const NZB_INT_AVOID_HISTORY: NzbInt = NzbInt::AvoidHistory;
 
-pub(crate) const NZB_I64_REMAINING_SIZE: i32 = 30;
-pub(crate) const NZB_I64_PAUSED_SIZE: i32 = 31;
-pub(crate) const NZB_I64_CUR_SUCCESS_SIZE: i32 = 32;
-pub(crate) const NZB_I64_CUR_FAILED_SIZE: i32 = 33;
-pub(crate) const NZB_I64_PAR_CUR_SUCCESS_SIZE: i32 = 34;
-pub(crate) const NZB_I64_PAR_CUR_FAILED_SIZE: i32 = 35;
-pub(crate) const NZB_I64_DOWNLOADED_SIZE: i32 = 36;
-pub(crate) const NZB_I64_PAR_SIZE: i32 = 37;
-pub(crate) const NZB_I64_PAR_FAILED_SIZE: i32 = 38;
-pub(crate) const NZB_I64_DUPE_RECOVERED_BYTES: i32 = 39;
+pub(crate) const NZB_I64_REMAINING_SIZE: NzbI64 = NzbI64::RemainingSize;
+pub(crate) const NZB_I64_PAUSED_SIZE: NzbI64 = NzbI64::PausedSize;
+pub(crate) const NZB_I64_CUR_SUCCESS_SIZE: NzbI64 = NzbI64::CurSuccessSize;
+pub(crate) const NZB_I64_CUR_FAILED_SIZE: NzbI64 = NzbI64::CurFailedSize;
+pub(crate) const NZB_I64_PAR_CUR_SUCCESS_SIZE: NzbI64 = NzbI64::ParCurSuccessSize;
+pub(crate) const NZB_I64_PAR_CUR_FAILED_SIZE: NzbI64 = NzbI64::ParCurFailedSize;
+pub(crate) const NZB_I64_DOWNLOADED_SIZE: NzbI64 = NzbI64::DownloadedSize;
+pub(crate) const NZB_I64_PAR_SIZE: NzbI64 = NzbI64::ParSize;
+pub(crate) const NZB_I64_PAR_FAILED_SIZE: NzbI64 = NzbI64::ParFailedSize;
+pub(crate) const NZB_I64_DUPE_RECOVERED_BYTES: NzbI64 = NzbI64::DupeRecoveredBytes;
 
-pub(crate) const NZB_STR_NAME: i32 = 40;
-pub(crate) const NZB_STR_FILENAME: i32 = 41;
-pub(crate) const NZB_STR_CATEGORY: i32 = 42;
-pub(crate) const NZB_STR_DEST_DIR: i32 = 43;
-pub(crate) const NZB_STR_DUPE_KEY: i32 = 44;
-pub(crate) const NZB_STR_QUEUED_FILENAME: i32 = 45;
-pub(crate) const NZB_STR_HARD_LINK_PATH: i32 = 46;
-pub(crate) const NZB_I64_FAILED_SIZE: i32 = 47;
-pub(crate) const NZB_I64_SUCCESS_SIZE: i32 = 48;
-pub(crate) const NZB_I64_PAR_SUCCESS_SIZE: i32 = 49;
+pub(crate) const NZB_STR_NAME: NzbStr = NzbStr::Name;
+pub(crate) const NZB_STR_FILENAME: NzbStr = NzbStr::Filename;
+pub(crate) const NZB_STR_CATEGORY: NzbStr = NzbStr::Category;
+pub(crate) const NZB_STR_DEST_DIR: NzbStr = NzbStr::DestDir;
+pub(crate) const NZB_STR_DUPE_KEY: NzbStr = NzbStr::DupeKey;
+pub(crate) const NZB_STR_QUEUED_FILENAME: NzbStr = NzbStr::QueuedFilename;
+pub(crate) const NZB_STR_HARD_LINK_PATH: NzbStr = NzbStr::HardLinkPath;
+pub(crate) const NZB_I64_FAILED_SIZE: NzbI64 = NzbI64::FailedSize;
+pub(crate) const NZB_I64_SUCCESS_SIZE: NzbI64 = NzbI64::SuccessSize;
+pub(crate) const NZB_I64_PAR_SUCCESS_SIZE: NzbI64 = NzbI64::ParSuccessSize;
 
-pub(crate) const NZB_ACT_BUILD_DEST_DIR: i32 = 50;
-pub(crate) const NZB_ACT_UPDATE_MIN_MAX_TIME: i32 = 51;
-pub(crate) const NZB_ACT_UPDATE_COMPLETED_STATS: i32 = 52;
-pub(crate) const NZB_ACT_UPDATE_DELETED_STATS: i32 = 53;
-pub(crate) const NZB_ACT_ENTER_POST_PROCESS: i32 = 54;
-pub(crate) const NZB_ACT_LEAVE_POST_PROCESS: i32 = 55;
-pub(crate) const NZB_ACT_CLEAR_SCRIPT_STATUSES: i32 = 56;
-pub(crate) const NZB_ACT_DISCONNECT_THREADS: i32 = 57;
-pub(crate) const NZB_ACT_CLEAR_LIVE_REPAIR_THREAD: i32 = 58;
-pub(crate) const NZB_STR_FINAL_DIR: i32 = 59;
+pub(crate) const NZB_ACT_BUILD_DEST_DIR: NzbAction = NzbAction::BuildDestDir;
+pub(crate) const NZB_ACT_UPDATE_MIN_MAX_TIME: NzbAction = NzbAction::UpdateMinMaxTime;
+pub(crate) const NZB_ACT_ENTER_POST_PROCESS: NzbAction = NzbAction::EnterPostProcess;
+pub(crate) const NZB_ACT_LEAVE_POST_PROCESS: NzbAction = NzbAction::LeavePostProcess;
+pub(crate) const NZB_ACT_CLEAR_SCRIPT_STATUSES: NzbAction = NzbAction::ClearScriptStatuses;
+pub(crate) const NZB_ACT_DISCONNECT_THREADS: NzbAction = NzbAction::DisconnectThreads;
+pub(crate) const NZB_ACT_CLEAR_LIVE_REPAIR_THREAD: NzbAction = NzbAction::ClearLiveRepairThread;
+pub(crate) const NZB_STR_FINAL_DIR: NzbStr = NzbStr::FinalDir;
 
-pub(crate) const NZB_INT_CLEANUP_DISK: i32 = 60;
-pub(crate) const NZB_INT_DUPE_MODE: i32 = 61;
-pub(crate) const NZB_INT_PAR_STATUS: i32 = 62;
-pub(crate) const NZB_INT_UNPACK_STATUS: i32 = 63;
-pub(crate) const NZB_INT_DIRECT_UNPACK_STATUS: i32 = 64;
-pub(crate) const NZB_INT_POST_TOTAL_SEC: i32 = 65;
-pub(crate) const NZB_INT_URL_STATUS: i32 = 66;
-pub(crate) const NZB_INT_PAR_SEC: i32 = 67;
-pub(crate) const NZB_INT_PAR_FULL: i32 = 68;
-pub(crate) const NZB_INT_REPAIR_SEC: i32 = 69;
-pub(crate) const NZB_INT_EXTRA_PAR_BLOCKS: i32 = 70;
-pub(crate) const NZB_INT_DUPE_RECOVERED_HOLES: i32 = 71;
-pub(crate) const NZB_INT_PAR_RENAME_STATUS: i32 = 72;
-pub(crate) const NZB_INT_UNPACK_CLEANED_UP_DISK: i32 = 73;
-pub(crate) const NZB_INT_UNPACK_SEC: i32 = 74;
+pub(crate) const NZB_INT_CLEANUP_DISK: NzbInt = NzbInt::CleanupDisk;
+pub(crate) const NZB_INT_DUPE_MODE: NzbInt = NzbInt::DupeMode;
+pub(crate) const NZB_INT_PAR_STATUS: NzbInt = NzbInt::ParStatus;
+pub(crate) const NZB_INT_UNPACK_STATUS: NzbInt = NzbInt::UnpackStatus;
+pub(crate) const NZB_INT_DIRECT_UNPACK_STATUS: NzbInt = NzbInt::DirectUnpackStatus;
+pub(crate) const NZB_INT_POST_TOTAL_SEC: NzbInt = NzbInt::PostTotalSec;
+pub(crate) const NZB_INT_URL_STATUS: NzbInt = NzbInt::UrlStatus;
+pub(crate) const NZB_INT_PAR_SEC: NzbInt = NzbInt::ParSec;
+pub(crate) const NZB_INT_PAR_FULL: NzbInt = NzbInt::ParFull;
+pub(crate) const NZB_INT_REPAIR_SEC: NzbInt = NzbInt::RepairSec;
+pub(crate) const NZB_INT_EXTRA_PAR_BLOCKS: NzbInt = NzbInt::ExtraParBlocks;
+pub(crate) const NZB_INT_DUPE_RECOVERED_HOLES: NzbInt = NzbInt::DupeRecoveredHoles;
+pub(crate) const NZB_INT_PAR_RENAME_STATUS: NzbInt = NzbInt::ParRenameStatus;
+pub(crate) const NZB_INT_UNPACK_CLEANED_UP_DISK: NzbInt = NzbInt::UnpackCleanedUpDisk;
+pub(crate) const NZB_INT_UNPACK_SEC: NzbInt = NzbInt::UnpackSec;
 /// The part of `UnpackSec` spent while still downloading (direct unpack), which
 /// `PostTotalSec` does not include.
-pub(crate) const NZB_INT_LIVE_UNPACK_SEC: i32 = 114;
+pub(crate) const NZB_INT_LIVE_UNPACK_SEC: NzbInt = NzbInt::LiveUnpackSec;
 /// The part of `ParSec` spent while still downloading (live PAR), likewise.
-pub(crate) const NZB_INT_LIVE_PAR_SEC: i32 = 115;
-pub(crate) const NZB_INT_MOVE_STATUS: i32 = 75;
-pub(crate) const NZB_INT_CLEANUP_STATUS: i32 = 76;
-pub(crate) const NZB_INT_RAR_RENAME_STATUS: i32 = 77;
-pub(crate) const NZB_INT_POST_DOWNLOAD_RENAMING_STATUS: i32 = 78;
-pub(crate) const NZB_INT_POST_UNPACK_RENAMING_STATUS: i32 = 79;
-pub(crate) const NZB_ACT_CLEAR_UNPACK_THREAD: i32 = 80;
-pub(crate) const NZB_INT_KIND: i32 = 81;
-pub(crate) const NZB_INT_FEED_ID: i32 = 82;
-pub(crate) const NZB_INT_ADD_URL_PAUSED: i32 = 83;
-pub(crate) const NZB_INT_AUTO_CATEGORY: i32 = 84;
-pub(crate) const NZB_INT_DESIRED_SERVER_ID: i32 = 85;
-pub(crate) const NZB_INT_SKIP_SCRIPT_PROCESSING: i32 = 86;
-pub(crate) const NZB_INT_SKIP_DISK_WRITE: i32 = 87;
-pub(crate) const NZB_INT_EXTRA_PRIORITY: i32 = 88;
-pub(crate) const NZB_INT_MANY_DUPE_FILES: i32 = 89;
-pub(crate) const NZB_INT_PARKED_FILE_COUNT: i32 = 90;
-pub(crate) const NZB_INT_REPROCESS: i32 = 91;
-pub(crate) const NZB_INT_PAR_REPAIRED: i32 = 92;
-pub(crate) const NZB_INT_UNPACK_TRIED: i32 = 93;
-pub(crate) const NZB_INT_LAST_UNPACK_STATUS: i32 = 94;
-pub(crate) const NZB_ACT_CLEAR_EXTRACTED_ARCHIVES: i32 = 95;
-pub(crate) const NZB_STR_URL: i32 = 96;
-pub(crate) const NZB_ACT_CLEAR_FILE_LIST: i32 = 97;
-pub(crate) const NZB_ACT_UPDATE_CURRENT_STATS: i32 = 98;
-pub(crate) const NZB_INT_DOWNLOAD_SEC: i32 = 99;
-pub(crate) const NZB_INT_FAILED_ARTICLES: i32 = 100;
-pub(crate) const NZB_INT_SUCCESS_ARTICLES: i32 = 101;
-pub(crate) const NZB_I64_SIZE: i32 = 102;
-pub(crate) const NZB_I64_MIN_TIME: i32 = 103;
-pub(crate) const NZB_I64_MAX_TIME: i32 = 104;
-pub(crate) const NZB_INT_FILE_COUNT: i32 = 106;
-pub(crate) const NZB_INT_MESSAGE_COUNT: i32 = 107;
-pub(crate) const NZB_INT_TOTAL_ARTICLES: i32 = 108;
-pub(crate) const NZB_INT_POST_STAGE: i32 = 109;
-pub(crate) const NZB_INT_POST_FORCE_FLAGS: i32 = 110;
-pub(crate) const NZB_ACT_CLEAR_PARAMS: i32 = 111;
-pub(crate) const NZB_ACT_CLEAR_REPAIR_JOBS: i32 = 112;
-pub(crate) const NZB_ACT_CLEAR_COMPLETED_FILES: i32 = 113;
+pub(crate) const NZB_INT_LIVE_PAR_SEC: NzbInt = NzbInt::LiveParSec;
+pub(crate) const NZB_INT_MOVE_STATUS: NzbInt = NzbInt::MoveStatus;
+pub(crate) const NZB_INT_CLEANUP_STATUS: NzbInt = NzbInt::CleanupStatus;
+pub(crate) const NZB_INT_RAR_RENAME_STATUS: NzbInt = NzbInt::RarRenameStatus;
+pub(crate) const NZB_INT_POST_DOWNLOAD_RENAMING_STATUS: NzbInt = NzbInt::PostDownloadRenamingStatus;
+pub(crate) const NZB_INT_POST_UNPACK_RENAMING_STATUS: NzbInt = NzbInt::PostUnpackRenamingStatus;
+pub(crate) const NZB_ACT_CLEAR_UNPACK_THREAD: NzbAction = NzbAction::ClearUnpackThread;
+pub(crate) const NZB_INT_KIND: NzbInt = NzbInt::Kind;
+pub(crate) const NZB_INT_FEED_ID: NzbInt = NzbInt::FeedId;
+pub(crate) const NZB_INT_ADD_URL_PAUSED: NzbInt = NzbInt::AddUrlPaused;
+pub(crate) const NZB_INT_AUTO_CATEGORY: NzbInt = NzbInt::AutoCategory;
+pub(crate) const NZB_INT_DESIRED_SERVER_ID: NzbInt = NzbInt::DesiredServerId;
+pub(crate) const NZB_INT_SKIP_SCRIPT_PROCESSING: NzbInt = NzbInt::SkipScriptProcessing;
+pub(crate) const NZB_INT_SKIP_DISK_WRITE: NzbInt = NzbInt::SkipDiskWrite;
+pub(crate) const NZB_INT_EXTRA_PRIORITY: NzbInt = NzbInt::ExtraPriority;
+pub(crate) const NZB_INT_MANY_DUPE_FILES: NzbInt = NzbInt::ManyDupeFiles;
+pub(crate) const NZB_INT_PARKED_FILE_COUNT: NzbInt = NzbInt::ParkedFileCount;
+pub(crate) const NZB_INT_REPROCESS: NzbInt = NzbInt::Reprocess;
+pub(crate) const NZB_INT_PAR_REPAIRED: NzbInt = NzbInt::ParRepaired;
+pub(crate) const NZB_INT_UNPACK_TRIED: NzbInt = NzbInt::UnpackTried;
+pub(crate) const NZB_INT_LAST_UNPACK_STATUS: NzbInt = NzbInt::LastUnpackStatus;
+pub(crate) const NZB_ACT_CLEAR_EXTRACTED_ARCHIVES: NzbAction = NzbAction::ClearExtractedArchives;
+pub(crate) const NZB_STR_URL: NzbStr = NzbStr::Url;
+pub(crate) const NZB_ACT_CLEAR_FILE_LIST: NzbAction = NzbAction::ClearFileList;
+pub(crate) const NZB_ACT_UPDATE_CURRENT_STATS: NzbAction = NzbAction::UpdateCurrentStats;
+pub(crate) const NZB_INT_DOWNLOAD_SEC: NzbInt = NzbInt::DownloadSec;
+pub(crate) const NZB_INT_FAILED_ARTICLES: NzbInt = NzbInt::FailedArticles;
+pub(crate) const NZB_INT_SUCCESS_ARTICLES: NzbInt = NzbInt::SuccessArticles;
+pub(crate) const NZB_I64_SIZE: NzbI64 = NzbI64::Size;
+pub(crate) const NZB_I64_MIN_TIME: NzbI64 = NzbI64::MinTime;
+pub(crate) const NZB_I64_MAX_TIME: NzbI64 = NzbI64::MaxTime;
+pub(crate) const NZB_INT_FILE_COUNT: NzbInt = NzbInt::FileCount;
+pub(crate) const NZB_INT_MESSAGE_COUNT: NzbInt = NzbInt::MessageCount;
+pub(crate) const NZB_INT_TOTAL_ARTICLES: NzbInt = NzbInt::TotalArticles;
+pub(crate) const NZB_INT_POST_STAGE: NzbInt = NzbInt::PostStage;
+pub(crate) const NZB_INT_POST_FORCE_FLAGS: NzbInt = NzbInt::PostForceFlags;
+pub(crate) const NZB_ACT_CLEAR_PARAMS: NzbAction = NzbAction::ClearParams;
+pub(crate) const NZB_ACT_CLEAR_REPAIR_JOBS: NzbAction = NzbAction::ClearRepairJobs;
+pub(crate) const NZB_ACT_CLEAR_COMPLETED_FILES: NzbAction = NzbAction::ClearCompletedFiles;
 
 // FileInfo field indices (op = 42)
 pub(crate) const FILE_INT_PAUSED: i32 = 0;
@@ -972,14 +972,6 @@ impl QueueSubsysHost {
         if self.use_active {
             let nzb = nzb.addr() as *const crate::qnzb::NzbScalars;
             unsafe { crate::qnzb::host_coll_snapshot(nzb, which, x.ints, x.i64s, x.strs) };
-        }
-        0
-    }
-
-    fn coll_set(&self, nzb: NzbRef, field: i32, x: OpArgs) -> usize {
-        if self.use_active {
-            let nzb = nzb.addr() as *mut crate::qnzb::NzbScalars;
-            unsafe { crate::qnzb::host_coll_set(nzb, field, x.a2, x.p2, x.s1, x.i64s) };
         }
         0
     }
@@ -2494,8 +2486,10 @@ impl QueueSubsysHost {
         }
     }
 
-    pub fn nzb_set_int(&self, nzb_ptr: NzbRef, field: i32, val: i32) {
-        self.coll_set(nzb_ptr, field, OpArgs::NONE.a2(val));
+    pub fn nzb_set_int(&self, nzb_ptr: NzbRef, field: NzbInt, val: i32) {
+        if self.use_active {
+            crate::qnzb::set_int(nzb_ptr, field, val);
+        }
     }
 
     pub fn nzb_set_par_status(&self, nzb_ptr: NzbRef, status: NzbParStatus) {
@@ -2542,35 +2536,40 @@ impl QueueSubsysHost {
         self.nzb_set_int(nzb_ptr, NZB_INT_DIRECT_UNPACK_STATUS, status.into());
     }
 
-    pub fn nzb_set_i64(&self, nzb_ptr: NzbRef, field: i32, val: i64) {
-        let mut i64s = [val];
-        self.coll_set(nzb_ptr, field, OpArgs::NONE.i64s(i64s.as_mut_ptr()));
+    pub fn nzb_set_i64(&self, nzb_ptr: NzbRef, field: NzbI64, val: i64) {
+        if self.use_active {
+            crate::qnzb::set_i64(nzb_ptr, field, val);
+        }
     }
 
-    pub fn nzb_set_str(&self, nzb_ptr: NzbRef, field: i32, val: &[u8]) {
+    pub fn nzb_set_str(&self, nzb_ptr: NzbRef, field: NzbStr, val: &[u8]) {
         self.nzb_set_str_opt(nzb_ptr, field, Some(val));
     }
 
-    pub fn nzb_set_str_opt(&self, nzb_ptr: NzbRef, field: i32, val: Option<&[u8]>) {
-        let cv = val.map(c_bytes);
-        let s1 = cv
-            .as_ref()
-            .map_or(std::ptr::null(), |v| v.as_ptr() as *const c_char);
-        self.coll_set(nzb_ptr, field, OpArgs::NONE.s1(s1));
+    pub fn nzb_set_str_opt(&self, nzb_ptr: NzbRef, field: NzbStr, val: Option<&[u8]>) {
+        if self.use_active {
+            crate::qnzb::set_str(nzb_ptr, field, val);
+        }
     }
 
-    pub fn nzb_action(&self, nzb_ptr: NzbRef, action: i32, p2: usize) {
-        self.coll_set(nzb_ptr, action, OpArgs::NONE.p2(p2));
+    pub fn nzb_action(&self, nzb_ptr: NzbRef, action: NzbAction) {
+        if self.use_active {
+            crate::qnzb::act(nzb_ptr, action);
+        }
     }
 
     /// Adds `file`'s sizes and article counts to the download's completed totals.
     pub fn nzb_update_completed_stats(&self, nzb_ptr: NzbRef, file: FileRef) {
-        self.nzb_action(nzb_ptr, NZB_ACT_UPDATE_COMPLETED_STATS, file.addr());
+        if self.use_active {
+            crate::qnzb::add_file_totals(nzb_ptr, file, FileTotals::Completed);
+        }
     }
 
     /// Adds `file`'s sizes and article counts to the download's deleted totals.
     pub fn nzb_update_deleted_stats(&self, nzb_ptr: NzbRef, file: FileRef) {
-        self.nzb_action(nzb_ptr, NZB_ACT_UPDATE_DELETED_STATS, file.addr());
+        if self.use_active {
+            crate::qnzb::add_file_totals(nzb_ptr, file, FileTotals::Deleted);
+        }
     }
 
     pub fn nzb_apply_merge_split_counters(

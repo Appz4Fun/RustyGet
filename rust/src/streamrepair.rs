@@ -10002,6 +10002,18 @@ impl CrossPackRepairSession {
         if end > sibling_len || sibling_len - end > 1 << 24 {
             return Err("sibling volume changed".into());
         }
+        // The sibling's framing is copied: none of it may be a hole of its own.
+        let sibling_holes = self
+            .member_targets
+            .get(d.template_member as usize)
+            .filter(|&&t| t >= 0)
+            .and_then(|&t| self.target_holes.get(t as usize))
+            .map_or(&[][..], |h| h.as_slice());
+        if sibling_holes.iter().any(|h| {
+            h.size > 0 && (h.offset < at as i64 || h.offset + h.size > end as i64)
+        }) {
+            return Err("the sibling's headers or tail are not all there".into());
+        }
         let mut sib_head = vec![0u8; at as usize];
         sibling.read_exact(&mut sib_head).map_err(io("sibling volume"))?;
         let mut sib_tail = Vec::new();

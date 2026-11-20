@@ -6,7 +6,7 @@ use crate::queuesubsys_host::NzbRef;
 use crate::cstr;
 use crate::options::OptStr;
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::{c_int, CStr};
+use std::ffi::CStr;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -29,7 +29,7 @@ use crate::streamrepair::{
     TargetMessageKind,
 };
 
-use crate::log::{MK_DEBUG, MK_DETAIL, MK_ERROR, MK_INFO, MK_WARNING};
+use crate::log::MessageKind;
 use crate::postproc::JobQueue;
 use crate::status::DupeMode;
 
@@ -41,12 +41,12 @@ const MAX_CONNECTION_WAIT_SEC: i32 = 1800;
 const DONOR_CHECK_SEC: i32 = 20;
 
 #[inline]
-fn map_target_msg_kind(kind: TargetMessageKind) -> c_int {
+const fn map_target_msg_kind(kind: TargetMessageKind) -> MessageKind {
     match kind {
-        TargetMessageKind::Info => MK_INFO,
-        TargetMessageKind::Warning => MK_WARNING,
-        TargetMessageKind::Error => MK_ERROR,
-        TargetMessageKind::Detail => MK_DETAIL,
+        TargetMessageKind::Info => MessageKind::Info,
+        TargetMessageKind::Warning => MessageKind::Warning,
+        TargetMessageKind::Error => MessageKind::Error,
+        TargetMessageKind::Detail => MessageKind::Detail,
     }
 }
 
@@ -360,7 +360,7 @@ impl NzbgetRsStreamRepairCtrl {
 
     /// Adds a message to the job's download: the queued one with this job's id in live
     /// mode (under the queue lock), else the post job's.
-    fn print_message(&self, q: JobQueue<'_>, kind: c_int, text: &[u8]) {
+    fn print_message(&self, q: JobQueue<'_>, kind: MessageKind, text: &[u8]) {
         if self.live_mode && repeats_recent_dead_volume_line(self.nzb_id, text) {
             return;
         }
@@ -370,28 +370,20 @@ impl NzbgetRsStreamRepairCtrl {
             host.with_locked_queue(|dq| {
                 let nzb = host.queue_find_by_id(dq, q.nzb_id());
                 if nzb.is_some() {
-                    host.nzb_add_message(nzb, kind, text);
+                    host.nzb_add_message(nzb, kind as i32, text);
                 }
             });
         } else if q.post_ptr().is_some() {
             let nzb = host.post_snap(q.post_ptr()).nzb_ptr;
             if nzb.is_some() {
-                host.nzb_add_message(nzb, kind, text);
+                host.nzb_add_message(nzb, kind as i32, text);
             }
         }
     }
 
-    /// Writes to the global log (`kind`: 0 info, 1 error, 2 warning, 3 detail, 4 debug).
-    fn global_log(&self, q: JobQueue<'_>, kind: c_int, text: &[u8]) {
-        let kind = match kind {
-            0 => MK_INFO,
-            1 => MK_ERROR,
-            2 => MK_WARNING,
-            3 => MK_DETAIL,
-            4 => MK_DEBUG,
-            _ => return,
-        };
-        q.host.log(kind, cstr::until_nul(text));
+    /// Writes to the global log.
+    fn global_log(&self, q: JobQueue<'_>, kind: MessageKind, text: &[u8]) {
+        q.host.log(kind as i32, cstr::until_nul(text));
     }
 
     fn set_post_progress(&self, q: JobQueue<'_>, label: &[u8], stage_progress: i32) {
@@ -530,7 +522,7 @@ impl NzbgetRsStreamRepairCtrl {
         ) -> HostOptions {
         let opts = crate::options::active_options();
         let primary_connections = crate::net::active_server_pool().map_or(0, |p| unsafe {
-            crate::net::nzbget_rs_serverpool_ctl(Arc::as_ptr(&p), 6, 0, 0, 0, 0) as c_int
+            crate::net::nzbget_rs_serverpool_ctl(Arc::as_ptr(&p), 6, 0, 0, 0, 0) as i32
         });
         let download_rate = crate::statmeter::active_statmeter().map_or(0, |sm| {
             let (_up, dn_sec, all_bytes, _sb) = sm.total_stat_snapshot();
@@ -953,7 +945,7 @@ impl NzbgetRsStreamRepairCtrl {
             );
             msg.extend_from_slice(&suffix);
             msg.extend_from_slice(b" still missing");
-            self.print_message(q, MK_WARNING, &msg);
+            self.print_message(q, MessageKind::Warning, &msg);
         }
     }
 
@@ -1065,7 +1057,7 @@ impl NzbgetRsStreamRepairCtrl {
                     )
                     .as_bytes(),
                 );
-                self.print_message(q, MK_INFO, &msg);
+                self.print_message(q, MessageKind::Info, &msg);
             }
         }
 
@@ -1082,7 +1074,7 @@ impl NzbgetRsStreamRepairCtrl {
         par_ignore_ext: &[u8],
     ) -> Option<DonorParsedNzb> {
         parse_donor_nzb_file(queued_filename, par_ignore_ext, |msg| {
-            self.global_log(q, 3, msg);
+            self.global_log(q, MessageKind::Detail, msg);
         })
     }
 
@@ -1116,7 +1108,7 @@ impl NzbgetRsStreamRepairCtrl {
             let mut msg = b"Leaving dead volume ".to_vec();
             msg.extend_from_slice(&t.filename);
             msg.extend_from_slice(b" to be borrowed from a duplicate; direct unpack keeps going");
-            self.print_message(q, MK_INFO, &msg);
+            self.print_message(q, MessageKind::Info, &msg);
         }
 
         for donor in donors {
@@ -1139,7 +1131,7 @@ impl NzbgetRsStreamRepairCtrl {
             if !tried_postings.insert(donor_key) {
                 let mut msg = b"Skipping another copy of duplicate posting ".to_vec();
                 msg.extend_from_slice(&donor.info_name);
-                self.print_message(q, MK_INFO, &msg);
+                self.print_message(q, MessageKind::Info, &msg);
                 continue;
             }
             if self.donor_dead(q, donor, &donor_nzb, counters) {
@@ -1345,7 +1337,7 @@ impl NzbgetRsStreamRepairCtrl {
                 let mut msg = b"Could not borrow dead volume ".to_vec();
                 msg.extend_from_slice(&t.filename);
                 msg.extend_from_slice(b"; recreating it from a byte-identical duplicate");
-                self.print_message(q, MK_INFO, &msg);
+                self.print_message(q, MessageKind::Info, &msg);
             } else {
                 t.patch_eligible = false;
             }
@@ -1369,7 +1361,7 @@ impl NzbgetRsStreamRepairCtrl {
                 msg.extend_from_slice(
                     b" either; a later run may still borrow it, else par2 rebuilds it",
                 );
-                self.print_message(q, MK_INFO, &msg);
+                self.print_message(q, MessageKind::Info, &msg);
             }
         }
     }
@@ -1435,7 +1427,7 @@ impl NzbgetRsStreamRepairCtrl {
                           vol: &crate::rarreader::Volume,
                           files: &[crate::rarreader::RarFile]| {
             for line in format_rar_volume_debug_lines(member_name, vol, files) {
-                self.global_log(q, 4, &line);
+                self.global_log(q, MessageKind::Debug, &line);
             }
         };
         let rar_vol_ref: Option<
@@ -1482,7 +1474,7 @@ impl NzbgetRsStreamRepairCtrl {
             if !tried_postings.insert(donor_key) {
                 let mut msg = b"Skipping another copy of duplicate posting ".to_vec();
                 msg.extend_from_slice(&donor.info_name);
-                self.print_message(q, MK_INFO, &msg);
+                self.print_message(q, MessageKind::Info, &msg);
                 continue;
             }
             if self.donor_dead(q, donor, &donor_nzb, counters) {
@@ -1626,11 +1618,12 @@ impl NzbgetRsStreamRepairCtrl {
                 }
 
                 fn emit_extractor_log(&mut self, kind: i32, msg: &str) {
+                    // the extractor's codes: 0 info, 1 error, 2 warning, else detail
                     let log_kind = match kind {
-                        0 => 0,
-                        1 => 1,
-                        2 => 2,
-                        _ => 3,
+                        0 => MessageKind::Info,
+                        1 => MessageKind::Error,
+                        2 => MessageKind::Warning,
+                        _ => MessageKind::Detail,
                     };
                     self.ctrl
                         .global_log(self.q, log_kind, msg.as_bytes());
@@ -1645,7 +1638,7 @@ impl NzbgetRsStreamRepairCtrl {
                 ) {
                     if self.ctrl.debug_enabled {
                         for line in format_rar_volume_debug_lines(member_name, vol, files) {
-                            self.ctrl.global_log(self.q, 4, &line);
+                            self.ctrl.global_log(self.q, MessageKind::Debug, &line);
                         }
                     }
                 }
@@ -1704,7 +1697,7 @@ impl NzbgetRsStreamRepairCtrl {
             counters.holes_remain |= unfinished > 0;
             let msg =
                 format!("Stream repair interrupted with {unfinished} file(s) still incomplete");
-            self.print_message(q, MK_INFO, msg.as_bytes());
+            self.print_message(q, MessageKind::Info, msg.as_bytes());
         }
 
         let par_disposition: &[u8] = if counters.has_par_files {
@@ -1740,7 +1733,7 @@ impl NzbgetRsStreamRepairCtrl {
                 msg.extend_from_slice(b": no duplicate could supply the file (");
                 msg.extend_from_slice(par_disposition);
                 msg.push(b')');
-                self.print_message(q, MK_INFO, &msg);
+                self.print_message(q, MessageKind::Info, &msg);
             } else {
                 let missing = total_size(&target.holes);
                 let miss_mb = stream_repair_bytes_to_mb(missing);
@@ -1751,7 +1744,7 @@ impl NzbgetRsStreamRepairCtrl {
                 );
                 msg.extend_from_slice(par_disposition);
                 msg.push(b')');
-                self.print_message(q, MK_INFO, &msg);
+                self.print_message(q, MessageKind::Info, &msg);
 
                 if is_incomplete_nzb_hole(missing, target.encoded_size) {
                     let dec_mb = stream_repair_bytes_to_mb(target.decoded_file_size);
@@ -1764,7 +1757,7 @@ impl NzbgetRsStreamRepairCtrl {
                         )
                         .as_bytes(),
                     );
-                    self.print_message(q, MK_WARNING, &warn_msg);
+                    self.print_message(q, MessageKind::Warning, &warn_msg);
                 }
             }
         }
@@ -2072,18 +2065,18 @@ impl NzbgetRsStreamRepairCtrl {
             let mut msg = format!("Not stream-repairing {skipped} RAR volume(s) of ").into_bytes();
             msg.extend_from_slice(&nzb_name);
             msg.extend_from_slice(b": direct unpack already extracted them");
-            self.print_message(q, MK_INFO, &msg);
+            self.print_message(q, MessageKind::Info, &msg);
         }
         if targets.is_empty() {
             if skipped == 0 {
                 let mut msg = b"Nothing to stream-repair for ".to_vec();
                 msg.extend_from_slice(&nzb_name);
-                self.print_message(q, MK_INFO, &msg);
+                self.print_message(q, MessageKind::Info, &msg);
             }
         } else if donors.is_empty() {
             let mut msg = b"No duplicate collections found for stream repair of ".to_vec();
             msg.extend_from_slice(&nzb_name);
-            self.print_message(q, MK_INFO, &msg);
+            self.print_message(q, MessageKind::Info, &msg);
         } else {
             let wd_handle = self.start_watchdog(q, &opts, &targets);
             self.compute_positional_ranks(&dest_dir, &mut targets, &member_names);
@@ -2200,7 +2193,7 @@ impl NzbgetRsStreamRepairCtrl {
         if any_eligible && !donors.is_empty() {
             let mut msg = b"Starting live stream repair for ".to_vec();
             msg.extend_from_slice(&nzb_name);
-            self.print_message(q, MK_INFO, &msg);
+            self.print_message(q, MessageKind::Info, &msg);
 
             let opts = self.query_host_options();
             // Keep the queue from failing over while the repair works towards borrowing a dead
@@ -2211,7 +2204,7 @@ impl NzbgetRsStreamRepairCtrl {
                     msg.extend_from_slice(&t.filename);
                     msg.extend_from_slice(b": ");
                     msg.extend_from_slice(why.as_bytes());
-                    self.print_message(q, MK_INFO, &msg);
+                    self.print_message(q, MessageKind::Info, &msg);
                 }
             }
             let borrowing = left_to_borrow.iter().any(|l| *l);

@@ -9502,9 +9502,10 @@ impl CrossPackRepairSession {
             lzma2_other_size: false,
             media_repair_set: None,
         };
-        // Extraction need not wait while the dead volumes are borrowed: hand them over now,
+        // A volume that lost only its headers has nothing left to borrow: rebuilt now. Extraction
+        // need not wait while the other dead volumes are borrowed: they are handed over now,
         // with what is not borrowed yet as holes.
-        session.offer_dead_fills(emit_msg);
+        session.finish_dead_fills_with(emit_msg);
         Some(session)
     }
 
@@ -9825,6 +9826,15 @@ impl CrossPackRepairSession {
     /// Dead volumes whose borrowed data is complete: rebuild their headers and hand them to
     /// direct unpack as virtual volumes.
     fn finish_dead_fills(&mut self, env_cell: &std::cell::RefCell<&mut dyn CrossPackDonorEnv>) {
+        self.finish_dead_fills_with(&mut |kind, msg| {
+            env_cell.borrow_mut().emit_message_bytes(kind, msg)
+        });
+    }
+
+    /// [`Self::finish_dead_fills`] reporting through `emit`: also run when the session starts,
+    /// for a volume that lost only its headers (nothing left to borrow, so no donor pass
+    /// would ever finish it).
+    fn finish_dead_fills_with(&mut self, emit: &mut dyn FnMut(TargetMessageKind, &[u8])) {
         for i in 0..self.dead_fills.len() {
             let d = self.dead_fills[i].clone();
             if d.done
@@ -9845,9 +9855,7 @@ impl CrossPackRepairSession {
                     let mut msg = format!("Borrowed {mb:.1} MB for dead volume ").into_bytes();
                     msg.extend_from_slice(name);
                     msg.extend_from_slice(b" from a duplicate; direct unpack reads it in place");
-                    env_cell
-                        .borrow_mut()
-                        .emit_message_bytes(TargetMessageKind::Info, &msg);
+                    emit(TargetMessageKind::Info, &msg);
                 }
                 Err(e) => {
                     // A volume handed over with holes is still read through its scratch file.
@@ -9859,13 +9867,11 @@ impl CrossPackRepairSession {
                     msg.extend_from_slice(name);
                     msg.extend_from_slice(b": ");
                     msg.extend_from_slice(e.as_bytes());
-                    env_cell
-                        .borrow_mut()
-                        .emit_message_bytes(TargetMessageKind::Warning, &msg);
+                    emit(TargetMessageKind::Warning, &msg);
                 }
             }
         }
-        self.offer_dead_fills(&mut |kind, msg| env_cell.borrow_mut().emit_message_bytes(kind, msg));
+        self.offer_dead_fills(emit);
     }
 
     /// Dead volumes still being borrowed: hand them to direct unpack now, with the bytes not

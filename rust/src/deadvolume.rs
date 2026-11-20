@@ -613,6 +613,44 @@ mod rar5 {
     /// Quick-open data is a run of records, each a CRC32 over its size and body, then the
     /// size (a vint) and the body: recomputes those CRCs after a copied header in a body
     /// changed. Stops at anything that does not read as a record.
+    const HEAD_SERVICE: u64 = 3;
+
+    pub(super) fn tail_is_rebuilt(tail: &[u8]) -> bool {
+        let mut p = 0;
+        while p < tail.len() {
+            let Some(b) = block(tail, &mut p) else { return true };
+            if b.kind == HEAD_SERVICE {
+                // file flags, unpacked size, attributes, [mtime], [crc32], compression, host
+                // OS, then the name.
+                let h = b.header;
+                let mut q = b.body;
+                let name = (|| {
+                    let fflags = vint(h, &mut q)?;
+                    vint(h, &mut q)?;
+                    vint(h, &mut q)?;
+                    if fflags & FHFL_MTIME != 0 {
+                        q += 4;
+                    }
+                    if fflags & FHFL_CRC32 != 0 {
+                        q += 4;
+                    }
+                    vint(h, &mut q)?;
+                    vint(h, &mut q)?;
+                    let n = vint(h, &mut q)? as usize;
+                    h.get(q..q.checked_add(n)?)
+                })();
+                if name != Some(b"QO".as_slice()) {
+                    return false;
+                }
+            }
+            match p.checked_add(b.data_len as usize).filter(|&e| e <= tail.len()) {
+                Some(e) => p = e,
+                None => return false,
+            }
+        }
+        true
+    }
+
     fn reseal_records(data: &mut [u8]) {
         let mut p = 0;
         while p + 4 < data.len() {
@@ -861,6 +899,13 @@ mod rar5 {
         let end = end.ok_or_else(|| bad("no end-of-archive header"))?;
         Ok((out, end))
     }
+}
+
+/// Whether every service record in RAR5 `tail` is one [`faithful_frame`] rebuilds (the
+/// quick-open copy of the file header). Others, such as a recovery record, protect the
+/// sibling's own bytes and cannot stand in for a volume that lost them.
+pub fn rar5_tail_is_rebuilt(tail: &[u8]) -> bool {
+    rar5::tail_is_rebuilt(tail)
 }
 
 /// The exact bytes a volume of a set had around its stored part, rebuilt from sibling
@@ -1291,6 +1336,8 @@ mod tests {
                 .unwrap();
         assert_eq!(head, lost[..at].to_vec());
         assert_eq!(tail, lost[at + len..].to_vec());
+        // Its tail holds only quick-open data, which the rebuild reseals.
+        assert!(rar5_tail_is_rebuilt(&tail));
         // RAR 1.5-4 has no faithful rebuild here.
         assert!(faithful_frame(3, &sibling[..at], &sibling[at + len..], 1, 2, 0).is_err());
     }

@@ -10059,6 +10059,13 @@ impl CrossPackRepairSession {
             .and_then(|t| self.target_holes.get(t))
             .cloned()
             .unwrap_or_default();
+        // Lost bytes behind the part are rebuilt only where the tail holds nothing but the
+        // quick-open copy: a recovery record there belongs to the sibling.
+        if holes.iter().any(|h| h.size > 0 && h.offset + h.size > tail_at as i64)
+            && !crate::deadvolume::rar5_tail_is_rebuilt(&tail)
+        {
+            return Err("its lost tail holds records that cannot be rebuilt".into());
+        }
         let in_hole = |i: u64| {
             holes
                 .iter()

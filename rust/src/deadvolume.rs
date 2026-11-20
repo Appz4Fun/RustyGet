@@ -329,8 +329,10 @@ fn shifted_volume_number(number: u64, index: usize, template: usize) -> Option<u
 /// `part_crc` (CRC32 of the borrowed bytes), with the header checksums recomputed. Without
 /// `part_crc` a RAR5 part carries no part checksum at all (the CRC32 flag is cleared): the
 /// volume can then be handed over before every byte is borrowed, and the member checksum in
-/// the last volume still checks the whole file. RAR 1.5-4 headers always carry one, so they
-/// need it. Records
+/// the last volume still checks the whole file. A RAR 1.5-4 header always has the field:
+/// without `part_crc` it carries 0, which a persistent session opted in with
+/// `ProgressiveOptions::rar4_unknown_part_crc` takes as "not known yet" for a part that
+/// continues in the next volume (every rebuilt part does). Records
 /// that point at other places in the sibling (RAR5's locator and quick-open data, RAR 1.5-4's
 /// recovery record and archive checksum) are left out: they describe the sibling, and an
 /// extraction does not need them. Encrypted parts and parts with another hash than CRC32 are
@@ -352,10 +354,8 @@ pub fn synthesize_frame(
             template,
             index,
             packed,
-            part_crc.ok_or(FrameError::Sibling {
-                format: "RAR4",
-                what: "a part checksum is needed",
-            })?,
+            // 0: not known yet, see `rar4::frame`.
+            part_crc.unwrap_or(0),
         ),
         v => Err(FrameError::UnsupportedVersion(v)),
     }
@@ -1089,10 +1089,25 @@ mod tests {
     }
 
     #[test]
-    fn rar4_frame_needs_a_part_checksum() {
-        let mut head = b"Rar!\x1a\x07\x00".to_vec();
-        head.extend_from_slice(&[0u8; 7]);
-        assert!(synthesize_frame(3, &head, &[], 1, 2, 10, None).is_err());
+    fn rar4_frame_without_a_part_checksum_carries_zero() {
+        let b = testdata("rarrenamer/testfile3.part02.rar");
+        let (_, files) = parse(&b);
+        let f = &files[0];
+        let at = f.data_offset as usize;
+        let len = f.packed_size as usize;
+        let mut head = b[..at].to_vec();
+        head[7 + 13 + 25] = 0x30;
+        let (h, t) = synthesize_frame(3, &head, &b[at + len..], 1, 4, len as u64, None).unwrap();
+        let (h2, _) = synthesize_frame(3, &head, &b[at + len..], 1, 4, len as u64, Some(7)).unwrap();
+        // Same layout as with a checksum, so holes recorded against it stay valid.
+        assert_eq!(h.len(), h2.len());
+        check_frame(&h, &t, len as u64, &f.filename).unwrap();
+        let mut whole = h.clone();
+        whole.extend_from_slice(&vec![0u8; len]);
+        whole.extend_from_slice(&t);
+        let (_, files) = parse(&whole);
+        assert_eq!(files[0].packed_size as usize, len);
+        assert!(files[0].split_after);
     }
 
     #[test]

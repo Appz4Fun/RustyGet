@@ -9795,7 +9795,7 @@ impl CrossPackRepairSession {
                 continue;
             };
             let left: i64 = holes.iter().map(|h| h.size).sum();
-            if d.done || d.version != 5 || holes.is_empty() || d.offer_failed || d.offered == Some(left) {
+            if d.done || holes.is_empty() || d.offer_failed || d.offered == Some(left) {
                 continue;
             }
             let holes = holes.clone();
@@ -9860,7 +9860,11 @@ impl CrossPackRepairSession {
         let data_path = path_of(d.member);
         let mut f = std::fs::File::open(crate::fsops::path(&data_path))
             .map_err(|e| format!("borrowed data: {e}"))?;
-        let part_crc = if d.version == 5 {
+        // Handed over with holes, the part checksum is not known yet: a RAR5 part goes
+        // without one, a RAR 1.5-4 part carries 0, which the persistent session skips
+        // (`rar4_unknown_part_crc`). The member checksum in the last volume still checks
+        // the whole file.
+        let part_crc = if d.version == 5 || !holes.is_empty() {
             let total = f
                 .metadata()
                 .map_err(|e| format!("borrowed data: {e}"))?
@@ -9870,9 +9874,6 @@ impl CrossPackRepairSession {
             }
             None
         } else {
-            if !holes.is_empty() {
-                return Err("a RAR 1.5-4 part needs every byte for its checksum".into());
-            }
             let mut hasher = crc32fast::Hasher::new();
             let mut buf = vec![0u8; 1 << 20];
             let mut total = 0i64;

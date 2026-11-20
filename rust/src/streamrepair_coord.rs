@@ -25,8 +25,8 @@ use crate::streamrepair::{
     format_rar_volume_debug_lines, format_whole_files_suffix,
     is_incomplete_nzb_hole, is_par2_job_or_file, process_m1_donor, resolve_completion_par_action,
     stream_repair_bytes_to_mb, total_size, watchdog_eval_tick, CrossPackDonorEnv,
-    CrossPackRepairSession, CrossPackTargetInput, FetchedDonorArticle, M1DonorEnv, M1RepairTarget, NzbSizes, SizePair,
-    TargetMessageKind,
+    CrossPackRepairSession, CrossPackTargetInput, FetchedDonorArticle, M1DonorEnv, M1RepairTarget,
+    NzbSizes, SizePair, TargetMessageKind,
 };
 
 use crate::log::MessageKind;

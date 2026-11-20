@@ -159,11 +159,16 @@ fn fleet_upgrade_kind(
 }
 
 /// Whether a probed kind replaces the stored one (see [`fleet_upgrade_kind`]).
+/// An encrypted copy stored unborrowable (read before its password was at
+/// hand, or by a build that did not try it) moves up once its password opens
+/// it.
 fn kind_upgrades(stored: crate::donorkind::DonorKind, found: crate::donorkind::DonorKind) -> bool {
     use crate::donorkind::DonorKind;
     found != DonorKind::Unknown
         && found != stored
-        && (stored == DonorKind::Unknown || found == DonorKind::Twin)
+        && (stored == DonorKind::Unknown
+            || found == DonorKind::Twin
+            || (stored == DonorKind::Unborrowable && found == DonorKind::EncryptedBorrowable))
 }
 
 /// Records on a copy already queued, or parked in history as a backup, that its
@@ -6853,6 +6858,10 @@ mod tests {
         assert!(!kind_upgrades(Twin, Borrowable));
         assert!(!kind_upgrades(Borrowable, Unborrowable));
         assert!(!kind_upgrades(Twin, Twin));
+        // an encrypted copy stored unborrowable, opened by its password now
+        assert!(kind_upgrades(Unborrowable, EncryptedBorrowable));
+        assert!(!kind_upgrades(EncryptedBorrowable, Unborrowable));
+        assert!(!kind_upgrades(Borrowable, EncryptedBorrowable));
     }
 
     #[test]

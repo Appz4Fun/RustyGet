@@ -285,7 +285,14 @@ fn rar_packing(data: &[u8], password: Option<&[u8]>) -> Packing {
             Packing::Unborrowable
         }
     } else if headers_encrypted || file.encrypted_data {
-        if password.is_none() {
+        let Some(pw) = password else {
+            return Packing::Unborrowable;
+        };
+        // Headers that opened prove the password. With only the data
+        // encrypted, a RAR5 file header keeps a check value to test it
+        // against (zipfast); a RAR4 one keeps none, and stream repair's
+        // identity check refuses a wrong password when it borrows.
+        if !headers_encrypted && !rar5_password_fits(file, pw) {
             return Packing::Unborrowable;
         }
         // stored but encrypted, password known: the repair decrypts it on
@@ -293,6 +300,24 @@ fn rar_packing(data: &[u8], password: Option<&[u8]>) -> Packing {
         Packing::EncryptedBorrowable { headers_encrypted }
     } else {
         Packing::Borrowable
+    }
+}
+
+/// Whether `password` passes the RAR5 password check `file` carries (true
+/// when it carries none).
+fn rar5_password_fits(file: &crate::rarreader::RarFile, password: &[u8]) -> bool {
+    match file.crypt {
+        Some(c) if c.has_check => {
+            let mut check = [0u8; 8];
+            check.copy_from_slice(&c.check_value[..8]);
+            zipfast::crypto::Rar5PasswordCheck {
+                kdf_count: c.kdf_count,
+                salt: c.salt,
+                check,
+            }
+            .accepts(&String::from_utf8_lossy(password))
+        }
+        _ => true,
     }
 }
 
@@ -567,6 +592,17 @@ mod tests {
             packing_of_head(&store, b"a.rar", Some(b"wrong")),
             Packing::HeadersEncrypted
         );
+        // only the data encrypted (-p): the file header's check value tells a
+        // wrong password
+        let data = fixture("donorkind", "encdata5.rar");
+        assert_eq!(
+            packing_of_head(&data, b"a.rar", Some(b"pw")),
+            Packing::EncryptedBorrowable {
+                headers_encrypted: false
+            }
+        );
+        assert_eq!(packing_of_head(&data, b"a.rar", Some(b"wrong")), Packing::Unborrowable);
+        assert_eq!(packing_of_head(&data, b"a.rar", None), Packing::Unborrowable);
         // the media inside is compressed: still unborrowable, password or not
         let comp = fixture("donorkind", "enchp5comp.rar");
         assert_eq!(packing_of_head(&comp, b"a.rar", Some(b"pw")), Packing::HeadersEncrypted);

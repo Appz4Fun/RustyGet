@@ -521,17 +521,8 @@ impl NzbgetRsStreamRepairCtrl {
         new_decoded_size: i64,
         holes: &[NzbgetRsByteRange],
     ) {
-        q.host.nzb_stream_repair_update_job_holes(
-            nzb,
-            idx,
-            new_decoded_size,
-            if holes.is_empty() {
-                0
-            } else {
-                holes.as_ptr() as usize
-            },
-            holes.len() as c_int,
-        );
+        q.host
+            .nzb_stream_repair_update_job_holes(nzb, idx, new_decoded_size, holes);
     }
 
     fn query_host_options(

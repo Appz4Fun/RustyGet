@@ -2415,135 +2415,266 @@ pub(crate) fn rename_completed(nzb: NzbRef, idx: usize, filename: &[u8], orignam
     }
 }
 
-/// A collection's file-list and completed-file ops (host op 34), as the
-/// C++ host did them.
-///
-/// # Safety
-/// Pointers are live objects of the kinds each op names; output arrays are
-/// large enough for the op; the caller holds the queue lock.
-#[allow(clippy::too_many_arguments)]
-pub(crate) unsafe fn host_filelist_op(
-    p: *mut NzbScalars,
-    a1: c_int,
-    a2: c_int,
-    p2: usize,
-    s1: *const c_char,
-    s2: *const c_char,
-    ints: *mut c_int,
-    i64s: *mut i64,
-    strs: *mut *const c_char,
-) -> usize {
-    use crate::qfile::{field, nzbget_rs_file_set, nzbget_rs_file_set_text, File};
-    let np: *const NzbScalars = std::ptr::null();
-    let ns: *const c_char = std::ptr::null();
-    let no: *const usize = std::ptr::null();
-    let empty = c"".as_ptr();
-    let or_empty = |s: *const c_char| if s.is_null() { empty } else { s };
-    let int = |k: usize| unsafe { *ints.add(k) };
-    let i64v = |k: usize| unsafe { *i64s.add(k) };
-    let fl = file_list(p);
-    let files = |op, a2, s1, s2, ints: *mut c_int, i64s: *mut i64, strs, raw: *const i64| unsafe {
-        nzbget_rs_nzb_files(p, op, a2, np, s1, s2, ints, i64s, strs, raw)
+type ByteRange = crate::dupefallback::NzbgetRsByteRange;
+
+fn hole_pairs(holes: &[ByteRange]) -> Vec<[i64; 2]> {
+    holes.iter().map(|r| [r.offset, r.size]).collect()
+}
+
+/// Updates the status of the completed file with id `file_id`: mode 1
+/// marks it successful (true when it was not), mode 2 turns a failure into
+/// a partial success.
+pub(crate) fn update_completed_status(nzb: NzbRef, file_id: i32, mode: i32) -> bool {
+    let Some(d) = nzb_data(nzb) else {
+        return false;
     };
-    let ni: *mut c_int = std::ptr::null_mut();
-    let nl: *mut i64 = std::ptr::null_mut();
-    let nstr: *mut *const c_char = std::ptr::null_mut();
-    let nraw: *const i64 = std::ptr::null();
-    let set = |f: usize, id, v: i64| unsafe { nzbget_rs_file_set(f as *const File, id, v) };
-    match a1 {
-        8 => {
-            files(23, a2, s1, ns, ints, i64s, nstr, p2 as *const i64);
-            0
+    let mut f = d.files();
+    if let Some(c) = f.completed.iter_mut().find(|c| c.id == file_id) {
+        if mode == 1 && c.status != 1 {
+            c.status = 1;
+            return true;
         }
-        11 => {
-            if a2 < 0 {
-                return files(20, 0, ns, ns, ni, nl, nstr, nraw) as usize;
-            }
-            files(21, a2, ns, ns, ints, i64s, strs, nraw);
-            0
+        if mode == 2 && c.status == 3 {
+            c.status = 2;
         }
-        12 => files(5, a2, ns, ns, ints, nl, nstr, nraw) as usize,
-        13 => match int(0) {
-            1 => files(24, a2, ns, ns, ni, nl, nstr, nraw) as usize,
-            2 => {
-                files(25, a2, ns, ns, ni, nl, nstr, nraw);
-                if int(1) != 0 {
-                    unsafe { (*p).changed = true };
-                }
-                0
-            }
-            3 => {
-                files(26, a2, ns, ns, ints, i64s, nstr, p2 as *const i64);
-                0
-            }
-            _ => {
-                files(22, a2, ns, ns, ints, i64s, strs, nraw);
-                0
-            }
-        },
-        14 => {
-            let f = crate::qfile::nzbget_rs_file_new(-1);
-            let fp = f as usize;
-            let id = if int(0) != 0 {
-                int(0)
-            } else {
-                crate::idgen::FILE_IDS.next()
-            };
-            set(fp, field::ID, i64::from(id));
-            set(fp, field::NZB, p as i64);
-            unsafe {
-                nzbget_rs_file_set_text(f, crate::qfile::text::SUBJECT, or_empty(s1));
-                nzbget_rs_file_set_text(f, crate::qfile::text::FILENAME, or_empty(s2));
-            }
-            set(fp, field::TIME, i64::from(int(1)));
-            set(fp, field::SIZE, i64v(0));
-            set(fp, field::REMAINING_SIZE, i64v(1));
-            set(fp, field::MISSED_SIZE, i64v(2));
-            set(fp, field::TOTAL_ARTICLES, i64::from(int(2)));
-            set(fp, field::MISSED_ARTICLES, i64::from(int(3)));
-            set(fp, field::PAR_FILE, i64::from(int(4) != 0));
-            let groups = unsafe { *strs } as *const *const c_char;
-            for g in 0..int(5).max(0) as usize {
-                let name = unsafe { *groups.add(g) };
-                unsafe { crate::qfile::nzbget_rs_file_op(f, 2, 0, or_empty(name), ni, nstr) };
-            }
-            let mut art_args = [i64v(3), i64v(4)];
-            unsafe {
-                crate::qarticle::nzbget_rs_article_host(
-                    crate::qfile::nzbget_rs_file_articles(f),
-                    std::ptr::null_mut(),
-                    105,
-                    int(6),
-                    0,
-                    ns,
-                    ni,
-                    art_args.as_mut_ptr(),
-                    (*strs.add(1)) as *mut *const c_char,
-                )
-            };
-            ptr_list_op(fl, 3, 0, fp, no, 0);
-            fp
-        }
-        19 => {
-            let f = crate::qfile::nzbget_rs_file_new(-1) as usize;
-            // new FileInfo() takes a generated id before SetId replaces it
-            set(
-                f,
-                field::ID,
-                i64::from(crate::idgen::FILE_IDS.next()),
-            );
-            set(f, field::ID, i64::from(int(0)));
-            set(f, field::PAUSED, i64::from(int(1) != 0));
-            if a2 != 0 {
-                set(f, field::TIME, i64::from(int(2)));
-            }
-            set(f, field::EXTRA_PRIORITY, i64::from(int(3) != 0));
-            set(f, field::NZB, p as i64);
-            ptr_list_op(fl, 3, 0, f, no, 0);
-            0
-        }
-        _ => 0,
     }
+    false
+}
+
+/// Queues a stream-repair job (not yet tried by the live pass).
+pub(crate) fn push_repair_job(
+    nzb: NzbRef,
+    job: &crate::queuesubsys_host::StreamRepairJobDetailSnap,
+) {
+    if let Some(d) = nzb_data(nzb) {
+        d.files().jobs.push(RepairJob {
+            file_id: job.file_id,
+            filename: c_string(&job.filename),
+            decoded_size: job.decoded_file_size,
+            failed_size: job.failed_size,
+            missed_size: job.missed_size,
+            failed_articles: job.failed_articles,
+            par: job.par_file,
+            holes: hole_pairs(&job.holes),
+            steps_hash: job.steps_hash,
+            live_attempted: false,
+        });
+    }
+}
+
+/// The number of stream-repair jobs.
+pub(crate) fn repair_job_count(nzb: NzbRef) -> usize {
+    nzb_data(nzb).map_or(0, |d| d.files().jobs.len())
+}
+
+/// A summary of every stream-repair job, in order.
+pub(crate) fn repair_jobs(nzb: NzbRef) -> Vec<crate::queuesubsys_host::StreamRepairJobSnap> {
+    nzb_data(nzb).map_or_else(Vec::new, |d| {
+        d.files()
+            .jobs
+            .iter()
+            .map(|j| crate::queuesubsys_host::StreamRepairJobSnap {
+                file_id: j.file_id,
+                decoded_file_size: j.decoded_size,
+                holes_total_size: j.holes.iter().map(|r| r[1]).sum(),
+                failed_plus_missed_size: j.failed_size + j.missed_size,
+                filename: j.filename.to_bytes().to_vec(),
+            })
+            .collect()
+    })
+}
+
+/// The `idx`-th stream-repair job in full, or `None` past the end.
+pub(crate) fn repair_job(
+    nzb: NzbRef,
+    idx: usize,
+) -> Option<crate::queuesubsys_host::StreamRepairJobDetailSnap> {
+    let d = nzb_data(nzb)?;
+    let f = d.files();
+    let j = f.jobs.get(idx)?;
+    Some(crate::queuesubsys_host::StreamRepairJobDetailSnap {
+        file_id: j.file_id,
+        failed_articles: j.failed_articles,
+        par_file: j.par,
+        decoded_file_size: j.decoded_size,
+        failed_size: j.failed_size,
+        missed_size: j.missed_size,
+        steps_hash: j.steps_hash,
+        filename: j.filename.to_bytes().to_vec(),
+        holes: j
+            .holes
+            .iter()
+            .map(|r| ByteRange {
+                offset: r[0],
+                size: r[1],
+            })
+            .collect(),
+    })
+}
+
+/// Marks the `idx`-th job as tried by the live pass; whether it already was.
+pub(crate) fn mark_repair_job_live_attempted(nzb: NzbRef, idx: usize) -> bool {
+    nzb_data(nzb).is_some_and(|d| {
+        d.files()
+            .jobs
+            .get_mut(idx)
+            .is_some_and(|j| std::mem::replace(&mut j.live_attempted, true))
+    })
+}
+
+/// Removes the `idx`-th job, marking the download changed when asked.
+pub(crate) fn erase_repair_job(nzb: NzbRef, idx: usize, set_changed: bool) {
+    let Some(d) = nzb_data(nzb) else {
+        return;
+    };
+    {
+        let mut f = d.files();
+        if idx < f.jobs.len() {
+            f.jobs.remove(idx);
+        }
+    }
+    if set_changed {
+        unsafe { (*scalars(nzb)).changed = true };
+    }
+}
+
+/// Replaces the `idx`-th job's holes and, when `decoded_size >= 0`, its
+/// decoded size.
+pub(crate) fn update_repair_job_holes(
+    nzb: NzbRef,
+    idx: usize,
+    decoded_size: i64,
+    holes: &[ByteRange],
+) {
+    let Some(d) = nzb_data(nzb) else {
+        return;
+    };
+    if let Some(j) = d.files().jobs.get_mut(idx) {
+        if decoded_size >= 0 {
+            j.decoded_size = decoded_size;
+        }
+        j.holes = hole_pairs(holes);
+    }
+}
+
+/// A file parsed from an NZB, as [`add_parsed_file`] queues it. Pointers are
+/// null or C strings; the article slices have one entry per article.
+pub(crate) struct ParsedFile<'a> {
+    /// 0 takes a fresh id.
+    pub id: i32,
+    pub subject: *const c_char,
+    pub filename: *const c_char,
+    pub time: i32,
+    pub size: i64,
+    pub remaining_size: i64,
+    pub missed_size: i64,
+    pub total_articles: i32,
+    pub missed_articles: i32,
+    pub par_file: bool,
+    pub groups: &'a [*const c_char],
+    pub article_parts: &'a [i32],
+    pub article_sizes: &'a [i64],
+    pub article_msg_ids: &'a [*const c_char],
+}
+
+/// Queues a new file parsed from an NZB with its groups and articles.
+pub(crate) fn add_parsed_file(nzb: NzbRef, pf: &ParsedFile<'_>) -> FileRef {
+    use crate::qfile::{field, nzbget_rs_file_set, nzbget_rs_file_set_text, text};
+    if nzb.is_none() {
+        return FileRef::NONE;
+    }
+    let or_empty = |s: *const c_char| if s.is_null() { c"".as_ptr() } else { s };
+    let f = crate::qfile::nzbget_rs_file_new(-1);
+    let set = |id, v: i64| unsafe { nzbget_rs_file_set(f, id, v) };
+    let id = if pf.id != 0 {
+        pf.id
+    } else {
+        crate::idgen::FILE_IDS.next()
+    };
+    set(field::ID, i64::from(id));
+    set(field::NZB, nzb.addr() as i64);
+    unsafe {
+        nzbget_rs_file_set_text(f, text::SUBJECT, or_empty(pf.subject));
+        nzbget_rs_file_set_text(f, text::FILENAME, or_empty(pf.filename));
+    }
+    set(field::TIME, i64::from(pf.time));
+    set(field::SIZE, pf.size);
+    set(field::REMAINING_SIZE, pf.remaining_size);
+    set(field::MISSED_SIZE, pf.missed_size);
+    set(field::TOTAL_ARTICLES, i64::from(pf.total_articles));
+    set(field::MISSED_ARTICLES, i64::from(pf.missed_articles));
+    set(field::PAR_FILE, i64::from(pf.par_file));
+    for &name in pf.groups {
+        unsafe {
+            crate::qfile::nzbget_rs_file_op(
+                f,
+                2,
+                0,
+                or_empty(name),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+    }
+    let addr_or_null = |empty: bool, addr: usize| if empty { 0 } else { addr as i64 };
+    let mut art_args = [
+        addr_or_null(
+            pf.article_parts.is_empty(),
+            pf.article_parts.as_ptr() as usize,
+        ),
+        addr_or_null(
+            pf.article_sizes.is_empty(),
+            pf.article_sizes.as_ptr() as usize,
+        ),
+    ];
+    let msg_ids = if pf.article_msg_ids.is_empty() {
+        std::ptr::null_mut()
+    } else {
+        pf.article_msg_ids.as_ptr().cast_mut()
+    };
+    unsafe {
+        crate::qarticle::nzbget_rs_article_host(
+            crate::qfile::nzbget_rs_file_articles(f),
+            std::ptr::null_mut(),
+            105,
+            pf.article_parts.len() as c_int,
+            0,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            art_args.as_mut_ptr(),
+            msg_ids,
+        )
+    };
+    let file = FileRef::from_addr(f as usize);
+    append_file(nzb, file);
+    file
+}
+
+/// Queues an empty file record with a saved id (disk state restore); `time`
+/// is set only when given.
+pub(crate) fn add_stub_file(
+    nzb: NzbRef,
+    id: i32,
+    paused: bool,
+    time: Option<i32>,
+    extra_priority: bool,
+) {
+    use crate::qfile::{field, nzbget_rs_file_set};
+    if nzb.is_none() {
+        return;
+    }
+    let f = crate::qfile::nzbget_rs_file_new(-1);
+    let set = |field_id, v: i64| unsafe { nzbget_rs_file_set(f, field_id, v) };
+    // new FileInfo() takes a generated id before SetId replaces it
+    set(field::ID, i64::from(crate::idgen::FILE_IDS.next()));
+    set(field::ID, i64::from(id));
+    set(field::PAUSED, i64::from(paused));
+    if let Some(t) = time {
+        set(field::TIME, i64::from(t));
+    }
+    set(field::EXTRA_PRIORITY, i64::from(extra_priority));
+    set(field::NZB, nzb.addr() as i64);
+    append_file(nzb, FileRef::from_addr(f as usize));
 }
 
 /// NzbInfo::SetId: the id, raising the id floor.

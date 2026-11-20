@@ -960,16 +960,6 @@ impl QueueSubsysHost {
         0
     }
 
-    fn filelist_op(&self, nzb: NzbRef, op: i32, x: OpArgs) -> usize {
-        if !self.use_active {
-            return 0;
-        }
-        let nzb = nzb.addr() as *mut crate::qnzb::NzbScalars;
-        unsafe {
-            crate::qnzb::host_filelist_op(nzb, op, x.a2, x.p2, x.s1, x.s2, x.ints, x.i64s, x.strs)
-        }
-    }
-
     /// A duplicate record's op, or (op 2) a history entry's summary.
     fn record_op(&self, record: usize, op: i32, x: OpArgs) -> usize {
         if !self.use_active {
@@ -2699,27 +2689,22 @@ impl QueueSubsysHost {
         holes: &[crate::dupefallback::NzbgetRsByteRange],
         steps_hash: u64,
     ) {
-        let c = c_bytes(filename);
-        let mut ints = [file_id, failed_articles, i32::from(par_file)];
-        let mut i64s = [
-            decoded_file_size,
-            failed_size,
-            missed_size,
-            steps_hash as i64,
-        ];
-        self.filelist_op(
+        if !self.use_active {
+            return;
+        }
+        crate::qnzb::push_repair_job(
             nzb_ptr,
-            8,
-            OpArgs::NONE
-                .a2(holes.len() as i32)
-                .p2(if holes.is_empty() {
-                    0
-                } else {
-                    holes.as_ptr() as usize
-                })
-                .s1(c.as_ptr() as *const c_char)
-                .ints(ints.as_mut_ptr())
-                .i64s(i64s.as_mut_ptr()),
+            &StreamRepairJobDetailSnap {
+                file_id,
+                failed_articles,
+                par_file,
+                decoded_file_size,
+                failed_size,
+                missed_size,
+                steps_hash,
+                filename: filename.to_vec(),
+                holes: holes.to_vec(),
+            },
         );
     }
 
@@ -2730,40 +2715,17 @@ impl QueueSubsysHost {
     }
 
     pub fn nzb_stream_repair_jobs(&self, nzb_ptr: NzbRef) -> Vec<StreamRepairJobSnap> {
-        if nzb_ptr.is_none() {
+        if !self.use_active {
             return Vec::new();
         }
-        let n = self.filelist_op(nzb_ptr, 11, OpArgs::NONE.a2(-1));
-        let mut out = Vec::with_capacity(n);
-        let mut ints = [0i32; 1];
-        let mut i64s = [0i64; 3];
-        let mut strs = [std::ptr::null(); 1];
-        for i in 0..n {
-            self.filelist_op(
-                nzb_ptr,
-                11,
-                OpArgs::NONE
-                    .a2(i as i32)
-                    .ints(ints.as_mut_ptr())
-                    .i64s(i64s.as_mut_ptr())
-                    .strs(strs.as_mut_ptr()),
-            );
-            out.push(StreamRepairJobSnap {
-                file_id: ints[0],
-                decoded_file_size: i64s[0],
-                holes_total_size: i64s[1],
-                failed_plus_missed_size: i64s[2],
-                filename: unsafe { read_cstr(strs[0]) },
-            });
-        }
-        out
+        crate::qnzb::repair_jobs(nzb_ptr)
     }
 
     pub fn nzb_stream_repair_jobs_len(&self, nzb_ptr: NzbRef) -> usize {
-        if nzb_ptr.is_none() {
+        if !self.use_active {
             return 0;
         }
-        self.filelist_op(nzb_ptr, 11, OpArgs::NONE.a2(-1))
+        crate::qnzb::repair_job_count(nzb_ptr)
     }
 
     pub fn nzb_stream_repair_update_completed_file(
@@ -2772,13 +2734,7 @@ impl QueueSubsysHost {
         file_id: i32,
         mode: i32,
     ) {
-        let mut ints = [mode];
-        if self.filelist_op(
-            nzb_ptr,
-            12,
-            OpArgs::NONE.a2(file_id).ints(ints.as_mut_ptr()),
-        ) != 0
-        {
+        if self.use_active && crate::qnzb::update_completed_status(nzb_ptr, file_id, mode) {
             self.disk_discard_file(file_id, true, true, true);
         }
     }
@@ -2788,59 +2744,20 @@ impl QueueSubsysHost {
         nzb_ptr: NzbRef,
         idx: usize,
     ) -> StreamRepairJobDetailSnap {
-        let mut ints = [0i32; 5];
-        let mut i64s = [0i64; 4];
-        let mut strs = [std::ptr::null(); 2];
-        self.filelist_op(
-            nzb_ptr,
-            13,
-            OpArgs::NONE
-                .a2(idx as i32)
-                .ints(ints.as_mut_ptr())
-                .i64s(i64s.as_mut_ptr())
-                .strs(strs.as_mut_ptr()),
-        );
-        let holes_len = ints[4].max(0) as usize;
-        let holes = if holes_len == 0 || strs[1].is_null() {
-            Vec::new()
-        } else {
-            unsafe {
-                std::slice::from_raw_parts(
-                    strs[1] as *const crate::dupefallback::NzbgetRsByteRange,
-                    holes_len,
-                )
-                .to_vec()
-            }
-        };
-        StreamRepairJobDetailSnap {
-            file_id: ints[0],
-            failed_articles: ints[1],
-            par_file: ints[2] != 0,
-            decoded_file_size: i64s[0],
-            failed_size: i64s[1],
-            missed_size: i64s[2],
-            steps_hash: i64s[3] as u64,
-            filename: unsafe { read_cstr(strs[0]) },
-            holes,
+        if !self.use_active {
+            return StreamRepairJobDetailSnap::default();
         }
+        crate::qnzb::repair_job(nzb_ptr, idx).unwrap_or_default()
     }
 
     pub fn nzb_stream_repair_mark_live_attempted(&self, nzb_ptr: NzbRef, idx: usize) -> bool {
-        let mut ints = [1i32];
-        self.filelist_op(
-            nzb_ptr,
-            13,
-            OpArgs::NONE.a2(idx as i32).ints(ints.as_mut_ptr()),
-        ) != 0
+        self.use_active && crate::qnzb::mark_repair_job_live_attempted(nzb_ptr, idx)
     }
 
     pub fn nzb_stream_repair_erase_job(&self, nzb_ptr: NzbRef, idx: usize, set_changed: bool) {
-        let mut ints = [2i32, i32::from(set_changed)];
-        self.filelist_op(
-            nzb_ptr,
-            13,
-            OpArgs::NONE.a2(idx as i32).ints(ints.as_mut_ptr()),
-        );
+        if self.use_active {
+            crate::qnzb::erase_repair_job(nzb_ptr, idx, set_changed);
+        }
     }
 
     pub fn nzb_stream_repair_update_job_holes(
@@ -2848,20 +2765,11 @@ impl QueueSubsysHost {
         nzb_ptr: NzbRef,
         idx: usize,
         new_decoded_size: i64,
-        holes_ptr: usize,
-        holes_len: i32,
+        holes: &[crate::dupefallback::NzbgetRsByteRange],
     ) {
-        let mut ints = [3i32, holes_len];
-        let mut i64s = [new_decoded_size];
-        self.filelist_op(
-            nzb_ptr,
-            13,
-            OpArgs::NONE
-                .a2(idx as i32)
-                .p2(holes_ptr)
-                .ints(ints.as_mut_ptr())
-                .i64s(i64s.as_mut_ptr()),
-        );
+        if self.use_active {
+            crate::qnzb::update_repair_job_holes(nzb_ptr, idx, new_decoded_size, holes);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2883,52 +2791,28 @@ impl QueueSubsysHost {
         article_sizes: &[i64],
         article_msg_ids: &[*const c_char],
     ) -> FileRef {
-        let mut ints = [
-            id,
-            time,
-            total_articles,
-            missed_articles,
-            i32::from(par_file),
-            group_ptrs.len() as i32,
-            article_parts.len() as i32,
-        ];
-        let mut i64s = [
-            size,
-            remaining_size,
-            missed_size,
-            if article_parts.is_empty() {
-                0
-            } else {
-                article_parts.as_ptr() as usize as i64
-            },
-            if article_sizes.is_empty() {
-                0
-            } else {
-                article_sizes.as_ptr() as usize as i64
-            },
-        ];
-        let mut strs = [
-            if group_ptrs.is_empty() {
-                std::ptr::null()
-            } else {
-                group_ptrs.as_ptr() as *const c_char
-            },
-            if article_msg_ids.is_empty() {
-                std::ptr::null()
-            } else {
-                article_msg_ids.as_ptr() as *const c_char
-            },
-        ];
-        FileRef::from_addr(self.filelist_op(
+        if !self.use_active {
+            return FileRef::NONE;
+        }
+        crate::qnzb::add_parsed_file(
             nzb_ptr,
-            14,
-            OpArgs::NONE
-                .s1(subject)
-                .s2(filename)
-                .ints(ints.as_mut_ptr())
-                .i64s(i64s.as_mut_ptr())
-                .strs(strs.as_mut_ptr()),
-        ))
+            &crate::qnzb::ParsedFile {
+                id,
+                subject,
+                filename,
+                time,
+                size,
+                remaining_size,
+                missed_size,
+                total_articles,
+                missed_articles,
+                par_file,
+                groups: group_ptrs,
+                article_parts,
+                article_sizes,
+                article_msg_ids,
+            },
+        )
     }
 
     pub fn nzb_redownload_replace_files(&self, nzb_ptr: NzbRef, src_nzb_ptr: NzbRef) {
@@ -2964,19 +2848,9 @@ impl QueueSubsysHost {
         time_opt: Option<i32>,
         extra_priority: bool,
     ) {
-        let mut ints = [
-            id,
-            i32::from(paused),
-            time_opt.unwrap_or(0),
-            i32::from(extra_priority),
-        ];
-        self.filelist_op(
-            nzb_ptr,
-            19,
-            OpArgs::NONE
-                .a2(i32::from(time_opt.is_some()))
-                .ints(ints.as_mut_ptr()),
-        );
+        if self.use_active {
+            crate::qnzb::add_stub_file(nzb_ptr, id, paused, time_opt, extra_priority);
+        }
     }
 
     pub fn dup_snap(&self, dup_ptr: usize) -> DupSnap {

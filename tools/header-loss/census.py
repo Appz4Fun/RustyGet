@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Measured from real NZBs: RAR format split, RAR5 quick-open copies, par2 index packets in vol tails.
-Usage (on the server, needs the NNTP server in /var/lib/rustyget/rustyget.conf):
-  sudo python3 census.py N SEED DIR...   -> census.jsonl + summary on stdout
+Usage:
+  python3 census.py SHARD NSHARDS DIR...   -> census.<SHARD>.jsonl (every NZB whose sorted index % NSHARDS == SHARD)
+  python3 census.py --summary FILE.jsonl...  -> merged summary
+NNTP server: env NNTP_HOST/NNTP_PORT/NNTP_USER/NNTP_PASS, else Server1.* in /var/lib/rustyget/rustyget.conf.
 Per sampled release (>= 3 RAR volumes):
   first article of volume 1: rar4 / rar5 / rar5-hp (header-encrypted) / other / missing
   rar5: last article of a middle volume: quick-open record ('QO') present, recovery record ('RR')
@@ -9,13 +11,18 @@ Per sampled release (>= 3 RAR volumes):
 """
 import sys, os, re, json, random, socket, threading, queue, gzip, binascii, xml.etree.ElementTree as ET
 from collections import Counter
-conf = open('/var/lib/rustyget/rustyget.conf').read()
-g = lambda k: re.search(r'^Server1\.' + k + r'=(.*)$', conf, re.M).group(1).strip()
-HOST, PORT, USER, PASS = g('Host'), int(g('Port')), g('Username'), g('Password')
+def _cfg():
+    if os.environ.get('NNTP_HOST'):
+        e = os.environ
+        return e['NNTP_HOST'], int(e.get('NNTP_PORT', '119')), e.get('NNTP_USER', ''), e.get('NNTP_PASS', '')
+    conf = open('/var/lib/rustyget/rustyget.conf').read()
+    g = lambda k: re.search(r'^Server1\.' + k + r'=(.*)$', conf, re.M).group(1).strip()
+    return g('Host'), int(g('Port')), g('Username'), g('Password')
 NS = '{http://www.newzbin.com/DTD/2003/nzb}'
 
 class C:
     def __init__(s):
+        HOST, PORT, USER, PASS = CFG
         s.s = socket.create_connection((HOST, PORT), 30); s.f = s.s.makefile('rb')
         s.f.readline(); s.cmd('AUTHINFO USER ' + USER); s.cmd('AUTHINFO PASS ' + PASS)
     def cmd(s, c): s.s.sendall((c + '\r\n').encode()); return s.f.readline().decode('latin1').strip()
@@ -42,14 +49,6 @@ def ydec(lines):
             out.append((c - 42) & 255); i += 1
     return bytes(out)
 
-N, SEED, dirs = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3:]
-allf = []
-for d in dirs:
-    for root, _, fs in os.walk(d):
-        allf += [os.path.join(root, f) for f in fs if re.search(r'\.nzb(\.queued|\.gz)?$', f, re.I)]
-random.Random(SEED).shuffle(allf)
-print('nzbs found', len(allf), flush=True)
-
 def files(path):
     op = gzip.open if path.endswith('.gz') else open
     out = []
@@ -75,57 +74,88 @@ def head_kind(b):
     return 'other'
 
 PK = {'main': b'PAR 2.0\x00Main\x00\x00\x00\x00', 'filedesc': b'PAR 2.0\x00FileDesc', 'ifsc': b'PAR 2.0\x00IFSC\x00\x00\x00\x00'}
-q = queue.Queue(); res = []; lock = threading.Lock()
-for p in allf: q.put(p)
-def w():
-    c = None
-    while True:
-        with lock:
-            if len(res) >= N: return
-        try: p = q.get_nowait()
-        except queue.Empty: return
-        try: fl = files(p)
-        except Exception: continue
-        vols = sorted((volno(n), n, s) for n, s in fl if volno(n) is not None)
-        if len(vols) < 3: continue
-        pars = sorted(((sum(x[2] for x in s), n, s) for n, s in fl if re.search(r'\.vol\d+\+\d+\.par2$', n, re.I)), reverse=True)
-        rec = dict(nzb=os.path.basename(p), vols=len(vols), par2vols=len(pars))
-        for attempt in range(2):
-            try:
-                if c is None: c = C()
-                b = c.body(vols[0][2][0][1])
-                rec['head'] = 'missing' if b is None else head_kind(b[:64])
-                if rec['head'] == 'rar5':
-                    t = c.body(vols[len(vols) // 2][2][-1][1])
-                    if t is None: rec['qo'] = 'missing'
-                    else:
-                        d = t[-8192:]
-                        rec['qo'] = b'\x02QO' in d; rec['rr'] = b'\x02RR' in d
-                if pars and len(pars[0][2]) >= 2:
-                    s = pars[0][2]
-                    lt, ft = c.body(s[-1][1]), c.body(s[0][1])
-                    rec['par_last'] = None if lt is None else [k for k, v in PK.items() if v in lt]
-                    rec['par_first'] = None if ft is None else [k for k, v in PK.items() if v in ft]
-                    rec['par_segs'] = len(s)
-                break
-            except Exception as e:
-                c = None; rec['err'] = str(e)[:80]
-        with lock:
-            if len(res) < N:
-                res.append(rec)
-                if len(res) % 50 == 0: print('done', len(res), flush=True)
-ts = [threading.Thread(target=w) for _ in range(16)]; [t.start() for t in ts]; [t.join() for t in ts]
-with open('census.jsonl', 'w') as f:
-    for r in res: f.write(json.dumps(r) + '\n')
-pc = lambda a, b: f'{a}/{b} ({100*a/max(b,1):.1f}%)'
-print('releases sampled', len(res))
-print('volume 1 format:', dict(Counter(r.get('head', 'err') for r in res)))
-r5 = [r for r in res if r.get('head') == 'rar5' and isinstance(r.get('qo'), bool)]
-print('unencrypted rar5, middle volume tail read:', len(r5))
-print('  with quick-open copy:', pc(sum(r['qo'] for r in r5), len(r5)))
-print('  with recovery record:', pc(sum(r['rr'] for r in r5), len(r5)))
-pp = [r for r in res if isinstance(r.get('par_last'), list) and isinstance(r.get('par_first'), list)]
-print('releases with a multi-article par2 vol file read:', len(pp))
-for k in PK:
-    print(f'  {k} in LAST article:', pc(sum(k in r['par_last'] for r in pp), len(pp)), ' in FIRST article:', pc(sum(k in r['par_first'] for r in pp), len(pp)))
-print('  main+filedesc+ifsc all in last article:', pc(sum(set(PK) <= set(r['par_last']) for r in pp), len(pp)))
+
+def one(c, p):
+    fl = files(p)
+    vols = sorted((volno(n), n, s) for n, s in fl if volno(n) is not None)
+    if len(vols) < 3: return None
+    pars = sorted(((sum(x[2] for x in s), n, s) for n, s in fl if re.search(r'\.vol\d+\+\d+\.par2$', n, re.I)), reverse=True)
+    rec = dict(nzb=p, vols=len(vols), par2vols=len(pars))
+    b = c.body(vols[0][2][0][1])
+    rec['head'] = 'missing' if b is None else head_kind(b[:64])
+    if rec['head'] == 'rar5':
+        t = c.body(vols[len(vols) // 2][2][-1][1])
+        if t is None: rec['qo'] = 'missing'
+        else:
+            d = t[-8192:]
+            rec['qo'] = b'\x02QO' in d; rec['rr'] = b'\x02RR' in d
+    if pars and len(pars[0][2]) >= 2:
+        s = pars[0][2]
+        lt, ft = c.body(s[-1][1]), c.body(s[0][1])
+        rec['par_last'] = None if lt is None else [k for k, v in PK.items() if v in lt]
+        rec['par_first'] = None if ft is None else [k for k, v in PK.items() if v in ft]
+        rec['par_segs'] = len(s)
+    return rec
+
+def run(shard, nshards, dirs):
+    allf = []
+    for d in dirs:
+        for root, _, fs in os.walk(d):
+            allf += [os.path.join(root, f) for f in fs if re.search(r'\.nzb(\.queued|\.gz)?$', f, re.I)]
+    allf.sort(key=lambda p: os.path.basename(p))
+    mine = [p for i, p in enumerate(allf) if i % nshards == shard]
+    out = f'census.{shard}.jsonl'
+    done = set()
+    if os.path.exists(out):
+        done = {json.loads(l)['nzb'] for l in open(out) if l.strip()}
+    print('nzbs found', len(allf), 'this shard', len(mine), 'already done', len(done), flush=True)
+    q = queue.Queue(); lock = threading.Lock(); n = [0]
+    for p in mine:
+        if p not in done: q.put(p)
+    f = open(out, 'a')
+    def w():
+        c = None
+        while True:
+            try: p = q.get_nowait()
+            except queue.Empty: return
+            rec = None
+            for attempt in range(3):
+                try:
+                    if c is None: c = C()
+                    rec = one(c, p); break
+                except (OSError, EOFError, IndexError) as e:
+                    c = None; rec = dict(nzb=p, err=str(e)[:80])
+                except Exception as e:
+                    rec = dict(nzb=p, err='parse: ' + str(e)[:80]); break
+            if rec is None: rec = dict(nzb=p, skip='under 3 rar volumes')
+            with lock:
+                f.write(json.dumps(rec) + '\n'); f.flush(); n[0] += 1
+                if n[0] % 200 == 0: print('done', n[0], flush=True)
+    ts = [threading.Thread(target=w) for _ in range(int(os.environ.get('CONNS', '16')))]
+    [t.start() for t in ts]; [t.join() for t in ts]
+    print('shard finished', flush=True)
+
+def summary(paths):
+    res = [json.loads(l) for p in paths for l in open(p) if l.strip()]
+    pc = lambda a, b: f'{a}/{b} ({100*a/max(b,1):.1f}%)'
+    print('nzbs processed', len(res), ' skipped (<3 rar volumes):', sum('skip' in r for r in res), ' errors:', sum('err' in r for r in res))
+    res = [r for r in res if 'head' in r]
+    print('releases with >= 3 rar volumes:', len(res))
+    print('volume 1 format (first article):', dict(Counter(r['head'] for r in res)))
+    r5 = [r for r in res if r['head'] == 'rar5' and isinstance(r.get('qo'), bool)]
+    print('unencrypted rar5 with a middle volume tail read:', len(r5))
+    print('  quick-open header copy at the end:', pc(sum(r['qo'] for r in r5), len(r5)))
+    print('  recovery record at the end:', pc(sum(r['rr'] for r in r5), len(r5)))
+    print('  quick-open and no recovery record (head rebuild applies):', pc(sum(r['qo'] and not r['rr'] for r in r5), len(r5)))
+    pp = [r for r in res if isinstance(r.get('par_last'), list) and isinstance(r.get('par_first'), list)]
+    print('releases whose largest par2 vol file (>= 2 articles) was read:', len(pp))
+    for k in PK:
+        print(f'  {k}: in last article', pc(sum(k in r['par_last'] for r in pp), len(pp)), '| in first article', pc(sum(k in r['par_first'] for r in pp), len(pp)))
+    print('  main+filedesc+ifsc all in last article:', pc(sum(set(PK) <= set(r['par_last']) for r in pp), len(pp)))
+
+if __name__ == '__main__':
+    if sys.argv[1] == '--summary':
+        summary(sys.argv[2:])
+    else:
+        CFG = _cfg()
+        run(int(sys.argv[1]), int(sys.argv[2]), sys.argv[3:])

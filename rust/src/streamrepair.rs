@@ -9869,6 +9869,7 @@ impl CrossPackRepairSession {
                                 if let Some(h) = self.target_holes.get_mut(t) {
                                     h.clear();
                                 }
+                                self.note_put_back();
                                 let mut msg = b"Rebuilt ".to_vec();
                                 msg.extend_from_slice(name);
                                 msg.extend_from_slice(b" on disk: its headers and borrowed holes are written back");
@@ -10230,6 +10231,15 @@ impl CrossPackRepairSession {
     /// end-of-archive block): no duplicate in another packing has them. In a volume set those
     /// trailing bytes are normally the same in every volume but the last, so when two other
     /// intact volumes agree on them, they are copied into the damaged volume.
+    /// Notes that bytes were rebuilt into a volume (an end block from its siblings, headers
+    /// from a template) that need not match the original byte for byte: par2 may count them as
+    /// damage although direct unpack reads the volume fine.
+    fn note_put_back(&self) {
+        if self.dead_nzb_id != 0 {
+            crate::postproc::note_volume_end_rebuilt(self.dead_nzb_id);
+        }
+    }
+
     fn rebuild_container_tails(
         &mut self,
         env_cell: &std::cell::RefCell<&mut dyn CrossPackDonorEnv>,
@@ -10359,6 +10369,7 @@ impl CrossPackRepairSession {
                     }
                 }
                 env_cell.borrow_mut().sync_target_holes(&self.target_holes);
+                self.note_put_back();
                 let mut msg = b"Rebuilt the end block of ".to_vec();
                 msg.extend_from_slice(&self.set_members[m as usize].name);
                 msg.extend_from_slice(b" from its sibling volumes");
@@ -18808,6 +18819,9 @@ mod dead_volume_fill_tests {
         );
         if tail.iter().all(|&b| b == 0) {
             assert!(!session.target_holes()[0].is_empty(), "a hole left must stay a hole");
+        } else {
+            // An end block rebuilt from the siblings is noted: par2 may count it as damage.
+            assert!(crate::postproc::take_volume_end_rebuilt(-4_242_004));
         }
         let _ = std::fs::remove_dir_all(&root);
     }

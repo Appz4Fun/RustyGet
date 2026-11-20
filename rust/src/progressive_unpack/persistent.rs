@@ -787,6 +787,10 @@ impl<'a> Run<'a> {
         // A persistent session keeps every volume it opened.
         opts.limits.volume_handles = opts.limits.volume_handles.max(volumes + 16).min(4096);
         opts.limits.protection_paths = opts.limits.protection_paths.max(volumes + 16);
+        // Every hole costs metadata (about 1.4 MB per 1 MiB hole on 6790): a whole dead volume
+        // handed over before its borrow finished (about 90 holes) used up the default 128 MiB
+        // and failed the session. Same headroom as `rarreader` gives its sessions.
+        opts.limits.metadata_bytes = opts.limits.metadata_bytes.max(1 << 31);
         if !self.req.password.is_empty() {
             opts.set_password(Some(self.req.password.to_string()))
                 .map_err(|e| Step::Fail(Failure::from_progressive(&e)))?;

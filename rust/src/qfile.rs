@@ -13,6 +13,7 @@
 
 use crate::idgen::FILE_IDS;
 use crate::options::OptStr;
+use crate::queuesubsys_host::{FileRef, NzbRef};
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::ptr;
 use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
@@ -423,73 +424,85 @@ pub(crate) unsafe fn add_file_stats(nzb: usize, f: *const File, which: i32, op: 
     }
 }
 
-/// Applies a queue-host file setter (host op 42 sub-op `a1`) as the C++
-/// FileInfo did; `p2` is the collection where the op names one.
-///
-/// # Safety
-/// `f` is a live file; `p2` a live collection for 53 and 59; the caller
-/// holds the queue lock.
-pub(crate) unsafe fn host_file_set(
-    f: *const File,
-    a1: i32,
-    a2: i32,
-    p2: usize,
-    s1: *const c_char,
-    i64s: *const i64,
-) {
+/// An integer or flag field of a queued file (flags take 0 or 1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FileInt {
+    Paused = 0,
+    Deleted = 1,
+    DupeDeleted = 2,
+    FilenameConfirmed = 3,
+    FirstContent = 4,
+    ExtraPriority = 5,
+    ForceDirectWrite = 6,
+    OutputInitialized = 7,
+    PartialState = 8,
+    PartialChanged = 9,
+    DupeCutover = 10,
+    DupeNoSourceLogged = 11,
+    DupeLeadDonorId = 12,
+    DupeLeadFailures = 13,
+    DupeLeadSwitches = 14,
+    DupeRecoveredArticles = 15,
+    DupeAttemptedArticles = 16,
+    CompletedArticles = 17,
+    SuccessArticles = 18,
+    FailedArticles = 19,
+    ActiveDownloads = 20,
+    CachedArticles = 21,
+    ParFile = 22,
+    TotalArticles = 65,
+    MissedArticles = 66,
+}
+
+/// A 64-bit size or time field of a queued file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FileI64 {
+    RemainingSize = 30,
+    SuccessSize = 31,
+    FailedSize = 32,
+    DecodedFileSize = 33,
+    Time = 62,
+    Size = 63,
+    MissedSize = 64,
+}
+
+/// A text field of a queued file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FileStr {
+    Filename = 40,
+    OutputFilename = 41,
+    Origname = 42,
+    Hash16k = 43,
+    ParSetId = 44,
+    HardLinkPath = 45,
+    Subject = 61,
+}
+
+/// An update a queued file makes to itself or its articles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FileAction {
+    MakeValidFilename = 50,
+    ClearArticles = 51,
+    ResetArticlesNonserv = 52,
+    FailFinishedArticles = 54,
+}
+
+/// The live file behind a handle; `None` for [`FileRef::NONE`].
+fn file_of<'a>(file: FileRef) -> Option<&'a File> {
+    // A live handle always names a file the queue owns; callers hold the queue lock.
+    file.is_some()
+        .then(|| unsafe { &*(file.addr() as *const File) })
+}
+
+/// Sets an integer or flag field (FileInfo's int setters). Pausing a file
+/// or changing its extra priority also updates its download's counts.
+pub(crate) fn set_int(file: FileRef, field: FileInt, v: i32) {
     use field::*;
-    if f.is_null() {
-        return;
-    }
-    let file = unsafe { &*f };
-    let flag = i64::from(a2 != 0);
-    let v64 = || unsafe { *i64s };
+    let Some(file) = file_of(file) else { return };
     let nzb = file.get(NZB) as usize as *mut crate::qnzb::NzbScalars;
-    // simple setters: (sub-op, field, value)
-    let simple = match a1 {
-        1 => Some((DELETED, flag)),
-        2 => Some((DUPE_DELETED, flag)),
-        3 => Some((FILENAME_CONFIRMED, flag)),
-        4 => Some((FIRST_CONTENT, i64::from(a2))),
-        6 => Some((FORCE_DIRECT_WRITE, flag)),
-        7 => Some((OUTPUT_INITIALIZED, flag)),
-        8 => Some((PARTIAL_STATE, i64::from(a2))),
-        9 => Some((PARTIAL_CHANGED, flag)),
-        10 => Some((DUPE_CUTOVER, flag)),
-        11 => Some((DUPE_NO_SOURCE_LOGGED, flag)),
-        12 => Some((DUPE_LEAD_DONOR_ID, i64::from(a2))),
-        13 => Some((DUPE_LEAD_FAILURES, i64::from(a2))),
-        14 => Some((DUPE_LEAD_SWITCHES, i64::from(a2))),
-        15 => Some((DUPE_RECOVERED_ARTICLES, i64::from(a2))),
-        16 => Some((DUPE_ATTEMPTED_ARTICLES, i64::from(a2))),
-        17 => Some((COMPLETED_ARTICLES, i64::from(a2))),
-        18 => Some((SUCCESS_ARTICLES, i64::from(a2))),
-        19 => Some((FAILED_ARTICLES, i64::from(a2))),
-        20 => Some((ACTIVE_DOWNLOADS, i64::from(a2))),
-        21 => Some((CACHED_ARTICLES, i64::from(a2))),
-        22 => Some((PAR_FILE, flag)),
-        30 => Some((REMAINING_SIZE, v64())),
-        31 => Some((SUCCESS_SIZE, v64())),
-        32 => Some((FAILED_SIZE, v64())),
-        33 => Some((DECODED_FILE_SIZE, v64())),
-        58 => Some((NZB, p2 as i64)),
-        62 => Some((TIME, v64())),
-        63 => Some((SIZE, v64())),
-        64 => Some((MISSED_SIZE, v64())),
-        65 => Some((TOTAL_ARTICLES, i64::from(a2))),
-        66 => Some((MISSED_ARTICLES, i64::from(a2))),
-        _ => None,
-    };
-    if let Some((id, v)) = simple {
-        file.set(id, v);
-        return;
-    }
-    let set_text = |id: i32, v: *const c_char| unsafe { nzbget_rs_file_set_text(f, id, v) };
-    // the collection's copy of a file's server stats (NzbInfo::AddFileStats)
-    let add_stats = |which: i32, op: i32| unsafe { add_file_stats(p2, f, which, op) };
-    match a1 {
-        0 => {
-            let paused = a2 != 0;
+    match field {
+        FileInt::Paused => {
+            let paused = v != 0;
             if (file.get(PAUSED) != 0) != paused && !nzb.is_null() {
                 let remaining = file.get(REMAINING_SIZE);
                 let n = unsafe { &mut *nzb };
@@ -498,81 +511,158 @@ pub(crate) unsafe fn host_file_set(
             }
             file.set(PAUSED, i64::from(paused));
         }
-        5 => {
-            let extra = a2 != 0;
+        FileInt::Deleted => file.set(DELETED, i64::from(v != 0)),
+        FileInt::DupeDeleted => file.set(DUPE_DELETED, i64::from(v != 0)),
+        FileInt::FilenameConfirmed => file.set(FILENAME_CONFIRMED, i64::from(v != 0)),
+        FileInt::FirstContent => file.set(FIRST_CONTENT, i64::from(v)),
+        FileInt::ExtraPriority => {
+            let extra = v != 0;
             if (file.get(EXTRA_PRIORITY) != 0) != extra && !nzb.is_null() {
                 unsafe { &mut *nzb }.extraPriority += if extra { 1 } else { -1 };
             }
             file.set(EXTRA_PRIORITY, i64::from(extra));
         }
-        40 => set_text(text::FILENAME, s1),
-        41 => {
-            // the output name changes under the output lock while downloads run
-            let taken = file.output_lock();
+        FileInt::ForceDirectWrite => file.set(FORCE_DIRECT_WRITE, i64::from(v != 0)),
+        FileInt::OutputInitialized => file.set(OUTPUT_INITIALIZED, i64::from(v != 0)),
+        FileInt::PartialState => file.set(PARTIAL_STATE, i64::from(v)),
+        FileInt::PartialChanged => file.set(PARTIAL_CHANGED, i64::from(v != 0)),
+        FileInt::DupeCutover => file.set(DUPE_CUTOVER, i64::from(v != 0)),
+        FileInt::DupeNoSourceLogged => file.set(DUPE_NO_SOURCE_LOGGED, i64::from(v != 0)),
+        FileInt::DupeLeadDonorId => file.set(DUPE_LEAD_DONOR_ID, i64::from(v)),
+        FileInt::DupeLeadFailures => file.set(DUPE_LEAD_FAILURES, i64::from(v)),
+        FileInt::DupeLeadSwitches => file.set(DUPE_LEAD_SWITCHES, i64::from(v)),
+        FileInt::DupeRecoveredArticles => file.set(DUPE_RECOVERED_ARTICLES, i64::from(v)),
+        FileInt::DupeAttemptedArticles => file.set(DUPE_ATTEMPTED_ARTICLES, i64::from(v)),
+        FileInt::CompletedArticles => file.set(COMPLETED_ARTICLES, i64::from(v)),
+        FileInt::SuccessArticles => file.set(SUCCESS_ARTICLES, i64::from(v)),
+        FileInt::FailedArticles => file.set(FAILED_ARTICLES, i64::from(v)),
+        FileInt::ActiveDownloads => file.set(ACTIVE_DOWNLOADS, i64::from(v)),
+        FileInt::CachedArticles => file.set(CACHED_ARTICLES, i64::from(v)),
+        FileInt::ParFile => file.set(PAR_FILE, i64::from(v != 0)),
+        FileInt::TotalArticles => file.set(TOTAL_ARTICLES, i64::from(v)),
+        FileInt::MissedArticles => file.set(MISSED_ARTICLES, i64::from(v)),
+    }
+}
+
+/// Sets a 64-bit size or time field.
+pub(crate) fn set_i64(file: FileRef, field: FileI64, v: i64) {
+    use field::*;
+    let Some(file) = file_of(file) else { return };
+    match field {
+        FileI64::RemainingSize => file.set(REMAINING_SIZE, v),
+        FileI64::SuccessSize => file.set(SUCCESS_SIZE, v),
+        FileI64::FailedSize => file.set(FAILED_SIZE, v),
+        FileI64::DecodedFileSize => file.set(DECODED_FILE_SIZE, v),
+        FileI64::Time => file.set(TIME, v),
+        FileI64::Size => file.set(SIZE, v),
+        FileI64::MissedSize => file.set(MISSED_SIZE, v),
+    }
+}
+
+/// Sets a text field; `None` unsets it (the hard-link path stores an empty
+/// text instead). The output file name changes under the output lock.
+pub(crate) fn set_str(file: FileRef, field: FileStr, value: Option<&[u8]>) {
+    let Some(f) = file_of(file) else { return };
+    let value = value.map(|v| {
+        let end = v.iter().position(|&b| b == 0).unwrap_or(v.len());
+        CString::new(&v[..end]).unwrap_or_default()
+    });
+    let s1 = value.as_ref().map_or(ptr::null(), |v| v.as_ptr());
+    let fp: *const File = f;
+    let set_text = |id: i32, v: *const c_char| unsafe { nzbget_rs_file_set_text(fp, id, v) };
+    match field {
+        FileStr::Filename => set_text(text::FILENAME, s1),
+        FileStr::OutputFilename => {
+            let taken = f.output_lock();
             set_text(text::OUTPUT_FILENAME, s1);
             if taken {
-                file.output_unlock();
+                f.output_unlock();
             }
         }
-        42 => set_text(text::ORIGNAME, s1),
-        43 => set_text(text::HASH16K, s1),
-        44 => set_text(text::PAR_SET_ID, s1),
-        45 => set_text(
+        FileStr::Origname => set_text(text::ORIGNAME, s1),
+        FileStr::Hash16k => set_text(text::HASH16K, s1),
+        FileStr::ParSetId => set_text(text::PAR_SET_ID, s1),
+        FileStr::HardLinkPath => set_text(
             text::HARD_LINK_PATH,
             if s1.is_null() { c"".as_ptr() } else { s1 },
         ),
-        50 => {
-            let name = file.lock().texts[text::FILENAME as usize]
-                .as_bytes()
-                .to_vec();
+        FileStr::Subject => set_text(text::SUBJECT, s1),
+    }
+}
+
+/// Runs one of the file's self-updates.
+pub(crate) fn act(file: FileRef, action: FileAction) {
+    let Some(f) = file_of(file) else { return };
+    let article_op = |op| unsafe {
+        crate::qarticle::nzbget_rs_article_host(
+            f.articles,
+            ptr::null_mut(),
+            op,
+            0,
+            0,
+            ptr::null(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+        );
+    };
+    match action {
+        FileAction::MakeValidFilename => {
+            let name = f.lock().texts[text::FILENAME as usize].as_bytes().to_vec();
             let valid = crate::paths::make_valid_filename(&name, false);
             let valid = CString::new(valid).unwrap_or_default();
-            set_text(text::FILENAME, valid.as_ptr());
+            unsafe { nzbget_rs_file_set_text(f, text::FILENAME, valid.as_ptr()) };
         }
-        51 | 52 | 54 => unsafe {
-            let op = match a1 {
-                51 => 101,
-                52 => 102,
-                _ => 103,
-            };
-            crate::qarticle::nzbget_rs_article_host(
-                file.articles,
-                ptr::null_mut(),
-                op,
-                0,
-                0,
-                ptr::null(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            );
-        },
-        53 => {
-            add_stats(1, 2);
-            file.lock().server_stats.clear();
-        }
-        55 => {
-            let taken = file.output_lock();
-            unsafe {
-                crate::qarticle::nzbget_rs_article_host(
-                    file.articles,
-                    ptr::null_mut(),
-                    104,
-                    0,
-                    p2,
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                )
-            };
-            if taken {
-                file.output_unlock();
-            }
-        }
-        59 => add_stats(0, 2),
-        61 => set_text(text::SUBJECT, s1),
-        _ => {}
+        FileAction::ClearArticles => article_op(101),
+        FileAction::ResetArticlesNonserv => article_op(102),
+        FileAction::FailFinishedArticles => article_op(103),
+    }
+}
+
+/// Sets the download the file belongs to.
+pub(crate) fn set_nzb(file: FileRef, nzb: NzbRef) {
+    if let Some(f) = file_of(file) {
+        f.set(field::NZB, nzb.addr() as i64);
+    }
+}
+
+/// Subtracts the file's server stats from the download's all-time totals;
+/// `and_clear` also subtracts them from the current-session counts and
+/// clears the file's own list.
+pub(crate) fn subtract_server_stats(file: FileRef, nzb: NzbRef, and_clear: bool) {
+    let (Some(f), true) = (file_of(file), nzb.is_some()) else {
+        return;
+    };
+    let fp: *const File = f;
+    if and_clear {
+        unsafe { add_file_stats(nzb.addr(), fp, 1, 2) };
+        f.lock().server_stats.clear();
+    } else {
+        unsafe { add_file_stats(nzb.addr(), fp, 0, 2) };
+    }
+}
+
+/// Deletes the temporary result files of the file's articles that are not
+/// running: all of them when `all`, else only those from a dupe-fallback
+/// round. Runs under the output lock.
+pub(crate) fn discard_temp_articles(file: FileRef, all: bool) {
+    let Some(f) = file_of(file) else { return };
+    let taken = f.output_lock();
+    unsafe {
+        crate::qarticle::nzbget_rs_article_host(
+            f.articles,
+            ptr::null_mut(),
+            104,
+            0,
+            usize::from(all),
+            ptr::null(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+        )
+    };
+    if taken {
+        f.output_unlock();
     }
 }
 
@@ -1373,6 +1463,38 @@ mod tests {
         }
         FILE_IDS.reset_to_floor();
         assert!(FILE_IDS.last() >= 9000);
+    }
+
+    #[test]
+    fn typed_setters_keep_the_download_counts() {
+        let n = crate::qnzb::nzbget_rs_nzb_scalars_new();
+        let f = nzbget_rs_file_new(5);
+        let fr = FileRef::from_addr(f as usize);
+        set_nzb(fr, NzbRef::from_addr(n as usize));
+        set_i64(fr, FileI64::RemainingSize, 100);
+        set_int(fr, FileInt::Paused, 1);
+        set_int(fr, FileInt::Paused, 1);
+        set_int(fr, FileInt::ExtraPriority, 1);
+        unsafe {
+            assert_eq!(((*n).pausedFileCount, (*n).pausedSize), (1, 100));
+            assert_eq!((*n).extraPriority, 1);
+        }
+        set_int(fr, FileInt::Paused, 0);
+        set_int(fr, FileInt::ExtraPriority, 0);
+        set_str(fr, FileStr::Filename, Some(b"a?b.rar"));
+        act(fr, FileAction::MakeValidFilename);
+        unsafe {
+            assert_eq!(((*n).pausedFileCount, (*n).pausedSize), (0, 0));
+            assert_eq!((*n).extraPriority, 0);
+            assert_eq!(
+                CStr::from_ptr(nzbget_rs_file_text(f, text::FILENAME)).to_bytes(),
+                b"a_b.rar"
+            );
+            nzbget_rs_file_free(f);
+            crate::qnzb::nzbget_rs_nzb_scalars_free(n);
+        }
+        // a missing handle is a no-op
+        set_int(FileRef::NONE, FileInt::Paused, 1);
     }
 
     #[test]

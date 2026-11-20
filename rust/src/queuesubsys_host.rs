@@ -2,6 +2,7 @@
 //! and `QueueCoordinator` orchestration in Rust.
 
 use crate::options::OptStr;
+use crate::qfile::{FileAction, FileI64, FileInt, FileStr};
 use crate::qnzb::{
     FileTotals, MessageRange, NzbAction, NzbI64, NzbInt, NzbStr, ServerStat, StatList,
 };
@@ -288,54 +289,52 @@ pub(crate) const NZB_ACT_CLEAR_REPAIR_JOBS: NzbAction = NzbAction::ClearRepairJo
 pub(crate) const NZB_ACT_CLEAR_COMPLETED_FILES: NzbAction = NzbAction::ClearCompletedFiles;
 
 // FileInfo field indices (op = 42)
-pub(crate) const FILE_INT_PAUSED: i32 = 0;
-pub(crate) const FILE_INT_DELETED: i32 = 1;
-pub(crate) const FILE_INT_DUPE_DELETED: i32 = 2;
-pub(crate) const FILE_INT_FILENAME_CONFIRMED: i32 = 3;
-pub(crate) const FILE_INT_FIRST_CONTENT: i32 = 4;
-pub(crate) const FILE_INT_EXTRA_PRIORITY: i32 = 5;
-pub(crate) const FILE_INT_FORCE_DIRECT_WRITE: i32 = 6;
-pub(crate) const FILE_INT_OUTPUT_INITIALIZED: i32 = 7;
-pub(crate) const FILE_INT_PARTIAL_STATE: i32 = 8;
-pub(crate) const FILE_INT_PARTIAL_CHANGED: i32 = 9;
-pub(crate) const FILE_INT_DUPE_CUTOVER: i32 = 10;
-pub(crate) const FILE_INT_DUPE_NO_SOURCE_LOGGED: i32 = 11;
-pub(crate) const FILE_INT_DUPE_LEAD_DONOR_ID: i32 = 12;
-pub(crate) const FILE_INT_DUPE_LEAD_FAILURES: i32 = 13;
-pub(crate) const FILE_INT_DUPE_LEAD_SWITCHES: i32 = 14;
-pub(crate) const FILE_INT_DUPE_RECOVERED_ARTICLES: i32 = 15;
-pub(crate) const FILE_INT_DUPE_ATTEMPTED_ARTICLES: i32 = 16;
-pub(crate) const FILE_INT_COMPLETED_ARTICLES: i32 = 17;
-pub(crate) const FILE_INT_SUCCESS_ARTICLES: i32 = 18;
-pub(crate) const FILE_INT_FAILED_ARTICLES: i32 = 19;
-pub(crate) const FILE_INT_ACTIVE_DOWNLOADS: i32 = 20;
-pub(crate) const FILE_INT_CACHED_ARTICLES: i32 = 21;
-pub(crate) const FILE_INT_PAR_FILE: i32 = 22;
+pub(crate) const FILE_INT_PAUSED: FileInt = FileInt::Paused;
+pub(crate) const FILE_INT_DELETED: FileInt = FileInt::Deleted;
+pub(crate) const FILE_INT_DUPE_DELETED: FileInt = FileInt::DupeDeleted;
+pub(crate) const FILE_INT_FILENAME_CONFIRMED: FileInt = FileInt::FilenameConfirmed;
+pub(crate) const FILE_INT_FIRST_CONTENT: FileInt = FileInt::FirstContent;
+pub(crate) const FILE_INT_EXTRA_PRIORITY: FileInt = FileInt::ExtraPriority;
+pub(crate) const FILE_INT_FORCE_DIRECT_WRITE: FileInt = FileInt::ForceDirectWrite;
+pub(crate) const FILE_INT_OUTPUT_INITIALIZED: FileInt = FileInt::OutputInitialized;
+pub(crate) const FILE_INT_PARTIAL_STATE: FileInt = FileInt::PartialState;
+pub(crate) const FILE_INT_PARTIAL_CHANGED: FileInt = FileInt::PartialChanged;
+pub(crate) const FILE_INT_DUPE_CUTOVER: FileInt = FileInt::DupeCutover;
+pub(crate) const FILE_INT_DUPE_NO_SOURCE_LOGGED: FileInt = FileInt::DupeNoSourceLogged;
+pub(crate) const FILE_INT_DUPE_LEAD_DONOR_ID: FileInt = FileInt::DupeLeadDonorId;
+pub(crate) const FILE_INT_DUPE_LEAD_FAILURES: FileInt = FileInt::DupeLeadFailures;
+pub(crate) const FILE_INT_DUPE_LEAD_SWITCHES: FileInt = FileInt::DupeLeadSwitches;
+pub(crate) const FILE_INT_DUPE_RECOVERED_ARTICLES: FileInt = FileInt::DupeRecoveredArticles;
+pub(crate) const FILE_INT_DUPE_ATTEMPTED_ARTICLES: FileInt = FileInt::DupeAttemptedArticles;
+pub(crate) const FILE_INT_COMPLETED_ARTICLES: FileInt = FileInt::CompletedArticles;
+pub(crate) const FILE_INT_SUCCESS_ARTICLES: FileInt = FileInt::SuccessArticles;
+pub(crate) const FILE_INT_FAILED_ARTICLES: FileInt = FileInt::FailedArticles;
+pub(crate) const FILE_INT_ACTIVE_DOWNLOADS: FileInt = FileInt::ActiveDownloads;
+pub(crate) const FILE_INT_CACHED_ARTICLES: FileInt = FileInt::CachedArticles;
+pub(crate) const FILE_INT_PAR_FILE: FileInt = FileInt::ParFile;
 
-pub(crate) const FILE_I64_REMAINING_SIZE: i32 = 30;
-pub(crate) const FILE_I64_SUCCESS_SIZE: i32 = 31;
-pub(crate) const FILE_I64_FAILED_SIZE: i32 = 32;
-pub(crate) const FILE_I64_DECODED_FILE_SIZE: i32 = 33;
+pub(crate) const FILE_I64_REMAINING_SIZE: FileI64 = FileI64::RemainingSize;
+pub(crate) const FILE_I64_SUCCESS_SIZE: FileI64 = FileI64::SuccessSize;
+pub(crate) const FILE_I64_FAILED_SIZE: FileI64 = FileI64::FailedSize;
+pub(crate) const FILE_I64_DECODED_FILE_SIZE: FileI64 = FileI64::DecodedFileSize;
 
-pub(crate) const FILE_STR_FILENAME: i32 = 40;
-pub(crate) const FILE_STR_OUTPUT_FILENAME: i32 = 41;
-pub(crate) const FILE_STR_ORIGNAME: i32 = 42;
-pub(crate) const FILE_STR_HASH16K: i32 = 43;
-pub(crate) const FILE_STR_PAR_SET_ID: i32 = 44;
-pub(crate) const FILE_STR_HARD_LINK_PATH: i32 = 45;
+pub(crate) const FILE_STR_FILENAME: FileStr = FileStr::Filename;
+pub(crate) const FILE_STR_OUTPUT_FILENAME: FileStr = FileStr::OutputFilename;
+pub(crate) const FILE_STR_ORIGNAME: FileStr = FileStr::Origname;
+pub(crate) const FILE_STR_HASH16K: FileStr = FileStr::Hash16k;
+pub(crate) const FILE_STR_PAR_SET_ID: FileStr = FileStr::ParSetId;
+pub(crate) const FILE_STR_HARD_LINK_PATH: FileStr = FileStr::HardLinkPath;
 
-pub(crate) const FILE_ACT_MAKE_VALID_FILENAME: i32 = 50;
-pub(crate) const FILE_ACT_CLEAR_ARTICLES: i32 = 51;
-pub(crate) const FILE_ACT_RESET_ARTICLES_NONSERV: i32 = 52;
-pub(crate) const FILE_ACT_SUBTRACT_AND_CLEAR_SERVER_STATS: i32 = 53;
-pub(crate) const FILE_ACT_FAIL_FINISHED_ARTICLES: i32 = 54;
-pub(crate) const FILE_ACT_DISCARD_TEMP_ARTICLES: i32 = 55;
-pub(crate) const FILE_STR_SUBJECT: i32 = 61;
-pub(crate) const FILE_I64_TIME: i32 = 62;
-pub(crate) const FILE_I64_SIZE: i32 = 63;
-pub(crate) const FILE_I64_MISSED_SIZE: i32 = 64;
-pub(crate) const FILE_INT_TOTAL_ARTICLES: i32 = 65;
-pub(crate) const FILE_INT_MISSED_ARTICLES: i32 = 66;
+pub(crate) const FILE_ACT_MAKE_VALID_FILENAME: FileAction = FileAction::MakeValidFilename;
+pub(crate) const FILE_ACT_CLEAR_ARTICLES: FileAction = FileAction::ClearArticles;
+pub(crate) const FILE_ACT_RESET_ARTICLES_NONSERV: FileAction = FileAction::ResetArticlesNonserv;
+pub(crate) const FILE_ACT_FAIL_FINISHED_ARTICLES: FileAction = FileAction::FailFinishedArticles;
+pub(crate) const FILE_STR_SUBJECT: FileStr = FileStr::Subject;
+pub(crate) const FILE_I64_TIME: FileI64 = FileI64::Time;
+pub(crate) const FILE_I64_SIZE: FileI64 = FileI64::Size;
+pub(crate) const FILE_I64_MISSED_SIZE: FileI64 = FileI64::MissedSize;
+pub(crate) const FILE_INT_TOTAL_ARTICLES: FileInt = FileInt::TotalArticles;
+pub(crate) const FILE_INT_MISSED_ARTICLES: FileInt = FileInt::MissedArticles;
 
 // ArticleInfo field indices (op = 43)
 pub(crate) const ART_INT_STATUS: i32 = 0;
@@ -1018,14 +1017,6 @@ impl QueueSubsysHost {
                 list, article, op, x.a2, x.p2, x.s1, x.ints, x.i64s, x.strs,
             )
         }
-    }
-
-    fn file_set_op(&self, file: FileRef, op: i32, x: OpArgs) -> usize {
-        if self.use_active {
-            let file = file.addr() as *const crate::qfile::File;
-            unsafe { crate::qfile::host_file_set(file, op, x.a2, x.p2, x.s1, x.i64s) };
-        }
-        0
     }
 
     fn cache_op(&self, file: FileRef, op: i32, x: OpArgs) -> usize {
@@ -3190,25 +3181,44 @@ impl QueueSubsysHost {
         }
     }
 
-    pub fn file_set_int(&self, file_ptr: FileRef, field: i32, val: i32) {
-        self.file_set_op(file_ptr, field, OpArgs::NONE.a2(val));
+    pub fn file_set_int(&self, file_ptr: FileRef, field: FileInt, val: i32) {
+        if self.use_active {
+            crate::qfile::set_int(file_ptr, field, val);
+        }
     }
 
-    pub fn file_set_i64(&self, file_ptr: FileRef, field: i32, val: i64) {
-        let mut i64s = [val];
-        self.file_set_op(file_ptr, field, OpArgs::NONE.i64s(i64s.as_mut_ptr()));
+    pub fn file_set_i64(&self, file_ptr: FileRef, field: FileI64, val: i64) {
+        if self.use_active {
+            crate::qfile::set_i64(file_ptr, field, val);
+        }
     }
 
-    pub fn file_set_str(&self, file_ptr: FileRef, field: i32, val: Option<&[u8]>) {
-        let cv = val.map(c_bytes);
-        let s1 = cv
-            .as_ref()
-            .map_or(std::ptr::null(), |v| v.as_ptr() as *const c_char);
-        self.file_set_op(file_ptr, field, OpArgs::NONE.s1(s1));
+    pub fn file_set_str(&self, file_ptr: FileRef, field: FileStr, val: Option<&[u8]>) {
+        if self.use_active {
+            crate::qfile::set_str(file_ptr, field, val);
+        }
     }
 
-    pub fn file_action(&self, file_ptr: FileRef, action: i32, p2: usize) {
-        self.file_set_op(file_ptr, action, OpArgs::NONE.p2(p2));
+    pub fn file_action(&self, file_ptr: FileRef, action: FileAction) {
+        if self.use_active {
+            crate::qfile::act(file_ptr, action);
+        }
+    }
+
+    /// Subtracts the file's server stats from the download's totals and
+    /// current-session counts, and clears the file's own list.
+    pub fn file_subtract_and_clear_server_stats(&self, file_ptr: FileRef, nzb_ptr: NzbRef) {
+        if self.use_active {
+            crate::qfile::subtract_server_stats(file_ptr, nzb_ptr, true);
+        }
+    }
+
+    /// Deletes the temporary result files of the file's articles that are
+    /// not running: all of them when `all`, else only dupe-fallback ones.
+    pub fn file_discard_temp_articles(&self, file_ptr: FileRef, all: bool) {
+        if self.use_active {
+            crate::qfile::discard_temp_articles(file_ptr, all);
+        }
     }
 
     pub fn alloc_file_id(&self) -> i32 {
@@ -3228,11 +3238,15 @@ impl QueueSubsysHost {
     }
 
     pub fn file_set_nzb_info(&self, file_ptr: FileRef, nzb_ptr: NzbRef) {
-        self.file_set_op(file_ptr, 58, OpArgs::NONE.p2(nzb_ptr.addr()));
+        if self.use_active {
+            crate::qfile::set_nzb(file_ptr, nzb_ptr);
+        }
     }
 
     pub fn file_subtract_server_stats_from_nzb_total(&self, file_ptr: FileRef, nzb_ptr: NzbRef) {
-        self.file_set_op(file_ptr, 59, OpArgs::NONE.p2(nzb_ptr.addr()));
+        if self.use_active {
+            crate::qfile::subtract_server_stats(file_ptr, nzb_ptr, false);
+        }
     }
 
     pub fn file_new_standalone(&self, id: i32, bump_gen: bool) -> FileRef {

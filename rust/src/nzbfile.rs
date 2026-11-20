@@ -1297,7 +1297,7 @@ pub(crate) fn parse_and_materialize_nzb(
     if opts.server_mode {
         for f in &files {
             host.disk_save_file(f.file_ptr);
-            host.file_action(f.file_ptr, FILE_ACT_CLEAR_ARTICLES, 0);
+            host.file_action(f.file_ptr, FILE_ACT_CLEAR_ARTICLES);
         }
     }
 

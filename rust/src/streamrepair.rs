@@ -6340,16 +6340,14 @@ impl RepairSetData {
                 })
             })
             .collect();
-        // Holes before this index were hinted in an earlier wave.
-        let mut hinted_to = 0usize;
-
         for (index, hole) in holes.iter().copied().enumerate() {
-            if index >= hinted_to && !target_files.is_stopped() {
+            // Hinted before every hole: each donor member fetches the next holes' articles
+            // as a batch once half a wave of them is not cached yet.
+            if !target_files.is_stopped() {
                 let wave = small_hole_wave(&holes[index..], FULL_CHUNK);
                 if wave >= 2 {
                     donor_map.prefetch_donor_inner(donor_sources, &holes[index..index + wave]);
                 }
-                hinted_to = index + wave.max(1);
             }
 
             let hole_end = range_end(hole);
@@ -6872,8 +6870,10 @@ impl DonorMemberSource {
         if !transport.has_prefetch_batch() || !self.ensure_init(transport) {
             return;
         }
-        let parts = self.wave_parts(ranges);
-        if parts.len() < 2 {
+        let (parts, all) = self.wave_parts(ranges);
+        // Called before every hole: waits until half a wave is free (or the rest fits) so
+        // each batch keeps enough articles in flight.
+        if parts.len() < 2 || (!all && parts.len() < DONOR_WAVE_PARTS / 2) {
             return;
         }
         transport.begin_prefetch_batch(&parts);
@@ -6890,12 +6890,14 @@ impl DonorMemberSource {
         }
     }
 
-    /// The uncached parts covering `ranges` (with the usual one-part slack each side), in
-    /// order and capped at `DONOR_WAVE_PARTS`.
-    fn wave_parts(&self, ranges: &[(i64, i64)]) -> Vec<i32> {
-        let mut parts = std::collections::BTreeSet::new();
+    /// The uncached parts covering the longest prefix of `ranges` (with the usual one-part
+    /// slack each side) whose parts, cached ones included, number at most
+    /// `DONOR_WAVE_PARTS`; and whether that prefix is all of `ranges`. Counting the cached
+    /// ones keeps a wave from evicting parts an earlier wave fetched for holes not read yet.
+    fn wave_parts(&self, ranges: &[(i64, i64)]) -> (Vec<i32>, bool) {
+        let mut held = std::collections::BTreeSet::new();
         if self.bad || self.ranges.is_empty() {
-            return Vec::new();
+            return (Vec::new(), false);
         }
         for &(offset, size) in ranges {
             if size <= 0 || offset < 0 {
@@ -6904,15 +6906,15 @@ impl DonorMemberSource {
             let first_est = donor_index_for_offset(offset, self.drift, &self.ranges);
             let last_est = donor_index_for_offset(offset + size - 1, self.drift, &self.ranges);
             let (first, last) = donor_calc_prefetch_bounds(first_est, last_est, self.ranges.len());
-            let wanted: Vec<i32> = (first..=last)
-                .filter(|i| !self.cache.contains_key(i) && !parts.contains(i))
-                .collect();
-            if parts.len() + wanted.len() > DONOR_WAVE_PARTS {
-                break;
+            let more = (first..=last).filter(|i| !held.contains(i)).count();
+            if held.len() + more > DONOR_WAVE_PARTS {
+                let parts = held.into_iter().filter(|i| !self.cache.contains_key(i)).collect();
+                return (parts, false);
             }
-            parts.extend(wanted);
+            held.extend(first..=last);
         }
-        parts.into_iter().collect()
+        let parts = held.into_iter().filter(|i| !self.cache.contains_key(i)).collect();
+        (parts, true)
     }
 
     pub fn read_with_transport(
@@ -17299,11 +17301,26 @@ mod tests {
         assert_eq!(transport.batch_begins, 1);
         assert_eq!(transport.single_fetches, singles);
 
-        // A wave never asks for more parts than the cache keeps.
-        let many: Vec<(i64, i64)> = (0..20i64).map(|i| (i * 200 + 10, 60)).collect();
+        // A wave never asks for more parts than the cache keeps, and the next wave comes
+        // once the first holes are read: 12 holes over 40 parts take three batches, not one
+        // per hole, and every read is served from the cache.
+        let many: Vec<(i64, i64)> = (0..12i64).map(|i| (i * 300 + 10, 60)).collect();
         let mut src = DonorMemberSource::new(vec![110i32; 40]);
         assert_eq!(src.size_with_transport(&mut transport), 4000);
-        assert!(src.wave_parts(&many).len() <= DONOR_WAVE_PARTS);
+        let (first_wave, all) = src.wave_parts(&many);
+        assert!(first_wave.len() <= DONOR_WAVE_PARTS);
+        assert!(!all);
+        let begins = transport.batch_begins;
+        let singles = transport.single_fetches;
+        for index in 0..many.len() {
+            src.prefetch_ranges_with_transport(&mut transport, &many[index..]);
+            let (offset, size) = many[index];
+            let mut buf = vec![0u8; size as usize];
+            assert!(src.read_with_transport(&mut transport, offset, &mut buf).is_ok());
+            assert_eq!(&buf[..], &full[offset as usize..(offset + size) as usize]);
+        }
+        assert_eq!(transport.single_fetches, singles);
+        assert!(transport.batch_begins - begins <= 4, "{}", transport.batch_begins - begins);
     }
 
     #[test]

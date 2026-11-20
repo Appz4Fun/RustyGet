@@ -4,7 +4,7 @@
 use crate::cstr;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{c_char, c_int, CStr};
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -433,6 +433,39 @@ pub fn set_server_unreachable(server_id: i32, unreachable: bool) {
         } else {
             s.remove(&server_id);
         }
+    }
+}
+
+/// Live stream repairs running now. While any runs under a speed limit, the download keeps
+/// to a quarter of the limit so the repair, which fixes bytes the stream reaches before
+/// anything still downloading, gets the rest of the line.
+static LIVE_REPAIRS: AtomicUsize = AtomicUsize::new(0);
+
+/// Share of the speed limit the download keeps while a live repair runs: 1 in this many.
+const DOWNLOAD_SHARE_DURING_REPAIR: i32 = 4;
+
+/// Holds the line for a live repair until dropped (see [`LIVE_REPAIRS`]).
+pub struct LiveRepairPriority(());
+
+impl LiveRepairPriority {
+    pub fn hold() -> Self {
+        LIVE_REPAIRS.fetch_add(1, Ordering::SeqCst);
+        Self(())
+    }
+}
+
+impl Drop for LiveRepairPriority {
+    fn drop(&mut self) {
+        LIVE_REPAIRS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// The speed limit the download itself keeps: `limit`, or its share while a live repair runs.
+pub fn download_speed_limit(limit: i32) -> i32 {
+    if limit > 0 && LIVE_REPAIRS.load(Ordering::SeqCst) > 0 {
+        (limit / DOWNLOAD_SHARE_DURING_REPAIR).max(1)
+    } else {
+        limit
     }
 }
 
@@ -1276,6 +1309,19 @@ mod tests {
         assert!(article_too_slow(s(61), s(61), 1 << 20, limit));
         // early on, a slow start is not judged
         assert!(!article_too_slow(s(30), s(30), 0, limit));
+    }
+
+    #[test]
+    fn the_download_keeps_a_quarter_of_the_limit_while_a_live_repair_runs() {
+        assert_eq!(download_speed_limit(0), 0);
+        let before = download_speed_limit(4_000_000);
+        {
+            let _hold = LiveRepairPriority::hold();
+            assert_eq!(download_speed_limit(4_000_000), 1_000_000);
+            assert_eq!(download_speed_limit(0), 0);
+            assert_eq!(download_speed_limit(2), 1);
+        }
+        assert_eq!(download_speed_limit(4_000_000), before);
     }
 
     #[test]

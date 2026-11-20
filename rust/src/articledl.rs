@@ -3321,7 +3321,9 @@ impl NzbgetRsArticleDownloader {
                 if host.is_stopped() {
                     break;
                 }
-                let limit = crate::ffi::active_workstate().map_or(0, |ws| ws.speed_limit());
+                let limit = crate::articlefetcher::download_speed_limit(
+                    crate::ffi::active_workstate().map_or(0, |ws| ws.speed_limit()),
+                );
                 if limit <= 0 {
                     break;
                 }

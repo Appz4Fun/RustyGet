@@ -3944,15 +3944,36 @@ impl OptionsHost for RustOptions<'_> {
     }
 }
 
-pub type NzbgetRsOptionsHostFn = Option<
-    unsafe extern "C" fn(
-        ctx: *mut std::ffi::c_void,
-        op: c_int,
-        ints: *const c_int,
-        strs: *const *const c_char,
-        count: usize,
-    ),
->;
+/// The kinds of message option parsing reports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OptMsg {
+    /// Printed to the console only (the missing config file help).
+    Console,
+    Error,
+    Warning,
+    /// Logged as information (DupeSearch without a URL).
+    Info,
+}
+
+/// What option parsing tells a listening caller while it runs: the parsed
+/// scalars whenever they are synced, and every message. Without one, messages
+/// go to the console and log only when the caller asked for that.
+pub trait OptionsListener: Send {
+    fn scalars(&mut self, _scalars: &NzbgetRsParsedOptions) {}
+    fn message(&mut self, _kind: OptMsg, _text: &CStr) {}
+}
+
+/// Where the options come from: given directly, or (daemon) from the command
+/// line `lifecycle::parse_command_line` read.
+pub(crate) enum OptionsSource<'a> {
+    DaemonCommandLine,
+    Given {
+        exe_name: &'a [u8],
+        config_file: Option<&'a CStr>,
+        no_config: bool,
+        cmd_opts: &'a [&'a CStr],
+    },
+}
 
 const OPT_STR_COUNT: usize = 41;
 
@@ -4040,13 +4061,9 @@ pub struct NzbgetRsOptions {
     mode_flags: std::sync::atomic::AtomicU8,
     config_line: i32,
     scalars: NzbgetRsParsedOptions,
-    out_scalars: *mut NzbgetRsParsedOptions,
-    cb_ctx: *mut std::ffi::c_void,
-    cb_fn: NzbgetRsOptionsHostFn,
+    /// the caller listening while the options are built; dropped after
+    host: std::sync::Mutex<Option<Box<dyn OptionsListener>>>,
 }
-
-unsafe impl Send for NzbgetRsOptions {}
-unsafe impl Sync for NzbgetRsOptions {}
 
 static ACTIVE_OPTIONS: std::sync::RwLock<Option<std::sync::Weak<NzbgetRsOptions>>> =
     std::sync::RwLock::new(None);
@@ -4066,6 +4083,12 @@ impl NzbgetRsOptions {
 
     pub(crate) fn scalars(&self) -> &NzbgetRsParsedOptions {
         &self.scalars
+    }
+
+    /// The config had errors (reported as they were found).
+    #[cfg(test)]
+    pub(crate) fn had_config_errors(&self) -> bool {
+        self.config_errors.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub(crate) fn has_fatal_error(&self) -> bool {
@@ -4141,61 +4164,40 @@ impl NzbgetRsOptions {
         None
     }
 
+    fn host(&self) -> std::sync::MutexGuard<'_, Option<Box<dyn OptionsListener>>> {
+        self.host
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn sync_scalars_to_host(&self) {
-        if !self.out_scalars.is_null() {
-            unsafe {
-                *self.out_scalars = self.scalars;
-            }
+        if let Some(host) = self.host().as_mut() {
+            host.scalars(&self.scalars);
         }
     }
 
-    fn emit_default_diag(op: c_int, s0: *const c_char) {
-        if s0.is_null() {
-            return;
+    fn emit_default_diag(kind: OptMsg, text: &CStr) {
+        let bytes = text.to_bytes();
+        if kind != OptMsg::Info {
+            // SAFETY: both are NUL-terminated C strings.
+            unsafe { libc::printf(c"%s\n".as_ptr(), text.as_ptr()) };
         }
-        unsafe {
-            let bytes = CStr::from_ptr(s0).to_bytes();
-            match op {
-                0 => {
-                    libc::printf(c"%s\n".as_ptr(), s0);
-                }
-                1 => {
-                    libc::printf(c"%s\n".as_ptr(), s0);
-                    crate::log::log_active_bytes(2, bytes);
-                }
-                2 => {
-                    libc::printf(c"%s\n".as_ptr(), s0);
-                    crate::log::log_active_bytes(1, bytes);
-                }
-                3 => {
-                    crate::log::log_active_bytes(1, bytes);
-                }
-                _ => {}
-            }
+        match kind {
+            OptMsg::Console => {}
+            OptMsg::Error => crate::log::log_active_bytes(2, bytes),
+            OptMsg::Warning | OptMsg::Info => crate::log::log_active_bytes(1, bytes),
         }
     }
 
-    fn emit_host(&self, op: c_int, ints: &[c_int], strs: &[*const c_char], count: usize) {
-        if let Some(cb) = self.cb_fn {
-            let ints_ptr = if ints.is_empty() {
-                std::ptr::null()
-            } else {
-                ints.as_ptr()
-            };
-            let strs_ptr = if strs.is_empty() {
-                std::ptr::null()
-            } else {
-                strs.as_ptr()
-            };
-            unsafe { cb(self.cb_ctx, op, ints_ptr, strs_ptr, count) };
+    fn emit_message(&self, kind: OptMsg, text: &CStr) {
+        if let Some(host) = self.host().as_mut() {
+            host.message(kind, text);
         } else if self.default_diag_sink {
-            if let Some(&s0) = strs.first() {
-                Self::emit_default_diag(op, s0);
-            }
+            Self::emit_default_diag(kind, text);
         }
     }
 
-    fn emit_diag(&self, op: c_int, msg: &CStr) {
+    fn emit_diag(&self, kind: OptMsg, msg: &CStr) {
         let mut trunc = msg.to_bytes().to_vec();
         if trunc.len() > 1023 {
             trunc.truncate(1023);
@@ -4209,8 +4211,7 @@ impl NzbgetRsOptions {
         };
         let line_s = self.config_line.to_string();
         let formatted = format_bytes_msg(&[base, b"(", line_s.as_bytes(), b"): ", &trunc]);
-        let ptrs = [formatted.as_ptr()];
-        self.emit_host(op, &[], &ptrs, 1);
+        self.emit_message(kind, &formatted);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4267,17 +4268,13 @@ impl NzbgetRsOptions {
         }
 
         if self.strs[OptStr::ConfigFile].is_none() && !no_config {
-            let p0 = [c"No configuration-file found".as_ptr()];
-            self.emit_host(0, &[], &p0, 1);
-            let p1 = [
-                c"Please use option \"-c\" or put configuration-file in one of the following locations:"
-                    .as_ptr(),
-            ];
-            self.emit_host(0, &[], &p1, 1);
+            self.emit_message(OptMsg::Console, c"No configuration-file found");
+            self.emit_message(
+                OptMsg::Console,
+                c"Please use option \"-c\" or put configuration-file in one of the following locations:",
+            );
             for &loc in POSSIBLE_CONFIG_LOCATIONS {
-                let loc_c = cstring(loc.to_vec());
-                let pl = [loc_c.as_ptr()];
-                self.emit_host(0, &[], &pl, 1);
+                self.emit_message(OptMsg::Console, &cstring(loc.to_vec()));
             }
             self.fatal_error = true;
             return;
@@ -4499,8 +4496,10 @@ impl NzbgetRsOptions {
         self.sync_scalars_to_host();
 
         if warn_no_url {
-            let p = [c"Option <DupeSearch> is enabled but option <DupeSearchUrl> is empty: no duplicates will be searched".as_ptr()];
-            self.emit_host(3, &[], &p, 1);
+            self.emit_message(
+                OptMsg::Info,
+                c"Option <DupeSearch> is enabled but option <DupeSearchUrl> is empty: no duplicates will be searched",
+            );
         }
     }
 
@@ -4563,13 +4562,13 @@ impl OptionsHost for NzbgetRsOptions {
     }
 
     fn config_error(&mut self, msg: &CStr) {
-        self.emit_diag(1, msg);
+        self.emit_diag(OptMsg::Error, msg);
         self.config_errors
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn config_warn(&mut self, msg: &CStr) {
-        self.emit_diag(2, msg);
+        self.emit_diag(OptMsg::Warning, msg);
     }
 
     fn file_exists(&self, path: &CStr) -> bool {
@@ -4641,30 +4640,7 @@ impl OptionsHost for NzbgetRsOptions {
                     );
                 }
             }
-            return;
         }
-        let ints = [
-            id,
-            c_int::from(active),
-            port,
-            ip_version,
-            c_int::from(join_group),
-            c_int::from(tls),
-            max_connections,
-            retention,
-            level,
-            group,
-            c_int::from(optional),
-            cert_verif_level as c_int,
-        ];
-        let ptrs = [
-            name.map_or(std::ptr::null(), CStr::as_ptr),
-            host.map_or(std::ptr::null(), CStr::as_ptr),
-            user.map_or(std::ptr::null(), CStr::as_ptr),
-            pass.map_or(std::ptr::null(), CStr::as_ptr),
-            cipher.map_or(std::ptr::null(), CStr::as_ptr),
-        ];
-        self.emit_host(7, &ints, &ptrs, 5);
     }
 
     fn add_feed(
@@ -4697,26 +4673,7 @@ impl OptionsHost for NzbgetRsOptions {
                     cert_verif_level,
                 );
             }
-            return;
         }
-        let ints = [
-            id,
-            interval,
-            c_int::from(backlog),
-            c_int::from(pause_nzb),
-            category_source,
-            priority,
-            cert_verif_level as c_int,
-        ];
-        let ptrs = [
-            name.map_or(std::ptr::null(), CStr::as_ptr),
-            url.map_or(std::ptr::null(), CStr::as_ptr),
-            filter.map_or(std::ptr::null(), CStr::as_ptr),
-            category.map_or(std::ptr::null(), CStr::as_ptr),
-            // formerly FeedN.Extensions
-            std::ptr::null(),
-        ];
-        self.emit_host(8, &ints, &ptrs, 5);
     }
 
     fn add_task(
@@ -4739,11 +4696,7 @@ impl OptionsHost for NzbgetRsOptions {
                     param.map_or(&[][..], CStr::to_bytes),
                 );
             }
-            return;
         }
-        let ints = [id, hours, minutes, week_days_bits, command];
-        let ptrs = [param.map_or(std::ptr::null(), CStr::as_ptr)];
-        self.emit_host(9, &ints, &ptrs, 1);
     }
 
     fn add_category(
@@ -4762,22 +4715,16 @@ impl OptionsHost for NzbgetRsOptions {
     }
 }
 
-pub(crate) unsafe fn new_options(
-    exe_name: *const c_char,
-    config_filename: *const c_char,
-    no_config: c_int,
-    no_disk_access: c_int,
-    cmd_opts: *const *const c_char,
-    cmd_opts_len: usize,
+pub(crate) fn new_options(
+    source: OptionsSource<'_>,
+    no_disk_access: bool,
     flags: c_int,
-    version: *const c_char,
-    cb_ctx: *mut std::ffi::c_void,
-    cb_fn: NzbgetRsOptionsHostFn,
-    out_scalars: *mut NzbgetRsParsedOptions,
-    out_state_flags: *mut c_int,
+    version: &CStr,
+    host: Option<Box<dyn OptionsListener>>,
 ) -> std::sync::Arc<NzbgetRsOptions> {
+    let daemon_source = matches!(source, OptionsSource::DaemonCommandLine);
     #[cfg(unix)]
-    let daemon_snap = if no_config < 0 {
+    let daemon_snap = if daemon_source {
         crate::lifecycle::daemon_cmdline_options_inputs()
     } else {
         None
@@ -4800,37 +4747,20 @@ pub(crate) unsafe fn new_options(
             true,
         )
     } else {
-        let eb = if exe_name.is_null() {
-            &[][..]
-        } else {
-            CStr::from_ptr(exe_name).to_bytes()
-        };
-        let cf = if config_filename.is_null() {
-            None
-        } else {
-            Some(CStr::from_ptr(config_filename))
-        };
-        let mut cv = Vec::with_capacity(cmd_opts_len);
-        if !cmd_opts.is_null() {
-            for i in 0..cmd_opts_len {
-                let p = *cmd_opts.add(i);
-                if !p.is_null() {
-                    cv.push(CStr::from_ptr(p));
-                }
+        let daemon_subsys = (flags & 16) != 0;
+        match source {
+            OptionsSource::Given { exe_name, config_file, no_config, cmd_opts } => {
+                (exe_name, config_file, no_config, cmd_opts.to_vec(), daemon_subsys)
             }
+            // no command line was read: as if no config was asked for
+            OptionsSource::DaemonCommandLine => (&[][..], None, true, Vec::new(), daemon_subsys),
         }
-        (eb, cf, no_config != 0, cv, (flags & 16) != 0)
-    };
-    let ver_cstr = if version.is_null() {
-        crate::ffi::build_version_cstr()
-    } else {
-        CStr::from_ptr(version)
     };
     let mut opts = NzbgetRsOptions {
         opt_entries: Vec::new(),
         categories: Vec::new(),
         strs: OptStrs(std::array::from_fn(|_| None)),
-        no_disk_access: no_disk_access != 0,
+        no_disk_access,
         no_config: eff_no_config,
         daemon_subsystems: eff_daemon_subsys,
         default_diag_sink: (flags & 32) != 0 || daemon_snap.is_some(),
@@ -4839,28 +4769,20 @@ pub(crate) unsafe fn new_options(
         mode_flags: std::sync::atomic::AtomicU8::new(0),
         config_line: 0,
         scalars: NzbgetRsParsedOptions::with_defaults(),
-        out_scalars,
-        cb_ctx,
-        cb_fn,
+        host: std::sync::Mutex::new(host),
     };
     opts.sync_scalars_to_host();
     opts.init_daemon(
         exe_bytes,
         cf_opt,
         eff_no_config,
-        no_disk_access != 0,
+        no_disk_access,
         &cmd_vec,
         flags & !(16 | 32),
-        ver_cstr,
+        version,
     );
     opts.sync_scalars_to_host();
-    if !out_state_flags.is_null() {
-        let had_err = opts.config_errors.load(std::sync::atomic::Ordering::SeqCst);
-        *out_state_flags = c_int::from(opts.fatal_error) | (c_int::from(had_err) << 1);
-    }
-    opts.out_scalars = std::ptr::null_mut();
-    opts.cb_ctx = std::ptr::null_mut();
-    opts.cb_fn = None;
+    *opts.host() = None;
     let arc = std::sync::Arc::new(opts);
     if let Ok(mut g) = ACTIVE_OPTIONS.write() {
         *g = Some(std::sync::Arc::downgrade(&arc));
@@ -4875,40 +4797,22 @@ pub(crate) unsafe fn new_options(
     arc
 }
 
-/// [`new_options`] as a raw handle for [`nzbget_rs_options_free`].
-///
-/// # Safety
-/// As [`new_options`].
-#[allow(clippy::too_many_arguments)]
-pub unsafe fn nzbget_rs_options_new(
-    exe_name: *const c_char,
-    config_filename: *const c_char,
-    no_config: c_int,
-    no_disk_access: c_int,
-    cmd_opts: *const *const c_char,
-    cmd_opts_len: usize,
-    flags: c_int,
-    version: *const c_char,
-    cb_ctx: *mut std::ffi::c_void,
-    cb_fn: NzbgetRsOptionsHostFn,
-    out_scalars: *mut NzbgetRsParsedOptions,
-    out_state_flags: *mut c_int,
-) -> *mut NzbgetRsOptions {
-    std::sync::Arc::into_raw(new_options(
-        exe_name,
-        config_filename,
-        no_config,
-        no_disk_access,
-        cmd_opts,
-        cmd_opts_len,
-        flags,
-        version,
-        cb_ctx,
-        cb_fn,
-        out_scalars,
-        out_state_flags,
-    ))
-    .cast_mut()
+/// Options for tests: built from `cmd_opts` alone, with no config file and
+/// no disk access.
+#[cfg(test)]
+pub(crate) fn test_options(cmd_opts: &[&CStr]) -> std::sync::Arc<NzbgetRsOptions> {
+    new_options(
+        OptionsSource::Given {
+            exe_name: b"rustyget",
+            config_file: None,
+            no_config: true,
+            cmd_opts,
+        },
+        true,
+        0,
+        c"1.0",
+        None,
+    )
 }
 
 /// Drops `opts`, first clearing the active options if they are these.
@@ -4922,108 +4826,6 @@ pub(crate) fn release_options(opts: std::sync::Arc<NzbgetRsOptions>) {
         }
     }
     drop(opts);
-}
-
-/// Frees a handle from [`nzbget_rs_options_new`]. Null is ignored.
-///
-/// # Safety
-/// `handle` is null or a live handle from [`nzbget_rs_options_new`], freed once.
-pub unsafe fn nzbget_rs_options_free(handle: *mut NzbgetRsOptions) {
-    if !handle.is_null() {
-        release_options(std::sync::Arc::from_raw(handle.cast_const()));
-    }
-}
-
-/// The active options set (the daemon's, or the newest one created), borrowed:
-/// it stays valid until its owner frees it. Null when there is none.
-pub extern "C" fn nzbget_rs_options_active() -> *const NzbgetRsOptions {
-    active_options().map_or(std::ptr::null(), |arc| std::sync::Arc::as_ptr(&arc))
-}
-
-/// The parsed scalars of `handle`, borrowed like the handle. Null for a null handle.
-///
-/// # Safety
-/// `handle` is null or a live handle from `nzbget_rs_options_new`.
-pub unsafe extern "C" fn nzbget_rs_options_scalars(
-    handle: *const NzbgetRsOptions,
-) -> *const NzbgetRsParsedOptions {
-    handle.as_ref().map_or(std::ptr::null(), |opts| {
-        &opts.scalars as *const NzbgetRsParsedOptions
-    })
-}
-
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn nzbget_rs_options_query(
-    handle: *const NzbgetRsOptions,
-    op: c_int,
-    s1: *const c_char,
-    a1: c_int,
-    out_int: *mut c_int,
-    out_strs: *mut *const c_char,
-    ctx: usize,
-    cb: Option<unsafe extern "C" fn(usize, *const c_char, *const c_char, c_int)>,
-) -> c_int {
-    let Some(opts) = handle.as_ref() else {
-        return 0;
-    };
-    match op {
-        0 => {
-            if s1.is_null() {
-                return 0;
-            }
-            let Some(cat) = opts.find_category(CStr::from_ptr(s1), a1 != 0) else {
-                return 0;
-            };
-            if !out_int.is_null() {
-                *out_int = c_int::from(cat.unpack);
-            }
-            if !out_strs.is_null() {
-                *out_strs.add(0) = cat.name.as_ptr();
-                *out_strs.add(1) = cat.dest_dir.as_ptr();
-                // formerly CategoryN.Extensions
-                *out_strs.add(2) = c"".as_ptr();
-            }
-            1
-        }
-        1 => {
-            if let Some(f) = cb {
-                let signed_char = (c_char::MIN as i32) != 0;
-                for e in &opts.opt_entries {
-                    let val = e.value.as_deref().unwrap_or(c"");
-                    let restr = c_int::from(option_restricted(&e.name, signed_char));
-                    f(ctx, e.name.as_ptr(), val.as_ptr(), restr);
-                }
-            }
-            opts.opt_entries.len() as c_int
-        }
-        2 => {
-            if let Some(f) = cb {
-                for cat in &opts.categories {
-                    f(
-                        ctx,
-                        cat.name.as_ptr(),
-                        c"".as_ptr(),
-                        c_int::from(cat.unpack),
-                    );
-                }
-            }
-            opts.categories.len() as c_int
-        }
-        4 => {
-            let bit = 1u8 << ((a1 & 3) as u8);
-            if (a1 & 0x10) != 0 {
-                if (a1 & 0x20) != 0 {
-                    opts.mode_flags
-                        .fetch_or(bit, std::sync::atomic::Ordering::SeqCst);
-                } else {
-                    opts.mode_flags
-                        .fetch_and(!bit, std::sync::atomic::Ordering::SeqCst);
-                }
-            }
-            c_int::from((opts.mode_flags.load(std::sync::atomic::Ordering::SeqCst) & bit) != 0)
-        }
-        _ => 0,
-    }
 }
 
 #[cfg(test)]
@@ -5665,64 +5467,51 @@ mod options_full_suite_port_from_cpp {
 
     #[test]
     fn options_new_preserves_startup_and_parsed_targets_for_init_diagnostics() {
+        #[derive(Default)]
         struct Cap {
             scalars: NzbgetRsParsedOptions,
-            events: Vec<(c_int, i32, i32, String)>,
+            events: Vec<(OptMsg, i32, i32, String)>,
         }
-        unsafe extern "C" fn cb(
-            ctx: *mut std::ffi::c_void,
-            op: c_int,
-            _ints: *const c_int,
-            strs: *const *const c_char,
-            _count: usize,
-        ) {
-            if (1..=3).contains(&op) {
-                let cap = &mut *(ctx as *mut Cap);
-                let msg = std::str::from_utf8(CStr::from_ptr(*strs).to_bytes())
-                    .unwrap()
-                    .to_owned();
-                cap.events.push((
-                    op,
-                    cap.scalars.error_target,
-                    cap.scalars.warning_target,
-                    msg,
-                ));
+        struct Host(std::sync::Arc<std::sync::Mutex<Cap>>);
+        impl OptionsListener for Host {
+            fn scalars(&mut self, scalars: &NzbgetRsParsedOptions) {
+                self.0.lock().unwrap().scalars = *scalars;
+            }
+            fn message(&mut self, kind: OptMsg, text: &CStr) {
+                if kind != OptMsg::Console {
+                    let mut cap = self.0.lock().unwrap();
+                    let msg = text.to_str().unwrap().to_owned();
+                    let (e, w) = (cap.scalars.error_target, cap.scalars.warning_target);
+                    cap.events.push((kind, e, w, msg));
+                }
             }
         }
 
-        let mut cap = Cap {
-            scalars: NzbgetRsParsedOptions::default(),
-            events: Vec::new(),
-        };
+        let cap = std::sync::Arc::new(std::sync::Mutex::new(Cap::default()));
         let cmd_opts = [
-            c"BogusEarlyOption=1".as_ptr(),
-            c"ErrorTarget=both".as_ptr(),
-            c"WarningTarget=log".as_ptr(),
-            c"Server1.Host=news.example.com".as_ptr(),
+            c"BogusEarlyOption=1",
+            c"ErrorTarget=both",
+            c"WarningTarget=log",
+            c"Server1.Host=news.example.com",
         ];
-        let mut state_flags: c_int = 0;
-        let scalars_ptr: *mut NzbgetRsParsedOptions = &mut cap.scalars;
-        let handle = unsafe {
-            nzbget_rs_options_new(
-                c"rustyget".as_ptr(),
-                std::ptr::null(),
-                1,
-                1,
-                cmd_opts.as_ptr(),
-                cmd_opts.len(),
-                0,
-                c"1.0".as_ptr(),
-                (&mut cap as *mut Cap).cast(),
-                Some(cb),
-                scalars_ptr,
-                &mut state_flags,
-            )
-        };
-        unsafe { nzbget_rs_options_free(handle) };
+        let opts = new_options(
+            OptionsSource::Given {
+                exe_name: b"rustyget",
+                config_file: None,
+                no_config: true,
+                cmd_opts: &cmd_opts,
+            },
+            true,
+            0,
+            c"1.0",
+            Some(Box::new(Host(std::sync::Arc::clone(&cap)))),
+        );
+        assert!(opts.had_config_errors());
+        release_options(opts);
 
-        assert_eq!(state_flags & 2, 2);
+        let cap = cap.lock().unwrap();
         // 1) Pre-InitOptions invalid option sees startup default targets (mtScreen = 1).
-        assert_eq!(cap.events[0].0, 1);
+        assert_eq!(cap.events[0].0, OptMsg::Error);
         assert_eq!(cap.events[0].1, 1);
         assert_eq!(cap.events[0].2, 1);
         assert!(cap.events[0]
@@ -5734,107 +5523,43 @@ mod options_full_suite_port_from_cpp {
             .iter()
             .find(|e| e.3.contains("Server definition not complete"))
             .expect("expected Server1 error");
-        assert_eq!(srv_ev.0, 1);
+        assert_eq!(srv_ev.0, OptMsg::Error);
         assert_eq!(srv_ev.1, 3);
         assert_eq!(srv_ev.2, 2);
     }
 
     #[test]
-    fn options_query_serves_entries_and_categories() {
+    fn options_serve_entries_and_categories() {
         assert!(option_restricted(c"Server1.Password", true));
         assert!(!option_restricted(c"Server1.Host", true));
 
-        let cmd_opts = [
-            c"Server1.Host=news.example.com".as_ptr(),
-            c"Server1.Port=119".as_ptr(),
-            c"Server1.Connections=2".as_ptr(),
-            c"Server1.Password=secret".as_ptr(),
-            c"Category1.Name=Movies".as_ptr(),
-            c"Category1.DestDir=/dl/movies".as_ptr(),
-            c"Category1.Unpack=no".as_ptr(),
-            c"Category1.Aliases=Films*;HD*".as_ptr(),
-        ];
-        let mut scalars = NzbgetRsParsedOptions::default();
-        let mut state_flags: c_int = 0;
-        let handle = unsafe {
-            nzbget_rs_options_new(
-                c"rustyget".as_ptr(),
-                std::ptr::null(),
-                1,
-                1,
-                cmd_opts.as_ptr(),
-                cmd_opts.len(),
-                0,
-                c"1.0".as_ptr(),
-                std::ptr::null_mut(),
-                None,
-                &mut scalars,
-                &mut state_flags,
-            )
-        };
-        unsafe {
-            let mut unpack: c_int = 1;
-            let mut strs = [std::ptr::null(); 3];
-            assert_eq!(
-                nzbget_rs_options_query(
-                    handle,
-                    0,
-                    c"films-1080p".as_ptr(),
-                    1,
-                    &mut unpack,
-                    strs.as_mut_ptr(),
-                    0,
-                    None,
-                ),
-                1
-            );
-            assert_eq!(unpack, 0);
-            assert_eq!(CStr::from_ptr(strs[0]), c"Movies");
-            assert_eq!(CStr::from_ptr(strs[1]), c"/dl/movies");
-            assert_eq!(
-                nzbget_rs_options_query(
-                    handle,
-                    0,
-                    c"films-1080p".as_ptr(),
-                    0,
-                    &mut unpack,
-                    strs.as_mut_ptr(),
-                    0,
-                    None,
-                ),
-                0
-            );
+        let opts = test_options(&[
+            c"Server1.Host=news.example.com",
+            c"Server1.Port=119",
+            c"Server1.Connections=2",
+            c"Server1.Password=secret",
+            c"Category1.Name=Movies",
+            c"Category1.DestDir=/dl/movies",
+            c"Category1.Unpack=no",
+            c"Category1.Aliases=Films*;HD*",
+        ]);
+        let cat = opts.find_category(c"films-1080p", true).expect("alias match");
+        assert!(!cat.unpack);
+        assert_eq!(cat.name.as_c_str(), c"Movies");
+        assert_eq!(cat.dest_dir.as_c_str(), c"/dl/movies");
+        assert!(opts.find_category(c"films-1080p", false).is_none());
 
-            unsafe extern "C" fn collect_entry(
-                ctx: usize,
-                name: *const c_char,
-                val: *const c_char,
-                restr: c_int,
-            ) {
-                let v = &mut *(ctx as *mut Vec<(String, String, i32)>);
-                v.push((
-                    CStr::from_ptr(name).to_str().unwrap().to_owned(),
-                    CStr::from_ptr(val).to_str().unwrap().to_owned(),
-                    restr,
-                ));
-            }
-            let mut entries: Vec<(String, String, i32)> = Vec::new();
-            let count = nzbget_rs_options_query(
-                handle,
-                1,
-                std::ptr::null(),
-                0,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                (&mut entries as *mut Vec<_>) as usize,
-                Some(collect_entry),
-            );
-            assert_eq!(count as usize, entries.len());
-            assert!(entries
-                .iter()
-                .any(|(n, v, r)| n == "Server1.Password" && v == "secret" && *r == 1));
-
-            nzbget_rs_options_free(handle);
-        }
+        let mut entries: Vec<(String, String, i32)> = Vec::new();
+        opts.for_each_option(|name, val, restr| {
+            entries.push((
+                name.to_str().unwrap().to_owned(),
+                val.to_str().unwrap().to_owned(),
+                restr,
+            ));
+        });
+        assert!(entries
+            .iter()
+            .any(|(n, v, r)| n == "Server1.Password" && v == "secret" && *r == 1));
+        release_options(opts);
     }
 }

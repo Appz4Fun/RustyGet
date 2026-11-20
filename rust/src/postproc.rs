@@ -2503,7 +2503,7 @@ impl crate::progressive_unpack::VolumeFeed for DirectUnpackFeed {
     fn has_borrowed(&self) -> bool {
         direct_unpack_holds()
             .get(&self.nzb_id)
-            .is_some_and(|st| !st.virtuals.is_empty())
+            .is_some_and(|st| !st.virtuals.is_empty() || !st.offered.is_empty())
     }
 
     fn set_became_final(&self) -> bool {
@@ -2789,7 +2789,7 @@ pub(crate) fn dead_volume_donor_cannot_lend(nzb_id: i32, donor: &[u8]) -> bool {
 fn dead_volume_rebuilt(nzb_id: i32) -> bool {
     direct_unpack_holds()
         .get(&nzb_id)
-        .is_some_and(|st| !st.virtuals.is_empty())
+        .is_some_and(|st| !st.virtuals.is_empty() || !st.offered.is_empty())
 }
 
 /// Forgets what was found of the donors of download `nzb_id` and whether the queue kept it for
@@ -2841,7 +2841,7 @@ pub(crate) fn dead_volume_borrow_underway(nzb_id: i32) -> bool {
     dead_volume_borrows().contains(&nzb_id)
         || direct_unpack_holds()
             .get(&nzb_id)
-            .is_some_and(|st| !st.virtuals.is_empty())
+            .is_some_and(|st| !st.virtuals.is_empty() || !st.offered.is_empty())
 }
 
 /// How many dead volumes of download `nzb_id` were rebuilt from a duplicate (0 if none), once:
@@ -2863,7 +2863,7 @@ pub(crate) fn direct_unpack_waits_on_dead_volume(nzb_id: i32) -> bool {
     let candidates: Vec<Vec<u8>> = direct_unpack_holds().get(&nzb_id).map_or_else(Vec::new, |st| {
         st.held
             .iter()
-            .filter(|p| !st.virtuals.contains_key(*p))
+            .filter(|p| !st.virtuals.contains_key(*p) && case_blind(&st.offered, p).is_none())
             .cloned()
             .collect()
     });

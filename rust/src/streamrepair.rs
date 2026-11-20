@@ -9099,6 +9099,7 @@ fn plan_dead_fills(
                             inner_name: inner_name.clone(),
                             done: false,
                             offered,
+                            offer_failed: false,
                         });
                     }
                     // A dead volume handed over earlier keeps its place in the map.
@@ -9238,7 +9239,8 @@ impl Drop for CrossPackRepairSession {
     /// belong to direct unpack, which removes them when it forgets its holds.
     fn drop(&mut self) {
         if !self.dead_fills.is_empty() {
-            // Handed-over volumes keep the borrow visible through direct unpack's state.
+            // Volumes handed over (finished or with holes) keep the borrow visible through
+            // direct unpack's state.
             crate::postproc::note_dead_volume_borrow(self.dead_nzb_id, false);
         }
         // A volume handed over with holes is read by direct unpack already: its scratch file
@@ -9271,8 +9273,11 @@ struct DeadFill {
     inner_name: Vec<u8>,
     done: bool,
     /// Bytes still to borrow when the volume was last handed to direct unpack with holes
-    /// (see `offer_dead_fills`); `None` until it is.
+    /// (see `offer_dead_fills`); `None` until it is. Once set, direct unpack reads the scratch
+    /// file, so it is never removed here.
     offered: Option<i64>,
+    /// Handing it over before its borrow finishes failed: not tried again.
+    offer_failed: bool,
 }
 
 impl CrossPackRepairSession {
@@ -9809,7 +9814,7 @@ impl CrossPackRepairSession {
                 continue;
             };
             let left: i64 = holes.iter().map(|h| h.size).sum();
-            if d.done || d.version != 5 || holes.is_empty() || d.offered == Some(left) {
+            if d.done || d.version != 5 || holes.is_empty() || d.offer_failed || d.offered == Some(left) {
                 continue;
             }
             let holes = holes.clone();
@@ -9837,8 +9842,9 @@ impl CrossPackRepairSession {
                     msg.extend_from_slice(b" over before its borrow finishes: ");
                     msg.extend_from_slice(e.as_bytes());
                     emit(TargetMessageKind::Info, &msg);
-                    // Not tried again: it is handed over once borrowed, as before.
-                    self.dead_fills[i].offered = Some(-1);
+                    // Not tried again: it is handed over once borrowed, as before. A volume
+                    // handed over earlier stays offered (direct unpack still reads it).
+                    self.dead_fills[i].offer_failed = true;
                 }
             }
         }
@@ -18579,6 +18585,9 @@ mod dead_volume_fill_tests {
         // The pass stops: its scratch file stays, direct unpack reads it.
         drop(session);
         assert!(scratch.is_file());
+        // The queue still sees the borrow: replacing the download would throw the extraction away.
+        assert!(crate::postproc::dead_volume_borrow_underway(nzb_id));
+        assert!(!crate::postproc::direct_unpack_waits_on_dead_volume(nzb_id));
         // Say the stopped pass had borrowed the first half: put it in and hand it over so.
         let at = offered.head.len() as u64;
         let half = offered.data_len / 2;

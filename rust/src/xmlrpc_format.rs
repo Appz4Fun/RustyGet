@@ -300,8 +300,8 @@ pub struct RpcNzbInfo<'a> {
 pub struct RpcPostInfo<'a> {
     pub is_post_queue: bool,
     pub has_post_info: bool,
-    /// NUL-terminated, or null
-    pub progress_label: *const c_char,
+    /// Read only when `has_post_info` is set.
+    pub progress_label: &'a CStr,
     pub stage_progress: c_int,
     pub cur_time: i64,
     pub stage_time: i64,
@@ -309,47 +309,47 @@ pub struct RpcPostInfo<'a> {
     pub logs: &'a [NzbgetRsRpcLogEntry],
 }
 
-/// The start of a `postqueue` entry. Strings are NUL-terminated or null.
+/// The start of a `postqueue` entry.
 #[derive(Clone, Copy)]
-pub struct RpcPostQueueItem {
+pub struct RpcPostQueueItem<'a> {
     pub nzb_id: c_int,
-    pub info_name: *const c_char,
+    pub info_name: &'a CStr,
     pub stage: c_int,
     pub file_progress: c_int,
 }
 
-/// The start of a `history` NZB or URL entry. Strings are NUL-terminated or null.
+/// The start of a `history` NZB or URL entry.
 #[derive(Clone, Copy)]
-pub struct RpcHistoryNzb {
+pub struct RpcHistoryNzb<'a> {
     pub id: c_int,
-    pub name: *const c_char,
+    pub name: &'a CStr,
     pub remaining_file_count: c_int,
     pub retry_data: bool,
     pub history_time: c_int,
-    pub status: *const c_char,
+    pub status: &'a CStr,
 }
 
-/// A `history` entry for a hidden duplicate. Strings are NUL-terminated or null.
+/// A `history` entry for a hidden duplicate.
 #[derive(Clone, Copy)]
-pub struct RpcHistoryDup {
+pub struct RpcHistoryDup<'a> {
     pub id: c_int,
-    pub name: *const c_char,
+    pub name: &'a CStr,
     pub history_time: c_int,
     pub size: i64,
-    pub dupe_key: *const c_char,
+    pub dupe_key: &'a CStr,
     pub dupe_score: c_int,
     pub dupe_mode: c_int,
     pub dup_status: c_int,
 }
 
-/// A `urlqueue` entry. Strings are NUL-terminated or null.
+/// A `urlqueue` entry.
 #[derive(Clone, Copy)]
-pub struct RpcUrlQueueItem {
+pub struct RpcUrlQueueItem<'a> {
     pub id: c_int,
-    pub filename: *const c_char,
-    pub url: *const c_char,
-    pub name: *const c_char,
-    pub category: *const c_char,
+    pub filename: &'a CStr,
+    pub url: &'a CStr,
+    pub name: &'a CStr,
+    pub category: &'a CStr,
     pub priority: c_int,
 }
 
@@ -366,10 +366,10 @@ pub trait RpcEmit {
     fn group(&mut self, group: &RpcGroupItem, info: &RpcNzbInfo<'_>) {}
     fn post_info_end(&mut self, post: &RpcPostInfo<'_>) {}
     /// Opens a `postqueue` entry; [`RpcEmit::post_info_end`] closes it.
-    fn post_queue_item(&mut self, item: &RpcPostQueueItem, info: &RpcNzbInfo<'_>) {}
-    fn history_nzb(&mut self, item: &RpcHistoryNzb, info: &RpcNzbInfo<'_>) {}
-    fn history_dup(&mut self, item: &RpcHistoryDup) {}
-    fn url_queue_item(&mut self, item: &RpcUrlQueueItem) {}
+    fn post_queue_item(&mut self, item: &RpcPostQueueItem<'_>, info: &RpcNzbInfo<'_>) {}
+    fn history_nzb(&mut self, item: &RpcHistoryNzb<'_>, info: &RpcNzbInfo<'_>) {}
+    fn history_dup(&mut self, item: &RpcHistoryDup<'_>) {}
+    fn url_queue_item(&mut self, item: &RpcUrlQueueItem<'_>) {}
     fn fleet_result(
         &mut self,
         chosen: c_int,
@@ -1440,7 +1440,7 @@ unsafe fn write_post_info_fields(
     json: bool,
     is_post_queue: bool,
     has_post_info: bool,
-    progress_label: *const c_char,
+    progress_label: &CStr,
     stage_progress: c_int,
     cur_time: i64,
     stage_time: i64,
@@ -1461,7 +1461,7 @@ unsafe fn write_post_info_fields(
             );
         }
         (
-            encode_str(json, unsafe { input(progress_label) }),
+            encode_str(json, progress_label.to_bytes()),
             stage_progress,
             st_sec,
             tot_sec,
@@ -1638,16 +1638,16 @@ unsafe fn write_group_item_start(
     }
 }
 
-unsafe fn write_postqueue_item_start(
+fn write_postqueue_item_start(
     out: &mut Vec<u8>,
     json: bool,
     index: usize,
     nzb_id: c_int,
-    info_name: *const c_char,
+    info_name: &CStr,
     stage: c_int,
     file_progress: c_int,
 ) {
-    let info_name_enc = encode_str(json, unsafe { input(info_name) });
+    let info_name_enc = encode_str(json, info_name.to_bytes());
     let stage_str = table_get(&POST_STAGE_NAMES, stage, "QUEUED");
 
     out.reserve(256);
@@ -1680,20 +1680,20 @@ unsafe fn write_postqueue_item_start(
 }
 
 #[allow(clippy::too_many_arguments)]
-unsafe fn write_history_nzb_start(
+fn write_history_nzb_start(
     out: &mut Vec<u8>,
     json: bool,
     index: usize,
     id: c_int,
-    name: *const c_char,
+    name: &CStr,
     remaining_file_count: c_int,
     retry_data: bool,
     history_time: c_int,
-    status: *const c_char,
+    status: &CStr,
 ) {
-    let name_enc = encode_str(json, unsafe { input(name) });
+    let name_enc = encode_str(json, name.to_bytes());
     let retry_str = bool_str(json, retry_data);
-    let status_enc = encode_str(json, unsafe { input(status) });
+    let status_enc = encode_str(json, status.to_bytes());
 
     out.reserve(256);
     if json {
@@ -1729,23 +1729,23 @@ unsafe fn write_history_nzb_start(
 }
 
 #[allow(clippy::too_many_arguments)]
-unsafe fn write_history_dup_item(
+fn write_history_dup_item(
     out: &mut Vec<u8>,
     json: bool,
     index: usize,
     id: c_int,
-    name: *const c_char,
+    name: &CStr,
     history_time: c_int,
     size: i64,
-    dupe_key: *const c_char,
+    dupe_key: &CStr,
     dupe_score: c_int,
     dupe_mode: c_int,
     dup_status: c_int,
 ) {
     let (size_hi, size_lo) = split_i64(size);
     let size_mb = (size / 1024 / 1024) as c_int;
-    let name_enc = encode_str(json, unsafe { input(name) });
-    let dupe_key_enc = encode_str(json, unsafe { input(dupe_key) });
+    let name_enc = encode_str(json, name.to_bytes());
+    let dupe_key_enc = encode_str(json, dupe_key.to_bytes());
     let dupe_mode_str = table_get(&DUPE_MODE_NAMES, dupe_mode, "SCORE");
     let dup_status_str = table_get(&DUP_STATUS_NAMES, dup_status, "UNKNOWN");
     let status_str = rpc_detect_history_dup_status(dup_status)
@@ -1820,21 +1820,21 @@ unsafe fn write_history_dup_item(
 }
 
 #[allow(clippy::too_many_arguments)]
-unsafe fn write_urlqueue_item(
+fn write_urlqueue_item(
     out: &mut Vec<u8>,
     json: bool,
     index: usize,
     id: c_int,
-    filename: *const c_char,
-    url: *const c_char,
-    name: *const c_char,
-    category: *const c_char,
+    filename: &CStr,
+    url: &CStr,
+    name: &CStr,
+    category: &CStr,
     priority: c_int,
 ) {
-    let filename_enc = encode_str(json, unsafe { input(filename) });
-    let url_enc = encode_str(json, unsafe { input(url) });
-    let name_enc = encode_str(json, unsafe { input(name) });
-    let category_enc = encode_str(json, unsafe { input(category) });
+    let filename_enc = encode_str(json, filename.to_bytes());
+    let url_enc = encode_str(json, url.to_bytes());
+    let name_enc = encode_str(json, name.to_bytes());
+    let category_enc = encode_str(json, category.to_bytes());
 
     out.reserve(256);
     if json {
@@ -2702,18 +2702,18 @@ mod tests {
             let unmasked = String::from_utf8(unmasked_buf).unwrap();
             assert!(unmasked.contains("\"Value\" : \"secret\""));
 
-            let name = CString::new("Release").unwrap();
-            let key = CString::new("series=1").unwrap();
+            let name = c"Release";
+            let key = c"series=1";
             let mut dup_json_buf = Vec::new();
             write_history_dup_item(
                 &mut dup_json_buf,
                 true,
                 0,
                 12,
-                name.as_ptr(),
+                name,
                 1700000000,
                 1048576,
-                key.as_ptr(),
+                key,
                 100,
                 0,
                 4,
@@ -2726,10 +2726,10 @@ mod tests {
                 false,
                 0,
                 12,
-                name.as_ptr(),
+                name,
                 1700000000,
                 1048576,
-                key.as_ptr(),
+                key,
                 100,
                 0,
                 4,
@@ -5016,79 +5016,71 @@ impl RpcEmit for RpcEmitter {
         self.close_struct(true);
     }
 
-    fn post_queue_item(&mut self, item: &RpcPostQueueItem, info: &RpcNzbInfo<'_>) {
+    fn post_queue_item(&mut self, item: &RpcPostQueueItem<'_>, info: &RpcNzbInfo<'_>) {
         let idx = self.next_index();
-        unsafe {
-            write_postqueue_item_start(
-                &mut self.out,
-                self.is_json,
-                idx,
-                item.nzb_id,
-                item.info_name,
-                item.stage,
-                item.file_progress,
-            );
-        }
+        write_postqueue_item_start(
+            &mut self.out,
+            self.is_json,
+            idx,
+            item.nzb_id,
+            item.info_name,
+            item.stage,
+            item.file_progress,
+        );
         self.nzb_info(info);
         if self.is_json {
             self.out.extend_from_slice(b",\n");
         }
     }
 
-    fn history_nzb(&mut self, item: &RpcHistoryNzb, info: &RpcNzbInfo<'_>) {
+    fn history_nzb(&mut self, item: &RpcHistoryNzb<'_>, info: &RpcNzbInfo<'_>) {
         let idx = self.next_index();
-        unsafe {
-            write_history_nzb_start(
-                &mut self.out,
-                self.is_json,
-                idx,
-                item.id,
-                item.name,
-                item.remaining_file_count,
-                item.retry_data,
-                item.history_time,
-                item.status,
-            );
-        }
+        write_history_nzb_start(
+            &mut self.out,
+            self.is_json,
+            idx,
+            item.id,
+            item.name,
+            item.remaining_file_count,
+            item.retry_data,
+            item.history_time,
+            item.status,
+        );
         self.nzb_info(info);
         self.close_struct(false);
     }
 
-    fn history_dup(&mut self, item: &RpcHistoryDup) {
+    fn history_dup(&mut self, item: &RpcHistoryDup<'_>) {
         let idx = self.next_index();
-        unsafe {
-            write_history_dup_item(
-                &mut self.out,
-                self.is_json,
-                idx,
-                item.id,
-                item.name,
-                item.history_time,
-                item.size,
-                item.dupe_key,
-                item.dupe_score,
-                item.dupe_mode,
-                item.dup_status,
-            );
-        }
+        write_history_dup_item(
+            &mut self.out,
+            self.is_json,
+            idx,
+            item.id,
+            item.name,
+            item.history_time,
+            item.size,
+            item.dupe_key,
+            item.dupe_score,
+            item.dupe_mode,
+            item.dup_status,
+        );
         self.close_struct(false);
     }
 
-    fn url_queue_item(&mut self, item: &RpcUrlQueueItem) {
+    fn url_queue_item(&mut self, item: &RpcUrlQueueItem<'_>) {
         let idx = self.next_index();
-        unsafe {
-            write_urlqueue_item(
-                &mut self.out,
-                self.is_json,
-                idx,
-                item.id,
-                item.filename,
-                item.url,
-                item.name,
-                item.category,
-                item.priority,
-            );
-        }
+        write_urlqueue_item(
+            &mut self.out,
+            self.is_json,
+            idx,
+            item.id,
+            item.filename,
+            item.url,
+            item.name,
+            item.category,
+            item.priority,
+        );
     }
 
     fn fleet_result(

@@ -2335,7 +2335,7 @@ unsafe fn emit_rpc_nzb(
     text_status_mode: i32,
     f_cb: impl FnOnce(
         &crate::queuesubsys_host::NzbSnap,
-        *const c_char,
+        &CStr,
         &crate::xmlrpc_format::NzbgetRsRpcNzbInfoInput,
         &[crate::xmlrpc_format::NzbgetRsRpcParamItem],
         &[crate::xmlrpc_format::NzbgetRsRpcScriptItem],
@@ -2444,7 +2444,7 @@ unsafe fn emit_rpc_nzb(
         })
         .collect();
 
-    f_cb(&n, c_text_status.as_ptr(), &f, &prms, &scrs, &sts);
+    f_cb(&n, &c_text_status, &f, &prms, &scrs, &sts);
 }
 
 #[cfg(unix)]
@@ -2459,7 +2459,7 @@ unsafe fn emit_rpc_post(
         out.post_info_end(&crate::xmlrpc_format::RpcPostInfo {
             is_post_queue: post_queue,
             has_post_info: false,
-            progress_label: std::ptr::null(),
+            progress_label: c"",
             stage_progress: 0,
             cur_time: 0,
             stage_time: 0,
@@ -2488,7 +2488,7 @@ unsafe fn emit_rpc_post(
     out.post_info_end(&crate::xmlrpc_format::RpcPostInfo {
         is_post_queue: post_queue,
         has_post_info: true,
-        progress_label: c_label.as_ptr(),
+        progress_label: &c_label,
         stage_progress: pi.stage_progress,
         cur_time,
         stage_time: pi.stage_time,
@@ -2863,7 +2863,7 @@ unsafe fn web_rpc_collect_bridge(
                         out.post_queue_item(
                             &crate::xmlrpc_format::RpcPostQueueItem {
                                 nzb_id: outer.id,
-                                info_name: c_pname.as_ptr(),
+                                info_name: &c_pname,
                                 stage: pi.stage.into(),
                                 file_progress: pi.file_progress,
                             },
@@ -2900,7 +2900,7 @@ unsafe fn web_rpc_collect_bridge(
                             out.history_nzb(
                                 &crate::xmlrpc_format::RpcHistoryNzb {
                                     id: h.id,
-                                    name: c_hname.as_ptr(),
+                                    name: &c_hname,
                                     remaining_file_count: n.parked_file_count,
                                     retry_data: has_completed != 0,
                                     history_time: h.time as c_int,
@@ -2919,10 +2919,10 @@ unsafe fn web_rpc_collect_bridge(
                         let c_dkey = cstr::to_cstring(&d.dupe_key);
                         out.history_dup(&crate::xmlrpc_format::RpcHistoryDup {
                             id: h.id,
-                            name: c_hname.as_ptr(),
+                            name: &c_hname,
                             history_time: h.time as c_int,
                             size: d.size,
-                            dupe_key: c_dkey.as_ptr(),
+                            dupe_key: &c_dkey,
                             dupe_score: d.dupe_score,
                             dupe_mode: d.dupe_mode.into(),
                             dup_status: d.status.into(),
@@ -2948,10 +2948,10 @@ unsafe fn web_rpc_collect_bridge(
                         let c_cat = cstr::to_cstring(&n.category);
                         out.url_queue_item(&crate::xmlrpc_format::RpcUrlQueueItem {
                             id: n.id,
-                            filename: c_fn.as_ptr(),
-                            url: c_url.as_ptr(),
-                            name: c_name.as_ptr(),
-                            category: c_cat.as_ptr(),
+                            filename: &c_fn,
+                            url: &c_url,
+                            name: &c_name,
+                            category: &c_cat,
                             priority: n.priority,
                         });
                     }

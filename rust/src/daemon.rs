@@ -150,8 +150,7 @@ fn prepost_has_active_unpack() -> bool {
 }
 
 fn get_reloading() -> bool {
-    let env = empty_env();
-    exec(3, &env) != 0
+    crate::lifecycle::daemon_is_reloading()
 }
 
 fn stop(reload: bool) {
@@ -246,11 +245,7 @@ fn destroy_instance() {
             PRE_POST.swap(ptr::null_mut(), Ordering::SeqCst),
         );
     }
-    let env = NzbgetRsDaemonEnv {
-        a1: c_int::from(!OPTIONS.load(Ordering::SeqCst).is_null()),
-        ..empty_env()
-    };
-    exec(12, &env);
+    crate::lifecycle::cleanup_global_objects(!OPTIONS.load(Ordering::SeqCst).is_null());
     unsafe {
         crate::net::nzbget_rs_serverpool_free(SERVER_POOL.swap(ptr::null_mut(), Ordering::SeqCst));
     }
@@ -273,11 +268,7 @@ unsafe extern "C" fn phase1_init(reload: bool) -> c_int {
     destroy_instance();
     INSTANCE.store(true, Ordering::SeqCst);
 
-    let reset = NzbgetRsDaemonEnv {
-        a1: c_int::from(reload),
-        ..empty_env()
-    };
-    exec(2, &reset);
+    crate::lifecycle::reset_instance(reload);
     LOG.store(new_log(), Ordering::SeqCst);
 
     let mut version = b"RustyGet ".to_vec();
@@ -292,13 +283,10 @@ unsafe extern "C" fn phase1_init(reload: bool) -> c_int {
     *WORK_STATE.lock().unwrap_or_else(PoisonError::into_inner) = Some(crate::ffi::install_workstate());
     SERVER_POOL.store(crate::net::nzbget_rs_serverpool_new(), Ordering::SeqCst);
 
-    let cmdline = empty_env();
-    let rc = exec(13, &cmdline);
-    if rc == -1 {
-        fatal("Invalid command line");
-    }
-    if rc < 0 {
-        fatal("Command line parsing failed");
+    match crate::lifecycle::parse_command_line() {
+        Ok(()) => {}
+        Err(crate::lifecycle::CommandLineError::NoArguments) => fatal("Invalid command line"),
+        Err(crate::lifecycle::CommandLineError::Invalid) => fatal("Command line parsing failed"),
     }
 
     PRE_POST.store(
@@ -306,7 +294,7 @@ unsafe extern "C" fn phase1_init(reload: bool) -> c_int {
         Ordering::SeqCst,
     );
 
-    // no_config < 0: the options come from the command line phase 13 parsed
+    // no_config < 0: the options come from the command line parse_command_line read
     let mut state_flags: c_int = 0;
     let options = crate::options::nzbget_rs_options_new(
         ptr::null(),
@@ -323,7 +311,7 @@ unsafe extern "C" fn phase1_init(reload: bool) -> c_int {
         &mut state_flags,
     );
     OPTIONS.store(options, Ordering::SeqCst);
-    exec(14, &cmdline);
+    crate::lifecycle::apply_command_line();
 
     if !crate::ffi::build_tls_disabled() {
         let opts = &*options;

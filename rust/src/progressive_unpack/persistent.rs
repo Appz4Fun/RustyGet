@@ -246,8 +246,9 @@ fn first_volume_qualifies(first: &Path, password: &str) -> Result<usize, String>
                 if h.split_before() {
                     continue;
                 }
+                // A directory entry is made at publish (see `Run::publish_where`).
                 if h.is_dir() {
-                    return Err("directory entry".into());
+                    continue;
                 }
                 if h.method != 0 {
                     return Err("compressed member".into());
@@ -558,6 +559,9 @@ struct Run<'a> {
     anchors: Option<Arc<DurableAnchors>>,
     /// Holes of this run not read back yet, patched as soon as their volume is repaired.
     inline: InlineRefill,
+    /// Directory entries this run passed, made in the destination (with their stored mode and
+    /// time) when the outputs are published.
+    dirs: Vec<Member>,
 }
 
 /// The holes of a running session whose volumes have not been repaired yet. Each one is read
@@ -727,6 +731,7 @@ impl<'a> Run<'a> {
             adopted: Vec::new(),
             anchors: None,
             inline: InlineRefill::default(),
+            dirs: Vec::new(),
         }
     }
 
@@ -949,21 +954,19 @@ impl<'a> Run<'a> {
                                 .unwrap_or("a member".into())
                         )));
                     }
-                    // A directory entry: zipfast #130 creates it inside this run's stage, but
-                    // publishing moves only files out of the stage, so an empty folder would be
-                    // lost. Hand the set to the progressive path, as before #130 (which refused
-                    // directory entries in persistent sessions).
+                    // A directory entry: noted and made in the destination at publish, so the
+                    // session goes on. Falling back here would throw away everything this run
+                    // extracted (and patched inline) and extract the whole set again; scene
+                    // releases end with one.
                     Ok(Some(ProgressiveEvent::MemberFinished {
                         outcome: zipfast::progressive::MemberOutcome::Directory { .. },
                         ..
                     })) => {
-                        return Err(Step::Fallback(format!(
-                            "directory entry{}",
-                            current
-                                .as_deref()
-                                .map(|m| format!(" {}", String::from_utf8_lossy(m)))
-                                .unwrap_or_default()
-                        )));
+                        summary.dirs += 1;
+                        if current.is_some() {
+                            self.dirs.push(current_member.clone());
+                        }
+                        current = None;
                     }
                     Ok(Some(ProgressiveEvent::MemberFinished { .. })) => {
                         summary.files += 1;
@@ -1294,12 +1297,14 @@ impl<'a> Run<'a> {
         self.anchors = None;
         let stage = self.plan.stage.clone();
         let mut files = Vec::new();
+        let mut staged_dirs = Vec::new();
         let mut stack = vec![stage.clone()];
         while let Some(d) = stack.pop() {
             let entries = std::fs::read_dir(&d).map_err(|e| format!("stage: {e}"))?;
             for e in entries.flatten() {
                 let ty = e.file_type().map_err(|e| format!("stage: {e}"))?;
                 if ty.is_dir() {
+                    staged_dirs.push(e.path());
                     stack.push(e.path());
                 } else if ty.is_file() {
                     files.push(e.path());
@@ -1330,6 +1335,28 @@ impl<'a> Run<'a> {
             };
             std::fs::rename(&from, &to).map_err(|e| format!("{}: {e}", to.display()))?;
         }
+        // Directory entries, as the progressive path places them: the ones this run passed
+        // with their stored mode, then their stored times once their children are in place.
+        // An empty folder zipfast staged (one a resumed run passed before a restart) is made
+        // too, so no folder is lost. Only for a whole set: a repair that was given up
+        // publishes just its intact files and leaves no empty folders behind.
+        let dirs = std::mem::take(&mut self.dirs);
+        if keep.is_some() {
+            remove_state_root(&self.plan.root);
+            return Ok(());
+        }
+        let mut placed = Vec::new();
+        for m in dirs {
+            let dir = super::place_directory(self.req.dest, &m).map_err(|f| f.to_string())?;
+            placed.retain(|(d, _): &(PathBuf, _)| *d != dir);
+            placed.push((dir, m.meta.mtime));
+        }
+        for d in staged_dirs {
+            if let Ok(rel) = d.strip_prefix(&stage) {
+                crate::archive_native::create_dir_all_no_follow(self.req.dest, rel)?;
+            }
+        }
+        super::set_directory_times(placed);
         remove_state_root(&self.plan.root);
         Ok(())
     }

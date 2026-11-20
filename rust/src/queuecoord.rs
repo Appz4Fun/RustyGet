@@ -1307,10 +1307,23 @@ const BACKUP_LEAD: i32 = 100;
 /// seconds, and failing over first throws away an extraction the backup could have fed.
 const BACKUP_CLASSIFY_GRACE_SEC: i64 = 120;
 
+/// How long a backup the fleet intake is still reading in the background may hold a failover:
+/// past the grace by the time that reading may take, and a margin.
+const BACKUP_CHECKING_MAX_SEC: i64 = BACKUP_CLASSIFY_GRACE_SEC + 240;
+
 /// Whether a backup parked at `parked_at` (Unix seconds) is still too new to tell whether it
-/// lends: its kind is unknown and it arrived under [`BACKUP_CLASSIFY_GRACE_SEC`] ago.
-fn backup_still_unclassified(kind: crate::donorkind::DonorKind, parked_at: i64, now: i64) -> bool {
-    kind == crate::donorkind::DonorKind::Unknown && now - parked_at < BACKUP_CLASSIFY_GRACE_SEC
+/// lends: its kind is unknown and it arrived under [`BACKUP_CLASSIFY_GRACE_SEC`] ago, or the
+/// fleet intake is still `checking` it (a nested alt can take longer to open down to its
+/// video) and it arrived under [`BACKUP_CHECKING_MAX_SEC`] ago.
+fn backup_still_unclassified(
+    kind: crate::donorkind::DonorKind,
+    parked_at: i64,
+    now: i64,
+    checking: bool,
+) -> bool {
+    let age = now - parked_at;
+    kind == crate::donorkind::DonorKind::Unknown
+        && (age < BACKUP_CLASSIFY_GRACE_SEC || (checking && age < BACKUP_CHECKING_MAX_SEC))
 }
 #[cfg(unix)]
 const DUPE_PROBE_SAMPLE_COUNT: i32 = 10;
@@ -4728,8 +4741,12 @@ impl NzbgetRsQueueCoordinator {
                 host.nzb_get_param(backup_nzb.ptr, crate::donorkind::KIND_PARAM)
                     .as_deref(),
             );
-            if backup_still_unclassified(backup_kind, backup_hi.time, now)
-                && !download_hopeless(nzb.total_articles, nzb.current_success_articles, failed)
+            if backup_still_unclassified(
+                backup_kind,
+                backup_hi.time,
+                now,
+                crate::dupesearch_coord::intake_pending(backup_nzb.id),
+            ) && !download_hopeless(nzb.total_articles, nzb.current_success_articles, failed)
             {
                 // Not checked yet: the next round looks again instead of waiting for
                 // another sample of failed articles.
@@ -5059,7 +5076,12 @@ impl NzbgetRsQueueCoordinator {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs() as i64);
-            if backup_still_unclassified(backup_kind, backup_hi.time, now) {
+            if backup_still_unclassified(
+                backup_kind,
+                backup_hi.time,
+                now,
+                crate::dupesearch_coord::intake_pending(backup_nzb.id),
+            ) {
                 return;
             }
             let backup_alive = backup_alive_permille(host, backup_nzb.ptr);
@@ -6372,11 +6394,16 @@ mod tests {
     fn late_backup_waits_until_classified() {
         use crate::donorkind::DonorKind;
         let parked = 1_000;
-        assert!(super::backup_still_unclassified(DonorKind::Unknown, parked, parked + 2));
-        assert!(super::backup_still_unclassified(DonorKind::Unknown, parked, parked + 119));
-        assert!(!super::backup_still_unclassified(DonorKind::Unknown, parked, parked + 120));
+        let unclassified = super::backup_still_unclassified;
+        assert!(unclassified(DonorKind::Unknown, parked, parked + 2, false));
+        assert!(unclassified(DonorKind::Unknown, parked, parked + 119, false));
+        assert!(!unclassified(DonorKind::Unknown, parked, parked + 120, false));
+        // still being read in the background: held longer, but not forever
+        assert!(unclassified(DonorKind::Unknown, parked, parked + 300, true));
+        assert!(!unclassified(DonorKind::Unknown, parked, parked + 360, true));
         for kind in [DonorKind::Twin, DonorKind::Borrowable, DonorKind::Unborrowable] {
-            assert!(!super::backup_still_unclassified(kind, parked, parked + 2));
+            assert!(!unclassified(kind, parked, parked + 2, false));
+            assert!(!unclassified(kind, parked, parked + 2, true));
         }
     }
 

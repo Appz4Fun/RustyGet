@@ -419,6 +419,8 @@ pub struct ArticleFetcher {
     host: &'static dyn NntpHost,
     wait_counter: Mutex<Option<Arc<AtomicI32>>>,
     stopped: AtomicBool,
+    /// Reads past the download speed limit (see [`ArticleFetcher::unthrottled`]).
+    unthrottled: AtomicBool,
     conn_ptr: Mutex<ConnHandle>,
 }
 
@@ -428,8 +430,19 @@ impl ArticleFetcher {
             host,
             wait_counter: Mutex::new(None),
             stopped: AtomicBool::new(false),
+            unthrottled: AtomicBool::new(false),
             conn_ptr: Mutex::new(ConnHandle::default()),
         }
+    }
+
+    /// A fetcher whose reads skip the download speed limit: for the few
+    /// articles a fleet is checked with, which would otherwise queue behind
+    /// every download connection for their share of a throttled line and run
+    /// out of time before the copy they classify is needed.
+    pub fn unthrottled(host: &'static dyn NntpHost) -> Self {
+        let fetcher = Self::new(host);
+        fetcher.unthrottled.store(true, Ordering::Relaxed);
+        fetcher
     }
 
     pub fn set_wait_counter(&self, counter: Option<Arc<AtomicI32>>) {
@@ -813,6 +826,7 @@ impl ArticleFetcher {
                 let st_lim = self.host.status();
                 if st_lim.quota_reached
                     || st_lim.speed_limit <= 0
+                    || self.unthrottled.load(Ordering::Relaxed)
                     || (st_lim.cur_speed <= st_lim.speed_limit
                         && st_lim.mom_speed <= st_lim.speed_limit)
                 {

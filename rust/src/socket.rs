@@ -16,11 +16,52 @@ use crate::fsops::{error_message, last_errno, set_last_errno};
 
 pub const INVALID_SOCKET: c_int = -1;
 
-pub const CS_CONNECTED: c_int = 0;
-pub const CS_DISCONNECTED: c_int = 1;
-pub const CS_LISTENING: c_int = 2;
-pub const CS_CANCELLED: c_int = 3;
-pub const CS_BROKEN: c_int = 4;
+/// Connection lifecycle state (`Connection::EStatus`). The discriminants are the
+/// values the C++ side used, and `nzbget_rs_conn_ctl` op 14 still reports them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(i32)]
+pub enum ConnStatus {
+    Connected = 0,
+    Disconnected = 1,
+    Listening = 2,
+    Cancelled = 3,
+    Broken = 4,
+}
+
+impl ConnStatus {
+    const fn from_raw(raw: i32) -> Self {
+        match raw {
+            0 => Self::Connected,
+            1 => Self::Disconnected,
+            2 => Self::Listening,
+            3 => Self::Cancelled,
+            _ => Self::Broken,
+        }
+    }
+}
+
+/// A [`ConnStatus`] shared between a connection and the threads that cancel it.
+/// Only valid statuses can be stored, so reads always decode.
+#[derive(Debug)]
+pub struct ConnStatusCell(AtomicI32);
+
+impl ConnStatusCell {
+    pub const fn new(status: ConnStatus) -> Self {
+        Self(AtomicI32::new(status as i32))
+    }
+
+    pub fn get(&self) -> ConnStatus {
+        ConnStatus::from_raw(self.0.load(Ordering::SeqCst))
+    }
+
+    pub fn set(&self, status: ConnStatus) {
+        self.0.store(status as i32, Ordering::SeqCst);
+    }
+
+    pub fn is(&self, status: ConnStatus) -> bool {
+        self.get() == status
+    }
+}
 
 pub const CONNECTION_READBUFFER_SIZE: usize = 1024;
 const BSTRING_MAX: usize = 1023;
@@ -206,7 +247,7 @@ pub fn bind_listener<E>(
     port: c_int,
     ip_version: c_int,
     socket_slot: &AtomicI32,
-    status_slot: &AtomicI32,
+    status_slot: &ConnStatusCell,
     is_listener: &mut bool,
     tls_error: &mut bool,
     mut on_error: E,
@@ -214,7 +255,7 @@ pub fn bind_listener<E>(
 where
     E: FnMut(&[u8]),
 {
-    if status_slot.load(Ordering::SeqCst) == CS_LISTENING {
+    if status_slot.is(ConnStatus::Listening) {
         return true;
     }
 
@@ -368,7 +409,7 @@ where
     }
 
     *is_listener = true;
-    status_slot.store(CS_LISTENING, Ordering::SeqCst);
+    status_slot.set(ConnStatus::Listening);
     true
 }
 
@@ -411,7 +452,7 @@ unsafe fn connect_with_timeout<W, S>(
     addr_len: libc::socklen_t,
     timeout_sec: c_int,
     has_deadline: bool,
-    status_slot: &AtomicI32,
+    status_slot: &ConnStatusCell,
     deadline_wait: &mut W,
     deadline_stopped: &mut S,
 ) -> bool
@@ -456,7 +497,7 @@ where
                 None
             };
             ret = loop {
-                if status_slot.load(Ordering::SeqCst) == CS_CANCELLED || deadline_stopped() {
+                if status_slot.is(ConnStatus::Cancelled) || deadline_stopped() {
                     set_last_errno(libc::ECANCELED);
                     return false;
                 }
@@ -514,7 +555,7 @@ where
         }
     }
 
-    if status_slot.load(Ordering::SeqCst) == CS_CANCELLED || deadline_stopped() {
+    if status_slot.is(ConnStatus::Cancelled) || deadline_stopped() {
         set_last_errno(libc::ECANCELED);
         return false;
     }
@@ -540,7 +581,7 @@ pub fn connect_stream<W, S, E, D>(
     mut deadline_wait: W,
     mut deadline_stopped: S,
     socket_slot: &AtomicI32,
-    status_slot: &AtomicI32,
+    status_slot: &ConnStatusCell,
     tls_error: &mut bool,
     mut on_error: E,
     mut on_debug: D,
@@ -551,7 +592,7 @@ where
     E: FnMut(&[u8]),
     D: FnMut(&[u8]),
 {
-    if status_slot.load(Ordering::SeqCst) == CS_CANCELLED || deadline_stopped() {
+    if status_slot.is(ConnStatus::Cancelled) || deadline_stopped() {
         set_last_errno(libc::ECANCELED);
         return false;
     }
@@ -701,7 +742,7 @@ where
             let mut last_err: c_int = 0;
 
             for item in &items {
-                if status_slot.load(Ordering::SeqCst) == CS_CANCELLED || deadline_stopped() {
+                if status_slot.is(ConnStatus::Cancelled) || deadline_stopped() {
                     set_last_errno(libc::ECANCELED);
                     last_err = libc::ECANCELED;
                     break;
@@ -799,7 +840,7 @@ pub fn disconnect_socket(
     graceful: bool,
     is_listener: &mut bool,
     socket_slot: &AtomicI32,
-    status_slot: &AtomicI32,
+    status_slot: &ConnStatusCell,
 ) {
     let was_listener = *is_listener;
     *is_listener = false;
@@ -829,7 +870,7 @@ pub fn disconnect_socket(
             }
         }
     }
-    status_slot.store(CS_DISCONNECTED, Ordering::SeqCst);
+    status_slot.set(ConnStatus::Disconnected);
 }
 
 fn is_transient_accept_err(err: c_int) -> bool {
@@ -857,7 +898,7 @@ pub fn accept_connection<S, E>(
     host: &[u8],
     timeout_sec: c_int,
     socket_slot: &AtomicI32,
-    status_slot: &AtomicI32,
+    status_slot: &ConnStatusCell,
     accept_busy: &mut bool,
     tls_error: &mut bool,
     mut should_stop: S,
@@ -867,7 +908,7 @@ where
     S: FnMut() -> bool,
     E: FnMut(&[u8]),
 {
-    if status_slot.load(Ordering::SeqCst) != CS_LISTENING || should_stop() {
+    if !status_slot.is(ConnStatus::Listening) || should_stop() {
         return INVALID_SOCKET;
     }
 
@@ -885,13 +926,13 @@ where
     let mut err: c_int = 0;
     let mut stopped_cleanly = false;
     let accepted = loop {
-        if status_slot.load(Ordering::SeqCst) != CS_LISTENING || should_stop() {
+        if !status_slot.is(ConnStatus::Listening) || should_stop() {
             stopped_cleanly = true;
             break INVALID_SOCKET;
         }
         let listen_fd = socket_slot.load(Ordering::SeqCst);
         if listen_fd == INVALID_SOCKET {
-            stopped_cleanly = status_slot.load(Ordering::SeqCst) != CS_LISTENING || should_stop();
+            stopped_cleanly = !status_slot.is(ConnStatus::Listening) || should_stop();
             err = libc::EBADF;
             break INVALID_SOCKET;
         }
@@ -906,7 +947,7 @@ where
             continue;
         }
         if poll_res < 0 {
-            if status_slot.load(Ordering::SeqCst) != CS_LISTENING || should_stop() {
+            if !status_slot.is(ConnStatus::Listening) || should_stop() {
                 stopped_cleanly = true;
                 break INVALID_SOCKET;
             }
@@ -943,7 +984,7 @@ where
             }
             break fd;
         }
-        if status_slot.load(Ordering::SeqCst) != CS_LISTENING || should_stop() {
+        if !status_slot.is(ConnStatus::Listening) || should_stop() {
             stopped_cleanly = true;
             break INVALID_SOCKET;
         }
@@ -958,10 +999,7 @@ where
         break INVALID_SOCKET;
     };
 
-    if accepted == INVALID_SOCKET
-        && !stopped_cleanly
-        && status_slot.load(Ordering::SeqCst) != CS_CANCELLED
-    {
+    if accepted == INVALID_SOCKET && !stopped_cleanly && !status_slot.is(ConnStatus::Cancelled) {
         emit_error(
             &mut on_error,
             tls_error,
@@ -1025,10 +1063,10 @@ fn format_peer_ip(ip: std::net::IpAddr) -> String {
 }
 
 /// Cancels an active or connecting socket (`Connection::Cancel`).
-pub fn cancel_socket(force_close: bool, socket_slot: &AtomicI32, status_slot: &AtomicI32) {
+pub fn cancel_socket(force_close: bool, socket_slot: &AtomicI32, status_slot: &ConnStatusCell) {
     let cur = socket_slot.load(Ordering::SeqCst);
     if cur != INVALID_SOCKET {
-        status_slot.store(CS_CANCELLED, Ordering::SeqCst);
+        status_slot.set(ConnStatus::Cancelled);
         unsafe {
             if force_close {
                 let s = socket_slot.swap(INVALID_SOCKET, Ordering::SeqCst);
@@ -1044,33 +1082,33 @@ pub fn cancel_socket(force_close: bool, socket_slot: &AtomicI32, status_slot: &A
 }
 
 /// Sends a single line buffer via `send_chunk` (`Connection::WriteLine`).
-pub fn write_line<F>(status_slot: &AtomicI32, line: &[u8], mut send_chunk: F) -> c_int
+pub fn write_line<F>(status_slot: &ConnStatusCell, line: &[u8], mut send_chunk: F) -> c_int
 where
     F: FnMut(&[u8]) -> c_int,
 {
-    if status_slot.load(Ordering::SeqCst) != CS_CONNECTED {
+    if !status_slot.is(ConnStatus::Connected) {
         return -1;
     }
     let res = send_chunk(line);
     if res <= 0 {
-        status_slot.store(CS_BROKEN, Ordering::SeqCst);
+        status_slot.set(ConnStatus::Broken);
     }
     res
 }
 
 /// Sends the entire slice via `send_chunk` (`Connection::Send`).
-pub fn send_all<F>(status_slot: &AtomicI32, data: &[u8], mut send_chunk: F) -> bool
+pub fn send_all<F>(status_slot: &ConnStatusCell, data: &[u8], mut send_chunk: F) -> bool
 where
     F: FnMut(&[u8]) -> c_int,
 {
-    if status_slot.load(Ordering::SeqCst) != CS_CONNECTED {
+    if !status_slot.is(ConnStatus::Connected) {
         return false;
     }
     let mut sent = 0usize;
     while sent < data.len() {
         let res = send_chunk(&data[sent..]);
         if res <= 0 {
-            status_slot.store(CS_BROKEN, Ordering::SeqCst);
+            status_slot.set(ConnStatus::Broken);
             return false;
         }
         sent += res as usize;
@@ -1084,7 +1122,7 @@ where
 #[allow(clippy::too_many_arguments)]
 pub fn read_line<R, E>(
     host: &[u8],
-    status_slot: &AtomicI32,
+    status_slot: &ConnStatusCell,
     read_buf: &mut [u8],
     buf_offset: &mut usize,
     buf_avail: &mut usize,
@@ -1098,7 +1136,7 @@ where
     R: FnMut(&mut [u8], &mut bool) -> c_int,
     E: FnMut(&[u8]),
 {
-    if status_slot.load(Ordering::SeqCst) != CS_CONNECTED || dst.is_empty() {
+    if !status_slot.is(ConnStatus::Connected) || dst.is_empty() {
         return None;
     }
 
@@ -1123,7 +1161,7 @@ where
                     err,
                     None,
                 );
-                status_slot.store(CS_BROKEN, Ordering::SeqCst);
+                status_slot.set(ConnStatus::Broken);
                 *buf_avail = 0;
                 break;
             } else if n == 0 {
@@ -1269,7 +1307,7 @@ mod tests {
     #[test]
     fn tcp_loopback_bind_connect_accept_readline_recv() {
         let srv_sock = AtomicI32::new(INVALID_SOCKET);
-        let srv_status = AtomicI32::new(CS_DISCONNECTED);
+        let srv_status = ConnStatusCell::new(ConnStatus::Disconnected);
         let mut srv_listener = false;
         let mut tls_err = false;
         let mut errs = Vec::new();
@@ -1285,7 +1323,7 @@ mod tests {
             |e| errs.push(e.to_vec()),
         ));
         assert!(errs.is_empty());
-        assert_eq!(srv_status.load(Ordering::SeqCst), CS_LISTENING);
+        assert_eq!(srv_status.get(), ConnStatus::Listening);
 
         let port = unsafe {
             let mut sin: libc::sockaddr_in = std::mem::zeroed();
@@ -1302,7 +1340,7 @@ mod tests {
         };
 
         let cli_sock = AtomicI32::new(INVALID_SOCKET);
-        let cli_status = AtomicI32::new(CS_DISCONNECTED);
+        let cli_status = ConnStatusCell::new(ConnStatus::Disconnected);
         let mut debugs = Vec::new();
         assert!(connect_stream(
             b"127.0.0.1",
@@ -1319,7 +1357,7 @@ mod tests {
             |e| errs.push(e.to_vec()),
             |d| debugs.push(d.to_vec()),
         ));
-        cli_status.store(CS_CONNECTED, Ordering::SeqCst);
+        cli_status.set(ConnStatus::Connected);
         assert!(errs.is_empty());
         assert!(debugs
             .iter()
@@ -1350,7 +1388,7 @@ mod tests {
             ) as c_int
         }));
 
-        let acc_status = AtomicI32::new(CS_CONNECTED);
+        let acc_status = ConnStatusCell::new(ConnStatus::Connected);
         let mut rbuf = [0u8; CONNECTION_READBUFFER_SIZE + 129];
         let mut off = 0usize;
         let mut avail = 0usize;
@@ -1422,7 +1460,7 @@ mod tests {
         let path_bytes = sock_path.as_bytes();
 
         let srv_sock = AtomicI32::new(INVALID_SOCKET);
-        let srv_status = AtomicI32::new(CS_DISCONNECTED);
+        let srv_status = ConnStatusCell::new(ConnStatus::Disconnected);
         let mut srv_listener = false;
         let mut tls_err = false;
         assert!(bind_listener(
@@ -1438,7 +1476,7 @@ mod tests {
         assert!(std::path::Path::new(&sock_path).exists());
 
         let cli_sock = AtomicI32::new(INVALID_SOCKET);
-        let cli_status = AtomicI32::new(CS_DISCONNECTED);
+        let cli_status = ConnStatusCell::new(ConnStatus::Disconnected);
         let mut cli_listener = false;
         assert!(connect_stream(
             path_bytes,
@@ -1472,7 +1510,7 @@ mod tests {
     #[test]
     fn deadline_empty_resolved_never_blocks_and_multi_addr_falls_back() {
         let srv_sock = AtomicI32::new(INVALID_SOCKET);
-        let srv_status = AtomicI32::new(CS_DISCONNECTED);
+        let srv_status = ConnStatusCell::new(ConnStatus::Disconnected);
         let mut srv_listener = false;
         let mut tls_err = false;
         assert!(bind_listener(
@@ -1497,7 +1535,7 @@ mod tests {
         };
 
         let cli_sock = AtomicI32::new(INVALID_SOCKET);
-        let cli_status = AtomicI32::new(CS_DISCONNECTED);
+        let cli_status = ConnStatusCell::new(ConnStatus::Disconnected);
         // Empty resolved_addresses with has_deadline must fail immediately without DNS
         assert!(!connect_stream(
             b"localhost",
@@ -1540,7 +1578,7 @@ mod tests {
             |_| {},
         ));
 
-        cli_status.store(CS_CONNECTED, Ordering::SeqCst);
+        cli_status.set(ConnStatus::Connected);
         let mut cli_listener = false;
         disconnect_socket(
             b"localhost",
@@ -1564,7 +1602,7 @@ mod tests {
         use std::sync::Arc;
 
         let srv_sock = Arc::new(AtomicI32::new(INVALID_SOCKET));
-        let srv_status = Arc::new(AtomicI32::new(CS_DISCONNECTED));
+        let srv_status = Arc::new(ConnStatusCell::new(ConnStatus::Disconnected));
         let stop_flag = Arc::new(AtomicBool::new(false));
         let mut srv_listener = false;
         let mut tls_err = false;
@@ -1621,7 +1659,7 @@ mod tests {
         );
         init_socket_opts(pair[0], 60).expect("opts");
         let r_sock = Arc::new(AtomicI32::new(pair[0]));
-        let r_status = Arc::new(AtomicI32::new(CS_CONNECTED));
+        let r_status = Arc::new(ConnStatusCell::new(ConnStatus::Connected));
         let r_sock_t = Arc::clone(&r_sock);
         let recv_handle = std::thread::spawn(move || {
             let rbuf = [0u8; CONNECTION_READBUFFER_SIZE];
@@ -1662,7 +1700,7 @@ mod tests {
 
         // Verify connect_stream aborts immediately when stop callback is true.
         let cli_sock = AtomicI32::new(INVALID_SOCKET);
-        let cli_status = AtomicI32::new(CS_DISCONNECTED);
+        let cli_status = ConnStatusCell::new(ConnStatus::Disconnected);
         assert!(!connect_stream(
             b"127.0.0.1",
             9,

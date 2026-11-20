@@ -1133,7 +1133,7 @@ impl NzbgetRsStreamRepairCtrl {
         }
 
         for donor in donors {
-            if self.host_is_stopped(q) {
+            if self.host_is_stopped(q) || self.yielding.load(Ordering::SeqCst) {
                 break;
             }
             let any_holes = targets
@@ -1440,7 +1440,7 @@ impl NzbgetRsStreamRepairCtrl {
         let pw =
             (!counters.target_password.is_empty()).then_some(counters.target_password.as_slice());
 
-        let aborted = || self.host_is_stopped(q);
+        let aborted = || self.host_is_stopped(q) || self.yielding.load(Ordering::SeqCst);
         let mut emit_msg = |kind: TargetMessageKind, text: &[u8]| {
             self.print_message(q, map_target_msg_kind(kind), text);
         };
@@ -1490,7 +1490,11 @@ impl NzbgetRsStreamRepairCtrl {
         let allow_decompress = !self.live_mode && opts.allow_decompress_opt;
 
         for donor in donors {
-            if self.host_is_stopped(q) || !session.has_inner_holes() {
+            // A pass stopping for a newly dead volume probes no further donor.
+            if self.host_is_stopped(q)
+                || self.yielding.load(Ordering::SeqCst)
+                || !session.has_inner_holes()
+            {
                 break;
             }
 
@@ -2178,17 +2182,20 @@ impl NzbgetRsStreamRepairCtrl {
             };
             ran = true;
             tried.extend(left);
-            for (name, holes) in attempted {
-                seen.entry(name).or_default().extend(holes);
-            }
             if self.host_is_stopped(q) {
                 break;
             }
-            // The pass stopped for a volume that went dead meanwhile: start the next one now.
+            // The pass stopped for a volume that went dead meanwhile: start the next one now,
+            // taking on again every file it had taken on (it was cut short: the files are marked
+            // tried, and their holes are not counted as seen, so a later look retries them).
             if self.yielding.swap(false, Ordering::SeqCst) && yields < MAX_LIVE_YIELDS {
                 yields += 1;
                 passes -= 1;
+                again = attempted.into_iter().map(|(name, _)| name).collect();
                 continue;
+            }
+            for (name, holes) in attempted {
+                seen.entry(name).or_default().extend(holes);
             }
             let (fresh, now) = self.look_again(q);
             let (newcomers, retry) = holes_to_rerun(&seen, &mut rerun_for, now);

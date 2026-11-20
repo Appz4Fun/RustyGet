@@ -6174,7 +6174,12 @@ impl RepairSetData {
             return (written, written > 0);
         }
 
-        const FULL_CHUNK: i64 = 4 * 1024 * 1024;
+        // One read's articles are fetched as one batch, so the chunk sets how many are in
+        // flight at once: 16 MB is about 22 articles, more than the fetch workers (at most
+        // 16), where 4 MB (6 articles) left most of them idle and borrows ran at 2-3 MB/s.
+        // It stays small enough that a stop (a live pass yielding) is seen within seconds.
+        const FULL_CHUNK: i64 = 16 * 1024 * 1024;
+        const RETRY_CHUNK: i64 = 4 * 1024 * 1024;
         const MIN_CHUNK: i64 = 64 * 1024;
         const MAX_FAILED_PIECES: i32 = 8;
 
@@ -6211,7 +6216,9 @@ impl RepairSetData {
                         failed_pieces,
                         MAX_FAILED_PIECES,
                     );
-                    size = new_size;
+                    // Retry at most 4 MB: the 16 cached articles before the failure then
+                    // cover the retry instead of a refetch of the whole chunk.
+                    size = new_size.min(RETRY_CHUNK);
                     pos = new_pos;
                     failed_pieces = new_failed;
                     if step_action == 0 {
@@ -6465,7 +6472,10 @@ fn final_end_block(middle: &[u8]) -> Option<Vec<u8>> {
 }
 
 pub const DONOR_MAX_CACHED_PARTS: usize = 16;
-pub const DONOR_MAX_PREFETCH_PARTS: usize = DONOR_MAX_CACHED_PARTS / 2;
+/// Most articles one read asks the batch fetcher for. They stream into the read in order
+/// (see [`DonorMemberSource::fetch_part`]), so this is bounded by the batch fetcher's own
+/// window and buffer, not by the cache: a read of a few tens of MB keeps every worker busy.
+pub const DONOR_MAX_PREFETCH_PARTS: usize = 64;
 pub const DONOR_MAX_RESOLVE_STEPS: usize = 6;
 
 pub const DONOR_PROBE_COUNT: i32 = 2;
@@ -6499,6 +6509,8 @@ pub struct DonorMemberSource {
     cache: std::collections::BTreeMap<i32, FetchedDonorArticle>,
     cache_order: std::collections::VecDeque<i32>,
     served_parts: std::collections::BTreeSet<i32>,
+    /// Parts of the open prefetch batch not taken yet, in the order the batch delivers them.
+    streaming: std::collections::VecDeque<i32>,
     size: i64,
     drift: i64,
     bad: bool,
@@ -6512,6 +6524,7 @@ impl DonorMemberSource {
             cache: std::collections::BTreeMap::new(),
             cache_order: std::collections::VecDeque::new(),
             served_parts: std::collections::BTreeSet::new(),
+            streaming: std::collections::VecDeque::new(),
             size: -1,
             drift: 0,
             bad: false,
@@ -6556,6 +6569,23 @@ impl DonorMemberSource {
         if self.cache.contains_key(&part_index) {
             let cached = self.cache.get(&part_index)?;
             return cached.success.then_some(cached);
+        }
+        if self.streaming.contains(&part_index) {
+            // Take the open batch up to this part. Parts it delivers first (the read's
+            // slack before its first part) are cached on the way.
+            while let Some(next) = self.streaming.pop_front() {
+                let Some(fetched) = transport.next_prefetch_part() else {
+                    self.streaming.clear();
+                    break;
+                };
+                if !self.cache.contains_key(&next) {
+                    self.store_fetched(next, fetched);
+                }
+                if next == part_index {
+                    let cached = self.cache.get(&part_index)?;
+                    return cached.success.then_some(cached);
+                }
+            }
         }
         let fetched = transport.fetch_part(part_index)?;
         if self.store_fetched(part_index, fetched) {
@@ -6648,14 +6678,20 @@ impl DonorMemberSource {
         if parts.len() < 2 {
             return;
         }
+        // The batch stays open for the read: `fetch_part` takes each part as the read gets to
+        // it while the workers fetch the ones after it. Draining it here first would make each
+        // read wait for its slowest article before any of the next read's are asked for.
         transport.begin_prefetch_batch(&parts);
-        for &part_index in &parts {
-            let Some(fetched) = transport.next_prefetch_part() else {
-                break;
-            };
-            self.store_fetched(part_index, fetched);
+        self.streaming = parts.into();
+    }
+
+    /// Cancels what is left of the read's batch: the batch fetcher is shared by every member
+    /// of the donor, so a batch never outlives the read that opened it.
+    fn end_stream(&mut self, transport: &mut dyn DonorArticleTransport) {
+        if !self.streaming.is_empty() {
+            self.streaming.clear();
+            transport.cancel_prefetch_batch();
         }
-        transport.cancel_prefetch_batch();
     }
 
     pub fn read_with_transport(
@@ -6672,8 +6708,19 @@ impl DonorMemberSource {
             return Err(ReadError::OutOfRange);
         }
         self.prefetch(transport, offset, size);
+        let read = self.read_parts(transport, offset, buffer);
+        self.end_stream(transport);
+        read
+    }
+
+    fn read_parts(
+        &mut self,
+        transport: &mut dyn DonorArticleTransport,
+        offset: i64,
+        buffer: &mut [u8],
+    ) -> ReadResult {
         let mut pos = offset;
-        let end_offset = offset + size;
+        let end_offset = offset + buffer.len() as i64;
         let mut out_pos = 0usize;
         while pos < end_offset {
             let (part_index, fetched) = self
@@ -16508,6 +16555,48 @@ mod tests {
         let served = src.take_served_parts();
         assert!(served >= 3);
         assert_eq!(src.take_served_parts(), 0);
+    }
+
+    #[test]
+    fn donor_member_source_streams_one_batch_per_read() {
+        // 40 parts of 100 bytes: one read across 30 of them is one batch, taken in order as
+        // the read gets to each part, with no single fetches and nothing left open after.
+        let parts: Vec<FetchedDonorArticle> = (0..40i64)
+            .map(|i| FetchedDonorArticle {
+                success: true,
+                offset: i * 100,
+                file_size: 4000,
+                data: (0..100).map(|b| ((i * 100 + b) % 251) as u8).collect(),
+            })
+            .collect();
+        let full: Vec<u8> = parts.iter().flat_map(|p| p.data.clone()).collect();
+        let mut src = DonorMemberSource::new(vec![110i32; 40]);
+        let mut transport = MockDonorTransport {
+            parts,
+            budget: None,
+            allow_prefetch: true,
+            prefetch_queue: std::collections::VecDeque::new(),
+            single_fetches: 0,
+            batch_begins: 0,
+        };
+        assert_eq!(src.size_with_transport(&mut transport), 4000);
+        let singles = transport.single_fetches;
+        let mut buf = vec![0u8; 3000];
+        assert!(src.read_with_transport(&mut transport, 550, &mut buf).is_ok());
+        assert_eq!(&buf[..], &full[550..3550]);
+        assert_eq!(transport.batch_begins, 1);
+        assert_eq!(transport.single_fetches, singles);
+        // The slack part after the read was never taken: the batch is cancelled.
+        assert!(transport.prefetch_queue.is_empty());
+        assert!(src.streaming.is_empty());
+
+        // A read that fails part-way still closes its batch.
+        transport.parts[20].success = false;
+        let mut src = DonorMemberSource::new(vec![110i32; 40]);
+        assert_eq!(src.size_with_transport(&mut transport), 4000);
+        assert!(src.read_with_transport(&mut transport, 1000, &mut buf[..2000]).is_err());
+        assert!(src.streaming.is_empty());
+        assert!(transport.prefetch_queue.is_empty());
     }
 
     struct MockBatchClient {

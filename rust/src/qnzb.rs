@@ -231,11 +231,37 @@ struct NzbData {
     files: Mutex<Files>,
     // (id, kind, time, text), oldest first (see `nzbget_rs_nzb_msgs`)
     msgs: Mutex<std::collections::VecDeque<(u32, i32, i64, CString)>>,
-    // host handles (see `nzbget_rs_nzb_slot`)
+    // host handles, indexed by [`Slot`]
     slots: [std::sync::atomic::AtomicUsize; SLOTS],
 }
 
 const SLOTS: usize = 5;
+
+/// What a collection keeps in each host slot. The host owns what they
+/// point to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Slot {
+    /// The file list.
+    FileList,
+    /// The post-processing job.
+    Post,
+    /// The direct-unpack job thread.
+    UnpackJob,
+    /// The live-repair job thread.
+    LiveRepairJob,
+    /// The message count.
+    MessageCount,
+}
+
+/// The value in slot `s` of collection `p`.
+pub(crate) fn slot(p: *const NzbScalars, s: Slot) -> usize {
+    data(p).slot(s).load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Stores `v` in slot `s` of collection `p`; returns the previous value.
+pub(crate) fn swap_slot(p: *const NzbScalars, s: Slot, v: usize) -> usize {
+    data(p).slot(s).swap(v, std::sync::atomic::Ordering::SeqCst)
+}
 
 /// A file that finished downloading and left the file list.
 struct Completed {
@@ -348,6 +374,10 @@ fn nzb_data<'a>(nzb: NzbRef) -> Option<&'a NzbData> {
 }
 
 impl NzbData {
+    fn slot(&self, s: Slot) -> &std::sync::atomic::AtomicUsize {
+        &self.slots[s as usize]
+    }
+
     fn coll(&self) -> std::sync::MutexGuard<'_, Coll> {
         self.coll.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
@@ -565,7 +595,10 @@ pub(crate) fn set_meta_name(nzb: NzbRef, name: &[u8]) {
 
 /// The direct-unpack job handle kept with the download, 0 for none.
 pub(crate) fn unpack_thread(nzb: NzbRef) -> usize {
-    nzb_data(nzb).map_or(0, |d| d.slots[2].load(std::sync::atomic::Ordering::SeqCst))
+    nzb_data(nzb).map_or(0, |d| {
+        d.slot(Slot::UnpackJob)
+            .load(std::sync::atomic::Ordering::SeqCst)
+    })
 }
 
 /// Whether a file still downloading has its output file open.
@@ -855,13 +888,14 @@ pub(crate) fn set_int(nzb: NzbRef, field: NzbInt, v: i32) {
         NzbInt::SuccessArticles => s.successArticles = v,
         NzbInt::FileCount => s.fileCount = v,
         NzbInt::MessageCount => {
-            d.slots[4].store(v as isize as usize, SeqCst);
+            d.slot(Slot::MessageCount)
+                .store(v as isize as usize, SeqCst);
         }
         NzbInt::TotalArticles => s.totalArticles = v,
         NzbInt::LiveUnpackSec => s.liveUnpackSec = v,
         NzbInt::LiveParSec => s.liveParSec = v,
         NzbInt::PostStage | NzbInt::PostForceFlags => {
-            let post = d.slots[1].load(SeqCst) as *const Post;
+            let post = d.slot(Slot::Post).load(SeqCst) as *const Post;
             if !post.is_null() {
                 if field == NzbInt::PostStage {
                     post_set(post, 0, i64::from(v));
@@ -958,11 +992,11 @@ pub(crate) fn act(nzb: NzbRef, action: NzbAction) {
         NzbAction::LeavePostProcess => unsafe { leave_post_process(p) },
         NzbAction::ClearScriptStatuses => d.coll().script_statuses.clear(),
         NzbAction::DisconnectThreads => {
-            d.slots[2].store(0, SeqCst);
-            d.slots[3].store(0, SeqCst);
+            d.slot(Slot::UnpackJob).store(0, SeqCst);
+            d.slot(Slot::LiveRepairJob).store(0, SeqCst);
         }
-        NzbAction::ClearLiveRepairThread => d.slots[3].store(0, SeqCst),
-        NzbAction::ClearUnpackThread => d.slots[2].store(0, SeqCst),
+        NzbAction::ClearLiveRepairThread => d.slot(Slot::LiveRepairJob).store(0, SeqCst),
+        NzbAction::ClearUnpackThread => d.slot(Slot::UnpackJob).store(0, SeqCst),
         NzbAction::ClearExtractedArchives => d.files().extracted.clear(),
         NzbAction::ClearFileList => {
             if file_list(p) != 0 {
@@ -1159,7 +1193,7 @@ unsafe extern "C" fn drop_file(p: usize) {
 pub unsafe extern "C" fn nzbget_rs_nzb_init(p: *mut NzbScalars) {
     unsafe { (*p).id = crate::idgen::NZB_IDS.next() };
     let files = crate::qlist::nzbget_rs_ptrlist_new(drop_file);
-    unsafe { nzbget_rs_nzb_slot(p, 0, 1, files as usize) };
+    swap_slot(p, Slot::FileList, files as usize);
 }
 
 /// # Safety
@@ -1750,11 +1784,11 @@ fn post_thread(p: *const Post) -> Option<JobHandle> {
 }
 
 /// The job thread in a download's slot `id`, if any.
-fn slot_job(nzb: usize, id: c_int) -> Option<JobHandle> {
+fn slot_job(nzb: usize, which: Slot) -> Option<JobHandle> {
     if nzb == 0 {
         return None;
     }
-    let addr = unsafe { nzbget_rs_nzb_slot(nzb as *const NzbScalars, id, 0, 0) };
+    let addr = slot(nzb as *const NzbScalars, which);
     // SAFETY: the job slots hold 0 or a live job thread.
     unsafe { JobHandle::from_addr(addr) }
 }
@@ -1784,7 +1818,7 @@ pub(crate) unsafe fn enter_post_process(p: *mut NzbScalars) {
             std::ptr::null_mut(),
         )
     };
-    let old = unsafe { nzbget_rs_nzb_slot(p, 1, 1, post as usize) };
+    let old = swap_slot(p, Slot::Post, post as usize);
     unsafe { nzbget_rs_post_free(old as *mut Post) };
 }
 
@@ -1794,7 +1828,7 @@ pub(crate) unsafe fn enter_post_process(p: *mut NzbScalars) {
 /// # Safety
 /// `p` is a live collection; the caller holds the queue lock.
 pub(crate) unsafe fn leave_post_process(p: *mut NzbScalars) {
-    let old = unsafe { nzbget_rs_nzb_slot(p, 1, 1, 0) };
+    let old = swap_slot(p, Slot::Post, 0);
     unsafe { nzbget_rs_post_free(old as *mut Post) };
     let s = unsafe { &mut *p };
     s.unpackTried = false;
@@ -1873,12 +1907,12 @@ pub unsafe extern "C" fn nzbget_rs_nzb_start_direct_unpack(p: *mut NzbScalars) {
         return;
     }
     let job = JobHandle::new_unpack(unsafe { (*p).id });
-    unsafe { nzbget_rs_nzb_slot(p, 2, 1, job.addr()) };
+    swap_slot(p, Slot::UnpackJob, job.addr());
     // NzbInfo::nsRunning
     unsafe { (*p).directUnpackStatus = 1 };
     if !job.start() {
         unsafe {
-            nzbget_rs_nzb_slot(p, 2, 1, 0);
+            swap_slot(p, Slot::UnpackJob, 0);
             (*p).directUnpackStatus = 0;
             job.free(false);
         }
@@ -1918,14 +1952,14 @@ pub(crate) unsafe fn host_post_job_op(
             }
         }
         3 => {
-            let Some(du) = slot_job(p1, 2) else {
+            let Some(du) = slot_job(p1, Slot::UnpackJob) else {
                 return 0;
             };
             let active = a2 != 0 || (du.unpack_is_unpacking() && !du.unpack_is_waiting_volume());
             return usize::from(active);
         }
         4..=7 => {
-            if let Some(du) = slot_job(p2, 2) {
+            if let Some(du) = slot_job(p2, Slot::UnpackJob) {
                 match a1 {
                     4 => du.unpack_stop(NzbRef::from_addr(p2)),
                     5 => du.unpack_nzb_downloaded(NzbRef::from_addr(p2)),
@@ -1936,12 +1970,12 @@ pub(crate) unsafe fn host_post_job_op(
         }
         8 if p1 != 0 => unsafe { nzbget_rs_nzb_start_direct_unpack(p1 as *mut NzbScalars) },
         9 => {
-            if let Some(t) = slot_job(p1, 3) {
+            if let Some(t) = slot_job(p1, Slot::LiveRepairJob) {
                 t.stop();
             }
         }
         10 if p1 != 0 => {
-            let addr = unsafe { nzbget_rs_nzb_slot(p1 as *const NzbScalars, 3, 1, 0) };
+            let addr = swap_slot(p1 as *const NzbScalars, Slot::LiveRepairJob, 0);
             // SAFETY: the slot held 0 or the live repair's thread.
             if let Some(t) = unsafe { JobHandle::from_addr(addr) } {
                 t.stop();
@@ -2034,7 +2068,7 @@ fn ptr_list_op(l: usize, op: c_int, a: i64, item: usize, order: *const usize, ot
 
 /// A collection's file list (slot 0).
 pub(crate) fn file_list(p: *const NzbScalars) -> usize {
-    unsafe { nzbget_rs_nzb_slot(p, 0, 0, 0) }
+    slot(p, Slot::FileList)
 }
 
 /// Moves `src`'s files and download counters to `dst` (NzbInfo::MoveFileList).
@@ -3058,11 +3092,11 @@ pub(crate) fn nzb_snapshot(
             std::ptr::null_mut(),
         )
     } as c_int;
-    let post = unsafe { nzbget_rs_nzb_slot(p, 1, 0, 0) } as *const Post;
+    let post = slot(p, Slot::Post) as *const Post;
     let post_flag = |id| !post.is_null() && post_get(post, id) != 0;
-    let unpack_thread = unsafe { nzbget_rs_nzb_slot(p, 2, 0, 0) };
-    let live_repair_thread = unsafe { nzbget_rs_nzb_slot(p, 3, 0, 0) };
-    let message_count = unsafe { nzbget_rs_nzb_slot(p, 4, 0, 0) } as isize as c_int;
+    let unpack_thread = slot(p, Slot::UnpackJob);
+    let live_repair_thread = slot(p, Slot::LiveRepairJob);
+    let message_count = slot(p, Slot::MessageCount) as isize as c_int;
     let health = calc_health(s);
     let critical_est = calc_critical_health(s, true);
     let critical_exact = calc_critical_health(s, false);
@@ -3226,26 +3260,6 @@ pub(crate) fn nzb_snapshot(
         queued_filename: text_bytes(p, 6),
         text_status,
         url: text_bytes(p, 0),
-    }
-}
-
-/// Host handles kept with a collection: 0 file list, 1 post-processing info,
-/// 2 direct-unpack job, 3 live-repair job, 4 message count. The host owns
-/// what they point to. set != 0 stores v; returns the (previous) value.
-pub unsafe extern "C" fn nzbget_rs_nzb_slot(
-    p: *const NzbScalars,
-    id: c_int,
-    set: c_int,
-    v: usize,
-) -> usize {
-    use std::sync::atomic::Ordering::SeqCst;
-    let Some(slot) = usize::try_from(id).ok().and_then(|i| data(p).slots.get(i)) else {
-        return 0;
-    };
-    if set != 0 {
-        slot.swap(v, SeqCst)
-    } else {
-        slot.load(SeqCst)
     }
 }
 
@@ -3683,9 +3697,9 @@ mod tests {
             let n = nzbget_rs_nzb_scalars_new();
             // stage and force flags need a post job
             set_int(NzbRef::from_addr(n as usize), NzbInt::PostStage, 4);
-            assert_eq!(nzbget_rs_nzb_slot(n, 1, 0, 0), 0);
+            assert_eq!(slot(n, Slot::Post), 0);
             act(NzbRef::from_addr(n as usize), NzbAction::EnterPostProcess);
-            let p = nzbget_rs_nzb_slot(n, 1, 0, 0) as *const Post;
+            let p = slot(n, Slot::Post) as *const Post;
             assert!(!p.is_null());
             assert_eq!(post_get(p, 2) as usize, 0);
             assert_eq!(
@@ -3699,13 +3713,13 @@ mod tests {
             assert_eq!(post_get(p, 8), 1);
             // a second enter replaces the post job
             act(NzbRef::from_addr(n as usize), NzbAction::EnterPostProcess);
-            let p2 = nzbget_rs_nzb_slot(n, 1, 0, 0) as *const Post;
+            let p2 = slot(n, Slot::Post) as *const Post;
             assert_eq!(post_get(p2, 0), 0);
             post_set(p2, 10, 1);
             post_set(p2, 12, 2);
             nzbget_rs_post_op(p2, 32, 0, 0, c"x.rar".as_ptr(), std::ptr::null_mut());
             act(NzbRef::from_addr(n as usize), NzbAction::LeavePostProcess);
-            assert_eq!(nzbget_rs_nzb_slot(n, 1, 0, 0), 0);
+            assert_eq!(slot(n, Slot::Post), 0);
             assert!(!(*n).unpackTried);
             assert_eq!((*n).lastUnpackStatus, 0);
             let np: *const NzbScalars = std::ptr::null();
@@ -3826,13 +3840,13 @@ mod tests {
     fn coll_with_list() -> *mut NzbScalars {
         let n = nzbget_rs_nzb_scalars_new();
         let l = crate::qlist::nzbget_rs_ptrlist_new(drop_test_file);
-        unsafe { nzbget_rs_nzb_slot(n, 0, 1, l as usize) };
+        swap_slot(n, Slot::FileList, l as usize);
         n
     }
 
     fn free_coll_with_list(n: *mut NzbScalars) {
         unsafe {
-            let l = nzbget_rs_nzb_slot(n, 0, 1, 0);
+            let l = swap_slot(n, Slot::FileList, 0);
             crate::qlist::nzbget_rs_ptrlist_free(l as *mut crate::qlist::PtrList);
             nzbget_rs_nzb_scalars_free(n);
         }

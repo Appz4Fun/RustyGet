@@ -28,9 +28,9 @@ pub fn drop_nzb(p: usize) {
     }
     let n = p as *mut NzbScalars;
     unsafe {
-        let post = crate::qnzb::nzbget_rs_nzb_slot(n, 1, 1, 0);
+        let post = crate::qnzb::swap_slot(n, crate::qnzb::Slot::Post, 0);
         crate::qnzb::nzbget_rs_post_free(post as *mut crate::qnzb::Post);
-        let files = crate::qnzb::nzbget_rs_nzb_slot(n, 0, 1, 0);
+        let files = crate::qnzb::swap_slot(n, crate::qnzb::Slot::FileList, 0);
         nzbget_rs_ptrlist_free(files as *mut PtrList);
         crate::qnzb::nzbget_rs_nzb_scalars_free(n);
     }
@@ -635,10 +635,10 @@ pub unsafe fn start_live_repair(nzb: usize) {
     }
     let n = nzb as *const NzbScalars;
     let job = JobHandle::new_post(10, PostRef::NONE, unsafe { (*n).id }, true);
-    unsafe { crate::qnzb::nzbget_rs_nzb_slot(n, 3, 1, job.addr()) };
+    crate::qnzb::swap_slot(n, crate::qnzb::Slot::LiveRepairJob, job.addr());
     if !job.start() {
         unsafe {
-            crate::qnzb::nzbget_rs_nzb_slot(n, 3, 1, 0);
+            crate::qnzb::swap_slot(n, crate::qnzb::Slot::LiveRepairJob, 0);
             job.free(false);
         }
     }

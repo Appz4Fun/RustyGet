@@ -286,6 +286,27 @@ pub const MAX_TIMED_OUT_TRIES: i32 = 2;
 /// Waiting longer than this for a free connection is logged.
 const SLOW_CONNECTION_WAIT: Duration = Duration::from_secs(10);
 
+/// Below this average rate, once the stream reply timeout has passed, an article is
+/// trickling rather than downloading.
+const ARTICLE_MIN_BYTES_PER_SEC: i64 = 4 * 1024;
+
+/// Whether an article fetch should be dropped and retried elsewhere: nothing delivered for
+/// `limit` since the last chunk, or still under `ARTICLE_MIN_BYTES_PER_SEC` on average once
+/// `limit` has passed since the request.
+fn article_too_slow(
+    since_progress: Duration,
+    since_request: Duration,
+    raw_bytes: i64,
+    limit: Duration,
+) -> bool {
+    if since_progress > limit {
+        return true;
+    }
+    since_request > limit
+        && i128::from(raw_bytes) * 1000
+            < i128::from(ARTICLE_MIN_BYTES_PER_SEC) * since_request.as_millis() as i128
+}
+
 /// Whether a read that failed after `elapsed` timed out. The bar sits below the reply timeout,
 /// so a very short `ArticleTimeout` still counts as a timeout.
 fn read_timed_out(elapsed: Duration) -> bool {
@@ -815,10 +836,10 @@ impl ArticleFetcher {
         let mut raw_bytes: i64 = 0;
         let mut decoded_bytes: i64 = 0;
 
-        // A connection that stops delivering has a deadline measured from its last progress
-        // (or the BODY request). Time held back by the speed limit does not count.
+        // Time held back by the speed limit counts against neither deadline.
         let mut progress_mark = requested;
         let mut throttled = Duration::ZERO;
+        let mut throttled_total = Duration::ZERO;
         while !self.is_stopped() && !decoder.eof {
             let st0 = self.host.status();
             if st0.quota_reached {
@@ -840,6 +861,7 @@ impl ArticleFetcher {
                 std::thread::sleep(Duration::from_millis(10));
             }
             throttled += throttle_started.elapsed();
+            throttled_total += throttle_started.elapsed();
             if self.host.status().quota_reached {
                 disconnect();
                 result.retry = true;
@@ -849,14 +871,19 @@ impl ArticleFetcher {
                 break;
             }
 
-            // A stalled connection held one cross-pack read (and every article queued behind
-            // it) for 205 s until the stream timeout gave the repair up. Retried elsewhere
-            // instead. Slow but steady links keep going: each delivered chunk resets this.
-            let working = progress_mark.elapsed().saturating_sub(throttled);
-            if working > Duration::from_secs(stream_reply_timeout_secs().max(1) as u64) {
+            // A stalled or trickling connection held one cross-pack read (and every article
+            // queued behind it) for 205 s until the stream timeout gave the repair up. Retried
+            // elsewhere instead. Slow but steady links keep going.
+            let working = requested.elapsed().saturating_sub(throttled_total);
+            if article_too_slow(
+                progress_mark.elapsed().saturating_sub(throttled),
+                working,
+                raw_bytes,
+                Duration::from_secs(stream_reply_timeout_secs().max(1) as u64),
+            ) {
                 let mut log = b"Stream repair: ".to_vec();
                 log.extend_from_slice(server_name);
-                log.extend_from_slice(b" stalled on ");
+                log.extend_from_slice(b" too slow for ");
                 log.extend_from_slice(msg_slice);
                 log.extend_from_slice(
                     format!(" ({} s); retrying it elsewhere", working.as_secs()).as_bytes(),
@@ -1236,6 +1263,20 @@ pub fn parse_donor_nzb_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_slow_but_steady_article_is_kept_and_a_trickle_is_dropped() {
+        let limit = Duration::from_secs(60);
+        let s = Duration::from_secs;
+        // 8 KB/s for 94 s: still downloading
+        assert!(!article_too_slow(s(1), s(94), 94 * 8 * 1024, limit));
+        // under 4 KB/s past the limit: trickling
+        assert!(article_too_slow(s(1), s(90), 90 * 1024, limit));
+        // nothing for over the limit since the last chunk
+        assert!(article_too_slow(s(61), s(61), 1 << 20, limit));
+        // early on, a slow start is not judged
+        assert!(!article_too_slow(s(30), s(30), 0, limit));
+    }
 
     #[test]
     fn articles_missing_everywhere_are_remembered_with_or_without_brackets() {

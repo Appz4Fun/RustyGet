@@ -2,17 +2,12 @@
 //! `RepairController`, `ParChecker`, `DirectUnpack`, and `UnpackController`.
 
 use crate::status::{DeleteStatus, DupStatus, DupeMode, MarkStatus};
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::VecDeque;
 use std::ffi::{c_char, c_int, CStr};
 
 // ============================================================================
 // Case-insensitive comparison helpers
 // ============================================================================
-
-#[inline]
-pub fn strcasecmp_bytes(a: &[u8], b: &[u8]) -> bool {
-    a.eq_ignore_ascii_case(b)
-}
 
 #[inline]
 pub fn strncasecmp_prefix(haystack: &[u8], prefix: &[u8]) -> bool {
@@ -34,43 +29,7 @@ pub fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 // 1. DupeCoordinator (`daemon/queue/DupeCoordinator.cpp`)
 // ============================================================================
 
-pub const HEALTH_CHECK_PARK: i32 = 2;
-pub const HEALTH_CHECK_NONE: i32 = 3;
-pub const HEALTH_CHECK_DUPE: i32 = 4;
 
-pub const HISTORY_KIND_NZB: i32 = 1;
-pub const HISTORY_KIND_URL: i32 = 2;
-pub const HISTORY_KIND_DUP: i32 = 3;
-
-/// `DupeCoordinator::SameNameOrKey`
-pub fn same_name_or_key(name1: &[u8], dupe_key1: &[u8], name2: &[u8], dupe_key2: &[u8]) -> bool {
-    let has_dupe_keys = !dupe_key1.is_empty() && !dupe_key2.is_empty();
-    (has_dupe_keys && strcasecmp_bytes(dupe_key1, dupe_key2))
-        || (!has_dupe_keys && strcasecmp_bytes(name1, name2))
-}
-
-/// `DupeCoordinator::DupeFailoverWarranted`
-pub fn failover_warranted(item_score: i32, health: i32, backup_score: i32) -> bool {
-    let clamped_health = health.clamp(0, 1000);
-    let warranted = if item_score > 0 {
-        ((item_score as i64) * (clamped_health as i64) / 1000) as i32
-    } else {
-        0
-    };
-    warranted == 0 || backup_score >= warranted
-}
-
-/// `DupeCoordinator::AlivePermille` string value parser
-pub unsafe fn parse_alive_permille_cstr(value: *const c_char) -> i32 {
-    crate::dupecoord::parse_alive_permille_cstr(value)
-}
-
-/// `DupeCoordinator::FailsOver`
-pub fn fails_over(dupe_check: bool, dupe_mode: DupeMode, health_check: i32) -> bool {
-    dupe_check
-        && (dupe_mode == DupeMode::Score
-            || (dupe_mode == DupeMode::Force && health_check == HEALTH_CHECK_DUPE))
-}
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -103,130 +62,6 @@ pub struct NzbgetRsDupeQueueCandidate {
     pub dupe_mode: DupeMode,
     pub dupe_score: i32,
     pub same_name_or_key: i32,
-}
-
-/// `DupeCoordinator::FindDupeBackup` full decision algorithm.
-/// Returns the winning `0..history.len()` index, or `-1` if no backup qualifies.
-/// `file_exists_cb(ctx, idx)` is invoked lazily on the exact same candidates as C++.
-pub fn select_dupe_backup<F>(
-    has_self_nzb: bool,
-    self_full_content_hash: u32,
-    dupe_health: bool,
-    history: &[NzbgetRsDupeHistoryCandidate],
-    queue: &[NzbgetRsDupeQueueCandidate],
-    mut file_exists_cb: F,
-) -> i32
-where
-    F: FnMut(usize) -> bool,
-{
-    let mut dupe_found = false;
-    let mut history_score = 0i32;
-
-    for h in history {
-        let mut good_dupe = false;
-
-        if h.kind == HISTORY_KIND_NZB
-            && h.dupe_mode != DupeMode::Force
-            && h.is_dupe_success != 0
-            && h.same_name_or_key != 0
-        {
-            if !dupe_found || h.dupe_score > history_score {
-                history_score = h.dupe_score;
-            }
-            dupe_found = true;
-            good_dupe = h.mark_status == MarkStatus::Good;
-        }
-
-        if h.kind == HISTORY_KIND_DUP
-            && h.dupe_mode != DupeMode::Force
-            && (h.dup_status == DupStatus::Success || h.dup_status == DupStatus::Good)
-            && h.same_name_or_key != 0
-        {
-            if !dupe_found || h.dupe_score > history_score {
-                history_score = h.dupe_score;
-            }
-            dupe_found = true;
-            good_dupe = h.dup_status == DupStatus::Good;
-        }
-
-        if good_dupe {
-            return -1;
-        }
-    }
-
-    let mut queue_dupe = false;
-    let mut queue_score = 0i32;
-    for q in queue {
-        if q.is_self == 0
-            && q.is_nzb_kind != 0
-            && q.dupe_mode != DupeMode::Force
-            && q.same_name_or_key != 0
-            && (!queue_dupe || q.dupe_score > queue_score)
-        {
-            queue_score = q.dupe_score;
-            queue_dupe = true;
-        }
-    }
-
-    let mut failed_content: BTreeSet<u32> = BTreeSet::new();
-    if dupe_health {
-        if has_self_nzb {
-            failed_content.insert(self_full_content_hash);
-        }
-        for h in history {
-            if h.kind == HISTORY_KIND_NZB
-                && h.full_content_hash > 0
-                && h.is_dupe_success == 0
-                && h.delete_status != DeleteStatus::Dupe
-                && h.delete_status != DeleteStatus::Copy
-                && h.delete_status != DeleteStatus::Manual
-            {
-                failed_content.insert(h.full_content_hash);
-            }
-        }
-    }
-
-    let mut best_idx: Option<usize> = None;
-    for (idx, h) in history.iter().enumerate() {
-        let has_candidate = h.kind == HISTORY_KIND_NZB || h.kind == HISTORY_KIND_URL;
-        let backup_status = has_candidate
-            && (h.delete_status == DeleteStatus::Dupe
-                || (dupe_health
-                    && h.kind == HISTORY_KIND_NZB
-                    && h.delete_status == DeleteStatus::Copy))
-            && !(dupe_health
-                && h.full_content_hash > 0
-                && failed_content.contains(&h.full_content_hash));
-
-        let candidate_score = if has_candidate { h.dupe_score } else { 0 };
-        let better = has_candidate
-            && match best_idx {
-                None => true,
-                Some(prev) => {
-                    let prev_h = &history[prev];
-                    candidate_score > prev_h.dupe_score
-                        || (candidate_score == prev_h.dupe_score
-                            && h.alive_permille > prev_h.alive_permille)
-                }
-            };
-
-        if has_candidate
-            && h.dupe_mode != DupeMode::Force
-            && backup_status
-            && better
-            && !(dupe_health && h.alive_permille == 0)
-            && (h.kind != HISTORY_KIND_NZB || file_exists_cb(idx))
-            && h.health >= h.critical_health
-            && h.mark_status != MarkStatus::Bad
-            && (!dupe_found || h.dupe_score > history_score)
-            && (!queue_dupe || h.dupe_score > queue_score)
-            && h.same_name_or_key != 0
-        {
-            best_idx = Some(idx);
-        }
-    }
-
-    best_idx.map(|i| i as i32).unwrap_or(-1)
 }
 
 // ============================================================================
@@ -415,45 +250,6 @@ pub use crate::parchecker::{
 // 6. DirectUnpack, UnpackController & RarVolume (`DirectUnpack.cpp`, `UnpackController.cpp`, `RarReader.cpp`)
 // ============================================================================
 
-/// `RarVolume::DetectRarVersion` and `UnpackController::FileHasRarSignature`:
-/// Given the 8-byte file signature read from disk, returns `3` (RAR3/4), `5` (RAR5), or `0` (not RAR).
-pub fn detect_rar_signature(sig: &[u8]) -> i32 {
-    if sig.len() != 8 {
-        return 0;
-    }
-    const RAR3: &[u8] = b"Rar!\x1a\x07\x00";
-    const RAR5: &[u8] = b"Rar!\x1a\x07\x01\x00";
-    let strcmp_eq = |s: &[u8]| s.iter().zip(sig.iter()).all(|(a, b)| a == b);
-    let rar5 = strcmp_eq(RAR5);
-    let rar3 = !rar5 && strcmp_eq(RAR3);
-    if rar3 {
-        3
-    } else if rar5 {
-        5
-    } else {
-        0
-    }
-}
-
-/// `UnpackController::JoinFile` fragment continuity and size validation:
-/// Returns `true` when the split fragments can be joined, or `false` if missing fragments are detected.
-pub fn check_joinable_fragments(
-    count: i32,
-    min_seg: i32,
-    max_seg: i32,
-    dif_size_min: i32,
-    par_success: bool,
-) -> bool {
-    let corrected_count = count - if min_seg == 0 { 1 } else { 0 };
-    if min_seg > 1
-        || corrected_count != max_seg
-        || ((dif_size_min != corrected_count || dif_size_min > max_seg) && !par_success)
-    {
-        return false;
-    }
-    true
-}
-
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct NzbgetRsUnpackMessageInfo {
@@ -483,91 +279,6 @@ pub struct NzbgetRsUnpackMessageInfo {
     pub all_ok: i32,
 }
 
-/// Parses an unpacker output line for both `DirectUnpack::AddMessage` (`is_seven_zip == false`)
-/// and `UnpackController::AddMessage` (`is_seven_zip == false` for Unrar, `true` for 7-Zip).
-pub fn parse_unpack_message(
-    text: &[u8],
-    unpack_extended_dir: &[u8],
-    is_seven_zip: bool,
-) -> NzbgetRsUnpackMessageInfo {
-    let mut info = NzbgetRsUnpackMessageInfo::default();
-    let len = text.len();
-
-    if !is_seven_zip
-        && text.starts_with(b"Unrar: Extracting  ")
-        && text[19..].starts_with(unpack_extended_dir)
-    {
-        info.strip_extracting_dir = 1;
-        info.stripped_suffix_offset = (19 + unpack_extended_dir.len() + 1).min(len);
-    }
-
-    if !is_seven_zip && text.starts_with(b"Unrar: Insert disk with") {
-        if let Some(pos) = find_subslice(text, b" [C]ontinue, [Q]uit") {
-            info.is_insert_disk = 1;
-            if pos >= 24 {
-                info.insert_disk_name_offset = 24;
-                info.insert_disk_name_len = pos - 24;
-            }
-        }
-    }
-
-    // Banner check runs on msgText in C++ (which is identical to text unless text started with "Unrar: Extracting  ")
-    if !is_seven_zip
-        && info.strip_extracting_dir == 0
-        && text.starts_with(b"Unrar: UNRAR ")
-        && find_subslice(text, b" Copyright ").is_some()
-        && find_subslice(text, b" Alexander Roshal").is_some()
-    {
-        info.reset_stage_time = 1;
-    }
-
-    if !is_seven_zip && (info.strip_extracting_dir != 0 || text.starts_with(b"Unrar: Extracting "))
-    {
-        info.has_extracting_progress = 1;
-    }
-
-    if !is_seven_zip && text.starts_with(b"Unrar: Extracting from ") {
-        info.has_extracting_from = 1;
-    }
-
-    if !is_seven_zip {
-        // Note: C++ uses strncmp(text, "Unrar: Checksum error in the encrypted file", 42)
-        if text.starts_with(&b"Unrar: Checksum error in the encrypted file"[..42])
-            || text.starts_with(b"Unrar: CRC failed in the encrypted file")
-        {
-            info.decrypt_error = 1;
-        }
-        if text.starts_with(b"Unrar: The specified password is incorrect.") {
-            info.password_error = 1;
-            info.direct_password_error = 1;
-        } else if text.starts_with(b"Unrar: Incorrect password for") {
-            info.password_error = 1;
-        }
-    } else if find_subslice(text, b"Cannot open encrypted archive. Wrong password?").is_some()
-        || find_subslice(text, b"Data Error in encrypted file. Wrong password?").is_some()
-        || find_subslice(text, b"CRC Failed in encrypted file. Wrong password?").is_some()
-    {
-        info.decrypt_error = 1;
-    }
-
-    if find_subslice(text, b" : packed data CRC failed in volume").is_some()
-        || find_subslice(text, b" : packed data checksum error in volume").is_some()
-        || (len > 13 && text.ends_with(b" - CRC failed"))
-        || (len > 18 && text.ends_with(b" - checksum failed"))
-        || text.starts_with(b"Unrar: WARNING: You need to start extraction from a previous volume")
-    {
-        info.crc_or_volume_error = 1;
-    }
-
-    if (!is_seven_zip && text.starts_with(b"Unrar: All OK"))
-        || (is_seven_zip && text.starts_with(b"7-Zip: Everything is Ok"))
-    {
-        info.all_ok = 1;
-    }
-
-    info
-}
-
 // ============================================================================
 // Unit Tests
 // ============================================================================
@@ -576,112 +287,6 @@ pub fn parse_unpack_message(
 mod tests {
     use super::*;
     use std::ffi::CString;
-
-    #[test]
-    fn test_same_name_or_key_and_failover() {
-        assert!(same_name_or_key(b"Movie.A", b"key1", b"Movie.B", b"KEY1"));
-        assert!(!same_name_or_key(b"Movie.A", b"key1", b"Movie.A", b"key2"));
-        assert!(same_name_or_key(b"Movie.A", b"", b"movie.a", b""));
-        assert!(same_name_or_key(b"Movie.A", b"key1", b"movie.a", b""));
-
-        assert!(failover_warranted(0, 900, -100));
-        assert!(failover_warranted(1000, 300, 300));
-        assert!(!failover_warranted(1000, 300, 299));
-
-        assert!(fails_over(true, DupeMode::Score, HEALTH_CHECK_NONE));
-        assert!(fails_over(true, DupeMode::Force, HEALTH_CHECK_DUPE));
-        assert!(!fails_over(true, DupeMode::Force, HEALTH_CHECK_PARK));
-        assert!(!fails_over(false, DupeMode::Score, HEALTH_CHECK_DUPE));
-    }
-
-    #[test]
-    fn test_parse_alive_permille() {
-        let s1 = CString::new("97.4").unwrap();
-        let s2 = CString::new("150.0").unwrap();
-        let s3 = CString::new("invalid").unwrap();
-        unsafe {
-            assert_eq!(parse_alive_permille_cstr(s1.as_ptr()), 974);
-            assert_eq!(parse_alive_permille_cstr(s2.as_ptr()), 1000);
-            assert_eq!(parse_alive_permille_cstr(s3.as_ptr()), -1);
-            assert_eq!(parse_alive_permille_cstr(std::ptr::null()), -1);
-        }
-    }
-
-    #[test]
-    fn test_select_dupe_backup_prefers_alive_and_skips_failed_hash() {
-        let history = vec![
-            // Index 0: failed copy with hash 42
-            NzbgetRsDupeHistoryCandidate {
-                kind: HISTORY_KIND_NZB,
-                dupe_mode: DupeMode::Score,
-                dupe_score: 500,
-                is_dupe_success: 0,
-                mark_status: MarkStatus::None,
-                dup_status: DupStatus::Undefined,
-                delete_status: DeleteStatus::Health,
-                full_content_hash: 42,
-                alive_permille: 900,
-                health: 500,
-                critical_health: 900,
-                same_name_or_key: 1,
-                donor_kind: crate::donorkind::DonorKind::Unknown as i32,
-                locked: 0,
-            },
-            // Index 1: dsCopy of hash 42 -> should be skipped because hash 42 failed
-            NzbgetRsDupeHistoryCandidate {
-                kind: HISTORY_KIND_NZB,
-                dupe_mode: DupeMode::Score,
-                dupe_score: 500,
-                is_dupe_success: 0,
-                mark_status: MarkStatus::None,
-                dup_status: DupStatus::Undefined,
-                delete_status: DeleteStatus::Copy,
-                full_content_hash: 42,
-                alive_permille: 1000,
-                health: 1000,
-                critical_health: 900,
-                same_name_or_key: 1,
-                donor_kind: crate::donorkind::DonorKind::Unknown as i32,
-                locked: 0,
-            },
-            // Index 2: dsDupe with score 100, alive 950
-            NzbgetRsDupeHistoryCandidate {
-                kind: HISTORY_KIND_NZB,
-                dupe_mode: DupeMode::Score,
-                dupe_score: 100,
-                is_dupe_success: 0,
-                mark_status: MarkStatus::None,
-                dup_status: DupStatus::Undefined,
-                delete_status: DeleteStatus::Dupe,
-                full_content_hash: 77,
-                alive_permille: 950,
-                health: 1000,
-                critical_health: 900,
-                same_name_or_key: 1,
-                donor_kind: crate::donorkind::DonorKind::Unknown as i32,
-                locked: 0,
-            },
-            // Index 3: dsDupe with equal score 100, higher alive 980 -> wins
-            NzbgetRsDupeHistoryCandidate {
-                kind: HISTORY_KIND_NZB,
-                dupe_mode: DupeMode::Score,
-                dupe_score: 100,
-                is_dupe_success: 0,
-                mark_status: MarkStatus::None,
-                dup_status: DupStatus::Undefined,
-                delete_status: DeleteStatus::Dupe,
-                full_content_hash: 88,
-                alive_permille: 980,
-                health: 1000,
-                critical_health: 900,
-                same_name_or_key: 1,
-                donor_kind: crate::donorkind::DonorKind::Unknown as i32,
-                locked: 0,
-            },
-        ];
-        let winner = select_dupe_backup(true, 99, true, &history, &[], |_| true);
-        assert_eq!(winner, 3);
-    }
 
     #[test]
     fn test_size_diff_ok_and_rar_lister() {
@@ -798,6 +403,8 @@ mod tests {
 
     #[test]
     fn test_unpack_helpers() {
+        use crate::unpack::{check_joinable_fragments, detect_rar_signature, parse_unpack_message};
+
         assert_eq!(detect_rar_signature(b"Rar!\x1a\x07\x00\x99"), 3);
         assert_eq!(detect_rar_signature(b"Rar!\x1a\x07\x01\x00"), 5);
         assert_eq!(detect_rar_signature(b"PK\x03\x04\x00\x00\x00\x00"), 0);

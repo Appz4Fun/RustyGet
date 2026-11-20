@@ -1010,14 +1010,6 @@ impl QueueSubsysHost {
         }
     }
 
-    fn post_snapshot(&self, post: PostRef, x: OpArgs) {
-        if !self.use_active {
-            return;
-        }
-        let post = post.addr() as *const crate::qnzb::Post;
-        unsafe { crate::qnzb::host_post_snapshot(post, x.ints, x.i64s, x.strs) };
-    }
-
     fn post_job_op(&self, op: i32, p1: usize, x: OpArgs) -> usize {
         if !self.use_active {
             return 0;
@@ -3633,45 +3625,14 @@ impl QueueSubsysHost {
 
     // PostInfo & PrePostProcessor ops (op = 60..=62)
     pub fn post_snap(&self, post_ptr: PostRef) -> PostSnap {
-        if post_ptr.is_none() {
-            return PostSnap::default();
+        if !self.use_active {
+            // the mock host still names the job it was asked about
+            return PostSnap {
+                ptr: post_ptr,
+                ..PostSnap::default()
+            };
         }
-        let mut ints = [0i32; 21];
-        let mut i64s = [0i64; 3];
-        let mut strs = [std::ptr::null(); 1];
-        self.post_snapshot(
-            post_ptr,
-            OpArgs::NONE
-                .ints(ints.as_mut_ptr())
-                .i64s(i64s.as_mut_ptr())
-                .strs(strs.as_mut_ptr()),
-        );
-        PostSnap {
-            ptr: post_ptr,
-            nzb_ptr: NzbRef::from_addr(i64s[1] as usize),
-            stage: PostStage::from(ints[0]),
-            working: ints[1] != 0,
-            deleted: ints[2] != 0,
-            request_par_check: ints[3] != 0,
-            force_par_full: ints[4] != 0,
-            force_repair: ints[5] != 0,
-            stream_repair_done: ints[6] != 0,
-            stream_repair_recovered: ints[7] != 0,
-            par_cannot_cover: ints[8] != 0,
-            need_par_check: ints[9] != 0,
-            need_unpack: ints[10] != 0,
-            has_post_thread: ints[11] != 0,
-            post_thread_running: ints[12] != 0,
-            unpack_tried: ints[13] != 0,
-            par_repaired: ints[14] != 0,
-            pass_list_tried: ints[15] != 0,
-            last_unpack_status: UnpackStatus::from(ints[16]),
-            stage_progress: ints[19],
-            file_progress: ints[20],
-            start_time: i64s[0],
-            stage_time: i64s[2],
-            progress_label: unsafe { read_cstr(strs[0]) },
-        }
+        crate::qnzb::post_snapshot(post_ptr)
     }
 
     pub fn post_set_int(&self, post_ptr: PostRef, field: PostInt, val: i32) {

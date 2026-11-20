@@ -255,26 +255,22 @@ pub fn select_probe_parts(
                 intersects[i] = intersects_any(dr, holes);
             }
         }
-        for i in 0..donor_ranges.len() {
-            if !intersects[i]
-                && (i == 0 || !intersects[i - 1])
-                && (i + 1 == donor_ranges.len() || !intersects[i + 1])
-            {
+        for (i, &hit) in intersects.iter().enumerate() {
+            let prev_hit = i > 0 && intersects[i - 1];
+            let next_hit = intersects.get(i + 1).copied().unwrap_or(false);
+            if !hit && !prev_hit && !next_hit {
                 candidates.push(i as i32);
             }
         }
     } else {
         for i in 0..donor_ranges.len() {
-            let mut clear = true;
+            // the range and both neighbours must stay clear of every hole
             let from = i.saturating_sub(1);
             let to = (i + 1).min(donor_ranges.len() - 1);
-            for &dr in &donor_ranges[from..=to] {
-                if !clear {
-                    break;
-                }
-                clear = !intersects_any(dr, holes);
-            }
-            if clear {
+            if donor_ranges[from..=to]
+                .iter()
+                .all(|&dr| !intersects_any(dr, holes))
+            {
                 candidates.push(i as i32);
             }
         }
@@ -416,23 +412,17 @@ pub fn suffix_key(filename: &[u8]) -> Vec<u8> {
 pub fn volume_key(filename: &[u8]) -> Vec<u8> {
     let key = suffix_key(filename);
     let mut out = Vec::with_capacity(key.len());
-    let mut i = 0;
-    while i < key.len() {
-        if !key[i].is_ascii_digit() {
-            out.push(key[i]);
-            i += 1;
-            continue;
+    for run in key.chunk_by(|a, b| a.is_ascii_digit() == b.is_ascii_digit()) {
+        if run[0].is_ascii_digit() {
+            // keep at least one digit: "007" -> "7", "000" -> "0"
+            let first = run
+                .iter()
+                .position(|&b| b != b'0')
+                .unwrap_or(run.len() - 1);
+            out.extend_from_slice(&run[first..]);
+        } else {
+            out.extend_from_slice(run);
         }
-        let mut end = i;
-        while end < key.len() && key[end].is_ascii_digit() {
-            end += 1;
-        }
-        let mut first = i;
-        while first + 1 < end && key[first] == b'0' {
-            first += 1;
-        }
-        out.extend_from_slice(&key[first..end]);
-        i = end;
     }
     out
 }
@@ -552,13 +542,19 @@ pub fn content_map_cipher_range(
     let mut pieces = Vec::new();
     let mut covered: i64 = 0;
     let c_end = range_end(cipher_range);
-    for i in 0..runs.len() {
-        if has_crypto[i] == 0 {
+    // the four slices have the same length, checked above
+    for (((run, &crypto), &cipher_size), &data_offset) in runs
+        .iter()
+        .zip(has_crypto)
+        .zip(cipher_sizes)
+        .zip(cipher_data_offsets)
+    {
+        if crypto == 0 {
             return Vec::new();
         }
-        let slab_base = runs[i].inner_offset;
+        let slab_base = run.inner_offset;
         let from = cipher_range.offset.max(slab_base);
-        let to = c_end.min(slab_base.wrapping_add(cipher_sizes[i]));
+        let to = c_end.min(slab_base.wrapping_add(cipher_size));
         if from >= to {
             continue;
         }
@@ -566,8 +562,8 @@ pub fn content_map_cipher_range(
             return Vec::new();
         }
         pieces.push(NzbgetRsMemberRange {
-            member_index: runs[i].member_index,
-            offset: cipher_data_offsets[i].wrapping_add(from.wrapping_sub(slab_base)),
+            member_index: run.member_index,
+            offset: data_offset.wrapping_add(from.wrapping_sub(slab_base)),
             size: to.wrapping_sub(from),
         });
         covered = covered.wrapping_add(to.wrapping_sub(from));
@@ -1544,21 +1540,22 @@ fn parse_seven_zip_streams_info(
         }
         if id == 0x09 {
             streams.substream_sizes.clear();
-            for f in 0..stream_counts.len() {
+            // `stream_counts` has one entry per folder
+            for (&count, &unpack_size) in stream_counts.iter().zip(&streams.folder_unpack_sizes) {
                 let mut sizes = Vec::new();
                 let mut used: u64 = 0;
                 let mut s = 0u64;
-                while reader.ok && s + 1 < stream_counts[f] {
+                while reader.ok && s + 1 < count {
                     let sz = reader.read_number();
                     sizes.push(sz);
                     used = used.wrapping_add(sz);
                     s += 1;
                 }
-                if stream_counts[f] > 0 {
-                    if used > streams.folder_unpack_sizes[f] {
+                if count > 0 {
+                    if used > unpack_size {
                         return false;
                     }
-                    sizes.push(streams.folder_unpack_sizes[f] - used);
+                    sizes.push(unpack_size - used);
                 }
                 streams.substream_sizes.push(sizes);
             }
@@ -1567,22 +1564,19 @@ fn parse_seven_zip_streams_info(
             return false;
         } else {
             streams.substream_sizes.clear();
-            for f in 0..stream_counts.len() {
-                if stream_counts[f] != 1 {
+            for (&count, &unpack_size) in stream_counts.iter().zip(&streams.folder_unpack_sizes) {
+                if count != 1 {
                     return false;
                 }
-                streams
-                    .substream_sizes
-                    .push(vec![streams.folder_unpack_sizes[f]]);
+                streams.substream_sizes.push(vec![unpack_size]);
             }
         }
         if id == 0x0a {
             let mut digest_count: u64 = 0;
-            for f in 0..stream_counts.len() {
-                let folder_covered = f < streams.folder_crc_defined.len()
-                    && streams.folder_crc_defined[f]
-                    && stream_counts[f] == 1;
-                digest_count += if folder_covered { 0 } else { stream_counts[f] };
+            for (f, &count) in stream_counts.iter().enumerate() {
+                let folder_covered =
+                    streams.folder_crc_defined.get(f).copied().unwrap_or(false) && count == 1;
+                digest_count += if folder_covered { 0 } else { count };
             }
             reader.skip_digests(digest_count);
             id = reader.read_number();
@@ -2063,8 +2057,8 @@ where
             dict_prop: streams.folder_props[folder].first().copied().unwrap_or(0),
         }));
     }
-    for f in 0..streams.pack_sizes.len() {
-        if streams.pack_sizes[f] != streams.folder_unpack_sizes[f] {
+    for (f, &pack_size) in streams.pack_sizes.iter().enumerate() {
+        if pack_size != streams.folder_unpack_sizes[f] {
             return Err("7z pack/unpack sizes disagree (not copy mode?)");
         }
     }
@@ -2089,9 +2083,9 @@ where
     let mut data_files = Vec::new();
     let pack_base = 32 + (streams.pack_pos as i64);
     let mut folder_pos = pack_base;
-    for f in 0..streams.substream_sizes.len() {
+    for (f, substreams) in streams.substream_sizes.iter().enumerate() {
         let mut file_pos = folder_pos;
-        for &sub_sz in &streams.substream_sizes[f] {
+        for &sub_sz in substreams {
             data_files.push(SevenZipFile {
                 name: Vec::new(),
                 data_pos: file_pos,
@@ -5426,30 +5420,24 @@ impl ContentMap {
     }
 
     pub fn exclude_member(&mut self, member_index: i32) {
-        let parallel = self.run_cryptos.len() == self.runs.len();
-        let layered = self.run_layers.len() == self.runs.len();
-        let mut kept_runs = Vec::new();
-        let mut kept_cryptos = Vec::new();
-        let mut kept_layers = Vec::new();
-        for i in 0..self.runs.len() {
-            if self.runs[i].member_index == member_index {
-                continue;
-            }
-            kept_runs.push(self.runs[i]);
-            if parallel {
-                kept_cryptos.push(self.run_cryptos[i].clone());
-            }
-            if layered {
-                kept_layers.push(self.run_layers[i]);
-            }
+        // The per-run vectors run parallel to `runs` when their lengths match; drop the
+        // same entries from them before `runs` itself.
+        let kept = |run: &NzbgetRsContentRun| run.member_index != member_index;
+        if self.run_cryptos.len() == self.runs.len() {
+            self.run_cryptos = std::mem::take(&mut self.run_cryptos)
+                .into_iter()
+                .zip(&self.runs)
+                .filter_map(|(crypto, run)| kept(run).then_some(crypto))
+                .collect();
         }
-        self.runs = kept_runs;
-        if parallel {
-            self.run_cryptos = kept_cryptos;
+        if self.run_layers.len() == self.runs.len() {
+            self.run_layers = std::mem::take(&mut self.run_layers)
+                .into_iter()
+                .zip(&self.runs)
+                .filter_map(|(layer, run)| kept(run).then_some(layer))
+                .collect();
         }
-        if layered {
-            self.run_layers = kept_layers;
-        }
+        self.runs.retain(kept);
     }
 
     /// The file lies in a plain archive that is stored inside an encrypted one. Its bytes
@@ -9490,8 +9478,7 @@ impl CrossPackRepairSession {
                 continue;
             }
 
-            for set_index in 0..donor_sets.len() {
-                let donor_set = &donor_sets[set_index];
+            for (set_index, donor_set) in donor_sets.iter().enumerate() {
                 if env_cell.borrow_mut().is_stopped()
                     || self.repair_sets[repair_set_idx].inner_holes.is_empty()
                 {

@@ -4376,51 +4376,50 @@ impl NzbgetRsDirectUnpack {
         );
     }
 
-    pub fn exec_active(&self, op: c_int, p1: usize, p2: usize) -> c_int {
-        match op {
-            5 => return c_int::from(self.is_unpacking()),
-            6 => return c_int::from(self.is_waiting_volume()),
-            _ => {}
+    /// Runs `f` with the active queue host; does nothing without one.
+    #[cfg(unix)]
+    fn with_active_host(&self, f: impl FnOnce(&QueueSubsysHost)) {
+        if let Some(host) = crate::ffi::queue_host() {
+            f(&host);
         }
+    }
+
+    /// Runs the direct unpack on its thread.
+    pub(crate) fn run_active(&self) {
         #[cfg(unix)]
-        {
-            let Some(host) = crate::ffi::queue_host() else {
-                return 0;
-            };
-            let host = &host;
-            match op {
-                0 => {
-                    self.run(host);
-                    0
-                }
-                1 => {
-                    let _ = p1;
-                    self.stop_with_nzb(host, NzbRef::from_addr(p2));
-                    0
-                }
-                2 => {
-                    let _ = p1;
-                    self.file_downloaded(host, FileRef::from_addr(p2));
-                    0
-                }
-                3 => {
-                    let _ = p1;
-                    self.nzb_downloaded(host, NzbRef::from_addr(p2));
-                    0
-                }
-                4 => {
-                    let _ = p1;
-                    self.nzb_deleted(host, NzbRef::from_addr(p2));
-                    0
-                }
-                _ => 0,
-            }
-        }
+        self.with_active_host(|host| self.run(host));
+    }
+
+    /// Stops the direct unpack of the collection `nzb`.
+    pub(crate) fn stop_active(&self, nzb: NzbRef) {
+        #[cfg(unix)]
+        self.with_active_host(|host| self.stop_with_nzb(host, nzb));
         #[cfg(not(unix))]
-        {
-            let _ = (p1, p2);
-            0
-        }
+        let _ = nzb;
+    }
+
+    /// Tells the direct unpack that `file` finished downloading.
+    pub(crate) fn file_downloaded_active(&self, file: FileRef) {
+        #[cfg(unix)]
+        self.with_active_host(|host| self.file_downloaded(host, file));
+        #[cfg(not(unix))]
+        let _ = file;
+    }
+
+    /// Tells the direct unpack that the collection `nzb` finished downloading.
+    pub(crate) fn nzb_downloaded_active(&self, nzb: NzbRef) {
+        #[cfg(unix)]
+        self.with_active_host(|host| self.nzb_downloaded(host, nzb));
+        #[cfg(not(unix))]
+        let _ = nzb;
+    }
+
+    /// Tells the direct unpack that the collection `nzb` was deleted.
+    pub(crate) fn nzb_deleted_active(&self, nzb: NzbRef) {
+        #[cfg(unix)]
+        self.with_active_host(|host| self.nzb_deleted(host, nzb));
+        #[cfg(not(unix))]
+        let _ = nzb;
     }
 }
 
@@ -5048,7 +5047,8 @@ impl NzbgetRsPostJob {
         }
     }
 
-    fn stop_from_cpp(&self) {
+    /// Asks the job's running controller to stop.
+    pub(crate) fn request_stop(&self) {
         match &self.inner {
             PostJobInner::Repair(ctrl_opt) => {
                 crate::log::log_active_bytes(MK_DEBUG, b"Stopping RepairController");
@@ -5067,7 +5067,7 @@ impl NzbgetRsPostJob {
 
     fn stop_from_rust(&self, host: &crate::queuesubsys_host::QueueSubsysHost) {
         if matches!(self.inner, PostJobInner::StreamRepair(_)) {
-            self.stop_from_cpp();
+            self.request_stop();
             host.thread_stop(self.thread_ptr);
         } else {
             match &self.inner {
@@ -5088,69 +5088,51 @@ impl NzbgetRsPostJob {
         }
     }
 
-    pub unsafe fn exec(&self, op: c_int, a1: c_int, p1: usize) -> c_int {
-        match op {
-            0 => {
-                self.stop_from_cpp();
-                0
+    /// Runs the job's work on its thread.
+    pub(crate) fn run(&self) {
+        match &self.inner {
+            PostJobInner::Rename(rk) => {
+                self.run_rename(*rk);
             }
-            1 => {
-                match &self.inner {
-                    PostJobInner::Rename(rk) => {
-                        self.run_rename(*rk);
-                        0
-                    }
-                    PostJobInner::StreamRepair(ctrl) => {
-                        if let Some(host) = crate::ffi::queue_host() {
-                            ctrl.run(JobQueue { job: self, host: &host });
-                        }
-                        0
-                    }
-                    PostJobInner::Repair(Some(ctrl)) => {
-                        if let Some(host) = crate::ffi::queue_host() {
-                            ctrl.run(JobQueue { job: self, host: &host });
-                        }
-                        0
-                    }
-                    PostJobInner::Repair(None) => 0,
-                    PostJobInner::Unpack(ctrl) => {
-                        if let Some(host) = crate::ffi::queue_host() {
-                            ctrl.run(JobQueue { job: self, host: &host });
-                        }
-                        0
-                    }
-                    PostJobInner::Cleanup => {
-                        self.run_cleanup();
-                        0
-                    }
-                    PostJobInner::Move => {
-                        self.run_move();
-                        0
-                    }
-                    PostJobInner::PostRenamer(post_unpack) => {
-                        self.run_post_renamer(*post_unpack);
-                        0
-                    }
-                    PostJobInner::Finish => {
-                        finish_post_job(self.post_ptr);
-                        0
-                    }
+            PostJobInner::StreamRepair(ctrl) => {
+                if let Some(host) = crate::ffi::queue_host() {
+                    ctrl.run(JobQueue { job: self, host: &host });
                 }
             }
-            2 => {
-                if let PostJobInner::Repair(Some(ctrl)) = &self.inner {
-                    crate::ffi::queue_host().map_or(0, |host| {
-                        c_int::from(ctrl.add_par(
-                            JobQueue { job: self, host: &host },
-                            FileRef::from_addr(p1),
-                            a1 != 0,
-                        ))
-                    })
-                } else {
-                    0
+            PostJobInner::Repair(Some(ctrl)) => {
+                if let Some(host) = crate::ffi::queue_host() {
+                    ctrl.run(JobQueue { job: self, host: &host });
                 }
             }
-            _ => 0,
+            PostJobInner::Repair(None) => {}
+            PostJobInner::Unpack(ctrl) => {
+                if let Some(host) = crate::ffi::queue_host() {
+                    ctrl.run(JobQueue { job: self, host: &host });
+                }
+            }
+            PostJobInner::Cleanup => {
+                self.run_cleanup();
+            }
+            PostJobInner::Move => {
+                self.run_move();
+            }
+            PostJobInner::PostRenamer(post_unpack) => {
+                self.run_post_renamer(*post_unpack);
+            }
+            PostJobInner::Finish => {
+                finish_post_job(self.post_ptr);
+            }
+        }
+    }
+
+    /// Adds the par file `file` (`deleted` when it was deleted) to a running
+    /// repair. False for other jobs or when the repair did not take it.
+    pub(crate) fn add_par(&self, file: FileRef, deleted: bool) -> bool {
+        if let PostJobInner::Repair(Some(ctrl)) = &self.inner {
+            crate::ffi::queue_host()
+                .is_some_and(|host| ctrl.add_par(JobQueue { job: self, host: &host }, file, deleted))
+        } else {
+            false
         }
     }
 }

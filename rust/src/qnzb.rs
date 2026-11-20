@@ -2130,6 +2130,15 @@ pub(crate) fn mark_repair_job_live_attempted(nzb: NzbRef, idx: usize) -> bool {
     })
 }
 
+/// Takes the live pass's mark off the `idx`-th job, so the next live pass tries it again.
+pub(crate) fn clear_repair_job_live_attempted(nzb: NzbRef, idx: usize) {
+    if let Some(d) = nzb_data(nzb) {
+        if let Some(j) = d.files().jobs.get_mut(idx) {
+            j.live_attempted = false;
+        }
+    }
+}
+
 /// Removes the `idx`-th job, marking the download changed when asked.
 pub(crate) fn erase_repair_job(nzb: NzbRef, idx: usize, set_changed: bool) {
     let Some(d) = nzb_data(nzb) else {
@@ -3037,6 +3046,8 @@ mod tests {
         assert_eq!(j.holes.len(), 1);
         assert_eq!((j.holes[0].offset, j.holes[0].size), (10, 5));
         assert!(mark_repair_job_live_attempted(pn, 0));
+        clear_repair_job_live_attempted(pn, 0);
+        assert!(!mark_repair_job_live_attempted(pn, 0));
         erase_repair_job(pn, 0, false);
         assert_eq!(repair_job_count(pn), 0);
         push_repair_job(pn, &StreamRepairJobDetailSnap::default());

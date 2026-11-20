@@ -2609,6 +2609,12 @@ impl QueueSubsysHost {
         self.use_active && crate::qnzb::mark_repair_job_live_attempted(nzb_ptr, idx)
     }
 
+    pub fn nzb_stream_repair_clear_live_attempted(&self, nzb_ptr: NzbRef, idx: usize) {
+        if self.use_active {
+            crate::qnzb::clear_repair_job_live_attempted(nzb_ptr, idx);
+        }
+    }
+
     pub fn nzb_stream_repair_erase_job(&self, nzb_ptr: NzbRef, idx: usize, set_changed: bool) {
         if self.use_active {
             crate::qnzb::erase_repair_job(nzb_ptr, idx, set_changed);

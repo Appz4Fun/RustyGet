@@ -1978,8 +1978,15 @@ impl NzbgetRsStreamRepairCtrl {
             .map(|j_idx| Self::repair_job(q, nzb_ptr, j_idx).file_id)
             .collect();
 
+        // A pass the watchdog stopped (DupeStreamTimeout) never reached some of the holes it
+        // took on: the next live repair tries those files again instead of leaving them to a
+        // par2 repair that may not exist while a duplicate could lend them.
+        let timed_out = self.timed_out.load(Ordering::SeqCst);
         for target in targets.iter().filter(|t| t.patch_eligible) {
             if let Some(j_idx) = job_ids.iter().position(|&id| id == target.file_id) {
+                if timed_out && target.needs_repair() {
+                    host.nzb_stream_repair_clear_live_attempted(nzb_ptr, j_idx);
+                }
                 let new_dec = if target.recreated {
                     host.nzb_stream_repair_update_completed_file(nzb_ptr, target.file_id, 2);
                     target.decoded_file_size
@@ -2418,8 +2425,9 @@ fn hole_spans(t: &RepairTarget) -> Vec<(i64, i64)> {
 }
 
 /// What another live pass is for: whether a file with holes that no pass of this repair took
-/// on turned up (the next pass takes it on by itself), and the files a pass took on that have
-/// a hole no pass tried (taken on again). Each file is rerun for once per state of its holes
+/// on turned up, and the files the next pass takes on although marked tried: those newcomers
+/// (an earlier pass collected the file before its holes were known, still arriving, and marked
+/// it tried all the same) and the files a pass took on that have a hole no pass tried. Each file is rerun for once per state of its holes
 /// (`rerun_for`), so a pass that cannot take them on is not repeated for nothing.
 #[allow(clippy::type_complexity)]
 fn holes_to_rerun(
@@ -2434,7 +2442,8 @@ fn holes_to_rerun(
     let newcomers: Vec<&(Vec<u8>, Vec<(i64, i64)>)> =
         fresh.iter().filter(|(name, _)| !seen.contains_key(name)).collect();
     let any_new = !newcomers.is_empty();
-    let again = holes_not_tried(seen, fresh.clone());
+    let mut again = holes_not_tried(seen, fresh.clone());
+    again.extend(newcomers.into_iter().map(|(name, _)| name.clone()));
     for (name, holes) in fresh {
         if !seen.contains_key(&name) || again.contains(&name) {
             rerun_for.insert(name, holes);
@@ -2511,11 +2520,15 @@ mod tests {
         ];
         let again = holes_not_tried(&seen, now.clone());
         assert_eq!(again.into_iter().collect::<Vec<_>>(), vec![b"a.part21.rar".to_vec()]);
-        // part22 finished during the pass: another pass runs for it, and for part21 again.
+        // part22 finished during the pass: another pass runs for it (taken on although an
+        // earlier pass may have marked it tried before its holes were known), and for part21.
         let mut rerun_for = std::collections::BTreeMap::new();
         let (newcomers, again) = holes_to_rerun(&seen, &mut rerun_for, now.clone());
         assert!(newcomers);
-        assert_eq!(again.into_iter().collect::<Vec<_>>(), vec![b"a.part21.rar".to_vec()]);
+        assert_eq!(
+            again.into_iter().collect::<Vec<_>>(),
+            vec![b"a.part21.rar".to_vec(), b"a.part22.rar".to_vec()]
+        );
         // A pass that could not take them on changes nothing: not run again for them.
         let (newcomers, again) = holes_to_rerun(&seen, &mut rerun_for, now);
         assert!(!newcomers && again.is_empty());

@@ -5748,4 +5748,73 @@ fn a_volume_with_its_end_rebuilt_from_a_sibling_extracts() {
     let (r, log) = run(&one, &t.out(), Box::new(CompleteSet));
     expect_ok(r, &log);
     assert!(t.out().join("testfile5.dat").is_file(), "{log:?}");
+
+#[test]
+fn a_directory_entry_keeps_the_persistent_session() {
+    // Before, a directory entry made the persistent session fall back and extract the whole set
+    // again; it is now made at publish with its stored mode and time.
+    let t = TestDir::new("direntry_persist");
+    let (first, a) = set_with_directory(&t.dl(), 1, 0o040550);
+    let damaged = Damaged {
+        holes: Vec::new(),
+        repair: Vec::new(),
+        handed: false,
+    };
+    let (r, log) = run_downloading(&first, &t.out(), damaged, 1);
+    expect_ok(r, &log);
+    assert!(persistent(&log), "{log:?}");
+    assert_eq!(std::fs::read(t.out().join("Sub/a.bin")).unwrap(), a);
+    #[cfg(unix)]
+    assert_eq!(mode_of(&t.out().join("Sub")), 0o750);
+    let mtime = std::fs::metadata(t.out().join("Sub"))
+        .unwrap()
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    assert_eq!(mtime, 1_700_000_000);
+    assert!(!t.out().join(persistent::STATE_DIR).exists());
+}
+
+#[test]
+fn a_trailing_empty_directory_entry_keeps_the_persistent_session() {
+    // Scene releases end with their folder's entry; an empty one must survive publishing.
+    let t = TestDir::new("direntry_persist_tail");
+    let a = pattern(40_000);
+    let mut v = SIG.to_vec();
+    v.extend(main_block(false, None));
+    v.extend(file_block(
+        "Rel/a.bin",
+        a.len() as u64,
+        &a,
+        crc32fast::hash(&a),
+        false,
+        false,
+    ));
+    v.extend(dir_block("Rel/Empty", 0o040755, 1));
+    v.extend(dir_block("Rel", 0o040755, 1));
+    v.extend(end_block(false));
+    let first = t.dl().join("set.rar");
+    std::fs::write(&first, &v).unwrap();
+    let damaged = Damaged {
+        holes: Vec::new(),
+        repair: Vec::new(),
+        handed: false,
+    };
+    let (r, log) = run_downloading(&first, &t.out(), damaged, 1);
+    expect_ok(r, &log);
+    assert!(persistent(&log), "{log:?}");
+    assert_eq!(std::fs::read(t.out().join("Rel/a.bin")).unwrap(), a);
+    assert!(t.out().join("Rel/Empty").is_dir());
+    for d in ["Rel", "Rel/Empty"] {
+        let mtime = std::fs::metadata(t.out().join(d))
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert_eq!(mtime, 1_700_000_000, "{d}");
+    }
 }

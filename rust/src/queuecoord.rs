@@ -449,10 +449,6 @@ fn was_kept_for_borrowing(nzb_id: i32) -> bool {
         .is_some_and(|g| g.contains(&nzb_id))
 }
 
-/// True when the live dead-volume borrow of download `nzb` found the video of `backup`
-/// to differ and no other donor lends the dead volumes (see
-/// `postproc::dead_volume_donor_cannot_lend`). Says so once.
-/// Direct unpack finished and verified the extraction.
 /// A download the dead-download check leaves alone: not an nzb, already being removed or parked,
 /// or one whose direct unpack already finished and verified. Failing that one over (on projected
 /// health, as nest3v on 6790 did 1 s after its verified extraction) only downloads and extracts
@@ -465,10 +461,14 @@ fn dead_check_skipped(nzb: &crate::queuesubsys_host::NzbSnap) -> bool {
         || direct_unpack_verified(nzb.direct_unpack_status)
 }
 
+/// Direct unpack finished and verified the extraction.
 fn direct_unpack_verified(status: DirectUnpackStatus) -> bool {
     status == DirectUnpackStatus::Success
 }
 
+/// True when the live dead-volume borrow of download `nzb` found the video of `backup`
+/// to differ and no other donor lends the dead volumes (see
+/// `postproc::dead_volume_donor_cannot_lend`). Says so once.
 fn backup_cannot_lend(
     host: &crate::queuesubsys_host::QueueSubsysHost,
     nzb: &crate::queuesubsys_host::NzbSnap,

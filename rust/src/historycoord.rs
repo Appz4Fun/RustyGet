@@ -510,7 +510,8 @@ use crate::status::{
     CleanupStatus, DeleteStatus, DirectRenameStatus, DirectUnpackStatus, DupStatus, DupeMode,
     MarkStatus, MoveStatus, NzbParStatus, UnpackStatus, UrlStatus,
 };
-use std::ffi::{c_int, CStr};
+use crate::cstr::{nul_terminated, to_cstring, until_nul};
+use std::ffi::c_int;
 
 /// Path separator of the directories the coordinator deletes.
 const HC_PATH_SEP: u8 = b'/';
@@ -770,27 +771,9 @@ pub(crate) trait HistoryHost {
     fn edit_dup(&self, _hist: usize, _edit: DupEdit<'_>) {}
 }
 
-fn hc_cbuf(bytes: &[u8]) -> Vec<u8> {
-    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    let mut v = Vec::with_capacity(end + 1);
-    v.extend_from_slice(&bytes[..end]);
-    v.push(0);
-    v
-}
-
-fn hc_bytes_as_cstr(buf: &[u8]) -> &CStr {
-    CStr::from_bytes_with_nul(buf).unwrap_or(c"")
-}
-
-/// The bytes before the first NUL, as a C string would carry them.
-fn hc_until_nul(bytes: &[u8]) -> &[u8] {
-    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    &bytes[..end]
-}
-
 #[cfg(unix)]
 fn hc_trunc(bytes: &[u8]) -> Vec<u8> {
-    hc_until_nul(bytes).to_vec()
+    until_nul(bytes).to_vec()
 }
 
 /// The `HistoryCoordinator` operations on one download queue.
@@ -801,11 +784,11 @@ pub(crate) struct HistoryCoord<'a> {
 
 impl HistoryCoord<'_> {
     fn log(&self, level: HcLevel, msg: &[u8]) {
-        self.host.log(level, hc_until_nul(msg));
+        self.host.log(level, until_nul(msg));
     }
 
     fn nzb_msg(&self, nzb: NzbRef, level: HcLevel, msg: &[u8]) {
-        self.host.nzb_message(nzb, level, hc_until_nul(msg));
+        self.host.nzb_message(nzb, level, until_nul(msg));
     }
 
     /// `DeleteDiskFiles`.
@@ -830,12 +813,11 @@ impl HistoryCoord<'_> {
             let name1 = &queued_fn[pos + ts..pos + te];
             pos += next_pos;
             if crate::fsops::file_exists(name1, &crate::fsops::posix_stat) {
-                let name_c = hc_cbuf(name1);
-                let cstr = hc_bytes_as_cstr(&name_c);
+                let cstr = to_cstring(name1);
                 let mut msg = b"Deleting file ".to_vec();
                 msg.extend_from_slice(name1);
                 self.log(HcLevel::Info, &msg);
-                crate::fsops::delete_file(cstr);
+                crate::fsops::delete_file(&cstr);
             }
         }
     }
@@ -1279,12 +1261,10 @@ impl HistoryCoord<'_> {
                             ARTICLE_UNDEFINED,
                             ARTICLE_FAILED,
                             |p| {
-                                let pc = hc_cbuf(p);
-                                crate::fsops::file_size(hc_bytes_as_cstr(&pc))
+                                crate::fsops::file_size(&to_cstring(p))
                             },
                             |p| {
-                                let pc = hc_cbuf(p);
-                                crate::fsops::delete_file(hc_bytes_as_cstr(&pc));
+                                crate::fsops::delete_file(&to_cstring(p));
                             },
                             |p| crate::fsops::file_exists(p, &crate::fsops::posix_stat),
                         );
@@ -1498,7 +1478,7 @@ impl HistoryCoord<'_> {
         let score = match text {
             None => 0,
             Some(t) => {
-                let t_c = hc_cbuf(t);
+                let t_c = nul_terminated(t);
                 // SAFETY: `t_c` is NUL-terminated.
                 unsafe { libc::atoi(t_c.as_ptr().cast()) }
             }
@@ -2371,7 +2351,7 @@ pub(crate) fn edit_list_active(
     HistoryCoord { host: &host, dq: dq_ptr }.edit_list(
         ids,
         action,
-        args.map(hc_until_nul),
+        args.map(until_nul),
         opts.dupe_check,
         opts.server_mode,
         hc_nzb_cleanup_disk(),

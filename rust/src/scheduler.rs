@@ -311,6 +311,7 @@ pub fn scheduler_calc_next_work_interval(cur_time: i64) -> i32 {
 // End-to-end `Scheduler` coordinator (`daemon/main/Scheduler.cpp`)
 // ============================================================================
 
+use crate::cstr::until_nul;
 use std::ffi::c_int;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Mutex;
@@ -363,16 +364,9 @@ pub(crate) trait SchedulerHost {
     }
 }
 
-/// The bytes before the first NUL, as a C string would carry them.
-fn until_nul(bytes: &[u8]) -> &[u8] {
-    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    &bytes[..end]
-}
-
 /// C `atoi` of `bytes` up to the first NUL.
 fn c_atoi(bytes: &[u8]) -> c_int {
-    let mut buf = until_nul(bytes).to_vec();
-    buf.push(0);
+    let buf = crate::cstr::nul_terminated(bytes);
     // SAFETY: `buf` is NUL-terminated.
     unsafe { libc::atoi(buf.as_ptr().cast()) }
 }

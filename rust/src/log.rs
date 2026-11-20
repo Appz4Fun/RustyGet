@@ -825,7 +825,6 @@ pub(crate) unsafe fn nzbget_rs_log_collect(
 mod tests {
     use super::*;
     use std::os::unix::fs::FileTypeExt as _;
-    use crate::options::{nzbget_rs_options_free, nzbget_rs_options_new, NzbgetRsParsedOptions};
 
     #[test]
     fn startup_buffering_init_options_file_flush_and_ring_trim() {
@@ -850,31 +849,15 @@ mod tests {
 
         let log_opt = CString::new(format!("LogFile={}", log_path.to_str().unwrap())).unwrap();
         let cmd_opts = [
-            log_opt.as_ptr(),
-            c"LogToFile=yes".as_ptr(),
-            c"InfoTarget=both".as_ptr(),
-            c"DetailTarget=log".as_ptr(),
-            c"ErrorTarget=both".as_ptr(),
-            c"LogBuffer=2".as_ptr(),
+            log_opt.as_c_str(),
+            c"LogToFile=yes",
+            c"InfoTarget=both",
+            c"DetailTarget=log",
+            c"ErrorTarget=both",
+            c"LogBuffer=2",
         ];
-        let mut scalars = NzbgetRsParsedOptions::default();
-        let mut flags = 0;
-        let opts = unsafe {
-            nzbget_rs_options_new(
-                c"rustyget".as_ptr(),
-                ptr::null(),
-                1,
-                1,
-                cmd_opts.as_ptr(),
-                cmd_opts.len(),
-                0,
-                c"1.0".as_ptr(),
-                ptr::null_mut(),
-                None,
-                &mut scalars,
-                &mut flags,
-            )
-        };
+        let opts_arc = crate::options::test_options(&cmd_opts);
+        let opts = std::sync::Arc::as_ptr(&opts_arc);
 
         unsafe {
             // server_mode = 1 -> resets stale log file and replays buffered messages
@@ -945,10 +928,8 @@ mod tests {
         assert_eq!(screen[0].0, 2);
         assert_eq!(screen[1].0, 3);
 
-        unsafe {
-            uninstall_log(log_arc);
-            nzbget_rs_options_free(opts);
-        }
+        uninstall_log(log_arc);
+        crate::options::release_options(opts_arc);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -963,31 +944,15 @@ mod tests {
         let log_path = dir.join("rustyget.log");
         let log_opt = CString::new(format!("LogFile={}", log_path.to_str().unwrap())).unwrap();
         let cmd_opts = [
-            log_opt.as_ptr(),
-            c"LogToFile=yes".as_ptr(),
-            c"InfoTarget=both".as_ptr(),
-            c"LogBuffer=0".as_ptr(),
+            log_opt.as_c_str(),
+            c"LogToFile=yes",
+            c"InfoTarget=both",
+            c"LogBuffer=0",
         ];
-        let mut scalars = NzbgetRsParsedOptions::default();
-        let mut flags = 0;
         let log_arc = install_log(false);
         let log = std::sync::Arc::as_ptr(&log_arc);
-        let opts = unsafe {
-            nzbget_rs_options_new(
-                c"rustyget".as_ptr(),
-                ptr::null(),
-                1,
-                1,
-                cmd_opts.as_ptr(),
-                cmd_opts.len(),
-                0,
-                c"1.0".as_ptr(),
-                ptr::null_mut(),
-                None,
-                &mut scalars,
-                &mut flags,
-            )
-        };
+        let opts_arc = crate::options::test_options(&cmd_opts);
+        let opts = std::sync::Arc::as_ptr(&opts_arc);
         let line = CString::new("x".repeat(200)).unwrap();
         unsafe {
             (*log).init_options(opts.as_ref(), true, false, false);
@@ -1048,7 +1013,7 @@ mod tests {
                 0,
             );
             uninstall_log(log_arc);
-            nzbget_rs_options_free(opts);
+            crate::options::release_options(opts_arc);
         }
         assert_eq!(screen.len(), 60, "LogBuffer 0 keeps every message");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1065,31 +1030,15 @@ mod tests {
         let log_path = dir.join("rustyget.log");
         let log_opt = CString::new(format!("LogFile={}", log_path.to_str().unwrap())).unwrap();
         let cmd_opts = [
-            log_opt.as_ptr(),
-            c"LogToFile=yes".as_ptr(),
-            c"InfoTarget=log".as_ptr(),
-            c"LogRotations=2".as_ptr(),
+            log_opt.as_c_str(),
+            c"LogToFile=yes",
+            c"InfoTarget=log",
+            c"LogRotations=2",
         ];
-        let mut scalars = NzbgetRsParsedOptions::default();
-        let mut flags = 0;
         let log_arc = install_log(false);
         let log = std::sync::Arc::as_ptr(&log_arc);
-        let opts = unsafe {
-            nzbget_rs_options_new(
-                c"rustyget".as_ptr(),
-                ptr::null(),
-                1,
-                1,
-                cmd_opts.as_ptr(),
-                cmd_opts.len(),
-                0,
-                c"1.0".as_ptr(),
-                ptr::null_mut(),
-                None,
-                &mut scalars,
-                &mut flags,
-            )
-        };
+        let opts_arc = crate::options::test_options(&cmd_opts);
+        let opts = std::sync::Arc::as_ptr(&opts_arc);
         unsafe {
             (*log).init_options(opts.as_ref(), true, false, false);
             for i in 0..120 {
@@ -1097,7 +1046,7 @@ mod tests {
                 nzbget_rs_log_emit(log, 0, opts, line.as_ptr());
             }
             uninstall_log(log_arc);
-            nzbget_rs_options_free(opts);
+            crate::options::release_options(opts_arc);
         }
         let mut names: Vec<String> = std::fs::read_dir(&dir)
             .unwrap()
@@ -1197,31 +1146,15 @@ mod tests {
         let dir = missing_log_dir("startup");
         let log_opt = CString::new(format!("LogFile={}", dir.join("rustyget.log").to_str().unwrap())).unwrap();
         let cmd_opts = [
-            log_opt.as_ptr(),
-            c"LogToFile=yes".as_ptr(),
-            c"InfoTarget=both".as_ptr(),
-            c"WarningTarget=both".as_ptr(),
-            c"ErrorTarget=both".as_ptr(),
-            c"LogBuffer=100".as_ptr(),
+            log_opt.as_c_str(),
+            c"LogToFile=yes",
+            c"InfoTarget=both",
+            c"WarningTarget=both",
+            c"ErrorTarget=both",
+            c"LogBuffer=100",
         ];
-        let mut scalars = NzbgetRsParsedOptions::default();
-        let mut flags = 0;
-        let opts = unsafe {
-            nzbget_rs_options_new(
-                c"rustyget".as_ptr(),
-                ptr::null(),
-                1,
-                1,
-                cmd_opts.as_ptr(),
-                cmd_opts.len(),
-                0,
-                c"1.0".as_ptr(),
-                ptr::null_mut(),
-                None,
-                &mut scalars,
-                &mut flags,
-            )
-        };
+        let opts_arc = crate::options::test_options(&cmd_opts);
+        let opts = std::sync::Arc::as_ptr(&opts_arc);
         let log = NzbgetRsLog::with_debug_cb(false, None);
         log.emit_bytes(MK_INFO, None, b"first");
         log.emit_bytes(MK_ERROR, None, b"second");
@@ -1238,7 +1171,7 @@ mod tests {
             vec!["first".to_owned(), "third".to_owned()]
         );
         drop(inner);
-        unsafe { nzbget_rs_options_free(opts) };
+        crate::options::release_options(opts_arc);
         assert!(!dir.exists());
     }
 

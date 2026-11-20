@@ -1793,37 +1793,36 @@ mod tests {
     /// Loads `text` as a configuration file (no disk access besides reading
     /// it) and returns every message the options reported.
     fn load_messages(dir: &Path, name: &str, text: &[u8]) -> Vec<String> {
-        use std::ffi::{c_char, c_int, c_void};
-        unsafe extern "C" fn cb(ctx: *mut c_void, op: c_int, _i: *const c_int, strs: *const *const c_char, n: usize) {
-            if n > 0 && !strs.is_null() && !(*strs).is_null() && (0..=3).contains(&op) {
-                let v = &mut *(ctx as *mut Vec<String>);
-                v.push(String::from_utf8_lossy(CStr::from_ptr(*strs).to_bytes()).into_owned());
+        use crate::options::{OptMsg, OptionsListener, OptionsSource};
+        struct Collect(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+        impl OptionsListener for Collect {
+            fn message(&mut self, _kind: OptMsg, text: &CStr) {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(text.to_bytes()).into_owned());
             }
         }
         let file = dir.join(name);
         std::fs::write(&file, text).unwrap();
         let path = CString::new(file.to_str().unwrap()).unwrap();
-        let mut msgs: Vec<String> = Vec::new();
-        let mut flags: c_int = 0;
-        let handle = unsafe {
-            crate::options::nzbget_rs_options_new(
-                c"rustyget".as_ptr(),
-                path.as_ptr(),
-                0,
-                1,
-                std::ptr::null(),
-                0,
-                0,
-                c"1.0".as_ptr(),
-                (&mut msgs as *mut Vec<String>).cast(),
-                Some(cb),
-                std::ptr::null_mut(),
-                &mut flags,
-            )
-        };
-        unsafe { crate::options::nzbget_rs_options_free(handle) };
-        assert_eq!(flags & 1, 0, "a readable file is never fatal: {msgs:?}");
-        msgs
+        let msgs = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let opts = crate::options::new_options(
+            OptionsSource::Given {
+                exe_name: b"rustyget",
+                config_file: Some(&path),
+                no_config: false,
+                cmd_opts: &[],
+            },
+            true,
+            0,
+            c"1.0",
+            Some(Box::new(Collect(msgs.clone()))),
+        );
+        let out = msgs.lock().unwrap().clone();
+        assert!(!opts.has_fatal_error(), "a readable file is never fatal: {out:?}");
+        crate::options::release_options(opts);
+        out
     }
 
     #[test]
@@ -1870,30 +1869,24 @@ mod tests {
         let file = d.join("partial.conf");
         std::fs::write(&file, "MainDir=/data/rg\nTempDir=/fast/tmp\nQueueDir=/data/rg/queue\n").unwrap();
         let path = CString::new(file.to_str().unwrap()).unwrap();
-        let mut flags = 0;
-        let handle = unsafe {
-            crate::options::nzbget_rs_options_new(
-                c"rustyget".as_ptr(),
-                path.as_ptr(),
-                0,
-                1,
-                std::ptr::null(),
-                0,
-                0,
-                c"1.0".as_ptr(),
-                std::ptr::null_mut(),
-                None,
-                std::ptr::null_mut(),
-                &mut flags,
-            )
-        };
-        let opts = unsafe { &*handle };
+        let opts = crate::options::new_options(
+            crate::options::OptionsSource::Given {
+                exe_name: b"rustyget",
+                config_file: Some(&path),
+                no_config: false,
+                cmd_opts: &[],
+            },
+            true,
+            0,
+            c"1.0",
+            None,
+        );
         use crate::options::OptStr;
         assert_eq!(opts.str_bytes(OptStr::QueueDir), b"/data/rg/queue");
         assert_eq!(opts.str_bytes(OptStr::TempDir), b"/fast/tmp");
         let dest = String::from_utf8_lossy(opts.str_bytes(OptStr::DestDir)).into_owned();
         assert!(dest.ends_with("downloads/dst") && !dest.starts_with("/data/rg"), "{dest}");
-        unsafe { crate::options::nzbget_rs_options_free(handle) };
+        crate::options::release_options(opts);
         let _ = std::fs::remove_dir_all(&d);
     }
 

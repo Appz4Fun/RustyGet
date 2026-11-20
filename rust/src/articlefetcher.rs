@@ -815,7 +815,9 @@ impl ArticleFetcher {
         let mut raw_bytes: i64 = 0;
         let mut decoded_bytes: i64 = 0;
 
-        // Time spent held back by the speed limit does not count against the article deadline.
+        // A connection that stops delivering has a deadline measured from its last progress
+        // (or the BODY request). Time held back by the speed limit does not count.
+        let mut progress_mark = requested;
         let mut throttled = Duration::ZERO;
         while !self.is_stopped() && !decoder.eof {
             let st0 = self.host.status();
@@ -847,15 +849,14 @@ impl ArticleFetcher {
                 break;
             }
 
-            // A whole article, not only each read, has a deadline: a connection that trickles
-            // or stalls between reads held one cross-pack read (and every article queued
-            // behind it) for 205 s until the stream timeout gave the repair up. Retried
-            // elsewhere instead.
-            let working = requested.elapsed().saturating_sub(throttled);
+            // A stalled connection held one cross-pack read (and every article queued behind
+            // it) for 205 s until the stream timeout gave the repair up. Retried elsewhere
+            // instead. Slow but steady links keep going: each delivered chunk resets this.
+            let working = progress_mark.elapsed().saturating_sub(throttled);
             if working > Duration::from_secs(stream_reply_timeout_secs().max(1) as u64) {
                 let mut log = b"Stream repair: ".to_vec();
                 log.extend_from_slice(server_name);
-                log.extend_from_slice(b" too slow for ");
+                log.extend_from_slice(b" stalled on ");
                 log.extend_from_slice(msg_slice);
                 log.extend_from_slice(
                     format!(" ({} s); retrying it elsewhere", working.as_secs()).as_bytes(),
@@ -885,6 +886,8 @@ impl ArticleFetcher {
                     ..Default::default()
                 };
             };
+            progress_mark = Instant::now();
+            throttled = Duration::ZERO;
 
             if !article_fetch_add_raw_bytes(&mut raw_bytes, len as i64) {
                 let mut log = b"Stream repair: article ".to_vec();

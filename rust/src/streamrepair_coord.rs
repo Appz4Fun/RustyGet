@@ -2047,22 +2047,16 @@ impl NzbgetRsStreamRepairCtrl {
         // Direct unpack already extracted the whole archive (dead volumes read in place from
         // what the live repair borrowed): borrowing those volumes again into files nothing
         // reads only spends downloads.
-        let unpacked = q.host.with_locked_queue(|_| {
+        let already_unpacked = q.host.with_locked_queue(|_| {
             let post_ptr = q.post_ptr();
-            (!post_ptr.is_none()).then(|| {
-                let nzb = q.host.post_snap(post_ptr).nzb_ptr;
-                (!nzb.is_none()).then(|| q.host.nzb_snap(nzb, false))
-            })
-        });
-        if let Some(Some(ns)) = unpacked {
-            if ns.direct_unpack_status == crate::status::DirectUnpackStatus::Success {
-                let mut msg = b"Not stream-repairing ".to_vec();
-                msg.extend_from_slice(cstr::until_nul(&ns.name));
-                msg.extend_from_slice(b": direct unpack already extracted it");
-                self.print_message(q, MK_INFO, &msg);
-                return;
+            if post_ptr.is_none() {
+                return false;
             }
-        }
+            let nzb = q.host.post_snap(post_ptr).nzb_ptr;
+            !nzb.is_none()
+                && q.host.nzb_snap(nzb, false).direct_unpack_status
+                    == crate::status::DirectUnpackStatus::Success
+        });
         let mut counters = RunCounters::default();
         let Some((nzb_name, dest_dir, mut targets, donors, member_names)) =
             q.host.with_locked_queue(|dq_ptr| {
@@ -2074,7 +2068,15 @@ impl NzbgetRsStreamRepairCtrl {
 
         let opts = self.query_host_options();
 
-        if targets.is_empty() {
+        if already_unpacked {
+            // The stage still completes, so its repair jobs are dropped and
+            // post-processing moves on.
+            targets.clear();
+            let mut msg = b"Not stream-repairing ".to_vec();
+            msg.extend_from_slice(&nzb_name);
+            msg.extend_from_slice(b": direct unpack already extracted it");
+            self.print_message(q, MK_INFO, &msg);
+        } else if targets.is_empty() {
             let mut msg = b"Nothing to stream-repair for ".to_vec();
             msg.extend_from_slice(&nzb_name);
             self.print_message(q, MK_INFO, &msg);

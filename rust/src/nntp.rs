@@ -750,14 +750,13 @@ pub fn server_pool_pick_candidate_index(rand_val: i32, candidates_len: usize) ->
     }
 }
 
-/// Returns true when `ServerPool::CloseUnusedConnections` should disconnect a pooled connection on an idle level (`conn_norm_level == level && conn_status == cs_connected`).
-pub fn server_pool_should_disconnect_idle_level_conn(
+/// Returns true when `ServerPool::CloseUnusedConnections` should disconnect a pooled connection on an idle level: it is connected and its server is on that level.
+pub const fn server_pool_should_disconnect_idle_level_conn(
     conn_norm_level: i32,
     level: i32,
-    conn_status: i32,
-    cs_connected: i32,
+    connected: bool,
 ) -> bool {
-    conn_norm_level == level && conn_status == cs_connected
+    conn_norm_level == level && connected
 }
 
 /// Returns true when `ArticleBatchFetcher::Begin` should call `EnsureWorkers()` (`worker_count > 0 && !is_stopped`).
@@ -1018,6 +1017,13 @@ impl BatchInner {
     }
 }
 
+/// Locks `m`, carrying on with the data if a worker panicked while holding it:
+/// the batch state stays consistent between statements, and a panic in one
+/// fetch must not take down delivery for the rest.
+fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 pub type BatchFetchFn =
     dyn Fn(usize, &BatchRequest) -> Result<BatchFetchedArticle, String> + Send + Sync;
 
@@ -1047,33 +1053,31 @@ impl ArticleBatchFetcher {
     }
 
     pub fn set_worker_count(&self, worker_count: i32) {
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = lock(&self.inner);
         guard.worker_count = worker_count;
     }
 
     pub fn get_window_parts(&self) -> i32 {
-        let guard = self.inner.lock().unwrap();
+        let guard = lock(&self.inner);
         guard.window_parts()
     }
 
     fn ensure_workers(&self, target_count: i32) {
         use std::sync::atomic::Ordering;
-        let mut workers = self.workers.lock().unwrap();
-        while (workers.len() as i32) < target_count {
+        let mut workers = lock(&self.workers);
+        let target = usize::try_from(target_count).unwrap_or(0);
+        while workers.len() < target {
             let worker_idx = workers.len();
             let inner = std::sync::Arc::clone(&self.inner);
             let stopped = std::sync::Arc::clone(&self.stopped);
             let fetch_fn = std::sync::Arc::clone(&self.fetch_fn);
             let handle = std::thread::spawn(move || {
                 while !stopped.load(Ordering::SeqCst) {
-                    let batch_id = inner.lock().unwrap().batch_id;
-                    let claimed = inner
-                        .lock()
-                        .unwrap()
-                        .claim_next(batch_id, stopped.load(Ordering::SeqCst));
+                    let batch_id = lock(&inner).batch_id;
+                    let claimed = lock(&inner).claim_next(batch_id, stopped.load(Ordering::SeqCst));
                     if let Some((index, req)) = claimed {
                         let fetched = (fetch_fn)(worker_idx, &req).unwrap_or_default();
-                        inner.lock().unwrap().store_result(batch_id, index, fetched);
+                        lock(&inner).store_result(batch_id, index, fetched);
                     } else {
                         std::thread::sleep(std::time::Duration::from_millis(5));
                     }
@@ -1086,7 +1090,7 @@ impl ArticleBatchFetcher {
     pub fn begin(&self, requests: Vec<BatchRequest>) {
         use std::sync::atomic::Ordering;
         let worker_count = {
-            let mut guard = self.inner.lock().unwrap();
+            let mut guard = lock(&self.inner);
             guard.batch_id = guard.batch_id.wrapping_add(1);
             guard.slots = vec![BatchSlot::default(); requests.len()];
             guard.requests = requests;
@@ -1105,7 +1109,7 @@ impl ArticleBatchFetcher {
     pub fn next(&self) -> Option<BatchFetchedArticle> {
         use std::sync::atomic::Ordering;
         let (index, worker_count) = {
-            let guard = self.inner.lock().unwrap();
+            let guard = lock(&self.inner);
             if !article_batch_can_deliver_next(
                 guard.cancelled,
                 self.stopped.load(Ordering::SeqCst),
@@ -1119,11 +1123,11 @@ impl ArticleBatchFetcher {
 
         if worker_count == 0 {
             let req = {
-                let guard = self.inner.lock().unwrap();
+                let guard = lock(&self.inner);
                 guard.requests[index].clone()
             };
             let result = (self.fetch_fn)(usize::MAX, &req).unwrap_or_default();
-            let mut guard = self.inner.lock().unwrap();
+            let mut guard = lock(&self.inner);
             guard.next_deliver += 1;
             if self.stopped.load(Ordering::SeqCst) {
                 return None;
@@ -1133,7 +1137,7 @@ impl ArticleBatchFetcher {
 
         while !self.stopped.load(Ordering::SeqCst) {
             {
-                let mut guard = self.inner.lock().unwrap();
+                let mut guard = lock(&self.inner);
                 if guard.cancelled {
                     return None;
                 }
@@ -1151,7 +1155,7 @@ impl ArticleBatchFetcher {
     }
 
     pub fn cancel_remaining(&self) {
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = lock(&self.inner);
         guard.cancelled = true;
         guard.buffered_bytes = 0;
     }
@@ -1168,7 +1172,7 @@ impl ArticleBatchFetcher {
 impl Drop for ArticleBatchFetcher {
     fn drop(&mut self) {
         self.stop();
-        let mut workers = self.workers.lock().unwrap();
+        let mut workers = lock(&self.workers);
         for worker in workers.drain(..) {
             let _ = worker.join();
         }
@@ -1616,8 +1620,7 @@ impl ServerPoolModel {
                     if server_pool_should_disconnect_idle_level_conn(
                         srv.norm_level,
                         level,
-                        i32::from(c.connected),
-                        1,
+                        c.connected,
                     ) {
                         c.connected = false;
                     }

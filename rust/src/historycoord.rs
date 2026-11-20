@@ -501,48 +501,273 @@ pub fn split_param_assignment(text: &[u8]) -> Option<(&[u8], &[u8])> {
 }
 
 // ============================================================================
-// End-to-end `HistoryCoordinator` FFI coordinator (`daemon/queue/HistoryCoordinator.cpp`)
+// End-to-end `HistoryCoordinator` coordinator (`daemon/queue/HistoryCoordinator.cpp`)
 // ============================================================================
 
+use crate::qdup::DupEdit;
+use crate::queuesubsys_host::FileRef;
 use crate::status::{
     CleanupStatus, DeleteStatus, DirectRenameStatus, DirectUnpackStatus, DupStatus, DupeMode,
     MarkStatus, MoveStatus, NzbParStatus, UnpackStatus, UrlStatus,
 };
-use std::ffi::{c_char, c_int, c_void, CStr};
+use std::ffi::{c_int, CStr};
 
-#[repr(C)]
-pub struct NzbgetRsHistoryCoordEnv {
-    pub ctx: *mut c_void,
-    pub p1: usize,
-    pub p2: usize,
-    pub a1: c_int,
-    pub a2: c_int,
-    pub a3: c_int,
-    pub a4: c_int,
-    pub a5: c_int,
-    pub a6: c_int,
-    pub t1: i64,
-    pub s1: *const c_char,
-    pub int_arr: *const c_int,
-    pub int_len: usize,
-    pub log_cb: Option<unsafe extern "C" fn(*mut c_void, c_int, *const c_char)>,
-    pub action_cb: Option<
-        unsafe extern "C" fn(
-            *mut c_void,
-            c_int,
-            c_int,
-            c_int,
-            usize,
-            usize,
-            *const c_char,
-            *const c_char,
-            *mut c_int,
-            *mut i64,
-            *mut *const c_char,
-            *mut u8,
-            usize,
-        ) -> usize,
-    >,
+/// Path separator of the directories the coordinator deletes.
+const HC_PATH_SEP: u8 = b'/';
+
+/// Level of a coordinator log line or job message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HcLevel {
+    Debug,
+    Detail,
+    Info,
+    Warning,
+    Error,
+}
+
+/// What `AddToHistory` reads back after moving a job into history.
+#[derive(Debug, Default)]
+pub(crate) struct AddedToHistory {
+    pub par_status: NzbParStatus,
+    pub unpack_status: UnpackStatus,
+    pub delete_status: DeleteStatus,
+    pub parking: bool,
+    pub unpack_cleaned_up: bool,
+    pub completed_count: c_int,
+    pub failed_size: i64,
+    pub par_failed_size: i64,
+    pub name: Vec<u8>,
+}
+
+/// One entry of a job's completed-files list.
+#[derive(Debug, Default)]
+pub(crate) struct CompletedFile {
+    pub status: c_int,
+    pub id: c_int,
+    pub filename: Vec<u8>,
+}
+
+/// What hiding a history record needs to know about it.
+#[derive(Debug, Default)]
+pub(crate) struct HideInfo {
+    pub nzb: NzbRef,
+    pub mark_status: MarkStatus,
+    pub delete_status: DeleteStatus,
+    pub is_dupe_success: bool,
+    pub name: Vec<u8>,
+}
+
+/// A history record seen while servicing the history.
+#[derive(Debug)]
+pub(crate) struct HistoryEntry {
+    pub hist_ptr: usize,
+    pub kind: c_int,
+    pub time: i64,
+    /// The record's job for an NZB record, else none.
+    pub nzb: NzbRef,
+    pub name: Vec<u8>,
+}
+
+/// How [`HistoryHost::find_history`] picks a record.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum HistoryKey {
+    Id(c_int),
+    Ptr(usize),
+}
+
+/// A history record found by id or address.
+#[derive(Debug)]
+pub(crate) struct FoundHistory {
+    pub hist_ptr: usize,
+    pub idx: c_int,
+    pub len: c_int,
+    pub kind: c_int,
+    pub delete_status: DeleteStatus,
+    pub par_status: NzbParStatus,
+    pub unpack_status: UnpackStatus,
+    pub parked_count: c_int,
+    pub nzb: NzbRef,
+    pub name: Vec<u8>,
+    pub dest_dir: Vec<u8>,
+}
+
+/// A job's timings and state read before it returns to the queue.
+#[derive(Debug, Default)]
+pub(crate) struct RequeueInfo {
+    pub unpack_cleaned_up_disk: bool,
+    pub post_total_sec: c_int,
+    pub unpack_sec: c_int,
+    pub par_sec: c_int,
+    pub move_status: MoveStatus,
+    pub file_count: c_int,
+    pub live_unpack_sec: c_int,
+    pub live_par_sec: c_int,
+    pub dest_dir: Vec<u8>,
+}
+
+/// A job's names and pause flag.
+#[derive(Debug, Default)]
+pub(crate) struct NzbNames {
+    pub delete_paused: bool,
+    pub name: Vec<u8>,
+    pub queued_filename: Vec<u8>,
+    pub dest_dir: Vec<u8>,
+}
+
+/// A completed file loaded back from disk for a retry.
+#[derive(Debug)]
+pub(crate) struct RetryFile {
+    pub file: FileRef,
+    pub state_loaded: bool,
+    pub success_articles: c_int,
+    pub partial_state: c_int,
+    pub article_count: usize,
+    pub par_file: bool,
+    pub total_articles: c_int,
+    pub missed_articles: c_int,
+    pub failed_articles: c_int,
+    pub completed_articles: c_int,
+    pub nzb_failed_articles: c_int,
+    pub nzb_success_articles: c_int,
+    pub size: i64,
+    pub missed_size: i64,
+    pub failed_size: i64,
+    pub remaining_size: i64,
+    pub success_size: i64,
+    pub nzb_failed_size: i64,
+    pub nzb_success_size: i64,
+    pub nzb_par_failed_size: i64,
+    pub nzb_par_success_size: i64,
+    pub filename: Vec<u8>,
+}
+
+/// File and job counters after resetting a requeued file's articles.
+#[derive(Debug)]
+pub(crate) struct RequeueCounts {
+    pub file_failed_articles: c_int,
+    pub file_completed_articles: c_int,
+    pub file_success_articles: c_int,
+    pub nzb_failed_articles: c_int,
+    pub nzb_success_articles: c_int,
+    pub file_failed_size: i64,
+    pub file_remaining_size: i64,
+    pub file_success_size: i64,
+    pub nzb_failed_size: i64,
+    pub nzb_success_size: i64,
+    pub nzb_par_failed_size: i64,
+    pub nzb_par_success_size: i64,
+}
+
+/// One edit of an NZB or URL history record's job.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum HistEdit<'a> {
+    Param { name: &'a [u8], value: &'a [u8] },
+    Category(&'a [u8]),
+    Name(&'a [u8]),
+    DupeKey(&'a [u8]),
+    DupeScore(c_int),
+    DupeMode(DupeMode),
+    DeleteStatus(DeleteStatus),
+}
+
+/// The queue the history coordinator works on. Each default does nothing
+/// and reports no data, so a test host implements only what it needs.
+pub(crate) trait HistoryHost {
+    fn log(&self, _level: HcLevel, _msg: &[u8]) {}
+    fn nzb_message(&self, _nzb: NzbRef, _level: HcLevel, _msg: &[u8]) {}
+    fn discard_disk_files(&self, _nzb: NzbRef, _delete_log: bool) {}
+    /// Clears the job's file list and returns its queued nzb file names.
+    fn clear_file_list(&self, _nzb: NzbRef) -> Vec<u8> {
+        Vec::new()
+    }
+    fn move_to_history(&self, _dq: usize, _nzb: NzbRef) -> AddedToHistory {
+        AddedToHistory::default()
+    }
+    fn completed_file(&self, _nzb: NzbRef, _idx: c_int) -> Option<CompletedFile> {
+        None
+    }
+    fn finish_add_to_history(&self, _nzb: NzbRef, _parked_count: c_int) {}
+    fn forget_par_damage(&self, _nzb: NzbRef) {}
+    /// Marks the job for a dupe recheck and returns its failed articles.
+    fn failed_article_samples(&self, _nzb: NzbRef) -> Vec<crate::dupeprobe::ProbeSample> {
+        Vec::new()
+    }
+    fn hide_info(&self, _hist: usize) -> HideInfo {
+        HideInfo::default()
+    }
+    fn replace_with_dup(&self, _dq: usize, _hist: usize, _rindex: c_int, _status: DupStatus) {}
+    /// The record `rindex` places from the end of the history.
+    fn history_entry_from_end(&self, _dq: usize, _rindex: c_int) -> Option<HistoryEntry> {
+        None
+    }
+    fn erase_history(&self, _dq: usize, _idx: c_int, _from_end: bool) {}
+    fn save_history(&self, _dq: usize) {}
+    fn mark_bad(&self, _dq: usize, _id: c_int) {}
+    fn find_history(&self, _dq: usize, _key: HistoryKey) -> Option<FoundHistory> {
+        None
+    }
+    fn requeue_info(&self, _nzb: NzbRef) -> RequeueInfo {
+        RequeueInfo::default()
+    }
+    fn file_name_at(&self, _nzb: NzbRef, _idx: c_int) -> Vec<u8> {
+        Vec::new()
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn return_to_queue(
+        &self,
+        _dq: usize,
+        _hist: usize,
+        _hidx: c_int,
+        _reprocess: bool,
+        _has_main_pars: bool,
+        _post_total_sec: c_int,
+        _move_status: MoveStatus,
+    ) {
+    }
+    fn notify_returned(&self, _dq: usize, _nzb: NzbRef, _added: bool) {}
+    fn build_dest_dir(&self, _nzb: NzbRef) -> Vec<u8> {
+        Vec::new()
+    }
+    fn return_url_to_queue(&self, _dq: usize, _hist: usize, _hidx: c_int) {}
+    fn nzb_names(&self, _nzb: NzbRef) -> NzbNames {
+        NzbNames::default()
+    }
+    /// Parses an nzb file into a new job; returns the job's owner address.
+    fn parse_nzb(&self, _path: &[u8]) -> Option<usize> {
+        None
+    }
+    fn reset_for_redownload(&self, _nzb: NzbRef, _new_nzb: usize, _paused: bool) {}
+    fn load_file_for_retry(&self, _nzb: NzbRef, _id: c_int, _status: c_int) -> Option<RetryFile> {
+        None
+    }
+    fn delete_file_info(&self, _file: FileRef) {}
+    fn rename_file(&self, _file: FileRef, _name: &[u8]) {}
+    fn article_states(&self, _file: FileRef, _statuses: &mut [c_int], _sizes: &mut [c_int]) {}
+    /// Puts a completed file back in the queue; returns its file id.
+    fn requeue_file(
+        &self,
+        _nzb: NzbRef,
+        _file: FileRef,
+        _completed_idx: c_int,
+        _partial_state: c_int,
+        _counts: &RequeueCounts,
+        _reset: &[u8],
+    ) -> c_int {
+        0
+    }
+    /// Drops the requeued files' repair jobs; returns whether the job is
+    /// completed and its id.
+    fn finish_retry(&self, _nzb: NzbRef, _requeued: &[c_int], _health_pause: bool) -> (bool, c_int) {
+        (false, 0)
+    }
+    fn pause_extra_pars(&self, _dq: usize, _nzb_id: c_int) {}
+    /// Edits an NZB or URL record; returns the job id when an NZB job's
+    /// name changed.
+    fn edit_history(&self, _hist: usize, _edit: HistEdit<'_>) -> Option<c_int> {
+        None
+    }
+    /// Edits a hidden dupe record.
+    fn edit_dup(&self, _hist: usize, _edit: DupEdit<'_>) {}
 }
 
 fn hc_cbuf(bytes: &[u8]) -> Vec<u8> {
@@ -553,1912 +778,961 @@ fn hc_cbuf(bytes: &[u8]) -> Vec<u8> {
     v
 }
 
-unsafe fn hc_cstr_bytes<'a>(p: *const c_char) -> &'a [u8] {
-    if p.is_null() {
-        &[]
-    } else {
-        CStr::from_ptr(p).to_bytes()
-    }
-}
-
 fn hc_bytes_as_cstr(buf: &[u8]) -> &CStr {
     CStr::from_bytes_with_nul(buf).unwrap_or(c"")
 }
 
-unsafe fn hc_log(env: &NzbgetRsHistoryCoordEnv, level: c_int, msg: &[u8]) {
-    if let Some(cb) = env.log_cb {
-        let c = hc_cbuf(msg);
-        cb(env.ctx, level, c.as_ptr() as *const c_char);
-    }
+/// The bytes before the first NUL, as a C string would carry them.
+fn hc_until_nul(bytes: &[u8]) -> &[u8] {
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    &bytes[..end]
 }
 
-unsafe fn hc_nzb_msg(env: &NzbgetRsHistoryCoordEnv, nzb_ptr: NzbRef, kind: c_int, msg: &[u8]) {
-    if let Some(cb) = env.action_cb {
-        let c = hc_cbuf(msg);
-        cb(
-            env.ctx,
-            4,
-            kind,
-            0,
-            0,
-            nzb_ptr.addr(),
-            c.as_ptr() as *const c_char,
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            0,
-        );
-    }
+#[cfg(unix)]
+fn hc_trunc(bytes: &[u8]) -> Vec<u8> {
+    hc_until_nul(bytes).to_vec()
 }
 
-unsafe fn hc_delete_disk_files(
-    env: &NzbgetRsHistoryCoordEnv,
-    nzb_ptr: NzbRef,
-    server_mode: bool,
-    nzb_cleanup_disk: bool,
-) {
-    let Some(cb) = env.action_cb else {
-        return;
-    };
-    if nzb_ptr.is_none() {
-        return;
+/// The `HistoryCoordinator` operations on one download queue.
+pub(crate) struct HistoryCoord<'a> {
+    pub host: &'a dyn HistoryHost,
+    pub dq: usize,
+}
+
+impl HistoryCoord<'_> {
+    fn log(&self, level: HcLevel, msg: &[u8]) {
+        self.host.log(level, hc_until_nul(msg));
     }
-    if server_mode {
-        cb(
-            env.ctx,
-            0,
-            1,
-            0,
-            0,
-            nzb_ptr.addr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            0,
-        );
+
+    fn nzb_msg(&self, nzb: NzbRef, level: HcLevel, msg: &[u8]) {
+        self.host.nzb_message(nzb, level, hc_until_nul(msg));
     }
-    let mut strs: [*const c_char; 1] = [std::ptr::null()];
-    cb(
-        env.ctx,
-        1,
-        0,
-        0,
-        0,
-        nzb_ptr.addr(),
-        std::ptr::null(),
-        std::ptr::null(),
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        strs.as_mut_ptr(),
-        std::ptr::null_mut(),
-        0,
-    );
-    if !nzb_cleanup_disk {
-        return;
-    }
-    let queued_fn = hc_cstr_bytes(strs[0]).to_vec();
-    let mut pos = 0usize;
-    while pos <= queued_fn.len() {
-        let Some((ts, te, next_pos)) =
-            crate::util::tokenizer_find_next_token(&queued_fn[pos..], b"|")
-        else {
-            break;
-        };
-        let name1 = &queued_fn[pos + ts..pos + te];
-        pos += next_pos;
-        if crate::fsops::file_exists(name1, &crate::fsops::posix_stat) {
-            let name_c = hc_cbuf(name1);
-            let cstr = hc_bytes_as_cstr(&name_c);
-            let mut msg = b"Deleting file ".to_vec();
-            msg.extend_from_slice(name1);
-            hc_log(env, 2, &msg);
-            crate::fsops::delete_file(cstr);
+
+    /// `DeleteDiskFiles`.
+    pub(crate) fn delete_disk_files(&self, nzb: NzbRef, server_mode: bool, nzb_cleanup_disk: bool) {
+        if nzb.is_none() {
+            return;
         }
-    }
-}
-
-unsafe fn hc_delete_dest_dir_if_present(
-    env: &NzbgetRsHistoryCoordEnv,
-    dest_dir: &[u8],
-    sep: u8,
-    log_level: c_int,
-) {
-    if crate::fsops::directory_exists(dest_dir, &crate::fsops::posix_stat) {
-        let mut msg = b"Deleting ".to_vec();
-        msg.extend_from_slice(dest_dir);
-        hc_log(env, log_level, &msg);
-        let mut err_text = Vec::new();
-        let done = crate::fsdelete::delete_directory_with_content(
-            &mut crate::fsops::PosixFsOps,
-            dest_dir,
-            sep,
-            &mut err_text,
-        )
-        .unwrap_or(false);
-        if !done {
-            let mut em = b"Could not delete directory ".to_vec();
-            em.extend_from_slice(dest_dir);
-            em.extend_from_slice(b": ");
-            let end = err_text
-                .iter()
-                .position(|&b| b == 0)
-                .unwrap_or(err_text.len());
-            em.extend_from_slice(&err_text[..end]);
-            hc_log(env, 4, &em);
+        if server_mode {
+            self.host.discard_disk_files(nzb, true);
         }
-    }
-}
-
-unsafe extern "C" fn hc_emit_failed_sample(
-    ctx: *mut c_void,
-    msg_id: *const c_char,
-    groups_ptr: *const *const c_char,
-    groups_len: usize,
-) {
-    if ctx.is_null() || msg_id.is_null() {
-        return;
-    }
-    let out = &mut *(ctx as *mut Vec<crate::dupeprobe::ProbeSample>);
-    let mid = hc_cstr_bytes(msg_id).to_vec();
-    if mid.is_empty() {
-        return;
-    }
-    let mut groups = Vec::with_capacity(groups_len);
-    if !groups_ptr.is_null() && groups_len > 0 {
-        let sl = std::slice::from_raw_parts(groups_ptr, groups_len);
-        for &gp in sl {
-            if !gp.is_null() {
-                groups.push(hc_cstr_bytes(gp).to_vec());
+        let queued_fn = self.host.clear_file_list(nzb);
+        if !nzb_cleanup_disk {
+            return;
+        }
+        let mut pos = 0usize;
+        while pos <= queued_fn.len() {
+            let Some((ts, te, next_pos)) =
+                crate::util::tokenizer_find_next_token(&queued_fn[pos..], b"|")
+            else {
+                break;
+            };
+            let name1 = &queued_fn[pos + ts..pos + te];
+            pos += next_pos;
+            if crate::fsops::file_exists(name1, &crate::fsops::posix_stat) {
+                let name_c = hc_cbuf(name1);
+                let cstr = hc_bytes_as_cstr(&name_c);
+                let mut msg = b"Deleting file ".to_vec();
+                msg.extend_from_slice(name1);
+                self.log(HcLevel::Info, &msg);
+                crate::fsops::delete_file(cstr);
             }
         }
     }
-    out.push(crate::dupeprobe::ProbeSample {
-        message_id: mid,
-        groups,
-    });
-}
 
-unsafe fn hc_recheck_failed_articles(
-    env: &NzbgetRsHistoryCoordEnv,
-    dq_ptr: usize,
-    nzb_ptr: NzbRef,
-) {
-    let Some(cb) = env.action_cb else {
-        return;
-    };
-    #[cfg(unix)]
-    if let Some(qh) = crate::ffi::queue_host() {
-        let opts = qh.opts();
-        let nzb = qh.nzb_snap(nzb_ptr, true);
-        let has_recheck = qh.nzb_get_param(nzb_ptr, b"*DupeRecheck").is_some();
-        if !should_recheck_failed_articles(
-            opts.dupe_article_fallback == 0,
-            opts.health_check == 4,
-            nzb.kind == 0,
-            nzb.failed_articles,
-            &nzb.text_status,
-            has_recheck,
-        ) {
-            return;
+    fn delete_dest_dir_if_present(&self, dest_dir: &[u8], level: HcLevel) {
+        if crate::fsops::directory_exists(dest_dir, &crate::fsops::posix_stat) {
+            let mut msg = b"Deleting ".to_vec();
+            msg.extend_from_slice(dest_dir);
+            self.log(level, &msg);
+            let mut err_text = Vec::new();
+            let done = crate::fsdelete::delete_directory_with_content(
+                &mut crate::fsops::PosixFsOps,
+                dest_dir,
+                HC_PATH_SEP,
+                &mut err_text,
+            )
+            .unwrap_or(false);
+            if !done {
+                let mut em = b"Could not delete directory ".to_vec();
+                em.extend_from_slice(dest_dir);
+                em.extend_from_slice(b": ");
+                let end = err_text
+                    .iter()
+                    .position(|&b| b == 0)
+                    .unwrap_or(err_text.len());
+                em.extend_from_slice(&err_text[..end]);
+                self.log(HcLevel::Error, &em);
+            }
         }
-        let q_len = qh.queue_len(dq_ptr);
-        for qidx in 0..q_len {
-            let q = qh.nzb_snap(qh.queue_at(dq_ptr, qidx), false);
-            if crate::dupecoord::same_name_or_key(&q.name, &q.dupe_key, &nzb.name, &nzb.dupe_key) {
+    }
+
+    fn recheck_failed_articles(&self, nzb_ptr: NzbRef) {
+        #[cfg(unix)]
+        if let Some(qh) = crate::ffi::queue_host() {
+            let dq_ptr = self.dq;
+            let opts = qh.opts();
+            let nzb = qh.nzb_snap(nzb_ptr, true);
+            let has_recheck = qh.nzb_get_param(nzb_ptr, b"*DupeRecheck").is_some();
+            if !should_recheck_failed_articles(
+                opts.dupe_article_fallback == 0,
+                opts.health_check == 4,
+                nzb.kind == 0,
+                nzb.failed_articles,
+                &nzb.text_status,
+                has_recheck,
+            ) {
                 return;
             }
-        }
-        if opts.dupe_check
-            && nzb.dupe_mode == DupeMode::Score
-            && crate::dupecoord::find_dupe_backup_host(
-                &qh,
-                &opts,
-                dq_ptr,
-                nzb_ptr,
-                &nzb.name,
-                &nzb.dupe_key,
-            )
-            .is_some()
-        {
-            return;
-        }
-        let mut failed: Vec<crate::dupeprobe::ProbeSample> = Vec::new();
-        cb(
-            env.ctx,
-            10,
-            0,
-            0,
-            std::ptr::addr_of_mut!(failed) as usize,
-            nzb_ptr.addr(),
-            hc_emit_failed_sample as *const c_void as *const c_char,
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            0,
-        );
-        if failed.len() < 2 {
-            return;
-        }
-        let idxs = crate::dupeprobe::sample_indexes(failed.len(), 10);
-        let samples: Vec<_> = idxs.into_iter().map(|i| failed[i].clone()).collect();
-        crate::dupeprobe::start_recheck_rs(nzb.id, samples);
-    }
-    #[cfg(not(unix))]
-    let _ = (cb, dq_ptr, nzb_ptr);
-}
-
-unsafe fn hc_history_hide(
-    env: &NzbgetRsHistoryCoordEnv,
-    dq_ptr: usize,
-    hist_ptr: usize,
-    rindex: c_int,
-    server_mode: bool,
-    nzb_cleanup_disk: bool,
-) {
-    let Some(cb) = env.action_cb else {
-        return;
-    };
-    let mut ints = [0i32; 3];
-    let mut strs: [*const c_char; 1] = [std::ptr::null()];
-    let nzb_ptr = NzbRef::from_addr(cb(
-        env.ctx,
-        12,
-        0,
-        0,
-        dq_ptr,
-        hist_ptr,
-        std::ptr::null(),
-        std::ptr::null(),
-        ints.as_mut_ptr(),
-        std::ptr::null_mut(),
-        strs.as_mut_ptr(),
-        std::ptr::null_mut(),
-        0,
-    ));
-    let hist_name = hc_cstr_bytes(strs[0]).to_vec();
-    let dup_status = classify_dup_status(
-        MarkStatus::from(ints[0]),
-        DeleteStatus::from(ints[1]),
-        ints[2] != 0,
-    );
-
-    hc_delete_disk_files(env, nzb_ptr, server_mode, nzb_cleanup_disk);
-
-    let mut msg = b"Collection ".to_vec();
-    msg.extend_from_slice(&hist_name);
-    msg.extend_from_slice(b" removed from history");
-    hc_log(env, 2, &msg);
-
-    cb(
-        env.ctx,
-        13,
-        dup_status.into(),
-        rindex,
-        dq_ptr,
-        hist_ptr,
-        std::ptr::null(),
-        std::ptr::null(),
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        0,
-    );
-}
-
-unsafe fn hc_move_to_queue(
-    env: &NzbgetRsHistoryCoordEnv,
-    dq_ptr: usize,
-    hist_ptr: usize,
-    hidx: c_int,
-    nzb_ptr: NzbRef,
-    hist_name: &[u8],
-    reprocess: bool,
-) {
-    let Some(cb) = env.action_cb else {
-        return;
-    };
-    let mut dbg_msg = b"Returning ".to_vec();
-    dbg_msg.extend_from_slice(hist_name);
-    dbg_msg.extend_from_slice(b" from history back to download queue");
-    hc_log(env, 0, &dbg_msg);
-
-    let nicename = hist_name.to_vec();
-
-    let mut ints = [0i32; 8];
-    let mut strs: [*const c_char; 1] = [std::ptr::null()];
-    cb(
-        env.ctx,
-        21,
-        -1,
-        0,
-        0,
-        nzb_ptr.addr(),
-        std::ptr::null(),
-        std::ptr::null(),
-        ints.as_mut_ptr(),
-        std::ptr::null_mut(),
-        strs.as_mut_ptr(),
-        std::ptr::null_mut(),
-        0,
-    );
-    let unpack_cleaned_up_disk = ints[0] != 0;
-    let post_total_sec = ints[1];
-    let unpack_sec = ints[2];
-    let par_sec = ints[3];
-    let move_status = MoveStatus::from(ints[4]);
-    let live_unpack_sec = ints[6];
-    let live_par_sec = ints[7];
-    let file_count = ints[5];
-    let dest_dir = hc_cstr_bytes(strs[0]).to_vec();
-
-    for fidx in 0..file_count {
-        let mut fstrs: [*const c_char; 1] = [std::ptr::null()];
-        cb(
-            env.ctx,
-            21,
-            fidx,
-            0,
-            0,
-            nzb_ptr.addr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            fstrs.as_mut_ptr(),
-            std::ptr::null_mut(),
-            0,
-        );
-        let mut unpark = b"Unparking file ".to_vec();
-        unpark.extend_from_slice(hc_cstr_bytes(fstrs[0]));
-        hc_nzb_msg(env, nzb_ptr, 1, &unpark);
-    }
-
-    let has_main_pars = if !unpack_cleaned_up_disk {
-        #[cfg(unix)]
-        {
-            use std::os::unix::ffi::OsStrExt;
-            let p = std::path::Path::new(std::ffi::OsStr::from_bytes(&dest_dir));
-            crate::parparser::find_main_pars(p, false, |_| {})
+            let q_len = qh.queue_len(dq_ptr);
+            for qidx in 0..q_len {
+                let q = qh.nzb_snap(qh.queue_at(dq_ptr, qidx), false);
+                if crate::dupecoord::same_name_or_key(&q.name, &q.dupe_key, &nzb.name, &nzb.dupe_key)
+                {
+                    return;
+                }
+            }
+            if opts.dupe_check
+                && nzb.dupe_mode == DupeMode::Score
+                && crate::dupecoord::find_dupe_backup_host(
+                    &qh,
+                    &opts,
+                    dq_ptr,
+                    nzb_ptr,
+                    &nzb.name,
+                    &nzb.dupe_key,
+                )
+                .is_some()
+            {
+                return;
+            }
+            let failed = self.host.failed_article_samples(nzb_ptr);
+            if failed.len() < 2 {
+                return;
+            }
+            let idxs = crate::dupeprobe::sample_indexes(failed.len(), 10);
+            let samples: Vec<_> = idxs.into_iter().map(|i| failed[i].clone()).collect();
+            crate::dupeprobe::start_recheck_rs(nzb.id, samples);
         }
         #[cfg(not(unix))]
-        {
-            false
+        let _ = nzb_ptr;
+    }
+
+    /// `AddToHistory` (+ `RecheckFailedArticles`).
+    pub(crate) fn add_to_history(&self, nzb: NzbRef) {
+        let added = self.host.move_to_history(self.dq, nzb);
+        let mut completed_count = added.completed_count;
+        let cleanup = added.par_status == NzbParStatus::Success
+            || added.unpack_status == UnpackStatus::Success
+            || (added.par_status == NzbParStatus::None
+                && added.unpack_status == UnpackStatus::None
+                && (added.failed_size - added.par_failed_size) == 0)
+            || (added.delete_status != DeleteStatus::None && !added.parking)
+            || added.unpack_cleaned_up;
+        if cleanup {
+            self.host.discard_disk_files(nzb, false);
+            completed_count = 0;
         }
-    } else {
-        false
-    };
 
-    let (new_post_total_sec, new_move_status) = calc_move_to_queue_reset(
-        unpack_cleaned_up_disk,
-        post_total_sec,
-        unpack_sec,
-        live_unpack_sec,
-        has_main_pars,
-        par_sec,
-        live_par_sec,
-        move_status,
-    );
-    let mut apply_ints = [
-        c_int::from(has_main_pars),
-        new_post_total_sec,
-        new_move_status.into(),
-    ];
-    cb(
-        env.ctx,
-        22,
-        hidx,
-        c_int::from(reprocess),
-        dq_ptr,
-        hist_ptr,
-        std::ptr::null(),
-        std::ptr::null(),
-        apply_ints.as_mut_ptr(),
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        0,
-    );
+        let mut parked_count = 0i32;
+        for cidx in 0..completed_count {
+            let cf = self.host.completed_file(nzb, cidx).unwrap_or_default();
+            let is_last = cidx + 1 == completed_count;
+            if should_park_completed_file(cf.status, 0, 2, is_last) {
+                let mut pm = b"Parking file ".to_vec();
+                pm.extend_from_slice(&cf.filename);
+                self.nzb_msg(nzb, HcLevel::Detail, &pm);
+                parked_count += 1;
+            }
+        }
 
-    let mut ret_msg = nicename.clone();
-    ret_msg.extend_from_slice(b" returned from history back to download queue");
-    hc_nzb_msg(env, nzb_ptr, 2, &ret_msg);
+        self.host.finish_add_to_history(nzb, parked_count);
 
-    if reprocess {
-        let mut rst_msg = b"Restarting postprocessing for ".to_vec();
-        rst_msg.extend_from_slice(&nicename);
-        hc_log(env, 0, &rst_msg);
-        cb(
-            env.ctx,
-            23,
-            0,
-            0,
-            dq_ptr,
-            nzb_ptr.addr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            0,
+        let mut msg = b"Collection ".to_vec();
+        msg.extend_from_slice(&added.name);
+        msg.extend_from_slice(b" added to history");
+        self.nzb_msg(nzb, HcLevel::Info, &msg);
+
+        self.recheck_failed_articles(nzb);
+
+        self.host.forget_par_damage(nzb);
+    }
+
+    /// `HistoryHide`.
+    pub(crate) fn history_hide(
+        &self,
+        hist_ptr: usize,
+        rindex: c_int,
+        server_mode: bool,
+        nzb_cleanup_disk: bool,
+    ) {
+        let info = self.host.hide_info(hist_ptr);
+        let dup_status = classify_dup_status(info.mark_status, info.delete_status, info.is_dupe_success);
+
+        self.delete_disk_files(info.nzb, server_mode, nzb_cleanup_disk);
+
+        let mut msg = b"Collection ".to_vec();
+        msg.extend_from_slice(&info.name);
+        msg.extend_from_slice(b" removed from history");
+        self.log(HcLevel::Info, &msg);
+
+        self.host.replace_with_dup(self.dq, hist_ptr, rindex, dup_status);
+    }
+
+    /// `ServiceWork`: hides or removes the records older than the history keep time.
+    pub(crate) fn service_work(
+        &self,
+        keep_history: c_int,
+        dupe_check: bool,
+        server_mode: bool,
+        nzb_cleanup_disk: bool,
+        cur_time: i64,
+    ) {
+        let min_time = calc_min_time(cur_time, keep_history);
+        let mut changed = false;
+        let mut rindex = 0i32;
+
+        while let Some(entry) = self.host.history_entry_from_end(self.dq, rindex) {
+            let act =
+                classify_service_work_item(entry.kind, 3, 1, entry.time, min_time, dupe_check);
+            if act != 0 {
+                if act == 1 {
+                    self.history_hide(entry.hist_ptr, rindex, server_mode, nzb_cleanup_disk);
+                    rindex += 1;
+                } else {
+                    if act == 2 {
+                        self.delete_disk_files(entry.nzb, server_mode, nzb_cleanup_disk);
+                    }
+                    let mut rm = b"Collection ".to_vec();
+                    rm.extend_from_slice(&entry.name);
+                    rm.extend_from_slice(b" removed from history");
+                    self.log(HcLevel::Info, &rm);
+                    self.host.erase_history(self.dq, rindex, true);
+                }
+                changed = true;
+            } else {
+                rindex += 1;
+            }
+        }
+
+        if changed {
+            self.host.save_history(self.dq);
+        }
+    }
+
+    fn move_to_queue(
+        &self,
+        hist_ptr: usize,
+        hidx: c_int,
+        nzb_ptr: NzbRef,
+        hist_name: &[u8],
+        reprocess: bool,
+    ) {
+        let mut dbg_msg = b"Returning ".to_vec();
+        dbg_msg.extend_from_slice(hist_name);
+        dbg_msg.extend_from_slice(b" from history back to download queue");
+        self.log(HcLevel::Debug, &dbg_msg);
+
+        let nicename = hist_name.to_vec();
+
+        let info = self.host.requeue_info(nzb_ptr);
+        for fidx in 0..info.file_count {
+            let mut unpark = b"Unparking file ".to_vec();
+            unpark.extend_from_slice(&self.host.file_name_at(nzb_ptr, fidx));
+            self.nzb_msg(nzb_ptr, HcLevel::Detail, &unpark);
+        }
+
+        let has_main_pars = if !info.unpack_cleaned_up_disk {
+            #[cfg(unix)]
+            {
+                use std::os::unix::ffi::OsStrExt;
+                let p = std::path::Path::new(std::ffi::OsStr::from_bytes(&info.dest_dir));
+                crate::parparser::find_main_pars(p, false, |_| {})
+            }
+            #[cfg(not(unix))]
+            {
+                false
+            }
+        } else {
+            false
+        };
+
+        let (new_post_total_sec, new_move_status) = calc_move_to_queue_reset(
+            info.unpack_cleaned_up_disk,
+            info.post_total_sec,
+            info.unpack_sec,
+            info.live_unpack_sec,
+            has_main_pars,
+            info.par_sec,
+            info.live_par_sec,
+            info.move_status,
         );
+        self.host.return_to_queue(
+            self.dq,
+            hist_ptr,
+            hidx,
+            reprocess,
+            has_main_pars,
+            new_post_total_sec,
+            new_move_status,
+        );
+
+        let mut ret_msg = nicename.clone();
+        ret_msg.extend_from_slice(b" returned from history back to download queue");
+        self.nzb_msg(nzb_ptr, HcLevel::Info, &ret_msg);
+
+        if reprocess {
+            let mut rst_msg = b"Restarting postprocessing for ".to_vec();
+            rst_msg.extend_from_slice(&nicename);
+            self.log(HcLevel::Debug, &rst_msg);
+            self.host.notify_returned(self.dq, nzb_ptr, false);
+            #[cfg(unix)]
+            {
+                crate::feed::notify_active_feed_queue_aspect(4, None);
+                crate::urlcoord::notify_active_urlcoord_queue_update(4);
+            }
+        }
+    }
+
+    /// `Redownload`: downloads the record `hist_ptr` again.
+    pub(crate) fn redownload(&self, hist_ptr: usize) {
+        if let Some(found) = self.host.find_history(self.dq, HistoryKey::Ptr(hist_ptr)) {
+            self.history_redownload(
+                found.hist_ptr,
+                found.idx,
+                found.kind,
+                found.nzb,
+                &found.name,
+                true,
+            );
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn history_redownload(
+        &self,
+        hist_ptr: usize,
+        hidx: c_int,
+        kind: c_int,
+        nzb_ptr: NzbRef,
+        hist_name: &[u8],
+        restore_pause_state: bool,
+    ) {
+        if kind == 2 {
+            self.host.return_url_to_queue(self.dq, hist_ptr, hidx);
+            #[cfg(unix)]
+            {
+                crate::feed::notify_active_feed_queue_aspect(12, None);
+                crate::urlcoord::notify_active_urlcoord_queue_update(12);
+            }
+            return;
+        }
+        if kind != 1 {
+            let mut em = b"Could not download again ".to_vec();
+            em.extend_from_slice(hist_name);
+            em.extend_from_slice(b": history item has wrong type");
+            self.log(HcLevel::Error, &em);
+            return;
+        }
+
+        let names = self.host.nzb_names(nzb_ptr);
+        let paused = restore_pause_state && names.delete_paused;
+        let nzb_name = names.name;
+        let queued_fn = names.queued_filename;
+        let old_dest_dir = names.dest_dir;
+
+        if !crate::fsops::file_exists(&queued_fn, &crate::fsops::posix_stat) {
+            let mut em = b"Could not download again ".to_vec();
+            em.extend_from_slice(&nzb_name);
+            em.extend_from_slice(b": could not find source nzb-file ");
+            em.extend_from_slice(&queued_fn);
+            self.log(HcLevel::Error, &em);
+            return;
+        }
+
+        let Some(new_nzb) = self.host.parse_nzb(&queued_fn) else {
+            let mut em = b"Could not download again ".to_vec();
+            em.extend_from_slice(&nzb_name);
+            em.extend_from_slice(b": could not parse nzb-file");
+            self.log(HcLevel::Error, &em);
+            return;
+        };
+
+        let mut info_m = b"Downloading again ".to_vec();
+        info_m.extend_from_slice(&nzb_name);
+        self.log(HcLevel::Info, &info_m);
+
+        self.delete_dest_dir_if_present(&old_dest_dir, HcLevel::Detail);
+
+        let new_dest_dir = self.host.build_dest_dir(nzb_ptr);
+        self.delete_dest_dir_if_present(&new_dest_dir, HcLevel::Detail);
+
+        self.host.reset_for_redownload(nzb_ptr, new_nzb, paused);
+
+        self.move_to_queue(hist_ptr, hidx, nzb_ptr, hist_name, false);
+
+        self.host.notify_returned(self.dq, nzb_ptr, true);
         #[cfg(unix)]
         {
             crate::feed::notify_active_feed_queue_aspect(4, None);
             crate::urlcoord::notify_active_urlcoord_queue_update(4);
         }
     }
-}
 
-unsafe fn hc_history_redownload(
-    env: &NzbgetRsHistoryCoordEnv,
-    dq_ptr: usize,
-    hist_ptr: usize,
-    hidx: c_int,
-    kind: c_int,
-    nzb_ptr: NzbRef,
-    hist_name: &[u8],
-    restore_pause_state: bool,
-) {
-    let Some(cb) = env.action_cb else {
-        return;
-    };
-    if kind == 2 {
-        cb(
-            env.ctx,
-            25,
-            hidx,
-            0,
-            dq_ptr,
-            hist_ptr,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            0,
-        );
-        #[cfg(unix)]
-        {
-            crate::feed::notify_active_feed_queue_aspect(12, None);
-            crate::urlcoord::notify_active_urlcoord_queue_update(12);
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn history_retry(
+        &self,
+        hist_ptr: usize,
+        hidx: c_int,
+        kind: c_int,
+        nzb_ptr: NzbRef,
+        hist_name: &[u8],
+        reset_failed: bool,
+        reprocess: bool,
+        pause_extra_pars: bool,
+    ) {
+        let (wrong_type, missing_dir, start_msg) = retry_action_labels(reset_failed, reprocess);
+        if kind != 1 {
+            let mut em = b"Could not ".to_vec();
+            em.extend_from_slice(&wrong_type[..wrong_type.len() - 1]);
+            em.extend_from_slice(b" for ");
+            em.extend_from_slice(hist_name);
+            em.extend_from_slice(b": history item has wrong type");
+            self.log(HcLevel::Error, &em);
+            return;
         }
-        return;
-    }
-    if kind != 1 {
-        let mut em = b"Could not download again ".to_vec();
-        em.extend_from_slice(hist_name);
-        em.extend_from_slice(b": history item has wrong type");
-        hc_log(env, 4, &em);
-        return;
-    }
 
-    let mut ints = [0i32; 2];
-    let mut strs: [*const c_char; 3] = [std::ptr::null(); 3];
-    cb(
-        env.ctx,
-        26,
-        0,
-        0,
-        0,
-        nzb_ptr.addr(),
-        std::ptr::null(),
-        std::ptr::null(),
-        ints.as_mut_ptr(),
-        std::ptr::null_mut(),
-        strs.as_mut_ptr(),
-        std::ptr::null_mut(),
-        0,
-    );
-    let paused = restore_pause_state && ints[0] != 0;
-    let nzb_name = hc_cstr_bytes(strs[0]).to_vec();
-    let queued_fn = hc_cstr_bytes(strs[1]).to_vec();
-    let old_dest_dir = hc_cstr_bytes(strs[2]).to_vec();
+        let names = self.host.nzb_names(nzb_ptr);
+        let nzb_name = names.name;
+        let dest_dir = names.dest_dir;
 
-    let qf_c = hc_cbuf(&queued_fn);
-    if !crate::fsops::file_exists(&queued_fn, &crate::fsops::posix_stat) {
-        let mut em = b"Could not download again ".to_vec();
-        em.extend_from_slice(&nzb_name);
-        em.extend_from_slice(b": could not find source nzb-file ");
-        em.extend_from_slice(&queued_fn);
-        hc_log(env, 4, &em);
-        return;
-    }
-
-    let new_nzb_ptr = cb(
-        env.ctx,
-        27,
-        0,
-        0,
-        0,
-        0,
-        qf_c.as_ptr() as *const c_char,
-        std::ptr::null(),
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        0,
-    );
-    if new_nzb_ptr == 0 {
-        let mut em = b"Could not download again ".to_vec();
-        em.extend_from_slice(&nzb_name);
-        em.extend_from_slice(b": could not parse nzb-file");
-        hc_log(env, 4, &em);
-        return;
-    }
-
-    let mut info_m = b"Downloading again ".to_vec();
-    info_m.extend_from_slice(&nzb_name);
-    hc_log(env, 2, &info_m);
-
-    let sep = env.a5 as u8;
-    hc_delete_dest_dir_if_present(env, &old_dest_dir, sep, 1);
-
-    let mut dstrs: [*const c_char; 1] = [std::ptr::null()];
-    cb(
-        env.ctx,
-        24,
-        0,
-        0,
-        0,
-        nzb_ptr.addr(),
-        std::ptr::null(),
-        std::ptr::null(),
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        dstrs.as_mut_ptr(),
-        std::ptr::null_mut(),
-        0,
-    );
-    let new_dest_dir = hc_cstr_bytes(dstrs[0]).to_vec();
-    hc_delete_dest_dir_if_present(env, &new_dest_dir, sep, 1);
-
-    cb(
-        env.ctx,
-        28,
-        c_int::from(paused),
-        0,
-        new_nzb_ptr,
-        nzb_ptr.addr(),
-        std::ptr::null(),
-        std::ptr::null(),
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        0,
-    );
-
-    hc_move_to_queue(env, dq_ptr, hist_ptr, hidx, nzb_ptr, hist_name, false);
-
-    cb(
-        env.ctx,
-        23,
-        1,
-        0,
-        dq_ptr,
-        nzb_ptr.addr(),
-        std::ptr::null(),
-        std::ptr::null(),
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        0,
-    );
-    #[cfg(unix)]
-    {
-        crate::feed::notify_active_feed_queue_aspect(4, None);
-        crate::urlcoord::notify_active_urlcoord_queue_update(4);
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-unsafe fn hc_history_retry(
-    env: &NzbgetRsHistoryCoordEnv,
-    dq_ptr: usize,
-    hist_ptr: usize,
-    hidx: c_int,
-    kind: c_int,
-    nzb_ptr: NzbRef,
-    hist_name: &[u8],
-    reset_failed: bool,
-    reprocess: bool,
-) {
-    let Some(cb) = env.action_cb else {
-        return;
-    };
-    let (wrong_type, missing_dir, start_msg) = retry_action_labels(reset_failed, reprocess);
-    if kind != 1 {
-        let mut em = b"Could not ".to_vec();
-        em.extend_from_slice(&wrong_type[..wrong_type.len() - 1]);
-        em.extend_from_slice(b" for ");
-        em.extend_from_slice(hist_name);
-        em.extend_from_slice(b": history item has wrong type");
-        hc_log(env, 4, &em);
-        return;
-    }
-
-    let mut ints = [0i32; 2];
-    let mut strs: [*const c_char; 3] = [std::ptr::null(); 3];
-    cb(
-        env.ctx,
-        26,
-        0,
-        0,
-        0,
-        nzb_ptr.addr(),
-        std::ptr::null(),
-        std::ptr::null(),
-        ints.as_mut_ptr(),
-        std::ptr::null_mut(),
-        strs.as_mut_ptr(),
-        std::ptr::null_mut(),
-        0,
-    );
-    let nzb_name = hc_cstr_bytes(strs[0]).to_vec();
-    let dest_dir = hc_cstr_bytes(strs[2]).to_vec();
-
-    if !crate::fsops::directory_exists(&dest_dir, &crate::fsops::posix_stat) {
-        let mut em = b"Could not ".to_vec();
-        em.extend_from_slice(&missing_dir[..missing_dir.len() - 1]);
-        em.push(b' ');
-        em.extend_from_slice(hist_name);
-        em.extend_from_slice(b": destination directory ");
-        em.extend_from_slice(&dest_dir);
-        em.extend_from_slice(b" doesn't exist");
-        hc_log(env, 4, &em);
-        return;
-    }
-
-    let mut sm = start_msg[..start_msg.len() - 1].to_vec();
-    sm.push(b' ');
-    sm.extend_from_slice(&nzb_name);
-    hc_nzb_msg(env, nzb_ptr, 2, &sm);
-
-    let sep = env.a5 as u8;
-    let mut requeued: Vec<c_int> = Vec::new();
-    let mut cidx = 0i32;
-
-    loop {
-        let mut cf_ints = [0i32; 2];
-        let mut cf_strs: [*const c_char; 1] = [std::ptr::null()];
-        let exists = cb(
-            env.ctx,
-            3,
-            cidx,
-            0,
-            0,
-            nzb_ptr.addr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            cf_ints.as_mut_ptr(),
-            std::ptr::null_mut(),
-            cf_strs.as_mut_ptr(),
-            std::ptr::null_mut(),
-            0,
-        );
-        if exists == 0 {
-            break;
+        if !crate::fsops::directory_exists(&dest_dir, &crate::fsops::posix_stat) {
+            let mut em = b"Could not ".to_vec();
+            em.extend_from_slice(&missing_dir[..missing_dir.len() - 1]);
+            em.push(b' ');
+            em.extend_from_slice(hist_name);
+            em.extend_from_slice(b": destination directory ");
+            em.extend_from_slice(&dest_dir);
+            em.extend_from_slice(b" doesn't exist");
+            self.log(HcLevel::Error, &em);
+            return;
         }
-        let cf_status = cf_ints[0];
-        let cf_id = cf_ints[1];
-        let recorded_name = hc_cstr_bytes(cf_strs[0]).to_vec();
 
-        if cf_status != 1 && (cf_status != 3 || reset_failed) && cf_id > 0 {
-            let mut f_ints = [0i32; 12];
-            let mut f_i64s = [0i64; 9];
-            let mut f_strs: [*const c_char; 1] = [std::ptr::null()];
-            let file_ptr = cb(
-                env.ctx,
-                30,
-                cf_id,
-                cf_status,
-                0,
-                nzb_ptr.addr(),
-                std::ptr::null(),
-                std::ptr::null(),
-                f_ints.as_mut_ptr(),
-                f_i64s.as_mut_ptr(),
-                f_strs.as_mut_ptr(),
-                std::ptr::null_mut(),
-                0,
-            );
-            if file_ptr != 0 {
-                let state_loaded = f_ints[0] != 0;
-                let success_articles = f_ints[1];
-                let cur_partial_state = f_ints[2];
-                let article_count = f_ints[3].max(0) as usize;
-                let is_par_file = f_ints[4] != 0;
-                let total_articles = f_ints[5];
-                let missed_articles = f_ints[6];
-                let mut file_failed_articles = f_ints[7];
-                let mut file_completed_articles = f_ints[8];
-                let mut file_success_articles = f_ints[9];
-                let mut nzb_failed_articles = f_ints[10];
-                let mut nzb_success_articles = f_ints[11];
+        let mut sm = start_msg[..start_msg.len() - 1].to_vec();
+        sm.push(b' ');
+        sm.extend_from_slice(&nzb_name);
+        self.nzb_msg(nzb_ptr, HcLevel::Info, &sm);
 
-                let file_size = f_i64s[0];
-                let file_missed_size = f_i64s[1];
-                let mut file_failed_size = f_i64s[2];
-                let mut file_remaining_size = f_i64s[3];
-                let mut file_success_size = f_i64s[4];
-                let mut nzb_failed_size = f_i64s[5];
-                let mut nzb_success_size = f_i64s[6];
-                let mut nzb_par_failed_size = f_i64s[7];
-                let mut nzb_par_success_size = f_i64s[8];
+        let mut requeued: Vec<c_int> = Vec::new();
+        let mut cidx = 0i32;
 
-                let cur_filename = hc_cstr_bytes(f_strs[0]).to_vec();
+        while let Some(cf) = self.host.completed_file(nzb_ptr, cidx) {
+            let cf_status = cf.status;
+            let cf_id = cf.id;
+            let recorded_name = cf.filename;
 
-                if eval_requeue_loaded_file(
-                    cf_status,
-                    0,
-                    3,
-                    2,
-                    reset_failed,
-                    state_loaded,
-                    file_remaining_size,
-                ) {
-                    let mut st_sz = vec![0i32; article_count * 2];
-                    if article_count > 0 {
-                        cb(
-                            env.ctx,
-                            32,
-                            0,
-                            0,
-                            0,
-                            file_ptr,
-                            std::ptr::null(),
-                            std::ptr::null(),
-                            st_sz.as_mut_ptr(),
-                            std::ptr::null_mut(),
-                            std::ptr::null_mut(),
-                            std::ptr::null_mut(),
-                            article_count,
-                        );
-                    }
-                    let (statuses_slice, sizes_slice) = st_sz.split_at_mut(article_count);
+            if cf_status != 1 && (cf_status != 3 || reset_failed) && cf_id > 0 {
+                if let Some(rf) = self.host.load_file_for_retry(nzb_ptr, cf_id, cf_status) {
+                    let file = rf.file;
+                    let article_count = rf.article_count;
+                    let mut file_failed_articles = rf.failed_articles;
+                    let mut file_completed_articles = rf.completed_articles;
+                    let mut file_success_articles = rf.success_articles;
+                    let mut nzb_failed_articles = rf.nzb_failed_articles;
+                    let mut nzb_success_articles = rf.nzb_success_articles;
+                    let mut file_failed_size = rf.failed_size;
+                    let mut file_remaining_size = rf.remaining_size;
+                    let mut file_success_size = rf.success_size;
+                    let mut nzb_failed_size = rf.nzb_failed_size;
+                    let mut nzb_success_size = rf.nzb_success_size;
+                    let mut nzb_par_failed_size = rf.nzb_par_failed_size;
+                    let mut nzb_par_success_size = rf.nzb_par_success_size;
+                    let cur_filename = rf.filename;
 
-                    let prep = prepare_requeued_loaded_file(
-                        &dest_dir,
-                        sep,
-                        &recorded_name,
-                        &cur_filename,
-                        success_articles,
-                        cur_partial_state,
+                    if eval_requeue_loaded_file(
+                        cf_status,
                         0,
+                        3,
                         2,
-                        reprocess,
                         reset_failed,
-                        statuses_slice,
-                        ARTICLE_UNDEFINED,
-                        ARTICLE_FAILED,
-                        |p| {
-                            let pc = hc_cbuf(p);
-                            crate::fsops::file_size(hc_bytes_as_cstr(&pc))
-                        },
-                        |p| {
-                            let pc = hc_cbuf(p);
-                            crate::fsops::delete_file(hc_bytes_as_cstr(&pc));
-                        },
-                        |p| crate::fsops::file_exists(p, &crate::fsops::posix_stat),
-                    );
+                        rf.state_loaded,
+                        file_remaining_size,
+                    ) {
+                        let mut statuses = vec![0i32; article_count];
+                        let mut sizes = vec![0i32; article_count];
+                        if article_count > 0 {
+                            self.host.article_states(file, &mut statuses, &mut sizes);
+                        }
 
-                    let effective_filename = if prep.set_recorded_filename {
-                        let rec_c = hc_cbuf(&recorded_name);
-                        cb(
-                            env.ctx,
-                            31,
-                            1,
+                        let prep = prepare_requeued_loaded_file(
+                            &dest_dir,
+                            HC_PATH_SEP,
+                            &recorded_name,
+                            &cur_filename,
+                            rf.success_articles,
+                            rf.partial_state,
                             0,
-                            0,
-                            file_ptr,
-                            rec_c.as_ptr() as *const c_char,
-                            std::ptr::null(),
-                            std::ptr::null_mut(),
-                            std::ptr::null_mut(),
-                            std::ptr::null_mut(),
-                            std::ptr::null_mut(),
-                            0,
+                            2,
+                            reprocess,
+                            reset_failed,
+                            &statuses,
+                            ARTICLE_UNDEFINED,
+                            ARTICLE_FAILED,
+                            |p| {
+                                let pc = hc_cbuf(p);
+                                crate::fsops::file_size(hc_bytes_as_cstr(&pc))
+                            },
+                            |p| {
+                                let pc = hc_cbuf(p);
+                                crate::fsops::delete_file(hc_bytes_as_cstr(&pc));
+                            },
+                            |p| crate::fsops::file_exists(p, &crate::fsops::posix_stat),
                         );
-                        recorded_name.clone()
-                    } else {
-                        cur_filename
-                    };
 
-                    if prep.warn_missing_on_disk {
-                        let mut wm = b"File ".to_vec();
-                        wm.extend_from_slice(&effective_filename);
-                        wm.extend_from_slice(b" could not be found on disk, downloading again");
-                        hc_nzb_msg(env, nzb_ptr, 3, &wm);
-                    }
+                        let effective_filename = if prep.set_recorded_filename {
+                            self.host.rename_file(file, &recorded_name);
+                            recorded_name.clone()
+                        } else {
+                            cur_filename
+                        };
 
-                    if prep.no_retryable_articles {
-                        cb(
-                            env.ctx,
-                            31,
-                            0,
-                            0,
-                            0,
-                            file_ptr,
-                            std::ptr::null(),
-                            std::ptr::null(),
-                            std::ptr::null_mut(),
-                            std::ptr::null_mut(),
-                            std::ptr::null_mut(),
-                            std::ptr::null_mut(),
-                            0,
+                        if prep.warn_missing_on_disk {
+                            let mut wm = b"File ".to_vec();
+                            wm.extend_from_slice(&effective_filename);
+                            wm.extend_from_slice(b" could not be found on disk, downloading again");
+                            self.nzb_msg(nzb_ptr, HcLevel::Warning, &wm);
+                        }
+
+                        if prep.no_retryable_articles {
+                            self.host.delete_file_info(file);
+                            cidx += 1;
+                            continue;
+                        }
+
+                        let mut reset_flags = vec![0u8; article_count];
+                        reset_articles_batch(
+                            cf_status == 3,
+                            reset_failed,
+                            rf.par_file,
+                            prep.new_partial_state,
+                            rf.size,
+                            rf.missed_size,
+                            rf.total_articles,
+                            rf.missed_articles,
+                            &mut file_failed_size,
+                            &mut file_failed_articles,
+                            &mut file_remaining_size,
+                            &mut file_completed_articles,
+                            &mut file_success_size,
+                            &mut file_success_articles,
+                            &mut nzb_failed_size,
+                            &mut nzb_success_size,
+                            &mut nzb_failed_articles,
+                            &mut nzb_success_articles,
+                            &mut nzb_par_failed_size,
+                            &mut nzb_par_success_size,
+                            &mut statuses,
+                            &sizes,
+                            &mut reset_flags,
                         );
-                        cidx += 1;
+
+                        let counts = RequeueCounts {
+                            file_failed_articles,
+                            file_completed_articles,
+                            file_success_articles,
+                            nzb_failed_articles,
+                            nzb_success_articles,
+                            file_failed_size,
+                            file_remaining_size,
+                            file_success_size,
+                            nzb_failed_size,
+                            nzb_success_size,
+                            nzb_par_failed_size,
+                            nzb_par_success_size,
+                        };
+                        let req_id = self.host.requeue_file(
+                            nzb_ptr,
+                            file,
+                            cidx,
+                            prep.new_partial_state,
+                            &counts,
+                            &reset_flags,
+                        );
+                        requeued.push(req_id);
                         continue;
                     }
 
-                    let mut reset_flags = vec![0u8; article_count];
-                    reset_articles_batch(
-                        cf_status == 3,
-                        reset_failed,
-                        is_par_file,
-                        prep.new_partial_state,
-                        file_size,
-                        file_missed_size,
-                        total_articles,
-                        missed_articles,
-                        &mut file_failed_size,
-                        &mut file_failed_articles,
-                        &mut file_remaining_size,
-                        &mut file_completed_articles,
-                        &mut file_success_size,
-                        &mut file_success_articles,
-                        &mut nzb_failed_size,
-                        &mut nzb_success_size,
-                        &mut nzb_failed_articles,
-                        &mut nzb_success_articles,
-                        &mut nzb_par_failed_size,
-                        &mut nzb_par_success_size,
-                        statuses_slice,
-                        sizes_slice,
-                        &mut reset_flags,
-                    );
-
-                    let mut out_ints = [
-                        file_failed_articles,
-                        file_completed_articles,
-                        file_success_articles,
-                        nzb_failed_articles,
-                        nzb_success_articles,
-                    ];
-                    let mut out_i64s = [
-                        file_failed_size,
-                        file_remaining_size,
-                        file_success_size,
-                        nzb_failed_size,
-                        nzb_success_size,
-                        nzb_par_failed_size,
-                        nzb_par_success_size,
-                    ];
-                    let req_id = cb(
-                        env.ctx,
-                        33,
-                        cidx,
-                        prep.new_partial_state,
-                        file_ptr,
-                        nzb_ptr.addr(),
-                        std::ptr::null(),
-                        std::ptr::null(),
-                        out_ints.as_mut_ptr(),
-                        out_i64s.as_mut_ptr(),
-                        std::ptr::null_mut(),
-                        reset_flags.as_mut_ptr(),
-                        article_count,
-                    ) as c_int;
-                    requeued.push(req_id);
-                    continue;
+                    self.host.delete_file_info(file);
                 }
-
-                cb(
-                    env.ctx,
-                    31,
-                    0,
-                    0,
-                    0,
-                    file_ptr,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    0,
-                );
             }
+            cidx += 1;
         }
-        cidx += 1;
+
+        let (is_completed, nzb_id) =
+            self.host
+                .finish_retry(nzb_ptr, &requeued, !reset_failed && !reprocess);
+
+        self.move_to_queue(hist_ptr, hidx, nzb_ptr, hist_name, reprocess || is_completed);
+
+        if pause_extra_pars {
+            self.host.pause_extra_pars(self.dq, nzb_id);
+        }
     }
 
-    let mut fin_i64s = [0i64; 2];
-    cb(
-        env.ctx,
-        34,
-        c_int::from(!reset_failed && !reprocess),
-        0,
-        0,
-        nzb_ptr.addr(),
-        std::ptr::null(),
-        std::ptr::null(),
-        requeued.as_mut_ptr(),
-        fin_i64s.as_mut_ptr(),
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        requeued.len(),
-    );
-    let is_completed = fin_i64s[0] != 0;
-    let nzb_id = fin_i64s[1] as c_int;
+    fn set_parameter(
+        &self,
+        hist_ptr: usize,
+        kind: c_int,
+        nzb_ptr: NzbRef,
+        hist_name: &[u8],
+        text: Option<&[u8]>,
+    ) -> bool {
+        let text_bytes = text.unwrap_or_default();
+        let mut dm = b"Setting post-process-parameter '".to_vec();
+        dm.extend_from_slice(text_bytes);
+        dm.extend_from_slice(b"' for '");
+        dm.extend_from_slice(hist_name);
+        dm.push(b'\'');
+        self.log(HcLevel::Debug, &dm);
 
-    hc_move_to_queue(
-        env,
-        dq_ptr,
-        hist_ptr,
-        hidx,
-        nzb_ptr,
-        hist_name,
-        reprocess || is_completed,
-    );
+        if kind != 1 && kind != 2 {
+            let mut em = b"Could not set post-process-parameter for ".to_vec();
+            em.extend_from_slice(hist_name);
+            em.extend_from_slice(b": history item has wrong type");
+            self.log(HcLevel::Error, &em);
+            return false;
+        }
 
-    if env.a6 != 0 {
-        cb(
-            env.ctx,
-            35,
-            nzb_id,
-            0,
-            dq_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            0,
-        );
-    }
-}
-
-unsafe fn hc_set_parameter(
-    env: &NzbgetRsHistoryCoordEnv,
-    hist_ptr: usize,
-    kind: c_int,
-    nzb_ptr: NzbRef,
-    hist_name: &[u8],
-    text_ptr: *const c_char,
-) -> bool {
-    let Some(cb) = env.action_cb else {
-        return false;
-    };
-    let text = hc_cstr_bytes(text_ptr);
-    let mut dm = b"Setting post-process-parameter '".to_vec();
-    dm.extend_from_slice(text);
-    dm.extend_from_slice(b"' for '");
-    dm.extend_from_slice(hist_name);
-    dm.push(b'\'');
-    hc_log(env, 0, &dm);
-
-    if kind != 1 && kind != 2 {
-        let mut em = b"Could not set post-process-parameter for ".to_vec();
-        em.extend_from_slice(hist_name);
-        em.extend_from_slice(b": history item has wrong type");
-        hc_log(env, 4, &em);
-        return false;
-    }
-
-    if !text_ptr.is_null() {
-        if let Some((name, val)) = split_param_assignment(text) {
-            let k_c = hc_cbuf(name);
-            let v_c = hc_cbuf(val);
-            cb(
-                env.ctx,
-                36,
-                0,
-                0,
-                0,
-                hist_ptr,
-                k_c.as_ptr() as *const c_char,
-                v_c.as_ptr() as *const c_char,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                0,
-            );
+        if let Some((name, val)) = text.and_then(split_param_assignment) {
+            self.host.edit_history(hist_ptr, HistEdit::Param { name, value: val });
             return true;
         }
+
+        let names = self.host.nzb_names(nzb_ptr);
+        let mut em = b"Could not set post-process-parameter for ".to_vec();
+        em.extend_from_slice(&names.name);
+        em.extend_from_slice(b": invalid argument: ");
+        em.extend_from_slice(text_bytes);
+        self.log(HcLevel::Error, &em);
+        true
     }
 
-    let mut strs: [*const c_char; 3] = [std::ptr::null(); 3];
-    let mut ints = [0i32; 2];
-    cb(
-        env.ctx,
-        26,
-        0,
-        0,
-        0,
-        nzb_ptr.addr(),
-        std::ptr::null(),
-        std::ptr::null(),
-        ints.as_mut_ptr(),
-        std::ptr::null_mut(),
-        strs.as_mut_ptr(),
-        std::ptr::null_mut(),
-        0,
-    );
-    let mut em = b"Could not set post-process-parameter for ".to_vec();
-    em.extend_from_slice(hc_cstr_bytes(strs[0]));
-    em.extend_from_slice(b": invalid argument: ");
-    em.extend_from_slice(text);
-    hc_log(env, 4, &em);
-    true
-}
+    fn set_category(&self, hist_ptr: usize, kind: c_int, hist_name: &[u8], text: &[u8]) -> bool {
+        let mut dm = b"Setting category '".to_vec();
+        dm.extend_from_slice(text);
+        dm.extend_from_slice(b"' for '");
+        dm.extend_from_slice(hist_name);
+        dm.push(b'\'');
+        self.log(HcLevel::Debug, &dm);
 
-unsafe fn hc_set_category(
-    env: &NzbgetRsHistoryCoordEnv,
-    hist_ptr: usize,
-    kind: c_int,
-    hist_name: &[u8],
-    text_ptr: *const c_char,
-) -> bool {
-    let Some(cb) = env.action_cb else {
-        return false;
-    };
-    let text = hc_cstr_bytes(text_ptr);
-    let mut dm = b"Setting category '".to_vec();
-    dm.extend_from_slice(text);
-    dm.extend_from_slice(b"' for '");
-    dm.extend_from_slice(hist_name);
-    dm.push(b'\'');
-    hc_log(env, 0, &dm);
-
-    if kind != 1 && kind != 2 {
-        let mut em = b"Could not set category for ".to_vec();
-        em.extend_from_slice(hist_name);
-        em.extend_from_slice(b": history item has wrong type");
-        hc_log(env, 4, &em);
-        return false;
-    }
-
-    let t_c = hc_cbuf(text);
-    cb(
-        env.ctx,
-        36,
-        1,
-        0,
-        0,
-        hist_ptr,
-        t_c.as_ptr() as *const c_char,
-        std::ptr::null(),
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        0,
-    );
-    true
-}
-
-unsafe fn hc_set_name(
-    env: &NzbgetRsHistoryCoordEnv,
-    hist_ptr: usize,
-    hist_name: &[u8],
-    text_ptr: *const c_char,
-) -> bool {
-    let Some(cb) = env.action_cb else {
-        return false;
-    };
-    let text = hc_cstr_bytes(text_ptr);
-    let mut dm = b"Setting name '".to_vec();
-    dm.extend_from_slice(text);
-    dm.extend_from_slice(b"' for '");
-    dm.extend_from_slice(hist_name);
-    dm.push(b'\'');
-    hc_log(env, 0, &dm);
-
-    if text.is_empty() {
-        let mut em = b"Could not rename ".to_vec();
-        em.extend_from_slice(hist_name);
-        em.extend_from_slice(b". The new name cannot be empty");
-        hc_log(env, 4, &em);
-        return false;
-    }
-
-    let t_c = hc_cbuf(text);
-    let changed_id = cb(
-        env.ctx,
-        36,
-        2,
-        0,
-        0,
-        hist_ptr,
-        t_c.as_ptr() as *const c_char,
-        std::ptr::null(),
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        0,
-    );
-    #[cfg(unix)]
-    if changed_id != 0 {
-        crate::dupesearch_coord::notify_active_dupesearch_name_changed(changed_id as i32);
-    }
-    true
-}
-
-unsafe fn hc_set_dupe_param(
-    env: &NzbgetRsHistoryCoordEnv,
-    hist_ptr: usize,
-    kind: c_int,
-    delete_status: DeleteStatus,
-    hist_name: &[u8],
-    action: c_int,
-    text_ptr: *const c_char,
-) {
-    let Some(cb) = env.action_cb else {
-        return;
-    };
-    let text = hc_cstr_bytes(text_ptr);
-    let mut dm = format!("Setting dupe-parameter '{action}'='").into_bytes();
-    dm.extend_from_slice(text);
-    dm.extend_from_slice(b"' for '");
-    dm.extend_from_slice(hist_name);
-    dm.push(b'\'');
-    hc_log(env, 0, &dm);
-
-    let mut mode = DupeMode::Score;
-    if action == 45 {
-        let Some(parsed) = crate::queueeditor::parse_dupe_mode(text) else {
-            let mut em = b"Could not set duplicate mode for ".to_vec();
+        if kind != 1 && kind != 2 {
+            let mut em = b"Could not set category for ".to_vec();
             em.extend_from_slice(hist_name);
-            em.extend_from_slice(b": incorrect mode (");
-            em.extend_from_slice(text);
-            em.push(b')');
-            hc_log(env, 4, &em);
-            return;
-        };
-        mode = parsed;
+            em.extend_from_slice(b": history item has wrong type");
+            self.log(HcLevel::Error, &em);
+            return false;
+        }
+
+        self.host.edit_history(hist_ptr, HistEdit::Category(text));
+        true
     }
 
-    let t_c = hc_cbuf(text);
-    let score = if text_ptr.is_null() {
-        0
-    } else {
-        libc::atoi(t_c.as_ptr() as *const c_char)
-    };
+    fn set_name(&self, hist_ptr: usize, hist_name: &[u8], text: &[u8]) -> bool {
+        let mut dm = b"Setting name '".to_vec();
+        dm.extend_from_slice(text);
+        dm.extend_from_slice(b"' for '");
+        dm.extend_from_slice(hist_name);
+        dm.push(b'\'');
+        self.log(HcLevel::Debug, &dm);
 
-    if kind == 1 || kind == 2 {
-        match action {
-            43 => {
-                cb(
-                    env.ctx,
-                    36,
-                    3,
-                    0,
-                    0,
-                    hist_ptr,
-                    t_c.as_ptr() as *const c_char,
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    0,
-                );
+        if text.is_empty() {
+            let mut em = b"Could not rename ".to_vec();
+            em.extend_from_slice(hist_name);
+            em.extend_from_slice(b". The new name cannot be empty");
+            self.log(HcLevel::Error, &em);
+            return false;
+        }
+
+        let changed_id = self.host.edit_history(hist_ptr, HistEdit::Name(text));
+        #[cfg(unix)]
+        if let Some(id) = changed_id {
+            crate::dupesearch_coord::notify_active_dupesearch_name_changed(id);
+        }
+        #[cfg(not(unix))]
+        let _ = changed_id;
+        true
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn set_dupe_param(
+        &self,
+        hist_ptr: usize,
+        kind: c_int,
+        delete_status: DeleteStatus,
+        hist_name: &[u8],
+        action: c_int,
+        text: Option<&[u8]>,
+    ) {
+        let text_bytes = text.unwrap_or_default();
+        let mut dm = format!("Setting dupe-parameter '{action}'='").into_bytes();
+        dm.extend_from_slice(text_bytes);
+        dm.extend_from_slice(b"' for '");
+        dm.extend_from_slice(hist_name);
+        dm.push(b'\'');
+        self.log(HcLevel::Debug, &dm);
+
+        let mut mode = DupeMode::Score;
+        if action == 45 {
+            let Some(parsed) = crate::queueeditor::parse_dupe_mode(text_bytes) else {
+                let mut em = b"Could not set duplicate mode for ".to_vec();
+                em.extend_from_slice(hist_name);
+                em.extend_from_slice(b": incorrect mode (");
+                em.extend_from_slice(text_bytes);
+                em.push(b')');
+                self.log(HcLevel::Error, &em);
+                return;
+            };
+            mode = parsed;
+        }
+
+        let score = match text {
+            None => 0,
+            Some(t) => {
+                let t_c = hc_cbuf(t);
+                // SAFETY: `t_c` is NUL-terminated.
+                unsafe { libc::atoi(t_c.as_ptr().cast()) }
             }
-            44 => {
-                cb(
-                    env.ctx,
-                    36,
-                    4,
-                    score,
-                    0,
-                    hist_ptr,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    0,
-                );
+        };
+
+        if kind == 1 || kind == 2 {
+            match action {
+                43 => {
+                    self.host.edit_history(hist_ptr, HistEdit::DupeKey(text_bytes));
+                }
+                44 => {
+                    self.host.edit_history(hist_ptr, HistEdit::DupeScore(score));
+                }
+                45 => {
+                    self.host.edit_history(hist_ptr, HistEdit::DupeMode(mode));
+                }
+                46 => {
+                    if kind == 2 {
+                        let mut em = b"Could not set duplicate parameter for ".to_vec();
+                        em.extend_from_slice(hist_name);
+                        em.extend_from_slice(b": history item has wrong type");
+                        self.log(HcLevel::Error, &em);
+                        return;
+                    }
+                    if delete_status != DeleteStatus::Dupe && delete_status != DeleteStatus::Manual
+                    {
+                        let mut em = b"Could not set duplicate parameter for ".to_vec();
+                        em.extend_from_slice(hist_name);
+                        em.extend_from_slice(b": history item has wrong delete status");
+                        self.log(HcLevel::Error, &em);
+                        return;
+                    }
+                    let status = parse_dupe_backup_flag(text_bytes);
+                    self.host
+                        .edit_history(hist_ptr, HistEdit::DeleteStatus(status));
+                }
+                _ => {}
             }
-            45 => {
-                cb(
-                    env.ctx,
-                    36,
-                    5,
-                    mode.into(),
-                    0,
-                    hist_ptr,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    0,
-                );
-            }
-            46 => {
-                if kind == 2 {
+        } else if kind == 3 {
+            match action {
+                43 => self.host.edit_dup(hist_ptr, DupEdit::DupeKey(text_bytes)),
+                44 => self.host.edit_dup(hist_ptr, DupEdit::Score(score)),
+                45 => self.host.edit_dup(hist_ptr, DupEdit::Mode(mode)),
+                46 => {
                     let mut em = b"Could not set duplicate parameter for ".to_vec();
                     em.extend_from_slice(hist_name);
                     em.extend_from_slice(b": history item has wrong type");
-                    hc_log(env, 4, &em);
-                    return;
+                    self.log(HcLevel::Error, &em);
                 }
-                if delete_status != DeleteStatus::Dupe && delete_status != DeleteStatus::Manual {
-                    let mut em = b"Could not set duplicate parameter for ".to_vec();
-                    em.extend_from_slice(hist_name);
-                    em.extend_from_slice(b": history item has wrong delete status");
-                    hc_log(env, 4, &em);
-                    return;
-                }
-                let new_ds = parse_dupe_backup_flag(text);
-                cb(
-                    env.ctx,
-                    36,
-                    6,
-                    new_ds.into(),
-                    0,
-                    hist_ptr,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    0,
-                );
+                _ => {}
             }
-            _ => {}
-        }
-    } else if kind == 3 {
-        match action {
-            43 => {
-                cb(
-                    env.ctx,
-                    36,
-                    7,
-                    0,
-                    0,
-                    hist_ptr,
-                    t_c.as_ptr() as *const c_char,
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    0,
-                );
-            }
-            44 => {
-                cb(
-                    env.ctx,
-                    36,
-                    8,
-                    score,
-                    0,
-                    hist_ptr,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    0,
-                );
-            }
-            45 => {
-                cb(
-                    env.ctx,
-                    36,
-                    9,
-                    mode.into(),
-                    0,
-                    hist_ptr,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    0,
-                );
-            }
-            46 => {
-                let mut em = b"Could not set duplicate parameter for ".to_vec();
-                em.extend_from_slice(hist_name);
-                em.extend_from_slice(b": history item has wrong type");
-                hc_log(env, 4, &em);
-            }
-            _ => {}
         }
     }
-}
 
-/// Executes `HistoryCoordinator` operations (`daemon/queue/HistoryCoordinator.cpp`):
-/// - `0`: `DeleteDiskFiles`
-/// - `1`: `AddToHistory` (+ `RecheckFailedArticles`)
-/// - `2`: `HistoryHide`
-/// - `3`: `ServiceWork`
-/// - `4`: `Redownload`
-/// - `5`: `EditList`
-pub unsafe fn history_coord_exec(op: c_int, env: *const NzbgetRsHistoryCoordEnv) -> c_int {
-    let Some(e) = env.as_ref() else {
-        return 0;
-    };
-    let Some(cb) = e.action_cb else {
-        return 0;
-    };
-    match op {
-        0 => {
-            hc_delete_disk_files(e, NzbRef::from_addr(e.p2), e.a1 != 0, e.a2 != 0);
-            1
-        }
-        1 => {
-            let mut ints = [0i32; 6];
-            let mut i64s = [0i64; 2];
-            let mut strs: [*const c_char; 1] = [std::ptr::null()];
-            cb(
-                e.ctx,
-                2,
-                0,
-                0,
-                e.p1,
-                e.p2,
-                std::ptr::null(),
-                std::ptr::null(),
-                ints.as_mut_ptr(),
-                i64s.as_mut_ptr(),
-                strs.as_mut_ptr(),
-                std::ptr::null_mut(),
-                0,
-            );
-            let par_status = NzbParStatus::from(ints[0]);
-            let unpack_status = UnpackStatus::from(ints[1]);
-            let delete_status = DeleteStatus::from(ints[2]);
-            let parking = ints[3];
-            let unpack_cleaned_up = ints[4];
-            let mut completed_count = ints[5];
-            let failed_size = i64s[0];
-            let par_failed_size = i64s[1];
-            let nzb_name = hc_cstr_bytes(strs[0]).to_vec();
-
-            let cleanup = par_status == NzbParStatus::Success
-                || unpack_status == UnpackStatus::Success
-                || (par_status == NzbParStatus::None
-                    && unpack_status == UnpackStatus::None
-                    && (failed_size - par_failed_size) == 0)
-                || (delete_status != DeleteStatus::None && parking == 0)
-                || unpack_cleaned_up != 0;
-            if cleanup {
-                cb(
-                    e.ctx,
-                    0,
-                    0,
-                    0,
-                    0,
-                    e.p2,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    0,
-                );
-                completed_count = 0;
+    /// `EditList`: applies a history edit `action` to the records `ids`.
+    /// Returns whether any record was edited.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub(crate) fn edit_list(
+        &self,
+        ids: &[i32],
+        action: c_int,
+        args: Option<&[u8]>,
+        dupe_check: bool,
+        server_mode: bool,
+        nzb_cleanup_disk: bool,
+        pause_extra_pars: bool,
+    ) -> bool {
+        if action == 47 {
+            for &id in ids {
+                self.host.mark_bad(self.dq, id);
             }
-
-            let mut parked_count = 0i32;
-            for cidx in 0..completed_count {
-                let mut cf_ints = [0i32; 2];
-                let mut cf_strs: [*const c_char; 1] = [std::ptr::null()];
-                cb(
-                    e.ctx,
-                    3,
-                    cidx,
-                    0,
-                    0,
-                    e.p2,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    cf_ints.as_mut_ptr(),
-                    std::ptr::null_mut(),
-                    cf_strs.as_mut_ptr(),
-                    std::ptr::null_mut(),
-                    0,
-                );
-                let is_last = cidx + 1 == completed_count;
-                if should_park_completed_file(cf_ints[0], 0, 2, is_last) {
-                    let mut pm = b"Parking file ".to_vec();
-                    pm.extend_from_slice(hc_cstr_bytes(cf_strs[0]));
-                    hc_nzb_msg(e, NzbRef::from_addr(e.p2), 1, &pm);
-                    parked_count += 1;
-                }
-            }
-
-            cb(
-                e.ctx,
-                5,
-                parked_count,
-                0,
-                0,
-                e.p2,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                0,
-            );
-
-            let mut added = b"Collection ".to_vec();
-            added.extend_from_slice(&nzb_name);
-            added.extend_from_slice(b" added to history");
-            hc_nzb_msg(e, NzbRef::from_addr(e.p2), 2, &added);
-
-            hc_recheck_failed_articles(e, e.p1, NzbRef::from_addr(e.p2));
-
-            cb(
-                e.ctx,
-                6,
-                0,
-                0,
-                0,
-                e.p2,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                0,
-            );
-            1
         }
-        2 => {
-            hc_history_hide(e, e.p1, e.p2, e.a1, e.a2 != 0, e.a3 != 0);
-            1
-        }
-        3 => {
-            let min_time = calc_min_time(e.t1, e.a1);
-            let dupe_check = e.a2 != 0;
-            let server_mode = e.a3 != 0;
-            let nzb_cleanup_disk = e.a4 != 0;
-            let mut changed = false;
-            let mut rindex = 0i32;
 
-            loop {
-                let mut ints = [0i32; 1];
-                let mut i64s = [0i64; 2];
-                let mut strs: [*const c_char; 1] = [std::ptr::null()];
-                let hist_ptr = cb(
-                    e.ctx,
-                    14,
-                    rindex,
-                    0,
-                    e.p1,
-                    0,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    ints.as_mut_ptr(),
-                    i64s.as_mut_ptr(),
-                    strs.as_mut_ptr(),
-                    std::ptr::null_mut(),
-                    0,
-                );
-                if hist_ptr == 0 {
-                    break;
-                }
-                let act = classify_service_work_item(ints[0], 3, 1, i64s[0], min_time, dupe_check);
-                if act != 0 {
-                    if act == 1 {
-                        hc_history_hide(e, e.p1, hist_ptr, rindex, server_mode, nzb_cleanup_disk);
-                        rindex += 1;
-                    } else {
-                        let hist_name = hc_cstr_bytes(strs[0]).to_vec();
-                        if act == 2 {
-                            hc_delete_disk_files(
-                                e,
-                                NzbRef::from_addr(i64s[1] as usize),
-                                server_mode,
-                                nzb_cleanup_disk,
-                            );
+        let mut ok = false;
+        for &id in ids {
+            let Some(found) = self.host.find_history(self.dq, HistoryKey::Id(id)) else {
+                continue;
+            };
+            let hist_ptr = found.hist_ptr;
+            let hidx = found.idx;
+            let kind = found.kind;
+            let nzb_ptr = found.nzb;
+            let hist_name = found.name;
+            let dest_dir = found.dest_dir;
+
+            let mut done = true;
+            match action {
+                36 | 37 => {
+                    let is_final = action == 37;
+                    let mut dm = b"Deleting ".to_vec();
+                    dm.extend_from_slice(&hist_name);
+                    dm.extend_from_slice(b" from history");
+                    self.log(HcLevel::Info, &dm);
+
+                    if kind == 1 {
+                        self.delete_disk_files(nzb_ptr, server_mode, nzb_cleanup_disk);
+                        let dir_exists =
+                            crate::fsops::directory_exists(&dest_dir, &crate::fsops::posix_stat);
+                        if should_delete_dest_dir(
+                            true,
+                            found.delete_status,
+                            found.par_status,
+                            found.unpack_status,
+                            dir_exists,
+                        ) {
+                            self.delete_dest_dir_if_present(&dest_dir, HcLevel::Info);
                         }
-                        let mut rm = b"Collection ".to_vec();
-                        rm.extend_from_slice(&hist_name);
-                        rm.extend_from_slice(b" removed from history");
-                        hc_log(e, 2, &rm);
-                        cb(
-                            e.ctx,
-                            15,
-                            rindex,
-                            1,
-                            e.p1,
-                            0,
-                            std::ptr::null(),
-                            std::ptr::null(),
-                            std::ptr::null_mut(),
-                            std::ptr::null_mut(),
-                            std::ptr::null_mut(),
-                            std::ptr::null_mut(),
-                            0,
+                    }
+
+                    if is_final || !dupe_check || kind == 2 {
+                        self.host.erase_history(self.dq, hidx, false);
+                    } else if kind == 1 {
+                        let rindex = found.len - 1 - hidx;
+                        self.history_hide(hist_ptr, rindex, server_mode, nzb_cleanup_disk);
+                    }
+                }
+                38 => {
+                    if kind == 2 {
+                        self.history_redownload(hist_ptr, hidx, kind, nzb_ptr, &hist_name, false);
+                    } else if kind == 1 && found.parked_count == 0 {
+                        let mut wm = b"Could not download remaining files for ".to_vec();
+                        wm.extend_from_slice(&hist_name);
+                        wm.extend_from_slice(
+                            b": history item does not have any files left for download",
+                        );
+                        self.log(HcLevel::Warning, &wm);
+                    } else if kind == 1 {
+                        self.history_retry(
+                            hist_ptr,
+                            hidx,
+                            kind,
+                            nzb_ptr,
+                            &hist_name,
+                            false,
+                            false,
+                            pause_extra_pars,
+                        );
+                    } else {
+                        let mut em = b"Could not download remaining files for ".to_vec();
+                        em.extend_from_slice(&hist_name);
+                        em.extend_from_slice(b": history item has wrong type");
+                        self.log(HcLevel::Error, &em);
+                    }
+                }
+                39 => {
+                    if kind != 1 {
+                        let mut em = b"Could not post-process again ".to_vec();
+                        em.extend_from_slice(&hist_name);
+                        em.extend_from_slice(b": history item has wrong type");
+                        self.log(HcLevel::Error, &em);
+                    } else {
+                        self.history_retry(
+                            hist_ptr,
+                            hidx,
+                            kind,
+                            nzb_ptr,
+                            &hist_name,
+                            false,
+                            true,
+                            pause_extra_pars,
                         );
                     }
-                    changed = true;
-                } else {
-                    rindex += 1;
                 }
-            }
-
-            if changed {
-                cb(
-                    e.ctx,
-                    16,
-                    0,
-                    0,
-                    e.p1,
-                    0,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    0,
-                );
-            }
-            1
-        }
-        4 => {
-            let mut ints = [0i32; 7];
-            let mut i64s = [0i64; 1];
-            let mut strs: [*const c_char; 2] = [std::ptr::null(); 2];
-            let found = cb(
-                e.ctx,
-                18,
-                0,
-                1,
-                e.p1,
-                e.p2,
-                std::ptr::null(),
-                std::ptr::null(),
-                ints.as_mut_ptr(),
-                i64s.as_mut_ptr(),
-                strs.as_mut_ptr(),
-                std::ptr::null_mut(),
-                0,
-            );
-            if found != 0 {
-                let hist_name = hc_cstr_bytes(strs[0]).to_vec();
-                hc_history_redownload(
-                    e,
-                    e.p1,
-                    found,
-                    ints[0],
-                    ints[2],
-                    NzbRef::from_addr(i64s[0] as usize),
-                    &hist_name,
-                    true,
-                );
-            }
-            1
-        }
-        5 => {
-            let ids = if e.int_arr.is_null() || e.int_len == 0 {
-                &[][..]
-            } else {
-                std::slice::from_raw_parts(e.int_arr, e.int_len)
-            };
-            let action = e.a1;
-            let dupe_check = e.a2 != 0;
-            let server_mode = e.a3 != 0;
-            let nzb_cleanup_disk = e.a4 != 0;
-            let sep = e.a5 as u8;
-
-            if action == 47 {
-                for &id in ids {
-                    cb(
-                        e.ctx,
-                        17,
-                        id,
-                        0,
-                        e.p1,
-                        0,
-                        std::ptr::null(),
-                        std::ptr::null(),
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                        0,
+                40 => {
+                    self.history_redownload(hist_ptr, hidx, kind, nzb_ptr, &hist_name, false);
+                }
+                41 => {
+                    self.history_retry(
+                        hist_ptr,
+                        hidx,
+                        kind,
+                        nzb_ptr,
+                        &hist_name,
+                        true,
+                        false,
+                        pause_extra_pars,
                     );
                 }
-            }
-
-            let mut ok = false;
-            for &id in ids {
-                let mut ints = [0i32; 7];
-                let mut i64s = [0i64; 1];
-                let mut strs: [*const c_char; 2] = [std::ptr::null(); 2];
-                let hist_ptr = cb(
-                    e.ctx,
-                    18,
-                    id,
-                    0,
-                    e.p1,
-                    0,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    ints.as_mut_ptr(),
-                    i64s.as_mut_ptr(),
-                    strs.as_mut_ptr(),
-                    std::ptr::null_mut(),
-                    0,
-                );
-                if hist_ptr == 0 {
-                    continue;
+                42 => {
+                    done = self.set_parameter(hist_ptr, kind, nzb_ptr, &hist_name, args);
                 }
-                let hidx = ints[0];
-                let hist_len = ints[1];
-                let kind = ints[2];
-                let delete_status = DeleteStatus::from(ints[3]);
-                let par_status = NzbParStatus::from(ints[4]);
-                let unpack_status = UnpackStatus::from(ints[5]);
-                let parked_count = ints[6];
-                let nzb_ptr = NzbRef::from_addr(i64s[0] as usize);
-                let hist_name = hc_cstr_bytes(strs[0]).to_vec();
-                let dest_dir = hc_cstr_bytes(strs[1]).to_vec();
-
-                let mut done = true;
-                match action {
-                    36 | 37 => {
-                        let is_final = action == 37;
-                        let mut dm = b"Deleting ".to_vec();
-                        dm.extend_from_slice(&hist_name);
-                        dm.extend_from_slice(b" from history");
-                        hc_log(e, 2, &dm);
-
-                        if kind == 1 {
-                            hc_delete_disk_files(e, nzb_ptr, server_mode, nzb_cleanup_disk);
-                            let dir_exists = crate::fsops::directory_exists(
-                                &dest_dir,
-                                &crate::fsops::posix_stat,
-                            );
-                            if should_delete_dest_dir(
-                                true,
-                                delete_status,
-                                par_status,
-                                unpack_status,
-                                dir_exists,
-                            ) {
-                                hc_delete_dest_dir_if_present(e, &dest_dir, sep, 2);
-                            }
-                        }
-
-                        if is_final || !dupe_check || kind == 2 {
-                            cb(
-                                e.ctx,
-                                15,
-                                hidx,
-                                0,
-                                e.p1,
-                                0,
-                                std::ptr::null(),
-                                std::ptr::null(),
-                                std::ptr::null_mut(),
-                                std::ptr::null_mut(),
-                                std::ptr::null_mut(),
-                                std::ptr::null_mut(),
-                                0,
-                            );
-                        } else if kind == 1 {
-                            let rindex = hist_len - 1 - hidx;
-                            hc_history_hide(
-                                e,
-                                e.p1,
-                                hist_ptr,
-                                rindex,
-                                server_mode,
-                                nzb_cleanup_disk,
-                            );
-                        }
-                    }
-                    38 => {
-                        if kind == 2 {
-                            hc_history_redownload(
-                                e, e.p1, hist_ptr, hidx, kind, nzb_ptr, &hist_name, false,
-                            );
-                        } else if kind == 1 && parked_count == 0 {
-                            let mut wm = b"Could not download remaining files for ".to_vec();
-                            wm.extend_from_slice(&hist_name);
-                            wm.extend_from_slice(
-                                b": history item does not have any files left for download",
-                            );
-                            hc_log(e, 3, &wm);
-                        } else if kind == 1 {
-                            hc_history_retry(
-                                e, e.p1, hist_ptr, hidx, kind, nzb_ptr, &hist_name, false, false,
-                            );
-                        } else {
-                            let mut em = b"Could not download remaining files for ".to_vec();
-                            em.extend_from_slice(&hist_name);
-                            em.extend_from_slice(b": history item has wrong type");
-                            hc_log(e, 4, &em);
-                        }
-                    }
-                    39 => {
-                        if kind != 1 {
-                            let mut em = b"Could not post-process again ".to_vec();
-                            em.extend_from_slice(&hist_name);
-                            em.extend_from_slice(b": history item has wrong type");
-                            hc_log(e, 4, &em);
-                        } else {
-                            hc_history_retry(
-                                e, e.p1, hist_ptr, hidx, kind, nzb_ptr, &hist_name, false, true,
-                            );
-                        }
-                    }
-                    40 => {
-                        hc_history_redownload(
-                            e, e.p1, hist_ptr, hidx, kind, nzb_ptr, &hist_name, false,
-                        );
-                    }
-                    41 => {
-                        hc_history_retry(
-                            e, e.p1, hist_ptr, hidx, kind, nzb_ptr, &hist_name, true, false,
-                        );
-                    }
-                    42 => {
-                        done = hc_set_parameter(e, hist_ptr, kind, nzb_ptr, &hist_name, e.s1);
-                    }
-                    50 => {
-                        done = hc_set_category(e, hist_ptr, kind, &hist_name, e.s1);
-                    }
-                    51 => {
-                        done = hc_set_name(e, hist_ptr, &hist_name, e.s1);
-                    }
-                    43..=46 => {
-                        hc_set_dupe_param(
-                            e,
+                50 => {
+                    done = self.set_category(hist_ptr, kind, &hist_name, args.unwrap_or_default());
+                }
+                51 => {
+                    done = self.set_name(hist_ptr, &hist_name, args.unwrap_or_default());
+                }
+                43..=46 => {
+                    self.set_dupe_param(
+                        hist_ptr,
+                        kind,
+                        found.delete_status,
+                        &hist_name,
+                        action,
+                        args,
+                    );
+                }
+                47..=49 =>
+                {
+                    #[cfg(unix)]
+                    if let Some(qh) = crate::ffi::queue_host() {
+                        crate::dupecoord::history_mark_host(
+                            &qh,
+                            self.dq,
                             hist_ptr,
-                            kind,
-                            delete_status,
-                            &hist_name,
-                            action,
-                            e.s1,
+                            MarkStatus::from(action - 46),
                         );
                     }
-                    47..=49 =>
-                    {
-                        #[cfg(unix)]
-                        if let Some(qh) = crate::ffi::queue_host() {
-                            crate::dupecoord::history_mark_host(
-                                &qh,
-                                e.p1,
-                                hist_ptr,
-                                MarkStatus::from(action - 46),
-                            );
-                        }
-                    }
-                    _ => {}
                 }
-                ok = ok || done;
+                _ => {}
             }
-
-            if ok {
-                cb(
-                    e.ctx,
-                    16,
-                    0,
-                    0,
-                    e.p1,
-                    0,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    0,
-                );
-            }
-            c_int::from(ok)
+            ok = ok || done;
         }
-        _ => 0,
+
+        if ok {
+            self.host.save_history(self.dq);
+        }
+        ok
     }
 }
 
 #[cfg(unix)]
-std::thread_local! {
-    static HC_STR_ARENA: std::cell::RefCell<Vec<std::ffi::CString>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-}
-
-#[cfg(unix)]
-struct HcArenaGuard;
-
-#[cfg(unix)]
-impl Drop for HcArenaGuard {
-    fn drop(&mut self) {
-        HC_STR_ARENA.with(|a| a.borrow_mut().clear());
-    }
-}
-
-#[cfg(unix)]
-fn hc_stash_str(bytes: &[u8]) -> *const c_char {
-    let cs = if let Some(pos) = bytes.iter().position(|&b| b == 0) {
-        std::ffi::CString::new(&bytes[..pos]).unwrap_or_default()
-    } else {
-        std::ffi::CString::new(bytes).unwrap_or_default()
-    };
-    HC_STR_ARENA.with(|a| {
-        let mut arena = a.borrow_mut();
-        arena.push(cs);
-        arena.last().map_or(std::ptr::null(), |s| s.as_ptr())
-    })
-}
-
-#[cfg(unix)]
-unsafe extern "C" fn hc_native_log_cb(_ctx: *mut c_void, level: c_int, msg: *const c_char) {
-    use crate::queuesubsys_host::{MK_DEBUG, MK_DETAIL, MK_ERROR, MK_INFO, MK_WARNING};
-    let mk = match level {
-        0 => MK_DEBUG,
-        1 => MK_DETAIL,
-        2 => MK_INFO,
-        3 => MK_WARNING,
-        4 => MK_ERROR,
-        _ => return,
-    };
-    crate::log::log_active_bytes(mk, hc_cstr_bytes(msg));
-}
-
-#[cfg(unix)]
-#[allow(clippy::too_many_lines)]
-unsafe extern "C" fn hc_native_action_cb(
-    ctx: *mut c_void,
-    sub: c_int,
-    a1: c_int,
-    a2: c_int,
-    p1: usize,
-    p2: usize,
-    s1: *const c_char,
-    s2: *const c_char,
-    ints: *mut c_int,
-    i64s: *mut i64,
-    strs: *mut *const c_char,
-    bytes: *mut u8,
-    len: usize,
-) -> usize {
-    use crate::qdup::DupEdit;
+#[allow(clippy::wildcard_imports)]
+mod native {
+    use super::*;
     use crate::queuesubsys_host::{
-        FileRef, QueueSubsysHost, AI_FAILED, AI_UNDEFINED, ASPECT_NZB_RETURNED,
-        ASPECT_URL_RETURNED, CF_FAILURE, CF_NONE, CF_PARTIAL, DH_NONE, DH_REDOWNLOAD_MANUAL,
-        DP_NONE, EA_GROUP_PAUSE_EXTRA_PARS, FILE_ACT_CLEAR_ARTICLES, FILE_I64_FAILED_SIZE,
-        FILE_I64_REMAINING_SIZE, FILE_I64_SUCCESS_SIZE, FILE_INT_COMPLETED_ARTICLES,
-        FILE_INT_FAILED_ARTICLES, FILE_INT_PARTIAL_STATE, FILE_INT_PAUSED,
-        FILE_INT_SUCCESS_ARTICLES, FILE_STR_FILENAME, HK_DUP, HK_NZB, HK_URL, MK_DETAIL, MK_INFO,
-        MK_WARNING, NZB_ACT_BUILD_DEST_DIR, NZB_ACT_CLEAR_EXTRACTED_ARCHIVES,
-        NZB_ACT_CLEAR_FILE_LIST, NZB_ACT_CLEAR_LIVE_REPAIR_THREAD, NZB_ACT_CLEAR_SCRIPT_STATUSES,
+        QueueSubsysHost, AI_FAILED, ASPECT_NZB_RETURNED, ASPECT_URL_RETURNED, CF_FAILURE,
+        CF_NONE, CF_PARTIAL, DH_NONE, DH_REDOWNLOAD_MANUAL, DP_NONE, EA_GROUP_PAUSE_EXTRA_PARS,
+        FILE_ACT_CLEAR_ARTICLES, FILE_I64_FAILED_SIZE, FILE_I64_REMAINING_SIZE,
+        FILE_I64_SUCCESS_SIZE, FILE_INT_COMPLETED_ARTICLES, FILE_INT_FAILED_ARTICLES,
+        FILE_INT_PARTIAL_STATE, FILE_INT_PAUSED, FILE_INT_SUCCESS_ARTICLES, FILE_STR_FILENAME,
+        HK_DUP, HK_NZB, HK_URL, MK_DEBUG, MK_DETAIL, MK_ERROR, MK_INFO, MK_WARNING,
+        NZB_ACT_BUILD_DEST_DIR, NZB_ACT_CLEAR_EXTRACTED_ARCHIVES, NZB_ACT_CLEAR_FILE_LIST,
+        NZB_ACT_CLEAR_LIVE_REPAIR_THREAD, NZB_ACT_CLEAR_SCRIPT_STATUSES,
         NZB_ACT_UPDATE_CURRENT_STATS, NZB_I64_DOWNLOADED_SIZE, NZB_I64_DUPE_RECOVERED_BYTES,
         NZB_I64_FAILED_SIZE, NZB_I64_PAR_FAILED_SIZE, NZB_I64_PAR_SUCCESS_SIZE,
         NZB_I64_SUCCESS_SIZE, NZB_INT_ALL_FIRST, NZB_INT_DEAD_PICK_PROBED, NZB_INT_DELETE_PAUSED,
@@ -2476,589 +1750,551 @@ unsafe extern "C" fn hc_native_action_cb(
         NZB_STR_FINAL_DIR, NZB_STR_NAME, PARTIAL_COMPLETED, RS_NONE,
     };
 
-    HC_STR_ARENA.with(|a| a.borrow_mut().clear());
-    if ctx.is_null() {
-        return 0;
-    }
-    let host = &*(ctx as *const QueueSubsysHost);
-    match sub {
-        0 => {
-            host.disk_discard_files_ex(NzbRef::from_addr(p2), a1 != 0);
-            0
+    impl HistoryHost for QueueSubsysHost {
+        fn log(&self, level: HcLevel, msg: &[u8]) {
+            let mk = match level {
+                HcLevel::Debug => MK_DEBUG,
+                HcLevel::Detail => MK_DETAIL,
+                HcLevel::Info => MK_INFO,
+                HcLevel::Warning => MK_WARNING,
+                HcLevel::Error => MK_ERROR,
+            };
+            crate::log::log_active_bytes(mk, msg);
         }
-        1 => {
-            let job = NzbRef::from_addr(p2);
-            let nzb = host.nzb_snap(job, false);
-            host.nzb_action(job, NZB_ACT_CLEAR_FILE_LIST);
-            *strs.add(0) = hc_stash_str(&nzb.queued_filename);
-            0
+
+        fn nzb_message(&self, nzb: NzbRef, level: HcLevel, msg: &[u8]) {
+            let mk = match level {
+                HcLevel::Detail => MK_DETAIL,
+                HcLevel::Warning => MK_WARNING,
+                _ => MK_INFO,
+            };
+            self.nzb_print_message(nzb, mk, msg);
         }
-        2 => {
-            let job = NzbRef::from_addr(p2);
-            let nzb0 = host.nzb_snap(job, false);
+
+        fn discard_disk_files(&self, nzb: NzbRef, delete_log: bool) {
+            self.disk_discard_files_ex(nzb, delete_log);
+        }
+
+        fn clear_file_list(&self, nzb: NzbRef) -> Vec<u8> {
+            let snap = self.nzb_snap(nzb, false);
+            self.nzb_action(nzb, NZB_ACT_CLEAR_FILE_LIST);
+            hc_trunc(&snap.queued_filename)
+        }
+
+        fn move_to_history(&self, dq: usize, job: NzbRef) -> AddedToHistory {
+            let nzb0 = self.nzb_snap(job, false);
             if nzb0.has_live_repair_thread {
                 let t = nzb0.live_repair_thread_ptr;
-                host.nzb_action(job, NZB_ACT_CLEAR_LIVE_REPAIR_THREAD);
-                host.thread_stop(t);
+                self.nzb_action(job, NZB_ACT_CLEAR_LIVE_REPAIR_THREAD);
+                self.thread_stop(t);
             }
-            crate::postproc::live_par_time_settle(host, job, true);
-            host.history_move_queue_item(p1, job);
-            host.dq_history_changed(p1);
-            let fn_len = host.nzb_file_len(job);
+            crate::postproc::live_par_time_settle(self, job, true);
+            self.history_move_queue_item(dq, job);
+            self.dq_history_changed(dq);
+            let fn_len = self.nzb_file_len(job);
             for i in 0..fn_len {
-                let fp = host.nzb_file_at(job, i);
-                let fs = host.file_snap(fp);
-                host.nzb_update_completed_stats(job, fp);
-                host.nzb_push_completed_file(job, fp, &fs.filename, CF_NONE, 0);
+                let fp = self.nzb_file_at(job, i);
+                let fs = self.file_snap(fp);
+                self.nzb_update_completed_stats(job, fp);
+                self.nzb_push_completed_file(job, fp, &fs.filename, CF_NONE, 0);
             }
-            let nzb = host.nzb_snap(job, false);
-            let cfs_len = host.nzb_completed_files_len(job) as c_int;
-            *ints.add(0) = nzb.par_status.into();
-            *ints.add(1) = nzb.unpack_status.into();
-            *ints.add(2) = nzb.delete_status.into();
-            *ints.add(3) = c_int::from(nzb.parking);
-            *ints.add(4) = c_int::from(nzb.unpack_cleaned_up_disk);
-            *ints.add(5) = cfs_len;
-            *i64s.add(0) = nzb.failed_size;
-            *i64s.add(1) = nzb.par_failed_size;
-            *strs.add(0) = hc_stash_str(&nzb.name);
-            0
-        }
-        3 => {
-            let job = NzbRef::from_addr(p2);
-            let cfs_len = host.nzb_completed_files_len(job);
-            if a1 < 0 || (a1 as usize) >= cfs_len {
-                return 0;
+            let nzb = self.nzb_snap(job, false);
+            AddedToHistory {
+                par_status: nzb.par_status,
+                unpack_status: nzb.unpack_status,
+                delete_status: nzb.delete_status,
+                parking: nzb.parking,
+                unpack_cleaned_up: nzb.unpack_cleaned_up_disk,
+                completed_count: self.nzb_completed_files_len(job) as c_int,
+                failed_size: nzb.failed_size,
+                par_failed_size: nzb.par_failed_size,
+                name: hc_trunc(&nzb.name),
             }
-            let cf = host.nzb_completed_file_at(job, a1 as usize);
-            *ints.add(0) = cf.status;
-            *ints.add(1) = cf.id;
-            *strs.add(0) = hc_stash_str(&cf.filename);
-            1
         }
-        4 => {
-            let mk = if a1 == 1 {
-                MK_DETAIL
-            } else if a1 == 3 {
-                MK_WARNING
-            } else {
-                MK_INFO
-            };
-            host.nzb_print_message(NzbRef::from_addr(p2), mk, hc_cstr_bytes(s1));
-            0
+
+        fn completed_file(&self, job: NzbRef, idx: c_int) -> Option<CompletedFile> {
+            let cfs_len = self.nzb_completed_files_len(job);
+            if idx < 0 || (idx as usize) >= cfs_len {
+                return None;
+            }
+            let cf = self.nzb_completed_file_at(job, idx as usize);
+            Some(CompletedFile {
+                status: cf.status,
+                id: cf.id,
+                filename: hc_trunc(&cf.filename),
+            })
         }
-        5 => {
-            let job = NzbRef::from_addr(p2);
-            let nzb = host.nzb_snap(job, false);
-            host.nzb_set_int(job, NZB_INT_PARKED_FILE_COUNT, a1);
-            host.nzb_action(job, NZB_ACT_CLEAR_FILE_LIST);
-            host.nzb_set_int(job, NZB_INT_REMAINING_PAR_COUNT, 0);
-            host.nzb_set_int(job, NZB_INT_PARKING, 0);
+
+        fn finish_add_to_history(&self, job: NzbRef, parked_count: c_int) {
+            let nzb = self.nzb_snap(job, false);
+            self.nzb_set_int(job, NZB_INT_PARKED_FILE_COUNT, parked_count);
+            self.nzb_action(job, NZB_ACT_CLEAR_FILE_LIST);
+            self.nzb_set_int(job, NZB_INT_REMAINING_PAR_COUNT, 0);
+            self.nzb_set_int(job, NZB_INT_PARKING, 0);
             if nzb.direct_rename_status == DirectRenameStatus::Running {
-                host.nzb_set_direct_rename_status(job, DirectRenameStatus::Failure);
+                self.nzb_set_direct_rename_status(job, DirectRenameStatus::Failure);
             }
             if nzb.direct_unpack_status == DirectUnpackStatus::Running {
-                host.nzb_set_direct_unpack_status(job, DirectUnpackStatus::None);
+                self.nzb_set_direct_unpack_status(job, DirectUnpackStatus::None);
             }
-            host.nzb_set_int(job, NZB_INT_DUPE_HINT, DH_NONE);
-            0
+            self.nzb_set_int(job, NZB_INT_DUPE_HINT, DH_NONE);
         }
-        6 => {
-            let nzb = host.nzb_snap(NzbRef::from_addr(p2), false);
+
+        fn forget_par_damage(&self, job: NzbRef) {
+            let nzb = self.nzb_snap(job, false);
             crate::dupefallback::par_damage_forget_all(nzb.id);
-            0
         }
-        10 => {
-            let job = NzbRef::from_addr(p2);
-            host.nzb_set_param(job, b"*DupeRecheck", Some(b"1"));
-            let emit: unsafe extern "C" fn(
-                *mut c_void,
-                *const c_char,
-                *const *const c_char,
-                usize,
-            ) = std::mem::transmute(s1 as usize);
-            let cfs = host.nzb_completed_files(job);
-            for cf in cfs {
+
+        fn failed_article_samples(&self, job: NzbRef) -> Vec<crate::dupeprobe::ProbeSample> {
+            self.nzb_set_param(job, b"*DupeRecheck", Some(b"1"));
+            let mut out = Vec::new();
+            for cf in self.nzb_completed_files(job) {
                 if (cf.status != CF_PARTIAL && cf.status != CF_FAILURE) || cf.id <= 0 {
                     continue;
                 }
                 let partial = cf.status == CF_PARTIAL;
-                let (fi_ptr, state_loaded) = host.disk_load_file_for_inspect(cf.id, false, partial);
+                let (fi_ptr, state_loaded) = self.disk_load_file_for_inspect(cf.id, false, partial);
                 if fi_ptr.is_none() {
                     continue;
                 }
                 if partial && !state_loaded {
-                    host.delete_file_info(fi_ptr);
+                    self.delete_file_info(fi_ptr);
                     continue;
                 }
-                let groups_vec = host.file_groups(fi_ptr);
-                let group_cstrs: Vec<std::ffi::CString> = groups_vec
-                    .iter()
-                    .map(|g| {
-                        let end = g.iter().position(|&b| b == 0).unwrap_or(g.len());
-                        std::ffi::CString::new(&g[..end]).unwrap_or_default()
-                    })
-                    .collect();
-                let group_ptrs: Vec<*const c_char> =
-                    group_cstrs.iter().map(|c| c.as_ptr()).collect();
-                let fs = host.file_snap(fi_ptr);
+                let groups: Vec<Vec<u8>> =
+                    self.file_groups(fi_ptr).iter().map(|g| hc_trunc(g)).collect();
+                let fs = self.file_snap(fi_ptr);
                 for aidx in 0..fs.articles_len {
-                    let art = host.article_at(fi_ptr, aidx);
+                    let art = self.article_at(fi_ptr, aidx);
                     if (!partial || art.status == AI_FAILED) && !art.message_id.is_empty() {
-                        let mid_c = hc_cbuf(&art.message_id);
-                        emit(
-                            p1 as *mut c_void,
-                            mid_c.as_ptr() as *const c_char,
-                            if group_ptrs.is_empty() {
-                                std::ptr::null()
-                            } else {
-                                group_ptrs.as_ptr()
-                            },
-                            group_ptrs.len(),
-                        );
+                        let mid = hc_trunc(&art.message_id);
+                        if !mid.is_empty() {
+                            out.push(crate::dupeprobe::ProbeSample {
+                                message_id: mid,
+                                groups: groups.clone(),
+                            });
+                        }
                     }
                 }
-                host.delete_file_info(fi_ptr);
+                self.delete_file_info(fi_ptr);
             }
-            0
+            out
         }
-        12 => {
-            let hi = host.hist_item_snap(p2);
+
+        fn hide_info(&self, hist: usize) -> HideInfo {
+            let hi = self.hist_item_snap(hist);
             let nzb_ptr = hi.nzb();
-            let nzb = host.nzb_snap(nzb_ptr, false);
-            *ints.add(0) = nzb.mark_status.into();
-            *ints.add(1) = nzb.delete_status.into();
-            *ints.add(2) = c_int::from(nzb.is_dupe_success);
-            *strs.add(0) = hc_stash_str(&hi.name);
-            nzb_ptr.addr()
-        }
-        13 => {
-            host.history_replace_with_dup(p1, p2, a2 as usize, DupStatus::from(a1));
-            0
-        }
-        14 => {
-            let hl_len = host.history_len(p1);
-            if a1 < 0 || (a1 as usize) >= hl_len {
-                return 0;
+            let nzb = self.nzb_snap(nzb_ptr, false);
+            HideInfo {
+                nzb: nzb_ptr,
+                mark_status: nzb.mark_status,
+                delete_status: nzb.delete_status,
+                is_dupe_success: nzb.is_dupe_success,
+                name: hc_trunc(&hi.name),
             }
-            let pos = hl_len - 1 - (a1 as usize);
-            let hi = host.history_at(p1, pos);
-            *ints.add(0) = hi.kind;
-            *i64s.add(0) = hi.time;
-            *i64s.add(1) = if hi.kind == HK_NZB {
-                hi.inner_ptr as i64
+        }
+
+        fn replace_with_dup(&self, dq: usize, hist: usize, rindex: c_int, status: DupStatus) {
+            self.history_replace_with_dup(dq, hist, rindex as usize, status);
+        }
+
+        fn history_entry_from_end(&self, dq: usize, rindex: c_int) -> Option<HistoryEntry> {
+            let hl_len = self.history_len(dq);
+            if rindex < 0 || (rindex as usize) >= hl_len {
+                return None;
+            }
+            let hi = self.history_at(dq, hl_len - 1 - (rindex as usize));
+            if hi.hi_ptr == 0 {
+                return None;
+            }
+            Some(HistoryEntry {
+                hist_ptr: hi.hi_ptr,
+                kind: hi.kind,
+                time: hi.time,
+                nzb: NzbRef::from_addr(if hi.kind == HK_NZB { hi.inner_ptr } else { 0 }),
+                name: hc_trunc(&hi.name),
+            })
+        }
+
+        fn erase_history(&self, dq: usize, idx: c_int, from_end: bool) {
+            let hl_len = self.history_len(dq);
+            let pos = if from_end {
+                hl_len - 1 - (idx as usize)
             } else {
-                0
+                idx as usize
             };
-            *strs.add(0) = hc_stash_str(&hi.name);
-            hi.hi_ptr
+            self.history_erase_at(dq, pos);
         }
-        15 => {
-            let hl_len = host.history_len(p1);
-            let pos = if a2 != 0 {
-                hl_len - 1 - (a1 as usize)
-            } else {
-                a1 as usize
-            };
-            host.history_erase_at(p1, pos);
-            0
+
+        fn save_history(&self, dq: usize) {
+            self.dq_history_changed(dq);
+            self.dq_save(dq);
         }
-        16 => {
-            host.dq_history_changed(p1);
-            host.dq_save(p1);
-            0
-        }
-        17 => {
-            let hi_ptr = host.history_find_by_id(p1, a1);
+
+        fn mark_bad(&self, dq: usize, id: c_int) {
+            let hi_ptr = self.history_find_by_id(dq, id);
             if hi_ptr != 0 {
-                let hi = host.hist_item_snap(hi_ptr);
+                let hi = self.hist_item_snap(hi_ptr);
                 if hi.kind == HK_NZB && hi.nzb().is_some() {
-                    host.nzb_set_mark_status(hi.nzb(), MarkStatus::Bad);
+                    self.nzb_set_mark_status(hi.nzb(), MarkStatus::Bad);
                 }
             }
-            0
         }
-        18 => {
-            let hl_len = host.history_len(p1);
-            let mut found_idx: Option<usize> = None;
-            let mut found_hi = crate::queuesubsys_host::HistEntrySnap::default();
-            for idx in 0..hl_len {
-                let hi = host.history_at(p1, idx);
-                let m = if a2 != 0 {
-                    hi.hi_ptr == p2
-                } else {
-                    hi.id == a1
-                };
-                if m {
-                    found_idx = Some(idx);
-                    found_hi = hi;
-                    break;
-                }
+
+        fn find_history(&self, dq: usize, key: HistoryKey) -> Option<FoundHistory> {
+            let hl_len = self.history_len(dq);
+            let (idx, hi) = (0..hl_len)
+                .map(|idx| (idx, self.history_at(dq, idx)))
+                .find(|(_, hi)| match key {
+                    HistoryKey::Ptr(p) => hi.hi_ptr == p,
+                    HistoryKey::Id(id) => hi.id == id,
+                })?;
+            if hi.hi_ptr == 0 {
+                return None;
             }
-            let Some(idx) = found_idx else {
-                return 0;
-            };
-            let nzb_ptr = found_hi.nzb();
-            let nzb = if nzb_ptr.is_some() {
-                Some(host.nzb_snap(nzb_ptr, false))
-            } else {
-                None
-            };
-            *ints.add(0) = idx as c_int;
-            *ints.add(1) = hl_len as c_int;
-            *ints.add(2) = found_hi.kind;
-            *ints.add(3) = nzb.as_ref().map_or(0, |n| n.delete_status.into());
-            *ints.add(4) = nzb.as_ref().map_or(0, |n| n.par_status.into());
-            *ints.add(5) = nzb.as_ref().map_or(0, |n| n.unpack_status.into());
-            *ints.add(6) = nzb.as_ref().map_or(0, |n| n.parked_file_count);
-            *i64s.add(0) = nzb_ptr.addr() as i64;
-            *strs.add(0) = hc_stash_str(&found_hi.name);
-            *strs.add(1) = hc_stash_str(nzb.as_ref().map_or(b"", |n| n.dest_dir.as_slice()));
-            found_hi.hi_ptr
-        }
-        21 => {
-            let job = NzbRef::from_addr(p2);
-            if a1 < 0 {
-                let nzb = host.nzb_snap(job, false);
-                *ints.add(0) = c_int::from(nzb.unpack_cleaned_up_disk);
-                *ints.add(1) = nzb.post_total_sec;
-                *ints.add(2) = nzb.unpack_sec;
-                *ints.add(3) = nzb.par_sec;
-                *ints.add(4) = nzb.move_status.into();
-                *ints.add(5) = host.nzb_file_len(job) as c_int;
-                *ints.add(6) = nzb.live_unpack_sec;
-                *ints.add(7) = nzb.live_par_sec;
-                *strs.add(0) = hc_stash_str(&nzb.dest_dir);
-            } else {
-                let fp = host.nzb_file_at(job, a1 as usize);
-                let fs = host.file_snap(fp);
-                *strs.add(0) = hc_stash_str(&fs.filename);
-            }
-            0
-        }
-        22 => {
-            let hi = host.hist_item_snap(p2);
             let nzb_ptr = hi.nzb();
-            let nzb = host.nzb_snap(nzb_ptr, false);
+            let nzb = nzb_ptr.is_some().then(|| self.nzb_snap(nzb_ptr, false));
+            Some(FoundHistory {
+                hist_ptr: hi.hi_ptr,
+                idx: idx as c_int,
+                len: hl_len as c_int,
+                kind: hi.kind,
+                delete_status: nzb.as_ref().map_or_else(DeleteStatus::default, |n| n.delete_status),
+                par_status: nzb.as_ref().map_or_else(NzbParStatus::default, |n| n.par_status),
+                unpack_status: nzb.as_ref().map_or_else(UnpackStatus::default, |n| n.unpack_status),
+                parked_count: nzb.as_ref().map_or(0, |n| n.parked_file_count),
+                nzb: nzb_ptr,
+                name: hc_trunc(&hi.name),
+                dest_dir: hc_trunc(nzb.as_ref().map_or(b"", |n| n.dest_dir.as_slice())),
+            })
+        }
+
+        fn requeue_info(&self, job: NzbRef) -> RequeueInfo {
+            let nzb = self.nzb_snap(job, false);
+            RequeueInfo {
+                unpack_cleaned_up_disk: nzb.unpack_cleaned_up_disk,
+                post_total_sec: nzb.post_total_sec,
+                unpack_sec: nzb.unpack_sec,
+                par_sec: nzb.par_sec,
+                move_status: nzb.move_status,
+                file_count: self.nzb_file_len(job) as c_int,
+                live_unpack_sec: nzb.live_unpack_sec,
+                live_par_sec: nzb.live_par_sec,
+                dest_dir: hc_trunc(&nzb.dest_dir),
+            }
+        }
+
+        fn file_name_at(&self, job: NzbRef, idx: c_int) -> Vec<u8> {
+            let fp = self.nzb_file_at(job, idx as usize);
+            hc_trunc(&self.file_snap(fp).filename)
+        }
+
+        fn return_to_queue(
+            &self,
+            dq: usize,
+            hist: usize,
+            hidx: c_int,
+            reprocess: bool,
+            has_main_pars: bool,
+            post_total_sec: c_int,
+            move_status: MoveStatus,
+        ) {
+            let hi = self.hist_item_snap(hist);
+            let nzb_ptr = hi.nzb();
+            let nzb = self.nzb_snap(nzb_ptr, false);
             // Live work that ended after the job reached history is no part of it.
             crate::postproc::live_par_time_discard(nzb.id);
             if !nzb.unpack_cleaned_up_disk {
-                host.nzb_set_unpack_status(nzb_ptr, UnpackStatus::None);
-                host.nzb_set_direct_unpack_status(nzb_ptr, DirectUnpackStatus::None);
-                host.nzb_set_int(nzb_ptr, NZB_INT_PAR_REPAIRED, 0);
-                host.nzb_set_int(nzb_ptr, NZB_INT_UNPACK_TRIED, 0);
-                host.nzb_set_last_unpack_status(nzb_ptr, UnpackStatus::None);
-                host.nzb_action(nzb_ptr, NZB_ACT_CLEAR_EXTRACTED_ARCHIVES);
-                host.nzb_set_cleanup_status(nzb_ptr, CleanupStatus::None);
-                host.nzb_set_int(nzb_ptr, NZB_INT_PAR_RENAME_STATUS, RS_NONE);
-                host.nzb_set_int(nzb_ptr, NZB_INT_RAR_RENAME_STATUS, RS_NONE);
-                host.nzb_set_int(nzb_ptr, NZB_INT_POST_TOTAL_SEC, *ints.add(1));
-                host.nzb_set_int(nzb_ptr, NZB_INT_UNPACK_SEC, 0);
-                host.nzb_set_int(nzb_ptr, NZB_INT_LIVE_UNPACK_SEC, 0);
-                if *ints.add(0) != 0 {
-                    host.nzb_set_par_status(nzb_ptr, NzbParStatus::None);
-                    host.nzb_set_int(nzb_ptr, NZB_INT_PAR_SEC, 0);
-                    host.nzb_set_int(nzb_ptr, NZB_INT_LIVE_PAR_SEC, 0);
-                    host.nzb_set_int(nzb_ptr, NZB_INT_REPAIR_SEC, 0);
-                    host.nzb_set_int(nzb_ptr, NZB_INT_PAR_FULL, 0);
+                self.nzb_set_unpack_status(nzb_ptr, UnpackStatus::None);
+                self.nzb_set_direct_unpack_status(nzb_ptr, DirectUnpackStatus::None);
+                self.nzb_set_int(nzb_ptr, NZB_INT_PAR_REPAIRED, 0);
+                self.nzb_set_int(nzb_ptr, NZB_INT_UNPACK_TRIED, 0);
+                self.nzb_set_last_unpack_status(nzb_ptr, UnpackStatus::None);
+                self.nzb_action(nzb_ptr, NZB_ACT_CLEAR_EXTRACTED_ARCHIVES);
+                self.nzb_set_cleanup_status(nzb_ptr, CleanupStatus::None);
+                self.nzb_set_int(nzb_ptr, NZB_INT_PAR_RENAME_STATUS, RS_NONE);
+                self.nzb_set_int(nzb_ptr, NZB_INT_RAR_RENAME_STATUS, RS_NONE);
+                self.nzb_set_int(nzb_ptr, NZB_INT_POST_TOTAL_SEC, post_total_sec);
+                self.nzb_set_int(nzb_ptr, NZB_INT_UNPACK_SEC, 0);
+                self.nzb_set_int(nzb_ptr, NZB_INT_LIVE_UNPACK_SEC, 0);
+                if has_main_pars {
+                    self.nzb_set_par_status(nzb_ptr, NzbParStatus::None);
+                    self.nzb_set_int(nzb_ptr, NZB_INT_PAR_SEC, 0);
+                    self.nzb_set_int(nzb_ptr, NZB_INT_LIVE_PAR_SEC, 0);
+                    self.nzb_set_int(nzb_ptr, NZB_INT_REPAIR_SEC, 0);
+                    self.nzb_set_int(nzb_ptr, NZB_INT_PAR_FULL, 0);
                 }
             }
-            host.nzb_set_delete_status(nzb_ptr, DeleteStatus::None);
-            host.nzb_set_int(nzb_ptr, NZB_INT_DELETE_PAUSED, 0);
-            host.nzb_set_int(nzb_ptr, NZB_INT_DUPE_FAILOVER_CHECKED, -1);
-            host.nzb_set_int(nzb_ptr, NZB_INT_DEAD_PICK_PROBED, 0);
-            host.nzb_set_int(nzb_ptr, NZB_INT_DUPE_ATTEMPTED_ARTICLES, 0);
-            host.nzb_set_int(nzb_ptr, NZB_INT_DUPE_UNSOURCED_ARTICLES, 0);
-            host.nzb_set_int(nzb_ptr, NZB_INT_DUPE_FAILED_RUN, 0);
-            host.nzb_set_int(nzb_ptr, NZB_INT_DUPE_PAR_DEFER_STATE, DP_NONE);
-            host.nzb_set_mark_status(nzb_ptr, MarkStatus::None);
-            host.nzb_action(nzb_ptr, NZB_ACT_CLEAR_SCRIPT_STATUSES);
-            host.nzb_set_int(nzb_ptr, NZB_INT_PARKED_FILE_COUNT, 0);
-            host.nzb_set_move_status(nzb_ptr, MoveStatus::from(*ints.add(2)));
-            host.nzb_set_int(nzb_ptr, NZB_INT_REPROCESS, c_int::from(a2 != 0));
-            host.nzb_set_str(nzb_ptr, NZB_STR_FINAL_DIR, b"");
+            self.nzb_set_delete_status(nzb_ptr, DeleteStatus::None);
+            self.nzb_set_int(nzb_ptr, NZB_INT_DELETE_PAUSED, 0);
+            self.nzb_set_int(nzb_ptr, NZB_INT_DUPE_FAILOVER_CHECKED, -1);
+            self.nzb_set_int(nzb_ptr, NZB_INT_DEAD_PICK_PROBED, 0);
+            self.nzb_set_int(nzb_ptr, NZB_INT_DUPE_ATTEMPTED_ARTICLES, 0);
+            self.nzb_set_int(nzb_ptr, NZB_INT_DUPE_UNSOURCED_ARTICLES, 0);
+            self.nzb_set_int(nzb_ptr, NZB_INT_DUPE_FAILED_RUN, 0);
+            self.nzb_set_int(nzb_ptr, NZB_INT_DUPE_PAR_DEFER_STATE, DP_NONE);
+            self.nzb_set_mark_status(nzb_ptr, MarkStatus::None);
+            self.nzb_action(nzb_ptr, NZB_ACT_CLEAR_SCRIPT_STATUSES);
+            self.nzb_set_int(nzb_ptr, NZB_INT_PARKED_FILE_COUNT, 0);
+            self.nzb_set_move_status(nzb_ptr, move_status);
+            self.nzb_set_int(nzb_ptr, NZB_INT_REPROCESS, c_int::from(reprocess));
+            self.nzb_set_str(nzb_ptr, NZB_STR_FINAL_DIR, b"");
             crate::postproc::forget_dead_volume_verdicts(nzb.id);
-            host.history_return_to_queue(p1, p2, a1 as usize);
-            0
+            self.history_return_to_queue(dq, hist, hidx as usize);
         }
-        23 => {
-            let job = NzbRef::from_addr(p2);
+
+        fn notify_returned(&self, dq: usize, job: NzbRef, added: bool) {
             if let Some(pp) = crate::ffi::active_prepost() {
-                if a1 != 0 {
-                    pp.nzb_added(host, p1, job);
+                if added {
+                    pp.nzb_added(self, dq, job);
                 } else {
-                    pp.nzb_downloaded(host, p1, job);
+                    pp.nzb_downloaded(self, dq, job);
                 }
             }
-            host.prepost_queue_changed(p1, ASPECT_NZB_RETURNED, job, FileRef::NONE);
-            0
+            self.prepost_queue_changed(dq, ASPECT_NZB_RETURNED, job, FileRef::NONE);
         }
-        24 => {
-            let job = NzbRef::from_addr(p2);
-            host.nzb_action(job, NZB_ACT_BUILD_DEST_DIR);
-            let nzb = host.nzb_snap(job, false);
-            *strs.add(0) = hc_stash_str(&nzb.dest_dir);
-            0
+
+        fn build_dest_dir(&self, job: NzbRef) -> Vec<u8> {
+            self.nzb_action(job, NZB_ACT_BUILD_DEST_DIR);
+            hc_trunc(&self.nzb_snap(job, false).dest_dir)
         }
-        25 => {
-            let hi = host.hist_item_snap(p2);
+
+        fn return_url_to_queue(&self, dq: usize, hist: usize, hidx: c_int) {
+            let hi = self.hist_item_snap(hist);
             let nzb_ptr = hi.nzb();
-            let nzb = host.nzb_snap(nzb_ptr, false);
-            host.nzb_set_url_status(nzb_ptr, UrlStatus::None);
-            host.nzb_set_delete_status(nzb_ptr, DeleteStatus::None);
+            let nzb = self.nzb_snap(nzb_ptr, false);
+            self.nzb_set_url_status(nzb_ptr, UrlStatus::None);
+            self.nzb_set_delete_status(nzb_ptr, DeleteStatus::None);
             if nzb.dupe_hint == DH_NONE {
-                host.nzb_set_int(nzb_ptr, NZB_INT_DUPE_HINT, DH_REDOWNLOAD_MANUAL);
+                self.nzb_set_int(nzb_ptr, NZB_INT_DUPE_HINT, DH_REDOWNLOAD_MANUAL);
             }
-            host.history_return_to_queue(p1, p2, a1 as usize);
-            host.prepost_queue_changed(p1, ASPECT_URL_RETURNED, nzb_ptr, FileRef::NONE);
-            0
+            self.history_return_to_queue(dq, hist, hidx as usize);
+            self.prepost_queue_changed(dq, ASPECT_URL_RETURNED, nzb_ptr, FileRef::NONE);
         }
-        26 => {
-            let nzb = host.nzb_snap(NzbRef::from_addr(p2), false);
-            *ints.add(0) = c_int::from(nzb.delete_paused);
-            *strs.add(0) = hc_stash_str(&nzb.name);
-            *strs.add(1) = hc_stash_str(&nzb.queued_filename);
-            *strs.add(2) = hc_stash_str(&nzb.dest_dir);
-            0
+
+        fn nzb_names(&self, job: NzbRef) -> NzbNames {
+            let nzb = self.nzb_snap(job, false);
+            NzbNames {
+                delete_paused: nzb.delete_paused,
+                name: hc_trunc(&nzb.name),
+                queued_filename: hc_trunc(&nzb.queued_filename),
+                dest_dir: hc_trunc(&nzb.dest_dir),
+            }
         }
-        27 => {
-            let parsed = crate::nzbfile::parse_and_materialize_nzb(host, hc_cstr_bytes(s1), b"");
+
+        fn parse_nzb(&self, path: &[u8]) -> Option<usize> {
+            let parsed = crate::nzbfile::parse_and_materialize_nzb(self, path, b"");
             if !parsed.ok {
-                host.destroy_nzb_uptr(parsed.uptr_addr);
-                return 0;
+                self.destroy_nzb_uptr(parsed.uptr_addr);
+                return None;
             }
-            parsed.uptr_addr
+            (parsed.uptr_addr != 0).then_some(parsed.uptr_addr)
         }
-        28 => {
-            let job = NzbRef::from_addr(p2);
-            let src_nzb_ptr = NzbRef::from_addr(if p1 != 0 { *(p1 as *const usize) } else { 0 });
+
+        fn reset_for_redownload(&self, job: NzbRef, new_nzb: usize, paused: bool) {
+            // SAFETY: `new_nzb` is the address of the owning pointer that
+            // `parse_nzb` returned, which holds the new job's address.
+            let src_nzb_ptr =
+                NzbRef::from_addr(if new_nzb != 0 { unsafe { *(new_nzb as *const usize) } } else { 0 });
             if src_nzb_ptr.is_some() {
-                let n = host.nzb_file_len(src_nzb_ptr);
-                let paused_val = c_int::from(a1 != 0);
+                let n = self.nzb_file_len(src_nzb_ptr);
+                let paused_val = c_int::from(paused);
                 for idx in 0..n {
-                    let fp = host.nzb_file_at(src_nzb_ptr, idx);
-                    host.file_set_int(fp, FILE_INT_PAUSED, paused_val);
+                    let fp = self.nzb_file_at(src_nzb_ptr, idx);
+                    self.file_set_int(fp, FILE_INT_PAUSED, paused_val);
                 }
             }
-            host.disk_discard_files(job);
-            crate::postproc::live_par_time_discard(host.nzb_snap(job, false).id);
-            host.nzb_set_move_status(job, MoveStatus::None);
-            host.nzb_set_int(job, NZB_INT_UNPACK_CLEANED_UP_DISK, 0);
-            host.nzb_set_par_status(job, NzbParStatus::None);
-            host.nzb_set_int(job, NZB_INT_PAR_RENAME_STATUS, RS_NONE);
-            host.nzb_set_int(job, NZB_INT_RAR_RENAME_STATUS, RS_NONE);
-            host.nzb_set_direct_rename_status(job, DirectRenameStatus::None);
-            host.nzb_set_direct_unpack_status(job, DirectUnpackStatus::None);
-            host.nzb_set_int(job, NZB_INT_PAR_REPAIRED, 0);
-            host.nzb_set_int(job, NZB_INT_UNPACK_TRIED, 0);
-            host.nzb_set_last_unpack_status(job, UnpackStatus::None);
-            host.nzb_action(job, NZB_ACT_CLEAR_EXTRACTED_ARCHIVES);
-            host.nzb_set_int(job, NZB_INT_HEALTH_PAUSED, 0);
-            host.nzb_set_i64(job, NZB_I64_DOWNLOADED_SIZE, 0);
-            host.nzb_set_int(job, NZB_INT_DOWNLOAD_SEC, 0);
-            host.nzb_set_int(job, NZB_INT_POST_TOTAL_SEC, 0);
-            host.nzb_set_int(job, NZB_INT_PAR_SEC, 0);
-            host.nzb_set_int(job, NZB_INT_REPAIR_SEC, 0);
-            host.nzb_set_int(job, NZB_INT_UNPACK_SEC, 0);
-            host.nzb_set_int(job, NZB_INT_LIVE_UNPACK_SEC, 0);
-            host.nzb_set_int(job, NZB_INT_LIVE_PAR_SEC, 0);
-            host.nzb_set_int(job, NZB_INT_EXTRA_PAR_BLOCKS, 0);
-            host.nzb_set_int(job, NZB_INT_ALL_FIRST, 0);
-            host.nzb_set_int(job, NZB_INT_WAITING_PAR, 0);
-            host.nzb_set_int(job, NZB_INT_LOADING_PAR, 0);
-            host.nzb_set_int(job, NZB_INT_DUPE_RECOVERED_ARTICLES, 0);
-            host.nzb_set_i64(job, NZB_I64_DUPE_RECOVERED_BYTES, 0);
-            host.nzb_set_int(job, NZB_INT_DUPE_RECOVERED_HOLES, 0);
-            host.nzb_set_param(job, crate::queuecoord::PAR_ARTICLES_PARAM, None);
-            host.nzb_set_param(job, crate::queuecoord::PAR_FILES_PARAM, None);
-            host.nzb_set_int(job, NZB_INT_DUPE_PAR_DEFER_STATE, DP_NONE);
-            host.nzb_set_int(job, NZB_INT_DUPE_NO_PAR_NOTED, 0);
-            host.nzb_redownload_replace_files(job, src_nzb_ptr);
-            host.destroy_nzb_uptr(p1);
+            self.disk_discard_files(job);
+            crate::postproc::live_par_time_discard(self.nzb_snap(job, false).id);
+            self.nzb_set_move_status(job, MoveStatus::None);
+            self.nzb_set_int(job, NZB_INT_UNPACK_CLEANED_UP_DISK, 0);
+            self.nzb_set_par_status(job, NzbParStatus::None);
+            self.nzb_set_int(job, NZB_INT_PAR_RENAME_STATUS, RS_NONE);
+            self.nzb_set_int(job, NZB_INT_RAR_RENAME_STATUS, RS_NONE);
+            self.nzb_set_direct_rename_status(job, DirectRenameStatus::None);
+            self.nzb_set_direct_unpack_status(job, DirectUnpackStatus::None);
+            self.nzb_set_int(job, NZB_INT_PAR_REPAIRED, 0);
+            self.nzb_set_int(job, NZB_INT_UNPACK_TRIED, 0);
+            self.nzb_set_last_unpack_status(job, UnpackStatus::None);
+            self.nzb_action(job, NZB_ACT_CLEAR_EXTRACTED_ARCHIVES);
+            self.nzb_set_int(job, NZB_INT_HEALTH_PAUSED, 0);
+            self.nzb_set_i64(job, NZB_I64_DOWNLOADED_SIZE, 0);
+            self.nzb_set_int(job, NZB_INT_DOWNLOAD_SEC, 0);
+            self.nzb_set_int(job, NZB_INT_POST_TOTAL_SEC, 0);
+            self.nzb_set_int(job, NZB_INT_PAR_SEC, 0);
+            self.nzb_set_int(job, NZB_INT_REPAIR_SEC, 0);
+            self.nzb_set_int(job, NZB_INT_UNPACK_SEC, 0);
+            self.nzb_set_int(job, NZB_INT_LIVE_UNPACK_SEC, 0);
+            self.nzb_set_int(job, NZB_INT_LIVE_PAR_SEC, 0);
+            self.nzb_set_int(job, NZB_INT_EXTRA_PAR_BLOCKS, 0);
+            self.nzb_set_int(job, NZB_INT_ALL_FIRST, 0);
+            self.nzb_set_int(job, NZB_INT_WAITING_PAR, 0);
+            self.nzb_set_int(job, NZB_INT_LOADING_PAR, 0);
+            self.nzb_set_int(job, NZB_INT_DUPE_RECOVERED_ARTICLES, 0);
+            self.nzb_set_i64(job, NZB_I64_DUPE_RECOVERED_BYTES, 0);
+            self.nzb_set_int(job, NZB_INT_DUPE_RECOVERED_HOLES, 0);
+            self.nzb_set_param(job, crate::queuecoord::PAR_ARTICLES_PARAM, None);
+            self.nzb_set_param(job, crate::queuecoord::PAR_FILES_PARAM, None);
+            self.nzb_set_int(job, NZB_INT_DUPE_PAR_DEFER_STATE, DP_NONE);
+            self.nzb_set_int(job, NZB_INT_DUPE_NO_PAR_NOTED, 0);
+            self.nzb_redownload_replace_files(job, src_nzb_ptr);
+            self.destroy_nzb_uptr(new_nzb);
             if let Some((qc, qh)) = crate::ffi::active_queue_coord_and_host() {
                 qc.check_dupe_file_infos(&qh, job);
             }
-            0
         }
-        30 => {
-            let job = NzbRef::from_addr(p2);
-            let try_state = a2 == CF_PARTIAL;
-            let (fi_ptr, state_loaded) = host.disk_load_file_for_inspect(a1, true, try_state);
+
+        fn load_file_for_retry(&self, job: NzbRef, id: c_int, status: c_int) -> Option<RetryFile> {
+            let (fi_ptr, state_loaded) =
+                self.disk_load_file_for_inspect(id, true, status == CF_PARTIAL);
             if fi_ptr.is_none() {
-                return 0;
+                return None;
             }
-            host.file_set_nzb_info(fi_ptr, job);
-            let fs = host.file_snap(fi_ptr);
-            let nzb = host.nzb_snap(job, false);
-            *ints.add(0) = c_int::from(state_loaded);
-            *ints.add(1) = fs.success_articles;
-            *ints.add(2) = fs.partial_state;
-            *ints.add(3) = fs.articles_len as c_int;
-            *ints.add(4) = c_int::from(fs.par_file);
-            *ints.add(5) = fs.total_articles;
-            *ints.add(6) = fs.missed_articles;
-            *ints.add(7) = fs.failed_articles;
-            *ints.add(8) = fs.completed_articles;
-            *ints.add(9) = fs.success_articles;
-            *ints.add(10) = nzb.failed_articles;
-            *ints.add(11) = nzb.success_articles;
-            *i64s.add(0) = fs.size;
-            *i64s.add(1) = fs.missed_size;
-            *i64s.add(2) = fs.failed_size;
-            *i64s.add(3) = fs.remaining_size;
-            *i64s.add(4) = fs.success_size;
-            *i64s.add(5) = nzb.failed_size;
-            *i64s.add(6) = nzb.success_size;
-            *i64s.add(7) = nzb.par_failed_size;
-            *i64s.add(8) = nzb.par_success_size;
-            *strs.add(0) = hc_stash_str(&fs.filename);
-            fi_ptr.addr()
+            self.file_set_nzb_info(fi_ptr, job);
+            let fs = self.file_snap(fi_ptr);
+            let nzb = self.nzb_snap(job, false);
+            Some(RetryFile {
+                file: fi_ptr,
+                state_loaded,
+                success_articles: fs.success_articles,
+                partial_state: fs.partial_state,
+                article_count: (fs.articles_len as c_int).max(0) as usize,
+                par_file: fs.par_file,
+                total_articles: fs.total_articles,
+                missed_articles: fs.missed_articles,
+                failed_articles: fs.failed_articles,
+                completed_articles: fs.completed_articles,
+                nzb_failed_articles: nzb.failed_articles,
+                nzb_success_articles: nzb.success_articles,
+                size: fs.size,
+                missed_size: fs.missed_size,
+                failed_size: fs.failed_size,
+                remaining_size: fs.remaining_size,
+                success_size: fs.success_size,
+                nzb_failed_size: nzb.failed_size,
+                nzb_success_size: nzb.success_size,
+                nzb_par_failed_size: nzb.par_failed_size,
+                nzb_par_success_size: nzb.par_success_size,
+                filename: hc_trunc(&fs.filename),
+            })
         }
-        31 => {
-            let file = FileRef::from_addr(p2);
-            if a1 == 0 {
-                host.delete_file_info(file);
-            } else {
-                host.file_set_str(file, FILE_STR_FILENAME, Some(hc_cstr_bytes(s1)));
+
+        fn delete_file_info(&self, file: FileRef) {
+            QueueSubsysHost::delete_file_info(self, file);
+        }
+
+        fn rename_file(&self, file: FileRef, name: &[u8]) {
+            self.file_set_str(file, FILE_STR_FILENAME, Some(name));
+        }
+
+        fn article_states(&self, file: FileRef, statuses: &mut [c_int], sizes: &mut [c_int]) {
+            for (idx, (status, size)) in statuses.iter_mut().zip(sizes.iter_mut()).enumerate() {
+                let art = self.article_at(file, idx);
+                *status = art.status;
+                *size = art.size;
             }
-            0
         }
-        32 => {
-            let file = FileRef::from_addr(p2);
-            for idx in 0..len {
-                let art = host.article_at(file, idx);
-                *ints.add(idx) = art.status;
-                *ints.add(len + idx) = art.size;
-            }
-            0
-        }
-        33 => {
-            let job = NzbRef::from_addr(p2);
-            let file = FileRef::from_addr(p1);
-            host.file_set_int(file, FILE_INT_PARTIAL_STATE, a2);
-            host.file_subtract_server_stats_from_nzb_total(file, job);
-            host.nzb_set_i64(job, NZB_I64_FAILED_SIZE, *i64s.add(3));
-            host.nzb_set_i64(job, NZB_I64_SUCCESS_SIZE, *i64s.add(4));
-            host.nzb_set_int(job, NZB_INT_FAILED_ARTICLES, *ints.add(3));
-            host.nzb_set_int(job, NZB_INT_SUCCESS_ARTICLES, *ints.add(4));
-            host.nzb_set_i64(job, NZB_I64_PAR_FAILED_SIZE, *i64s.add(5));
-            host.nzb_set_i64(job, NZB_I64_PAR_SUCCESS_SIZE, *i64s.add(6));
-            if !bytes.is_null() {
-                for idx in 0..len {
-                    if *bytes.add(idx) != 0 {
-                        let art = host.article_at(file, idx);
-                        if art.ptr != 0 {
-                            host.invalidate_source_replacement(file, art.ptr);
-                            host.article_edit(art.ptr, crate::qarticle::ArticleEdit::ResetForRetry);
-                        }
-                    }
+
+        fn requeue_file(
+            &self,
+            job: NzbRef,
+            file: FileRef,
+            completed_idx: c_int,
+            partial_state: c_int,
+            counts: &RequeueCounts,
+            reset: &[u8],
+        ) -> c_int {
+            self.file_set_int(file, FILE_INT_PARTIAL_STATE, partial_state);
+            self.file_subtract_server_stats_from_nzb_total(file, job);
+            self.nzb_set_i64(job, NZB_I64_FAILED_SIZE, counts.nzb_failed_size);
+            self.nzb_set_i64(job, NZB_I64_SUCCESS_SIZE, counts.nzb_success_size);
+            self.nzb_set_int(job, NZB_INT_FAILED_ARTICLES, counts.nzb_failed_articles);
+            self.nzb_set_int(job, NZB_INT_SUCCESS_ARTICLES, counts.nzb_success_articles);
+            self.nzb_set_i64(job, NZB_I64_PAR_FAILED_SIZE, counts.nzb_par_failed_size);
+            self.nzb_set_i64(job, NZB_I64_PAR_SUCCESS_SIZE, counts.nzb_par_success_size);
+            for (idx, _) in reset.iter().enumerate().filter(|(_, &flag)| flag != 0) {
+                let art = self.article_at(file, idx);
+                if art.ptr != 0 {
+                    self.invalidate_source_replacement(file, art.ptr);
+                    self.article_edit(art.ptr, crate::qarticle::ArticleEdit::ResetForRetry);
                 }
             }
-            host.file_set_i64(file, FILE_I64_FAILED_SIZE, *i64s.add(0));
-            host.file_set_i64(file, FILE_I64_REMAINING_SIZE, *i64s.add(1));
-            host.file_set_i64(file, FILE_I64_SUCCESS_SIZE, *i64s.add(2));
-            host.file_set_int(file, FILE_INT_FAILED_ARTICLES, *ints.add(0));
-            host.file_set_int(file, FILE_INT_COMPLETED_ARTICLES, *ints.add(1));
-            host.file_set_int(file, FILE_INT_SUCCESS_ARTICLES, *ints.add(2));
-            let fs = host.file_snap(file);
-            host.disk_discard_file(fs.id, false, true, a2 != PARTIAL_COMPLETED);
-            if a2 == PARTIAL_COMPLETED {
-                host.disk_save_file_state(file, true);
+            self.file_set_i64(file, FILE_I64_FAILED_SIZE, counts.file_failed_size);
+            self.file_set_i64(file, FILE_I64_REMAINING_SIZE, counts.file_remaining_size);
+            self.file_set_i64(file, FILE_I64_SUCCESS_SIZE, counts.file_success_size);
+            self.file_set_int(file, FILE_INT_FAILED_ARTICLES, counts.file_failed_articles);
+            self.file_set_int(file, FILE_INT_COMPLETED_ARTICLES, counts.file_completed_articles);
+            self.file_set_int(file, FILE_INT_SUCCESS_ARTICLES, counts.file_success_articles);
+            let fs = self.file_snap(file);
+            self.disk_discard_file(fs.id, false, true, partial_state != PARTIAL_COMPLETED);
+            if partial_state == PARTIAL_COMPLETED {
+                self.disk_save_file_state(file, true);
             }
-            host.file_action(file, FILE_ACT_CLEAR_ARTICLES);
-            let fid = fs.id;
-            host.nzb_add_requeued_file(job, file);
-            host.nzb_erase_completed_file(job, a1 as usize);
-            fid as usize
+            self.file_action(file, FILE_ACT_CLEAR_ARTICLES);
+            self.nzb_add_requeued_file(job, file);
+            self.nzb_erase_completed_file(job, completed_idx as usize);
+            fs.id
         }
-        34 => {
-            let job = NzbRef::from_addr(p2);
-            if len > 0 && !ints.is_null() {
-                let req = std::slice::from_raw_parts(ints, len);
-                let jobs = host.nzb_stream_repair_jobs(job);
+
+        fn finish_retry(&self, job: NzbRef, requeued: &[c_int], health_pause: bool) -> (bool, c_int) {
+            if !requeued.is_empty() {
+                let jobs = self.nzb_stream_repair_jobs(job);
                 for j in (0..jobs.len()).rev() {
-                    if req.contains(&jobs[j].file_id) {
-                        host.nzb_stream_repair_erase_job(job, j, false);
+                    if requeued.contains(&jobs[j].file_id) {
+                        self.nzb_stream_repair_erase_job(job, j, false);
                     }
                 }
             }
-            host.nzb_action(job, NZB_ACT_UPDATE_CURRENT_STATS);
-            if a1 != 0 {
-                host.nzb_set_int(job, NZB_INT_HEALTH_PAUSED, 1);
+            self.nzb_action(job, NZB_ACT_UPDATE_CURRENT_STATS);
+            if health_pause {
+                self.nzb_set_int(job, NZB_INT_HEALTH_PAUSED, 1);
             }
-            let nzb = host.nzb_snap(job, false);
-            *i64s.add(0) = i64::from(nzb.is_download_completed);
-            *i64s.add(1) = i64::from(nzb.id);
-            let _ = AI_UNDEFINED;
-            0
+            let nzb = self.nzb_snap(job, false);
+            (nzb.is_download_completed, nzb.id)
         }
-        35 => {
-            host.dq_edit_entry(p1, a1, EA_GROUP_PAUSE_EXTRA_PARS, None);
-            0
+
+        fn pause_extra_pars(&self, dq: usize, nzb_id: c_int) {
+            self.dq_edit_entry(dq, nzb_id, EA_GROUP_PAUSE_EXTRA_PARS, None);
         }
-        36 => {
-            let hi = host.hist_item_snap(p2);
-            match a1 {
-                0 => {
-                    host.nzb_set_param(hi.nzb(), hc_cstr_bytes(s1), Some(hc_cstr_bytes(s2)));
-                }
-                1 => {
-                    host.nzb_set_str(hi.nzb(), NZB_STR_CATEGORY, hc_cstr_bytes(s1));
-                }
-                2 => {
+
+        fn edit_history(&self, hist: usize, edit: HistEdit<'_>) -> Option<c_int> {
+            let hi = self.hist_item_snap(hist);
+            let nzb = hi.nzb();
+            match edit {
+                HistEdit::Param { name, value } => self.nzb_set_param(nzb, name, Some(value)),
+                HistEdit::Category(category) => self.nzb_set_str(nzb, NZB_STR_CATEGORY, category),
+                HistEdit::Name(name) => {
                     if hi.kind == HK_NZB || hi.kind == HK_URL {
-                        let prev = host.nzb_snap(hi.nzb(), false).name;
-                        host.nzb_set_str(hi.nzb(), NZB_STR_NAME, hc_cstr_bytes(s1));
-                        let after = host.nzb_snap(hi.nzb(), false);
-                        if hi.kind == HK_NZB && prev != after.name {
-                            return after.id as usize;
+                        let prev = self.nzb_snap(nzb, false).name;
+                        self.nzb_set_str(nzb, NZB_STR_NAME, name);
+                        let after = self.nzb_snap(nzb, false);
+                        if hi.kind == HK_NZB && prev != after.name && after.id != 0 {
+                            return Some(after.id);
                         }
                     } else if hi.kind == HK_DUP {
-                        host.dup_edit(hi.inner_ptr, DupEdit::Name(hc_cstr_bytes(s1)));
+                        self.dup_edit(hi.inner_ptr, DupEdit::Name(name));
                     }
                 }
-                3 => {
-                    host.nzb_set_param(hi.nzb(), b"DupeSearchOwnedKey", None);
-                    host.nzb_set_str(hi.nzb(), NZB_STR_DUPE_KEY, hc_cstr_bytes(s1));
+                HistEdit::DupeKey(key) => {
+                    self.nzb_set_param(nzb, b"DupeSearchOwnedKey", None);
+                    self.nzb_set_str(nzb, NZB_STR_DUPE_KEY, key);
                 }
-                4 => host.nzb_set_int(hi.nzb(), NZB_INT_DUPE_SCORE, a2),
-                5 => host.nzb_set_dupe_mode(hi.nzb(), DupeMode::from(a2)),
-                6 => host.nzb_set_delete_status(hi.nzb(), DeleteStatus::from(a2)),
-                7 => host.dup_edit(hi.inner_ptr, DupEdit::DupeKey(hc_cstr_bytes(s1))),
-                8 => host.dup_edit(hi.inner_ptr, DupEdit::Score(a2)),
-                9 => host.dup_edit(hi.inner_ptr, DupEdit::Mode(DupeMode::from(a2))),
-                _ => {}
+                HistEdit::DupeScore(score) => self.nzb_set_int(nzb, NZB_INT_DUPE_SCORE, score),
+                HistEdit::DupeMode(mode) => self.nzb_set_dupe_mode(nzb, mode),
+                HistEdit::DeleteStatus(status) => self.nzb_set_delete_status(nzb, status),
             }
-            0
+            None
         }
-        _ => 0,
+
+        fn edit_dup(&self, hist: usize, edit: DupEdit<'_>) {
+            self.dup_edit(self.hist_item_snap(hist).inner_ptr, edit);
+        }
     }
 }
 
 #[cfg(unix)]
-fn hc_make_native_env(host: &crate::queuesubsys_host::QueueSubsysHost) -> NzbgetRsHistoryCoordEnv {
-    NzbgetRsHistoryCoordEnv {
-        ctx: std::ptr::from_ref(host) as *mut c_void,
-        p1: 0,
-        p2: 0,
-        a1: 0,
-        a2: 0,
-        a3: 0,
-        a4: 0,
-        a5: b'/' as c_int,
-        a6: 0,
-        t1: 0,
-        s1: std::ptr::null(),
-        int_arr: std::ptr::null(),
-        int_len: 0,
-        log_cb: Some(hc_native_log_cb),
-        action_cb: Some(hc_native_action_cb),
-    }
-}
-
-#[cfg(unix)]
-fn hc_nzb_cleanup_disk() -> c_int {
-    c_int::from(crate::options::active_options().is_some_and(|o| o.scalars().nzb_cleanup_disk != 0))
+fn hc_nzb_cleanup_disk() -> bool {
+    crate::options::active_options().is_some_and(|o| o.scalars().nzb_cleanup_disk != 0)
 }
 
 #[cfg(unix)]
@@ -3066,15 +2302,12 @@ pub(crate) fn delete_disk_files_active(nzb_ptr: NzbRef) {
     let Some(host) = crate::ffi::queue_host() else {
         return;
     };
-    let _guard = HcArenaGuard;
-    let opts = host.opts();
-    let mut env = hc_make_native_env(&host);
-    env.p2 = nzb_ptr.addr();
-    env.a1 = c_int::from(opts.server_mode);
-    env.a2 = hc_nzb_cleanup_disk();
-    unsafe {
-        history_coord_exec(0, &env);
-    }
+    let server_mode = host.opts().server_mode;
+    HistoryCoord { host: &host, dq: 0 }.delete_disk_files(
+        nzb_ptr,
+        server_mode,
+        hc_nzb_cleanup_disk(),
+    );
 }
 
 #[cfg(unix)]
@@ -3082,13 +2315,7 @@ pub(crate) fn add_to_history_active(dq_ptr: usize, nzb_ptr: NzbRef) {
     let Some(host) = crate::ffi::queue_host() else {
         return;
     };
-    let _guard = HcArenaGuard;
-    let mut env = hc_make_native_env(&host);
-    env.p1 = dq_ptr;
-    env.p2 = nzb_ptr.addr();
-    unsafe {
-        history_coord_exec(1, &env);
-    }
+    HistoryCoord { host: &host, dq: dq_ptr }.add_to_history(nzb_ptr);
 }
 
 #[cfg(unix)]
@@ -3096,17 +2323,13 @@ pub(crate) fn history_hide_active(dq_ptr: usize, hist_ptr: usize, rindex: i32) {
     let Some(host) = crate::ffi::queue_host() else {
         return;
     };
-    let _guard = HcArenaGuard;
-    let opts = host.opts();
-    let mut env = hc_make_native_env(&host);
-    env.p1 = dq_ptr;
-    env.p2 = hist_ptr;
-    env.a1 = rindex;
-    env.a2 = c_int::from(opts.server_mode);
-    env.a3 = hc_nzb_cleanup_disk();
-    unsafe {
-        history_coord_exec(2, &env);
-    }
+    let server_mode = host.opts().server_mode;
+    HistoryCoord { host: &host, dq: dq_ptr }.history_hide(
+        hist_ptr,
+        rindex,
+        server_mode,
+        hc_nzb_cleanup_disk(),
+    );
 }
 
 #[cfg(unix)]
@@ -3115,18 +2338,14 @@ pub(crate) fn service_work_active() {
         return;
     };
     host.with_locked_queue(|dq_ptr| {
-        let _guard = HcArenaGuard;
         let opts = host.opts();
-        let mut env = hc_make_native_env(&host);
-        env.p1 = dq_ptr;
-        env.a1 = opts.keep_history;
-        env.a2 = c_int::from(opts.dupe_check);
-        env.a3 = c_int::from(opts.server_mode);
-        env.a4 = hc_nzb_cleanup_disk();
-        env.t1 = opts.cur_time;
-        unsafe {
-            history_coord_exec(3, &env);
-        }
+        HistoryCoord { host: &host, dq: dq_ptr }.service_work(
+            opts.keep_history,
+            opts.dupe_check,
+            opts.server_mode,
+            hc_nzb_cleanup_disk(),
+            opts.cur_time,
+        );
     });
 }
 
@@ -3135,13 +2354,7 @@ pub(crate) fn redownload_active(dq_ptr: usize, hist_ptr: usize) {
     let Some(host) = crate::ffi::queue_host() else {
         return;
     };
-    let _guard = HcArenaGuard;
-    let mut env = hc_make_native_env(&host);
-    env.p1 = dq_ptr;
-    env.p2 = hist_ptr;
-    unsafe {
-        history_coord_exec(4, &env);
-    }
+    HistoryCoord { host: &host, dq: dq_ptr }.redownload(hist_ptr);
 }
 
 #[cfg(unix)]
@@ -3154,26 +2367,16 @@ pub(crate) fn edit_list_active(
     let Some(host) = crate::ffi::queue_host() else {
         return false;
     };
-    let _guard = HcArenaGuard;
     let opts = host.opts();
-    let args_c = args.map(hc_cbuf);
-    let mut env = hc_make_native_env(&host);
-    env.p1 = dq_ptr;
-    env.a1 = action;
-    env.a2 = c_int::from(opts.dupe_check);
-    env.a3 = c_int::from(opts.server_mode);
-    env.a4 = hc_nzb_cleanup_disk();
-    env.a6 = c_int::from(opts.par_check != crate::queuesubsys_host::PC_FORCE);
-    env.s1 = args_c
-        .as_ref()
-        .map_or(std::ptr::null(), |v| v.as_ptr() as *const c_char);
-    env.int_arr = if ids.is_empty() {
-        std::ptr::null()
-    } else {
-        ids.as_ptr()
-    };
-    env.int_len = ids.len();
-    unsafe { history_coord_exec(5, &env) != 0 }
+    HistoryCoord { host: &host, dq: dq_ptr }.edit_list(
+        ids,
+        action,
+        args.map(hc_until_nul),
+        opts.dupe_check,
+        opts.server_mode,
+        hc_nzb_cleanup_disk(),
+        opts.par_check != crate::queuesubsys_host::PC_FORCE,
+    )
 }
 
 #[cfg(test)]
@@ -3755,96 +2958,58 @@ mod tests {
     }
 
     #[test]
-    fn history_coord_exec_service_work_hides_and_purges_expired() {
+    fn history_coord_service_work_hides_and_purges_expired() {
+        use std::cell::{Cell, RefCell};
         struct MockHist {
-            items: Vec<(i32, i64, &'static [u8])>,
-            saved: bool,
+            items: RefCell<Vec<(i32, i64, &'static [u8])>>,
+            saved: Cell<bool>,
         }
-        unsafe extern "C" fn mock_hc_action(
-            raw: *mut c_void,
-            sub: c_int,
-            a1: c_int,
-            a2: c_int,
-            _p1: usize,
-            p2: usize,
-            _s1: *const c_char,
-            _s2: *const c_char,
-            ints: *mut c_int,
-            i64s: *mut i64,
-            strs: *mut *const c_char,
-            _u8s: *mut u8,
-            _len: usize,
-        ) -> usize {
-            let h = &mut *(raw as *mut MockHist);
-            match sub {
-                12 => {
-                    let it = &h.items[p2 - 1];
-                    let is = std::slice::from_raw_parts_mut(ints, 3);
-                    is[0] = 0;
-                    is[1] = 0;
-                    is[2] = 1;
-                    *strs = it.2.as_ptr() as *const c_char;
-                    0
+        impl HistoryHost for MockHist {
+            fn hide_info(&self, hist: usize) -> HideInfo {
+                let items = self.items.borrow();
+                HideInfo {
+                    nzb: NzbRef::NONE,
+                    mark_status: MarkStatus::None,
+                    delete_status: DeleteStatus::None,
+                    is_dupe_success: true,
+                    name: items[hist - 1].2.to_vec(),
                 }
-                13 => {
-                    h.items[a2 as usize].0 = 3;
-                    1
-                }
-                14 => {
-                    if (a1 as usize) >= h.items.len() {
-                        return 0;
-                    }
-                    let it = &h.items[a1 as usize];
-                    *ints = it.0;
-                    let ts = std::slice::from_raw_parts_mut(i64s, 2);
-                    ts[0] = it.1;
-                    ts[1] = 0;
-                    *strs = it.2.as_ptr() as *const c_char;
-                    (a1 as usize) + 1
-                }
-                15 => {
-                    h.items.remove(a1 as usize);
-                    1
-                }
-                16 => {
-                    h.saved = true;
-                    1
-                }
-                _ => 0,
+            }
+            fn replace_with_dup(&self, _dq: usize, _hist: usize, rindex: c_int, _: DupStatus) {
+                self.items.borrow_mut()[rindex as usize].0 = 3;
+            }
+            fn history_entry_from_end(&self, _dq: usize, rindex: c_int) -> Option<HistoryEntry> {
+                let items = self.items.borrow();
+                let it = items.get(rindex as usize)?;
+                Some(HistoryEntry {
+                    hist_ptr: rindex as usize + 1,
+                    kind: it.0,
+                    time: it.1,
+                    nzb: NzbRef::NONE,
+                    name: it.2.to_vec(),
+                })
+            }
+            fn erase_history(&self, _dq: usize, idx: c_int, _from_end: bool) {
+                self.items.borrow_mut().remove(idx as usize);
+            }
+            fn save_history(&self, _dq: usize) {
+                self.saved.set(true);
             }
         }
 
-        unsafe {
-            let mut mock = MockHist {
-                items: vec![
-                    (1, 1_000_000 - 10 * 86_400, b"expired-nzb\0"),
-                    (2, 1_000_000 - 10 * 86_400, b"expired-url\0"),
-                    (1, 1_000_000 - 86_400, b"recent-nzb\0"),
-                ],
-                saved: false,
-            };
-            let env = NzbgetRsHistoryCoordEnv {
-                ctx: (&mut mock as *mut MockHist).cast(),
-                p1: 1,
-                p2: 0,
-                a1: 7,
-                a2: 1,
-                a3: 0,
-                a4: 0,
-                a5: b'/' as c_int,
-                a6: 0,
-                t1: 1_000_000,
-                s1: std::ptr::null(),
-                int_arr: std::ptr::null(),
-                int_len: 0,
-                log_cb: None,
-                action_cb: Some(mock_hc_action),
-            };
-            assert_eq!(history_coord_exec(3, &env), 1);
-            assert!(mock.saved);
-            assert_eq!(mock.items.len(), 2);
-            assert_eq!(mock.items[0].0, 3);
-            assert_eq!(mock.items[1].0, 1);
-        }
+        let mock = MockHist {
+            items: RefCell::new(vec![
+                (1, 1_000_000 - 10 * 86_400, b"expired-nzb"),
+                (2, 1_000_000 - 10 * 86_400, b"expired-url"),
+                (1, 1_000_000 - 86_400, b"recent-nzb"),
+            ]),
+            saved: Cell::new(false),
+        };
+        HistoryCoord { host: &mock, dq: 1 }.service_work(7, true, false, false, 1_000_000);
+        assert!(mock.saved.get());
+        let items = mock.items.borrow();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].0, 3);
+        assert_eq!(items[1].0, 1);
     }
 }

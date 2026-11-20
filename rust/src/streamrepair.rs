@@ -9839,6 +9839,8 @@ impl CrossPackRepairSession {
         self.finish_dead_fills_with(&mut |kind, msg| {
             env_cell.borrow_mut().emit_message_bytes(kind, msg)
         });
+        // A volume written back cleared its own holes: the caller's targets see it repaired.
+        env_cell.borrow_mut().sync_target_holes(&self.target_holes);
     }
 
     /// [`Self::finish_dead_fills`] reporting through `emit`: also run when the session starts,
@@ -10022,6 +10024,15 @@ impl CrossPackRepairSession {
             .write(true)
             .open(crate::fsops::path(&d.volume_path))
             .map_err(|e| e.to_string())?;
+        // The same barrier as every donor write: no write to a file live PAR has sealed, and
+        // its verified state is dropped before the bytes change. Held from the comparison on.
+        let context = self
+            .target_files
+            .write_root
+            .as_ref()
+            .map(|root| root.for_path(crate::fsops::path(&d.volume_path)))
+            .ok_or("no write permission for the volume")?;
+        let _permit = context.descriptor_permit(&f).map_err(|e| e.to_string())?;
         let have = f.metadata().map_err(|e| e.to_string())?.len();
         let data_at = at;
         let tail_at = at + d.packed as u64;
@@ -10073,23 +10084,31 @@ impl CrossPackRepairSession {
             pos += n as u64;
         }
         // Headers and tail whole; of the data only its holes (the rest arrived and matched).
-        f.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
-        f.write_all(&head).map_err(|e| e.to_string())?;
-        for h in &holes {
-            let (s, e) = ((h.offset.max(0) as u64).max(data_at), ((h.offset + h.size).max(0) as u64).min(tail_at));
-            let mut p = s;
-            while p < e {
-                let n = (CHUNK as u64).min(e - p) as usize;
-                data.seek(SeekFrom::Start(p - data_at)).map_err(io("borrowed data"))?;
-                data.read_exact(&mut buf[..n]).map_err(io("borrowed data"))?;
-                f.seek(SeekFrom::Start(p)).map_err(|e| e.to_string())?;
-                f.write_all(&buf[..n]).map_err(|e| e.to_string())?;
-                p += n as u64;
+        context.invalidate_identity();
+        let written = (|| -> std::io::Result<()> {
+            f.seek(SeekFrom::Start(0))?;
+            f.write_all(&head)?;
+            for h in &holes {
+                let s = (h.offset.max(0) as u64).max(data_at);
+                let e = ((h.offset + h.size).max(0) as u64).min(tail_at);
+                let mut p = s;
+                while p < e {
+                    let n = (CHUNK as u64).min(e - p) as usize;
+                    data.seek(SeekFrom::Start(p - data_at))?;
+                    data.read_exact(&mut buf[..n])?;
+                    f.seek(SeekFrom::Start(p))?;
+                    f.write_all(&buf[..n])?;
+                    p += n as u64;
+                }
             }
+            f.seek(SeekFrom::Start(tail_at))?;
+            f.write_all(&tail)?;
+            f.sync_data()
+        })();
+        if written.is_err() {
+            context.invalidate();
         }
-        f.seek(SeekFrom::Start(tail_at)).map_err(|e| e.to_string())?;
-        f.write_all(&tail).map_err(|e| e.to_string())?;
-        f.sync_data().map_err(|e| e.to_string())
+        written.map_err(|e| e.to_string())
     }
 
     /// The scratch file a dead volume's borrowed bytes are written to.

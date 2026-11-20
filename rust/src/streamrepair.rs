@@ -10040,6 +10040,9 @@ impl CrossPackRepairSession {
                         // bytes in plain form: borrow just the articles around each hole.
                         self.lzma2_compressed_throughout = false;
                         self.lzma2_other_size = false;
+                        // The raw-LZMA2 path has no per-volume boundary to release a yield
+                        // hold at, so it never holds one.
+                        env_cell.borrow_mut().set_finishing_volume(false);
                         let raw_filled = donor_set.format == MemberFormat::SevenZip
                             && set_maps[set_index].is_none()
                             && self.exec_lzma2_raw_repair(

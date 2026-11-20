@@ -4345,10 +4345,6 @@ pub struct NzbgetRsDiskStateEnv<'a> {
     pub flush_queue: c_int,
     pub direct_write: c_int,
     pub continue_partial: c_int,
-    pub a1: c_int,
-    pub a2: c_int,
-    pub a3: c_int,
-    pub a4: c_int,
     pub now: i64,
     pub out_flag: *mut c_int,
 }
@@ -4368,10 +4364,6 @@ impl<'a> NzbgetRsDiskStateEnv<'a> {
             flush_queue: 0,
             direct_write: 0,
             continue_partial: 0,
-            a1: 0,
-            a2: 0,
-            a3: 0,
-            a4: 0,
             now: 0,
             out_flag: std::ptr::null_mut(),
         }
@@ -5569,18 +5561,16 @@ unsafe fn save_single_file_or_state(
     env: &NzbgetRsDiskStateEnv,
     qdir: &[u8],
     sep: u8,
-    mode: c_int,
+    part: FilePart,
     replace: bool,
 ) -> bool {
-    let export_mode = if mode == 0 {
-        FileExport::InfoWithArticles
-    } else if mode == 2 {
-        FileExport::CompletedState
-    } else {
-        FileExport::State
+    let export_mode = match part {
+        FilePart::Info => FileExport::InfoWithArticles,
+        FilePart::State => FileExport::State,
+        FilePart::CompletedState => FileExport::CompletedState,
     };
     let (file_id, bytes) = unsafe { format_target_file_bytes(env, export_mode) };
-    if mode == 0 {
+    if part == FilePart::Info {
         emit_log(
             env,
             DiskLogLevel::Debug,
@@ -5593,10 +5583,10 @@ unsafe fn save_single_file_or_state(
             format!("Saving FileState {file_id} to disk").as_bytes(),
         );
     }
-    let fname = if mode == 0 {
+    let fname = if part == FilePart::Info {
         format!("{file_id}").into_bytes()
     } else {
-        diskstate_format_file_state_name(file_id, mode == 2)
+        diskstate_format_file_state_name(file_id, part == FilePart::CompletedState)
     };
     let mut sf = RsStateFile::new(
         qdir,
@@ -5619,7 +5609,7 @@ unsafe fn load_single_file_or_state(
     qdir: &[u8],
     temp_dir: &[u8],
     sep: u8,
-    mode: c_int,
+    part: FilePart,
     file_summary: bool,
     articles: bool,
     out_ver: &mut i32,
@@ -5630,10 +5620,10 @@ unsafe fn load_single_file_or_state(
         DiskLogLevel::Debug,
         format!("Loading FileInfo {} from disk", meta.file_id).as_bytes(),
     );
-    let fname = if mode == 0 {
+    let fname = if part == FilePart::Info {
         format!("{}", meta.file_id).into_bytes()
     } else {
-        diskstate_format_file_state_name(meta.file_id, mode == 2)
+        diskstate_format_file_state_name(meta.file_id, part == FilePart::CompletedState)
     };
     let mut sf = RsStateFile::new(
         qdir,
@@ -5647,10 +5637,11 @@ unsafe fn load_single_file_or_state(
         return false;
     };
     *out_ver = sf.file_version;
-    if mode == 0 {
+    if part == FilePart::Info {
         unsafe { load_file_info_from_reader(env, &mut r, sf.file_version, file_summary, articles) }
     } else {
-        unsafe { load_file_state_from_reader(env, &mut r, sf.file_version, mode == 2, temp_dir) }
+        let completed = part == FilePart::CompletedState;
+        unsafe { load_file_state_from_reader(env, &mut r, sf.file_version, completed, temp_dir) }
     }
 }
 
@@ -5704,7 +5695,16 @@ unsafe fn load_all_file_infos_op(env: &NzbgetRsDiskStateEnv, qdir: &[u8], sep: u
             if !res {
                 let mut dummy_ver = 0;
                 res = unsafe {
-                    load_single_file_or_state(env, qdir, &[], sep, 0, true, false, &mut dummy_ver)
+                    load_single_file_or_state(
+                        env,
+                        qdir,
+                        &[],
+                        sep,
+                        FilePart::Info,
+                        true,
+                        false,
+                        &mut dummy_ver,
+                    )
                 };
             }
             if !res {
@@ -5765,7 +5765,11 @@ unsafe fn load_all_file_states_op(
                 let found = call_ctrl(env, DiskCtrl::SelectFileWithCounters { file_id: id }) != 0;
                 if found {
                     let completed = suffix == b'c';
-                    let mode = if completed { 2 } else { 1 };
+                    let part = if completed {
+                        FilePart::CompletedState
+                    } else {
+                        FilePart::State
+                    };
                     let mut state_ver = 0;
                     if !unsafe {
                         load_single_file_or_state(
@@ -5773,7 +5777,7 @@ unsafe fn load_all_file_states_op(
                             qdir,
                             temp_dir,
                             sep,
-                            mode,
+                            part,
                             false,
                             false,
                             &mut state_ver,
@@ -5792,7 +5796,7 @@ unsafe fn load_all_file_states_op(
                         continue;
                     }
                     if state_ver > DISKSTATE_FILE_VERSION {
-                        let _ = unsafe { save_single_file_or_state(env, qdir, sep, mode, false) };
+                        let _ = unsafe { save_single_file_or_state(env, qdir, sep, part, false) };
                     }
                     call_ctrl(env, DiskCtrl::ResetFileArticles { completed });
                 }
@@ -5850,24 +5854,43 @@ unsafe fn convert_legacy_file_states_op(
         let mut dummy_ver = 0;
         let ok = if suffix_kind == 0 {
             unsafe {
-                load_single_file_or_state(env, qdir, temp_dir, sep, 0, true, true, &mut dummy_ver)
-                    && save_single_file_or_state(env, qdir, sep, 0, true)
+                load_single_file_or_state(
+                    env,
+                    qdir,
+                    temp_dir,
+                    sep,
+                    FilePart::Info,
+                    true,
+                    true,
+                    &mut dummy_ver,
+                ) && save_single_file_or_state(env, qdir, sep, FilePart::Info, true)
             }
         } else {
-            let mode = if suffix_kind == 2 { 2 } else { 1 };
+            let part = if suffix_kind == 2 {
+                FilePart::CompletedState
+            } else {
+                FilePart::State
+            };
             unsafe {
-                load_single_file_or_state(env, qdir, temp_dir, sep, 0, false, true, &mut dummy_ver)
-                    && load_single_file_or_state(
-                        env,
-                        qdir,
-                        temp_dir,
-                        sep,
-                        mode,
-                        false,
-                        false,
-                        &mut dummy_ver,
-                    )
-                    && save_single_file_or_state(env, qdir, sep, mode, true)
+                load_single_file_or_state(
+                    env,
+                    qdir,
+                    temp_dir,
+                    sep,
+                    FilePart::Info,
+                    false,
+                    true,
+                    &mut dummy_ver,
+                ) && load_single_file_or_state(
+                    env,
+                    qdir,
+                    temp_dir,
+                    sep,
+                    part,
+                    false,
+                    false,
+                    &mut dummy_ver,
+                ) && save_single_file_or_state(env, qdir, sep, part, true)
             }
         };
         if ok {
@@ -5927,36 +5950,64 @@ unsafe fn set_aside_queue_files_op(env: &NzbgetRsDiskStateEnv, qdir: &[u8], sep:
     }
 }
 
-/// A disk-state operation. Where noted, the env's `a1`..`a4` carry its
-/// arguments.
+/// Which per-file record a `SaveFile` writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FilePart {
+    /// The file info with its article list (`<id>`).
+    Info,
+    /// The partial download state (`<id>s`).
+    State,
+    /// The completed download state (`<id>c`).
+    CompletedState,
+}
+
+/// A disk-state operation and its arguments.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DiskOp {
     DiscardQueue,
     QueueExists,
-    /// `a1` file id; `a2`..`a4` delete data, partial, completed.
-    DiscardFile,
+    DiscardFile {
+        file_id: i32,
+        data: bool,
+        partial: bool,
+        completed: bool,
+    },
     DeleteCacheFlag,
     WriteCacheFlag,
-    /// `a1` nzb id (`DiscardFiles` log deletion).
-    DeleteNzbLog,
-    /// `a1` nzb id, `a2` kind, `a3` time; text in `text`.
-    AppendNzbMessage,
-    /// `a1` nzb id.
-    LoadNzbMessages,
+    DeleteNzbLog {
+        nzb_id: i32,
+    },
+    /// Appends the env's `text`, stamped with `time_str`, to the nzb log.
+    AppendNzbMessage {
+        nzb_id: i32,
+        kind: i32,
+        time: i32,
+    },
+    LoadNzbMessages {
+        nzb_id: i32,
+    },
     CleanupTempDir,
     SaveFeeds,
     LoadFeeds,
     SaveStats,
     LoadStats,
-    /// `SaveFile` (`a1=0`) / `SaveFileState` (`a1=1` partial, `a1=2`
-    /// completed; `a2=replace`).
-    SaveFile,
-    /// `LoadFile` (`a1=0`, `a2=summary`, `a3=articles`) / `LoadFileState`
-    /// (`a1=1` partial, `a1=2` completed).
-    LoadFile,
-    /// `SaveDownloadQueue` (`a1=0, a2=saveHistory`) / `SaveDownloadProgress`
-    /// (`a1=1`) / `SaveAllFileInfos` (`a1=2`).
-    SaveQueue,
+    SaveFile {
+        part: FilePart,
+        replace: bool,
+    },
+    LoadFileInfo {
+        summary: bool,
+        articles: bool,
+    },
+    /// Writes the file version read to the env's `out_flag`, if set.
+    LoadFileState {
+        completed: bool,
+    },
+    SaveQueue {
+        history: bool,
+    },
+    SaveProgress,
+    SaveAllFileInfos,
     LoadQueue,
 }
 
@@ -5980,8 +6031,13 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
             );
             c_int::from(saved_queue_exists(qdir, sep))
         }
-        DiskOp::DiscardFile => {
-            discard_file_parts(qdir, sep, env.a1, env.a2 != 0, env.a3 != 0, env.a4 != 0);
+        DiskOp::DiscardFile {
+            file_id,
+            data,
+            partial,
+            completed,
+        } => {
+            discard_file_parts(qdir, sep, file_id, data, partial, completed);
             1
         }
         DiskOp::DeleteCacheFlag => {
@@ -6005,12 +6061,12 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                 1
             }
         }
-        DiskOp::DeleteNzbLog => {
-            delete_nzb_log(qdir, sep, env.a1);
+        DiskOp::DeleteNzbLog { nzb_id } => {
+            delete_nzb_log(qdir, sep, nzb_id);
             1
         }
-        DiskOp::AppendNzbMessage => {
-            let log_name = format!("n{}.log", env.a1);
+        DiskOp::AppendNzbMessage { nzb_id, kind, time } => {
+            let log_name = format!("n{nzb_id}.log");
             let log_p = crate::artwritercore::article_writer_format_dest_file_path(
                 qdir,
                 sep,
@@ -6027,20 +6083,14 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                 return 0;
             }
             let line = unsafe {
-                format_nzb_message_line_bytes(
-                    env.time_str,
-                    env.a2,
-                    env.a3,
-                    env.text,
-                    env.line_ending,
-                )
+                format_nzb_message_line_bytes(env.time_str, time, kind, env.text, env.line_ending)
             };
             let mut file: std::fs::File = unsafe { std::os::unix::io::FromRawFd::from_raw_fd(fd) };
             let _ = file.write_all(&line);
             1
         }
-        DiskOp::LoadNzbMessages => {
-            let log_name = format!("n{}.log", env.a1);
+        DiskOp::LoadNzbMessages { nzb_id } => {
+            let log_name = format!("n{nzb_id}.log");
             let log_p = crate::artwritercore::article_writer_format_dest_file_path(
                 qdir,
                 sep,
@@ -6510,31 +6560,42 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
             }
             1
         }
-        DiskOp::SaveFile => {
-            c_int::from(unsafe { save_single_file_or_state(env, qdir, sep, env.a1, env.a2 != 0) })
+        DiskOp::SaveFile { part, replace } => {
+            c_int::from(unsafe { save_single_file_or_state(env, qdir, sep, part, replace) })
         }
-        DiskOp::LoadFile => {
+        DiskOp::LoadFileInfo { summary, articles } => {
             let mut ver = 0;
-            let ok = unsafe {
+            c_int::from(unsafe {
                 load_single_file_or_state(
                     env,
                     qdir,
                     tdir,
                     sep,
-                    env.a1,
-                    env.a2 != 0,
-                    env.a3 != 0,
+                    FilePart::Info,
+                    summary,
+                    articles,
                     &mut ver,
                 )
+            })
+        }
+        DiskOp::LoadFileState { completed } => {
+            let part = if completed {
+                FilePart::CompletedState
+            } else {
+                FilePart::State
             };
-            if !env.out_flag.is_null() && env.a1 != 0 && ver != 0 {
+            let mut ver = 0;
+            let ok = unsafe {
+                load_single_file_or_state(env, qdir, tdir, sep, part, false, false, &mut ver)
+            };
+            if !env.out_flag.is_null() && ver != 0 {
                 unsafe { *env.out_flag = ver };
             }
             c_int::from(ok)
         }
-        DiskOp::SaveQueue => {
+        DiskOp::SaveQueue { .. } | DiskOp::SaveProgress | DiskOp::SaveAllFileInfos => {
             let flush_queue = env.flush_queue != 0;
-            if env.a1 == 0 {
+            if let DiskOp::SaveQueue { history } = op {
                 emit_log(
                     env,
                     DiskLogLevel::Debug,
@@ -6563,7 +6624,7 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                     q_sf.discard();
                 }
 
-                if env.a2 != 0 {
+                if history {
                     let hist_len = call_ctrl(env, DiskCtrl::HistoryLen);
                     let h_sf = RsStateFile::new(
                         qdir,
@@ -6601,7 +6662,7 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                 let last_file = call_ctrl(env, DiskCtrl::LastFileId);
                 let _ = save_id_floor_file(qdir, sep, last_nzb, last_file);
                 c_int::from(ok)
-            } else if env.a1 == 1 {
+            } else if op == DiskOp::SaveProgress {
                 let changed_count = call_ctrl(env, DiskCtrl::ChangedNzbCount);
                 emit_log(env, DiskLogLevel::Debug, b"Saving queue progress to disk");
                 let p_sf = RsStateFile::new(
@@ -8041,12 +8102,6 @@ fn active_disk_live_ids_cb(c: &ActiveDiskExecCtx<'_>) -> LiveIds {
 fn run_active_diskstate_exec(
     op: DiskOp,
     ctx: &mut ActiveDiskExecCtx<'_>,
-    a1: c_int,
-    a2: c_int,
-    a3: c_int,
-    a4: c_int,
-    time_str: *const c_char,
-    text: *const c_char,
     out_flag: *mut c_int,
 ) -> c_int {
     let opts = crate::options::active_options();
@@ -8073,17 +8128,11 @@ fn run_active_diskstate_exec(
     env.queue_dir = qdir_c.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
     env.temp_dir = tdir_c.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
     env.line_ending = c"\n".as_ptr();
-    env.time_str = time_str;
-    env.text = text;
     env.sep = c_int::from(crate::paths::PATH_SEPARATOR as u8);
     env.has_options = has_options;
     env.flush_queue = flush_queue;
     env.direct_write = direct_write;
     env.continue_partial = continue_partial;
-    env.a1 = a1;
-    env.a2 = a2;
-    env.a3 = a3;
-    env.a4 = a4;
     env.now = now;
     env.out_flag = out_flag;
     unsafe { diskstate_exec(op, &env) }
@@ -8092,33 +8141,13 @@ fn run_active_diskstate_exec(
 #[cfg(unix)]
 pub(crate) fn active_disk_queue_exists() -> bool {
     let mut ctx = ActiveDiskExecCtx::new(None);
-    run_active_diskstate_exec(
-        DiskOp::QueueExists,
-        &mut ctx,
-        0,
-        0,
-        0,
-        0,
-        std::ptr::null(),
-        std::ptr::null(),
-        std::ptr::null_mut(),
-    ) != 0
+    run_active_diskstate_exec(DiskOp::QueueExists, &mut ctx, std::ptr::null_mut()) != 0
 }
 
 #[cfg(unix)]
 pub(crate) fn active_disk_discard_queue() {
     let mut ctx = ActiveDiskExecCtx::new(None);
-    run_active_diskstate_exec(
-        DiskOp::DiscardQueue,
-        &mut ctx,
-        0,
-        0,
-        0,
-        0,
-        std::ptr::null(),
-        std::ptr::null(),
-        std::ptr::null_mut(),
-    );
+    run_active_diskstate_exec(DiskOp::DiscardQueue, &mut ctx, std::ptr::null_mut());
 }
 
 #[cfg(unix)]
@@ -8130,14 +8159,13 @@ pub(crate) fn active_disk_discard_file(
 ) {
     let mut ctx = ActiveDiskExecCtx::new(None);
     run_active_diskstate_exec(
-        DiskOp::DiscardFile,
+        DiskOp::DiscardFile {
+            file_id: file_id,
+            data: del_data,
+            partial: del_part,
+            completed: del_compl,
+        },
         &mut ctx,
-        file_id,
-        c_int::from(del_data),
-        c_int::from(del_part),
-        c_int::from(del_compl),
-        std::ptr::null(),
-        std::ptr::null(),
         std::ptr::null_mut(),
     );
 }
@@ -8164,14 +8192,8 @@ pub(crate) fn active_disk_discard_files(
         let nzb_id = qh.nzb_snap(nzb_ptr, false).id;
         let mut ctx = ActiveDiskExecCtx::new(None);
         run_active_diskstate_exec(
-            DiskOp::DeleteNzbLog,
+            DiskOp::DeleteNzbLog { nzb_id: nzb_id },
             &mut ctx,
-            nzb_id,
-            0,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
             std::ptr::null_mut(),
         );
     }
@@ -8185,17 +8207,7 @@ pub(crate) fn active_disk_load_queue(
     let mut ctx = ActiveDiskExecCtx::new(Some(qh));
     ctx.dq_ptr = dq_ptr;
     let mut legacy = 0;
-    let ok = run_active_diskstate_exec(
-        DiskOp::LoadQueue,
-        &mut ctx,
-        0,
-        0,
-        0,
-        0,
-        std::ptr::null(),
-        std::ptr::null(),
-        &mut legacy,
-    ) != 0;
+    let ok = run_active_diskstate_exec(DiskOp::LoadQueue, &mut ctx, &mut legacy) != 0;
     if legacy != 0 {
         ACTIVE_LEGACY_QUEUE_READ.store(true, std::sync::atomic::Ordering::SeqCst);
     }
@@ -8215,14 +8227,10 @@ pub(crate) fn active_disk_save_queue(
     let mut ctx = ActiveDiskExecCtx::new(Some(qh));
     ctx.dq_ptr = dq_ptr;
     run_active_diskstate_exec(
-        DiskOp::SaveQueue,
+        DiskOp::SaveQueue {
+            history: save_history,
+        },
         &mut ctx,
-        0,
-        c_int::from(save_history),
-        0,
-        0,
-        std::ptr::null(),
-        std::ptr::null(),
         std::ptr::null_mut(),
     ) != 0
 }
@@ -8234,17 +8242,7 @@ pub(crate) fn active_disk_save_progress(
 ) -> bool {
     let mut ctx = ActiveDiskExecCtx::new(Some(qh));
     ctx.dq_ptr = dq_ptr;
-    run_active_diskstate_exec(
-        DiskOp::SaveQueue,
-        &mut ctx,
-        1,
-        0,
-        0,
-        0,
-        std::ptr::null(),
-        std::ptr::null(),
-        std::ptr::null_mut(),
-    ) != 0
+    run_active_diskstate_exec(DiskOp::SaveProgress, &mut ctx, std::ptr::null_mut()) != 0
 }
 
 #[cfg(unix)]
@@ -8254,17 +8252,7 @@ pub(crate) fn active_disk_save_all_file_infos(
 ) -> bool {
     let mut ctx = ActiveDiskExecCtx::new(Some(qh));
     ctx.dq_ptr = dq_ptr;
-    run_active_diskstate_exec(
-        DiskOp::SaveQueue,
-        &mut ctx,
-        2,
-        0,
-        0,
-        0,
-        std::ptr::null(),
-        std::ptr::null(),
-        std::ptr::null_mut(),
-    ) != 0
+    run_active_diskstate_exec(DiskOp::SaveAllFileInfos, &mut ctx, std::ptr::null_mut()) != 0
 }
 
 #[cfg(unix)]
@@ -8274,17 +8262,7 @@ pub(crate) fn active_disk_cleanup_temp_dir(
 ) {
     let mut ctx = ActiveDiskExecCtx::new(Some(qh));
     ctx.dq_ptr = dq_ptr;
-    run_active_diskstate_exec(
-        DiskOp::CleanupTempDir,
-        &mut ctx,
-        0,
-        0,
-        0,
-        0,
-        std::ptr::null(),
-        std::ptr::null(),
-        std::ptr::null_mut(),
-    );
+    run_active_diskstate_exec(DiskOp::CleanupTempDir, &mut ctx, std::ptr::null_mut());
 }
 
 #[cfg(unix)]
@@ -8296,14 +8274,11 @@ pub(crate) fn active_disk_save_file(
     let mut ctx = ActiveDiskExecCtx::new(Some(qh));
     ctx.target_file_ptr = file_ptr;
     run_active_diskstate_exec(
-        DiskOp::SaveFile,
+        DiskOp::SaveFile {
+            part: FilePart::Info,
+            replace,
+        },
         &mut ctx,
-        0,
-        c_int::from(replace),
-        0,
-        0,
-        std::ptr::null(),
-        std::ptr::null(),
         std::ptr::null_mut(),
     ) != 0
 }
@@ -8318,14 +8293,11 @@ pub(crate) fn active_disk_load_file(
     let mut ctx = ActiveDiskExecCtx::new(Some(qh));
     ctx.target_file_ptr = file_ptr;
     run_active_diskstate_exec(
-        DiskOp::LoadFile,
+        DiskOp::LoadFileInfo {
+            summary: file_summary,
+            articles,
+        },
         &mut ctx,
-        0,
-        c_int::from(file_summary),
-        c_int::from(articles),
-        0,
-        std::ptr::null(),
-        std::ptr::null(),
         std::ptr::null_mut(),
     ) != 0
 }
@@ -8340,14 +8312,15 @@ pub(crate) fn active_disk_save_file_state(
     let mut ctx = ActiveDiskExecCtx::new(Some(qh));
     ctx.target_file_ptr = file_ptr;
     run_active_diskstate_exec(
-        DiskOp::SaveFile,
+        DiskOp::SaveFile {
+            part: if completed {
+                FilePart::CompletedState
+            } else {
+                FilePart::State
+            },
+            replace,
+        },
         &mut ctx,
-        if completed { 2 } else { 1 },
-        c_int::from(replace),
-        0,
-        0,
-        std::ptr::null(),
-        std::ptr::null(),
         std::ptr::null_mut(),
     ) != 0
 }
@@ -8361,14 +8334,8 @@ pub(crate) fn active_disk_load_file_state(
     let mut ctx = ActiveDiskExecCtx::new(Some(qh));
     ctx.target_file_ptr = file_ptr;
     run_active_diskstate_exec(
-        DiskOp::LoadFile,
+        DiskOp::LoadFileState { completed },
         &mut ctx,
-        if completed { 2 } else { 1 },
-        0,
-        0,
-        0,
-        std::ptr::null(),
-        std::ptr::null(),
         std::ptr::null_mut(),
     ) != 0
 }
@@ -8462,14 +8429,8 @@ pub(crate) fn active_disk_load_file_for_inspect(
 pub(crate) fn load_active_nzb_messages(nzb_id: i32) -> Vec<(i32, i32, i32, std::ffi::CString)> {
     let mut ctx = ActiveDiskExecCtx::new(None);
     run_active_diskstate_exec(
-        DiskOp::LoadNzbMessages,
+        DiskOp::LoadNzbMessages { nzb_id: nzb_id },
         &mut ctx,
-        nzb_id,
-        0,
-        0,
-        0,
-        std::ptr::null(),
-        std::ptr::null(),
         std::ptr::null_mut(),
     );
     std::mem::take(&mut ctx.messages)

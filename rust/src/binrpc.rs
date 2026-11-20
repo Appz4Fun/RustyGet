@@ -3896,7 +3896,7 @@ impl PlainBinRpcConn {
         for _ in 0..retry_attempts {
             let sock = AtomicI32::new(crate::socket::INVALID_SOCKET);
             let status = ConnStatusCell::new(ConnStatus::Disconnected);
-            let mut tls_err = false;
+            let mut errors = crate::socket::ErrorGate::default();
             let ok = crate::socket::connect_stream(
                 host,
                 port,
@@ -3908,7 +3908,7 @@ impl PlainBinRpcConn {
                 &mut is_stopped,
                 &sock,
                 &status,
-                &mut tls_err,
+                &mut errors,
                 |_| {},
                 |_| {},
             );
@@ -3920,8 +3920,7 @@ impl PlainBinRpcConn {
                     status,
                 });
             }
-            let mut is_listener = false;
-            crate::socket::disconnect_socket(&host, false, &mut is_listener, &sock, &status);
+            crate::socket::disconnect_socket(&host, false, false, &sock, &status);
             if retry_attempts > 1 {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
@@ -3941,33 +3940,25 @@ impl PlainBinRpcConn {
         use std::sync::atomic::Ordering;
         let mut buf_offset = 0usize;
         let mut buf_avail = 0usize;
-        let mut total_read = 0i32;
-        let mut tls_err = false;
+        let mut errors = crate::socket::ErrorGate::default();
         crate::socket::recv_exact(
             &self.host,
             &[],
             &mut buf_offset,
             &mut buf_avail,
-            &mut total_read,
             dst,
-            &mut tls_err,
-            |chunk, _| unsafe {
+            &mut errors,
+            |chunk| {
                 let fd = self.sock.load(Ordering::SeqCst);
-                libc::recv(fd, chunk.as_mut_ptr().cast(), chunk.len(), 0) as std::ffi::c_int
+                let n = unsafe { libc::recv(fd, chunk.as_mut_ptr().cast(), chunk.len(), 0) };
+                usize::try_from(n).map_err(|_| crate::socket::ChunkError::Socket)
             },
             |_| {},
         )
     }
 
     fn disconnect(&self) {
-        let mut is_listener = false;
-        crate::socket::disconnect_socket(
-            &self.host,
-            false,
-            &mut is_listener,
-            &self.sock,
-            &self.status,
-        );
+        crate::socket::disconnect_socket(&self.host, false, false, &self.sock, &self.status);
     }
 }
 

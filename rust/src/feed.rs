@@ -1950,7 +1950,7 @@ impl NzbgetRsFeedCoord {
                                 false,
                                 force_flag,
                                 &opts,
-                                );
+                            );
                         }
                     }
                 }
@@ -2393,7 +2393,7 @@ impl NzbgetRsFeedCoord {
                     true,
                     true,
                     &opts,
-                    );
+                );
                 self.force.store(true, Ordering::SeqCst);
                 self.wait_cv.notify_all();
                 ff

@@ -3806,6 +3806,103 @@ fn an_unrepaired_set_places_its_intact_members_as_the_progressive_path_does() {
     assert!(!t.out().join(persistent::STATE_DIR).exists());
 }
 
+#[test]
+fn a_member_patched_inline_is_placed_when_another_repair_is_given_up() {
+    // a.bin (volume 1) loses a range that the live repair puts back while the session waits
+    // for volume 2; b.bin's hole in volume 2 is never repaired. a.bin is whole and must be
+    // placed, as the progressive path places intact members, though it once had a hole.
+    struct Feed {
+        v1: PathBuf,
+        v2: PathBuf,
+        h1: Vec<(u64, u64)>,
+        h2: Vec<(u64, u64)>,
+        original1: Vec<u8>,
+        parks: u32,
+        repaired: bool,
+    }
+    impl VolumeFeed for Feed {
+        fn volume(&mut self, path: &Path) -> VolumeView {
+            if path == self.v2 {
+                if self.parks < 20 {
+                    self.parks += 1;
+                    if !self.repaired {
+                        std::fs::write(&self.v1, &self.original1).unwrap();
+                        self.repaired = true;
+                    }
+                    return VolumeView::NotYet;
+                }
+                return VolumeView::Ready {
+                    holes: self.h2.clone(),
+                };
+            }
+            if path == self.v1 && !self.repaired {
+                return VolumeView::Ready {
+                    holes: self.h1.clone(),
+                };
+            }
+            if path.is_file() {
+                VolumeView::Ready { holes: Vec::new() }
+            } else {
+                VolumeView::Missing
+            }
+        }
+        fn wait_repaired(&mut self, _c: &mut dyn FnMut() -> bool) -> bool {
+            false
+        }
+        fn expected_volumes(&self) -> u64 {
+            2
+        }
+        fn repaired(&self, path: &Path) -> bool {
+            path == self.v1 && self.repaired
+        }
+    }
+    let t = TestDir::new("persist_inline_giveup");
+    let a = pattern(200_000);
+    let b: Vec<u8> = pattern(150_000).iter().map(|x| x ^ 0x5a).collect();
+    let mut vol1 = SIG.to_vec();
+    vol1.extend(main_block(true, None));
+    let fa = file_block("a.bin", a.len() as u64, &a, crc32fast::hash(&a), false, false);
+    let a_off = vol1.len() + fa.len() - a.len();
+    vol1.extend(fa);
+    vol1.extend(end_block(true));
+    let mut vol2 = SIG.to_vec();
+    vol2.extend(main_block(true, Some(1)));
+    let fb = file_block("b.bin", b.len() as u64, &b, crc32fast::hash(&b), false, false);
+    let b_off = vol2.len() + fb.len() - b.len();
+    vol2.extend(fb);
+    vol2.extend(end_block(false));
+    let first = write_set(&t.dl(), &[vol1.clone(), vol2.clone()]);
+    let v2 = t.dl().join(volume_name(1, 2));
+    let mut d1 = vol1.clone();
+    d1[a_off + 80_000..a_off + 90_000].fill(0);
+    std::fs::write(&first, &d1).unwrap();
+    let mut d2 = vol2.clone();
+    d2[b_off + 80_000..b_off + 90_000].fill(0);
+    std::fs::write(&v2, &d2).unwrap();
+    let feed = Feed {
+        v1: first.clone(),
+        v2,
+        h1: vec![((a_off + 80_000) as u64, 10_000)],
+        h2: vec![((b_off + 80_000) as u64, 10_000)],
+        original1: vol1,
+        parks: 0,
+        repaired: false,
+    };
+    let (r, log) = run(&first, &t.out(), Box::new(feed));
+    assert!(
+        matches!(r, Err(Error::Failed(Failure::Damaged(_)))),
+        "{log:?}"
+    );
+    assert!(persistent(&log), "{log:?}");
+    assert!(
+        log.iter().any(|l| l.contains("patched a.bin from repaired")),
+        "{log:?}"
+    );
+    assert_eq!(std::fs::read(t.out().join("a.bin")).unwrap(), a, "{log:?}");
+    assert!(!t.out().join("b.bin").exists());
+    assert!(!t.out().join(persistent::STATE_DIR).exists());
+}
+
 /// Like DirectUnpackFeed: direct_unpack_abandon clears held + holes, so after a give-up a
 /// damaged volume is answered as Ready with no holes.
 struct AbandonFeed {

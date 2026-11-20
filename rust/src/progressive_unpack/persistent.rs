@@ -1202,7 +1202,9 @@ impl<'a> Run<'a> {
         let mut keep = std::collections::HashSet::new();
         for i in 0..self.handles.len() {
             let key = self.handles[i].0.clone();
-            if self.holes.iter().any(|h| h.member == key) {
+            // A member whose holes were all patched from repaired volumes while extracting is
+            // judged like any other below; one with a hole still pending is not intact.
+            if self.inline.pending.iter().any(|(k, _, _)| *k == key) {
                 continue;
             }
             let intact = match self.verify_one(i, is_cancelled) {

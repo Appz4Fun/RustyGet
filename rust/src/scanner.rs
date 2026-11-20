@@ -253,36 +253,8 @@ pub struct NzbgetRsScannerEnv {
     pub url_info: *mut c_void,
     pub out_nzb_id: *mut c_int,
     pub wake_cb: Option<unsafe extern "C" fn(*mut c_void)>,
-    pub log_cb: Option<unsafe extern "C" fn(*mut c_void, c_int, *const c_char)>,
-    pub find_category_cb:
-        Option<unsafe extern "C" fn(*mut c_void, *const c_char, c_int) -> *const c_char>,
-    pub iter_params_cb: Option<
-        unsafe extern "C" fn(
-            *mut c_void,
-            *mut c_void,
-            unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char),
-        ),
-    >,
     pub work_params_cb:
         Option<unsafe extern "C" fn(*mut c_void, c_int, *const c_char, *const c_char)>,
-    pub scan_script_cb: Option<
-        unsafe extern "C" fn(
-            *mut c_void,
-            *const c_char,
-            *mut c_void,
-            *const c_char,
-            *const c_char,
-            *const c_char,
-            *const c_char,
-            *mut c_void,
-            unsafe extern "C" fn(*mut c_void, c_int, *const c_char),
-            *mut c_int,
-            *mut c_int,
-            *mut c_int,
-            *mut c_int,
-            *mut c_int,
-        ),
-    >,
     pub parse_nzb_cb: Option<
         unsafe extern "C" fn(
             *mut c_void,
@@ -447,10 +419,7 @@ fn now_unix_secs() -> i64 {
 }
 
 fn emit_log(env: &NzbgetRsScannerEnv, kind: c_int, msg: &[u8]) {
-    if let Some(cb) = env.log_cb {
-        let c = to_cstr_sanitized(msg);
-        unsafe { cb(env.ctx, kind, c.as_ptr()) };
-    } else if env.nzb_dir.is_null() {
+    if env.nzb_dir.is_null() {
         #[cfg(unix)]
         {
             let active_kind = match kind {
@@ -473,38 +442,7 @@ fn join_sep(dir: &[u8], sep: u8, leaf: &[u8]) -> Vec<u8> {
     out
 }
 
-#[cfg(test)]
-fn capture_params(env: &NzbgetRsScannerEnv) -> Vec<(CString, CString)> {
-    unsafe extern "C" fn push_param(raw: *mut c_void, name: *const c_char, val: *const c_char) {
-        let out = unsafe { &mut *raw.cast::<Vec<(CString, CString)>>() };
-        out.push((
-            to_cstr_sanitized(unsafe { cstr::bytes(name) }),
-            to_cstr_sanitized(unsafe { cstr::bytes(val) }),
-        ));
-    }
-    let mut list: Vec<(CString, CString)> = Vec::new();
-    if !env.parameters.is_null() {
-        if let Some(iter_cb) = env.iter_params_cb {
-            unsafe {
-                iter_cb(
-                    env.parameters,
-                    (&mut list as *mut Vec<(CString, CString)>).cast(),
-                    push_param,
-                )
-            };
-        }
-    }
-    list
-}
-
 fn find_matched_category(env: &NzbgetRsScannerEnv, cat_c: &CStr) -> Option<Vec<u8>> {
-    if let Some(find_cb) = env.find_category_cb {
-        let matched_ptr = unsafe { find_cb(env.ctx, cat_c.as_ptr(), 1) };
-        if !matched_ptr.is_null() {
-            return Some(unsafe { cstr::bytes(matched_ptr) }.to_vec());
-        }
-        return None;
-    }
     if env.nzb_dir.is_null() {
         if let Some(opts) = crate::options::active_options() {
             if let Some(cat) = opts.find_category(cat_c, true) {
@@ -961,14 +899,8 @@ impl NzbgetRsScanner {
                         if merged.ctx.is_null() {
                             merged.ctx = stored.ctx;
                         }
-                        if merged.iter_params_cb.is_none() {
-                            merged.iter_params_cb = stored.iter_params_cb;
-                        }
                         if merged.work_params_cb.is_none() {
                             merged.work_params_cb = stored.work_params_cb;
-                        }
-                        if merged.scan_script_cb.is_none() {
-                            merged.scan_script_cb = stored.scan_script_cb;
                         }
                         if merged.parse_nzb_cb.is_none() {
                             merged.parse_nzb_cb = stored.parse_nzb_cb;
@@ -978,12 +910,6 @@ impl NzbgetRsScanner {
                         }
                         if merged.wake_cb.is_none() {
                             merged.wake_cb = stored.wake_cb;
-                        }
-                        if merged.log_cb.is_none() {
-                            merged.log_cb = stored.log_cb;
-                        }
-                        if merged.find_category_cb.is_none() {
-                            merged.find_category_cb = stored.find_category_cb;
                         }
                     }
                 }
@@ -1188,7 +1114,6 @@ impl NzbgetRsScanner {
             } else if can_process_file(&mut inner.file_list, &full_filename, check_stat, file_age) {
                 Self::process_incoming_file(
                     inner,
-                    directory,
                     &filename,
                     &full_filename,
                     category,
@@ -1200,7 +1125,6 @@ impl NzbgetRsScanner {
 
     fn process_incoming_file(
         inner: &mut ScannerInner,
-        directory: &[u8],
         base_filename: &[u8],
         full_filename: &[u8],
         category: &[u8],
@@ -1260,61 +1184,6 @@ impl NzbgetRsScanner {
         let ran_scan_script =
             inner.scan_script && !extension.eq_ignore_ascii_case(b".nzb_processed");
         if ran_scan_script {
-            struct ScriptStrings<'a> {
-                nzb_name: &'a mut Vec<u8>,
-                nzb_category: &'a mut Vec<u8>,
-                dupe_key: &'a mut Vec<u8>,
-            }
-            unsafe extern "C" fn update_script_str(
-                raw: *mut c_void,
-                field: c_int,
-                val: *const c_char,
-            ) {
-                let st = unsafe { &mut *raw.cast::<ScriptStrings<'_>>() };
-                let bytes = unsafe { cstr::bytes(val) }.to_vec();
-                match field {
-                    0 => *st.nzb_name = bytes,
-                    1 => *st.nzb_category = bytes,
-                    2 => *st.dupe_key = bytes,
-                    _ => {}
-                }
-            }
-            if let Some(sc_cb) = env.scan_script_cb {
-                let full_c = to_cstr_sanitized(full_filename);
-                let dir_c = to_cstr_sanitized(directory);
-                let init_name_c = to_cstr_sanitized(&nzb_name);
-                let init_cat_c = to_cstr_sanitized(&nzb_category);
-                let init_key_c = to_cstr_sanitized(&dupe_key);
-                let mut add_top_i = c_int::from(add_top);
-                let mut add_paused_i = c_int::from(add_paused);
-                {
-                    let mut st = ScriptStrings {
-                        nzb_name: &mut nzb_name,
-                        nzb_category: &mut nzb_category,
-                        dupe_key: &mut dupe_key,
-                    };
-                    unsafe {
-                        sc_cb(
-                            env.ctx,
-                            full_c.as_ptr(),
-                            url_info_usize as *mut c_void,
-                            dir_c.as_ptr(),
-                            init_name_c.as_ptr(),
-                            init_cat_c.as_ptr(),
-                            init_key_c.as_ptr(),
-                            (&mut st as *mut ScriptStrings<'_>).cast(),
-                            update_script_str,
-                            &mut priority,
-                            &mut add_top_i,
-                            &mut add_paused_i,
-                            &mut dupe_score,
-                            &mut dupe_mode,
-                        );
-                    }
-                }
-                add_top = add_top_i != 0;
-                add_paused = add_paused_i != 0;
-            }
             exists = crate::fsops::file_exists(full_filename, &crate::fsops::posix_stat);
         }
 
@@ -1601,8 +1470,7 @@ impl NzbgetRsScanner {
 
     #[cfg(test)]
     fn add_external_file(&self, env: &NzbgetRsScannerEnv) -> c_int {
-        let captured_params = capture_params(env);
-        self.add_external_with_params(env, captured_params)
+        self.add_external_with_params(env, Vec::new())
     }
 
     fn add_external_with_params(

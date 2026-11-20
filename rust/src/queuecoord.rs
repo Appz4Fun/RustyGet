@@ -4711,6 +4711,9 @@ impl NzbgetRsQueueCoordinator {
             && opts.dupe_article_fallback >= crate::queuesubsys_host::DAF_STREAM
             && !dupe_mass_failure(nzb.total_articles, failed);
 
+        // Set when the backup feeds the running extraction: neither a failover nor parking the
+        // download as hopeless may throw that extraction away.
+        let mut feeds_extraction = false;
         if let Some((backup_hi, backup_nzb)) = backup {
             // A backup that only just arrived has not been classified yet: give it the
             // grace to be sampled, so a twin or alt that can lend is not skipped over by
@@ -4759,6 +4762,7 @@ impl NzbgetRsQueueCoordinator {
                         nzb.current_success_articles,
                         failed,
                     ));
+            feeds_extraction = lendable && nzb.direct_unpack_status == DirectUnpackStatus::Running;
             if !light_damage
                 && !lendable
                 && crate::dupecoord::dupe_failover_warranted_inline(
@@ -4793,11 +4797,13 @@ impl NzbgetRsQueueCoordinator {
             }
         }
 
-        if download_hopeless(
-            nzb.total_articles,
-            nzb.current_success_articles,
-            nzb.current_failed_articles,
-        ) {
+        if !feeds_extraction
+            && download_hopeless(
+                nzb.total_articles,
+                nzb.current_success_articles,
+                nzb.current_failed_articles,
+            )
+        {
             let tried = nzb.current_success_articles + nzb.current_failed_articles;
             let reason = crate::dupecoord::no_backup_reason_host(host, opts, dq_ptr, nzb);
             let mut msg = b"Parking ".to_vec();

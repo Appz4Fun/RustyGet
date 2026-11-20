@@ -791,6 +791,13 @@ impl<'a> Run<'a> {
         // handed over before its borrow finished (about 90 holes) used up the default 128 MiB
         // and failed the session. Same headroom as `rarreader` gives its sessions.
         opts.limits.metadata_bytes = opts.limits.metadata_bytes.max(1 << 31);
+        // Every hole patched inline re-checks the member from its start, so verify work grows
+        // with the patches: 79 patches of one dead volume (S23E07 on 6790) went past the
+        // default 64 GiB and left its holes for after the set. 4 TiB until zipfast checks a
+        // patch without re-reading what came before it.
+        let verify = opts.limits.verify_work_bytes.max(1 << 42);
+        opts.limits.verify_work_bytes = verify;
+        opts.limits.verify_bytes = opts.limits.verify_bytes.max(verify);
         // A RAR 1.5-4 dead volume handed over before its borrow finished carries part
         // checksum 0 (see `deadvolume::synthesize_frame`): skip that part's own check, the
         // member checksum still checks the file. Set on every session, a restart included.

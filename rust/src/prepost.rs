@@ -544,16 +544,18 @@ fn damage_is_borrowed_volumes(
     absent_unnamed <= borrowed
 }
 
-/// True when par-check would only rebuild volumes that direct unpack already read borrowed:
-/// some data files never reached the disk, each of them is one of the `borrowed` dead volumes,
-/// and every damaged file on disk is an archive volume direct unpack extracted from (its outputs
-/// passed the archive's own checksums, with any hole patched from a repair). A damaged file
-/// direct unpack never read still needs par-check.
+/// True when par-check would only rebuild volumes that direct unpack already read borrowed,
+/// or only flag bytes put back into them: every data file that never reached the disk is one
+/// of the `borrowed` dead volumes, every damaged file on disk is an archive volume direct
+/// unpack extracted from (its outputs passed the archive's own checksums, with any hole
+/// patched from a repair), and something is missing or was put back. A damaged file direct
+/// unpack never read still needs par-check.
 fn direct_unpack_read_all_damage(
     files: &[crate::queuesubsys_host::CompletedFileSnap],
     extracted: &[Vec<u8>],
     dest_dir: &[u8],
     borrowed: usize,
+    put_back: bool,
 ) -> bool {
     const CF_SUCCESS: i32 = 1;
     // Files that never reached the disk: each one must be a dead volume read borrowed.
@@ -585,9 +587,35 @@ fn direct_unpack_read_all_damage(
         }
         absent += 1;
     }
+    // Nothing else checks a file direct unpack did not extract: bytes put back into it (a
+    // split file, a sample) are verified by par-check alone, so it is kept for such a job
+    // unless every file it did not read is a small informational one.
+    if put_back && absent == 0 {
+        let unread = files.iter().filter(|f| !f.par_file).any(|f| {
+            !extracted.iter().any(|e| e.eq_ignore_ascii_case(&f.filename))
+                && !is_informational_file(&f.filename)
+        });
+        if unread {
+            return false;
+        }
+    }
     // With every file on disk par-check only verifies (quickly, from the article checksums
-    // where it can): it is kept. It is skipped when it would rebuild borrowed volumes.
-    absent > 0 && absent <= borrowed
+    // where it can): it is kept, unless bytes were put back into the volumes that par2 can
+    // count as damage although the extraction read them fine (`put_back`: lent by a duplicate,
+    // or a volume end rebuilt from a sibling, whose quick-open record par2 sees as a bad
+    // block): its failure would then fail a download direct unpack verified. It is skipped
+    // when it would rebuild borrowed volumes.
+    absent <= borrowed && (absent > 0 || put_back)
+}
+
+/// Release side files that hold no payload (`.nfo`, `.sfv`, ...): par-check is not kept for them.
+fn is_informational_file(name: &[u8]) -> bool {
+    const EXTS: [&[u8]; 12] = [
+        b".nfo", b".sfv", b".srr", b".srs", b".txt", b".jpg", b".jpeg", b".png", b".url",
+        b".nzb", b".md5", b".sha1",
+    ];
+    let ext = crate::filetypes::file_extension(name);
+    EXTS.iter().any(|e| e.eq_ignore_ascii_case(ext))
 }
 
 /// Classify skipped par-check health action in `PrePostProcessor::StartJob`:
@@ -1641,6 +1669,7 @@ impl NzbgetRsPrePostProcessor {
         let nzb2 = host.nzb_snap(nzb_ptr, false);
         crate::parlive::forget_download_writes(nzb2.id);
         crate::postproc::forget_dead_volume_verdicts(nzb2.id);
+        crate::postproc::forget_put_back(nzb2.id);
         dupe_gate_forget(nzb2.id);
         crate::postproc::direct_unpack_join_live_par_repair(nzb2.id);
         delete_cleanup_host(host, &opts, &nzb2);
@@ -2102,6 +2131,7 @@ impl NzbgetRsPrePostProcessor {
                     &host.nzb_extracted_archives(nzb.ptr),
                     &nzb.dest_dir,
                     crate::postproc::dead_volumes_borrowed_count(nzb.id),
+                    crate::postproc::volume_end_was_rebuilt(nzb.id) || nzb.dupe_recovered_bytes > 0,
                 )
             {
                 // Every extracted file already passed the archive checksums: par2 would only
@@ -2110,12 +2140,13 @@ impl NzbgetRsPrePostProcessor {
                 msg.extend_from_slice(&nzb.name);
                 msg.extend_from_slice(
                     b": direct unpack verified every file against the archive checksums, \
-                      reading the missing volumes borrowed from duplicates",
+                      reading what duplicates lent and any volume rebuilt",
                 );
                 host.nzb_print_message(nzb.ptr, MK_INFO, &msg);
                 host.nzb_set_par_status(nzb.ptr, NzbParStatus::Success);
                 host.nzb_set_int(nzb.ptr, NZB_INT_CHANGED, 1);
                 let _ = crate::postproc::take_dead_volumes_borrowed(nzb.id);
+                let _ = crate::postproc::take_volume_end_rebuilt(nzb.id);
                 return;
             }
 
@@ -2631,32 +2662,47 @@ mod tests {
             f("a.part04.rar", 3, false),
             f("a.vol00+01.par2", 3, true),
         ];
-        assert!(ok(&files, &extracted, &d, 1));
-        assert!(!ok(&files, &extracted, &d, 0), "a missing volume nobody borrowed");
+        assert!(ok(&files, &extracted, &d, 1, false));
+        assert!(!ok(&files, &extracted, &d, 0, false), "a missing volume nobody borrowed");
         let mut sample = files.clone();
         std::fs::write(dir.join("a.sample.mkv"), b"partial").unwrap();
         sample.push(f("a.sample.mkv", 2, false));
-        assert!(!ok(&sample, &extracted, &d, 5), "a damaged file direct unpack never read");
+        assert!(!ok(&sample, &extracted, &d, 5, false), "a damaged file direct unpack never read");
         let mut other_set = files;
         std::fs::write(dir.join("subs.rar"), b"partial").unwrap();
         other_set.push(f("subs.rar", 2, false));
-        assert!(!ok(&other_set, &extracted, &d, 5), "an archive direct unpack did not extract");
-        assert!(!ok(&[f("a.part01.rar", 1, false)], &extracted, &d, 0), "nothing to rebuild");
+        assert!(!ok(&other_set, &extracted, &d, 5, false), "an archive direct unpack did not extract");
+        assert!(!ok(&[f("a.part01.rar", 1, false)], &extracted, &d, 0, false), "nothing to rebuild");
         assert!(
-            !ok(&[f("A.PART02.rar", 2, false)], &extracted, &d, 0),
+            !ok(&[f("A.PART02.rar", 2, false)], &extracted, &d, 0, false),
             "holes repaired in place: par-check only verifies"
         );
+        assert!(
+            ok(&[f("A.PART02.rar", 2, false)], &extracted, &d, 0, true),
+            "bytes put back (lent, or an end rebuilt) that par2 would count as damage"
+        );
+        assert!(
+            !ok(&[f("a.part01.rar", 1, false)], &extracted, &d, 0, false),
+            "nothing damaged, nothing put back"
+        );
+        let patched_split = [f("A.PART02.rar", 2, false), f("Show.mkv.001", 1, false)];
+        assert!(
+            !ok(&patched_split, &extracted, &d, 0, true),
+            "a file direct unpack never read may hold lent bytes only par-check verifies"
+        );
+        let with_nfo = [f("A.PART02.rar", 2, false), f("a.nfo", 1, false), f("a.SFV", 1, false)];
+        assert!(ok(&with_nfo, &extracted, &d, 0, true), "side files hold no payload");
         // part03 never arrived and was read borrowed (so it is in `extracted`): it takes the
         // one borrowed slot, and a missing obfuscated file has none left.
         let borrowed_read = vec![f("a.part03.rar", 3, false)];
-        assert!(ok(&borrowed_read, &extracted, &d, 1));
+        assert!(ok(&borrowed_read, &extracted, &d, 1, false));
         let mut plus_obf = borrowed_read.clone();
         plus_obf.push(f("q9z1m0", 3, false));
-        assert!(!ok(&plus_obf, &extracted, &d, 1), "one borrowed volume covers one file");
-        assert!(ok(&plus_obf, &extracted, &d, 2));
+        assert!(!ok(&plus_obf, &extracted, &d, 1, false), "one borrowed volume covers one file");
+        assert!(ok(&plus_obf, &extracted, &d, 2, false));
         let mut plus_sample = borrowed_read;
         plus_sample.push(f("a.sample.mkv", 3, false));
-        assert!(!ok(&plus_sample, &extracted, &d, 5), "a sample that never arrived");
+        assert!(!ok(&plus_sample, &extracted, &d, 5, false), "a sample that never arrived");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

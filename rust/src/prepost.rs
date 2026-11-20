@@ -2125,9 +2125,7 @@ impl NzbgetRsPrePostProcessor {
                 && nzb.direct_unpack_status == DirectUnpackStatus::Success
                 && direct_unpack_read_all_damage(
                     &host.nzb_completed_files(nzb.ptr),
-                    &(0..host.nzb_extracted_archives_len(nzb.ptr))
-                        .map(|i| host.nzb_extracted_archive_at(nzb.ptr, i))
-                        .collect::<Vec<_>>(),
+                    &host.nzb_extracted_archives(nzb.ptr),
                     &nzb.dest_dir,
                     crate::postproc::dead_volumes_borrowed_count(nzb.id),
                 )

@@ -3646,6 +3646,22 @@ pub fn donor_step_part_for_offset(
     }
 }
 
+/// How many holes from the front of `holes` make one prefetch wave: consecutive holes each
+/// smaller than `chunk`, together at most `chunk`. A hole of a chunk or more is read in
+/// chunks with its own batches, so it ends the wave (and alone makes a wave of one).
+fn small_hole_wave(holes: &[NzbgetRsByteRange], chunk: i64) -> usize {
+    let mut total = 0i64;
+    let mut count = 0usize;
+    for hole in holes {
+        if hole.size >= chunk || total + hole.size > chunk {
+            break;
+        }
+        total += hole.size;
+        count += 1;
+    }
+    count.max(usize::from(!holes.is_empty()))
+}
+
 /// Computes `(first, last)` inclusive prefetch part indices in `DonorMemberSource::Prefetch`.
 pub fn donor_calc_prefetch_bounds(first_est: i32, last_est: i32, ranges_len: usize) -> (i32, i32) {
     let first = (first_est - 1).max(0);
@@ -4963,6 +4979,9 @@ pub trait ContentSource {
     fn size(&self) -> i64;
     /// Fills `buf` with the bytes at `offset`, all of them or an error.
     fn read(&self, offset: i64, buf: &mut [u8]) -> ReadResult;
+    /// Hint that the byte ranges `(offset, size)` are about to be read, so a source that
+    /// fetches over the network can fetch them all at once. Does nothing by default.
+    fn prefetch_ranges(&self, _ranges: &[(i64, i64)]) {}
 }
 
 /// Reads `pieces` back to back into `buf`, each from its member's source.
@@ -5472,6 +5491,34 @@ impl ContentMap {
 
     /// Reads donor plaintext for `inner_range` (`StreamRepairController::ReadDonorInner` in `StreamRepair.cpp`),
     /// decrypting through the donor map when the donor is encrypted.
+    /// Hints the donor sources that the inner ranges `inner_ranges` are read next (see
+    /// [`ContentSource::prefetch_ranges`]), member by member. Encrypted maps read through
+    /// layers and are left alone.
+    pub fn prefetch_donor_inner(
+        &self,
+        sources: &dyn ContentSourceSet,
+        inner_ranges: &[NzbgetRsByteRange],
+    ) {
+        if self.inside_encrypted() || self.encrypted() {
+            return;
+        }
+        let mut by_member: std::collections::BTreeMap<i32, Vec<(i64, i64)>> =
+            std::collections::BTreeMap::new();
+        for &range in inner_ranges {
+            for piece in self.map_from_inner(range) {
+                by_member
+                    .entry(piece.member_index)
+                    .or_default()
+                    .push((piece.offset, piece.size));
+            }
+        }
+        for (member, ranges) in by_member {
+            if let Some(source) = sources.get_source(member) {
+                source.prefetch_ranges(&ranges);
+            }
+        }
+    }
+
     pub fn read_donor_inner(
         &self,
         sources: &dyn ContentSourceSet,
@@ -6279,16 +6326,28 @@ impl RepairSetData {
 
         let mut written: i64 = 0;
         let mut donor_data = Vec::new();
-        let holes = self.inner_holes.clone();
-
-        for hole in holes {
-            let mut target_hole = true;
-            for piece in target_map.map_from_inner(hole) {
-                let idx = piece.member_index as usize;
-                target_hole &= member_targets.get(idx).copied().unwrap_or(-1) >= 0;
-            }
-            if !target_hole {
-                continue;
+        let holes: Vec<NzbgetRsByteRange> = self
+            .inner_holes
+            .iter()
+            .copied()
+            .filter(|hole| {
+                target_map.map_from_inner(*hole).iter().all(|piece| {
+                    member_targets
+                        .get(piece.member_index as usize)
+                        .copied()
+                        .unwrap_or(-1)
+                        >= 0
+                })
+            })
+            .collect();
+        for (index, hole) in holes.iter().copied().enumerate() {
+            // Hinted before every hole: each donor member fetches the next holes' articles
+            // as a batch once half a wave of them is not cached yet.
+            if !target_files.is_stopped() {
+                let wave = small_hole_wave(&holes[index..], FULL_CHUNK);
+                if wave >= 2 {
+                    donor_map.prefetch_donor_inner(donor_sources, &holes[index..index + wave]);
+                }
             }
 
             let hole_end = range_end(hole);
@@ -6564,6 +6623,10 @@ fn final_end_block(middle: &[u8]) -> Option<Vec<u8>> {
 }
 
 pub const DONOR_MAX_CACHED_PARTS: usize = 16;
+/// Parts one wave of small holes fetches at once (see
+/// `DonorMemberSource::prefetch_ranges_with_transport`): under the cache size, so none of
+/// them is evicted before its read.
+pub const DONOR_WAVE_PARTS: usize = DONOR_MAX_CACHED_PARTS - 2;
 /// Most articles one read asks the batch fetcher for. They stream into the read in order
 /// (see [`DonorMemberSource::fetch_part`]), so this is bounded by the batch fetcher's own
 /// window and buffer, not by the cache: a read of a few tens of MB keeps every worker busy.
@@ -6794,6 +6857,64 @@ impl DonorMemberSource {
             self.streaming.clear();
             transport.cancel_prefetch_batch();
         }
+    }
+
+    /// Fetches the articles of several upcoming reads as one batch and keeps them cached, so
+    /// reads of small scattered holes (an article or two each) stop waiting on one round trip
+    /// after another. At most `DONOR_WAVE_PARTS` parts, which fit the cache.
+    pub fn prefetch_ranges_with_transport(
+        &mut self,
+        transport: &mut dyn DonorArticleTransport,
+        ranges: &[(i64, i64)],
+    ) {
+        if !transport.has_prefetch_batch() || !self.ensure_init(transport) {
+            return;
+        }
+        let (parts, all) = self.wave_parts(ranges);
+        // Called before every hole: waits until half a wave is free (or the rest fits) so
+        // each batch keeps enough articles in flight.
+        if parts.len() < 2 || (!all && parts.len() < DONOR_WAVE_PARTS / 2) {
+            return;
+        }
+        transport.begin_prefetch_batch(&parts);
+        for (taken, &part) in parts.iter().enumerate() {
+            let Some(fetched) = transport.next_prefetch_part() else {
+                if taken + 1 < parts.len() {
+                    transport.cancel_prefetch_batch();
+                }
+                return;
+            };
+            if !self.cache.contains_key(&part) {
+                self.store_fetched(part, fetched);
+            }
+        }
+    }
+
+    /// The uncached parts covering the longest prefix of `ranges` (with the usual one-part
+    /// slack each side) whose parts, cached ones included, number at most
+    /// `DONOR_WAVE_PARTS`; and whether that prefix is all of `ranges`. Counting the cached
+    /// ones keeps a wave from evicting parts an earlier wave fetched for holes not read yet.
+    fn wave_parts(&self, ranges: &[(i64, i64)]) -> (Vec<i32>, bool) {
+        let mut held = std::collections::BTreeSet::new();
+        if self.bad || self.ranges.is_empty() {
+            return (Vec::new(), false);
+        }
+        for &(offset, size) in ranges {
+            if size <= 0 || offset < 0 {
+                continue;
+            }
+            let first_est = donor_index_for_offset(offset, self.drift, &self.ranges);
+            let last_est = donor_index_for_offset(offset + size - 1, self.drift, &self.ranges);
+            let (first, last) = donor_calc_prefetch_bounds(first_est, last_est, self.ranges.len());
+            let more = (first..=last).filter(|i| !held.contains(i)).count();
+            if held.len() + more > DONOR_WAVE_PARTS {
+                let parts = held.into_iter().filter(|i| !self.cache.contains_key(i)).collect();
+                return (parts, false);
+            }
+            held.extend(first..=last);
+        }
+        let parts = held.into_iter().filter(|i| !self.cache.contains_key(i)).collect();
+        (parts, true)
     }
 
     pub fn read_with_transport(
@@ -8728,6 +8849,16 @@ impl ContentSource for DonorSetMemberSlot<'_, '_> {
         self.inner
             .borrow_mut()
             .read_with_transport(&mut adapter, offset, buf)
+    }
+
+    fn prefetch_ranges(&self, ranges: &[(i64, i64)]) {
+        let mut adapter = MemberTransportAdapter {
+            shared: &self.shared,
+            member_index: self.member_index,
+        };
+        self.inner
+            .borrow_mut()
+            .prefetch_ranges_with_transport(&mut adapter, ranges);
     }
 }
 
@@ -17130,6 +17261,77 @@ mod tests {
         assert!(src.read_with_transport(&mut transport, 1000, &mut buf[..2000]).is_err());
         assert!(src.streaming.is_empty());
         assert!(transport.prefetch_queue.is_empty());
+    }
+
+    #[test]
+    fn scattered_small_holes_are_fetched_as_one_wave() {
+        // Four one-article holes spread over 40 parts: one batch fetches them all up front and
+        // every read after it is served from the cache, with no batch or fetch of its own.
+        let parts: Vec<FetchedDonorArticle> = (0..40i64)
+            .map(|i| FetchedDonorArticle {
+                success: true,
+                offset: i * 100,
+                file_size: 4000,
+                data: (0..100).map(|b| ((i * 100 + b) % 251) as u8).collect(),
+            })
+            .collect();
+        let full: Vec<u8> = parts.iter().flat_map(|p| p.data.clone()).collect();
+        let mut src = DonorMemberSource::new(vec![110i32; 40]);
+        let mut transport = MockDonorTransport {
+            parts,
+            budget: None,
+            allow_prefetch: true,
+            prefetch_queue: std::collections::VecDeque::new(),
+            single_fetches: 0,
+            batch_begins: 0,
+        };
+        assert_eq!(src.size_with_transport(&mut transport), 4000);
+        let singles = transport.single_fetches;
+        let holes = [(510i64, 60i64), (1210, 60), (2010, 60), (2810, 60)];
+        src.prefetch_ranges_with_transport(&mut transport, &holes);
+        assert_eq!(transport.batch_begins, 1);
+        assert!(transport.prefetch_queue.is_empty());
+        for &(offset, size) in &holes {
+            let mut buf = vec![0u8; size as usize];
+            assert!(src
+                .read_with_transport(&mut transport, offset, &mut buf)
+                .is_ok());
+            assert_eq!(&buf[..], &full[offset as usize..(offset + size) as usize]);
+        }
+        assert_eq!(transport.batch_begins, 1);
+        assert_eq!(transport.single_fetches, singles);
+
+        // A wave never asks for more parts than the cache keeps, and the next wave comes
+        // once the first holes are read: 12 holes over 40 parts take three batches, not one
+        // per hole, and every read is served from the cache.
+        let many: Vec<(i64, i64)> = (0..12i64).map(|i| (i * 300 + 10, 60)).collect();
+        let mut src = DonorMemberSource::new(vec![110i32; 40]);
+        assert_eq!(src.size_with_transport(&mut transport), 4000);
+        let (first_wave, all) = src.wave_parts(&many);
+        assert!(first_wave.len() <= DONOR_WAVE_PARTS);
+        assert!(!all);
+        let begins = transport.batch_begins;
+        let singles = transport.single_fetches;
+        for index in 0..many.len() {
+            src.prefetch_ranges_with_transport(&mut transport, &many[index..]);
+            let (offset, size) = many[index];
+            let mut buf = vec![0u8; size as usize];
+            assert!(src.read_with_transport(&mut transport, offset, &mut buf).is_ok());
+            assert_eq!(&buf[..], &full[offset as usize..(offset + size) as usize]);
+        }
+        assert_eq!(transport.single_fetches, singles);
+        assert!(transport.batch_begins - begins <= 4, "{}", transport.batch_begins - begins);
+    }
+
+    #[test]
+    fn a_wave_is_the_run_of_small_holes_up_to_a_chunk() {
+        let h = |size| NzbgetRsByteRange { offset: 0, size };
+        assert_eq!(small_hole_wave(&[], 100), 0);
+        assert_eq!(small_hole_wave(&[h(10), h(20), h(30)], 100), 3);
+        assert_eq!(small_hole_wave(&[h(40), h(40), h(40)], 100), 2);
+        // A big hole reads in its own batches: alone, or ending the wave before it.
+        assert_eq!(small_hole_wave(&[h(100), h(10)], 100), 1);
+        assert_eq!(small_hole_wave(&[h(10), h(100)], 100), 1);
     }
 
     struct MockBatchClient {

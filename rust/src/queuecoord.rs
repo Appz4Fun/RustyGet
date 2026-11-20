@@ -1965,6 +1965,7 @@ impl NzbgetRsQueueCoordinator {
                 &nzb.name,
                 &nzb.dupe_key,
             )
+            .filter(|(_, b)| !crate::dupecoord::locked_host(host, b.ptr))
         } else {
             None
         };
@@ -4692,6 +4693,7 @@ impl NzbgetRsQueueCoordinator {
                 &nzb.name,
                 &nzb.dupe_key,
             )
+            .filter(|(_, b)| !crate::dupecoord::locked_host(host, b.ptr))
         } else {
             None
         };
@@ -5177,7 +5179,8 @@ impl NzbgetRsQueueCoordinator {
             nzb.ptr,
             &nzb.name,
             &nzb.dupe_key,
-        );
+        )
+        .filter(|(_, b)| !crate::dupecoord::locked_host(host, b.ptr));
         let damage = format_par_damage_summary(
             certain,
             verdict.damaged_blocks,

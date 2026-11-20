@@ -10,8 +10,9 @@
 
 #![allow(non_snake_case)]
 
+use crate::jobthread::JobHandle;
 use crate::options::OptStr;
-use crate::queuesubsys_host::{FileRef, NzbRef};
+use crate::queuesubsys_host::{FileRef, NzbRef, PostRef};
 use crate::status::{DeleteStatus, ScriptStatus};
 use std::collections::BTreeSet;
 use std::ffi::{c_char, c_int, CStr, CString};
@@ -1740,10 +1741,22 @@ pub unsafe extern "C" fn nzbget_rs_post_op(
     }
 }
 
-/// Field 19 of a post job: its post-processing thread.
-fn post_thread(p: *const Post) -> *mut crate::jobthread::JobThread {
+/// Field 19 of a post job: its post-processing thread, if any.
+fn post_thread(p: *const Post) -> Option<JobHandle> {
     let ns = std::ptr::null_mut();
-    (unsafe { nzbget_rs_post_op(p, 0, 19, 0, std::ptr::null(), ns) }) as usize as *mut _
+    let addr = (unsafe { nzbget_rs_post_op(p, 0, 19, 0, std::ptr::null(), ns) }) as usize;
+    // SAFETY: field 19 holds 0 or the post job's live thread.
+    unsafe { JobHandle::from_addr(addr) }
+}
+
+/// The job thread in a download's slot `id`, if any.
+fn slot_job(nzb: usize, id: c_int) -> Option<JobHandle> {
+    if nzb == 0 {
+        return None;
+    }
+    let addr = unsafe { nzbget_rs_nzb_slot(nzb as *const NzbScalars, id, 0, 0) };
+    // SAFETY: the job slots hold 0 or a live job thread.
+    unsafe { JobHandle::from_addr(addr) }
 }
 
 fn post_set(p: *const Post, id: c_int, v: i64) {
@@ -1833,10 +1846,8 @@ pub(crate) unsafe fn host_post_snapshot(
     for (slot, id) in [1, 2, 3, 4, 8, 15, 16, 5, 6, 7].into_iter().enumerate() {
         ints[slot + 1] = flag(id);
     }
-    ints[11] = c_int::from(!pt.is_null());
-    ints[12] = c_int::from(
-        !pt.is_null() && unsafe { crate::jobthread::nzbget_rs_job_op(pt, 4, 0, 0, 0) } != 0,
-    );
+    ints[11] = c_int::from(pt.is_some());
+    ints[12] = c_int::from(pt.is_some_and(JobHandle::is_running));
     ints[13] = flag(10);
     ints[14] = flag(9);
     ints[15] = flag(11);
@@ -1870,19 +1881,18 @@ pub(crate) unsafe fn host_post_snapshot(
 /// # Safety
 /// `p` is a live collection; the caller holds the queue lock.
 pub unsafe extern "C" fn nzbget_rs_nzb_start_direct_unpack(p: *mut NzbScalars) {
-    use crate::jobthread::{nzbget_rs_job_free, nzbget_rs_job_new_unpack, nzbget_rs_job_start};
     if p.is_null() {
         return;
     }
-    let job = nzbget_rs_job_new_unpack(unsafe { (*p).id });
-    unsafe { nzbget_rs_nzb_slot(p, 2, 1, job as usize) };
+    let job = JobHandle::new_unpack(unsafe { (*p).id });
+    unsafe { nzbget_rs_nzb_slot(p, 2, 1, job.addr()) };
     // NzbInfo::nsRunning
     unsafe { (*p).directUnpackStatus = 1 };
-    if unsafe { nzbget_rs_job_start(job) } == 0 {
+    if !job.start() {
         unsafe {
             nzbget_rs_nzb_slot(p, 2, 1, 0);
             (*p).directUnpackStatus = 0;
-            nzbget_rs_job_free(job, 0);
+            job.free(false);
         }
     }
 }
@@ -1906,72 +1916,52 @@ pub(crate) unsafe fn host_post_job_op(
     p2: usize,
     i64s: *const i64,
 ) -> usize {
-    use crate::jobthread::{
-        nzbget_rs_job_free, nzbget_rs_job_new_post, nzbget_rs_job_op, nzbget_rs_job_start,
-    };
     let post = p1 as *const Post;
-    let slot = |n: usize, id: c_int| -> *mut crate::jobthread::JobThread {
-        if n == 0 {
-            std::ptr::null_mut()
-        } else {
-            (unsafe { nzbget_rs_nzb_slot(n as *const NzbScalars, id, 0, 0) }) as *mut _
-        }
-    };
     match a1 {
         0 if !post.is_null() => {
-            let t = post_thread(post);
-            if !t.is_null() {
-                unsafe { nzbget_rs_job_op(t, 0, 0, 0, 0) };
+            if let Some(t) = post_thread(post) {
+                t.stop();
             }
         }
         1 | 2 if !post.is_null() => {
-            let t = post_thread(post);
-            if !t.is_null() {
+            if let Some(t) = post_thread(post) {
                 post_set(post, 19, 0);
-                unsafe { nzbget_rs_job_free(t, c_int::from(a1 == 2)) };
+                unsafe { t.free(a1 == 2) };
             }
         }
         3 => {
-            let du = slot(p1, 2);
-            if du.is_null() {
+            let Some(du) = slot_job(p1, 2) else {
                 return 0;
-            }
-            let active = a2 != 0
-                || (unsafe { nzbget_rs_job_op(du, 15, 0, 0, 0) } != 0
-                    && unsafe { nzbget_rs_job_op(du, 16, 0, 0, 0) } == 0);
+            };
+            let active = a2 != 0 || (du.unpack_is_unpacking() && !du.unpack_is_waiting_volume());
             return usize::from(active);
         }
         4..=7 => {
-            let du = slot(p2, 2);
-            if !du.is_null() {
-                const DU_OP: [c_int; 4] = [11, 13, 14, 12];
-                let arg = if a1 == 7 {
-                    (unsafe { *i64s }) as usize
-                } else {
-                    p2
-                };
-                unsafe { nzbget_rs_job_op(du, DU_OP[(a1 - 4) as usize], 0, p1, arg) };
+            if let Some(du) = slot_job(p2, 2) {
+                match a1 {
+                    4 => du.unpack_stop(NzbRef::from_addr(p2)),
+                    5 => du.unpack_nzb_downloaded(NzbRef::from_addr(p2)),
+                    6 => du.unpack_nzb_deleted(NzbRef::from_addr(p2)),
+                    _ => du.unpack_file_downloaded(FileRef::from_addr((unsafe { *i64s }) as usize)),
+                }
             }
         }
         8 if p1 != 0 => unsafe { nzbget_rs_nzb_start_direct_unpack(p1 as *mut NzbScalars) },
         9 => {
-            let t = slot(p1, 3);
-            if !t.is_null() {
-                unsafe { nzbget_rs_job_op(t, 0, 0, 0, 0) };
+            if let Some(t) = slot_job(p1, 3) {
+                t.stop();
             }
         }
         10 if p1 != 0 => {
-            let t = unsafe { nzbget_rs_nzb_slot(p1 as *const NzbScalars, 3, 1, 0) }
-                as *mut crate::jobthread::JobThread;
-            if !t.is_null() {
-                unsafe { nzbget_rs_job_op(t, 0, 0, 0, 0) };
+            let addr = unsafe { nzbget_rs_nzb_slot(p1 as *const NzbScalars, 3, 1, 0) };
+            // SAFETY: the slot held 0 or the live repair's thread.
+            if let Some(t) = unsafe { JobHandle::from_addr(addr) } {
+                t.stop();
             }
         }
         11 if !post.is_null() && crate::ffi::build_parcheck_enabled() => {
-            let t = post_thread(post);
-            if !t.is_null() {
-                let added = unsafe { nzbget_rs_job_op(t, 5, c_int::from(a2 != 0), p2, 0) };
-                return usize::from(added != 0);
+            if let Some(t) = post_thread(post) {
+                return usize::from(t.add_par_file(FileRef::from_addr(p2), a2 != 0));
             }
         }
         12 if !post.is_null() => {
@@ -1985,13 +1975,13 @@ pub(crate) unsafe fn host_post_job_op(
             if a2 == 9 && !nzb.is_null() && unsafe { (*nzb).skipScriptProcessing } {
                 return 0;
             }
-            let job = unsafe { nzbget_rs_job_new_post(a2, p1, 0, 0) };
-            post_set(post, 19, job as usize as i64);
-            if unsafe { nzbget_rs_job_start(job) } == 0 {
+            let job = JobHandle::new_post(a2, PostRef::from_addr(p1), 0, false);
+            post_set(post, 19, job.addr() as i64);
+            if !job.start() {
                 // no worker will finish this stage: let the scheduler clean up and retry it
                 post_set(post, 19, 0);
                 post_set(post, 1, 0);
-                unsafe { nzbget_rs_job_free(job, 0) };
+                unsafe { job.free(false) };
             }
         }
         _ => {}

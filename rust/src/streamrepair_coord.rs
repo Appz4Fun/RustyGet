@@ -329,6 +329,9 @@ pub struct NzbgetRsStreamRepairCtrl {
     /// Raised when a volume went dead while a live pass borrows: the pass stops so the next
     /// one hands every dead volume to direct unpack at once.
     yielding: AtomicBool,
+    /// Set while the cross-pack session borrows one dead volume: a yield waits until that
+    /// volume is in, so its borrow is handed over whole instead of restarting from zero.
+    finishing_volume: AtomicBool,
     /// Dead volumes whose whole-file recreation a yielded pass skipped: a later pass still owes
     /// it, though the queue now marks them tried.
     recreate_owed: Mutex<std::collections::BTreeSet<Vec<u8>>>,
@@ -359,6 +362,7 @@ impl NzbgetRsStreamRepairCtrl {
             parallel_live_fetch: AtomicBool::new(false),
             pass_dead: Mutex::new(PassDead::default()),
             yielding: AtomicBool::new(false),
+            finishing_volume: AtomicBool::new(false),
             recreate_owed: Mutex::new(Default::default()),
             tls_enabled,
             debug_enabled,
@@ -1475,7 +1479,7 @@ impl NzbgetRsStreamRepairCtrl {
         let pw =
             (!counters.target_password.is_empty()).then_some(counters.target_password.as_slice());
 
-        let aborted = || self.host_is_stopped(q) || self.yielding.load(Ordering::SeqCst);
+        let aborted = || self.host_is_stopped(q) || self.yield_stops_now();
         let mut emit_msg = |kind: TargetMessageKind, text: &[u8]| {
             self.print_message(q, map_target_msg_kind(kind), text);
         };
@@ -1571,7 +1575,14 @@ impl NzbgetRsStreamRepairCtrl {
 
             impl CrossPackDonorEnv for NativeCrossPackEnv<'_> {
                 fn is_stopped(&mut self) -> bool {
-                    self.ctrl.host_is_stopped(self.q) || self.ctrl.yield_for_new_dead(self.q)
+                    // Still asks the queue for new dead volumes while a volume finishes, so
+                    // the yield is raised as soon as one turns up.
+                    let new_dead = self.ctrl.yield_for_new_dead(self.q);
+                    self.ctrl.host_is_stopped(self.q) || (new_dead && self.ctrl.yield_stops_now())
+                }
+
+                fn set_finishing_volume(&mut self, on: bool) {
+                    self.ctrl.finishing_volume.store(on, Ordering::SeqCst);
                 }
 
                 fn fetch_donor_part(
@@ -2314,6 +2325,11 @@ impl NzbgetRsStreamRepairCtrl {
     /// volumes). Stopping the pass instead lets the next one hand every dead volume over at
     /// once and resume the borrow where this one left it (its borrowed bytes are kept). The
     /// queue is asked at most every `YIELD_CHECK`.
+    /// Whether a raised yield stops the pass now: not while a dead volume's borrow finishes.
+    fn yield_stops_now(&self) -> bool {
+        self.yielding.load(Ordering::SeqCst) && !self.finishing_volume.load(Ordering::SeqCst)
+    }
+
     fn yield_for_new_dead(&self, q: JobQueue<'_>) -> bool {
         if !self.live_mode {
             return false;
@@ -2674,6 +2690,20 @@ fn release_completed_holds(dest_dir: &[u8], targets: &[RepairTarget]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_yield_waits_for_the_dead_volume_being_borrowed() {
+        static HOST: crate::articlefetcher::NativeNntpHost = crate::articlefetcher::NativeNntpHost;
+        let ctrl = NzbgetRsStreamRepairCtrl::new(true, 1, &HOST, false, false);
+        assert!(!ctrl.yield_stops_now());
+        ctrl.yielding.store(true, Ordering::SeqCst);
+        assert!(ctrl.yield_stops_now());
+        // mid-volume: the borrow finishes first, then the pass stops
+        ctrl.finishing_volume.store(true, Ordering::SeqCst);
+        assert!(!ctrl.yield_stops_now());
+        ctrl.finishing_volume.store(false, Ordering::SeqCst);
+        assert!(ctrl.yield_stops_now());
+    }
 
     #[test]
     fn a_dead_volume_is_placeable_once_every_earlier_volume_finished() {

@@ -698,7 +698,7 @@ fn rar4_aes_wrong_password_is_typed() {
     // The unpacker's password list moves on to the next candidate on a decryption error.
     assert!(
         log.iter().any(|l| {
-            let info = crate::postrepair::parse_unpack_message(l.as_bytes(), b"", false);
+            let info = crate::unpack::parse_unpack_message(l.as_bytes(), b"", false);
             info.decrypt_error != 0 || info.password_error != 0
         }),
         "{log:?}"

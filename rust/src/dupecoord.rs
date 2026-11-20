@@ -1,6 +1,6 @@
 //! End-to-end Rust implementation of `DupeCoordinator` (`daemon/queue/DupeCoordinator.cpp`):
 //! duplicate name/key matching (`same_name_or_key`), on-disk verification (`files_on_disk`),
-//! failover threshold & policy (`failover_warranted`, `fails_over`, `parse_alive_permille_cstr`),
+//! failover threshold & policy (`dupe_failover_warranted_inline`, `fails_over_snap`, `parse_alive_permille_bytes`),
 //! backup candidate selection (`select_dupe_backup`), no-backup diagnostics
 //! (`no_backup_reason`, `format_no_backup_reason`), skip message formatting
 //! (`format_dupe_skip_message`), and status classification (`status_from_text`).
@@ -8,7 +8,6 @@
 use crate::queuesubsys_host::NzbRef;
 use crate::status::{DeleteStatus, DupStatus, DupeMode, MarkStatus};
 use std::collections::BTreeSet;
-use std::ffi::{c_char, CStr};
 use std::path::Path;
 
 pub(crate) fn parse_f64_prefix(bytes: &[u8]) -> Option<f64> {
@@ -82,13 +81,7 @@ pub fn strncasecmp_prefix(haystack: &[u8], prefix: &[u8]) -> bool {
     haystack.len() >= prefix.len() && haystack[..prefix.len()].eq_ignore_ascii_case(prefix)
 }
 
-pub const HEALTH_CHECK_PAUSE: i32 = 0;
-pub const HEALTH_CHECK_DELETE: i32 = 1;
-pub const HEALTH_CHECK_PARK: i32 = 2;
-pub const HEALTH_CHECK_NONE: i32 = 3;
-pub const HEALTH_CHECK_DUPE: i32 = 4;
 
-pub const HISTORY_KIND_UNKNOWN: i32 = 0;
 pub const HISTORY_KIND_NZB: i32 = 1;
 pub const HISTORY_KIND_URL: i32 = 2;
 pub const HISTORY_KIND_DUP: i32 = 3;
@@ -156,39 +149,6 @@ pub fn files_on_disk(final_dir: &[u8], dest_dir: &[u8], ext_cleanup_disk: &[u8])
         }
     }
     false
-}
-
-/// `DupeCoordinator::DupeFailoverWarranted`
-pub fn failover_warranted(item_score: i32, health: i32, backup_score: i32) -> bool {
-    let clamped_health = health.clamp(0, 1000);
-    let warranted = if item_score > 0 {
-        ((item_score as i64) * (clamped_health as i64) / 1000) as i32
-    } else {
-        0
-    };
-    warranted == 0 || backup_score >= warranted
-}
-
-/// `DupeCoordinator::AlivePermille` string value parser
-pub unsafe fn parse_alive_permille_cstr(value: *const c_char) -> i32 {
-    if value.is_null() {
-        return -1;
-    }
-    let Some(percent) = parse_f64_prefix(CStr::from_ptr(value).to_bytes()) else {
-        return -1;
-    };
-    if percent.is_nan() {
-        return -1;
-    }
-    let clamped = percent.clamp(0.0, 100.0);
-    (clamped * 10.0).round() as i32
-}
-
-/// `DupeCoordinator::FailsOver`
-pub fn fails_over(dupe_check: bool, dupe_mode: DupeMode, health_check: i32) -> bool {
-    dupe_check
-        && (dupe_mode == DupeMode::Score
-            || (dupe_mode == DupeMode::Force && health_check == HEALTH_CHECK_DUPE))
 }
 
 /// `DupeCoordinator::NoBackupReason` formatter
@@ -506,12 +466,6 @@ where
         }
     }
     best.map(|(idx, _)| idx)
-}
-
-/// `DupeCoordinator::NzbFound` content hash equality check.
-#[inline]
-pub fn same_content_hash(full1: u32, filtered1: u32, full2: u32, filtered2: u32) -> bool {
-    (full1 > 0 && full1 == full2) || (filtered1 > 0 && filtered1 == filtered2)
 }
 
 #[cfg(unix)]
@@ -1568,22 +1522,18 @@ pub(crate) fn list_history_dupes_host(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::CString;
 
     #[test]
     fn unknown_dupe_mode_matches_no_mode_check() {
         for raw in [3, -1] {
             let mode = DupeMode::from(raw);
             assert_eq!(i32::from(mode), raw);
-            // Not Score, so it never fails over, and the reason names DupeMode all.
-            assert!(!fails_over(true, mode, HEALTH_CHECK_DUPE));
+            // Not Score, so the reason names DupeMode all.
             assert_eq!(
                 no_backup_reason(false, mode, &[], |_| true),
                 b"its DupeMode is all".to_vec()
             );
         }
-        assert!(fails_over(true, DupeMode::Score, 0));
-        assert!(fails_over(true, DupeMode::Force, HEALTH_CHECK_DUPE));
     }
 
     fn rescue_candidate(
@@ -1777,8 +1727,6 @@ mod tests {
             b"Movie.A",
             b"imdb:456"
         ));
-        assert!(failover_warranted(90, 300, 27));
-        assert!(!failover_warranted(90, 300, 26));
         assert_eq!(status_from_text(b"SUCCESS/ALL"), DUPE_STATUS_SUCCESS);
         assert_eq!(
             format_dupe_skip_message(b"Show.A", b"Show.A", false, true, false),
@@ -1788,18 +1736,6 @@ mod tests {
 
     #[test]
     fn dupe_coordinator_full_suite_port_from_cpp() {
-        // 1. DupeFailoverWarrantedTest
-        assert!(failover_warranted(90, 300, 27));
-        assert!(!failover_warranted(90, 300, 26));
-        assert!(failover_warranted(90, 0, 0));
-        assert!(failover_warranted(90, 0, -5));
-        assert!(failover_warranted(-10, 500, -20));
-        assert!(failover_warranted(90, 1000, 90));
-        assert!(!failover_warranted(90, 1000, 89));
-        assert!(failover_warranted(0, 1000, 0));
-        assert!(failover_warranted(-10, 500, 0));
-        assert!(!failover_warranted(90, 1500, 89));
-        assert!(failover_warranted(90, -7, 0));
 
         // 2. DupeSuccessMatchesUnrepairedHealthFailure
         let health = crate::downloadinfo::calc_health(1000, 0, 40, 0);
@@ -1871,24 +1807,15 @@ mod tests {
         ));
 
         // 3. DupeAlivePermilleTest
-        let alive = |val: Option<&str>| -> i32 {
-            match val {
-                None => unsafe { parse_alive_permille_cstr(std::ptr::null()) },
-                Some(s) => {
-                    let c = CString::new(s).unwrap();
-                    unsafe { parse_alive_permille_cstr(c.as_ptr()) }
-                }
-            }
-        };
-        assert_eq!(alive(None), -1);
-        assert_eq!(alive(Some("100")), 1000);
-        assert_eq!(alive(Some("99.6")), 996);
-        assert_eq!(alive(Some("0")), 0);
-        assert_eq!(alive(Some("")), -1);
-        assert_eq!(alive(Some("abc")), -1);
-        assert_eq!(alive(Some("-5")), 0);
-        assert_eq!(alive(Some("1000")), 1000);
-        assert_eq!(alive(Some("nan")), -1);
+        let alive = |s: &str| parse_alive_permille_bytes(s.as_bytes());
+        assert_eq!(alive("100"), 1000);
+        assert_eq!(alive("99.6"), 996);
+        assert_eq!(alive("0"), 0);
+        assert_eq!(alive(""), -1);
+        assert_eq!(alive("abc"), -1);
+        assert_eq!(alive("-5"), 0);
+        assert_eq!(alive("1000"), 1000);
+        assert_eq!(alive("nan"), -1);
 
         // 4. DupeCoordinatorFindDupeBackupTest
         let make_backup = |name: &[u8], key: &[u8], score: i32| -> NzbgetRsDupeHistoryCandidate {
@@ -1991,10 +1918,8 @@ mod tests {
             b"imdb:456"
         ));
         assert!(same_name_or_key(b"Movie.A", b"", b"movie.a", b""));
-        assert!(failover_warranted(1000, 300, 300));
-        assert!(!failover_warranted(1000, 300, 299));
-        assert_eq!(alive(Some("96.5")), 965);
-        assert_eq!(alive(Some("invalid")), -1);
+        assert_eq!(alive("96.5"), 965);
+        assert_eq!(alive("invalid"), -1);
         assert_eq!(status_from_text(b"SUCCESS/ALL"), DUPE_STATUS_SUCCESS);
         assert_eq!(status_from_text(b"FAILURE/PAR"), DUPE_STATUS_FAILURE);
         assert_eq!(status_from_text(b"WARNING/SCRIPT"), DUPE_STATUS_WARNING);
@@ -2027,10 +1952,5 @@ mod tests {
             Some(DupeMode::Force)
         );
         assert_eq!(crate::queueeditor::parse_dupe_mode(b"bad"), None);
-
-        // 6. NzbFound / NzbCompleted / HistoryMark evaluators
-        assert!(same_content_hash(42, 0, 42, 99));
-        assert!(same_content_hash(0, 77, 12, 77));
-        assert!(!same_content_hash(0, 0, 0, 0));
     }
 }

@@ -2253,8 +2253,6 @@ mod tests {
 
     #[test]
     fn test_reload_coordinator_debounce_unpack_deferral_and_cancel() {
-        // the daemon stop test cancels the shared reload coordinator, so run alone
-        let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         static TEST_EVENTS: std::sync::Mutex<Vec<c_int>> = std::sync::Mutex::new(Vec::new());
         static TEST_UNPACK_POLLS: AtomicUsize = AtomicUsize::new(0);
 

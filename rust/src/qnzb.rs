@@ -903,10 +903,18 @@ pub(crate) fn set_int(nzb: NzbRef, field: NzbInt, v: i32) {
             let post = d.slot(Slot::Post).load(SeqCst) as *const Post;
             if !post.is_null() {
                 if field == NzbInt::PostStage {
-                    post_set(post, 0, i64::from(v));
+                    post_set(post, PostField::Int(PostInt::Stage), i64::from(v));
                 } else {
-                    post_set(post, 4, i64::from(v & 1 != 0));
-                    post_set(post, 8, i64::from(v & 2 != 0));
+                    post_set(
+                        post,
+                        PostField::Int(PostInt::ForceParFull),
+                        i64::from(v & 1 != 0),
+                    );
+                    post_set(
+                        post,
+                        PostField::Int(PostInt::ForceRepair),
+                        i64::from(v & 2 != 0),
+                    );
                 }
             }
         }
@@ -1063,23 +1071,23 @@ pub(crate) fn post_set_int(post: crate::queuesubsys_host::PostRef, field: PostIn
         } else {
             i64::from(v)
         };
-        post_set(p, field as c_int, v);
+        post_set(p, PostField::Int(field), v);
     }
 }
 
 /// Sets when post-processing started.
 pub(crate) fn post_set_start_time(post: crate::queuesubsys_host::PostRef, time: i64) {
     if let Some(p) = post_of(post) {
-        post_set(p, 17, time);
+        post_set(p, PostField::StartTime, time);
     }
 }
 
 /// Starts a new stage at `time`: progress and label are cleared.
 pub(crate) fn post_begin_stage(post: crate::queuesubsys_host::PostRef, time: i64) {
     if let Some(p) = post_of(post) {
-        post_set(p, 18, time);
-        post_set(p, PostInt::StageProgress as c_int, 0);
-        post_set(p, PostInt::FileProgress as c_int, 0);
+        post_set(p, PostField::StageTime, time);
+        post_set(p, PostField::Int(PostInt::StageProgress), 0);
+        post_set(p, PostField::Int(PostInt::FileProgress), 0);
         post_set_label(p, c"");
     }
 }
@@ -1087,7 +1095,7 @@ pub(crate) fn post_begin_stage(post: crate::queuesubsys_host::PostRef, time: i64
 /// Sets when the current stage started.
 pub(crate) fn post_set_stage_time(post: crate::queuesubsys_host::PostRef, time: i64) {
     if let Some(p) = post_of(post) {
-        post_set(p, 18, time);
+        post_set(p, PostField::StageTime, time);
     }
 }
 
@@ -1400,44 +1408,10 @@ pub unsafe extern "C" fn nzbget_rs_nzb_coll(
     }
 }
 
-fn owned(s: *const c_char) -> CString {
-    cstr(s).to_owned()
-}
-
-/// 0 count; 1 read at a2 into strs[0] (-1 when out of range); 2 add s1;
-/// 3 clear.
-fn list_op(
-    v: &mut Vec<CString>,
-    op: c_int,
-    a2: c_int,
-    s1: *const c_char,
-    strs: *mut *const c_char,
-) -> i64 {
-    match op {
-        0 => v.len() as i64,
-        1 => match v.get(a2.max(0) as usize) {
-            Some(e) if a2 >= 0 => {
-                unsafe { *strs = e.as_ptr() };
-                0
-            }
-            _ => -1,
-        },
-        2 => {
-            v.push(owned(s1));
-            0
-        }
-        3 => {
-            v.clear();
-            0
-        }
-        _ => 0,
-    }
-}
-
 /// Post-processing state of a collection. The C++ PostInfo is this
 /// allocation (a PostInfo* is a Post*): it has no members of its own.
 pub struct Post {
-    // scalar fields by id (see `nzbget_rs_post_op`)
+    // stored values, indexed by [`PostField::index`]
     vals: [std::sync::atomic::AtomicI64; POST_VALS],
     // the collection being post-processed (an NzbScalars*), 0 for none
     nzb: std::sync::atomic::AtomicUsize,
@@ -1478,91 +1452,10 @@ pub unsafe fn nzbget_rs_post_label(p: *const Post) -> Vec<u8> {
     l.label.as_bytes().to_vec()
 }
 
-/// Fields 0-19: 0 stage, 1 working, 2 deleted, 3 request par check,
-/// 4 force par full, 5 par cannot cover, 6 need par check, 7 need unpack,
-/// 8 force repair, 9 par repaired, 10 unpack tried, 11 pass list tried,
-/// 12 last unpack status, 13 file progress, 14 stage progress (kept in
-/// 0..=1000), 15 stream repair done, 16 stream repair recovered,
-/// 17 start time, 18 stage time, 19 post thread pointer. Fields 9, 10 and
-/// 12 read the collection's own value when the post job has one, and a set
-/// writes both.
-///  0 get field a2; 1 set field a2 to v;
-///  2 get the collection pointer; 3 set it to v;
-///  11 set the progress label to s1 (read it with `nzbget_rs_post_label`);
-///  20-23 parred files, 30-33 extracted archives (see `list_op`; the
-///  collection's list when there is one): strings returned stay valid until
-///  that list changes.
-pub unsafe extern "C" fn nzbget_rs_post_op(
-    p: *const Post,
-    op: c_int,
-    a2: c_int,
-    v: i64,
-    s1: *const c_char,
-    strs: *mut *const c_char,
-) -> i64 {
-    use std::sync::atomic::Ordering::SeqCst;
-    let post = unsafe { &*p };
-    let field = || post.vals.get(a2.max(0) as usize).filter(|_| a2 >= 0);
-    let nzb = post.nzb.load(SeqCst) as *mut NzbScalars;
-    match op {
-        0 => {
-            if !nzb.is_null() {
-                let s = unsafe { &*nzb };
-                match a2 {
-                    9 => return i64::from(s.parRepaired),
-                    10 => return i64::from(s.unpackTried),
-                    12 => return i64::from(s.lastUnpackStatus),
-                    _ => {}
-                }
-            }
-            field().map_or(0, |f| f.load(SeqCst))
-        }
-        1 => {
-            let v = if a2 == 14 { v.clamp(0, 1000) } else { v };
-            if let Some(f) = field() {
-                f.store(v, SeqCst);
-            }
-            if !nzb.is_null() {
-                let s = unsafe { &mut *nzb };
-                match a2 {
-                    9 => s.parRepaired = v != 0,
-                    10 => s.unpackTried = v != 0,
-                    12 => s.lastUnpackStatus = v as i32,
-                    _ => {}
-                }
-            }
-            0
-        }
-        2 => nzb as usize as i64,
-        3 => {
-            post.nzb.store(v as usize, SeqCst);
-            0
-        }
-        11 => {
-            post.lists.lock().unwrap_or_else(|e| e.into_inner()).label = owned(s1);
-            0
-        }
-        30..=33 if !nzb.is_null() => {
-            list_op(&mut data(nzb).files().extracted, op - 30, a2, s1, strs)
-        }
-        20..=23 | 30..=33 => {
-            let mut l = post.lists.lock().unwrap_or_else(|e| e.into_inner());
-            let list = if op < 30 {
-                &mut l.parred
-            } else {
-                &mut l.extracted
-            };
-            list_op(list, op % 10, a2, s1, strs)
-        }
-        _ => 0,
-    }
-}
-
-/// Field 19 of a post job: its post-processing thread, if any.
+/// A post job's post-processing thread ([`PostField::Thread`]), if any.
 fn post_thread(p: *const Post) -> Option<JobHandle> {
-    let ns = std::ptr::null_mut();
-    let addr = (unsafe { nzbget_rs_post_op(p, 0, 19, 0, std::ptr::null(), ns) }) as usize;
-    // SAFETY: field 19 holds 0 or the post job's live thread.
+    let addr = post_get(p, PostField::Thread) as usize;
+    // SAFETY: PostField::Thread holds 0 or the post job's live thread.
     unsafe { JobHandle::from_addr(addr) }
 }
 
@@ -1576,12 +1469,77 @@ fn slot_job(nzb: usize, which: Slot) -> Option<JobHandle> {
     unsafe { JobHandle::from_addr(addr) }
 }
 
-fn post_set(p: *const Post, id: c_int, v: i64) {
-    unsafe { nzbget_rs_post_op(p, 1, id, v, std::ptr::null(), std::ptr::null_mut()) };
+/// A value a post job stores.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PostField {
+    Int(PostInt),
+    StartTime,
+    StageTime,
+    /// The post-processing thread's address, 0 for none.
+    Thread,
 }
 
-fn post_get(p: *const Post, id: c_int) -> i64 {
-    unsafe { nzbget_rs_post_op(p, 0, id, 0, std::ptr::null(), std::ptr::null_mut()) }
+impl PostField {
+    const fn index(self) -> usize {
+        match self {
+            Self::Int(f) => f as usize,
+            Self::StartTime => 17,
+            Self::StageTime => 18,
+            Self::Thread => 19,
+        }
+    }
+}
+
+/// Sets a post job's value. Stage progress is kept in 0..=1000. Par
+/// repaired, unpack tried and last unpack status are also written to the
+/// job's collection, if it has one.
+fn post_set(p: *const Post, field: PostField, v: i64) {
+    use std::sync::atomic::Ordering::SeqCst;
+    let post = unsafe { &*p };
+    let v = if field == PostField::Int(PostInt::StageProgress) {
+        v.clamp(0, 1000)
+    } else {
+        v
+    };
+    post.vals[field.index()].store(v, SeqCst);
+    let nzb = post_nzb(p);
+    if let (PostField::Int(f), false) = (field, nzb.is_null()) {
+        let s = unsafe { &mut *nzb };
+        match f {
+            PostInt::ParRepaired => s.parRepaired = v != 0,
+            PostInt::UnpackTried => s.unpackTried = v != 0,
+            PostInt::LastUnpackStatus => s.lastUnpackStatus = v as i32,
+            _ => {}
+        }
+    }
+}
+
+/// A post job's value. Par repaired, unpack tried and last unpack status
+/// come from the job's collection when it has one.
+fn post_get(p: *const Post, field: PostField) -> i64 {
+    use std::sync::atomic::Ordering::SeqCst;
+    let nzb = post_nzb(p);
+    if let (PostField::Int(f), false) = (field, nzb.is_null()) {
+        let s = unsafe { &*nzb };
+        match f {
+            PostInt::ParRepaired => return i64::from(s.parRepaired),
+            PostInt::UnpackTried => return i64::from(s.unpackTried),
+            PostInt::LastUnpackStatus => return i64::from(s.lastUnpackStatus),
+            _ => {}
+        }
+    }
+    unsafe { &*p }.vals[field.index()].load(SeqCst)
+}
+
+/// The collection a post job processes, null for none.
+fn post_nzb(p: *const Post) -> *mut NzbScalars {
+    unsafe { &*p }.nzb.load(std::sync::atomic::Ordering::SeqCst) as *mut NzbScalars
+}
+
+fn set_post_nzb(p: *const Post, nzb: *mut NzbScalars) {
+    unsafe { &*p }
+        .nzb
+        .store(nzb as usize, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// Starts post-processing for a collection (host op 32 sub-op 54): a fresh
@@ -1591,16 +1549,7 @@ fn post_get(p: *const Post, id: c_int) -> i64 {
 /// `p` is a live collection; the caller holds the queue lock.
 pub(crate) unsafe fn enter_post_process(p: *mut NzbScalars) {
     let post = nzbget_rs_post_new();
-    unsafe {
-        nzbget_rs_post_op(
-            post,
-            3,
-            0,
-            p as usize as i64,
-            std::ptr::null(),
-            std::ptr::null_mut(),
-        )
-    };
+    set_post_nzb(post, p);
     let old = swap_slot(p, Slot::Post, post as usize);
     unsafe { nzbget_rs_post_free(old as *mut Post) };
 }
@@ -1627,10 +1576,10 @@ pub(crate) fn post_snapshot(
     let Some(p) = post_of(post) else {
         return crate::queuesubsys_host::PostSnap::default();
     };
-    let flag = |id| post_get(p, id) != 0;
-    let int = |id| post_get(p, id) as i32;
+    let flag = |f| post_get(p, PostField::Int(f)) != 0;
+    let int = |f| post_get(p, PostField::Int(f)) as i32;
     let pt = post_thread(p);
-    let nzb = unsafe { nzbget_rs_post_op(p, 2, 0, 0, std::ptr::null(), std::ptr::null_mut()) };
+    let nzb = post_nzb(p);
     let progress_label = unsafe { &*p }
         .lists
         .lock()
@@ -1641,27 +1590,27 @@ pub(crate) fn post_snapshot(
     crate::queuesubsys_host::PostSnap {
         ptr: post,
         nzb_ptr: NzbRef::from_addr(nzb as usize),
-        stage: PostStage::from(int(0)),
-        working: flag(1),
-        deleted: flag(2),
-        request_par_check: flag(3),
-        force_par_full: flag(4),
-        force_repair: flag(8),
-        stream_repair_done: flag(15),
-        stream_repair_recovered: flag(16),
-        par_cannot_cover: flag(5),
-        need_par_check: flag(6),
-        need_unpack: flag(7),
+        stage: PostStage::from(int(PostInt::Stage)),
+        working: flag(PostInt::Working),
+        deleted: flag(PostInt::Deleted),
+        request_par_check: flag(PostInt::RequestParCheck),
+        force_par_full: flag(PostInt::ForceParFull),
+        force_repair: flag(PostInt::ForceRepair),
+        stream_repair_done: flag(PostInt::StreamRepairDone),
+        stream_repair_recovered: flag(PostInt::StreamRepairRecovered),
+        par_cannot_cover: flag(PostInt::ParCannotCover),
+        need_par_check: flag(PostInt::NeedParCheck),
+        need_unpack: flag(PostInt::NeedUnpack),
         has_post_thread: pt.is_some(),
         post_thread_running: pt.is_some_and(JobHandle::is_running),
-        unpack_tried: flag(10),
-        par_repaired: flag(9),
-        pass_list_tried: flag(11),
-        last_unpack_status: UnpackStatus::from(int(12)),
-        stage_progress: int(14),
-        file_progress: int(13),
-        start_time: post_get(p, 17),
-        stage_time: post_get(p, 18),
+        unpack_tried: flag(PostInt::UnpackTried),
+        par_repaired: flag(PostInt::ParRepaired),
+        pass_list_tried: flag(PostInt::PassListTried),
+        last_unpack_status: UnpackStatus::from(int(PostInt::LastUnpackStatus)),
+        stage_progress: int(PostInt::StageProgress),
+        file_progress: int(PostInt::FileProgress),
+        start_time: post_get(p, PostField::StartTime),
+        stage_time: post_get(p, PostField::StageTime),
         progress_label,
     }
 }
@@ -1717,7 +1666,7 @@ pub(crate) unsafe fn host_post_job_op(
         }
         1 | 2 if !post.is_null() => {
             if let Some(t) = post_thread(post) {
-                post_set(post, 19, 0);
+                post_set(post, PostField::Thread, 0);
                 unsafe { t.free(a1 == 2) };
             }
         }
@@ -1761,18 +1710,16 @@ pub(crate) unsafe fn host_post_job_op(
             if a2 == 3 && !crate::ffi::build_parcheck_enabled() {
                 return 0;
             }
-            let nzb =
-                unsafe { nzbget_rs_post_op(post, 2, 0, 0, std::ptr::null(), std::ptr::null_mut()) }
-                    as usize as *const NzbScalars;
+            let nzb = post_nzb(post).cast_const();
             if a2 == 9 && !nzb.is_null() && unsafe { (*nzb).skipScriptProcessing } {
                 return 0;
             }
             let job = JobHandle::new_post(a2, PostRef::from_addr(p1), 0, false);
-            post_set(post, 19, job.addr() as i64);
+            post_set(post, PostField::Thread, job.addr() as i64);
             if !job.start() {
                 // no worker will finish this stage: let the scheduler clean up and retry it
-                post_set(post, 19, 0);
-                post_set(post, 1, 0);
+                post_set(post, PostField::Thread, 0);
+                post_set(post, PostField::Int(PostInt::Working), 0);
                 unsafe { job.free(false) };
             }
         }
@@ -2830,7 +2777,7 @@ pub(crate) fn nzb_snapshot(
         )
     } as c_int;
     let post = slot(p, Slot::Post) as *const Post;
-    let post_flag = |id| !post.is_null() && post_get(post, id) != 0;
+    let post_flag = |f| !post.is_null() && post_get(post, PostField::Int(f)) != 0;
     let unpack_thread = slot(p, Slot::UnpackJob);
     let live_repair_thread = slot(p, Slot::LiveRepairJob);
     let message_count = slot(p, Slot::MessageCount) as isize as c_int;
@@ -2901,11 +2848,11 @@ pub(crate) fn nzb_snapshot(
         dead_pick_probed: s.deadPickProbed,
         dupe_no_par_noted: s.dupeNoParNoted,
         has_post_info: !post.is_null(),
-        post_working: post_flag(1),
+        post_working: post_flag(PostInt::Working),
         post_stage: if post.is_null() {
             PostStage::default()
         } else {
-            PostStage::from(post_get(post, 0) as c_int)
+            PostStage::from(post_get(post, PostField::Int(PostInt::Stage)) as c_int)
         },
         has_live_repair_thread: live_repair_thread != 0,
         live_repair_thread_ptr: live_repair_thread,
@@ -2940,8 +2887,8 @@ pub(crate) fn nzb_snapshot(
         cleanup_disk: s.cleanupDisk,
         unpack_tried: s.unpackTried,
         par_full: s.parFull,
-        force_par_full: post_flag(4),
-        force_repair: post_flag(8),
+        force_par_full: post_flag(PostInt::ForceParFull),
+        force_repair: post_flag(PostInt::ForceRepair),
         par_repaired: s.parRepaired,
         last_unpack_status: UnpackStatus::from(s.lastUnpackStatus),
         message_count,
@@ -3272,62 +3219,63 @@ mod tests {
 
     #[test]
     fn post_state_and_lists() {
-        let ns: *const c_char = std::ptr::null();
-        let mut out = ns;
+        use crate::queuesubsys_host::PostRef;
+        let stage = PostField::Int(PostInt::StageProgress);
         unsafe {
             let p = nzbget_rs_post_new();
-            nzbget_rs_post_op(p, 1, 14, 750, ns, &mut out);
-            assert_eq!(nzbget_rs_post_op(p, 0, 14, 0, ns, &mut out), 750);
-            assert_eq!(nzbget_rs_post_op(p, 0, 99, 0, ns, &mut out), 0);
-            nzbget_rs_post_op(p, 11, 0, 0, c"Unpacking".as_ptr(), &mut out);
+            let pr = PostRef::from_addr(p as usize);
+            post_set(p, stage, 750);
+            assert_eq!(post_get(p, stage), 750);
+            assert_eq!(post_get(p, PostField::Thread), 0);
+            post_set_progress_label(pr, b"Unpacking");
             assert_eq!(nzbget_rs_post_label(p), b"Unpacking");
-            nzbget_rs_post_op(p, 22, 0, 0, c"a.par2".as_ptr(), &mut out);
-            assert_eq!(nzbget_rs_post_op(p, 20, 0, 0, ns, &mut out), 1);
-            assert_eq!(nzbget_rs_post_op(p, 21, 0, 0, ns, &mut out), 0);
-            assert_eq!(CStr::from_ptr(out).to_bytes(), b"a.par2");
-            assert_eq!(nzbget_rs_post_op(p, 31, 0, 0, ns, &mut out), -1);
-            nzbget_rs_post_op(p, 32, 0, 0, c"x.rar".as_ptr(), &mut out);
-            nzbget_rs_post_op(p, 33, 0, 0, ns, &mut out);
-            assert_eq!(nzbget_rs_post_op(p, 30, 0, 0, ns, &mut out), 0);
+            post_push_parred_file(pr, b"a.par2");
+            assert_eq!(post_parred_files(pr), vec![b"a.par2".to_vec()]);
+            // without a collection the job keeps its own extracted list
+            assert!(post_extracted_archives(pr).is_empty());
+            (*p).lists
+                .lock()
+                .unwrap()
+                .extracted
+                .push(c"x.rar".to_owned());
+            assert_eq!(post_extracted_archives(pr), vec![b"x.rar".to_vec()]);
+            post_clear_extracted_archives(pr);
+            assert!(post_extracted_archives(pr).is_empty());
             nzbget_rs_post_free(p);
         }
     }
 
     #[test]
     fn post_fields_follow_the_collection() {
-        let ns: *const c_char = std::ptr::null();
-        let mut out = ns;
+        use crate::queuesubsys_host::PostRef;
+        let f = PostField::Int;
         unsafe {
             let n = nzbget_rs_nzb_scalars_new();
             let p = nzbget_rs_post_new();
+            let pr = PostRef::from_addr(p as usize);
             // without a collection the post job keeps its own values
-            nzbget_rs_post_op(p, 1, 9, 1, ns, &mut out);
-            assert_eq!(nzbget_rs_post_op(p, 0, 9, 0, ns, &mut out), 1);
+            post_set(p, f(PostInt::ParRepaired), 1);
+            assert_eq!(post_get(p, f(PostInt::ParRepaired)), 1);
             assert!(!(*n).parRepaired);
-            nzbget_rs_post_op(p, 3, 0, n as usize as i64, ns, &mut out);
-            assert_eq!(
-                nzbget_rs_post_op(p, 2, 0, 0, ns, &mut out),
-                n as usize as i64
-            );
+            set_post_nzb(p, n);
+            assert_eq!(post_nzb(p), n);
             // reads come from the collection, writes go to both
-            assert_eq!(nzbget_rs_post_op(p, 0, 9, 0, ns, &mut out), 0);
-            nzbget_rs_post_op(p, 1, 10, 1, ns, &mut out);
-            nzbget_rs_post_op(p, 1, 12, 2, ns, &mut out);
+            assert_eq!(post_get(p, f(PostInt::ParRepaired)), 0);
+            post_set(p, f(PostInt::UnpackTried), 1);
+            post_set(p, f(PostInt::LastUnpackStatus), 2);
             assert!((*n).unpackTried);
             assert_eq!((*n).lastUnpackStatus, 2);
             (*n).lastUnpackStatus = 3;
-            assert_eq!(nzbget_rs_post_op(p, 0, 12, 0, ns, &mut out), 3);
+            assert_eq!(post_get(p, f(PostInt::LastUnpackStatus)), 3);
             // stage progress stays in 0..=1000
-            nzbget_rs_post_op(p, 1, 14, 5000, ns, &mut out);
-            assert_eq!(nzbget_rs_post_op(p, 0, 14, 0, ns, &mut out), 1000);
-            nzbget_rs_post_op(p, 1, 14, -4, ns, &mut out);
-            assert_eq!(nzbget_rs_post_op(p, 0, 14, 0, ns, &mut out), 0);
+            post_set(p, f(PostInt::StageProgress), 5000);
+            assert_eq!(post_get(p, f(PostInt::StageProgress)), 1000);
+            post_set(p, f(PostInt::StageProgress), -4);
+            assert_eq!(post_get(p, f(PostInt::StageProgress)), 0);
             // extracted archives are the collection's list
-            nzbget_rs_post_op(p, 32, 0, 0, c"a.rar".as_ptr(), &mut out);
-            assert_eq!(data(n).files().extracted.len(), 1);
-            assert_eq!(nzbget_rs_post_op(p, 31, 0, 0, ns, &mut out), 0);
-            assert_eq!(CStr::from_ptr(out).to_bytes(), b"a.rar");
-            nzbget_rs_post_op(p, 33, 0, 0, ns, &mut out);
+            push_extracted_archive(NzbRef::from_addr(n as usize), b"a.rar");
+            assert_eq!(post_extracted_archives(pr), vec![b"a.rar".to_vec()]);
+            post_clear_extracted_archives(pr);
             assert!(data(n).files().extracted.is_empty());
             nzbget_rs_post_free(p);
             nzbget_rs_nzb_scalars_free(n);
@@ -3336,7 +3284,6 @@ mod tests {
 
     #[test]
     fn coll_set_enters_and_leaves_post_process() {
-        let ns: *const c_char = std::ptr::null();
         unsafe {
             let n = nzbget_rs_nzb_scalars_new();
             // stage and force flags need a post job
@@ -3345,23 +3292,20 @@ mod tests {
             act(NzbRef::from_addr(n as usize), NzbAction::EnterPostProcess);
             let p = slot(n, Slot::Post) as *const Post;
             assert!(!p.is_null());
-            assert_eq!(post_get(p, 2) as usize, 0);
-            assert_eq!(
-                nzbget_rs_post_op(p, 2, 0, 0, ns, std::ptr::null_mut()) as usize,
-                n as usize
-            );
+            assert_eq!(post_get(p, PostField::Int(PostInt::Deleted)), 0);
+            assert_eq!(post_nzb(p), n);
             set_int(NzbRef::from_addr(n as usize), NzbInt::PostStage, 7);
             set_int(NzbRef::from_addr(n as usize), NzbInt::PostForceFlags, 2);
-            assert_eq!(post_get(p, 0), 7);
-            assert_eq!(post_get(p, 4), 0);
-            assert_eq!(post_get(p, 8), 1);
+            assert_eq!(post_get(p, PostField::Int(PostInt::Stage)), 7);
+            assert_eq!(post_get(p, PostField::Int(PostInt::ForceParFull)), 0);
+            assert_eq!(post_get(p, PostField::Int(PostInt::ForceRepair)), 1);
             // a second enter replaces the post job
             act(NzbRef::from_addr(n as usize), NzbAction::EnterPostProcess);
             let p2 = slot(n, Slot::Post) as *const Post;
-            assert_eq!(post_get(p2, 0), 0);
-            post_set(p2, 10, 1);
-            post_set(p2, 12, 2);
-            nzbget_rs_post_op(p2, 32, 0, 0, c"x.rar".as_ptr(), std::ptr::null_mut());
+            assert_eq!(post_get(p2, PostField::Int(PostInt::Stage)), 0);
+            post_set(p2, PostField::Int(PostInt::UnpackTried), 1);
+            post_set(p2, PostField::Int(PostInt::LastUnpackStatus), 2);
+            push_extracted_archive(NzbRef::from_addr(n as usize), b"x.rar");
             act(NzbRef::from_addr(n as usize), NzbAction::LeavePostProcess);
             assert_eq!(slot(n, Slot::Post), 0);
             assert!(!(*n).unpackTried);
@@ -3374,20 +3318,18 @@ mod tests {
     #[test]
     fn post_snapshot_and_typed_setters() {
         use crate::queuesubsys_host::PostRef;
-        let ns: *const c_char = std::ptr::null();
         unsafe {
             // a missing post job gives the default snapshot
             let none = post_snapshot(PostRef::NONE);
             assert!(none.ptr.is_none() && !none.working && none.stage_progress == 0);
             let p = nzbget_rs_post_new();
             let pr = PostRef::from_addr(p as usize);
-            let nsn: *mut *const c_char = std::ptr::null_mut();
             // flags are stored as 0/1
             post_set_int(pr, PostInt::Working, 5);
             post_set_int(pr, PostInt::ForceRepair, 1);
             post_set_int(pr, PostInt::Stage, 7);
             post_set_int(pr, PostInt::LastUnpackStatus, 3);
-            assert_eq!(post_get(p, 1), 1);
+            assert_eq!(post_get(p, PostField::Int(PostInt::Working)), 1);
             post_set_start_time(pr, 1234);
             post_set_int(pr, PostInt::StageProgress, 500);
             post_set_progress_label(pr, b"Repairing");
@@ -3395,7 +3337,11 @@ mod tests {
             post_push_parred_file(pr, b"");
             assert_eq!(post_parred_files(pr), vec![b"a.par2".to_vec(), Vec::new()]);
             assert!(post_extracted_archives(pr).is_empty());
-            nzbget_rs_post_op(p, 32, 0, 0, c"b.rar".as_ptr(), nsn);
+            (*p).lists
+                .lock()
+                .unwrap()
+                .extracted
+                .push(c"b.rar".to_owned());
             assert_eq!(post_extracted_archives(pr), vec![b"b.rar".to_vec()]);
             let snap = post_snapshot(pr);
             assert_eq!(snap.ptr, pr);
@@ -3417,9 +3363,9 @@ mod tests {
             assert!(snap.progress_label.is_empty());
             assert!(nzbget_rs_post_label(p).is_empty());
             post_set_stage_time(pr, 77);
-            assert_eq!(post_get(p, 18), 77);
+            assert_eq!(post_get(p, PostField::StageTime), 77);
             post_clear_extracted_archives(pr);
-            assert_eq!(nzbget_rs_post_op(p, 30, 0, 0, ns, nsn), 0);
+            assert!(post_extracted_archives(pr).is_empty());
             nzbget_rs_post_free(p);
             // a missing handle is a no-op
             post_set_int(PostRef::NONE, PostInt::Working, 1);
@@ -3447,17 +3393,10 @@ mod tests {
             // direct unpack queries need a job
             assert_eq!(host_post_job_op(3, 1, n as usize, 0, i64s.as_ptr()), 0);
             // the script controller is skipped when the collection skips scripts
-            nzbget_rs_post_op(
-                p,
-                3,
-                0,
-                n as usize as i64,
-                std::ptr::null(),
-                std::ptr::null_mut(),
-            );
+            set_post_nzb(p, n);
             (*n).skipScriptProcessing = true;
             assert_eq!(host_post_job_op(12, 9, p as usize, 0, i64s.as_ptr()), 0);
-            assert_eq!(post_get(p, 19), 0);
+            assert_eq!(post_get(p, PostField::Thread), 0);
             nzbget_rs_post_free(p);
             nzbget_rs_nzb_scalars_free(n);
         }

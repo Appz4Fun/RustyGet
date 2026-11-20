@@ -1076,7 +1076,10 @@ impl HistoryCoord<'_> {
         }
     }
 
-    /// `Redownload`: downloads the record `hist_ptr` again.
+    /// `Redownload`: downloads the record `hist_ptr` again. Only the dupe failover and rescue
+    /// paths call this, so the copy always comes back running: a backup appended paused (as
+    /// the add-on sends fleets) went to history as a paused duplicate, and restoring that
+    /// state left the promoted copy paused and the fleet stalled forever.
     pub(crate) fn redownload(&self, hist_ptr: usize) {
         if let Some(found) = self.host.find_history(self.dq, HistoryKey::Ptr(hist_ptr)) {
             self.history_redownload(
@@ -1085,7 +1088,7 @@ impl HistoryCoord<'_> {
                 found.kind,
                 found.nzb,
                 &found.name,
-                true,
+                false,
             );
         }
     }
@@ -2993,5 +2996,57 @@ mod tests {
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].0, 3);
         assert_eq!(items[1].0, 1);
+    }
+
+    #[test]
+    fn a_backup_appended_paused_comes_back_running_on_failover() {
+        use std::cell::Cell;
+        struct MockHist {
+            queued: Vec<u8>,
+            paused: Cell<Option<bool>>,
+        }
+        impl HistoryHost for MockHist {
+            fn find_history(&self, _dq: usize, _key: HistoryKey) -> Option<FoundHistory> {
+                Some(FoundHistory {
+                    hist_ptr: 1,
+                    idx: 0,
+                    len: 1,
+                    kind: 1,
+                    delete_status: DeleteStatus::Dupe,
+                    par_status: NzbParStatus::None,
+                    unpack_status: UnpackStatus::None,
+                    parked_count: 0,
+                    nzb: NzbRef::NONE,
+                    name: b"Alt1".to_vec(),
+                    dest_dir: Vec::new(),
+                })
+            }
+            fn nzb_names(&self, _nzb: NzbRef) -> NzbNames {
+                NzbNames {
+                    delete_paused: true,
+                    name: b"Alt1".to_vec(),
+                    queued_filename: self.queued.clone(),
+                    dest_dir: Vec::new(),
+                }
+            }
+            fn parse_nzb(&self, _path: &[u8]) -> Option<usize> {
+                Some(1)
+            }
+            fn reset_for_redownload(&self, _nzb: NzbRef, _new_nzb: usize, paused: bool) {
+                self.paused.set(Some(paused));
+            }
+        }
+
+        let dir = std::env::temp_dir().join(format!("hc-paused-alt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let queued = dir.join("Alt1.nzb");
+        std::fs::write(&queued, b"<nzb/>").unwrap();
+        let mock = MockHist {
+            queued: queued.to_string_lossy().as_bytes().to_vec(),
+            paused: Cell::new(None),
+        };
+        HistoryCoord { host: &mock, dq: 1 }.redownload(1);
+        assert_eq!(mock.paused.get(), Some(false));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

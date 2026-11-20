@@ -1119,3 +1119,43 @@ pub fn prepare(snapshot: Snapshot, request: [u8; 16]) -> Result<Plan, PurgeError
         snapshot,
     })
 }
+
+#[cfg(test)]
+mod budget_tests {
+    use super as purge;
+
+    fn exact_owned_width<T>() {
+        let width = std::mem::size_of::<T>();
+        assert!(width > 1);
+        let mut exact = purge::Budget::new();
+        exact.add(purge::MAX_PAYLOAD - width).unwrap();
+        exact.table::<T>(1).unwrap();
+        assert_eq!(exact.add(1), Err(purge::PurgeError::LimitExceeded));
+        let mut short = purge::Budget::new();
+        short.add(purge::MAX_PAYLOAD - width + 1).unwrap();
+        assert_eq!(short.table::<T>(1), Err(purge::PurgeError::LimitExceeded));
+        let mut overflow = purge::Budget::new();
+        assert_eq!(
+            overflow.table::<T>(usize::MAX / width + 1),
+            Err(purge::PurgeError::LimitExceeded)
+        );
+    }
+    #[test]
+    fn every_owned_record_width_has_checked_budget_boundaries() {
+        // Actual Rust widths, with no 64 MiB allocation.
+        exact_owned_width::<purge::MemberBinding>();
+        exact_owned_width::<purge::MemberRecord>();
+        exact_owned_width::<purge::SourceValidation>();
+        exact_owned_width::<purge::CustodyReceipt>();
+        exact_owned_width::<purge::ParentMembership>();
+        exact_owned_width::<purge::AnchorComparison>();
+        exact_owned_width::<purge::DirectBinding>();
+        exact_owned_width::<purge::PairMembershipReceipt>();
+        exact_owned_width::<purge::PairCustodyReceipt>();
+        exact_owned_width::<purge::RootRecord>();
+        exact_owned_width::<purge::NamespaceProof>();
+        exact_owned_width::<purge::InventoryEntry>();
+        exact_owned_width::<purge::OwnershipReceipt>();
+        exact_owned_width::<purge::OutsideClaim>();
+    }
+}

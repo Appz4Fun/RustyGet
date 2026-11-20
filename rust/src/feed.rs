@@ -1574,81 +1574,55 @@ fn feed_disk_log_cb(raw: *mut c_void, level: crate::diskstate_format::DiskLogLev
     feed_emit_log(bridge.env, level as i32, &[msg]);
 }
 
-unsafe extern "C" fn feed_disk_aux_cb(
+fn feed_disk_export_cb(
     raw: *mut c_void,
-    op: c_int,
-    a1: c_int,
-    a2: c_int,
-    u1: u32,
-    s1: *const c_char,
-    s2: *const c_char,
-    _vol_item: *const c_void,
-    sink_ctx: *mut c_void,
-    sink_fn: Option<crate::diskstate_format::DiskAuxSinkFn>,
+    sink: &mut dyn FnMut(crate::diskstate_format::FeedRecord<'_>),
 ) {
+    use crate::diskstate_format::FeedRecord;
     let bridge = unsafe { &mut *raw.cast::<DiskBridgeCtx<'_>>() };
-    match op {
-        1 => {
-            let Some(sink) = sink_fn else {
-                return;
-            };
-            for fi in &bridge.inner.feeds {
-                unsafe {
-                    sink(
-                        sink_ctx,
-                        0,
-                        fi.last_update as c_int,
-                        0,
-                        fi.cfg.filter_hash,
-                        fi.cfg.url.as_ptr(),
-                        std::ptr::null(),
-                        0,
-                        std::ptr::null(),
-                        0,
-                    );
-                }
-            }
-            for h in &bridge.inner.history {
-                let c_url = feed_bytes_to_cstr(&h.url);
-                unsafe {
-                    sink(
-                        sink_ctx,
-                        1,
-                        h.status as c_int,
-                        h.last_seen as c_int,
-                        0,
-                        c_url.as_ptr(),
-                        std::ptr::null(),
-                        0,
-                        std::ptr::null(),
-                        0,
-                    );
-                }
-            }
-        }
-        2 => {
-            let url = feed_cstr_bytes(s1);
-            let filter = feed_cstr_bytes(s2);
-            for fi in &mut bridge.inner.feeds {
-                if fi.cfg.url.as_bytes() == url
-                    && (a2 == 1
-                        || (a2 == 2 && fi.cfg.filter == filter)
-                        || (a2 >= 3 && fi.cfg.filter_hash == u1))
-                {
-                    fi.last_update = i64::from(a1);
-                }
-            }
-        }
-        3 => {
-            let url = feed_cstr_bytes(s1).to_vec();
-            bridge.inner.history.push(RsFeedHistoryEntry {
-                url,
-                status: a1,
-                last_seen: i64::from(a2),
-            });
-        }
-        _ => {}
+    for fi in &bridge.inner.feeds {
+        sink(FeedRecord::Status {
+            url: fi.cfg.url.as_bytes(),
+            filter_hash: fi.cfg.filter_hash,
+            last_update: fi.last_update as i32,
+        });
     }
+    for h in &bridge.inner.history {
+        sink(FeedRecord::History {
+            url: &h.url,
+            status: h.status as i32,
+            last_seen: h.last_seen as i32,
+        });
+    }
+}
+
+fn feed_disk_load_status_cb(
+    raw: *mut c_void,
+    url: &[u8],
+    matching: crate::diskstate_format::FeedMatch<'_>,
+    last_update: i32,
+) {
+    use crate::diskstate_format::FeedMatch;
+    let bridge = unsafe { &mut *raw.cast::<DiskBridgeCtx<'_>>() };
+    for fi in &mut bridge.inner.feeds {
+        let same = match matching {
+            FeedMatch::Url => true,
+            FeedMatch::Filter(filter) => fi.cfg.filter == filter,
+            FeedMatch::FilterHash(hash) => fi.cfg.filter_hash == hash,
+        };
+        if fi.cfg.url.as_bytes() == url && same {
+            fi.last_update = i64::from(last_update);
+        }
+    }
+}
+
+fn feed_disk_load_history_cb(raw: *mut c_void, url: &[u8], status: i32, last_seen: i32) {
+    let bridge = unsafe { &mut *raw.cast::<DiskBridgeCtx<'_>>() };
+    bridge.inner.history.push(RsFeedHistoryEntry {
+        url: url.to_vec(),
+        status,
+        last_seen: i64::from(last_seen),
+    });
 }
 
 fn run_diskstate_feeds(inner: &mut FeedCoordInner, env: &NzbgetRsFeedCoordEnv, save: bool) {
@@ -1661,7 +1635,9 @@ fn run_diskstate_feeds(inner: &mut FeedCoordInner, env: &NzbgetRsFeedCoordEnv, s
     ds_env.sep = c_int::from(opts.path_sep);
     ds_env.flush_queue = c_int::from(opts.flush_queue);
     ds_env.log_cb = Some(feed_disk_log_cb);
-    ds_env.aux_cb = Some(feed_disk_aux_cb);
+    ds_env.export_feeds_cb = Some(feed_disk_export_cb);
+    ds_env.load_feed_status_cb = Some(feed_disk_load_status_cb);
+    ds_env.load_feed_history_cb = Some(feed_disk_load_history_cb);
     unsafe {
         crate::diskstate_format::diskstate_exec(
             if save {

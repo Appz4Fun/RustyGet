@@ -4176,6 +4176,43 @@ pub struct LiveIds {
 
 pub type DiskLiveIdsFn = fn(ctx: *mut c_void) -> LiveIds;
 
+/// One record of the feeds state file as the feed coordinator saves it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FeedRecord<'a> {
+    /// A configured feed and when it was last fetched.
+    Status {
+        url: &'a [u8],
+        filter_hash: u32,
+        last_update: i32,
+    },
+    /// A remembered feed item.
+    History {
+        url: &'a [u8],
+        status: i32,
+        last_seen: i32,
+    },
+}
+
+/// How a loaded feed status picks the configured feeds it applies to,
+/// besides an equal url. Older files saved less of the feed's identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FeedMatch<'a> {
+    /// Version 1: the url alone.
+    Url,
+    /// Version 2: the url and the filter text.
+    Filter(&'a [u8]),
+    /// Version 3 and later: the url and the filter hash.
+    FilterHash(u32),
+}
+
+/// Hands every feed record to the sink, statuses first.
+pub type DiskExportFeedsFn = fn(ctx: *mut c_void, sink: &mut dyn FnMut(FeedRecord<'_>));
+/// Applies one loaded feed status to every configured feed `matching` it.
+pub type DiskLoadFeedStatusFn =
+    fn(ctx: *mut c_void, url: &[u8], matching: FeedMatch<'_>, last_update: i32);
+/// Adds one loaded feed history record.
+pub type DiskLoadFeedHistoryFn = fn(ctx: *mut c_void, url: &[u8], status: i32, last_seen: i32);
+
 pub type DiskAuxSinkFn = unsafe extern "C" fn(
     sink_ctx: *mut c_void,
     kind: c_int,
@@ -4228,6 +4265,9 @@ pub struct NzbgetRsDiskStateEnv {
     pub apply_file_cb: Option<DiskApplyFileFn>,
     pub aux_cb: Option<DiskAuxFn>,
     pub live_ids_cb: Option<DiskLiveIdsFn>,
+    pub export_feeds_cb: Option<DiskExportFeedsFn>,
+    pub load_feed_status_cb: Option<DiskLoadFeedStatusFn>,
+    pub load_feed_history_cb: Option<DiskLoadFeedHistoryFn>,
 }
 
 fn bytes_to_cstring_trunc(raw: &[u8]) -> std::ffi::CString {
@@ -6121,30 +6161,6 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                 seens: Vec<c_int>,
                 hist_urls: Vec<std::ffi::CString>,
             }
-            unsafe extern "C" fn feed_sink(
-                sink_ctx: *mut c_void,
-                kind: c_int,
-                a1: c_int,
-                a2: c_int,
-                u1: u32,
-                s1: *const c_char,
-                _srv: *const NzbgetRsServerMatchItem,
-                _srv_len: usize,
-                _vol: *const c_void,
-                _vol_len: usize,
-            ) {
-                let fo = unsafe { &mut *sink_ctx.cast::<FeedOut>() };
-                let c = bytes_to_cstring_trunc(unsafe { cstr::bytes(s1) });
-                if kind == 0 {
-                    fo.urls.push(c);
-                    fo.hashes.push(u1);
-                    fo.updates.push(a1);
-                } else {
-                    fo.statuses.push(a1);
-                    fo.seens.push(a2);
-                    fo.hist_urls.push(c);
-                }
-            }
             let mut fo = FeedOut {
                 urls: Vec::new(),
                 hashes: Vec::new(),
@@ -6153,21 +6169,27 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                 seens: Vec::new(),
                 hist_urls: Vec::new(),
             };
-            if let Some(aux) = env.aux_cb {
-                unsafe {
-                    aux(
-                        env.ctx,
-                        1,
-                        0,
-                        0,
-                        0,
-                        std::ptr::null(),
-                        std::ptr::null(),
-                        std::ptr::null(),
-                        (&mut fo as *mut FeedOut).cast(),
-                        Some(feed_sink),
-                    );
-                }
+            if let Some(cb) = env.export_feeds_cb {
+                cb(env.ctx, &mut |rec| match rec {
+                    FeedRecord::Status {
+                        url,
+                        filter_hash,
+                        last_update,
+                    } => {
+                        fo.urls.push(bytes_to_cstring_trunc(url));
+                        fo.hashes.push(filter_hash);
+                        fo.updates.push(last_update);
+                    }
+                    FeedRecord::History {
+                        url,
+                        status,
+                        last_seen,
+                    } => {
+                        fo.statuses.push(status);
+                        fo.seens.push(last_seen);
+                        fo.hist_urls.push(bytes_to_cstring_trunc(url));
+                    }
+                });
             }
             let sf = RsStateFile::new(
                 qdir,
@@ -6238,22 +6260,16 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                 filter: *const c_char,
             ) {
                 let env = unsafe { &*ctx.cast::<NzbgetRsDiskStateEnv>() };
-                if let Some(aux) = env.aux_cb {
-                    unsafe {
-                        aux(
-                            env.ctx,
-                            2,
-                            last_update,
-                            ver,
-                            filter_hash,
-                            url,
-                            filter,
-                            std::ptr::null(),
-                            std::ptr::null_mut(),
-                            None,
-                        );
-                    }
-                }
+                let Some(cb) = env.load_feed_status_cb else {
+                    return;
+                };
+                let matching = match ver {
+                    1 => FeedMatch::Url,
+                    2 => FeedMatch::Filter(unsafe { cstr::bytes(filter) }),
+                    v if v >= 3 => FeedMatch::FilterHash(filter_hash),
+                    _ => return,
+                };
+                cb(env.ctx, unsafe { cstr::bytes(url) }, matching, last_update);
             }
             unsafe extern "C" fn on_feed_hist(
                 ctx: *mut c_void,
@@ -6267,21 +6283,8 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                 _s2: *const c_char,
             ) {
                 let env = unsafe { &*ctx.cast::<NzbgetRsDiskStateEnv>() };
-                if let Some(aux) = env.aux_cb {
-                    unsafe {
-                        aux(
-                            env.ctx,
-                            3,
-                            status,
-                            last_seen,
-                            0,
-                            url,
-                            std::ptr::null(),
-                            std::ptr::null(),
-                            std::ptr::null_mut(),
-                            None,
-                        );
-                    }
+                if let Some(cb) = env.load_feed_history_cb {
+                    cb(env.ctx, unsafe { cstr::bytes(url) }, status, last_seen);
                 }
             }
             let env_ptr: *mut c_void = (env as *const NzbgetRsDiskStateEnv).cast_mut().cast();
@@ -8247,6 +8250,9 @@ fn run_active_diskstate_exec(
         apply_file_cb: Some(active_disk_apply_file_cb),
         aux_cb: None,
         live_ids_cb: Some(active_disk_live_ids_cb),
+        export_feeds_cb: None,
+        load_feed_status_cb: None,
+        load_feed_history_cb: None,
     };
     unsafe { diskstate_exec(op, &env) }
 }
@@ -9009,6 +9015,72 @@ mod tests {
             false, 9, 0, 2, 1024, 512, 1, 3, true, false
         ));
         assert_eq!(calc_volume_slot_size(0, 10), (true, 60));
+    }
+
+    #[test]
+    fn feeds_state_round_trips_through_typed_callbacks() {
+        #[derive(Default)]
+        struct Feeds {
+            statuses: Vec<(Vec<u8>, u32, i32)>,
+            history: Vec<(Vec<u8>, i32, i32)>,
+            loaded_status: Vec<(Vec<u8>, String, i32)>,
+            loaded_history: Vec<(Vec<u8>, i32, i32)>,
+        }
+        fn export(ctx: *mut c_void, sink: &mut dyn FnMut(FeedRecord<'_>)) {
+            let f = unsafe { &*ctx.cast::<Feeds>() };
+            for (url, filter_hash, last_update) in &f.statuses {
+                sink(FeedRecord::Status {
+                    url,
+                    filter_hash: *filter_hash,
+                    last_update: *last_update,
+                });
+            }
+            for (url, status, last_seen) in &f.history {
+                sink(FeedRecord::History {
+                    url,
+                    status: *status,
+                    last_seen: *last_seen,
+                });
+            }
+        }
+        fn load_status(ctx: *mut c_void, url: &[u8], matching: FeedMatch<'_>, last_update: i32) {
+            let f = unsafe { &mut *ctx.cast::<Feeds>() };
+            f.loaded_status
+                .push((url.to_vec(), format!("{matching:?}"), last_update));
+        }
+        fn load_history(ctx: *mut c_void, url: &[u8], status: i32, last_seen: i32) {
+            let f = unsafe { &mut *ctx.cast::<Feeds>() };
+            f.loaded_history.push((url.to_vec(), status, last_seen));
+        }
+
+        let dir = std::env::temp_dir().join(format!("rustyget_feeds_rt_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let qdir_c = bytes_to_cstring_trunc(dir.to_string_lossy().as_bytes());
+        let mut feeds = Feeds {
+            statuses: vec![(b"http://a/rss".to_vec(), 77, 1_700_000_000)],
+            history: vec![(b"http://a/item1".to_vec(), 2, 1_700_000_100)],
+            ..Feeds::default()
+        };
+        let mut env: NzbgetRsDiskStateEnv = unsafe { std::mem::zeroed() };
+        env.ctx = (&mut feeds as *mut Feeds).cast();
+        env.queue_dir = qdir_c.as_ptr();
+        env.sep = b'/' as c_int;
+        env.export_feeds_cb = Some(export);
+        env.load_feed_status_cb = Some(load_status);
+        env.load_feed_history_cb = Some(load_history);
+        assert_eq!(unsafe { diskstate_exec(DiskOp::SaveFeeds, &env) }, 1);
+        assert_eq!(unsafe { diskstate_exec(DiskOp::LoadFeeds, &env) }, 1);
+        assert_eq!(
+            feeds.loaded_status,
+            vec![(
+                b"http://a/rss".to_vec(),
+                "FilterHash(77)".to_string(),
+                1_700_000_000
+            )]
+        );
+        assert_eq!(feeds.loaded_history, feeds.history);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

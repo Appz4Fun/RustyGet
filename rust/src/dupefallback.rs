@@ -606,32 +606,6 @@ pub fn list_par2_files(dir: &Path) -> Vec<(Vec<u8>, u64, u64)> {
         .collect()
 }
 
-/// `DupeArticleFallback::BorrowedPar2Mismatches`: returns the indices of borrowed finished articles
-/// whose completed PAR2 blocks fail CRC32 verification.
-#[allow(clippy::too_many_arguments)]
-pub fn borrowed_par2_mismatches(
-    path: &Path,
-    dest_dir: &Path,
-    filename: &[u8],
-    statuses: &[i32],
-    donor_ids: &[i32],
-    fallback_rounds: &[i32],
-    segment_offsets: &[i64],
-    segment_sizes: &[i32],
-) -> Vec<i32> {
-    borrowed_par2_mismatches_with_crc(
-        path,
-        dest_dir,
-        filename,
-        statuses,
-        donor_ids,
-        fallback_rounds,
-        segment_offsets,
-        segment_sizes,
-        crc32_ieee,
-    )
-}
-
 /// `DupeArticleFallback::BorrowedPar2Mismatches` with a caller-supplied CRC32 backend.
 #[allow(clippy::too_many_arguments)]
 pub fn borrowed_par2_mismatches_with_crc<F>(
@@ -808,49 +782,6 @@ pub fn project_par_damage(
         && (projected_blocks as i64).saturating_mul(4)
             > (recovery_blocks as i64).saturating_mul(5).saturating_add(8);
     (projected_blocks, certain, projected)
-}
-
-/// Computes `DupeProbe::SampleIndexes(total, count)`.
-pub fn dupe_probe_sample_indexes(total: usize, count: i32) -> Vec<usize> {
-    if total == 0 || count <= 0 {
-        return Vec::new();
-    }
-    let wanted = total.min(count as usize);
-    let mut indexes = Vec::with_capacity(wanted);
-    for i in 0..wanted {
-        let num = (2 * i + 1) as u128 * (total as u128);
-        let den = (2 * wanted) as u128;
-        indexes.push((num / den) as usize);
-    }
-    indexes
-}
-
-/// Classifies an NNTP `STAT` response for `DupeProbe::Classify`.
-pub fn dupe_probe_classify(response: Option<&[u8]>) -> i32 {
-    let Some(resp) = response else {
-        return DUPE_PROBE_UNKNOWN;
-    };
-    if resp.starts_with(b"2") {
-        return DUPE_PROBE_EXISTS;
-    }
-    if resp.starts_with(b"400") || resp.starts_with(b"499") {
-        return DUPE_PROBE_UNKNOWN;
-    }
-    if resp.starts_with(b"41")
-        || resp.starts_with(b"42")
-        || resp.starts_with(b"43")
-        || resp.starts_with(b"451")
-    {
-        return DUPE_PROBE_MISSING;
-    }
-    DUPE_PROBE_UNKNOWN
-}
-
-/// Computes `DupeProbe::IsDead(existing, definitive_servers, active_servers)`.
-pub fn dupe_probe_is_dead(existing: i32, definitive_servers: i32, active_servers: i32) -> bool {
-    existing < DUPE_PROBE_MIN_ALIVE_SAMPLES
-        && definitive_servers > 0
-        && definitive_servers >= active_servers
 }
 
 #[repr(C)]
@@ -1103,39 +1034,6 @@ pub fn is_par_file(
         && filename[filename.len() - 5..].eq_ignore_ascii_case(b".par2")
 }
 
-/// `DupeArticleFallback::HasPar2` / `ShouldDeferToPar`:
-/// Checks whether a completed file is a PAR2 file by flag or `.par2` extension.
-pub fn completed_file_is_par2(par_file: bool, filename: &[u8]) -> bool {
-    par_file
-        || (filename.len() >= 5 && filename[filename.len() - 5..].eq_ignore_ascii_case(b".par2"))
-}
-
-/// `DupeArticleFallback::ShouldDeferToPar` header evaluation:
-/// - `-1`: do not defer (`false`)
-/// - `1`: defer (`true`)
-/// - `0`: check file list and completed files for PAR2 entries
-pub fn should_defer_to_par_header(
-    has_nzb_info: bool,
-    direct_rename_status: DirectRenameStatus,
-    all_first: bool,
-    par_status: NzbParStatus,
-    par_size: i64,
-) -> i32 {
-    if !has_nzb_info {
-        return -1;
-    }
-    if direct_rename_status == DirectRenameStatus::Running && !all_first {
-        return 1;
-    }
-    if par_status == NzbParStatus::Failure {
-        return -1;
-    }
-    if par_size > 0 {
-        return 1;
-    }
-    0
-}
-
 /// `DupeArticleFallback::TryFallback`:
 /// Evaluates all entry preconditions (mode, raw article, PAR file, first-article content,
 /// and file/NZB deletion/parking/force status). Returns `true` when `TryFallback` may proceed.
@@ -1173,67 +1071,6 @@ pub fn check_try_preconditions(
         return false;
     }
     true
-}
-
-/// `DupeArticleFallback::TryFallback`:
-/// Evaluates whether duplicate article fallback should defer to par-check and
-/// whether defer state transitions to `dpLifted`.
-/// Returns `(defer, lift_defer_state, log_lifted)`.
-#[allow(clippy::too_many_arguments)]
-pub fn eval_par_defer(
-    par_defer: bool,
-    part_number: i32,
-    dupe_par_defer_state: i32,
-    dp_deferred: i32,
-    dp_lifted: i32,
-    par_cannot_cover_flag: bool,
-    damage_certain: bool,
-    damage_projected: bool,
-) -> (bool, bool, bool) {
-    let defer = par_defer
-        && part_number != 1
-        && dupe_par_defer_state != dp_lifted
-        && !par_cannot_cover_flag
-        && !damage_certain
-        && !damage_projected;
-    let lift_defer_state = par_defer && !defer && part_number != 1;
-    let log_lifted = lift_defer_state && dupe_par_defer_state == dp_deferred;
-    (defer, lift_defer_state, log_lifted)
-}
-
-/// `DupeArticleFallback::TryFallback`:
-/// Checks whether deferred fallback must abort before pinning or advancing sources.
-pub fn should_abort_deferred_try(
-    defer: bool,
-    round: i32,
-    has_download_queue: bool,
-    source_donors_empty: bool,
-) -> bool {
-    defer && ((round == 0 && !has_download_queue) || (round > 0 && source_donors_empty))
-}
-
-/// `DupeArticleFallback::TryFallback`:
-/// Evaluates actions when `round >= sources.len()` (all candidate sources exhausted):
-/// Returns `(check_log_par_defer, inc_unsourced, restore_orig_msg_id)`.
-pub fn resolve_exhausted_sources(
-    defer: bool,
-    pinned_round: i32,
-    dupe_proactive: bool,
-    par_defer_state: i32,
-    dp_none: i32,
-    has_download_queue: bool,
-    orig_msg_id_empty: bool,
-) -> (bool, bool, bool) {
-    if defer {
-        let check_log_par_defer =
-            !dupe_proactive && par_defer_state == dp_none && has_download_queue;
-        let restore_orig_msg_id = pinned_round > 0 && !orig_msg_id_empty;
-        (check_log_par_defer, false, restore_orig_msg_id)
-    } else if pinned_round == 0 && !dupe_proactive {
-        (false, true, false)
-    } else {
-        (false, false, !orig_msg_id_empty)
-    }
 }
 
 /// `DupeArticleFallback::RotateToLead`:
@@ -1284,57 +1121,10 @@ pub fn should_vacate_ghost_lead(lead_nzb_id: i32, is_barred: bool, donor_ids: &[
     !donor_ids.contains(&lead_nzb_id)
 }
 
-/// `DupeArticleFallback::NzbFilenameOf`:
-/// Checks whether `own_article` matches `article` by part number and original (or current) message-id.
-pub fn own_article_matches(
-    own_part_number: i32,
-    part_number: i32,
-    own_msg_id: &[u8],
-    orig_msg_id: &[u8],
-    cur_msg_id: &[u8],
-) -> bool {
-    let msg_id = if !orig_msg_id.is_empty() {
-        orig_msg_id
-    } else {
-        cur_msg_id
-    };
-    own_part_number == part_number && !msg_id.is_empty() && own_msg_id == msg_id
-}
-
-/// `DupeArticleFallback::CollectDonors`:
-/// Checks whether a queued or history item is eligible as a donor before comparing names/dupe-keys.
-pub fn is_donor_eligible(
-    is_self: bool,
-    kind: i32,
-    expected_kind: i32,
-    dupe_mode: DupeMode,
-) -> bool {
-    !is_self && kind == expected_kind && dupe_mode != DupeMode::Force
-}
-
 /// `DupeArticleFallback::CollectDonors` / `MatchDonorFile`:
 /// Checks whether both identities are non-empty and `kind` starts with `"twin"`.
 pub fn is_twin_kind(own_identity: &[u8], donor_identity: &[u8], kind: &[u8]) -> bool {
     !own_identity.is_empty() && !donor_identity.is_empty() && kind.starts_with(b"twin")
-}
-
-/// `DupeArticleFallback::CollectDonors`:
-/// Comparator ordering twin donors first, then higher `dupe_score`, then lower `id`.
-pub fn compare_donors(
-    twin1: bool,
-    score1: i32,
-    id1: i32,
-    twin2: bool,
-    score2: i32,
-    id2: i32,
-) -> bool {
-    if twin1 != twin2 {
-        return twin1;
-    }
-    if score1 != score2 {
-        return score1 > score2;
-    }
-    id1 < id2
 }
 
 /// What orders the duplicates asked for missing articles.
@@ -1367,47 +1157,32 @@ pub fn compare_donor_ranks(a: &DonorRank, b: &DonorRank) -> std::cmp::Ordering {
         .then_with(|| a.id.cmp(&b.id))
 }
 
-/// `DupeArticleFallback::PinSources`:
-/// Checks whether a non-twin lead donor should be reset when `twin_only` is active.
-pub fn should_reset_non_twin_lead(
-    twin_only: bool,
-    lead_id: i32,
-    own_identity: &[u8],
-    lead_identity: &[u8],
-    kind: &[u8],
-) -> bool {
-    twin_only && lead_id != 0 && !is_twin_kind(own_identity, lead_identity, kind)
+/// How a donor file's name matches the name the content says it has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NameMatch {
+    /// The same bytes.
+    Exact,
+    /// The same name in another case.
+    CaseFolded,
 }
 
-/// `DupeArticleFallback::GetParsedDonor`:
-/// Checks whether a donor whose NZB failed to parse is still within its retry cooldown window.
-pub fn is_bad_donor_in_cooldown(now_sec: i64, bad_since_sec: i64, retry_sec: i64) -> bool {
-    now_sec.wrapping_sub(bad_since_sec) < retry_sec
-}
-
-/// `DupeArticleFallback::MatchDonorFile`:
-/// Classifies how `donor_filename` matches `by_content`:
-/// `1` (exact byte match), `2` (case-insensitive match), or `0` (no match).
-pub fn classify_content_name_match(donor_filename: &[u8], by_content: &[u8]) -> i32 {
+/// `DupeArticleFallback::MatchDonorFile`: how `donor_filename` matches `by_content`, if at all.
+pub fn content_name_match(donor_filename: &[u8], by_content: &[u8]) -> Option<NameMatch> {
     if donor_filename == by_content {
-        1
+        Some(NameMatch::Exact)
     } else if crate::queuecoord::strcasecmp_bytes(donor_filename, by_content) {
-        2
+        Some(NameMatch::CaseFolded)
     } else {
-        0
+        None
     }
 }
 
-/// `DupeArticleFallback::MatchDonorFile`:
-/// Selects between exact-case and case-folded content-matched donor files:
-/// `1` when `exact_count == 1`, `2` when `exact_count == 0 && folded_count == 1`, `0` otherwise.
-pub fn select_named_content_match(exact_count: usize, folded_count: usize) -> i32 {
-    if exact_count == 1 {
-        1
-    } else if exact_count == 0 && folded_count == 1 {
-        2
-    } else {
-        0
+/// `DupeArticleFallback::MatchDonorFile`: the single exact-case match, else the single
+/// case-folded one when there is no exact match.
+fn single_named_match(exact: &[usize], folded: &[usize]) -> Option<usize> {
+    match (exact, folded) {
+        ([only], _) | ([], [only]) => Some(*only),
+        _ => None,
     }
 }
 
@@ -1424,39 +1199,16 @@ pub fn is_donor_filename_match(
             && crate::queuecoord::strcasecmp_bytes(target_nzb_filename, donor_filename))
 }
 
-/// `DupeArticleFallback::MatchDonorFile`:
-/// Resolves structural / filename match:
-/// `-1` to abort (`nullptr`), `1` to return `filenameMatch`, `2` to return `structuralMatches[0]`,
-/// or `0` to continue to step-size matching.
-pub fn resolve_structural_or_filename_match(
-    filename_ambiguous: bool,
-    has_filename_match: bool,
-    structural_matches_len: usize,
-) -> i32 {
-    if filename_ambiguous {
-        -1
-    } else if has_filename_match {
-        1
-    } else if structural_matches_len == 1 {
-        2
+/// `DupeArticleFallback::FirstContent`: the first-content code (`FC_PAR2` or `FC_OTHER`) for
+/// the first 8 bytes of a file's first article on disk, or `None` while they are all zero
+/// (not flushed from the article cache yet).
+pub fn first_content_of_head(head8: &[u8]) -> Option<i32> {
+    let head = head8.get(..8).filter(|h| h.iter().any(|&b| b != 0))?;
+    Some(if head == b"PAR2\0PKT" {
+        crate::queuesubsys_host::FC_PAR2
     } else {
-        0
-    }
-}
-
-/// `DupeArticleFallback::FirstContent`:
-/// Classifies the first 8 bytes of a file's first article on disk:
-/// - `0`: all zeroes (not flushed from article cache yet -> `fcUnknown`)
-/// - `1`: `"PAR2\0PKT"` (`fcPar2`)
-/// - `2`: any other non-zero header (`fcOther`)
-pub fn classify_first_head(head8: &[u8]) -> i32 {
-    if head8.len() < 8 || head8[..8].iter().all(|&b| b == 0) {
-        0
-    } else if &head8[..8] == b"PAR2\0PKT" {
-        1
-    } else {
-        2
-    }
+        crate::queuesubsys_host::FC_OTHER
+    })
 }
 
 /// Pure-Rust descriptor for a target or donor file in `match_donor_file`.
@@ -1516,18 +1268,13 @@ pub fn match_donor_file(
             if df.is_par_file {
                 continue;
             }
-            match classify_content_name_match(df.filename, by_content) {
-                1 => exact.push(i),
-                2 => folded.push(i),
-                _ => {}
+            match content_name_match(df.filename, by_content) {
+                Some(NameMatch::Exact) => exact.push(i),
+                Some(NameMatch::CaseFolded) => folded.push(i),
+                None => {}
             }
         }
-        let match_kind = select_named_content_match(exact.len(), folded.len());
-        let named = match match_kind {
-            1 => Some(exact[0]),
-            2 => Some(folded[0]),
-            _ => None,
-        };
+        let named = single_named_match(&exact, &folded);
         if named.is_some() || twin_only {
             return named.filter(|&idx| check_structure(&donor_files[idx]));
         }
@@ -1552,15 +1299,14 @@ pub fn match_donor_file(
         structural_matches.push(i);
     }
 
-    match resolve_structural_or_filename_match(
-        filename_ambiguous,
-        filename_match.is_some(),
-        structural_matches.len(),
-    ) {
-        -1 => return None,
-        1 => return filename_match,
-        2 => return Some(structural_matches[0]),
-        _ => {}
+    if filename_ambiguous {
+        return None;
+    }
+    if filename_match.is_some() {
+        return filename_match;
+    }
+    if let [only] = structural_matches[..] {
+        return Some(only);
     }
 
     let mut step_match = None;
@@ -2269,14 +2015,8 @@ pub(crate) fn first_content_host(
     if f.read_exact(&mut head).is_err() {
         return crate::queuesubsys_host::FC_UNKNOWN;
     }
-    let cls = classify_first_head(&head);
-    if cls == 0 {
+    let Some(fc) = first_content_of_head(&head) else {
         return crate::queuesubsys_host::FC_UNKNOWN;
-    }
-    let fc = if cls == 1 {
-        crate::queuesubsys_host::FC_PAR2
-    } else {
-        crate::queuesubsys_host::FC_OTHER
     };
     file.first_content = fc;
     host.file_set_int(
@@ -3247,18 +2987,6 @@ mod tests {
 
     #[test]
     fn test_dupe_probe_and_server_pool() {
-        assert_eq!(dupe_probe_sample_indexes(100, 4), vec![12, 37, 62, 87]);
-        assert_eq!(dupe_probe_classify(Some(b"223 0 <id>")), DUPE_PROBE_EXISTS);
-        assert_eq!(
-            dupe_probe_classify(Some(b"430 No such article")),
-            DUPE_PROBE_MISSING
-        );
-        assert_eq!(
-            dupe_probe_classify(Some(b"400 Service unavailable")),
-            DUPE_PROBE_UNKNOWN
-        );
-        assert!(dupe_probe_is_dead(1, 3, 3));
-        assert!(!dupe_probe_is_dead(2, 3, 3));
 
         let servers = [
             NzbgetRsServerNormInput {
@@ -3390,59 +3118,6 @@ mod tests {
     fn test_consolidated_dupe_fallback_domain_functions() {
         assert!(is_par_file(false, 0, 2, true, b"caf\xe9.PAR2"));
         assert!(!is_par_file(false, 0, 2, false, b"caf\xe9.PAR2"));
-        assert!(completed_file_is_par2(false, b"vol01.PAR2"));
-        assert!(!completed_file_is_par2(false, b"vol01.rar"));
-
-        assert_eq!(
-            should_defer_to_par_header(
-                false,
-                DirectRenameStatus::None,
-                false,
-                NzbParStatus::None,
-                100
-            ),
-            -1
-        );
-        assert_eq!(
-            should_defer_to_par_header(
-                true,
-                DirectRenameStatus::Running,
-                false,
-                NzbParStatus::None,
-                0
-            ),
-            1
-        );
-        assert_eq!(
-            should_defer_to_par_header(
-                true,
-                DirectRenameStatus::None,
-                false,
-                NzbParStatus::Failure,
-                100
-            ),
-            -1
-        );
-        assert_eq!(
-            should_defer_to_par_header(
-                true,
-                DirectRenameStatus::None,
-                false,
-                NzbParStatus::None,
-                100
-            ),
-            1
-        );
-        assert_eq!(
-            should_defer_to_par_header(
-                true,
-                DirectRenameStatus::None,
-                false,
-                NzbParStatus::None,
-                0
-            ),
-            0
-        );
 
         assert!(check_try_preconditions(
             1,
@@ -3493,32 +3168,6 @@ mod tests {
             DupeMode::Score
         ));
 
-        assert_eq!(
-            eval_par_defer(true, 2, 1, 1, 2, false, false, false),
-            (true, false, false)
-        );
-        assert_eq!(
-            eval_par_defer(true, 2, 1, 1, 2, true, false, false),
-            (false, true, true)
-        );
-
-        assert!(should_abort_deferred_try(true, 0, false, false));
-        assert!(should_abort_deferred_try(true, 1, true, true));
-        assert!(!should_abort_deferred_try(true, 1, true, false));
-
-        assert_eq!(
-            resolve_exhausted_sources(true, 0, false, 0, 0, true, false),
-            (true, false, false)
-        );
-        assert_eq!(
-            resolve_exhausted_sources(false, 0, false, 0, 0, true, false),
-            (false, true, false)
-        );
-        assert_eq!(
-            resolve_exhausted_sources(false, 1, false, 0, 0, true, false),
-            (false, false, true)
-        );
-
         assert_eq!(find_rotate_offset(&[10, 20, 30], 20), 1);
         assert_eq!(find_rotate_offset(&[10, 20, 30], 10), 0);
         assert_eq!(find_rotate_offset(&[10, 20, 30], 0), 0);
@@ -3532,21 +3181,8 @@ mod tests {
         assert!(should_vacate_ghost_lead(10, true, &[10, 20]));
         assert!(should_vacate_ghost_lead(30, false, &[10, 20]));
         assert!(!should_vacate_ghost_lead(10, false, &[10, 20]));
-
-        assert!(own_article_matches(
-            3,
-            3,
-            b"<orig@id>",
-            b"<orig@id>",
-            b"<sub@id>"
-        ));
-        assert!(!own_article_matches(3, 3, b"<orig@id>", b"", b"<sub@id>"));
-
-        assert!(is_donor_eligible(false, 1, 1, DupeMode::Score));
-        assert!(!is_donor_eligible(true, 1, 1, DupeMode::Score));
         assert!(is_twin_kind(b"fp1", b"fp2", b"twin 16/18"));
         assert!(!is_twin_kind(b"fp1", b"fp2", b"alt"));
-        assert!(compare_donors(true, 10, 5, false, 100, 1));
         {
             use crate::donorkind::DonorKind as K;
             use std::cmp::Ordering::{Greater, Less};
@@ -3594,20 +3230,24 @@ mod tests {
                 Greater
             );
         }
-        assert!(should_reset_non_twin_lead(true, 3, b"fp1", b"fp2", b"alt"));
-        assert!(is_bad_donor_in_cooldown(105, 100, 30));
-        assert!(!is_bad_donor_in_cooldown(130, 100, 30));
 
-        assert_eq!(classify_content_name_match(b"Movie.rar", b"Movie.rar"), 1);
-        assert_eq!(classify_content_name_match(b"Movie.rar", b"movie.rar"), 2);
-        assert_eq!(select_named_content_match(0, 1), 2);
+        assert_eq!(content_name_match(b"Movie.rar", b"Movie.rar"), Some(NameMatch::Exact));
+        assert_eq!(content_name_match(b"Movie.rar", b"movie.rar"), Some(NameMatch::CaseFolded));
+        assert_eq!(content_name_match(b"Movie.rar", b"other.rar"), None);
+        assert_eq!(single_named_match(&[], &[7]), Some(7));
+        assert_eq!(single_named_match(&[3], &[7, 8]), Some(3));
+        assert_eq!(single_named_match(&[3, 4], &[7]), None);
         assert!(is_donor_filename_match(
             b"obfuscated.bin",
             b"Movie.part01.rar",
             b"movie.part01.rar"
         ));
-        assert_eq!(resolve_structural_or_filename_match(false, true, 2), 1);
-        assert_eq!(classify_first_head(b"PAR2\0PKT"), 1);
+        assert_eq!(
+            first_content_of_head(b"PAR2\0PKT"),
+            Some(crate::queuesubsys_host::FC_PAR2)
+        );
+        assert_eq!(first_content_of_head(&[0; 8]), None);
+        assert_eq!(first_content_of_head(b"Rar!\x1a\x07\x01\x00"), Some(crate::queuesubsys_host::FC_OTHER));
     }
 
     #[derive(Clone, Debug)]
@@ -3906,6 +3546,31 @@ mod tests {
         candidates
     }
 
+    /// The PAR2 check with the default CRC32 backend.
+    #[allow(clippy::too_many_arguments)]
+    fn borrowed_par2_mismatches(
+        path: &Path,
+        dest_dir: &Path,
+        filename: &[u8],
+        statuses: &[i32],
+        donor_ids: &[i32],
+        fallback_rounds: &[i32],
+        segment_offsets: &[i64],
+        segment_sizes: &[i32],
+    ) -> Vec<i32> {
+        borrowed_par2_mismatches_with_crc(
+            path,
+            dest_dir,
+            filename,
+            statuses,
+            donor_ids,
+            fallback_rounds,
+            segment_offsets,
+            segment_sizes,
+            crc32_ieee,
+        )
+    }
+
     #[test]
     fn dupe_article_fallback_full_suite_port_from_cpp() {
         // 1. DupeArticleFallbackRejectsDamagedPar2BlockSizeTest
@@ -4069,16 +3734,6 @@ mod tests {
             let _ = std::fs::remove_dir_all(&dir);
         }
 
-        // 3. DupeArticleFallbackProactiveTryIsNotUnsourcedTest
-        for proactive in [true, false] {
-            let (_check_log_par_defer, inc_unsourced, _restore_orig) =
-                resolve_exhausted_sources(false, 0, proactive, 0, 0, true, false);
-            assert_eq!(
-                if inc_unsourced { 1 } else { 0 },
-                if proactive { 0 } else { 1 }
-            );
-        }
-
         // 4. DupeArticleFallbackSizesMatchTest
         assert!(sizes_match(100000, 100000, 64));
         assert!(sizes_match(100000, 101000, 64));
@@ -4178,111 +3833,6 @@ mod tests {
             ));
         }
 
-        // 9. DupeArticleFallbackDefersDataToAvailableParTest
-        for kind in 0..10 {
-            let par_size = if kind == 0 || kind >= 6 { 500000 } else { 0 };
-            let direct_rename_status = if kind == 5 {
-                DirectRenameStatus::Running
-            } else {
-                DirectRenameStatus::None
-            };
-            let par_status = match kind {
-                6 => 3, // psSkipped
-                7 => 4, // psRepairPossible
-                8 => 1, // psSuccess
-                9 => 5, // psManual
-                _ => 0,
-            };
-            let header = should_defer_to_par_header(
-                true,
-                direct_rename_status,
-                false,
-                NzbParStatus::from(par_status),
-                par_size,
-            );
-            let should_defer = if header != 0 {
-                header > 0
-            } else if kind == 1 || kind == 3 {
-                is_par_file(
-                    kind == 1,
-                    0,
-                    1,
-                    kind == 3,
-                    if kind == 1 {
-                        b"obfuscated.bin"
-                    } else {
-                        b"release.PAR2"
-                    },
-                )
-            } else if kind == 2 || kind == 4 {
-                completed_file_is_par2(
-                    kind == 2,
-                    if kind == 2 {
-                        b"obfuscated.bin"
-                    } else {
-                        b"release.PAR2"
-                    },
-                )
-            } else {
-                false
-            };
-            assert!(should_defer, "fixture {kind} must defer to PAR");
-            let (defer, _, _) = eval_par_defer(should_defer, 2, 0, 1, 2, false, false, false);
-            assert!(defer);
-            assert!(should_abort_deferred_try(defer, 1, false, true));
-        }
-        // First article of a file (part_number == 1) is never deferred
-        {
-            let (defer, _, _) = eval_par_defer(true, 1, 0, 1, 2, false, false, false);
-            assert!(!defer);
-        }
-        // DirectRename running vs AllFirst vs ParSize
-        assert_eq!(
-            should_defer_to_par_header(
-                true,
-                DirectRenameStatus::Running,
-                false,
-                NzbParStatus::None,
-                0
-            ),
-            1
-        );
-        assert_eq!(
-            should_defer_to_par_header(
-                true,
-                DirectRenameStatus::Running,
-                true,
-                NzbParStatus::None,
-                0
-            ),
-            0
-        );
-        assert_eq!(
-            should_defer_to_par_header(
-                true,
-                DirectRenameStatus::Running,
-                true,
-                NzbParStatus::None,
-                500000
-            ),
-            1
-        );
-
-        // 10. DupeArticleFallbackAllowsDataWithoutUsableParTest
-        for par_failed in [false, true] {
-            let par_size = if par_failed { 500000 } else { 0 };
-            let par_status = if par_failed { 2 } else { 0 };
-            let has_par2 = par_size > 0;
-            let should_defer = should_defer_to_par_header(
-                true,
-                DirectRenameStatus::Failure,
-                false,
-                NzbParStatus::from(par_status),
-                par_size,
-            ) > 0;
-            assert_eq!(has_par2 && !should_defer, par_failed);
-        }
-
         // 11. DupeArticleFallbackLiftsDeferralWhenParCannotCoverTest
         for (failed, expect_fallback) in [
             (100000i64, false),
@@ -4290,20 +3840,8 @@ mod tests {
             (480001, true),
             (2000000, true),
         ] {
-            let should_defer = should_defer_to_par_header(
-                true,
-                DirectRenameStatus::Failure,
-                false,
-                NzbParStatus::None,
-                500000,
-            ) > 0;
-            assert!(should_defer);
             let cannot_cover = par_cannot_cover(500000, 20000, failed + 20000, 0, 0, 0, 0, 0, true);
             assert_eq!(cannot_cover, expect_fallback);
-            let (defer, lift, _) =
-                eval_par_defer(should_defer, 2, 0, 1, 2, cannot_cover, false, false);
-            assert_eq!(!defer, expect_fallback);
-            assert_eq!(lift, expect_fallback);
         }
 
         // 12. DupeArticleFallbackArticleModePreservesRecoveryWithParTest

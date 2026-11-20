@@ -196,25 +196,14 @@ pub fn scheduler_calc_speed_limit_bytes(kb_per_sec: i32) -> i32 {
 
 /// `Scheduler::EditServer`:
 /// Checks whether a server matches `server_ref` by numeric ID or case-insensitive name.
-///
-/// # Safety
-/// `server_name` and `server_ref` must be valid null-terminated C strings (or null).
 #[inline]
-pub unsafe fn scheduler_matches_server_ref(
+pub fn scheduler_matches_server_ref(
     id: i32,
     server_id: i32,
-    server_name: *const std::ffi::c_char,
-    server_ref: *const std::ffi::c_char,
+    server_name: &[u8],
+    server_ref: &[u8],
 ) -> bool {
-    if id > 0 && server_id == id {
-        return true;
-    }
-    if server_name.is_null() || server_ref.is_null() {
-        return false;
-    }
-    std::ffi::CStr::from_ptr(server_name)
-        .to_bytes()
-        .eq_ignore_ascii_case(std::ffi::CStr::from_ptr(server_ref).to_bytes())
+    (id > 0 && server_id == id) || server_name.eq_ignore_ascii_case(server_ref)
 }
 
 /// `Scheduler::FetchFeed`:
@@ -322,33 +311,70 @@ pub fn scheduler_calc_next_work_interval(cur_time: i64) -> i32 {
 // End-to-end `Scheduler` coordinator (`daemon/main/Scheduler.cpp`)
 // ============================================================================
 
-use std::ffi::{c_char, c_int, c_void, CStr};
+use std::ffi::c_int;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Mutex;
 
-#[repr(C)]
-pub struct NzbgetRsSchedulerEnv {
-    pub ctx: *mut c_void,
-    pub a1: c_int,
-    pub a2: c_int,
-    pub a3: c_int,
-    pub a4: c_int,
-    pub a5: c_int,
-    pub s1: *const c_char,
-    pub log_cb: Option<unsafe extern "C" fn(*mut c_void, c_int, *const c_char)>,
-    pub action_cb: Option<
-        unsafe extern "C" fn(
-            *mut c_void,
-            c_int,
-            c_int,
-            c_int,
-            *const *const c_char,
-            usize,
-            *mut c_int,
-            *mut i64,
-            *mut *const c_char,
-        ) -> c_int,
-    >,
+/// Level of a scheduler log line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SchedLevel {
+    Debug,
+    Info,
+    Error,
+}
+
+/// The work state the scheduler reads.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct SchedState {
+    pub local_time_offset: c_int,
+    pub last_check_offset: c_int,
+    pub speed_limit: c_int,
+    pub pause_download: bool,
+    pub pause_post_process: bool,
+    pub pause_scan: bool,
+    pub resume_time: i64,
+}
+
+/// A change the scheduler makes to the work state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SchedEdit {
+    SpeedLimit(c_int),
+    PauseDownload(bool),
+    PausePostProcess(bool),
+    PauseScan(bool),
+    /// Clears the resume time and all pause flags.
+    Autoresume,
+}
+
+/// What the scheduler acts on. Each default does nothing and reports no
+/// data, so a test host implements only what it needs.
+pub(crate) trait SchedulerHost {
+    fn log(&self, _level: SchedLevel, _msg: &[u8]) {}
+    /// The work state, or `None` while the queue is not loaded.
+    fn state(&self) -> Option<SchedState> {
+        None
+    }
+    fn edit(&self, _edit: SchedEdit) {}
+    fn fetch_feeds(&self, _feed_list: &[u8]) {}
+    fn start_process(&self, _task_id: c_int, _words: &[&[u8]]) {}
+    /// The service clock, or 0 to use the system time.
+    fn now(&self) -> i64 {
+        0
+    }
+}
+
+/// The bytes before the first NUL, as a C string would carry them.
+fn until_nul(bytes: &[u8]) -> &[u8] {
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    &bytes[..end]
+}
+
+/// C `atoi` of `bytes` up to the first NUL.
+fn c_atoi(bytes: &[u8]) -> c_int {
+    let mut buf = until_nul(bytes).to_vec();
+    buf.push(0);
+    // SAFETY: `buf` is NUL-terminated.
+    unsafe { libc::atoi(buf.as_ptr().cast()) }
 }
 
 struct SchedTaskEntry {
@@ -380,20 +406,6 @@ pub struct NzbgetRsScheduler {
     service_interval: AtomicI32,
 }
 
-fn make_c_buf(bytes: &[u8]) -> Vec<u8> {
-    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    let mut v = Vec::with_capacity(end + 1);
-    v.extend_from_slice(&bytes[..end]);
-    v.push(0);
-    v
-}
-
-unsafe fn emit_sched_log(env: &NzbgetRsSchedulerEnv, level: c_int, msg: &[u8]) {
-    if let Some(cb) = env.log_cb {
-        let cbuf = make_c_buf(msg);
-        cb(env.ctx, level, cbuf.as_ptr() as *const c_char);
-    }
-}
 
 fn libc_gmtime_tm(val: i64) -> Tm {
     #[cfg(unix)]
@@ -426,25 +438,10 @@ fn libc_gmtime_tm(val: i64) -> Tm {
     }
 }
 
-fn current_unix_time(env: &NzbgetRsSchedulerEnv) -> i64 {
-    if let Some(cb) = env.action_cb {
-        let mut i64s = [0i64; 2];
-        unsafe {
-            cb(
-                env.ctx,
-                6,
-                0,
-                0,
-                std::ptr::null(),
-                0,
-                std::ptr::null_mut(),
-                i64s.as_mut_ptr(),
-                std::ptr::null_mut(),
-            );
-        }
-        if i64s[0] != 0 {
-            return i64s[0];
-        }
+fn current_unix_time(host: &dyn SchedulerHost) -> i64 {
+    let now = host.now();
+    if now != 0 {
+        return now;
     }
     #[cfg(unix)]
     unsafe {
@@ -503,90 +500,45 @@ impl NzbgetRsScheduler {
             .collect()
     }
 
-    unsafe fn execute_task(
+    fn execute_task(
         ws: &mut SchedulerWorkState,
         task: &SchedTaskEntry,
         is_debug: bool,
-        env: &NzbgetRsSchedulerEnv,
+        host: &dyn SchedulerHost,
     ) {
-        let Some(cb) = env.action_cb else {
-            return;
-        };
         if is_debug {
             let cmd_bytes = scheduler_command_name(task.command);
             let cmd_slice = &cmd_bytes[..cmd_bytes.len().saturating_sub(1)];
             let mut msg = b"Executing scheduled command: ".to_vec();
             msg.extend_from_slice(cmd_slice);
-            emit_sched_log(env, 0, &msg);
+            sched_log(host, SchedLevel::Debug, &msg);
         }
 
         let exec_proc =
             scheduler_should_execute_process(ws.execute_process, task.hours, STARTUP_TASK);
-        let param_c = make_c_buf(&task.param);
 
         match task.command {
             4 => {
                 // scDownloadRate
                 if !task.param.is_empty() {
-                    let kb = libc::atoi(param_c.as_ptr() as *const c_char);
-                    let limit = scheduler_calc_speed_limit_bytes(kb);
-                    cb(
-                        env.ctx,
-                        1,
-                        0,
-                        limit,
-                        std::ptr::null(),
-                        0,
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                    );
+                    let limit = scheduler_calc_speed_limit_bytes(c_atoi(&task.param));
+                    host.edit(SchedEdit::SpeedLimit(limit));
                     ws.download_rate_changed = true;
                 }
             }
             0 | 1 => {
                 // scPauseDownload | scUnpauseDownload
-                cb(
-                    env.ctx,
-                    1,
-                    1,
-                    c_int::from(task.command == 0),
-                    std::ptr::null(),
-                    0,
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                );
+                host.edit(SchedEdit::PauseDownload(task.command == 0));
                 ws.pause_download_changed = true;
             }
             2 | 3 => {
                 // scPausePostProcess | scUnpausePostProcess
-                cb(
-                    env.ctx,
-                    1,
-                    2,
-                    c_int::from(task.command == 2),
-                    std::ptr::null(),
-                    0,
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                );
+                host.edit(SchedEdit::PausePostProcess(task.command == 2));
                 ws.pause_post_process_changed = true;
             }
             7 | 8 => {
                 // scPauseScan | scUnpauseScan
-                cb(
-                    env.ctx,
-                    1,
-                    3,
-                    c_int::from(task.command == 7),
-                    std::ptr::null(),
-                    0,
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                );
+                host.edit(SchedEdit::PauseScan(task.command == 7));
                 ws.pause_scan_changed = true;
             }
             6 => {
@@ -596,59 +548,28 @@ impl NzbgetRsScheduler {
                     if words.is_empty() {
                         let mut err = b"Could not execute scheduled process-script, failed to parse command line: ".to_vec();
                         err.extend_from_slice(&task.param);
-                        emit_sched_log(env, 4, &err);
+                        sched_log(host, SchedLevel::Error, &err);
                     } else {
-                        let c_words: Vec<Vec<u8>> = words.iter().map(|w| make_c_buf(w)).collect();
-                        let mut ptrs: Vec<*const c_char> = Vec::with_capacity(c_words.len() + 1);
-                        ptrs.push(param_c.as_ptr() as *const c_char);
-                        for w in &c_words {
-                            ptrs.push(w.as_ptr() as *const c_char);
-                        }
-                        cb(
-                            env.ctx,
-                            4,
-                            1,
-                            task.id,
-                            ptrs.as_ptr(),
-                            ptrs.len(),
-                            std::ptr::null_mut(),
-                            std::ptr::null_mut(),
-                            std::ptr::null_mut(),
-                        );
+                        let words: Vec<&[u8]> = words.iter().map(|w| until_nul(w)).collect();
+                        host.start_process(task.id, &words);
                     }
                 }
             }
             9 | 10 => {
                 // scActivateServer | scDeactivateServer
-                Self::edit_server(ws, task.command == 9, &task.param, env);
+                Self::edit_server(ws, task.command == 9, &task.param);
             }
             11 => {
                 // scFetchFeed
                 if exec_proc {
-                    let ptrs = [param_c.as_ptr() as *const c_char];
-                    cb(
-                        env.ctx,
-                        3,
-                        0,
-                        0,
-                        ptrs.as_ptr(),
-                        1,
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                    );
+                    host.fetch_feeds(until_nul(&task.param));
                 }
             }
             _ => {}
         }
     }
 
-    unsafe fn edit_server(
-        ws: &mut SchedulerWorkState,
-        active: bool,
-        server_list: &[u8],
-        env: &NzbgetRsSchedulerEnv,
-    ) {
+    fn edit_server(ws: &mut SchedulerWorkState, active: bool, server_list: &[u8]) {
         #[cfg(unix)]
         if let Some(pool) = crate::net::active_server_pool() {
             let srvs = pool.servers_snapshot();
@@ -659,18 +580,12 @@ impl NzbgetRsScheduler {
                 else {
                     break;
                 };
-                let tok = &server_list[pos + tok_start..pos + tok_end];
+                let tok = until_nul(&server_list[pos + tok_start..pos + tok_end]);
                 pos += next_pos;
-                let ref_c = make_c_buf(tok);
-                let ref_id = libc::atoi(ref_c.as_ptr() as *const c_char);
+                let ref_id = c_atoi(tok);
 
                 for s in &srvs {
-                    if scheduler_matches_server_ref(
-                        ref_id,
-                        s.id,
-                        s.name.as_ptr(),
-                        ref_c.as_ptr() as *const c_char,
-                    ) {
+                    if scheduler_matches_server_ref(ref_id, s.id, s.name.to_bytes(), tok) {
                         if !ws.server_changed {
                             ws.server_status_list = srvs
                                 .iter()
@@ -683,103 +598,17 @@ impl NzbgetRsScheduler {
                     }
                 }
             }
-            return;
         }
-
-        let Some(cb) = env.action_cb else {
-            return;
-        };
-        let mut pos = 0usize;
-        while pos <= server_list.len() {
-            let Some((tok_start, tok_end, next_pos)) =
-                crate::util::tokenizer_find_next_token(&server_list[pos..], b",;")
-            else {
-                break;
-            };
-            let tok = &server_list[pos + tok_start..pos + tok_end];
-            pos += next_pos;
-            let ref_c = make_c_buf(tok);
-            let ref_id = libc::atoi(ref_c.as_ptr() as *const c_char);
-
-            let srv_count = cb(
-                env.ctx,
-                2,
-                0,
-                0,
-                std::ptr::null(),
-                0,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            );
-            for idx in 0..srv_count {
-                let mut ints = [0i32; 2];
-                let mut strs: [*const c_char; 1] = [std::ptr::null()];
-                cb(
-                    env.ctx,
-                    2,
-                    1,
-                    idx,
-                    std::ptr::null(),
-                    0,
-                    ints.as_mut_ptr(),
-                    std::ptr::null_mut(),
-                    strs.as_mut_ptr(),
-                );
-                if scheduler_matches_server_ref(
-                    ref_id,
-                    ints[0],
-                    strs[0],
-                    ref_c.as_ptr() as *const c_char,
-                ) {
-                    if !ws.server_changed {
-                        ws.server_status_list.clear();
-                        ws.server_status_list.reserve(srv_count as usize);
-                        for idx2 in 0..srv_count {
-                            let mut ints2 = [0i32; 2];
-                            let mut strs2: [*const c_char; 1] = [std::ptr::null()];
-                            cb(
-                                env.ctx,
-                                2,
-                                1,
-                                idx2,
-                                std::ptr::null(),
-                                0,
-                                ints2.as_mut_ptr(),
-                                std::ptr::null_mut(),
-                                strs2.as_mut_ptr(),
-                            );
-                            ws.server_status_list.push(ints2[1] != 0);
-                        }
-                    }
-                    ws.server_changed = true;
-                    let mut flag = [c_int::from(active)];
-                    cb(
-                        env.ctx,
-                        2,
-                        2,
-                        idx,
-                        std::ptr::null(),
-                        0,
-                        flag.as_mut_ptr(),
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                    );
-                    break;
-                }
-            }
-        }
+        #[cfg(not(unix))]
+        let _ = (ws, active, server_list);
     }
 
-    unsafe fn check_tasks_and_log(
+    fn check_tasks_and_log(
         &self,
         ws: &mut SchedulerWorkState,
         is_debug: bool,
-        env: &NzbgetRsSchedulerEnv,
+        host: &dyn SchedulerHost,
     ) {
-        let Some(cb) = env.action_cb else {
-            return;
-        };
         ws.download_rate_changed = false;
         ws.pause_download_changed = false;
         ws.pause_post_process_changed = false;
@@ -788,7 +617,7 @@ impl NzbgetRsScheduler {
 
         {
             let mut task_guard = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
-            let current = current_unix_time(env);
+            let current = current_unix_time(host);
             let mut sched_tasks: Vec<Task> = task_guard
                 .iter()
                 .map(|t| Task {
@@ -802,20 +631,8 @@ impl NzbgetRsScheduler {
             let (current_offset, last_check_offset) = if sched_tasks.is_empty() {
                 (0i64, 0i64)
             } else {
-                let mut ints = [0i32; 6];
-                let mut i64s = [0i64; 1];
-                cb(
-                    env.ctx,
-                    0,
-                    0,
-                    0,
-                    std::ptr::null(),
-                    0,
-                    ints.as_mut_ptr(),
-                    i64s.as_mut_ptr(),
-                    std::ptr::null_mut(),
-                );
-                (ints[0] as i64, ints[1] as i64)
+                let st = host.state().unwrap_or_default();
+                (i64::from(st.local_time_offset), i64::from(st.last_check_offset))
             };
 
             let mut last_check = ws.last_check;
@@ -828,9 +645,9 @@ impl NzbgetRsScheduler {
                 libc_gmtime_tm,
             );
             if res.reset {
-                emit_sched_log(
-                    env,
-                    0,
+                sched_log(
+                    host,
+                    SchedLevel::Debug,
                     b"Reset scheduled tasks (detected clock change greater than 90 minutes or negative)",
                 );
                 ws.execute_process = false;
@@ -839,7 +656,7 @@ impl NzbgetRsScheduler {
                 task_guard[i].last_executed = st.last_executed;
             }
             for &idx in &res.due {
-                Self::execute_task(ws, &task_guard[idx], is_debug, env);
+                Self::execute_task(ws, &task_guard[idx], is_debug, host);
             }
             ws.last_check = last_check;
         }
@@ -850,51 +667,39 @@ impl NzbgetRsScheduler {
             || ws.pause_post_process_changed
             || ws.pause_scan_changed
         {
-            let mut ints = [0i32; 6];
-            let mut i64s = [0i64; 1];
-            cb(
-                env.ctx,
-                0,
-                0,
-                0,
-                std::ptr::null(),
-                0,
-                ints.as_mut_ptr(),
-                i64s.as_mut_ptr(),
-                std::ptr::null_mut(),
-            );
+            let st = host.state().unwrap_or_default();
             if ws.download_rate_changed {
                 let msg = format!(
                     "Scheduler: setting download rate to {} KB/s",
-                    scheduler_bytes_to_kb(ints[2])
+                    scheduler_bytes_to_kb(st.speed_limit)
                 );
-                emit_sched_log(env, 2, msg.as_bytes());
+                sched_log(host, SchedLevel::Info, msg.as_bytes());
             }
             if ws.pause_download_changed {
-                let act = scheduler_pause_action_str(ints[3] != 0);
+                let act = scheduler_pause_action_str(st.pause_download);
                 let mut msg = b"Scheduler: ".to_vec();
                 msg.extend_from_slice(&act[..act.len() - 1]);
                 msg.extend_from_slice(b" download");
-                emit_sched_log(env, 2, &msg);
+                sched_log(host, SchedLevel::Info, &msg);
             }
             if ws.pause_post_process_changed {
-                let act = scheduler_pause_action_str(ints[4] != 0);
+                let act = scheduler_pause_action_str(st.pause_post_process);
                 let mut msg = b"Scheduler: ".to_vec();
                 msg.extend_from_slice(&act[..act.len() - 1]);
                 msg.extend_from_slice(b" post-processing");
-                emit_sched_log(env, 2, &msg);
+                sched_log(host, SchedLevel::Info, &msg);
             }
             if ws.pause_scan_changed {
-                let act = scheduler_pause_action_str(ints[5] != 0);
+                let act = scheduler_pause_action_str(st.pause_scan);
                 let mut msg = b"Scheduler: ".to_vec();
                 msg.extend_from_slice(&act[..act.len() - 1]);
                 msg.extend_from_slice(b" scan");
-                emit_sched_log(env, 2, &msg);
+                sched_log(host, SchedLevel::Info, &msg);
             }
         }
+        #[cfg(unix)]
         if ws.server_changed {
-            #[cfg(unix)]
-            let handled = if let Some(pool) = crate::net::active_server_pool() {
+            if let Some(pool) = crate::net::active_server_pool() {
                 let srvs = pool.servers_snapshot();
                 for (idx, s) in srvs.iter().enumerate() {
                     let cur_active = s.active.load(Ordering::SeqCst);
@@ -905,100 +710,24 @@ impl NzbgetRsScheduler {
                             msg.extend_from_slice(&act[..act.len() - 1]);
                             msg.push(b' ');
                             msg.extend_from_slice(s.name.to_bytes());
-                            emit_sched_log(env, 2, &msg);
+                            sched_log(host, SchedLevel::Info, &msg);
                         }
                     }
                 }
                 pool.changed();
-                true
-            } else {
-                false
-            };
-            #[cfg(not(unix))]
-            let handled = false;
-            if !handled {
-                let srv_count = cb(
-                    env.ctx,
-                    2,
-                    0,
-                    0,
-                    std::ptr::null(),
-                    0,
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                );
-                for idx in 0..srv_count {
-                    let mut ints = [0i32; 2];
-                    let mut strs: [*const c_char; 1] = [std::ptr::null()];
-                    cb(
-                        env.ctx,
-                        2,
-                        1,
-                        idx,
-                        std::ptr::null(),
-                        0,
-                        ints.as_mut_ptr(),
-                        std::ptr::null_mut(),
-                        strs.as_mut_ptr(),
-                    );
-                    let cur_active = ints[1] != 0;
-                    if let Some(&prev_active) = ws.server_status_list.get(idx as usize) {
-                        if cur_active != prev_active {
-                            let act = scheduler_server_action_str(cur_active);
-                            let name_bytes = if strs[0].is_null() {
-                                &[][..]
-                            } else {
-                                CStr::from_ptr(strs[0]).to_bytes()
-                            };
-                            let mut msg = b"Scheduler: ".to_vec();
-                            msg.extend_from_slice(&act[..act.len() - 1]);
-                            msg.push(b' ');
-                            msg.extend_from_slice(name_bytes);
-                            emit_sched_log(env, 2, &msg);
-                        }
-                    }
-                }
-                cb(
-                    env.ctx,
-                    2,
-                    3,
-                    0,
-                    std::ptr::null(),
-                    0,
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                );
             }
         }
     }
 
-    unsafe fn service_work(&self, env: &NzbgetRsSchedulerEnv) {
-        let Some(cb) = env.action_cb else {
-            return;
-        };
-        let is_debug = env.a5 != 0;
-        emit_sched_log(env, 0, b"Scheduler service work");
+    /// `Scheduler::ServiceWork`.
+    pub(crate) fn service_work(&self, host: &dyn SchedulerHost, is_debug: bool) {
+        sched_log(host, SchedLevel::Debug, b"Scheduler service work");
 
-        let mut ints = [0i32; 6];
-        let mut i64s = [0i64; 1];
-        if cb(
-            env.ctx,
-            0,
-            0,
-            0,
-            std::ptr::null(),
-            0,
-            ints.as_mut_ptr(),
-            i64s.as_mut_ptr(),
-            std::ptr::null_mut(),
-        ) == 0
-        {
+        if host.state().is_none() {
             return;
         }
 
-        emit_sched_log(env, 0, b"Scheduler service work: doing work");
+        sched_log(host, SchedLevel::Debug, b"Scheduler service work: doing work");
 
         let mut ws = self.work.lock().unwrap_or_else(|e| e.into_inner());
         if !ws.first_checked {
@@ -1014,46 +743,24 @@ impl NzbgetRsScheduler {
                     }
                 });
             }
-            self.check_tasks_and_log(&mut ws, is_debug, env);
+            self.check_tasks_and_log(&mut ws, is_debug, host);
             ws.first_checked = true;
             return;
         }
 
         ws.execute_process = true;
-        self.check_tasks_and_log(&mut ws, is_debug, env);
+        self.check_tasks_and_log(&mut ws, is_debug, host);
 
         // CheckScheduledResume
-        let mut resume_ints = [0i32; 6];
-        let mut resume_i64s = [0i64; 1];
-        cb(
-            env.ctx,
-            0,
-            0,
-            0,
-            std::ptr::null(),
-            0,
-            resume_ints.as_mut_ptr(),
-            resume_i64s.as_mut_ptr(),
-            std::ptr::null_mut(),
-        );
-        let now_resume = current_unix_time(env);
-        if scheduler_should_autoresume(resume_i64s[0], now_resume) {
-            emit_sched_log(env, 2, b"Autoresume");
-            cb(
-                env.ctx,
-                1,
-                4,
-                0,
-                std::ptr::null(),
-                0,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            );
+        let resume_time = host.state().unwrap_or_default().resume_time;
+        let now_resume = current_unix_time(host);
+        if scheduler_should_autoresume(resume_time, now_resume) {
+            sched_log(host, SchedLevel::Info, b"Autoresume");
+            host.edit(SchedEdit::Autoresume);
         }
 
         // ScheduleNextWork
-        let now_next = current_unix_time(env);
+        let now_next = current_unix_time(host);
         self.service_interval.store(
             scheduler_calc_next_work_interval(now_next),
             Ordering::SeqCst,
@@ -1061,118 +768,76 @@ impl NzbgetRsScheduler {
     }
 
     #[cfg(unix)]
-    pub(crate) unsafe fn service_work_active(&self) {
-        unsafe extern "C" fn active_log_cb(_ctx: *mut c_void, level: c_int, msg: *const c_char) {
-            let bytes = if msg.is_null() {
-                &[][..]
-            } else {
-                unsafe { CStr::from_ptr(msg).to_bytes() }
-            };
-            let kind = match level {
-                0 => 3,
-                2 => 0,
-                4 => 1,
-                _ => return,
-            };
-            crate::log::log_active_bytes(kind, bytes);
-        }
+    pub(crate) fn service_work_active(&self) {
+        self.service_work(&ActiveSchedulerHost, crate::log::active_debug_build());
+    }
+}
 
-        unsafe extern "C" fn active_action_cb(
-            _ctx: *mut c_void,
-            sub: c_int,
-            a1: c_int,
-            a2: c_int,
-            ptrs: *const *const c_char,
-            len: usize,
-            ints: *mut c_int,
-            i64s: *mut i64,
-            _strs: *mut *const c_char,
-        ) -> c_int {
-            match sub {
-                0 => {
-                    if !crate::ffi::is_queue_loaded() {
-                        return 0;
-                    }
-                    let Some(ws) = crate::ffi::active_workstate() else {
-                        return 0;
-                    };
-                    let out = unsafe { std::slice::from_raw_parts_mut(ints, 6) };
-                    let lto = ws.local_time_offset();
-                    out[0] = lto;
-                    out[1] = lto;
-                    out[2] = ws.speed_limit();
-                    out[3] = c_int::from(ws.pause_download());
-                    out[4] = c_int::from(ws.pause_post_process());
-                    out[5] = c_int::from(ws.pause_scan());
-                    unsafe {
-                        *i64s = ws.resume_time();
-                    }
-                    1
+fn sched_log(host: &dyn SchedulerHost, level: SchedLevel, msg: &[u8]) {
+    host.log(level, until_nul(msg));
+}
+
+/// The daemon's work state, feed coordinator and process runner.
+#[cfg(unix)]
+struct ActiveSchedulerHost;
+
+#[cfg(unix)]
+impl SchedulerHost for ActiveSchedulerHost {
+    fn log(&self, level: SchedLevel, msg: &[u8]) {
+        let kind = match level {
+            SchedLevel::Debug => 3,
+            SchedLevel::Info => 0,
+            SchedLevel::Error => 1,
+        };
+        crate::log::log_active_bytes(kind, msg);
+    }
+
+    fn state(&self) -> Option<SchedState> {
+        if !crate::ffi::is_queue_loaded() {
+            return None;
+        }
+        let ws = crate::ffi::active_workstate()?;
+        let lto = ws.local_time_offset();
+        Some(SchedState {
+            local_time_offset: lto,
+            last_check_offset: lto,
+            speed_limit: ws.speed_limit(),
+            pause_download: ws.pause_download(),
+            pause_post_process: ws.pause_post_process(),
+            pause_scan: ws.pause_scan(),
+            resume_time: ws.resume_time(),
+        })
+    }
+
+    fn edit(&self, edit: SchedEdit) {
+        if let Some(ws) = crate::ffi::active_workstate() {
+            match edit {
+                SchedEdit::SpeedLimit(limit) => ws.set_speed_limit(limit),
+                SchedEdit::PauseDownload(paused) => ws.set_pause_download(paused),
+                SchedEdit::PausePostProcess(paused) => ws.set_pause_post_process(paused),
+                SchedEdit::PauseScan(paused) => ws.set_pause_scan(paused),
+                SchedEdit::Autoresume => {
+                    ws.set_resume_time(0);
+                    ws.set_pause_download(false);
+                    ws.set_pause_post_process(false);
+                    ws.set_pause_scan(false);
                 }
-                1 => {
-                    if let Some(ws) = crate::ffi::active_workstate() {
-                        match a1 {
-                            0 => ws.set_speed_limit(a2),
-                            1 => ws.set_pause_download(a2 != 0),
-                            2 => ws.set_pause_post_process(a2 != 0),
-                            3 => ws.set_pause_scan(a2 != 0),
-                            4 => {
-                                ws.set_resume_time(0);
-                                ws.set_pause_download(false);
-                                ws.set_pause_post_process(false);
-                                ws.set_pause_scan(false);
-                            }
-                            _ => {}
-                        }
-                    }
-                    1
-                }
-                3 => {
-                    if !ptrs.is_null() {
-                        let p0 = unsafe { *ptrs };
-                        if !p0.is_null() {
-                            if let Some(fc) = crate::feed::active_feed_coord() {
-                                fc.fetch_feed_list_bytes(unsafe { CStr::from_ptr(p0).to_bytes() });
-                            }
-                        }
-                    }
-                    1
-                }
-                4 => {
-                    // ptrs[0] = task param, ptrs[1..] = program and arguments
-                    if a1 != 0 && !ptrs.is_null() && len > 1 {
-                        unsafe {
-                            crate::procrun::scheduler_process_start_active(
-                                a2,
-                                ptrs.add(1),
-                                len - 1,
-                            );
-                        }
-                    }
-                    1
-                }
-                6 => {
-                    unsafe {
-                        *i64s = service_coord_now();
-                    }
-                    1
-                }
-                _ => 0,
             }
         }
+    }
 
-        let env = NzbgetRsSchedulerEnv {
-            ctx: std::ptr::null_mut(),
-            a1: 0,
-            a2: 0,
-            a3: 0,
-            a4: 0,
-            a5: c_int::from(crate::log::active_debug_build()),
-            s1: std::ptr::null(),
-            log_cb: Some(active_log_cb),
-            action_cb: Some(active_action_cb),
-        };
-        self.service_work(&env);
+    fn fetch_feeds(&self, feed_list: &[u8]) {
+        if let Some(fc) = crate::feed::active_feed_coord() {
+            fc.fetch_feed_list_bytes(feed_list);
+        }
+    }
+
+    fn start_process(&self, task_id: c_int, words: &[&[u8]]) {
+        crate::procrun::scheduler_process_start_active(task_id, words);
+    }
+
+    fn now(&self) -> i64 {
+        service_coord_now()
     }
 }
 
@@ -1269,70 +934,6 @@ pub(crate) fn shutdown_daemon_scheduler() {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn nzbget_rs_scheduler_new() -> *mut NzbgetRsScheduler {
-    let arc = std::sync::Arc::new(NzbgetRsScheduler::new());
-    if let Ok(mut g) = ACTIVE_SCHEDULER.write() {
-        *g = Some(std::sync::Arc::downgrade(&arc));
-    }
-    std::sync::Arc::into_raw(arc).cast_mut()
-}
-
-#[cfg(test)]
-pub(crate) unsafe fn nzbget_rs_scheduler_free(h: *mut NzbgetRsScheduler) {
-    if !h.is_null() {
-        let arc = std::sync::Arc::from_raw(h.cast_const());
-        let wk = std::sync::Arc::downgrade(&arc);
-        if let Ok(mut g) = ACTIVE_SCHEDULER.write() {
-            if g.as_ref()
-                .is_some_and(|cur| std::sync::Weak::ptr_eq(cur, &wk))
-            {
-                *g = None;
-            }
-        }
-        drop(arc);
-    }
-}
-
-/// Executes a `Scheduler` operation:
-/// - `op = 0` (`AddTask`): adds `(a1=id, a2=hours, a3=minutes, a4=weekDaysBits, a5=command, s1=param)`.
-/// - `op = 1` (`ServiceInterval`): returns `m_serviceInterval`.
-/// - `op = 2` (`ServiceWork`): executes `Scheduler::ServiceWork` (`env.a5 != 0` = debug build).
-#[cfg(test)]
-pub(crate) unsafe fn nzbget_rs_scheduler_exec(
-    h: *mut NzbgetRsScheduler,
-    op: c_int,
-    env: *const NzbgetRsSchedulerEnv,
-) -> c_int {
-    let Some(sched) = h.as_ref() else {
-        return 0;
-    };
-    match op {
-        0 => {
-            let Some(env_ref) = env.as_ref() else {
-                return 0;
-            };
-            let param = if env_ref.s1.is_null() {
-                &[][..]
-            } else {
-                CStr::from_ptr(env_ref.s1).to_bytes()
-            };
-            sched.add_task(
-                env_ref.a1, env_ref.a2, env_ref.a3, env_ref.a4, env_ref.a5, param,
-            );
-            1
-        }
-        1 => sched.service_interval.load(Ordering::SeqCst),
-        2 => {
-            if let Some(env_ref) = env.as_ref() {
-                sched.service_work(env_ref);
-            }
-            1
-        }
-        _ => 0,
-    }
-}
-
 struct ServiceSlot {
     kind: u8,
     last_work: i64,
@@ -1422,7 +1023,7 @@ fn daemon_service_work(kind: u8) {
         0 => crate::lifecycle::disk_service_work_active(),
         1 => {
             if let Some(s) = active_scheduler() {
-                unsafe { s.service_work_active() };
+                s.service_work_active();
             }
         }
         2 => crate::twin::service_work_active(),
@@ -1726,112 +1327,60 @@ mod tests {
     }
 
     #[test]
-    fn scheduler_exec_startup_health_and_autoresume() {
-        struct MockCtx {
-            now: i64,
-            resume_time: i64,
-            speed_limit: i32,
-            autoresumed: bool,
-            emitted_tasks: Vec<[i32; 4]>,
+    fn scheduler_service_work_startup_health_and_autoresume() {
+        use std::cell::Cell;
+        #[derive(Default)]
+        struct MockHost {
+            now: Cell<i64>,
+            resume_time: Cell<i64>,
+            speed_limit: Cell<i32>,
+            autoresumed: Cell<bool>,
         }
-        unsafe extern "C" fn mock_action(
-            raw: *mut c_void,
-            sub: c_int,
-            a1: c_int,
-            a2: c_int,
-            _argv: *const *const c_char,
-            _argc: usize,
-            ints: *mut c_int,
-            i64s: *mut i64,
-            _strs: *mut *const c_char,
-        ) -> c_int {
-            let ctx = &mut *(raw as *mut MockCtx);
-            match sub {
-                0 => {
-                    let s = std::slice::from_raw_parts_mut(ints, 6);
-                    s[0] = 0;
-                    s[1] = 0;
-                    s[2] = 0;
-                    s[3] = 0;
-                    s[4] = 0;
-                    s[5] = 0;
-                    *i64s = ctx.resume_time;
-                    1
-                }
-                1 => {
-                    if a1 == 0 {
-                        ctx.speed_limit = a2;
-                    } else if a1 == 4 {
-                        ctx.autoresumed = true;
-                        ctx.resume_time = 0;
+        impl SchedulerHost for MockHost {
+            fn state(&self) -> Option<SchedState> {
+                Some(SchedState {
+                    resume_time: self.resume_time.get(),
+                    ..SchedState::default()
+                })
+            }
+            fn edit(&self, edit: SchedEdit) {
+                match edit {
+                    SchedEdit::SpeedLimit(limit) => self.speed_limit.set(limit),
+                    SchedEdit::Autoresume => {
+                        self.autoresumed.set(true);
+                        self.resume_time.set(0);
                     }
-                    1
+                    _ => {}
                 }
-                2 => 0,
-                5 => {
-                    let v = std::slice::from_raw_parts(ints, 4);
-                    ctx.emitted_tasks.push([v[0], v[1], v[2], v[3]]);
-                    1
-                }
-                6 => {
-                    *i64s = ctx.now;
-                    1
-                }
-                _ => 0,
+            }
+            fn now(&self) -> i64 {
+                self.now.get()
             }
         }
 
-        unsafe {
-            let h = nzbget_rs_scheduler_new();
-            assert!(!h.is_null());
-            assert_eq!(nzbget_rs_scheduler_exec(h, 1, std::ptr::null()), 1);
+        let sched = NzbgetRsScheduler::new();
+        assert_eq!(sched.service_interval_val(), 1);
 
-            let mut m = MockCtx {
-                now: 1_791_635_696,
-                resume_time: 1_791_635_600,
-                speed_limit: 0,
-                autoresumed: false,
-                emitted_tasks: Vec::new(),
-            };
-            let param = b"512\0";
-            let mut env = NzbgetRsSchedulerEnv {
-                ctx: (&mut m as *mut MockCtx).cast(),
-                a1: 7,
-                a2: -1,
-                a3: 0,
-                a4: 0,
-                a5: 4,
-                s1: param.as_ptr() as *const c_char,
-                log_cb: None,
-                action_cb: Some(mock_action),
-            };
-            assert_eq!(nzbget_rs_scheduler_exec(h, 0, &env), 1);
-            env.a1 = 8;
-            env.a2 = 12;
-            env.a3 = 40;
-            env.a4 = 0x7f;
-            env.a5 = 0;
-            env.s1 = std::ptr::null();
-            assert_eq!(nzbget_rs_scheduler_exec(h, 0, &env), 1);
+        let m = MockHost::default();
+        m.now.set(1_791_635_696);
+        m.resume_time.set(1_791_635_600);
+        sched.add_task(7, -1, 0, 0, 4, b"512");
+        sched.add_task(8, 12, 40, 0x7f, 0, b"");
 
-            let tasks_out: Vec<[i32; 4]> = (*h)
-                .collect_health_tasks()
-                .into_iter()
-                .map(|t| [t.id, t.hours, t.minutes, t.week_days_bits])
-                .collect();
-            assert_eq!(tasks_out, vec![[7, -1, 0, 0], [8, 12, 40, 0x7f]]);
+        let tasks_out: Vec<[i32; 4]> = sched
+            .collect_health_tasks()
+            .into_iter()
+            .map(|t| [t.id, t.hours, t.minutes, t.week_days_bits])
+            .collect();
+        assert_eq!(tasks_out, vec![[7, -1, 0, 0], [8, 12, 40, 0x7f]]);
 
-            env.a5 = 0;
-            assert_eq!(nzbget_rs_scheduler_exec(h, 2, &env), 1);
-            assert_eq!(m.speed_limit, 512 * 1024);
-            assert!(!m.autoresumed);
+        sched.service_work(&m, false);
+        assert_eq!(m.speed_limit.get(), 512 * 1024);
+        assert!(!m.autoresumed.get());
 
-            m.now += 10;
-            assert_eq!(nzbget_rs_scheduler_exec(h, 2, &env), 1);
-            assert!(m.autoresumed);
-            assert!(nzbget_rs_scheduler_exec(h, 1, std::ptr::null()) > 0);
-
-            nzbget_rs_scheduler_free(h);
-        }
+        m.now.set(m.now.get() + 10);
+        sched.service_work(&m, false);
+        assert!(m.autoresumed.get());
+        assert!(sched.service_interval_val() > 0);
     }
 }

@@ -128,14 +128,7 @@ pub(crate) fn c_buf(bytes: &[u8]) -> Vec<u8> {
     v
 }
 
-#[inline]
-pub(crate) unsafe fn opt_bytes(p: *const c_char) -> Vec<u8> {
-    if p.is_null() {
-        Vec::new()
-    } else {
-        CStr::from_ptr(p).to_bytes().to_vec()
-    }
-}
+
 
 #[inline]
 fn trunc_bytes(mut v: Vec<u8>, max_len: usize) -> Vec<u8> {
@@ -1124,17 +1117,11 @@ fn run_background_script_job(job: BackgroundScriptJob, host: &'static dyn Script
     crate::ffi::stop_ssl_thread();
 }
 /// Starts the scheduler `Process` command (`words` = program and its arguments).
-pub(crate) unsafe fn scheduler_process_start_active(
-    task_id: c_int,
-    words: *const *const c_char,
-    word_count: usize,
-) {
-    let mut argv = Vec::with_capacity(word_count);
-    if !words.is_null() {
-        for i in 0..word_count {
-            argv.push(crate::entrypoint::os_string_from_bytes(&opt_bytes(*words.add(i))));
-        }
-    }
+pub(crate) fn scheduler_process_start_active(task_id: c_int, words: &[&[u8]]) {
+    let argv = words
+        .iter()
+        .map(|w| crate::entrypoint::os_string_from_bytes(w))
+        .collect();
     spawn_background_job(
         BackgroundScriptJob::SchedulerProcess {
             task_id,

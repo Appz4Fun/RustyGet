@@ -56,6 +56,15 @@ fn stream_fetch_worker_count(primary_connections: i32) -> i32 {
     (primary_connections / 4).clamp(4, 8)
 }
 
+/// Fetch workers of a live repair that borrows a dead volume direct unpack waits on, while the
+/// download still runs. The workers take their connections from the same pool as the download,
+/// so 8 of them against its 60 got an eighth of the pipe: a 264 MB borrow ran at 1.5 MB/s and
+/// finished 40 s after the download. Extraction needs the borrowed bytes before anything the
+/// download fetches later, so the borrow takes up to half the connections.
+fn live_borrow_fetch_worker_count(primary_connections: i32) -> i32 {
+    (primary_connections / 2).clamp(stream_fetch_worker_count(primary_connections), 30)
+}
+
 /// Fetch workers of a live repair that borrows no dead volume: fewer than after the download,
 /// so the download keeps most connections, but more than one. Direct unpack patches each hole
 /// as soon as it is borrowed, so one article at a time left holes to be filled at the end.
@@ -1125,7 +1134,13 @@ impl NzbgetRsStreamRepairCtrl {
     ) {
         self.batch_fetcher.set_worker_count(if self.live_mode {
             if self.parallel_live_fetch.load(Ordering::SeqCst) {
-                stream_fetch_worker_count(opts.primary_connections)
+                // Half the connections only while a dead volume is left to borrow: a later
+                // pass that patches a few holes keeps to the usual count.
+                if left_to_borrow.iter().any(|b| *b) {
+                    live_borrow_fetch_worker_count(opts.primary_connections)
+                } else {
+                    stream_fetch_worker_count(opts.primary_connections)
+                }
             } else {
                 live_hole_fetch_worker_count(opts.primary_connections)
             }
@@ -2466,7 +2481,7 @@ impl NzbgetRsStreamRepairCtrl {
                 if borrowing {
                     self.parallel_live_fetch.store(true, Ordering::SeqCst);
                     self.batch_fetcher
-                        .set_worker_count(stream_fetch_worker_count(opts.primary_connections));
+                        .set_worker_count(live_borrow_fetch_worker_count(opts.primary_connections));
                 }
                 self.refresh_live_names(q, &mut targets, &mut member_names);
                 self.exec_cross_pack_repair(

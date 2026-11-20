@@ -6204,6 +6204,44 @@ impl RepairSetData {
     /// and `StreamRepairController::PatchFromDonorSetEncrypted`).
     /// Returns `(written, credit_recovery)`.
     #[allow(clippy::too_many_arguments)]
+    /// The set's inner holes split into runs that start in the same archive member, in order:
+    /// one run per dead volume (or other damaged volume) of the set.
+    pub fn holes_by_first_member(&self) -> Vec<Vec<NzbgetRsByteRange>> {
+        let Some(map) = self.map.as_ref() else {
+            return vec![self.inner_holes.clone()];
+        };
+        let mut groups: Vec<Vec<NzbgetRsByteRange>> = Vec::new();
+        let mut last: Option<i32> = None;
+        for &hole in &self.inner_holes {
+            // A hole across consecutive dead volumes is split at each member, so every volume
+            // is handed over on its own as soon as it is in.
+            let pieces = map.map_from_inner(hole);
+            let mut at = hole.offset;
+            let end = range_end(hole);
+            for (k, p) in pieces.iter().enumerate() {
+                let len = if k + 1 == pieces.len() { end - at } else { p.size.min(end - at) };
+                if len <= 0 {
+                    continue;
+                }
+                let member = Some(p.member_index);
+                if groups.is_empty() || member != last {
+                    groups.push(Vec::new());
+                }
+                last = member;
+                groups.last_mut().expect("pushed").push(NzbgetRsByteRange { offset: at, size: len });
+                at += len;
+            }
+            if pieces.is_empty() {
+                if groups.is_empty() || last.is_some() {
+                    groups.push(Vec::new());
+                }
+                last = None;
+                groups.last_mut().expect("pushed").push(hole);
+            }
+        }
+        groups
+    }
+
     pub fn patch_from_donor_set(
         &mut self,
         donor_map: &ContentMap,
@@ -6231,10 +6269,11 @@ impl RepairSetData {
         }
 
         // One read's articles are fetched as one batch, so the chunk sets how many are in
-        // flight at once: 16 MB is about 22 articles, more than the fetch workers (at most
-        // 8), where 4 MB (6 articles) left most of them idle and borrows ran at 2-3 MB/s.
-        // It stays small enough that a stop (a live pass yielding) is seen within seconds.
-        const FULL_CHUNK: i64 = 16 * 1024 * 1024;
+        // flight at once: 32 MB is about 45 articles, more than the fetch workers (up to 30
+        // for a live borrow), where 4 MB (6 articles) left most of them idle and borrows ran
+        // at 2-3 MB/s. It stays small enough that a stop (a live pass yielding) is seen
+        // within seconds.
+        const FULL_CHUNK: i64 = 32 * 1024 * 1024;
         const MIN_CHUNK: i64 = 64 * 1024;
         const MAX_FAILED_PIECES: i32 = 8;
 
@@ -10082,23 +10121,59 @@ impl CrossPackRepairSession {
                 donor_sources.take_served_parts();
 
                 let donor_info_str = String::from_utf8_lossy(donor_info_name);
-                let (written, credit_recovery) = {
-                    let mut target_adapter = DiskTargetFileSetAdapter {
-                        files: &mut self.target_files,
-                        members: &self.set_members,
-                        env: &env_cell,
-                    };
-                    self.repair_sets[repair_set_idx].patch_from_donor_set(
-                        donor_map,
-                        &donor_sources,
-                        &mut target_adapter,
-                        &mut self.target_holes,
-                        &self.member_targets,
-                        &self.set_members,
-                        &donor_info_str,
-                    )
+                // With dead volumes to fill, one volume at a time in archive order: each is
+                // handed to direct unpack complete as soon as its bytes are in (and the rest
+                // re-offered with what is left), so extraction patches it while the next one is
+                // borrowed instead of waiting for the whole borrow.
+                // Encrypted patching checks predecessor ciphertext against the full hole
+                // set, so encrypted sets keep it whole.
+                let encrypted = self.repair_sets[repair_set_idx]
+                    .map
+                    .as_ref()
+                    .is_some_and(ContentMap::encrypted);
+                let groups = if self.dead_fills.is_empty() || encrypted {
+                    vec![self.repair_sets[repair_set_idx].inner_holes.clone()]
+                } else {
+                    self.repair_sets[repair_set_idx].holes_by_first_member()
                 };
-                env_cell.borrow_mut().sync_target_holes(&self.target_holes);
+                let (mut written, mut credit_recovery) = (0i64, false);
+                let mut left_over: Vec<NzbgetRsByteRange> = Vec::new();
+                for (g, group) in groups.into_iter().enumerate() {
+                    if g > 0 && env_cell.borrow_mut().is_stopped() {
+                        left_over.extend(group);
+                        continue;
+                    }
+                    self.repair_sets[repair_set_idx].inner_holes = group;
+                    let (w, credit) = {
+                        let mut target_adapter = DiskTargetFileSetAdapter {
+                            files: &mut self.target_files,
+                            members: &self.set_members,
+                            env: &env_cell,
+                        };
+                        self.repair_sets[repair_set_idx].patch_from_donor_set(
+                            donor_map,
+                            &donor_sources,
+                            &mut target_adapter,
+                            &mut self.target_holes,
+                            &self.member_targets,
+                            &self.set_members,
+                            &donor_info_str,
+                        )
+                    };
+                    written += w;
+                    credit_recovery |= credit;
+                    left_over.extend(std::mem::take(
+                        &mut self.repair_sets[repair_set_idx].inner_holes,
+                    ));
+                    env_cell.borrow_mut().sync_target_holes(&self.target_holes);
+                    // Also for a pass that is stopping (a volume went dead meanwhile): the
+                    // re-offer records what was borrowed, so the next pass resumes from there
+                    // instead of from the first byte.
+                    if w > 0 && !self.dead_fills.is_empty() {
+                        self.finish_dead_fills(&env_cell);
+                    }
+                }
+                self.repair_sets[repair_set_idx].inner_holes = left_over;
                 if credit_recovery && written > 0 {
                     let recovered_parts = donor_sources.take_served_parts();
                     env_cell.borrow_mut().add_recovered(written, 0);
@@ -12100,6 +12175,33 @@ pub fn process_m1_donor(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn holes_across_consecutive_dead_volumes_are_handed_over_one_volume_at_a_time() {
+        let mut map = ContentMap::default();
+        for (m, at) in [(0, 0i64), (1, 100), (2, 200)] {
+            map.runs_mut().push(NzbgetRsContentRun {
+                inner_offset: at,
+                member_index: m,
+                member_offset: 10,
+                size: 100,
+            });
+        }
+        let r = |offset, size| NzbgetRsByteRange { offset, size };
+        let data = RepairSetData {
+            set: MemberSet { format: MemberFormat::Rar, members: vec![0, 1, 2] },
+            map: Some(map),
+            // One hole over volumes 2 and 3 (coalesced), one inside volume 1.
+            inner_holes: vec![r(20, 10), r(150, 120)],
+            original_inner_holes: Vec::new(),
+            skip_reason: String::new(),
+            want: None,
+        };
+        assert_eq!(
+            data.holes_by_first_member(),
+            vec![vec![r(20, 10)], vec![r(150, 50)], vec![r(200, 70)]]
+        );
+    }
 
     fn r(offset: i64, size: i64) -> NzbgetRsByteRange {
         NzbgetRsByteRange { offset, size }

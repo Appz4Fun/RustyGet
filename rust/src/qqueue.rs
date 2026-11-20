@@ -609,18 +609,14 @@ pub unsafe fn nzb_message(nzb: usize, kind: i32, add: bool, msg: &[u8]) {
         crate::options::nzbget_rs_options_scalars(crate::options::nzbget_rs_options_active())
             .as_ref()
     };
-    let ints = [now() as c_int, opts.map_or(0, |o| o.log_buffer)];
     let kept = std::ffi::CString::new(text).unwrap_or_default();
-    unsafe {
-        crate::qnzb::nzbget_rs_nzb_msgs(
-            nzb as *const NzbScalars,
-            0,
-            kind,
-            std::ptr::null(),
-            kept.as_ptr(),
-            ints.as_ptr(),
-        )
-    };
+    crate::qnzb::add_message(
+        crate::queuesubsys_host::NzbRef::from_addr(nzb),
+        kind,
+        kept,
+        i64::from(now() as c_int),
+        opts.map_or(0, |o| o.log_buffer),
+    );
 }
 
 /// Starts a collection's live-repair job.

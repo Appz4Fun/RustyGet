@@ -229,7 +229,7 @@ struct NzbData {
     texts: Mutex<[Option<CString>; TEXTS]>,
     coll: Mutex<Coll>,
     files: Mutex<Files>,
-    // (id, kind, time, text), oldest first (see `nzbget_rs_nzb_msgs`)
+    // (id, kind, time, text), oldest first (see [`log_messages`])
     msgs: Mutex<std::collections::VecDeque<(u32, i32, i64, CString)>>,
     // host handles, indexed by [`Slot`]
     slots: [std::sync::atomic::AtomicUsize; SLOTS],
@@ -660,12 +660,17 @@ pub(crate) fn copy_cached_messages(dest: NzbRef, src: NzbRef) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as c_int);
-    let lim = [now, log_buffer];
-    let (p, p2) = (
-        dest.addr() as *const NzbScalars,
-        src.addr() as *const NzbScalars,
-    );
-    unsafe { nzbget_rs_nzb_msgs(p, 3, 0, p2, std::ptr::null(), lim.as_ptr()) };
+    if dest == src {
+        return;
+    }
+    let copied: Vec<(i32, CString)> = {
+        let o = data(scalars(src))
+            .msgs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        o.iter().map(|m| (m.1, m.3.clone())).collect()
+    };
+    log_messages(scalars(dest), i64::from(now), log_buffer, copied);
 }
 
 /// An integer or flag field of a download (flags take 0 or 1).
@@ -3263,61 +3268,38 @@ pub(crate) fn nzb_snapshot(
     }
 }
 
-/// A collection's message log. The caller prints; this keeps the messages.
-///  0 add kind a2, text s1, time ints[0]; keep at most ints[1] when > 0;
-///    the id comes from the collection's idMessageGen; returns the count
-///  1 count; 2 clear;
-///  3 add p2's messages (fresh ids, time now in ints[0], limit ints[1]).
-/// Read them with [`cached_messages`].
-/// cachedMessageCount follows every change.
-pub unsafe extern "C" fn nzbget_rs_nzb_msgs(
+/// Appends `new` (kind, text) messages to collection `p`'s log at `time`,
+/// with ids from its idMessageGen, keeping at most `limit` when > 0.
+/// cachedMessageCount follows. Returns the count.
+fn log_messages(
     p: *const NzbScalars,
-    op: c_int,
-    a2: c_int,
-    p2: *const NzbScalars,
-    s1: *const c_char,
-    ints: *const c_int,
-) -> i64 {
-    let copied: Vec<(i32, CString)> = if op == 3 && !p2.is_null() && p2 != p {
-        let o = data(p2).msgs.lock().unwrap_or_else(|e| e.into_inner());
-        o.iter().map(|m| (m.1, m.3.clone())).collect()
-    } else {
-        Vec::new()
-    };
+    time: i64,
+    limit: i32,
+    new: impl IntoIterator<Item = (i32, CString)>,
+) -> usize {
     let mut m = data(p).msgs.lock().unwrap_or_else(|e| e.into_inner());
     // the scalars are C++-owned plain memory; these two fields change only
     // under this lock
     let sp = p.cast_mut();
-    let int = |k: usize| unsafe { *ints.add(k) };
-    let push = |m: &mut std::collections::VecDeque<_>, kind: i32, text: CString| unsafe {
-        let id = (*sp).idMessageGen.wrapping_add(1);
-        (*sp).idMessageGen = id;
-        m.push_back((id as u32, kind, i64::from(int(0)), text));
-        let limit = int(1);
+    for (kind, text) in new {
+        let id = unsafe { (*sp).idMessageGen.wrapping_add(1) };
+        unsafe { (*sp).idMessageGen = id };
+        m.push_back((id as u32, kind, time, text));
         while limit > 0 && m.len() > limit as usize {
             m.pop_front();
         }
-    };
-    let ret = match op {
-        0 => {
-            push(&mut m, a2, owned(s1));
-            m.len() as i64
-        }
-        1 => return m.len() as i64,
-        2 => {
-            m.clear();
-            0
-        }
-        3 => {
-            for (kind, text) in copied {
-                push(&mut m, kind, text);
-            }
-            0
-        }
-        _ => return 0,
-    };
+    }
     unsafe { (*sp).cachedMessageCount = m.len() as i32 };
-    ret
+    m.len()
+}
+
+/// Keeps message `text` of `kind` in a collection's log (the caller
+/// prints it), at `time`, keeping at most `limit` when > 0. Returns the
+/// count. Read them with [`cached_messages`].
+pub(crate) fn add_message(nzb: NzbRef, kind: i32, text: CString, time: i64, limit: i32) -> usize {
+    nzb_data(nzb).map_or(0, |_| {
+        log_messages(scalars(nzb), time, limit, [(kind, text)])
+    })
 }
 
 #[cfg(test)]
@@ -3576,19 +3558,13 @@ mod tests {
     fn message_log() {
         let p = nzbget_rs_nzb_scalars_new();
         let q = nzbget_rs_nzb_scalars_new();
-        let np: *const NzbScalars = std::ptr::null();
-        let ns: *const c_char = std::ptr::null();
+        let (pn, qn) = (NzbRef::from_addr(p as usize), NzbRef::from_addr(q as usize));
         unsafe {
-            let lim = [100, 2];
-            nzbget_rs_nzb_msgs(p, 0, 0, np, c"one".as_ptr(), lim.as_ptr());
-            nzbget_rs_nzb_msgs(p, 0, 1, np, c"two".as_ptr(), lim.as_ptr());
-            assert_eq!(
-                nzbget_rs_nzb_msgs(p, 0, 2, np, c"three".as_ptr(), lim.as_ptr()),
-                2
-            );
+            add_message(pn, 0, c"one".to_owned(), 100, 2);
+            add_message(pn, 1, c"two".to_owned(), 100, 2);
+            assert_eq!(add_message(pn, 2, c"three".to_owned(), 100, 2), 2);
             assert_eq!((*p).cachedMessageCount, 2);
             assert_eq!((*p).idMessageGen, 3);
-            let pn = NzbRef::from_addr(p as usize);
             let got: Vec<(u32, i32, Vec<u8>)> = cached_messages(pn, MessageRange::Last(10))
                 .into_iter()
                 .map(|m| (m.id, m.kind, m.text.into_bytes()))
@@ -3600,12 +3576,13 @@ mod tests {
             assert_eq!(cached_messages(pn, MessageRange::FromId(3)).len(), 1);
             assert_eq!(cached_messages(pn, MessageRange::FromId(1)).len(), 2);
             assert_eq!(cached_messages(pn, MessageRange::Last(1))[0].id, 3);
-            let nolimit = [100, 0];
-            nzbget_rs_nzb_msgs(q, 3, 0, p, ns, nolimit.as_ptr());
-            assert_eq!(nzbget_rs_nzb_msgs(q, 1, 0, np, ns, nolimit.as_ptr()), 2);
+            // copies get fresh ids; a log never copies onto itself
+            copy_cached_messages(qn, pn);
+            assert_eq!((*q).cachedMessageCount, 2);
             assert_eq!((*q).idMessageGen, 2);
-            nzbget_rs_nzb_msgs(p, 2, 0, np, ns, nolimit.as_ptr());
-            assert_eq!((*p).cachedMessageCount, 0);
+            copy_cached_messages(pn, pn);
+            assert_eq!((*p).cachedMessageCount, 2);
+            assert_eq!(add_message(NzbRef::NONE, 0, c"x".to_owned(), 0, 0), 0);
             nzbget_rs_nzb_scalars_free(p);
             nzbget_rs_nzb_scalars_free(q);
         }

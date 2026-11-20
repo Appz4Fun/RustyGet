@@ -2874,6 +2874,12 @@ pub(crate) fn take_volume_end_rebuilt(nzb_id: i32) -> bool {
     volume_ends_rebuilt().remove(&nzb_id)
 }
 
+/// True when a volume end of download `nzb_id` was rebuilt from a sibling volume, without
+/// forgetting it (see [`take_volume_end_rebuilt`]).
+pub(crate) fn volume_end_was_rebuilt(nzb_id: i32) -> bool {
+    volume_ends_rebuilt().contains(&nzb_id)
+}
+
 /// How many dead volumes of download `nzb_id` direct unpack read borrowed, without forgetting
 /// it (see [`take_dead_volumes_borrowed`]).
 pub(crate) fn dead_volumes_borrowed_count(nzb_id: i32) -> usize {

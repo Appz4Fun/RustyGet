@@ -4166,6 +4166,16 @@ pub type DiskApplyFileFn = unsafe extern "C" fn(
     stats: *const NzbgetRsDiskServerStat,
     stats_len: usize,
 ) -> c_int;
+/// Nzb and file ids still referenced by the queue and history; disk-state
+/// files for any other id are orphans.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct LiveIds {
+    pub nzb_ids: Vec<i32>,
+    pub file_ids: Vec<i32>,
+}
+
+pub type DiskLiveIdsFn = fn(ctx: *mut c_void) -> LiveIds;
+
 pub type DiskAuxSinkFn = unsafe extern "C" fn(
     sink_ctx: *mut c_void,
     kind: c_int,
@@ -4217,6 +4227,7 @@ pub struct NzbgetRsDiskStateEnv {
     pub export_file_cb: Option<DiskExportFileFn>,
     pub apply_file_cb: Option<DiskApplyFileFn>,
     pub aux_cb: Option<DiskAuxFn>,
+    pub live_ids_cb: Option<DiskLiveIdsFn>,
 }
 
 fn bytes_to_cstring_trunc(raw: &[u8]) -> std::ffi::CString {
@@ -5731,49 +5742,9 @@ unsafe fn load_all_file_infos_op(env: &NzbgetRsDiskStateEnv, qdir: &[u8], sep: u
 }
 
 unsafe fn cleanup_queue_dir_op(env: &NzbgetRsDiskStateEnv, qdir: &[u8], sep: u8) {
-    struct IdLists {
-        nzb_ids: Vec<i32>,
-        file_ids: Vec<i32>,
-    }
-    unsafe extern "C" fn collect_sink(
-        sink_ctx: *mut c_void,
-        kind: c_int,
-        id: c_int,
-        _a2: c_int,
-        _u1: u32,
-        _s1: *const c_char,
-        _srv: *const NzbgetRsServerMatchItem,
-        _srv_len: usize,
-        _vol: *const c_void,
-        _vol_len: usize,
-    ) {
-        let lists = unsafe { &mut *sink_ctx.cast::<IdLists>() };
-        if kind != 0 {
-            lists.nzb_ids.push(id);
-        } else {
-            lists.file_ids.push(id);
-        }
-    }
-    let mut lists = IdLists {
-        nzb_ids: Vec::new(),
-        file_ids: Vec::new(),
-    };
-    if let Some(aux) = env.aux_cb {
-        unsafe {
-            aux(
-                env.ctx,
-                0,
-                0,
-                0,
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null(),
-                (&mut lists as *mut IdLists).cast(),
-                Some(collect_sink),
-            );
-        }
-    }
+    let mut lists = env
+        .live_ids_cb
+        .map_or_else(LiveIds::default, |cb| cb(env.ctx));
     lists.nzb_ids.sort_unstable();
     lists.file_ids.sort_unstable();
 
@@ -8187,91 +8158,35 @@ unsafe extern "C" fn active_disk_apply_file_cb(
 }
 
 #[cfg(unix)]
-unsafe extern "C" fn active_disk_aux_cb(
-    raw_ctx: *mut c_void,
-    op: c_int,
-    _a1: c_int,
-    _a2: c_int,
-    _u1: u32,
-    _s1: *const c_char,
-    _s2: *const c_char,
-    _vol_item: *const c_void,
-    sink_ctx: *mut c_void,
-    sink_fn_opt: Option<DiskAuxSinkFn>,
-) {
-    if op != 0 {
-        return;
-    }
-    let Some(sink_fn) = sink_fn_opt else {
-        return;
-    };
+fn active_disk_live_ids_cb(raw_ctx: *mut c_void) -> LiveIds {
     let (qh_opt, dq_ptr) = {
         let c = unsafe { &*raw_ctx.cast::<ActiveDiskExecCtx<'_>>() };
         (c.qh, c.dq_ptr)
     };
+    let mut ids = LiveIds::default();
     let Some(qh) = qh_opt else {
-        return;
+        return ids;
     };
-    let emit_nzb = |n: NzbRef| unsafe {
-        let sn = qh.nzb_snap(n, false);
-        sink_fn(
-            sink_ctx,
-            1,
-            sn.id,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            0,
-            std::ptr::null(),
-            0,
-        );
-        let flen = qh.nzb_file_len(n);
-        for i in 0..flen {
-            let fp = qh.nzb_file_at(n, i);
-            sink_fn(
-                sink_ctx,
-                0,
-                qh.file_snap(fp).id,
-                0,
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                0,
-                std::ptr::null(),
-                0,
-            );
+    let mut add_nzb = |n: NzbRef| {
+        ids.nzb_ids.push(qh.nzb_snap(n, false).id);
+        for i in 0..qh.nzb_file_len(n) {
+            ids.file_ids.push(qh.file_snap(qh.nzb_file_at(n, i)).id);
         }
-        let cflen = qh.nzb_completed_files_len(n);
-        for i in 0..cflen {
-            let cf = qh.nzb_completed_file_at(n, i);
-            sink_fn(
-                sink_ctx,
-                0,
-                cf.id,
-                0,
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                0,
-                std::ptr::null(),
-                0,
-            );
+        for i in 0..qh.nzb_completed_files_len(n) {
+            ids.file_ids.push(qh.nzb_completed_file_at(n, i).id);
         }
     };
-
-    let qlen = qh.queue_len(dq_ptr);
-    for i in 0..qlen {
-        emit_nzb(qh.queue_at(dq_ptr, i));
+    for i in 0..qh.queue_len(dq_ptr) {
+        add_nzb(qh.queue_at(dq_ptr, i));
     }
-    let hlen = qh.history_len(dq_ptr);
-    for i in 0..hlen {
+    for i in 0..qh.history_len(dq_ptr) {
         let hi = qh.history_at(dq_ptr, i);
         if hi.kind == crate::queuesubsys_host::HK_NZB || hi.kind == crate::queuesubsys_host::HK_URL
         {
-            emit_nzb(hi.nzb());
+            add_nzb(hi.nzb());
         }
     }
+    ids
 }
 
 #[cfg(unix)]
@@ -8330,7 +8245,8 @@ fn run_active_diskstate_exec(
         apply_nzb_cb: Some(active_disk_apply_nzb_cb),
         export_file_cb: Some(active_disk_export_file_cb),
         apply_file_cb: Some(active_disk_apply_file_cb),
-        aux_cb: Some(active_disk_aux_cb),
+        aux_cb: None,
+        live_ids_cb: Some(active_disk_live_ids_cb),
     };
     unsafe { diskstate_exec(op, &env) }
 }

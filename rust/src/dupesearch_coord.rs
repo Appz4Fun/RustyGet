@@ -6277,7 +6277,7 @@ pub unsafe fn fleet_append(
                 .into_iter()
                 .chain(usable.iter().map(|&i| &candidates[i].summary))
                 .collect();
-            let (mut verdicts, print, mut prints, mut keys) = fleet_intake(
+            let (mut verdicts, mut print, mut prints, mut keys) = fleet_intake(
                 host_ctx,
                 host_cb,
                 &summaries,
@@ -6288,6 +6288,17 @@ pub unsafe fn fleet_append(
             if let Some((ref_id, _)) = reference {
                 verdicts.remove(0);
                 keys.remove(0);
+                // without the queued copy's video there is nothing to compare
+                // with: the lone backup's own print would only match itself
+                if prints.first().is_none_or(|p| p.is_none()) {
+                    print = None;
+                    for (v, why) in &mut verdicts {
+                        if *v != crate::dupeintake::Verdict::Unverified {
+                            *v = crate::dupeintake::Verdict::Unverified;
+                            *why = "the queued copy could not be read".to_string();
+                        }
+                    }
+                }
                 // the queued copy's video, for TwinCheck to compare the backup with
                 #[cfg(unix)]
                 if let Some(p) = prints.remove(0) {

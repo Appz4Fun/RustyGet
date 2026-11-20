@@ -312,7 +312,7 @@ pub fn status_from_text(text_status: &[u8]) -> i32 {
 }
 
 /// `DupeCoordinator::FindDupeBackup` full decision algorithm.
-/// Returns the winning `0..history.len()` index, or `-1` if no backup qualifies.
+/// Returns the winning `0..history.len()` index, or `None` if no backup qualifies.
 pub fn select_dupe_backup<F>(
     has_self_nzb: bool,
     self_full_content_hash: u32,
@@ -320,7 +320,7 @@ pub fn select_dupe_backup<F>(
     history: &[NzbgetRsDupeHistoryCandidate],
     queue: &[NzbgetRsDupeQueueCandidate],
     mut file_exists_cb: F,
-) -> i32
+) -> Option<usize>
 where
     F: FnMut(usize) -> bool,
 {
@@ -355,7 +355,7 @@ where
         }
 
         if good_dupe {
-            return -1;
+            return None;
         }
     }
 
@@ -435,7 +435,7 @@ where
         }
     }
 
-    best_idx.map(|i| i as i32).unwrap_or(-1)
+    best_idx
 }
 
 /// The history backup to send back to the queue after a download failed its
@@ -449,13 +449,13 @@ where
 /// encrypted, no password: [`crate::donorkind::LOCKED_PARAM`]) can never be
 /// extracted and goes after all of them, whatever its health. Unlike
 /// `select_dupe_backup` it takes backups in DupeMode FORCE and backups filed
-/// as copies, which failover skips. `-1` when a download of the key is
+/// as copies, which failover skips. `None` when a download of the key is
 /// queued, one already succeeded, or no backup is alive.
 pub fn select_rescue_backup<F>(
     history: &[NzbgetRsDupeHistoryCandidate],
     queue: &[NzbgetRsDupeQueueCandidate],
     mut file_exists_cb: F,
-) -> i32
+) -> Option<usize>
 where
     F: FnMut(usize) -> bool,
 {
@@ -463,7 +463,7 @@ where
         .iter()
         .any(|q| q.is_self == 0 && q.is_nzb_kind != 0 && q.same_name_or_key != 0)
     {
-        return -1;
+        return None;
     }
     let succeeded = history.iter().any(|h| {
         h.same_name_or_key != 0
@@ -472,7 +472,7 @@ where
                     && (h.dup_status == DupStatus::Success || h.dup_status == DupStatus::Good)))
     });
     if succeeded {
-        return -1;
+        return None;
     }
     let mut best: Option<(usize, (i32, i32, i32, i32, i32))> = None;
     for (idx, h) in history.iter().enumerate() {
@@ -505,361 +505,13 @@ where
             best = Some((idx, rank));
         }
     }
-    best.map_or(-1, |(idx, _)| idx as i32)
-}
-
-/// Returns true when `RarLister::FindLargestFile` in `DupeMatcher.cpp` should continue waiting for `unrar` (`is_running && start_time + timeout_sec > cur_time && start_time >= cur_time`).
-pub fn dupematcher_should_wait_rar_lister(
-    is_running: bool,
-    start_time: i64,
-    timeout_sec: i32,
-    cur_time: i64,
-) -> bool {
-    is_running && start_time + i64::from(timeout_sec) > cur_time && start_time >= cur_time
-}
-
-/// `DupeCoordinator::DownloadedOnDisk` candidate check.
-#[allow(clippy::too_many_arguments)]
-pub fn is_downloaded_on_disk_candidate(
-    health_check: i32,
-    self_dupe_key: &[u8],
-    is_self: bool,
-    item_delete_status: DeleteStatus,
-    item_is_dupe_success: bool,
-    item_mark_status: MarkStatus,
-    item_dupe_key: &[u8],
-    item_final_dir: &[u8],
-    item_dest_dir: &[u8],
-    ext_cleanup_disk: &[u8],
-) -> bool {
-    let dupe_health = health_check == HEALTH_CHECK_DUPE || health_check == HEALTH_CHECK_PARK;
-    if !dupe_health || self_dupe_key.is_empty() || is_self {
-        return false;
-    }
-    item_delete_status == DeleteStatus::None
-        && item_is_dupe_success
-        && item_mark_status != MarkStatus::Bad
-        && strcasecmp_bytes(item_dupe_key, self_dupe_key)
-        && files_on_disk(item_final_dir, item_dest_dir, ext_cleanup_disk)
-}
-
-/// `DupeCoordinator::GetDupeStatus` per-queue-item bitmask accumulator.
-pub fn accumulate_queue_dupe_status(
-    current_statuses: i32,
-    name: &[u8],
-    dupe_key: &[u8],
-    item_name: &[u8],
-    item_dupe_key: &[u8],
-    success_articles: i32,
-    failed_articles: i32,
-) -> i32 {
-    if !same_name_or_key(name, dupe_key, item_name, item_dupe_key) {
-        return current_statuses;
-    }
-    if success_articles + failed_articles > 0 {
-        current_statuses | DUPE_STATUS_DOWNLOADING
-    } else {
-        current_statuses | DUPE_STATUS_QUEUED
-    }
-}
-
-/// `DupeCoordinator::GetDupeStatus` per-history-item bitmask accumulator.
-#[allow(clippy::too_many_arguments)]
-pub fn accumulate_history_dupe_status(
-    current_statuses: i32,
-    kind: i32,
-    name: &[u8],
-    dupe_key: &[u8],
-    item_name: &[u8],
-    item_dupe_key: &[u8],
-    text_status: &[u8],
-    dup_status: DupStatus,
-) -> i32 {
-    if kind == HISTORY_KIND_NZB && same_name_or_key(name, dupe_key, item_name, item_dupe_key) {
-        return current_statuses | status_from_text(text_status);
-    }
-    if kind == HISTORY_KIND_DUP && same_name_or_key(name, dupe_key, item_name, item_dupe_key) {
-        if dup_status == DupStatus::Success || dup_status == DupStatus::Good {
-            return current_statuses | DUPE_STATUS_SUCCESS;
-        }
-        if dup_status == DupStatus::Failed || dup_status == DupStatus::Bad {
-            return current_statuses | DUPE_STATUS_FAILURE;
-        }
-    }
-    current_statuses
-}
-
-/// `DupeCoordinator::HistoryCleanup` candidate predicate.
-#[allow(clippy::too_many_arguments)]
-pub fn should_cleanup_history_dupe(
-    kind: i32,
-    dupe_mode: DupeMode,
-    delete_status: DeleteStatus,
-    is_self: bool,
-    item_name: &[u8],
-    item_dupe_key: &[u8],
-    target_name: &[u8],
-    target_dupe_key: &[u8],
-) -> bool {
-    !is_self
-        && (kind == HISTORY_KIND_NZB || kind == HISTORY_KIND_URL)
-        && dupe_mode != DupeMode::Force
-        && delete_status == DeleteStatus::Dupe
-        && same_name_or_key(item_name, item_dupe_key, target_name, target_dupe_key)
-}
-
-/// `DupeCoordinator::ListHistoryDupes` candidate predicate.
-pub fn should_list_history_dupe(
-    self_dupe_mode: DupeMode,
-    kind: i32,
-    item_dupe_mode: DupeMode,
-    item_name: &[u8],
-    item_dupe_key: &[u8],
-    self_name: &[u8],
-    self_dupe_key: &[u8],
-) -> bool {
-    self_dupe_mode != DupeMode::Force
-        && kind == HISTORY_KIND_NZB
-        && item_dupe_mode != DupeMode::Force
-        && same_name_or_key(item_name, item_dupe_key, self_name, self_dupe_key)
+    best.map(|(idx, _)| idx)
 }
 
 /// `DupeCoordinator::NzbFound` content hash equality check.
 #[inline]
 pub fn same_content_hash(full1: u32, filtered1: u32, full2: u32, filtered2: u32) -> bool {
     (full1 > 0 && full1 == full2) || (filtered1 > 0 && filtered1 == filtered2)
-}
-
-/// `DupeCoordinator::NzbFound` property-inheritance match predicate:
-/// returns true when `self_name == other_name` and `other` has a non-empty `other_key` or non-zero `other_score`.
-#[inline]
-pub fn should_inherit_dupe_props(
-    self_name: &[u8],
-    other_name: &[u8],
-    other_key: &[u8],
-    other_score: i32,
-) -> bool {
-    self_name == other_name && (!other_key.is_empty() || other_score != 0)
-}
-
-/// `DupeCoordinator::NzbFound` history duplicate match evaluator.
-/// Returns `Some((same_content, good))` when the history item causes `self` to be skipped.
-#[allow(clippy::too_many_arguments)]
-pub fn eval_history_dupe_match(
-    kind: i32,
-    self_full_hash: u32,
-    self_filtered_hash: u32,
-    self_dupe_mode: DupeMode,
-    self_dupe_score: i32,
-    self_name: &[u8],
-    self_dupe_key: &[u8],
-    item_full_hash: u32,
-    item_filtered_hash: u32,
-    item_dupe_mode: DupeMode,
-    item_mark_status: MarkStatus,
-    item_dup_status: DupStatus,
-    item_dupe_score: i32,
-    item_name: &[u8],
-    item_dupe_key: &[u8],
-) -> Option<(bool, bool)> {
-    if (kind == HISTORY_KIND_NZB || kind == HISTORY_KIND_DUP)
-        && same_content_hash(
-            self_full_hash,
-            self_filtered_hash,
-            item_full_hash,
-            item_filtered_hash,
-        )
-    {
-        return Some((true, false));
-    }
-    if kind == HISTORY_KIND_NZB
-        && item_dupe_mode != DupeMode::Force
-        && item_mark_status == MarkStatus::Good
-        && same_name_or_key(item_name, item_dupe_key, self_name, self_dupe_key)
-    {
-        return Some((false, true));
-    }
-    if kind == HISTORY_KIND_DUP
-        && item_dupe_mode != DupeMode::Force
-        && (item_dup_status == DupStatus::Good
-            || (self_dupe_mode == DupeMode::Score
-                && item_dup_status == DupStatus::Success
-                && self_dupe_score <= item_dupe_score))
-        && same_name_or_key(item_name, item_dupe_key, self_name, self_dupe_key)
-    {
-        return Some((false, item_dup_status == DupStatus::Good));
-    }
-    None
-}
-
-/// `DupeCoordinator::NzbFound` `HealthCheck=dupe` same-content history outcome accumulator.
-#[allow(clippy::too_many_arguments)]
-pub fn accum_hc_dupe_same_content_outcome(
-    kind: i32,
-    self_full_hash: u32,
-    self_filtered_hash: u32,
-    item_full_hash: u32,
-    item_filtered_hash: u32,
-    item_delete_status: DeleteStatus,
-    item_is_dupe_success: bool,
-    item_dup_status: DupStatus,
-    succeeded: &mut bool,
-    failed: &mut bool,
-) {
-    if !same_content_hash(
-        self_full_hash,
-        self_filtered_hash,
-        item_full_hash,
-        item_filtered_hash,
-    ) {
-        return;
-    }
-    if kind == HISTORY_KIND_NZB {
-        if item_delete_status != DeleteStatus::Dupe
-            && item_delete_status != DeleteStatus::Copy
-            && item_delete_status != DeleteStatus::Manual
-        {
-            if item_is_dupe_success {
-                *succeeded = true;
-            } else {
-                *failed = true;
-            }
-        }
-    } else if kind == HISTORY_KIND_DUP {
-        if item_dup_status == DupStatus::Success || item_dup_status == DupStatus::Good {
-            *succeeded = true;
-        } else if item_dup_status == DupStatus::Failed || item_dup_status == DupStatus::Bad {
-            *failed = true;
-        }
-    }
-}
-
-/// `DupeCoordinator::NzbFound` recent-history score-duplicate skip predicate.
-#[allow(clippy::too_many_arguments)]
-pub fn should_skip_recent_history_score_dupe(
-    same_content: bool,
-    good: bool,
-    self_dupe_mode: DupeMode,
-    self_dupe_score: i32,
-    self_name: &[u8],
-    self_dupe_key: &[u8],
-    kind: i32,
-    item_dupe_mode: DupeMode,
-    item_dupe_score: i32,
-    item_is_dupe_success: bool,
-    item_name: &[u8],
-    item_dupe_key: &[u8],
-) -> bool {
-    !same_content
-        && !good
-        && self_dupe_mode == DupeMode::Score
-        && (kind == HISTORY_KIND_NZB || kind == HISTORY_KIND_URL)
-        && item_dupe_mode != DupeMode::Force
-        && same_name_or_key(item_name, item_dupe_key, self_name, self_dupe_key)
-        && self_dupe_score <= item_dupe_score
-        && item_is_dupe_success
-}
-
-/// `DupeCoordinator::NzbFound` queue score-duplicate evaluator:
-/// - `0`: not a matching duplicate or no action
-/// - `1`: skip `self` (`dsDupe`) and return
-/// - `2`: move `queued` with lower score to history (`dsDupe` + `eaGroupDelete`)
-#[allow(clippy::too_many_arguments)]
-pub fn eval_queue_score_dupe(
-    is_self: bool,
-    queued_delete_status: DeleteStatus,
-    queued_is_nzb: bool,
-    both_are_url: bool,
-    queued_dupe_mode: DupeMode,
-    queued_name: &[u8],
-    queued_dupe_key: &[u8],
-    self_name: &[u8],
-    self_dupe_key: &[u8],
-    self_dupe_score: i32,
-    queued_dupe_score: i32,
-    health_check: i32,
-    queued_is_redownload_auto: bool,
-    queued_cur_success_articles: i32,
-    queued_health: i32,
-    queued_crit_health: i32,
-    queued_has_post_info: bool,
-) -> i32 {
-    if is_self
-        || queued_delete_status != DeleteStatus::None
-        || (!queued_is_nzb && !both_are_url)
-        || queued_dupe_mode == DupeMode::Force
-        || !same_name_or_key(queued_name, queued_dupe_key, self_name, self_dupe_key)
-    {
-        return 0;
-    }
-    let keep_returned = health_check == HEALTH_CHECK_DUPE
-        && queued_is_redownload_auto
-        && queued_cur_success_articles > 0
-        && queued_health >= queued_crit_health;
-    if self_dupe_score <= queued_dupe_score || keep_returned {
-        return 1;
-    }
-    if !queued_has_post_info {
-        return 2;
-    }
-    0
-}
-
-/// `DupeCoordinator::NzbCompleted` predicate for stopping other queued items of the same key.
-#[allow(clippy::too_many_arguments)]
-pub fn is_other_to_stop_on_completed(
-    is_self: bool,
-    queued_is_nzb: bool,
-    queued_deleting: bool,
-    queued_delete_status: DeleteStatus,
-    queued_dupe_mode: DupeMode,
-    queued_dupe_key: &[u8],
-    self_dupe_key: &[u8],
-) -> bool {
-    !is_self
-        && queued_is_nzb
-        && !queued_deleting
-        && queued_delete_status == DeleteStatus::None
-        && queued_dupe_mode != DupeMode::Force
-        && strcasecmp_bytes(queued_dupe_key, self_dupe_key)
-}
-
-/// `DupeCoordinator::HistoryMark` status/action resolver.
-pub fn resolve_history_mark(
-    mark_status: MarkStatus,
-    dupe_check: bool,
-    kind: i32,
-    dupe_mode: DupeMode,
-) -> (&'static [u8], DupStatus, i32) {
-    let mark_name: &'static [u8] = if mark_status == MarkStatus::Bad {
-        b"bad\0"
-    } else if mark_status == MarkStatus::Good {
-        b"good\0"
-    } else if mark_status == MarkStatus::Success {
-        b"success\0"
-    } else {
-        b"NONE\0"
-    };
-    let dup_status = if mark_status == MarkStatus::Good {
-        DupStatus::Good
-    } else if mark_status == MarkStatus::Success {
-        DupStatus::Success
-    } else {
-        DupStatus::Bad
-    };
-    if !dupe_check
-        || ((kind == HISTORY_KIND_NZB || kind == HISTORY_KIND_DUP) && dupe_mode == DupeMode::Force)
-    {
-        return (mark_name, dup_status, 0);
-    }
-    let post_action = if mark_status == MarkStatus::Good {
-        1
-    } else if mark_status == MarkStatus::Bad {
-        2
-    } else {
-        0
-    };
-    (mark_name, dup_status, post_action)
 }
 
 #[cfg(unix)]
@@ -1165,8 +817,8 @@ pub(crate) fn find_dupe_backup_host(
             })
         },
     );
-    if winner >= 0 && (winner as usize) < history_entries.len() {
-        let hi = history_entries[winner as usize].clone();
+    if let Some(hi) = winner.and_then(|i| history_entries.get(i)) {
+        let hi = hi.clone();
         let nzb_snap = if hi.inner_ptr != 0 {
             host.nzb_snap(hi.nzb(), false)
         } else {
@@ -1263,10 +915,7 @@ fn rescue_dupe_host(
             !p.is_empty() && crate::fsops::file_exists(p, &crate::fsops::posix_stat)
         })
     });
-    let Some(hi) = usize::try_from(winner)
-        .ok()
-        .and_then(|i| history_entries.get(i))
-    else {
+    let Some((winner, hi)) = winner.and_then(|i| Some((i, history_entries.get(i)?))) else {
         return;
     };
     if hi.inner_ptr == 0 {
@@ -1276,7 +925,7 @@ fn rescue_dupe_host(
     if locked_host(host, backup.ptr) {
         return;
     }
-    let alive = history_candidates[winner as usize].alive_permille;
+    let alive = history_candidates[winner].alive_permille;
     // DupeSearchDryRun only covers what DupeSearch itself would do.
     let dry_run = crate::options::active_options()
         .is_some_and(|o| o.scalars().dupe_search != 0 && o.scalars().dupe_search_dry_run != 0);
@@ -1926,13 +1575,8 @@ mod tests {
         for raw in [3, -1] {
             let mode = DupeMode::from(raw);
             assert_eq!(i32::from(mode), raw);
-            // Not Score, so it never fails over; not Force, so a mark still
-            // gets its post action and the reason names DupeMode all.
+            // Not Score, so it never fails over, and the reason names DupeMode all.
             assert!(!fails_over(true, mode, HEALTH_CHECK_DUPE));
-            assert_eq!(
-                resolve_history_mark(MarkStatus::Good, true, HISTORY_KIND_NZB, mode).2,
-                1
-            );
             assert_eq!(
                 no_backup_reason(false, mode, &[], |_| true),
                 b"its DupeMode is all".to_vec()
@@ -1940,10 +1584,6 @@ mod tests {
         }
         assert!(fails_over(true, DupeMode::Score, 0));
         assert!(fails_over(true, DupeMode::Force, HEALTH_CHECK_DUPE));
-        assert_eq!(
-            resolve_history_mark(MarkStatus::Good, true, HISTORY_KIND_NZB, DupeMode::Force).2,
-            0
-        );
     }
 
     fn rescue_candidate(
@@ -1992,15 +1632,14 @@ mod tests {
         let queue = [rescue_self()];
         // failover skips FORCE backups and (without HealthCheck=dupe) copies
         assert_eq!(
-            select_dupe_backup(true, 0, false, &history, &queue, |_| true),
-            -1
+            select_dupe_backup(true, 0, false, &history, &queue, |_| true), None
         );
         // the rescue takes the wholest one
-        assert_eq!(select_rescue_backup(&history, &queue, |_| true), 2);
+        assert_eq!(select_rescue_backup(&history, &queue, |_| true), Some(2));
         // its nzb-file is gone: the next wholest
-        assert_eq!(select_rescue_backup(&history, &queue, |i| i != 2), 1);
+        assert_eq!(select_rescue_backup(&history, &queue, |i| i != 2), Some(1));
         // a dead backup is never returned
-        assert_eq!(select_rescue_backup(&history[3..], &queue, |_| true), -1);
+        assert_eq!(select_rescue_backup(&history[3..], &queue, |_| true), None);
     }
 
     #[test]
@@ -2011,9 +1650,9 @@ mod tests {
             rescue_candidate(DupeMode::Score, DeleteStatus::Dupe, 999_030, 500),
         ];
         let queue = [rescue_self()];
-        assert_eq!(select_rescue_backup(&history, &queue, |_| true), 2);
+        assert_eq!(select_rescue_backup(&history, &queue, |_| true), Some(2));
         // unmeasured backups only when nothing measured is alive
-        assert_eq!(select_rescue_backup(&history[..1], &queue, |_| true), 0);
+        assert_eq!(select_rescue_backup(&history[..1], &queue, |_| true), Some(0));
     }
 
     #[test]
@@ -2026,13 +1665,13 @@ mod tests {
         unborrowable.donor_kind = crate::donorkind::DonorKind::Unborrowable as i32;
         let queue = [rescue_self()];
         let history = [unborrowable, borrowable, twin];
-        assert_eq!(select_rescue_backup(&history, &queue, |_| true), 2);
-        assert_eq!(select_rescue_backup(&history[..2], &queue, |_| true), 1);
+        assert_eq!(select_rescue_backup(&history, &queue, |_| true), Some(2));
+        assert_eq!(select_rescue_backup(&history[..2], &queue, |_| true), Some(1));
         // a weak twin (90% alive, under 97.5%) comes after the healthy ALTs
         let mut weak_twin = twin;
         weak_twin.alive_permille = 900;
         let history = [weak_twin, unborrowable, borrowable];
-        assert_eq!(select_rescue_backup(&history, &queue, |_| true), 2);
+        assert_eq!(select_rescue_backup(&history, &queue, |_| true), Some(2));
     }
 
     #[test]
@@ -2044,7 +1683,7 @@ mod tests {
         let mut healthy = rescue_candidate(DupeMode::Score, DeleteStatus::Dupe, 999_010, 1000);
         healthy.donor_kind = crate::donorkind::DonorKind::Unborrowable as i32;
         let queue = [rescue_self()];
-        assert_eq!(select_rescue_backup(&[weak, healthy], &queue, |_| true), 1);
+        assert_eq!(select_rescue_backup(&[weak, healthy], &queue, |_| true), Some(1));
     }
 
     #[test]
@@ -2058,33 +1697,28 @@ mod tests {
         plain.donor_kind = crate::donorkind::DonorKind::Borrowable as i32;
         let unmeasured = rescue_candidate(DupeMode::Score, DeleteStatus::Dupe, 999_000, -1);
         let queue = [rescue_self()];
-        assert_eq!(select_rescue_backup(&[locked, plain], &queue, |_| true), 1);
+        assert_eq!(select_rescue_backup(&[locked, plain], &queue, |_| true), Some(1));
         assert_eq!(
-            select_rescue_backup(&[locked, unmeasured], &queue, |_| true),
-            1
+            select_rescue_backup(&[locked, unmeasured], &queue, |_| true), Some(1)
         );
         // nothing else alive: the locked copy is the last resort
-        assert_eq!(select_rescue_backup(&[locked], &queue, |_| true), 0);
+        assert_eq!(select_rescue_backup(&[locked], &queue, |_| true), Some(0));
         // the same password-less copy with its password known ranks by health
         let mut with_password = locked;
         with_password.locked = 0;
         assert_eq!(
-            select_rescue_backup(&[with_password, plain], &queue, |_| true),
-            0
+            select_rescue_backup(&[with_password, plain], &queue, |_| true), Some(0)
         );
         // failover too passes over it despite its higher score, and takes it
         // when it is the only backup
         assert_eq!(
-            select_dupe_backup(true, 0, true, &[locked, plain], &queue, |_| true),
-            1
+            select_dupe_backup(true, 0, true, &[locked, plain], &queue, |_| true), Some(1)
         );
         assert_eq!(
-            select_dupe_backup(true, 0, true, &[plain, locked], &queue, |_| true),
-            0
+            select_dupe_backup(true, 0, true, &[plain, locked], &queue, |_| true), Some(0)
         );
         assert_eq!(
-            select_dupe_backup(true, 0, true, &[locked], &queue, |_| true),
-            0
+            select_dupe_backup(true, 0, true, &[locked], &queue, |_| true), Some(0)
         );
     }
 
@@ -2094,29 +1728,25 @@ mod tests {
         let mut queued = rescue_self();
         queued.is_self = 0;
         assert_eq!(
-            select_rescue_backup(&[backup], &[rescue_self(), queued], |_| true),
-            -1
+            select_rescue_backup(&[backup], &[rescue_self(), queued], |_| true), None
         );
         let mut done = rescue_candidate(DupeMode::Score, DeleteStatus::None, 999_000, -1);
         done.is_dupe_success = 1;
         assert_eq!(
-            select_rescue_backup(&[backup, done], &[rescue_self()], |_| true),
-            -1
+            select_rescue_backup(&[backup, done], &[rescue_self()], |_| true), None
         );
         let mut dup = done;
         dup.kind = HISTORY_KIND_DUP;
         dup.is_dupe_success = 0;
         dup.dup_status = DupStatus::Success;
         assert_eq!(
-            select_rescue_backup(&[backup, dup], &[rescue_self()], |_| true),
-            -1
+            select_rescue_backup(&[backup, dup], &[rescue_self()], |_| true), None
         );
         // another key's success does not count
         let mut other = done;
         other.same_name_or_key = 0;
         assert_eq!(
-            select_rescue_backup(&[backup, other], &[rescue_self()], |_| true),
-            0
+            select_rescue_backup(&[backup, other], &[rescue_self()], |_| true), Some(0)
         );
     }
 
@@ -2129,8 +1759,7 @@ mod tests {
         let mut manual = rescue_candidate(DupeMode::Score, DeleteStatus::Manual, 999_060, 900);
         manual.health = 1000;
         assert_eq!(
-            select_rescue_backup(&[bad, sick, manual], &[rescue_self()], |_| true),
-            -1
+            select_rescue_backup(&[bad, sick, manual], &[rescue_self()], |_| true), None
         );
     }
 
@@ -2297,35 +1926,32 @@ mod tests {
 
         let run_find = |hist: &[(NzbgetRsDupeHistoryCandidate, bool)],
                         q: &[NzbgetRsDupeQueueCandidate]|
-         -> i32 {
+         -> Option<usize> {
             let candidates: Vec<NzbgetRsDupeHistoryCandidate> =
                 hist.iter().map(|(c, _)| *c).collect();
             select_dupe_backup(true, 0, false, &candidates, q, |idx| hist[idx].1)
         };
 
         // nothing in history
-        assert_eq!(run_find(&history, &queue), -1);
+        assert_eq!(run_find(&history, &queue), None);
 
         // the highest-scored healthy backup of the same key wins; other keys are ignored
         history.insert(0, (make_backup(b"Rel.2026.1080p-B", b"imdb:1", 50), true));
         history.insert(0, (make_backup(b"Rel.2026.1080p-C", b"imdb:1", 90), true));
         history.insert(0, (make_backup(b"Other.2026-X", b"imdb:2", 100), true));
-        let winner = run_find(&history, &queue);
-        assert!(winner >= 0);
-        assert_eq!(history[winner as usize].0.dupe_score, 90);
+        let winner = run_find(&history, &queue).expect("a backup qualifies");
+        assert_eq!(history[winner].0.dupe_score, 90);
 
         // a backup whose source nzb-file is gone can't be downloaded again
         history.insert(0, (make_backup(b"Rel.2026.1080p-Z", b"imdb:1", 95), false));
-        let winner = run_find(&history, &queue);
-        assert!(winner >= 0);
-        assert_eq!(history[winner as usize].0.dupe_score, 90);
+        let winner = run_find(&history, &queue).expect("a backup qualifies");
+        assert_eq!(history[winner].0.dupe_score, 90);
         history[0].0.same_name_or_key = 0;
 
         // a backup marked bad is no candidate
         history[2].0.mark_status = MarkStatus::Bad;
-        let winner = run_find(&history, &queue);
-        assert!(winner >= 0);
-        assert_eq!(history[winner as usize].0.dupe_score, 50);
+        let winner = run_find(&history, &queue).expect("a backup qualifies");
+        assert_eq!(history[winner].0.dupe_score, 50);
 
         // a queued duplicate with a higher score than every backup blocks them
         queue.push(NzbgetRsDupeQueueCandidate {
@@ -2335,14 +1961,13 @@ mod tests {
             dupe_score: 60,
             same_name_or_key: 1,
         });
-        assert_eq!(run_find(&history, &queue), -1);
+        assert_eq!(run_find(&history, &queue), None);
 
         // the item itself never counts as its own rival
         queue[0].dupe_score = 99;
         queue.pop();
-        let winner = run_find(&history, &queue);
-        assert!(winner >= 0);
-        assert_eq!(history[winner as usize].0.dupe_score, 50);
+        let winner = run_find(&history, &queue).expect("a backup qualifies");
+        assert_eq!(history[winner].0.dupe_score, 50);
 
         // a good-duplicate in history ends the search
         let mut good = make_backup(b"Rel.2026.1080p-G", b"imdb:1", 1);
@@ -2350,7 +1975,7 @@ mod tests {
         good.mark_status = MarkStatus::Good;
         good.is_dupe_success = 1;
         history.insert(0, (good, true));
-        assert_eq!(run_find(&history, &queue), -1);
+        assert_eq!(run_find(&history, &queue), None);
 
         // 5. RustDupeCoordinatorFfiParity
         assert!(same_name_or_key(
@@ -2407,81 +2032,5 @@ mod tests {
         assert!(same_content_hash(42, 0, 42, 99));
         assert!(same_content_hash(0, 77, 12, 77));
         assert!(!same_content_hash(0, 0, 0, 0));
-        assert!(should_inherit_dupe_props(
-            b"Show.A", b"Show.A", b"imdb:1", 0
-        ));
-        assert!(!should_inherit_dupe_props(b"Show.A", b"Show.A", b"", 0));
-        assert_eq!(
-            eval_history_dupe_match(
-                HISTORY_KIND_NZB,
-                100,
-                0,
-                DupeMode::Score,
-                10,
-                b"A",
-                b"k",
-                100,
-                0,
-                DupeMode::Score,
-                MarkStatus::None,
-                DupStatus::Undefined,
-                10,
-                b"B",
-                b"k2"
-            ),
-            Some((true, false))
-        );
-        assert_eq!(
-            eval_queue_score_dupe(
-                false,
-                DeleteStatus::None,
-                true,
-                false,
-                DupeMode::Score,
-                b"Show.B",
-                b"imdb:1",
-                b"Show.A",
-                b"imdb:1",
-                50,
-                80,
-                HEALTH_CHECK_NONE,
-                false,
-                0,
-                1000,
-                900,
-                false
-            ),
-            1
-        );
-        assert_eq!(
-            eval_queue_score_dupe(
-                false,
-                DeleteStatus::None,
-                true,
-                false,
-                DupeMode::Score,
-                b"Show.B",
-                b"imdb:1",
-                b"Show.A",
-                b"imdb:1",
-                90,
-                50,
-                HEALTH_CHECK_NONE,
-                false,
-                0,
-                1000,
-                900,
-                false
-            ),
-            2
-        );
-        assert_eq!(
-            resolve_history_mark(MarkStatus::Good, true, HISTORY_KIND_NZB, DupeMode::Score),
-            (&b"good\0"[..], DupStatus::Good, 1)
-        );
-        assert_eq!(
-            resolve_history_mark(MarkStatus::Bad, true, HISTORY_KIND_DUP, DupeMode::Score),
-            (&b"bad\0"[..], DupStatus::Bad, 2)
-        );
     }
 }

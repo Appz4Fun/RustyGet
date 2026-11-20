@@ -6123,7 +6123,7 @@ pub unsafe fn fleet_append(
         }
     }
     let mut earlier = earlier_kept;
-    // a queued copy is read with the password it has now, not only its nzb's
+    // a queued copy is read with the password it has now
     let stored_pw = fleet_stored_passwords(
         host_ctx,
         host_cb,
@@ -6131,9 +6131,12 @@ pub unsafe fn fleet_append(
     );
     for ((_, summary), pw) in earlier.iter_mut().zip(stored_pw) {
         if let Some(pw) = pw {
-            if !summary_password_known(summary) {
-                summary.meta.insert(b"password".to_vec(), pw);
-            }
+            // the password it has now wins over its nzb's, which the user may
+            // have corrected since
+            summary
+                .meta
+                .retain(|k, _| !k.eq_ignore_ascii_case(b"password"));
+            summary.meta.insert(b"password".to_vec(), pw);
         }
     }
     let earlier = earlier;
@@ -6291,11 +6294,14 @@ pub unsafe fn fleet_append(
         // against the copy already queued for its key (the client's pick, so it
         // goes first and wins a tie), so a nested alt is told the same video
         // before the queued copy dies, not only once a later pass samples it.
+        // Only the running copy is authoritative: never a parked backup, and not
+        // when the one member sent is the running copy itself.
         let reference: Option<&(i32, NzbSummaryData)> = earlier
             .iter()
-            .find(|(id, _)| *id == running_id)
-            .or_else(|| earlier.first())
-            .filter(|_| usable.len() == 1);
+            .find(|(id, _)| running_id != 0 && *id == running_id)
+            .filter(|_| {
+                usable.len() == 1 && candidates[usable[0]].existing_id != running_id
+            });
         if (usable.len() >= 2 || reference.is_some())
             && !donor_stopping()
             && !http_stopped()

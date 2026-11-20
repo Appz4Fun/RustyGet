@@ -50,8 +50,17 @@ const fn map_target_msg_kind(kind: TargetMessageKind) -> MessageKind {
     }
 }
 
+/// Fetch workers of a repair that borrows in earnest. At most 8: the news proxy measured
+/// about 0.9 MB/s per connection, peaked near 8.6 MB/s at 8 and got slower at 16.
 fn stream_fetch_worker_count(primary_connections: i32) -> i32 {
-    (primary_connections / 4).clamp(4, 16)
+    (primary_connections / 4).clamp(4, 8)
+}
+
+/// Fetch workers of a live repair that borrows no dead volume: fewer than after the download,
+/// so the download keeps most connections, but more than one. Direct unpack patches each hole
+/// as soon as it is borrowed, so one article at a time left holes to be filled at the end.
+fn live_hole_fetch_worker_count(primary_connections: i32) -> i32 {
+    (primary_connections / 8).clamp(2, 8)
 }
 
 /// The target download as read under the queue lock.
@@ -1106,7 +1115,7 @@ impl NzbgetRsStreamRepairCtrl {
             if self.parallel_live_fetch.load(Ordering::SeqCst) {
                 stream_fetch_worker_count(opts.primary_connections)
             } else {
-                0
+                live_hole_fetch_worker_count(opts.primary_connections)
             }
         } else {
             stream_fetch_worker_count(opts.primary_connections)
@@ -2344,12 +2353,11 @@ impl NzbgetRsStreamRepairCtrl {
         
             let any_holes = targets.iter().any(|t| t.patch_eligible && t.needs_repair());
             if any_holes && !self.host_is_stopped(q) {
-                // Live repairs fetch one article at a time so they never crowd out the download.
+                // Live repairs fetch with a few workers so they never crowd out the download.
                 // Direct unpack stands still until a dead volume is borrowed, so from here on
                 // this live repair (the borrow, the recreation fallback and any later pass)
-                // fetches in parallel like the repair after the download does. Once raised it
-                // stays raised: workers already spawned would keep claiming requests that an
-                // inline (zero-worker) fetch then reads empty.
+                // fetches with as many workers as the repair after the download does. Once
+                // raised it stays raised.
                 if borrowing {
                     self.parallel_live_fetch.store(true, Ordering::SeqCst);
                     self.batch_fetcher

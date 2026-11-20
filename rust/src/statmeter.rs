@@ -1621,12 +1621,12 @@ mod runtime {
         ds_env.aux_cb = Some(stat_disk_aux_cb);
         match op {
             0 => {
-                let ok = diskstate_exec(11, &ds_env);
+                let ok = diskstate_exec(crate::diskstate_format::DiskOp::SaveStats, &ds_env);
                 s.stat_changed.store(false, Ordering::SeqCst);
                 ok
             }
             1 => {
-                let ok = diskstate_exec(12, &ds_env);
+                let ok = diskstate_exec(crate::diskstate_format::DiskOp::LoadStats, &ds_env);
                 for (ns, &st_id) in pool_srvs.iter().zip(bridge.state_ids.iter()) {
                     if st_id >= 0 {
                         ns.state_id.store(st_id, Ordering::SeqCst);

@@ -4210,33 +4210,34 @@ pub type DiskExportFeedsFn = fn(ctx: *mut c_void, sink: &mut dyn FnMut(FeedRecor
 /// Applies one loaded feed status to every configured feed `matching` it.
 pub type DiskLoadFeedStatusFn =
     fn(ctx: *mut c_void, url: &[u8], matching: FeedMatch<'_>, last_update: i32);
+/// Which volume a loaded volume-stat record belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VolumeSlot {
+    /// The all-servers total.
+    Total,
+    /// The server that was given this state id while loading.
+    Server(i32),
+}
+
+/// Hands the current news servers, and the volume stats when
+/// `with_volumes`, to the sink once.
+pub type DiskExportStatsFn = fn(
+    ctx: *mut c_void,
+    with_volumes: bool,
+    sink: &mut dyn FnMut(&[NzbgetRsServerMatchItem], &[NzbgetRsDiskVolumeStatInput]),
+);
+/// Records the saved state id matched to the server at index `server`.
+pub type DiskSetServerStateIdFn = fn(ctx: *mut c_void, server: usize, state_id: i32);
+/// Applies one loaded volume-stat record.
+pub type DiskLoadVolumeFn = fn(
+    ctx: *mut c_void,
+    slot: VolumeSlot,
+    vol: &NzbgetRsDiskVolumeStatInput,
+    format_version: i32,
+    has_custom_times: bool,
+);
 /// Adds one loaded feed history record.
 pub type DiskLoadFeedHistoryFn = fn(ctx: *mut c_void, url: &[u8], status: i32, last_seen: i32);
-
-pub type DiskAuxSinkFn = unsafe extern "C" fn(
-    sink_ctx: *mut c_void,
-    kind: c_int,
-    a1: c_int,
-    a2: c_int,
-    u1: u32,
-    s1: *const c_char,
-    srv_items: *const NzbgetRsServerMatchItem,
-    srv_len: usize,
-    vol_items: *const c_void,
-    vol_len: usize,
-);
-pub type DiskAuxFn = unsafe extern "C" fn(
-    ctx: *mut c_void,
-    op: c_int,
-    a1: c_int,
-    a2: c_int,
-    u1: u32,
-    s1: *const c_char,
-    s2: *const c_char,
-    vol_item: *const c_void,
-    sink_ctx: *mut c_void,
-    sink_fn: Option<DiskAuxSinkFn>,
-);
 
 #[repr(C)]
 pub struct NzbgetRsDiskStateEnv {
@@ -4263,11 +4264,13 @@ pub struct NzbgetRsDiskStateEnv {
     pub apply_nzb_cb: Option<DiskApplyNzbFn>,
     pub export_file_cb: Option<DiskExportFileFn>,
     pub apply_file_cb: Option<DiskApplyFileFn>,
-    pub aux_cb: Option<DiskAuxFn>,
     pub live_ids_cb: Option<DiskLiveIdsFn>,
     pub export_feeds_cb: Option<DiskExportFeedsFn>,
     pub load_feed_status_cb: Option<DiskLoadFeedStatusFn>,
     pub load_feed_history_cb: Option<DiskLoadFeedHistoryFn>,
+    pub export_stats_cb: Option<DiskExportStatsFn>,
+    pub set_server_state_id_cb: Option<DiskSetServerStateIdFn>,
+    pub load_volume_cb: Option<DiskLoadVolumeFn>,
 }
 
 fn bytes_to_cstring_trunc(raw: &[u8]) -> std::ffi::CString {
@@ -6350,67 +6353,39 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                 vol_count: usize,
                 vol_bytes: Vec<u8>,
             }
-            unsafe extern "C" fn stats_save_sink(
-                sink_ctx: *mut c_void,
-                _kind: c_int,
-                _a1: c_int,
-                _a2: c_int,
-                _u1: u32,
-                _s1: *const c_char,
-                srv_items: *const NzbgetRsServerMatchItem,
-                srv_len: usize,
-                vol_items: *const c_void,
-                vol_len: usize,
-            ) {
-                let so = unsafe { &mut *sink_ctx.cast::<StatsSaveOut>() };
-                if srv_items.is_null() || srv_len == 0 {
-                    return;
-                }
-                so.has_servers = true;
-                let srvs = unsafe { std::slice::from_raw_parts(srv_items, srv_len) };
-                let names: Vec<*const c_char> = srvs.iter().map(|s| s.name).collect();
-                let hosts: Vec<*const c_char> = srvs.iter().map(|s| s.host).collect();
-                let ports: Vec<c_int> = srvs.iter().map(|s| s.port).collect();
-                let users: Vec<*const c_char> = srvs.iter().map(|s| s.user).collect();
-                so.srv_bytes = unsafe {
-                    format_server_info_bytes(
-                        names.as_ptr(),
-                        hosts.as_ptr(),
-                        ports.as_ptr(),
-                        users.as_ptr(),
-                        srvs.len(),
-                    )
-                };
-                if !vol_items.is_null() && vol_len > 0 {
-                    let vol_items = vol_items.cast::<NzbgetRsDiskVolumeStatInput>();
-                    so.vol_count = vol_len;
-                    for i in 0..vol_len {
-                        let b = unsafe { format_volume_stat_item_bytes(vol_items.add(i)) };
-                        so.vol_bytes.extend_from_slice(&b);
-                    }
-                }
-            }
             let mut so = StatsSaveOut {
                 has_servers: false,
                 srv_bytes: Vec::new(),
                 vol_count: 0,
                 vol_bytes: Vec::new(),
             };
-            if let Some(aux) = env.aux_cb {
-                unsafe {
-                    aux(
-                        env.ctx,
-                        4,
-                        1,
-                        0,
-                        0,
-                        std::ptr::null(),
-                        std::ptr::null(),
-                        std::ptr::null(),
-                        (&mut so as *mut StatsSaveOut).cast(),
-                        Some(stats_save_sink),
-                    );
-                }
+            if let Some(cb) = env.export_stats_cb {
+                cb(env.ctx, true, &mut |srvs, vols| {
+                    if srvs.is_empty() {
+                        return;
+                    }
+                    so.has_servers = true;
+                    let names: Vec<*const c_char> = srvs.iter().map(|s| s.name).collect();
+                    let hosts: Vec<*const c_char> = srvs.iter().map(|s| s.host).collect();
+                    let ports: Vec<c_int> = srvs.iter().map(|s| s.port).collect();
+                    let users: Vec<*const c_char> = srvs.iter().map(|s| s.user).collect();
+                    so.srv_bytes = unsafe {
+                        format_server_info_bytes(
+                            names.as_ptr(),
+                            hosts.as_ptr(),
+                            ports.as_ptr(),
+                            users.as_ptr(),
+                            srvs.len(),
+                        )
+                    };
+                    if !vols.is_empty() {
+                        so.vol_count = vols.len();
+                        for v in vols {
+                            let b = unsafe { format_volume_stat_item_bytes(v) };
+                            so.vol_bytes.extend_from_slice(&b);
+                        }
+                    }
+                });
             }
             let sf = RsStateFile::new(
                 qdir,
@@ -6459,22 +6434,11 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                 host: Vec<u8>,
                 user: Vec<u8>,
             }
-            unsafe extern "C" fn srv_load_sink(
-                sink_ctx: *mut c_void,
-                _kind: c_int,
-                _a1: c_int,
-                _a2: c_int,
-                _u1: u32,
-                _s1: *const c_char,
-                srv_items: *const NzbgetRsServerMatchItem,
-                srv_len: usize,
-                _vol: *const c_void,
-                _vol_len: usize,
-            ) {
-                let vec = unsafe { &mut *sink_ctx.cast::<Vec<SrvMeta>>() };
-                if !srv_items.is_null() && srv_len > 0 {
-                    for s in unsafe { std::slice::from_raw_parts(srv_items, srv_len) } {
-                        vec.push(SrvMeta {
+            let mut srvs: Vec<SrvMeta> = Vec::new();
+            if let Some(cb) = env.export_stats_cb {
+                cb(env.ctx, false, &mut |items, _| {
+                    for s in items {
+                        srvs.push(SrvMeta {
                             id: s.id,
                             port: s.port,
                             name: unsafe { cstr::bytes(s.name) }.to_vec(),
@@ -6482,24 +6446,7 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                             user: unsafe { cstr::bytes(s.user) }.to_vec(),
                         });
                     }
-                }
-            }
-            let mut srvs: Vec<SrvMeta> = Vec::new();
-            if let Some(aux) = env.aux_cb {
-                unsafe {
-                    aux(
-                        env.ctx,
-                        4,
-                        0,
-                        0,
-                        0,
-                        std::ptr::null(),
-                        std::ptr::null(),
-                        std::ptr::null(),
-                        (&mut srvs as *mut Vec<SrvMeta>).cast(),
-                        Some(srv_load_sink),
-                    );
-                }
+                });
             }
             let inputs: Vec<ServerMatchInput<'_>> = srvs
                 .iter()
@@ -6534,22 +6481,9 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
             if !env.out_flag.is_null() {
                 unsafe { *env.out_flag = c_int::from(perfect) };
             }
-            if let Some(aux) = env.aux_cb {
+            if let Some(cb) = env.set_server_state_id_cb {
                 for (idx, &st_id) in state_ids.iter().enumerate() {
-                    unsafe {
-                        aux(
-                            env.ctx,
-                            5,
-                            idx as c_int,
-                            st_id,
-                            0,
-                            std::ptr::null(),
-                            std::ptr::null(),
-                            std::ptr::null(),
-                            std::ptr::null_mut(),
-                            None,
-                        );
-                    }
+                    cb(env.ctx, idx, st_id);
                 }
             }
             emit_log(
@@ -6601,22 +6535,18 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                     has_custom_times: c_int,
                 ) {
                     let vc = unsafe { &*ctx.cast::<VolCtx<'_>>() };
-                    if let Some(aux) = vc.env.aux_cb {
-                        unsafe {
-                            aux(
-                                vc.env.ctx,
-                                6,
-                                slot_idx,
-                                (vc.ver << 1) | (has_custom_times & 1),
-                                0,
-                                std::ptr::null(),
-                                std::ptr::null(),
-                                item.cast(),
-                                std::ptr::null_mut(),
-                                None,
-                            );
-                        }
-                    }
+                    let Some(cb) = vc.env.load_volume_cb else {
+                        return;
+                    };
+                    let Some(vol) = (unsafe { item.as_ref() }) else {
+                        return;
+                    };
+                    let slot = if slot_idx == 0 {
+                        VolumeSlot::Total
+                    } else {
+                        VolumeSlot::Server(slot_idx)
+                    };
+                    cb(vc.env.ctx, slot, vol, vc.ver, (has_custom_times & 1) != 0);
                 }
                 let mut vc = VolCtx { env, ver };
                 if !unsafe {
@@ -8248,11 +8178,13 @@ fn run_active_diskstate_exec(
         apply_nzb_cb: Some(active_disk_apply_nzb_cb),
         export_file_cb: Some(active_disk_export_file_cb),
         apply_file_cb: Some(active_disk_apply_file_cb),
-        aux_cb: None,
         live_ids_cb: Some(active_disk_live_ids_cb),
         export_feeds_cb: None,
         load_feed_status_cb: None,
         load_feed_history_cb: None,
+        export_stats_cb: None,
+        set_server_state_id_cb: None,
+        load_volume_cb: None,
     };
     unsafe { diskstate_exec(op, &env) }
 }

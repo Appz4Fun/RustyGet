@@ -2130,132 +2130,145 @@ pub(crate) fn remote_srv_ctl(op: c_int) {
     }
 }
 
-/// Default Rust-backed `conn_cb` implementation for `NServMain` (`nserv.rs`).
-pub unsafe extern "C" fn nserv_default_conn_cb(
+/// NServ's sockets over [`NzbgetRsConn`]: the transport `--nserv` uses unless a
+/// test supplies its own.
+pub struct NetNservTransport {
+    pub tls_host_cb: NzbgetRsConnHostFn,
+    pub debug_on: bool,
+}
+
+impl crate::nserv::NservTransport for NetNservTransport {
+    fn listener(
+        &self,
+        bind_address: &CStr,
+        port: c_int,
+        tls: bool,
+    ) -> Option<Box<dyn crate::nserv::NservListener>> {
+        let mut conn = Box::new(NzbgetRsConn::new_client(
+            bind_address.to_bytes(),
+            port,
+            tls,
+            true,
+            self.debug_on,
+            0,
+            self.tls_host_cb,
+        ));
+        conn.session.get_mut().core.timeout = 10;
+        conn.slot.set_suppress_errors(false);
+        Some(Box::new(NetNservSocket {
+            conn,
+            tls_host_cb: self.tls_host_cb,
+            debug_on: self.debug_on,
+        }))
+    }
+}
+
+/// One NServ socket: a listener or an accepted client connection. It owns its
+/// connection, so its I/O goes through `&mut` without `unsafe`; other threads
+/// reach it only through [`crate::nserv::NservListener::canceller`].
+struct NetNservSocket {
+    conn: Box<NzbgetRsConn>,
     tls_host_cb: NzbgetRsConnHostFn,
     debug_on: bool,
-    raw_conn: usize,
-    op: c_int,
-    a1: c_int,
-    a2: c_int,
-    s1: *const c_char,
-    s2: *const c_char,
-    out_buf: *mut c_char,
-) -> usize {
-    if op == 0 {
-        let mut conn = Box::new(NzbgetRsConn::new_client(
-            opt_bytes(s1),
-            a1,
-            !s2.is_null(),
-            true,
+}
+
+impl NetNservSocket {
+    fn core(&mut self) -> &mut ConnCore {
+        &mut self.conn.session.get_mut().core
+    }
+}
+
+impl crate::nserv::NservListener for NetNservSocket {
+    fn bind(&mut self) -> bool {
+        self.core().bind()
+    }
+
+    fn accept(&mut self) -> Option<Box<dyn crate::nserv::NservConn>> {
+        let (tls_host_cb, debug_on) = (self.tls_host_cb, self.debug_on);
+        let core = self.core();
+        let fd = core.accept_fd();
+        if fd == INVALID_SOCKET {
+            return None;
+        }
+        let conn = Box::new(NzbgetRsConn::from_accepted(
+            fd,
+            core.tls,
+            core.timeout,
             debug_on,
             0,
             tls_host_cb,
         ));
-        conn.session.get_mut().core.timeout = 10;
-        conn.slot.set_suppress_errors(false);
-        return Box::into_raw(conn) as usize;
+        Some(Box::new(Self {
+            conn,
+            tls_host_cb,
+            debug_on,
+        }))
     }
-    if raw_conn == 0 {
-        return 0;
+
+    fn canceller(&self) -> crate::nserv::NservCanceller {
+        let slot = Arc::clone(&self.conn.slot);
+        let tls_host_cb = self.tls_host_cb;
+        Box::new(move || slot.cancel(true, tls_host_cb))
     }
-    let conn = &*(raw_conn as *const NzbgetRsConn);
-    match op {
-        1 => usize::from((*conn.session.get()).core.bind()),
-        2 => {
-            let (fd, tls, timeout) = {
-                let core = &mut (*conn.session.get()).core;
-                (core.accept_fd(), core.tls, core.timeout)
-            };
-            if fd == INVALID_SOCKET {
-                0
-            } else {
-                let acc = Box::new(NzbgetRsConn::from_accepted(
-                    fd,
-                    tls,
-                    timeout,
-                    debug_on,
+
+    fn shutdown(mut self: Box<Self>) {
+        self.core().disconnect_base();
+    }
+}
+
+impl crate::nserv::NservConn for NetNservSocket {
+    fn start_tls(&mut self, cert: Option<&CStr>, key: Option<&CStr>) -> Option<Vec<u8>> {
+        self.conn.slot.set_suppress_errors(false);
+        if let Some(cert) = cert {
+            if !self.core().start_tls(false, cert, key.unwrap_or(c"")) {
+                return None;
+            }
+        }
+        Some(self.conn.host.to_bytes().to_vec())
+    }
+
+    fn read_line<'a>(&mut self, buf: &'a mut [u8]) -> Option<&'a [u8]> {
+        self.core().read_line_slice(buf)?;
+        Some(match CStr::from_bytes_until_nul(buf) {
+            Ok(line) => line.to_bytes(),
+            Err(_) => buf,
+        })
+    }
+
+    fn write_line(&mut self, line: &[u8]) {
+        self.core().write_line_bytes(line);
+    }
+
+    fn send(&mut self, data: &[u8]) {
+        self.core().send_bytes(data);
+    }
+
+    fn close(mut self: Box<Self>, graceful: bool) {
+        let core = self.core();
+        if graceful {
+            core.graceful = true;
+        }
+        core.disconnect_base();
+        let tls_host_cb = self.tls_host_cb;
+        drop(self);
+        if let Some(cb) = tls_host_cb {
+            // SAFETY: op 10 (`StopSSLThread`) takes no pointers; every other
+            // argument is null or zero, as the callback contract allows.
+            unsafe {
+                cb(
+                    ptr::null_mut(),
+                    10,
                     0,
-                    tls_host_cb,
-                ));
-                Box::into_raw(acc) as usize
+                    0,
+                    0,
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                );
             }
         }
-        3 => {
-            conn.slot.cancel(true, tls_host_cb);
-            1
-        }
-        4 => {
-            {
-                let core = &mut (*conn.session.get()).core;
-                if a1 == 1 {
-                    core.graceful = true;
-                }
-                if a1 == 1 || a1 == 2 || a2 == 1 {
-                    core.disconnect_base();
-                }
-            }
-            drop(Box::from_raw(raw_conn as *mut NzbgetRsConn));
-            if a2 == 1 {
-                if let Some(cb) = tls_host_cb {
-                    cb(
-                        ptr::null_mut(),
-                        10,
-                        0,
-                        0,
-                        0,
-                        ptr::null(),
-                        ptr::null(),
-                        ptr::null(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                    );
-                }
-            }
-            0
-        }
-        5 => {
-            conn.slot.set_suppress_errors(false);
-            if !s1.is_null() {
-                let cert = CStr::from_ptr(s1);
-                let key = if s2.is_null() {
-                    c""
-                } else {
-                    CStr::from_ptr(s2)
-                };
-                if !(*conn.session.get()).core.start_tls(false, cert, key) {
-                    return 0;
-                }
-            }
-            if !out_buf.is_null() && a1 > 0 {
-                let hb = conn.host.to_bytes();
-                let copy_len = hb.len().min((a1 as usize).saturating_sub(1));
-                if copy_len > 0 {
-                    ptr::copy_nonoverlapping(hb.as_ptr(), out_buf.cast::<u8>(), copy_len);
-                }
-                *out_buf.add(copy_len) = 0;
-            }
-            1
-        }
-        6 => {
-            if out_buf.is_null() || a1 <= 0 {
-                0
-            } else {
-                let dst = std::slice::from_raw_parts_mut(out_buf.cast::<u8>(), a1 as usize);
-                usize::from((*conn.session.get()).core.read_line_slice(dst).is_some())
-            }
-        }
-        7 => {
-            let core = &mut (*conn.session.get()).core;
-            if a2 != 0 {
-                core.write_line_bytes(opt_bytes(s1));
-            } else if !s1.is_null() && a1 > 0 {
-                let data = std::slice::from_raw_parts(s1.cast::<u8>(), a1 as usize);
-                core.send_bytes(data);
-            }
-            1
-        }
-        _ => 0,
     }
 }
 

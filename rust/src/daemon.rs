@@ -461,7 +461,7 @@ unsafe extern "C" fn nserv_main(argc: c_int, argv: *mut *mut c_char) -> c_int {
         write_stdout_cb: None,
         log_cb: None,
         runtime_cb: Some(nserv_runtime),
-        conn_cb: None,
+        transport: None,
         tls_host_cb: None,
         debug_on: 0,
     };

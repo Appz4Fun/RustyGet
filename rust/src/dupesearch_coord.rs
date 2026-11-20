@@ -239,6 +239,30 @@ fn fleet_stored_locks(
     })
 }
 
+/// The archive password each queued or parked copy has now
+/// (`*Unpack:Password`: from its nzb, its name, or set by the user since).
+fn fleet_stored_passwords(
+    host_ctx: *mut c_void,
+    host_cb: DupeHostFn,
+    ids: &[i32],
+) -> Vec<Option<Vec<u8>>> {
+    if ids.is_empty() {
+        return Vec::new();
+    }
+    with_guarded_queue(host_ctx, host_cb, |dq_ptr| {
+        let Some(qh) = crate::ffi::queue_host() else {
+            return vec![None; ids.len()];
+        };
+        ids.iter()
+            .map(|&id| {
+                let (ptr_, _) = dq_find_nzb(host_ctx, host_cb, dq_ptr, id)?;
+                qh.nzb_get_param(ptr_, crate::donorkind::PASSWORD_PARAM)
+                    .filter(|p| !p.trim_ascii().is_empty())
+            })
+            .collect()
+    })
+}
+
 /// A `{{password}}` in a fleet member's name is its password, as the scanner
 /// reads it into `*Unpack:Password` when the copy is added; a password in the
 /// nzb's meta wins. Kept in the summary's meta so the probe, the intake and
@@ -6098,7 +6122,21 @@ pub unsafe fn fleet_append(
             earlier_kept.push((id, summary));
         }
     }
-    let earlier = earlier_kept;
+    let mut earlier = earlier_kept;
+    // a queued copy is read with the password it has now, not only its nzb's
+    let stored_pw = fleet_stored_passwords(
+        host_ctx,
+        host_cb,
+        &earlier.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+    );
+    for ((_, summary), pw) in earlier.iter_mut().zip(stored_pw) {
+        if let Some(pw) = pw {
+            if !summary_password_known(summary) {
+                summary.meta.insert(b"password".to_vec(), pw);
+            }
+        }
+    }
+    let earlier = earlier;
     // the stored kind of each queued copy a member is the same posting as
     let member_stored = fleet_queued_kinds(
         host_ctx,
@@ -6231,6 +6269,9 @@ pub unsafe fn fleet_append(
     }
 
     let mut intake_later: Vec<usize> = Vec::new();
+    // the video of the copy queued from an earlier submission, when a backup
+    // sent alone was opened against it
+    let mut reference_print: Option<crate::dupeintake::Print> = None;
     let mut intake_print: Option<crate::dupeintake::Print> = None;
     let mut intake_prints: Vec<Option<crate::dupeintake::Print>> = vec![None; candidates.len()];
     let mut intake_keys: Vec<Option<crate::twinfields::InnerKey>> = vec![None; candidates.len()];
@@ -6300,15 +6341,14 @@ pub unsafe fn fleet_append(
                     }
                 }
                 // the queued copy's video, for TwinCheck to compare the backup with
+                reference_print = prints.remove(0);
                 #[cfg(unix)]
-                if let Some(p) = prints.remove(0) {
+                if let Some(p) = &reference_print {
                     crate::twin::set_inner_digests(&[(
                         *ref_id,
-                        crate::dupeintake::inner_param_value(&p, samples, seed),
+                        crate::dupeintake::inner_param_value(p, samples, seed),
                     )]);
                 }
-                #[cfg(not(unix))]
-                prints.remove(0);
             }
             intake_print = print;
             for (&i, p) in usable.iter().zip(prints) {
@@ -6821,7 +6861,7 @@ pub unsafe fn fleet_append(
                 earlier
                     .iter()
                     .find(|(id, _)| *id == chosen)
-                    .map(|(id, s)| (*id, s.clone(), None))
+                    .map(|(id, s)| (*id, s.clone(), reference_print.clone()))
             });
         let mut msg = b"Fleet intake: ".to_vec();
         msg.extend_from_slice(pending.len().to_string().as_bytes());

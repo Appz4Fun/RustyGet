@@ -1312,9 +1312,9 @@ const BACKUP_CLASSIFY_GRACE_SEC: i64 = 120;
 const BACKUP_CHECKING_MAX_SEC: i64 = BACKUP_CLASSIFY_GRACE_SEC + 240;
 
 /// Whether a backup parked at `parked_at` (Unix seconds) is still too new to tell whether it
-/// lends: its kind is unknown and it arrived under [`BACKUP_CLASSIFY_GRACE_SEC`] ago, or the
-/// fleet intake is still `checking` it (a nested alt can take longer to open down to its
-/// video) and it arrived under [`BACKUP_CHECKING_MAX_SEC`] ago.
+/// lends: its kind is unknown and it arrived under [`BACKUP_CLASSIFY_GRACE_SEC`] ago, or, whatever
+/// its kind, the fleet intake is still `checking` its video (a nested alt can take longer to open
+/// down to it) and it arrived under [`BACKUP_CHECKING_MAX_SEC`] ago.
 fn backup_still_unclassified(
     kind: crate::donorkind::DonorKind,
     parked_at: i64,
@@ -1322,8 +1322,9 @@ fn backup_still_unclassified(
     checking: bool,
 ) -> bool {
     let age = now - parked_at;
-    kind == crate::donorkind::DonorKind::Unknown
-        && (age < BACKUP_CLASSIFY_GRACE_SEC || (checking && age < BACKUP_CHECKING_MAX_SEC))
+    // the packing kind says nothing about the video: a copy still being read may carry another
+    (kind == crate::donorkind::DonorKind::Unknown && age < BACKUP_CLASSIFY_GRACE_SEC)
+        || (checking && age < BACKUP_CHECKING_MAX_SEC)
 }
 #[cfg(unix)]
 const DUPE_PROBE_SAMPLE_COUNT: i32 = 10;
@@ -6414,7 +6415,8 @@ mod tests {
         assert!(!unclassified(DonorKind::Unknown, parked, parked + 360, true));
         for kind in [DonorKind::Twin, DonorKind::Borrowable, DonorKind::Unborrowable] {
             assert!(!unclassified(kind, parked, parked + 2, false));
-            assert!(!unclassified(kind, parked, parked + 2, true));
+            assert!(unclassified(kind, parked, parked + 2, true));
+            assert!(!unclassified(kind, parked, parked + 360, true));
         }
     }
 

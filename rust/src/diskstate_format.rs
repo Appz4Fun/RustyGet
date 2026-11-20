@@ -4069,15 +4069,18 @@ pub enum DiskCtrl<'a> {
     RemoveFile { nzb: i32, file_id: i32 },
     /// 1 if a queued nzb holds the file with `file_id`.
     FileQueued { file_id: i32 },
-    /// Drop the nzb being loaded and clear the target.
+    /// Replace the nzb being loaded with a fresh empty one and target it.
     ResetPendingNzb,
     /// Append the nzb being loaded to the queue.
     FinishNewNzb,
-    /// Target the queued nzb with `id`; 1 if found.
+    /// Target the queued nzb with `id`; 1 if found, otherwise acts as
+    /// `ResetPendingNzb` and returns 0.
     SelectQueuedNzb { id: i32 },
-    /// Move the nzb being loaded into history as `kind` at `time`.
+    /// Move the nzb being loaded into history as `kind` at `time`. For an
+    /// nzb history entry the target nzb also leaves post-processing first.
     PushPendingToHistory { kind: i32, time: i32 },
-    /// Target the nzb with `id` in the queue or history; 1 if found.
+    /// Target the nzb with `id` in the queue or history; 1 if found,
+    /// otherwise acts as `ResetPendingNzb` and returns 0.
     SelectNzb { in_history: bool, id: i32 },
     /// Target the queued file with `file_id` and remember its counters;
     /// 1 if found.
@@ -4090,7 +4093,7 @@ pub enum DiskCtrl<'a> {
     StageStandaloneFile { file_id: i32 },
     /// Raise the id generator to the given maxima and refresh nzb stats.
     RaiseIdGen { max_nzb: i32, max_file: i32 },
-    /// Collect a log message for the nzb with `nzb_id`.
+    /// Collect a log message; `id` is its running message number.
     AddMessage {
         nzb_id: i32,
         kind: i32,

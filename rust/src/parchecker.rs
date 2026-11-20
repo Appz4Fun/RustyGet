@@ -123,6 +123,12 @@ impl ParResult {
     }
 }
 
+impl std::fmt::Display for ParResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message())
+    }
+}
+
 /// Loads a `.par2` index file and any sibling volumes of the same collection in its directory
 /// into a [`PacketSet`].
 pub fn load_par2_set(main_path: &Path) -> Result<PacketSet, RepairError> {
@@ -3377,8 +3383,6 @@ pub fn classify_streambuf_line(msg: &[u8]) -> (bool, usize) {
     let offset = if msg.starts_with(b"You have ") { 9 } else { 0 };
     (extra_debug, offset)
 }
-
-/// Returns the NUL-terminated error message for `Par2CmdLineErrStr[res]`.
 
 /// `ParChecker::MaybeSplittedFragement`
 pub fn maybe_splitted_fragment(filename1: &[u8], filename2: &[u8]) -> bool {

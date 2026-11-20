@@ -3281,6 +3281,11 @@ impl NzbgetRsServerPool {
         self.get_connection(nl, Some(&srv), &[])
     }
 
+    /// Return a connection handed out by `get_connection*` to the pool.
+    ///
+    /// The pointer is only used as an identity: it is looked up among the
+    /// pool's own connections, so a null or foreign pointer is ignored instead
+    /// of dereferenced.
     pub fn free_connection(&self, conn_ptr: *mut PooledNntpConn, used: bool) {
         if conn_ptr.is_null() {
             return;
@@ -3291,7 +3296,14 @@ impl NzbgetRsServerPool {
         let Ok(mut g) = self.inner.lock() else {
             return;
         };
-        let c = unsafe { &*conn_ptr };
+        let inner = &mut *g;
+        let Some(c) = inner
+            .connections
+            .iter()
+            .find(|c| ptr::eq(&***c, conn_ptr.cast_const()))
+        else {
+            return;
+        };
         if c.check.swap(false, Ordering::SeqCst) {
             // paired with the increment in get_check_connection
             c.server.check_in_use.fetch_sub(1, Ordering::SeqCst);
@@ -3302,7 +3314,7 @@ impl NzbgetRsServerPool {
         }
         let nl = c.server.norm_level.load(Ordering::SeqCst);
         if nl > -1 && c.server.active.load(Ordering::SeqCst) {
-            if let Some(slot) = g.levels.get_mut(nl as usize) {
+            if let Some(slot) = inner.levels.get_mut(nl as usize) {
                 *slot += 1;
             }
         }

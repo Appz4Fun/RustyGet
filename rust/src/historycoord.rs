@@ -2949,7 +2949,7 @@ unsafe extern "C" fn hc_native_action_cb(
                         let art = host.article_at(file, idx);
                         if art.ptr != 0 {
                             host.invalidate_source_replacement(file, art.ptr);
-                            host.article_reset_for_retry(art.ptr);
+                            host.article_edit(art.ptr, crate::qarticle::ArticleEdit::ResetForRetry);
                         }
                     }
                 }

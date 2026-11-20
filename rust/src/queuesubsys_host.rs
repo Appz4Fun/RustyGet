@@ -332,15 +332,6 @@ pub(crate) const FILE_I64_MISSED_SIZE: FileI64 = FileI64::MissedSize;
 pub(crate) const FILE_INT_TOTAL_ARTICLES: FileInt = FileInt::TotalArticles;
 pub(crate) const FILE_INT_MISSED_ARTICLES: FileInt = FileInt::MissedArticles;
 
-// ArticleInfo field indices (op = 43)
-pub(crate) const ART_INT_STATUS: i32 = 0;
-pub(crate) const ART_INT_DUPE_FALLBACK_ROUND: i32 = 1;
-pub(crate) const ART_INT_DUPE_DONOR_ID: i32 = 2;
-pub(crate) const ART_INT_DUPE_PROACTIVE: i32 = 3;
-
-pub(crate) const ART_STR_MESSAGE_ID: i32 = 0;
-pub(crate) const ART_STR_DUPE_ORIG_MESSAGE_ID: i32 = 1;
-
 // ArticleDownloader actions (op = 51)
 pub(crate) const AD_ACT_STOP: i32 = 1;
 pub(crate) const AD_ACT_LOG_DEBUG: i32 = 2;
@@ -3462,21 +3453,13 @@ impl QueueSubsysHost {
         );
     }
 
-    pub fn article_set_int(&self, article_ptr: usize, field: i32, val: i32) {
-        self.article_op(article_ptr, 2, OpArgs::NONE.a2(field).p2(val as usize));
-    }
-
-    pub fn article_set_i64_pair(&self, article_ptr: usize, exp_offset: i64, exp_end: i64) {
-        let mut i64s = [exp_offset, exp_end];
-        self.article_op(article_ptr, 5, OpArgs::NONE.i64s(i64s.as_mut_ptr()));
-    }
-
-    pub fn article_set_str(&self, article_ptr: usize, field: i32, val: Option<&[u8]>) {
-        let cv = val.map(c_bytes);
-        let s1 = cv
-            .as_ref()
-            .map_or(std::ptr::null(), |v| v.as_ptr() as *const c_char);
-        self.article_op(article_ptr, 6, OpArgs::NONE.a2(field).s1(s1));
+    pub fn article_edit(&self, article_ptr: usize, edit: crate::qarticle::ArticleEdit<'_>) {
+        if !self.use_active {
+            return;
+        }
+        if let Some(a) = unsafe { crate::qarticle::Article::from_addr(article_ptr) } {
+            a.edit(edit);
+        }
     }
 
     /// Caller holds the queue; dedicated claims include running articles.
@@ -3510,9 +3493,6 @@ impl QueueSubsysHost {
                 context.invalidate_identity();
             }
         }
-    }
-    pub fn article_reset_for_retry(&self, article_ptr: usize) {
-        self.article_op(article_ptr, 9, OpArgs::NONE);
     }
 
     // ArticleCache & flush lock ops (op = 44)

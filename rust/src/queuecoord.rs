@@ -5043,6 +5043,17 @@ impl NzbgetRsQueueCoordinator {
         }
 
         if dead {
+            // a backup the fleet intake is still reading may yet feed this extraction: a
+            // dead run waits for its verdict too, unless nothing of this copy can be saved
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs() as i64);
+            if !hopeless
+                && crate::dupesearch_coord::intake_pending(backup_nzb.id)
+                && backup_still_unclassified(backup_kind, backup_hi.time, now, true)
+            {
+                return;
+            }
             if !crate::dupecoord::dupe_failover_warranted_inline(
                 nzb.dupe_score,
                 0,

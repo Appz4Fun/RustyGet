@@ -6842,7 +6842,8 @@ pub unsafe fn fleet_append(
         .iter()
         .filter_map(|&i| {
             let c = &candidates[i];
-            let id = added[c.index];
+            // a member already parked from an earlier submission keeps its id
+            let id = if c.existing_id > 0 { c.existing_id } else { added[c.index] };
             (id > 0 && !c.dead).then(|| (id, members[c.index].name.clone(), c.summary.clone()))
         })
         .collect();

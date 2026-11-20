@@ -499,6 +499,42 @@ pub fn content_map_to_inner(
     inner_ranges
 }
 
+/// The parts of `member_range` of member `member_index` that no run of `runs` covers.
+pub fn uncovered_by_runs(
+    runs: &[NzbgetRsContentRun],
+    member_index: i32,
+    member_range: NzbgetRsByteRange,
+) -> Vec<NzbgetRsByteRange> {
+    let mut covered: Vec<(i64, i64)> = runs
+        .iter()
+        .filter(|r| r.member_index == member_index)
+        .map(|r| (r.member_offset, r.member_offset.saturating_add(r.size)))
+        .collect();
+    covered.sort_unstable();
+    let mut left = Vec::new();
+    let mut at = member_range.offset;
+    let end = range_end(member_range);
+    for (s, e) in covered {
+        if e <= at {
+            continue;
+        }
+        if s >= end {
+            break;
+        }
+        if s > at {
+            left.push(NzbgetRsByteRange { offset: at, size: s - at });
+        }
+        at = at.max(e);
+        if at >= end {
+            break;
+        }
+    }
+    if at < end {
+        left.push(NzbgetRsByteRange { offset: at, size: end - at });
+    }
+    left
+}
+
 /// `ContentMap::MapFromInner`: maps an inner stream range into member coordinates.
 pub fn content_map_from_inner(
     runs: &[NzbgetRsContentRun],
@@ -5688,6 +5724,9 @@ pub struct RepairSetData {
     pub inner_holes: Vec<NzbgetRsByteRange>,
     pub original_inner_holes: Vec<NzbgetRsByteRange>,
     pub skip_reason: String,
+    /// Another file of the set than its payload (a sample beside the movie): base name and
+    /// size, which a duplicate's map looks for at any layer of its containers.
+    pub want: Option<(Vec<u8>, i64)>,
 }
 
 impl RepairSetData {
@@ -7412,17 +7451,38 @@ impl ContentMapper {
         password: Option<&[u8]>,
         tls_enabled: bool,
     ) -> Result<ContentMap, MapError> {
-        Self::build_map_at_depth(members, set, sources, password, tls_enabled, 0)
+        Self::build_map_at_depth_wanting(members, set, sources, password, tls_enabled, 0, None)
     }
 
-    fn build_map_at_depth(
+    #[allow(clippy::too_many_arguments)]
+    fn build_map_at_depth_wanting(
         members: &[SetMember],
         set: &MemberSet,
         sources: &dyn ContentSourceSet,
         password: Option<&[u8]>,
         tls_enabled: bool,
         depth: usize,
+        want: Option<&(Vec<u8>, i64)>,
     ) -> Result<ContentMap, MapError> {
+        if let Some(want) = want {
+            if matches!(set.format, MemberFormat::Bare | MemberFormat::Split) {
+                return Err(MapError::NotMedia);
+            }
+            let mut one = LayerPick {
+                want: Some(want.clone()),
+                ..LayerPick::default()
+            };
+            if let Ok(map) =
+                Self::build_layer_map(members, set, sources, password, tls_enabled, &mut one)
+            {
+                if map.inner_size() == want.1 {
+                    return Ok(map);
+                }
+            }
+            if sources.aborted() {
+                return Err(MapError::Aborted);
+            }
+        }
         let mut listing = LayerPick {
             nested: true,
             ..LayerPick::default()
@@ -7434,6 +7494,10 @@ impl ContentMapper {
         if matches!(set.format, MemberFormat::Bare | MemberFormat::Split)
             || is_stream_eligible(primary.inner_name_bytes())
         {
+            // Not the file asked for, which is not in this layer.
+            if want.is_some() {
+                return Err(MapError::NotMedia);
+            }
             return Ok(primary);
         }
         // Otherwise the biggest file must be a stored archive, alone or one volume of a
@@ -7516,13 +7580,14 @@ impl ContentMapper {
                 .map(|outer| NestedLayerSource { outer, sources })
                 .collect(),
         };
-        let inner = Self::build_map_at_depth(
+        let inner = Self::build_map_at_depth_wanting(
             &nested_members,
             &nested_set,
             &layer,
             password,
             tls_enabled,
             depth + 1,
+            want,
         )?;
         Self::compose_nested(&volume_maps, &inner)
     }
@@ -8037,7 +8102,9 @@ impl ContentMapper {
                 inner_holes: Vec::new(),
                 original_inner_holes: Vec::new(),
                 skip_reason: String::new(),
+                want: None,
             };
+            let mut others = Vec::new();
             match Self::build_map_with_tls(members, &set, sources, password, tls_enabled) {
                 Ok(map) if map.inside_encrypted() => {
                     // Such a file can be read but not patched in place: writing a range
@@ -8060,6 +8127,16 @@ impl ContentMapper {
                     data.inner_holes =
                         content_mapper_collect_inner_holes(map.runs(), &hole_members, &hole_ranges);
                     data.original_inner_holes = data.inner_holes.clone();
+                    others = Self::other_file_repair_sets(
+                        members,
+                        &set,
+                        sources,
+                        password,
+                        tls_enabled,
+                        &map,
+                        &hole_members,
+                        &hole_ranges,
+                    );
                     if data.inner_holes.is_empty() {
                         data.skip_reason =
                             "holes lie outside the mappable inner stream".to_string();
@@ -8075,8 +8152,94 @@ impl ContentMapper {
                 }
             }
             repair_sets.push(data);
+            repair_sets.extend(others);
         }
         repair_sets
+    }
+
+    /// How many other files of one set are mapped for their holes.
+    const MAX_OTHER_FILES: usize = 16;
+
+    /// Repair sets for the other stored files of `set` (a sample, an nfo beside the movie)
+    /// holding holes that `payload`'s map leaves out: each is mapped by its name and size, and
+    /// a duplicate lends it from wherever it keeps that file.
+    #[allow(clippy::too_many_arguments)]
+    fn other_file_repair_sets(
+        members: &[SetMember],
+        set: &MemberSet,
+        sources: &dyn ContentSourceSet,
+        password: Option<&[u8]>,
+        tls_enabled: bool,
+        payload: &ContentMap,
+        hole_members: &[i32],
+        hole_ranges: &[NzbgetRsByteRange],
+    ) -> Vec<RepairSetData> {
+        let mut left_members = Vec::new();
+        let mut left_ranges = Vec::new();
+        for (&m, &h) in hole_members.iter().zip(hole_ranges) {
+            for piece in uncovered_by_runs(payload.runs(), m, h) {
+                left_members.push(m);
+                left_ranges.push(piece);
+            }
+        }
+        if left_ranges.is_empty() || set.format != MemberFormat::Rar {
+            return Vec::new();
+        }
+        let mut listing = LayerPick {
+            nested: true,
+            ..LayerPick::default()
+        };
+        if Self::build_layer_map(members, set, sources, password, tls_enabled, &mut listing).is_err()
+        {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for (name, size) in listing.files.into_iter().take(Self::MAX_OTHER_FILES) {
+            if sources.aborted() {
+                break;
+            }
+            let is_payload = locale_casecmp(&name, payload.inner_name_bytes())
+                == std::cmp::Ordering::Equal
+                && size == payload.inner_size();
+            if size <= 0 || is_payload || is_nested_container_name(&name) {
+                continue;
+            }
+            let want = (name, size);
+            let Ok(map) = Self::build_map_wanting(members, set, sources, password, tls_enabled, &want)
+            else {
+                continue;
+            };
+            if map.inside_encrypted() || map.encrypted() {
+                continue;
+            }
+            let inner_holes = content_mapper_collect_inner_holes(map.runs(), &left_members, &left_ranges);
+            if inner_holes.is_empty() {
+                continue;
+            }
+            out.push(RepairSetData {
+                set: set.clone(),
+                map: Some(map),
+                original_inner_holes: inner_holes.clone(),
+                inner_holes,
+                skip_reason: String::new(),
+                want: Some(want),
+            });
+        }
+        out
+    }
+
+    /// Maps the file `want` (base name and size) of a member set, found at any layer: in the
+    /// set's own archive, or in a stored archive inside it (a duplicate keeps its sample beside
+    /// a nested set, or inside it).
+    pub fn build_map_wanting(
+        members: &[SetMember],
+        set: &MemberSet,
+        sources: &dyn ContentSourceSet,
+        password: Option<&[u8]>,
+        tls_enabled: bool,
+        want: &(Vec<u8>, i64),
+    ) -> Result<ContentMap, MapError> {
+        Self::build_map_at_depth_wanting(members, set, sources, password, tls_enabled, 0, Some(want))
     }
 
     pub fn coalesce_ranges(ranges: &[NzbgetRsByteRange]) -> Vec<NzbgetRsByteRange> {
@@ -9173,6 +9336,7 @@ fn plan_dead_fills(
             original_inner_holes: inner_holes.clone(),
             inner_holes,
             skip_reason: DEAD_VOLUME_SET.to_string(),
+            want: None,
         };
         match existing {
             Some(e) if repair_sets[e].map.is_none() => repair_sets[e] = data,
@@ -9606,7 +9770,7 @@ impl CrossPackRepairSession {
             let first = target_sets[media].members.first()?;
             self.repair_sets
                 .iter()
-                .position(|r| r.map.is_some() && r.set.members.contains(first))
+                .position(|r| r.map.is_some() && r.want.is_none() && r.set.members.contains(first))
         });
         self.media_repair_set = target_media;
         let mut media_extracted_unsized = false;
@@ -9614,6 +9778,8 @@ impl CrossPackRepairSession {
         let mut set_maps: Vec<Option<ContentMap>> = vec![None; donor_sets.len()];
         let mut set_skips: Vec<Option<MapError>> = vec![None; donor_sets.len()];
         let mut set_tried: Vec<bool> = vec![false; donor_sets.len()];
+        let mut want_maps: std::collections::HashMap<(usize, Vec<u8>, i64), Option<ContentMap>> =
+            std::collections::HashMap::new();
 
         for repair_set_idx in 0..self.repair_sets.len() {
             if self.repair_sets[repair_set_idx].map.is_none()
@@ -9630,119 +9796,147 @@ impl CrossPackRepairSession {
                     break;
                 }
 
-                if !set_tried[set_index] {
-                    set_tried[set_index] = true;
-                    let mapping_budget = 8 + (donor_set.members.len() as i32) * 4;
-                    donor_sources.set_fetch_budget(Some(mapping_budget));
-                    match ContentMapper::build_map_with_tls(
-                        &donor_members,
-                        donor_set,
-                        &donor_sources,
-                        None,
-                        self.tls_enabled,
-                    ) {
-                        Ok(map) => set_maps[set_index] = Some(map),
-                        Err(reason) => set_skips[set_index] = Some(reason),
+                let want = self.repair_sets[repair_set_idx].want.clone();
+                let donor_map: &ContentMap;
+                if let Some(want) = want {
+                    // Another file than the payload: found by name and size at any layer of
+                    // the duplicate's containers (its sample may sit beside a nested set).
+                    let key = (set_index, want.0.clone(), want.1);
+                    if !want_maps.contains_key(&key) {
+                        donor_sources
+                            .set_fetch_budget(Some(8 + (donor_set.members.len() as i32) * 4));
+                        let map = ContentMapper::build_map_wanting(
+                            &donor_members,
+                            donor_set,
+                            &donor_sources,
+                            None,
+                            self.tls_enabled,
+                            &want,
+                        )
+                        .ok()
+                        .filter(|m| m.inner_size() == want.1 && !m.encrypted());
+                        donor_sources.set_fetch_budget(None);
+                        want_maps.insert(key.clone(), map);
                     }
-                    if set_maps[set_index].is_none()
-                        && !donor_password.is_empty()
-                        && set_skips[set_index].as_ref().is_some_and(MapError::is_encrypted)
-                    {
-                        let retry_budget = 8 + (donor_set.members.len() as i32) * 4;
-                        donor_sources.set_fetch_budget(Some(retry_budget));
+                    let Some(map) = want_maps.get(&key).and_then(Option::as_ref) else {
+                        continue;
+                    };
+                    donor_map = map;
+                } else {
+                    if !set_tried[set_index] {
+                        set_tried[set_index] = true;
+                        let mapping_budget = 8 + (donor_set.members.len() as i32) * 4;
+                        donor_sources.set_fetch_budget(Some(mapping_budget));
                         match ContentMapper::build_map_with_tls(
                             &donor_members,
                             donor_set,
                             &donor_sources,
-                            Some(donor_password),
+                            None,
                             self.tls_enabled,
                         ) {
-                            Ok(map) => {
-                                set_maps[set_index] = Some(map);
-                                set_skips[set_index] = None;
-                            }
-                            Err(reason) => {
-                                let reason_text = reason.to_string();
-                                set_skips[set_index] = Some(reason);
-                                let first_donor_name =
-                                    &donor_members[donor_set.members[0] as usize].name;
-                                let mut msg = b"Skipping packing ".to_vec();
-                                msg.extend_from_slice(first_donor_name);
-                                msg.extend_from_slice(b" of duplicate ");
-                                msg.extend_from_slice(donor_info_name);
-                                msg.extend_from_slice(b": ");
-                                msg.extend_from_slice(reason_text.as_bytes());
-                                env_cell
-                                    .borrow_mut()
-                                    .emit_message_bytes(TargetMessageKind::Info, &msg);
+                            Ok(map) => set_maps[set_index] = Some(map),
+                            Err(reason) => set_skips[set_index] = Some(reason),
+                        }
+                        if set_maps[set_index].is_none()
+                            && !donor_password.is_empty()
+                            && set_skips[set_index].as_ref().is_some_and(MapError::is_encrypted)
+                        {
+                            let retry_budget = 8 + (donor_set.members.len() as i32) * 4;
+                            donor_sources.set_fetch_budget(Some(retry_budget));
+                            match ContentMapper::build_map_with_tls(
+                                &donor_members,
+                                donor_set,
+                                &donor_sources,
+                                Some(donor_password),
+                                self.tls_enabled,
+                            ) {
+                                Ok(map) => {
+                                    set_maps[set_index] = Some(map);
+                                    set_skips[set_index] = None;
+                                }
+                                Err(reason) => {
+                                    let reason_text = reason.to_string();
+                                    set_skips[set_index] = Some(reason);
+                                    let first_donor_name =
+                                        &donor_members[donor_set.members[0] as usize].name;
+                                    let mut msg = b"Skipping packing ".to_vec();
+                                    msg.extend_from_slice(first_donor_name);
+                                    msg.extend_from_slice(b" of duplicate ");
+                                    msg.extend_from_slice(donor_info_name);
+                                    msg.extend_from_slice(b": ");
+                                    msg.extend_from_slice(reason_text.as_bytes());
+                                    env_cell
+                                        .borrow_mut()
+                                        .emit_message_bytes(TargetMessageKind::Info, &msg);
+                                }
                             }
                         }
+                        donor_sources.set_fetch_budget(None);
+                        set_compressed[set_index] = set_maps[set_index].is_none()
+                            && set_skips[set_index].as_ref().is_some_and(is_compressed_skip);
                     }
-                    donor_sources.set_fetch_budget(None);
-                    set_compressed[set_index] = set_maps[set_index].is_none()
-                        && set_skips[set_index].as_ref().is_some_and(is_compressed_skip);
-                }
 
-                let target_inner_size = self.repair_sets[repair_set_idx]
-                    .map
-                    .as_ref()
-                    .map_or(0, ContentMap::inner_size);
-                let size_matches = set_maps[set_index]
-                    .as_ref()
-                    .is_some_and(|dm| dm.inner_size() == target_inner_size);
-                if !size_matches {
-                    // A 7z whose LZMA2 coder stored the data in raw chunks holds the inner
-                    // bytes in plain form: borrow just the articles around each hole.
-                    self.lzma2_compressed_throughout = false;
-                    self.lzma2_other_size = false;
-                    let raw_filled = donor_set.format == MemberFormat::SevenZip
-                        && set_maps[set_index].is_none()
-                        && self.exec_lzma2_raw_repair(
-                            repair_set_idx,
-                            &donor_members,
-                            donor_set,
-                            &donor_sources,
-                            donor_info_name,
-                            &env_cell,
-                        );
-                    set_compressed[set_index] |= self.lzma2_compressed_throughout;
-                    media_extracted_unsized |= self.lzma2_other_size
-                        && donor_media == Some(set_index)
-                        && target_media == Some(repair_set_idx);
-                    if raw_filled && self.repair_sets[repair_set_idx].inner_holes.is_empty() {
-                        // Everything is filled. Holes the raw chunks did not reach (stretches
-                        // the coder compressed) are left to the decompression step below.
-                        continue;
-                    }
-                    let can_decompress =
-                        allow_decompress && ContentMapper::is_compressible_archive(donor_set);
-                    if can_decompress {
-                        let first_donor_name = &donor_members[donor_set.members[0] as usize].name;
-                        let mut key = Vec::with_capacity(
-                            donor_queued_filename.len() + 1 + first_donor_name.len(),
-                        );
-                        key.extend_from_slice(donor_queued_filename);
-                        key.push(b'|');
-                        key.extend_from_slice(first_donor_name);
-                        if self.decompress_tried.insert((repair_set_idx, key)) {
-                            let none_sized = self.exec_decompress_repair(
+                    let target_inner_size = self.repair_sets[repair_set_idx]
+                        .map
+                        .as_ref()
+                        .map_or(0, ContentMap::inner_size);
+                    let size_matches = set_maps[set_index]
+                        .as_ref()
+                        .is_some_and(|dm| dm.inner_size() == target_inner_size);
+                    if !size_matches {
+                        // A 7z whose LZMA2 coder stored the data in raw chunks holds the inner
+                        // bytes in plain form: borrow just the articles around each hole.
+                        self.lzma2_compressed_throughout = false;
+                        self.lzma2_other_size = false;
+                        let raw_filled = donor_set.format == MemberFormat::SevenZip
+                            && set_maps[set_index].is_none()
+                            && self.exec_lzma2_raw_repair(
                                 repair_set_idx,
                                 &donor_members,
                                 donor_set,
-                                donor_article_sizes,
+                                &donor_sources,
                                 donor_info_name,
-                                donor_password,
                                 &env_cell,
                             );
-                            media_extracted_unsized |= none_sized
-                                && donor_media == Some(set_index)
-                                && target_media == Some(repair_set_idx);
+                        set_compressed[set_index] |= self.lzma2_compressed_throughout;
+                        media_extracted_unsized |= self.lzma2_other_size
+                            && donor_media == Some(set_index)
+                            && target_media == Some(repair_set_idx);
+                        if raw_filled && self.repair_sets[repair_set_idx].inner_holes.is_empty() {
+                            // Everything is filled. Holes the raw chunks did not reach (stretches
+                            // the coder compressed) are left to the decompression step below.
+                            continue;
                         }
+                        let can_decompress =
+                            allow_decompress && ContentMapper::is_compressible_archive(donor_set);
+                        if can_decompress {
+                            let first_donor_name = &donor_members[donor_set.members[0] as usize].name;
+                            let mut key = Vec::with_capacity(
+                                donor_queued_filename.len() + 1 + first_donor_name.len(),
+                            );
+                            key.extend_from_slice(donor_queued_filename);
+                            key.push(b'|');
+                            key.extend_from_slice(first_donor_name);
+                            if self.decompress_tried.insert((repair_set_idx, key)) {
+                                let none_sized = self.exec_decompress_repair(
+                                    repair_set_idx,
+                                    &donor_members,
+                                    donor_set,
+                                    donor_article_sizes,
+                                    donor_info_name,
+                                    donor_password,
+                                    &env_cell,
+                                );
+                                media_extracted_unsized |= none_sized
+                                    && donor_media == Some(set_index)
+                                    && target_media == Some(repair_set_idx);
+                            }
+                        }
+                        continue;
                     }
-                    continue;
-                }
 
-                let donor_map = set_maps[set_index].as_ref().unwrap();
+                    donor_map = set_maps[set_index].as_ref().unwrap();
+                }
                 let check = {
                     let mut target_adapter = DiskTargetFileSetAdapter {
                         files: &mut self.target_files,
@@ -13233,6 +13427,139 @@ mod tests {
         out
     }
 
+    /// A stored RAR5 volume holding several files: (data, full size, split before, split
+    /// after, name) each.
+    fn build_rar5_multi_volume(entries: &[(&[u8], i64, bool, bool, &str)]) -> Vec<u8> {
+        let mut out = vec![0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00];
+        let mut main_header = Vec::new();
+        cm_put_vint(&mut main_header, 1);
+        cm_put_vint(&mut main_header, 0);
+        cm_put_vint(&mut main_header, 0x01);
+        cm_put_le32(&mut out, 0);
+        cm_put_vint(&mut out, main_header.len() as u64);
+        out.extend_from_slice(&main_header);
+        for &(slice, full_size, split_before, split_after, name) in entries {
+            let mut file_header = Vec::new();
+            cm_put_vint(&mut file_header, 2);
+            cm_put_vint(
+                &mut file_header,
+                0x02 | if split_before { 0x08 } else { 0 } | if split_after { 0x10 } else { 0 },
+            );
+            cm_put_vint(&mut file_header, slice.len() as u64);
+            cm_put_vint(&mut file_header, 0);
+            cm_put_vint(&mut file_header, full_size as u64);
+            cm_put_vint(&mut file_header, 0);
+            cm_put_vint(&mut file_header, 0);
+            cm_put_vint(&mut file_header, 0);
+            cm_put_vint(&mut file_header, name.len() as u64);
+            file_header.extend_from_slice(name.as_bytes());
+            cm_put_le32(&mut out, 0);
+            cm_put_vint(&mut out, file_header.len() as u64);
+            out.extend_from_slice(&file_header);
+            out.extend_from_slice(slice);
+        }
+        let mut end_header = Vec::new();
+        cm_put_vint(&mut end_header, 5);
+        cm_put_vint(&mut end_header, 0);
+        cm_put_vint(&mut end_header, 0);
+        cm_put_le32(&mut out, 0);
+        cm_put_vint(&mut out, end_header.len() as u64);
+        out.extend_from_slice(&end_header);
+        seal_rar_headers(&mut out);
+        out
+    }
+
+    #[test]
+    fn a_sample_beside_the_movie_is_mapped_and_found_in_any_layer_of_a_duplicate() {
+        let movie = cm_pattern(300, 3);
+        let sample = cm_pattern(80, 101);
+        // Target: the movie over two volumes, the sample after it in the second.
+        let vol1 = build_rar5_multi_volume(&[(&movie[..200], 300, false, true, "movie.mkv")]);
+        let vol2 = build_rar5_multi_volume(&[
+            (&movie[200..], 300, true, false, "movie.mkv"),
+            (&sample, 80, false, false, "movie-sample.mkv"),
+        ]);
+        let at = vol2.windows(80).position(|w| w == sample.as_slice()).unwrap() as i64;
+        let members = vec![
+            SetMember::new(b"t.part1.rar", vol1.len() as i64),
+            SetMember::new(b"t.part2.rar", vol2.len() as i64),
+        ];
+        let mut sources = MemorySourceSet::default();
+        sources.push(vol1);
+        sources.push(vol2);
+        // Holes in the movie's tail and in the sample.
+        let mut movie_end = 0;
+        if let Some(p) = sources.sources[1]
+            .as_ref()
+            .unwrap()
+            .0
+            .windows(100)
+            .position(|w| w == &movie[200..])
+        {
+            movie_end = p as i64 + 100;
+        }
+        let holes = vec![
+            Vec::new(),
+            vec![
+                NzbgetRsByteRange { offset: movie_end - 10, size: 10 },
+                NzbgetRsByteRange { offset: at + 20, size: 30 },
+            ],
+        ];
+        let sets = ContentMapper::build_repair_sets(&members, &holes, &sources, None);
+        assert_eq!(sets.len(), 2);
+        assert_eq!(sets[0].map.as_ref().unwrap().inner_name_bytes(), b"movie.mkv");
+        assert!(sets[0].want.is_none());
+        assert_eq!(sets[0].inner_holes, vec![NzbgetRsByteRange { offset: 290, size: 10 }]);
+        let want = sets[1].want.clone().unwrap();
+        assert_eq!(want, (b"movie-sample.mkv".to_vec(), 80));
+        assert_eq!(sets[1].inner_holes, vec![NzbgetRsByteRange { offset: 20, size: 30 }]);
+
+        // Duplicates: the sample beside a nested set holding the movie, or inside it.
+        let read_through = |map: &ContentMap, src: &MemorySourceSet| -> Vec<u8> {
+            let mut out = vec![0u8; map.inner_size() as usize];
+            for r in map.runs() {
+                let s = src.get_source(r.member_index).unwrap();
+                let dst = r.inner_offset as usize;
+                assert!(s.read(r.member_offset, &mut out[dst..dst + r.size as usize]).is_ok());
+            }
+            out
+        };
+        let one = MemberSet { format: MemberFormat::Rar, members: vec![0] };
+        let donor_members = vec![SetMember::new(b"d.rar", 0)];
+        let inner_movie = build_rar5_multi_volume(&[(&movie, 300, false, false, "movie.mkv")]);
+        let beside = build_rar5_multi_volume(&[
+            (&inner_movie, inner_movie.len() as i64, false, false, "inner.rar"),
+            (&sample, 80, false, false, "movie-sample.mkv"),
+        ]);
+        let inner_both = build_rar5_multi_volume(&[
+            (&movie, 300, false, false, "movie.mkv"),
+            (&sample, 80, false, false, "movie-sample.mkv"),
+        ]);
+        let inside = build_rar5_multi_volume(&[(
+            &inner_both,
+            inner_both.len() as i64,
+            false,
+            false,
+            "inner.rar",
+        )]);
+        for donor in [beside, inside] {
+            let mut d = MemorySourceSet::default();
+            d.push(donor);
+            let map =
+                ContentMapper::build_map_wanting(&donor_members, &one, &d, None, true, &want).unwrap();
+            assert_eq!(map.inner_size(), 80);
+            assert_eq!(read_through(&map, &d), sample);
+            // The payload map is still the movie.
+            let movie_map = ContentMapper::build_map(&donor_members, &one, &d, None).unwrap();
+            assert_eq!(read_through(&movie_map, &d), movie);
+        }
+        // A file no layer holds is not mapped.
+        let mut d = MemorySourceSet::default();
+        d.push(inner_movie);
+        let missing = (b"other.mkv".to_vec(), 80);
+        assert!(ContentMapper::build_map_wanting(&donor_members, &one, &d, None, true, &missing).is_err());
+    }
+
     fn build_rar3_encrypted_data_volume(slice: &[u8], full_size: i64, inner_name: &str) -> Vec<u8> {
         let mut out = vec![0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x00];
         cm_put_le16(&mut out, 0);
@@ -16358,6 +16685,7 @@ mod tests {
             inner_holes: vec![hole],
             original_inner_holes: vec![hole],
             skip_reason: String::new(),
+            want: None,
         };
 
         let mut donor_map = ContentMap::default();

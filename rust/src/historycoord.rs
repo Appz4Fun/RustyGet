@@ -2040,6 +2040,7 @@ mod native {
             self.nzb_set_int(nzb_ptr, NZB_INT_REPROCESS, c_int::from(reprocess));
             self.nzb_set_str(nzb_ptr, NZB_STR_FINAL_DIR, b"");
             crate::postproc::forget_dead_volume_verdicts(nzb.id);
+            crate::postproc::forget_put_back(nzb.id);
             self.history_return_to_queue(dq, hist, hidx as usize);
         }
 
@@ -2139,6 +2140,7 @@ mod native {
             self.nzb_set_int(job, NZB_INT_DUPE_NO_PAR_NOTED, 0);
             self.nzb_redownload_replace_files(job, src_nzb_ptr);
             self.destroy_nzb_uptr(new_nzb);
+            crate::postproc::forget_put_back(self.nzb_snap(job, false).id);
             if let Some((qc, qh)) = crate::ffi::active_queue_coord_and_host() {
                 qc.check_dupe_file_infos(&qh, job);
             }

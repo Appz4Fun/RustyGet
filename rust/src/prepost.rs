@@ -587,6 +587,18 @@ fn direct_unpack_read_all_damage(
         }
         absent += 1;
     }
+    // Nothing else checks a file direct unpack did not extract: bytes put back into it (a
+    // split file, a sample) are verified by par-check alone, so it is kept for such a job
+    // unless every file it did not read is a small informational one.
+    if put_back && absent == 0 {
+        let unread = files.iter().filter(|f| !f.par_file).any(|f| {
+            !extracted.iter().any(|e| e.eq_ignore_ascii_case(&f.filename))
+                && !is_informational_file(&f.filename)
+        });
+        if unread {
+            return false;
+        }
+    }
     // With every file on disk par-check only verifies (quickly, from the article checksums
     // where it can): it is kept, unless bytes were put back into the volumes that par2 can
     // count as damage although the extraction read them fine (`put_back`: lent by a duplicate,
@@ -594,6 +606,16 @@ fn direct_unpack_read_all_damage(
     // block): its failure would then fail a download direct unpack verified. It is skipped
     // when it would rebuild borrowed volumes.
     absent <= borrowed && (absent > 0 || put_back)
+}
+
+/// Release side files that hold no payload (`.nfo`, `.sfv`, ...): par-check is not kept for them.
+fn is_informational_file(name: &[u8]) -> bool {
+    const EXTS: [&[u8]; 12] = [
+        b".nfo", b".sfv", b".srr", b".srs", b".txt", b".jpg", b".jpeg", b".png", b".url",
+        b".nzb", b".md5", b".sha1",
+    ];
+    let ext = crate::filetypes::file_extension(name);
+    EXTS.iter().any(|e| e.eq_ignore_ascii_case(ext))
 }
 
 /// Classify skipped par-check health action in `PrePostProcessor::StartJob`:
@@ -1647,6 +1669,7 @@ impl NzbgetRsPrePostProcessor {
         let nzb2 = host.nzb_snap(nzb_ptr, false);
         crate::parlive::forget_download_writes(nzb2.id);
         crate::postproc::forget_dead_volume_verdicts(nzb2.id);
+        crate::postproc::forget_put_back(nzb2.id);
         dupe_gate_forget(nzb2.id);
         crate::postproc::direct_unpack_join_live_par_repair(nzb2.id);
         delete_cleanup_host(host, &opts, &nzb2);
@@ -2662,6 +2685,13 @@ mod tests {
             !ok(&[f("a.part01.rar", 1, false)], &extracted, &d, 0, false),
             "nothing damaged, nothing put back"
         );
+        let patched_split = [f("A.PART02.rar", 2, false), f("Show.mkv.001", 1, false)];
+        assert!(
+            !ok(&patched_split, &extracted, &d, 0, true),
+            "a file direct unpack never read may hold lent bytes only par-check verifies"
+        );
+        let with_nfo = [f("A.PART02.rar", 2, false), f("a.nfo", 1, false), f("a.SFV", 1, false)];
+        assert!(ok(&with_nfo, &extracted, &d, 0, true), "side files hold no payload");
         // part03 never arrived and was read borrowed (so it is in `extracted`): it takes the
         // one borrowed slot, and a missing obfuscated file has none left.
         let borrowed_read = vec![f("a.part03.rar", 3, false)];

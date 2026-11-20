@@ -2801,6 +2801,14 @@ pub(crate) fn forget_dead_volume_verdicts(nzb_id: i32) {
     crate::queuecoord::forget_kept_for_borrowing(nzb_id);
 }
 
+/// Forgets what was put back into the volumes of download `nzb_id` (dead volumes read
+/// borrowed, volume ends rebuilt): it left the queue, or starts over, and a fresh attempt must
+/// not skip par-check over an earlier one's repairs.
+pub(crate) fn forget_put_back(nzb_id: i32) {
+    let _ = take_dead_volumes_borrowed(nzb_id);
+    let _ = take_volume_end_rebuilt(nzb_id);
+}
+
 /// Marks (or clears) a borrow of dead volumes of download `nzb_id` in progress.
 pub(crate) fn note_dead_volume_borrow(nzb_id: i32, underway: bool) {
     if underway {

@@ -2453,6 +2453,10 @@ struct DirectUnpackHoldState {
     /// Dead volumes rebuilt from a duplicate (see `deadvolume`), by full path: the extraction
     /// reads these instead of the missing files.
     virtuals: std::collections::HashMap<Vec<u8>, crate::deadvolume::VirtualVolume>,
+    /// Dead volumes handed over before their borrow finished, by full path: rebuilt like
+    /// `virtuals`, with the bytes not borrowed yet as holes. They stay held until the borrow
+    /// completes and `direct_unpack_set_virtual` replaces them.
+    offered: std::collections::HashMap<Vec<u8>, crate::deadvolume::VirtualVolume>,
 }
 
 /// What direct unpack's extraction session sees of a download in progress: a volume is ready
@@ -2499,7 +2503,7 @@ impl crate::progressive_unpack::VolumeFeed for DirectUnpackFeed {
     fn has_borrowed(&self) -> bool {
         direct_unpack_holds()
             .get(&self.nzb_id)
-            .is_some_and(|st| !st.virtuals.is_empty())
+            .is_some_and(|st| !st.virtuals.is_empty() || !st.offered.is_empty())
     }
 
     fn set_became_final(&self) -> bool {
@@ -2677,6 +2681,8 @@ pub(crate) fn direct_unpack_virtual(nzb_id: i32, full_path: &[u8]) -> Option<cra
             st.virtuals.get(full_path).or_else(|| {
                 st.virtuals.iter().find(|(k, _)| k.eq_ignore_ascii_case(full_path)).map(|(_, v)| v)
             })
+            // One handed over before its borrow finished, with holes.
+            .or_else(|| case_blind(&st.offered, full_path))
             .cloned()
         })
 }
@@ -2781,6 +2787,8 @@ pub(crate) fn dead_volume_donor_cannot_lend(nzb_id: i32, donor: &[u8]) -> bool {
 
 /// True once direct unpack of download `nzb_id` holds a dead volume rebuilt from a duplicate.
 fn dead_volume_rebuilt(nzb_id: i32) -> bool {
+    // A volume handed over before its borrow finished proves nothing of the donor: it is
+    // offered before any donor is read.
     direct_unpack_holds()
         .get(&nzb_id)
         .is_some_and(|st| !st.virtuals.is_empty())
@@ -2835,7 +2843,7 @@ pub(crate) fn dead_volume_borrow_underway(nzb_id: i32) -> bool {
     dead_volume_borrows().contains(&nzb_id)
         || direct_unpack_holds()
             .get(&nzb_id)
-            .is_some_and(|st| !st.virtuals.is_empty())
+            .is_some_and(|st| !st.virtuals.is_empty() || !st.offered.is_empty())
 }
 
 /// How many dead volumes of download `nzb_id` were rebuilt from a duplicate (0 if none), once:
@@ -2857,6 +2865,7 @@ pub(crate) fn direct_unpack_waits_on_dead_volume(nzb_id: i32) -> bool {
     let candidates: Vec<Vec<u8>> = direct_unpack_holds().get(&nzb_id).map_or_else(Vec::new, |st| {
         st.held
             .iter()
+            // A volume handed over with holes still waits for the rest of its borrow.
             .filter(|p| !st.virtuals.contains_key(*p))
             .cloned()
             .collect()
@@ -2894,6 +2903,48 @@ pub(crate) fn direct_unpack_has_virtual(full_path: &[u8]) -> bool {
         .any(|st| st.virtuals.keys().any(|k| k.eq_ignore_ascii_case(full_path)))
 }
 
+fn case_blind<'a>(
+    map: &'a std::collections::HashMap<Vec<u8>, crate::deadvolume::VirtualVolume>,
+    full_path: &[u8],
+) -> Option<&'a crate::deadvolume::VirtualVolume> {
+    map.get(full_path).or_else(|| {
+        map.iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(full_path))
+            .map(|(_, v)| v)
+    })
+}
+
+/// The stand-in for dead volume `full_path` of download `nzb_id` handed over before its borrow
+/// finished (see [`direct_unpack_offer_virtual`]), if any.
+pub(crate) fn direct_unpack_offered(
+    nzb_id: i32,
+    full_path: &[u8],
+) -> Option<crate::deadvolume::VirtualVolume> {
+    direct_unpack_holds()
+        .get(&nzb_id)
+        .and_then(|st| case_blind(&st.offered, full_path).cloned())
+}
+
+/// Hands direct unpack of download `nzb_id` a rebuilt stand-in for dead volume `full_path`
+/// whose borrow has not finished: its `holes` are read as holes, so extraction goes on past
+/// them instead of waiting at the volume. The volume stays held: the holes are patched into
+/// the output once [`direct_unpack_set_virtual`] hands over the finished volume. Ignored once
+/// a finished stand-in is there.
+pub(crate) fn direct_unpack_offer_virtual(
+    nzb_id: i32,
+    full_path: &[u8],
+    volume: crate::deadvolume::VirtualVolume,
+) {
+    let mut map = direct_unpack_holds();
+    let st = map.entry(nzb_id).or_default();
+    if case_blind(&st.virtuals, full_path).is_some() {
+        return;
+    }
+    st.offered
+        .retain(|k, _| !k.eq_ignore_ascii_case(full_path));
+    st.offered.insert(full_path.to_vec(), volume);
+}
+
 /// Hands direct unpack of download `nzb_id` a rebuilt stand-in for dead volume `full_path`,
 /// releasing the volume from hold when one was set for it (a dead file with an obfuscated name
 /// is held under that name instead, see below).
@@ -2905,6 +2956,8 @@ pub(crate) fn direct_unpack_set_virtual(
     let mut map = direct_unpack_holds();
     let id = nzb_id;
     let st = map.entry(id).or_default();
+    st.offered
+        .retain(|k, _| !k.eq_ignore_ascii_case(full_path));
     st.virtuals.insert(full_path.to_vec(), volume);
     // The extractor derives volume names from part 1's spelling, a dead job keeps its posted
     // spelling: match the hold case-blind.
@@ -2935,10 +2988,12 @@ pub(crate) fn direct_unpack_set_virtual(
 
 /// Releases one repaired volume by path. Returns true when it was on hold.
 pub(crate) fn direct_unpack_release_path(full_path: &[u8]) -> bool {
+    let settled = settle_offered(full_path);
     let mut map = direct_unpack_holds();
     for st in map.values_mut() {
         if let Some(i) = st.held.iter().position(|p| p == full_path) {
             let path = st.held.remove(i);
+            drop_offered(st, &path, settled.as_ref());
             st.holes.remove(&path);
             st.released.push(hold_path_filename(&path).to_vec());
             if st.held.is_empty() {
@@ -2948,6 +3003,73 @@ pub(crate) fn direct_unpack_release_path(full_path: &[u8]) -> bool {
         }
     }
     false
+}
+
+/// The stand-in for `full_path` handed over with holes, completed from the real volume now on
+/// disk (recreated whole from a twin, or repaired by par2), if both are there. The extraction
+/// may have read the stand-in already and recorded its holes against the stand-in's layout,
+/// which for RAR5 has no part checksum and so starts its data at another offset than the real
+/// volume: the real volume's data is copied into the stand-in's scratch file instead of
+/// switching to the real file, so the recorded holes still name the right bytes. The real
+/// volume must end like the stand-in and be long enough to hold its data; anything it gets
+/// wrong is caught when the extracted file is verified.
+fn settle_offered(full_path: &[u8]) -> Option<crate::deadvolume::VirtualVolume> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let offered = direct_unpack_holds()
+        .values()
+        .find_map(|st| case_blind(&st.offered, full_path).cloned())?;
+    let real = crate::fsops::path(full_path);
+    let tail_len = offered.tail.len() as u64;
+    let complete = (|| -> std::io::Result<bool> {
+        let mut src = std::fs::File::open(real)?;
+        let len = src.metadata()?.len();
+        let Some(head_len) = len.checked_sub(offered.data_len + tail_len) else {
+            return Ok(false);
+        };
+        let mut tail = vec![0u8; tail_len as usize];
+        src.seek(SeekFrom::Start(len - tail_len))?;
+        src.read_exact(&mut tail)?;
+        if tail != offered.tail {
+            return Ok(false);
+        }
+        src.seek(SeekFrom::Start(head_len))?;
+        let mut dst = std::fs::OpenOptions::new().write(true).open(&offered.data)?;
+        let copied = std::io::copy(&mut src.take(offered.data_len), &mut dst)?;
+        dst.flush()?;
+        Ok(copied == offered.data_len)
+    })()
+    .unwrap_or(false);
+    complete.then(|| crate::deadvolume::VirtualVolume { holes: Vec::new(), ..offered })
+}
+
+/// Drops the stand-in for `path` handed over with holes, as its real volume is released: it
+/// becomes a finished stand-in when `settled` completed it (see [`settle_offered`]), otherwise
+/// it goes with its scratch file and the real volume answers.
+fn drop_offered(
+    st: &mut DirectUnpackHoldState,
+    path: &[u8],
+    settled: Option<&crate::deadvolume::VirtualVolume>,
+) {
+    let mut stale = Vec::new();
+    st.offered.retain(|k, v| {
+        let keep = !k.eq_ignore_ascii_case(path);
+        if !keep {
+            stale.push((k.clone(), v.data.clone()));
+        }
+        keep
+    });
+    for (key, data) in stale {
+        match settled {
+            Some(v) if v.data == data => {
+                st.virtuals.insert(key, v.clone());
+            }
+            _ => {
+                if crate::deadvolume::is_scratch(&data) {
+                    let _ = std::fs::remove_file(&data);
+                }
+            }
+        }
+    }
 }
 
 /// Releases every held volume of download `nzb_id` (its repair succeeded).
@@ -3014,6 +3136,11 @@ fn publish_live_holds(
     targets: &[(i32, Vec<u8>)],
     verified: &[i32],
 ) -> usize {
+    let settled: Vec<(&[u8], Option<crate::deadvolume::VirtualVolume>)> = targets
+        .iter()
+        .filter(|(id, _)| verified.contains(id))
+        .map(|(_, path)| (path.as_slice(), settle_offered(path)))
+        .collect();
     let mut map = direct_unpack_holds();
     let Some(state) = map.get_mut(&nzb_id) else {
         return 0;
@@ -3031,6 +3158,8 @@ fn publish_live_holds(
         }
         if let Some(index) = state.held.iter().position(|held| held == path) {
             let path = state.held.remove(index);
+            let done = settled.iter().find(|(p, _)| *p == path.as_slice()).and_then(|(_, v)| v.as_ref());
+            drop_offered(state, &path, done);
             state.released.push(hold_path_filename(&path).to_vec());
             released += 1;
         }
@@ -3347,7 +3476,10 @@ pub(crate) fn direct_unpack_forget_holds(nzb_id: i32) {
     forget_dead_volume_verdicts(nzb_id);
     let gone = direct_unpack_holds().remove(&nzb_id);
     // Borrowed data of rebuilt dead volumes is only read by direct unpack.
-    for v in gone.iter().flat_map(|st| st.virtuals.values()) {
+    for v in gone
+        .iter()
+        .flat_map(|st| st.virtuals.values().chain(st.offered.values()))
+    {
         if crate::deadvolume::is_scratch(&v.data) {
             let _ = std::fs::remove_file(&v.data);
         }
@@ -5149,6 +5281,7 @@ mod live_hold_tests {
             data: dir.join("none"),
             data_len: 0,
             tail: Vec::new(),
+            holes: Vec::new(),
         };
         super::direct_unpack_set_virtual(id, &p("movie.part04.rar"), v.clone());
         let (released, _) = super::direct_unpack_take_released(id);
@@ -5166,10 +5299,78 @@ mod live_hold_tests {
             data: dir.join("none"),
             data_len: 0,
             tail: Vec::new(),
+            holes: Vec::new(),
         };
         super::direct_unpack_set_virtual(id, &p("movie.part06.rar"), v2);
         assert!(super::direct_unpack_is_held_path(&p("movie.part07.rar")));
         assert_eq!(super::take_dead_volumes_borrowed(id), 1);
+        super::direct_unpack_forget_holds(id);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_volume_recreated_whole_drops_its_stand_in_handed_over_with_holes() {
+        use crate::progressive_unpack::{VolumeFeed, VolumeView};
+        let dir = std::env::temp_dir().join(format!("rg-offer-rel-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let vol = dir.join("movie.part04.rar");
+        let full = vol.to_string_lossy().as_bytes().to_vec();
+        let scratch = dir.join(String::from_utf8(crate::deadvolume::scratch_name(b"movie.part04.rar")).unwrap());
+        std::fs::write(&scratch, vec![0u8; 8]).unwrap();
+        let id = 917_303;
+        super::direct_unpack_hold(id, &full);
+        super::direct_unpack_offer_virtual(
+            id,
+            &full,
+            crate::deadvolume::VirtualVolume {
+                head: vec![1, 2],
+                data: scratch.clone(),
+                data_len: 8,
+                tail: Vec::new(),
+                holes: vec![(2, 8)],
+            },
+        );
+        let mut feed = super::DirectUnpackFeed { nzb_id: id, expected_volumes: 6 };
+        assert!(matches!(feed.volume(&vol), VolumeView::Virtual(_)));
+        // Recreated whole from a twin: its data completes the stand-in, whose layout the
+        // extraction may have recorded holes against.
+        std::fs::write(&vol, b"HEADwhole-v!TL").unwrap();
+        super::direct_unpack_offer_virtual(
+            id,
+            &full,
+            crate::deadvolume::VirtualVolume {
+                head: vec![1, 2],
+                data: scratch.clone(),
+                data_len: 8,
+                tail: b"TL".to_vec(),
+                holes: vec![(2, 8)],
+            },
+        );
+        assert!(super::direct_unpack_release_path(&full));
+        assert!(super::direct_unpack_offered(id, &full).is_none());
+        assert_eq!(std::fs::read(&scratch).unwrap(), b"whole-v!");
+        assert!(matches!(feed.volume(&vol), VolumeView::Virtual(ref v) if v.holes.is_empty()));
+        super::direct_unpack_forget_holds(id);
+        assert!(!scratch.exists());
+        // A real volume that does not end like the stand-in: the stand-in goes, the file answers.
+        std::fs::write(&scratch, vec![0u8; 8]).unwrap();
+        super::direct_unpack_hold(id, &full);
+        super::direct_unpack_offer_virtual(
+            id,
+            &full,
+            crate::deadvolume::VirtualVolume {
+                head: vec![1, 2],
+                data: scratch.clone(),
+                data_len: 8,
+                tail: b"XX".to_vec(),
+                holes: vec![(2, 8)],
+            },
+        );
+        assert!(super::direct_unpack_release_path(&full));
+        assert!(super::direct_unpack_offered(id, &full).is_none());
+        assert!(!scratch.exists());
+        assert!(!super::dead_volume_borrow_underway(id));
+        assert!(matches!(feed.volume(&vol), VolumeView::Ready { ref holes } if holes.is_empty()));
         super::direct_unpack_forget_holds(id);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -5433,6 +5634,7 @@ mod dead_volume_case_tests {
                 data: std::path::PathBuf::from("/dl/x"),
                 data_len: 0,
                 tail: Vec::new(),
+                holes: Vec::new(),
             },
         );
         assert!(!dead_volume_donor_cannot_lend(id, b1));
@@ -5476,6 +5678,7 @@ mod dead_volume_case_tests {
             data: std::path::PathBuf::from("/dl/x"),
             data_len: 0,
             tail: Vec::new(),
+            holes: Vec::new(),
         };
         direct_unpack_set_virtual(id, held, v.clone());
         assert!(!direct_unpack_has_holds(id), "the hold is released");

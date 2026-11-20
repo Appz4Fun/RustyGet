@@ -13,6 +13,7 @@
 //! left behind (`Outcome::Fallback`).
 
 use super::*;
+use std::io::Seek;
 use anchors::DurableAnchors;
 use zipfast::partial::{
     ArchiveBinding, HoleReport, MemberKey, PartialFile, PartialLimits, PartialNaming,
@@ -583,6 +584,30 @@ impl InlineRefill {
     }
 }
 
+/// A volume's bytes for reading holes back: its file, or the finished stand-in of a dead volume
+/// that was rebuilt from a duplicate (it has no file). `None` when neither is there.
+fn open_repaired(
+    feed: &Mutex<Box<dyn VolumeFeed>>,
+    path: &Path,
+) -> Option<std::io::Result<Box<dyn ReadSeek>>> {
+    // A stand-in wins over a file at the volume's path (a dead or placeholder one), as it does
+    // when the extraction asks for the volume: the holes were recorded against its layout.
+    match feed.lock().unwrap_or_else(|e| e.into_inner()).volume(path) {
+        VolumeView::Virtual(v) if v.holes.is_empty() => {
+            Some(super::VirtualFile::open(&v).map(|f| Box::new(f) as Box<dyn ReadSeek>))
+        }
+        VolumeView::Virtual(_) => None,
+        _ if path.is_file() => {
+            Some(std::fs::File::open(path).map(|f| Box::new(f) as Box<dyn ReadSeek>))
+        }
+        _ => None,
+    }
+}
+
+/// What reading holes back needs of a volume.
+trait ReadSeek: std::io::Read + std::io::Seek {}
+impl<T: std::io::Read + std::io::Seek> ReadSeek for T {}
+
 /// Reads the holes of `inline` whose volume the repair has released back into their members.
 /// `force` skips the rate limit (the session ended). Runs on the session's own thread,
 /// between its steps and while it is parked. zipfast takes a fill on a member's handle while
@@ -622,9 +647,9 @@ fn refill_released<F>(
     };
     for (v, path) in repaired {
         let volume = path.file_name().unwrap_or_default().to_string_lossy();
-        let mut f = match std::fs::File::open(&path) {
-            Ok(f) => f,
-            Err(e) => {
+        let mut f = match open_repaired(feed, &path) {
+            Some(Ok(f)) => f,
+            Some(Err(e)) => {
                 log_cb(
                     2,
                     &format!("Unrar: cannot read repaired {volume} while extracting ({e}); its holes are filled after the set"),
@@ -632,6 +657,9 @@ fn refill_released<F>(
                 inline.failed = true;
                 return;
             }
+            // Released without a file or a finished stand-in (recreated later, say): the
+            // refill after the set reads it.
+            None => continue,
         };
         let mut patched: Vec<(String, u64)> = Vec::new();
         let mut left = Vec::new();
@@ -1126,13 +1154,24 @@ impl<'a> Run<'a> {
                     continue;
                 };
                 let path = self.plan.dir.join(name);
-                if !required.contains(&v) && !path.is_file() {
+                let opened = open_repaired(&self.feed, &path);
+                if !required.contains(&v) && opened.is_none() {
                     continue;
                 }
-                let mut f = std::fs::File::open(&path).map_err(|e| {
-                    Step::Fallback(format!("repaired volume {}: {e}", path.display()))
-                })?;
-                let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+                let mut f = match opened {
+                    Some(r) => r.map_err(|e| {
+                        Step::Fallback(format!("repaired volume {}: {e}", path.display()))
+                    })?,
+                    None => {
+                        return Err(Step::Fallback(format!(
+                            "repaired volume {}: not on disk",
+                            path.display()
+                        )))
+                    }
+                };
+                let len = f
+                    .seek(std::io::SeekFrom::End(0))
+                    .map_err(|e| Step::Fallback(format!("repaired volume {}: {e}", path.display())))?;
                 // A limit or any other refusal here is zipfast's, not damage: the progressive
                 // path extracts the repaired set again.
                 file.refill_from_packed(v, 0..len, &mut f).map_err(|e| {

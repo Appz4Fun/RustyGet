@@ -4368,7 +4368,7 @@ fn dead_volumes_extract_from_borrowed_data_through_rebuilt_headers() {
             p.template,
             p.index,
             p.packed_size as u64,
-            crc32fast::hash(borrowed),
+            Some(crc32fast::hash(borrowed)),
         )
         .unwrap();
         crate::deadvolume::check_frame(&head, &tail, p.packed_size as u64, b"movie.mkv").unwrap();
@@ -4379,6 +4379,7 @@ fn dead_volumes_extract_from_borrowed_data_through_rebuilt_headers() {
                 data: path,
                 data_len: p.packed_size as u64,
                 tail,
+                holes: Vec::new(),
             },
         );
     }
@@ -4478,7 +4479,7 @@ fn dead_rar4_volumes_extract_from_borrowed_data_through_rebuilt_headers() {
             p.template,
             p.index,
             p.packed_size as u64,
-            crc32fast::hash(borrowed),
+            Some(crc32fast::hash(borrowed)),
         )
         .unwrap();
         crate::deadvolume::check_frame(&head, &tail, p.packed_size as u64, b"movie.mkv").unwrap();
@@ -4489,6 +4490,7 @@ fn dead_rar4_volumes_extract_from_borrowed_data_through_rebuilt_headers() {
                 data: path,
                 data_len: p.packed_size as u64,
                 tail,
+                holes: Vec::new(),
             },
         );
     }
@@ -5281,7 +5283,7 @@ fn borrowed_run_set(
             p.template,
             p.index,
             p.packed_size as u64,
-            crc32fast::hash(borrowed),
+            Some(crc32fast::hash(borrowed)),
         )
         .unwrap();
         virtuals.insert(
@@ -5291,6 +5293,7 @@ fn borrowed_run_set(
                 data: path,
                 data_len: p.packed_size as u64,
                 tail,
+                holes: Vec::new(),
             },
         );
     }
@@ -5379,4 +5382,230 @@ fn the_copy_path_reads_borrowed_volumes_after_the_download_ends() {
             "late {late}"
         );
     }
+}
+
+/// A RAR5 file header for a middle part with no part CRC (flag 0x4 clear), as a dead
+/// volume's rebuilt headers carry while some of its bytes are not borrowed yet.
+fn file_block_no_part_crc(name: &str, size: u64, part: &[u8]) -> Vec<u8> {
+    let (host, attributes) = RAR5_HOST.with(|h| h.get());
+    let mut fields = Vec::new();
+    vint(0x2, &mut fields); // mtime only
+    vint(size, &mut fields);
+    vint(attributes, &mut fields);
+    fields.extend_from_slice(&1_700_000_000u32.to_le_bytes());
+    vint(0, &mut fields);
+    vint(host, &mut fields);
+    vint(name.len() as u64, &mut fields);
+    fields.extend_from_slice(name.as_bytes());
+    block(2, 0x8 | 0x10, &fields, part, true)
+}
+
+#[test]
+fn probe_middle_part_without_crc_with_hole_refills_and_verifies() {
+    let t = TestDir::new("probe_nocrc_mid");
+    let data = pattern(600_000);
+    let chunk = 100_000;
+    let mut vols = rar5_volumes("movie.mkv", &data, chunk);
+    // Volume 3 rebuilt without a part CRC.
+    let mut v = SIG.to_vec();
+    v.extend(main_block(true, Some(2)));
+    v.extend(file_block_no_part_crc("movie.mkv", data.len() as u64, &data[200_000..300_000]));
+    v.extend(end_block(true));
+    vols[2] = v;
+    let first = write_set(&t.dl(), &vols);
+    let path = t.dl().join(volume_name(2, vols.len()));
+    let p = payload_offset(&vols[2], chunk) as u64;
+    let mut dmg = vols[2].clone();
+    dmg[(p + 10_000) as usize..(p + 30_000) as usize].fill(0);
+    std::fs::write(&path, &dmg).unwrap();
+    let damaged = Damaged {
+        holes: vec![(path.clone(), vec![(p + 10_000, 20_000)])],
+        repair: vec![(path, vols[2].clone())],
+        handed: false,
+    };
+    let (r, log) = run_downloading(&first, &t.out(), damaged, vols.len() as u64);
+    expect_ok(r, &log);
+    assert!(persistent(&log), "{log:?}");
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+}
+
+/// A download whose volume 4 died: its stand-in is handed over while only its first half is
+/// borrowed (the rest are holes). The borrow finishes while the session waits for volume 7.
+struct DeadHalfBorrowed {
+    dead: PathBuf,
+    holed: crate::deadvolume::VirtualVolume,
+    rest: Vec<u8>,
+    rest_at: u64,
+    park_on: PathBuf,
+    parks: u32,
+    finished: bool,
+    asked_holed: bool,
+    volumes: u64,
+}
+
+impl VolumeFeed for DeadHalfBorrowed {
+    fn volume(&mut self, path: &Path) -> VolumeView {
+        if path == self.park_on && self.parks < 20 {
+            self.parks += 1;
+            if !self.finished {
+                use std::os::unix::fs::FileExt;
+                let f = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&self.holed.data)
+                    .unwrap();
+                f.write_all_at(&self.rest, self.rest_at).unwrap();
+                self.finished = true;
+            }
+            return VolumeView::NotYet;
+        }
+        if path == self.dead {
+            let mut v = self.holed.clone();
+            if self.finished {
+                v.holes.clear();
+            } else {
+                self.asked_holed = true;
+            }
+            return VolumeView::Virtual(v);
+        }
+        if path.is_file() {
+            VolumeView::Ready { holes: Vec::new() }
+        } else {
+            VolumeView::Missing
+        }
+    }
+    fn wait_repaired(&mut self, _c: &mut dyn FnMut() -> bool) -> bool {
+        self.finished
+    }
+    fn expected_volumes(&self) -> u64 {
+        self.volumes
+    }
+    fn has_borrowed(&self) -> bool {
+        true
+    }
+    fn still_held(&self, path: &Path) -> bool {
+        path == self.dead && !self.finished
+    }
+    fn repaired(&self, path: &Path) -> bool {
+        path == self.dead && self.finished
+    }
+}
+
+/// Builds the half-borrowed dead volume 4 of a 10-volume RAR5 set, and the feed around it.
+fn half_borrowed_dead_volume(t: &TestDir, park_on: usize) -> (PathBuf, Vec<u8>, DeadHalfBorrowed) {
+    use crate::deadvolume::{plan, synthesize_frame, VirtualVolume, VolumeState};
+    let data = pattern(1_000_000);
+    let vols = rar5_volumes("movie.mkv", &data, 100_000);
+    let first = write_set(&t.dl(), &vols);
+    let dead = 3usize;
+    let states: Vec<VolumeState> = vols
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            if i == dead {
+                VolumeState::Dead {
+                    encoded_size: v.len() as i64 * 102 / 100,
+                }
+            } else {
+                VolumeState::Readable(geometry_of(v))
+            }
+        })
+        .collect();
+    let dead_path = t.dl().join(volume_name(dead, vols.len()));
+    std::fs::remove_file(&dead_path).unwrap();
+    let p = plan(&states, data.len() as i64)
+        .into_iter()
+        .find(|p| p.index == dead)
+        .unwrap();
+    let borrowed = &data[p.inner_offset as usize..(p.inner_offset + p.packed_size) as usize];
+    let half = borrowed.len() / 2;
+    let scratch = t.0.join("deadvol.data");
+    let mut first_half = borrowed[..half].to_vec();
+    first_half.resize(borrowed.len(), 0);
+    std::fs::write(&scratch, &first_half).unwrap();
+    let tv = &vols[p.template];
+    let tg = geometry_of(tv);
+    let (head, tail) = synthesize_frame(
+        5,
+        &tv[..tg.data_offset as usize],
+        &tv[(tg.data_offset + tg.packed_size) as usize..],
+        p.template,
+        p.index,
+        p.packed_size as u64,
+        None,
+    )
+    .unwrap();
+    let at = head.len() as u64;
+    let holed = VirtualVolume {
+        head,
+        data: scratch,
+        data_len: p.packed_size as u64,
+        tail,
+        holes: vec![(at + half as u64, (borrowed.len() - half) as u64)],
+    };
+    let feed = DeadHalfBorrowed {
+        dead: dead_path,
+        holed,
+        rest: borrowed[half..].to_vec(),
+        rest_at: half as u64,
+        park_on: t.dl().join(volume_name(park_on, vols.len())),
+        parks: 0,
+        finished: false,
+        asked_holed: false,
+        volumes: vols.len() as u64,
+    };
+    (first, data, feed)
+}
+
+#[test]
+fn a_half_borrowed_dead_volume_is_extracted_past_and_patched_inline() {
+    // The user's goal: never wait at a dead volume. Extraction reads volume 4 while half of it
+    // is still being borrowed, goes on to volumes 5 and 6, and the rest is patched in from the
+    // finished stand-in while the session waits for volume 7, before volume 7 is read.
+    let t = TestDir::new("deadvol-half");
+    let (first, data, feed) = half_borrowed_dead_volume(&t, 6);
+    let mut log = Vec::new();
+    let req = Request {
+        first_volume: &first,
+        dest: &t.out(),
+        password: "",
+        overwrite: Overwrite::Always,
+        on_wait: None,
+    };
+    let r = extract(
+        &req,
+        Box::new(feed),
+        &mut |_, m: &str| log.push(m.to_string()),
+        &mut || false,
+    );
+    expect_ok(r, &log);
+    assert!(persistent(&log), "{log:?}");
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+    let pos = |needle: &str| {
+        log.iter()
+            .position(|l| l.contains(needle))
+            .unwrap_or_else(|| panic!("no {needle:?}: {log:?}"))
+    };
+    let past = pos("Extracting from set.part06.rar");
+    let patched = pos("patched movie.mkv from repaired set.part04.rar while extracting");
+    let reached = pos("Extracting from set.part07.rar");
+    assert!(past < patched && patched < reached, "{log:?}");
+    assert!(
+        log.iter()
+            .any(|l| l.contains("every hole was patched while extracting")),
+        "{log:?}"
+    );
+}
+
+#[test]
+fn the_copy_path_waits_for_a_half_borrowed_dead_volume_to_finish() {
+    // Skip mode takes the progressive copy path, which patches only from volumes on disk: it
+    // waits at the dead volume until the stand-in is finished, as before.
+    let t = TestDir::new("deadvol-half-copy");
+    let (first, data, mut feed) = half_borrowed_dead_volume(&t, 3);
+    // Parking on the dead volume itself finishes its borrow.
+    feed.park_on = feed.dead.clone();
+    let (r, log) = run_with(&first, &t.out(), Box::new(feed), Overwrite::Skip);
+    expect_ok(r, &log);
+    assert!(!persistent(&log), "{log:?}");
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
 }

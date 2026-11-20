@@ -981,12 +981,12 @@ fn validate_plan(p: &Plan) -> Result<(), PurgeError> {
         }
         if &j.journal_identity[..8] != b"NZBPJID1"
             || j.global_sequence < 2
-            || j.global_sequence >= u64::MAX
+            || j.global_sequence == u64::MAX
             || j.high_water < p.token.generation
-            || j.high_water >= u64::MAX
+            || j.high_water == u64::MAX
             || j.state_revision == 0
             || j.barrier_revision == 0
-            || j.receipt_sequence >= u64::MAX
+            || j.receipt_sequence == u64::MAX
             || j.required_owners.is_empty()
             || j.required_owners.len() > MAX_MEMBERS
             || j.required_owners.windows(2).any(|x| x[0] >= x[1])

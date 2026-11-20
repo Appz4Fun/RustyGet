@@ -4780,6 +4780,13 @@ impl NzbgetRsQueueCoordinator {
                         nzb.current_success_articles,
                         failed,
                     ));
+            // A duplicate whose bytes the running extraction already patched in (a nested or
+            // otherwise unlabelled alt the cross-packing repair maps by the video inside) lends:
+            // the article-level count of recovered articles misses those bytes.
+            let lendable = lendable
+                || (nzb.direct_unpack_status == DirectUnpackStatus::Running
+                    && nzb.dupe_recovered_bytes > 0
+                    && !backup_cannot_lend(host, nzb, &backup_nzb));
             feeds_extraction = lendable && nzb.direct_unpack_status == DirectUnpackStatus::Running;
             if !light_damage
                 && !lendable

@@ -3323,9 +3323,6 @@ pub(crate) fn tls_host_cb() -> crate::net::NzbgetRsConnHostFn {
     Some(crate::tlssock::conn_host)
 }
 
-
-
-
 #[cfg(unix)]
 pub(crate) fn stop_ssl_thread() {
     if !build_tls_disabled() {

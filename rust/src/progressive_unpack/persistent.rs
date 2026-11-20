@@ -519,7 +519,8 @@ impl VolumeSource for Provider {
             }
             VolumeView::NotYet => {
                 *self.pending.lock().unwrap_or_else(|e| e.into_inner()) =
-                    Some((path, cx.waker().clone()));
+                    // A stand-in with holes is read here: it ends the wait.
+                    Some((path, cx.waker().clone(), false));
                 Ok(VolumeAnswer::Wait)
             }
             VolumeView::Missing => Ok(VolumeAnswer::Missing),

@@ -4689,6 +4689,15 @@ impl NzbgetRsQueueCoordinator {
             if backup_still_unclassified(backup_kind, backup_hi.time, now)
                 && !download_hopeless(nzb.total_articles, nzb.current_success_articles, failed)
             {
+                // Not checked yet: the next round looks again instead of waiting for
+                // another sample of failed articles.
+                if upd_checked {
+                    host.nzb_set_int(
+                        nzb.ptr,
+                        crate::queuesubsys_host::NZB_INT_DUPE_FAILOVER_CHECKED,
+                        nzb.dupe_failover_checked,
+                    );
+                }
                 return;
             }
             // A stretch of lost articles (whole volumes included) that a twin or a

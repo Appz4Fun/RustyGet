@@ -224,10 +224,59 @@ const LOG_ERROR: c_int = 4;
 static SCANNER_ID_GEN: AtomicI32 = AtomicI32::new(0);
 static SCANNER_UNPACK_SEQ: AtomicU64 = AtomicU64::new(1);
 
-#[repr(C)]
-#[derive(Clone, Copy)]
+/// What the scanner asks of its owner while it scans and queues files. The
+/// daemon's host is [`NativeScannerHost`]; tests supply their own. Each
+/// default is what the scanner did when the owner had nothing to add.
+pub(crate) trait ScannerHost: Send + Sync {
+    /// Wakes the scanner's service thread. False lets the scanner wake the
+    /// daemon's service coordinator itself.
+    fn wake(&self) -> bool {
+        false
+    }
+
+    /// Starts a new file's queue parameters.
+    fn clear_work_params(&self) {}
+
+    /// Sets one queue parameter of the file being added.
+    fn set_work_param(&self, _name: &[u8], _value: &[u8]) {}
+
+    /// Sets the post-processing parameters from the file's category.
+    fn set_work_category(&self, _category: &[u8]) {}
+
+    /// Parses an NZB file. Returns whether it parsed and the category the
+    /// file itself names (empty for none).
+    fn parse_nzb(&self, _filename: &[u8], _category: &[u8]) -> (bool, Vec<u8>) {
+        (false, Vec::new())
+    }
+
+    /// Adds the last parsed NZB to the queue. Returns its id, or 0.
+    fn commit_nzb(&self, _nzb: &CommitNzb<'_>) -> c_int {
+        0
+    }
+}
+
+/// The settings [`ScannerHost::commit_nzb`] applies to a parsed NZB.
+pub(crate) struct CommitNzb<'a> {
+    /// Whether parsing and renaming succeeded.
+    pub ok: bool,
+    /// The file's name after renaming to `.queued` or `.error`.
+    pub queued_filename: &'a [u8],
+    /// The category auto-detection settled on, if any.
+    pub auto_category: Option<&'a CStr>,
+    pub nzb_name: &'a [u8],
+    pub priority: c_int,
+    pub dupe_key: &'a [u8],
+    pub dupe_score: c_int,
+    pub dupe_mode: c_int,
+    pub add_top: bool,
+    pub add_paused: bool,
+    /// The URL queue entry this file came from (0 for none).
+    pub url_info: usize,
+}
+
+#[derive(Clone)]
 pub struct NzbgetRsScannerEnv {
-    pub ctx: *mut c_void,
+    pub(crate) host: Option<Arc<dyn ScannerHost>>,
     pub nzb_dir: *const c_char,
     pub temp_dir: *const c_char,
     pub filename: *const c_char,
@@ -252,34 +301,39 @@ pub struct NzbgetRsScannerEnv {
     pub parameters: *mut c_void,
     pub url_info: *mut c_void,
     pub out_nzb_id: *mut c_int,
-    pub wake_cb: Option<unsafe extern "C" fn(*mut c_void)>,
-    pub work_params_cb:
-        Option<unsafe extern "C" fn(*mut c_void, c_int, *const c_char, *const c_char)>,
-    pub parse_nzb_cb: Option<
-        unsafe extern "C" fn(
-            *mut c_void,
-            *const c_char,
-            *const c_char,
-            *mut *const c_char,
-        ) -> c_int,
-    >,
-    pub commit_nzb_cb: Option<
-        unsafe extern "C" fn(
-            *mut c_void,
-            c_int,
-            *const c_char,
-            *const c_char,
-            c_int,
-            *const c_char,
-            c_int,
-            *const c_char,
-            c_int,
-            c_int,
-            c_int,
-            c_int,
-            *mut c_void,
-        ) -> c_int,
-    >,
+}
+
+impl NzbgetRsScannerEnv {
+    /// No host, null strings and zero settings.
+    pub(crate) fn empty() -> Self {
+        Self {
+            host: None,
+            nzb_dir: std::ptr::null(),
+            temp_dir: std::ptr::null(),
+            filename: std::ptr::null(),
+            nzb_name: std::ptr::null(),
+            category: std::ptr::null(),
+            dupe_key: std::ptr::null(),
+            buf_ptr: std::ptr::null(),
+            buf_len: 0,
+            priority: 0,
+            dupe_score: 0,
+            dupe_mode: 0,
+            auto_category: 0,
+            add_top: 0,
+            add_paused: 0,
+            nzb_dir_interval: 0,
+            nzb_dir_file_age: 0,
+            archive_scan: 0,
+            archive_action: 0,
+            queue_loaded: 0,
+            pause_scan: 0,
+            path_sep: 0,
+            parameters: std::ptr::null_mut(),
+            url_info: std::ptr::null_mut(),
+            out_nzb_id: std::ptr::null_mut(),
+        }
+    }
 }
 
 unsafe impl Send for NzbgetRsScannerEnv {}
@@ -326,8 +380,6 @@ pub struct NzbgetRsScanner {
     work_params: Mutex<Vec<(CString, CString)>>,
     #[cfg(unix)]
     active_parsed: Mutex<Option<crate::nzbfile::ParsedMaterializedNzb>>,
-    #[cfg(unix)]
-    detected_cat_c: Mutex<CString>,
 }
 
 static ACTIVE_SCANNER: std::sync::OnceLock<Mutex<Option<Arc<NzbgetRsScanner>>>> =
@@ -753,22 +805,13 @@ fn add_file_to_queue(
     add_msg.extend_from_slice(b" to queue");
     emit_log(env, LOG_INFO, &add_msg);
 
-    let file_c = to_cstr_sanitized(filename);
-    let cat_c = to_cstr_sanitized(category);
-    let mut detected_cat_ptr: *const c_char = std::ptr::null();
-    let mut ok = if let Some(parse_cb) = env.parse_nzb_cb {
-        unsafe {
-            parse_cb(
-                env.ctx,
-                file_c.as_ptr(),
-                cat_c.as_ptr(),
-                &mut detected_cat_ptr,
-            ) != 0
-        }
-    } else {
-        false
+    let (mut ok, detected_cat) = match &env.host {
+        Some(host) => host.parse_nzb(
+            to_cstr_sanitized(filename).to_bytes(),
+            to_cstr_sanitized(category).to_bytes(),
+        ),
+        None => (false, Vec::new()),
     };
-    let detected_cat = unsafe { cstr::bytes(detected_cat_ptr) }.to_vec();
     if !ok {
         let mut err_msg = b"Could not add collection ".to_vec();
         err_msg.extend_from_slice(basename);
@@ -830,40 +873,26 @@ fn add_file_to_queue(
                 detected_cat
             }
         };
-        if let Some(wp_cb) = env.work_params_cb {
-            let pp_c = to_cstr_sanitized(&pp_cat);
-            unsafe { wp_cb(env.ctx, 3, pp_c.as_ptr(), std::ptr::null()) };
+        if let Some(host) = &env.host {
+            host.set_work_category(to_cstr_sanitized(&pp_cat).to_bytes());
         }
     }
 
-    let bak_c = to_cstr_sanitized(&bakname2);
-    let name_c = to_cstr_sanitized(nzb_name);
-    let key_c = to_cstr_sanitized(dupe_key);
-    let auto_ptr = auto_resolved_cat
-        .as_ref()
-        .map_or(std::ptr::null(), |c| c.as_ptr());
-    let has_auto = c_int::from(auto_resolved_cat.is_some());
-
-    let nzb_id = if let Some(commit_cb) = env.commit_nzb_cb {
-        unsafe {
-            commit_cb(
-                env.ctx,
-                c_int::from(ok),
-                bak_c.as_ptr(),
-                auto_ptr,
-                has_auto,
-                name_c.as_ptr(),
-                priority,
-                key_c.as_ptr(),
-                dupe_score,
-                dupe_mode,
-                c_int::from(add_top),
-                c_int::from(add_paused),
-                url_info,
-            )
-        }
-    } else {
-        0
+    let nzb_id = match &env.host {
+        Some(host) => host.commit_nzb(&CommitNzb {
+            ok,
+            queued_filename: to_cstr_sanitized(&bakname2).to_bytes(),
+            auto_category: auto_resolved_cat.as_deref(),
+            nzb_name: to_cstr_sanitized(nzb_name).to_bytes(),
+            priority,
+            dupe_key: to_cstr_sanitized(dupe_key).to_bytes(),
+            dupe_score,
+            dupe_mode,
+            add_top,
+            add_paused,
+            url_info: url_info as usize,
+        }),
+        None => 0,
     };
     (ok, nzb_id)
 }
@@ -885,38 +914,12 @@ impl NzbgetRsScanner {
             work_params: Mutex::new(Vec::new()),
             #[cfg(unix)]
             active_parsed: Mutex::new(None),
-            #[cfg(unix)]
-            detected_cat_c: Mutex::new(CString::default()),
         }
     }
 
-    fn effective_env(&self, caller: Option<&NzbgetRsScannerEnv>) -> Option<NzbgetRsScannerEnv> {
-        match caller {
-            Some(c) => {
-                let mut merged = *c;
-                if merged.parse_nzb_cb.is_none() {
-                    if let Some(stored) = *self.host_env.lock().unwrap_or_else(|e| e.into_inner()) {
-                        if merged.ctx.is_null() {
-                            merged.ctx = stored.ctx;
-                        }
-                        if merged.work_params_cb.is_none() {
-                            merged.work_params_cb = stored.work_params_cb;
-                        }
-                        if merged.parse_nzb_cb.is_none() {
-                            merged.parse_nzb_cb = stored.parse_nzb_cb;
-                        }
-                        if merged.commit_nzb_cb.is_none() {
-                            merged.commit_nzb_cb = stored.commit_nzb_cb;
-                        }
-                        if merged.wake_cb.is_none() {
-                            merged.wake_cb = stored.wake_cb;
-                        }
-                    }
-                }
-                Some(merged)
-            }
-            None => *self.host_env.lock().unwrap_or_else(|e| e.into_inner()),
-        }
+    /// The env the daemon stored for this scanner.
+    fn stored_env(&self) -> Option<NzbgetRsScannerEnv> {
+        self.host_env.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     fn init_options(&self, has_scan_script: bool, env: &NzbgetRsScannerEnv) {
@@ -931,8 +934,8 @@ impl NzbgetRsScanner {
 
     pub(crate) fn init_options_active(&self) {
         let env = self
-            .effective_env(None)
-            .unwrap_or_else(|| unsafe { std::mem::zeroed() });
+            .stored_env()
+            .unwrap_or_else(NzbgetRsScannerEnv::empty);
         self.init_options(false, &env);
     }
 
@@ -956,9 +959,8 @@ impl NzbgetRsScanner {
             let _guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             self.scanning.store(true, Ordering::SeqCst);
             self.requested_nzb_dir_scan.store(true, Ordering::SeqCst);
-            if let Some(wake) = env.wake_cb {
-                unsafe { wake(env.ctx) };
-            } else if env.nzb_dir.is_null() {
+            let woken = env.host.as_ref().is_some_and(|h| h.wake());
+            if !woken && env.nzb_dir.is_null() {
                 crate::scheduler::wake_active_service_coord();
             }
         }
@@ -972,15 +974,15 @@ impl NzbgetRsScanner {
 
     pub(crate) fn scan_nzb_dir_active(&self, sync_mode: bool) {
         let env = self
-            .effective_env(None)
-            .unwrap_or_else(|| unsafe { std::mem::zeroed() });
+            .stored_env()
+            .unwrap_or_else(NzbgetRsScannerEnv::empty);
         self.scan_nzb_dir(sync_mode, &env);
     }
 
     pub(crate) fn service_work_active(&self) {
         let env = self
-            .effective_env(None)
-            .unwrap_or_else(|| unsafe { std::mem::zeroed() });
+            .stored_env()
+            .unwrap_or_else(NzbgetRsScannerEnv::empty);
         self.service_work(&env);
     }
 
@@ -1148,8 +1150,8 @@ impl NzbgetRsScanner {
         let mut nzb_id: c_int = 0;
         let mut url_info_usize: usize = 0;
 
-        if let Some(wp_cb) = env.work_params_cb {
-            unsafe { wp_cb(env.ctx, 0, std::ptr::null(), std::ptr::null()) };
+        if let Some(host) = &env.host {
+            host.clear_work_params();
         }
 
         let matched_idx = inner
@@ -1168,16 +1170,15 @@ impl NzbgetRsScanner {
             add_paused = q.add_paused;
             auto_category = q.auto_category;
             url_info_usize = q.url_info;
-            if let Some(wp_cb) = env.work_params_cb {
+            if let Some(host) = &env.host {
                 for (pname, pval) in &q.params {
-                    unsafe { wp_cb(env.ctx, 1, pname.as_ptr(), pval.as_ptr()) };
+                    host.set_work_param(pname.to_bytes(), pval.to_bytes());
                 }
             }
         }
 
-        if let Some(wp_cb) = env.work_params_cb {
-            let cat_c = to_cstr_sanitized(&nzb_category);
-            unsafe { wp_cb(env.ctx, 2, cat_c.as_ptr(), std::ptr::null()) };
+        if let Some(host) = &env.host {
+            host.set_work_category(to_cstr_sanitized(&nzb_category).to_bytes());
         }
 
         let mut exists = true;
@@ -1609,7 +1610,7 @@ impl NzbgetRsScanner {
         add_paused: bool,
         data: &[u8],
     ) -> (c_int, c_int) {
-        let Some(mut env) = self.effective_env(None) else {
+        let Some(mut env) = self.stored_env() else {
             return (AS_FAILED, 0);
         };
         let name_c = to_cstr_sanitized(nzb_name);
@@ -1658,7 +1659,7 @@ impl NzbgetRsScanner {
         add_paused: bool,
         data: &[u8],
     ) -> c_int {
-        let Some(mut env) = self.effective_env(None) else {
+        let Some(mut env) = self.stored_env() else {
             return AS_FAILED;
         };
         let fn_c = to_cstr_sanitized(filename);
@@ -1752,51 +1753,52 @@ fn set_param_list(list: &mut Vec<(CString, CString)>, name: &[u8], val: Option<&
     }
 }
 
+/// The daemon's [`ScannerHost`]: parses and queues through the queue host,
+/// keeping the work parameters and the parsed NZB on its scanner.
 #[cfg(unix)]
-unsafe extern "C" fn native_work_params_cb(
-    ctx: *mut c_void,
-    op: c_int,
-    s1: *const c_char,
-    s2: *const c_char,
-) {
-    if ctx.is_null() {
-        return;
-    }
-    let sc = unsafe { &*ctx.cast::<NzbgetRsScanner>() };
-    match op {
-        0 => sc
-            .work_params
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear(),
-        1 => {
-            let mut wp = sc.work_params.lock().unwrap_or_else(|e| e.into_inner());
-            let v = if s2.is_null() {
-                None
-            } else {
-                Some(cstr::bytes(s2))
-            };
-            set_param_list(&mut wp, cstr::bytes(s1), v);
+struct NativeScannerHost(std::sync::Weak<NzbgetRsScanner>);
+
+#[cfg(unix)]
+impl ScannerHost for NativeScannerHost {
+    fn clear_work_params(&self) {
+        if let Some(sc) = self.0.upgrade() {
+            sc.work_params.lock().unwrap_or_else(|e| e.into_inner()).clear();
         }
-        2 | 3 => sc.init_work_params_pp(cstr::bytes(s1)),
-        _ => {}
+    }
+
+    fn set_work_param(&self, name: &[u8], value: &[u8]) {
+        if let Some(sc) = self.0.upgrade() {
+            let mut wp = sc.work_params.lock().unwrap_or_else(|e| e.into_inner());
+            set_param_list(&mut wp, name, Some(value));
+        }
+    }
+
+    fn set_work_category(&self, category: &[u8]) {
+        if let Some(sc) = self.0.upgrade() {
+            sc.init_work_params_pp(category);
+        }
+    }
+
+    fn parse_nzb(&self, filename: &[u8], category: &[u8]) -> (bool, Vec<u8>) {
+        match self.0.upgrade() {
+            Some(sc) => native_parse_nzb(&sc, filename, category),
+            None => (false, Vec::new()),
+        }
+    }
+
+    fn commit_nzb(&self, nzb: &CommitNzb<'_>) -> c_int {
+        match self.0.upgrade() {
+            Some(sc) => native_commit_nzb(&sc, nzb),
+            None => 0,
+        }
     }
 }
 
 #[cfg(unix)]
-unsafe extern "C" fn native_parse_nzb_cb(
-    ctx: *mut c_void,
-    filename: *const c_char,
-    category: *const c_char,
-    out_detected_cat: *mut *const c_char,
-) -> c_int {
-    if ctx.is_null() {
-        return 0;
-    }
+fn native_parse_nzb(scanner: &NzbgetRsScanner, filename: &[u8], category: &[u8]) -> (bool, Vec<u8>) {
     let Some(host) = crate::ffi::queue_host() else {
-        return 0;
+        return (false, Vec::new());
     };
-    let scanner = unsafe { &*ctx.cast::<NzbgetRsScanner>() };
     if let Some(prev) = scanner
         .active_parsed
         .lock()
@@ -1805,45 +1807,18 @@ unsafe extern "C" fn native_parse_nzb_cb(
     {
         host.destroy_nzb_uptr(prev.uptr_addr);
     }
-    let parsed = crate::nzbfile::parse_and_materialize_nzb(
-        &host,
-        unsafe { cstr::bytes(filename) },
-        unsafe { cstr::bytes(category) },
-    );
+    let parsed = crate::nzbfile::parse_and_materialize_nzb(&host, filename, category);
     let ok = parsed.ok;
-    {
-        let mut cat_g = scanner
-            .detected_cat_c
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        *cat_g = to_cstr_sanitized(&parsed.category_from_file);
-        if !out_detected_cat.is_null() {
-            unsafe { *out_detected_cat = cat_g.as_ptr() };
-        }
-    }
+    let detected = to_cstr_sanitized(&parsed.category_from_file).to_bytes().to_vec();
     *scanner
         .active_parsed
         .lock()
         .unwrap_or_else(|e| e.into_inner()) = Some(parsed);
-    c_int::from(ok)
+    (ok, detected)
 }
 
 #[cfg(unix)]
-unsafe extern "C" fn native_commit_nzb_cb(
-    ctx: *mut c_void,
-    ok_flag: c_int,
-    queued: *const c_char,
-    auto_cat: *const c_char,
-    has_auto: c_int,
-    nzb_name: *const c_char,
-    priority: c_int,
-    dupe_key: *const c_char,
-    dupe_score: c_int,
-    dupe_mode: c_int,
-    add_top: c_int,
-    add_paused: c_int,
-    raw_url_info: *mut c_void,
-) -> c_int {
+fn native_commit_nzb(scanner: &NzbgetRsScanner, nzb: &CommitNzb<'_>) -> c_int {
     use crate::queuesubsys_host::{
         FILE_INT_PAUSED, MK_DETAIL, MK_WARNING, NZB_ACT_BUILD_DEST_DIR, NZB_INT_DESIRED_SERVER_ID,
         NZB_INT_DUPE_HINT, NZB_INT_DUPE_MODE, NZB_INT_DUPE_SCORE, NZB_INT_FEED_ID,
@@ -1851,13 +1826,9 @@ unsafe extern "C" fn native_commit_nzb_cb(
         NZB_STR_CATEGORY, NZB_STR_DUPE_KEY, NZB_STR_FILENAME, NZB_STR_NAME,
         NZB_STR_QUEUED_FILENAME, NZB_STR_URL,
     };
-    if ctx.is_null() {
-        return 0;
-    }
     let Some(host) = crate::ffi::queue_host() else {
         return 0;
     };
-    let scanner = unsafe { &*ctx.cast::<NzbgetRsScanner>() };
     let Some(parsed) = scanner
         .active_parsed
         .lock()
@@ -1878,17 +1849,17 @@ unsafe extern "C" fn native_commit_nzb_cb(
         return 0;
     }
 
-    host.nzb_set_str(nzb_ptr, NZB_STR_QUEUED_FILENAME, unsafe { cstr::bytes(queued) });
-    if has_auto != 0 && !auto_cat.is_null() {
-        host.nzb_set_str(nzb_ptr, NZB_STR_CATEGORY, unsafe { cstr::bytes(auto_cat) });
+    host.nzb_set_str(nzb_ptr, NZB_STR_QUEUED_FILENAME, nzb.queued_filename);
+    if let Some(auto_cat) = nzb.auto_category {
+        host.nzb_set_str(nzb_ptr, NZB_STR_CATEGORY, auto_cat.to_bytes());
     }
-    let name_bytes = unsafe { cstr::bytes(nzb_name) };
+    let name_bytes = nzb.nzb_name;
     if !name_bytes.is_empty() {
         host.nzb_set_str_opt(nzb_ptr, NZB_STR_NAME, None);
         host.nzb_set_str(nzb_ptr, NZB_STR_FILENAME, name_bytes);
         host.nzb_action(nzb_ptr, NZB_ACT_BUILD_DEST_DIR);
     }
-    if ok_flag != 0 {
+    if nzb.ok {
         let cur_name = host.nzb_snap(nzb_ptr, false).name;
         for mf in &parsed.files {
             let sev = classify_missed_articles(mf.missed_articles, mf.total_articles, mf.cut_short);
@@ -1914,11 +1885,11 @@ unsafe extern "C" fn native_commit_nzb_cb(
             }
         }
     }
-    host.nzb_set_str(nzb_ptr, NZB_STR_DUPE_KEY, unsafe { cstr::bytes(dupe_key) });
-    host.nzb_set_int(nzb_ptr, NZB_INT_DUPE_SCORE, dupe_score);
-    host.nzb_set_int(nzb_ptr, NZB_INT_DUPE_MODE, dupe_mode);
-    host.nzb_set_int(nzb_ptr, NZB_INT_PRIORITY, priority);
-    let url_ptr = NzbRef::from_addr(raw_url_info as usize);
+    host.nzb_set_str(nzb_ptr, NZB_STR_DUPE_KEY, nzb.dupe_key);
+    host.nzb_set_int(nzb_ptr, NZB_INT_DUPE_SCORE, nzb.dupe_score);
+    host.nzb_set_int(nzb_ptr, NZB_INT_DUPE_MODE, nzb.dupe_mode);
+    host.nzb_set_int(nzb_ptr, NZB_INT_PRIORITY, nzb.priority);
+    let url_ptr = NzbRef::from_addr(nzb.url_info);
     if url_ptr.is_some() {
         let us = host.nzb_snap(url_ptr, false);
         host.nzb_set_str(nzb_ptr, NZB_STR_URL, &us.url);
@@ -1948,14 +1919,14 @@ unsafe extern "C" fn native_commit_nzb_cb(
     for (k, v) in &wp {
         host.nzb_set_param(nzb_ptr, k.as_bytes(), Some(v.as_bytes()));
     }
-    let paused_val = i32::from(add_paused != 0);
+    let paused_val = i32::from(nzb.add_paused);
     for mf in &parsed.files {
         host.file_set_int(mf.file_ptr, FILE_INT_PAUSED, paused_val);
     }
 
-    let added = if ok_flag != 0 {
+    let added = if nzb.ok {
         crate::ffi::active_queue_coord_and_host().map_or(NzbRef::NONE, |(qc, qh)| {
-            qc.add_nzb_file_to_queue(&qh, parsed.uptr_addr, url_ptr, add_top != 0)
+            qc.add_nzb_file_to_queue(&qh, parsed.uptr_addr, url_ptr, nzb.add_top)
         })
     } else if url_ptr.is_some() {
         host.nzb_copy_cached_messages_silent(url_ptr, nzb_ptr);
@@ -1963,7 +1934,7 @@ unsafe extern "C" fn native_commit_nzb_cb(
     } else {
         host.nzb_set_delete_status(nzb_ptr, DeleteStatus::Scan);
         crate::ffi::active_queue_coord_and_host().map_or(NzbRef::NONE, |(qc, qh)| {
-            qc.add_nzb_file_to_queue(&qh, parsed.uptr_addr, url_ptr, add_top != 0)
+            qc.add_nzb_file_to_queue(&qh, parsed.uptr_addr, url_ptr, nzb.add_top)
         })
     };
     if added.is_some() {
@@ -1976,11 +1947,8 @@ unsafe extern "C" fn native_commit_nzb_cb(
 #[cfg(unix)]
 pub(crate) fn create_daemon_scanner() {
     let scanner = Arc::new(NzbgetRsScanner::new());
-    let mut env: NzbgetRsScannerEnv = unsafe { std::mem::zeroed() };
-    env.ctx = (Arc::as_ptr(&scanner) as *mut NzbgetRsScanner).cast();
-    env.work_params_cb = Some(native_work_params_cb);
-    env.parse_nzb_cb = Some(native_parse_nzb_cb);
-    env.commit_nzb_cb = Some(native_commit_nzb_cb);
+    let mut env = NzbgetRsScannerEnv::empty();
+    env.host = Some(Arc::new(NativeScannerHost(Arc::downgrade(&scanner))));
     *scanner.host_env.lock().unwrap_or_else(|e| e.into_inner()) = Some(env);
     register_active_scanner(scanner);
 }
@@ -2016,7 +1984,7 @@ pub(crate) fn add_url_file_active(
     let (Some(sc), Some(host)) = (active_scanner(), crate::ffi::queue_host()) else {
         return AS_FAILED;
     };
-    let Some(mut env) = sc.effective_env(None) else {
+    let Some(mut env) = sc.stored_env() else {
         return AS_FAILED;
     };
     let snap = host.nzb_snap(url_ptr, false);
@@ -2140,7 +2108,8 @@ mod tests {
         let nzb_dir_c = CString::new(crate::fsops::path_to_bytes(&nzb_dir)).unwrap();
         let temp_dir_c = CString::new(crate::fsops::path_to_bytes(&temp_dir)).unwrap();
 
-        struct MockHost {
+        /// What the test reads back, shared by both mock hosts.
+        struct MockState {
             scanner: Arc<NzbgetRsScanner>,
             nzb_dir_c: CString,
             temp_dir_c: CString,
@@ -2148,68 +2117,57 @@ mod tests {
             last_cat: Mutex<String>,
         }
 
-        unsafe extern "C" fn wake_cb(ctx: *mut c_void) {
-            let host = unsafe { &*ctx.cast::<MockHost>() };
-            let scanner = host.scanner.clone();
-            let nzb_c = host.nzb_dir_c.clone();
-            let tmp_c = host.temp_dir_c.clone();
-            let ctx_usize = ctx as usize;
-            std::thread::spawn(move || {
-                let mut env: NzbgetRsScannerEnv = unsafe { std::mem::zeroed() };
-                env.ctx = ctx_usize as *mut c_void;
-                env.nzb_dir = nzb_c.as_ptr();
-                env.temp_dir = tmp_c.as_ptr();
-                env.nzb_dir_interval = 5;
-                env.nzb_dir_file_age = 0;
-                env.archive_scan = 1;
-                env.archive_action = 0;
-                env.queue_loaded = 1;
-                env.path_sep = b'/' as c_char;
-                env.parse_nzb_cb = Some(parse_cb);
-                env.commit_nzb_cb = Some(commit_cb);
-                scanner.service_work(&env);
-            });
+        /// `wakes`: the caller's host runs a service pass on a new thread
+        /// with a host that does not wake.
+        struct MockHost {
+            state: Arc<MockState>,
+            wakes: bool,
         }
 
-        unsafe extern "C" fn parse_cb(
-            _ctx: *mut c_void,
-            _filename: *const c_char,
-            _category: *const c_char,
-            out_cat: *mut *const c_char,
-        ) -> c_int {
-            unsafe { *out_cat = c"movies".as_ptr() };
-            1
-        }
-
-        unsafe extern "C" fn commit_cb(
-            ctx: *mut c_void,
-            ok: c_int,
-            _queued: *const c_char,
-            auto_cat: *const c_char,
-            has_auto: c_int,
-            _nzb_name: *const c_char,
-            _prio: c_int,
-            _dupe_key: *const c_char,
-            _dupe_score: c_int,
-            _dupe_mode: c_int,
-            _add_top: c_int,
-            _add_paused: c_int,
-            _url_info: *mut c_void,
-        ) -> c_int {
-            if ok == 0 {
-                return 0;
-            }
-            let host = unsafe { &*ctx.cast::<MockHost>() };
-            if has_auto != 0 && !auto_cat.is_null() {
-                if let Ok(s) = unsafe { CStr::from_ptr(auto_cat) }.to_str() {
-                    *host.last_cat.lock().unwrap() = s.to_string();
+        impl ScannerHost for MockHost {
+            fn wake(&self) -> bool {
+                if !self.wakes {
+                    return false;
                 }
+                let state = self.state.clone();
+                std::thread::spawn(move || {
+                    let mut env = NzbgetRsScannerEnv::empty();
+                    env.host = Some(Arc::new(MockHost {
+                        state: state.clone(),
+                        wakes: false,
+                    }));
+                    env.nzb_dir = state.nzb_dir_c.as_ptr();
+                    env.temp_dir = state.temp_dir_c.as_ptr();
+                    env.nzb_dir_interval = 5;
+                    env.nzb_dir_file_age = 0;
+                    env.archive_scan = 1;
+                    env.archive_action = 0;
+                    env.queue_loaded = 1;
+                    env.path_sep = b'/' as c_char;
+                    state.scanner.service_work(&env);
+                });
+                true
             }
-            host.added_count.fetch_add(1, Ordering::SeqCst) + 100
+
+            fn parse_nzb(&self, _filename: &[u8], _category: &[u8]) -> (bool, Vec<u8>) {
+                (true, b"movies".to_vec())
+            }
+
+            fn commit_nzb(&self, nzb: &CommitNzb<'_>) -> c_int {
+                if !nzb.ok {
+                    return 0;
+                }
+                if let Some(cat) = nzb.auto_category {
+                    if let Ok(s) = cat.to_str() {
+                        *self.state.last_cat.lock().unwrap() = s.to_string();
+                    }
+                }
+                self.state.added_count.fetch_add(1, Ordering::SeqCst) + 100
+            }
         }
 
         let scanner = Arc::new(NzbgetRsScanner::new());
-        let mut host = Box::new(MockHost {
+        let state = Arc::new(MockState {
             scanner: scanner.clone(),
             nzb_dir_c: nzb_dir_c.clone(),
             temp_dir_c: temp_dir_c.clone(),
@@ -2217,14 +2175,14 @@ mod tests {
             last_cat: Mutex::new(String::new()),
         });
 
-        let mut env: NzbgetRsScannerEnv = unsafe { std::mem::zeroed() };
-        env.ctx = (&mut *host as *mut MockHost).cast();
+        let mut env = NzbgetRsScannerEnv::empty();
+        env.host = Some(Arc::new(MockHost {
+            state: state.clone(),
+            wakes: true,
+        }));
         env.nzb_dir = nzb_dir_c.as_ptr();
         env.temp_dir = temp_dir_c.as_ptr();
         env.path_sep = b'/' as c_char;
-        env.wake_cb = Some(wake_cb);
-        env.parse_nzb_cb = Some(parse_cb);
-        env.commit_nzb_cb = Some(commit_cb);
 
         scanner.init_options(false, &env);
         assert!(!temp_dir.join("_unpack").exists());
@@ -2245,7 +2203,7 @@ mod tests {
         let status = scanner.add_external_file(&env);
         assert_eq!(status, AS_SUCCESS);
         assert_eq!(out_id, 100);
-        assert_eq!(host.last_cat.lock().unwrap().as_str(), "movies");
+        assert_eq!(state.last_cat.lock().unwrap().as_str(), "movies");
         assert!(nzb_dir.join("Show.S01E01.nzb.queued").exists());
 
         let _ = std::fs::remove_dir_all(&base);

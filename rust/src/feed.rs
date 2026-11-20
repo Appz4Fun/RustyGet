@@ -1680,7 +1680,14 @@ fn run_diskstate_feeds(inner: &mut FeedCoordInner, env: &NzbgetRsFeedCoordEnv, s
     ds_env.log_cb = Some(feed_disk_log_cb);
     ds_env.aux_cb = Some(feed_disk_aux_cb);
     unsafe {
-        crate::diskstate_format::diskstate_exec(if save { 9 } else { 10 }, &ds_env);
+        crate::diskstate_format::diskstate_exec(
+            if save {
+                crate::diskstate_format::DiskOp::SaveFeeds
+            } else {
+                crate::diskstate_format::DiskOp::LoadFeeds
+            },
+            &ds_env,
+        );
     }
 }
 

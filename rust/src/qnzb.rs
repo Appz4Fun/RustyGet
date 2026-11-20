@@ -303,7 +303,8 @@ struct Files {
     extracted: Vec<CString>,
 }
 
-/// A collection's small lists (see `nzbget_rs_nzb_coll`).
+/// A collection's small lists: parameters, script statuses, blocked donors
+/// and server stats.
 #[derive(Default)]
 struct Coll {
     // post-processing parameters, names compared case-insensitively
@@ -340,8 +341,16 @@ impl Coll {
     }
 }
 
-/// Applies a server-stat operation (0 set, 1 add, 2 subtract) to `list`.
-fn stat_op(list: &mut Vec<[i32; 3]>, server_id: i32, success: i32, failed: i32, op: i32) {
+/// How a server stat changes the stored counts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StatOp {
+    Set = 0,
+    Add = 1,
+    Subtract = 2,
+}
+
+/// Applies a server-stat operation to `list`.
+fn stat_op(list: &mut Vec<[i32; 3]>, server_id: i32, success: i32, failed: i32, op: StatOp) {
     let i = match list.iter().position(|s| s[0] == server_id) {
         Some(i) => i,
         None => {
@@ -350,7 +359,9 @@ fn stat_op(list: &mut Vec<[i32; 3]>, server_id: i32, success: i32, failed: i32, 
         }
     };
     let (mut s, mut f) = (list[i][1], list[i][2]);
-    unsafe { crate::ffi::nzbget_rs_server_stat_apply_op(op, success, failed, &mut s, &mut f) };
+    unsafe {
+        crate::ffi::nzbget_rs_server_stat_apply_op(op as c_int, success, failed, &mut s, &mut f)
+    };
     list[i][1] = s;
     list[i][2] = f;
 }
@@ -498,7 +509,7 @@ pub(crate) fn set_server_stat(nzb: NzbRef, stat: ServerStat) {
             stat.server_id,
             stat.success,
             stat.failed,
-            0,
+            StatOp::Set,
         );
     }
 }
@@ -514,10 +525,50 @@ pub(crate) fn sync_current_server_stats(nzb: NzbRef) {
                 e[0],
                 e[1],
                 e[2],
-                0,
+                StatOp::Set,
             );
         }
     }
+}
+
+/// Applies `op` with `stat` to a download's `which` list.
+pub(crate) fn apply_server_stat(nzb: NzbRef, which: StatList, op: StatOp, stat: ServerStat) {
+    if let Some(d) = nzb_data(nzb) {
+        stat_op(
+            &mut d.coll().stats[which as usize],
+            stat.server_id,
+            stat.success,
+            stat.failed,
+            op,
+        );
+    }
+}
+
+/// Adds `src`'s totals and current counts to `nzb`'s.
+fn add_server_stats_from(nzb: NzbRef, src: NzbRef) {
+    let (Some(d), Some(o)) = (nzb_data(nzb), nzb_data(src)) else {
+        return;
+    };
+    // copy first: src may be nzb
+    let other = o.coll().stats.clone();
+    let mut c = d.coll();
+    for (dst, list) in c.stats.iter_mut().zip(other) {
+        for e in list {
+            stat_op(dst, e[0], e[1], e[2], StatOp::Add);
+        }
+    }
+}
+
+/// The scripts' total status.
+fn script_total_status(nzb: NzbRef) -> ScriptStatus {
+    nzb_data(nzb).map_or(ScriptStatus::default(), |d| {
+        let c = d.coll();
+        crate::downloadinfo::script_calc_total_status(
+            c.script_statuses
+                .iter()
+                .map(|&(_, s)| ScriptStatus::from(s)),
+        )
+    })
 }
 
 /// Records how a post-processing script ended.
@@ -1257,157 +1308,6 @@ pub unsafe extern "C" fn nzbget_rs_nzb_set_text(
     }
 }
 
-/// A collection's small lists. `p2` is another collection where noted.
-///
-/// - Parameters: 0 find `s1` (value into `strs[0]`, returns 1 when found);
-///   1 set `s1` = `s2` (an empty value removes it); 2 copy all of `p2`'s in;
-///   3 count; 4 parameter `a2` into `strs[0..2]`; 5 clear.
-/// - Script statuses: 10 add `s1` with status `a2`; 11 count; 12 status `a2`
-///   into `ints[0]` and `strs[0]`; 13 clear; 14 total status.
-/// - Blocked donors: 20 contains `a2`; 21 add `a2`.
-/// - Server stats (`w` = 0 totals, 1 current): 40+w count; 42+w entry `a2`
-///   into `ints[0..3]`; 44+w apply op `a2` (0 set, 1 add, 2 subtract) with
-///   `ints[0..3]`; 46+w clear; 48 set current from the totals; 49 apply op
-///   `a2` of `p2`'s list `ints[1]` to this one's list `ints[0]`.
-///
-/// # Safety
-/// `p` (and `p2` where used) come from `nzbget_rs_nzb_scalars_new`; output
-/// arrays are large enough; strings are null or NUL-terminated.
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn nzbget_rs_nzb_coll(
-    p: *const NzbScalars,
-    op: c_int,
-    a2: c_int,
-    p2: *const NzbScalars,
-    s1: *const c_char,
-    s2: *const c_char,
-    ints: *mut c_int,
-    strs: *mut *const c_char,
-) -> i64 {
-    // copy another collection's lists before locking this one (p2 may be p)
-    let other: Option<Coll> = match op {
-        2 | 49 if !p2.is_null() => {
-            let o = data(p2).coll.lock().unwrap_or_else(|e| e.into_inner());
-            Some(Coll {
-                params: o.params.clone(),
-                stats: o.stats.clone(),
-                ..Coll::default()
-            })
-        }
-        _ => None,
-    };
-    let mut c = data(p).coll.lock().unwrap_or_else(|e| e.into_inner());
-    match op {
-        0 => match c.param(cstr(s1).to_bytes()) {
-            Some(v) => {
-                unsafe { *strs = v.as_ptr() };
-                1
-            }
-            None => 0,
-        },
-        1 => {
-            c.set_param(cstr(s1), cstr(s2));
-            0
-        }
-        2 => {
-            if let Some(o) = other {
-                for (n, v) in &o.params {
-                    c.set_param(n, v);
-                }
-            }
-            0
-        }
-        3 => c.params.len() as i64,
-        4 => match c.params.get(a2 as usize) {
-            Some((n, v)) => {
-                unsafe {
-                    *strs = n.as_ptr();
-                    *strs.add(1) = v.as_ptr();
-                }
-                0
-            }
-            None => 0,
-        },
-        5 => {
-            c.params.clear();
-            0
-        }
-        10 => {
-            c.script_statuses.push((cstr(s1).to_owned(), a2));
-            0
-        }
-        11 => c.script_statuses.len() as i64,
-        12 => match c.script_statuses.get(a2 as usize) {
-            Some((n, st)) => {
-                unsafe {
-                    *ints = *st;
-                    *strs = n.as_ptr();
-                }
-                0
-            }
-            None => 0,
-        },
-        13 => {
-            c.script_statuses.clear();
-            0
-        }
-        14 => {
-            let all = c
-                .script_statuses
-                .iter()
-                .map(|&(_, s)| ScriptStatus::from(s));
-            i64::from(i32::from(crate::downloadinfo::script_calc_total_status(
-                all,
-            )))
-        }
-        20 => i64::from(c.blocked_donors.contains(&a2)),
-        21 => i64::from(c.blocked_donors.insert(a2) || true),
-        40 | 41 => c.stats[(op - 40) as usize].len() as i64,
-        42 | 43 => match c.stats[(op - 42) as usize].get(a2 as usize) {
-            Some(e) => {
-                unsafe {
-                    *ints = e[0];
-                    *ints.add(1) = e[1];
-                    *ints.add(2) = e[2];
-                }
-                0
-            }
-            None => 0,
-        },
-        44 | 45 => {
-            let (id, ok, bad) = unsafe { (*ints, *ints.add(1), *ints.add(2)) };
-            stat_op(&mut c.stats[(op - 44) as usize], id, ok, bad, a2);
-            0
-        }
-        46 | 47 => {
-            c.stats[(op - 46) as usize].clear();
-            0
-        }
-        48 => {
-            let totals = c.stats[0].clone();
-            for e in totals {
-                stat_op(&mut c.stats[1], e[0], e[1], e[2], 0);
-            }
-            0
-        }
-        49 => {
-            if let Some(o) = other {
-                let (dst, src) = unsafe {
-                    (
-                        (*ints).clamp(0, 1) as usize,
-                        (*ints.add(1)).clamp(0, 1) as usize,
-                    )
-                };
-                for e in &o.stats[src] {
-                    stat_op(&mut c.stats[dst], e[0], e[1], e[2], a2);
-                }
-            }
-            0
-        }
-        _ => 0,
-    }
-}
-
 /// Post-processing state of a collection. The C++ PostInfo is this
 /// allocation (a PostInfo* is a Post*): it has no members of its own.
 pub struct Post {
@@ -1925,8 +1825,18 @@ pub(crate) fn transfer_file(nzb: NzbRef, file: FileRef, dest: NzbRef) {
             crate::qfile::field::NZB,
             dest.addr() as i64,
         );
-        crate::qfile::add_file_stats(nzb.addr(), file.addr() as *const crate::qfile::File, 1, 2);
-        crate::qfile::add_file_stats(dest.addr(), file.addr() as *const crate::qfile::File, 1, 1);
+        crate::qfile::add_file_stats(
+            nzb.addr(),
+            file.addr() as *const crate::qfile::File,
+            StatList::Current,
+            StatOp::Subtract,
+        );
+        crate::qfile::add_file_stats(
+            dest.addr(),
+            file.addr() as *const crate::qfile::File,
+            StatList::Current,
+            StatOp::Add,
+        );
     }
 }
 
@@ -1950,21 +1860,7 @@ pub(crate) fn merge_from(nzb: NzbRef, src: NzbRef) {
         };
     }
     ptr_list_op(file_list(p), 11, 0, 0, no, sl);
-    let ns: *const c_char = std::ptr::null();
-    for mut lists in [[0 as c_int, 0], [1, 1]] {
-        unsafe {
-            nzbget_rs_nzb_coll(
-                p,
-                49,
-                1,
-                src,
-                ns,
-                ns,
-                lists.as_mut_ptr(),
-                std::ptr::null_mut(),
-            )
-        };
-    }
+    add_server_stats_from(nzb, NzbRef::from_addr(src as usize));
     if !src.is_null() && src != p.cast_const() {
         let taken = std::mem::take(&mut data(src).files().completed);
         data(p).files().completed.extend(taken);
@@ -1989,25 +1885,13 @@ pub(crate) fn replace_files_from(nzb: NzbRef, src: NzbRef) {
         return;
     }
     let p = scalars(nzb);
-    let ns: *const c_char = std::ptr::null();
     {
         let mut f = data(p).files();
         f.completed.clear();
         f.jobs.clear();
     }
-    for op in [46, 47] {
-        unsafe {
-            nzbget_rs_nzb_coll(
-                p,
-                op,
-                0,
-                std::ptr::null(),
-                ns,
-                ns,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
+    if let Some(d) = nzb_data(nzb) {
+        d.coll().stats.iter_mut().for_each(Vec::clear);
     }
     unsafe { move_file_list(p, src.addr() as *const NzbScalars) };
 }
@@ -2564,7 +2448,7 @@ unsafe fn update_completed_stats(p: *mut NzbScalars, f: *const crate::qfile::Fil
             &mut s.pausedFileCount,
         );
     }
-    unsafe { crate::qfile::add_file_stats(p as usize, f, 0, 1) };
+    unsafe { crate::qfile::add_file_stats(p as usize, f, StatList::Total, StatOp::Add) };
 }
 
 /// NzbInfo::UpdateDeletedStats: a file left the queue undownloaded.
@@ -2606,7 +2490,7 @@ unsafe fn update_deleted_stats(p: *mut NzbScalars, f: *const crate::qfile::File)
             &mut s.pausedSize,
         );
     }
-    unsafe { crate::qfile::add_file_stats(p as usize, f, 1, 2) };
+    unsafe { crate::qfile::add_file_stats(p as usize, f, StatList::Current, StatOp::Subtract) };
 }
 
 /// NzbInfo::UpdateCurrentStats: recomputes the current-session counters
@@ -2625,18 +2509,7 @@ unsafe fn update_current_stats(p: *mut NzbScalars) {
             ..Default::default()
         }
     };
-    unsafe {
-        nzbget_rs_nzb_coll(
-            p,
-            48,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
-    };
+    sync_current_server_stats(NzbRef::from_addr(p as usize));
     for f in files_of(p) {
         let g = |id| file_get(f, id);
         crate::downloadinfo::update_current_stats_step(
@@ -2650,7 +2523,7 @@ unsafe fn update_current_stats(p: *mut NzbScalars) {
             g(field::PAUSED) != 0,
             g(field::PAR_FILE) != 0,
         );
-        unsafe { crate::qfile::add_file_stats(p as usize, f, 1, 1) };
+        unsafe { crate::qfile::add_file_stats(p as usize, f, StatList::Current, StatOp::Add) };
     }
     let s = unsafe { &mut *p };
     s.pausedFileCount = acc.paused_file_count;
@@ -2763,19 +2636,7 @@ pub(crate) fn nzb_snapshot(
     }
     let p = scalars(nzb).cast_const();
     let s = unsafe { &*p };
-    let ns: *const c_char = std::ptr::null();
-    let script_total = unsafe {
-        nzbget_rs_nzb_coll(
-            p,
-            14,
-            0,
-            std::ptr::null(),
-            ns,
-            ns,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
-    } as c_int;
+    let script_total = script_total_status(nzb);
     let post = slot(p, Slot::Post) as *const Post;
     let post_flag = |f| !post.is_null() && post_get(post, PostField::Int(f)) != 0;
     let unpack_thread = slot(p, Slot::UnpackJob);
@@ -2811,7 +2672,7 @@ pub(crate) fn nzb_snapshot(
                 if text_status == TextStatus::IgnoreScript {
                     ScriptStatus::Success
                 } else {
-                    ScriptStatus::from(script_total)
+                    script_total
                 },
                 health,
                 critical_exact,
@@ -2867,7 +2728,7 @@ pub(crate) fn nzb_snapshot(
         reprocess: s.reprocess,
         extra_par_blocks: s.extraParBlocks,
         dupe_recovered_holes: s.dupeRecoveredHoles,
-        script_total_status: ScriptStatus::from(script_total),
+        script_total_status: script_total,
         parked_file_count: s.parkedFileCount,
         delete_paused: s.deletePaused,
         auto_category: s.autoCategory,
@@ -3026,20 +2887,11 @@ mod tests {
         assert!(!donor_blocked(pn, 7));
         block_donor(pn, 7);
         assert!(donor_blocked(pn, 7) && !donor_blocked(qn, 7));
-        let mut ints = [0 as c_int; 1];
-        unsafe {
-            nzbget_rs_nzb_coll(
-                p,
-                10,
-                2,
-                std::ptr::null(),
-                c"script.py".as_ptr(),
-                std::ptr::null(),
-                ints.as_mut_ptr(),
-                std::ptr::null_mut(),
-            );
-        }
-        assert_eq!(script_statuses(pn), [(b"script.py".to_vec(), ScriptStatus::from(2))]);
+        push_script_status(pn, b"script.py", ScriptStatus::from(2));
+        assert_eq!(
+            script_statuses(pn),
+            [(b"script.py".to_vec(), ScriptStatus::from(2))]
+        );
         unsafe {
             nzbget_rs_nzb_scalars_free(p);
             nzbget_rs_nzb_scalars_free(q);
@@ -3047,45 +2899,40 @@ mod tests {
     }
 
     #[test]
-    fn small_collections() {
+    fn server_stats_and_script_total() {
         let p = nzbget_rs_nzb_scalars_new();
         let q = nzbget_rs_nzb_scalars_new();
-        let np: *const NzbScalars = std::ptr::null();
-        let ns: *const c_char = std::ptr::null();
-        let mut ints = [0 as c_int; 4];
-        let mut strs = [ns; 2];
-        let mut coll = |n: *const NzbScalars,
-                        op: c_int,
-                        a2: c_int,
-                        p2: *const NzbScalars,
-                        s1: *const c_char,
-                        s2: *const c_char| unsafe {
-            nzbget_rs_nzb_coll(n, op, a2, p2, s1, s2, ints.as_mut_ptr(), strs.as_mut_ptr())
-        };
-        coll(p, 1, 0, np, c"Category".as_ptr(), c"tv".as_ptr());
-        assert_eq!(coll(p, 0, 0, np, c"category".as_ptr(), ns), 1);
-        coll(p, 1, 0, np, c"CATEGORY".as_ptr(), c"".as_ptr());
-        assert_eq!(coll(p, 3, 0, np, ns, ns), 0);
-        coll(q, 1, 0, np, c"a".as_ptr(), c"1".as_ptr());
-        coll(p, 2, 0, q, ns, ns);
-        assert_eq!(coll(p, 3, 0, np, ns, ns), 1);
-        coll(p, 10, 2, np, c"script.py".as_ptr(), ns);
-        assert_eq!(coll(p, 11, 0, np, ns, ns), 1);
-        assert_eq!(coll(p, 20, 7, np, ns, ns), 0);
-        coll(p, 21, 7, np, ns, ns);
-        assert_eq!(coll(p, 20, 7, np, ns, ns), 1);
-        drop(coll);
+        let (pn, qn) = (NzbRef::from_addr(p as usize), NzbRef::from_addr(q as usize));
+        let stat = ServerStat::from([1, 5, 2]);
+        apply_server_stat(pn, StatList::Total, StatOp::Add, stat);
+        sync_current_server_stats(pn);
+        assert_eq!(server_stats(pn, StatList::Current), [stat]);
+        // merging adds both lists
+        add_server_stats_from(qn, pn);
+        add_server_stats_from(qn, pn);
+        let twice = ServerStat::from([1, 10, 4]);
+        assert_eq!(server_stats(qn, StatList::Total), [twice]);
+        assert_eq!(server_stats(qn, StatList::Current), [twice]);
+        apply_server_stat(qn, StatList::Total, StatOp::Subtract, stat);
+        assert_eq!(server_stats(qn, StatList::Total), [stat]);
+        apply_server_stat(
+            qn,
+            StatList::Total,
+            StatOp::Set,
+            ServerStat::from([1, 0, 0]),
+        );
+        assert_eq!(
+            server_stats(qn, StatList::Total),
+            [ServerStat::from([1, 0, 0])]
+        );
+        // copying onto itself doubles
+        add_server_stats_from(pn, pn);
+        assert_eq!(server_stats(pn, StatList::Total), [twice]);
+        assert_eq!(script_total_status(pn), ScriptStatus::None);
+        push_script_status(pn, b"a.py", ScriptStatus::Success);
+        assert_eq!(script_total_status(pn), ScriptStatus::Success);
+        assert_eq!(script_total_status(NzbRef::NONE), ScriptStatus::None);
         unsafe {
-            ints[..3].copy_from_slice(&[1, 5, 2]);
-            nzbget_rs_nzb_coll(p, 44, 1, np, ns, ns, ints.as_mut_ptr(), strs.as_mut_ptr());
-            nzbget_rs_nzb_coll(p, 48, 0, np, ns, ns, ints.as_mut_ptr(), strs.as_mut_ptr());
-            nzbget_rs_nzb_coll(p, 43, 0, np, ns, ns, ints.as_mut_ptr(), strs.as_mut_ptr());
-            assert_eq!(&ints[..3], &[1, 5, 2]);
-            ints[0] = 0;
-            ints[1] = 1;
-            nzbget_rs_nzb_coll(q, 49, 1, p, ns, ns, ints.as_mut_ptr(), strs.as_mut_ptr());
-            nzbget_rs_nzb_coll(q, 42, 0, np, ns, ns, ints.as_mut_ptr(), strs.as_mut_ptr());
-            assert_eq!(&ints[..3], &[1, 5, 2]);
             nzbget_rs_nzb_scalars_free(p);
             nzbget_rs_nzb_scalars_free(q);
         }

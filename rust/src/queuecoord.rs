@@ -2516,22 +2516,14 @@ impl NzbgetRsQueueCoordinator {
             if let Some((idx, mut art)) = host.file_first_undefined_article(file.ptr) {
                 if file.dupe_cutover && art.dupe_fallback_round == 0 {
                     art.dupe_proactive = true;
-                    host.article_set_int(
-                        art.ptr,
-                        crate::queuesubsys_host::ART_INT_DUPE_PROACTIVE,
-                        1,
-                    );
+                    host.article_edit(art.ptr, crate::qarticle::ArticleEdit::Proactive(true));
                     let ok = self.with_donor_cache(|cache| {
                         crate::dupefallback::try_fallback_host(
                             cache, host, opts, dq_ptr, &mut nzb, &mut file, idx, &mut art,
                         )
                     });
                     art.dupe_proactive = ok;
-                    host.article_set_int(
-                        art.ptr,
-                        crate::queuesubsys_host::ART_INT_DUPE_PROACTIVE,
-                        i32::from(ok),
-                    );
+                    host.article_edit(art.ptr, crate::qarticle::ArticleEdit::Proactive(ok));
                 }
                 self.propagation_wait_logged_id
                     .store(0, std::sync::atomic::Ordering::Relaxed);
@@ -3188,11 +3180,7 @@ impl NzbgetRsQueueCoordinator {
 
             if ad.status == crate::queuesubsys_host::AD_FINISHED && !misplaced {
                 art.status = crate::queuesubsys_host::AI_FINISHED;
-                host.article_set_int(
-                    art.ptr,
-                    crate::queuesubsys_host::ART_INT_STATUS,
-                    crate::queuesubsys_host::AI_FINISHED,
-                );
+                host.article_edit(art.ptr, crate::qarticle::ArticleEdit::Status(crate::queuesubsys_host::AI_FINISHED));
                 if art.dupe_fallback_round == 0
                     || (!art.dupe_original_message_id.is_empty()
                         && art.message_id == art.dupe_original_message_id)
@@ -3263,11 +3251,7 @@ impl NzbgetRsQueueCoordinator {
                     &art.dupe_original_message_id,
                 );
                 art.dupe_donor_id = donor_id;
-                host.article_set_int(
-                    art.ptr,
-                    crate::queuesubsys_host::ART_INT_DUPE_DONOR_ID,
-                    donor_id,
-                );
+                host.article_edit(art.ptr, crate::qarticle::ArticleEdit::DonorId(donor_id));
 
                 let (rec, next_file_rec, next_nzb_rec, trig_cutover) =
                     eval_dupe_recovery_and_cutover(
@@ -3358,11 +3342,7 @@ impl NzbgetRsQueueCoordinator {
                 })
             {
                 art.status = crate::queuesubsys_host::AI_UNDEFINED;
-                host.article_set_int(
-                    art.ptr,
-                    crate::queuesubsys_host::ART_INT_STATUS,
-                    crate::queuesubsys_host::AI_UNDEFINED,
-                );
+                host.article_edit(art.ptr, crate::qarticle::ArticleEdit::Status(crate::queuesubsys_host::AI_UNDEFINED));
                 retry = true;
                 if art.part_number == 1 {
                     nzb.all_first = false;
@@ -3373,11 +3353,7 @@ impl NzbgetRsQueueCoordinator {
                 || misplaced
             {
                 art.status = crate::queuesubsys_host::AI_FAILED;
-                host.article_set_int(
-                    art.ptr,
-                    crate::queuesubsys_host::ART_INT_STATUS,
-                    crate::queuesubsys_host::AI_FAILED,
-                );
+                host.article_edit(art.ptr, crate::qarticle::ArticleEdit::Status(crate::queuesubsys_host::AI_FAILED));
                 let (dfr, ff_sz, nf_sz, npf_sz, ff_art, nf_art) = apply_failed_article_counters(
                     art.part_number,
                     file.par_file as i32,
@@ -3433,11 +3409,7 @@ impl NzbgetRsQueueCoordinator {
                 }
             } else if ad.status == crate::queuesubsys_host::AD_RETRY {
                 art.status = crate::queuesubsys_host::AI_UNDEFINED;
-                host.article_set_int(
-                    art.ptr,
-                    crate::queuesubsys_host::ART_INT_STATUS,
-                    crate::queuesubsys_host::AI_UNDEFINED,
-                );
+                host.article_edit(art.ptr, crate::qarticle::ArticleEdit::Status(crate::queuesubsys_host::AI_UNDEFINED));
                 retry = true;
                 if art.part_number == 1 {
                     nzb.all_first = false;
@@ -4153,10 +4125,9 @@ impl NzbgetRsQueueCoordinator {
         // direct checksum demotion that does not discard cached content here.
         host.invalidate_source_replacement(file.ptr, art.ptr);
         art.status = crate::queuesubsys_host::AI_FAILED;
-        host.article_set_int(
+        host.article_edit(
             art.ptr,
-            crate::queuesubsys_host::ART_INT_STATUS,
-            crate::queuesubsys_host::AI_FAILED,
+            crate::qarticle::ArticleEdit::Status(crate::queuesubsys_host::AI_FAILED),
         );
         let par_recovered_before = file.dupe_recovered_articles;
         demote_article_counters(
@@ -5632,10 +5603,9 @@ impl NzbgetRsQueueCoordinator {
             info_name.to_vec(),
         ));
         let ad_ptr = std::sync::Arc::as_ptr(&ad) as usize;
-        host.article_set_int(
+        host.article_edit(
             article_ptr,
-            crate::queuesubsys_host::ART_INT_STATUS,
-            ARTICLE_RUNNING,
+            crate::qarticle::ArticleEdit::Status(ARTICLE_RUNNING),
         );
         let f = host.file_snap(file_ptr);
         host.file_set_int(
@@ -5697,10 +5667,9 @@ impl NzbgetRsQueueCoordinator {
                     pool.free_connection(conn_ptr as *mut crate::net::PooledNntpConn, false);
                 }
             }
-            host.article_set_int(
+            host.article_edit(
                 article_ptr,
-                crate::queuesubsys_host::ART_INT_STATUS,
-                ARTICLE_UNDEFINED,
+                crate::qarticle::ArticleEdit::Status(ARTICLE_UNDEFINED),
             );
             host.file_set_int(
                 file_ptr,

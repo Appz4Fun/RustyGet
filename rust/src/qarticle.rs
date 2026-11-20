@@ -110,6 +110,31 @@ fn opt_cstring(p: *const c_char) -> Option<CString> {
     (!p.is_null()).then(|| cstring(p))
 }
 
+/// One change to an article's fields. Message-ids stop at the first NUL.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ArticleEdit<'a> {
+    /// One of the `AI_*` states.
+    Status(i32),
+    FallbackRound(i32),
+    DonorId(i32),
+    Proactive(bool),
+    /// The decoded range a donor article is expected to fill (-1 unknown).
+    ExpectedRange {
+        offset: i64,
+        end: i64,
+    },
+    MessageId(&'a [u8]),
+    OriginalMessageId(&'a [u8]),
+    /// Back to undefined with no segment, crc or expected range, for a new
+    /// attempt.
+    ResetForRetry,
+}
+
+fn cstring_from(bytes: &[u8]) -> CString {
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    CString::new(&bytes[..end]).unwrap_or_default()
+}
+
 impl Article {
     fn new(part_number: i32, size: i32, message_id: *const c_char) -> Self {
         let a = Self::default();
@@ -120,6 +145,37 @@ impl Article {
             d.message_id = cstring(message_id);
         }
         a
+    }
+
+    /// The article at `addr`, or `None` for 0.
+    ///
+    /// # Safety
+    /// A non-zero `addr` names a live article for `'a`.
+    pub(crate) unsafe fn from_addr<'a>(addr: usize) -> Option<&'a Article> {
+        (addr != 0).then(|| unsafe { &*(addr as *const Article) })
+    }
+
+    pub(crate) fn edit(&self, edit: ArticleEdit<'_>) {
+        let mut d = self.lock();
+        match edit {
+            ArticleEdit::Status(v) => d.status = v,
+            ArticleEdit::FallbackRound(v) => d.dupe_fallback_round = v,
+            ArticleEdit::DonorId(v) => d.dupe_donor_id = v,
+            ArticleEdit::Proactive(v) => d.dupe_proactive = v,
+            ArticleEdit::ExpectedRange { offset, end } => {
+                d.dupe_expected_offset = offset;
+                d.dupe_expected_end = end;
+            }
+            ArticleEdit::MessageId(v) => d.message_id = cstring_from(v),
+            ArticleEdit::OriginalMessageId(v) => d.dupe_original_message_id = cstring_from(v),
+            ArticleEdit::ResetForRetry => {
+                d.status = AI_UNDEFINED;
+                self.crc.store(0, Ordering::SeqCst);
+                self.set_geometry(0, 0);
+                d.dupe_expected_offset = -1;
+                d.dupe_expected_end = -1;
+            }
+        }
     }
 
     fn lock(&self) -> MutexGuard<'_, Data> {
@@ -298,12 +354,9 @@ pub unsafe extern "C" fn nzbget_rs_artlist_free(list: *mut ArticleList) {
 /// - 0 summary of the article at index `a2`; 1 summary of `article` (done);
 ///   7 first undefined article; 8 summary of `article` with its index in
 ///   `ints[11]`. Summaries return the article address.
-/// - 2 set `a2`-th field of `article` to `p2` (0 status, 1 fallback round,
-///   2 donor id, 3 proactive); 3 pinned source `a2` (`a2` < 0: count);
-///   4 pin sources (`a2` sources in `strs`, `ints` = lead, next lead, donor
-///   count, donors count, donors...); 5 expected range from `i64s`;
-///   6 message-id (`a2` 0) or original message-id (`a2` 1) from `s1`;
-///   9 reset for a new attempt.
+/// - 3 pinned source `a2` (`a2` < 0: count); 4 pin sources (`a2` sources in
+///   `strs`, `ints` = lead, next lead, donor count, donors count, donors...).
+///   Field changes go through [`Article::edit`].
 /// - 10 persisted fields of article `a2`; 11 append article (part `a2`, size
 ///   `p2`, message-id `s1`); 12 restore article `a2` (with `p2` 0 returns
 ///   `part << 1 | has result file`); 13 admit a live-par header claim on
@@ -370,18 +423,6 @@ pub unsafe extern "C" fn nzbget_rs_article_host(
                 None => 0,
             }
         }
-        (2, _, Some(a)) => {
-            let v = p2 as i32;
-            let mut d = a.lock();
-            match a2 {
-                0 => d.status = v,
-                1 => d.dupe_fallback_round = v,
-                2 => d.dupe_donor_id = v,
-                3 => d.dupe_proactive = v != 0,
-                _ => {}
-            }
-            0
-        }
         (3, _, Some(a)) => {
             let d = a.lock();
             if a2 < 0 {
@@ -408,32 +449,6 @@ pub unsafe extern "C" fn nzbget_rs_article_host(
                 let n = (*ints.add(3)).max(0) as usize;
                 d.dupe_source_donors = (0..n).map(|i| *ints.add(4 + i)).collect();
             }
-            0
-        }
-        (5, _, Some(a)) => {
-            let mut d = a.lock();
-            unsafe {
-                d.dupe_expected_offset = *i64s;
-                d.dupe_expected_end = *i64s.add(1);
-            }
-            0
-        }
-        (6, _, Some(a)) => {
-            let mut d = a.lock();
-            if a2 == 0 {
-                d.message_id = cstring(s1);
-            } else if a2 == 1 {
-                d.dupe_original_message_id = cstring(s1);
-            }
-            0
-        }
-        (9, _, Some(a)) => {
-            let mut d = a.lock();
-            d.status = AI_UNDEFINED;
-            a.crc.store(0, Ordering::SeqCst);
-            a.set_geometry(0, 0);
-            d.dupe_expected_offset = -1;
-            d.dupe_expected_end = -1;
             0
         }
         (10, Some(l), _) => {
@@ -621,6 +636,12 @@ unsafe fn list_change(
 mod tests {
     use super::*;
 
+    fn set_status(addr: usize, status: i32) {
+        unsafe { Article::from_addr(addr) }
+            .unwrap()
+            .edit(ArticleEdit::Status(status));
+    }
+
     fn host(
         list: *mut ArticleList,
         art: usize,
@@ -660,7 +681,7 @@ mod tests {
         assert_eq!((ints[0], ints[1], ints[2]), (2, 300, AI_UNDEFINED));
         assert_eq!(i64s[0], 0);
         assert_eq!(unsafe { CStr::from_ptr(strs[0]) }.to_bytes(), b"a@b");
-        host(list, addr, 2, 0, AI_FINISHED as usize, ptr::null());
+        set_status(addr, AI_FINISHED);
         assert_eq!(host(list, 0, 7, 0, 0, ptr::null()).1[11], 0);
         let (_, ints, _, _) = host(list, addr, 8, 0, 0, ptr::null());
         assert_eq!((ints[11], ints[2]), (1, AI_FINISHED));
@@ -778,7 +799,7 @@ mod tests {
             let n = host(self.list, 0, 100, 0, 0, ptr::null()).0;
             host(self.list, 0, 11, n as c_int + 1, 0, ptr::null());
             let a = host(self.list, 0, 106, n as c_int, 0, ptr::null()).0;
-            host(ptr::null_mut(), a, 2, 0, AI_RUNNING as usize, ptr::null());
+            set_status(a, AI_RUNNING);
             a
         }
         fn claim(&self, art: usize, b: i64, e: i64) -> bool {
@@ -798,14 +819,7 @@ mod tests {
             }
         }
         fn finished(&self, art: usize, offset: i64, size: c_int) {
-            host(
-                ptr::null_mut(),
-                art,
-                2,
-                0,
-                AI_FINISHED as usize,
-                ptr::null(),
-            );
+            set_status(art, AI_FINISHED);
             let mut ints = [size, 0];
             let mut i64s = [offset, 0];
             unsafe {
@@ -873,14 +887,7 @@ mod tests {
         let c = Claims::new();
         let first = c.running();
         assert!(c.claim(first, 0, 10));
-        host(
-            ptr::null_mut(),
-            first,
-            2,
-            0,
-            AI_UNDEFINED as usize,
-            ptr::null(),
-        );
+        set_status(first, AI_UNDEFINED);
         let mut ints = [0, 0];
         let mut i64s = [0, 0];
         unsafe {

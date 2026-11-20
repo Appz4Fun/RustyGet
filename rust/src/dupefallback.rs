@@ -2968,10 +2968,9 @@ pub(crate) fn try_fallback_host(
     if art.dupe_original_message_id.is_empty() {
         let orig = art.message_id.clone();
         art.dupe_original_message_id = orig.clone();
-        host.article_set_str(
+        host.article_edit(
             art.ptr,
-            crate::queuesubsys_host::ART_STR_DUPE_ORIG_MESSAGE_ID,
-            Some(&orig),
+            crate::qarticle::ArticleEdit::OriginalMessageId(&orig),
         );
     }
 
@@ -3015,11 +3014,7 @@ pub(crate) fn try_fallback_host(
             if pinned_round > 0 && !art.dupe_original_message_id.is_empty() {
                 let orig = art.dupe_original_message_id.clone();
                 art.message_id = orig.clone();
-                host.article_set_str(
-                    art.ptr,
-                    crate::queuesubsys_host::ART_STR_MESSAGE_ID,
-                    Some(&orig),
-                );
+                host.article_edit(art.ptr, crate::qarticle::ArticleEdit::MessageId(&orig));
             }
         } else if pinned_round == 0 && !art.dupe_proactive {
             nzb.dupe_unsourced_articles += 1;
@@ -3031,11 +3026,7 @@ pub(crate) fn try_fallback_host(
         } else if !art.dupe_original_message_id.is_empty() {
             let orig = art.dupe_original_message_id.clone();
             art.message_id = orig.clone();
-            host.article_set_str(
-                art.ptr,
-                crate::queuesubsys_host::ART_STR_MESSAGE_ID,
-                Some(&orig),
-            );
+            host.article_edit(art.ptr, crate::qarticle::ArticleEdit::MessageId(&orig));
         }
         return false;
     }
@@ -3065,20 +3056,21 @@ pub(crate) fn try_fallback_host(
         file.decoded_file_size,
     );
     // the article stores an unknown bound as -1
-    host.article_set_i64_pair(art.ptr, exp_off.unwrap_or(-1), exp_end.unwrap_or(-1));
+    host.article_edit(
+        art.ptr,
+        crate::qarticle::ArticleEdit::ExpectedRange {
+            offset: exp_off.unwrap_or(-1),
+            end: exp_end.unwrap_or(-1),
+        },
+    );
 
     let chosen = sources[round as usize].clone();
     art.message_id = chosen.clone();
     art.dupe_fallback_round = round + 1;
-    host.article_set_str(
+    host.article_edit(art.ptr, crate::qarticle::ArticleEdit::MessageId(&chosen));
+    host.article_edit(
         art.ptr,
-        crate::queuesubsys_host::ART_STR_MESSAGE_ID,
-        Some(&chosen),
-    );
-    host.article_set_int(
-        art.ptr,
-        crate::queuesubsys_host::ART_INT_DUPE_FALLBACK_ROUND,
-        round + 1,
+        crate::qarticle::ArticleEdit::FallbackRound(round + 1),
     );
     true
 }

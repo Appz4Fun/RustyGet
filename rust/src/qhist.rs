@@ -7,7 +7,7 @@
 use std::ffi::{c_char, c_int};
 use std::sync::atomic::{AtomicI32, AtomicI64, AtomicUsize, Ordering};
 
-use crate::qdup::{nzbget_rs_dup_get, Dup};
+use crate::qdup::Dup;
 use crate::qnzb::{nzbget_rs_nzb_text, NzbScalars};
 
 /// `HistoryInfo::EKind`.
@@ -99,17 +99,8 @@ pub unsafe fn host_hist_summary(
             )
         }
         KIND_DUP if info != 0 => {
-            let mut all = [0 as c_int; 6];
-            let mut texts = [std::ptr::null::<c_char>(); 2];
-            unsafe {
-                nzbget_rs_dup_get(
-                    info as *const Dup,
-                    all.as_mut_ptr(),
-                    std::ptr::null_mut(),
-                    texts.as_mut_ptr(),
-                )
-            };
-            (all[5], texts[0], info)
+            let d = unsafe { &*(info as *const Dup) };
+            (d.id(), d.name_ptr(), info)
         }
         KIND_NZB | KIND_URL | KIND_DUP => (0, std::ptr::null(), 0),
         _ => (0, c"<unknown>".as_ptr(), 0),
@@ -129,7 +120,7 @@ pub unsafe fn host_hist_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::qdup::{nzbget_rs_dup_free, nzbget_rs_dup_new, nzbget_rs_dup_set};
+    use crate::qdup::DupEdit;
     use crate::qnzb::{
         nzbget_rs_nzb_scalars_free, nzbget_rs_nzb_scalars_new, nzbget_rs_nzb_set_text,
     };
@@ -181,9 +172,9 @@ mod tests {
         let mut ints = [-1 as c_int; 2];
         let mut strs = [ns; 1];
         unsafe {
-            let d = nzbget_rs_dup_new();
-            nzbget_rs_dup_set(d, 5, 42, ns);
-            nzbget_rs_dup_set(d, 7, 0, c"Movie.2021".as_ptr());
+            let d = Dup::alloc();
+            (*d).edit(DupEdit::Id(42));
+            (*d).edit(DupEdit::Name(b"Movie.2021"));
             let h = nzbget_rs_hist_new();
             nzbget_rs_hist_set(h, field::KIND, i64::from(KIND_DUP));
             nzbget_rs_hist_set(h, field::INFO, d as i64);
@@ -212,7 +203,7 @@ mod tests {
             assert_eq!(ints, [KIND_NZB, 0]);
             assert!(strs[0].is_null());
             nzbget_rs_hist_free(h);
-            nzbget_rs_dup_free(d);
+            Dup::free(d);
         }
     }
 }

@@ -4958,7 +4958,7 @@ pub enum ReadError {
     Unavailable,
     /// The archive needs decrypting and no key is known, or decryption failed.
     Crypto,
-    /// The disk or the transport failed.
+    /// The disk or the transport failed (the underlying cause is not kept).
     Io,
 }
 
@@ -4976,7 +4976,8 @@ impl std::fmt::Display for ReadError {
 
 impl std::error::Error for ReadError {}
 
-/// The outcome of a content read: the whole buffer is filled, or nothing useful is.
+/// The outcome of a content read: the whole buffer is filled, or an error says why. On
+/// error the buffer may be partly written and its contents are unspecified.
 pub type ReadResult = Result<(), ReadError>;
 
 /// A readable byte stream: one member file of a posting, or a view through a map.
@@ -10123,11 +10124,10 @@ impl CrossPackRepairSession {
                 self.0.inner_size()
             }
             fn read(&self, offset: i64, buf: &mut [u8]) -> ReadResult {
-                if self.0.read_inner(offset, buf) {
-                    Ok(())
-                } else {
-                    Err(ReadError::Io)
-                }
+                self.0
+                    .read_inner(offset, buf)
+                    .then_some(())
+                    .ok_or(ReadError::Unavailable)
             }
         }
         let inner_source = InnerSource(&source);

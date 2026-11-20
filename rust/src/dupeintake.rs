@@ -164,7 +164,10 @@ impl ContentSource for ArticleMember<'_> {
     }
 
     fn read(&self, offset: i64, buf: &mut [u8]) -> ReadResult {
-        if offset < 0 || self.ids.is_empty() {
+        if self.ids.is_empty() {
+            return Err(ReadError::NoSource);
+        }
+        if offset < 0 {
             return Err(ReadError::OutOfRange);
         }
         if self.part_size.get() <= 0 && self.part(0).is_none() {

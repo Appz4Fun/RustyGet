@@ -2037,7 +2037,7 @@ impl NzbgetRsQueueCoordinator {
         }
         let old_dest_dir = nzb.dest_dir;
         host.nzb_set_str(nzb_ptr, crate::queuesubsys_host::NZB_STR_CATEGORY, category);
-        host.nzb_action(nzb_ptr, crate::queuesubsys_host::NZB_ACT_BUILD_DEST_DIR, 0);
+        host.nzb_action(nzb_ptr, crate::queuesubsys_host::NZB_ACT_BUILD_DEST_DIR);
         let new_nzb = host.nzb_snap(nzb_ptr, false);
         new_nzb.dest_dir == old_dest_dir || host.move_completed_files(nzb_ptr, &old_dest_dir)
     }
@@ -2074,7 +2074,7 @@ impl NzbgetRsQueueCoordinator {
         }
 
         let old_dest_dir = nzb.dest_dir;
-        host.nzb_action(nzb_ptr, crate::queuesubsys_host::NZB_ACT_BUILD_DEST_DIR, 0);
+        host.nzb_action(nzb_ptr, crate::queuesubsys_host::NZB_ACT_BUILD_DEST_DIR);
         let new_nzb = host.nzb_snap(nzb_ptr, false);
         new_nzb.dest_dir == old_dest_dir || host.move_completed_files(nzb_ptr, &old_dest_dir)
     }
@@ -2249,11 +2249,7 @@ impl NzbgetRsQueueCoordinator {
             crate::queuesubsys_host::NZB_INT_PRIORITY,
             src_snap.priority,
         );
-        host.nzb_action(
-            new_nzb_ptr,
-            crate::queuesubsys_host::NZB_ACT_BUILD_DEST_DIR,
-            0,
-        );
+        host.nzb_action(new_nzb_ptr, crate::queuesubsys_host::NZB_ACT_BUILD_DEST_DIR);
         host.nzb_set_str(
             new_nzb_ptr,
             crate::queuesubsys_host::NZB_STR_QUEUED_FILENAME,
@@ -2314,13 +2310,11 @@ impl NzbgetRsQueueCoordinator {
         host.nzb_action(
             new_nzb_ptr,
             crate::queuesubsys_host::NZB_ACT_UPDATE_MIN_MAX_TIME,
-            0,
         );
         if host.nzb_completed_files(src_nzb_ptr).is_empty() {
             host.nzb_action(
                 src_nzb_ptr,
                 crate::queuesubsys_host::NZB_ACT_UPDATE_MIN_MAX_TIME,
-                0,
             );
         }
 

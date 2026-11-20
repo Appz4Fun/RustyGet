@@ -4096,14 +4096,24 @@ pub enum DiskCtrl<'a> {
 }
 
 pub type DiskCtrlFn = fn(ctx: *mut c_void, cmd: DiskCtrl<'_>) -> i32;
-pub type DiskNzbSinkFn =
-    unsafe extern "C" fn(sink_ctx: *mut c_void, exp: *const NzbgetRsDiskNzbExport);
-pub type DiskExportNzbFn = unsafe extern "C" fn(
+/// Which list an nzb export walks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NzbSource {
+    /// Every queued nzb.
+    Queue,
+    /// Every history entry.
+    History,
+    /// Queued nzbs with unsaved changes; unchanged ones are skipped.
+    ChangedQueue,
+}
+
+/// Exports entry `idx` of `source` and hands it to `sink`, which is not
+/// called when the entry is skipped.
+pub type DiskExportNzbFn = fn(
     ctx: *mut c_void,
-    source: c_int,
+    source: NzbSource,
     idx: usize,
-    sink_ctx: *mut c_void,
-    sink_fn: DiskNzbSinkFn,
+    sink: &mut dyn FnMut(&NzbgetRsDiskNzbExport),
 );
 pub type DiskApplyNzbFn = unsafe extern "C" fn(
     ctx: *mut c_void,
@@ -4123,14 +4133,25 @@ pub type DiskApplyNzbFn = unsafe extern "C" fn(
     files_len: usize,
     job: *const NzbgetRsDiskRepairJob,
 );
-pub type DiskFileSinkFn =
-    unsafe extern "C" fn(sink_ctx: *mut c_void, exp: *const NzbgetRsDiskFileExport);
-pub type DiskExportFileFn = unsafe extern "C" fn(
-    ctx: *mut c_void,
-    mode: c_int,
-    sink_ctx: *mut c_void,
-    sink_fn: DiskFileSinkFn,
-);
+/// What a file export fills in for the target file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileExport {
+    /// File info with groups and articles.
+    InfoWithArticles,
+    /// File info with groups, no articles.
+    Info,
+    /// Download state (counters, server stats, article states).
+    State,
+    /// Download state for a completed file.
+    CompletedState,
+    /// Ids, names and output flags only.
+    Meta,
+}
+
+/// Exports the target file as `what` and hands it to `sink`, which is not
+/// called when there is no target file.
+pub type DiskExportFileFn =
+    fn(ctx: *mut c_void, what: FileExport, sink: &mut dyn FnMut(&NzbgetRsDiskFileExport));
 pub type DiskApplyFileFn = unsafe extern "C" fn(
     ctx: *mut c_void,
     mode: c_int,
@@ -4628,13 +4649,13 @@ impl TrailerAccum {
 unsafe fn save_nzb_section(
     env: &NzbgetRsDiskStateEnv,
     w: &mut std::io::BufWriter<std::fs::File>,
-    source: c_int,
+    source: NzbSource,
     header_count: i32,
 ) {
     let Some(export_cb) = env.export_nzb_cb else {
         return;
     };
-    let iter_len = if source == 1 {
+    let iter_len = if source == NzbSource::History {
         call_ctrl(env, DiskCtrl::HistoryLen) as usize
     } else {
         call_ctrl(env, DiskCtrl::QueueLen) as usize
@@ -4643,17 +4664,12 @@ unsafe fn save_nzb_section(
 
     struct SinkState<'a> {
         w: &'a mut std::io::BufWriter<std::fs::File>,
-        source: c_int,
+        source: NzbSource,
         remaining_progress: i32,
         trailer: TrailerAccum,
     }
-    unsafe extern "C" fn sink_cb(sink_ctx: *mut c_void, exp_ptr: *const NzbgetRsDiskNzbExport) {
-        if exp_ptr.is_null() {
-            return;
-        }
-        let st = unsafe { &mut *sink_ctx.cast::<SinkState<'_>>() };
-        let exp = unsafe { &*exp_ptr };
-        if st.source == 0 {
+    fn sink_cb(st: &mut SinkState<'_>, exp: &NzbgetRsDiskNzbExport) {
+        if st.source == NzbSource::Queue {
             let bytes = unsafe {
                 format_nzb_info_bytes(
                     &exp.info,
@@ -4671,7 +4687,7 @@ unsafe fn save_nzb_section(
             };
             let _ = st.w.write_all(&bytes);
             unsafe { st.trailer.push_nzb(exp) };
-        } else if st.source == 2 {
+        } else if st.source == NzbSource::ChangedQueue {
             if exp.changed != 0 && st.remaining_progress > 0 {
                 st.remaining_progress -= 1;
                 let _ = writeln!(st.w, "{}", exp.info.id);
@@ -4693,7 +4709,7 @@ unsafe fn save_nzb_section(
                 let _ = st.w.write_all(&bytes);
                 unsafe { st.trailer.push_nzb(exp) };
             }
-        } else if st.source == 1 {
+        } else {
             let _ = writeln!(st.w, "{},{},{}", exp.hist_id, exp.hist_kind, exp.hist_time);
             if exp.hist_kind == 1 || exp.hist_kind == 2 {
                 let bytes = unsafe {
@@ -4738,15 +4754,7 @@ unsafe fn save_nzb_section(
         trailer: TrailerAccum::default(),
     };
     for idx in 0..iter_len {
-        unsafe {
-            export_cb(
-                env.ctx,
-                source,
-                idx,
-                (&mut state as *mut SinkState<'_>).cast(),
-                sink_cb,
-            );
-        }
+        export_cb(env.ctx, source, idx, &mut |exp| sink_cb(&mut state, exp));
     }
     state.trailer.write_to(state.w);
 }
@@ -5273,12 +5281,8 @@ unsafe fn query_target_file_meta(env: &NzbgetRsDiskStateEnv) -> QueriedFileMeta 
         filename: Vec::new(),
         output_filename: Vec::new(),
     };
-    unsafe extern "C" fn sink(sink_ctx: *mut c_void, exp_ptr: *const NzbgetRsDiskFileExport) {
-        if exp_ptr.is_null() {
-            return;
-        }
-        let m = unsafe { &mut *sink_ctx.cast::<QueriedFileMeta>() };
-        let exp = unsafe { &*exp_ptr };
+    let mut sink = |exp: &NzbgetRsDiskFileExport| {
+        let m = &mut meta;
         m.file_id = exp.file_id;
         m.has_articles = exp.has_articles;
         m.articles_len = exp.articles_len_count;
@@ -5287,29 +5291,21 @@ unsafe fn query_target_file_meta(env: &NzbgetRsDiskStateEnv) -> QueriedFileMeta 
         m.dest_dir = unsafe { cstr::bytes(exp.info.subject) }.to_vec();
         m.filename = unsafe { cstr::bytes(exp.info.filename) }.to_vec();
         m.output_filename = unsafe { cstr::bytes(exp.info.output_filename) }.to_vec();
-    }
+    };
     if let Some(cb) = env.export_file_cb {
-        unsafe { cb(env.ctx, 4, (&mut meta as *mut QueriedFileMeta).cast(), sink) };
+        cb(env.ctx, FileExport::Meta, &mut sink);
     }
     meta
 }
 
-unsafe fn format_target_file_bytes(env: &NzbgetRsDiskStateEnv, mode: c_int) -> (i32, Vec<u8>) {
-    struct Out {
-        file_id: i32,
-        mode: c_int,
-        bytes: Vec<u8>,
-    }
-    unsafe extern "C" fn sink(sink_ctx: *mut c_void, exp_ptr: *const NzbgetRsDiskFileExport) {
-        if exp_ptr.is_null() {
-            return;
-        }
-        let o = unsafe { &mut *sink_ctx.cast::<Out>() };
-        let exp = unsafe { &*exp_ptr };
-        o.file_id = exp.file_id;
-        if o.mode == 0 || o.mode == 1 {
-            let incl = c_int::from(o.mode == 0);
-            o.bytes = unsafe {
+unsafe fn format_target_file_bytes(env: &NzbgetRsDiskStateEnv, what: FileExport) -> (i32, Vec<u8>) {
+    let mut file_id = 0;
+    let mut bytes = Vec::new();
+    let mut sink = |exp: &NzbgetRsDiskFileExport| {
+        file_id = exp.file_id;
+        if matches!(what, FileExport::InfoWithArticles | FileExport::Info) {
+            let incl = c_int::from(what == FileExport::InfoWithArticles);
+            bytes = unsafe {
                 format_file_info_bytes(
                     &exp.info,
                     exp.groups,
@@ -5320,7 +5316,7 @@ unsafe fn format_target_file_bytes(env: &NzbgetRsDiskStateEnv, mode: c_int) -> (
                 )
             };
         } else {
-            o.bytes = unsafe {
+            bytes = unsafe {
                 format_file_state_bytes(
                     &exp.state,
                     exp.stats,
@@ -5330,16 +5326,11 @@ unsafe fn format_target_file_bytes(env: &NzbgetRsDiskStateEnv, mode: c_int) -> (
                 )
             };
         }
-    }
-    let mut out = Out {
-        file_id: 0,
-        mode,
-        bytes: Vec::new(),
     };
     if let Some(cb) = env.export_file_cb {
-        unsafe { cb(env.ctx, mode, (&mut out as *mut Out).cast(), sink) };
+        cb(env.ctx, what, &mut sink);
     }
-    (out.file_id, out.bytes)
+    (file_id, bytes)
 }
 
 unsafe fn load_file_info_from_reader(
@@ -5589,11 +5580,11 @@ unsafe fn save_single_file_or_state(
     replace: bool,
 ) -> bool {
     let export_mode = if mode == 0 {
-        0
+        FileExport::InfoWithArticles
     } else if mode == 2 {
-        3
+        FileExport::CompletedState
     } else {
-        2
+        FileExport::State
     };
     let (file_id, bytes) = unsafe { format_target_file_bytes(env, export_mode) };
     if mode == 0 {
@@ -6724,7 +6715,7 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                     };
                     unsafe {
                         emit_log(env, DiskLogLevel::Debug, b"Saving nzb list to disk");
-                        save_nzb_section(env, &mut w, 0, queue_len);
+                        save_nzb_section(env, &mut w, NzbSource::Queue, queue_len);
                     }
                     ok = unsafe { q_sf.finish_write(env, w, flush_queue) };
                 } else {
@@ -6747,7 +6738,7 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                         };
                         unsafe {
                             emit_log(env, DiskLogLevel::Debug, b"Saving history to disk");
-                            save_nzb_section(env, &mut w, 1, hist_len);
+                            save_nzb_section(env, &mut w, NzbSource::History, hist_len);
                         }
                         ok &= unsafe { h_sf.finish_write(env, w, flush_queue) };
                     } else {
@@ -6786,7 +6777,7 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                     };
                     unsafe {
                         emit_log(env, DiskLogLevel::Debug, b"Saving nzb progress to disk");
-                        save_nzb_section(env, &mut w, 2, changed_count);
+                        save_nzb_section(env, &mut w, NzbSource::ChangedQueue, changed_count);
                     }
                     c_int::from(unsafe { p_sf.finish_write(env, w, flush_queue) })
                 } else {
@@ -6820,7 +6811,8 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                                 },
                             );
                             let _ = writeln!(w, "{file_id}");
-                            let (_, bytes) = unsafe { format_target_file_bytes(env, 1) };
+                            let (_, bytes) =
+                                unsafe { format_target_file_bytes(env, FileExport::Info) };
                             let _ = w.write_all(&bytes);
                         }
                     }
@@ -7328,12 +7320,11 @@ fn active_disk_ctrl_cb(raw_ctx: *mut c_void, cmd: DiskCtrl<'_>) -> i32 {
 }
 
 #[cfg(unix)]
-unsafe extern "C" fn active_disk_export_nzb_cb(
+fn active_disk_export_nzb_cb(
     raw_ctx: *mut c_void,
-    source: c_int,
+    source: NzbSource,
     idx: usize,
-    sink_ctx: *mut c_void,
-    sink_fn: DiskNzbSinkFn,
+    sink: &mut dyn FnMut(&NzbgetRsDiskNzbExport),
 ) {
     let (qh_opt, dq_ptr) = {
         let c = unsafe { &*raw_ctx.cast::<ActiveDiskExecCtx<'_>>() };
@@ -7344,7 +7335,7 @@ unsafe extern "C" fn active_disk_export_nzb_cb(
     };
     let mut exp: NzbgetRsDiskNzbExport = unsafe { std::mem::zeroed() };
     let nzb_ptr: NzbRef;
-    if source == 1 {
+    if source == NzbSource::History {
         let hi = qh.history_at(dq_ptr, idx);
         exp.hist_id = hi.id;
         exp.hist_kind = hi.kind;
@@ -7361,12 +7352,12 @@ unsafe extern "C" fn active_disk_export_nzb_cb(
             exp.info.dupe_mode = d.dupe_mode.into();
             exp.info.name = name_c.as_ptr();
             exp.info.dupe_key = dupe_key_c.as_ptr();
-            unsafe { sink_fn(sink_ctx, &exp) };
+            sink(&exp);
             return;
         }
         if hi.kind != crate::queuesubsys_host::HK_NZB && hi.kind != crate::queuesubsys_host::HK_URL
         {
-            unsafe { sink_fn(sink_ctx, &exp) };
+            sink(&exp);
             return;
         }
         nzb_ptr = hi.nzb();
@@ -7374,7 +7365,7 @@ unsafe extern "C" fn active_disk_export_nzb_cb(
         nzb_ptr = qh.queue_at(dq_ptr, idx);
         let changed = qh.nzb_snap(nzb_ptr, false).changed;
         exp.changed = c_int::from(changed);
-        if source == 2 && !changed {
+        if source == NzbSource::ChangedQueue && !changed {
             return;
         }
     }
@@ -7597,7 +7588,7 @@ unsafe extern "C" fn active_disk_export_nzb_cb(
     exp.last_unpack_status = sn.last_unpack_status.into();
     exp.archives = archive_ptrs.as_ptr();
     exp.archives_len = archive_ptrs.len();
-    unsafe { sink_fn(sink_ctx, &exp) };
+    sink(&exp);
 }
 
 #[cfg(unix)]
@@ -7885,11 +7876,10 @@ unsafe extern "C" fn active_disk_apply_nzb_cb(
 }
 
 #[cfg(unix)]
-unsafe extern "C" fn active_disk_export_file_cb(
+fn active_disk_export_file_cb(
     raw_ctx: *mut c_void,
-    mode: c_int,
-    sink_ctx: *mut c_void,
-    sink_fn: DiskFileSinkFn,
+    what: FileExport,
+    sink: &mut dyn FnMut(&NzbgetRsDiskFileExport),
 ) {
     let (qh_opt, fp) = {
         let c = unsafe { &*raw_ctx.cast::<ActiveDiskExecCtx<'_>>() };
@@ -7910,7 +7900,7 @@ unsafe extern "C" fn active_disk_export_file_cb(
 
     let fn_c = bytes_to_cstring_trunc(&fs.filename);
     let out_c = bytes_to_cstring_trunc(&fs.output_filename);
-    if mode == 4 {
+    if what == FileExport::Meta {
         let dest_c = if fs.nzb_ptr.is_some() {
             Some(bytes_to_cstring_trunc(
                 &qh.nzb_snap(fs.nzb_ptr, false).dest_dir,
@@ -7922,10 +7912,10 @@ unsafe extern "C" fn active_disk_export_file_cb(
         exp.info.filename = fn_c.as_ptr();
         exp.info.output_filename = out_c.as_ptr();
         exp.info.output_initialized = c_int::from(fs.output_initialized);
-        unsafe { sink_fn(sink_ctx, &exp) };
+        sink(&exp);
         return;
     }
-    if mode == 0 || mode == 1 {
+    if matches!(what, FileExport::InfoWithArticles | FileExport::Info) {
         let subj_c = bytes_to_cstring_trunc(&fs.subject);
         let orig_c = bytes_to_cstring_trunc(&fs.origname);
         exp.info = NzbgetRsDiskFileInfoInput {
@@ -7951,7 +7941,7 @@ unsafe extern "C" fn active_disk_export_file_cb(
 
         let mut art_mids = Vec::new();
         let mut art_meta = Vec::new();
-        if mode == 0 {
+        if what == FileExport::InfoWithArticles {
             art_mids.reserve(fs.articles_len);
             art_meta.reserve(fs.articles_len);
             for i in 0..fs.articles_len {
@@ -7979,11 +7969,11 @@ unsafe extern "C" fn active_disk_export_file_cb(
         exp.groups_len = grp_ptrs.len();
         exp.articles = art_entries.as_ptr();
         exp.articles_len = art_entries.len();
-        unsafe { sink_fn(sink_ctx, &exp) };
+        sink(&exp);
         return;
     }
 
-    let completed = mode == 3;
+    let completed = what == FileExport::CompletedState;
     let h16_c = bytes_to_cstring_trunc(&fs.hash16k);
     let psid_c = bytes_to_cstring_trunc(&fs.par_set_id);
     exp.state = NzbgetRsDiskFileStateInput {
@@ -8035,7 +8025,7 @@ unsafe extern "C" fn active_disk_export_file_cb(
     exp.stats_len = stats.len();
     exp.article_states = articles.as_ptr();
     exp.article_states_len = articles.len();
-    unsafe { sink_fn(sink_ctx, &exp) };
+    sink(&exp);
 }
 
 #[cfg(unix)]

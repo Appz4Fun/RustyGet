@@ -1,10 +1,10 @@
 //! The daemon's start-up, reload and shutdown wiring, formerly the `RustyGet`
 //! class and the `nzbget_c_*` entry points in `daemon/main/rustyget.cpp`.
 //!
-//! [`daemon_hooks`] is the table `LifecycleManager::run_daemon_loop` drives.
-//! The process entry (`rust/entry.rs`) registers it through
-//! [`register_daemon_hooks`]. Its first hook, [`util_init`], sets the build
-//! environment (formerly the C++ `Util::Init`).
+//! [`Daemon`] implements the `LifecycleHooks` that
+//! `LifecycleManager::run_daemon_loop` drives. The process entry
+//! (`rust/entry.rs`) registers it through [`register_daemon_hooks`]. Its first
+//! hook, `util_init`, sets the build environment (formerly the C++ `Util::Init`).
 //!
 //! One daemon instance lives from phase 1 to phase 4. It owns the log, the
 //! options, the work state, the server pool and the pre/post-processor runner,
@@ -40,32 +40,10 @@ static SERVER_POOL: AtomicPtr<NzbgetRsServerPool> = AtomicPtr::new(ptr::null_mut
 static PRE_POST: Mutex<Option<Arc<PrePostRunner>>> = Mutex::new(None);
 static ATEXIT: Once = Once::new();
 
-/// Sets the build flags, the version and the TLS library's version text,
-/// before anything else runs (the former C++ `Util::Init`).
-unsafe extern "C" fn util_init() {
-    crate::ffi::init_build_env();
-}
-
-/// The lifecycle table for the daemon binary.
-pub fn daemon_hooks() -> LifecycleHooks {
-    LifecycleHooks {
-        util_init: Some(util_init),
-        nserv_main: Some(nserv_main),
-        phase1_init: Some(phase1_init),
-        phase2_subsystems_create_and_recover: None,
-        phase3_server_activate: Some(phase3_server_activate),
-        phase4_shutdown: Some(phase4_shutdown),
-        has_active_unpack: Some(has_active_unpack_hook),
-        is_reloading: Some(is_reloading_hook),
-        stop_server: Some(stop_server_hook),
-        reload: Some(reload),
-        exit_proc: Some(exit_proc),
-    }
-}
-
-/// Registers [`daemon_hooks`] for `nzbget_rs_main`. Called by the process entry.
+/// Registers the daemon's lifecycle hooks for `nzbget_rs_main`. Called by
+/// the process entry.
 pub fn register_daemon_hooks() {
-    crate::lifecycle::register_hooks(daemon_hooks());
+    crate::lifecycle::register_hooks(&DAEMON);
 }
 
 fn log_debug(text: &[u8]) {
@@ -173,6 +151,48 @@ impl DaemonHost for Daemon {
     }
 }
 
+impl LifecycleHooks for Daemon {
+    fn util_init(&self) {
+        crate::ffi::init_build_env();
+    }
+
+    unsafe fn nserv_main(&self, argc: c_int, argv: *mut *mut c_char) -> Option<c_int> {
+        Some(nserv_main(argc, argv))
+    }
+
+    fn phase1_init(&self, reload: bool) -> c_int {
+        unsafe { phase1_init(reload) }
+    }
+
+    fn phase3_server_activate(&self) -> c_int {
+        phase3_server_activate()
+    }
+
+    fn phase4_shutdown(&self, reload: bool) {
+        phase4_shutdown(reload);
+    }
+
+    fn has_active_unpack(&self) -> bool {
+        prepost_has_active_unpack()
+    }
+
+    fn is_reloading(&self) -> bool {
+        INSTANCE.load(Ordering::SeqCst) && get_reloading()
+    }
+
+    fn drives_reload(&self) -> bool {
+        true
+    }
+
+    fn reload(&self) {
+        crate::lifecycle::request_reload(&DAEMON);
+    }
+
+    fn exit_proc(&self) {
+        crate::lifecycle::request_exit(&DAEMON);
+    }
+}
+
 unsafe extern "C" fn segv_log(_ctx: *mut c_void, msg: *const c_char) {
     if !msg.is_null() {
         crate::log::log_active_bytes(KIND_ERROR, CStr::from_ptr(msg).to_bytes());
@@ -208,7 +228,7 @@ fn destroy_instance() {
 
 /// Phase 1: log, globals, command line, options, TLS, then daemonize and
 /// activate. Returns 0 to continue (the command line's direct modes exit).
-unsafe extern "C" fn phase1_init(reload: bool) -> c_int {
+unsafe fn phase1_init(reload: bool) -> c_int {
     ATEXIT.call_once(|| {
         libc::atexit(atexit_cleanup);
     });
@@ -273,7 +293,7 @@ unsafe extern "C" fn phase1_init(reload: bool) -> c_int {
 }
 
 /// Phase 3: the main program loop until stop or reload.
-unsafe extern "C" fn phase3_server_activate() -> c_int {
+fn phase3_server_activate() -> c_int {
     if !INSTANCE.load(Ordering::SeqCst) {
         return 0;
     }
@@ -282,7 +302,7 @@ unsafe extern "C" fn phase3_server_activate() -> c_int {
 }
 
 /// Phase 4: stop the subsystems, shut TLS down, and free the instance.
-unsafe extern "C" fn phase4_shutdown(reload: bool) {
+fn phase4_shutdown(reload: bool) {
     if INSTANCE.load(Ordering::SeqCst) {
         crate::lifecycle::shutdown_daemon(reload, &DAEMON);
 
@@ -295,28 +315,6 @@ unsafe extern "C" fn phase4_shutdown(reload: bool) {
         }
     }
     destroy_instance();
-}
-
-unsafe extern "C" fn has_active_unpack_hook() -> bool {
-    prepost_has_active_unpack()
-}
-
-unsafe extern "C" fn is_reloading_hook() -> bool {
-    INSTANCE.load(Ordering::SeqCst) && get_reloading()
-}
-
-unsafe extern "C" fn stop_server_hook(reload: bool) {
-    if INSTANCE.load(Ordering::SeqCst) {
-        stop(reload);
-    }
-}
-
-unsafe extern "C" fn reload() {
-    crate::lifecycle::request_reload(&DAEMON);
-}
-
-unsafe extern "C" fn exit_proc() {
-    crate::lifecycle::request_exit(&DAEMON);
 }
 
 /// NServ's runtime requests: 0 creates the options from its command line and
@@ -361,7 +359,7 @@ unsafe extern "C" fn nserv_runtime(
 }
 
 /// `--nserv`: the test NNTP server, with its own log and options.
-unsafe extern "C" fn nserv_main(argc: c_int, argv: *mut *mut c_char) -> c_int {
+unsafe fn nserv_main(argc: c_int, argv: *mut *mut c_char) -> c_int {
     let log = new_log();
     let mut options: *mut NzbgetRsOptions = ptr::null_mut();
     let env = NzbgetRsNservEnv {

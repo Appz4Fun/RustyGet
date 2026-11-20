@@ -99,11 +99,8 @@ pub unsafe fn init_platform(argc: c_int, argv: *mut *mut c_char, argp: *mut *mut
         g.envp = (!argp.is_null()).then(|| os_strings(argp, usize::MAX));
     }
 
-    let hooks = get_hooks();
-    if let Some(hooks) = hooks {
-        if let Some(util_init) = hooks.util_init {
-            util_init();
-        }
+    if let Some(hooks) = get_hooks() {
+        hooks.util_init();
     }
 
     #[cfg(unix)]
@@ -144,11 +141,8 @@ pub unsafe extern "C" fn nzbget_rs_main(
     init_platform(argc, argv, argp);
 
     if route == EntrypointRoute::NServ {
-        let hooks = get_hooks();
-        if let Some(hooks) = hooks {
-            if let Some(nserv) = hooks.nserv_main {
-                return nserv(argc, argv);
-            }
+        if let Some(rc) = get_hooks().and_then(|hooks| hooks.nserv_main(argc, argv)) {
+            return rc;
         }
         eprintln!("ERROR: Could not start NServ, the program was compiled without NServ");
         return 1;

@@ -2024,19 +2024,15 @@ unsafe extern "C" fn web_rpc_action_bridge(
         }
         4 => {
             if let Some(hooks) = crate::lifecycle::get_hooks() {
-                if let Some(exit_fn) = hooks.exit_proc {
-                    exit_fn();
-                    return 1;
-                }
+                hooks.exit_proc();
+                return 1;
             }
             0
         }
         5 => {
             if let Some(hooks) = crate::lifecycle::get_hooks() {
-                if let Some(reload_fn) = hooks.reload {
-                    reload_fn();
-                    return 1;
-                }
+                hooks.reload();
+                return 1;
             }
             0
         }
@@ -3253,17 +3249,13 @@ pub(crate) unsafe fn serve_binrpc_conn(conn: &crate::net::NzbgetRsConn) {
             }
             if kind == 8 {
                 if let Some(hooks) = crate::lifecycle::get_hooks() {
-                    if let Some(exit_fn) = hooks.exit_proc {
-                        exit_fn();
-                    }
+                    hooks.exit_proc();
                 }
                 return true;
             }
             if kind == 9 {
                 if let Some(hooks) = crate::lifecycle::get_hooks() {
-                    if let Some(reload_fn) = hooks.reload {
-                        reload_fn();
-                    }
+                    hooks.reload();
                 }
                 return true;
             }

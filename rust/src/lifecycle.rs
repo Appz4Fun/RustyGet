@@ -44,33 +44,70 @@ impl From<u32> for LifecyclePhase {
     }
 }
 
-/// Function table of the daemon lifecycle hooks (`crate::daemon::daemon_hooks`;
-/// tests register mocks).
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct LifecycleHooks {
-    pub util_init: Option<unsafe extern "C" fn()>,
-    pub nserv_main: Option<unsafe extern "C" fn(c_int, *mut *mut c_char) -> c_int>,
-    pub phase1_init: Option<unsafe extern "C" fn(bool) -> c_int>,
-    pub phase2_subsystems_create_and_recover: Option<unsafe extern "C" fn(bool) -> c_int>,
-    pub phase3_server_activate: Option<unsafe extern "C" fn() -> c_int>,
-    pub phase4_shutdown: Option<unsafe extern "C" fn(bool)>,
-    pub has_active_unpack: Option<unsafe extern "C" fn() -> bool>,
-    pub is_reloading: Option<unsafe extern "C" fn() -> bool>,
-    pub stop_server: Option<unsafe extern "C" fn(bool)>,
-    pub reload: Option<unsafe extern "C" fn()>,
-    pub exit_proc: Option<unsafe extern "C" fn()>,
+/// The daemon's lifecycle hooks, which `LifecycleManager::run_daemon_loop`
+/// drives (`crate::daemon` implements it; tests register mocks). A default
+/// method is what the loop does when the host has nothing to add.
+pub trait LifecycleHooks: Sync {
+    /// Process start-up, before the command line is looked at.
+    fn util_init(&self) {}
+
+    /// `--nserv`: runs the test NNTP server and returns its exit code, or
+    /// `None` when the binary has no NServ.
+    ///
+    /// # Safety
+    /// `argv` must point to `argc` valid C strings.
+    unsafe fn nserv_main(&self, _argc: c_int, _argv: *mut *mut c_char) -> Option<c_int> {
+        None
+    }
+
+    /// Phase 1. Non-zero ends the loop: a positive value is the exit code,
+    /// a negative one exits with 0.
+    fn phase1_init(&self, reload: bool) -> c_int;
+
+    /// Phase 2. `None` lets the loop create the server connections and the
+    /// stat meter itself; `Some(non-zero)` ends the loop with that code.
+    fn phase2_subsystems_create_and_recover(&self, _reload: bool) -> Option<c_int> {
+        None
+    }
+
+    /// Phase 3. Non-zero becomes the exit code.
+    fn phase3_server_activate(&self) -> c_int;
+
+    /// Phase 4: tear down, for a reload or for good.
+    fn phase4_shutdown(&self, _reload: bool) {}
+
+    /// Whether an unpack is running, which defers an in-process reload.
+    fn has_active_unpack(&self) -> bool {
+        false
+    }
+
+    /// The host's own reload flag.
+    fn is_reloading(&self) -> bool {
+        false
+    }
+
+    /// Whether the host runs reloads itself ([`Self::reload`] and
+    /// [`Self::is_reloading`]). If not, the manager's own reload flag counts too.
+    fn drives_reload(&self) -> bool {
+        false
+    }
+
+    /// Starts a reload the manager accepted.
+    fn reload(&self) {}
+
+    /// Starts a shutdown the manager accepted.
+    fn exit_proc(&self) {}
 }
 
-static REGISTERED_HOOKS: RwLock<Option<LifecycleHooks>> = RwLock::new(None);
+static REGISTERED_HOOKS: RwLock<Option<&'static dyn LifecycleHooks>> = RwLock::new(None);
 
-pub fn register_hooks(hooks: LifecycleHooks) {
+pub fn register_hooks(hooks: &'static dyn LifecycleHooks) {
     if let Ok(mut lock) = REGISTERED_HOOKS.write() {
         *lock = Some(hooks);
     }
 }
 
-pub fn get_hooks() -> Option<LifecycleHooks> {
+pub fn get_hooks() -> Option<&'static dyn LifecycleHooks> {
     REGISTERED_HOOKS.read().ok().and_then(|guard| *guard)
 }
 
@@ -127,9 +164,7 @@ impl LifecycleManager {
             return;
         }
         if let Some(hooks) = get_hooks() {
-            if let Some(reload_fn) = hooks.reload {
-                unsafe { reload_fn() };
-            }
+            hooks.reload();
         }
     }
 
@@ -142,9 +177,7 @@ impl LifecycleManager {
             return;
         }
         if let Some(hooks) = get_hooks() {
-            if let Some(exit_fn) = hooks.exit_proc {
-                unsafe { exit_fn() };
-            }
+            hooks.exit_proc();
         }
     }
 
@@ -179,8 +212,7 @@ impl LifecycleManager {
         while !self.is_stopping() {
             // Phase 1: Platform & Preflight, Options & Logging
             self.set_phase(LifecyclePhase::OptionsLogging);
-            let p1_fn = hooks.phase1_init.expect("phase1_init hook required");
-            let p1_rc = unsafe { p1_fn(reloading) };
+            let p1_rc = hooks.phase1_init(reloading);
             if p1_rc != 0 {
                 // Non-zero return indicates early exit or client operation complete
                 exit_code = if p1_rc > 0 { p1_rc } else { 0 };
@@ -189,8 +221,7 @@ impl LifecycleManager {
 
             // Phase 2: Core Subsystems Creation & State Recovery
             self.set_phase(LifecyclePhase::SubsystemsRecovery);
-            if let Some(p2_fn) = hooks.phase2_subsystems_create_and_recover {
-                let p2_rc = unsafe { p2_fn(reloading) };
+            if let Some(p2_rc) = hooks.phase2_subsystems_create_and_recover(reloading) {
                 if p2_rc != 0 {
                     exit_code = p2_rc;
                     break;
@@ -207,8 +238,7 @@ impl LifecycleManager {
 
             // Phase 3: Server Activation & Wait
             self.set_phase(LifecyclePhase::ServersActive);
-            let p3_fn = hooks.phase3_server_activate.expect("phase3 hook required");
-            let p3_rc = unsafe { p3_fn() };
+            let p3_rc = hooks.phase3_server_activate();
             if p3_rc != 0 {
                 exit_code = p3_rc;
             }
@@ -218,32 +248,24 @@ impl LifecycleManager {
 
             // Active unpack deferral check (Requirement R3):
             // If in-process reload is requested, ensure active unpack finishes before tearing down
-            let c_reloading = hooks.is_reloading.map(|f| unsafe { f() }).unwrap_or(false);
+            let host_reloading = hooks.is_reloading();
             let mut is_reload = !self.is_stopping()
-                && if hooks.reload.is_some() && hooks.is_reloading.is_some() {
-                    c_reloading
+                && if hooks.drives_reload() {
+                    host_reloading
                 } else {
-                    self.is_reloading() || c_reloading
+                    self.is_reloading() || host_reloading
                 };
 
             if is_reload {
-                if let Some(unpack_fn) = hooks.has_active_unpack {
-                    while !self.is_stopping() && unsafe { unpack_fn() } {
-                        std::thread::sleep(Duration::from_millis(100));
-                    }
+                while !self.is_stopping() && hooks.has_active_unpack() {
+                    std::thread::sleep(Duration::from_millis(100));
                 }
-                if self.is_stopping()
-                    || (hooks.reload.is_some()
-                        && hooks.is_reloading.is_some()
-                        && !hooks.is_reloading.map(|f| unsafe { f() }).unwrap_or(false))
-                {
+                if self.is_stopping() || (hooks.drives_reload() && !hooks.is_reloading()) {
                     is_reload = false;
                 }
             }
 
-            if let Some(p4_fn) = hooks.phase4_shutdown {
-                unsafe { p4_fn(is_reload) };
-            }
+            hooks.phase4_shutdown(is_reload);
 
             if !is_reload {
                 break;
@@ -1757,39 +1779,78 @@ mod tests {
     static MOCK_P1_RELOAD: AtomicBool = AtomicBool::new(false);
     static MOCK_P4_RELOAD: AtomicBool = AtomicBool::new(false);
     static MOCK_UNPACK_COUNT: AtomicUsize = AtomicUsize::new(0);
+    static RELOAD_SIM_STEP: AtomicUsize = AtomicUsize::new(0);
 
-    unsafe extern "C" fn mock_phase1(reload: bool) -> c_int {
-        MOCK_CALL_COUNT.fetch_add(1, Ordering::SeqCst);
-        MOCK_P1_RELOAD.store(reload, Ordering::SeqCst);
-        0
+    /// Hooks that count phase calls. `phase1_rc` is what phase 1 returns;
+    /// `reload_once` reports one host reload, then none.
+    struct MockHooks {
+        phase1_rc: c_int,
+        reload_once: bool,
     }
 
-    unsafe extern "C" fn mock_phase2(_reload: bool) -> c_int {
-        MOCK_CALL_COUNT.fetch_add(1, Ordering::SeqCst);
-        0
-    }
+    impl LifecycleHooks for MockHooks {
+        fn phase1_init(&self, reload: bool) -> c_int {
+            if self.phase1_rc != 0 {
+                return self.phase1_rc;
+            }
+            MOCK_CALL_COUNT.fetch_add(1, Ordering::SeqCst);
+            MOCK_P1_RELOAD.store(reload, Ordering::SeqCst);
+            0
+        }
 
-    unsafe extern "C" fn mock_phase3() -> c_int {
-        MOCK_CALL_COUNT.fetch_add(1, Ordering::SeqCst);
-        0
-    }
+        fn phase2_subsystems_create_and_recover(&self, _reload: bool) -> Option<c_int> {
+            MOCK_CALL_COUNT.fetch_add(1, Ordering::SeqCst);
+            Some(0)
+        }
 
-    unsafe extern "C" fn mock_phase4(reload: bool) {
-        MOCK_CALL_COUNT.fetch_add(1, Ordering::SeqCst);
-        MOCK_P4_RELOAD.store(reload, Ordering::SeqCst);
-    }
+        fn phase3_server_activate(&self) -> c_int {
+            MOCK_CALL_COUNT.fetch_add(1, Ordering::SeqCst);
+            0
+        }
 
-    unsafe extern "C" fn mock_has_active_unpack() -> bool {
-        if MOCK_UNPACK_COUNT.load(Ordering::SeqCst) > 0 {
-            MOCK_UNPACK_COUNT.fetch_sub(1, Ordering::SeqCst);
-            true
-        } else {
-            false
+        fn phase4_shutdown(&self, reload: bool) {
+            MOCK_CALL_COUNT.fetch_add(1, Ordering::SeqCst);
+            MOCK_P4_RELOAD.store(reload, Ordering::SeqCst);
+        }
+
+        fn has_active_unpack(&self) -> bool {
+            if MOCK_UNPACK_COUNT.load(Ordering::SeqCst) > 0 {
+                MOCK_UNPACK_COUNT.fetch_sub(1, Ordering::SeqCst);
+                true
+            } else {
+                false
+            }
+        }
+
+        fn is_reloading(&self) -> bool {
+            if self.reload_once && RELOAD_SIM_STEP.load(Ordering::SeqCst) == 0 {
+                RELOAD_SIM_STEP.store(1, Ordering::SeqCst);
+                true
+            } else {
+                false
+            }
         }
     }
 
-    unsafe extern "C" fn mock_is_reloading() -> bool {
-        false
+    static MOCK_CLEAN: MockHooks = MockHooks {
+        phase1_rc: 0,
+        reload_once: false,
+    };
+    static MOCK_CLIENT_EXIT: MockHooks = MockHooks {
+        phase1_rc: 10,
+        reload_once: false,
+    };
+    static MOCK_RELOAD_ONCE: MockHooks = MockHooks {
+        phase1_rc: 0,
+        reload_once: true,
+    };
+
+    fn fresh_manager() -> LifecycleManager {
+        LifecycleManager {
+            phase: AtomicU32::new(LifecyclePhase::Uninitialized as u32),
+            reloading: AtomicBool::new(false),
+            stopping: AtomicBool::new(false),
+        }
     }
 
     #[test]
@@ -1800,27 +1861,8 @@ mod tests {
         MOCK_P4_RELOAD.store(false, Ordering::SeqCst);
         MOCK_UNPACK_COUNT.store(0, Ordering::SeqCst);
 
-        let hooks = LifecycleHooks {
-            util_init: None,
-            nserv_main: None,
-            phase1_init: Some(mock_phase1),
-            phase2_subsystems_create_and_recover: Some(mock_phase2),
-            phase3_server_activate: Some(mock_phase3),
-            phase4_shutdown: Some(mock_phase4),
-            has_active_unpack: Some(mock_has_active_unpack),
-            is_reloading: Some(mock_is_reloading),
-            stop_server: None,
-            reload: None,
-            exit_proc: None,
-        };
-
-        register_hooks(hooks);
-
-        let mgr = LifecycleManager {
-            phase: AtomicU32::new(LifecyclePhase::Uninitialized as u32),
-            reloading: AtomicBool::new(false),
-            stopping: AtomicBool::new(false),
-        };
+        register_hooks(&MOCK_CLEAN);
+        let mgr = fresh_manager();
 
         let rc = mgr.run_daemon_loop(1, std::ptr::null_mut(), std::ptr::null_mut());
         assert_eq!(rc, 0);
@@ -1830,49 +1872,15 @@ mod tests {
         assert!(!MOCK_P4_RELOAD.load(Ordering::SeqCst));
     }
 
-    unsafe extern "C" fn mock_phase1_client_exit(_reload: bool) -> c_int {
-        10
-    }
-
     #[test]
     fn test_daemon_loop_early_exit_client_mode() {
         let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let hooks = LifecycleHooks {
-            util_init: None,
-            nserv_main: None,
-            phase1_init: Some(mock_phase1_client_exit),
-            phase2_subsystems_create_and_recover: Some(mock_phase2),
-            phase3_server_activate: Some(mock_phase3),
-            phase4_shutdown: Some(mock_phase4),
-            has_active_unpack: Some(mock_has_active_unpack),
-            is_reloading: Some(mock_is_reloading),
-            stop_server: None,
-            reload: None,
-            exit_proc: None,
-        };
-
-        register_hooks(hooks);
-
-        let mgr = LifecycleManager {
-            phase: AtomicU32::new(LifecyclePhase::Uninitialized as u32),
-            reloading: AtomicBool::new(false),
-            stopping: AtomicBool::new(false),
-        };
+        register_hooks(&MOCK_CLIENT_EXIT);
+        let mgr = fresh_manager();
 
         let rc = mgr.run_daemon_loop(1, std::ptr::null_mut(), std::ptr::null_mut());
         assert_eq!(rc, 10);
         assert_eq!(mgr.get_phase(), LifecyclePhase::Terminated);
-    }
-
-    static RELOAD_SIM_STEP: AtomicUsize = AtomicUsize::new(0);
-
-    unsafe extern "C" fn mock_is_reloading_once() -> bool {
-        if RELOAD_SIM_STEP.load(Ordering::SeqCst) == 0 {
-            RELOAD_SIM_STEP.store(1, Ordering::SeqCst);
-            true
-        } else {
-            false
-        }
     }
 
     #[test]
@@ -1884,27 +1892,8 @@ mod tests {
         MOCK_P1_RELOAD.store(false, Ordering::SeqCst);
         MOCK_P4_RELOAD.store(false, Ordering::SeqCst);
 
-        let hooks = LifecycleHooks {
-            util_init: None,
-            nserv_main: None,
-            phase1_init: Some(mock_phase1),
-            phase2_subsystems_create_and_recover: Some(mock_phase2),
-            phase3_server_activate: Some(mock_phase3),
-            phase4_shutdown: Some(mock_phase4),
-            has_active_unpack: Some(mock_has_active_unpack),
-            is_reloading: Some(mock_is_reloading_once),
-            stop_server: None,
-            reload: None,
-            exit_proc: None,
-        };
-
-        register_hooks(hooks);
-
-        let mgr = LifecycleManager {
-            phase: AtomicU32::new(LifecyclePhase::Uninitialized as u32),
-            reloading: AtomicBool::new(false),
-            stopping: AtomicBool::new(false),
-        };
+        register_hooks(&MOCK_RELOAD_ONCE);
+        let mgr = fresh_manager();
 
         let rc = mgr.run_daemon_loop(1, std::ptr::null_mut(), std::ptr::null_mut());
         assert_eq!(rc, 0);

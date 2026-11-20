@@ -327,7 +327,8 @@ pub fn eval_dead_download(
 /// it tried arrived. The lost parts are then borrowed from the backup (whole dead volumes
 /// included, see `deadvolume`), and the extraction already running is kept; a failover would
 /// delete it and download and extract the backup from its first byte. A download whose
-/// articles are mostly gone (`dead_rate`) still fails over.
+/// articles are mostly gone (`dead_rate`) still fails over, unless direct unpack of it runs
+/// (`extracting`): the backup then feeds the rest of that extraction, however much is gone.
 ///
 /// A backup whose kind is not known yet (an alt nested in another container, say: its first
 /// file is an archive, not the video) lends too once a borrow from it is underway, or while
@@ -361,12 +362,45 @@ pub fn alt_covers_lost_articles(
     )
         || ((borrow_underway || (extracting && labelled_alt))
             && backup_kind != DonorKind::Unborrowable);
+    // While direct unpack runs, failing over would throw its extraction away and start the
+    // backup from its first byte: the download stays however much of it is gone, and every
+    // volume it lost is borrowed from the backup, so the extraction carries on with the
+    // backup's bytes (a dead volume is handed to it before its borrow finishes, see
+    // `streamrepair::offer_dead_fills`). Without a running extraction there is nothing to keep,
+    // and a download mostly gone fails over as before.
+    let mostly_alive = !dead_rate && projected_permille >= 500;
     !backup_mismatched
-        && !dead_rate
         && live_borrowing
         && own_kind != DonorKind::Unborrowable
         && backup_lends
-        && projected_permille >= 500
+        && (extracting || mostly_alive)
+}
+
+/// True while direct unpack of `nzb` runs and `backup` can feed the rest of it (see
+/// [`alt_covers_lost_articles`]): failing over would throw that extraction away, so the lost
+/// parts are borrowed from the backup instead, whatever the damage.
+fn backup_continues_extraction(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    opts: &crate::queuesubsys_host::GlobalOptsSnap,
+    nzb: &crate::queuesubsys_host::NzbSnap,
+    backup: &crate::queuesubsys_host::NzbSnap,
+) -> bool {
+    nzb.direct_unpack_status == DirectUnpackStatus::Running
+        && alt_covers_lost_articles(
+            true,
+            opts.dupe_article_fallback == crate::queuesubsys_host::DAF_LIVE && opts.direct_unpack,
+            crate::donorkind::DonorKind::from_param(
+                host.nzb_get_param(nzb.ptr, crate::donorkind::KIND_PARAM).as_deref(),
+            ),
+            crate::donorkind::DonorKind::from_param(
+                host.nzb_get_param(backup.ptr, crate::donorkind::KIND_PARAM).as_deref(),
+            ),
+            0,
+            crate::postproc::dead_volume_borrow_underway(nzb.id),
+            true,
+            backup_labelled_alt(host, backup.ptr),
+            backup_cannot_lend(host, nzb, backup),
+        )
 }
 
 /// Whether `backup_ptr` was labelled the same video in another container (see
@@ -1975,11 +2009,13 @@ impl NzbgetRsQueueCoordinator {
         let Some((_, backup_nzb)) = backup else {
             return;
         };
-        if !crate::dupecoord::dupe_failover_warranted_inline(
-            nzb.dupe_score,
-            0,
-            backup_nzb.dupe_score,
-        ) {
+        if backup_continues_extraction(host, &opts, &nzb, &backup_nzb)
+            || !crate::dupecoord::dupe_failover_warranted_inline(
+                nzb.dupe_score,
+                0,
+                backup_nzb.dupe_score,
+            )
+        {
             return;
         }
         let mut msg = b"Failing over ".to_vec();
@@ -4678,6 +4714,9 @@ impl NzbgetRsQueueCoordinator {
             && opts.dupe_article_fallback >= crate::queuesubsys_host::DAF_STREAM
             && !dupe_mass_failure(nzb.total_articles, failed);
 
+        // Set when the backup feeds the running extraction: neither a failover nor parking the
+        // download as hopeless may throw that extraction away.
+        let mut feeds_extraction = false;
         if let Some((backup_hi, backup_nzb)) = backup {
             // A backup that only just arrived has not been classified yet: give it the
             // grace to be sampled, so a twin or alt that can lend is not skipped over by
@@ -4720,7 +4759,13 @@ impl NzbgetRsQueueCoordinator {
                     nzb.direct_unpack_status == DirectUnpackStatus::Running,
                     backup_labelled_alt(host, backup_nzb.ptr),
                     backup_cannot_lend(host, nzb, &backup_nzb),
-                ) && !download_hopeless(nzb.total_articles, nzb.current_success_articles, failed);
+                ) && (nzb.direct_unpack_status == DirectUnpackStatus::Running
+                    || !download_hopeless(
+                        nzb.total_articles,
+                        nzb.current_success_articles,
+                        failed,
+                    ));
+            feeds_extraction = lendable && nzb.direct_unpack_status == DirectUnpackStatus::Running;
             if !light_damage
                 && !lendable
                 && crate::dupecoord::dupe_failover_warranted_inline(
@@ -4755,11 +4800,13 @@ impl NzbgetRsQueueCoordinator {
             }
         }
 
-        if download_hopeless(
-            nzb.total_articles,
-            nzb.current_success_articles,
-            nzb.current_failed_articles,
-        ) {
+        if !feeds_extraction
+            && download_hopeless(
+                nzb.total_articles,
+                nzb.current_success_articles,
+                nzb.current_failed_articles,
+            )
+        {
             let tried = nzb.current_success_articles + nzb.current_failed_articles;
             let reason = crate::dupecoord::no_backup_reason_host(host, opts, dq_ptr, nzb);
             let mut msg = b"Parking ".to_vec();
@@ -5186,6 +5233,10 @@ impl NzbgetRsQueueCoordinator {
             return false;
         };
 
+        // A running extraction is kept: the backup lends what par2 cannot repair.
+        if backup_continues_extraction(host, opts, nzb, &backup_nzb) {
+            return true;
+        }
         let backup_alive = backup_alive_permille(host, backup_nzb.ptr);
         if (!certain && backup_alive < 999)
             || !crate::dupecoord::dupe_failover_warranted_inline(
@@ -6485,7 +6536,7 @@ mod tests {
         ));
         // ... or while direct unpack runs if labelled an alt (no par2: the first dead volume
         // trips the failed-in-a-row check before it ends), but never an unborrowable one, nor
-        // when live borrowing is off or the download is mostly gone.
+        // when live borrowing is off.
         assert!(alt_covers_lost_articles(
             false, true, Borrowable, Unknown, 952, false, true, true, false
         ));
@@ -6495,8 +6546,30 @@ mod tests {
         assert!(!alt_covers_lost_articles(
             false, false, Borrowable, Unknown, 952, false, true, true, false
         ));
-        assert!(!alt_covers_lost_articles(
+        // Mostly gone while direct unpack runs: the backup feeds the rest of the extraction
+        // instead of a failover starting it over, a borrowable or labelled backup alike.
+        assert!(alt_covers_lost_articles(
             true, true, Borrowable, Unknown, 952, false, true, true, false
+        ));
+        assert!(alt_covers_lost_articles(
+            true, true, Borrowable, Borrowable, 100, false, true, false, false
+        ));
+        assert!(alt_covers_lost_articles(
+            false, true, Unknown, Borrowable, 0, false, true, false, false
+        ));
+        // ... but never from an unborrowable or mismatched backup, an unborrowable download,
+        // or with live borrowing off.
+        assert!(!alt_covers_lost_articles(
+            true, true, Borrowable, Unborrowable, 100, false, true, true, false
+        ));
+        assert!(!alt_covers_lost_articles(
+            true, true, Borrowable, Borrowable, 100, false, true, true, true
+        ));
+        assert!(!alt_covers_lost_articles(
+            true, true, Unborrowable, Borrowable, 100, false, true, true, false
+        ));
+        assert!(!alt_covers_lost_articles(
+            true, false, Borrowable, Borrowable, 100, false, true, true, false
         ));
         // An unlabelled backup (not classed the same video in another container) still
         // fails over while extracting.

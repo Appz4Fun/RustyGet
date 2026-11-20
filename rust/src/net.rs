@@ -57,6 +57,229 @@ pub type NzbgetRsConnHostFn = Option<
     ) -> isize,
 >;
 
+/// A TLS socket the host started for a connection (op 4). It is only made by
+/// [`ConnHost::tls_start`] and freed by [`ConnHost::tls_close`], so holding
+/// one means the host's socket is alive.
+#[derive(Debug, PartialEq, Eq)]
+pub struct TlsHandle(std::num::NonZeroUsize);
+
+impl TlsHandle {
+    fn raw(&self) -> usize {
+        self.0.get()
+    }
+}
+
+/// What [`ConnHost::tls_start`] reports besides the socket.
+pub struct TlsStarted {
+    pub handle: Option<TlsHandle>,
+    pub ok: bool,
+    pub probe_failure: c_int,
+}
+
+/// Typed calls into a [`NzbgetRsConnHostFn`]. The op numbers and the pointer
+/// plumbing of that callback live only here; a missing callback behaves as
+/// "no host": nothing is logged, nothing is stopped, TLS can't start.
+#[derive(Clone, Copy, Default)]
+pub struct ConnHost(NzbgetRsConnHostFn);
+
+impl ConnHost {
+    pub const fn new(cb: NzbgetRsConnHostFn) -> Self {
+        Self(cb)
+    }
+
+    pub const fn callback(self) -> NzbgetRsConnHostFn {
+        self.0
+    }
+
+    pub const fn is_some(self) -> bool {
+        self.0.is_some()
+    }
+
+    /// Calls op `op` with the given arguments; `None` without a callback.
+    ///
+    /// # Safety
+    /// The arguments must be what the callback documents for `op`.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn call(
+        self,
+        ctx: usize,
+        op: c_int,
+        a1: c_int,
+        a2: c_int,
+        p1: usize,
+        s1: *const c_char,
+        buf: *mut c_char,
+        out_int: *mut c_int,
+    ) -> Option<isize> {
+        let cb = self.0?;
+        Some(unsafe {
+            cb(
+                ctx as *mut c_void,
+                op,
+                a1,
+                a2,
+                p1,
+                s1,
+                ptr::null(),
+                ptr::null(),
+                buf,
+                out_int,
+            )
+        })
+    }
+
+    /// Op 0: a debug message.
+    pub fn debug(self, ctx: usize, msg: &[u8]) {
+        let msg = bytes_to_cstring(msg);
+        // SAFETY: op 0 reads only the string in `s1`.
+        unsafe { self.call(ctx, 0, 0, 0, 0, msg.as_ptr(), ptr::null_mut(), ptr::null_mut()) };
+    }
+
+    /// Op 1: an error, logged as debug when `suppressed`.
+    pub fn error(self, ctx: usize, msg: &[u8], suppressed: bool) {
+        let msg = bytes_to_cstring(msg);
+        let sup = c_int::from(suppressed);
+        // SAFETY: op 1 reads only the string in `s1`.
+        unsafe { self.call(ctx, 1, sup, 0, 0, msg.as_ptr(), ptr::null_mut(), ptr::null_mut()) };
+    }
+
+    /// Op 2: whether the thread or the deadline (0 = none) says to stop.
+    ///
+    /// # Safety
+    /// `deadline` is 0 or the address of a live `tlssock::Deadline`: the host
+    /// callback dereferences any nonzero value.
+    pub unsafe fn is_stopped(self, ctx: usize, deadline: usize) -> bool {
+        // SAFETY: the caller guarantees `deadline` is 0 or a live deadline.
+        unsafe {
+            self.call(ctx, 2, 0, 0, deadline, ptr::null(), ptr::null_mut(), ptr::null_mut())
+        }
+        .is_some_and(|r| r != 0)
+    }
+
+    /// Op 3: waits on `fd` for readability/writability within the deadline.
+    ///
+    /// # Safety
+    /// As for [`ConnHost::is_stopped`]: `deadline` is 0 or a live deadline.
+    pub unsafe fn wait(
+        self,
+        ctx: usize,
+        deadline: usize,
+        fd: c_int,
+        read: bool,
+        write: bool,
+    ) -> bool {
+        let mut write = c_int::from(write);
+        // SAFETY: the caller guarantees `deadline`; `out_int` points at a live c_int.
+        unsafe {
+            self.call(ctx, 3, fd, c_int::from(read), deadline, ptr::null(), ptr::null_mut(), &mut write)
+        }
+        .is_some_and(|r| r != 0)
+    }
+
+    /// Op 4: starts TLS on `fd`.
+    ///
+    /// # Safety
+    /// `deadline` (0 = none) and `suppress` must outlive the returned handle:
+    /// the TLS socket keeps both pointers.
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe fn tls_start(
+        self,
+        ctx: usize,
+        fd: c_int,
+        flags_verif: c_int,
+        deadline: usize,
+        suppress: &AtomicBool,
+        host: &CStr,
+        cert: &CStr,
+        key: &CStr,
+        cipher: &CStr,
+    ) -> TlsStarted {
+        let Some(cb) = self.0 else {
+            return TlsStarted {
+                handle: None,
+                ok: false,
+                probe_failure: -1,
+            };
+        };
+        let ptrs: [usize; 2] = [deadline, ptr::from_ref(suppress) as usize];
+        let mut out: [c_int; 2] = [0, -1];
+        // SAFETY: op 4's documented arguments, all live for the call; the
+        // caller keeps `deadline` and `suppress` alive for the socket.
+        let raw = unsafe {
+            cb(
+                ctx as *mut c_void,
+                4,
+                fd,
+                flags_verif,
+                ptrs.as_ptr() as usize,
+                host.as_ptr(),
+                cert.as_ptr(),
+                key.as_ptr(),
+                cipher.as_ptr().cast_mut(),
+                out.as_mut_ptr(),
+            )
+        };
+        TlsStarted {
+            handle: std::num::NonZeroUsize::new(raw as usize).map(TlsHandle),
+            ok: out[0] != 0,
+            probe_failure: out[1],
+        }
+    }
+
+    /// Op 5: sends on the TLS socket; negative on error.
+    pub fn tls_send(self, ctx: usize, sock: &TlsHandle, data: &[u8]) -> c_int {
+        let len = c_int::try_from(data.len()).unwrap_or(c_int::MAX);
+        // SAFETY: `sock` is a live socket from op 4; `s1` holds `len` bytes.
+        unsafe {
+            self.call(ctx, 5, len, 0, sock.raw(), data.as_ptr().cast(), ptr::null_mut(), ptr::null_mut())
+        }
+        .map_or(-1, |r| r as c_int)
+    }
+
+    /// Op 6: receives into `buf` from the TLS socket; negative on error.
+    pub fn tls_recv(self, ctx: usize, sock: &TlsHandle, buf: &mut [u8]) -> c_int {
+        let len = c_int::try_from(buf.len()).unwrap_or(c_int::MAX);
+        // SAFETY: `sock` is a live socket from op 4; `buf` has room for `len` bytes.
+        unsafe {
+            self.call(ctx, 6, len, 0, sock.raw(), ptr::null(), buf.as_mut_ptr().cast(), ptr::null_mut())
+        }
+        .map_or(-1, |r| r as c_int)
+    }
+
+    /// Op 7: frees the TLS socket, shutting TLS down first when `close`.
+    pub fn tls_close(self, ctx: usize, sock: TlsHandle, close: bool) {
+        // SAFETY: `sock` is a live socket from op 4, consumed here.
+        unsafe {
+            self.call(ctx, 7, c_int::from(close), 0, sock.raw(), ptr::null(), ptr::null_mut(), ptr::null_mut())
+        };
+    }
+
+    /// Op 9: the negotiated TLS version and cipher name (`""` when unknown).
+    pub fn tls_info(self, ctx: usize, sock: &TlsHandle) -> (c_int, &'static CStr) {
+        let mut version: c_int = 0;
+        // SAFETY: `sock` is a live socket from op 4; `out_int` points at a live c_int.
+        let cipher = unsafe {
+            self.call(ctx, 9, 0, 0, sock.raw(), ptr::null(), ptr::null_mut(), &mut version)
+        }
+        .unwrap_or(0);
+        let cipher = if cipher == 0 {
+            c""
+        } else {
+            // SAFETY: op 9 returns a static NUL-terminated cipher name.
+            unsafe { CStr::from_ptr(cipher as *const c_char) }
+        };
+        (version, cipher)
+    }
+
+    /// Op 10: lets OpenSSL drop this thread's state.
+    pub fn stop_ssl_thread(self) {
+        // SAFETY: op 10 takes no arguments.
+        unsafe {
+            self.call(0, 10, 0, 0, 0, ptr::null(), ptr::null_mut(), ptr::null_mut())
+        };
+    }
+}
+
 fn bytes_to_cstring(raw: &[u8]) -> CString {
     let nul = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
     // SAFETY: slice up to first NUL contains no NUL bytes.
@@ -80,7 +303,7 @@ pub struct ConnCancelSlot {
     pub accept_busy: AtomicBool,
     pub tls_probe_failure: AtomicI32,
     pub debug_on: bool,
-    pub host_cb: NzbgetRsConnHostFn,
+    pub host: ConnHost,
 }
 
 impl ConnCancelSlot {
@@ -89,7 +312,7 @@ impl ConnCancelSlot {
         status: c_int,
         debug_on: bool,
         owner_ctx: usize,
-        host_cb: NzbgetRsConnHostFn,
+        host: ConnHost,
     ) -> Self {
         Self {
             socket: AtomicI32::new(fd),
@@ -100,32 +323,33 @@ impl ConnCancelSlot {
             accept_busy: AtomicBool::new(false),
             tls_probe_failure: AtomicI32::new(-1),
             debug_on,
-            host_cb,
+            host,
         }
     }
 
+    fn owner_ctx(&self) -> usize {
+        self.owner_ctx.load(Ordering::SeqCst)
+    }
+
     fn emit_debug(&self, msg: &[u8]) {
-        if !self.debug_on {
-            return;
+        if self.debug_on {
+            self.host.debug(self.owner_ctx(), msg);
         }
-        if let Some(cb) = self.host_cb {
-            let cs = bytes_to_cstring(msg);
-            let ctx = self.owner_ctx.load(Ordering::SeqCst);
-            unsafe {
-                cb(
-                    ctx as *mut c_void,
-                    0,
-                    0,
-                    0,
-                    0,
-                    cs.as_ptr(),
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                );
-            }
-        }
+    }
+
+    /// Reports an error, as debug output while errors are suppressed.
+    fn report_error(&self, msg: &[u8]) {
+        let suppressed = self.suppress_errors.load(Ordering::SeqCst);
+        self.host.error(self.owner_ctx(), msg, suppressed);
+    }
+
+    /// Whether the thread or `deadline` says to stop.
+    ///
+    /// Callers pass only their connection's own deadline field, which is 0
+    /// or the deadline its owner set and keeps alive for the connection.
+    fn is_stopped(&self, deadline: usize) -> bool {
+        // SAFETY: see above; every caller in this module passes `core.deadline`.
+        unsafe { self.host.is_stopped(self.owner_ctx(), deadline) }
     }
 
     pub fn set_suppress_errors(&self, sup: bool) {
@@ -215,7 +439,7 @@ struct ConnCore {
     cipher: CString,
     resolved_addrs: Vec<Vec<u8>>,
     deadline_ptr: usize,
-    tls_box: usize,
+    tls_box: Option<TlsHandle>,
     port: c_int,
     tls: bool,
     ip_version: c_int,
@@ -234,7 +458,7 @@ struct ConnCore {
 
 impl ConnCore {
     fn owner_ctx(&self) -> usize {
-        self.slot.owner_ctx.load(Ordering::SeqCst)
+        self.slot.owner_ctx()
     }
 
     fn emit_debug(&self, msg: &[u8]) {
@@ -242,115 +466,58 @@ impl ConnCore {
     }
 
     fn emit_error(&self, msg: &[u8]) {
-        if let Some(cb) = self.slot.host_cb {
-            let cs = bytes_to_cstring(msg);
-            let sup = c_int::from(self.slot.suppress_errors.load(Ordering::SeqCst));
-            unsafe {
-                cb(
-                    self.owner_ctx() as *mut c_void,
-                    1,
-                    sup,
-                    0,
-                    0,
-                    cs.as_ptr(),
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                );
-            }
-        }
+        self.slot.report_error(msg);
     }
 
     fn is_stopped(&self) -> bool {
-        let Some(cb) = self.slot.host_cb else {
-            return false;
-        };
-        unsafe {
-            cb(
-                self.owner_ctx() as *mut c_void,
-                2,
-                0,
-                0,
-                self.deadline_ptr,
-                ptr::null(),
-                ptr::null(),
-                ptr::null(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            ) != 0
-        }
+        self.slot.is_stopped(self.deadline_ptr)
     }
 
     fn start_tls(&mut self, is_client: bool, cert_file: &CStr, key_file: &CStr) -> bool {
         self.emit_debug(b"Starting TLS");
-        let Some(cb) = self.slot.host_cb else {
+        let host = self.slot.host;
+        if !host.is_some() {
             return false;
-        };
+        }
         let ctx = self.owner_ctx();
-        let old_tb = std::mem::replace(&mut self.tls_box, 0);
-        if old_tb != 0 {
-            unsafe {
-                cb(
-                    ctx as *mut c_void,
-                    7,
-                    0,
-                    0,
-                    old_tb,
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                );
-            }
+        if let Some(old) = self.tls_box.take() {
+            host.tls_close(ctx, old, false);
         }
         let fd = self.slot.socket.load(Ordering::SeqCst);
         let flags_verif = c_int::from(is_client) | ((self.cert_verif_level as c_int) << 2);
-        let ptrs: [usize; 2] = [
-            self.deadline_ptr,
-            ptr::from_ref(&self.slot.suppress_errors) as usize,
-        ];
-        let mut out = [0 as c_int, -1 as c_int];
-        let new_tb = unsafe {
-            cb(
-                ctx as *mut c_void,
-                4,
+        // SAFETY: the deadline is set by the connection's owner and outlives
+        // it, and `suppress_errors` lives in `self.slot`, which this core keeps
+        // alive at least until `close_tls_box` frees the socket.
+        let started = unsafe {
+            host.tls_start(
+                ctx,
                 fd,
                 flags_verif,
-                ptrs.as_ptr() as usize,
-                self.host.as_ptr(),
-                cert_file.as_ptr(),
-                key_file.as_ptr(),
-                self.cipher.as_ptr().cast_mut(),
-                out.as_mut_ptr(),
-            ) as usize
+                self.deadline_ptr,
+                &self.slot.suppress_errors,
+                &self.host,
+                cert_file,
+                key_file,
+                &self.cipher,
+            )
         };
-        self.tls_box = new_tb;
-        self.slot.tls_probe_failure.store(out[1], Ordering::SeqCst);
-        out[0] != 0
+        self.tls_box = started.handle;
+        self.slot
+            .tls_probe_failure
+            .store(started.probe_failure, Ordering::SeqCst);
+        started.ok
     }
 
     fn close_tls_box(&mut self, do_close: bool) {
-        let tb = std::mem::replace(&mut self.tls_box, 0);
-        if tb != 0 {
-            if let Some(cb) = self.slot.host_cb {
-                unsafe {
-                    cb(
-                        self.owner_ctx() as *mut c_void,
-                        7,
-                        c_int::from(do_close),
-                        0,
-                        tb,
-                        ptr::null(),
-                        ptr::null(),
-                        ptr::null(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                    );
-                }
-            }
+        if let Some(sock) = self.tls_box.take() {
+            self.slot.host.tls_close(self.owner_ctx(), sock, do_close);
         }
+    }
+
+    /// The negotiated TLS version and cipher, when TLS is up.
+    fn tls_info(&self) -> Option<(c_int, &'static CStr)> {
+        let sock = self.tls_box.as_ref()?;
+        Some(self.slot.host.tls_info(self.owner_ctx(), sock))
     }
 
     fn do_disconnect(&mut self) {
@@ -391,53 +558,8 @@ impl ConnCore {
             return true;
         }
         let resolved_slices: Vec<&[u8]> = self.resolved_addrs.iter().map(Vec::as_slice).collect();
-        let owner_ctx = self.owner_ctx();
-        let host_cb = self.slot.host_cb;
-        let debug_on = self.slot.debug_on;
-        let sup_ref = &self.slot.suppress_errors;
+        let slot = &self.slot;
         let deadline_ptr = self.deadline_ptr;
-        let on_err = |msg: &[u8]| {
-            if let Some(cb) = host_cb {
-                let cs = bytes_to_cstring(msg);
-                let sup = c_int::from(sup_ref.load(Ordering::SeqCst));
-                unsafe {
-                    cb(
-                        owner_ctx as *mut c_void,
-                        1,
-                        sup,
-                        0,
-                        0,
-                        cs.as_ptr(),
-                        ptr::null(),
-                        ptr::null(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                    );
-                }
-            }
-        };
-        let on_dbg = |msg: &[u8]| {
-            if !debug_on {
-                return;
-            }
-            if let Some(cb) = host_cb {
-                let cs = bytes_to_cstring(msg);
-                unsafe {
-                    cb(
-                        owner_ctx as *mut c_void,
-                        0,
-                        0,
-                        0,
-                        0,
-                        cs.as_ptr(),
-                        ptr::null(),
-                        ptr::null(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                    );
-                }
-            }
-        };
         let mut res = connect_stream(
             self.host.to_bytes(),
             self.port,
@@ -445,47 +567,14 @@ impl ConnCore {
             self.timeout,
             &resolved_slices,
             deadline_ptr != 0,
-            |fd, r, w| {
-                let Some(cb) = host_cb else {
-                    return false;
-                };
-                let mut wf = c_int::from(w);
-                unsafe {
-                    cb(
-                        owner_ctx as *mut c_void,
-                        3,
-                        fd,
-                        c_int::from(r),
-                        deadline_ptr,
-                        ptr::null(),
-                        ptr::null(),
-                        ptr::null(),
-                        ptr::null_mut(),
-                        &mut wf,
-                    ) != 0
-                }
-            },
-            || {
-                host_cb.map_or(false, |cb| unsafe {
-                    cb(
-                        owner_ctx as *mut c_void,
-                        2,
-                        0,
-                        0,
-                        deadline_ptr,
-                        ptr::null(),
-                        ptr::null(),
-                        ptr::null(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                    ) != 0
-                })
-            },
-            &self.slot.socket,
-            &self.slot.status,
+            // SAFETY: `deadline_ptr` is this connection's own deadline field.
+            |fd, r, w| unsafe { slot.host.wait(slot.owner_ctx(), deadline_ptr, fd, r, w) },
+            || slot.is_stopped(deadline_ptr),
+            &slot.socket,
+            &slot.status,
             &mut self.tls_error,
-            on_err,
-            on_dbg,
+            |msg| slot.report_error(msg),
+            |msg| slot.emit_debug(msg),
         );
         if self.slot.status.load(Ordering::SeqCst) == CS_CANCELLED || self.is_stopped() {
             res = false;
@@ -510,37 +599,16 @@ impl ConnCore {
         #[cfg(unix)]
         let _cg = unsafe { crate::ffi::PosixCancelGuard::disable() };
         self.emit_debug(b"Binding");
-        let owner_ctx = self.owner_ctx();
-        let host_cb = self.slot.host_cb;
-        let sup_ref = &self.slot.suppress_errors;
+        let slot = &self.slot;
         bind_listener(
             self.host.to_bytes(),
             self.port,
             self.ip_version,
-            &self.slot.socket,
-            &self.slot.status,
+            &slot.socket,
+            &slot.status,
             &mut self.is_listener,
             &mut self.tls_error,
-            |msg| {
-                if let Some(cb) = host_cb {
-                    let cs = bytes_to_cstring(msg);
-                    let sup = c_int::from(sup_ref.load(Ordering::SeqCst));
-                    unsafe {
-                        cb(
-                            owner_ctx as *mut c_void,
-                            1,
-                            sup,
-                            0,
-                            0,
-                            cs.as_ptr(),
-                            ptr::null(),
-                            ptr::null(),
-                            ptr::null_mut(),
-                            ptr::null_mut(),
-                        );
-                    }
-                }
-            },
+            |msg| slot.report_error(msg),
         )
     }
 
@@ -548,54 +616,18 @@ impl ConnCore {
         #[cfg(unix)]
         let _cg = unsafe { crate::ffi::PosixCancelGuard::disable() };
         self.emit_debug(b"Accepting connection");
-        let owner_ctx = self.owner_ctx();
-        let host_cb = self.slot.host_cb;
-        let sup_ref = &self.slot.suppress_errors;
+        let slot = &self.slot;
         let deadline_ptr = self.deadline_ptr;
-        let mut busy = self.slot.accept_busy.load(Ordering::SeqCst);
+        let mut busy = slot.accept_busy.load(Ordering::SeqCst);
         let fd = accept_connection(
             self.host.to_bytes(),
             self.timeout,
-            &self.slot.socket,
-            &self.slot.status,
+            &slot.socket,
+            &slot.status,
             &mut busy,
             &mut self.tls_error,
-            || {
-                host_cb.map_or(false, |cb| unsafe {
-                    cb(
-                        owner_ctx as *mut c_void,
-                        2,
-                        0,
-                        0,
-                        deadline_ptr,
-                        ptr::null(),
-                        ptr::null(),
-                        ptr::null(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                    ) != 0
-                })
-            },
-            |msg| {
-                if let Some(cb) = host_cb {
-                    let cs = bytes_to_cstring(msg);
-                    let sup = c_int::from(sup_ref.load(Ordering::SeqCst));
-                    unsafe {
-                        cb(
-                            owner_ctx as *mut c_void,
-                            1,
-                            sup,
-                            0,
-                            0,
-                            cs.as_ptr(),
-                            ptr::null(),
-                            ptr::null(),
-                            ptr::null_mut(),
-                            ptr::null_mut(),
-                        );
-                    }
-                }
-            },
+            || slot.is_stopped(deadline_ptr),
+            |msg| slot.report_error(msg),
         );
         self.slot.accept_busy.store(busy, Ordering::SeqCst);
         fd
@@ -603,28 +635,13 @@ impl ConnCore {
 
     fn raw_send_chunk(
         slot: &ConnCancelSlot,
-        tb: usize,
-        owner_ctx: usize,
-        host_cb: NzbgetRsConnHostFn,
+        tls: Option<&TlsHandle>,
         tls_error: &mut bool,
         chunk: &[u8],
     ) -> c_int {
-        if tb != 0 {
+        if let Some(sock) = tls {
             *tls_error = false;
-            let sent = host_cb.map_or(-1, |cb| unsafe {
-                cb(
-                    owner_ctx as *mut c_void,
-                    5,
-                    chunk.len() as c_int,
-                    0,
-                    tb,
-                    chunk.as_ptr().cast::<c_char>(),
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                ) as c_int
-            });
+            let sent = slot.host.tls_send(slot.owner_ctx(), sock, chunk);
             if sent < 0 {
                 *tls_error = true;
                 return -1;
@@ -643,28 +660,13 @@ impl ConnCore {
 
     fn raw_recv_chunk(
         slot: &ConnCancelSlot,
-        tb: usize,
-        owner_ctx: usize,
-        host_cb: NzbgetRsConnHostFn,
+        tls: Option<&TlsHandle>,
         chunk: &mut [u8],
         te: &mut bool,
     ) -> c_int {
-        if tb != 0 {
+        if let Some(sock) = tls {
             *te = false;
-            let recvd = host_cb.map_or(-1, |cb| unsafe {
-                cb(
-                    owner_ctx as *mut c_void,
-                    6,
-                    chunk.len() as c_int,
-                    0,
-                    tb,
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null(),
-                    chunk.as_mut_ptr().cast::<c_char>(),
-                    ptr::null_mut(),
-                ) as c_int
-            });
+            let recvd = slot.host.tls_recv(slot.owner_ctx(), sock, chunk);
             if recvd < 0 {
                 *te = true;
                 return -1;
@@ -685,13 +687,11 @@ impl ConnCore {
     fn write_line_bytes(&mut self, line: &[u8]) -> c_int {
         #[cfg(unix)]
         let _cg = unsafe { crate::ffi::PosixCancelGuard::disable() };
-        let owner_ctx = self.owner_ctx();
-        let tb = self.tls_box;
+        let tb = self.tls_box.as_ref();
         let slot = &self.slot;
-        let host_cb = slot.host_cb;
         let tls_err = &mut self.tls_error;
         write_line(&slot.status, line, |chunk| {
-            Self::raw_send_chunk(slot, tb, owner_ctx, host_cb, tls_err, chunk)
+            Self::raw_send_chunk(slot, tb, tls_err, chunk)
         })
     }
 
@@ -699,13 +699,11 @@ impl ConnCore {
         #[cfg(unix)]
         let _cg = unsafe { crate::ffi::PosixCancelGuard::disable() };
         self.emit_debug(b"Sending data");
-        let owner_ctx = self.owner_ctx();
-        let tb = self.tls_box;
+        let tb = self.tls_box.as_ref();
         let slot = &self.slot;
-        let host_cb = slot.host_cb;
         let tls_err = &mut self.tls_error;
         send_all(&slot.status, data, |chunk| {
-            Self::raw_send_chunk(slot, tb, owner_ctx, host_cb, tls_err, chunk)
+            Self::raw_send_chunk(slot, tb, tls_err, chunk)
         })
     }
 
@@ -715,10 +713,8 @@ impl ConnCore {
         if self.slot.status.load(Ordering::SeqCst) != CS_CONNECTED || dst.is_empty() {
             return None;
         }
-        let owner_ctx = self.owner_ctx();
-        let tb = self.tls_box;
+        let tb = self.tls_box.as_ref();
         let slot = &self.slot;
-        let host_cb = slot.host_cb;
         let mut delta = 0i32;
         let res = read_line(
             self.host.to_bytes(),
@@ -729,27 +725,8 @@ impl ConnCore {
             &mut delta,
             dst,
             &mut self.tls_error,
-            |chunk, te| Self::raw_recv_chunk(slot, tb, owner_ctx, host_cb, chunk, te),
-            |msg| {
-                if let Some(cb) = host_cb {
-                    let cs = bytes_to_cstring(msg);
-                    let sup = c_int::from(slot.suppress_errors.load(Ordering::SeqCst));
-                    unsafe {
-                        cb(
-                            owner_ctx as *mut c_void,
-                            1,
-                            sup,
-                            0,
-                            0,
-                            cs.as_ptr(),
-                            ptr::null(),
-                            ptr::null(),
-                            ptr::null_mut(),
-                            ptr::null_mut(),
-                        );
-                    }
-                }
-            },
+            |chunk, te| Self::raw_recv_chunk(slot, tb, chunk, te),
+            |msg| slot.report_error(msg),
         );
         if delta != 0 {
             slot.total_bytes_read.fetch_add(delta, Ordering::SeqCst);
@@ -763,10 +740,8 @@ impl ConnCore {
         if dst.is_empty() {
             return true;
         }
-        let owner_ctx = self.owner_ctx();
-        let tb = self.tls_box;
+        let tb = self.tls_box.as_ref();
         let slot = &self.slot;
-        let host_cb = slot.host_cb;
         let mut delta = 0i32;
         let ok = recv_exact(
             self.host.to_bytes(),
@@ -776,27 +751,8 @@ impl ConnCore {
             &mut delta,
             dst,
             &mut self.tls_error,
-            |chunk, te| Self::raw_recv_chunk(slot, tb, owner_ctx, host_cb, chunk, te),
-            |msg| {
-                if let Some(cb) = host_cb {
-                    let cs = bytes_to_cstring(msg);
-                    let sup = c_int::from(slot.suppress_errors.load(Ordering::SeqCst));
-                    unsafe {
-                        cb(
-                            owner_ctx as *mut c_void,
-                            1,
-                            sup,
-                            0,
-                            0,
-                            cs.as_ptr(),
-                            ptr::null(),
-                            ptr::null(),
-                            ptr::null_mut(),
-                            ptr::null_mut(),
-                        );
-                    }
-                }
-            },
+            |chunk, te| Self::raw_recv_chunk(slot, tb, chunk, te),
+            |msg| slot.report_error(msg),
         );
         if delta != 0 {
             slot.total_bytes_read.fetch_add(delta, Ordering::SeqCst);
@@ -807,37 +763,16 @@ impl ConnCore {
     fn try_recv_slice(&mut self, dst: &mut [u8]) -> c_int {
         #[cfg(unix)]
         let _cg = unsafe { crate::ffi::PosixCancelGuard::disable() };
-        let owner_ctx = self.owner_ctx();
-        let tb = self.tls_box;
+        let tb = self.tls_box.as_ref();
         let slot = &self.slot;
-        let host_cb = slot.host_cb;
         let mut delta = 0i32;
         let n = try_recv(
             self.host.to_bytes(),
             &mut delta,
             dst,
             &mut self.tls_error,
-            |chunk, te| Self::raw_recv_chunk(slot, tb, owner_ctx, host_cb, chunk, te),
-            |msg| {
-                if let Some(cb) = host_cb {
-                    let cs = bytes_to_cstring(msg);
-                    let sup = c_int::from(slot.suppress_errors.load(Ordering::SeqCst));
-                    unsafe {
-                        cb(
-                            owner_ctx as *mut c_void,
-                            1,
-                            sup,
-                            0,
-                            0,
-                            cs.as_ptr(),
-                            ptr::null(),
-                            ptr::null(),
-                            ptr::null_mut(),
-                            ptr::null_mut(),
-                        );
-                    }
-                }
-            },
+            |chunk, te| Self::raw_recv_chunk(slot, tb, chunk, te),
+            |msg| slot.report_error(msg),
         );
         if delta != 0 {
             slot.total_bytes_read.fetch_add(delta, Ordering::SeqCst);
@@ -1061,7 +996,7 @@ impl NzbgetRsConn {
             CS_DISCONNECTED,
             debug_on,
             owner_ctx,
-            host_cb,
+            ConnHost::new(host_cb),
         ));
         let mut cancel_reg = None;
         if register_cancel {
@@ -1096,7 +1031,7 @@ impl NzbgetRsConn {
             cipher: CString::default(),
             resolved_addrs: Vec::new(),
             deadline_ptr: 0,
-            tls_box: 0,
+            tls_box: None,
             port,
             tls,
             ip_version: 0,
@@ -1139,7 +1074,7 @@ impl NzbgetRsConn {
             CS_CONNECTED,
             debug_on,
             owner_ctx,
-            host_cb,
+            ConnHost::new(host_cb),
         ));
         let mut core = ConnCore {
             id,
@@ -1149,7 +1084,7 @@ impl NzbgetRsConn {
             cipher: CString::default(),
             resolved_addrs: Vec::new(),
             deadline_ptr: 0,
-            tls_box: 0,
+            tls_box: None,
             port: 0,
             tls,
             ip_version: 0,
@@ -2249,26 +2184,9 @@ impl crate::nserv::NservConn for NetNservSocket {
             core.graceful = true;
         }
         core.disconnect_base();
-        let tls_host_cb = self.tls_host_cb;
+        let host = ConnHost::new(self.tls_host_cb);
         drop(self);
-        if let Some(cb) = tls_host_cb {
-            // SAFETY: op 10 (`StopSSLThread`) takes no pointers; every other
-            // argument is null or zero, as the callback contract allows.
-            unsafe {
-                cb(
-                    ptr::null_mut(),
-                    10,
-                    0,
-                    0,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                );
-            }
-        }
+        host.stop_ssl_thread();
     }
 }
 
@@ -2354,7 +2272,7 @@ pub(crate) unsafe fn nzbget_rs_conn_ctl(
     let c = &*(conn as *const NzbgetRsConn);
     match op {
         3 => {
-            c.slot.cancel(false, c.slot.host_cb);
+            c.slot.cancel(false, c.slot.host.callback());
             return 1;
         }
         5 => {
@@ -2430,53 +2348,9 @@ pub(crate) unsafe fn nzbget_rs_conn_ctl(
             }
             1
         }
-        18 => {
-            if core.tls_box == 0 {
-                return 0;
-            }
-            let mut ver: c_int = 0;
-            if let Some(cb) = core.slot.host_cb {
-                cb(
-                    core.owner_ctx() as *mut c_void,
-                    9,
-                    0,
-                    0,
-                    core.tls_box,
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null_mut(),
-                    &mut ver,
-                );
-            }
-            ver as isize
-        }
+        18 => core.tls_info().map_or(0, |(version, _)| version as isize),
         20 => core.get_remote_addr().as_ptr() as isize,
-        21 => {
-            if core.tls_box == 0 {
-                return c"".as_ptr() as isize;
-            }
-            let mut ver: c_int = 0;
-            core.slot.host_cb.map_or(c"".as_ptr() as isize, |cb| {
-                let p = cb(
-                    core.owner_ctx() as *mut c_void,
-                    9,
-                    0,
-                    0,
-                    core.tls_box,
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null_mut(),
-                    &mut ver,
-                );
-                if p == 0 {
-                    c"".as_ptr() as isize
-                } else {
-                    p
-                }
-            })
-        }
+        21 => core.tls_info().map_or(c"", |(_, cipher)| cipher).as_ptr() as isize,
         _ => 0,
     }
 }
@@ -2732,7 +2606,7 @@ impl PooledNntpConn {
 
     #[inline]
     pub fn cancel(&self) {
-        self.conn.slot.cancel(false, self.conn.slot.host_cb);
+        self.conn.slot.cancel(false, self.conn.slot.host.callback());
     }
 
     #[inline]
@@ -3978,30 +3852,10 @@ pub unsafe extern "C" fn nzbget_rs_serverpool_probe_tls(
             .get_mut()
             .nntp_connect(&srv.user, &srv.password, &srv.name, &srv.host);
 
-    let mut neg_ver: c_int = 0;
-    let mut neg_cipher: *const c_char = c"".as_ptr();
-    let tb = conn.session.get_mut().core.tls_box;
-    if tb != 0 {
-        if let Some(cb) = conn_host_cb {
-            let p = cb(
-                ptr::null_mut(),
-                9,
-                0,
-                0,
-                tb,
-                ptr::null(),
-                ptr::null(),
-                ptr::null(),
-                ptr::null_mut(),
-                &mut neg_ver,
-            );
-            if p != 0 {
-                neg_cipher = p as *const c_char;
-            }
-        }
-    }
+    // The connection's host forwards op 9 to `conn_host_cb`.
+    let (neg_ver, neg_cipher) = conn.session.get_mut().core.tls_info().unwrap_or((0, c""));
     let want_cipher = opt_bytes(cipher);
-    let got_cipher = opt_bytes(neg_cipher);
+    let got_cipher = neg_cipher.to_bytes();
     let result = if connected && got_cipher == want_cipher && neg_ver == expected_ver {
         1
     } else if conn.session.get_mut().nntp_auth.error {

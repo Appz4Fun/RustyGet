@@ -751,33 +751,25 @@ pub fn reload_coordinator_op(op: c_int, state_cb: Option<unsafe extern "C" fn(c_
 // End-to-end `DiskService` & `RustyGet` daemon state/loop coordinator
 // ============================================================================
 
-#[repr(C)]
-pub struct NzbgetRsDaemonEnv {
-    pub ctx: *mut std::ffi::c_void,
-    pub a1: c_int,
-    pub a2: c_int,
-    pub a3: c_int,
-    pub a4: c_int,
-    pub a5: c_int,
-    pub a6: c_int,
-    pub s1: *const c_char,
-    pub s2: *const c_char,
-    pub s3: *const c_char,
-    pub s4: *const c_char,
-    pub s5: *const c_char,
-    pub segv_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
-    pub global_log_cb: Option<unsafe extern "C" fn(c_int, *const c_char)>,
-    pub reload_cb: Option<unsafe extern "C" fn(c_int) -> c_int>,
-    pub log_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char)>,
-    pub action_cb: Option<
-        unsafe extern "C" fn(
-            *mut std::ffi::c_void,
-            c_int,
-            c_int,
-            *const c_char,
-            *const c_char,
-        ) -> c_int,
-    >,
+/// What the lifecycle needs from the running daemon instance
+/// (implemented by `crate::daemon`).
+pub(crate) trait DaemonHost: Sync {
+    /// Whether an instance exists.
+    fn has_instance(&self) -> bool;
+    /// Whether the pre/post-processor has an unpack running.
+    fn has_active_unpack(&self) -> bool;
+    /// Stops the instance for a reload or for good; does nothing without one.
+    fn stop(&self, reload: bool);
+    /// Starts the pre/post-processor.
+    fn start_prepost(&self);
+    /// Whether the pre/post-processor thread is running.
+    fn prepost_running(&self) -> bool;
+    /// Whether the pre/post-processor has jobs.
+    fn prepost_has_jobs(&self) -> bool;
+    /// Stops the pre/post-processor unless it is busy (standalone mode end).
+    fn stop_prepost_when_idle(&self);
+    /// Stops the pre/post-processor as the daemon stops (not in remote mode).
+    fn stop_prepost(&self, remote_mode: bool);
 }
 
 struct DiskServiceState {
@@ -930,22 +922,6 @@ fn dm_cbuf(bytes: &[u8]) -> Vec<u8> {
     v
 }
 
-unsafe fn dm_cstr_bytes<'a>(p: *const c_char) -> &'a [u8] {
-    if p.is_null() {
-        &[]
-    } else {
-        std::ffi::CStr::from_ptr(p).to_bytes()
-    }
-}
-
-unsafe fn dm_opt_cstr<'a>(p: *const c_char) -> &'a std::ffi::CStr {
-    if p.is_null() {
-        c""
-    } else {
-        std::ffi::CStr::from_ptr(p)
-    }
-}
-
 fn dm_emit_active_log(level: c_int, msg: &[u8]) {
     #[cfg(unix)]
     {
@@ -965,16 +941,8 @@ fn dm_emit_active_log(level: c_int, msg: &[u8]) {
     }
 }
 
-unsafe fn dm_log(env: &NzbgetRsDaemonEnv, level: c_int, msg: &[u8]) {
-    if let Some(cb) = env.log_cb {
-        let c = dm_cbuf(msg);
-        cb(env.ctx, level, c.as_ptr() as *const c_char);
-    } else if let Some(gcb) = env.global_log_cb {
-        let c = dm_cbuf(msg);
-        gcb(level, c.as_ptr() as *const c_char);
-    } else {
-        dm_emit_active_log(level, msg);
-    }
+fn dm_log(level: c_int, msg: &[u8]) {
+    dm_emit_active_log(level, msg);
 }
 
 fn dm_is_stopped() -> bool {
@@ -993,85 +961,48 @@ fn dm_is_reloading() -> bool {
         .reloading
 }
 
-unsafe fn dm_trigger_exit(env: &NzbgetRsDaemonEnv) {
+fn trigger_exit(host: &dyn DaemonHost) {
     RELOAD_COORDINATOR.cancel_pending();
     signal_state_op(5);
-    if let Some(rcb) = env.reload_cb {
-        rcb(3);
-    } else if let Some(acb) = env.action_cb {
-        acb(env.ctx, 10, 0, std::ptr::null(), std::ptr::null());
-    }
+    host.stop(false);
 }
 
-unsafe fn dm_trigger_reload(
-    reload_cb: Option<unsafe extern "C" fn(c_int) -> c_int>,
-    global_log_cb: Option<unsafe extern "C" fn(c_int, *const c_char)>,
-) {
-    let Some(rcb) = reload_cb else {
-        return;
-    };
+fn trigger_reload(host: &'static dyn DaemonHost) {
     RELOAD_COORDINATOR.request_reload(move |action| match action {
-        0 => {
-            let flags = rcb(0);
-            let has_inst = (flags & 1) != 0;
-            c_int::from(
-                !has_inst || dm_is_reloading() || dm_is_stopped() || signal_state_op(0) != 0,
-            )
-        }
+        0 => c_int::from(
+            !host.has_instance() || dm_is_reloading() || dm_is_stopped() || signal_state_op(0) != 0,
+        ),
         1 => {
-            if let Some(lcb) = global_log_cb {
-                lcb(0, c"Daemon is already reloading or stopping".as_ptr());
-            } else {
-                dm_emit_active_log(0, b"Daemon is already reloading or stopping");
-            }
+            dm_emit_active_log(0, b"Daemon is already reloading or stopping");
             0
         }
         2 => {
-            if let Some(lcb) = global_log_cb {
-                lcb(0, c"Reload request debounced, target extended".as_ptr());
-            } else {
-                dm_emit_active_log(0, b"Reload request debounced, target extended");
-            }
+            dm_emit_active_log(0, b"Reload request debounced, target extended");
             0
         }
         3 => signal_state_op(0),
         4 => {
-            let flags = rcb(0);
-            let has_inst = (flags & 1) != 0;
-            let active_unpack = (flags & 2) != 0;
-            c_int::from(active_unpack) | (if !has_inst || dm_is_reloading() { 2 } else { 0 })
+            c_int::from(host.has_active_unpack())
+                | (if !host.has_instance() || dm_is_reloading() { 2 } else { 0 })
         }
         5 => {
-            if let Some(lcb) = global_log_cb {
-                lcb(
-                    2,
-                    c"Unpack is actively executing; deferring reload until unpack completes..."
-                        .as_ptr(),
-                );
-            } else {
-                dm_emit_active_log(
-                    2,
-                    b"Unpack is actively executing; deferring reload until unpack completes...",
-                );
-            }
+            dm_emit_active_log(
+                2,
+                b"Unpack is actively executing; deferring reload until unpack completes...",
+            );
             0
         }
         6 => signal_state_op(1),
         7 => {
             RELOAD_COORDINATOR.cancel_pending();
             signal_state_op(5);
-            rcb(3);
+            host.stop(false);
             0
         }
         8 => {
-            let flags = rcb(0);
-            if (flags & 1) != 0 && !dm_is_reloading() {
-                if let Some(lcb) = global_log_cb {
-                    lcb(2, c"Reloading...".as_ptr());
-                } else {
-                    dm_emit_active_log(2, b"Reloading...");
-                }
-                rcb(1);
+            if host.has_instance() && !dm_is_reloading() {
+                dm_emit_active_log(2, b"Reloading...");
+                host.stop(true);
             }
             0
         }
@@ -1171,599 +1102,387 @@ pub(crate) fn disk_service_work_active() {
 }
 
 
-/// Executes `DiskService` and `RustyGet` daemon lifecycle operations (driven by `crate::daemon`):
-/// - `0`: `DiskService::ServiceInterval`
-/// - `1`: `DiskService::ServiceWork`
-/// - `2`: `ResetInstance(a1 = reload)`
-/// - `3`: `QueryState` (`0`: `reloading`, `1`: `stopped`, `2`: `signal_state_op(a2)`)
-/// - `4`: `Phase1ApplyUmask(a1 = opt_umask, a2 = is_debug)`
-/// - `5`: `Phase1DaemonizeAndActivate`
-/// - `6`: `ShouldStartSecureServer`
-/// - `7`: `Phase3Run` (standalone/server `DoMainLoop` + `remote-mode` loop)
-/// - `8`: `Stop(a1 = reload, a2 = remote_mode)`
-/// - `9`: `Reload()`
-/// - `10`: `ExitProc()`
-/// - `11`: `Phase4Shutdown`
-/// - `12`: `CleanupLockFile`
-pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDaemonEnv) -> c_int {
-    let Some(e) = env.as_ref() else {
-        return 0;
+/// Phase 1's end: runs the command line's direct modes (they exit), forks
+/// into the background in daemon mode, logs the start banner and installs
+/// the signal handlers. `segv_cb` logs a crash from the SIGSEGV handler.
+pub(crate) unsafe fn activate_daemon(
+    segv_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
+) {
+    let (daemon_mode, remote_mode) = if let Some(cmd) = daemon_cmdline_clone() {
+        daemon_process_direct(&cmd);
+        (cmd.daemon_mode, cmd.remote_client_mode)
+    } else {
+        (false, false)
     };
-    match op {
-        3 => match e.a1 {
-            0 => c_int::from(dm_is_reloading()),
-            1 => c_int::from(dm_is_stopped()),
-            2 => signal_state_op(e.a2),
-            _ => 0,
-        },
-        5 => {
-            #[cfg(unix)]
-            let (daemon_mode, remote_mode) = if e.s1.is_null() && e.a1 < 0 {
-                if let Some(cmd) = daemon_cmdline_clone() {
-                    daemon_process_direct(&cmd);
-                    (cmd.daemon_mode, cmd.remote_client_mode)
-                } else {
-                    (false, false)
-                }
-            } else {
-                (e.a1 != 0, e.a3 != 0)
-            };
-            #[cfg(not(unix))]
-            let (daemon_mode, remote_mode) = (e.a1 != 0, e.a3 != 0);
 
-            let was_reloading = dm_is_reloading();
-            #[cfg(unix)]
-            let active_opts = if e.s1.is_null() {
-                crate::options::active_options()
-            } else {
-                None
-            };
-            #[cfg(unix)]
-            if let Some(opts) = active_opts.as_ref() {
-                if opts.server_mode() && opts.scalars().system_health_check != 0 {
-                    let _ = crate::ffi::system_health_diagnose_bytes(0);
-                }
-            }
-            #[cfg(unix)]
-            let (
-                ver,
-                lock_file,
-                daemon_user,
-                server_mode,
-                cfg_fn,
-                ctrl_ip,
-                ctrl_port,
-                crash_dump,
-                crash_trace,
-            ) = if let Some(opts) = active_opts.as_ref() {
-                let sc = opts.scalars();
-                (
-                    crate::ffi::build_version_bytes(),
-                    opts.str_cstr(OptStr::LockFile).unwrap_or(c""),
-                    opts.str_cstr(OptStr::DaemonUsername).unwrap_or(c""),
-                    opts.server_mode(),
-                    opts.str_bytes(OptStr::ConfigFile),
-                    opts.str_bytes(OptStr::ControlIp),
-                    sc.control_port,
-                    sc.crash_dump != 0,
-                    crate::ffi::build_debug_enabled() && sc.crash_trace != 0,
-                )
-            } else {
-                (
-                    dm_cstr_bytes(e.s1),
-                    dm_opt_cstr(e.s2),
-                    dm_opt_cstr(e.s3),
-                    e.a2 != 0,
-                    dm_cstr_bytes(e.s4),
-                    dm_cstr_bytes(e.s5),
-                    e.a6,
-                    e.a4 != 0,
-                    e.a5 != 0,
-                )
-            };
-            #[cfg(not(unix))]
-            let (
-                ver,
-                lock_file,
-                daemon_user,
-                server_mode,
-                cfg_fn,
-                ctrl_ip,
-                ctrl_port,
-                crash_dump,
-                crash_trace,
-            ) = (
-                dm_cstr_bytes(e.s1),
-                dm_opt_cstr(e.s2),
-                dm_opt_cstr(e.s3),
-                e.a2 != 0,
-                dm_cstr_bytes(e.s4),
-                dm_cstr_bytes(e.s5),
-                e.a6,
-                e.a4 != 0,
-                e.a5 != 0,
-            );
-
-            if daemon_mode {
-                if !was_reloading {
-                    #[cfg(unix)]
-                    {
-                        let f = libc::fork();
-                        if f < 0 {
-                            libc::exit(1);
-                        }
-                        if f > 0 {
-                            libc::exit(0);
-                        }
-                        libc::setsid();
-                    }
-                    match daemonize_setup(lock_file, daemon_user) {
-                        Ok((owned, trunc_failed)) => {
-                            DAEMON_INSTANCE
-                                .lock_file_owned
-                                .store(owned, Ordering::SeqCst);
-                            if trunc_failed {
-                                let mut wm = b"Could not truncate lock-file ".to_vec();
-                                wm.extend_from_slice(lock_file.to_bytes());
-                                dm_log(e, 3, &wm);
-                            }
-                        }
-                        Err(code) => {
-                            let mut em = b"Starting daemon failed: ".to_vec();
-                            match code {
-                                1 => {
-                                    em.extend_from_slice(b"could not create lock-file ");
-                                    em.extend_from_slice(lock_file.to_bytes());
-                                }
-                                2 => {
-                                    em.extend_from_slice(b"lock-file ");
-                                    em.extend_from_slice(lock_file.to_bytes());
-                                    em.extend_from_slice(b" is not a regular file");
-                                }
-                                3 => {
-                                    em.extend_from_slice(b"could not acquire lock on lock-file ");
-                                    em.extend_from_slice(lock_file.to_bytes());
-                                }
-                                4 => em.extend_from_slice(b"invalid DaemonUsername"),
-                                _ => em.extend_from_slice(b"could not drop privileges"),
-                            }
-                            dm_log(e, 4, &em);
-                            libc::exit(1);
-                        }
-                    }
-                }
-                let mut im = b"RustyGet ".to_vec();
-                im.extend_from_slice(ver);
-                im.extend_from_slice(b" daemon-mode");
-                dm_log(e, 2, &im);
-                // after the fork: a thread started in the parent would not survive it
-                crate::sysmetrics::start_sampler();
-            } else if server_mode {
-                let mut im = b"RustyGet ".to_vec();
-                im.extend_from_slice(ver);
-                im.extend_from_slice(b" server-mode");
-                dm_log(e, 2, &im);
-                crate::sysmetrics::start_sampler();
-            } else if remote_mode {
-                let mut im = b"RustyGet ".to_vec();
-                im.extend_from_slice(ver);
-                im.extend_from_slice(b" remote-mode");
-                dm_log(e, 2, &im);
-            }
-
-            if server_mode {
-                let mut u = b"using ".to_vec();
-                u.extend_from_slice(cfg_fn);
-                dm_log(e, 2, &u);
-
-                let mut r = b"RustyGet runs on ".to_vec();
-                r.extend_from_slice(ctrl_ip);
-                r.extend_from_slice(format!(":{ctrl_port}").as_bytes());
-                dm_log(e, 2, &r);
-            }
-
-            #[cfg(unix)]
-            if e.s1.is_null() && crate::ffi::build_debug_enabled() {
-                let sys_bytes = crate::ffi::format_system_info_bytes(0, false);
-                let mut pos = 0;
-                while pos < sys_bytes.len() {
-                    let end = sys_bytes[pos..]
-                        .iter()
-                        .position(|&b| b == b'\n')
-                        .map_or(sys_bytes.len(), |d| pos + d);
-                    dm_emit_active_log(1, &sys_bytes[pos..end]);
-                    if end == sys_bytes.len() {
-                        break;
-                    }
-                    pos = end + 1;
-                }
-            }
-            if let Some(cb) = e.action_cb {
-                cb(e.ctx, 2, 0, std::ptr::null(), std::ptr::null());
-            }
-
-            DAEMON_INSTANCE
-                .wait_mutex
-                .lock()
-                .unwrap_or_else(|err| err.into_inner())
-                .reloading = false;
-
-            install_error_handler(crash_dump, crash_trace, e.segv_cb);
-            0
+    let was_reloading = dm_is_reloading();
+    let active_opts = crate::options::active_options();
+    if let Some(opts) = active_opts.as_ref() {
+        if opts.server_mode() && opts.scalars().system_health_check != 0 {
+            let _ = crate::ffi::system_health_diagnose_bytes(0);
         }
-        7 => {
-            let Some(cb) = e.action_cb else {
-                return 0;
-            };
-            #[cfg(unix)]
-            if e.a1 < 0 {
-                crate::net::remote_srv_ctl(0);
-                if let Some(opts) = crate::options::active_options() {
-                    if !opts.daemon_mode() {
-                        let fe_mode = match opts.scalars().output_mode {
-                            2 if !crate::ffi::build_curses_disabled() => Some(2),
-                            2 | 1 => Some(1),
-                            0 => Some(0),
-                            _ => None,
-                        };
-                        if let Some(m) = fe_mode {
-                            let rcb = e.reload_cb;
-                            let acb = e.action_cb;
-                            let ctx_u = e.ctx as usize;
-                            let exit_fn: std::sync::Arc<dyn Fn() + Send + Sync> =
-                                std::sync::Arc::new(move || unsafe {
-                                    RELOAD_COORDINATOR.cancel_pending();
-                                    signal_state_op(5);
-                                    if let Some(r) = rcb {
-                                        r(3);
-                                    } else if let Some(a) = acb {
-                                        a(
-                                            ctx_u as *mut std::ffi::c_void,
-                                            10,
-                                            0,
-                                            std::ptr::null(),
-                                            std::ptr::null(),
-                                        );
-                                    }
-                                });
-                            let fe = std::sync::Arc::new(crate::ffi::FrontendHandle::new(
-                                m,
-                                Some(exit_fn),
-                            ));
-                            fe.start();
-                            if let Ok(mut g) = DAEMON_FRONTEND.lock() {
-                                *g = Some(fe);
-                            }
-                        }
-                    }
-                }
-            }
-            #[cfg(unix)]
-            let cmd_opt = if e.a1 < 0 {
-                daemon_cmdline_clone()
-            } else {
-                None
-            };
-            #[cfg(unix)]
-            let (remote_mode, server_mode, standalone_add, cat_ptr, nzb_ptr) =
-                if let Some(ref cmd) = cmd_opt {
-                    let srv_mode =
-                        crate::options::active_options().is_some_and(|o| o.server_mode());
-                    (
-                        cmd.remote_client_mode,
-                        srv_mode,
-                        !cmd.server_mode,
-                        cmd.add_category
-                            .as_deref()
-                            .map_or(std::ptr::null(), std::ffi::CStr::as_ptr),
-                        cmd.arg_filename
-                            .as_deref()
-                            .map_or(std::ptr::null(), std::ffi::CStr::as_ptr),
-                    )
-                } else {
-                    (e.a1 != 0, e.a2 != 0, e.a3 != 0, e.s1, e.s2)
-                };
-            #[cfg(not(unix))]
-            let (remote_mode, server_mode, standalone_add, cat_ptr, nzb_ptr) =
-                (e.a1 != 0, e.a2 != 0, e.a3 != 0, e.s1, e.s2);
-
-            if !remote_mode {
-                if standalone_add && signal_state_op(0) == 0 {
-                    #[cfg(unix)]
-                    if e.a1 < 0 {
-                        let _ = crate::scanner::add_cli_nzb_file_active(cat_ptr, nzb_ptr);
-                    } else {
-                        cb(e.ctx, 11, 0, cat_ptr, nzb_ptr);
-                    }
-                    #[cfg(not(unix))]
-                    cb(e.ctx, 11, 0, cat_ptr, nzb_ptr);
-                }
-
-                dm_log(e, 0, b"Entering main program loop");
-                #[cfg(unix)]
-                if e.a1 < 0 {
-                    crate::queuecoord::start_daemon_queue_coord();
-                }
-                cb(e.ctx, 4, 0, std::ptr::null(), std::ptr::null());
-                #[cfg(unix)]
-                if e.a1 < 0 {
-                    crate::articledl::start_daemon_article_cache();
-                    crate::scheduler::start_daemon_service_coord();
-                    crate::dupesearch_coord::start_daemon_dupesearch();
-                    crate::urlcoord::start_daemon_url_coord();
-                    crate::feed::start_daemon_feed_coord();
-                    crate::articledl::start_daemon_memory_monitor();
-                }
-
-                loop {
-                    let mut st_mask = cb(e.ctx, 5, 0, std::ptr::null(), std::ptr::null());
-                    #[cfg(unix)]
-                    if e.a1 < 0
-                        && (crate::queuecoord::is_daemon_queue_coord_running()
-                            || crate::articledl::is_daemon_article_cache_running()
-                            || crate::scheduler::is_daemon_service_coord_running()
-                            || crate::dupesearch_coord::is_daemon_dupesearch_running()
-                            || crate::urlcoord::is_daemon_url_coord_running()
-                            || crate::feed::is_daemon_feed_coord_running()
-                            || crate::articledl::is_daemon_memory_monitor_running())
-                    {
-                        st_mask |= 1;
-                    }
-                    if (st_mask & 1) == 0 {
-                        break;
-                    }
-                    if signal_state_op(1) != 0 {
-                        dm_trigger_exit(e);
-                    } else if signal_state_op(2) != 0 {
-                        dm_trigger_reload(e.reload_cb, e.global_log_cb);
-                    }
-
-                    let mut st_jobs = cb(e.ctx, 5, 1, std::ptr::null(), std::ptr::null());
-                    #[cfg(unix)]
-                    if e.a1 < 0 {
-                        if crate::queuecoord::daemon_queue_coord_has_more_jobs() {
-                            st_jobs |= 1;
-                        }
-                        if crate::urlcoord::daemon_url_coord_has_more_jobs() {
-                            st_jobs |= 2;
-                        }
-                    }
-                    if crate::options::nzbget_should_stop_standalone(
-                        server_mode,
-                        (st_jobs & 1) != 0,
-                        (st_jobs & 2) != 0,
-                        (st_jobs & 4) != 0,
-                    ) {
-                        #[cfg(unix)]
-                        if e.a1 < 0 {
-                            crate::queuecoord::stop_daemon_queue_coord(false);
-                        }
-                        cb(e.ctx, 6, 0, std::ptr::null(), std::ptr::null());
-                        #[cfg(unix)]
-                        if e.a1 < 0 {
-                            crate::articledl::stop_daemon_article_cache();
-                            crate::scheduler::stop_daemon_service_coord();
-                            crate::dupesearch_coord::stop_daemon_dupesearch();
-                            crate::urlcoord::stop_daemon_url_coord();
-                            crate::feed::stop_daemon_feed_coord();
-                            crate::articledl::stop_daemon_memory_monitor();
-                        }
-                    }
-
-                    std::thread::sleep(Duration::from_millis(100));
-
-                    if server_mode && !dm_is_stopped() {
-                        while !dm_is_stopped() {
-                            {
-                                let wg = DAEMON_INSTANCE
-                                    .wait_mutex
-                                    .lock()
-                                    .unwrap_or_else(|err| err.into_inner());
-                                if !wg.stopped && signal_state_op(4) == 0 {
-                                    let _ = DAEMON_INSTANCE
-                                        .wait_cond
-                                        .wait_timeout(wg, Duration::from_millis(50))
-                                        .unwrap_or_else(|err| err.into_inner());
-                                }
-                            }
-                            if signal_state_op(1) != 0 {
-                                dm_trigger_exit(e);
-                            } else if signal_state_op(2) != 0 {
-                                dm_trigger_reload(e.reload_cb, e.global_log_cb);
-                            }
-                        }
-                    }
-                }
-
-                dm_log(e, 0, b"Main program loop terminated");
-            } else {
-                if signal_state_op(1) != 0 {
-                    dm_trigger_exit(e);
-                }
-                while !dm_is_stopped() && !dm_is_reloading() && {
-                    #[cfg(unix)]
-                    let running = if e.a1 < 0 {
-                        daemon_frontend_clone().is_some_and(|fe| fe.is_running())
-                    } else {
-                        cb(e.ctx, 3, 0, std::ptr::null(), std::ptr::null()) != 0
-                    };
-                    #[cfg(not(unix))]
-                    let running = cb(e.ctx, 3, 0, std::ptr::null(), std::ptr::null()) != 0;
-                    running
-                } {
-                    if signal_state_op(1) != 0 {
-                        dm_trigger_exit(e);
-                    } else if signal_state_op(2) != 0 {
-                        dm_trigger_reload(e.reload_cb, e.global_log_cb);
-                    }
-                    std::thread::sleep(Duration::from_millis(50));
-                }
-            }
-            0
-        }
-        8 => {
-            #[cfg(unix)]
-            let eff_remote_mode = if e.a2 < 0 {
-                c_int::from(daemon_cmdline_clone().is_some_and(|c| c.remote_client_mode))
-            } else {
-                e.a2
-            };
-            #[cfg(not(unix))]
-            let eff_remote_mode = e.a2;
-            let reload = e.a1 != 0;
-            if !reload {
-                RELOAD_COORDINATOR.cancel_pending();
-                signal_state_op(5);
-            }
-
-            {
-                let mut wg = DAEMON_INSTANCE
-                    .wait_mutex
-                    .lock()
-                    .unwrap_or_else(|err| err.into_inner());
-                if wg.stopped && !wg.reloading && reload {
-                    drop(wg);
-                    dm_log(
-                        e,
-                        0,
-                        b"Ignoring reload request because shutdown is already in progress",
-                    );
-                    return 0;
-                }
-                wg.reloading = reload;
-            }
-
-            if !dm_is_reloading() {
-                signal_state_op(3);
-                dm_log(e, 2, b"Stopping, please wait...");
-            }
-
-            if let Some(cb) = e.action_cb {
-                if dm_is_reloading() && cb(e.ctx, 7, 0, std::ptr::null(), std::ptr::null()) != 0 {
-                    dm_log(
-                        e,
-                        2,
-                        b"Waiting for active unpack to complete before in-process reload...",
-                    );
-                    while cb(e.ctx, 7, 0, std::ptr::null(), std::ptr::null()) != 0
-                        && signal_state_op(0) == 0
-                    {
-                        std::thread::sleep(Duration::from_millis(100));
-                    }
-                }
-            }
-
-            if signal_state_op(1) != 0 {
-                DAEMON_INSTANCE
-                    .wait_mutex
-                    .lock()
-                    .unwrap_or_else(|err| err.into_inner())
-                    .reloading = false;
-                signal_state_op(5);
-            }
-
-            #[cfg(unix)]
-            if e.a2 < 0 && eff_remote_mode != 0 {
-                if let Some(fe) = daemon_frontend_clone() {
-                    dm_log(e, 0, b"Stopping Frontend");
-                    fe.stop();
-                }
-            }
-            #[cfg(unix)]
-            if e.a2 < 0 && eff_remote_mode == 0 {
-                crate::queuecoord::stop_daemon_queue_coord(true);
-            }
-            if let Some(cb) = e.action_cb {
-                cb(
-                    e.ctx,
-                    8,
-                    eff_remote_mode,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                );
-            }
-            #[cfg(unix)]
-            if e.a2 < 0 && eff_remote_mode == 0 {
-                crate::articledl::stop_daemon_article_cache();
-                crate::scheduler::stop_daemon_service_coord();
-                crate::dupesearch_coord::stop_daemon_dupesearch();
-                crate::urlcoord::stop_daemon_url_coord();
-                crate::feed::stop_daemon_feed_coord();
-                crate::articledl::stop_daemon_memory_monitor();
-            }
-
-            let mut wg = DAEMON_INSTANCE
-                .wait_mutex
-                .lock()
-                .unwrap_or_else(|err| err.into_inner());
-            wg.stopped = true;
-            DAEMON_INSTANCE.wait_cond.notify_all();
-            1
-        }
-        9 => {
-            dm_trigger_reload(e.reload_cb, e.global_log_cb);
-            1
-        }
-        10 => {
-            dm_trigger_exit(e);
-            1
-        }
-        11 => {
-            #[cfg(unix)]
-            let eff_remote_mode = if e.a2 < 0 {
-                c_int::from(daemon_cmdline_clone().is_some_and(|c| c.remote_client_mode))
-            } else {
-                e.a2
-            };
-            #[cfg(not(unix))]
-            let eff_remote_mode = e.a2;
-            DAEMON_INSTANCE
-                .wait_mutex
-                .lock()
-                .unwrap_or_else(|err| err.into_inner())
-                .reloading = e.a1 != 0;
-            RELOAD_COORDINATOR.cancel_and_join();
-            #[cfg(unix)]
-            if e.a2 < 0 {
-                crate::procrun::terminate_all_active();
-                crate::net::remote_srv_ctl(1);
-                if let Some(fe) = daemon_frontend_clone() {
-                    if eff_remote_mode == 0 || dm_is_stopped() {
-                        dm_log(e, 0, b"Stopping Frontend");
-                        fe.stop();
-                    }
-                    while fe.is_running() {
-                        if signal_state_op(1) != 0 {
-                            dm_trigger_exit(e);
-                        }
-                        std::thread::sleep(Duration::from_millis(50));
-                    }
-                    dm_log(e, 0, b"Frontend stopped");
-                }
-            } else if let Some(cb) = e.action_cb {
-                cb(
-                    e.ctx,
-                    12,
-                    c_int::from(eff_remote_mode == 0 || dm_is_stopped()),
-                    std::ptr::null(),
-                    std::ptr::null(),
-                );
-            }
-            #[cfg(not(unix))]
-            if let Some(cb) = e.action_cb {
-                cb(
-                    e.ctx,
-                    12,
-                    c_int::from(eff_remote_mode == 0 || dm_is_stopped()),
-                    std::ptr::null(),
-                    std::ptr::null(),
-                );
-            }
-            RELOAD_COORDINATOR.cancel_and_join();
-            1
-        }
-        _ => 0,
     }
+    let (ver, lock_file, daemon_user, server_mode, cfg_fn, ctrl_ip, ctrl_port, crash_dump, crash_trace) =
+        if let Some(opts) = active_opts.as_ref() {
+            let sc = opts.scalars();
+            (
+                crate::ffi::build_version_bytes(),
+                opts.str_cstr(OptStr::LockFile).unwrap_or(c""),
+                opts.str_cstr(OptStr::DaemonUsername).unwrap_or(c""),
+                opts.server_mode(),
+                opts.str_bytes(OptStr::ConfigFile),
+                opts.str_bytes(OptStr::ControlIp),
+                sc.control_port,
+                sc.crash_dump != 0,
+                crate::ffi::build_debug_enabled() && sc.crash_trace != 0,
+            )
+        } else {
+            (&[][..], c"", c"", false, &[][..], &[][..], 0, false, false)
+        };
+
+    if daemon_mode {
+        if !was_reloading {
+            let f = libc::fork();
+            if f < 0 {
+                libc::exit(1);
+            }
+            if f > 0 {
+                libc::exit(0);
+            }
+            libc::setsid();
+            match daemonize_setup(lock_file, daemon_user) {
+                Ok((owned, trunc_failed)) => {
+                    DAEMON_INSTANCE
+                        .lock_file_owned
+                        .store(owned, Ordering::SeqCst);
+                    if trunc_failed {
+                        let mut wm = b"Could not truncate lock-file ".to_vec();
+                        wm.extend_from_slice(lock_file.to_bytes());
+                        dm_log(3, &wm);
+                    }
+                }
+                Err(code) => {
+                    let mut em = b"Starting daemon failed: ".to_vec();
+                    match code {
+                        1 => {
+                            em.extend_from_slice(b"could not create lock-file ");
+                            em.extend_from_slice(lock_file.to_bytes());
+                        }
+                        2 => {
+                            em.extend_from_slice(b"lock-file ");
+                            em.extend_from_slice(lock_file.to_bytes());
+                            em.extend_from_slice(b" is not a regular file");
+                        }
+                        3 => {
+                            em.extend_from_slice(b"could not acquire lock on lock-file ");
+                            em.extend_from_slice(lock_file.to_bytes());
+                        }
+                        4 => em.extend_from_slice(b"invalid DaemonUsername"),
+                        _ => em.extend_from_slice(b"could not drop privileges"),
+                    }
+                    dm_log(4, &em);
+                    libc::exit(1);
+                }
+            }
+        }
+        let mut im = b"RustyGet ".to_vec();
+        im.extend_from_slice(ver);
+        im.extend_from_slice(b" daemon-mode");
+        dm_log(2, &im);
+        // after the fork: a thread started in the parent would not survive it
+        crate::sysmetrics::start_sampler();
+    } else if server_mode {
+        let mut im = b"RustyGet ".to_vec();
+        im.extend_from_slice(ver);
+        im.extend_from_slice(b" server-mode");
+        dm_log(2, &im);
+        crate::sysmetrics::start_sampler();
+    } else if remote_mode {
+        let mut im = b"RustyGet ".to_vec();
+        im.extend_from_slice(ver);
+        im.extend_from_slice(b" remote-mode");
+        dm_log(2, &im);
+    }
+
+    if server_mode {
+        let mut u = b"using ".to_vec();
+        u.extend_from_slice(cfg_fn);
+        dm_log(2, &u);
+
+        let mut r = b"RustyGet runs on ".to_vec();
+        r.extend_from_slice(ctrl_ip);
+        r.extend_from_slice(format!(":{ctrl_port}").as_bytes());
+        dm_log(2, &r);
+    }
+
+    if crate::ffi::build_debug_enabled() {
+        let sys_bytes = crate::ffi::format_system_info_bytes(0, false);
+        let mut lines: Vec<&[u8]> = sys_bytes.split(|&b| b == b'\n').collect();
+        if sys_bytes.is_empty() || sys_bytes.ends_with(b"\n") {
+            lines.pop();
+        }
+        for line in lines {
+            dm_emit_active_log(1, line);
+        }
+    }
+
+    DAEMON_INSTANCE
+        .wait_mutex
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .reloading = false;
+
+    install_error_handler(crash_dump, crash_trace, segv_cb);
+}
+
+fn start_daemon_services() {
+    crate::articledl::start_daemon_article_cache();
+    crate::scheduler::start_daemon_service_coord();
+    crate::dupesearch_coord::start_daemon_dupesearch();
+    crate::urlcoord::start_daemon_url_coord();
+    crate::feed::start_daemon_feed_coord();
+    crate::articledl::start_daemon_memory_monitor();
+}
+
+fn stop_daemon_services() {
+    crate::articledl::stop_daemon_article_cache();
+    crate::scheduler::stop_daemon_service_coord();
+    crate::dupesearch_coord::stop_daemon_dupesearch();
+    crate::urlcoord::stop_daemon_url_coord();
+    crate::feed::stop_daemon_feed_coord();
+    crate::articledl::stop_daemon_memory_monitor();
+}
+
+fn daemon_services_running() -> bool {
+    crate::queuecoord::is_daemon_queue_coord_running()
+        || crate::articledl::is_daemon_article_cache_running()
+        || crate::scheduler::is_daemon_service_coord_running()
+        || crate::dupesearch_coord::is_daemon_dupesearch_running()
+        || crate::urlcoord::is_daemon_url_coord_running()
+        || crate::feed::is_daemon_feed_coord_running()
+        || crate::articledl::is_daemon_memory_monitor_running()
+}
+
+/// Handles a pending exit or reload signal.
+fn handle_pending_signals(host: &'static dyn DaemonHost) {
+    if signal_state_op(1) != 0 {
+        trigger_exit(host);
+    } else if signal_state_op(2) != 0 {
+        trigger_reload(host);
+    }
+}
+
+/// Phase 3: starts the frontend and the services, then runs the main loop
+/// (standalone or server mode) or the remote-mode loop until stop or reload.
+pub(crate) fn run_daemon(host: &'static dyn DaemonHost) {
+    crate::net::remote_srv_ctl(0);
+    if let Some(opts) = crate::options::active_options() {
+        if !opts.daemon_mode() {
+            let fe_mode = match opts.scalars().output_mode {
+                2 if !crate::ffi::build_curses_disabled() => Some(2),
+                2 | 1 => Some(1),
+                0 => Some(0),
+                _ => None,
+            };
+            if let Some(m) = fe_mode {
+                let exit_fn: std::sync::Arc<dyn Fn() + Send + Sync> =
+                    std::sync::Arc::new(move || trigger_exit(host));
+                let fe = std::sync::Arc::new(crate::ffi::FrontendHandle::new(m, Some(exit_fn)));
+                fe.start();
+                if let Ok(mut g) = DAEMON_FRONTEND.lock() {
+                    *g = Some(fe);
+                }
+            }
+        }
+    }
+    let cmd_opt = daemon_cmdline_clone();
+    // without a command line there is nothing to serve: wait as in remote mode
+    let (remote_mode, server_mode, standalone_add, cat_ptr, nzb_ptr) =
+        if let Some(ref cmd) = cmd_opt {
+            let srv_mode = crate::options::active_options().is_some_and(|o| o.server_mode());
+            (
+                cmd.remote_client_mode,
+                srv_mode,
+                !cmd.server_mode,
+                cmd.add_category
+                    .as_deref()
+                    .map_or(std::ptr::null(), std::ffi::CStr::as_ptr),
+                cmd.arg_filename
+                    .as_deref()
+                    .map_or(std::ptr::null(), std::ffi::CStr::as_ptr),
+            )
+        } else {
+            (true, false, false, std::ptr::null(), std::ptr::null())
+        };
+
+    if !remote_mode {
+        if standalone_add && signal_state_op(0) == 0 {
+            // SAFETY: both are null or point into `cmd_opt`, alive until the end.
+            let _ = unsafe { crate::scanner::add_cli_nzb_file_active(cat_ptr, nzb_ptr) };
+        }
+
+        dm_log(0, b"Entering main program loop");
+        crate::queuecoord::start_daemon_queue_coord();
+        host.start_prepost();
+        start_daemon_services();
+
+        loop {
+            if !host.prepost_running() && !daemon_services_running() {
+                break;
+            }
+            handle_pending_signals(host);
+
+            let post_jobs = host.prepost_has_jobs();
+            let queue_jobs = crate::queuecoord::daemon_queue_coord_has_more_jobs();
+            let url_jobs = crate::urlcoord::daemon_url_coord_has_more_jobs();
+            if crate::options::nzbget_should_stop_standalone(
+                server_mode,
+                queue_jobs,
+                url_jobs,
+                post_jobs,
+            ) {
+                crate::queuecoord::stop_daemon_queue_coord(false);
+                host.stop_prepost_when_idle();
+                stop_daemon_services();
+            }
+
+            std::thread::sleep(Duration::from_millis(100));
+
+            if server_mode && !dm_is_stopped() {
+                while !dm_is_stopped() {
+                    {
+                        let wg = DAEMON_INSTANCE
+                            .wait_mutex
+                            .lock()
+                            .unwrap_or_else(|err| err.into_inner());
+                        if !wg.stopped && signal_state_op(4) == 0 {
+                            let _ = DAEMON_INSTANCE
+                                .wait_cond
+                                .wait_timeout(wg, Duration::from_millis(50))
+                                .unwrap_or_else(|err| err.into_inner());
+                        }
+                    }
+                    handle_pending_signals(host);
+                }
+            }
+        }
+
+        dm_log(0, b"Main program loop terminated");
+    } else {
+        if signal_state_op(1) != 0 {
+            trigger_exit(host);
+        }
+        while !dm_is_stopped()
+            && !dm_is_reloading()
+            && daemon_frontend_clone().is_some_and(|fe| fe.is_running())
+        {
+            handle_pending_signals(host);
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    drop(cmd_opt);
+}
+
+/// Stops the daemon (`reload`: for an in-process reload): waits for an active
+/// unpack before a reload, stops the frontend or the queue, the
+/// pre/post-processor and the services, then marks the instance stopped.
+pub(crate) fn stop_daemon(reload: bool, host: &dyn DaemonHost) {
+    let remote_mode = daemon_cmdline_clone().is_some_and(|c| c.remote_client_mode);
+    if !reload {
+        RELOAD_COORDINATOR.cancel_pending();
+        signal_state_op(5);
+    }
+
+    {
+        let mut wg = DAEMON_INSTANCE
+            .wait_mutex
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if wg.stopped && !wg.reloading && reload {
+            drop(wg);
+            dm_log(0, b"Ignoring reload request because shutdown is already in progress");
+            return;
+        }
+        wg.reloading = reload;
+    }
+
+    if !dm_is_reloading() {
+        signal_state_op(3);
+        dm_log(2, b"Stopping, please wait...");
+    }
+
+    if dm_is_reloading() && host.has_active_unpack() {
+        dm_log(2, b"Waiting for active unpack to complete before in-process reload...");
+        while host.has_active_unpack() && signal_state_op(0) == 0 {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    if signal_state_op(1) != 0 {
+        DAEMON_INSTANCE
+            .wait_mutex
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .reloading = false;
+        signal_state_op(5);
+    }
+
+    if remote_mode {
+        if let Some(fe) = daemon_frontend_clone() {
+            dm_log(0, b"Stopping Frontend");
+            fe.stop();
+        }
+    } else {
+        crate::queuecoord::stop_daemon_queue_coord(true);
+    }
+    host.stop_prepost(remote_mode);
+    if !remote_mode {
+        stop_daemon_services();
+    }
+
+    let mut wg = DAEMON_INSTANCE
+        .wait_mutex
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    wg.stopped = true;
+    DAEMON_INSTANCE.wait_cond.notify_all();
+}
+
+/// Asks for an in-process reload (debounced, deferred while unpacking).
+pub(crate) fn request_reload(host: &'static dyn DaemonHost) {
+    trigger_reload(host);
+}
+
+/// Asks the daemon to exit.
+pub(crate) fn request_exit(host: &dyn DaemonHost) {
+    trigger_exit(host);
+}
+
+/// Phase 4: stops scripts, the remote server and the frontend.
+pub(crate) fn shutdown_daemon(reload: bool, host: &dyn DaemonHost) {
+    let remote_mode = daemon_cmdline_clone().is_some_and(|c| c.remote_client_mode);
+    DAEMON_INSTANCE
+        .wait_mutex
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .reloading = reload;
+    RELOAD_COORDINATOR.cancel_and_join();
+    crate::procrun::terminate_all_active();
+    crate::net::remote_srv_ctl(1);
+    if let Some(fe) = daemon_frontend_clone() {
+        if !remote_mode || dm_is_stopped() {
+            dm_log(0, b"Stopping Frontend");
+            fe.stop();
+        }
+        while fe.is_running() {
+            if signal_state_op(1) != 0 {
+                trigger_exit(host);
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        dm_log(0, b"Frontend stopped");
+    }
+    RELOAD_COORDINATOR.cancel_and_join();
 }
 
 /// Resets the instance's wait and disk-service state at the start of phase 1.
@@ -2366,16 +2085,26 @@ mod tests {
     #[test]
     fn test_daemon_reset_stop_and_cleanup_lockfile() {
         let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe extern "C" fn mock_dm_action(
-            raw: *mut std::ffi::c_void,
-            sub: c_int,
-            a1: c_int,
-            _s1: *const c_char,
-            _s2: *const c_char,
-        ) -> c_int {
-            let vec = &mut *(raw as *mut Vec<(c_int, c_int)>);
-            vec.push((sub, a1));
-            1
+        struct MockHost(std::sync::Mutex<Vec<bool>>);
+        impl DaemonHost for MockHost {
+            fn has_instance(&self) -> bool {
+                true
+            }
+            fn has_active_unpack(&self) -> bool {
+                true
+            }
+            fn stop(&self, _reload: bool) {}
+            fn start_prepost(&self) {}
+            fn prepost_running(&self) -> bool {
+                false
+            }
+            fn prepost_has_jobs(&self) -> bool {
+                false
+            }
+            fn stop_prepost_when_idle(&self) {}
+            fn stop_prepost(&self, remote_mode: bool) {
+                self.0.lock().unwrap().push(remote_mode);
+            }
         }
 
         let lock_path =
@@ -2385,37 +2114,14 @@ mod tests {
         let mut lock_c = lock_path.as_os_str().as_bytes().to_vec();
         lock_c.push(0);
 
-        unsafe {
-            let mut calls: Vec<(c_int, c_int)> = Vec::new();
-            let mut env = NzbgetRsDaemonEnv {
-                ctx: (&mut calls as *mut Vec<(c_int, c_int)>).cast(),
-                a1: 0,
-                a2: 0,
-                a3: 0,
-                a4: 0,
-                a5: 0,
-                a6: 0,
-                s1: std::ptr::null(),
-                s2: std::ptr::null(),
-                s3: std::ptr::null(),
-                s4: std::ptr::null(),
-                s5: std::ptr::null(),
-                segv_cb: None,
-                global_log_cb: None,
-                reload_cb: None,
-                log_cb: None,
-                action_cb: Some(mock_dm_action),
-            };
+        {
+            let host = MockHost(std::sync::Mutex::new(Vec::new()));
             reset_instance(false);
-            env.a1 = 1;
-            assert_eq!(nzbget_rs_daemon_exec(3, &env), 0);
+            assert!(!dm_is_stopped());
 
-            env.a1 = 0;
-            env.a2 = 1;
-            assert_eq!(nzbget_rs_daemon_exec(8, &env), 1);
-            assert_eq!(calls, vec![(8, 1)]);
-            env.a1 = 1;
-            assert_eq!(nzbget_rs_daemon_exec(3, &env), 1);
+            stop_daemon(false, &host);
+            assert_eq!(*host.0.lock().unwrap(), vec![false]);
+            assert!(dm_is_stopped());
 
             DAEMON_INSTANCE
                 .lock_file_owned

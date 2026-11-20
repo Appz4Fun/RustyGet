@@ -1815,62 +1815,50 @@ pub(crate) unsafe fn leave_post_process(p: *mut NzbScalars) {
     };
 }
 
-thread_local! {
-    // the progress label host op 60 hands out: valid on this thread until
-    // the next snapshot
-    static POST_LABEL: std::cell::RefCell<CString> = std::cell::RefCell::new(CString::default());
-}
-
-/// A post job's snapshot: ints[0..21], i64s[0..3] and strs[0] the
-/// progress label (when `strs` is not null). The setters and lists are the
-/// typed `post_*` functions.
-///
-/// # Safety
-/// `p` is null or a live post job; the arrays fit the snapshot.
-pub(crate) unsafe fn host_post_snapshot(
-    p: *const Post,
-    ints: *mut c_int,
-    i64s: *mut i64,
-    strs: *mut *const c_char,
-) {
-    if p.is_null() {
-        return;
-    }
-    let ns: *const c_char = std::ptr::null();
-    let none: *mut *const c_char = std::ptr::null_mut();
-    let flag = |id| c_int::from(post_get(p, id) != 0);
-    let ints = unsafe { std::slice::from_raw_parts_mut(ints, 21) };
-    let i64s = unsafe { std::slice::from_raw_parts_mut(i64s, 3) };
+/// A copy of a post job's state, or the default for a missing handle.
+pub(crate) fn post_snapshot(
+    post: crate::queuesubsys_host::PostRef,
+) -> crate::queuesubsys_host::PostSnap {
+    use crate::status::{PostStage, UnpackStatus};
+    let Some(p) = post_of(post) else {
+        return crate::queuesubsys_host::PostSnap::default();
+    };
+    let flag = |id| post_get(p, id) != 0;
+    let int = |id| post_get(p, id) as i32;
     let pt = post_thread(p);
-    ints[0] = post_get(p, 0) as c_int;
-    for (slot, id) in [1, 2, 3, 4, 8, 15, 16, 5, 6, 7].into_iter().enumerate() {
-        ints[slot + 1] = flag(id);
-    }
-    ints[11] = c_int::from(pt.is_some());
-    ints[12] = c_int::from(pt.is_some_and(JobHandle::is_running));
-    ints[13] = flag(10);
-    ints[14] = flag(9);
-    ints[15] = flag(11);
-    ints[16] = post_get(p, 12) as c_int;
-    ints[17] = unsafe { nzbget_rs_post_op(p, 30, 0, 0, ns, none) } as c_int;
-    ints[18] = unsafe { nzbget_rs_post_op(p, 20, 0, 0, ns, none) } as c_int;
-    ints[19] = post_get(p, 14) as c_int;
-    ints[20] = post_get(p, 13) as c_int;
-    i64s[0] = post_get(p, 17);
-    i64s[1] = unsafe { nzbget_rs_post_op(p, 2, 0, 0, ns, none) };
-    i64s[2] = post_get(p, 18);
-    if !strs.is_null() {
-        let label = unsafe { &*p }
-            .lists
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .label
-            .clone();
-        let ptr = POST_LABEL.with(|l| {
-            *l.borrow_mut() = label;
-            l.borrow().as_ptr()
-        });
-        unsafe { *strs = ptr };
+    let nzb = unsafe { nzbget_rs_post_op(p, 2, 0, 0, std::ptr::null(), std::ptr::null_mut()) };
+    let progress_label = unsafe { &*p }
+        .lists
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .label
+        .to_bytes()
+        .to_vec();
+    crate::queuesubsys_host::PostSnap {
+        ptr: post,
+        nzb_ptr: NzbRef::from_addr(nzb as usize),
+        stage: PostStage::from(int(0)),
+        working: flag(1),
+        deleted: flag(2),
+        request_par_check: flag(3),
+        force_par_full: flag(4),
+        force_repair: flag(8),
+        stream_repair_done: flag(15),
+        stream_repair_recovered: flag(16),
+        par_cannot_cover: flag(5),
+        need_par_check: flag(6),
+        need_unpack: flag(7),
+        has_post_thread: pt.is_some(),
+        post_thread_running: pt.is_some_and(JobHandle::is_running),
+        unpack_tried: flag(10),
+        par_repaired: flag(9),
+        pass_list_tried: flag(11),
+        last_unpack_status: UnpackStatus::from(int(12)),
+        stage_progress: int(14),
+        file_progress: int(13),
+        start_time: post_get(p, 17),
+        stage_time: post_get(p, 18),
+        progress_label,
     }
 }
 
@@ -3751,18 +3739,10 @@ mod tests {
     fn post_snapshot_and_typed_setters() {
         use crate::queuesubsys_host::PostRef;
         let ns: *const c_char = std::ptr::null();
-        let mut ints = [0 as c_int; 21];
-        let mut i64s = [0i64; 3];
-        let mut strs = [ns; 1];
         unsafe {
-            // a null post job is ignored
-            host_post_snapshot(
-                std::ptr::null(),
-                ints.as_mut_ptr(),
-                i64s.as_mut_ptr(),
-                strs.as_mut_ptr(),
-            );
-            assert_eq!(ints, [0; 21]);
+            // a missing post job gives the default snapshot
+            let none = post_snapshot(PostRef::NONE);
+            assert!(none.ptr.is_none() && !none.working && none.stage_progress == 0);
             let p = nzbget_rs_post_new();
             let pr = PostRef::from_addr(p as usize);
             let nsn: *mut *const c_char = std::ptr::null_mut();
@@ -3781,31 +3761,24 @@ mod tests {
             assert!(post_extracted_archives(pr).is_empty());
             nzbget_rs_post_op(p, 32, 0, 0, c"b.rar".as_ptr(), nsn);
             assert_eq!(post_extracted_archives(pr), vec![b"b.rar".to_vec()]);
-            host_post_snapshot(p, ints.as_mut_ptr(), i64s.as_mut_ptr(), strs.as_mut_ptr());
-            assert_eq!(ints[0], 7);
-            assert_eq!(ints[1], 1);
-            assert_eq!(ints[5], 1);
-            assert_eq!(ints[11], 0);
-            assert_eq!(ints[12], 0);
-            assert_eq!(ints[16], 3);
-            assert_eq!(ints[17], 1);
-            assert_eq!(ints[18], 2);
-            assert_eq!(ints[19], 500);
-            assert_eq!(i64s, [1234, 0, 0]);
-            assert_eq!(CStr::from_ptr(strs[0]).to_bytes(), b"Repairing");
-            // the label copy outlives a later change
-            let label = strs[0];
-            post_set_progress_label(pr, b"Unpacking");
-            assert_eq!(CStr::from_ptr(label).to_bytes(), b"Repairing");
+            let snap = post_snapshot(pr);
+            assert_eq!(snap.ptr, pr);
+            assert_eq!(i32::from(snap.stage), 7);
+            assert!(snap.working && snap.force_repair && !snap.deleted);
+            assert!(!snap.has_post_thread && !snap.post_thread_running);
+            assert_eq!(i32::from(snap.last_unpack_status), 3);
+            assert_eq!(snap.stage_progress, 500);
+            assert_eq!((snap.start_time, snap.stage_time), (1234, 0));
+            assert!(snap.nzb_ptr.is_none());
+            assert_eq!(snap.progress_label, b"Repairing");
             // a new stage clears progress and label
             post_begin_stage(pr, 99);
-            host_post_snapshot(
-                p,
-                ints.as_mut_ptr(),
-                i64s.as_mut_ptr(),
-                std::ptr::null_mut(),
+            let snap = post_snapshot(pr);
+            assert_eq!(
+                (snap.stage_progress, snap.file_progress, snap.stage_time),
+                (0, 0, 99)
             );
-            assert_eq!((ints[19], ints[20], i64s[2]), (0, 0, 99));
+            assert!(snap.progress_label.is_empty());
             assert!(nzbget_rs_post_label(p).is_empty());
             post_set_stage_time(pr, 77);
             assert_eq!(post_get(p, 18), 77);

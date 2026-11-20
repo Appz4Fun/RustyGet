@@ -4746,7 +4746,7 @@ impl NzbgetRsQueueCoordinator {
                 backup_kind,
                 backup_hi.time,
                 now,
-                crate::dupesearch_coord::intake_pending(backup_nzb.id),
+                crate::dupesearch_coord::intake_pending(backup_nzb.id, &nzb.dupe_key),
             ) && !download_hopeless(nzb.total_articles, nzb.current_success_articles, failed)
             {
                 // Not checked yet: the next round looks again instead of waiting for
@@ -5050,7 +5050,7 @@ impl NzbgetRsQueueCoordinator {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs() as i64);
             if !hopeless
-                && crate::dupesearch_coord::intake_pending(backup_nzb.id)
+                && crate::dupesearch_coord::intake_pending(backup_nzb.id, &nzb.dupe_key)
                 && backup_still_unclassified(backup_kind, backup_hi.time, now, true)
             {
                 return;
@@ -5092,7 +5092,7 @@ impl NzbgetRsQueueCoordinator {
                 backup_kind,
                 backup_hi.time,
                 now,
-                crate::dupesearch_coord::intake_pending(backup_nzb.id),
+                crate::dupesearch_coord::intake_pending(backup_nzb.id, &nzb.dupe_key),
             ) {
                 return;
             }

@@ -1858,12 +1858,50 @@ struct IntakeLater {
 /// a backup to be told instead of switching to a copy it has not checked.
 static INTAKE_PENDING: Mutex<Vec<i32>> = Mutex::new(Vec::new());
 
-/// Whether the background intake is still reading the copy `id`.
-pub(crate) fn intake_pending(id: i32) -> bool {
-    INTAKE_PENDING
+/// Dupe keys (lowercase) whose lone backup is being added: from before it is
+/// queued until its id is in [`INTAKE_PENDING`], so no failover slips between.
+static INTAKE_PENDING_KEYS: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+
+/// Whether the background intake is still reading the copy `id`, or a lone
+/// backup of `dupe_key` is being added to be read.
+pub(crate) fn intake_pending(id: i32, dupe_key: &[u8]) -> bool {
+    if INTAKE_PENDING
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .contains(&id)
+    {
+        return true;
+    }
+    !dupe_key.is_empty()
+        && INTAKE_PENDING_KEYS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|k| k.eq_ignore_ascii_case(dupe_key))
+}
+
+/// Holds failovers for a dupe key while its lone backup is added (see
+/// [`INTAKE_PENDING_KEYS`]), until it is dropped.
+struct IntakeKeyGuard(Vec<u8>);
+
+impl IntakeKeyGuard {
+    fn enter(dupe_key: &[u8]) -> Self {
+        let key = dupe_key.to_ascii_lowercase();
+        INTAKE_PENDING_KEYS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(key.clone());
+        Self(key)
+    }
+}
+
+impl Drop for IntakeKeyGuard {
+    fn drop(&mut self) {
+        let mut keys = INTAKE_PENDING_KEYS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(at) = keys.iter().position(|k| *k == self.0) {
+            keys.swap_remove(at);
+        }
+    }
 }
 
 /// Marks copies as being read in the background until it is dropped.
@@ -6289,6 +6327,9 @@ pub unsafe fn fleet_append(
     }
 
     let mut intake_later: Vec<usize> = Vec::new();
+    // held from before a lone backup is queued until its background check owns
+    // it (dropped when this call returns, after that check is spawned)
+    let mut _lone_key_guard: Option<IntakeKeyGuard> = None;
     let mut intake_print: Option<crate::dupeintake::Print> = None;
     let mut intake_prints: Vec<Option<crate::dupeintake::Print>> = vec![None; candidates.len()];
     let mut intake_keys: Vec<Option<crate::twinfields::InnerKey>> = vec![None; candidates.len()];
@@ -6322,6 +6363,7 @@ pub unsafe fn fleet_append(
         // TwinCheck groups dupe keys case-blind; the samples must land alike
         let seed = u64::from(crate::dupefallback::crc32_ieee(&dupe_key.to_ascii_lowercase())) | 1;
         if lone_backup {
+            _lone_key_guard = Some(IntakeKeyGuard::enter(&dupe_key));
             intake_samples = samples;
             intake_seed = seed;
             intake_later.push(usable[0]);

@@ -14,7 +14,8 @@ use crate::artwritercore::join_c_slices;
 use crate::socket::{
     accept_connection, bind_listener, cancel_socket, connect_stream, disconnect_socket,
     format_report_error, read_line, recv_exact, remote_addr, send_all, try_recv, write_line,
-    ConnStatus, ConnStatusCell, CONNECTION_READBUFFER_SIZE, INVALID_SOCKET,
+    AcceptOutcome, ChunkError, ConnStatus, ConnStatusCell, ErrorGate, CONNECTION_READBUFFER_SIZE,
+    INVALID_SOCKET,
 };
 use crate::webdownload::{
     webdl_download_with_redirects, webdl_run_loop, WebDlConfig, WebDlIo, WebDlStatus,
@@ -325,6 +326,14 @@ impl ConnCancelSlot {
         self.host.error(msg, suppressed);
     }
 
+    /// Adds `n` freshly received bytes to the resettable read counter.
+    fn count_bytes_read(&self, n: usize) {
+        if n != 0 {
+            let n = i32::try_from(n).unwrap_or(i32::MAX);
+            self.total_bytes_read.fetch_add(n, Ordering::SeqCst);
+        }
+    }
+
     /// Whether the thread or `deadline` says to stop.
     ///
     /// Callers pass only their connection's own deadline field, which is 0
@@ -430,7 +439,7 @@ struct ConnCore {
     buf_avail: usize,
     timeout: c_int,
     is_listener: bool,
-    tls_error: bool,
+    errors: ErrorGate,
     remote_addr_cstr: CString,
     graceful: bool,
     cert_verif_level: u32,
@@ -505,7 +514,7 @@ impl ConnCore {
         disconnect_socket(
             self.host.to_bytes(),
             graceful,
-            &mut self.is_listener,
+            std::mem::take(&mut self.is_listener),
             &self.slot.socket,
             &self.slot.status,
         );
@@ -547,7 +556,7 @@ impl ConnCore {
             || slot.is_stopped(deadline_ptr),
             &slot.socket,
             &slot.status,
-            &mut self.tls_error,
+            &mut self.errors,
             |msg| slot.report_error(msg),
             |msg| slot.emit_debug(msg),
         );
@@ -575,16 +584,19 @@ impl ConnCore {
         let _cg = unsafe { crate::ffi::PosixCancelGuard::disable() };
         self.emit_debug(b"Binding");
         let slot = &self.slot;
-        bind_listener(
+        let listening = bind_listener(
             self.host.to_bytes(),
             self.port,
             self.ip_version,
             &slot.socket,
             &slot.status,
-            &mut self.is_listener,
-            &mut self.tls_error,
+            &mut self.errors,
             |msg| slot.report_error(msg),
-        )
+        );
+        if listening {
+            self.is_listener = true;
+        }
+        listening
     }
 
     fn accept_fd(&mut self) -> c_int {
@@ -593,35 +605,38 @@ impl ConnCore {
         self.emit_debug(b"Accepting connection");
         let slot = &self.slot;
         let deadline_ptr = self.deadline_ptr;
-        let mut busy = slot.accept_busy.load(Ordering::SeqCst);
-        let fd = accept_connection(
+        let outcome = accept_connection(
             self.host.to_bytes(),
             self.timeout,
             &slot.socket,
             &slot.status,
-            &mut busy,
-            &mut self.tls_error,
+            &mut self.errors,
             || slot.is_stopped(deadline_ptr),
             |msg| slot.report_error(msg),
         );
-        self.slot.accept_busy.store(busy, Ordering::SeqCst);
-        fd
+        match outcome {
+            AcceptOutcome::Accepted(fd) => {
+                slot.accept_busy.store(false, Ordering::SeqCst);
+                fd
+            }
+            AcceptOutcome::NotListening => INVALID_SOCKET,
+            AcceptOutcome::NoClient { busy } => {
+                slot.accept_busy.store(busy, Ordering::SeqCst);
+                INVALID_SOCKET
+            }
+        }
     }
 
     fn raw_send_chunk(
         slot: &ConnCancelSlot,
         tls: Option<&TlsHandle>,
-        tls_error: &mut bool,
+        errors: &mut ErrorGate,
         chunk: &[u8],
     ) -> c_int {
         if let Some(sock) = tls {
-            *tls_error = false;
             let sent = slot.host.tls_send(sock, chunk);
-            if sent < 0 {
-                *tls_error = true;
-                return -1;
-            }
-            return sent;
+            errors.set_tls_error(sent < 0);
+            return sent.max(-1);
         }
         unsafe {
             libc::send(
@@ -637,26 +652,29 @@ impl ConnCore {
         slot: &ConnCancelSlot,
         tls: Option<&TlsHandle>,
         chunk: &mut [u8],
-        te: &mut bool,
-    ) -> c_int {
+    ) -> Result<usize, ChunkError> {
         if let Some(sock) = tls {
-            *te = false;
             let recvd = slot.host.tls_recv(sock, chunk);
-            if recvd < 0 {
-                *te = true;
-                return -1;
-            }
-            return recvd;
+            return usize::try_from(recvd).map_err(|_| ChunkError::Tls);
         }
-        *te = false;
-        unsafe {
+        let recvd = unsafe {
             libc::recv(
                 slot.socket.load(Ordering::SeqCst),
                 chunk.as_mut_ptr().cast(),
                 chunk.len(),
                 0,
-            ) as c_int
-        }
+            )
+        };
+        usize::try_from(recvd).map_err(|_| ChunkError::Socket)
+    }
+
+    /// Receives one chunk, adding what arrived to the slot's read counter.
+    fn counted_recv_chunk(
+        slot: &ConnCancelSlot,
+        tls: Option<&TlsHandle>,
+        chunk: &mut [u8],
+    ) -> Result<usize, ChunkError> {
+        Self::raw_recv_chunk(slot, tls, chunk).inspect(|&n| slot.count_bytes_read(n))
     }
 
     fn write_line_bytes(&mut self, line: &[u8]) -> c_int {
@@ -664,9 +682,9 @@ impl ConnCore {
         let _cg = unsafe { crate::ffi::PosixCancelGuard::disable() };
         let tb = self.tls_box.as_ref();
         let slot = &self.slot;
-        let tls_err = &mut self.tls_error;
+        let errors = &mut self.errors;
         write_line(&slot.status, line, |chunk| {
-            Self::raw_send_chunk(slot, tb, tls_err, chunk)
+            Self::raw_send_chunk(slot, tb, errors, chunk)
         })
     }
 
@@ -676,9 +694,9 @@ impl ConnCore {
         self.emit_debug(b"Sending data");
         let tb = self.tls_box.as_ref();
         let slot = &self.slot;
-        let tls_err = &mut self.tls_error;
+        let errors = &mut self.errors;
         send_all(&slot.status, data, |chunk| {
-            Self::raw_send_chunk(slot, tb, tls_err, chunk)
+            Self::raw_send_chunk(slot, tb, errors, chunk)
         })
     }
 
@@ -690,23 +708,17 @@ impl ConnCore {
         }
         let tb = self.tls_box.as_ref();
         let slot = &self.slot;
-        let mut delta = 0i32;
-        let res = read_line(
+        read_line(
             self.host.to_bytes(),
             &slot.status,
             &mut self.read_buf,
             &mut self.buf_offset,
             &mut self.buf_avail,
-            &mut delta,
             dst,
-            &mut self.tls_error,
-            |chunk, te| Self::raw_recv_chunk(slot, tb, chunk, te),
+            &mut self.errors,
+            |chunk| Self::counted_recv_chunk(slot, tb, chunk),
             |msg| slot.report_error(msg),
-        );
-        if delta != 0 {
-            slot.total_bytes_read.fetch_add(delta, Ordering::SeqCst);
-        }
-        res
+        )
     }
 
     fn recv_exact_slice(&mut self, dst: &mut [u8]) -> bool {
@@ -717,22 +729,16 @@ impl ConnCore {
         }
         let tb = self.tls_box.as_ref();
         let slot = &self.slot;
-        let mut delta = 0i32;
-        let ok = recv_exact(
+        recv_exact(
             self.host.to_bytes(),
             &self.read_buf,
             &mut self.buf_offset,
             &mut self.buf_avail,
-            &mut delta,
             dst,
-            &mut self.tls_error,
-            |chunk, te| Self::raw_recv_chunk(slot, tb, chunk, te),
+            &mut self.errors,
+            |chunk| Self::counted_recv_chunk(slot, tb, chunk),
             |msg| slot.report_error(msg),
-        );
-        if delta != 0 {
-            slot.total_bytes_read.fetch_add(delta, Ordering::SeqCst);
-        }
-        ok
+        )
     }
 
     fn try_recv_slice(&mut self, dst: &mut [u8]) -> c_int {
@@ -740,19 +746,14 @@ impl ConnCore {
         let _cg = unsafe { crate::ffi::PosixCancelGuard::disable() };
         let tb = self.tls_box.as_ref();
         let slot = &self.slot;
-        let mut delta = 0i32;
-        let n = try_recv(
+        let received = try_recv(
             self.host.to_bytes(),
-            &mut delta,
             dst,
-            &mut self.tls_error,
-            |chunk, te| Self::raw_recv_chunk(slot, tb, chunk, te),
+            &mut self.errors,
+            |chunk| Self::counted_recv_chunk(slot, tb, chunk),
             |msg| slot.report_error(msg),
         );
-        if delta != 0 {
-            slot.total_bytes_read.fetch_add(delta, Ordering::SeqCst);
-        }
-        n
+        received.map_or(-1, |n| c_int::try_from(n).unwrap_or(c_int::MAX))
     }
 
     fn report_error_msg(
@@ -763,7 +764,7 @@ impl ConnCore {
         code: c_int,
     ) {
         if let Some(formatted) =
-            format_report_error(&mut self.tls_error, prefix, arg, print_code, code, None)
+            format_report_error(&mut self.errors, prefix, arg, print_code, code, None)
         {
             self.emit_error(&formatted);
         }
@@ -1013,7 +1014,7 @@ impl NzbgetRsConn {
             buf_avail: 0,
             timeout: 60,
             is_listener: false,
-            tls_error: false,
+            errors: ErrorGate::default(),
             remote_addr_cstr: CString::default(),
             graceful: false,
             cert_verif_level: 2,
@@ -1064,7 +1065,7 @@ impl NzbgetRsConn {
             buf_avail: 0,
             timeout,
             is_listener: false,
-            tls_error: false,
+            errors: ErrorGate::default(),
             remote_addr_cstr: CString::default(),
             graceful: false,
             cert_verif_level: 2,

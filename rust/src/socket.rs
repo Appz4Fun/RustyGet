@@ -142,19 +142,60 @@ fn truncate_bstring(mut v: Vec<u8>) -> Vec<u8> {
     v
 }
 
+/// One-shot error suppression for a connection: once the TLS layer has reported
+/// its own failure, the socket-level error that follows it is swallowed.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ErrorGate {
+    tls_error_reported: bool,
+}
+
+impl ErrorGate {
+    /// Records whether the last transfer failed in the TLS layer (which reported it already).
+    pub fn set_tls_error(&mut self, reported: bool) {
+        self.tls_error_reported = reported;
+    }
+
+    /// Returns whether the next error should be swallowed, re-opening the gate.
+    pub fn take_tls_error(&mut self) -> bool {
+        std::mem::take(&mut self.tls_error_reported)
+    }
+}
+
+/// Why a single send/receive chunk failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChunkError {
+    /// The OS socket call failed; `errno` holds the cause.
+    Socket,
+    /// The TLS layer failed and has already reported the error.
+    Tls,
+}
+
+/// Receives one chunk through `recv_chunk`, recording a TLS failure in `errors`.
+fn recv_gated<R>(
+    errors: &mut ErrorGate,
+    recv_chunk: &mut R,
+    dst: &mut [u8],
+) -> Result<usize, ChunkError>
+where
+    R: FnMut(&mut [u8]) -> Result<usize, ChunkError>,
+{
+    let res = recv_chunk(dst);
+    errors.set_tls_error(res == Err(ChunkError::Tls));
+    res
+}
+
 /// Formats `Connection::ReportError`, preserving raw non-UTF8 bytes and
-/// `BString<1024>` truncation semantics. Returns `None` when `tls_error`
-/// suppressed duplicate emission (clearing `*tls_error`).
+/// `BString<1024>` truncation semantics. Returns `None` when `errors` held a
+/// pending TLS error, which suppresses this duplicate emission (and is consumed).
 pub fn format_report_error(
-    tls_error: &mut bool,
+    errors: &mut ErrorGate,
     msg_prefix: &[u8],
     msg_arg: Option<&[u8]>,
     print_err_code: bool,
     err_code: c_int,
     err_msg: Option<&[u8]>,
 ) -> Option<Vec<u8>> {
-    if *tls_error {
-        *tls_error = false;
+    if errors.take_tls_error() {
         return None;
     }
 
@@ -192,7 +233,7 @@ pub fn format_report_error(
 
 fn emit_error<F>(
     on_error: &mut F,
-    tls_error: &mut bool,
+    errors: &mut ErrorGate,
     msg_prefix: &[u8],
     msg_arg: Option<&[u8]>,
     print_err_code: bool,
@@ -202,7 +243,7 @@ fn emit_error<F>(
     F: FnMut(&[u8]),
 {
     if let Some(formatted) = format_report_error(
-        tls_error,
+        errors,
         msg_prefix,
         msg_arg,
         print_err_code,
@@ -241,15 +282,15 @@ fn ip_version_family(ip_version: c_int) -> c_int {
 }
 
 /// Binds and listens on a Unix domain path or TCP `(host, port)` (`Connection::Bind`).
-#[allow(clippy::too_many_arguments)]
+/// Returns `true` once the socket is listening (also when it already was), at
+/// which point the caller should treat the connection as a listener.
 pub fn bind_listener<E>(
     host: &[u8],
     port: c_int,
     ip_version: c_int,
     socket_slot: &AtomicI32,
     status_slot: &ConnStatusCell,
-    is_listener: &mut bool,
-    tls_error: &mut bool,
+    errors: &mut ErrorGate,
     mut on_error: E,
 ) -> bool
 where
@@ -266,7 +307,7 @@ where
         if host.len() >= addr.sun_path.len() {
             emit_error(
                 &mut on_error,
-                tls_error,
+                errors,
                 b"Binding socket failed for %s: name too long\n",
                 Some(host),
                 false,
@@ -288,7 +329,7 @@ where
                 let err = last_errno();
                 emit_error(
                     &mut on_error,
-                    tls_error,
+                    errors,
                     b"Socket creation failed for %s",
                     Some(host),
                     true,
@@ -336,7 +377,7 @@ where
                 };
                 emit_error(
                     &mut on_error,
-                    tls_error,
+                    errors,
                     b"Could not resolve hostname %s",
                     Some(host),
                     true,
@@ -380,7 +421,7 @@ where
     if sock == INVALID_SOCKET {
         emit_error(
             &mut on_error,
-            tls_error,
+            errors,
             b"Binding socket failed for %s",
             Some(host),
             true,
@@ -395,7 +436,7 @@ where
             let err = last_errno();
             emit_error(
                 &mut on_error,
-                tls_error,
+                errors,
                 b"Listen on socket failed for %s",
                 Some(host),
                 true,
@@ -408,7 +449,6 @@ where
         }
     }
 
-    *is_listener = true;
     status_slot.set(ConnStatus::Listening);
     true
 }
@@ -582,7 +622,7 @@ pub fn connect_stream<W, S, E, D>(
     mut deadline_stopped: S,
     socket_slot: &AtomicI32,
     status_slot: &ConnStatusCell,
-    tls_error: &mut bool,
+    errors: &mut ErrorGate,
     mut on_error: E,
     mut on_debug: D,
 ) -> bool
@@ -604,7 +644,7 @@ where
         if host.len() >= addr.sun_path.len() {
             emit_error(
                 &mut on_error,
-                tls_error,
+                errors,
                 b"Connection to %s failed: name too long\n",
                 Some(host),
                 false,
@@ -626,7 +666,7 @@ where
                 let err = last_errno();
                 emit_error(
                     &mut on_error,
-                    tls_error,
+                    errors,
                     b"Socket creation failed for %s",
                     Some(host),
                     true,
@@ -648,7 +688,7 @@ where
                 let err = last_errno();
                 emit_error(
                     &mut on_error,
-                    tls_error,
+                    errors,
                     b"Connection to %s failed",
                     Some(host),
                     true,
@@ -727,7 +767,7 @@ where
                 };
                 emit_error(
                     &mut on_error,
-                    tls_error,
+                    errors,
                     b"Could not resolve hostname %s",
                     Some(host),
                     true,
@@ -785,7 +825,7 @@ where
             if final_sock == INVALID_SOCKET && !items.is_empty() {
                 emit_error(
                     &mut on_error,
-                    tls_error,
+                    errors,
                     b"Socket creation failed for %s",
                     Some(host),
                     true,
@@ -797,7 +837,7 @@ where
             if !connected && final_sock != INVALID_SOCKET {
                 emit_error(
                     &mut on_error,
-                    tls_error,
+                    errors,
                     b"Connection to %s failed",
                     Some(host),
                     true,
@@ -820,7 +860,7 @@ where
     if let Err(err) = init_socket_opts(sock, timeout_sec) {
         emit_error(
             &mut on_error,
-            tls_error,
+            errors,
             b"Socket initialization failed for %s",
             Some(host),
             true,
@@ -834,16 +874,15 @@ where
 }
 
 /// Closes the underlying socket and unlinks Unix listener paths (`Connection::DoDisconnect`
-/// after `CloseTls()`).
+/// after `CloseTls()`). `was_listener` says whether this connection bound the
+/// socket, so a Unix listener path is unlinked even if `SO_ACCEPTCONN` cannot tell.
 pub fn disconnect_socket(
     host: &[u8],
     graceful: bool,
-    is_listener: &mut bool,
+    was_listener: bool,
     socket_slot: &AtomicI32,
     status_slot: &ConnStatusCell,
 ) {
-    let was_listener = *is_listener;
-    *is_listener = false;
     let sock = socket_slot.swap(INVALID_SOCKET, Ordering::SeqCst);
     if sock != INVALID_SOCKET {
         unsafe {
@@ -892,24 +931,34 @@ fn is_transient_accept_err(err: c_int) -> bool {
     )
 }
 
+/// Result of [`accept_connection`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcceptOutcome {
+    /// A client connected; the accepted socket descriptor.
+    Accepted(c_int),
+    /// Not listening, or stopped before waiting began; nothing was attempted.
+    NotListening,
+    /// Waiting ended without a client (stopped, cancelled or failed). `busy` is
+    /// set when accepting failed for lack of descriptors or memory.
+    NoClient { busy: bool },
+}
+
 /// Accepts an incoming client socket from a listening socket (`Connection::Accept`).
-/// Returns `INVALID_SOCKET` (`-1`) if not listening, cancelled, stopped, or failed.
 pub fn accept_connection<S, E>(
     host: &[u8],
     timeout_sec: c_int,
     socket_slot: &AtomicI32,
     status_slot: &ConnStatusCell,
-    accept_busy: &mut bool,
-    tls_error: &mut bool,
+    errors: &mut ErrorGate,
     mut should_stop: S,
     mut on_error: E,
-) -> c_int
+) -> AcceptOutcome
 where
     S: FnMut() -> bool,
     E: FnMut(&[u8]),
 {
     if !status_slot.is(ConnStatus::Listening) || should_stop() {
-        return INVALID_SOCKET;
+        return AcceptOutcome::NotListening;
     }
 
     let initial_fd = socket_slot.load(Ordering::SeqCst);
@@ -922,7 +971,7 @@ where
         }
     }
 
-    *accept_busy = false;
+    let mut busy = false;
     let mut err: c_int = 0;
     let mut stopped_cleanly = false;
     let accepted = loop {
@@ -992,7 +1041,7 @@ where
         if err == libc::EAGAIN || err == libc::EWOULDBLOCK || is_transient_accept_err(err) {
             continue;
         }
-        *accept_busy = matches!(
+        busy = matches!(
             err,
             libc::EMFILE | libc::ENFILE | libc::ENOBUFS | libc::ENOMEM
         );
@@ -1002,7 +1051,7 @@ where
     if accepted == INVALID_SOCKET && !stopped_cleanly && !status_slot.is(ConnStatus::Cancelled) {
         emit_error(
             &mut on_error,
-            tls_error,
+            errors,
             b"Could not accept connection for %s",
             Some(host),
             true,
@@ -1011,13 +1060,13 @@ where
         );
     }
     if accepted == INVALID_SOCKET {
-        return INVALID_SOCKET;
+        return AcceptOutcome::NoClient { busy };
     }
 
     if let Err(opt_err) = init_socket_opts(accepted, timeout_sec) {
         emit_error(
             &mut on_error,
-            tls_error,
+            errors,
             b"Socket initialization failed for %s",
             Some(host),
             true,
@@ -1026,7 +1075,7 @@ where
         );
     }
 
-    accepted
+    AcceptOutcome::Accepted(accepted)
 }
 
 /// Resolves the peer IP string for `fd` (`Connection::GetRemoteAddr`).
@@ -1126,14 +1175,13 @@ pub fn read_line<R, E>(
     read_buf: &mut [u8],
     buf_offset: &mut usize,
     buf_avail: &mut usize,
-    total_bytes_read: &mut i32,
     dst: &mut [u8],
-    tls_error: &mut bool,
+    errors: &mut ErrorGate,
     mut recv_chunk: R,
     mut on_error: E,
 ) -> Option<usize>
 where
-    R: FnMut(&mut [u8], &mut bool) -> c_int,
+    R: FnMut(&mut [u8]) -> Result<usize, ChunkError>,
     E: FnMut(&[u8]),
 {
     if !status_slot.is(ConnStatus::Connected) || dst.is_empty() {
@@ -1149,28 +1197,28 @@ where
 
     while bytes_read < max_copy {
         if *buf_avail == 0 {
-            let n = recv_chunk(&mut read_buf[..recv_cap], tls_error);
-            if n < 0 {
-                let err = last_errno();
-                emit_error(
-                    &mut on_error,
-                    tls_error,
-                    b"Could not receive data on socket from %s",
-                    Some(host),
-                    true,
-                    err,
-                    None,
-                );
-                status_slot.set(ConnStatus::Broken);
-                *buf_avail = 0;
-                break;
-            } else if n == 0 {
-                break;
-            } else {
-                *total_bytes_read = total_bytes_read.wrapping_add(n);
-                *buf_offset = 0;
-                *buf_avail = n as usize;
-                read_buf[*buf_avail] = 0;
+            match recv_gated(errors, &mut recv_chunk, &mut read_buf[..recv_cap]) {
+                Err(_) => {
+                    let err = last_errno();
+                    emit_error(
+                        &mut on_error,
+                        errors,
+                        b"Could not receive data on socket from %s",
+                        Some(host),
+                        true,
+                        err,
+                        None,
+                    );
+                    status_slot.set(ConnStatus::Broken);
+                    *buf_avail = 0;
+                    break;
+                }
+                Ok(0) => break,
+                Ok(n) => {
+                    *buf_offset = 0;
+                    *buf_avail = n;
+                    read_buf[n] = 0;
+                }
             }
         }
 
@@ -1205,14 +1253,13 @@ pub fn recv_exact<R, E>(
     read_buf: &[u8],
     buf_offset: &mut usize,
     buf_avail: &mut usize,
-    total_bytes_read: &mut i32,
     dst: &mut [u8],
-    tls_error: &mut bool,
+    errors: &mut ErrorGate,
     mut recv_chunk: R,
     mut on_error: E,
 ) -> bool
 where
-    R: FnMut(&mut [u8], &mut bool) -> c_int,
+    R: FnMut(&mut [u8]) -> Result<usize, ChunkError>,
     E: FnMut(&[u8]),
 {
     dst.fill(0);
@@ -1227,12 +1274,11 @@ where
     }
 
     while pos < dst.len() {
-        let received = recv_chunk(&mut dst[pos..], tls_error);
-        if received <= 0 {
+        let Ok(received @ 1..) = recv_gated(errors, &mut recv_chunk, &mut dst[pos..]) else {
             let err = last_errno();
             emit_error(
                 &mut on_error,
-                tls_error,
+                errors,
                 b"Could not receive data on socket from %s",
                 Some(host),
                 true,
@@ -1240,49 +1286,51 @@ where
                 None,
             );
             return false;
-        }
-        pos += received as usize;
-        *total_bytes_read = total_bytes_read.wrapping_add(received);
+        };
+        pos += received;
     }
 
     true
 }
 
 /// Receives up to `dst.len()` bytes once (`Connection::TryRecv`).
+/// Returns `None` on error (after reporting it); `Some(0)` means EOF.
 pub fn try_recv<R, E>(
     host: &[u8],
-    total_bytes_read: &mut i32,
     dst: &mut [u8],
-    tls_error: &mut bool,
+    errors: &mut ErrorGate,
     mut recv_chunk: R,
     mut on_error: E,
-) -> c_int
+) -> Option<usize>
 where
-    R: FnMut(&mut [u8], &mut bool) -> c_int,
+    R: FnMut(&mut [u8]) -> Result<usize, ChunkError>,
     E: FnMut(&[u8]),
 {
     dst.fill(0);
-    let received = recv_chunk(dst, tls_error);
-    if received < 0 {
+    let received = recv_gated(errors, &mut recv_chunk, dst);
+    if received.is_err() {
         let err = last_errno();
         emit_error(
             &mut on_error,
-            tls_error,
+            errors,
             b"Could not receive data on socket from %s",
             Some(host),
             true,
             err,
             None,
         );
-    } else {
-        *total_bytes_read = total_bytes_read.wrapping_add(received);
     }
-    received
+    received.ok()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn recv_fd(fd: c_int, dst: &mut [u8]) -> Result<usize, ChunkError> {
+        let n = unsafe { libc::recv(fd, dst.as_mut_ptr().cast(), dst.len(), 0) };
+        usize::try_from(n).map_err(|_| ChunkError::Socket)
+    }
 
     #[test]
     fn peer_ip_text_matches_inet_ntop() {
@@ -1308,8 +1356,7 @@ mod tests {
     fn tcp_loopback_bind_connect_accept_readline_recv() {
         let srv_sock = AtomicI32::new(INVALID_SOCKET);
         let srv_status = ConnStatusCell::new(ConnStatus::Disconnected);
-        let mut srv_listener = false;
-        let mut tls_err = false;
+        let mut errors = ErrorGate::default();
         let mut errs = Vec::new();
 
         assert!(bind_listener(
@@ -1318,8 +1365,7 @@ mod tests {
             4,
             &srv_sock,
             &srv_status,
-            &mut srv_listener,
-            &mut tls_err,
+            &mut errors,
             |e| errs.push(e.to_vec()),
         ));
         assert!(errs.is_empty());
@@ -1353,7 +1399,7 @@ mod tests {
             || false,
             &cli_sock,
             &cli_status,
-            &mut tls_err,
+            &mut errors,
             |e| errs.push(e.to_vec()),
             |d| debugs.push(d.to_vec()),
         ));
@@ -1362,20 +1408,19 @@ mod tests {
         assert!(debugs
             .iter()
             .any(|d| d.starts_with(b"getaddrinfo for 127.0.0.1: 0")));
-
-        let mut busy = false;
-        let accepted_fd = accept_connection(
+        let outcome = accept_connection(
             b"127.0.0.1",
             5,
             &srv_sock,
             &srv_status,
-            &mut busy,
-            &mut tls_err,
+            &mut errors,
             || false,
             |e| errs.push(e.to_vec()),
         );
+        let AcceptOutcome::Accepted(accepted_fd) = outcome else {
+            panic!("accept failed: {outcome:?}");
+        };
         assert!(accepted_fd >= 0);
-        assert!(!busy);
         assert_eq!(remote_addr(b"127.0.0.1", accepted_fd), b"127.0.0.1");
 
         let payload = b"200 ready\r\nBINARY1234";
@@ -1392,7 +1437,7 @@ mod tests {
         let mut rbuf = [0u8; CONNECTION_READBUFFER_SIZE + 129];
         let mut off = 0usize;
         let mut avail = 0usize;
-        let mut total = 0i32;
+        let mut total = 0usize;
         let mut line = [0u8; 64];
 
         let n = read_line(
@@ -1401,12 +1446,9 @@ mod tests {
             &mut rbuf,
             &mut off,
             &mut avail,
-            &mut total,
             &mut line,
-            &mut tls_err,
-            |dst, _| unsafe {
-                libc::recv(accepted_fd, dst.as_mut_ptr().cast(), dst.len(), 0) as c_int
-            },
+            &mut errors,
+            |dst| recv_fd(accepted_fd, dst).inspect(|&n| total += n),
             |e| errs.push(e.to_vec()),
         )
         .expect("line");
@@ -1418,40 +1460,18 @@ mod tests {
             &rbuf,
             &mut off,
             &mut avail,
-            &mut total,
             &mut body,
-            &mut tls_err,
-            |dst, _| unsafe {
-                libc::recv(accepted_fd, dst.as_mut_ptr().cast(), dst.len(), 0) as c_int
-            },
+            &mut errors,
+            |dst| recv_fd(accepted_fd, dst).inspect(|&n| total += n),
             |e| errs.push(e.to_vec()),
         ));
         assert_eq!(&body, b"BINARY1234");
-        assert_eq!(total as usize, payload.len());
+        assert_eq!(total, payload.len());
 
         let acc_sock = AtomicI32::new(accepted_fd);
-        let mut false_listener = false;
-        disconnect_socket(
-            b"127.0.0.1",
-            true,
-            &mut false_listener,
-            &acc_sock,
-            &acc_status,
-        );
-        disconnect_socket(
-            b"127.0.0.1",
-            false,
-            &mut false_listener,
-            &cli_sock,
-            &cli_status,
-        );
-        disconnect_socket(
-            b"127.0.0.1",
-            false,
-            &mut srv_listener,
-            &srv_sock,
-            &srv_status,
-        );
+        disconnect_socket(b"127.0.0.1", true, false, &acc_sock, &acc_status);
+        disconnect_socket(b"127.0.0.1", false, false, &cli_sock, &cli_status);
+        disconnect_socket(b"127.0.0.1", false, true, &srv_sock, &srv_status);
     }
 
     #[test]
@@ -1461,23 +1481,20 @@ mod tests {
 
         let srv_sock = AtomicI32::new(INVALID_SOCKET);
         let srv_status = ConnStatusCell::new(ConnStatus::Disconnected);
-        let mut srv_listener = false;
-        let mut tls_err = false;
+        let mut errors = ErrorGate::default();
         assert!(bind_listener(
             path_bytes,
             0,
             0,
             &srv_sock,
             &srv_status,
-            &mut srv_listener,
-            &mut tls_err,
+            &mut errors,
             |_| {},
         ));
         assert!(std::path::Path::new(&sock_path).exists());
 
         let cli_sock = AtomicI32::new(INVALID_SOCKET);
         let cli_status = ConnStatusCell::new(ConnStatus::Disconnected);
-        let mut cli_listener = false;
         assert!(connect_stream(
             path_bytes,
             0,
@@ -1489,7 +1506,7 @@ mod tests {
             || false,
             &cli_sock,
             &cli_status,
-            &mut tls_err,
+            &mut errors,
             |_| {},
             |_| {},
         ));
@@ -1499,11 +1516,11 @@ mod tests {
         );
 
         // Disconnecting client must NOT unlink listener socket
-        disconnect_socket(path_bytes, false, &mut cli_listener, &cli_sock, &cli_status);
+        disconnect_socket(path_bytes, false, false, &cli_sock, &cli_status);
         assert!(std::path::Path::new(&sock_path).exists());
 
         // Disconnecting listener MUST unlink listener socket
-        disconnect_socket(path_bytes, false, &mut srv_listener, &srv_sock, &srv_status);
+        disconnect_socket(path_bytes, false, true, &srv_sock, &srv_status);
         assert!(!std::path::Path::new(&sock_path).exists());
     }
 
@@ -1511,16 +1528,14 @@ mod tests {
     fn deadline_empty_resolved_never_blocks_and_multi_addr_falls_back() {
         let srv_sock = AtomicI32::new(INVALID_SOCKET);
         let srv_status = ConnStatusCell::new(ConnStatus::Disconnected);
-        let mut srv_listener = false;
-        let mut tls_err = false;
+        let mut errors = ErrorGate::default();
         assert!(bind_listener(
             b"127.0.0.1",
             0,
             4,
             &srv_sock,
             &srv_status,
-            &mut srv_listener,
-            &mut tls_err,
+            &mut errors,
             |_| {},
         ));
         let port = unsafe {
@@ -1548,7 +1563,7 @@ mod tests {
             || false,
             &cli_sock,
             &cli_status,
-            &mut tls_err,
+            &mut errors,
             |_| {},
             |_| {},
         ));
@@ -1573,27 +1588,14 @@ mod tests {
             || false,
             &cli_sock,
             &cli_status,
-            &mut tls_err,
+            &mut errors,
             |_| {},
             |_| {},
         ));
 
         cli_status.set(ConnStatus::Connected);
-        let mut cli_listener = false;
-        disconnect_socket(
-            b"localhost",
-            false,
-            &mut cli_listener,
-            &cli_sock,
-            &cli_status,
-        );
-        disconnect_socket(
-            b"127.0.0.1",
-            false,
-            &mut srv_listener,
-            &srv_sock,
-            &srv_status,
-        );
+        disconnect_socket(b"localhost", false, false, &cli_sock, &cli_status);
+        disconnect_socket(b"127.0.0.1", false, true, &srv_sock, &srv_status);
     }
 
     #[test]
@@ -1604,16 +1606,14 @@ mod tests {
         let srv_sock = Arc::new(AtomicI32::new(INVALID_SOCKET));
         let srv_status = Arc::new(ConnStatusCell::new(ConnStatus::Disconnected));
         let stop_flag = Arc::new(AtomicBool::new(false));
-        let mut srv_listener = false;
-        let mut tls_err = false;
+        let mut errors = ErrorGate::default();
         assert!(bind_listener(
             b"127.0.0.1",
             0,
             4,
             &srv_sock,
             &srv_status,
-            &mut srv_listener,
-            &mut tls_err,
+            &mut errors,
             |_| {},
         ));
 
@@ -1621,35 +1621,27 @@ mod tests {
         let srv_status_t = Arc::clone(&srv_status);
         let stop_t = Arc::clone(&stop_flag);
         let accept_handle = std::thread::spawn(move || {
-            let mut busy = false;
-            let mut te = false;
+            let mut errors = ErrorGate::default();
             let mut errs = Vec::new();
-            let fd = accept_connection(
+            let outcome = accept_connection(
                 b"127.0.0.1",
                 60,
                 &srv_sock_t,
                 &srv_status_t,
-                &mut busy,
-                &mut te,
+                &mut errors,
                 || stop_t.load(Ordering::SeqCst),
                 |e| errs.push(e.to_vec()),
             );
-            (fd, errs)
+            (outcome, errs)
         });
 
         std::thread::sleep(std::time::Duration::from_millis(20));
         stop_flag.store(true, Ordering::SeqCst);
-        let (acc_fd, errs) = accept_handle.join().expect("accept thread");
-        assert_eq!(acc_fd, INVALID_SOCKET);
+        let (outcome, errs) = accept_handle.join().expect("accept thread");
+        assert_eq!(outcome, AcceptOutcome::NoClient { busy: false });
         assert!(errs.is_empty());
 
-        disconnect_socket(
-            b"127.0.0.1",
-            false,
-            &mut srv_listener,
-            &srv_sock,
-            &srv_status,
-        );
+        disconnect_socket(b"127.0.0.1", false, true, &srv_sock, &srv_status);
 
         // Verify cancel_socket wakes a blocked recv_exact promptly via shutdown(SHUT_RDWR).
         let mut pair = [INVALID_SOCKET; 2];
@@ -1665,25 +1657,16 @@ mod tests {
             let rbuf = [0u8; CONNECTION_READBUFFER_SIZE];
             let mut off = 0usize;
             let mut avail = 0usize;
-            let mut total = 0i32;
             let mut dst = [0u8; 4];
-            let mut te = false;
+            let mut errors = ErrorGate::default();
             recv_exact(
                 b"peer",
                 &rbuf,
                 &mut off,
                 &mut avail,
-                &mut total,
                 &mut dst,
-                &mut te,
-                |chunk, _| unsafe {
-                    libc::recv(
-                        r_sock_t.load(Ordering::SeqCst),
-                        chunk.as_mut_ptr().cast(),
-                        chunk.len(),
-                        0,
-                    ) as c_int
-                },
+                &mut errors,
+                |chunk| recv_fd(r_sock_t.load(Ordering::SeqCst), chunk),
                 |_| {},
             )
         });
@@ -1691,9 +1674,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(20));
         cancel_socket(false, &r_sock, &r_status);
         assert!(!recv_handle.join().expect("recv thread"));
-
-        let mut dummy_listener = false;
-        disconnect_socket(b"peer", false, &mut dummy_listener, &r_sock, &r_status);
+        disconnect_socket(b"peer", false, false, &r_sock, &r_status);
         unsafe {
             libc::close(pair[1]);
         }
@@ -1712,7 +1693,7 @@ mod tests {
             || true,
             &cli_sock,
             &cli_status,
-            &mut tls_err,
+            &mut errors,
             |_| {},
             |_| {},
         ));
@@ -1720,9 +1701,10 @@ mod tests {
 
     #[test]
     fn report_error_preserves_non_utf8_and_honors_tls_suppression() {
-        let mut tls_err = true;
+        let mut errors = ErrorGate::default();
+        errors.set_tls_error(true);
         assert!(format_report_error(
-            &mut tls_err,
+            &mut errors,
             b"Connection to %s failed",
             Some(b"\xff\xfe"),
             false,
@@ -1730,10 +1712,10 @@ mod tests {
             None
         )
         .is_none());
-        assert!(!tls_err);
+        assert!(!errors.take_tls_error());
 
         let out = format_report_error(
-            &mut tls_err,
+            &mut errors,
             b"Connection to %s failed",
             Some(b"host\xffname"),
             true,

@@ -499,6 +499,23 @@ pub fn content_map_to_inner(
     inner_ranges
 }
 
+/// A file a duplicate may lend beside the payload: a media file (a sample) or a small side
+/// file (subtitles, an nfo), never an archive or a volume of one.
+fn is_side_file_name(filename: &[u8]) -> bool {
+    if is_stream_eligible(filename) {
+        return true;
+    }
+    let Some(dot) = filename.iter().rposition(|&b| b == b'.') else {
+        return false;
+    };
+    let ext = c_lower_bytes(&filename[dot..]);
+    const SIDE_EXTS: &[&[u8]] = &[
+        b".srt", b".sub", b".idx", b".ass", b".ssa", b".sup", b".vtt", b".nfo", b".txt", b".jpg",
+        b".jpeg", b".png",
+    ];
+    SIDE_EXTS.iter().any(|&e| ext.as_slice() == e)
+}
+
 /// The parts of `member_range` of member `member_index` that no run of `runs` covers.
 pub fn uncovered_by_runs(
     runs: &[NzbgetRsContentRun],
@@ -8201,7 +8218,9 @@ impl ContentMapper {
             let is_payload = locale_casecmp(&name, payload.inner_name_bytes())
                 == std::cmp::Ordering::Equal
                 && size == payload.inner_size();
-            if size <= 0 || is_payload || is_nested_container_name(&name) {
+            // Only a whole file of its own: a volume of a nested set (`x.r00`, `x.001`) holds
+            // container bytes that differ from post to post.
+            if size <= 0 || is_payload || !is_side_file_name(&name) {
                 continue;
             }
             let want = (name, size);
@@ -9715,9 +9734,11 @@ impl CrossPackRepairSession {
     /// one records nothing. Only a check against the media payload counts: a matching sample or
     /// subs set says nothing about the movie.
     fn note_donor_identity(&mut self, repair_set_idx: usize, check: DonorCheck) {
+        // A sample or other side file says nothing about the video.
         if self
             .media_repair_set
             .is_some_and(|media| media != repair_set_idx)
+            || self.repair_sets.get(repair_set_idx).is_some_and(|r| r.want.is_some())
         {
             return;
         }
@@ -9805,16 +9826,29 @@ impl CrossPackRepairSession {
                     if !want_maps.contains_key(&key) {
                         donor_sources
                             .set_fetch_budget(Some(8 + (donor_set.members.len() as i32) * 4));
-                        let map = ContentMapper::build_map_wanting(
+                        let mut map = ContentMapper::build_map_wanting(
                             &donor_members,
                             donor_set,
                             &donor_sources,
                             None,
                             self.tls_enabled,
                             &want,
-                        )
-                        .ok()
-                        .filter(|m| m.inner_size() == want.1 && !m.encrypted());
+                        );
+                        if !donor_password.is_empty()
+                            && map.as_ref().is_err_and(MapError::is_encrypted)
+                        {
+                            donor_sources
+                                .set_fetch_budget(Some(8 + (donor_set.members.len() as i32) * 4));
+                            map = ContentMapper::build_map_wanting(
+                                &donor_members,
+                                donor_set,
+                                &donor_sources,
+                                Some(donor_password),
+                                self.tls_enabled,
+                                &want,
+                            );
+                        }
+                        let map = map.ok().filter(|m| m.inner_size() == want.1);
                         donor_sources.set_fetch_budget(None);
                         want_maps.insert(key.clone(), map);
                     }
@@ -13553,6 +13587,9 @@ mod tests {
             let movie_map = ContentMapper::build_map(&donor_members, &one, &d, None).unwrap();
             assert_eq!(read_through(&movie_map, &d), movie);
         }
+        assert!(is_side_file_name(b"x-sample.MKV") && is_side_file_name(b"x.nfo"));
+        assert!(!is_side_file_name(b"x.r00") && !is_side_file_name(b"x.001"));
+        assert!(!is_side_file_name(b"x.rar") && !is_side_file_name(b"x.sfv"));
         // A file no layer holds is not mapped.
         let mut d = MemorySourceSet::default();
         d.push(inner_movie);

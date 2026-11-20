@@ -606,8 +606,6 @@ pub unsafe fn nzb_message(nzb: usize, kind: i32, add: bool, msg: &[u8]) {
             std::ptr::null(),
             kept.as_ptr(),
             ints.as_ptr(),
-            None,
-            0,
         )
     };
 }

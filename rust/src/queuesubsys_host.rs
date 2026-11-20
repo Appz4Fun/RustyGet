@@ -2,6 +2,7 @@
 //! and `QueueCoordinator` orchestration in Rust.
 
 use crate::options::OptStr;
+use crate::qnzb::{MessageRange, ServerStat, StatList};
 use crate::status::{
     CleanupStatus, DeleteStatus, DirectRenameStatus, DirectUnpackStatus, DupStatus, DupeMode,
     MarkStatus, MoveStatus, NzbParStatus, PostStage, ScriptStatus, UnpackStatus, UrlStatus,
@@ -973,15 +974,6 @@ impl QueueSubsysHost {
             unsafe { crate::qnzb::host_coll_snapshot(nzb, which, x.ints, x.i64s, x.strs) };
         }
         0
-    }
-
-    fn coll_op(&self, nzb: NzbRef, op: i32, x: OpArgs) -> usize {
-        if !self.use_active {
-            return 0;
-        }
-        let nzb = nzb.addr() as *const crate::qnzb::NzbScalars;
-        unsafe { crate::qnzb::host_coll_op(nzb, op, x.a2, x.p2, x.s1, x.s2, x.ints, x.strs) }
-            .unwrap_or(0)
     }
 
     fn coll_set(&self, nzb: NzbRef, field: i32, x: OpArgs) -> usize {
@@ -2344,12 +2336,10 @@ impl QueueSubsysHost {
     }
 
     pub fn nzb_build_final_dir_name(&self, nzb_ptr: NzbRef) -> Vec<u8> {
-        if nzb_ptr.is_none() {
+        if !self.use_active {
             return Vec::new();
         }
-        let mut strs = [std::ptr::null(); 1];
-        self.coll_op(nzb_ptr, 3, OpArgs::NONE.strs(strs.as_mut_ptr()));
-        unsafe { read_cstr(strs[0]) }
+        crate::qnzb::build_final_dir_name(nzb_ptr)
     }
 
     /// Whether `nzb_ptr` must not borrow from donor `donor_id` again.
@@ -2365,115 +2355,67 @@ impl QueueSubsysHost {
     }
 
     pub fn nzb_hard_link_path(&self, nzb_ptr: NzbRef) -> Vec<u8> {
-        if nzb_ptr.is_none() {
+        if !self.use_active {
             return Vec::new();
         }
-        let mut strs = [std::ptr::null(); 1];
-        self.coll_op(nzb_ptr, 6, OpArgs::NONE.strs(strs.as_mut_ptr()));
-        unsafe { read_cstr(strs[0]) }
+        crate::qnzb::hard_link_path(nzb_ptr)
     }
 
     pub fn nzb_meta_name(&self, nzb_ptr: NzbRef) -> Vec<u8> {
-        if nzb_ptr.is_none() {
+        if !self.use_active {
             return Vec::new();
         }
-        let mut strs = [std::ptr::null(); 1];
-        self.coll_op(nzb_ptr, 7, OpArgs::NONE.strs(strs.as_mut_ptr()));
-        unsafe { read_cstr(strs[0]) }
+        crate::qnzb::meta_name(nzb_ptr)
     }
 
     pub fn nzb_has_busy_output_file(&self, nzb_ptr: NzbRef) -> bool {
-        if nzb_ptr.is_none() {
-            return false;
+        self.use_active && crate::qnzb::has_busy_output_file(nzb_ptr)
+    }
+
+    /// The download's all-time article counts per server.
+    pub fn nzb_server_stats(&self, nzb_ptr: NzbRef) -> Vec<ServerStat> {
+        if !self.use_active {
+            return Vec::new();
         }
-        self.coll_op(nzb_ptr, 22, OpArgs::NONE) != 0
+        crate::qnzb::server_stats(nzb_ptr, StatList::Total)
     }
 
-    pub fn nzb_server_stats_len(&self, nzb_ptr: NzbRef) -> usize {
-        if nzb_ptr.is_none() {
-            return 0;
+    /// The download's article counts per server since it was last loaded.
+    pub fn nzb_current_server_stats(&self, nzb_ptr: NzbRef) -> Vec<ServerStat> {
+        if !self.use_active {
+            return Vec::new();
         }
-        self.coll_op(nzb_ptr, 9, OpArgs::NONE.a2(-1))
+        crate::qnzb::server_stats(nzb_ptr, StatList::Current)
     }
 
-    pub fn nzb_server_stat_at(&self, nzb_ptr: NzbRef, idx: usize) -> (i32, i32, i32) {
-        let mut ints = [0i32; 3];
-        self.coll_op(
-            nzb_ptr,
-            9,
-            OpArgs::NONE.a2(idx as i32).ints(ints.as_mut_ptr()),
-        );
-        (ints[0], ints[1], ints[2])
-    }
-
-    pub fn nzb_current_server_stats_len(&self, nzb_ptr: NzbRef) -> usize {
-        if nzb_ptr.is_none() {
-            return 0;
-        }
-        self.coll_op(nzb_ptr, 21, OpArgs::NONE.a2(-1))
-    }
-
-    pub fn nzb_current_server_stat_at(&self, nzb_ptr: NzbRef, idx: usize) -> (i32, i32, i32) {
-        let mut ints = [0i32; 3];
-        self.coll_op(
-            nzb_ptr,
-            21,
-            OpArgs::NONE.a2(idx as i32).ints(ints.as_mut_ptr()),
-        );
-        (ints[0], ints[1], ints[2])
-    }
-
+    /// The cached messages from id `id_from` on when it is positive, else
+    /// the newest `max_entries` when that is positive, else none.
     pub fn nzb_cached_messages_slice(
         &self,
         nzb_ptr: NzbRef,
         id_from: i32,
         max_entries: i32,
     ) -> Vec<(i32, i32, i32, std::ffi::CString)> {
-        if nzb_ptr.is_none() {
+        if !self.use_active {
             return Vec::new();
         }
-        unsafe extern "C" fn push_msg(
-            ctx: usize,
-            id: c_int,
-            kind: c_int,
-            time: c_int,
-            text: *const c_char,
-        ) {
-            let out = &mut *(ctx as *mut Vec<(i32, i32, i32, std::ffi::CString)>);
-            let bytes = if text.is_null() {
-                &[][..]
-            } else {
-                std::ffi::CStr::from_ptr(text).to_bytes()
-            };
-            out.push((
-                id,
-                kind,
-                time,
-                std::ffi::CString::from_vec_unchecked(bytes.to_vec()),
-            ));
-        }
-        let mut out: Vec<(i32, i32, i32, std::ffi::CString)> = Vec::new();
-        let mut ints = [id_from, max_entries];
-        self.coll_op(
-            nzb_ptr,
-            20,
-            OpArgs::NONE
-                .p2((&mut out as *mut Vec<(i32, i32, i32, std::ffi::CString)>) as usize)
-                .s1(push_msg as *const () as *const c_char)
-                .ints(ints.as_mut_ptr()),
-        );
-        out
+        let range = if let Ok(id @ 1..) = u32::try_from(id_from) {
+            MessageRange::FromId(id)
+        } else if let Ok(n @ 1..) = usize::try_from(max_entries) {
+            MessageRange::Last(n)
+        } else {
+            return Vec::new();
+        };
+        crate::qnzb::cached_messages(nzb_ptr, range)
+            .into_iter()
+            .map(|m| (m.id as i32, m.kind, m.time as i32, m.text))
+            .collect()
     }
 
     pub fn nzb_push_script_status(&self, nzb_ptr: NzbRef, name: &[u8], status: ScriptStatus) {
-        let cn = c_bytes(name);
-        self.coll_op(
-            nzb_ptr,
-            10,
-            OpArgs::NONE
-                .a2(status.into())
-                .s1(cn.as_ptr() as *const c_char),
-        );
+        if self.use_active {
+            crate::qnzb::push_script_status(nzb_ptr, name, status);
+        }
     }
 
     pub fn nzb_rename_completed_file(
@@ -2482,63 +2424,41 @@ impl QueueSubsysHost {
         old_name: &[u8],
         new_name: &[u8],
     ) -> bool {
-        let co = c_bytes(old_name);
-        let cn = c_bytes(new_name);
-        self.coll_op(
-            nzb_ptr,
-            11,
-            OpArgs::NONE
-                .s1(co.as_ptr() as *const c_char)
-                .s2(cn.as_ptr() as *const c_char),
-        ) != 0
+        self.use_active && crate::qnzb::rename_completed_file(nzb_ptr, old_name, new_name)
     }
 
     pub fn nzb_unpack_thread_ptr(&self, nzb_ptr: NzbRef) -> usize {
-        if nzb_ptr.is_none() {
+        if !self.use_active {
             return 0;
         }
-        self.coll_op(nzb_ptr, 12, OpArgs::NONE)
+        crate::qnzb::unpack_thread(nzb_ptr)
     }
 
     pub fn nzb_push_extracted_archive(&self, nzb_ptr: NzbRef, name: &[u8]) {
-        if nzb_ptr.is_none() {
-            return;
+        if self.use_active {
+            crate::qnzb::push_extracted_archive(nzb_ptr, name);
         }
-        let cn = c_bytes(name);
-        self.coll_op(nzb_ptr, 13, OpArgs::NONE.s1(cn.as_ptr() as *const c_char));
     }
 
     pub fn nzb_set_meta_name(&self, nzb_ptr: NzbRef, meta_name: &[u8]) {
-        if nzb_ptr.is_none() {
-            return;
+        if self.use_active {
+            crate::qnzb::set_meta_name(nzb_ptr, meta_name);
         }
-        let cn = c_bytes(meta_name);
-        self.coll_op(nzb_ptr, 14, OpArgs::NONE.s1(cn.as_ptr() as *const c_char));
     }
 
     pub fn nzb_copy_cached_messages_silent(&self, dst_nzb: NzbRef, src_nzb: NzbRef) {
-        if dst_nzb.is_none() || src_nzb.is_none() {
-            return;
+        if self.use_active {
+            crate::qnzb::copy_cached_messages(dst_nzb, src_nzb);
         }
-        self.coll_op(dst_nzb, 15, OpArgs::NONE.p2(src_nzb.addr()));
     }
 
     pub fn nzb_make_nice_url_name(&self, nzb_ptr: NzbRef, url: &[u8], filename: &[u8]) -> Vec<u8> {
-        if nzb_ptr.is_none() {
+        if !self.use_active || nzb_ptr.is_none() {
             return Vec::new();
         }
-        let cu = c_bytes(url);
-        let cf = c_bytes(filename);
-        let mut strs = [std::ptr::null(); 1];
-        self.coll_op(
-            nzb_ptr,
-            16,
-            OpArgs::NONE
-                .s1(cu.as_ptr() as *const c_char)
-                .s2(cf.as_ptr() as *const c_char)
-                .strs(strs.as_mut_ptr()),
-        );
-        unsafe { read_cstr(strs[0]) }
+        let url = c_bytes(url);
+        let url = CStr::from_bytes_with_nul(&url).ok();
+        crate::downloadinfo::make_nice_url_name(url, filename)
     }
 
     /// The post-processing scripts that ran, as (script name, status), in run order.
@@ -2549,30 +2469,29 @@ impl QueueSubsysHost {
         crate::qnzb::script_statuses(nzb_ptr)
     }
 
-    pub fn nzb_extracted_archives_len(&self, nzb_ptr: NzbRef) -> usize {
-        if nzb_ptr.is_none() {
-            return 0;
+    /// The archives unpacked so far, in unpack order.
+    pub fn nzb_extracted_archives(&self, nzb_ptr: NzbRef) -> Vec<Vec<u8>> {
+        if !self.use_active {
+            return Vec::new();
         }
-        self.coll_op(nzb_ptr, 18, OpArgs::NONE.a2(-1))
-    }
-
-    pub fn nzb_extracted_archive_at(&self, nzb_ptr: NzbRef, idx: usize) -> Vec<u8> {
-        let mut strs = [std::ptr::null(); 1];
-        self.coll_op(
-            nzb_ptr,
-            18,
-            OpArgs::NONE.a2(idx as i32).strs(strs.as_mut_ptr()),
-        );
-        unsafe { read_cstr(strs[0]) }
+        crate::qnzb::extracted_archives(nzb_ptr)
     }
 
     pub fn nzb_server_stat_set(&self, nzb_ptr: NzbRef, server_id: i32, succ: i32, fail: i32) {
-        let mut ints = [server_id, succ, fail];
-        self.coll_op(nzb_ptr, 19, OpArgs::NONE.ints(ints.as_mut_ptr()));
+        if self.use_active {
+            let stat = ServerStat {
+                server_id,
+                success: succ,
+                failed: fail,
+            };
+            crate::qnzb::set_server_stat(nzb_ptr, stat);
+        }
     }
 
     pub fn nzb_sync_current_server_stats(&self, nzb_ptr: NzbRef) {
-        self.coll_op(nzb_ptr, 19, OpArgs::NONE.a2(1));
+        if self.use_active {
+            crate::qnzb::sync_current_server_stats(nzb_ptr);
+        }
     }
 
     pub fn nzb_set_int(&self, nzb_ptr: NzbRef, field: i32, val: i32) {

@@ -4986,16 +4986,15 @@ unsafe fn emit_rpc_nzb(
         })
         .collect();
 
-    let stlen = qh.nzb_current_server_stats_len(nzb_ptr);
-    let mut sts = Vec::with_capacity(stlen);
-    for i in 0..stlen {
-        let (sid, succ, fail) = qh.nzb_current_server_stat_at(nzb_ptr, i);
-        sts.push(crate::xmlrpc_format::NzbgetRsRpcServerStatItem {
-            server_id: sid,
-            success_articles: succ,
-            failed_articles: fail,
-        });
-    }
+    let sts: Vec<_> = qh
+        .nzb_current_server_stats(nzb_ptr)
+        .into_iter()
+        .map(|st| crate::xmlrpc_format::NzbgetRsRpcServerStatItem {
+            server_id: st.server_id,
+            success_articles: st.success,
+            failed_articles: st.failed,
+        })
+        .collect();
 
     f_cb(&n, c_text_status.as_ptr(), &f, &prms, &scrs, &sts);
 }

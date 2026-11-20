@@ -350,6 +350,12 @@ impl NzbData {
     fn coll(&self) -> std::sync::MutexGuard<'_, Coll> {
         self.coll.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
+
+    fn files(&self) -> std::sync::MutexGuard<'_, Files> {
+        self.files
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 /// `bytes` up to its first NUL, as a C string (names and values never hold NULs).
@@ -413,6 +419,219 @@ pub(crate) fn params(nzb: NzbRef) -> Vec<(Vec<u8>, Vec<u8>)> {
         let coll = d.coll();
         coll.params.iter().map(|(n, v)| (n.to_bytes().to_vec(), v.to_bytes().to_vec())).collect()
     })
+}
+
+/// One server's article counts for a download.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ServerStat {
+    pub server_id: i32,
+    pub success: i32,
+    pub failed: i32,
+}
+
+impl From<[i32; 3]> for ServerStat {
+    fn from([server_id, success, failed]: [i32; 3]) -> Self {
+        Self {
+            server_id,
+            success,
+            failed,
+        }
+    }
+}
+
+/// Which of a download's two server-stat lists: all-time totals, or the
+/// counts since the download was last loaded or resumed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StatList {
+    Total = 0,
+    Current = 1,
+}
+
+/// A download's per-server article counts, oldest server first.
+pub(crate) fn server_stats(nzb: NzbRef, which: StatList) -> Vec<ServerStat> {
+    nzb_data(nzb).map_or_else(Vec::new, |d| {
+        d.coll().stats[which as usize]
+            .iter()
+            .copied()
+            .map(ServerStat::from)
+            .collect()
+    })
+}
+
+/// Sets the all-time counts of one server (NzbInfo::ServerStats::StatOp set).
+pub(crate) fn set_server_stat(nzb: NzbRef, stat: ServerStat) {
+    if let Some(d) = nzb_data(nzb) {
+        let mut coll = d.coll();
+        stat_op(
+            &mut coll.stats[StatList::Total as usize],
+            stat.server_id,
+            stat.success,
+            stat.failed,
+            0,
+        );
+    }
+}
+
+/// Copies the all-time counts into the current-session counts.
+pub(crate) fn sync_current_server_stats(nzb: NzbRef) {
+    if let Some(d) = nzb_data(nzb) {
+        let mut coll = d.coll();
+        let totals = coll.stats[StatList::Total as usize].clone();
+        for e in totals {
+            stat_op(
+                &mut coll.stats[StatList::Current as usize],
+                e[0],
+                e[1],
+                e[2],
+                0,
+            );
+        }
+    }
+}
+
+/// Records how a post-processing script ended.
+pub(crate) fn push_script_status(nzb: NzbRef, name: &[u8], status: ScriptStatus) {
+    if let Some(d) = nzb_data(nzb) {
+        d.coll()
+            .script_statuses
+            .push((c_string(name), status.into()));
+    }
+}
+
+/// The archives unpacked so far, in unpack order.
+pub(crate) fn extracted_archives(nzb: NzbRef) -> Vec<Vec<u8>> {
+    nzb_data(nzb).map_or_else(Vec::new, |d| {
+        d.files()
+            .extracted
+            .iter()
+            .map(|a| a.to_bytes().to_vec())
+            .collect()
+    })
+}
+
+/// Records an unpacked archive.
+pub(crate) fn push_extracted_archive(nzb: NzbRef, name: &[u8]) {
+    if let Some(d) = nzb_data(nzb) {
+        d.files().extracted.push(c_string(name));
+    }
+}
+
+/// Renames the completed file `old` to `new`, keeping the first name as the
+/// original one; false when no completed file is called `old`.
+pub(crate) fn rename_completed_file(nzb: NzbRef, old: &[u8], new: &[u8]) -> bool {
+    let Some(d) = nzb_data(nzb) else { return false };
+    if old.is_empty() || new.is_empty() {
+        return false;
+    }
+    let mut files = d.files();
+    let Some(c) = files
+        .completed
+        .iter_mut()
+        .find(|c| crate::downloadinfo::completed_same_filename(c.filename.to_bytes(), old))
+    else {
+        return false;
+    };
+    if c.origname.to_bytes().is_empty() {
+        c.origname = c.filename.clone();
+    }
+    c.filename = c_string(new);
+    true
+}
+
+/// The directory the download moves to when done (NzbInfo::BuildFinalDirName).
+pub(crate) fn build_final_dir_name(nzb: NzbRef) -> Vec<u8> {
+    match nzb_data(nzb) {
+        Some(_) => unsafe { final_dir_name(nzb.addr() as *const NzbScalars) },
+        None => Vec::new(),
+    }
+}
+
+/// The path of the hard link to the queued NZB file, empty when none.
+pub(crate) fn hard_link_path(nzb: NzbRef) -> Vec<u8> {
+    nzb_data(nzb).map_or_else(Vec::new, |_| text_bytes(nzb.addr() as *const NzbScalars, 8))
+}
+
+/// The name the download's NZB file carries in its meta data, empty when none.
+pub(crate) fn meta_name(nzb: NzbRef) -> Vec<u8> {
+    nzb_data(nzb).map_or_else(Vec::new, |_| text_bytes(nzb.addr() as *const NzbScalars, 9))
+}
+
+pub(crate) fn set_meta_name(nzb: NzbRef, name: &[u8]) {
+    if nzb_data(nzb).is_some() {
+        set_text_bytes(nzb.addr() as *const NzbScalars, 9, name);
+    }
+}
+
+/// The direct-unpack job handle kept with the download, 0 for none.
+pub(crate) fn unpack_thread(nzb: NzbRef) -> usize {
+    nzb_data(nzb).map_or(0, |d| d.slots[2].load(std::sync::atomic::Ordering::SeqCst))
+}
+
+/// Whether a file still downloading has its output file open.
+pub(crate) fn has_busy_output_file(nzb: NzbRef) -> bool {
+    nzb_data(nzb).is_some() && unsafe { has_active_output(nzb.addr() as *const NzbScalars) }
+}
+
+/// A logged message kept with a download.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CachedMessage {
+    pub id: u32,
+    pub kind: i32,
+    pub time: i64,
+    pub text: CString,
+}
+
+/// Which cached messages to read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MessageRange {
+    /// From the message with this id on (all when it is older than every kept one).
+    FromId(u32),
+    /// The newest this many.
+    Last(usize),
+}
+
+/// The download's cached messages in `range`, oldest first.
+pub(crate) fn cached_messages(nzb: NzbRef, range: MessageRange) -> Vec<CachedMessage> {
+    let Some(d) = nzb_data(nzb) else {
+        return Vec::new();
+    };
+    let m = d
+        .msgs
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let start = match range {
+        MessageRange::FromId(id) => m
+            .front()
+            .map_or(0, |first| id.saturating_sub(first.0) as usize),
+        MessageRange::Last(n) => m.len() - n.min(m.len()),
+    };
+    m.iter()
+        .skip(start)
+        .map(|(id, kind, time, text)| CachedMessage {
+            id: *id,
+            kind: *kind,
+            time: *time,
+            text: text.clone(),
+        })
+        .collect()
+}
+
+/// Appends `src`'s cached messages to `dest` with fresh ids and the current
+/// time, keeping at most the configured log buffer.
+pub(crate) fn copy_cached_messages(dest: NzbRef, src: NzbRef) {
+    let (Some(_), Some(_)) = (nzb_data(dest), nzb_data(src)) else {
+        return;
+    };
+    let log_buffer = crate::options::active_options().map_or(0, |o| o.scalars().log_buffer);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as c_int);
+    let lim = [now, log_buffer];
+    let (p, p2) = (
+        dest.addr() as *const NzbScalars,
+        src.addr() as *const NzbScalars,
+    );
+    unsafe { nzbget_rs_nzb_msgs(p, 3, 0, p2, std::ptr::null(), lim.as_ptr()) };
 }
 
 pub extern "C" fn nzbget_rs_nzb_scalars_new() -> *mut NzbScalars {
@@ -1908,128 +2127,6 @@ pub(crate) unsafe fn host_coll_set(
     true
 }
 
-/// A collection's list and text ops (host op 31), as the C++ host did them.
-/// Strings handed back in `strs` by 3 and 16 stay valid on this thread until
-/// the next such call.
-///
-/// # Safety
-/// `p` is a live collection, `p2` one too where the op names it; output
-/// arrays are large enough for the op.
-#[allow(clippy::too_many_arguments)]
-pub(crate) unsafe fn host_coll_op(
-    p: *const NzbScalars,
-    a1: c_int,
-    a2: c_int,
-    p2: usize,
-    s1: *const c_char,
-    s2: *const c_char,
-    ints: *mut c_int,
-    strs: *mut *const c_char,
-) -> Option<usize> {
-    let np: *const NzbScalars = std::ptr::null();
-    let ns: *const c_char = std::ptr::null();
-    let ni: *mut c_int = std::ptr::null_mut();
-    let nstr: *mut *const c_char = std::ptr::null_mut();
-    let empty = c"".as_ptr();
-    let or_empty = |s: *const c_char| if s.is_null() { empty } else { s };
-    let other = p2 as *const NzbScalars;
-    let coll = |op, a2, other, s1, s2, ints, strs| unsafe {
-        nzbget_rs_nzb_coll(p, op, a2, other, s1, s2, ints, strs)
-    };
-    let files = |op, a2, s1, s2, strs| unsafe {
-        nzbget_rs_nzb_files(
-            p,
-            op,
-            a2,
-            np,
-            s1,
-            s2,
-            ni,
-            std::ptr::null_mut(),
-            strs,
-            std::ptr::null(),
-        )
-    };
-    let log_buffer = || crate::options::active_options().map_or(0, |o| o.scalars().log_buffer);
-    let now = || {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs() as c_int)
-    };
-    Some(match a1 {
-        6 | 7 => {
-            unsafe { *strs = nzbget_rs_nzb_text(p, if a1 == 6 { 8 } else { 9 }) };
-            0
-        }
-        9 => {
-            if a2 < 0 {
-                return Some(coll(40, 0, np, ns, ns, ni, nstr) as usize);
-            }
-            coll(42, a2, np, ns, ns, ints, nstr);
-            0
-        }
-        10 => {
-            coll(10, a2, np, or_empty(s1), ns, ni, nstr);
-            0
-        }
-        11 => usize::from(files(4, 0, or_empty(s1), or_empty(s2), nstr) != 0),
-        12 => unsafe { nzbget_rs_nzb_slot(p, 2, 0, 0) },
-        13 => {
-            files(32, 0, or_empty(s1), ns, nstr);
-            0
-        }
-        14 => {
-            unsafe { nzbget_rs_nzb_set_text(p, 9, or_empty(s1), -1) };
-            0
-        }
-        15 => {
-            let lim = [now(), log_buffer()];
-            unsafe { nzbget_rs_nzb_msgs(p, 3, 0, other, ns, lim.as_ptr(), None, 0) };
-            0
-        }
-        18 => {
-            if a2 < 0 {
-                return Some(files(30, 0, ns, ns, nstr) as usize);
-            }
-            unsafe { *strs = empty };
-            files(31, a2, ns, ns, strs);
-            0
-        }
-        19 => {
-            if a2 == 0 {
-                coll(44, 0, np, ns, ns, ints, nstr);
-            } else {
-                coll(48, 0, np, ns, ns, ni, nstr);
-            }
-            0
-        }
-        20 => {
-            let visit: MsgVisit = unsafe { std::mem::transmute::<*const c_char, MsgVisit>(s1) };
-            unsafe { nzbget_rs_nzb_msgs(p, 4, 0, np, ns, ints, visit, p2) };
-            0
-        }
-        21 => {
-            if a2 < 0 {
-                return Some(coll(41, 0, np, ns, ns, ni, nstr) as usize);
-            }
-            coll(43, a2, np, ns, ns, ints, nstr);
-            0
-        }
-        3 => {
-            let dir = unsafe { final_dir_name(p) };
-            unsafe { *strs = keep_text(&FINAL_DIR, dir) };
-            0
-        }
-        16 => {
-            let name = crate::downloadinfo::make_nice_url_name(Some(cstr(s1)), cstr(s2).to_bytes());
-            unsafe { *strs = keep_text(&NICE_URL, name) };
-            0
-        }
-        22 => usize::from(unsafe { has_active_output(p) }),
-        _ => 0,
-    })
-}
-
 /// NzbInfo::SetId: the id, raising the id floor.
 fn set_id(s: &mut NzbScalars, id: c_int) {
     s.id = id;
@@ -2132,27 +2229,6 @@ unsafe fn build_dest_dir_name(p: *mut NzbScalars) {
         unsafe { (*p).id },
     );
     set_text_bytes(p, 3, &dir);
-}
-
-thread_local! {
-    static FINAL_DIR: std::cell::RefCell<CString> = std::cell::RefCell::new(CString::default());
-    static NICE_URL: std::cell::RefCell<CString> = std::cell::RefCell::new(CString::default());
-}
-
-/// Keeps `bytes` (up to an embedded NUL) in this thread's `slot` and returns
-/// a pointer valid until the slot's next use on this thread.
-fn keep_text(
-    slot: &'static std::thread::LocalKey<std::cell::RefCell<CString>>,
-    mut bytes: Vec<u8>,
-) -> *const c_char {
-    if let Some(end) = bytes.iter().position(|&b| b == 0) {
-        bytes.truncate(end);
-    }
-    slot.with(|s| {
-        let mut s = s.borrow_mut();
-        *s = CString::new(bytes).unwrap_or_default();
-        s.as_ptr()
-    })
 }
 
 /// NzbInfo::SetFilename: names the collection from the file name when it
@@ -2644,16 +2720,12 @@ pub unsafe extern "C" fn nzbget_rs_nzb_slot(
     }
 }
 
-/// Called once per message, oldest first: (ctx, id, kind, time, text).
-pub type MsgVisit = Option<unsafe extern "C" fn(usize, c_int, c_int, c_int, *const c_char)>;
-
 /// A collection's message log. The caller prints; this keeps the messages.
 ///  0 add kind a2, text s1, time ints[0]; keep at most ints[1] when > 0;
 ///    the id comes from the collection's idMessageGen; returns the count
 ///  1 count; 2 clear;
-///  3 add p2's messages (fresh ids, time now in ints[0], limit ints[1]);
-///  4 visit messages: from id ints[0] when > 0, else the last ints[1] when
-///    > 0, else none.
+///  3 add p2's messages (fresh ids, time now in ints[0], limit ints[1]).
+/// Read them with [`cached_messages`].
 /// cachedMessageCount follows every change.
 pub unsafe extern "C" fn nzbget_rs_nzb_msgs(
     p: *const NzbScalars,
@@ -2662,8 +2734,6 @@ pub unsafe extern "C" fn nzbget_rs_nzb_msgs(
     p2: *const NzbScalars,
     s1: *const c_char,
     ints: *const c_int,
-    visit: MsgVisit,
-    ctx: usize,
 ) -> i64 {
     let copied: Vec<(i32, CString)> = if op == 3 && !p2.is_null() && p2 != p {
         let o = data(p2).msgs.lock().unwrap_or_else(|e| e.into_inner());
@@ -2700,22 +2770,6 @@ pub unsafe extern "C" fn nzbget_rs_nzb_msgs(
                 push(&mut m, kind, text);
             }
             0
-        }
-        4 => {
-            let Some(f) = visit else { return 0 };
-            let sz = m.len();
-            let mut start = sz;
-            let (from_id, last) = (int(0), int(1));
-            if last > 0 {
-                start = sz - (last as usize).min(sz);
-            }
-            if from_id > 0 && sz > 0 {
-                start = (i64::from(from_id) - i64::from(m[0].0)).max(0) as usize;
-            }
-            for e in m.iter().skip(start) {
-                unsafe { f(ctx, e.0 as c_int, e.1, e.2 as c_int, e.3.as_ptr()) };
-            }
-            return 0;
         }
         _ => return 0,
     };
@@ -2977,71 +3031,37 @@ mod tests {
 
     #[test]
     fn message_log() {
-        unsafe extern "C" fn collect(
-            ctx: usize,
-            id: c_int,
-            kind: c_int,
-            _t: c_int,
-            text: *const c_char,
-        ) {
-            let v = unsafe { &mut *(ctx as *mut Vec<(i32, i32, Vec<u8>)>) };
-            v.push((
-                id,
-                kind,
-                unsafe { CStr::from_ptr(text) }.to_bytes().to_vec(),
-            ));
-        }
         let p = nzbget_rs_nzb_scalars_new();
         let q = nzbget_rs_nzb_scalars_new();
         let np: *const NzbScalars = std::ptr::null();
         let ns: *const c_char = std::ptr::null();
         unsafe {
             let lim = [100, 2];
-            nzbget_rs_nzb_msgs(p, 0, 0, np, c"one".as_ptr(), lim.as_ptr(), None, 0);
-            nzbget_rs_nzb_msgs(p, 0, 1, np, c"two".as_ptr(), lim.as_ptr(), None, 0);
+            nzbget_rs_nzb_msgs(p, 0, 0, np, c"one".as_ptr(), lim.as_ptr());
+            nzbget_rs_nzb_msgs(p, 0, 1, np, c"two".as_ptr(), lim.as_ptr());
             assert_eq!(
-                nzbget_rs_nzb_msgs(p, 0, 2, np, c"three".as_ptr(), lim.as_ptr(), None, 0),
+                nzbget_rs_nzb_msgs(p, 0, 2, np, c"three".as_ptr(), lim.as_ptr()),
                 2
             );
             assert_eq!((*p).cachedMessageCount, 2);
             assert_eq!((*p).idMessageGen, 3);
-            let mut got: Vec<(i32, i32, Vec<u8>)> = Vec::new();
-            let all = [0, 10];
-            nzbget_rs_nzb_msgs(
-                p,
-                4,
-                0,
-                np,
-                ns,
-                all.as_ptr(),
-                Some(collect),
-                &mut got as *mut _ as usize,
-            );
+            let pn = NzbRef::from_addr(p as usize);
+            let got: Vec<(u32, i32, Vec<u8>)> = cached_messages(pn, MessageRange::Last(10))
+                .into_iter()
+                .map(|m| (m.id, m.kind, m.text.into_bytes()))
+                .collect();
             assert_eq!(
                 got,
                 vec![(2, 1, b"two".to_vec()), (3, 2, b"three".to_vec())]
             );
-            got.clear();
-            let from = [3, 0];
-            nzbget_rs_nzb_msgs(
-                p,
-                4,
-                0,
-                np,
-                ns,
-                from.as_ptr(),
-                Some(collect),
-                &mut got as *mut _ as usize,
-            );
-            assert_eq!(got.len(), 1);
+            assert_eq!(cached_messages(pn, MessageRange::FromId(3)).len(), 1);
+            assert_eq!(cached_messages(pn, MessageRange::FromId(1)).len(), 2);
+            assert_eq!(cached_messages(pn, MessageRange::Last(1))[0].id, 3);
             let nolimit = [100, 0];
-            nzbget_rs_nzb_msgs(q, 3, 0, p, ns, nolimit.as_ptr(), None, 0);
-            assert_eq!(
-                nzbget_rs_nzb_msgs(q, 1, 0, np, ns, nolimit.as_ptr(), None, 0),
-                2
-            );
+            nzbget_rs_nzb_msgs(q, 3, 0, p, ns, nolimit.as_ptr());
+            assert_eq!(nzbget_rs_nzb_msgs(q, 1, 0, np, ns, nolimit.as_ptr()), 2);
             assert_eq!((*q).idMessageGen, 2);
-            nzbget_rs_nzb_msgs(p, 2, 0, np, ns, nolimit.as_ptr(), None, 0);
+            nzbget_rs_nzb_msgs(p, 2, 0, np, ns, nolimit.as_ptr());
             assert_eq!((*p).cachedMessageCount, 0);
             nzbget_rs_nzb_scalars_free(p);
             nzbget_rs_nzb_scalars_free(q);
@@ -3352,7 +3372,6 @@ mod tests {
 
     #[test]
     fn coll_set_filename_and_url_name_the_collection() {
-        let ns: *const c_char = std::ptr::null();
         unsafe {
             let n = nzbget_rs_nzb_scalars_new();
             (*n).id = 5;
@@ -3414,23 +3433,14 @@ mod tests {
             assert_eq!(text_of(u, 2).unwrap(), b"Real.Name");
             nzbget_rs_nzb_scalars_free(u);
 
-            let v = nzbget_rs_nzb_scalars_new();
-            let mut strs = [ns; 1];
-            host_coll_op(
-                v,
-                16,
-                0,
-                0,
-                c"https://idx.example/api".as_ptr(),
-                c"Some.Name.nzb".as_ptr(),
-                std::ptr::null_mut(),
-                strs.as_mut_ptr(),
-            );
+            // the nice URL name comes from the URL and the NZB file name only
             assert_eq!(
-                CStr::from_ptr(strs[0]).to_bytes(),
+                crate::downloadinfo::make_nice_url_name(
+                    Some(c"https://idx.example/api"),
+                    b"Some.Name.nzb"
+                ),
                 b"Some.Name @ idx.example"
             );
-            nzbget_rs_nzb_scalars_free(v);
         }
     }
 
@@ -3440,18 +3450,7 @@ mod tests {
             let n = nzbget_rs_nzb_scalars_new();
             (*n).id = 9;
             nzbget_rs_nzb_set_text(n, 2, c"Some.Name".as_ptr(), -1);
-            let mut strs = [std::ptr::null(); 1];
-            host_coll_op(
-                n,
-                3,
-                0,
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                strs.as_mut_ptr(),
-            );
-            let final_dir = CStr::from_ptr(strs[0]).to_bytes().to_vec();
+            let final_dir = build_final_dir_name(NzbRef::from_addr(n as usize));
             assert!(final_dir.ends_with(b"Some.Name"), "{final_dir:?}");
             assert!(host_coll_set(
                 n,
@@ -3580,34 +3579,22 @@ mod tests {
         use crate::qfile::field;
         unsafe {
             let n = coll_with_list();
-            let ns = std::ptr::null();
-            let op = |n| {
-                host_coll_op(
-                    n,
-                    22,
-                    0,
-                    0,
-                    ns,
-                    ns,
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                )
-            };
-            assert_eq!(op(n), Some(0));
+            let op = |n: *const NzbScalars| has_busy_output_file(NzbRef::from_addr(n as usize));
+            assert!(!op(n));
             let f = add_test_file(
                 n,
                 &[(field::OUTPUT_INITIALIZED, 1), (field::ACTIVE_DOWNLOADS, 1)],
             );
             // no output file name yet
-            assert_eq!(op(n), Some(0));
+            assert!(!op(n));
             crate::qfile::nzbget_rs_file_set_text(
                 f,
                 crate::qfile::text::OUTPUT_FILENAME,
                 c"out.tmp".as_ptr(),
             );
-            assert_eq!(op(n), Some(1));
+            assert!(op(n));
             crate::qfile::nzbget_rs_file_set(f, field::ACTIVE_DOWNLOADS, 0);
-            assert_eq!(op(n), Some(0));
+            assert!(!op(n));
             free_coll_with_list(n);
         }
     }

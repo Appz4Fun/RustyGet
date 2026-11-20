@@ -159,11 +159,16 @@ fn fleet_upgrade_kind(
 }
 
 /// Whether a probed kind replaces the stored one (see [`fleet_upgrade_kind`]).
+/// An encrypted copy stored unborrowable (read before its password was at
+/// hand, or by a build that did not try it) moves up once its password opens
+/// it.
 fn kind_upgrades(stored: crate::donorkind::DonorKind, found: crate::donorkind::DonorKind) -> bool {
     use crate::donorkind::DonorKind;
     found != DonorKind::Unknown
         && found != stored
-        && (stored == DonorKind::Unknown || found == DonorKind::Twin)
+        && (stored == DonorKind::Unknown
+            || found == DonorKind::Twin
+            || (stored == DonorKind::Unborrowable && found == DonorKind::EncryptedBorrowable))
 }
 
 /// Records on a copy already queued, or parked in history as a backup, that its
@@ -1543,9 +1548,16 @@ fn fleet_candidate_locked(encrypted: bool, nzb_password: bool, stored_password: 
 }
 
 fn summary_password_known(info: &NzbSummaryData) -> bool {
+    summary_password(info).is_some()
+}
+
+/// The archive password a fleet member's nzb carries (its meta, or a
+/// `{{password}}` in its name, see [`summary_take_name_password`]).
+fn summary_password(info: &NzbSummaryData) -> Option<&[u8]> {
     info.meta
         .iter()
-        .any(|(k, v)| k.eq_ignore_ascii_case(b"password") && !v.trim_ascii().is_empty())
+        .find(|(k, v)| k.eq_ignore_ascii_case(b"password") && !v.trim_ascii().is_empty())
+        .map(|(_, v)| v.as_slice())
 }
 
 /// Reads each copy's par2 index and the first article of its largest file
@@ -1625,7 +1637,7 @@ fn probe_copies(
                             packing = crate::donorkind::packing_of_head(
                                 &art.data,
                                 &head.name,
-                                summary_password_known(info),
+                                summary_password(info),
                             );
                         } else if summary_password_known(info)
                             && crate::donorkind::is_7z_name(&head.name)
@@ -3663,7 +3675,7 @@ impl NzbgetRsDupeSearch {
             (
                 twin,
                 DonorKind::of(twin, packing),
-                packing == Packing::HeadersEncrypted,
+                packing.headers_encrypted(),
             )
         };
         let alive_of = |h: &DonorHealthResult, s: &NzbSummaryData| -> f64 {
@@ -6212,7 +6224,7 @@ pub unsafe fn fleet_append(
             let mut got = probe_copies(host_ctx, host_cb, &summaries, probe_deadline);
             earlier_probed = got.split_off(usable.len().min(got.len()));
             for (&i, p) in usable.iter().zip(got) {
-                candidates[i].encrypted |= p.1 == crate::donorkind::Packing::HeadersEncrypted;
+                candidates[i].encrypted |= p.1.headers_encrypted();
                 probed[i] = Some(p);
             }
         }
@@ -6674,7 +6686,7 @@ pub unsafe fn fleet_append(
                 .any(|&p| added[p] != 0 || member_stored[p].is_some());
         let kind = crate::donorkind::DonorKind::of(partner_queued, w.packing);
         fleet_upgrade_kind(host_ctx, host_cb, w.nzb_id, kind);
-        if w.packing == crate::donorkind::Packing::HeadersEncrypted {
+        if w.packing.headers_encrypted() {
             fleet_mark_encrypted(host_ctx, host_cb, w.nzb_id);
         }
     }
@@ -6846,6 +6858,10 @@ mod tests {
         assert!(!kind_upgrades(Twin, Borrowable));
         assert!(!kind_upgrades(Borrowable, Unborrowable));
         assert!(!kind_upgrades(Twin, Twin));
+        // an encrypted copy stored unborrowable, opened by its password now
+        assert!(kind_upgrades(Unborrowable, EncryptedBorrowable));
+        assert!(!kind_upgrades(EncryptedBorrowable, Unborrowable));
+        assert!(!kind_upgrades(Borrowable, EncryptedBorrowable));
     }
 
     #[test]

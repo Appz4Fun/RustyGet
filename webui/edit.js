@@ -40,8 +40,10 @@ var DetailsPanel = (new function($)
 	'use strict';
 
 	// donor priority, lower first: the primary, twins, then borrowable alts,
-	// alts whose packaging is unknown, and alts that cannot be borrowed from
-	var ROLE_ORDER = { primary: 0, twin: 1, borrowable: 2, alt: 3, unborrowable: 4, '': 5 };
+	// encrypted alts borrowable with their nzb password, alts whose packaging
+	// is unknown, and alts that cannot be borrowed from
+	var ROLE_ORDER = { primary: 0, twin: 1, borrowable: 2, 'borrowable-encrypted': 3, alt: 4,
+		unborrowable: 5, '': 6 };
 
 	function param(item, name)
 	{
@@ -58,6 +60,7 @@ var DetailsPanel = (new function($)
 		var kind = param(item, 'DupeKind');
 		var copy = param(item, 'DupeCopyKind');
 		var copyLabel = copy === 'borrowable' ? I18n.translate('fleet_copy_borrowable') :
+			copy === 'borrowable-encrypted' ? I18n.translate('fleet_copy_borrowable_encrypted') :
 			copy === 'unborrowable' ? I18n.translate('fleet_copy_unborrowable') : '';
 		var near = /^twin:(\d+\/\d+)$/.exec(kind);
 		if (kind === 'twin' || near)
@@ -66,7 +69,8 @@ var DetailsPanel = (new function($)
 		}
 		if (kind === 'alt')
 		{
-			return { kind: copy === 'borrowable' || copy === 'unborrowable' ? copy : 'alt',
+			return { kind: copy === 'borrowable' || copy === 'borrowable-encrypted' ||
+				copy === 'unborrowable' ? copy : 'alt',
 				label: I18n.translate('fleet_role_alt'), copy: copyLabel };
 		}
 		// another container whose video inside is not verified yet, or another
@@ -337,7 +341,7 @@ var DetailsPanel = (new function($)
 			{
 				out.twins++;
 			}
-			else if (kind !== 'primary' && kind !== 'twin' && param(m.item, 'DupeCopyKind') === 'borrowable' &&
+			else if (kind !== 'primary' && kind !== 'twin' && /^borrowable(-encrypted)?$/.test(param(m.item, 'DupeCopyKind')) &&
 				param(m.item, 'DupeVideo') !== 'different')
 			{
 				if (param(m.item, 'DupeVideo') === 'same')

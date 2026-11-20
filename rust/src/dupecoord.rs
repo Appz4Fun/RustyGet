@@ -634,7 +634,7 @@ pub(crate) fn no_backup_reason_host(
             health: 0,
             critical_health: 0,
             same_name_or_key: 0,
-            donor_kind: 2,
+            donor_kind: crate::donorkind::DonorKind::Unknown as i32,
             locked: 0,
         };
         let mut qfn = Vec::new();
@@ -715,7 +715,7 @@ fn collect_dupe_candidates(
             health: 0,
             critical_health: 0,
             same_name_or_key: 0,
-            donor_kind: 2,
+            donor_kind: crate::donorkind::DonorKind::Unknown as i32,
             locked: 0,
         };
         let mut qfn = Vec::new();
@@ -1605,7 +1605,7 @@ mod tests {
             health: 1000,
             critical_health: 900,
             same_name_or_key: 1,
-            donor_kind: 2,
+            donor_kind: crate::donorkind::DonorKind::Unknown as i32,
             locked: 0,
         }
     }
@@ -1910,7 +1910,7 @@ mod tests {
                     b"Rel.2026.1080p-A",
                     b"imdb:1",
                 )),
-                donor_kind: 2,
+                donor_kind: crate::donorkind::DonorKind::Unknown as i32,
                 locked: 0,
             }
         };

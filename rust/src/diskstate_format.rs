@@ -4047,14 +4047,64 @@ impl DiskLogLevel {
 }
 
 pub type DiskLogFn = fn(ctx: *mut c_void, level: DiskLogLevel, msg: &[u8]);
-pub type DiskCtrlFn = unsafe extern "C" fn(
-    ctx: *mut c_void,
-    cmd: c_int,
-    a1: c_int,
-    a2: c_int,
-    a3: i64,
-    s1: *const c_char,
-) -> c_int;
+/// A request from the disk-state code to the queue it is loading into or
+/// saving from. Ids are nzb or file ids, indexes are queue positions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiskCtrl<'a> {
+    /// Number of nzbs in the queue.
+    QueueLen,
+    /// Number of history entries.
+    HistoryLen,
+    /// Last nzb id handed out by the id generator.
+    LastNzbId,
+    /// Last file id handed out by the id generator.
+    LastFileId,
+    /// Number of files across every queued nzb.
+    QueuedFileCount,
+    /// Number of files in the queued nzb at `nzb`.
+    NzbFileCount { nzb: i32 },
+    /// Target file `file` of the queued nzb at `nzb`; returns its id.
+    SelectFile { nzb: i32, file: i32 },
+    /// Remove the file with `file_id` from the queued nzb at `nzb`.
+    RemoveFile { nzb: i32, file_id: i32 },
+    /// 1 if a queued nzb holds the file with `file_id`.
+    FileQueued { file_id: i32 },
+    /// Replace the nzb being loaded with a fresh empty one and target it.
+    ResetPendingNzb,
+    /// Append the nzb being loaded to the queue.
+    FinishNewNzb,
+    /// Target the queued nzb with `id`; 1 if found, otherwise acts as
+    /// `ResetPendingNzb` and returns 0.
+    SelectQueuedNzb { id: i32 },
+    /// Move the nzb being loaded into history as `kind` at `time`. For an
+    /// nzb history entry the target nzb also leaves post-processing first.
+    PushPendingToHistory { kind: i32, time: i32 },
+    /// Target the nzb with `id` in the queue or history; 1 if found,
+    /// otherwise acts as `ResetPendingNzb` and returns 0.
+    SelectNzb { in_history: bool, id: i32 },
+    /// Target the queued file with `file_id` and remember its counters;
+    /// 1 if found.
+    SelectFileWithCounters { file_id: i32 },
+    /// Clear the target file's articles and restore the remembered counters.
+    RestoreFileCounters,
+    /// Clear the target file's articles and mark it completed or partial.
+    ResetFileArticles { completed: bool },
+    /// Stage a standalone file with `file_id` as the target.
+    StageStandaloneFile { file_id: i32 },
+    /// Raise the id generator to the given maxima and refresh nzb stats.
+    RaiseIdGen { max_nzb: i32, max_file: i32 },
+    /// Collect a log message; `id` is its running message number.
+    AddMessage {
+        nzb_id: i32,
+        kind: i32,
+        time: i32,
+        text: &'a [u8],
+    },
+    /// Number of queued nzbs with unsaved changes.
+    ChangedNzbCount,
+}
+
+pub type DiskCtrlFn = fn(ctx: *mut c_void, cmd: DiskCtrl<'_>) -> i32;
 pub type DiskNzbSinkFn =
     unsafe extern "C" fn(sink_ctx: *mut c_void, exp: *const NzbgetRsDiskNzbExport);
 pub type DiskExportNzbFn = unsafe extern "C" fn(
@@ -4173,19 +4223,8 @@ fn emit_log_parts(env: &NzbgetRsDiskStateEnv, level: DiskLogLevel, parts: &[&[u8
     emit_log(env, level, &parts.concat());
 }
 
-unsafe fn call_ctrl(
-    env: &NzbgetRsDiskStateEnv,
-    cmd: c_int,
-    a1: c_int,
-    a2: c_int,
-    a3: i64,
-    s1: *const c_char,
-) -> c_int {
-    if let Some(cb) = env.ctrl_cb {
-        unsafe { cb(env.ctx, cmd, a1, a2, a3, s1) }
-    } else {
-        0
-    }
+fn call_ctrl(env: &NzbgetRsDiskStateEnv, cmd: DiskCtrl<'_>) -> i32 {
+    env.ctrl_cb.map_or(0, |cb| cb(env.ctx, cmd))
 }
 
 struct RsStateReader {
@@ -4605,9 +4644,9 @@ unsafe fn save_nzb_section(
         return;
     };
     let iter_len = if source == 1 {
-        unsafe { call_ctrl(env, 1, 0, 0, 0, std::ptr::null()) as usize }
+        call_ctrl(env, DiskCtrl::HistoryLen) as usize
     } else {
-        unsafe { call_ctrl(env, 0, 0, 0, 0, std::ptr::null()) as usize }
+        call_ctrl(env, DiskCtrl::QueueLen) as usize
     };
     let _ = writeln!(w, "{header_count}");
 
@@ -4964,12 +5003,17 @@ unsafe fn load_dupe_trailer_section(
         if count < 0 {
             return false;
         }
-        let target_src = c_int::from(is_history);
         for _ in 0..count {
             let Some(id) = r.scan_i32() else {
                 return false;
             };
-            unsafe { call_ctrl(env, 13, target_src, id, 0, std::ptr::null()) };
+            call_ctrl(
+                env,
+                DiskCtrl::SelectNzb {
+                    in_history: is_history,
+                    id,
+                },
+            );
             if !unsafe { load_dupe_extras_into_target(env, r, DISKSTATE_QUEUE_LEGACY_VERSION) } {
                 return false;
             }
@@ -4986,7 +5030,13 @@ unsafe fn load_dupe_trailer_section(
                     let Some(id) = r.scan_i32() else {
                         return false;
                     };
-                    unsafe { call_ctrl(env, 13, target_src, id, 0, std::ptr::null()) };
+                    call_ctrl(
+                        env,
+                        DiskCtrl::SelectNzb {
+                            in_history: is_history,
+                            id,
+                        },
+                    );
                     if !unsafe { parse_unpack_state_into_target(env, r) } {
                         return false;
                     }
@@ -5016,11 +5066,11 @@ unsafe fn load_queue_section(
             return false;
         };
         for _ in 0..size {
-            unsafe { call_ctrl(env, 9, 0, 0, 0, std::ptr::null()) };
+            call_ctrl(env, DiskCtrl::ResetPendingNzb);
             if !unsafe { load_nzb_info_into_target(env, r, format_version) } {
                 return false;
             }
-            unsafe { call_ctrl(env, 10, 0, 0, 0, std::ptr::null()) };
+            call_ctrl(env, DiskCtrl::FinishNewNzb);
         }
         if (57..=DISKSTATE_QUEUE_VERSION).contains(&format_version)
             && !unsafe { load_dupe_trailer_section(env, r, false) }
@@ -5053,7 +5103,7 @@ unsafe fn load_progress_section(
             let Some(id) = r.scan_i32() else {
                 return false;
             };
-            let found = unsafe { call_ctrl(env, 11, id, 0, 0, std::ptr::null()) != 0 };
+            let found = call_ctrl(env, DiskCtrl::SelectQueuedNzb { id }) != 0;
             if !found {
                 emit_log(
                     env,
@@ -5105,11 +5155,17 @@ unsafe fn load_history_section(
                 return false;
             };
             if kindval == 1 || kindval == 2 {
-                unsafe { call_ctrl(env, 9, 0, 0, 0, std::ptr::null()) };
+                call_ctrl(env, DiskCtrl::ResetPendingNzb);
                 if !unsafe { load_nzb_info_into_target(env, r, format_version) } {
                     return false;
                 }
-                unsafe { call_ctrl(env, 12, kindval, time, 0, std::ptr::null()) };
+                call_ctrl(
+                    env,
+                    DiskCtrl::PushPendingToHistory {
+                        kind: kindval,
+                        time,
+                    },
+                );
             } else if kindval == 3 {
                 struct DupCtx<'a> {
                     env: &'a NzbgetRsDiskStateEnv,
@@ -5624,7 +5680,7 @@ unsafe fn load_single_file_or_state(
 }
 
 unsafe fn load_all_file_infos_op(env: &NzbgetRsDiskStateEnv, qdir: &[u8], sep: u8) {
-    let nzb_count = unsafe { call_ctrl(env, 0, 0, 0, 0, std::ptr::null()) };
+    let nzb_count = call_ctrl(env, DiskCtrl::QueueLen);
     if nzb_count <= 0 {
         return;
     }
@@ -5641,7 +5697,7 @@ unsafe fn load_all_file_infos_op(env: &NzbgetRsDiskStateEnv, qdir: &[u8], sep: u
     let mut hib_ver = 0;
     if sf.file_exists() {
         if let Some(mut r) = unsafe { sf.begin_read(env) } {
-            let total_files = unsafe { call_ctrl(env, 4, 0, 0, 0, std::ptr::null()) };
+            let total_files = call_ctrl(env, DiskCtrl::QueuedFileCount);
             if r.scan_i32() == Some(total_files) {
                 hib_ver = sf.file_version;
                 hib_reader = Some(r);
@@ -5653,10 +5709,16 @@ unsafe fn load_all_file_infos_op(env: &NzbgetRsDiskStateEnv, qdir: &[u8], sep: u
     }
 
     for nzb_idx in 0..nzb_count {
-        let fl_len = unsafe { call_ctrl(env, 5, nzb_idx, 0, 0, std::ptr::null()) };
+        let fl_len = call_ctrl(env, DiskCtrl::NzbFileCount { nzb: nzb_idx });
         let mut broken_ids = Vec::new();
         for file_idx in 0..fl_len {
-            let file_id = unsafe { call_ctrl(env, 6, nzb_idx, file_idx, 0, std::ptr::null()) };
+            let file_id = call_ctrl(
+                env,
+                DiskCtrl::SelectFile {
+                    nzb: nzb_idx,
+                    file: file_idx,
+                },
+            );
             let mut res = false;
             if let Some(ref mut r) = hib_reader {
                 let scanned_id = r.scan_i32().unwrap_or(0);
@@ -5675,7 +5737,13 @@ unsafe fn load_all_file_infos_op(env: &NzbgetRsDiskStateEnv, qdir: &[u8], sep: u
             }
         }
         for bad_id in broken_ids {
-            unsafe { call_ctrl(env, 7, nzb_idx, bad_id, 0, std::ptr::null()) };
+            call_ctrl(
+                env,
+                DiskCtrl::RemoveFile {
+                    nzb: nzb_idx,
+                    file_id: bad_id,
+                },
+            );
         }
     }
 }
@@ -5763,7 +5831,7 @@ unsafe fn load_all_file_states_op(
     for filename in crate::fsops::list_dir_entries(qdir) {
         if let Some((id, suffix)) = diskstate_parse_queue_file_id_and_suffix(&filename) {
             if suffix == b'c' || (env.continue_partial != 0 && !cache_was_active) {
-                let found = unsafe { call_ctrl(env, 14, id, 0, 0, std::ptr::null()) != 0 };
+                let found = call_ctrl(env, DiskCtrl::SelectFileWithCounters { file_id: id }) != 0;
                 if found {
                     let completed = suffix == b'c';
                     let mode = if completed { 2 } else { 1 };
@@ -5780,14 +5848,12 @@ unsafe fn load_all_file_states_op(
                             &mut state_ver,
                         )
                     } {
-                        unsafe {
-                            emit_log_parts(
-                                env,
-                                DiskLogLevel::Warning,
-                                &[b"Discarding damaged download state ", &filename],
-                            );
-                            call_ctrl(env, 15, 0, 0, 0, std::ptr::null());
-                        }
+                        emit_log_parts(
+                            env,
+                            DiskLogLevel::Warning,
+                            &[b"Discarding damaged download state ", &filename],
+                        );
+                        call_ctrl(env, DiskCtrl::RestoreFileCounters);
                         let p = crate::artwritercore::article_writer_format_dest_file_path(
                             qdir, sep, &filename,
                         );
@@ -5797,9 +5863,7 @@ unsafe fn load_all_file_states_op(
                     if state_ver > DISKSTATE_FILE_VERSION {
                         let _ = unsafe { save_single_file_or_state(env, qdir, sep, mode, false) };
                     }
-                    unsafe {
-                        call_ctrl(env, 16, c_int::from(completed), 0, 0, std::ptr::null());
-                    }
+                    call_ctrl(env, DiskCtrl::ResetFileArticles { completed });
                 }
             } else {
                 let p = crate::artwritercore::article_writer_format_dest_file_path(
@@ -5851,7 +5915,7 @@ unsafe fn convert_legacy_file_states_op(
 
     let mut converted = 0i32;
     for &(id, suffix_kind) in &legacy {
-        unsafe { call_ctrl(env, 17, id, 0, 0, std::ptr::null()) };
+        call_ctrl(env, DiskCtrl::StageStandaloneFile { file_id: id });
         let mut dummy_ver = 0;
         let ok = if suffix_kind == 0 {
             unsafe {
@@ -6064,8 +6128,15 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                     break;
                 };
                 id += 1;
-                let text_c = bytes_to_cstring_trunc(&trimmed[text_off..]);
-                unsafe { call_ctrl(env, 19, id, kind, i64::from(time), text_c.as_ptr()) };
+                call_ctrl(
+                    env,
+                    DiskCtrl::AddMessage {
+                        nzb_id: id,
+                        kind,
+                        time,
+                        text: &trimmed[text_off..],
+                    },
+                );
             }
             1
         }
@@ -6073,7 +6144,7 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
             for filename in crate::fsops::list_dir_entries(tdir) {
                 let (kind, id, _) = classify_temp_file(&filename);
                 let garbage = kind == 1
-                    || (kind == 2 && unsafe { call_ctrl(env, 8, id, 0, 0, std::ptr::null()) == 0 });
+                    || (kind == 2 && call_ctrl(env, DiskCtrl::FileQueued { file_id: id }) == 0);
                 if garbage {
                     let p = crate::artwritercore::article_writer_format_dest_file_path(
                         tdir, sep, &filename,
@@ -6643,7 +6714,7 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                     b"Saving queue and history to disk",
                 );
                 let mut ok = true;
-                let queue_len = unsafe { call_ctrl(env, 0, 0, 0, 0, std::ptr::null()) };
+                let queue_len = call_ctrl(env, DiskCtrl::QueueLen);
                 let q_sf = RsStateFile::new(
                     qdir,
                     sep,
@@ -6666,7 +6737,7 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                 }
 
                 if env.a2 != 0 {
-                    let hist_len = unsafe { call_ctrl(env, 1, 0, 0, 0, std::ptr::null()) };
+                    let hist_len = call_ctrl(env, DiskCtrl::HistoryLen);
                     let h_sf = RsStateFile::new(
                         qdir,
                         sep,
@@ -6699,12 +6770,12 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                 );
                 p_sf.discard();
 
-                let last_nzb = unsafe { call_ctrl(env, 2, 0, 0, 0, std::ptr::null()) };
-                let last_file = unsafe { call_ctrl(env, 3, 0, 0, 0, std::ptr::null()) };
+                let last_nzb = call_ctrl(env, DiskCtrl::LastNzbId);
+                let last_file = call_ctrl(env, DiskCtrl::LastFileId);
                 let _ = save_id_floor_file(qdir, sep, last_nzb, last_file);
                 c_int::from(ok)
             } else if env.a1 == 1 {
-                let changed_count = unsafe { call_ctrl(env, 20, 0, 0, 0, std::ptr::null()) };
+                let changed_count = call_ctrl(env, DiskCtrl::ChangedNzbCount);
                 emit_log(env, DiskLogLevel::Debug, b"Saving queue progress to disk");
                 let p_sf = RsStateFile::new(
                     qdir,
@@ -6728,7 +6799,7 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                     1
                 }
             } else {
-                let nzb_count = unsafe { call_ctrl(env, 0, 0, 0, 0, std::ptr::null()) };
+                let nzb_count = call_ctrl(env, DiskCtrl::QueueLen);
                 let f_sf = RsStateFile::new(
                     qdir,
                     sep,
@@ -6741,14 +6812,18 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                     let Some(mut w) = (unsafe { f_sf.begin_write(env) }) else {
                         return 0;
                     };
-                    let total_files = unsafe { call_ctrl(env, 4, 0, 0, 0, std::ptr::null()) };
+                    let total_files = call_ctrl(env, DiskCtrl::QueuedFileCount);
                     let _ = writeln!(w, "{total_files}");
                     for nzb_idx in 0..nzb_count {
-                        let fl_len = unsafe { call_ctrl(env, 5, nzb_idx, 0, 0, std::ptr::null()) };
+                        let fl_len = call_ctrl(env, DiskCtrl::NzbFileCount { nzb: nzb_idx });
                         for file_idx in 0..fl_len {
-                            let file_id = unsafe {
-                                call_ctrl(env, 6, nzb_idx, file_idx, 0, std::ptr::null())
-                            };
+                            let file_id = call_ctrl(
+                                env,
+                                DiskCtrl::SelectFile {
+                                    nzb: nzb_idx,
+                                    file: file_idx,
+                                },
+                            );
                             let _ = writeln!(w, "{file_id}");
                             let (_, bytes) = unsafe { format_target_file_bytes(env, 1) };
                             let _ = w.write_all(&bytes);
@@ -6898,7 +6973,7 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                     b"Error reading diskstate for download queue and history",
                 );
             }
-            if !file_infos_loaded && unsafe { call_ctrl(env, 0, 0, 0, 0, std::ptr::null()) > 0 } {
+            if !file_infos_loaded && call_ctrl(env, DiskCtrl::QueueLen) > 0 {
                 unsafe { load_all_file_infos_op(env, qdir, sep) };
             }
             if queue_files_failed {
@@ -6907,7 +6982,7 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
             let mut max_nzb = -1;
             let mut max_file = -1;
             diskstate_fs_op(4, qdir, sep, 0, 0, 0, 0, &mut max_nzb, &mut max_file);
-            unsafe { call_ctrl(env, 18, max_nzb, max_file, 0, std::ptr::null()) };
+            call_ctrl(env, DiskCtrl::RaiseIdGen { max_nzb, max_file });
             c_int::from(ok)
         }
     }
@@ -7031,29 +7106,28 @@ fn apply_active_server_stats_file(
 }
 
 #[cfg(unix)]
-unsafe extern "C" fn active_disk_ctrl_cb(
-    raw_ctx: *mut c_void,
-    cmd: c_int,
-    a1: c_int,
-    a2: c_int,
-    a3: i64,
-    s1: *const c_char,
-) -> c_int {
+fn active_disk_ctrl_cb(raw_ctx: *mut c_void, cmd: DiskCtrl<'_>) -> i32 {
     let c = unsafe { &mut *raw_ctx.cast::<ActiveDiskExecCtx<'_>>() };
-    if cmd == 19 {
-        let txt = bytes_to_cstring_trunc(unsafe { cstr::bytes(s1) });
-        c.messages.push((a1, a2, a3 as i32, txt));
+    if let DiskCtrl::AddMessage {
+        nzb_id,
+        kind,
+        time,
+        text,
+    } = cmd
+    {
+        c.messages
+            .push((nzb_id, kind, time, bytes_to_cstring_trunc(text)));
         return 0;
     }
     let Some(qh) = c.qh else {
         return 0;
     };
     match cmd {
-        0 => qh.queue_len(c.dq_ptr) as c_int,
-        1 => qh.history_len(c.dq_ptr) as c_int,
-        2 => qh.id_gen_last().0,
-        3 => qh.id_gen_last().1,
-        4 => {
+        DiskCtrl::QueueLen => qh.queue_len(c.dq_ptr) as i32,
+        DiskCtrl::HistoryLen => qh.history_len(c.dq_ptr) as i32,
+        DiskCtrl::LastNzbId => qh.id_gen_last().0,
+        DiskCtrl::LastFileId => qh.id_gen_last().1,
+        DiskCtrl::QueuedFileCount => {
             let qlen = qh.queue_len(c.dq_ptr);
             let mut total = 0i32;
             for i in 0..qlen {
@@ -7062,47 +7136,47 @@ unsafe extern "C" fn active_disk_ctrl_cb(
             }
             total
         }
-        5 => {
-            let n = qh.queue_at(c.dq_ptr, a1 as usize);
-            qh.nzb_file_len(n) as c_int
+        DiskCtrl::NzbFileCount { nzb } => {
+            let n = qh.queue_at(c.dq_ptr, nzb as usize);
+            qh.nzb_file_len(n) as i32
         }
-        6 => {
-            let n = qh.queue_at(c.dq_ptr, a1 as usize);
-            let fp = qh.nzb_file_at(n, a2 as usize);
+        DiskCtrl::SelectFile { nzb, file } => {
+            let n = qh.queue_at(c.dq_ptr, nzb as usize);
+            let fp = qh.nzb_file_at(n, file as usize);
             c.target_file_ptr = fp;
             qh.file_snap(fp).id
         }
-        7 => {
-            let n = qh.queue_at(c.dq_ptr, a1 as usize);
+        DiskCtrl::RemoveFile { nzb, file_id } => {
+            let n = qh.queue_at(c.dq_ptr, nzb as usize);
             let flen = qh.nzb_file_len(n);
             for i in 0..flen {
                 let fp = qh.nzb_file_at(n, i);
-                if qh.file_snap(fp).id == a2 {
+                if qh.file_snap(fp).id == file_id {
                     qh.nzb_remove_file(n, fp);
                     break;
                 }
             }
             0
         }
-        8 => {
+        DiskCtrl::FileQueued { file_id } => {
             let qlen = qh.queue_len(c.dq_ptr);
             for i in 0..qlen {
                 let n = qh.queue_at(c.dq_ptr, i);
                 let flen = qh.nzb_file_len(n);
                 for j in 0..flen {
                     let fp = qh.nzb_file_at(n, j);
-                    if qh.file_snap(fp).id == a1 {
+                    if qh.file_snap(fp).id == file_id {
                         return 1;
                     }
                 }
             }
             0
         }
-        9 => {
+        DiskCtrl::ResetPendingNzb => {
             c.reset_pending_nzb(qh);
             0
         }
-        10 => {
+        DiskCtrl::FinishNewNzb => {
             let uptr = c.pending_nzb_uptr;
             c.pending_nzb_uptr = 0;
             c.target_nzb_ptr = NzbRef::NONE;
@@ -7111,8 +7185,8 @@ unsafe extern "C" fn active_disk_ctrl_cb(
             }
             0
         }
-        11 => {
-            let found = qh.queue_find_by_id(c.dq_ptr, a1);
+        DiskCtrl::SelectQueuedNzb { id } => {
+            let found = qh.queue_find_by_id(c.dq_ptr, id);
             if found.is_some() {
                 c.target_nzb_ptr = found;
                 1
@@ -7121,8 +7195,8 @@ unsafe extern "C" fn active_disk_ctrl_cb(
                 0
             }
         }
-        12 => {
-            if a1 == crate::queuesubsys_host::HK_NZB && c.target_nzb_ptr.is_some() {
+        DiskCtrl::PushPendingToHistory { kind, time } => {
+            if kind == crate::queuesubsys_host::HK_NZB && c.target_nzb_ptr.is_some() {
                 qh.nzb_action(
                     c.target_nzb_ptr,
                     crate::queuesubsys_host::NZB_ACT_LEAVE_POST_PROCESS,
@@ -7132,21 +7206,21 @@ unsafe extern "C" fn active_disk_ctrl_cb(
             c.pending_nzb_uptr = 0;
             c.target_nzb_ptr = NzbRef::NONE;
             if uptr != 0 {
-                qh.history_push_nzb_uptr(c.dq_ptr, uptr, a2);
+                qh.history_push_nzb_uptr(c.dq_ptr, uptr, time);
             }
             0
         }
-        13 => {
+        DiskCtrl::SelectNzb { in_history, id } => {
             let mut found = NzbRef::NONE;
-            if a1 == 0 {
-                found = qh.queue_find_by_id(c.dq_ptr, a2);
+            if !in_history {
+                found = qh.queue_find_by_id(c.dq_ptr, id);
             } else {
                 let hlen = qh.history_len(c.dq_ptr);
                 for i in 0..hlen {
                     let hi = qh.history_at(c.dq_ptr, i);
                     if (hi.kind == crate::queuesubsys_host::HK_NZB
                         || hi.kind == crate::queuesubsys_host::HK_URL)
-                        && hi.id == a2
+                        && hi.id == id
                     {
                         found = hi.nzb();
                         break;
@@ -7161,7 +7235,7 @@ unsafe extern "C" fn active_disk_ctrl_cb(
                 0
             }
         }
-        14 => {
+        DiskCtrl::SelectFileWithCounters { file_id } => {
             let qlen = qh.queue_len(c.dq_ptr);
             for i in 0..qlen {
                 let n = qh.queue_at(c.dq_ptr, i);
@@ -7169,7 +7243,7 @@ unsafe extern "C" fn active_disk_ctrl_cb(
                 for j in 0..flen {
                     let fp = qh.nzb_file_at(n, j);
                     let fs = qh.file_snap(fp);
-                    if fs.id == a1 {
+                    if fs.id == file_id {
                         c.target_file_ptr = fp;
                         c.snap_success_articles = fs.success_articles;
                         c.snap_failed_articles = fs.failed_articles;
@@ -7182,7 +7256,7 @@ unsafe extern "C" fn active_disk_ctrl_cb(
             }
             0
         }
-        15 => {
+        DiskCtrl::RestoreFileCounters => {
             let fp = c.target_file_ptr;
             qh.file_action(fp, crate::queuesubsys_host::FILE_ACT_CLEAR_ARTICLES);
             qh.file_set_int(
@@ -7212,13 +7286,13 @@ unsafe extern "C" fn active_disk_ctrl_cb(
             );
             0
         }
-        16 => {
+        DiskCtrl::ResetFileArticles { completed } => {
             let fp = c.target_file_ptr;
             qh.file_action(fp, crate::queuesubsys_host::FILE_ACT_CLEAR_ARTICLES);
             qh.file_set_int(
                 fp,
                 crate::queuesubsys_host::FILE_INT_PARTIAL_STATE,
-                if a1 != 0 {
+                if completed {
                     crate::queuesubsys_host::PARTIAL_COMPLETED
                 } else {
                     crate::queuesubsys_host::PARTIAL_PARTIAL
@@ -7226,18 +7300,18 @@ unsafe extern "C" fn active_disk_ctrl_cb(
             );
             0
         }
-        17 => {
+        DiskCtrl::StageStandaloneFile { file_id } => {
             if c.staged_file_ptr.is_some() {
                 qh.delete_file_info(c.staged_file_ptr);
                 c.staged_file_ptr = FileRef::NONE;
             }
-            let fp = qh.file_new_standalone(a1, true);
+            let fp = qh.file_new_standalone(file_id, true);
             c.staged_file_ptr = fp;
             c.target_file_ptr = fp;
             0
         }
-        18 => {
-            qh.id_gen_raise_and_reset(a1, a2);
+        DiskCtrl::RaiseIdGen { max_nzb, max_file } => {
+            qh.id_gen_raise_and_reset(max_nzb, max_file);
             let qlen = qh.queue_len(c.dq_ptr);
             for i in 0..qlen {
                 let n = qh.queue_at(c.dq_ptr, i);
@@ -7245,7 +7319,7 @@ unsafe extern "C" fn active_disk_ctrl_cb(
             }
             0
         }
-        20 => {
+        DiskCtrl::ChangedNzbCount => {
             let qlen = qh.queue_len(c.dq_ptr);
             let mut cnt = 0i32;
             for i in 0..qlen {
@@ -7256,7 +7330,7 @@ unsafe extern "C" fn active_disk_ctrl_cb(
             }
             cnt
         }
-        _ => 0,
+        DiskCtrl::AddMessage { .. } => 0,
     }
 }
 

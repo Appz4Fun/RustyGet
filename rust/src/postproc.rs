@@ -2989,6 +2989,21 @@ pub(crate) fn direct_unpack_release_path(full_path: &[u8]) -> bool {
     for st in map.values_mut() {
         if let Some(i) = st.held.iter().position(|p| p == full_path) {
             let path = st.held.remove(i);
+            // The real volume is on disk now (recreated whole from a twin, say): a stand-in
+            // handed over before its borrow finished would keep answering for it with holes.
+            let mut stale = Vec::new();
+            st.offered.retain(|k, v| {
+                let keep = !k.eq_ignore_ascii_case(&path);
+                if !keep {
+                    stale.push(v.data.clone());
+                }
+                keep
+            });
+            for data in stale {
+                if crate::deadvolume::is_scratch(&data) {
+                    let _ = std::fs::remove_file(&data);
+                }
+            }
             st.holes.remove(&path);
             st.released.push(hold_path_filename(&path).to_vec());
             if st.held.is_empty() {
@@ -5225,6 +5240,41 @@ mod live_hold_tests {
         super::direct_unpack_set_virtual(id, &p("movie.part06.rar"), v2);
         assert!(super::direct_unpack_is_held_path(&p("movie.part07.rar")));
         assert_eq!(super::take_dead_volumes_borrowed(id), 1);
+        super::direct_unpack_forget_holds(id);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_volume_recreated_whole_drops_its_stand_in_handed_over_with_holes() {
+        use crate::progressive_unpack::{VolumeFeed, VolumeView};
+        let dir = std::env::temp_dir().join(format!("rg-offer-rel-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let vol = dir.join("movie.part04.rar");
+        let full = vol.to_string_lossy().as_bytes().to_vec();
+        let scratch = dir.join(String::from_utf8(crate::deadvolume::scratch_name(b"movie.part04.rar")).unwrap());
+        std::fs::write(&scratch, vec![0u8; 8]).unwrap();
+        let id = 917_303;
+        super::direct_unpack_hold(id, &full);
+        super::direct_unpack_offer_virtual(
+            id,
+            &full,
+            crate::deadvolume::VirtualVolume {
+                head: vec![1, 2],
+                data: scratch.clone(),
+                data_len: 8,
+                tail: Vec::new(),
+                holes: vec![(2, 8)],
+            },
+        );
+        let mut feed = super::DirectUnpackFeed { nzb_id: id, expected_volumes: 6 };
+        assert!(matches!(feed.volume(&vol), VolumeView::Virtual(_)));
+        // Recreated whole from a twin: the real file answers now, and the stand-in is gone.
+        std::fs::write(&vol, b"whole volume").unwrap();
+        assert!(super::direct_unpack_release_path(&full));
+        assert!(super::direct_unpack_offered(id, &full).is_none());
+        assert!(!scratch.exists());
+        assert!(!super::dead_volume_borrow_underway(id));
+        assert!(matches!(feed.volume(&vol), VolumeView::Ready { ref holes } if holes.is_empty()));
         super::direct_unpack_forget_holds(id);
         let _ = std::fs::remove_dir_all(&dir);
     }

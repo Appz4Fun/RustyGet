@@ -2044,6 +2044,25 @@ impl NzbgetRsStreamRepairCtrl {
     fn run_post(&self, q: JobQueue<'_>) {
         // (self.nzb_id is set for a live repair only)
         let _running = self.pending_data_files(q).1.map(RunningRepair::mark);
+        // Direct unpack already extracted the whole archive (dead volumes read in place from
+        // what the live repair borrowed): borrowing those volumes again into files nothing
+        // reads only spends downloads.
+        let unpacked = q.host.with_locked_queue(|_| {
+            let post_ptr = q.post_ptr();
+            (!post_ptr.is_none()).then(|| {
+                let nzb = q.host.post_snap(post_ptr).nzb_ptr;
+                (!nzb.is_none()).then(|| q.host.nzb_snap(nzb, false))
+            })
+        });
+        if let Some(Some(ns)) = unpacked {
+            if ns.direct_unpack_status == crate::status::DirectUnpackStatus::Success {
+                let mut msg = b"Not stream-repairing ".to_vec();
+                msg.extend_from_slice(cstr::until_nul(&ns.name));
+                msg.extend_from_slice(b": direct unpack already extracted it");
+                self.print_message(q, MK_INFO, &msg);
+                return;
+            }
+        }
         let mut counters = RunCounters::default();
         let Some((nzb_name, dest_dir, mut targets, donors, member_names)) =
             q.host.with_locked_queue(|dq_ptr| {

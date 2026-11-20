@@ -3062,7 +3062,11 @@ impl NzbgetRsArticleDownloader {
                             );
                             return false;
                         }
-                        Err(mismatch) => {
+                        Err(
+                            mismatch @ (YencRangeError::FileSizeMismatch
+                            | YencRangeError::OffsetMismatch
+                            | YencRangeError::EndMismatch),
+                        ) => {
                             w.decoded_file_size = article_file_size;
                             let tail = match mismatch {
                                 YencRangeError::FileSizeMismatch => format!(
@@ -3073,6 +3077,7 @@ impl NzbgetRsArticleDownloader {
                                     begin_pos - 1,
                                     dupe_expected_offset.unwrap_or(-1)
                                 ),
+                                // EndMismatch; the other kinds are handled above
                                 _ => format!(
                                     " from duplicate: decoded end mismatch ({end_pos} vs {})",
                                     dupe_expected_end.unwrap_or(-1)

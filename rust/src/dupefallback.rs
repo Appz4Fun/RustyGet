@@ -339,6 +339,7 @@ pub fn expected_segment_offset(
         && prev_status == ARTICLE_STATUS_FINISHED
         && prev_size > 0)
         .then(|| prev_offset.saturating_add(i64::from(prev_size)))
+        .filter(|&offset| offset >= 0)
 }
 
 /// Computes the expected decoded byte end of article at `index` from its right neighbour or
@@ -363,6 +364,7 @@ pub fn expected_segment_end(
         && next_status == ARTICLE_STATUS_FINISHED
         && next_size > 0)
         .then_some(next_offset)
+        .filter(|&end| end >= 0)
 }
 
 /// Checks whether a finished segment `[segment_offset, segment_offset + segment_size)` aligns
@@ -1068,6 +1070,20 @@ pub enum YencRangeError {
     /// A borrowed article ends somewhere other than its neighbours say.
     EndMismatch,
 }
+
+impl std::fmt::Display for YencRangeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::MissingBounds => "missing yEnc begin or end",
+            Self::Malformed => "yEnc range out of bounds",
+            Self::FileSizeMismatch => "file size mismatch",
+            Self::OffsetMismatch => "decoded offset mismatch",
+            Self::EndMismatch => "decoded end mismatch",
+        })
+    }
+}
+
+impl std::error::Error for YencRangeError {}
 
 /// `DupeArticleFallback::IsParFile`:
 /// Checks whether a file is a PAR2 file by flag, first-article content (`fcPar2`),

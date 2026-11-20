@@ -240,6 +240,7 @@ impl NntpHost for NativeNntpHost {
         if let Some(sm) = crate::statmeter::active_statmeter() {
             sm.add_speed_reading_locked(len as c_int);
         }
+        note_repair_bytes(len);
         Some(len)
     }
 
@@ -436,37 +437,70 @@ pub fn set_server_unreachable(server_id: i32, unreachable: bool) {
     }
 }
 
-/// Live stream repairs running now. While any runs under a speed limit, the download keeps
-/// to a quarter of the limit so the repair, which fixes bytes the stream reaches before
-/// anything still downloading, gets the rest of the line.
-static LIVE_REPAIRS: AtomicUsize = AtomicUsize::new(0);
+/// Repair fetches held back by the speed limit right now: they want more of the line.
+static REPAIR_WAITING: AtomicUsize = AtomicUsize::new(0);
 
-/// Share of the speed limit the download keeps while a live repair runs: 1 in this many.
-const DOWNLOAD_SHARE_DURING_REPAIR: i32 = 4;
+/// Bytes repair fetches read in the current second (unix time, bytes), like the statmeter's
+/// momentary speed, so the download's own share can be told apart from the total.
+static REPAIR_SECOND: Mutex<(i64, i64)> = Mutex::new((0, 0));
 
-/// Holds the line for a live repair until dropped (see [`LIVE_REPAIRS`]).
-pub struct LiveRepairPriority(());
+/// Share of the speed limit the download keeps while repair fetches wait: 1 in this many.
+const DOWNLOAD_SHARE_DURING_REPAIR: i64 = 4;
 
-impl LiveRepairPriority {
-    pub fn hold() -> Self {
-        LIVE_REPAIRS.fetch_add(1, Ordering::SeqCst);
-        Self(())
-    }
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
 }
 
-impl Drop for LiveRepairPriority {
-    fn drop(&mut self) {
-        LIVE_REPAIRS.fetch_sub(1, Ordering::SeqCst);
+fn note_repair_bytes(len: usize) {
+    let now = unix_now();
+    let mut g = REPAIR_SECOND.lock().unwrap_or_else(|e| e.into_inner());
+    if g.0 != now {
+        *g = (now, 0);
     }
+    g.1 += len as i64;
 }
 
-/// The speed limit the download itself keeps: `limit`, or its share while a live repair runs.
-pub fn download_speed_limit(limit: i32) -> i32 {
-    if limit > 0 && LIVE_REPAIRS.load(Ordering::SeqCst) > 0 {
-        (limit / DOWNLOAD_SHARE_DURING_REPAIR).max(1)
+fn repair_momentary_speed() -> i64 {
+    let g = REPAIR_SECOND.lock().unwrap_or_else(|e| e.into_inner());
+    if g.0 == unix_now() {
+        g.1
     } else {
-        limit
+        0
     }
+}
+
+/// Whether the download should hold back its next read. Over the speed limit it always does.
+/// While repair fetches wait for the line it also does once its own share of this second
+/// passes a quarter of the limit: everything a repair fixes lies behind the download front,
+/// where the stream reaches first, so the repair gets the rest. When no repair is waiting the
+/// download has the whole line.
+fn download_should_yield(
+    limit: i64,
+    cur_speed: i64,
+    mom_speed: i64,
+    repair_mom_speed: i64,
+    repair_waiting: bool,
+) -> bool {
+    if limit <= 0 {
+        return false;
+    }
+    if cur_speed > limit || mom_speed > limit {
+        return true;
+    }
+    repair_waiting && mom_speed - repair_mom_speed > limit / DOWNLOAD_SHARE_DURING_REPAIR
+}
+
+/// [`download_should_yield`] with the live repair state.
+pub fn download_must_wait(limit: i64, cur_speed: i64, mom_speed: i64) -> bool {
+    download_should_yield(
+        limit,
+        cur_speed,
+        mom_speed,
+        repair_momentary_speed(),
+        REPAIR_WAITING.load(Ordering::SeqCst) > 0,
+    )
 }
 
 pub struct ArticleFetcher {
@@ -881,6 +915,7 @@ impl ArticleFetcher {
                 return result;
             }
             let throttle_started = Instant::now();
+            let mut waiting = false;
             while !self.is_stopped() {
                 let st_lim = self.host.status();
                 if st_lim.quota_reached
@@ -891,7 +926,14 @@ impl ArticleFetcher {
                 {
                     break;
                 }
+                if !waiting {
+                    waiting = true;
+                    REPAIR_WAITING.fetch_add(1, Ordering::SeqCst);
+                }
                 std::thread::sleep(Duration::from_millis(10));
+            }
+            if waiting {
+                REPAIR_WAITING.fetch_sub(1, Ordering::SeqCst);
             }
             throttled += throttle_started.elapsed();
             throttled_total += throttle_started.elapsed();
@@ -1312,16 +1354,17 @@ mod tests {
     }
 
     #[test]
-    fn the_download_keeps_a_quarter_of_the_limit_while_a_live_repair_runs() {
-        assert_eq!(download_speed_limit(0), 0);
-        let before = download_speed_limit(4_000_000);
-        {
-            let _hold = LiveRepairPriority::hold();
-            assert_eq!(download_speed_limit(4_000_000), 1_000_000);
-            assert_eq!(download_speed_limit(0), 0);
-            assert_eq!(download_speed_limit(2), 1);
-        }
-        assert_eq!(download_speed_limit(4_000_000), before);
+    fn the_download_yields_beyond_a_quarter_only_while_repair_waits() {
+        let limit = 4_000_000;
+        // no limit, or under it with nothing waiting: go
+        assert!(!download_should_yield(0, 9e9 as i64, 9e9 as i64, 0, true));
+        assert!(!download_should_yield(limit, 3_900_000, 3_900_000, 0, false));
+        // over the limit: always wait
+        assert!(download_should_yield(limit, 4_100_000, 100, 0, false));
+        // repair waiting: the download keeps a quarter of its own, counted without repair bytes
+        assert!(download_should_yield(limit, 3_000_000, 1_100_000, 0, true));
+        assert!(!download_should_yield(limit, 3_000_000, 3_900_000, 3_000_000, true));
+        assert!(download_should_yield(limit, 3_000_000, 3_900_000, 2_000_000, true));
     }
 
     #[test]

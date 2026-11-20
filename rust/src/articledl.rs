@@ -3321,15 +3321,17 @@ impl NzbgetRsArticleDownloader {
                 if host.is_stopped() {
                     break;
                 }
-                let limit = crate::articlefetcher::download_speed_limit(
-                    crate::ffi::active_workstate().map_or(0, |ws| ws.speed_limit()),
-                );
+                let limit = crate::ffi::active_workstate().map_or(0, |ws| ws.speed_limit());
                 if limit <= 0 {
                     break;
                 }
+                // Repair fetches waiting for the line get most of it (see `download_must_wait`).
                 let over = crate::statmeter::active_statmeter().is_some_and(|sm| {
-                    sm.current_download_speed() > i64::from(limit)
-                        || sm.momentary_download_speed() > i64::from(limit)
+                    crate::articlefetcher::download_must_wait(
+                        i64::from(limit),
+                        sm.current_download_speed(),
+                        sm.momentary_download_speed(),
+                    )
                 });
                 if !over {
                     break;

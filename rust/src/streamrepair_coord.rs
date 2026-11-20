@@ -1362,24 +1362,11 @@ impl NzbgetRsStreamRepairCtrl {
         left_to_borrow: &[bool],
     ) {
         let mut owed = self.recreate_owed.lock().unwrap_or_else(|e| e.into_inner());
-        // A dead volume waiting for an earlier volume to download is borrowed once that one
-        // is in, which beats recreating it now (the capped run spent 101 s on that and still
-        // borrowed after). It stays owed, so a later failed borrow still recreates it.
-        let finished: Vec<&[u8]> = member_names.iter().map(Vec::as_slice).collect();
-        for (i, t) in targets.iter().enumerate() {
-            if left_to_borrow.get(i).copied().unwrap_or(false)
-                && t.needs_repair()
-                && waiting_for_earlier_volume(&t.filename, &finished)
-            {
-                owed.insert(t.filename.clone());
-            }
-        }
         let retry: Vec<bool> = (0..targets.len())
             .map(|i| {
                 let t = &targets[i];
                 left_to_borrow.get(i).copied().unwrap_or(false)
                     && (!t.tried_before || owed.contains(&t.filename))
-                    && !waiting_for_earlier_volume(&t.filename, &finished)
                     && t.needs_repair()
                     && !crate::postproc::direct_unpack_has_virtual(
                         &[
@@ -2451,9 +2438,6 @@ impl NzbgetRsStreamRepairCtrl {
                 }
             }
             let borrowing = left_to_borrow.iter().any(|l| *l);
-            // Everything a live pass fixes lies behind the download front, where the stream
-            // reaches first: under a speed limit it gets most of the line until it ends.
-            let _priority = crate::articlefetcher::LiveRepairPriority::hold();
             let borrow_note = BorrowNote::mark(if borrowing {
                 self.pending_data_files(q).1
             } else {
@@ -2647,11 +2631,6 @@ struct PassDead {
 /// Whether a dead volume can be placed now: every earlier volume of its set is finished (on
 /// disk or dead too). A borrow plan walks the set from part 1, so a dead volume behind one
 /// still downloading waits; stopping a pass for it would only start the borrow over.
-/// A `partNN` volume whose earlier volumes are not all finished yet.
-fn waiting_for_earlier_volume(name: &[u8], finished: &[&[u8]]) -> bool {
-    crate::streamrepair::rar_part_number(name).is_some() && !placeable_now(name, finished)
-}
-
 fn placeable_now(name: &[u8], finished: &[&[u8]]) -> bool {
     let Some((prefix, n, width, suffix)) = crate::streamrepair::rar_part_number(name) else {
         return false;
@@ -2705,16 +2684,6 @@ mod tests {
         assert!(!placeable_now(b"y.part03.rar", &done));
         assert!(placeable_now(b"y.part02.rar", &done));
         assert!(!placeable_now(b"movie.mkv", &done));
-    }
-
-    #[test]
-    fn only_a_part_volume_with_earlier_volumes_missing_waits_instead_of_being_recreated() {
-        let done: Vec<&[u8]> = vec![b"x.part01.rar", b"x.part02.rar"];
-        assert!(!waiting_for_earlier_volume(b"x.part03.rar", &done));
-        assert!(waiting_for_earlier_volume(b"x.part05.rar", &done));
-        // Names without a part number never wait: they keep the recreation.
-        assert!(!waiting_for_earlier_volume(b"x.r07", &done));
-        assert!(!waiting_for_earlier_volume(b"movie.7z.003", &done));
     }
 
     #[test]

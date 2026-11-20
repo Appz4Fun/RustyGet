@@ -39,8 +39,34 @@ const NAMES: [&CStr; LAST_TYPE as usize + 1] = [
     c"History",
 ];
 
-fn be32(base: &[u8; BASE_SIZE], at: usize) -> u32 {
-    u32::from_be_bytes(base[at..at + 4].try_into().unwrap())
+/// The 4 bytes of `buf` at `at`. Panics past the end like slicing would;
+/// every caller has already checked the message size.
+fn word_at(buf: &[u8], at: usize) -> [u8; 4] {
+    let mut word = [0; 4];
+    word.copy_from_slice(&buf[at..at + 4]);
+    word
+}
+
+/// Big-endian `u32` at byte offset `at` (the wire byte order).
+fn be_u32(buf: &[u8], at: usize) -> u32 {
+    u32::from_be_bytes(word_at(buf, at))
+}
+
+/// Big-endian `i32` at byte offset `at` (the wire byte order).
+fn be_i32(buf: &[u8], at: usize) -> i32 {
+    i32::from_be_bytes(word_at(buf, at))
+}
+
+/// Native-endian `i32` at byte offset `at`, for the one field NZBGet wrote
+/// without converting it.
+fn ne_i32(buf: &[u8], at: usize) -> i32 {
+    i32::from_ne_bytes(word_at(buf, at))
+}
+
+/// The message base at the start of a buffer at least `BASE_SIZE` long.
+fn base_mut(buf: &mut [u8]) -> &mut [u8; BASE_SIZE] {
+    buf.first_chunk_mut::<BASE_SIZE>()
+        .expect("message buffers are at least BASE_SIZE bytes")
 }
 
 /// A C string in the base from `at`: strcmp read on past an unterminated
@@ -63,7 +89,7 @@ pub fn credentials_ok(
 
 /// The request type (ntohl(m_type)).
 pub fn request_type(base: &[u8; BASE_SIZE]) -> u32 {
-    be32(base, 8)
+    be_u32(base, 8)
 }
 
 /// The request's name in the debug line ("Unknown" past rrHistory).
@@ -75,7 +101,7 @@ pub fn request_name(kind: u32) -> &'static CStr {
 /// type comes with another struct size than g_MessageRequestSizes gives.
 pub fn size_error(base: &[u8; BASE_SIZE], sizes: &[u32]) -> Option<(u32, u32)> {
     let kind = request_type(base);
-    let size = be32(base, 4);
+    let size = be_u32(base, 4);
     if (1..=LAST_TYPE).contains(&kind) {
         let expected = sizes.get(kind as usize).copied()?;
         if expected != size {
@@ -1319,7 +1345,7 @@ pub fn init_download_request(
     auto_category: bool,
 ) {
     out.fill(0);
-    let base_slice: &mut [u8; BASE_SIZE] = (&mut out[..BASE_SIZE]).try_into().unwrap();
+    let base_slice = base_mut(out);
     init_message_base(
         base_slice,
         1,
@@ -3436,14 +3462,14 @@ pub fn serve_binrpc<RV, SD, LG, ACT, LST, LOGT, POSTT, HISTT>(
             extra[1044 + 511] = 0;
             let nzb_filename = cstr::until_nul(&extra[0..512]);
             let category = cstr::until_nul(&extra[512..1024]);
-            let add_first = i32::from_be_bytes(extra[1024..1028].try_into().unwrap());
-            let add_paused = i32::from_be_bytes(extra[1028..1032].try_into().unwrap());
-            let priority = i32::from_be_bytes(extra[1032..1036].try_into().unwrap());
-            let dupe_score = i32::from_be_bytes(extra[1036..1040].try_into().unwrap());
-            let dupe_mode = i32::from_be_bytes(extra[1040..1044].try_into().unwrap());
+            let add_first = be_i32(&extra, 1024);
+            let add_paused = be_i32(&extra, 1028);
+            let priority = be_i32(&extra, 1032);
+            let dupe_score = be_i32(&extra, 1036);
+            let dupe_mode = be_i32(&extra, 1040);
             let dupe_key = cstr::until_nul(&extra[1044..1556]);
-            let buf_len = i32::from_be_bytes(extra[1556..1560].try_into().unwrap());
-            let auto_category = i32::from_be_bytes(extra[1560..1564].try_into().unwrap());
+            let buf_len = be_i32(&extra, 1556);
+            let auto_category = be_i32(&extra, 1560);
 
             if buf_len <= 0 {
                 log_msg(2, b"invalid request");
@@ -3498,8 +3524,8 @@ pub fn serve_binrpc<RV, SD, LG, ACT, LST, LOGT, POSTT, HISTT>(
             if !recv_extra(&mut extra, &mut recv_exact, &mut log_msg) {
                 return;
             }
-            let pause = i32::from_be_bytes(extra[0..4].try_into().unwrap());
-            let action = i32::from_be_bytes(extra[4..8].try_into().unwrap());
+            let pause = be_i32(&extra, 0);
+            let action = be_i32(&extra, 4);
             let _ = run_action(
                 2,
                 i32::from(pause != 0),
@@ -3525,10 +3551,10 @@ pub fn serve_binrpc<RV, SD, LG, ACT, LST, LOGT, POSTT, HISTT>(
             if !recv_extra(&mut extra, &mut recv_exact, &mut log_msg) {
                 return;
             }
-            let want_files = i32::from_be_bytes(extra[0..4].try_into().unwrap()) != 0;
-            let want_state = i32::from_be_bytes(extra[4..8].try_into().unwrap()) != 0;
-            let match_mode = i32::from_be_bytes(extra[8..12].try_into().unwrap());
-            let match_group = i32::from_be_bytes(extra[12..16].try_into().unwrap()) != 0;
+            let want_files = be_i32(&extra, 0) != 0;
+            let want_state = be_i32(&extra, 4) != 0;
+            let match_mode = be_i32(&extra, 8);
+            let match_group = be_i32(&extra, 12) != 0;
             extra[16 + 511] = 0;
             let pattern = cstr::until_nul(&extra[16..528]);
 
@@ -3604,14 +3630,14 @@ pub fn serve_binrpc<RV, SD, LG, ACT, LST, LOGT, POSTT, HISTT>(
             if !recv_extra(&mut extra, &mut recv_exact, &mut log_msg) {
                 return;
             }
-            let action = i32::from_be_bytes(extra[0..4].try_into().unwrap());
-            let offset = i32::from_be_bytes(extra[4..8].try_into().unwrap());
-            let match_mode = i32::from_be_bytes(extra[8..12].try_into().unwrap());
-            let nr_ids = i32::from_be_bytes(extra[12..16].try_into().unwrap());
-            let nr_names = i32::from_be_bytes(extra[16..20].try_into().unwrap());
-            let names_len = i32::from_be_bytes(extra[20..24].try_into().unwrap());
-            let text_len = i32::from_be_bytes(extra[24..28].try_into().unwrap());
-            let data_len = u32::from_be_bytes(extra[28..32].try_into().unwrap());
+            let action = be_i32(&extra, 0);
+            let offset = be_i32(&extra, 4);
+            let match_mode = be_i32(&extra, 8);
+            let nr_ids = be_i32(&extra, 12);
+            let nr_names = be_i32(&extra, 16);
+            let names_len = be_i32(&extra, 20);
+            let text_len = be_i32(&extra, 24);
+            let data_len = be_u32(&extra, 28);
 
             if !edit_sizes_ok(nr_ids, nr_names, names_len, text_len, data_len) {
                 log_msg(2, b"Invalid struct size");
@@ -3696,8 +3722,8 @@ pub fn serve_binrpc<RV, SD, LG, ACT, LST, LOGT, POSTT, HISTT>(
             if !recv_extra(&mut extra, &mut recv_exact, &mut log_msg) {
                 return;
             }
-            let id_from = u32::from_be_bytes(extra[0..4].try_into().unwrap());
-            let lines = i32::from_be_bytes(extra[4..8].try_into().unwrap());
+            let id_from = be_u32(&extra, 0);
+            let lines = be_i32(&extra, 4);
             let mut nr_entries = 0u32;
             let mut enc = WireEntryEncoder::new();
             collect_log(lines, id_from, &mut nr_entries, &mut enc);
@@ -3744,8 +3770,8 @@ pub fn serve_binrpc<RV, SD, LG, ACT, LST, LOGT, POSTT, HISTT>(
             if !recv_extra(&mut extra, &mut recv_exact, &mut log_msg) {
                 return;
             }
-            let msg_kind = i32::from_be_bytes(extra[0..4].try_into().unwrap());
-            let data_len = i32::from_be_bytes(extra[4..8].try_into().unwrap());
+            let msg_kind = be_i32(&extra, 0);
+            let data_len = be_i32(&extra, 4);
             let Some(buf) = recv_trailing(
                 i64::from(data_len),
                 1024 * 1024,
@@ -4068,8 +4094,8 @@ where
             vprint(b"Request sent\n", out);
             let mut resp = [0u8; 16];
             let read_ok = conn.recv(&mut resp);
-            let sig = i32::from_be_bytes(resp[0..4].try_into().unwrap());
-            let sz = u32::from_be_bytes(resp[4..8].try_into().unwrap());
+            let sig = be_i32(&resp, 0);
+            let sz = be_u32(&resp, 4);
             if !read_ok || sig != SIGNATURE || sz != 16 {
                 vprint(
                     b"No response or invalid response (timeout, not RustyGet server or wrong RustyGet server version)\n",
@@ -4077,8 +4103,8 @@ where
                 );
                 false
             } else {
-                let success = u32::from_be_bytes(resp[8..12].try_into().unwrap()) != 0;
-                let text_len = i32::from_be_bytes(resp[12..16].try_into().unwrap());
+                let success = be_u32(&resp, 8) != 0;
+                let text_len = be_i32(&resp, 12);
                 let mut text_buf = vec![0u8; text_len.max(0) as usize];
                 if text_len < 0 || (text_len > 0 && !conn.recv(&mut text_buf)) {
                     vprint(
@@ -4121,8 +4147,8 @@ where
         }
         let mut resp = vec![0u8; resp_size];
         let read_ok = conn.recv(&mut resp);
-        let sig = i32::from_be_bytes(resp[0..4].try_into().unwrap());
-        let sz = u32::from_be_bytes(resp[4..8].try_into().unwrap()) as usize;
+        let sig = be_i32(&resp, 0);
+        let sz = be_u32(&resp, 4) as usize;
         if !read_ok || sig != SIGNATURE || sz != resp_size {
             if verbose_exchange {
                 vprint(
@@ -4132,7 +4158,7 @@ where
             }
             return None;
         }
-        let trailing_len = i32::from_be_bytes(resp[resp_size - 4..resp_size].try_into().unwrap());
+        let trailing_len = be_i32(&resp, resp_size - 4);
         let mut trailing = Vec::new();
         if trailing_len > 0 {
             let n = trailing_len as usize;
@@ -4150,7 +4176,7 @@ where
 
     let make_req = |req_type: i32, size: usize| -> Vec<u8> {
         let mut req = vec![0u8; size];
-        let base_arr: &mut [u8; BASE_SIZE] = (&mut req[..BASE_SIZE]).try_into().unwrap();
+        let base_arr = base_mut(&mut req);
         init_message_base(
             base_arr,
             req_type,
@@ -4278,14 +4304,14 @@ where
             ) else {
                 return false;
             };
-            let regex_valid = i32::from_ne_bytes(resp[72..76].try_into().unwrap()) != 0;
+            let regex_valid = ne_i32(&resp, 72) != 0;
             if pattern_opt.is_some() && !regex_valid {
                 vprint(b"Error in regular expression\n", &mut write_stdout);
                 return false;
             }
-            let nr_nzb = u32::from_be_bytes(resp[76..80].try_into().unwrap());
-            let nr_ppp = u32::from_be_bytes(resp[80..84].try_into().unwrap());
-            let nr_files = u32::from_be_bytes(resp[84..88].try_into().unwrap());
+            let nr_nzb = be_u32(&resp, 76);
+            let nr_ppp = be_u32(&resp, 80);
+            let nr_files = be_u32(&resp, 84);
 
             if files {
                 if trailing.is_empty() {
@@ -4322,25 +4348,25 @@ where
                 }
             }
 
-            let rem_lo = u32::from_be_bytes(resp[12..16].try_into().unwrap());
-            let rem_hi = u32::from_be_bytes(resp[16..20].try_into().unwrap());
-            let dl_lo = u32::from_be_bytes(resp[64..68].try_into().unwrap());
-            let dl_hi = u32::from_be_bytes(resp[68..72].try_into().unwrap());
+            let rem_lo = be_u32(&resp, 12);
+            let rem_hi = be_u32(&resp, 16);
+            let dl_lo = be_u32(&resp, 64);
+            let dl_hi = be_u32(&resp, 68);
             let spec = StatusSummarySpec {
                 include_remaining_size: i32::from(!files && !groups),
                 remaining_size: join_i64(rem_hi, rem_lo),
-                download_rate: u32::from_be_bytes(resp[20..24].try_into().unwrap()),
-                download_paused: u32::from_be_bytes(resp[28..32].try_into().unwrap()),
-                download2_paused: u32::from_be_bytes(resp[32..36].try_into().unwrap()),
-                download_stand_by: u32::from_be_bytes(resp[36..40].try_into().unwrap()),
+                download_rate: be_u32(&resp, 20),
+                download_paused: be_u32(&resp, 28),
+                download2_paused: be_u32(&resp, 32),
+                download_stand_by: be_u32(&resp, 36),
                 downloaded_bytes: join_i64(dl_hi, dl_lo),
-                download_time_sec: u32::from_be_bytes(resp[60..64].try_into().unwrap()),
-                download_limit: u32::from_be_bytes(resp[24..28].try_into().unwrap()),
-                up_time_sec: u32::from_be_bytes(resp[56..60].try_into().unwrap()),
-                thread_count: u32::from_be_bytes(resp[48..52].try_into().unwrap()),
-                post_job_count: u32::from_be_bytes(resp[52..56].try_into().unwrap()),
-                scan_paused: u32::from_be_bytes(resp[44..48].try_into().unwrap()),
-                post_paused: u32::from_be_bytes(resp[40..44].try_into().unwrap()),
+                download_time_sec: be_u32(&resp, 60),
+                download_limit: be_u32(&resp, 24),
+                up_time_sec: be_u32(&resp, 56),
+                thread_count: be_u32(&resp, 48),
+                post_job_count: be_u32(&resp, 52),
+                scan_paused: be_u32(&resp, 44),
+                post_paused: be_u32(&resp, 40),
             };
             let summary = status_summary(&spec);
             write_stdout(&summary);
@@ -4417,7 +4443,7 @@ where
             if trailing.is_empty() {
                 vprint(b"Log is empty\n", &mut write_stdout);
             } else {
-                let count = u32::from_be_bytes(resp[12..16].try_into().unwrap());
+                let count = be_u32(&resp, 12);
                 let hdr = format!(
                     "Log (last {} entries)\n-----------------------------------\n",
                     count as i32
@@ -4451,7 +4477,7 @@ where
                     &mut write_stdout,
                 );
             } else {
-                let count = u32::from_be_bytes(resp[12..16].try_into().unwrap());
+                let count = be_u32(&resp, 12);
                 vprint(
                     b"Post-Processing List\n-----------------------------------\n",
                     &mut write_stdout,
@@ -4530,7 +4556,7 @@ where
             if trailing.is_empty() {
                 vprint(b"Server has no files in history\n", &mut write_stdout);
             } else {
-                let count = u32::from_be_bytes(resp[12..16].try_into().unwrap());
+                let count = be_u32(&resp, 12);
                 vprint(
                     b"History (most recent first)\n-----------------------------------\n",
                     &mut write_stdout,
@@ -4575,7 +4601,7 @@ where
                 return false;
             };
             if !trailing.is_empty() {
-                let nr_entries = u32::from_be_bytes(resp[12..16].try_into().unwrap());
+                let nr_entries = be_u32(&resp, 12);
                 decode_log_response_entries(&trailing, nr_entries, |id, kind, time, ptr| {
                     on_log_entry(id, kind, time, ptr);
                 });
@@ -4604,29 +4630,29 @@ where
             };
             if p.want_summary {
                 if let Some(ref mut sum) = out_summary {
-                    let rem_lo = u32::from_be_bytes(resp[12..16].try_into().unwrap());
-                    let rem_hi = u32::from_be_bytes(resp[16..20].try_into().unwrap());
-                    let dl_lo = u32::from_be_bytes(resp[64..68].try_into().unwrap());
-                    let dl_hi = u32::from_be_bytes(resp[68..72].try_into().unwrap());
+                    let rem_lo = be_u32(&resp, 12);
+                    let rem_hi = be_u32(&resp, 16);
+                    let dl_lo = be_u32(&resp, 64);
+                    let dl_hi = be_u32(&resp, 68);
                     sum.pause_download =
-                        i32::from(u32::from_be_bytes(resp[28..32].try_into().unwrap()) != 0);
+                        i32::from(be_u32(&resp, 28) != 0);
                     sum.remaining_size = join_i64(rem_hi, rem_lo);
                     sum.current_download_speed =
-                        u32::from_be_bytes(resp[20..24].try_into().unwrap()) as i64;
-                    sum.download_limit = i32::from_be_bytes(resp[24..28].try_into().unwrap());
-                    sum.thread_count = i32::from_be_bytes(resp[48..52].try_into().unwrap());
-                    sum.post_job_count = i32::from_be_bytes(resp[52..56].try_into().unwrap());
-                    sum.up_time_sec = i32::from_be_bytes(resp[56..60].try_into().unwrap());
-                    sum.dn_time_sec = i32::from_be_bytes(resp[60..64].try_into().unwrap());
+                        be_u32(&resp, 20) as i64;
+                    sum.download_limit = be_i32(&resp, 24);
+                    sum.thread_count = be_i32(&resp, 48);
+                    sum.post_job_count = be_i32(&resp, 52);
+                    sum.up_time_sec = be_i32(&resp, 56);
+                    sum.dn_time_sec = be_i32(&resp, 60);
                     sum.stand_by =
-                        i32::from(u32::from_be_bytes(resp[36..40].try_into().unwrap()) != 0);
+                        i32::from(be_u32(&resp, 36) != 0);
                     sum.all_bytes = join_i64(dl_hi, dl_lo);
                 }
             }
             if p.want_file_list && !trailing.is_empty() {
-                let nr_nzb = u32::from_be_bytes(resp[76..80].try_into().unwrap());
-                let nr_ppp = u32::from_be_bytes(resp[80..84].try_into().unwrap());
-                let nr_files = u32::from_be_bytes(resp[84..88].try_into().unwrap());
+                let nr_nzb = be_u32(&resp, 76);
+                let nr_ppp = be_u32(&resp, 80);
+                let nr_files = be_u32(&resp, 84);
                 let mut at = 0usize;
                 let mut added_nzb = 0usize;
                 for _ in 0..nr_nzb {

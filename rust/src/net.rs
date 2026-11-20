@@ -2709,12 +2709,13 @@ impl PooledNntpConn {
         (*self.conn.session.get()).core.read_line_slice(dst)
     }
 
-    pub unsafe fn drain_read_buffer(&self) -> (*mut u8, usize) {
+    /// Takes the buffered bytes: the slice starts at them and runs to the end
+    /// of the read buffer, so it includes the decode slack after them.
+    pub unsafe fn drain_read_buffer(&self) -> (&mut [u8], usize) {
         let core = &mut (*self.conn.session.get()).core;
         let avail = core.buf_avail;
-        let p = core.read_buf.as_mut_ptr().add(core.buf_offset);
         core.buf_avail = 0;
-        (p, avail)
+        (&mut core.read_buf[core.buf_offset..], avail)
     }
 
     /// Moves up to `dst.len()` already-buffered bytes into `dst`; the rest

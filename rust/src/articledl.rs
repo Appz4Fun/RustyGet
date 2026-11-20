@@ -2711,8 +2711,8 @@ impl NzbgetRsArticleDownloader {
             conn_state: Mutex::new((initial_conn, Vec::new())),
             worker: Mutex::new(DlWorker {
                 decoder: Decoder::new(
-                    crate::decoder::rust_yenc_decode_incremental,
-                    crate::decoder::rust_yenc_crc,
+                    crate::decoder::yenc_decode_incremental,
+                    crate::decoder::yenc_crc,
                 ),
                 writer: RsArticleWriter::default(),
                 analyzer: if has_analyzer && parcheck_enabled {
@@ -3336,12 +3336,12 @@ impl NzbgetRsArticleDownloader {
                 sleep_ms(10);
             }
 
-            let (mut buf_ptr, avail) = unsafe { conn.drain_read_buffer() };
+            let (mut buf, avail) = unsafe { conn.drain_read_buffer() };
             let mut raw_len = avail as isize;
             if raw_len == 0 {
                 let n = unsafe { conn.try_recv(&mut line_buf[..read_chunk as usize]) };
                 raw_len = n as isize;
-                buf_ptr = line_buf.as_mut_ptr();
+                buf = &mut line_buf[..];
             }
             if raw_len <= 0 {
                 if !host.is_stopped() {
@@ -3374,10 +3374,9 @@ impl NzbgetRsArticleDownloader {
                 self.add_conn_bytes(&mut w.downloaded_size);
             }
 
-            let decoded_len = unsafe { w.decoder.decode_buffer(buf_ptr, raw_len) };
+            let decoded_len = w.decoder.decode_buffer(buf, raw_len);
             if decoded_len > 0 {
-                let decoded_slice = unsafe { std::slice::from_raw_parts(buf_ptr, decoded_len) };
-                if !self.write_decoded(w, host, decoded_slice, raw_article, skip_disk_write) {
+                if !self.write_decoded(w, host, &buf[..decoded_len], raw_article, skip_disk_write) {
                     let (wst, crej) = article_dl_classify_write_failure(
                         i32::from(w.local_write_error),
                         AD_FATAL_ERROR,

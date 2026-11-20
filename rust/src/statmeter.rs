@@ -459,14 +459,13 @@ pub fn statmeter_format_indexed_bytes_line(first_idx: i32, values: &[i64]) -> Ve
 #[cfg(unix)]
 mod runtime {
     use super::*;
-    use std::ffi::{c_char, c_int, c_void, CStr};
+    use std::ffi::{c_int, c_void, CStr};
     use std::ptr;
     use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, Ordering};
     use std::sync::Mutex;
 
     use crate::diskstate_format::{
-        diskstate_exec, DiskAuxSinkFn, NzbgetRsDiskStateEnv, NzbgetRsDiskVolumeStatInput,
-        NzbgetRsServerMatchItem,
+        diskstate_exec, NzbgetRsDiskStateEnv, NzbgetRsDiskVolumeStatInput, NzbgetRsServerMatchItem,
     };
     use crate::log::NzbgetRsLog;
     use crate::options::NzbgetRsOptions;
@@ -1391,154 +1390,111 @@ mod runtime {
         }
     }
 
-    unsafe extern "C" fn stat_disk_aux_cb(
+    fn stat_disk_export_cb(
         raw: *mut c_void,
-        op: c_int,
-        a1: c_int,
-        a2: c_int,
-        _u1: u32,
-        _s1: *const c_char,
-        _s2: *const c_char,
-        vol_item: *const c_void,
-        sink_ctx: *mut c_void,
-        sink_fn: Option<DiskAuxSinkFn>,
+        with_volumes: bool,
+        sink: &mut dyn FnMut(&[NzbgetRsServerMatchItem], &[NzbgetRsDiskVolumeStatInput]),
     ) {
         let br = unsafe { &mut *raw.cast::<StatDiskBridge<'_>>() };
-        match op {
-            4 => {
-                let Some(sink) = sink_fn else {
-                    return;
-                };
-                let srv_ptr = if br.servers.is_empty() {
+        if !with_volumes || br.servers.is_empty() {
+            sink(br.servers, &[]);
+            return;
+        }
+        let mut vol_items = Vec::with_capacity(br.vols.len());
+        for sv in br.vols.iter() {
+            vol_items.push(NzbgetRsDiskVolumeStatInput {
+                first_day: sv.first_day,
+                data_time: sv.data_time as c_int,
+                custom_time: sv.custom_time as c_int,
+                counters_reset_time: sv.counters_reset_time as c_int,
+                total_bytes: sv.total_bytes,
+                custom_bytes: sv.custom_bytes,
+                bytes_per_seconds: sv.bytes_per_seconds.as_ptr(),
+                bytes_per_seconds_len: sv.bytes_per_seconds.len(),
+                bytes_per_minutes: sv.bytes_per_minutes.as_ptr(),
+                bytes_per_minutes_len: sv.bytes_per_minutes.len(),
+                bytes_per_hours: sv.bytes_per_hours.as_ptr(),
+                bytes_per_hours_len: sv.bytes_per_hours.len(),
+                bytes_per_days: sv.bytes_per_days.as_ptr(),
+                bytes_per_days_len: sv.bytes_per_days.len(),
+                articles_per_days: if sv.articles_per_days.is_empty() {
                     ptr::null()
                 } else {
-                    br.servers.as_ptr()
-                };
-                if a1 == 0 || br.servers.is_empty() {
-                    unsafe {
-                        sink(
-                            sink_ctx,
-                            0,
-                            0,
-                            0,
-                            0,
-                            ptr::null(),
-                            srv_ptr,
-                            br.servers.len(),
-                            ptr::null(),
-                            0,
-                        );
-                    }
-                    return;
-                }
-                let mut vol_items = Vec::with_capacity(br.vols.len());
-                for sv in br.vols.iter() {
-                    vol_items.push(NzbgetRsDiskVolumeStatInput {
-                        first_day: sv.first_day,
-                        data_time: sv.data_time as c_int,
-                        custom_time: sv.custom_time as c_int,
-                        counters_reset_time: sv.counters_reset_time as c_int,
-                        total_bytes: sv.total_bytes,
-                        custom_bytes: sv.custom_bytes,
-                        bytes_per_seconds: sv.bytes_per_seconds.as_ptr(),
-                        bytes_per_seconds_len: sv.bytes_per_seconds.len(),
-                        bytes_per_minutes: sv.bytes_per_minutes.as_ptr(),
-                        bytes_per_minutes_len: sv.bytes_per_minutes.len(),
-                        bytes_per_hours: sv.bytes_per_hours.as_ptr(),
-                        bytes_per_hours_len: sv.bytes_per_hours.len(),
-                        bytes_per_days: sv.bytes_per_days.as_ptr(),
-                        bytes_per_days_len: sv.bytes_per_days.len(),
-                        articles_per_days: if sv.articles_per_days.is_empty() {
-                            ptr::null()
-                        } else {
-                            sv.articles_per_days.as_ptr()
-                        },
-                        articles_per_days_len: sv.articles_per_days.len(),
-                    });
-                }
-                unsafe {
-                    sink(
-                        sink_ctx,
-                        0,
-                        0,
-                        0,
-                        0,
-                        ptr::null(),
-                        srv_ptr,
-                        br.servers.len(),
-                        vol_items.as_ptr().cast(),
-                        vol_items.len(),
-                    );
+                    sv.articles_per_days.as_ptr()
+                },
+                articles_per_days_len: sv.articles_per_days.len(),
+            });
+        }
+        sink(br.servers, &vol_items);
+    }
+
+    fn stat_disk_set_state_id_cb(raw: *mut c_void, server: usize, state_id: i32) {
+        let br = unsafe { &mut *raw.cast::<StatDiskBridge<'_>>() };
+        if let Some(slot) = br.state_ids.get_mut(server) {
+            *slot = state_id;
+        }
+    }
+
+    fn stat_disk_load_volume_cb(
+        raw: *mut c_void,
+        slot: crate::diskstate_format::VolumeSlot,
+        vi: &NzbgetRsDiskVolumeStatInput,
+        format_ver: i32,
+        has_custom_times: bool,
+    ) {
+        use crate::diskstate_format::VolumeSlot;
+        let br = unsafe { &mut *raw.cast::<StatDiskBridge<'_>>() };
+        let mut target_idx: Option<usize> = None;
+        match slot {
+            VolumeSlot::Total => {
+                if !br.vols.is_empty() {
+                    target_idx = Some(0);
                 }
             }
-            5 => {
-                if let Some(slot) = usize::try_from(a1)
-                    .ok()
-                    .and_then(|i| br.state_ids.get_mut(i))
-                {
-                    *slot = a2;
-                }
-            }
-            6 => {
-                if vol_item.is_null() {
-                    return;
-                }
-                let vi = unsafe { &*vol_item.cast::<NzbgetRsDiskVolumeStatInput>() };
-                let mut target_idx: Option<usize> = None;
-                if a1 == 0 {
-                    if !br.vols.is_empty() {
-                        target_idx = Some(0);
-                    }
-                } else {
-                    for (i, srv) in br.servers.iter().enumerate() {
-                        if br.state_ids.get(i).copied() == Some(a1) {
-                            if let Ok(vid) = usize::try_from(srv.id) {
-                                if vid < br.vols.len() {
-                                    target_idx = Some(vid);
-                                }
+            VolumeSlot::Server(state_id) => {
+                for (i, srv) in br.servers.iter().enumerate() {
+                    if br.state_ids.get(i).copied() == Some(state_id) {
+                        if let Ok(vid) = usize::try_from(srv.id) {
+                            if vid < br.vols.len() {
+                                target_idx = Some(vid);
                             }
                         }
                     }
                 }
-                let Some(vidx) = target_idx else {
-                    return;
-                };
-                let sv = &mut br.vols[vidx];
-                let format_ver = a2 >> 1;
-                if (a2 & 1) != 0 {
-                    sv.custom_time = i64::from(vi.custom_time);
-                    sv.counters_reset_time = i64::from(vi.counters_reset_time);
-                }
-                sv.first_day = vi.first_day;
-                sv.data_time = i64::from(vi.data_time);
-                sv.total_bytes = vi.total_bytes;
-                sv.custom_bytes = vi.custom_bytes;
-                let copy_i64 = |ptr_in: *const i64, len: usize| -> Vec<i64> {
-                    if ptr_in.is_null() || len == 0 {
-                        Vec::new()
-                    } else {
-                        unsafe { std::slice::from_raw_parts(ptr_in, len) }.to_vec()
-                    }
-                };
-                sv.bytes_per_seconds = copy_i64(vi.bytes_per_seconds, vi.bytes_per_seconds_len);
-                sv.bytes_per_minutes = copy_i64(vi.bytes_per_minutes, vi.bytes_per_minutes_len);
-                sv.bytes_per_hours = copy_i64(vi.bytes_per_hours, vi.bytes_per_hours_len);
-                sv.bytes_per_days = copy_i64(vi.bytes_per_days, vi.bytes_per_days_len);
-                if format_ver >= 4 {
-                    if vi.articles_per_days.is_null() || vi.articles_per_days_len == 0 {
-                        sv.articles_per_days = Vec::new();
-                    } else {
-                        sv.articles_per_days = unsafe {
-                            std::slice::from_raw_parts(
-                                vi.articles_per_days,
-                                vi.articles_per_days_len,
-                            )
-                        }
-                        .to_vec();
-                    }
-                }
             }
-            _ => {}
+        }
+        let Some(vidx) = target_idx else {
+            return;
+        };
+        let sv = &mut br.vols[vidx];
+        if has_custom_times {
+            sv.custom_time = i64::from(vi.custom_time);
+            sv.counters_reset_time = i64::from(vi.counters_reset_time);
+        }
+        sv.first_day = vi.first_day;
+        sv.data_time = i64::from(vi.data_time);
+        sv.total_bytes = vi.total_bytes;
+        sv.custom_bytes = vi.custom_bytes;
+        let copy_i64 = |ptr_in: *const i64, len: usize| -> Vec<i64> {
+            if ptr_in.is_null() || len == 0 {
+                Vec::new()
+            } else {
+                unsafe { std::slice::from_raw_parts(ptr_in, len) }.to_vec()
+            }
+        };
+        sv.bytes_per_seconds = copy_i64(vi.bytes_per_seconds, vi.bytes_per_seconds_len);
+        sv.bytes_per_minutes = copy_i64(vi.bytes_per_minutes, vi.bytes_per_minutes_len);
+        sv.bytes_per_hours = copy_i64(vi.bytes_per_hours, vi.bytes_per_hours_len);
+        sv.bytes_per_days = copy_i64(vi.bytes_per_days, vi.bytes_per_days_len);
+        if format_ver >= 4 {
+            if vi.articles_per_days.is_null() || vi.articles_per_days_len == 0 {
+                sv.articles_per_days = Vec::new();
+            } else {
+                sv.articles_per_days = unsafe {
+                    std::slice::from_raw_parts(vi.articles_per_days, vi.articles_per_days_len)
+                }
+                .to_vec();
+            }
         }
     }
 
@@ -1608,7 +1564,9 @@ mod runtime {
             ptr::null_mut()
         };
         ds_env.log_cb = Some(stat_disk_log_cb);
-        ds_env.aux_cb = Some(stat_disk_aux_cb);
+        ds_env.export_stats_cb = Some(stat_disk_export_cb);
+        ds_env.set_server_state_id_cb = Some(stat_disk_set_state_id_cb);
+        ds_env.load_volume_cb = Some(stat_disk_load_volume_cb);
         match op {
             0 => {
                 let ok = diskstate_exec(crate::diskstate_format::DiskOp::SaveStats, &ds_env);

@@ -3,16 +3,18 @@
 //!
 //! Ported from the C++ `TlsSocket`, `SocketDeadline`, `TlsHostCb` and
 //! `TlsCipherBackend` that lived in `daemon/util/Util.h`. The connection code in
-//! `net.rs` reaches all of it through [`conn_host`], which keeps the host
-//! callback operations documented on [`crate::net::NzbgetRsConnHostFn`]. The only
-//! part still answered by C++ is whether the current C++ `Thread` was stopped.
+//! `net.rs` reaches all of it through [`TlsHost`], its implementation of
+//! [`crate::net::ConnHostOps`]. The only part still answered by C++ is whether
+//! the current C++ `Thread` was stopped.
 
 use std::ffi::{c_char, c_int, c_long, c_ulong, c_void, CStr, CString};
 use std::ptr;
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::time::{Duration, Instant};
 
 use openssl_sys as ossl;
+
+use crate::net::{ConnHostOps, TlsHandle, TlsStarted};
 
 mod sys {
     use super::{c_char, c_int, c_ulong};
@@ -716,95 +718,109 @@ impl TlsSocket {
     }
 }
 
-/// Host callback for connections. Operations are documented on
-/// [`crate::net::NzbgetRsConnHostFn`].
-///
-/// # Safety
-/// Arguments follow that documentation: `p1` is a deadline pointer, a
-/// `[deadline, suppress_slot]` pair or a socket returned by operation 4,
-/// strings are null or NUL-terminated, and `buf` / `out_int` are valid for the
-/// operation.
-pub unsafe extern "C" fn conn_host(
-    _ctx: *mut c_void,
-    op: c_int,
-    a1: c_int,
-    a2: c_int,
-    p1: usize,
-    s1: *const c_char,
-    s2: *const c_char,
-    s3: *const c_char,
-    buf: *mut c_char,
-    out_int: *mut c_int,
-) -> isize {
-    match op {
-        0 => {
-            log_debug(unsafe { opt_cstr(s1) });
-            0
+/// The connection host: TLS, deadlines, stop checks and logging, all in Rust.
+/// Its TLS handles are `Box<TlsSocket>` addresses.
+pub struct TlsHost;
+
+impl TlsHost {
+    /// The socket behind a handle this host made.
+    fn socket(sock: &TlsHandle) -> *mut TlsSocket {
+        sock.raw() as *mut TlsSocket
+    }
+}
+
+impl ConnHostOps for TlsHost {
+    fn debug(&self, msg: &CStr) {
+        log_debug(msg.to_bytes());
+    }
+
+    fn error(&self, msg: &CStr, suppressed: bool) {
+        if suppressed {
+            log_debug(msg.to_bytes());
+        } else {
+            log_error(msg.to_bytes());
         }
-        1 => {
-            let msg = unsafe { opt_cstr(s1) };
-            if a1 != 0 {
-                log_debug(msg);
-            } else {
-                log_error(msg);
-            }
-            0
+    }
+
+    unsafe fn is_stopped(&self, deadline: usize) -> bool {
+        let deadline_stopped = unsafe { deadline_ref(deadline) }.is_some_and(Deadline::stopped);
+        crate::ffi::is_rust_thread_stopped() || deadline_stopped
+    }
+
+    unsafe fn wait(&self, deadline: usize, fd: c_int, read: bool, write: bool) -> bool {
+        unsafe { deadline_ref(deadline) }.is_some_and(|d| d.wait(fd, read, write))
+    }
+
+    unsafe fn tls_start(
+        &self,
+        fd: c_int,
+        flags_verif: c_int,
+        deadline: usize,
+        suppress: &AtomicBool,
+        host: &CStr,
+        cert: &CStr,
+        key: &CStr,
+        cipher: &CStr,
+    ) -> TlsStarted {
+        if crate::ffi::build_tls_disabled() {
+            return TlsStarted::NOT_STARTED;
         }
-        2 => {
-            let deadline_stopped = unsafe { deadline_ref(p1) }.is_some_and(Deadline::stopped);
-            isize::from(crate::ffi::is_rust_thread_stopped() || deadline_stopped)
+        let mut sock = Box::new(TlsSocket::new(
+            fd,
+            (flags_verif & 1) != 0,
+            host.to_bytes(),
+            cert.to_bytes(),
+            key.to_bytes(),
+            cipher.to_bytes(),
+            (flags_verif >> 2) & 0xff,
+        ));
+        sock.bind_suppress_errors(ptr::from_ref(suppress) as usize);
+        sock.set_deadline(deadline);
+        let ok = sock.start();
+        let probe_failure = sock.probe_failure();
+        let raw = std::num::NonZeroUsize::new(Box::into_raw(sock) as usize);
+        TlsStarted {
+            // SAFETY: a boxed socket freed only by `tls_close`.
+            handle: raw.map(|raw| unsafe { TlsHandle::from_raw(raw) }),
+            ok,
+            probe_failure,
         }
-        3 => {
-            let write = !out_int.is_null() && unsafe { *out_int } != 0;
-            isize::from(unsafe { deadline_ref(p1) }.is_some_and(|d| d.wait(a1, a2 != 0, write)))
+    }
+
+    unsafe fn tls_send(&self, sock: &TlsHandle, data: &[u8]) -> c_int {
+        let len = c_int::try_from(data.len()).unwrap_or(c_int::MAX);
+        unsafe { (*Self::socket(sock)).send(data.as_ptr().cast(), len) }
+    }
+
+    unsafe fn tls_recv(&self, sock: &TlsHandle, buf: &mut [u8]) -> c_int {
+        let len = c_int::try_from(buf.len()).unwrap_or(c_int::MAX);
+        unsafe { (*Self::socket(sock)).recv(buf.as_mut_ptr().cast(), len) }
+    }
+
+    unsafe fn tls_close(&self, sock: TlsHandle, close: bool) {
+        let mut sock = unsafe { Box::from_raw(Self::socket(&sock)) };
+        if close {
+            sock.close();
         }
-        4 if !crate::ffi::build_tls_disabled() => {
-            let ptrs = p1 as *const usize;
-            let mut sock = Box::new(TlsSocket::new(
-                a1,
-                (a2 & 1) != 0,
-                unsafe { opt_cstr(s1) },
-                unsafe { opt_cstr(s2) },
-                unsafe { opt_cstr(s3) },
-                unsafe { opt_cstr(buf) },
-                (a2 >> 2) & 0xff,
-            ));
-            if !ptrs.is_null() {
-                sock.bind_suppress_errors(unsafe { *ptrs.add(1) });
-                sock.set_deadline(unsafe { *ptrs });
-            }
-            let started = sock.start();
-            if !out_int.is_null() {
-                unsafe {
-                    *out_int = c_int::from(started);
-                    *out_int.add(1) = sock.probe_failure();
-                }
-            }
-            Box::into_raw(sock) as isize
+    }
+
+    unsafe fn tls_info(&self, sock: &TlsHandle) -> (c_int, &'static CStr) {
+        let sock = unsafe { &*Self::socket(sock) };
+        let cipher = sock.negotiated_cipher();
+        let cipher = if cipher.is_null() {
+            c""
+        } else {
+            // SAFETY: OpenSSL's cipher names and the fallbacks are static
+            // NUL-terminated strings.
+            unsafe { CStr::from_ptr(cipher) }
+        };
+        (sock.negotiated_version(), cipher)
+    }
+
+    fn stop_ssl_thread(&self) {
+        if !crate::ffi::build_tls_disabled() {
+            stop_ssl_thread();
         }
-        5 if p1 != 0 => unsafe { (*(p1 as *mut TlsSocket)).send(s1, a1) as isize },
-        6 if p1 != 0 => unsafe { (*(p1 as *mut TlsSocket)).recv(buf, a1) as isize },
-        7 if p1 != 0 => {
-            let mut sock = unsafe { Box::from_raw(p1 as *mut TlsSocket) };
-            if a1 != 0 {
-                sock.close();
-            }
-            0
-        }
-        9 if p1 != 0 => {
-            let sock = unsafe { &*(p1 as *const TlsSocket) };
-            if !out_int.is_null() {
-                unsafe { *out_int = sock.negotiated_version() };
-            }
-            sock.negotiated_cipher() as isize
-        }
-        10 => {
-            if !crate::ffi::build_tls_disabled() {
-                stop_ssl_thread();
-            }
-            0
-        }
-        _ => 0,
     }
 }
 

@@ -839,8 +839,8 @@ pub(crate) fn build_version_bytes() -> &'static [u8] {
 
 /// Connection host callback: TLS, deadlines, stop checks and logging, all in Rust.
 #[cfg(unix)]
-pub(crate) fn tls_host_cb() -> crate::net::NzbgetRsConnHostFn {
-    Some(crate::tlssock::conn_host)
+pub(crate) fn tls_host() -> crate::net::ConnHost {
+    crate::net::ConnHost::new(std::sync::Arc::new(crate::tlssock::TlsHost))
 }
 
 #[cfg(unix)]
@@ -925,7 +925,7 @@ pub(crate) fn note_thread_cancelled() {
 
 #[cfg(unix)]
 pub(crate) unsafe fn format_system_info_bytes(mode: c_int, with_network: bool) -> Vec<u8> {
-    let conn_host_cb = tls_host_cb();
+    let conn_host = tls_host();
     let (ssl_lib, ssl_raw) = BUILD_ENV
         .read()
         .ok()
@@ -944,97 +944,45 @@ pub(crate) unsafe fn format_system_info_bytes(mode: c_int, with_network: bool) -
             !build_tls_disabled(),
             !build_gzip_disabled(),
             |fd, host_cstr, req| {
-                let Some(cb) = conn_host_cb else {
-                    return Err("TLS callback missing".to_string());
-                };
                 let suppress = std::sync::atomic::AtomicBool::new(true);
-                let ptrs: [usize; 2] = [
-                    0,
-                    (&suppress as *const std::sync::atomic::AtomicBool) as usize,
-                ];
-                let mut out_int = [0i32; 2];
-                let mut empty_cipher = [0 as c_char; 1];
-                let tls_ptr = cb(
-                    std::ptr::null_mut(),
-                    4,
-                    fd,
-                    1,
-                    ptrs.as_ptr() as usize,
-                    host_cstr.as_ptr(),
-                    c"".as_ptr(),
-                    c"".as_ptr(),
-                    empty_cipher.as_mut_ptr(),
-                    out_int.as_mut_ptr(),
-                ) as usize;
-                if tls_ptr == 0 || out_int[0] == 0 {
-                    if tls_ptr != 0 {
-                        cb(
-                            std::ptr::null_mut(),
-                            7,
-                            1,
-                            0,
-                            tls_ptr,
-                            std::ptr::null(),
-                            std::ptr::null(),
-                            std::ptr::null(),
-                            std::ptr::null_mut(),
-                            std::ptr::null_mut(),
-                        );
+                // SAFETY: no deadline, and `suppress` outlives the socket,
+                // which is closed before this closure returns.
+                let started =
+                    unsafe { conn_host.tls_start(fd, 1, 0, &suppress, host_cstr, c"", c"", c"") };
+                let tls = match started.handle {
+                    Some(tls) if started.ok => tls,
+                    handle => {
+                        if let Some(tls) = handle {
+                            conn_host.tls_close(tls, true);
+                        }
+                        stop_ssl_thread();
+                        return Err("TLS handshake failed".to_string());
                     }
-                    stop_ssl_thread();
-                    return Err("TLS handshake failed".to_string());
-                }
+                };
                 let mut written = 0usize;
                 while written < req.len() {
-                    let n = cb(
-                        std::ptr::null_mut(),
-                        5,
-                        (req.len() - written) as c_int,
-                        0,
-                        tls_ptr,
-                        req[written..].as_ptr().cast(),
-                        std::ptr::null(),
-                        std::ptr::null(),
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                    );
-                    if n <= 0 {
+                    let n = conn_host.tls_send(&tls, &req[written..]);
+                    let Ok(n) = usize::try_from(n) else {
+                        break;
+                    };
+                    if n == 0 {
                         break;
                     }
-                    written += n as usize;
+                    written += n;
                 }
                 let mut raw_resp = Vec::new();
                 let mut chunk = [0u8; 4096];
                 loop {
-                    let n = cb(
-                        std::ptr::null_mut(),
-                        6,
-                        chunk.len() as c_int,
-                        0,
-                        tls_ptr,
-                        std::ptr::null(),
-                        std::ptr::null(),
-                        std::ptr::null(),
-                        chunk.as_mut_ptr().cast(),
-                        std::ptr::null_mut(),
-                    );
-                    if n <= 0 {
+                    let n = conn_host.tls_recv(&tls, &mut chunk);
+                    let Ok(n) = usize::try_from(n) else {
+                        break;
+                    };
+                    if n == 0 {
                         break;
                     }
-                    raw_resp.extend_from_slice(&chunk[..(n as usize)]);
+                    raw_resp.extend_from_slice(&chunk[..n]);
                 }
-                cb(
-                    std::ptr::null_mut(),
-                    7,
-                    1,
-                    0,
-                    tls_ptr,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                );
+                conn_host.tls_close(tls, true);
                 stop_ssl_thread();
                 Ok(raw_resp)
             },

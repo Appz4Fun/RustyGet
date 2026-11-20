@@ -1308,7 +1308,7 @@ impl NServOptsHandle {
 // ============================================================================
 
 /// Host callback table for `nzbget_rs_nserv_run`.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct NzbgetRsNservEnv {
     pub ctx: *mut std::ffi::c_void,
     pub version: *const std::ffi::c_char,
@@ -1330,7 +1330,7 @@ pub struct NzbgetRsNservEnv {
     /// turns off NServ's own console output and log setup.
     pub transport: Option<&'static dyn NservTransport>,
     #[cfg(unix)]
-    pub tls_host_cb: crate::net::NzbgetRsConnHostFn,
+    pub tls_host: Option<crate::net::ConnHost>,
     pub debug_on: std::ffi::c_int,
 }
 
@@ -1381,7 +1381,7 @@ fn nserv_transport(env: &NzbgetRsNservEnv) -> Option<Box<dyn NservTransport>> {
     #[cfg(unix)]
     {
         Some(Box::new(crate::net::NetNservTransport {
-            tls_host_cb: env.tls_host_cb.or_else(crate::ffi::tls_host_cb),
+            tls_host: env.tls_host.clone().unwrap_or_else(crate::ffi::tls_host),
             debug_on: env.debug_on != 0 || crate::ffi::build_debug_enabled(),
         }))
     }
@@ -1402,7 +1402,7 @@ impl<T: NservTransport + ?Sized> NservTransport for &T {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct NservEnvSend(NzbgetRsNservEnv);
 unsafe impl Send for NservEnvSend {}
 unsafe impl Sync for NservEnvSend {}
@@ -1729,7 +1729,7 @@ pub unsafe fn nzbget_rs_nserv_run(
     }
 
     let shared = std::sync::Arc::new(NservSharedState {
-        env: NservEnvSend(*env),
+        env: NservEnvSend(env.clone()),
         bind_address: handle.c_bind_address.clone(),
         secure_cert: handle.c_secure_cert.clone(),
         secure_key: handle.c_secure_key.clone(),
@@ -2170,7 +2170,7 @@ mod tests {
             runtime_cb: Some(mock_rt),
             transport: Some(&MockTransport),
             #[cfg(unix)]
-            tls_host_cb: None,
+            tls_host: None,
             debug_on: 0,
         };
         let rc = unsafe { nzbget_rs_nserv_run(argv.len() as std::ffi::c_int, argv.as_ptr(), &env) };

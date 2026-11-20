@@ -1654,6 +1654,7 @@ pub(crate) fn shutdown_daemon_service_coord() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn a_large_leap_correction_makes_one_task_due_many_times() {
         // The large-correction TZif fixture in scheduler_differential.py,
@@ -1679,7 +1680,6 @@ mod tests {
         assert_eq!(tasks[0].last_executed, 80_049_599);
         assert_eq!(last, 80_049_600);
     }
-
 
     #[test]
     fn dates() {

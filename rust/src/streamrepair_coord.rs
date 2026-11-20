@@ -2068,18 +2068,27 @@ impl NzbgetRsStreamRepairCtrl {
 
         let opts = self.query_host_options();
 
-        if already_unpacked {
-            // The stage still completes, so its repair jobs are dropped and
-            // post-processing moves on.
-            targets.clear();
-            let mut msg = b"Not stream-repairing ".to_vec();
+        // Direct unpack reads RAR volumes only: a damaged file of another kind (a 7z, a
+        // standalone file) is still repaired.
+        let skipped = if already_unpacked {
+            let before = targets.len();
+            targets.retain(|t| !crate::filetypes::is_rar_file(&t.filename));
+            before - targets.len()
+        } else {
+            0
+        };
+        if skipped > 0 {
+            let mut msg = format!("Not stream-repairing {skipped} RAR volume(s) of ").into_bytes();
             msg.extend_from_slice(&nzb_name);
-            msg.extend_from_slice(b": direct unpack already extracted it");
+            msg.extend_from_slice(b": direct unpack already extracted them");
             self.print_message(q, MK_INFO, &msg);
-        } else if targets.is_empty() {
-            let mut msg = b"Nothing to stream-repair for ".to_vec();
-            msg.extend_from_slice(&nzb_name);
-            self.print_message(q, MK_INFO, &msg);
+        }
+        if targets.is_empty() {
+            if skipped == 0 {
+                let mut msg = b"Nothing to stream-repair for ".to_vec();
+                msg.extend_from_slice(&nzb_name);
+                self.print_message(q, MK_INFO, &msg);
+            }
         } else if donors.is_empty() {
             let mut msg = b"No duplicate collections found for stream repair of ".to_vec();
             msg.extend_from_slice(&nzb_name);

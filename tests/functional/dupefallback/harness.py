@@ -10498,7 +10498,7 @@ def scenario_obfuscatedparnoborrow(daemon, t):
             % (hp['Status'], par_borrowed, data_borrowed))
 
 
-def _allheads_release(daemon, t, tag, par, alt, twin):
+def _allheads_release(daemon, t, tag, par, alt, twin, alt_first_alive=False):
     """Every volume lost its header: a real `rar` RAR5 store set (with quick-open
     records, as rar 5+ writes by default) of movie.mkv whose every volume loses
     its FIRST article, as does every par2 file (the index too, when there is
@@ -10527,7 +10527,8 @@ def _allheads_release(daemon, t, tag, par, alt, twin):
     api = daemon.wait_ready()
     if alt:
         awork, anames = rar_set(tag + 'B', 1100, 'Oth')
-        amembers = [('%sB/%s' % (tag, n), n, os.path.getsize(os.path.join(awork, n)), 90_000, {1}) for n in anames]
+        amembers = [('%sB/%s' % (tag, n), n, os.path.getsize(os.path.join(awork, n)), 90_000,
+                     set() if (alt_first_alive and i == 0) else {1}) for i, n in enumerate(anames)]
         _ds_append(api, 'Alt' + tag, build_multi_nzb(amembers), tag + '-key', 50,
                    params=[{'Name': 'DupeAlive', 'Value': '0'}])
     if twin:
@@ -10552,11 +10553,20 @@ def scenario_allheadspar(daemon, t):
 
 
 def scenario_allheadsalt(daemon, t):
-    """Every volume lost article 1, no par2; an alt (other volume size) lost its
-    own first articles, which sit at other mkv offsets. Headers come back from
-    each volume's quick-open record, and the lost bytes from the alt."""
-    good, detail = _allheads_release(daemon, t, 'AHA', par=False, alt=True, twin=False)
+    """Every volume lost article 1, no par2; an alt (other volume size) lost the
+    first article of every volume but its first, which sit at other mkv offsets.
+    Headers come back from each volume's quick-open record, and the lost bytes
+    from the alt."""
+    good, detail = _allheads_release(daemon, t, 'AHA', par=False, alt=True, twin=False, alt_first_alive=True)
     return ('allheadsalt', good, detail)
+
+
+def scenario_allheadsaltall(daemon, t):
+    """Every volume of both copies lost article 1, no par2. Volume 1 of every
+    RAR copy starts with the mkv's first bytes, so they are gone everywhere:
+    this must fail (and say so) instead of reporting success."""
+    good, detail = _allheads_release(daemon, t, 'AHX', par=False, alt=True, twin=False)
+    return ('allheadsaltall', not good and 'status=FAILURE' in detail, detail)
 
 
 def scenario_allheadstwin(daemon, t):
@@ -11177,6 +11187,7 @@ SCENARIOS = {
     'lostindexpar': scenario_lostindexpar,
     'allheadspar': scenario_allheadspar,
     'allheadsalt': scenario_allheadsalt,
+    'allheadsaltall': scenario_allheadsaltall,
     'allheadstwin': scenario_allheadstwin,
     'obfuscatedparnoborrow': scenario_obfuscatedparnoborrow,
     'twinaltsampled': scenario_twinaltsampled,
@@ -11298,6 +11309,7 @@ SCENARIO_ENV_KEYS = sorted({k for env in SCENARIO_ENV.values() for k in env})
 SCENARIO_OPTIONS = {
     'allheadspar': PROD_OPTIONS,
     'allheadsalt': PROD_OPTIONS,
+    'allheadsaltall': PROD_OPTIONS,
     'allheadstwin': PROD_OPTIONS,
     'watchforcepick': ['DupeArticleFallback=no', 'DupeWatch=yes', 'DupeBodyChecks=0', 'DupeHealthMin=40', 'DupeHealthMax=40'],
     'watchdeadpick': ['DupeArticleFallback=no', 'DupeWatch=yes', 'DupeBodyChecks=0', 'DupeHealthMin=40', 'DupeHealthMax=40'],

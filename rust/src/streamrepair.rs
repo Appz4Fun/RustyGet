@@ -6622,6 +6622,18 @@ impl DonorMemberSource {
             Some(first) if first.success && first.offset == 0 => (true, first.file_size),
             _ => (false, 0),
         };
+        // A member whose first article is gone (in some releases from every volume and in
+        // every copy) still tells its size: every yEnc part carries the whole file's size, so
+        // the last one is asked. Reads of the lost range fail as for any other hole.
+        let (first_ok, first_file_size) = if first_ok {
+            (first_ok, first_file_size)
+        } else {
+            let last = self.article_sizes.len() as i32 - 1;
+            match (last > 0).then(|| self.fetch_part(transport, last)).flatten() {
+                Some(l) if l.success && l.file_size > 0 && l.offset > 0 => (true, l.file_size),
+                _ => (false, 0),
+            }
+        };
         if !first_ok {
             self.bad = true;
             return false;

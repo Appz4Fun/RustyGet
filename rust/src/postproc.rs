@@ -3569,7 +3569,7 @@ impl NzbgetRsDirectUnpack {
     /// Clears the download's unpack thread and sets its direct unpack status.
     fn finish_nzb(host: &QueueSubsysHost, nzb_ptr: NzbRef, status: DirectUnpackStatus) {
         use crate::queuesubsys_host::NZB_ACT_CLEAR_UNPACK_THREAD;
-        host.nzb_action(nzb_ptr, NZB_ACT_CLEAR_UNPACK_THREAD, 0);
+        host.nzb_action(nzb_ptr, NZB_ACT_CLEAR_UNPACK_THREAD);
         host.nzb_set_direct_unpack_status(nzb_ptr, status);
     }
 

@@ -371,6 +371,63 @@ pub fn with_part_crc(head: &[u8], part_crc: u32) -> Vec<u8> {
     out
 }
 
+/// Where the last file's data of the RAR volume at `path` ends, the volume's length, and
+/// whether that file goes on in the next volume. None when its headers cannot be read.
+fn data_end(path: &[u8]) -> Option<(u64, u64, bool)> {
+    let (_, vol, files) = crate::rarreader::read_volume_file(path, b"", false);
+    if vol.version == 0 || vol.encrypted {
+        return None;
+    }
+    let last = files.last()?;
+    let end = u64::try_from(last.data_offset.checked_add(last.packed_size)?).ok()?;
+    let len = std::fs::metadata(crate::fsops::path(path)).ok()?.len();
+    (end <= len).then_some((end, len, last.split_after))
+}
+
+/// Restores the bytes behind the last file's data of RAR volume `path` (its end block and the
+/// records next to it) from `sibling`, a volume of the same set, when every lost range in
+/// `holes` (`start`, `end`) lies there. Those bytes are no part of any file, so no duplicate
+/// lends them and only a par2 repair could, which a damaged par2 set cannot: the volume would
+/// stay damaged although every byte of its file is back. The sibling must end the same way
+/// (same length behind its data, its file going on in the next volume or not alike), as the
+/// volumes of one set do. True when written.
+pub fn restore_tail_from_sibling(path: &[u8], holes: &[(u64, u64)], sibling: &[u8]) -> bool {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let Some((end, len, more)) = data_end(path) else {
+        return false;
+    };
+    if holes.is_empty() || holes.iter().any(|&(s, e)| s < end || e > len || s >= e) {
+        return false;
+    }
+    let Some((s_end, s_len, s_more)) = data_end(sibling) else {
+        return false;
+    };
+    if s_len - s_end != len - end || s_more != more {
+        return false;
+    }
+    let tail = (|| -> std::io::Result<Vec<u8>> {
+        let mut f = std::fs::File::open(crate::fsops::path(sibling))?;
+        f.seek(SeekFrom::Start(s_end))?;
+        let mut buf = vec![0u8; (s_len - s_end) as usize];
+        f.read_exact(&mut buf)?;
+        Ok(buf)
+    })();
+    let Ok(tail) = tail else {
+        return false;
+    };
+    (|| -> std::io::Result<()> {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(crate::fsops::path(path))?;
+        for &(s, e) in holes {
+            f.seek(SeekFrom::Start(s))?;
+            f.write_all(&tail[(s - end) as usize..(e - end) as usize])?;
+        }
+        f.flush()
+    })()
+    .is_ok()
+}
+
 /// Checks a rebuilt volume with the regular header reader: it has to read as volume `index`
 /// holding a stored middle part of `inner_name` that starts right after `head` and runs for
 /// `packed` bytes.
@@ -1149,6 +1206,43 @@ mod tests {
         assert!(files[0].split_after);
         // Completed later, the head takes the real checksum, byte for byte as if built with it.
         assert_eq!(with_part_crc(&h, 7), h2);
+    }
+
+    #[test]
+    fn a_lost_end_block_is_restored_from_a_sibling_volume() {
+        let dir = std::env::temp_dir().join(format!("rg-tail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str| {
+            let p = dir.join(name);
+            std::fs::write(&p, testdata(&format!("rarrenamer/{name}"))).unwrap();
+            p.to_str().unwrap().as_bytes().to_vec()
+        };
+        let one = write("testfile5.part01.rar");
+        let two = write("testfile5.part02.rar");
+        let last = write("testfile5.part03.rar");
+        let whole = std::fs::read(crate::fsops::path(&two)).unwrap();
+        let (end, len, more) = data_end(&two).unwrap();
+        assert!(more && end < len);
+        // Its end block lost (zeros), as when the volume's last article never arrived.
+        let mut damaged = whole.clone();
+        let hole = (end + 1, len);
+        damaged[hole.0 as usize..].fill(0);
+        std::fs::write(crate::fsops::path(&two), &damaged).unwrap();
+        // Not from the last volume: it ends the set another way.
+        assert!(!restore_tail_from_sibling(&two, &[hole], &last));
+        // Not when a lost byte belongs to the file.
+        assert!(!restore_tail_from_sibling(&two, &[(end - 1, len)], &one));
+        assert!(restore_tail_from_sibling(&two, &[hole], &one));
+        let restored = std::fs::read(crate::fsops::path(&two)).unwrap();
+        // The file's bytes are untouched, the tail is the sibling's (its quick-open record
+        // describes the sibling's part, which no extraction reads), and it reads as before.
+        assert_eq!(restored[..=hole.0 as usize - 1], whole[..hole.0 as usize]);
+        let sib = std::fs::read(crate::fsops::path(&one)).unwrap();
+        assert_eq!(restored[hole.0 as usize..], sib[sib.len() - (len - hole.0) as usize..]);
+        assert_eq!(data_end(&two), Some((end, len, true)));
+        let (ok, _, files) = crate::rarreader::read_volume_file(&two, b"", false);
+        assert!(ok && files.len() == 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

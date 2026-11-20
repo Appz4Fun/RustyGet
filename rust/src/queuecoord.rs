@@ -355,7 +355,10 @@ pub fn alt_covers_lost_articles(
     backup_mismatched: bool,
 ) -> bool {
     use crate::donorkind::DonorKind;
-    let backup_lends = matches!(backup_kind, DonorKind::Twin | DonorKind::Borrowable)
+    let backup_lends = matches!(
+        backup_kind,
+        DonorKind::Twin | DonorKind::Borrowable | DonorKind::EncryptedBorrowable
+    )
         || ((borrow_underway || (extracting && labelled_alt))
             && backup_kind != DonorKind::Unborrowable);
     !backup_mismatched
@@ -6421,6 +6424,11 @@ mod tests {
         ));
         assert!(alt_covers_lost_articles(
             false, true, Unknown, Twin, 600, false, false, true, false
+        ));
+        // an encrypted store copy whose nzb password opens it lends like a plain one,
+        // even unlabelled and before its borrow starts
+        assert!(alt_covers_lost_articles(
+            false, true, Borrowable, EncryptedBorrowable, 952, false, false, false, false
         ));
         // Mostly gone, no live borrowing, an unborrowable backup or download: fail over.
         assert!(!alt_covers_lost_articles(

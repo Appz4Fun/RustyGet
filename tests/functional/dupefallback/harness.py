@@ -4070,6 +4070,61 @@ def scenario_deadvolumenestednopar(daemon, t):
             % (hp['Status'], hb['Status'], failed_over, cancelled, kept, du_ok, integ))
 
 
+def scenario_deadvolumeencrypted(daemon, t):
+    """The user's question (2026-11-20): borrow from an encrypted alt when its
+    nzb carries the password. A plain stored rar set without par2 loses three
+    middle volumes entirely; its backup in history holds the same movie in a
+    RAR5 store set with ENCRYPTED HEADERS, whose password travels in the
+    backup's own nzb <meta type="password">, and which a fleet classed
+    `borrowable-encrypted`. The download is kept, the dead volumes are
+    borrowed from the backup (decrypted on the way) while direct unpack waits,
+    and the extraction carries on to the end: no failover, no restart."""
+    if not generators.HAVE_RAR:
+        return ('deadvolumeencrypted', None, 'SKIP: rar not installed')
+    tag = 'dve'
+    password = 'alt-pw 7'
+    seg = 20_000
+    movie = _payload(15_000_000, 23070)
+    vols = generators.rar3_store_volumes_valid('movie.mkv', movie, 1_000_000)
+    dead = {6, 7, 8}
+    members = []
+    for i, data in enumerate(vols):
+        name = 'Show.part%02d.rar' % (i + 1)
+        rel = '%sA/%s' % (tag, name)
+        t.write_file(os.path.join('data', rel), data)
+        parts = (len(data) + seg - 1) // seg
+        members.append((rel, name, len(data), seg,
+                        set(range(1, parts + 1)) if i in dead else set()))
+    with tempfile.TemporaryDirectory(prefix='dve-') as workdir:
+        enc = generators.rar5_store_volumes_hp('movie.mkv', movie, 5_000_000, password, workdir)
+    donor_members = []
+    for i, data in enumerate(enc):
+        name = 'Other.part%d.rar' % (i + 1)
+        rel = '%sB/%s' % (tag, name)
+        t.write_file(os.path.join('data', rel), data)
+        donor_members.append((rel, name, len(data), 100_000, set()))
+    api = daemon.wait_ready()
+    daemon.append(api, 'Primary', build_multi_nzb(members), True, tag + '-key', 100)
+    _ds_append(api, 'Backup', build_multi_nzb(donor_members, password=password), tag + '-key', 90,
+               paused=False,
+               params=[{'Name': 'DupeCopyKind', 'Value': 'borrowable-encrypted'},
+                       {'Name': 'DupeLocked', 'Value': 'yes'}])
+    daemon.wait_history(api, 'Backup', timeout=60)
+    api.editqueue('GroupResume', 0, '', [g['NZBID'] for g in api.listgroups() if g['NZBName'] == 'Primary'])
+    hp = daemon.wait_history(api, 'Primary', timeout=300)
+    hb = daemon.wait_history(api, 'Backup')
+    failed_over = _grep_log(t, 'Failing over Primary')
+    cancelled = _grep_log(t, 'Cancelling direct unpack')
+    kept = _grep_log(t, 'lends the lost parts')
+    du_ok = _grep_log(t, 'Direct unpack for Primary successful')
+    integ = _verify_output(t, movie, '.mkv', dirs=(('main', 'dst'), ('main', 'inter')))
+    ok = (failed_over == 0 and cancelled == 0 and kept == 1 and du_ok == 1 and integ and
+          hp['Status'].startswith('SUCCESS') and hb['Status'].startswith('DELETED'))
+    return ('deadvolumeencrypted', ok,
+            'status=%s backup=%s failover_logs=%d du_cancelled=%d kept_logs=%d du_ok=%d extracted_ok=%s'
+            % (hp['Status'], hb['Status'], failed_over, cancelled, kept, du_ok, integ))
+
+
 def scenario_deadvolumeunlabelled(daemon, t):
     """The same release, but nothing classed the backup (no fleet labels, and
     TwinCheck cannot sample three volumes against fifteen): a same-key grab,
@@ -6716,6 +6771,42 @@ def scenario_fleetencryptedheadless(daemon, t):
              for n, g in items.items()}
     ok = (order[-1] == 'Show.S01E01.headless' and kinds.get('Show.S01E01.headless') == 'unborrowable')
     return ('fleetencryptedheadless', ok, 'order=%s kinds=%s' % (order, kinds))
+
+
+def scenario_fleetencryptedpassword(daemon, t):
+    """appendfleet (2026-11-20): a RAR5 copy with ENCRYPTED HEADERS, store
+    mode inside, whose nzb carries the password, is read with that password
+    (zipfast opens the headers) and classed `borrowable-encrypted`: it lends
+    like a borrowable ALT and ranks right after the plain borrowable copy,
+    ahead of a compressed copy. The same posting without a password stays
+    unborrowable and locked, last. All copies are whole, so kind decides."""
+    if not generators.HAVE_RAR:
+        return ('fleetencryptedpassword', None, 'SKIP: rar not installed')
+    daemon.fake_nntp.alive = set()
+    password = 'alt-pw'
+    # the copy's first article is its first 400 bytes: the signature, the
+    # encryption header and the encrypted main and file headers (as with
+    # _rar4_head, a short body keeps within the segment size the nzb declares)
+    with tempfile.TemporaryDirectory(prefix='fep-') as workdir:
+        hp = generators.rar5_store_volumes_hp('movie.mkv', _payload(300_000, 7701), 1_000_000,
+                                              password, workdir)[0][:400]
+    api = daemon.wait_ready()
+    with_pw = _fleet_copy(daemon, 'fw', 'a.rar', 400_000, hp, _payload(400_000, 7702))
+    with_pw = with_pw.replace('<file ', '<head><meta type="password">%s</meta></head><file ' % password, 1)
+    no_pw = _fleet_copy(daemon, 'fn', 'b.rar', 400_000, hp, _payload(400_000, 7703))
+    store = _fleet_copy(daemon, 'fs', 'c.rar', 400_000, _rar4_head(0x30), _payload(400_000, 7704))
+    comp = _fleet_copy(daemon, 'fc', 'd.rar', 400_000, _rar4_head(0x33), _payload(400_000, 7705))
+    reply = _fleet(daemon, [('Show.S01E01.nopw', no_pw), ('Show.S01E01.comp', comp),
+                            ('Show.S01E01.pw', with_pw), ('Show.S01E01.store', store)], key='fleet:encpw')
+    order = [m['Name'] for m in sorted(reply['Members'], key=lambda m: m['Rank'])]
+    items = {g['NZBName']: g for g in api.listgroups() + api.history() if g.get('DupeKey') == 'fleet:encpw'}
+    params = {n: {p['Name']: p['Value'] for p in g.get('Parameters', [])} for n, g in items.items()}
+    kinds = {n: p.get('DupeCopyKind') for n, p in params.items()}
+    ok = (order == ['Show.S01E01.store', 'Show.S01E01.pw', 'Show.S01E01.comp', 'Show.S01E01.nopw']
+          and kinds.get('Show.S01E01.pw') == 'borrowable-encrypted'
+          and kinds.get('Show.S01E01.store') == 'borrowable'
+          and params.get('Show.S01E01.pw', {}).get('DupeLocked') == 'yes')
+    return ('fleetencryptedpassword', ok, 'order=%s kinds=%s' % (order, kinds))
 
 
 def scenario_fleetlockedlast(daemon, t):
@@ -10810,6 +10901,7 @@ SCENARIOS = {
     'fleetencryptedlast': scenario_fleetencryptedlast,
     'fleetencryptedheadless': scenario_fleetencryptedheadless,
     'fleetlockedlast': scenario_fleetlockedlast,
+    'fleetencryptedpassword': scenario_fleetencryptedpassword,
     'fleettwinvolumes': scenario_fleettwinvolumes,
     'fleetkindslowcheck': scenario_fleetkindslowcheck,
     'watchforcepick': scenario_watchforcepick,
@@ -10977,6 +11069,7 @@ SCENARIOS = {
     'prodrarstream': scenario_prodrarstream,
     'skipholetwin': scenario_skipholetwin,
     'deadvolumenestednopar': scenario_deadvolumenestednopar,
+    'deadvolumeencrypted': scenario_deadvolumeencrypted,
     'deadvolumeunlabelled': scenario_deadvolumeunlabelled,
     'deadvolumetwincheck': scenario_deadvolumetwincheck,
     'deadvolumeothervideo': scenario_deadvolumeothervideo,
@@ -11347,6 +11440,7 @@ SCENARIO_OPTIONS = {
     # throttled so direct unpack reaches the damaged volume before its repair lands
     'skipholetwin': PROD_OPTIONS + ['DownloadRate=1500'],
     'deadvolumenestednopar': PROD_OPTIONS + ['DownloadRate=4000'],
+    'deadvolumeencrypted': PROD_OPTIONS + ['DownloadRate=4000'],
     'deadvolumeunlabelled': PROD_OPTIONS + ['DownloadRate=4000'],
     'deadvolumetwincheck': PROD_OPTIONS + ['DownloadRate=1000'],
     'deadvolumeothervideo': PROD_OPTIONS + ['DownloadRate=1000'],
@@ -11457,7 +11551,7 @@ SCENARIO_FIRST_FAIL_PROXY = {'recheckfailed': ((b'?5=', b'?10=', b'?15='),),
 # scenarios with a FakeNewznab indexer (DupeSearchUrl points to it)
 
 # scenarios with a FakeNntp news server in place of nserv
-SCENARIO_FAKE_NNTP = {'watchfleet', 'watchforcepick', 'watchdeadpick', 'watchswap', 'watchborrow', 'watchswaptwin', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetnodupecheck', 'fleetkindorder', 'fleetkindsingle', 'fleetkindlater', 'fleetintake', 'fleetintakelater', 'fleetencryptedlast', 'fleetencryptedheadless', 'fleetlockedlast', 'fleetkindslowcheck', 'fleettwinvolumes', 'fleetalldead', 'fleetshutdown'}
+SCENARIO_FAKE_NNTP = {'watchfleet', 'watchforcepick', 'watchdeadpick', 'watchswap', 'watchborrow', 'watchswaptwin', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetnodupecheck', 'fleetkindorder', 'fleetkindsingle', 'fleetkindlater', 'fleetintake', 'fleetintakelater', 'fleetencryptedlast', 'fleetencryptedheadless', 'fleetlockedlast', 'fleetencryptedpassword', 'fleetkindslowcheck', 'fleettwinvolumes', 'fleetalldead', 'fleetshutdown'}
 
 
 # --------------------------------------------------------------------------- #

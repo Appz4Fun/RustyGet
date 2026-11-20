@@ -46,7 +46,8 @@ pub struct Entry {
     pub bytes: i64,
     pub grabs: i32,
     /// `DonorKind` of a non-twin (`crate::donorkind::DonorKind as u8`:
-    /// 1 borrowable, 2 unknown, 3 unborrowable); a twin is always first.
+    /// 1 borrowable, 2 borrowable once decrypted, 3 unknown, 4 unborrowable);
+    /// a twin is always first.
     pub kind: u8,
     /// The highest offset this entry can be given (0: none). A partly alive
     /// fleet member is never raised above its old score (see
@@ -60,7 +61,8 @@ pub struct Entry {
 }
 
 impl Entry {
-    /// TWINs first, then borrowable, unknown and unborrowable ALTs.
+    /// TWINs first, then borrowable, encrypted borrowable, unknown and
+    /// unborrowable ALTs.
     fn kind_rank(&self) -> u8 {
         if self.twin {
             0
@@ -138,7 +140,7 @@ mod tests {
             twin,
             bytes,
             grabs,
-            kind: 2,
+            kind: crate::donorkind::DonorKind::Unknown as u8,
             cap: 0,
             locked: false,
         }
@@ -148,7 +150,7 @@ mod tests {
     fn a_locked_copy_goes_after_every_extractable_one() {
         // encrypted headers, no password: whole but never extractable
         let locked = Entry {
-            kind: 3,
+            kind: crate::donorkind::DonorKind::Unborrowable as u8,
             locked: true,
             ..e(50, 1.0, false, 1000, 0)
         };
@@ -190,7 +192,7 @@ mod tests {
             ..e(50, -1.0, false, 1000, 0)
         };
         let weak = Entry {
-            kind: 3,
+            kind: crate::donorkind::DonorKind::Unborrowable as u8,
             ..e(50, 0.5, false, 1000, 0)
         };
         let got = rerank(&[unknown, weak], 1000);

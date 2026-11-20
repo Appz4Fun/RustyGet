@@ -4831,6 +4831,10 @@
     "message": "borrowable",
     "description": "Caption next to an alt whose packaging lets stream repair borrow bytes from it."
   },
+  "fleet_copy_borrowable_encrypted": {
+    "message": "borrowable (encrypted)",
+    "description": "Caption next to an alt whose archive is encrypted but whose nzb carries the password, so stream repair can decrypt and borrow from it."
+  },
   "fleet_copy_unborrowable": {
     "message": "non-borrowable",
     "description": "Caption next to an alt whose packaging (compressed or encrypted) stream repair cannot borrow from."

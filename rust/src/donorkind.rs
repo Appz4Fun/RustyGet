@@ -1,10 +1,12 @@
 //! Which copy of a release goes first in a fleet, and which duplicate is asked
 //! first for missing data: TWINs (byte-identical postings, their articles swap
 //! one for one), then ALTs whose packaging stream repair can cross-map
-//! ("borrowable": bare media, store-mode rar/zip, raw splits), then ALTs whose
-//! packaging it cannot read without decompressing or a password
-//! ("unborrowable"). A copy whose packaging could not be told sits between the
-//! two kinds of ALT.
+//! ("borrowable": bare media, store-mode rar/zip, raw splits), then encrypted
+//! store-mode RARs whose password the nzb carries ("borrowable-encrypted":
+//! stream repair decrypts them on the way, at a cost, so they come after the
+//! plain ones), then ALTs whose packaging it cannot read without decompressing
+//! or a password ("unborrowable"). A copy whose packaging could not be told
+//! sits between the borrowable and the unborrowable ALTs.
 //!
 //! The kind a fleet worked out for a member is kept on the queued item in the
 //! nzb parameter [`KIND_PARAM`] (not `DupeKind`, which TwinCheck owns for its
@@ -60,9 +62,13 @@ pub fn locked_params(locked_value: Option<&[u8]>, password_value: Option<&[u8]>)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Packing {
     /// The inner file's bytes are posted as they are (bare media, store-mode
-    /// rar or zip, a raw split, an encrypted store-mode archive whose password
-    /// the nzb carries).
+    /// rar or zip, a raw split).
     Borrowable,
+    /// A store-mode RAR whose file data, and maybe headers
+    /// (`headers_encrypted`), are encrypted, and whose password the nzb
+    /// carries and opens its headers: stream repair decrypts its bytes on the
+    /// way, so it lends like a [`Packing::Borrowable`] copy, ranked after them.
+    EncryptedBorrowable { headers_encrypted: bool },
     /// Not known: 7-Zip without a password (its headers are at the end), an
     /// unrecognised start, or the first article could not be read (except a
     /// 7-Zip whose nzb carries a password, which is unborrowable either way).
@@ -70,10 +76,26 @@ pub enum Packing {
     /// Compressed, encrypted without a known password, or a 7-Zip whose nzb
     /// carries a password (encrypted: borrowing means decrypting it whole).
     Unborrowable,
-    /// RAR headers encrypted (password or not). Its kind is unborrowable;
-    /// without a password it is also [`locked`]: never extractable, ranked
-    /// after every copy that can be extracted (see [`LOCKED_PARAM`]).
+    /// RAR headers encrypted and not readable: no password, a password that
+    /// does not open them, or the media inside is compressed or could not be
+    /// found. Its kind is unborrowable; without a password it is also
+    /// [`locked`]: never extractable, ranked after every copy that can be
+    /// extracted (see [`LOCKED_PARAM`]).
     HeadersEncrypted,
+}
+
+impl Packing {
+    /// Whether the copy's archive headers are encrypted (the fact a fleet
+    /// keeps in [`LOCKED_PARAM`]).
+    pub fn headers_encrypted(self) -> bool {
+        matches!(
+            self,
+            Packing::HeadersEncrypted
+                | Packing::EncryptedBorrowable {
+                    headers_encrypted: true
+                }
+        )
+    }
 }
 
 /// Priority of a copy, lower first.
@@ -81,8 +103,12 @@ pub enum Packing {
 pub enum DonorKind {
     Twin = 0,
     Borrowable = 1,
-    Unknown = 2,
-    Unborrowable = 3,
+    /// Borrowable once decrypted with the password its nzb carries (see
+    /// [`Packing::EncryptedBorrowable`]): it lends like a borrowable ALT and
+    /// ranks right after them, before every copy of unknown packing.
+    EncryptedBorrowable = 2,
+    Unknown = 3,
+    Unborrowable = 4,
 }
 
 impl DonorKind {
@@ -94,6 +120,7 @@ impl DonorKind {
         }
         match packing {
             Packing::Borrowable => DonorKind::Borrowable,
+            Packing::EncryptedBorrowable { .. } => DonorKind::EncryptedBorrowable,
             Packing::Unknown => DonorKind::Unknown,
             Packing::Unborrowable | Packing::HeadersEncrypted => DonorKind::Unborrowable,
         }
@@ -104,7 +131,8 @@ impl DonorKind {
         match value {
             0 => DonorKind::Twin,
             1 => DonorKind::Borrowable,
-            3 => DonorKind::Unborrowable,
+            2 => DonorKind::EncryptedBorrowable,
+            4 => DonorKind::Unborrowable,
             _ => DonorKind::Unknown,
         }
     }
@@ -114,6 +142,7 @@ impl DonorKind {
         match self {
             DonorKind::Twin => b"twin",
             DonorKind::Borrowable => b"borrowable",
+            DonorKind::EncryptedBorrowable => b"borrowable-encrypted",
             DonorKind::Unknown => b"unknown",
             DonorKind::Unborrowable => b"unborrowable",
         }
@@ -125,6 +154,7 @@ impl DonorKind {
         match value.map(|v| v.trim_ascii()) {
             Some(b"twin") => DonorKind::Twin,
             Some(b"borrowable") => DonorKind::Borrowable,
+            Some(b"borrowable-encrypted") => DonorKind::EncryptedBorrowable,
             Some(b"unborrowable") => DonorKind::Unborrowable,
             _ => DonorKind::Unknown,
         }
@@ -217,32 +247,50 @@ impl crate::rarreader::Source for MemSource<'_> {
     }
 }
 
-fn rar_packing(data: &[u8], password_known: bool) -> Packing {
-    let mut volume = crate::rarreader::Volume::default();
+fn rar_packing(data: &[u8], password: Option<&[u8]>) -> Packing {
+    let password = password.filter(|p| !p.trim_ascii().is_empty());
+    let mut volume = crate::rarreader::Volume {
+        has_password: password.is_some(),
+        ..Default::default()
+    };
     let mut files: Vec<crate::rarreader::RarFile> = Vec::new();
     // The decoded article ends inside the first file's data, so the reader
     // stops there; the file header it read before that is what counts.
-    // Headers are only read without a password here: encrypted headers stop
-    // the reader.
-    crate::rarreader::read_from(&mut volume, &mut MemSource(data), None, &mut files);
-    if volume.encrypted {
-        // encrypted headers: nothing about the content can be read here, so
+    // Encrypted headers are read with the nzb's password (zipfast decrypts
+    // them); without one, or with one that does not open them, the reader
+    // stops at them.
+    crate::rarreader::read_from(&mut volume, &mut MemSource(data), password, &mut files);
+    let headers_encrypted = volume.encrypted;
+    if headers_encrypted && files.is_empty() {
+        // encrypted headers nothing opened: the content cannot be told, so
         // it is never taken before a copy that is proven borrowable or
-        // simply plain (encryption keeps a penalty even with the password);
-        // whether a missing password locks it is told when it is ranked
+        // simply plain; whether a missing password locks it is told when it
+        // is ranked
         return Packing::HeadersEncrypted;
     }
     // the media file decides; a small nfo or sample in front of it says
     // nothing about how the movie is packed
     let Some(file) = files.iter().find(|f| is_media_name(&f.filename)) else {
-        return Packing::Unknown;
+        return if headers_encrypted {
+            Packing::HeadersEncrypted
+        } else {
+            Packing::Unknown
+        };
     };
-    if !file.stored || (file.encrypted_data && !password_known) {
-        Packing::Unborrowable
-    } else if file.encrypted_data {
-        // stored but encrypted, password known: the repair can decrypt it, at
-        // a cost, so it comes after the plain borrowable copies
-        Packing::Unknown
+    if !file.stored {
+        // compressed: live repair never decompresses
+        if headers_encrypted {
+            Packing::HeadersEncrypted
+        } else {
+            Packing::Unborrowable
+        }
+    } else if headers_encrypted || file.encrypted_data {
+        if password.is_none() {
+            return Packing::Unborrowable;
+        }
+        // stored but encrypted, password known: the repair decrypts it on
+        // the way, at a cost, so it comes after the plain borrowable copies
+        Packing::EncryptedBorrowable { headers_encrypted }
     } else {
         Packing::Borrowable
     }
@@ -294,10 +342,12 @@ pub fn is_7z_name(name: &[u8]) -> bool {
 
 /// The packaging of a copy, read from the decoded first article of its
 /// largest data file (`name` is that file's name in the nzb).
-/// `password_known`: the nzb carries the archive's password.
-pub fn packing_of_head(data: &[u8], name: &[u8], password_known: bool) -> Packing {
+/// `password`: the archive's password, when the nzb carries one.
+pub fn packing_of_head(data: &[u8], name: &[u8], password: Option<&[u8]>) -> Packing {
+    let password = password.filter(|p| !p.trim_ascii().is_empty());
+    let password_known = password.is_some();
     if data.starts_with(b"Rar!\x1a\x07") {
-        return rar_packing(data, password_known);
+        return rar_packing(data, password);
     }
     if data.starts_with(b"PK\x03\x04") {
         return zip_packing(data);
@@ -358,12 +408,12 @@ mod tests {
     fn a_later_piece_of_a_passworded_split_7z_is_unborrowable() {
         let body = [0x5au8; 64];
         assert_eq!(
-            packing_of_head(&body, b"x.7z.003", true),
+            packing_of_head(&body, b"x.7z.003", Some(b"pw")),
             Packing::Unborrowable
         );
-        assert_eq!(packing_of_head(&body, b"x.7z", true), Packing::Unborrowable);
+        assert_eq!(packing_of_head(&body, b"x.7z", Some(b"pw")), Packing::Unborrowable);
         // without a password a 7-Zip piece stays unknown
-        assert_eq!(packing_of_head(&body, b"x.7z.003", false), Packing::Unknown);
+        assert_eq!(packing_of_head(&body, b"x.7z.003", None), Packing::Unknown);
     }
     use crate::twin::{FileSig, Listed};
 
@@ -421,7 +471,7 @@ mod tests {
     #[test]
     fn rar_without_media_entry_is_unknown() {
         assert_eq!(
-            packing_of_head(&rar4_named(b"info.nfo", 0x30, 0, 0), b"a.rar", false),
+            packing_of_head(&rar4_named(b"info.nfo", 0x30, 0, 0), b"a.rar", None),
             Packing::Unknown
         );
     }
@@ -445,30 +495,33 @@ mod tests {
     #[test]
     fn rar_store_compressed_and_encrypted() {
         assert_eq!(
-            packing_of_head(&rar4_with_file(0x30, 0, 0), b"a.rar", false),
+            packing_of_head(&rar4_with_file(0x30, 0, 0), b"a.rar", None),
             Packing::Borrowable
         );
         assert_eq!(
-            packing_of_head(&rar4_with_file(0x33, 0, 0), b"a.rar", false),
+            packing_of_head(&rar4_with_file(0x33, 0, 0), b"a.rar", None),
             Packing::Unborrowable
         );
         // encrypted file data, store mode: usable only with the password, and
-        // then still after the plain borrowable copies
+        // then after the plain borrowable copies
         assert_eq!(
-            packing_of_head(&rar4_with_file(0x30, 0x04, 0), b"a.rar", false),
+            packing_of_head(&rar4_with_file(0x30, 0x04, 0), b"a.rar", None),
             Packing::Unborrowable
         );
         assert_eq!(
-            packing_of_head(&rar4_with_file(0x30, 0x04, 0), b"a.rar", true),
-            Packing::Unknown
+            packing_of_head(&rar4_with_file(0x30, 0x04, 0), b"a.rar", Some(b"pw")),
+            Packing::EncryptedBorrowable {
+                headers_encrypted: false
+            }
         );
-        // encrypted headers: last, password or not
+        // encrypted headers the password does not open (this one is no
+        // real encryption): last, password or not
         assert_eq!(
-            packing_of_head(&rar4_with_file(0x30, 0, 0x80), b"a.rar", false),
+            packing_of_head(&rar4_with_file(0x30, 0, 0x80), b"a.rar", None),
             Packing::HeadersEncrypted
         );
         assert_eq!(
-            packing_of_head(&rar4_with_file(0x30, 0, 0x80), b"a.rar", true),
+            packing_of_head(&rar4_with_file(0x30, 0, 0x80), b"a.rar", Some(b"pw")),
             Packing::HeadersEncrypted
         );
         assert_eq!(
@@ -477,9 +530,66 @@ mod tests {
         );
         // a header cut short tells nothing
         assert_eq!(
-            packing_of_head(b"Rar!\x1a\x07\x00\x00", b"a.rar", false),
+            packing_of_head(b"Rar!\x1a\x07\x00\x00", b"a.rar", None),
             Packing::Unknown
         );
+    }
+
+    fn fixture(dir: &str, name: &str) -> Vec<u8> {
+        std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../tests/testdata")
+                .join(dir)
+                .join(name),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn header_encrypted_rar_with_its_password_is_borrowable_encrypted() {
+        // RAR5 -hp, store mode, password "pw"
+        let store = fixture("donorkind", "enchp5.rar");
+        let found = packing_of_head(&store, b"a.rar", Some(b"pw"));
+        assert_eq!(
+            found,
+            Packing::EncryptedBorrowable {
+                headers_encrypted: true
+            }
+        );
+        assert!(found.headers_encrypted());
+        assert_eq!(DonorKind::of(false, found), DonorKind::EncryptedBorrowable);
+        // only the first article of a big volume is read: its start is enough
+        assert_eq!(packing_of_head(&store[..store.len() / 2], b"a.rar", Some(b"pw")), found);
+        // no password, a blank one, or a wrong one: nothing can be told
+        assert_eq!(packing_of_head(&store, b"a.rar", None), Packing::HeadersEncrypted);
+        assert_eq!(packing_of_head(&store, b"a.rar", Some(b" ")), Packing::HeadersEncrypted);
+        assert_eq!(
+            packing_of_head(&store, b"a.rar", Some(b"wrong")),
+            Packing::HeadersEncrypted
+        );
+        // the media inside is compressed: still unborrowable, password or not
+        let comp = fixture("donorkind", "enchp5comp.rar");
+        assert_eq!(packing_of_head(&comp, b"a.rar", Some(b"pw")), Packing::HeadersEncrypted);
+        assert!(Packing::HeadersEncrypted.headers_encrypted());
+        assert!(!Packing::EncryptedBorrowable {
+            headers_encrypted: false
+        }
+        .headers_encrypted());
+    }
+
+    #[test]
+    fn kinds_order_and_round_trip() {
+        use DonorKind::*;
+        assert!(Twin < Borrowable);
+        assert!(Borrowable < EncryptedBorrowable);
+        assert!(EncryptedBorrowable < Unknown);
+        assert!(Unknown < Unborrowable);
+        for k in [Twin, Borrowable, EncryptedBorrowable, Unknown, Unborrowable] {
+            assert_eq!(DonorKind::from_u8(k as u8), k);
+            if k != Twin {
+                assert_eq!(DonorKind::from_param(Some(k.param())), k);
+            }
+        }
     }
 
     #[test]
@@ -495,45 +605,43 @@ mod tests {
             z
         };
         let z = zip_entry(b"movie.mkv", 0, 0);
-        assert_eq!(packing_of_head(&z, b"a.zip", false), Packing::Borrowable);
+        assert_eq!(packing_of_head(&z, b"a.zip", None), Packing::Borrowable);
         let z = zip_entry(b"movie.mkv", 0, 8); // deflate
-        assert_eq!(packing_of_head(&z, b"a.zip", false), Packing::Unborrowable);
+        assert_eq!(packing_of_head(&z, b"a.zip", None), Packing::Unborrowable);
         // encrypted entries are never mapped, password or not
         let z = zip_entry(b"movie.mkv", 1, 0);
-        assert_eq!(packing_of_head(&z, b"a.zip", false), Packing::Unborrowable);
-        assert_eq!(packing_of_head(&z, b"a.zip", true), Packing::Unborrowable);
+        assert_eq!(packing_of_head(&z, b"a.zip", None), Packing::Unborrowable);
+        assert_eq!(packing_of_head(&z, b"a.zip", Some(b"pw")), Packing::Unborrowable);
         // a stored nfo first says nothing about the movie behind it
         let z = zip_entry(b"info.nfo", 0, 0);
-        assert_eq!(packing_of_head(&z, b"a.zip", false), Packing::Unknown);
+        assert_eq!(packing_of_head(&z, b"a.zip", None), Packing::Unknown);
         let z = zip_entry(b"movie-sample.mkv", 0, 0);
-        assert_eq!(packing_of_head(&z, b"a.zip", false), Packing::Unknown);
+        assert_eq!(packing_of_head(&z, b"a.zip", None), Packing::Unknown);
         assert_eq!(
-            packing_of_head(&[b'7', b'z', 0xbc, 0xaf, 0x27, 0x1c, 0, 4], b"a.7z", false),
+            packing_of_head(&[b'7', b'z', 0xbc, 0xaf, 0x27, 0x1c, 0, 4], b"a.7z", None),
             Packing::Unknown
         );
         // an nzb password on a 7-Zip: encrypted, ranked after every other ALT
         assert_eq!(
             packing_of_head(
                 &[b'7', b'z', 0xbc, 0xaf, 0x27, 0x1c, 0, 4],
-                b"a.7z.001",
-                true
-            ),
+                b"a.7z.001", Some(b"pw")),
             Packing::Unborrowable
         );
         assert_eq!(
-            packing_of_head(b"anything", b"Movie.2020.mkv", false),
+            packing_of_head(b"anything", b"Movie.2020.mkv", None),
             Packing::Borrowable
         );
         assert_eq!(
-            packing_of_head(&[0x1a, 0x45, 0xdf, 0xa3, 1, 2], b"abc123", false),
+            packing_of_head(&[0x1a, 0x45, 0xdf, 0xa3, 1, 2], b"abc123", None),
             Packing::Borrowable
         );
         assert_eq!(
-            packing_of_head(b"anything", b"Movie.2020.mkv.001", false),
+            packing_of_head(b"anything", b"Movie.2020.mkv.001", None),
             Packing::Borrowable
         );
         assert_eq!(
-            packing_of_head(b"anything", b"setup.exe", false),
+            packing_of_head(b"anything", b"setup.exe", None),
             Packing::Unknown
         );
     }

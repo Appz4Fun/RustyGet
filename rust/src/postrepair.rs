@@ -624,7 +624,7 @@ mod tests {
                 health: 500,
                 critical_health: 900,
                 same_name_or_key: 1,
-                donor_kind: 2,
+                donor_kind: crate::donorkind::DonorKind::Unknown as i32,
                 locked: 0,
             },
             // Index 1: dsCopy of hash 42 -> should be skipped because hash 42 failed
@@ -641,7 +641,7 @@ mod tests {
                 health: 1000,
                 critical_health: 900,
                 same_name_or_key: 1,
-                donor_kind: 2,
+                donor_kind: crate::donorkind::DonorKind::Unknown as i32,
                 locked: 0,
             },
             // Index 2: dsDupe with score 100, alive 950
@@ -658,7 +658,7 @@ mod tests {
                 health: 1000,
                 critical_health: 900,
                 same_name_or_key: 1,
-                donor_kind: 2,
+                donor_kind: crate::donorkind::DonorKind::Unknown as i32,
                 locked: 0,
             },
             // Index 3: dsDupe with equal score 100, higher alive 980 -> wins
@@ -675,7 +675,7 @@ mod tests {
                 health: 1000,
                 critical_health: 900,
                 same_name_or_key: 1,
-                donor_kind: 2,
+                donor_kind: crate::donorkind::DonorKind::Unknown as i32,
                 locked: 0,
             },
         ];

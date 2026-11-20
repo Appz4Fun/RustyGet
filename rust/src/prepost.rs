@@ -501,7 +501,7 @@ fn backup_can_lend(
     use crate::donorkind::DonorKind;
     DonorKind::from_param(own_kind) != DonorKind::Unborrowable
         && match DonorKind::from_param(backup_kind) {
-            DonorKind::Twin | DonorKind::Borrowable => true,
+            DonorKind::Twin | DonorKind::Borrowable | DonorKind::EncryptedBorrowable => true,
             DonorKind::Unknown => labelled_alt,
             DonorKind::Unborrowable => false,
         }
@@ -2661,6 +2661,9 @@ mod tests {
         assert!(can(Some(b"borrowable"), Some(b"unknown"), true));
         assert!(!can(Some(b"borrowable"), Some(b"unborrowable"), true));
         assert!(!can(Some(b"unborrowable"), Some(b"twin"), true));
+        // an encrypted store copy whose nzb password opens it lends without a label
+        assert!(can(Some(b"borrowable"), Some(b"borrowable-encrypted"), false));
+        assert!(can(Some(b"borrowable-encrypted"), Some(b"borrowable"), false));
     }
 
     use super::*;

@@ -50,8 +50,10 @@ const fn map_target_msg_kind(kind: TargetMessageKind) -> MessageKind {
     }
 }
 
+/// Fetch workers of a repair that borrows in earnest. At most 8: the news proxy measured
+/// about 0.9 MB/s per connection, peaked near 8.6 MB/s at 8 and got slower at 16.
 fn stream_fetch_worker_count(primary_connections: i32) -> i32 {
-    (primary_connections / 4).clamp(4, 16)
+    (primary_connections / 4).clamp(4, 8)
 }
 
 /// Fetch workers of a live repair that borrows no dead volume: fewer than after the download,

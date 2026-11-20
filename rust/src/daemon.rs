@@ -15,7 +15,7 @@ use crate::options::OptStr;
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
-use std::sync::Once;
+use std::sync::{Arc, Mutex, Once, PoisonError};
 use std::time::Duration;
 
 use crate::ffi::NzbgetRsWorkState;
@@ -34,7 +34,7 @@ const KIND_DEBUG: i32 = 3;
 static INSTANCE: AtomicBool = AtomicBool::new(false);
 static LOG: AtomicPtr<NzbgetRsLog> = AtomicPtr::new(ptr::null_mut());
 static OPTIONS: AtomicPtr<NzbgetRsOptions> = AtomicPtr::new(ptr::null_mut());
-static WORK_STATE: AtomicPtr<NzbgetRsWorkState> = AtomicPtr::new(ptr::null_mut());
+static WORK_STATE: Mutex<Option<Arc<NzbgetRsWorkState>>> = Mutex::new(None);
 static SERVER_POOL: AtomicPtr<NzbgetRsServerPool> = AtomicPtr::new(ptr::null_mut());
 /// The daemon's pre/post-processor thread (rust/src/jobthread.rs).
 static PRE_POST: AtomicPtr<PrePostRunner> = AtomicPtr::new(ptr::null_mut());
@@ -117,7 +117,7 @@ fn options_flags() -> c_int {
 
 fn tls_init() {
     if !crate::ffi::build_tls_disabled() {
-        crate::ffi::nzbget_rs_tls_init();
+        crate::tlssock::init();
     }
 }
 
@@ -253,7 +253,11 @@ fn destroy_instance() {
     exec(12, &env);
     unsafe {
         crate::net::nzbget_rs_serverpool_free(SERVER_POOL.swap(ptr::null_mut(), Ordering::SeqCst));
-        crate::ffi::nzbget_rs_workstate_free(WORK_STATE.swap(ptr::null_mut(), Ordering::SeqCst));
+    }
+    if let Some(ws) = WORK_STATE.lock().unwrap_or_else(PoisonError::into_inner).take() {
+        crate::ffi::uninstall_workstate(&ws);
+    }
+    unsafe {
         crate::options::nzbget_rs_options_free(OPTIONS.swap(ptr::null_mut(), Ordering::SeqCst));
         crate::log::nzbget_rs_log_free(LOG.swap(ptr::null_mut(), Ordering::SeqCst));
     }
@@ -285,7 +289,7 @@ unsafe extern "C" fn phase1_init(reload: bool) -> c_int {
         tls_init();
     }
 
-    WORK_STATE.store(crate::ffi::nzbget_rs_workstate_new(), Ordering::SeqCst);
+    *WORK_STATE.lock().unwrap_or_else(PoisonError::into_inner) = Some(crate::ffi::install_workstate());
     SERVER_POOL.store(crate::net::nzbget_rs_serverpool_new(), Ordering::SeqCst);
 
     let cmdline = empty_env();
@@ -324,11 +328,11 @@ unsafe extern "C" fn phase1_init(reload: bool) -> c_int {
     if !crate::ffi::build_tls_disabled() {
         let opts = &*options;
         let cert_store = if opts.scalars().cert_check != 0 {
-            opts.str_cstr(OptStr::CertStore).unwrap_or(c"")
+            opts.str_bytes(OptStr::CertStore)
         } else {
-            c""
+            &[]
         };
-        crate::ffi::nzbget_rs_tls_init_options(cert_store.as_ptr());
+        crate::tlssock::init_options(cert_store);
     }
 
     let activate = NzbgetRsDaemonEnv {
@@ -367,10 +371,10 @@ unsafe extern "C" fn phase4_shutdown(reload: bool) {
 
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         if !crate::ffi::build_tls_disabled() {
-            crate::ffi::nzbget_rs_tls_cipher_shutdown();
+            crate::ffi::tls_cipher_native::service().shutdown();
         }
         if !get_reloading() && !crate::ffi::build_tls_disabled() {
-            crate::ffi::nzbget_rs_tls_final();
+            crate::tlssock::final_cleanup();
         }
     }
     destroy_instance();

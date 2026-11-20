@@ -2489,7 +2489,7 @@ unsafe extern "C" fn hc_native_action_cb(
         1 => {
             let job = NzbRef::from_addr(p2);
             let nzb = host.nzb_snap(job, false);
-            host.nzb_action(job, NZB_ACT_CLEAR_FILE_LIST, 0);
+            host.nzb_action(job, NZB_ACT_CLEAR_FILE_LIST);
             *strs.add(0) = hc_stash_str(&nzb.queued_filename);
             0
         }
@@ -2498,7 +2498,7 @@ unsafe extern "C" fn hc_native_action_cb(
             let nzb0 = host.nzb_snap(job, false);
             if nzb0.has_live_repair_thread {
                 let t = nzb0.live_repair_thread_ptr;
-                host.nzb_action(job, NZB_ACT_CLEAR_LIVE_REPAIR_THREAD, 0);
+                host.nzb_action(job, NZB_ACT_CLEAR_LIVE_REPAIR_THREAD);
                 host.thread_stop(t);
             }
             crate::postproc::live_par_time_settle(host, job, true);
@@ -2551,7 +2551,7 @@ unsafe extern "C" fn hc_native_action_cb(
             let job = NzbRef::from_addr(p2);
             let nzb = host.nzb_snap(job, false);
             host.nzb_set_int(job, NZB_INT_PARKED_FILE_COUNT, a1);
-            host.nzb_action(job, NZB_ACT_CLEAR_FILE_LIST, 0);
+            host.nzb_action(job, NZB_ACT_CLEAR_FILE_LIST);
             host.nzb_set_int(job, NZB_INT_REMAINING_PAR_COUNT, 0);
             host.nzb_set_int(job, NZB_INT_PARKING, 0);
             if nzb.direct_rename_status == DirectRenameStatus::Running {
@@ -2748,7 +2748,7 @@ unsafe extern "C" fn hc_native_action_cb(
                 host.nzb_set_int(nzb_ptr, NZB_INT_PAR_REPAIRED, 0);
                 host.nzb_set_int(nzb_ptr, NZB_INT_UNPACK_TRIED, 0);
                 host.nzb_set_last_unpack_status(nzb_ptr, UnpackStatus::None);
-                host.nzb_action(nzb_ptr, NZB_ACT_CLEAR_EXTRACTED_ARCHIVES, 0);
+                host.nzb_action(nzb_ptr, NZB_ACT_CLEAR_EXTRACTED_ARCHIVES);
                 host.nzb_set_cleanup_status(nzb_ptr, CleanupStatus::None);
                 host.nzb_set_int(nzb_ptr, NZB_INT_PAR_RENAME_STATUS, RS_NONE);
                 host.nzb_set_int(nzb_ptr, NZB_INT_RAR_RENAME_STATUS, RS_NONE);
@@ -2772,7 +2772,7 @@ unsafe extern "C" fn hc_native_action_cb(
             host.nzb_set_int(nzb_ptr, NZB_INT_DUPE_FAILED_RUN, 0);
             host.nzb_set_int(nzb_ptr, NZB_INT_DUPE_PAR_DEFER_STATE, DP_NONE);
             host.nzb_set_mark_status(nzb_ptr, MarkStatus::None);
-            host.nzb_action(nzb_ptr, NZB_ACT_CLEAR_SCRIPT_STATUSES, 0);
+            host.nzb_action(nzb_ptr, NZB_ACT_CLEAR_SCRIPT_STATUSES);
             host.nzb_set_int(nzb_ptr, NZB_INT_PARKED_FILE_COUNT, 0);
             host.nzb_set_move_status(nzb_ptr, MoveStatus::from(*ints.add(2)));
             host.nzb_set_int(nzb_ptr, NZB_INT_REPROCESS, c_int::from(a2 != 0));
@@ -2795,7 +2795,7 @@ unsafe extern "C" fn hc_native_action_cb(
         }
         24 => {
             let job = NzbRef::from_addr(p2);
-            host.nzb_action(job, NZB_ACT_BUILD_DEST_DIR, 0);
+            host.nzb_action(job, NZB_ACT_BUILD_DEST_DIR);
             let nzb = host.nzb_snap(job, false);
             *strs.add(0) = hc_stash_str(&nzb.dest_dir);
             0
@@ -2852,7 +2852,7 @@ unsafe extern "C" fn hc_native_action_cb(
             host.nzb_set_int(job, NZB_INT_PAR_REPAIRED, 0);
             host.nzb_set_int(job, NZB_INT_UNPACK_TRIED, 0);
             host.nzb_set_last_unpack_status(job, UnpackStatus::None);
-            host.nzb_action(job, NZB_ACT_CLEAR_EXTRACTED_ARCHIVES, 0);
+            host.nzb_action(job, NZB_ACT_CLEAR_EXTRACTED_ARCHIVES);
             host.nzb_set_int(job, NZB_INT_HEALTH_PAUSED, 0);
             host.nzb_set_i64(job, NZB_I64_DOWNLOADED_SIZE, 0);
             host.nzb_set_int(job, NZB_INT_DOWNLOAD_SEC, 0);
@@ -2982,7 +2982,7 @@ unsafe extern "C" fn hc_native_action_cb(
                     }
                 }
             }
-            host.nzb_action(job, NZB_ACT_UPDATE_CURRENT_STATS, 0);
+            host.nzb_action(job, NZB_ACT_UPDATE_CURRENT_STATS);
             if a1 != 0 {
                 host.nzb_set_int(job, NZB_INT_HEALTH_PAUSED, 1);
             }

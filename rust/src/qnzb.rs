@@ -11,7 +11,7 @@
 #![allow(non_snake_case)]
 
 use crate::options::OptStr;
-use crate::queuesubsys_host::NzbRef;
+use crate::queuesubsys_host::{FileRef, NzbRef};
 use crate::status::{DeleteStatus, ScriptStatus};
 use std::collections::BTreeSet;
 use std::ffi::{c_char, c_int, CStr, CString};
@@ -2125,6 +2125,235 @@ unsafe fn add_completed(p: *const NzbScalars, ints4: [c_int; 4], strs4: [*const 
     };
 }
 
+fn scalars(nzb: NzbRef) -> *mut NzbScalars {
+    nzb.addr() as *mut NzbScalars
+}
+
+/// Drops a file the list no longer holds (as the C++ unique_ptr did).
+fn free_file(file: FileRef) {
+    unsafe { crate::qfile::nzbget_rs_file_free(file.addr() as *mut crate::qfile::File) };
+}
+
+/// Takes `file` out of the download's list; whether it was there.
+fn take_file(nzb: NzbRef, file: FileRef) -> bool {
+    ptr_list_op(
+        file_list(scalars(nzb)),
+        6,
+        0,
+        file.addr(),
+        std::ptr::null(),
+        0,
+    ) != 0
+}
+
+/// Appends `file` to the download's list.
+fn append_file(nzb: NzbRef, file: FileRef) {
+    ptr_list_op(
+        file_list(scalars(nzb)),
+        3,
+        0,
+        file.addr(),
+        std::ptr::null(),
+        0,
+    );
+}
+
+/// The number of files queued for the download.
+pub(crate) fn file_count(nzb: NzbRef) -> usize {
+    if nzb.is_none() {
+        return 0;
+    }
+    ptr_list_op(file_list(scalars(nzb)), 0, 0, 0, std::ptr::null(), 0) as usize
+}
+
+/// The `idx`-th queued file, or none.
+pub(crate) fn file_at(nzb: NzbRef, idx: usize) -> FileRef {
+    if nzb.is_none() {
+        return FileRef::NONE;
+    }
+    let addr = ptr_list_op(
+        file_list(scalars(nzb)),
+        1,
+        idx as i64,
+        0,
+        std::ptr::null(),
+        0,
+    );
+    FileRef::from_addr(addr as usize)
+}
+
+/// Removes `file` from the download and frees it.
+pub(crate) fn remove_file(nzb: NzbRef, file: FileRef) {
+    if nzb.is_some() && take_file(nzb, file) {
+        free_file(file);
+    }
+}
+
+/// Removes `file`, tells the pre/post-processor about `aspect_action` on
+/// queue `dq`, then frees it.
+pub(crate) fn remove_file_and_notify(nzb: NzbRef, file: FileRef, aspect_action: i32, dq: usize) {
+    if nzb.is_none() {
+        return;
+    }
+    let released = take_file(nzb, file);
+    crate::jobthread::nzbget_rs_prepost_queue_changed(aspect_action, dq, nzb.addr(), file.addr());
+    if released {
+        free_file(file);
+    }
+}
+
+/// Moves `file` (split off a download) from `nzb` to `dest`, moving its
+/// counts with it.
+pub(crate) fn transfer_file(nzb: NzbRef, file: FileRef, dest: NzbRef) {
+    if nzb.is_none() {
+        return;
+    }
+    if take_file(nzb, file) {
+        append_file(dest, file);
+    }
+    unsafe {
+        crate::qfile::nzbget_rs_file_set(
+            file.addr() as *const crate::qfile::File,
+            crate::qfile::field::NZB,
+            dest.addr() as i64,
+        );
+        crate::qfile::add_file_stats(nzb.addr(), file.addr() as *const crate::qfile::File, 1, 2);
+        crate::qfile::add_file_stats(dest.addr(), file.addr() as *const crate::qfile::File, 1, 1);
+    }
+}
+
+/// Moves every file, completed file and server stat of `src` into `nzb`
+/// (merging two downloads).
+pub(crate) fn merge_from(nzb: NzbRef, src: NzbRef) {
+    if nzb.is_none() {
+        return;
+    }
+    let (p, src) = (scalars(nzb), src.addr() as *const NzbScalars);
+    let sl = file_list(src);
+    let no: *const usize = std::ptr::null();
+    for i in 0..ptr_list_op(sl, 0, 0, 0, no, 0) {
+        let f = ptr_list_op(sl, 1, i, 0, no, 0) as usize;
+        unsafe {
+            crate::qfile::nzbget_rs_file_set(
+                f as *const crate::qfile::File,
+                crate::qfile::field::NZB,
+                p as i64,
+            )
+        };
+    }
+    ptr_list_op(file_list(p), 11, 0, 0, no, sl);
+    let ns: *const c_char = std::ptr::null();
+    for mut lists in [[0 as c_int, 0], [1, 1]] {
+        unsafe {
+            nzbget_rs_nzb_coll(
+                p,
+                49,
+                1,
+                src,
+                ns,
+                ns,
+                lists.as_mut_ptr(),
+                std::ptr::null_mut(),
+            )
+        };
+    }
+    unsafe {
+        nzbget_rs_nzb_files(
+            p,
+            8,
+            0,
+            src,
+            ns,
+            ns,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+        )
+    };
+}
+
+/// Puts the download's files in `order` (files not named keep their place
+/// after them, as the list op does).
+pub(crate) fn reorder_files(nzb: NzbRef, order: &[FileRef]) {
+    if nzb.is_none() || order.is_empty() {
+        return;
+    }
+    // FileRef is a transparent address, so the slice is a list of addresses.
+    let addrs = order.as_ptr().cast::<usize>();
+    ptr_list_op(file_list(scalars(nzb)), 10, order.len() as i64, 0, addrs, 0);
+}
+
+/// Replaces the download's files, completed files and stats with those of
+/// `src` (a redownload).
+pub(crate) fn replace_files_from(nzb: NzbRef, src: NzbRef) {
+    if nzb.is_none() {
+        return;
+    }
+    let p = scalars(nzb);
+    let ns: *const c_char = std::ptr::null();
+    let files = |op| unsafe {
+        nzbget_rs_nzb_files(
+            p,
+            op,
+            0,
+            std::ptr::null(),
+            ns,
+            ns,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+        )
+    };
+    files(7);
+    files(27);
+    for op in [46, 47] {
+        unsafe {
+            nzbget_rs_nzb_coll(
+                p,
+                op,
+                0,
+                std::ptr::null(),
+                ns,
+                ns,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+    }
+    unsafe { move_file_list(p, src.addr() as *const NzbScalars) };
+}
+
+/// Erases the `idx`-th completed file.
+pub(crate) fn erase_completed_file(nzb: NzbRef, idx: usize) {
+    if nzb.is_none() {
+        return;
+    }
+    let ns: *const c_char = std::ptr::null();
+    unsafe {
+        nzbget_rs_nzb_files(
+            scalars(nzb),
+            6,
+            idx as c_int,
+            std::ptr::null(),
+            ns,
+            ns,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+        )
+    };
+}
+
+/// Appends a requeued `file` to the download.
+pub(crate) fn push_file(nzb: NzbRef, file: FileRef) {
+    if nzb.is_some() {
+        append_file(nzb, file);
+    }
+}
+
 /// A collection's file-list and completed-file ops (host op 34), as the
 /// C++ host did them.
 ///
@@ -2158,54 +2387,12 @@ pub(crate) unsafe fn host_filelist_op(
     let files = |op, a2, s1, s2, ints: *mut c_int, i64s: *mut i64, strs, raw: *const i64| unsafe {
         nzbget_rs_nzb_files(p, op, a2, np, s1, s2, ints, i64s, strs, raw)
     };
-    let coll = |p: *const NzbScalars, op, a2, other, ints| unsafe {
-        nzbget_rs_nzb_coll(p, op, a2, other, ns, ns, ints, std::ptr::null_mut())
-    };
     let ni: *mut c_int = std::ptr::null_mut();
     let nl: *mut i64 = std::ptr::null_mut();
     let nstr: *mut *const c_char = std::ptr::null_mut();
     let nraw: *const i64 = std::ptr::null();
     let set = |f: usize, id, v: i64| unsafe { nzbget_rs_file_set(f as *const File, id, v) };
     match a1 {
-        0 => ptr_list_op(fl, 0, 0, 0, no, 0) as usize,
-        1 => ptr_list_op(fl, 1, i64::from(a2), 0, no, 0) as usize,
-        2 => {
-            // removes the file from the list, dropping it (as the C++ unique_ptr did)
-            if ptr_list_op(fl, 6, 0, p2, no, 0) != 0 {
-                unsafe { crate::qfile::nzbget_rs_file_free(p2 as *mut File) };
-            }
-            0
-        }
-        3 => {
-            let dst = i64v(0) as usize as *mut NzbScalars;
-            if ptr_list_op(fl, 6, 0, p2, no, 0) != 0 {
-                ptr_list_op(file_list(dst), 3, 0, p2, no, 0);
-            }
-            set(p2, field::NZB, dst as i64);
-            unsafe {
-                crate::qfile::add_file_stats(p as usize, p2 as *const File, 1, 2);
-                crate::qfile::add_file_stats(dst as usize, p2 as *const File, 1, 1);
-            }
-            0
-        }
-        4 => {
-            let src = p2 as *const NzbScalars;
-            let sl = file_list(src);
-            for i in 0..ptr_list_op(sl, 0, 0, 0, no, 0) {
-                set(
-                    ptr_list_op(sl, 1, i, 0, no, 0) as usize,
-                    field::NZB,
-                    p as i64,
-                );
-            }
-            ptr_list_op(fl, 11, 0, 0, no, sl);
-            let mut lists = [0 as c_int, 0];
-            coll(p, 49, 1, src, lists.as_mut_ptr());
-            lists = [1, 1];
-            coll(p, 49, 1, src, lists.as_mut_ptr());
-            unsafe { nzbget_rs_nzb_files(p, 8, 0, src, ns, ns, ni, nl, nstr, nraw) };
-            0
-        }
         5 => {
             if a2 < 0 {
                 return files(0, 0, ns, ns, ni, nl, nstr, nraw) as usize;
@@ -2242,20 +2429,6 @@ pub(crate) unsafe fn host_filelist_op(
         }
         8 => {
             files(23, a2, s1, ns, ints, i64s, nstr, p2 as *const i64);
-            0
-        }
-        9 => {
-            // take the file out, tell the pre/post-processor, then drop it
-            let dq = i64v(0) as usize;
-            let released = ptr_list_op(fl, 6, 0, p2, no, 0) != 0;
-            crate::jobthread::nzbget_rs_prepost_queue_changed(a2, dq, p as usize, p2);
-            if released {
-                unsafe { crate::qfile::nzbget_rs_file_free(p2 as *mut File) };
-            }
-            0
-        }
-        10 => {
-            ptr_list_op(fl, 10, i64::from(a2), 0, p2 as *const usize, 0);
             0
         }
         11 => {
@@ -2326,22 +2499,6 @@ pub(crate) unsafe fn host_filelist_op(
             };
             ptr_list_op(fl, 3, 0, fp, no, 0);
             fp
-        }
-        15 => {
-            files(7, 0, ns, ns, ni, nl, nstr, nraw);
-            files(27, 0, ns, ns, ni, nl, nstr, nraw);
-            coll(p, 46, 0, np, ni);
-            coll(p, 47, 0, np, ni);
-            unsafe { move_file_list(p, p2 as *const NzbScalars) };
-            0
-        }
-        16 => {
-            files(6, a2, ns, ns, ni, nl, nstr, nraw);
-            0
-        }
-        17 => {
-            ptr_list_op(fl, 3, 0, p2, no, 0);
-            0
         }
         18 => {
             unsafe {

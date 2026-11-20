@@ -2591,15 +2591,23 @@ impl QueueSubsysHost {
     }
 
     pub fn nzb_file_len(&self, nzb_ptr: NzbRef) -> usize {
-        self.filelist_op(nzb_ptr, 0, OpArgs::NONE)
+        if !self.use_active {
+            return 0;
+        }
+        crate::qnzb::file_count(nzb_ptr)
     }
 
     pub fn nzb_file_at(&self, nzb_ptr: NzbRef, idx: usize) -> FileRef {
-        FileRef::from_addr(self.filelist_op(nzb_ptr, 1, OpArgs::NONE.a2(idx as i32)))
+        if !self.use_active {
+            return FileRef::NONE;
+        }
+        crate::qnzb::file_at(nzb_ptr, idx)
     }
 
     pub fn nzb_remove_file(&self, nzb_ptr: NzbRef, file_ptr: FileRef) {
-        self.filelist_op(nzb_ptr, 2, OpArgs::NONE.p2(file_ptr.addr()));
+        if self.use_active {
+            crate::qnzb::remove_file(nzb_ptr, file_ptr);
+        }
     }
 
     pub fn nzb_remove_file_and_notify(
@@ -2609,33 +2617,27 @@ impl QueueSubsysHost {
         file_ptr: FileRef,
         aspect_action: i32,
     ) {
-        let mut i64s = [dq_ptr as i64];
-        self.filelist_op(
-            nzb_ptr,
-            9,
-            OpArgs::NONE
-                .a2(aspect_action)
-                .p2(file_ptr.addr())
-                .i64s(i64s.as_mut_ptr()),
-        );
+        if !self.use_active {
+            return;
+        }
+        crate::qnzb::remove_file_and_notify(nzb_ptr, file_ptr, aspect_action, dq_ptr);
         #[cfg(unix)]
-        if self.use_active {
+        {
             crate::feed::notify_active_feed_queue_aspect(aspect_action, None);
             crate::urlcoord::notify_active_urlcoord_queue_update(aspect_action);
         }
     }
 
     pub fn nzb_transfer_split_file(&self, src_nzb: NzbRef, dest_nzb: NzbRef, file_ptr: FileRef) {
-        let mut i64s = [dest_nzb.addr() as i64];
-        self.filelist_op(
-            src_nzb,
-            3,
-            OpArgs::NONE.p2(file_ptr.addr()).i64s(i64s.as_mut_ptr()),
-        );
+        if self.use_active {
+            crate::qnzb::transfer_file(src_nzb, file_ptr, dest_nzb);
+        }
     }
 
     pub fn nzb_merge_lists_and_stats(&self, dest_nzb: NzbRef, src_nzb: NzbRef) {
-        self.filelist_op(dest_nzb, 4, OpArgs::NONE.p2(src_nzb.addr()));
+        if self.use_active {
+            crate::qnzb::merge_from(dest_nzb, src_nzb);
+        }
     }
 
     pub fn nzb_completed_files_len(&self, nzb_ptr: NzbRef) -> usize {
@@ -2757,16 +2759,9 @@ impl QueueSubsysHost {
     }
 
     pub fn nzb_reorder_files(&self, nzb_ptr: NzbRef, new_order: &[FileRef]) {
-        if nzb_ptr.is_none() || new_order.is_empty() {
-            return;
+        if self.use_active {
+            crate::qnzb::reorder_files(nzb_ptr, new_order);
         }
-        self.filelist_op(
-            nzb_ptr,
-            10,
-            OpArgs::NONE
-                .a2(new_order.len() as i32)
-                .p2(new_order.as_ptr() as usize),
-        );
     }
 
     pub fn nzb_stream_repair_jobs(&self, nzb_ptr: NzbRef) -> Vec<StreamRepairJobSnap> {
@@ -2972,15 +2967,21 @@ impl QueueSubsysHost {
     }
 
     pub fn nzb_redownload_replace_files(&self, nzb_ptr: NzbRef, src_nzb_ptr: NzbRef) {
-        self.filelist_op(nzb_ptr, 15, OpArgs::NONE.p2(src_nzb_ptr.addr()));
+        if self.use_active {
+            crate::qnzb::replace_files_from(nzb_ptr, src_nzb_ptr);
+        }
     }
 
     pub fn nzb_erase_completed_file(&self, nzb_ptr: NzbRef, idx: usize) {
-        self.filelist_op(nzb_ptr, 16, OpArgs::NONE.a2(idx as i32));
+        if self.use_active {
+            crate::qnzb::erase_completed_file(nzb_ptr, idx);
+        }
     }
 
     pub fn nzb_add_requeued_file(&self, nzb_ptr: NzbRef, file_ptr: FileRef) {
-        self.filelist_op(nzb_ptr, 17, OpArgs::NONE.p2(file_ptr.addr()));
+        if self.use_active {
+            crate::qnzb::push_file(nzb_ptr, file_ptr);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]

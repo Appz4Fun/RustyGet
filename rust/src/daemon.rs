@@ -375,7 +375,7 @@ unsafe fn nserv_main(argc: c_int, argv: *mut *mut c_char) -> c_int {
         log_cb: None,
         runtime_cb: Some(nserv_runtime),
         transport: None,
-        tls_host_cb: None,
+        tls_host: None,
         debug_on: 0,
     };
     let rc =

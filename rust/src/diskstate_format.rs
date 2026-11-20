@@ -4190,20 +4190,61 @@ pub enum FileExport {
 /// called when there is no target file.
 pub type DiskExportFileFn =
     fn(ctx: *mut c_void, what: FileExport, sink: &mut dyn FnMut(&NzbgetRsDiskFileExport));
-pub type DiskApplyFileFn = unsafe extern "C" fn(
-    ctx: *mut c_void,
-    mode: c_int,
-    idx_or_flags: c_int,
-    extra_i32: c_int,
-    seg_offset: i64,
-    crc: u32,
-    str_arg: *const c_char,
-    finfo: *const NzbgetRsDiskFileInfoInput,
-    art_info: *const NzbgetRsDiskArticleInfo,
-    fstate: *const NzbgetRsDiskFileStateInput,
-    stats: *const NzbgetRsDiskServerStat,
-    stats_len: usize,
-) -> c_int;
+/// Borrows a C string; null reads as `None`.
+///
+/// # Safety
+/// `p` must be null or point to a NUL-terminated string that outlives `'a`.
+unsafe fn opt_cstr<'a>(p: *const c_char) -> Option<&'a std::ffi::CStr> {
+    if p.is_null() {
+        None
+    } else {
+        Some(unsafe { std::ffi::CStr::from_ptr(p) })
+    }
+}
+
+/// Something loaded from disk to apply to the target file.
+#[derive(Clone, Copy)]
+pub enum FileApply<'a> {
+    /// File info. Bit 1 of `flags` sets the output filename; when
+    /// `summary`, the rest of the record is applied too, with bits 2, 4 and
+    /// 8 selecting filename-confirmed, time and output-initialized.
+    Info {
+        info: &'a NzbgetRsDiskFileInfoInput,
+        flags: c_int,
+        summary: bool,
+    },
+    /// A news group and/or an article, each added when present.
+    Item {
+        group: Option<&'a std::ffi::CStr>,
+        article: Option<&'a NzbgetRsDiskArticleInfo>,
+    },
+    /// Asks for article `idx` (created if missing); the callback returns
+    /// its part number shifted left by one, plus 1 if it has a result file.
+    ArticleInfo { idx: i32 },
+    /// The saved state of article `idx`.
+    ArticleState {
+        idx: i32,
+        format_version: i32,
+        status: i32,
+        seg_offset: i64,
+        seg_size: i32,
+        crc: u32,
+        dupe_round: i32,
+        result_filename: Option<&'a std::ffi::CStr>,
+    },
+    /// The file's download state. `flags` bits: 1 decoded size, 2 filename,
+    /// 4 hash16k and par flag, 8 par set id, 16 output initialized.
+    State {
+        state: &'a NzbgetRsDiskFileStateInput,
+        flags: c_int,
+        completed_articles: i32,
+        output_filename: Option<&'a std::ffi::CStr>,
+        stats: &'a [NzbgetRsDiskServerStat],
+    },
+}
+
+/// Applies `what` to the target file; only `ArticleInfo` returns a value.
+pub type DiskApplyFileFn = fn(ctx: *mut c_void, what: FileApply<'_>) -> i32;
 /// Nzb and file ids still referenced by the queue and history; disk-state
 /// files for any other id are orphans.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -5354,23 +5395,15 @@ unsafe fn load_file_info_from_reader(
         flags: c_int,
     ) {
         let c = unsafe { &*ctx.cast::<Ctx<'_>>() };
-        if let Some(cb) = c.env.apply_file_cb {
-            unsafe {
-                cb(
-                    c.env.ctx,
-                    0,
+        if let (Some(cb), Some(info)) = (c.env.apply_file_cb, unsafe { fields.as_ref() }) {
+            cb(
+                c.env.ctx,
+                FileApply::Info {
+                    info,
                     flags,
-                    c.summary,
-                    0,
-                    0,
-                    std::ptr::null(),
-                    fields,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    0,
-                );
-            }
+                    summary: c.summary != 0,
+                },
+            );
         }
     }
     unsafe extern "C" fn on_item(
@@ -5380,22 +5413,13 @@ unsafe fn load_file_info_from_reader(
     ) {
         let c = unsafe { &*ctx.cast::<Ctx<'_>>() };
         if let Some(cb) = c.env.apply_file_cb {
-            unsafe {
-                cb(
-                    c.env.ctx,
-                    1,
-                    0,
-                    0,
-                    0,
-                    0,
-                    grp,
-                    std::ptr::null(),
-                    art,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    0,
-                );
-            }
+            cb(
+                c.env.ctx,
+                FileApply::Item {
+                    group: unsafe { opt_cstr(grp) },
+                    article: unsafe { art.as_ref() },
+                },
+            );
         }
     }
     let mut fctx = Ctx {
@@ -5442,7 +5466,6 @@ unsafe fn load_file_state_from_reader(
     struct Ctx<'a> {
         env: &'a NzbgetRsDiskStateEnv,
         ver: i32,
-        has_art: i32,
     }
     unsafe extern "C" fn art_cb(
         ctx: *mut c_void,
@@ -5460,52 +5483,21 @@ unsafe fn load_file_state_from_reader(
             return 0;
         };
         if op == 0 {
-            unsafe {
-                cb(
-                    c.env.ctx,
-                    2,
-                    idx,
-                    c.has_art,
-                    0,
-                    0,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    0,
-                )
-            }
+            cb(c.env.ctx, FileApply::ArticleInfo { idx })
         } else {
-            let st = NzbgetRsDiskFileStateInput {
-                success_articles: seg_size,
-                failed_articles: fb_round,
-                remaining_size: 0,
-                success_size: 0,
-                failed_size: 0,
-                filename: std::ptr::null(),
-                hash16k: std::ptr::null(),
-                par_set_id: std::ptr::null(),
-                par_file: status,
-                decoded_file_size: 0,
-                output_initialized: 0,
-            };
-            unsafe {
-                cb(
-                    c.env.ctx,
-                    3,
+            cb(
+                c.env.ctx,
+                FileApply::ArticleState {
                     idx,
-                    c.ver,
+                    format_version: c.ver,
+                    status,
                     seg_offset,
+                    seg_size,
                     crc,
-                    res_fn,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    &st,
-                    std::ptr::null(),
-                    0,
-                )
-            }
+                    dupe_round: fb_round,
+                    result_filename: unsafe { opt_cstr(res_fn) },
+                },
+            )
         }
     }
     unsafe extern "C" fn sum_cb(
@@ -5518,29 +5510,22 @@ unsafe fn load_file_state_from_reader(
         stats_len: usize,
     ) {
         let c = unsafe { &*ctx.cast::<Ctx<'_>>() };
-        if let Some(cb) = c.env.apply_file_cb {
-            unsafe {
-                cb(
-                    c.env.ctx,
-                    4,
+        if let (Some(cb), Some(state)) = (c.env.apply_file_cb, unsafe { fields.as_ref() }) {
+            cb(
+                c.env.ctx,
+                FileApply::State {
+                    state,
                     flags,
                     completed_articles,
-                    0,
-                    0,
-                    new_out_fn,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    fields,
-                    stats,
-                    stats_len,
-                );
-            }
+                    output_filename: unsafe { opt_cstr(new_out_fn) },
+                    stats: unsafe { raw_slice(stats, stats_len) },
+                },
+            );
         }
     }
     let mut sctx = Ctx {
         env,
         ver: format_version,
-        has_art: meta.has_articles,
     };
     let ok = unsafe {
         load_file_state(
@@ -7860,20 +7845,7 @@ fn active_disk_export_file_cb(
 }
 
 #[cfg(unix)]
-unsafe extern "C" fn active_disk_apply_file_cb(
-    raw_ctx: *mut c_void,
-    mode: c_int,
-    idx_or_flags: c_int,
-    extra_i32: c_int,
-    seg_offset: i64,
-    crc: u32,
-    str_arg: *const c_char,
-    finfo_ptr: *const NzbgetRsDiskFileInfoInput,
-    art_info_ptr: *const NzbgetRsDiskArticleInfo,
-    fstate_ptr: *const NzbgetRsDiskFileStateInput,
-    stats: *const NzbgetRsDiskServerStat,
-    stats_len: usize,
-) -> c_int {
+fn active_disk_apply_file_cb(raw_ctx: *mut c_void, what: FileApply<'_>) -> i32 {
     use crate::queuesubsys_host::*;
     let (qh_opt, fp) = {
         let c = unsafe { &*raw_ctx.cast::<ActiveDiskExecCtx<'_>>() };
@@ -7885,136 +7857,135 @@ unsafe extern "C" fn active_disk_apply_file_cb(
     if fp.is_none() {
         return 0;
     }
-    if mode == 0 {
-        let finfo = unsafe { &*finfo_ptr };
-        if (idx_or_flags & 1) != 0 {
-            qh.file_set_str(
-                fp,
-                FILE_STR_OUTPUT_FILENAME,
-                Some(unsafe { cstr::bytes(finfo.output_filename) }),
-            );
+    match what {
+        FileApply::Info {
+            info: finfo,
+            flags,
+            summary,
+        } => {
+            if (flags & 1) != 0 {
+                qh.file_set_str(
+                    fp,
+                    FILE_STR_OUTPUT_FILENAME,
+                    Some(unsafe { cstr::bytes(finfo.output_filename) }),
+                );
+            }
+            if summary {
+                let subj = unsafe { cstr::bytes(finfo.subject) };
+                if !subj.is_empty() {
+                    qh.file_set_str(fp, FILE_STR_SUBJECT, Some(subj));
+                }
+                let fn_b = unsafe { cstr::bytes(finfo.filename) };
+                if !fn_b.is_empty() {
+                    qh.file_set_str(fp, FILE_STR_FILENAME, Some(fn_b));
+                }
+                let orig_b = unsafe { cstr::bytes(finfo.origname) };
+                if !orig_b.is_empty() {
+                    qh.file_set_str(fp, FILE_STR_ORIGNAME, Some(orig_b));
+                }
+                if (flags & 2) != 0 {
+                    qh.file_set_int(fp, FILE_INT_FILENAME_CONFIRMED, finfo.filename_confirmed);
+                }
+                if (flags & 4) != 0 {
+                    qh.file_set_i64(fp, FILE_I64_TIME, i64::from(finfo.time));
+                }
+                if (flags & 8) != 0 {
+                    qh.file_set_int(fp, FILE_INT_OUTPUT_INITIALIZED, finfo.output_initialized);
+                }
+                qh.file_set_i64(fp, FILE_I64_SIZE, finfo.size);
+                qh.file_set_i64(fp, FILE_I64_MISSED_SIZE, finfo.missed_size);
+                qh.file_set_i64(fp, FILE_I64_REMAINING_SIZE, finfo.size - finfo.missed_size);
+                qh.file_set_int(fp, FILE_INT_PAR_FILE, finfo.par_file);
+                qh.file_set_int(fp, FILE_INT_TOTAL_ARTICLES, finfo.total_articles);
+                qh.file_set_int(fp, FILE_INT_MISSED_ARTICLES, finfo.missed_articles);
+            }
+            0
         }
-        if extra_i32 != 0 {
-            let subj = unsafe { cstr::bytes(finfo.subject) };
-            if !subj.is_empty() {
-                qh.file_set_str(fp, FILE_STR_SUBJECT, Some(subj));
+        FileApply::Item { group, article } => {
+            if let Some(g) = group {
+                qh.file_push_group(fp, g.as_ptr());
             }
-            let fn_b = unsafe { cstr::bytes(finfo.filename) };
-            if !fn_b.is_empty() {
-                qh.file_set_str(fp, FILE_STR_FILENAME, Some(fn_b));
+            if let Some(ai) = article {
+                qh.file_push_article_basic(fp, ai.part_number, ai.size, ai.message_id);
             }
-            let orig_b = unsafe { cstr::bytes(finfo.origname) };
-            if !orig_b.is_empty() {
-                qh.file_set_str(fp, FILE_STR_ORIGNAME, Some(orig_b));
-            }
-            if (idx_or_flags & 2) != 0 {
-                qh.file_set_int(fp, FILE_INT_FILENAME_CONFIRMED, finfo.filename_confirmed);
-            }
-            if (idx_or_flags & 4) != 0 {
-                qh.file_set_i64(fp, FILE_I64_TIME, i64::from(finfo.time));
-            }
-            if (idx_or_flags & 8) != 0 {
-                qh.file_set_int(fp, FILE_INT_OUTPUT_INITIALIZED, finfo.output_initialized);
-            }
-            qh.file_set_i64(fp, FILE_I64_SIZE, finfo.size);
-            qh.file_set_i64(fp, FILE_I64_MISSED_SIZE, finfo.missed_size);
-            qh.file_set_i64(fp, FILE_I64_REMAINING_SIZE, finfo.size - finfo.missed_size);
-            qh.file_set_int(fp, FILE_INT_PAR_FILE, finfo.par_file);
-            qh.file_set_int(fp, FILE_INT_TOTAL_ARTICLES, finfo.total_articles);
-            qh.file_set_int(fp, FILE_INT_MISSED_ARTICLES, finfo.missed_articles);
+            0
         }
-        return 0;
-    }
-    if mode == 1 {
-        if !str_arg.is_null() {
-            qh.file_push_group(fp, str_arg);
+        FileApply::ArticleInfo { idx } => {
+            qh.file_article_disk_op(fp, idx, false, 0, 0, 0, 0, 0, 0, std::ptr::null())
         }
-        if !art_info_ptr.is_null() {
-            let ai = unsafe { &*art_info_ptr };
-            qh.file_push_article_basic(fp, ai.part_number, ai.size, ai.message_id);
-        }
-        return 0;
-    }
-    if mode == 2 {
-        return qh.file_article_disk_op(
-            fp,
-            idx_or_flags,
-            false,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            std::ptr::null(),
-        );
-    }
-    if mode == 3 {
-        let fst = unsafe { &*fstate_ptr };
-        return qh.file_article_disk_op(
-            fp,
-            idx_or_flags,
-            true,
-            extra_i32,
+        FileApply::ArticleState {
+            idx,
+            format_version,
+            status,
             seg_offset,
-            fst.success_articles,
+            seg_size,
             crc,
-            fst.failed_articles,
-            fst.par_file,
-            str_arg,
-        );
+            dupe_round,
+            result_filename,
+        } => qh.file_article_disk_op(
+            fp,
+            idx,
+            true,
+            format_version,
+            seg_offset,
+            seg_size,
+            crc,
+            dupe_round,
+            status,
+            result_filename.map_or(std::ptr::null(), |c| c.as_ptr()),
+        ),
+        FileApply::State {
+            state: fst,
+            flags,
+            completed_articles,
+            output_filename,
+            stats,
+        } => {
+            qh.file_set_int(fp, FILE_INT_SUCCESS_ARTICLES, fst.success_articles);
+            qh.file_set_int(fp, FILE_INT_FAILED_ARTICLES, fst.failed_articles);
+            qh.file_set_i64(fp, FILE_I64_REMAINING_SIZE, fst.remaining_size);
+            qh.file_set_i64(fp, FILE_I64_SUCCESS_SIZE, fst.success_size);
+            qh.file_set_i64(fp, FILE_I64_FAILED_SIZE, fst.failed_size);
+            if (flags & 1) != 0 {
+                qh.file_set_i64(fp, FILE_I64_DECODED_FILE_SIZE, fst.decoded_file_size);
+            }
+            if (flags & 2) != 0 {
+                qh.file_set_str(
+                    fp,
+                    FILE_STR_FILENAME,
+                    Some(unsafe { cstr::bytes(fst.filename) }),
+                );
+            }
+            if (flags & 4) != 0 {
+                let h16 = unsafe { cstr::bytes(fst.hash16k) };
+                qh.file_set_str(
+                    fp,
+                    FILE_STR_HASH16K,
+                    if h16.is_empty() { None } else { Some(h16) },
+                );
+                qh.file_set_int(fp, FILE_INT_PAR_FILE, fst.par_file);
+            }
+            if (flags & 8) != 0 {
+                let psid = unsafe { cstr::bytes(fst.par_set_id) };
+                qh.file_set_str(
+                    fp,
+                    FILE_STR_PAR_SET_ID,
+                    if psid.is_empty() { None } else { Some(psid) },
+                );
+            }
+            if !stats.is_empty() {
+                apply_active_server_stats_file(qh, fp, stats);
+            }
+            qh.file_set_int(fp, FILE_INT_COMPLETED_ARTICLES, completed_articles);
+            if (flags & 16) != 0 {
+                qh.file_set_int(fp, FILE_INT_OUTPUT_INITIALIZED, fst.output_initialized);
+            }
+            if let Some(out) = output_filename {
+                qh.file_set_str(fp, FILE_STR_OUTPUT_FILENAME, Some(out.to_bytes()));
+            }
+            0
+        }
     }
-    if mode == 4 {
-        let fst = unsafe { &*fstate_ptr };
-        qh.file_set_int(fp, FILE_INT_SUCCESS_ARTICLES, fst.success_articles);
-        qh.file_set_int(fp, FILE_INT_FAILED_ARTICLES, fst.failed_articles);
-        qh.file_set_i64(fp, FILE_I64_REMAINING_SIZE, fst.remaining_size);
-        qh.file_set_i64(fp, FILE_I64_SUCCESS_SIZE, fst.success_size);
-        qh.file_set_i64(fp, FILE_I64_FAILED_SIZE, fst.failed_size);
-        if (idx_or_flags & 1) != 0 {
-            qh.file_set_i64(fp, FILE_I64_DECODED_FILE_SIZE, fst.decoded_file_size);
-        }
-        if (idx_or_flags & 2) != 0 {
-            qh.file_set_str(
-                fp,
-                FILE_STR_FILENAME,
-                Some(unsafe { cstr::bytes(fst.filename) }),
-            );
-        }
-        if (idx_or_flags & 4) != 0 {
-            let h16 = unsafe { cstr::bytes(fst.hash16k) };
-            qh.file_set_str(
-                fp,
-                FILE_STR_HASH16K,
-                if h16.is_empty() { None } else { Some(h16) },
-            );
-            qh.file_set_int(fp, FILE_INT_PAR_FILE, fst.par_file);
-        }
-        if (idx_or_flags & 8) != 0 {
-            let psid = unsafe { cstr::bytes(fst.par_set_id) };
-            qh.file_set_str(
-                fp,
-                FILE_STR_PAR_SET_ID,
-                if psid.is_empty() { None } else { Some(psid) },
-            );
-        }
-        if !stats.is_null() && stats_len > 0 {
-            let st_slice = unsafe { std::slice::from_raw_parts(stats, stats_len) };
-            apply_active_server_stats_file(qh, fp, st_slice);
-        }
-        qh.file_set_int(fp, FILE_INT_COMPLETED_ARTICLES, extra_i32);
-        if (idx_or_flags & 16) != 0 {
-            qh.file_set_int(fp, FILE_INT_OUTPUT_INITIALIZED, fst.output_initialized);
-        }
-        if !str_arg.is_null() {
-            qh.file_set_str(
-                fp,
-                FILE_STR_OUTPUT_FILENAME,
-                Some(unsafe { cstr::bytes(str_arg) }),
-            );
-        }
-    }
-    0
 }
 
 #[cfg(unix)]

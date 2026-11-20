@@ -4966,6 +4966,52 @@ pub trait ContentSourceSet {
 
 struct ContentSourceRarAdapter<'a>(&'a dyn ContentSource);
 
+/// A RAR volume whose first bytes (its headers) are served from `head`, rebuilt from the
+/// volume's own quick-open record, and the rest from its source.
+struct RebuiltHeadAdapter<'a> {
+    source: &'a dyn ContentSource,
+    head: Vec<u8>,
+}
+
+impl crate::rarreader::Source for RebuiltHeadAdapter<'_> {
+    fn size(&mut self) -> i64 {
+        self.source.size()
+    }
+    fn read(&mut self, offset: i64, buf: &mut [u8]) -> bool {
+        let Ok(start) = usize::try_from(offset) else { return false };
+        let head_len = self.head.len();
+        let from_head = head_len.saturating_sub(start).min(buf.len());
+        if from_head > 0 {
+            buf[..from_head].copy_from_slice(&self.head[start..start + from_head]);
+        }
+        from_head == buf.len()
+            || self
+                .source
+                .read(offset + from_head as i64, &mut buf[from_head..])
+                .is_ok()
+    }
+}
+
+/// The headers of RAR5 volume `name` rebuilt from its own quick-open record (see
+/// [`crate::deadvolume::rar5_head_from_tail`]) when its first bytes cannot be read: in a
+/// copy that lost every volume's first article they are gone from every volume. Smaller
+/// tails are tried when a long one runs into a lost article.
+fn rebuilt_rar5_head(name: &[u8], source: &dyn ContentSource) -> Option<Vec<u8>> {
+    let (_, number, _, _) = rar_part_number(name)?;
+    let index = number.checked_sub(1)? as usize;
+    let size = u64::try_from(source.size()).ok()?;
+    for scan in [crate::deadvolume::HEAD_TAIL_SCAN, 1 << 14, 1 << 10] {
+        let from = size.saturating_sub(scan);
+        let mut tail = vec![0u8; (size - from) as usize];
+        if source.read(from as i64, &mut tail).is_ok() {
+            if let Some(head) = crate::deadvolume::rar5_head_from_tail(&tail, size, index) {
+                return Some(head);
+            }
+        }
+    }
+    None
+}
+
 impl crate::rarreader::Source for ContentSourceRarAdapter<'_> {
     fn size(&mut self) -> i64 {
         self.0.size()
@@ -7784,13 +7830,31 @@ impl ContentMapper {
                 let mut adapter = ContentSourceRarAdapter(src);
                 // without TLS there is no AES: encrypted headers stay unread
                 let password = password.filter(|_| tls_enabled);
-                let ok = crate::rarreader::read_from(&mut vol, &mut adapter, password, &mut files);
+                let mut ok =
+                    crate::rarreader::read_from(&mut vol, &mut adapter, password, &mut files);
                 if sources.aborted() {
                     return Err(MapError::Aborted);
                 }
                 let member_name = members
                     .get(member_index as usize)
                     .map_or(&[][..], |m| m.name.as_slice());
+                if !ok && files.is_empty() && !vol.encrypted {
+                    if let Some(head) = rebuilt_rar5_head(member_name, src) {
+                        let mut rebuilt = RebuiltHeadAdapter { source: src, head };
+                        let mut v = crate::rarreader::Volume {
+                            has_password: vol.has_password,
+                            ..crate::rarreader::Volume::default()
+                        };
+                        let mut f = Vec::new();
+                        let read = crate::rarreader::read_from(&mut v, &mut rebuilt, password, &mut f);
+                        if read || (!f.is_empty() && !v.encrypted) {
+                            (ok, vol, files) = (read, v, f);
+                        }
+                        if sources.aborted() {
+                            return Err(MapError::Aborted);
+                        }
+                    }
+                }
                 sources.on_rar_volume_parsed(member_name, &vol, &files);
                 if sources.aborted() {
                     return Err(MapError::Aborted);

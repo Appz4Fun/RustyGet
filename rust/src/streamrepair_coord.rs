@@ -2059,6 +2059,7 @@ impl NzbgetRsStreamRepairCtrl {
         else {
             return;
         };
+        self.restore_lost_heads(q, &dest_dir, &mut targets);
 
         let opts = self.query_host_options();
 
@@ -2189,6 +2190,49 @@ impl NzbgetRsStreamRepairCtrl {
     /// no duplicate lends those, they belong to no file, and without them the extraction stops
     /// at the volume. Rebuilt from the nearest complete volume of the same set; see
     /// `deadvolume::restore_tail_from_sibling`.
+    /// Writes back the first bytes of RAR5 volumes that lost them (their first article) from
+    /// each volume's own quick-open record (see [`crate::deadvolume::restore_head_from_tail`]),
+    /// and leaves only the rest of that hole, which holds archived data, to the borrow. When
+    /// every copy and the par2 set lost every volume's first article, nothing else says where
+    /// a volume's data belongs; with the headers back each volume reads, maps and lends again.
+    fn restore_lost_heads(&self, q: JobQueue<'_>, dest_dir: &[u8], targets: &mut [RepairTarget]) {
+        let path = |name: &[u8]| [dest_dir, &[crate::paths::PATH_SEPARATOR], name].concat();
+        for t in targets.iter_mut().filter(|t| t.holes.first().is_some_and(|h| h.offset == 0)) {
+            let Some((_, number, _, _)) = crate::streamrepair::rar_part_number(&t.filename) else {
+                continue;
+            };
+            let holes: Vec<(u64, u64)> = hole_spans(t)
+                .into_iter()
+                .filter_map(|(s, e)| Some((u64::try_from(s).ok()?, u64::try_from(e).ok()?)))
+                .collect();
+            let Some(head_len) = number.checked_sub(1).and_then(|index| {
+                crate::deadvolume::restore_head_from_tail(&path(&t.filename), &holes, index as usize)
+            }) else {
+                continue;
+            };
+            let head_len = head_len as i64;
+            let first = &mut t.holes[0];
+            let end = first.offset.saturating_add(first.size);
+            if end <= head_len {
+                t.holes.remove(0);
+            } else {
+                first.offset = head_len;
+                first.size = end - head_len;
+            }
+            let mut msg = b"Rebuilt the headers of ".to_vec();
+            msg.extend_from_slice(&t.filename);
+            msg.extend_from_slice(
+                format!(
+                    " ({head_len} bytes) from its own quick-open record; borrowing the {:.1} MB \
+                     of archived data its first article held",
+                    crate::streamrepair::stream_repair_bytes_to_mb(end.saturating_sub(head_len))
+                )
+                .as_bytes(),
+            );
+            self.print_message(q, MessageKind::Info, &msg);
+        }
+    }
+
     fn restore_lost_tails(
         &self,
         q: JobQueue<'_>,
@@ -2286,6 +2330,7 @@ impl NzbgetRsStreamRepairCtrl {
         else {
             return None;
         };
+        self.restore_lost_heads(q, &dest_dir, &mut targets);
 
         // A dead volume is offered to the borrow on every run, also after an earlier one could
         // not place it yet: volumes arriving since may let it be placed now. Planning costs no

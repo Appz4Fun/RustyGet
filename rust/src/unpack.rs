@@ -1170,6 +1170,9 @@ where
             log_cb(kind, msg);
         }
     };
+    // A nested member hands a slot for "not an archive at all"; the archive a job unpacks
+    // does not, and nothing coming out of it is a failure, never an empty success.
+    let top_level = not_archive.is_none();
     let summary = crate::archive_native::extract_zipfast_reporting(
         archive_path,
         output_dir,
@@ -1187,7 +1190,23 @@ where
             summary.files, summary.bytes
         ),
     );
+    if top_level && summary.files == 0 && summary.dirs == 0 {
+        let name = String::from_utf8_lossy(fname);
+        let msg = nothing_extracted_message(&name, classify_archive_file(fname) == 1);
+        log_cb(1, &msg);
+        return Err(msg);
+    }
     Ok(summary)
+}
+
+/// Why an archive a job unpacks gave nothing: a RAR volume without its signature lost its
+/// first bytes (its headers), which no reader can do without.
+fn nothing_extracted_message(name: &str, rar_named: bool) -> String {
+    if rar_named {
+        format!("Unrar: {name} has no readable RAR headers: its first bytes are missing or damaged")
+    } else {
+        format!("{name}: nothing could be extracted from it")
+    }
 }
 
 /// Collects all volume files belonging to a multi-volume nested archive so they can be cleaned up
@@ -2499,6 +2518,33 @@ pub fn eval_unpack_completed_failure(
 mod tests {
 
     use super::*;
+
+    /// A RAR volume that lost its first article (its headers) gives nothing: the unpack fails
+    /// with the reason instead of reporting "All OK" over no files, which would have deleted
+    /// the volumes and called the job a success.
+    #[test]
+    fn headerless_rar_volume_is_a_failure_not_an_empty_success() {
+        let dir = std::env::temp_dir().join(format!("rg_headless_rar_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut bytes = vec![0u8; 100_000];
+        bytes.extend((0..400_000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8));
+        let part1 = dir.join("Rel.part1.rar");
+        std::fs::write(&part1, &bytes).unwrap();
+        let out = dir.join("out");
+        let mut logs = Vec::new();
+        let res =
+            extract_archive_with_zipfast(&part1, &out, "", 1, |k, m| logs.push((k, m.to_string())));
+        let err = res.expect_err("a headerless RAR volume must not unpack successfully");
+        assert!(err.contains("has no readable RAR headers"), "{err}");
+        assert!(
+            !logs
+                .iter()
+                .any(|(_, m)| m.contains("All OK") || m.contains("Everything is Ok")),
+            "{logs:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Unpacks an outer zip holding `members` with the Extended Unpacker; returns the result,
     /// the output folder and the log.

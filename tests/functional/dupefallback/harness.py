@@ -10498,6 +10498,75 @@ def scenario_obfuscatedparnoborrow(daemon, t):
             % (hp['Status'], par_borrowed, data_borrowed))
 
 
+def _allheads_release(daemon, t, tag, par, alt, twin):
+    """Every volume lost its header: a real `rar` RAR5 store set (with quick-open
+    records, as rar 5+ writes by default) of movie.mkv whose every volume loses
+    its FIRST article, as does every par2 file (the index too, when there is
+    par2). Optional duplicates: ``alt`` is the same mkv in RAR5 volumes of
+    another size, with its own first articles lost too; ``twin`` is the same
+    volumes posted again with the same first articles lost. The extracted mkv
+    must come out byte-identical."""
+    import subprocess as _sp
+    seg = 100_000
+    movie = _payload(9_000_000, 14100)
+    def rar_set(sub, vol_kb, base):
+        work = t.path('data', sub)
+        os.makedirs(work, exist_ok=True)
+        t.write_file(os.path.join('data', sub, 'movie.mkv'), movie)
+        _sp.run([generators.RAR_PATH, 'a', '-m0', '-ma5', '-v%dk' % vol_kb, '-idq', base + '.rar', 'movie.mkv'],
+                cwd=work, check=True, capture_output=True)
+        os.remove(os.path.join(work, 'movie.mkv'))
+        names = sorted(n for n in os.listdir(work) if n.endswith('.rar'))
+        return work, names
+    work, names = rar_set(tag + 'A', 1500, 'Rel')
+    if par:
+        _sp.run(['par2', 'create', '-q', '-q', '-s100000', '-r20', '-n4', 'Rel.par2'] + names,
+                cwd=work, check=True, capture_output=True)
+    members = [('%sA/%s' % (tag, n), n, os.path.getsize(os.path.join(work, n)), seg, {1})
+               for n in sorted(os.listdir(work))]
+    api = daemon.wait_ready()
+    if alt:
+        awork, anames = rar_set(tag + 'B', 1100, 'Oth')
+        amembers = [('%sB/%s' % (tag, n), n, os.path.getsize(os.path.join(awork, n)), 90_000, {1}) for n in anames]
+        _ds_append(api, 'Alt' + tag, build_multi_nzb(amembers), tag + '-key', 50,
+                   params=[{'Name': 'DupeAlive', 'Value': '0'}])
+    if twin:
+        tmembers = [('%sA/%s' % (tag, n), 'Tw' + n, os.path.getsize(os.path.join(work, n)), seg, {1})
+                    for n in names]
+        _ds_append(api, 'Twin' + tag, build_multi_nzb(tmembers), tag + '-key', 40,
+                   params=[{'Name': 'DupeAlive', 'Value': '0'}])
+    daemon.append(api, 'Rel' + tag, build_multi_nzb(members), False, tag + '-key', 100)
+    h = daemon.wait_history(api, 'Rel' + tag, timeout=400)
+    ok = _verify_output(t, movie, '.mkv', dirs=(('main', 'dst'), ('main', 'inter')))
+    detail = 'status=%s par=%s unpack=%s mkv_identical=%s vols=%d' % (
+        h['Status'], h['ParStatus'], h['UnpackStatus'], ok, len(names))
+    return ok and h['Status'].startswith('SUCCESS'), detail
+
+
+def scenario_allheadspar(daemon, t):
+    """Every RAR volume and every par2 file (index included) lost article 1; no
+    duplicate. The vol files keep the set's description in their last
+    articles, and there are enough recovery blocks: par2 repairs it."""
+    good, detail = _allheads_release(daemon, t, 'AHP', par=True, alt=False, twin=False)
+    return ('allheadspar', good, detail)
+
+
+def scenario_allheadsalt(daemon, t):
+    """Every volume lost article 1, no par2; an alt (other volume size) lost its
+    own first articles, which sit at other mkv offsets. Headers come back from
+    each volume's quick-open record, and the lost bytes from the alt."""
+    good, detail = _allheads_release(daemon, t, 'AHA', par=False, alt=True, twin=False)
+    return ('allheadsalt', good, detail)
+
+
+def scenario_allheadstwin(daemon, t):
+    """Every volume lost article 1, no par2; the only duplicate is a twin that
+    lost the same articles. The bytes are gone everywhere: this must fail
+    (it is the case nothing can rescue)."""
+    good, detail = _allheads_release(daemon, t, 'AHT', par=False, alt=False, twin=True)
+    return ('allheadstwin', not good, detail)
+
+
 def scenario_lostindexpar(daemon, t):
     """The index par2-file (rel.par2) is lost entirely and the data file has
     holes; the recovery volumes are held back (ParCheck=auto). Post-processing
@@ -11106,6 +11175,9 @@ SCENARIOS = {
     'twinlabelonadd': scenario_twinlabelonadd,
     'neartwinborrow': scenario_neartwinborrow,
     'lostindexpar': scenario_lostindexpar,
+    'allheadspar': scenario_allheadspar,
+    'allheadsalt': scenario_allheadsalt,
+    'allheadstwin': scenario_allheadstwin,
     'obfuscatedparnoborrow': scenario_obfuscatedparnoborrow,
     'twinaltsampled': scenario_twinaltsampled,
     'twinparrepair': scenario_twinparrepair,
@@ -11224,6 +11296,9 @@ SCENARIO_ENV = {
 SCENARIO_ENV_KEYS = sorted({k for env in SCENARIO_ENV.values() for k in env})
 
 SCENARIO_OPTIONS = {
+    'allheadspar': PROD_OPTIONS,
+    'allheadsalt': PROD_OPTIONS,
+    'allheadstwin': PROD_OPTIONS,
     'watchforcepick': ['DupeArticleFallback=no', 'DupeWatch=yes', 'DupeBodyChecks=0', 'DupeHealthMin=40', 'DupeHealthMax=40'],
     'watchdeadpick': ['DupeArticleFallback=no', 'DupeWatch=yes', 'DupeBodyChecks=0', 'DupeHealthMin=40', 'DupeHealthMax=40'],
     'watchfleet': ['DupeArticleFallback=no', 'DupeWatch=yes', 'DupeBodyChecks=0', 'DupeHealthMin=40', 'DupeHealthMax=40'],

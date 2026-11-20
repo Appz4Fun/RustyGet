@@ -276,21 +276,10 @@ pub(crate) unsafe fn live_par_visit_namespace(
     };
     let queued = op(0, 0).max(0) as usize;
     let none = std::ptr::null_mut();
-    let nl: *mut i64 = std::ptr::null_mut();
     let ns: *mut *const c_char = std::ptr::null_mut();
-    let completed_count = crate::qnzb::nzbget_rs_nzb_files(
-        nzb,
-        0,
-        0,
-        std::ptr::null(),
-        std::ptr::null(),
-        std::ptr::null(),
-        none,
-        nl,
-        ns,
-        std::ptr::null(),
-    )
-    .max(0) as usize;
+    let completed =
+        crate::qnzb::completed_files(crate::queuesubsys_host::NzbRef::from_addr(nzb as usize));
+    let completed_count = completed.len();
     if queued > MAX_ROWS || completed_count > MAX_ROWS - queued {
         return 0;
     }
@@ -332,32 +321,17 @@ pub(crate) unsafe fn live_par_visit_namespace(
             return 0;
         }
     }
-    for i in 0..completed_count {
-        let mut ints = [0 as c_int; 4];
-        let mut strs = [std::ptr::null::<c_char>(); 4];
-        if crate::qnzb::nzbget_rs_nzb_files(
-            nzb,
-            1,
-            i as c_int,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            nl,
-            strs.as_mut_ptr(),
-            std::ptr::null(),
-        ) != 0
-        {
-            return 0;
-        }
-        let flags = 4 | u32::from(ints[2] != 0);
+    for c in completed {
+        let text = |b: Vec<u8>| std::ffi::CString::new(b).unwrap_or_default();
+        let (filename, origname, hash16k) = (text(c.filename), text(c.origname), text(c.hash16k));
+        let flags = 4 | u32::from(c.par_file);
         if !visit(
             context,
-            ints[0],
+            c.id,
             flags,
-            or_empty(strs[0]),
-            or_empty(strs[1]),
-            or_empty(strs[2]),
+            filename.as_ptr(),
+            origname.as_ptr(),
+            hash16k.as_ptr(),
             empty,
         ) {
             return 0;
@@ -487,27 +461,16 @@ mod tests {
         }
         let parity = nzb.add(99, "rel.par2");
         unsafe { nzbget_rs_file_set(parity, field::PAR_FILE, 1) };
-        let mut ints = [39, 1 /* cfSuccess */, 0, 0];
-        let mut strs = [
-            c"part39.rar".as_ptr(),
-            c"part39.rar".as_ptr(),
-            c"".as_ptr(),
-            c"".as_ptr(),
-        ];
-        unsafe {
-            crate::qnzb::nzbget_rs_nzb_files(
-                nzb.0,
-                2,
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null(),
-                ints.as_mut_ptr(),
-                std::ptr::null_mut(),
-                strs.as_mut_ptr(),
-                std::ptr::null(),
-            );
-        }
+        crate::qnzb::push_completed_file(
+            crate::queuesubsys_host::NzbRef::from_addr(nzb.0 as usize),
+            &crate::queuesubsys_host::CompletedFileSnap {
+                id: 39,
+                status: 1, // cfSuccess
+                filename: b"part39.rar".to_vec(),
+                origname: b"part39.rar".to_vec(),
+                ..Default::default()
+            },
+        );
         let mut rows: Vec<Row> = Vec::new();
         let ctx = std::ptr::from_mut(&mut rows).cast::<c_void>();
         assert_eq!(nzb.walk(ctx, collect), 1);

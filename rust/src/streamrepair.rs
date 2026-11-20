@@ -8909,6 +8909,13 @@ fn plan_dead_fills(
                         middle: f.split_before && f.split_after,
                     }));
                 }
+                // A later volume that holds other files (a sample, an nfo) but no part of the
+                // inner file comes after its end: a RAR file never skips a volume. The volumes
+                // from here on say nothing about the video, so the plan stops before them.
+                None if n > 1 && !files.is_empty() => {
+                    members_by_index.pop();
+                    break;
+                }
                 _ => {
                     usable = false;
                     break;
@@ -18174,6 +18181,87 @@ mod dead_volume_fill_tests {
         // Post-processing still learns, once, that the par-check failure was borrowed around.
         assert_eq!(crate::postproc::take_dead_volumes_borrowed(nzb_id), 3);
         assert_eq!(crate::postproc::take_dead_volumes_borrowed(nzb_id), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The S23E07 case: the set's last volume holds only a sample (and an nfo), not the video,
+    /// which ends in the volume before it. That tail volume must not make the set unborrowable.
+    #[test]
+    fn a_tail_volume_without_the_video_does_not_block_the_borrow() {
+        let root = std::env::temp_dir().join(format!("rg-deadtail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dl = root.join("dl");
+        std::fs::create_dir_all(&dl).unwrap();
+        let data: Vec<u8> = (0..1_000_000u64).map(|i| (i.wrapping_mul(2654435761) >> 5) as u8).collect();
+        let vols = rar5_set("Movie.2160p.mkv", &data, 100_000);
+        let name = |i: usize| format!("Set.part{:02}.rar", i + 1);
+        // The tail volume: one whole stored sample file, no part of the video.
+        let tail = {
+            let i = vols.len();
+            let sample: Vec<u8> = (0..5_000u32).map(|v| v as u8).collect();
+            let mut out = b"Rar!\x1a\x07\x01\x00".to_vec();
+            let mut f = Vec::new();
+            vint(1 | 2, &mut f);
+            vint(i as u64, &mut f);
+            out.extend(block(1, 0, &f, &[], false));
+            let fname = "Movie.2160p.sample.mkv";
+            let mut f = Vec::new();
+            vint(0x6, &mut f);
+            vint(sample.len() as u64, &mut f);
+            vint(0o644, &mut f);
+            f.extend_from_slice(&1_700_000_000u32.to_le_bytes());
+            f.extend_from_slice(&crc32fast::hash(&sample).to_le_bytes());
+            vint(0, &mut f);
+            vint(1, &mut f);
+            vint(fname.len() as u64, &mut f);
+            f.extend_from_slice(fname.as_bytes());
+            out.extend(block(2, 0, &f, &sample, true));
+            let mut e = Vec::new();
+            vint(0, &mut e);
+            out.extend(block(5, 0, &e, &[], false));
+            out
+        };
+        let dead = [3usize, 4, 5];
+        let mut names: Vec<Vec<u8>> = Vec::new();
+        for (i, v) in vols.iter().enumerate() {
+            if !dead.contains(&i) {
+                std::fs::write(dl.join(name(i)), v).unwrap();
+            }
+            names.push(name(i).into_bytes());
+        }
+        std::fs::write(dl.join(name(vols.len())), &tail).unwrap();
+        names.push(name(vols.len()).into_bytes());
+        let dest = crate::fsops::path_to_bytes(&dl).to_vec();
+        let name_refs: Vec<&[u8]> = names.iter().map(|n| n.as_slice()).collect();
+        let targets: Vec<CrossPackTargetInput> = dead
+            .iter()
+            .map(|&i| CrossPackTargetInput {
+                filename: name(i).into_bytes(),
+                decoded_file_size: 0,
+                encoded_size: 102_000,
+                patch_eligible: true,
+                holes: Vec::new(),
+                all_articles_failed: true,
+            })
+            .collect();
+        let mut init = Vec::new();
+        let mut emit = |_: TargetMessageKind, m: &[u8]| init.push(String::from_utf8_lossy(m).into_owned());
+        let session = CrossPackRepairSession::new_with_dead(
+            &dest,
+            &name_refs,
+            &targets,
+            None,
+            true,
+            None,
+            &mut emit,
+            None,
+            DeadVolumeContext { pending_data_files: Some(0), nzb_id: Some(-4_242_077) },
+        );
+        assert!(
+            !init.iter().any(|m| m.contains("cannot be borrowed")),
+            "{init:?}"
+        );
+        assert_eq!(session.map_or(0, |s| s.dead_fills.len()), 3, "{init:?}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

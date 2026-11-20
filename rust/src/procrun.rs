@@ -107,9 +107,8 @@ impl ScriptHost for NativeScriptHost {
     }
 
     fn exit_proc(&self) {
-        if let Some(exit_fn) = crate::lifecycle::get_hooks().and_then(|h| h.exit_proc) {
-            // SAFETY: the lifecycle hook takes no arguments and is safe to call from any thread.
-            unsafe { exit_fn() };
+        if let Some(hooks) = crate::lifecycle::get_hooks() {
+            hooks.exit_proc();
         }
     }
 }

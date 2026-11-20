@@ -4139,7 +4139,7 @@ pub struct NzbInfoApply<'a> {
     pub scripts: &'a [NzbgetRsDiskScriptStatus],
     pub stats: &'a [NzbgetRsDiskServerStat],
     pub files: &'a [NzbgetRsDiskFileStub],
-    /// One time per file when present, otherwise empty.
+    /// One time per file; meaningful only when `flags & 8`.
     pub file_times: &'a [c_int],
 }
 

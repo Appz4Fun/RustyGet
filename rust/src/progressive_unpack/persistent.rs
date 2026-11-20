@@ -791,6 +791,10 @@ impl<'a> Run<'a> {
         // handed over before its borrow finished (about 90 holes) used up the default 128 MiB
         // and failed the session. Same headroom as `rarreader` gives its sessions.
         opts.limits.metadata_bytes = opts.limits.metadata_bytes.max(1 << 31);
+        // A RAR 1.5-4 dead volume handed over before its borrow finished carries part
+        // checksum 0 (see `deadvolume::synthesize_frame`): skip that part's own check, the
+        // member checksum still checks the file. Set on every session, a restart included.
+        opts.rar4_unknown_part_crc = true;
         if !self.req.password.is_empty() {
             opts.set_password(Some(self.req.password.to_string()))
                 .map_err(|e| Step::Fail(Failure::from_progressive(&e)))?;

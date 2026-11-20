@@ -21,7 +21,7 @@ doctest = false
 
 [dependencies]
 par-rs = { git = "https://github.com/xbmc4lyfe/par-rs", rev = "48d8f957e54e6c96f1a3449f69109ec2661f0142" }
-zipfast = { git = "https://github.com/xbmc4lyfe/zipfast", rev = "4c4bec207791d1de5805d64de088f4b0411c21af", features = ["persistent-partials"] }
+zipfast = { git = "https://github.com/xbmc4lyfe/zipfast", rev = "fd8ad9630821f6b54bed2d0026e0bb329c0db3b9", features = ["persistent-partials"] }
 zipview = { git = "https://github.com/xbmc4lyfe/zipview", rev = "2c3d73a06b29987cea1510e903e437a482076745" }
 nntmux-yenc = { git = "https://github.com/xbmc4lyfe/newznab-tmux", rev = "8dade08ca0372e046af2bd9d3040e23a47379bd4" }
 crc32fast = "1.5"

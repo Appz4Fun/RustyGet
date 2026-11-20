@@ -5514,9 +5514,23 @@ fn half_borrowed_dead_volume(t: &TestDir, park_on: usize) -> (PathBuf, Vec<u8>, 
 
 /// As [`half_borrowed_dead_volume`], with `1/part` of the dead volume borrowed (0: none).
 fn borrowed_dead_volume(t: &TestDir, park_on: usize, part: usize) -> (PathBuf, Vec<u8>, DeadHalfBorrowed) {
+    borrowed_dead_volume_of(t, park_on, part, 5)
+}
+
+/// As [`borrowed_dead_volume`], in a RAR5 (`version` 5) or RAR 1.5-4 (3) set.
+fn borrowed_dead_volume_of(
+    t: &TestDir,
+    park_on: usize,
+    part: usize,
+    version: i32,
+) -> (PathBuf, Vec<u8>, DeadHalfBorrowed) {
     use crate::deadvolume::{plan, synthesize_frame, VirtualVolume, VolumeState};
     let data = pattern(1_000_000);
-    let vols = rar5_volumes("movie.mkv", &data, 100_000);
+    let vols = if version == 5 {
+        rar5_volumes("movie.mkv", &data, 100_000)
+    } else {
+        rar4_store_volumes("movie.mkv", &data, 100_000)
+    };
     let first = write_set(&t.dl(), &vols);
     let dead = 3usize;
     let states: Vec<VolumeState> = vols
@@ -5547,7 +5561,7 @@ fn borrowed_dead_volume(t: &TestDir, park_on: usize, part: usize) -> (PathBuf, V
     let tv = &vols[p.template];
     let tg = geometry_of(tv);
     let (head, tail) = synthesize_frame(
-        5,
+        version,
         &tv[..tg.data_offset as usize],
         &tv[(tg.data_offset + tg.packed_size) as usize..],
         p.template,
@@ -5659,6 +5673,36 @@ fn the_copy_path_parks_on_a_holed_stand_in_without_spinning() {
     assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
     let asks = asks.load(std::sync::atomic::Ordering::Relaxed);
     assert!(asks < 200, "asked for the holed stand-in {asks} times in 600 ms");
+}
+
+#[test]
+fn a_half_borrowed_rar4_dead_volume_is_extracted_past_and_patched_inline() {
+    // RAR 1.5-4 parts carry their own checksum, unknown until every byte is borrowed: the
+    // stand-in carries 0 and the session skips that check (`rar4_unknown_part_crc`), so the
+    // extraction goes past it too and the member checksum checks the patched file.
+    let t = TestDir::new("deadvol-half-rar4");
+    let (first, data, feed) = borrowed_dead_volume_of(&t, 6, 2, 3);
+    let mut log = Vec::new();
+    let req = Request {
+        first_volume: &first,
+        dest: &t.out(),
+        password: "",
+        overwrite: Overwrite::Always,
+        on_wait: None,
+    };
+    let r = extract(
+        &req,
+        Box::new(feed),
+        &mut |_, m: &str| log.push(m.to_string()),
+        &mut || false,
+    );
+    expect_ok(r, &log);
+    assert!(persistent(&log), "{log:?}");
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+    assert!(
+        log.iter().any(|l| l.contains("patched movie.mkv from repaired")),
+        "{log:?}"
+    );
 }
 
 #[test]

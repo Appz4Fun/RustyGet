@@ -3872,7 +3872,7 @@ pub struct FrontendSummary {
 struct PlainBinRpcConn {
     host: Vec<u8>,
     sock: std::sync::atomic::AtomicI32,
-    status: std::sync::atomic::AtomicI32,
+    status: crate::socket::ConnStatusCell,
 }
 
 #[cfg(unix)]
@@ -3886,7 +3886,8 @@ impl PlainBinRpcConn {
     where
         S: FnMut() -> bool,
     {
-        use std::sync::atomic::{AtomicI32, Ordering};
+        use crate::socket::{ConnStatus, ConnStatusCell};
+        use std::sync::atomic::AtomicI32;
         let host: &[u8] = if raw_host == b"0.0.0.0" {
             b"127.0.0.1"
         } else {
@@ -3894,7 +3895,7 @@ impl PlainBinRpcConn {
         };
         for _ in 0..retry_attempts {
             let sock = AtomicI32::new(crate::socket::INVALID_SOCKET);
-            let status = AtomicI32::new(crate::socket::CS_DISCONNECTED);
+            let status = ConnStatusCell::new(ConnStatus::Disconnected);
             let mut tls_err = false;
             let ok = crate::socket::connect_stream(
                 host,
@@ -3912,7 +3913,7 @@ impl PlainBinRpcConn {
                 |_| {},
             );
             if ok && !is_stopped() {
-                status.store(crate::socket::CS_CONNECTED, Ordering::SeqCst);
+                status.set(ConnStatus::Connected);
                 return Some(Self {
                     host: host.to_vec(),
                     sock,

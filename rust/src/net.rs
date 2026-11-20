@@ -14,8 +14,7 @@ use crate::artwritercore::join_c_slices;
 use crate::socket::{
     accept_connection, bind_listener, cancel_socket, connect_stream, disconnect_socket,
     format_report_error, read_line, recv_exact, remote_addr, send_all, try_recv, write_line,
-    CONNECTION_READBUFFER_SIZE, CS_BROKEN, CS_CANCELLED, CS_CONNECTED, CS_DISCONNECTED,
-    INVALID_SOCKET,
+    ConnStatus, ConnStatusCell, CONNECTION_READBUFFER_SIZE, INVALID_SOCKET,
 };
 use crate::webdownload::{
     webdl_download_with_redirects, webdl_run_loop, WebDlConfig, WebDlIo, WebDlStatus,
@@ -296,7 +295,7 @@ unsafe fn opt_bytes<'a>(p: *const c_char) -> &'a [u8] {
 
 pub struct ConnCancelSlot {
     pub socket: AtomicI32,
-    pub status: AtomicI32,
+    pub status: ConnStatusCell,
     pub suppress_errors: AtomicBool,
     pub owner_ctx: AtomicUsize,
     pub total_bytes_read: AtomicI32,
@@ -309,14 +308,14 @@ pub struct ConnCancelSlot {
 impl ConnCancelSlot {
     fn new(
         fd: c_int,
-        status: c_int,
+        status: ConnStatus,
         debug_on: bool,
         owner_ctx: usize,
         host: ConnHost,
     ) -> Self {
         Self {
             socket: AtomicI32::new(fd),
-            status: AtomicI32::new(status),
+            status: ConnStatusCell::new(status),
             suppress_errors: AtomicBool::new(true),
             owner_ctx: AtomicUsize::new(owner_ctx),
             total_bytes_read: AtomicI32::new(0),
@@ -395,7 +394,7 @@ impl NzbgetRsCancelReg {
             }
         };
         for slot in slots {
-            slot.status.store(CS_CANCELLED, Ordering::SeqCst);
+            slot.status.set(ConnStatus::Cancelled);
             cancel_socket(false, &slot.socket, &slot.status);
         }
     }
@@ -524,9 +523,8 @@ impl ConnCore {
         self.emit_debug(b"Do disconnecting");
         let fd = self.slot.socket.load(Ordering::SeqCst);
         self.close_tls_box(fd != INVALID_SOCKET);
-        let graceful = self.graceful
-            && self.slot.status.load(Ordering::SeqCst) != CS_CANCELLED
-            && !self.is_stopped();
+        let graceful =
+            self.graceful && !self.slot.status.is(ConnStatus::Cancelled) && !self.is_stopped();
         disconnect_socket(
             self.host.to_bytes(),
             graceful,
@@ -538,7 +536,7 @@ impl ConnCore {
 
     fn disconnect_base(&mut self) -> bool {
         self.emit_debug(b"Disconnecting");
-        if self.slot.status.load(Ordering::SeqCst) == CS_DISCONNECTED
+        if self.slot.status.is(ConnStatus::Disconnected)
             && self.slot.socket.load(Ordering::SeqCst) == INVALID_SOCKET
         {
             self.close_tls_box(false);
@@ -554,7 +552,7 @@ impl ConnCore {
         #[cfg(unix)]
         let _cg = unsafe { crate::ffi::PosixCancelGuard::disable() };
         self.emit_debug(b"Connecting");
-        if self.slot.status.load(Ordering::SeqCst) == CS_CONNECTED {
+        if self.slot.status.is(ConnStatus::Connected) {
             return true;
         }
         let resolved_slices: Vec<&[u8]> = self.resolved_addrs.iter().map(Vec::as_slice).collect();
@@ -576,20 +574,20 @@ impl ConnCore {
             |msg| slot.report_error(msg),
             |msg| slot.emit_debug(msg),
         );
-        if self.slot.status.load(Ordering::SeqCst) == CS_CANCELLED || self.is_stopped() {
+        if self.slot.status.is(ConnStatus::Cancelled) || self.is_stopped() {
             res = false;
         }
         if res && self.tls && !self.start_tls(true, c"", c"") {
             res = false;
         }
         self.connect_cancelled = false;
-        if res && self.slot.status.load(Ordering::SeqCst) != CS_CANCELLED && !self.is_stopped() {
-            self.slot.status.store(CS_CONNECTED, Ordering::SeqCst);
+        if res && !self.slot.status.is(ConnStatus::Cancelled) && !self.is_stopped() {
+            self.slot.status.set(ConnStatus::Connected);
         } else {
             res = false;
             // seen before do_disconnect, which leaves the status at disconnected
             self.connect_cancelled =
-                self.slot.status.load(Ordering::SeqCst) == CS_CANCELLED || self.is_stopped();
+                self.slot.status.is(ConnStatus::Cancelled) || self.is_stopped();
             self.do_disconnect();
         }
         res
@@ -710,7 +708,7 @@ impl ConnCore {
     fn read_line_slice(&mut self, dst: &mut [u8]) -> Option<usize> {
         #[cfg(unix)]
         let _cg = unsafe { crate::ffi::PosixCancelGuard::disable() };
-        if self.slot.status.load(Ordering::SeqCst) != CS_CONNECTED || dst.is_empty() {
+        if !self.slot.status.is(ConnStatus::Connected) || dst.is_empty() {
             return None;
         }
         let tb = self.tls_box.as_ref();
@@ -823,7 +821,7 @@ impl ConnSession {
             let msg = join_c_slices(&[b"Opening connection to ", self.core.host.to_bytes()]);
             self.core.emit_debug(&msg);
         }
-        if self.core.slot.status.load(Ordering::SeqCst) == CS_CONNECTED {
+        if self.core.slot.status.is(ConnStatus::Connected) {
             return true;
         }
         self.nntp_auth.rejected = false;
@@ -848,7 +846,7 @@ impl ConnSession {
         };
         let handshake = crate::nntp::handshake(&mut io, &mut self.nntp_auth);
         let cancelled = handshake.is_err()
-            || self.core.slot.status.load(Ordering::SeqCst) == CS_CANCELLED
+            || self.core.slot.status.is(ConnStatus::Cancelled)
             || self.core.is_stopped();
         let result = handshake.unwrap_or(1);
         self.nntp_connect_stage = match result {
@@ -873,7 +871,7 @@ impl ConnSession {
         srv_name: &CStr,
         srv_host: &CStr,
     ) -> bool {
-        if self.core.slot.status.load(Ordering::SeqCst) == CS_CONNECTED {
+        if self.core.slot.status.is(ConnStatus::Connected) {
             let _ = self.nntp_request(c"quit\r\n".as_ptr(), user, pass, srv_name, srv_host);
         }
         self.nntp_active_group = None;
@@ -993,7 +991,7 @@ impl NzbgetRsConn {
         let id = NEXT_CONN_ID.fetch_add(1, Ordering::Relaxed);
         let slot = Arc::new(ConnCancelSlot::new(
             INVALID_SOCKET,
-            CS_DISCONNECTED,
+            ConnStatus::Disconnected,
             debug_on,
             owner_ctx,
             ConnHost::new(host_cb),
@@ -1015,7 +1013,7 @@ impl NzbgetRsConn {
                         }
                     };
                     if pre_stopped {
-                        slot.status.store(CS_CANCELLED, Ordering::SeqCst);
+                        slot.status.set(ConnStatus::Cancelled);
                         cancel_socket(false, &slot.socket, &slot.status);
                     }
                     cancel_reg = Some(reg_arc);
@@ -1071,7 +1069,7 @@ impl NzbgetRsConn {
         let id = NEXT_CONN_ID.fetch_add(1, Ordering::Relaxed);
         let slot = Arc::new(ConnCancelSlot::new(
             fd,
-            CS_CONNECTED,
+            ConnStatus::Connected,
             debug_on,
             owner_ctx,
             ConnHost::new(host_cb),
@@ -1180,7 +1178,7 @@ unsafe impl crate::nntp::Io for DirectNntpIo<'_> {
     }
 
     fn cancelled(&mut self) -> Result<bool, crate::nntp::Abort> {
-        Ok(self.core.slot.status.load(Ordering::SeqCst) == CS_CANCELLED)
+        Ok(self.core.slot.status.is(ConnStatus::Cancelled))
     }
 
     fn user(&self) -> &CStr {
@@ -1456,7 +1454,7 @@ impl WebDlIo for DirectWebDlIo<'_> {
             if let Ok(mut g) = self.dl.active_slot.lock() {
                 *g = None;
             }
-            if conn.slot.status.load(Ordering::SeqCst) == CS_CANCELLED {
+            if conn.slot.status.is(ConnStatus::Cancelled) {
                 conn.session.get_mut().core.disconnect_base();
             }
         }
@@ -2280,10 +2278,10 @@ pub(crate) unsafe fn nzbget_rs_conn_ctl(
             return 1;
         }
         11 => {
-            c.slot.status.store(CS_BROKEN, Ordering::SeqCst);
+            c.slot.status.set(ConnStatus::Broken);
             return 1;
         }
-        14 => return c.slot.status.load(Ordering::SeqCst) as isize,
+        14 => return c.slot.status.get() as isize,
         15 => return isize::from(c.slot.accept_busy.load(Ordering::SeqCst)),
         16 => return c.slot.total_bytes_read.swap(0, Ordering::SeqCst) as isize,
         17 => return c.slot.tls_probe_failure.load(Ordering::SeqCst) as isize,
@@ -2591,12 +2589,12 @@ impl PooledNntpConn {
 
     #[inline]
     pub fn is_connected(&self) -> bool {
-        self.conn.slot.status.load(Ordering::SeqCst) == CS_CONNECTED
+        self.conn.slot.status.is(ConnStatus::Connected)
     }
 
     #[inline]
     pub fn is_cancelled(&self) -> bool {
-        self.conn.slot.status.load(Ordering::SeqCst) == CS_CANCELLED
+        self.conn.slot.status.is(ConnStatus::Cancelled)
     }
 
     #[inline]
@@ -2611,7 +2609,7 @@ impl PooledNntpConn {
 
     #[inline]
     pub fn set_broken(&self) {
-        self.conn.slot.status.store(CS_BROKEN, Ordering::SeqCst);
+        self.conn.slot.status.set(ConnStatus::Broken);
     }
 
     #[inline]
@@ -2652,7 +2650,7 @@ impl PooledNntpConn {
     /// a network-level failure (socket, TLS, greeting), never after a login failure.
     pub unsafe fn connect(&self) -> bool {
         let session = &mut *self.conn.session.get();
-        if self.conn.slot.status.load(Ordering::SeqCst) == CS_CONNECTED {
+        if self.conn.slot.status.is(ConnStatus::Connected) {
             return true;
         }
         let host = String::from_utf8_lossy(self.server.host.to_bytes()).into_owned();
@@ -2688,11 +2686,9 @@ impl PooledNntpConn {
                 crate::addrpick::report(self.server.id, addr, true);
                 return true;
             }
-            let status = self.conn.slot.status.load(Ordering::SeqCst);
+            let cancelled = self.conn.slot.status.is(ConnStatus::Cancelled);
             // a refused login fails the same everywhere; a cancel or stop is not the address's fault
-            if matches!(session.nntp_connect_stage, 3 | 4)
-                || status == CS_CANCELLED
-                || session.core.is_stopped()
+            if matches!(session.nntp_connect_stage, 3 | 4) || cancelled || session.core.is_stopped()
             {
                 return false;
             }
@@ -3863,7 +3859,7 @@ pub unsafe extern "C" fn nzbget_rs_serverpool_probe_tls(
     } else {
         conn.slot.tls_probe_failure.load(Ordering::SeqCst)
     };
-    conn.slot.status.store(CS_BROKEN, Ordering::SeqCst);
+    conn.slot.status.set(ConnStatus::Broken);
     conn.session
         .get_mut()
         .nntp_disconnect(&srv.user, &srv.password, &srv.name, &srv.host);
@@ -4109,12 +4105,12 @@ mod tests {
         {
             let _scope = CancelRegScope::enter(Arc::clone(&reg));
             let c1 = NzbgetRsConn::new_client(b"127.0.0.1", 12345, false, true, false, 0, None);
-            assert_eq!(c1.slot.status.load(Ordering::SeqCst), CS_DISCONNECTED);
+            assert_eq!(c1.slot.status.get(), ConnStatus::Disconnected);
             reg.stop_all();
-            assert_eq!(c1.slot.status.load(Ordering::SeqCst), CS_CANCELLED);
+            assert_eq!(c1.slot.status.get(), ConnStatus::Cancelled);
 
             let c2 = NzbgetRsConn::new_client(b"127.0.0.1", 12345, false, true, false, 0, None);
-            assert_eq!(c2.slot.status.load(Ordering::SeqCst), CS_CANCELLED);
+            assert_eq!(c2.slot.status.get(), ConnStatus::Cancelled);
         }
         assert!(reg.inner.lock().unwrap().1.is_empty());
     }
@@ -4292,7 +4288,7 @@ mod tests {
                         ptr::null(),
                         0
                     ),
-                    CS_CANCELLED as isize
+                    ConnStatus::Cancelled as isize
                 );
             }
             let res = reader.join().unwrap();

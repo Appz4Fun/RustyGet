@@ -10113,7 +10113,6 @@ impl CrossPackRepairSession {
                 };
                 let (mut written, mut credit_recovery) = (0i64, false);
                 let mut left_over: Vec<NzbgetRsByteRange> = Vec::new();
-                let group_count = groups.len();
                 for (g, group) in groups.into_iter().enumerate() {
                     if g > 0 && env_cell.borrow_mut().is_stopped() {
                         left_over.extend(group);
@@ -10142,7 +10141,10 @@ impl CrossPackRepairSession {
                         &mut self.repair_sets[repair_set_idx].inner_holes,
                     ));
                     env_cell.borrow_mut().sync_target_holes(&self.target_holes);
-                    if group_count > 1 && w > 0 {
+                    // Also for a pass that is stopping (a volume went dead meanwhile): the
+                    // re-offer records what was borrowed, so the next pass resumes from there
+                    // instead of from the first byte.
+                    if w > 0 && !self.dead_fills.is_empty() {
                         self.finish_dead_fills(&env_cell);
                     }
                 }

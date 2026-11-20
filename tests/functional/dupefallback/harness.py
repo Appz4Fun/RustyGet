@@ -4125,6 +4125,70 @@ def scenario_deadvolumeencrypted(daemon, t):
             % (hp['Status'], hb['Status'], failed_over, cancelled, kept, du_ok, integ))
 
 
+def _headlost_volume(daemon, t, name, rar5):
+    """A plain stored rar set without par2 loses the first articles of one
+    middle volume (its headers and the start of its data) and a few in its
+    middle; the rest of that volume arrives. Its backup in history holds the
+    same movie in a RAR5 store set with encrypted headers whose password is in
+    the backup's nzb. The lost headers are rebuilt from a sibling volume, only
+    the volume's holes are borrowed from the backup, and direct unpack goes on
+    to the end: no failover, no restart (6790, 2026-11-20: copy 02's part18
+    lost its [1/147] and its 8.2 MB was never borrowed)."""
+    if not generators.HAVE_RAR:
+        return (name, None, 'SKIP: rar not installed')
+    tag = name[:6]
+    password = 'alt-pw 7'
+    seg = 20_000
+    movie = _payload(15_000_000, 23071)
+    with tempfile.TemporaryDirectory(prefix='hlv-') as workdir:
+        if rar5:
+            vols = generators.rar5_store_volumes_hp('movie.mkv', movie, 1_000_000, None, workdir)
+        else:
+            vols = generators.rar3_store_volumes_valid('movie.mkv', movie, 1_000_000)
+    lost = {1, 2, 3, 20, 21}
+    members = []
+    for i, data in enumerate(vols):
+        vname = 'Show.part%02d.rar' % (i + 1)
+        rel = '%sA/%s' % (tag, vname)
+        t.write_file(os.path.join('data', rel), data)
+        members.append((rel, vname, len(data), seg, set(lost) if i == 6 else set()))
+    with tempfile.TemporaryDirectory(prefix='hlv-') as workdir:
+        enc = generators.rar5_store_volumes_hp('movie.mkv', movie, 5_000_000, password, workdir)
+    donor_members = []
+    for i, data in enumerate(enc):
+        vname = 'Other.part%d.rar' % (i + 1)
+        rel = '%sB/%s' % (tag, vname)
+        t.write_file(os.path.join('data', rel), data)
+        donor_members.append((rel, vname, len(data), 100_000, set()))
+    api = daemon.wait_ready()
+    daemon.append(api, 'Primary', build_multi_nzb(members), True, tag + '-key', 100)
+    _ds_append(api, 'Backup', build_multi_nzb(donor_members, password=password), tag + '-key', 90,
+               paused=False,
+               params=[{'Name': 'DupeCopyKind', 'Value': 'borrowable-encrypted'},
+                       {'Name': 'DupeLocked', 'Value': 'yes'}])
+    daemon.wait_history(api, 'Backup', timeout=60)
+    api.editqueue('GroupResume', 0, '', [g['NZBID'] for g in api.listgroups() if g['NZBName'] == 'Primary'])
+    hp = daemon.wait_history(api, 'Primary', timeout=300)
+    failed_over = _grep_log(t, 'Failing over Primary')
+    cancelled = _grep_log(t, 'Cancelling direct unpack')
+    rebuilt = _grep_log(t, 'Volume Show.part07.rar lost its headers')
+    du_ok = _grep_log(t, 'Direct unpack for Primary successful')
+    integ = _verify_output(t, movie, '.mkv', dirs=(('main', 'dst'), ('main', 'inter')))
+    ok = (failed_over == 0 and cancelled == 0 and rebuilt >= 1 and du_ok == 1 and integ and
+          hp['Status'].startswith('SUCCESS'))
+    return (name, ok,
+            'status=%s failover_logs=%d du_cancelled=%d headers_rebuilt=%d du_ok=%d extracted_ok=%s'
+            % (hp['Status'], failed_over, cancelled, rebuilt, du_ok, integ))
+
+
+def scenario_headlostvolume(daemon, t):
+    return _headlost_volume(daemon, t, 'headlostvolume', rar5=False)
+
+
+def scenario_headlostvolume5(daemon, t):
+    return _headlost_volume(daemon, t, 'headlostvolume5', rar5=True)
+
+
 def scenario_deadvolumeunlabelled(daemon, t):
     """The same release, but nothing classed the backup (no fleet labels, and
     TwinCheck cannot sample three volumes against fifteen): a same-key grab,
@@ -11070,6 +11134,8 @@ SCENARIOS = {
     'skipholetwin': scenario_skipholetwin,
     'deadvolumenestednopar': scenario_deadvolumenestednopar,
     'deadvolumeencrypted': scenario_deadvolumeencrypted,
+    'headlostvolume': scenario_headlostvolume,
+    'headlostvolume5': scenario_headlostvolume5,
     'deadvolumeunlabelled': scenario_deadvolumeunlabelled,
     'deadvolumetwincheck': scenario_deadvolumetwincheck,
     'deadvolumeothervideo': scenario_deadvolumeothervideo,
@@ -11441,6 +11507,8 @@ SCENARIO_OPTIONS = {
     'skipholetwin': PROD_OPTIONS + ['DownloadRate=1500'],
     'deadvolumenestednopar': PROD_OPTIONS + ['DownloadRate=4000'],
     'deadvolumeencrypted': PROD_OPTIONS + ['DownloadRate=4000'],
+    'headlostvolume': PROD_OPTIONS + ['DownloadRate=4000'],
+    'headlostvolume5': PROD_OPTIONS + ['DownloadRate=4000'],
     'deadvolumeunlabelled': PROD_OPTIONS + ['DownloadRate=4000'],
     'deadvolumetwincheck': PROD_OPTIONS + ['DownloadRate=1000'],
     'deadvolumeothervideo': PROD_OPTIONS + ['DownloadRate=1000'],

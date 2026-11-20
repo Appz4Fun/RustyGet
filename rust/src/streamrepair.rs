@@ -8743,14 +8743,17 @@ fn plan_dead_fills(
     let is_dead_job = |name: &[u8]| dead_jobs.iter().any(|t| t.filename.eq_ignore_ascii_case(name));
     // A volume of a stored set with holes that the regular map cannot reach: while the set is
     // still downloading its packed sizes do not add up to the inner file yet, so only the
-    // volumes on disk so far can place the holes.
+    // volumes on disk so far can place the holes. A volume that lost its headers is in the
+    // regular map's set but none of its runs: the map skipped it, so its holes count too.
     let unmapped: Vec<bool> = (0..set_members.len())
         .map(|m| {
             member_holes.get(m).is_some_and(|h| !h.is_empty())
                 && member_targets.get(m).is_some_and(|&t| t >= 0)
-                && !repair_sets
-                    .iter()
-                    .any(|r| r.map.is_some() && r.set.members.contains(&(m as i32)))
+                && !repair_sets.iter().any(|r| {
+                    r.map
+                        .as_ref()
+                        .is_some_and(|map| map.runs().iter().any(|run| run.member_index == m as i32))
+                })
         })
         .collect();
     let unmapped_holes = |m: usize| unmapped.get(m).copied().unwrap_or(false);
@@ -8830,6 +8833,9 @@ fn plan_dead_fills(
         let mut usable = true;
         // Why a volume counts as not there yet, for the log.
         let mut unknown_why: std::collections::BTreeMap<u32, String> = Default::default();
+        // Volumes on disk whose first article (their headers) was lost, by set position, with
+        // their size: rebuilt like a dead volume, but only their holes are borrowed.
+        let mut head_lost: std::collections::BTreeMap<usize, i64> = Default::default();
         for n in 1..=max {
             let name = volume_name(n);
             let Some(&m) = numbered.get(&n) else {
@@ -8870,6 +8876,11 @@ fn plan_dead_fills(
                 break;
             }
             if !ok && files.is_empty() {
+                if n > 1 && unmapped_holes(m as usize) && head_was_lost(member_holes.get(m as usize)) {
+                    head_lost.insert(states.len(), size);
+                    states.push(VolumeState::Dead { encoded_size: 0 });
+                    continue;
+                }
                 unknown_why.insert(n, format!("{} ({size} bytes) has no readable RAR headers", String::from_utf8_lossy(&name)));
                 states.push(VolumeState::Unknown);
                 continue;
@@ -9027,10 +9038,36 @@ fn plan_dead_fills(
                                 if created.is_err() {
                                     break;
                                 }
-                                vec![NzbgetRsByteRange {
+                                let whole = vec![NzbgetRsByteRange {
                                     offset: 0,
                                     size: p.packed_size,
-                                }]
+                                }];
+                                match (head_lost.get(&i), &states[p.template]) {
+                                    (Some(&size), VolumeState::Readable(t)) => seed_head_lost(
+                                        &path_of(&name),
+                                        size,
+                                        t.size,
+                                        &scratch_path,
+                                        &p,
+                                        member_holes.get(members_by_index[i] as usize),
+                                    )
+                                    .inspect(|left| {
+                                        let mut msg = b"Volume ".to_vec();
+                                        msg.extend_from_slice(&name);
+                                        msg.extend_from_slice(
+                                            format!(
+                                                " lost its headers: rebuilding them from volume {} \
+                                                 and borrowing its {:.1} MB of holes from duplicates",
+                                                p.template + 1,
+                                                stream_repair_bytes_to_mb(total_size(left))
+                                            )
+                                            .as_bytes(),
+                                        );
+                                        emit_msg(TargetMessageKind::Info, &msg);
+                                    })
+                                    .unwrap_or(whole),
+                                    _ => whole,
+                                }
                             }
                         };
                         if resumed.is_some() {
@@ -9095,12 +9132,13 @@ fn plan_dead_fills(
         let existing = repair_sets.iter().position(|r| {
             r.set.format == MemberFormat::Rar && r.set.members.contains(&set.members[0])
         });
-        if existing.is_none_or(|e| repair_sets[e].map.is_none()) {
+        let regular_map = existing.is_some_and(|e| repair_sets[e].map.is_some());
+        {
             // The regular map could not be built: the readable volumes' holes are repaired
-            // through this one.
+            // through this one. With one, only the holes of volumes it skipped are.
             let mut hole_members = Vec::new();
             let mut hole_ranges = Vec::new();
-            for &m in &set.members {
+            for &m in set.members.iter().filter(|&&m| !regular_map || unmapped_holes(m as usize)) {
                 for &h in member_holes.get(m as usize).map_or(&[][..], |v| v.as_slice()) {
                     hole_members.push(m);
                     hole_ranges.push(h);
@@ -9153,7 +9191,10 @@ fn plan_dead_fills(
         if set_fills.is_empty() {
             continue;
         }
-        let borrowed: i64 = set_fills.iter().map(|d| d.packed).sum();
+        let borrowed: i64 = set_fills
+            .iter()
+            .map(|d| total_size(&target_holes[d.target]))
+            .sum();
         let mut msg = b"Dead volumes in ".to_vec();
         msg.extend_from_slice(&volume_name(1));
         msg.extend_from_slice(
@@ -9170,6 +9211,51 @@ fn plan_dead_fills(
         fills.extend(set_fills);
     }
     fills
+}
+
+/// Whether a volume's holes start at its first byte: the article holding its headers was lost.
+fn head_was_lost(holes: Option<&Vec<NzbgetRsByteRange>>) -> bool {
+    holes.is_some_and(|h| h.iter().any(|r| r.offset == 0 && r.size > 0))
+}
+
+/// Seeds the scratch file of a volume that lost its headers with the member bytes that did
+/// arrive (`plan`'s data range of the volume on disk at `volume_path`) and returns what is
+/// still to borrow, in scratch file offsets: the volume's holes inside that range. `None` when
+/// the volume is not the size its sibling's layout gives (its data may sit elsewhere), or
+/// cannot be read; the whole volume is borrowed then.
+fn seed_head_lost(
+    volume_path: &[u8],
+    volume_size: i64,
+    template_size: i64,
+    scratch_path: &[u8],
+    plan: &crate::deadvolume::Plan,
+    holes: Option<&Vec<NzbgetRsByteRange>>,
+) -> Option<Vec<NzbgetRsByteRange>> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    if volume_size != template_size || plan.data_offset + plan.packed_size > volume_size {
+        return None;
+    }
+    let mut src = std::fs::File::open(crate::fsops::path(volume_path)).ok()?;
+    let mut dst = std::fs::OpenOptions::new()
+        .write(true)
+        .open(crate::fsops::path(scratch_path))
+        .ok()?;
+    src.seek(SeekFrom::Start(plan.data_offset as u64)).ok()?;
+    let copied = std::io::copy(&mut (&mut src).take(plan.packed_size as u64), &mut dst).ok()?;
+    if copied != plan.packed_size as u64 {
+        return None;
+    }
+    dst.flush().ok()?;
+    let (start, end) = (plan.data_offset, plan.data_offset + plan.packed_size);
+    let left: Vec<NzbgetRsByteRange> = holes
+        .map_or(&[][..], |h| h.as_slice())
+        .iter()
+        .filter_map(|h| {
+            let (a, b) = (h.offset.max(start), (h.offset + h.size).min(end));
+            (b > a).then(|| NzbgetRsByteRange { offset: a - start, size: b - a })
+        })
+        .collect();
+    Some(content_mapper_coalesce_ranges(&left))
 }
 
 /// Pure-Rust cross-packing (M2/M3) and decompression-assisted (M4) stream repair session
@@ -9416,9 +9502,10 @@ impl CrossPackRepairSession {
             lzma2_other_size: false,
             media_repair_set: None,
         };
-        // Extraction need not wait while the dead volumes are borrowed: hand them over now,
+        // A volume that lost only its headers has nothing left to borrow: rebuilt now. Extraction
+        // need not wait while the other dead volumes are borrowed: they are handed over now,
         // with what is not borrowed yet as holes.
-        session.offer_dead_fills(emit_msg);
+        session.finish_dead_fills_with(emit_msg);
         Some(session)
     }
 
@@ -9739,6 +9826,15 @@ impl CrossPackRepairSession {
     /// Dead volumes whose borrowed data is complete: rebuild their headers and hand them to
     /// direct unpack as virtual volumes.
     fn finish_dead_fills(&mut self, env_cell: &std::cell::RefCell<&mut dyn CrossPackDonorEnv>) {
+        self.finish_dead_fills_with(&mut |kind, msg| {
+            env_cell.borrow_mut().emit_message_bytes(kind, msg)
+        });
+    }
+
+    /// [`Self::finish_dead_fills`] reporting through `emit`: also run when the session starts,
+    /// for a volume that lost only its headers (nothing left to borrow, so no donor pass
+    /// would ever finish it).
+    fn finish_dead_fills_with(&mut self, emit: &mut dyn FnMut(TargetMessageKind, &[u8])) {
         for i in 0..self.dead_fills.len() {
             let d = self.dead_fills[i].clone();
             if d.done
@@ -9759,9 +9855,7 @@ impl CrossPackRepairSession {
                     let mut msg = format!("Borrowed {mb:.1} MB for dead volume ").into_bytes();
                     msg.extend_from_slice(name);
                     msg.extend_from_slice(b" from a duplicate; direct unpack reads it in place");
-                    env_cell
-                        .borrow_mut()
-                        .emit_message_bytes(TargetMessageKind::Info, &msg);
+                    emit(TargetMessageKind::Info, &msg);
                 }
                 Err(e) => {
                     // A volume handed over with holes is still read through its scratch file.
@@ -9773,13 +9867,11 @@ impl CrossPackRepairSession {
                     msg.extend_from_slice(name);
                     msg.extend_from_slice(b": ");
                     msg.extend_from_slice(e.as_bytes());
-                    env_cell
-                        .borrow_mut()
-                        .emit_message_bytes(TargetMessageKind::Warning, &msg);
+                    emit(TargetMessageKind::Warning, &msg);
                 }
             }
         }
-        self.offer_dead_fills(&mut |kind, msg| env_cell.borrow_mut().emit_message_bytes(kind, msg));
+        self.offer_dead_fills(emit);
     }
 
     /// Dead volumes still being borrowed: hand them to direct unpack now, with the bytes not
@@ -11487,6 +11579,52 @@ pub fn process_m1_donor(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn r(offset: i64, size: i64) -> NzbgetRsByteRange {
+        NzbgetRsByteRange { offset, size }
+    }
+
+    #[test]
+    fn head_lost_only_when_a_hole_starts_the_volume() {
+        assert!(head_was_lost(Some(&vec![r(0, 100), r(500, 10)])));
+        assert!(head_was_lost(Some(&vec![r(500, 10), r(0, 100)])));
+        assert!(!head_was_lost(Some(&vec![r(1, 100)])));
+        assert!(!head_was_lost(Some(&vec![r(0, 0)])));
+        assert!(!head_was_lost(None));
+    }
+
+    #[test]
+    fn seed_head_lost_copies_the_data_and_leaves_its_holes() {
+        let dir = std::env::temp_dir().join(format!("seed-head-lost-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let volume: Vec<u8> = (0..1000u32).map(|i| (i % 251) as u8).collect();
+        let vpath = dir.join("Show.part07.rar");
+        let spath = dir.join("scratch");
+        std::fs::write(&vpath, &volume).unwrap();
+        let bytes = |p: &std::path::Path| p.to_str().unwrap().as_bytes().to_vec();
+        let plan = crate::deadvolume::Plan {
+            index: 6,
+            template: 5,
+            inner_offset: 6000,
+            packed_size: 900,
+            data_offset: 80,
+        };
+        // Lost: the headers and the data's first 20 bytes, one range in the middle, and a
+        // range in the tail (not part of the data).
+        let holes = vec![r(0, 100), r(400, 50), r(990, 10)];
+        let fresh = |path: &std::path::Path| {
+            std::fs::File::create(path).unwrap().set_len(900).unwrap();
+        };
+        fresh(&spath);
+        let left = seed_head_lost(&bytes(&vpath), 1000, 1000, &bytes(&spath), &plan, Some(&holes))
+            .expect("seeded");
+        assert_eq!(left, vec![r(0, 20), r(320, 50)]);
+        assert_eq!(std::fs::read(&spath).unwrap(), volume[80..980].to_vec());
+        // A volume of another size than its sibling may hold its data elsewhere.
+        fresh(&spath);
+        assert!(seed_head_lost(&bytes(&vpath), 1000, 1004, &bytes(&spath), &plan, Some(&holes)).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     // Archives written by 7-Zip 23.01 with `-m0=Copy -pSecret1`: `he` also with `-mhe=on`.
     const SZ_HE: &str = "377abcaf271c0004b6f2d43ab0000000000000002e00000000000000cb975426041ccf24954be508b54a6c3b949c3d9d8c78b7284e30cd97d67a61e0675bc3d25598c57a696320fb1f934ec8321442c118a6df7927424d4505e4eb332355ad20e6d69418d4d6a36f501ac368154e9433c1009cb91344c44fad3fb385b8afaae0c4d50d7bddd1f8e0c278d5f1a4532aa2be5a02b8bf471ebccdf19f6e4783ce78b16aa1f1752e8c89b4a1ce30b7ead0de0f6640f29f781c45d22e51e09442f96a4573a7343de8f10f74e231f665a8b5e917064001097000070b0100012406f1070112530fa36177ed75b5c1f9aab2f5b0143fbd650c6a0a01022eb6280000";

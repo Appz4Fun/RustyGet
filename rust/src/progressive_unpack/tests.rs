@@ -5718,3 +5718,34 @@ fn the_copy_path_waits_for_a_half_borrowed_dead_volume_to_finish() {
     assert!(!persistent(&log), "{log:?}");
     assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
 }
+
+
+/// A volume whose end block (and the quick-open record in front of it) was lost and rebuilt
+/// from a sibling (`deadvolume::restore_tail_from_sibling`) still extracts: the sibling's
+/// quick-open record describes the sibling's part, which the extraction does not read.
+#[test]
+fn a_volume_with_its_end_rebuilt_from_a_sibling_extracts() {
+    let t = TestDir::new("sibling-tail");
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/testdata/rarrenamer");
+    for i in 1..=3 {
+        let name = format!("testfile5.part0{i}.rar");
+        std::fs::copy(src.join(&name), t.dl().join(&name)).unwrap();
+    }
+    let two = t.dl().join("testfile5.part02.rar");
+    let one = t.dl().join("testfile5.part01.rar");
+    let mut v2 = std::fs::read(&two).unwrap();
+    let v1 = std::fs::read(&one).unwrap();
+    assert_ne!(v1[10_146..], v2[10_146..]);
+    let n = v2.len();
+    v2[10_146..].fill(0);
+    std::fs::write(&two, &v2).unwrap();
+    let path = |p: &Path| p.to_str().unwrap().as_bytes().to_vec();
+    assert!(crate::deadvolume::restore_tail_from_sibling(
+        &path(&two),
+        &[(10_146, n as u64)],
+        &path(&one)
+    ));
+    let (r, log) = run(&one, &t.out(), Box::new(CompleteSet));
+    expect_ok(r, &log);
+    assert!(t.out().join("testfile5.dat").is_file(), "{log:?}");
+}

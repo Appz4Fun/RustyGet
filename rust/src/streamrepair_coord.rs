@@ -380,6 +380,21 @@ impl NzbgetRsStreamRepairCtrl {
         }
     }
 
+    /// The id of the download this repair works on.
+    fn target_nzb_id(&self, q: JobQueue<'_>) -> Option<i32> {
+        if self.live_mode {
+            return Some(q.nzb_id());
+        }
+        let post_ptr = q.post_ptr();
+        if post_ptr.is_none() {
+            return None;
+        }
+        q.host.with_locked_queue(|_| {
+            let nzb = q.host.post_snap(post_ptr).nzb_ptr;
+            (!nzb.is_none()).then(|| q.host.nzb_snap(nzb, false).id)
+        })
+    }
+
     /// Writes to the global log.
     fn global_log(&self, q: JobQueue<'_>, kind: MessageKind, text: &[u8]) {
         q.host.log(kind as i32, cstr::until_nul(text));
@@ -2092,6 +2107,7 @@ impl NzbgetRsStreamRepairCtrl {
                 );
             
             }
+            self.restore_lost_tails(q, &dest_dir, &mut targets, &member_names);
             self.stop_watchdog(
                 q,
                 wd_handle,
@@ -2104,6 +2120,19 @@ impl NzbgetRsStreamRepairCtrl {
 
         self.report_remaining_holes(q, &targets, &mut counters);
         self.repair_completed_post(q, &opts, &dest_dir, &targets, &counters);
+        // Volumes this repair completed can be read by a paused direct unpack again, as after
+        // a live pass: left held, they wait for a par2 repair that may fail over another file
+        // (a dead volume direct unpack reads rebuilt in place), and the extraction is dropped.
+        // Only all at once: with any still held, par2 runs next and may rewrite a released one.
+        #[cfg(unix)]
+        if let Some(id) = self.target_nzb_id(q) {
+            let complete: Vec<Vec<u8>> = targets
+                .iter()
+                .filter(|t| !t.needs_repair())
+                .map(|t| [dest_dir.as_slice(), &[crate::paths::PATH_SEPARATOR], &t.filename].concat())
+                .collect();
+            crate::postproc::direct_unpack_release_if_all(id, &complete);
+        }
     
     }
 
@@ -2113,19 +2142,33 @@ impl NzbgetRsStreamRepairCtrl {
         // job, and borrow the new ones before post-processing takes over and par2 rebuilds them.
         // The job is given back only after the last pass: giving it back after each one would
         // end this thread's hold, and the next look would find nothing.
+        // Holes also turn up while a pass runs, in files still arriving when it collected its
+        // targets: the pass marks those files tried, so without another pass their holes go to
+        // a par2 repair that may not exist, though the duplicate could lend them.
+        // Such a file finishing while a pass runs gets its repair job then (a new file to this
+        // repair), and the live repair already running keeps the queue from starting another.
         let mut tried: std::collections::BTreeSet<Vec<u8>> = Default::default();
+        let mut seen: std::collections::BTreeMap<Vec<u8>, Vec<(i64, i64)>> = Default::default();
+        let mut again: std::collections::BTreeSet<Vec<u8>> = Default::default();
+        let mut rerun_for: std::collections::BTreeMap<Vec<u8>, Vec<(i64, i64)>> =
+            Default::default();
         let mut ran = false;
         for _ in 0..MAX_LIVE_BORROW_PASSES {
-            let Some(left) = self.run_live_pass(q) else {
+            let Some((left, attempted)) = self.run_live_pass(q, &again) else {
                 break;
             };
             ran = true;
             tried.extend(left);
+            for (name, holes) in attempted {
+                seen.entry(name).or_default().extend(holes);
+            }
             if self.host_is_stopped(q) {
                 break;
             }
-            let fresh = self.dead_volumes_left_to_borrow(q);
-            if fresh.iter().all(|n| tried.contains(n)) {
+            let (fresh, now) = self.look_again(q);
+            let (newcomers, retry) = holes_to_rerun(&seen, &mut rerun_for, now);
+            again = retry;
+            if fresh.iter().all(|n| tried.contains(n)) && again.is_empty() && !newcomers {
                 break;
             }
         }
@@ -2134,31 +2177,100 @@ impl NzbgetRsStreamRepairCtrl {
         }
     }
 
-    /// Names of the dead volumes a pass would leave to the borrow now.
-    fn dead_volumes_left_to_borrow(
+    /// Restores the ends of RAR volumes whose only lost bytes lie behind their file's data (the
+    /// end block and the quick-open record in front of it, lost with a volume's last article):
+    /// no duplicate lends those, they belong to no file, and without them the extraction stops
+    /// at the volume. Rebuilt from the nearest complete volume of the same set; see
+    /// `deadvolume::restore_tail_from_sibling`.
+    fn restore_lost_tails(
         &self,
         q: JobQueue<'_>,
-    ) -> Vec<Vec<u8>> {
+        dest_dir: &[u8],
+        targets: &mut [RepairTarget],
+        member_names: &[Vec<u8>],
+    ) {
+        let damaged: Vec<Vec<u8>> = targets
+            .iter()
+            .filter(|t| t.needs_repair())
+            .map(|t| t.filename.to_ascii_lowercase())
+            .collect();
+        let path = |name: &[u8]| [dest_dir, &[crate::paths::PATH_SEPARATOR], name].concat();
+        for t in targets
+            .iter_mut()
+            .filter(|t| t.patch_eligible && !t.holes.is_empty() && t.decoded_file_size > 0)
+        {
+            let Some((prefix, number, _, _)) = crate::streamrepair::rar_part_number(&t.filename)
+            else {
+                continue;
+            };
+            let holes: Vec<(u64, u64)> = hole_spans(t)
+                .into_iter()
+                .filter_map(|(s, e)| Some((u64::try_from(s).ok()?, u64::try_from(e).ok()?)))
+                .collect();
+            let mut siblings: Vec<(u32, &Vec<u8>)> = member_names
+                .iter()
+                .filter(|n| !damaged.contains(&n.to_ascii_lowercase()))
+                .filter_map(|n| {
+                    let (p, k, _, _) = crate::streamrepair::rar_part_number(n)?;
+                    (p.eq_ignore_ascii_case(&prefix) && k != number)
+                        .then_some((k.abs_diff(number), n))
+                })
+                .collect();
+            siblings.sort();
+            for (_, sibling) in siblings.into_iter().take(4) {
+                if crate::deadvolume::restore_tail_from_sibling(
+                    &path(&t.filename),
+                    &holes,
+                    &path(sibling),
+                ) {
+                    t.holes.clear();
+                    if let Some(id) = self.target_nzb_id(q) {
+                        crate::postproc::note_volume_end_rebuilt(id);
+                    }
+                    let mut msg = b"Rebuilt the end of ".to_vec();
+                    msg.extend_from_slice(&t.filename);
+                    msg.extend_from_slice(b" from ");
+                    msg.extend_from_slice(sibling);
+                    msg.extend_from_slice(b": its lost bytes lie behind the archived data");
+                    self.print_message(q, MessageKind::Info, &msg);
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Names of the dead volumes a pass would leave to the borrow now, and the holes of every
+    /// file that still has some.
+    fn look_again(&self, q: JobQueue<'_>) -> (Vec<Vec<u8>>, Vec<(Vec<u8>, Vec<(i64, i64)>)>) {
         let mut counters = RunCounters::default();
         // Only looks: the live-attempted marks belong to the pass that repairs the files.
         let Some((_, dest_dir, targets, _, _)) = q.host.with_locked_queue(|dq_ptr| {
             self.collect_targets_and_donors(q, dq_ptr, false, false, &mut counters)
         }) else {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         };
-        dead_volumes_to_borrow(&dest_dir, &targets)
+        let holes = targets
+            .iter()
+            .filter(|t| !t.holes.is_empty())
+            .map(|t| (t.filename.clone(), hole_spans(t)))
+            .collect();
+        let dead = dead_volumes_to_borrow(&dest_dir, &targets)
             .into_iter()
             .zip(targets)
             .filter_map(|(left, t)| left.then_some(t.filename))
-            .collect()
+            .collect();
+        (dead, holes)
     }
 
-    /// One live pass; returns the dead volumes it left to the borrow, None when there was
-    /// nothing to look at.
+    /// One live pass; returns the dead volumes it left to the borrow and the holes it took on
+    /// (by file), None when there was nothing to look at. The files in `again` are taken on
+    /// even though an earlier pass of this repair marked them tried: they have new holes.
+    #[allow(clippy::type_complexity)]
     fn run_live_pass(
         &self,
         q: JobQueue<'_>,
-    ) -> Option<Vec<Vec<u8>>> {
+        again: &std::collections::BTreeSet<Vec<u8>>,
+    ) -> Option<(Vec<Vec<u8>>, Vec<(Vec<u8>, Vec<(i64, i64)>)>)> {
         let mut counters = RunCounters::default();
         let Some((nzb_name, dest_dir, mut targets, donors, mut member_names)) =
             q.host.with_locked_queue(|dq_ptr| {
@@ -2173,10 +2285,19 @@ impl NzbgetRsStreamRepairCtrl {
         // fetches; only the whole-file recreation is not repeated.
         let left_to_borrow = dead_volumes_to_borrow(&dest_dir, &targets);
         for (t, left) in targets.iter_mut().zip(&left_to_borrow) {
-            if *left {
+            if *left || again.contains(&t.filename) {
                 t.patch_eligible = true;
             }
         }
+        let attempted: Vec<(Vec<u8>, Vec<(i64, i64)>)> = if donors.is_empty() {
+            Vec::new()
+        } else {
+            targets
+                .iter()
+                .filter(|t| t.patch_eligible && !t.holes.is_empty())
+                .map(|t| (t.filename.clone(), hole_spans(t)))
+                .collect()
+        };
         let any_eligible = targets.iter().any(|t| t.patch_eligible && t.needs_repair());
         if any_eligible && !donors.is_empty() {
             let mut msg = b"Starting live stream repair for ".to_vec();
@@ -2240,6 +2361,7 @@ impl NzbgetRsStreamRepairCtrl {
             
             }
             drop(borrow_note);
+            self.restore_lost_tails(q, &dest_dir, &mut targets, &member_names);
             // Dead volumes the borrow could not rebuild (a compressed set, a volume that cannot
             // be placed yet, the real last one...) still get the whole-file recreation from a
             // byte-identical duplicate, as before.
@@ -2268,32 +2390,133 @@ impl NzbgetRsStreamRepairCtrl {
 
         self.repair_completed_live(q, &targets, &counters);
         // A volume the live repair completed can be read by a paused direct unpack again.
-        #[cfg(unix)]
-        for t in targets.iter().filter(|t| !t.needs_repair()) {
-            let full = [
-                dest_dir.as_slice(),
-                &[crate::paths::PATH_SEPARATOR],
-                t.filename.as_slice(),
-            ]
-            .concat();
-            crate::postproc::direct_unpack_release_path(&full);
-        }
-        Some(
+        release_completed_holds(&dest_dir, &targets);
+        Some((
             left_to_borrow
                 .iter()
                 .zip(&targets)
                 .filter_map(|(left, t)| left.then(|| t.filename.clone()))
                 .collect(),
-        )
+            attempted,
+        ))
     }
+}
+
+/// A target's holes as (start, end) byte spans.
+fn hole_spans(t: &RepairTarget) -> Vec<(i64, i64)> {
+    t.holes
+        .iter()
+        .map(|h| (h.offset, h.offset.saturating_add(h.size)))
+        .collect()
+}
+
+/// What another live pass is for: whether a file with holes that no pass of this repair took
+/// on turned up (the next pass takes it on by itself), and the files a pass took on that have
+/// a hole no pass tried (taken on again). Each file is rerun for once per state of its holes
+/// (`rerun_for`), so a pass that cannot take them on is not repeated for nothing.
+#[allow(clippy::type_complexity)]
+fn holes_to_rerun(
+    seen: &std::collections::BTreeMap<Vec<u8>, Vec<(i64, i64)>>,
+    rerun_for: &mut std::collections::BTreeMap<Vec<u8>, Vec<(i64, i64)>>,
+    now: Vec<(Vec<u8>, Vec<(i64, i64)>)>,
+) -> (bool, std::collections::BTreeSet<Vec<u8>>) {
+    let fresh: Vec<(Vec<u8>, Vec<(i64, i64)>)> = now
+        .into_iter()
+        .filter(|(name, holes)| rerun_for.get(name) != Some(holes))
+        .collect();
+    let newcomers: Vec<&(Vec<u8>, Vec<(i64, i64)>)> =
+        fresh.iter().filter(|(name, _)| !seen.contains_key(name)).collect();
+    let any_new = !newcomers.is_empty();
+    let again = holes_not_tried(seen, fresh.clone());
+    for (name, holes) in fresh {
+        if !seen.contains_key(&name) || again.contains(&name) {
+            rerun_for.insert(name, holes);
+        }
+    }
+    (any_new, again)
+}
+
+/// Files with a hole that no earlier pass took on: a byte of it lies outside every span tried
+/// for that file. What is left of a hole a pass tried and could not fill is not new.
+fn holes_not_tried(
+    seen: &std::collections::BTreeMap<Vec<u8>, Vec<(i64, i64)>>,
+    now: Vec<(Vec<u8>, Vec<(i64, i64)>)>,
+) -> std::collections::BTreeSet<Vec<u8>> {
+    let covered = |tried: &[(i64, i64)], (start, end): (i64, i64)| {
+        let mut spans: Vec<(i64, i64)> = tried.to_vec();
+        spans.sort_unstable();
+        let mut at = start;
+        for (s, e) in spans {
+            if s > at {
+                break;
+            }
+            at = at.max(e);
+            if at >= end {
+                return true;
+            }
+        }
+        at >= end
+    };
+    now.into_iter()
+        .filter(|(name, holes)| {
+            seen.get(name)
+                .is_some_and(|tried| holes.iter().any(|&h| !covered(tried, h)))
+        })
+        .map(|(name, _)| name)
+        .collect()
 }
 
 /// Bounds the borrow passes one live repair makes for volumes that go dead while it runs.
 const MAX_LIVE_BORROW_PASSES: usize = 8;
 
+/// Releases direct unpack's hold on every target a repair left complete.
+fn release_completed_holds(dest_dir: &[u8], targets: &[RepairTarget]) {
+    #[cfg(unix)]
+    for t in targets.iter().filter(|t| !t.needs_repair()) {
+        let full = [
+            dest_dir,
+            &[crate::paths::PATH_SEPARATOR],
+            t.filename.as_slice(),
+        ]
+        .concat();
+        crate::postproc::direct_unpack_release_path(&full);
+    }
+    #[cfg(not(unix))]
+    let _ = (dest_dir, targets);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn holes_that_turned_up_during_a_pass_are_taken_on_again() {
+        let mut seen = std::collections::BTreeMap::new();
+        seen.insert(b"a.part20.rar".to_vec(), vec![(0, 100), (200, 300)]);
+        seen.insert(b"a.part21.rar".to_vec(), vec![(0, 50)]);
+        let now = vec![
+            // What is left of holes already tried: not new.
+            (b"a.part20.rar".to_vec(), vec![(10, 90), (200, 250)]),
+            // A hole past what the pass saw.
+            (b"a.part21.rar".to_vec(), vec![(0, 50), (60, 900)]),
+            // Never taken on by this repair: the next pass collects it anyway.
+            (b"a.part22.rar".to_vec(), vec![(0, 10)]),
+        ];
+        let again = holes_not_tried(&seen, now.clone());
+        assert_eq!(again.into_iter().collect::<Vec<_>>(), vec![b"a.part21.rar".to_vec()]);
+        // part22 finished during the pass: another pass runs for it, and for part21 again.
+        let mut rerun_for = std::collections::BTreeMap::new();
+        let (newcomers, again) = holes_to_rerun(&seen, &mut rerun_for, now.clone());
+        assert!(newcomers);
+        assert_eq!(again.into_iter().collect::<Vec<_>>(), vec![b"a.part21.rar".to_vec()]);
+        // A pass that could not take them on changes nothing: not run again for them.
+        let (newcomers, again) = holes_to_rerun(&seen, &mut rerun_for, now);
+        assert!(!newcomers && again.is_empty());
+        // Spans tried in two passes cover a hole together.
+        let mut seen = std::collections::BTreeMap::new();
+        seen.insert(b"b".to_vec(), vec![(50, 100), (0, 60)]);
+        assert!(holes_not_tried(&seen, vec![(b"b".to_vec(), vec![(0, 100)])]).is_empty());
+    }
 
     #[test]
     fn a_running_repair_is_marked_until_its_last_mark_drops() {

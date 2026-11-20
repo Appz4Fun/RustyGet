@@ -459,7 +459,7 @@ pub fn statmeter_format_indexed_bytes_line(first_idx: i32, values: &[i64]) -> Ve
 #[cfg(unix)]
 mod runtime {
     use super::*;
-    use std::ffi::{c_int, c_void, CStr};
+    use std::ffi::{c_int, CStr};
     use std::ptr;
     use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, Ordering};
     use std::sync::Mutex;
@@ -1379,23 +1379,46 @@ mod runtime {
         log: Option<&'a NzbgetRsLog>,
     }
 
+    impl crate::diskstate_format::DiskStateHost for StatDiskBridge<'_> {
+        fn log(&mut self, level: crate::diskstate_format::DiskLogLevel, msg: &[u8]) {
+            stat_disk_log_cb(self, level, msg);
+        }
+        fn export_stats(
+            &mut self,
+            with_volumes: bool,
+            sink: &mut dyn FnMut(&[NzbgetRsServerMatchItem], &[NzbgetRsDiskVolumeStatInput]),
+        ) {
+            stat_disk_export_cb(self, with_volumes, sink);
+        }
+        fn set_server_state_id(&mut self, server: usize, state_id: i32) {
+            stat_disk_set_state_id_cb(self, server, state_id);
+        }
+        fn load_volume(
+            &mut self,
+            slot: crate::diskstate_format::VolumeSlot,
+            vol: &NzbgetRsDiskVolumeStatInput,
+            format_version: i32,
+            has_custom_times: bool,
+        ) {
+            stat_disk_load_volume_cb(self, slot, vol, format_version, has_custom_times);
+        }
+    }
+
     fn stat_disk_log_cb(
-        raw: *mut c_void,
+        br: &StatDiskBridge<'_>,
         level: crate::diskstate_format::DiskLogLevel,
         msg: &[u8],
     ) {
-        let br = unsafe { &*raw.cast::<StatDiskBridge<'_>>() };
         if let Some(lg) = br.log {
             lg.emit_bytes(level.kind() as i32, br.opts, msg);
         }
     }
 
     fn stat_disk_export_cb(
-        raw: *mut c_void,
+        br: &StatDiskBridge<'_>,
         with_volumes: bool,
         sink: &mut dyn FnMut(&[NzbgetRsServerMatchItem], &[NzbgetRsDiskVolumeStatInput]),
     ) {
-        let br = unsafe { &mut *raw.cast::<StatDiskBridge<'_>>() };
         if !with_volumes || br.servers.is_empty() {
             sink(br.servers, &[]);
             return;
@@ -1428,22 +1451,20 @@ mod runtime {
         sink(br.servers, &vol_items);
     }
 
-    fn stat_disk_set_state_id_cb(raw: *mut c_void, server: usize, state_id: i32) {
-        let br = unsafe { &mut *raw.cast::<StatDiskBridge<'_>>() };
+    fn stat_disk_set_state_id_cb(br: &mut StatDiskBridge<'_>, server: usize, state_id: i32) {
         if let Some(slot) = br.state_ids.get_mut(server) {
             *slot = state_id;
         }
     }
 
     fn stat_disk_load_volume_cb(
-        raw: *mut c_void,
+        br: &mut StatDiskBridge<'_>,
         slot: crate::diskstate_format::VolumeSlot,
         vi: &NzbgetRsDiskVolumeStatInput,
         format_ver: i32,
         has_custom_times: bool,
     ) {
         use crate::diskstate_format::VolumeSlot;
-        let br = unsafe { &mut *raw.cast::<StatDiskBridge<'_>>() };
         let mut target_idx: Option<usize> = None;
         match slot {
             VolumeSlot::Total => {
@@ -1546,8 +1567,7 @@ mod runtime {
         } else {
             1
         };
-        let mut ds_env: NzbgetRsDiskStateEnv = std::mem::zeroed();
-        ds_env.ctx = (&mut bridge as *mut StatDiskBridge<'_>).cast();
+        let mut ds_env = NzbgetRsDiskStateEnv::new(&mut bridge);
         ds_env.queue_dir = opt_ref
             .and_then(|o| o.str_cstr(OptStr::QueueDir))
             .map_or(ptr::null(), CStr::as_ptr);
@@ -1563,10 +1583,6 @@ mod runtime {
         } else {
             ptr::null_mut()
         };
-        ds_env.log_cb = Some(stat_disk_log_cb);
-        ds_env.export_stats_cb = Some(stat_disk_export_cb);
-        ds_env.set_server_state_id_cb = Some(stat_disk_set_state_id_cb);
-        ds_env.load_volume_cb = Some(stat_disk_load_volume_cb);
         match op {
             0 => {
                 let ok = diskstate_exec(crate::diskstate_format::DiskOp::SaveStats, &ds_env);
@@ -1575,6 +1591,7 @@ mod runtime {
             }
             1 => {
                 let ok = diskstate_exec(crate::diskstate_format::DiskOp::LoadStats, &ds_env);
+                drop(ds_env);
                 for (ns, &st_id) in pool_srvs.iter().zip(bridge.state_ids.iter()) {
                     if st_id >= 0 {
                         ns.state_id.store(st_id, Ordering::SeqCst);

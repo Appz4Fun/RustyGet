@@ -1656,16 +1656,7 @@ mod runtime {
                     return 0;
                 };
                 for (index, sv) in vols.iter().enumerate() {
-                    let art_ptr = if a5 != 0 && !sv.articles_per_days.is_empty() {
-                        sv.articles_per_days.as_ptr()
-                    } else {
-                        ptr::null()
-                    };
-                    let art_len = if a5 != 0 {
-                        sv.articles_per_days.len()
-                    } else {
-                        0
-                    };
+                    let articles: &[_] = if a5 != 0 { &sv.articles_per_days } else { &[] };
                     let vf = NzbgetRsRpcServerVolumeItem {
                         server_id: index as c_int,
                         data_time: sv.data_time as c_int,
@@ -1679,20 +1670,15 @@ mod runtime {
                         hour_slot: sv.hour_slot,
                         day_slot: sv.day_slot,
                         include_seconds: a1,
-                        bytes_per_seconds: sv.bytes_per_seconds.as_ptr(),
-                        bytes_per_seconds_len: sv.bytes_per_seconds.len(),
+                        bytes_per_seconds: &sv.bytes_per_seconds,
                         include_minutes: a2,
-                        bytes_per_minutes: sv.bytes_per_minutes.as_ptr(),
-                        bytes_per_minutes_len: sv.bytes_per_minutes.len(),
+                        bytes_per_minutes: &sv.bytes_per_minutes,
                         include_hours: a3,
-                        bytes_per_hours: sv.bytes_per_hours.as_ptr(),
-                        bytes_per_hours_len: sv.bytes_per_hours.len(),
+                        bytes_per_hours: &sv.bytes_per_hours,
                         include_days: a4,
-                        bytes_per_days: sv.bytes_per_days.as_ptr(),
-                        bytes_per_days_len: sv.bytes_per_days.len(),
+                        bytes_per_days: &sv.bytes_per_days,
                         include_articles: a5,
-                        articles_per_days: art_ptr,
-                        articles_per_days_len: art_len,
+                        articles_per_days: articles,
                     };
                     out.server_volume(&vf);
                 }

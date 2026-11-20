@@ -2,7 +2,9 @@
 //! verify package signatures).
 
 use crate::options::OptStr;
-use std::ffi::{c_char, c_int};
+#[cfg(test)]
+use std::ffi::c_char;
+use std::ffi::c_int;
 use std::path::PathBuf;
 
 #[cfg(unix)]
@@ -221,14 +223,6 @@ pub(crate) struct NzbgetRsMaintenanceEnv {
     >,
 }
 
-fn cbuf_from_bytes(bytes: &[u8]) -> Vec<u8> {
-    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    let mut v = Vec::with_capacity(end + 1);
-    v.extend_from_slice(&bytes[..end]);
-    v.push(0);
-    v
-}
-
 #[cfg(test)]
 unsafe fn opt_cstr_bytes<'a>(p: *const c_char) -> &'a [u8] {
     if p.is_null() {
@@ -242,7 +236,7 @@ struct MaintMessage {
     id: u32,
     kind: c_int,
     time: c_int,
-    text: Vec<u8>,
+    text: std::ffi::CString,
 }
 
 pub struct NzbgetRsMaintenance {
@@ -358,7 +352,7 @@ impl NzbgetRsMaintenance {
                 id: msg.id as c_int,
                 kind: msg.kind,
                 time: msg.time,
-                text: msg.text.as_ptr() as *const c_char,
+                text: &msg.text,
             })
             .collect();
         out.log(&entries);
@@ -844,7 +838,7 @@ impl NzbgetRsMaintenance {
             id,
             kind,
             time: time as c_int,
-            text: cbuf_from_bytes(text),
+            text: crate::cstr::to_cstring(text),
         });
     }
 }
@@ -1066,10 +1060,9 @@ mod tests {
         #[derive(Default)]
         struct Collected(Vec<(i32, i32, Vec<u8>)>);
         impl crate::xmlrpc_format::RpcEmit for Collected {
-            fn log(&mut self, entries: &[crate::xmlrpc_format::NzbgetRsRpcLogEntry]) {
+            fn log(&mut self, entries: &[crate::xmlrpc_format::NzbgetRsRpcLogEntry<'_>]) {
                 for e in entries {
-                    let text = unsafe { std::ffi::CStr::from_ptr(e.text) };
-                    self.0.push((e.id, e.kind, text.to_bytes().to_vec()));
+                    self.0.push((e.id, e.kind, e.text.to_bytes().to_vec()));
                 }
             }
         }

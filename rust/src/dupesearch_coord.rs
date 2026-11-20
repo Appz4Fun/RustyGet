@@ -5879,30 +5879,32 @@ fn emit_fleet_result(
     reason: &[u8],
     entries: &[FleetOutEntry],
 ) -> c_int {
-    let reason_c = c_bytes(reason);
-    let mut name_cs = Vec::with_capacity(entries.len());
-    let mut status_cs = Vec::with_capacity(entries.len());
-    let mut entry_reason_cs = Vec::with_capacity(entries.len());
-    for e in entries {
-        name_cs.push(c_bytes(&e.name));
-        status_cs.push(c_bytes(&e.status));
-        entry_reason_cs.push(c_bytes(&e.reason));
-    }
-    let mut ffi_entries = Vec::with_capacity(entries.len());
-    for (idx, e) in entries.iter().enumerate() {
-        ffi_entries.push(NzbgetRsRpcFleetMember {
+    let reason_c = crate::cstr::to_cstring(reason);
+    let owned: Vec<_> = entries
+        .iter()
+        .map(|e| {
+            (
+                crate::cstr::to_cstring(&e.name),
+                crate::cstr::to_cstring(&e.status),
+                crate::cstr::to_cstring(&e.reason),
+            )
+        })
+        .collect();
+    let ffi_entries: Vec<_> = entries
+        .iter()
+        .zip(&owned)
+        .map(|(e, (name, status, reason))| NzbgetRsRpcFleetMember {
             nzb_id: e.nzb_id,
-            name: name_cs[idx].as_ptr() as *const c_char,
+            name,
             rank: e.rank,
             alive: e.alive,
-            status: status_cs[idx].as_ptr() as *const c_char,
+            status,
             same_as: e.same_as,
             same_as_rank: e.same_as_rank,
-            reason: entry_reason_cs[idx].as_ptr() as *const c_char,
-        });
-    }
-    let reason_c = CStr::from_bytes_until_nul(&reason_c).unwrap_or_default();
-    out.fleet_result(chosen, complete, reason_c, &ffi_entries);
+            reason,
+        })
+        .collect();
+    out.fleet_result(chosen, complete, &reason_c, &ffi_entries);
     1
 }
 

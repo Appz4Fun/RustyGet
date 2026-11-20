@@ -4101,7 +4101,7 @@ impl NzbgetRsOptions {
         (self.mode_flags.load(std::sync::atomic::Ordering::Relaxed) & 8) != 0
     }
 
-    pub(crate) fn for_each_option(&self, mut cb: impl FnMut(&CStr, &CStr, c_int)) {
+    pub(crate) fn for_each_option<'s>(&'s self, mut cb: impl FnMut(&'s CStr, &'s CStr, c_int)) {
         let signed_char = (c_char::MIN as i32) != 0;
         for e in &self.opt_entries {
             let val = e.value.as_deref().unwrap_or(c"");

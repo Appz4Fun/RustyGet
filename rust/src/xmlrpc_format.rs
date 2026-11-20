@@ -3,14 +3,11 @@
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::io::Write;
 
-use crate::ffi::input;
-
-#[repr(C)]
-pub struct NzbgetRsRpcStatusInput {
+pub struct NzbgetRsRpcStatusInput<'a> {
     pub remaining_size: i64,
     pub forced_size: i64,
     pub article_cache: i64,
-    pub memory_pressure: *const c_char,
+    pub memory_pressure: &'a CStr,
     pub effective_article_cache_mb: c_int,
     pub effective_par_buffer_mb: c_int,
     pub download_rate: i64,
@@ -45,16 +42,14 @@ pub struct NzbgetRsRpcServerStatus {
     pub active: c_int,
 }
 
-#[repr(C)]
-pub struct NzbgetRsRpcLogEntry {
+pub struct NzbgetRsRpcLogEntry<'a> {
     pub id: c_int,
     pub kind: c_int,
     pub time: c_int,
-    pub text: *const c_char,
+    pub text: &'a CStr,
 }
 
-#[repr(C)]
-pub struct NzbgetRsRpcFileItem {
+pub struct NzbgetRsRpcFileItem<'a> {
     pub id: c_int,
     pub file_size: i64,
     pub remaining_size: i64,
@@ -62,27 +57,26 @@ pub struct NzbgetRsRpcFileItem {
     pub filename_confirmed: c_int,
     pub paused: c_int,
     pub nzb_id: c_int,
-    pub nzb_name: *const c_char,
-    pub nzb_filename: *const c_char,
-    pub subject: *const c_char,
-    pub filename: *const c_char,
-    pub dest_dir: *const c_char,
-    pub category: *const c_char,
+    pub nzb_name: &'a CStr,
+    pub nzb_filename: &'a CStr,
+    pub subject: &'a CStr,
+    pub filename: &'a CStr,
+    pub dest_dir: &'a CStr,
+    pub category: &'a CStr,
     pub priority: c_int,
     pub active_downloads: c_int,
     pub progress: c_int,
 }
 
-#[repr(C)]
-pub struct NzbgetRsRpcNzbInfoInput {
+pub struct NzbgetRsRpcNzbInfoInput<'a> {
     pub id: c_int,
     pub kind: c_int,
-    pub name: *const c_char,
-    pub url: *const c_char,
-    pub filename: *const c_char,
-    pub dest_dir: *const c_char,
-    pub final_dir: *const c_char,
-    pub category: *const c_char,
+    pub name: &'a CStr,
+    pub url: &'a CStr,
+    pub filename: &'a CStr,
+    pub dest_dir: &'a CStr,
+    pub final_dir: &'a CStr,
+    pub category: &'a CStr,
     pub par_status: c_int,
     pub unpack_status: c_int,
     pub move_status: c_int,
@@ -103,7 +97,7 @@ pub struct NzbgetRsRpcNzbInfoInput {
     pub live_repairing: c_int,
     pub health: c_int,
     pub critical_health: c_int,
-    pub dupe_key: *const c_char,
+    pub dupe_key: &'a CStr,
     pub dupe_score: c_int,
     pub dupe_mode: c_int,
     pub downloaded_size: i64,
@@ -120,15 +114,13 @@ pub struct NzbgetRsRpcNzbInfoInput {
     pub extra_par_blocks: c_int,
 }
 
-#[repr(C)]
-pub struct NzbgetRsRpcParamItem {
-    pub name: *const c_char,
-    pub value: *const c_char,
+pub struct NzbgetRsRpcParamItem<'a> {
+    pub name: &'a CStr,
+    pub value: &'a CStr,
 }
 
-#[repr(C)]
-pub struct NzbgetRsRpcScriptItem {
-    pub name: *const c_char,
+pub struct NzbgetRsRpcScriptItem<'a> {
+    pub name: &'a CStr,
     pub status: c_int,
 }
 
@@ -139,28 +131,26 @@ pub struct NzbgetRsRpcServerStatItem {
     pub failed_articles: c_int,
 }
 
-#[repr(C)]
-pub struct NzbgetRsRpcConfigItem {
-    pub name: *const c_char,
-    pub value: *const c_char,
+pub struct NzbgetRsRpcConfigItem<'a> {
+    pub name: &'a CStr,
+    pub value: &'a CStr,
     pub restricted: c_int,
 }
 
-#[repr(C)]
-pub struct NzbgetRsRpcFeedItem {
-    pub title: *const c_char,
-    pub filename: *const c_char,
-    pub url: *const c_char,
+pub struct NzbgetRsRpcFeedItem<'a> {
+    pub title: &'a CStr,
+    pub filename: &'a CStr,
+    pub url: &'a CStr,
     pub size: i64,
     pub size_mb: c_int,
-    pub category: *const c_char,
-    pub add_category: *const c_char,
+    pub category: &'a CStr,
+    pub add_category: &'a CStr,
     pub pause_nzb: c_int,
     pub priority: c_int,
     pub time: c_int,
     pub match_status: c_int,
     pub match_rule: c_int,
-    pub dupe_key: *const c_char,
+    pub dupe_key: &'a CStr,
     pub dupe_score: c_int,
     pub dupe_mode: c_int,
     pub status: c_int,
@@ -173,8 +163,7 @@ pub struct NzbgetRsRpcArticlePair {
     pub success: u32,
 }
 
-#[repr(C)]
-pub struct NzbgetRsRpcServerVolumeItem {
+pub struct NzbgetRsRpcServerVolumeItem<'a> {
     pub server_id: c_int,
     pub data_time: c_int,
     pub first_day: c_int,
@@ -187,32 +176,26 @@ pub struct NzbgetRsRpcServerVolumeItem {
     pub hour_slot: c_int,
     pub day_slot: c_int,
     pub include_seconds: c_int,
-    pub bytes_per_seconds: *const i64,
-    pub bytes_per_seconds_len: usize,
+    pub bytes_per_seconds: &'a [i64],
     pub include_minutes: c_int,
-    pub bytes_per_minutes: *const i64,
-    pub bytes_per_minutes_len: usize,
+    pub bytes_per_minutes: &'a [i64],
     pub include_hours: c_int,
-    pub bytes_per_hours: *const i64,
-    pub bytes_per_hours_len: usize,
+    pub bytes_per_hours: &'a [i64],
     pub include_days: c_int,
-    pub bytes_per_days: *const i64,
-    pub bytes_per_days_len: usize,
+    pub bytes_per_days: &'a [i64],
     pub include_articles: c_int,
-    pub articles_per_days: *const NzbgetRsRpcArticlePair,
-    pub articles_per_days_len: usize,
+    pub articles_per_days: &'a [NzbgetRsRpcArticlePair],
 }
 
-#[repr(C)]
-pub struct NzbgetRsRpcFleetMember {
+pub struct NzbgetRsRpcFleetMember<'a> {
     pub nzb_id: c_int,
-    pub name: *const c_char,
+    pub name: &'a CStr,
     pub rank: c_int,
     pub alive: c_int,
-    pub status: *const c_char,
+    pub status: &'a CStr,
     pub same_as: c_int,
     pub same_as_rank: c_int,
-    pub reason: *const c_char,
+    pub reason: &'a CStr,
 }
 
 #[repr(C)]
@@ -289,9 +272,9 @@ pub struct RpcGroupItem {
 /// The NZB fields shared by group, post-queue and history entries.
 #[derive(Clone, Copy)]
 pub struct RpcNzbInfo<'a> {
-    pub info: &'a NzbgetRsRpcNzbInfoInput,
-    pub params: &'a [NzbgetRsRpcParamItem],
-    pub scripts: &'a [NzbgetRsRpcScriptItem],
+    pub info: &'a NzbgetRsRpcNzbInfoInput<'a>,
+    pub params: &'a [NzbgetRsRpcParamItem<'a>],
+    pub scripts: &'a [NzbgetRsRpcScriptItem<'a>],
     pub stats: &'a [NzbgetRsRpcServerStatItem],
 }
 
@@ -306,7 +289,7 @@ pub struct RpcPostInfo<'a> {
     pub cur_time: i64,
     pub stage_time: i64,
     pub start_time: i64,
-    pub logs: &'a [NzbgetRsRpcLogEntry],
+    pub logs: &'a [NzbgetRsRpcLogEntry<'a>],
 }
 
 /// The start of a `postqueue` entry.
@@ -354,14 +337,14 @@ pub struct RpcUrlQueueItem<'a> {
 }
 
 /// Where collectors write RPC results, one method per kind of result.
-/// Pointers inside the items must be valid (NUL-terminated strings) for the
-/// call. Every method does nothing by default, so a test can implement only
-/// what it checks.
+/// Every method does nothing by default, so a test can implement only what it
+/// checks.
 #[allow(unused_variables)]
 pub trait RpcEmit {
-    fn status(&mut self, status: &NzbgetRsRpcStatusInput, servers: &[NzbgetRsRpcServerStatus]) {}
-    fn log(&mut self, entries: &[NzbgetRsRpcLogEntry]) {}
-    fn file(&mut self, item: &NzbgetRsRpcFileItem) {}
+    fn status(&mut self, status: &NzbgetRsRpcStatusInput<'_>, servers: &[NzbgetRsRpcServerStatus]) {
+    }
+    fn log(&mut self, entries: &[NzbgetRsRpcLogEntry<'_>]) {}
+    fn file(&mut self, item: &NzbgetRsRpcFileItem<'_>) {}
     /// Opens a `listgroups` entry; [`RpcEmit::post_info_end`] closes it.
     fn group(&mut self, group: &RpcGroupItem, info: &RpcNzbInfo<'_>) {}
     fn post_info_end(&mut self, post: &RpcPostInfo<'_>) {}
@@ -375,14 +358,13 @@ pub trait RpcEmit {
         chosen: c_int,
         complete: bool,
         reason: &CStr,
-        members: &[NzbgetRsRpcFleetMember],
+        members: &[NzbgetRsRpcFleetMember<'_>],
     ) {
     }
-    fn config_list(&mut self, entries: &[NzbgetRsRpcConfigItem]) {}
-    /// Template texts, each NUL-terminated.
-    fn config_templates(&mut self, templates: &[*const c_char]) {}
-    fn feed_item(&mut self, item: &NzbgetRsRpcFeedItem) {}
-    fn server_volume(&mut self, item: &NzbgetRsRpcServerVolumeItem) {}
+    fn config_list(&mut self, entries: &[NzbgetRsRpcConfigItem<'_>]) {}
+    fn config_templates(&mut self, templates: &[&CStr]) {}
+    fn feed_item(&mut self, item: &NzbgetRsRpcFeedItem<'_>) {}
+    fn server_volume(&mut self, item: &NzbgetRsRpcServerVolumeItem<'_>) {}
 }
 
 #[inline]
@@ -555,18 +537,12 @@ pub fn is_safe_command(cmd_id: c_int) -> bool {
     )
 }
 
-unsafe fn write_status(
+fn write_status(
     out: &mut Vec<u8>,
     json: bool,
-    inp: *const NzbgetRsRpcStatusInput,
-    servers: *const NzbgetRsRpcServerStatus,
-    servers_len: usize,
+    s: &NzbgetRsRpcStatusInput<'_>,
+    servers: &[NzbgetRsRpcServerStatus],
 ) {
-    if inp.is_null() {
-        return;
-    }
-    let s = unsafe { &*inp };
-
     let (rem_hi, rem_lo) = split_i64(s.remaining_size);
     let (forced_hi, forced_lo) = split_i64(s.forced_size);
     let (cache_hi, cache_lo) = split_i64(s.article_cache);
@@ -581,6 +557,7 @@ unsafe fn write_status(
 
     let (mut rem_mb, mut forced_mb, mut cache_mb, mut dl_mb, mut month_mb, mut day_mb) =
         (0, 0, 0, 0, 0, 0);
+    // SAFETY: every out-pointer is a live local.
     unsafe {
         roc_xmlrpc_status_calc_mbytes(
             s.remaining_size,
@@ -601,6 +578,7 @@ unsafe fn write_status(
     let mut free_inter = s.free_inter_disk_space;
     let mut total_inter = s.total_inter_disk_space;
     let (mut free_disk_mb, mut total_disk_mb, mut free_inter_mb, mut total_inter_mb) = (0, 0, 0, 0);
+    // SAFETY: every out-pointer is a live local.
     unsafe {
         roc_xmlrpc_status_calc_disk_space_mb(
             s.free_disk_space,
@@ -622,7 +600,7 @@ unsafe fn write_status(
     let (free_inter_hi, free_inter_lo) = split_i64(free_inter);
     let (total_inter_hi, total_inter_lo) = split_i64(total_inter);
 
-    let mem_pressure = encode_str(json, unsafe { input(s.memory_pressure) });
+    let mem_pressure = encode_str(json, s.memory_pressure.to_bytes());
     let dl_paused_str = bool_str(json, s.download_paused != 0);
     let stand_by_str = bool_str(json, s.server_stand_by != 0);
     let post_paused_str = bool_str(json, s.post_paused != 0);
@@ -877,12 +855,7 @@ unsafe fn write_status(
         );
     }
 
-    let srv_slice = if servers.is_null() || servers_len == 0 {
-        &[]
-    } else {
-        unsafe { std::slice::from_raw_parts(servers, servers_len) }
-    };
-    for (idx, srv) in srv_slice.iter().enumerate() {
+    for (idx, srv) in servers.iter().enumerate() {
         let active_str = bool_str(json, srv.active != 0);
         if json {
             if idx > 0 {
@@ -909,10 +882,10 @@ unsafe fn write_status(
     }
 }
 
-unsafe fn write_log_entries(is_json: bool, entries: &[NzbgetRsRpcLogEntry], out: &mut Vec<u8>) {
+fn write_log_entries(is_json: bool, entries: &[NzbgetRsRpcLogEntry<'_>], out: &mut Vec<u8>) {
     for (idx, entry) in entries.iter().enumerate() {
         let kind_str = table_get(&MESSAGE_TYPES, entry.kind, "INFO");
-        let text_enc = encode_str(is_json, unsafe { input(entry.text) });
+        let text_enc = encode_str(is_json, entry.text.to_bytes());
         if is_json {
             if idx > 0 {
                 out.extend_from_slice(b",\n");
@@ -932,26 +905,14 @@ unsafe fn write_log_entries(is_json: bool, entries: &[NzbgetRsRpcLogEntry], out:
     }
 }
 
-unsafe fn write_log_list(
-    out: &mut Vec<u8>,
-    json: bool,
-    entries: *const NzbgetRsRpcLogEntry,
-    len: usize,
-) {
-    let slice = if entries.is_null() || len == 0 {
-        &[]
-    } else {
-        unsafe { std::slice::from_raw_parts(entries, len) }
-    };
-    out.reserve(slice.len() * 128 + 32);
+fn write_log_list(out: &mut Vec<u8>, json: bool, entries: &[NzbgetRsRpcLogEntry<'_>]) {
+    out.reserve(entries.len() * 128 + 32);
     if json {
         out.extend_from_slice(b"[\n");
     } else {
         out.extend_from_slice(b"<array><data>\n");
     }
-    unsafe {
-        write_log_entries(json, slice, out);
-    }
+    write_log_entries(json, entries, out);
     if json {
         out.extend_from_slice(b"\n]");
     } else {
@@ -959,24 +920,15 @@ unsafe fn write_log_list(
     }
 }
 
-unsafe fn write_file_item(
-    out: &mut Vec<u8>,
-    json: bool,
-    index: usize,
-    item: *const NzbgetRsRpcFileItem,
-) {
-    if item.is_null() {
-        return;
-    }
-    let f = unsafe { &*item };
+fn write_file_item(out: &mut Vec<u8>, json: bool, index: usize, f: &NzbgetRsRpcFileItem<'_>) {
     let (file_hi, file_lo) = split_i64(f.file_size);
     let (rem_hi, rem_lo) = split_i64(f.remaining_size);
-    let nzb_name = encode_str(json, unsafe { input(f.nzb_name) });
-    let nzb_filename = encode_str(json, unsafe { input(f.nzb_filename) });
-    let subject = encode_str(json, unsafe { input(f.subject) });
-    let filename = encode_str(json, unsafe { input(f.filename) });
-    let dest_dir = encode_str(json, unsafe { input(f.dest_dir) });
-    let category = encode_str(json, unsafe { input(f.category) });
+    let nzb_name = encode_str(json, f.nzb_name.to_bytes());
+    let nzb_filename = encode_str(json, f.nzb_filename.to_bytes());
+    let subject = encode_str(json, f.subject.to_bytes());
+    let filename = encode_str(json, f.filename.to_bytes());
+    let dest_dir = encode_str(json, f.dest_dir.to_bytes());
+    let category = encode_str(json, f.category.to_bytes());
     let confirmed_str = bool_str(json, f.filename_confirmed != 0);
     let paused_str = bool_str(json, f.paused != 0);
 
@@ -1075,22 +1027,8 @@ unsafe fn write_file_item(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-unsafe fn write_nzb_info_fields(
-    out: &mut Vec<u8>,
-    json: bool,
-    info: *const NzbgetRsRpcNzbInfoInput,
-    params: *const NzbgetRsRpcParamItem,
-    params_len: usize,
-    scripts: *const NzbgetRsRpcScriptItem,
-    scripts_len: usize,
-    stats: *const NzbgetRsRpcServerStatItem,
-    stats_len: usize,
-) {
-    if info.is_null() {
-        return;
-    }
-    let n = unsafe { &*info };
+fn write_nzb_info_fields(out: &mut Vec<u8>, json: bool, nzb: &RpcNzbInfo<'_>) {
+    let n = nzb.info;
 
     let (file_hi, file_lo) = split_i64(n.size);
     let file_mb = (n.size / 1024 / 1024) as c_int;
@@ -1107,13 +1045,13 @@ unsafe fn write_nzb_info_fields(
         n.post_start_time,
     );
 
-    let name_enc = encode_str(json, unsafe { input(n.name) });
-    let url_enc = encode_str(json, unsafe { input(n.url) });
-    let filename_enc = encode_str(json, unsafe { input(n.filename) });
-    let dest_dir_enc = encode_str(json, unsafe { input(n.dest_dir) });
-    let final_dir_enc = encode_str(json, unsafe { input(n.final_dir) });
-    let category_enc = encode_str(json, unsafe { input(n.category) });
-    let dupe_key_enc = encode_str(json, unsafe { input(n.dupe_key) });
+    let name_enc = encode_str(json, n.name.to_bytes());
+    let url_enc = encode_str(json, n.url.to_bytes());
+    let filename_enc = encode_str(json, n.filename.to_bytes());
+    let dest_dir_enc = encode_str(json, n.dest_dir.to_bytes());
+    let final_dir_enc = encode_str(json, n.final_dir.to_bytes());
+    let category_enc = encode_str(json, n.category.to_bytes());
+    let dupe_key_enc = encode_str(json, n.dupe_key.to_bytes());
 
     let kind_str = table_get(&KIND_NAMES, n.kind, "NZB");
     let par_status_str = table_get(&PAR_STATUS_NAMES, n.par_status, "NONE");
@@ -1336,14 +1274,9 @@ unsafe fn write_nzb_info_fields(
         );
     }
 
-    let param_slice = if params.is_null() || params_len == 0 {
-        &[]
-    } else {
-        unsafe { std::slice::from_raw_parts(params, params_len) }
-    };
-    for (idx, p) in param_slice.iter().enumerate() {
-        let p_name = encode_str(json, unsafe { input(p.name) });
-        let p_val = encode_str(json, unsafe { input(p.value) });
+    for (idx, p) in nzb.params.iter().enumerate() {
+        let p_name = encode_str(json, p.name.to_bytes());
+        let p_val = encode_str(json, p.value.to_bytes());
         if json {
             if idx > 0 {
                 out.extend_from_slice(b",\n");
@@ -1368,13 +1301,8 @@ unsafe fn write_nzb_info_fields(
         out.extend_from_slice(b"</data></array></value></member>\n<member><name>ScriptStatuses</name><value><array><data>\n");
     }
 
-    let script_slice = if scripts.is_null() || scripts_len == 0 {
-        &[]
-    } else {
-        unsafe { std::slice::from_raw_parts(scripts, scripts_len) }
-    };
-    for (idx, sc) in script_slice.iter().enumerate() {
-        let sc_name = encode_str(json, unsafe { input(sc.name) });
+    for (idx, sc) in nzb.scripts.iter().enumerate() {
+        let sc_name = encode_str(json, sc.name.to_bytes());
         let sc_status = encode_str(
             json,
             table_get(&SCRIPT_STATUS_NAMES, sc.status, "NONE").as_bytes(),
@@ -1403,12 +1331,7 @@ unsafe fn write_nzb_info_fields(
         out.extend_from_slice(b"</data></array></value></member>\n<member><name>ServerStats</name><value><array><data>\n");
     }
 
-    let stat_slice = if stats.is_null() || stats_len == 0 {
-        &[]
-    } else {
-        unsafe { std::slice::from_raw_parts(stats, stats_len) }
-    };
-    for (idx, st) in stat_slice.iter().enumerate() {
+    for (idx, st) in nzb.stats.iter().enumerate() {
         if json {
             if idx > 0 {
                 out.extend_from_slice(b",\n");
@@ -1434,35 +1357,24 @@ unsafe fn write_nzb_info_fields(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-unsafe fn write_post_info_fields(
-    out: &mut Vec<u8>,
-    json: bool,
-    is_post_queue: bool,
-    has_post_info: bool,
-    progress_label: &CStr,
-    stage_progress: c_int,
-    cur_time: i64,
-    stage_time: i64,
-    start_time: i64,
-    logs: *const NzbgetRsRpcLogEntry,
-    logs_len: usize,
-) {
-    let (label, progress, stage_sec, total_sec) = if has_post_info {
+fn write_post_info_fields(out: &mut Vec<u8>, json: bool, p: &RpcPostInfo<'_>) {
+    let is_post_queue = p.is_post_queue;
+    let (label, progress, stage_sec, total_sec) = if p.has_post_info {
         let mut st_sec = 0;
         let mut tot_sec = 0;
+        // SAFETY: both out-pointers are live locals.
         unsafe {
             roc_xmlrpc_post_info_elapsed_sec(
-                cur_time,
-                stage_time,
-                start_time,
+                p.cur_time,
+                p.stage_time,
+                p.start_time,
                 &mut st_sec,
                 &mut tot_sec,
             );
         }
         (
-            encode_str(json, progress_label.to_bytes()),
-            stage_progress,
+            encode_str(json, p.progress_label.to_bytes()),
+            p.stage_progress,
             st_sec,
             tot_sec,
         )
@@ -1509,14 +1421,7 @@ unsafe fn write_post_info_fields(
         }
     }
 
-    let log_slice = if logs.is_null() || logs_len == 0 {
-        &[]
-    } else {
-        unsafe { std::slice::from_raw_parts(logs, logs_len) }
-    };
-    unsafe {
-        write_log_entries(json, log_slice, out);
-    }
+    write_log_entries(json, p.logs, out);
 
     if json {
         out.extend_from_slice(b"]\n");
@@ -1526,7 +1431,7 @@ unsafe fn write_post_info_fields(
 }
 
 #[allow(clippy::too_many_arguments)]
-unsafe fn write_group_item_start(
+fn write_group_item_start(
     out: &mut Vec<u8>,
     json: bool,
     index: usize,
@@ -1548,6 +1453,7 @@ unsafe fn write_group_item_start(
     let (pau_hi, pau_lo) = split_i64(paused_size);
     let mut rem_mb = 0;
     let mut pau_mb = 0;
+    // SAFETY: both out-pointers are live locals.
     unsafe {
         roc_xmlrpc_list_groups_calc_mb(remaining_size, paused_size, &mut rem_mb, &mut pau_mb);
     }
@@ -1869,33 +1775,27 @@ fn write_urlqueue_item(
     }
 }
 
-unsafe fn write_config_list(
+fn write_config_list(
     out: &mut Vec<u8>,
     json: bool,
     user_access: c_int,
     ua_restricted: c_int,
-    entries: *const NzbgetRsRpcConfigItem,
-    len: usize,
+    entries: &[NzbgetRsRpcConfigItem<'_>],
 ) {
-    let slice = if entries.is_null() || len == 0 {
-        &[]
-    } else {
-        unsafe { std::slice::from_raw_parts(entries, len) }
-    };
-    out.reserve(slice.len() * 96 + 32);
+    out.reserve(entries.len() * 96 + 32);
     if json {
         out.extend_from_slice(b"[\n");
     } else {
         out.extend_from_slice(b"<array><data>\n");
     }
-    for (idx, entry) in slice.iter().enumerate() {
+    for (idx, entry) in entries.iter().enumerate() {
         let mask =
             roc_xmlrpc_config_should_mask_value(user_access, ua_restricted, entry.restricted) != 0;
-        let name_enc = encode_str(json, unsafe { input(entry.name) });
+        let name_enc = encode_str(json, entry.name.to_bytes());
         let val_enc = if mask {
             "***".to_string()
         } else {
-            encode_str(json, unsafe { input(entry.value) })
+            encode_str(json, entry.value.to_bytes())
         };
         if json {
             if idx > 0 {
@@ -1921,25 +1821,15 @@ unsafe fn write_config_list(
     }
 }
 
-unsafe fn write_config_templates(
-    out: &mut Vec<u8>,
-    json: bool,
-    templates: *const *const c_char,
-    len: usize,
-) {
-    let slice = if templates.is_null() || len == 0 {
-        &[]
-    } else {
-        unsafe { std::slice::from_raw_parts(templates, len) }
-    };
-    out.reserve(slice.len() * 256 + 32);
+fn write_config_templates(out: &mut Vec<u8>, json: bool, templates: &[&CStr]) {
+    out.reserve(templates.len() * 256 + 32);
     if json {
         out.extend_from_slice(b"[\n");
     } else {
         out.extend_from_slice(b"<array><data>\n");
     }
-    for (idx, &tpl_ptr) in slice.iter().enumerate() {
-        let tpl_enc = encode_str(json, unsafe { input(tpl_ptr) });
+    for (idx, tpl) in templates.iter().enumerate() {
+        let tpl_enc = encode_str(json, tpl.to_bytes());
         if json {
             if idx > 0 {
                 out.extend_from_slice(b",\n");
@@ -1960,25 +1850,16 @@ unsafe fn write_config_templates(
     }
 }
 
-unsafe fn write_feed_item(
-    out: &mut Vec<u8>,
-    json: bool,
-    index: usize,
-    item: *const NzbgetRsRpcFeedItem,
-) {
-    if item.is_null() {
-        return;
-    }
-    let f = unsafe { &*item };
+fn write_feed_item(out: &mut Vec<u8>, json: bool, index: usize, f: &NzbgetRsRpcFeedItem<'_>) {
     let (size_hi, size_lo) = split_i64(f.size);
-    let title_enc = encode_str(json, unsafe { input(f.title) });
-    let filename_enc = encode_str(json, unsafe { input(f.filename) });
-    let url_enc = encode_str(json, unsafe { input(f.url) });
-    let category_enc = encode_str(json, unsafe { input(f.category) });
-    let add_category_enc = encode_str(json, unsafe { input(f.add_category) });
+    let title_enc = encode_str(json, f.title.to_bytes());
+    let filename_enc = encode_str(json, f.filename.to_bytes());
+    let url_enc = encode_str(json, f.url.to_bytes());
+    let category_enc = encode_str(json, f.category.to_bytes());
+    let add_category_enc = encode_str(json, f.add_category.to_bytes());
     let pause_str = bool_str(json, f.pause_nzb != 0);
     let match_str = table_get(&FEED_MATCH_NAMES, f.match_status, "IGNORED");
-    let dupe_key_enc = encode_str(json, unsafe { input(f.dupe_key) });
+    let dupe_key_enc = encode_str(json, f.dupe_key.to_bytes());
     let dupe_mode_str = table_get(&DUPE_MODE_NAMES, f.dupe_mode, "SCORE");
     let status_str = table_get(&FEED_STATUS_NAMES, f.status, "UNKNOWN");
 
@@ -2069,20 +1950,17 @@ unsafe fn write_feed_item(
     }
 }
 
-unsafe fn write_server_volume_item(
+fn write_server_volume_item(
     out: &mut Vec<u8>,
     json: bool,
     index: usize,
-    item: *const NzbgetRsRpcServerVolumeItem,
+    v: &NzbgetRsRpcServerVolumeItem<'_>,
 ) {
-    if item.is_null() {
-        return;
-    }
-    let v = unsafe { &*item };
     let (total_hi, total_lo) = split_i64(v.total_bytes);
     let (custom_hi, custom_lo) = split_i64(v.custom_bytes);
     let mut total_mb: u32 = 0;
     let mut custom_mb: u32 = 0;
+    // SAFETY: both out-pointers are live locals.
     unsafe {
         roc_xmlrpc_server_volumes_calc_mb(
             v.total_bytes,
@@ -2173,29 +2051,17 @@ unsafe fn write_server_volume_item(
             v.include_seconds != 0,
             "BytesPerSeconds",
             v.bytes_per_seconds,
-            v.bytes_per_seconds_len,
         ),
         (
             v.include_minutes != 0,
             "BytesPerMinutes",
             v.bytes_per_minutes,
-            v.bytes_per_minutes_len,
         ),
-        (
-            v.include_hours != 0,
-            "BytesPerHours",
-            v.bytes_per_hours,
-            v.bytes_per_hours_len,
-        ),
-        (
-            v.include_days != 0,
-            "BytesPerDays",
-            v.bytes_per_days,
-            v.bytes_per_days_len,
-        ),
+        (v.include_hours != 0, "BytesPerHours", v.bytes_per_hours),
+        (v.include_days != 0, "BytesPerDays", v.bytes_per_days),
     ];
 
-    for (include, name, ptr, len) in byte_arrays {
+    for (include, name, slice) in byte_arrays {
         if !include {
             continue;
         }
@@ -2204,11 +2070,6 @@ unsafe fn write_server_volume_item(
         } else {
             let _ = write!(out, "<member><name>{}</name><value><array><data>\n", name);
         }
-        let slice = if ptr.is_null() || len == 0 {
-            &[]
-        } else {
-            unsafe { std::slice::from_raw_parts(ptr, len) }
-        };
         for (idx2, &bytes) in slice.iter().enumerate() {
             let (b_hi, b_lo) = split_i64(bytes);
             let b_mb = (bytes / 1024 / 1024) as i32;
@@ -2242,11 +2103,7 @@ unsafe fn write_server_volume_item(
         } else {
             out.extend_from_slice(b"<member><name>ArticlesPerDays</name><value><array><data>\n");
         }
-        let art_slice = if v.articles_per_days.is_null() || v.articles_per_days_len == 0 {
-            &[]
-        } else {
-            unsafe { std::slice::from_raw_parts(v.articles_per_days, v.articles_per_days_len) }
-        };
+        let art_slice = v.articles_per_days;
         for (idx2, art) in art_slice.iter().enumerate() {
             if json {
                 let _ = write!(
@@ -2279,15 +2136,14 @@ unsafe fn write_server_volume_item(
     }
 }
 
-unsafe fn write_fleet_result(
+fn write_fleet_result(
     out: &mut Vec<u8>,
     chosen: c_int,
     complete: bool,
-    reason: *const c_char,
-    members: *const NzbgetRsRpcFleetMember,
-    members_len: usize,
+    reason: &CStr,
+    members: &[NzbgetRsRpcFleetMember<'_>],
 ) {
-    let reason_enc = encode_str(true, unsafe { input(reason) });
+    let reason_enc = encode_str(true, reason.to_bytes());
     let complete_str = if complete { "true" } else { "false" };
     let mut head = Vec::with_capacity(256);
     let _ = write!(
@@ -2300,15 +2156,10 @@ unsafe fn write_fleet_result(
     }
 
     out.extend_from_slice(&head);
-    let slice = if members.is_null() || members_len == 0 {
-        &[]
-    } else {
-        unsafe { std::slice::from_raw_parts(members, members_len) }
-    };
-    for (idx, m) in slice.iter().enumerate() {
-        let name_enc = encode_str(true, unsafe { input(m.name) });
-        let status_enc = encode_str(true, unsafe { input(m.status) });
-        let m_reason_enc = encode_str(true, unsafe { input(m.reason) });
+    for (idx, m) in members.iter().enumerate() {
+        let name_enc = encode_str(true, m.name.to_bytes());
+        let status_enc = encode_str(true, m.status.to_bytes());
+        let m_reason_enc = encode_str(true, m.reason.to_bytes());
         let sep = if idx > 0 { ", " } else { "" };
         let _ = write!(
             out,
@@ -2667,94 +2518,94 @@ mod tests {
 
     #[test]
     fn test_log_and_config_list_formatting() {
-        unsafe {
-            let text = CString::new("Hello & world").unwrap();
-            let entry = NzbgetRsRpcLogEntry {
-                id: 7,
-                kind: 1,
-                time: 1700000000,
-                text: text.as_ptr(),
-            };
-            let mut json_buf = Vec::new();
-            write_log_list(&mut json_buf, true, &entry, 1);
-            let json = String::from_utf8(json_buf).unwrap();
-            assert!(json.contains("\"Kind\" : \"WARNING\""));
-            assert!(json.contains("\"Text\" : \"Hello & world\""));
+        let text = CString::new("Hello & world").unwrap();
+        let entry = NzbgetRsRpcLogEntry {
+            id: 7,
+            kind: 1,
+            time: 1700000000,
+            text: &text,
+        };
+        let mut json_buf = Vec::new();
+        write_log_list(&mut json_buf, true, std::slice::from_ref(&entry));
+        let json = String::from_utf8(json_buf).unwrap();
+        assert!(json.contains("\"Kind\" : \"WARNING\""));
+        assert!(json.contains("\"Text\" : \"Hello & world\""));
 
-            let mut xml_buf = Vec::new();
-            write_log_list(&mut xml_buf, false, &entry, 1);
-            let xml = String::from_utf8(xml_buf).unwrap();
-            assert!(xml.contains("<string>Hello &amp; world</string>"));
+        let mut xml_buf = Vec::new();
+        write_log_list(&mut xml_buf, false, std::slice::from_ref(&entry));
+        let xml = String::from_utf8(xml_buf).unwrap();
+        assert!(xml.contains("<string>Hello &amp; world</string>"));
 
-            let k = CString::new("Server1.Password").unwrap();
-            let v = CString::new("secret").unwrap();
-            let cfg = NzbgetRsRpcConfigItem {
-                name: k.as_ptr(),
-                value: v.as_ptr(),
-                restricted: 1,
-            };
-            let mut masked_buf = Vec::new();
-            write_config_list(&mut masked_buf, true, 1, 1, &cfg, 1);
-            let masked = String::from_utf8(masked_buf).unwrap();
-            assert!(masked.contains("\"Value\" : \"***\""));
-            let mut unmasked_buf = Vec::new();
-            write_config_list(&mut unmasked_buf, true, 0, 1, &cfg, 1);
-            let unmasked = String::from_utf8(unmasked_buf).unwrap();
-            assert!(unmasked.contains("\"Value\" : \"secret\""));
+        let k = CString::new("Server1.Password").unwrap();
+        let v = CString::new("secret").unwrap();
+        let cfg = NzbgetRsRpcConfigItem {
+            name: &k,
+            value: &v,
+            restricted: 1,
+        };
+        let mut masked_buf = Vec::new();
+        write_config_list(&mut masked_buf, true, 1, 1, std::slice::from_ref(&cfg));
+        let masked = String::from_utf8(masked_buf).unwrap();
+        assert!(masked.contains("\"Value\" : \"***\""));
+        let mut unmasked_buf = Vec::new();
+        write_config_list(&mut unmasked_buf, true, 0, 1, std::slice::from_ref(&cfg));
+        let unmasked = String::from_utf8(unmasked_buf).unwrap();
+        assert!(unmasked.contains("\"Value\" : \"secret\""));
 
-            let name = c"Release";
-            let key = c"series=1";
-            let mut dup_json_buf = Vec::new();
-            write_history_dup_item(
-                &mut dup_json_buf,
-                true,
-                0,
-                12,
-                name,
-                1700000000,
-                1048576,
-                key,
-                100,
-                0,
-                4,
-            );
-            let dup_json = String::from_utf8(dup_json_buf).unwrap();
-            assert!(dup_json.ends_with("\"Status\" : \"DELETED/DUPE\"\n"));
-            let mut dup_xml_buf = Vec::new();
-            write_history_dup_item(
-                &mut dup_xml_buf,
-                false,
-                0,
-                12,
-                name,
-                1700000000,
-                1048576,
-                key,
-                100,
-                0,
-                4,
-            );
-            let dup_xml = String::from_utf8(dup_xml_buf).unwrap();
-            assert!(dup_xml.ends_with("<member><name>Status</name><value><string>DELETED/DUPE</string></value></member>\n"));
+        let name = c"Release";
+        let key = c"series=1";
+        let mut dup_json_buf = Vec::new();
+        write_history_dup_item(
+            &mut dup_json_buf,
+            true,
+            0,
+            12,
+            name,
+            1700000000,
+            1048576,
+            key,
+            100,
+            0,
+            4,
+        );
+        let dup_json = String::from_utf8(dup_json_buf).unwrap();
+        assert!(dup_json.ends_with("\"Status\" : \"DELETED/DUPE\"\n"));
+        let mut dup_xml_buf = Vec::new();
+        write_history_dup_item(
+            &mut dup_xml_buf,
+            false,
+            0,
+            12,
+            name,
+            1700000000,
+            1048576,
+            key,
+            100,
+            0,
+            4,
+        );
+        let dup_xml = String::from_utf8(dup_xml_buf).unwrap();
+        assert!(dup_xml.ends_with(
+            "<member><name>Status</name><value><string>DELETED/DUPE</string></value></member>\n"
+        ));
 
-            let d_json = String::from_utf8(format_disk_speed_bytes(
-                true,
-                100 * 1024 * 1024,
-                250.5,
-                200 * 1024 * 1024,
-                125.0,
-            ))
-            .unwrap();
-            assert_eq!(
-                d_json,
-                "{\"SizeMB\":100,\"DurationMS\":250.5,\"ReadSizeMB\":200,\"ReadDurationMS\":125.0}"
-            );
-            let n_xml = String::from_utf8(format_network_speed_bytes(false, 940.25)).unwrap();
-            assert_eq!(
-                n_xml,
-                "<value><struct><member><name>SpeedMbps</name><value><double>940.250000</double></value></member></struct></value>"
-            );
-        }
+        let d_json = String::from_utf8(format_disk_speed_bytes(
+            true,
+            100 * 1024 * 1024,
+            250.5,
+            200 * 1024 * 1024,
+            125.0,
+        ))
+        .unwrap();
+        assert_eq!(
+            d_json,
+            "{\"SizeMB\":100,\"DurationMS\":250.5,\"ReadSizeMB\":200,\"ReadDurationMS\":125.0}"
+        );
+        let n_xml = String::from_utf8(format_network_speed_bytes(false, 940.25)).unwrap();
+        assert_eq!(
+            n_xml,
+            "<value><struct><member><name>SpeedMbps</name><value><double>940.250000</double></value></member></struct></value>"
+        );
     }
 }
 
@@ -4919,20 +4770,7 @@ impl RpcEmitter {
     }
 
     fn nzb_info(&mut self, info: &RpcNzbInfo<'_>) {
-        // SAFETY: RpcEmit's contract: the items' pointers are valid.
-        unsafe {
-            write_nzb_info_fields(
-                &mut self.out,
-                self.is_json,
-                info.info,
-                info.params.as_ptr(),
-                info.params.len(),
-                info.scripts.as_ptr(),
-                info.scripts.len(),
-                info.stats.as_ptr(),
-                info.stats.len(),
-            );
-        }
+        write_nzb_info_fields(&mut self.out, self.is_json, info);
     }
 
     fn close_struct(&mut self, xml_newline: bool) {
@@ -4945,52 +4783,40 @@ impl RpcEmitter {
     }
 }
 
-// SAFETY (all methods): RpcEmit's contract makes the items' pointers valid
-// for the call, which is what the write_* functions need.
 impl RpcEmit for RpcEmitter {
-    fn status(&mut self, status: &NzbgetRsRpcStatusInput, servers: &[NzbgetRsRpcServerStatus]) {
-        unsafe {
-            write_status(
-                &mut self.out,
-                self.is_json,
-                status,
-                servers.as_ptr(),
-                servers.len(),
-            )
-        };
+    fn status(&mut self, status: &NzbgetRsRpcStatusInput<'_>, servers: &[NzbgetRsRpcServerStatus]) {
+        write_status(&mut self.out, self.is_json, status, servers);
     }
 
-    fn log(&mut self, entries: &[NzbgetRsRpcLogEntry]) {
-        unsafe { write_log_list(&mut self.out, self.is_json, entries.as_ptr(), entries.len()) };
+    fn log(&mut self, entries: &[NzbgetRsRpcLogEntry<'_>]) {
+        write_log_list(&mut self.out, self.is_json, entries);
     }
 
-    fn file(&mut self, item: &NzbgetRsRpcFileItem) {
+    fn file(&mut self, item: &NzbgetRsRpcFileItem<'_>) {
         let idx = self.next_index();
-        unsafe { write_file_item(&mut self.out, self.is_json, idx, item) };
+        write_file_item(&mut self.out, self.is_json, idx, item);
     }
 
     fn group(&mut self, g: &RpcGroupItem, info: &RpcNzbInfo<'_>) {
         let idx = self.next_index();
-        unsafe {
-            write_group_item_start(
-                &mut self.out,
-                self.is_json,
-                idx,
-                g.nzb_id,
-                g.remaining_size,
-                g.paused_size,
-                g.remaining_file_count,
-                g.remaining_par_count,
-                g.priority,
-                g.active_downloads,
-                g.has_post_info,
-                g.post_stage,
-                g.has_queue_script_job,
-                g.queue_script_active,
-                g.direct_unpack_status,
-                g.kind,
-            );
-        }
+        write_group_item_start(
+            &mut self.out,
+            self.is_json,
+            idx,
+            g.nzb_id,
+            g.remaining_size,
+            g.paused_size,
+            g.remaining_file_count,
+            g.remaining_par_count,
+            g.priority,
+            g.active_downloads,
+            g.has_post_info,
+            g.post_stage,
+            g.has_queue_script_job,
+            g.queue_script_active,
+            g.direct_unpack_status,
+            g.kind,
+        );
         self.nzb_info(info);
         if self.is_json {
             self.out.extend_from_slice(b",\n");
@@ -4998,21 +4824,7 @@ impl RpcEmit for RpcEmitter {
     }
 
     fn post_info_end(&mut self, p: &RpcPostInfo<'_>) {
-        unsafe {
-            write_post_info_fields(
-                &mut self.out,
-                self.is_json,
-                p.is_post_queue,
-                p.has_post_info,
-                p.progress_label,
-                p.stage_progress,
-                p.cur_time,
-                p.stage_time,
-                p.start_time,
-                p.logs.as_ptr(),
-                p.logs.len(),
-            );
-        }
+        write_post_info_fields(&mut self.out, self.is_json, p);
         self.close_struct(true);
     }
 
@@ -5088,52 +4900,33 @@ impl RpcEmit for RpcEmitter {
         chosen: c_int,
         complete: bool,
         reason: &CStr,
-        members: &[NzbgetRsRpcFleetMember],
+        members: &[NzbgetRsRpcFleetMember<'_>],
     ) {
-        unsafe {
-            write_fleet_result(
-                &mut self.out,
-                chosen,
-                complete,
-                reason.as_ptr(),
-                members.as_ptr(),
-                members.len(),
-            );
-        }
+        write_fleet_result(&mut self.out, chosen, complete, reason, members);
     }
 
-    fn config_list(&mut self, entries: &[NzbgetRsRpcConfigItem]) {
-        unsafe {
-            write_config_list(
-                &mut self.out,
-                self.is_json,
-                self.eff_access,
-                crate::rpcroute::UA_RESTRICTED,
-                entries.as_ptr(),
-                entries.len(),
-            );
-        }
+    fn config_list(&mut self, entries: &[NzbgetRsRpcConfigItem<'_>]) {
+        write_config_list(
+            &mut self.out,
+            self.is_json,
+            self.eff_access,
+            crate::rpcroute::UA_RESTRICTED,
+            entries,
+        );
     }
 
-    fn config_templates(&mut self, templates: &[*const c_char]) {
-        unsafe {
-            write_config_templates(
-                &mut self.out,
-                self.is_json,
-                templates.as_ptr(),
-                templates.len(),
-            );
-        }
+    fn config_templates(&mut self, templates: &[&CStr]) {
+        write_config_templates(&mut self.out, self.is_json, templates);
     }
 
-    fn feed_item(&mut self, item: &NzbgetRsRpcFeedItem) {
+    fn feed_item(&mut self, item: &NzbgetRsRpcFeedItem<'_>) {
         let idx = self.next_index();
-        unsafe { write_feed_item(&mut self.out, self.is_json, idx, item) };
+        write_feed_item(&mut self.out, self.is_json, idx, item);
     }
 
-    fn server_volume(&mut self, item: &NzbgetRsRpcServerVolumeItem) {
+    fn server_volume(&mut self, item: &NzbgetRsRpcServerVolumeItem<'_>) {
         let idx = self.next_index();
-        unsafe { write_server_volume_item(&mut self.out, self.is_json, idx, item) };
+        write_server_volume_item(&mut self.out, self.is_json, idx, item);
     }
 }
 
@@ -5628,16 +5421,14 @@ unsafe fn execute_xml_command(
                 let is_zip = !dl.is_url
                     && !fname_clean.is_empty()
                     && crate::unpack::can_extract_with_zipfast(crate::fsops::path(fname_clean));
-                let mut c_param_vecs: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(dl.params.len());
-                for (k, v) in &dl.params {
-                    c_param_vecs.push((to_c_vec(k), to_c_vec(v)));
-                }
-                let c_params: Vec<NzbgetRsRpcParamItem> = c_param_vecs
+                let c_param_vecs: Vec<_> = dl
+                    .params
                     .iter()
-                    .map(|(k, v)| NzbgetRsRpcParamItem {
-                        name: k.as_ptr().cast(),
-                        value: v.as_ptr().cast(),
-                    })
+                    .map(|(k, v)| (crate::cstr::to_cstring(k), crate::cstr::to_cstring(v)))
+                    .collect();
+                let c_params: Vec<NzbgetRsRpcParamItem<'_>> = c_param_vecs
+                    .iter()
+                    .map(|(k, v)| NzbgetRsRpcParamItem { name: k, value: v })
                     .collect();
                 let body_len = dl.content.len();
                 let mut body_buf = dl.content;

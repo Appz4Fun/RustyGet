@@ -1308,9 +1308,20 @@ const BACKUP_LEAD: i32 = 100;
 const BACKUP_CLASSIFY_GRACE_SEC: i64 = 120;
 
 /// Whether a backup parked at `parked_at` (Unix seconds) is still too new to tell whether it
-/// lends: its kind is unknown and it arrived under [`BACKUP_CLASSIFY_GRACE_SEC`] ago.
-fn backup_still_unclassified(kind: crate::donorkind::DonorKind, parked_at: i64, now: i64) -> bool {
-    kind == crate::donorkind::DonorKind::Unknown && now - parked_at < BACKUP_CLASSIFY_GRACE_SEC
+/// lends: its kind is unknown and it arrived under [`BACKUP_CLASSIFY_GRACE_SEC`] ago, or, whatever
+/// its kind and age, the fleet intake is still `checking` its video (a nested alt can take
+/// longer to open down to it). That check is bounded on its own: it reads until its deadline,
+/// then lets go.
+fn backup_still_unclassified(
+    kind: crate::donorkind::DonorKind,
+    parked_at: i64,
+    now: i64,
+    checking: bool,
+) -> bool {
+    // the packing kind says nothing about the video: a copy still being read may carry another
+    checking
+        || (kind == crate::donorkind::DonorKind::Unknown
+            && now - parked_at < BACKUP_CLASSIFY_GRACE_SEC)
 }
 #[cfg(unix)]
 const DUPE_PROBE_SAMPLE_COUNT: i32 = 10;
@@ -4728,8 +4739,12 @@ impl NzbgetRsQueueCoordinator {
                 host.nzb_get_param(backup_nzb.ptr, crate::donorkind::KIND_PARAM)
                     .as_deref(),
             );
-            if backup_still_unclassified(backup_kind, backup_hi.time, now)
-                && !download_hopeless(nzb.total_articles, nzb.current_success_articles, failed)
+            if backup_still_unclassified(
+                backup_kind,
+                backup_hi.time,
+                now,
+                crate::dupesearch_coord::intake_pending(backup_nzb.id, &nzb.dupe_key),
+            ) && !download_hopeless(nzb.total_articles, nzb.current_success_articles, failed)
             {
                 // Not checked yet: the next round looks again instead of waiting for
                 // another sample of failed articles.
@@ -5026,6 +5041,17 @@ impl NzbgetRsQueueCoordinator {
         }
 
         if dead {
+            // a backup the fleet intake is still reading may yet feed this extraction: a
+            // dead run waits for its verdict too, unless nothing of this copy can be saved
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs() as i64);
+            if !hopeless
+                && crate::dupesearch_coord::intake_pending(backup_nzb.id, &nzb.dupe_key)
+                && backup_still_unclassified(backup_kind, backup_hi.time, now, true)
+            {
+                return;
+            }
             if !crate::dupecoord::dupe_failover_warranted_inline(
                 nzb.dupe_score,
                 0,
@@ -5059,7 +5085,12 @@ impl NzbgetRsQueueCoordinator {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs() as i64);
-            if backup_still_unclassified(backup_kind, backup_hi.time, now) {
+            if backup_still_unclassified(
+                backup_kind,
+                backup_hi.time,
+                now,
+                crate::dupesearch_coord::intake_pending(backup_nzb.id, &nzb.dupe_key),
+            ) {
                 return;
             }
             let backup_alive = backup_alive_permille(host, backup_nzb.ptr);
@@ -5233,6 +5264,11 @@ impl NzbgetRsQueueCoordinator {
             return false;
         };
 
+        // A backup the fleet intake is still reading may carry another video, or lend: wait
+        // for its verdict (the next round looks again).
+        if crate::dupesearch_coord::intake_pending(backup_nzb.id, &nzb.dupe_key) {
+            return true;
+        }
         // A running extraction is kept: the backup lends what par2 cannot repair.
         if backup_continues_extraction(host, opts, nzb, &backup_nzb) {
             return true;
@@ -6372,11 +6408,15 @@ mod tests {
     fn late_backup_waits_until_classified() {
         use crate::donorkind::DonorKind;
         let parked = 1_000;
-        assert!(super::backup_still_unclassified(DonorKind::Unknown, parked, parked + 2));
-        assert!(super::backup_still_unclassified(DonorKind::Unknown, parked, parked + 119));
-        assert!(!super::backup_still_unclassified(DonorKind::Unknown, parked, parked + 120));
+        let unclassified = super::backup_still_unclassified;
+        assert!(unclassified(DonorKind::Unknown, parked, parked + 2, false));
+        assert!(unclassified(DonorKind::Unknown, parked, parked + 119, false));
+        assert!(!unclassified(DonorKind::Unknown, parked, parked + 120, false));
+        // still being read in the background: held while the check runs, however old
+        assert!(unclassified(DonorKind::Unknown, parked, parked + 3_600, true));
         for kind in [DonorKind::Twin, DonorKind::Borrowable, DonorKind::Unborrowable] {
-            assert!(!super::backup_still_unclassified(kind, parked, parked + 2));
+            assert!(!unclassified(kind, parked, parked + 2, false));
+            assert!(unclassified(kind, parked, parked + 3_600, true));
         }
     }
 

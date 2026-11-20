@@ -5,7 +5,7 @@
 //! included: the line buffer appends as strncpy (a NUL ends the copied text
 //! and the rest is zero-filled) and lines are found as strchr found them.
 
-use std::ffi::{c_int, c_ulong, c_void, CStr};
+use std::ffi::{c_int, c_ulong};
 
 mod scan;
 
@@ -14,42 +14,77 @@ pub fn scan_kernel() -> u8 {
     scan::imp::kernel()
 }
 
-/// rapidyenc_decode_incremental: returns 0 (no end), 1 ("\r\n=y" found,
-/// `src` after the 'y') or 2 ("\r\n.\r\n" found, `src` after it).
-pub type DecodeFn = unsafe extern "C" fn(
-    src: *mut *const c_void,
-    dst: *mut *mut c_void,
-    len: usize,
-    state: *mut c_int,
-) -> c_int;
-/// rapidyenc_crc.
-pub type CrcFn = unsafe extern "C" fn(src: *const c_void, len: usize, init: u32) -> u32;
+/// How an incremental yEnc step ended (rapidyenc's RYDEC_END_*).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum YencEnd {
+    /// No end sequence in this piece.
+    More,
+    /// "\r\n=y" was found; reading stopped after the 'y'.
+    Control,
+    /// "\r\n.\r\n" was found; reading stopped after it.
+    Article,
+}
+
+/// Where a step stopped: reading at `src` and writing at `dst` (indexes into
+/// the buffer it decoded).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct YencStep {
+    pub end: YencEnd,
+    pub src: usize,
+    pub dst: usize,
+}
+
+/// rapidyenc_decode_incremental: decodes `buf[src..src + len]` into `buf`
+/// from `dst`, carrying the line state across pieces in `state`. `dst` must
+/// not be after `src`: each byte is written only after the byte it came from
+/// was read, so the output may overwrite input already read.
+pub type DecodeFn =
+    fn(buf: &mut [u8], src: usize, len: usize, dst: usize, state: &mut c_int) -> YencStep;
+/// rapidyenc_crc: the CRC-32 of `data` appended to `init`.
+pub type CrcFn = fn(data: &[u8], init: u32) -> u32;
 
 /// Built-in Rust incremental yEnc decoder powered by `nntmux_yenc` SIMD kernels
 /// and exact NNTP dot-unstuffing / control-line framing state machine.
-pub unsafe extern "C" fn rust_yenc_decode_incremental(
-    src: *mut *const c_void,
-    dst: *mut *mut c_void,
+pub fn yenc_decode_incremental(
+    buf: &mut [u8],
+    src: usize,
     len: usize,
-    state: *mut c_int,
-) -> c_int {
-    if src.is_null() || dst.is_null() || (*src).is_null() || (*dst).is_null() || len == 0 {
-        return 0;
+    dst: usize,
+    state: &mut c_int,
+) -> YencStep {
+    if len == 0 {
+        return YencStep { end: YencEnd::More, src, dst };
     }
-    let s = (*src).cast::<u8>();
-    let mut p = (*dst).cast::<u8>();
-    let mut idx = 0usize;
-    let mut st = if state.is_null() { 0 } else { *state };
+    // indexes below are into `buf`, which ends where the input does
+    let input_end = src.checked_add(len).expect("yEnc input range overflows");
+    let buf = &mut buf[..input_end];
+    let end = buf.len();
+    let mut p = dst;
+    let mut idx = src;
+    let mut st = *state;
 
+    macro_rules! at {
+        ($i:expr) => {
+            buf[$i]
+        };
+    }
+    macro_rules! put {
+        ($v:expr) => {{
+            let v = $v;
+            buf[p] = v;
+            p += 1;
+        }};
+    }
+    macro_rules! stop {
+        ($end:expr, $read:expr, $new_state:expr) => {{
+            *state = $new_state;
+            return YencStep { end: $end, src: $read, dst: p };
+        }};
+    }
     macro_rules! check_end {
         ($new_state:expr) => {
-            if idx == len {
-                if !state.is_null() {
-                    *state = $new_state;
-                }
-                *src = s.add(len).cast();
-                *dst = p.cast();
-                return 0;
+            if idx == end {
+                stop!(YencEnd::More, end, $new_state);
             }
         };
     }
@@ -59,21 +94,15 @@ pub unsafe extern "C" fn rust_yenc_decode_incremental(
         match st {
             6 => {
                 // RYDEC_STATE_CRLFEQ
-                if *s.add(idx) == b'y' {
-                    if !state.is_null() {
-                        *state = 3; // RYDEC_STATE_NONE
-                    }
-                    *src = s.add(idx + 1).cast();
-                    *dst = p.cast();
-                    return 1; // RYDEC_END_CONTROL
+                if at!(idx) == b'y' {
+                    stop!(YencEnd::Control, idx + 1, 3); // RYDEC_STATE_NONE
                 }
                 st = 1; // Fall through to RYDEC_STATE_EQ
             }
             1 => {
                 // RYDEC_STATE_EQ
-                let c = *s.add(idx);
-                *p = c.wrapping_sub(42 + 64);
-                p = p.add(1);
+                let c = at!(idx);
+                put!(c.wrapping_sub(42 + 64));
                 idx += 1;
                 if c != b'\r' {
                     break;
@@ -83,7 +112,7 @@ pub unsafe extern "C" fn rust_yenc_decode_incremental(
             }
             2 => {
                 // RYDEC_STATE_CR
-                if *s.add(idx) != b'\n' {
+                if at!(idx) != b'\n' {
                     break;
                 }
                 idx += 1;
@@ -92,7 +121,7 @@ pub unsafe extern "C" fn rust_yenc_decode_incremental(
             }
             0 => {
                 // RYDEC_STATE_CRLF
-                let c = *s.add(idx);
+                let c = at!(idx);
                 if c == b'.' {
                     idx += 1;
                     check_end!(4); // RYDEC_STATE_CRLFDT
@@ -107,7 +136,7 @@ pub unsafe extern "C" fn rust_yenc_decode_incremental(
             }
             4 => {
                 // RYDEC_STATE_CRLFDT
-                let c = *s.add(idx);
+                let c = at!(idx);
                 if c == b'\r' {
                     idx += 1;
                     check_end!(5); // RYDEC_STATE_CRLFDTCR
@@ -122,13 +151,8 @@ pub unsafe extern "C" fn rust_yenc_decode_incremental(
             }
             5 => {
                 // RYDEC_STATE_CRLFDTCR
-                if *s.add(idx) == b'\n' {
-                    if !state.is_null() {
-                        *state = 0; // RYDEC_STATE_CRLF
-                    }
-                    *src = s.add(idx + 1).cast();
-                    *dst = p.cast();
-                    return 2; // RYDEC_END_ARTICLE
+                if at!(idx) == b'\n' {
+                    stop!(YencEnd::Article, idx + 1, 0); // RYDEC_STATE_CRLF
                 }
                 break;
             }
@@ -141,15 +165,15 @@ pub unsafe extern "C" fn rust_yenc_decode_incremental(
 
     // 2. Main body loop with `nntmux_yenc` SIMD fast-path on unstuffed interior spans
     let mut next_simd_check = 0usize;
-    while len >= 2 && idx < len - 2 {
+    while len >= 2 && idx < end - 2 {
         if idx >= next_simd_check {
             // Scan ahead for a span free of `\r\n.`, `\r\n=`, `=\r`, `=\n`
-            let max_end = len - 2;
-            let raw_scan_end = scan::find_break(s, idx, max_end);
+            let max_end = end - 2;
+            let raw_scan_end = scan::find_break(buf, idx, max_end);
             let mut run_end = raw_scan_end;
             // Back off trailing `=`, `\r`, `\n` so the SIMD span ends in clean RYDEC_STATE_NONE
             while run_end > idx {
-                let last = *s.add(run_end - 1);
+                let last = at!(run_end - 1);
                 if last == b'=' || last == b'\r' || last == b'\n' {
                     run_end -= 1;
                 } else {
@@ -158,16 +182,14 @@ pub unsafe extern "C" fn rust_yenc_decode_incremental(
             }
             let simd_len = run_end - idx;
             if simd_len >= 64 {
-                let src_ptr = s.add(idx);
-                if p != src_ptr.cast_mut() {
-                    std::ptr::copy(src_ptr, p, simd_len);
+                if p != idx {
+                    buf.copy_within(idx..run_end, p);
                 }
-                let slice = std::slice::from_raw_parts_mut(p, simd_len);
-                let written = nntmux_yenc::decoder::decode_in_place(slice);
-                p = p.add(written);
+                let written = nntmux_yenc::decoder::decode_in_place(&mut buf[p..p + simd_len]);
+                p += written;
                 idx = run_end;
                 next_simd_check = raw_scan_end.max(idx + 1);
-                if idx >= len - 2 {
+                if idx >= end - 2 {
                     break;
                 }
             } else {
@@ -175,42 +197,31 @@ pub unsafe extern "C" fn rust_yenc_decode_incremental(
             }
         }
 
-        let c = *s.add(idx);
+        let c = at!(idx);
         match c {
             b'\r' => {
-                if *s.add(idx + 1) == b'\n' {
-                    let b2 = *s.add(idx + 2);
+                if at!(idx + 1) == b'\n' {
+                    let b2 = at!(idx + 2);
                     if b2 == b'.' {
                         idx += 3;
                         check_end!(4); // RYDEC_STATE_CRLFDT
-                        let next = *s.add(idx);
+                        let next = at!(idx);
                         if next == b'\r' {
                             idx += 1;
                             check_end!(5); // RYDEC_STATE_CRLFDTCR
-                            if *s.add(idx) == b'\n' {
-                                *src = s.add(idx + 1).cast();
-                                *dst = p.cast();
-                                if !state.is_null() {
-                                    *state = 0; // RYDEC_STATE_CRLF
-                                }
-                                return 2; // RYDEC_END_ARTICLE
+                            if at!(idx) == b'\n' {
+                                stop!(YencEnd::Article, idx + 1, 0); // RYDEC_STATE_CRLF
                             } else {
                                 idx -= 1;
                             }
                         } else if next == b'=' {
                             idx += 1;
                             check_end!(6); // RYDEC_STATE_CRLFEQ
-                            let esc = *s.add(idx);
+                            let esc = at!(idx);
                             if esc == b'y' {
-                                *src = s.add(idx + 1).cast();
-                                *dst = p.cast();
-                                if !state.is_null() {
-                                    *state = 3; // RYDEC_STATE_NONE
-                                }
-                                return 1; // RYDEC_END_CONTROL
+                                stop!(YencEnd::Control, idx + 1, 3); // RYDEC_STATE_NONE
                             } else {
-                                *p = esc.wrapping_sub(42 + 64);
-                                p = p.add(1);
+                                put!(esc.wrapping_sub(42 + 64));
                                 if esc == b'\r' {
                                     idx -= 1;
                                 }
@@ -221,17 +232,11 @@ pub unsafe extern "C" fn rust_yenc_decode_incremental(
                     } else if b2 == b'=' {
                         idx += 3;
                         check_end!(6); // RYDEC_STATE_CRLFEQ
-                        let esc = *s.add(idx);
+                        let esc = at!(idx);
                         if esc == b'y' {
-                            *src = s.add(idx + 1).cast();
-                            *dst = p.cast();
-                            if !state.is_null() {
-                                *state = 3; // RYDEC_STATE_NONE
-                            }
-                            return 1; // RYDEC_END_CONTROL
+                            stop!(YencEnd::Control, idx + 1, 3); // RYDEC_STATE_NONE
                         } else {
-                            *p = esc.wrapping_sub(42 + 64);
-                            p = p.add(1);
+                            put!(esc.wrapping_sub(42 + 64));
                             if esc == b'\r' {
                                 idx -= 1;
                             }
@@ -244,59 +249,49 @@ pub unsafe extern "C" fn rust_yenc_decode_incremental(
                 idx += 1;
             }
             b'=' => {
-                let esc = *s.add(idx + 1);
-                *p = esc.wrapping_sub(42 + 64);
-                p = p.add(1);
+                let esc = at!(idx + 1);
+                put!(esc.wrapping_sub(42 + 64));
                 idx += if esc != b'\r' { 2 } else { 1 };
             }
             _ => {
-                *p = c.wrapping_sub(42);
-                p = p.add(1);
+                put!(c.wrapping_sub(42));
                 idx += 1;
             }
         }
     }
 
-    if !state.is_null() {
-        *state = 3; // RYDEC_STATE_NONE
-    }
+    *state = 3; // RYDEC_STATE_NONE
 
     // 2nd last char
-    if len >= 2 && idx == len - 2 {
-        let c = *s.add(idx);
+    if len >= 2 && idx == end - 2 {
+        let c = at!(idx);
         match c {
             b'\r' => {
-                if !state.is_null() && *s.add(idx + 1) == b'\n' {
-                    *state = 0; // RYDEC_STATE_CRLF
-                    *src = s.add(len).cast();
-                    *dst = p.cast();
-                    return 0;
+                if at!(idx + 1) == b'\n' {
+                    stop!(YencEnd::More, end, 0); // RYDEC_STATE_CRLF
                 }
             }
             b'\n' => {}
             b'=' => {
-                let esc = *s.add(idx + 1);
-                *p = esc.wrapping_sub(42 + 64);
-                p = p.add(1);
+                let esc = at!(idx + 1);
+                put!(esc.wrapping_sub(42 + 64));
                 if esc != b'\r' {
                     idx += 1;
                 }
             }
             _ => {
-                *p = c.wrapping_sub(42);
-                p = p.add(1);
+                put!(c.wrapping_sub(42));
             }
         }
         idx += 1;
     }
 
     // Final char
-    if idx + 1 == len {
-        let c = *s.add(idx);
+    if idx + 1 == end {
+        let c = at!(idx);
         if c != b'\n' && c != b'\r' && c != b'=' {
-            *p = c.wrapping_sub(42);
-            p = p.add(1);
-        } else if !state.is_null() {
+            put!(c.wrapping_sub(42));
+        } else {
             *state = if c == b'=' {
                 1 // RYDEC_STATE_EQ
             } else if c == b'\r' {
@@ -307,20 +302,13 @@ pub unsafe extern "C" fn rust_yenc_decode_incremental(
         }
     }
 
-    *src = s.add(len).cast();
-    *dst = p.cast();
-    0
+    YencStep { end: YencEnd::More, src: end, dst: p }
 }
 
 /// Built-in Rust CRC-32 function powered by `crc32fast` SIMD kernels.
-pub unsafe extern "C" fn rust_yenc_crc(src: *const c_void, len: usize, init: u32) -> u32 {
-    if src.is_null() || len == 0 {
-        return init;
-    }
-    let slice = std::slice::from_raw_parts(src.cast::<u8>(), len);
-    crate::crc::crc32_append(slice, init)
+pub fn yenc_crc(data: &[u8], init: u32) -> u32 {
+    crate::crc::crc32_append(data, init)
 }
-
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Format {
     Unknown = 0,
@@ -393,8 +381,6 @@ pub struct Decoder {
     state: c_int,
     pub raw_mode: bool,
     pub article_filename: Vec<u8>,
-    /// the file name and a NUL, for GetArticleFilename
-    filename_c: Vec<u8>,
     line_buf: LineBuf,
     crc32: u32,
 }
@@ -507,7 +493,6 @@ impl Decoder {
             state: 0,
             raw_mode: false,
             article_filename: Vec::new(),
-            filename_c: vec![0],
             line_buf: LineBuf::default(),
             crc32: 0,
         };
@@ -539,32 +524,32 @@ impl Decoder {
         self.line_buf.set_len(0);
     }
 
-    /// Decoder::DecodeBuffer: decodes `len` bytes of `buf`, writing the data
-    /// to `buf` itself; returns its length.
+    /// Decoder::DecodeBuffer: decodes the first `len` bytes of `buf`, writing
+    /// the data to the start of `buf` itself; returns its length.
     ///
-    /// # Safety
-    /// `buf` is non-null and readable for `len` bytes. In line mode, zero
-    /// length means a NUL-terminated string (StringBuilder::Append's default).
-    /// The allocation must also fit the decoded output: up to the input length
-    /// plus 63 bytes for a pending UU line. Connection reserves 128 slack bytes.
-    /// It must not alias this decoder's storage. Callbacks obey DecodeFn/CrcFn's
-    /// contract and must not unwind. No Rust slice bounds the output to `len`.
-    pub unsafe fn decode_buffer(&mut self, buf: *mut u8, len: usize) -> usize {
+    /// In line mode, zero length means the NUL-terminated string at the start
+    /// of `buf` (StringBuilder::Append's default). `buf` must also fit the
+    /// decoded output: up to the input length plus 63 bytes for a pending UU
+    /// line (Connection reserves 128 slack bytes); a shorter one panics.
+    pub fn decode_buffer(&mut self, buf: &mut [u8], len: usize) -> usize {
         if self.raw_mode {
-            self.process_raw(std::slice::from_raw_parts(buf, len));
+            self.process_raw(&buf[..len]);
             return len;
         }
         let mut outlen = 0usize;
         if self.body && self.format == Format::Yenc {
-            outlen = self.decode_yenc_from(buf, buf, len);
+            let decode = self.decode_fn;
+            let step = decode(buf, 0, len, 0, &mut self.state);
+            let tail = buf[step.src..len].to_vec();
+            outlen = self.yenc_done(step.end, &tail, &buf[..step.dst]);
             if self.body {
                 return outlen;
             }
         } else {
             let chunk = if len == 0 {
-                CStr::from_ptr(buf.cast()).to_bytes()
+                crate::cstr::until_nul(buf)
             } else {
-                std::slice::from_raw_parts(buf, len)
+                &buf[..len]
             };
             self.line_buf.append(chunk);
         }
@@ -605,10 +590,16 @@ impl Decoder {
                     self.line_buf = line_buf;
                 }
                 if self.body {
+                    // decode the rest in place in the line buffer, then copy it out
                     let rest_at = nl + 1;
-                    let rest = self.line_buf.len - rest_at;
-                    let src = self.line_buf.data.as_mut_ptr().add(rest_at);
-                    outlen = self.decode_yenc_from(src, buf, rest);
+                    let rest_end = self.line_buf.len;
+                    let decode = self.decode_fn;
+                    let data = &mut self.line_buf.data;
+                    let step = decode(data, rest_at, rest_end - rest_at, rest_at, &mut self.state);
+                    let written = step.dst - rest_at;
+                    buf[..written].copy_from_slice(&data[rest_at..step.dst]);
+                    let tail = data[step.src..rest_end].to_vec();
+                    outlen = self.yenc_done(step.end, &tail, &buf[..written]);
                     if self.body {
                         self.line_buf.set_len(0);
                         return outlen;
@@ -625,7 +616,7 @@ impl Decoder {
                     (line + llen.max(63)).min(self.line_buf.data.len())
                 };
                 let text = self.line_buf.data[line..end].to_vec();
-                outlen += self.decode_ux(&text, llen, buf.add(outlen));
+                outlen += self.decode_ux(&text, llen, &mut buf[outlen..]);
             }
             line = nl + 1;
         }
@@ -710,37 +701,28 @@ impl Decoder {
         }
     }
 
-    /// DecodeYenc: rapidyenc from `src` to `out`; at the end of the yEnc data
-    /// the rest goes back to the line buffer.
-    unsafe fn decode_yenc_from(&mut self, src: *mut u8, out: *mut u8, len: usize) -> usize {
-        let mut s = src as *const c_void;
-        let mut d = out as *mut c_void;
-        let endseq = (self.decode_fn)(&mut s, &mut d, len, &mut self.state);
-        let written = d as usize - out as usize;
-        if endseq != 0 {
-            let consumed = s as usize - src as usize;
-            let rest = if len > consumed {
-                std::slice::from_raw_parts(s as *const u8, len - consumed).to_vec()
-            } else {
-                Vec::new()
-            };
+    /// DecodeYenc after rapidyenc wrote `out`: at the end of the yEnc data
+    /// the rest (`tail`, the input after the end sequence) goes back to the
+    /// line buffer. Returns the length written.
+    fn yenc_done(&mut self, end: YencEnd, tail: &[u8], out: &[u8]) -> usize {
+        if end != YencEnd::More {
             self.line_buf.set_len(0);
             self.line_buf
-                .append(if endseq == 1 { b"=y" } else { b".\r\n" });
-            if !rest.is_empty() {
-                self.line_buf.append(&rest);
+                .append(if end == YencEnd::Control { b"=y" } else { b".\r\n" });
+            if !tail.is_empty() {
+                self.line_buf.append(tail);
             }
             self.body = false;
         }
         if self.crc_check {
-            self.crc32 = (self.crc_fn)(out as *const c_void, written, self.crc32);
+            self.crc32 = (self.crc_fn)(out, self.crc32);
         }
-        self.out_size += written as i64;
-        written
+        self.out_size += out.len() as i64;
+        out.len()
     }
 
     /// DecodeUx for one line (`len` bytes of `line`, which goes on to its NUL).
-    unsafe fn decode_ux(&mut self, line: &[u8], len: usize, out: *mut u8) -> usize {
+    fn decode_ux(&mut self, line: &[u8], len: usize, out: &mut [u8]) -> usize {
         let at = |k: usize| *line.get(k).unwrap_or(&0);
         if !self.body {
             if line.starts_with(b"begin ") {
@@ -796,15 +778,15 @@ impl Decoder {
             let mut eff = eff as isize;
             while eff > 0 {
                 if eff >= 3 {
-                    *out.add(o) = g(i) << 2 | g(i + 1) >> 4;
-                    *out.add(o + 1) = g(i + 1) << 4 | g(i + 2) >> 2;
-                    *out.add(o + 2) = g(i + 2) << 6 | g(i + 3);
+                    out[o] = g(i) << 2 | g(i + 1) >> 4;
+                    out[o + 1] = g(i + 1) << 4 | g(i + 2) >> 2;
+                    out[o + 2] = g(i + 2) << 6 | g(i + 3);
                     o += 3;
                 } else {
-                    *out.add(o) = g(i) << 2 | g(i + 1) >> 4;
+                    out[o] = g(i) << 2 | g(i + 1) >> 4;
                     o += 1;
                     if eff >= 2 {
-                        *out.add(o) = g(i + 1) << 4 | g(i + 2) >> 2;
+                        out[o] = g(i + 1) << 4 | g(i + 2) >> 2;
                         o += 1;
                     }
                 }
@@ -855,17 +837,6 @@ impl Decoder {
         } else {
             0
         };
-    }
-
-    /// GetArticleFilename: the name as a C string.
-    pub fn filename_c(&mut self) -> *const u8 {
-        if self.filename_c.len() != self.article_filename.len() + 1
-            || self.filename_c[..self.article_filename.len()] != self.article_filename[..]
-        {
-            self.filename_c = self.article_filename.clone();
-            self.filename_c.push(0);
-        }
-        self.filename_c.as_ptr()
     }
 
     /// Decoder::Check.
@@ -925,19 +896,12 @@ fn detect_format(line: &[u8], len: usize) -> Format {
 mod tests {
     use super::*;
 
-    unsafe extern "C" fn decode(
-        src: *mut *const c_void,
-        dst: *mut *mut c_void,
-        len: usize,
-        _state: *mut c_int,
-    ) -> c_int {
-        std::ptr::copy(*src as *const u8, *dst as *mut u8, len);
-        *src = (*src).byte_add(len);
-        *dst = (*dst).byte_add(len);
-        0
+    fn decode(buf: &mut [u8], src: usize, len: usize, dst: usize, _state: &mut c_int) -> YencStep {
+        buf.copy_within(src..src + len, dst);
+        YencStep { end: YencEnd::More, src: src + len, dst: dst + len }
     }
 
-    unsafe extern "C" fn crc(_src: *const c_void, _len: usize, init: u32) -> u32 {
+    fn crc(_data: &[u8], init: u32) -> u32 {
         init
     }
 
@@ -1036,7 +1000,7 @@ mod tests {
         buffer[32..32 + chunk.len()].copy_from_slice(chunk);
         let before = buffer.clone();
         assert_eq!(
-            unsafe { d.decode_buffer(buffer.as_mut_ptr().add(32), chunk.len()) },
+            d.decode_buffer(&mut buffer[32..], chunk.len()),
             chunk.len()
         );
         assert_eq!(buffer, before);
@@ -1158,10 +1122,8 @@ mod tests {
         for prefix in 1..=4 {
             let mut d = Decoder::new(decode, crc);
             let mut header = b"begin 644 f.bin\r\n".to_vec();
-            assert_eq!(
-                unsafe { d.decode_buffer(header.as_mut_ptr(), header.len()) },
-                0
-            );
+            let n = header.len();
+            assert_eq!(d.decode_buffer(&mut header, n), 0);
             assert_eq!(d.format, Format::Ux);
             d.raw_mode = true;
             check_raw_chunk(&mut d, &marker[..prefix], false);
@@ -1240,59 +1202,54 @@ mod tests {
     }
 
     #[test]
-    fn zero_length_line_and_filename_c() {
-        unsafe {
-            let mut d = Decoder::new(decode, crc);
-            assert_eq!(CStr::from_ptr(d.filename_c().cast()).to_bytes(), b"");
-            let mut b = [0u8; 256];
-            let input = b"begin 644 x\r\n#04)#\r\n`\r\n\0";
-            b[..input.len()].copy_from_slice(input);
-            assert_eq!(d.decode_buffer(b.as_mut_ptr(), 0), 3);
-            assert_eq!(&b[..3], b"ABC");
-            assert_eq!(CStr::from_ptr(d.filename_c().cast()).to_bytes(), b"x");
-        }
+    fn zero_length_line_and_filename() {
+        let mut d = Decoder::new(decode, crc);
+        assert_eq!(d.article_filename, b"");
+        let mut b = [0u8; 256];
+        let input = b"begin 644 x\r\n#04)#\r\n`\r\n\0";
+        b[..input.len()].copy_from_slice(input);
+        assert_eq!(d.decode_buffer(&mut b, 0), 3);
+        assert_eq!(&b[..3], b"ABC");
+        assert_eq!(d.article_filename, b"x");
     }
 
-    unsafe extern "C" fn test_yenc_decode(
-        src: *mut *const c_void,
-        dst: *mut *mut c_void,
+    fn test_yenc_decode(
+        buf: &mut [u8],
+        src: usize,
         len: usize,
-        _state: *mut c_int,
-    ) -> c_int {
-        let s = std::slice::from_raw_parts(*src as *const u8, len);
-        let out = *dst as *mut u8;
-        let mut written = 0usize;
-        let mut i = 0usize;
-        let mut endseq = 0;
-        while i < s.len() {
-            if i + 4 <= s.len() && &s[i..i + 4] == b"\r\n=y" {
+        dst: usize,
+        _state: &mut c_int,
+    ) -> YencStep {
+        let mut written = dst;
+        let mut i = src;
+        let end = src + len;
+        let mut endseq = YencEnd::More;
+        while i < end {
+            if i + 4 <= end && &buf[i..i + 4] == b"\r\n=y" {
                 i += 4;
-                endseq = 1;
+                endseq = YencEnd::Control;
                 break;
             }
-            if i + 5 <= s.len() && &s[i..i + 5] == b"\r\n.\r\n" {
+            if i + 5 <= end && &buf[i..i + 5] == b"\r\n.\r\n" {
                 i += 5;
-                endseq = 2;
+                endseq = YencEnd::Article;
                 break;
             }
-            let b = s[i];
+            let b = buf[i];
             i += 1;
             if b == b'\r' || b == b'\n' {
                 continue;
             }
-            *out.add(written) = b.wrapping_sub(42);
+            buf[written] = b.wrapping_sub(42);
             written += 1;
         }
-        *src = (*src).byte_add(i);
-        *dst = (*dst).byte_add(written);
-        endseq
+        YencStep { end: endseq, src: i, dst: written }
     }
 
-    unsafe extern "C" fn test_yenc_crc(src: *const c_void, len: usize, init: u32) -> u32 {
-        let slice = std::slice::from_raw_parts(src as *const u8, len);
+    fn test_yenc_crc(data: &[u8], init: u32) -> u32 {
         let mut acc = crate::crc::Crc32::new();
-        acc.append(slice);
-        crate::crc::combine(init, acc.finish(), len as u32)
+        acc.append(data);
+        crate::crc::combine(init, acc.finish(), data.len() as u32)
     }
 
     fn yenc_encode(data: &[u8]) -> Vec<u8> {
@@ -1315,7 +1272,8 @@ mod tests {
             msg.extend_from_slice(
                 format!("\r\n=yend size={} crc32=a30bff0d\r\n.\r\n", data.len()).as_bytes(),
             );
-            let len = unsafe { decoder.decode_buffer(msg.as_mut_ptr(), msg.len()) };
+            let n = msg.len();
+            let len = decoder.decode_buffer(&mut msg, n);
             assert_eq!(decoder.check(), Status::Finished);
             assert_eq!(decoder.article_filename, b"name.dat");
             assert_eq!(decoder.size, 6);
@@ -1366,7 +1324,8 @@ mod tests {
                 .as_bytes(),
             );
 
-            let len1 = unsafe { decoder.decode_buffer(msg1.as_mut_ptr(), msg1.len()) };
+            let n = msg1.len();
+            let len1 = decoder.decode_buffer(&mut msg1, n);
             assert_eq!(decoder.check(), Status::Finished);
             assert_eq!(decoder.article_filename, b"name.dat");
             assert_eq!(decoder.size, total_size as i64);
@@ -1377,7 +1336,8 @@ mod tests {
 
             decoder.clear();
             decoder.crc_check = true;
-            let len2 = unsafe { decoder.decode_buffer(msg2.as_mut_ptr(), msg2.len()) };
+            let n = msg2.len();
+            let len2 = decoder.decode_buffer(&mut msg2, n);
             assert_eq!(decoder.article_filename, b"name.dat");
             assert_eq!(decoder.check(), Status::Finished);
             assert_eq!(len1, data2.len());
@@ -1393,7 +1353,7 @@ mod tests {
             let mut decoder = Decoder::new(decode, crc);
             decoder.raw_mode = true;
             let mut buf = vec![b'x'; 4096];
-            let len = unsafe { decoder.decode_buffer(buf.as_mut_ptr(), 4096) };
+            let len = decoder.decode_buffer(&mut buf, 4096);
             assert_eq!(len, 4096);
             assert!(!decoder.eof);
         }
@@ -1405,9 +1365,7 @@ mod tests {
             first.extend_from_slice(&[b'A'; 62]);
             let first_len = first.len();
             first.resize(first_len + 128, 0);
-            unsafe {
-                decoder.decode_buffer(first.as_mut_ptr(), first_len);
-            }
+            decoder.decode_buffer(&mut first, first_len);
 
             let mut next = vec![b'A'; 22];
             next.extend_from_slice(b"\r\n");
@@ -1419,7 +1377,7 @@ mod tests {
             let next_len = next.len();
             let mut second = vec![b'Z'; next_len + 128];
             second[..next_len].copy_from_slice(&next);
-            let outlen = unsafe { decoder.decode_buffer(second.as_mut_ptr(), next_len) };
+            let outlen = decoder.decode_buffer(&mut second, next_len);
             assert!(outlen > 0);
             assert!(outlen <= next_len + 63);
         }
@@ -1434,7 +1392,7 @@ mod tests {
                 let text_len = text.len();
                 let mut buffer = vec![b'Z'; text_len + 128];
                 buffer[..text_len].copy_from_slice(&text);
-                let outlen = unsafe { decoder.decode_buffer(buffer.as_mut_ptr(), text_len) };
+                let outlen = decoder.decode_buffer(&mut buffer, text_len);
                 buffer[..outlen].to_vec()
             };
             let mut short_line = vec![b'M'];
@@ -1507,7 +1465,7 @@ mod tests {
                 })
                 .collect();
             let art = yenc_article(&data, round % 2 == 0);
-            let mut d = Decoder::new(rust_yenc_decode_incremental, rust_yenc_crc);
+            let mut d = Decoder::new(yenc_decode_incremental, yenc_crc);
             d.crc_check = true;
             let mut got = Vec::new();
             let mut at = 0;
@@ -1515,7 +1473,7 @@ mod tests {
                 let n = ((next() % 9000) as usize + 1).min(art.len() - at);
                 let mut piece = art[at..at + n].to_vec();
                 piece.resize(n + 128, 0);
-                let w = unsafe { d.decode_buffer(piece.as_mut_ptr(), n) };
+                let w = d.decode_buffer(&mut piece, n);
                 got.extend_from_slice(&piece[..w]);
                 at += n;
             }

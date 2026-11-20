@@ -1,7 +1,7 @@
 //! yEnc article decode throughput through the real `Decoder` caller:
 //! framing, dot-unstuffing, the SIMD body kernel and the CRC-32 check.
 //! `cargo bench --bench yenc_decode` prints MB/s of encoded input per case.
-use nzbget_rs::decoder::{rust_yenc_crc, rust_yenc_decode_incremental, Decoder, Status};
+use nzbget_rs::decoder::{yenc_crc, yenc_decode_incremental, Decoder, Status};
 use std::time::Instant;
 
 /// A 750,000-byte part encoded as a news server sends it: 128-byte lines,
@@ -47,14 +47,14 @@ fn article(seed: u64, size: usize) -> (Vec<u8>, u32) {
 }
 
 fn run(article: &[u8], chunk: usize, scratch: &mut Vec<u8>) -> (usize, Status, u32) {
-    let mut d = Decoder::new(rust_yenc_decode_incremental, rust_yenc_crc);
+    let mut d = Decoder::new(yenc_decode_incremental, yenc_crc);
     d.crc_check = true;
     let mut total = 0;
     for piece in article.chunks(chunk) {
         scratch.clear();
         scratch.extend_from_slice(piece);
         scratch.resize(piece.len() + 128, 0);
-        total += unsafe { d.decode_buffer(scratch.as_mut_ptr(), piece.len()) };
+        total += d.decode_buffer(scratch, piece.len());
     }
     (total, d.check(), d.calculated_crc)
 }

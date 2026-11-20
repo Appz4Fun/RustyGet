@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use crate::decoder::{rust_yenc_crc, rust_yenc_decode_incremental, Decoder, Format, Status};
+use crate::decoder::{yenc_crc, yenc_decode_incremental, Decoder, Format, Status};
 use crate::dupefallback::{
     article_fetch_add_decoded_bytes, article_fetch_add_raw_bytes,
     article_fetch_header_within_limit, article_size_steps_hash,
@@ -805,7 +805,7 @@ impl ArticleFetcher {
             return result;
         }
 
-        let mut decoder = Decoder::new(rust_yenc_decode_incremental, rust_yenc_crc);
+        let mut decoder = Decoder::new(yenc_decode_incremental, yenc_crc);
         decoder.clear();
         decoder.crc_check = true;
         decoder.raw_mode = false;
@@ -872,8 +872,7 @@ impl ArticleFetcher {
                 return result;
             }
 
-            let buffer_ptr = recv_buf.as_mut_ptr();
-            let decoded_len = unsafe { decoder.decode_buffer(buffer_ptr, len) };
+            let decoded_len = decoder.decode_buffer(&mut recv_buf, len);
             let declared_range_known =
                 decoder.begin_pos > 0 && decoder.end_pos >= decoder.begin_pos && decoder.size > 0;
             if !article_fetch_header_within_limit(raw_bytes, declared_range_known) {
@@ -905,8 +904,7 @@ impl ArticleFetcher {
                 return result;
             }
             if decoded_len > 0 {
-                let slice = unsafe { std::slice::from_raw_parts(buffer_ptr, decoded_len) };
-                result.data.extend_from_slice(slice);
+                result.data.extend_from_slice(&recv_buf[..decoded_len]);
             }
         }
 
@@ -1239,7 +1237,7 @@ mod tests {
     }
 
     fn yenc_encode_single_part(payload: &[u8]) -> Vec<u8> {
-        let crc = unsafe { rust_yenc_crc(payload.as_ptr().cast(), payload.len(), 0) };
+        let crc = yenc_crc(payload, 0);
         let mut out = format!(
             "=ybegin part=1 total=1 line=128 size={} name=test.bin\r\n=ypart begin=1 end={}\r\n",
             payload.len(),

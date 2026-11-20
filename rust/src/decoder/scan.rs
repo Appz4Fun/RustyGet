@@ -5,13 +5,16 @@
 //! scalar loop as the reference and fallback.
 
 /// The first `i` in `from..max_end` where a break starts, else `max_end`.
-///
-/// # Safety
-/// `s` must be readable for `max_end + 2` bytes (a break is up to three bytes
-/// long, and the scan looks at the two after its start).
+/// `s` must hold `max_end + 2` bytes (a break is up to three bytes long, and
+/// the scan looks at the two after its start); a shorter one panics.
 #[inline]
-pub(super) unsafe fn find_break(s: *const u8, from: usize, max_end: usize) -> usize {
-    imp::find_break(s, from, max_end)
+pub(super) fn find_break(s: &[u8], from: usize, max_end: usize) -> usize {
+    assert!(
+        max_end.checked_add(2).is_some_and(|n| n <= s.len()),
+        "find_break past the end of its buffer"
+    );
+    // SAFETY: the assert above keeps every read inside `s`.
+    unsafe { imp::find_break(s.as_ptr(), from, max_end) }
 }
 
 /// The reference loop. The vector versions return exactly what it returns.
@@ -233,7 +236,7 @@ mod tests {
     /// Every available version against the scalar reference.
     fn versions() -> Vec<(&'static str, unsafe fn(*const u8, usize, usize) -> usize)> {
         let mut v: Vec<(&'static str, unsafe fn(*const u8, usize, usize) -> usize)> =
-            vec![("dispatch", find_break)];
+            vec![("dispatch", imp::find_break)];
         #[cfg(target_arch = "x86_64")]
         {
             if is_x86_feature_detected!("avx2") {

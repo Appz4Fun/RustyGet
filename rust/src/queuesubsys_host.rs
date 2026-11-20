@@ -3920,17 +3920,23 @@ impl QueueSubsysHost {
 
     pub fn thread_is_stopped(&self, thread_ptr: usize) -> bool {
         let _ = self;
-        unsafe { crate::jobthread::nzbget_rs_job_op(thread_ptr as *const _, 1, 0, 0, 0) != 0 }
+        // SAFETY: the callers pass 0 or a live job thread.
+        unsafe { crate::jobthread::JobHandle::from_addr(thread_ptr) }
+            .is_some_and(|h| h.is_stopped())
     }
 
     pub fn thread_stop(&self, thread_ptr: usize) {
         let _ = self;
-        unsafe { crate::jobthread::nzbget_rs_job_op(thread_ptr as *const _, 2, 0, 0, 0) };
+        if let Some(h) = unsafe { crate::jobthread::JobHandle::from_addr(thread_ptr) } {
+            h.set_stopped(true);
+        }
     }
 
     pub fn thread_resume(&self, thread_ptr: usize) {
         let _ = self;
-        unsafe { crate::jobthread::nzbget_rs_job_op(thread_ptr as *const _, 3, 0, 0, 0) };
+        if let Some(h) = unsafe { crate::jobthread::JobHandle::from_addr(thread_ptr) } {
+            h.set_stopped(false);
+        }
     }
 
     pub fn post_stop_thread(&self, post_ptr: PostRef) {

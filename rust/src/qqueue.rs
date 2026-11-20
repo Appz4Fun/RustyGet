@@ -628,17 +628,18 @@ pub unsafe fn nzb_message(nzb: usize, kind: i32, add: bool, msg: &[u8]) {
 /// # Safety
 /// `nzb` is 0 or a live collection.
 pub unsafe fn start_live_repair(nzb: usize) {
-    use crate::jobthread::{nzbget_rs_job_free, nzbget_rs_job_new_post, nzbget_rs_job_start};
+    use crate::jobthread::JobHandle;
+    use crate::queuesubsys_host::PostRef;
     if nzb == 0 {
         return;
     }
     let n = nzb as *const NzbScalars;
-    unsafe {
-        let job = nzbget_rs_job_new_post(10, 0, (*n).id, 1);
-        crate::qnzb::nzbget_rs_nzb_slot(n, 3, 1, job as usize);
-        if nzbget_rs_job_start(job) == 0 {
+    let job = JobHandle::new_post(10, PostRef::NONE, unsafe { (*n).id }, true);
+    unsafe { crate::qnzb::nzbget_rs_nzb_slot(n, 3, 1, job.addr()) };
+    if !job.start() {
+        unsafe {
             crate::qnzb::nzbget_rs_nzb_slot(n, 3, 1, 0);
-            nzbget_rs_job_free(job, 0);
+            job.free(false);
         }
     }
 }

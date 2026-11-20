@@ -101,7 +101,7 @@ def run(shard, nshards, dirs):
     allf = []
     for d in dirs:
         for root, _, fs in os.walk(d):
-            allf += [os.path.join(root, f) for f in fs if re.search(r'\.nzb(\.queued|\.gz)?$', f, re.I)]
+            allf += [os.path.join(root, f) for f in fs if re.search(r'\.nzb(\.\d+)?(\.queued|\.gz|\.error)?$', f, re.I)]
     allf.sort(key=lambda p: os.path.basename(p))
     mine = [p for i, p in enumerate(allf) if i % nshards == shard]
     out = f'census.{shard}.jsonl'

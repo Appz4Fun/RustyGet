@@ -361,6 +361,16 @@ pub fn synthesize_frame(
     }
 }
 
+/// `head` with its part checksum set to `part_crc`, for a volume handed over before its
+/// part checksum was known and completed since. A RAR 1.5-4 head carries 0 until then (see
+/// [`synthesize_frame`]); the field has the same size either way, so the layout stays. A RAR5
+/// head comes back unchanged: it goes without a part checksum.
+pub fn with_part_crc(head: &[u8], part_crc: u32) -> Vec<u8> {
+    let mut out = head.to_vec();
+    rar4::set_part_crc(&mut out, part_crc);
+    out
+}
+
 /// Checks a rebuilt volume with the regular header reader: it has to read as volume `index`
 /// holding a stored middle part of `inner_name` that starts right after `head` and runs for
 /// `packed` bytes.
@@ -706,6 +716,35 @@ mod rar4 {
     fn seal(block: &mut [u8]) {
         let crc = (crc32fast::hash(&block[2..]) & 0xffff) as u16;
         block[..2].copy_from_slice(&crc.to_le_bytes());
+    }
+
+    /// Puts `part_crc` into the file header of a RAR 1.5-4 `head` and reseals it. False when
+    /// `head` is not a RAR 1.5-4 head with a file header.
+    pub(super) fn set_part_crc(head: &mut [u8], part_crc: u32) -> bool {
+        if !head.starts_with(MARK) {
+            return false;
+        }
+        let mut p = MARK.len();
+        while p + 7 <= head.len() {
+            let (Some(size), Some(&kind)) = (u16le(head, p + 5), head.get(p + 2)) else {
+                return false;
+            };
+            let size = size as usize;
+            if size < 7 || p + size > head.len() {
+                return false;
+            }
+            if kind == FILE_HEAD {
+                let block = &mut head[p..p + size];
+                if block.len() < 20 {
+                    return false;
+                }
+                block[16..20].copy_from_slice(&part_crc.to_le_bytes());
+                seal(block);
+                return true;
+            }
+            p += size;
+        }
+        false
     }
 
     pub(super) fn frame(
@@ -1108,6 +1147,8 @@ mod tests {
         let (_, files) = parse(&whole);
         assert_eq!(files[0].packed_size as usize, len);
         assert!(files[0].split_after);
+        // Completed later, the head takes the real checksum, byte for byte as if built with it.
+        assert_eq!(with_part_crc(&h, 7), h2);
     }
 
     #[test]

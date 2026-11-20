@@ -3020,26 +3020,45 @@ fn settle_offered(full_path: &[u8]) -> Option<crate::deadvolume::VirtualVolume> 
         .find_map(|st| case_blind(&st.offered, full_path).cloned())?;
     let real = crate::fsops::path(full_path);
     let tail_len = offered.tail.len() as u64;
-    let complete = (|| -> std::io::Result<bool> {
+    let complete = (|| -> std::io::Result<Option<u32>> {
         let mut src = std::fs::File::open(real)?;
         let len = src.metadata()?.len();
         let Some(head_len) = len.checked_sub(offered.data_len + tail_len) else {
-            return Ok(false);
+            return Ok(None);
         };
         let mut tail = vec![0u8; tail_len as usize];
         src.seek(SeekFrom::Start(len - tail_len))?;
         src.read_exact(&mut tail)?;
         if tail != offered.tail {
-            return Ok(false);
+            return Ok(None);
         }
         src.seek(SeekFrom::Start(head_len))?;
         let mut dst = std::fs::OpenOptions::new().write(true).open(&offered.data)?;
-        let copied = std::io::copy(&mut src.take(offered.data_len), &mut dst)?;
+        let mut hasher = crc32fast::Hasher::new();
+        let mut buf = vec![0u8; 1 << 20];
+        let mut left = offered.data_len;
+        while left > 0 {
+            let want = left.min(buf.len() as u64) as usize;
+            let n = src.read(&mut buf[..want])?;
+            if n == 0 {
+                return Ok(None);
+            }
+            hasher.update(&buf[..n]);
+            dst.write_all(&buf[..n])?;
+            left -= n as u64;
+        }
         dst.flush()?;
-        Ok(copied == offered.data_len)
+        Ok(Some(hasher.finalize()))
     })()
-    .unwrap_or(false);
-    complete.then(|| crate::deadvolume::VirtualVolume { holes: Vec::new(), ..offered })
+    .ok()
+    .flatten();
+    // A RAR 1.5-4 stand-in was handed over with part checksum 0 (not known yet); the finished
+    // one carries the real one, as a reader that checks it (the copy path) needs.
+    complete.map(|crc| crate::deadvolume::VirtualVolume {
+        head: crate::deadvolume::with_part_crc(&offered.head, crc),
+        holes: Vec::new(),
+        ..offered
+    })
 }
 
 /// Drops the stand-in for `path` handed over with holes, as its real volume is released: it

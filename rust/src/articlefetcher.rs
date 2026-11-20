@@ -4,7 +4,7 @@
 use crate::cstr;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{c_char, c_int, CStr};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -437,8 +437,19 @@ pub fn set_server_unreachable(server_id: i32, unreachable: bool) {
     }
 }
 
-/// Repair fetches held back by the speed limit right now: they want more of the line.
-static REPAIR_WAITING: AtomicUsize = AtomicUsize::new(0);
+/// When a repair fetch was last held back by the speed limit (unix ms). Demand counts for
+/// [`REPAIR_DEMAND_MS`] after that, so it holds the download's share across the reads in
+/// between, not only while a fetch happens to be waiting.
+static REPAIR_WAITED_AT_MS: AtomicI64 = AtomicI64::new(0);
+
+/// How long repair demand lasts after a repair fetch was last held back.
+const REPAIR_DEMAND_MS: i64 = 2_000;
+
+fn unix_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64)
+}
 
 /// Bytes repair fetches read in the current second (unix time, bytes), like the statmeter's
 /// momentary speed, so the download's own share can be told apart from the total.
@@ -472,7 +483,7 @@ fn repair_momentary_speed() -> i64 {
 }
 
 /// Whether the download should hold back its next read. Over the speed limit it always does.
-/// While repair fetches wait for the line it also does once its own share of this second
+/// While repair fetches want more of the line (one was held back in the last 2 s) it also does once its own share of this second
 /// passes a quarter of the limit: everything a repair fixes lies behind the download front,
 /// where the stream reaches first, so the repair gets the rest. When no repair is waiting the
 /// download has the whole line.
@@ -499,7 +510,7 @@ pub fn download_must_wait(limit: i64, cur_speed: i64, mom_speed: i64) -> bool {
         cur_speed,
         mom_speed,
         repair_momentary_speed(),
-        REPAIR_WAITING.load(Ordering::SeqCst) > 0,
+        unix_now_ms() - REPAIR_WAITED_AT_MS.load(Ordering::SeqCst) <= REPAIR_DEMAND_MS,
     )
 }
 
@@ -915,7 +926,6 @@ impl ArticleFetcher {
                 return result;
             }
             let throttle_started = Instant::now();
-            let mut waiting = false;
             while !self.is_stopped() {
                 let st_lim = self.host.status();
                 if st_lim.quota_reached
@@ -926,14 +936,8 @@ impl ArticleFetcher {
                 {
                     break;
                 }
-                if !waiting {
-                    waiting = true;
-                    REPAIR_WAITING.fetch_add(1, Ordering::SeqCst);
-                }
+                REPAIR_WAITED_AT_MS.store(unix_now_ms(), Ordering::SeqCst);
                 std::thread::sleep(Duration::from_millis(10));
-            }
-            if waiting {
-                REPAIR_WAITING.fetch_sub(1, Ordering::SeqCst);
             }
             throttled += throttle_started.elapsed();
             throttled_total += throttle_started.elapsed();

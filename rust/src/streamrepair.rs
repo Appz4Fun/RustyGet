@@ -5543,11 +5543,10 @@ impl ContentMap {
         let mut filled = 0usize;
         for piece in pieces {
             let len = piece.size as usize;
-            if !target_files.read_file(
-                piece.member_index,
-                piece.offset,
-                &mut buffer[filled..filled + len],
-            ) {
+            if target_files
+                .read_file(piece.member_index, piece.offset, &mut buffer[filled..filled + len])
+                .is_err()
+            {
                 return false;
             }
             filled += len;
@@ -5603,7 +5602,9 @@ impl ContentMap {
             let rel = (inner_pos[0].offset - inner_range.offset) as usize;
             let len = piece.size as usize;
             if rel.saturating_add(len) > data.len()
-                || !target_files.write_file(piece.member_index, piece.offset, &data[rel..rel + len])
+                || target_files
+                    .write_file(piece.member_index, piece.offset, &data[rel..rel + len])
+                    .is_err()
             {
                 return -1;
             }
@@ -5686,16 +5687,19 @@ pub trait TargetFileSet {
         false
     }
     fn has_file(&mut self, member_index: i32) -> bool;
-    fn read_file(&mut self, member_index: i32, offset: i64, buf: &mut [u8]) -> bool;
+    fn read_file(&mut self, member_index: i32, offset: i64, buf: &mut [u8]) -> std::io::Result<()>;
     fn compare_file(&mut self, member_index: i32, offset: i64, expected: &[u8]) -> bool {
         if expected.is_empty() {
-            return self.read_file(member_index, offset, &mut []);
+            return self.read_file(member_index, offset, &mut []).is_ok();
         }
         let mut buf = vec![0u8; expected.len().min(64 * 1024)];
         let mut pos = 0usize;
         while pos < expected.len() {
             let chunk = (expected.len() - pos).min(buf.len());
-            if !self.read_file(member_index, offset + (pos as i64), &mut buf[..chunk]) {
+            if self
+                .read_file(member_index, offset + (pos as i64), &mut buf[..chunk])
+                .is_err()
+            {
                 return false;
             }
             if buf[..chunk] != expected[pos..pos + chunk] {
@@ -5705,7 +5709,7 @@ pub trait TargetFileSet {
         }
         true
     }
-    fn write_file(&mut self, member_index: i32, offset: i64, data: &[u8]) -> bool;
+    fn write_file(&mut self, member_index: i32, offset: i64, data: &[u8]) -> std::io::Result<()>;
     fn on_message(&mut self, _kind: TargetMessageKind, _text: &str) {}
     fn on_message_bytes(&mut self, kind: TargetMessageKind, text: &[u8]) {
         self.on_message(kind, &String::from_utf8_lossy(text));
@@ -5847,7 +5851,9 @@ impl RepairSetData {
                     // holds zeros where its articles have not arrived yet, also inside a piece
                     // that is partly written.
                     target_data.resize(len, 0);
-                    let read = target_files.read_file(piece.member_index, piece.offset, &mut target_data);
+                    let read = target_files
+                        .read_file(piece.member_index, piece.offset, &mut target_data)
+                        .is_ok();
                     return if read && differs_where_written(&target_data, piece_data) {
                         DonorCheck::Differs
                     } else {
@@ -6764,18 +6770,18 @@ pub trait DonorBatchClient {
 
 /// Target file reader for M1 per-file verification (`CompareToFile` in `StreamRepair.cpp`).
 pub trait TargetFileReader {
-    fn read_range(&mut self, offset: i64, buf: &mut [u8]) -> bool;
+    fn read_range(&mut self, offset: i64, buf: &mut [u8]) -> std::io::Result<()>;
 
     fn compare_range(&mut self, offset: i64, expected: &[u8]) -> bool {
         if expected.is_empty() {
-            return self.read_range(offset, &mut []);
+            return self.read_range(offset, &mut []).is_ok();
         }
         const CHUNK: usize = 64 * 1024;
         let mut buf = vec![0u8; expected.len().min(CHUNK)];
         let mut done = 0usize;
         while done < expected.len() {
             let n = (expected.len() - done).min(CHUNK);
-            if !self.read_range(offset + done as i64, &mut buf[..n]) {
+            if self.read_range(offset + done as i64, &mut buf[..n]).is_err() {
                 return false;
             }
             if buf[..n] != expected[done..done + n] {
@@ -6789,7 +6795,7 @@ pub trait TargetFileReader {
 
 /// Target file writer and progress/message sink for M1 per-file patching (`PatchFromDonor`).
 pub trait TargetFilePatcher {
-    fn write_range(&mut self, offset: i64, data: &[u8]) -> bool;
+    fn write_range(&mut self, offset: i64, data: &[u8]) -> std::io::Result<()>;
     fn add_progress(&mut self, bytes: i64);
     fn emit_message_bytes(&mut self, kind: TargetMessageKind, text: &[u8]);
 }
@@ -6990,7 +6996,10 @@ pub fn patch_from_donor_file(
                 {
                     let rel_start = (from - fetched.offset) as usize;
                     let rel_end = (to - fetched.offset) as usize;
-                    if !target_patcher.write_range(from, &fetched.data[rel_start..rel_end]) {
+                    if target_patcher
+                        .write_range(from, &fetched.data[rel_start..rel_end])
+                        .is_err()
+                    {
                         batch_client.cancel_remaining();
                         return DonorFilePatchResult {
                             recovered_parts,
@@ -7074,8 +7083,8 @@ pub fn probe_whole_file_donor_size(
 /// (`StreamRepairController::MaterializeDonorSet` in `StreamRepair.cpp`).
 pub trait DonorMaterializeClient {
     fn is_stopped(&mut self) -> bool;
-    fn open_member(&mut self, member_index: i32) -> bool;
-    fn write_member(&mut self, offset: i64, data: &[u8]) -> bool;
+    fn open_member(&mut self, member_index: i32) -> std::io::Result<()>;
+    fn write_member(&mut self, offset: i64, data: &[u8]) -> std::io::Result<()>;
     fn close_member(&mut self);
     fn begin_member_batch(&mut self, member_index: i32);
     fn next_article(&mut self) -> Option<FetchedDonorArticle>;
@@ -7118,7 +7127,7 @@ pub fn materialize_donor_set(
         let member_name = file_names.get(member_idx).copied().unwrap_or(b"");
         let member_article_count = file_article_counts[member_idx];
 
-        if !client.open_member(member_index) {
+        if client.open_member(member_index).is_err() {
             return false;
         }
 
@@ -7195,7 +7204,7 @@ pub fn materialize_donor_set(
                 client.cancel_remaining();
                 return false;
             }
-            if !client.write_member(fetched.offset, &fetched.data) {
+            if client.write_member(fetched.offset, &fetched.data).is_err() {
                 client.cancel_remaining();
                 return false;
             }
@@ -8115,24 +8124,35 @@ impl ContentSource for DiskContentSource {
     }
 
     fn read(&self, offset: i64, buf: &mut [u8]) -> ReadResult {
-        use std::io::{Read, Seek, SeekFrom};
         let size = buf.len() as i64;
-        let start = u64::try_from(offset).map_err(|_| ReadError::OutOfRange)?;
+        let start = io_offset(offset).map_err(|_| ReadError::OutOfRange)?;
         if offset > self.size || size > self.size - offset {
             return Err(ReadError::OutOfRange);
         }
-        let mut file = self.file.borrow_mut();
-        file.seek(SeekFrom::Start(start)).map_err(|_| ReadError::Io)?;
-        if size == 0 {
-            return Ok(());
-        }
-        file.read_exact(buf).map_err(|_| ReadError::Io)
+        read_exact_at(&mut self.file.borrow_mut(), start, buf).map_err(|_| ReadError::Io)
     }
 }
 
 fn file_size_bytes(path_bytes: &[u8]) -> i64 {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata(crate::fsops::path(path_bytes)).map_or(-1, |m| m.size() as i64)
+}
+
+/// A file offset for I/O; a negative one is `InvalidInput`.
+fn io_offset(offset: i64) -> std::io::Result<u64> {
+    u64::try_from(offset).map_err(|_| std::io::ErrorKind::InvalidInput.into())
+}
+
+/// Reads exactly `buf.len()` bytes of `file` starting at `offset`.
+fn read_exact_at(file: &mut std::fs::File, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
+    use std::io::{Read, Seek, SeekFrom};
+    if file.seek(SeekFrom::Start(offset))? != offset {
+        return Err(std::io::Error::other("seek mismatch"));
+    }
+    if buf.is_empty() {
+        return Ok(());
+    }
+    file.read_exact(buf)
 }
 
 fn write_error_message_bytes(err: &std::io::Error) -> Vec<u8> {
@@ -8525,50 +8545,37 @@ impl TargetFileSet for DiskTargetFileSetAdapter<'_, '_, '_> {
         self.files.get_file(self.members, member_index).is_some()
     }
 
-    fn read_file(&mut self, member_index: i32, offset: i64, buf: &mut [u8]) -> bool {
-        use std::io::{Read, Seek, SeekFrom};
-        if offset < 0 {
-            return false;
-        }
-        let Some(file) = self.files.get_file(self.members, member_index) else {
-            return false;
-        };
-        let Ok(pos) = file.seek(SeekFrom::Start(offset as u64)) else {
-            return false;
-        };
-        if pos != offset as u64 {
-            return false;
-        }
-        if buf.is_empty() {
-            return true;
-        }
-        file.read_exact(buf).is_ok()
+    fn read_file(&mut self, member_index: i32, offset: i64, buf: &mut [u8]) -> std::io::Result<()> {
+        let start = io_offset(offset)?;
+        let file = self
+            .files
+            .get_file(self.members, member_index)
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
+        read_exact_at(file, start, buf)
     }
 
-    fn write_file(&mut self, member_index: i32, offset: i64, data: &[u8]) -> bool {
-        if offset < 0 || self.env.borrow_mut().is_stopped() {
-            return false;
+    fn write_file(&mut self, member_index: i32, offset: i64, data: &[u8]) -> std::io::Result<()> {
+        io_offset(offset)?;
+        if self.env.borrow_mut().is_stopped() {
+            return Err(std::io::ErrorKind::Interrupted.into());
         }
-        let Some(member) = usize::try_from(member_index)
+        let member = usize::try_from(member_index)
             .ok()
             .and_then(|index| self.members.get(index))
-        else {
-            return false;
-        };
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
         let path = crate::fsops::path(&self.files.dest_dir).join(crate::fsops::path(&member.name));
-        let Some(context) = self
+        let context = self
             .files
             .write_root
             .as_ref()
             .map(|root| root.for_path(&path))
-        else {
-            return false;
-        };
-        let Some(file) = self.files.get_file(self.members, member_index) else {
-            return false;
-        };
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::PermissionDenied))?;
+        let file = self
+            .files
+            .get_file(self.members, member_index)
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
         let io_res = guarded_donor_write(file, &context, offset, data);
-        if let Err(err) = io_res {
+        if let Err(err) = &io_res {
             let err_msg = write_error_message_bytes(&err);
             let member_name = self
                 .members
@@ -8581,9 +8588,8 @@ impl TargetFileSet for DiskTargetFileSetAdapter<'_, '_, '_> {
             self.env
                 .borrow_mut()
                 .emit_message_bytes(TargetMessageKind::Error, &msg);
-            return false;
         }
-        true
+        io_res
     }
 
     fn on_message(&mut self, kind: TargetMessageKind, text: &str) {
@@ -8610,7 +8616,7 @@ impl DonorMaterializeClient for MaterializeClientAdapter<'_, '_, '_> {
         self.env.borrow_mut().is_stopped()
     }
 
-    fn open_member(&mut self, member_index: i32) -> bool {
+    fn open_member(&mut self, member_index: i32) -> std::io::Result<()> {
         let member_name = self
             .donor_members
             .get(member_index as usize)
@@ -8623,7 +8629,7 @@ impl DonorMaterializeClient for MaterializeClientAdapter<'_, '_, '_> {
         match std::fs::File::create(crate::fsops::path(&self.current_path)) {
             Ok(f) => {
                 self.current_file = Some(f);
-                true
+                Ok(())
             }
             Err(err) => {
                 let errno = err.raw_os_error().unwrap_or_else(crate::fsops::last_errno);
@@ -8635,27 +8641,26 @@ impl DonorMaterializeClient for MaterializeClientAdapter<'_, '_, '_> {
                 self.env
                     .borrow_mut()
                     .emit_message_bytes(TargetMessageKind::Warning, &msg);
-                false
+                Err(err)
             }
         }
     }
 
-    fn write_member(&mut self, offset: i64, data: &[u8]) -> bool {
+    fn write_member(&mut self, offset: i64, data: &[u8]) -> std::io::Result<()> {
         use std::io::{Seek, SeekFrom, Write};
-        if offset < 0 {
-            return false;
-        }
-        let Some(file) = self.current_file.as_mut() else {
-            return false;
-        };
-        let io_res = file.seek(SeekFrom::Start(offset as u64)).and_then(|pos| {
-            if pos != offset as u64 {
+        let start = io_offset(offset)?;
+        let file = self
+            .current_file
+            .as_mut()
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
+        let io_res = file.seek(SeekFrom::Start(start)).and_then(|pos| {
+            if pos != start {
                 Err(std::io::Error::other("seek mismatch"))
             } else {
                 file.write_all(data).and_then(|()| file.flush())
             }
         });
-        if let Err(err) = io_res {
+        if let Err(err) = &io_res {
             let err_msg = write_error_message_bytes(&err);
             let mut msg = b"Could not write to ".to_vec();
             msg.extend_from_slice(&self.current_path);
@@ -8664,9 +8669,8 @@ impl DonorMaterializeClient for MaterializeClientAdapter<'_, '_, '_> {
             self.env
                 .borrow_mut()
                 .emit_message_bytes(TargetMessageKind::Warning, &msg);
-            return false;
         }
-        true
+        io_res
     }
 
     fn close_member(&mut self) {
@@ -9882,7 +9886,7 @@ impl CrossPackRepairSession {
                             members: &self.set_members,
                             env: env_cell,
                         };
-                        adapter.read_file(other, o_at, &mut buf)
+                        adapter.read_file(other, o_at, &mut buf).is_ok()
                     };
                     if !read {
                         continue;
@@ -9911,7 +9915,7 @@ impl CrossPackRepairSession {
                         members: &self.set_members,
                         env: env_cell,
                     };
-                    adapter.write_file(m, tail_at, &tail)
+                    adapter.write_file(m, tail_at, &tail).is_ok()
                 };
                 if !written {
                     continue;
@@ -10555,21 +10559,8 @@ struct DiskTargetFileReader<'a> {
 }
 
 impl TargetFileReader for DiskTargetFileReader<'_> {
-    fn read_range(&mut self, offset: i64, buf: &mut [u8]) -> bool {
-        use std::io::{Read, Seek, SeekFrom};
-        if offset < 0 {
-            return false;
-        }
-        let Ok(pos) = self.file.seek(SeekFrom::Start(offset as u64)) else {
-            return false;
-        };
-        if pos != offset as u64 {
-            return false;
-        }
-        if buf.is_empty() {
-            return true;
-        }
-        self.file.read_exact(buf).is_ok()
+    fn read_range(&mut self, offset: i64, buf: &mut [u8]) -> std::io::Result<()> {
+        read_exact_at(self.file, io_offset(offset)?, buf)
     }
 }
 
@@ -10619,12 +10610,13 @@ fn patch_disk_file_from_donor(
         env: &'a std::cell::RefCell<&'b mut (dyn M1DonorEnv + 'e)>,
     }
     impl TargetFilePatcher for DiskPatcherAdapter<'_, '_, '_> {
-        fn write_range(&mut self, offset: i64, data: &[u8]) -> bool {
-            if offset < 0 || self.env.borrow().is_stopped() {
-                return false;
+        fn write_range(&mut self, offset: i64, data: &[u8]) -> std::io::Result<()> {
+            io_offset(offset)?;
+            if self.env.borrow().is_stopped() {
+                return Err(std::io::ErrorKind::Interrupted.into());
             }
             let io_res = guarded_donor_write(self.file, self.write_context, offset, data);
-            if let Err(err) = io_res {
+            if let Err(err) = &io_res {
                 let err_msg = write_error_message_bytes(&err);
                 let mut msg = b"Could not write to ".to_vec();
                 msg.extend_from_slice(self.target_filename);
@@ -10633,9 +10625,8 @@ fn patch_disk_file_from_donor(
                 self.env
                     .borrow_mut()
                     .emit_message_bytes(TargetMessageKind::Error, &msg);
-                return false;
             }
-            true
+            io_res
         }
 
         fn add_progress(&mut self, bytes: i64) {
@@ -15779,28 +15770,35 @@ mod tests {
             member_index >= 0 && (member_index as usize) < self.files.len()
         }
 
-        fn read_file(&mut self, member_index: i32, offset: i64, buf: &mut [u8]) -> bool {
-            let Some(file) = self.files.get(member_index as usize) else {
-                return false;
-            };
+        fn read_file(
+            &mut self,
+            member_index: i32,
+            offset: i64,
+            buf: &mut [u8],
+        ) -> std::io::Result<()> {
+            let file = self
+                .files
+                .get(member_index as usize)
+                .ok_or(std::io::ErrorKind::NotFound)?;
             if offset < 0 || (offset as usize).saturating_add(buf.len()) > file.len() {
-                return false;
+                return Err(std::io::ErrorKind::UnexpectedEof.into());
             }
             let start = offset as usize;
             buf.copy_from_slice(&file[start..start + buf.len()]);
-            true
+            Ok(())
         }
 
-        fn write_file(&mut self, member_index: i32, offset: i64, data: &[u8]) -> bool {
-            let Some(file) = self.files.get_mut(member_index as usize) else {
-                return false;
-            };
+        fn write_file(&mut self, member_index: i32, offset: i64, data: &[u8]) -> std::io::Result<()> {
+            let file = self
+                .files
+                .get_mut(member_index as usize)
+                .ok_or(std::io::ErrorKind::NotFound)?;
             if offset < 0 || (offset as usize).saturating_add(data.len()) > file.len() {
-                return false;
+                return Err(std::io::ErrorKind::InvalidInput.into());
             }
             let start = offset as usize;
             file[start..start + data.len()].copy_from_slice(data);
-            true
+            Ok(())
         }
 
         fn on_message(&mut self, kind: TargetMessageKind, text: &str) {
@@ -16220,32 +16218,26 @@ mod tests {
     }
 
     impl TargetFileReader for MockFileTarget {
-        fn read_range(&mut self, offset: i64, buf: &mut [u8]) -> bool {
-            if offset < 0 {
-                return false;
-            }
-            let start = offset as usize;
+        fn read_range(&mut self, offset: i64, buf: &mut [u8]) -> std::io::Result<()> {
+            let start = io_offset(offset)? as usize;
             let end = start.saturating_add(buf.len());
             if end > self.bytes.len() {
-                return false;
+                return Err(std::io::ErrorKind::UnexpectedEof.into());
             }
             buf.copy_from_slice(&self.bytes[start..end]);
-            true
+            Ok(())
         }
     }
 
     impl TargetFilePatcher for MockFileTarget {
-        fn write_range(&mut self, offset: i64, data: &[u8]) -> bool {
-            if offset < 0 {
-                return false;
-            }
-            let start = offset as usize;
+        fn write_range(&mut self, offset: i64, data: &[u8]) -> std::io::Result<()> {
+            let start = io_offset(offset)? as usize;
             let end = start.saturating_add(data.len());
             if end > self.bytes.len() {
-                return false;
+                return Err(std::io::ErrorKind::InvalidInput.into());
             }
             self.bytes[start..end].copy_from_slice(data);
-            true
+            Ok(())
         }
 
         fn add_progress(&mut self, bytes: i64) {
@@ -17633,13 +17625,13 @@ mod tests {
                 fn is_stopped(&mut self) -> bool {
                     false
                 }
-                fn open_member(&mut self, member_index: i32) -> bool {
+                fn open_member(&mut self, member_index: i32) -> std::io::Result<()> {
                     self.cur_member = member_index;
-                    true
+                    Ok(())
                 }
-                fn write_member(&mut self, offset: i64, data: &[u8]) -> bool {
+                fn write_member(&mut self, offset: i64, data: &[u8]) -> std::io::Result<()> {
                     self.written.push((self.cur_member, offset, data.to_vec()));
-                    true
+                    Ok(())
                 }
                 fn close_member(&mut self) {}
                 fn begin_member_batch(&mut self, member_index: i32) {

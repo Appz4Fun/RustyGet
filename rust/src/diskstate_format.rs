@@ -2107,107 +2107,98 @@ unsafe fn scan_one_i32(infile_ctx: *mut std::ffi::c_void, read_line_cb: ReadLine
     ScanCursor(&line).i32(false)
 }
 
-/// Consolidated filesystem operations for `DiskState`:
-/// - `op == 0`: `DiscardDownloadQueue`
-/// - `op == 1`: `DownloadQueueExists`
-/// - `op == 2`: `DiscardFile(a1, a2 != 0, a3 != 0, a4 != 0)`
-/// - `op == 3`: `DeleteCacheFlag`
-/// - `op == 4`: `RaiseIdsPastQueueDir` (outputs `max_nzb_id` and `max_file_id` into `out1`/`out2`)
-/// - `op == 5`: `SaveIdFloor(a1, a2)`
-/// - `op == 6`: `CacheWasActive` (checks `<queue_dir><sep>acache`)
-/// - `op == 7`: `DeleteQueueNzbLog(a1)` (deletes `<queue_dir><sep>n<a1>.log`)
-#[allow(clippy::too_many_arguments)]
-pub fn diskstate_fs_op(
-    op: i32,
-    qdir: &[u8],
-    sep: u8,
-    a1: i32,
-    a2: i32,
-    a3: i32,
-    a4: i32,
-    out1: &mut i32,
-    out2: &mut i32,
-) -> i32 {
-    let join = |name: &[u8]| -> Vec<u8> {
-        crate::artwritercore::article_writer_format_dest_file_path(qdir, sep, name)
-    };
-    let remove = |name: &[u8]| {
-        let p = join(name);
-        let _ = std::fs::remove_file(crate::fsops::path(&p));
-    };
-    let exists = |name: &[u8]| -> bool {
-        let p = join(name);
-        crate::fsops::posix_stat(&p) == 1
-    };
+fn queue_file_path(qdir: &[u8], sep: u8, name: &[u8]) -> Vec<u8> {
+    crate::artwritercore::article_writer_format_dest_file_path(qdir, sep, name)
+}
 
-    match op {
-        0 => {
-            remove(b"queue");
-            remove(b"history");
-            for entry in crate::fsops::list_dir_entries(qdir) {
-                if !entry.is_empty() && entry.iter().all(|b| b.is_ascii_digit()) {
-                    remove(&entry);
-                    let mut s_name = entry.clone();
-                    s_name.push(b's');
-                    remove(&s_name);
-                    let mut c_name = entry;
-                    c_name.push(b'c');
-                    remove(&c_name);
-                }
-            }
-            1
+fn remove_queue_file(qdir: &[u8], sep: u8, name: &[u8]) {
+    let p = queue_file_path(qdir, sep, name);
+    let _ = std::fs::remove_file(crate::fsops::path(&p));
+}
+
+fn queue_file_exists(qdir: &[u8], sep: u8, name: &[u8]) -> bool {
+    crate::fsops::posix_stat(&queue_file_path(qdir, sep, name)) == 1
+}
+
+/// `DiscardDownloadQueue`: removes the queue and history files and every
+/// numbered file (with its `s` and `c` companions) in the queue dir.
+pub fn discard_queue_files(qdir: &[u8], sep: u8) {
+    remove_queue_file(qdir, sep, b"queue");
+    remove_queue_file(qdir, sep, b"history");
+    for entry in crate::fsops::list_dir_entries(qdir) {
+        if !entry.is_empty() && entry.iter().all(|b| b.is_ascii_digit()) {
+            remove_queue_file(qdir, sep, &entry);
+            let mut s_name = entry.clone();
+            s_name.push(b's');
+            remove_queue_file(qdir, sep, &s_name);
+            let mut c_name = entry;
+            c_name.push(b'c');
+            remove_queue_file(qdir, sep, &c_name);
         }
-        1 => i32::from(exists(b"queue") || exists(b"history") || exists(b"ids")),
-        2 => {
-            if a2 != 0 {
-                remove(format!("{a1}").as_bytes());
-            }
-            if a3 != 0 {
-                remove(format!("{a1}s").as_bytes());
-            }
-            if a4 != 0 {
-                remove(format!("{a1}c").as_bytes());
-            }
-            1
-        }
-        3 => {
-            remove(b"acache");
-            1
-        }
-        4 => {
-            let mut max_nzb = -1i32;
-            let mut max_file = -1i32;
-            let ids_path = join(b"ids");
-            if crate::fsops::posix_stat(&ids_path) == 1 {
-                if let Ok(mut data) = std::fs::read(crate::fsops::path(&ids_path)) {
-                    data.push(0);
-                    if let Some((n_id, f_id)) = parse_ids_file(&data) {
-                        max_nzb = max_nzb.max(n_id);
-                        max_file = max_file.max(f_id);
-                    }
-                }
-            }
-            for entry in crate::fsops::list_dir_entries(qdir) {
-                if let Some((id, is_nzb_log)) = classify_queue_dir_id(&entry) {
-                    if is_nzb_log {
-                        max_nzb = max_nzb.max(id);
-                    } else {
-                        max_file = max_file.max(id);
-                    }
-                }
-            }
-            *out1 = max_nzb;
-            *out2 = max_file;
-            1
-        }
-        5 => i32::from(save_id_floor_file(qdir, sep, a1, a2)),
-        6 => i32::from(exists(b"acache")),
-        7 => {
-            remove(format!("n{a1}.log").as_bytes());
-            1
-        }
-        _ => 0,
     }
+}
+
+/// `DownloadQueueExists`: true if a queue, history or ids file is saved.
+pub fn saved_queue_exists(qdir: &[u8], sep: u8) -> bool {
+    queue_file_exists(qdir, sep, b"queue")
+        || queue_file_exists(qdir, sep, b"history")
+        || queue_file_exists(qdir, sep, b"ids")
+}
+
+/// `DiscardFile`: removes the chosen parts of file `id`: its info file
+/// (`<id>`), its state file (`<id>s`) and its completed-state file (`<id>c`).
+pub fn discard_file_parts(qdir: &[u8], sep: u8, id: i32, info: bool, state: bool, completed: bool) {
+    if info {
+        remove_queue_file(qdir, sep, format!("{id}").as_bytes());
+    }
+    if state {
+        remove_queue_file(qdir, sep, format!("{id}s").as_bytes());
+    }
+    if completed {
+        remove_queue_file(qdir, sep, format!("{id}c").as_bytes());
+    }
+}
+
+/// Removes the `acache` flag file.
+pub fn delete_cache_flag(qdir: &[u8], sep: u8) {
+    remove_queue_file(qdir, sep, b"acache");
+}
+
+/// True if the `acache` flag file is present.
+pub fn cache_was_active(qdir: &[u8], sep: u8) -> bool {
+    queue_file_exists(qdir, sep, b"acache")
+}
+
+/// Removes the message log `n<nzb_id>.log`.
+pub fn delete_nzb_log(qdir: &[u8], sep: u8, nzb_id: i32) {
+    remove_queue_file(qdir, sep, format!("n{nzb_id}.log").as_bytes());
+}
+
+/// The highest nzb and file ids found in the `ids` file and the file names
+/// in the queue dir, each -1 when none is found.
+pub fn max_queue_dir_ids(qdir: &[u8], sep: u8) -> (i32, i32) {
+    let mut max_nzb = -1i32;
+    let mut max_file = -1i32;
+    let ids_path = queue_file_path(qdir, sep, b"ids");
+    if crate::fsops::posix_stat(&ids_path) == 1 {
+        if let Ok(mut data) = std::fs::read(crate::fsops::path(&ids_path)) {
+            data.push(0);
+            if let Some((n_id, f_id)) = parse_ids_file(&data) {
+                max_nzb = max_nzb.max(n_id);
+                max_file = max_file.max(f_id);
+            }
+        }
+    }
+    for entry in crate::fsops::list_dir_entries(qdir) {
+        if let Some((id, is_nzb_log)) = classify_queue_dir_id(&entry) {
+            if is_nzb_log {
+                max_nzb = max_nzb.max(id);
+            } else {
+                max_file = max_file.max(id);
+            }
+        }
+    }
+    (max_nzb, max_file)
 }
 
 /// Reads saved server info from `infile_ctx` via `read_line_cb` and runs `match_servers`.
@@ -5824,9 +5815,7 @@ unsafe fn load_all_file_states_op(
     temp_dir: &[u8],
     sep: u8,
 ) -> bool {
-    let mut o1 = 0;
-    let mut o2 = 0;
-    let cache_was_active = diskstate_fs_op(6, qdir, sep, 0, 0, 0, 0, &mut o1, &mut o2) != 0;
+    let cache_was_active = cache_was_active(qdir, sep);
 
     for filename in crate::fsops::list_dir_entries(qdir) {
         if let Some((id, suffix)) = diskstate_parse_queue_file_id_and_suffix(&filename) {
@@ -6034,13 +6023,12 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
     let qdir = unsafe { cstr::bytes(env.queue_dir) };
     let tdir = unsafe { cstr::bytes(env.temp_dir) };
     let sep = env.sep as u8;
-    let mut o1 = 0;
-    let mut o2 = 0;
 
     match op {
         DiskOp::DiscardQueue => {
             emit_log(env, DiskLogLevel::Debug, b"Discarding queue");
-            diskstate_fs_op(0, qdir, sep, 0, 0, 0, 0, &mut o1, &mut o2)
+            discard_queue_files(qdir, sep);
+            1
         }
         DiskOp::QueueExists => {
             emit_log(
@@ -6048,12 +6036,16 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                 DiskLogLevel::Debug,
                 b"Checking if a saved queue exists on disk",
             );
-            diskstate_fs_op(1, qdir, sep, 0, 0, 0, 0, &mut o1, &mut o2)
+            c_int::from(saved_queue_exists(qdir, sep))
         }
-        DiskOp::DiscardFile => diskstate_fs_op(
-            2, qdir, sep, env.a1, env.a2, env.a3, env.a4, &mut o1, &mut o2,
-        ),
-        DiskOp::DeleteCacheFlag => diskstate_fs_op(3, qdir, sep, 0, 0, 0, 0, &mut o1, &mut o2),
+        DiskOp::DiscardFile => {
+            discard_file_parts(qdir, sep, env.a1, env.a2 != 0, env.a3 != 0, env.a4 != 0);
+            1
+        }
+        DiskOp::DeleteCacheFlag => {
+            delete_cache_flag(qdir, sep);
+            1
+        }
         DiskOp::WriteCacheFlag => {
             let flag_p =
                 crate::artwritercore::article_writer_format_dest_file_path(qdir, sep, b"acache");
@@ -6071,7 +6063,10 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                 1
             }
         }
-        DiskOp::DeleteNzbLog => diskstate_fs_op(7, qdir, sep, env.a1, 0, 0, 0, &mut o1, &mut o2),
+        DiskOp::DeleteNzbLog => {
+            delete_nzb_log(qdir, sep, env.a1);
+            1
+        }
         DiskOp::AppendNzbMessage => {
             let log_name = format!("n{}.log", env.a1);
             let log_p = crate::artwritercore::article_writer_format_dest_file_path(
@@ -6979,9 +6974,7 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
             if queue_files_failed {
                 unsafe { set_aside_queue_files_op(env, qdir, sep) };
             }
-            let mut max_nzb = -1;
-            let mut max_file = -1;
-            diskstate_fs_op(4, qdir, sep, 0, 0, 0, 0, &mut max_nzb, &mut max_file);
+            let (max_nzb, max_file) = max_queue_dir_ids(qdir, sep);
             call_ctrl(env, DiskCtrl::RaiseIdGen { max_nzb, max_file });
             c_int::from(ok)
         }
@@ -9113,31 +9106,16 @@ mod tests {
     }
 
     #[test]
-    fn test_diskstate_fs_op_and_set_aside_regular_files() {
+    fn test_queue_dir_files_and_set_aside_regular_files() {
         let dir =
             std::env::temp_dir().join(format!("rustyget_diskstate_fs_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let qdir = dir.to_string_lossy().into_owned().into_bytes();
-        let mut o1 = 0;
-        let mut o2 = 0;
-        assert_eq!(
-            diskstate_fs_op(1, &qdir, b'/', 0, 0, 0, 0, &mut o1, &mut o2),
-            0
-        );
-        assert_eq!(
-            diskstate_fs_op(5, &qdir, b'/', 12, 34, 0, 0, &mut o1, &mut o2),
-            1
-        );
-        assert_eq!(
-            diskstate_fs_op(1, &qdir, b'/', 0, 0, 0, 0, &mut o1, &mut o2),
-            1
-        );
-        assert_eq!(
-            diskstate_fs_op(4, &qdir, b'/', 0, 0, 0, 0, &mut o1, &mut o2),
-            1
-        );
-        assert_eq!((o1, o2), (12, 34));
+        assert!(!saved_queue_exists(&qdir, b'/'));
+        assert!(save_id_floor_file(&qdir, b'/', 12, 34));
+        assert!(saved_queue_exists(&qdir, b'/'));
+        assert_eq!(max_queue_dir_ids(&qdir, b'/'), (12, 34));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1190,6 +1190,17 @@ fn return_best_dupe_host(
     if let Some((hi, backup_nzb)) =
         find_dupe_backup_host(host, opts, dq_ptr, nzb_ptr, nzb_name, dupe_key)
     {
+        // A copy whose archive needs a password nobody has can never be extracted: downloading
+        // it after this one failed only fails again.
+        if locked_host(host, backup_nzb.ptr) {
+            let mut msg = b"Not returning duplicate ".to_vec();
+            msg.extend_from_slice(&backup_nzb.name);
+            msg.extend_from_slice(b" for ");
+            msg.extend_from_slice(nzb_name);
+            msg.extend_from_slice(b": its archive needs a password its nzb does not carry");
+            host.log(crate::queuesubsys_host::MK_INFO, &msg);
+            return;
+        }
         let mut msg = b"Found duplicate ".to_vec();
         msg.extend_from_slice(&backup_nzb.name);
         msg.extend_from_slice(b" for ");
@@ -1262,6 +1273,9 @@ fn rescue_dupe_host(
         return;
     }
     let backup = host.nzb_snap(hi.nzb(), false);
+    if locked_host(host, backup.ptr) {
+        return;
+    }
     let alive = history_candidates[winner as usize].alive_permille;
     // DupeSearchDryRun only covers what DupeSearch itself would do.
     let dry_run = crate::options::active_options()

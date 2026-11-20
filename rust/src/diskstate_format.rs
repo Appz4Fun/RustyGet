@@ -7144,7 +7144,7 @@ unsafe extern "C" fn active_disk_ctrl_cb(
         }
         15 => {
             let fp = c.target_file_ptr;
-            qh.file_action(fp, crate::queuesubsys_host::FILE_ACT_CLEAR_ARTICLES, 0);
+            qh.file_action(fp, crate::queuesubsys_host::FILE_ACT_CLEAR_ARTICLES);
             qh.file_set_int(
                 fp,
                 crate::queuesubsys_host::FILE_INT_SUCCESS_ARTICLES,
@@ -7174,7 +7174,7 @@ unsafe extern "C" fn active_disk_ctrl_cb(
         }
         16 => {
             let fp = c.target_file_ptr;
-            qh.file_action(fp, crate::queuesubsys_host::FILE_ACT_CLEAR_ARTICLES, 0);
+            qh.file_action(fp, crate::queuesubsys_host::FILE_ACT_CLEAR_ARTICLES);
             qh.file_set_int(
                 fp,
                 crate::queuesubsys_host::FILE_INT_PARTIAL_STATE,

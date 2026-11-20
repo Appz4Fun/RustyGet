@@ -2965,7 +2965,7 @@ unsafe extern "C" fn hc_native_action_cb(
             if a2 == PARTIAL_COMPLETED {
                 host.disk_save_file_state(file, true);
             }
-            host.file_action(file, FILE_ACT_CLEAR_ARTICLES, 0);
+            host.file_action(file, FILE_ACT_CLEAR_ARTICLES);
             let fid = fs.id;
             host.nzb_add_requeued_file(job, file);
             host.nzb_erase_completed_file(job, a1 as usize);

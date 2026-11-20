@@ -3501,7 +3501,6 @@ impl NzbgetRsQueueCoordinator {
                     host.file_action(
                         file.ptr,
                         crate::queuesubsys_host::FILE_ACT_MAKE_VALID_FILENAME,
-                        0,
                     );
                     file = host.file_snap(file.ptr);
                 }
@@ -3688,7 +3687,6 @@ impl NzbgetRsQueueCoordinator {
                     host.file_action(
                         file.ptr,
                         crate::queuesubsys_host::FILE_ACT_FAIL_FINISHED_ARTICLES,
-                        0,
                     );
                     self.discard_temp_files(host, &opts, &file);
                     self.delete_downloader(host, dq_ptr, ad_ptr, true);
@@ -5975,7 +5973,7 @@ fn discard_direct_rename_host(
             host.log(crate::queuesubsys_host::MK_DEBUG, &dbg);
             host.file_set_int(fp, crate::queuesubsys_host::FILE_INT_PARTIAL_CHANGED, 1);
             save_partial_state_host(host, fp);
-            host.file_action(fp, crate::queuesubsys_host::FILE_ACT_CLEAR_ARTICLES, 0);
+            host.file_action(fp, crate::queuesubsys_host::FILE_ACT_CLEAR_ARTICLES);
         }
     }
 
@@ -5997,11 +5995,7 @@ fn discard_downloaded_articles_host(
     nzb_ptr: NzbRef,
     file_ptr: FileRef,
 ) {
-    host.file_action(
-        file_ptr,
-        crate::queuesubsys_host::FILE_ACT_SUBTRACT_AND_CLEAR_SERVER_STATS,
-        nzb_ptr.addr(),
-    );
+    host.file_subtract_and_clear_server_stats(file_ptr, nzb_ptr);
     let nzb = host.nzb_snap(nzb_ptr, false);
     let file = host.file_snap(file_ptr);
     let (
@@ -6125,16 +6119,11 @@ fn discard_downloaded_articles_host(
     );
 
     if opts.server_mode {
-        host.file_action(
-            file_ptr,
-            crate::queuesubsys_host::FILE_ACT_CLEAR_ARTICLES,
-            0,
-        );
+        host.file_action(file_ptr, crate::queuesubsys_host::FILE_ACT_CLEAR_ARTICLES);
     } else {
         host.file_action(
             file_ptr,
             crate::queuesubsys_host::FILE_ACT_RESET_ARTICLES_NONSERV,
-            0,
         );
     }
 }
@@ -6151,11 +6140,7 @@ fn discard_temp_files_host(
             let _ = crate::fsops::delete_file(cs);
         }
     };
-    host.file_action(
-        file.ptr,
-        crate::queuesubsys_host::FILE_ACT_DISCARD_TEMP_ARTICLES,
-        usize::from(!opts.direct_write && !file.force_direct_write),
-    );
+    host.file_discard_temp_articles(file.ptr, !opts.direct_write && !file.force_direct_write);
     if opts.direct_write && !file.output_filename.is_empty() && !file.force_direct_write {
         unlink_bytes(&file.output_filename);
         if file.is_hard_linked && !file.hard_link_path.is_empty() {

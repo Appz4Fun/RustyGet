@@ -1640,9 +1640,7 @@ impl JobQueue<'_> {
         st.downloaded_files = (0..host.nzb_completed_files_len(n))
             .map(|i| cstr::until_nul(&host.nzb_completed_file_at(n, i).filename).to_vec())
             .collect();
-        st.extracted_archives = (0..ps.extracted_archives_len)
-            .map(|i| cstr::until_nul(&host.post_extracted_archive_at(post_ptr, i)).to_vec())
-            .collect();
+        st.extracted_archives = host.post_extracted_archives(post_ptr);
         st.unpack_tried = ps.unpack_tried;
         st.par_repaired = ps.par_repaired;
         st.prev_pass_list_tried = ps.pass_list_tried;

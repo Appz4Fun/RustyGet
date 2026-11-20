@@ -975,6 +975,160 @@ pub(crate) fn act(nzb: NzbRef, action: NzbAction) {
     }
 }
 
+/// An integer or flag field of a post-processing job (flags take 0 or 1).
+/// ParRepaired, UnpackTried and LastUnpackStatus also live on the download,
+/// and setting them writes both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PostInt {
+    Stage = 0,
+    Working = 1,
+    Deleted = 2,
+    RequestParCheck = 3,
+    ForceParFull = 4,
+    ParCannotCover = 5,
+    NeedParCheck = 6,
+    NeedUnpack = 7,
+    ForceRepair = 8,
+    ParRepaired = 9,
+    UnpackTried = 10,
+    PassListTried = 11,
+    LastUnpackStatus = 12,
+    FileProgress = 13,
+    /// Kept in 0..=1000.
+    StageProgress = 14,
+    StreamRepairDone = 15,
+    StreamRepairRecovered = 16,
+}
+
+impl PostInt {
+    /// Whether the field is a flag (stored as 0 or 1).
+    const fn is_flag(self) -> bool {
+        !matches!(
+            self,
+            Self::Stage | Self::LastUnpackStatus | Self::FileProgress | Self::StageProgress
+        )
+    }
+}
+
+/// The live post job behind a handle; `None` for [`PostRef::NONE`].
+fn post_of(post: crate::queuesubsys_host::PostRef) -> Option<*const Post> {
+    post.is_some().then(|| post.addr() as *const Post)
+}
+
+/// Sets an integer or flag field of a post job.
+pub(crate) fn post_set_int(post: crate::queuesubsys_host::PostRef, field: PostInt, v: i32) {
+    if let Some(p) = post_of(post) {
+        let v = if field.is_flag() {
+            i64::from(v != 0)
+        } else {
+            i64::from(v)
+        };
+        post_set(p, field as c_int, v);
+    }
+}
+
+/// Sets when post-processing started.
+pub(crate) fn post_set_start_time(post: crate::queuesubsys_host::PostRef, time: i64) {
+    if let Some(p) = post_of(post) {
+        post_set(p, 17, time);
+    }
+}
+
+/// Starts a new stage at `time`: progress and label are cleared.
+pub(crate) fn post_begin_stage(post: crate::queuesubsys_host::PostRef, time: i64) {
+    if let Some(p) = post_of(post) {
+        post_set(p, 18, time);
+        post_set(p, PostInt::StageProgress as c_int, 0);
+        post_set(p, PostInt::FileProgress as c_int, 0);
+        post_set_label(p, c"");
+    }
+}
+
+/// Sets when the current stage started.
+pub(crate) fn post_set_stage_time(post: crate::queuesubsys_host::PostRef, time: i64) {
+    if let Some(p) = post_of(post) {
+        post_set(p, 18, time);
+    }
+}
+
+/// Sets the progress label.
+pub(crate) fn post_set_progress_label(post: crate::queuesubsys_host::PostRef, label: &[u8]) {
+    if let Some(p) = post_of(post) {
+        post_set_label(p, &c_string(label));
+    }
+}
+
+fn post_set_label(p: *const Post, label: &CStr) {
+    unsafe { &*p }
+        .lists
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .label = label.to_owned();
+}
+
+/// Records a file the par check repaired or renamed.
+pub(crate) fn post_push_parred_file(post: crate::queuesubsys_host::PostRef, name: &[u8]) {
+    if let Some(p) = post_of(post) {
+        unsafe { &*p }
+            .lists
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .parred
+            .push(c_string(name));
+    }
+}
+
+/// The files the par check repaired or renamed, in order.
+pub(crate) fn post_parred_files(post: crate::queuesubsys_host::PostRef) -> Vec<Vec<u8>> {
+    post_of(post).map_or_else(Vec::new, |p| {
+        let l = unsafe { &*p }
+            .lists
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        l.parred.iter().map(|f| f.to_bytes().to_vec()).collect()
+    })
+}
+
+/// The archives unpacked so far: the download's list when the job has a
+/// download, else the job's own.
+pub(crate) fn post_extracted_archives(post: crate::queuesubsys_host::PostRef) -> Vec<Vec<u8>> {
+    use std::sync::atomic::Ordering::SeqCst;
+    let Some(p) = post_of(post) else {
+        return Vec::new();
+    };
+    let post = unsafe { &*p };
+    let nzb = post.nzb.load(SeqCst);
+    if nzb != 0 {
+        return extracted_archives(NzbRef::from_addr(nzb));
+    }
+    let l = post
+        .lists
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    l.extracted.iter().map(|a| a.to_bytes().to_vec()).collect()
+}
+
+/// Forgets the archives unpacked so far (the download's list when the job
+/// has a download, else the job's own).
+pub(crate) fn post_clear_extracted_archives(post: crate::queuesubsys_host::PostRef) {
+    use std::sync::atomic::Ordering::SeqCst;
+    let Some(p) = post_of(post) else { return };
+    let post = unsafe { &*p };
+    match post.nzb.load(SeqCst) {
+        0 => post
+            .lists
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extracted
+            .clear(),
+        nzb => {
+            if let Some(d) = nzb_data(NzbRef::from_addr(nzb)) {
+                d.files().extracted.clear();
+            }
+        }
+    }
+}
+
 pub extern "C" fn nzbget_rs_nzb_scalars_new() -> *mut NzbScalars {
     let mut texts: [Option<CString>; TEXTS] = Default::default();
     for (i, t) in texts.iter_mut().enumerate() {
@@ -1654,106 +1808,59 @@ thread_local! {
     static POST_LABEL: std::cell::RefCell<CString> = std::cell::RefCell::new(CString::default());
 }
 
-/// Host op 60 on a post job `p` (sub-op `a1`), as the C++ host did:
-///  0 snapshot (ints[0..21], i64s[0..3], strs[0] the progress label);
-///  1 set field a2 (0-16) to p2; 2 start time = i64s[0];
-///  3 new stage at time i64s[0] (progress and label cleared);
-///  4 stage time = i64s[0]; 5 progress label = s1;
-///  6 parred files: add s1 when a2 < 0, else strs[0] = file a2;
-///  7 extracted archives: clear when a2 < 0, else strs[0] = archive a2.
+/// A post job's snapshot: ints[0..21], i64s[0..3] and strs[0] the
+/// progress label (when `strs` is not null). The setters and lists are the
+/// typed `post_*` functions.
 ///
 /// # Safety
-/// `p` is null or a live post job; the arrays fit the sub-op.
-#[allow(clippy::too_many_arguments)]
-pub(crate) unsafe fn host_post_op(
+/// `p` is null or a live post job; the arrays fit the snapshot.
+pub(crate) unsafe fn host_post_snapshot(
     p: *const Post,
-    a1: c_int,
-    a2: c_int,
-    p2: usize,
-    s1: *const c_char,
     ints: *mut c_int,
     i64s: *mut i64,
     strs: *mut *const c_char,
-) -> usize {
+) {
     if p.is_null() {
-        return 0;
+        return;
     }
     let ns: *const c_char = std::ptr::null();
     let none: *mut *const c_char = std::ptr::null_mut();
     let flag = |id| c_int::from(post_get(p, id) != 0);
-    match a1 {
-        0 => {
-            let ints = unsafe { std::slice::from_raw_parts_mut(ints, 21) };
-            let i64s = unsafe { std::slice::from_raw_parts_mut(i64s, 3) };
-            let pt = post_thread(p);
-            ints[0] = post_get(p, 0) as c_int;
-            for (slot, id) in [1, 2, 3, 4, 8, 15, 16, 5, 6, 7].into_iter().enumerate() {
-                ints[slot + 1] = flag(id);
-            }
-            ints[11] = c_int::from(!pt.is_null());
-            ints[12] = c_int::from(
-                !pt.is_null() && unsafe { crate::jobthread::nzbget_rs_job_op(pt, 4, 0, 0, 0) } != 0,
-            );
-            ints[13] = flag(10);
-            ints[14] = flag(9);
-            ints[15] = flag(11);
-            ints[16] = post_get(p, 12) as c_int;
-            ints[17] = unsafe { nzbget_rs_post_op(p, 30, 0, 0, ns, none) } as c_int;
-            ints[18] = unsafe { nzbget_rs_post_op(p, 20, 0, 0, ns, none) } as c_int;
-            ints[19] = post_get(p, 14) as c_int;
-            ints[20] = post_get(p, 13) as c_int;
-            i64s[0] = post_get(p, 17);
-            i64s[1] = unsafe { nzbget_rs_post_op(p, 2, 0, 0, ns, none) };
-            i64s[2] = post_get(p, 18);
-            if !strs.is_null() {
-                let label = unsafe { &*p }
-                    .lists
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .label
-                    .clone();
-                let ptr = POST_LABEL.with(|l| {
-                    *l.borrow_mut() = label;
-                    l.borrow().as_ptr()
-                });
-                unsafe { *strs = ptr };
-            }
-        }
-        1 => {
-            let v = p2 as c_int;
-            match a2 {
-                0 | 12 | 13 | 14 => post_set(p, a2, i64::from(v)),
-                1..=11 | 15 | 16 => post_set(p, a2, i64::from(v != 0)),
-                _ => {}
-            }
-        }
-        2 => post_set(p, 17, unsafe { *i64s }),
-        3 => {
-            post_set(p, 18, unsafe { *i64s });
-            post_set(p, 14, 0);
-            post_set(p, 13, 0);
-            unsafe { nzbget_rs_post_op(p, 11, 0, 0, c"".as_ptr(), none) };
-        }
-        4 => post_set(p, 18, unsafe { *i64s }),
-        5 => {
-            unsafe { nzbget_rs_post_op(p, 11, 0, 0, s1, none) };
-        }
-        6 | 7 => {
-            let base = if a1 == 6 { 20 } else { 30 };
-            if a2 < 0 {
-                // add a parred file, or clear the extracted archives
-                let (op, s) = if a1 == 6 { (22, s1) } else { (33, ns) };
-                unsafe { nzbget_rs_post_op(p, op, 0, 0, s, none) };
-            } else {
-                unsafe {
-                    *strs = c"".as_ptr();
-                    nzbget_rs_post_op(p, base + 1, a2, 0, ns, strs);
-                }
-            }
-        }
-        _ => {}
+    let ints = unsafe { std::slice::from_raw_parts_mut(ints, 21) };
+    let i64s = unsafe { std::slice::from_raw_parts_mut(i64s, 3) };
+    let pt = post_thread(p);
+    ints[0] = post_get(p, 0) as c_int;
+    for (slot, id) in [1, 2, 3, 4, 8, 15, 16, 5, 6, 7].into_iter().enumerate() {
+        ints[slot + 1] = flag(id);
     }
-    0
+    ints[11] = c_int::from(!pt.is_null());
+    ints[12] = c_int::from(
+        !pt.is_null() && unsafe { crate::jobthread::nzbget_rs_job_op(pt, 4, 0, 0, 0) } != 0,
+    );
+    ints[13] = flag(10);
+    ints[14] = flag(9);
+    ints[15] = flag(11);
+    ints[16] = post_get(p, 12) as c_int;
+    ints[17] = unsafe { nzbget_rs_post_op(p, 30, 0, 0, ns, none) } as c_int;
+    ints[18] = unsafe { nzbget_rs_post_op(p, 20, 0, 0, ns, none) } as c_int;
+    ints[19] = post_get(p, 14) as c_int;
+    ints[20] = post_get(p, 13) as c_int;
+    i64s[0] = post_get(p, 17);
+    i64s[1] = unsafe { nzbget_rs_post_op(p, 2, 0, 0, ns, none) };
+    i64s[2] = post_get(p, 18);
+    if !strs.is_null() {
+        let label = unsafe { &*p }
+            .lists
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .label
+            .clone();
+        let ptr = POST_LABEL.with(|l| {
+            *l.borrow_mut() = label;
+            l.borrow().as_ptr()
+        });
+        unsafe { *strs = ptr };
+    }
 }
 
 /// Starts a direct-unpack job for collection `p` (host op 62 sub-op 8): the
@@ -3339,66 +3446,40 @@ mod tests {
     }
 
     #[test]
-    fn host_post_op_snapshot_and_setters() {
+    fn post_snapshot_and_typed_setters() {
+        use crate::queuesubsys_host::PostRef;
         let ns: *const c_char = std::ptr::null();
         let mut ints = [0 as c_int; 21];
         let mut i64s = [0i64; 3];
         let mut strs = [ns; 1];
         unsafe {
             // a null post job is ignored
-            assert_eq!(
-                host_post_op(
-                    std::ptr::null(),
-                    0,
-                    0,
-                    0,
-                    ns,
-                    ints.as_mut_ptr(),
-                    i64s.as_mut_ptr(),
-                    strs.as_mut_ptr()
-                ),
-                0
-            );
-            let p = nzbget_rs_post_new();
-            let op =
-                |a1, a2, p2: usize, s1: *const c_char, i64s: *mut i64, strs: *mut *const c_char| {
-                    host_post_op(p, a1, a2, p2, s1, std::ptr::null_mut(), i64s, strs)
-                };
-            let ni: *mut i64 = std::ptr::null_mut();
-            let nsn: *mut *const c_char = std::ptr::null_mut();
-            // flags are stored as 0/1, unknown fields ignored
-            op(1, 1, 5, ns, ni, nsn);
-            op(1, 8, 1, ns, ni, nsn);
-            op(1, 0, 7, ns, ni, nsn);
-            op(1, 12, 3, ns, ni, nsn);
-            op(1, 19, 99, ns, ni, nsn);
-            assert_eq!(post_get(p, 1), 1);
-            assert_eq!(post_get(p, 19), 0);
-            let mut t = [1234i64];
-            op(2, 0, 0, ns, t.as_mut_ptr(), nsn);
-            op(1, 14, 500, ns, ni, nsn);
-            op(5, 0, 0, c"Repairing".as_ptr(), ni, nsn);
-            op(6, -1, 0, c"a.par2".as_ptr(), ni, nsn);
-            op(6, -1, 0, ns, ni, nsn);
-            op(7, 0, 0, ns, ni, strs.as_mut_ptr());
-            assert_eq!(CStr::from_ptr(strs[0]).to_bytes(), b"");
-            op(6, 0, 0, ns, ni, strs.as_mut_ptr());
-            assert_eq!(CStr::from_ptr(strs[0]).to_bytes(), b"a.par2");
-            op(6, 1, 0, ns, ni, strs.as_mut_ptr());
-            assert_eq!(CStr::from_ptr(strs[0]).to_bytes(), b"");
-            op(6, 5, 0, ns, ni, strs.as_mut_ptr());
-            assert_eq!(CStr::from_ptr(strs[0]).to_bytes(), b"");
-            nzbget_rs_post_op(p, 32, 0, 0, c"b.rar".as_ptr(), nsn);
-            host_post_op(
-                p,
-                0,
-                0,
-                0,
-                ns,
+            host_post_snapshot(
+                std::ptr::null(),
                 ints.as_mut_ptr(),
                 i64s.as_mut_ptr(),
                 strs.as_mut_ptr(),
             );
+            assert_eq!(ints, [0; 21]);
+            let p = nzbget_rs_post_new();
+            let pr = PostRef::from_addr(p as usize);
+            let nsn: *mut *const c_char = std::ptr::null_mut();
+            // flags are stored as 0/1
+            post_set_int(pr, PostInt::Working, 5);
+            post_set_int(pr, PostInt::ForceRepair, 1);
+            post_set_int(pr, PostInt::Stage, 7);
+            post_set_int(pr, PostInt::LastUnpackStatus, 3);
+            assert_eq!(post_get(p, 1), 1);
+            post_set_start_time(pr, 1234);
+            post_set_int(pr, PostInt::StageProgress, 500);
+            post_set_progress_label(pr, b"Repairing");
+            post_push_parred_file(pr, b"a.par2");
+            post_push_parred_file(pr, b"");
+            assert_eq!(post_parred_files(pr), vec![b"a.par2".to_vec(), Vec::new()]);
+            assert!(post_extracted_archives(pr).is_empty());
+            nzbget_rs_post_op(p, 32, 0, 0, c"b.rar".as_ptr(), nsn);
+            assert_eq!(post_extracted_archives(pr), vec![b"b.rar".to_vec()]);
+            host_post_snapshot(p, ints.as_mut_ptr(), i64s.as_mut_ptr(), strs.as_mut_ptr());
             assert_eq!(ints[0], 7);
             assert_eq!(ints[1], 1);
             assert_eq!(ints[5], 1);
@@ -3412,28 +3493,25 @@ mod tests {
             assert_eq!(CStr::from_ptr(strs[0]).to_bytes(), b"Repairing");
             // the label copy outlives a later change
             let label = strs[0];
-            op(5, 0, 0, c"Unpacking".as_ptr(), ni, nsn);
+            post_set_progress_label(pr, b"Unpacking");
             assert_eq!(CStr::from_ptr(label).to_bytes(), b"Repairing");
             // a new stage clears progress and label
-            t[0] = 99;
-            op(3, 0, 0, ns, t.as_mut_ptr(), nsn);
-            host_post_op(
+            post_begin_stage(pr, 99);
+            host_post_snapshot(
                 p,
-                0,
-                0,
-                0,
-                ns,
                 ints.as_mut_ptr(),
                 i64s.as_mut_ptr(),
                 std::ptr::null_mut(),
             );
             assert_eq!((ints[19], ints[20], i64s[2]), (0, 0, 99));
             assert!(nzbget_rs_post_label(p).is_empty());
-            op(4, 0, 0, ns, [77i64].as_mut_ptr(), nsn);
+            post_set_stage_time(pr, 77);
             assert_eq!(post_get(p, 18), 77);
-            op(7, -1, 0, ns, ni, nsn);
+            post_clear_extracted_archives(pr);
             assert_eq!(nzbget_rs_post_op(p, 30, 0, 0, ns, nsn), 0);
             nzbget_rs_post_free(p);
+            // a missing handle is a no-op
+            post_set_int(PostRef::NONE, PostInt::Working, 1);
         }
     }
 

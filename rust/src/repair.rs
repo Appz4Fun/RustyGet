@@ -997,11 +997,10 @@ impl NzbgetRsRepairController {
 
     fn is_parred_file(&self, q: JobQueue<'_>, filename: &[u8]) -> bool {
         let post_ptr = q.post_ptr();
-        let count = q.host.post_snap(post_ptr).parred_files_len;
-        (0..count).any(|idx| {
-            let pf = q.host.post_parred_file_at(post_ptr, idx);
-            cstr::until_nul(&pf).eq_ignore_ascii_case(filename)
-        })
+        q.host
+            .post_parred_files(post_ptr)
+            .iter()
+            .any(|pf| pf.eq_ignore_ascii_case(filename))
     }
 
     fn find_file_quick_info(

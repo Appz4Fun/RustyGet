@@ -3,6 +3,7 @@
 
 use crate::options::OptStr;
 use crate::qfile::{FileAction, FileI64, FileInt, FileStr};
+use crate::qnzb::PostInt;
 use crate::qnzb::{
     FileTotals, MessageRange, NzbAction, NzbI64, NzbInt, NzbStr, ServerStat, StatList,
 };
@@ -353,23 +354,23 @@ pub(crate) const AD_ACT_COMPLETE_FILE_PARTS: i32 = 5;
 pub(crate) const AD_ACT_CANCEL_HANGING: i32 = 6;
 
 // PostInfo field indices (op = 60, a1 = 1)
-pub(crate) const POST_INT_STAGE: i32 = 0;
-pub(crate) const POST_INT_WORKING: i32 = 1;
-pub(crate) const POST_INT_DELETED: i32 = 2;
-pub(crate) const POST_INT_REQUEST_PAR_CHECK: i32 = 3;
-pub(crate) const POST_INT_FORCE_PAR_FULL: i32 = 4;
-pub(crate) const POST_INT_PAR_CANNOT_COVER: i32 = 5;
-pub(crate) const POST_INT_NEED_PAR_CHECK: i32 = 6;
-pub(crate) const POST_INT_NEED_UNPACK: i32 = 7;
-pub(crate) const POST_INT_FORCE_REPAIR: i32 = 8;
-pub(crate) const POST_INT_PAR_REPAIRED: i32 = 9;
-pub(crate) const POST_INT_UNPACK_TRIED: i32 = 10;
-pub(crate) const POST_INT_PASS_LIST_TRIED: i32 = 11;
-pub(crate) const POST_INT_LAST_UNPACK_STATUS: i32 = 12;
-pub(crate) const POST_INT_FILE_PROGRESS: i32 = 13;
-pub(crate) const POST_INT_STAGE_PROGRESS: i32 = 14;
-pub(crate) const POST_INT_STREAM_REPAIR_DONE: i32 = 15;
-pub(crate) const POST_INT_STREAM_REPAIR_RECOVERED: i32 = 16;
+pub(crate) const POST_INT_STAGE: PostInt = PostInt::Stage;
+pub(crate) const POST_INT_WORKING: PostInt = PostInt::Working;
+pub(crate) const POST_INT_DELETED: PostInt = PostInt::Deleted;
+pub(crate) const POST_INT_REQUEST_PAR_CHECK: PostInt = PostInt::RequestParCheck;
+pub(crate) const POST_INT_FORCE_PAR_FULL: PostInt = PostInt::ForceParFull;
+pub(crate) const POST_INT_PAR_CANNOT_COVER: PostInt = PostInt::ParCannotCover;
+pub(crate) const POST_INT_NEED_PAR_CHECK: PostInt = PostInt::NeedParCheck;
+pub(crate) const POST_INT_NEED_UNPACK: PostInt = PostInt::NeedUnpack;
+pub(crate) const POST_INT_FORCE_REPAIR: PostInt = PostInt::ForceRepair;
+pub(crate) const POST_INT_PAR_REPAIRED: PostInt = PostInt::ParRepaired;
+pub(crate) const POST_INT_UNPACK_TRIED: PostInt = PostInt::UnpackTried;
+pub(crate) const POST_INT_PASS_LIST_TRIED: PostInt = PostInt::PassListTried;
+pub(crate) const POST_INT_LAST_UNPACK_STATUS: PostInt = PostInt::LastUnpackStatus;
+pub(crate) const POST_INT_FILE_PROGRESS: PostInt = PostInt::FileProgress;
+pub(crate) const POST_INT_STAGE_PROGRESS: PostInt = PostInt::StageProgress;
+pub(crate) const POST_INT_STREAM_REPAIR_DONE: PostInt = PostInt::StreamRepairDone;
+pub(crate) const POST_INT_STREAM_REPAIR_RECOVERED: PostInt = PostInt::StreamRepairRecovered;
 
 // PostController kinds (op = 62, a1 = 12)
 pub(crate) const CTRL_RENAME_PAR: i32 = 0;
@@ -779,8 +780,6 @@ pub(crate) struct PostSnap {
     pub par_repaired: bool,
     pub pass_list_tried: bool,
     pub last_unpack_status: UnpackStatus,
-    pub extracted_archives_len: usize,
-    pub parred_files_len: usize,
     pub stage_progress: i32,
     pub file_progress: i32,
     pub start_time: i64,
@@ -1038,12 +1037,12 @@ impl QueueSubsysHost {
         }
     }
 
-    fn post_op(&self, post: PostRef, op: i32, x: OpArgs) -> usize {
+    fn post_snapshot(&self, post: PostRef, x: OpArgs) {
         if !self.use_active {
-            return 0;
+            return;
         }
         let post = post.addr() as *const crate::qnzb::Post;
-        unsafe { crate::qnzb::host_post_op(post, op, x.a2, x.p2, x.s1, x.ints, x.i64s, x.strs) }
+        unsafe { crate::qnzb::host_post_snapshot(post, x.ints, x.i64s, x.strs) };
     }
 
     fn post_job_op(&self, op: i32, p1: usize, x: OpArgs) -> usize {
@@ -3868,9 +3867,8 @@ impl QueueSubsysHost {
         let mut ints = [0i32; 21];
         let mut i64s = [0i64; 3];
         let mut strs = [std::ptr::null(); 1];
-        self.post_op(
+        self.post_snapshot(
             post_ptr,
-            0,
             OpArgs::NONE
                 .ints(ints.as_mut_ptr())
                 .i64s(i64s.as_mut_ptr())
@@ -3896,8 +3894,6 @@ impl QueueSubsysHost {
             par_repaired: ints[14] != 0,
             pass_list_tried: ints[15] != 0,
             last_unpack_status: UnpackStatus::from(ints[16]),
-            extracted_archives_len: ints[17].max(0) as usize,
-            parred_files_len: ints[18].max(0) as usize,
             stage_progress: ints[19],
             file_progress: ints[20],
             start_time: i64s[0],
@@ -3906,11 +3902,10 @@ impl QueueSubsysHost {
         }
     }
 
-    pub fn post_set_int(&self, post_ptr: PostRef, field: i32, val: i32) {
-        if post_ptr.is_none() {
-            return;
+    pub fn post_set_int(&self, post_ptr: PostRef, field: PostInt, val: i32) {
+        if self.use_active {
+            crate::qnzb::post_set_int(post_ptr, field, val);
         }
-        self.post_op(post_ptr, 1, OpArgs::NONE.a2(field).p2(val as usize));
     }
 
     pub fn post_set_stage(&self, post_ptr: PostRef, stage: PostStage) {
@@ -3918,74 +3913,56 @@ impl QueueSubsysHost {
     }
 
     pub fn post_set_start_time(&self, post_ptr: PostRef, start_time: i64) {
-        if post_ptr.is_none() {
-            return;
+        if self.use_active {
+            crate::qnzb::post_set_start_time(post_ptr, start_time);
         }
-        let mut i64s = [start_time];
-        self.post_op(post_ptr, 2, OpArgs::NONE.i64s(i64s.as_mut_ptr()));
     }
 
+    /// Starts a new stage at `stage_time`, clearing its progress and label.
     pub fn post_reset_stage_progress(&self, post_ptr: PostRef, stage_time: i64) {
-        if post_ptr.is_none() {
-            return;
+        if self.use_active {
+            crate::qnzb::post_begin_stage(post_ptr, stage_time);
         }
-        let mut i64s = [stage_time];
-        self.post_op(post_ptr, 3, OpArgs::NONE.i64s(i64s.as_mut_ptr()));
     }
 
     pub fn post_set_stage_time(&self, post_ptr: PostRef, stage_time: i64) {
-        if post_ptr.is_none() {
-            return;
+        if self.use_active {
+            crate::qnzb::post_set_stage_time(post_ptr, stage_time);
         }
-        let mut i64s = [stage_time];
-        self.post_op(post_ptr, 4, OpArgs::NONE.i64s(i64s.as_mut_ptr()));
     }
 
     pub fn post_set_progress_label(&self, post_ptr: PostRef, label: &[u8]) {
-        if post_ptr.is_none() {
-            return;
+        if self.use_active {
+            crate::qnzb::post_set_progress_label(post_ptr, label);
         }
-        let c = c_bytes(label);
-        self.post_op(post_ptr, 5, OpArgs::NONE.s1(c.as_ptr() as *const c_char));
     }
 
     pub fn post_push_parred_file(&self, post_ptr: PostRef, name: &[u8]) {
-        if post_ptr.is_none() {
-            return;
+        if self.use_active {
+            crate::qnzb::post_push_parred_file(post_ptr, name);
         }
-        let c = c_bytes(name);
-        self.post_op(
-            post_ptr,
-            6,
-            OpArgs::NONE.a2(-1).s1(c.as_ptr() as *const c_char),
-        );
     }
 
-    pub fn post_parred_file_at(&self, post_ptr: PostRef, idx: usize) -> Vec<u8> {
-        let mut strs = [std::ptr::null(); 1];
-        self.post_op(
-            post_ptr,
-            6,
-            OpArgs::NONE.a2(idx as i32).strs(strs.as_mut_ptr()),
-        );
-        unsafe { read_cstr(strs[0]) }
+    /// The files the par check repaired or renamed, in order.
+    pub fn post_parred_files(&self, post_ptr: PostRef) -> Vec<Vec<u8>> {
+        if !self.use_active {
+            return Vec::new();
+        }
+        crate::qnzb::post_parred_files(post_ptr)
     }
 
     pub fn post_clear_extracted_archives(&self, post_ptr: PostRef) {
-        if post_ptr.is_none() {
-            return;
+        if self.use_active {
+            crate::qnzb::post_clear_extracted_archives(post_ptr);
         }
-        self.post_op(post_ptr, 7, OpArgs::NONE.a2(-1));
     }
 
-    pub fn post_extracted_archive_at(&self, post_ptr: PostRef, idx: usize) -> Vec<u8> {
-        let mut strs = [std::ptr::null(); 1];
-        self.post_op(
-            post_ptr,
-            7,
-            OpArgs::NONE.a2(idx as i32).strs(strs.as_mut_ptr()),
-        );
-        unsafe { read_cstr(strs[0]) }
+    /// The archives unpacked so far, in unpack order.
+    pub fn post_extracted_archives(&self, post_ptr: PostRef) -> Vec<Vec<u8>> {
+        if !self.use_active {
+            return Vec::new();
+        }
+        crate::qnzb::post_extracted_archives(post_ptr)
     }
 
     pub fn prepost_is_stopped(&self, owner_ptr: usize) -> bool {

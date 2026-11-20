@@ -305,6 +305,12 @@ pub struct NzbgetRsStreamRepairCtrl {
     nzb_id: i32,
     /// Set once a live repair borrows a dead volume: its fetches then run in parallel.
     parallel_live_fetch: AtomicBool,
+    /// The live pass that is borrowing: the dead volumes it took on, and when the queue was
+    /// last asked for new ones (see `yield_for_new_dead`).
+    pass_dead: Mutex<(std::collections::BTreeSet<Vec<u8>>, Option<std::time::Instant>)>,
+    /// Raised when a volume went dead while a live pass borrows: the pass stops so the next
+    /// one hands every dead volume to direct unpack at once.
+    yielding: AtomicBool,
     tls_enabled: bool,
     debug_enabled: bool,
     fetcher: ArticleFetcher,
@@ -330,6 +336,8 @@ impl NzbgetRsStreamRepairCtrl {
             live_mode,
             nzb_id,
             parallel_live_fetch: AtomicBool::new(false),
+            pass_dead: Mutex::new((Default::default(), None)),
+            yielding: AtomicBool::new(false),
             tls_enabled,
             debug_enabled,
             fetcher: ArticleFetcher::new(nntp_host),
@@ -1524,7 +1532,7 @@ impl NzbgetRsStreamRepairCtrl {
 
             impl CrossPackDonorEnv for NativeCrossPackEnv<'_> {
                 fn is_stopped(&mut self) -> bool {
-                    self.ctrl.host_is_stopped(self.q)
+                    self.ctrl.host_is_stopped(self.q) || self.ctrl.yield_for_new_dead(self.q)
                 }
 
                 fn fetch_donor_part(
@@ -2160,7 +2168,11 @@ impl NzbgetRsStreamRepairCtrl {
         let mut rerun_for: std::collections::BTreeMap<Vec<u8>, Vec<(i64, i64)>> =
             Default::default();
         let mut ran = false;
-        for _ in 0..MAX_LIVE_BORROW_PASSES {
+        // Passes stopped for a volume that went dead meanwhile do not count against the bound:
+        // a long run of dead volumes can stop several.
+        let (mut passes, mut yields) = (0, 0);
+        while passes < MAX_LIVE_BORROW_PASSES {
+            passes += 1;
             let Some((left, attempted)) = self.run_live_pass(q, &again) else {
                 break;
             };
@@ -2171,6 +2183,12 @@ impl NzbgetRsStreamRepairCtrl {
             }
             if self.host_is_stopped(q) {
                 break;
+            }
+            // The pass stopped for a volume that went dead meanwhile: start the next one now.
+            if self.yielding.swap(false, Ordering::SeqCst) && yields < MAX_LIVE_YIELDS {
+                yields += 1;
+                passes -= 1;
+                continue;
             }
             let (fresh, now) = self.look_again(q);
             let (newcomers, retry) = holes_to_rerun(&seen, &mut rerun_for, now);
@@ -2248,6 +2266,45 @@ impl NzbgetRsStreamRepairCtrl {
 
     /// Names of the dead volumes a pass would leave to the borrow now, and the holes of every
     /// file that still has some.
+    /// True once a volume went dead that the borrowing live pass did not take on. Until the
+    /// pass ends, a dead volume found after it started waits for the whole borrow before it is
+    /// handed to direct unpack, so the extraction stands at it (minutes for a run of dead
+    /// volumes). Stopping the pass instead lets the next one hand every dead volume over at
+    /// once and resume the borrow where this one left it (its borrowed bytes are kept). The
+    /// queue is asked at most every `YIELD_CHECK`.
+    fn yield_for_new_dead(&self, q: JobQueue<'_>) -> bool {
+        if !self.live_mode {
+            return false;
+        }
+        if self.yielding.load(Ordering::SeqCst) {
+            return true;
+        }
+        let taken = {
+            let mut g = self.pass_dead.lock().unwrap_or_else(|e| e.into_inner());
+            if g.0.is_empty() {
+                return false;
+            }
+            let now = std::time::Instant::now();
+            if g.1.is_some_and(|t| now.duration_since(t) < YIELD_CHECK) {
+                return false;
+            }
+            g.1 = Some(now);
+            g.0.clone()
+        };
+        let (dead, _) = self.look_again(q);
+        let Some(new) = dead.into_iter().find(|n| !taken.contains(n)) else {
+            return false;
+        };
+        let mut msg = b"Dead volume ".to_vec();
+        msg.extend_from_slice(&new);
+        msg.extend_from_slice(
+            b" went dead while borrowing others: handing it to direct unpack now, the borrow goes on after",
+        );
+        self.print_message(q, MessageKind::Info, &msg);
+        self.yielding.store(true, Ordering::SeqCst);
+        true
+    }
+
     fn look_again(&self, q: JobQueue<'_>) -> (Vec<Vec<u8>>, Vec<(Vec<u8>, Vec<(i64, i64)>)>) {
         let mut counters = RunCounters::default();
         // Only looks: the live-attempted marks belong to the pass that repairs the files.
@@ -2331,6 +2388,15 @@ impl NzbgetRsStreamRepairCtrl {
             });
             let wd_handle = self.start_watchdog(q, &opts, &targets);
             self.compute_positional_ranks(&dest_dir, &mut targets, &member_names);
+            {
+                let mut g = self.pass_dead.lock().unwrap_or_else(|e| e.into_inner());
+                g.0 = left_to_borrow
+                    .iter()
+                    .zip(&targets)
+                    .filter_map(|(left, t)| left.then(|| t.filename.clone()))
+                    .collect();
+                g.1 = Some(std::time::Instant::now());
+            }
             self.exec_repair(
                 q,
                 &opts,
@@ -2369,10 +2435,17 @@ impl NzbgetRsStreamRepairCtrl {
             }
             drop(borrow_note);
             self.restore_lost_tails(q, &dest_dir, &mut targets, &member_names);
+            // A pass that stopped for a new dead volume leaves the rest to the next one.
+            let yielded = self.yielding.load(Ordering::SeqCst);
+            self.pass_dead
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .0
+                .clear();
             // Dead volumes the borrow could not rebuild (a compressed set, a volume that cannot
             // be placed yet, the real last one...) still get the whole-file recreation from a
             // byte-identical duplicate, as before.
-            if borrowing && !self.host_is_stopped(q) {
+            if borrowing && !yielded && !self.host_is_stopped(q) {
                 self.recreate_unborrowed(
                     q,
                     &opts,
@@ -2472,6 +2545,12 @@ fn holes_not_tried(
         .map(|(name, _)| name)
         .collect()
 }
+
+/// How often a borrowing live pass asks the queue for volumes that went dead since it started.
+const YIELD_CHECK: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Bounds the passes one live repair stops early for volumes that went dead while it borrowed.
+const MAX_LIVE_YIELDS: usize = 32;
 
 /// Bounds the borrow passes one live repair makes for volumes that go dead while it runs.
 const MAX_LIVE_BORROW_PASSES: usize = 8;

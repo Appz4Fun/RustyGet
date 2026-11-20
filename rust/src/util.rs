@@ -1546,6 +1546,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn match_file_ext_locale_folds_case_and_wildcards() {
+        for list in [&b".NZB"[..], b"*.NZ?"] {
+            assert!(match_file_ext_locale(b"a.nzb", list, b","));
+        }
+        assert!(!match_file_ext_locale(b"a.nzb", b".rar,.par2", b","));
+        assert!(!match_file_ext_locale(b"", b"", b""));
+    }
+
+    #[test]
+    fn reduce_str_ignores_null_operands() {
+        unsafe {
+            reduce_str(std::ptr::null_mut(), std::ptr::null(), std::ptr::null());
+            let mut raw = *b"abc\0";
+            reduce_str(raw.as_mut_ptr().cast(), std::ptr::null(), c"".as_ptr());
+            assert_eq!(&raw, b"abc\0");
+        }
+    }
+
+    #[test]
     fn formats() {
         assert_eq!(format_size(0), b"0 MB");
         assert_eq!(format_size(512), b"512 B");

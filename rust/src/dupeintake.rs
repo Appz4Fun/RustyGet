@@ -433,13 +433,10 @@ pub fn print_copy(
     let map: ContentMap = ContentMapper::build_map_with_tls(
         &members, set, &sources, password, true,
     )
-    .map_err(|e| {
-        // the mapper does not always say why; never log an empty reason
-        if e.trim().is_empty() {
-            "archive could not be mapped".to_string()
-        } else {
-            e
-        }
+    .map_err(|e| match e {
+        // an aborted mapping says nothing; never log an empty reason
+        crate::streamrepair::MapError::Aborted => "archive could not be mapped".to_string(),
+        e => e.to_string(),
     })?;
     let size = map.inner_size();
     if size <= 0 {

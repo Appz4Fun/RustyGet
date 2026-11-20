@@ -5569,11 +5569,13 @@ fn media_size_differs(all_mapped: bool, donor_size: Option<i64>, target_size: Op
 /// Whether a set failed to map only because its data is compressed (a zip entry or RAR file
 /// not stored): a fact of the archive, not a failed read. A 7z is told by its LZMA2 probe, as
 /// raw chunks in it can still be lent.
-fn is_compressed_skip(reason: &str) -> bool {
+fn is_compressed_skip(reason: &MapError) -> bool {
     matches!(
         reason,
-        "compressed zip entry (only stored maps)"
-            | "compressed archive (only store mode is mappable)"
+        MapError::Layer(
+            "compressed zip entry (only stored maps)"
+                | "compressed archive (only store mode is mappable)"
+        )
     )
 }
 
@@ -7307,6 +7309,57 @@ impl ContentSourceSet for NestedLayerSources<'_> {
     }
 }
 
+/// Why [`ContentMapper`] could not map a member set to its media file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MapError {
+    /// The sources were aborted (the repair stopped) while mapping.
+    Aborted,
+    /// The archive's data is encrypted and no password unlocked it.
+    EncryptedData,
+    /// The archive's headers are encrypted and no password unlocked them.
+    EncryptedHeaders,
+    /// The file the set holds is not a media file.
+    NotMedia,
+    /// A member could not be read, named when known.
+    MemberUnreadable(Option<String>),
+    /// Any other reason the layer could not be mapped.
+    Layer(&'static str),
+}
+
+impl From<&'static str> for MapError {
+    /// The layer readers report a fixed reason; the encrypted ones get their own variant.
+    fn from(reason: &'static str) -> Self {
+        match reason {
+            ContentMapper::SKIP_ENCRYPTED_DATA => Self::EncryptedData,
+            ContentMapper::SKIP_ENCRYPTED_HEADERS => Self::EncryptedHeaders,
+            other => Self::Layer(other),
+        }
+    }
+}
+
+impl std::fmt::Display for MapError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Aborted => Ok(()),
+            Self::EncryptedData => f.write_str(ContentMapper::SKIP_ENCRYPTED_DATA),
+            Self::EncryptedHeaders => f.write_str(ContentMapper::SKIP_ENCRYPTED_HEADERS),
+            Self::NotMedia => f.write_str("inner file is not a media file"),
+            Self::MemberUnreadable(None) => f.write_str("member unreadable"),
+            Self::MemberUnreadable(Some(name)) => write!(f, "member {name} unreadable"),
+            Self::Layer(reason) => f.write_str(reason),
+        }
+    }
+}
+
+impl std::error::Error for MapError {}
+
+impl MapError {
+    /// The archive is encrypted (data or headers): a password may unlock it.
+    pub const fn is_encrypted(&self) -> bool {
+        matches!(self, Self::EncryptedData | Self::EncryptedHeaders)
+    }
+}
+
 /// Pure-Rust `ContentMapper` mirroring `daemon/postprocess/ContentMap.h`.
 pub struct ContentMapper;
 
@@ -7336,7 +7389,7 @@ impl ContentMapper {
         set: &MemberSet,
         sources: &dyn ContentSourceSet,
         password: Option<&str>,
-    ) -> Result<ContentMap, String> {
+    ) -> Result<ContentMap, MapError> {
         Self::build_map_with_tls(members, set, sources, password.map(str::as_bytes), true)
     }
 
@@ -7351,7 +7404,7 @@ impl ContentMapper {
         sources: &dyn ContentSourceSet,
         password: Option<&[u8]>,
         tls_enabled: bool,
-    ) -> Result<ContentMap, String> {
+    ) -> Result<ContentMap, MapError> {
         Self::build_map_at_depth(members, set, sources, password, tls_enabled, 0)
     }
 
@@ -7362,8 +7415,7 @@ impl ContentMapper {
         password: Option<&[u8]>,
         tls_enabled: bool,
         depth: usize,
-    ) -> Result<ContentMap, String> {
-        const NOT_MEDIA: &str = "inner file is not a media file";
+    ) -> Result<ContentMap, MapError> {
         let mut listing = LayerPick {
             nested: true,
             ..LayerPick::default()
@@ -7380,7 +7432,7 @@ impl ContentMapper {
         // Otherwise the biggest file must be a stored archive, alone or one volume of a
         // set that this container holds: find the set among the container's files.
         if depth >= Self::MAX_NESTED_LAYERS {
-            return Err(NOT_MEDIA.to_string());
+            return Err(MapError::NotMedia);
         }
         // One entry per name: the mapped file itself where it shares its name with files
         // in other folders of the container, otherwise the biggest of that name.
@@ -7406,7 +7458,7 @@ impl ContentMapper {
         let Some(primary_idx) = files.iter().position(|f| {
             f.0.as_slice() == primary.inner_name_bytes() && f.1 == primary.inner_size()
         }) else {
-            return Err(NOT_MEDIA.to_string());
+            return Err(MapError::NotMedia);
         };
         let file_names: Vec<&[u8]> = files.iter().map(|f| f.0.as_slice()).collect();
         let Some((format, volume_idxs)) = content_mapper_group_sets(&file_names)
@@ -7416,10 +7468,10 @@ impl ContentMapper {
                 !matches!(fmt, MemberFormat::Bare) && idxs.contains(&(primary_idx as i32))
             })
         else {
-            return Err(NOT_MEDIA.to_string());
+            return Err(MapError::NotMedia);
         };
         if volume_idxs.len() > Self::MAX_NESTED_VOLUMES {
-            return Err("too many volumes in a nested archive".to_string());
+            return Err(MapError::Layer("too many volumes in a nested archive"));
         }
         // The map of every volume of the nested set onto the members. Each one parses the
         // container again, so what that reads is remembered.
@@ -7430,7 +7482,7 @@ impl ContentMapper {
         for &idx in &volume_idxs {
             let (name, size) = &files[idx as usize];
             if sources.aborted() {
-                return Err("member unreadable".to_string());
+                return Err(MapError::MemberUnreadable(None));
             }
             let volume_map = if idx as usize == primary_idx {
                 primary.clone()
@@ -7442,7 +7494,7 @@ impl ContentMapper {
                 Self::build_layer_map(members, set, &memo, password, tls_enabled, &mut one)?
             };
             if volume_map.inner_size() != *size {
-                return Err("nested archive does not lie in mapped data".to_string());
+                return Err(MapError::Layer("nested archive does not lie in mapped data"));
             }
             nested_members.push(SetMember::new(name, *size));
             volume_maps.push(volume_map);
@@ -7477,7 +7529,7 @@ impl ContentMapper {
     /// `inner` maps a file to ranges of the volumes of a nested archive, and `outers` maps
     /// each of those volumes to the members: the composition maps the file straight to the
     /// members.
-    fn compose_nested(outers: &[ContentMap], inner: &ContentMap) -> Result<ContentMap, String> {
+    fn compose_nested(outers: &[ContentMap], inner: &ContentMap) -> Result<ContentMap, MapError> {
         const BROKEN: &str = "nested archive does not lie in mapped data";
         let mut map = ContentMap::default();
         map.set_inner_name_bytes(inner.inner_name_bytes());
@@ -7488,7 +7540,7 @@ impl ContentMapper {
         }
         let encrypted = inner.encrypted();
         if encrypted && inner.run_cryptos().len() != inner.runs().len() {
-            return Err(BROKEN.to_string());
+            return Err(MapError::Layer(BROKEN));
         }
         for (i, run) in inner.runs().iter().enumerate() {
             // The bytes of this run inside the nested archive: its cipher bytes when the
@@ -7503,21 +7555,21 @@ impl ContentMapper {
                 .ok()
                 .and_then(|m| outers.get(m))
             else {
-                return Err(BROKEN.to_string());
+                return Err(MapError::Layer(BROKEN));
             };
             let pieces = outer.map_from_inner(NzbgetRsByteRange {
                 offset: from,
                 size: len,
             });
             if pieces.iter().map(|p| p.size).sum::<i64>() != len {
-                return Err(BROKEN.to_string());
+                return Err(MapError::Layer(BROKEN));
             }
             let mut inner_offset = run.inner_offset;
             let mut plain_left = run.size;
             for piece in pieces {
                 let plain = piece.size.min(plain_left);
                 if plain <= 0 {
-                    return Err(BROKEN.to_string());
+                    return Err(MapError::Layer(BROKEN));
                 }
                 map.runs_mut().push(NzbgetRsContentRun {
                     inner_offset,
@@ -7540,7 +7592,7 @@ impl ContentMapper {
                 plain_left -= plain;
             }
             if plain_left != 0 {
-                return Err(BROKEN.to_string());
+                return Err(MapError::Layer(BROKEN));
             }
         }
         // Encrypted archives further in keep their place: their own maps move out with
@@ -7556,7 +7608,7 @@ impl ContentMapper {
                 map.runs.len()
             }
         {
-            return Err(BROKEN.to_string());
+            return Err(MapError::Layer(BROKEN));
         }
         Ok(map)
     }
@@ -7569,13 +7621,13 @@ impl ContentMapper {
         outers: &[ContentMap],
         inner: &ContentMap,
         outer_encrypted: usize,
-    ) -> Result<ContentMap, String> {
+    ) -> Result<ContentMap, MapError> {
         const BROKEN: &str = "nested archive does not lie in mapped data";
         if outer_encrypted != outers.len() {
-            return Err("nested archive volumes are only partly encrypted".to_string());
+            return Err(MapError::Layer("nested archive volumes are only partly encrypted"));
         }
         if inner.encrypted() || inner.inside_encrypted() {
-            return Err("encrypted archive inside an encrypted archive".to_string());
+            return Err(MapError::Layer("encrypted archive inside an encrypted archive"));
         }
         let mut map = ContentMap::default();
         map.set_inner_name_bytes(inner.inner_name_bytes());
@@ -7589,14 +7641,14 @@ impl ContentMapper {
                 .ok()
                 .filter(|&m| m < outers.len())
             else {
-                return Err(BROKEN.to_string());
+                return Err(MapError::Layer(BROKEN));
             };
             let pieces = outers[layer].map_from_inner(NzbgetRsByteRange {
                 offset: run.member_offset,
                 size: run.size,
             });
             if pieces.iter().map(|p| p.size).sum::<i64>() != run.size {
-                return Err(BROKEN.to_string());
+                return Err(MapError::Layer(BROKEN));
             }
             let mut done: i64 = 0;
             for piece in pieces {
@@ -7620,7 +7672,7 @@ impl ContentMapper {
         password: Option<&[u8]>,
         tls_enabled: bool,
         pick: &mut LayerPick,
-    ) -> Result<ContentMap, String> {
+    ) -> Result<ContentMap, MapError> {
         match set.format {
             MemberFormat::Bare => Self::build_bare_map(members, set, sources),
             MemberFormat::Split => Self::build_split_map(members, set, sources),
@@ -7638,14 +7690,14 @@ impl ContentMapper {
         members: &[SetMember],
         set: &MemberSet,
         sources: &dyn ContentSourceSet,
-    ) -> Result<ContentMap, String> {
+    ) -> Result<ContentMap, MapError> {
         let member_index = set.members[0];
         let Some(source) = sources.get_source(member_index) else {
-            return Err("member unreadable".to_string());
+            return Err(MapError::MemberUnreadable(None));
         };
         let sz = source.size();
         if sz <= 0 {
-            return Err("member unreadable".to_string());
+            return Err(MapError::MemberUnreadable(None));
         }
         let mut map = ContentMap::default();
         map.set_inner_name_bytes(&members[member_index as usize].name);
@@ -7663,28 +7715,26 @@ impl ContentMapper {
         members: &[SetMember],
         set: &MemberSet,
         sources: &dyn ContentSourceSet,
-    ) -> Result<ContentMap, String> {
+    ) -> Result<ContentMap, MapError> {
         let first_name = &members[set.members[0] as usize].name;
         let inner_bytes = content_mapper_split_inner_name(first_name);
         if inner_bytes.is_empty() {
-            return Err("inner file is not a media file".to_string());
+            return Err(MapError::NotMedia);
         }
         let mut map = ContentMap::default();
         map.set_inner_name_bytes(&inner_bytes);
         let mut inner_offset = 0i64;
         for &member_index in &set.members {
             let Some(source) = sources.get_source(member_index) else {
-                return Err(format!(
-                    "member {} unreadable",
-                    String::from_utf8_lossy(&members[member_index as usize].name)
-                ));
+                return Err(MapError::MemberUnreadable(Some(
+                    String::from_utf8_lossy(&members[member_index as usize].name).into_owned(),
+                )));
             };
             let sz = source.size();
             if sz <= 0 {
-                return Err(format!(
-                    "member {} unreadable",
-                    String::from_utf8_lossy(&members[member_index as usize].name)
-                ));
+                return Err(MapError::MemberUnreadable(Some(
+                    String::from_utf8_lossy(&members[member_index as usize].name).into_owned(),
+                )));
             };
             map.runs_mut().push(NzbgetRsContentRun {
                 inner_offset,
@@ -7705,18 +7755,18 @@ impl ContentMapper {
         password: Option<&[u8]>,
         tls_enabled: bool,
         pick: &mut LayerPick,
-    ) -> Result<ContentMap, String> {
+    ) -> Result<ContentMap, MapError> {
         let mut volumes: Vec<Option<(crate::rarreader::Volume, Vec<crate::rarreader::RarFile>)>> =
             vec![None; set.members.len()];
         let mut unknown_volume: i32 = -1;
 
         for (i, &member_index) in set.members.iter().enumerate() {
             if sources.aborted() {
-                return Err(String::new());
+                return Err(MapError::Aborted);
             }
             let source = sources.get_source(member_index);
             if sources.aborted() {
-                return Err(String::new());
+                return Err(MapError::Aborted);
             }
             let mut vol = crate::rarreader::Volume {
                 has_password: password.is_some_and(|pw| !pw.is_empty()),
@@ -7729,14 +7779,14 @@ impl ContentMapper {
                 let password = password.filter(|_| tls_enabled);
                 let ok = crate::rarreader::read_from(&mut vol, &mut adapter, password, &mut files);
                 if sources.aborted() {
-                    return Err(String::new());
+                    return Err(MapError::Aborted);
                 }
                 let member_name = members
                     .get(member_index as usize)
                     .map_or(&[][..], |m| m.name.as_slice());
                 sources.on_rar_volume_parsed(member_name, &vol, &files);
                 if sources.aborted() {
-                    return Err(String::new());
+                    return Err(MapError::Aborted);
                 }
                 ok
             } else {
@@ -7756,8 +7806,8 @@ impl ContentMapper {
                 vol.encrypted,
                 unknown_volume,
             ) {
-                1 => return Err(Self::SKIP_ENCRYPTED_HEADERS.to_string()),
-                2 => return Err("unreadable headers in more than one volume".to_string()),
+                1 => return Err(MapError::EncryptedHeaders),
+                2 => return Err(MapError::Layer("unreadable headers in more than one volume")),
                 _ => unknown_volume = i as i32,
             }
         }
@@ -7838,7 +7888,7 @@ impl ContentMapper {
             },
             pick,
         )
-        .map_err(str::to_string)?;
+        .map_err(MapError::from)?;
 
         let mut map = ContentMap::default();
         map.set_inner_name_bytes(&out.inner_name);
@@ -7860,15 +7910,15 @@ impl ContentMapper {
         set: &MemberSet,
         sources: &dyn ContentSourceSet,
         pick: &mut LayerPick,
-    ) -> Result<ContentMap, String> {
+    ) -> Result<ContentMap, MapError> {
         let mut member_sizes = Vec::with_capacity(set.members.len());
         for &member_index in &set.members {
             let Some(source) = sources.get_source(member_index) else {
-                return Err("member unreadable".to_string());
+                return Err(MapError::MemberUnreadable(None));
             };
             let sz = source.size();
             if sz <= 0 {
-                return Err("member unreadable".to_string());
+                return Err(MapError::MemberUnreadable(None));
             }
             member_sizes.push(sz);
         }
@@ -7882,7 +7932,7 @@ impl ContentMapper {
             },
             pick,
         )
-        .map_err(str::to_string)?;
+        .map_err(MapError::from)?;
         let mut map = ContentMap::default();
         map.set_inner_name_bytes(&inner_name);
         map.set_inner_size(inner_size);
@@ -7895,15 +7945,15 @@ impl ContentMapper {
         sources: &dyn ContentSourceSet,
         password: Option<&[u8]>,
         pick: &mut LayerPick,
-    ) -> Result<ContentMap, String> {
+    ) -> Result<ContentMap, MapError> {
         let mut member_sizes = Vec::with_capacity(set.members.len());
         for &member_index in &set.members {
             let Some(source) = sources.get_source(member_index) else {
-                return Err("member unreadable".to_string());
+                return Err(MapError::MemberUnreadable(None));
             };
             let sz = source.size();
             if sz <= 0 {
-                return Err("member unreadable".to_string());
+                return Err(MapError::MemberUnreadable(None));
             }
             member_sizes.push(sz);
         }
@@ -7918,7 +7968,7 @@ impl ContentMapper {
             password,
             pick,
         )
-        .map_err(str::to_string)?;
+        .map_err(MapError::from)?;
         let mut map = ContentMap::default();
         match mapped {
             SevenZipMap::Plain(inner_name, inner_size, runs) => {
@@ -8014,7 +8064,7 @@ impl ContentMapper {
                     if sources.aborted() {
                         break;
                     }
-                    data.skip_reason = reason;
+                    data.skip_reason = reason.to_string();
                 }
             }
             repair_sets.push(data);
@@ -9458,7 +9508,7 @@ impl CrossPackRepairSession {
         let mut media_extracted_unsized = false;
         let mut set_compressed: Vec<bool> = vec![false; donor_sets.len()];
         let mut set_maps: Vec<Option<ContentMap>> = vec![None; donor_sets.len()];
-        let mut set_skips: Vec<String> = vec![String::new(); donor_sets.len()];
+        let mut set_skips: Vec<Option<MapError>> = vec![None; donor_sets.len()];
         let mut set_tried: Vec<bool> = vec![false; donor_sets.len()];
 
         for repair_set_idx in 0..self.repair_sets.len() {
@@ -9488,12 +9538,11 @@ impl CrossPackRepairSession {
                         self.tls_enabled,
                     ) {
                         Ok(map) => set_maps[set_index] = Some(map),
-                        Err(reason) => set_skips[set_index] = reason,
+                        Err(reason) => set_skips[set_index] = Some(reason),
                     }
                     if set_maps[set_index].is_none()
                         && !donor_password.is_empty()
-                        && (set_skips[set_index] == ContentMapper::SKIP_ENCRYPTED_DATA
-                            || set_skips[set_index] == ContentMapper::SKIP_ENCRYPTED_HEADERS)
+                        && set_skips[set_index].as_ref().is_some_and(MapError::is_encrypted)
                     {
                         let retry_budget = 8 + (donor_set.members.len() as i32) * 4;
                         donor_sources.set_fetch_budget(Some(retry_budget));
@@ -9506,10 +9555,11 @@ impl CrossPackRepairSession {
                         ) {
                             Ok(map) => {
                                 set_maps[set_index] = Some(map);
-                                set_skips[set_index].clear();
+                                set_skips[set_index] = None;
                             }
                             Err(reason) => {
-                                set_skips[set_index] = reason;
+                                let reason_text = reason.to_string();
+                                set_skips[set_index] = Some(reason);
                                 let first_donor_name =
                                     &donor_members[donor_set.members[0] as usize].name;
                                 let mut msg = b"Skipping packing ".to_vec();
@@ -9517,7 +9567,7 @@ impl CrossPackRepairSession {
                                 msg.extend_from_slice(b" of duplicate ");
                                 msg.extend_from_slice(donor_info_name);
                                 msg.extend_from_slice(b": ");
-                                msg.extend_from_slice(set_skips[set_index].as_bytes());
+                                msg.extend_from_slice(reason_text.as_bytes());
                                 env_cell
                                     .borrow_mut()
                                     .emit_message_bytes(TargetMessageKind::Info, &msg);
@@ -9526,7 +9576,7 @@ impl CrossPackRepairSession {
                     }
                     donor_sources.set_fetch_budget(None);
                     set_compressed[set_index] = set_maps[set_index].is_none()
-                        && is_compressed_skip(&set_skips[set_index]);
+                        && set_skips[set_index].as_ref().is_some_and(is_compressed_skip);
                 }
 
                 let target_inner_size = self.repair_sets[repair_set_idx]
@@ -13595,7 +13645,7 @@ mod tests {
                 let err = ContentMapper::build_map(&members, &single, &sources, None)
                     .err()
                     .unwrap();
-                assert!(err.contains("store"));
+                assert!(err.to_string().contains("store"));
             }
 
             // non-media inner file
@@ -13617,7 +13667,7 @@ mod tests {
                 let err = ContentMapper::build_map(&members, &single, &sources, None)
                     .err()
                     .unwrap();
-                assert_eq!(err, "inner file is not a media file");
+                assert_eq!(err.to_string(), "inner file is not a media file");
             }
 
             // packed sizes that do not sum to inner size
@@ -13650,7 +13700,7 @@ mod tests {
                 let err = ContentMapper::build_map(&members, &set, &sources, None)
                     .err()
                     .unwrap();
-                assert!(err.contains("sum"));
+                assert!(err.to_string().contains("sum"));
             }
 
             // packed sizes exceed inner size
@@ -13676,7 +13726,7 @@ mod tests {
                 let err = ContentMapper::build_map(&members, &set, &sources, None)
                     .err()
                     .unwrap();
-                assert!(err.contains("exceed"));
+                assert!(err.to_string().contains("exceed"));
             }
 
             // encrypted archive headers without password
@@ -13690,7 +13740,7 @@ mod tests {
                 let err = ContentMapper::build_map(&members, &single, &sources, None)
                     .err()
                     .unwrap();
-                assert_eq!(err, "encrypted archive headers");
+                assert_eq!(err.to_string(), "encrypted archive headers");
             }
 
             // encrypted archive data without password
@@ -13708,7 +13758,7 @@ mod tests {
                 let err = ContentMapper::build_map(&members, &single, &sources, None)
                     .err()
                     .unwrap();
-                assert_eq!(err, "encrypted archive data");
+                assert_eq!(err.to_string(), "encrypted archive data");
             }
 
             // inconsistent inner file size
@@ -13737,7 +13787,7 @@ mod tests {
                 let err = ContentMapper::build_map(&members, &pair, &sources, None)
                     .err()
                     .unwrap();
-                assert_eq!(err, "inconsistent inner file size across volumes");
+                assert_eq!(err.to_string(), "inconsistent inner file size across volumes");
             }
         }
 
@@ -13848,7 +13898,7 @@ mod tests {
                 let err = ContentMapper::build_map(&members, &set, &sources, None)
                     .err()
                     .unwrap();
-                assert!(err.contains("stored"));
+                assert!(err.to_string().contains("stored"));
             }
 
             // encrypted
@@ -13858,7 +13908,7 @@ mod tests {
                 let err = ContentMapper::build_map(&members, &set, &sources, None)
                     .err()
                     .unwrap();
-                assert!(err.contains("encrypted"));
+                assert!(err.to_string().contains("encrypted"));
             }
 
             // zip64 per-entry extra
@@ -13972,7 +14022,7 @@ mod tests {
                 let err = ContentMapper::build_map(&members, &set, &sources, None)
                     .err()
                     .unwrap();
-                assert!(err.contains("opy"));
+                assert!(err.to_string().contains("opy"));
             }
             {
                 let mut sources = MemorySourceSet::default();
@@ -13985,7 +14035,7 @@ mod tests {
                 let err = ContentMapper::build_map(&members, &set, &sources, None)
                     .err()
                     .unwrap();
-                assert_eq!(err, "inner file is not a media file");
+                assert_eq!(err.to_string(), "inner file is not a media file");
             }
         }
 
@@ -14040,7 +14090,7 @@ mod tests {
                 let err = ContentMapper::build_map(&members, &set, &sources, None)
                     .err()
                     .unwrap();
-                assert_eq!(err, "compressed 7z header");
+                assert_eq!(err.to_string(), "compressed 7z header");
             }
         }
 
@@ -14057,6 +14107,7 @@ mod tests {
                 ContentMapper::build_map(&members, &set, &sources, None)
                     .err()
                     .unwrap()
+                    .to_string()
             };
 
             {
@@ -14750,7 +14801,7 @@ mod tests {
                 let err = ContentMapper::build_map(&members, &single, &sources, Some("wrongpw"))
                     .err()
                     .unwrap();
-                assert_eq!(err, "archive password rejected");
+                assert_eq!(err.to_string(), "archive password rejected");
             }
 
             // no password
@@ -14767,7 +14818,7 @@ mod tests {
                 let err = ContentMapper::build_map(&members, &single, &sources, None)
                     .err()
                     .unwrap();
-                assert_eq!(err, "encrypted archive data");
+                assert_eq!(err.to_string(), "encrypted archive data");
             }
 
             // non-16-aligned non-last volume (47 + 17 = 64)
@@ -14828,7 +14879,7 @@ mod tests {
                 let err = ContentMapper::build_map(&pair, &two_vol, &sources, Some("123"))
                     .err()
                     .unwrap();
-                assert_eq!(err, "encrypted volume geometry does not fit store mode");
+                assert_eq!(err.to_string(), "encrypted volume geometry does not fit store mode");
             }
 
             // padding-only last volume (52 >= 50)
@@ -14853,7 +14904,7 @@ mod tests {
                 let err = ContentMapper::build_map(&pair, &two_vol, &sources, Some("123"))
                     .err()
                     .unwrap();
-                assert_eq!(err, "encrypted volume geometry does not fit store mode");
+                assert_eq!(err.to_string(), "encrypted volume geometry does not fit store mode");
             }
 
             // single volume whose packed size is not ceil16(innerSize)
@@ -14870,7 +14921,7 @@ mod tests {
                 let err = ContentMapper::build_map(&members, &single, &sources, Some("123"))
                     .err()
                     .unwrap();
-                assert_eq!(err, "encrypted volume geometry does not fit store mode");
+                assert_eq!(err.to_string(), "encrypted volume geometry does not fit store mode");
             }
         }
 
@@ -15211,7 +15262,7 @@ mod tests {
                 let err = ContentMapper::build_map(&members, &set, &sources, Some("123"))
                     .err()
                     .unwrap();
-                assert_eq!(err, "encrypted volume geometry does not fit store mode");
+                assert_eq!(err.to_string(), "encrypted volume geometry does not fit store mode");
             }
         }
 
@@ -15324,15 +15375,15 @@ mod tests {
                 let reason = ContentMapper::build_map(&members, &single, &no_pw, None)
                     .err()
                     .unwrap();
-                assert_eq!(reason, "encrypted archive headers");
+                assert_eq!(reason, MapError::EncryptedHeaders);
 
                 let mut with_pw = MemorySourceSet::default();
                 with_pw.push(bytes);
                 let reason2 = ContentMapper::build_map(&members, &single, &with_pw, Some("123"))
                     .err()
                     .unwrap();
-                assert_ne!(reason2, "encrypted archive headers");
-                assert!(!reason2.is_empty());
+                assert_ne!(reason2, MapError::EncryptedHeaders);
+                assert_ne!(reason2, MapError::Aborted);
             }
         }
 
@@ -15804,14 +15855,16 @@ mod tests {
 
     #[test]
     fn only_a_compressed_payload_counts_as_one_live_repair_cannot_lend() {
-        assert!(is_compressed_skip("compressed zip entry (only stored maps)"));
-        assert!(is_compressed_skip("compressed archive (only store mode is mappable)"));
+        assert!(is_compressed_skip(&MapError::Layer("compressed zip entry (only stored maps)")));
+        assert!(is_compressed_skip(&MapError::Layer(
+            "compressed archive (only store mode is mappable)"
+        )));
         // A 7z is told by its LZMA2 probe (raw chunks can still be lent); a failed read or an
         // encrypted header says nothing.
-        assert!(!is_compressed_skip("non-Copy 7z coder (only copy mode maps)"));
-        assert!(!is_compressed_skip("compressed 7z header"));
-        assert!(!is_compressed_skip(ContentMapper::SKIP_ENCRYPTED_HEADERS));
-        assert!(!is_compressed_skip(""));
+        assert!(!is_compressed_skip(&MapError::Layer("non-Copy 7z coder (only copy mode maps)")));
+        assert!(!is_compressed_skip(&MapError::Layer("compressed 7z header")));
+        assert!(!is_compressed_skip(&MapError::EncryptedHeaders));
+        assert!(!is_compressed_skip(&MapError::Aborted));
     }
 
     #[test]

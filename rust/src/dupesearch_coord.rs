@@ -6246,7 +6246,19 @@ pub unsafe fn fleet_append(
                 c.error.is_empty() && c.same_as < 0
             })
             .collect();
-        if usable.len() >= 2 && !donor_stopping() && !http_stopped() {
+        // A backup sent on its own after the fleet's first submission is opened
+        // against the copy already queued for its key (the client's pick, so it
+        // goes first and wins a tie), so a nested alt is told the same video
+        // before the queued copy dies, not only once a later pass samples it.
+        let reference: Option<&(i32, NzbSummaryData)> = earlier
+            .iter()
+            .find(|(id, _)| *id == running_id)
+            .or_else(|| earlier.first())
+            .filter(|_| usable.len() == 1);
+        if (usable.len() >= 2 || reference.is_some())
+            && !donor_stopping()
+            && !http_stopped()
+        {
             let intake_deadline = now_unix_sec()
                 + fleet_phase_secs(
                     deadline_ms - donor_now_ms() - FINISH_RESERVE_MS,
@@ -6260,9 +6272,12 @@ pub unsafe fn fleet_append(
             let seed = u64::from(crate::dupefallback::crc32_ieee(
                 &dupe_key.to_ascii_lowercase(),
             )) | 1;
-            let summaries: Vec<&NzbSummaryData> =
-                usable.iter().map(|&i| &candidates[i].summary).collect();
-            let (verdicts, print, prints, keys) = fleet_intake(
+            let summaries: Vec<&NzbSummaryData> = reference
+                .map(|(_, s)| s)
+                .into_iter()
+                .chain(usable.iter().map(|&i| &candidates[i].summary))
+                .collect();
+            let (mut verdicts, print, mut prints, mut keys) = fleet_intake(
                 host_ctx,
                 host_cb,
                 &summaries,
@@ -6270,6 +6285,20 @@ pub unsafe fn fleet_append(
                 seed,
                 intake_deadline,
             );
+            if let Some((ref_id, _)) = reference {
+                verdicts.remove(0);
+                keys.remove(0);
+                // the queued copy's video, for TwinCheck to compare the backup with
+                #[cfg(unix)]
+                if let Some(p) = prints.remove(0) {
+                    crate::twin::set_inner_digests(&[(
+                        *ref_id,
+                        crate::dupeintake::inner_param_value(&p, samples, seed),
+                    )]);
+                }
+                #[cfg(not(unix))]
+                prints.remove(0);
+            }
             intake_print = print;
             for (&i, p) in usable.iter().zip(prints) {
                 intake_prints[i] = p;
@@ -6775,7 +6804,14 @@ pub unsafe fn fleet_append(
             .iter()
             .enumerate()
             .find(|(_, c)| added[c.index] == chosen)
-            .map(|(i, c)| (chosen, c.summary.clone(), intake_prints[i].clone()));
+            .map(|(i, c)| (chosen, c.summary.clone(), intake_prints[i].clone()))
+            .or_else(|| {
+                // a backup sent alone: the copy queued from the first submission
+                earlier
+                    .iter()
+                    .find(|(id, _)| *id == chosen)
+                    .map(|(id, s)| (*id, s.clone(), None))
+            });
         let mut msg = b"Fleet intake: ".to_vec();
         msg.extend_from_slice(pending.len().to_string().as_bytes());
         msg.extend_from_slice(b" unverified copies are checked again in the background");

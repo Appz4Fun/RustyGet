@@ -1145,22 +1145,9 @@ pub(crate) mod cipher {
         data: *mut *const u8,
         length: *mut usize,
     ) -> c_int {
-        let mut buf = Vec::new();
-        let ok = unsafe {
-            crate::ffi::nzbget_rs_script_config_exec(
-                1,
-                ptr::null(),
-                0,
-                ptr::null(),
-                0,
-                ptr::null_mut(),
-                None,
-                &mut buf,
-            )
-        };
-        if ok == 0 {
+        let Some(buf) = crate::ffi::cipher_config_snapshot() else {
             return 0;
-        }
+        };
         let ctx = unsafe { &mut *context.cast::<Context>() };
         ctx.snapshot = buf;
         unsafe {
@@ -1332,6 +1319,18 @@ pub(crate) mod cipher {
         result
     }
 
+    /// `length` bytes at `data`, or empty for null or zero length.
+    ///
+    /// # Safety
+    /// A non-null `data` points to `length` readable bytes that outlive the slice.
+    unsafe fn raw_bytes<'a>(data: *const u8, length: usize) -> &'a [u8] {
+        if data.is_null() || length == 0 {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(data, length) }
+        }
+    }
+
     pub(crate) unsafe extern "C" fn commit(
         _: *mut c_void,
         original: *const u8,
@@ -1341,17 +1340,20 @@ pub(crate) mod cipher {
         cancel: Cancel,
         cancel_context: *mut c_void,
     ) -> c_int {
-        unsafe {
-            crate::ffi::nzbget_rs_script_config_exec(
-                2,
-                original.cast(),
-                original_length,
-                replacement.cast(),
-                replacement_length,
-                cancel_context,
-                Some(cancel),
-                ptr::null_mut(),
+        use crate::configfile::RsCipherCommit;
+        let (expected, replacement) = unsafe {
+            (
+                raw_bytes(original, original_length),
+                raw_bytes(replacement, replacement_length),
             )
+        };
+        let cancelled = || unsafe { cancel(cancel_context) != 0 };
+        match crate::ffi::commit_cipher_config(expected, replacement, cancelled) {
+            None | Some(RsCipherCommit::Failed) => -1,
+            Some(RsCipherCommit::Saved) => 1,
+            Some(RsCipherCommit::Unchanged) => 0,
+            Some(RsCipherCommit::Conflict) => -2,
+            Some(RsCipherCommit::Cancelled) => -3,
         }
     }
 

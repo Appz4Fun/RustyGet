@@ -131,10 +131,11 @@ fn stat_op(list: &mut Vec<[i32; 3]>, server_id: i32, success: i32, failed: i32, 
             list.len() - 1
         }
     };
-    let (mut s, mut f) = (list[i][1], list[i][2]);
-    unsafe { crate::ffi::nzbget_rs_server_stat_apply_op(op, success, failed, &mut s, &mut f) };
-    list[i][1] = s;
-    list[i][2] = f;
+    if let Some(op) = crate::qnzb::StatOp::from_code(op) {
+        let (s, f) = op.apply((list[i][1], list[i][2]), (success, failed));
+        list[i][1] = s;
+        list[i][2] = f;
+    }
 }
 
 impl File {

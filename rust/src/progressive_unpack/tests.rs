@@ -5748,6 +5748,7 @@ fn a_volume_with_its_end_rebuilt_from_a_sibling_extracts() {
     let (r, log) = run(&one, &t.out(), Box::new(CompleteSet));
     expect_ok(r, &log);
     assert!(t.out().join("testfile5.dat").is_file(), "{log:?}");
+}
 
 #[test]
 fn a_directory_entry_keeps_the_persistent_session() {

@@ -5,7 +5,7 @@ use crate::options::OptStr;
 use crate::qfile::{FileAction, FileI64, FileInt, FileStr};
 use crate::qnzb::PostInt;
 use crate::qnzb::{
-    FileTotals, MessageRange, NzbAction, NzbI64, NzbInt, NzbStr, ServerStat, StatList,
+    FileTotals, MessageRange, NzbAction, NzbI64, NzbInt, NzbStr, ServerStat, StatList, TextStatus,
 };
 use crate::status::{
     CleanupStatus, DeleteStatus, DirectRenameStatus, DirectUnpackStatus, DupStatus, DupeMode,
@@ -951,14 +951,6 @@ impl QueueSubsysHost {
     // Queue-object ops. The daemon's host runs them on the live Rust objects;
     // no test mock answers them, so on a mock host they do nothing and read
     // as 0 (output arrays untouched), as the mock callbacks did.
-
-    fn coll_snapshot(&self, nzb: NzbRef, which: i32, x: OpArgs) -> usize {
-        if self.use_active {
-            let nzb = nzb.addr() as *const crate::qnzb::NzbScalars;
-            unsafe { crate::qnzb::host_coll_snapshot(nzb, which, x.ints, x.i64s, x.strs) };
-        }
-        0
-    }
 
     /// A duplicate record's op, or (op 2) a history entry's summary.
     fn record_op(&self, record: usize, op: i32, x: OpArgs) -> usize {
@@ -2004,16 +1996,7 @@ impl QueueSubsysHost {
             let qlen = self.queue_len(dq_ptr);
             for i in 0..qlen {
                 let nzb_ptr = self.queue_at(dq_ptr, i);
-                let mut n_ints = [0i32; 90];
-                let mut n_i64s = [0i64; 21];
-                self.coll_snapshot(
-                    nzb_ptr,
-                    0,
-                    OpArgs::NONE
-                        .ints(n_ints.as_mut_ptr())
-                        .i64s(n_i64s.as_mut_ptr()),
-                );
-                let force = n_ints[14] != 0;
+                let force = crate::qnzb::nzb_snapshot(nzb_ptr, TextStatus::Off).force_priority;
                 let flen = self.nzb_file_len(nzb_ptr);
                 for j in 0..flen {
                     let fp = self.nzb_file_at(nzb_ptr, j);
@@ -2111,148 +2094,28 @@ impl QueueSubsysHost {
 
     // NzbInfo ops (op = 30..=35)
     pub fn nzb_snap(&self, nzb_ptr: NzbRef, with_text_status: bool) -> NzbSnap {
-        self.nzb_snap_mode(nzb_ptr, i32::from(with_text_status))
+        self.nzb_snap_mode(
+            nzb_ptr,
+            if with_text_status {
+                TextStatus::IgnoreScript
+            } else {
+                TextStatus::Off
+            },
+        )
     }
 
-    pub fn nzb_snap_mode(&self, nzb_ptr: NzbRef, text_status_mode: i32) -> NzbSnap {
+    /// A collection's snapshot. On a mock host only the handle is set.
+    pub fn nzb_snap_mode(&self, nzb_ptr: NzbRef, text_status: TextStatus) -> NzbSnap {
         if nzb_ptr.is_none() {
             return NzbSnap::default();
         }
-        let mut ints = [0i32; 90];
-        let mut i64s = [0i64; 21];
-        let mut strs = [std::ptr::null(); 9];
-        self.coll_snapshot(
-            nzb_ptr,
-            text_status_mode,
-            OpArgs::NONE
-                .ints(ints.as_mut_ptr())
-                .i64s(i64s.as_mut_ptr())
-                .strs(strs.as_mut_ptr()),
-        );
-        unsafe {
-            NzbSnap {
+        if !self.use_active {
+            return NzbSnap {
                 ptr: nzb_ptr,
-                post_info_ptr: PostRef::from_addr(i64s[18] as usize),
-                id: ints[0],
-                kind: ints[1],
-                dupe_mode: DupeMode::from(ints[2]),
-                dupe_score: ints[3],
-                dupe_hint: ints[4],
-                delete_status: DeleteStatus::from(ints[5]),
-                mark_status: MarkStatus::from(ints[6]),
-                par_status: NzbParStatus::from(ints[7]),
-                direct_rename_status: DirectRenameStatus::from(ints[8]),
-                direct_unpack_status: DirectUnpackStatus::from(ints[9]),
-                dupe_par_defer_state: ints[10],
-                deleting: ints[11] != 0,
-                parking: ints[12] != 0,
-                health_paused: ints[13] != 0,
-                force_priority: ints[14] != 0,
-                has_extra_priority: ints[15] != 0,
-                many_dupe_files: ints[16] != 0,
-                has_desired_server: ints[17] != 0,
-                desired_server_id: ints[18],
-                priority: ints[19],
-                feed_id: ints[20],
-                changed: ints[21] != 0,
-                all_first: ints[22] != 0,
-                dead_pick_probed: ints[23] != 0,
-                dupe_no_par_noted: ints[24] != 0,
-                has_post_info: ints[25] != 0,
-                post_working: ints[26] != 0,
-                post_stage: PostStage::from(ints[27]),
-                has_live_repair_thread: ints[28] != 0,
-                live_repair_thread_ptr: i64s[19] as usize,
-                has_unpack_thread: ints[68] != 0,
-                has_stream_repair_jobs: ints[69] != 0,
-                url_status: UrlStatus::from(ints[70]),
-                par_sec: ints[71],
-                repair_sec: ints[72],
-                unpack_sec: ints[73],
-                live_unpack_sec: ints[88],
-                live_par_sec: ints[89],
-                reprocess: ints[74] != 0,
-                extra_par_blocks: ints[75],
-                dupe_recovered_holes: ints[76],
-                script_total_status: ScriptStatus::from(ints[77]),
-                parked_file_count: ints[78],
-                delete_paused: ints[79] != 0,
-                auto_category: ints[80] != 0,
-                add_url_paused: ints[81] != 0,
-                is_dupe_success: ints[29] != 0,
-                health: ints[30],
-                critical_health_opt: ints[31],
-                critical_health_exact: ints[32],
-                is_download_completed: ints[33] != 0,
-                is_download_completed_strict: ints[54] != 0,
-                skip_disk_write: ints[50] != 0,
-                waiting_par: ints[51] != 0,
-                loading_par: ints[52] != 0,
-                unpack_cleaned_up_disk: ints[53] != 0,
-                skip_script_processing: ints[55] != 0,
-                avoid_history: ints[56] != 0,
-                cleanup_disk: ints[57] != 0,
-                unpack_tried: ints[58] != 0,
-                par_full: ints[59] != 0,
-                force_par_full: ints[83] != 0,
-                force_repair: ints[84] != 0,
-                par_repaired: ints[85] != 0,
-                last_unpack_status: UnpackStatus::from(ints[86]),
-                message_count: ints[82],
-                cached_message_count: ints[87],
-                post_total_sec: ints[60],
-                par_rename_status: ints[61],
-                rar_rename_status: ints[62],
-                unpack_status: UnpackStatus::from(ints[63]),
-                cleanup_status: CleanupStatus::from(ints[64]),
-                move_status: MoveStatus::from(ints[65]),
-                post_download_renaming_status: ints[66],
-                post_unpack_renaming_status: ints[67],
-                file_count: ints[34],
-                active_downloads: ints[35],
-                paused_file_count: ints[36],
-                remaining_par_count: ints[37],
-                total_articles: ints[38],
-                success_articles: ints[39],
-                failed_articles: ints[40],
-                current_success_articles: ints[41],
-                current_failed_articles: ints[42],
-                dupe_recovered_articles: ints[43],
-                dupe_attempted_articles: ints[44],
-                dupe_unsourced_articles: ints[45],
-                dupe_failed_run: ints[46],
-                dupe_failover_checked: ints[47],
-                download_sec: ints[48],
-                full_content_hash: ints[49] as u32,
-                filtered_content_hash: i64s[15] as u32,
-                size: i64s[0],
-                remaining_size: i64s[1],
-                paused_size: i64s[2],
-                success_size: i64s[3],
-                current_success_size: i64s[4],
-                failed_size: i64s[5],
-                current_failed_size: i64s[6],
-                par_size: i64s[7],
-                par_success_size: i64s[8],
-                par_current_success_size: i64s[9],
-                par_failed_size: i64s[10],
-                par_current_failed_size: i64s[11],
-                downloaded_size: i64s[12],
-                min_time: i64s[13],
-                max_time: i64s[14],
-                download_start_time: i64s[16],
-                dupe_recovered_bytes: i64s[17],
-                name: read_cstr(strs[0]),
-                filename: read_cstr(strs[1]),
-                dest_dir: read_cstr(strs[2]),
-                final_dir: read_cstr(strs[3]),
-                category: read_cstr(strs[4]),
-                dupe_key: read_cstr(strs[5]),
-                queued_filename: read_cstr(strs[6]),
-                text_status: read_cstr(strs[7]),
-                url: read_cstr(strs[8]),
-            }
+                ..NzbSnap::default()
+            };
         }
+        crate::qnzb::nzb_snapshot(nzb_ptr, text_status)
     }
 
     pub fn nzb_get_param(&self, nzb_ptr: NzbRef, name: &[u8]) -> Option<Vec<u8>> {

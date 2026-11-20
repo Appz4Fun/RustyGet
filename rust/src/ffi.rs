@@ -2332,7 +2332,7 @@ unsafe extern "C" fn web_rpc_action_bridge(
 unsafe fn emit_rpc_nzb(
     qh: &crate::queuesubsys_host::QueueSubsysHost,
     nzb_ptr: NzbRef,
-    text_status_mode: i32,
+    text_status: crate::qnzb::TextStatus,
     f_cb: impl FnOnce(
         &crate::queuesubsys_host::NzbSnap,
         &CStr,
@@ -2342,7 +2342,7 @@ unsafe fn emit_rpc_nzb(
         &[crate::xmlrpc_format::NzbgetRsRpcServerStatItem],
     ),
 ) {
-    let n = qh.nzb_snap_mode(nzb_ptr, text_status_mode);
+    let n = qh.nzb_snap_mode(nzb_ptr, text_status);
     let post_start_time = if n.post_info_ptr.is_some() {
         qh.post_snap(n.post_info_ptr).start_time
     } else {
@@ -2810,36 +2810,41 @@ unsafe fn web_rpc_collect_bridge(
                     let np = qh.queue_at(dq_ptr, qi);
                     let flen = qh.nzb_file_len(np) as c_int;
                     let mut post_ptr = crate::queuesubsys_host::PostRef::NONE;
-                    emit_rpc_nzb(&qh, np, 0, |n, _, f, prms, scrs, sts| {
-                        post_ptr = n.post_info_ptr;
-                        let has_post = post_ptr.is_some();
-                        let post_stage = if has_post { i32::from(n.post_stage) } else { 0 };
-                        // The wire format keeps these 8 bits wide.
-                        let group = crate::xmlrpc_format::RpcGroupItem {
-                            nzb_id: n.id,
-                            remaining_size: n.remaining_size,
-                            paused_size: n.paused_size,
-                            remaining_file_count: flen,
-                            remaining_par_count: n.remaining_par_count,
-                            priority: n.priority,
-                            active_downloads: n.active_downloads,
-                            has_post_info: has_post,
-                            post_stage: post_stage & 0xff,
-                            has_queue_script_job: false,
-                            queue_script_active: false,
-                            direct_unpack_status: i32::from(n.direct_unpack_status) & 0xff,
-                            kind: n.kind & 0xff,
-                        };
-                        out.group(
-                            &group,
-                            &crate::xmlrpc_format::RpcNzbInfo {
-                                info: f,
-                                params: prms,
-                                scripts: scrs,
-                                stats: sts,
-                            },
-                        );
-                    });
+                    emit_rpc_nzb(
+                        &qh,
+                        np,
+                        crate::qnzb::TextStatus::Off,
+                        |n, _, f, prms, scrs, sts| {
+                            post_ptr = n.post_info_ptr;
+                            let has_post = post_ptr.is_some();
+                            let post_stage = if has_post { i32::from(n.post_stage) } else { 0 };
+                            // The wire format keeps these 8 bits wide.
+                            let group = crate::xmlrpc_format::RpcGroupItem {
+                                nzb_id: n.id,
+                                remaining_size: n.remaining_size,
+                                paused_size: n.paused_size,
+                                remaining_file_count: flen,
+                                remaining_par_count: n.remaining_par_count,
+                                priority: n.priority,
+                                active_downloads: n.active_downloads,
+                                has_post_info: has_post,
+                                post_stage: post_stage & 0xff,
+                                has_queue_script_job: false,
+                                queue_script_active: false,
+                                direct_unpack_status: i32::from(n.direct_unpack_status) & 0xff,
+                                kind: n.kind & 0xff,
+                            };
+                            out.group(
+                                &group,
+                                &crate::xmlrpc_format::RpcNzbInfo {
+                                    info: f,
+                                    params: prms,
+                                    scripts: scrs,
+                                    stats: sts,
+                                },
+                            );
+                        },
+                    );
                     emit_rpc_post(&qh, post_ptr, a1, false, out);
                 }
             });
@@ -2858,23 +2863,28 @@ unsafe fn web_rpc_collect_bridge(
                         continue;
                     }
                     let pi = qh.post_snap(outer.post_info_ptr);
-                    emit_rpc_nzb(&qh, pi.nzb_ptr, 0, |pn, _, f, prms, scrs, sts| {
-                        let c_pname = cstr::to_cstring(&pn.name);
-                        out.post_queue_item(
-                            &crate::xmlrpc_format::RpcPostQueueItem {
-                                nzb_id: outer.id,
-                                info_name: &c_pname,
-                                stage: pi.stage.into(),
-                                file_progress: pi.file_progress,
-                            },
-                            &crate::xmlrpc_format::RpcNzbInfo {
-                                info: f,
-                                params: prms,
-                                scripts: scrs,
-                                stats: sts,
-                            },
-                        );
-                    });
+                    emit_rpc_nzb(
+                        &qh,
+                        pi.nzb_ptr,
+                        crate::qnzb::TextStatus::Off,
+                        |pn, _, f, prms, scrs, sts| {
+                            let c_pname = cstr::to_cstring(&pn.name);
+                            out.post_queue_item(
+                                &crate::xmlrpc_format::RpcPostQueueItem {
+                                    nzb_id: outer.id,
+                                    info_name: &c_pname,
+                                    stage: pi.stage.into(),
+                                    file_progress: pi.file_progress,
+                                },
+                                &crate::xmlrpc_format::RpcNzbInfo {
+                                    info: f,
+                                    params: prms,
+                                    scripts: scrs,
+                                    stats: sts,
+                                },
+                            );
+                        },
+                    );
                     emit_rpc_post(&qh, outer.post_info_ptr, a1, true, out);
                 }
             });
@@ -2896,24 +2906,29 @@ unsafe fn web_rpc_collect_bridge(
                         || h.kind == crate::queuesubsys_host::HK_URL
                     {
                         let has_completed = c_int::from(qh.nzb_completed_files_len(h.nzb()) > 0);
-                        emit_rpc_nzb(&qh, h.nzb(), 2, |n, status_ptr, f, prms, scrs, sts| {
-                            out.history_nzb(
-                                &crate::xmlrpc_format::RpcHistoryNzb {
-                                    id: h.id,
-                                    name: &c_hname,
-                                    remaining_file_count: n.parked_file_count,
-                                    retry_data: has_completed != 0,
-                                    history_time: h.time as c_int,
-                                    status: status_ptr,
-                                },
-                                &crate::xmlrpc_format::RpcNzbInfo {
-                                    info: f,
-                                    params: prms,
-                                    scripts: scrs,
-                                    stats: sts,
-                                },
-                            );
-                        });
+                        emit_rpc_nzb(
+                            &qh,
+                            h.nzb(),
+                            crate::qnzb::TextStatus::WithScript,
+                            |n, status_ptr, f, prms, scrs, sts| {
+                                out.history_nzb(
+                                    &crate::xmlrpc_format::RpcHistoryNzb {
+                                        id: h.id,
+                                        name: &c_hname,
+                                        remaining_file_count: n.parked_file_count,
+                                        retry_data: has_completed != 0,
+                                        history_time: h.time as c_int,
+                                        status: status_ptr,
+                                    },
+                                    &crate::xmlrpc_format::RpcNzbInfo {
+                                        info: f,
+                                        params: prms,
+                                        scripts: scrs,
+                                        stats: sts,
+                                    },
+                                );
+                            },
+                        );
                     } else if h.kind == crate::queuesubsys_host::HK_DUP {
                         let d = qh.dup_snap(h.inner_ptr);
                         let c_dkey = cstr::to_cstring(&d.dupe_key);

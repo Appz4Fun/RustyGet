@@ -374,7 +374,7 @@ mod tests {
         field, nzbget_rs_file_new, nzbget_rs_file_set, nzbget_rs_file_set_text, text,
     };
     use crate::qnzb::{
-        nzbget_rs_nzb_scalars_free, nzbget_rs_nzb_scalars_new, nzbget_rs_nzb_slot, NzbScalars,
+        nzbget_rs_nzb_scalars_free, nzbget_rs_nzb_scalars_new, swap_slot, NzbScalars, Slot,
     };
 
     struct Row {
@@ -396,7 +396,7 @@ mod tests {
         fn new() -> Self {
             let p = nzbget_rs_nzb_scalars_new();
             let list = crate::qlist::nzbget_rs_ptrlist_new(drop_file);
-            unsafe { nzbget_rs_nzb_slot(p, 0, 1, list as usize) };
+            swap_slot(p, Slot::FileList, list as usize);
             Nzb(p)
         }
         fn add(&self, id: i32, name: &str) -> *mut crate::qfile::File {
@@ -424,7 +424,7 @@ mod tests {
     impl Drop for Nzb {
         fn drop(&mut self) {
             unsafe {
-                let list = nzbget_rs_nzb_slot(self.0, 0, 1, 0);
+                let list = swap_slot(self.0, Slot::FileList, 0);
                 crate::qlist::nzbget_rs_ptrlist_free(list as *mut crate::qlist::PtrList);
                 nzbget_rs_nzb_scalars_free(self.0);
             }

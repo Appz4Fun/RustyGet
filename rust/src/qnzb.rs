@@ -231,11 +231,37 @@ struct NzbData {
     files: Mutex<Files>,
     // (id, kind, time, text), oldest first (see `nzbget_rs_nzb_msgs`)
     msgs: Mutex<std::collections::VecDeque<(u32, i32, i64, CString)>>,
-    // host handles (see `nzbget_rs_nzb_slot`)
+    // host handles, indexed by [`Slot`]
     slots: [std::sync::atomic::AtomicUsize; SLOTS],
 }
 
 const SLOTS: usize = 5;
+
+/// What a collection keeps in each host slot. The host owns what they
+/// point to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Slot {
+    /// The file list.
+    FileList,
+    /// The post-processing job.
+    Post,
+    /// The direct-unpack job thread.
+    UnpackJob,
+    /// The live-repair job thread.
+    LiveRepairJob,
+    /// The message count.
+    MessageCount,
+}
+
+/// The value in slot `s` of collection `p`.
+pub(crate) fn slot(p: *const NzbScalars, s: Slot) -> usize {
+    data(p).slot(s).load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Stores `v` in slot `s` of collection `p`; returns the previous value.
+pub(crate) fn swap_slot(p: *const NzbScalars, s: Slot, v: usize) -> usize {
+    data(p).slot(s).swap(v, std::sync::atomic::Ordering::SeqCst)
+}
 
 /// A file that finished downloading and left the file list.
 struct Completed {
@@ -348,6 +374,10 @@ fn nzb_data<'a>(nzb: NzbRef) -> Option<&'a NzbData> {
 }
 
 impl NzbData {
+    fn slot(&self, s: Slot) -> &std::sync::atomic::AtomicUsize {
+        &self.slots[s as usize]
+    }
+
     fn coll(&self) -> std::sync::MutexGuard<'_, Coll> {
         self.coll.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
@@ -565,7 +595,10 @@ pub(crate) fn set_meta_name(nzb: NzbRef, name: &[u8]) {
 
 /// The direct-unpack job handle kept with the download, 0 for none.
 pub(crate) fn unpack_thread(nzb: NzbRef) -> usize {
-    nzb_data(nzb).map_or(0, |d| d.slots[2].load(std::sync::atomic::Ordering::SeqCst))
+    nzb_data(nzb).map_or(0, |d| {
+        d.slot(Slot::UnpackJob)
+            .load(std::sync::atomic::Ordering::SeqCst)
+    })
 }
 
 /// Whether a file still downloading has its output file open.
@@ -855,13 +888,14 @@ pub(crate) fn set_int(nzb: NzbRef, field: NzbInt, v: i32) {
         NzbInt::SuccessArticles => s.successArticles = v,
         NzbInt::FileCount => s.fileCount = v,
         NzbInt::MessageCount => {
-            d.slots[4].store(v as isize as usize, SeqCst);
+            d.slot(Slot::MessageCount)
+                .store(v as isize as usize, SeqCst);
         }
         NzbInt::TotalArticles => s.totalArticles = v,
         NzbInt::LiveUnpackSec => s.liveUnpackSec = v,
         NzbInt::LiveParSec => s.liveParSec = v,
         NzbInt::PostStage | NzbInt::PostForceFlags => {
-            let post = d.slots[1].load(SeqCst) as *const Post;
+            let post = d.slot(Slot::Post).load(SeqCst) as *const Post;
             if !post.is_null() {
                 if field == NzbInt::PostStage {
                     post_set(post, 0, i64::from(v));
@@ -958,11 +992,11 @@ pub(crate) fn act(nzb: NzbRef, action: NzbAction) {
         NzbAction::LeavePostProcess => unsafe { leave_post_process(p) },
         NzbAction::ClearScriptStatuses => d.coll().script_statuses.clear(),
         NzbAction::DisconnectThreads => {
-            d.slots[2].store(0, SeqCst);
-            d.slots[3].store(0, SeqCst);
+            d.slot(Slot::UnpackJob).store(0, SeqCst);
+            d.slot(Slot::LiveRepairJob).store(0, SeqCst);
         }
-        NzbAction::ClearLiveRepairThread => d.slots[3].store(0, SeqCst),
-        NzbAction::ClearUnpackThread => d.slots[2].store(0, SeqCst),
+        NzbAction::ClearLiveRepairThread => d.slot(Slot::LiveRepairJob).store(0, SeqCst),
+        NzbAction::ClearUnpackThread => d.slot(Slot::UnpackJob).store(0, SeqCst),
         NzbAction::ClearExtractedArchives => d.files().extracted.clear(),
         NzbAction::ClearFileList => {
             if file_list(p) != 0 {
@@ -1159,7 +1193,7 @@ unsafe extern "C" fn drop_file(p: usize) {
 pub unsafe extern "C" fn nzbget_rs_nzb_init(p: *mut NzbScalars) {
     unsafe { (*p).id = crate::idgen::NZB_IDS.next() };
     let files = crate::qlist::nzbget_rs_ptrlist_new(drop_file);
-    unsafe { nzbget_rs_nzb_slot(p, 0, 1, files as usize) };
+    swap_slot(p, Slot::FileList, files as usize);
 }
 
 /// # Safety
@@ -1750,11 +1784,11 @@ fn post_thread(p: *const Post) -> Option<JobHandle> {
 }
 
 /// The job thread in a download's slot `id`, if any.
-fn slot_job(nzb: usize, id: c_int) -> Option<JobHandle> {
+fn slot_job(nzb: usize, which: Slot) -> Option<JobHandle> {
     if nzb == 0 {
         return None;
     }
-    let addr = unsafe { nzbget_rs_nzb_slot(nzb as *const NzbScalars, id, 0, 0) };
+    let addr = slot(nzb as *const NzbScalars, which);
     // SAFETY: the job slots hold 0 or a live job thread.
     unsafe { JobHandle::from_addr(addr) }
 }
@@ -1784,7 +1818,7 @@ pub(crate) unsafe fn enter_post_process(p: *mut NzbScalars) {
             std::ptr::null_mut(),
         )
     };
-    let old = unsafe { nzbget_rs_nzb_slot(p, 1, 1, post as usize) };
+    let old = swap_slot(p, Slot::Post, post as usize);
     unsafe { nzbget_rs_post_free(old as *mut Post) };
 }
 
@@ -1794,7 +1828,7 @@ pub(crate) unsafe fn enter_post_process(p: *mut NzbScalars) {
 /// # Safety
 /// `p` is a live collection; the caller holds the queue lock.
 pub(crate) unsafe fn leave_post_process(p: *mut NzbScalars) {
-    let old = unsafe { nzbget_rs_nzb_slot(p, 1, 1, 0) };
+    let old = swap_slot(p, Slot::Post, 0);
     unsafe { nzbget_rs_post_free(old as *mut Post) };
     let s = unsafe { &mut *p };
     s.unpackTried = false;
@@ -1873,12 +1907,12 @@ pub unsafe extern "C" fn nzbget_rs_nzb_start_direct_unpack(p: *mut NzbScalars) {
         return;
     }
     let job = JobHandle::new_unpack(unsafe { (*p).id });
-    unsafe { nzbget_rs_nzb_slot(p, 2, 1, job.addr()) };
+    swap_slot(p, Slot::UnpackJob, job.addr());
     // NzbInfo::nsRunning
     unsafe { (*p).directUnpackStatus = 1 };
     if !job.start() {
         unsafe {
-            nzbget_rs_nzb_slot(p, 2, 1, 0);
+            swap_slot(p, Slot::UnpackJob, 0);
             (*p).directUnpackStatus = 0;
             job.free(false);
         }
@@ -1918,14 +1952,14 @@ pub(crate) unsafe fn host_post_job_op(
             }
         }
         3 => {
-            let Some(du) = slot_job(p1, 2) else {
+            let Some(du) = slot_job(p1, Slot::UnpackJob) else {
                 return 0;
             };
             let active = a2 != 0 || (du.unpack_is_unpacking() && !du.unpack_is_waiting_volume());
             return usize::from(active);
         }
         4..=7 => {
-            if let Some(du) = slot_job(p2, 2) {
+            if let Some(du) = slot_job(p2, Slot::UnpackJob) {
                 match a1 {
                     4 => du.unpack_stop(NzbRef::from_addr(p2)),
                     5 => du.unpack_nzb_downloaded(NzbRef::from_addr(p2)),
@@ -1936,12 +1970,12 @@ pub(crate) unsafe fn host_post_job_op(
         }
         8 if p1 != 0 => unsafe { nzbget_rs_nzb_start_direct_unpack(p1 as *mut NzbScalars) },
         9 => {
-            if let Some(t) = slot_job(p1, 3) {
+            if let Some(t) = slot_job(p1, Slot::LiveRepairJob) {
                 t.stop();
             }
         }
         10 if p1 != 0 => {
-            let addr = unsafe { nzbget_rs_nzb_slot(p1 as *const NzbScalars, 3, 1, 0) };
+            let addr = swap_slot(p1 as *const NzbScalars, Slot::LiveRepairJob, 0);
             // SAFETY: the slot held 0 or the live repair's thread.
             if let Some(t) = unsafe { JobHandle::from_addr(addr) } {
                 t.stop();
@@ -2034,7 +2068,7 @@ fn ptr_list_op(l: usize, op: c_int, a: i64, item: usize, order: *const usize, ot
 
 /// A collection's file list (slot 0).
 pub(crate) fn file_list(p: *const NzbScalars) -> usize {
-    unsafe { nzbget_rs_nzb_slot(p, 0, 0, 0) }
+    slot(p, Slot::FileList)
 }
 
 /// Moves `src`'s files and download counters to `dst` (NzbInfo::MoveFileList).
@@ -3017,30 +3051,39 @@ fn is_download_completed(p: *const NzbScalars, ignore_paused_pars: bool) -> bool
 const HEALTH_CHECK_DUPE: i32 = 4;
 /// Priority at and above which a collection is forced.
 const FORCE_PRIORITY: i32 = 900;
-/// `ScriptStatus::srSuccess`.
 
-/// A collection's snapshot (host op 30): 90 ints, 21 i64s and, when `strs`
-/// is not null, 9 strings, in the order the C++ host wrote them. `a1` 1 or 2
-/// adds the text status (ignoring, or not, the script status).
-///
-/// # Safety
-/// `p` is a live collection; `ints`, `i64s` and `strs` (if not null) hold
-/// 90, 21 and 9 entries; the caller holds the queue lock.
-pub(crate) unsafe fn host_coll_snapshot(
-    p: *const NzbScalars,
-    a1: c_int,
-    ints: *mut c_int,
-    i64s: *mut i64,
-    strs: *mut *const c_char,
-) {
+/// Which text status a collection snapshot carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TextStatus {
+    /// None: the snapshot's text status is empty.
+    Off,
+    /// As if the scripts succeeded.
+    IgnoreScript,
+    /// Including the scripts' total status.
+    WithScript,
+}
+
+/// A copy of a collection's fields and the values computed from them.
+/// A none handle gives the default snapshot. The caller holds the queue
+/// lock.
+pub(crate) fn nzb_snapshot(
+    nzb: NzbRef,
+    text_status: TextStatus,
+) -> crate::queuesubsys_host::NzbSnap {
+    use crate::status::{
+        CleanupStatus, DirectRenameStatus, DirectUnpackStatus, DupeMode, MarkStatus, MoveStatus,
+        NzbParStatus, PostStage, UnpackStatus, UrlStatus,
+    };
+    if nzb_data(nzb).is_none() {
+        return crate::queuesubsys_host::NzbSnap::default();
+    }
+    let p = scalars(nzb).cast_const();
     let s = unsafe { &*p };
-    let ints = unsafe { std::slice::from_raw_parts_mut(ints, 90) };
-    let i64s = unsafe { std::slice::from_raw_parts_mut(i64s, 21) };
     let ns: *const c_char = std::ptr::null();
-    let coll = |op| unsafe {
+    let script_total = unsafe {
         nzbget_rs_nzb_coll(
             p,
-            op,
+            14,
             0,
             std::ptr::null(),
             ns,
@@ -3048,213 +3091,175 @@ pub(crate) unsafe fn host_coll_snapshot(
             std::ptr::null_mut(),
             std::ptr::null_mut(),
         )
-    };
-    let files = |op| unsafe {
-        nzbget_rs_nzb_files(
-            p,
-            op,
-            0,
-            std::ptr::null(),
-            ns,
-            ns,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null(),
-        )
-    };
-    let post = unsafe { nzbget_rs_nzb_slot(p, 1, 0, 0) } as *const Post;
+    } as c_int;
+    let post = slot(p, Slot::Post) as *const Post;
     let post_flag = |id| !post.is_null() && post_get(post, id) != 0;
-    let unpack_thread = unsafe { nzbget_rs_nzb_slot(p, 2, 0, 0) };
-    let live_repair_thread = unsafe { nzbget_rs_nzb_slot(p, 3, 0, 0) };
-    let message_count = unsafe { nzbget_rs_nzb_slot(p, 4, 0, 0) } as isize as c_int;
-    let b = c_int::from;
+    let unpack_thread = slot(p, Slot::UnpackJob);
+    let live_repair_thread = slot(p, Slot::LiveRepairJob);
+    let message_count = slot(p, Slot::MessageCount) as isize as c_int;
     let health = calc_health(s);
     let critical_est = calc_critical_health(s, true);
     let critical_exact = calc_critical_health(s, false);
     let health_check_dupe = crate::options::active_options()
         .is_some_and(|o| o.scalars().health_check == HEALTH_CHECK_DUPE);
-    let dupe_success = crate::downloadinfo::is_dupe_success(
-        crate::status::MarkStatus::from(s.markStatus),
+    let is_dupe_success = crate::downloadinfo::is_dupe_success(
+        MarkStatus::from(s.markStatus),
         DeleteStatus::from(s.deleteStatus),
-        crate::status::NzbParStatus::from(s.parStatus),
-        crate::status::UnpackStatus::from(s.unpackStatus),
-        crate::status::UrlStatus::from(s.urlStatus),
+        NzbParStatus::from(s.parStatus),
+        UnpackStatus::from(s.unpackStatus),
+        UrlStatus::from(s.urlStatus),
         health,
         critical_est,
         critical_exact,
         health_check_dupe,
     );
-    ints[0] = s.id;
-    ints[1] = s.kind;
-    ints[2] = s.dupeMode;
-    ints[3] = s.dupeScore;
-    ints[4] = s.dupeHint;
-    ints[5] = s.deleteStatus;
-    ints[6] = s.markStatus;
-    ints[7] = s.parStatus;
-    ints[8] = s.directRenameStatus;
-    ints[9] = s.directUnpackStatus;
-    ints[10] = s.dupeParDeferState;
-    ints[11] = b(s.deleting);
-    ints[12] = b(s.parking);
-    ints[13] = b(s.healthPaused);
-    ints[14] = b(s.priority >= FORCE_PRIORITY);
-    ints[15] = b(s.extraPriority > 0);
-    ints[16] = b(s.manyDupeFiles);
-    ints[17] = b(s.desiredServerId > 0);
-    ints[18] = s.desiredServerId;
-    ints[19] = s.priority;
-    ints[20] = s.feedId;
-    ints[21] = b(s.changed);
-    ints[22] = b(s.allFirst);
-    ints[23] = b(s.deadPickProbed);
-    ints[24] = b(s.dupeNoParNoted);
-    ints[25] = b(!post.is_null());
-    ints[26] = b(post_flag(1));
-    ints[27] = if post.is_null() {
-        0
-    } else {
-        post_get(post, 0) as c_int
+    let text_status = match text_status {
+        TextStatus::Off => Vec::new(),
+        TextStatus::IgnoreScript | TextStatus::WithScript => {
+            let status = crate::downloadinfo::make_text_status_cstr(
+                s.kind,
+                MarkStatus::from(s.markStatus),
+                DeleteStatus::from(s.deleteStatus),
+                NzbParStatus::from(s.parStatus),
+                UnpackStatus::from(s.unpackStatus),
+                MoveStatus::from(s.moveStatus),
+                UrlStatus::from(s.urlStatus),
+                if text_status == TextStatus::IgnoreScript {
+                    ScriptStatus::Success
+                } else {
+                    ScriptStatus::from(script_total)
+                },
+                health,
+                critical_exact,
+            );
+            status.strip_suffix(b"\0").unwrap_or(status).to_vec()
+        }
     };
-    ints[28] = b(live_repair_thread != 0);
-    ints[29] = b(dupe_success);
-    ints[30] = health;
-    ints[31] = critical_est;
-    ints[32] = critical_exact;
-    ints[33] = b(is_download_completed(p, true));
-    ints[34] = s.fileCount;
-    ints[35] = s.activeDownloads;
-    ints[36] = s.pausedFileCount;
-    ints[37] = s.remainingParCount;
-    ints[38] = s.totalArticles;
-    ints[39] = s.successArticles;
-    ints[40] = s.failedArticles;
-    ints[41] = s.currentSuccessArticles;
-    ints[42] = s.currentFailedArticles;
-    ints[43] = s.dupeRecoveredArticles;
-    ints[44] = s.dupeAttemptedArticles;
-    ints[45] = s.dupeUnsourcedArticles;
-    ints[46] = s.dupeFailedRun;
-    ints[47] = s.dupeFailoverChecked;
-    ints[48] = s.downloadSec;
-    ints[49] = s.fullContentHash as c_int;
-    ints[50] = b(s.skipDiskWrite);
-    ints[51] = b(s.waitingPar);
-    ints[52] = b(s.loadingPar);
-    ints[53] = b(s.unpackCleanedUpDisk);
-    ints[54] = b(is_download_completed(p, false));
-    ints[55] = b(s.skipScriptProcessing);
-    ints[56] = b(s.avoidHistory);
-    ints[57] = b(s.cleanupDisk);
-    ints[58] = b(s.unpackTried);
-    ints[59] = b(s.parFull);
-    ints[60] = s.postTotalSec;
-    ints[61] = s.parRenameStatus;
-    ints[62] = s.rarRenameStatus;
-    ints[63] = s.unpackStatus;
-    ints[64] = s.cleanupStatus;
-    ints[65] = s.moveStatus;
-    ints[66] = s.postDownloadRenamingStatus;
-    ints[67] = s.postUnpackRenamingStatus;
-    ints[68] = b(unpack_thread != 0);
-    ints[69] = b(files(20) > 0);
-    ints[70] = s.urlStatus;
-    ints[71] = s.parSec;
-    ints[72] = s.repairSec;
-    ints[73] = s.unpackSec;
-    ints[74] = b(s.reprocess);
-    ints[75] = s.extraParBlocks;
-    ints[76] = s.dupeRecoveredHoles;
-    let script_total = coll(14) as c_int;
-    ints[77] = script_total;
-    ints[78] = s.parkedFileCount;
-    ints[79] = b(s.deletePaused);
-    ints[80] = b(s.autoCategory);
-    ints[81] = b(s.addUrlPaused);
-    ints[82] = message_count;
-    ints[83] = b(post_flag(4));
-    ints[84] = b(post_flag(8));
-    ints[85] = b(s.parRepaired);
-    ints[86] = s.lastUnpackStatus;
-    ints[87] = s.cachedMessageCount;
-    ints[88] = s.liveUnpackSec;
-    ints[89] = s.liveParSec;
-    i64s[0] = s.size;
-    i64s[1] = s.remainingSize;
-    i64s[2] = s.pausedSize;
-    i64s[3] = s.successSize;
-    i64s[4] = s.currentSuccessSize;
-    i64s[5] = s.failedSize;
-    i64s[6] = s.currentFailedSize;
-    i64s[7] = s.parSize;
-    i64s[8] = s.parSuccessSize;
-    i64s[9] = s.parCurrentSuccessSize;
-    i64s[10] = s.parFailedSize;
-    i64s[11] = s.parCurrentFailedSize;
-    i64s[12] = s.downloadedSize;
-    i64s[13] = s.minTime;
-    i64s[14] = s.maxTime;
-    i64s[15] = i64::from(s.filteredContentHash);
-    i64s[16] = s.downloadStartTime;
-    i64s[17] = s.dupeRecoveredBytes;
-    i64s[18] = post as i64;
-    i64s[19] = live_repair_thread as i64;
-    i64s[20] = s.queueScriptTime;
-    if strs.is_null() {
-        return;
-    }
-    let strs = unsafe { std::slice::from_raw_parts_mut(strs, 9) };
-    let t = |id| unsafe { nzbget_rs_nzb_text(p, id) };
-    strs[0] = t(2);
-    strs[1] = t(1);
-    strs[2] = t(3);
-    strs[3] = t(4);
-    strs[4] = t(5);
-    strs[5] = t(7);
-    strs[6] = t(6);
-    // a static literal, so it outlives the call
-    strs[7] = match a1 {
-        1 | 2 => crate::downloadinfo::make_text_status_cstr(
-            s.kind,
-            crate::status::MarkStatus::from(s.markStatus),
-            DeleteStatus::from(s.deleteStatus),
-            crate::status::NzbParStatus::from(s.parStatus),
-            crate::status::UnpackStatus::from(s.unpackStatus),
-            crate::status::MoveStatus::from(s.moveStatus),
-            crate::status::UrlStatus::from(s.urlStatus),
-            if a1 == 1 {
-                ScriptStatus::Success
-            } else {
-                ScriptStatus::from(script_total)
-            },
-            health,
-            critical_exact,
-        )
-        .as_ptr()
-        .cast(),
-        _ => std::ptr::null(),
-    };
-    strs[8] = t(0);
-}
-
-/// Host handles kept with a collection: 0 file list, 1 post-processing info,
-/// 2 direct-unpack job, 3 live-repair job, 4 message count. The host owns
-/// what they point to. set != 0 stores v; returns the (previous) value.
-pub unsafe extern "C" fn nzbget_rs_nzb_slot(
-    p: *const NzbScalars,
-    id: c_int,
-    set: c_int,
-    v: usize,
-) -> usize {
-    use std::sync::atomic::Ordering::SeqCst;
-    let Some(slot) = usize::try_from(id).ok().and_then(|i| data(p).slots.get(i)) else {
-        return 0;
-    };
-    if set != 0 {
-        slot.swap(v, SeqCst)
-    } else {
-        slot.load(SeqCst)
+    crate::queuesubsys_host::NzbSnap {
+        ptr: nzb,
+        post_info_ptr: PostRef::from_addr(post as usize),
+        id: s.id,
+        kind: s.kind,
+        dupe_mode: DupeMode::from(s.dupeMode),
+        dupe_score: s.dupeScore,
+        dupe_hint: s.dupeHint,
+        delete_status: DeleteStatus::from(s.deleteStatus),
+        mark_status: MarkStatus::from(s.markStatus),
+        par_status: NzbParStatus::from(s.parStatus),
+        direct_rename_status: DirectRenameStatus::from(s.directRenameStatus),
+        direct_unpack_status: DirectUnpackStatus::from(s.directUnpackStatus),
+        dupe_par_defer_state: s.dupeParDeferState,
+        deleting: s.deleting,
+        parking: s.parking,
+        health_paused: s.healthPaused,
+        force_priority: s.priority >= FORCE_PRIORITY,
+        has_extra_priority: s.extraPriority > 0,
+        many_dupe_files: s.manyDupeFiles,
+        has_desired_server: s.desiredServerId > 0,
+        desired_server_id: s.desiredServerId,
+        priority: s.priority,
+        feed_id: s.feedId,
+        changed: s.changed,
+        all_first: s.allFirst,
+        dead_pick_probed: s.deadPickProbed,
+        dupe_no_par_noted: s.dupeNoParNoted,
+        has_post_info: !post.is_null(),
+        post_working: post_flag(1),
+        post_stage: if post.is_null() {
+            PostStage::default()
+        } else {
+            PostStage::from(post_get(post, 0) as c_int)
+        },
+        has_live_repair_thread: live_repair_thread != 0,
+        live_repair_thread_ptr: live_repair_thread,
+        has_unpack_thread: unpack_thread != 0,
+        has_stream_repair_jobs: repair_job_count(nzb) > 0,
+        url_status: UrlStatus::from(s.urlStatus),
+        par_sec: s.parSec,
+        repair_sec: s.repairSec,
+        unpack_sec: s.unpackSec,
+        live_unpack_sec: s.liveUnpackSec,
+        live_par_sec: s.liveParSec,
+        reprocess: s.reprocess,
+        extra_par_blocks: s.extraParBlocks,
+        dupe_recovered_holes: s.dupeRecoveredHoles,
+        script_total_status: ScriptStatus::from(script_total),
+        parked_file_count: s.parkedFileCount,
+        delete_paused: s.deletePaused,
+        auto_category: s.autoCategory,
+        add_url_paused: s.addUrlPaused,
+        is_dupe_success,
+        health,
+        critical_health_opt: critical_est,
+        critical_health_exact: critical_exact,
+        is_download_completed: is_download_completed(p, true),
+        is_download_completed_strict: is_download_completed(p, false),
+        skip_disk_write: s.skipDiskWrite,
+        waiting_par: s.waitingPar,
+        loading_par: s.loadingPar,
+        unpack_cleaned_up_disk: s.unpackCleanedUpDisk,
+        skip_script_processing: s.skipScriptProcessing,
+        avoid_history: s.avoidHistory,
+        cleanup_disk: s.cleanupDisk,
+        unpack_tried: s.unpackTried,
+        par_full: s.parFull,
+        force_par_full: post_flag(4),
+        force_repair: post_flag(8),
+        par_repaired: s.parRepaired,
+        last_unpack_status: UnpackStatus::from(s.lastUnpackStatus),
+        message_count,
+        cached_message_count: s.cachedMessageCount,
+        post_total_sec: s.postTotalSec,
+        par_rename_status: s.parRenameStatus,
+        rar_rename_status: s.rarRenameStatus,
+        unpack_status: UnpackStatus::from(s.unpackStatus),
+        cleanup_status: CleanupStatus::from(s.cleanupStatus),
+        move_status: MoveStatus::from(s.moveStatus),
+        post_download_renaming_status: s.postDownloadRenamingStatus,
+        post_unpack_renaming_status: s.postUnpackRenamingStatus,
+        file_count: s.fileCount,
+        active_downloads: s.activeDownloads,
+        paused_file_count: s.pausedFileCount,
+        remaining_par_count: s.remainingParCount,
+        total_articles: s.totalArticles,
+        success_articles: s.successArticles,
+        failed_articles: s.failedArticles,
+        current_success_articles: s.currentSuccessArticles,
+        current_failed_articles: s.currentFailedArticles,
+        dupe_recovered_articles: s.dupeRecoveredArticles,
+        dupe_attempted_articles: s.dupeAttemptedArticles,
+        dupe_unsourced_articles: s.dupeUnsourcedArticles,
+        dupe_failed_run: s.dupeFailedRun,
+        dupe_failover_checked: s.dupeFailoverChecked,
+        download_sec: s.downloadSec,
+        full_content_hash: s.fullContentHash,
+        filtered_content_hash: s.filteredContentHash,
+        size: s.size,
+        remaining_size: s.remainingSize,
+        paused_size: s.pausedSize,
+        success_size: s.successSize,
+        current_success_size: s.currentSuccessSize,
+        failed_size: s.failedSize,
+        current_failed_size: s.currentFailedSize,
+        par_size: s.parSize,
+        par_success_size: s.parSuccessSize,
+        par_current_success_size: s.parCurrentSuccessSize,
+        par_failed_size: s.parFailedSize,
+        par_current_failed_size: s.parCurrentFailedSize,
+        downloaded_size: s.downloadedSize,
+        min_time: s.minTime,
+        max_time: s.maxTime,
+        download_start_time: s.downloadStartTime,
+        dupe_recovered_bytes: s.dupeRecoveredBytes,
+        name: text_bytes(p, 2),
+        filename: text_bytes(p, 1),
+        dest_dir: text_bytes(p, 3),
+        final_dir: text_bytes(p, 4),
+        category: text_bytes(p, 5),
+        dupe_key: text_bytes(p, 7),
+        queued_filename: text_bytes(p, 6),
+        text_status,
+        url: text_bytes(p, 0),
     }
 }
 
@@ -3692,9 +3697,9 @@ mod tests {
             let n = nzbget_rs_nzb_scalars_new();
             // stage and force flags need a post job
             set_int(NzbRef::from_addr(n as usize), NzbInt::PostStage, 4);
-            assert_eq!(nzbget_rs_nzb_slot(n, 1, 0, 0), 0);
+            assert_eq!(slot(n, Slot::Post), 0);
             act(NzbRef::from_addr(n as usize), NzbAction::EnterPostProcess);
-            let p = nzbget_rs_nzb_slot(n, 1, 0, 0) as *const Post;
+            let p = slot(n, Slot::Post) as *const Post;
             assert!(!p.is_null());
             assert_eq!(post_get(p, 2) as usize, 0);
             assert_eq!(
@@ -3708,13 +3713,13 @@ mod tests {
             assert_eq!(post_get(p, 8), 1);
             // a second enter replaces the post job
             act(NzbRef::from_addr(n as usize), NzbAction::EnterPostProcess);
-            let p2 = nzbget_rs_nzb_slot(n, 1, 0, 0) as *const Post;
+            let p2 = slot(n, Slot::Post) as *const Post;
             assert_eq!(post_get(p2, 0), 0);
             post_set(p2, 10, 1);
             post_set(p2, 12, 2);
             nzbget_rs_post_op(p2, 32, 0, 0, c"x.rar".as_ptr(), std::ptr::null_mut());
             act(NzbRef::from_addr(n as usize), NzbAction::LeavePostProcess);
-            assert_eq!(nzbget_rs_nzb_slot(n, 1, 0, 0), 0);
+            assert_eq!(slot(n, Slot::Post), 0);
             assert!(!(*n).unpackTried);
             assert_eq!((*n).lastUnpackStatus, 0);
             let np: *const NzbScalars = std::ptr::null();
@@ -3835,13 +3840,13 @@ mod tests {
     fn coll_with_list() -> *mut NzbScalars {
         let n = nzbget_rs_nzb_scalars_new();
         let l = crate::qlist::nzbget_rs_ptrlist_new(drop_test_file);
-        unsafe { nzbget_rs_nzb_slot(n, 0, 1, l as usize) };
+        swap_slot(n, Slot::FileList, l as usize);
         n
     }
 
     fn free_coll_with_list(n: *mut NzbScalars) {
         unsafe {
-            let l = nzbget_rs_nzb_slot(n, 0, 1, 0);
+            let l = swap_slot(n, Slot::FileList, 0);
             crate::qlist::nzbget_rs_ptrlist_free(l as *mut crate::qlist::PtrList);
             nzbget_rs_nzb_scalars_free(n);
         }
@@ -4045,10 +4050,12 @@ mod tests {
     }
 
     #[test]
-    fn coll_snapshot_reports_fields_and_computed_values() {
+    fn nzb_snapshot_reports_fields_and_computed_values() {
         use crate::qfile::field;
+        assert_eq!(nzb_snapshot(NzbRef::NONE, TextStatus::IgnoreScript).id, 0);
         unsafe {
             let n = coll_with_list();
+            let r = NzbRef::from_addr(n as usize);
             (*n).id = 77;
             (*n).kind = 0;
             (*n).priority = 900;
@@ -4056,57 +4063,44 @@ mod tests {
             (*n).desiredServerId = 3;
             (*n).size = 1000;
             (*n).currentFailedSize = 100;
-            (*n).queueScriptTime = 1234;
+            (*n).fullContentHash = 0xdead_beef;
+            (*n).filteredContentHash = 0xffff_0001;
             nzbget_rs_nzb_set_text(n, 2, c"Name".as_ptr(), -1);
             nzbget_rs_nzb_set_text(n, 0, c"http://u".as_ptr(), -1);
             add_test_file(n, &[(field::PAR_FILE, 1), (field::PAUSED, 1)]);
-            let mut ints = [0; 90];
-            let mut i64s = [0i64; 21];
-            let mut strs = [std::ptr::null(); 9];
-            host_coll_snapshot(
-                n,
-                1,
-                ints.as_mut_ptr(),
-                i64s.as_mut_ptr(),
-                strs.as_mut_ptr(),
-            );
-            assert_eq!(ints[0], 77);
-            assert_eq!((ints[14], ints[15], ints[17], ints[18]), (1, 1, 1, 3));
-            assert_eq!(ints[25], 0);
-            assert_eq!(ints[30], 900);
+            let s = nzb_snapshot(r, TextStatus::IgnoreScript);
+            assert_eq!(s.ptr, r);
+            assert_eq!(s.id, 77);
+            assert!(s.force_priority && s.has_extra_priority && s.has_desired_server);
+            assert_eq!(s.desired_server_id, 3);
+            assert!(!s.has_post_info && s.post_info_ptr.is_none());
+            assert_eq!(s.health, 900);
             // a paused par file blocks completion only when paused pars count
-            assert_eq!((ints[33], ints[54]), (1, 0));
-            assert_eq!(ints[47], -1);
-            assert_eq!(i64s[0], 1000);
-            assert_eq!(i64s[18], 0);
-            assert_eq!(i64s[20], 1234);
-            assert_eq!(CStr::from_ptr(strs[0]).to_bytes(), b"Name");
-            assert_eq!(CStr::from_ptr(strs[8]).to_bytes(), b"http://u");
-            assert!(!strs[7].is_null());
-            // with a post job
-            act(NzbRef::from_addr(n as usize), NzbAction::EnterPostProcess);
-            set_int(NzbRef::from_addr(n as usize), NzbInt::PostStage, 7);
-            set_int(NzbRef::from_addr(n as usize), NzbInt::PostForceFlags, 2);
-            host_coll_snapshot(
-                n,
-                0,
-                ints.as_mut_ptr(),
-                i64s.as_mut_ptr(),
-                std::ptr::null_mut(),
+            assert!(s.is_download_completed && !s.is_download_completed_strict);
+            assert_eq!(s.dupe_failover_checked, -1);
+            assert_eq!(s.size, 1000);
+            assert_eq!(
+                (s.full_content_hash, s.filtered_content_hash),
+                (0xdead_beef, 0xffff_0001)
             );
-            assert_eq!((ints[25], ints[27], ints[83], ints[84]), (1, 7, 0, 1));
-            assert_ne!(i64s[18], 0);
+            assert_eq!(s.name, b"Name");
+            assert_eq!(s.url, b"http://u");
+            assert!(s.filename.is_empty());
+            assert!(!s.text_status.is_empty() && !s.text_status.contains(&0));
+            assert!(nzb_snapshot(r, TextStatus::Off).text_status.is_empty());
+            // with a post job
+            act(r, NzbAction::EnterPostProcess);
+            set_int(r, NzbInt::PostStage, 7);
+            set_int(r, NzbInt::PostForceFlags, 2);
+            let s = nzb_snapshot(r, TextStatus::Off);
+            assert!(s.has_post_info && s.post_info_ptr.is_some());
+            assert_eq!(i32::from(s.post_stage), 7);
+            assert!(!s.force_par_full && s.force_repair);
             // active downloads: never completed
             (*n).activeDownloads = 1;
-            host_coll_snapshot(
-                n,
-                0,
-                ints.as_mut_ptr(),
-                i64s.as_mut_ptr(),
-                std::ptr::null_mut(),
-            );
-            assert_eq!((ints[33], ints[54]), (0, 0));
-            act(NzbRef::from_addr(n as usize), NzbAction::LeavePostProcess);
+            let s = nzb_snapshot(r, TextStatus::Off);
+            assert!(!s.is_download_completed && !s.is_download_completed_strict);
+            act(r, NzbAction::LeavePostProcess);
             free_coll_with_list(n);
         }
     }

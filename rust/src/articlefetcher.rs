@@ -815,6 +815,8 @@ impl ArticleFetcher {
         let mut raw_bytes: i64 = 0;
         let mut decoded_bytes: i64 = 0;
 
+        // Time spent held back by the speed limit does not count against the article deadline.
+        let mut throttled = Duration::ZERO;
         while !self.is_stopped() && !decoder.eof {
             let st0 = self.host.status();
             if st0.quota_reached {
@@ -822,6 +824,7 @@ impl ArticleFetcher {
                 result.retry = true;
                 return result;
             }
+            let throttle_started = Instant::now();
             while !self.is_stopped() {
                 let st_lim = self.host.status();
                 if st_lim.quota_reached
@@ -834,6 +837,7 @@ impl ArticleFetcher {
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
+            throttled += throttle_started.elapsed();
             if self.host.status().quota_reached {
                 disconnect();
                 result.retry = true;
@@ -843,6 +847,27 @@ impl ArticleFetcher {
                 break;
             }
 
+            // A whole article, not only each read, has a deadline: a connection that trickles
+            // or stalls between reads held one cross-pack read (and every article queued
+            // behind it) for 205 s until the stream timeout gave the repair up. Retried
+            // elsewhere instead.
+            let working = requested.elapsed().saturating_sub(throttled);
+            if working > Duration::from_secs(stream_reply_timeout_secs().max(1) as u64) {
+                let mut log = b"Stream repair: ".to_vec();
+                log.extend_from_slice(server_name);
+                log.extend_from_slice(b" too slow for ");
+                log.extend_from_slice(msg_slice);
+                log.extend_from_slice(
+                    format!(" ({} s); retrying it elsewhere", working.as_secs()).as_bytes(),
+                );
+                self.host.detail(&log);
+                disconnect();
+                return FetchedArticle {
+                    transient: true,
+                    timed_out: true,
+                    ..Default::default()
+                };
+            }
             let read_started = Instant::now();
             // An empty read makes no progress and a length past the buffer would make the decoder
             // read out of bounds: treat either like a lost connection.

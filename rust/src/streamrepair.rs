@@ -9,7 +9,7 @@
 
 use crate::dupefallback::NzbgetRsByteRange;
 use crate::releasename::lower as c_lower_bytes;
-use crate::status::{DeleteStatus, NzbParStatus};
+use crate::status::NzbParStatus;
 
 pub const MAX_DECOMPRESS_BYTES: i64 = 16 * 1024 * 1024 * 1024;
 
@@ -3483,19 +3483,6 @@ pub fn content_mapper_split_inner_name(first_name: &[u8]) -> Vec<u8> {
     }
 }
 
-/// Orders donor indices for `StreamRepairController::CollectDonors` by descending `dupe_scores`
-/// and ascending `ids` on ties.
-pub fn stream_repair_order_donor_indices(dupe_scores: &[i32], ids: &[i32]) -> Vec<usize> {
-    let n = dupe_scores.len().min(ids.len());
-    let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&a, &b| {
-        dupe_scores[b]
-            .cmp(&dupe_scores[a])
-            .then_with(|| ids[a].cmp(&ids[b]))
-    });
-    order
-}
-
 /// Checks whether a completed member in `StreamRepairController::ProveDonorOnIntactFile` is an
 /// intact non-PAR2 member of `target_set` that is not in `target_filenames`.
 pub fn stream_repair_is_intact_proof_member_eligible(
@@ -3541,69 +3528,6 @@ pub fn streamcrypto_rar5_iterations(kdf_count: u8, add_psw_check_offset: bool) -
     } else {
         base
     })
-}
-
-/// Computes the next batch block count (capped at `1 << 16` blocks = 1 MiB) and byte length
-/// for `RarCryptoContext::Crypt`.
-pub fn streamcrypto_next_batch(done_blocks: i64, total_blocks: i64, block_size: i64) -> (i64, i32) {
-    const BATCH_BLOCKS: i64 = 1 << 16;
-    let rem = total_blocks.saturating_sub(done_blocks);
-    let batch = if rem < BATCH_BLOCKS {
-        rem
-    } else {
-        BATCH_BLOCKS
-    };
-    let len = (batch * block_size) as i32;
-    (batch, len)
-}
-
-/// Evaluates `DupeStreamRepair::BuildRepairJob`:
-/// - `0`: skip (`return false`)
-/// - `1`: whole-file hole job (`success_articles == 0 && encoded_size > 0`)
-/// - `2`: compute holes from decoded articles (`success_articles > 0 && decoded_file_size > 0`)
-#[allow(clippy::too_many_arguments)]
-pub fn eval_build_repair_job(
-    fallback_mode: i32,
-    daf_stream: i32,
-    raw_article: bool,
-    is_par_file: bool,
-    disk_basename: &[u8],
-    has_nzb: bool,
-    delete_status: DeleteStatus,
-    deleting: bool,
-    parking: bool,
-    has_post_info: bool,
-    articles_empty: bool,
-    success_articles: i32,
-    encoded_size: i64,
-    decoded_file_size: i64,
-) -> i32 {
-    if fallback_mode < daf_stream
-        || raw_article
-        || is_par_file
-        || ends_with_par2_ci(disk_basename)
-        || disk_basename.is_empty()
-        || articles_empty
-        || !has_nzb
-        || has_post_info
-    {
-        return 0;
-    }
-    let health_cancel = delete_status == DeleteStatus::Health;
-    if !health_cancel && (deleting || parking || delete_status != DeleteStatus::None) {
-        return 0;
-    }
-    if success_articles == 0 {
-        if encoded_size <= 0 {
-            0
-        } else {
-            1
-        }
-    } else if decoded_file_size <= 0 {
-        0
-    } else {
-        2
-    }
 }
 
 /// `DonorMemberSource::StoreFetched`:
@@ -10929,47 +10853,6 @@ pub fn prove_donor_on_intact_file(
     false
 }
 
-/// `StreamRepairController::RepairWholeFile` (`StreamRepair.h`).
-#[allow(clippy::too_many_arguments)]
-pub fn repair_whole_file(
-    dest_dir: &[u8],
-    target: &mut M1RepairTarget,
-    donor_name: &[u8],
-    donor_file_names: &[&[u8]],
-    donor_file_sizes: &[i64],
-    donor_file_is_par: &[u8],
-    donor_has_articles: &[u8],
-    donor_steps_hashes: &[u64],
-    donor_article_sizes: &[Vec<i32>],
-    claimed: &mut [u8],
-    donor_proven: bool,
-    env: &mut dyn M1DonorEnv,
-) -> M1RepairOutcome {
-    if env.is_stopped() {
-        return M1RepairOutcome::NoCost;
-    }
-    let root = crate::fsops::path(dest_dir);
-    let Ok(write_context) = crate::parlive::donor_write_context(root, root) else {
-        return M1RepairOutcome::NoCost;
-    };
-
-    repair_whole_file_with_context(
-        dest_dir,
-        target,
-        donor_name,
-        donor_file_names,
-        donor_file_sizes,
-        donor_file_is_par,
-        donor_has_articles,
-        donor_steps_hashes,
-        donor_article_sizes,
-        claimed,
-        donor_proven,
-        env,
-        &write_context,
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
 fn repair_whole_file_with_context(
     dest_dir: &[u8],
@@ -11155,53 +11038,6 @@ fn repair_whole_file_with_context(
 
     target.recreated = true;
     M1RepairOutcome::Productive
-}
-
-/// `StreamRepairController::RepairFile` (`StreamRepair.h`).
-#[allow(clippy::too_many_arguments)]
-pub fn repair_file(
-    dest_dir: &[u8],
-    live_mode: bool,
-    target_idx: usize,
-    targets: &mut [M1RepairTarget],
-    donor_name: &[u8],
-    donor_file_names: &[&[u8]],
-    donor_file_sizes: &[i64],
-    donor_file_is_par: &[u8],
-    donor_has_articles: &[u8],
-    donor_steps_hashes: &[u64],
-    donor_article_sizes: &[Vec<i32>],
-    claimed: &mut [u8],
-    verified: &mut bool,
-    donor_proven: bool,
-    env: &mut dyn M1DonorEnv,
-) -> M1RepairOutcome {
-    if env.is_stopped() {
-        return M1RepairOutcome::NoCost;
-    }
-    let root = crate::fsops::path(dest_dir);
-    let Ok(write_context) = crate::parlive::donor_write_context(root, root) else {
-        return M1RepairOutcome::NoCost;
-    };
-
-    repair_file_with_context(
-        dest_dir,
-        live_mode,
-        target_idx,
-        targets,
-        donor_name,
-        donor_file_names,
-        donor_file_sizes,
-        donor_file_is_par,
-        donor_has_articles,
-        donor_steps_hashes,
-        donor_article_sizes,
-        claimed,
-        verified,
-        donor_proven,
-        env,
-        &write_context,
-    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -12165,11 +12001,6 @@ mod tests {
             b"movie.mkv"
         );
         assert!(content_mapper_split_inner_name(b"archive.rar.001").is_empty());
-
-        assert_eq!(
-            stream_repair_order_donor_indices(&[100, 200, 200], &[5, 9, 2]),
-            vec![2, 1, 0]
-        );
         let target_set = volume_set_key(b"Show.part01.rar");
         assert!(stream_repair_is_intact_proof_member_eligible(
             b"Show.part02.rar",
@@ -12197,65 +12028,6 @@ mod tests {
         assert_eq!(streamcrypto_rar5_iterations(15, false), Some(32768));
         assert_eq!(streamcrypto_rar5_iterations(15, true), Some(32800));
         assert_eq!(streamcrypto_rar5_iterations(25, false), None);
-        assert_eq!(streamcrypto_next_batch(0, 100, 16), (100, 1600));
-
-        assert_eq!(
-            eval_build_repair_job(
-                2,
-                2,
-                false,
-                false,
-                b"movie.mkv",
-                true,
-                DeleteStatus::None,
-                false,
-                false,
-                false,
-                false,
-                0,
-                1000,
-                0
-            ),
-            1
-        );
-        assert_eq!(
-            eval_build_repair_job(
-                2,
-                2,
-                false,
-                false,
-                b"movie.mkv",
-                true,
-                DeleteStatus::None,
-                false,
-                false,
-                false,
-                false,
-                5,
-                1000,
-                950
-            ),
-            2
-        );
-        assert_eq!(
-            eval_build_repair_job(
-                2,
-                2,
-                false,
-                false,
-                b"movie.par2",
-                true,
-                DeleteStatus::None,
-                false,
-                false,
-                false,
-                false,
-                5,
-                1000,
-                950
-            ),
-            0
-        );
 
         let mut new_prog = 0i64;
         let mut reset_last = false;
@@ -16815,184 +16587,6 @@ mod tests {
         assert_eq!(sub_holes, vec![br(300, 50), br(450, 50)]);
         sub_holes = subtract_covered(&sub_holes, br(600, 100));
         assert_eq!(sub_holes, vec![br(300, 50), br(450, 50)]);
-
-        // 13. StreamRepairBuildRepairJobTest & 14. StreamRepairWholeFileJobTest & 20. StreamRepairDoesNotCaptureParFilesTest
-        assert_eq!(
-            eval_build_repair_job(
-                2,
-                2,
-                false,
-                false,
-                b"movie.mkv",
-                true,
-                DeleteStatus::None,
-                false,
-                false,
-                false,
-                false,
-                2,
-                1000,
-                1000
-            ),
-            2
-        );
-        assert_eq!(
-            eval_build_repair_job(
-                2,
-                2,
-                false,
-                false,
-                b"release.r01",
-                true,
-                DeleteStatus::None,
-                false,
-                false,
-                false,
-                false,
-                1,
-                1000,
-                1000
-            ),
-            2
-        );
-        // Post-process active -> 0
-        assert_eq!(
-            eval_build_repair_job(
-                2,
-                2,
-                false,
-                false,
-                b"late.par2",
-                true,
-                DeleteStatus::None,
-                false,
-                false,
-                true,
-                false,
-                1,
-                1000,
-                1000
-            ),
-            0
-        );
-        // Below "stream" mode -> 0
-        assert_eq!(
-            eval_build_repair_job(
-                0,
-                2,
-                false,
-                false,
-                b"movie.mkv",
-                true,
-                DeleteStatus::None,
-                false,
-                false,
-                false,
-                false,
-                1,
-                1000,
-                1000
-            ),
-            0
-        );
-        // Whole-file missing -> 1
-        assert_eq!(
-            eval_build_repair_job(
-                2,
-                2,
-                false,
-                false,
-                b"ZGWRiqtR4jt2nswwN.part03.rar",
-                true,
-                DeleteStatus::None,
-                false,
-                false,
-                false,
-                false,
-                0,
-                2_400_000,
-                0
-            ),
-            1
-        );
-        // Sizeless whole file -> 0
-        assert_eq!(
-            eval_build_repair_job(
-                2,
-                2,
-                false,
-                false,
-                b"x.r00",
-                true,
-                DeleteStatus::None,
-                false,
-                false,
-                false,
-                false,
-                0,
-                0,
-                0
-            ),
-            0
-        );
-        // PAR files (by flag or by confirmed/disk .par2 name) -> 0
-        assert_eq!(
-            eval_build_repair_job(
-                2,
-                2,
-                false,
-                true,
-                b"obfuscated.bin",
-                true,
-                DeleteStatus::None,
-                false,
-                false,
-                false,
-                false,
-                1,
-                1000,
-                1000
-            ),
-            0
-        );
-        assert_eq!(
-            eval_build_repair_job(
-                2,
-                2,
-                false,
-                false,
-                b"release.PaR2",
-                true,
-                DeleteStatus::None,
-                false,
-                false,
-                false,
-                false,
-                1,
-                1000,
-                1000
-            ),
-            0
-        );
-        assert_eq!(
-            eval_build_repair_job(
-                2,
-                2,
-                false,
-                false,
-                b"release.vol01+02.PAR2",
-                true,
-                DeleteStatus::None,
-                false,
-                false,
-                false,
-                false,
-                1,
-                1000,
-                1000
-            ),
-            0
-        );
 
         // 15. StreamRepairDecodedSizePlausibleTest
         assert!(decoded_size_plausible(1_000_000, 1_020_000));

@@ -6179,7 +6179,6 @@ impl RepairSetData {
         // 16), where 4 MB (6 articles) left most of them idle and borrows ran at 2-3 MB/s.
         // It stays small enough that a stop (a live pass yielding) is seen within seconds.
         const FULL_CHUNK: i64 = 16 * 1024 * 1024;
-        const RETRY_CHUNK: i64 = 4 * 1024 * 1024;
         const MIN_CHUNK: i64 = 64 * 1024;
         const MAX_FAILED_PIECES: i32 = 8;
 
@@ -6216,9 +6215,7 @@ impl RepairSetData {
                         failed_pieces,
                         MAX_FAILED_PIECES,
                     );
-                    // Retry at most 4 MB: the 16 cached articles before the failure then
-                    // cover the retry instead of a refetch of the whole chunk.
-                    size = new_size.min(RETRY_CHUNK);
+                    size = new_size;
                     pos = new_pos;
                     failed_pieces = new_failed;
                     if step_action == 0 {
@@ -6685,9 +6682,19 @@ impl DonorMemberSource {
         self.streaming = parts.into();
     }
 
-    /// Cancels what is left of the read's batch: the batch fetcher is shared by every member
-    /// of the donor, so a batch never outlives the read that opened it.
+    /// Closes the read's batch: the batch fetcher is shared by every member of the donor, so a
+    /// batch never outlives the read that opened it. The read's trailing slack part (usually
+    /// fetched by now) is taken into the cache for the next read; anything more is cancelled.
     fn end_stream(&mut self, transport: &mut dyn DonorArticleTransport) {
+        if self.streaming.len() == 1 {
+            if let Some(next) = self.streaming.pop_front() {
+                if let Some(fetched) = transport.next_prefetch_part() {
+                    if !self.cache.contains_key(&next) {
+                        self.store_fetched(next, fetched);
+                    }
+                }
+            }
+        }
         if !self.streaming.is_empty() {
             self.streaming.clear();
             transport.cancel_prefetch_batch();
@@ -16586,9 +16593,13 @@ mod tests {
         assert_eq!(&buf[..], &full[550..3550]);
         assert_eq!(transport.batch_begins, 1);
         assert_eq!(transport.single_fetches, singles);
-        // The slack part after the read was never taken: the batch is cancelled.
+        // The slack part after the read is cached for the next one; nothing is left open.
         assert!(transport.prefetch_queue.is_empty());
         assert!(src.streaming.is_empty());
+        let mut next = vec![0u8; 50];
+        assert!(src.read_with_transport(&mut transport, 3550, &mut next).is_ok());
+        assert_eq!(&next[..], &full[3550..3600]);
+        assert_eq!(transport.single_fetches, singles);
 
         // A read that fails part-way still closes its batch.
         transport.parts[20].success = false;

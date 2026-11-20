@@ -6204,6 +6204,25 @@ impl RepairSetData {
     /// and `StreamRepairController::PatchFromDonorSetEncrypted`).
     /// Returns `(written, credit_recovery)`.
     #[allow(clippy::too_many_arguments)]
+    /// The set's inner holes split into runs that start in the same archive member, in order:
+    /// one run per dead volume (or other damaged volume) of the set.
+    pub fn holes_by_first_member(&self) -> Vec<Vec<NzbgetRsByteRange>> {
+        let Some(map) = self.map.as_ref() else {
+            return vec![self.inner_holes.clone()];
+        };
+        let mut groups: Vec<Vec<NzbgetRsByteRange>> = Vec::new();
+        let mut last: Option<i32> = None;
+        for &hole in &self.inner_holes {
+            let member = map.map_from_inner(hole).first().map(|p| p.member_index);
+            if groups.is_empty() || member != last {
+                groups.push(Vec::new());
+            }
+            last = member;
+            groups.last_mut().expect("pushed").push(hole);
+        }
+        groups
+    }
+
     pub fn patch_from_donor_set(
         &mut self,
         donor_map: &ContentMap,
@@ -10083,23 +10102,51 @@ impl CrossPackRepairSession {
                 donor_sources.take_served_parts();
 
                 let donor_info_str = String::from_utf8_lossy(donor_info_name);
-                let (written, credit_recovery) = {
-                    let mut target_adapter = DiskTargetFileSetAdapter {
-                        files: &mut self.target_files,
-                        members: &self.set_members,
-                        env: &env_cell,
-                    };
-                    self.repair_sets[repair_set_idx].patch_from_donor_set(
-                        donor_map,
-                        &donor_sources,
-                        &mut target_adapter,
-                        &mut self.target_holes,
-                        &self.member_targets,
-                        &self.set_members,
-                        &donor_info_str,
-                    )
+                // With dead volumes to fill, one volume at a time in archive order: each is
+                // handed to direct unpack complete as soon as its bytes are in (and the rest
+                // re-offered with what is left), so extraction patches it while the next one is
+                // borrowed instead of waiting for the whole borrow.
+                let groups = if self.dead_fills.is_empty() {
+                    vec![self.repair_sets[repair_set_idx].inner_holes.clone()]
+                } else {
+                    self.repair_sets[repair_set_idx].holes_by_first_member()
                 };
-                env_cell.borrow_mut().sync_target_holes(&self.target_holes);
+                let (mut written, mut credit_recovery) = (0i64, false);
+                let mut left_over: Vec<NzbgetRsByteRange> = Vec::new();
+                let group_count = groups.len();
+                for (g, group) in groups.into_iter().enumerate() {
+                    if g > 0 && env_cell.borrow_mut().is_stopped() {
+                        left_over.extend(group);
+                        continue;
+                    }
+                    self.repair_sets[repair_set_idx].inner_holes = group;
+                    let (w, credit) = {
+                        let mut target_adapter = DiskTargetFileSetAdapter {
+                            files: &mut self.target_files,
+                            members: &self.set_members,
+                            env: &env_cell,
+                        };
+                        self.repair_sets[repair_set_idx].patch_from_donor_set(
+                            donor_map,
+                            &donor_sources,
+                            &mut target_adapter,
+                            &mut self.target_holes,
+                            &self.member_targets,
+                            &self.set_members,
+                            &donor_info_str,
+                        )
+                    };
+                    written += w;
+                    credit_recovery |= credit;
+                    left_over.extend(std::mem::take(
+                        &mut self.repair_sets[repair_set_idx].inner_holes,
+                    ));
+                    env_cell.borrow_mut().sync_target_holes(&self.target_holes);
+                    if group_count > 1 && w > 0 {
+                        self.finish_dead_fills(&env_cell);
+                    }
+                }
+                self.repair_sets[repair_set_idx].inner_holes = left_over;
                 if credit_recovery && written > 0 {
                     let recovered_parts = donor_sources.take_served_parts();
                     env_cell.borrow_mut().add_recovered(written, 0);

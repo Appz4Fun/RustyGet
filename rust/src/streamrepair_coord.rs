@@ -1134,7 +1134,13 @@ impl NzbgetRsStreamRepairCtrl {
     ) {
         self.batch_fetcher.set_worker_count(if self.live_mode {
             if self.parallel_live_fetch.load(Ordering::SeqCst) {
-                live_borrow_fetch_worker_count(opts.primary_connections)
+                // Half the connections only while a dead volume is left to borrow: a later
+                // pass that patches a few holes keeps to the usual count.
+                if left_to_borrow.iter().any(|b| *b) {
+                    live_borrow_fetch_worker_count(opts.primary_connections)
+                } else {
+                    stream_fetch_worker_count(opts.primary_connections)
+                }
             } else {
                 live_hole_fetch_worker_count(opts.primary_connections)
             }

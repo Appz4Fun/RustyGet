@@ -453,6 +453,18 @@ fn was_kept_for_borrowing(nzb_id: i32) -> bool {
 /// to differ and no other donor lends the dead volumes (see
 /// `postproc::dead_volume_donor_cannot_lend`). Says so once.
 /// Direct unpack finished and verified the extraction.
+/// A download the dead-download check leaves alone: not an nzb, already being removed or parked,
+/// or one whose direct unpack already finished and verified. Failing that one over (on projected
+/// health, as nest3v on 6790 did 1 s after its verified extraction) only downloads and extracts
+/// the release again.
+fn dead_check_skipped(nzb: &crate::queuesubsys_host::NzbSnap) -> bool {
+    nzb.kind != crate::queuesubsys_host::NK_NZB
+        || nzb.deleting
+        || nzb.parking
+        || nzb.delete_status != DeleteStatus::None
+        || direct_unpack_verified(nzb.direct_unpack_status)
+}
+
 fn direct_unpack_verified(status: DirectUnpackStatus) -> bool {
     status == DirectUnpackStatus::Success
 }
@@ -4880,10 +4892,7 @@ impl NzbgetRsQueueCoordinator {
         if opts.health_check != crate::queuesubsys_host::HC_DUPE
             || !opts.dupe_check
             || !crate::dupecoord::fails_over_snap(opts, &nzb)
-            || nzb.kind != crate::queuesubsys_host::NK_NZB
-            || nzb.deleting
-            || nzb.parking
-            || nzb.delete_status != DeleteStatus::None
+            || dead_check_skipped(&nzb)
         {
             return;
         }
@@ -6428,6 +6437,22 @@ mod tests {
         assert!(!direct_unpack_verified(DirectUnpackStatus::Running));
         assert!(!direct_unpack_verified(DirectUnpackStatus::Failure));
         assert!(!direct_unpack_verified(DirectUnpackStatus::None));
+    }
+
+    #[test]
+    fn the_dead_check_skips_a_verified_direct_unpack() {
+        let mut nzb = crate::queuesubsys_host::NzbSnap {
+            kind: crate::queuesubsys_host::NK_NZB,
+            direct_unpack_status: DirectUnpackStatus::Running,
+            ..Default::default()
+        };
+        assert!(!dead_check_skipped(&nzb));
+        nzb.direct_unpack_status = DirectUnpackStatus::Success;
+        assert!(dead_check_skipped(&nzb));
+        nzb.direct_unpack_status = DirectUnpackStatus::Failure;
+        assert!(!dead_check_skipped(&nzb));
+        nzb.parking = true;
+        assert!(dead_check_skipped(&nzb));
     }
 
     #[test]

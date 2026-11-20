@@ -7399,16 +7399,15 @@ unsafe extern "C" fn active_disk_export_nzb_cb(
         })
         .collect();
 
-    let stlen = qh.nzb_server_stats_len(nzb_ptr);
-    let mut stats = Vec::with_capacity(stlen);
-    for i in 0..stlen {
-        let (sid, succ, fail) = qh.nzb_server_stat_at(nzb_ptr, i);
-        stats.push(NzbgetRsDiskServerStat {
-            server_id: sid,
-            success_articles: succ,
-            failed_articles: fail,
-        });
-    }
+    let stats: Vec<_> = qh
+        .nzb_server_stats(nzb_ptr)
+        .into_iter()
+        .map(|st| NzbgetRsDiskServerStat {
+            server_id: st.server_id,
+            success_articles: st.success,
+            failed_articles: st.failed,
+        })
+        .collect();
 
     let flen = qh.nzb_file_len(nzb_ptr);
     let mut files = Vec::with_capacity(flen);
@@ -7464,13 +7463,11 @@ unsafe extern "C" fn active_disk_export_nzb_cb(
         });
     }
 
-    let alen = qh.nzb_extracted_archives_len(nzb_ptr);
-    let mut archive_strs = Vec::with_capacity(alen);
-    for i in 0..alen {
-        archive_strs.push(bytes_to_cstring_trunc(
-            &qh.nzb_extracted_archive_at(nzb_ptr, i),
-        ));
-    }
+    let archive_strs: Vec<_> = qh
+        .nzb_extracted_archives(nzb_ptr)
+        .iter()
+        .map(|a| bytes_to_cstring_trunc(a))
+        .collect();
     let archive_ptrs: Vec<*const c_char> = archive_strs.iter().map(|c| c.as_ptr()).collect();
 
     exp.completed = completed.as_ptr();

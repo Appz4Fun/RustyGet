@@ -526,9 +526,10 @@ fn damage_is_borrowed_volumes(
         return false;
     }
     let mut absent_unnamed = 0usize;
+    // A lost `.nfo` or `.sfv` holds no payload: it never decides a verified extraction.
     for f in files
         .iter()
-        .filter(|f| f.status != CF_SUCCESS && !f.par_file)
+        .filter(|f| f.status != CF_SUCCESS && !f.par_file && !is_informational_file(&f.filename))
     {
         if crate::filetypes::is_rar_file(&f.filename) {
             // Only a volume direct unpack read was checked by the extraction.
@@ -565,9 +566,10 @@ fn direct_unpack_read_all_damage(
     const CF_SUCCESS: i32 = 1;
     // Files that never reached the disk: each one must be a dead volume read borrowed.
     let mut absent = 0usize;
+    // A lost `.nfo` or `.sfv` holds no payload: it never decides a verified extraction.
     for f in files
         .iter()
-        .filter(|f| f.status != CF_SUCCESS && !f.par_file)
+        .filter(|f| f.status != CF_SUCCESS && !f.par_file && !is_informational_file(&f.filename))
     {
         let read = extracted.iter().any(|e| e.eq_ignore_ascii_case(&f.filename));
         let mut path = dest_dir.to_vec();
@@ -2644,6 +2646,38 @@ mod tests {
             !ok(&present, &ex, &d, 3, false),
             "a damaged file on disk is not a borrowed volume"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_lost_nfo_does_not_send_a_verified_extraction_to_par_check() {
+        use crate::queuesubsys_host::CompletedFileSnap;
+        let dir = std::env::temp_dir().join(format!("rg-lostnfo-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = dir.to_string_lossy().as_bytes().to_vec();
+        let f = |name: &str, status: i32, par: bool| CompletedFileSnap {
+            status,
+            par_file: par,
+            filename: name.as_bytes().to_vec(),
+            ..Default::default()
+        };
+        std::fs::write(dir.join("a.part01.rar"), b"x").unwrap();
+        std::fs::write(dir.join("a.part02.rar"), b"x").unwrap();
+        let extracted: Vec<Vec<u8>> = vec![b"a.part01.rar".to_vec(), b"a.part02.rar".to_vec()];
+        // The A2 shape: volumes put back (end rebuilt), the release's nfo never arrived.
+        let files = vec![
+            f("a.part01.rar", 2, false),
+            f("a.part02.rar", 2, false),
+            f("Release.nfo", 3, false),
+            f("a.par2", 1, true),
+        ];
+        assert!(super::direct_unpack_read_all_damage(&files, &extracted, &d, 0, true));
+        assert!(super::damage_is_borrowed_volumes(&files, &extracted, &d, 0, true));
+        // A lost sample still counts.
+        let mut sample = files.clone();
+        sample.push(f("a.sample.mkv", 3, false));
+        assert!(!super::direct_unpack_read_all_damage(&sample, &extracted, &d, 0, true));
+        assert!(!super::damage_is_borrowed_volumes(&sample, &extracted, &d, 0, true));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

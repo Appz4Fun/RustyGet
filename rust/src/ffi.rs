@@ -2876,31 +2876,31 @@ unsafe fn web_rpc_collect_bridge(
             let Some(fc) = crate::feed::active_feed_coord() else {
                 return 0;
             };
-            unsafe extern "C" fn on_feed_item(
-                raw: *mut c_void,
-                item: *const crate::xmlrpc_format::NzbgetRsRpcFeedItem<'_>,
-            ) {
-                // SAFETY: `raw` is the `&mut dyn RpcEmit` below, alive for the
-                // call; the feed passes a valid item.
-                let out = unsafe { &mut *raw.cast::<&mut dyn crate::xmlrpc_format::RpcEmit>() };
-                out.feed_item(unsafe { &*item });
-            }
-            let mut out_ref: &mut dyn crate::xmlrpc_format::RpcEmit = out;
+            let (name, url, filter, category, cache_id) = unsafe {
+                (
+                    cstr::owned(s1),
+                    cstr::owned(s2),
+                    cstr::owned(s3),
+                    cstr::owned(s4),
+                    cstr::owned(s6),
+                )
+            };
+            let _ = s5;
             fc.emit_view_or_preview_active(
-                a1,
-                a2,
-                a3,
-                a4,
-                a5,
-                n1 as c_int,
-                s1,
-                s2,
-                s3,
-                s4,
-                s5,
-                s6,
-                (&raw mut out_ref).cast(),
-                Some(on_feed_item),
+                &crate::feed::ViewFeedRequest {
+                    flags: a1,
+                    id: a2,
+                    category_source: a3,
+                    priority: a4,
+                    interval: a5,
+                    cache_time_sec: n1 as c_int,
+                    name: &name,
+                    url: &url,
+                    filter: &filter,
+                    category: &category,
+                    cache_id: &cache_id,
+                },
+                out,
             )
         }
         12 => {

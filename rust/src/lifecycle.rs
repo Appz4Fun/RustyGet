@@ -2253,6 +2253,9 @@ mod tests {
 
     #[test]
     fn test_reload_coordinator_debounce_unpack_deferral_and_cancel() {
+        // RELOAD_COORDINATOR is a process-wide static that the daemon-loop
+        // tests also cancel and join, so hold TEST_MUTEX like they do.
+        let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         static TEST_EVENTS: std::sync::Mutex<Vec<c_int>> = std::sync::Mutex::new(Vec::new());
         static TEST_UNPACK_POLLS: AtomicUsize = AtomicUsize::new(0);
 
@@ -2295,7 +2298,9 @@ mod tests {
             .clear();
         TEST_UNPACK_POLLS.store(1, Ordering::SeqCst);
         reload_coordinator_op(0, Some(test_reload_cb));
-        for _ in 0..40 {
+        // Debounce (100 ms) plus one deferral poll (100 ms) normally finish in
+        // well under a second; allow 5 s for a loaded CI runner.
+        for _ in 0..200 {
             if TEST_EVENTS
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())

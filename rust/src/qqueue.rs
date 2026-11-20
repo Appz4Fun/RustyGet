@@ -394,6 +394,7 @@ pub unsafe fn history_push_handle(key: usize, handle: usize, time: i32) {
 }
 
 /// A duplicate record's fields, as `history_push_dup` stores them.
+#[derive(Clone, Copy)]
 pub struct DupRecord<'a> {
     pub id: i32,
     pub time: i32,

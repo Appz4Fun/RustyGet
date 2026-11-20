@@ -4115,24 +4115,62 @@ pub type DiskExportNzbFn = fn(
     idx: usize,
     sink: &mut dyn FnMut(&NzbgetRsDiskNzbExport),
 );
-pub type DiskApplyNzbFn = unsafe extern "C" fn(
-    ctx: *mut c_void,
-    mode: c_int,
-    inp: *const NzbgetRsDiskNzbInfoInput,
-    flags: c_int,
-    completed: *const NzbgetRsDiskCompletedFile,
-    completed_len: usize,
-    params: *const NzbgetRsDiskParam,
-    params_len: usize,
-    scripts: *const NzbgetRsDiskScriptStatus,
-    scripts_len: usize,
-    stats: *const NzbgetRsDiskServerStat,
-    stats_len: usize,
-    files: *const NzbgetRsDiskFileStub,
-    file_times: *const c_int,
-    files_len: usize,
-    job: *const NzbgetRsDiskRepairJob,
-);
+/// Borrows `len` items at `ptr` as a slice; null or zero length is empty.
+///
+/// # Safety
+/// `ptr` must be null or point to `len` initialized items that outlive `'a`.
+unsafe fn raw_slice<'a, T>(ptr: *const T, len: usize) -> &'a [T] {
+    if ptr.is_null() || len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(ptr, len) }
+    }
+}
+
+/// A loaded nzb record and the lists saved with it.
+#[derive(Clone, Copy)]
+pub struct NzbInfoApply<'a> {
+    pub info: &'a NzbgetRsDiskNzbInfoInput,
+    /// Which optional field groups were saved: 1 par/force settings,
+    /// 2 timing stats, 4 script/disk-write/server options, 8 file times.
+    pub flags: c_int,
+    pub completed: &'a [NzbgetRsDiskCompletedFile],
+    pub params: &'a [NzbgetRsDiskParam],
+    pub scripts: &'a [NzbgetRsDiskScriptStatus],
+    pub stats: &'a [NzbgetRsDiskServerStat],
+    pub files: &'a [NzbgetRsDiskFileStub],
+    /// One time per file when present, otherwise empty.
+    pub file_times: &'a [c_int],
+}
+
+/// Something loaded from disk to apply to the target nzb (or, for a dup
+/// record, to history).
+#[derive(Clone, Copy)]
+pub enum NzbApply<'a> {
+    /// The nzb record itself.
+    Info(NzbInfoApply<'a>),
+    /// Totals recovered from duplicate copies.
+    DupeRecovered {
+        articles: i32,
+        bytes: i64,
+        holes: i32,
+    },
+    /// A pending stream repair job.
+    RepairJob(&'a NzbgetRsDiskRepairJob),
+    /// The saved unpack state; also clears the extracted-archive list.
+    UnpackState {
+        direct_unpack_status: i32,
+        unpack_tried: bool,
+        par_repaired: bool,
+        last_unpack_status: i32,
+    },
+    /// One extracted archive name, added to the list.
+    ExtractedArchive(&'a [u8]),
+    /// A duplicate history record, pushed to history.
+    DupHistory(crate::qqueue::DupRecord<'a>),
+}
+
+pub type DiskApplyNzbFn = fn(ctx: *mut c_void, what: NzbApply<'_>);
 /// What a file export fills in for the target file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FileExport {
@@ -4813,10 +4851,6 @@ unsafe fn save_nzb_section(
     state.trailer.write_to(state.w);
 }
 
-unsafe fn empty_nzb_input() -> NzbgetRsDiskNzbInfoInput {
-    unsafe { std::mem::zeroed() }
-}
-
 unsafe fn load_dupe_extras_into_target(
     env: &NzbgetRsDiskStateEnv,
     r: &mut RsStateReader,
@@ -4830,56 +4864,20 @@ unsafe fn load_dupe_extras_into_target(
     ) {
         let env = unsafe { &*ctx.cast::<NzbgetRsDiskStateEnv>() };
         if let Some(cb) = env.apply_nzb_cb {
-            let mut inp = unsafe { empty_nzb_input() };
-            inp.total_articles = rec_articles;
-            inp.size = rec_bytes;
-            inp.failed_articles = rec_holes;
-            unsafe {
-                cb(
-                    env.ctx,
-                    1,
-                    &inp,
-                    0,
-                    std::ptr::null(),
-                    0,
-                    std::ptr::null(),
-                    0,
-                    std::ptr::null(),
-                    0,
-                    std::ptr::null(),
-                    0,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    0,
-                    std::ptr::null(),
-                );
-            }
+            cb(
+                env.ctx,
+                NzbApply::DupeRecovered {
+                    articles: rec_articles,
+                    bytes: rec_bytes,
+                    holes: rec_holes,
+                },
+            );
         }
     }
     unsafe extern "C" fn on_job(ctx: *mut c_void, job: *const NzbgetRsDiskRepairJob) {
         let env = unsafe { &*ctx.cast::<NzbgetRsDiskStateEnv>() };
-        if let Some(cb) = env.apply_nzb_cb {
-            let inp = unsafe { empty_nzb_input() };
-            unsafe {
-                cb(
-                    env.ctx,
-                    2,
-                    &inp,
-                    0,
-                    std::ptr::null(),
-                    0,
-                    std::ptr::null(),
-                    0,
-                    std::ptr::null(),
-                    0,
-                    std::ptr::null(),
-                    0,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    0,
-                    job,
-                );
-            }
+        if let (Some(cb), Some(job)) = (env.apply_nzb_cb, unsafe { job.as_ref() }) {
+            cb(env.ctx, NzbApply::RepairJob(job));
         }
     }
     unsafe {
@@ -4914,56 +4912,22 @@ unsafe fn parse_unpack_state_into_target(
         return false;
     };
     if let Some(cb) = env.apply_nzb_cb {
-        let mut inp = unsafe { empty_nzb_input() };
-        inp.par_status = direct;
-        inp.unpack_status = c_int::from(tried);
-        inp.move_status = c_int::from(repaired);
-        inp.delete_status = last;
-        unsafe {
-            cb(
-                env.ctx,
-                3,
-                &inp,
-                0,
-                std::ptr::null(),
-                0,
-                std::ptr::null(),
-                0,
-                std::ptr::null(),
-                0,
-                std::ptr::null(),
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                0,
-                std::ptr::null(),
-            );
-        }
+        cb(
+            env.ctx,
+            NzbApply::UnpackState {
+                direct_unpack_status: direct,
+                unpack_tried: tried,
+                par_repaired: repaired,
+                last_unpack_status: last,
+            },
+        );
         let archives = l4.strip_prefix(b"ExtractedArchives=").unwrap_or(&l4);
         let mut cursor = 0;
         while let Some((start, len, next)) = diskstate_next_comma_token(archives, cursor) {
-            let mut tok_inp = unsafe { empty_nzb_input() };
-            tok_inp.name = unsafe { archives.as_ptr().add(start).cast() };
-            unsafe {
-                cb(
-                    env.ctx,
-                    4,
-                    &tok_inp,
-                    len as c_int,
-                    std::ptr::null(),
-                    0,
-                    std::ptr::null(),
-                    0,
-                    std::ptr::null(),
-                    0,
-                    std::ptr::null(),
-                    0,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    0,
-                    std::ptr::null(),
-                );
-            }
+            cb(
+                env.ctx,
+                NzbApply::ExtractedArchive(&archives[start..start + len]),
+            );
             cursor = next;
         }
     }
@@ -4992,28 +4956,22 @@ unsafe fn load_nzb_info_into_target(
         files_len: usize,
     ) {
         let env = unsafe { &*ctx.cast::<NzbgetRsDiskStateEnv>() };
-        if let Some(cb) = env.apply_nzb_cb {
-            unsafe {
-                cb(
-                    env.ctx,
-                    0,
-                    inp,
-                    flags,
-                    completed,
-                    completed_len,
-                    params,
-                    params_len,
-                    scripts,
-                    scripts_len,
-                    stats,
-                    stats_len,
-                    files,
-                    file_times,
-                    files_len,
-                    std::ptr::null(),
-                );
+        let (Some(cb), Some(info)) = (env.apply_nzb_cb, unsafe { inp.as_ref() }) else {
+            return;
+        };
+        let rec = unsafe {
+            NzbInfoApply {
+                info,
+                flags,
+                completed: raw_slice(completed, completed_len),
+                params: raw_slice(params, params_len),
+                scripts: raw_slice(scripts, scripts_len),
+                stats: raw_slice(stats, stats_len),
+                files: raw_slice(files, files_len),
+                file_times: raw_slice(file_times, files_len),
             }
-        }
+        };
+        cb(env.ctx, NzbApply::Info(rec));
     }
 
     let ok = unsafe {
@@ -5238,37 +5196,28 @@ unsafe fn load_history_section(
                 ) {
                     let dc = unsafe { &*ctx.cast::<DupCtx<'_>>() };
                     if let Some(cb) = dc.env.apply_nzb_cb {
-                        let mut inp = unsafe { empty_nzb_input() };
-                        inp.id = dc.id;
-                        inp.feed_id = dc.time;
-                        inp.par_status = status;
-                        inp.size = size;
-                        inp.full_content_hash = full_hash;
-                        inp.filtered_content_hash = filt_hash;
-                        inp.dupe_score = dupe_score;
-                        inp.dupe_mode = dupe_mode;
-                        inp.name = name;
-                        inp.dupe_key = dupe_key;
-                        unsafe {
-                            cb(
-                                dc.env.ctx,
-                                5,
-                                &inp,
-                                0,
-                                std::ptr::null(),
-                                0,
-                                std::ptr::null(),
-                                0,
-                                std::ptr::null(),
-                                0,
-                                std::ptr::null(),
-                                0,
-                                std::ptr::null(),
-                                std::ptr::null(),
-                                0,
-                                std::ptr::null(),
-                            );
-                        }
+                        let text = |p: *const c_char| {
+                            if p.is_null() {
+                                c""
+                            } else {
+                                unsafe { std::ffi::CStr::from_ptr(p) }
+                            }
+                        };
+                        cb(
+                            dc.env.ctx,
+                            NzbApply::DupHistory(crate::qqueue::DupRecord {
+                                id: dc.id,
+                                time: dc.time,
+                                status,
+                                full_hash,
+                                filtered_hash: filt_hash,
+                                dupe_score,
+                                dupe_mode,
+                                size,
+                                name: text(name),
+                                dupe_key: text(dupe_key),
+                            }),
+                        );
                     }
                 }
                 let mut dc = DupCtx { env, id, time };
@@ -7496,24 +7445,7 @@ fn active_disk_export_nzb_cb(
 }
 
 #[cfg(unix)]
-unsafe extern "C" fn active_disk_apply_nzb_cb(
-    raw_ctx: *mut c_void,
-    mode: c_int,
-    inp_ptr: *const NzbgetRsDiskNzbInfoInput,
-    flags: c_int,
-    completed: *const NzbgetRsDiskCompletedFile,
-    completed_len: usize,
-    params: *const NzbgetRsDiskParam,
-    params_len: usize,
-    scripts: *const NzbgetRsDiskScriptStatus,
-    scripts_len: usize,
-    stats: *const NzbgetRsDiskServerStat,
-    stats_len: usize,
-    files: *const NzbgetRsDiskFileStub,
-    file_times: *const c_int,
-    files_len: usize,
-    job: *const NzbgetRsDiskRepairJob,
-) {
+fn active_disk_apply_nzb_cb(raw_ctx: *mut c_void, what: NzbApply<'_>) {
     use crate::queuesubsys_host::*;
     let (qh_opt, dq_ptr, nzb_ptr) = {
         let c = unsafe { &*raw_ctx.cast::<ActiveDiskExecCtx<'_>>() };
@@ -7522,83 +7454,83 @@ unsafe extern "C" fn active_disk_apply_nzb_cb(
     let Some(qh) = qh_opt else {
         return;
     };
-    let inp = unsafe { &*inp_ptr };
-    if mode == 5 {
+    if let NzbApply::DupHistory(d) = what {
         qh.history_push_dup(
             dq_ptr,
-            inp.id,
-            inp.feed_id,
-            inp.par_status,
-            inp.size,
-            inp.full_content_hash,
-            inp.filtered_content_hash,
-            inp.dupe_score,
-            inp.dupe_mode,
-            inp.name,
-            inp.dupe_key,
+            d.id,
+            d.time,
+            d.status,
+            d.size,
+            d.full_hash,
+            d.filtered_hash,
+            d.dupe_score,
+            d.dupe_mode,
+            d.name.as_ptr(),
+            d.dupe_key.as_ptr(),
         );
         return;
     }
     if nzb_ptr.is_none() {
         return;
     }
-    if mode == 1 {
-        qh.nzb_set_int(nzb_ptr, NZB_INT_DUPE_RECOVERED_ARTICLES, inp.total_articles);
-        qh.nzb_set_i64(nzb_ptr, NZB_I64_DUPE_RECOVERED_BYTES, inp.size);
-        qh.nzb_set_int(nzb_ptr, NZB_INT_DUPE_RECOVERED_HOLES, inp.failed_articles);
-        return;
-    }
-    if mode == 2 {
-        let jb = unsafe { &*job };
-        let mut holes = Vec::with_capacity(jb.holes_len);
-        if !jb.holes.is_null() {
-            for k in 0..jb.holes_len {
-                let h = unsafe { &*jb.holes.add(k) };
-                holes.push(crate::dupefallback::NzbgetRsByteRange {
-                    offset: h.offset,
-                    size: h.size,
-                });
-            }
+    let rec = match what {
+        NzbApply::Info(rec) => rec,
+        NzbApply::DupHistory(_) => return,
+        NzbApply::DupeRecovered {
+            articles,
+            bytes,
+            holes,
+        } => {
+            qh.nzb_set_int(nzb_ptr, NZB_INT_DUPE_RECOVERED_ARTICLES, articles);
+            qh.nzb_set_i64(nzb_ptr, NZB_I64_DUPE_RECOVERED_BYTES, bytes);
+            qh.nzb_set_int(nzb_ptr, NZB_INT_DUPE_RECOVERED_HOLES, holes);
+            return;
         }
-        qh.nzb_push_stream_repair_job(
-            nzb_ptr,
-            jb.file_id,
-            unsafe { cstr::bytes(jb.filename) },
-            jb.decoded_file_size,
-            jb.failed_size,
-            jb.missed_size,
-            jb.failed_articles,
-            jb.par_file != 0,
-            &holes,
-            jb.steps_hash,
-        );
-        return;
-    }
-    if mode == 3 {
-        qh.nzb_set_int(nzb_ptr, NZB_INT_DIRECT_UNPACK_STATUS, inp.par_status);
-        qh.nzb_set_int(
-            nzb_ptr,
-            NZB_INT_UNPACK_TRIED,
-            c_int::from(inp.unpack_status != 0),
-        );
-        qh.nzb_set_int(
-            nzb_ptr,
-            NZB_INT_PAR_REPAIRED,
-            c_int::from(inp.move_status != 0),
-        );
-        qh.nzb_set_last_unpack_status(nzb_ptr, UnpackStatus::from(inp.delete_status));
-        qh.nzb_action(nzb_ptr, NZB_ACT_CLEAR_EXTRACTED_ARCHIVES);
-        return;
-    }
-    if mode == 4 {
-        let slice = if inp.name.is_null() || flags <= 0 {
-            &[][..]
-        } else {
-            unsafe { std::slice::from_raw_parts(inp.name.cast::<u8>(), flags as usize) }
-        };
-        qh.nzb_push_extracted_archive(nzb_ptr, slice);
-        return;
-    }
+        NzbApply::RepairJob(jb) => {
+            let mut holes = Vec::with_capacity(jb.holes_len);
+            if !jb.holes.is_null() {
+                for k in 0..jb.holes_len {
+                    let h = unsafe { &*jb.holes.add(k) };
+                    holes.push(crate::dupefallback::NzbgetRsByteRange {
+                        offset: h.offset,
+                        size: h.size,
+                    });
+                }
+            }
+            qh.nzb_push_stream_repair_job(
+                nzb_ptr,
+                jb.file_id,
+                unsafe { cstr::bytes(jb.filename) },
+                jb.decoded_file_size,
+                jb.failed_size,
+                jb.missed_size,
+                jb.failed_articles,
+                jb.par_file != 0,
+                &holes,
+                jb.steps_hash,
+            );
+            return;
+        }
+        NzbApply::UnpackState {
+            direct_unpack_status,
+            unpack_tried,
+            par_repaired,
+            last_unpack_status,
+        } => {
+            qh.nzb_set_int(nzb_ptr, NZB_INT_DIRECT_UNPACK_STATUS, direct_unpack_status);
+            qh.nzb_set_int(nzb_ptr, NZB_INT_UNPACK_TRIED, c_int::from(unpack_tried));
+            qh.nzb_set_int(nzb_ptr, NZB_INT_PAR_REPAIRED, c_int::from(par_repaired));
+            qh.nzb_set_last_unpack_status(nzb_ptr, UnpackStatus::from(last_unpack_status));
+            qh.nzb_action(nzb_ptr, NZB_ACT_CLEAR_EXTRACTED_ARCHIVES);
+            return;
+        }
+        NzbApply::ExtractedArchive(name) => {
+            qh.nzb_push_extracted_archive(nzb_ptr, name);
+            return;
+        }
+    };
+    let inp = rec.info;
+    let flags = rec.flags;
 
     qh.nzb_set_int(nzb_ptr, NZB_INT_ID, inp.id);
     qh.nzb_set_int(nzb_ptr, NZB_INT_KIND, inp.kind);
@@ -7709,9 +7641,8 @@ unsafe extern "C" fn active_disk_apply_nzb_cb(
         qh.nzb_set_int(nzb_ptr, NZB_INT_LIVE_PAR_SEC, inp.live_par_sec);
     }
     qh.nzb_action(nzb_ptr, NZB_ACT_CLEAR_COMPLETED_FILES);
-    if !completed.is_null() {
-        for i in 0..completed_len {
-            let cf = unsafe { &*completed.add(i) };
+    {
+        for cf in rec.completed {
             let text = |p: *const c_char| unsafe { crate::queuesubsys_host::read_cstr(p) };
             qh.nzb_restore_completed_file(
                 nzb_ptr,
@@ -7738,9 +7669,8 @@ unsafe extern "C" fn active_disk_apply_nzb_cb(
         qh.nzb_set_int(nzb_ptr, NZB_INT_SKIP_DISK_WRITE, inp.skip_disk_write);
         qh.nzb_set_int(nzb_ptr, NZB_INT_DESIRED_SERVER_ID, inp.desired_server_id);
     }
-    if !params.is_null() {
-        for i in 0..params_len {
-            let p = unsafe { &*params.add(i) };
+    {
+        for p in rec.params {
             qh.nzb_set_param(
                 nzb_ptr,
                 unsafe { cstr::bytes(p.name) },
@@ -7749,9 +7679,8 @@ unsafe extern "C" fn active_disk_apply_nzb_cb(
         }
     }
     qh.nzb_action(nzb_ptr, NZB_ACT_CLEAR_SCRIPT_STATUSES);
-    if !scripts.is_null() {
-        for i in 0..scripts_len {
-            let sc = unsafe { &*scripts.add(i) };
+    {
+        for sc in rec.scripts {
             qh.nzb_push_script_status(
                 nzb_ptr,
                 unsafe { cstr::bytes(sc.name) },
@@ -7759,17 +7688,15 @@ unsafe extern "C" fn active_disk_apply_nzb_cb(
             );
         }
     }
-    if !stats.is_null() && stats_len > 0 {
-        let st_slice = unsafe { std::slice::from_raw_parts(stats, stats_len) };
-        apply_active_server_stats_nzb(qh, nzb_ptr, st_slice);
+    if !rec.stats.is_empty() {
+        apply_active_server_stats_nzb(qh, nzb_ptr, rec.stats);
     }
     qh.nzb_sync_current_server_stats(nzb_ptr);
     qh.nzb_action(nzb_ptr, NZB_ACT_CLEAR_FILE_LIST);
-    if !files.is_null() {
-        for i in 0..files_len {
-            let fs = unsafe { &*files.add(i) };
-            let tm = if (flags & 8) != 0 && !file_times.is_null() {
-                Some(unsafe { *file_times.add(i) })
+    {
+        for (i, fs) in rec.files.iter().enumerate() {
+            let tm = if (flags & 8) != 0 {
+                rec.file_times.get(i).copied()
             } else {
                 None
             };

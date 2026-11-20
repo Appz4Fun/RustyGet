@@ -6213,12 +6213,31 @@ impl RepairSetData {
         let mut groups: Vec<Vec<NzbgetRsByteRange>> = Vec::new();
         let mut last: Option<i32> = None;
         for &hole in &self.inner_holes {
-            let member = map.map_from_inner(hole).first().map(|p| p.member_index);
-            if groups.is_empty() || member != last {
-                groups.push(Vec::new());
+            // A hole across consecutive dead volumes is split at each member, so every volume
+            // is handed over on its own as soon as it is in.
+            let pieces = map.map_from_inner(hole);
+            let mut at = hole.offset;
+            let end = range_end(hole);
+            for (k, p) in pieces.iter().enumerate() {
+                let len = if k + 1 == pieces.len() { end - at } else { p.size.min(end - at) };
+                if len <= 0 {
+                    continue;
+                }
+                let member = Some(p.member_index);
+                if groups.is_empty() || member != last {
+                    groups.push(Vec::new());
+                }
+                last = member;
+                groups.last_mut().expect("pushed").push(NzbgetRsByteRange { offset: at, size: len });
+                at += len;
             }
-            last = member;
-            groups.last_mut().expect("pushed").push(hole);
+            if pieces.is_empty() {
+                if groups.is_empty() || last.is_some() {
+                    groups.push(Vec::new());
+                }
+                last = None;
+                groups.last_mut().expect("pushed").push(hole);
+            }
         }
         groups
     }
@@ -12150,6 +12169,33 @@ pub fn process_m1_donor(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn holes_across_consecutive_dead_volumes_are_handed_over_one_volume_at_a_time() {
+        let mut map = ContentMap::default();
+        for (m, at) in [(0, 0i64), (1, 100), (2, 200)] {
+            map.runs_mut().push(NzbgetRsContentRun {
+                inner_offset: at,
+                member_index: m,
+                member_offset: 10,
+                size: 100,
+            });
+        }
+        let r = |offset, size| NzbgetRsByteRange { offset, size };
+        let data = RepairSetData {
+            set: MemberSet { format: MemberFormat::Rar, members: vec![0, 1, 2] },
+            map: Some(map),
+            // One hole over volumes 2 and 3 (coalesced), one inside volume 1.
+            inner_holes: vec![r(20, 10), r(150, 120)],
+            original_inner_holes: Vec::new(),
+            skip_reason: String::new(),
+            want: None,
+        };
+        assert_eq!(
+            data.holes_by_first_member(),
+            vec![vec![r(20, 10)], vec![r(150, 50)], vec![r(200, 70)]]
+        );
+    }
 
     fn r(offset: i64, size: i64) -> NzbgetRsByteRange {
         NzbgetRsByteRange { offset, size }

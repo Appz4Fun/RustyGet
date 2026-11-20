@@ -1073,7 +1073,16 @@ impl ArticleBatchFetcher {
             let fetch_fn = std::sync::Arc::clone(&self.fetch_fn);
             let handle = std::thread::spawn(move || {
                 while !stopped.load(Ordering::SeqCst) {
-                    let batch_id = lock(&inner).batch_id;
+                    // A worker past a lowered count idles: threads are never shrunk, so this
+                    // keeps a later batch to the count it was given.
+                    let (batch_id, idle) = {
+                        let g = lock(&inner);
+                        (g.batch_id, worker_idx >= usize::try_from(g.worker_count).unwrap_or(0))
+                    };
+                    if idle {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                        continue;
+                    }
                     let claimed = lock(&inner).claim_next(batch_id, stopped.load(Ordering::SeqCst));
                     if let Some((index, req)) = claimed {
                         let fetched = (fetch_fn)(worker_idx, &req).unwrap_or_default();

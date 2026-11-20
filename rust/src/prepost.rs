@@ -511,9 +511,9 @@ fn backup_can_lend(
 /// archive: every damaged or missing file is a par2 file, a RAR volume (its content was checked
 /// by the extraction), or one of at most `borrowed` files that never arrived under a name telling
 /// nothing (obfuscated dead volumes, each rebuilt from a duplicate). Only when something was
-/// borrowed: `borrowed` dead volumes, or bytes a duplicate lent (`recovered`) that par2 cannot
-/// tell from damage (a volume end rebuilt from a sibling) or could not check (its own par2
-/// files damaged).
+/// borrowed: `borrowed` dead volumes, or bytes put back otherwise (`recovered`: lent by a
+/// duplicate, or a volume end rebuilt from a sibling volume) that par2 cannot tell from damage
+/// or could not check (its own par2 files damaged).
 fn damage_is_borrowed_volumes(
     files: &[crate::queuesubsys_host::CompletedFileSnap],
     dest_dir: &[u8],
@@ -2256,7 +2256,8 @@ impl NzbgetRsPrePostProcessor {
                 &host.nzb_completed_files(nzb.ptr),
                 &nzb.dest_dir,
                 crate::postproc::take_dead_volumes_borrowed(nzb.id),
-                nzb.dupe_recovered_bytes > 0,
+                // Not short-circuited: both marks are read once and forgotten.
+                crate::postproc::take_volume_end_rebuilt(nzb.id) | (nzb.dupe_recovered_bytes > 0),
             )
         {
             // Par-check could not restore the dead volumes, but direct unpack read them rebuilt

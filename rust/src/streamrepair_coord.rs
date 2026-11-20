@@ -380,6 +380,21 @@ impl NzbgetRsStreamRepairCtrl {
         }
     }
 
+    /// The id of the download this repair works on.
+    fn target_nzb_id(&self, q: JobQueue<'_>) -> Option<i32> {
+        if self.live_mode {
+            return Some(q.nzb_id());
+        }
+        let post_ptr = q.post_ptr();
+        if post_ptr.is_none() {
+            return None;
+        }
+        q.host.with_locked_queue(|_| {
+            let nzb = q.host.post_snap(post_ptr).nzb_ptr;
+            (!nzb.is_none()).then(|| q.host.nzb_snap(nzb, false).id)
+        })
+    }
+
     /// Writes to the global log.
     fn global_log(&self, q: JobQueue<'_>, kind: MessageKind, text: &[u8]) {
         q.host.log(kind as i32, cstr::until_nul(text));
@@ -2195,6 +2210,9 @@ impl NzbgetRsStreamRepairCtrl {
                     &path(sibling),
                 ) {
                     t.holes.clear();
+                    if let Some(id) = self.target_nzb_id(q) {
+                        crate::postproc::note_volume_end_rebuilt(id);
+                    }
                     let mut msg = b"Rebuilt the end of ".to_vec();
                     msg.extend_from_slice(&t.filename);
                     msg.extend_from_slice(b" from ");

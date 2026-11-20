@@ -2852,6 +2852,28 @@ pub(crate) fn take_dead_volumes_borrowed(nzb_id: i32) -> usize {
     dead_volumes_borrowed().remove(&nzb_id).unwrap_or(0)
 }
 
+/// Downloads with a RAR volume end rebuilt from a sibling volume (see
+/// `deadvolume::restore_tail_from_sibling`): par2 sees the rebuilt bytes as damage when the
+/// sibling's quick-open record differs, though the extraction read them fine.
+fn volume_ends_rebuilt() -> std::sync::MutexGuard<'static, std::collections::HashSet<i32>> {
+    static SET: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<i32>>> =
+        std::sync::OnceLock::new();
+    SET.get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// Notes that a volume end of download `nzb_id` was rebuilt from a sibling volume.
+pub(crate) fn note_volume_end_rebuilt(nzb_id: i32) {
+    volume_ends_rebuilt().insert(nzb_id);
+}
+
+/// True when a volume end of download `nzb_id` was rebuilt from a sibling volume, once: it is
+/// forgotten as it is read.
+pub(crate) fn take_volume_end_rebuilt(nzb_id: i32) -> bool {
+    volume_ends_rebuilt().remove(&nzb_id)
+}
+
 /// How many dead volumes of download `nzb_id` direct unpack read borrowed, without forgetting
 /// it (see [`take_dead_volumes_borrowed`]).
 pub(crate) fn dead_volumes_borrowed_count(nzb_id: i32) -> usize {

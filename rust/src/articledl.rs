@@ -205,11 +205,11 @@ pub fn memory_monitor_tier() -> i32 {
     }
 }
 
-pub fn memory_monitor_tier_name_c() -> *const c_char {
+pub fn memory_monitor_tier_name_c() -> &'static CStr {
     match memory_monitor_tier() {
-        PRESSURE_CRITICAL => c"CRITICAL".as_ptr(),
-        PRESSURE_CONSTRAINED => c"CONSTRAINED".as_ptr(),
-        _ => c"NORMAL".as_ptr(),
+        PRESSURE_CRITICAL => c"CRITICAL",
+        PRESSURE_CONSTRAINED => c"CONSTRAINED",
+        _ => c"NORMAL",
     }
 }
 

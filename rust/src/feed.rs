@@ -1475,8 +1475,9 @@ pub struct NzbgetRsFeedCoordEnv {
             *const c_char,
         ) -> usize,
     >,
-    pub rpc_emit_cb:
-        Option<unsafe extern "C" fn(*mut c_void, *const crate::xmlrpc_format::NzbgetRsRpcFeedItem)>,
+    pub rpc_emit_cb: Option<
+        unsafe extern "C" fn(*mut c_void, *const crate::xmlrpc_format::NzbgetRsRpcFeedItem<'_>),
+    >,
 }
 
 unsafe impl Send for NzbgetRsFeedCoordEnv {}
@@ -2513,7 +2514,7 @@ impl NzbgetRsFeedCoord {
         cache_id: *const c_char,
         emit_ctx: *mut c_void,
         emit_cb: Option<
-            unsafe extern "C" fn(*mut c_void, *const crate::xmlrpc_format::NzbgetRsRpcFeedItem),
+            unsafe extern "C" fn(*mut c_void, *const crate::xmlrpc_format::NzbgetRsRpcFeedItem<'_>),
         >,
     ) -> c_int {
         let mut env = self.effective_env(None);
@@ -2678,19 +2679,19 @@ impl NzbgetRsFeedCoord {
                         let add_cat_c = feed_bytes_to_cstr(&fi.add_category);
                         let dk_c = feed_bytes_to_cstr(&fi.dupe_key);
                         let rpc_item = crate::xmlrpc_format::NzbgetRsRpcFeedItem {
-                            title: title_c.as_ptr(),
-                            filename: fn_c.as_ptr(),
-                            url: url_c.as_ptr(),
+                            title: &title_c,
+                            filename: &fn_c,
+                            url: &url_c,
                             size: fi.size,
                             size_mb: (fi.size / 1024 / 1024) as c_int,
-                            category: cat_c.as_ptr(),
-                            add_category: add_cat_c.as_ptr(),
+                            category: &cat_c,
+                            add_category: &add_cat_c,
                             pause_nzb: c_int::from(fi.pause_nzb),
                             priority: fi.priority,
                             time: fi.time as c_int,
                             match_status: fi.match_status,
                             match_rule: fi.match_rule,
-                            dupe_key: dk_c.as_ptr(),
+                            dupe_key: &dk_c,
                             dupe_score: fi.dupe_score,
                             dupe_mode: fi.dupe_mode,
                             status: fi.status,

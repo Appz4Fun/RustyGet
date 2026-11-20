@@ -1258,15 +1258,15 @@ pub(crate) unsafe fn script_config_emit_templates(
         let Some(loaded) = load_script_template_cstrings() else {
             return 0;
         };
-        let ptrs: Vec<*const c_char> = loaded.iter().map(|c| c.as_ptr()).collect();
-        out.config_templates(&ptrs);
+        let refs: Vec<&CStr> = loaded.iter().map(|c| c.as_c_str()).collect();
+        out.config_templates(&refs);
         1
     } else {
         let Ok(g) = ACTIVE_SCRIPT_TEMPLATES.lock() else {
             return 0;
         };
-        let ptrs: Vec<*const c_char> = g.iter().map(|c| c.as_ptr()).collect();
-        out.config_templates(&ptrs);
+        let refs: Vec<&CStr> = g.iter().map(|c| c.as_c_str()).collect();
+        out.config_templates(&refs);
         1
     }
 }
@@ -2037,17 +2037,7 @@ unsafe extern "C" fn web_rpc_action_bridge(
             let mut param_pairs: Vec<(&[u8], &[u8])> = Vec::new();
             if !params.is_null() && params_len > 0 {
                 for item in std::slice::from_raw_parts(params, params_len) {
-                    let k = if item.name.is_null() {
-                        &[][..]
-                    } else {
-                        CStr::from_ptr(item.name).to_bytes()
-                    };
-                    let v = if item.value.is_null() {
-                        &[][..]
-                    } else {
-                        CStr::from_ptr(item.value).to_bytes()
-                    };
-                    param_pairs.push((k, v));
+                    param_pairs.push((item.name.to_bytes(), item.value.to_bytes()));
                 }
             }
             if is_url {
@@ -2309,12 +2299,12 @@ unsafe fn emit_rpc_nzb(
     let f = crate::xmlrpc_format::NzbgetRsRpcNzbInfoInput {
         id: n.id,
         kind: n.kind,
-        name: c_name.as_ptr(),
-        url: c_url.as_ptr(),
-        filename: c_filename.as_ptr(),
-        dest_dir: c_dest_dir.as_ptr(),
-        final_dir: c_final_dir.as_ptr(),
-        category: c_category.as_ptr(),
+        name: &c_name,
+        url: &c_url,
+        filename: &c_filename,
+        dest_dir: &c_dest_dir,
+        final_dir: &c_final_dir,
+        category: &c_category,
         par_status: n.par_status.into(),
         unpack_status: n.unpack_status.into(),
         move_status: n.move_status.into(),
@@ -2335,7 +2325,7 @@ unsafe fn emit_rpc_nzb(
         live_repairing: c_int::from(n.has_live_repair_thread),
         health: n.health,
         critical_health: n.critical_health_exact,
-        dupe_key: c_dupe_key.as_ptr(),
+        dupe_key: &c_dupe_key,
         dupe_score: n.dupe_score,
         dupe_mode: n.dupe_mode.into(),
         downloaded_size: n.downloaded_size,
@@ -2359,10 +2349,7 @@ unsafe fn emit_rpc_nzb(
         .collect();
     let prms: Vec<crate::xmlrpc_format::NzbgetRsRpcParamItem> = prm_cvecs
         .iter()
-        .map(|(k, v)| crate::xmlrpc_format::NzbgetRsRpcParamItem {
-            name: k.as_ptr(),
-            value: v.as_ptr(),
-        })
+        .map(|(k, v)| crate::xmlrpc_format::NzbgetRsRpcParamItem { name: k, value: v })
         .collect();
 
     let scr_cvecs: Vec<_> = qh
@@ -2373,7 +2360,7 @@ unsafe fn emit_rpc_nzb(
     let scrs: Vec<crate::xmlrpc_format::NzbgetRsRpcScriptItem> = scr_cvecs
         .iter()
         .map(|(sname, st)| crate::xmlrpc_format::NzbgetRsRpcScriptItem {
-            name: sname.as_ptr(),
+            name: sname,
             status: *st,
         })
         .collect();
@@ -2426,7 +2413,7 @@ unsafe fn emit_rpc_post(
             id: m.0,
             kind: m.1,
             time: m.2,
-            text: m.3.as_ptr(),
+            text: &m.3,
         })
         .collect();
     out.post_info_end(&crate::xmlrpc_format::RpcPostInfo {
@@ -2525,7 +2512,7 @@ unsafe fn web_rpc_collect_bridge(
                 memory_pressure: if mm_active {
                     crate::articledl::memory_monitor_tier_name_c()
                 } else {
-                    c"NORMAL".as_ptr()
+                    c"NORMAL"
                 },
                 effective_article_cache_mb: if mm_active {
                     crate::articledl::memory_monitor_effective_cache_mb()
@@ -2605,7 +2592,7 @@ unsafe fn web_rpc_collect_bridge(
                             id: m.0,
                             kind: m.1,
                             time: m.2,
-                            text: m.3.as_ptr(),
+                            text: &m.3,
                         })
                         .collect();
                     out.log(&entries);
@@ -2650,7 +2637,7 @@ unsafe fn web_rpc_collect_bridge(
                             id: m.0,
                             kind: m.1,
                             time: m.2,
-                            text: m.3.as_ptr(),
+                            text: &m.3,
                         });
                     }
                 }
@@ -2720,20 +2707,12 @@ unsafe fn web_rpc_collect_bridge(
                             filename_confirmed: c_int::from(f.filename_confirmed),
                             paused: c_int::from(f.paused),
                             nzb_id: fnzb_id,
-                            nzb_name: alt_c
-                                .as_ref()
-                                .map_or(c_outer_name.as_ptr(), |x| x.0.as_ptr()),
-                            nzb_filename: alt_c
-                                .as_ref()
-                                .map_or(c_outer_fn.as_ptr(), |x| x.1.as_ptr()),
-                            subject: c_subj.as_ptr(),
-                            filename: c_ffn.as_ptr(),
-                            dest_dir: alt_c
-                                .as_ref()
-                                .map_or(c_outer_dest.as_ptr(), |x| x.2.as_ptr()),
-                            category: alt_c
-                                .as_ref()
-                                .map_or(c_outer_cat.as_ptr(), |x| x.3.as_ptr()),
+                            nzb_name: alt_c.as_ref().map_or(&c_outer_name, |x| &x.0),
+                            nzb_filename: alt_c.as_ref().map_or(&c_outer_fn, |x| &x.1),
+                            subject: &c_subj,
+                            filename: &c_ffn,
+                            dest_dir: alt_c.as_ref().map_or(&c_outer_dest, |x| &x.2),
+                            category: alt_c.as_ref().map_or(&c_outer_cat, |x| &x.3),
                             priority: alt_c.as_ref().map_or(outer_n.priority, |x| x.4),
                             active_downloads: f.active_downloads,
                             progress,
@@ -2935,8 +2914,8 @@ unsafe fn web_rpc_collect_bridge(
             if let Some(o) = opts.as_deref() {
                 o.for_each_option(|n, v, r| {
                     entries.push(crate::xmlrpc_format::NzbgetRsRpcConfigItem {
-                        name: n.as_ptr(),
-                        value: v.as_ptr(),
+                        name: n,
+                        value: v,
                         restricted: r,
                     });
                 });
@@ -2951,7 +2930,7 @@ unsafe fn web_rpc_collect_bridge(
             };
             unsafe extern "C" fn on_feed_item(
                 raw: *mut c_void,
-                item: *const crate::xmlrpc_format::NzbgetRsRpcFeedItem,
+                item: *const crate::xmlrpc_format::NzbgetRsRpcFeedItem<'_>,
             ) {
                 // SAFETY: `raw` is the `&mut dyn RpcEmit` below, alive for the
                 // call; the feed passes a valid item.

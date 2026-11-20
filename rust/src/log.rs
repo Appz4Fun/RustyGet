@@ -532,7 +532,7 @@ fn collect_messages_rpc(
             start = (id_from.wrapping_sub(front.id as i32)).max(0);
         }
     }
-    let entries: Vec<NzbgetRsRpcLogEntry> = if (start as u32) < (messages.len() as u32) {
+    let entries: Vec<NzbgetRsRpcLogEntry<'_>> = if (start as u32) < (messages.len() as u32) {
         messages
             .iter()
             .skip(start as usize)
@@ -540,7 +540,7 @@ fn collect_messages_rpc(
                 id: m.id as c_int,
                 kind: m.kind,
                 time: m.time as c_int,
-                text: m.text.as_ptr(),
+                text: &m.text,
             })
             .collect()
     } else {

@@ -6,9 +6,7 @@ use crate::queuesubsys_host::NzbRef;
 use crate::queuesubsys_host::FileRef;
 use crate::cstr;
 use crate::parchecker::{
-    is_processed_file, ParRepairEvents, ParSegment, QuickInfo, RustParRepairer,
-    PAR_RESULT_INVALID_ARGS, PAR_RESULT_REPAIR_FAILED, PAR_RESULT_REPAIR_NOT_POSSIBLE,
-    PAR_RESULT_REPAIR_POSSIBLE, PAR_RESULT_SUCCESS,
+    is_processed_file, ParRepairEvents, ParResult, ParSegment, QuickInfo, RustParRepairer,
 };
 use crate::options::OptStr;
 use crate::postrepair::NzbgetRsParSegment;
@@ -430,7 +428,7 @@ impl NzbgetRsParChecker {
             &mut mem_to_use,
             hooks,
         );
-        if hooks.is_stopped() || res != PAR_RESULT_SUCCESS {
+        if hooks.is_stopped() || res != ParResult::Success {
             self.cleanup(&mut repairer, &mut dupe_sources);
             return ParCheckerStatus::Failed;
         }
@@ -475,7 +473,7 @@ impl NzbgetRsParChecker {
         let mut added_splitted_fragments = false;
         if self.lock_signal().has_damaged_files
             && !hooks.is_stopped()
-            && res == PAR_RESULT_REPAIR_NOT_POSSIBLE
+            && res == ParResult::RepairNotPossible
         {
             added_splitted_fragments = self
                 .add_splitted_fragments(repairer.as_mut().expect("repairer initialized"), hooks);
@@ -497,7 +495,7 @@ impl NzbgetRsParChecker {
                 .expect("repairer initialized")
                 .missing_file_count()
                 > 0
-            && !(added_splitted_fragments && res == PAR_RESULT_REPAIR_POSSIBLE)
+            && !(added_splitted_fragments && res == ParResult::RepairPossible)
             && (opts.par_scan == PAR_SCAN_EXTENDED || opts.par_scan == PAR_SCAN_DUPE)
         {
             let dest_dir = self.dest_dir();
@@ -520,7 +518,7 @@ impl NzbgetRsParChecker {
 
         if self.lock_signal().has_damaged_files
             && !hooks.is_stopped()
-            && res == PAR_RESULT_REPAIR_NOT_POSSIBLE
+            && res == ParResult::RepairNotPossible
         {
             res = self.process_more_pars(
                 repairer.as_mut().expect("repairer initialized"),
@@ -532,7 +530,7 @@ impl NzbgetRsParChecker {
 
         if self.lock_signal().has_damaged_files
             && !hooks.is_stopped()
-            && res == PAR_RESULT_REPAIR_NOT_POSSIBLE
+            && res == ParResult::RepairNotPossible
             && opts.par_scan == PAR_SCAN_DUPE
         {
             if self.add_dupe_files(
@@ -547,7 +545,7 @@ impl NzbgetRsParChecker {
                     mem_to_use,
                     hooks,
                 );
-                if res == PAR_RESULT_REPAIR_NOT_POSSIBLE && !hooks.is_stopped() {
+                if res == ParResult::RepairNotPossible && !hooks.is_stopped() {
                     res = self.process_more_pars(
                         repairer.as_mut().expect("repairer initialized"),
                         threads_to_use,
@@ -560,7 +558,7 @@ impl NzbgetRsParChecker {
 
         if self.lock_signal().has_damaged_files
             && !hooks.is_stopped()
-            && res == PAR_RESULT_REPAIR_NOT_POSSIBLE
+            && res == ParResult::RepairNotPossible
         {
             res = self.process_twin_set(
                 &mut repairer,
@@ -579,13 +577,13 @@ impl NzbgetRsParChecker {
         let mut status = ParCheckerStatus::Failed;
         let has_damaged = self.lock_signal().has_damaged_files;
 
-        if res == PAR_RESULT_SUCCESS || !has_damaged {
+        if res == ParResult::Success || !has_damaged {
             hooks.print_message(
                 MK_INFO,
                 &[b"Repair not needed for ", info_name.as_slice()].concat(),
             );
             status = ParCheckerStatus::RepairNotNeeded;
-        } else if res == PAR_RESULT_REPAIR_POSSIBLE {
+        } else if res == ParResult::RepairPossible {
             status = ParCheckerStatus::RepairPossible;
             if hooks.read_options().par_repair {
                 hooks.print_message(MK_INFO, &[b"Repairing ", info_name.as_slice()].concat());
@@ -608,7 +606,7 @@ impl NzbgetRsParChecker {
                     mem_to_use,
                     hooks,
                 );
-                if res == PAR_RESULT_SUCCESS {
+                if res == ParResult::Success {
                     hooks.print_message(
                         MK_INFO,
                         &[b"Successfully repaired ", info_name.as_slice()].concat(),
@@ -648,10 +646,8 @@ impl NzbgetRsParChecker {
             }
         } else if status == ParCheckerStatus::Failed {
             let mut err = self.get_err_msg();
-            if err.is_empty() && (0..=8).contains(&res) {
-                let raw = crate::parchecker::cmdline_err_str(res);
-                let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
-                err = raw[..end].to_vec();
+            if err.is_empty() {
+                err = res.message().as_bytes().to_vec();
                 self.set_err_msg(err.clone());
             }
             let msg = [
@@ -692,11 +688,11 @@ impl NzbgetRsParChecker {
         threads_to_use: &mut i32,
         mem_to_use: &mut i32,
         hooks: &dyn ParCheckerHooks,
-    ) -> i32 {
-        let mut res = PAR_RESULT_REPAIR_FAILED;
+    ) -> ParResult {
+        let mut res = ParResult::RepairFailed;
         let info_name = self.info_name();
 
-        while !hooks.is_stopped() && res != PAR_RESULT_SUCCESS {
+        while !hooks.is_stopped() && res != ParResult::Success {
             self.cleanup(repairer, dupe_sources);
 
             let opts = hooks.read_options();
@@ -743,7 +739,7 @@ impl NzbgetRsParChecker {
 
             hooks.global_log(
                 MK_DEBUG,
-                format!("ParChecker: PreProcess-result={res}").as_bytes(),
+                format!("ParChecker: PreProcess-result={}", res.code()).as_bytes(),
             );
 
             if hooks.is_stopped() {
@@ -752,10 +748,10 @@ impl NzbgetRsParChecker {
                     &[b"Could not verify ", info_name.as_slice(), b": stopping"].concat(),
                 );
                 self.set_err_msg(b"par-check was stopped".to_vec());
-                return PAR_RESULT_REPAIR_FAILED;
+                return ParResult::RepairFailed;
             }
 
-            if res == PAR_RESULT_INVALID_ARGS {
+            if res == ParResult::InvalidArgs {
                 hooks.print_message(
                     MK_ERROR,
                     &[
@@ -770,7 +766,7 @@ impl NzbgetRsParChecker {
                 return res;
             }
 
-            if res != PAR_RESULT_SUCCESS {
+            if res != ParResult::Success {
                 hooks.print_message(
                     MK_WARNING,
                     &[
@@ -791,7 +787,7 @@ impl NzbgetRsParChecker {
             }
         }
 
-        if res != PAR_RESULT_SUCCESS {
+        if res != ParResult::Success {
             hooks.print_message(
                 MK_ERROR,
                 &[
@@ -854,7 +850,7 @@ impl NzbgetRsParChecker {
         threads_to_use: i32,
         mem_to_use: i32,
         hooks: &dyn ParCheckerHooks,
-    ) -> i32 {
+    ) -> ParResult {
         if do_repair {
             let nzb_name = self.nzb_name();
             let prefix = format!(
@@ -882,7 +878,7 @@ impl NzbgetRsParChecker {
             .store(repairer.source_files().len(), Ordering::Release);
         hooks.global_log(
             MK_DEBUG,
-            format!("ParChecker: Process-result={res}").as_bytes(),
+            format!("ParChecker: Process-result={}", res.code()).as_bytes(),
         );
         res
     }
@@ -913,16 +909,16 @@ impl NzbgetRsParChecker {
         threads_to_use: i32,
         mem_to_use: i32,
         hooks: &dyn ParCheckerHooks,
-    ) -> i32 {
-        let mut res = PAR_RESULT_REPAIR_NOT_POSSIBLE;
+    ) -> ParResult {
+        let mut res = ParResult::RepairNotPossible;
         let mut more_files_loaded = true;
         let info_name = self.info_name();
 
-        while !hooks.is_stopped() && res == PAR_RESULT_REPAIR_NOT_POSSIBLE {
+        while !hooks.is_stopped() && res == ParResult::RepairNotPossible {
             let missing_block_count =
                 repairer.missing_block_count() as i32 - repairer.recovery_block_count() as i32;
             if missing_block_count <= 0 {
-                return PAR_RESULT_REPAIR_POSSIBLE;
+                return ParResult::RepairPossible;
             }
 
             if more_files_loaded {
@@ -1016,10 +1012,10 @@ impl NzbgetRsParChecker {
         threads_to_use: &mut i32,
         mem_to_use: &mut i32,
         hooks: &dyn ParCheckerHooks,
-    ) -> i32 {
+    ) -> ParResult {
         let index = hooks.request_twin_index();
         if index.is_empty() || hooks.is_stopped() {
-            return PAR_RESULT_REPAIR_NOT_POSSIBLE;
+            return ParResult::RepairNotPossible;
         }
 
         let own_par_filename = self.par_filename();
@@ -1029,10 +1025,10 @@ impl NzbgetRsParChecker {
 
         let mut res =
             self.pre_process_par(repairer, dupe_sources, threads_to_use, mem_to_use, hooks);
-        if res != PAR_RESULT_SUCCESS || hooks.is_stopped() {
+        if res != ParResult::Success || hooks.is_stopped() {
             self.lock_meta().par_filename = own_par_filename;
             self.set_err_msg(own_err_msg);
-            return PAR_RESULT_REPAIR_NOT_POSSIBLE;
+            return ParResult::RepairNotPossible;
         }
 
         res = self.process_repairer(
@@ -1042,7 +1038,7 @@ impl NzbgetRsParChecker {
             *mem_to_use,
             hooks,
         );
-        if res == PAR_RESULT_REPAIR_NOT_POSSIBLE && !hooks.is_stopped() {
+        if res == ParResult::RepairNotPossible && !hooks.is_stopped() {
             let r = repairer.as_ref().expect("repairer initialized");
             let block_needed =
                 (r.missing_block_count() as i32 - r.recovery_block_count() as i32).max(1);
@@ -1081,7 +1077,7 @@ impl NzbgetRsParChecker {
             }
         }
 
-        if res == PAR_RESULT_REPAIR_NOT_POSSIBLE {
+        if res == ParResult::RepairNotPossible {
             let msg = if own_err_msg.is_empty() {
                 b"not enough par-blocks, the twin's included".to_vec()
             } else {

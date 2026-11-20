@@ -22,11 +22,11 @@ use crate::dupeprobe::{sample_indexes, NzbgetRsDupeProbe, MIN_ARTICLES, SAMPLE_C
 use crate::nntp::BatchRequest;
 use crate::streamrepair::{
     build_donor_key, classify_remaining_hole_target, compute_positional_rank,
-    credit_repaired_sizes, format_rar_volume_debug_lines, format_whole_files_suffix,
+    format_rar_volume_debug_lines, format_whole_files_suffix,
     is_incomplete_nzb_hole, is_par2_job_or_file, process_m1_donor, resolve_completion_par_action,
     stream_repair_bytes_to_mb, total_size, watchdog_eval_tick, CrossPackDonorEnv,
     CrossPackRepairSession, CrossPackTargetInput, FetchedDonorArticle, M1DonorEnv, M1RepairTarget,
-    TargetMessageKind,
+    NzbSizes, SizePair, TargetMessageKind,
 };
 
 use crate::log::MessageKind;
@@ -282,7 +282,6 @@ struct HostOptions {
     allow_decompress_opt: bool,
     primary_connections: i32,
     par_check: i32,
-    pc_manual: i32,
     download_rate: i64,
     par_ignore_ext: Vec<u8>,
 }
@@ -541,7 +540,6 @@ impl NzbgetRsStreamRepairCtrl {
                 .is_some_and(|o| o.scalars().dupe_stream_decompress != 0),
             primary_connections,
             par_check: opts.as_deref().map_or(0, |o| o.scalars().par_check),
-            pc_manual: 3,
             download_rate,
             par_ignore_ext: opts
                 .as_deref()
@@ -1826,23 +1824,14 @@ impl NzbgetRsStreamRepairCtrl {
             }
 
             let ns = host.nzb_snap(nzb_ptr, false);
-            let (
-                reset_par_rename,
-                set_par_status,
-                new_par_status,
-                set_force_par_full,
-                clear_req_par_check,
-                check_main_pars,
-            ) = resolve_completion_par_action(
+            let action = resolve_completion_par_action(
                 counters.recovered_bytes,
                 counters.holes_remain,
-                ns.par_rename_status,
-                RS_NONE,
+                ns.par_rename_status != RS_NONE,
                 ns.par_status,
-                opts.par_check,
-                opts.pc_manual,
+                opts.par_check == crate::queuesubsys_host::PC_MANUAL,
             );
-            let request_par_check = check_main_pars
+            let request_par_check = action.check_main_pars
                 && crate::parparser::find_main_pars(crate::fsops::path(dest_dir), false, |_| {});
 
             if counters.recovered_articles > 0
@@ -1866,26 +1855,25 @@ impl NzbgetRsStreamRepairCtrl {
                 );
             }
             if counters.recovered_failed_size > 0 {
-                let (f, s, cf, cs, pf, ps, pcf, pcs) = credit_repaired_sizes(
+                let pair = |failed, success| SizePair { failed, success };
+                let mut sizes = NzbSizes {
+                    total: pair(ns.failed_size, ns.success_size),
+                    current: pair(ns.current_failed_size, ns.current_success_size),
+                    par: pair(ns.par_failed_size, ns.par_success_size),
+                    par_current: pair(ns.par_current_failed_size, ns.par_current_success_size),
+                };
+                sizes.credit_repaired(
                     counters.recovered_failed_size,
                     counters.recovered_failed_par_size,
-                    ns.failed_size,
-                    ns.success_size,
-                    ns.current_failed_size,
-                    ns.current_success_size,
-                    ns.par_failed_size,
-                    ns.par_success_size,
-                    ns.par_current_failed_size,
-                    ns.par_current_success_size,
                 );
-                host.nzb_set_i64(nzb_ptr, NZB_I64_FAILED_SIZE, f);
-                host.nzb_set_i64(nzb_ptr, NZB_I64_SUCCESS_SIZE, s);
-                host.nzb_set_i64(nzb_ptr, NZB_I64_CUR_FAILED_SIZE, cf);
-                host.nzb_set_i64(nzb_ptr, NZB_I64_CUR_SUCCESS_SIZE, cs);
-                host.nzb_set_i64(nzb_ptr, NZB_I64_PAR_FAILED_SIZE, pf);
-                host.nzb_set_i64(nzb_ptr, NZB_I64_PAR_SUCCESS_SIZE, ps);
-                host.nzb_set_i64(nzb_ptr, NZB_I64_PAR_CUR_FAILED_SIZE, pcf);
-                host.nzb_set_i64(nzb_ptr, NZB_I64_PAR_CUR_SUCCESS_SIZE, pcs);
+                host.nzb_set_i64(nzb_ptr, NZB_I64_FAILED_SIZE, sizes.total.failed);
+                host.nzb_set_i64(nzb_ptr, NZB_I64_SUCCESS_SIZE, sizes.total.success);
+                host.nzb_set_i64(nzb_ptr, NZB_I64_CUR_FAILED_SIZE, sizes.current.failed);
+                host.nzb_set_i64(nzb_ptr, NZB_I64_CUR_SUCCESS_SIZE, sizes.current.success);
+                host.nzb_set_i64(nzb_ptr, NZB_I64_PAR_FAILED_SIZE, sizes.par.failed);
+                host.nzb_set_i64(nzb_ptr, NZB_I64_PAR_SUCCESS_SIZE, sizes.par.success);
+                host.nzb_set_i64(nzb_ptr, NZB_I64_PAR_CUR_FAILED_SIZE, sizes.par_current.failed);
+                host.nzb_set_i64(nzb_ptr, NZB_I64_PAR_CUR_SUCCESS_SIZE, sizes.par_current.success);
             }
             let post_ptr = q.post_ptr();
             host.post_set_int(post_ptr, POST_INT_STREAM_REPAIR_DONE, 1);
@@ -1894,16 +1882,16 @@ impl NzbgetRsStreamRepairCtrl {
                 POST_INT_STREAM_REPAIR_RECOVERED,
                 i32::from(counters.recovered_bytes > 0),
             );
-            if reset_par_rename {
+            if action.reset_par_rename {
                 host.nzb_set_int(nzb_ptr, NZB_INT_PAR_RENAME_STATUS, RS_NONE);
             }
-            if set_par_status {
-                host.nzb_set_par_status(nzb_ptr, new_par_status);
+            if let Some(status) = action.new_par_status {
+                host.nzb_set_par_status(nzb_ptr, status);
             }
-            if set_force_par_full {
+            if action.force_par_full {
                 host.post_set_int(post_ptr, POST_INT_FORCE_PAR_FULL, 1);
             }
-            if clear_req_par_check {
+            if action.clear_request_par_check {
                 host.post_set_int(post_ptr, POST_INT_REQUEST_PAR_CHECK, 0);
             }
             if request_par_check {

@@ -4025,87 +4025,94 @@ pub fn materialize_article_valid(
         && (member_size < 0 || fetched_file_size == member_size)
 }
 
-/// Computes updated NZB failed/success byte counters after crediting fully
-/// repaired files back to health (`StreamRepairController::RepairCompleted`).
-#[allow(clippy::too_many_arguments)]
-pub fn credit_repaired_sizes(
-    recovered_failed_size: i64,
-    recovered_failed_par_size: i64,
-    failed_size: i64,
-    success_size: i64,
-    current_failed_size: i64,
-    current_success_size: i64,
-    par_failed_size: i64,
-    par_success_size: i64,
-    par_current_failed_size: i64,
-    par_current_success_size: i64,
-) -> (i64, i64, i64, i64, i64, i64, i64, i64) {
-    let mut new_failed = failed_size;
-    let mut new_success = success_size;
-    let mut new_cur_failed = current_failed_size;
-    let mut new_cur_success = current_success_size;
-    let mut new_par_failed = par_failed_size;
-    let mut new_par_success = par_success_size;
-    let mut new_par_cur_failed = par_current_failed_size;
-    let mut new_par_cur_success = par_current_success_size;
+/// A failed/success byte counter pair of an NZB.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SizePair {
+    pub failed: i64,
+    pub success: i64,
+}
 
-    if recovered_failed_size > 0 {
-        new_failed = 0.max(failed_size.saturating_sub(recovered_failed_size));
-        new_success = success_size.saturating_add(recovered_failed_size);
-        new_cur_failed = 0.max(current_failed_size.saturating_sub(recovered_failed_size));
-        new_cur_success = current_success_size.saturating_add(recovered_failed_size);
+impl SizePair {
+    /// Moves `bytes` from failed to success, never taking failed below zero.
+    fn credit(&mut self, bytes: i64) {
+        self.failed = self.failed.saturating_sub(bytes).max(0);
+        self.success = self.success.saturating_add(bytes);
+    }
+}
+
+/// The NZB byte counters a completed stream repair credits back to health.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NzbSizes {
+    pub total: SizePair,
+    pub current: SizePair,
+    pub par: SizePair,
+    pub par_current: SizePair,
+}
+
+impl NzbSizes {
+    /// Credits fully repaired files back to health
+    /// (`StreamRepairController::RepairCompleted`): their failed bytes count as
+    /// success, and the par counters move by the repaired par bytes.
+    pub fn credit_repaired(&mut self, recovered_failed_size: i64, recovered_failed_par_size: i64) {
+        if recovered_failed_size <= 0 {
+            return;
+        }
+        self.total.credit(recovered_failed_size);
+        self.current.credit(recovered_failed_size);
         if recovered_failed_par_size > 0 {
-            new_par_failed = 0.max(par_failed_size.saturating_sub(recovered_failed_par_size));
-            new_par_success = par_success_size.saturating_add(recovered_failed_par_size);
-            new_par_cur_failed =
-                0.max(par_current_failed_size.saturating_sub(recovered_failed_par_size));
-            new_par_cur_success =
-                par_current_success_size.saturating_add(recovered_failed_par_size);
+            self.par.credit(recovered_failed_par_size);
+            self.par_current.credit(recovered_failed_par_size);
         }
     }
+}
 
-    (
-        new_failed,
-        new_success,
-        new_cur_failed,
-        new_cur_success,
-        new_par_failed,
-        new_par_success,
-        new_par_cur_failed,
-        new_par_cur_success,
-    )
+/// Par-check and par-rename changes a completed stream repair makes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CompletionParAction {
+    pub reset_par_rename: bool,
+    /// the par status to store, if it changes
+    pub new_par_status: Option<NzbParStatus>,
+    pub force_par_full: bool,
+    pub clear_request_par_check: bool,
+    /// request a par check if the destination has main par files
+    pub check_main_pars: bool,
 }
 
 /// Resolves post-stream-repair par-check and par-rename state transitions in
 /// `StreamRepairController::RepairCompleted`.
-#[allow(clippy::too_many_arguments)]
 pub fn resolve_completion_par_action(
     recovered_bytes: i64,
     holes_remain: bool,
-    par_rename_status: i32,
-    rs_none: i32,
+    par_renamed: bool,
     par_status: NzbParStatus,
-    par_check_opt: i32,
-    pc_manual: i32,
-) -> (bool, bool, NzbParStatus, bool, bool, bool) {
+    manual_par_check: bool,
+) -> CompletionParAction {
     let recovered = recovered_bytes > 0;
     if !recovered && !holes_remain {
-        return (false, false, par_status, false, false, false);
+        return CompletionParAction::default();
     }
-    let reset_par_rename = recovered && par_rename_status != rs_none;
-    if par_status > NzbParStatus::Skipped {
-        if recovered {
-            let new_status = if par_check_opt == pc_manual {
-                NzbParStatus::Manual
-            } else {
-                NzbParStatus::None
-            };
-            (reset_par_rename, true, new_status, true, true, false)
+    let reset_par_rename = recovered && par_renamed;
+    if par_status <= NzbParStatus::Skipped {
+        return CompletionParAction {
+            reset_par_rename,
+            force_par_full: recovered,
+            check_main_pars: true,
+            ..CompletionParAction::default()
+        };
+    }
+    if !recovered {
+        return CompletionParAction { reset_par_rename, ..CompletionParAction::default() };
+    }
+    CompletionParAction {
+        reset_par_rename,
+        new_par_status: Some(if manual_par_check {
+            NzbParStatus::Manual
         } else {
-            (reset_par_rename, false, par_status, false, false, false)
-        }
-    } else {
-        (reset_par_rename, false, par_status, recovered, false, true)
+            NzbParStatus::None
+        }),
+        force_par_full: true,
+        clear_request_par_check: true,
+        check_main_pars: false,
     }
 }
 
@@ -18488,5 +18495,73 @@ mod seven_zip_header_coder_tests {
         let aes = one_folder(&[0x04, 0x06, 0xf1, 0x07, 0x01]);
         assert_eq!(aes.folder_coder, vec![SZ_CODER_OTHER]);
         assert_eq!(aes.folder_has_aes, vec![true]);
+    }
+}
+
+#[cfg(test)]
+mod completion_tests {
+    use super::*;
+
+    #[test]
+    fn credit_repaired_moves_failed_to_success_and_floors_at_zero() {
+        let pair = |failed, success| SizePair { failed, success };
+        let start = NzbSizes {
+            total: pair(1000, 5000),
+            current: pair(300, 700),
+            par: pair(50, 100),
+            par_current: pair(10, 20),
+        };
+        let mut sizes = start;
+        sizes.credit_repaired(0, 40);
+        assert_eq!(sizes, start);
+
+        sizes.credit_repaired(400, 0);
+        assert_eq!(sizes.total, pair(600, 5400));
+        assert_eq!(sizes.current, pair(0, 1100));
+        assert_eq!(sizes.par, start.par);
+        assert_eq!(sizes.par_current, start.par_current);
+
+        let mut sizes = start;
+        sizes.credit_repaired(100, 40);
+        assert_eq!(sizes.par, pair(10, 140));
+        assert_eq!(sizes.par_current, pair(0, 60));
+    }
+
+    #[test]
+    fn completion_par_action_transitions() {
+        use NzbParStatus as P;
+        let act = resolve_completion_par_action;
+        assert_eq!(act(0, false, true, P::Success, false), CompletionParAction::default());
+        // Already par-checked and something was repaired: check again, fully.
+        assert_eq!(
+            act(10, false, true, P::Success, true),
+            CompletionParAction {
+                reset_par_rename: true,
+                new_par_status: Some(P::Manual),
+                force_par_full: true,
+                clear_request_par_check: true,
+                check_main_pars: false,
+            }
+        );
+        assert_eq!(act(10, false, false, P::Failure, false).new_par_status, Some(P::None));
+        // Already par-checked, only holes left: nothing changes.
+        assert_eq!(
+            act(0, true, true, P::Success, false),
+            CompletionParAction::default()
+        );
+        // Not par-checked yet: look for main pars, force a full check if repaired.
+        assert_eq!(
+            act(0, true, true, P::None, false),
+            CompletionParAction { check_main_pars: true, ..CompletionParAction::default() }
+        );
+        assert_eq!(
+            act(10, true, true, P::Skipped, false),
+            CompletionParAction {
+                reset_par_rename: true,
+                force_par_full: true,
+                check_main_pars: true,
+                ..CompletionParAction::default()
+            }
+        );
     }
 }

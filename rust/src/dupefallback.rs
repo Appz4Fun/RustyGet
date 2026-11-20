@@ -321,36 +321,30 @@ pub fn structure_matches(
     true
 }
 
-/// Computes the expected decoded byte offset of article at `index` from its left neighbour.
+/// Computes the expected decoded byte offset of article at `index` from its left neighbour,
+/// or `None` when the neighbour does not pin it down.
 pub fn expected_segment_offset(
-    index: isize,
+    index: usize,
     part_number: i32,
     prev_part_number: i32,
     prev_status: i32,
     prev_offset: i64,
     prev_size: i32,
-) -> i64 {
-    if index < 0 {
-        return -1;
-    }
+) -> Option<i64> {
     if part_number == 1 {
-        return 0;
+        return Some(0);
     }
-    if index == 0 {
-        return -1;
-    }
-    if prev_part_number == part_number.wrapping_sub(1)
+    (index > 0
+        && prev_part_number == part_number.wrapping_sub(1)
         && prev_status == ARTICLE_STATUS_FINISHED
-        && prev_size > 0
-    {
-        return prev_offset.saturating_add(prev_size as i64);
-    }
-    -1
+        && prev_size > 0)
+        .then(|| prev_offset.saturating_add(i64::from(prev_size)))
 }
 
-/// Computes the expected decoded byte end of article at `index` from its right neighbour or file size.
+/// Computes the expected decoded byte end of article at `index` from its right neighbour or
+/// file size, or `None` when neither pins it down.
 pub fn expected_segment_end(
-    index: isize,
+    index: usize,
     count: usize,
     part_number: i32,
     decoded_file_size: i64,
@@ -358,24 +352,17 @@ pub fn expected_segment_end(
     next_status: i32,
     next_offset: i64,
     next_size: i32,
-) -> i64 {
-    if index < 0 || (index as usize) >= count {
-        return -1;
+) -> Option<i64> {
+    if index >= count {
+        return None;
     }
-    if (index as usize) + 1 == count {
-        return if decoded_file_size > 0 {
-            decoded_file_size
-        } else {
-            -1
-        };
+    if index + 1 == count {
+        return (decoded_file_size > 0).then_some(decoded_file_size);
     }
-    if next_part_number == part_number.wrapping_add(1)
+    (next_part_number == part_number.wrapping_add(1)
         && next_status == ARTICLE_STATUS_FINISHED
-        && next_size > 0
-    {
-        return next_offset;
-    }
-    -1
+        && next_size > 0)
+        .then_some(next_offset)
 }
 
 /// Checks whether a finished segment `[segment_offset, segment_offset + segment_size)` aligns
@@ -383,31 +370,25 @@ pub fn expected_segment_end(
 pub fn segment_aligned(
     segment_offset: i64,
     segment_size: i32,
-    expected_offset: i64,
-    expected_end: i64,
+    expected_offset: Option<i64>,
+    expected_end: Option<i64>,
 ) -> bool {
-    if segment_size <= 0 {
-        return true;
-    }
-    if expected_offset >= 0 && segment_offset != expected_offset {
-        return false;
-    }
-    if expected_end >= 0 && segment_offset.saturating_add(segment_size as i64) != expected_end {
-        return false;
-    }
-    true
+    segment_size <= 0
+        || (expected_offset.is_none_or(|e| segment_offset == e)
+            && expected_end
+                .is_none_or(|e| segment_offset.saturating_add(i64::from(segment_size)) == e))
 }
 
 /// Inspects a completed file's article list and returns the index of the first article
-/// that breaks contiguous yEnc byte tiling `[0..decoded_size)`, or `-1` if tiled/incomplete.
-pub fn first_untiled_article(articles: &[NzbgetRsArticleGeom], decoded_size: i64) -> isize {
+/// that breaks contiguous yEnc byte tiling `[0..decoded_size)`, or `None` if tiled/incomplete.
+pub fn first_untiled_article(articles: &[NzbgetRsArticleGeom], decoded_size: i64) -> Option<usize> {
     if decoded_size <= 0 {
-        return -1;
+        return None;
     }
     let mut expected: i64 = 0;
     for (index, article) in articles.iter().enumerate() {
         if article.status != ARTICLE_STATUS_FINISHED || article.segment_size <= 0 {
-            return -1;
+            return None;
         }
         if article.segment_offset != expected {
             if index > 0 {
@@ -415,11 +396,7 @@ pub fn first_untiled_article(articles: &[NzbgetRsArticleGeom], decoded_size: i64
                 let prev_borrowed = prev.fallback_round > 0;
                 let this_borrowed = article.fallback_round > 0;
                 if prev_borrowed != this_borrowed {
-                    return if prev_borrowed {
-                        (index - 1) as isize
-                    } else {
-                        index as isize
-                    };
+                    return Some(if prev_borrowed { index - 1 } else { index });
                 }
                 let end = article
                     .segment_offset
@@ -433,23 +410,19 @@ pub fn first_untiled_article(articles: &[NzbgetRsArticleGeom], decoded_size: i64
                     end == decoded_size
                 };
                 if article.segment_offset > expected && placed_right {
-                    return (index - 1) as isize;
+                    return Some(index - 1);
                 }
             }
-            return index as isize;
+            return Some(index);
         }
         expected = article
             .segment_offset
             .saturating_add(article.segment_size as i64);
     }
     if expected != decoded_size {
-        return if articles.is_empty() {
-            -1
-        } else {
-            (articles.len() - 1) as isize
-        };
+        return articles.len().checked_sub(1);
     }
-    -1
+    None
 }
 
 /// Merges a newly decoded article's declared file size into the file's `decoded_file_size`.
@@ -464,48 +437,59 @@ pub fn merge_decoded_file_size(decoded_file_size: i64, article_file_size: i64) -
     (true, -1)
 }
 
-/// Updates file lead-donor state after a round-1 fallback failure.
-/// Returns `true` if the lead donor was rotated to `next_lead`.
-pub fn register_lead_failure(
-    fallback_round: i32,
-    lead_snapshot: i32,
-    donor_count: i32,
-    next_lead: i32,
-    lead_donor_id: &mut i32,
-    lead_failures: &mut i32,
-    lead_switches: &mut i32,
-) -> bool {
-    if fallback_round != 1 || lead_snapshot == 0 || lead_snapshot != *lead_donor_id {
-        return false;
-    }
-    let failures = lead_failures.saturating_add(1);
-    *lead_failures = failures;
-    if failures >= LEAD_DEMOTE_THRESHOLD && next_lead != 0 && *lead_switches < donor_count {
-        *lead_donor_id = next_lead;
-        *lead_failures = 0;
-        *lead_switches = lead_switches.saturating_add(1);
-        return true;
-    }
-    false
+/// A file's lead-donor bookkeeping: the donor that leads round-1 fallback, its current
+/// failure streak, and how often the lead has rotated.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LeadState {
+    pub donor_id: i32,
+    pub failures: i32,
+    pub switches: i32,
 }
 
-/// Resets file lead-donor failure streak (and switch count when neighbour bounds are known)
-/// after a round-1 fallback success.
-pub fn register_lead_success(
-    fallback_round: i32,
-    lead_snapshot: i32,
-    lead_donor_id: i32,
-    expected_offset: i64,
-    expected_end: i64,
-    lead_failures: &mut i32,
-    lead_switches: &mut i32,
-) {
-    if fallback_round != 1 || lead_snapshot == 0 || lead_snapshot != lead_donor_id {
-        return;
+impl LeadState {
+    /// A round-1 attempt counts toward the lead only when it was pinned to the current lead.
+    fn pinned_to_lead(&self, fallback_round: i32, lead_snapshot: i32) -> bool {
+        fallback_round == 1 && lead_snapshot != 0 && lead_snapshot == self.donor_id
     }
-    *lead_failures = 0;
-    if expected_offset != -1 && expected_end != -1 {
-        *lead_switches = 0;
+
+    /// Records a round-1 fallback failure. Returns `true` if the lead rotated to `next_lead`.
+    pub fn register_failure(
+        &mut self,
+        fallback_round: i32,
+        lead_snapshot: i32,
+        donor_count: i32,
+        next_lead: i32,
+    ) -> bool {
+        if !self.pinned_to_lead(fallback_round, lead_snapshot) {
+            return false;
+        }
+        self.failures = self.failures.saturating_add(1);
+        if self.failures >= LEAD_DEMOTE_THRESHOLD && next_lead != 0 && self.switches < donor_count
+        {
+            self.donor_id = next_lead;
+            self.failures = 0;
+            self.switches = self.switches.saturating_add(1);
+            return true;
+        }
+        false
+    }
+
+    /// Records a round-1 fallback success: clears the failure streak, and the switch count
+    /// too when both neighbours pinned the article's bounds.
+    pub fn register_success(
+        &mut self,
+        fallback_round: i32,
+        lead_snapshot: i32,
+        expected_offset: Option<i64>,
+        expected_end: Option<i64>,
+    ) {
+        if !self.pinned_to_lead(fallback_round, lead_snapshot) {
+            return;
+        }
+        self.failures = 0;
+        if expected_offset.is_some() && expected_end.is_some() {
+            self.switches = 0;
+        }
     }
 }
 
@@ -1033,23 +1017,18 @@ pub fn article_downloader_check_response(response: Option<&[u8]>, auth_error: bo
 
 /// Validates yEnc decoded range and duplicate-fallback expected bounds in `ArticleDownloader::Write`.
 /// Return codes:
-/// - `0`: valid (`*out_offset` and `*out_size` populated)
-/// - `1`: missing begin or end (`begin_pos == 0 || end_pos == 0`)
-/// - `2`: malformed range (`offset < 0 || range_size <= 0 || range_size > 1 GiB || offset + range_size > article_file_size`)
-/// - `3`: duplicate file size mismatch
-/// - `4`: duplicate decoded offset mismatch
-/// - `5`: duplicate decoded end mismatch
+/// On success returns the article's `(offset, size)`.
 pub fn article_downloader_validate_yenc(
     begin_pos: i64,
     end_pos: i64,
     article_file_size: i64,
     expected_file_size: i64,
     fallback_round: i32,
-    dupe_expected_offset: i64,
-    dupe_expected_end: i64,
-) -> Result<(i64, i32), i32> {
+    dupe_expected_offset: Option<i64>,
+    dupe_expected_end: Option<i64>,
+) -> Result<(i64, i32), YencRangeError> {
     if begin_pos == 0 || end_pos == 0 {
-        return Err(1);
+        return Err(YencRangeError::MissingBounds);
     }
     let article_offset = begin_pos.saturating_sub(1);
     let range_size = end_pos.saturating_sub(begin_pos).saturating_add(1);
@@ -1058,22 +1037,36 @@ pub fn article_downloader_validate_yenc(
         || range_size > 1024 * 1024 * 1024
         || (article_file_size > 0 && article_offset.saturating_add(range_size) > article_file_size)
     {
-        return Err(2);
+        return Err(YencRangeError::Malformed);
     }
     let article_size = range_size as i32;
-    if fallback_round > 0 && expected_file_size > 0 && article_file_size != expected_file_size {
-        return Err(3);
-    }
-    if fallback_round > 0 && dupe_expected_offset >= 0 && article_offset != dupe_expected_offset {
-        return Err(4);
-    }
-    if fallback_round > 0
-        && dupe_expected_end >= 0
-        && article_offset.saturating_add(article_size as i64) != dupe_expected_end
-    {
-        return Err(5);
+    if fallback_round > 0 {
+        if expected_file_size > 0 && article_file_size != expected_file_size {
+            return Err(YencRangeError::FileSizeMismatch);
+        }
+        if dupe_expected_offset.is_some_and(|e| article_offset != e) {
+            return Err(YencRangeError::OffsetMismatch);
+        }
+        if dupe_expected_end.is_some_and(|e| article_offset.saturating_add(range_size) != e) {
+            return Err(YencRangeError::EndMismatch);
+        }
     }
     Ok((article_offset, article_size))
+}
+
+/// Why an article's yEnc `begin`/`end` range was rejected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum YencRangeError {
+    /// `begin` or `end` is missing.
+    MissingBounds,
+    /// The range is negative, empty, over 1 GiB, or runs past the file size.
+    Malformed,
+    /// A borrowed article declares another file size than the primary's.
+    FileSizeMismatch,
+    /// A borrowed article starts somewhere other than its neighbours say.
+    OffsetMismatch,
+    /// A borrowed article ends somewhere other than its neighbours say.
+    EndMismatch,
 }
 
 /// `DupeArticleFallback::IsParFile`:
@@ -2083,22 +2076,19 @@ pub(crate) fn expected_segment_offset_at(
     articles_len: usize,
     index: usize,
     art: &crate::queuesubsys_host::ArticleSnap,
-) -> i64 {
+) -> Option<i64> {
     if index >= articles_len {
-        return -1;
+        return None;
     }
     if index == 0 {
-        return if art.part_number == 1 { 0 } else { -1 };
+        return (art.part_number == 1).then_some(0);
     }
     let prev = host.article_at(file_ptr, index - 1);
-    if prev.part_number + 1 == art.part_number
+    (prev.part_number + 1 == art.part_number
         && prev.status == crate::queuesubsys_host::AI_FINISHED
         && prev.segment_size > 0
-        && prev.segment_offset >= 0
-    {
-        return prev.segment_offset + i64::from(prev.segment_size);
-    }
-    -1
+        && prev.segment_offset >= 0)
+        .then(|| prev.segment_offset + i64::from(prev.segment_size))
 }
 
 #[cfg(unix)]
@@ -2109,26 +2099,19 @@ pub(crate) fn expected_segment_end_at(
     index: usize,
     art: &crate::queuesubsys_host::ArticleSnap,
     decoded_file_size: i64,
-) -> i64 {
+) -> Option<i64> {
     if index >= articles_len {
-        return -1;
+        return None;
     }
     if index + 1 == articles_len {
-        return if decoded_file_size > 0 {
-            decoded_file_size
-        } else {
-            -1
-        };
+        return (decoded_file_size > 0).then_some(decoded_file_size);
     }
     let next = host.article_at(file_ptr, index + 1);
-    if art.part_number + 1 == next.part_number
+    (art.part_number + 1 == next.part_number
         && next.status == crate::queuesubsys_host::AI_FINISHED
         && next.segment_size > 0
-        && next.segment_offset > 0
-    {
-        return next.segment_offset;
-    }
-    -1
+        && next.segment_offset > 0)
+        .then_some(next.segment_offset)
 }
 
 #[cfg(unix)]
@@ -2152,15 +2135,12 @@ pub(crate) fn segment_aligned_at(
         return false;
     }
     let expected_begin = expected_segment_offset_at(host, file_ptr, articles_len, index, art);
-    if expected_begin >= 0 && begin != expected_begin {
+    if expected_begin.is_some_and(|e| begin != e) {
         return false;
     }
     let expected_end =
         expected_segment_end_at(host, file_ptr, articles_len, index, art, decoded_file_size);
-    if expected_end >= 0 && begin + i64::from(size) != expected_end {
-        return false;
-    }
-    true
+    expected_end.is_none_or(|e| begin + i64::from(size) == e)
 }
 
 #[cfg(unix)]
@@ -2181,12 +2161,7 @@ pub(crate) fn first_untiled_article_slice(
             fallback_round: a.dupe_fallback_round,
         })
         .collect();
-    let idx = first_untiled_article(&geom, decoded_size);
-    if idx >= 0 && (idx as usize) < articles.len() {
-        Some(idx as usize)
-    } else {
-        None
-    }
+    first_untiled_article(&geom, decoded_size).filter(|&idx| idx < articles.len())
 }
 
 #[cfg(unix)]
@@ -2302,37 +2277,51 @@ pub(crate) fn register_lead_failure_host(
     file: &mut crate::queuesubsys_host::FileSnap,
     art: &crate::queuesubsys_host::ArticleSnap,
 ) -> bool {
-    let mut lead_donor_id = file.dupe_lead_donor_id;
-    let mut lead_failures = file.dupe_lead_failures;
-    let mut lead_switches = file.dupe_lead_switches;
-    let rotated = register_lead_failure(
+    let mut lead = lead_state_of(file);
+    let rotated = lead.register_failure(
         art.dupe_fallback_round,
         art.dupe_lead_snapshot,
         art.dupe_donor_count,
         art.dupe_next_lead,
-        &mut lead_donor_id,
-        &mut lead_failures,
-        &mut lead_switches,
     );
-    file.dupe_lead_donor_id = lead_donor_id;
-    file.dupe_lead_failures = lead_failures;
-    file.dupe_lead_switches = lead_switches;
+    file.dupe_lead_donor_id = lead.donor_id;
     host.file_set_int(
         file.ptr,
         crate::queuesubsys_host::FILE_INT_DUPE_LEAD_DONOR_ID,
-        lead_donor_id,
+        lead.donor_id,
     );
+    store_lead_streak(host, file, lead);
+    rotated
+}
+
+#[cfg(unix)]
+fn lead_state_of(file: &crate::queuesubsys_host::FileSnap) -> LeadState {
+    LeadState {
+        donor_id: file.dupe_lead_donor_id,
+        failures: file.dupe_lead_failures,
+        switches: file.dupe_lead_switches,
+    }
+}
+
+/// Saves the lead's failure streak and switch count to the file and its snapshot.
+#[cfg(unix)]
+fn store_lead_streak(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    file: &mut crate::queuesubsys_host::FileSnap,
+    lead: LeadState,
+) {
+    file.dupe_lead_failures = lead.failures;
+    file.dupe_lead_switches = lead.switches;
     host.file_set_int(
         file.ptr,
         crate::queuesubsys_host::FILE_INT_DUPE_LEAD_FAILURES,
-        lead_failures,
+        lead.failures,
     );
     host.file_set_int(
         file.ptr,
         crate::queuesubsys_host::FILE_INT_DUPE_LEAD_SWITCHES,
-        lead_switches,
+        lead.switches,
     );
-    rotated
 }
 
 #[cfg(unix)]
@@ -2361,29 +2350,9 @@ pub(crate) fn register_lead_success_at(
         art,
         file.decoded_file_size,
     );
-    let mut lead_failures = file.dupe_lead_failures;
-    let mut lead_switches = file.dupe_lead_switches;
-    register_lead_success(
-        art.dupe_fallback_round,
-        art.dupe_lead_snapshot,
-        file.dupe_lead_donor_id,
-        exp_off,
-        exp_end,
-        &mut lead_failures,
-        &mut lead_switches,
-    );
-    file.dupe_lead_failures = lead_failures;
-    file.dupe_lead_switches = lead_switches;
-    host.file_set_int(
-        file.ptr,
-        crate::queuesubsys_host::FILE_INT_DUPE_LEAD_FAILURES,
-        lead_failures,
-    );
-    host.file_set_int(
-        file.ptr,
-        crate::queuesubsys_host::FILE_INT_DUPE_LEAD_SWITCHES,
-        lead_switches,
-    );
+    let mut lead = lead_state_of(file);
+    lead.register_success(art.dupe_fallback_round, art.dupe_lead_snapshot, exp_off, exp_end);
+    store_lead_streak(host, file, lead);
 }
 
 #[cfg(unix)]
@@ -3079,7 +3048,8 @@ pub(crate) fn try_fallback_host(
         art,
         file.decoded_file_size,
     );
-    host.article_set_i64_pair(art.ptr, exp_off, exp_end);
+    // the article stores an unknown bound as -1
+    host.article_set_i64_pair(art.ptr, exp_off.unwrap_or(-1), exp_end.unwrap_or(-1));
 
     let chosen = sources[round as usize].clone();
     art.message_id = chosen.clone();
@@ -3221,7 +3191,7 @@ mod tests {
                 fallback_round: 1,
             },
         ];
-        assert_eq!(first_untiled_article(&tiled, 200), -1);
+        assert_eq!(first_untiled_article(&tiled, 200), None);
 
         // Borrowed article at index 0 decoded short, leaving a gap before own article at index 1
         let short_borrowed = [
@@ -3240,7 +3210,7 @@ mod tests {
                 fallback_round: 0,
             },
         ];
-        assert_eq!(first_untiled_article(&short_borrowed, 200), 0);
+        assert_eq!(first_untiled_article(&short_borrowed, 200), Some(0));
     }
 
     #[test]
@@ -3379,16 +3349,32 @@ mod tests {
         );
 
         assert_eq!(
-            article_downloader_validate_yenc(101, 200, 1000, 1000, 1, 100, 200),
+            article_downloader_validate_yenc(101, 200, 1000, 1000, 1, Some(100), Some(200)),
             Ok((100, 100))
         );
         assert_eq!(
-            article_downloader_validate_yenc(101, 200, 1000, 999, 1, 100, 200),
-            Err(3)
+            article_downloader_validate_yenc(101, 200, 1000, 999, 1, Some(100), Some(200)),
+            Err(YencRangeError::FileSizeMismatch)
         );
         assert_eq!(
-            article_downloader_validate_yenc(101, 200, 1000, 1000, 1, 90, 200),
-            Err(4)
+            article_downloader_validate_yenc(101, 200, 1000, 1000, 1, Some(90), Some(200)),
+            Err(YencRangeError::OffsetMismatch)
+        );
+        assert_eq!(
+            article_downloader_validate_yenc(101, 200, 1000, 1000, 1, Some(100), Some(201)),
+            Err(YencRangeError::EndMismatch)
+        );
+        assert_eq!(
+            article_downloader_validate_yenc(101, 200, 1000, 1000, 1, None, None),
+            Ok((100, 100))
+        );
+        assert_eq!(
+            article_downloader_validate_yenc(0, 200, 1000, 1000, 0, None, None),
+            Err(YencRangeError::MissingBounds)
+        );
+        assert_eq!(
+            article_downloader_validate_yenc(101, 2000, 1000, 1000, 0, None, None),
+            Err(YencRangeError::Malformed)
         );
     }
 
@@ -3714,7 +3700,7 @@ mod tests {
             a.segment_size = size;
         }
 
-        fn expected_offset(&self, index: usize) -> i64 {
+        fn expected_offset(&self, index: usize) -> Option<i64> {
             let a = &self.articles[index];
             let prev = if index > 0 {
                 Some(&self.articles[index - 1])
@@ -3722,7 +3708,7 @@ mod tests {
                 None
             };
             expected_segment_offset(
-                index as isize,
+                index,
                 a.part_number,
                 prev.map_or(0, |p| p.part_number),
                 prev.map_or(0, |p| p.status),
@@ -3731,11 +3717,11 @@ mod tests {
             )
         }
 
-        fn expected_end(&self, index: usize) -> i64 {
+        fn expected_end(&self, index: usize) -> Option<i64> {
             let a = &self.articles[index];
             let next = self.articles.get(index + 1);
             expected_segment_end(
-                index as isize,
+                index,
                 self.articles.len(),
                 a.part_number,
                 self.decoded_file_size,
@@ -3768,12 +3754,7 @@ mod tests {
                     fallback_round: a.fallback_round,
                 })
                 .collect();
-            let idx = first_untiled_article(&geom, self.decoded_file_size);
-            if idx >= 0 {
-                Some(idx as usize)
-            } else {
-                None
-            }
+            first_untiled_article(&geom, self.decoded_file_size)
         }
 
         fn merge_decoded_size(&mut self, article_file_size: i64) -> bool {
@@ -3806,32 +3787,36 @@ mod tests {
             a.source_donors = contributors.to_vec();
         }
 
+        fn lead(&self) -> LeadState {
+            LeadState {
+                donor_id: self.lead_donor_id,
+                failures: self.lead_failures,
+                switches: self.lead_switches,
+            }
+        }
+
+        fn set_lead(&mut self, lead: LeadState) {
+            self.lead_donor_id = lead.donor_id;
+            self.lead_failures = lead.failures;
+            self.lead_switches = lead.switches;
+        }
+
         fn register_lead_failure(&mut self, article_idx: usize) -> bool {
             let a = &self.articles[article_idx];
-            register_lead_failure(
-                a.fallback_round,
-                a.lead_snapshot,
-                a.donor_count,
-                a.next_lead,
-                &mut self.lead_donor_id,
-                &mut self.lead_failures,
-                &mut self.lead_switches,
-            )
+            let mut lead = self.lead();
+            let rotated =
+                lead.register_failure(a.fallback_round, a.lead_snapshot, a.donor_count, a.next_lead);
+            self.set_lead(lead);
+            rotated
         }
 
         fn register_lead_success(&mut self, article_idx: usize) {
             let exp_off = self.expected_offset(article_idx);
             let exp_end = self.expected_end(article_idx);
             let a = &self.articles[article_idx];
-            register_lead_success(
-                a.fallback_round,
-                a.lead_snapshot,
-                self.lead_donor_id,
-                exp_off,
-                exp_end,
-                &mut self.lead_failures,
-                &mut self.lead_switches,
-            );
+            let mut lead = self.lead();
+            lead.register_success(a.fallback_round, a.lead_snapshot, exp_off, exp_end);
+            self.set_lead(lead);
         }
 
         fn vacate_ghost_lead(&mut self, is_barred: bool, donor_ids: &[i32]) {
@@ -4773,18 +4758,18 @@ mod tests {
         {
             let mut target =
                 TestFile::build(b"release.r01", &[(1, 1300), (2, 1300), (3, 700)], b"orig");
-            assert_eq!(target.expected_offset(0), 0);
-            assert_eq!(target.expected_offset(1), -1);
-            assert_eq!(target.expected_end(1), -1);
-            assert_eq!(target.expected_end(2), -1);
+            assert_eq!(target.expected_offset(0), Some(0));
+            assert_eq!(target.expected_offset(1), None);
+            assert_eq!(target.expected_end(1), None);
+            assert_eq!(target.expected_end(2), None);
 
             target.finish_article(0, 0, 1000);
             target.finish_article(2, 2000, 500);
             target.decoded_file_size = 2500;
-            assert_eq!(target.expected_offset(1), 1000);
-            assert_eq!(target.expected_end(1), 2000);
-            assert_eq!(target.expected_end(2), 2500);
-            assert_eq!(target.expected_offset(2), -1);
+            assert_eq!(target.expected_offset(1), Some(1000));
+            assert_eq!(target.expected_end(1), Some(2000));
+            assert_eq!(target.expected_end(2), Some(2500));
+            assert_eq!(target.expected_offset(2), None);
         }
 
         // 37. DupeArticleFallbackStructureGapTest (B30)
@@ -4879,12 +4864,12 @@ mod tests {
             target.finish_article(0, 0, 1000);
             target.finish_article(1, 1000, 1000);
             target.finish_article(2, 2000, 1000);
-            assert_eq!(target.expected_offset(3), -1);
+            assert_eq!(target.expected_offset(3), None);
             target.finish_article(3, 4000, 500);
-            assert_eq!(target.expected_end(2), -1);
+            assert_eq!(target.expected_end(2), None);
 
             let no_first = TestFile::build(b"release.r01", &[(2, 1300), (3, 700)], b"orig");
-            assert_eq!(no_first.expected_offset(0), -1);
+            assert_eq!(no_first.expected_offset(0), None);
         }
 
         // 41. DupeArticleFallbackFirstUntiledTest (B7)
@@ -5015,7 +5000,7 @@ mod tests {
             vol.merge_decoded_size(7548362);
             vol.finish_article(2, 2000, 500);
             assert_eq!(vol.first_untiled(), None);
-            assert_eq!(vol.expected_end(2), -1);
+            assert_eq!(vol.expected_end(2), None);
             assert!(!vol.has_donor_articles());
             vol.articles[1].fallback_round = 1;
             assert!(vol.has_donor_articles());

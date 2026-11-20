@@ -7482,7 +7482,24 @@ impl ContentMapper {
         want: Option<&(Vec<u8>, i64)>,
     ) -> Result<ContentMap, MapError> {
         if let Some(want) = want {
-            if matches!(set.format, MemberFormat::Bare | MemberFormat::Split) {
+            // A file posted on its own is the one asked for when its name and size are.
+            if set.format == MemberFormat::Bare {
+                let named = set
+                    .members
+                    .first()
+                    .and_then(|&m| members.get(m as usize))
+                    .is_some_and(|m| {
+                        locale_casecmp(base_file_name(&m.name), &want.0) == std::cmp::Ordering::Equal
+                    });
+                if named {
+                    let map = Self::build_bare_map(members, set, sources)?;
+                    if map.inner_size() == want.1 {
+                        return Ok(map);
+                    }
+                }
+                return Err(MapError::NotMedia);
+            }
+            if set.format == MemberFormat::Split {
                 return Err(MapError::NotMedia);
             }
             let mut one = LayerPick {
@@ -13590,6 +13607,15 @@ mod tests {
         assert!(is_side_file_name(b"x-sample.MKV") && is_side_file_name(b"x.nfo"));
         assert!(!is_side_file_name(b"x.r00") && !is_side_file_name(b"x.001"));
         assert!(!is_side_file_name(b"x.rar") && !is_side_file_name(b"x.sfv"));
+        // A duplicate posting the sample as a file of its own lends it too.
+        let bare_members = vec![SetMember::new(b"Movie-Sample.mkv", 80)];
+        let bare = MemberSet { format: MemberFormat::Bare, members: vec![0] };
+        let mut d = MemorySourceSet::default();
+        d.push(sample.clone());
+        let map = ContentMapper::build_map_wanting(&bare_members, &bare, &d, None, true, &want).unwrap();
+        assert_eq!(read_through(&map, &d), sample);
+        let other_members = vec![SetMember::new(b"other.mkv", 80)];
+        assert!(ContentMapper::build_map_wanting(&other_members, &bare, &d, None, true, &want).is_err());
         // A file no layer holds is not mapped.
         let mut d = MemorySourceSet::default();
         d.push(inner_movie);

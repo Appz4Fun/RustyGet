@@ -23,7 +23,9 @@ use crate::artwritercore::{
     ArticleWriterProcessItem, PRESSURE_CONSTRAINED, PRESSURE_CRITICAL, PRESSURE_NORMAL,
 };
 use crate::decoder::{Decoder, Format};
-use crate::dupefallback::{article_downloader_check_response, article_downloader_validate_yenc};
+use crate::dupefallback::{
+    article_downloader_check_response, article_downloader_validate_yenc, YencRangeError,
+};
 use crate::nntp::{
     article_dl_all_servers_on_level_failed, article_dl_classify_attempt_stat,
     article_dl_classify_decode_status, article_dl_classify_write_failure,
@@ -3027,8 +3029,9 @@ impl NzbgetRsArticleDownloader {
                     );
                     let dupe_round = vints[0];
                     let expected_file_size = vi64s[0];
-                    let dupe_expected_offset = vi64s[1];
-                    let dupe_expected_end = vi64s[2];
+                    // an unknown bound is stored as -1
+                    let dupe_expected_offset = Some(vi64s[1]).filter(|&v| v >= 0);
+                    let dupe_expected_end = Some(vi64s[2]).filter(|&v| v >= 0);
 
                     match article_downloader_validate_yenc(
                         begin_pos,
@@ -3044,8 +3047,8 @@ impl NzbgetRsArticleDownloader {
                             article_offset = off;
                             article_size = sz;
                         }
-                        Err(1) => return false,
-                        Err(2) => {
+                        Err(YencRangeError::MissingBounds) => return false,
+                        Err(YencRangeError::Malformed) => {
                             let tail = format!(
                                 ": range {begin_pos}-{end_pos} out of range (file size {article_file_size})"
                             );
@@ -3059,46 +3062,35 @@ impl NzbgetRsArticleDownloader {
                             );
                             return false;
                         }
-                        Err(code) => {
+                        Err(
+                            mismatch @ (YencRangeError::FileSizeMismatch
+                            | YencRangeError::OffsetMismatch
+                            | YencRangeError::EndMismatch),
+                        ) => {
                             w.decoded_file_size = article_file_size;
-                            if code == 3 {
-                                let tail = format!(
+                            let tail = match mismatch {
+                                YencRangeError::FileSizeMismatch => format!(
                                     " from duplicate: file size mismatch ({article_file_size} vs {expected_file_size})"
-                                );
-                                host.log(
-                                    MK_DETAIL,
-                                    &join_c_slices(&[
-                                        b"Discarding article ",
-                                        &self.info_name,
-                                        tail.as_bytes(),
-                                    ]),
-                                );
-                            } else if code == 4 {
-                                let actual_off = begin_pos - 1;
-                                let tail = format!(
-                                    " from duplicate: decoded offset mismatch ({actual_off} vs {dupe_expected_offset})"
-                                );
-                                host.log(
-                                    MK_DETAIL,
-                                    &join_c_slices(&[
-                                        b"Discarding article ",
-                                        &self.info_name,
-                                        tail.as_bytes(),
-                                    ]),
-                                );
-                            } else if code == 5 {
-                                let tail = format!(
-                                    " from duplicate: decoded end mismatch ({end_pos} vs {dupe_expected_end})"
-                                );
-                                host.log(
-                                    MK_DETAIL,
-                                    &join_c_slices(&[
-                                        b"Discarding article ",
-                                        &self.info_name,
-                                        tail.as_bytes(),
-                                    ]),
-                                );
-                            }
+                                ),
+                                YencRangeError::OffsetMismatch => format!(
+                                    " from duplicate: decoded offset mismatch ({} vs {})",
+                                    begin_pos - 1,
+                                    dupe_expected_offset.unwrap_or(-1)
+                                ),
+                                // EndMismatch; the other kinds are handled above
+                                _ => format!(
+                                    " from duplicate: decoded end mismatch ({end_pos} vs {})",
+                                    dupe_expected_end.unwrap_or(-1)
+                                ),
+                            };
+                            host.log(
+                                MK_DETAIL,
+                                &join_c_slices(&[
+                                    b"Discarding article ",
+                                    &self.info_name,
+                                    tail.as_bytes(),
+                                ]),
+                            );
                             return false;
                         }
                     }

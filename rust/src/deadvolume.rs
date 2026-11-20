@@ -597,6 +597,121 @@ mod rar5 {
         out.extend_from_slice(&sized);
     }
 
+    /// Where a file or service header's CRC32 field sits in `h` (from its type on), if it
+    /// has one.
+    fn crc32_field(h: &[u8], body: usize) -> Option<Option<usize>> {
+        let mut q = body;
+        let fflags = vint(h, &mut q)?;
+        vint(h, &mut q)?; // unpacked size
+        vint(h, &mut q)?; // attributes
+        if fflags & FHFL_MTIME != 0 {
+            q += 4;
+        }
+        Some((fflags & FHFL_CRC32 != 0).then_some(q).filter(|&q| q + 4 <= h.len()))
+    }
+
+    /// Quick-open data is a run of records, each a CRC32 over its size and body, then the
+    /// size (a vint) and the body: recomputes those CRCs after a copied header in a body
+    /// changed. Stops at anything that does not read as a record.
+    fn reseal_records(data: &mut [u8]) {
+        let mut p = 0;
+        while p + 4 < data.len() {
+            let mut q = p + 4;
+            let Some(size) = vint(data, &mut q) else { return };
+            let Some(end) = q.checked_add(size as usize).filter(|&e| e <= data.len()) else {
+                return;
+            };
+            let crc = crc32fast::hash(&data[p + 4..end]);
+            data[p..p + 4].copy_from_slice(&crc.to_le_bytes());
+            p = end;
+        }
+    }
+
+    pub(super) fn faithful_frame(
+        head: &[u8],
+        tail: &[u8],
+        template: usize,
+        index: usize,
+        part_crc: u32,
+    ) -> Result<(Vec<u8>, Vec<u8>), FrameError> {
+        let bad = |what: &'static str| FrameError::Sibling { format: "RAR5", what };
+        if !head.starts_with(SIG) {
+            return Err(bad("no signature"));
+        }
+        let mut out = SIG.to_vec();
+        let mut p = SIG.len();
+        // The sibling's file header block as stored and as rebuilt: quick-open data behind
+        // the part keeps a copy of it.
+        let mut file_block: Option<(Vec<u8>, Vec<u8>)> = None;
+        while p < head.len() {
+            let start = p;
+            let b = block(head, &mut p).ok_or_else(|| bad("truncated header"))?;
+            let mut h = b.header.to_vec();
+            match b.kind {
+                HEAD_MAIN => {
+                    let mut q = b.body;
+                    let aflags = vint(b.header, &mut q).ok_or_else(|| bad("main header"))?;
+                    if aflags & MHFL_VOLNUMBER == 0 {
+                        return Err(bad("main header without a volume number"));
+                    }
+                    let at = q;
+                    let number = vint(b.header, &mut q).ok_or_else(|| bad("volume number"))?;
+                    let number = super::shifted_volume_number(number, index, template)
+                        .ok_or_else(|| bad("volume number"))?;
+                    let mut v = Vec::new();
+                    put_vint(&mut v, number);
+                    h.splice(at..q, v);
+                    emit(&mut out, &h);
+                }
+                HEAD_FILE => {
+                    if p != head.len() {
+                        return Err(bad("file header does not end in front of its data"));
+                    }
+                    if let Some(at) = crc32_field(&h, b.body).ok_or_else(|| bad("file header"))? {
+                        h[at..at + 4].copy_from_slice(&part_crc.to_le_bytes());
+                    }
+                    let at = out.len();
+                    emit(&mut out, &h);
+                    file_block = Some((head[start..p].to_vec(), out[at..].to_vec()));
+                }
+                _ => emit(&mut out, &h),
+            }
+        }
+        let (old_block, new_block) = file_block.ok_or_else(|| bad("no file header"))?;
+        let mut end = Vec::new();
+        let mut p = 0;
+        while p < tail.len() {
+            let start = p;
+            // Behind the last header: padding (zeros in usual sets), kept as it is.
+            let Some(b) = block(tail, &mut p) else {
+                end.extend_from_slice(&tail[start..]);
+                break;
+            };
+            let Some(data_end) = p.checked_add(b.data_len as usize).filter(|&e| e <= tail.len())
+            else {
+                end.extend_from_slice(&tail[start..]);
+                break;
+            };
+            let data = &tail[p..data_end];
+            match data.windows(old_block.len()).position(|w| w == old_block.as_slice()) {
+                Some(at) if old_block.len() == new_block.len() => {
+                    let mut data = data.to_vec();
+                    data[at..at + new_block.len()].copy_from_slice(&new_block);
+                    reseal_records(&mut data);
+                    let mut h = b.header.to_vec();
+                    if let Some(c) = crc32_field(&h, b.body).flatten() {
+                        h[c..c + 4].copy_from_slice(&crc32fast::hash(&data).to_le_bytes());
+                    }
+                    emit(&mut end, &h);
+                    end.extend_from_slice(&data);
+                }
+                _ => end.extend_from_slice(&tail[start..data_end]),
+            }
+            p = data_end;
+        }
+        Ok((out, end))
+    }
+
     pub(super) fn frame(
         head: &[u8],
         tail: &[u8],
@@ -745,6 +860,27 @@ mod rar5 {
         }
         let end = end.ok_or_else(|| bad("no end-of-archive header"))?;
         Ok((out, end))
+    }
+}
+
+/// The exact bytes a volume of a set had around its stored part, rebuilt from sibling
+/// `template`'s `head` and `tail`: verbatim but for the volume number in the main header and
+/// the part checksum `part_crc` in the file header and in its copy in the quick-open data
+/// behind the part, with every checksum over them recomputed. Unlike [`synthesize_frame`]
+/// nothing is left out, so a volume that lost only these bytes can be written back over its
+/// file and verify against its par2 set; the caller checks the result against the bytes that
+/// arrived. RAR5 only.
+pub fn faithful_frame(
+    version: i32,
+    head: &[u8],
+    tail: &[u8],
+    template: usize,
+    index: usize,
+    part_crc: u32,
+) -> Result<(Vec<u8>, Vec<u8>), FrameError> {
+    match version {
+        5 => rar5::faithful_frame(head, tail, template, index, part_crc),
+        v => Err(FrameError::UnsupportedVersion(v)),
     }
 }
 
@@ -1137,6 +1273,26 @@ mod tests {
         let crc = crc32fast::hash(&sized);
         b[hdr_start..hdr_start + 4].copy_from_slice(&crc.to_le_bytes());
         (b, at, len)
+    }
+
+    #[test]
+    fn rar5_faithful_frame_rebuilds_the_next_volume_byte_for_byte() {
+        // Two middle volumes of a stored RAR5 set written by rar 7 (`-m0 -ma5 -v10000b`),
+        // with quick-open data behind each part that copies its file header.
+        let sibling = testdata("deadvolume/out.part2.rar");
+        let lost = testdata("deadvolume/out.part3.rar");
+        let (_, files) = parse(&sibling);
+        let (at, len) = (files[0].data_offset as usize, files[0].packed_size as usize);
+        let (_, lost_files) = parse(&lost);
+        assert_eq!((lost_files[0].data_offset as usize, lost_files[0].packed_size as usize), (at, len));
+        let data = &lost[at..at + len];
+        let (head, tail) =
+            faithful_frame(5, &sibling[..at], &sibling[at + len..], 1, 2, crc32fast::hash(data))
+                .unwrap();
+        assert_eq!(head, lost[..at].to_vec());
+        assert_eq!(tail, lost[at + len..].to_vec());
+        // RAR 1.5-4 has no faithful rebuild here.
+        assert!(faithful_frame(3, &sibling[..at], &sibling[at + len..], 1, 2, 0).is_err());
     }
 
     #[test]

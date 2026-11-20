@@ -9118,6 +9118,12 @@ fn plan_dead_fills(
                             done: false,
                             offered,
                             offer_failed: false,
+                            on_disk_target: head_lost
+                                .contains_key(&i)
+                                .then(|| member_targets.get(members_by_index[i] as usize).copied())
+                                .flatten()
+                                .filter(|&t| t >= 0)
+                                .map(|t| t as usize),
                         });
                     }
                     // A dead volume handed over earlier keeps its place in the map.
@@ -9345,6 +9351,10 @@ struct DeadFill {
     offered: Option<i64>,
     /// Handing it over before its borrow finishes failed: not tried again.
     offer_failed: bool,
+    /// For a volume on disk that lost its headers, its own repair target: once rebuilt, the
+    /// volume is written back over the file on disk, so par verification and the repair's
+    /// report find it whole.
+    on_disk_target: Option<usize>,
 }
 
 impl CrossPackRepairSession {
@@ -9851,6 +9861,25 @@ impl CrossPackRepairSession {
             match result {
                 Ok(v) => {
                     let mb = stream_repair_bytes_to_mb(d.packed);
+                    if let Some(t) = d.on_disk_target {
+                        match self.write_back_volume(&d) {
+                            Ok(()) => {
+                                if let Some(h) = self.target_holes.get_mut(t) {
+                                    h.clear();
+                                }
+                                let mut msg = b"Rebuilt ".to_vec();
+                                msg.extend_from_slice(name);
+                                msg.extend_from_slice(b" on disk: its headers and borrowed holes are written back");
+                                emit(TargetMessageKind::Info, &msg);
+                            }
+                            Err(e) => {
+                                let mut msg = b"Cannot write rebuilt ".to_vec();
+                                msg.extend_from_slice(name);
+                                msg.extend_from_slice(format!(" back to disk: {e}").as_bytes());
+                                emit(TargetMessageKind::Warning, &msg);
+                            }
+                        }
+                    }
                     crate::postproc::direct_unpack_set_virtual(self.dead_nzb_id, &d.volume_path, v);
                     let mut msg = format!("Borrowed {mb:.1} MB for dead volume ").into_bytes();
                     msg.extend_from_slice(name);
@@ -9922,6 +9951,91 @@ impl CrossPackRepairSession {
                 }
             }
         }
+    }
+
+    /// Writes the volume that lost its headers, fill `d` (borrowed in full), back over its
+    /// file: its headers as the sibling's but for its number and part checksum, the data with
+    /// the borrowed holes filled, and the sibling's tail. Only when the result has the file's
+    /// size and layout, so nothing on disk moves.
+    fn write_back_volume(&self, d: &DeadFill) -> Result<(), String> {
+        use std::io::{Read, Seek, SeekFrom, Write};
+        let path_of = |m: i32| {
+            crate::artwritercore::article_writer_format_dest_file_path(
+                &self.dest_dir,
+                std::path::MAIN_SEPARATOR as u8,
+                &self.set_members[m as usize].name,
+            )
+        };
+        if d.packed != d.template_packed {
+            return Err("its part is not the size of the sibling's".into());
+        }
+        let data = std::fs::read(crate::fsops::path(&path_of(d.member)))
+            .map_err(|e| format!("borrowed data: {e}"))?;
+        if data.len() as i64 != d.packed {
+            return Err(format!("borrowed {} bytes, expected {}", data.len(), d.packed));
+        }
+        let part_crc = crc32fast::hash(&data);
+        let template = std::fs::read(crate::fsops::path(&path_of(d.template_member)))
+            .map_err(|e| format!("sibling volume: {e}"))?;
+        let at = d.template_data_offset as usize;
+        let end = at + d.template_packed as usize;
+        if end > template.len() {
+            return Err("sibling volume changed".into());
+        }
+        let (head, tail) = match d.version {
+            5 => crate::deadvolume::faithful_frame(
+                5,
+                &template[..at],
+                &template[end..],
+                d.template_index,
+                d.index,
+                part_crc,
+            ),
+            _ => crate::deadvolume::synthesize_frame(
+                d.version,
+                &template[..at],
+                &template[end..],
+                d.template_index,
+                d.index,
+                d.packed as u64,
+                Some(part_crc),
+            ),
+        }
+        .map_err(|e| e.to_string())?;
+        if head.len() != at {
+            return Err(format!("rebuilt headers are {} bytes, the sibling's {at}", head.len()));
+        }
+        let mut f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(crate::fsops::path(&d.volume_path))
+            .map_err(|e| e.to_string())?;
+        let have = f.metadata().map_err(|e| e.to_string())?.len();
+        let want = (head.len() + data.len() + tail.len()) as u64;
+        if have != want {
+            return Err(format!("the file is {have} bytes, the rebuilt volume {want}"));
+        }
+        // What arrived of the volume must match the rebuilt one where both have bytes: a
+        // volume laid out otherwise is left alone.
+        let mut disk = Vec::with_capacity(have as usize);
+        f.read_to_end(&mut disk).map_err(|e| e.to_string())?;
+        let rebuilt: Vec<u8> = [head.as_slice(), &data, &tail].concat();
+        let holes = d
+            .on_disk_target
+            .and_then(|t| self.target_holes.get(t))
+            .cloned()
+            .unwrap_or_default();
+        let in_hole = |i: usize| {
+            holes
+                .iter()
+                .any(|h| (i as i64) >= h.offset && (i as i64) < h.offset + h.size)
+        };
+        if let Some(i) = (0..disk.len()).find(|&i| disk[i] != rebuilt[i] && !in_hole(i)) {
+            return Err(format!("the rebuilt volume differs from the bytes that arrived at {i}"));
+        }
+        f.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+        f.write_all(&rebuilt).map_err(|e| e.to_string())?;
+        f.sync_data().map_err(|e| e.to_string())
     }
 
     /// The scratch file a dead volume's borrowed bytes are written to.

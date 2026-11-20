@@ -371,38 +371,41 @@ pub fn with_part_crc(head: &[u8], part_crc: u32) -> Vec<u8> {
     out
 }
 
-/// Where the last file's data of the RAR volume at `path` ends, the volume's length, and
-/// whether that file goes on in the next volume. None when its headers cannot be read.
-fn data_end(path: &[u8]) -> Option<(u64, u64, bool)> {
+/// Where the last file's data of the RAR5 volume at `path` ends, the volume's length, whether
+/// that file goes on in the next volume, and whether the volume's end block says another
+/// volume follows. None when its headers cannot be read.
+fn data_end(path: &[u8]) -> Option<(u64, u64, bool, bool)> {
     let (_, vol, files) = crate::rarreader::read_volume_file(path, b"", false);
-    if vol.version == 0 || vol.encrypted {
+    // RAR 1.5-4 end blocks carry their volume's number and checksum: not copied as they are.
+    if vol.version != 5 || vol.encrypted {
         return None;
     }
     let last = files.last()?;
     let end = u64::try_from(last.data_offset.checked_add(last.packed_size)?).ok()?;
     let len = std::fs::metadata(crate::fsops::path(path)).ok()?.len();
-    (end <= len).then_some((end, len, last.split_after))
+    (end <= len).then_some((end, len, last.split_after, vol.has_next_volume))
 }
 
-/// Restores the bytes behind the last file's data of RAR volume `path` (its end block and the
+/// Restores the bytes behind the file data of RAR5 volume `path` (its end block and the
 /// records next to it) from `sibling`, a volume of the same set, when every lost range in
 /// `holes` (`start`, `end`) lies there. Those bytes are no part of any file, so no duplicate
 /// lends them and only a par2 repair could, which a damaged par2 set cannot: the volume would
-/// stay damaged although every byte of its file is back. The sibling must end the same way
-/// (same length behind its data, its file going on in the next volume or not alike), as the
-/// volumes of one set do. True when written.
+/// stay damaged although every byte of its file is back. Only for a volume whose last file
+/// goes on in the next volume (nothing else can follow that file in it, and another volume
+/// must), from a sibling that ends alike: its file going on too, its end block saying another
+/// volume follows, the same length behind its data. True when written.
 pub fn restore_tail_from_sibling(path: &[u8], holes: &[(u64, u64)], sibling: &[u8]) -> bool {
     use std::io::{Read, Seek, SeekFrom, Write};
-    let Some((end, len, more)) = data_end(path) else {
+    let Some((end, len, true, _)) = data_end(path) else {
         return false;
     };
     if holes.is_empty() || holes.iter().any(|&(s, e)| s < end || e > len || s >= e) {
         return false;
     }
-    let Some((s_end, s_len, s_more)) = data_end(sibling) else {
+    let Some((s_end, s_len, true, true)) = data_end(sibling) else {
         return false;
     };
-    if s_len - s_end != len - end || s_more != more {
+    if s_len - s_end != len - end {
         return false;
     }
     let tail = (|| -> std::io::Result<Vec<u8>> {
@@ -1221,8 +1224,8 @@ mod tests {
         let two = write("testfile5.part02.rar");
         let last = write("testfile5.part03.rar");
         let whole = std::fs::read(crate::fsops::path(&two)).unwrap();
-        let (end, len, more) = data_end(&two).unwrap();
-        assert!(more && end < len);
+        let (end, len, more, next) = data_end(&two).unwrap();
+        assert!(more && next && end < len);
         // Its end block lost (zeros), as when the volume's last article never arrived.
         let mut damaged = whole.clone();
         let hole = (end + 1, len);
@@ -1239,7 +1242,7 @@ mod tests {
         assert_eq!(restored[..=hole.0 as usize - 1], whole[..hole.0 as usize]);
         let sib = std::fs::read(crate::fsops::path(&one)).unwrap();
         assert_eq!(restored[hole.0 as usize..], sib[sib.len() - (len - hole.0) as usize..]);
-        assert_eq!(data_end(&two), Some((end, len, true)));
+        assert_eq!(data_end(&two), Some((end, len, true, true)));
         let (ok, _, files) = crate::rarreader::read_volume_file(&two, b"", false);
         assert!(ok && files.len() == 1);
         let _ = std::fs::remove_dir_all(&dir);

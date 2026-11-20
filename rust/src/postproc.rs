@@ -3113,6 +3113,23 @@ fn drop_offered(
     }
 }
 
+/// Releases the held volumes of download `nzb_id` if every one of them is in `complete` (full
+/// paths of volumes a repair completed); otherwise releases none. A partial release would let
+/// direct unpack read on while post-processing goes on to a par2 repair, which may rewrite a
+/// released volume it sees as damaged (a volume end rebuilt from a sibling) under the reader.
+pub(crate) fn direct_unpack_release_if_all(nzb_id: i32, complete: &[Vec<u8>]) -> bool {
+    let held: Vec<Vec<u8>> = match direct_unpack_holds().get(&nzb_id) {
+        Some(st) if !st.held.is_empty() && st.held.iter().all(|p| complete.contains(p)) => {
+            st.held.clone()
+        }
+        _ => return false,
+    };
+    for path in held {
+        direct_unpack_release_path(&path);
+    }
+    true
+}
+
 /// Releases every held volume of download `nzb_id` (its repair succeeded).
 pub(crate) fn direct_unpack_release_all(nzb_id: i32) {
     let mut map = direct_unpack_holds();

@@ -311,6 +311,9 @@ pub struct NzbgetRsStreamRepairCtrl {
     /// Raised when a volume went dead while a live pass borrows: the pass stops so the next
     /// one hands every dead volume to direct unpack at once.
     yielding: AtomicBool,
+    /// Dead volumes whose whole-file recreation a yielded pass skipped: a later pass still owes
+    /// it, though the queue now marks them tried.
+    recreate_owed: Mutex<std::collections::BTreeSet<Vec<u8>>>,
     tls_enabled: bool,
     debug_enabled: bool,
     fetcher: ArticleFetcher,
@@ -338,6 +341,7 @@ impl NzbgetRsStreamRepairCtrl {
             parallel_live_fetch: AtomicBool::new(false),
             pass_dead: Mutex::new(PassDead::default()),
             yielding: AtomicBool::new(false),
+            recreate_owed: Mutex::new(Default::default()),
             tls_enabled,
             debug_enabled,
             fetcher: ArticleFetcher::new(nntp_host),
@@ -1333,11 +1337,12 @@ impl NzbgetRsStreamRepairCtrl {
         counters: &mut RunCounters,
         left_to_borrow: &[bool],
     ) {
+        let mut owed = self.recreate_owed.lock().unwrap_or_else(|e| e.into_inner());
         let retry: Vec<bool> = (0..targets.len())
             .map(|i| {
                 let t = &targets[i];
                 left_to_borrow.get(i).copied().unwrap_or(false)
-                    && !t.tried_before
+                    && (!t.tried_before || owed.contains(&t.filename))
                     && t.needs_repair()
                     && !crate::postproc::direct_unpack_has_virtual(
                         &[
@@ -1349,6 +1354,12 @@ impl NzbgetRsStreamRepairCtrl {
                     )
             })
             .collect();
+        for (t, r) in targets.iter().zip(&retry) {
+            if *r {
+                owed.remove(&t.filename);
+            }
+        }
+        drop(owed);
         if !retry.iter().any(|r| *r) {
             return;
         }
@@ -2469,6 +2480,14 @@ impl NzbgetRsStreamRepairCtrl {
             // Dead volumes the borrow could not rebuild (a compressed set, a volume that cannot
             // be placed yet, the real last one...) still get the whole-file recreation from a
             // byte-identical duplicate, as before.
+            if borrowing && yielded {
+                let mut owed = self.recreate_owed.lock().unwrap_or_else(|e| e.into_inner());
+                for (t, left) in targets.iter().zip(&left_to_borrow) {
+                    if *left && t.needs_repair() {
+                        owed.insert(t.filename.clone());
+                    }
+                }
+            }
             if borrowing && !yielded && !self.host_is_stopped(q) {
                 self.recreate_unborrowed(
                     q,

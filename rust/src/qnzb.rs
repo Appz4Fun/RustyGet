@@ -433,34 +433,6 @@ pub extern "C" fn nzbget_rs_nzb_scalars_new() -> *mut NzbScalars {
     Box::into_raw(data).cast()
 }
 
-static NZB_ID_GEN: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
-static NZB_ID_MAX: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
-
-/// Id generation shared by all collections (was `NzbInfo::m_idGen` and
-/// `m_idMax`): 0 last generated id, 1 reset to the highest id seen, 2 reset
-/// to zero, 3 raise the floor to `v`, 4 generate the next id.
-pub extern "C" fn nzbget_rs_nzb_ids(op: c_int, v: c_int) -> c_int {
-    use std::sync::atomic::Ordering::SeqCst;
-    match op {
-        0 => NZB_ID_GEN.load(SeqCst),
-        1 => {
-            NZB_ID_GEN.store(NZB_ID_MAX.load(SeqCst), SeqCst);
-            0
-        }
-        2 => {
-            NZB_ID_GEN.store(0, SeqCst);
-            NZB_ID_MAX.store(0, SeqCst);
-            0
-        }
-        3 => {
-            NZB_ID_MAX.fetch_max(v, SeqCst);
-            0
-        }
-        4 => NZB_ID_GEN.fetch_add(1, SeqCst) + 1,
-        _ => 0,
-    }
-}
-
 unsafe extern "C" fn drop_file(p: usize) {
     unsafe { crate::qfile::nzbget_rs_file_free(p as *mut crate::qfile::File) };
 }
@@ -470,7 +442,7 @@ unsafe extern "C" fn drop_file(p: usize) {
 /// # Safety
 /// `p` is from `nzbget_rs_nzb_scalars_new` and not initialised yet.
 pub unsafe extern "C" fn nzbget_rs_nzb_init(p: *mut NzbScalars) {
-    unsafe { (*p).id = nzbget_rs_nzb_ids(4, 0) };
+    unsafe { (*p).id = crate::idgen::NZB_IDS.next() };
     let files = crate::qlist::nzbget_rs_ptrlist_new(drop_file);
     unsafe { nzbget_rs_nzb_slot(p, 0, 1, files as usize) };
 }
@@ -1467,7 +1439,7 @@ unsafe fn move_file_list(dst: *mut NzbScalars, src: *const NzbScalars) {
 
 /// Adds a completed file, raising the file id floor (NzbInfo::AddCompletedFile).
 unsafe fn add_completed(p: *const NzbScalars, ints4: [c_int; 4], strs4: [*const c_char; 4]) {
-    crate::qfile::nzbget_rs_file_ids(3, ints4[0]);
+    crate::idgen::FILE_IDS.raise_floor(ints4[0]);
     let mut ints = ints4;
     let mut strs = strs4;
     unsafe {
@@ -1651,7 +1623,7 @@ pub(crate) unsafe fn host_filelist_op(
             let id = if int(0) != 0 {
                 int(0)
             } else {
-                crate::qfile::nzbget_rs_file_ids(4, 0)
+                crate::idgen::FILE_IDS.next()
             };
             set(fp, field::ID, i64::from(id));
             set(fp, field::NZB, p as i64);
@@ -1720,7 +1692,7 @@ pub(crate) unsafe fn host_filelist_op(
             set(
                 f,
                 field::ID,
-                i64::from(crate::qfile::nzbget_rs_file_ids(4, 0)),
+                i64::from(crate::idgen::FILE_IDS.next()),
             );
             set(f, field::ID, i64::from(int(0)));
             set(f, field::PAUSED, i64::from(int(1) != 0));
@@ -2061,7 +2033,7 @@ pub(crate) unsafe fn host_coll_op(
 /// NzbInfo::SetId: the id, raising the id floor.
 fn set_id(s: &mut NzbScalars, id: c_int) {
     s.id = id;
-    nzbget_rs_nzb_ids(3, id);
+    crate::idgen::NZB_IDS.raise_floor(id);
 }
 
 fn unix_now() -> i64 {

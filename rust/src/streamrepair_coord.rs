@@ -1731,6 +1731,11 @@ impl NzbgetRsStreamRepairCtrl {
                 recovered_holes: &mut counters.recovered_holes,
             };
 
+            // Borrowing dead volumes: a yield waits for this donor's first dead volume (its
+            // check included), so the next pass resumes after it instead of fetching it again.
+            // The session clears this after each volume it borrows.
+            self.finishing_volume
+                .store(session.has_pending_dead_fills(), Ordering::SeqCst);
             session.process_donor(
                 &donor.queued_filename,
                 &donor.info_name,
@@ -1741,6 +1746,7 @@ impl NzbgetRsStreamRepairCtrl {
                 allow_decompress,
                 &mut env,
             );
+            self.finishing_volume.store(false, Ordering::SeqCst);
             // A donor whose video was checked while dead volumes waited for it: the queue
             // stops keeping the download for it once it fails the check in a few runs. Live
             // repair never decompresses, so a donor holding its video compressed cannot lend

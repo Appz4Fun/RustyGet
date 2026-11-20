@@ -2012,7 +2012,7 @@ impl NzbgetRsStreamRepairCtrl {
             if nzb_ptr.is_none() {
                 return;
             }
-            host.nzb_action(nzb_ptr, NZB_ACT_CLEAR_LIVE_REPAIR_THREAD, 0);
+            host.nzb_action(nzb_ptr, NZB_ACT_CLEAR_LIVE_REPAIR_THREAD);
             let ns = host.nzb_snap(nzb_ptr, false);
             // A volume arrived while this pass ran and direct unpack still waits on a dead
             // volume: one more pass may now place it for the borrow.

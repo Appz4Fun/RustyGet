@@ -100,9 +100,6 @@ pub unsafe fn nzbget_rs_tls_cipher_cancel(id: *const c_char) -> Vec<u8> {
             .and_then(|()| tls_cipher_native::service().status(Some(id))),
     )
 }
-pub extern "C" fn nzbget_rs_tls_cipher_shutdown() {
-    tls_cipher_native::service().shutdown();
-}
 
 #[cfg(test)]
 mod tls_cipher_abi_tests {
@@ -1450,28 +1447,6 @@ pub(crate) fn tls_host_cb() -> crate::net::NzbgetRsConnHostFn {
 }
 
 #[cfg(unix)]
-pub extern "C" fn nzbget_rs_tls_init() {
-    crate::tlssock::init();
-}
-
-/// # Safety
-/// cert_store is null or a NUL-terminated path; empty or null loads no store.
-#[cfg(unix)]
-pub unsafe extern "C" fn nzbget_rs_tls_init_options(cert_store: *const c_char) {
-    let path = if cert_store.is_null() {
-        &[][..]
-    } else {
-        unsafe { CStr::from_ptr(cert_store) }.to_bytes()
-    };
-    crate::tlssock::init_options(path);
-}
-
-#[cfg(unix)]
-pub extern "C" fn nzbget_rs_tls_final() {
-    crate::tlssock::final_cleanup();
-}
-
-#[cfg(unix)]
 pub(crate) fn stop_ssl_thread() {
     if !build_tls_disabled() {
         crate::tlssock::stop_ssl_thread();
@@ -1869,40 +1844,46 @@ impl NzbgetRsWorkState {
     }
 }
 
-pub extern "C" fn nzbget_rs_workstate_new() -> *mut NzbgetRsWorkState {
-    let arc = std::sync::Arc::new(NzbgetRsWorkState {
-        resume_time: std::sync::atomic::AtomicI64::new(0),
-        local_time_offset: std::sync::atomic::AtomicI32::new(0),
-        speed_limit: std::sync::atomic::AtomicI32::new(0),
-        temp_pause_download: std::sync::atomic::AtomicBool::new(true),
-        fleet_hold: std::sync::atomic::AtomicI32::new(0),
-        temp_pause_postprocess: std::sync::atomic::AtomicBool::new(true),
-        pause_download: std::sync::atomic::AtomicBool::new(false),
-        pause_post_process: std::sync::atomic::AtomicBool::new(false),
-        pause_scan: std::sync::atomic::AtomicBool::new(false),
-        pause_frontend: std::sync::atomic::AtomicBool::new(false),
-        downloading: std::sync::atomic::AtomicBool::new(false),
-        quota_reached: std::sync::atomic::AtomicBool::new(false),
-        wait_lock: (std::sync::Mutex::new(0), std::sync::Condvar::new()),
-    });
-    if let Ok(mut g) = ACTIVE_WORKSTATE.write() {
-        *g = Some(std::sync::Arc::downgrade(&arc));
+impl NzbgetRsWorkState {
+    fn new() -> Self {
+        use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64};
+        Self {
+            resume_time: AtomicI64::new(0),
+            local_time_offset: AtomicI32::new(0),
+            speed_limit: AtomicI32::new(0),
+            temp_pause_download: AtomicBool::new(true),
+            fleet_hold: AtomicI32::new(0),
+            temp_pause_postprocess: AtomicBool::new(true),
+            pause_download: AtomicBool::new(false),
+            pause_post_process: AtomicBool::new(false),
+            pause_scan: AtomicBool::new(false),
+            pause_frontend: AtomicBool::new(false),
+            downloading: AtomicBool::new(false),
+            quota_reached: AtomicBool::new(false),
+            wait_lock: (std::sync::Mutex::new(0), std::sync::Condvar::new()),
+        }
     }
-    std::sync::Arc::into_raw(arc).cast_mut()
 }
 
-pub unsafe extern "C" fn nzbget_rs_workstate_free(ws: *mut NzbgetRsWorkState) {
-    if !ws.is_null() {
-        let arc = std::sync::Arc::from_raw(ws.cast_const());
-        let wk = std::sync::Arc::downgrade(&arc);
-        if let Ok(mut g) = ACTIVE_WORKSTATE.write() {
-            if g.as_ref()
-                .is_some_and(|cur| std::sync::Weak::ptr_eq(cur, &wk))
-            {
-                *g = None;
-            }
+/// Creates a work state and makes it the one [`active_workstate`] returns.
+/// The caller owns it; the active slot only holds a weak reference.
+pub(crate) fn install_workstate() -> std::sync::Arc<NzbgetRsWorkState> {
+    let ws = std::sync::Arc::new(NzbgetRsWorkState::new());
+    if let Ok(mut g) = ACTIVE_WORKSTATE.write() {
+        *g = Some(std::sync::Arc::downgrade(&ws));
+    }
+    ws
+}
+
+/// Clears the active work state if it is `ws`, so a newer one stays active.
+pub(crate) fn uninstall_workstate(ws: &std::sync::Arc<NzbgetRsWorkState>) {
+    if let Ok(mut g) = ACTIVE_WORKSTATE.write() {
+        if g
+            .as_ref()
+            .is_some_and(|cur| std::ptr::eq(cur.as_ptr(), std::sync::Arc::as_ptr(ws)))
+        {
+            *g = None;
         }
-        drop(arc);
     }
 }
 

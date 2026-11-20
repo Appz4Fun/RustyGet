@@ -1204,7 +1204,7 @@ pub(crate) fn parse_and_materialize_nzb(
     let (uptr_addr, nzb_ptr) = host.alloc_new_nzb_uptr();
     host.nzb_set_str(nzb_ptr, NZB_STR_FILENAME, filename);
     host.nzb_set_str(nzb_ptr, NZB_STR_CATEGORY, category);
-    host.nzb_action(nzb_ptr, NZB_ACT_BUILD_DEST_DIR, 0);
+    host.nzb_action(nzb_ptr, NZB_ACT_BUILD_DEST_DIR);
 
     let opts = host.opts();
 
@@ -1293,7 +1293,7 @@ pub(crate) fn parse_and_materialize_nzb(
         });
     }
 
-    host.nzb_action(nzb_ptr, NZB_ACT_UPDATE_MIN_MAX_TIME, 0);
+    host.nzb_action(nzb_ptr, NZB_ACT_UPDATE_MIN_MAX_TIME);
     if opts.server_mode {
         for f in &files {
             host.disk_save_file(f.file_ptr);

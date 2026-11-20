@@ -8949,16 +8949,15 @@ fn plan_dead_fills(
             let mut msg = b"Dead volumes in ".to_vec();
             msg.extend_from_slice(&volume_name(1));
             msg.extend_from_slice(b" cannot be placed yet: ");
-            msg.extend_from_slice(
-                stop.as_deref()
-                    .unwrap_or("they are already rebuilt or none is dead")
-                    .as_bytes(),
+            let why = stop.map_or_else(
+                || "they are already rebuilt or none is dead".to_string(),
+                |s| s.to_string(),
             );
+            msg.extend_from_slice(why.as_bytes());
             // Name what keeps the first missing volume out (the plan stops at the first).
             // Only when the plan stopped at a volume of unknown state; other stops say enough.
-            let stopped_on_unknown = stop
-                .as_deref()
-                .is_some_and(|s| s.contains("not on disk or not readable"));
+            let stopped_on_unknown =
+                matches!(stop, Some(crate::deadvolume::StopReason::NotReadable { .. }));
             if let Some(why) = unknown_why.values().next().filter(|_| stopped_on_unknown) {
                 msg.extend_from_slice(b" (");
                 msg.extend_from_slice(why.as_bytes());
@@ -9769,8 +9768,10 @@ impl CrossPackRepairSession {
             d.index,
             d.packed as u64,
             hasher.finalize(),
-        )?;
-        crate::deadvolume::check_frame(&head, &tail, d.packed as u64, &d.inner_name)?;
+        )
+        .map_err(|e| e.to_string())?;
+        crate::deadvolume::check_frame(&head, &tail, d.packed as u64, &d.inner_name)
+            .map_err(|e| e.to_string())?;
         Ok(crate::deadvolume::VirtualVolume {
             head,
             data: crate::fsops::path(&data_path).to_path_buf(),

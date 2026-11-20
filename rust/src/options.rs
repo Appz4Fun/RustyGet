@@ -1207,20 +1207,6 @@ pub fn nzbget_is_valid_umask(umask_val: u32) -> bool {
     umask_val < 0o1000
 }
 
-/// Determines whether `NZBGet::StartRemoteServer` should start the secure control server.
-pub fn nzbget_should_start_secure_server(
-    secure_control: bool,
-    is_unix: bool,
-    control_ip: &[u8],
-) -> bool {
-    if !secure_control {
-        return false;
-    }
-    if is_unix && !control_ip.is_empty() && control_ip[0] == b'/' {
-        return false;
-    }
-    true
-}
 
 /// Determines whether `NZBGet::DoMainLoop` should stop standalone coordinators.
 pub fn nzbget_should_stop_standalone(

@@ -1190,152 +1190,12 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
         return 0;
     };
     match op {
-        0 => {
-            let waiting = DAEMON_INSTANCE
-                .disk
-                .lock()
-                .unwrap_or_else(|err| err.into_inner())
-                .waiting_required_dir;
-            if waiting || (e.a1 > 0 && e.a2 != 0) {
-                1
-            } else {
-                -1
-            }
-        }
-        1 => {
-            dm_log(e, 0, b"Disk service work");
-            if e.a1 > 0 && e.a2 != 0 {
-                dm_log(e, 0, b"Disk service work: check disk space");
-                let inter_opt = if e.s2.is_null() {
-                    None
-                } else {
-                    Some(std::ffi::CStr::from_ptr(e.s2))
-                };
-                let (dest_low, inter_low) =
-                    crate::fsops::disk_service_check_disk_space(dm_opt_cstr(e.s1), inter_opt, e.a1);
-                if dest_low {
-                    let mut wm = b"Low disk space on ".to_vec();
-                    wm.extend_from_slice(dm_cstr_bytes(e.s1));
-                    wm.extend_from_slice(b". Pausing download");
-                    dm_log(e, 3, &wm);
-                    if let Some(cb) = e.action_cb {
-                        cb(e.ctx, 0, 0, std::ptr::null(), std::ptr::null());
-                    }
-                }
-                if inter_low {
-                    let mut wm = b"Low disk space on ".to_vec();
-                    wm.extend_from_slice(dm_cstr_bytes(e.s2));
-                    wm.extend_from_slice(b". Pausing download");
-                    dm_log(e, 3, &wm);
-                    if let Some(cb) = e.action_cb {
-                        cb(e.ctx, 0, 0, std::ptr::null(), std::ptr::null());
-                    }
-                }
-            }
-
-            let (waiting_req, prev_reported) = {
-                let dg = DAEMON_INSTANCE
-                    .disk
-                    .lock()
-                    .unwrap_or_else(|err| err.into_inner());
-                (dg.waiting_required_dir, dg.waiting_reported)
-            };
-            if waiting_req {
-                dm_log(e, 0, b"Disk service work: check required dir");
-                let (all_exist, next_reported) = crate::fsops::disk_service_check_required_dirs(
-                    dm_cstr_bytes(e.s3),
-                    prev_reported,
-                    |dir_cstr| {
-                        let mut im = b"Waiting for required directory ".to_vec();
-                        im.extend_from_slice(dir_cstr.to_bytes());
-                        dm_log(e, 2, &im);
-                    },
-                );
-                if !all_exist {
-                    DAEMON_INSTANCE
-                        .disk
-                        .lock()
-                        .unwrap_or_else(|err| err.into_inner())
-                        .waiting_reported = next_reported;
-                    return 0;
-                }
-                if prev_reported {
-                    dm_log(e, 2, b"All required directories available");
-                }
-                if let Some(cb) = e.action_cb {
-                    cb(e.ctx, 1, 0, std::ptr::null(), std::ptr::null());
-                }
-                let mut dg = DAEMON_INSTANCE
-                    .disk
-                    .lock()
-                    .unwrap_or_else(|err| err.into_inner());
-                dg.waiting_required_dir = false;
-                dg.waiting_reported = next_reported;
-            }
-            1
-        }
-        2 => {
-            crate::memory_pressure::limit_malloc_arenas();
-            #[cfg(unix)]
-            {
-                crate::diskstate_format::reset_active_legacy_queue_read();
-            }
-            {
-                let mut dg = DAEMON_INSTANCE
-                    .disk
-                    .lock()
-                    .unwrap_or_else(|err| err.into_inner());
-                dg.waiting_required_dir = true;
-                dg.waiting_reported = false;
-            }
-            let mut wg = DAEMON_INSTANCE
-                .wait_mutex
-                .lock()
-                .unwrap_or_else(|err| err.into_inner());
-            wg.reloading = e.a1 != 0;
-            wg.stopped = false;
-            1
-        }
         3 => match e.a1 {
             0 => c_int::from(dm_is_reloading()),
             1 => c_int::from(dm_is_stopped()),
             2 => signal_state_op(e.a2),
             _ => 0,
         },
-        4 => {
-            #[cfg(unix)]
-            let (umask_raw, is_debug) = if e.a1 < 0 {
-                (
-                    crate::options::active_options().map_or(0o1000, |o| o.scalars().umask),
-                    crate::ffi::build_debug_enabled(),
-                )
-            } else {
-                (e.a1, e.a2 != 0)
-            };
-            #[cfg(unix)]
-            let eff = {
-                let umask_val = umask_raw as u32;
-                let res = if crate::options::nzbget_is_valid_umask(umask_val) {
-                    let m = umask_val as libc::mode_t;
-                    libc::umask(m);
-                    m
-                } else {
-                    let m = libc::umask(0);
-                    libc::umask(m);
-                    m
-                };
-                res as c_int
-            };
-            #[cfg(not(unix))]
-            let (eff, is_debug) = (0, e.a2 != 0);
-
-            ACTIVE_UMASK.store(eff as u32, Ordering::Relaxed);
-            if is_debug {
-                let msg = format!("Using {:o} umask", eff as u32);
-                dm_log(e, 0, msg.as_bytes());
-            }
-            eff
-        }
         5 => {
             #[cfg(unix)]
             let (daemon_mode, remote_mode) = if e.s1.is_null() && e.a1 < 0 {
@@ -1531,11 +1391,6 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
             install_error_handler(crash_dump, crash_trace, e.segv_cb);
             0
         }
-        6 => c_int::from(crate::options::nzbget_should_start_secure_server(
-            e.a1 != 0,
-            cfg!(unix),
-            dm_cstr_bytes(e.s1),
-        )),
         7 => {
             let Some(cb) = e.action_cb else {
                 return 0;
@@ -1907,182 +1762,219 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
             RELOAD_COORDINATOR.cancel_and_join();
             1
         }
-        12 => {
-            dm_log(e, 0, b"Cleaning up global objects");
-            #[cfg(unix)]
-            if e.s1.is_null() {
-                if let Ok(mut g) = DAEMON_INSTANCE.cmdline.lock() {
-                    *g = None;
-                }
-                if let Ok(mut g) = DAEMON_FRONTEND.lock() {
-                    let _ = g.take();
-                }
-                crate::scheduler::shutdown_daemon_service_coord();
-                crate::scanner::shutdown_daemon_scanner();
-                crate::articledl::shutdown_daemon_article_cache();
-                crate::articledl::shutdown_daemon_memory_monitor();
-                crate::feed::shutdown_daemon_feed_coord();
-                crate::urlcoord::shutdown_daemon_url_coord();
-                crate::twin::shutdown_daemon_twincheck();
-                crate::dupesearch_coord::shutdown_daemon_dupesearch();
-                crate::maintenance::shutdown_daemon_maintenance();
-                crate::statmeter::shutdown_daemon_statmeter();
-                crate::scheduler::shutdown_daemon_scheduler();
-                crate::queuecoord::shutdown_daemon_queue_coord();
-            }
-            if e.a1 != 0
-                && !dm_is_reloading()
-                && DAEMON_INSTANCE.lock_file_owned.load(Ordering::SeqCst)
-            {
-                dm_log(e, 2, b"Deleting lock file");
-                if !e.s1.is_null() {
-                    crate::fsops::delete_file(dm_opt_cstr(e.s1));
-                } else {
-                    #[cfg(unix)]
-                    if let Some(opts) = crate::options::active_options() {
-                        if let Some(lf) = opts.str_cstr(OptStr::LockFile) {
-                            crate::fsops::delete_file(lf);
-                        }
-                    }
-                }
-            }
-            1
-        }
-        #[cfg(unix)]
-        13 => {
-            crate::scheduler::create_daemon_service_coord();
-            crate::articledl::create_daemon_article_cache();
-            crate::queuecoord::create_daemon_queue_coord();
-            dm_emit_active_log(0, b"Parsing command line");
-            let args = if e.ctx.is_null() {
-                crate::entrypoint::process_argv()
-            } else {
-                let argv = e.ctx.cast::<*const c_char>();
-                let parsed: Option<Vec<std::ffi::OsString>> = (0..usize::try_from(e.a1)
-                    .unwrap_or(0))
-                    .map(|i| {
-                        let p = *argv.add(i);
-                        (!p.is_null()).then(|| {
-                            crate::entrypoint::os_string_from_bytes(
-                                std::ffi::CStr::from_ptr(p).to_bytes(),
-                            )
-                        })
-                    })
-                    .collect();
-                // a null entry inside argc fails the parse, as before
-                let Some(parsed) = parsed else {
-                    return -2;
-                };
-                parsed
-            };
-            let argc = args.len();
-            if argc < 1 {
-                return -1;
-            }
-            let Some(cmd) = crate::cmdline::CmdlineHandle::parse_args(&args, |bytes| {
-                crate::ffi::write_stdout_bytes(bytes, false);
-            }) else {
-                return -2;
-            };
-            let arg0 = crate::cleanup::os_str_to_bytes(&args[0]).to_vec();
-            if cmd.print_version {
-                libc::printf(
-                    c"RustyGet version: %s\n".as_ptr(),
-                    crate::ffi::build_version_cstr().as_ptr(),
-                );
-                libc::exit(0);
-            }
-            if cmd.print_usage || cmd.errors || argc <= 1 {
-                let base_idx = crate::paths::base_file_name(&arg0);
-                let usage = crate::cmdline::format_usage(
-                    &arg0[base_idx..],
-                    crate::paths::PATH_SEPARATOR as u8,
-                    true,
-                );
-                let usage_c = dm_cbuf(&usage);
-                libc::printf(c"%s".as_ptr(), usage_c.as_ptr().cast::<c_char>());
-                libc::exit(if cmd.print_usage { 0 } else { 1 });
-            }
-            if let Ok(mut g) = DAEMON_INSTANCE.cmdline.lock() {
-                *g = Some((arg0, cmd));
-            }
-            dm_emit_active_log(0, b"Reading options");
-            1
-        }
-        #[cfg(unix)]
-        14 => {
-            let Some(cmd) = daemon_cmdline_clone() else {
-                return 0;
-            };
-            let Some(opts) = crate::options::active_options() else {
-                return 0;
-            };
-            opts.set_mode_flag(2, cmd.remote_client_mode);
-            opts.set_mode_flag(0, cmd.server_mode);
-            opts.set_mode_flag(1, cmd.daemon_mode);
-            let test_bt = crate::ffi::build_debug_enabled() && cmd.test_backtrace;
-            let direct_mode = test_bt
-                || cmd.web_get
-                || cmd.sig_verify
-                || cmd.client_operation != 0
-                || cmd.print_options;
-            opts.set_mode_flag(3, direct_mode);
-
-            if let Some(ws) = crate::ffi::active_workstate() {
-                ws.set_pause_download(cmd.pause_download);
-                ws.set_speed_limit(opts.scalars().download_rate);
-            }
-            if let Some(lg) = crate::log::active_log() {
-                lg.init_options_active();
-            }
-            if opts.has_fatal_error() {
-                libc::exit(1);
-            }
-            if opts.has_config_errors() && cmd.client_operation == 0 {
-                dm_emit_active_log(2, b"Pausing all activities due to errors in configuration");
-                if let Some(ws) = crate::ffi::active_workstate() {
-                    ws.set_pause_download(true);
-                    ws.set_pause_post_process(true);
-                    ws.set_pause_scan(true);
-                }
-            }
-            if let Some(sp) = crate::net::active_server_pool() {
-                sp.set_timeout(opts.scalars().article_timeout);
-                sp.set_retry_interval(opts.scalars().article_interval);
-            }
-            crate::ffi::nzbget_rs_script_config_exec(
-                0,
-                std::ptr::null(),
-                0,
-                std::ptr::null(),
-                0,
-                std::ptr::null_mut(),
-                None,
-                std::ptr::null_mut(),
-            );
-            if crate::articledl::memory_monitor_active() {
-                crate::articledl::memory_monitor_init_options(false);
-            }
-            let umask_raw = opts.scalars().umask as u32;
-            let eff_umask = if crate::options::nzbget_is_valid_umask(umask_raw) {
-                let m = umask_raw as libc::mode_t;
-                libc::umask(m);
-                m
-            } else {
-                let m = libc::umask(0);
-                libc::umask(m);
-                m
-            } as c_int;
-            ACTIVE_UMASK.store(eff_umask as u32, Ordering::Relaxed);
-            if crate::ffi::build_debug_enabled() {
-                dm_emit_active_log(0, format!("Using {:o} umask", eff_umask as u32).as_bytes());
-            }
-            if let Some(sc) = crate::scanner::active_scanner() {
-                sc.init_options_active();
-            }
-            eff_umask
-        }
         _ => 0,
+    }
+}
+
+/// Resets the instance's wait and disk-service state at the start of phase 1.
+pub(crate) fn reset_instance(reloading: bool) {
+    crate::memory_pressure::limit_malloc_arenas();
+    #[cfg(unix)]
+    {
+        crate::diskstate_format::reset_active_legacy_queue_read();
+    }
+    {
+        let mut dg = DAEMON_INSTANCE
+            .disk
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        dg.waiting_required_dir = true;
+        dg.waiting_reported = false;
+    }
+    let mut wg = DAEMON_INSTANCE
+        .wait_mutex
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    wg.reloading = reloading;
+    wg.stopped = false;
+}
+
+/// Whether the daemon is reloading rather than stopping.
+pub(crate) fn daemon_is_reloading() -> bool {
+    dm_is_reloading()
+}
+
+/// Shuts down the daemon's global subsystems.
+#[cfg(unix)]
+fn shutdown_daemon_globals() {
+    if let Ok(mut g) = DAEMON_INSTANCE.cmdline.lock() {
+        *g = None;
+    }
+    if let Ok(mut g) = DAEMON_FRONTEND.lock() {
+        let _ = g.take();
+    }
+    crate::scheduler::shutdown_daemon_service_coord();
+    crate::scanner::shutdown_daemon_scanner();
+    crate::articledl::shutdown_daemon_article_cache();
+    crate::articledl::shutdown_daemon_memory_monitor();
+    crate::feed::shutdown_daemon_feed_coord();
+    crate::urlcoord::shutdown_daemon_url_coord();
+    crate::twin::shutdown_daemon_twincheck();
+    crate::dupesearch_coord::shutdown_daemon_dupesearch();
+    crate::maintenance::shutdown_daemon_maintenance();
+    crate::statmeter::shutdown_daemon_statmeter();
+    crate::scheduler::shutdown_daemon_scheduler();
+    crate::queuecoord::shutdown_daemon_queue_coord();
+}
+
+/// Whether this instance created its lock file and may delete it now.
+fn may_delete_lock_file() -> bool {
+    !dm_is_reloading() && DAEMON_INSTANCE.lock_file_owned.load(Ordering::SeqCst)
+}
+
+/// Frees the daemon's global objects and, with `delete_lock_file`, removes
+/// the options' lock file if this instance owns it.
+pub(crate) fn cleanup_global_objects(delete_lock_file: bool) {
+    dm_emit_active_log(0, b"Cleaning up global objects");
+    #[cfg(unix)]
+    shutdown_daemon_globals();
+    if delete_lock_file && may_delete_lock_file() {
+        dm_emit_active_log(2, b"Deleting lock file");
+        #[cfg(unix)]
+        if let Some(lf) = crate::options::active_options()
+            .as_ref()
+            .and_then(|opts| opts.str_cstr(OptStr::LockFile))
+        {
+            crate::fsops::delete_file(lf);
+        }
+    }
+}
+
+/// Why [`parse_command_line`] failed.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommandLineError {
+    /// The process has no arguments, not even its own name.
+    NoArguments,
+    /// The arguments did not parse.
+    Invalid,
+}
+
+/// Creates the early services, then parses the process's command line into
+/// the instance. `--version`, `--help` and bad arguments print and exit.
+#[cfg(unix)]
+pub(crate) fn parse_command_line() -> Result<(), CommandLineError> {
+    crate::scheduler::create_daemon_service_coord();
+    crate::articledl::create_daemon_article_cache();
+    crate::queuecoord::create_daemon_queue_coord();
+    dm_emit_active_log(0, b"Parsing command line");
+    let args = crate::entrypoint::process_argv();
+    let argc = args.len();
+    if argc < 1 {
+        return Err(CommandLineError::NoArguments);
+    }
+    let Some(cmd) = crate::cmdline::CmdlineHandle::parse_args(&args, |bytes| {
+        crate::ffi::write_stdout_bytes(bytes, false);
+    }) else {
+        return Err(CommandLineError::Invalid);
+    };
+    let arg0 = crate::cleanup::os_str_to_bytes(&args[0]).to_vec();
+    if cmd.print_version {
+        unsafe {
+            libc::printf(
+                c"RustyGet version: %s\n".as_ptr(),
+                crate::ffi::build_version_cstr().as_ptr(),
+            );
+            libc::exit(0);
+        }
+    }
+    if cmd.print_usage || cmd.errors || argc <= 1 {
+        let base_idx = crate::paths::base_file_name(&arg0);
+        let usage = crate::cmdline::format_usage(
+            &arg0[base_idx..],
+            crate::paths::PATH_SEPARATOR as u8,
+            true,
+        );
+        let usage_c = dm_cbuf(&usage);
+        unsafe {
+            libc::printf(c"%s".as_ptr(), usage_c.as_ptr().cast::<c_char>());
+            libc::exit(if cmd.print_usage { 0 } else { 1 });
+        }
+    }
+    if let Ok(mut g) = DAEMON_INSTANCE.cmdline.lock() {
+        *g = Some((arg0, cmd));
+    }
+    dm_emit_active_log(0, b"Reading options");
+    Ok(())
+}
+
+/// Applies the parsed command line to the loaded options and to the
+/// subsystems that read options at start-up.
+#[cfg(unix)]
+pub(crate) fn apply_command_line() {
+    let Some(cmd) = daemon_cmdline_clone() else {
+        return;
+    };
+    let Some(opts) = crate::options::active_options() else {
+        return;
+    };
+    opts.set_mode_flag(2, cmd.remote_client_mode);
+    opts.set_mode_flag(0, cmd.server_mode);
+    opts.set_mode_flag(1, cmd.daemon_mode);
+    let test_bt = crate::ffi::build_debug_enabled() && cmd.test_backtrace;
+    let direct_mode = test_bt
+        || cmd.web_get
+        || cmd.sig_verify
+        || cmd.client_operation != 0
+        || cmd.print_options;
+    opts.set_mode_flag(3, direct_mode);
+
+    if let Some(ws) = crate::ffi::active_workstate() {
+        ws.set_pause_download(cmd.pause_download);
+        ws.set_speed_limit(opts.scalars().download_rate);
+    }
+    if let Some(lg) = crate::log::active_log() {
+        lg.init_options_active();
+    }
+    if opts.has_fatal_error() {
+        unsafe { libc::exit(1) };
+    }
+    if opts.has_config_errors() && cmd.client_operation == 0 {
+        dm_emit_active_log(2, b"Pausing all activities due to errors in configuration");
+        if let Some(ws) = crate::ffi::active_workstate() {
+            ws.set_pause_download(true);
+            ws.set_pause_post_process(true);
+            ws.set_pause_scan(true);
+        }
+    }
+    if let Some(sp) = crate::net::active_server_pool() {
+        sp.set_timeout(opts.scalars().article_timeout);
+        sp.set_retry_interval(opts.scalars().article_interval);
+    }
+    unsafe {
+        crate::ffi::nzbget_rs_script_config_exec(
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null_mut(),
+            None,
+            std::ptr::null_mut(),
+        );
+    }
+    if crate::articledl::memory_monitor_active() {
+        crate::articledl::memory_monitor_init_options(false);
+    }
+    let umask_raw = opts.scalars().umask as u32;
+    // SAFETY: umask only swaps the process file-mode mask.
+    let eff_umask = unsafe {
+        if crate::options::nzbget_is_valid_umask(umask_raw) {
+            let m = umask_raw as libc::mode_t;
+            libc::umask(m);
+            m
+        } else {
+            let m = libc::umask(0);
+            libc::umask(m);
+            m
+        }
+    } as c_int;
+    ACTIVE_UMASK.store(eff_umask as u32, Ordering::Relaxed);
+    if crate::ffi::build_debug_enabled() {
+        dm_emit_active_log(0, format!("Using {:o} umask", eff_umask as u32).as_bytes());
+    }
+    if let Some(sc) = crate::scanner::active_scanner() {
+        sc.init_options_active();
     }
 }
 
@@ -2467,7 +2359,7 @@ mod tests {
     }
 
     #[test]
-    fn test_daemon_exec_reset_stop_add_task_and_cleanup_lockfile() {
+    fn test_daemon_reset_stop_and_cleanup_lockfile() {
         let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         unsafe extern "C" fn mock_dm_action(
             raw: *mut std::ffi::c_void,
@@ -2509,13 +2401,9 @@ mod tests {
                 log_cb: None,
                 action_cb: Some(mock_dm_action),
             };
-            assert_eq!(nzbget_rs_daemon_exec(2, &env), 1);
+            reset_instance(false);
             env.a1 = 1;
             assert_eq!(nzbget_rs_daemon_exec(3, &env), 0);
-
-            env.a1 = 1;
-            env.s1 = c"".as_ptr();
-            assert_eq!(nzbget_rs_daemon_exec(6, &env), 1);
 
             env.a1 = 0;
             env.a2 = 1;
@@ -2527,14 +2415,11 @@ mod tests {
             DAEMON_INSTANCE
                 .lock_file_owned
                 .store(true, Ordering::SeqCst);
-            env.a1 = 1;
-            env.s1 = lock_c.as_ptr() as *const c_char;
-            assert_eq!(nzbget_rs_daemon_exec(12, &env), 1);
+            assert!(may_delete_lock_file());
+            crate::fsops::delete_file(std::ffi::CStr::from_bytes_with_nul(&lock_c).unwrap());
             assert!(!lock_path.exists());
 
-            env.a1 = 0;
-            env.s1 = std::ptr::null();
-            let _ = nzbget_rs_daemon_exec(2, &env);
+            reset_instance(false);
         }
     }
 }

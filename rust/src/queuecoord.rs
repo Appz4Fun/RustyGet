@@ -452,6 +452,11 @@ fn was_kept_for_borrowing(nzb_id: i32) -> bool {
 /// True when the live dead-volume borrow of download `nzb` found the video of `backup`
 /// to differ and no other donor lends the dead volumes (see
 /// `postproc::dead_volume_donor_cannot_lend`). Says so once.
+/// Direct unpack finished and verified the extraction.
+fn direct_unpack_verified(status: DirectUnpackStatus) -> bool {
+    status == DirectUnpackStatus::Success
+}
+
 fn backup_cannot_lend(
     host: &crate::queuesubsys_host::QueueSubsysHost,
     nzb: &crate::queuesubsys_host::NzbSnap,
@@ -4787,7 +4792,13 @@ impl NzbgetRsQueueCoordinator {
                 || (nzb.direct_unpack_status == DirectUnpackStatus::Running
                     && nzb.dupe_recovered_bytes > 0
                     && !backup_cannot_lend(host, nzb, &backup_nzb));
-            feeds_extraction = lendable && nzb.direct_unpack_status == DirectUnpackStatus::Running;
+            // An extraction direct unpack already finished and verified has nothing left to
+            // lose or gain: replacing the download only downloads and extracts it again (nest3v
+            // on 6790 failed over 3 s after its verified extraction).
+            let extraction_verified = direct_unpack_verified(nzb.direct_unpack_status);
+            let lendable = lendable || extraction_verified;
+            feeds_extraction = lendable
+                && (nzb.direct_unpack_status == DirectUnpackStatus::Running || extraction_verified);
             if !light_damage
                 && !lendable
                 && crate::dupecoord::dupe_failover_warranted_inline(
@@ -6410,6 +6421,14 @@ fn downloaded_ranges(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_verified_direct_unpack_is_never_failed_over() {
+        assert!(direct_unpack_verified(DirectUnpackStatus::Success));
+        assert!(!direct_unpack_verified(DirectUnpackStatus::Running));
+        assert!(!direct_unpack_verified(DirectUnpackStatus::Failure));
+        assert!(!direct_unpack_verified(DirectUnpackStatus::None));
+    }
 
     #[test]
     fn late_backup_waits_until_classified() {

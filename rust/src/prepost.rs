@@ -1099,60 +1099,30 @@ impl NzbgetRsPrePostProcessor {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) unsafe fn exec(
+    /// Whether jobs are queued for post-processing.
+    pub(crate) fn has_queued_jobs(&self) -> bool {
+        self.queued_jobs.load(std::sync::atomic::Ordering::Acquire) > 0
+    }
+
+    /// Whether a job is unpacking (or, with `include_waiting_volume`, waiting
+    /// for a volume to unpack), checked under the queue lock.
+    pub(crate) fn has_active_unpack_locked(
         &self,
-        op: std::ffi::c_int,
-        a1: std::ffi::c_int,
-        a2: std::ffi::c_int,
-        p1: usize,
-        p2: usize,
-        p3: usize,
-        s1: *const std::ffi::c_char,
-        host: crate::queuesubsys_host::QueueSubsysHost,
-    ) -> usize {
-        use std::sync::atomic::Ordering;
-        let _ = (a2, s1);
-        match op {
-            0 => {
-                self.run(&host);
-                0
-            }
-            1 => {
-                self.stop(&host);
-                0
-            }
-            2 => usize::from(self.queued_jobs.load(Ordering::Acquire) > 0),
-            3 => {
-                let inc = a1 != 0;
-                if p1 == 0 {
-                    let mut res = false;
-                    host.with_locked_queue(|dq_ptr| {
-                        res = self.has_active_unpack(&host, dq_ptr, inc);
-                    });
-                    usize::from(res)
-                } else {
-                    usize::from(self.has_active_unpack(&host, p1, inc))
-                }
-            }
-            6 => {
-                self.nzb_downloaded(&host, p1, NzbRef::from_addr(p2));
-                0
-            }
-            8 => {
-                let (nzb, file) = (NzbRef::from_addr(p2), FileRef::from_addr(p3));
-                self.download_queue_update(&host, a1, p1, nzb, file);
-                0
-            }
-            _ => 0,
-        }
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        include_waiting_volume: bool,
+    ) -> bool {
+        let mut res = false;
+        host.with_locked_queue(|dq_ptr| {
+            res = self.has_active_unpack(host, dq_ptr, include_waiting_volume);
+        });
+        res
     }
 
     pub(crate) fn owner_ptr(&self) -> usize {
         self.owner
     }
 
-    fn run(&self, host: &crate::queuesubsys_host::QueueSubsysHost) {
+    pub(crate) fn run(&self, host: &crate::queuesubsys_host::QueueSubsysHost) {
         use crate::queuesubsys_host::MK_DEBUG;
         use std::sync::atomic::Ordering;
 
@@ -1190,7 +1160,7 @@ impl NzbgetRsPrePostProcessor {
         host.log(MK_DEBUG, b"Exiting PrePostProcessor-loop");
     }
 
-    fn stop(&self, host: &crate::queuesubsys_host::QueueSubsysHost) {
+    pub(crate) fn stop(&self, host: &crate::queuesubsys_host::QueueSubsysHost) {
         host.with_locked_queue(|dq_ptr| {
             let jobs = self.active_jobs.lock().unwrap().clone();
             for job_ptr in jobs {
@@ -1544,7 +1514,7 @@ impl NzbgetRsPrePostProcessor {
         }
     }
 
-    fn download_queue_update(
+    pub(crate) fn download_queue_update(
         &self,
         host: &crate::queuesubsys_host::QueueSubsysHost,
         action: i32,

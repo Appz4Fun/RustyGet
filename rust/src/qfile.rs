@@ -400,27 +400,20 @@ pub unsafe extern "C" fn nzbget_rs_file_op(
     }
 }
 
-/// Applies a file's server stats to collection `nzb`'s totals (which 0)
-/// or current list (1) with `op` (0 set, 1 add, 2 subtract), as
-/// NzbInfo::AddFileStats did.
+/// Applies a file's server stats to collection `nzb`'s `which` list with
+/// `op`, as NzbInfo::AddFileStats did.
 ///
 /// # Safety
 /// `nzb` is a live collection and `f` a live file.
-pub(crate) unsafe fn add_file_stats(nzb: usize, f: *const File, which: i32, op: i32) {
+pub(crate) unsafe fn add_file_stats(
+    nzb: usize,
+    f: *const File,
+    which: crate::qnzb::StatList,
+    op: crate::qnzb::StatOp,
+) {
     let stats = unsafe { &*f }.lock().server_stats.clone();
-    for mut v in stats {
-        unsafe {
-            crate::qnzb::nzbget_rs_nzb_coll(
-                nzb as *const crate::qnzb::NzbScalars,
-                44 + which,
-                op,
-                ptr::null(),
-                ptr::null(),
-                ptr::null(),
-                v.as_mut_ptr(),
-                ptr::null_mut(),
-            )
-        };
+    for v in stats {
+        crate::qnzb::apply_server_stat(NzbRef::from_addr(nzb), which, op, v.into());
     }
 }
 
@@ -635,10 +628,24 @@ pub(crate) fn subtract_server_stats(file: FileRef, nzb: NzbRef, and_clear: bool)
     };
     let fp: *const File = f;
     if and_clear {
-        unsafe { add_file_stats(nzb.addr(), fp, 1, 2) };
+        unsafe {
+            add_file_stats(
+                nzb.addr(),
+                fp,
+                crate::qnzb::StatList::Current,
+                crate::qnzb::StatOp::Subtract,
+            )
+        };
         f.lock().server_stats.clear();
     } else {
-        unsafe { add_file_stats(nzb.addr(), fp, 0, 2) };
+        unsafe {
+            add_file_stats(
+                nzb.addr(),
+                fp,
+                crate::qnzb::StatList::Total,
+                crate::qnzb::StatOp::Subtract,
+            )
+        };
     }
 }
 
@@ -1191,18 +1198,13 @@ pub(crate) unsafe fn host_output_op(
         10 => {
             unsafe { nzbget_rs_file_op(f, 12, 1, ptr::null(), ints, ptr::null_mut()) };
             if !nzb.is_null() {
-                unsafe {
-                    crate::qnzb::nzbget_rs_nzb_coll(
-                        nzb,
-                        45,
-                        1,
-                        ptr::null(),
-                        ptr::null(),
-                        ptr::null(),
-                        ints,
-                        ptr::null_mut(),
-                    )
-                };
+                let stat = unsafe { [*ints, *ints.add(1), *ints.add(2)] };
+                crate::qnzb::apply_server_stat(
+                    NzbRef::from_addr(nzb as usize),
+                    crate::qnzb::StatList::Current,
+                    crate::qnzb::StatOp::Add,
+                    stat.into(),
+                );
             }
             0
         }

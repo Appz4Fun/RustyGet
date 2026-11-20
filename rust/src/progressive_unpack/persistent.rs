@@ -792,6 +792,11 @@ impl<'a> Run<'a> {
         // A persistent session keeps every volume it opened.
         opts.limits.volume_handles = opts.limits.volume_handles.max(volumes + 16).min(4096);
         opts.limits.protection_paths = opts.limits.protection_paths.max(volumes + 16);
+        // Holes patched inline still grow zipfast's metadata past its default 128 MiB: a
+        // capped VM run on 359610eb hit MetadataBytes at 134.7 MB while patching the third of
+        // three dead volumes (264 holes of 1 MiB) and extracted the whole set a second time.
+        // Same headroom as before #672 until zipfast's inline-refill path stops growing it.
+        opts.limits.metadata_bytes = opts.limits.metadata_bytes.max(1 << 31);
         // A RAR 1.5-4 dead volume handed over before its borrow finished carries part
         // checksum 0 (see `deadvolume::synthesize_frame`): skip that part's own check, the
         // member checksum still checks the file. Set on every session, a restart included.

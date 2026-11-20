@@ -2018,7 +2018,7 @@ unsafe extern "C" fn native_commit_nzb_cb(
     if !name_bytes.is_empty() {
         host.nzb_set_str_opt(nzb_ptr, NZB_STR_NAME, None);
         host.nzb_set_str(nzb_ptr, NZB_STR_FILENAME, name_bytes);
-        host.nzb_action(nzb_ptr, NZB_ACT_BUILD_DEST_DIR, 0);
+        host.nzb_action(nzb_ptr, NZB_ACT_BUILD_DEST_DIR);
     }
     if ok_flag != 0 {
         let cur_name = host.nzb_snap(nzb_ptr, false).name;

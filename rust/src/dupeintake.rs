@@ -46,8 +46,24 @@ pub trait ArticleFetch {
 
 /// Bytes read from each sample of the payload.
 pub const SAMPLE_BYTES: i64 = 4096;
-/// Articles one copy may fetch while it is mapped and sampled.
+/// Articles one copy may fetch while it is mapped and sampled, besides
+/// [`FETCH_PER_VOLUME`] for each of its files.
 pub const FETCH_BUDGET: i32 = 48;
+/// Articles each file of a copy adds to its budget: mapping reads every
+/// volume's header, and a nested archive (a RAR set stored inside another)
+/// reads the inner volumes' headers too, wherever they fall in the outer ones.
+pub const FETCH_PER_VOLUME: i32 = 3;
+/// The most articles one copy may fetch, however many files it has.
+pub const FETCH_BUDGET_MAX: i32 = 640;
+
+/// The articles a copy of `files` data files may fetch while it is mapped and
+/// sampled.
+pub fn fetch_budget(files: usize) -> i32 {
+    let per_volume = i32::try_from(files)
+        .unwrap_or(i32::MAX)
+        .saturating_mul(FETCH_PER_VOLUME);
+    FETCH_BUDGET.saturating_add(per_volume).min(FETCH_BUDGET_MAX)
+}
 
 /// What intake found about one copy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -425,7 +441,7 @@ pub fn print_copy(
         .collect();
     let shared = Rc::new(Shared {
         fetch,
-        budget: Cell::new(FETCH_BUDGET),
+        budget: Cell::new(fetch_budget(files.len())),
     });
     let sources = IntakeSources {
         shared: Rc::clone(&shared),
@@ -848,6 +864,16 @@ mod tests {
         z.extend_from_slice(&cd.to_le_bytes());
         z.extend_from_slice(&[0, 0]);
         z
+    }
+
+    #[test]
+    fn the_budget_grows_with_the_volumes_up_to_a_cap() {
+        assert_eq!(fetch_budget(0), FETCH_BUDGET);
+        assert_eq!(fetch_budget(1), FETCH_BUDGET + FETCH_PER_VOLUME);
+        // a nested set of 60 outer volumes can read every outer and inner header
+        assert!(fetch_budget(60) >= 2 * 60 + FETCH_BUDGET);
+        assert_eq!(fetch_budget(10_000), FETCH_BUDGET_MAX);
+        assert_eq!(fetch_budget(usize::MAX), FETCH_BUDGET_MAX);
     }
 
     #[test]

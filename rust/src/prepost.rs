@@ -516,6 +516,7 @@ fn backup_can_lend(
 /// or could not check (its own par2 files damaged).
 fn damage_is_borrowed_volumes(
     files: &[crate::queuesubsys_host::CompletedFileSnap],
+    extracted: &[Vec<u8>],
     dest_dir: &[u8],
     borrowed: usize,
     recovered: bool,
@@ -530,7 +531,11 @@ fn damage_is_borrowed_volumes(
         .filter(|f| f.status != CF_SUCCESS && !f.par_file)
     {
         if crate::filetypes::is_rar_file(&f.filename) {
-            continue;
+            // Only a volume direct unpack read was checked by the extraction.
+            if extracted.iter().any(|e| e.eq_ignore_ascii_case(&f.filename)) {
+                continue;
+            }
+            return false;
         }
         let ext = crate::filetypes::file_extension(&f.filename);
         let mut path = dest_dir.to_vec();
@@ -2285,6 +2290,7 @@ impl NzbgetRsPrePostProcessor {
             && nzb.par_status == NzbParStatus::Failure
             && damage_is_borrowed_volumes(
                 &host.nzb_completed_files(nzb.ptr),
+                &host.nzb_extracted_archives(nzb.ptr),
                 &nzb.dest_dir,
                 crate::postproc::take_dead_volumes_borrowed(nzb.id),
                 // Not short-circuited: both marks are read once and forgotten.
@@ -2600,37 +2606,42 @@ mod tests {
             filename: name.as_bytes().to_vec(),
             ..Default::default()
         };
+        let ex: Vec<Vec<u8>> = vec![b"a.part01.rar".to_vec(), b"a.part02.rar".to_vec()];
         let base = vec![
             f("a.part01.rar", 1, false),
             f("a.part02.rar", 2, false),
             f("a.vol00+01.par2", 3, true),
         ];
-        assert!(!ok(&base, &d, 0, false), "nothing borrowed");
+        assert!(!ok(&base, &ex, &d, 0, false), "nothing borrowed");
         assert!(
-            ok(&base, &d, 0, true),
+            !ok(&base, &[], &d, 0, true),
+            "a damaged volume direct unpack did not read (another set) is real damage"
+        );
+        assert!(
+            ok(&base, &ex, &d, 0, true),
             "bytes a duplicate lent into the volumes, checked by the extraction"
         );
         assert!(
-            ok(&base, &d, 1, false),
+            ok(&base, &ex, &d, 1, false),
             "damage only inside the archive and its par2 files"
         );
         let mut obf = base.clone();
         obf.push(f("a8f3k2", 3, false));
         obf.push(f("q9z1m0", 3, false));
-        assert!(ok(&obf, &d, 2, false));
+        assert!(ok(&obf, &ex, &d, 2, false));
         assert!(
-            !ok(&obf, &d, 1, false),
+            !ok(&obf, &ex, &d, 1, false),
             "more dead obfuscated files than borrowed volumes"
         );
-        assert!(!ok(&obf, &d, 0, true), "lent bytes rebuild no missing file");
+        assert!(!ok(&obf, &ex, &d, 0, true), "lent bytes rebuild no missing file");
         let mut sample = base.clone();
         sample.push(f("a.sample.mkv", 2, false));
-        assert!(!ok(&sample, &d, 3, false), "a damaged loose file is real damage");
+        assert!(!ok(&sample, &ex, &d, 3, false), "a damaged loose file is real damage");
         std::fs::write(dir.join("x1y2z3"), b"partial").unwrap();
         let mut present = base;
         present.push(f("x1y2z3", 2, false));
         assert!(
-            !ok(&present, &d, 3, false),
+            !ok(&present, &ex, &d, 3, false),
             "a damaged file on disk is not a borrowed volume"
         );
         let _ = std::fs::remove_dir_all(&dir);

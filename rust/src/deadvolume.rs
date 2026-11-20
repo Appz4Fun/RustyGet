@@ -258,6 +258,10 @@ pub struct VirtualVolume {
     pub data: PathBuf,
     pub data_len: u64,
     pub tail: Vec<u8>,
+    /// Byte ranges of this volume (offsets in the whole volume, head included) not borrowed
+    /// yet, sorted and disjoint. A volume handed over before its borrow finished reads these
+    /// as holes, so extraction goes past them and they are patched once borrowed.
+    pub holes: Vec<(u64, u64)>,
 }
 
 impl VirtualVolume {
@@ -322,7 +326,11 @@ fn shifted_volume_number(number: u64, index: usize, template: usize) -> Option<u
 ///
 /// `head` is the sibling's bytes in front of its stored part, `tail` the bytes behind it. The
 /// result carries the dead volume's number, part length `packed` and part checksum
-/// `part_crc` (CRC32 of the borrowed bytes), with the header checksums recomputed. Records
+/// `part_crc` (CRC32 of the borrowed bytes), with the header checksums recomputed. Without
+/// `part_crc` a RAR5 part carries no part checksum at all (the CRC32 flag is cleared): the
+/// volume can then be handed over before every byte is borrowed, and the member checksum in
+/// the last volume still checks the whole file. RAR 1.5-4 headers always carry one, so they
+/// need it. Records
 /// that point at other places in the sibling (RAR5's locator and quick-open data, RAR 1.5-4's
 /// recovery record and archive checksum) are left out: they describe the sibling, and an
 /// extraction does not need them. Encrypted parts and parts with another hash than CRC32 are
@@ -334,11 +342,21 @@ pub fn synthesize_frame(
     template: usize,
     index: usize,
     packed: u64,
-    part_crc: u32,
+    part_crc: Option<u32>,
 ) -> Result<(Vec<u8>, Vec<u8>), FrameError> {
     match version {
         5 => rar5::frame(head, tail, template, index, packed, part_crc),
-        3 => rar4::frame(head, tail, template, index, packed, part_crc),
+        3 => rar4::frame(
+            head,
+            tail,
+            template,
+            index,
+            packed,
+            part_crc.ok_or(FrameError::Sibling {
+                format: "RAR4",
+                what: "a part checksum is needed",
+            })?,
+        ),
         v => Err(FrameError::UnsupportedVersion(v)),
     }
 }
@@ -515,7 +533,7 @@ mod rar5 {
         template: usize,
         index: usize,
         packed: u64,
-        part_crc: u32,
+        part_crc: Option<u32>,
     ) -> Result<(Vec<u8>, Vec<u8>), FrameError> {
         let bad = |what: &'static str| FrameError::Sibling { format: "RAR5", what };
         if !head.starts_with(SIG) {
@@ -607,11 +625,20 @@ mod rar5 {
                         put_vint(&mut rebuilt, extra.len() as u64);
                     }
                     put_vint(&mut rebuilt, packed);
-                    put_vint(&mut rebuilt, fflags);
                     let mut fields = rest.to_vec();
-                    if let Some(at) = crc_at {
-                        let at = at - fields_start;
-                        fields[at..at + 4].copy_from_slice(&part_crc.to_le_bytes());
+                    match (crc_at, part_crc) {
+                        (Some(at), Some(crc)) => {
+                            let at = at - fields_start;
+                            fields[at..at + 4].copy_from_slice(&crc.to_le_bytes());
+                            put_vint(&mut rebuilt, fflags);
+                        }
+                        (Some(at), None) => {
+                            // No part checksum: the flag goes and so do its four bytes.
+                            let at = at - fields_start;
+                            fields.drain(at..at + 4);
+                            put_vint(&mut rebuilt, fflags & !FHFL_CRC32);
+                        }
+                        (None, _) => put_vint(&mut rebuilt, fflags),
                     }
                     rebuilt.extend_from_slice(&fields);
                     rebuilt.extend_from_slice(extra);
@@ -1020,7 +1047,7 @@ mod tests {
         let data: Vec<u8> = (0..len as u32).map(|i| (i * 7) as u8).collect();
         let crc = crc32fast::hash(&data);
         // Sibling is volume 1 (number 1); rebuild volume 5.
-        let (h, t) = synthesize_frame(5, head, tail, 1, 5, len as u64, crc).unwrap();
+        let (h, t) = synthesize_frame(5, head, tail, 1, 5, len as u64, Some(crc)).unwrap();
         check_frame(&h, &t, len as u64, b"testfile5.dat").unwrap();
         let mut whole = h.clone();
         whole.extend_from_slice(&data);
@@ -1041,12 +1068,40 @@ mod tests {
     }
 
     #[test]
+    fn rar5_frame_without_a_part_checksum_reads_back_with_the_same_layout() {
+        // Handed over before the borrow finished: no part CRC (the bytes are not all known),
+        // and a later rebuild with the same input must produce the same headers, because the
+        // extraction already placed the data at the head's length.
+        let (b, at, len) = stored_rar5_middle();
+        let (head, tail) = (&b[..at], &b[at + len..]);
+        let (h, t) = synthesize_frame(5, head, tail, 1, 5, len as u64, None).unwrap();
+        check_frame(&h, &t, len as u64, b"testfile5.dat").unwrap();
+        let (with_crc, _) = synthesize_frame(5, head, tail, 1, 5, len as u64, Some(7)).unwrap();
+        assert_eq!(h.len() + 4, with_crc.len());
+        assert_eq!(synthesize_frame(5, head, tail, 1, 5, len as u64, None).unwrap().0, h);
+        let mut whole = h.clone();
+        whole.extend(std::iter::repeat_n(0u8, len));
+        whole.extend_from_slice(&t);
+        let (vol, files) = parse(&whole);
+        assert_eq!(vol.volume_no, 5);
+        assert_eq!(files[0].packed_size as usize, len);
+        assert_eq!(files[0].data_offset as usize, h.len());
+    }
+
+    #[test]
+    fn rar4_frame_needs_a_part_checksum() {
+        let mut head = b"Rar!\x1a\x07\x00".to_vec();
+        head.extend_from_slice(&[0u8; 7]);
+        assert!(synthesize_frame(3, &head, &[], 1, 2, 10, None).is_err());
+    }
+
+    #[test]
     fn rar5_frame_refuses_compressed_parts() {
         let b = testdata("rarrenamer/testfile5.part02.rar");
         let (_, files) = parse(&b);
         let at = files[0].data_offset as usize;
         let len = files[0].packed_size as usize;
-        let err = synthesize_frame(5, &b[..at], &b[at + len..], 1, 2, len as u64, 0).unwrap_err();
+        let err = synthesize_frame(5, &b[..at], &b[at + len..], 1, 2, len as u64, Some(0)).unwrap_err();
         assert_eq!(err, FrameError::Sibling { format: "RAR5", what: "compressed part" });
     }
 
@@ -1065,7 +1120,7 @@ mod tests {
         head[file_hdr + 25] = 0x30;
         let data = vec![0xabu8; len];
         let crc = crc32fast::hash(&data);
-        let (h, t) = synthesize_frame(3, &head, &b[at + len..], 1, 4, len as u64, crc).unwrap();
+        let (h, t) = synthesize_frame(3, &head, &b[at + len..], 1, 4, len as u64, Some(crc)).unwrap();
         check_frame(&h, &t, len as u64, &f.filename).unwrap();
         let mut whole = h.clone();
         whole.extend_from_slice(&data);

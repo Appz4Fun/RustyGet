@@ -2335,6 +2335,13 @@ impl VolumeSource for FeedProvider {
                 Ok(VolumeAnswer::Wait)
             }
             VolumeView::Missing => Ok(VolumeAnswer::Missing),
+            // A dead volume handed over before its borrow finished: this path patches holes
+            // only from volumes on disk, so it waits for the finished volume.
+            VolumeView::Virtual(v) if !v.holes.is_empty() => {
+                *self.pending.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some((path, cx.waker().clone()));
+                Ok(VolumeAnswer::Wait)
+            }
             VolumeView::Virtual(v) => {
                 // A virtual volume is no file of the set: never declare the set complete.
                 self.late.refused = true;
@@ -2458,13 +2465,15 @@ impl RangeSource for HoledVolume {
 }
 
 /// A dead volume as rebuilt from a duplicate: headers in memory, the borrowed part in a
-/// scratch file. Everything it answers is filled; the extraction's own checks decide whether
-/// the borrowed bytes were right.
+/// scratch file. Bytes not borrowed yet (a volume handed over before its borrow finished) are
+/// answered as holes; everything else is filled, and the extraction's own checks decide
+/// whether the borrowed bytes were right.
 struct VirtualSource {
     head: Vec<u8>,
     data: std::fs::File,
     data_len: u64,
     tail: Vec<u8>,
+    holes: Vec<(u64, u64)>,
     info: SourceInfo,
 }
 
@@ -2493,7 +2502,83 @@ impl VirtualSource {
             data,
             data_len: v.data_len,
             tail: v.tail,
+            holes: v.holes,
         })
+    }
+}
+
+/// A finished dead volume as one readable file (headers, borrowed part, tail), for reading its
+/// bytes back into an output whose holes it fills.
+pub(crate) struct VirtualFile {
+    head: Vec<u8>,
+    data: std::fs::File,
+    data_len: u64,
+    tail: Vec<u8>,
+    pos: u64,
+}
+
+impl VirtualFile {
+    pub(crate) fn open(v: &crate::deadvolume::VirtualVolume) -> std::io::Result<Self> {
+        let data = std::fs::File::open(&v.data)?;
+        if data.metadata()?.len() < v.data_len {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "borrowed data is shorter than its part",
+            ));
+        }
+        Ok(Self {
+            head: v.head.clone(),
+            data,
+            data_len: v.data_len,
+            tail: v.tail.clone(),
+            pos: 0,
+        })
+    }
+
+    pub(crate) fn len(&self) -> u64 {
+        self.head.len() as u64 + self.data_len + self.tail.len() as u64
+    }
+}
+
+impl std::io::Read for VirtualFile {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let head = self.head.len() as u64;
+        let data_end = head + self.data_len;
+        let n = buf.len().min(self.len().saturating_sub(self.pos) as usize);
+        if n == 0 {
+            return Ok(0);
+        }
+        let at = self.pos;
+        let count = if at < head {
+            let k = n.min((head - at) as usize);
+            buf[..k].copy_from_slice(&self.head[at as usize..at as usize + k]);
+            k
+        } else if at < data_end {
+            let k = n.min((data_end - at) as usize);
+            match read_at(&self.data, &mut buf[..k], at - head)? {
+                0 => return Err(std::io::ErrorKind::UnexpectedEof.into()),
+                c => c,
+            }
+        } else {
+            let t = (at - data_end) as usize;
+            let k = n.min(self.tail.len() - t);
+            buf[..k].copy_from_slice(&self.tail[t..t + k]);
+            k
+        };
+        self.pos += count as u64;
+        Ok(count)
+    }
+}
+
+impl std::io::Seek for VirtualFile {
+    fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+        let target = match to {
+            std::io::SeekFrom::Start(p) => Some(p),
+            std::io::SeekFrom::End(d) => self.len().checked_add_signed(d),
+            std::io::SeekFrom::Current(d) => self.pos.checked_add_signed(d),
+        };
+        self.pos = target.ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+        Ok(self.pos)
     }
 }
 
@@ -2514,9 +2599,22 @@ impl RangeSource for VirtualSource {
     ) -> ProgressiveResult<RangeRead> {
         let head = self.head.len() as u64;
         let data_end = head + self.data_len;
-        let n = buf
+        if let Some(&(start, len)) = self
+            .holes
+            .iter()
+            .find(|&&(s, l)| s <= offset && offset < s + l)
+        {
+            // A hole answer may not be longer than the read it answers.
+            return Ok(RangeRead::Hole {
+                len: (start + len - offset).min(buf.len() as u64),
+            });
+        }
+        let mut n = buf
             .len()
             .min(self.info.extent.saturating_sub(offset) as usize);
+        if let Some(&(start, _)) = self.holes.iter().find(|&&(s, _)| s > offset) {
+            n = n.min((start - offset) as usize);
+        }
         if n == 0 {
             return Err(ProgressiveFailure::new(FailureKind::Truncated));
         }

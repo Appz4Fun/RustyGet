@@ -77,19 +77,13 @@ impl QueueSubsysHost {
             return false;
         }
         for index in 0..count {
-            let mut ints = [0; 4];
-            let mut strings = [std::ptr::null(); 4];
-            let x = OpArgs::NONE
-                .a2(index as i32)
-                .ints(ints.as_mut_ptr())
-                .strs(strings.as_mut_ptr());
-            self.filelist_op(nzb, 5, x);
-            if ints[0] as u64 != id {
+            let Some(cf) = crate::qnzb::completed_file(nzb, index) else {
+                return false;
+            };
+            if cf.id as u64 != id {
                 continue;
             }
-            return !strings[0].is_null()
-                && unsafe { CStr::from_ptr(strings[0]).to_bytes() } == name
-                && (!successful || ints[1] == super::CF_SUCCESS);
+            return cf.filename == name && (!successful || cf.status == super::CF_SUCCESS);
         }
         false
     }

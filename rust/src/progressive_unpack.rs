@@ -1694,7 +1694,9 @@ fn create_unique_sibling(target: &Path) -> std::io::Result<(PathBuf, std::fs::Fi
 }
 
 /// The volume the session is parked on and the waker that resumes it.
-type PendingWait = Arc<Mutex<Option<(PathBuf, Waker)>>>;
+/// The volume the session waits on, the waker to call once that changes, and whether a stand-in
+/// handed over with holes still counts as waiting (the copy path waits for the finished one).
+type PendingWait = Arc<Mutex<Option<(PathBuf, Waker, bool)>>>;
 
 /// Thread-parking driver around `poll_event`.
 struct Driver<'s> {
@@ -1753,18 +1755,25 @@ impl<'s> Driver<'s> {
     /// Wakes the session when the volume it is parked on has changed state.
     fn recheck_pending(&self) {
         let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        // Woken only for an answer the provider would not wait on again: waking it for one it
+        // waits on spins the session until zipfast's wake limit fails it.
         let changed = match pending.as_ref() {
-            Some((path, _)) => !matches!(
-                self.feed
+            Some((path, _, holed_waits)) => {
+                match self
+                    .feed
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .volume(path),
-                VolumeView::NotYet
-            ),
+                    .volume(path)
+                {
+                    VolumeView::NotYet => false,
+                    VolumeView::Virtual(v) if !v.holes.is_empty() => !*holed_waits,
+                    _ => true,
+                }
+            }
             None => false,
         };
         if changed {
-            if let Some((_, waker)) = pending.take() {
+            if let Some((_, waker, _)) = pending.take() {
                 waker.wake();
             }
         }
@@ -2331,7 +2340,7 @@ impl VolumeSource for FeedProvider {
                 // The driver asks the feed again while parked and wakes the session when the
                 // volume's state changes.
                 *self.pending.lock().unwrap_or_else(|e| e.into_inner()) =
-                    Some((path, cx.waker().clone()));
+                    Some((path, cx.waker().clone(), true));
                 Ok(VolumeAnswer::Wait)
             }
             VolumeView::Missing => Ok(VolumeAnswer::Missing),
@@ -2339,7 +2348,7 @@ impl VolumeSource for FeedProvider {
             // only from volumes on disk, so it waits for the finished volume.
             VolumeView::Virtual(v) if !v.holes.is_empty() => {
                 *self.pending.lock().unwrap_or_else(|e| e.into_inner()) =
-                    Some((path, cx.waker().clone()));
+                    Some((path, cx.waker().clone(), true));
                 Ok(VolumeAnswer::Wait)
             }
             VolumeView::Virtual(v) => {

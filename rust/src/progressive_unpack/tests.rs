@@ -5441,6 +5441,10 @@ struct DeadHalfBorrowed {
     finished: bool,
     asked_holed: bool,
     volumes: u64,
+    /// Finishes the borrow once this long has passed since the stand-in was first asked for.
+    finish_after: Option<(std::time::Duration, Option<std::time::Instant>)>,
+    /// How often the stand-in was asked for with holes.
+    holed_asks: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl VolumeFeed for DeadHalfBorrowed {
@@ -5459,11 +5463,24 @@ impl VolumeFeed for DeadHalfBorrowed {
             return VolumeView::NotYet;
         }
         if path == self.dead {
+            if let Some((after, since)) = &mut self.finish_after {
+                let since = *since.get_or_insert_with(std::time::Instant::now);
+                if !self.finished && since.elapsed() >= *after {
+                    use std::os::unix::fs::FileExt;
+                    let f = std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(&self.holed.data)
+                        .unwrap();
+                    f.write_all_at(&self.rest, self.rest_at).unwrap();
+                    self.finished = true;
+                }
+            }
             let mut v = self.holed.clone();
             if self.finished {
                 v.holes.clear();
             } else {
                 self.asked_holed = true;
+                self.holed_asks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             return VolumeView::Virtual(v);
         }
@@ -5492,6 +5509,11 @@ impl VolumeFeed for DeadHalfBorrowed {
 
 /// Builds the half-borrowed dead volume 4 of a 10-volume RAR5 set, and the feed around it.
 fn half_borrowed_dead_volume(t: &TestDir, park_on: usize) -> (PathBuf, Vec<u8>, DeadHalfBorrowed) {
+    borrowed_dead_volume(t, park_on, 2)
+}
+
+/// As [`half_borrowed_dead_volume`], with `1/part` of the dead volume borrowed (0: none).
+fn borrowed_dead_volume(t: &TestDir, park_on: usize, part: usize) -> (PathBuf, Vec<u8>, DeadHalfBorrowed) {
     use crate::deadvolume::{plan, synthesize_frame, VirtualVolume, VolumeState};
     let data = pattern(1_000_000);
     let vols = rar5_volumes("movie.mkv", &data, 100_000);
@@ -5517,7 +5539,7 @@ fn half_borrowed_dead_volume(t: &TestDir, park_on: usize) -> (PathBuf, Vec<u8>, 
         .find(|p| p.index == dead)
         .unwrap();
     let borrowed = &data[p.inner_offset as usize..(p.inner_offset + p.packed_size) as usize];
-    let half = borrowed.len() / 2;
+    let half = if part == 0 { 0 } else { borrowed.len() / part };
     let scratch = t.0.join("deadvol.data");
     let mut first_half = borrowed[..half].to_vec();
     first_half.resize(borrowed.len(), 0);
@@ -5552,6 +5574,8 @@ fn half_borrowed_dead_volume(t: &TestDir, park_on: usize) -> (PathBuf, Vec<u8>, 
         finished: false,
         asked_holed: false,
         volumes: vols.len() as u64,
+        finish_after: None,
+        holed_asks: Default::default(),
     };
     (first, data, feed)
 }
@@ -5594,6 +5618,47 @@ fn a_half_borrowed_dead_volume_is_extracted_past_and_patched_inline() {
             .any(|l| l.contains("every hole was patched while extracting")),
         "{log:?}"
     );
+}
+
+#[test]
+fn a_dead_volume_handed_over_before_any_byte_is_borrowed_is_extracted_past() {
+    // On 6790 a whole dead volume was handed over with nothing borrowed yet: extraction must
+    // read it as one hole and go on, not spin on it.
+    let t = TestDir::new("deadvol-none");
+    let (first, data, feed) = borrowed_dead_volume(&t, 6, 0);
+    let mut log = Vec::new();
+    let req = Request {
+        first_volume: &first,
+        dest: &t.out(),
+        password: "",
+        overwrite: Overwrite::Always,
+        on_wait: None,
+    };
+    let r = extract(
+        &req,
+        Box::new(feed),
+        &mut |_, m: &str| log.push(m.to_string()),
+        &mut || false,
+    );
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+}
+
+#[test]
+fn the_copy_path_parks_on_a_holed_stand_in_without_spinning() {
+    // 6790: the copy path waited on a stand-in handed over with holes, but the driver woke it
+    // again at once each time (the stand-in was no longer "not yet"), until zipfast's wake
+    // limit failed the extraction. It must park until the stand-in is finished.
+    let t = TestDir::new("deadvol-copy-park");
+    let (first, data, mut feed) = borrowed_dead_volume(&t, 9, 0);
+    feed.finish_after = Some((std::time::Duration::from_millis(600), None));
+    let asks = feed.holed_asks.clone();
+    let (r, log) = run_with(&first, &t.out(), Box::new(feed), Overwrite::Skip);
+    expect_ok(r, &log);
+    assert!(!persistent(&log), "{log:?}");
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+    let asks = asks.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(asks < 200, "asked for the holed stand-in {asks} times in 600 ms");
 }
 
 #[test]

@@ -8191,8 +8191,10 @@ impl ContentMapper {
         repair_sets
     }
 
-    /// How many other files of one set are mapped for their holes.
+    /// How many other files of one set get a repair set for their holes.
     const MAX_OTHER_FILES: usize = 16;
+    /// How many other files of one set are mapped while looking for holes.
+    const MAX_OTHER_FILES_MAPPED: usize = 64;
 
     /// Repair sets for the other stored files of `set` (a sample, an nfo beside the movie)
     /// holding holes that `payload`'s map leaves out: each is mapped by its name and size, and
@@ -8227,18 +8229,21 @@ impl ContentMapper {
         {
             return Vec::new();
         }
-        let mut out = Vec::new();
-        for (name, size) in listing.files.into_iter().take(Self::MAX_OTHER_FILES) {
-            if sources.aborted() {
-                break;
-            }
-            let is_payload = locale_casecmp(&name, payload.inner_name_bytes())
+        // Pick the candidates first, so nested volumes and the payload never use up the
+        // limits. Mapping is bounded separately from the sets kept, since intact side files
+        // are mapped and then dropped.
+        let candidates = listing.files.into_iter().filter(|(name, size)| {
+            let is_payload = locale_casecmp(name, payload.inner_name_bytes())
                 == std::cmp::Ordering::Equal
-                && size == payload.inner_size();
+                && *size == payload.inner_size();
             // Only a whole file of its own: a volume of a nested set (`x.r00`, `x.001`) holds
             // container bytes that differ from post to post.
-            if size <= 0 || is_payload || !is_side_file_name(&name) {
-                continue;
+            *size > 0 && !is_payload && is_side_file_name(name)
+        });
+        let mut out = Vec::new();
+        for (name, size) in candidates.take(Self::MAX_OTHER_FILES_MAPPED) {
+            if sources.aborted() || out.len() >= Self::MAX_OTHER_FILES {
+                break;
             }
             let want = (name, size);
             let Ok(map) = Self::build_map_wanting(members, set, sources, password, tls_enabled, &want)

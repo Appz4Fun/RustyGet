@@ -88,52 +88,81 @@ pub fn plan(volumes: &[VolumeState], inner_size: i64) -> Vec<Plan> {
     plan_with_stop(volumes, inner_size).0
 }
 
-/// [`plan`], plus why planning stopped before the end of `volumes`, if it did: which volume
-/// (numbered from 1) and what kept it from being planned. For the log.
-pub fn plan_with_stop(volumes: &[VolumeState], inner_size: i64) -> (Vec<Plan>, Option<String>) {
+/// Why [`plan_with_stop`] stopped before the end of the set. Volumes are numbered from 1.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StopReason {
+    /// The first volume has no readable headers.
+    FirstNotReadable,
+    /// The volume is not on disk, or not readable yet.
+    NotReadable { volume: usize },
+    /// No readable middle sibling gives the dead volume's layout.
+    NoTemplate { volume: usize },
+    /// The dead volume may be the set's (shorter) last one.
+    MaybeLast { volume: usize },
+    /// The nzb lists a size that does not fit the sibling's layout.
+    SizeMismatch { volume: usize, encoded_size: i64, expected: i64 },
+    /// The dead volume would end past the inner file.
+    PastInnerEnd { volume: usize },
+    /// The volumes up to this one hold more than the inner file.
+    Overflow { volume: usize },
+}
+
+impl std::fmt::Display for StopReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            Self::FirstNotReadable => f.write_str("volume 1 is not readable"),
+            Self::NotReadable { volume } => {
+                write!(f, "volume {volume} is not on disk or not readable yet")
+            }
+            Self::NoTemplate { volume } => {
+                write!(f, "no readable sibling gives volume {volume}'s layout")
+            }
+            Self::MaybeLast { volume } => write!(f, "volume {volume} may be the set's last"),
+            Self::SizeMismatch { volume, encoded_size, expected } => write!(
+                f,
+                "volume {volume} is listed at {encoded_size} bytes, which does not fit a \
+                 {expected}-byte volume like its sibling"
+            ),
+            Self::PastInnerEnd { volume } => {
+                write!(f, "volume {volume} would end past the inner file")
+            }
+            Self::Overflow { volume } => {
+                write!(f, "the volumes up to {volume} hold more than the inner file")
+            }
+        }
+    }
+}
+
+/// [`plan`], plus why planning stopped before the end of `volumes`, if it did. For the log.
+pub fn plan_with_stop(volumes: &[VolumeState], inner_size: i64) -> (Vec<Plan>, Option<StopReason>) {
     let mut out = Vec::new();
     let Some(VolumeState::Readable(first)) = volumes.first() else {
-        return (out, Some("volume 1 is not readable".to_string()));
+        return (out, Some(StopReason::FirstNotReadable));
     };
-    let mut stop = None;
     let last = volumes.len() - 1;
     let mut offset = first.packed_size;
-    for i in 1..volumes.len() {
-        match &volumes[i] {
+    for (i, state) in volumes.iter().enumerate().skip(1) {
+        let volume = i + 1;
+        match state {
             VolumeState::Readable(g) => offset += g.packed_size,
-            VolumeState::Unknown => {
-                stop = Some(format!(
-                    "volume {} is not on disk or not readable yet",
-                    i + 1
-                ));
-                break;
-            }
+            VolumeState::Unknown => return (out, Some(StopReason::NotReadable { volume })),
             VolumeState::Dead { encoded_size } => {
                 let Some((template, g)) = template_for(volumes, i) else {
-                    stop = Some(format!(
-                        "no readable sibling gives volume {}'s layout",
-                        i + 1
-                    ));
-                    break;
+                    return (out, Some(StopReason::NoTemplate { volume }));
                 };
                 // The last volume known may be the set's last (shorter, closing the file): it
                 // is planned only when the inner file goes on past it.
                 if i == last && offset + g.packed_size >= inner_size {
-                    stop = Some(format!("volume {} may be the set's last", i + 1));
-                    break;
+                    return (out, Some(StopReason::MaybeLast { volume }));
                 }
                 let size = g.data_offset + g.packed_size + g.tail_len();
-                if *encoded_size > 0 && (*encoded_size < size || *encoded_size > size + size / 16) {
-                    stop = Some(format!(
-                        "volume {} is listed at {encoded_size} bytes, which does not fit a \
-                         {size}-byte volume like its sibling",
-                        i + 1
-                    ));
-                    break;
+                let encoded_size = *encoded_size;
+                if encoded_size > 0 && (encoded_size < size || encoded_size > size + size / 16) {
+                    let stop = StopReason::SizeMismatch { volume, encoded_size, expected: size };
+                    return (out, Some(stop));
                 }
                 if g.packed_size <= 0 || offset + g.packed_size > inner_size {
-                    stop = Some(format!("volume {} would end past the inner file", i + 1));
-                    break;
+                    return (out, Some(StopReason::PastInnerEnd { volume }));
                 }
                 out.push(Plan {
                     index: i,
@@ -147,14 +176,10 @@ pub fn plan_with_stop(volumes: &[VolumeState], inner_size: i64) -> (Vec<Plan>, O
         }
         if offset > inner_size {
             // Something before does not add up: plan nothing past it.
-            stop = Some(format!(
-                "the volumes up to {} hold more than the inner file",
-                i + 1
-            ));
-            break;
+            return (out, Some(StopReason::Overflow { volume }));
         }
     }
-    (out, stop)
+    (out, None)
 }
 
 /// The geometry dead volume `i` would have, from its siblings, and the sibling it came from.
@@ -244,6 +269,55 @@ impl VirtualVolume {
     }
 }
 
+/// Why [`synthesize_frame`] or [`check_frame`] refused a rebuilt volume.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FrameError {
+    /// Only RAR 1.5-4 (3) and RAR5 (5) volumes can be rebuilt.
+    UnsupportedVersion(i32),
+    /// The sibling's headers cannot serve as a template.
+    Sibling { format: &'static str, what: &'static str },
+    /// The rebuilt headers do not read back with the header reader.
+    ReadBack,
+    /// The rebuilt headers read back without a file.
+    NoFile,
+    /// The rebuilt headers read back as something else than the expected part.
+    Mismatch {
+        filename: String,
+        stored: bool,
+        split_before: bool,
+        split_after: bool,
+        packed_size: i64,
+        data_offset: i64,
+    },
+}
+
+impl std::fmt::Display for FrameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsupportedVersion(v) => write!(f, "RAR version {v} cannot be rebuilt"),
+            Self::Sibling { format, what } => write!(f, "{format} sibling headers: {what}"),
+            Self::ReadBack => f.write_str("rebuilt headers do not read back"),
+            Self::NoFile => f.write_str("rebuilt headers hold no file"),
+            Self::Mismatch { filename, stored, split_before, split_after, packed_size, data_offset } => {
+                write!(
+                    f,
+                    "rebuilt headers read back as {filename} (stored {stored}, split \
+                     {split_before}/{split_after}, {packed_size} bytes at {data_offset})"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for FrameError {}
+
+/// Volume number `number` of sibling `template`, moved to volume `index`.
+fn shifted_volume_number(number: u64, index: usize, template: usize) -> Option<u64> {
+    number
+        .checked_add(u64::try_from(index).ok()?)?
+        .checked_sub(u64::try_from(template).ok()?)
+}
+
 /// Rebuilds the headers of dead volume `index` from those of sibling `template`.
 ///
 /// `head` is the sibling's bytes in front of its stored part, `tail` the bytes behind it. The
@@ -261,18 +335,23 @@ pub fn synthesize_frame(
     index: usize,
     packed: u64,
     part_crc: u32,
-) -> Result<(Vec<u8>, Vec<u8>), String> {
+) -> Result<(Vec<u8>, Vec<u8>), FrameError> {
     match version {
         5 => rar5::frame(head, tail, template, index, packed, part_crc),
         3 => rar4::frame(head, tail, template, index, packed, part_crc),
-        v => Err(format!("RAR version {v} cannot be rebuilt")),
+        v => Err(FrameError::UnsupportedVersion(v)),
     }
 }
 
 /// Checks a rebuilt volume with the regular header reader: it has to read as volume `index`
 /// holding a stored middle part of `inner_name` that starts right after `head` and runs for
 /// `packed` bytes.
-pub fn check_frame(head: &[u8], tail: &[u8], packed: u64, inner_name: &[u8]) -> Result<(), String> {
+pub fn check_frame(
+    head: &[u8],
+    tail: &[u8],
+    packed: u64,
+    inner_name: &[u8],
+) -> Result<(), FrameError> {
     struct Frame<'a> {
         head: &'a [u8],
         packed: u64,
@@ -308,10 +387,10 @@ pub fn check_frame(head: &[u8], tail: &[u8], packed: u64, inner_name: &[u8]) -> 
     let mut files: Vec<crate::rarreader::RarFile> = Vec::new();
     let ok = crate::rarreader::read_from(&mut vol, &mut src, None, &mut files);
     if !ok && files.is_empty() {
-        return Err("rebuilt headers do not read back".into());
+        return Err(FrameError::ReadBack);
     }
     let Some(f) = files.first() else {
-        return Err("rebuilt headers hold no file".into());
+        return Err(FrameError::NoFile);
     };
     let base = |n: &[u8]| -> Vec<u8> {
         n.rsplit(|&b| b == b'/' || b == b'\\')
@@ -327,20 +406,21 @@ pub fn check_frame(head: &[u8], tail: &[u8], packed: u64, inner_name: &[u8]) -> 
         || f.packed_size != packed as i64
         || f.data_offset != head.len() as i64
     {
-        return Err(format!(
-            "rebuilt headers read back as {} (stored {}, split {}/{}, {} bytes at {})",
-            String::from_utf8_lossy(&f.filename),
-            f.stored,
-            f.split_before,
-            f.split_after,
-            f.packed_size,
-            f.data_offset
-        ));
+        return Err(FrameError::Mismatch {
+            filename: String::from_utf8_lossy(&f.filename).into_owned(),
+            stored: f.stored,
+            split_before: f.split_before,
+            split_after: f.split_after,
+            packed_size: f.packed_size,
+            data_offset: f.data_offset,
+        });
     }
     Ok(())
 }
 
 mod rar5 {
+    use super::FrameError;
+
     const SIG: &[u8] = b"Rar!\x1a\x07\x01\x00";
     const HFL_EXTRA: u64 = 0x01;
     const HFL_DATA: u64 = 0x02;
@@ -349,6 +429,11 @@ mod rar5 {
     const MHFL_VOLNUMBER: u64 = 0x02;
     const FHFL_MTIME: u64 = 0x02;
     const FHFL_CRC32: u64 = 0x04;
+    const HEAD_MAIN: u64 = 1;
+    const HEAD_FILE: u64 = 2;
+    const HEAD_ENDARC: u64 = 5;
+    const EXTRA_CRYPT: u64 = 1;
+    const EXTRA_HASH: u64 = 2;
 
     pub(super) fn vint(b: &[u8], p: &mut usize) -> Option<u64> {
         let mut v = 0u64;
@@ -431,8 +516,8 @@ mod rar5 {
         index: usize,
         packed: u64,
         part_crc: u32,
-    ) -> Result<(Vec<u8>, Vec<u8>), String> {
-        let bad = |what: &str| format!("RAR5 sibling headers: {what}");
+    ) -> Result<(Vec<u8>, Vec<u8>), FrameError> {
+        let bad = |what: &'static str| FrameError::Sibling { format: "RAR5", what };
         if !head.starts_with(SIG) {
             return Err(bad("no signature"));
         }
@@ -442,7 +527,7 @@ mod rar5 {
         while p < head.len() {
             let b = block(head, &mut p).ok_or_else(|| bad("truncated header"))?;
             match b.kind {
-                1 => {
+                HEAD_MAIN => {
                     // Main header: the archive flags and the volume number; the extra area
                     // (locator of the sibling's quick-open and recovery data) is left out.
                     let mut q = b.body;
@@ -453,9 +538,8 @@ mod rar5 {
                     put_vint(&mut h, aflags);
                     if aflags & MHFL_VOLNUMBER != 0 {
                         let number = vint(b.header, &mut q).ok_or_else(|| bad("volume number"))?;
-                        let number = (number as i64 + index as i64 - template as i64)
-                            .try_into()
-                            .map_err(|_| bad("volume number"))?;
+                        let number = super::shifted_volume_number(number, index, template)
+                            .ok_or_else(|| bad("volume number"))?;
                         put_vint(&mut h, number);
                     } else {
                         return Err(bad("main header without a volume number"));
@@ -465,7 +549,7 @@ mod rar5 {
                         return Err(bad("main header with data"));
                     }
                 }
-                2 => {
+                HEAD_FILE => {
                     if p != head.len() {
                         return Err(bad("file header does not end in front of its data"));
                     }
@@ -504,8 +588,8 @@ mod rar5 {
                         let mut r = e;
                         let kind = vint(extra, &mut r).ok_or_else(|| bad("extra record"))?;
                         match kind {
-                            1 => return Err(bad("encrypted part")),
-                            2 => return Err(bad("part hash other than CRC32")),
+                            EXTRA_CRYPT => return Err(bad("encrypted part")),
+                            EXTRA_HASH => return Err(bad("part hash other than CRC32")),
                             _ => {}
                         }
                         e = rec_end;
@@ -552,7 +636,7 @@ mod rar5 {
         let mut end = None;
         while p < tail.len() {
             let Some(b) = block(tail, &mut p) else { break };
-            if b.kind == 5 {
+            if b.kind == HEAD_ENDARC {
                 let mut e = Vec::new();
                 emit(&mut e, b.header);
                 end = Some(e);
@@ -568,6 +652,8 @@ mod rar5 {
 }
 
 mod rar4 {
+    use super::FrameError;
+
     const MARK: &[u8] = b"Rar!\x1a\x07\x00";
     const LONG_BLOCK: u16 = 0x8000;
     const LHD_SPLIT_BEFORE: u16 = 0x0001;
@@ -577,6 +663,10 @@ mod rar4 {
     const EARC_DATACRC: u16 = 0x0002;
     const EARC_REVSPACE: u16 = 0x0004;
     const EARC_VOLNUMBER: u16 = 0x0008;
+    const FILE_HEAD: u8 = 0x74;
+    const ENDARC_HEAD: u8 = 0x7b;
+    /// Method byte of a stored (uncompressed) file.
+    const METHOD_STORE: u8 = 0x30;
 
     fn u16le(b: &[u8], at: usize) -> Option<u16> {
         Some(u16::from_le_bytes(b.get(at..at + 2)?.try_into().ok()?))
@@ -598,8 +688,8 @@ mod rar4 {
         index: usize,
         packed: u64,
         part_crc: u32,
-    ) -> Result<(Vec<u8>, Vec<u8>), String> {
-        let bad = |what: &str| format!("RAR4 sibling headers: {what}");
+    ) -> Result<(Vec<u8>, Vec<u8>), FrameError> {
+        let bad = |what: &'static str| FrameError::Sibling { format: "RAR4", what };
         if !head.starts_with(MARK) {
             return Err(bad("no marker"));
         }
@@ -618,14 +708,14 @@ mod rar4 {
                 .ok_or_else(|| bad("truncated header"))?
                 .to_vec();
             match kind {
-                0x74 => {
+                FILE_HEAD => {
                     if p + size != head.len() {
                         return Err(bad("file header does not end in front of its data"));
                     }
                     if flags & LHD_PASSWORD != 0 {
                         return Err(bad("encrypted part"));
                     }
-                    if block.get(25).copied() != Some(0x30) {
+                    if block.get(25).copied() != Some(METHOD_STORE) {
                         return Err(bad("compressed part"));
                     }
                     let mut f = flags | LHD_SPLIT_BEFORE | LHD_SPLIT_AFTER;
@@ -675,13 +765,13 @@ mod rar4 {
             if size < 7 {
                 break;
             }
-            if kind == 0x7b {
+            if kind == ENDARC_HEAD {
                 let mut q = p + 7;
                 if flags & EARC_DATACRC != 0 {
                     q += 4;
                 }
                 let mut end = Vec::new();
-                end.extend_from_slice(&[0, 0, 0x7b]);
+                end.extend_from_slice(&[0, 0, ENDARC_HEAD]);
                 // Without the reserved space too: readers check the block's length against
                 // its flags.
                 let new_flags = flags & !(EARC_DATACRC | EARC_REVSPACE);
@@ -689,10 +779,10 @@ mod rar4 {
                 end.extend_from_slice(&[0, 0]);
                 if flags & EARC_VOLNUMBER != 0 {
                     let n = u16le(tail, q).ok_or_else(|| bad("end block"))?;
-                    let n = (i64::from(n) + index as i64 - template as i64)
-                        .try_into()
-                        .map_err(|_| bad("volume number"))?;
-                    end.extend_from_slice(&u16::to_le_bytes(n));
+                    let n = super::shifted_volume_number(u64::from(n), index, template)
+                        .and_then(|n| u16::try_from(n).ok())
+                        .ok_or_else(|| bad("volume number"))?;
+                    end.extend_from_slice(&n.to_le_bytes());
                 }
                 let len = end.len() as u16;
                 end[5..7].copy_from_slice(&len.to_le_bytes());
@@ -957,7 +1047,7 @@ mod tests {
         let at = files[0].data_offset as usize;
         let len = files[0].packed_size as usize;
         let err = synthesize_frame(5, &b[..at], &b[at + len..], 1, 2, len as u64, 0).unwrap_err();
-        assert!(err.contains("compressed"), "{err}");
+        assert_eq!(err, FrameError::Sibling { format: "RAR5", what: "compressed part" });
     }
 
     #[test]

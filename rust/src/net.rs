@@ -3411,7 +3411,8 @@ impl NzbgetRsServerPool {
     }
 }
 
-pub extern "C" fn nzbget_rs_serverpool_new() -> *mut NzbgetRsServerPool {
+/// Creates a server pool and makes it the active one.
+pub(crate) fn install_server_pool() -> Arc<NzbgetRsServerPool> {
     let arc = Arc::new(NzbgetRsServerPool::new(crate::ffi::tls_host_cb()));
     // A new pool (start-up or a config reload) may hold servers that have
     // articles the old one lacked.
@@ -3422,25 +3423,23 @@ pub extern "C" fn nzbget_rs_serverpool_new() -> *mut NzbgetRsServerPool {
     if let Some(lg) = crate::log::active_log() {
         lg.register_debuggable(4);
     }
-    Arc::into_raw(arc).cast_mut()
+    arc
 }
 
-pub unsafe extern "C" fn nzbget_rs_serverpool_free(pool: *mut NzbgetRsServerPool) {
-    if !pool.is_null() {
-        if let Some(lg) = crate::log::active_log() {
-            lg.unregister_debuggable(4);
-        }
-        let arc = Arc::from_raw(pool.cast_const());
-        let wk = Arc::downgrade(&arc);
-        if let Ok(mut g) = ACTIVE_SERVER_POOL.write() {
-            if g.as_ref()
-                .is_some_and(|cur| std::sync::Weak::ptr_eq(cur, &wk))
-            {
-                *g = None;
-            }
-        }
-        drop(arc);
+/// Drops `pool`, first clearing the active pool if it is this one.
+pub(crate) fn release_server_pool(pool: Arc<NzbgetRsServerPool>) {
+    if let Some(lg) = crate::log::active_log() {
+        lg.unregister_debuggable(4);
     }
+    let wk = Arc::downgrade(&pool);
+    if let Ok(mut g) = ACTIVE_SERVER_POOL.write() {
+        if g.as_ref()
+            .is_some_and(|cur| std::sync::Weak::ptr_eq(cur, &wk))
+        {
+            *g = None;
+        }
+    }
+    drop(pool);
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -14,7 +14,7 @@
 use crate::options::OptStr;
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Once, PoisonError};
 use std::time::Duration;
 
@@ -35,7 +35,7 @@ static INSTANCE: AtomicBool = AtomicBool::new(false);
 static LOG: Mutex<Option<Arc<NzbgetRsLog>>> = Mutex::new(None);
 static OPTIONS: Mutex<Option<Arc<NzbgetRsOptions>>> = Mutex::new(None);
 static WORK_STATE: Mutex<Option<Arc<NzbgetRsWorkState>>> = Mutex::new(None);
-static SERVER_POOL: AtomicPtr<NzbgetRsServerPool> = AtomicPtr::new(ptr::null_mut());
+static SERVER_POOL: Mutex<Option<Arc<NzbgetRsServerPool>>> = Mutex::new(None);
 /// The daemon's pre/post-processor thread (rust/src/jobthread.rs).
 static PRE_POST: Mutex<Option<Arc<PrePostRunner>>> = Mutex::new(None);
 static ATEXIT: Once = Once::new();
@@ -216,8 +216,8 @@ fn destroy_instance() {
     crate::lifecycle::cleanup_global_objects(
         OPTIONS.lock().unwrap_or_else(PoisonError::into_inner).is_some(),
     );
-    unsafe {
-        crate::net::nzbget_rs_serverpool_free(SERVER_POOL.swap(ptr::null_mut(), Ordering::SeqCst));
+    if let Some(pool) = SERVER_POOL.lock().unwrap_or_else(PoisonError::into_inner).take() {
+        crate::net::release_server_pool(pool);
     }
     if let Some(ws) = WORK_STATE.lock().unwrap_or_else(PoisonError::into_inner).take() {
         crate::ffi::uninstall_workstate(&ws);
@@ -253,7 +253,7 @@ unsafe fn phase1_init(reload: bool) -> c_int {
     }
 
     *WORK_STATE.lock().unwrap_or_else(PoisonError::into_inner) = Some(crate::ffi::install_workstate());
-    SERVER_POOL.store(crate::net::nzbget_rs_serverpool_new(), Ordering::SeqCst);
+    *SERVER_POOL.lock().unwrap_or_else(PoisonError::into_inner) = Some(crate::net::install_server_pool());
 
     match crate::lifecycle::parse_command_line() {
         Ok(()) => {}

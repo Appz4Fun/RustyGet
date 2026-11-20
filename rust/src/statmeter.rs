@@ -2086,7 +2086,8 @@ mod tests {
             assert_eq!(tot_ints[2], 0);
             assert_eq!(all_b, 8192);
 
-            let pool = crate::net::nzbget_rs_serverpool_new();
+            let pool_arc = crate::net::install_server_pool();
+            let pool = std::sync::Arc::as_ptr(&pool_arc);
             crate::net::nzbget_rs_serverpool_add(
                 pool,
                 1,
@@ -2140,7 +2141,7 @@ mod tests {
                     .load(std::sync::atomic::Ordering::SeqCst),
                 1
             );
-            crate::net::nzbget_rs_serverpool_free(pool);
+            crate::net::release_server_pool(pool_arc);
 
             struct CaptureVols(Vec<(i32, i64, i64)>);
             impl RpcEmit for CaptureVols {

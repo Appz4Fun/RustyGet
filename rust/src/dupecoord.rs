@@ -1804,7 +1804,7 @@ pub(crate) fn history_mark_host(
             } else {
                 DupStatus::Bad
             };
-            host.dup_set_status(hi.inner_ptr, ds);
+            host.dup_edit(hi.inner_ptr, crate::qdup::DupEdit::Status(ds));
             (dup.dupe_mode, dup.dupe_key, dup.name)
         } else {
             let mut err = b"Could not mark ".to_vec();

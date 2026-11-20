@@ -100,11 +100,6 @@ pub(crate) const HK_NZB: i32 = 1;
 pub(crate) const HK_URL: i32 = 2;
 pub(crate) const HK_DUP: i32 = 3;
 
-pub(crate) const DUP_STR_NAME: i32 = 3;
-pub(crate) const DUP_STR_DUPE_KEY: i32 = 4;
-pub(crate) const DUP_INT_DUPE_SCORE: i32 = 5;
-pub(crate) const DUP_INT_DUPE_MODE: i32 = 6;
-
 // DownloadQueue::EAspectAction
 pub(crate) const ASPECT_NZB_FOUND: i32 = 0;
 pub(crate) const ASPECT_NZB_ADDED: i32 = 1;
@@ -989,12 +984,9 @@ impl QueueSubsysHost {
         if !self.use_active {
             return 0;
         }
-        if op == 2 {
-            let hist = record as *const crate::qhist::Hist;
-            return unsafe { crate::qhist::host_hist_summary(hist, x.ints, x.strs) };
-        }
-        let dup = record as *const crate::qdup::Dup;
-        unsafe { crate::qdup::host_dup_op(dup, op, x.a2, x.s1, x.ints, x.i64s, x.strs) }
+        debug_assert_eq!(op, 2);
+        let hist = record as *const crate::qhist::Hist;
+        unsafe { crate::qhist::host_hist_summary(hist, x.ints, x.strs) }
     }
 
     /// An article op: on file `p1`'s article list (with the article in p2
@@ -3046,45 +3038,20 @@ impl QueueSubsysHost {
     }
 
     pub fn dup_snap(&self, dup_ptr: usize) -> DupSnap {
-        if dup_ptr == 0 {
+        if !self.use_active {
             return DupSnap::default();
         }
-        let mut ints = [0i32; 5];
-        let mut i64s = [0i64; 1];
-        let mut strs = [std::ptr::null(); 2];
-        self.record_op(
-            dup_ptr,
-            0,
-            OpArgs::NONE
-                .ints(ints.as_mut_ptr())
-                .i64s(i64s.as_mut_ptr())
-                .strs(strs.as_mut_ptr()),
-        );
-        unsafe {
-            DupSnap {
-                dupe_mode: DupeMode::from(ints[0]),
-                dupe_score: ints[1],
-                status: DupStatus::from(ints[2]),
-                size: i64s[0],
-                full_content_hash: ints[3] as u32,
-                filtered_content_hash: ints[4] as u32,
-                name: read_cstr(strs[0]),
-                dupe_key: read_cstr(strs[1]),
-            }
+        unsafe { crate::qdup::Dup::from_addr(dup_ptr) }
+            .map_or_else(DupSnap::default, |d| d.snapshot())
+    }
+
+    pub fn dup_edit(&self, dup_ptr: usize, edit: crate::qdup::DupEdit<'_>) {
+        if !self.use_active {
+            return;
         }
-    }
-
-    pub fn dup_set_status(&self, dup_ptr: usize, status: DupStatus) {
-        self.record_op(dup_ptr, 1, OpArgs::NONE.a2(status.into()));
-    }
-
-    pub fn dup_set_str(&self, dup_ptr: usize, field: i32, val: &[u8]) {
-        let c = c_bytes(val);
-        self.record_op(dup_ptr, field, OpArgs::NONE.s1(c.as_ptr() as *const c_char));
-    }
-
-    pub fn dup_set_int(&self, dup_ptr: usize, field: i32, val: i32) {
-        self.record_op(dup_ptr, field, OpArgs::NONE.a2(val));
+        if let Some(d) = unsafe { crate::qdup::Dup::from_addr(dup_ptr) } {
+            d.edit(edit);
+        }
     }
 
     pub fn hist_item_snap(&self, hi_ptr: usize) -> HistEntrySnap {

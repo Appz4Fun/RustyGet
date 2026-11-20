@@ -10,13 +10,14 @@ use std::ffi::{c_char, c_int, CStr};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard};
 
-use crate::qdup::{nzbget_rs_dup_free, nzbget_rs_dup_new, nzbget_rs_dup_set, Dup};
+use crate::qdup::{Dup, DupEdit};
 use crate::qhist::{
     field as hfield, host_hist_summary, nzbget_rs_hist_free, nzbget_rs_hist_get,
     nzbget_rs_hist_new, nzbget_rs_hist_set, Hist, KIND_DUP, KIND_NZB, KIND_URL,
 };
 use crate::qlist::{nzbget_rs_ptrlist_free, nzbget_rs_ptrlist_new, nzbget_rs_ptrlist_op, PtrList};
 use crate::qnzb::{nzbget_rs_nzb_text, NzbScalars};
+use crate::queuesubsys_host::read_cstr;
 
 /// Deletes a collection (null is ignored), as `delete NzbInfo*` did: its
 /// post job, then its file list (which frees its files), then the
@@ -48,7 +49,7 @@ unsafe extern "C" fn hist_drop_fn(p: usize) {
     if (kind == KIND_NZB || kind == KIND_URL) && info != 0 {
         drop_nzb(info);
     } else if kind == KIND_DUP && info != 0 {
-        unsafe { nzbget_rs_dup_free(info as *mut Dup) };
+        unsafe { Dup::free(info as *mut Dup) };
     }
     unsafe { nzbget_rs_hist_free(h) };
 }
@@ -225,8 +226,8 @@ fn hist_new_dup(dup: *mut Dup, time: i64) -> usize {
 }
 
 /// `DupInfo::SetId`: the id also raises the collection id floor.
-unsafe fn dup_set_id(d: *const Dup, id: i32) {
-    unsafe { nzbget_rs_dup_set(d, 5, i64::from(id), std::ptr::null()) };
+fn dup_set_id(d: &Dup, id: i32) {
+    d.edit(DupEdit::Id(id));
     crate::idgen::NZB_IDS.raise_floor(id);
 }
 
@@ -411,18 +412,21 @@ pub fn history_push_dup(key: usize, rec: &DupRecord<'_>) {
     let Some(q) = queue_ref(key) else {
         return;
     };
-    let d = nzbget_rs_dup_new();
-    unsafe {
-        nzbget_rs_dup_set(d, 2, i64::from(rec.status), std::ptr::null());
-        nzbget_rs_dup_set(d, 3, i64::from(rec.full_hash), std::ptr::null());
-        nzbget_rs_dup_set(d, 4, i64::from(rec.filtered_hash), std::ptr::null());
-        nzbget_rs_dup_set(d, 6, rec.size, std::ptr::null());
-        nzbget_rs_dup_set(d, 1, i64::from(rec.dupe_score), std::ptr::null());
-        nzbget_rs_dup_set(d, 0, i64::from(rec.dupe_mode), std::ptr::null());
-        nzbget_rs_dup_set(d, 7, 0, rec.name.as_ptr());
-        nzbget_rs_dup_set(d, 8, 0, rec.dupe_key.as_ptr());
-        dup_set_id(d, rec.id);
+    let d = Dup::alloc();
+    let r = unsafe { &*d };
+    for edit in [
+        DupEdit::Status(rec.status.into()),
+        DupEdit::FullHash(rec.full_hash),
+        DupEdit::FilteredHash(rec.filtered_hash),
+        DupEdit::Size(rec.size),
+        DupEdit::Score(rec.dupe_score),
+        DupEdit::Mode(rec.dupe_mode.into()),
+        DupEdit::Name(rec.name.to_bytes()),
+        DupEdit::DupeKey(rec.dupe_key.to_bytes()),
+    ] {
+        r.edit(edit);
     }
+    dup_set_id(r, rec.id);
     list_op(q.history(), 3, 0, hist_new_dup(d, i64::from(rec.time)));
 }
 
@@ -449,18 +453,27 @@ pub unsafe fn history_replace_with_dup(key: usize, old: usize, rindex: i32, stat
     let hist = q.history();
     let old = old as *const Hist;
     let n = unsafe { nzbget_rs_hist_get(old, hfield::INFO) } as *const NzbScalars;
-    let d = nzbget_rs_dup_new();
-    unsafe {
-        let s = &*n;
-        dup_set_id(d, s.id);
-        nzbget_rs_dup_set(d, 7, 0, nzbget_rs_nzb_text(n, 2));
-        nzbget_rs_dup_set(d, 8, 0, nzbget_rs_nzb_text(n, 7));
-        nzbget_rs_dup_set(d, 1, i64::from(s.dupeScore), std::ptr::null());
-        nzbget_rs_dup_set(d, 0, i64::from(s.dupeMode), std::ptr::null());
-        nzbget_rs_dup_set(d, 6, s.size, std::ptr::null());
-        nzbget_rs_dup_set(d, 3, i64::from(s.fullContentHash), std::ptr::null());
-        nzbget_rs_dup_set(d, 4, i64::from(s.filteredContentHash), std::ptr::null());
-        nzbget_rs_dup_set(d, 2, i64::from(status), std::ptr::null());
+    let d = Dup::alloc();
+    let r = unsafe { &*d };
+    let s = unsafe { &*n };
+    dup_set_id(r, s.id);
+    let (name, dupe_key) = unsafe {
+        (
+            read_cstr(nzbget_rs_nzb_text(n, 2)),
+            read_cstr(nzbget_rs_nzb_text(n, 7)),
+        )
+    };
+    for edit in [
+        DupEdit::Name(&name),
+        DupEdit::DupeKey(&dupe_key),
+        DupEdit::Score(s.dupeScore),
+        DupEdit::Mode(s.dupeMode.into()),
+        DupEdit::Size(s.size),
+        DupEdit::FullHash(s.fullContentHash),
+        DupEdit::FilteredHash(s.filteredContentHash),
+        DupEdit::Status(status.into()),
+    ] {
+        r.edit(edit);
     }
     let time = unsafe { nzbget_rs_hist_get(old, hfield::TIME) };
     let new = hist_new_dup(d, time);

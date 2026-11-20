@@ -2,7 +2,7 @@
 //! verify package signatures).
 
 use crate::options::OptStr;
-use std::ffi::{c_char, c_int, c_void};
+use std::ffi::{c_char, c_int};
 use std::path::PathBuf;
 
 #[cfg(unix)]
@@ -197,7 +197,7 @@ pub fn maintenance_prepare_signature_inputs(
 #[cfg(test)]
 #[repr(C)]
 pub(crate) struct NzbgetRsMaintenanceEnv {
-    pub ctx: *mut c_void,
+    pub ctx: *mut std::ffi::c_void,
     pub p1: usize,
     pub a1: c_int,
     pub a2: c_int,
@@ -208,12 +208,10 @@ pub(crate) struct NzbgetRsMaintenanceEnv {
     pub s2: *const c_char,
     pub s3: *const c_char,
     pub out_buf: *mut Vec<u8>,
-    pub emit_ctx: *mut c_void,
-    pub emit_cb: Option<crate::xmlrpc_format::NzbgetRsXmlRpcEmitFn>,
     pub script_host: Option<&'static dyn crate::procrun::ScriptHost>,
     pub action_cb: Option<
         unsafe extern "C" fn(
-            *mut c_void,
+            *mut std::ffi::c_void,
             c_int,
             *const c_char,
             *const c_char,
@@ -334,18 +332,16 @@ fn read_pkg_info_active(web_dir: &[u8], sep: u8, key: &[u8]) -> Option<Vec<u8>> 
     }
 }
 
-pub(crate) unsafe fn collect_maint_messages_active(
-    id_from: c_int,
-    nr_entries: c_int,
-    emit_ctx: *mut c_void,
-    emit_cb: crate::xmlrpc_format::NzbgetRsXmlRpcEmitFn,
-) {
-    let mut entries = Vec::new();
-    let kept = active_maintenance();
-    let guard = kept
-        .as_deref()
-        .map(|m| m.messages.lock().unwrap_or_else(|err| err.into_inner()));
-    if let Some(ref g) = guard {
+impl NzbgetRsMaintenance {
+    /// The RPC `loadlog` result for the update script's messages: from
+    /// `id_from`, or the last `nr_entries` (both 0 = all).
+    pub(crate) fn collect_rpc(
+        &self,
+        id_from: c_int,
+        nr_entries: c_int,
+        out: &mut dyn crate::xmlrpc_format::RpcEmit,
+    ) {
+        let g = self.messages.lock().unwrap_or_else(|err| err.into_inner());
         let list = &g.1;
         let len = list.len() as i32;
         let mut start = len;
@@ -355,43 +351,31 @@ pub(crate) unsafe fn collect_maint_messages_active(
         if id_from > 0 && !list.is_empty() {
             start = (id_from - list[0].id as i32).max(0);
         }
-        if (start as usize) < list.len() {
-            entries.reserve(list.len() - start as usize);
-            for msg in &list[start as usize..] {
-                entries.push(crate::xmlrpc_format::NzbgetRsRpcLogEntry {
-                    id: msg.id as c_int,
-                    kind: msg.kind,
-                    time: msg.time,
-                    text: msg.text.as_ptr() as *const c_char,
-                });
-            }
-        }
+        let entries: Vec<_> = list
+            .iter()
+            .skip(start as usize)
+            .map(|msg| crate::xmlrpc_format::NzbgetRsRpcLogEntry {
+                id: msg.id as c_int,
+                kind: msg.kind,
+                time: msg.time,
+                text: msg.text.as_ptr() as *const c_char,
+            })
+            .collect();
+        out.log(&entries);
     }
-    emit_cb(
-        emit_ctx,
-        2,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        std::ptr::null(),
-        std::ptr::null(),
-        std::ptr::null(),
-        std::ptr::null(),
-        entries.as_ptr() as *const c_void,
-        entries.len(),
-        std::ptr::null(),
-        0,
-        std::ptr::null(),
-        0,
-        std::ptr::null(),
-        0,
-    );
+}
+
+/// [`NzbgetRsMaintenance::collect_rpc`] on the running daemon's maintenance;
+/// an empty list without one.
+pub(crate) fn collect_maint_messages_active(
+    id_from: c_int,
+    nr_entries: c_int,
+    out: &mut dyn crate::xmlrpc_format::RpcEmit,
+) {
+    match active_maintenance() {
+        Some(m) => m.collect_rpc(id_from, nr_entries, out),
+        None => out.log(&[]),
+    }
 }
 
 #[cfg(unix)]
@@ -946,62 +930,6 @@ pub(crate) unsafe fn nzbget_rs_maintenance_exec(
             }
             1
         }
-        3 => {
-            let Some(e) = env.as_ref() else {
-                return 0;
-            };
-            let Some(emit) = e.emit_cb else {
-                return 0;
-            };
-            let g = m.messages.lock().unwrap_or_else(|err| err.into_inner());
-            let list = &g.1;
-            let len = list.len() as i32;
-            let mut start = len;
-            if e.a4 > 0 {
-                start = len - e.a4.min(len);
-            }
-            if e.a3 > 0 && !list.is_empty() {
-                start = (e.a3 - list[0].id as i32).max(0);
-            }
-            let mut entries = Vec::new();
-            if (start as usize) < list.len() {
-                entries.reserve(list.len() - start as usize);
-                for msg in &list[start as usize..] {
-                    entries.push(crate::xmlrpc_format::NzbgetRsRpcLogEntry {
-                        id: msg.id as c_int,
-                        kind: msg.kind,
-                        time: msg.time,
-                        text: msg.text.as_ptr() as *const c_char,
-                    });
-                }
-            }
-            emit(
-                e.emit_ctx,
-                2,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null(),
-                entries.as_ptr() as *const c_void,
-                entries.len(),
-                std::ptr::null(),
-                0,
-                std::ptr::null(),
-                0,
-                std::ptr::null(),
-                0,
-            );
-            1
-        }
         4 => {
             #[cfg(unix)]
             {
@@ -1135,40 +1063,14 @@ mod tests {
 
     #[test]
     fn maintenance_exec_lifecycle() {
-        unsafe extern "C" fn mock_maint_emit(
-            emit_ctx: *mut c_void,
-            sub: c_int,
-            _a1: c_int,
-            _a2: c_int,
-            _a3: c_int,
-            _a4: c_int,
-            _a5: c_int,
-            _a6: c_int,
-            _i1: i64,
-            _i2: i64,
-            _i3: i64,
-            _s1: *const c_char,
-            _s2: *const c_char,
-            _s3: *const c_char,
-            _s4: *const c_char,
-            ptr1: *const c_void,
-            len1: usize,
-            _ptr2: *const c_void,
-            _len2: usize,
-            _ptr3: *const c_void,
-            _len3: usize,
-            _ptr4: *const c_void,
-            _len4: usize,
-        ) {
-            assert_eq!(sub, 2);
-            let out = &mut *(emit_ctx as *mut Vec<(i32, i32, Vec<u8>)>);
-            let slice = std::slice::from_raw_parts(
-                ptr1 as *const crate::xmlrpc_format::NzbgetRsRpcLogEntry,
-                len1,
-            );
-            for e in slice {
-                let b = std::ffi::CStr::from_ptr(e.text).to_bytes().to_vec();
-                out.push((e.id, e.kind, b));
+        #[derive(Default)]
+        struct Collected(Vec<(i32, i32, Vec<u8>)>);
+        impl crate::xmlrpc_format::RpcEmit for Collected {
+            fn log(&mut self, entries: &[crate::xmlrpc_format::NzbgetRsRpcLogEntry]) {
+                for e in entries {
+                    let text = unsafe { std::ffi::CStr::from_ptr(e.text) };
+                    self.0.push((e.id, e.kind, text.to_bytes().to_vec()));
+                }
             }
         }
 
@@ -1179,7 +1081,7 @@ mod tests {
             let m = nzbget_rs_maintenance_new();
             assert!(!m.is_null());
             unsafe extern "C" fn mock_maint_action(
-                _ctx: *mut c_void,
+                _ctx: *mut std::ffi::c_void,
                 _sub: c_int,
                 _s1: *const c_char,
                 _s2: *const c_char,
@@ -1202,8 +1104,6 @@ mod tests {
                 s2: std::ptr::null(),
                 s3: std::ptr::null(),
                 out_buf: std::ptr::null_mut(),
-                emit_ctx: std::ptr::null_mut(),
-                emit_cb: None,
                 script_host: None,
                 action_cb: Some(mock_maint_action),
             };
@@ -1212,12 +1112,9 @@ mod tests {
             menv.s1 = m2.as_ptr() as *const c_char;
             assert_eq!(nzbget_rs_maintenance_exec(m, 2, &menv), 1);
 
-            let mut collected: Vec<(i32, i32, Vec<u8>)> = Vec::new();
-            menv.a3 = 0;
-            menv.a4 = 10;
-            menv.emit_ctx = (&mut collected as *mut Vec<(i32, i32, Vec<u8>)>).cast();
-            menv.emit_cb = Some(mock_maint_emit);
-            assert_eq!(nzbget_rs_maintenance_exec(m, 3, &menv), 1);
+            let mut collected = Collected::default();
+            (*m).collect_rpc(0, 10, &mut collected);
+            let collected = collected.0;
             assert_eq!(collected.len(), 2);
             assert_eq!(collected[0], (1, 0, b"first line".to_vec()));
             assert_eq!(collected[1], (2, 1, b"second line".to_vec()));
@@ -1284,8 +1181,6 @@ mod tests {
                     s2: std::ptr::null(),
                     s3: std::ptr::null(),
                     out_buf: &mut out_buf,
-                    emit_ctx: std::ptr::null_mut(),
-                    emit_cb: None,
                     script_host: Some(host),
                     action_cb: None,
                 };

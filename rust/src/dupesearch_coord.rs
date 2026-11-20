@@ -43,7 +43,7 @@ use crate::dupewatch::{
 };
 use crate::status::{DeleteStatus, DupeMode, MarkStatus};
 use crate::xmlrpc_format::{
-    NzbgetRsRpcFleetMember, NzbgetRsRpcFleetReqMember, NzbgetRsXmlRpcEmitFn,
+    NzbgetRsRpcFleetMember, NzbgetRsRpcFleetReqMember, RpcEmit,
 };
 
 pub const POST_PROCESS_RETRY_SEC: i64 = 30;
@@ -5788,8 +5788,7 @@ struct FleetOutEntry {
 }
 
 fn emit_fleet_result(
-    emit_ctx: *mut c_void,
-    emit_cb: NzbgetRsXmlRpcEmitFn,
+    out: &mut dyn RpcEmit,
     chosen: i32,
     complete: bool,
     reason: &[u8],
@@ -5817,37 +5816,8 @@ fn emit_fleet_result(
             reason: entry_reason_cs[idx].as_ptr() as *const c_char,
         });
     }
-    unsafe {
-        emit_cb(
-            emit_ctx,
-            10,
-            chosen,
-            c_int::from(complete),
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            reason_c.as_ptr() as *const c_char,
-            ptr::null(),
-            ptr::null(),
-            ptr::null(),
-            if ffi_entries.is_empty() {
-                ptr::null()
-            } else {
-                ffi_entries.as_ptr() as *const c_void
-            },
-            ffi_entries.len(),
-            ptr::null(),
-            0,
-            ptr::null(),
-            0,
-            ptr::null(),
-            0,
-        );
-    }
+    let reason_c = CStr::from_bytes_until_nul(&reason_c).unwrap_or_default();
+    out.fleet_result(chosen, complete, reason_c, &ffi_entries);
     1
 }
 
@@ -5861,8 +5831,7 @@ pub unsafe fn fleet_append(
     timeout_sec_in: c_int,
     req_members: *const NzbgetRsRpcFleetReqMember,
     req_members_len: usize,
-    emit_ctx: *mut c_void,
-    emit_cb: NzbgetRsXmlRpcEmitFn,
+    out: &mut dyn RpcEmit,
 ) -> c_int {
     const MAX_NZB_BYTES: usize = 64 * 1024 * 1024;
     const MAX_PARALLEL: i32 = 16;
@@ -5872,7 +5841,7 @@ pub unsafe fn fleet_append(
 
     let timeout_sec = fleet_clamp_timeout_sec(timeout_sec_in, MAX_TIMEOUT_SEC);
     if req_members.is_null() || req_members_len == 0 {
-        return emit_fleet_result(emit_ctx, emit_cb, 0, true, b"NO_MEMBERS", &[]);
+        return emit_fleet_result(out, 0, true, b"NO_MEMBERS", &[]);
     }
 
     struct ReqMember {
@@ -5915,7 +5884,7 @@ pub unsafe fn fleet_append(
     let key_lock = fleet_key_lock(&dupe_key);
     let key_wait_ms = (deadline_ms - donor_now_ms() - FINISH_RESERVE_MS).max(0);
     let Some(_key_guard) = key_lock.try_lock_for(key_wait_ms) else {
-        return emit_fleet_result(emit_ctx, emit_cb, 0, false, b"KEY_BUSY", &[]);
+        return emit_fleet_result(out, 0, false, b"KEY_BUSY", &[]);
     };
 
     let fetched_slots: Vec<Mutex<(bool, i32, Vec<u8>)>> = (0..members.len())
@@ -6208,8 +6177,7 @@ pub unsafe fn fleet_append(
         msg.extend_from_slice(b" is downloaded already");
         host_log(host_ctx, host_cb, MK_INFO, &msg);
         return emit_fleet_result(
-            emit_ctx,
-            emit_cb,
+            out,
             0,
             true,
             b"ALREADY_DOWNLOADED",
@@ -6565,7 +6533,7 @@ pub unsafe fn fleet_append(
     }
 
     if donor_stopping() || http_stopped() {
-        return emit_fleet_result(emit_ctx, emit_cb, 0, false, b"SHUTDOWN", &[]);
+        return emit_fleet_result(out, 0, false, b"SHUTDOWN", &[]);
     }
 
     let mut added = vec![0i32; candidates.len()];
@@ -6822,7 +6790,7 @@ pub unsafe fn fleet_append(
     let summary_log =
         fleet_format_summary_log(members.len() as i32, &dupe_key, chosen, &reason, complete);
     host_log(host_ctx, host_cb, MK_INFO, &summary_log);
-    emit_fleet_result(emit_ctx, emit_cb, chosen, complete, &reason, &out_entries)
+    emit_fleet_result(out, chosen, complete, &reason, &out_entries)
 }
 
 #[cfg(test)]

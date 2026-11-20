@@ -248,33 +248,8 @@ pub type NzbgetRsXmlRpcActionFn = unsafe extern "C" fn(
     out_buf: *mut Vec<u8>,
 ) -> c_int;
 
-pub type NzbgetRsXmlRpcEmitFn = unsafe extern "C" fn(
-    emit_ctx: *mut c_void,
-    sub: c_int,
-    a1: c_int,
-    a2: c_int,
-    a3: c_int,
-    a4: c_int,
-    a5: c_int,
-    a6: c_int,
-    i1: i64,
-    i2: i64,
-    i3: i64,
-    s1: *const c_char,
-    s2: *const c_char,
-    s3: *const c_char,
-    s4: *const c_char,
-    p1: *const c_void,
-    n1: usize,
-    p2: *const c_void,
-    n2: usize,
-    p3: *const c_void,
-    n3: usize,
-    p4: *const c_void,
-    n4: usize,
-);
-
-pub type NzbgetRsXmlRpcCollectFn = unsafe extern "C" fn(
+/// Gathers one kind of RPC result from the daemon and writes it to `out`.
+pub type NzbgetRsXmlRpcCollectFn = unsafe fn(
     ctx: *mut c_void,
     kind: c_int,
     a1: c_int,
@@ -290,9 +265,125 @@ pub type NzbgetRsXmlRpcCollectFn = unsafe extern "C" fn(
     s6: *const c_char,
     p1: *const c_void,
     n1: usize,
-    emit_ctx: *mut c_void,
-    emit_cb: NzbgetRsXmlRpcEmitFn,
+    out: &mut dyn RpcEmit,
 ) -> c_int;
+
+/// A list-group entry's queue fields (`listgroups`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RpcGroupItem {
+    pub nzb_id: c_int,
+    pub remaining_size: i64,
+    pub paused_size: i64,
+    pub remaining_file_count: c_int,
+    pub remaining_par_count: c_int,
+    pub priority: c_int,
+    pub active_downloads: c_int,
+    pub has_post_info: bool,
+    pub post_stage: c_int,
+    pub has_queue_script_job: bool,
+    pub queue_script_active: bool,
+    pub direct_unpack_status: c_int,
+    pub kind: c_int,
+}
+
+/// The NZB fields shared by group, post-queue and history entries.
+#[derive(Clone, Copy)]
+pub struct RpcNzbInfo<'a> {
+    pub info: &'a NzbgetRsRpcNzbInfoInput,
+    pub params: &'a [NzbgetRsRpcParamItem],
+    pub scripts: &'a [NzbgetRsRpcScriptItem],
+    pub stats: &'a [NzbgetRsRpcServerStatItem],
+}
+
+/// The post-processing fields that close a group or post-queue entry.
+#[derive(Clone, Copy)]
+pub struct RpcPostInfo<'a> {
+    pub is_post_queue: bool,
+    pub has_post_info: bool,
+    /// NUL-terminated, or null
+    pub progress_label: *const c_char,
+    pub stage_progress: c_int,
+    pub cur_time: i64,
+    pub stage_time: i64,
+    pub start_time: i64,
+    pub logs: &'a [NzbgetRsRpcLogEntry],
+}
+
+/// The start of a `postqueue` entry. Strings are NUL-terminated or null.
+#[derive(Clone, Copy)]
+pub struct RpcPostQueueItem {
+    pub nzb_id: c_int,
+    pub info_name: *const c_char,
+    pub stage: c_int,
+    pub file_progress: c_int,
+}
+
+/// The start of a `history` NZB or URL entry. Strings are NUL-terminated or null.
+#[derive(Clone, Copy)]
+pub struct RpcHistoryNzb {
+    pub id: c_int,
+    pub name: *const c_char,
+    pub remaining_file_count: c_int,
+    pub retry_data: bool,
+    pub history_time: c_int,
+    pub status: *const c_char,
+}
+
+/// A `history` entry for a hidden duplicate. Strings are NUL-terminated or null.
+#[derive(Clone, Copy)]
+pub struct RpcHistoryDup {
+    pub id: c_int,
+    pub name: *const c_char,
+    pub history_time: c_int,
+    pub size: i64,
+    pub dupe_key: *const c_char,
+    pub dupe_score: c_int,
+    pub dupe_mode: c_int,
+    pub dup_status: c_int,
+}
+
+/// A `urlqueue` entry. Strings are NUL-terminated or null.
+#[derive(Clone, Copy)]
+pub struct RpcUrlQueueItem {
+    pub id: c_int,
+    pub filename: *const c_char,
+    pub url: *const c_char,
+    pub name: *const c_char,
+    pub category: *const c_char,
+    pub priority: c_int,
+}
+
+/// Where collectors write RPC results, one method per kind of result.
+/// Pointers inside the items must be valid (NUL-terminated strings) for the
+/// call. Every method does nothing by default, so a test can implement only
+/// what it checks.
+#[allow(unused_variables)]
+pub trait RpcEmit {
+    fn status(&mut self, status: &NzbgetRsRpcStatusInput, servers: &[NzbgetRsRpcServerStatus]) {}
+    fn log(&mut self, entries: &[NzbgetRsRpcLogEntry]) {}
+    fn file(&mut self, item: &NzbgetRsRpcFileItem) {}
+    /// Opens a `listgroups` entry; [`RpcEmit::post_info_end`] closes it.
+    fn group(&mut self, group: &RpcGroupItem, info: &RpcNzbInfo<'_>) {}
+    fn post_info_end(&mut self, post: &RpcPostInfo<'_>) {}
+    /// Opens a `postqueue` entry; [`RpcEmit::post_info_end`] closes it.
+    fn post_queue_item(&mut self, item: &RpcPostQueueItem, info: &RpcNzbInfo<'_>) {}
+    fn history_nzb(&mut self, item: &RpcHistoryNzb, info: &RpcNzbInfo<'_>) {}
+    fn history_dup(&mut self, item: &RpcHistoryDup) {}
+    fn url_queue_item(&mut self, item: &RpcUrlQueueItem) {}
+    fn fleet_result(
+        &mut self,
+        chosen: c_int,
+        complete: bool,
+        reason: &CStr,
+        members: &[NzbgetRsRpcFleetMember],
+    ) {
+    }
+    fn config_list(&mut self, entries: &[NzbgetRsRpcConfigItem]) {}
+    /// Template texts, each NUL-terminated.
+    fn config_templates(&mut self, templates: &[*const c_char]) {}
+    fn feed_item(&mut self, item: &NzbgetRsRpcFeedItem) {}
+    fn server_volume(&mut self, item: &NzbgetRsRpcServerVolumeItem) {}
+}
 
 #[inline]
 fn split_i64(val: i64) -> (u32, u32) {
@@ -4812,217 +4903,245 @@ impl<'a> XmlRpcHost<'a> {
     }
 }
 
-struct EmitState {
+/// The RPC response being built: what the collectors write into.
+struct RpcEmitter {
     is_json: bool,
     eff_access: c_int,
     index: usize,
     out: Vec<u8>,
 }
 
-#[allow(clippy::too_many_arguments)]
-unsafe extern "C" fn collect_emit_trampoline(
-    emit_ctx: *mut c_void,
-    sub: c_int,
-    a1: c_int,
-    a2: c_int,
-    a3: c_int,
-    a4: c_int,
-    a5: c_int,
-    a6: c_int,
-    i1: i64,
-    i2: i64,
-    i3: i64,
-    s1: *const c_char,
-    s2: *const c_char,
-    s3: *const c_char,
-    s4: *const c_char,
-    p1: *const c_void,
-    n1: usize,
-    p2: *const c_void,
-    n2: usize,
-    p3: *const c_void,
-    n3: usize,
-    p4: *const c_void,
-    n4: usize,
-) {
-    let st = unsafe { &mut *(emit_ctx as *mut EmitState) };
-    let json = st.is_json;
-    match sub {
-        // status
-        1 => unsafe {
-            write_status(&mut st.out, json, p1.cast(), p2.cast(), n2);
-        },
-        // log / loadlog / logupdate
-        2 => unsafe {
-            write_log_list(&mut st.out, json, p1.cast(), n1);
-        },
-        // listfiles item
-        3 => {
-            let idx = st.index;
-            st.index += 1;
-            unsafe {
-                write_file_item(&mut st.out, json, idx, p1.cast());
-            }
-        }
-        // listgroups start + nzb_info_fields
-        4 => {
-            let idx = st.index;
-            st.index += 1;
-            let flags = a6;
-            unsafe {
-                write_group_item_start(
-                    &mut st.out,
-                    json,
-                    idx,
-                    a1,
-                    i1,
-                    i2,
-                    a2,
-                    a3,
-                    a4,
-                    a5,
-                    (flags & 1) != 0,
-                    (flags >> 4) & 0xff,
-                    (flags & 2) != 0,
-                    (flags & 4) != 0,
-                    (flags >> 12) & 0xff,
-                    (flags >> 20) & 0xff,
-                );
-                write_nzb_info_fields(
-                    &mut st.out,
-                    json,
-                    p1.cast(),
-                    p2.cast(),
-                    n2,
-                    p3.cast(),
-                    n3,
-                    p4.cast(),
-                    n4,
-                );
-            }
-            if json {
-                st.out.extend_from_slice(b",\n");
-            }
-        }
-        // listgroups / postqueue post_info_fields + item close
-        5 => {
-            let is_post_queue = a1 != 0;
-            let has_post_info = a2 != 0;
-            unsafe {
-                write_post_info_fields(
-                    &mut st.out,
-                    json,
-                    is_post_queue,
-                    has_post_info,
-                    s1,
-                    a3,
-                    i1,
-                    i2,
-                    i3,
-                    p1.cast(),
-                    n1,
-                );
-            }
-            st.out
-                .extend_from_slice(if json { b"}" } else { b"</struct></value>\n" });
-        }
-        // postqueue start + nzb_info_fields
-        6 => {
-            let idx = st.index;
-            st.index += 1;
-            unsafe {
-                write_postqueue_item_start(&mut st.out, json, idx, a1, s1, a2, a3);
-                write_nzb_info_fields(
-                    &mut st.out,
-                    json,
-                    p1.cast(),
-                    p2.cast(),
-                    n2,
-                    p3.cast(),
-                    n3,
-                    p4.cast(),
-                    n4,
-                );
-            }
-            if json {
-                st.out.extend_from_slice(b",\n");
-            }
-        }
-        // history nzb/url item
-        7 => {
-            let idx = st.index;
-            st.index += 1;
-            unsafe {
-                write_history_nzb_start(&mut st.out, json, idx, a1, s1, a2, a3 != 0, a4, s2);
-                write_nzb_info_fields(
-                    &mut st.out,
-                    json,
-                    p1.cast(),
-                    p2.cast(),
-                    n2,
-                    p3.cast(),
-                    n3,
-                    p4.cast(),
-                    n4,
-                );
-            }
-            st.out
-                .extend_from_slice(if json { b"}" } else { b"</struct></value>" });
-        }
-        // history dup item
-        8 => {
-            let idx = st.index;
-            st.index += 1;
-            unsafe {
-                write_history_dup_item(&mut st.out, json, idx, a1, s1, a2, i1, s2, a3, a4, a5);
-            }
-            st.out
-                .extend_from_slice(if json { b"}" } else { b"</struct></value>" });
-        }
-        // urlqueue item
-        9 => {
-            let idx = st.index;
-            st.index += 1;
-            unsafe {
-                write_urlqueue_item(&mut st.out, json, idx, a1, s1, s2, s3, s4, a2);
-            }
-        }
-        // appendfleet result
-        10 => unsafe {
-            write_fleet_result(&mut st.out, a1, a2 != 0, s1, p1.cast(), n1);
-        },
-        // config list
-        11 => unsafe {
-            write_config_list(
-                &mut st.out,
-                json,
-                st.eff_access,
-                crate::rpcroute::UA_RESTRICTED,
-                p1.cast(),
-                n1,
+impl RpcEmitter {
+    fn next_index(&mut self) -> usize {
+        let idx = self.index;
+        self.index += 1;
+        idx
+    }
+
+    fn nzb_info(&mut self, info: &RpcNzbInfo<'_>) {
+        // SAFETY: RpcEmit's contract: the items' pointers are valid.
+        unsafe {
+            write_nzb_info_fields(
+                &mut self.out,
+                self.is_json,
+                info.info,
+                info.params.as_ptr(),
+                info.params.len(),
+                info.scripts.as_ptr(),
+                info.scripts.len(),
+                info.stats.as_ptr(),
+                info.stats.len(),
             );
-        },
-        // configtemplates
-        12 => unsafe {
-            write_config_templates(&mut st.out, json, p1.cast(), n1);
-        },
-        // viewfeed / previewfeed item
-        13 => {
-            let idx = st.index;
-            st.index += 1;
-            unsafe {
-                write_feed_item(&mut st.out, json, idx, p1.cast());
-            }
         }
-        // servervolumes item
-        14 => {
-            let idx = st.index;
-            st.index += 1;
-            unsafe {
-                write_server_volume_item(&mut st.out, json, idx, p1.cast());
-            }
+    }
+
+    fn close_struct(&mut self, xml_newline: bool) {
+        let close: &[u8] = match (self.is_json, xml_newline) {
+            (true, _) => b"}",
+            (false, true) => b"</struct></value>\n",
+            (false, false) => b"</struct></value>",
+        };
+        self.out.extend_from_slice(close);
+    }
+}
+
+// SAFETY (all methods): RpcEmit's contract makes the items' pointers valid
+// for the call, which is what the write_* functions need.
+impl RpcEmit for RpcEmitter {
+    fn status(&mut self, status: &NzbgetRsRpcStatusInput, servers: &[NzbgetRsRpcServerStatus]) {
+        unsafe {
+            write_status(
+                &mut self.out,
+                self.is_json,
+                status,
+                servers.as_ptr(),
+                servers.len(),
+            )
+        };
+    }
+
+    fn log(&mut self, entries: &[NzbgetRsRpcLogEntry]) {
+        unsafe { write_log_list(&mut self.out, self.is_json, entries.as_ptr(), entries.len()) };
+    }
+
+    fn file(&mut self, item: &NzbgetRsRpcFileItem) {
+        let idx = self.next_index();
+        unsafe { write_file_item(&mut self.out, self.is_json, idx, item) };
+    }
+
+    fn group(&mut self, g: &RpcGroupItem, info: &RpcNzbInfo<'_>) {
+        let idx = self.next_index();
+        unsafe {
+            write_group_item_start(
+                &mut self.out,
+                self.is_json,
+                idx,
+                g.nzb_id,
+                g.remaining_size,
+                g.paused_size,
+                g.remaining_file_count,
+                g.remaining_par_count,
+                g.priority,
+                g.active_downloads,
+                g.has_post_info,
+                g.post_stage,
+                g.has_queue_script_job,
+                g.queue_script_active,
+                g.direct_unpack_status,
+                g.kind,
+            );
         }
-        _ => {}
+        self.nzb_info(info);
+        if self.is_json {
+            self.out.extend_from_slice(b",\n");
+        }
+    }
+
+    fn post_info_end(&mut self, p: &RpcPostInfo<'_>) {
+        unsafe {
+            write_post_info_fields(
+                &mut self.out,
+                self.is_json,
+                p.is_post_queue,
+                p.has_post_info,
+                p.progress_label,
+                p.stage_progress,
+                p.cur_time,
+                p.stage_time,
+                p.start_time,
+                p.logs.as_ptr(),
+                p.logs.len(),
+            );
+        }
+        self.close_struct(true);
+    }
+
+    fn post_queue_item(&mut self, item: &RpcPostQueueItem, info: &RpcNzbInfo<'_>) {
+        let idx = self.next_index();
+        unsafe {
+            write_postqueue_item_start(
+                &mut self.out,
+                self.is_json,
+                idx,
+                item.nzb_id,
+                item.info_name,
+                item.stage,
+                item.file_progress,
+            );
+        }
+        self.nzb_info(info);
+        if self.is_json {
+            self.out.extend_from_slice(b",\n");
+        }
+    }
+
+    fn history_nzb(&mut self, item: &RpcHistoryNzb, info: &RpcNzbInfo<'_>) {
+        let idx = self.next_index();
+        unsafe {
+            write_history_nzb_start(
+                &mut self.out,
+                self.is_json,
+                idx,
+                item.id,
+                item.name,
+                item.remaining_file_count,
+                item.retry_data,
+                item.history_time,
+                item.status,
+            );
+        }
+        self.nzb_info(info);
+        self.close_struct(false);
+    }
+
+    fn history_dup(&mut self, item: &RpcHistoryDup) {
+        let idx = self.next_index();
+        unsafe {
+            write_history_dup_item(
+                &mut self.out,
+                self.is_json,
+                idx,
+                item.id,
+                item.name,
+                item.history_time,
+                item.size,
+                item.dupe_key,
+                item.dupe_score,
+                item.dupe_mode,
+                item.dup_status,
+            );
+        }
+        self.close_struct(false);
+    }
+
+    fn url_queue_item(&mut self, item: &RpcUrlQueueItem) {
+        let idx = self.next_index();
+        unsafe {
+            write_urlqueue_item(
+                &mut self.out,
+                self.is_json,
+                idx,
+                item.id,
+                item.filename,
+                item.url,
+                item.name,
+                item.category,
+                item.priority,
+            );
+        }
+    }
+
+    fn fleet_result(
+        &mut self,
+        chosen: c_int,
+        complete: bool,
+        reason: &CStr,
+        members: &[NzbgetRsRpcFleetMember],
+    ) {
+        unsafe {
+            write_fleet_result(
+                &mut self.out,
+                chosen,
+                complete,
+                reason.as_ptr(),
+                members.as_ptr(),
+                members.len(),
+            );
+        }
+    }
+
+    fn config_list(&mut self, entries: &[NzbgetRsRpcConfigItem]) {
+        unsafe {
+            write_config_list(
+                &mut self.out,
+                self.is_json,
+                self.eff_access,
+                crate::rpcroute::UA_RESTRICTED,
+                entries.as_ptr(),
+                entries.len(),
+            );
+        }
+    }
+
+    fn config_templates(&mut self, templates: &[*const c_char]) {
+        unsafe {
+            write_config_templates(
+                &mut self.out,
+                self.is_json,
+                templates.as_ptr(),
+                templates.len(),
+            );
+        }
+    }
+
+    fn feed_item(&mut self, item: &NzbgetRsRpcFeedItem) {
+        let idx = self.next_index();
+        unsafe { write_feed_item(&mut self.out, self.is_json, idx, item) };
+    }
+
+    fn server_volume(&mut self, item: &NzbgetRsRpcServerVolumeItem) {
+        let idx = self.next_index();
+        unsafe { write_server_volume_item(&mut self.out, self.is_json, idx, item) };
     }
 }
 
@@ -5108,7 +5227,7 @@ unsafe fn execute_xml_command(
                        n1: usize,
                        wrap_array: bool|
      -> (c_int, Vec<u8>) {
-        let mut st = EmitState {
+        let mut st = RpcEmitter {
             is_json,
             eff_access,
             index: 0,
@@ -5136,8 +5255,7 @@ unsafe fn execute_xml_command(
                     s6,
                     p1,
                     n1,
-                    (&mut st as *mut EmitState).cast(),
-                    collect_emit_trampoline,
+                    &mut st,
                 )
             },
             None => 0,

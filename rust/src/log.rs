@@ -9,7 +9,7 @@ use std::ptr;
 use std::sync::Mutex;
 
 use crate::options::NzbgetRsOptions;
-use crate::xmlrpc_format::{NzbgetRsRpcLogEntry, NzbgetRsXmlRpcEmitFn};
+use crate::xmlrpc_format::{NzbgetRsRpcLogEntry, RpcEmit};
 
 type BinRpcLogBeginFn = unsafe extern "C" fn(*mut c_void, c_int, u32, *mut c_int);
 type BinRpcLogPushFn = unsafe extern "C" fn(*mut c_void, u32, u32, u32, *const c_char);
@@ -520,8 +520,7 @@ fn collect_messages_rpc(
     messages: &VecDeque<RsLogMessage>,
     id_from: c_int,
     max_entries: c_int,
-    emit_ctx: *mut c_void,
-    emit_cb: NzbgetRsXmlRpcEmitFn,
+    out: &mut dyn RpcEmit,
 ) {
     let len = messages.len() as i32;
     let mut start = len;
@@ -547,37 +546,21 @@ fn collect_messages_rpc(
     } else {
         Vec::new()
     };
-    unsafe {
-        emit_cb(
-            emit_ctx,
-            2,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            ptr::null(),
-            ptr::null(),
-            ptr::null(),
-            ptr::null(),
-            entries.as_ptr().cast(),
-            entries.len(),
-            ptr::null(),
-            0,
-            ptr::null(),
-            0,
-            ptr::null(),
-            0,
-        );
-    }
+    out.log(&entries);
 }
 
 static ACTIVE_LOG: std::sync::RwLock<Option<std::sync::Weak<NzbgetRsLog>>> =
     std::sync::RwLock::new(None);
+
+impl NzbgetRsLog {
+    /// The XML/JSON-RPC `log` result: messages from `id_from`, or the last
+    /// `max_entries` (both 0 = all).
+    pub(crate) fn collect_rpc(&self, id_from: c_int, max_entries: c_int, out: &mut dyn RpcEmit) {
+        if let Ok(inner) = self.inner.lock() {
+            collect_messages_rpc(&inner.messages, id_from, max_entries, out);
+        }
+    }
+}
 
 pub(crate) fn active_log() -> Option<std::sync::Arc<NzbgetRsLog>> {
     ACTIVE_LOG
@@ -794,7 +777,7 @@ pub(crate) unsafe fn nzbget_rs_log_collect(
     mode: c_int,
     log: *const NzbgetRsLog,
     a1: c_int,
-    a2: c_int,
+    _a2: c_int,
     u1: u32,
     out_int: *mut c_int,
     ctx: *mut c_void,
@@ -830,18 +813,6 @@ pub(crate) unsafe fn nzbget_rs_log_collect(
             } else {
                 for m in &inner.messages {
                     emit(ctx, m.id, m.kind, m.time, m.text.as_ptr());
-                }
-            }
-        }
-        1 => {
-            // XML/JSON-RPC log
-            if fn1 == 0 {
-                return;
-            }
-            let emit_cb: NzbgetRsXmlRpcEmitFn = std::mem::transmute(fn1);
-            if let Some(lg) = log.as_ref() {
-                if let Ok(inner) = lg.inner.lock() {
-                    collect_messages_rpc(&inner.messages, a1, a2, ctx, emit_cb);
                 }
             }
         }

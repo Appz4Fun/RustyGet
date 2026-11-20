@@ -3784,73 +3784,21 @@ fn load_script_template_cstrings() -> Option<Vec<CString>> {
 #[cfg(unix)]
 pub(crate) unsafe fn script_config_emit_templates(
     load_descriptions: bool,
-    emit_ctx: *mut c_void,
-    emit_cb: Option<crate::xmlrpc_format::NzbgetRsXmlRpcEmitFn>,
+    out: &mut dyn crate::xmlrpc_format::RpcEmit,
 ) -> c_int {
-    let Some(emit) = emit_cb else {
-        return 0;
-    };
     if load_descriptions {
         let Some(loaded) = load_script_template_cstrings() else {
             return 0;
         };
         let ptrs: Vec<*const c_char> = loaded.iter().map(|c| c.as_ptr()).collect();
-        emit(
-            emit_ctx,
-            12,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null(),
-            ptrs.as_ptr().cast(),
-            ptrs.len(),
-            std::ptr::null(),
-            0,
-            std::ptr::null(),
-            0,
-            std::ptr::null(),
-            0,
-        );
+        out.config_templates(&ptrs);
         1
     } else {
         let Ok(g) = ACTIVE_SCRIPT_TEMPLATES.lock() else {
             return 0;
         };
         let ptrs: Vec<*const c_char> = g.iter().map(|c| c.as_ptr()).collect();
-        emit(
-            emit_ctx,
-            12,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null(),
-            ptrs.as_ptr().cast(),
-            ptrs.len(),
-            std::ptr::null(),
-            0,
-            std::ptr::null(),
-            0,
-            std::ptr::null(),
-            0,
-        );
+        out.config_templates(&ptrs);
         1
     }
 }
@@ -4739,8 +4687,8 @@ unsafe extern "C" fn web_rpc_action_bridge(
             )
         }
         18 => {
-            let tdir =
-                crate::options::active_options().and_then(|o| o.str_cstr(OptStr::TempDir).map(|s| s.to_owned()));
+            let tdir = crate::options::active_options()
+                .and_then(|o| o.str_cstr(OptStr::TempDir).map(|s| s.to_owned()));
             let tdir_ptr = tdir.as_ref().map_or(c"".as_ptr(), |s| s.as_ptr());
             let mut buf = Vec::new();
             let ok = crate::net::nzbget_rs_webdl_read_temp_url(
@@ -4779,7 +4727,6 @@ unsafe extern "C" fn web_rpc_action_bridge(
                 0,
                 0,
                 0,
-                std::ptr::null_mut(),
                 None,
             )
         }
@@ -4986,35 +4933,19 @@ unsafe fn emit_rpc_post(
     post_ptr: crate::queuesubsys_host::PostRef,
     log_entries: c_int,
     post_queue: bool,
-    emit_ctx: *mut c_void,
-    emit_cb: crate::xmlrpc_format::NzbgetRsXmlRpcEmitFn,
+    out: &mut dyn crate::xmlrpc_format::RpcEmit,
 ) {
     if post_ptr.is_none() {
-        emit_cb(
-            emit_ctx,
-            5,
-            c_int::from(post_queue),
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null(),
-            0,
-            std::ptr::null(),
-            0,
-            std::ptr::null(),
-            0,
-            std::ptr::null(),
-            0,
-        );
+        out.post_info_end(&crate::xmlrpc_format::RpcPostInfo {
+            is_post_queue: post_queue,
+            has_post_info: false,
+            progress_label: std::ptr::null(),
+            stage_progress: 0,
+            cur_time: 0,
+            stage_time: 0,
+            start_time: 0,
+            logs: &[],
+        });
         return;
     }
     let pi = qh.post_snap(post_ptr);
@@ -5034,35 +4965,21 @@ unsafe fn emit_rpc_post(
             text: m.3.as_ptr(),
         })
         .collect();
-    emit_cb(
-        emit_ctx,
-        5,
-        c_int::from(post_queue),
-        1,
-        pi.stage_progress,
-        0,
-        0,
-        0,
+    out.post_info_end(&crate::xmlrpc_format::RpcPostInfo {
+        is_post_queue: post_queue,
+        has_post_info: true,
+        progress_label: c_label.as_ptr(),
+        stage_progress: pi.stage_progress,
         cur_time,
-        pi.stage_time,
-        pi.start_time,
-        c_label.as_ptr(),
-        std::ptr::null(),
-        std::ptr::null(),
-        std::ptr::null(),
-        entries.as_ptr().cast(),
-        entries.len(),
-        std::ptr::null(),
-        0,
-        std::ptr::null(),
-        0,
-        std::ptr::null(),
-        0,
-    );
+        stage_time: pi.stage_time,
+        start_time: pi.start_time,
+        logs: &entries,
+    });
 }
 
 #[cfg(unix)]
-unsafe extern "C" fn web_rpc_collect_bridge(
+#[allow(clippy::too_many_arguments)]
+unsafe fn web_rpc_collect_bridge(
     _ctx: *mut c_void,
     kind: c_int,
     a1: c_int,
@@ -5078,8 +4995,7 @@ unsafe extern "C" fn web_rpc_collect_bridge(
     s6: *const c_char,
     p1: *const c_void,
     n1: usize,
-    emit_ctx: *mut c_void,
-    emit_cb: crate::xmlrpc_format::NzbgetRsXmlRpcEmitFn,
+    out: &mut dyn crate::xmlrpc_format::RpcEmit,
 ) -> c_int {
     match kind {
         1 => {
@@ -5120,12 +5036,13 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                 s.calc_quota_usage(tz, opts.as_deref(), lg.as_deref())
             });
 
-            let (free_disk, total_disk) = match opts.as_deref().and_then(|o| o.str_cstr(OptStr::DestDir)) {
-                Some(p) if !p.to_bytes().is_empty() => {
-                    crate::fsops::get_disk_state(p).unwrap_or((0, 0))
-                }
-                _ => (0, 0),
-            };
+            let (free_disk, total_disk) =
+                match opts.as_deref().and_then(|o| o.str_cstr(OptStr::DestDir)) {
+                    Some(p) if !p.to_bytes().is_empty() => {
+                        crate::fsops::get_disk_state(p).unwrap_or((0, 0))
+                    }
+                    _ => (0, 0),
+                };
             let inter_cstr = opts.as_deref().and_then(|o| o.str_cstr(OptStr::InterDir));
             let inter_empty = inter_cstr.map_or(true, |p| p.to_bytes().is_empty());
             let (free_inter, total_inter) = match inter_cstr {
@@ -5200,31 +5117,7 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                 srvs.truncate(filled.min(cnt));
             }
 
-            emit_cb(
-                emit_ctx,
-                1,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null(),
-                (&sf as *const crate::xmlrpc_format::NzbgetRsRpcStatusInput).cast(),
-                0,
-                srvs.as_ptr().cast(),
-                srvs.len(),
-                std::ptr::null(),
-                0,
-                std::ptr::null(),
-                0,
-            );
+            out.status(&sf, &srvs);
             1
         }
         2 => {
@@ -5251,31 +5144,7 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                             text: m.3.as_ptr(),
                         })
                         .collect();
-                    emit_cb(
-                        emit_ctx,
-                        2,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        std::ptr::null(),
-                        std::ptr::null(),
-                        std::ptr::null(),
-                        std::ptr::null(),
-                        entries.as_ptr().cast(),
-                        entries.len(),
-                        std::ptr::null(),
-                        0,
-                        std::ptr::null(),
-                        0,
-                        std::ptr::null(),
-                        0,
-                    );
+                    out.log(&entries);
                     return 1;
                 }
                 // a download logged before NZB log files were dropped: its old file comes
@@ -5321,48 +5190,15 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                         });
                     }
                 }
-                emit_cb(
-                    emit_ctx,
-                    2,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    entries.as_ptr().cast(),
-                    entries.len(),
-                    std::ptr::null(),
-                    0,
-                    std::ptr::null(),
-                    0,
-                    std::ptr::null(),
-                    0,
-                );
+                out.log(&entries);
                 return 1;
             }
             if a1 == 1 {
-                crate::maintenance::collect_maint_messages_active(a3, a4, emit_ctx, emit_cb);
+                crate::maintenance::collect_maint_messages_active(a3, a4, out);
             } else {
-                let lg = crate::log::active_log();
-                crate::log::nzbget_rs_log_collect(
-                    1,
-                    lg.as_deref().map_or(std::ptr::null(), |l| l as *const _),
-                    a3,
-                    a4,
-                    0,
-                    std::ptr::null_mut(),
-                    emit_ctx,
-                    emit_cb as usize,
-                    0,
-                );
+                if let Some(lg) = crate::log::active_log() {
+                    lg.collect_rpc(a3, a4, out);
+                }
             }
             1
         }
@@ -5438,31 +5274,7 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                             active_downloads: f.active_downloads,
                             progress,
                         };
-                        emit_cb(
-                            emit_ctx,
-                            3,
-                            0,
-                            0,
-                            0,
-                            0,
-                            0,
-                            0,
-                            0,
-                            0,
-                            0,
-                            std::ptr::null(),
-                            std::ptr::null(),
-                            std::ptr::null(),
-                            std::ptr::null(),
-                            (&item as *const crate::xmlrpc_format::NzbgetRsRpcFileItem).cast(),
-                            0,
-                            std::ptr::null(),
-                            0,
-                            std::ptr::null(),
-                            0,
-                            std::ptr::null(),
-                            0,
-                        );
+                        out.file(&item);
                     }
                 }
             });
@@ -5482,37 +5294,33 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                         post_ptr = n.post_info_ptr;
                         let has_post = post_ptr.is_some();
                         let post_stage = if has_post { i32::from(n.post_stage) } else { 0 };
-                        let flags = (if has_post { 1 } else { 0 })
-                            | ((post_stage & 0xff) << 4)
-                            | ((i32::from(n.direct_unpack_status) & 0xff) << 12)
-                            | ((n.kind & 0xff) << 20);
-                        emit_cb(
-                            emit_ctx,
-                            4,
-                            n.id,
-                            flen,
-                            n.remaining_par_count,
-                            n.priority,
-                            n.active_downloads,
-                            flags,
-                            n.remaining_size,
-                            n.paused_size,
-                            0,
-                            std::ptr::null(),
-                            std::ptr::null(),
-                            std::ptr::null(),
-                            std::ptr::null(),
-                            (f as *const crate::xmlrpc_format::NzbgetRsRpcNzbInfoInput).cast(),
-                            0,
-                            prms.as_ptr().cast(),
-                            prms.len(),
-                            scrs.as_ptr().cast(),
-                            scrs.len(),
-                            sts.as_ptr().cast(),
-                            sts.len(),
+                        // The wire format keeps these 8 bits wide.
+                        let group = crate::xmlrpc_format::RpcGroupItem {
+                            nzb_id: n.id,
+                            remaining_size: n.remaining_size,
+                            paused_size: n.paused_size,
+                            remaining_file_count: flen,
+                            remaining_par_count: n.remaining_par_count,
+                            priority: n.priority,
+                            active_downloads: n.active_downloads,
+                            has_post_info: has_post,
+                            post_stage: post_stage & 0xff,
+                            has_queue_script_job: false,
+                            queue_script_active: false,
+                            direct_unpack_status: i32::from(n.direct_unpack_status) & 0xff,
+                            kind: n.kind & 0xff,
+                        };
+                        out.group(
+                            &group,
+                            &crate::xmlrpc_format::RpcNzbInfo {
+                                info: f,
+                                params: prms,
+                                scripts: scrs,
+                                stats: sts,
+                            },
                         );
                     });
-                    emit_rpc_post(&qh, post_ptr, a1, false, emit_ctx, emit_cb);
+                    emit_rpc_post(&qh, post_ptr, a1, false, out);
                 }
             });
             1
@@ -5532,33 +5340,22 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                     let pi = qh.post_snap(outer.post_info_ptr);
                     emit_rpc_nzb(&qh, pi.nzb_ptr, 0, |pn, _, f, prms, scrs, sts| {
                         let c_pname = cstr::to_cstring(&pn.name);
-                        emit_cb(
-                            emit_ctx,
-                            6,
-                            outer.id,
-                            pi.stage.into(),
-                            pi.file_progress,
-                            0,
-                            0,
-                            0,
-                            0,
-                            0,
-                            0,
-                            c_pname.as_ptr(),
-                            std::ptr::null(),
-                            std::ptr::null(),
-                            std::ptr::null(),
-                            (f as *const crate::xmlrpc_format::NzbgetRsRpcNzbInfoInput).cast(),
-                            0,
-                            prms.as_ptr().cast(),
-                            prms.len(),
-                            scrs.as_ptr().cast(),
-                            scrs.len(),
-                            sts.as_ptr().cast(),
-                            sts.len(),
+                        out.post_queue_item(
+                            &crate::xmlrpc_format::RpcPostQueueItem {
+                                nzb_id: outer.id,
+                                info_name: c_pname.as_ptr(),
+                                stage: pi.stage.into(),
+                                file_progress: pi.file_progress,
+                            },
+                            &crate::xmlrpc_format::RpcNzbInfo {
+                                info: f,
+                                params: prms,
+                                scripts: scrs,
+                                stats: sts,
+                            },
                         );
                     });
-                    emit_rpc_post(&qh, outer.post_info_ptr, a1, true, emit_ctx, emit_cb);
+                    emit_rpc_post(&qh, outer.post_info_ptr, a1, true, out);
                 }
             });
             1
@@ -5578,63 +5375,38 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                     if h.kind == crate::queuesubsys_host::HK_NZB
                         || h.kind == crate::queuesubsys_host::HK_URL
                     {
-                        let has_completed =
-                            c_int::from(qh.nzb_completed_files_len(h.nzb()) > 0);
+                        let has_completed = c_int::from(qh.nzb_completed_files_len(h.nzb()) > 0);
                         emit_rpc_nzb(&qh, h.nzb(), 2, |n, status_ptr, f, prms, scrs, sts| {
-                            emit_cb(
-                                emit_ctx,
-                                7,
-                                h.id,
-                                n.parked_file_count,
-                                has_completed,
-                                h.time as c_int,
-                                0,
-                                0,
-                                0,
-                                0,
-                                0,
-                                c_hname.as_ptr(),
-                                status_ptr,
-                                std::ptr::null(),
-                                std::ptr::null(),
-                                (f as *const crate::xmlrpc_format::NzbgetRsRpcNzbInfoInput).cast(),
-                                0,
-                                prms.as_ptr().cast(),
-                                prms.len(),
-                                scrs.as_ptr().cast(),
-                                scrs.len(),
-                                sts.as_ptr().cast(),
-                                sts.len(),
+                            out.history_nzb(
+                                &crate::xmlrpc_format::RpcHistoryNzb {
+                                    id: h.id,
+                                    name: c_hname.as_ptr(),
+                                    remaining_file_count: n.parked_file_count,
+                                    retry_data: has_completed != 0,
+                                    history_time: h.time as c_int,
+                                    status: status_ptr,
+                                },
+                                &crate::xmlrpc_format::RpcNzbInfo {
+                                    info: f,
+                                    params: prms,
+                                    scripts: scrs,
+                                    stats: sts,
+                                },
                             );
                         });
                     } else if h.kind == crate::queuesubsys_host::HK_DUP {
                         let d = qh.dup_snap(h.inner_ptr);
                         let c_dkey = cstr::to_cstring(&d.dupe_key);
-                        emit_cb(
-                            emit_ctx,
-                            8,
-                            h.id,
-                            h.time as c_int,
-                            d.dupe_score,
-                            d.dupe_mode.into(),
-                            d.status.into(),
-                            0,
-                            d.size,
-                            0,
-                            0,
-                            c_hname.as_ptr(),
-                            c_dkey.as_ptr(),
-                            std::ptr::null(),
-                            std::ptr::null(),
-                            std::ptr::null(),
-                            0,
-                            std::ptr::null(),
-                            0,
-                            std::ptr::null(),
-                            0,
-                            std::ptr::null(),
-                            0,
-                        );
+                        out.history_dup(&crate::xmlrpc_format::RpcHistoryDup {
+                            id: h.id,
+                            name: c_hname.as_ptr(),
+                            history_time: h.time as c_int,
+                            size: d.size,
+                            dupe_key: c_dkey.as_ptr(),
+                            dupe_score: d.dupe_score,
+                            dupe_mode: d.dupe_mode.into(),
+                            dup_status: d.status.into(),
+                        });
                     }
                 }
             });
@@ -5654,31 +5426,14 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                         let c_url = cstr::to_cstring(&n.url);
                         let c_name = cstr::to_cstring(&n.name);
                         let c_cat = cstr::to_cstring(&n.category);
-                        emit_cb(
-                            emit_ctx,
-                            9,
-                            n.id,
-                            n.priority,
-                            0,
-                            0,
-                            0,
-                            0,
-                            0,
-                            0,
-                            0,
-                            c_fn.as_ptr(),
-                            c_url.as_ptr(),
-                            c_name.as_ptr(),
-                            c_cat.as_ptr(),
-                            std::ptr::null(),
-                            0,
-                            std::ptr::null(),
-                            0,
-                            std::ptr::null(),
-                            0,
-                            std::ptr::null(),
-                            0,
-                        );
+                        out.url_queue_item(&crate::xmlrpc_format::RpcUrlQueueItem {
+                            id: n.id,
+                            filename: c_fn.as_ptr(),
+                            url: c_url.as_ptr(),
+                            name: c_name.as_ptr(),
+                            category: c_cat.as_ptr(),
+                            priority: n.priority,
+                        });
                     }
                 }
             });
@@ -5693,8 +5448,7 @@ unsafe extern "C" fn web_rpc_collect_bridge(
             a2,
             p1.cast(),
             n1,
-            emit_ctx,
-            emit_cb,
+            out,
         ),
         9 => {
             let opts = crate::options::active_options();
@@ -5708,77 +5462,24 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                     });
                 });
             }
-            emit_cb(
-                emit_ctx,
-                11,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null(),
-                entries.as_ptr().cast(),
-                entries.len(),
-                std::ptr::null(),
-                0,
-                std::ptr::null(),
-                0,
-                std::ptr::null(),
-                0,
-            );
+            out.config_list(&entries);
             1
         }
-        10 => script_config_emit_templates(a1 != 0, emit_ctx, Some(emit_cb)),
+        10 => script_config_emit_templates(a1 != 0, out),
         11 => {
             let Some(fc) = crate::feed::active_feed_coord() else {
                 return 0;
             };
-            struct RpcFeedEmit {
-                ctx: *mut c_void,
-                cb: crate::xmlrpc_format::NzbgetRsXmlRpcEmitFn,
-            }
             unsafe extern "C" fn on_feed_item(
                 raw: *mut c_void,
                 item: *const crate::xmlrpc_format::NzbgetRsRpcFeedItem,
             ) {
-                let r = &*(raw as *const RpcFeedEmit);
-                (r.cb)(
-                    r.ctx,
-                    13,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    item.cast(),
-                    0,
-                    std::ptr::null(),
-                    0,
-                    std::ptr::null(),
-                    0,
-                    std::ptr::null(),
-                    0,
-                );
+                // SAFETY: `raw` is the `&mut dyn RpcEmit` below, alive for the
+                // call; the feed passes a valid item.
+                let out = unsafe { &mut *raw.cast::<&mut dyn crate::xmlrpc_format::RpcEmit>() };
+                out.feed_item(unsafe { &*item });
             }
-            let mut rctx = RpcFeedEmit {
-                ctx: emit_ctx,
-                cb: emit_cb,
-            };
+            let mut out_ref: &mut dyn crate::xmlrpc_format::RpcEmit = out;
             fc.emit_view_or_preview_active(
                 a1,
                 a2,
@@ -5792,7 +5493,7 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                 s4,
                 s5,
                 s6,
-                (&mut rctx as *mut RpcFeedEmit).cast(),
+                (&raw mut out_ref).cast(),
                 Some(on_feed_item),
             )
         }
@@ -5810,8 +5511,7 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                 a3,
                 a4,
                 a5,
-                emit_ctx,
-                Some(emit_cb),
+                Some(out),
             )
         }
         _ => 0,

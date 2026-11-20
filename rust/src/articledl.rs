@@ -319,19 +319,7 @@ fn write_acache_flag(qdir: &[u8]) {
 }
 
 fn delete_acache_flag(qdir: &[u8]) {
-    let mut o1 = 0;
-    let mut o2 = 0;
-    let _ = crate::diskstate_format::diskstate_fs_op(
-        3,
-        qdir,
-        crate::paths::PATH_SEPARATOR,
-        0,
-        0,
-        0,
-        0,
-        &mut o1,
-        &mut o2,
-    );
+    crate::diskstate_format::delete_cache_flag(qdir, crate::paths::PATH_SEPARATOR);
 }
 
 fn cache_alloc(size: i32) -> *mut u8 {

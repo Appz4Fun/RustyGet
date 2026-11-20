@@ -9118,8 +9118,8 @@ fn plan_dead_fills(
                             done: false,
                             offered,
                             offer_failed: false,
-                            on_disk_target: head_lost
-                                .contains_key(&i)
+                            // Restored exactly only in RAR5 (see `write_back_volume`).
+                            on_disk_target: (template.version == 5 && head_lost.contains_key(&i))
                                 .then(|| member_targets.get(members_by_index[i] as usize).copied())
                                 .flatten()
                                 .filter(|&t| t >= 0)
@@ -9954,11 +9954,13 @@ impl CrossPackRepairSession {
     }
 
     /// Writes the volume that lost its headers, fill `d` (borrowed in full), back over its
-    /// file: its headers as the sibling's but for its number and part checksum, the data with
-    /// the borrowed holes filled, and the sibling's tail. Only when the result has the file's
-    /// size and layout, so nothing on disk moves.
+    /// file: its headers and tail as the sibling's but for its number and part checksum
+    /// ([`crate::deadvolume::faithful_frame`]), and the borrowed holes of its data. Only when
+    /// the result has the file's size and matches every byte that arrived, so nothing on disk
+    /// moves. Streams in chunks: volumes run to hundreds of MB.
     fn write_back_volume(&self, d: &DeadFill) -> Result<(), String> {
         use std::io::{Read, Seek, SeekFrom, Write};
+        const CHUNK: usize = 1 << 20;
         let path_of = |m: i32| {
             crate::artwritercore::article_writer_format_dest_file_path(
                 &self.dest_dir,
@@ -9966,43 +9968,53 @@ impl CrossPackRepairSession {
                 &self.set_members[m as usize].name,
             )
         };
+        if d.version != 5 {
+            return Err("only RAR5 headers are restored exactly".into());
+        }
         if d.packed != d.template_packed {
             return Err("its part is not the size of the sibling's".into());
         }
-        let data = std::fs::read(crate::fsops::path(&path_of(d.member)))
-            .map_err(|e| format!("borrowed data: {e}"))?;
-        if data.len() as i64 != d.packed {
-            return Err(format!("borrowed {} bytes, expected {}", data.len(), d.packed));
+        fn io(what: &'static str) -> impl Fn(std::io::Error) -> String {
+            move |e| format!("{what}: {e}")
         }
-        let part_crc = crc32fast::hash(&data);
-        let template = std::fs::read(crate::fsops::path(&path_of(d.template_member)))
-            .map_err(|e| format!("sibling volume: {e}"))?;
-        let at = d.template_data_offset as usize;
-        let end = at + d.template_packed as usize;
-        if end > template.len() {
+        let mut data = std::fs::File::open(crate::fsops::path(&path_of(d.member)))
+            .map_err(io("borrowed data"))?;
+        if data.metadata().map_err(io("borrowed data"))?.len() != d.packed as u64 {
+            return Err("the borrowed data is not the part's size".into());
+        }
+        let mut buf = vec![0u8; CHUNK];
+        let mut hasher = crc32fast::Hasher::new();
+        loop {
+            let n = data.read(&mut buf).map_err(io("borrowed data"))?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        let part_crc = hasher.finalize();
+        let at = d.template_data_offset as u64;
+        let end = at + d.template_packed as u64;
+        let mut sibling = std::fs::File::open(crate::fsops::path(&path_of(d.template_member)))
+            .map_err(io("sibling volume"))?;
+        let sibling_len = sibling.metadata().map_err(io("sibling volume"))?.len();
+        if end > sibling_len || sibling_len - end > 1 << 24 {
             return Err("sibling volume changed".into());
         }
-        let (head, tail) = match d.version {
-            5 => crate::deadvolume::faithful_frame(
-                5,
-                &template[..at],
-                &template[end..],
-                d.template_index,
-                d.index,
-                part_crc,
-            ),
-            _ => crate::deadvolume::synthesize_frame(
-                d.version,
-                &template[..at],
-                &template[end..],
-                d.template_index,
-                d.index,
-                d.packed as u64,
-                Some(part_crc),
-            ),
-        }
+        let mut sib_head = vec![0u8; at as usize];
+        sibling.read_exact(&mut sib_head).map_err(io("sibling volume"))?;
+        let mut sib_tail = Vec::new();
+        sibling.seek(SeekFrom::Start(end)).map_err(io("sibling volume"))?;
+        sibling.read_to_end(&mut sib_tail).map_err(io("sibling volume"))?;
+        let (head, tail) = crate::deadvolume::faithful_frame(
+            5,
+            &sib_head,
+            &sib_tail,
+            d.template_index,
+            d.index,
+            part_crc,
+        )
         .map_err(|e| e.to_string())?;
-        if head.len() != at {
+        if head.len() as u64 != at {
             return Err(format!("rebuilt headers are {} bytes, the sibling's {at}", head.len()));
         }
         let mut f = std::fs::OpenOptions::new()
@@ -10011,30 +10023,72 @@ impl CrossPackRepairSession {
             .open(crate::fsops::path(&d.volume_path))
             .map_err(|e| e.to_string())?;
         let have = f.metadata().map_err(|e| e.to_string())?.len();
-        let want = (head.len() + data.len() + tail.len()) as u64;
-        if have != want {
-            return Err(format!("the file is {have} bytes, the rebuilt volume {want}"));
+        let data_at = at;
+        let tail_at = at + d.packed as u64;
+        if have != tail_at + tail.len() as u64 {
+            return Err(format!(
+                "the file is {have} bytes, the rebuilt volume {}",
+                tail_at + tail.len() as u64
+            ));
         }
-        // What arrived of the volume must match the rebuilt one where both have bytes: a
-        // volume laid out otherwise is left alone.
-        let mut disk = Vec::with_capacity(have as usize);
-        f.read_to_end(&mut disk).map_err(|e| e.to_string())?;
-        let rebuilt: Vec<u8> = [head.as_slice(), &data, &tail].concat();
         let holes = d
             .on_disk_target
             .and_then(|t| self.target_holes.get(t))
             .cloned()
             .unwrap_or_default();
-        let in_hole = |i: usize| {
+        let in_hole = |i: u64| {
             holes
                 .iter()
                 .any(|h| (i as i64) >= h.offset && (i as i64) < h.offset + h.size)
         };
-        if let Some(i) = (0..disk.len()).find(|&i| disk[i] != rebuilt[i] && !in_hole(i)) {
-            return Err(format!("the rebuilt volume differs from the bytes that arrived at {i}"));
+        // What arrived of the volume must match the rebuilt one where both have bytes: a
+        // volume laid out otherwise is left alone.
+        let mut disk = vec![0u8; CHUNK];
+        let mut want = vec![0u8; CHUNK];
+        data.seek(SeekFrom::Start(0)).map_err(io("borrowed data"))?;
+        let mut pos = 0u64;
+        while pos < have {
+            let n = (CHUNK as u64).min(have - pos) as usize;
+            f.read_exact(&mut disk[..n]).map_err(|e| e.to_string())?;
+            // The rebuilt bytes for [pos, pos+n): head, data (from the scratch file), tail.
+            for k in 0..n {
+                let i = pos + k as u64;
+                if i < data_at {
+                    want[k] = head[i as usize];
+                } else if i >= tail_at {
+                    want[k] = tail[(i - tail_at) as usize];
+                }
+            }
+            let (ds, de) = (pos.max(data_at), (pos + n as u64).min(tail_at));
+            if ds < de {
+                let (a, b) = ((ds - pos) as usize, (de - pos) as usize);
+                data.read_exact(&mut want[a..b]).map_err(io("borrowed data"))?;
+            }
+            if let Some(k) = (0..n).find(|&k| disk[k] != want[k] && !in_hole(pos + k as u64)) {
+                return Err(format!(
+                    "the rebuilt volume differs from the bytes that arrived at {}",
+                    pos + k as u64
+                ));
+            }
+            pos += n as u64;
         }
+        // Headers and tail whole; of the data only its holes (the rest arrived and matched).
         f.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
-        f.write_all(&rebuilt).map_err(|e| e.to_string())?;
+        f.write_all(&head).map_err(|e| e.to_string())?;
+        for h in &holes {
+            let (s, e) = ((h.offset.max(0) as u64).max(data_at), ((h.offset + h.size).max(0) as u64).min(tail_at));
+            let mut p = s;
+            while p < e {
+                let n = (CHUNK as u64).min(e - p) as usize;
+                data.seek(SeekFrom::Start(p - data_at)).map_err(io("borrowed data"))?;
+                data.read_exact(&mut buf[..n]).map_err(io("borrowed data"))?;
+                f.seek(SeekFrom::Start(p)).map_err(|e| e.to_string())?;
+                f.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+                p += n as u64;
+            }
+        }
+        f.seek(SeekFrom::Start(tail_at)).map_err(|e| e.to_string())?;
+        f.write_all(&tail).map_err(|e| e.to_string())?;
         f.sync_data().map_err(|e| e.to_string())
     }
 

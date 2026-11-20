@@ -4182,12 +4182,13 @@ def _headlost_volume(daemon, t, name, rar5, par=False):
     failed_over = _grep_log(t, 'Failing over Primary')
     cancelled = _grep_log(t, 'Cancelling direct unpack')
     rebuilt = _grep_log(t, 'Volume Show.part07.rar lost its headers')
-    # Written back over the file on disk, byte for byte: par verification finds it whole.
+    # Written back over the file on disk, byte for byte: par verification finds it whole
+    # (RAR5 only: RAR 1.5-4 headers are rebuilt, not restored).
     on_disk = _grep_log(t, 'Rebuilt Show.part07.rar on disk')
     par_failed = _grep_log(t, 'Repair failed for Primary')
     du_ok = _grep_log(t, 'Direct unpack for Primary successful')
     integ = _verify_output(t, movie, '.mkv', dirs=(('main', 'dst'), ('main', 'inter')))
-    ok = (failed_over == 0 and cancelled == 0 and rebuilt >= 1 and on_disk == 1 and
+    ok = (failed_over == 0 and cancelled == 0 and rebuilt >= 1 and on_disk == (1 if rar5 else 0) and
           par_failed == 0 and du_ok == 1 and integ and hp['Status'].startswith('SUCCESS'))
     return (name, ok,
             'status=%s failover_logs=%d du_cancelled=%d headers_rebuilt=%d on_disk=%d par_failed=%d du_ok=%d extracted_ok=%s'

@@ -617,7 +617,7 @@ mod rar5 {
         let mut p = 0;
         while p + 4 < data.len() {
             let mut q = p + 4;
-            let Some(size) = vint(data, &mut q) else { return };
+            let Some(size) = vint(data, &mut q).filter(|&n| n > 0) else { return };
             let Some(end) = q.checked_add(size as usize).filter(|&e| e <= data.len()) else {
                 return;
             };

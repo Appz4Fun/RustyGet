@@ -2094,27 +2094,6 @@ unsafe fn move_file_list(dst: *mut NzbScalars, src: *const NzbScalars) {
     d.maxTime = s.maxTime;
 }
 
-/// Adds a completed file, raising the file id floor (NzbInfo::AddCompletedFile).
-unsafe fn add_completed(p: *const NzbScalars, ints4: [c_int; 4], strs4: [*const c_char; 4]) {
-    crate::idgen::FILE_IDS.raise_floor(ints4[0]);
-    let mut ints = ints4;
-    let mut strs = strs4;
-    unsafe {
-        nzbget_rs_nzb_files(
-            p,
-            2,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            std::ptr::null_mut(),
-            strs.as_mut_ptr(),
-            std::ptr::null(),
-        )
-    };
-}
-
 fn scalars(nzb: NzbRef) -> *mut NzbScalars {
     nzb.addr() as *mut NzbScalars
 }
@@ -2344,6 +2323,98 @@ pub(crate) fn push_file(nzb: NzbRef, file: FileRef) {
     }
 }
 
+fn completed_snap(c: &Completed) -> crate::queuesubsys_host::CompletedFileSnap {
+    crate::queuesubsys_host::CompletedFileSnap {
+        id: c.id,
+        status: c.status,
+        par_file: c.par,
+        crc: c.crc,
+        filename: c.filename.to_bytes().to_vec(),
+        origname: c.origname.to_bytes().to_vec(),
+        hash16k: c.hash16k.to_bytes().to_vec(),
+        par_set_id: c.par_set_id.to_bytes().to_vec(),
+    }
+}
+
+/// The number of completed files.
+pub(crate) fn completed_file_count(nzb: NzbRef) -> usize {
+    nzb_data(nzb).map_or(0, |d| d.files().completed.len())
+}
+
+/// The `idx`-th completed file, or `None` past the end.
+pub(crate) fn completed_file(
+    nzb: NzbRef,
+    idx: usize,
+) -> Option<crate::queuesubsys_host::CompletedFileSnap> {
+    nzb_data(nzb).and_then(|d| d.files().completed.get(idx).map(completed_snap))
+}
+
+/// Every completed file, in order.
+pub(crate) fn completed_files(nzb: NzbRef) -> Vec<crate::queuesubsys_host::CompletedFileSnap> {
+    nzb_data(nzb).map_or_else(Vec::new, |d| {
+        d.files().completed.iter().map(completed_snap).collect()
+    })
+}
+
+/// Appends a completed file, raising the file id floor
+/// (NzbInfo::AddCompletedFile). Text stops at the first NUL.
+pub(crate) fn push_completed_file(nzb: NzbRef, cf: &crate::queuesubsys_host::CompletedFileSnap) {
+    let Some(d) = nzb_data(nzb) else {
+        return;
+    };
+    crate::idgen::FILE_IDS.raise_floor(cf.id);
+    d.files().completed.push(Completed {
+        id: cf.id,
+        status: cf.status,
+        crc: cf.crc,
+        par: cf.par_file,
+        filename: c_string(&cf.filename),
+        origname: c_string(&cf.origname),
+        hash16k: c_string(&cf.hash16k),
+        par_set_id: c_string(&cf.par_set_id),
+    });
+}
+
+/// Records queued `file` as completed under `filename` with `status` and
+/// `crc`, keeping its id, par flag, original name, 16k hash and par set.
+pub(crate) fn complete_file(nzb: NzbRef, file: FileRef, filename: &[u8], status: i32, crc: u32) {
+    use crate::qfile::{field, nzbget_rs_file_get, nzbget_rs_file_text, text, File};
+    if nzb.is_none() || file.is_none() {
+        return;
+    }
+    let f = file.addr() as *const File;
+    let t = |id| {
+        cstr(unsafe { nzbget_rs_file_text(f, id) })
+            .to_bytes()
+            .to_vec()
+    };
+    let cf = crate::queuesubsys_host::CompletedFileSnap {
+        id: unsafe { nzbget_rs_file_get(f, field::ID) } as i32,
+        status,
+        par_file: unsafe { nzbget_rs_file_get(f, field::PAR_FILE) } != 0,
+        crc,
+        filename: filename.to_vec(),
+        origname: t(text::ORIGNAME),
+        hash16k: t(text::HASH16K),
+        par_set_id: t(text::PAR_SET_ID),
+    };
+    push_completed_file(nzb, &cf);
+}
+
+/// Renames the `idx`-th completed file to `filename`, and sets its original
+/// name when `origname` is given.
+pub(crate) fn rename_completed(nzb: NzbRef, idx: usize, filename: &[u8], origname: Option<&[u8]>) {
+    let Some(d) = nzb_data(nzb) else {
+        return;
+    };
+    if let Some(c) = d.files().completed.get_mut(idx) {
+        if let Some(o) = origname {
+            c.origname = c_string(o);
+        }
+        c.filename = c_string(filename);
+    }
+}
+
 /// A collection's file-list and completed-file ops (host op 34), as the
 /// C++ host did them.
 ///
@@ -2362,10 +2433,7 @@ pub(crate) unsafe fn host_filelist_op(
     i64s: *mut i64,
     strs: *mut *const c_char,
 ) -> usize {
-    use crate::qfile::{
-        field, nzbget_rs_file_get, nzbget_rs_file_set, nzbget_rs_file_set_text,
-        nzbget_rs_file_text, File,
-    };
+    use crate::qfile::{field, nzbget_rs_file_set, nzbget_rs_file_set_text, File};
     let np: *const NzbScalars = std::ptr::null();
     let ns: *const c_char = std::ptr::null();
     let no: *const usize = std::ptr::null();
@@ -2383,40 +2451,6 @@ pub(crate) unsafe fn host_filelist_op(
     let nraw: *const i64 = std::ptr::null();
     let set = |f: usize, id, v: i64| unsafe { nzbget_rs_file_set(f as *const File, id, v) };
     match a1 {
-        5 => {
-            if a2 < 0 {
-                return files(0, 0, ns, ns, ni, nl, nstr, nraw) as usize;
-            }
-            files(1, a2, ns, ns, ints, nl, strs, nraw);
-            0
-        }
-        6 => {
-            let f = p2 as *const File;
-            let g = |id| unsafe { nzbget_rs_file_get(f, id) };
-            let t = |id| unsafe { nzbget_rs_file_text(f, id) };
-            unsafe {
-                add_completed(
-                    p,
-                    [
-                        g(field::ID) as c_int,
-                        a2,
-                        int(0),
-                        c_int::from(g(field::PAR_FILE) != 0),
-                    ],
-                    [
-                        s1,
-                        t(crate::qfile::text::ORIGNAME),
-                        t(crate::qfile::text::HASH16K),
-                        t(crate::qfile::text::PAR_SET_ID),
-                    ],
-                )
-            };
-            0
-        }
-        7 => {
-            files(3, a2, s1, s2, ni, nl, nstr, nraw);
-            0
-        }
         8 => {
             files(23, a2, s1, ns, ints, i64s, nstr, p2 as *const i64);
             0
@@ -2489,16 +2523,6 @@ pub(crate) unsafe fn host_filelist_op(
             };
             ptr_list_op(fl, 3, 0, fp, no, 0);
             fp
-        }
-        18 => {
-            unsafe {
-                add_completed(
-                    p,
-                    [int(0), int(1), int(2), c_int::from(int(3) != 0)],
-                    [*strs, *strs.add(1), *strs.add(2), *strs.add(3)],
-                )
-            };
-            0
         }
         19 => {
             let f = crate::qfile::nzbget_rs_file_new(-1) as usize;

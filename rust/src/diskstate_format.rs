@@ -7710,16 +7710,19 @@ unsafe extern "C" fn active_disk_apply_nzb_cb(
     if !completed.is_null() {
         for i in 0..completed_len {
             let cf = unsafe { &*completed.add(i) };
-            qh.nzb_push_completed_file_raw(
+            let text = |p: *const c_char| unsafe { crate::queuesubsys_host::read_cstr(p) };
+            qh.nzb_restore_completed_file(
                 nzb_ptr,
-                cf.id,
-                cf.status,
-                cf.crc,
-                cf.par_file != 0,
-                cf.filename,
-                cf.origname,
-                cf.hash16k,
-                cf.par_set_id,
+                &crate::queuesubsys_host::CompletedFileSnap {
+                    id: cf.id,
+                    status: cf.status,
+                    par_file: cf.par_file != 0,
+                    crc: cf.crc,
+                    filename: text(cf.filename),
+                    origname: text(cf.origname),
+                    hash16k: text(cf.hash16k),
+                    par_set_id: text(cf.par_set_id),
+                },
             );
         }
     }

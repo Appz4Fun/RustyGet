@@ -2641,41 +2641,24 @@ impl QueueSubsysHost {
     }
 
     pub fn nzb_completed_files_len(&self, nzb_ptr: NzbRef) -> usize {
-        self.filelist_op(nzb_ptr, 5, OpArgs::NONE.a2(-1))
+        if !self.use_active {
+            return 0;
+        }
+        crate::qnzb::completed_file_count(nzb_ptr)
     }
 
     pub fn nzb_completed_file_at(&self, nzb_ptr: NzbRef, idx: usize) -> CompletedFileSnap {
-        let mut ints = [0i32; 4];
-        let mut strs = [std::ptr::null(); 4];
-        self.filelist_op(
-            nzb_ptr,
-            5,
-            OpArgs::NONE
-                .a2(idx as i32)
-                .ints(ints.as_mut_ptr())
-                .strs(strs.as_mut_ptr()),
-        );
-        unsafe {
-            CompletedFileSnap {
-                id: ints[0],
-                status: ints[1],
-                par_file: ints[2] != 0,
-                crc: ints[3] as u32,
-                filename: read_cstr(strs[0]),
-                origname: read_cstr(strs[1]),
-                hash16k: read_cstr(strs[2]),
-                par_set_id: read_cstr(strs[3]),
-            }
+        if !self.use_active {
+            return CompletedFileSnap::default();
         }
+        crate::qnzb::completed_file(nzb_ptr, idx).unwrap_or_default()
     }
 
     pub fn nzb_completed_files(&self, nzb_ptr: NzbRef) -> Vec<CompletedFileSnap> {
-        let n = self.nzb_completed_files_len(nzb_ptr);
-        let mut out = Vec::with_capacity(n);
-        for i in 0..n {
-            out.push(self.nzb_completed_file_at(nzb_ptr, i));
+        if !self.use_active {
+            return Vec::new();
         }
-        out
+        crate::qnzb::completed_files(nzb_ptr)
     }
 
     pub fn nzb_push_completed_file(
@@ -2686,17 +2669,9 @@ impl QueueSubsysHost {
         file_status: i32,
         file_crc: u32,
     ) {
-        let c = c_bytes(filename);
-        let mut ints = [file_crc as i32];
-        self.filelist_op(
-            nzb_ptr,
-            6,
-            OpArgs::NONE
-                .a2(file_status)
-                .p2(file_ptr.addr())
-                .s1(c.as_ptr() as *const c_char)
-                .ints(ints.as_mut_ptr()),
-        );
+        if self.use_active {
+            crate::qnzb::complete_file(nzb_ptr, file_ptr, filename, file_status, file_crc);
+        }
     }
 
     pub fn nzb_update_completed_file(
@@ -2706,19 +2681,9 @@ impl QueueSubsysHost {
         filename: &[u8],
         origname: Option<&[u8]>,
     ) {
-        let c_fn = c_bytes(filename);
-        let c_orig = origname.map(c_bytes);
-        let s2 = c_orig
-            .as_ref()
-            .map_or(std::ptr::null(), |v| v.as_ptr() as *const c_char);
-        self.filelist_op(
-            nzb_ptr,
-            7,
-            OpArgs::NONE
-                .a2(idx as i32)
-                .s1(c_fn.as_ptr() as *const c_char)
-                .s2(s2),
-        );
+        if self.use_active {
+            crate::qnzb::rename_completed(nzb_ptr, idx, filename, origname);
+        }
     }
 
     pub fn nzb_push_stream_repair_job(
@@ -2984,26 +2949,11 @@ impl QueueSubsysHost {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn nzb_push_completed_file_raw(
-        &self,
-        nzb_ptr: NzbRef,
-        id: i32,
-        status: i32,
-        crc: u32,
-        par_file: bool,
-        filename: *const c_char,
-        origname: *const c_char,
-        hash16k: *const c_char,
-        par_set_id: *const c_char,
-    ) {
-        let mut ints = [id, status, crc as i32, i32::from(par_file)];
-        let mut strs = [filename, origname, hash16k, par_set_id];
-        self.filelist_op(
-            nzb_ptr,
-            18,
-            OpArgs::NONE.ints(ints.as_mut_ptr()).strs(strs.as_mut_ptr()),
-        );
+    /// Appends a completed file as saved (disk state restore).
+    pub fn nzb_restore_completed_file(&self, nzb_ptr: NzbRef, cf: &CompletedFileSnap) {
+        if self.use_active {
+            crate::qnzb::push_completed_file(nzb_ptr, cf);
+        }
     }
 
     pub fn nzb_add_stub_file(

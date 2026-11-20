@@ -1338,9 +1338,15 @@ impl<'a> Run<'a> {
         // Directory entries, as the progressive path places them: the ones this run passed
         // with their stored mode, then their stored times once their children are in place.
         // An empty folder zipfast staged (one a resumed run passed before a restart) is made
-        // too, so no folder is lost.
+        // too, so no folder is lost. Only for a whole set: a repair that was given up
+        // publishes just its intact files and leaves no empty folders behind.
+        let dirs = std::mem::take(&mut self.dirs);
+        if keep.is_some() {
+            remove_state_root(&self.plan.root);
+            return Ok(());
+        }
         let mut placed = Vec::new();
-        for m in std::mem::take(&mut self.dirs) {
+        for m in dirs {
             let dir = super::place_directory(self.req.dest, &m).map_err(|f| f.to_string())?;
             placed.retain(|(d, _): &(PathBuf, _)| *d != dir);
             placed.push((dir, m.meta.mtime));

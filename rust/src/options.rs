@@ -4762,7 +4762,7 @@ impl OptionsHost for NzbgetRsOptions {
     }
 }
 
-pub unsafe extern "C" fn nzbget_rs_options_new(
+pub(crate) unsafe fn new_options(
     exe_name: *const c_char,
     config_filename: *const c_char,
     no_config: c_int,
@@ -4775,7 +4775,7 @@ pub unsafe extern "C" fn nzbget_rs_options_new(
     cb_fn: NzbgetRsOptionsHostFn,
     out_scalars: *mut NzbgetRsParsedOptions,
     out_state_flags: *mut c_int,
-) -> *mut NzbgetRsOptions {
+) -> std::sync::Arc<NzbgetRsOptions> {
     #[cfg(unix)]
     let daemon_snap = if no_config < 0 {
         crate::lifecycle::daemon_cmdline_options_inputs()
@@ -4872,21 +4872,65 @@ pub unsafe extern "C" fn nzbget_rs_options_new(
             std::time::Duration::from_secs(u64::MAX / 4),
         );
     }
-    std::sync::Arc::into_raw(arc).cast_mut()
+    arc
 }
 
-pub unsafe extern "C" fn nzbget_rs_options_free(handle: *mut NzbgetRsOptions) {
-    if !handle.is_null() {
-        let arc = std::sync::Arc::from_raw(handle.cast_const());
-        let wk = std::sync::Arc::downgrade(&arc);
-        if let Ok(mut g) = ACTIVE_OPTIONS.write() {
-            if g.as_ref()
-                .is_some_and(|cur| std::sync::Weak::ptr_eq(cur, &wk))
-            {
-                *g = None;
-            }
+/// [`new_options`] as a raw handle for [`nzbget_rs_options_free`].
+///
+/// # Safety
+/// As [`new_options`].
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn nzbget_rs_options_new(
+    exe_name: *const c_char,
+    config_filename: *const c_char,
+    no_config: c_int,
+    no_disk_access: c_int,
+    cmd_opts: *const *const c_char,
+    cmd_opts_len: usize,
+    flags: c_int,
+    version: *const c_char,
+    cb_ctx: *mut std::ffi::c_void,
+    cb_fn: NzbgetRsOptionsHostFn,
+    out_scalars: *mut NzbgetRsParsedOptions,
+    out_state_flags: *mut c_int,
+) -> *mut NzbgetRsOptions {
+    std::sync::Arc::into_raw(new_options(
+        exe_name,
+        config_filename,
+        no_config,
+        no_disk_access,
+        cmd_opts,
+        cmd_opts_len,
+        flags,
+        version,
+        cb_ctx,
+        cb_fn,
+        out_scalars,
+        out_state_flags,
+    ))
+    .cast_mut()
+}
+
+/// Drops `opts`, first clearing the active options if they are these.
+pub(crate) fn release_options(opts: std::sync::Arc<NzbgetRsOptions>) {
+    let wk = std::sync::Arc::downgrade(&opts);
+    if let Ok(mut g) = ACTIVE_OPTIONS.write() {
+        if g.as_ref()
+            .is_some_and(|cur| std::sync::Weak::ptr_eq(cur, &wk))
+        {
+            *g = None;
         }
-        drop(arc);
+    }
+    drop(opts);
+}
+
+/// Frees a handle from [`nzbget_rs_options_new`]. Null is ignored.
+///
+/// # Safety
+/// `handle` is null or a live handle from [`nzbget_rs_options_new`], freed once.
+pub unsafe fn nzbget_rs_options_free(handle: *mut NzbgetRsOptions) {
+    if !handle.is_null() {
+        release_options(std::sync::Arc::from_raw(handle.cast_const()));
     }
 }
 

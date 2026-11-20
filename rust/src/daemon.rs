@@ -32,8 +32,8 @@ const KIND_DEBUG: i32 = 3;
 
 /// Whether a daemon instance exists (phase 1 until phase 4 or exit).
 static INSTANCE: AtomicBool = AtomicBool::new(false);
-static LOG: AtomicPtr<NzbgetRsLog> = AtomicPtr::new(ptr::null_mut());
-static OPTIONS: AtomicPtr<NzbgetRsOptions> = AtomicPtr::new(ptr::null_mut());
+static LOG: Mutex<Option<Arc<NzbgetRsLog>>> = Mutex::new(None);
+static OPTIONS: Mutex<Option<Arc<NzbgetRsOptions>>> = Mutex::new(None);
 static WORK_STATE: Mutex<Option<Arc<NzbgetRsWorkState>>> = Mutex::new(None);
 static SERVER_POOL: AtomicPtr<NzbgetRsServerPool> = AtomicPtr::new(ptr::null_mut());
 /// The daemon's pre/post-processor thread (rust/src/jobthread.rs).
@@ -73,8 +73,8 @@ fn tls_init() {
     }
 }
 
-fn new_log() -> *mut NzbgetRsLog {
-    crate::log::nzbget_rs_log_new(c_int::from(crate::ffi::build_debug_enabled()))
+fn new_log() -> Arc<NzbgetRsLog> {
+    crate::log::install_log(crate::ffi::build_debug_enabled())
 }
 
 /// A start-up failure the C++ daemon reported by throwing out of phase 1,
@@ -213,16 +213,20 @@ fn destroy_instance() {
     if let Some(r) = runner {
         r.shutdown();
     }
-    crate::lifecycle::cleanup_global_objects(!OPTIONS.load(Ordering::SeqCst).is_null());
+    crate::lifecycle::cleanup_global_objects(
+        OPTIONS.lock().unwrap_or_else(PoisonError::into_inner).is_some(),
+    );
     unsafe {
         crate::net::nzbget_rs_serverpool_free(SERVER_POOL.swap(ptr::null_mut(), Ordering::SeqCst));
     }
     if let Some(ws) = WORK_STATE.lock().unwrap_or_else(PoisonError::into_inner).take() {
         crate::ffi::uninstall_workstate(&ws);
     }
-    unsafe {
-        crate::options::nzbget_rs_options_free(OPTIONS.swap(ptr::null_mut(), Ordering::SeqCst));
-        crate::log::nzbget_rs_log_free(LOG.swap(ptr::null_mut(), Ordering::SeqCst));
+    if let Some(opts) = OPTIONS.lock().unwrap_or_else(PoisonError::into_inner).take() {
+        crate::options::release_options(opts);
+    }
+    if let Some(log) = LOG.lock().unwrap_or_else(PoisonError::into_inner).take() {
+        crate::log::uninstall_log(log);
     }
 }
 
@@ -237,7 +241,7 @@ unsafe fn phase1_init(reload: bool) -> c_int {
     INSTANCE.store(true, Ordering::SeqCst);
 
     crate::lifecycle::reset_instance(reload);
-    LOG.store(new_log(), Ordering::SeqCst);
+    *LOG.lock().unwrap_or_else(PoisonError::into_inner) = Some(new_log());
 
     let mut version = b"RustyGet ".to_vec();
     version.extend_from_slice(crate::ffi::build_version_bytes());
@@ -261,7 +265,7 @@ unsafe fn phase1_init(reload: bool) -> c_int {
 
     // no_config < 0: the options come from the command line parse_command_line read
     let mut state_flags: c_int = 0;
-    let options = crate::options::nzbget_rs_options_new(
+    let options = crate::options::new_options(
         ptr::null(),
         ptr::null(),
         -1,
@@ -275,7 +279,7 @@ unsafe fn phase1_init(reload: bool) -> c_int {
         ptr::null_mut(),
         &mut state_flags,
     );
-    OPTIONS.store(options, Ordering::SeqCst);
+    *OPTIONS.lock().unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&options));
     crate::lifecycle::apply_command_line();
 
     if !crate::ffi::build_tls_disabled() {
@@ -328,9 +332,9 @@ unsafe extern "C" fn nserv_runtime(
 ) {
     match op {
         0 => {
-            let slot = ctx.cast::<*mut NzbgetRsOptions>();
+            let slot = ctx.cast::<Option<Arc<NzbgetRsOptions>>>();
             let mut state_flags: c_int = 0;
-            let created = crate::options::nzbget_rs_options_new(
+            let created = crate::options::new_options(
                 c"rustyget/rustyget".as_ptr(),
                 ptr::null(),
                 1,
@@ -344,7 +348,9 @@ unsafe extern "C" fn nserv_runtime(
                 ptr::null_mut(),
                 &mut state_flags,
             );
-            crate::options::nzbget_rs_options_free(std::mem::replace(&mut *slot, created));
+            if let Some(old) = (*slot).replace(created) {
+                crate::options::release_options(old);
+            }
             log_debug(b"Initializing global connection data");
             tls_init();
             libc::signal(libc::SIGPIPE, libc::SIG_IGN);
@@ -361,7 +367,7 @@ unsafe extern "C" fn nserv_runtime(
 /// `--nserv`: the test NNTP server, with its own log and options.
 unsafe fn nserv_main(argc: c_int, argv: *mut *mut c_char) -> c_int {
     let log = new_log();
-    let mut options: *mut NzbgetRsOptions = ptr::null_mut();
+    let mut options: Option<Arc<NzbgetRsOptions>> = None;
     let env = NzbgetRsNservEnv {
         ctx: (&raw mut options).cast::<c_void>(),
         version: ptr::null(),
@@ -374,7 +380,9 @@ unsafe fn nserv_main(argc: c_int, argv: *mut *mut c_char) -> c_int {
     };
     let rc =
         crate::nserv::nzbget_rs_nserv_run(argc, argv.cast::<*const c_char>().cast_const(), &env);
-    crate::options::nzbget_rs_options_free(options);
-    crate::log::nzbget_rs_log_free(log);
+    if let Some(opts) = options {
+        crate::options::release_options(opts);
+    }
+    crate::log::uninstall_log(log);
     rc
 }

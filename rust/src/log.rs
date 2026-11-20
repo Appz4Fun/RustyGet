@@ -582,27 +582,26 @@ pub(crate) fn log_active_bytes(kind: i32, bytes: &[u8]) {
     emit_message(&lg, kind, lg.debug_build, opts.as_deref(), &cs);
 }
 
-pub extern "C" fn nzbget_rs_log_new(debug_build: c_int) -> *mut NzbgetRsLog {
-    let arc = std::sync::Arc::new(NzbgetRsLog::with_debug_cb(debug_build != 0, None));
+/// Creates a log and makes it the active one.
+pub(crate) fn install_log(debug_build: bool) -> std::sync::Arc<NzbgetRsLog> {
+    let arc = std::sync::Arc::new(NzbgetRsLog::with_debug_cb(debug_build, None));
     if let Ok(mut g) = ACTIVE_LOG.write() {
         *g = Some(std::sync::Arc::downgrade(&arc));
     }
-    std::sync::Arc::into_raw(arc).cast_mut()
+    arc
 }
 
-pub unsafe extern "C" fn nzbget_rs_log_free(log: *mut NzbgetRsLog) {
-    if !log.is_null() {
-        let arc = std::sync::Arc::from_raw(log.cast_const());
-        let wk = std::sync::Arc::downgrade(&arc);
-        if let Ok(mut g) = ACTIVE_LOG.write() {
-            if g.as_ref()
-                .is_some_and(|cur| std::sync::Weak::ptr_eq(cur, &wk))
-            {
-                *g = None;
-            }
+/// Drops `log`, first clearing the active log if it is this one.
+pub(crate) fn uninstall_log(log: std::sync::Arc<NzbgetRsLog>) {
+    let wk = std::sync::Arc::downgrade(&log);
+    if let Ok(mut g) = ACTIVE_LOG.write() {
+        if g.as_ref()
+            .is_some_and(|cur| std::sync::Weak::ptr_eq(cur, &wk))
+        {
+            *g = None;
         }
-        drop(arc);
     }
+    drop(log);
 }
 
 pub unsafe extern "C" fn nzbget_rs_log_emit(
@@ -865,7 +864,8 @@ mod tests {
         let log_path = dir.join("nzbget.log");
         let _ = std::fs::write(&log_path, b"stale line\n");
 
-        let log = nzbget_rs_log_new(0);
+        let log_arc = install_log(false);
+        let log = std::sync::Arc::as_ptr(&log_arc);
         unsafe {
             // Startup messages before Options exist:
             // info (kind 0) -> mtScreen, detail (kind 4) -> mtScreen, error (kind 2) -> mtBoth
@@ -972,7 +972,7 @@ mod tests {
         assert_eq!(screen[1].0, 3);
 
         unsafe {
-            nzbget_rs_log_free(log);
+            uninstall_log(log_arc);
             nzbget_rs_options_free(opts);
         }
         let _ = std::fs::remove_dir_all(&dir);
@@ -996,7 +996,8 @@ mod tests {
         ];
         let mut scalars = NzbgetRsParsedOptions::default();
         let mut flags = 0;
-        let log = nzbget_rs_log_new(0);
+        let log_arc = install_log(false);
+        let log = std::sync::Arc::as_ptr(&log_arc);
         let opts = unsafe {
             nzbget_rs_options_new(
                 c"rustyget".as_ptr(),
@@ -1072,7 +1073,7 @@ mod tests {
                 collect as *const () as usize,
                 0,
             );
-            nzbget_rs_log_free(log);
+            uninstall_log(log_arc);
             nzbget_rs_options_free(opts);
         }
         assert_eq!(screen.len(), 60, "LogBuffer 0 keeps every message");
@@ -1097,7 +1098,8 @@ mod tests {
         ];
         let mut scalars = NzbgetRsParsedOptions::default();
         let mut flags = 0;
-        let log = nzbget_rs_log_new(0);
+        let log_arc = install_log(false);
+        let log = std::sync::Arc::as_ptr(&log_arc);
         let opts = unsafe {
             nzbget_rs_options_new(
                 c"rustyget".as_ptr(),
@@ -1120,7 +1122,7 @@ mod tests {
                 let line = CString::new(format!("line {i:03} {}", "y".repeat(190))).unwrap();
                 nzbget_rs_log_emit(log, 0, opts, line.as_ptr());
             }
-            nzbget_rs_log_free(log);
+            uninstall_log(log_arc);
             nzbget_rs_options_free(opts);
         }
         let mut names: Vec<String> = std::fs::read_dir(&dir)

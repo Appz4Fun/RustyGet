@@ -1982,7 +1982,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn statmeter_runtime_disk_and_rpc_roundtrip() {
-        use crate::log::{nzbget_rs_log_free, nzbget_rs_log_new};
+        use crate::log::{install_log, uninstall_log};
         use crate::options::{
             nzbget_rs_options_free, nzbget_rs_options_new, NzbgetRsParsedOptions,
         };
@@ -2009,7 +2009,8 @@ mod tests {
         let mut scalars = NzbgetRsParsedOptions::default();
         let mut flags = 0;
         unsafe {
-            let log = nzbget_rs_log_new(0);
+            let log_arc = install_log(false);
+            let log = std::sync::Arc::as_ptr(&log_arc);
             let opts = nzbget_rs_options_new(
                 c"rustyget".as_ptr(),
                 ptr::null(),
@@ -2187,7 +2188,7 @@ mod tests {
             nzbget_rs_statmeter_free(sm2);
             nzbget_rs_statmeter_free(sm);
             nzbget_rs_options_free(opts);
-            nzbget_rs_log_free(log);
+            uninstall_log(log_arc);
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

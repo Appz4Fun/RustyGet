@@ -2295,7 +2295,8 @@ mod tests {
             .clear();
         TEST_UNPACK_POLLS.store(1, Ordering::SeqCst);
         reload_coordinator_op(0, Some(test_reload_cb));
-        for _ in 0..40 {
+        // the debounce can stretch to 1.5 s, so wait well past it on a busy runner
+        for _ in 0..200 {
             if TEST_EVENTS
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())

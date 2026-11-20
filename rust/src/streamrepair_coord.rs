@@ -2166,21 +2166,27 @@ impl NzbgetRsStreamRepairCtrl {
         let mut again: std::collections::BTreeSet<Vec<u8>> = Default::default();
         let mut rerun_for: std::collections::BTreeMap<Vec<u8>, Vec<(i64, i64)>> =
             Default::default();
+        // Files a pass of this repair collected (and marked tried) before they had holes.
+        let mut collected_holeless: std::collections::BTreeSet<Vec<u8>> = Default::default();
         let mut ran = false;
         for _ in 0..MAX_LIVE_BORROW_PASSES {
-            let Some((left, attempted)) = self.run_live_pass(q, &again) else {
+            let Some((left, attempted, holeless, had_donors)) = self.run_live_pass(q, &again)
+            else {
                 break;
             };
             ran = true;
             tried.extend(left);
+            collected_holeless.extend(holeless);
             for (name, holes) in attempted {
                 seen.entry(name).or_default().extend(holes);
             }
-            if self.host_is_stopped(q) {
+            // With no duplicate to borrow from another pass does nothing either.
+            if self.host_is_stopped(q) || !had_donors {
                 break;
             }
             let (fresh, now) = self.look_again(q);
-            let (newcomers, retry) = holes_to_rerun(&seen, &mut rerun_for, now);
+            let (newcomers, retry) =
+                holes_to_rerun(&seen, &collected_holeless, &mut rerun_for, now);
             again = retry;
             if fresh.iter().all(|n| tried.contains(n)) && again.is_empty() && !newcomers {
                 break;
@@ -2276,15 +2282,17 @@ impl NzbgetRsStreamRepairCtrl {
         (dead, holes)
     }
 
-    /// One live pass; returns the dead volumes it left to the borrow and the holes it took on
-    /// (by file), None when there was nothing to look at. The files in `again` are taken on
+    /// One live pass; returns the dead volumes it left to the borrow, the holes it took on (by
+    /// file), the files it collected for the first time without holes (marked tried all the
+    /// same) and whether it had a duplicate to borrow from; None when there was nothing to
+    /// look at. The files in `again` are taken on
     /// even though an earlier pass of this repair marked them tried: they have new holes.
     #[allow(clippy::type_complexity)]
     fn run_live_pass(
         &self,
         q: JobQueue<'_>,
         again: &std::collections::BTreeSet<Vec<u8>>,
-    ) -> Option<(Vec<Vec<u8>>, Vec<(Vec<u8>, Vec<(i64, i64)>)>)> {
+    ) -> Option<(Vec<Vec<u8>>, Vec<(Vec<u8>, Vec<(i64, i64)>)>, Vec<Vec<u8>>, bool)> {
         let mut counters = RunCounters::default();
         let Some((nzb_name, dest_dir, mut targets, donors, mut member_names)) =
             q.host.with_locked_queue(|dq_ptr| {
@@ -2312,6 +2320,16 @@ impl NzbgetRsStreamRepairCtrl {
                 .map(|t| (t.filename.clone(), hole_spans(t)))
                 .collect()
         };
+        let holeless: Vec<Vec<u8>> = if donors.is_empty() {
+            Vec::new()
+        } else {
+            targets
+                .iter()
+                .filter(|t| !t.tried_before && t.holes.is_empty())
+                .map(|t| t.filename.clone())
+                .collect()
+        };
+        let had_donors = !donors.is_empty();
         let any_eligible = targets.iter().any(|t| t.patch_eligible && t.needs_repair());
         if any_eligible && !donors.is_empty() {
             let mut msg = b"Starting live stream repair for ".to_vec();
@@ -2412,6 +2430,8 @@ impl NzbgetRsStreamRepairCtrl {
                 .filter_map(|(left, t)| left.then(|| t.filename.clone()))
                 .collect(),
             attempted,
+            holeless,
+            had_donors,
         ))
     }
 }
@@ -2425,13 +2445,15 @@ fn hole_spans(t: &RepairTarget) -> Vec<(i64, i64)> {
 }
 
 /// What another live pass is for: whether a file with holes that no pass of this repair took
-/// on turned up, and the files the next pass takes on although marked tried: those newcomers
-/// (an earlier pass collected the file before its holes were known, still arriving, and marked
-/// it tried all the same) and the files a pass took on that have a hole no pass tried. Each file is rerun for once per state of its holes
+/// on turned up, and the files the next pass takes on although marked tried: the newcomers a
+/// pass of this repair collected before their holes were known (`holeless`: still arriving,
+/// marked tried all the same) and the files a pass took on that have a hole no pass tried. A
+/// newcomer an earlier live repair tried keeps its mark. Each file is rerun for once per state of its holes
 /// (`rerun_for`), so a pass that cannot take them on is not repeated for nothing.
 #[allow(clippy::type_complexity)]
 fn holes_to_rerun(
     seen: &std::collections::BTreeMap<Vec<u8>, Vec<(i64, i64)>>,
+    holeless: &std::collections::BTreeSet<Vec<u8>>,
     rerun_for: &mut std::collections::BTreeMap<Vec<u8>, Vec<(i64, i64)>>,
     now: Vec<(Vec<u8>, Vec<(i64, i64)>)>,
 ) -> (bool, std::collections::BTreeSet<Vec<u8>>) {
@@ -2443,7 +2465,12 @@ fn holes_to_rerun(
         fresh.iter().filter(|(name, _)| !seen.contains_key(name)).collect();
     let any_new = !newcomers.is_empty();
     let mut again = holes_not_tried(seen, fresh.clone());
-    again.extend(newcomers.into_iter().map(|(name, _)| name.clone()));
+    again.extend(
+        newcomers
+            .into_iter()
+            .filter(|(name, _)| holeless.contains(name))
+            .map(|(name, _)| name.clone()),
+    );
     for (name, holes) in fresh {
         if !seen.contains_key(&name) || again.contains(&name) {
             rerun_for.insert(name, holes);
@@ -2523,14 +2550,21 @@ mod tests {
         // part22 finished during the pass: another pass runs for it (taken on although an
         // earlier pass may have marked it tried before its holes were known), and for part21.
         let mut rerun_for = std::collections::BTreeMap::new();
-        let (newcomers, again) = holes_to_rerun(&seen, &mut rerun_for, now.clone());
+        let holeless: std::collections::BTreeSet<Vec<u8>> = [b"a.part22.rar".to_vec()].into();
+        let (newcomers, again) = holes_to_rerun(&seen, &holeless, &mut rerun_for, now.clone());
         assert!(newcomers);
         assert_eq!(
             again.into_iter().collect::<Vec<_>>(),
             vec![b"a.part21.rar".to_vec(), b"a.part22.rar".to_vec()]
         );
+        // A newcomer an earlier live repair tried (not collected holeless here) keeps its mark.
+        let mut fresh_rerun = std::collections::BTreeMap::new();
+        let none = std::collections::BTreeSet::new();
+        let (newcomers, again) = holes_to_rerun(&seen, &none, &mut fresh_rerun, now.clone());
+        assert!(newcomers);
+        assert_eq!(again.into_iter().collect::<Vec<_>>(), vec![b"a.part21.rar".to_vec()]);
         // A pass that could not take them on changes nothing: not run again for them.
-        let (newcomers, again) = holes_to_rerun(&seen, &mut rerun_for, now);
+        let (newcomers, again) = holes_to_rerun(&seen, &holeless, &mut rerun_for, now);
         assert!(!newcomers && again.is_empty());
         // Spans tried in two passes cover a hole together.
         let mut seen = std::collections::BTreeMap::new();

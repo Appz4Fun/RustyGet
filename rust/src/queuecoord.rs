@@ -1307,24 +1307,21 @@ const BACKUP_LEAD: i32 = 100;
 /// seconds, and failing over first throws away an extraction the backup could have fed.
 const BACKUP_CLASSIFY_GRACE_SEC: i64 = 120;
 
-/// How long a backup the fleet intake is still reading in the background may hold a failover:
-/// past the grace by the time that reading may take, and a margin.
-const BACKUP_CHECKING_MAX_SEC: i64 = BACKUP_CLASSIFY_GRACE_SEC + 240;
-
 /// Whether a backup parked at `parked_at` (Unix seconds) is still too new to tell whether it
 /// lends: its kind is unknown and it arrived under [`BACKUP_CLASSIFY_GRACE_SEC`] ago, or, whatever
-/// its kind, the fleet intake is still `checking` its video (a nested alt can take longer to open
-/// down to it) and it arrived under [`BACKUP_CHECKING_MAX_SEC`] ago.
+/// its kind and age, the fleet intake is still `checking` its video (a nested alt can take
+/// longer to open down to it). That check is bounded on its own: it reads until its deadline,
+/// then lets go.
 fn backup_still_unclassified(
     kind: crate::donorkind::DonorKind,
     parked_at: i64,
     now: i64,
     checking: bool,
 ) -> bool {
-    let age = now - parked_at;
     // the packing kind says nothing about the video: a copy still being read may carry another
-    (kind == crate::donorkind::DonorKind::Unknown && age < BACKUP_CLASSIFY_GRACE_SEC)
-        || (checking && age < BACKUP_CHECKING_MAX_SEC)
+    checking
+        || (kind == crate::donorkind::DonorKind::Unknown
+            && now - parked_at < BACKUP_CLASSIFY_GRACE_SEC)
 }
 #[cfg(unix)]
 const DUPE_PROBE_SAMPLE_COUNT: i32 = 10;
@@ -5267,6 +5264,11 @@ impl NzbgetRsQueueCoordinator {
             return false;
         };
 
+        // A backup the fleet intake is still reading may carry another video, or lend: wait
+        // for its verdict (the next round looks again).
+        if crate::dupesearch_coord::intake_pending(backup_nzb.id, &nzb.dupe_key) {
+            return true;
+        }
         // A running extraction is kept: the backup lends what par2 cannot repair.
         if backup_continues_extraction(host, opts, nzb, &backup_nzb) {
             return true;
@@ -6410,13 +6412,11 @@ mod tests {
         assert!(unclassified(DonorKind::Unknown, parked, parked + 2, false));
         assert!(unclassified(DonorKind::Unknown, parked, parked + 119, false));
         assert!(!unclassified(DonorKind::Unknown, parked, parked + 120, false));
-        // still being read in the background: held longer, but not forever
-        assert!(unclassified(DonorKind::Unknown, parked, parked + 300, true));
-        assert!(!unclassified(DonorKind::Unknown, parked, parked + 360, true));
+        // still being read in the background: held while the check runs, however old
+        assert!(unclassified(DonorKind::Unknown, parked, parked + 3_600, true));
         for kind in [DonorKind::Twin, DonorKind::Borrowable, DonorKind::Unborrowable] {
             assert!(!unclassified(kind, parked, parked + 2, false));
-            assert!(unclassified(kind, parked, parked + 2, true));
-            assert!(!unclassified(kind, parked, parked + 360, true));
+            assert!(unclassified(kind, parked, parked + 3_600, true));
         }
     }
 

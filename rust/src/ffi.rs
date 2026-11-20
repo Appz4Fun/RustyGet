@@ -152,7 +152,6 @@ unsafe fn in_place(raw: *mut c_char, f: impl FnOnce(&mut [u8]) -> usize) {
     *raw.add(n) = 0;
 }
 
-
 unsafe fn bytes<'a>(p: *const c_char, len: usize) -> &'a [u8] {
     if p.is_null() || len == 0 {
         &[]
@@ -161,20 +160,9 @@ unsafe fn bytes<'a>(p: *const c_char, len: usize) -> &'a [u8] {
     }
 }
 
-
-
-
-
-
-
-
-
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
 
     #[test]
     fn parrenamer_ffi_nulls() {
@@ -257,7 +245,6 @@ mod tests {
         );
         assert!(crate::parparser::same_par_collection(&name, &name, true));
     }
-
 
     #[test]
     fn split_command_line_keeps_quoted_words() {
@@ -343,12 +330,6 @@ mod tests {
             assert!(v3.is_some());
         }
     }
-
-
-
-
-
-
 
     #[test]
     fn webutil_nulls_borrowing_and_ownership() {

@@ -1654,6 +1654,32 @@ pub(crate) fn shutdown_daemon_service_coord() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_large_leap_correction_makes_one_task_due_many_times() {
+        // The large-correction TZif fixture in scheduler_differential.py,
+        // expressed here independently of the host's libc timezone support.
+        let calendar = |time: i64| {
+            let correction = if time < 78_796_800 {
+                0
+            } else {
+                1 + ((time - 78_796_800) / 86400).min(14) * 86400
+            };
+            gmtime(time - correction)
+        };
+        let mut tasks = [Task {
+            hours: 336,
+            minutes: 0,
+            week_days: 0,
+            last_executed: 0,
+        }];
+        let mut last = 0;
+        let r = check_tasks(&mut tasks, &mut last, 80_049_600, 0, 0, calendar);
+        assert_eq!(r.due, [0; 15]);
+        assert!(r.reset);
+        assert_eq!(tasks[0].last_executed, 80_049_599);
+        assert_eq!(last, 80_049_600);
+    }
+
 
     #[test]
     fn dates() {

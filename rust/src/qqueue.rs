@@ -603,8 +603,7 @@ pub unsafe fn nzb_message(nzb: usize, kind: i32, add: bool, msg: &[u8]) {
     // detail()/info()/warn()/error() cut at 1023 bytes; debug() printed
     // nothing without DEBUG
     if kind != crate::log::MK_DEBUG || crate::ffi::build_debug_enabled() {
-        let logged = std::ffi::CString::new(&text[..text.len().min(1023)]).unwrap_or_default();
-        unsafe { crate::log::nzbget_rs_log_active_emit(kind, logged.as_ptr()) };
+        crate::log::log_active_bytes(kind, &text[..text.len().min(1023)]);
     }
     let opts = unsafe {
         crate::options::nzbget_rs_options_scalars(crate::options::nzbget_rs_options_active())

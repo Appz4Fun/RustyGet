@@ -261,22 +261,65 @@ impl NzbgetRsLog {
 
     pub(crate) fn init_options_active(&self) {
         let opts = crate::options::active_options();
-        let flags = opts.as_deref().map_or(0, |o| {
-            c_int::from(o.server_mode())
-                | (c_int::from(o.remote_client_mode()) << 1)
-                | (c_int::from(o.direct_client_mode()) << 2)
+        let (server, remote, direct) = opts.as_deref().map_or((false, false, false), |o| {
+            (o.server_mode(), o.remote_client_mode(), o.direct_client_mode())
         });
-        unsafe {
-            nzbget_rs_log_ctl(
-                self,
-                1,
-                flags,
-                0,
-                opts.as_deref().map_or(ptr::null(), |o| o as *const _),
-                ptr::null(),
-                None,
-            );
+        self.init_options(opts.as_deref(), server, remote, direct);
+    }
+
+    /// Applies the options once they exist: takes the log file path (and, in
+    /// server mode with `WriteLog=reset`, deletes the old file), then writes
+    /// the buffered start-up messages that target the file and drops those
+    /// that do not stay on screen, renumbering the rest.
+    pub(crate) fn init_options(
+        &self,
+        opts: Option<&NzbgetRsOptions>,
+        server_mode: bool,
+        remote_mode: bool,
+        direct_mode: bool,
+    ) {
+        let debug_build = self.debug_build;
+        if let Some(o) = opts {
+            if !remote_mode && !direct_mode && o.scalars().write_log != 0 {
+                if let Some(lf) = o.str_cstr(OptStr::LogFile) {
+                    if let Ok(mut pg) = self.path.lock() {
+                        *pg = lf.to_owned();
+                    }
+                    if server_mode && o.scalars().write_log == 2 {
+                        let _ = unsafe { libc::unlink(lf.as_ptr()) };
+                    }
+                }
+            }
         }
+        let Ok(mut inner) = self.inner.lock() else {
+            return;
+        };
+        inner.id_gen = 0;
+        let mut i = 0usize;
+        while i < inner.messages.len() {
+            let kind = inner.messages[i].kind;
+            let target = target_for_kind(kind, opts);
+            let (write_to_file, keep_in_screen) = crate::util::log_init_message_disposition(target);
+            if write_to_file {
+                let msg_bytes = inner.messages[i].text.to_bytes().to_vec();
+                filelog_locked(
+                    &mut inner,
+                    &self.path,
+                    prefix_for_kind(kind),
+                    &msg_bytes,
+                    debug_build,
+                    opts,
+                );
+            }
+            if !keep_in_screen {
+                inner.messages.remove(i);
+            } else {
+                inner.id_gen = inner.id_gen.wrapping_add(1);
+                inner.messages[i].id = inner.id_gen;
+                i += 1;
+            }
+        }
+        inner.opt_init = true;
     }
 }
 
@@ -604,7 +647,8 @@ pub(crate) fn uninstall_log(log: std::sync::Arc<NzbgetRsLog>) {
     drop(log);
 }
 
-pub unsafe extern "C" fn nzbget_rs_log_emit(
+#[cfg(test)]
+unsafe fn nzbget_rs_log_emit(
     log: *const NzbgetRsLog,
     kind: c_int,
     options: *const NzbgetRsOptions,
@@ -619,148 +663,6 @@ pub unsafe extern "C" fn nzbget_rs_log_emit(
         CStr::from_ptr(text)
     };
     emit_message(lg, kind, lg.debug_build, options.as_ref(), cstr);
-}
-
-/// Emits `text` (a `Message::EKind`) to the active log with the active options,
-/// as the C++ `error`/`warn`/`info`/`detail`/`debug` functions do. Without an
-/// active log it does nothing.
-///
-/// # Safety
-/// `text` is null or NUL-terminated.
-pub unsafe extern "C" fn nzbget_rs_log_active_emit(kind: c_int, text: *const c_char) {
-    let Some(lg) = active_log() else {
-        return;
-    };
-    let cstr = if text.is_null() {
-        c""
-    } else {
-        CStr::from_ptr(text)
-    };
-    let opts = crate::options::active_options();
-    emit_message(&lg, kind, lg.debug_build, opts.as_deref(), cstr);
-}
-
-pub(crate) unsafe fn nzbget_rs_log_ctl(
-    log: *const NzbgetRsLog,
-    op: c_int,
-    a1: c_int,
-    p1: usize,
-    options: *const NzbgetRsOptions,
-    s1: *const c_char,
-    debug_cb: Option<unsafe extern "C" fn(usize)>,
-) {
-    let Some(lg) = log.as_ref() else {
-        return;
-    };
-    let opts = options.as_ref();
-    match op {
-        0 => {
-            if let Ok(mut inner) = lg.inner.lock() {
-                inner.messages.clear();
-            }
-        }
-        1 => {
-            let server_mode = (a1 & 1) != 0;
-            let remote_mode = (a1 & 2) != 0;
-            let direct_mode = (a1 & 4) != 0;
-            let debug_build = lg.debug_build;
-            if let Some(o) = opts {
-                if !remote_mode && !direct_mode && o.scalars().write_log != 0 {
-                    if let Some(lf) = o.str_cstr(OptStr::LogFile) {
-                        if let Ok(mut pg) = lg.path.lock() {
-                            *pg = lf.to_owned();
-                        }
-                        if server_mode && o.scalars().write_log == 2 {
-                            let _ = libc::unlink(lf.as_ptr());
-                        }
-                    }
-                }
-            }
-            let Ok(mut inner) = lg.inner.lock() else {
-                return;
-            };
-            inner.id_gen = 0;
-            let mut i = 0usize;
-            while i < inner.messages.len() {
-                let kind = inner.messages[i].kind;
-                let target = target_for_kind(kind, opts);
-                let (write_to_file, keep_in_screen) =
-                    crate::util::log_init_message_disposition(target);
-                if write_to_file {
-                    let msg_bytes = inner.messages[i].text.to_bytes().to_vec();
-                    filelog_locked(
-                        &mut inner,
-                        &lg.path,
-                        prefix_for_kind(kind),
-                        &msg_bytes,
-                        debug_build,
-                        opts,
-                    );
-                }
-                if !keep_in_screen {
-                    inner.messages.remove(i);
-                } else {
-                    inner.id_gen = inner.id_gen.wrapping_add(1);
-                    inner.messages[i].id = inner.id_gen;
-                    i += 1;
-                }
-            }
-            inner.opt_init = true;
-        }
-        2 => {
-            let Ok(mut inner) = lg.inner.lock() else {
-                return;
-            };
-            if inner.log_file.is_some() {
-                let corr = opts.map_or(0, |o| o.scalars().time_correction) as i64;
-                let cur_time = current_unix_time() + corr;
-                if crate::util::log_should_close_idle(cur_time, inner.last_written) {
-                    inner.log_file = None;
-                }
-            }
-        }
-        3 => {
-            if let Some(lf) = opts.and_then(|o| o.str_cstr(OptStr::LogFile)) {
-                let _ = libc::unlink(lf.as_ptr());
-            }
-        }
-        4 => {
-            let new_c = if s1.is_null() {
-                c"".to_owned()
-            } else {
-                CStr::from_ptr(s1).to_owned()
-            };
-            if let Ok(mut pg) = lg.path.lock() {
-                *pg = new_c;
-            }
-        }
-        5 => {
-            if let Ok(mut dbg) = lg.debuggables.lock() {
-                dbg.push(p1);
-            }
-        }
-        6 => {
-            if let Ok(mut dbg) = lg.debuggables.lock() {
-                dbg.retain(|&x| x != p1);
-            }
-        }
-        7 => {
-            let debug_build = lg.debug_build;
-            let sep = c"--------------------------------------------";
-            emit_message(lg, 0, debug_build, opts, sep);
-            emit_message(lg, 0, debug_build, opts, c"Dumping debug info to log");
-            emit_message(lg, 0, debug_build, opts, sep);
-            if let Ok(dbg) = lg.debuggables.lock() {
-                if let Some(cb) = debug_cb {
-                    for &item in dbg.iter() {
-                        cb(item);
-                    }
-                }
-            }
-            emit_message(lg, 0, debug_build, opts, sep);
-        }
-        _ => {}
-    }
 }
 
 pub(crate) fn clear_active_log() {
@@ -904,7 +806,7 @@ mod tests {
 
         unsafe {
             // server_mode = 1 -> resets stale log file and replays buffered messages
-            nzbget_rs_log_ctl(log, 1, 1, 0, opts, ptr::null(), None);
+            (*log).init_options(opts.as_ref(), true, false, false);
         }
 
         // LogFile itself is written: the old line is kept and new ones follow it
@@ -1016,7 +918,7 @@ mod tests {
         };
         let line = CString::new("x".repeat(200)).unwrap();
         unsafe {
-            nzbget_rs_log_ctl(log, 1, 1, 0, opts, ptr::null(), None);
+            (*log).init_options(opts.as_ref(), true, false, false);
             for _ in 0..60 {
                 nzbget_rs_log_emit(log, 0, opts, line.as_ptr());
             }
@@ -1117,7 +1019,7 @@ mod tests {
             )
         };
         unsafe {
-            nzbget_rs_log_ctl(log, 1, 1, 0, opts, ptr::null(), None);
+            (*log).init_options(opts.as_ref(), true, false, false);
             for i in 0..120 {
                 let line = CString::new(format!("line {i:03} {}", "y".repeat(190))).unwrap();
                 nzbget_rs_log_emit(log, 0, opts, line.as_ptr());

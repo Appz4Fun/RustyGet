@@ -10125,7 +10125,13 @@ impl CrossPackRepairSession {
                 // handed to direct unpack complete as soon as its bytes are in (and the rest
                 // re-offered with what is left), so extraction patches it while the next one is
                 // borrowed instead of waiting for the whole borrow.
-                let groups = if self.dead_fills.is_empty() {
+                // Encrypted patching checks predecessor ciphertext against the full hole
+                // set, so encrypted sets keep it whole.
+                let encrypted = self.repair_sets[repair_set_idx]
+                    .map
+                    .as_ref()
+                    .is_some_and(ContentMap::encrypted);
+                let groups = if self.dead_fills.is_empty() || encrypted {
                     vec![self.repair_sets[repair_set_idx].inner_holes.clone()]
                 } else {
                     self.repair_sets[repair_set_idx].holes_by_first_member()

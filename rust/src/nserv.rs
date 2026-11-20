@@ -1307,8 +1307,7 @@ impl NServOptsHandle {
 // End-to-End NServ Server & Client Session Runner (`NServMain`, `NntpServer`, `NntpProcessor`)
 // ============================================================================
 
-/// Host C++ callback table for `nzbget_rs_nserv_run`.
-#[repr(C)]
+/// Host callback table for `nzbget_rs_nserv_run`.
 #[derive(Clone, Copy)]
 pub struct NzbgetRsNservEnv {
     pub ctx: *mut std::ffi::c_void,
@@ -1326,52 +1325,80 @@ pub struct NzbgetRsNservEnv {
             usize,
         ),
     >,
-    pub conn_cb: Option<
-        unsafe extern "C" fn(
-            usize,
-            std::ffi::c_int,
-            std::ffi::c_int,
-            std::ffi::c_int,
-            *const std::ffi::c_char,
-            *const std::ffi::c_char,
-            *mut std::ffi::c_char,
-        ) -> usize,
-    >,
+    /// The sockets NServ listens and talks on. `None` uses the real network
+    /// ([`crate::net::NetNservTransport`]); tests pass a fake one, which also
+    /// turns off NServ's own console output and log setup.
+    pub transport: Option<&'static dyn NservTransport>,
     #[cfg(unix)]
     pub tls_host_cb: crate::net::NzbgetRsConnHostFn,
     pub debug_on: std::ffi::c_int,
 }
 
-unsafe fn nserv_conn_op(
-    env: &NzbgetRsNservEnv,
-    conn: usize,
-    op: std::ffi::c_int,
-    a1: std::ffi::c_int,
-    a2: std::ffi::c_int,
-    s1: *const std::ffi::c_char,
-    s2: *const std::ffi::c_char,
-    out_buf: *mut std::ffi::c_char,
-) -> usize {
-    if let Some(cb) = env.conn_cb {
-        return cb(conn, op, a1, a2, s1, s2, out_buf);
+/// Lets another thread interrupt a listener's `bind` or `accept`.
+pub type NservCanceller = Box<dyn Fn() + Send + Sync>;
+
+/// Where NServ gets its sockets: the network, or a fake in tests.
+pub trait NservTransport: Send + Sync {
+    /// A listener for `bind_address:port`, not yet bound. `tls` when NServ
+    /// was given a certificate.
+    fn listener(
+        &self,
+        bind_address: &CStr,
+        port: std::ffi::c_int,
+        tls: bool,
+    ) -> Option<Box<dyn NservListener>>;
+}
+
+/// A listening socket, owned by its server instance's accept loop.
+pub trait NservListener: Send {
+    fn bind(&mut self) -> bool;
+    /// The next client, or `None` on error or cancellation.
+    fn accept(&mut self) -> Option<Box<dyn NservConn>>;
+    fn canceller(&self) -> NservCanceller;
+    /// Closes the socket at shutdown. Dropping a listener frees it without
+    /// closing it first.
+    fn shutdown(self: Box<Self>);
+}
+
+/// One client connection, owned by its session thread.
+pub trait NservConn: Send {
+    /// Starts TLS when `cert` is given and returns the peer's host, or
+    /// `None` when the TLS handshake failed.
+    fn start_tls(&mut self, cert: Option<&CStr>, key: Option<&CStr>) -> Option<Vec<u8>>;
+    /// The next request line, or `None` when the client is gone.
+    fn read_line<'a>(&mut self, buf: &'a mut [u8]) -> Option<&'a [u8]>;
+    fn write_line(&mut self, line: &[u8]);
+    fn send(&mut self, data: &[u8]);
+    /// Disconnects (lingering first when `graceful`) and frees the connection.
+    fn close(self: Box<Self>, graceful: bool);
+}
+
+/// The transport `env` names, or the network one.
+fn nserv_transport(env: &NzbgetRsNservEnv) -> Option<Box<dyn NservTransport>> {
+    if let Some(t) = env.transport {
+        return Some(Box::new(t));
     }
     #[cfg(unix)]
     {
-        crate::net::nserv_default_conn_cb(
-            env.tls_host_cb.or_else(crate::ffi::tls_host_cb),
-            env.debug_on != 0 || crate::ffi::build_debug_enabled(),
-            conn,
-            op,
-            a1,
-            a2,
-            s1,
-            s2,
-            out_buf,
-        )
+        Some(Box::new(crate::net::NetNservTransport {
+            tls_host_cb: env.tls_host_cb.or_else(crate::ffi::tls_host_cb),
+            debug_on: env.debug_on != 0 || crate::ffi::build_debug_enabled(),
+        }))
     }
     #[cfg(not(unix))]
     {
-        0
+        None
+    }
+}
+
+impl<T: NservTransport + ?Sized> NservTransport for &T {
+    fn listener(
+        &self,
+        bind_address: &CStr,
+        port: std::ffi::c_int,
+        tls: bool,
+    ) -> Option<Box<dyn NservListener>> {
+        (**self).listener(bind_address, port, tls)
     }
 }
 
@@ -1401,7 +1428,7 @@ fn nserv_emit_level_bytes(env: &NzbgetRsNservEnv, level: i32, bytes: &[u8]) {
         return;
     }
     #[cfg(unix)]
-    if env.conn_cb.is_none() {
+    if env.transport.is_none() {
         let kind = match level {
             0 => 3,
             1 => 4,
@@ -1415,7 +1442,7 @@ fn nserv_emit_level_bytes(env: &NzbgetRsNservEnv, level: i32, bytes: &[u8]) {
 }
 
 fn nserv_env_log(env: &NzbgetRsNservEnv, level: i32, parts: &[&[u8]]) {
-    if env.log_cb.is_none() && env.conn_cb.is_some() {
+    if env.log_cb.is_none() && env.transport.is_some() {
         return;
     }
     let joined: Vec<u8> = parts.concat();
@@ -1433,59 +1460,27 @@ struct NservSharedState {
     speed: i32,
     cache: Option<std::sync::Arc<NntpCache>>,
     stopped: std::sync::atomic::AtomicBool,
+    transport: Option<Box<dyn NservTransport>>,
 }
 
 fn run_nntp_processor_session(
-    shared: std::sync::Arc<NservSharedState>,
+    shared: &NservSharedState,
     proc_id: i32,
     server_id: i32,
-    conn: usize,
+    mut conn: Box<dyn NservConn>,
 ) {
     let env = &shared.env.0;
-    let cert_ptr = shared
-        .secure_cert
-        .as_ref()
-        .map_or(std::ptr::null(), |s| s.as_ptr());
-    let key_ptr = shared
-        .secure_key
-        .as_ref()
-        .map_or(std::ptr::null(), |s| s.as_ptr());
-
-    let mut host_buf = [0 as std::ffi::c_char; 256];
-    let started = unsafe {
-        nserv_conn_op(
-            env,
-            conn,
-            5,
-            host_buf.len() as std::ffi::c_int,
-            0,
-            cert_ptr,
-            key_ptr,
-            host_buf.as_mut_ptr(),
-        )
-    };
-    if started == 0 {
+    let Some(host) = conn.start_tls(shared.secure_cert.as_deref(), shared.secure_key.as_deref())
+    else {
         nserv_env_log(
             env,
             4,
             &[b"Could not establish secure connection to nntp-client: Start TLS failed"],
         );
-        unsafe {
-            nserv_conn_op(
-                env,
-                conn,
-                4,
-                0,
-                1,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null_mut(),
-            )
-        };
+        conn.close(false);
         return;
-    }
+    };
 
-    let host_bytes = unsafe { CStr::from_ptr(host_buf.as_ptr()) }.to_bytes();
     let ts = nserv_now_formatted();
     nserv_env_log(
         env,
@@ -1493,68 +1488,26 @@ fn run_nntp_processor_session(
         &[
             &ts,
             format!(" [{proc_id}] Incoming connection from: ").as_bytes(),
-            host_bytes,
+            &host,
         ],
     );
 
-    unsafe {
-        nserv_conn_op(
-            env,
-            conn,
-            7,
-            0,
-            1,
-            c"200 Welcome (NServ)\r\n".as_ptr(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-        );
-    }
+    conn.write_line(b"200 Welcome (NServ)\r\n");
 
-    let mut line_buf = [0 as std::ffi::c_char; 1024];
+    let conn = std::cell::RefCell::new(conn);
+    let mut line_buf = [0u8; 1024];
     loop {
-        let got = unsafe {
-            nserv_conn_op(
-                env,
-                conn,
-                6,
-                1024,
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                line_buf.as_mut_ptr(),
-            )
-        };
-        if got == 0 {
+        let mut reader = conn.borrow_mut();
+        let Some(raw_line) = reader.read_line(&mut line_buf) else {
             break;
-        }
-        let raw_line = unsafe { CStr::from_ptr(line_buf.as_ptr()) }.to_bytes();
+        };
+        let raw_line = raw_line.to_vec();
+        drop(reader);
         let mut write_line_fn = |reply: &[u8]| {
-            let cstr = nserv_bytes_to_cstring(reply);
-            unsafe {
-                nserv_conn_op(
-                    env,
-                    conn,
-                    7,
-                    0,
-                    1,
-                    cstr.as_ptr(),
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                );
-            }
+            let end = reply.iter().position(|&b| b == 0).unwrap_or(reply.len());
+            conn.borrow_mut().write_line(&reply[..end]);
         };
-        let mut send_fn = |chunk: &[u8]| unsafe {
-            nserv_conn_op(
-                env,
-                conn,
-                7,
-                chunk.len() as std::ffi::c_int,
-                0,
-                chunk.as_ptr().cast(),
-                std::ptr::null(),
-                std::ptr::null_mut(),
-            );
-        };
+        let mut send_fn = |chunk: &[u8]| conn.borrow_mut().send(chunk);
         let mut log_fn = |kind: i32, msg: &[u8]| match kind {
             0 => {
                 let ts = nserv_now_formatted();
@@ -1573,7 +1526,7 @@ fn run_nntp_processor_session(
             shared.latency,
             shared.speed,
             shared.cache.as_deref(),
-            raw_line,
+            &raw_line,
             &mut write_line_fn,
             &mut send_fn,
             &mut log_fn,
@@ -1583,25 +1536,14 @@ fn run_nntp_processor_session(
         }
     }
 
-    unsafe {
-        nserv_conn_op(
-            env,
-            conn,
-            4,
-            1,
-            1,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-        )
-    };
+    conn.into_inner().close(true);
 }
 
 fn run_nntp_server_instance(
     shared: std::sync::Arc<NservSharedState>,
     server_id: i32,
     port: i32,
-    listener_slot: std::sync::Arc<Mutex<usize>>,
+    canceller_slot: std::sync::Arc<Mutex<Option<NservCanceller>>>,
 ) {
     use std::sync::atomic::Ordering;
     let env = &shared.env.0;
@@ -1614,129 +1556,62 @@ fn run_nntp_server_instance(
         &[&ts, format!(" Listening on port {port}").as_bytes()],
     );
 
-    let cert_ptr = shared
-        .secure_cert
-        .as_ref()
-        .map_or(std::ptr::null(), |s| s.as_ptr());
+    let tls = shared.secure_cert.is_some();
+    let mut listener: Option<Box<dyn NservListener>> = None;
     let mut num: i32 = 1;
 
     while !shared.stopped.load(Ordering::SeqCst) {
-        let mut conn = listener_slot.lock().map(|g| *g).unwrap_or(0);
-        let bind = if conn == 0 {
-            let created = unsafe {
-                nserv_conn_op(
-                    env,
-                    0,
-                    0,
-                    port as std::ffi::c_int,
-                    0,
-                    shared.bind_address.as_ptr(),
-                    cert_ptr,
-                    std::ptr::null_mut(),
-                )
-            };
-            let bound = created != 0
-                && unsafe {
-                    nserv_conn_op(
-                        env,
-                        created,
-                        1,
-                        0,
-                        0,
-                        std::ptr::null(),
-                        std::ptr::null(),
-                        std::ptr::null_mut(),
-                    )
-                } != 0;
-            if let Ok(mut g) = listener_slot.lock() {
-                *g = created;
-                if shared.stopped.load(Ordering::SeqCst) && created != 0 {
-                    unsafe {
-                        nserv_conn_op(
-                            env,
-                            created,
-                            3,
-                            0,
-                            0,
-                            std::ptr::null(),
-                            std::ptr::null(),
-                            std::ptr::null_mut(),
-                        );
+        let bound = if listener.is_none() {
+            let mut created = shared
+                .transport
+                .as_ref()
+                .and_then(|t| t.listener(&shared.bind_address, port, tls));
+            let bound = created.as_mut().is_some_and(|l| l.bind());
+            if let Ok(mut slot) = canceller_slot.lock() {
+                *slot = created.as_ref().map(|l| l.canceller());
+                // A stop that came in while binding found no canceller to call.
+                if shared.stopped.load(Ordering::SeqCst) {
+                    if let Some(cancel) = slot.as_ref() {
+                        cancel();
                     }
                 }
             }
-            conn = created;
+            listener = created;
             bound
         } else {
             true
         };
 
-        let accepted = if bind && !shared.stopped.load(Ordering::SeqCst) {
-            unsafe {
-                nserv_conn_op(
-                    env,
-                    conn,
-                    2,
-                    0,
-                    0,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                )
-            }
-        } else {
-            0
+        let accepted = match listener.as_mut() {
+            Some(l) if bound && !shared.stopped.load(Ordering::SeqCst) => l.accept(),
+            _ => None,
         };
 
-        if !bind || accepted == 0 {
+        let Some(accepted) = accepted else {
             if shared.stopped.load(Ordering::SeqCst) {
                 break;
             }
-            if let Ok(mut g) = listener_slot.lock() {
-                let old = std::mem::replace(&mut *g, 0);
-                if old != 0 {
-                    unsafe {
-                        nserv_conn_op(
-                            env,
-                            old,
-                            4,
-                            0,
-                            0,
-                            std::ptr::null(),
-                            std::ptr::null(),
-                            std::ptr::null_mut(),
-                        );
-                    }
-                }
+            if let Ok(mut slot) = canceller_slot.lock() {
+                *slot = None;
             }
+            drop(listener.take());
             std::thread::sleep(Duration::from_millis(500));
             continue;
-        }
+        };
 
         let proc_id = num;
         num = num.wrapping_add(1);
         let shared_clone = std::sync::Arc::clone(&shared);
         std::thread::spawn(move || {
-            run_nntp_processor_session(shared_clone, proc_id, server_id, accepted);
+            run_nntp_processor_session(&shared_clone, proc_id, server_id, accepted);
         });
     }
 
-    if let Ok(mut g) = listener_slot.lock() {
-        let old = std::mem::replace(&mut *g, 0);
-        if old != 0 {
-            unsafe {
-                nserv_conn_op(
-                    env,
-                    old,
-                    4,
-                    2,
-                    0,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                );
-            }
-        }
+    if let Ok(mut slot) = canceller_slot.lock() {
+        *slot = None;
+    }
+    if let Some(l) = listener.take() {
+        l.shutdown();
     }
 
     nserv_env_log(env, 0, &[b"Exiting NntpServer-loop"]);
@@ -1747,7 +1622,7 @@ fn run_nntp_server_instance(
 ///
 /// # Safety
 /// `argv` (when `argc > 0`) and `env` must be valid for the duration of the call.
-pub unsafe extern "C" fn nzbget_rs_nserv_run(
+pub unsafe fn nzbget_rs_nserv_run(
     argc: std::ffi::c_int,
     argv: *const *const std::ffi::c_char,
     env: *const NzbgetRsNservEnv,
@@ -1758,7 +1633,7 @@ pub unsafe extern "C" fn nzbget_rs_nserv_run(
     let ver_bytes = if env.version.is_null() {
         #[cfg(unix)]
         {
-            if env.conn_cb.is_none() {
+            if env.transport.is_none() {
                 crate::ffi::build_version_bytes()
             } else {
                 &b""[..]
@@ -1797,7 +1672,7 @@ pub unsafe extern "C" fn nzbget_rs_nserv_run(
                 cb(data.as_ptr().cast(), data.len());
             } else {
                 #[cfg(unix)]
-                if env.conn_cb.is_none() {
+                if env.transport.is_none() {
                     crate::ffi::write_stdout_bytes(data, false);
                 }
             }
@@ -1819,13 +1694,13 @@ pub unsafe extern "C" fn nzbget_rs_nserv_run(
         rt_cb(env.ctx, 0, 0, opt_ptrs.as_ptr(), opt_ptrs.len());
     }
     #[cfg(unix)]
-    if env.conn_cb.is_none() {
+    if env.transport.is_none() {
         if let Some(lg) = crate::log::active_log() {
             lg.init_options_active();
         }
     }
     #[cfg(unix)]
-    let nserv_frontend = env.conn_cb.is_none().then(|| {
+    let nserv_frontend = env.transport.is_none().then(|| {
         let fe = crate::ffi::FrontendHandle::new(3, None);
         fe.start();
         fe
@@ -1867,6 +1742,7 @@ pub unsafe extern "C" fn nzbget_rs_nserv_run(
             .mem_cache
             .then(|| std::sync::Arc::new(NntpCache::new())),
         stopped: std::sync::atomic::AtomicBool::new(false),
+        transport: nserv_transport(env),
     });
 
     let inst_count = handle.parsed.instances.max(0) as usize;
@@ -1875,7 +1751,7 @@ pub unsafe extern "C" fn nzbget_rs_nserv_run(
     let mut threads = Vec::with_capacity(inst_count);
 
     for i in 0..inst_count {
-        let slot = std::sync::Arc::new(Mutex::new(0usize));
+        let slot = std::sync::Arc::new(Mutex::new(None));
         slots.push(std::sync::Arc::clone(&slot));
         let shared_clone = std::sync::Arc::clone(&shared);
         let server_id = (i as i32) + 1;
@@ -1895,17 +1771,8 @@ pub unsafe extern "C" fn nzbget_rs_nserv_run(
         .store(true, std::sync::atomic::Ordering::SeqCst);
     for slot in &slots {
         if let Ok(g) = slot.lock() {
-            if *g != 0 {
-                nserv_conn_op(
-                    env,
-                    *g,
-                    3,
-                    0,
-                    0,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                );
+            if let Some(cancel) = g.as_ref() {
+                cancel();
             }
         }
     }
@@ -2236,46 +2103,48 @@ mod tests {
             }
         }
 
-        unsafe extern "C" fn mock_conn(
-            raw: usize,
-            op: std::ffi::c_int,
-            _: std::ffi::c_int,
-            _: std::ffi::c_int,
-            _: *const std::ffi::c_char,
-            _: *const std::ffi::c_char,
-            _: *mut std::ffi::c_char,
-        ) -> usize {
-            let m = MOCK.get().unwrap();
-            match op {
-                0 => 0x1234,
-                1 => {
-                    m.entered_bind.wait();
-                    // Give main thread time to set shared.stopped = true and attempt slot cancellation
-                    std::thread::sleep(Duration::from_millis(25));
-                    m.allow_bind_finish.wait();
-                    // Overwrite status with LISTENING just like socket::bind_listener does
-                    m.status.store(1, Ordering::SeqCst);
-                    1
+        struct MockTransport;
+        struct MockListener;
+
+        impl NservTransport for MockTransport {
+            fn listener(
+                &self,
+                _: &CStr,
+                _: std::ffi::c_int,
+                _: bool,
+            ) -> Option<Box<dyn NservListener>> {
+                Some(Box::new(MockListener))
+            }
+        }
+
+        impl NservListener for MockListener {
+            fn bind(&mut self) -> bool {
+                let m = MOCK.get().unwrap();
+                m.entered_bind.wait();
+                // Give main thread time to set shared.stopped = true and attempt slot cancellation
+                std::thread::sleep(Duration::from_millis(25));
+                m.allow_bind_finish.wait();
+                // Overwrite status with LISTENING just like socket::bind_listener does
+                m.status.store(1, Ordering::SeqCst);
+                true
+            }
+
+            fn accept(&mut self) -> Option<Box<dyn NservConn>> {
+                let m = MOCK.get().unwrap();
+                m.accept_calls.fetch_add(1, Ordering::SeqCst);
+                // Would hang forever if called while status == 1 (LISTENING)!
+                while m.status.load(Ordering::SeqCst) == 1 {
+                    std::thread::sleep(Duration::from_millis(10));
                 }
-                2 => {
-                    m.accept_calls.fetch_add(1, Ordering::SeqCst);
-                    // Would hang forever if called while status == 1 (LISTENING)!
-                    while m.status.load(Ordering::SeqCst) == 1 {
-                        std::thread::sleep(Duration::from_millis(10));
-                    }
-                    0
-                }
-                3 => {
-                    assert_eq!(raw, 0x1234);
-                    m.status.store(2, Ordering::SeqCst);
-                    1
-                }
-                4 => {
-                    assert_eq!(raw, 0x1234);
-                    m.status.store(3, Ordering::SeqCst);
-                    0
-                }
-                _ => 0,
+                None
+            }
+
+            fn canceller(&self) -> NservCanceller {
+                Box::new(|| MOCK.get().unwrap().status.store(2, Ordering::SeqCst))
+            }
+
+            fn shutdown(self: Box<Self>) {
+                MOCK.get().unwrap().status.store(3, Ordering::SeqCst);
             }
         }
 
@@ -2299,7 +2168,7 @@ mod tests {
             write_stdout_cb: None,
             log_cb: None,
             runtime_cb: Some(mock_rt),
-            conn_cb: Some(mock_conn),
+            transport: Some(&MockTransport),
             #[cfg(unix)]
             tls_host_cb: None,
             debug_on: 0,

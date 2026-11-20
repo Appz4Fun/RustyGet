@@ -2031,10 +2031,15 @@ mod article_fetcher_tests {
                 std::thread::sleep(Duration::from_millis(50));
                 batch_for_stop.stop();
             });
-            assert!(batch.next().is_none());
-            assert!(stop_hook_called.load(Ordering::SeqCst));
-            release.store(true, Ordering::SeqCst);
+            let delivered = batch.next();
+            // next() can return as soon as stop() sets the flag, before stop()
+            // has run the hook, so wait for stop() to finish. Release the worker
+            // before asserting: a failed assert drops the batch, and its Drop
+            // joins the worker, which would otherwise spin on `release` forever.
             stopper.join().unwrap();
+            release.store(true, Ordering::SeqCst);
+            assert!(delivered.is_none());
+            assert!(stop_hook_called.load(Ordering::SeqCst));
         }
 
         // 12. ArticleBatchFetcherRequestsOwnTheirGroups

@@ -6231,10 +6231,11 @@ impl RepairSetData {
         }
 
         // One read's articles are fetched as one batch, so the chunk sets how many are in
-        // flight at once: 16 MB is about 22 articles, more than the fetch workers (at most
-        // 8), where 4 MB (6 articles) left most of them idle and borrows ran at 2-3 MB/s.
-        // It stays small enough that a stop (a live pass yielding) is seen within seconds.
-        const FULL_CHUNK: i64 = 16 * 1024 * 1024;
+        // flight at once: 32 MB is about 45 articles, more than the fetch workers (up to 30
+        // for a live borrow), where 4 MB (6 articles) left most of them idle and borrows ran
+        // at 2-3 MB/s. It stays small enough that a stop (a live pass yielding) is seen
+        // within seconds.
+        const FULL_CHUNK: i64 = 32 * 1024 * 1024;
         const MIN_CHUNK: i64 = 64 * 1024;
         const MAX_FAILED_PIECES: i32 = 8;
 

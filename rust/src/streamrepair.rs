@@ -8619,6 +8619,9 @@ pub fn nothing_arrived(decoded_file_size: i64, holes: &[NzbgetRsByteRange]) -> b
 /// Host callback boundary for [`CrossPackRepairSession::process_donor`].
 pub trait CrossPackDonorEnv {
     fn is_stopped(&mut self) -> bool;
+    /// Set while one dead volume's holes are borrowed: a pass yielding for a newly dead volume
+    /// lets that volume finish first, so its bytes are handed over instead of fetched again.
+    fn set_finishing_volume(&mut self, _on: bool) {}
     fn has_batch_fetcher(&self) -> bool {
         true
     }
@@ -10144,6 +10147,10 @@ impl CrossPackRepairSession {
                         continue;
                     }
                     self.repair_sets[repair_set_idx].inner_holes = group;
+                    let finishing = !self.dead_fills.is_empty();
+                    if finishing {
+                        env_cell.borrow_mut().set_finishing_volume(true);
+                    }
                     let (w, credit) = {
                         let mut target_adapter = DiskTargetFileSetAdapter {
                             files: &mut self.target_files,
@@ -10160,6 +10167,9 @@ impl CrossPackRepairSession {
                             &donor_info_str,
                         )
                     };
+                    if finishing {
+                        env_cell.borrow_mut().set_finishing_volume(false);
+                    }
                     written += w;
                     credit_recovery |= credit;
                     left_over.extend(std::mem::take(

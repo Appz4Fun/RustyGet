@@ -1275,7 +1275,7 @@ impl NzbgetRsPrePostProcessor {
             let qlen = host.queue_len(dq_ptr);
             for qi in 0..qlen {
                 let nzb_ptr = host.queue_at(dq_ptr, qi);
-                host.nzb_action(nzb_ptr, NZB_ACT_DISCONNECT_THREADS, 0);
+                host.nzb_action(nzb_ptr, NZB_ACT_DISCONNECT_THREADS);
             }
         });
 
@@ -1494,7 +1494,7 @@ impl NzbgetRsPrePostProcessor {
             msg.extend_from_slice(&nzb.name);
             msg.extend_from_slice(b" for post-processing");
             host.nzb_print_message(nzb_ptr, MK_INFO, &msg);
-            host.nzb_action(nzb_ptr, NZB_ACT_ENTER_POST_PROCESS, 0);
+            host.nzb_action(nzb_ptr, NZB_ACT_ENTER_POST_PROCESS);
             if set_par_skipped {
                 host.nzb_set_par_status(nzb_ptr, NzbParStatus::Skipped);
             }
@@ -1755,7 +1755,7 @@ impl NzbgetRsPrePostProcessor {
                 host.post_set_int(ps.ptr, POST_INT_FORCE_PAR_FULL, i32::from(new_force_full));
                 host.nzb_set_par_status(nzb.ptr, NzbParStatus::None);
                 host.post_set_int(ps.ptr, POST_INT_REQUEST_PAR_CHECK, 0);
-                host.nzb_action(nzb.ptr, NZB_ACT_CLEAR_SCRIPT_STATUSES, 0);
+                host.nzb_action(nzb.ptr, NZB_ACT_CLEAR_SCRIPT_STATUSES);
                 host.post_set_stage(ps.ptr, PostStage::Queued);
                 host.post_set_int(ps.ptr, POST_INT_WORKING, 0);
             } else if act == 2 || act == 3 {
@@ -2125,9 +2125,7 @@ impl NzbgetRsPrePostProcessor {
                 && nzb.direct_unpack_status == DirectUnpackStatus::Success
                 && direct_unpack_read_all_damage(
                     &host.nzb_completed_files(nzb.ptr),
-                    &(0..host.nzb_extracted_archives_len(nzb.ptr))
-                        .map(|i| host.nzb_extracted_archive_at(nzb.ptr, i))
-                        .collect::<Vec<_>>(),
+                    &host.nzb_extracted_archives(nzb.ptr),
                     &nzb.dest_dir,
                     crate::postproc::dead_volumes_borrowed_count(nzb.id),
                 )
@@ -2399,7 +2397,7 @@ impl NzbgetRsPrePostProcessor {
         use crate::queuesubsys_host::NZB_ACT_LEAVE_POST_PROCESS;
         use std::sync::atomic::Ordering;
 
-        host.nzb_action(nzb_ptr, NZB_ACT_LEAVE_POST_PROCESS, 0);
+        host.nzb_action(nzb_ptr, NZB_ACT_LEAVE_POST_PROCESS);
         let nzb = host.nzb_snap(nzb_ptr, false);
         if dupe_gate_has(&DUPE_STOPPED_IN_POST, nzb.id) && nzb.delete_status == DeleteStatus::Dupe {
             let opts = host.opts();

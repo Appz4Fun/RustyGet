@@ -7086,7 +7086,6 @@ unsafe extern "C" fn active_disk_ctrl_cb(
                 qh.nzb_action(
                     c.target_nzb_ptr,
                     crate::queuesubsys_host::NZB_ACT_LEAVE_POST_PROCESS,
-                    0,
                 );
             }
             let uptr = c.pending_nzb_uptr;
@@ -7202,7 +7201,7 @@ unsafe extern "C" fn active_disk_ctrl_cb(
             let qlen = qh.queue_len(c.dq_ptr);
             for i in 0..qlen {
                 let n = qh.queue_at(c.dq_ptr, i);
-                qh.nzb_action(n, crate::queuesubsys_host::NZB_ACT_UPDATE_CURRENT_STATS, 0);
+                qh.nzb_action(n, crate::queuesubsys_host::NZB_ACT_UPDATE_CURRENT_STATS);
             }
             0
         }
@@ -7399,16 +7398,15 @@ unsafe extern "C" fn active_disk_export_nzb_cb(
         })
         .collect();
 
-    let stlen = qh.nzb_server_stats_len(nzb_ptr);
-    let mut stats = Vec::with_capacity(stlen);
-    for i in 0..stlen {
-        let (sid, succ, fail) = qh.nzb_server_stat_at(nzb_ptr, i);
-        stats.push(NzbgetRsDiskServerStat {
-            server_id: sid,
-            success_articles: succ,
-            failed_articles: fail,
-        });
-    }
+    let stats: Vec<_> = qh
+        .nzb_server_stats(nzb_ptr)
+        .into_iter()
+        .map(|st| NzbgetRsDiskServerStat {
+            server_id: st.server_id,
+            success_articles: st.success,
+            failed_articles: st.failed,
+        })
+        .collect();
 
     let flen = qh.nzb_file_len(nzb_ptr);
     let mut files = Vec::with_capacity(flen);
@@ -7464,13 +7462,11 @@ unsafe extern "C" fn active_disk_export_nzb_cb(
         });
     }
 
-    let alen = qh.nzb_extracted_archives_len(nzb_ptr);
-    let mut archive_strs = Vec::with_capacity(alen);
-    for i in 0..alen {
-        archive_strs.push(bytes_to_cstring_trunc(
-            &qh.nzb_extracted_archive_at(nzb_ptr, i),
-        ));
-    }
+    let archive_strs: Vec<_> = qh
+        .nzb_extracted_archives(nzb_ptr)
+        .iter()
+        .map(|a| bytes_to_cstring_trunc(a))
+        .collect();
     let archive_ptrs: Vec<*const c_char> = archive_strs.iter().map(|c| c.as_ptr()).collect();
 
     exp.completed = completed.as_ptr();
@@ -7589,7 +7585,7 @@ unsafe extern "C" fn active_disk_apply_nzb_cb(
             c_int::from(inp.move_status != 0),
         );
         qh.nzb_set_last_unpack_status(nzb_ptr, UnpackStatus::from(inp.delete_status));
-        qh.nzb_action(nzb_ptr, NZB_ACT_CLEAR_EXTRACTED_ARCHIVES, 0);
+        qh.nzb_action(nzb_ptr, NZB_ACT_CLEAR_EXTRACTED_ARCHIVES);
         return;
     }
     if mode == 4 {
@@ -7635,7 +7631,7 @@ unsafe extern "C" fn active_disk_apply_nzb_cb(
     qh.nzb_set_int(nzb_ptr, NZB_INT_DELETE_PAUSED, inp.delete_paused);
     qh.nzb_set_int(nzb_ptr, NZB_INT_MANY_DUPE_FILES, inp.many_dupe_files);
     if inp.has_post_info != 0 {
-        qh.nzb_action(nzb_ptr, NZB_ACT_ENTER_POST_PROCESS, 0);
+        qh.nzb_action(nzb_ptr, NZB_ACT_ENTER_POST_PROCESS);
         qh.nzb_set_int(nzb_ptr, NZB_INT_POST_STAGE, inp.post_stage);
     }
     qh.nzb_set_int(nzb_ptr, NZB_INT_FEED_ID, inp.feed_id);
@@ -7710,7 +7706,7 @@ unsafe extern "C" fn active_disk_apply_nzb_cb(
         qh.nzb_set_int(nzb_ptr, NZB_INT_LIVE_UNPACK_SEC, inp.live_unpack_sec);
         qh.nzb_set_int(nzb_ptr, NZB_INT_LIVE_PAR_SEC, inp.live_par_sec);
     }
-    qh.nzb_action(nzb_ptr, NZB_ACT_CLEAR_COMPLETED_FILES, 0);
+    qh.nzb_action(nzb_ptr, NZB_ACT_CLEAR_COMPLETED_FILES);
     if !completed.is_null() {
         for i in 0..completed_len {
             let cf = unsafe { &*completed.add(i) };
@@ -7727,7 +7723,7 @@ unsafe extern "C" fn active_disk_apply_nzb_cb(
             );
         }
     }
-    qh.nzb_action(nzb_ptr, NZB_ACT_CLEAR_PARAMS, 0);
+    qh.nzb_action(nzb_ptr, NZB_ACT_CLEAR_PARAMS);
     if (flags & 4) != 0 {
         qh.nzb_set_int(
             nzb_ptr,
@@ -7747,7 +7743,7 @@ unsafe extern "C" fn active_disk_apply_nzb_cb(
             );
         }
     }
-    qh.nzb_action(nzb_ptr, NZB_ACT_CLEAR_SCRIPT_STATUSES, 0);
+    qh.nzb_action(nzb_ptr, NZB_ACT_CLEAR_SCRIPT_STATUSES);
     if !scripts.is_null() {
         for i in 0..scripts_len {
             let sc = unsafe { &*scripts.add(i) };
@@ -7763,7 +7759,7 @@ unsafe extern "C" fn active_disk_apply_nzb_cb(
         apply_active_server_stats_nzb(qh, nzb_ptr, st_slice);
     }
     qh.nzb_sync_current_server_stats(nzb_ptr);
-    qh.nzb_action(nzb_ptr, NZB_ACT_CLEAR_FILE_LIST, 0);
+    qh.nzb_action(nzb_ptr, NZB_ACT_CLEAR_FILE_LIST);
     if !files.is_null() {
         for i in 0..files_len {
             let fs = unsafe { &*files.add(i) };
@@ -7775,7 +7771,7 @@ unsafe extern "C" fn active_disk_apply_nzb_cb(
             qh.nzb_add_stub_file(nzb_ptr, fs.id, fs.paused != 0, tm, fs.extra_priority != 0);
         }
     }
-    qh.nzb_action(nzb_ptr, NZB_ACT_CLEAR_REPAIR_JOBS, 0);
+    qh.nzb_action(nzb_ptr, NZB_ACT_CLEAR_REPAIR_JOBS);
 }
 
 #[cfg(unix)]

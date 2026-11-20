@@ -6796,10 +6796,10 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                         break 'load false;
                     } else if ver_err == 2 {
                         emit_log(
-                                env,
-                                DiskLogLevel::Error,
-                                b"Failed to read queue and history data. Only queue and history from NZBGet v13 or newer can be converted by this RustyGet version. Old queue and history data still can be converted using NZBGet v16 as an intermediate version.",
-                            );
+                            env,
+                            DiskLogLevel::Error,
+                            b"Failed to read queue and history data. Only queue and history from NZBGet v13 or newer can be converted by this RustyGet version. Old queue and history data still can be converted using NZBGet v16 as an intermediate version.",
+                        );
                         queue_files_failed = true;
                         break 'load false;
                     }

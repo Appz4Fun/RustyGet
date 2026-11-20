@@ -349,6 +349,27 @@ pub(crate) enum StatOp {
     Subtract = 2,
 }
 
+impl StatOp {
+    /// The op for its wire code (0 set, 1 add, 2 subtract).
+    pub(crate) fn from_code(code: i32) -> Option<Self> {
+        match code {
+            0 => Some(Self::Set),
+            1 => Some(Self::Add),
+            2 => Some(Self::Subtract),
+            _ => None,
+        }
+    }
+
+    /// The `(success, failed)` counts after applying `delta` to `cur`.
+    pub(crate) fn apply(self, cur: (i32, i32), delta: (i32, i32)) -> (i32, i32) {
+        match self {
+            Self::Set => delta,
+            Self::Add => (cur.0.wrapping_add(delta.0), cur.1.wrapping_add(delta.1)),
+            Self::Subtract => (cur.0.wrapping_sub(delta.0), cur.1.wrapping_sub(delta.1)),
+        }
+    }
+}
+
 /// Applies a server-stat operation to `list`.
 fn stat_op(list: &mut Vec<[i32; 3]>, server_id: i32, success: i32, failed: i32, op: StatOp) {
     let i = match list.iter().position(|s| s[0] == server_id) {
@@ -358,10 +379,7 @@ fn stat_op(list: &mut Vec<[i32; 3]>, server_id: i32, success: i32, failed: i32, 
             list.len() - 1
         }
     };
-    let (mut s, mut f) = (list[i][1], list[i][2]);
-    unsafe {
-        crate::ffi::nzbget_rs_server_stat_apply_op(op as c_int, success, failed, &mut s, &mut f)
-    };
+    let (s, f) = op.apply((list[i][1], list[i][2]), (success, failed));
     list[i][1] = s;
     list[i][2] = f;
 }

@@ -1682,18 +1682,7 @@ pub(crate) fn apply_command_line() {
         sp.set_timeout(opts.scalars().article_timeout);
         sp.set_retry_interval(opts.scalars().article_interval);
     }
-    unsafe {
-        crate::ffi::nzbget_rs_script_config_exec(
-            0,
-            std::ptr::null(),
-            0,
-            std::ptr::null(),
-            0,
-            std::ptr::null_mut(),
-            None,
-            std::ptr::null_mut(),
-        );
-    }
+    crate::ffi::reload_script_templates();
     if crate::articledl::memory_monitor_active() {
         crate::articledl::memory_monitor_init_options(false);
     }

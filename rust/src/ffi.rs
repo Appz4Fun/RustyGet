@@ -149,14 +149,6 @@ unsafe fn in_place(raw: *mut c_char, f: impl FnOnce(&mut [u8]) -> usize) {
     *raw.add(n) = 0;
 }
 
-unsafe fn bytes<'a>(p: *const c_char, len: usize) -> &'a [u8] {
-    if p.is_null() || len == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(p.cast(), len)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1271,83 +1263,61 @@ pub(crate) unsafe fn script_config_emit_templates(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn nzbget_rs_script_config_exec(
-    op: c_int,
-    p1: *const c_char,
-    n1: usize,
-    p2: *const c_char,
-    n2: usize,
-    ctx: *mut std::ffi::c_void,
-    cancel_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
-    out_buf: *mut Vec<u8>,
-) -> c_int {
-    match op {
-        0 => match load_script_template_cstrings() {
-            Some(v) => {
-                if let Ok(mut g) = ACTIVE_SCRIPT_TEMPLATES.lock() {
-                    *g = v;
-                }
-                1
+/// Reloads the script configuration templates into [`ACTIVE_SCRIPT_TEMPLATES`].
+/// Returns false (and logs) when they cannot be read.
+pub(crate) fn reload_script_templates() -> bool {
+    match load_script_template_cstrings() {
+        Some(v) => {
+            if let Ok(mut g) = ACTIVE_SCRIPT_TEMPLATES.lock() {
+                *g = v;
             }
-            None => {
-                #[cfg(unix)]
-                crate::log::log_active_bytes(2, b"Could not read configuration templates");
-                0
-            }
-        },
-        1 => {
-            if out_buf.is_null() {
-                return 0;
-            }
-            let Some(opts) = crate::options::active_options() else {
-                return 0;
-            };
-            let fn_bytes = opts.str_bytes(OptStr::ConfigFile);
-            if fn_bytes.is_empty() {
-                return 0;
-            }
-            match crate::configfile::script_config_read_cipher_snapshot(fn_bytes) {
-                Some(buf) => {
-                    *out_buf = buf;
-                    1
-                }
-                None => 0,
-            }
+            true
         }
-        2 => {
-            let Some(opts) = crate::options::active_options() else {
-                return -1;
-            };
-            let fn_bytes = opts.str_bytes(OptStr::ConfigFile);
-            if fn_bytes.is_empty() {
-                return -1;
-            }
-            let expected = bytes(p1, n1);
-            let replacement = bytes(p2, n2);
-            let commit = crate::configfile::script_config_commit_cipher_patch(
-                fn_bytes,
-                expected,
-                replacement,
-                || cancel_cb.is_some_and(|cb| unsafe { cb(ctx) != 0 }),
-                || {
-                    #[cfg(unix)]
-                    crate::log::log_active_bytes(
-                        1,
-                        b"TLS cipher settings were replaced, but the configuration directory could not be synchronized",
-                    );
-                },
-            );
-            match commit {
-                crate::configfile::RsCipherCommit::Saved => 1,
-                crate::configfile::RsCipherCommit::Unchanged => 0,
-                crate::configfile::RsCipherCommit::Conflict => -2,
-                crate::configfile::RsCipherCommit::Cancelled => -3,
-                crate::configfile::RsCipherCommit::Failed => -1,
-            }
+        None => {
+            #[cfg(unix)]
+            crate::log::log_active_bytes(2, b"Could not read configuration templates");
+            false
         }
-        _ => 0,
     }
+}
+
+/// The active config file's bytes as the TLS cipher job sees them, or `None`
+/// without options, a config file, or a readable snapshot.
+pub(crate) fn cipher_config_snapshot() -> Option<Vec<u8>> {
+    let opts = crate::options::active_options()?;
+    let fn_bytes = opts.str_bytes(OptStr::ConfigFile);
+    if fn_bytes.is_empty() {
+        return None;
+    }
+    crate::configfile::script_config_read_cipher_snapshot(fn_bytes)
+}
+
+/// Replaces the cipher settings in the active config file when it still holds
+/// `expected`. `None` without options or a config file; otherwise the commit
+/// outcome. `cancelled` is polled while waiting.
+pub(crate) fn commit_cipher_config(
+    expected: &[u8],
+    replacement: &[u8],
+    cancelled: impl Fn() -> bool,
+) -> Option<crate::configfile::RsCipherCommit> {
+    let opts = crate::options::active_options()?;
+    let fn_bytes = opts.str_bytes(OptStr::ConfigFile);
+    if fn_bytes.is_empty() {
+        return None;
+    }
+    Some(crate::configfile::script_config_commit_cipher_patch(
+        fn_bytes,
+        expected,
+        replacement,
+        cancelled,
+        || {
+            #[cfg(unix)]
+            crate::log::log_active_bytes(
+                1,
+                b"TLS cipher settings were replaced, but the configuration directory could not be synchronized",
+            );
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -1804,28 +1774,6 @@ pub(crate) unsafe fn nzbget_rs_cross_pack_session_process_donor(
         allow_decompress != 0,
         &mut env,
     );
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_server_stat_apply_op(
-    stat_op: c_int,
-    delta_success: c_int,
-    delta_failed: c_int,
-    inout_success: *mut c_int,
-    inout_failed: *mut c_int,
-) {
-    let (s, f) = crate::downloadinfo::server_stat_apply_op(
-        *inout_success,
-        *inout_failed,
-        delta_success,
-        delta_failed,
-        stat_op,
-        0,
-        1,
-        2,
-    );
-    *inout_success = s;
-    *inout_failed = f;
 }
 
 #[cfg(unix)]

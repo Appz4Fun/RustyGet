@@ -2935,6 +2935,122 @@ fn holes_in_a_persistent_output_are_refilled_from_the_repaired_volumes() {
     assert!(!t.out().join(persistent::STATE_DIR).exists());
 }
 
+/// A download whose volume 2 lost a range. While the session waits for volume 4, the live
+/// repair writes the lost bytes back into volume 2 and releases it.
+struct RepairedMidway {
+    damaged: PathBuf,
+    holes: Vec<(u64, u64)>,
+    original: Vec<u8>,
+    park_on: PathBuf,
+    parks: u32,
+    repaired: bool,
+    waited: Arc<AtomicBool>,
+    volumes: u64,
+}
+
+impl VolumeFeed for RepairedMidway {
+    fn volume(&mut self, path: &Path) -> VolumeView {
+        // About a second parked (the driver asks again every 50 ms).
+        if path == self.park_on && self.parks < 20 {
+            self.parks += 1;
+            if !self.repaired {
+                std::fs::write(&self.damaged, &self.original).unwrap();
+                self.repaired = true;
+            }
+            return VolumeView::NotYet;
+        }
+        if path == self.damaged && !self.repaired {
+            return VolumeView::Ready {
+                holes: self.holes.clone(),
+            };
+        }
+        if path.is_file() {
+            VolumeView::Ready { holes: Vec::new() }
+        } else {
+            VolumeView::Missing
+        }
+    }
+    fn wait_repaired(&mut self, _c: &mut dyn FnMut() -> bool) -> bool {
+        self.waited.store(true, Ordering::SeqCst);
+        self.repaired
+    }
+    fn expected_volumes(&self) -> u64 {
+        self.volumes
+    }
+    fn still_held(&self, path: &Path) -> bool {
+        path == self.damaged && !self.repaired
+    }
+    fn repaired(&self, path: &Path) -> bool {
+        path == self.damaged && self.repaired
+    }
+}
+
+#[test]
+fn holes_are_patched_inline_as_soon_as_their_volume_is_repaired() {
+    // The user's rule: borrowed bytes go into the output while extraction runs, never after
+    // the whole set. The hole in volume 2 is patched while the session is parked on volume 4,
+    // before anything of volume 4 is read, and nothing waits for a repair at the end.
+    let t = TestDir::new("persist_inline");
+    let data = pattern(600_000);
+    let chunk = 100_000;
+    let vols = rar5_volumes("movie.mkv", &data, chunk);
+    let first = write_set(&t.dl(), &vols);
+    let v2 = t.dl().join(volume_name(1, vols.len()));
+    let p2 = payload_offset(&vols[1], chunk) as u64;
+    let mut dmg = vols[1].clone();
+    dmg[(p2 + 10_000) as usize..(p2 + 30_000) as usize].fill(0);
+    std::fs::write(&v2, &dmg).unwrap();
+    let park_name = volume_name(3, vols.len());
+    let waited = Arc::new(AtomicBool::new(false));
+    let feed = RepairedMidway {
+        damaged: v2,
+        holes: vec![(p2 + 10_000, 20_000)],
+        original: vols[1].clone(),
+        park_on: t.dl().join(&park_name),
+        parks: 0,
+        repaired: false,
+        waited: waited.clone(),
+        volumes: vols.len() as u64,
+    };
+    let mut log = Vec::new();
+    let req = Request {
+        first_volume: &first,
+        dest: &t.out(),
+        password: "",
+        overwrite: Overwrite::Always,
+        on_wait: None,
+    };
+    let r = extract(
+        &req,
+        Box::new(feed),
+        &mut |_, m: &str| log.push(m.to_string()),
+        &mut || false,
+    );
+    expect_ok(r, &log);
+    assert!(persistent(&log), "{log:?}");
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+    let patched = log
+        .iter()
+        .position(|l| l.contains("patched movie.mkv from repaired") && l.contains("20000 bytes"))
+        .unwrap_or_else(|| panic!("not patched inline: {log:?}"));
+    let reached = log
+        .iter()
+        .position(|l| l.contains("Extracting from") && l.contains(&park_name))
+        .unwrap_or_else(|| panic!("volume 4 never read: {log:?}"));
+    assert!(patched < reached, "patched only after volume 4: {log:?}");
+    assert!(
+        log.iter()
+            .any(|l| l.contains("every hole was patched while extracting")),
+        "{log:?}"
+    );
+    assert!(
+        !log.iter().any(|l| l.contains("waiting for the volumes")),
+        "{log:?}"
+    );
+    assert!(!waited.load(Ordering::SeqCst), "waited at the end: {log:?}");
+    assert!(!t.out().join(persistent::STATE_DIR).exists());
+}
+
 #[test]
 fn an_unknown_volume_count_uses_the_progressive_path() {
     let t = TestDir::new("persist_nocount");

@@ -2538,6 +2538,22 @@ impl crate::progressive_unpack::VolumeFeed for DirectUnpackFeed {
             .is_some_and(|st| st.held.iter().any(|p| p == &full))
     }
 
+    fn repaired(&self, path: &std::path::Path) -> bool {
+        #[cfg(unix)]
+        let full = {
+            use std::os::unix::ffi::OsStrExt;
+            path.as_os_str().as_bytes().to_vec()
+        };
+        #[cfg(not(unix))]
+        let full = path.to_string_lossy().as_bytes().to_vec();
+        // Asked only of volumes handed out with holes, which were held then. Released by its
+        // repair: no longer held, and the holds were not given up (an abandon clears every
+        // hold without repairing anything).
+        direct_unpack_holds()
+            .get(&self.nzb_id)
+            .is_some_and(|st| !st.abandoned && !st.held.iter().any(|p| p == &full))
+    }
+
     fn wait_repaired(&mut self, is_cancelled: &mut dyn FnMut() -> bool) -> bool {
         loop {
             if direct_unpack_abandoned(self.nzb_id) || is_cancelled() {

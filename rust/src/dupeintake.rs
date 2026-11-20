@@ -131,6 +131,9 @@ struct ArticleMember<'f> {
     ids: Vec<Vec<u8>>,
     shared: Rc<Shared<'f>>,
     cache: RefCell<HashMap<usize, Rc<Fetched>>>,
+    /// Articles that could not be read: asked for once, so a dead article
+    /// read again by each header parse does not use up the budget.
+    missing: RefCell<std::collections::HashSet<usize>>,
     part_size: Cell<i64>,
     file_size: Cell<i64>,
 }
@@ -140,10 +143,21 @@ impl ArticleMember<'_> {
         if let Some(hit) = self.cache.borrow().get(&index) {
             return Some(Rc::clone(hit));
         }
-        let got = Rc::new(self.shared.get(self.ids.get(index)?)?);
-        if got.data.is_empty() {
+        if self.missing.borrow().contains(&index) {
             return None;
         }
+        let id = self.ids.get(index)?;
+        let budget_before = self.shared.budget.get();
+        let got = match self.shared.get(id) {
+            Some(f) if !f.data.is_empty() => Rc::new(f),
+            _ => {
+                // only a fetch that was made says the article is gone
+                if self.shared.budget.get() < budget_before {
+                    self.missing.borrow_mut().insert(index);
+                }
+                return None;
+            }
+        };
         if index == 0 || self.part_size.get() <= 0 {
             self.part_size.set(got.data.len() as i64);
         }
@@ -302,6 +316,7 @@ pub fn inner_key_copy(
             ids: f.ids.clone(),
             shared: Rc::clone(&shared),
             cache: RefCell::new(HashMap::new()),
+            missing: RefCell::new(std::collections::HashSet::new()),
             part_size: Cell::new(0),
             file_size: Cell::new(0),
         })
@@ -420,6 +435,7 @@ pub fn print_copy(
                 ids: f.ids.clone(),
                 shared: Rc::clone(&shared),
                 cache: RefCell::new(HashMap::new()),
+                missing: RefCell::new(std::collections::HashSet::new()),
                 part_size: Cell::new(0),
                 file_size: Cell::new(0),
             })
@@ -435,6 +451,12 @@ pub fn print_copy(
     )
     .map_err(|e| match e {
         // an aborted mapping says nothing; never log an empty reason
+        crate::streamrepair::MapError::Aborted if shared.budget.get() <= 0 => {
+            "archive could not be mapped: every article it may read was used up".to_string()
+        }
+        crate::streamrepair::MapError::Aborted if fetch.expired() => {
+            "archive could not be mapped: no time left".to_string()
+        }
         crate::streamrepair::MapError::Aborted => "archive could not be mapped".to_string(),
         e => e.to_string(),
     })?;
@@ -826,6 +848,33 @@ mod tests {
         z.extend_from_slice(&cd.to_le_bytes());
         z.extend_from_slice(&[0, 0]);
         z
+    }
+
+    #[test]
+    fn a_dead_article_is_fetched_once() {
+        let mem = Memory {
+            files: HashMap::new(),
+            fetched: Cell::new(0),
+        };
+        let shared = Rc::new(Shared {
+            fetch: &mem,
+            budget: Cell::new(FETCH_BUDGET),
+        });
+        let member = ArticleMember {
+            ids: vec![b"gone-0".to_vec(), b"gone-1".to_vec()],
+            shared: Rc::clone(&shared),
+            cache: RefCell::new(HashMap::new()),
+            missing: RefCell::new(std::collections::HashSet::new()),
+            part_size: Cell::new(0),
+            file_size: Cell::new(0),
+        };
+        // each header parse reads the volume again; a dead article costs one fetch
+        for _ in 0..10 {
+            let mut buf = [0u8; 16];
+            assert!(member.read(0, &mut buf).is_err());
+        }
+        assert_eq!(mem.fetched.get(), 1);
+        assert_eq!(shared.budget.get(), FETCH_BUDGET - 1);
     }
 
     #[test]

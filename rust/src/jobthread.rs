@@ -383,129 +383,111 @@ pub(crate) fn owner_stopped(owner: usize) -> bool {
 }
 
 impl PrePostRunner {
-    fn exec(&self, op: c_int, a1: c_int, p1: usize, p2: usize, p3: usize) -> usize {
-        let Some(qh) = crate::ffi::queue_host() else {
-            return 0;
-        };
+    /// Creates the daemon's pre/post-processor (stopped, not started) and
+    /// makes it the active one.
+    pub(crate) fn new() -> Arc<Self> {
+        let stopped = Box::new(AtomicBool::new(false));
+        let owner = (&*stopped as *const AtomicBool) as usize;
+        let runner = Arc::new(PrePostRunner {
+            stopped,
+            running: AtomicBool::new(false),
+            pp: Arc::new(crate::prepost::NzbgetRsPrePostProcessor::new(owner)),
+            handle: Mutex::new(None),
+        });
+        crate::ffi::set_active_prepost(&runner.pp);
+        *ACTIVE_RUNNER.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&runner));
+        runner
+    }
+
+    /// Runs `f` with the queue host and thread cancellation disabled; `None`
+    /// without a host.
+    fn with_host<R>(&self, f: impl FnOnce(&crate::queuesubsys_host::QueueSubsysHost) -> R) -> Option<R> {
+        let qh = crate::ffi::queue_host()?;
         let _cancel_guard = unsafe { crate::ffi::PosixCancelGuard::disable() };
-        unsafe { self.pp.exec(op, a1, 0, p1, p2, p3, std::ptr::null(), qh) }
+        Some(f(&qh))
     }
-}
 
-/// Creates the daemon's pre/post-processor (stopped, not started) and makes it
-/// the active one. Returns an opaque handle for the other runner calls.
-pub extern "C" fn nzbget_rs_prepost_runner_new() -> *const PrePostRunner {
-    let stopped = Box::new(AtomicBool::new(false));
-    let owner = (&*stopped as *const AtomicBool) as usize;
-    let runner = Arc::new(PrePostRunner {
-        stopped,
-        running: AtomicBool::new(false),
-        pp: Arc::new(crate::prepost::NzbgetRsPrePostProcessor::new(owner)),
-        handle: Mutex::new(None),
-    });
-    crate::ffi::set_active_prepost(&runner.pp);
-    *ACTIVE_RUNNER.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&runner));
-    Arc::into_raw(runner)
-}
+    /// Starts the processor's loop on its own thread.
+    pub(crate) fn start(self: &Arc<Self>) {
+        self.stopped.store(false, Ordering::SeqCst);
+        self.running.store(true, Ordering::SeqCst);
+        let runner = Arc::clone(self);
+        let spawned = std::thread::Builder::new()
+            .name("prepost".into())
+            .spawn(move || {
+                {
+                    let _tg = crate::ffi::RustThreadGuard::enter(&runner.stopped);
+                    runner.with_host(|qh| runner.pp.run(qh));
+                }
+                runner.running.store(false, Ordering::SeqCst);
+            });
+        match spawned {
+            Ok(h) => *self.handle.lock().unwrap_or_else(|e| e.into_inner()) = Some(h),
+            Err(_) => self.running.store(false, Ordering::SeqCst),
+        }
+    }
 
-/// Runner operations: 0 start, 1 stop, 2 is running, 3 is stopped, 4 has more
-/// jobs, 5 has active unpack (`a1` includes waiting volumes), 6 collection
-/// downloaded (`p1` queue, `p2` collection), 8 queue change (`a1` action,
-/// `p1` queue, `p2` collection, `p3` file).
-///
-/// # Safety
-/// `r` is null or a handle from `nzbget_rs_prepost_runner_new` not yet freed.
-pub unsafe extern "C" fn nzbget_rs_prepost_runner_op(
-    r: *const PrePostRunner,
-    op: c_int,
-    a1: c_int,
-    p1: usize,
-    p2: usize,
-    p3: usize,
-) -> c_int {
-    let Some(runner) = (unsafe { r.as_ref() }) else {
-        return 0;
-    };
-    match op {
-        0 => {
-            runner.stopped.store(false, Ordering::SeqCst);
-            runner.running.store(true, Ordering::SeqCst);
-            let addr = r as usize;
-            let spawned = std::thread::Builder::new()
-                .name("prepost".into())
-                .spawn(move || {
-                    let runner = unsafe { &*(addr as *const PrePostRunner) };
-                    {
-                        let _tg = crate::ffi::RustThreadGuard::enter(&runner.stopped);
-                        runner.exec(0, 0, 0, 0, 0);
-                    }
-                    runner.running.store(false, Ordering::SeqCst);
-                });
-            match spawned {
-                Ok(h) => *runner.handle.lock().unwrap_or_else(|e| e.into_inner()) = Some(h),
-                Err(_) => runner.running.store(false, Ordering::SeqCst),
-            }
-            0
-        }
-        1 => {
-            runner.stopped.store(true, Ordering::SeqCst);
-            runner.exec(1, 0, 0, 0, 0);
-            0
-        }
-        2 => c_int::from(runner.running.load(Ordering::SeqCst)),
-        3 => c_int::from(runner.stopped.load(Ordering::SeqCst)),
-        4 => c_int::from(runner.exec(2, 0, 0, 0, 0) != 0),
-        5 => c_int::from(runner.exec(3, a1, 0, 0, 0) != 0),
-        6 => {
-            runner.exec(6, 0, p1, p2, 0);
-            0
-        }
-        8 => {
-            runner.exec(8, a1, p1, p2, p3);
-            0
-        }
-        _ => 0,
+    /// Asks the loop and its jobs to stop.
+    pub(crate) fn stop(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
+        self.with_host(|qh| self.pp.stop(qh));
     }
-}
 
-/// Releases the runner. Its thread must have finished (see op 2).
-///
-/// # Safety
-/// `r` is null or a handle from `nzbget_rs_prepost_runner_new`, freed once.
-pub unsafe extern "C" fn nzbget_rs_prepost_runner_free(r: *const PrePostRunner) {
-    if r.is_null() {
-        return;
+    /// Whether the loop's thread is running.
+    pub(crate) fn is_running(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
     }
-    let runner = unsafe { Arc::from_raw(r) };
-    if runner.running.load(Ordering::SeqCst) && !runner.stopped.load(Ordering::SeqCst) {
-        runner.stopped.store(true, Ordering::SeqCst);
-        runner.exec(1, 0, 0, 0, 0);
+
+    /// Whether a stop was requested.
+    pub(crate) fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::SeqCst)
     }
-    if let Some(h) = runner
-        .handle
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .take()
-    {
-        let _ = h.join();
+
+    /// Whether jobs are queued for post-processing.
+    pub(crate) fn has_more_jobs(&self) -> bool {
+        self.with_host(|_| self.pp.has_queued_jobs()).unwrap_or(false)
     }
-    let mut active = ACTIVE_RUNNER.lock().unwrap_or_else(|e| e.into_inner());
-    if active.as_ref().is_some_and(|a| Arc::ptr_eq(a, &runner)) {
-        *active = None;
+
+    /// Whether a job is unpacking (or, with `include_waiting_volume`, waiting
+    /// for a volume).
+    pub(crate) fn has_active_unpack(&self, include_waiting_volume: bool) -> bool {
+        self.with_host(|qh| self.pp.has_active_unpack_locked(qh, include_waiting_volume))
+            .unwrap_or(false)
     }
-    drop(active);
-    crate::ffi::clear_active_prepost(&runner.pp);
+
+    /// Forwards a download-queue change (`action` on `nzb`, and `file` for a
+    /// file aspect) to the processor.
+    pub(crate) fn queue_changed(&self, action: c_int, dq: usize, nzb: NzbRef, file: FileRef) {
+        self.with_host(|qh| self.pp.download_queue_update(qh, action, dq, nzb, file));
+    }
+
+    /// Releases the runner: stops a running loop, waits for its thread and
+    /// clears it as the active processor.
+    pub(crate) fn shutdown(self: Arc<Self>) {
+        if self.is_running() && !self.is_stopped() {
+            self.stop();
+        }
+        if let Some(h) = self
+            .handle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            let _ = h.join();
+        }
+        let mut active = ACTIVE_RUNNER.lock().unwrap_or_else(|e| e.into_inner());
+        if active.as_ref().is_some_and(|a| Arc::ptr_eq(a, &self)) {
+            *active = None;
+        }
+        drop(active);
+        crate::ffi::clear_active_prepost(&self.pp);
+    }
 }
 
 /// Forwards a download-queue change to the active pre/post-processor
 /// (was its `Observer::Update` on the C++ `DownloadQueue`).
-pub extern "C" fn nzbget_rs_prepost_queue_changed(
-    action: c_int,
-    dq: usize,
-    nzb: usize,
-    file: usize,
-) {
+pub fn nzbget_rs_prepost_queue_changed(action: c_int, dq: usize, nzb: usize, file: usize) {
     if let Some(runner) = active_runner() {
-        runner.exec(8, action, dq, nzb, file);
+        runner.queue_changed(action, dq, NzbRef::from_addr(nzb), FileRef::from_addr(file));
     }
 }

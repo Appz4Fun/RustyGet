@@ -37,7 +37,7 @@ static OPTIONS: AtomicPtr<NzbgetRsOptions> = AtomicPtr::new(ptr::null_mut());
 static WORK_STATE: Mutex<Option<Arc<NzbgetRsWorkState>>> = Mutex::new(None);
 static SERVER_POOL: AtomicPtr<NzbgetRsServerPool> = AtomicPtr::new(ptr::null_mut());
 /// The daemon's pre/post-processor thread (rust/src/jobthread.rs).
-static PRE_POST: AtomicPtr<PrePostRunner> = AtomicPtr::new(ptr::null_mut());
+static PRE_POST: Mutex<Option<Arc<PrePostRunner>>> = Mutex::new(None);
 static ATEXIT: Once = Once::new();
 
 /// Sets the build flags, the version and the TLS library's version text,
@@ -106,21 +106,13 @@ fn fatal(msg: &str) -> ! {
     std::process::abort();
 }
 
-fn prepost_op(op: c_int) -> c_int {
-    unsafe {
-        crate::jobthread::nzbget_rs_prepost_runner_op(
-            PRE_POST.load(Ordering::SeqCst),
-            op,
-            0,
-            0,
-            0,
-            0,
-        )
-    }
+/// The instance's pre/post-processor runner, if any.
+fn prepost() -> Option<Arc<PrePostRunner>> {
+    PRE_POST.lock().unwrap_or_else(PoisonError::into_inner).clone()
 }
 
 fn prepost_has_active_unpack() -> bool {
-    !PRE_POST.load(Ordering::SeqCst).is_null() && prepost_op(5) != 0
+    prepost().is_some_and(|r| r.has_active_unpack(false))
 }
 
 fn get_reloading() -> bool {
@@ -151,26 +143,32 @@ impl DaemonHost for Daemon {
     }
 
     fn start_prepost(&self) {
-        prepost_op(0);
+        if let Some(r) = prepost() {
+            r.start();
+        }
     }
 
     fn prepost_running(&self) -> bool {
-        prepost_op(2) != 0
+        prepost().is_some_and(|r| r.is_running())
     }
 
     fn prepost_has_jobs(&self) -> bool {
-        prepost_op(4) != 0
+        prepost().is_some_and(|r| r.has_more_jobs())
     }
 
     fn stop_prepost_when_idle(&self) {
-        if prepost_op(3) == 0 {
-            prepost_op(1);
+        if let Some(r) = prepost() {
+            if !r.is_stopped() {
+                r.stop();
+            }
         }
     }
 
     fn stop_prepost(&self, remote_mode: bool) {
-        if !remote_mode && !PRE_POST.load(Ordering::SeqCst).is_null() {
-            prepost_op(1);
+        if !remote_mode {
+            if let Some(r) = prepost() {
+                r.stop();
+            }
         }
     }
 }
@@ -191,10 +189,9 @@ fn destroy_instance() {
     if !INSTANCE.swap(false, Ordering::SeqCst) {
         return;
     }
-    unsafe {
-        crate::jobthread::nzbget_rs_prepost_runner_free(
-            PRE_POST.swap(ptr::null_mut(), Ordering::SeqCst),
-        );
+    let runner = PRE_POST.lock().unwrap_or_else(PoisonError::into_inner).take();
+    if let Some(r) = runner {
+        r.shutdown();
     }
     crate::lifecycle::cleanup_global_objects(!OPTIONS.load(Ordering::SeqCst).is_null());
     unsafe {
@@ -240,10 +237,7 @@ unsafe extern "C" fn phase1_init(reload: bool) -> c_int {
         Err(crate::lifecycle::CommandLineError::Invalid) => fatal("Command line parsing failed"),
     }
 
-    PRE_POST.store(
-        crate::jobthread::nzbget_rs_prepost_runner_new().cast_mut(),
-        Ordering::SeqCst,
-    );
+    *PRE_POST.lock().unwrap_or_else(PoisonError::into_inner) = Some(PrePostRunner::new());
 
     // no_config < 0: the options come from the command line parse_command_line read
     let mut state_flags: c_int = 0;

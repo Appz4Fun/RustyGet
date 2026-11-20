@@ -2298,8 +2298,21 @@ impl NzbgetRsStreamRepairCtrl {
             g.1 = Some(now);
             g.0.clone()
         };
-        let (dead, _) = self.look_again(q);
-        let Some(new) = dead.into_iter().find(|n| !taken.contains(n)) else {
+        let mut counters = RunCounters::default();
+        let Some((_, dest_dir, targets, _, member_names)) = q.host.with_locked_queue(|dq_ptr| {
+            self.collect_targets_and_donors(q, dq_ptr, false, false, &mut counters)
+        }) else {
+            return false;
+        };
+        // Every finished file of the download, damaged or not.
+        let finished: Vec<&[u8]> = member_names.iter().map(Vec::as_slice).collect();
+        let Some(new) = dead_volumes_to_borrow(&dest_dir, &targets)
+            .into_iter()
+            .zip(&targets)
+            .filter_map(|(left, t)| left.then_some(&t.filename))
+            .find(|n| !taken.contains(*n) && placeable_now(n, &finished))
+            .cloned()
+        else {
             return false;
         };
         let mut msg = b"Dead volume ".to_vec();
@@ -2396,11 +2409,15 @@ impl NzbgetRsStreamRepairCtrl {
             let wd_handle = self.start_watchdog(q, &opts, &targets);
             self.compute_positional_ranks(&dest_dir, &mut targets, &member_names);
             {
+                // Only the dead volumes this pass can place count as taken: one it cannot place
+                // yet (an earlier volume is still downloading) stops it once it can be.
+                let finished: Vec<&[u8]> = member_names.iter().map(Vec::as_slice).collect();
                 let mut g = self.pass_dead.lock().unwrap_or_else(|e| e.into_inner());
                 g.0 = left_to_borrow
                     .iter()
                     .zip(&targets)
-                    .filter_map(|(left, t)| left.then(|| t.filename.clone()))
+                    .filter(|(left, t)| **left && placeable_now(&t.filename, &finished))
+                    .map(|(_, t)| t.filename.clone())
                     .collect();
                 g.1 = Some(std::time::Instant::now());
             }
@@ -2553,6 +2570,24 @@ fn holes_not_tried(
         .collect()
 }
 
+/// Whether a dead volume can be placed now: every earlier volume of its set is finished (on
+/// disk or dead too). A borrow plan walks the set from part 1, so a dead volume behind one
+/// still downloading waits; stopping a pass for it would only start the borrow over.
+fn placeable_now(name: &[u8], finished: &[&[u8]]) -> bool {
+    let Some((prefix, n, width, suffix)) = crate::streamrepair::rar_part_number(name) else {
+        return false;
+    };
+    let done: std::collections::BTreeSet<u32> = finished
+        .iter()
+        .filter_map(|f| crate::streamrepair::rar_part_number(f))
+        .filter(|(p, _, w, x)| {
+            p.eq_ignore_ascii_case(&prefix) && *w == width && x.eq_ignore_ascii_case(&suffix)
+        })
+        .map(|(_, k, _, _)| k)
+        .collect();
+    (1..n).all(|k| done.contains(&k))
+}
+
 /// How often a borrowing live pass asks the queue for volumes that went dead since it started.
 const YIELD_CHECK: std::time::Duration = std::time::Duration::from_secs(2);
 
@@ -2581,6 +2616,17 @@ fn release_completed_holds(dest_dir: &[u8], targets: &[RepairTarget]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_dead_volume_is_placeable_once_every_earlier_volume_finished() {
+        let done: Vec<&[u8]> = vec![b"x.part01.rar", b"x.part02.rar", b"y.part01.rar"];
+        assert!(placeable_now(b"x.part03.rar", &done));
+        assert!(!placeable_now(b"x.part04.rar", &done));
+        // Another set's volumes do not count.
+        assert!(!placeable_now(b"y.part03.rar", &done));
+        assert!(placeable_now(b"y.part02.rar", &done));
+        assert!(!placeable_now(b"movie.mkv", &done));
+    }
 
     #[test]
     fn holes_that_turned_up_during_a_pass_are_taken_on_again() {

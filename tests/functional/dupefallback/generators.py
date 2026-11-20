@@ -419,13 +419,15 @@ def rar5_store_volumes_hp(inner_name, data, volume_size, password, workdir):
     (-hp<password>), holding ``inner_name`` = ``data`` split into volumes of
     ``volume_size`` bytes; returns their bytes in order. Built by the local
     rar binary (callers check HAVE_RAR first); ``workdir`` is a scratch
-    directory the caller creates and removes."""
+    directory the caller creates and removes. With ``password`` None the
+    volumes are plain (no encryption)."""
     if not HAVE_RAR:
         raise RuntimeError('rar is not installed')
     with open(os.path.join(workdir, inner_name), 'wb') as f:
         f.write(data)
-    subprocess.run([RAR_PATH, 'a', '-idq', '-m0', '-ma5', '-hp' + password,
-                    '-v%db' % volume_size, 'out.rar', inner_name],
+    crypt = [] if password is None else ['-hp' + password]
+    subprocess.run([RAR_PATH, 'a', '-idq', '-m0', '-ma5'] + crypt +
+                   ['-v%db' % volume_size, 'out.rar', inner_name],
                    cwd=workdir, check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     vols = sorted(n for n in os.listdir(workdir) if n.startswith('out.part') and n.endswith('.rar'))

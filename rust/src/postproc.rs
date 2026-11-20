@@ -4233,6 +4233,9 @@ impl NzbgetRsDirectUnpack {
         let cleanup_disk = local.unpack_cleanup_disk;
 
         let mut failure: Option<crate::progressive_unpack::Failure> = None;
+        // Set while the progressive session itself is parked on a volume: it logs from inside
+        // its wait (a volume patched in line, say), and holding it there would never end.
+        let session_parked = AtomicBool::new(false);
         let guard = local
             .unpack_guard
             .get_or_insert_with(|| {
@@ -4268,6 +4271,7 @@ impl NzbgetRsDirectUnpack {
                 // A volume wait signalled through a log line holds the extractor here; RAR sets
                 // read by the progressive session wait in the session and never block here.
                 while self.waiting_volume.load(Ordering::Acquire)
+                    && !session_parked.load(Ordering::Acquire)
                     && !self.is_stopped_or_terminated(host)
                 {
                     std::thread::sleep(Duration::from_millis(20));
@@ -4283,7 +4287,10 @@ impl NzbgetRsDirectUnpack {
                 failure: Some(&mut failure),
                 // A parked session counts as waiting, as the volume handshake did, so reloads
                 // are not deferred behind it.
-                on_wait: Some(&|waiting| self.set_waiting(waiting)),
+                on_wait: Some(&|waiting| {
+                    session_parked.store(waiting, Ordering::Release);
+                    self.set_waiting(waiting);
+                }),
                 guard: Some(&guard),
             },
         );

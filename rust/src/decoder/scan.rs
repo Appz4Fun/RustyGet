@@ -9,7 +9,10 @@
 /// the scan looks at the two after its start); a shorter one panics.
 #[inline]
 pub(super) fn find_break(s: &[u8], from: usize, max_end: usize) -> usize {
-    assert!(max_end + 2 <= s.len(), "find_break past the end of its buffer");
+    assert!(
+        max_end.checked_add(2).is_some_and(|n| n <= s.len()),
+        "find_break past the end of its buffer"
+    );
     // SAFETY: the assert above keeps every read inside `s`.
     unsafe { imp::find_break(s.as_ptr(), from, max_end) }
 }

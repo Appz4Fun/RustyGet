@@ -56,7 +56,8 @@ pub fn yenc_decode_incremental(
         return YencStep { end: YencEnd::More, src, dst };
     }
     // indexes below are into `buf`, which ends where the input does
-    let buf = &mut buf[..src + len];
+    let input_end = src.checked_add(len).expect("yEnc input range overflows");
+    let buf = &mut buf[..input_end];
     let end = buf.len();
     let mut p = dst;
     let mut idx = src;

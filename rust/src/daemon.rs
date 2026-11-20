@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use crate::ffi::NzbgetRsWorkState;
 use crate::jobthread::PrePostRunner;
-use crate::lifecycle::{nzbget_rs_daemon_exec, LifecycleHooks, NzbgetRsDaemonEnv};
+use crate::lifecycle::{DaemonHost, LifecycleHooks};
 use crate::log::NzbgetRsLog;
 use crate::net::NzbgetRsServerPool;
 use crate::nserv::NzbgetRsNservEnv;
@@ -66,32 +66,6 @@ pub fn daemon_hooks() -> LifecycleHooks {
 /// Registers [`daemon_hooks`] for `nzbget_rs_main`. Called by the process entry.
 pub fn register_daemon_hooks() {
     crate::lifecycle::register_hooks(daemon_hooks());
-}
-
-fn empty_env() -> NzbgetRsDaemonEnv {
-    NzbgetRsDaemonEnv {
-        ctx: ptr::null_mut(),
-        a1: 0,
-        a2: 0,
-        a3: 0,
-        a4: 0,
-        a5: 0,
-        a6: 0,
-        s1: ptr::null(),
-        s2: ptr::null(),
-        s3: ptr::null(),
-        s4: ptr::null(),
-        s5: ptr::null(),
-        segv_cb: None,
-        global_log_cb: None,
-        reload_cb: None,
-        log_cb: None,
-        action_cb: None,
-    }
-}
-
-fn exec(op: c_int, env: &NzbgetRsDaemonEnv) -> c_int {
-    unsafe { nzbget_rs_daemon_exec(op, env) }
 }
 
 fn log_debug(text: &[u8]) {
@@ -154,79 +128,56 @@ fn get_reloading() -> bool {
 }
 
 fn stop(reload: bool) {
-    let env = NzbgetRsDaemonEnv {
-        a1: c_int::from(reload),
-        a2: -1,
-        action_cb: Some(action_cb),
-        ..empty_env()
-    };
-    exec(8, &env);
+    crate::lifecycle::stop_daemon(reload, &DAEMON);
+}
+
+/// The instance as the lifecycle sees it.
+struct Daemon;
+static DAEMON: Daemon = Daemon;
+
+impl DaemonHost for Daemon {
+    fn has_instance(&self) -> bool {
+        INSTANCE.load(Ordering::SeqCst)
+    }
+
+    fn has_active_unpack(&self) -> bool {
+        prepost_has_active_unpack()
+    }
+
+    fn stop(&self, reload: bool) {
+        if self.has_instance() {
+            stop(reload);
+        }
+    }
+
+    fn start_prepost(&self) {
+        prepost_op(0);
+    }
+
+    fn prepost_running(&self) -> bool {
+        prepost_op(2) != 0
+    }
+
+    fn prepost_has_jobs(&self) -> bool {
+        prepost_op(4) != 0
+    }
+
+    fn stop_prepost_when_idle(&self) {
+        if prepost_op(3) == 0 {
+            prepost_op(1);
+        }
+    }
+
+    fn stop_prepost(&self, remote_mode: bool) {
+        if !remote_mode && !PRE_POST.load(Ordering::SeqCst).is_null() {
+            prepost_op(1);
+        }
+    }
 }
 
 unsafe extern "C" fn segv_log(_ctx: *mut c_void, msg: *const c_char) {
     if !msg.is_null() {
         crate::log::log_active_bytes(KIND_ERROR, CStr::from_ptr(msg).to_bytes());
-    }
-}
-
-/// Answers the lifecycle's requests to the daemon instance (`action_cb`).
-unsafe extern "C" fn action_cb(
-    _ctx: *mut c_void,
-    sub: c_int,
-    a2: c_int,
-    _s1: *const c_char,
-    _s2: *const c_char,
-) -> c_int {
-    match sub {
-        4 => {
-            prepost_op(0);
-            0
-        }
-        5 => {
-            if a2 == 0 {
-                c_int::from(prepost_op(2) != 0)
-            } else if prepost_op(4) != 0 {
-                4
-            } else {
-                0
-            }
-        }
-        6 => {
-            if prepost_op(3) == 0 {
-                prepost_op(1);
-            }
-            0
-        }
-        7 => c_int::from(prepost_has_active_unpack()),
-        8 => {
-            if a2 == 0 && !PRE_POST.load(Ordering::SeqCst).is_null() {
-                prepost_op(1);
-            }
-            0
-        }
-        10 => {
-            exit_proc();
-            0
-        }
-        _ => 0,
-    }
-}
-
-/// The reload coordinator's view of the instance (`reload_cb`): 0 asks for
-/// flags (1 instance exists, 2 unpack active), 1 stops for reload, 3 stops.
-unsafe extern "C" fn reload_cb(sub: c_int) -> c_int {
-    let has_instance = INSTANCE.load(Ordering::SeqCst);
-    match sub {
-        0 => c_int::from(has_instance) | (c_int::from(prepost_has_active_unpack()) << 1),
-        1 if has_instance => {
-            stop(true);
-            0
-        }
-        3 if has_instance => {
-            stop(false);
-            0
-        }
-        _ => 0,
     }
 }
 
@@ -323,13 +274,8 @@ unsafe extern "C" fn phase1_init(reload: bool) -> c_int {
         crate::tlssock::init_options(cert_store);
     }
 
-    let activate = NzbgetRsDaemonEnv {
-        a1: -1,
-        segv_cb: Some(segv_log),
-        action_cb: Some(action_cb),
-        ..empty_env()
-    };
-    exec(5, &activate)
+    crate::lifecycle::activate_daemon(Some(segv_log));
+    0
 }
 
 /// Phase 3: the main program loop until stop or reload.
@@ -337,25 +283,14 @@ unsafe extern "C" fn phase3_server_activate() -> c_int {
     if !INSTANCE.load(Ordering::SeqCst) {
         return 0;
     }
-    let env = NzbgetRsDaemonEnv {
-        a1: -1,
-        reload_cb: Some(reload_cb),
-        action_cb: Some(action_cb),
-        ..empty_env()
-    };
-    exec(7, &env)
+    crate::lifecycle::run_daemon(&DAEMON);
+    0
 }
 
 /// Phase 4: stop the subsystems, shut TLS down, and free the instance.
 unsafe extern "C" fn phase4_shutdown(reload: bool) {
     if INSTANCE.load(Ordering::SeqCst) {
-        let env = NzbgetRsDaemonEnv {
-            a1: c_int::from(reload),
-            a2: -1,
-            action_cb: Some(action_cb),
-            ..empty_env()
-        };
-        exec(11, &env);
+        crate::lifecycle::shutdown_daemon(reload, &DAEMON);
 
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         if !crate::ffi::build_tls_disabled() {
@@ -383,19 +318,11 @@ unsafe extern "C" fn stop_server_hook(reload: bool) {
 }
 
 unsafe extern "C" fn reload() {
-    let env = NzbgetRsDaemonEnv {
-        reload_cb: Some(reload_cb),
-        ..empty_env()
-    };
-    exec(9, &env);
+    crate::lifecycle::request_reload(&DAEMON);
 }
 
 unsafe extern "C" fn exit_proc() {
-    let env = NzbgetRsDaemonEnv {
-        reload_cb: Some(reload_cb),
-        ..empty_env()
-    };
-    exec(10, &env);
+    crate::lifecycle::request_exit(&DAEMON);
 }
 
 /// NServ's runtime requests: 0 creates the options from its command line and

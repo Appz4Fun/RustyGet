@@ -1569,26 +1569,9 @@ struct DiskBridgeCtx<'a> {
     env: &'a NzbgetRsFeedCoordEnv,
 }
 
-unsafe extern "C" fn feed_disk_log_cb(raw: *mut c_void, level: c_int, msg: *const c_char) {
+fn feed_disk_log_cb(raw: *mut c_void, level: crate::diskstate_format::DiskLogLevel, msg: &[u8]) {
     let bridge = unsafe { &*raw.cast::<DiskBridgeCtx<'_>>() };
-    if let Some(cb) = bridge.env.log_cb {
-        unsafe { cb(bridge.env.ctx, level, msg) };
-        return;
-    }
-    #[cfg(unix)]
-    {
-        if level == 0 && !crate::log::active_debug_build() {
-            return;
-        }
-        let kind = match level {
-            0 => 3,
-            1 => 4,
-            2 => 0,
-            3 => 1,
-            _ => 2,
-        };
-        crate::log::log_active_bytes(kind, feed_cstr_bytes(msg));
-    }
+    feed_emit_log(bridge.env, level as i32, &[msg]);
 }
 
 unsafe extern "C" fn feed_disk_aux_cb(

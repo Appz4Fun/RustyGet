@@ -4020,7 +4020,33 @@ pub struct NzbgetRsDiskFileExport {
     pub article_states_len: usize,
 }
 
-pub type DiskLogFn = unsafe extern "C" fn(ctx: *mut c_void, level: c_int, msg: *const c_char);
+/// Severity of a disk-state log line. The discriminants are the levels the
+/// disk-state hosts were handed as plain ints before this enum existed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(i32)]
+pub enum DiskLogLevel {
+    Debug = 0,
+    Detail = 1,
+    Info = 2,
+    Warning = 3,
+    Error = 4,
+}
+
+impl DiskLogLevel {
+    /// The log message kind this level is written as.
+    pub fn kind(self) -> crate::log::MessageKind {
+        use crate::log::MessageKind;
+        match self {
+            Self::Debug => MessageKind::Debug,
+            Self::Detail => MessageKind::Detail,
+            Self::Info => MessageKind::Info,
+            Self::Warning => MessageKind::Warning,
+            Self::Error => MessageKind::Error,
+        }
+    }
+}
+
+pub type DiskLogFn = fn(ctx: *mut c_void, level: DiskLogLevel, msg: &[u8]);
 pub type DiskCtrlFn = unsafe extern "C" fn(
     ctx: *mut c_void,
     cmd: c_int,
@@ -4136,16 +4162,15 @@ fn bytes_to_cstring_trunc(raw: &[u8]) -> std::ffi::CString {
     unsafe { std::ffi::CString::from_vec_unchecked(raw[..end].to_vec()) }
 }
 
-unsafe fn emit_log(env: &NzbgetRsDiskStateEnv, level: c_int, msg: &[u8]) {
+fn emit_log(env: &NzbgetRsDiskStateEnv, level: DiskLogLevel, msg: &[u8]) {
     if let Some(cb) = env.log_cb {
-        let cstr = bytes_to_cstring_trunc(msg);
-        unsafe { cb(env.ctx, level, cstr.as_ptr()) };
+        let end = msg.iter().position(|&b| b == 0).unwrap_or(msg.len());
+        cb(env.ctx, level, &msg[..end]);
     }
 }
 
-unsafe fn emit_log_parts(env: &NzbgetRsDiskStateEnv, level: c_int, parts: &[&[u8]]) {
-    let joined: Vec<u8> = parts.concat();
-    unsafe { emit_log(env, level, &joined) };
+fn emit_log_parts(env: &NzbgetRsDiskStateEnv, level: DiskLogLevel, parts: &[&[u8]]) {
+    emit_log(env, level, &parts.concat());
 }
 
 unsafe fn call_ctrl(
@@ -4343,18 +4368,16 @@ impl RsStateFile {
         let fd = crate::fsops::open_cloexec_fd(&self.temp_c, 2, 0, 1, 2);
         if fd == -1 {
             let err = crate::fsops::error_message(crate::fsops::last_errno());
-            unsafe {
-                emit_log_parts(
-                    env,
-                    4,
-                    &[
-                        b"Error saving diskstate: Could not create file ",
-                        &self.temp,
-                        b": ",
-                        &err,
-                    ],
-                );
-            }
+            emit_log_parts(
+                env,
+                DiskLogLevel::Error,
+                &[
+                    b"Error saving diskstate: Could not create file ",
+                    &self.temp,
+                    b": ",
+                    &err,
+                ],
+            );
             return None;
         }
         let file = unsafe { std::os::unix::io::FromRawFd::from_raw_fd(fd) };
@@ -4376,31 +4399,27 @@ impl RsStateFile {
         }
 
         if self.flush && flush_queue {
-            unsafe {
-                emit_log_parts(
-                    env,
-                    0,
-                    &[
-                        b"Flushing data for file ",
-                        crate::nserv::base_file_name(&self.temp),
-                    ],
-                );
-            }
+            emit_log_parts(
+                env,
+                DiskLogLevel::Debug,
+                &[
+                    b"Flushing data for file ",
+                    crate::nserv::base_file_name(&self.temp),
+                ],
+            );
             let mut errmsg = Vec::new();
             let fd = std::os::unix::io::AsRawFd::as_raw_fd(w.get_ref());
             if !crate::fsops::flush_file_buffers(fd, &mut errmsg) {
-                unsafe {
-                    emit_log_parts(
-                        env,
-                        3,
-                        &[
-                            b"Could not flush file ",
-                            &self.temp,
-                            b" into disk: ",
-                            &errmsg,
-                        ],
-                    );
-                }
+                emit_log_parts(
+                    env,
+                    DiskLogLevel::Warning,
+                    &[
+                        b"Could not flush file ",
+                        &self.temp,
+                        b" into disk: ",
+                        &errmsg,
+                    ],
+                );
             }
         }
 
@@ -4409,48 +4428,42 @@ impl RsStateFile {
         crate::fsops::delete_file(&self.dest_c);
         if !crate::fsops::move_file(&self.temp_c, &self.dest_c) {
             let err = crate::fsops::error_message(crate::fsops::last_errno());
-            unsafe {
-                emit_log_parts(
-                    env,
-                    4,
-                    &[
-                        b"Error saving diskstate: Could not rename file ",
-                        &self.temp,
-                        b" to ",
-                        &self.dest,
-                        b": ",
-                        &err,
-                    ],
-                );
-            }
+            emit_log_parts(
+                env,
+                DiskLogLevel::Error,
+                &[
+                    b"Error saving diskstate: Could not rename file ",
+                    &self.temp,
+                    b" to ",
+                    &self.dest,
+                    b": ",
+                    &err,
+                ],
+            );
             return false;
         }
 
         if self.flush && flush_queue {
-            unsafe {
-                emit_log_parts(
-                    env,
-                    0,
-                    &[
-                        b"Flushing directory for file ",
-                        crate::nserv::base_file_name(&self.dest),
-                    ],
-                );
-            }
+            emit_log_parts(
+                env,
+                DiskLogLevel::Debug,
+                &[
+                    b"Flushing directory for file ",
+                    crate::nserv::base_file_name(&self.dest),
+                ],
+            );
             let mut errmsg = Vec::new();
             if !crate::fsops::flush_dir_buffers(&self.dest_c, self.sep, &mut errmsg) {
-                unsafe {
-                    emit_log_parts(
-                        env,
-                        3,
-                        &[
-                            b"Could not flush directory buffers for file ",
-                            &self.dest,
-                            b" into disk: ",
-                            &errmsg,
-                        ],
-                    );
-                }
+                emit_log_parts(
+                    env,
+                    DiskLogLevel::Warning,
+                    &[
+                        b"Could not flush directory buffers for file ",
+                        &self.dest,
+                        b" into disk: ",
+                        &errmsg,
+                    ],
+                );
             }
         }
 
@@ -4463,34 +4476,30 @@ impl RsStateFile {
         if self.transactional && dest_exists && temp_exists {
             crate::fsops::delete_file(&self.temp_c);
         } else if !dest_exists && temp_exists {
-            unsafe {
-                emit_log_parts(
-                    env,
-                    3,
-                    &[
-                        b"Restoring diskstate file ",
-                        crate::nserv::base_file_name(&self.dest),
-                        b" from ",
-                        crate::nserv::base_file_name(&self.temp),
-                    ],
-                );
-            }
+            emit_log_parts(
+                env,
+                DiskLogLevel::Warning,
+                &[
+                    b"Restoring diskstate file ",
+                    crate::nserv::base_file_name(&self.dest),
+                    b" from ",
+                    crate::nserv::base_file_name(&self.temp),
+                ],
+            );
             if !crate::fsops::move_file(&self.temp_c, &self.dest_c) {
                 let err = crate::fsops::error_message(crate::fsops::last_errno());
-                unsafe {
-                    emit_log_parts(
-                        env,
-                        4,
-                        &[
-                            b"Error restoring diskstate: Could not rename file ",
-                            &self.temp,
-                            b" to ",
-                            &self.dest,
-                            b": ",
-                            &err,
-                        ],
-                    );
-                }
+                emit_log_parts(
+                    env,
+                    DiskLogLevel::Error,
+                    &[
+                        b"Error restoring diskstate: Could not rename file ",
+                        &self.temp,
+                        b" to ",
+                        &self.dest,
+                        b": ",
+                        &err,
+                    ],
+                );
                 return None;
             }
         }
@@ -4499,18 +4508,16 @@ impl RsStateFile {
             Ok(r) => r,
             Err(errno) => {
                 let err = crate::fsops::error_message(errno);
-                unsafe {
-                    emit_log_parts(
-                        env,
-                        4,
-                        &[
-                            b"Error reading diskstate: could not open file ",
-                            &self.dest,
-                            b": ",
-                            &err,
-                        ],
-                    );
-                }
+                emit_log_parts(
+                    env,
+                    DiskLogLevel::Error,
+                    &[
+                        b"Error reading diskstate: could not open file ",
+                        &self.dest,
+                        b": ",
+                        &err,
+                    ],
+                );
                 return None;
             }
         };
@@ -4518,17 +4525,15 @@ impl RsStateFile {
         let sig = reader.read_line(128).unwrap_or(b"");
         self.file_version = parse_format_version(sig);
         if self.file_version > self.read_version {
-            unsafe {
-                emit_log_parts(
-                    env,
-                    4,
-                    &[
-                        b"Could not load diskstate file ",
-                        &self.dest,
-                        b" due to file version mismatch",
-                    ],
-                );
-            }
+            emit_log_parts(
+                env,
+                DiskLogLevel::Error,
+                &[
+                    b"Could not load diskstate file ",
+                    &self.dest,
+                    b" due to file version mismatch",
+                ],
+            );
             return None;
         }
 
@@ -4932,7 +4937,11 @@ unsafe fn load_nzb_info_into_target(
         && (format_version < 67 || unsafe { parse_unpack_state_into_target(env, r) });
 
     if !ok {
-        unsafe { emit_log(env, 4, b"Error reading nzb info from disk") };
+        emit_log(
+            env,
+            DiskLogLevel::Error,
+            b"Error reading nzb info from disk",
+        );
     }
     ok
 }
@@ -4987,7 +4996,11 @@ unsafe fn load_dupe_trailer_section(
         true
     })();
     if !ok {
-        unsafe { emit_log(env, 4, b"Error reading duplicate repair state from disk") };
+        emit_log(
+            env,
+            DiskLogLevel::Error,
+            b"Error reading duplicate repair state from disk",
+        );
     }
     ok
 }
@@ -4997,7 +5010,7 @@ unsafe fn load_queue_section(
     r: &mut RsStateReader,
     format_version: i32,
 ) -> bool {
-    unsafe { emit_log(env, 0, b"Loading nzb list from disk") };
+    emit_log(env, DiskLogLevel::Debug, b"Loading nzb list from disk");
     let ok = (|| -> bool {
         let Some(size) = r.scan_i32() else {
             return false;
@@ -5017,7 +5030,11 @@ unsafe fn load_queue_section(
         true
     })();
     if !ok {
-        unsafe { emit_log(env, 4, b"Error reading nzb list from disk") };
+        emit_log(
+            env,
+            DiskLogLevel::Error,
+            b"Error reading nzb list from disk",
+        );
     }
     ok
 }
@@ -5027,7 +5044,7 @@ unsafe fn load_progress_section(
     r: &mut RsStateReader,
     format_version: i32,
 ) -> bool {
-    unsafe { emit_log(env, 0, b"Loading nzb progress from disk") };
+    emit_log(env, DiskLogLevel::Debug, b"Loading nzb progress from disk");
     let ok = (|| -> bool {
         let Some(size) = r.scan_i32() else {
             return false;
@@ -5038,16 +5055,14 @@ unsafe fn load_progress_section(
             };
             let found = unsafe { call_ctrl(env, 11, id, 0, 0, std::ptr::null()) != 0 };
             if !found {
-                unsafe {
-                    emit_log(
-                        env,
-                        3,
-                        format!(
-                            "Skipping saved progress of NZB with id {id}, which is no longer queued"
-                        )
-                        .as_bytes(),
-                    );
-                }
+                emit_log(
+                    env,
+                    DiskLogLevel::Warning,
+                    format!(
+                        "Skipping saved progress of NZB with id {id}, which is no longer queued"
+                    )
+                    .as_bytes(),
+                );
             }
             if !unsafe { load_nzb_info_into_target(env, r, format_version) } {
                 return false;
@@ -5061,7 +5076,11 @@ unsafe fn load_progress_section(
         true
     })();
     if !ok {
-        unsafe { emit_log(env, 4, b"Error reading nzb progress from disk") };
+        emit_log(
+            env,
+            DiskLogLevel::Error,
+            b"Error reading nzb progress from disk",
+        );
     }
     ok
 }
@@ -5071,7 +5090,7 @@ unsafe fn load_history_section(
     r: &mut RsStateReader,
     format_version: i32,
 ) -> bool {
-    unsafe { emit_log(env, 0, b"Loading history from disk") };
+    emit_log(env, DiskLogLevel::Debug, b"Loading history from disk");
     let ok = (|| -> bool {
         let Some(size) = r.scan_i32() else {
             return false;
@@ -5160,13 +5179,11 @@ unsafe fn load_history_section(
                     return false;
                 }
             } else {
-                unsafe {
-                    emit_log(
-                        env,
-                        4,
-                        format!("Unknown history record kind {kindval}").as_bytes(),
-                    );
-                }
+                emit_log(
+                    env,
+                    DiskLogLevel::Error,
+                    format!("Unknown history record kind {kindval}").as_bytes(),
+                );
                 return false;
             }
         }
@@ -5178,7 +5195,11 @@ unsafe fn load_history_section(
         true
     })();
     if !ok {
-        unsafe { emit_log(env, 4, b"Error reading diskstate for history") };
+        emit_log(
+            env,
+            DiskLogLevel::Error,
+            b"Error reading diskstate for history",
+        );
     }
     ok
 }
@@ -5360,13 +5381,11 @@ unsafe fn load_file_info_from_reader(
         )
     };
     if !ok {
-        unsafe {
-            emit_log(
-                env,
-                4,
-                format!("Error reading diskstate for file {}", meta.file_id).as_bytes(),
-            );
-        }
+        emit_log(
+            env,
+            DiskLogLevel::Error,
+            format!("Error reading diskstate for file {}", meta.file_id).as_bytes(),
+        );
     }
     ok
 }
@@ -5506,13 +5525,11 @@ unsafe fn load_file_state_from_reader(
         )
     };
     if !ok {
-        unsafe {
-            emit_log(
-                env,
-                4,
-                format!("Error reading diskstate for file {}", meta.file_id).as_bytes(),
-            );
-        }
+        emit_log(
+            env,
+            DiskLogLevel::Error,
+            format!("Error reading diskstate for file {}", meta.file_id).as_bytes(),
+        );
     }
     ok
 }
@@ -5533,21 +5550,17 @@ unsafe fn save_single_file_or_state(
     };
     let (file_id, bytes) = unsafe { format_target_file_bytes(env, export_mode) };
     if mode == 0 {
-        unsafe {
-            emit_log(
-                env,
-                0,
-                format!("Saving FileInfo {file_id} to disk").as_bytes(),
-            );
-        }
+        emit_log(
+            env,
+            DiskLogLevel::Debug,
+            format!("Saving FileInfo {file_id} to disk").as_bytes(),
+        );
     } else {
-        unsafe {
-            emit_log(
-                env,
-                0,
-                format!("Saving FileState {file_id} to disk").as_bytes(),
-            );
-        }
+        emit_log(
+            env,
+            DiskLogLevel::Debug,
+            format!("Saving FileState {file_id} to disk").as_bytes(),
+        );
     }
     let fname = if mode == 0 {
         format!("{file_id}").into_bytes()
@@ -5581,13 +5594,11 @@ unsafe fn load_single_file_or_state(
     out_ver: &mut i32,
 ) -> bool {
     let meta = unsafe { query_target_file_meta(env) };
-    unsafe {
-        emit_log(
-            env,
-            0,
-            format!("Loading FileInfo {} from disk", meta.file_id).as_bytes(),
-        );
-    }
+    emit_log(
+        env,
+        DiskLogLevel::Debug,
+        format!("Loading FileInfo {} from disk", meta.file_id).as_bytes(),
+    );
     let fname = if mode == 0 {
         format!("{}", meta.file_id).into_bytes()
     } else {
@@ -5719,9 +5730,11 @@ unsafe fn cleanup_queue_dir_op(env: &NzbgetRsDiskStateEnv, qdir: &[u8], sep: u8)
     let mut deleted_files = 0i32;
     for filename in crate::fsops::list_dir_entries(qdir) {
         if is_orphan_queue_file(&filename, &lists.file_ids, &lists.nzb_ids) {
-            unsafe {
-                emit_log_parts(env, 1, &[b"Deleting orphaned diskstate file ", &filename]);
-            }
+            emit_log_parts(
+                env,
+                DiskLogLevel::Detail,
+                &[b"Deleting orphaned diskstate file ", &filename],
+            );
             let p =
                 crate::artwritercore::article_writer_format_dest_file_path(qdir, sep, &filename);
             crate::fsops::delete_file(&bytes_to_cstring_trunc(&p));
@@ -5729,13 +5742,11 @@ unsafe fn cleanup_queue_dir_op(env: &NzbgetRsDiskStateEnv, qdir: &[u8], sep: u8)
         }
     }
     if deleted_files > 0 {
-        unsafe {
-            emit_log(
-                env,
-                2,
-                format!("Deleted {deleted_files} orphaned diskstate file(s)").as_bytes(),
-            );
-        }
+        emit_log(
+            env,
+            DiskLogLevel::Info,
+            format!("Deleted {deleted_files} orphaned diskstate file(s)").as_bytes(),
+        );
     }
 }
 
@@ -5772,7 +5783,7 @@ unsafe fn load_all_file_states_op(
                         unsafe {
                             emit_log_parts(
                                 env,
-                                3,
+                                DiskLogLevel::Warning,
                                 &[b"Discarding damaged download state ", &filename],
                             );
                             call_ctrl(env, 15, 0, 0, 0, std::ptr::null());
@@ -5868,18 +5879,16 @@ unsafe fn convert_legacy_file_states_op(
             converted += 1;
         }
     }
-    unsafe {
-        emit_log(
-            env,
-            2,
-            format!(
-                "Converted {} of {} file state(s) of an earlier build to the upstream format",
-                converted,
-                legacy.len()
-            )
-            .as_bytes(),
-        );
-    }
+    emit_log(
+        env,
+        DiskLogLevel::Info,
+        format!(
+            "Converted {} of {} file state(s) of an earlier build to the upstream format",
+            converted,
+            legacy.len()
+        )
+        .as_bytes(),
+    );
 }
 
 unsafe fn set_aside_queue_files_op(env: &NzbgetRsDiskStateEnv, qdir: &[u8], sep: u8) {
@@ -5898,7 +5907,7 @@ unsafe fn set_aside_queue_files_op(env: &NzbgetRsDiskStateEnv, qdir: &[u8], sep:
         unsafe {
             emit_log_parts(
                 env,
-                4,
+                DiskLogLevel::Error,
                 &[
                     b"Diskstate file ",
                     cstr::bytes(name),
@@ -5966,11 +5975,15 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
 
     match op {
         DiskOp::DiscardQueue => {
-            unsafe { emit_log(env, 0, b"Discarding queue") };
+            emit_log(env, DiskLogLevel::Debug, b"Discarding queue");
             diskstate_fs_op(0, qdir, sep, 0, 0, 0, 0, &mut o1, &mut o2)
         }
         DiskOp::QueueExists => {
-            unsafe { emit_log(env, 0, b"Checking if a saved queue exists on disk") };
+            emit_log(
+                env,
+                DiskLogLevel::Debug,
+                b"Checking if a saved queue exists on disk",
+            );
             diskstate_fs_op(1, qdir, sep, 0, 0, 0, 0, &mut o1, &mut o2)
         }
         DiskOp::DiscardFile => diskstate_fs_op(
@@ -5983,13 +5996,11 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
             let flag_c = bytes_to_cstring_trunc(&flag_p);
             let fd = crate::fsops::open_cloexec_fd(&flag_c, 2, 0, 1, 2);
             if fd == -1 {
-                unsafe {
-                    emit_log_parts(
-                        env,
-                        4,
-                        &[b"Error saving diskstate: Could not create file ", &flag_p],
-                    );
-                }
+                emit_log_parts(
+                    env,
+                    DiskLogLevel::Error,
+                    &[b"Error saving diskstate: Could not create file ", &flag_p],
+                );
                 0
             } else {
                 unsafe { libc::close(fd) };
@@ -6007,13 +6018,11 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
             let log_c = bytes_to_cstring_trunc(&log_p);
             let fd = crate::fsops::open_cloexec_fd(&log_c, 3, 0, 1, 2);
             if fd == -1 {
-                unsafe {
-                    emit_log_parts(
-                        env,
-                        4,
-                        &[b"Error saving log: Could not create file ", &log_p],
-                    );
-                }
+                emit_log_parts(
+                    env,
+                    DiskLogLevel::Error,
+                    &[b"Error saving log: Could not create file ", &log_p],
+                );
                 return 0;
             }
             let line = unsafe {
@@ -6041,13 +6050,11 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
             }
             let log_c = bytes_to_cstring_trunc(&log_p);
             let Ok(mut r) = RsStateReader::open(&log_c) else {
-                unsafe {
-                    emit_log_parts(
-                        env,
-                        4,
-                        &[b"Error reading log: could not open file ", &log_p],
-                    );
-                }
+                emit_log_parts(
+                    env,
+                    DiskLogLevel::Error,
+                    &[b"Error reading log: could not open file ", &log_p],
+                );
                 return 0;
             };
             let mut id = 0i32;
@@ -6077,7 +6084,7 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
             1
         }
         DiskOp::SaveFeeds => {
-            unsafe { emit_log(env, 0, b"Saving feeds state to disk") };
+            emit_log(env, DiskLogLevel::Debug, b"Saving feeds state to disk");
             struct FeedOut {
                 urls: Vec<std::ffi::CString>,
                 hashes: Vec<u32>,
@@ -6149,7 +6156,7 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
             let Some(mut w) = (unsafe { sf.begin_write(env) }) else {
                 return 0;
             };
-            unsafe { emit_log(env, 0, b"Saving feed status to disk") };
+            emit_log(env, DiskLogLevel::Debug, b"Saving feed status to disk");
             let url_ptrs: Vec<*const c_char> = fo.urls.iter().map(|c| c.as_ptr()).collect();
             let status_bytes = unsafe {
                 format_feed_status_bytes(
@@ -6161,7 +6168,7 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
             };
             let _ = w.write_all(&status_bytes);
 
-            unsafe { emit_log(env, 0, b"Saving feed history to disk") };
+            emit_log(env, DiskLogLevel::Debug, b"Saving feed history to disk");
             let hist_ptrs: Vec<*const c_char> = fo.hist_urls.iter().map(|c| c.as_ptr()).collect();
             let hist_bytes = unsafe {
                 format_feed_history_bytes(
@@ -6175,7 +6182,7 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
             c_int::from(unsafe { sf.finish_write(env, w, env.flush_queue != 0) })
         }
         DiskOp::LoadFeeds => {
-            unsafe { emit_log(env, 0, b"Loading feeds state from disk") };
+            emit_log(env, DiskLogLevel::Debug, b"Loading feeds state from disk");
             let mut sf = RsStateFile::new(
                 qdir,
                 sep,
@@ -6250,7 +6257,7 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                 }
             }
             let env_ptr: *mut c_void = (env as *const NzbgetRsDiskStateEnv).cast_mut().cast();
-            unsafe { emit_log(env, 0, b"Loading feed status from disk") };
+            emit_log(env, DiskLogLevel::Debug, b"Loading feed status from disk");
             if !unsafe {
                 load_section(
                     1,
@@ -6264,13 +6271,19 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                     on_feed_status,
                 )
             } {
-                unsafe {
-                    emit_log(env, 4, b"Error reading feed status from disk");
-                    emit_log(env, 4, b"Error reading diskstate for feeds");
-                }
+                emit_log(
+                    env,
+                    DiskLogLevel::Error,
+                    b"Error reading feed status from disk",
+                );
+                emit_log(
+                    env,
+                    DiskLogLevel::Error,
+                    b"Error reading diskstate for feeds",
+                );
                 return 0;
             }
-            unsafe { emit_log(env, 0, b"Loading feed history from disk") };
+            emit_log(env, DiskLogLevel::Debug, b"Loading feed history from disk");
             if !unsafe {
                 load_section(
                     2,
@@ -6284,16 +6297,22 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                     on_feed_hist,
                 )
             } {
-                unsafe {
-                    emit_log(env, 4, b"Error reading feed history from disk");
-                    emit_log(env, 4, b"Error reading diskstate for feeds");
-                }
+                emit_log(
+                    env,
+                    DiskLogLevel::Error,
+                    b"Error reading feed history from disk",
+                );
+                emit_log(
+                    env,
+                    DiskLogLevel::Error,
+                    b"Error reading diskstate for feeds",
+                );
                 return 0;
             }
             1
         }
         DiskOp::SaveStats => {
-            unsafe { emit_log(env, 0, b"Saving stats to disk") };
+            emit_log(env, DiskLogLevel::Debug, b"Saving stats to disk");
             struct StatsSaveOut {
                 has_servers: bool,
                 srv_bytes: Vec<u8>,
@@ -6377,15 +6396,15 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
             let Some(mut w) = (unsafe { sf.begin_write(env) }) else {
                 return 0;
             };
-            unsafe { emit_log(env, 0, b"Saving server info to disk") };
+            emit_log(env, DiskLogLevel::Debug, b"Saving server info to disk");
             let _ = w.write_all(&so.srv_bytes);
-            unsafe { emit_log(env, 0, b"Saving volume stats to disk") };
+            emit_log(env, DiskLogLevel::Debug, b"Saving volume stats to disk");
             let _ = writeln!(w, "{}", so.vol_count as c_int);
             let _ = w.write_all(&so.vol_bytes);
             c_int::from(unsafe { sf.finish_write(env, w, env.flush_queue != 0) })
         }
         DiskOp::LoadStats => {
-            unsafe { emit_log(env, 0, b"Loading stats from disk") };
+            emit_log(env, DiskLogLevel::Debug, b"Loading stats from disk");
             let mut sf = RsStateFile::new(
                 qdir,
                 sep,
@@ -6401,7 +6420,7 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                 return 0;
             };
             let ver = sf.file_version;
-            unsafe { emit_log(env, 0, b"Loading server info from disk") };
+            emit_log(env, DiskLogLevel::Debug, b"Loading server info from disk");
             struct SrvMeta {
                 id: c_int,
                 port: c_int,
@@ -6469,10 +6488,16 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                     &mut state_ids,
                 )
             }) else {
-                unsafe {
-                    emit_log(env, 4, b"Error reading server info from disk");
-                    emit_log(env, 4, b"Error reading diskstate for statistics");
-                }
+                emit_log(
+                    env,
+                    DiskLogLevel::Error,
+                    b"Error reading server info from disk",
+                );
+                emit_log(
+                    env,
+                    DiskLogLevel::Error,
+                    b"Error reading diskstate for statistics",
+                );
                 return 0;
             };
             if !env.out_flag.is_null() {
@@ -6496,44 +6521,44 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                     }
                 }
             }
-            unsafe { emit_log(env, 0, b"******** MATCHING NEWS-SERVERS **********") };
+            emit_log(
+                env,
+                DiskLogLevel::Debug,
+                b"******** MATCHING NEWS-SERVERS **********",
+            );
             for (idx, s) in srvs.iter().enumerate() {
-                unsafe {
-                    emit_log(
-                        env,
-                        0,
-                        format!("Server {} -> {}", s.id, state_ids[idx]).as_bytes(),
-                    );
-                    emit_log_parts(
-                        env,
-                        0,
-                        &[format!("Server {}.Name: ", s.id).as_bytes(), &s.name],
-                    );
-                    emit_log_parts(
-                        env,
-                        0,
-                        &[
-                            format!("Server {}.Host: ", s.id).as_bytes(),
-                            &s.host,
-                            format!(":{}", s.port).as_bytes(),
-                        ],
-                    );
-                }
-            }
-            unsafe {
                 emit_log(
                     env,
-                    0,
-                    if perfect {
-                        b"All servers perfectly matched: yes"
-                    } else {
-                        b"All servers perfectly matched: no"
-                    },
+                    DiskLogLevel::Debug,
+                    format!("Server {} -> {}", s.id, state_ids[idx]).as_bytes(),
+                );
+                emit_log_parts(
+                    env,
+                    DiskLogLevel::Debug,
+                    &[format!("Server {}.Name: ", s.id).as_bytes(), &s.name],
+                );
+                emit_log_parts(
+                    env,
+                    DiskLogLevel::Debug,
+                    &[
+                        format!("Server {}.Host: ", s.id).as_bytes(),
+                        &s.host,
+                        format!(":{}", s.port).as_bytes(),
+                    ],
                 );
             }
+            emit_log(
+                env,
+                DiskLogLevel::Debug,
+                if perfect {
+                    b"All servers perfectly matched: yes"
+                } else {
+                    b"All servers perfectly matched: no"
+                },
+            );
 
             if ver >= 2 {
-                unsafe { emit_log(env, 0, b"Loading volume stats from disk") };
+                emit_log(env, DiskLogLevel::Debug, b"Loading volume stats from disk");
                 struct VolCtx<'a> {
                     env: &'a NzbgetRsDiskStateEnv,
                     ver: i32,
@@ -6572,10 +6597,16 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                         on_vol,
                     )
                 } {
-                    unsafe {
-                        emit_log(env, 4, b"Error reading volume stats from disk");
-                        emit_log(env, 4, b"Error reading diskstate for statistics");
-                    }
+                    emit_log(
+                        env,
+                        DiskLogLevel::Error,
+                        b"Error reading volume stats from disk",
+                    );
+                    emit_log(
+                        env,
+                        DiskLogLevel::Error,
+                        b"Error reading diskstate for statistics",
+                    );
                     return 0;
                 }
             }
@@ -6606,7 +6637,11 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
         DiskOp::SaveQueue => {
             let flush_queue = env.flush_queue != 0;
             if env.a1 == 0 {
-                unsafe { emit_log(env, 0, b"Saving queue and history to disk") };
+                emit_log(
+                    env,
+                    DiskLogLevel::Debug,
+                    b"Saving queue and history to disk",
+                );
                 let mut ok = true;
                 let queue_len = unsafe { call_ctrl(env, 0, 0, 0, 0, std::ptr::null()) };
                 let q_sf = RsStateFile::new(
@@ -6622,7 +6657,7 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                         return 0;
                     };
                     unsafe {
-                        emit_log(env, 0, b"Saving nzb list to disk");
+                        emit_log(env, DiskLogLevel::Debug, b"Saving nzb list to disk");
                         save_nzb_section(env, &mut w, 0, queue_len);
                     }
                     ok = unsafe { q_sf.finish_write(env, w, flush_queue) };
@@ -6645,7 +6680,7 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                             return 0;
                         };
                         unsafe {
-                            emit_log(env, 0, b"Saving history to disk");
+                            emit_log(env, DiskLogLevel::Debug, b"Saving history to disk");
                             save_nzb_section(env, &mut w, 1, hist_len);
                         }
                         ok &= unsafe { h_sf.finish_write(env, w, flush_queue) };
@@ -6670,7 +6705,7 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                 c_int::from(ok)
             } else if env.a1 == 1 {
                 let changed_count = unsafe { call_ctrl(env, 20, 0, 0, 0, std::ptr::null()) };
-                unsafe { emit_log(env, 0, b"Saving queue progress to disk") };
+                emit_log(env, DiskLogLevel::Debug, b"Saving queue progress to disk");
                 let p_sf = RsStateFile::new(
                     qdir,
                     sep,
@@ -6684,7 +6719,7 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                         return 0;
                     };
                     unsafe {
-                        emit_log(env, 0, b"Saving nzb progress to disk");
+                        emit_log(env, DiskLogLevel::Debug, b"Saving nzb progress to disk");
                         save_nzb_section(env, &mut w, 2, changed_count);
                     }
                     c_int::from(unsafe { p_sf.finish_write(env, w, flush_queue) })
@@ -6727,7 +6762,7 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
             }
         }
         DiskOp::LoadQueue => {
-            unsafe { emit_log(env, 0, b"Loading queue from disk") };
+            emit_log(env, DiskLogLevel::Debug, b"Loading queue from disk");
             let mut queue_files_failed = false;
             let mut file_infos_loaded = false;
             let mut format_version = 0i32;
@@ -6752,19 +6787,19 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                         check_queue_format_version(format_version, DISKSTATE_QUEUE_VERSION);
                     legacy_queue_read |= is_legacy;
                     if ver_err == 1 {
-                        unsafe {
-                            emit_log(env, 4, b"Failed to read queue: diskstate file is corrupted");
-                        }
+                        emit_log(
+                            env,
+                            DiskLogLevel::Error,
+                            b"Failed to read queue: diskstate file is corrupted",
+                        );
                         queue_files_failed = true;
                         break 'load false;
                     } else if ver_err == 2 {
-                        unsafe {
-                            emit_log(
-                                env,
-                                4,
-                                b"Failed to read queue and history data. Only queue and history from NZBGet v13 or newer can be converted by this RustyGet version. Old queue and history data still can be converted using NZBGet v16 as an intermediate version.",
-                            );
-                        }
+                        emit_log(
+                            env,
+                            DiskLogLevel::Error,
+                            b"Failed to read queue and history data. Only queue and history from NZBGet v13 or newer can be converted by this RustyGet version. Old queue and history data still can be converted using NZBGet v16 as an intermediate version.",
+                        );
                         queue_files_failed = true;
                         break 'load false;
                     }
@@ -6794,9 +6829,11 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                         break 'load false;
                     };
                     if p_sf.file_version <= 0 {
-                        unsafe {
-                            emit_log(env, 4, b"Failed to read queue: diskstate file is corrupted");
-                        }
+                        emit_log(
+                            env,
+                            DiskLogLevel::Error,
+                            b"Failed to read queue: diskstate file is corrupted",
+                        );
                         queue_files_failed = true;
                         break 'load false;
                     }
@@ -6822,13 +6859,11 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                             break 'load false;
                         };
                         if h_sf.file_version <= 0 {
-                            unsafe {
-                                emit_log(
-                                    env,
-                                    4,
-                                    b"Failed to read queue: diskstate file is corrupted",
-                                );
-                            }
+                            emit_log(
+                                env,
+                                DiskLogLevel::Error,
+                                b"Failed to read queue: diskstate file is corrupted",
+                            );
                             queue_files_failed = true;
                             break 'load false;
                         }
@@ -6857,13 +6892,11 @@ pub unsafe fn diskstate_exec(op: DiskOp, env: &NzbgetRsDiskStateEnv) -> c_int {
                 unsafe { *env.out_flag = 1 };
             }
             if !ok {
-                unsafe {
-                    emit_log(
-                        env,
-                        4,
-                        b"Error reading diskstate for download queue and history",
-                    );
-                }
+                emit_log(
+                    env,
+                    DiskLogLevel::Error,
+                    b"Error reading diskstate for download queue and history",
+                );
             }
             if !file_infos_loaded && unsafe { call_ctrl(env, 0, 0, 0, 0, std::ptr::null()) > 0 } {
                 unsafe { load_all_file_infos_op(env, qdir, sep) };
@@ -6957,16 +6990,8 @@ impl Drop for ActiveDiskExecCtx<'_> {
 }
 
 #[cfg(unix)]
-unsafe extern "C" fn active_disk_log_cb(_ctx: *mut c_void, level: c_int, msg: *const c_char) {
-    let kind = match level {
-        0 => 3,
-        1 => 4,
-        2 => 0,
-        3 => 1,
-        4 => 2,
-        _ => return,
-    };
-    crate::log::log_active_bytes(kind, unsafe { cstr::bytes(msg) });
+fn active_disk_log_cb(_ctx: *mut c_void, level: DiskLogLevel, msg: &[u8]) {
+    crate::log::log_active_bytes(level.kind() as i32, msg);
 }
 
 #[cfg(unix)]
@@ -8813,12 +8838,12 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let qdir_bytes = dir.as_os_str().as_bytes().to_vec();
         let qdir_c = bytes_to_cstring_trunc(&qdir_bytes);
-        let logs: std::cell::RefCell<Vec<(c_int, Vec<u8>)>> = std::cell::RefCell::new(Vec::new());
+        let logs: std::cell::RefCell<Vec<(DiskLogLevel, Vec<u8>)>> =
+            std::cell::RefCell::new(Vec::new());
 
-        unsafe extern "C" fn log_cb(ctx: *mut c_void, level: c_int, msg: *const c_char) {
-            let v = unsafe { &*ctx.cast::<std::cell::RefCell<Vec<(c_int, Vec<u8>)>>>() };
-            v.borrow_mut()
-                .push((level, unsafe { cstr::bytes(msg) }.to_vec()));
+        fn log_cb(ctx: *mut c_void, level: DiskLogLevel, msg: &[u8]) {
+            let v = unsafe { &*ctx.cast::<std::cell::RefCell<Vec<(DiskLogLevel, Vec<u8>)>>>() };
+            v.borrow_mut().push((level, msg.to_vec()));
         }
 
         let mut env: NzbgetRsDiskStateEnv = unsafe { std::mem::zeroed() };

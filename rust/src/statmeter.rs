@@ -1380,25 +1380,15 @@ mod runtime {
         log: Option<&'a NzbgetRsLog>,
     }
 
-    unsafe extern "C" fn stat_disk_log_cb(raw: *mut c_void, level: c_int, msg: *const c_char) {
+    fn stat_disk_log_cb(
+        raw: *mut c_void,
+        level: crate::diskstate_format::DiskLogLevel,
+        msg: &[u8],
+    ) {
         let br = unsafe { &*raw.cast::<StatDiskBridge<'_>>() };
-        let Some(lg) = br.log else {
-            return;
-        };
-        let bytes = if msg.is_null() {
-            &[][..]
-        } else {
-            unsafe { CStr::from_ptr(msg) }.to_bytes()
-        };
-        let kind = match level {
-            0 => 3, // debug
-            1 => 4, // detail
-            2 => 0, // info
-            3 => 1, // warn
-            4 => 2, // error
-            _ => return,
-        };
-        lg.emit_bytes(kind, br.opts, bytes);
+        if let Some(lg) = br.log {
+            lg.emit_bytes(level.kind() as i32, br.opts, msg);
+        }
     }
 
     unsafe extern "C" fn stat_disk_aux_cb(

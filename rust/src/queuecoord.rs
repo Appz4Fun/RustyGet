@@ -4675,7 +4675,22 @@ impl NzbgetRsQueueCoordinator {
             && opts.dupe_article_fallback >= crate::queuesubsys_host::DAF_STREAM
             && !dupe_mass_failure(nzb.total_articles, failed);
 
-        if let Some((_, backup_nzb)) = backup {
+        if let Some((backup_hi, backup_nzb)) = backup {
+            // A backup that only just arrived has not been classified yet: give it the
+            // grace to be sampled, so a twin or alt that can lend is not skipped over by
+            // a failover that throws away the extraction that runs.
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs() as i64);
+            let backup_kind = crate::donorkind::DonorKind::from_param(
+                host.nzb_get_param(backup_nzb.ptr, crate::donorkind::KIND_PARAM)
+                    .as_deref(),
+            );
+            if backup_still_unclassified(backup_kind, backup_hi.time, now)
+                && !download_hopeless(nzb.total_articles, nzb.current_success_articles, failed)
+            {
+                return;
+            }
             // A stretch of lost articles (whole volumes included) that a twin or a
             // borrowable alt can lend is borrowed too, keeping the extraction that runs.
             let lendable =
@@ -4687,10 +4702,7 @@ impl NzbgetRsQueueCoordinator {
                         host.nzb_get_param(nzb.ptr, crate::donorkind::KIND_PARAM)
                             .as_deref(),
                     ),
-                    crate::donorkind::DonorKind::from_param(
-                        host.nzb_get_param(backup_nzb.ptr, crate::donorkind::KIND_PARAM)
-                            .as_deref(),
-                    ),
+                    backup_kind,
                     nzb.health,
                     crate::postproc::dead_volume_borrow_underway(nzb.id),
                     nzb.direct_unpack_status == DirectUnpackStatus::Running,

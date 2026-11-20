@@ -4947,10 +4947,74 @@ impl RarCryptoContext {
     }
 }
 
-/// Pure-Rust `ContentSource` trait mirroring `daemon/postprocess/ContentMap.h`.
+/// Why a [`ContentSource`] read could not fill the buffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadError {
+    /// The range lies outside the source, or the buffer is too small for it.
+    OutOfRange,
+    /// A member of the set has no source.
+    NoSource,
+    /// The range touches a hole or bytes the map does not cover.
+    Unavailable,
+    /// The archive needs decrypting and no key is known, or decryption failed.
+    Crypto,
+    /// The disk or the transport failed (the underlying cause is not kept).
+    Io,
+}
+
+impl std::fmt::Display for ReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::OutOfRange => "range outside the source",
+            Self::NoSource => "member has no source",
+            Self::Unavailable => "bytes not available",
+            Self::Crypto => "decryption failed",
+            Self::Io => "read failed",
+        })
+    }
+}
+
+impl std::error::Error for ReadError {}
+
+/// The outcome of a content read: the whole buffer is filled, or an error says why. On
+/// error the buffer may be partly written and its contents are unspecified.
+pub type ReadResult = Result<(), ReadError>;
+
+/// A readable byte stream: one member file of a posting, or a view through a map.
 pub trait ContentSource {
     fn size(&self) -> i64;
-    fn read(&self, offset: i64, buf: &mut [u8]) -> bool;
+    /// Fills `buf` with the bytes at `offset`, all of them or an error.
+    fn read(&self, offset: i64, buf: &mut [u8]) -> ReadResult;
+}
+
+/// Reads `pieces` back to back into `buf`, each from its member's source.
+fn read_pieces(
+    sources: &dyn ContentSourceSet,
+    pieces: impl IntoIterator<Item = NzbgetRsMemberRange>,
+    buf: &mut [u8],
+) -> ReadResult {
+    let mut filled = 0usize;
+    for piece in pieces {
+        let source = sources
+            .get_source(piece.member_index)
+            .ok_or(ReadError::NoSource)?;
+        let len = usize::try_from(piece.size).map_err(|_| ReadError::OutOfRange)?;
+        let dest = buf
+            .get_mut(filled..filled + len)
+            .ok_or(ReadError::OutOfRange)?;
+        source.read(piece.offset, dest)?;
+        filled += len;
+    }
+    Ok(())
+}
+
+/// A map read is whole only when its pieces cover every requested byte.
+fn fully_covered(covered: i64, wanted: i64) -> ReadResult {
+    if covered == wanted {
+        Ok(())
+    } else {
+        Err(ReadError::Unavailable)
+    }
 }
 
 /// Pure-Rust `ContentSourceSet` trait mirroring `daemon/postprocess/ContentMap.h`.
@@ -4982,7 +5046,7 @@ impl crate::rarreader::Source for ContentSourceRarAdapter<'_> {
         self.0.size()
     }
     fn read(&mut self, offset: i64, buf: &mut [u8]) -> bool {
-        self.0.read(offset, buf)
+        self.0.read(offset, buf).is_ok()
     }
 }
 
@@ -5074,23 +5138,16 @@ impl ContentSource for CompositeSource<'_> {
         self.total_size
     }
 
-    fn read(&self, offset: i64, buf: &mut [u8]) -> bool {
+    fn read(&self, offset: i64, buf: &mut [u8]) -> ReadResult {
         let size = buf.len() as i64;
-        if offset < 0 || size < 0 || offset > self.total_size || size > self.total_size - offset {
-            return false;
+        if offset < 0 || offset > self.total_size || size > self.total_size - offset {
+            return Err(ReadError::OutOfRange);
         }
-        let mut filled = 0usize;
-        for piece in self.to_members(NzbgetRsByteRange { offset, size }) {
-            let Some(source) = self.sources.get_source(piece.member_index) else {
-                return false;
-            };
-            let len = piece.size as usize;
-            if !source.read(piece.offset, &mut buf[filled..filled + len]) {
-                return false;
-            }
-            filled += len;
-        }
-        true
+        read_pieces(
+            self.sources,
+            self.to_members(NzbgetRsByteRange { offset, size }),
+            buf,
+        )
     }
 }
 
@@ -5111,9 +5168,9 @@ impl ContentSource for HoledSource<'_> {
         self.inner.size()
     }
 
-    fn read(&self, offset: i64, buf: &mut [u8]) -> bool {
+    fn read(&self, offset: i64, buf: &mut [u8]) -> ReadResult {
         if holed_source_intersects(&self.holes, offset, buf.len() as i64) {
-            return false;
+            return Err(ReadError::Unavailable);
         }
         self.inner.read(offset, buf)
     }
@@ -5279,29 +5336,18 @@ impl ContentMap {
         sources: &dyn ContentSourceSet,
         cipher_range: NzbgetRsByteRange,
         buffer: &mut [u8],
-    ) -> bool {
+    ) -> ReadResult {
         if cipher_range.size == 0 {
-            return true;
+            return Ok(());
         }
         if (buffer.len() as i64) < cipher_range.size {
-            return false;
+            return Err(ReadError::OutOfRange);
         }
         let pieces = self.map_cipher_range(cipher_range);
         if pieces.is_empty() {
-            return false;
+            return Err(ReadError::Unavailable);
         }
-        let mut filled = 0usize;
-        for piece in pieces {
-            let Some(source) = sources.get_source(piece.member_index) else {
-                return false;
-            };
-            let len = piece.size as usize;
-            if !source.read(piece.offset, &mut buffer[filled..filled + len]) {
-                return false;
-            }
-            filled += len;
-        }
-        true
+        read_pieces(sources, pieces, buffer)
     }
 
     pub fn read_inner_decrypted(
@@ -5309,7 +5355,7 @@ impl ContentMap {
         sources: &dyn ContentSourceSet,
         inner_range: NzbgetRsByteRange,
         buffer: &mut [u8],
-    ) -> bool {
+    ) -> ReadResult {
         let block_size = RarCryptoContext::CRYPTO_BLOCK_SIZE as i64;
         let (ok, empty, cipher_from, cipher_to) = content_map_calc_decrypt_cipher_bounds(
             inner_range.offset,
@@ -5319,55 +5365,52 @@ impl ContentMap {
             self.cipher_stream_size(),
         );
         if !ok {
-            return false;
+            return Err(ReadError::OutOfRange);
         }
         if empty {
-            return true;
+            return Ok(());
         }
         if (buffer.len() as i64) < inner_range.size {
-            return false;
+            return Err(ReadError::OutOfRange);
         }
-        let Some(rc) = self.run_crypto(0) else {
-            return false;
-        };
-        let Some(crypto) = &rc.crypto else {
-            return false;
-        };
+        let crypto = self
+            .run_crypto(0)
+            .and_then(|rc| rc.crypto.as_ref())
+            .ok_or(ReadError::Crypto)?;
         let mut prev = [0u8; RarCryptoContext::CRYPTO_BLOCK_SIZE];
-        if cipher_from > 0
-            && !self.read_cipher_range(
+        if cipher_from > 0 {
+            self.read_cipher_range(
                 sources,
                 NzbgetRsByteRange {
                     offset: cipher_from - block_size,
                     size: block_size,
                 },
                 &mut prev,
-            )
-        {
-            return false;
+            )?;
         }
         let total_cipher = (cipher_to - cipher_from) as usize;
         let mut cipher = vec![0u8; total_cipher];
         let mut plain = vec![0u8; total_cipher];
-        if !self.read_cipher_range(
+        self.read_cipher_range(
             sources,
             NzbgetRsByteRange {
                 offset: cipher_from,
                 size: cipher_to - cipher_from,
             },
             &mut cipher,
-        ) || !crypto.decrypt_range(
-            if cipher_from > 0 { Some(&prev) } else { None },
+        )?;
+        if !crypto.decrypt_range(
+            (cipher_from > 0).then_some(&prev),
             &cipher,
             &mut plain,
             (cipher_to - cipher_from) / block_size,
         ) {
-            return false;
+            return Err(ReadError::Crypto);
         }
         let rel = (inner_range.offset - cipher_from) as usize;
         let len = inner_range.size as usize;
         buffer[..len].copy_from_slice(&plain[rel..rel + len]);
-        true
+        Ok(())
     }
 
     pub fn map_to_inner(
@@ -5421,9 +5464,12 @@ impl ContentMap {
         sources: &dyn ContentSourceSet,
         inner_range: NzbgetRsByteRange,
         buffer: &mut [u8],
-    ) -> bool {
-        if self.run_layers.len() != self.runs.len() || (buffer.len() as i64) < inner_range.size {
-            return false;
+    ) -> ReadResult {
+        if self.run_layers.len() != self.runs.len() {
+            return Err(ReadError::Unavailable);
+        }
+        if (buffer.len() as i64) < inner_range.size {
+            return Err(ReadError::OutOfRange);
         }
         let end = inner_range.offset + inner_range.size;
         let mut covered: i64 = 0;
@@ -5433,24 +5479,23 @@ impl ContentMap {
             if from >= to {
                 continue;
             }
-            let Some(layer) = self.plain_layers.get(layer) else {
-                return false;
-            };
+            let layer = self
+                .plain_layers
+                .get(layer)
+                .ok_or(ReadError::Unavailable)?;
             let rel = (from - inner_range.offset) as usize;
             let len = (to - from) as usize;
-            if !layer.read_inner_decrypted(
+            layer.read_inner_decrypted(
                 sources,
                 NzbgetRsByteRange {
                     offset: layer_offset + (from - run.inner_offset),
                     size: to - from,
                 },
                 &mut buffer[rel..rel + len],
-            ) {
-                return false;
-            }
+            )?;
             covered += to - from;
         }
-        covered == inner_range.size
+        fully_covered(covered, inner_range.size)
     }
 
     /// Reads donor plaintext for `inner_range` (`StreamRepairController::ReadDonorInner` in `StreamRepair.cpp`),
@@ -5460,11 +5505,9 @@ impl ContentMap {
         sources: &dyn ContentSourceSet,
         inner_range: NzbgetRsByteRange,
         buffer: &mut Vec<u8>,
-    ) -> bool {
-        if inner_range.size < 0 {
-            return false;
-        }
-        buffer.resize(inner_range.size as usize, 0);
+    ) -> ReadResult {
+        let size = usize::try_from(inner_range.size).map_err(|_| ReadError::OutOfRange)?;
+        buffer.resize(size, 0);
         if self.inside_encrypted() {
             return self.read_inner_through_layers(sources, inner_range, buffer);
         }
@@ -5480,20 +5523,18 @@ impl ContentMap {
                     size: piece.size,
                 },
             );
-            if inner_pos.len() != 1 {
-                return false;
-            }
-            let Some(source) = sources.get_source(piece.member_index) else {
-                return false;
+            let [inner_pos] = inner_pos[..] else {
+                return Err(ReadError::Unavailable);
             };
-            let rel = (inner_pos[0].offset - inner_range.offset) as usize;
+            let source = sources
+                .get_source(piece.member_index)
+                .ok_or(ReadError::NoSource)?;
+            let rel = (inner_pos.offset - inner_range.offset) as usize;
             let len = piece.size as usize;
-            if !source.read(piece.offset, &mut buffer[rel..rel + len]) {
-                return false;
-            }
+            source.read(piece.offset, &mut buffer[rel..rel + len])?;
             covered += piece.size;
         }
-        covered == inner_range.size
+        fully_covered(covered, inner_range.size)
     }
 
     /// Assembles raw ciphertext of the target's contiguous cipher space from its member files on disk
@@ -5700,20 +5741,18 @@ impl ContentSource for DonorInnerPlaintextSource<'_> {
         self.map.inner_size()
     }
 
-    fn read(&self, offset: i64, buf: &mut [u8]) -> bool {
+    fn read(&self, offset: i64, buf: &mut [u8]) -> ReadResult {
         let mut scratch = Vec::new();
-        if !self.map.read_donor_inner(
+        self.map.read_donor_inner(
             self.sources,
             NzbgetRsByteRange {
                 offset,
                 size: buf.len() as i64,
             },
             &mut scratch,
-        ) {
-            return false;
-        }
+        )?;
         buf.copy_from_slice(&scratch);
-        true
+        Ok(())
     }
 }
 
@@ -5797,7 +5836,7 @@ impl RepairSetData {
                 continue;
             }
             donor_data.resize(window.size as usize, 0);
-            if !plaintext.read(window.offset, &mut donor_data) {
+            if plaintext.read(window.offset, &mut donor_data).is_err() {
                 continue;
             }
             for piece in target_map.map_from_inner(window) {
@@ -5914,7 +5953,7 @@ impl RepairSetData {
             }
             let block_len = (block_to - block_from) as usize;
             donor_data.resize(block_len, 0);
-            if !plaintext.read(block_from, &mut donor_data) {
+            if plaintext.read(block_from, &mut donor_data).is_err() {
                 continue;
             }
             cipher.resize(block_len, 0);
@@ -6092,7 +6131,7 @@ impl RepairSetData {
                     calc_encrypted_chunk_end(block_from, block_to, 4 * 1024 * 1024, BLOCK_SIZE);
                 let chunk_len = (chunk_end - block_from) as usize;
                 donor_data.resize(chunk_len, 0);
-                if !plaintext.read(block_from, &mut donor_data) {
+                if plaintext.read(block_from, &mut donor_data).is_err() {
                     break;
                 }
                 cipher.resize(chunk_len, 0);
@@ -6236,7 +6275,7 @@ impl RepairSetData {
                     offset: pos,
                     size: chunk,
                 };
-                if !donor_map.read_donor_inner(donor_sources, chunk_range, &mut donor_data) {
+                if donor_map.read_donor_inner(donor_sources, chunk_range, &mut donor_data).is_err() {
                     let (step_action, new_size, new_pos, new_failed) = patch_donor_set_step_failure(
                         chunk,
                         MIN_CHUNK,
@@ -6377,7 +6416,7 @@ impl RepairSetData {
             while pos < hole_end && !target_files.is_stopped() {
                 let chunk = (hole_end - pos).min(4 * 1024 * 1024);
                 donor_data.resize(chunk as usize, 0);
-                if !donor_inner.read(pos, &mut donor_data) {
+                if donor_inner.read(pos, &mut donor_data).is_err() {
                     break;
                 }
                 let chunk_range = NzbgetRsByteRange {
@@ -6697,21 +6736,22 @@ impl DonorMemberSource {
         transport: &mut dyn DonorArticleTransport,
         offset: i64,
         buffer: &mut [u8],
-    ) -> bool {
+    ) -> ReadResult {
         let size = buffer.len() as i64;
-        if !self.ensure_init(transport)
-            || !(offset >= 0 && size >= 0 && offset <= self.size && size <= self.size - offset)
-        {
-            return false;
+        if !self.ensure_init(transport) {
+            return Err(ReadError::Io);
+        }
+        if offset < 0 || offset > self.size || size > self.size - offset {
+            return Err(ReadError::OutOfRange);
         }
         self.prefetch(transport, offset, size);
         let mut pos = offset;
         let end_offset = offset + size;
         let mut out_pos = 0usize;
         while pos < end_offset {
-            let Some((part_index, fetched)) = self.part_for_offset(transport, pos) else {
-                return false;
-            };
+            let (part_index, fetched) = self
+                .part_for_offset(transport, pos)
+                .ok_or(ReadError::Io)?;
             let (from, len) =
                 donor_calc_read_chunk(pos, fetched.offset, fetched.data.len(), end_offset);
             let from_usize = from as usize;
@@ -6722,7 +6762,7 @@ impl DonorMemberSource {
             out_pos += len_usize;
             pos += len;
         }
-        true
+        Ok(())
     }
 }
 
@@ -7217,9 +7257,9 @@ impl ContentSource for NestedLayerSource<'_> {
         self.outer.inner_size()
     }
 
-    fn read(&self, offset: i64, buf: &mut [u8]) -> bool {
+    fn read(&self, offset: i64, buf: &mut [u8]) -> ReadResult {
         if buf.is_empty() {
-            return true;
+            return Ok(());
         }
         if self.outer.encrypted() {
             // The nested archive is the plaintext of an encrypted one.
@@ -7236,21 +7276,8 @@ impl ContentSource for NestedLayerSource<'_> {
             offset,
             size: buf.len() as i64,
         });
-        if pieces.iter().map(|p| p.size).sum::<i64>() != buf.len() as i64 {
-            return false;
-        }
-        let mut filled = 0usize;
-        for piece in pieces {
-            let Some(source) = self.sources.get_source(piece.member_index) else {
-                return false;
-            };
-            let len = piece.size as usize;
-            if !source.read(piece.offset, &mut buf[filled..filled + len]) {
-                return false;
-            }
-            filled += len;
-        }
-        true
+        fully_covered(pieces.iter().map(|p| p.size).sum(), buf.len() as i64)?;
+        read_pieces(self.sources, pieces, buf)
     }
 }
 
@@ -7276,23 +7303,21 @@ impl ContentSource for MemoSource<'_> {
             .map_or(0, |s| s.size())
     }
 
-    fn read(&self, offset: i64, buf: &mut [u8]) -> bool {
+    fn read(&self, offset: i64, buf: &mut [u8]) -> ReadResult {
         let key = (offset, buf.len());
         if let Some(bytes) = self.reads.borrow().get(&key) {
             buf.copy_from_slice(bytes);
-            return true;
+            return Ok(());
         }
-        let Some(source) = self.sources.get_source(self.member_index) else {
-            return false;
-        };
-        if !source.read(offset, buf) {
-            return false;
-        }
+        self.sources
+            .get_source(self.member_index)
+            .ok_or(ReadError::NoSource)?
+            .read(offset, buf)?;
         if buf.len() <= Self::MAX_READ && self.held.get() + buf.len() <= Self::MAX_HELD {
             self.held.set(self.held.get() + buf.len());
             self.reads.borrow_mut().insert(key, buf.to_vec());
         }
-        true
+        Ok(())
     }
 }
 
@@ -7932,7 +7957,7 @@ impl ContentMapper {
             |member_index, offset, buf| {
                 sources
                     .get_source(member_index)
-                    .is_some_and(|s| s.read(offset, buf))
+                    .is_some_and(|s| s.read(offset, buf).is_ok())
             },
             pick,
         )
@@ -7967,7 +7992,7 @@ impl ContentMapper {
             |member_index, offset, buf| {
                 sources
                     .get_source(member_index)
-                    .is_some_and(|s| s.read(offset, buf))
+                    .is_some_and(|s| s.read(offset, buf).is_ok())
             },
             password,
             pick,
@@ -8101,20 +8126,19 @@ impl ContentSource for DiskContentSource {
         self.size
     }
 
-    fn read(&self, offset: i64, buf: &mut [u8]) -> bool {
+    fn read(&self, offset: i64, buf: &mut [u8]) -> ReadResult {
         use std::io::{Read, Seek, SeekFrom};
         let size = buf.len() as i64;
-        if offset < 0 || size < 0 || offset > self.size || size > self.size - offset {
-            return false;
+        let start = u64::try_from(offset).map_err(|_| ReadError::OutOfRange)?;
+        if offset > self.size || size > self.size - offset {
+            return Err(ReadError::OutOfRange);
         }
         let mut file = self.file.borrow_mut();
-        if file.seek(SeekFrom::Start(offset as u64)).is_err() {
-            return false;
-        }
+        file.seek(SeekFrom::Start(start)).map_err(|_| ReadError::Io)?;
         if size == 0 {
-            return true;
+            return Ok(());
         }
-        file.read_exact(buf).is_ok()
+        file.read_exact(buf).map_err(|_| ReadError::Io)
     }
 }
 
@@ -8407,7 +8431,7 @@ impl ContentSource for DonorSetMemberSlot<'_, '_> {
         self.inner.borrow_mut().size_with_transport(&mut adapter)
     }
 
-    fn read(&self, offset: i64, buf: &mut [u8]) -> bool {
+    fn read(&self, offset: i64, buf: &mut [u8]) -> ReadResult {
         let mut adapter = MemberTransportAdapter {
             shared: &self.shared,
             member_index: self.member_index,
@@ -9973,7 +9997,7 @@ impl CrossPackRepairSession {
             |member_index, offset, buf| {
                 donor_sources
                     .get_source(member_index)
-                    .is_some_and(|src| src.read(offset, buf))
+                    .is_some_and(|src| src.read(offset, buf).is_ok())
             },
         );
         donor_sources.set_fetch_budget(None);
@@ -10028,7 +10052,7 @@ impl CrossPackRepairSession {
                         || !donor_sources
                             .get_source(piece.member_index)
                             .is_some_and(|src| {
-                                src.read(piece.offset, &mut buf[cursor..cursor + len])
+                                src.read(piece.offset, &mut buf[cursor..cursor + len]).is_ok()
                             })
                     {
                         return false;
@@ -10107,8 +10131,11 @@ impl CrossPackRepairSession {
             fn size(&self) -> i64 {
                 self.0.inner_size()
             }
-            fn read(&self, offset: i64, buf: &mut [u8]) -> bool {
-                self.0.read_inner(offset, buf)
+            fn read(&self, offset: i64, buf: &mut [u8]) -> ReadResult {
+                self.0
+                    .read_inner(offset, buf)
+                    .then_some(())
+                    .ok_or(ReadError::Unavailable)
             }
         }
         let inner_source = InnerSource(&source);
@@ -11704,7 +11731,7 @@ mod tests {
                 size: 200
             },
             &mut got
-        ));
+        ).is_ok());
         assert_eq!(got, &archive[60..260]);
         // A range that starts and ends inside cipher blocks, across the two members.
         assert!(map.read_donor_inner(
@@ -11714,16 +11741,16 @@ mod tests {
                 size: 21
             },
             &mut got
-        ));
+        ).is_ok());
         assert_eq!(got, &archive[93..114]);
-        assert!(!map.read_donor_inner(
+        assert!(map.read_donor_inner(
             &sources,
             NzbgetRsByteRange {
                 offset: 190,
                 size: 20
             },
             &mut got
-        ));
+        ).is_err());
 
         // The nested archive itself reads as the decrypted outer one.
         let layer = NestedLayerSource {
@@ -11731,7 +11758,7 @@ mod tests {
             sources: &sources,
         };
         let mut head = [0u8; 70];
-        assert!(layer.read(0, &mut head));
+        assert!(layer.read(0, &mut head).is_ok());
         assert_eq!(&head[..], &archive[..70]);
 
         // Dropping a member drops its runs and their layer notes together.
@@ -11745,7 +11772,7 @@ mod tests {
                 size: 50
             },
             &mut got
-        ));
+        ).is_ok());
         assert_eq!(got, &archive[160..210]);
 
         // An encrypted archive inside an encrypted one is refused.
@@ -12750,14 +12777,14 @@ mod tests {
         fn size(&self) -> i64 {
             self.0.len() as i64
         }
-        fn read(&self, offset: i64, buf: &mut [u8]) -> bool {
+        fn read(&self, offset: i64, buf: &mut [u8]) -> ReadResult {
             let sz = buf.len() as i64;
-            if offset < 0 || sz < 0 || offset + sz > self.0.len() as i64 {
-                return false;
+            if offset < 0 || offset + sz > self.0.len() as i64 {
+                return Err(ReadError::OutOfRange);
             }
             let start = offset as usize;
             buf.copy_from_slice(&self.0[start..start + buf.len()]);
-            true
+            Ok(())
         }
     }
 
@@ -13317,13 +13344,13 @@ mod tests {
             assert_eq!(composite.size(), 35);
 
             let mut buffer = [0u8; 15];
-            assert!(composite.read(5, &mut buffer));
+            assert!(composite.read(5, &mut buffer).is_ok());
             let member0 = cm_pattern(10, 1);
             let member1 = cm_pattern(20, 2);
             assert_eq!(&buffer[..5], &member0[5..10]);
             assert_eq!(&buffer[5..15], &member1[..10]);
 
-            assert!(!composite.read(30, &mut buffer[..10]));
+            assert!(composite.read(30, &mut buffer[..10]).is_err());
 
             let pieces = composite.to_members(NzbgetRsByteRange {
                 offset: 8,
@@ -13535,7 +13562,7 @@ mod tests {
                 assert!(source.read(
                     piece.offset,
                     &mut reassembled[dst..dst + piece.size as usize]
-                ));
+                ).is_ok());
             }
             assert_eq!(reassembled, inner);
 
@@ -13842,7 +13869,8 @@ mod tests {
                 assert!(sources
                     .get_source(0)
                     .unwrap()
-                    .read(run.member_offset, &mut data));
+                    .read(run.member_offset, &mut data)
+                    .is_ok());
                 assert_eq!(data, inner);
             }
 
@@ -13895,10 +13923,10 @@ mod tests {
                     );
                     assert_eq!(inner_pos.len(), 1);
                     let dst = inner_pos[0].offset as usize;
-                    assert!(sources.get_source(piece.member_index).unwrap().read(
-                        piece.offset,
-                        &mut reassembled[dst..dst + piece.size as usize]
-                    ));
+                    assert!(sources.get_source(piece.member_index)
+                        .unwrap()
+                        .read(piece.offset, &mut reassembled[dst..dst + piece.size as usize])
+                        .is_ok());
                 }
                 assert_eq!(reassembled, inner);
             }
@@ -14020,10 +14048,10 @@ mod tests {
                     );
                     assert_eq!(inner_pos.len(), 1);
                     let dst = inner_pos[0].offset as usize;
-                    assert!(sources.get_source(piece.member_index).unwrap().read(
-                        piece.offset,
-                        &mut reassembled[dst..dst + piece.size as usize]
-                    ));
+                    assert!(sources.get_source(piece.member_index)
+                        .unwrap()
+                        .read(piece.offset, &mut reassembled[dst..dst + piece.size as usize])
+                        .is_ok());
                 }
                 assert_eq!(reassembled, inner);
             }
@@ -14334,7 +14362,8 @@ mod tests {
             assert!(sources
                 .get_source(0)
                 .unwrap()
-                .read(map.runs()[0].member_offset, &mut reassembled));
+                .read(map.runs()[0].member_offset, &mut reassembled)
+                .is_ok());
             assert_eq!(reassembled, inner);
         }
 
@@ -14420,7 +14449,8 @@ mod tests {
             assert!(sources
                 .get_source(0)
                 .unwrap()
-                .read(map.runs()[0].member_offset, &mut reassembled));
+                .read(map.runs()[0].member_offset, &mut reassembled)
+                .is_ok());
             assert_eq!(reassembled, inner);
         }
 
@@ -14435,11 +14465,11 @@ mod tests {
                 }],
             );
             let mut buf = [0u8; 100];
-            assert!(holed.read(0, &mut buf[..30]));
-            assert!(holed.read(40, &mut buf[..60]));
-            assert!(!holed.read(25, &mut buf[..10]));
-            assert!(!holed.read(35, &mut buf[..1]));
-            assert!(!holed.read(0, &mut buf[..100]));
+            assert!(holed.read(0, &mut buf[..30]).is_ok());
+            assert!(holed.read(40, &mut buf[..60]).is_ok());
+            assert!(holed.read(25, &mut buf[..10]).is_err());
+            assert!(holed.read(35, &mut buf[..1]).is_err());
+            assert!(holed.read(0, &mut buf[..100]).is_err());
             assert_eq!(holed.size(), 100);
         }
 
@@ -15059,7 +15089,7 @@ mod tests {
                     size: 100
                 },
                 &mut out
-            ));
+            ).is_ok());
             assert_eq!(out, inner);
             for probe in [
                 NzbgetRsByteRange {
@@ -15085,7 +15115,7 @@ mod tests {
                 },
             ] {
                 let mut piece = vec![0u8; probe.size as usize];
-                assert!(map.read_inner_decrypted(&sources, probe, &mut piece));
+                assert!(map.read_inner_decrypted(&sources, probe, &mut piece).is_ok());
                 let p_off = probe.offset as usize;
                 assert_eq!(piece, &inner[p_off..p_off + probe.size as usize]);
             }
@@ -15096,23 +15126,23 @@ mod tests {
                     size: 0
                 },
                 &mut out
-            ));
-            assert!(!map.read_inner_decrypted(
+            ).is_ok());
+            assert!(map.read_inner_decrypted(
                 &sources,
                 NzbgetRsByteRange {
                     offset: 96,
                     size: 10
                 },
                 &mut out
-            ));
-            assert!(!map.read_inner_decrypted(
+            ).is_err());
+            assert!(map.read_inner_decrypted(
                 &sources,
                 NzbgetRsByteRange {
                     offset: -16,
                     size: 16
                 },
                 &mut out
-            ));
+            ).is_err());
 
             let mut partial = MemorySourceSet::default();
             partial.push(build_rar3_enc_store_volume(
@@ -15139,32 +15169,32 @@ mod tests {
                     size: 32
                 },
                 &mut out
-            ));
+            ).is_ok());
             assert_eq!(&out[..32], &inner[..32]);
-            assert!(!map.read_inner_decrypted(
+            assert!(map.read_inner_decrypted(
                 &partial,
                 NzbgetRsByteRange {
                     offset: 50,
                     size: 10
                 },
                 &mut out
-            ));
-            assert!(!map.read_inner_decrypted(
+            ).is_err());
+            assert!(map.read_inner_decrypted(
                 &partial,
                 NzbgetRsByteRange {
                     offset: 0,
                     size: 48
                 },
                 &mut out
-            ));
-            assert!(!map.read_inner_decrypted(
+            ).is_err());
+            assert!(map.read_inner_decrypted(
                 &partial,
                 NzbgetRsByteRange {
                     offset: 96,
                     size: 4
                 },
                 &mut out
-            ));
+            ).is_err());
         }
 
         // 22. ContentMapperRar5EncryptedNonAlignedTest
@@ -15240,7 +15270,7 @@ mod tests {
                         size: 60
                     },
                     &mut out
-                ));
+                ).is_ok());
                 assert_eq!(out, inner);
                 assert!(map.read_inner_decrypted(
                     &sources,
@@ -15249,7 +15279,7 @@ mod tests {
                         size: 10
                     },
                     &mut out
-                ));
+                ).is_ok());
                 assert_eq!(&out[..10], &inner[20..30]);
             }
             {
@@ -16155,11 +16185,11 @@ mod tests {
 
         // Reading part 5 with exhausted budget fails without poisoning cache
         let mut buf = vec![0u8; 250];
-        assert!(!src.read_with_transport(&mut transport, 500, &mut buf));
+        assert!(src.read_with_transport(&mut transport, 500, &mut buf).is_err());
 
         // Removing budget allows prefetch + drift-corrected read across parts
         transport.budget = None;
-        assert!(src.read_with_transport(&mut transport, 500, &mut buf));
+        assert!(src.read_with_transport(&mut transport, 500, &mut buf).is_ok());
         assert_eq!(&buf[..], &full_data[500..750]);
         assert!(transport.batch_begins >= 1);
         let served = src.take_served_parts();

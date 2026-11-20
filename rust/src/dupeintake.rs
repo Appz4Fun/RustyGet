@@ -15,7 +15,8 @@ use std::rc::Rc;
 
 use crate::dupefallback::NzbgetRsByteRange;
 use crate::streamrepair::{
-    ContentMap, ContentMapper, ContentSource, ContentSourceSet, MemberSet, SetMember,
+    ContentMap, ContentMapper, ContentSource, ContentSourceSet, MemberSet, ReadError, ReadResult,
+    SetMember,
 };
 
 /// One data file of a copy as its nzb lists it: name, encoded bytes and the
@@ -162,12 +163,15 @@ impl ContentSource for ArticleMember<'_> {
         self.file_size.get().max(0)
     }
 
-    fn read(&self, offset: i64, buf: &mut [u8]) -> bool {
-        if offset < 0 || self.ids.is_empty() {
-            return false;
+    fn read(&self, offset: i64, buf: &mut [u8]) -> ReadResult {
+        if self.ids.is_empty() {
+            return Err(ReadError::NoSource);
+        }
+        if offset < 0 {
+            return Err(ReadError::OutOfRange);
         }
         if self.part_size.get() <= 0 && self.part(0).is_none() {
-            return false;
+            return Err(ReadError::Io);
         }
         let last = self.ids.len() - 1;
         let mut pos = offset;
@@ -178,9 +182,7 @@ impl ContentSource for ArticleMember<'_> {
             // Parts are mostly the same size; step to the one holding `pos`.
             let mut steps = 0;
             let art = loop {
-                let Some(art) = self.part(index) else {
-                    return false;
-                };
+                let art = self.part(index).ok_or(ReadError::Io)?;
                 let end = art.offset + art.data.len() as i64;
                 if pos < art.offset && index > 0 && steps < 4 {
                     index -= 1;
@@ -189,7 +191,7 @@ impl ContentSource for ArticleMember<'_> {
                 } else if pos >= art.offset && pos < end {
                     break art;
                 } else {
-                    return false;
+                    return Err(ReadError::Unavailable);
                 }
                 steps += 1;
             };
@@ -199,7 +201,7 @@ impl ContentSource for ArticleMember<'_> {
             done += n;
             pos += n as i64;
         }
-        true
+        Ok(())
     }
 }
 
@@ -306,9 +308,7 @@ pub fn inner_key_copy(
         .collect();
     let first = vols.first()?;
     let mut magic = [0u8; 6];
-    if !first.read(0, &mut magic) {
-        return None;
-    }
+    first.read(0, &mut magic).ok()?;
     if magic.starts_with(b"Rar!") {
         // the last volume's first bytes hold its file header, which records
         // the whole file's size and CRC32
@@ -318,9 +318,7 @@ pub fn inner_key_copy(
             .filter(|&n| n > 0)?
             .min(RAR_KEY_HEAD);
         let mut head = vec![0u8; len];
-        if !last.read(0, &mut head) {
-            return None;
-        }
+        last.read(0, &mut head).ok()?;
         // RAR volumes are one size but the last: a full-size "last" volume
         // means the copy lacks the set's real last volumes, and a middle
         // volume would key the file that ends there, not the video
@@ -365,7 +363,7 @@ pub fn inner_key_copy(
         &lens,
         |vol, offset, buf| {
             vols.get(vol as usize)
-                .is_some_and(|m| i64::try_from(offset).is_ok_and(|o| m.read(o, buf)))
+                .is_some_and(|m| i64::try_from(offset).is_ok_and(|o| m.read(o, buf).is_ok()))
         },
         &name,
     )
@@ -454,7 +452,7 @@ pub fn print_copy(
             offset,
             size: SAMPLE_BYTES.min(size - offset),
         };
-        if !map.read_donor_inner(&sources, range, &mut buf) {
+        if map.read_donor_inner(&sources, range, &mut buf).is_err() {
             return Err("payload unreadable".to_string());
         }
         // Only a video's own bytes may drop a copy: an archive under an

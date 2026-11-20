@@ -1207,7 +1207,7 @@ fn patch_from_repaired_volumes(
                 offset: at as i64,
                 size: n as i64,
             };
-            if !map.read_donor_inner(&sources, range, &mut buf) || buf.len() as u64 != n {
+            if map.read_donor_inner(&sources, range, &mut buf).is_err() || buf.len() as u64 != n {
                 return Err(Failure::Damaged(format!(
                     "cannot read inner bytes {at}..{} from the repaired volumes",
                     at + n

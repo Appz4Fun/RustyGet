@@ -605,17 +605,14 @@ pub unsafe fn nzb_message(nzb: usize, kind: i32, add: bool, msg: &[u8]) {
     if kind != crate::log::MK_DEBUG || crate::ffi::build_debug_enabled() {
         crate::log::log_active_bytes(kind, &text[..text.len().min(1023)]);
     }
-    let opts = unsafe {
-        crate::options::nzbget_rs_options_scalars(crate::options::nzbget_rs_options_active())
-            .as_ref()
-    };
+    let log_buffer = crate::options::active_options().map_or(0, |o| o.scalars().log_buffer);
     let kept = std::ffi::CString::new(text).unwrap_or_default();
     crate::qnzb::add_message(
         crate::queuesubsys_host::NzbRef::from_addr(nzb),
         kind,
         kept,
         i64::from(now() as c_int),
-        opts.map_or(0, |o| o.log_buffer),
+        log_buffer,
     );
 }
 

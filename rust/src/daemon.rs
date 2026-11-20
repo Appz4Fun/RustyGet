@@ -263,21 +263,12 @@ unsafe fn phase1_init(reload: bool) -> c_int {
 
     *PRE_POST.lock().unwrap_or_else(PoisonError::into_inner) = Some(PrePostRunner::new());
 
-    // no_config < 0: the options come from the command line parse_command_line read
-    let mut state_flags: c_int = 0;
     let options = crate::options::new_options(
-        ptr::null(),
-        ptr::null(),
-        -1,
-        0,
-        ptr::null(),
-        0,
+        crate::options::OptionsSource::DaemonCommandLine,
+        false,
         options_flags(),
-        crate::ffi::build_version_cstr().as_ptr(),
-        ptr::null_mut(),
+        crate::ffi::build_version_cstr(),
         None,
-        ptr::null_mut(),
-        &mut state_flags,
     );
     *OPTIONS.lock().unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&options));
     crate::lifecycle::apply_command_line();
@@ -333,20 +324,26 @@ unsafe extern "C" fn nserv_runtime(
     match op {
         0 => {
             let slot = ctx.cast::<Option<Arc<NzbgetRsOptions>>>();
-            let mut state_flags: c_int = 0;
+            let cmd_opts: Vec<&CStr> = if opts.is_null() {
+                Vec::new()
+            } else {
+                std::slice::from_raw_parts(opts, opt_len)
+                    .iter()
+                    .filter(|p| !p.is_null())
+                    .map(|&p| CStr::from_ptr(p))
+                    .collect()
+            };
             let created = crate::options::new_options(
-                c"rustyget/rustyget".as_ptr(),
-                ptr::null(),
-                1,
-                1,
-                if opt_len > 0 { opts } else { ptr::null() },
-                opt_len,
+                crate::options::OptionsSource::Given {
+                    exe_name: b"rustyget/rustyget",
+                    config_file: None,
+                    no_config: true,
+                    cmd_opts: &cmd_opts,
+                },
+                true,
                 options_flags(),
-                crate::ffi::build_version_cstr().as_ptr(),
-                ptr::null_mut(),
+                crate::ffi::build_version_cstr(),
                 None,
-                ptr::null_mut(),
-                &mut state_flags,
             );
             if let Some(old) = (*slot).replace(created) {
                 crate::options::release_options(old);

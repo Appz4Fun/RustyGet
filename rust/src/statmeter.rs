@@ -1934,9 +1934,6 @@ mod tests {
     #[test]
     fn statmeter_runtime_disk_and_rpc_roundtrip() {
         use crate::log::{install_log, uninstall_log};
-        use crate::options::{
-            nzbget_rs_options_free, nzbget_rs_options_new, NzbgetRsParsedOptions,
-        };
         use crate::xmlrpc_format::{NzbgetRsRpcServerVolumeItem, RpcEmit};
         use std::ffi::CString;
         use std::ptr;
@@ -1952,30 +1949,16 @@ mod tests {
         let q_opt = CString::new(format!("QueueDir={}", qdir.to_str().unwrap())).unwrap();
         let t_opt = CString::new(format!("TempDir={}", tdir.to_str().unwrap())).unwrap();
         let cmd = [
-            q_opt.as_ptr(),
-            t_opt.as_ptr(),
-            c"WriteLog=none".as_ptr(),
-            c"-s".as_ptr(),
+            q_opt.as_c_str(),
+            t_opt.as_c_str(),
+            c"WriteLog=none",
+            c"-s",
         ];
-        let mut scalars = NzbgetRsParsedOptions::default();
-        let mut flags = 0;
         unsafe {
             let log_arc = install_log(false);
             let log = std::sync::Arc::as_ptr(&log_arc);
-            let opts = nzbget_rs_options_new(
-                c"rustyget".as_ptr(),
-                ptr::null(),
-                1,
-                1,
-                cmd.as_ptr(),
-                cmd.len(),
-                0,
-                c"1.0".as_ptr(),
-                ptr::null_mut(),
-                None,
-                &mut scalars,
-                &mut flags,
-            );
+            let opts_arc = crate::options::test_options(&cmd);
+            let opts = std::sync::Arc::as_ptr(&opts_arc);
             let sm = nzbget_rs_statmeter_new(log, opts);
             let mut init_off = 0;
             nzbget_rs_statmeter_ctl(
@@ -2139,7 +2122,7 @@ mod tests {
 
             nzbget_rs_statmeter_free(sm2);
             nzbget_rs_statmeter_free(sm);
-            nzbget_rs_options_free(opts);
+            crate::options::release_options(opts_arc);
             uninstall_log(log_arc);
         }
         let _ = std::fs::remove_dir_all(&dir);

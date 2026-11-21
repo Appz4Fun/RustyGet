@@ -360,8 +360,25 @@ struct DonorFetchStats {
     singles: u32,
     batches: u32,
     batch_parts: u32,
+    /// Batches that fetched the next holes of several volumes at once, and their articles.
+    waves: u32,
+    wave_parts: u32,
+    largest: u32,
     bytes: u64,
     waited: std::time::Duration,
+}
+
+impl DonorFetchStats {
+    fn count_batch(&mut self, parts: usize, wave: bool) {
+        let parts = u32::try_from(parts).unwrap_or(u32::MAX);
+        self.batches += 1;
+        self.batch_parts = self.batch_parts.saturating_add(parts);
+        self.largest = self.largest.max(parts);
+        if wave {
+            self.waves += 1;
+            self.wave_parts = self.wave_parts.saturating_add(parts);
+        }
+    }
 }
 
 impl DonorFetchStats {
@@ -370,13 +387,16 @@ impl DonorFetchStats {
         msg.extend_from_slice(donor);
         msg.extend_from_slice(
             format!(
-                ": {:.1} MB in {:.1} s, waiting on the network {:.1} s; {} single fetch(es), {} batch(es) of {} article(s), {} worker(s)",
+                ": {:.1} MB in {:.1} s, waiting on the network {:.1} s; {} single fetch(es), {} batch(es) of {} article(s) ({} wave(s) of {} across volumes, largest {}), {} worker(s)",
                 self.bytes as f64 / 1_000_000.0,
                 elapsed.as_secs_f64(),
                 self.waited.as_secs_f64(),
                 self.singles,
                 self.batches,
                 self.batch_parts,
+                self.waves,
+                self.wave_parts,
+                self.largest,
                 workers,
             )
             .as_bytes(),
@@ -1727,8 +1747,7 @@ impl NzbgetRsStreamRepairCtrl {
                     }
                     {
                         let mut st = self.ctrl.fetch_stats.lock().unwrap_or_else(|e| e.into_inner());
-                        st.batches += 1;
-                        st.batch_parts += requests.len() as u32;
+                        st.count_batch(requests.len(), false);
                     }
                     self.ctrl.batch_fetcher.begin(requests);
                 }
@@ -1754,8 +1773,7 @@ impl NzbgetRsStreamRepairCtrl {
                     }
                     {
                         let mut st = self.ctrl.fetch_stats.lock().unwrap_or_else(|e| e.into_inner());
-                        st.batches += 1;
-                        st.batch_parts += requests.len() as u32;
+                        st.count_batch(requests.len(), true);
                     }
                     self.ctrl.batch_fetcher.begin(requests);
                     true
@@ -1802,8 +1820,7 @@ impl NzbgetRsStreamRepairCtrl {
                         .collect();
                     {
                         let mut st = self.ctrl.fetch_stats.lock().unwrap_or_else(|e| e.into_inner());
-                        st.batches += 1;
-                        st.batch_parts += requests.len() as u32;
+                        st.count_batch(requests.len(), false);
                     }
                     self.ctrl.batch_fetcher.begin(requests);
                 }
@@ -2980,13 +2997,16 @@ mod tests {
             singles: 3,
             batches: 2,
             batch_parts: 40,
+            waves: 1,
+            wave_parts: 30,
+            largest: 30,
             bytes: 30_000_000,
             waited: std::time::Duration::from_secs(9),
         };
         let line = String::from_utf8(st.line(b"Copy.05", std::time::Duration::from_secs(12), 8)).unwrap();
         assert_eq!(
             line,
-            "Fetch cost of borrowing from Copy.05: 30.0 MB in 12.0 s, waiting on the network 9.0 s; 3 single fetch(es), 2 batch(es) of 40 article(s), 8 worker(s)"
+            "Fetch cost of borrowing from Copy.05: 30.0 MB in 12.0 s, waiting on the network 9.0 s; 3 single fetch(es), 2 batch(es) of 40 article(s) (1 wave(s) of 30 across volumes, largest 30), 8 worker(s)"
         );
     }
 

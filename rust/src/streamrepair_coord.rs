@@ -405,6 +405,10 @@ pub struct NzbgetRsStreamRepairCtrl {
     recreate_owed: Mutex<std::collections::BTreeSet<Vec<u8>>>,
     /// What borrowing from the current donor cost in fetches, logged after each donor.
     fetch_stats: Mutex<DonorFetchStats>,
+    /// Fetch workers a live repair takes once the download has nothing left to fetch (0 until
+    /// a live repair runs), and when the queue was last asked (see `widen_when_drained`).
+    drained_workers: AtomicI32,
+    drain_checked: Mutex<Option<std::time::Instant>>,
     tls_enabled: bool,
     debug_enabled: bool,
     fetcher: ArticleFetcher,
@@ -435,6 +439,8 @@ impl NzbgetRsStreamRepairCtrl {
             finishing_volume: AtomicBool::new(false),
             recreate_owed: Mutex::new(Default::default()),
             fetch_stats: Mutex::new(DonorFetchStats::default()),
+            drained_workers: AtomicI32::new(0),
+            drain_checked: Mutex::new(None),
             tls_enabled,
             debug_enabled,
             fetcher: ArticleFetcher::new(nntp_host),
@@ -1207,6 +1213,10 @@ impl NzbgetRsStreamRepairCtrl {
         counters: &mut RunCounters,
         left_to_borrow: &[bool],
     ) {
+        if self.live_mode {
+            self.drained_workers
+                .store(stream_fetch_worker_count(opts.primary_connections), Ordering::SeqCst);
+        }
         self.batch_fetcher.set_worker_count(if self.live_mode {
             if self.parallel_live_fetch.load(Ordering::SeqCst) {
                 // Half the connections only while a dead volume is left to borrow: a later
@@ -1649,6 +1659,7 @@ impl NzbgetRsStreamRepairCtrl {
                     // Still asks the queue for new dead volumes while a volume finishes, so
                     // the yield is raised as soon as one turns up.
                     let new_dead = self.ctrl.yield_for_new_dead(self.q);
+                    self.ctrl.widen_when_drained(self.q);
                     self.ctrl.host_is_stopped(self.q) || (new_dead && self.ctrl.yield_stops_now())
                 }
 
@@ -1751,6 +1762,9 @@ impl NzbgetRsStreamRepairCtrl {
                 }
 
                 fn next_donor_prefetch(&mut self) -> Option<FetchedDonorArticle> {
+                    // A wave drains its batch here without asking `is_stopped`: the download
+                    // ending during it must still widen it.
+                    self.ctrl.widen_when_drained(self.q);
                     let started = std::time::Instant::now();
                     let fetched = self.ctrl.batch_fetcher.next();
                     {
@@ -2532,6 +2546,47 @@ impl NzbgetRsStreamRepairCtrl {
         self.print_message(q, MessageKind::Info, &msg);
         self.yielding.store(true, Ordering::SeqCst);
         true
+    }
+
+    /// A live repair fetches with few workers so the download keeps its connections. Once the
+    /// download has nothing left to fetch (it holds only paused par2 files), those connections
+    /// are idle while extraction waits on the repair: A2's last wave on 6790 borrowed 182 MB
+    /// across the download end with 15 of 60 connections, at 6 MB/s, and was most of the 40 s
+    /// wait. The wave running now takes the workers of a repair after the download at once,
+    /// and so does every later pass. The queue is asked at most every `YIELD_CHECK`.
+    fn widen_when_drained(&self, q: JobQueue<'_>) {
+        let want = self.drained_workers.load(Ordering::SeqCst);
+        if !self.live_mode || want <= self.batch_fetcher.worker_count() {
+            return;
+        }
+        {
+            let mut checked = self.drain_checked.lock().unwrap_or_else(|e| e.into_inner());
+            let now = std::time::Instant::now();
+            if checked.is_some_and(|t| now.duration_since(t) < YIELD_CHECK) {
+                return;
+            }
+            *checked = Some(now);
+        }
+        let host = q.host;
+        let drained = host.with_locked_queue(|dq_ptr| {
+            let nzb = host.queue_find_by_id(dq_ptr, q.nzb_id());
+            // Only par2 files held back: a data file paused means the user paused the
+            // download, which goes on when resumed.
+            !nzb.is_none()
+                && (0..host.nzb_file_len(nzb)).all(|i| {
+                    let f = host.file_snap(host.nzb_file_at(nzb, i));
+                    f.paused && f.par_file
+                })
+        });
+        if !drained {
+            return;
+        }
+        self.parallel_live_fetch.store(true, Ordering::SeqCst);
+        self.batch_fetcher.raise_worker_count(want);
+        let msg = format!(
+            "The download has nothing left to fetch: the live repair now fetches with {want} workers"
+        );
+        self.print_message(q, MessageKind::Info, msg.as_bytes());
     }
 
     fn look_again(&self, q: JobQueue<'_>) -> (Vec<Vec<u8>>, Vec<(Vec<u8>, Vec<(i64, i64)>)>) {

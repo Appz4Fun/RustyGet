@@ -62,6 +62,8 @@ pub struct Plan {
     pub packed_size: i64,
     /// Where those bytes start in the volume (after its headers).
     pub data_offset: i64,
+    /// The set's last volume: its part closes the file and no volume follows it.
+    pub last: bool,
 }
 
 /// Bytes a RAR5 volume number takes in the main header (a vint).
@@ -99,6 +101,9 @@ pub enum StopReason {
     NoTemplate { volume: usize },
     /// The dead volume may be the set's (shorter) last one.
     MaybeLast { volume: usize },
+    /// The dead volume would be the set's last, and no par2 length shows it holds nothing
+    /// after the inner file's end (another member behind it would be lost).
+    LastNotProven { volume: usize, par2_length: Option<i64>, expected: i64 },
     /// The nzb lists a size that does not fit the sibling's layout.
     SizeMismatch { volume: usize, encoded_size: i64, expected: i64 },
     /// The dead volume would end past the inner file.
@@ -118,6 +123,15 @@ impl std::fmt::Display for StopReason {
                 write!(f, "no readable sibling gives volume {volume}'s layout")
             }
             Self::MaybeLast { volume } => write!(f, "volume {volume} may be the set's last"),
+            Self::LastNotProven { volume, par2_length: None, .. } => write!(
+                f,
+                "volume {volume} would be the set's last, and no par2 file gives its length"
+            ),
+            Self::LastNotProven { volume, par2_length: Some(len), expected } => write!(
+                f,
+                "volume {volume} would be the set's last, but par2 lists it at {len} bytes, not \
+                 {expected}: it holds more than the inner file's end"
+            ),
             Self::SizeMismatch { volume, encoded_size, expected } => write!(
                 f,
                 "volume {volume} is listed at {encoded_size} bytes, which does not fit a \
@@ -134,7 +148,24 @@ impl std::fmt::Display for StopReason {
 }
 
 /// [`plan`], plus why planning stopped before the end of `volumes`, if it did. For the log.
+/// Never plans a dead last volume: see [`plan_with_last`].
 pub fn plan_with_stop(volumes: &[VolumeState], inner_size: i64) -> (Vec<Plan>, Option<StopReason>) {
+    plan_with_last(volumes, inner_size, None)
+}
+
+/// How far a rebuilt last volume may be off its par2 length: its header's size fields can
+/// shrink a byte or two with the shorter part. Another member behind the inner file needs a
+/// header of its own, well over this.
+const LAST_LENGTH_SLACK: i64 = 8;
+
+/// [`plan_with_stop`], also planning a dead last volume the inner file ends in when
+/// `last_length` (the volume's exact length, from par2) shows it holds that end and nothing
+/// more: a member after it would otherwise be dropped without a word.
+pub fn plan_with_last(
+    volumes: &[VolumeState],
+    inner_size: i64,
+    last_length: Option<i64>,
+) -> (Vec<Plan>, Option<StopReason>) {
     let mut out = Vec::new();
     let Some(VolumeState::Readable(first)) = volumes.first() else {
         return (out, Some(StopReason::FirstNotReadable));
@@ -150,28 +181,40 @@ pub fn plan_with_stop(volumes: &[VolumeState], inner_size: i64) -> (Vec<Plan>, O
                 let Some((template, g)) = template_for(volumes, i) else {
                     return (out, Some(StopReason::NoTemplate { volume }));
                 };
-                // The last volume known may be the set's last (shorter, closing the file): it
-                // is planned only when the inner file goes on past it.
-                if i == last && offset + g.packed_size >= inner_size {
+                // The last volume listed holds what is left of the inner file when the file
+                // ends inside it: the set's last volume, its part shorter, closing the file.
+                // Only RAR5 is rebuilt so (its last part goes without a checksum); a RAR 1.5-4
+                // last part must carry the whole file's checksum, which is not known.
+                let closes = i == last && offset + g.packed_size >= inner_size;
+                if closes && (g.version != 5 || offset >= inner_size) {
                     return (out, Some(StopReason::MaybeLast { volume }));
                 }
-                let size = g.data_offset + g.packed_size + g.tail_len();
+                let packed = if closes { inner_size - offset } else { g.packed_size };
+                let size = g.data_offset + packed + g.tail_len();
                 let encoded_size = *encoded_size;
-                if encoded_size > 0 && (encoded_size < size || encoded_size > size + size / 16) {
+                // yEnc's own lines weigh more in a short last volume: a little slack on top.
+                let slack = size / 16 + if closes { 1024 } else { 0 };
+                if encoded_size > 0 && (encoded_size < size || encoded_size > size + slack) {
                     let stop = StopReason::SizeMismatch { volume, encoded_size, expected: size };
                     return (out, Some(stop));
                 }
-                if g.packed_size <= 0 || offset + g.packed_size > inner_size {
+                if packed <= 0 || offset + packed > inner_size {
                     return (out, Some(StopReason::PastInnerEnd { volume }));
+                }
+                if closes && !last_length.is_some_and(|len| (len - size).abs() <= LAST_LENGTH_SLACK) {
+                    let stop =
+                        StopReason::LastNotProven { volume, par2_length: last_length, expected: size };
+                    return (out, Some(stop));
                 }
                 out.push(Plan {
                     index: i,
                     template,
                     inner_offset: offset,
-                    packed_size: g.packed_size,
+                    packed_size: packed,
                     data_offset: g.data_offset,
+                    last: closes,
                 });
-                offset += g.packed_size;
+                offset += packed;
             }
         }
         if offset > inner_size {
@@ -332,7 +375,9 @@ fn shifted_volume_number(number: u64, index: usize, template: usize) -> Option<u
 /// the last volume still checks the whole file. A RAR 1.5-4 header always has the field:
 /// without `part_crc` it carries 0, which a persistent session opted in with
 /// `ProgressiveOptions::rar4_unknown_part_crc` takes as "not known yet" for a part that
-/// continues in the next volume (every rebuilt part does). Records
+/// continues in the next volume (every rebuilt part does). With `last` the volume is the
+/// set's last (RAR5 only): its part closes the file, its end header says no volume follows,
+/// and `part_crc` is the whole file's CRC32, which a last part stores. Records
 /// that point at other places in the sibling (RAR5's locator and quick-open data, RAR 1.5-4's
 /// recovery record and archive checksum) are left out: they describe the sibling, and an
 /// extraction does not need them. Encrypted parts and parts with another hash than CRC32 are
@@ -345,9 +390,14 @@ pub fn synthesize_frame(
     index: usize,
     packed: u64,
     part_crc: Option<u32>,
+    last: bool,
 ) -> Result<(Vec<u8>, Vec<u8>), FrameError> {
     match version {
-        5 => rar5::frame(head, tail, template, index, packed, part_crc),
+        5 => rar5::frame(head, tail, template, index, packed, part_crc, last),
+        3 if last => Err(FrameError::Sibling {
+            format: "RAR4",
+            what: "a last volume needs the whole file's checksum",
+        }),
         3 => rar4::frame(
             head,
             tail,
@@ -359,6 +409,12 @@ pub fn synthesize_frame(
         ),
         v => Err(FrameError::UnsupportedVersion(v)),
     }
+}
+
+/// The part checksum stored by the file header that ends RAR5 `head` (a volume's bytes in
+/// front of a part): CRC32 of the part for a part that goes on in the next volume.
+pub fn rar5_part_crc(head: &[u8]) -> Option<u32> {
+    rar5::part_crc(head)
 }
 
 /// `head` with its part checksum set to `part_crc`, for a volume handed over before its
@@ -439,6 +495,7 @@ pub fn check_frame(
     tail: &[u8],
     packed: u64,
     inner_name: &[u8],
+    last: bool,
 ) -> Result<(), FrameError> {
     struct Frame<'a> {
         head: &'a [u8],
@@ -490,7 +547,7 @@ pub fn check_frame(
         || !f.stored
         || f.encrypted_data
         || !f.split_before
-        || !f.split_after
+        || f.split_after == last
         || f.packed_size != packed as i64
         || f.data_offset != head.len() as i64
     {
@@ -522,6 +579,7 @@ mod rar5 {
     const HEAD_ENDARC: u64 = 5;
     const EXTRA_CRYPT: u64 = 1;
     const EXTRA_HASH: u64 = 2;
+    const EHFL_NEXTVOLUME: u64 = 0x01;
 
     pub(super) fn vint(b: &[u8], p: &mut usize) -> Option<u64> {
         let mut v = 0u64;
@@ -608,6 +666,24 @@ mod rar5 {
             q += 4;
         }
         Some((fflags & FHFL_CRC32 != 0).then_some(q).filter(|&q| q + 4 <= h.len()))
+    }
+
+    /// The CRC32 stored by the file header that ends `head` (a volume's bytes in front of a
+    /// part): the part's own header, behind any other files (an nfo, say) and their data.
+    pub(super) fn part_crc(head: &[u8]) -> Option<u32> {
+        if !head.starts_with(SIG) {
+            return None;
+        }
+        let mut p = SIG.len();
+        while p < head.len() {
+            let b = block(head, &mut p)?;
+            if b.kind == HEAD_FILE && p == head.len() {
+                let at = crc32_field(b.header, b.body)??;
+                return Some(u32::from_le_bytes(b.header.get(at..at + 4)?.try_into().ok()?));
+            }
+            p = p.checked_add(usize::try_from(b.data_len).ok()?)?;
+        }
+        None
     }
 
     /// Quick-open data is a run of records, each a CRC32 over its size and body, then the
@@ -927,6 +1003,7 @@ mod rar5 {
         index: usize,
         packed: u64,
         part_crc: Option<u32>,
+        last: bool,
     ) -> Result<(Vec<u8>, Vec<u8>), FrameError> {
         let bad = |what: &'static str| FrameError::Sibling { format: "RAR5", what };
         if !head.starts_with(SIG) {
@@ -1007,7 +1084,12 @@ mod rar5 {
                     }
                     let mut rebuilt = Vec::new();
                     put_vint(&mut rebuilt, 2);
-                    let flags = (b.flags | HFL_DATA | HFL_SPLIT_BEFORE | HFL_SPLIT_AFTER)
+                    let split = if last {
+                        HFL_SPLIT_BEFORE
+                    } else {
+                        HFL_SPLIT_BEFORE | HFL_SPLIT_AFTER
+                    };
+                    let flags = ((b.flags & !HFL_SPLIT_AFTER) | HFL_DATA | split)
                         & if extra.is_empty() {
                             !HFL_EXTRA
                         } else {
@@ -1058,7 +1140,21 @@ mod rar5 {
             let Some(b) = block(tail, &mut p) else { break };
             if b.kind == HEAD_ENDARC {
                 let mut e = Vec::new();
-                emit(&mut e, b.header);
+                if last {
+                    // The last volume's end header says no volume follows.
+                    let mut q = b.body;
+                    let end_flags = vint(b.header, &mut q).ok_or_else(|| bad("end header"))?;
+                    if b.flags & (HFL_EXTRA | HFL_DATA) != 0 || q != b.header.len() {
+                        return Err(bad("end header with more than its flags"));
+                    }
+                    let mut h = Vec::new();
+                    put_vint(&mut h, HEAD_ENDARC);
+                    put_vint(&mut h, b.flags);
+                    put_vint(&mut h, end_flags & !EHFL_NEXTVOLUME);
+                    emit(&mut e, &h);
+                } else {
+                    emit(&mut e, b.header);
+                }
                 end = Some(e);
                 break;
             }
@@ -1414,21 +1510,73 @@ mod tests {
                     template: 1,
                     inner_offset: 1799,
                     packed_size: 899,
-                    data_offset: 61
+                    data_offset: 61,
+                    last: false,
                 },
                 Plan {
                     index: 3,
                     template: 1,
                     inner_offset: 2698,
                     packed_size: 899,
-                    data_offset: 61
+                    data_offset: 61,
+                    last: false,
                 },
             ]
         );
     }
 
     #[test]
-    fn stops_at_unknown_and_never_plans_first_or_a_closing_last() {
+    fn the_part_crc_is_the_header_in_front_of_the_part_not_an_earlier_files() {
+        fn vint(out: &mut Vec<u8>, mut v: u64) {
+            loop {
+                let c = (v & 0x7f) as u8;
+                v >>= 7;
+                out.push(c | if v != 0 { 0x80 } else { 0 });
+                if v == 0 {
+                    break;
+                }
+            }
+        }
+        fn emit(out: &mut Vec<u8>, h: &[u8]) {
+            let mut sized = Vec::new();
+            vint(&mut sized, h.len() as u64);
+            sized.extend_from_slice(h);
+            out.extend_from_slice(&crc32fast::hash(&sized).to_le_bytes());
+            out.extend_from_slice(&sized);
+        }
+        // A stored file header with `data` bytes of data and part checksum `crc`.
+        let file = |name: &[u8], data: u64, crc: u32| {
+            let mut h = Vec::new();
+            vint(&mut h, 2); // file header
+            vint(&mut h, 0x02); // has data
+            vint(&mut h, data);
+            vint(&mut h, 0x04); // CRC32 present
+            vint(&mut h, data); // unpacked size
+            vint(&mut h, 0x20); // attributes
+            h.extend_from_slice(&crc.to_le_bytes());
+            vint(&mut h, 0); // stored
+            vint(&mut h, 0); // Windows
+            vint(&mut h, name.len() as u64);
+            h.extend_from_slice(name);
+            h
+        };
+        let mut head = b"Rar!\x1a\x07\x01\x00".to_vec();
+        let mut main = Vec::new();
+        vint(&mut main, 1);
+        vint(&mut main, 0);
+        vint(&mut main, 0x01); // volume
+        emit(&mut head, &main);
+        emit(&mut head, &file(b"x.nfo", 3, 0x1111_1111));
+        head.extend_from_slice(b"nfo");
+        emit(&mut head, &file(b"x.mkv", 1000, 0x2222_2222));
+        assert_eq!(rar5_part_crc(&head), Some(0x2222_2222));
+        // Bytes past the part's header: not a head that ends in front of a part.
+        head.push(0);
+        assert_eq!(rar5_part_crc(&head), None);
+    }
+
+    #[test]
+    fn stops_at_unknown_never_plans_first_and_closes_with_a_dead_last() {
         let v = vec![
             first(1000, 60, 900),
             g(1000, 61, 899),
@@ -1438,10 +1586,34 @@ mod tests {
             g(10, 1, 1),
         ];
         assert!(plan(&v, 1 << 40).is_empty());
-        // A dead volume last of those known: planned only while the file goes on past it.
+        // A dead volume last of those listed: while the file goes on past it, a middle
+        // volume; when the file ends inside it, the set's last, holding what is left.
         let v = vec![first(1000, 60, 900), g(1000, 61, 899), DEAD];
-        assert!(plan(&v, 900 + 899 + 899).is_empty());
+        let last = |packed| Plan {
+            index: 2,
+            template: 1,
+            inner_offset: 1799,
+            packed_size: packed,
+            data_offset: 61,
+            last: true,
+        };
+        // The last volume's size: 61 header bytes, the part, the end header.
+        let len = |packed: i64| Some(61 + packed + (1000 - 61 - 899));
+        assert_eq!(plan_with_last(&v, 900 + 899 + 899, len(899)).0, vec![last(899)]);
+        assert_eq!(plan_with_last(&v, 900 + 899 + 500, len(500)).0, vec![last(500)]);
+        // Without par2's word, or with a length that leaves room for another member behind
+        // the inner file, the last volume stays dead.
         assert!(plan(&v, 900 + 899 + 500).is_empty());
+        let longer = len(500).map(|l| l + 60);
+        assert_eq!(
+            plan_with_last(&v, 900 + 899 + 500, longer).1,
+            Some(StopReason::LastNotProven {
+                volume: 3,
+                par2_length: longer,
+                expected: len(500).unwrap()
+            })
+        );
+        assert_eq!(plan_with_stop(&v, 900 + 899).1, Some(StopReason::MaybeLast { volume: 3 }));
         assert_eq!(
             plan(&v, 900 + 899 + 900),
             vec![Plan {
@@ -1449,7 +1621,8 @@ mod tests {
                 template: 1,
                 inner_offset: 1799,
                 packed_size: 899,
-                data_offset: 61
+                data_offset: 61,
+                last: false,
             }]
         );
         let v = vec![DEAD, g(1000, 61, 899), g(1000, 61, 899)];
@@ -1687,8 +1860,8 @@ mod tests {
         let data: Vec<u8> = (0..len as u32).map(|i| (i * 7) as u8).collect();
         let crc = crc32fast::hash(&data);
         // Sibling is volume 1 (number 1); rebuild volume 5.
-        let (h, t) = synthesize_frame(5, head, tail, 1, 5, len as u64, Some(crc)).unwrap();
-        check_frame(&h, &t, len as u64, b"testfile5.dat").unwrap();
+        let (h, t) = synthesize_frame(5, head, tail, 1, 5, len as u64, Some(crc), false).unwrap();
+        check_frame(&h, &t, len as u64, b"testfile5.dat", false).unwrap();
         let mut whole = h.clone();
         whole.extend_from_slice(&data);
         whole.extend_from_slice(&t);
@@ -1714,11 +1887,11 @@ mod tests {
         // extraction already placed the data at the head's length.
         let (b, at, len) = stored_rar5_middle();
         let (head, tail) = (&b[..at], &b[at + len..]);
-        let (h, t) = synthesize_frame(5, head, tail, 1, 5, len as u64, None).unwrap();
-        check_frame(&h, &t, len as u64, b"testfile5.dat").unwrap();
-        let (with_crc, _) = synthesize_frame(5, head, tail, 1, 5, len as u64, Some(7)).unwrap();
+        let (h, t) = synthesize_frame(5, head, tail, 1, 5, len as u64, None, false).unwrap();
+        check_frame(&h, &t, len as u64, b"testfile5.dat", false).unwrap();
+        let (with_crc, _) = synthesize_frame(5, head, tail, 1, 5, len as u64, Some(7), false).unwrap();
         assert_eq!(h.len() + 4, with_crc.len());
-        assert_eq!(synthesize_frame(5, head, tail, 1, 5, len as u64, None).unwrap().0, h);
+        assert_eq!(synthesize_frame(5, head, tail, 1, 5, len as u64, None, false).unwrap().0, h);
         let mut whole = h.clone();
         whole.extend(std::iter::repeat_n(0u8, len));
         whole.extend_from_slice(&t);
@@ -1737,11 +1910,11 @@ mod tests {
         let len = f.packed_size as usize;
         let mut head = b[..at].to_vec();
         head[7 + 13 + 25] = 0x30;
-        let (h, t) = synthesize_frame(3, &head, &b[at + len..], 1, 4, len as u64, None).unwrap();
-        let (h2, _) = synthesize_frame(3, &head, &b[at + len..], 1, 4, len as u64, Some(7)).unwrap();
+        let (h, t) = synthesize_frame(3, &head, &b[at + len..], 1, 4, len as u64, None, false).unwrap();
+        let (h2, _) = synthesize_frame(3, &head, &b[at + len..], 1, 4, len as u64, Some(7), false).unwrap();
         // Same layout as with a checksum, so holes recorded against it stay valid.
         assert_eq!(h.len(), h2.len());
-        check_frame(&h, &t, len as u64, &f.filename).unwrap();
+        check_frame(&h, &t, len as u64, &f.filename, false).unwrap();
         let mut whole = h.clone();
         whole.extend_from_slice(&vec![0u8; len]);
         whole.extend_from_slice(&t);
@@ -1795,7 +1968,7 @@ mod tests {
         let (_, files) = parse(&b);
         let at = files[0].data_offset as usize;
         let len = files[0].packed_size as usize;
-        let err = synthesize_frame(5, &b[..at], &b[at + len..], 1, 2, len as u64, Some(0)).unwrap_err();
+        let err = synthesize_frame(5, &b[..at], &b[at + len..], 1, 2, len as u64, Some(0), false).unwrap_err();
         assert_eq!(err, FrameError::Sibling { format: "RAR5", what: "compressed part" });
     }
 
@@ -1814,8 +1987,8 @@ mod tests {
         head[file_hdr + 25] = 0x30;
         let data = vec![0xabu8; len];
         let crc = crc32fast::hash(&data);
-        let (h, t) = synthesize_frame(3, &head, &b[at + len..], 1, 4, len as u64, Some(crc)).unwrap();
-        check_frame(&h, &t, len as u64, &f.filename).unwrap();
+        let (h, t) = synthesize_frame(3, &head, &b[at + len..], 1, 4, len as u64, Some(crc), false).unwrap();
+        check_frame(&h, &t, len as u64, &f.filename, false).unwrap();
         let mut whole = h.clone();
         whole.extend_from_slice(&data);
         whole.extend_from_slice(&t);

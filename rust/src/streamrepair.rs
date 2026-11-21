@@ -9351,6 +9351,33 @@ pub(crate) fn rar_part_number(name: &[u8]) -> Option<(Vec<u8>, u32, usize, Vec<u
     Some((prefix.to_vec(), n, digits, name[name.len() - 4..].to_vec()))
 }
 
+/// `name`'s exact length as a par2 file in `dest_dir` lists it, from the smallest par2 files
+/// there (lost articles leave gaps, which the parser skips). `None` when none names it.
+fn par2_length_of(dest_dir: &[u8], name: &[u8]) -> Option<i64> {
+    const MAX_READ: i64 = 64 << 20;
+    let mut par2s: Vec<(i64, Vec<u8>)> = crate::fsops::list_dir_entries(dest_dir)
+        .into_iter()
+        .filter(|f| f.to_ascii_lowercase().ends_with(b".par2"))
+        .map(|f| {
+            let path = crate::artwritercore::article_writer_format_dest_file_path(
+                dest_dir,
+                std::path::MAIN_SEPARATOR as u8,
+                &f,
+            );
+            (file_size_bytes(&path), path)
+        })
+        .filter(|(size, _)| *size > 0 && *size <= MAX_READ)
+        .collect();
+    par2s.sort();
+    par2s.iter().take(3).find_map(|(_, path)| {
+        let data = std::fs::read(crate::fsops::path(path)).ok()?;
+        crate::twin::par2_sigs(&data).into_iter().find_map(|sig| {
+            let local = crate::parrenamer::translate_filename_from_par2_to_local(&sig.name);
+            local.eq_ignore_ascii_case(name).then(|| i64::try_from(sig.length).ok()).flatten()
+        })
+    })
+}
+
 /// Finds whole dead volumes of stored RAR sets, plans where their inner bytes belong (see
 /// [`crate::deadvolume::plan`]) and adds a repair set that borrows those bytes into scratch
 /// files, one pseudo member per dead volume.
@@ -9593,9 +9620,16 @@ fn plan_dead_fills(
         else {
             continue;
         };
-        let (all_plans, stop) = crate::deadvolume::plan_with_stop(&states, inner_size);
+        // A dead last volume is rebuilt only when par2's length shows it ends with the inner
+        // file: another member behind it would be dropped.
+        let last_length = matches!(states.last(), Some(VolumeState::Dead { .. }))
+            .then(|| par2_length_of(dest_dir, &volume_name(max)))
+            .flatten();
+        let (all_plans, stop) =
+            crate::deadvolume::plan_with_last(&states, inner_size, last_length);
         let plans: Vec<crate::deadvolume::Plan> = all_plans
-            .into_iter()
+            .iter()
+            .copied()
             .filter(|p| !crate::postproc::direct_unpack_has_virtual(&path_of(&volume_name(p.index as u32 + 1))))
             .collect();
         if plans.is_empty() && any_dead {
@@ -9643,8 +9677,9 @@ fn plan_dead_fills(
                     offset += g.packed_size;
                 }
                 VolumeState::Dead { .. } => {
-                    let Some(p) = crate::deadvolume::plan(&states, inner_size)
-                        .into_iter()
+                    let Some(p) = all_plans
+                        .iter()
+                        .copied()
                         .find(|p| p.index == i)
                     else {
                         break;
@@ -9757,6 +9792,33 @@ fn plan_dead_fills(
                             index: i,
                             version: template.version,
                             packed: p.packed_size,
+                            last: p.last,
+                            parts_before: if p.last {
+                                (0..i)
+                                    .map(|j| match &states[j] {
+                                        VolumeState::Readable(g) => Some(WholePart::Volume {
+                                            path: path_of(&volume_name(j as u32 + 1)),
+                                            head_len: g.data_offset,
+                                            packed: g.packed_size,
+                                        }),
+                                        _ => set_fills
+                                            .iter()
+                                            .find(|f: &&DeadFill| f.index == j)
+                                            .map(|f| WholePart::Scratch {
+                                                member: f.member,
+                                                packed: f.packed,
+                                            })
+                                            .or_else(|| {
+                                                let path = path_of(&volume_name(j as u32 + 1));
+                                                crate::postproc::direct_unpack_has_virtual(&path)
+                                                    .then_some(WholePart::Virtual { path })
+                                            }),
+                                    })
+                                    .collect::<Option<Vec<_>>>()
+                                    .unwrap_or_default()
+                            } else {
+                                Vec::new()
+                            },
                             template_data_offset: template.data_offset,
                             template_packed: template.packed_size,
                             inner_name: inner_name.clone(),
@@ -9764,7 +9826,9 @@ fn plan_dead_fills(
                             offered,
                             offer_failed: false,
                             // Restored exactly only in RAR5 (see `write_back_volume`).
-                            on_disk_target: (template.version == 5 && head_lost.contains_key(&i))
+                            on_disk_target: (template.version == 5
+                                && !p.last
+                                && head_lost.contains_key(&i))
                                 .then(|| member_targets.get(members_by_index[i] as usize).copied())
                                 .flatten()
                                 .filter(|&t| t >= 0)
@@ -9974,6 +10038,17 @@ impl Drop for CrossPackRepairSession {
 }
 
 /// One dead volume being borrowed into a scratch file.
+/// One part of the inner file in front of a rebuilt last volume.
+#[derive(Clone, Debug)]
+enum WholePart {
+    /// A volume on disk: its part checksum is in its file header (`head_len` bytes long).
+    Volume { path: Vec<u8>, head_len: i64, packed: i64 },
+    /// A dead volume rebuilt from borrowed bytes in this scratch member.
+    Scratch { member: i32, packed: i64 },
+    /// A dead volume an earlier pass rebuilt and handed to direct unpack already.
+    Virtual { path: Vec<u8> },
+}
+
 #[derive(Clone, Debug)]
 struct DeadFill {
     /// Pseudo member (the scratch file) in `set_members`, and its entry in `target_holes`.
@@ -9987,6 +10062,12 @@ struct DeadFill {
     index: usize,
     version: i32,
     packed: i64,
+    /// The set's last volume (see [`crate::deadvolume::Plan::last`]).
+    last: bool,
+    /// For the last volume: every part in front of its own, in order, so the whole file's
+    /// CRC32 its header stores can be put together (see `whole_file_crc`). Empty otherwise,
+    /// or when a part in front cannot be accounted for (the volume is then not rebuilt).
+    parts_before: Vec<WholePart>,
     template_data_offset: i64,
     template_packed: i64,
     inner_name: Vec<u8>,
@@ -10591,6 +10672,7 @@ impl CrossPackRepairSession {
                     .target_holes
                     .get(d.target)
                     .is_some_and(|h| h.is_empty())
+                || (d.last && !self.parts_before_borrowed(&d))
             {
                 continue;
             }
@@ -10657,7 +10739,8 @@ impl CrossPackRepairSession {
                 continue;
             };
             let left: i64 = holes.iter().map(|h| h.size).sum();
-            if d.done || holes.is_empty() || d.offer_failed || d.offered == Some(left) {
+            // A last volume carries the whole file's checksum, known only once it is borrowed.
+            if d.done || d.last || holes.is_empty() || d.offer_failed || d.offered == Some(left) {
                 continue;
             }
             let holes = holes.clone();
@@ -10877,6 +10960,83 @@ impl CrossPackRepairSession {
         )
     }
 
+    /// Whether every dead volume in front of last volume `d` this session borrows into is
+    /// borrowed whole: its whole-file checksum takes in their bytes, so it waits for them.
+    fn parts_before_borrowed(&self, d: &DeadFill) -> bool {
+        d.parts_before.iter().all(|part| match part {
+            WholePart::Scratch { member, .. } => self
+                .dead_fills
+                .iter()
+                .find(|f| f.member == *member)
+                .and_then(|f| self.target_holes.get(f.target))
+                .is_some_and(|h| h.is_empty()),
+            _ => true,
+        })
+    }
+
+    /// The whole inner file's CRC32 for last volume `d`, whose borrowed bytes `own` holds: the
+    /// part checksums the volumes in front store, with the CRC32 of the bytes borrowed into
+    /// dead ones, chained. Only the borrowed bytes vouch for themselves; every hole patched
+    /// into a volume on disk is checked against its original part checksum by the extraction.
+    fn whole_file_crc(&self, d: &DeadFill, own: &mut std::fs::File) -> Result<u32, String> {
+        use std::io::Read;
+        fn hash_file(f: &mut std::fs::File, len: i64) -> Result<crc32fast::Hasher, String> {
+            let mut hasher = crc32fast::Hasher::new();
+            let mut buf = vec![0u8; 1 << 20];
+            let mut total = 0i64;
+            loop {
+                let n = f.read(&mut buf).map_err(|e| format!("borrowed data: {e}"))?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+                total += n as i64;
+            }
+            if total != len {
+                return Err(format!("borrowed {total} bytes, expected {len}"));
+            }
+            Ok(hasher)
+        }
+        if d.parts_before.len() != d.index {
+            return Err("the parts in front of the last volume are not all known".into());
+        }
+        let mut whole = crc32fast::Hasher::new();
+        for part in &d.parts_before {
+            let next = match part {
+                WholePart::Volume { path, head_len, packed } => {
+                    let mut head = vec![0u8; usize::try_from(*head_len).map_err(|_| "head length")?];
+                    std::fs::File::open(crate::fsops::path(path))
+                        .and_then(|mut f| f.read_exact(&mut head))
+                        .map_err(|e| format!("volume in front: {e}"))?;
+                    let crc = crate::deadvolume::rar5_part_crc(&head)
+                        .ok_or("a volume in front stores no part checksum")?;
+                    crc32fast::Hasher::new_with_initial_len(crc, *packed as u64)
+                }
+                WholePart::Virtual { path } => {
+                    let v = crate::postproc::direct_unpack_virtual(self.dead_nzb_id, path)
+                        .filter(|v| v.holes.is_empty())
+                        .ok_or("a volume in front rebuilt earlier is not complete")?;
+                    let mut f = std::fs::File::open(&v.data)
+                        .map_err(|e| format!("borrowed data in front: {e}"))?;
+                    hash_file(&mut f, v.data_len as i64)?
+                }
+                WholePart::Scratch { member, packed } => {
+                    let path = crate::artwritercore::article_writer_format_dest_file_path(
+                        &self.dest_dir,
+                        std::path::MAIN_SEPARATOR as u8,
+                        &self.set_members[*member as usize].name,
+                    );
+                    let mut f = std::fs::File::open(crate::fsops::path(&path))
+                        .map_err(|e| format!("borrowed data in front: {e}"))?;
+                    hash_file(&mut f, *packed)?
+                }
+            };
+            whole.combine(&next);
+        }
+        whole.combine(&hash_file(own, d.packed)?);
+        Ok(whole.finalize())
+    }
+
     /// Rebuilds dead volume `d` around its scratch file. `holes` are the scratch file's ranges
     /// not borrowed yet; with any, the volume is handed over early and needs a RAR5 part
     /// without a part checksum. A RAR5 volume never carries one, so a volume handed over early
@@ -10901,7 +11061,12 @@ impl CrossPackRepairSession {
         // without one, a RAR 1.5-4 part carries 0, which the persistent session skips
         // (`rar4_unknown_part_crc`). The member checksum in the last volume still checks
         // the whole file.
-        let part_crc = if d.version == 5 || !holes.is_empty() {
+        let part_crc = if d.last {
+            if !holes.is_empty() {
+                return Err("a last volume is handed over only once borrowed".into());
+            }
+            Some(self.whole_file_crc(d, &mut f)?)
+        } else if d.version == 5 || !holes.is_empty() {
             let total = f
                 .metadata()
                 .map_err(|e| format!("borrowed data: {e}"))?
@@ -10942,9 +11107,10 @@ impl CrossPackRepairSession {
             d.index,
             d.packed as u64,
             part_crc,
+            d.last,
         )
         .map_err(|e| e.to_string())?;
-        crate::deadvolume::check_frame(&head, &tail, d.packed as u64, &d.inner_name)
+        crate::deadvolume::check_frame(&head, &tail, d.packed as u64, &d.inner_name, d.last)
             .map_err(|e| e.to_string())?;
         let at = head.len() as u64;
         Ok(crate::deadvolume::VirtualVolume {
@@ -12589,6 +12755,7 @@ mod tests {
             inner_offset: 6000,
             packed_size: 900,
             data_offset: 80,
+            last: false,
         };
         // Lost: the headers and the data's first 20 bytes, one range in the middle, and a
         // range in the tail (not part of the data).

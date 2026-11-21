@@ -796,6 +796,22 @@ mod rar5 {
     /// record is. `None` unless the tail ends in a sound end block right behind a sound
     /// quick-open record (no recovery record), whose copied headers, each checked, run with
     /// their data back to back from the main header to the record.
+    /// Whether a file header's compression information marks it solid.
+    fn solid_file(b: &Block<'_>) -> Option<bool> {
+        let h = b.header;
+        let mut q = b.body;
+        let file_flags = vint(h, &mut q)?;
+        vint(h, &mut q)?; // unpacked size
+        vint(h, &mut q)?; // attributes
+        if file_flags & 0x02 != 0 {
+            q += 4; // modification time
+        }
+        if file_flags & 0x04 != 0 {
+            q += 4; // data CRC32
+        }
+        Some(vint(h, &mut q)? & 0x40 != 0)
+    }
+
     pub(super) fn head_from_tail(tail: &[u8], file_size: u64, index: usize) -> Option<Vec<u8>> {
         let base = file_size.checked_sub(tail.len() as u64)?;
         // The end block, then only padding.
@@ -831,7 +847,10 @@ mod rar5 {
             let len = vint(data, &mut q)? as usize;
             let header = data.get(q..q.checked_add(len)?).filter(|_| q + len == end)?;
             let (b, e) = checked_block(header, 0).filter(|(_, e)| *e == header.len())?;
-            if b.kind != HEAD_FILE {
+            // A solid archive sets a main-header flag the record does not keep: its head
+            // cannot be rebuilt exactly. (A locked archive's flag is lost the same way and
+            // shows nowhere; RAR's -k is rare.)
+            if b.kind != HEAD_FILE || solid_file(&b)? {
                 return None;
             }
             let _ = e;
@@ -840,6 +859,12 @@ mod rar5 {
         }
         cached.sort_by_key(|c| c.0);
         let first = cached.first()?;
+        // The volume number comes from the file name: only a later volume's first file goes
+        // on from the volume before, so the first volume and a later one cannot be mixed up.
+        let split_before = checked_block(first.1, 0)?.0.flags & HFL_SPLIT_BEFORE != 0;
+        if split_before != (index > 0) {
+            return None;
+        }
         // Back to back: each header, its data, the next header... up to the record.
         let mut at = first.0;
         for &(pos, header, data_len) in &cached {
@@ -1482,6 +1507,10 @@ mod tests {
         ] {
             assert!(head_back(&testdata(name), index).is_none(), "{name}");
         }
+        // A first volume taken for a later one, or the other way round: its first file
+        // does or does not go on from a volume before.
+        assert!(head_back(&testdata("rarrenamer/testfile5.part01.rar"), 1).is_none());
+        assert!(head_back(&testdata("rarrenamer/testfile5.part02.rar"), 0).is_none());
         // A flipped byte in the copied header fails its checksum.
         let mut b = testdata("deadvolume/out.part2.rar");
         let n = b.len();
@@ -1510,8 +1539,7 @@ mod tests {
         assert!(now[head_len as usize..4000].iter().all(|&c| c == 0));
         // Again: already there.
         assert_eq!(restore_head_from_tail(p, &[(0, 4000)], 2), Some(head_len));
-        // A wrong volume number makes another head, which cannot fill the same room exactly
-        // or disagrees with bytes that arrived behind a short hole.
+        // A wrong volume number disagrees with bytes that arrived behind a short hole.
         assert_eq!(restore_head_from_tail(p, &[(0, 10)], 1), None);
         let _ = std::fs::remove_dir_all(&dir);
     }

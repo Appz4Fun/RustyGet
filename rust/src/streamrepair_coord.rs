@@ -317,6 +317,39 @@ struct RunCounters {
     donor_dead: BTreeMap<Vec<u8>, bool>,
 }
 
+/// Fetches of one donor's borrow: how many went one at a time and how many in batches, and
+/// how long the repair waited on them, so a slow borrow tells whether the network or the
+/// repair itself held it up.
+#[derive(Debug, Default)]
+struct DonorFetchStats {
+    singles: u32,
+    batches: u32,
+    batch_parts: u32,
+    bytes: u64,
+    waited: std::time::Duration,
+}
+
+impl DonorFetchStats {
+    fn line(&self, donor: &[u8], elapsed: std::time::Duration, workers: i32) -> Vec<u8> {
+        let mut msg = b"Fetch cost of borrowing from ".to_vec();
+        msg.extend_from_slice(donor);
+        msg.extend_from_slice(
+            format!(
+                ": {:.1} MB in {:.1} s, waiting on the network {:.1} s; {} single fetch(es), {} batch(es) of {} article(s), {} worker(s)",
+                self.bytes as f64 / 1_000_000.0,
+                elapsed.as_secs_f64(),
+                self.waited.as_secs_f64(),
+                self.singles,
+                self.batches,
+                self.batch_parts,
+                workers,
+            )
+            .as_bytes(),
+        );
+        msg
+    }
+}
+
 pub struct NzbgetRsStreamRepairCtrl {
     live_mode: bool,
     /// Keys the repeated-line filter, so one job's lines never hide another's.
@@ -335,6 +368,8 @@ pub struct NzbgetRsStreamRepairCtrl {
     /// Dead volumes whose whole-file recreation a yielded pass skipped: a later pass still owes
     /// it, though the queue now marks them tried.
     recreate_owed: Mutex<std::collections::BTreeSet<Vec<u8>>>,
+    /// What borrowing from the current donor cost in fetches, logged after each donor.
+    fetch_stats: Mutex<DonorFetchStats>,
     tls_enabled: bool,
     debug_enabled: bool,
     fetcher: ArticleFetcher,
@@ -364,6 +399,7 @@ impl NzbgetRsStreamRepairCtrl {
             yielding: AtomicBool::new(false),
             finishing_volume: AtomicBool::new(false),
             recreate_owed: Mutex::new(Default::default()),
+            fetch_stats: Mutex::new(DonorFetchStats::default()),
             tls_enabled,
             debug_enabled,
             fetcher: ArticleFetcher::new(nntp_host),
@@ -1595,7 +1631,14 @@ impl NzbgetRsStreamRepairCtrl {
                     }
                     let df = self.donor_files.get(member_index as usize)?;
                     let msg_id = df.article_msg_ids.get(part_index as usize)?;
+                    let started = std::time::Instant::now();
                     let fetched = self.ctrl.fetcher.fetch(msg_id, &df.groups);
+                    {
+                        let mut st = self.ctrl.fetch_stats.lock().unwrap_or_else(|e| e.into_inner());
+                        st.singles += 1;
+                        st.bytes += fetched.data.len() as u64;
+                        st.waited += started.elapsed();
+                    }
                     Some(FetchedDonorArticle {
                         success: fetched.success,
                         offset: fetched.offset,
@@ -1622,11 +1665,23 @@ impl NzbgetRsStreamRepairCtrl {
                             }
                         }
                     }
+                    {
+                        let mut st = self.ctrl.fetch_stats.lock().unwrap_or_else(|e| e.into_inner());
+                        st.batches += 1;
+                        st.batch_parts += requests.len() as u32;
+                    }
                     self.ctrl.batch_fetcher.begin(requests);
                 }
 
                 fn next_donor_prefetch(&mut self) -> Option<FetchedDonorArticle> {
-                    let fetched = self.ctrl.batch_fetcher.next()?;
+                    let started = std::time::Instant::now();
+                    let fetched = self.ctrl.batch_fetcher.next();
+                    {
+                        let mut st = self.ctrl.fetch_stats.lock().unwrap_or_else(|e| e.into_inner());
+                        st.waited += started.elapsed();
+                        st.bytes += fetched.as_ref().map_or(0, |f| f.data.len() as u64);
+                    }
+                    let fetched = fetched?;
                     Some(FetchedDonorArticle {
                         success: fetched.success,
                         offset: fetched.offset,
@@ -1654,6 +1709,11 @@ impl NzbgetRsStreamRepairCtrl {
                             groups: Arc::clone(&df.groups),
                         })
                         .collect();
+                    {
+                        let mut st = self.ctrl.fetch_stats.lock().unwrap_or_else(|e| e.into_inner());
+                        st.batches += 1;
+                        st.batch_parts += requests.len() as u32;
+                    }
                     self.ctrl.batch_fetcher.begin(requests);
                 }
 
@@ -1736,6 +1796,9 @@ impl NzbgetRsStreamRepairCtrl {
             // The session clears this after each volume it borrows.
             self.finishing_volume
                 .store(session.has_pending_dead_fills(), Ordering::SeqCst);
+            *self.fetch_stats.lock().unwrap_or_else(|e| e.into_inner()) =
+                DonorFetchStats::default();
+            let donor_started = std::time::Instant::now();
             session.process_donor(
                 &donor.queued_filename,
                 &donor.info_name,
@@ -1747,6 +1810,18 @@ impl NzbgetRsStreamRepairCtrl {
                 &mut env,
             );
             self.finishing_volume.store(false, Ordering::SeqCst);
+            {
+                let st = self.fetch_stats.lock().unwrap_or_else(|e| e.into_inner());
+                if st.bytes > 0 {
+                    let line = st.line(
+                        &donor.info_name,
+                        donor_started.elapsed(),
+                        self.batch_fetcher.worker_count(),
+                    );
+                    drop(st);
+                    self.print_message(q, MessageKind::Info, &line);
+                }
+            }
             // A donor whose video was checked while dead volumes waited for it: the queue
             // stops keeping the download for it once it fails the check in a few runs. Live
             // repair never decompresses, so a donor holding its video compressed cannot lend
@@ -2696,6 +2771,22 @@ fn release_completed_holds(dest_dir: &[u8], targets: &[RepairTarget]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_fetch_cost_line_tells_network_from_repair_time() {
+        let st = DonorFetchStats {
+            singles: 3,
+            batches: 2,
+            batch_parts: 40,
+            bytes: 30_000_000,
+            waited: std::time::Duration::from_secs(9),
+        };
+        let line = String::from_utf8(st.line(b"Copy.05", std::time::Duration::from_secs(12), 8)).unwrap();
+        assert_eq!(
+            line,
+            "Fetch cost of borrowing from Copy.05: 30.0 MB in 12.0 s, waiting on the network 9.0 s; 3 single fetch(es), 2 batch(es) of 40 article(s), 8 worker(s)"
+        );
+    }
 
     #[test]
     fn a_yield_waits_for_the_dead_volume_being_borrowed() {

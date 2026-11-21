@@ -271,6 +271,16 @@ pub struct RsDeadDownloadEval {
 
 /// `QueueCoordinator::CheckDeadDownload` metrics (`QueueCoordinator.cpp`).
 #[allow(clippy::too_many_arguments)]
+/// Of `articles` covering `size` bytes, about how many are not par2 files' (`par_size` of
+/// the bytes): par2 articles are assumed as large as the others.
+fn data_articles(articles: i32, size: i64, par_size: i64) -> i32 {
+    if size <= 0 || par_size <= 0 {
+        return articles;
+    }
+    let data = (size - par_size).clamp(0, size);
+    ((articles.max(0) as i64) * data / size) as i32
+}
+
 pub fn eval_dead_download(
     current_success: i32,
     dupe_recovered: i32,
@@ -4943,10 +4953,17 @@ impl NzbgetRsQueueCoordinator {
         let probing = crate::dupeprobe::probe_probing_for(nzb.id);
         let failed = nzb.current_failed_articles;
         let files_tried = Self::files_tried(host, &nzb);
+        // Judge the data files only: par2 recovery files are tried early (live PAR asks for
+        // them), and a dead one says nothing about whether the data can be finished, from the
+        // duplicates or otherwise. Their articles are taken out by their share of the size.
         let eval = eval_dead_download(
-            nzb.current_success_articles,
+            data_articles(
+                nzb.current_success_articles,
+                nzb.current_success_size,
+                nzb.par_current_success_size,
+            ),
             nzb.dupe_recovered_articles,
-            failed,
+            data_articles(failed, nzb.current_failed_size, nzb.par_current_failed_size),
             nzb.file_count,
             nzb.dupe_failed_run,
             crate::dupefallback::par_cannot_cover_snap(&nzb, false),
@@ -6430,6 +6447,22 @@ fn downloaded_ranges(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dead_par2_recovery_articles_leave_the_data_projection_alone() {
+        // 300 articles failed, 200 of them in par2 files by size: 100 data articles failed.
+        assert_eq!(super::data_articles(300, 3_000_000, 2_000_000), 100);
+        assert_eq!(super::data_articles(300, 3_000_000, 0), 300);
+        assert_eq!(super::data_articles(300, 0, 0), 300);
+        assert_eq!(super::data_articles(300, 1_000, 5_000), 0);
+        // 900 own data articles of 1000 tried: no longer far below a 90% critical health
+        // because 400 dead par2 articles were tried first.
+        let own = super::data_articles(900, 9_000_000, 0);
+        let failed = super::data_articles(500, 5_000_000, 4_000_000);
+        let e = super::eval_dead_download(own, 0, failed, 10, 0, false, 900, 0, 5, -1);
+        assert_eq!(e.projected, 900);
+        assert_eq!(e.far_below, 0);
+    }
+
 
     #[test]
     fn a_verified_direct_unpack_is_never_failed_over() {

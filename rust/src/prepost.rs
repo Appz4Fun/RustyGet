@@ -2544,7 +2544,11 @@ impl NzbgetRsPrePostProcessor {
                 // A lost first article took the volume's headers, so extraction would wait at
                 // it for the whole repair. Its quick-open record, at the end, rebuilds them
                 // now, as the volume finishes, and extraction reads on past the lost data.
-                let holes = match rebuild_lost_head(&full, &file.filename, &mut ranges) {
+                let writes_disk = !opts.skip_write && !nzb.skip_disk_write && !opts.raw_article;
+                let rebuilt = writes_disk
+                    .then(|| rebuild_lost_head(&full, &file.filename, &mut ranges))
+                    .flatten();
+                let holes = match rebuilt {
                     Some((head_len, data_end)) => {
                         let mut msg = b"Rebuilt the headers of ".to_vec();
                         msg.extend_from_slice(&file.filename);

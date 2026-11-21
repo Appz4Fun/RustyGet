@@ -1138,6 +1138,18 @@ impl BatchFetcherPool {
         self.batch.set_worker_count(worker_count);
     }
 
+    /// Raises the worker count mid-batch: the added workers join the batch running now.
+    pub fn raise_worker_count(&self, worker_count: i32) {
+        if worker_count <= self.worker_count() {
+            return;
+        }
+        if let Ok(mut guard) = self.state.lock() {
+            guard.worker_count = worker_count;
+        }
+        self.ensure_worker_fetchers();
+        self.batch.raise_worker_count(worker_count);
+    }
+
     pub fn set_wait_counter(&self, counter: Option<Arc<AtomicI32>>) {
         if let Ok(mut guard) = self.state.lock() {
             guard.wait_counter = counter.clone();

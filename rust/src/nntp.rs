@@ -1057,6 +1057,16 @@ impl ArticleBatchFetcher {
         guard.worker_count = worker_count;
     }
 
+    /// Raises the worker count of the batch running now: the added workers start on its
+    /// unclaimed requests at once instead of waiting for the next batch.
+    pub fn raise_worker_count(&self, worker_count: i32) {
+        use std::sync::atomic::Ordering;
+        self.set_worker_count(worker_count);
+        if article_batch_should_ensure_workers(worker_count, self.stopped.load(Ordering::SeqCst)) {
+            self.ensure_workers(worker_count);
+        }
+    }
+
     pub fn get_window_parts(&self) -> i32 {
         let guard = lock(&self.inner);
         guard.window_parts()
@@ -1823,6 +1833,38 @@ mod article_fetcher_tests {
             ARTICLE_FETCH_MAX_DECODED_BYTES,
             ARTICLE_FETCH_MAX_DECODED_BYTES
         ));
+    }
+
+    #[test]
+    fn raising_the_worker_count_joins_the_running_batch() {
+        let no_groups = Arc::new(Vec::<Vec<u8>>::new());
+        let seen = Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new()));
+        let seen_cb = Arc::clone(&seen);
+        let batch = ArticleBatchFetcher::new(
+            move |worker, _| {
+                seen_cb.lock().unwrap().insert(worker);
+                std::thread::sleep(Duration::from_millis(20));
+                Ok(make_result(b'r', 4))
+            },
+            None,
+        );
+        batch.set_worker_count(1);
+        let requests = (0..24)
+            .map(|_| BatchRequest {
+                message_id: b"m".to_vec(),
+                groups: Arc::clone(&no_groups),
+            })
+            .collect();
+        batch.begin(requests);
+        assert!(batch.next().is_some());
+        // Mid-batch: no new batch begins, yet the added workers take part in this one.
+        batch.raise_worker_count(4);
+        let mut delivered = 1;
+        while batch.next().is_some() {
+            delivered += 1;
+        }
+        assert_eq!(delivered, 24);
+        assert_eq!(seen.lock().unwrap().len(), 4);
     }
 
     #[test]

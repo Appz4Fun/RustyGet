@@ -9757,6 +9757,7 @@ fn plan_dead_fills(
                             index: i,
                             version: template.version,
                             packed: p.packed_size,
+                            last: p.last,
                             template_data_offset: template.data_offset,
                             template_packed: template.packed_size,
                             inner_name: inner_name.clone(),
@@ -9764,7 +9765,9 @@ fn plan_dead_fills(
                             offered,
                             offer_failed: false,
                             // Restored exactly only in RAR5 (see `write_back_volume`).
-                            on_disk_target: (template.version == 5 && head_lost.contains_key(&i))
+                            on_disk_target: (template.version == 5
+                                && !p.last
+                                && head_lost.contains_key(&i))
                                 .then(|| member_targets.get(members_by_index[i] as usize).copied())
                                 .flatten()
                                 .filter(|&t| t >= 0)
@@ -9987,6 +9990,8 @@ struct DeadFill {
     index: usize,
     version: i32,
     packed: i64,
+    /// The set's last volume (see [`crate::deadvolume::Plan::last`]).
+    last: bool,
     template_data_offset: i64,
     template_packed: i64,
     inner_name: Vec<u8>,
@@ -10942,9 +10947,10 @@ impl CrossPackRepairSession {
             d.index,
             d.packed as u64,
             part_crc,
+            d.last,
         )
         .map_err(|e| e.to_string())?;
-        crate::deadvolume::check_frame(&head, &tail, d.packed as u64, &d.inner_name)
+        crate::deadvolume::check_frame(&head, &tail, d.packed as u64, &d.inner_name, d.last)
             .map_err(|e| e.to_string())?;
         let at = head.len() as u64;
         Ok(crate::deadvolume::VirtualVolume {
@@ -12589,6 +12595,7 @@ mod tests {
             inner_offset: 6000,
             packed_size: 900,
             data_offset: 80,
+            last: false,
         };
         // Lost: the headers and the data's first 20 bytes, one range in the middle, and a
         // range in the tail (not part of the data).

@@ -4368,10 +4368,10 @@ fn dead_volumes_extract_from_borrowed_data_through_rebuilt_headers() {
             p.template,
             p.index,
             p.packed_size as u64,
-            Some(crc32fast::hash(borrowed)),
+            Some(crc32fast::hash(borrowed)), false,
         )
         .unwrap();
-        crate::deadvolume::check_frame(&head, &tail, p.packed_size as u64, b"movie.mkv").unwrap();
+        crate::deadvolume::check_frame(&head, &tail, p.packed_size as u64, b"movie.mkv", false).unwrap();
         virtuals.insert(
             t.dl().join(volume_name(p.index, vols.len())),
             VirtualVolume {
@@ -4412,6 +4412,64 @@ fn dead_volumes_extract_from_borrowed_data_through_rebuilt_headers() {
     let (r, log) = run(&first2, &t2.out(), Box::new(WithVirtual { virtuals: bad }));
     assert!(r.is_err(), "corrupt borrowed data must fail: {log:?}");
     assert!(!t2.out().join("movie.mkv").exists());
+}
+
+#[test]
+fn a_dead_last_volume_extracts_from_borrowed_data_through_rebuilt_headers() {
+    use crate::deadvolume::{plan, synthesize_frame, VirtualVolume, VolumeState};
+    let t = TestDir::new("deadvol-last");
+    // Eleven volumes, the last holding the file's final 50000 bytes.
+    let data = pattern(1_050_000);
+    let vols: Vec<Vec<u8>> = rar5_volumes("movie.mkv", &data, 100_000)
+        .iter()
+        .map(|v| with_locator_and_quick_open(v))
+        .collect();
+    let first = write_set(&t.dl(), &vols);
+    let last = vols.len() - 1;
+    let states: Vec<VolumeState> = vols
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            if i == last {
+                VolumeState::Dead { encoded_size: v.len() as i64 * 102 / 100 }
+            } else {
+                VolumeState::Readable(geometry_of(v))
+            }
+        })
+        .collect();
+    std::fs::remove_file(t.dl().join(volume_name(last, vols.len()))).unwrap();
+    let plans = plan(&states, data.len() as i64);
+    assert_eq!(plans.len(), 1);
+    let p = plans[0];
+    assert!(p.last);
+    assert_eq!((p.index, p.packed_size), (last, 50_000));
+    let borrowed = &data[p.inner_offset as usize..];
+    let path = t.0.join("last.data");
+    std::fs::write(&path, borrowed).unwrap();
+    let tv = &vols[p.template];
+    let tg = geometry_of(tv);
+    let (head, tail) = synthesize_frame(
+        5,
+        &tv[..tg.data_offset as usize],
+        &tv[(tg.data_offset + tg.packed_size) as usize..],
+        p.template,
+        p.index,
+        p.packed_size as u64,
+        Some(crc32fast::hash(borrowed)),
+        true,
+    )
+    .unwrap();
+    crate::deadvolume::check_frame(&head, &tail, p.packed_size as u64, b"movie.mkv", true).unwrap();
+    // A middle volume's framing does not pass for a last one.
+    assert!(crate::deadvolume::check_frame(&head, &tail, p.packed_size as u64, b"movie.mkv", false)
+        .is_err());
+    let virtuals = std::collections::HashMap::from([(
+        t.dl().join(volume_name(last, vols.len())),
+        VirtualVolume { head, data: path, data_len: p.packed_size as u64, tail, holes: Vec::new() },
+    )]);
+    let (r, log) = run(&first, &t.out(), Box::new(WithVirtual { virtuals }));
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
 }
 
 /// RAR4 volumes as WinRAR 3.x writes them: the end block carries the archive checksum, the
@@ -4479,10 +4537,10 @@ fn dead_rar4_volumes_extract_from_borrowed_data_through_rebuilt_headers() {
             p.template,
             p.index,
             p.packed_size as u64,
-            Some(crc32fast::hash(borrowed)),
+            Some(crc32fast::hash(borrowed)), false,
         )
         .unwrap();
-        crate::deadvolume::check_frame(&head, &tail, p.packed_size as u64, b"movie.mkv").unwrap();
+        crate::deadvolume::check_frame(&head, &tail, p.packed_size as u64, b"movie.mkv", false).unwrap();
         virtuals.insert(
             t.dl().join(rar4_name(p.index)),
             VirtualVolume {
@@ -5283,7 +5341,7 @@ fn borrowed_run_set(
             p.template,
             p.index,
             p.packed_size as u64,
-            Some(crc32fast::hash(borrowed)),
+            Some(crc32fast::hash(borrowed)), false,
         )
         .unwrap();
         virtuals.insert(
@@ -5567,7 +5625,7 @@ fn borrowed_dead_volume_of(
         p.template,
         p.index,
         p.packed_size as u64,
-        None,
+        None, false,
     )
     .unwrap();
     let at = head.len() as u64;

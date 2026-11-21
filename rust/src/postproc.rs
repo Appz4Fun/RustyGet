@@ -2610,6 +2610,27 @@ pub(crate) fn direct_unpack_hold_with_holes(nzb_id: i32, full_path: &[u8], holes
     }
 }
 
+/// Replaces the lost ranges of a volume still on hold with `holes`; false when the hold is gone
+/// (a repair released it, or the download ended), so nothing is held again.
+pub(crate) fn direct_unpack_widen_hold(nzb_id: i32, full_path: &[u8], holes: Vec<(u64, u64)>) -> bool {
+    let mut map = direct_unpack_holds();
+    let Some(st) = map.get_mut(&nzb_id) else {
+        return false;
+    };
+    if !st.held.iter().any(|p| p == full_path) {
+        return false;
+    }
+    if holes.is_empty() {
+        st.holes.remove(full_path);
+    } else {
+        st.holes.insert(full_path.to_vec(), holes);
+        // The unpack thread picks this up like a release: a wait on it ends, a first volume
+        // is queued for extraction.
+        st.released.push(hold_path_filename(full_path).to_vec());
+    }
+    true
+}
+
 /// Holds `full_path` again with its lost ranges after a restart, unless the download is over or
 /// abandoned: nothing would release a new hold then (post-processing only waits for holds the
 /// download left), so the refill reads the volume as it is. One lock, so `NzbDownloaded` sees
@@ -5496,6 +5517,22 @@ mod live_hold_tests {
     }
 
     use super::*;
+    #[test]
+    fn a_widened_hold_reaches_the_unpack_thread_and_a_released_one_stays_released() {
+        let id = -1900299;
+        let path = b"/fixture/widen.part02.rar".as_slice();
+        assert!(!direct_unpack_widen_hold(id, path, vec![(70_000, 10)]));
+        direct_unpack_hold_with_holes(id, path, Vec::new());
+        assert_eq!(direct_unpack_hole_view(path), Some(Vec::new()));
+        assert!(direct_unpack_widen_hold(id, path, vec![(70_000, 10)]));
+        assert_eq!(direct_unpack_hole_view(path), Some(vec![(70_000, 10)]));
+        let (released, _) = direct_unpack_take_released(id);
+        assert_eq!(released, vec![b"widen.part02.rar".to_vec()]);
+        direct_unpack_holds().remove(&id);
+        assert!(!direct_unpack_widen_hold(id, path, vec![(70_000, 10)]));
+        assert_eq!(direct_unpack_hole_view(path), None);
+    }
+
     #[test]
     fn live_hold_publication_is_scoped_to_its_generation_and_download() {
         let id = -1900240;

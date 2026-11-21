@@ -278,7 +278,7 @@ fn data_articles(articles: i32, size: i64, par_size: i64) -> i32 {
         return articles;
     }
     let data = (size - par_size).clamp(0, size);
-    ((articles.max(0) as i64) * data / size) as i32
+    (i128::from(articles.max(0)) * i128::from(data) / i128::from(size)) as i32
 }
 
 pub fn eval_dead_download(
@@ -6454,6 +6454,8 @@ mod tests {
         assert_eq!(super::data_articles(300, 3_000_000, 0), 300);
         assert_eq!(super::data_articles(300, 0, 0), 300);
         assert_eq!(super::data_articles(300, 1_000, 5_000), 0);
+        // Terabytes of articles: no overflow on the way.
+        assert_eq!(super::data_articles(4_000_000, 3_000_000_000_000, 1_500_000_000_000), 2_000_000);
         // 900 own data articles of 1000 tried: no longer far below a 90% critical health
         // because 400 dead par2 articles were tried first.
         let own = super::data_articles(900, 9_000_000, 0);

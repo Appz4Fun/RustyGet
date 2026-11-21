@@ -318,6 +318,29 @@ struct RunCounters {
     donor_dead: BTreeMap<Vec<u8>, bool>,
 }
 
+/// Donor articles fetched one at a time, by message id: each repair wave builds its donor's
+/// map again and reads every volume's first article for it (39 of them per wave in A2 on
+/// 6790, about 27 MB a wave), so later waves take them from here. A few dozen articles.
+static RECENT_SINGLES: Mutex<std::collections::VecDeque<(Vec<u8>, FetchedDonorArticle)>> =
+    Mutex::new(std::collections::VecDeque::new());
+const RECENT_SINGLES_MAX: usize = 64;
+
+fn recent_single(msg_id: &[u8]) -> Option<FetchedDonorArticle> {
+    let g = RECENT_SINGLES.lock().unwrap_or_else(|e| e.into_inner());
+    g.iter().find(|(id, _)| id == msg_id).map(|(_, a)| a.clone())
+}
+
+fn keep_single(msg_id: &[u8], article: FetchedDonorArticle) {
+    let mut g = RECENT_SINGLES.lock().unwrap_or_else(|e| e.into_inner());
+    if g.iter().any(|(id, _)| id == msg_id) {
+        return;
+    }
+    if g.len() >= RECENT_SINGLES_MAX {
+        g.pop_front();
+    }
+    g.push_back((msg_id.to_vec(), article));
+}
+
 /// Fetches of one donor's borrow: how many went one at a time and how many in batches, and
 /// how long the repair waited on them, so a slow borrow tells whether the network or the
 /// repair itself held it up.
@@ -1632,8 +1655,22 @@ impl NzbgetRsStreamRepairCtrl {
                     }
                     let df = self.donor_files.get(member_index as usize)?;
                     let msg_id = df.article_msg_ids.get(part_index as usize)?;
+                    if let Some(hit) = recent_single(msg_id) {
+                        return Some(hit);
+                    }
                     let started = std::time::Instant::now();
                     let fetched = self.ctrl.fetcher.fetch(msg_id, &df.groups);
+                    if fetched.success {
+                        keep_single(
+                            msg_id,
+                            FetchedDonorArticle {
+                                success: true,
+                                offset: fetched.offset,
+                                file_size: fetched.file_size,
+                                data: fetched.data.clone(),
+                            },
+                        );
+                    }
                     {
                         let mut st = self.ctrl.fetch_stats.lock().unwrap_or_else(|e| e.into_inner());
                         st.singles += 1;
@@ -2800,6 +2837,21 @@ fn release_completed_holds(dest_dir: &[u8], targets: &[RepairTarget]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_donor_article_fetched_once_is_kept_for_the_next_wave() {
+        let id = b"<first-article-cache-test@x>".to_vec();
+        assert!(recent_single(&id).is_none());
+        let article = FetchedDonorArticle { success: true, offset: 0, file_size: 10, data: vec![1, 2, 3] };
+        keep_single(&id, article.clone());
+        assert_eq!(recent_single(&id).map(|a| a.data), Some(vec![1, 2, 3]));
+        // Bounded: old ones make way.
+        for i in 0..RECENT_SINGLES_MAX {
+            keep_single(format!("<filler-{i}@x>").as_bytes(), article.clone());
+        }
+        assert!(recent_single(&id).is_none());
+        assert!(RECENT_SINGLES.lock().unwrap().len() <= RECENT_SINGLES_MAX);
+    }
 
     #[test]
     fn the_fetch_cost_line_tells_network_from_repair_time() {

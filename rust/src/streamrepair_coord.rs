@@ -1709,6 +1709,11 @@ impl NzbgetRsStreamRepairCtrl {
                             groups: Arc::clone(&df.groups),
                         })
                         .collect();
+                    {
+                        let mut st = self.ctrl.fetch_stats.lock().unwrap_or_else(|e| e.into_inner());
+                        st.batches += 1;
+                        st.batch_parts += requests.len() as u32;
+                    }
                     self.ctrl.batch_fetcher.begin(requests);
                 }
 

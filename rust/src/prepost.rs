@@ -2545,7 +2545,7 @@ impl NzbgetRsPrePostProcessor {
                 // it for the whole repair. Its quick-open record, at the end, rebuilds them
                 // now, as the volume finishes, and extraction reads on past the lost data.
                 let holes = match rebuild_lost_head(&full, &file.filename, &mut ranges) {
-                    Some(head_len) => {
+                    Some((head_len, data_end)) => {
                         let mut msg = b"Rebuilt the headers of ".to_vec();
                         msg.extend_from_slice(&file.filename);
                         msg.extend_from_slice(
@@ -2564,6 +2564,7 @@ impl NzbgetRsPrePostProcessor {
                             &ranges,
                             file.decoded_file_size,
                             head_len,
+                            data_end,
                         )
                     }
                     None => crate::progressive_unpack::skippable_holes(
@@ -2966,12 +2967,12 @@ mod tests {
 
 /// Writes back the headers of RAR5 volume `full` (`filename` names its number) when its first
 /// lost range starts the file and its quick-open record arrived, and drops them from `ranges`.
-/// Returns where the headers end.
+/// Returns where the headers end and where the first file data behind them ends.
 fn rebuild_lost_head(
     full: &[u8],
     filename: &[u8],
     ranges: &mut Vec<crate::dupefallback::NzbgetRsByteRange>,
-) -> Option<i64> {
+) -> Option<(i64, i64)> {
     ranges.retain(|r| r.size > 0);
     ranges.sort_by_key(|r| r.offset);
     if ranges.first()?.offset != 0 {
@@ -2986,7 +2987,8 @@ fn rebuild_lost_head(
         })
         .collect();
     let index = usize::try_from(number.checked_sub(1)?).ok()?;
-    let head_len = i64::try_from(crate::deadvolume::restore_head_from_tail(full, &spans, index)?).ok()?;
+    let (head_len, data_end) = crate::deadvolume::restore_head_guarded(full, &spans, index)?;
+    let (head_len, data_end) = (i64::try_from(head_len).ok()?, i64::try_from(data_end).ok()?);
     let first = &mut ranges[0];
     let end = first.offset.saturating_add(first.size);
     if end <= head_len {
@@ -2995,7 +2997,7 @@ fn rebuild_lost_head(
         first.offset = head_len;
         first.size = end - head_len;
     }
-    Some(head_len)
+    Some((head_len, data_end))
 }
 
 #[cfg(test)]
@@ -3018,15 +3020,25 @@ mod lost_head_tests {
         let mut ranges = vec![R { offset: 0, size: 4000 }];
         // Without the headers, extraction must wait for the repair.
         assert!(crate::progressive_unpack::skippable_holes(&ranges, size).is_empty());
-        let head = super::rebuild_lost_head(&full, b"out.part3.rar", &mut ranges).unwrap();
+        let (head, data_end) =
+            super::rebuild_lost_head(&full, b"out.part3.rar", &mut ranges).unwrap();
+        assert!(data_end > 4000);
         let now = std::fs::read(&path).unwrap();
         assert_eq!(now[..head as usize], good[..head as usize]);
         assert_eq!(ranges.len(), 1);
         assert_eq!((ranges[0].offset, ranges[0].size), (head, 4000 - head));
         assert_eq!(
-            crate::progressive_unpack::skippable_holes_behind_head(&ranges, size, head),
+            crate::progressive_unpack::skippable_holes_behind_head(&ranges, size, head, data_end),
             vec![(head as u64, (4000 - head) as u64)]
         );
+        // A hole past the first file data, inside the usual header guard, still waits.
+        let behind = [R { offset: data_end, size: 10 }];
+        if data_end + 10 < 64 * 1024 {
+            assert!(crate::progressive_unpack::skippable_holes_behind_head(
+                &behind, size, head, data_end
+            )
+            .is_empty());
+        }
         // A volume whose first article arrived is left alone.
         let mut later = vec![R { offset: 8000, size: 100 }];
         assert_eq!(super::rebuild_lost_head(&full, b"out.part3.rar", &mut later), None);

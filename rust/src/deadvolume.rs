@@ -812,6 +812,18 @@ mod rar5 {
         Some(vint(h, &mut q)? & 0x40 != 0)
     }
 
+    /// Packed bytes of the first file part behind a head built by [`head_from_tail`].
+    pub(super) fn first_data_len(head: &[u8]) -> Option<u64> {
+        let mut p = SIG.len();
+        while p < head.len() {
+            let b = block(head, &mut p)?;
+            if b.kind == HEAD_FILE {
+                return Some(b.data_len);
+            }
+        }
+        None
+    }
+
     pub(super) fn head_from_tail(tail: &[u8], file_size: u64, index: usize) -> Option<Vec<u8>> {
         let base = file_size.checked_sub(tail.len() as u64)?;
         // The end block, then only padding.
@@ -1080,6 +1092,31 @@ pub fn rar5_head_from_tail(tail: &[u8], file_size: u64, index: usize) -> Option<
 /// head is on disk (also when it already was): the volume's data starts there, and only
 /// the rest of the first hole is part of the file it holds.
 pub fn restore_head_from_tail(path: &[u8], holes: &[(u64, u64)], index: usize) -> Option<u64> {
+    restore_head_and_data(path, holes, index).map(|(head, _)| head)
+}
+
+/// [`restore_head_from_tail`] through the live-PAR write guard of the download folder holding
+/// `path`: refused while a live repair owns the volume, and a live session reading it re-checks
+/// the rewritten range (otherwise the file's identity changes, as for any patch). Returns the
+/// head's length and where the volume's first file data ends.
+pub fn restore_head_guarded(path: &[u8], holes: &[(u64, u64)], index: usize) -> Option<(u64, u64)> {
+    let os = crate::fsops::path(path);
+    let file = std::path::Path::new(&os);
+    let context = crate::parlive::donor_write_context(file.parent()?, file).ok()?;
+    let live = context.watched_by_live_par();
+    let (head, data_end) = context
+        .perform_io(|| {
+            restore_head_and_data(path, holes, index)
+                .ok_or_else(|| std::io::ErrorKind::NotFound.into())
+        })
+        .ok()?;
+    if !(live && context.range_replaced(0, head)) {
+        context.invalidate_identity();
+    }
+    Some((head, data_end))
+}
+
+fn restore_head_and_data(path: &[u8], holes: &[(u64, u64)], index: usize) -> Option<(u64, u64)> {
     use std::io::{Read, Seek, SeekFrom, Write};
     let &(first_start, first_end) = holes.first()?;
     if first_start != 0 {
@@ -1124,7 +1161,8 @@ pub fn restore_head_from_tail(path: &[u8], holes: &[(u64, u64)], index: usize) -
         f.write_all(&head[..head_len.min(first_end) as usize]).ok()?;
         f.flush().ok()?;
     }
-    Some(head_len)
+    let data_end = head_len.checked_add(rar5::first_data_len(&head)?)?;
+    Some((head_len, data_end))
 }
 
 /// Whether every service record in RAR5 `tail` is one [`faithful_frame`] rebuilds (the

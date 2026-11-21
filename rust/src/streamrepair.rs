@@ -5027,6 +5027,17 @@ pub trait ContentSourceSet {
     /// article per volume, which the allowance for the outer archive does not foresee.
     fn grant_fetches(&self, _extra: i32) {}
 
+    /// Hints that the member ranges in `by_member` are read next (see
+    /// [`ContentSource::prefetch_ranges`]). A set whose members share one fetcher fetches
+    /// them as one batch.
+    fn prefetch_member_ranges(&self, by_member: &[(i32, Vec<(i64, i64)>)]) {
+        for (member, ranges) in by_member {
+            if let Some(source) = self.get_source(*member) {
+                source.prefetch_ranges(ranges);
+            }
+        }
+    }
+
     fn on_rar_volume_parsed(
         &self,
         _member_name: &[u8],
@@ -5512,11 +5523,8 @@ impl ContentMap {
                     .push((piece.offset, piece.size));
             }
         }
-        for (member, ranges) in by_member {
-            if let Some(source) = sources.get_source(member) {
-                source.prefetch_ranges(&ranges);
-            }
-        }
+        let by_member: Vec<(i32, Vec<(i64, i64)>)> = by_member.into_iter().collect();
+        sources.prefetch_member_ranges(&by_member);
     }
 
     pub fn read_donor_inner(
@@ -6627,6 +6635,12 @@ pub const DONOR_MAX_CACHED_PARTS: usize = 16;
 /// `DonorMemberSource::prefetch_ranges_with_transport`): under the cache size, so none of
 /// them is evicted before its read.
 pub const DONOR_WAVE_PARTS: usize = DONOR_MAX_CACHED_PARTS - 2;
+/// How close to an estimated article edge a read must come before the neighbouring article
+/// is fetched with it (see `DonorMemberSource::needed_parts`).
+pub const DONOR_EDGE_MARGIN: i64 = 16 * 1024;
+/// A wave across members starts once this many parts are wanted, or when every member's
+/// holes ahead fit: enough to keep the fetch workers busy.
+pub const DONOR_MULTI_WAVE_MIN: usize = 8;
 /// Most articles one read asks the batch fetcher for. They stream into the read in order
 /// (see [`DonorMemberSource::fetch_part`]), so this is bounded by the batch fetcher's own
 /// window and buffer, not by the cache: a read of a few tens of MB keeps every worker busy.
@@ -6819,6 +6833,11 @@ impl DonorMemberSource {
         if !transport.has_prefetch_batch() || self.bad || self.ranges.is_empty() || size <= 0 {
             return;
         }
+        // A wave already fetched what this read needs: its spare neighbours are not wanted.
+        let (need_first, need_last) = self.needed_parts(offset, size);
+        if (need_first..=need_last).all(|i| self.cache.contains_key(&i)) {
+            return;
+        }
         let first_est = donor_index_for_offset(offset, self.drift, &self.ranges);
         let last_est = donor_index_for_offset(offset + size - 1, self.drift, &self.ranges);
         let (first, last) = donor_calc_prefetch_bounds(first_est, last_est, self.ranges.len());
@@ -6903,9 +6922,7 @@ impl DonorMemberSource {
             if size <= 0 || offset < 0 {
                 continue;
             }
-            let first_est = donor_index_for_offset(offset, self.drift, &self.ranges);
-            let last_est = donor_index_for_offset(offset + size - 1, self.drift, &self.ranges);
-            let (first, last) = donor_calc_prefetch_bounds(first_est, last_est, self.ranges.len());
+            let (first, last) = self.needed_parts(offset, size);
             let more = (first..=last).filter(|i| !held.contains(i)).count();
             if held.len() + more > DONOR_WAVE_PARTS {
                 let parts = held.into_iter().filter(|i| !self.cache.contains_key(i)).collect();
@@ -6915,6 +6932,35 @@ impl DonorMemberSource {
         }
         let parts = held.into_iter().filter(|i| !self.cache.contains_key(i)).collect();
         (parts, true)
+    }
+
+    /// The parts a read of `size` bytes at `offset` needs: the estimated ones, plus a
+    /// neighbour only where the range comes within `DONOR_EDGE_MARGIN` of an estimated
+    /// article edge. A spare article on each side of every hole fetched 2.3 times the bytes
+    /// A2's repair recovered on 6790.
+    fn needed_parts(&self, offset: i64, size: i64) -> (i32, i32) {
+        // Never more than a sixteenth of an article, so a small article is not swamped.
+        let article = self.size / (self.ranges.len().max(1) as i64);
+        let margin = DONOR_EDGE_MARGIN.min(article / 16);
+        let start = (offset - margin).max(0);
+        let end = (offset + size - 1 + margin).min((self.size - 1).max(0));
+        (
+            donor_index_for_offset(start, self.drift, &self.ranges),
+            donor_index_for_offset(end.max(start), self.drift, &self.ranges),
+        )
+    }
+
+    /// Plans a wave for `ranges` (see [`Self::wave_parts`]) after making sure the member's
+    /// size is known.
+    fn plan_wave(
+        &mut self,
+        transport: &mut dyn DonorArticleTransport,
+        ranges: &[(i64, i64)],
+    ) -> (Vec<i32>, bool) {
+        if !self.ensure_init(transport) {
+            return (Vec::new(), true);
+        }
+        self.wave_parts(ranges)
     }
 
     pub fn read_with_transport(
@@ -8752,6 +8798,11 @@ pub trait CrossPackDonorEnv {
         part_index: i32,
     ) -> Option<FetchedDonorArticle>;
     fn begin_donor_prefetch(&mut self, member_index: i32, part_indices: &[i32]);
+    /// Begins one batch over parts of several members, `(member, part)` in delivery order.
+    /// False when the env cannot (the caller then fetches member by member).
+    fn begin_donor_prefetch_multi(&mut self, _parts: &[(i32, i32)]) -> bool {
+        false
+    }
     fn next_donor_prefetch(&mut self) -> Option<FetchedDonorArticle>;
     fn cancel_donor_prefetch(&mut self);
     fn begin_materialize_member(&mut self, member_index: i32);
@@ -8927,6 +8978,60 @@ impl ContentSourceSet for DonorSetSources<'_, '_> {
 
     fn aborted(&self) -> bool {
         self.shared.env.borrow_mut().is_stopped()
+    }
+
+    fn prefetch_member_ranges(&self, by_member: &[(i32, Vec<(i64, i64)>)]) {
+        let batching = self.shared.use_batch_fetcher.get()
+            && self.shared.fetch_budget.get().is_none()
+            && self.shared.env.borrow().has_batch_fetcher();
+        if !batching {
+            return;
+        }
+        // Plan every member's wave, then fetch them all as one batch: holes spread over many
+        // volumes are a few articles each, too few alone to keep the workers busy.
+        let mut plan: Vec<(i32, i32)> = Vec::new();
+        let mut complete = true;
+        for (member, ranges) in by_member {
+            if self.get_source(*member).is_none() {
+                continue;
+            }
+            let Some(slot) = self.slots.get(*member as usize).and_then(|c| c.get()) else {
+                continue;
+            };
+            let mut adapter = MemberTransportAdapter {
+                shared: &self.shared,
+                member_index: *member,
+            };
+            let (parts, all) = slot.inner.borrow_mut().plan_wave(&mut adapter, ranges);
+            complete &= all;
+            plan.extend(parts.into_iter().map(|p| (*member, p)));
+        }
+        if plan.len() < 2 || (!complete && plan.len() < DONOR_MULTI_WAVE_MIN) {
+            return;
+        }
+        if !self.shared.env.borrow_mut().begin_donor_prefetch_multi(&plan) {
+            for (member, ranges) in by_member {
+                if let Some(source) = self.get_source(*member) {
+                    source.prefetch_ranges(ranges);
+                }
+            }
+            return;
+        }
+        for (taken, &(member, part)) in plan.iter().enumerate() {
+            let fetched = self.shared.env.borrow_mut().next_donor_prefetch();
+            let Some(fetched) = fetched else {
+                if taken + 1 < plan.len() {
+                    self.shared.env.borrow_mut().cancel_donor_prefetch();
+                }
+                return;
+            };
+            if let Some(slot) = self.slots.get(member as usize).and_then(|c| c.get()) {
+                let mut inner = slot.inner.borrow_mut();
+                if !inner.cache.contains_key(&part) {
+                    inner.store_fetched(part, fetched);
+                }
+            }
+        }
     }
 
     fn on_rar_volume_parsed(
@@ -17302,9 +17407,9 @@ mod tests {
         assert_eq!(transport.single_fetches, singles);
 
         // A wave never asks for more parts than the cache keeps, and the next wave comes
-        // once the first holes are read: 12 holes over 40 parts take three batches, not one
+        // once the first holes are read: 20 holes over 40 parts take a few batches, not one
         // per hole, and every read is served from the cache.
-        let many: Vec<(i64, i64)> = (0..12i64).map(|i| (i * 300 + 10, 60)).collect();
+        let many: Vec<(i64, i64)> = (0..20i64).map(|i| (i * 200 + 10, 60)).collect();
         let mut src = DonorMemberSource::new(vec![110i32; 40]);
         assert_eq!(src.size_with_transport(&mut transport), 4000);
         let (first_wave, all) = src.wave_parts(&many);
@@ -18990,6 +19095,94 @@ mod dead_volume_fill_tests {
                 out
             })
             .collect()
+    }
+
+    /// Three donor members of 20 articles of 100 bytes, fetched one by one or in batches
+    /// (one member at a time, or several at once).
+    struct MultiDonor {
+        singles: usize,
+        member_batches: usize,
+        multi_batches: Vec<usize>,
+        queue: std::collections::VecDeque<FetchedDonorArticle>,
+    }
+    impl MultiDonor {
+        fn article(member: i32, part: i32) -> FetchedDonorArticle {
+            FetchedDonorArticle {
+                success: true,
+                offset: i64::from(part) * 100,
+                file_size: 2000,
+                data: (0..100).map(|b| (member as u8).wrapping_mul(31).wrapping_add((part * 100 + b) as u8)).collect(),
+            }
+        }
+    }
+    impl CrossPackDonorEnv for MultiDonor {
+        fn is_stopped(&mut self) -> bool {
+            false
+        }
+        fn fetch_donor_part(&mut self, member: i32, part: i32) -> Option<FetchedDonorArticle> {
+            self.singles += 1;
+            Some(Self::article(member, part))
+        }
+        fn begin_donor_prefetch(&mut self, member: i32, parts: &[i32]) {
+            self.member_batches += 1;
+            self.queue = parts.iter().map(|&p| Self::article(member, p)).collect();
+        }
+        fn begin_donor_prefetch_multi(&mut self, parts: &[(i32, i32)]) -> bool {
+            self.multi_batches.push(parts.len());
+            self.queue = parts.iter().map(|&(m, p)| Self::article(m, p)).collect();
+            true
+        }
+        fn next_donor_prefetch(&mut self) -> Option<FetchedDonorArticle> {
+            self.queue.pop_front()
+        }
+        fn cancel_donor_prefetch(&mut self) {
+            self.queue.clear();
+        }
+        fn begin_materialize_member(&mut self, _: i32) {}
+        fn next_materialize_article(&mut self) -> Option<FetchedDonorArticle> {
+            None
+        }
+        fn cancel_materialize_member(&mut self) {}
+        fn set_progress(&mut self, _: &[u8], _: i32) {}
+        fn set_materializing(&mut self, _: i32) {}
+        fn add_recovered(&mut self, _: i64, _: i32) {}
+        fn emit_message_bytes(&mut self, _: TargetMessageKind, _: &[u8]) {}
+        fn emit_extractor_log(&mut self, _: i32, _: &str) {}
+    }
+
+    #[test]
+    fn holes_over_several_donor_volumes_are_fetched_as_one_batch() {
+        // Two one-article holes in each of three volumes: one batch fetches all six (no spare
+        // articles around them), and every read after it comes from the cache.
+        let mut env = MultiDonor {
+            singles: 0,
+            member_batches: 0,
+            multi_batches: Vec::new(),
+            queue: Default::default(),
+        };
+        let mut env_ref: &mut dyn CrossPackDonorEnv = &mut env;
+        let cell = std::cell::RefCell::new(env_ref);
+        let sources = DonorSetSources::new(&cell, vec![vec![110; 20]; 3]);
+        let holes: Vec<(i32, Vec<(i64, i64)>)> =
+            (0..3).map(|m| (m, vec![(510, 60), (1310, 60)])).collect();
+        sources.prefetch_member_ranges(&holes);
+        for (member, ranges) in &holes {
+            let source = sources.get_source(*member).unwrap();
+            for &(offset, size) in ranges {
+                let mut buf = vec![0u8; size as usize];
+                source.read(offset, &mut buf).unwrap();
+                let part = (offset / 100) as i32;
+                let from = (offset % 100) as usize;
+                assert_eq!(buf[..], MultiDonor::article(*member, part).data[from..from + size as usize]);
+            }
+        }
+        drop(sources);
+        env_ref = cell.into_inner();
+        let _ = env_ref;
+        assert_eq!(env.multi_batches, vec![6]);
+        assert_eq!(env.member_batches, 0);
+        // Only each member's first article, read to learn its size.
+        assert_eq!(env.singles, 3);
     }
 
     struct BareDonor {

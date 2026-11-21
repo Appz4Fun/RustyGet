@@ -50,10 +50,11 @@ const fn map_target_msg_kind(kind: TargetMessageKind) -> MessageKind {
     }
 }
 
-/// Fetch workers of a repair that borrows in earnest. At most 8: the news proxy measured
-/// about 0.9 MB/s per connection, peaked near 8.6 MB/s at 8 and got slower at 16.
+/// Fetch workers of a repair that borrows in earnest: half the connections, up to 30. With 8
+/// of the 60 (about 1 MB/s each through the news proxy) A2's repair on 6790 fetched 7-8 MB/s
+/// while the download, on all 60, ran at 20-30 MB/s, and extraction waited on the repair.
 fn stream_fetch_worker_count(primary_connections: i32) -> i32 {
-    (primary_connections / 4).clamp(4, 8)
+    (primary_connections / 2).clamp(4, 30)
 }
 
 /// Fetch workers of a live repair that borrows a dead volume direct unpack waits on, while the
@@ -69,7 +70,7 @@ fn live_borrow_fetch_worker_count(primary_connections: i32) -> i32 {
 /// so the download keeps most connections, but more than one. Direct unpack patches each hole
 /// as soon as it is borrowed, so one article at a time left holes to be filled at the end.
 fn live_hole_fetch_worker_count(primary_connections: i32) -> i32 {
-    (primary_connections / 8).clamp(2, 8)
+    (primary_connections / 4).clamp(2, 16)
 }
 
 /// The target download as read under the queue lock.
@@ -1671,6 +1672,34 @@ impl NzbgetRsStreamRepairCtrl {
                         st.batch_parts += requests.len() as u32;
                     }
                     self.ctrl.batch_fetcher.begin(requests);
+                }
+
+                fn begin_donor_prefetch_multi(&mut self, parts: &[(i32, i32)]) -> bool {
+                    let mut requests = Vec::with_capacity(parts.len());
+                    for &(member, part) in parts {
+                        let msg = usize::try_from(member)
+                            .ok()
+                            .and_then(|m| self.donor_files.get(m))
+                            .and_then(|df| {
+                                let id = df.article_msg_ids.get(usize::try_from(part).ok()?)?;
+                                Some(BatchRequest {
+                                    message_id: id.clone(),
+                                    groups: Arc::clone(&df.groups),
+                                })
+                            });
+                        // Every part must map to a request, or the delivery order would shift.
+                        let Some(request) = msg else {
+                            return false;
+                        };
+                        requests.push(request);
+                    }
+                    {
+                        let mut st = self.ctrl.fetch_stats.lock().unwrap_or_else(|e| e.into_inner());
+                        st.batches += 1;
+                        st.batch_parts += requests.len() as u32;
+                    }
+                    self.ctrl.batch_fetcher.begin(requests);
+                    true
                 }
 
                 fn next_donor_prefetch(&mut self) -> Option<FetchedDonorArticle> {

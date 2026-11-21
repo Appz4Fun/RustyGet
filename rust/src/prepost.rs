@@ -2539,10 +2539,38 @@ impl NzbgetRsPrePostProcessor {
                 let articles: Vec<_> = (0..file.total_articles.max(0) as usize)
                     .map(|i| host.article_at(file_ptr, i))
                     .collect();
-                let holes = crate::progressive_unpack::skippable_holes(
-                    &crate::dupefallback::compute_holes_slice(&articles, file.decoded_file_size),
-                    file.decoded_file_size,
-                );
+                let mut ranges =
+                    crate::dupefallback::compute_holes_slice(&articles, file.decoded_file_size);
+                // A lost first article took the volume's headers, so extraction would wait at
+                // it for the whole repair. Its quick-open record, at the end, rebuilds them
+                // now, as the volume finishes, and extraction reads on past the lost data.
+                let holes = match rebuild_lost_head(&full, &file.filename, &mut ranges) {
+                    Some(head_len) => {
+                        let mut msg = b"Rebuilt the headers of ".to_vec();
+                        msg.extend_from_slice(&file.filename);
+                        msg.extend_from_slice(
+                            format!(
+                                " ({head_len} bytes) from its own quick-open record as it \
+                                 finished; direct unpack reads on past its lost data"
+                            )
+                            .as_bytes(),
+                        );
+                        host.nzb_print_message(
+                            nzb_ptr,
+                            crate::queuesubsys_host::MK_INFO,
+                            &msg,
+                        );
+                        crate::progressive_unpack::skippable_holes_behind_head(
+                            &ranges,
+                            file.decoded_file_size,
+                            head_len,
+                        )
+                    }
+                    None => crate::progressive_unpack::skippable_holes(
+                        &ranges,
+                        file.decoded_file_size,
+                    ),
+                };
                 crate::postproc::direct_unpack_hold_with_holes(nzb.id, &full, holes);
             }
         }
@@ -2933,5 +2961,75 @@ mod tests {
         assert_eq!(f.job_count, 1);
         f.check_download_completed();
         assert_eq!(f.job_count, 1);
+    }
+}
+
+/// Writes back the headers of RAR5 volume `full` (`filename` names its number) when its first
+/// lost range starts the file and its quick-open record arrived, and drops them from `ranges`.
+/// Returns where the headers end.
+fn rebuild_lost_head(
+    full: &[u8],
+    filename: &[u8],
+    ranges: &mut Vec<crate::dupefallback::NzbgetRsByteRange>,
+) -> Option<i64> {
+    ranges.retain(|r| r.size > 0);
+    ranges.sort_by_key(|r| r.offset);
+    if ranges.first()?.offset != 0 {
+        return None;
+    }
+    let (_, number, _, _) = crate::streamrepair::rar_part_number(filename)?;
+    let spans: Vec<(u64, u64)> = ranges
+        .iter()
+        .filter_map(|r| {
+            let start = u64::try_from(r.offset).ok()?;
+            Some((start, start.checked_add(u64::try_from(r.size).ok()?)?))
+        })
+        .collect();
+    let index = usize::try_from(number.checked_sub(1)?).ok()?;
+    let head_len = i64::try_from(crate::deadvolume::restore_head_from_tail(full, &spans, index)?).ok()?;
+    let first = &mut ranges[0];
+    let end = first.offset.saturating_add(first.size);
+    if end <= head_len {
+        ranges.remove(0);
+    } else {
+        first.offset = head_len;
+        first.size = end - head_len;
+    }
+    Some(head_len)
+}
+
+#[cfg(test)]
+mod lost_head_tests {
+    use crate::dupefallback::NzbgetRsByteRange as R;
+
+    #[test]
+    fn a_finished_volume_gets_its_headers_back_and_extraction_reads_past_the_rest() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tests/testdata/deadvolume/out.part3.rar");
+        let good = std::fs::read(src).unwrap();
+        let dir = std::env::temp_dir().join(format!("rg-lost-head-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("out.part3.rar");
+        let mut lost = good.clone();
+        lost[..4000].fill(0);
+        std::fs::write(&path, &lost).unwrap();
+        let full = path.to_str().unwrap().as_bytes().to_vec();
+        let size = good.len() as i64;
+        let mut ranges = vec![R { offset: 0, size: 4000 }];
+        // Without the headers, extraction must wait for the repair.
+        assert!(crate::progressive_unpack::skippable_holes(&ranges, size).is_empty());
+        let head = super::rebuild_lost_head(&full, b"out.part3.rar", &mut ranges).unwrap();
+        let now = std::fs::read(&path).unwrap();
+        assert_eq!(now[..head as usize], good[..head as usize]);
+        assert_eq!(ranges.len(), 1);
+        assert_eq!((ranges[0].offset, ranges[0].size), (head, 4000 - head));
+        assert_eq!(
+            crate::progressive_unpack::skippable_holes_behind_head(&ranges, size, head),
+            vec![(head as u64, (4000 - head) as u64)]
+        );
+        // A volume whose first article arrived is left alone.
+        let mut later = vec![R { offset: 8000, size: 100 }];
+        assert_eq!(super::rebuild_lost_head(&full, b"out.part3.rar", &mut later), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

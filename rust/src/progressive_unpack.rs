@@ -119,7 +119,18 @@ pub fn skippable_holes(
     holes: &[crate::dupefallback::NzbgetRsByteRange],
     file_size: i64,
 ) -> Vec<(u64, u64)> {
-    if file_size <= HEADER_GUARD_HEAD + HEADER_GUARD_TAIL {
+    skippable_holes_behind_head(holes, file_size, HEADER_GUARD_HEAD)
+}
+
+/// [`skippable_holes`] for a volume whose headers are known to end at `head_end` (rebuilt from
+/// its quick-open record): a hole right behind them is archived data and can be read past.
+pub fn skippable_holes_behind_head(
+    holes: &[crate::dupefallback::NzbgetRsByteRange],
+    file_size: i64,
+    head_end: i64,
+) -> Vec<(u64, u64)> {
+    let head_end = head_end.max(1);
+    if file_size <= head_end + HEADER_GUARD_TAIL {
         return Vec::new();
     }
     let mut out: Vec<(u64, u64)> = Vec::with_capacity(holes.len());
@@ -127,7 +138,7 @@ pub fn skippable_holes(
         if h.size <= 0 {
             continue;
         }
-        if h.offset < HEADER_GUARD_HEAD || h.offset + h.size > file_size - HEADER_GUARD_TAIL {
+        if h.offset < head_end || h.offset + h.size > file_size - HEADER_GUARD_TAIL {
             return Vec::new();
         }
         out.push((h.offset as u64, h.size as u64));

@@ -279,6 +279,50 @@ impl SourceWriteContext {
         self.coordinator.invalidate_sources();
         self.cancel_live_sessions();
     }
+    /// Whether a live PAR session reads the download this context writes into.
+    pub fn watched_by_live_par(&self) -> bool {
+        self.live_jobs()
+            .into_iter()
+            .any(crate::parchecker::streaming_session_has_session)
+    }
+    /// A rewrite of `size` bytes at `offset`, already on disk, that live PAR takes in by
+    /// re-verifying the slices it touches: true when every live session watching this
+    /// download reconciled it. False when one could not, or this context names no file; the
+    /// caller then invalidates the identity as before.
+    pub fn range_replaced(&self, offset: u64, size: u64) -> bool {
+        #[allow(unreachable_patterns)]
+        let path = match &self.identity {
+            WriterIdentity::Path(path) | WriterIdentity::FileAndPath(_, path) => path,
+            _ => return false,
+        };
+        let Some(name) = path.file_name() else {
+            return false;
+        };
+        let jobs = self.live_jobs();
+        !jobs.is_empty()
+            && jobs.into_iter().all(|id| {
+                crate::parchecker::streaming_session_on_range_replaced_by_name(
+                    id,
+                    name.as_encoded_bytes(),
+                    offset,
+                    size,
+                ) != Some(false)
+            })
+    }
+    fn live_jobs(&self) -> Vec<i32> {
+        WRITES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .downloads
+            .iter()
+            .filter_map(|(&id, (_, owner))| {
+                owner
+                    .upgrade()
+                    .filter(|owner| Arc::ptr_eq(owner, &self.coordinator))
+                    .map(|_| id)
+            })
+            .collect()
+    }
     #[track_caller]
     fn cancel_live_sessions(&self) {
         let owners: Vec<_> = WRITES

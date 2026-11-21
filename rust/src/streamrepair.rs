@@ -8772,7 +8772,13 @@ fn guarded_donor_write(
     use std::io::{Seek, SeekFrom, Write};
     let offset = u64::try_from(offset).map_err(|_| std::io::ErrorKind::InvalidInput)?;
     let _permit = context.descriptor_permit(file)?;
-    context.invalidate_identity();
+    // A live PAR session reading this download takes the patch in once it is on disk (it
+    // re-verifies the slices the range touches); without one, or when it cannot reconcile
+    // the new bytes, the file's identity changes as before and live PAR stops.
+    let live = context.watched_by_live_par();
+    if !live {
+        context.invalidate_identity();
+    }
     let result = (|| {
         file.seek(SeekFrom::Start(offset)).and_then(|position| {
             if position != offset {
@@ -8783,6 +8789,8 @@ fn guarded_donor_write(
     })();
     if result.is_err() {
         context.invalidate();
+    } else if live && !context.range_replaced(offset, data.len() as u64) {
+        context.invalidate_identity();
     }
     result
 }

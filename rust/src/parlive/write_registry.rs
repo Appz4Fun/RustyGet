@@ -227,6 +227,9 @@ impl SourceWriteContext {
         }
     }
     /// Run only filesystem work here; queue callbacks belong after the permit drops.
+    /// A failure that found nothing (a file or folder already gone) changed nothing on disk
+    /// and leaves live PAR's sources valid.
+    #[track_caller]
     pub fn perform_io<T>(&self, action: impl FnOnce() -> std::io::Result<T>) -> std::io::Result<T> {
         let _permit = self.permit().map_err(|_| {
             std::io::Error::new(
@@ -235,7 +238,10 @@ impl SourceWriteContext {
             )
         })?;
         let result = action();
-        if result.is_err() {
+        if result
+            .as_ref()
+            .is_err_and(|e| e.kind() != std::io::ErrorKind::NotFound)
+        {
             self.invalidate();
         }
         result
@@ -267,10 +273,13 @@ impl SourceWriteContext {
         }
         changed
     }
+    /// Callers are tracked so live PAR's stop line names the write that failed, not this.
+    #[track_caller]
     pub fn invalidate(&self) {
         self.coordinator.invalidate_sources();
         self.cancel_live_sessions();
     }
+    #[track_caller]
     fn cancel_live_sessions(&self) {
         let owners: Vec<_> = WRITES
             .lock()

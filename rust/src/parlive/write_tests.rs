@@ -573,3 +573,24 @@ fn one_live_repair_request_cannot_claim_aliased_paths() {
         .expect("distinct eligible target names remain admissible");
     drop(lease);
 }
+
+#[test]
+fn a_write_that_found_nothing_leaves_live_par_sources_valid() {
+    for (id, error, survives) in [
+        (-1900297, std::io::ErrorKind::NotFound, true),
+        (-1900298, std::io::ErrorKind::Other, false),
+    ] {
+        let disk = Disk::new(&format!("found-nothing{id}"));
+        let root = disk.0.parent().unwrap();
+        let context = donor_write_context(root, &disk.0).unwrap();
+        let gate = download_writes(id, root).unwrap();
+        gate.advance_generation(SessionGeneration(1)).unwrap();
+        let _ = context.perform_io(|| -> std::io::Result<()> { Err(error.into()) });
+        assert_eq!(
+            gate.is_current_generation(SessionGeneration(1)),
+            survives,
+            "{error:?} should leave live PAR running: {survives}"
+        );
+        forget_download_writes(id);
+    }
+}

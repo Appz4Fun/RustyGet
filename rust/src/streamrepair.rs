@@ -9766,9 +9766,18 @@ fn plan_dead_fills(
                                             head_len: g.data_offset,
                                             packed: g.packed_size,
                                         }),
-                                        _ => set_fills.iter().find(|f: &&DeadFill| f.index == j).map(
-                                            |f| WholePart::Scratch { member: f.member, packed: f.packed },
-                                        ),
+                                        _ => set_fills
+                                            .iter()
+                                            .find(|f: &&DeadFill| f.index == j)
+                                            .map(|f| WholePart::Scratch {
+                                                member: f.member,
+                                                packed: f.packed,
+                                            })
+                                            .or_else(|| {
+                                                let path = path_of(&volume_name(j as u32 + 1));
+                                                crate::postproc::direct_unpack_has_virtual(&path)
+                                                    .then_some(WholePart::Virtual { path })
+                                            }),
                                     })
                                     .collect::<Option<Vec<_>>>()
                                     .unwrap_or_default()
@@ -10001,6 +10010,8 @@ enum WholePart {
     Volume { path: Vec<u8>, head_len: i64, packed: i64 },
     /// A dead volume rebuilt from borrowed bytes in this scratch member.
     Scratch { member: i32, packed: i64 },
+    /// A dead volume an earlier pass rebuilt and handed to direct unpack already.
+    Virtual { path: Vec<u8> },
 }
 
 #[derive(Clone, Debug)]
@@ -10626,6 +10637,7 @@ impl CrossPackRepairSession {
                     .target_holes
                     .get(d.target)
                     .is_some_and(|h| h.is_empty())
+                || (d.last && !self.parts_before_borrowed(&d))
             {
                 continue;
             }
@@ -10913,6 +10925,20 @@ impl CrossPackRepairSession {
         )
     }
 
+    /// Whether every dead volume in front of last volume `d` this session borrows into is
+    /// borrowed whole: its whole-file checksum takes in their bytes, so it waits for them.
+    fn parts_before_borrowed(&self, d: &DeadFill) -> bool {
+        d.parts_before.iter().all(|part| match part {
+            WholePart::Scratch { member, .. } => self
+                .dead_fills
+                .iter()
+                .find(|f| f.member == *member)
+                .and_then(|f| self.target_holes.get(f.target))
+                .is_some_and(|h| h.is_empty()),
+            _ => true,
+        })
+    }
+
     /// The whole inner file's CRC32 for last volume `d`, whose borrowed bytes `own` holds: the
     /// part checksums the volumes in front store, with the CRC32 of the bytes borrowed into
     /// dead ones, chained. Only the borrowed bytes vouch for themselves; every hole patched
@@ -10950,6 +10976,14 @@ impl CrossPackRepairSession {
                     let crc = crate::deadvolume::rar5_part_crc(&head)
                         .ok_or("a volume in front stores no part checksum")?;
                     crc32fast::Hasher::new_with_initial_len(crc, *packed as u64)
+                }
+                WholePart::Virtual { path } => {
+                    let v = crate::postproc::direct_unpack_virtual(self.dead_nzb_id, path)
+                        .filter(|v| v.holes.is_empty())
+                        .ok_or("a volume in front rebuilt earlier is not complete")?;
+                    let mut f = std::fs::File::open(&v.data)
+                        .map_err(|e| format!("borrowed data in front: {e}"))?;
+                    hash_file(&mut f, v.data_len as i64)?
                 }
                 WholePart::Scratch { member, packed } => {
                     let path = crate::artwritercore::article_writer_format_dest_file_path(

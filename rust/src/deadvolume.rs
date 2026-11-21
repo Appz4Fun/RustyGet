@@ -377,8 +377,8 @@ pub fn synthesize_frame(
     }
 }
 
-/// The part checksum stored in the file header of RAR5 `head` (a volume's bytes in front of
-/// its part): CRC32 of the part for a part that goes on in the next volume.
+/// The part checksum stored by the file header that ends RAR5 `head` (a volume's bytes in
+/// front of a part): CRC32 of the part for a part that goes on in the next volume.
 pub fn rar5_part_crc(head: &[u8]) -> Option<u32> {
     rar5::part_crc(head)
 }
@@ -634,7 +634,8 @@ mod rar5 {
         Some((fflags & FHFL_CRC32 != 0).then_some(q).filter(|&q| q + 4 <= h.len()))
     }
 
-    /// The CRC32 the file header in `head` (a volume's bytes in front of its part) stores.
+    /// The CRC32 stored by the file header that ends `head` (a volume's bytes in front of a
+    /// part): the part's own header, behind any other files (an nfo, say) and their data.
     pub(super) fn part_crc(head: &[u8]) -> Option<u32> {
         if !head.starts_with(SIG) {
             return None;
@@ -642,10 +643,11 @@ mod rar5 {
         let mut p = SIG.len();
         while p < head.len() {
             let b = block(head, &mut p)?;
-            if b.kind == HEAD_FILE {
+            if b.kind == HEAD_FILE && p == head.len() {
                 let at = crc32_field(b.header, b.body)??;
                 return Some(u32::from_le_bytes(b.header.get(at..at + 4)?.try_into().ok()?));
             }
+            p = p.checked_add(usize::try_from(b.data_len).ok()?)?;
         }
         None
     }
@@ -1487,6 +1489,56 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn the_part_crc_is_the_header_in_front_of_the_part_not_an_earlier_files() {
+        fn vint(out: &mut Vec<u8>, mut v: u64) {
+            loop {
+                let c = (v & 0x7f) as u8;
+                v >>= 7;
+                out.push(c | if v != 0 { 0x80 } else { 0 });
+                if v == 0 {
+                    break;
+                }
+            }
+        }
+        fn emit(out: &mut Vec<u8>, h: &[u8]) {
+            let mut sized = Vec::new();
+            vint(&mut sized, h.len() as u64);
+            sized.extend_from_slice(h);
+            out.extend_from_slice(&crc32fast::hash(&sized).to_le_bytes());
+            out.extend_from_slice(&sized);
+        }
+        // A stored file header with `data` bytes of data and part checksum `crc`.
+        let file = |name: &[u8], data: u64, crc: u32| {
+            let mut h = Vec::new();
+            vint(&mut h, 2); // file header
+            vint(&mut h, 0x02); // has data
+            vint(&mut h, data);
+            vint(&mut h, 0x04); // CRC32 present
+            vint(&mut h, data); // unpacked size
+            vint(&mut h, 0x20); // attributes
+            h.extend_from_slice(&crc.to_le_bytes());
+            vint(&mut h, 0); // stored
+            vint(&mut h, 0); // Windows
+            vint(&mut h, name.len() as u64);
+            h.extend_from_slice(name);
+            h
+        };
+        let mut head = b"Rar!\x1a\x07\x01\x00".to_vec();
+        let mut main = Vec::new();
+        vint(&mut main, 1);
+        vint(&mut main, 0);
+        vint(&mut main, 0x01); // volume
+        emit(&mut head, &main);
+        emit(&mut head, &file(b"x.nfo", 3, 0x1111_1111));
+        head.extend_from_slice(b"nfo");
+        emit(&mut head, &file(b"x.mkv", 1000, 0x2222_2222));
+        assert_eq!(rar5_part_crc(&head), Some(0x2222_2222));
+        // Bytes past the part's header: not a head that ends in front of a part.
+        head.push(0);
+        assert_eq!(rar5_part_crc(&head), None);
     }
 
     #[test]

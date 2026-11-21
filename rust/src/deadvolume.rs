@@ -750,6 +750,164 @@ mod rar5 {
         Ok((out, end))
     }
 
+    /// A block at `at` in `b` whose header CRC checks out: its kind, its header (from the
+    /// type on), the offset just behind the header and its data length.
+    fn checked_block(b: &[u8], at: usize) -> Option<(Block<'_>, usize)> {
+        let mut p = at;
+        let blk = block(b, &mut p)?;
+        let stored = u32::from_le_bytes(b.get(at..at + 4)?.try_into().ok()?);
+        (crc32fast::hash(b.get(at + 4..p)?) == stored).then_some((blk, p))
+    }
+
+    /// The name of a service header (`QO` for quick-open data, `RR` for a recovery record).
+    fn service_name<'a>(b: &Block<'a>) -> Option<&'a [u8]> {
+        let h = b.header;
+        let mut q = b.body;
+        let fflags = vint(h, &mut q)?;
+        vint(h, &mut q)?; // unpacked size
+        vint(h, &mut q)?; // attributes
+        if fflags & FHFL_MTIME != 0 {
+            q += 4;
+        }
+        if fflags & FHFL_CRC32 != 0 {
+            q += 4;
+        }
+        vint(h, &mut q)?; // compression
+        vint(h, &mut q)?; // host OS
+        let n = vint(h, &mut q)? as usize;
+        h.get(q..q.checked_add(n)?)
+    }
+
+    /// `v` as a vint of exactly `width` bytes (RAR pads a field it patches later this way).
+    fn put_padded_vint(out: &mut Vec<u8>, mut v: u64, width: usize) -> Option<()> {
+        for i in 0..width {
+            let more = i + 1 < width;
+            out.push((v & 0x7f) as u8 | if more { 0x80 } else { 0 });
+            v >>= 7;
+        }
+        (v == 0).then_some(())
+    }
+
+    /// Rebuilds the first bytes of volume `index` (from 0) of a RAR5 set, its signature, main
+    /// header and the header of the file its data starts with, from `tail`, the volume's last
+    /// bytes (`file_size` long in all). RAR 5 and later keep a quick-open record behind the
+    /// data of every volume holding an exact copy of each file header in it and where it
+    /// sits, and the main header holds nothing but the volume flags, the number and where that
+    /// record is. `None` unless the tail ends in a sound end block right behind a sound
+    /// quick-open record (no recovery record), whose copied headers, each checked, run with
+    /// their data back to back from the main header to the record.
+    /// Whether a file header's compression information marks it solid.
+    fn solid_file(b: &Block<'_>) -> Option<bool> {
+        let h = b.header;
+        let mut q = b.body;
+        let file_flags = vint(h, &mut q)?;
+        vint(h, &mut q)?; // unpacked size
+        vint(h, &mut q)?; // attributes
+        if file_flags & 0x02 != 0 {
+            q += 4; // modification time
+        }
+        if file_flags & 0x04 != 0 {
+            q += 4; // data CRC32
+        }
+        Some(vint(h, &mut q)? & 0x40 != 0)
+    }
+
+    pub(super) fn head_from_tail(tail: &[u8], file_size: u64, index: usize) -> Option<Vec<u8>> {
+        let base = file_size.checked_sub(tail.len() as u64)?;
+        // The end block, then only padding.
+        let end_at = (tail.len().saturating_sub(64)..tail.len()).rev().find(|&at| {
+            checked_block(tail, at).is_some_and(|(b, e)| {
+                b.kind == HEAD_ENDARC && tail[e..].iter().all(|&c| c == 0)
+            })
+        })?;
+        // The quick-open service block, its data ending where the end block starts.
+        let (qo_at, data) = (end_at.saturating_sub(1 << 16)..end_at).rev().find_map(|at| {
+            let (b, e) = checked_block(tail, at)?;
+            (b.kind == HEAD_SERVICE
+                && b.flags & HFL_DATA != 0
+                && e.checked_add(b.data_len as usize) == Some(end_at)
+                && service_name(&b) == Some(b"QO".as_slice()))
+            .then(|| (at, &tail[e..end_at]))
+        })?;
+        let qo_pos = base + qo_at as u64;
+        // Its records: CRC32 over size and body; body = flags, offset back from the record
+        // block, size, then that many bytes of a cached header block.
+        let mut cached: Vec<(u64, &[u8], u64)> = Vec::new();
+        let mut p = 0;
+        while p < data.len() {
+            let crc = u32::from_le_bytes(data.get(p..p + 4)?.try_into().ok()?);
+            let mut q = p + 4;
+            let size = vint(data, &mut q)? as usize;
+            let end = q.checked_add(size).filter(|&e| e <= data.len())?;
+            if crc32fast::hash(&data[p + 4..end]) != crc {
+                return None;
+            }
+            vint(data, &mut q)?; // flags
+            let back = vint(data, &mut q)?;
+            let len = vint(data, &mut q)? as usize;
+            let header = data.get(q..q.checked_add(len)?).filter(|_| q + len == end)?;
+            let (b, e) = checked_block(header, 0).filter(|(_, e)| *e == header.len())?;
+            // A solid archive sets a main-header flag the record does not keep: its head
+            // cannot be rebuilt exactly. (A locked archive's flag is lost the same way and
+            // shows nowhere; RAR's -k is rare.)
+            if b.kind != HEAD_FILE || solid_file(&b)? {
+                return None;
+            }
+            let _ = e;
+            cached.push((qo_pos.checked_sub(back)?, header, b.data_len));
+            p = end;
+        }
+        cached.sort_by_key(|c| c.0);
+        let first = cached.first()?;
+        // The volume number comes from the file name: only a later volume's first file goes
+        // on from the volume before, so the first volume and a later one cannot be mixed up.
+        let split_before = checked_block(first.1, 0)?.0.flags & HFL_SPLIT_BEFORE != 0;
+        if split_before != (index > 0) {
+            return None;
+        }
+        // Back to back: each header, its data, the next header... up to the record.
+        let mut at = first.0;
+        for &(pos, header, data_len) in &cached {
+            if pos != at {
+                return None;
+            }
+            at = pos.checked_add(header.len() as u64)?.checked_add(data_len)?;
+        }
+        if at != qo_pos {
+            return None;
+        }
+        // The main header fills what is left in front of the first file header.
+        let want = usize::try_from(first.0.checked_sub(SIG.len() as u64)?).ok()?;
+        let locator = qo_pos.checked_sub(SIG.len() as u64)?;
+        let main = [6usize, 1, 2, 3, 4, 5, 7, 8, 9, 10].into_iter().find_map(|width| {
+            let mut rec = Vec::new();
+            put_vint(&mut rec, 1); // locator record
+            put_vint(&mut rec, 1); // quick-open offset present
+            put_padded_vint(&mut rec, locator, width)?;
+            let mut extra = Vec::new();
+            put_vint(&mut extra, rec.len() as u64);
+            extra.extend_from_slice(&rec);
+            let mut h = Vec::new();
+            put_vint(&mut h, HEAD_MAIN);
+            put_vint(&mut h, HFL_EXTRA | 0x04); // extra area, skip if unknown
+            put_vint(&mut h, extra.len() as u64);
+            if index == 0 {
+                put_vint(&mut h, 0x01); // volume
+            } else {
+                put_vint(&mut h, 0x01 | MHFL_VOLNUMBER);
+                put_vint(&mut h, index as u64);
+            }
+            h.extend_from_slice(&extra);
+            let mut out = Vec::new();
+            emit(&mut out, &h);
+            (out.len() == want).then_some(out)
+        })?;
+        let mut head = SIG.to_vec();
+        head.extend_from_slice(&main);
+        head.extend_from_slice(first.1);
+        Some(head)
+    }
+
     pub(super) fn frame(
         head: &[u8],
         tail: &[u8],
@@ -899,6 +1057,74 @@ mod rar5 {
         let end = end.ok_or_else(|| bad("no end-of-archive header"))?;
         Ok((out, end))
     }
+}
+
+/// How many bytes at a volume's end [`rar5_head_from_tail`] looks at.
+pub const HEAD_TAIL_SCAN: u64 = 1 << 17;
+
+/// The first bytes of RAR5 volume `index` (from 0) rebuilt from its own last bytes `tail`
+/// (the volume is `file_size` bytes long): its signature, main header and the header of the
+/// file its data starts with, from the quick-open copy RAR 5 and later keep behind the data
+/// of every volume. Lets a volume whose first article was lost in every copy (and in the
+/// par2 set) be read, mapped and lent to again. `None` when the tail does not vouch for them
+/// (no quick-open record, a recovery record, a comment or anything else in front).
+pub fn rar5_head_from_tail(tail: &[u8], file_size: u64, index: usize) -> Option<Vec<u8>> {
+    rar5::head_from_tail(tail, file_size, index)
+}
+
+/// Writes the first bytes of RAR5 volume `path`, number `index` (from 0), back from its own
+/// quick-open record (see [`rar5_head_from_tail`]) when its first lost range in `holes`
+/// (`start`, `end`, sorted) starts the file and what arrived behind the last one (at most
+/// [`HEAD_TAIL_SCAN`] bytes of it) holds that record.
+/// Bytes of the rebuilt head that did arrive must match. Returns the head's length when the
+/// head is on disk (also when it already was): the volume's data starts there, and only
+/// the rest of the first hole is part of the file it holds.
+pub fn restore_head_from_tail(path: &[u8], holes: &[(u64, u64)], index: usize) -> Option<u64> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let &(first_start, first_end) = holes.first()?;
+    if first_start != 0 {
+        return None;
+    }
+    let len = std::fs::metadata(crate::fsops::path(path)).ok()?.len();
+    // The tail looked at: what arrived behind the last hole, at most HEAD_TAIL_SCAN bytes.
+    let from = holes
+        .iter()
+        .map(|&(_, e)| e)
+        .fold(len.saturating_sub(HEAD_TAIL_SCAN), u64::max);
+    if from >= len {
+        return None;
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(crate::fsops::path(path))
+        .ok()?;
+    let mut tail = vec![0u8; (len - from) as usize];
+    f.seek(SeekFrom::Start(from)).ok()?;
+    f.read_exact(&mut tail).ok()?;
+    let head = rar5::head_from_tail(&tail, len, index)?;
+    let head_len = head.len() as u64;
+    if head_len >= len {
+        return None;
+    }
+    // Bytes behind the first hole that the head covers arrived: they must agree.
+    if head_len > first_end {
+        let mut got = vec![0u8; (head_len - first_end) as usize];
+        f.seek(SeekFrom::Start(first_end)).ok()?;
+        f.read_exact(&mut got).ok()?;
+        if got != head[first_end as usize..] {
+            return None;
+        }
+    }
+    let mut on_disk = vec![0u8; head.len()];
+    f.seek(SeekFrom::Start(0)).ok()?;
+    f.read_exact(&mut on_disk).ok()?;
+    if on_disk != head {
+        f.seek(SeekFrom::Start(0)).ok()?;
+        f.write_all(&head[..head_len.min(first_end) as usize]).ok()?;
+        f.flush().ok()?;
+    }
+    Some(head_len)
 }
 
 /// Whether every service record in RAR5 `tail` is one [`faithful_frame`] rebuilds (the
@@ -1242,6 +1468,80 @@ mod tests {
             (p[0].template, p[0].data_offset, p[0].packed_size),
             (127, 62, 898)
         );
+    }
+
+    /// Rebuilds `bytes`' head (everything in front of its first file's data) from its tail.
+    fn head_back(bytes: &[u8], index: usize) -> Option<Vec<u8>> {
+        let from = bytes.len().saturating_sub(HEAD_TAIL_SCAN as usize);
+        rar5_head_from_tail(&bytes[from..], bytes.len() as u64, index)
+    }
+
+    #[test]
+    fn rar5_head_is_rebuilt_from_the_quick_open_record_byte_for_byte() {
+        for (name, index) in [
+            ("rarrenamer/testfile5.part01.rar", 0),
+            ("rarrenamer/testfile5.part02.rar", 1),
+            ("deadvolume/out.part2.rar", 1),
+            ("deadvolume/out.part3.rar", 2),
+        ] {
+            let b = testdata(name);
+            let (_, files) = parse(&b);
+            let head_len = files[0].data_offset as usize;
+            let head = head_back(&b, index).unwrap_or_else(|| panic!("{name}: no head"));
+            assert_eq!(head, b[..head_len], "{name}");
+            // Only the tail is looked at: the head's own bytes may all be gone.
+            let mut lost = b.clone();
+            lost[..head_len + 100].fill(0);
+            assert_eq!(head_back(&lost, index).as_deref(), Some(&b[..head_len]), "{name}");
+        }
+    }
+
+    #[test]
+    fn rar5_head_is_not_guessed_without_a_sound_quick_open_record() {
+        // The last volume has no quick-open record; header-encrypted sets keep it encrypted;
+        // RAR4 has none.
+        for (name, index) in [
+            ("rarrenamer/testfile5.part03.rar", 2),
+            ("rarrenamer/testfile5encnam.part02.rar", 1),
+            ("rarrenamer/testfile3.part02.rar", 1),
+        ] {
+            assert!(head_back(&testdata(name), index).is_none(), "{name}");
+        }
+        // A first volume taken for a later one, or the other way round: its first file
+        // does or does not go on from a volume before.
+        assert!(head_back(&testdata("rarrenamer/testfile5.part01.rar"), 1).is_none());
+        assert!(head_back(&testdata("rarrenamer/testfile5.part02.rar"), 0).is_none());
+        // A flipped byte in the copied header fails its checksum.
+        let mut b = testdata("deadvolume/out.part2.rar");
+        let n = b.len();
+        b[n - 30] ^= 1;
+        assert!(head_back(&b, 1).is_none());
+    }
+
+    #[test]
+    fn a_lost_head_is_written_back_and_the_data_left_to_borrow() {
+        let b = testdata("deadvolume/out.part3.rar");
+        let (_, files) = parse(&b);
+        let head_len = files[0].data_offset as u64;
+        let dir = std::env::temp_dir().join(format!("rg_headback_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("out.part3.rar");
+        let mut lost = b.clone();
+        lost[..4000].fill(0);
+        std::fs::write(&path, &lost).unwrap();
+        let p = path.to_str().unwrap().as_bytes();
+        // A hole reaching into the tail, or one that does not start the file, is left alone.
+        assert_eq!(restore_head_from_tail(p, &[(0, 4000), (9990, 10000)], 2), None);
+        assert_eq!(restore_head_from_tail(p, &[(10, 4000)], 2), None);
+        assert_eq!(restore_head_from_tail(p, &[(0, 4000)], 2), Some(head_len));
+        let now = std::fs::read(&path).unwrap();
+        assert_eq!(now[..head_len as usize], b[..head_len as usize]);
+        assert!(now[head_len as usize..4000].iter().all(|&c| c == 0));
+        // Again: already there.
+        assert_eq!(restore_head_from_tail(p, &[(0, 4000)], 2), Some(head_len));
+        // A wrong volume number disagrees with bytes that arrived behind a short hole.
+        assert_eq!(restore_head_from_tail(p, &[(0, 10)], 1), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn testdata(name: &str) -> Vec<u8> {

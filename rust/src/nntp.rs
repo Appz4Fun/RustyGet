@@ -1840,9 +1840,20 @@ mod article_fetcher_tests {
         let no_groups = Arc::new(Vec::<Vec<u8>>::new());
         let seen = Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new()));
         let seen_cb = Arc::clone(&seen);
+        let raised = Arc::new(AtomicBool::new(false));
+        let raised_cb = Arc::clone(&raised);
         let batch = ArticleBatchFetcher::new(
             move |worker, _| {
                 seen_cb.lock().unwrap().insert(worker);
+                // Once raised, worker 0 waits for the others so it cannot drain the batch
+                // alone on a loaded machine.
+                let until = std::time::Instant::now() + Duration::from_secs(5);
+                while raised_cb.load(Ordering::SeqCst)
+                    && seen_cb.lock().unwrap().len() < 4
+                    && std::time::Instant::now() < until
+                {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
                 std::thread::sleep(Duration::from_millis(20));
                 Ok(make_result(b'r', 4))
             },
@@ -1858,6 +1869,7 @@ mod article_fetcher_tests {
         batch.begin(requests);
         assert!(batch.next().is_some());
         // Mid-batch: no new batch begins, yet the added workers take part in this one.
+        raised.store(true, Ordering::SeqCst);
         batch.raise_worker_count(4);
         let mut delivered = 1;
         while batch.next().is_some() {

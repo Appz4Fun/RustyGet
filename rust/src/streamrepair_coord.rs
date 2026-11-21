@@ -2546,12 +2546,11 @@ impl NzbgetRsStreamRepairCtrl {
     }
 
     /// A live repair fetches with few workers so the download keeps its connections. Once the
-    /// download has nothing left to fetch (every file it still holds is paused, par2 files
-    /// held back), those connections are idle while extraction waits on the repair: A2's last
-    /// wave on 6790 borrowed 182 MB across the download end with 15 of 60 connections, at 6
-    /// MB/s, and was most of the 40 s wait. The wave running now takes the workers of a
-    /// repair after the download at once, and so does every later pass. The queue is asked at
-    /// most every `YIELD_CHECK`.
+    /// download has nothing left to fetch (it holds only paused par2 files), those connections
+    /// are idle while extraction waits on the repair: A2's last wave on 6790 borrowed 182 MB
+    /// across the download end with 15 of 60 connections, at 6 MB/s, and was most of the 40 s
+    /// wait. The wave running now takes the workers of a repair after the download at once,
+    /// and so does every later pass. The queue is asked at most every `YIELD_CHECK`.
     fn widen_when_drained(&self, q: JobQueue<'_>) {
         let want = self.drained_workers.load(Ordering::SeqCst);
         if !self.live_mode || want <= self.batch_fetcher.worker_count() {
@@ -2568,9 +2567,13 @@ impl NzbgetRsStreamRepairCtrl {
         let host = q.host;
         let drained = host.with_locked_queue(|dq_ptr| {
             let nzb = host.queue_find_by_id(dq_ptr, q.nzb_id());
+            // Only par2 files held back: a data file paused means the user paused the
+            // download, which goes on when resumed.
             !nzb.is_none()
-                && (0..host.nzb_file_len(nzb))
-                    .all(|i| host.file_snap(host.nzb_file_at(nzb, i)).paused)
+                && (0..host.nzb_file_len(nzb)).all(|i| {
+                    let f = host.file_snap(host.nzb_file_at(nzb, i));
+                    f.paused && f.par_file
+                })
         });
         if !drained {
             return;

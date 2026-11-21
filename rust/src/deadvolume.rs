@@ -163,7 +163,9 @@ pub fn plan_with_stop(volumes: &[VolumeState], inner_size: i64) -> (Vec<Plan>, O
                 let packed = if closes { inner_size - offset } else { g.packed_size };
                 let size = g.data_offset + packed + g.tail_len();
                 let encoded_size = *encoded_size;
-                if encoded_size > 0 && (encoded_size < size || encoded_size > size + size / 16) {
+                // yEnc's own lines weigh more in a short last volume: a little slack on top.
+                let slack = size / 16 + if closes { 1024 } else { 0 };
+                if encoded_size > 0 && (encoded_size < size || encoded_size > size + slack) {
                     let stop = StopReason::SizeMismatch { volume, encoded_size, expected: size };
                     return (out, Some(stop));
                 }
@@ -339,7 +341,9 @@ fn shifted_volume_number(number: u64, index: usize, template: usize) -> Option<u
 /// the last volume still checks the whole file. A RAR 1.5-4 header always has the field:
 /// without `part_crc` it carries 0, which a persistent session opted in with
 /// `ProgressiveOptions::rar4_unknown_part_crc` takes as "not known yet" for a part that
-/// continues in the next volume (every rebuilt part does). Records
+/// continues in the next volume (every rebuilt part does). With `last` the volume is the
+/// set's last (RAR5 only): its part closes the file, its end header says no volume follows,
+/// and `part_crc` is the whole file's CRC32, which a last part stores. Records
 /// that point at other places in the sibling (RAR5's locator and quick-open data, RAR 1.5-4's
 /// recovery record and archive checksum) are left out: they describe the sibling, and an
 /// extraction does not need them. Encrypted parts and parts with another hash than CRC32 are
@@ -371,6 +375,12 @@ pub fn synthesize_frame(
         ),
         v => Err(FrameError::UnsupportedVersion(v)),
     }
+}
+
+/// The part checksum stored in the file header of RAR5 `head` (a volume's bytes in front of
+/// its part): CRC32 of the part for a part that goes on in the next volume.
+pub fn rar5_part_crc(head: &[u8]) -> Option<u32> {
+    rar5::part_crc(head)
 }
 
 /// `head` with its part checksum set to `part_crc`, for a volume handed over before its
@@ -622,6 +632,22 @@ mod rar5 {
             q += 4;
         }
         Some((fflags & FHFL_CRC32 != 0).then_some(q).filter(|&q| q + 4 <= h.len()))
+    }
+
+    /// The CRC32 the file header in `head` (a volume's bytes in front of its part) stores.
+    pub(super) fn part_crc(head: &[u8]) -> Option<u32> {
+        if !head.starts_with(SIG) {
+            return None;
+        }
+        let mut p = SIG.len();
+        while p < head.len() {
+            let b = block(head, &mut p)?;
+            if b.kind == HEAD_FILE {
+                let at = crc32_field(b.header, b.body)??;
+                return Some(u32::from_le_bytes(b.header.get(at..at + 4)?.try_into().ok()?));
+            }
+        }
+        None
     }
 
     /// Quick-open data is a run of records, each a CRC32 over its size and body, then the
@@ -944,8 +970,6 @@ mod rar5 {
         last: bool,
     ) -> Result<(Vec<u8>, Vec<u8>), FrameError> {
         let bad = |what: &'static str| FrameError::Sibling { format: "RAR5", what };
-        // A last part's checksum field is the whole file's, which is not known: none.
-        let part_crc = part_crc.filter(|_| !last);
         if !head.starts_with(SIG) {
             return Err(bad("no signature"));
         }

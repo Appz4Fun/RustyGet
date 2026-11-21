@@ -4446,6 +4446,19 @@ fn a_dead_last_volume_extracts_from_borrowed_data_through_rebuilt_headers() {
     let borrowed = &data[p.inner_offset as usize..];
     let path = t.0.join("last.data");
     std::fs::write(&path, borrowed).unwrap();
+    // The whole file's CRC32, as the last header stores it: the part checksums of the
+    // volumes in front, chained with that of the borrowed bytes.
+    let mut whole = crc32fast::Hasher::new();
+    for v in &vols[..last] {
+        let g = geometry_of(v);
+        let crc = crate::deadvolume::rar5_part_crc(&v[..g.data_offset as usize]).unwrap();
+        whole.combine(&crc32fast::Hasher::new_with_initial_len(crc, g.packed_size as u64));
+    }
+    let mut own = crc32fast::Hasher::new();
+    own.update(borrowed);
+    whole.combine(&own);
+    let whole = whole.finalize();
+    assert_eq!(whole, crc32fast::hash(&data));
     let tv = &vols[p.template];
     let tg = geometry_of(tv);
     let (head, tail) = synthesize_frame(
@@ -4455,7 +4468,7 @@ fn a_dead_last_volume_extracts_from_borrowed_data_through_rebuilt_headers() {
         p.template,
         p.index,
         p.packed_size as u64,
-        Some(crc32fast::hash(borrowed)),
+        Some(whole),
         true,
     )
     .unwrap();
@@ -4463,13 +4476,37 @@ fn a_dead_last_volume_extracts_from_borrowed_data_through_rebuilt_headers() {
     // A middle volume's framing does not pass for a last one.
     assert!(crate::deadvolume::check_frame(&head, &tail, p.packed_size as u64, b"movie.mkv", false)
         .is_err());
-    let virtuals = std::collections::HashMap::from([(
-        t.dl().join(volume_name(last, vols.len())),
-        VirtualVolume { head, data: path, data_len: p.packed_size as u64, tail, holes: Vec::new() },
-    )]);
-    let (r, log) = run(&first, &t.out(), Box::new(WithVirtual { virtuals }));
+    let volume = |data: std::path::PathBuf| {
+        std::collections::HashMap::from([(
+            t.dl().join(volume_name(last, vols.len())),
+            VirtualVolume {
+                head: head.clone(),
+                data,
+                data_len: p.packed_size as u64,
+                tail: tail.clone(),
+                holes: Vec::new(),
+            },
+        )])
+    };
+    let (r, log) = run(&first, &t.out(), Box::new(WithVirtual { virtuals: volume(path) }));
     expect_ok(r, &log);
     assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+
+    // Wrong borrowed bytes fail the whole file's checksum, never published.
+    let t2 = TestDir::new("deadvol-last-bad");
+    let first2 = write_set(&t2.dl(), &vols);
+    std::fs::remove_file(t2.dl().join(volume_name(last, vols.len()))).unwrap();
+    let mut bad = borrowed.to_vec();
+    bad[100] ^= 1;
+    let bad_path = t2.0.join("last.bad");
+    std::fs::write(&bad_path, bad).unwrap();
+    let virtuals = volume(bad_path)
+        .into_iter()
+        .map(|(k, v)| (t2.dl().join(k.file_name().unwrap()), v))
+        .collect();
+    let (r, log) = run(&first2, &t2.out(), Box::new(WithVirtual { virtuals }));
+    assert!(r.is_err(), "corrupt borrowed data must fail: {log:?}");
+    assert!(!t2.out().join("movie.mkv").exists());
 }
 
 /// RAR4 volumes as WinRAR 3.x writes them: the end block carries the archive checksum, the

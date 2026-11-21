@@ -9351,6 +9351,33 @@ pub(crate) fn rar_part_number(name: &[u8]) -> Option<(Vec<u8>, u32, usize, Vec<u
     Some((prefix.to_vec(), n, digits, name[name.len() - 4..].to_vec()))
 }
 
+/// `name`'s exact length as a par2 file in `dest_dir` lists it, from the smallest par2 files
+/// there (lost articles leave gaps, which the parser skips). `None` when none names it.
+fn par2_length_of(dest_dir: &[u8], name: &[u8]) -> Option<i64> {
+    const MAX_READ: i64 = 64 << 20;
+    let mut par2s: Vec<(i64, Vec<u8>)> = crate::fsops::list_dir_entries(dest_dir)
+        .into_iter()
+        .filter(|f| f.to_ascii_lowercase().ends_with(b".par2"))
+        .map(|f| {
+            let path = crate::artwritercore::article_writer_format_dest_file_path(
+                dest_dir,
+                std::path::MAIN_SEPARATOR as u8,
+                &f,
+            );
+            (file_size_bytes(&path), path)
+        })
+        .filter(|(size, _)| *size > 0 && *size <= MAX_READ)
+        .collect();
+    par2s.sort();
+    par2s.iter().take(3).find_map(|(_, path)| {
+        let data = std::fs::read(crate::fsops::path(path)).ok()?;
+        crate::twin::par2_sigs(&data).into_iter().find_map(|sig| {
+            let local = crate::parrenamer::translate_filename_from_par2_to_local(&sig.name);
+            local.eq_ignore_ascii_case(name).then(|| i64::try_from(sig.length).ok()).flatten()
+        })
+    })
+}
+
 /// Finds whole dead volumes of stored RAR sets, plans where their inner bytes belong (see
 /// [`crate::deadvolume::plan`]) and adds a repair set that borrows those bytes into scratch
 /// files, one pseudo member per dead volume.
@@ -9593,9 +9620,16 @@ fn plan_dead_fills(
         else {
             continue;
         };
-        let (all_plans, stop) = crate::deadvolume::plan_with_stop(&states, inner_size);
+        // A dead last volume is rebuilt only when par2's length shows it ends with the inner
+        // file: another member behind it would be dropped.
+        let last_length = matches!(states.last(), Some(VolumeState::Dead { .. }))
+            .then(|| par2_length_of(dest_dir, &volume_name(max)))
+            .flatten();
+        let (all_plans, stop) =
+            crate::deadvolume::plan_with_last(&states, inner_size, last_length);
         let plans: Vec<crate::deadvolume::Plan> = all_plans
-            .into_iter()
+            .iter()
+            .copied()
             .filter(|p| !crate::postproc::direct_unpack_has_virtual(&path_of(&volume_name(p.index as u32 + 1))))
             .collect();
         if plans.is_empty() && any_dead {
@@ -9643,8 +9677,9 @@ fn plan_dead_fills(
                     offset += g.packed_size;
                 }
                 VolumeState::Dead { .. } => {
-                    let Some(p) = crate::deadvolume::plan(&states, inner_size)
-                        .into_iter()
+                    let Some(p) = all_plans
+                        .iter()
+                        .copied()
                         .find(|p| p.index == i)
                     else {
                         break;

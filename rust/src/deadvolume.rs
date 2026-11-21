@@ -101,6 +101,9 @@ pub enum StopReason {
     NoTemplate { volume: usize },
     /// The dead volume may be the set's (shorter) last one.
     MaybeLast { volume: usize },
+    /// The dead volume would be the set's last, and no par2 length shows it holds nothing
+    /// after the inner file's end (another member behind it would be lost).
+    LastNotProven { volume: usize, par2_length: Option<i64>, expected: i64 },
     /// The nzb lists a size that does not fit the sibling's layout.
     SizeMismatch { volume: usize, encoded_size: i64, expected: i64 },
     /// The dead volume would end past the inner file.
@@ -120,6 +123,15 @@ impl std::fmt::Display for StopReason {
                 write!(f, "no readable sibling gives volume {volume}'s layout")
             }
             Self::MaybeLast { volume } => write!(f, "volume {volume} may be the set's last"),
+            Self::LastNotProven { volume, par2_length: None, .. } => write!(
+                f,
+                "volume {volume} would be the set's last, and no par2 file gives its length"
+            ),
+            Self::LastNotProven { volume, par2_length: Some(len), expected } => write!(
+                f,
+                "volume {volume} would be the set's last, but par2 lists it at {len} bytes, not \
+                 {expected}: it holds more than the inner file's end"
+            ),
             Self::SizeMismatch { volume, encoded_size, expected } => write!(
                 f,
                 "volume {volume} is listed at {encoded_size} bytes, which does not fit a \
@@ -136,7 +148,24 @@ impl std::fmt::Display for StopReason {
 }
 
 /// [`plan`], plus why planning stopped before the end of `volumes`, if it did. For the log.
+/// Never plans a dead last volume: see [`plan_with_last`].
 pub fn plan_with_stop(volumes: &[VolumeState], inner_size: i64) -> (Vec<Plan>, Option<StopReason>) {
+    plan_with_last(volumes, inner_size, None)
+}
+
+/// How far a rebuilt last volume may be off its par2 length: its header's size fields can
+/// shrink a byte or two with the shorter part. Another member behind the inner file needs a
+/// header of its own, well over this.
+const LAST_LENGTH_SLACK: i64 = 8;
+
+/// [`plan_with_stop`], also planning a dead last volume the inner file ends in when
+/// `last_length` (the volume's exact length, from par2) shows it holds that end and nothing
+/// more: a member after it would otherwise be dropped without a word.
+pub fn plan_with_last(
+    volumes: &[VolumeState],
+    inner_size: i64,
+    last_length: Option<i64>,
+) -> (Vec<Plan>, Option<StopReason>) {
     let mut out = Vec::new();
     let Some(VolumeState::Readable(first)) = volumes.first() else {
         return (out, Some(StopReason::FirstNotReadable));
@@ -171,6 +200,11 @@ pub fn plan_with_stop(volumes: &[VolumeState], inner_size: i64) -> (Vec<Plan>, O
                 }
                 if packed <= 0 || offset + packed > inner_size {
                     return (out, Some(StopReason::PastInnerEnd { volume }));
+                }
+                if closes && !last_length.is_some_and(|len| (len - size).abs() <= LAST_LENGTH_SLACK) {
+                    let stop =
+                        StopReason::LastNotProven { volume, par2_length: last_length, expected: size };
+                    return (out, Some(stop));
                 }
                 out.push(Plan {
                     index: i,
@@ -1563,8 +1597,22 @@ mod tests {
             data_offset: 61,
             last: true,
         };
-        assert_eq!(plan(&v, 900 + 899 + 899), vec![last(899)]);
-        assert_eq!(plan(&v, 900 + 899 + 500), vec![last(500)]);
+        // The last volume's size: 61 header bytes, the part, the end header.
+        let len = |packed: i64| Some(61 + packed + (1000 - 61 - 899));
+        assert_eq!(plan_with_last(&v, 900 + 899 + 899, len(899)).0, vec![last(899)]);
+        assert_eq!(plan_with_last(&v, 900 + 899 + 500, len(500)).0, vec![last(500)]);
+        // Without par2's word, or with a length that leaves room for another member behind
+        // the inner file, the last volume stays dead.
+        assert!(plan(&v, 900 + 899 + 500).is_empty());
+        let longer = len(500).map(|l| l + 60);
+        assert_eq!(
+            plan_with_last(&v, 900 + 899 + 500, longer).1,
+            Some(StopReason::LastNotProven {
+                volume: 3,
+                par2_length: longer,
+                expected: len(500).unwrap()
+            })
+        );
         assert_eq!(plan_with_stop(&v, 900 + 899).1, Some(StopReason::MaybeLast { volume: 3 }));
         assert_eq!(
             plan(&v, 900 + 899 + 900),

@@ -4416,7 +4416,7 @@ fn dead_volumes_extract_from_borrowed_data_through_rebuilt_headers() {
 
 #[test]
 fn a_dead_last_volume_extracts_from_borrowed_data_through_rebuilt_headers() {
-    use crate::deadvolume::{plan, synthesize_frame, VirtualVolume, VolumeState};
+    use crate::deadvolume::{plan_with_last, synthesize_frame, VirtualVolume, VolumeState};
     let t = TestDir::new("deadvol-last");
     // Eleven volumes, the last holding the file's final 50000 bytes.
     let data = pattern(1_050_000);
@@ -4438,7 +4438,9 @@ fn a_dead_last_volume_extracts_from_borrowed_data_through_rebuilt_headers() {
         })
         .collect();
     std::fs::remove_file(t.dl().join(volume_name(last, vols.len()))).unwrap();
-    let plans = plan(&states, data.len() as i64);
+    // par2 gives the dead last volume's exact length.
+    let last_len = vols.last().map(|v| v.len() as i64);
+    let plans = plan_with_last(&states, data.len() as i64, last_len).0;
     assert_eq!(plans.len(), 1);
     let p = plans[0];
     assert!(p.last);

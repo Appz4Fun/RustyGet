@@ -320,10 +320,13 @@ struct RunCounters {
 
 /// Donor articles fetched one at a time, by message id: each repair wave builds its donor's
 /// map again and reads every volume's first article for it (39 of them per wave in A2 on
-/// 6790, about 27 MB a wave), so later waves take them from here. A few dozen articles.
+/// 6790, about 27 MB a wave), so later waves take them from here. At most
+/// `RECENT_SINGLES_MAX` articles and `RECENT_SINGLES_BYTES` in all; an article over a
+/// sixteenth of that is not kept.
 static RECENT_SINGLES: Mutex<std::collections::VecDeque<(Vec<u8>, FetchedDonorArticle)>> =
     Mutex::new(std::collections::VecDeque::new());
 const RECENT_SINGLES_MAX: usize = 64;
+const RECENT_SINGLES_BYTES: usize = 48 << 20;
 
 fn recent_single(msg_id: &[u8]) -> Option<FetchedDonorArticle> {
     let g = RECENT_SINGLES.lock().unwrap_or_else(|e| e.into_inner());
@@ -331,12 +334,20 @@ fn recent_single(msg_id: &[u8]) -> Option<FetchedDonorArticle> {
 }
 
 fn keep_single(msg_id: &[u8], article: FetchedDonorArticle) {
+    if article.data.len() > RECENT_SINGLES_BYTES / 16 {
+        return;
+    }
     let mut g = RECENT_SINGLES.lock().unwrap_or_else(|e| e.into_inner());
     if g.iter().any(|(id, _)| id == msg_id) {
         return;
     }
-    if g.len() >= RECENT_SINGLES_MAX {
-        g.pop_front();
+    let mut held: usize = g.iter().map(|(_, a)| a.data.len()).sum();
+    while !g.is_empty()
+        && (g.len() >= RECENT_SINGLES_MAX || held + article.data.len() > RECENT_SINGLES_BYTES)
+    {
+        if let Some((_, old)) = g.pop_front() {
+            held -= old.data.len();
+        }
     }
     g.push_back((msg_id.to_vec(), article));
 }
@@ -2851,6 +2862,16 @@ mod tests {
         }
         assert!(recent_single(&id).is_none());
         assert!(RECENT_SINGLES.lock().unwrap().len() <= RECENT_SINGLES_MAX);
+        // Bounded in bytes too, and a huge article is never kept.
+        let big = FetchedDonorArticle { success: true, offset: 0, file_size: 1, data: vec![0; RECENT_SINGLES_BYTES / 16 + 1] };
+        keep_single(b"<huge@x>", big);
+        assert!(recent_single(b"<huge@x>").is_none());
+        let chunk = FetchedDonorArticle { success: true, offset: 0, file_size: 1, data: vec![0; RECENT_SINGLES_BYTES / 16] };
+        for i in 0..40 {
+            keep_single(format!("<chunk-{i}@x>").as_bytes(), chunk.clone());
+        }
+        let held: usize = RECENT_SINGLES.lock().unwrap().iter().map(|(_, a)| a.data.len()).sum();
+        assert!(held <= RECENT_SINGLES_BYTES);
     }
 
     #[test]

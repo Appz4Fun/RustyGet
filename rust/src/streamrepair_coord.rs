@@ -1762,6 +1762,9 @@ impl NzbgetRsStreamRepairCtrl {
                 }
 
                 fn next_donor_prefetch(&mut self) -> Option<FetchedDonorArticle> {
+                    // A wave drains its batch here without asking `is_stopped`: the download
+                    // ending during it must still widen it.
+                    self.ctrl.widen_when_drained(self.q);
                     let started = std::time::Instant::now();
                     let fetched = self.ctrl.batch_fetcher.next();
                     {

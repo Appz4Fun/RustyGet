@@ -1127,6 +1127,10 @@ impl BatchFetcherPool {
         Self { host, state, batch }
     }
 
+    pub fn worker_count(&self) -> i32 {
+        self.state.lock().map_or(0, |g| g.worker_count)
+    }
+
     pub fn set_worker_count(&self, worker_count: i32) {
         if let Ok(mut guard) = self.state.lock() {
             guard.worker_count = worker_count;

@@ -5549,20 +5549,21 @@ impl ContentMap {
     /// Reads donor plaintext for `inner_range` (`StreamRepairController::ReadDonorInner` in `StreamRepair.cpp`),
     /// decrypting through the donor map when the donor is encrypted.
     /// Hints the donor sources that the inner ranges `inner_ranges` are read next (see
-    /// [`ContentSource::prefetch_ranges`]), member by member. Encrypted maps read through
-    /// layers and are left alone.
+    /// [`ContentSource::prefetch_ranges`]), member by member. An encrypted donor is hinted
+    /// with the ciphertext each read decrypts, the block before it included (its IV); maps
+    /// that read through encrypted layers are left alone.
     pub fn prefetch_donor_inner(
         &self,
         sources: &dyn ContentSourceSet,
         inner_ranges: &[NzbgetRsByteRange],
     ) {
-        if self.inside_encrypted() || self.encrypted() {
+        if self.inside_encrypted() {
             return;
         }
         let mut by_member: std::collections::BTreeMap<i32, Vec<(i64, i64)>> =
             std::collections::BTreeMap::new();
         for &range in inner_ranges {
-            for piece in self.map_from_inner(range) {
+            for piece in self.member_pieces_read_for(range) {
                 by_member
                     .entry(piece.member_index)
                     .or_default()
@@ -5571,6 +5572,30 @@ impl ContentMap {
         }
         let by_member: Vec<(i32, Vec<(i64, i64)>)> = by_member.into_iter().collect();
         sources.prefetch_member_ranges(&by_member);
+    }
+
+    /// The member ranges a read of `inner_range` fetches: the mapped plaintext, or for an
+    /// encrypted map the ciphertext blocks covering it plus the block before them.
+    fn member_pieces_read_for(&self, inner_range: NzbgetRsByteRange) -> Vec<NzbgetRsMemberRange> {
+        if !self.encrypted() {
+            return self.map_from_inner(inner_range);
+        }
+        let block_size = RarCryptoContext::CRYPTO_BLOCK_SIZE as i64;
+        let (ok, empty, cipher_from, cipher_to) = content_map_calc_decrypt_cipher_bounds(
+            inner_range.offset,
+            inner_range.size,
+            self.inner_size,
+            block_size,
+            self.cipher_stream_size(),
+        );
+        if !ok || empty {
+            return Vec::new();
+        }
+        let from = (cipher_from - block_size).max(0);
+        self.map_cipher_range(NzbgetRsByteRange {
+            offset: from,
+            size: cipher_to - from,
+        })
     }
 
     pub fn read_donor_inner(
@@ -12797,6 +12822,38 @@ mod tests {
             .map(|rc| (rc.cipher_data_offset, rc.cipher_size))
             .collect();
         assert_eq!(cipher, vec![(100, 40), (10, 168)]);
+    }
+
+    #[test]
+    fn an_encrypted_donor_hints_the_ciphertext_its_reads_decrypt() {
+        struct Recording {
+            seen: std::cell::RefCell<Vec<(i32, Vec<(i64, i64)>)>>,
+        }
+        impl ContentSourceSet for Recording {
+            fn get_source(&self, _member_index: i32) -> Option<&dyn ContentSource> {
+                None
+            }
+            fn prefetch_member_ranges(&self, by_member: &[(i32, Vec<(i64, i64)>)]) {
+                self.seen.borrow_mut().extend_from_slice(by_member);
+            }
+        }
+        // 300 bytes of movie, AES-CBC encrypted, over two members behind 40 and 8 bytes.
+        let crypto =
+            std::sync::Arc::new(RarCryptoContext::from_key_iv(&[9u8; 32], [3u8; 16]).unwrap());
+        let mut map = ContentMap::default();
+        map.set_inner_size(300);
+        *map.runs_mut() = vec![run(0, 0, 40, 100), run(100, 1, 8, 200)];
+        for (offset, size) in [(40, 100), (8, 204)] {
+            map.run_cryptos_mut().push(RunCrypto {
+                crypto: Some(crypto.clone()),
+                cipher_data_offset: offset,
+                cipher_size: size,
+            });
+        }
+        let sources = Recording { seen: std::cell::RefCell::new(Vec::new()) };
+        // Plaintext 90..110 decrypts from cipher blocks 80..112 with the IV block 64..80.
+        map.prefetch_donor_inner(&sources, &[NzbgetRsByteRange { offset: 90, size: 20 }]);
+        assert_eq!(*sources.seen.borrow(), vec![(0, vec![(104, 36)]), (1, vec![(8, 12)])]);
     }
 
     #[test]

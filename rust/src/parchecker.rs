@@ -1886,6 +1886,29 @@ fn start_streaming_session_with(
     install_streaming_session(nzb_id, entry)
 }
 
+/// Tells the live session of `nzb_id` that `size` bytes at `offset` of file `name` were
+/// rewritten on disk (a stream-repair patch, a rebuilt volume head or end): it reads the range
+/// back and re-verifies the slices it touches instead of being cancelled. `Some(true)` when
+/// every slice was reconciled; `Some(false)` when one could not be (the caller falls back to
+/// cancelling); `None` when no live session runs for the download.
+pub fn streaming_session_on_range_replaced_by_name(
+    nzb_id: i32,
+    name: &[u8],
+    offset: u64,
+    size: u64,
+) -> Option<bool> {
+    let outcome = with_live_session(nzb_id, |entry| {
+        let id = entry
+            .session
+            .file_id_by_name(name)
+            .ok_or(RepairError::UnknownFile(FileId([0; 16])))?;
+        let outcome = entry.session.on_range_replaced(&id, offset, size, None)?;
+        entry.unpause(outcome.unpause.as_ref());
+        Ok(outcome.is_reconciled() && entry.session.diverged_slices().is_empty())
+    })?;
+    Some(outcome.unwrap_or(false))
+}
+
 /// Cancels the current generation permanently; in-flight owners retain their reservation.
 #[track_caller]
 pub fn streaming_session_cancel(nzb_id: i32) {

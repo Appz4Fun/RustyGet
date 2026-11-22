@@ -20,8 +20,8 @@ bench = false
 doctest = false
 
 [dependencies]
-par-rs = { git = "https://github.com/xbmc4lyfe/par-rs", rev = "13fba5deb6ffba8bd06930ae4d5ed25dcb821373" }
-zipfast = { git = "https://github.com/xbmc4lyfe/zipfast", rev = "5838ec963a9f94feca5566bc5a2ee1a8cb4f5fa0", features = ["persistent-partials"] }
+par-rs = { git = "https://github.com/Appz4Fun/par-rs", rev = "13fba5deb6ffba8bd06930ae4d5ed25dcb821373" }
+zipfast = { git = "https://github.com/Appz4Fun/zipfast", rev = "f368577e0d5fca858ae907d05f735c2988d25223", features = ["persistent-partials"] }
 zipview = { git = "https://github.com/xbmc4lyfe/zipview", rev = "2c3d73a06b29987cea1510e903e437a482076745" }
 nntmux-yenc = { git = "https://github.com/xbmc4lyfe/newznab-tmux", rev = "8dade08ca0372e046af2bd9d3040e23a47379bd4" }
 crc32fast = "1.5"

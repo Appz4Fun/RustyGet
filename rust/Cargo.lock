@@ -641,7 +641,7 @@ dependencies = [
 [[package]]
 name = "par-rs"
 version = "0.2.0"
-source = "git+https://github.com/xbmc4lyfe/par-rs?rev=13fba5deb6ffba8bd06930ae4d5ed25dcb821373#13fba5deb6ffba8bd06930ae4d5ed25dcb821373"
+source = "git+https://github.com/Appz4Fun/par-rs?rev=13fba5deb6ffba8bd06930ae4d5ed25dcb821373#13fba5deb6ffba8bd06930ae4d5ed25dcb821373"
 dependencies = [
  "crc32fast",
  "libc",
@@ -1013,12 +1013,12 @@ dependencies = [
 [[package]]
 name = "zip-container"
 version = "0.1.0"
-source = "git+https://github.com/xbmc4lyfe/zipfast?rev=5838ec963a9f94feca5566bc5a2ee1a8cb4f5fa0#5838ec963a9f94feca5566bc5a2ee1a8cb4f5fa0"
+source = "git+https://github.com/Appz4Fun/zipfast?rev=f368577e0d5fca858ae907d05f735c2988d25223#f368577e0d5fca858ae907d05f735c2988d25223"
 
 [[package]]
 name = "zipfast"
 version = "0.1.0"
-source = "git+https://github.com/xbmc4lyfe/zipfast?rev=5838ec963a9f94feca5566bc5a2ee1a8cb4f5fa0#5838ec963a9f94feca5566bc5a2ee1a8cb4f5fa0"
+source = "git+https://github.com/Appz4Fun/zipfast?rev=f368577e0d5fca858ae907d05f735c2988d25223#f368577e0d5fca858ae907d05f735c2988d25223"
 dependencies = [
  "bzip2",
  "crc32fast",

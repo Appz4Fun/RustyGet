@@ -1379,8 +1379,11 @@ impl SevenZipAes {
                 return *key;
             }
         }
-        let key = stream_password_text(password)
-            .and_then(|text| zipfast::crypto::derive_7z_key(text, &self.salt, self.cycles_power));
+        let key = zipfast::crypto::derive_7z_key_utf16(
+            &stream_password_utf16(password),
+            &self.salt,
+            self.cycles_power,
+        );
         let _ = self.derived.set((password.to_vec(), key));
         key
     }
@@ -4228,32 +4231,40 @@ pub fn stream_repair_bytes_to_mb(bytes: i64) -> f64 {
 // The KDFs, SHA and AES rounds live in `zipfast::crypto`; these are thin adapters
 // that keep the byte-slice password handling of the C++ port.
 
-/// The password text a KDF takes: the bytes before the first NUL, as UTF-8.
-// OPEN ITEM (zipfast): the zipfast KDFs take `&str`, so a password that is not valid
-// UTF-8 now yields no key; the former local RAR5 PBKDF2 ran over the raw bytes and the
-// former RAR3 KDF decoded them leniently. zipfast has no `&[u8]` password entry point.
-fn stream_password_text(password: &[u8]) -> Option<&str> {
+/// The password bytes a KDF takes: those before the first NUL.
+fn stream_password_bytes(password: &[u8]) -> &[u8] {
     let nul_pos = password
         .iter()
         .position(|&b| b == 0)
         .unwrap_or(password.len());
-    std::str::from_utf8(&password[..nul_pos]).ok()
+    &password[..nul_pos]
+}
+
+/// The password as the UTF-16 code units the RAR 3.x and 7z KDFs hash. Valid UTF-8 is
+/// encoded as Rust does (surrogate pairs outside the BMP, as WinRAR and 7-Zip do); other
+/// bytes go through the C++ port's lenient decoder, as before the KDFs moved to zipfast.
+fn stream_password_utf16(password: &[u8]) -> Vec<u16> {
+    let password = stream_password_bytes(password);
+    if let Ok(text) = std::str::from_utf8(password) {
+        return text.encode_utf16().collect();
+    }
+    let mut units = vec![0u16; password.len() * 2 + 1];
+    let written = crate::util::wstring_decode_utf8_to_utf16(password, &mut units);
+    units.truncate(written);
+    units
 }
 
 /// `StreamCrypto::DeriveRar3`: derives the 16-byte AES-128 key and 16-byte CBC IV from UTF-8 `password` and 8-byte `salt`.
-// OPEN ITEM (zipfast): characters outside the BMP are now encoded as proper UTF-16
-// surrogate pairs (zipfast `derive_rar4_key_iv`, as WinRAR does); the former local
-// UTF-8 decoder built wrong surrogates (`0xd800 + (cp >> 10)`), so such passwords
-// derive a different (now correct) key.
 pub fn streamcrypto_derive_rar3(password: &[u8], salt: &[u8; 8]) -> Option<([u8; 16], [u8; 16])> {
-    let text = stream_password_text(password)?;
-    if text.is_empty() {
+    let units = stream_password_utf16(password);
+    if units.is_empty() {
         return None;
     }
-    Some(zipfast::crypto::derive_rar4_key_iv(text, salt))
+    Some(zipfast::crypto::derive_rar4_key_iv_utf16(&units, salt))
 }
 
-/// `StreamCrypto::DeriveRar5`: derives the 32-byte AES-256 key via PBKDF2-HMAC-SHA256.
+/// `StreamCrypto::DeriveRar5`: derives the 32-byte AES-256 key via PBKDF2-HMAC-SHA256
+/// over the password bytes as given.
 pub fn streamcrypto_derive_rar5(
     password: &[u8],
     kdf_count: u8,
@@ -4262,7 +4273,7 @@ pub fn streamcrypto_derive_rar5(
     if kdf_count > 24 {
         return None;
     }
-    zipfast::crypto::derive_rar5_key(stream_password_text(password)?, kdf_count, salt, None)
+    zipfast::crypto::derive_rar5_key_bytes(stream_password_bytes(password), kdf_count, salt, None)
 }
 
 /// `RarCryptoContext` mirroring `daemon/postprocess/StreamCrypto.h`: AES-128-CBC or
@@ -4284,8 +4295,8 @@ impl RarCryptoContext {
     }
 
     pub fn make_rar5(password: &[u8], crypt: &crate::rarreader::Rar5Crypt) -> Option<Self> {
-        let text = stream_password_text(password)?;
-        if text.is_empty() || crypt.version != 0 {
+        let pwd = stream_password_bytes(password);
+        if pwd.is_empty() || crypt.version != 0 {
             return None;
         }
         let key = streamcrypto_derive_rar5(password, crypt.kdf_count, &crypt.salt)?;
@@ -4295,7 +4306,7 @@ impl RarCryptoContext {
                 salt: crypt.salt,
                 check: crypt.check_value[..8].try_into().ok()?,
             };
-            if !check.accepts(text) {
+            if !check.accepts_bytes(pwd) {
                 return None;
             }
         }
@@ -12806,6 +12817,49 @@ mod tests {
     }
 
     #[test]
+    fn non_utf8_passwords_derive_the_pre_zipfast_keys() {
+        // Expected values from the local KDFs this crate had before zipfast took them over.
+        let pw = b"pw\xff\xfe";
+        let salt8 = [0x92u8, 0x80, 0x37, 0x09, 0x6e, 0x88, 0x92, 0xdb];
+        let salt16: [u8; 16] = std::array::from_fn(|i| 0x10 + i as u8);
+        let (key3, iv3) = streamcrypto_derive_rar3(pw, &salt8).unwrap();
+        assert_eq!(
+            key3,
+            [
+                0x87, 0x8a, 0xa3, 0xf7, 0xbd, 0x07, 0xdc, 0xc3, 0x80, 0x65, 0x0e, 0x1e, 0xae, 0x5c,
+                0xe4, 0x45
+            ]
+        );
+        assert_eq!(
+            iv3,
+            [
+                0x0b, 0xe7, 0x14, 0x07, 0x7a, 0x83, 0xc2, 0x0f, 0xa0, 0x63, 0x08, 0x06, 0xe1, 0x01,
+                0x30, 0xea
+            ]
+        );
+        let key5 = [
+            0x0d, 0x45, 0xcd, 0x5d, 0x7a, 0x63, 0x13, 0xa1, 0xa2, 0x53, 0x9d, 0x69, 0x46, 0xc8,
+            0x1b, 0xa2, 0xcd, 0xbb, 0xbd, 0x63, 0x9c, 0xc8, 0x47, 0x62, 0x37, 0x06, 0x44, 0x83,
+            0xbf, 0xe5, 0x51, 0xc8,
+        ];
+        assert_eq!(streamcrypto_derive_rar5(pw, 3, &salt16), Some(key5));
+        let mut check_value = [0u8; 12];
+        check_value[..8].copy_from_slice(&[0xf1, 0x44, 0x59, 0xf8, 0x3c, 0x01, 0xf7, 0x6e]);
+        let crypt = crate::rarreader::Rar5Crypt {
+            version: 0,
+            flags: 1,
+            kdf_count: 3,
+            salt: salt16,
+            iv: [5u8; 16],
+            check_value,
+            has_check: true,
+        };
+        let ctx = RarCryptoContext::make_rar5(b"pw\xff\xfe\0ignored", &crypt).unwrap();
+        assert_eq!(ctx.key(), &key5[..]);
+        assert!(RarCryptoContext::make_rar5(b"pw\xff", &crypt).is_none());
+    }
+
+    #[test]
     fn seven_zip_key_is_derived_once_and_shared() {
         // 7-Zip's 2^19 rounds, salt and password checked against zipfast's one-shot SHA-256
         let header = SevenZipAes::parse(&[0x40 | 0x80 | 3, 0x30, 1, 2, 3, 4, 9]).unwrap();
@@ -12820,7 +12874,17 @@ mod tests {
         assert_eq!(key, zipfast::crypto::sha256(&all));
         assert_eq!(header.derive_key("pä\0ignored".as_bytes()), Some(key));
         assert_ne!(header.derive_key(b"other"), Some(key));
-        assert_eq!(header.derive_key(b"\xff"), None);
+        // a byte that is not UTF-8 becomes the lenient decoder's unit (0xff -> 0x0007)
+        let mut lenient = Vec::new();
+        for round in 0u64..8 {
+            lenient.extend_from_slice(&header.salt);
+            lenient.extend_from_slice(&[7, 0]);
+            lenient.extend_from_slice(&round.to_le_bytes());
+        }
+        assert_eq!(
+            header.derive_key(b"\xff"),
+            Some(zipfast::crypto::sha256(&lenient))
+        );
         let data = SevenZipAes::parse(&[0x40 | 0x80 | 3, 0x30, 1, 2, 3, 4, 7]).unwrap();
         data.share_key_from(&header);
         assert_eq!(data.derived.get().map(|d| d.1), Some(Some(key)));

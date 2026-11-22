@@ -6761,6 +6761,11 @@ pub struct DonorArticleUse {
     pub fetched: [u32; 3],
     pub unread: [u32; 3],
     pub again: u32,
+    /// Never-read parts by position: just before a part that was read, just after one, or
+    /// with no read neighbour (a wave planned for the wrong place).
+    pub unread_before: u32,
+    pub unread_after: u32,
+    pub unread_alone: u32,
 }
 
 impl DonorArticleUse {
@@ -6770,6 +6775,9 @@ impl DonorArticleUse {
             self.unread[i] = self.unread[i].saturating_add(other.unread[i]);
         }
         self.again = self.again.saturating_add(other.again);
+        self.unread_before = self.unread_before.saturating_add(other.unread_before);
+        self.unread_after = self.unread_after.saturating_add(other.unread_after);
+        self.unread_alone = self.unread_alone.saturating_add(other.unread_alone);
     }
 
     pub fn total_fetched(&self) -> u32 {
@@ -6781,9 +6789,12 @@ impl DonorArticleUse {
         let [s, r, w] = self.fetched;
         let [us, ur, uw] = self.unread;
         format!(
-            "{} article(s) fetched ({w} by wave, {r} by read, {s} single), {} never read ({uw} by wave, {ur} by read, {us} single), {} fetched again after the cache dropped them",
+            "{} article(s) fetched ({w} by wave, {r} by read, {s} single), {} never read ({uw} by wave, {ur} by read, {us} single; {} just before a read part, {} just after, {} alone), {} fetched again after the cache dropped them",
             self.total_fetched(),
             us.saturating_add(ur).saturating_add(uw),
+            self.unread_before,
+            self.unread_after,
+            self.unread_alone,
             self.again,
         )
     }
@@ -6803,6 +6814,9 @@ pub struct DonorMemberSource {
     unread: std::collections::BTreeMap<i32, DonorFetchOrigin>,
     /// Every part stored so far, to count the ones fetched again.
     ever_stored: std::collections::BTreeSet<i32>,
+    /// Parts dropped unread, and every part read, to place the unread ones at the end.
+    dropped_unread: Vec<i32>,
+    ever_read: std::collections::BTreeSet<i32>,
     article_use: DonorArticleUse,
     /// Parts of the open prefetch batch not taken yet, in the order the batch delivers them.
     streaming: std::collections::VecDeque<i32>,
@@ -6821,6 +6835,8 @@ impl DonorMemberSource {
             served_parts: std::collections::BTreeSet::new(),
             unread: std::collections::BTreeMap::new(),
             ever_stored: std::collections::BTreeSet::new(),
+            dropped_unread: Vec::new(),
+            ever_read: std::collections::BTreeSet::new(),
             article_use: DonorArticleUse::default(),
             streaming: std::collections::VecDeque::new(),
             size: -1,
@@ -6839,9 +6855,22 @@ impl DonorMemberSource {
     /// unread as never read; resets the counts.
     pub fn take_article_use(&mut self) -> DonorArticleUse {
         let mut out = std::mem::take(&mut self.article_use);
-        for origin in std::mem::take(&mut self.unread).into_values() {
+        let mut dropped = std::mem::take(&mut self.dropped_unread);
+        for (part, origin) in std::mem::take(&mut self.unread) {
             out.unread[origin as usize] = out.unread[origin as usize].saturating_add(1);
+            dropped.push(part);
         }
+        for part in dropped {
+            let slot = if self.ever_read.contains(&(part + 1)) {
+                &mut out.unread_before
+            } else if self.ever_read.contains(&(part - 1)) {
+                &mut out.unread_after
+            } else {
+                &mut out.unread_alone
+            };
+            *slot = slot.saturating_add(1);
+        }
+        self.ever_read.clear();
         out
     }
 
@@ -6877,6 +6906,7 @@ impl DonorMemberSource {
                 if let Some(was) = self.unread.remove(&oldest) {
                     self.article_use.unread[was as usize] =
                         self.article_use.unread[was as usize].saturating_add(1);
+                    self.dropped_unread.push(oldest);
                 }
             }
         }
@@ -7175,6 +7205,7 @@ impl DonorMemberSource {
                 .copy_from_slice(&fetched.data[from_usize..from_usize + len_usize]);
             self.served_parts.insert(part_index);
             self.unread.remove(&part_index);
+            self.ever_read.insert(part_index);
             out_pos += len_usize;
             pos += len;
         }
@@ -17887,6 +17918,7 @@ mod tests {
         let u = src.take_article_use();
         assert_eq!(u.fetched[DonorFetchOrigin::Read as usize], 3);
         assert_eq!(u.unread[DonorFetchOrigin::Read as usize], 2);
+        assert_eq!((u.unread_before, u.unread_after, u.unread_alone), (1, 1, 0));
 
         // Reading 20 parts on through a 16-part cache drops the early ones; reading part 10
         // again fetches it again.

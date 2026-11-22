@@ -131,28 +131,6 @@ pub unsafe fn parse_rar_lister_line_cstr(
 }
 
 // ============================================================================
-// 3. StreamCrypto (`daemon/postprocess/StreamCrypto.cpp`)
-// ============================================================================
-
-/// `StreamCrypto::DeriveRar3` 4-byte-group digest-to-key byte swizzle.
-pub fn rar3_swizzle_key(digest: &[u8; 20], key_out: &mut [u8; 16]) {
-    for i in 0..4 {
-        for j in 0..4 {
-            key_out[i * 4 + j] = digest[i * 4 + 3 - j];
-        }
-    }
-}
-
-/// `StreamCrypto::DeriveRar5PswCheck` 32-byte XOR fold into 8-byte password check.
-pub fn rar5_fold_psw_check(value: &[u8; 32], check_out: &mut [u8; 8]) {
-    let mut check = [0u8; 8];
-    for i in 0..32 {
-        check[i % 8] ^= value[i];
-    }
-    *check_out = check;
-}
-
-// ============================================================================
 // 4. RepairController (`daemon/postprocess/Repair.cpp`)
 // ============================================================================
 
@@ -335,24 +313,6 @@ mod tests {
             );
             assert_eq!(compressed, 1);
         }
-    }
-
-    #[test]
-    fn test_stream_crypto_helpers() {
-        let mut digest = [0u8; 20];
-        for (i, b) in digest.iter_mut().enumerate() {
-            *b = i as u8;
-        }
-        let mut key = [0u8; 16];
-        rar3_swizzle_key(&digest, &mut key);
-        assert_eq!(key, [3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12]);
-
-        let mut val = [0u8; 32];
-        val[0] = 0xAA;
-        val[8] = 0x55;
-        let mut check = [0u8; 8];
-        rar5_fold_psw_check(&val, &mut check);
-        assert_eq!(check[0], 0xFF);
     }
 
     #[test]

@@ -6739,6 +6739,56 @@ pub trait DonorArticleTransport {
     fn cancel_prefetch_batch(&mut self);
 }
 
+/// How a donor article came into a member's cache (see [`DonorArticleUse`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DonorFetchOrigin {
+    /// One article on its own (a read past the cache, or a member's size).
+    Single = 0,
+    /// Part of the batch a read opened for its own range, slack around it included.
+    Read = 1,
+    /// Part of a wave fetched ahead for the holes still to read.
+    Wave = 2,
+}
+
+/// What a donor's fetched articles were used for: by origin (single, read batch, wave), how
+/// many were fetched and how many left the cache (or the borrow ended) without a byte read,
+/// and how many were fetched again after the cache had dropped them. A borrow that fetches
+/// much more than it recovers tells here which path asks for the spare articles.
+/// Articles that came back failed count as fetched but never as "never read" (they were
+/// wanted); articles a cancelled batch dropped before delivery are not counted at all.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DonorArticleUse {
+    pub fetched: [u32; 3],
+    pub unread: [u32; 3],
+    pub again: u32,
+}
+
+impl DonorArticleUse {
+    pub fn add(&mut self, other: &Self) {
+        for i in 0..3 {
+            self.fetched[i] = self.fetched[i].saturating_add(other.fetched[i]);
+            self.unread[i] = self.unread[i].saturating_add(other.unread[i]);
+        }
+        self.again = self.again.saturating_add(other.again);
+    }
+
+    pub fn total_fetched(&self) -> u32 {
+        self.fetched.iter().fold(0u32, |a, &b| a.saturating_add(b))
+    }
+
+    /// `"N fetched (w wave, r read, s single), U never read (w/r/s), A fetched again"`.
+    pub fn summary(&self) -> String {
+        let [s, r, w] = self.fetched;
+        let [us, ur, uw] = self.unread;
+        format!(
+            "{} article(s) fetched ({w} by wave, {r} by read, {s} single), {} never read ({uw} by wave, {ur} by read, {us} single), {} fetched again after the cache dropped them",
+            self.total_fetched(),
+            us.saturating_add(ur).saturating_add(uw),
+            self.again,
+        )
+    }
+}
+
 /// Donor-side byte access to one member of a duplicate posting (`DonorMemberSource` in `StreamRepair.h`).
 /// Articles are fetched and decoded on demand, offsets resolve through estimated ranges with
 /// measured-drift correction, and recent articles stay cached up to `DONOR_MAX_CACHED_PARTS`.
@@ -6749,6 +6799,11 @@ pub struct DonorMemberSource {
     cache: std::collections::BTreeMap<i32, FetchedDonorArticle>,
     cache_order: std::collections::VecDeque<i32>,
     served_parts: std::collections::BTreeSet<i32>,
+    /// Cached parts not read since they were stored, with how each was fetched.
+    unread: std::collections::BTreeMap<i32, DonorFetchOrigin>,
+    /// Every part stored so far, to count the ones fetched again.
+    ever_stored: std::collections::BTreeSet<i32>,
+    article_use: DonorArticleUse,
     /// Parts of the open prefetch batch not taken yet, in the order the batch delivers them.
     streaming: std::collections::VecDeque<i32>,
     size: i64,
@@ -6764,6 +6819,9 @@ impl DonorMemberSource {
             cache: std::collections::BTreeMap::new(),
             cache_order: std::collections::VecDeque::new(),
             served_parts: std::collections::BTreeSet::new(),
+            unread: std::collections::BTreeMap::new(),
+            ever_stored: std::collections::BTreeSet::new(),
+            article_use: DonorArticleUse::default(),
             streaming: std::collections::VecDeque::new(),
             size: -1,
             drift: 0,
@@ -6777,7 +6835,31 @@ impl DonorMemberSource {
         count
     }
 
-    pub fn store_fetched(&mut self, part_index: i32, mut fetched: FetchedDonorArticle) -> bool {
+    /// The article use so far (see [`DonorArticleUse`]), counting parts still cached and
+    /// unread as never read; resets the counts.
+    pub fn take_article_use(&mut self) -> DonorArticleUse {
+        let mut out = std::mem::take(&mut self.article_use);
+        for origin in std::mem::take(&mut self.unread).into_values() {
+            out.unread[origin as usize] = out.unread[origin as usize].saturating_add(1);
+        }
+        out
+    }
+
+    pub fn store_fetched(&mut self, part_index: i32, fetched: FetchedDonorArticle) -> bool {
+        self.store_fetched_from(part_index, fetched, DonorFetchOrigin::Single)
+    }
+
+    fn store_fetched_from(
+        &mut self,
+        part_index: i32,
+        mut fetched: FetchedDonorArticle,
+        origin: DonorFetchOrigin,
+    ) -> bool {
+        let o = origin as usize;
+        self.article_use.fetched[o] = self.article_use.fetched[o].saturating_add(1);
+        if !self.ever_stored.insert(part_index) && !self.cache.contains_key(&part_index) {
+            self.article_use.again = self.article_use.again.saturating_add(1);
+        }
         let (invalid, mark_bad) = donor_check_fetched_part(
             fetched.success,
             fetched.data.len(),
@@ -6792,9 +6874,16 @@ impl DonorMemberSource {
         if self.cache.len() >= DONOR_MAX_CACHED_PARTS {
             if let Some(oldest) = self.cache_order.pop_front() {
                 self.cache.remove(&oldest);
+                if let Some(was) = self.unread.remove(&oldest) {
+                    self.article_use.unread[was as usize] =
+                        self.article_use.unread[was as usize].saturating_add(1);
+                }
             }
         }
         self.cache_order.push_back(part_index);
+        if fetched.success && !self.cache.contains_key(&part_index) {
+            self.unread.insert(part_index, origin);
+        }
         self.cache.entry(part_index).or_insert(fetched).success
     }
 
@@ -6819,7 +6908,7 @@ impl DonorMemberSource {
                     break;
                 };
                 if !self.cache.contains_key(&next) {
-                    self.store_fetched(next, fetched);
+                    self.store_fetched_from(next, fetched, DonorFetchOrigin::Read);
                 }
                 if next == part_index {
                     let cached = self.cache.get(&part_index)?;
@@ -6950,7 +7039,7 @@ impl DonorMemberSource {
             if let Some(next) = self.streaming.pop_front() {
                 if let Some(fetched) = transport.next_prefetch_part() {
                     if !self.cache.contains_key(&next) {
-                        self.store_fetched(next, fetched);
+                        self.store_fetched_from(next, fetched, DonorFetchOrigin::Read);
                     }
                 }
             }
@@ -6987,7 +7076,7 @@ impl DonorMemberSource {
                 return;
             };
             if !self.cache.contains_key(&part) {
-                self.store_fetched(part, fetched);
+                self.store_fetched_from(part, fetched, DonorFetchOrigin::Wave);
             }
         }
     }
@@ -7085,6 +7174,7 @@ impl DonorMemberSource {
             buffer[out_pos..out_pos + len_usize]
                 .copy_from_slice(&fetched.data[from_usize..from_usize + len_usize]);
             self.served_parts.insert(part_index);
+            self.unread.remove(&part_index);
             out_pos += len_usize;
             pos += len;
         }
@@ -9051,6 +9141,16 @@ impl<'a, 'b> DonorSetSources<'a, 'b> {
         self.shared.fetch_budget.set(budget);
     }
 
+    fn take_article_use(&self) -> DonorArticleUse {
+        let mut total = DonorArticleUse::default();
+        for cell in &self.slots {
+            if let Some(slot) = cell.get() {
+                total.add(&slot.inner.borrow_mut().take_article_use());
+            }
+        }
+        total
+    }
+
     fn take_served_parts(&self) -> i32 {
         let mut total = 0i32;
         for cell in &self.slots {
@@ -9137,7 +9237,7 @@ impl ContentSourceSet for DonorSetSources<'_, '_> {
             if let Some(slot) = self.slots.get(member as usize).and_then(|c| c.get()) {
                 let mut inner = slot.inner.borrow_mut();
                 if !inner.cache.contains_key(&part) {
-                    inner.store_fetched(part, fetched);
+                    inner.store_fetched_from(part, fetched, DonorFetchOrigin::Wave);
                 }
             }
         }
@@ -10649,6 +10749,17 @@ impl CrossPackRepairSession {
         }
         self.rebuild_container_tails(&env_cell);
         self.finish_dead_fills(&env_cell);
+        let article_use = donor_sources.take_article_use();
+        if article_use.total_fetched() > 0 {
+            // Worded without "from duplicate <name>": tests count that phrase as a repair.
+            let mut msg = b"Donor ".to_vec();
+            msg.extend_from_slice(donor_info_name);
+            msg.extend_from_slice(b" article use: ");
+            msg.extend_from_slice(article_use.summary().as_bytes());
+            env_cell
+                .borrow_mut()
+                .emit_message_bytes(TargetMessageKind::Info, &msg);
+        }
     }
 
     /// Dead volumes whose borrowed data is complete: rebuild their headers and hand them to
@@ -17734,6 +17845,68 @@ mod tests {
         }
         assert_eq!(transport.single_fetches, singles);
         assert!(transport.batch_begins - begins <= 4, "{}", transport.batch_begins - begins);
+    }
+
+    #[test]
+    fn donor_article_use_counts_spare_and_refetched_parts() {
+        let parts: Vec<FetchedDonorArticle> = (0..40i64)
+            .map(|i| FetchedDonorArticle {
+                success: true,
+                offset: i * 100,
+                file_size: 4000,
+                data: vec![i as u8; 100],
+            })
+            .collect();
+        let mut src = DonorMemberSource::new(vec![110i32; 40]);
+        let mut transport = MockDonorTransport {
+            parts,
+            budget: None,
+            allow_prefetch: true,
+            prefetch_queue: std::collections::VecDeque::new(),
+            single_fetches: 0,
+            batch_begins: 0,
+        };
+        assert_eq!(src.size_with_transport(&mut transport), 4000);
+        // Part 0 came for the size alone: one single, never read.
+        let u = src.take_article_use();
+        assert_eq!((u.fetched, u.unread, u.again), ([1, 0, 0], [1, 0, 0], 0));
+
+        // A wave of two one-article holes, both read: nothing spare.
+        let holes = [(1030i64, 40i64), (2030, 40)];
+        src.prefetch_ranges_with_transport(&mut transport, &holes);
+        for &(offset, size) in &holes {
+            let mut buf = vec![0u8; size as usize];
+            assert!(src.read_with_transport(&mut transport, offset, &mut buf).is_ok());
+        }
+        let u = src.take_article_use();
+        assert_eq!((u.fetched, u.unread, u.again), ([0, 0, 2], [0, 0, 0], 0));
+
+        // A read past the cache opens its own batch with a slack part each side: two spare.
+        let mut buf = vec![0u8; 40];
+        assert!(src.read_with_transport(&mut transport, 3030, &mut buf).is_ok());
+        let u = src.take_article_use();
+        assert_eq!(u.fetched[DonorFetchOrigin::Read as usize], 3);
+        assert_eq!(u.unread[DonorFetchOrigin::Read as usize], 2);
+
+        // Reading 20 parts on through a 16-part cache drops the early ones; reading part 10
+        // again fetches it again.
+        let mut big = vec![0u8; 2000];
+        assert!(src.read_with_transport(&mut transport, 0, &mut big).is_ok());
+        let mut one = vec![0u8; 10];
+        assert!(src.read_with_transport(&mut transport, 1040, &mut one).is_ok());
+        let u = src.take_article_use();
+        assert!(u.again >= 1, "{u:?}");
+        assert!(u.summary().contains("fetched again"));
+
+        // A part that comes back failed was wanted: fetched, never "never read".
+        transport.parts[30].success = false;
+        let mut src = DonorMemberSource::new(vec![110i32; 40]);
+        assert_eq!(src.size_with_transport(&mut transport), 4000);
+        src.take_article_use();
+        transport.allow_prefetch = false;
+        assert!(src.read_with_transport(&mut transport, 3010, &mut buf[..10]).is_err());
+        let u = src.take_article_use();
+        assert_eq!((u.fetched, u.unread), ([1, 0, 0], [0, 0, 0]));
     }
 
     #[test]

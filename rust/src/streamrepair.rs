@@ -201,6 +201,40 @@ pub fn estimate_donor_ranges(
     ranges
 }
 
+/// Exact article ranges for a posting cut into equal articles: every article but the last
+/// decodes to `article_len` bytes. Taken only when the file size fits that count of
+/// articles and the NZB's encoded sizes of all but the last article agree within 3%
+/// (posters that vary the article size fail it and keep the estimate).
+pub fn uniform_donor_ranges(
+    article_sizes: &[i32],
+    decoded_file_size: i64,
+    article_len: i64,
+) -> Option<Vec<NzbgetRsByteRange>> {
+    let n = article_sizes.len() as i64;
+    if n == 0 || article_len <= 0 || decoded_file_size <= 0 {
+        return None;
+    }
+    if (n - 1).checked_mul(article_len)? >= decoded_file_size
+        || n.checked_mul(article_len)? < decoded_file_size
+    {
+        return None;
+    }
+    let body = &article_sizes[..article_sizes.len() - 1];
+    if let (Some(&lo), Some(&hi)) = (body.iter().min(), body.iter().max()) {
+        if lo <= 0 || (hi as i64) * 100 > (lo as i64) * 103 {
+            return None;
+        }
+    }
+    Some(
+        (0..n)
+            .map(|k| NzbgetRsByteRange {
+                offset: k * article_len,
+                size: if k == n - 1 { decoded_file_size - k * article_len } else { article_len },
+            })
+            .collect(),
+    )
+}
+
 /// `DupeStreamRepair::SelectProbeParts`: selects up to `probe_count` donor article indices
 /// that do not intersect (and whose immediate neighbours do not intersect) `holes`.
 pub fn select_probe_parts(
@@ -6823,6 +6857,8 @@ pub struct DonorMemberSource {
     size: i64,
     drift: i64,
     bad: bool,
+    /// `ranges` are exact (see [`uniform_donor_ranges`]): reads need no edge margin.
+    exact: bool,
 }
 
 impl DonorMemberSource {
@@ -6842,6 +6878,7 @@ impl DonorMemberSource {
             size: -1,
             drift: 0,
             bad: false,
+            exact: false,
         }
     }
 
@@ -6961,8 +6998,14 @@ impl DonorMemberSource {
         if self.bad || self.article_sizes.is_empty() {
             return false;
         }
+        // The decoded length of one full article, when the posting is cut evenly: from the
+        // first article, or from where the last one starts.
+        let mut article_len = 0i64;
         let (first_ok, first_file_size) = match self.fetch_part(transport, 0) {
-            Some(first) if first.success && first.offset == 0 => (true, first.file_size),
+            Some(first) if first.success && first.offset == 0 => {
+                article_len = first.data.len() as i64;
+                (true, first.file_size)
+            }
             _ => (false, 0),
         };
         // A member whose first article is gone (in some releases from every volume and in
@@ -6973,7 +7016,12 @@ impl DonorMemberSource {
         } else {
             let last = self.article_sizes.len() as i32 - 1;
             match (last > 0).then(|| self.fetch_part(transport, last)).flatten() {
-                Some(l) if l.success && l.file_size > 0 && l.offset > 0 => (true, l.file_size),
+                Some(l) if l.success && l.file_size > 0 && l.offset > 0 => {
+                    if l.offset % i64::from(last) == 0 {
+                        article_len = l.offset / i64::from(last);
+                    }
+                    (true, l.file_size)
+                }
                 _ => (false, 0),
             }
         };
@@ -6982,7 +7030,16 @@ impl DonorMemberSource {
             return false;
         }
         self.size = first_file_size;
-        self.ranges = estimate_donor_ranges(&self.article_sizes, self.size);
+        // An evenly cut posting places every article exactly: a wave fetches what the reads
+        // need and no neighbour for an edge margin (A2 on 6790 fetched one spare article
+        // ahead of almost every hole, its copies being cut alike).
+        match uniform_donor_ranges(&self.article_sizes, self.size, article_len) {
+            Some(exact) => {
+                self.ranges = exact;
+                self.exact = true;
+            }
+            None => self.ranges = estimate_donor_ranges(&self.article_sizes, self.size),
+        }
         if self.ranges.is_empty() {
             self.bad = true;
             self.size = -1;
@@ -7143,7 +7200,7 @@ impl DonorMemberSource {
     fn needed_parts(&self, offset: i64, size: i64) -> (i32, i32) {
         // Never more than a sixteenth of an article, so a small article is not swamped.
         let article = self.size / (self.ranges.len().max(1) as i64);
-        let margin = DONOR_EDGE_MARGIN.min(article / 16);
+        let margin = if self.exact { 0 } else { DONOR_EDGE_MARGIN.min(article / 16) };
         let start = (offset - margin).max(0);
         let end = (offset + size - 1 + margin).min((self.size - 1).max(0));
         (
@@ -17939,6 +17996,40 @@ mod tests {
         assert!(src.read_with_transport(&mut transport, 3010, &mut buf[..10]).is_err());
         let u = src.take_article_use();
         assert_eq!((u.fetched, u.unread), ([1, 0, 0], [0, 0, 0]));
+    }
+
+    #[test]
+    fn evenly_cut_postings_place_articles_exactly() {
+        let r = uniform_donor_ranges(&[130, 131, 129, 40], 330, 100).unwrap();
+        assert_eq!(r.iter().map(|x| (x.offset, x.size)).collect::<Vec<_>>(), [(0, 100), (100, 100), (200, 100), (300, 30)]);
+        // The size must fit the article count, and the NZB sizes must agree.
+        assert!(uniform_donor_ranges(&[130, 131, 129, 40], 300, 100).is_none());
+        assert!(uniform_donor_ranges(&[130, 131, 129, 40], 401, 100).is_none());
+        assert!(uniform_donor_ranges(&[130, 90, 129, 40], 330, 100).is_none());
+        assert!(uniform_donor_ranges(&[130], 70, 100).is_some());
+
+        // A hole starting just past an article edge wants no spare article before it.
+        let parts: Vec<FetchedDonorArticle> = (0..40i64)
+            .map(|i| FetchedDonorArticle {
+                success: true,
+                offset: i * 1000,
+                file_size: 39_500,
+                data: vec![i as u8; if i == 39 { 500 } else { 1000 }],
+            })
+            .collect();
+        let mut src = DonorMemberSource::new(vec![1300i32; 40]);
+        let mut transport = MockDonorTransport {
+            parts,
+            budget: None,
+            allow_prefetch: true,
+            prefetch_queue: std::collections::VecDeque::new(),
+            single_fetches: 0,
+            batch_begins: 0,
+        };
+        assert_eq!(src.size_with_transport(&mut transport), 39_500);
+        assert!(src.exact);
+        assert_eq!(src.needed_parts(5010, 1000), (5, 6));
+        assert_eq!(src.needed_parts(5000, 1000), (5, 5));
     }
 
     #[test]

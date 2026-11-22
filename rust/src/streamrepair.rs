@@ -6754,6 +6754,8 @@ pub enum DonorFetchOrigin {
 /// many were fetched and how many left the cache (or the borrow ended) without a byte read,
 /// and how many were fetched again after the cache had dropped them. A borrow that fetches
 /// much more than it recovers tells here which path asks for the spare articles.
+/// Articles that came back failed count as fetched but never as "never read" (they were
+/// wanted); articles a cancelled batch dropped before delivery are not counted at all.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DonorArticleUse {
     pub fetched: [u32; 3],
@@ -6879,7 +6881,7 @@ impl DonorMemberSource {
             }
         }
         self.cache_order.push_back(part_index);
-        if !self.cache.contains_key(&part_index) {
+        if fetched.success && !self.cache.contains_key(&part_index) {
             self.unread.insert(part_index, origin);
         }
         self.cache.entry(part_index).or_insert(fetched).success
@@ -10749,9 +10751,10 @@ impl CrossPackRepairSession {
         self.finish_dead_fills(&env_cell);
         let article_use = donor_sources.take_article_use();
         if article_use.total_fetched() > 0 {
-            let mut msg = b"Donor article use from duplicate ".to_vec();
+            // Worded without "from duplicate <name>": tests count that phrase as a repair.
+            let mut msg = b"Donor ".to_vec();
             msg.extend_from_slice(donor_info_name);
-            msg.extend_from_slice(b": ");
+            msg.extend_from_slice(b" article use: ");
             msg.extend_from_slice(article_use.summary().as_bytes());
             env_cell
                 .borrow_mut()
@@ -17894,6 +17897,16 @@ mod tests {
         let u = src.take_article_use();
         assert!(u.again >= 1, "{u:?}");
         assert!(u.summary().contains("fetched again"));
+
+        // A part that comes back failed was wanted: fetched, never "never read".
+        transport.parts[30].success = false;
+        let mut src = DonorMemberSource::new(vec![110i32; 40]);
+        assert_eq!(src.size_with_transport(&mut transport), 4000);
+        src.take_article_use();
+        transport.allow_prefetch = false;
+        assert!(src.read_with_transport(&mut transport, 3010, &mut buf[..10]).is_err());
+        let u = src.take_article_use();
+        assert_eq!((u.fetched, u.unread), ([1, 0, 0], [0, 0, 0]));
     }
 
     #[test]

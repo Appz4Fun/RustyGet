@@ -7067,6 +7067,14 @@ impl DonorMemberSource {
                 let fetched = self.fetch_part(transport, index)?;
                 (fetched.offset, fetched.data.len())
             };
+            if self.exact && fetched_offset != self.ranges[index as usize].offset {
+                // Not cut evenly after all: back to the estimate from the NZB's sizes, which
+                // follows uneven articles (exact ranges could sit many articles off mid-file).
+                self.exact = false;
+                self.ranges = estimate_donor_ranges(&self.article_sizes, self.size);
+                index = donor_index_for_offset(offset, 0, &self.ranges);
+                continue;
+            }
             self.drift = fetched_offset - self.ranges[index as usize].offset;
             let (status, new_index) = donor_step_part_for_offset(
                 offset,
@@ -18030,6 +18038,37 @@ mod tests {
         assert!(src.exact);
         assert_eq!(src.needed_parts(5010, 1000), (5, 6));
         assert_eq!(src.needed_parts(5000, 1000), (5, 5));
+        let mut buf = vec![0u8; 1000];
+        assert!(src.read_with_transport(&mut transport, 5010, &mut buf).is_ok());
+        assert!(src.exact);
+
+        // Article 0 is as long as the rest, but the middle ones are not: the first article
+        // found off its exact place drops the exact ranges, and the read still succeeds.
+        let mut offset = 0i64;
+        let parts: Vec<FetchedDonorArticle> = (0..40i64)
+            .map(|i| {
+                let len = if i == 0 { 1000 } else if i < 20 { 1020 } else { 980 };
+                let p = FetchedDonorArticle {
+                    success: true,
+                    offset,
+                    file_size: 0,
+                    data: vec![(i % 251) as u8; len],
+                };
+                offset += len as i64;
+                p
+            })
+            .collect();
+        let total = offset;
+        let parts: Vec<FetchedDonorArticle> =
+            parts.into_iter().map(|p| FetchedDonorArticle { file_size: total, ..p }).collect();
+        let mut src = DonorMemberSource::new(vec![1300i32; 40]);
+        transport.parts = parts.clone();
+        assert_eq!(src.size_with_transport(&mut transport), total);
+        assert!(src.exact);
+        let at = parts[19].offset + 5;
+        assert!(src.read_with_transport(&mut transport, at, &mut buf[..10]).is_ok());
+        assert_eq!(buf[..10], [19u8; 10]);
+        assert!(!src.exact);
     }
 
     #[test]

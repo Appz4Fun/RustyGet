@@ -127,33 +127,14 @@ fn is_map_inner_eligible(filename: &[u8]) -> bool {
     is_stream_eligible(filename) || is_nested_container_name(filename)
 }
 
-/// `DupeStreamRepair::ComputeHoles`: computes the missing `[offset, size)` ranges in `[0, file_size)`
-/// given the finished article ranges.
+/// `DupeStreamRepair::ComputeHoles`: the missing `[offset, size)` ranges in `[0, file_size)`
+/// given the finished article ranges: par-rs's `damage::compute_holes` on the FFI range type.
+/// Empty ranges are ignored and holes stop at `file_size`.
 pub fn compute_holes(covered: &[NzbgetRsByteRange], file_size: i64) -> Vec<NzbgetRsByteRange> {
-    if file_size <= 0 {
-        return Vec::new();
-    }
-    let mut sorted = covered.to_vec();
-    sorted.sort_by_key(|r| r.offset);
-
-    let mut holes = Vec::new();
-    let mut pos: i64 = 0;
-    for r in sorted {
-        if r.offset > pos {
-            holes.push(NzbgetRsByteRange {
-                offset: pos,
-                size: r.offset.wrapping_sub(pos),
-            });
-        }
-        pos = pos.max(range_end(r));
-    }
-    if pos < file_size {
-        holes.push(NzbgetRsByteRange {
-            offset: pos,
-            size: file_size.wrapping_sub(pos),
-        });
-    }
-    holes
+    par_rs::damage::compute_holes(&crate::dupefallback::par_ranges(covered), file_size)
+        .into_iter()
+        .map(Into::into)
+        .collect()
 }
 
 /// `DupeStreamRepair::TotalSize`: sums `size` across `ranges`.

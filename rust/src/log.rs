@@ -116,7 +116,13 @@ struct LogInner {
     file_day: Option<i64>,
     file_size: u64,
     device: bool,
+    /// when LogFile last could not be opened: until it opens again its lines go
+    /// to stderr, and opening is retried only every LOG_REOPEN_INTERVAL seconds
+    file_failed_at: Option<i64>,
 }
+
+/// While LogFile cannot be opened, try again at most this often (seconds).
+pub const LOG_REOPEN_INTERVAL: i64 = 60;
 
 /// LogFile is moved aside to `<stem>-YYYY-MM-DD.<n><ext>` (then gzipped) once it
 /// reaches this size, and a new LogFile is started.
@@ -174,6 +180,7 @@ impl NzbgetRsLog {
                 file_day: None,
                 file_size: 0,
                 device: false,
+                file_failed_at: None,
             }),
             path: Mutex::new(c"".to_owned()),
             debuggables: Mutex::new(Vec::new()),
@@ -294,9 +301,16 @@ impl NzbgetRsLog {
         let Ok(mut inner) = self.inner.lock() else {
             return;
         };
-        inner.id_gen = 0;
+        // the path may have changed (a reload): try it at once
+        if inner.file_failed_at.take().is_some() {
+            inner.log_file = None;
+        }
+        // a warning about LogFile is appended while the buffered messages are
+        // written: only the buffered ones are processed, then all are renumbered
         let mut i = 0usize;
-        while i < inner.messages.len() {
+        let mut remaining = inner.messages.len();
+        while remaining > 0 {
+            remaining -= 1;
             let kind = inner.messages[i].kind;
             let target = target_for_kind(kind, opts);
             let (write_to_file, keep_in_screen) = crate::util::log_init_message_disposition(target);
@@ -311,13 +325,17 @@ impl NzbgetRsLog {
                     opts,
                 );
             }
-            if !keep_in_screen {
-                inner.messages.remove(i);
-            } else {
-                inner.id_gen = inner.id_gen.wrapping_add(1);
-                inner.messages[i].id = inner.id_gen;
+            if keep_in_screen {
                 i += 1;
+            } else {
+                inner.messages.remove(i);
             }
+        }
+        inner.id_gen = 0;
+        for n in 0..inner.messages.len() {
+            inner.id_gen = inner.id_gen.wrapping_add(1);
+            let id = inner.id_gen;
+            inner.messages[n].id = id;
         }
         inner.opt_init = true;
     }
@@ -366,6 +384,24 @@ pub(crate) fn native_detail_record_for_test(text: &[u8]) -> Vec<u8> {
     format_truncated_1023(MessageKind::Detail.prefix(), text)
 }
 
+/// The warning logged once when LogFile cannot be opened.
+pub(crate) fn log_file_problem_message(path: &[u8], why: &[u8]) -> Vec<u8> {
+    let mut msg = crate::options::path_problem_message(b"LogFile", path, why);
+    msg.extend_from_slice(b" Until then the log goes to the screen (stderr) and the Messages tab.");
+    msg
+}
+
+fn write_stderr(line: &[u8]) {
+    use std::io::Write as _;
+    let mut err = std::io::stderr().lock();
+    let _ = err.write_all(line);
+    let _ = err.flush();
+}
+
+/// Writes one line to LogFile (nothing when none is set). When LogFile cannot
+/// be opened the line goes to stderr instead (the messages meant for the screen
+/// are in the in-memory buffer the web interface reads anyway), a warning is
+/// logged once, and opening is retried every [`LOG_REOPEN_INTERVAL`] seconds.
 fn filelog_locked(
     inner: &mut LogInner,
     path_mtx: &Mutex<CString>,
@@ -407,22 +443,44 @@ fn filelog_locked(
         use std::io::Write as _;
         let _ = write!(line, "{pid}\t{tid}\t");
     }
+    let head_len = line.len();
     line.extend_from_slice(&tmp2);
     line.push(b'\n');
 
-    if write_log == 3 {
+    let retry_due = inner
+        .file_failed_at
+        .is_none_or(|t| rawtime < t || rawtime - t >= LOG_REOPEN_INTERVAL);
+    if !retry_due {
+        write_stderr(&line);
+        return;
+    }
+
+    if write_log == 3 && inner.file_failed_at.is_none() {
         rotate_if_due(inner, &log_filename, rawtime, time_corr, line.len() as u64, rotate_log, log_buffer);
     }
 
     if inner.log_file.is_none() {
         match LogFileGuard::open_append(&log_filename) {
             None => {
-                unsafe {
-                    libc::perror(log_filename.as_ptr());
+                let why = crate::fsops::error_message(crate::fsops::last_errno());
+                if inner.file_failed_at.is_none() {
+                    let warning = log_file_problem_message(log_filename.to_bytes(), &why);
+                    let mut wline = line[..head_len].to_vec();
+                    wline.extend_from_slice(&format_truncated_1023(MessageKind::Warning.prefix(), &warning));
+                    wline.push(b'\n');
+                    write_stderr(&wline);
+                    inner.add_message(MK_WARNING, &warning, log_buffer);
+                    crate::options::note_path_warning(b"LogFile", log_filename.to_bytes());
                 }
+                inner.file_failed_at = Some(rawtime);
+                write_stderr(&line);
                 return;
             }
             Some(guard) => {
+                if inner.file_failed_at.take().is_some() {
+                    let note = b"LogFile can be written again; the log goes there from now on.";
+                    inner.add_message(MK_INFO, note, log_buffer);
+                }
                 unsafe {
                     if libc::getuid() == 0 || libc::geteuid() == 0 {
                         if let Some(user) = options.and_then(|o| o.str_cstr(OptStr::DaemonUsername)) {
@@ -1068,6 +1126,122 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    fn missing_log_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "rustyget_log_{tag}_{}_{}",
+            std::process::id(),
+            current_unix_time()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn texts_of_kind(messages: &VecDeque<RsLogMessage>, kind: i32) -> Vec<String> {
+        messages
+            .iter()
+            .filter(|m| m.kind == kind)
+            .map(|m| m.text.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn a_log_file_in_a_missing_folder_warns_once_and_is_retried_later() {
+        let dir = missing_log_dir("missing");
+        let path = dir.join("rustyget.log");
+        let path_bytes = path.as_os_str().as_encoded_bytes().to_vec();
+        let path_mtx = Mutex::new(CString::new(path_bytes.clone()).unwrap());
+        let mut inner = LogInner {
+            messages: VecDeque::new(),
+            log_file: None,
+            id_gen: 0,
+            last_written: 0,
+            opt_init: false,
+            extra_debug: false,
+            file_day: None,
+            file_size: 0,
+            device: false,
+            file_failed_at: None,
+        };
+        for i in 0..5 {
+            filelog_locked(&mut inner, &path_mtx, b"INFO", format!("line {i}").as_bytes(), false, None);
+        }
+        // one warning, not one error per line
+        let expected = log_file_problem_message(&path_bytes, b"No such file or directory");
+        assert_eq!(
+            texts_of_kind(&inner.messages, MK_WARNING),
+            vec![String::from_utf8(expected).unwrap()]
+        );
+        assert!(inner.file_failed_at.is_some());
+        assert!(!path.exists());
+
+        // the folder appears: nothing is tried until the retry is due
+        std::fs::create_dir_all(&dir).unwrap();
+        filelog_locked(&mut inner, &path_mtx, b"INFO", b"too soon", false, None);
+        assert!(!path.exists());
+        inner.file_failed_at = Some(current_unix_time() - LOG_REOPEN_INTERVAL);
+        filelog_locked(&mut inner, &path_mtx, b"INFO", b"back again", false, None);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.ends_with("INFO\tback again\n"), "{text}");
+        assert!(!text.contains("too soon"));
+        assert!(inner.file_failed_at.is_none());
+        assert_eq!(
+            texts_of_kind(&inner.messages, MK_INFO),
+            vec!["LogFile can be written again; the log goes there from now on.".to_owned()]
+        );
+        drop(inner);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_log_file_warning_at_start_up_is_numbered_with_the_buffered_messages() {
+        let dir = missing_log_dir("startup");
+        let log_opt = CString::new(format!("LogFile={}", dir.join("rustyget.log").to_str().unwrap())).unwrap();
+        let cmd_opts = [
+            log_opt.as_ptr(),
+            c"LogToFile=yes".as_ptr(),
+            c"InfoTarget=both".as_ptr(),
+            c"WarningTarget=both".as_ptr(),
+            c"ErrorTarget=both".as_ptr(),
+            c"LogBuffer=100".as_ptr(),
+        ];
+        let mut scalars = NzbgetRsParsedOptions::default();
+        let mut flags = 0;
+        let opts = unsafe {
+            nzbget_rs_options_new(
+                c"rustyget".as_ptr(),
+                ptr::null(),
+                1,
+                1,
+                cmd_opts.as_ptr(),
+                cmd_opts.len(),
+                0,
+                c"1.0".as_ptr(),
+                ptr::null_mut(),
+                None,
+                &mut scalars,
+                &mut flags,
+            )
+        };
+        let log = NzbgetRsLog::with_debug_cb(false, None);
+        log.emit_bytes(MK_INFO, None, b"first");
+        log.emit_bytes(MK_ERROR, None, b"second");
+        unsafe {
+            log.init_options(opts.as_ref(), true, false, false);
+            log.emit_bytes(MK_INFO, opts.as_ref(), b"third");
+        }
+        let inner = log.inner.lock().unwrap();
+        let ids: Vec<u32> = inner.messages.iter().map(|m| m.id).collect();
+        assert_eq!(ids, (1..=ids.len() as u32).collect::<Vec<_>>());
+        assert_eq!(texts_of_kind(&inner.messages, MK_WARNING).len(), 1);
+        assert_eq!(
+            texts_of_kind(&inner.messages, MK_INFO),
+            vec!["first".to_owned(), "third".to_owned()]
+        );
+        drop(inner);
+        unsafe { nzbget_rs_options_free(opts) };
+        assert!(!dir.exists());
+    }
+
     #[test]
     fn a_device_log_file_is_written_as_is_and_never_renamed() {
         let mut inner = LogInner {
@@ -1080,6 +1254,7 @@ mod tests {
             file_day: None,
             file_size: 0,
             device: false,
+            file_failed_at: None,
         };
         let now = current_unix_time();
         rotate_if_due(&mut inner, c"/dev/null", now, 0, 10, 7, None);

@@ -10001,6 +10001,86 @@ def scenario_daemonlock(daemon, t):
     return ('daemonlock', ok, 'up=%s pid=%r kept=%s removed=%s' % (first_up, pid, kept, removed))
 
 
+def scenario_daemonlockhealth(daemon, t):
+    """Daemon mode keeps its lock-file lock through a systemhealth call and a
+    reload. The health check opened and closed the lock-file to test it, and
+    closing any descriptor of a file drops the process's lockf lock, so a
+    second daemon on the same config then started beside the first one."""
+    import json as _json
+    import re as _re
+    import subprocess as _sp
+    import urllib.request as _req
+    daemon.wait_ready()
+    lock = t.path('main', 'h.lock')
+    port = free_port()
+    conf = t.read_file(daemon.conf_rel).decode()
+    for key, value in (('ControlPort', str(port)), ('LockFile', lock),
+                       ('QueueDir', t.path('main', 'hqueue')), ('LogFile', t.path('h.log')),
+                       ('NzbDir', t.path('main', 'hnzb'))):
+        conf = _re.sub(r'(?m)^%s=.*$' % key, '%s=%s' % (key, value), conf)
+    conf += 'SystemHealthCheck=yes\n'
+    hconf = t.path('main', 'h.conf')
+    with open(hconf, 'w') as f:
+        f.write(conf)
+    base = [t.nzbget, '-c', hconf]
+
+    def call(method):
+        body = _json.dumps({'method': method, 'params': []}).encode()
+        return _json.loads(_req.urlopen('http://127.0.0.1:%d/jsonrpc' % port, body, timeout=5).read())['result']
+
+    def uptime():
+        try:
+            return call('status')['UpTimeSec']
+        except Exception:
+            return None
+
+    def wait(cond, timeout=30):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if cond():
+                return True
+            time.sleep(0.3)
+        return False
+
+    second_rc = None
+    health_ok = reloaded = kept = refused = still_up = False
+    pid = ''
+    try:
+        _sp.run(base + ['-D'], timeout=30)
+        up = wait(lambda: uptime() is not None)
+        pid = open(lock).read() if os.path.exists(lock) else ''
+        health_ok = isinstance(call('systemhealth'), dict) if up else False
+        time.sleep(2)
+        before = uptime() or 0
+        call('reload')
+        # the reloaded instance answers again with a fresh uptime
+        reloaded = wait(lambda: (lambda u: u is not None and u < before)(uptime()))
+        call('systemhealth')
+        second = _sp.run(base + ['-D'], timeout=30)
+        second_rc = second.returncode
+        time.sleep(3)
+        kept = os.path.exists(lock) and open(lock).read() == pid
+        log = t.read_file('h.log').decode(errors='replace')
+        refused = 'could not acquire lock on lock-file' in log
+        still_up = uptime() is not None
+    finally:
+        try:
+            _sp.run(base + ['-Q'], timeout=30)
+        except Exception:
+            pass
+        time.sleep(2)
+        found = _sp.run(['pgrep', '-f', hconf], capture_output=True, text=True).stdout.split()
+        for entry in found:
+            try:
+                os.kill(int(entry), 9)
+            except (OSError, ValueError):
+                pass
+    ok = (_re.fullmatch(r'\d+\n', pid) is not None and health_ok and reloaded and kept
+          and refused and still_up and len(found) == 0)
+    return ('daemonlockhealth', ok, 'pid=%r health=%s reloaded=%s kept=%s refused=%s still_up=%s leftover=%s' % (
+        pid, health_ok, reloaded, kept, refused, still_up, found))
+
+
 def scenario_urlarchive(daemon, t):
     """A url that serves a zip with two nzb-files: both are added. The url
     item went with every nzb of the archive; adding the first took it out of
@@ -10892,6 +10972,146 @@ def _verify_output(t, expected, ext='.bin', dirs=(('main', 'dst'),)):
     return False
 
 
+def scenario_badpaths(daemon, t):
+    """The config's paths do not work (MainDir lies under a regular file, so
+    nothing can be created there, whoever runs the test). The daemon still
+    starts: its port answers HTTP and RPC, downloading, post-processing and
+    scanning stay paused, each bad path is warned about once (in the Messages
+    the web interface reads, with the option, value, reason and "Settings >
+    Paths"), a LogFile in a missing folder is not an error per line, and the
+    Settings page still gets option descriptions. Saving fixed paths and
+    reloading unpauses it and creates the folders."""
+    api = daemon.wait_ready()
+    try:
+        api.shutdown()
+    except Exception:
+        pass
+    t.procs[-1].wait(timeout=60)
+
+    t.write_file('blocker', b'not a folder\n')
+    bad_main = t.path('blocker', 'rg')
+    daemon.write_config(DEFAULT_OPTIONS + [
+        'MainDir=%s' % bad_main, 'DestDir=${MainDir}/dst', 'InterDir=${MainDir}/inter',
+        'NzbDir=${MainDir}/nzb', 'QueueDir=${MainDir}/queue', 'TempDir=${MainDir}/tmp',
+        'LogFile=${MainDir}/rustyget.log', 'ConfigTemplate=',
+        # a secret that must never reach the Settings page's template
+        'Server1.Password=badpaths-secret-42',
+    ])
+    daemon.process = t.spawn([t.nzbget, '-c', t.path(daemon.conf_rel), '-s'], output_rel='badpaths.out')
+    api = daemon.wait_ready()
+    problems = []
+
+    version = api.version()
+    try:
+        with socket.create_connection((t.rpc_host(), daemon.rpc_port), timeout=5) as sock:
+            sock.sendall(b'GET / HTTP/1.0\r\n\r\n')
+            http_reply = sock.recv(64)
+    except OSError as e:
+        http_reply = repr(e).encode()
+    if not http_reply.startswith(b'HTTP/1.'):
+        problems.append('http=%r' % http_reply[:30])
+
+    st = api.status()
+    paused = (st['DownloadPaused'], st['PostPaused'], st['ScanPaused'])
+    if paused != (True, True, True):
+        problems.append('paused=%s' % (paused,))
+
+    time.sleep(3)  # let the queue, scanner and log run against the missing folders
+    if daemon.process.poll() is not None:
+        problems.append('daemon exited with %s' % daemon.process.returncode)
+    texts = [m['Text'] for m in api.log(0, 1000) if m['Kind'] in ('WARNING', 'ERROR')]
+    counts = {}
+    for option in ('MainDir', 'DestDir', 'InterDir', 'NzbDir', 'QueueDir', 'TempDir', 'LogFile'):
+        warned = [x for x in texts if ('%s "' % option) in x and "can't be used" in x and 'Settings > Paths' in x]
+        counts[option] = len(warned)
+        if len(warned) != 1:
+            problems.append('%s warned %d times' % (option, len(warned)))
+    repeated = [x for x in texts if x.startswith('[Paths][')]
+    if repeated:
+        problems.append('repeated=%s' % repeated)
+    if not any('paused until the bad paths are fixed' in x for x in texts):
+        problems.append('no pause notice')
+
+    out = t.read_file('badpaths.out').decode(errors='replace')
+    per_line_errors = out.count('rustyget.log: ')
+    if per_line_errors:
+        problems.append('log file errors per line=%d' % per_line_errors)
+    # once on stderr (a log line) and once among the screen messages
+    for form in ('WARNING\tLogFile "', '[WARNING] LogFile "'):
+        if out.count(form + '%s/rustyget.log" can\'t be used' % bad_main) != 1:
+            problems.append('%r LogFile warnings=%d' % (form, out.count(form)))
+
+    for from_disk in (True, False):
+        templates = api.configtemplates(from_disk)
+        text = templates[0].get('Template', '') if templates else ''
+        if '### PATHS' not in text:
+            problems.append('no config template (from_disk=%s)' % from_disk)
+        if 'badpaths-secret-42' in text:
+            problems.append('the live config was served as the template')
+
+    # daemon mode with the lock file in the missing folder runs without it
+    lock_warned = None
+    if t.name == 'local':
+        dport = free_port()
+        dconf = t.path('badpaths-daemon.conf')
+        conf = t.read_file(daemon.conf_rel).decode()
+        conf = re.sub(r'(?m)^ControlPort=.*$', 'ControlPort=%d' % dport, conf)
+        conf += 'LockFile=${MainDir}/rustyget.lock\n'
+        with open(dconf, 'w') as f:
+            f.write(conf)
+        subprocess.run([t.nzbget, '-c', dconf, '-D'], timeout=30)
+        dapi = ServerProxy('http://127.0.0.1:%d/xmlrpc' % dport)
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            try:
+                dapi.version()
+                lock_warned = sum(1 for m in dapi.log(0, 1000)
+                                  if 'LockFile "%s/rustyget.lock" can\'t be used' % bad_main in m['Text'])
+                break
+            except Exception:
+                time.sleep(0.3)
+        try:
+            dapi.shutdown()
+        except Exception:
+            pass
+        time.sleep(1)
+        for entry in subprocess.run(['pgrep', '-f', dconf], capture_output=True, text=True).stdout.split():
+            try:
+                os.kill(int(entry), 9)
+            except (OSError, ValueError):
+                pass
+        if lock_warned != 1:
+            problems.append('daemon mode lock warnings=%s' % lock_warned)
+
+    # fix the paths in the config, save and reload
+    good_main = t.path('fixed')
+    values = [{'Name': o['Name'], 'Value': good_main if o['Name'] == 'MainDir' else o['Value']}
+              for o in api.loadconfig()]
+    if not api.saveconfig(values):
+        problems.append('saveconfig failed')
+    api.reload()
+    deadline = time.time() + 60
+    st = None
+    while time.time() < deadline:
+        try:
+            st = api.status()
+            if not st['DownloadPaused'] and os.path.isdir(os.path.join(good_main, 'queue')):
+                break
+        except Exception:
+            pass
+        time.sleep(0.3)
+    after = (st['DownloadPaused'], st['PostPaused'], st['ScanPaused']) if st else None
+    if after != (False, False, False):
+        problems.append('after reload paused=%s' % (after,))
+    made = sorted(d for d in ('dst', 'inter', 'nzb', 'queue', 'tmp') if os.path.isdir(os.path.join(good_main, d)))
+    if len(made) != 5:
+        problems.append('made=%s' % made)
+    if not os.path.isfile(os.path.join(good_main, 'rustyget.log')):
+        problems.append('no log file after the fix')
+    return ('badpaths', not problems, 'version=%s paused=%s warnings=%s daemon_lock_warnings=%s after_reload=%s %s' % (
+        version, paused, counts, lock_warned, after, ' '.join(problems)))
+
+
 def _grep_log(t, needle):
     try:
         return t.read_file('nzbget.log').decode(errors='replace').count(needle)
@@ -11109,6 +11329,7 @@ SCENARIOS = {
     'queueedits': scenario_queueedits,
     'directunpackkeep': scenario_directunpackkeep,
     'directunpacksimple': scenario_directunpacksimple,
+    'badpaths': scenario_badpaths,
     'directunpacktwoarchives': scenario_directunpacktwoarchives,
     'directunpackparfailure': scenario_directunpackparfailure,
     'parfailurenodirectunpack': scenario_parfailurenodirectunpack,
@@ -11174,6 +11395,7 @@ SCENARIOS = {
     'partialnzb': scenario_partialnzb,
     'partialnzbdeclared': scenario_partialnzbdeclared,
     'daemonlock': scenario_daemonlock,
+    'daemonlockhealth': scenario_daemonlockhealth,
     'urlarchive': scenario_urlarchive,
     'extdownloadname': scenario_extdownloadname,
     'connectioncap': scenario_connectioncap,

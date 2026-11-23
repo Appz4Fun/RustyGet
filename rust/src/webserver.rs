@@ -531,28 +531,44 @@ pub fn gzip_compress_body(body: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
+/// True for a file the web server never sends from WebDir: a `.conf` file (a
+/// configuration file kept there holds passwords).
+pub(crate) fn web_file_is_forbidden(path: &[u8]) -> bool {
+    let base = &path[crate::paths::base_file_name(path)..];
+    base.len() >= 5 && base[base.len() - 5..].eq_ignore_ascii_case(b".conf")
+}
+
+/// Loads a static file from WebDir (with a trailing NUL), but never a `.conf`
+/// file and never the active configuration file under another name (a link or
+/// copy-by-hardlink): the file is opened first and its device and inode are
+/// compared with `config_file`'s, so a swap between check and read cannot slip
+/// it through.
 #[cfg(unix)]
-fn load_file_bytes(path_bytes: &[u8]) -> Option<Vec<u8>> {
-    if path_bytes.is_empty() || path_bytes.contains(&0) {
+fn load_web_file(path_bytes: &[u8], config_file: &[u8]) -> Option<Vec<u8>> {
+    use std::io::Read as _;
+    use std::os::unix::fs::MetadataExt as _;
+    if path_bytes.is_empty() || path_bytes.contains(&0) || web_file_is_forbidden(path_bytes) {
         return None;
     }
-    let mut c_path = Vec::with_capacity(path_bytes.len() + 1);
-    c_path.extend_from_slice(path_bytes);
-    c_path.push(0);
-    let cstr = std::ffi::CStr::from_bytes_with_nul(&c_path).ok()?;
-    let mut buf = Vec::new();
-    let ok = crate::fsops::load_file_into_buffer(cstr, true, &crate::fsops::posix_stat, |sz| {
-        if sz <= 0 || buf.try_reserve_exact(sz as usize).is_err() {
-            return std::ptr::null_mut();
-        }
-        buf.resize(sz as usize, 0);
-        buf.as_mut_ptr()
-    });
-    if ok {
-        Some(buf)
-    } else {
-        None
+    let mut file = std::fs::File::open(crate::cleanup::bytes_to_path_buf(path_bytes)).ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() {
+        return None;
     }
+    if !config_file.is_empty() {
+        if let Ok(cfg) = std::fs::metadata(crate::cleanup::bytes_to_path_buf(config_file)) {
+            if cfg.dev() == meta.dev() && cfg.ino() == meta.ino() {
+                return None;
+            }
+        }
+    }
+    let len = usize::try_from(meta.len()).ok()?;
+    let mut buf = Vec::new();
+    buf.try_reserve_exact(len.checked_add(1)?).ok()?;
+    file.read_to_end(&mut buf).ok()?;
+    // the callers expect a trailing NUL
+    buf.push(0);
+    Some(buf)
 }
 
 fn compute_etag(body: &[u8]) -> Vec<u8> {
@@ -572,6 +588,8 @@ pub struct WebServeConfig<'a> {
     pub remote_addr: &'a [u8],
     pub version: &'a [u8],
     pub web_dir: &'a [u8],
+    /// The active configuration file: never served, whatever its name in WebDir.
+    pub config_file: &'a [u8],
     pub credentials: Credentials<'a>,
     pub control_port: i32,
     pub form_auth: bool,
@@ -1047,7 +1065,7 @@ where
             disk_filename.push(crate::paths::PATH_SEPARATOR);
             disk_filename.extend_from_slice(part);
 
-            let Some(buf) = load_file_bytes(&disk_filename) else {
+            let Some(buf) = load_web_file(&disk_filename, cfg.config_file) else {
                 let mut w = Vec::with_capacity(32 + part.len());
                 w.extend_from_slice(b"Web-Server: ");
                 w.extend_from_slice(ERR_HTTP_NOT_FOUND);
@@ -1101,7 +1119,7 @@ where
             log_msg(0, &dbg);
         }
 
-        let Some(mut buf) = load_file_bytes(&filename) else {
+        let Some(mut buf) = load_web_file(&filename, cfg.config_file) else {
             let base = &filename[crate::paths::base_file_name(&filename)..];
             let ignorable = web_is_ignorable_404(base);
             send_error(
@@ -1307,6 +1325,12 @@ mod tests {
         std::fs::write(web_dir.join("index.html"), b"<html>ok</html>").unwrap();
         std::fs::write(web_dir.join("a.js"), big_js.as_bytes()).unwrap();
         std::fs::write(web_dir.join("b.js"), b"var x = 1;\n").unwrap();
+        // the live configuration file kept in WebDir, a hard link to it under a
+        // harmless name, and another .conf file: none of them is ever sent
+        let live_conf = web_dir.join("rustyget.conf");
+        std::fs::write(&live_conf, b"ControlPassword=secret\n").unwrap();
+        std::fs::hard_link(&live_conf, web_dir.join("linked.js")).unwrap();
+        std::fs::write(web_dir.join("Other.CONF"), b"Server1.Password=secret\n").unwrap();
 
         let run_req = |raw_req: &[u8], gzip_enabled: bool| -> (bool, Vec<u8>) {
             let sig = &raw_req[..4];
@@ -1316,6 +1340,7 @@ mod tests {
                 remote_addr: b"127.0.0.1",
                 version: b"26.0",
                 web_dir: web_dir.as_os_str().as_bytes(),
+                config_file: live_conf.as_os_str().as_bytes(),
                 credentials: Credentials {
                     control_username: Some(b"admin"),
                     control_password: Some(b"pass"),
@@ -1418,6 +1443,23 @@ mod tests {
             false,
         );
         assert!(resp_ext.starts_with(b"HTTP/1.1 404 Not Found\r\n"));
+
+        // 4b. The configuration file and any .conf file are never served
+        for req in [
+            &b"GET /rustyget.conf HTTP/1.1\r\nAuthorization: Basic YWRtaW46cGFzcw==\r\n\r\n"[..],
+            b"GET /linked.js HTTP/1.1\r\nAuthorization: Basic YWRtaW46cGFzcw==\r\n\r\n",
+            b"GET /Other.CONF HTTP/1.1\r\nAuthorization: Basic YWRtaW46cGFzcw==\r\n\r\n",
+            b"GET /combined.js?rustyget.conf HTTP/1.1\r\nAuthorization: Basic YWRtaW46cGFzcw==\r\n\r\n",
+            b"GET /combined.js?a.js+linked.js HTTP/1.1\r\nAuthorization: Basic YWRtaW46cGFzcw==\r\n\r\n",
+        ] {
+            let (_, resp) = run_req(req, false);
+            assert!(resp.starts_with(b"HTTP/1.1 404 Not Found\r\n"), "{}", String::from_utf8_lossy(req));
+            assert!(!resp.windows(6).any(|w| w == b"secret"));
+        }
+        assert!(web_file_is_forbidden(b"/w/rustyget.conf"));
+        assert!(web_file_is_forbidden(b"/w/x.Conf"));
+        assert!(!web_file_is_forbidden(b"/w/conf.js"));
+        assert!(!web_file_is_forbidden(b"/w/.conf.d/a.js"));
 
         // 5. POST JSON-RPC with URL credentials
         let (_, resp_rpc) = run_req(

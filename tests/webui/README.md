@@ -24,7 +24,15 @@ node tests/webui/system-metrics.js http://127.0.0.1:17999/     # offline: Status
 node tests/webui/settings-health-startup.js http://127.0.0.1:17689/
 node tests/webui/tls-cipher.js http://127.0.0.1:17689/
 node tests/webui/tls-cipher-settings.js http://127.0.0.1:17689/
+node tests/webui/bad-paths.js build/debug/rustyget 17791       # starts its own daemon
 ```
+
+`bad-paths.js` starts its own loopback daemon from a copy of `rustyget.conf` with
+`MainDir=/nonexistent`. It checks that Downloads, History, Messages and Settings
+work without console errors, that Messages holds one "can't be used ... Change
+<option> in Settings > Paths" warning per bad path, that everything is paused,
+and that typing a valid MainDir in Settings > Paths, saving and reloading clears
+the warnings and unpauses. `NZBGET_UI_CAPTURE_DIR` saves JPEGs of that state.
 
 The TLS cipher dialog check fulfills candidate assets and intercepts every RPC.
 It runs at 1280, 390 and 320 pixels in both themes, covering duplicate starts,

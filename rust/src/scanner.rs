@@ -622,6 +622,31 @@ fn drop_old_files(
     });
 }
 
+/// The last "Could not scan" warning about a scan folder: the same one is not
+/// repeated on every scan (a NzbDir that does not exist yet), only after the
+/// folder could be read again or the reason changed.
+static LAST_SCAN_WARNING: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+
+/// True when `msg` should be logged as a warning: it differs from the last one.
+fn scan_warning_is_new(msg: &[u8]) -> bool {
+    let mut last = LAST_SCAN_WARNING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if last.as_slice() == msg {
+        return false;
+    }
+    last.clear();
+    last.extend_from_slice(msg);
+    true
+}
+
+fn clear_scan_warning() {
+    LAST_SCAN_WARNING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+}
+
 fn find_archives(
     dir: &Path,
     check_stat: bool,
@@ -631,7 +656,10 @@ fn find_archives(
 ) -> Vec<PathBuf> {
     let mut archives = Vec::new();
     let root_rd = match std::fs::read_dir(dir) {
-        Ok(rd) => rd,
+        Ok(rd) => {
+            clear_scan_warning();
+            rd
+        }
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return archives,
         Err(e) => {
             let code = e.raw_os_error().unwrap_or(1);
@@ -640,7 +668,8 @@ fn find_archives(
             msg.extend_from_slice(crate::fsops::path_to_bytes(dir));
             msg.extend_from_slice(b" for archives: ");
             msg.extend_from_slice(&err_bytes);
-            emit_log(env, LOG_WARN, &msg);
+            let kind = if scan_warning_is_new(&msg) { LOG_WARN } else { LOG_DEBUG };
+            emit_log(env, kind, &msg);
             return archives;
         }
     };
@@ -2069,6 +2098,21 @@ pub(crate) unsafe fn add_cli_nzb_file_active(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_scan_folder_that_cannot_be_read_is_warned_about_once_until_it_works() {
+        let a = b"Could not scan /nonexistent/rg/nzb for archives: No such file or directory";
+        let b = b"Could not scan /other/nzb for archives: No such file or directory";
+        super::clear_scan_warning();
+        assert!(super::scan_warning_is_new(a));
+        assert!(!super::scan_warning_is_new(a));
+        assert!(!super::scan_warning_is_new(a));
+        assert!(super::scan_warning_is_new(b), "another folder or reason is new");
+        assert!(super::scan_warning_is_new(a));
+        super::clear_scan_warning();
+        assert!(super::scan_warning_is_new(a), "after a good scan it is warned about again");
+        super::clear_scan_warning();
+    }
+
     use super::*;
 
     #[test]

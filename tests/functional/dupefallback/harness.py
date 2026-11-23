@@ -6824,6 +6824,83 @@ def scenario_fleetnzbpassword(daemon, t):
     return ('fleetnzbpassword', ok, 'order=%s kinds=%s status=%s' % (order, kinds, status))
 
 
+def scenario_dropdune(daemon, t):
+    """The Dune Part Two drop on m5air (docs/DROP_AS_FLEET.md, ground truth in
+    the request's nzb identity check), in small: copies of the 2160p release
+    copied into NzbDir with download-manager suffixes, plus the 1080p release.
+    - C01: RAR5 with encrypted headers, stored, password only in the nzb meta,
+      100% alive: read with that password (borrowable-encrypted), never the
+      primary while a healthy plain copy is there (F8, F10).
+    - C07: stored RAR, 100% alive: the primary (F10).
+    - C04 and C11: twins (the same par2 file list) of each other.
+    - C08: a repacked RAR (other par2): another container, never 'other' (F9).
+    - C13: a bare mkv a little shorter (other par2): never 'other' (F9).
+    - C17, C05, C09: dead: kept in history as dead donors with their nzb (F3).
+    - C00: the 1080p release: never joins the 2160p fleet (F1).
+    Every copy shows its probed alive share (DupeAlive), not a Health of
+    untried articles (F4)."""
+    daemon.fake_nntp.alive = set()
+    rel = 'Dune.Part.Two.2024.UHD.BluRay.2160p.TrueHD.Atmos.7.1.DV.HEVC.REMUX-FraMeSToR'
+    key = 'dupes:dune.part.two.2024.uhd.bluray.2160p.truehd.atmos.7.1.dv.hevc.remux.framestor'
+    hd = 'Dune.Part.Two.2024.BluRay.1080p.TrueHD.Atmos.7.1.AVC.REMUX-FraMeSToR'
+    hp = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'testdata', 'donorkind', 'enchp5.rar'),
+              'rb').read()
+    movie = _payload(400_000, 8001)
+    meta = '<head><meta type="password">pw</meta></head><file '
+    copies = {
+        ' (1)': _fleet_copy(daemon, 'du01', 'a.rar', 400_000, hp, _payload(400_000, 8011)).replace('<file ', meta, 1),
+        '_12': _fleet_copy(daemon, 'du07', 'b.rar', 400_000, _rar4_head(0x30), _payload(400_000, 8017)),
+        '_1': _fleet_copy(daemon, 'du04', 'c.mkv', 400_000, None, movie, 30),
+        '_3': _fleet_copy(daemon, 'du11', 'c.mkv', 400_000, None, movie, 26),
+        '_13': _fleet_copy(daemon, 'du08', 'd.rar', 400_000, _rar4_head(0x30), _payload(400_000, 8018), 20),
+        '_5': _fleet_copy(daemon, 'du13', 'e.mkv', 399_000, None, movie[:399_000], 34),
+        '_9': _fleet_copy(daemon, 'du02', 'f.rar', 400_000, None, _payload(400_000, 8012), 0),
+        '_10': _fleet_copy(daemon, 'du05', 'g.mkv', 400_000, None, _payload(400_000, 8015), 0),
+        '_14': _fleet_copy(daemon, 'du09', 'h.rar', 400_000, None, _payload(400_000, 8019), 0),
+    }
+    for tag in ('du02', 'du05', 'du09'):
+        daemon.fake_nntp.alive.discard('%s-par@x' % tag)
+    other = _fleet_copy(daemon, 'du00', 'i.mkv', 400_000, None, _payload(400_000, 8010))
+    api = daemon.wait_ready()
+    api.pausedownload()
+    for suffix, text in copies.items():
+        name = rel + suffix + '.nzb'
+        t.write_file(os.path.join('main', 'nzb', name), text.encode())
+    t.write_file(os.path.join('main', 'nzb', hd + '.nzb'), other.encode())
+    deadline = time.time() + 120
+    while time.time() < deadline and not _grep_log(t, 'Fleet ' + key + ' from NzbDir'):
+        time.sleep(0.5)
+    reply_line = next((line for line in t.read_file('nzbget.log').decode(errors='replace').splitlines()
+                       if 'Fleet ' + key + ' from NzbDir' in line), '')
+    chosen = re.search(r'downloading #(\d+)', reply_line)
+    # TwinCheck labels the backups on its next rounds
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        kinds = {i['NZBName']: _params(i).get('DupeKind') for i in _items_of_key(api, key)}
+        if kinds.get(rel + '_13') and kinds.get(rel + '_5'):
+            break
+        time.sleep(1)
+    items = {i['NZBName']: i for i in _items_of_key(api, key)}
+    p = {n: _params(i) for n, i in items.items()}
+    primary = next((n for n, i in items.items() if chosen and i['NZBID'] == int(chosen.group(1))), None)
+    hd_items = [g for g in api.listgroups() + api.history() if g['NZBName'] == hd]
+    nzb_files = os.listdir(t.path('main', 'nzb'))
+    dead_names = [n for n in items if p[n].get('DupeAlive') == '0']
+    api.resumedownload()
+    ok = (primary == rel + '_12'
+          and p.get(rel + ' (1)', {}).get('DupeCopyKind') == 'borrowable-encrypted'
+          and p.get(rel + '_3', {}).get('DupeCopyKind') == 'twin' and p.get(rel + '_1', {}).get('DupeCopyKind') == 'twin'
+          and all(p.get(rel + s, {}).get('DupeKind') not in ('other',) for s in ('_13', '_5'))
+          and all(p.get(rel + s, {}).get('DupeKind') == 'container' for s in ('_13', '_5'))
+          and len(dead_names) == 3 and all(items[n]['Status'].startswith('DELETED') for n in dead_names)
+          and all(any(f.startswith(n + '.nzb') for f in nzb_files) for n in dead_names)
+          and all(p[n].get('DupeAlive') is not None for n in items)
+          and hd_items and all(g.get('DupeKey', '').lower() != key for g in hd_items))
+    return ('dropdune', ok, 'primary=%s kinds=%s alive=%s dead=%s hd=%s' % (
+        primary, {n: (q.get('DupeCopyKind'), q.get('DupeKind')) for n, q in p.items()},
+        {n: q.get('DupeAlive') for n, q in p.items()}, dead_names, [(g['NZBName'], g.get('DupeKey')) for g in hd_items]))
+
+
 def scenario_fleettimeoutunverified(daemon, t):
     """F6: timeouts are never evidence. A copy whose every check fails with a
     temporary error (451, as a server or proxy that times out answers) is
@@ -11510,6 +11587,7 @@ def scenario_dropkeepdonor(daemon, t):
 SCENARIOS = {
     'dropnzbdir': scenario_dropnzbdir,
     'fleetprimaryease': scenario_fleetprimaryease,
+    'dropdune': scenario_dropdune,
     'fleetnzbpassword': scenario_fleetnzbpassword,
     'fleettimeoutunverified': scenario_fleettimeoutunverified,
     'dropjoin': scenario_dropjoin,
@@ -11912,6 +11990,7 @@ SCENARIO_ENV_KEYS = sorted({k for env in SCENARIO_ENV.values() for k in env})
 
 SCENARIO_OPTIONS = {
     'fleetprimaryease': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
+    'dropdune': ['NzbDirInterval=1', 'NzbDirFileAge=2', 'DupeArticleFallback=no', 'HealthCheck=dupe'],
     'fleetnzbpassword': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
     'fleettimeoutunverified': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
     'dropnzbdir': ['NzbDirInterval=1', 'NzbDirFileAge=2', 'HealthCheck=dupe', 'DupeArticleFallback=article'],
@@ -12340,7 +12419,7 @@ SCENARIO_FIRST_FAIL_PROXY = {'recheckfailed': ((b'?5=', b'?10=', b'?15='),),
 # scenarios with a FakeNewznab indexer (DupeSearchUrl points to it)
 
 # scenarios with a FakeNntp news server in place of nserv
-SCENARIO_FAKE_NNTP = {'fleetprimaryease', 'fleetnzbpassword', 'fleettimeoutunverified', 'watchfleet', 'watchforcepick', 'watchdeadpick', 'watchswap', 'watchborrow', 'watchswaptwin', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetnodupecheck', 'fleetkindorder', 'fleetkindsingle', 'fleetkindlater', 'fleetintake', 'fleetintakelater', 'fleetencryptedlast', 'fleetencryptedheadless', 'fleetlockedlast', 'fleetencryptedpassword', 'fleetkindslowcheck', 'fleettwinvolumes', 'fleetalldead', 'fleetshutdown'}
+SCENARIO_FAKE_NNTP = {'fleetprimaryease', 'dropdune', 'fleetnzbpassword', 'fleettimeoutunverified', 'watchfleet', 'watchforcepick', 'watchdeadpick', 'watchswap', 'watchborrow', 'watchswaptwin', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetnodupecheck', 'fleetkindorder', 'fleetkindsingle', 'fleetkindlater', 'fleetintake', 'fleetintakelater', 'fleetencryptedlast', 'fleetencryptedheadless', 'fleetlockedlast', 'fleetencryptedpassword', 'fleetkindslowcheck', 'fleettwinvolumes', 'fleetalldead', 'fleetshutdown'}
 
 
 # --------------------------------------------------------------------------- #

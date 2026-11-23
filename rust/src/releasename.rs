@@ -765,7 +765,8 @@ pub const GROUP_KEY_PREFIX: &[u8] = b"dupes:";
 /// separator (`-D3FiL3D`, `-EPSiLON2`) is never touched. The web UI mirrors
 /// this rule in `webui/dupegroup.js`.
 pub fn strip_copy_suffix(name: &[u8]) -> Vec<u8> {
-    let mut s = trim(name, b" \t\r\n").to_vec();
+    let cut = without_password(name);
+    let mut s = trim(&cut, b" \t\r\n").to_vec();
     loop {
         let before = s.len();
         if ends_icase(&s, b".queued") {
@@ -816,6 +817,25 @@ pub fn strip_copy_suffix(name: &[u8]) -> Vec<u8> {
         }
     }
     s
+}
+
+/// The name without any `{{password}}` in it (NZBGet's convention for an
+/// archive password in a file name): a password never reaches a group key, a
+/// DupeKey or a log line.
+pub fn without_password(name: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(name.len());
+    let mut i = 0;
+    while i < name.len() {
+        if name[i..].starts_with(b"{{") {
+            if let Some(end) = name[i + 2..].windows(2).position(|w| w == b"}}") {
+                i += 2 + end + 2;
+                continue;
+            }
+        }
+        out.push(name[i]);
+        i += 1;
+    }
+    out
 }
 
 fn trailing_digits(text: &[u8]) -> usize {
@@ -1006,6 +1026,19 @@ mod tests {
             group_key(b"Dune.2021.BluRay.1080p.TrueHD.Atmos.7.1.AVC.REMUX-FraMeSToR_3.nzb"),
             b"dupes:dune.2021.bluray.1080p.truehd.atmos.7.1.avc.remux.framestor".to_vec()
         );
+    }
+
+    /// Review C: a `{{password}}` in a file name never reaches a group key.
+    #[test]
+    fn a_password_in_the_name_never_reaches_the_key() {
+        let key = group_key(b"Movie.2024.1080p-GRP{{s3cret}}.nzb");
+        assert_eq!(key, b"dupes:movie.2024.1080p.grp".to_vec());
+        assert!(!String::from_utf8_lossy(&key).contains("s3cret"));
+        assert_eq!(group_key(b"Movie.2024.1080p-GRP{{s3cret}}_2.nzb"), key);
+        assert_eq!(without_password(b"A{{x}}B{{y}}"), b"AB".to_vec());
+        assert_eq!(without_password(b"A{{unclosed"), b"A{{unclosed".to_vec());
+        // a bare season is a release marker too (review D, as in the web UI)
+        assert_eq!(strip_copy_suffix(b"Show.S01.COMPLETE-GRP_2"), b"Show.S01.COMPLETE-GRP".to_vec());
     }
 
     /// The release parser takes the group from a name with a copy suffix as

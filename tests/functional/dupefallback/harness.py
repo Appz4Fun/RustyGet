@@ -11605,6 +11605,29 @@ def scenario_dropallfail(daemon, t):
     return ('dropallfail', ok, 'statuses=%s' % statuses)
 
 
+def scenario_dropallfailnonzb(daemon, t):
+    """Review B: a backup that failover could never pick (here its nzb-file is
+    gone) is no reason to keep a failed copy as a donor: with nothing left that
+    can complete the release, the copy ends FAILURE/HEALTH."""
+    rel = 'Nonzb.Movie.2024.1080p.WEB-DL.x264-GRP'
+    data = _payload(1_000_000, 15421)
+    api = daemon.wait_ready()
+    _ds_append(api, rel, _dead_release(t, 'anA', 15431), '', 0, paused=True)
+    _ds_append(api, rel + '_1', _drop_copy(t, 'anB', data, set()), '', 0, paused=False)
+    hb = daemon.wait_history(api, rel + '_1', timeout=60)
+    for f in os.listdir(t.path('main', 'nzb')):
+        if f.startswith(rel + '_1.nzb'):
+            os.remove(t.path('main', 'nzb', f))
+    api.editqueue('GroupResume', 0, '', [g['NZBID'] for g in api.listgroups() if g['NZBName'] == rel])
+    h = daemon.wait_history(api, rel, timeout=300)
+    deadline = time.time() + 60
+    while time.time() < deadline and not h['Status'].startswith(('FAILURE', 'DELETED')):
+        time.sleep(0.5)
+        h = daemon.wait_history(api, rel, timeout=60)
+    ok = h['Status'].startswith('FAILURE/HEALTH')
+    return ('dropallfailnonzb', ok, 'status=%s backup=%s' % (h['Status'], hb['Status']))
+
+
 def scenario_dropjoinstrict(daemon, t):
     """Review findings 3 and 4: the daemon-side join never touches another
     release, a copy in another category or DupeMode, or a download with a key
@@ -11717,6 +11740,7 @@ SCENARIOS = {
     'fleettimeoutunverified': scenario_fleettimeoutunverified,
     'dropjoin': scenario_dropjoin,
     'dropallfail': scenario_dropallfail,
+    'dropallfailnonzb': scenario_dropallfailnonzb,
     'dropjoinstrict': scenario_dropjoinstrict,
     'dropfleetasync': scenario_dropfleetasync,
     'dropjoinrestart': scenario_dropjoinrestart,
@@ -12125,6 +12149,7 @@ SCENARIO_OPTIONS = {
     'dropnzbdir': ['NzbDirInterval=1', 'NzbDirFileAge=2', 'HealthCheck=dupe', 'DupeArticleFallback=article'],
     'dropjoin': ['HealthCheck=dupe'],
     'dropallfail': ['HealthCheck=dupe', 'DupeArticleFallback=article'],
+    'dropallfailnonzb': ['HealthCheck=dupe', 'DupeArticleFallback=article'],
     'dropjoinstrict': ['HealthCheck=dupe'],
     'dropfleetasync': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
     'dropjoinrestart': ['HealthCheck=dupe', 'DupeCheck=no'],

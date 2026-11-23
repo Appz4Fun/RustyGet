@@ -238,15 +238,21 @@ var DupeGroup = (new function()
 		{
 			var w = lower(words[i]);
 			if (/^(19|20)\d\d$/.test(w) || /^\d{3,4}[pi]$/.test(w) || /^(4k|8k|uhd)$/.test(w) ||
-				/^s\d{1,3}(e\d{1,4})+$/.test(w)) return true;
+				/^s\d{1,3}(e\d{1,4})*$/.test(w)) return true;
 		}
 		return false;
 	}
 
 	// releasename.rs strip_copy_suffix
+	// releasename.rs without_password: a {{password}} never reaches a key
+	this.withoutPassword = function(name)
+	{
+		return String(name).replace(/\{\{[\s\S]*?\}\}/g, '');
+	};
+
 	this.stripCopySuffix = function(name)
 	{
-		var s = trim(String(name), ' \t\r\n');
+		var s = trim(this.withoutPassword(name), ' \t\r\n');
 		var before, d;
 		for (;;)
 		{

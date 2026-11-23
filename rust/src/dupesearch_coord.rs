@@ -6010,6 +6010,48 @@ fn emit_fleet_result(
 /// Logs what a fleet checked in the background replied (see [`fleet_append_rpc`]).
 struct FleetLogReply {
     key: Vec<u8>,
+    reason: Vec<u8>,
+    any_added: bool,
+}
+
+/// Writes the members of a fleet that never ran (the program stopping, the
+/// key busy with the same release, the thread not starting) into NzbDir, so
+/// the next scan adds them (as one fleet again): an upload is never lost.
+/// Members sent as urls have nothing to write. Returns how many were written.
+pub fn keep_members_for_scan(members: &[(Vec<u8>, bool, Vec<u8>)]) -> usize {
+    let Some(opts) = crate::options::active_options() else {
+        return 0;
+    };
+    let dir = opts.str_bytes(crate::options::OptStr::NzbDir).to_vec();
+    keep_members_in(&dir, members)
+}
+
+/// [`keep_members_for_scan`] into `dir`.
+pub fn keep_members_in(dir: &[u8], members: &[(Vec<u8>, bool, Vec<u8>)]) -> usize {
+    let dir = crate::cstr::until_nul(dir);
+    if dir.is_empty() {
+        return 0;
+    }
+    let mut written = 0;
+    for (name, is_url, data) in members {
+        if *is_url || data.is_empty() {
+            continue;
+        }
+        let base = crate::paths::make_valid_filename(&fleet_ensure_nzb_ext(name), false);
+        let dot = base.len() - 4;
+        let mut path = crate::fsops::path(dir).join(crate::fsops::path(&base)).to_path_buf();
+        let mut n = 2;
+        while path.exists() {
+            let mut leaf = base[..dot].to_vec();
+            leaf.extend_from_slice(format!("_{n}.nzb").as_bytes());
+            path = crate::fsops::path(dir).join(crate::fsops::path(&leaf)).to_path_buf();
+            n += 1;
+        }
+        if std::fs::write(&path, data).is_ok() {
+            written += 1;
+        }
+    }
+    written
 }
 
 impl RpcEmit for FleetLogReply {
@@ -6029,11 +6071,13 @@ impl RpcEmit for FleetLogReply {
         }
         for m in members {
             msg.extend_from_slice(b"; ");
-            msg.extend_from_slice(m.name.to_bytes());
+            msg.extend_from_slice(&crate::releasename::without_password(m.name.to_bytes()));
             msg.extend_from_slice(b" ");
             msg.extend_from_slice(m.status.to_bytes());
         }
         host_log(std::ptr::null_mut(), native_dupe_host, MK_INFO, &msg);
+        self.reason = reason.to_bytes().to_vec();
+        self.any_added = members.iter().any(|m| m.nzb_id > 0);
     }
 }
 
@@ -6101,9 +6145,18 @@ pub unsafe fn fleet_append_rpc(
         })
         .collect();
     let ctx_addr = host_ctx as usize;
+    // what to write back to NzbDir if the fleet never runs
+    let backup: Vec<(Vec<u8>, bool, Vec<u8>)> = owned
+        .iter()
+        .map(|(name, is_url, data)| (name.to_bytes().to_vec(), *is_url != 0, data.clone()))
+        .collect();
+    let backup_for_spawn_failure = backup.clone();
+    // counted like the donor walkers, so shutdown waits for the check
+    let walker = crate::dupesearch_nzb::DonorWalkerGuard::enter();
     let spawned = std::thread::Builder::new()
         .name("fleet-check".to_owned())
         .spawn(move || {
+            let _walker = walker;
             let key_c = crate::cstr::to_cstring(&key);
             let cat_c = crate::cstr::to_cstring(&category);
             let req: Vec<NzbgetRsRpcFleetReqMember> = owned
@@ -6115,7 +6168,11 @@ pub unsafe fn fleet_append_rpc(
                     data_len: data.len(),
                 })
                 .collect();
-            let mut log = FleetLogReply { key: key.clone() };
+            let mut log = FleetLogReply {
+                key: key.clone(),
+                reason: Vec::new(),
+                any_added: false,
+            };
             unsafe {
                 fleet_append(
                     ctx_addr as *mut c_void,
@@ -6129,9 +6186,19 @@ pub unsafe fn fleet_append_rpc(
                     &mut log,
                 );
             }
+            if crate::scanner::fleet_never_ran(&log.reason, log.any_added) {
+                let kept = keep_members_for_scan(&backup);
+                let mut msg = b"Fleet ".to_vec();
+                msg.extend_from_slice(&key);
+                msg.extend_from_slice(
+                    format!(": {} member(s) written to NzbDir for the next scan", kept).as_bytes(),
+                );
+                host_log(std::ptr::null_mut(), native_dupe_host, MK_INFO, &msg);
+            }
         });
     if spawned.is_err() {
-        return emit_fleet_result(out, 0, false, b"SHUTDOWN", &[]);
+        // never lose an upload: the next scan adds the members
+        keep_members_for_scan(&backup_for_spawn_failure);
     }
     emit_fleet_result(out, 0, false, b"PROBING", &entries)
 }
@@ -7306,6 +7373,29 @@ mod tests {
         assert_eq!(summary_password(&summary), None);
         summary_take_name_password(&mut summary, b"Movie.2024.1080p-GRP{{name-pw}}.nzb");
         assert_eq!(summary_password(&summary), Some(b"name-pw".as_slice()));
+    }
+
+    /// Review A: a fleet that never ran writes its uploaded members to NzbDir
+    /// for the next scan (never lost); a url member has nothing to write; an
+    /// existing file is never overwritten.
+    #[test]
+    fn a_fleet_that_never_ran_keeps_its_uploads_for_the_next_scan() {
+        let dir = std::env::temp_dir().join(format!("rg-keep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Movie.2024.1080p-GRP.nzb"), b"earlier").unwrap();
+        let members = vec![
+            (b"Movie.2024.1080p-GRP.nzb".to_vec(), false, b"<nzb a/>".to_vec()),
+            (b"Movie.2024.1080p-GRP_1".to_vec(), false, b"<nzb b/>".to_vec()),
+            (b"From.Url.nzb".to_vec(), true, b"https://example.invalid/x.nzb".to_vec()),
+        ];
+        let dir_bytes = dir.to_string_lossy().into_owned().into_bytes();
+        assert_eq!(keep_members_in(&dir_bytes, &members), 2);
+        assert_eq!(std::fs::read(dir.join("Movie.2024.1080p-GRP.nzb")).unwrap(), b"earlier");
+        assert_eq!(std::fs::read(dir.join("Movie.2024.1080p-GRP_2.nzb")).unwrap(), b"<nzb a/>");
+        assert_eq!(std::fs::read(dir.join("Movie.2024.1080p-GRP_1.nzb")).unwrap(), b"<nzb b/>");
+        assert!(!dir.join("From.Url.nzb").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// F7: a grouped fleet's check budget is per copy (60 s each).

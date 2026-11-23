@@ -1038,12 +1038,17 @@ fn spawn_nzbdir_fleet(
     copies: Vec<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)>,
     env: NzbgetRsScannerEnv,
 ) {
+    // counted like the donor walkers, so shutdown waits for it
+    #[cfg(unix)]
+    let walker = crate::dupesearch_nzb::DonorWalkerGuard::enter();
     // (renamed .queued file, original name): put back for the next scan when
     // the fleet never ran, so no copy is stranded
     let restore: Vec<(Vec<u8>, Vec<u8>)> = copies.iter().map(|c| (c.2.clone(), c.3.clone())).collect();
     let spawned = std::thread::Builder::new()
         .name("nzbdir-fleet".to_owned())
         .spawn(move || {
+            #[cfg(unix)]
+            let _walker = walker;
             #[cfg(unix)]
             {
                 let key_c = to_cstr_sanitized(&key);
@@ -1096,7 +1101,7 @@ fn spawn_nzbdir_fleet(
                 }
                 for (name, id, status) in &reply.added {
                     msg.extend_from_slice(b"; ");
-                    msg.extend_from_slice(name);
+                    msg.extend_from_slice(&crate::releasename::without_password(name));
                     msg.extend_from_slice(b" ");
                     msg.extend_from_slice(status);
                     if *id > 0 {

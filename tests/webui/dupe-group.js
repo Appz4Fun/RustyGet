@@ -79,6 +79,13 @@ check('different releases never share a group', () => {
   ]) assert.notEqual(DupeGroup.groupKey(a), DupeGroup.groupKey(b), a + ' vs ' + b);
 });
 
+check('a password in the name never reaches the key; a bare season is a marker', () => {
+  const key = DupeGroup.groupKey('Movie.2024.1080p-GRP{{s3cret}}.nzb');
+  assert.equal(key, 'dupes:movie.2024.1080p.grp');
+  assert.equal(DupeGroup.groupKey('Movie.2024.1080p-GRP{{s3cret}}_2.nzb'), key);
+  assert.equal(DupeGroup.stripCopySuffix('Show.S01.COMPLETE-GRP_2'), 'Show.S01.COMPLETE-GRP');
+});
+
 check('only nzb-files are grouped', () => {
   const plan = DupeGroup.plan([
     { name: `${BASE}.zip`, content: 'a', dupekey: '' },

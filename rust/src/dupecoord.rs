@@ -844,7 +844,9 @@ pub(crate) fn rescue_on_health_failure_host(
         || nzb.delete_status != DeleteStatus::Health
         || nzb.dupe_key.is_empty()
         || !(crate::options::dupe_watch()
-            || crate::options::active_options().is_some_and(|o| o.scalars().dupe_search != 0))
+            || crate::options::active_options().is_some_and(|o| o.scalars().dupe_search != 0)
+            // a fleet always looks after its copies: one of them must download
+            || is_fleet_member(host, &nzb))
     {
         return;
     }
@@ -1104,6 +1106,38 @@ pub(crate) fn join_copy_group_host(
 /// a download added now would get. Nothing is moved to history here: the
 /// copies already downloading keep downloading, and failover and TwinCheck
 /// see them as one fleet from now on.
+/// A group key stored by an earlier build that grouped by the raw file name
+/// (review C) can hold a `{{password}}`: such a key is rebuilt from the name
+/// without it, in the queue and in history.
+#[cfg(unix)]
+fn scrub_password_keys_host(host: &crate::queuesubsys_host::QueueSubsysHost, dq_ptr: usize) {
+    let mut items = Vec::new();
+    for i in 0..host.queue_len(dq_ptr) {
+        let qp = host.queue_at(dq_ptr, i);
+        if qp.is_some() {
+            items.push(host.nzb_snap(qp, false));
+        }
+    }
+    for i in 0..host.history_len(dq_ptr) {
+        let hi = host.history_at(dq_ptr, i);
+        if hi.kind == crate::queuesubsys_host::HK_NZB && hi.nzb().is_some() {
+            items.push(host.nzb_snap(hi.nzb(), false));
+        }
+    }
+    let mut changed = false;
+    for item in items {
+        if crate::dupesearch_coord::is_group_key(&item.dupe_key) && item.dupe_key.windows(2).any(|w| w == b"{{") {
+            let clean = crate::releasename::without_password(&item.dupe_key);
+            host.nzb_set_str(item.ptr, crate::queuesubsys_host::NZB_STR_DUPE_KEY, &clean);
+            changed = true;
+        }
+    }
+    if changed {
+        host.dq_history_changed(dq_ptr);
+        host.dq_save(dq_ptr);
+    }
+}
+
 #[cfg(unix)]
 pub(crate) fn join_queued_copy_groups_host(
     host: &crate::queuesubsys_host::QueueSubsysHost,
@@ -1112,6 +1146,7 @@ pub(crate) fn join_queued_copy_groups_host(
     if dq_ptr == 0 || !host.opts().dupe_check {
         return;
     }
+    scrub_password_keys_host(host, dq_ptr);
     // by id, from the end: the last copy joins the earlier ones, which are
     // scored in queue order, so the copy queued first keeps the top score; the
     // queue is never reordered after a restart
@@ -1683,7 +1718,17 @@ pub(crate) fn live_fleet_copies(
         if h.is_dupe_success && h.delete_status == DeleteStatus::None {
             return 0; // the fleet is done
         }
-        if tried_delete_status(host, &h) == DeleteStatus::Dupe && alive_permille_host(host, h.ptr) != 0 {
+        // only a backup failover or the rescue would actually pick: not tried,
+        // not dead, not marked bad, healthy enough, its nzb-file still there and
+        // not locked
+        if tried_delete_status(host, &h) == DeleteStatus::Dupe
+            && alive_permille_host(host, h.ptr) != 0
+            && h.mark_status != MarkStatus::Bad
+            && h.health >= h.critical_health_opt
+            && !locked_host(host, h.ptr)
+            && !h.queued_filename.is_empty()
+            && crate::fsops::file_exists(&h.queued_filename, &crate::fsops::posix_stat)
+        {
             live += 1;
         }
     }

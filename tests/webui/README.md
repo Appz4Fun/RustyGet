@@ -54,8 +54,10 @@ the warnings and unpauses. `NZBGET_UI_CAPTURE_DIR` saves JPEGs of that state.
 
 `first-run.js` starts its own loopback daemons from a copy of the binary with
 HOME pointed at an empty folder, plus a `--nserv` test news server. With no
-configuration file it checks the created file, the address on stdout, and the
-setup guide at desktop/light and phone/dark: password rules, live folder checks,
+configuration file it checks the created file, the address and the generated
+password on stdout (never in the log), the sign-in with it, and the setup guide
+at desktop/light and phone/dark: showing or keeping that password, new-password
+rules, live folder checks,
 plain-language connection errors (DNS, closed port), a successful test, saving
 (with a backup), the restart and the sign-in; the phone run also checks the
 expert skip, the banner that stays, and that Resume explains instead of resuming.
@@ -65,9 +67,13 @@ file:line warning per bad line with what was used instead, the banner listing
 them, Settings flagging values it can't save (Save stays off until they are
 fixed), the daemon refusing bad values without touching the file, the backup
 before a save, restoring it (with a confirmation), and the confirmations for
-clearing messages and discarding changes. A missing, folder, empty and
+clearing messages and discarding changes. A working setup without a password
+gets only a hint, and Resume works. `garbage-guide` completes the guide on a
+terrible file without a news server: the lines that can't be kept are listed,
+"Don't save" leaves the file alone, and confirming drops them and saves.
+A missing, folder, empty and
 unreadable configuration file each start too. `FIRST_RUN_ONLY` picks parts
-(`noconfig,noconfig-phone,garbage,garbage-phone,oddfiles`); console errors fail it.
+(`noconfig,noconfig-phone,garbage,garbage-phone,garbage-guide,oddfiles`); console errors fail it.
 
 The TLS cipher dialog check fulfills candidate assets and intercepts every RPC.
 It runs at 1280, 390 and 320 pixels in both themes, covering duplicate starts,

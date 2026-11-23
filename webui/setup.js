@@ -31,6 +31,7 @@ var Setup = (new function($)
 	var testing = false;
 	var SKIP_KEY = 'RustyGetSetupSkipped';
 	var HIDE_NOTES_KEY = 'RustyGetConfigNotesHidden';
+	var HIDE_PASSWORD_KEY = 'RustyGetPasswordHintHidden';
 
 	function t(key, text) { return (typeof I18n !== 'undefined' && I18n.defaultValue) ? I18n.defaultValue(key, text) : text; }
 	function esc(text) { return Util.textToHtml(String(text == null ? '' : text)); }
@@ -72,7 +73,9 @@ var Setup = (new function($)
 	this.status = function() { return status; };
 
 	// Downloads stay paused until the password, folders and a news server are set.
-	this.blocked = function() { return !!status && !status.SetupComplete; };
+	// Only a missing news server or unusable folders block downloading; a weak
+	// password is a hint, never a reason to refuse Resume.
+	this.blocked = function() { return !!status && status.DownloadsBlocked === true; };
 
 	this.refresh = function(done)
 	{
@@ -104,13 +107,6 @@ var Setup = (new function($)
 	{
 		var items = [];
 		if (!status) return items;
-		if (!status.PasswordSet)
-		{
-			items.push({ text: status.PasswordIsStock ?
-				t('setup_todo_stock_password', 'The web interface uses the stock password, which anyone can look up. Set your own password.') :
-				t('setup_todo_password', 'Set a password for the web interface.'),
-				action: 'password', label: t('setup_btn_password', 'Set password') });
-		}
 		(status.PathProblems || []).forEach(function(p)
 		{
 			items.push({ text: p.Option + ' (' + p.Value + '): ' + p.Problem,
@@ -138,11 +134,12 @@ var Setup = (new function($)
 		}
 		var html = '';
 		var todo = todoItems();
-		if (!status.SetupComplete || status.ConfigProblem)
+		var blocked = status.DownloadsBlocked === true;
+		if (blocked || status.ConfigProblem)
 		{
 			html += '<div class="setup-banner__box setup-banner__box--todo" role="region" aria-labelledby="SetupBannerTitle">' +
 				'<h3 id="SetupBannerTitle" class="setup-banner__title">' +
-				(status.SetupComplete ? esc(t('setup_banner_title_save', 'Settings can\'t be saved')) :
+				(!blocked ? esc(t('setup_banner_title_save', 'Settings can\'t be saved')) :
 					'<span class="setup-wide">' + esc(t('setup_banner_title', 'Downloads are paused until RustyGet is set up')) + '</span>' +
 					'<span class="setup-narrow">' + esc(t('setup_banner_title_short', 'Downloads paused: setup not done')) + '</span>') + '</h3>' +
 				// a phone shows the count and the guide button; the list opens on a tap
@@ -156,12 +153,24 @@ var Setup = (new function($)
 					(item.option ? ' data-option="' + esc(item.option) + '"' : '') + '>' + esc(item.label) + '</button>' : '') + '</li>';
 			});
 			html += '</ul></details>';
-			if (!status.SetupComplete)
+			if (blocked)
 			{
 				html += '<button type="button" class="btn btn-primary" id="SetupBannerOpen" data-setup-action="open">' +
 					esc(t('setup_btn_open', 'Open the setup guide')) + '</button>';
 			}
 			html += '</div>';
+		}
+		// a weak password: a gentle hint (it blocks nothing)
+		if (status.PasswordSet === false && store('session', HIDE_PASSWORD_KEY) !== '1')
+		{
+			html += '<div class="setup-banner__box setup-banner__box--hint" role="region" aria-labelledby="SetupHintTitle">' +
+				'<h3 id="SetupHintTitle" class="setup-banner__title">' + esc(status.PasswordIsStock ?
+					t('setup_hint_stock', 'Tip: the web interface uses the stock password, which anyone can look up.') :
+					t('setup_hint_none', 'Tip: the web interface has no password.')) + '</h3>' +
+				'<p>' + esc(t('setup_hint_text', 'Set your own so that only you can control RustyGet. Downloading works either way.')) + '</p>' +
+				'<button type="button" class="btn btn-small" data-setup-action="password">' + esc(t('setup_btn_password', 'Set a password')) + '</button> ' +
+				'<button type="button" class="btn btn-small" data-setup-action="hidepassword">' + esc(t('setup_btn_later', 'Later')) + '</button>' +
+				'</div>';
 		}
 		// in line order ("file:12: ..."), the file-wide ones first
 		var lineOf = function(w) { var m = /:(\d+): /.exec(w); return m ? +m[1] : 0; };
@@ -199,13 +208,21 @@ var Setup = (new function($)
 		switch (what)
 		{
 			case 'open': open(firstOpenStep()); break;
-			case 'password': open(1); break;
+			case 'password':
+				// a working setup only needs the password changed: Settings has it
+				if (status && !status.DownloadsBlocked) { goSettings('SECURITY', 'ControlPassword'); }
+				else { open(1); }
+				break;
 			case 'server': open(3); break;
 			case 'paths':
 				if (status && status.PasswordSet && status.Servers) { goSettings('PATHS', option); }
 				else { open(2); }
 				break;
 			case 'settings': goSettings(); break;
+			case 'hidepassword':
+				store('session', HIDE_PASSWORD_KEY, '1');
+				render();
+				break;
 			case 'hidenotes':
 				store('session', HIDE_NOTES_KEY, status ? status.ConfigFile : '1');
 				render();
@@ -233,7 +250,9 @@ var Setup = (new function($)
 	function firstOpenStep()
 	{
 		if (!status) return 1;
-		if (!status.PasswordSet) return 1;
+		// the guide starts with the password: a new configuration shows the one
+		// RustyGet made, and a missing one is asked for
+		if (status.ConfigCreated || status.PasswordSet === false) return 1;
 		if ((status.PathProblems || []).length) return 2;
 		if (!status.Servers) return 3;
 		return 1;
@@ -241,10 +260,10 @@ var Setup = (new function($)
 
 	function maybeOpen()
 	{
-		if (!status || status.SetupComplete || !status.ConfigWritable) return;
+		if (!status || !status.DownloadsBlocked || !status.ConfigWritable) return;
 		var skipped = store('local', SKIP_KEY) === (status.ConfigFile || '1');
 		if (skipped) return;
-		if (status.ConfigCreated || (!status.PasswordSet && !status.Servers))
+		if (status.ConfigCreated || (status.PasswordSet === false && !status.Servers))
 		{
 			open(firstOpenStep());
 		}
@@ -281,7 +300,8 @@ var Setup = (new function($)
 	{
 		if ($Wizard) $Wizard.remove();
 		lastFocus = document.activeElement;
-		var passwordKept = status && status.PasswordSet;
+		var current = value('ControlPassword', '');
+		var passwordKept = current !== '' && current !== 'tegbzn6789';
 		var html =
 			'<div class="setup-overlay" id="SetupWizard">' +
 			'<div class="setup-dialog" role="dialog" aria-modal="true" aria-labelledby="SetupTitle">' +
@@ -298,8 +318,12 @@ var Setup = (new function($)
 
 			// 1 password
 			'<fieldset class="setup-page" data-page="1"><legend>' + esc(t('setup_p1_title', '1. Protect the web interface')) + '</legend>' +
+				(passwordKept ? '<p class="setup-current">' + esc(t('setup_p1_current', 'Current password: ')) +
+					'<code id="SetupCurrentPass" data-secret="' + esc(current) + '">' + esc(current.replace(/./g, '\u2022')) + '</code> ' +
+					'<button type="button" class="btn btn-small" id="SetupRevealPass" aria-controls="SetupCurrentPass" aria-pressed="false">' +
+					esc(t('setup_p1_show', 'Show')) + '</button></p>' : '') +
 				'<p class="setup-help">' + esc(passwordKept ?
-					t('setup_p1_kept', 'A password is already set. Leave the fields empty to keep it, or enter a new one.') :
+					t('setup_p1_kept', 'This is the password you sign in with (RustyGet made it when it created the configuration file). Keep it by leaving the fields empty, or enter your own.') :
 					t('setup_p1_help', 'Choose the user name and password you will sign in with. Anyone who can open this page without them could control RustyGet.')) + '</p>' +
 				field('SetupUser', t('setup_user', 'User name'), 'text', value('ControlUsername', 'rustyget') || 'rustyget', 'username') +
 				field('SetupPass', t('setup_pass', 'Password (at least 8 characters)'), 'password', '', 'new-password') +
@@ -366,6 +390,13 @@ var Setup = (new function($)
 		$('#SetupBack').on('click', function() { show(step - 1); });
 		$('#SetupSkip').on('click', skip);
 		$('#SetupTest').on('click', testServer);
+		$('#SetupRevealPass').on('click', function()
+		{
+			var code = $('#SetupCurrentPass');
+			var shown = $(this).attr('aria-pressed') === 'true';
+			code.text(shown ? code.attr('data-secret').replace(/./g, '\u2022') : code.attr('data-secret'));
+			$(this).attr('aria-pressed', shown ? 'false' : 'true').text(shown ? t('setup_p1_show', 'Show') : t('setup_p1_hide', 'Hide'));
+		});
 		$('#SetupShowPass').on('change', function()
 		{
 			$('#SetupPass, #SetupPass2').attr('type', this.checked ? 'text' : 'password');
@@ -511,7 +542,8 @@ var Setup = (new function($)
 		if (step === 1)
 		{
 			var user = $('#SetupUser').val(), p1 = $('#SetupPass').val(), p2 = $('#SetupPass2').val();
-			var keep = status && status.PasswordSet && p1 === '' && p2 === '';
+			var cur = value('ControlPassword', '');
+			var keep = cur !== '' && cur !== 'tegbzn6789' && p1 === '' && p2 === '';
 			check('SetupUser', user.indexOf(':') > -1 ? t('setup_user_colon', 'The user name can\'t contain ":".') :
 				(user !== $.trim(user) ? t('setup_user_spaces', 'Remove the spaces at the start or end.') : ''));
 			if (!keep)
@@ -702,6 +734,58 @@ var Setup = (new function($)
 
 		$('#SetupNext').prop('disabled', true).text(t('setup_saving', 'Saving…'));
 		$('#SetupSaveResult').removeClass('is-bad').text('');
+		var changed = Object.keys(changes).map(function(k) { return k.toLowerCase(); });
+		RPC.call('checkconfig', [request], function(problems)
+		{
+			problems = problems || [];
+			var mine = problems.filter(function(p) { return changed.indexOf(String(p.Name).toLowerCase()) > -1; });
+			if (mine.length)
+			{
+				saveFailed(mine.map(function(p) { return p.Problem; }).join(' '));
+				return;
+			}
+			if (!problems.length)
+			{
+				send(request, changes);
+				return;
+			}
+			confirmDrop(problems, function()
+			{
+				var drop = problems.map(function(p) { return String(p.Name).toLowerCase(); });
+				send(request.filter(function(o) { return drop.indexOf(o.Name.toLowerCase()) === -1; }), changes);
+			});
+		}, function()
+		{
+			// an older daemon without checkconfig: save as it is
+			send(request, changes);
+		});
+	}
+
+	// The configuration file has lines that can't be kept: list them, and
+	// remove them only when the user agrees.
+	function confirmDrop(problems, proceed)
+	{
+		var box = $('#SetupSaveResult').removeClass('is-bad').addClass('setup-drop');
+		box.html('<p><strong>' + esc(problems.length === 1 ?
+			t('setup_drop_one', 'One setting in your configuration file can\'t be kept:') :
+			t('setup_drop_n', '%1 settings in your configuration file can\'t be kept:').replace('%1', problems.length)) + '</strong></p><ul>' +
+			problems.map(function(p) { return '<li>' + esc(p.Problem) + '</li>'; }).join('') + '</ul>' +
+			'<p>' + esc(t('setup_drop_text', 'They will be removed from the file; RustyGet uses its defaults for them. A backup of the file is made first.')) + '</p>' +
+			'<button type="button" class="btn btn-primary" id="SetupDropOk">' + esc(t('setup_drop_ok', 'Remove them and save')) + '</button> ' +
+			'<button type="button" class="btn" id="SetupDropCancel">' + esc(t('setup_drop_cancel', 'Don\'t save')) + '</button>');
+		$('#SetupNext').prop('disabled', true).text(t('setup_save', 'Save and restart RustyGet'));
+		$('#SetupDropOk').on('click', function() { box.empty().removeClass('setup-drop'); proceed(); }).focus();
+		$('#SetupDropCancel').on('click', function()
+		{
+			box.empty().removeClass('setup-drop');
+			$('#SetupNext').prop('disabled', false);
+			$('#SetupNext').focus();
+		});
+	}
+
+	function send(request, changes)
+	{
+		$('#SetupNext').prop('disabled', true).text(t('setup_saving', 'Saving…'));
 		RPC.call('saveconfig', [request], function(ok)
 		{
 			if (!ok)

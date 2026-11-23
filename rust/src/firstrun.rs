@@ -113,11 +113,40 @@ pub fn pick_control_port(ip: &str, start: u16) -> u16 {
     start
 }
 
+/// A password of 20 letters and digits from the system's random source
+/// (about 119 bits), easy to copy from the terminal.
+pub fn random_password() -> String {
+    use std::io::Read as _;
+    const ALPHABET: &[u8] = b"abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let mut raw = [0u8; 64];
+    let filled = std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut raw)).is_ok();
+    if !filled {
+        // no /dev/urandom: the clock and addresses (weak, but never empty)
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(1, |d| d.as_nanos() as u64);
+        let mut x = nanos ^ (u64::from(std::process::id()) << 32) | 1;
+        for b in &mut raw {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            *b = (x >> 24) as u8;
+        }
+    }
+    // rejection sampling: no bias towards the first letters
+    let limit = 256 - 256 % ALPHABET.len();
+    raw.iter()
+        .filter(|&&b| (b as usize) < limit)
+        .take(20)
+        .map(|&b| ALPHABET[b as usize % ALPHABET.len()] as char)
+        .collect()
+}
+
 /// The built-in template with the defaults of a new configuration: MainDir
 /// in the user's home, the web interface on this computer only, the given
-/// port, no password yet (the setup guide asks for one) and no example news
-/// server.
-pub fn first_run_config(port: u16) -> String {
+/// port, the given password (the setup guide shows it and can change it),
+/// the sign-in form and no example news server.
+pub fn first_run_config(port: u16, password: &str) -> String {
     let mut out = String::with_capacity(TEMPLATE.len() + 256);
     out.push_str(
         "# Created by RustyGet on first start. Change it in the web interface\n\
@@ -129,7 +158,7 @@ pub fn first_run_config(port: u16) -> String {
             Some(("MainDir", _)) => Some(format!("MainDir={DEFAULT_MAIN_DIR}")),
             Some(("ControlIP", _)) => Some("ControlIP=127.0.0.1".to_owned()),
             Some(("ControlPort", _)) => Some(format!("ControlPort={port}")),
-            Some(("ControlPassword", _)) => Some("ControlPassword=".to_owned()),
+            Some(("ControlPassword", _)) => Some(format!("ControlPassword={password}")),
             Some(("FormAuth", _)) => Some("FormAuth=yes".to_owned()),
             Some(("WebDir", _)) => Some("WebDir=".to_owned()),
             Some(("ConfigTemplate", _)) => Some("ConfigTemplate=".to_owned()),
@@ -166,6 +195,52 @@ pub fn create_config_file(path: &Path, contents: &str) -> Result<(), String> {
     file.write_all(contents.as_bytes())
         .and_then(|()| file.sync_all())
         .map_err(|e| plain_io(&e))
+}
+
+/// Folders drives are usually mounted under.
+const MOUNT_ROOTS: [&str; 5] = ["/mnt/", "/media/", "/Volumes/", "/run/media/", "/srv/"];
+
+/// Best effort: would creating `file` put it on the wrong disk because the
+/// drive meant to hold it is not mounted? True when the nearest existing
+/// folder above it is an empty folder under a usual mount root and nothing is
+/// mounted on it (it is on the same device as its parent). The reason, in
+/// plain words, when it looks so.
+pub fn looks_unmounted(file: &Path) -> Option<String> {
+    let mut dir = file.parent()?;
+    while !dir.exists() {
+        dir = dir.parent()?;
+    }
+    looks_unmounted_dir(dir, &MOUNT_ROOTS)
+}
+
+fn looks_unmounted_dir(dir: &Path, roots: &[&str]) -> Option<String> {
+    let text = dir.to_string_lossy();
+    let under_root = roots
+        .iter()
+        .any(|r| text.starts_with(r) && text.len() > r.len());
+    if !under_root {
+        return None;
+    }
+    let empty = std::fs::read_dir(dir).ok()?.next().is_none();
+    if !empty {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let own = std::fs::metadata(dir).ok()?.dev();
+        let parent = std::fs::metadata(dir.parent()?).ok()?.dev();
+        (own == parent).then(|| {
+            format!(
+                "{} is an empty folder where a drive is usually mounted, and no drive is mounted on it.",
+                dir.display()
+            )
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
 }
 
 fn create_private_dirs(dir: &Path) -> std::io::Result<()> {
@@ -500,13 +575,28 @@ fn predefined(name: &str) -> bool {
     found
 }
 
-/// Checks the options `saveconfig` was given. Each problem is one sentence
-/// that names the option, says what is wrong and what to do. Options it does
-/// not know the type of are only checked for characters that would break
-/// the file. `lookup` gives the running value of an option the list does not
-/// set (for `${...}` in paths).
+/// Checks the options `saveconfig` was given (see [`validate_detailed`]);
+/// every folder is checked.
 pub fn validate(entries: &[(Vec<u8>, Vec<u8>)], lookup: &dyn Fn(&str) -> Option<String>) -> Vec<String> {
-    let mut problems = Vec::new();
+    validate_detailed(entries, lookup, &|_| None)
+        .into_iter()
+        .map(|(_, m)| m)
+        .collect()
+}
+
+/// Checks the options `saveconfig` was given. Each problem is the option it
+/// is about and one sentence that names it, says what is wrong and what to
+/// do. Options it does not know the type of are only checked for characters
+/// that would break the file. `lookup` gives the running value of an option
+/// the list does not set (for `${...}` in paths); `current` the value the
+/// configuration file has now: a folder that did not change is not checked
+/// again (a NAS that is not mounted must not block an unrelated save).
+pub fn validate_detailed(
+    entries: &[(Vec<u8>, Vec<u8>)],
+    lookup: &dyn Fn(&str) -> Option<String>,
+    current: &dyn Fn(&str) -> Option<String>,
+) -> Vec<(String, String)> {
+    let mut problems: Vec<(String, String)> = Vec::new();
     let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
     let given = |name: &str| -> Option<String> {
         entries
@@ -519,22 +609,23 @@ pub fn validate(entries: &[(Vec<u8>, Vec<u8>)], lookup: &dyn Fn(&str) -> Option<
         let name = text(raw_name);
         let value = text(raw_value);
         let nice = label(&name);
+        let mut push = |m: String| problems.push((name.clone(), m));
         if name.trim().is_empty()
             || name.trim() != name
             || name.starts_with('#')
             || raw_name.iter().any(|&b| matches!(b, b'=' | b'\n' | b'\r' | 0))
         {
-            problems.push(format!("\"{}\" is not an option name.", show(&name)));
+            push(format!("\"{}\" is not an option name.", show(&name)));
             continue;
         }
         if raw_value.iter().any(|&b| matches!(b, b'\n' | b'\r' | 0)) {
-            problems.push(format!("{nice}: the value has a line break in it. Enter it on one line."));
+            push(format!("{nice}: the value has a line break in it. Enter it on one line."));
             continue;
         }
         if let Ok(c) = CString::new(raw_name.clone()) {
             let check = crate::options::validate_option_name(&c, &mut || predefined(&name));
             if check == crate::options::NameCheck::Invalid {
-                problems.push(format!("\"{}\" is not an option RustyGet knows. Remove it.", show(&name)));
+                push(format!("\"{}\" is not an option RustyGet knows. Remove it.", show(&name)));
                 continue;
             }
         }
@@ -544,7 +635,7 @@ pub fn validate(entries: &[(Vec<u8>, Vec<u8>)], lookup: &dyn Fn(&str) -> Option<
         match meta.kind() {
             Kind::Choice(choices) => {
                 if !choice_ok(&name, &choices, value.trim()) {
-                    problems.push(format!(
+                    push(format!(
                         "{nice}: \"{}\" is not one of the choices. Pick one of: {}.",
                         show(&value),
                         choices.join(", ")
@@ -553,9 +644,9 @@ pub fn validate(entries: &[(Vec<u8>, Vec<u8>)], lookup: &dyn Fn(&str) -> Option<
             }
             Kind::Number { min, max } => match value.trim().parse::<i64>() {
                 Err(_) if value.trim().is_empty() => {
-                    problems.push(format!("{nice}: enter a number (the default is {}).", meta.default));
+                    push(format!("{nice}: enter a number (the default is {}).", meta.default));
                 }
-                Err(_) => problems.push(format!(
+                Err(_) => push(format!(
                     "{nice}: \"{}\" is not a whole number. Enter digits only, for example {}.",
                     show(&value),
                     meta.default
@@ -563,7 +654,7 @@ pub fn validate(entries: &[(Vec<u8>, Vec<u8>)], lookup: &dyn Fn(&str) -> Option<
                 Ok(n) => {
                     if let (Some(lo), Some(hi)) = (min, max) {
                         if n < lo || n > hi {
-                            problems.push(format!("{nice}: {n} is out of range. Enter a number from {lo} to {hi}."));
+                            push(format!("{nice}: {n} is out of range. Enter a number from {lo} to {hi}."));
                         }
                     }
                 }
@@ -590,23 +681,35 @@ pub fn validate(entries: &[(Vec<u8>, Vec<u8>)], lookup: &dyn Fn(&str) -> Option<
         });
         if host.is_empty() {
             if active {
-                problems.push(format!(
-                    "{}: a news server that is on needs a host name, for example news.example.com. Enter it, or turn the server off.",
-                    label(&name)
+                problems.push((
+                    name.clone(),
+                    format!(
+                        "{}: a news server that is on needs a host name, for example news.example.com. Enter it, or turn the server off.",
+                        label(&name)
+                    ),
                 ));
             }
         } else if !host_ok(host) {
-            problems.push(format!(
-                "{}: \"{}\" is not a host name or IP address. Enter only the name, for example news.example.com (no http:// and no spaces).",
-                label(&name),
-                show(host)
+            problems.push((
+                name.clone(),
+                format!(
+                    "{}: \"{}\" is not a host name or IP address. Enter only the name, for example news.example.com (no http:// and no spaces).",
+                    label(&name),
+                    show(host)
+                ),
             ));
         }
     }
 
-    // folders
+    // folders: empty required ones always; usable only when they changed (a
+    // changed MainDir changes what ${MainDir} means for the others)
     let main_dir = given("MainDir").or_else(|| lookup("MainDir")).unwrap_or_default();
+    let main_changed = given("MainDir").is_some_and(|m| current("MainDir").as_deref() != Some(m.as_str()));
     let resolve = |n: &str| given(n).or_else(|| lookup(n));
+    let changed = |option: &str, value: &str| {
+        let depends_on_main = value.contains("${") || !(value.starts_with('/') || value.starts_with('~'));
+        current(option).as_deref() != Some(value) || (main_changed && depends_on_main && option != "MainDir")
+    };
     for (option, required) in REQUIRED_DIRS
         .iter()
         .map(|o| (*o, true))
@@ -617,22 +720,26 @@ pub fn validate(entries: &[(Vec<u8>, Vec<u8>)], lookup: &dyn Fn(&str) -> Option<
         };
         if value.trim().is_empty() {
             if required {
-                problems.push(format!("{option}: enter a folder. It must not be empty."));
+                problems.push((option.to_owned(), format!("{option}: enter a folder. It must not be empty.")));
             }
+            continue;
+        }
+        if !changed(option, &value) {
             continue;
         }
         let path = expand_path(&value, if option == "MainDir" { "" } else { &main_dir }, &resolve);
         if let DirState::Bad(why) = check_dir(&path) {
-            problems.push(format!("{option} ({}): {why}", path.display()));
+            problems.push((option.to_owned(), format!("{option} ({}): {why}", path.display())));
         }
     }
     for (raw_name, raw_value) in entries {
         let name = text(raw_name);
         let lower = name.to_ascii_lowercase();
-        if lower.starts_with("category") && lower.ends_with(".destdir") && !raw_value.is_empty() {
-            let path = expand_path(&text(raw_value), &main_dir, &resolve);
+        let value = text(raw_value);
+        if lower.starts_with("category") && lower.ends_with(".destdir") && !value.is_empty() && changed(&name, &value) {
+            let path = expand_path(&value, &main_dir, &resolve);
             if let DirState::Bad(why) = check_dir(&path) {
-                problems.push(format!("{} ({}): {why}", label(&name), path.display()));
+                problems.push((name.clone(), format!("{} ({}): {why}", label(&name), path.display())));
             }
         }
     }
@@ -645,6 +752,24 @@ pub fn validate(entries: &[(Vec<u8>, Vec<u8>)], lookup: &dyn Fn(&str) -> Option<
 
 fn backup_prefix(config: &Path) -> Option<String> {
     Some(format!("{}.bak-", config.file_name()?.to_string_lossy()))
+}
+
+/// Is `name` a backup RustyGet made of a file whose backups start with
+/// `prefix`: `<prefix>YYYYMMDD-HHMMSS`, maybe with `-N`? A hand-made
+/// `rustyget.conf.bak-original` is not, and is never pruned or listed.
+pub fn is_backup_name(prefix: &str, name: &str) -> bool {
+    let Some(rest) = name.strip_prefix(prefix) else {
+        return false;
+    };
+    let b = rest.as_bytes();
+    if b.len() < 15 || b[8] != b'-' || !b[..8].iter().chain(&b[9..15]).all(u8::is_ascii_digit) {
+        return false;
+    }
+    match &b[15..] {
+        [] => true,
+        [b'-', n @ ..] => !n.is_empty() && n.iter().all(u8::is_ascii_digit),
+        _ => false,
+    }
 }
 
 fn local_stamp() -> String {
@@ -665,38 +790,73 @@ fn local_stamp() -> String {
             );
         }
     }
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    format!("{secs}")
+    "19700101-000000".to_owned()
+}
+
+fn config_dir(config: &Path) -> PathBuf {
+    match config.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
+        _ => PathBuf::from("."),
+    }
+}
+
+/// Where backups go: next to the configuration file, or (when that folder
+/// can't be written) QueueDir, then MainDir.
+pub fn backup_dirs(config: &Path) -> Vec<PathBuf> {
+    let mut dirs = vec![config_dir(config)];
+    for option in ["QueueDir", "MainDir"] {
+        if let Some(v) = running_option(option).filter(|v| !v.is_empty()) {
+            let p = PathBuf::from(v);
+            if p.is_absolute() && !dirs.contains(&p) {
+                dirs.push(p);
+            }
+        }
+    }
+    dirs
+}
+
+/// The backups of `config` in `dirs`, oldest first.
+pub fn list_backups_in(config: &Path, dirs: &[PathBuf]) -> Vec<PathBuf> {
+    let Some(prefix) = backup_prefix(config) else {
+        return Vec::new();
+    };
+    let mut found: Vec<(String, PathBuf)> = Vec::new();
+    for dir in dirs {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for e in rd.filter_map(Result::ok) {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if is_backup_name(&prefix, &name) && e.metadata().is_ok_and(|m| m.is_file()) {
+                // "...-HHMMSS" sorts before "...-HHMMSS-2"; pad the counter
+                let key = match name[prefix.len()..].split_at(15) {
+                    (stamp, "") => format!("{stamp}-0000"),
+                    (stamp, n) => format!("{stamp}-{:0>4}", &n[1..]),
+                };
+                found.push((key, e.path()));
+            }
+        }
+    }
+    found.sort();
+    found.into_iter().map(|(_, p)| p).collect()
 }
 
 /// The backups of `config`, oldest first.
 pub fn list_backups(config: &Path) -> Vec<PathBuf> {
-    let (Some(dir), Some(prefix)) = (config.parent(), backup_prefix(config)) else {
-        return Vec::new();
-    };
-    let dir = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut found: Vec<(std::time::SystemTime, String, PathBuf)> = rd
-        .filter_map(Result::ok)
-        .filter_map(|e| {
-            let name = e.file_name().to_string_lossy().into_owned();
-            let meta = e.metadata().ok()?;
-            (name.starts_with(&prefix) && meta.is_file())
-                .then(|| (meta.modified().unwrap_or(std::time::UNIX_EPOCH), name, e.path()))
-        })
-        .collect();
-    found.sort();
-    found.into_iter().map(|(_, _, p)| p).collect()
+    list_backups_in(config, &backup_dirs(config))
 }
 
-/// Copies `config` to `<config>.bak-<date>-<time>` (readable by its owner
-/// only) and removes all but the newest [`BACKUPS_KEPT`]. `Ok(None)`: there
-/// was nothing to copy.
+/// Copies `config` to `<config>.bak-<date>-<time>` next to it (or in the
+/// first of the other folders that can be written; see [`backup_dirs`]).
+/// The copy is written to a temporary file, synced and renamed, readable by
+/// its owner only. Afterwards only the newest [`BACKUPS_KEPT`] and the very
+/// first backup are kept. `Ok(None)`: there was nothing to copy.
 pub fn backup_config(config: &Path) -> Result<Option<PathBuf>, String> {
+    backup_config_in(config, &backup_dirs(config))
+}
+
+/// [`backup_config`] with the folders given.
+pub fn backup_config_in(config: &Path, dirs: &[PathBuf]) -> Result<Option<PathBuf>, String> {
     let bytes = match std::fs::read(config) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -704,104 +864,207 @@ pub fn backup_config(config: &Path) -> Result<Option<PathBuf>, String> {
     };
     let prefix = backup_prefix(config).ok_or("the configuration file has no name")?;
     let stamp = local_stamp();
-    let mut target = config.with_file_name(format!("{prefix}{stamp}"));
-    let mut n = 2;
-    let file = loop {
+    let mut last_err = String::from("no folder to keep it in");
+    for dir in dirs {
+        match write_backup(dir, &prefix, &stamp, &bytes) {
+            Ok(target) => {
+                prune_backups(config, dirs, &target);
+                return Ok(Some(target));
+            }
+            Err(e) => last_err = e,
+        }
+    }
+    Err(last_err)
+}
+
+fn write_backup(dir: &Path, prefix: &str, stamp: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+    let tmp = dir.join(format!(".{prefix}saving-{}", std::process::id()));
+    let fail = |what: &Path, e: &std::io::Error| format!("can't write the backup copy {}: {}", what.display(), plain_io(e));
+    {
         let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create_new(true);
+        opts.write(true).create(true).truncate(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt as _;
             opts.mode(0o600);
         }
-        match opts.open(&target) {
-            Ok(f) => break f,
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && n < 1000 => {
-                target = config.with_file_name(format!("{prefix}{stamp}-{n}"));
-                n += 1;
+        let mut f = opts.open(&tmp).map_err(|e| fail(&tmp, &e))?;
+        if let Err(e) = f.write_all(bytes).and_then(|()| f.sync_all()) {
+            drop(f);
+            let _ = std::fs::remove_file(&tmp);
+            return Err(fail(&tmp, &e));
+        }
+    }
+    // a name after every one made in this second (so a pruned name is not
+    // reused out of order); hard_link fails when it exists
+    let base = format!("{prefix}{stamp}");
+    let mut n = std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.filter_map(Result::ok)
+                .filter_map(|e| {
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    let rest = name.strip_prefix(&base)?;
+                    if rest.is_empty() {
+                        Some(1)
+                    } else {
+                        rest.strip_prefix('-')?.parse::<u32>().ok()
+                    }
+                })
+                .max()
+                .map_or(1, |m| m + 1)
+        })
+        .unwrap_or(1);
+    loop {
+        let target = if n == 1 {
+            dir.join(format!("{prefix}{stamp}"))
+        } else {
+            dir.join(format!("{prefix}{stamp}-{n}"))
+        };
+        match std::fs::hard_link(&tmp, &target) {
+            Ok(()) => {
+                let _ = std::fs::remove_file(&tmp);
+                return Ok(target);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && n < 1000 => n += 1,
+            Err(_) if !target.exists() => {
+                // no hard links here (some network shares): rename instead
+                return match std::fs::rename(&tmp, &target) {
+                    Ok(()) => Ok(target),
+                    Err(e) => {
+                        let _ = std::fs::remove_file(&tmp);
+                        Err(fail(&target, &e))
+                    }
+                };
             }
             Err(e) => {
-                return Err(format!(
-                    "can't write the backup copy {}: {}",
-                    target.display(),
-                    plain_io(&e)
-                ))
-            }
-        }
-    };
-    let mut file = file;
-    file.write_all(&bytes)
-        .and_then(|()| file.sync_all())
-        .map_err(|e| format!("can't write the backup copy {}: {}", target.display(), plain_io(&e)))?;
-    let all = list_backups(config);
-    if all.len() > BACKUPS_KEPT {
-        for old in &all[..all.len() - BACKUPS_KEPT] {
-            if old != &target {
-                let _ = std::fs::remove_file(old);
+                let _ = std::fs::remove_file(&tmp);
+                return Err(fail(&target, &e));
             }
         }
     }
-    Ok(Some(target))
 }
 
-/// Replaces `config` with `bytes` in one step (a new file renamed over the
-/// old one, so a crash leaves the old or the new file, never half of one).
-/// A symbolic link is followed, the file's permissions are kept. Where the
-/// rename is not possible (a file mounted on its own, as Docker does), the
-/// file is rewritten in place.
+/// Keeps the newest [`BACKUPS_KEPT`] backups and the oldest one (the
+/// settings from before RustyGet first changed them); never touches a file
+/// RustyGet did not name.
+fn prune_backups(config: &Path, dirs: &[PathBuf], just_made: &Path) {
+    let all = list_backups_in(config, dirs);
+    if all.len() <= BACKUPS_KEPT + 1 {
+        return;
+    }
+    for old in &all[1..all.len() - BACKUPS_KEPT] {
+        if old != just_made {
+            let _ = std::fs::remove_file(old);
+        }
+    }
+}
+
+fn errno_of(e: &std::io::Error) -> i32 {
+    e.raw_os_error().unwrap_or(0)
+}
+
+/// Replaces `config` with `bytes` in one step: a new file next to it is
+/// written, synced and renamed over the old one, so a crash or a full disk
+/// leaves the old or the new file, never half of one. A symbolic link is
+/// followed; the file's mode and (where allowed) owner are kept. Only when
+/// the rename is impossible (a file mounted on its own, as Docker does:
+/// EBUSY or EXDEV) or the folder can't be written is the file rewritten in
+/// place. A configuration file RustyGet may not write is never replaced.
 pub fn write_config_atomically(config: &Path, bytes: &[u8]) -> Result<(), String> {
     let target = std::fs::canonicalize(config).unwrap_or_else(|_| config.to_path_buf());
     let meta = std::fs::metadata(&target).ok();
     if meta.as_ref().is_some_and(std::fs::Metadata::is_dir) {
         return Err(format!("{} is a folder", target.display()));
     }
+    if meta.is_some() && !writable_file(&target) {
+        return Err(format!(
+            "{} is read-only for RustyGet, so it is left as it is. Make it writable (or start RustyGet with -c <another file>) and save again",
+            target.display()
+        ));
+    }
     let name = target.file_name().map_or_else(|| "rustyget.conf".into(), |n| n.to_string_lossy().into_owned());
     let tmp = target.with_file_name(format!(".{name}.saving-{}", std::process::id()));
-    let written = (|| -> std::io::Result<()> {
-        let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            use std::os::unix::fs::PermissionsExt as _;
-            opts.mode(meta.as_ref().map_or(0o600, |m| m.permissions().mode() & 0o7777));
-        }
-        let mut f = opts.open(&tmp)?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
-        #[cfg(unix)]
-        if let Some(m) = &meta {
-            use std::os::unix::fs::PermissionsExt as _;
-            f.set_permissions(std::fs::Permissions::from_mode(m.permissions().mode() & 0o7777))?;
-        }
-        Ok(())
-    })();
-    if written.is_ok() && std::fs::rename(&tmp, &target).is_ok() {
-        return Ok(());
+    let fail = |e: &std::io::Error| format!("can't write {}: {}", target.display(), plain_io(e));
+
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        use std::os::unix::fs::PermissionsExt as _;
+        opts.mode(meta.as_ref().map_or(0o600, |m| m.permissions().mode() & 0o7777));
     }
-    let _ = std::fs::remove_file(&tmp);
-    // in place: the backup already holds the old text
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .truncate(true)
-        .open(&target)
-        .map_err(|e| format!("can't write {}: {}", target.display(), plain_io(&e)))?;
+    let mut f = match opts.open(&tmp) {
+        Ok(f) => f,
+        // the folder can't be written: the file itself can be, in place
+        Err(e) if matches!(errno_of(&e), libc::EACCES | libc::EPERM) => return write_in_place(&target, bytes),
+        Err(e) => return Err(fail(&e)),
+    };
+    let written = f.write_all(bytes).and_then(|()| f.sync_all());
+    if let Err(e) = written {
+        // never fall back to writing in place after this: the disk may be full
+        drop(f);
+        let _ = std::fs::remove_file(&tmp);
+        return Err(fail(&e));
+    }
+    #[cfg(unix)]
+    if let Some(m) = &meta {
+        use std::os::unix::fs::MetadataExt as _;
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = f.set_permissions(std::fs::Permissions::from_mode(m.permissions().mode() & 0o7777));
+        // keep the owner where allowed (root, or the same user)
+        let _ = std::os::unix::fs::fchown(&f, Some(m.uid()), Some(m.gid()));
+    }
+    drop(f);
+    match std::fs::rename(&tmp, &target) {
+        Ok(()) => {
+            if let Ok(d) = std::fs::File::open(config_dir(&target)) {
+                let _ = d.sync_all();
+            }
+            Ok(())
+        }
+        Err(e) if matches!(errno_of(&e), libc::EBUSY | libc::EXDEV) => {
+            let _ = std::fs::remove_file(&tmp);
+            write_in_place(&target, bytes)
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(fail(&e))
+        }
+    }
+}
+
+/// Rewrites `target` in place (the backup holds the old text).
+fn write_in_place(target: &Path, bytes: &[u8]) -> Result<(), String> {
+    let fail = |e: &std::io::Error| format!("can't write {}: {}", target.display(), plain_io(e));
+    let mut f = std::fs::OpenOptions::new().write(true).open(target).map_err(|e| fail(&e))?;
     f.write_all(bytes)
+        .and_then(|()| f.set_len(bytes.len() as u64))
         .and_then(|()| f.sync_all())
-        .map_err(|e| format!("can't write {}: {}", target.display(), plain_io(&e)))
+        .map_err(|e| fail(&e))
 }
 
 /// Puts a backup back: the current file is backed up first (so a restore
 /// can be undone the same way), then replaced with the backup. `name` is the
 /// backup's file name as [`list_backups`] gives it.
 pub fn restore_backup(config: &Path, name: &str) -> Result<(), String> {
+    restore_backup_in(config, name, &backup_dirs(config))
+}
+
+/// [`restore_backup`] looking in `dirs`.
+pub fn restore_backup_in(config: &Path, name: &str, dirs: &[PathBuf]) -> Result<(), String> {
     let prefix = backup_prefix(config).ok_or("the configuration file has no name")?;
-    if !name.starts_with(&prefix) || name.contains('/') || name.contains('\\') || name.contains("..") {
+    if !is_backup_name(&prefix, name) {
         return Err(format!("\"{}\" is not a backup of this configuration file.", show(name)));
     }
-    let source = config.with_file_name(name);
+    let source = list_backups_in(config, dirs)
+        .into_iter()
+        .find(|p| p.file_name().is_some_and(|n| n.to_string_lossy() == name))
+        .ok_or_else(|| format!("the backup {name} is not there any more"))?;
     let bytes = std::fs::read(&source).map_err(|e| format!("can't read the backup {name}: {}", plain_io(&e)))?;
-    backup_config(config)?;
+    if let Err(why) = backup_config_in(config, dirs) {
+        crate::log::log_active_bytes(1, format!("The settings could not be backed up before the restore: {why}").as_bytes());
+    }
     write_config_atomically(config, &bytes)
 }
 
@@ -827,7 +1090,8 @@ fn config_path() -> Option<PathBuf> {
     (!f.is_empty()).then(|| crate::cleanup::bytes_to_path_buf(f))
 }
 
-/// Can the configuration file be saved (and backed up)? The reason when not.
+/// Can the configuration file be saved? The reason when not. (Backups go
+/// elsewhere when its folder can't be written, so that is not required.)
 pub fn config_writable(config: Option<&Path>) -> Result<(), String> {
     let Some(config) = config else {
         return Err("RustyGet is running without a configuration file, so settings can't be saved. \
@@ -835,25 +1099,14 @@ Start it with -c <file> to name one."
             .to_owned());
     };
     match std::fs::metadata(config) {
-        Ok(m) if m.is_dir() => return Err(format!("{} is a folder, not a file.", config.display())),
-        Ok(_) => {
-            if !writable_file(config) {
-                return Err(format!(
-                    "RustyGet is not allowed to change {}. Change its permissions, or start RustyGet with -c <another file>.",
-                    config.display()
-                ));
-            }
-        }
-        Err(e) => return Err(format!("{} can't be used: {}.", config.display(), plain_io(&e))),
+        Ok(m) if m.is_dir() => Err(format!("{} is a folder, not a file.", config.display())),
+        Ok(_) if !writable_file(config) => Err(format!(
+            "RustyGet is not allowed to change {} (it is read-only). Change its permissions, or start RustyGet with -c <another file>.",
+            config.display()
+        )),
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!("{} can't be used: {}.", config.display(), plain_io(&e))),
     }
-    let dir = config.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
-    if !writable(dir) {
-        return Err(format!(
-            "RustyGet is not allowed to write in {}, where it keeps a backup copy before every save. Change the folder's permissions.",
-            dir.display()
-        ));
-    }
-    Ok(())
 }
 
 #[cfg(unix)]
@@ -946,8 +1199,10 @@ pub(crate) fn no_usable_server() -> bool {
 }
 
 /// `setupstatus`: what still keeps RustyGet from downloading, for the setup
-/// guide and the banner.
-pub fn rpc_setup_status(is_json: bool) -> Vec<u8> {
+/// guide and the banner. Only a missing news server and unusable folders
+/// block downloading (`DownloadsBlocked`); a stock or empty password is only
+/// a hint. A restricted user is not told the user name or password state.
+pub fn rpc_setup_status(is_json: bool, restricted: bool) -> Vec<u8> {
     let config = config_path();
     let password = running_option("ControlPassword").unwrap_or_default();
     let username = running_option("ControlUsername").unwrap_or_default();
@@ -964,10 +1219,12 @@ pub fn rpc_setup_status(is_json: bool) -> Vec<u8> {
     o.push_str(",\"ConfigProblem\":");
     let problem = if problem.is_empty() { writable.err().unwrap_or_default() } else { problem };
     js(&mut o, &problem);
-    o.push_str(&format!(",\"PasswordSet\":{}", !password.is_empty() && password != STOCK_PASSWORD));
-    o.push_str(&format!(",\"PasswordIsStock\":{}", password == STOCK_PASSWORD));
-    o.push_str(",\"ControlUsername\":");
-    js(&mut o, &username);
+    if !restricted {
+        o.push_str(&format!(",\"PasswordSet\":{}", !password.is_empty() && password != STOCK_PASSWORD));
+        o.push_str(&format!(",\"PasswordIsStock\":{}", password == STOCK_PASSWORD));
+        o.push_str(",\"ControlUsername\":");
+        js(&mut o, &username);
+    }
     o.push_str(&format!(",\"Servers\":{servers}"));
     o.push_str(",\"PathProblems\":[");
     for (i, (option, value, why)) in paths.iter().enumerate() {
@@ -990,9 +1247,11 @@ pub fn rpc_setup_status(is_json: bool) -> Vec<u8> {
         js(&mut o, n);
     }
     o.push_str(&format!("],\"MoreWarnings\":{dropped}"));
+    let blocked = servers == 0 || !paths.is_empty();
+    o.push_str(&format!(",\"DownloadsBlocked\":{blocked}"));
     o.push_str(&format!(
         ",\"SetupComplete\":{}}}",
-        servers > 0 && paths.is_empty() && !password.is_empty() && password != STOCK_PASSWORD
+        !blocked && !password.is_empty() && password != STOCK_PASSWORD
     ));
     reply(is_json, o)
 }
@@ -1225,7 +1484,7 @@ mod tests {
 
     #[test]
     fn a_first_run_config_has_safe_defaults_and_loads() {
-        let text = first_run_config(6790);
+        let text = first_run_config(6790, "examplePassw0rd");
         let entries = crate::configfile::script_config_parse_bytes(text.as_bytes());
         let get = |n: &str| {
             entries
@@ -1236,7 +1495,8 @@ mod tests {
         assert_eq!(get("MainDir").as_deref(), Some("~/RustyGet"));
         assert_eq!(get("ControlIP").as_deref(), Some("127.0.0.1"));
         assert_eq!(get("ControlPort").as_deref(), Some("6790"));
-        assert_eq!(get("ControlPassword").as_deref(), Some(""));
+        assert_eq!(get("ControlPassword").as_deref(), Some("examplePassw0rd"));
+        assert_eq!(get("FormAuth").as_deref(), Some("yes"));
         assert_eq!(get("WebDir").as_deref(), Some(""));
         assert_eq!(get("Server1.Host").as_deref(), Some(""));
         assert_eq!(get("Server1.Password").as_deref(), Some(""));
@@ -1273,33 +1533,154 @@ mod tests {
     }
 
     #[test]
-    fn backups_are_made_kept_to_ten_and_restored() {
+    fn backups_are_made_kept_to_ten_plus_the_first_and_restored() {
         let d = tmp("backup");
         let conf = d.join("rustyget.conf");
-        assert_eq!(backup_config(&conf).unwrap(), None);
+        let dirs = vec![d.clone()];
+        assert_eq!(backup_config_in(&conf, &dirs).unwrap(), None);
+        // a copy made by hand is never pruned, listed or restored
+        std::fs::write(d.join("rustyget.conf.bak-original"), b"mine").unwrap();
         for i in 0..13 {
             std::fs::write(&conf, format!("NzbDirInterval={i}\n")).unwrap();
-            let b = backup_config(&conf).unwrap().unwrap();
-            assert!(b.file_name().unwrap().to_str().unwrap().starts_with("rustyget.conf.bak-"));
+            let b = backup_config_in(&conf, &dirs).unwrap().unwrap();
+            assert!(is_backup_name("rustyget.conf.bak-", b.file_name().unwrap().to_str().unwrap()));
         }
-        let all = list_backups(&conf);
-        assert_eq!(all.len(), BACKUPS_KEPT);
+        let all = list_backups_in(&conf, &dirs);
+        assert_eq!(all.len(), BACKUPS_KEPT + 1);
+        assert_eq!(std::fs::read_to_string(&all[0]).unwrap(), "NzbDirInterval=0\n", "the first one is kept");
+        assert_eq!(std::fs::read_to_string(&all[1]).unwrap(), "NzbDirInterval=3\n");
         assert_eq!(std::fs::read_to_string(all.last().unwrap()).unwrap(), "NzbDirInterval=12\n");
-        assert_eq!(std::fs::read_to_string(&all[0]).unwrap(), "NzbDirInterval=3\n");
+        assert_eq!(std::fs::read(d.join("rustyget.conf.bak-original")).unwrap(), b"mine");
+        let leftovers = std::fs::read_dir(&d).unwrap().filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().contains("saving")).count();
+        assert_eq!(leftovers, 0, "backups are written to a temporary file and renamed");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            assert_eq!(std::fs::metadata(&all[0]).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(std::fs::metadata(&all[1]).unwrap().permissions().mode() & 0o777, 0o600);
         }
-        // restore the oldest kept: the current text is backed up first
-        let name = all[0].file_name().unwrap().to_str().unwrap().to_owned();
+        // restore one: the current text is backed up first
+        let name = all[1].file_name().unwrap().to_str().unwrap().to_owned();
         std::fs::write(&conf, "NzbDirInterval=99\n").unwrap();
-        restore_backup(&conf, &name).unwrap();
+        restore_backup_in(&conf, &name, &dirs).unwrap();
         assert_eq!(std::fs::read_to_string(&conf).unwrap(), "NzbDirInterval=3\n");
-        let after = list_backups(&conf);
+        let after = list_backups_in(&conf, &dirs);
         assert_eq!(std::fs::read_to_string(after.last().unwrap()).unwrap(), "NzbDirInterval=99\n");
-        assert!(restore_backup(&conf, "../etc/passwd").is_err());
-        assert!(restore_backup(&conf, "other.conf").is_err());
+        assert!(restore_backup_in(&conf, "../etc/passwd", &dirs).is_err());
+        assert!(restore_backup_in(&conf, "other.conf", &dirs).is_err());
+        assert!(restore_backup_in(&conf, "rustyget.conf.bak-original", &dirs).is_err());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_failed_temporary_write_never_touches_the_file() {
+        // the temporary file can't be written (here: a folder is in the way,
+        // as a full disk would fail the write): the old file stays whole, and
+        // there is no fallback to writing in place
+        let d = tmp("tmpfail");
+        let conf = d.join("c.conf");
+        std::fs::write(&conf, "NzbDirInterval=1\n").unwrap();
+        let blocker = d.join(format!(".c.conf.saving-{}", std::process::id()));
+        std::fs::create_dir(&blocker).unwrap();
+        assert!(write_config_atomically(&conf, b"NzbDirInterval=2\n").is_err());
+        assert_eq!(std::fs::read_to_string(&conf).unwrap(), "NzbDirInterval=1\n");
+        std::fs::remove_dir(&blocker).unwrap();
+        write_config_atomically(&conf, b"NzbDirInterval=2\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&conf).unwrap(), "NzbDirInterval=2\n");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn backup_names_are_recognized_exactly() {
+        let p = "rustyget.conf.bak-";
+        assert!(is_backup_name(p, "rustyget.conf.bak-20261123-101010"));
+        assert!(is_backup_name(p, "rustyget.conf.bak-20261123-101010-12"));
+        for bad in ["rustyget.conf.bak-original", "rustyget.conf.bak-2026112-101010", "rustyget.conf.bak-20261123-101010-",
+            "rustyget.conf.bak-20261123-101010x", "other.conf.bak-20261123-101010", "rustyget.conf.bak-20261123_101010"] {
+            assert!(!is_backup_name(p, bad), "{bad}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backups_go_elsewhere_and_saving_still_works_when_the_folder_is_read_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let d = tmp("rodir");
+        let cfgdir = d.join("cfg");
+        let queue = d.join("queue");
+        std::fs::create_dir_all(&cfgdir).unwrap();
+        std::fs::create_dir_all(&queue).unwrap();
+        let conf = cfgdir.join("rustyget.conf");
+        std::fs::write(&conf, "NzbDirInterval=1\n").unwrap();
+        std::fs::set_permissions(&cfgdir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let dirs = vec![cfgdir.clone(), queue.clone()];
+        let b = backup_config_in(&conf, &dirs).unwrap().unwrap();
+        assert!(b.starts_with(&queue), "{}", b.display());
+        // the folder can't take a temporary file: the file is written in place
+        write_config_atomically(&conf, b"NzbDirInterval=2\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&conf).unwrap(), "NzbDirInterval=2\n");
+        // a read-only file is never replaced
+        std::fs::set_permissions(&cfgdir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(&conf, std::fs::Permissions::from_mode(0o400)).unwrap();
+        let err = write_config_atomically(&conf, b"NzbDirInterval=3\n").unwrap_err();
+        assert!(err.contains("read-only"), "{err}");
+        assert_eq!(std::fs::read_to_string(&conf).unwrap(), "NzbDirInterval=2\n");
+        assert!(config_writable(Some(&conf)).unwrap_err().contains("read-only"));
+        std::fs::set_permissions(&conf, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(config_writable(Some(&conf)).is_ok());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn an_unchanged_folder_is_not_checked_again() {
+        let d = tmp("nas");
+        std::fs::write(d.join("file"), b"x").unwrap();
+        let unmounted = d.join("file").join("nas").to_str().unwrap().to_owned();
+        let entries = vec![e("DestDir", &unmounted), e("NzbDirInterval", "7")];
+        let same = |n: &str| (n == "DestDir").then(|| unmounted.clone());
+        assert!(validate_detailed(&entries, &none, &same).is_empty(), "a NAS that is away blocks nothing");
+        let p = validate_detailed(&entries, &none, &|_| None);
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0].0, "DestDir");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn random_passwords_are_long_and_different() {
+        let a = random_password();
+        let b = random_password();
+        assert_eq!(a.len(), 20);
+        assert!(a.bytes().all(|c| c.is_ascii_alphanumeric()));
+        assert_ne!(a, b);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_empty_mount_point_is_not_written_to() {
+        let d = tmp("mnt");
+        let root = format!("{}/", d.display());
+        let empty = d.join("usb");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert!(looks_unmounted_dir(&empty, &[root.as_str()]).is_some());
+        std::fs::write(empty.join("photo.jpg"), b"x").unwrap();
+        assert!(looks_unmounted_dir(&empty, &[root.as_str()]).is_none(), "a folder with files is in use");
+        assert!(looks_unmounted_dir(&d, &[root.as_str()]).is_none(), "the root itself");
+        assert!(looks_unmounted(Path::new("/tmp/rg-not-a-mount/x.conf")).is_none());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn old_mac_line_ends_and_comments_with_cr_load() {
+        let d = tmp("cr");
+        let msgs = load_messages(&d, "mac.conf", b"# comment\rArticleTimeout=33\rNzbDirInterval=4\r");
+        assert!(!msgs.iter().any(|m| m.contains("mac.conf:")), "{msgs:?}");
+        let parsed = crate::configfile::script_config_parse_bytes(b"ArticleTimeout=33\rNzbDirInterval=4\r");
+        assert_eq!(parsed.len(), 2);
+        let merged = crate::configfile::script_config_merge_bytes(b"# a\rb comment\nArticleTimeout=1\n", &[(b"ArticleTimeout", b"2")]);
+        assert_eq!(merged, b"# a\rb comment\nArticleTimeout=2\n");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -1410,10 +1791,12 @@ mod tests {
     }
 
     #[test]
-    fn default_folders_follow_the_main_dir_the_file_sets() {
+    fn folders_of_an_existing_config_are_never_moved() {
+        // nzbget's rule stays: a default folder is expanded with the MainDir
+        // of its time, and an explicit value is used as written
         let d = tmp("defaults");
         let file = d.join("partial.conf");
-        std::fs::write(&file, "MainDir=/data/rg\nTempDir=/fast/tmp\n").unwrap();
+        std::fs::write(&file, "MainDir=/data/rg\nTempDir=/fast/tmp\nQueueDir=/data/rg/queue\n").unwrap();
         let path = CString::new(file.to_str().unwrap()).unwrap();
         let mut flags = 0;
         let handle = unsafe {
@@ -1434,10 +1817,10 @@ mod tests {
         };
         let opts = unsafe { &*handle };
         use crate::options::OptStr;
-        assert_eq!(opts.str_bytes(OptStr::DestDir), b"/data/rg/dst");
         assert_eq!(opts.str_bytes(OptStr::QueueDir), b"/data/rg/queue");
         assert_eq!(opts.str_bytes(OptStr::TempDir), b"/fast/tmp");
-        assert_eq!(opts.str_bytes(OptStr::LogFile), b"/data/rg/rustyget.log");
+        let dest = String::from_utf8_lossy(opts.str_bytes(OptStr::DestDir)).into_owned();
+        assert!(dest.ends_with("downloads/dst") && !dest.starts_with("/data/rg"), "{dest}");
         unsafe { crate::options::nzbget_rs_options_free(handle) };
         let _ = std::fs::remove_dir_all(&d);
     }

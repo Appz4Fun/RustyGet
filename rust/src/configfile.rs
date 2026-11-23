@@ -57,6 +57,7 @@ fn script_config_cipher_baseline_cstrings(entries: &[(CString, CString)]) -> Vec
 /// and `ConvertOldOptions` (`ScriptConfig::LoadConfigUnlocked`).
 pub fn script_config_parse_bytes(raw: &[u8]) -> Vec<(CString, CString)> {
     let mut entries = Vec::new();
+    let raw = normalize_line_ends(raw);
     for raw_line in raw.split_inclusive(|&b| b == b'\n') {
         let nul_trimmed = match raw_line.iter().position(|&b| b == 0) {
             Some(pos) => &raw_line[..pos],
@@ -103,6 +104,7 @@ pub fn script_config_load(filename: &[u8]) -> Option<Vec<(CString, CString)>> {
 /// occurrence's value), dropping orphaned/duplicate option lines, preserving comments
 /// with guaranteed trailing `\n`, and appending new options at the end.
 pub fn script_config_merge_bytes(raw: &[u8], entries: &[(&[u8], &[u8])]) -> Vec<u8> {
+    let raw = &*normalize_line_ends(raw);
     let mut values: Vec<(&[u8], &[u8])> = Vec::with_capacity(entries.len());
     for &(name, val) in entries {
         if let Some(existing) = values
@@ -192,7 +194,7 @@ fn blank_or_comment(line: &[u8]) -> Option<&[u8]> {
     if t.is_empty() {
         Some(b"")
     } else if t[0] == b'#' {
-        Some(if body.iter().any(|&b| b == b'\r') { b"#" } else { t })
+        Some(t)
     } else {
         None
     }
@@ -256,8 +258,26 @@ pub fn script_config_save_checked(
     drop(file);
 
     let merged = script_config_merge_bytes(&raw, entries);
-    crate::firstrun::backup_config(&path).map_err(SaveError::Failed)?;
+    // a file RustyGet may not write is left alone, whatever its folder allows
+    crate::firstrun::config_writable(Some(&path)).map_err(SaveError::Failed)?;
+    if let Err(why) = crate::firstrun::backup_config(&path) {
+        // a backup that can't be made never blocks the save
+        crate::log::log_active_bytes(
+            1,
+            format!("No backup copy of the settings could be made before saving ({why}); saving anyway").as_bytes(),
+        );
+    }
     crate::firstrun::write_config_atomically(&path, &merged).map_err(SaveError::Failed)
+}
+
+/// Text with old Mac line ends (CR only, no LF) read with LF line ends;
+/// anything else unchanged.
+pub fn normalize_line_ends(raw: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    if !raw.contains(&b'\n') && raw.contains(&b'\r') {
+        std::borrow::Cow::Owned(raw.iter().map(|&b| if b == b'\r' { b'\n' } else { b }).collect())
+    } else {
+        std::borrow::Cow::Borrowed(raw)
+    }
 }
 
 #[repr(C)]
@@ -656,6 +676,15 @@ pub fn script_config_commit_cipher_patch(
     let _guard = CONFIG_WRITE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
+        let path = bytes_to_path(filename);
+        if std::fs::read(&path).is_ok_and(|now| now == expected) {
+            if let Err(why) = crate::firstrun::backup_config(&path) {
+                crate::log::log_active_bytes(
+                    1,
+                    format!("No backup copy of the settings could be made before the cipher change ({why})").as_bytes(),
+                );
+            }
+        }
         cipher_atomic::commit_patch_unlocked(
             filename,
             expected,

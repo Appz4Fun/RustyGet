@@ -1514,7 +1514,22 @@ pub fn load_config_file_lines_ex(
     }
     use std::io::BufRead;
     let max = crate::configfile::MAX_CONFIG_LINE;
-    let mut reader = std::io::BufReader::new(file);
+    let mut file_reader = std::io::BufReader::with_capacity(max + 2, file);
+    // a file with old Mac line ends (CR only) is read line by line too
+    let cr_only = file_reader
+        .fill_buf()
+        .is_ok_and(|head| !head.contains(&b'\n') && head.contains(&b'\r'));
+    let mut reader: Box<dyn BufRead> = if cr_only {
+        use std::io::Read as _;
+        let mut all = Vec::new();
+        if file_reader.take(64 * 1024 * 1024).read_to_end(&mut all).is_err() {
+            return false;
+        }
+        let all = crate::configfile::normalize_line_ends(&all).into_owned();
+        Box::new(std::io::Cursor::new(all))
+    } else {
+        Box::new(file_reader)
+    };
     let mut raw = Vec::new();
     let mut line_no = 0i32;
     loop {
@@ -4424,6 +4439,8 @@ pub struct NzbgetRsOptions {
     create_missing_config: bool,
     /// this start wrote the configuration file
     just_created: bool,
+    /// the password it got (told once, then forgotten)
+    created_password: String,
     /// the configuration file is being read: its problems are counted
     loading: bool,
     /// problems in the file reported / left out (after [`MAX_LINE_REPORTS`])
@@ -4615,6 +4632,17 @@ impl NzbgetRsOptions {
         self.emit_host(op, &[], &ptrs, 1);
     }
 
+    /// Prints `msg` only (no log).
+    fn tell_screen(&self, msg: &str) {
+        if !self.default_diag_sink {
+            return;
+        }
+        let c = crate::firstrun::cstring_lossy(msg);
+        unsafe {
+            libc::printf(c"%s\n".as_ptr(), c.as_ptr());
+        }
+    }
+
     /// Prints `msg` and logs it as information.
     fn tell(&self, msg: &str) {
         if !self.default_diag_sink {
@@ -4674,18 +4702,6 @@ impl NzbgetRsOptions {
         if self.daemon_subsystems && !no_disk_access {
             crate::firstrun::begin_load();
         }
-        // defaults such as DestDir=${MainDir}/dst were expanded with the default
-        // MainDir: the ones the file and the command line leave alone are
-        // expanded again afterwards, with the MainDir they set
-        let mut templated: Vec<(CString, CString, Option<CString>)> = Vec::new();
-        init_defaults_with(disable_curses, |name, val| {
-            if val.to_bytes().windows(2).any(|w| w == b"${") {
-                templated.push((name.to_owned(), val.to_owned(), None));
-            }
-        });
-        for t in &mut templated {
-            t.2 = self.get_option(&t.0);
-        }
         self.init_opt_file();
         if self.fatal_error {
             return;
@@ -4694,13 +4710,6 @@ impl NzbgetRsOptions {
         for &opt in cmd_opts {
             self.set_option_string(opt);
         }
-        let line = self.config_line;
-        for (name, raw, before) in templated {
-            if self.get_option(&name) == before {
-                self.set_option(&name, &raw);
-            }
-        }
-        self.config_line = line;
 
         if self.strs[OptStr::ConfigFile].is_none() && !no_config && self.create_missing_config {
             // creating one failed: run on the built-in defaults
@@ -4789,6 +4798,15 @@ impl NzbgetRsOptions {
         let user = get(self, c"ControlUsername");
         if self.just_created {
             self.tell(&format!("Open the web interface to finish setting up RustyGet: {address}"));
+            // the password goes to the screen only, never into the log file
+            let pw = std::mem::take(&mut self.created_password);
+            self.tell_screen(&format!(
+                "Sign in with user \"{user}\" and password \"{pw}\" (it is ControlPassword in the configuration file; the setup guide can change it)"
+            ));
+            crate::log::log_active_bytes(
+                crate::log::MK_INFO,
+                format!("Sign in with user \"{user}\" and the password printed when RustyGet started (ControlPassword in the configuration file)").as_bytes(),
+            );
         } else if password == crate::firstrun::STOCK_PASSWORD {
             self.tell(&format!(
                 "Web interface: {address} (user \"{user}\", password \"{password}\", the stock password: change it in Settings > Security)"
@@ -4838,7 +4856,7 @@ impl NzbgetRsOptions {
             } else if self.create_missing_config && !self.no_disk_access {
                 // none anywhere: write one from the built-in template
                 let path = crate::firstrun::default_config_path();
-                if self.create_config_at(&path) {
+                if self.create_config_at(&path, false) {
                     self.strs[OptStr::ConfigFile] = Some(cstring(path));
                 }
             }
@@ -4859,14 +4877,14 @@ impl NzbgetRsOptions {
                             path.display(),
                             inner.display()
                         );
-                        if inner.exists() || self.create_config_at(&inner_b) {
+                        if inner.exists() || self.create_config_at(&inner_b, true) {
                             exp2 = cstring(inner_b);
                             self.config_warn(&crate::firstrun::cstring_lossy(&note));
                         }
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                         let b = exp2.to_bytes().to_vec();
-                        self.create_config_at(&b);
+                        self.create_config_at(&b, true);
                     }
                     _ => {}
                 }
@@ -4892,14 +4910,35 @@ impl NzbgetRsOptions {
 
     /// Writes a new configuration file at `path` from the built-in template
     /// with safe defaults, and says where it is. False when it can't.
-    fn create_config_at(&mut self, path: &[u8]) -> bool {
+    fn create_config_at(&mut self, path: &[u8], asked: bool) -> bool {
         let p = crate::cleanup::bytes_to_path_buf(path);
+        if let Some(why) = crate::firstrun::looks_unmounted(&p) {
+            let msg = format!(
+                "Not creating the configuration file {}: {why} RustyGet runs on its built-in defaults; mount the drive (or start with -c <another file>) and restart",
+                p.display()
+            );
+            crate::firstrun::set_problem(&msg);
+            let c = crate::firstrun::cstring_lossy(&msg);
+            let ptrs = [c.as_ptr()];
+            self.emit_host(2, &[], &ptrs, 1);
+            return false;
+        }
         let port = crate::firstrun::pick_control_port("127.0.0.1", crate::firstrun::DEFAULT_CONTROL_PORT);
-        match crate::firstrun::create_config_file(&p, &crate::firstrun::first_run_config(port)) {
+        let password = crate::firstrun::random_password();
+        match crate::firstrun::create_config_file(&p, &crate::firstrun::first_run_config(port, &password)) {
             Ok(()) => {
                 self.just_created = true;
+                self.created_password = password;
                 crate::firstrun::mark_created();
                 self.tell(&format!("RustyGet created a new configuration file: {}", p.display()));
+                if asked {
+                    // the -c file did not exist: say so where it is seen
+                    let msg = format!(
+                        "The configuration file {} did not exist, so RustyGet created a new one there with default settings. If you expected your own settings, check the path given with -c",
+                        p.display()
+                    );
+                    self.config_warn(&crate::firstrun::cstring_lossy(&msg));
+                }
                 if port != crate::firstrun::DEFAULT_CONTROL_PORT {
                     self.tell(&format!(
                         "Port {} is in use, so the web interface uses port {port}",
@@ -5502,6 +5541,7 @@ pub(crate) unsafe fn new_options(
         config_line: 0,
         create_missing_config: daemon_snap.is_some() && daemon_server_mode(),
         just_created: false,
+        created_password: String::new(),
         loading: false,
         line_reports: 0,
         line_reports_dropped: 0,

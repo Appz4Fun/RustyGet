@@ -31,6 +31,12 @@ pub enum Header<'a> {
     AuthToken(&'a [u8]),
     ForwardedFor(&'a [u8]),
     IfNoneMatch(&'a [u8]),
+    /// the Host the browser asked for (for the same-origin check)
+    Host(&'a [u8]),
+    /// the page a browser request came from
+    Referer(&'a [u8]),
+    /// the Host a reverse proxy was asked for
+    ForwardedHost(&'a [u8]),
     KeepAlive,
     /// the empty line: the headers end
     End,
@@ -83,6 +89,12 @@ pub fn header(buffer: &[u8], auth_info_empty: bool) -> Header<'_> {
         Header::ForwardedFor(value(17))
     } else if prefix(line, "If-None-Match: ") {
         Header::IfNoneMatch(value(15))
+    } else if prefix(line, "Host: ") {
+        Header::Host(value(6))
+    } else if prefix(line, "Referer: ") {
+        Header::Referer(value(9))
+    } else if prefix(line, "X-Forwarded-Host: ") {
+        Header::ForwardedHost(value(18))
     } else if prefix(line, "Connection: keep-alive") {
         Header::KeepAlive
     } else if line.is_empty() {
@@ -270,6 +282,12 @@ pub fn format_options_response(keep_alive: bool, origin: &[u8], version: &[u8]) 
     let mut out = Vec::with_capacity(320);
     out.extend_from_slice(b"HTTP/1.1 200 OK\r\nConnection: ");
     out.extend_from_slice(if keep_alive { b"keep-alive" } else { b"close" });
+    if origin.is_empty() {
+        out.extend_from_slice(b"\r\nContent-Length: 0\r\nServer: RustyGet-");
+        out.extend_from_slice(version);
+        out.extend_from_slice(b"\r\n\r\n");
+        return truncate_bstring_1024(out);
+    }
     out.extend_from_slice(
         b"\r\n\
 Content-Length: 0\r\n\
@@ -353,19 +371,18 @@ pub fn format_body_response_header(
     });
     out.extend_from_slice(b"Connection: ");
     out.extend_from_slice(if keep_alive { b"keep-alive" } else { b"close" });
-    out.extend_from_slice(
-        b"\r\n\
-Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\
-Access-Control-Allow-Origin: ",
-    );
-    out.extend_from_slice(origin);
-    out.extend_from_slice(
-        b"\r\n\
+    out.extend_from_slice(b"\r\n");
+    if !origin.is_empty() {
+        out.extend_from_slice(b"Access-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Origin: ");
+        out.extend_from_slice(origin);
+        out.extend_from_slice(
+            b"\r\n\
 Access-Control-Allow-Credentials: true\r\n\
 Access-Control-Max-Age: 86400\r\n\
-Access-Control-Allow-Headers: Content-Type, Authorization\r\n\
-Set-Cookie: Auth-Type=",
-    );
+Access-Control-Allow-Headers: Content-Type, Authorization\r\n",
+        );
+    }
+    out.extend_from_slice(b"Set-Cookie: Auth-Type=");
     out.extend_from_slice(if form_auth { b"form" } else { b"http" });
     out.extend_from_slice(b"; SameSite=Lax\r\nSet-Cookie: Auth-Token=");
     out.extend_from_slice(auth_token);
@@ -471,6 +488,35 @@ pub const HM_OPTIONS: i32 = 2;
 const ERR_HTTP_BAD_REQUEST: &[u8] = b"400 Bad Request";
 const ERR_HTTP_NOT_FOUND: &[u8] = b"404 Not Found";
 const ERR_HTTP_SERVICE_UNAVAILABLE: &[u8] = b"503 Service Unavailable";
+const ERR_HTTP_FORBIDDEN: &[u8] = b"403 Forbidden";
+
+/// Is `url` (an Origin or Referer value) on `host`, the Host the browser
+/// sent: the same scheme-less authority, compared without case?
+pub fn same_origin(url: &[u8], host: &[u8]) -> bool {
+    if host.is_empty() {
+        return false;
+    }
+    let lower = url.to_ascii_lowercase();
+    let rest = if lower.starts_with(b"http://") {
+        &url[7..]
+    } else if lower.starts_with(b"https://") {
+        &url[8..]
+    } else {
+        return false;
+    };
+    let authority = &rest[..find_byte(rest, b'/').unwrap_or(rest.len())];
+    authority.eq_ignore_ascii_case(host.trim_ascii())
+}
+
+/// Does a browser request come from another site? An Origin that is not the
+/// daemon's own (Host) one, "null" included, or without an Origin a Referer
+/// from elsewhere. Requests from scripts and tools send neither.
+pub fn cross_site(origin: &[u8], referer: &[u8], host: &[u8]) -> bool {
+    if !origin.is_empty() {
+        return !same_origin(origin, host);
+    }
+    !referer.is_empty() && !same_origin(referer, host)
+}
 const MAX_UNCOMPRESSED_SIZE: usize = 500;
 
 static SERVER_AUTH_TOKENS: std::sync::OnceLock<[[u8; 48]; 3]> = std::sync::OnceLock::new();
@@ -538,6 +584,9 @@ pub(crate) fn web_file_is_forbidden(path: &[u8]) -> bool {
     // ".conf" anywhere: rustyget.conf, its backups (rustyget.conf.bak-...) and
     // the file being saved (.rustyget.conf.saving-...)
     base.windows(5).any(|w| w.eq_ignore_ascii_case(b".conf"))
+        || base.windows(5).any(|w| w.eq_ignore_ascii_case(b".bak-"))
+        || base.windows(8).any(|w| w.eq_ignore_ascii_case(b".saving-"))
+        || (base.len() >= 4 && base[base.len() - 4..].eq_ignore_ascii_case(b".bak"))
 }
 
 mod bundle {
@@ -688,6 +737,9 @@ where
     let mut auth_token = [0u8; TOKEN_SIZE];
     let mut origin: Vec<u8> = Vec::new();
     let mut forwarded_for: Vec<u8> = Vec::new();
+    let mut host_hdr: Vec<u8> = Vec::new();
+    let mut referer: Vec<u8> = Vec::new();
+    let mut forwarded_host: Vec<u8> = Vec::new();
     let mut old_etag: Vec<u8> = Vec::new();
     let mut keep_alive = false;
     let mut content_len: i32 = 0;
@@ -736,6 +788,9 @@ where
                 }
                 Header::ForwardedFor(v) => forwarded_for = c_bytes(v).to_vec(),
                 Header::IfNoneMatch(v) => old_etag = c_bytes(v).to_vec(),
+                Header::Host(v) => host_hdr = c_bytes(v).to_vec(),
+                Header::Referer(v) => referer = c_bytes(v).to_vec(),
+                Header::ForwardedHost(v) => forwarded_host = c_bytes(v).to_vec(),
                 Header::KeepAlive => keep_alive = true,
                 Header::End => break,
                 Header::Other => {}
@@ -790,6 +845,15 @@ where
         return false;
     }
 
+    // CORS: never reflect another site's Origin (with credentials it would
+    // let that site read the answers); the daemon's own pages need nothing
+    // (behind a reverse proxy the browser's host is X-Forwarded-Host)
+    let from_elsewhere =
+        cross_site(&origin, &referer, &host_hdr) && cross_site(&origin, &referer, &forwarded_host);
+    if !origin.is_empty() && !same_origin(&origin, &host_hdr) && !same_origin(&origin, &forwarded_host) {
+        origin.clear();
+    }
+
     if http_method == HM_OPTIONS {
         let hdr = format_options_response(keep_alive, &origin, cfg.version);
         let mut msg = Vec::with_capacity(15 + hdr.len());
@@ -828,6 +892,16 @@ where
     }
 
     let rpc_request = crate::rpcroute::protocol(&url) != crate::rpcroute::RP_UNDEFINED;
+    // without a password any web page could drive the daemon through the
+    // browser: an API call from another site is refused then
+    if rpc_request && from_elsewhere && cfg.credentials.control_password.is_none_or(<[u8]>::is_empty) {
+        log_msg(
+            1,
+            b"Refused an API call from another web site: no ControlPassword is set. Set one in Settings > Security",
+        );
+        send_error(ERR_HTTP_FORBIDDEN, false, &url, keep_alive, &mut send_all, &mut log_msg);
+        return keep_alive;
+    }
     let check = check_credentials(
         &cfg.credentials,
         cfg.remote_addr,
@@ -1341,6 +1415,29 @@ mod tests {
     }
 
     #[test]
+    fn other_sites_are_never_given_cors_access() {
+        assert!(same_origin(b"http://127.0.0.1:6789", b"127.0.0.1:6789"));
+        assert!(same_origin(b"HTTPS://NAS.local:6789/x", b"nas.local:6789"));
+        assert!(!same_origin(b"http://evil.example", b"127.0.0.1:6789"));
+        assert!(!same_origin(b"null", b"127.0.0.1:6789"));
+        assert!(!same_origin(b"http://127.0.0.1:6789", b""));
+        assert!(!cross_site(b"", b"", b"127.0.0.1:6789"), "tools send neither");
+        assert!(!cross_site(b"http://127.0.0.1:6789", b"", b"127.0.0.1:6789"));
+        assert!(cross_site(b"http://evil.example", b"", b"127.0.0.1:6789"));
+        assert!(cross_site(b"null", b"", b"127.0.0.1:6789"));
+        assert!(cross_site(b"", b"http://evil.example/page", b"127.0.0.1:6789"));
+        assert!(!cross_site(b"", b"http://127.0.0.1:6789/", b"127.0.0.1:6789"));
+        let none = String::from_utf8(format_options_response(true, b"", b"1")).unwrap();
+        assert!(!none.contains("Access-Control"), "{none}");
+        let body = String::from_utf8(format_body_response_header(false, true, b"", false, b"t", 1, None, false, None, b"1")).unwrap();
+        assert!(!body.contains("Access-Control"), "{body}");
+        let own = String::from_utf8(format_body_response_header(false, true, b"http://a:1", false, b"t", 1, None, false, None, b"1")).unwrap();
+        assert!(own.contains("Access-Control-Allow-Origin: http://a:1\r\n"), "{own}");
+        assert_eq!(header(b"Host: 127.0.0.1:6789", true), Header::Host(b"127.0.0.1:6789"));
+        assert_eq!(header(b"Referer: http://x/", true), Header::Referer(b"http://x/"));
+    }
+
+    #[test]
     fn the_web_interface_is_built_in_and_config_copies_are_never_served() {
         assert!(has_embedded_webui());
         let index = embedded_file(b"index.html").unwrap();
@@ -1355,7 +1452,8 @@ mod tests {
         std::fs::write(dir.join("file"), b"x").unwrap();
         assert!(!web_dir_usable(dir.join("file").to_str().unwrap().as_bytes()), "a file is not a folder");
         let _ = std::fs::remove_dir_all(&dir);
-        for name in [&b"rustyget.conf"[..], b"x/RUSTYGET.CONF", b"rustyget.conf.bak-20261123-101010", b".rustyget.conf.saving-42"] {
+        for name in [&b"rustyget.conf"[..], b"x/RUSTYGET.CONF", b"rustyget.conf.bak-20261123-101010", b".rustyget.conf.saving-42",
+            b"my.cfg.bak-20261123-101010", b"settings.ini.bak", b".my.cfg.saving-7"] {
             assert!(web_file_is_forbidden(name), "{}", String::from_utf8_lossy(name));
             assert!(load_embedded_file(name).is_none());
         }

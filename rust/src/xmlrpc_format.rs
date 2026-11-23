@@ -541,6 +541,7 @@ pub fn match_command(method: &[u8]) -> c_int {
         b"checkpath" => 65,
         b"configbackups" => 66,
         b"restoreconfig" => 67,
+        b"checkconfig" => 68,
         _ => 0,
     }
 }
@@ -2669,7 +2670,10 @@ pub fn xmlrpc_check_user_access_denied(
             || method_name.eq_ignore_ascii_case(b"parpresetdetect")
             || method_name.eq_ignore_ascii_case(b"checkpath")
             || method_name.eq_ignore_ascii_case(b"configbackups")
-            || method_name.eq_ignore_ascii_case(b"restoreconfig");
+            || method_name.eq_ignore_ascii_case(b"restoreconfig")
+            || method_name.eq_ignore_ascii_case(b"checkconfig")
+            || method_name.eq_ignore_ascii_case(b"testserver")
+            || method_name.eq_ignore_ascii_case(b"testserverspeed");
         if forbidden {
             return 2;
         }
@@ -3701,9 +3705,40 @@ impl<'a> ParamCursor<'a> {
 }
 
 fn xmlrpc_execute_save_config_cursor(
+    cur: ParamCursor<'_>,
+    is_json: bool,
+    config_filename: Option<&[u8]>,
+) -> (usize, bool, Vec<u8>) {
+    save_config_cursor(cur, is_json, config_filename, false)
+}
+
+/// The values the configuration file has now, by option name (for the save
+/// check: a folder that did not change is not checked again).
+fn current_config_values(config_filename: Option<&[u8]>) -> Vec<(String, String)> {
+    config_filename
+        .filter(|f| !f.is_empty())
+        .and_then(crate::configfile::script_config_load)
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|(n, v)| {
+                    (
+                        String::from_utf8_lossy(n.to_bytes()).into_owned(),
+                        String::from_utf8_lossy(v.to_bytes()).into_owned(),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `saveconfig`, or with `check_only` `checkconfig`: the same list is only
+/// checked, and the answer lists each problem as {Name, Problem}.
+fn save_config_cursor(
     mut cur: ParamCursor<'_>,
     is_json: bool,
     config_filename: Option<&[u8]>,
+    check_only: bool,
 ) -> (usize, bool, Vec<u8>) {
     let mut opt_entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     let mut cipher_baseline: Option<Vec<u8>> = None;
@@ -3777,10 +3812,35 @@ fn xmlrpc_execute_save_config_cursor(
 
     // never write a file that would not load cleanly: every value is checked
     // first, and the save is refused with what to fix
-    let problems = crate::firstrun::validate(&opt_entries, &crate::firstrun::running_option);
+    let current = current_config_values(config_filename);
+    let current_of = |name: &str| {
+        current
+            .iter()
+            .rev()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.clone())
+    };
+    let problems = crate::firstrun::validate_detailed(&opt_entries, &crate::firstrun::running_option, &current_of);
+    if check_only {
+        let mut o = String::from("[");
+        for (i, (name, problem)) in problems.iter().enumerate() {
+            if i > 0 {
+                o.push(',');
+            }
+            o.push_str("{\"Name\":");
+            crate::sysmetrics::json_str(&mut o, name);
+            o.push_str(",\"Problem\":");
+            crate::sysmetrics::json_str(&mut o, problem);
+            o.push('}');
+        }
+        o.push(']');
+        let out = if is_json { o.into_bytes() } else { crate::sysmetrics::to_xml(&o).into_bytes() };
+        return (cur_off, false, out);
+    }
     if !problems.is_empty() {
         let mut msg = String::from("Settings were not saved. Fix these first: ");
-        msg.push_str(&problems.join(" "));
+        let texts: Vec<&str> = problems.iter().map(|(_, m)| m.as_str()).collect();
+        msg.push_str(&texts.join(" "));
         return (cur_off, true, format_error_bytes(is_json, 4, msg.as_bytes()));
     }
 
@@ -6382,7 +6442,16 @@ unsafe fn execute_xml_command(
             (false, crate::parpreset::rpc_reply(is_json, start))
         }
         // setupstatus(): what still keeps RustyGet from downloading
-        64 => (false, crate::firstrun::rpc_setup_status(is_json)),
+        64 => (
+            false,
+            crate::firstrun::rpc_setup_status(is_json, eff_access == crate::rpcroute::UA_RESTRICTED),
+        ),
+        // checkconfig([...]): what saveconfig would refuse in this list, nothing written
+        68 => {
+            let cur = unsafe { ParamCursor::from_raw(raw_start, is_get, is_json) };
+            let (_, fault, out) = save_config_cursor(cur, is_json, host.config_filename, true);
+            (fault, out)
+        }
         // checkpath(path, maindir): can this folder be used?
         65 => {
             let mut text = || {

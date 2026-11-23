@@ -138,6 +138,8 @@ async function noConfig(browser, binSrc, viewport, theme, complete) {
     const url = await waitFor(() => (/Open the web interface to finish setting up RustyGet: (http:\/\/\S+)/.exec(run.read('daemon.out')) || [])[1], 20000, 'the address on stdout');
     const base = new URL(url);
     const conf = path.join(home, '.config', 'rustyget', 'rustyget.conf');
+    const made = await waitFor(() => (/Sign in with user "rustyget" and password "([A-Za-z0-9]{20})"/.exec(run.read('daemon.out')) || [])[1], 20000, 'the password on stdout');
+    const firstAuth = 'rustyget:' + made;
     await run.check('stdout says where the file is and the address', async () => {
       const out = run.read('daemon.out');
       assert(out.includes('RustyGet created a new configuration file: ' + conf), out);
@@ -146,37 +148,65 @@ async function noConfig(browser, binSrc, viewport, theme, complete) {
       const text = fs.readFileSync(conf, 'utf8');
       assert.match(text, /^MainDir=~\/RustyGet$/m);
       assert.match(text, /^ControlIP=127\.0\.0\.1$/m);
-      assert.match(text, /^ControlPassword=$/m);
+      assert.match(text, new RegExp('^ControlPassword=' + made + '$', 'm'));
+      assert.match(text, /^FormAuth=yes$/m);
       assert.match(text, new RegExp('^ControlPort=' + base.port + '$', 'm'));
       assert(base.port !== '6789' || !out.includes('is in use'));
-      await waitFor(() => rpc(base, 'version'), 20000, 'the daemon');
-      const log = (await rpc(base, 'log', [0, 200])).map(m => m.Text);
+      await waitFor(() => rpc(base, 'version', [], firstAuth), 20000, 'the daemon');
+      const anon = await fetch(new URL('jsonrpc', base), { method: 'POST', body: JSON.stringify({ method: 'status', params: [] }) });
+      assert.equal(anon.status, 401, 'a password from the first start');
+      const log = (await rpc(base, 'log', [0, 200], firstAuth)).map(m => m.Text);
       assert(log.some(t => t.includes('created a new configuration file')), 'logged too');
+      assert(!log.some(t => t.includes(made)), 'the password is not in the log');
       assert(fs.statSync(path.join(home, 'RustyGet', 'queue')).isDirectory(), 'MainDir made in HOME');
     });
     await run.check('downloads stay paused until setup is done', async () => {
-      const st = await rpc(base, 'status');
+      const st = await rpc(base, 'status', [], firstAuth);
       assert.equal(st.DownloadPaused, true);
-      const s = await rpc(base, 'setupstatus');
+      const s = await rpc(base, 'setupstatus', [], firstAuth);
       assert.equal(s.SetupComplete, false);
+      assert.equal(s.DownloadsBlocked, true);
       assert.equal(s.ConfigCreated, true);
       assert.equal(s.Servers, 0);
-      assert.equal(s.PasswordSet, false);
+      assert.equal(s.PasswordSet, true);
     });
 
     const { context, page } = await newPage(browser, viewport, theme, errors, state);
     run.page = page;
+    state.reloading = true;
     await page.goto(base.href);
     const wizard = page.locator('#SetupWizard');
-    await run.check('the setup guide opens by itself', async () => {
-      await wizard.waitFor({ state: 'visible', timeout: 15000 });
+    await run.check('sign in with the password from the terminal', async () => {
+      // (the sign-in form's first probe is answered 401: expected, not an error)
+      await page.locator('#LoginDialog_Username').waitFor({ state: 'visible', timeout: 20000 });
+      await shot(page, prefix + '00-first-sign-in');
+      await page.locator('#LoginDialog_Username').fill('rustyget');
+      await page.locator('#LoginDialog_Password').fill(made);
+      await page.locator('#LoginDialog_Password').press('Enter');
+    });
+    await run.check('the setup guide opens by itself and shows the password', async () => {
+      await wizard.waitFor({ state: 'visible', timeout: 20000 });
+      state.reloading = false;
       assert.equal(await page.locator('#SetupWizard .setup-steps li.is-current').getAttribute('data-step'), '1');
-      assert(await page.locator('#SetupNext').isDisabled(), 'Next is off until a password is entered');
+      assert(!(await page.locator('#SetupNext').isDisabled()), 'the password RustyGet made can be kept');
       assert.equal(await page.evaluate(() => document.activeElement && document.activeElement.id), 'SetupUser');
+      assert(!(await page.locator('#SetupCurrentPass').textContent()).includes(made), 'hidden until asked');
+      await page.locator('#SetupRevealPass').click();
+      assert.equal(await page.locator('#SetupCurrentPass').textContent(), made);
       await shot(page, prefix + '01-wizard-password');
+      await page.locator('#SetupRevealPass').click();
     });
 
-    await run.check('step 1: the password is checked as you type', async () => {
+    if (!complete) {
+      await run.check('step 1: keep the password RustyGet made', async () => {
+        await page.locator('#SetupNext').click();
+        await page.locator('#SetupWizard [data-page="2"]').waitFor({ state: 'visible' });
+        await page.locator('#SetupBack').click();
+        await page.locator('#SetupWizard [data-page="1"]').waitFor({ state: 'visible' });
+      });
+    }
+
+    await run.check('step 1: a new password is checked as you type', async () => {
       await page.locator('#SetupPass').fill('short');
       await page.locator('#SetupPass_Msg').filter({ hasText: 'at least 8' }).waitFor({ timeout: 3000 });
       await page.locator('#SetupPass').fill('example-pass-1');
@@ -271,7 +301,7 @@ async function noConfig(browser, binSrc, viewport, theme, complete) {
         assert.match(await page.locator('#AlertDialog').textContent(), /can't download yet/);
         await shot(page, prefix + '10-resume-blocked');
         await page.keyboard.press('Escape');
-        assert.equal((await rpc(base, 'status')).DownloadPaused, true);
+        assert.equal((await rpc(base, 'status', [], firstAuth)).DownloadPaused, true);
         // reloading the page does not reopen a skipped guide
         await page.reload();
         await page.locator('#SetupBanner .setup-banner__box--todo').waitFor({ state: 'visible', timeout: 15000 });
@@ -331,12 +361,12 @@ async function noConfig(browser, binSrc, viewport, theme, complete) {
 // ----------------------------------------------------------------------------
 // 2. A terrible configuration file
 // ----------------------------------------------------------------------------
-function terribleConfig(port, main) {
+function terribleConfig(port, main, noServer) {
   const parts = [
     Buffer.from('# a terrible configuration file\n'),
     Buffer.from('ControlIP=127.0.0.1\nControlPort=' + port + '\nControlUsername=\nControlPassword=\n'),
     Buffer.from('MainDir=' + main + '\n'),
-    Buffer.from('Server1.Host=127.0.0.1\nServer1.Port=1\nServer1.Encryption=no\nServer1.Connections=2\n'),
+    Buffer.from(noServer ? '#\n#\n#\n#\n' : 'Server1.Host=127.0.0.1\nServer1.Port=1\nServer1.Encryption=no\nServer1.Connections=2\n'),
     Buffer.from('ArticleTimeout=soon\n'),               // a wrong type
     Buffer.from('ParCheck=sometimes\n'),                // an invalid choice
     Buffer.from('NotAnOption=1\n'),                     // an unknown option
@@ -389,16 +419,28 @@ async function garbage(browser, bin, viewport, theme) {
     await page.goto(base.href);
     await ready(page);
     await run.check('the web interface shows the problems and what was used', async () => {
-      // a news server is set, so the guide does not open by itself; the banner asks for a password
-      await page.locator('#SetupBanner .setup-banner__box--todo').waitFor({ state: 'visible', timeout: 15000 });
+      // a news server is set: nothing blocks downloading, the guide stays shut,
+      // and a missing password is only a gentle hint
+      await page.locator('#SetupBanner .setup-banner__box--hint').waitFor({ state: 'visible', timeout: 15000 });
       assert.equal(await page.locator('#SetupWizard').count(), 0);
-      assert.match(await page.locator('#SetupBanner').textContent(), /Set a password/);
+      assert.equal(await page.locator('#SetupBanner .setup-banner__box--todo').count(), 0, 'no red banner for a working setup');
+      assert.match(await page.locator('#SetupBanner .setup-banner__box--hint').textContent(), /no password/);
       const notes = page.locator('#SetupBanner .setup-banner__box--notes');
       await notes.waitFor({ state: 'visible' });
       assert.match(await notes.textContent(), /The configuration file had \d+ problems/);
       await notes.locator('summary').click();
       assert.match(await notes.textContent(), /ArticleTimeout/);
       await shot(page, prefix + '01-banner-problems');
+    });
+    await run.check('Resume works for a working setup without a password', async () => {
+      await rpc(base, 'pausedownload');
+      await page.evaluate(() => Refresher.update());
+      await page.waitForFunction(() => window.Status && Status.status && Status.status.DownloadPaused === true, null, { timeout: 10000 });
+      await page.evaluate(() => Status.playClick());
+      await page.waitForTimeout(800);
+      assert(!(await page.locator('#AlertDialog').isVisible()), 'no "set up first" dialog');
+      await waitFor(async () => (await rpc(base, 'status')).DownloadPaused === false, 10000, 'resumed');
+      await shot(page, prefix + '01b-password-hint');
     });
     for (const name of ['Downloads', 'History', 'Messages']) {
       await run.check(name + ' renders', async () => {
@@ -537,6 +579,71 @@ async function garbage(browser, bin, viewport, theme) {
   return run;
 }
 
+async function garbageGuide(browser, bin) {
+  const run = new Run('garbage-guide');
+  const port = await freePort();
+  const nntpPort = await freePort();
+  const base = new URL(`http://127.0.0.1:${port}/`);
+  const conf = path.join(run.work, 'rustyget.conf');
+  const main = path.join(run.work, 'main');
+  fs.writeFileSync(conf, terribleConfig(port, main, true));
+  const errors = [];
+  const state = { reloading: false };
+  try {
+    fs.mkdirSync(path.join(run.work, 'nserv'));
+    run.spawn(bin, ['--nserv', '-d', path.join(run.work, 'nserv'), '-p', String(nntpPort), '-i', '1', '-v', '0'], {}, 'nserv.out');
+    run.spawn(bin, ['-c', conf, '-s', '-o', 'OutputMode=log'], { HOME: run.work }, 'daemon.out');
+    await waitFor(() => rpc(base, 'version'), 20000, 'the daemon');
+    const { context, page } = await newPage(browser, DESKTOP, 'light', errors, state);
+    run.page = page;
+    await page.goto(base.href);
+    await run.check('the guide opens for a terrible file with no news server', async () => {
+      await page.locator('#SetupWizard').waitFor({ state: 'visible', timeout: 20000 });
+      await page.locator('#SetupPass').fill('example-pass-9');
+      await page.locator('#SetupPass2').fill('example-pass-9');
+      await page.locator('#SetupNext').click();
+      await page.locator('#SetupMainDir_Msg.is-ok').waitFor({ timeout: 5000 });
+      await page.locator('#SetupDestDir_Msg.is-ok').waitFor({ timeout: 5000 });
+      await page.locator('#SetupNext').click();
+      await page.locator('#SetupHost').fill('127.0.0.1');
+      await page.locator('#SetupTls').uncheck();
+      await page.locator('#SetupPort').fill(String(nntpPort));
+      await page.locator('#SetupConns').fill('2');
+      await page.locator('#SetupTest').click();
+      await page.locator('#SetupTestResult.is-ok').waitFor({ timeout: 30000 });
+      await page.locator('#SetupNext').click();
+      await page.locator('#SetupWizard [data-page="4"]').waitFor({ state: 'visible' });
+    });
+    await run.check('save lists the lines that can\'t be kept, drops them after a confirm, and succeeds', async () => {
+      await page.locator('#SetupNext').click();
+      await page.locator('#SetupDropOk').waitFor({ state: 'visible', timeout: 10000 });
+      const list = await page.locator('#SetupSaveResult').textContent();
+      assert(/NotAnOption/.test(list) && /ArticleTimeout/.test(list), list);
+      await shot(page, 'garbage-guide-01-drop-confirm');
+      // "Don't save" leaves the file alone
+      await page.locator('#SetupDropCancel').click();
+      assert(fs.readFileSync(conf).equals(terribleConfig(port, main, true)));
+      state.reloading = true;
+      await page.locator('#SetupNext').click();
+      await page.locator('#SetupDropOk').waitFor({ state: 'visible', timeout: 10000 });
+      await page.locator('#SetupDropOk').click();
+      await page.locator('.setup-restart').waitFor({ timeout: 10000 });
+      const text = fs.readFileSync(conf, 'latin1');
+      assert.match(text, /^ControlPassword=example-pass-9$/m);
+      assert.match(text, /^Server\d+\.Host=127\.0\.0\.1$/m);
+      assert(!/NotAnOption|this line is broken|ArticleTimeout=soon|ParCheck=sometimes/.test(text), 'the bad lines are gone');
+      const auth = 'rustyget:example-pass-9';
+      await waitFor(async () => (await rpc(base, 'setupstatus', [], auth)).SetupComplete === true, 40000, 'set up after the restart');
+      state.reloading = false;
+    });
+    await context.close();
+  } finally {
+    await run.stop();
+  }
+  if (errors.length) run.failures.push(run.name + ': console/page errors: ' + errors.join('; '));
+  return run;
+}
+
 // ----------------------------------------------------------------------------
 // 3. Files that are not usable as a configuration
 // ----------------------------------------------------------------------------
@@ -564,8 +671,11 @@ async function oddFiles(bin) {
           ? await waitFor(() => (/(http:\/\/127\.0\.0\.1:\d+\/)/.exec(run.read(out)) || [])[1], 20000, 'the address')
           : `http://127.0.0.1:${port}/`;
         const base = new URL(url);
-        // an empty or unreadable file means the stock sign-in, which stdout tells
-        const auth = creates ? undefined : 'rustyget:tegbzn6789';
+        // an empty or unreadable file means the stock sign-in, which stdout tells;
+        // a created one has its own password, told on stdout
+        const auth = creates
+          ? 'rustyget:' + await waitFor(() => (/password "([A-Za-z0-9]{20})"/.exec(run.read(out)) || [])[1], 20000, 'the password')
+          : 'rustyget:tegbzn6789';
         await waitFor(() => rpc(base, 'version', [], auth), 20000, 'the daemon (' + name + ')');
         if (!creates) assert(run.read(out).includes('password "tegbzn6789", the stock password'), 'stdout tells the sign-in');
         assert.equal(d.exitCode, null, 'running');
@@ -600,11 +710,12 @@ async function oddFiles(bin) {
     .catch(() => chromium.launch());
   const runs = [];
   try {
-    const only = (process.env.FIRST_RUN_ONLY || 'noconfig,noconfig-phone,garbage,garbage-phone,oddfiles').split(',');
+    const only = (process.env.FIRST_RUN_ONLY || 'noconfig,noconfig-phone,garbage,garbage-phone,garbage-guide,oddfiles').split(',');
     if (only.includes('noconfig')) runs.push(await noConfig(browser, bin, DESKTOP, 'light', true));
     if (only.includes('noconfig-phone')) runs.push(await noConfig(browser, bin, PHONE, 'dark', false));
     if (only.includes('garbage')) runs.push(await garbage(browser, bin, DESKTOP, 'dark'));
     if (only.includes('garbage-phone')) runs.push(await garbage(browser, bin, PHONE, 'light'));
+    if (only.includes('garbage-guide')) runs.push(await garbageGuide(browser, bin));
     if (only.includes('oddfiles')) runs.push(await oddFiles(bin));
   } finally {
     await browser.close();

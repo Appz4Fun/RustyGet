@@ -50,6 +50,8 @@ struct LoadState {
     created: bool,
     /// why the configuration file cannot be used, if it cannot
     problem: String,
+    /// counts the loads (a reload is a new instance; the web page waits for it)
+    instance: u64,
 }
 
 static LOAD_STATE: Mutex<Option<LoadState>> = Mutex::new(None);
@@ -66,6 +68,7 @@ pub(crate) fn begin_load() {
         s.notes.clear();
         s.dropped = 0;
         s.problem.clear();
+        s.instance += 1;
     });
 }
 
@@ -1208,12 +1211,13 @@ pub fn rpc_setup_status(is_json: bool, restricted: bool) -> Vec<u8> {
     let username = running_option("ControlUsername").unwrap_or_default();
     let servers = usable_servers();
     let paths = path_problems();
-    let (notes, dropped, created, problem) =
-        with_state(|s| (s.notes.clone(), s.dropped, s.created, s.problem.clone()));
+    let (notes, dropped, created, problem, instance) =
+        with_state(|s| (s.notes.clone(), s.dropped, s.created, s.problem.clone(), s.instance));
     let writable = config_writable(config.as_deref());
     let mut o = String::with_capacity(1024);
     o.push_str("{\"ConfigFile\":");
     js(&mut o, &config.as_deref().map_or(String::new(), |p| p.display().to_string()));
+    o.push_str(&format!(",\"Instance\":{instance}"));
     o.push_str(&format!(",\"ConfigCreated\":{created}"));
     o.push_str(&format!(",\"ConfigWritable\":{}", writable.is_ok()));
     o.push_str(",\"ConfigProblem\":");

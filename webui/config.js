@@ -6365,8 +6365,14 @@ var Config = (new function($)
 		ConfirmDialog.showModal('ReloadConfirmDialog', Config.reload);
 	}
 
+	var reloadInstance;
+
 	this.reload = function()
 	{
+		// the daemon's instance number (setupstatus) tells a restarted daemon apart
+		// for sure; the uptime comparison below is the fallback
+		var st = typeof Setup !== 'undefined' ? Setup.status() : null;
+		reloadInstance = st && st.Instance !== undefined ? st.Instance : undefined;
 		$('#ConfigReloadAction').text(I18n.translate('msg_stopping_reloading'));
 		restart(function() { RPC.call('reload', [], reloadCheckStatus); });
 	}
@@ -6375,6 +6381,27 @@ var Config = (new function($)
 
 	function reloadCheckStatus()
 	{
+		if (reloadInstance !== undefined)
+		{
+			RPC.call('setupstatus', [], function(st)
+			{
+				if (st && st.Instance !== undefined && st.Instance !== reloadInstance)
+				{
+					$('#ConfigReloadAction').text(I18n.translate('msg_reloaded_refreshing'));
+					document.location.reload(true);
+				}
+				else
+				{
+					setTimeout(reloadCheckStatus, 500);
+					reloadCheckNotes();
+				}
+			}, function()
+			{
+				setTimeout(reloadCheckStatus, 500);
+				reloadCheckNotes();
+			});
+			return;
+		}
 		RPC.call('status', [], function(status)
 			{
 				// OK, checking if it is a restarted instance (a shorter uptime, or

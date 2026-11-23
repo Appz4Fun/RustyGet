@@ -817,6 +817,7 @@ var Setup = (new function($)
 			'</div>');
 		$Wizard.find('.setup-foot').hide();
 		var upBefore = (typeof Status !== 'undefined' && Status.status) ? Status.status.UpTimeSec : null;
+		var instanceBefore = status && status.Instance !== undefined ? status.Instance : null;
 		RPC.call('reload', [], function() {}, function() {});
 		var started = Date.now();
 		var sawDown = false;
@@ -825,7 +826,7 @@ var Setup = (new function($)
 		function poll()
 		{
 			var xhr = new XMLHttpRequest();
-			xhr.open('get', UISettings.rpcUrl + '/status');
+			xhr.open('get', UISettings.rpcUrl + (instanceBefore !== null ? '/setupstatus' : '/status'));
 			xhr.onreadystatechange = function()
 			{
 				if (xhr.readyState !== 4) return;
@@ -835,8 +836,15 @@ var Setup = (new function($)
 				{
 					try
 					{
-						var up = JSON.parse(xhr.responseText).result.UpTimeSec;
-						restarted = restarted || (upBefore === null ? Date.now() - started > 4000 : up < upBefore);
+						var result = JSON.parse(xhr.responseText).result;
+						if (instanceBefore !== null)
+						{
+							restarted = result.Instance !== undefined && result.Instance !== instanceBefore;
+						}
+						else
+						{
+							restarted = restarted || (upBefore === null ? Date.now() - started > 4000 : result.UpTimeSec < upBefore);
+						}
 					}
 					catch (e) { restarted = false; }
 				}

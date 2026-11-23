@@ -52,7 +52,11 @@ const MAX_FIRST_VOLUME_MEMBERS: usize = 30;
 /// Output bytes one durable group commit covers (zipfast's default is 64 MiB). Each commit syncs
 /// the output, writes the ledger and makes two anchor CASes (each a file and a directory sync in
 /// `DurableAnchors`), so on a slow destination disk the syncs, not the copy, set the speed.
-/// A crash loses at most one group, which the restarted session extracts again from the volumes.
+/// A crash loses at most one group, which the restarted session extracts again from the volumes
+/// (up to 1 GiB re-read and re-written; nothing is lost that the volumes do not still hold).
+/// Measured with the `persistent_throughput` bench on 0.5 and 2 GiB sets, with and without lost
+/// articles, 1 GiB took the fewest syncs and was fastest, ahead of 256 MiB and 64 MiB (a
+/// smaller group for small sets did not help either: a set under 1 GiB commits only at the end).
 const GROUP_COMMIT_BYTES: u64 = 1 << 30;
 /// A group also commits once it has been open this long (zipfast's default is 2 s), and before
 /// the session waits for a volume when it is older than this.

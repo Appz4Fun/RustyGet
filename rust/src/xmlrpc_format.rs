@@ -40,6 +40,10 @@ pub struct NzbgetRsRpcStatusInput<'a> {
 pub struct NzbgetRsRpcServerStatus {
     pub id: c_int,
     pub active: c_int,
+    /// Light connections the server keeps for checks (`crate::light_pool`).
+    pub light_connections: c_int,
+    /// Of those, the ones in use now.
+    pub light_busy: c_int,
 }
 
 pub struct NzbgetRsRpcLogEntry<'a> {
@@ -863,14 +867,14 @@ fn write_status(
             }
             let _ = write!(
                 out,
-                "{{\n\"ID\" : {},\n\"Active\" : {}\n}}",
-                srv.id, active_str
+                "{{\n\"ID\" : {},\n\"Active\" : {},\n\"LightConnections\" : {},\n\"LightBusy\" : {}\n}}",
+                srv.id, active_str, srv.light_connections, srv.light_busy
             );
         } else {
             let _ = write!(
                 out,
-                "<value><struct>\n<member><name>ID</name><value><i4>{}</i4></value></member>\n<member><name>Active</name><value><boolean>{}</boolean></value></member>\n</struct></value>\n",
-                srv.id, active_str
+                "<value><struct>\n<member><name>ID</name><value><i4>{}</i4></value></member>\n<member><name>Active</name><value><boolean>{}</boolean></value></member>\n<member><name>LightConnections</name><value><i4>{}</i4></value></member>\n<member><name>LightBusy</name><value><i4>{}</i4></value></member>\n</struct></value>\n",
+                srv.id, active_str, srv.light_connections, srv.light_busy
             );
         }
     }

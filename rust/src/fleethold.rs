@@ -187,6 +187,67 @@ pub fn parse_held_files(value: &[u8]) -> Vec<i32> {
         .collect()
 }
 
+/// `yes` on a copy that leaves its fleet without its files deleted, whatever
+/// the delete mode says (a copy sharing the primary's folder, or held copies
+/// a fleet ends with): `prepost::delete_cleanup_host` leaves its disk alone.
+pub const KEEP_FILES_PARAM: &[u8] = b"DupeKeepFiles";
+
+/// Whether two download folders are one: the same path, or the same folder
+/// once resolved (links, `..`), or equal ignoring case on macOS, whose file
+/// systems are case-insensitive by default.
+pub fn same_folder(a: &[u8], b: &[u8]) -> bool {
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    if a == b {
+        return true;
+    }
+    let resolve = |p: &[u8]| std::fs::canonicalize(std::ffi::OsStr::new(std::str::from_utf8(p).ok()?)).ok();
+    if let (Some(x), Some(y)) = (resolve(a), resolve(b)) {
+        if x == y {
+            return true;
+        }
+    }
+    let trim = |p: &[u8]| -> Vec<u8> {
+        let mut v = p.to_vec();
+        while v.len() > 1 && v.last() == Some(&b'/') {
+            v.pop();
+        }
+        v
+    };
+    let (a, b) = (trim(a), trim(b));
+    a == b || (cfg!(target_os = "macos") && a.eq_ignore_ascii_case(&b))
+}
+
+/// Keys whose fleet is being ended or refreshed now: a nested end or refresh
+/// of the same key (the queue editor runs a deleted copy's completion inline,
+/// which refreshes its fleet) does nothing, so the outer walk keeps its copies.
+static BUSY_KEYS: std::sync::Mutex<Vec<Vec<u8>>> = std::sync::Mutex::new(Vec::new());
+
+/// Holds a key busy while it lives; None when the key is busy already.
+pub struct BusyKey(Vec<u8>);
+
+impl BusyKey {
+    pub fn enter(key: &[u8]) -> Option<Self> {
+        let key = key.to_ascii_lowercase();
+        let mut keys = BUSY_KEYS.lock().unwrap_or_else(|e| e.into_inner());
+        if keys.contains(&key) {
+            return None;
+        }
+        keys.push(key.clone());
+        Some(Self(key))
+    }
+}
+
+impl Drop for BusyKey {
+    fn drop(&mut self) {
+        let mut keys = BUSY_KEYS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(pos) = keys.iter().position(|k| *k == self.0) {
+            keys.remove(pos);
+        }
+    }
+}
+
 /// Keys whose background probe runs now (see [`ProbingGuard`]): their
 /// `DupeProbing` copies are not stale.
 static PROBING_KEYS: std::sync::Mutex<Vec<Vec<u8>>> = std::sync::Mutex::new(Vec::new());
@@ -515,12 +576,31 @@ mod host {
     /// is the copy that just failed. Copies still being probed are left to
     /// their probe.
     pub(crate) fn end_fleet_host(host: &QueueSubsysHost, dq_ptr: usize, key: &[u8], exclude: NzbRef) {
-        let held: Vec<(NzbSnap, MemberFacts)> = held_in_order(host, dq_ptr, key, exclude)
+        let Some(_busy) = BusyKey::enter(key) else {
+            return;
+        };
+        end_fleet_locked(host, dq_ptr, key, exclude);
+    }
+
+    /// [`end_fleet_host`] with the key held busy by the caller.
+    fn end_fleet_locked(host: &QueueSubsysHost, dq_ptr: usize, key: &[u8], exclude: NzbRef) {
+        // ids, not pointers: a delete can complete inline and, with
+        // KeepHistory=0, free the copy before the next one is handled
+        let ids: Vec<i32> = held_in_order(host, dq_ptr, key, exclude)
             .into_iter()
             .filter(|(q, _)| !is_probing(host, q.ptr))
+            .map(|(q, _)| q.id)
             .collect();
-        for (q, f) in held {
-            let ending = ending_of(&f);
+        for id in ids {
+            let ptr = host.queue_find_by_id(dq_ptr, id);
+            if ptr.is_none() {
+                continue;
+            }
+            let q = host.nzb_snap(ptr, false);
+            if q.deleting || q.delete_status != DeleteStatus::None || !is_held(host, q.ptr) {
+                continue;
+            }
+            let ending = ending_of(&facts_of(host, &q));
             let mut msg = b"Every copy of the fleet of ".to_vec();
             msg.extend_from_slice(&q.name);
             msg.extend_from_slice(match ending {
@@ -538,8 +618,9 @@ mod host {
                 }
                 Ending::Donor => host.nzb_set_delete_status(q.ptr, DeleteStatus::Dupe),
             }
-            // parked: its files and nzb stay
-            host.dq_edit_entry(dq_ptr, q.id, crate::queuesubsys_host::EA_GROUP_PARK_DELETE, None);
+            // parked, its files and nzb kept whatever the delete mode says
+            host.nzb_set_param(q.ptr, KEEP_FILES_PARAM, Some(b"yes"));
+            host.dq_edit_entry(dq_ptr, id, crate::queuesubsys_host::EA_GROUP_PARK_DELETE, None);
         }
     }
 
@@ -549,11 +630,21 @@ mod host {
         if !holds_in_queue(host, nzb) {
             return;
         }
-        let others: Vec<NzbSnap> = queued_members(host, dq_ptr, &nzb.dupe_key)
+        let others: Vec<i32> = queued_members(host, dq_ptr, &nzb.dupe_key)
             .into_iter()
             .filter(|q| q.ptr != nzb.ptr && !q.has_post_info)
+            .map(|q| q.id)
             .collect();
-        for q in others {
+        for id in others {
+            // re-found each time: a delete can complete inline and free a copy
+            let ptr = host.queue_find_by_id(dq_ptr, id);
+            if ptr.is_none() {
+                continue;
+            }
+            let q = host.nzb_snap(ptr, false);
+            if q.deleting || q.delete_status != DeleteStatus::None {
+                continue;
+            }
             let mut msg = b"Moving ".to_vec();
             msg.extend_from_slice(&q.name);
             msg.extend_from_slice(b" to history: ");
@@ -564,14 +655,13 @@ mod host {
             host.nzb_set_delete_status(q.ptr, DeleteStatus::Dupe);
             // its own folder only: without InterDir two copies of one name
             // share a folder, and the files there may be the primary's release
-            let shares_folder = !q.dest_dir.is_empty()
-                && (q.dest_dir == nzb.dest_dir || q.dest_dir == nzb.final_dir);
-            let action = if shares_folder {
-                crate::queuesubsys_host::EA_GROUP_PARK_DELETE
-            } else {
-                crate::queuesubsys_host::EA_GROUP_DUPE_DELETE
-            };
-            host.dq_edit_entry(dq_ptr, q.id, action, None);
+            let shares_folder =
+                same_folder(&q.dest_dir, &nzb.dest_dir) || same_folder(&q.dest_dir, &nzb.final_dir);
+            if shares_folder {
+                // never a disk clean-up: the folder's files may be the primary's
+                host.nzb_set_param(q.ptr, KEEP_FILES_PARAM, Some(b"yes"));
+            }
+            host.dq_edit_entry(dq_ptr, q.id, crate::queuesubsys_host::EA_GROUP_DUPE_DELETE, None);
         }
     }
 
@@ -588,6 +678,10 @@ mod host {
     /// copy waits, it is released (a primary deleted by hand, a restart in the
     /// middle of a probe). Returns whether anything changed.
     pub(crate) fn refresh_key_host(host: &QueueSubsysHost, dq_ptr: usize, key: &[u8]) -> bool {
+        // nested inside an end or refresh of the same key: nothing to do
+        let Some(_busy) = BusyKey::enter(key) else {
+            return false;
+        };
         let members = queued_members(host, dq_ptr, key);
         if members.is_empty() {
             return false;
@@ -614,7 +708,7 @@ mod host {
             let flags: Vec<(MemberFacts, bool)> =
                 ordered.iter().map(|(q, f)| (*f, is_probing(host, q.ptr))).collect();
             if first.is_none() && fleet_ended(0, probing_now, &flags) {
-                end_fleet_host(host, dq_ptr, key, NzbRef::NONE);
+                end_fleet_locked(host, dq_ptr, key, NzbRef::NONE);
                 host.dq_save_changed(dq_ptr);
                 return true;
             }
@@ -787,6 +881,34 @@ mod tests {
         assert_eq!(released_priority(100, Some(50)), 100);
         assert_eq!(parse_held_files(held_files_param(&[3, 17, 40]).as_bytes()), vec![3, 17, 40]);
         assert!(parse_held_files(b"").is_empty());
+    }
+
+    /// Re-review 1: a nested end or refresh of a key already being handled
+    /// does nothing.
+    #[test]
+    fn a_busy_key_is_not_entered_twice() {
+        let outer = BusyKey::enter(b"dupes:Busy.Test").expect("free");
+        assert!(BusyKey::enter(b"dupes:busy.test").is_none());
+        assert!(BusyKey::enter(b"dupes:other.test").is_some());
+        drop(outer);
+        assert!(BusyKey::enter(b"dupes:busy.test").is_some());
+    }
+
+    /// Re-review nit 2: folders compare once resolved, and ignoring case on macOS.
+    #[test]
+    fn shared_folders_are_found() {
+        let dir = std::env::temp_dir().join(format!("rg-same-folder-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("Rel")).unwrap();
+        let a = dir.join("Rel");
+        let b = dir.join("x").join("..").join("Rel");
+        std::fs::create_dir_all(dir.join("x")).unwrap();
+        assert!(same_folder(a.to_str().unwrap().as_bytes(), b.to_str().unwrap().as_bytes()));
+        let slash = format!("{}/", a.to_str().unwrap());
+        assert!(same_folder(a.to_str().unwrap().as_bytes(), slash.as_bytes()));
+        assert!(!same_folder(b"/x/Rel", b"/x/Other"));
+        assert!(!same_folder(b"", b""));
+        assert_eq!(same_folder(b"/nowhere/Rel.A", b"/nowhere/rel.a"), cfg!(target_os = "macos"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

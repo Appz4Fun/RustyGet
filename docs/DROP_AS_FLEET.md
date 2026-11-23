@@ -378,6 +378,18 @@ Review fixes (becee83b review):
   deleted; copies already added when the program stops during a probe are
   never written back to NzbDir.
 
+Re-review fixes (bde1b0c4 re-review):
+
+- Ending a fleet walks its held copies by id, finding each again before it
+  is deleted (a delete can complete inline and, with KeepHistory=0, free the
+  copy), and a nested end or refresh of the same key does nothing
+  (`fleethold::BusyKey`).
+- A copy that shares the primary's folder (compared once resolved, and
+  ignoring case on macOS) or that a fleet ends with is marked
+  `DupeKeepFiles`: no delete mode cleans its disk.
+- The web UI counts `UnpackPassFile` as a password, as the daemon does, so
+  "next" and "locked" match it.
+
 Changed expectations (functional): `dropjoin` (backups held in the queue, not
 in history, until the primary succeeds), `dropkeepdonor` (the failed copy is
 held in the queue as a donor, then DELETED/DUPE), `dropallfail` (both copies
@@ -416,6 +428,8 @@ completes), `dropnzbdir` (every copy queued in front of the item queued before).
 | Review 3: a release resumes only what the hold paused. | functional `fleetholdfiles` (a user-paused file and the extra par2 stay paused; a copy held as added resumes with its extra par2 paused) |
 | Review 4: a copy with a higher score takes over, exactly one downloads. | functional `fleetholdfiles` |
 | Review nits: priority back, "next" only on failover's pick, no password shown, no NzbDir write-back at shutdown. | Rust `fleethold::tests::a_released_copy_keeps_the_users_priority`, `next_is_the_copy_failover_takes`, `scanner::tests` (`fleet_never_ran`); functional `fleetholdfiles`; Playwright `fleet-downloads.js` |
+| Re-review 1: ending a fleet survives copies freed inline (KeepHistory=0); a nested end does nothing. | functional `fleetendkeephistory0`; Rust `fleethold::tests::a_busy_key_is_not_entered_twice` |
+| Re-review nits: shared folders keep their files; UnpackPassFile counts as a password in the web UI. | Rust `fleethold::tests::shared_folders_are_found`; Playwright `fleet-downloads.js` ("next" with UnpackPassFile) |
 | F2b: a lost index par2 is salvaged from a volume's tail. | Rust `twinfields::tests::a_lost_index_is_salvaged_from_a_volume_tail`; functional `fleetsalvage` (two copies with dead indexes: twins, the same salvaged fingerprint, never dead) |
 | F11a: keyed checks compare only with keyed ones (zipfast last_volume_identity). | Rust `twinfields::tests::keyed_checks_compare_only_with_keyed`, `twinfields::tests` RAR fixtures |
 | F10: the primary is the healthy copy easiest to borrow into. | Rust `donorkind::tests::primary_ease_orders_bare_stored_compressed_encrypted`, `dupesearch_nzb::tests::the_primary_is_the_healthy_copy_easiest_to_borrow_into`; functional `fleetprimaryease`; functional `dropdune` (the Dune drop in small: stored RAR primary over a healthy header-encrypted RAR5 with the nzb password, twins, repacked and shorter copies as unverified containers, dead copies kept with their nzb, the 1080p release apart) |

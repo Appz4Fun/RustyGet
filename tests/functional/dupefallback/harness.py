@@ -12209,6 +12209,45 @@ def scenario_fleetprobehealthfail(daemon, t):
     return ('fleetprobehealthfail', ok, 'done=%s history=%s failed_during_probe=%d failovers=%d' % (
         done and done['NZBName'], hist, during, failovers))
 
+
+def scenario_fleetendkeephistory0(daemon, t):
+    """Re-review 1: with KeepHistory=0 a copy deleted from the queue is freed at
+    once. A fleet whose primary fails its par check with two dead copies held
+    ends once: no crash (the daemon still answers), each held copy handled
+    exactly once ("Every copy of the fleet of ..." once for each), and nothing
+    of the fleet left in the queue."""
+    data = _payload(1_000_000, 16601)
+    bad = bytearray(data)
+    for i in range(0, len(bad), 50_000):
+        bad[i] ^= 0xff
+    rel = 'Kh0.Movie.2024.1080p.WEB-DL.x264-GRP'
+    key = 'dupes:kh0.movie.2024.1080p.web.dl.x264.grp'
+    api = daemon.wait_ready()
+    prim_path = _place_copy(t, 'khA', bytes(bad), 'movie.bin')
+    par = generators.par2_index([('Kh0.Movie.bin', data)], pad=0)
+    t.write_file(os.path.join('data', 'khA', 'rel.par2'), par)
+    primary = build_multi_nzb([(prim_path, 'Kh0.Movie.bin', len(data), 100_000, set()),
+                               ('khA/rel.par2', 'Kh0.Movie.par2', len(par), 500_000, set())])
+    dead1 = _drop_copy(t, 'khB', data, set(range(1, 11)), dead_par=True)
+    dead2 = _drop_copy(t, 'khC', data, set(range(1, 11)), dead_par=True)
+    _fleet(daemon, [(rel + '.nzb', primary), (rel + '_1.nzb', dead1), (rel + '_2.nzb', dead2)], key=key, timeout=60)
+    deadline = time.time() + 240
+    while time.time() < deadline:
+        if not _queued(api, key) and _grep_log(t, 'Every copy of the fleet of') >= 2:
+            break
+        time.sleep(1)
+    time.sleep(3)
+    alive = True
+    try:
+        api.status()
+    except Exception:
+        alive = False
+    counts = {s_: _grep_log(t, 'Every copy of the fleet of ' + rel + s_ + ' failed') for s_ in ('_1', '_2')}
+    total = _grep_log(t, 'Every copy of the fleet of')
+    ok = alive and not _queued(api, key) and counts == {'_1': 1, '_2': 1} and total == 2
+    return ('fleetendkeephistory0', ok, 'alive=%s queued=%d counts=%s total=%d' % (
+        alive, len(_queued(api, key)) if alive else -1, counts, total))
+
 SCENARIOS = {
     'dropnzbdir': scenario_dropnzbdir,
     'fleetprimaryease': scenario_fleetprimaryease,
@@ -12229,6 +12268,7 @@ SCENARIOS = {
     'fleetholdfiles': scenario_fleetholdfiles,
     'fleetendnolive': scenario_fleetendnolive,
     'fleetprobehealthfail': scenario_fleetprobehealthfail,
+    'fleetendkeephistory0': scenario_fleetendkeephistory0,
     'complementary': scenario_complementary,
     'historylog': scenario_historylog,
     'urlhistorylog': scenario_urlhistorylog,
@@ -12645,6 +12685,7 @@ SCENARIO_OPTIONS = {
     'fleetholdfiles': ['HealthCheck=dupe', 'DupeArticleFallback=no'],
     'fleetendnolive': ['HealthCheck=dupe', 'DupeArticleFallback=no', 'ParCheck=always'],
     'fleetprobehealthfail': ['HealthCheck=dupe', 'DupeArticleFallback=no'],
+    'fleetendkeephistory0': ['HealthCheck=dupe', 'DupeArticleFallback=no', 'ParCheck=always', 'KeepHistory=0'],
     'allheadspar': PROD_OPTIONS,
     'allheadsalt': PROD_OPTIONS,
     'allheadsaltall': PROD_OPTIONS,

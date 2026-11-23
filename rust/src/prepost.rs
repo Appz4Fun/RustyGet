@@ -1012,6 +1012,14 @@ pub(crate) fn delete_cleanup_host(
     use crate::queuesubsys_host::{c_bytes, MK_DETAIL, MK_ERROR};
     use std::ffi::{CStr, CString};
 
+    // a fleet copy that shares the primary's folder, or is kept as a donor or
+    // a dead copy with its files: never cleaned up (fleethold::KEEP_FILES_PARAM)
+    if host
+        .nzb_get_param(nzb.ptr, crate::fleethold::KEEP_FILES_PARAM)
+        .is_some_and(|v| v.trim_ascii().eq_ignore_ascii_case(b"yes"))
+    {
+        return;
+    }
     let mode = classify_delete_cleanup_mode(
         nzb.cleanup_disk,
         nzb.delete_status,
@@ -1733,7 +1741,14 @@ impl NzbgetRsPrePostProcessor {
         }
         if !add_to_history {
             crate::postproc::live_par_time_settle(host, nzb_ptr, false);
-            host.history_delete_disk_files(nzb_ptr);
+            // a fleet copy kept with its files (fleethold::KEEP_FILES_PARAM)
+            // may share the primary's folder: its disk is left alone
+            if !host
+                .nzb_get_param(nzb_ptr, crate::fleethold::KEEP_FILES_PARAM)
+                .is_some_and(|v| v.trim_ascii().eq_ignore_ascii_case(b"yes"))
+            {
+                host.history_delete_disk_files(nzb_ptr);
+            }
             crate::dupefallback::par_damage_forget_all(nzb.id);
             host.queue_remove(dq_ptr, nzb_ptr);
         }

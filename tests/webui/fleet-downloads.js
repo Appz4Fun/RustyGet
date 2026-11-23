@@ -161,6 +161,17 @@ function fleetHistory(history) {
             DownloadsUI.fleetPosition(g({ DupeFleetOrder: '1' }))];
         });
         assert.deepEqual(pos, ['next', '1', '1', '1', '…', 'next']);
+        // re-review nit 3: UnpackPassFile is a password source, as for the daemon
+        const withPassFile = await page.evaluate(() => {
+          const saved = Options.option;
+          Options.option = name => name === 'UnpackPassFile' ? '/config/passwords.txt' : saved.call(Options, name);
+          try {
+            return DownloadsUI.fleetPosition({ Parameters: [{ Name: 'DupeFleetOrder', Value: '1' }, { Name: 'DupeLocked', Value: 'yes' }] });
+          } finally {
+            Options.option = saved;
+          }
+        });
+        assert.equal(withPassFile, 'next');
       });
 
       await check('the open state is remembered per viewer', async () => {

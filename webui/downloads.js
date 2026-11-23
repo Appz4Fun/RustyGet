@@ -1165,9 +1165,7 @@ var DownloadsUI = (new function($)
 		{
 			parts.push(I18n.translate('fleet_label_other'));
 		}
-		var locked = DownloadsUI.parameterValue(p, 'DupeLocked').toLowerCase() === 'yes' &&
-			DownloadsUI.parameterValue(p, '*Unpack:Password') === '';
-		if (locked)
+		if (DownloadsUI.fleetLocked(group))
 		{
 			parts.push(I18n.translate('fleet_label_locked'));
 		}
@@ -1211,6 +1209,16 @@ var DownloadsUI = (new function($)
 		return group.Status === 'PAUSED' ? I18n.translate('fleet_state_paused') : I18n.translate('fleet_state_downloading');
 	}
 
+	// locked as the daemon rules it (donorkind::locked): archive headers
+	// encrypted and no password at hand, neither its own nor UnpackPassFile
+	this.fleetLocked = function(group)
+	{
+		var p = group.Parameters;
+		var passFile = typeof Options !== 'undefined' && Options.option ? String(Options.option('UnpackPassFile') || '') : '';
+		return DownloadsUI.parameterValue(p, 'DupeLocked').toLowerCase() === 'yes' &&
+			DownloadsUI.parameterValue(p, '*Unpack:Password') === '' && passFile.trim() === '';
+	}
+
 	// whether failover can take the copy: not probing, not dead or tried, not locked
 	this.fleetPickable = function(group)
 	{
@@ -1219,8 +1227,7 @@ var DownloadsUI = (new function($)
 		{
 			return false;
 		}
-		if (DownloadsUI.parameterValue(p, 'DupeLocked').toLowerCase() === 'yes' &&
-			DownloadsUI.parameterValue(p, '*Unpack:Password') === '')
+		if (DownloadsUI.fleetLocked(group))
 		{
 			return false;
 		}

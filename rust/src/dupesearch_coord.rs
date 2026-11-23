@@ -1797,7 +1797,7 @@ fn fleet_prints_keyed(
     seed: u64,
     deadline: i64,
 ) -> Vec<KeyedPrint> {
-    use crate::dupeintake::{inner_key_copy, print_copy};
+    use crate::dupeintake::{inner_key_copy_with, print_copy};
     let n = summaries.len();
     let slots: Vec<Mutex<KeyedPrint>> = (0..n)
         .map(|_| Mutex::new((Err(INTAKE_TIME_RAN_OUT.to_string()), None)))
@@ -1845,11 +1845,54 @@ fn fleet_prints_keyed(
                             || crate::filetypes::is_rar_file(&n)
                     });
                     let key = if named_archive || got.is_err() {
-                        inner_key_copy(&info.data_segments, &fetch)
+                        inner_key_copy_with(&info.data_segments, &fetch, password.as_deref())
                     } else {
                         None
                     };
                     *slot.lock().unwrap_or_else(|e| e.into_inner()) = (got, key);
+                });
+            }
+        });
+    }
+    slots
+        .into_iter()
+        .map(|m| m.into_inner().unwrap_or_else(|e| e.into_inner()))
+        .collect()
+}
+
+/// Each copy's archive identity only ([`crate::dupeintake::inner_key_copy_with`],
+/// with its nzb's password), in parallel until `deadline` (unix seconds): what
+/// a grouped fleet reads instead of the whole intake.
+fn fleet_keys_only(
+    host_ctx: *mut c_void,
+    host_cb: DupeHostFn,
+    summaries: &[&NzbSummaryData],
+    deadline: i64,
+) -> Vec<Option<crate::twinfields::InnerKey>> {
+    let n = summaries.len();
+    let slots: Vec<Mutex<Option<crate::twinfields::InnerKey>>> = (0..n).map(|_| Mutex::new(None)).collect();
+    let ctx_addr = host_ctx as usize;
+    for chunk in (0..n).collect::<Vec<_>>().chunks(FLEET_KIND_PROBE_PARALLEL) {
+        if now_unix_sec() >= deadline || donor_stopping() || http_stopped() {
+            break;
+        }
+        std::thread::scope(|s| {
+            for &i in chunk {
+                let info = summaries[i];
+                let slot = &slots[i];
+                s.spawn(move || {
+                    let fetch = HostArticles {
+                        ctx: ctx_addr,
+                        cb: host_cb,
+                        groups: summary_groups_arc(info),
+                        deadline,
+                    };
+                    let key = crate::dupeintake::inner_key_copy_with(
+                        &info.data_segments,
+                        &fetch,
+                        summary_password(info),
+                    );
+                    *slot.lock().unwrap_or_else(|e| e.into_inner()) = key;
                 });
             }
         });
@@ -6500,6 +6543,32 @@ pub unsafe fn fleet_append(
                     }
                 }
                 host_log(host_ctx, host_cb, MK_INFO, &msg);
+            }
+        }
+    }
+
+    // F11: a grouped fleet skips the payload intake but still reads each
+    // copy's archive identity: the size and CRC32 of the video its last
+    // volume's header records (two articles: the first and the last volume's
+    // first), with the nzb's password for encrypted headers. Equal keys make
+    // a container an alt for TwinCheck; a header-sized difference stays a
+    // likely alt, never another video.
+    if grouped {
+        let usable: Vec<usize> = (0..candidates.len())
+            .filter(|&i| candidates[i].error.is_empty() && candidates[i].same_as < 0)
+            .collect();
+        if !usable.is_empty() {
+            let left_ms = deadline_ms - donor_now_ms() - FINISH_RESERVE_MS;
+            let rounds = usable.len().div_ceil(FLEET_KIND_PROBE_PARALLEL).max(1);
+            let key_deadline = now_unix_sec()
+                + fleet_phase_secs(left_ms, 3, i64::from(GROUP_CHECK_SEC_PER_COPY) * rounds as i64);
+            let summaries: Vec<&NzbSummaryData> =
+                usable.iter().map(|&i| &candidates[i].summary).collect();
+            let keys = fleet_keys_only(host_ctx, host_cb, &summaries, key_deadline);
+            for (&i, key) in usable.iter().zip(keys) {
+                if key.is_some() {
+                    intake_keys[i] = key;
+                }
             }
         }
     }

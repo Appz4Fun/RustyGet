@@ -5103,6 +5103,16 @@ impl ContentMap {
         inner_range: NzbgetRsByteRange,
         data: &[u8],
     ) -> i64 {
+        // bytes borrowed by the video's offset (an alt): checked structurally
+        // first; a range the check rejects is never written, so the caller
+        // tries another donor
+        if validate_borrowed_range(inner_range, data) == RangeVerdict::Bad {
+            target_files.on_message_bytes(
+                TargetMessageKind::Warning,
+                b"Stream repair: borrowed bytes failed the media structure check, not written",
+            );
+            return -1;
+        }
         let mut written: i64 = 0;
         for piece in self.map_from_inner(inner_range) {
             let piece_range = NzbgetRsByteRange {
@@ -5150,6 +5160,29 @@ impl ContentMap {
         }
         written
     }
+}
+
+/// What the structural check of a borrowed range says ([`validate_borrowed_range`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RangeVerdict {
+    /// The range and both seams parse cleanly.
+    Ok,
+    /// The range breaks the media structure: never written.
+    Bad,
+    /// Not checkable (no validator, or not a format it knows): written, and
+    /// the final proof stays the whole-file CRC32/BLAKE2 or par2.
+    Unknown,
+}
+
+/// Checks bytes borrowed from an alt by the video's offset (`inner_range` of
+/// the video, `data` its bytes) that no par2 slice or archive hash covers:
+/// that the range and both seams parse as the media file's structure (an
+/// MKV/EBML check), without ffmpeg.
+// OPEN ITEM (zipfast): MKV range validator. zipfast's MKV crate is building
+// validate(range); until it lands every range is Unknown.
+pub fn validate_borrowed_range(inner_range: NzbgetRsByteRange, data: &[u8]) -> RangeVerdict {
+    let _ = (inner_range, data);
+    RangeVerdict::Unknown
 }
 
 /// Log severity emitted by inner-space verification and patching.
@@ -20023,6 +20056,14 @@ mod seven_zip_header_coder_tests {
 #[cfg(test)]
 mod completion_tests {
     use super::*;
+
+    /// F12: borrowed alt bytes go through the structural check; until
+    /// zipfast's MKV validator lands it answers Unknown, so nothing is refused.
+    #[test]
+    fn borrowed_ranges_pass_the_validator_hook() {
+        let range = NzbgetRsByteRange { offset: 0, size: 4 };
+        assert_eq!(validate_borrowed_range(range, b"\x1a\x45\xdf\xa3"), RangeVerdict::Unknown);
+    }
 
     #[test]
     fn credit_repaired_moves_failed_to_success_and_floors_at_zero() {

@@ -640,13 +640,28 @@ impl InnerKey {
 /// (the sizes or the CRCs differ), `Some(true)` the same file (both equal and
 /// the file at least `min_size` bytes), None when a value is missing or the
 /// file is too small to tell.
+///
+/// Sizes that differ by no more than [`HEADER_SIZED_DIFF`] are a likely alt,
+/// not another file (the user's rule, 2026-11-23: a copy of the same mkv
+/// without its 11,245-byte Tags tail): None, so the copy stays an unverified
+/// container that borrows with per-range checks, never `other`.
 pub fn same_inner_key(a: &[u8], b: &[u8], min_size: u64) -> Option<bool> {
     let (a, b) = (InnerKey::parse(a)?, InnerKey::parse(b)?);
-    if a.size != b.size || a.crc32 != b.crc32 {
+    if a.size != b.size {
+        if a.size.abs_diff(b.size) <= HEADER_SIZED_DIFF {
+            return None;
+        }
+        return Some(false);
+    }
+    if a.crc32 != b.crc32 {
         return Some(false);
     }
     (a.size >= min_size).then_some(true)
 }
+
+/// The largest size difference between two videos that can still be the same
+/// movie with some header or tag bytes more or less (an mkv's Tags or Cues).
+pub const HEADER_SIZED_DIFF: u64 = 1024 * 1024;
 
 /// The 7z signature.
 pub const SEVEN_ZIP_MAGIC: &[u8] = b"7z\xBC\xAF\x27\x1C";
@@ -740,15 +755,33 @@ impl VolumeSource for Volumes {
 /// Only a video counts, so an inner archive (a RAR inside a RAR) gives none.
 /// None for encrypted headers (`-hp`), keyed checks (RAR 5 `-p`), a file whose
 /// CRC is not recorded, or a head with no last part of such a file.
+#[cfg(test)]
 pub fn rar_last_volume_key(head: &[u8], multi_volume: bool, min_size: u64) -> Option<InnerKey> {
+    rar_last_volume_key_with(head, multi_volume, min_size, None)
+}
+
+/// [`rar_last_volume_key`] with the archive password from the copy's nzb
+/// (F8): encrypted headers (`-hp`) are read with it. A check the password
+/// keys (RAR 5 encrypted data) still gives no key: keyed values compare only
+/// under one password.
+// OPEN ITEM (zipfast): keyed checks (RAR 5 AES) as a key under one password,
+// via zipfast::map::last_volume_identity once the pin is at 21474cf or later.
+pub fn rar_last_volume_key_with(
+    head: &[u8],
+    multi_volume: bool,
+    min_size: u64,
+    password: Option<&str>,
+) -> Option<InnerKey> {
     if !head.starts_with(b"Rar!") {
         return None;
     }
-    let map = MemberMap::from_volume(head, MapOptions::new("head.rar")).ok()?;
+    let password = password.filter(|p| !p.is_empty());
+    let map =
+        MemberMap::from_volume(head, MapOptions::new("head.rar").password(password)).ok()?;
     // the volume's own main header must agree: a lone middle volume (names
     // too obfuscated to group) is no whole archive, and a set's last volume
     // is never its first
-    if map.header_encrypted
+    if (map.header_encrypted && password.is_none())
         || !map.main_read
         || map.multi_volume != multi_volume
         || (multi_volume && map.first_volume)
@@ -1305,7 +1338,7 @@ mod tests {
             Some(false)
         );
         let other_size = InnerKey {
-            size: big.size + 1,
+            size: big.size + HEADER_SIZED_DIFF + 1,
             ..big
         }
         .param();
@@ -1323,6 +1356,20 @@ mod tests {
             Some(true)
         );
         assert_eq!(same_inner_key(b"", p.as_bytes(), MIN_KEY_SIZE), None);
+        // F11c: a header-sized difference (an mkv without its 11,245-byte
+        // Tags tail) is a likely alt, never another file
+        let short_tail = InnerKey {
+            size: big.size - 11_245,
+            crc32: 7,
+        }
+        .param();
+        assert_eq!(same_inner_key(p.as_bytes(), short_tail.as_bytes(), MIN_KEY_SIZE), None);
+        let far = InnerKey {
+            size: big.size - HEADER_SIZED_DIFF - 1,
+            crc32: 7,
+        }
+        .param();
+        assert_eq!(same_inner_key(p.as_bytes(), far.as_bytes(), MIN_KEY_SIZE), Some(false));
         assert_eq!(InnerKey::parse(b"12:abc"), None);
     }
 

@@ -313,6 +313,17 @@ pub fn inner_key_copy(
     files: &[IntakeFile],
     fetch: &dyn ArticleFetch,
 ) -> Option<crate::twinfields::InnerKey> {
+    inner_key_copy_with(files, fetch, None)
+}
+
+/// [`inner_key_copy`] with the archive password from the copy's nzb (F8):
+/// a RAR set's encrypted headers are read with it.
+pub fn inner_key_copy_with(
+    files: &[IntakeFile],
+    fetch: &dyn ArticleFetch,
+    password: Option<&[u8]>,
+) -> Option<crate::twinfields::InnerKey> {
+    let password = password.map(String::from_utf8_lossy);
     let files: Vec<&IntakeFile> = files.iter().filter(|f| !f.ids.is_empty()).collect();
     let members: Vec<SetMember> = files
         .iter()
@@ -377,7 +388,12 @@ pub fn inner_key_copy(
             .map(|f| u64::try_from(f.bytes).unwrap_or(0))
             .fold(0u64, u64::saturating_add);
         let set_bytes = measured.max(listed);
-        return crate::twinfields::rar_last_volume_key(&head, vols.len() > 1, RAR_KEY_MIN)
+        return crate::twinfields::rar_last_volume_key_with(
+            &head,
+            vols.len() > 1,
+            RAR_KEY_MIN,
+            password.as_deref(),
+        )
             .filter(|k| k.size.saturating_mul(2) > set_bytes);
     }
     if magic != crate::twinfields::SEVEN_ZIP_MAGIC {

@@ -182,6 +182,27 @@ badge, and shows a kept donor's `DupeParked` the same way.
   7-Zip, then an encrypted one. Health still gates: a weak plain copy never
   leads a healthy one. The backups keep their order (twins first).
 
+- **Alt identity without par2 (F11).** (a) A grouped fleet reads each copy's
+  archive identity, the size and CRC32 of the video its last volume's header
+  (RAR) or its 7z header records (`dupeintake::inner_key_copy_with`, two
+  articles), with the nzb's password for encrypted headers
+  (`twinfields::rar_last_volume_key_with`), and stores it as `DupeInnerCrc`;
+  TwinCheck makes a container an `alt` when the keys match. Keyed checks (RAR 5
+  AES data) still give no key: `OPEN ITEM (zipfast)` to use
+  `zipfast::map::last_volume_identity` with a zipfast pin at 21474cf or later.
+  (c) Sizes that differ only by a header-sized amount (at most 1 MiB, such as
+  an mkv without its 11,245-byte Tags tail) are a likely alt
+  (`twinfields::same_inner_key` gives no verdict), so the copy stays an
+  unverified container that borrows with per-range checks, never `other`.
+  (b) Aligning stored copies by MKV landmarks uses only what the payload map
+  gives today: `OPEN ITEM (zipfast): MKV landmark reader`.
+- **Borrowed alt bytes pass a structural check (F12).** Stream repair calls
+  `streamrepair::validate_borrowed_range` before it writes bytes borrowed by
+  the video's offset; a range it calls Bad is never written, so another donor
+  is tried. Until zipfast's MKV range validator lands the hook answers Unknown
+  (`OPEN ITEM (zipfast): MKV range validator`); the final proof stays the
+  whole-file CRC32/BLAKE2 or par2.
+
 Open item (F2a): par-rs #87 is merged (b2ba9e5) but not pinned here yet; the 1 MB probe is to switch to
 `par_rs::probe::{plan_probe, check_probe}` (slice-verified Match, Mismatch or
 Incomplete; probed slices that match the same IFSC are twin evidence). It is
@@ -207,6 +228,8 @@ marked `OPEN ITEM (par-rs)` at `GROUP_PROBE_BYTES`.
 | F7: the check budget is per copy. | Rust `dupesearch_coord::tests::grouped_fleets_check_each_copy_for_a_minute` |
 | F8: encrypted headers are read with the nzb's password. | Rust `dupesearch_coord::tests::fleet_copies_carry_the_nzb_password`, `donorkind::tests::header_encrypted_rar_with_its_password_is_borrowable_encrypted`; functional `fleetnzbpassword` (RAR5 -hp fixture, password only in the nzb meta: borrowable-encrypted; missing password locked; never DEAD), `fleetencryptedpassword` (needs `rar`) |
 | F9: another container shows unverified until the video inside matches. | Rust `twin::tests::par2_differences_alone_never_make_an_alt`; web UI `dupe-group.js` "F9: another container is unverified" |
+| F11: alt identity without par2; a header-sized difference is a likely alt, never other. | Rust `twinfields::tests` (same_inner_key: an 11,245-byte shorter video gives no verdict, a difference over 1 MiB is another file), `dupeintake::tests` (inner keys); functional `dropdune` (the shorter bare mkv stays a container) |
+| F12: borrowed alt bytes pass a structural check before use. | Rust `streamrepair` test `borrowed_ranges_pass_the_validator_hook` (the hook answers Unknown until zipfast's validator lands) |
 | F10: the primary is the healthy copy easiest to borrow into. | Rust `donorkind::tests::primary_ease_orders_bare_stored_compressed_encrypted`, `dupesearch_nzb::tests::the_primary_is_the_healthy_copy_easiest_to_borrow_into`; functional `fleetprimaryease`; functional `dropdune` (the Dune drop in small: stored RAR primary over a healthy header-encrypted RAR5 with the nzb password, twins, repacked and shorter copies as unverified containers, dead copies kept with their nzb, the 1080p release apart) |
 | The name rule strips only a copy suffix. | Rust `releasename::tests::copy_suffixes_strip_only_after_a_group_tag`; web UI `dupe-group.js` (the same cases) |
 

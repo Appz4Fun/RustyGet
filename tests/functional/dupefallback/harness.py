@@ -9208,7 +9208,9 @@ def scenario_xmlparamdecode(daemon, t):
     "&amp;") was fetched with "&amp;" in it. And testserver over JSON-P (GET)
     parsed the query string as a JSON body and always answered "Invalid
     JSON"; JSON-P now runs only the reading methods, so testserver, which
-    connects out, is refused there (error 4, through the callback)."""
+    connects out, is refused there through the callback (error 4, or 401
+    now that testserver is also refused to the restricted access JSON-P
+    runs with)."""
     import http.server
     import urllib.request as _req
     hits = []
@@ -9234,7 +9236,7 @@ def scenario_xmlparamdecode(daemon, t):
     url = 'http://127.0.0.1:%d/jsonprpc/testserver?=cb&=127.0.0.1&=%d&=&=&=false&=&=5&=0' % (daemon.rpc_port, daemon.nntp_port)
     with _req.urlopen(url, timeout=30) as reply:
         jsonp = reply.read().decode()
-    refused = jsonp.startswith('cb(') and '"code" : 4,' in jsonp
+    refused = jsonp.startswith('cb(') and ('"code" : 4,' in jsonp or '"code" : 401,' in jsonp)
     ok = hits and hits[0] == '/x.nzb?a=1&b=2' and 'Invalid JSON' not in jsonp and refused
     return ('xmlparamdecode', bool(ok), 'fetched=%s jsonp=%s' % (hits[:1], jsonp[:160].replace('\n', ' ')))
 

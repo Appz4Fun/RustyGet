@@ -23,6 +23,20 @@ use std::{
 use zipfast::partial::*;
 use zipfast::progressive::OutputOperation;
 
+/// File and directory syncs issued by every `DurableAnchors` in this process, counted next to
+/// zipfast's own `durable_sync_count` (which leaves the caller's anchor store out).
+static ANCHOR_SYNCS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Syncs issued by anchor stores in this process so far.
+pub(crate) fn anchor_sync_count() -> u64 {
+    ANCHOR_SYNCS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn sync(file: &File) -> std::io::Result<()> {
+    ANCHOR_SYNCS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    file.sync_all()
+}
+
 // Copied from zipfast's docs/persistent-anchor-store.rs (the reference store its
 // persistent partial files are tested against).
 //
@@ -84,7 +98,7 @@ impl DurableAnchors {
                 )));
             }
         }
-        self.directory.sync_all().map_err(store_io)
+        sync(&self.directory).map_err(store_io)
     }
     fn path(&self, member: &MemberKey) -> PathBuf {
         fn hex(bytes: &[u8]) -> String {
@@ -154,7 +168,7 @@ impl StateAnchorStore for DurableAnchors {
         file.write_all(&next.sequence().to_le_bytes())
             .map_err(store_io)?;
         file.write_all(next.digest()).map_err(store_io)?;
-        file.sync_all().map_err(store_io)?;
+        sync(&file).map_err(store_io)?;
         fs::rename(&temporary, self.path(member)).map_err(store_io)?;
         // A late error is uncertain: rename may have durably installed next.
         #[cfg(test)]

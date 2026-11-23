@@ -49,6 +49,75 @@ pub(super) fn switch_value(value: &str, default: bool) -> bool {
 /// member's state for the session (about 3 of its 128 state pages and 6 descriptors each).
 const MAX_FIRST_VOLUME_MEMBERS: usize = 30;
 
+/// Output bytes one durable group commit covers (zipfast's default is 64 MiB). Each commit syncs
+/// the output, writes the ledger and makes two anchor CASes (each a file and a directory sync in
+/// `DurableAnchors`), so on a slow destination disk the syncs, not the copy, set the speed.
+/// A crash loses at most one group, which the restarted session extracts again from the volumes.
+const GROUP_COMMIT_BYTES: u64 = 1 << 30;
+/// A group also commits once it has been open this long (zipfast's default is 2 s), and before
+/// the session waits for a volume when it is older than this.
+const GROUP_COMMIT_INTERVAL: Duration = Duration::from_secs(30);
+/// Bytes of one extraction write and of one `refill_from_packed` step (zipfast's default is
+/// 1 MiB). Each refill step is its own durable transaction.
+const FILL_BYTES: u32 = 8 << 20;
+
+#[cfg(test)]
+thread_local! {
+    /// Benchmarks: (group bytes, group interval, fill bytes) instead of the constants above.
+    pub(super) static TUNING: std::cell::Cell<Option<(u64, Duration, u32)>> =
+        const { std::cell::Cell::new(None) };
+    /// Benchmarks: true runs as before this tuning: each reported hole refilled on its own,
+    /// inline refills checked every 100 ms and holes answered once per read.
+    pub(super) static LEGACY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn legacy() -> bool {
+    #[cfg(test)]
+    return LEGACY.with(|l| l.get());
+    #[cfg(not(test))]
+    false
+}
+
+fn tuning() -> (u64, Duration, u32) {
+    #[cfg(test)]
+    if let Some(t) = TUNING.with(|t| t.get()) {
+        return t;
+    }
+    (GROUP_COMMIT_BYTES, GROUP_COMMIT_INTERVAL, FILL_BYTES)
+}
+
+/// What one persistent run cost in durable syncs, for the per-job log line. zipfast's counter
+/// and the anchor stores' are process-wide, so another set extracting at the same time adds
+/// its syncs to this one's.
+struct SyncMeter {
+    zipfast: u64,
+    anchors: u64,
+    started: std::time::Instant,
+}
+
+impl SyncMeter {
+    fn start() -> Self {
+        Self {
+            zipfast: zipfast::partial::durable_sync_count(),
+            anchors: anchors::anchor_sync_count(),
+            started: std::time::Instant::now(),
+        }
+    }
+
+    fn line(&self, bytes: u64) -> String {
+        let zipfast = zipfast::partial::durable_sync_count().saturating_sub(self.zipfast);
+        let anchors = anchors::anchor_sync_count().saturating_sub(self.anchors);
+        let syncs = zipfast + anchors;
+        let secs = self.started.elapsed().as_secs_f64();
+        let mib = bytes as f64 / (1024.0 * 1024.0);
+        format!(
+            "Unrar: persistent partial files wrote {bytes} bytes in {secs:.1} s ({:.1} MB/s) with {syncs} durable syncs ({zipfast} output and state, {anchors} anchor store; {:.1} MiB per sync)",
+            if secs > 0.0 { bytes as f64 / 1e6 / secs } else { 0.0 },
+            if syncs > 0 { mib / syncs as f64 } else { mib },
+        )
+    }
+}
+
 /// Directory under the destination that holds each set's partial state and trusted anchors.
 pub(crate) const STATE_DIR: &str = ".rustyget-partial";
 
@@ -82,6 +151,7 @@ where
         }
     };
     let feed = Arc::new(Mutex::new(feed));
+    let meter = SyncMeter::start();
     let mut run = Run::new(req, &plan, feed.clone());
     let damaged = run.damaged.clone();
     let result = run.extract(log_cb, is_cancelled);
@@ -89,7 +159,9 @@ where
         Ok(summary) => run.publish().map(|()| summary).map_err(Step::Fallback),
         Err(e) => Err(e),
     };
+    let written = run.written;
     drop(run);
+    log_cb(3, &meter.line(written));
     match outcome {
         Ok(summary) => {
             log_cb(4, "Unrar: All OK");
@@ -516,6 +588,9 @@ impl VolumeSource for Provider {
                 })?;
                 // Declared NonFile: zipfast must not see a backing file.
                 volume.expose_backing = false;
+                if !legacy() {
+                    volume.allow_long_holes(&path);
+                }
                 Ok(VolumeAnswer::Ready(Box::new(volume)))
             }
             VolumeView::NotYet => {
@@ -562,6 +637,8 @@ struct Run<'a> {
     /// Directory entries this run passed, made in the destination (with their stored mode and
     /// time) when the outputs are published.
     dirs: Vec<Member>,
+    /// Output bytes the session wrote (the extraction itself, not refills).
+    written: u64,
 }
 
 /// The holes of a running session whose volumes have not been repaired yet. Each one is read
@@ -579,8 +656,9 @@ struct InlineRefill {
     checked: Option<std::time::Instant>,
 }
 
-/// How often a running session asks whether the volumes of its holes were repaired.
-const INLINE_CHECK: Duration = Duration::from_millis(100);
+/// How often a running session asks whether the volumes of its holes were repaired. Patching
+/// commits the session's open group first, so a check that patches costs a durable commit.
+const INLINE_CHECK: Duration = Duration::from_secs(1);
 
 impl InlineRefill {
     /// True when every hole this run reported was patched while extracting.
@@ -613,6 +691,58 @@ fn open_repaired(
 trait ReadSeek: std::io::Read + std::io::Seek {}
 impl<T: std::io::Read + std::io::Seek> ReadSeek for T {}
 
+/// Merges the pending holes of volume `v` within one member into as few refills as possible.
+/// zipfast answers a lost range in reads of at most 1 MiB, so one lost stretch arrives as many
+/// `Hole` reports, and every refill call is at least one durable transaction of its own.
+/// Holes that touch or overlap become one range for `refill_from_packed`, which reads only the
+/// bytes still missing. Holes further apart but within `window` bytes of the first one become one
+/// span with good bytes between them (the flag is true), filled with a single `fill_packed`
+/// call: zipfast checks the good bytes against the output and writes only the holes.
+/// Other volumes' holes are kept as they are, in their order.
+fn coalesce_pending(
+    pending: Vec<(MemberKey, u32, std::ops::Range<u64>)>,
+    v: u32,
+    window: u64,
+) -> Vec<(MemberKey, u32, std::ops::Range<u64>, bool)> {
+    if legacy() {
+        return pending.into_iter().map(|(k, hv, r)| (k, hv, r, false)).collect();
+    }
+    let (mut mine, other): (Vec<_>, Vec<_>) = pending.into_iter().partition(|(_, hv, _)| *hv == v);
+    let mut out: Vec<_> = other.into_iter().map(|(k, hv, r)| (k, hv, r, false)).collect();
+    // Stable: members keep the order their first hole was reported in.
+    let mut members: Vec<MemberKey> = Vec::new();
+    for (k, _, _) in &mine {
+        if !members.contains(k) {
+            members.push(k.clone());
+        }
+    }
+    mine.sort_by_key(|(k, _, r)| (members.iter().position(|m| m == k), r.start));
+    let first = out.len();
+    for (key, hv, range) in mine {
+        match out[first..].last_mut() {
+            Some((k, _, last, _)) if *k == key && range.start <= last.end => {
+                last.end = last.end.max(range.end);
+            }
+            Some((k, _, last, gaps))
+                if *k == key && range.end.saturating_sub(last.start) <= window =>
+            {
+                last.end = range.end;
+                *gaps = true;
+            }
+            _ => out.push((key, hv, range, false)),
+        }
+    }
+    out
+}
+
+/// Reads `range` of a repaired volume.
+fn read_span(f: &mut dyn ReadSeek, range: &std::ops::Range<u64>) -> std::io::Result<Vec<u8>> {
+    let mut buf = vec![0u8; (range.end - range.start) as usize];
+    f.seek(std::io::SeekFrom::Start(range.start))?;
+    f.read_exact(&mut buf)?;
+    Ok(buf)
+}
+
 /// Reads the holes of `inline` whose volume the repair has released back into their members.
 /// `force` skips the rate limit (the session ended). Runs on the session's own thread,
 /// between its steps and while it is parked. zipfast takes a fill on a member's handle while
@@ -633,7 +763,12 @@ fn refill_released<F>(
         return;
     }
     let now = std::time::Instant::now();
-    if !force && inline.checked.is_some_and(|t| now.duration_since(t) < INLINE_CHECK) {
+    let every = if legacy() {
+        Duration::from_millis(100)
+    } else {
+        INLINE_CHECK
+    };
+    if !force && inline.checked.is_some_and(|t| now.duration_since(t) < every) {
         return;
     }
     inline.checked = Some(now);
@@ -668,7 +803,11 @@ fn refill_released<F>(
         };
         let mut patched: Vec<(String, u64)> = Vec::new();
         let mut left = Vec::new();
-        for (key, hv, range) in std::mem::take(&mut inline.pending) {
+        // One `fill_packed` call takes at most the handle's fill limit (see `Run::extract`).
+        let window = u64::from(tuning().2).max(1 << 20);
+        for (key, hv, range, gaps) in
+            coalesce_pending(std::mem::take(&mut inline.pending), v, window)
+        {
             if hv != v || inline.failed {
                 left.push((key, hv, range));
                 continue;
@@ -677,7 +816,17 @@ fn refill_released<F>(
                 left.push((key, hv, range));
                 continue;
             };
-            match file.refill_from_packed(v, range.clone(), &mut f) {
+            let filled = if gaps {
+                match read_span(f.as_mut(), &range) {
+                    Ok(bytes) => file.fill_packed(v, range.start, &bytes),
+                    Err(cause) => Err(zipfast::partial::PartialError::new(
+                        zipfast::partial::PartialErrorKind::PackedRead(cause),
+                    )),
+                }
+            } else {
+                file.refill_from_packed(v, range.clone(), &mut f)
+            };
+            match filled {
                 Ok(r) => {
                     let name = String::from_utf8_lossy(&member.name).into_owned();
                     let bytes: u64 = r.applied.iter().map(|a| a.end - a.start).sum();
@@ -732,6 +881,7 @@ impl<'a> Run<'a> {
             anchors: None,
             inline: InlineRefill::default(),
             dirs: Vec::new(),
+            written: 0,
         }
     }
 
@@ -804,7 +954,10 @@ impl<'a> Run<'a> {
         // Every member keeps its handle (and a few descriptors) for the session's life.
         limits.open_partials = limits.open_partials.max(256);
         limits.open_files = limits.open_files.max(2048);
-        limits.fill_bytes = limits.fill_bytes.max(opts.limits.read_chunk as u32);
+        let (group_bytes, group_interval, fill_bytes) = tuning();
+        limits.fill_bytes = fill_bytes.max(opts.limits.read_chunk as u32);
+        limits.group_commit_bytes = group_bytes;
+        limits.group_commit_interval = group_interval;
         let popts = PartialOptions {
             binding: self.plan.binding.clone(),
             naming: PartialNaming::ArchivePath,
@@ -929,6 +1082,7 @@ impl<'a> Run<'a> {
                     }
                     Ok(Some(ProgressiveEvent::BytesWritten { valid_bytes, .. })) => {
                         summary.bytes += valid_bytes;
+                        self.written += valid_bytes;
                     }
                     Ok(Some(ProgressiveEvent::MemberFinished {
                         outcome: zipfast::progressive::MemberOutcome::Refused { reason },
@@ -1381,4 +1535,42 @@ pub(super) fn plant_state_for_test(req: &Request<'_>) {
         .join(hex(&binding_for(req).archive[..8]));
     std::fs::create_dir_all(root.join("state")).unwrap();
     std::fs::write(root.join("state").join("bundle"), b"x").unwrap();
+}
+
+#[cfg(test)]
+#[test]
+fn coalesce_pending_merges_adjacent_holes_of_one_volume_and_member() {
+    let binding = ArchiveBinding {
+        job: [1; 16],
+        archive: [2; 32],
+    };
+    let a = MemberKey::new(binding.clone(), 0, [3; 32]);
+    let b = MemberKey::new(binding, 1, [4; 32]);
+    let pending = vec![
+        (a.clone(), 2, 200..300),
+        (a.clone(), 1, 0..10),
+        (a.clone(), 2, 100..200),
+        (b.clone(), 2, 300..400),
+        (a.clone(), 2, 250..260),
+        (a.clone(), 2, 500..600),
+        (b.clone(), 2, 400..450),
+    ];
+    assert_eq!(
+        coalesce_pending(pending.clone(), 2, 150),
+        vec![
+            (a.clone(), 1, 0..10, false),
+            (a.clone(), 2, 100..300, false),
+            (a.clone(), 2, 500..600, false),
+            (b.clone(), 2, 300..450, false),
+        ]
+    );
+    // A wider window spans the gap between 100..300 and 500..600: one fill with good bytes.
+    assert_eq!(
+        coalesce_pending(pending, 2, 500),
+        vec![
+            (a.clone(), 1, 0..10, false),
+            (a, 2, 100..600, true),
+            (b, 2, 300..450, false),
+        ]
+    );
 }

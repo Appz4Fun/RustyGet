@@ -35,9 +35,10 @@ this project. Human instructions and current coordination ownership take priorit
 - Fix actionable review findings and request review again after changes. Pull in
   the actual upstream default, resolve conflicts, and repeat affected validation
   and review. Before a signed squash merge into the default branch, require g2g
-  review of the actual final head, resolved actionable discussions, and green
-  required pre-merge CI checks. Older-head approval does not cover later changes.
-- After merge, the same agent follows required default-branch CI/CD to completion,
+  review of the actual final head, resolved actionable discussions, and passing
+  pre-merge CI (GitHub Actions, or the local runs below when Actions is broken).
+  Older-head approval does not cover later changes.
+- After merge, the same agent follows default-branch CI/CD to completion when it runs,
   fixes failures, and performs the authorized redeployment of the exact merged
   artifact. An automated deployment pipeline may perform installation; the PR
   owner triggers it when needed, monitors it, and verifies the deployed result.
@@ -66,9 +67,14 @@ this project. Human instructions and current coordination ownership take priorit
   and test in a Linux machine (for example an OrbStack VM with a copy of the
   tree) or wait for the `build` workflow, which builds and tests on Linux
   x86_64, Linux arm64 and macOS for every pull request and push to `main`.
-- Reviewers and review agents: do not approve a head whose `build` workflow is
-  not green on all three platforms, or whose PR description lacks the local
-  test results above. Ask for them instead of assuming.
+- When GitHub Actions is broken (billing, outage, or private dependencies it
+  cannot fetch), running the same checks locally replaces it. Run the commands
+  above on the exact head on macOS, Linux x86_64 and Linux arm64 (OrbStack VMs
+  are fine), and paste each platform's pass/fail lines and the head commit into
+  the PR description. Say in the PR that Actions was unavailable.
+- Reviewers and review agents: do not approve a head that lacks either a green
+  `build` workflow on all three platforms or, when Actions is broken, the local
+  results for all three platforms on that head. Ask for them instead of assuming.
 
 ## Capture evidence before interpreting it
 

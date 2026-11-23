@@ -12661,7 +12661,12 @@ _SEVENZIP_OPTION = ['SevenZipCmd=%s' % generators.SEVENZIP_PATH] if generators.H
 
 # Environment variables the daemon of a scenario runs with (others are cleared).
 SCENARIO_ENV = {
+    # Persistent partial files are off by default on macOS (see
+    # progressive_unpack/persistent.rs `enabled`): the scenarios that test them
+    # turn them on, so they test the same path on every platform.
     'persistdeadprimary': {'RUSTYGET_PERSISTENT_UNPACK': '1'},
+    'persistrestart': {'RUSTYGET_PERSISTENT_UNPACK': '1'},
+    'persistrestartdamaged': {'RUSTYGET_PERSISTENT_UNPACK': '1'},
 }
 SCENARIO_ENV_KEYS = sorted({k for env in SCENARIO_ENV.values() for k in env})
 

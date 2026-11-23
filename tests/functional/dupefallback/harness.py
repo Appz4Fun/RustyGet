@@ -12006,7 +12006,7 @@ EXPECTED_HISTORY_STATUS = {
     'wholefile': 'SUCCESS/HEALTH',
     # a failed copy whose key still has backups is kept as a donor (F3)
     'dupefailover': 'DELETED/DUPE', 'dupehopeless': 'DELETED/DUPE',
-    'dupedeadstart': 'DELETED/DUPE',
+    'dupedeadstart': 'FAILURE/HEALTH',
 }
 
 # per-scenario daemon options; the article-level scenarios keep the legacy

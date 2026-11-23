@@ -1414,40 +1414,62 @@ fn defer_uncached(
 }
 
 #[test]
-fn a_cancelled_repair_never_creates_a_missing_target() {
+fn a_failed_target_admission_removes_every_target_it_created_and_nothing_else() {
     let fx = Fixture::new();
     let set = fx.set();
     let id = -1900184;
     streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 << 20).unwrap();
-    let desc = &set.file_descs[&set.main.as_ref().unwrap().recoverable_file_ids[0]];
+    let ids = &set.main.as_ref().unwrap().recoverable_file_ids;
+    let desc = &set.file_descs[&ids[0]];
     // Bind the physical root as a repair admission does.
     let context = crate::parlive::source_write_context(id, 40, &fx.0, &desc.name).unwrap();
     context.attest_existing_source().unwrap();
     let entry = active_streaming_session(id).unwrap();
-    let missing = fx.0.join("not-there-yet.bin");
-    // Current: an existing target opens, a missing one is created.
     let existing = fx.0.join(desc.local_name());
-    assert!(open_live_repair_target(&entry, &existing, || false).is_ok());
-    assert!(open_live_repair_target(&entry, &missing, || false).is_ok());
-    assert!(missing.exists());
-    std::fs::remove_file(&missing).unwrap();
-    // Cancelled (the download was deleted or moved): nothing is created.
-    assert!(matches!(
-        open_live_repair_target(&entry, &missing, || true),
-        Err(RepairError::Cancelled)
-    ));
-    assert!(!missing.exists());
-    // Cancelled just after the create: the new file is removed again.
+    let before = std::fs::read(&existing).unwrap();
+    let first = fx.0.join("missing-one.bin");
+    let second = fx.0.join("missing-two.bin");
+    let targets = vec![
+        (first.clone(), ids[0]),
+        (existing.clone(), ids[0]),
+        (second.clone(), ids[0]),
+    ];
+    // Cancelled after the last target opened: both created files go, the existing stays.
     let calls = std::cell::Cell::new(0);
-    let cancelled_after_create = || {
+    let cancel_at_end = || {
         calls.set(calls.get() + 1);
-        calls.get() > 1
+        calls.get() > 3
     };
     assert!(matches!(
-        open_live_repair_target(&entry, &missing, cancelled_after_create),
+        open_live_repair_targets(&entry, &targets, cancel_at_end),
         Err(RepairError::Cancelled)
     ));
-    assert!(!missing.exists());
+    assert!(!first.exists() && !second.exists());
+    assert_eq!(std::fs::read(&existing).unwrap(), before);
+    // Refused part way (a target outside the root): what was created before goes too.
+    let outside = std::env::temp_dir().join("rustyget-outside-root.bin");
+    let refused = vec![(first.clone(), ids[0]), (outside.clone(), ids[0])];
+    assert!(open_live_repair_targets(&entry, &refused, || false).is_err());
+    assert!(!first.exists() && !outside.exists());
+    // A name taken over by another file after the create is never removed.
+    let swap = vec![(first.clone(), ids[0])];
+    let swapped = std::cell::Cell::new(false);
+    let replace_then_cancel = || {
+        if first.exists() && !swapped.get() {
+            std::fs::remove_file(&first).unwrap();
+            std::fs::write(&first, b"someone else").unwrap();
+            swapped.set(true);
+        }
+        swapped.get()
+    };
+    assert!(open_live_repair_targets(&entry, &swap, replace_then_cancel).is_err());
+    assert_eq!(std::fs::read(&first).unwrap(), b"someone else");
+    std::fs::remove_file(&first).unwrap();
+    // Current: all open, the missing ones created and kept.
+    let files = open_live_repair_targets(&entry, &targets, || false).unwrap();
+    assert_eq!(files.len(), 3);
+    assert!(first.exists() && second.exists());
+    drop(files);
     drop(entry);
     drop(context);
     streaming_session_forget(id);

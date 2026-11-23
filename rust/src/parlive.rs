@@ -344,7 +344,8 @@ mod physical_ownership_tests;
 mod source_identity;
 mod write_registry;
 pub(crate) use write_registry::{
-    donor_write_context, download_writes, forget_download_writes, open_repair_target,
+    create_repair_target, donor_write_context, download_writes, forget_download_writes,
+    open_repair_target, remove_created_repair_target,
     repair_target_is_current, source_write_context, SourceWriteContext,
 };
 

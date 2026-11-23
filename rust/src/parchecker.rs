@@ -2933,37 +2933,67 @@ pub(crate) fn streaming_session_can_schedule_repair(nzb_id: i32) -> bool {
     unknown as u64 <= (status.ready_recovery as u64).saturating_add(queued_upper_bound)
 }
 
-/// Opens a repair target under the write barrier. An existing file is opened as it is; a
-/// missing one is created only while the session is current, and removed again when the
-/// session turns out cancelled right after (a deleted or moved download), so a cancelled
-/// repair never leaves an empty file behind in a folder that is going away.
-fn open_live_repair_target(
-    entry: &ActiveStreamingSession,
-    path: &Path,
-    cancelled: impl Fn() -> bool,
-) -> Result<std::fs::File, RepairError> {
-    let unproven = || live_error("live target admission", "target ownership unproven");
-    match crate::parlive::open_repair_target(&entry.writers, path, false) {
-        Ok(file) if cancelled() => {
-            drop(file);
-            Err(RepairError::Cancelled)
-        }
-        Ok(file) => Ok(file),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            if cancelled() {
-                return Err(RepairError::Cancelled);
-            }
-            let file = crate::parlive::open_repair_target(&entry.writers, path, true)
-                .map_err(|_| unproven())?;
-            if cancelled() {
-                drop(file);
-                let _ = std::fs::remove_file(path);
-                return Err(RepairError::Cancelled);
-            }
-            Ok(file)
-        }
-        Err(_) => Err(unproven()),
+/// The repair targets one admission created, removed again (each only while its name is
+/// still the file created) unless the admission succeeds.
+struct CreatedTargets<'a> {
+    writers: &'a WriteCoordinator,
+    created: Vec<(PathBuf, std::fs::File)>,
+}
+
+impl CreatedTargets<'_> {
+    fn keep(mut self) {
+        self.created.clear();
     }
+}
+
+impl Drop for CreatedTargets<'_> {
+    fn drop(&mut self) {
+        for (path, file) in self.created.drain(..) {
+            let _ = crate::parlive::remove_created_repair_target(self.writers, &path, &file);
+        }
+    }
+}
+
+/// Opens the repair targets under the write barrier. An existing file is opened as it is;
+/// a missing one is created (exclusively) only while the session is current. On any error,
+/// cancellation included, every target this call created is removed again, so a cancelled
+/// or refused repair leaves no empty file in a folder that is going away.
+fn open_live_repair_targets(
+    entry: &ActiveStreamingSession,
+    targets: &[(PathBuf, FileId)],
+    cancelled: impl Fn() -> bool,
+) -> Result<Vec<par_rs::RepairTargetFile>, RepairError> {
+    let unproven = || live_error("live target admission", "target ownership unproven");
+    let mut created = CreatedTargets {
+        writers: &entry.writers,
+        created: Vec::new(),
+    };
+    let mut files = Vec::with_capacity(targets.len());
+    for (path, file_id) in targets {
+        if cancelled() {
+            return Err(RepairError::Cancelled);
+        }
+        let file = match crate::parlive::open_repair_target(&entry.writers, path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let file = crate::parlive::create_repair_target(&entry.writers, path)
+                    .map_err(|_| unproven())?;
+                let handle = file.try_clone().map_err(|_| unproven())?;
+                created.created.push((path.clone(), handle));
+                file
+            }
+            Err(_) => return Err(unproven()),
+        };
+        files.push(par_rs::RepairTargetFile {
+            file_id: *file_id,
+            file,
+        });
+    }
+    if cancelled() {
+        return Err(RepairError::Cancelled);
+    }
+    created.keep();
+    Ok(files)
 }
 
 /// Captured under the queue lock; it owns the original session and admitted metadata.
@@ -3101,11 +3131,12 @@ impl LiveRepairRequest {
         .ok_or(RepairError::Cancelled)?
         .map_err(|_| RepairError::Cancelled)?;
         // Writers are drained: bind the actual target inodes under the barrier.
-        let mut files = Vec::with_capacity(paths.len());
-        for (path, (_, file_id)) in paths.iter().zip(&self.ids) {
-            let file = open_live_repair_target(&self.entry, path, cancelled)?;
-            files.push(par_rs::RepairTargetFile { file_id: *file_id, file });
-        }
+        let targets: Vec<(PathBuf, FileId)> = paths
+            .iter()
+            .zip(&self.ids)
+            .map(|(path, (_, file_id))| (path.clone(), *file_id))
+            .collect();
+        let files = open_live_repair_targets(&self.entry, &targets, cancelled)?;
         Ok(TargetWriteLease {
             nzb_id: self.nzb_id,
             ids: self.ids,

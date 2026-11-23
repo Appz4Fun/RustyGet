@@ -479,13 +479,37 @@ pub(crate) fn donor_write_context(
 pub(crate) fn open_repair_target(
     coordinator: &WriteCoordinator,
     path: &Path,
-    create: bool,
 ) -> std::io::Result<std::fs::File> {
     let root = coordinator.physical_root().ok_or_else(refused)?;
     if path.parent() != Some(root.spelling.as_path()) {
         return Err(refused());
     }
-    root.open_leaf(path.file_name().ok_or_else(refused)?, true, create)
+    root.open_leaf(path.file_name().ok_or_else(refused)?, true, false)
+}
+
+/// Creates a missing repair target; fails when anything already has its name.
+pub(crate) fn create_repair_target(
+    coordinator: &WriteCoordinator,
+    path: &Path,
+) -> std::io::Result<std::fs::File> {
+    let root = coordinator.physical_root().ok_or_else(refused)?;
+    if path.parent() != Some(root.spelling.as_path()) {
+        return Err(refused());
+    }
+    root.create_leaf_exclusive(path.file_name().ok_or_else(refused)?)
+}
+
+/// Removes a target `create_repair_target` made, only while its name still is `file`.
+pub(crate) fn remove_created_repair_target(
+    coordinator: &WriteCoordinator,
+    path: &Path,
+    file: &std::fs::File,
+) -> std::io::Result<bool> {
+    let root = coordinator.physical_root().ok_or_else(refused)?;
+    if path.parent() != Some(root.spelling.as_path()) {
+        return Err(refused());
+    }
+    root.unlink_leaf_if_same(path.file_name().ok_or_else(refused)?, file)
 }
 
 /// The target path must still name the descriptor admitted for repair.

@@ -278,16 +278,58 @@ fn cache_unlock_flush() {
     CACHE_FLUSH_LOCK.1.notify_one();
 }
 
-pub(crate) fn with_live_cache_fence<T>(action: impl FnOnce() -> T) -> T {
+/// Takes the flush lock unless `cancelled` turns true while waiting for it (checked before
+/// and every 50 ms while waiting). False when cancelled: the lock is not held then.
+fn cache_lock_flush_unless(cancelled: &dyn Fn() -> bool) -> bool {
+    let mut locked = CACHE_FLUSH_LOCK.0.lock().unwrap_or_else(|e| e.into_inner());
+    while *locked {
+        if cancelled() {
+            return false;
+        }
+        locked = CACHE_FLUSH_LOCK
+            .1
+            .wait_timeout(locked, std::time::Duration::from_millis(50))
+            .unwrap_or_else(|e| e.into_inner())
+            .0;
+    }
+    if cancelled() {
+        return false;
+    }
+    *locked = true;
+    CACHE_FLUSHING.store(true, Ordering::Release);
+    true
+}
+
+/// The flush lock as a fence for a live repair helper that may be cancelled while it waits:
+/// a cancelled wait gives up (`None`) instead of blocking, so a caller that cancels the
+/// helper under the queue lock never waits on a flusher that waits for that lock.
+pub(crate) fn with_live_cache_fence_unless<T>(
+    cancelled: impl Fn() -> bool,
+    action: impl FnOnce() -> T,
+) -> Option<T> {
     struct Fence;
     impl Drop for Fence {
         fn drop(&mut self) {
             cache_unlock_flush();
         }
     }
-    cache_lock_flush();
+    if !cache_lock_flush_unless(&cancelled) {
+        return None;
+    }
     let _fence = Fence;
-    action()
+    Some(action())
+}
+
+#[cfg(test)]
+pub(crate) fn hold_cache_flush_lock_for_test() -> impl Drop {
+    struct Held;
+    impl Drop for Held {
+        fn drop(&mut self) {
+            cache_unlock_flush();
+        }
+    }
+    cache_lock_flush();
+    Held
 }
 
 fn cache_effective_limit() -> usize {
@@ -652,7 +694,16 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
                         crate::paths::PATH_SEPARATOR,
                         &f.filename,
                     );
-                    let live = (nzb.id, f.id, f.filename.clone(), f.hash16k.clone());
+                    // Identity for live PAR's flush report, copied only when a session runs.
+                    let live = (
+                        nzb.id,
+                        f.id,
+                        if crate::parchecker::streaming_session_has_session(nzb.id) {
+                            (f.filename.clone(), f.hash16k.clone())
+                        } else {
+                            (Vec::new(), Vec::new())
+                        },
+                    );
                     return Some((fp, info_name, write_context, live));
                 }
             }
@@ -722,7 +773,11 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
 
     // Live PAR: articles that waited for their bytes to reach the file can be read there
     // now. Only those written in place (DirectWrite), up to the first failed write.
-    if direct_write && !skip_disk_write && flushed_articles > 0 {
+    if direct_write
+        && !skip_disk_write
+        && flushed_articles > 0
+        && crate::parchecker::streaming_session_has_session(live.0)
+    {
         let written = usize::try_from(flushed_articles).unwrap_or(0).min(items.len());
         let all: i64 = items[..written]
             .iter()
@@ -738,7 +793,7 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
                 ))
             })
             .collect();
-        let (nzb_id, file_id, name, hash16k) = &live;
+        let (nzb_id, file_id, (name, hash16k)) = &live;
         crate::parchecker::streaming_session_articles_committed(
             *nzb_id,
             (Some(*file_id), name, hash16k),

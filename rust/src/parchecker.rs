@@ -1389,13 +1389,13 @@ fn drain_live_articles_locked(
                 && article.article.as_ref().is_some_and(|a| {
                     a.bytes.is_some() && entry.await_commit(a.file_id, a.offset, a.size, a.crc32)
                 });
-            // An article read from its file failed to read: the file was renamed (completed)
-            // before par-rs learned its new path. Its completion replay covers it.
-            let renamed = matches!(&result, Err(RepairError::Io { .. }))
-                && article
-                    .article
-                    .as_ref()
-                    .is_some_and(|a| a.bytes.is_none() && a.committed);
+            // The file was renamed (completed) before par-rs learned its new path: an article
+            // read from its file, or a slice par-rs completes from the file, finds nothing
+            // there. Its completion replay covers it: no warning, and the drain goes on.
+            let renamed = article
+                .article
+                .as_ref()
+                .is_some_and(|a| renamed_away(&result, a.bytes.is_none() && a.committed));
             let parked = parked || renamed;
             drop(article);
             if parked {
@@ -1408,6 +1408,18 @@ fn drain_live_articles_locked(
             count += 1;
         }
     })())
+}
+
+/// An article's fold failed only because its file was renamed away: any I/O error for one
+/// par-rs reads from its file (`committed`), a missing file for one from RAM (par-rs may
+/// complete its slice from the file).
+fn renamed_away<T>(result: &Result<T, RepairError>, committed: bool) -> bool {
+    match result {
+        Err(RepairError::Io { source, .. }) => {
+            committed || source.kind() == std::io::ErrorKind::NotFound
+        }
+        _ => false,
+    }
 }
 
 /// Queue file `identity` of job `nzb_id` is at `path` now (completed, possibly renamed since):
@@ -3042,11 +3054,19 @@ impl LiveRepairRequest {
                 }
             }
         }
-        let ownership = crate::articledl::with_live_cache_fence(|| {
+        // Cancelled while waiting for the cache fence (the job was deleted or stopped): give
+        // up rather than block, since the canceller may hold the queue lock that the cache
+        // flusher holding the fence waits for.
+        let cancelled = || {
+            self.entry.session.is_cancelled()
+                || !self.entry.writers.is_current_generation(self.entry.generation)
+        };
+        let ownership = crate::articledl::with_live_cache_fence_unless(cancelled, || {
             self.entry
                 .writers
                 .begin_repair(self.entry.generation, self.targets, self.charge)
         })
+        .ok_or(RepairError::Cancelled)?
         .map_err(|_| RepairError::Cancelled)?;
         // Writers are drained: bind the actual target inodes under the barrier.
         let mut files = Vec::with_capacity(paths.len());
@@ -4201,6 +4221,21 @@ mod tests {
         // No volume known: the first exponents.
         let plan = live_recovery_plan(&LivePlanHint::default(), 1000, &HashSet::new());
         assert_eq!(plan.exponents, vec![0, 1]);
+    }
+
+    #[test]
+    fn renamed_away_tolerates_only_the_rename_window() {
+        let io = |kind| -> Result<(), RepairError> {
+            Err(RepairError::Io {
+                context: "reading".into(),
+                source: std::io::Error::from(kind),
+            })
+        };
+        assert!(renamed_away(&io(std::io::ErrorKind::NotFound), false));
+        assert!(renamed_away(&io(std::io::ErrorKind::UnexpectedEof), true));
+        assert!(!renamed_away(&io(std::io::ErrorKind::UnexpectedEof), false));
+        assert!(!renamed_away(&Err::<(), _>(RepairError::Cancelled), true));
+        assert!(!renamed_away(&Ok::<(), RepairError>(()), true));
     }
 
     #[test]

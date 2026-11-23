@@ -3475,10 +3475,12 @@ pub(crate) fn direct_unpack_try_live_par_repair(
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug)]
 enum EndRepair {
-    /// Running; its progress counter last changed at `progressed_at`.
+    /// Running; its progress counter last changed at `progressed_at`, and it is given up
+    /// after `stall_limit` without a change.
     Running {
         progress: u64,
         progressed_at: std::time::Instant,
+        stall_limit: Duration,
     },
     /// It failed: par-check repairs the download; no retry.
     Failed,
@@ -3492,9 +3494,20 @@ static LIVE_END_REPAIRS: std::sync::LazyLock<Mutex<std::collections::HashMap<i32
     std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
 /// Post-processing waits for a running download-end repair while it makes progress; it
-/// gives up after this long without any.
+/// gives up after this long without any, plus [`end_repair_stall_limit`]'s allowance.
 #[cfg(unix)]
 const END_REPAIR_STALL: Duration = Duration::from_secs(300);
+
+/// How long an end repair may go without visible progress. par-rs reports no progress
+/// while it plans and inverts the recovery matrix (its phase timers count only when a
+/// phase ends; decode shows its target writes), and that grows with the damaged slices and
+/// the recovery slots: allow 1 ms per damaged slice and slot on top of
+/// [`END_REPAIR_STALL`], at most 6 hours.
+#[cfg(unix)]
+fn end_repair_stall_limit(damaged: usize, slots: usize) -> Duration {
+    let work = (damaged as u64).saturating_mul(slots.max(1) as u64);
+    (END_REPAIR_STALL + Duration::from_millis(work)).min(Duration::from_secs(6 * 3600))
+}
 #[cfg(unix)]
 const END_REPAIR_RETRY: Duration = Duration::from_secs(10);
 
@@ -3524,14 +3537,14 @@ fn live_end_repair_defers_post(nzb_id: i32) -> Option<bool> {
         Some(EndRepair::Running {
             progress,
             progressed_at,
-            ..
+            stall_limit,
         }) => {
             let current = crate::parchecker::streaming_session_repair_progress(nzb_id);
             if let Some(current) = current.filter(|current| current != progress) {
                 *progress = current;
                 *progressed_at = now;
             }
-            if now.duration_since(*progressed_at) >= END_REPAIR_STALL {
+            if now.duration_since(*progressed_at) >= *stall_limit {
                 drop(map);
                 crate::parchecker::streaming_session_cancel(nzb_id);
             }
@@ -3657,6 +3670,10 @@ fn live_par_repair_at_download_end(
                 progress: crate::parchecker::streaming_session_repair_progress(nzb_id)
                     .unwrap_or(0),
                 progressed_at: now,
+                stall_limit: crate::parchecker::streaming_session_status(nzb_id).map_or(
+                    END_REPAIR_STALL,
+                    |status| end_repair_stall_limit(status.damaged, status.syndrome_slots),
+                ),
             },
         );
         drop(map);
@@ -3744,8 +3761,14 @@ static LIVE_PAR_HELPERS: LiveHelpers =
 static LIVE_END_HELPERS: LiveHelpers =
     std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
-/// Waits for the live par2 repair of download `nzb_id` to end. Called before the download's
-/// files are cleaned up (deletion, shutdown) so no repair write outlives the download.
+/// Stops the live par2 repairs of download `nzb_id` before its files are cleaned up
+/// (deletion, shutdown, a rename): cancels them, and joins their helper threads on a reaper
+/// thread, never here. Callers hold the queue lock, and a helper may be waiting for the
+/// article cache's flush lock while the flusher holding it waits for the queue lock; joining
+/// here would hang the queue. Cancelled, a helper stops waiting for that lock within 50 ms,
+/// par-rs stops between slices, and its target writes go through descriptors it owns, so
+/// nothing it writes lands in a file another job uses. Post-processing still waits for a
+/// helper until it has ended (its running state clears on exit).
 #[track_caller]
 pub(crate) fn direct_unpack_join_live_par_repair(nzb_id: i32) {
     crate::parchecker::streaming_session_cancel(nzb_id);
@@ -3761,16 +3784,32 @@ pub(crate) fn direct_unpack_join_live_par_repair(nzb_id: i32) {
                 handles.extend(list);
             }
         }
-        for handle in handles {
-            let _ = handle.join();
-        }
-        LIVE_END_REPAIRS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&nzb_id);
+        reap_live_helpers(handles);
     }
     #[cfg(not(unix))]
     let _ = nzb_id;
+}
+
+/// Joins ended or cancelled live repair helpers on a thread of its own (finished ones at once).
+#[cfg(unix)]
+fn reap_live_helpers(handles: Vec<std::thread::JoinHandle<()>>) {
+    let (finished, running): (Vec<_>, Vec<_>) =
+        handles.into_iter().partition(|handle| handle.is_finished());
+    for handle in finished {
+        let _ = handle.join();
+    }
+    if running.is_empty() {
+        return;
+    }
+    let reaper = std::thread::Builder::new()
+        .name("live-par-reaper".into())
+        .spawn(move || {
+            for handle in running {
+                let _ = handle.join();
+            }
+        });
+    // Without a reaper the handles are dropped: the threads still end on their own.
+    drop(reaper);
 }
 
 /// Gives up on the held volumes of download `nzb_id` (its repair failed).
@@ -6145,6 +6184,69 @@ mod live_end_repair_tests {
     use super::*;
 
     #[test]
+    fn the_stall_allowance_grows_with_the_matrix() {
+        assert_eq!(end_repair_stall_limit(0, 0), END_REPAIR_STALL);
+        assert_eq!(
+            end_repair_stall_limit(1000, 1200),
+            END_REPAIR_STALL + Duration::from_millis(1_200_000)
+        );
+        assert_eq!(end_repair_stall_limit(usize::MAX, usize::MAX), Duration::from_secs(6 * 3600));
+    }
+
+    #[test]
+    fn stopping_a_download_never_waits_for_its_repair_helpers() {
+        // A helper stuck (as one waiting for the cache fence would be) must not hold up
+        // the caller, who may hold the queue lock; the reaper joins it once it ends.
+        let id = -1_975_002;
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        let stuck = std::thread::spawn(move || {
+            let _ = wait.recv();
+        });
+        keep_live_helper(&LIVE_END_HELPERS, id, stuck);
+        let (release2, wait2) = std::sync::mpsc::channel::<()>();
+        keep_live_helper(
+            &LIVE_PAR_HELPERS,
+            id,
+            std::thread::spawn(move || {
+                let _ = wait2.recv();
+            }),
+        );
+        let started = std::time::Instant::now();
+        direct_unpack_join_live_par_repair(id);
+        assert!(started.elapsed() < Duration::from_secs(1), "stopping must not join");
+        assert!(LIVE_END_HELPERS.lock().unwrap().get(&id).is_none());
+        assert!(LIVE_PAR_HELPERS.lock().unwrap().get(&id).is_none());
+        release.send(()).unwrap();
+        release2.send(()).unwrap();
+    }
+
+    #[test]
+    fn a_cancelled_helper_stops_waiting_for_the_cache_fence() {
+        // The cache flusher holds the fence (and would wait for the queue lock); the job is
+        // deleted meanwhile. The helper's fence wait must end on the cancel, not hang.
+        let held = crate::articledl::hold_cache_flush_lock_for_test();
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&cancelled);
+        let waiter = std::thread::spawn(move || {
+            crate::articledl::with_live_cache_fence_unless(
+                || flag.load(std::sync::atomic::Ordering::Relaxed),
+                || (),
+            )
+        });
+        std::thread::sleep(Duration::from_millis(120));
+        cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+        let started = std::time::Instant::now();
+        while !waiter.is_finished() {
+            assert!(started.elapsed() < Duration::from_secs(2), "fence wait hung");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(waiter.join().unwrap().is_none());
+        drop(held);
+        // Not cancelled: it takes the fence once free.
+        assert_eq!(crate::articledl::with_live_cache_fence_unless(|| false, || 7), Some(7));
+    }
+
+    #[test]
     fn keeping_a_helper_never_waits_for_a_running_one() {
         static HELPERS: LiveHelpers =
             std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
@@ -6192,6 +6294,7 @@ mod live_end_repair_tests {
         set(Some(EndRepair::Running {
             progress: 0,
             progressed_at: std::time::Instant::now(),
+            stall_limit: END_REPAIR_STALL,
         }));
         assert_eq!(live_end_repair_defers_post(id), Some(true));
         assert!(live_end_repair_running(id));

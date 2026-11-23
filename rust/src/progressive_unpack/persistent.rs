@@ -69,6 +69,15 @@ thread_local! {
     /// Benchmarks: true runs as before this tuning: each reported hole refilled on its own,
     /// inline refills checked every 100 ms and holes answered once per read.
     pub(super) static LEGACY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Benchmarks: false leaves `PartialLimits::group_refills` off.
+    pub(super) static GROUP_REFILLS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+fn group_refills() -> bool {
+    #[cfg(test)]
+    return GROUP_REFILLS.with(|g| g.get());
+    #[cfg(not(test))]
+    true
 }
 
 fn legacy() -> bool {
@@ -969,7 +978,7 @@ impl<'a> Run<'a> {
         // member resumes before it), and grouped refill bytes are holes again: the restarted
         // run's inline refill and its refill of adopted members read them back.
         limits.group_holes = !legacy();
-        limits.group_refills = !legacy();
+        limits.group_refills = !legacy() && group_refills();
         self.inline.plain = self.req.password.is_empty() && !legacy();
         let popts = PartialOptions {
             binding: self.plan.binding.clone(),

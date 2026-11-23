@@ -6086,7 +6086,10 @@ fn persistent_throughput() {
     let tunings: &[(&str, (u64, Duration, u32))] = &[
         // Everything as before this tuning (see `persistent::LEGACY`).
         ("zipfast-default", (64 << 20, Duration::from_secs(2), 1 << 20)),
+        ("group64", (64 << 20, Duration::from_secs(30), 8 << 20)),
         ("group256", (256 << 20, Duration::from_secs(30), 8 << 20)),
+        // group1g without `group_refills` (see `persistent::GROUP_REFILLS`).
+        ("group1g-norefills", (1 << 30, Duration::from_secs(30), 8 << 20)),
         ("group1g", (1 << 30, Duration::from_secs(30), 8 << 20)),
         ("group4g", (4 << 30, Duration::from_secs(60), 8 << 20)),
     ];
@@ -6108,6 +6111,7 @@ fn persistent_throughput() {
                 std::fs::create_dir_all(&out).unwrap();
                 persistent::TUNING.with(|t| t.set(Some(*tuning)));
                 persistent::LEGACY.with(|c| c.set(*name == "zipfast-default"));
+                persistent::GROUP_REFILLS.with(|c| c.set(*name != "group1g-norefills"));
                 let syncs = zipfast::partial::durable_sync_count();
                 let anchor = anchors::anchor_sync_count();
                 let t0 = std::time::Instant::now();
@@ -6120,6 +6124,7 @@ fn persistent_throughput() {
                 let secs = t0.elapsed().as_secs_f64();
                 persistent::TUNING.with(|t| t.set(None));
                 persistent::LEGACY.with(|c| c.set(false));
+                persistent::GROUP_REFILLS.with(|c| c.set(true));
                 expect_ok(r, &log);
                 assert!(
                     log.iter().any(|l| l.contains("into persistent partial files")),

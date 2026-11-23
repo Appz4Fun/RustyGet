@@ -2410,7 +2410,14 @@ struct HoledVolume {
     holes: Vec<(u64, u64)>,
     /// Whether zipfast sees `file` as the volume's backing (false when it is declared NonFile).
     expose_backing: bool,
+    /// Data areas `[start, end)` of the file members in this volume, from its checked headers.
+    /// Set only for a persistent session (see `allow_long_holes`): a hole inside one of them is
+    /// answered in one go, up to `LONG_HOLE`, instead of once per read.
+    data_spans: Vec<(u64, u64)>,
 }
+
+/// Longest hole a persistent session takes as one answer (zipfast's cap).
+const LONG_HOLE: u64 = 256 << 20;
 
 impl HoledVolume {
     fn open(path: &Path, holes: Vec<(u64, u64)>) -> std::io::Result<Self> {
@@ -2439,7 +2446,36 @@ impl HoledVolume {
             },
             holes,
             expose_backing: true,
+            data_spans: Vec::new(),
         })
+    }
+
+    /// Lets holes inside member data be answered past the read's buffer, as a persistent session
+    /// accepts (`RangeRead::Hole`): each answer is a `Hole` event and a durable commit, so one
+    /// lost stretch of many articles costs one instead of one per 1 MiB read. Only data areas of
+    /// file members whose headers check out count; a hole anywhere else (a header, a service
+    /// block) is answered per read as before. Volumes without holes are not parsed.
+    fn allow_long_holes(&mut self, path: &Path) {
+        if self.holes.is_empty() {
+            return;
+        }
+        use zipfast::rar5::reader::{Block, Volume};
+        let Ok(mut vol) = Volume::open(path) else {
+            return;
+        };
+        let extent = self.info.extent;
+        for _ in 0..100_000 {
+            match vol.next_block() {
+                Ok(Some(Block::File(h))) => {
+                    let end = h.data_at.saturating_add(h.packed_size).min(extent);
+                    if h.data_at < end {
+                        self.data_spans.push((h.data_at, end));
+                    }
+                }
+                Ok(Some(Block::End { .. })) | Ok(None) | Err(_) => break,
+                Ok(Some(_)) => {}
+            }
+        }
     }
 }
 
@@ -2465,10 +2501,18 @@ impl RangeSource for HoledVolume {
             .iter()
             .find(|&&(s, l)| s <= offset && offset < s + l)
         {
-            // A hole answer may not be longer than the read it answers.
-            return Ok(RangeRead::Hole {
-                len: (start + len - offset).min(buf.len() as u64),
-            });
+            let hole_end = start + len;
+            // A hole answer may not be longer than the read it answers, except inside a
+            // member's data area in a persistent session (see `allow_long_holes`).
+            let mut end = hole_end.min(offset + buf.len() as u64);
+            if let Some(&(_, span_end)) = self
+                .data_spans
+                .iter()
+                .find(|&&(s, e)| s <= offset && offset < e)
+            {
+                end = end.max(hole_end.min(span_end).min(offset + LONG_HOLE));
+            }
+            return Ok(RangeRead::Hole { len: end - offset });
         }
         let mut n = buf
             .len()

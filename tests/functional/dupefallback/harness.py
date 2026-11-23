@@ -6791,6 +6791,39 @@ def scenario_fleetprimaryease(daemon, t):
     return ('fleetprimaryease', ok, 'order=%s chosen=%s' % (order, chosen))
 
 
+def scenario_fleetnzbpassword(daemon, t):
+    """F8: a copy whose RAR5 headers are encrypted (-hp, store mode inside),
+    with its password only in its nzb's <meta type="password">, is read with
+    that password: borrowable-encrypted (it lends once decrypted), ranked
+    after the plain stored copy and kept as a backup with its alive share. The
+    same posting without a password is locked (DupeLocked, unborrowable, last);
+    with a wrong one its headers stay unread (DupeLocked recorded,
+    unborrowable). Neither is ever DEAD. Uses the committed RAR5 fixture, so no
+    rar binary is needed."""
+    daemon.fake_nntp.alive = set()
+    hp = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'testdata', 'donorkind', 'enchp5.rar'),
+              'rb').read()
+    api = daemon.wait_ready()
+    meta = '<head><meta type="password">%s</meta></head><file '
+    with_pw = _fleet_copy(daemon, 'pw', 'a.rar', 400_000, hp, _payload(400_000, 7951)).replace('<file ', meta % 'pw', 1)
+    wrong_pw = _fleet_copy(daemon, 'pr', 'b.rar', 400_000, hp, _payload(400_000, 7952)).replace('<file ', meta % 'nope', 1)
+    no_pw = _fleet_copy(daemon, 'pn', 'c.rar', 400_000, hp, _payload(400_000, 7953))
+    store = _fleet_copy(daemon, 'ps', 'd.rar', 400_000, _rar4_head(0x30), _payload(400_000, 7954))
+    reply = _fleet(daemon, [('Show.S01E01.nopw', no_pw), ('Show.S01E01.wrongpw', wrong_pw),
+                            ('Show.S01E01.pw', with_pw), ('Show.S01E01.store', store)], key='fleet:nzbpw')
+    order = [m['Name'] for m in sorted(reply['Members'], key=lambda m: m['Rank'])]
+    status = {m['Name']: (m['Status'], m['Alive']) for m in reply['Members']}
+    items = {g['NZBName']: {p['Name']: p['Value'] for p in g.get('Parameters', [])}
+             for g in api.listgroups() + api.history() if g.get('DupeKey') == 'fleet:nzbpw'}
+    kinds = {n: p.get('DupeCopyKind') for n, p in items.items()}
+    ok = (order[:2] == ['Show.S01E01.store', 'Show.S01E01.pw']
+          and kinds.get('Show.S01E01.pw') == 'borrowable-encrypted'
+          and items.get('Show.S01E01.pw', {}).get('*Unpack:Password') == 'pw'
+          and all(items.get(n, {}).get('DupeLocked') == 'yes' for n in ('Show.S01E01.nopw', 'Show.S01E01.wrongpw'))
+          and all(status[n][0] != 'DEAD' and status[n][1] == 100 for n in status))
+    return ('fleetnzbpassword', ok, 'order=%s kinds=%s status=%s' % (order, kinds, status))
+
+
 def scenario_fleettimeoutunverified(daemon, t):
     """F6: timeouts are never evidence. A copy whose every check fails with a
     temporary error (451, as a server or proxy that times out answers) is
@@ -11477,6 +11510,7 @@ def scenario_dropkeepdonor(daemon, t):
 SCENARIOS = {
     'dropnzbdir': scenario_dropnzbdir,
     'fleetprimaryease': scenario_fleetprimaryease,
+    'fleetnzbpassword': scenario_fleetnzbpassword,
     'fleettimeoutunverified': scenario_fleettimeoutunverified,
     'dropjoin': scenario_dropjoin,
     'dropkeepdonor': scenario_dropkeepdonor,
@@ -11878,6 +11912,7 @@ SCENARIO_ENV_KEYS = sorted({k for env in SCENARIO_ENV.values() for k in env})
 
 SCENARIO_OPTIONS = {
     'fleetprimaryease': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
+    'fleetnzbpassword': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
     'fleettimeoutunverified': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
     'dropnzbdir': ['NzbDirInterval=1', 'NzbDirFileAge=2', 'HealthCheck=dupe', 'DupeArticleFallback=article'],
     'dropjoin': ['HealthCheck=dupe'],
@@ -12305,7 +12340,7 @@ SCENARIO_FIRST_FAIL_PROXY = {'recheckfailed': ((b'?5=', b'?10=', b'?15='),),
 # scenarios with a FakeNewznab indexer (DupeSearchUrl points to it)
 
 # scenarios with a FakeNntp news server in place of nserv
-SCENARIO_FAKE_NNTP = {'fleetprimaryease', 'fleettimeoutunverified', 'watchfleet', 'watchforcepick', 'watchdeadpick', 'watchswap', 'watchborrow', 'watchswaptwin', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetnodupecheck', 'fleetkindorder', 'fleetkindsingle', 'fleetkindlater', 'fleetintake', 'fleetintakelater', 'fleetencryptedlast', 'fleetencryptedheadless', 'fleetlockedlast', 'fleetencryptedpassword', 'fleetkindslowcheck', 'fleettwinvolumes', 'fleetalldead', 'fleetshutdown'}
+SCENARIO_FAKE_NNTP = {'fleetprimaryease', 'fleetnzbpassword', 'fleettimeoutunverified', 'watchfleet', 'watchforcepick', 'watchdeadpick', 'watchswap', 'watchborrow', 'watchswaptwin', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetnodupecheck', 'fleetkindorder', 'fleetkindsingle', 'fleetkindlater', 'fleetintake', 'fleetintakelater', 'fleetencryptedlast', 'fleetencryptedheadless', 'fleetlockedlast', 'fleetencryptedpassword', 'fleetkindslowcheck', 'fleettwinvolumes', 'fleetalldead', 'fleetshutdown'}
 
 
 # --------------------------------------------------------------------------- #

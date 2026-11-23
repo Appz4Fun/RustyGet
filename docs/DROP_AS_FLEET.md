@@ -205,7 +205,7 @@ marked `OPEN ITEM (par-rs)` at `GROUP_PROBE_BYTES`.
 | The shown health is the one a copy was judged on. | functional `dropkeepdonor` (Health above 90%, DupeProjected under 10%) |
 | F6: a copy whose checks timed out is unverified, never dead. | Rust `dupesearch_nzb::tests::timeouts_leave_a_fleet_copy_unverified`; functional `fleettimeoutunverified` |
 | F7: the check budget is per copy. | Rust `dupesearch_coord::tests::grouped_fleets_check_each_copy_for_a_minute` |
-| F8: encrypted headers are read with the nzb's password. | Rust `dupesearch_coord::tests::fleet_copies_carry_the_nzb_password`, `donorkind::tests::header_encrypted_rar_with_its_password_is_borrowable_encrypted`; functional `fleetencryptedpassword` (needs `rar`) |
+| F8: encrypted headers are read with the nzb's password. | Rust `dupesearch_coord::tests::fleet_copies_carry_the_nzb_password`, `donorkind::tests::header_encrypted_rar_with_its_password_is_borrowable_encrypted`; functional `fleetnzbpassword` (RAR5 -hp fixture, password only in the nzb meta: borrowable-encrypted; missing password locked; never DEAD), `fleetencryptedpassword` (needs `rar`) |
 | F9: another container shows unverified until the video inside matches. | Rust `twin::tests::par2_differences_alone_never_make_an_alt`; web UI `dupe-group.js` "F9: another container is unverified" |
 | F10: the primary is the healthy copy easiest to borrow into. | Rust `donorkind::tests::primary_ease_orders_bare_stored_compressed_encrypted`, `dupesearch_nzb::tests::the_primary_is_the_healthy_copy_easiest_to_borrow_into`; functional `fleetprimaryease` |
 | The name rule strips only a copy suffix. | Rust `releasename::tests::copy_suffixes_strip_only_after_a_group_tag`; web UI `dupe-group.js` (the same cases) |

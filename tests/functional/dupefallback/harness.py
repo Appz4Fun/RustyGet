@@ -11459,6 +11459,333 @@ def scenario_badpaths(daemon, t):
         version, paused, counts, lock_warned, after, ' '.join(problems)))
 
 
+def _jrpc(port, method, params=(), auth=None, timeout=30):
+    """JSON-RPC on 127.0.0.1:port; the whole reply ({'result'} or {'error'})."""
+    import json as _json
+    import urllib.request as _req
+    headers = {'Content-Type': 'application/json'}
+    if auth:
+        headers['Authorization'] = 'Basic ' + base64.b64encode(auth.encode()).decode()
+    body = _json.dumps({'method': method, 'params': list(params)}).encode()
+    with _req.urlopen(_req.Request('http://127.0.0.1:%d/jsonrpc' % port, body, headers), timeout=timeout) as reply:
+        return _json.loads(reply.read().decode())
+
+
+def _http_get(port, path):
+    """(status, body) of a plain GET."""
+    with socket.create_connection(('127.0.0.1', port), timeout=10) as sock:
+        sock.sendall(('GET %s HTTP/1.0\r\n\r\n' % path).encode())
+        data = b''
+        while True:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+    head, _, body = data.partition(b'\r\n\r\n')
+    status = int(head.split(b' ')[1]) if head.startswith(b'HTTP/') else 0
+    return status, body
+
+
+def _wait_rpc(port, timeout=30, auth=None):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            if 'result' in _jrpc(port, 'version', auth=auth, timeout=5):
+                return True
+        except Exception:
+            pass
+        time.sleep(0.3)
+    return False
+
+
+def _stop_default_daemon(daemon, t):
+    api = daemon.wait_ready()
+    try:
+        api.shutdown()
+    except Exception:
+        pass
+    t.procs[-1].wait(timeout=60)
+
+
+def _spawn_env(t, args, env, output_rel):
+    full = dict(os.environ)
+    full.update(env)
+    with open(t.path(output_rel), 'wb') as output:
+        p = subprocess.Popen(args, stdout=output, stderr=subprocess.STDOUT, env=full, cwd=t.work)
+    t.procs.append(p)
+    return p
+
+
+def _wait_text(t, rel, pattern, timeout=30):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            m = re.search(pattern, t.read_file(rel).decode(errors='replace'))
+            if m:
+                return m
+        except OSError:
+            pass
+        time.sleep(0.2)
+    return None
+
+
+def scenario_noconfig(daemon, t):
+    """No configuration file anywhere (HOME is an empty folder): "-s" writes
+    ~/.config/rustyget/rustyget.conf from the built-in template (owner-only,
+    MainDir=~/RustyGet, ControlIP=127.0.0.1, the first free port from 6789, no
+    password, the web interface built in), says where and which address to
+    open on stdout and in the log, serves the web interface from the binary
+    and stays paused until a news server is set up. saveconfig refuses bad
+    values without touching the file, saves good ones after a backup, and the
+    reload is ready to download. "-c <missing file>" creates that file, and
+    "-D" (daemon mode) with no file starts as well."""
+    if t.name != 'local':
+        return ('noconfig', True, 'skipped: needs a local HOME')
+    _stop_default_daemon(daemon, t)
+    problems = []
+    bindir = t.makedirs('ncbin')
+    binary = os.path.join(bindir, 'rustyget')
+    shutil.copy2(t.nzbget, binary)  # no rustyget.conf next to it
+    home = t.makedirs('nchome')
+    proc = _spawn_env(t, [binary, '-s', '-o', 'OutputMode=log'], {'HOME': home}, 'noconfig.out')
+    m = _wait_text(t, 'noconfig.out', r'Open the web interface to finish setting up RustyGet: http://127\.0\.0\.1:(\d+)/')
+    if not m:
+        return ('noconfig', False, 'no address on stdout: %r' % t.read_file('noconfig.out')[-2000:])
+    port = int(m.group(1))
+    conf = os.path.join(home, '.config', 'rustyget', 'rustyget.conf')
+    out = t.read_file('noconfig.out').decode(errors='replace')
+    if ('RustyGet created a new configuration file: ' + conf) not in out:
+        problems.append('stdout does not name the file')
+    if not _wait_rpc(port):
+        return ('noconfig', False, 'no RPC on port %d' % port)
+    text = open(conf).read() if os.path.isfile(conf) else ''
+    for want in ('MainDir=~/RustyGet', 'ControlIP=127.0.0.1', 'ControlPort=%d' % port, 'ControlPassword=', 'WebDir='):
+        if not re.search('(?m)^' + re.escape(want) + '$', text):
+            problems.append('config lacks %s' % want)
+    mode = os.stat(conf).st_mode & 0o777 if text else None
+    if mode != 0o600:
+        problems.append('mode=%s' % (oct(mode) if mode else None))
+    if not os.path.isdir(os.path.join(home, 'RustyGet', 'queue')):
+        problems.append('MainDir not made in HOME')
+    log = [m['Text'] for m in _jrpc(port, 'log', [0, 500])['result']]
+    if not any('created a new configuration file' in x for x in log):
+        problems.append('creation not logged')
+    st = _jrpc(port, 'setupstatus')['result']
+    if (st.get('ConfigCreated'), st.get('Servers'), st.get('SetupComplete'), st.get('PasswordSet')) != (True, 0, False, False):
+        problems.append('setupstatus=%s' % st)
+    if not _jrpc(port, 'status')['result']['DownloadPaused']:
+        problems.append('not paused without a server')
+    if not any('no news server is set up' in x for x in log):
+        problems.append('no pause notice')
+    if any(x.startswith('At least one') for x in log):
+        problems.append('scary server errors: %s' % [x for x in log if x.startswith('At least one')])
+    status, body = _http_get(port, '/')
+    if status != 200 or b'RustyGet' not in body:
+        problems.append('web interface: %s' % status)
+    status, body = _http_get(port, '/combined.js?util.js+setup.js')
+    if status != 200 or b'Setup' not in body:
+        problems.append('built-in combined.js: %s' % status)
+    for leak in ('/rustyget.conf', '/x.conf.bak-1'):
+        if _http_get(port, leak)[0] == 200:
+            problems.append('served %s' % leak)
+    t.write_file('ncfile', b'x')
+    chk = _jrpc(port, 'checkpath', [t.path('ncfile', 'sub'), ''])['result']
+    if chk.get('State') != 'bad' or 'is a file' not in chk.get('Message', ''):
+        problems.append('checkpath=%s' % chk)
+
+    # a bad save is refused and changes nothing
+    before = open(conf, 'rb').read()
+    bad = _jrpc(port, 'saveconfig', [[{'Name': 'ControlPort', 'Value': 'abc'}, {'Name': 'Server1.Host', 'Value': 'http://x y'}]])
+    if 'error' not in bad or 'ControlPort' not in bad['error']['message']:
+        problems.append('bad save=%s' % bad)
+    if open(conf, 'rb').read() != before:
+        problems.append('a refused save changed the file')
+    # the guide's save: everything loadconfig gave, with the changes
+    values = _jrpc(port, 'loadconfig')['result']
+    changes = {'ControlPassword': 'example-pass-1', 'Server1.Active': 'yes', 'Server1.Host': '127.0.0.1',
+               'Server1.Port': str(daemon.nntp_port), 'Server1.Encryption': 'no', 'Server1.Connections': '2',
+               'Server1.Username': '', 'Server1.Password': ''}
+    req = [{'Name': o['Name'], 'Value': changes.get(o['Name'], o['Value'])} for o in values]
+    ok = _jrpc(port, 'saveconfig', [req])
+    if ok.get('result') is not True:
+        problems.append('good save=%s' % ok)
+    backups = [n for n in os.listdir(os.path.dirname(conf)) if n.startswith('rustyget.conf.bak-')]
+    if len(backups) != 1:
+        problems.append('backups=%s' % backups)
+    elif open(os.path.join(os.path.dirname(conf), backups[0]), 'rb').read() != before:
+        problems.append('the backup is not the old file')
+    started = out.count('server-mode')
+    _jrpc(port, 'reload')
+    auth = 'rustyget:example-pass-1'
+    time.sleep(2)
+    if not _wait_rpc(port, 30, auth):
+        problems.append('not back after reload')
+    else:
+        st = _jrpc(port, 'setupstatus', auth=auth)['result']
+        if not st.get('SetupComplete'):
+            problems.append('after reload setupstatus=%s' % st)
+        if _jrpc(port, 'status', auth=auth)['result']['DownloadPaused']:
+            problems.append('still paused after setup')
+        try:
+            _jrpc(port, 'status')
+            problems.append('no password needed after setup')
+        except Exception:
+            pass
+    try:
+        _jrpc(port, 'shutdown', auth=auth)
+    except Exception:
+        pass
+    proc.wait(timeout=30)
+
+    # -c <missing file>: created there
+    missing = t.path('nc-new', 'deeper', 'my.conf')
+    p2 = _spawn_env(t, [binary, '-c', missing, '-s', '-o', 'OutputMode=log'], {'HOME': home}, 'noconfig-c.out')
+    m = _wait_text(t, 'noconfig-c.out', r'Open the web interface to finish setting up RustyGet: http://127\.0\.0\.1:(\d+)/')
+    if not m or not os.path.isfile(missing):
+        problems.append('-c missing: %r' % t.read_file('noconfig-c.out')[-600:])
+    else:
+        port2 = int(m.group(1))
+        if not _wait_rpc(port2):
+            problems.append('-c missing: no RPC')
+        try:
+            _jrpc(port2, 'shutdown')
+        except Exception:
+            pass
+    p2.wait(timeout=30)
+
+    # -D, no file at all (another empty HOME)
+    home3 = t.makedirs('nchome-d')
+    r = subprocess.run([binary, '-D', '-o', 'OutputMode=log'], env=dict(os.environ, HOME=home3), cwd=t.work,
+                       capture_output=True, timeout=30)
+    m = re.search(rb'http://127\.0\.0\.1:(\d+)/', r.stdout)
+    if r.returncode != 0 or not m:
+        problems.append('-D: rc=%s out=%r' % (r.returncode, r.stdout[-400:]))
+    else:
+        port3 = int(m.group(1))
+        if not _wait_rpc(port3):
+            problems.append('-D: no RPC')
+        try:
+            _jrpc(port3, 'shutdown')
+        except Exception:
+            pass
+        time.sleep(1)
+    return ('noconfig', not problems, 'port=%d started=%d %s' % (port, started, ' '.join(problems)))
+
+
+def _terrible_config(rpc_port, main, nntp_port):
+    return b''.join([
+        b'# a terrible configuration file\n',                                      # 1
+        ('ControlIP=127.0.0.1\nControlPort=%d\nControlUsername=\nControlPassword=\n' % rpc_port).encode(),  # 2-5
+        ('MainDir=%s\n' % main).encode(),                                           # 6
+        ('Server1.Host=127.0.0.1\nServer1.Port=%d\nServer1.Encryption=no\nServer1.Connections=2\n' % nntp_port).encode(),  # 7-10
+        b'ArticleTimeout=soon\n',                                                   # 11
+        b'ParCheck=sometimes\n',                                                    # 12
+        b'NotAnOption=1\n',                                                         # 13
+        b'this line is broken\n',                                                   # 14
+        b'DiskSpace=100\nDiskSpace=200\n',                                          # 15-16
+        b'\x01\xff\xfe=\x02\n',                                                     # 17
+        b'Category1.Name=Caf\xe9\n',                                                # 18
+        b'x' * 70000 + b'\n',                                                       # 19
+        b'UMask=octal\n',                                                           # 20
+    ])
+
+
+def scenario_garbageconfig(daemon, t):
+    """A terrible configuration file (wrong types, a bad choice, an unknown
+    option, a broken line, a duplicate, binary bytes, a non-UTF-8 value, a
+    70 kB line): the daemon starts on the defaults for the bad options, warns
+    once per bad line with file:line, what is wrong and what it used instead,
+    serves the web interface and lists the problems in setupstatus. An empty
+    file, a folder (its rustyget.conf is used) and an unreadable file start
+    too; the unreadable one says that settings can't be saved."""
+    if t.name != 'local':
+        return ('garbageconfig', True, 'skipped: needs local files')
+    _stop_default_daemon(daemon, t)
+    problems = []
+    conf = t.path('terrible.conf')
+    t.write_file('terrible.conf', _terrible_config(daemon.rpc_port, t.path('gmain'), daemon.nntp_port))
+    proc = _spawn_env(t, [t.nzbget, '-c', conf, '-s', '-o', 'OutputMode=log'], {'HOME': t.makedirs('ghome')}, 'garbage.out')
+    if not _wait_rpc(daemon.rpc_port):
+        return ('garbageconfig', False, 'did not start: %r' % t.read_file('garbage.out')[-2000:])
+    time.sleep(1)
+    if proc.poll() is not None:
+        problems.append('exited %s' % proc.returncode)
+    log = [m['Text'] for m in _jrpc(daemon.rpc_port, 'log', [0, 1000])['result']]
+    expect = {
+        11: 'Invalid value for option "ArticleTimeout": "soon" is not a whole number. Using the default "60" instead',
+        12: 'Invalid value for option "ParCheck": "sometimes". Using "auto" instead',
+        13: 'Invalid option "NotAnOption": RustyGet has no such option, the line is ignored',
+        14: 'Invalid option "this line is broken": not a "Name=value" line, ignored',
+        16: 'Option "DiskSpace" is set again (first on line 15); using the value from this line',
+        17: 'Invalid option "',
+        19: 'Line is too long (70000 bytes',
+        20: 'Invalid value for option "UMask": "octal" is not a whole number. Using the default',
+    }
+    for line, text in expect.items():
+        tag = '%s:%d: ' % (conf, line)
+        hits = [x for x in log if x.startswith(tag)]
+        if len(hits) != 1 or text not in hits[0]:
+            problems.append('line %d: %s' % (line, hits))
+    for line in (1, 2, 3, 6, 7, 8, 9, 10, 15, 18):
+        if any(x.startswith('%s:%d: ' % (conf, line)) for x in log):
+            problems.append('line %d warned' % line)
+    if any('�' in x or '\x01' in x for x in log if x.startswith(conf)):
+        problems.append('binary shown raw')
+    cfg = {o['Name']: o['Value'] for o in _jrpc(daemon.rpc_port, 'config')['result']}
+    if (cfg.get('ArticleTimeout'), cfg.get('ParCheck'), cfg.get('DiskSpace')) != ('60', 'auto', '200'):
+        problems.append('used=%s/%s/%s' % (cfg.get('ArticleTimeout'), cfg.get('ParCheck'), cfg.get('DiskSpace')))
+    st = _jrpc(daemon.rpc_port, 'setupstatus')['result']
+    if len(st.get('Warnings', [])) < len(expect) or st.get('Servers') != 1:
+        problems.append('setupstatus=%s' % st)
+    status, body = _http_get(daemon.rpc_port, '/')
+    if status != 200:
+        problems.append('web interface %s' % status)
+    # every loadconfig value can be read back (non-UTF-8 included)
+    if not _jrpc(daemon.rpc_port, 'loadconfig').get('result'):
+        problems.append('loadconfig failed')
+    try:
+        _jrpc(daemon.rpc_port, 'shutdown')
+    except Exception:
+        pass
+    proc.wait(timeout=30)
+
+    # files that can't be a configuration
+    odd = [('empty', lambda p: open(p, 'wb').close(), False),
+           ('folder', lambda p: os.makedirs(p), True)]
+    if os.geteuid() != 0:
+        odd.append(('unreadable', lambda p: (open(p, 'w').write('MainDir=/x\n'), os.chmod(p, 0)), False))
+    for name, make, inner in odd:
+        path = t.path('odd-' + name + '.conf')
+        make(path)
+        port = free_port()
+        args = [t.nzbget, '-c', path, '-s', '-o', 'OutputMode=log', '-o', 'ControlPort=%d' % port,
+                '-o', 'MainDir=%s' % t.path('odd-main-' + name)]
+        p = _spawn_env(t, args, {'HOME': t.makedirs('odd-home-' + name)}, 'odd-%s.out' % name)
+        # without a file the stock sign-in applies, and stdout says so
+        auth = None if inner else 'rustyget:tegbzn6789'
+        if not _wait_rpc(port, auth=auth):
+            problems.append('%s: no RPC: %r' % (name, t.read_file('odd-%s.out' % name)[-500:]))
+            continue
+        out = t.read_file('odd-%s.out' % name).decode(errors='replace')
+        if not inner and 'password "tegbzn6789", the stock password' not in out:
+            problems.append('%s: stdout does not tell the stock sign-in' % name)
+        st = _jrpc(port, 'setupstatus', auth=auth)['result']
+        if inner and not os.path.isfile(os.path.join(path, 'rustyget.conf')):
+            problems.append('folder: no rustyget.conf made inside')
+        if name == 'unreadable':
+            if st.get('ConfigWritable') or 'ermission' not in st.get('ConfigProblem', ''):
+                problems.append('unreadable: %s' % st)
+            os.chmod(path, 0o600)
+        if _http_get(port, '/')[0] not in (200, 401):
+            problems.append('%s: no web interface' % name)
+        try:
+            _jrpc(port, 'shutdown', auth=auth)
+        except Exception:
+            pass
+        p.wait(timeout=30)
+    return ('garbageconfig', not problems, ' '.join(problems))
+
+
 def _grep_log(t, needle):
     try:
         return t.read_file('nzbget.log').decode(errors='replace').count(needle)
@@ -12579,6 +12906,8 @@ SCENARIOS = {
     'directunpackkeep': scenario_directunpackkeep,
     'directunpacksimple': scenario_directunpacksimple,
     'badpaths': scenario_badpaths,
+    'noconfig': scenario_noconfig,
+    'garbageconfig': scenario_garbageconfig,
     'directunpacktwoarchives': scenario_directunpacktwoarchives,
     'directunpackparfailure': scenario_directunpackparfailure,
     'parfailurenodirectunpack': scenario_parfailurenodirectunpack,

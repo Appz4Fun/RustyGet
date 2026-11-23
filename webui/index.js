@@ -304,6 +304,7 @@ var Frontend = (new function($)
 		SystemMetrics.init();
 		Libraries.renderLicensePage($('#ConfigLicenses'));
 		SystemHealth.init();
+		Setup.init();
 
 		DownloadsEditDialog.init();
 		DownloadsMultiDialog.init();
@@ -380,6 +381,7 @@ var Frontend = (new function($)
 			windowResized();
 			firstLoad = false;
 			UpdateDialog.checkUpdate();
+			Setup.refresh();
 		}
 	}
 
@@ -1142,7 +1144,9 @@ var ConfirmDialog = (new function($)
 		// Copy data-i18n attributes from source dialog so translatePage uses correct keys
 		var copyAttr = function(suffix, attr) {
 			var val = $('#' + id + '_' + suffix).attr(attr);
+			// a dialog without a key keeps its own text (not the previous dialog's key)
 			if (val) $('#ConfirmDialog_' + suffix).attr(attr, val);
+			else $('#ConfirmDialog_' + suffix).removeAttr(attr);
 		};
 		copyAttr('Title', 'data-i18n');
 		copyAttr('Text', 'data-i18n');

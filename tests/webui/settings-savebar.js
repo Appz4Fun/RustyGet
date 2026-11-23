@@ -70,6 +70,11 @@ const { installOfflineModel } = require('./settings-offline-fixture');
 
       // Discard reloads the saved values and keeps the section
       await page.locator('#ConfigSaveBar_Discard').click();
+      // Discard asks first: unsaved edits are lost
+      await page.locator('#ConfirmDialog_OK').waitFor({ state: 'visible' });
+      assert.match(await page.locator('#ConfirmDialog_Title').textContent(), /Discard your changes\?/);
+      await page.waitForTimeout(300);
+      await page.locator('#ConfirmDialog_OK').click();
       await page.waitForFunction(() => Config.currentSectionID === 'DOWNLOAD_QUEUE' && document.querySelector('#S_NzbCleanupDisk'));
       await page.waitForFunction(() => document.getElementById('ConfigSaveBar').hidden);
       assert.equal(await page.locator('#S_NzbCleanupDisk').getAttribute('aria-checked'), before);
@@ -86,6 +91,11 @@ const { installOfflineModel } = require('./settings-offline-fixture');
       await page.waitForFunction(() => !document.getElementById('ConfigSaveBar').hidden);
       assert.equal(await count.textContent(), 'List changes');
       await page.locator('#ConfigSaveBar_Discard').click();
+      // Discard asks first: unsaved edits are lost
+      await page.locator('#ConfirmDialog_OK').waitFor({ state: 'visible' });
+      assert.match(await page.locator('#ConfirmDialog_Title').textContent(), /Discard your changes\?/);
+      await page.waitForTimeout(300);
+      await page.locator('#ConfirmDialog_OK').click();
       await page.waitForFunction(n => Config.currentSectionID === 'CATEGORIES' &&
         document.querySelectorAll('#ConfigData [onclick*="deleteSet"]').length === n &&
         document.getElementById('ConfigSaveBar').hidden, sets);

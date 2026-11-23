@@ -4,7 +4,7 @@
 use crate::cstr;
 use std::collections::BTreeMap;
 use std::ffi::{c_int, CStr, CString};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Write};
 use std::path::PathBuf;
 
 #[cfg(unix)]
@@ -19,6 +19,18 @@ fn bytes_to_path(bytes: &[u8]) -> PathBuf {
 }
 
 static CONFIG_WRITE_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Holds off every other read and write of the configuration file.
+pub(crate) fn lock_config_writes() -> std::sync::MutexGuard<'static, ()> {
+    CONFIG_WRITE_MUTEX.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The longest configuration line read; a longer one is skipped (and the
+/// loader warns about it).
+pub const MAX_CONFIG_LINE: usize = 64 * 1024;
+
+/// The most of a configuration file `loadconfig` reads.
+const MAX_CONFIG_FILE: u64 = 64 * 1024 * 1024;
 
 /// Computes `ScriptConfig::CipherBaseline` from `(name, value)` pairs.
 pub fn script_config_cipher_baseline(entries: &[(&[u8], &[u8])]) -> Vec<u8> {
@@ -52,7 +64,7 @@ pub fn script_config_parse_bytes(raw: &[u8]) -> Vec<(CString, CString)> {
         };
         let trimmed_len = crate::util::trim_right_line(nul_trimmed);
         let line = &nul_trimmed[..trimmed_len];
-        if line.is_empty() || line[0] == b'#' {
+        if line.is_empty() || line[0] == b'#' || line.len() > MAX_CONFIG_LINE {
             continue;
         }
         if let Some((raw_name, raw_val)) = crate::options::options_split_option_string(line) {
@@ -67,7 +79,7 @@ pub fn script_config_parse_bytes(raw: &[u8]) -> Vec<(CString, CString)> {
 
 fn script_config_load_unlocked(filename: &[u8]) -> Option<Vec<(CString, CString)>> {
     let path = bytes_to_path(filename);
-    let mut file = std::fs::File::open(&path).ok()?;
+    let file = std::fs::File::open(&path).ok()?;
     let meta = file.metadata().ok()?;
     if meta.is_dir() {
         return None;
@@ -75,8 +87,8 @@ fn script_config_load_unlocked(filename: &[u8]) -> Option<Vec<(CString, CString)
     if meta.len() == 0 {
         return Some(Vec::new());
     }
-    let mut raw = Vec::with_capacity(meta.len() as usize);
-    file.read_to_end(&mut raw).ok()?;
+    let mut raw = Vec::with_capacity(meta.len().min(MAX_CONFIG_FILE) as usize);
+    file.take(MAX_CONFIG_FILE).read_to_end(&mut raw).ok()?;
     Some(script_config_parse_bytes(&raw))
 }
 
@@ -141,12 +153,14 @@ pub fn script_config_merge_bytes(raw: &[u8], entries: &[(&[u8], &[u8])]) -> Vec<
                     }
                 }
             }
-        } else {
-            out.extend_from_slice(line);
-            if !line.ends_with(b"\n") {
-                out.push(b'\n');
-            }
+        } else if let Some(kept) = blank_or_comment(line) {
+            // as the loader reads it: a comment starts with "#", a blank line
+            // has nothing else (indented comments and tabs are tidied)
+            out.extend_from_slice(kept);
+            out.push(b'\n');
         }
+        // anything else is not an option line: the loader would complain
+        // about it on every start, so a save leaves it out
     }
 
     for &(name, val) in entries {
@@ -166,6 +180,33 @@ pub fn script_config_merge_bytes(raw: &[u8], entries: &[(&[u8], &[u8])]) -> Vec<
     out
 }
 
+/// A blank line or a comment as a save keeps it (without its line end), or
+/// `None` for anything else.
+fn blank_or_comment(line: &[u8]) -> Option<&[u8]> {
+    let mut end = line.len();
+    while end > 0 && matches!(line[end - 1], b'\n' | b'\r') {
+        end -= 1;
+    }
+    let body = &line[..end];
+    let t = body.trim_ascii_start();
+    if t.is_empty() {
+        Some(b"")
+    } else if t[0] == b'#' {
+        Some(if body.iter().any(|&b| b == b'\r') { b"#" } else { t })
+    } else {
+        None
+    }
+}
+
+/// Why a save did not happen.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SaveError {
+    /// the news server settings changed since the caller read them
+    Conflict,
+    /// the reason, in plain words
+    Failed(String),
+}
+
 /// End-to-end implementation of `ScriptConfig::SaveConfig`.
 /// Returns `(saved, conflict)`.
 pub fn script_config_save(
@@ -173,43 +214,50 @@ pub fn script_config_save(
     entries: &[(&[u8], &[u8])],
     cipher_baseline: Option<&[u8]>,
 ) -> (bool, bool) {
+    match script_config_save_checked(filename, entries, cipher_baseline) {
+        Ok(()) => (true, false),
+        Err(SaveError::Conflict) => (false, true),
+        Err(SaveError::Failed(_)) => (false, false),
+    }
+}
+
+/// Saves `entries` into the configuration file: the current file is copied
+/// to a backup first (`<file>.bak-<date>-<time>`, the last ten kept), then
+/// replaced with the merged text in one step.
+pub fn script_config_save_checked(
+    filename: &[u8],
+    entries: &[(&[u8], &[u8])],
+    cipher_baseline: Option<&[u8]>,
+) -> Result<(), SaveError> {
     let _guard = CONFIG_WRITE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let path = bytes_to_path(filename);
     if let Some(expected) = cipher_baseline {
         let Some(current) = script_config_load_unlocked(filename) else {
-            return (false, false);
+            return Err(SaveError::Failed(format!("{} can't be read", path.display())));
         };
         let actual = script_config_cipher_baseline_cstrings(&current);
         if actual.as_slice() != expected {
-            return (false, true);
+            return Err(SaveError::Conflict);
         }
     }
 
-    let path = bytes_to_path(filename);
-    let Ok(mut file) = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&path)
-    else {
-        return (false, false);
+    let failed = |what: &str, e: &std::io::Error| {
+        SaveError::Failed(format!("{} can't be {what}: {}", path.display(), crate::firstrun::plain_io(e)))
     };
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .open(&path)
+        .map_err(|e| failed("opened", &e))?;
     if file.metadata().map_or(true, |m| m.is_dir()) {
-        return (false, false);
+        return Err(SaveError::Failed(format!("{} is a folder, not a file", path.display())));
     }
-
     let mut raw = Vec::new();
-    if file.read_to_end(&mut raw).is_err() {
-        return (false, false);
-    }
+    file.read_to_end(&mut raw).map_err(|e| failed("read", &e))?;
+    drop(file);
 
     let merged = script_config_merge_bytes(&raw, entries);
-    if file.seek(SeekFrom::Start(0)).is_err() {
-        return (false, false);
-    }
-    if file.write_all(&merged).is_err() || file.flush().is_err() {
-        return (false, false);
-    }
-    let _ = file.set_len(merged.len() as u64);
-    (true, false)
+    crate::firstrun::backup_config(&path).map_err(SaveError::Failed)?;
+    crate::firstrun::write_config_atomically(&path, &merged).map_err(SaveError::Failed)
 }
 
 #[repr(C)]

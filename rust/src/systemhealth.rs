@@ -2054,7 +2054,10 @@ pub fn validate_news_servers_group(
         .min(actives.len())
         .min(max_conns.len())
         .min(levels.len());
-    if n == 1 && hosts[0] == b"my.newsserver.com" && actives[0] == 0 {
+    // none set up yet (the stock example, an empty host, or no server at
+    // all): start-up already says, once, that downloading waits for one
+    let placeholder = |h: &[u8]| h.trim_ascii().is_empty() || h == b"my.newsserver.com";
+    if (0..n).all(|i| placeholder(hosts[i]) && actives[i] == 0) || (0..n).all(|i| hosts[i].trim_ascii().is_empty()) {
         emit_issue(Severity::Info, b"No news servers are configured yet");
         return;
     }

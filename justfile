@@ -148,6 +148,7 @@ test-daemon jobs="3": (debug jobs)
     scenarios = [
         "directunpacksimple", "directunpacktwoarchives", "directunpackparfailure",
         "parfailurenodirectunpack", "parfailuredirectunpackfailed", "badpaths",
+        "noconfig", "garbageconfig",
     ]
     for scenario in scenarios:
         print(f"Running {scenario}...")

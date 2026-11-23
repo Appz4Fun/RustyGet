@@ -79,11 +79,12 @@
 	<script language="javascript" type="text/javascript" src="sysmetrics.js"></script>
 	<script language="javascript" type="text/javascript" src="releasename.js"></script>
 	<script language="javascript" type="text/javascript" src="easteregg.js"></script>
+	<script language="javascript" type="text/javascript" src="setup.js"></script>
 	%end% -->
 
 	<!-- Loading all javascript files from libraries and NZBGet in one request -->
 	<!-- %if-not-debug% -->
-	<script language="javascript" type="text/javascript" src="combined.js?lib/jquery.min.js+lib/bootstrap.min.js+lib/raphael.min.js+lib/elycharts.min.js+i18n.js+datetime.js+fasttable.js+index.js+util.js+downloads.js+edit.js+status.js+messages.js+history.js+dupegroup.js+upload.js+config.js+tlscipher.js+feed.js+system-info.js+statistics.js+system-health.js+libraries.js+sysmetrics.js+releasename.js+easteregg.js"></script>
+	<script language="javascript" type="text/javascript" src="combined.js?lib/jquery.min.js+lib/bootstrap.min.js+lib/raphael.min.js+lib/elycharts.min.js+i18n.js+datetime.js+fasttable.js+index.js+util.js+downloads.js+edit.js+status.js+messages.js+history.js+dupegroup.js+upload.js+config.js+tlscipher.js+feed.js+system-info.js+statistics.js+system-health.js+libraries.js+sysmetrics.js+releasename.js+easteregg.js+setup.js"></script>
 	<!-- %end% -->
 
 	<style>.hide{display:none;}</style>
@@ -97,10 +98,11 @@
 	<link rel="stylesheet" type="text/css" href="settings.css" />
 	<link rel="stylesheet" type="text/css" href="sysmetrics.css" />
 	<link rel="stylesheet" type="text/css" href="releasename.css" />
+	<link rel="stylesheet" type="text/css" href="setup.css" />
 	%end% -->
 	<!-- Loading all css files from libraries and NZBGet in one request -->
 	<!-- %if-not-debug% -->
-	<link rel="stylesheet" type="text/css" href="combined.css?lib/bootstrap.css+style.css+tokens.css+ds.css+skin.css+oxide.css+settings.css+sysmetrics.css+releasename.css" />
+	<link rel="stylesheet" type="text/css" href="combined.css?lib/bootstrap.css+style.css+tokens.css+ds.css+skin.css+oxide.css+settings.css+sysmetrics.css+releasename.css+setup.css" />
 	<!-- %end% -->
 
 	<!-- fav and touch icons -->
@@ -949,6 +951,17 @@
 													<p class="help-block">
 														<span class="help-option-title" data-i18n="config_system_restore_title"></span><br><br>
 														<span data-i18n="config_system_restore_desc"></span>
+													</p>
+												</div>
+											</div>
+
+											<div class="control-group config-static config-system">
+												<label class="control-label nowrap">Restore previous settings</label>
+												<div class="controls">
+													<button type="button" class="btn btn-default" id="Config_RestorePrevious" onclick="Config.restorePrevious()">Restore previous settings</button>
+													<p class="help-block">
+														<span class="help-option-title">Go back to settings saved earlier.</span><br><br>
+														<span>RustyGet keeps a copy of the configuration file every time you save (the last 10). Pick one to put it back; RustyGet asks first, backs up the current settings and restarts.</span>
 													</p>
 												</div>
 											</div>
@@ -2890,6 +2903,23 @@
 		<p class="confirm-help-block" data-i18n="reload_dialog_text2"></p>
 	</div>
 	<div id="ReloadConfirmDialog_OK" data-i18n="btn_reload_nzbget"></div>
+</div>
+
+<div class="hide" id="RestorePreviousConfirmDialog">
+	<div id="RestorePreviousConfirmDialog_Title">Restore previous settings?</div>
+	<div id="RestorePreviousConfirmDialog_Text">
+		<p>Your current settings are replaced with the copy you pick below, and RustyGet restarts.</p>
+		<p class="confirm-help-block">Your current settings are backed up first, so you can switch back the same way.</p>
+	</div>
+	<div id="RestorePreviousConfirmDialog_OK">Restore and restart</div>
+</div>
+
+<div class="hide" id="DiscardChangesConfirmDialog">
+	<div id="DiscardChangesConfirmDialog_Title">Discard your changes?</div>
+	<div id="DiscardChangesConfirmDialog_Text">
+		<p>Every change you made on this page since the last save is thrown away. The saved settings stay as they are.</p>
+	</div>
+	<div id="DiscardChangesConfirmDialog_OK">Discard changes</div>
 </div>
 
 <!-- ***  RELOAD INFO BLOCK ***************************************** -->

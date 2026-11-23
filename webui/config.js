@@ -544,6 +544,12 @@ var Options = (new function($)
 								{
 									newoption.value = val.Value;
 								}
+								else if (/^Server[0-9]+\.Active$/i.test(name))
+								{
+									// RustyGet uses a server without an Active line: show it
+									// (and save it) as on, not as the template example's "no"
+									newoption.value = 'yes';
+								}
 							}
 						}
 					}
@@ -1282,6 +1288,12 @@ var Config = (new function($)
 		{
 			option.type = 'text';
 			html += '<input type="text" id="' + option.formId + '" value="' + Util.textToAttr(value) + '" class="editlarge">';
+		}
+
+		var plain = plainHelp(option);
+		if (plain && !section.postparam)
+		{
+			description = plain + '\n\n' + (description || '');
 		}
 
 		if (description) 
@@ -3538,6 +3550,319 @@ var Config = (new function($)
 		return { options: changed, lists: listChanged, restored: restored };
 	}
 
+	/*** INLINE VALIDATION *******************************************************/
+
+	// Plain words first, for options whose built-in description is technical.
+	var PLAIN_HELP = {
+		'maindir': 'The folder RustyGet works in. The other folders are inside it unless you choose otherwise. ~ means your home folder.',
+		'destdir': 'Where finished downloads end up.',
+		'interdir': 'Where downloads are kept while they are not finished yet. Leave it empty to download straight into the finished-downloads folder.',
+		'nzbdir': 'Drop .nzb files into this folder and RustyGet picks them up by itself.',
+		'queuedir': 'Where RustyGet remembers the queue and history. Do not delete it.',
+		'tempdir': 'Scratch space for temporary files.',
+		'webdir': 'Leave this empty: RustyGet then uses the web interface built into it.',
+		'configtemplate': 'Leave this empty: the option descriptions built into RustyGet are used.',
+		'controlip': 'Which network address the web interface listens on. 127.0.0.1 means this computer only; 0.0.0.0 means every computer that can reach this one.',
+		'controlport': 'The port in the web interface address (http://address:port/). 1 to 65535; 6789 is the usual one.',
+		'controlusername': 'The user name you sign in to the web interface with.',
+		'controlpassword': 'The password you sign in to the web interface with. Always set one.',
+		'formauth': 'Yes shows a sign-in page; No uses the browser’s own sign-in box.',
+		'server1.host': 'The address of your news server, for example news.example.com (no http://).',
+		'server1.port': 'Usually 563 with encryption and 119 without. Your provider tells you.',
+		'server1.encryption': 'Encrypt the connection to the news server. Keep it on unless your provider does not support it.',
+		'server1.connections': 'How many downloads run at once on this server. Your provider says how many you may use.',
+		'server1.username': 'The user name of your Usenet account.',
+		'server1.password': 'The password of your Usenet account.',
+		'server1.active': 'Turn the server off to stop using it without deleting it.',
+		'server1.level': 'Servers with level 0 are used first; higher levels are backups for missing articles.',
+		'articlecache': 'Memory used to hold downloaded pieces before writing them. More is faster; 0 turns it off.',
+		'downloadrate': 'Speed limit in kilobytes per second. 0 means no limit.',
+		'diskspace': 'Downloading pauses when less free space than this (in megabytes) is left.',
+		'keephistory': 'How many days finished items stay in History. 0 removes them at once.',
+		'umask': 'File permissions for new files, as an octal number. 1000 keeps the system default.',
+		'parcheck': 'When to check downloads with their repair files. "auto" checks only when something is damaged.',
+		'healthcheck': 'What to do when a download cannot be completed because too much is missing.',
+		'dupecheck': 'Skip items you already downloaded.',
+		'securecontrol': 'Also answer HTTPS on the web interface port.'
+	};
+
+	function familyName(name)
+	{
+		return String(name || '').toLowerCase().replace(/^([a-z]+)[0-9]+\./, '$11.');
+	}
+
+	function plainHelp(option)
+	{
+		return option && option.name && option.name.indexOf(':') === -1 ? PLAIN_HELP[familyName(option.name)] || '' : '';
+	}
+
+	// other words RustyGet takes for a choice (as options.rs reads them)
+	var CHOICE_ALIASES = {
+		'dupearticlefallback': ['yes'],
+		'outputmode': ['loggable', 'logable', 'log', 'colored', 'color', 'ncurses', 'curses']
+	};
+	var REQUIRED_DIRS = ['maindir', 'destdir', 'tempdir', 'queuedir', 'nzbdir'];
+	var CHECKED_DIRS = ['maindir', 'destdir', 'interdir', 'tempdir', 'queuedir', 'nzbdir', 'category1.destdir'];
+	var HOST_RE = /^(\[[0-9a-fA-F:.%]+\]|[A-Za-z0-9_][A-Za-z0-9._-]*|[0-9a-fA-F:.%]+)$/;
+	var pathChecks = {}; // "value\u0001maindir" -> {state, message, path} or 'pending'
+	var validationTimer = null;
+	var invalidOptions = [];
+
+	function numberRule(option)
+	{
+		if (!option.select || option.select.length > 1 || !/^-?[0-9]+$/.test($.trim(option.defvalue || '')))
+		{
+			return null;
+		}
+		var m = /^\s*(-?[0-9]+)\s*-\s*(-?[0-9]+)\s*$/.exec(option.select[0] || '');
+		if (m && !(m[1].length > 1 && m[1][0] === '0'))
+		{
+			return { min: +m[1], max: +m[2] };
+		}
+		return { min: null, max: null };
+	}
+
+	function serverActive(name)
+	{
+		var m = /^(Server[0-9]+)\./i.exec(name);
+		if (!m) return true;
+		var active = findOptionByName(m[1] + '.Active');
+		return !active || String(getOptionValue(active) || 'yes').toLowerCase() !== 'no';
+	}
+
+	// The problem with this value, in plain words, or '' (folders: the last check).
+	function optionProblem(option, value)
+	{
+		var family = familyName(option.name);
+		value = value == null ? '' : String(value);
+		var trimmed = $.trim(value);
+		if (/[\r\n]/.test(value))
+		{
+			return I18n.defaultValue('config_invalid_newline', 'Enter it on one line.');
+		}
+		var rule = numberRule(option);
+		if (rule && !/^\$\{/.test(trimmed))
+		{
+			if (trimmed === '')
+			{
+				return I18n.defaultValue('config_invalid_number_empty', 'Enter a number (the default is %1).').replace('%1', option.defvalue);
+			}
+			if (!/^-?[0-9]+$/.test(trimmed))
+			{
+				return I18n.defaultValue('config_invalid_number', 'Enter a whole number, digits only (for example %1).').replace('%1', option.defvalue);
+			}
+			var n = parseInt(trimmed, 10);
+			if (rule.min !== null && (n < rule.min || n > rule.max))
+			{
+				return I18n.defaultValue('config_invalid_range', 'Enter a number from %1 to %2.').replace('%1', rule.min).replace('%2', rule.max);
+			}
+		}
+		var yesNo = option.select && option.select.length === 2 &&
+			option.select.map(function(v) { return v.toLowerCase(); }).sort().join() === 'no,yes';
+		var aliases = CHOICE_ALIASES[family] || [];
+		if (option.select && option.select.length > 1 && option.type === 'switch' && trimmed !== '' &&
+			!option.select.some(function(v) { return v.toLowerCase() === trimmed.toLowerCase(); }) &&
+			aliases.indexOf(trimmed.toLowerCase()) === -1 &&
+			!(yesNo && /^(true|false|on|off|0|1|enable|disable|enabled|disabled)$/i.test(trimmed)))
+		{
+			return I18n.defaultValue('config_invalid_choice', 'The file says "%1", which is not a choice. Pick one of: %2.')
+				.replace('%1', trimmed).replace('%2', option.select.join(', '));
+		}
+		if (REQUIRED_DIRS.indexOf(family) > -1 && trimmed === '')
+		{
+			return I18n.defaultValue('config_invalid_folder_empty', 'Enter a folder. It must not be empty.');
+		}
+		if (family === 'server1.host' && serverActive(option.name))
+		{
+			if (trimmed === '')
+			{
+				return I18n.defaultValue('config_invalid_host_empty', 'Enter the server address (for example news.example.com), or turn the server off.');
+			}
+			if (/^[a-z]+:\/\//i.test(trimmed))
+			{
+				return I18n.defaultValue('config_invalid_host_scheme', 'Enter only the name, without http:// or nntp://.');
+			}
+			if (!HOST_RE.test(trimmed))
+			{
+				return I18n.defaultValue('config_invalid_host', 'This is not a server address. Use letters, digits, dots and dashes.');
+			}
+		}
+		if (CHECKED_DIRS.indexOf(family) > -1 && trimmed !== '')
+		{
+			var check = pathChecks[pathKey(option, value)];
+			if (check && check !== 'pending' && check.state === 'bad')
+			{
+				return check.message;
+			}
+		}
+		return '';
+	}
+
+	function mainDirValue()
+	{
+		var main = findOptionByName('MainDir');
+		return main ? getOptionValue(main) : '';
+	}
+
+	function pathKey(option, value)
+	{
+		return value + '\u0001' + (familyName(option.name) === 'maindir' ? '' : mainDirValue());
+	}
+
+	function checkPathOption(option, value)
+	{
+		var key = pathKey(option, value);
+		if (pathChecks[key]) return;
+		pathChecks[key] = 'pending';
+		RPC.call('checkpath', [value, familyName(option.name) === 'maindir' ? '' : mainDirValue()], function(result)
+		{
+			pathChecks[key] = result && result.State ? result : { state: 'ok' };
+			pathChecks[key].state = result && result.State;
+			pathChecks[key].message = result && result.Message;
+			scheduleValidation();
+		}, function()
+		{
+			// an older daemon without checkpath: no folder check
+			pathChecks[key] = { state: 'ok' };
+		});
+	}
+
+	function scheduleValidation()
+	{
+		clearTimeout(validationTimer);
+		validationTimer = setTimeout(refreshValidation, 60);
+	}
+
+	function refreshValidation()
+	{
+		if (!config || !$ConfigData)
+		{
+			return;
+		}
+		invalidOptions = [];
+		eachEditableOption(function(option)
+		{
+			if (option.type === 'info' || option.nocontent)
+			{
+				return;
+			}
+			var control = $('#' + option.formId);
+			if (!control.length)
+			{
+				return;
+			}
+			var value = getOptionValue(option);
+			var family = familyName(option.name);
+			if (CHECKED_DIRS.indexOf(family) > -1 && $.trim(value || '') !== '')
+			{
+				checkPathOption(option, value);
+			}
+			var problem = optionProblem(option, value);
+			var group = control.closest('.control-group');
+			var box = group.find('> .controls > .config-invalid');
+			if (problem)
+			{
+				invalidOptions.push(option);
+				if (!box.length)
+				{
+					box = $('<div class="config-invalid" role="alert"></div>').attr('id', option.formId + '_Invalid');
+					var controls = group.children('.controls');
+					var help = controls.children('.config-help-toggle, .help-block').first();
+					if (help.length) box.insertBefore(help); else controls.append(box);
+				}
+				if (box.text() !== problem) box.text(problem);
+				group.addClass('has-invalid');
+				control.attr('aria-invalid', 'true').attr('aria-describedby', option.formId + '_Invalid');
+			}
+			else if (box.length || group.hasClass('has-invalid'))
+			{
+				box.remove();
+				group.removeClass('has-invalid');
+				control.removeAttr('aria-invalid').removeAttr('aria-describedby');
+			}
+		});
+		var count = invalidOptions.length;
+		var why = count === 0 ? '' : (count === 1 ? I18n.defaultValue('config_fix_one', 'Fix 1 setting before saving') :
+			I18n.defaultValue('config_fix_n', 'Fix %1 settings before saving').replace('%1', count));
+		$('[id=Config_Save], #ConfigSaveBar_Save').prop('disabled', count > 0 || pageSaving || serverSaving).attr('title', why || null);
+		if ($SaveBar)
+		{
+			var $fix = $('.config-savebar__fix', $SaveBar);
+			if (!$fix.length)
+			{
+				$fix = $('<button type="button" class="btn-link config-savebar__fix"></button>').on('click', function()
+				{
+					focusFirstInvalid();
+				});
+				$fix.insertBefore($('#ConfigSaveBar_Discard', $SaveBar));
+			}
+			$fix.text(why).prop('hidden', count === 0);
+			if (count > 0) $SaveBar.prop('hidden', false);
+		}
+	}
+	this.refreshValidation = refreshValidation;
+	this.invalidCount = function() { return invalidOptions.length; };
+
+	function focusFirstInvalid()
+	{
+		var option = invalidOptions[0];
+		if (!option) return;
+		if (option.sectionId && Config.currentSectionID !== option.sectionId)
+		{
+			Config.showSection(option.sectionId, false);
+		}
+		var control = $('#' + option.formId);
+		var group = control.closest('.control-group');
+		if (group.hasClass('list-closed'))
+		{
+			group.removeClass('list-closed');
+		}
+		setTimeout(function() { scrollOptionIntoView(option.formId); control.focus(); }, 50);
+	}
+
+	/*** RESTORE PREVIOUS SETTINGS ***********************************************/
+
+	this.restorePrevious = function()
+	{
+		RPC.call('configbackups', [], function(list)
+		{
+			list = list || [];
+			if (!list.length)
+			{
+				AlertDialog.showModal(I18n.defaultValue('config_restore_none_title', 'No earlier settings yet'),
+					Util.textToHtml(I18n.defaultValue('config_restore_none', 'RustyGet keeps a copy of your settings every time you save them. There is no copy yet.')));
+				return;
+			}
+			var options = list.map(function(b, i)
+			{
+				var when = b.Time ? new Date(b.Time * 1000).toLocaleString() : b.Name;
+				return '<option value="' + Util.textToAttr(b.Name) + '"' + (i === 0 ? ' selected' : '') + '>' +
+					Util.textToHtml(when + (i === 0 ? ' (' + I18n.defaultValue('config_restore_newest', 'newest') + ')' : '')) + '</option>';
+			}).join('');
+			ConfirmDialog.showModal('RestorePreviousConfirmDialog', function(dialog)
+			{
+				var name = $('#RestorePrevious_Choice', dialog).val() || list[0].Name;
+				RPC.call('restoreconfig', [name], function()
+				{
+					Config.reload();
+				}, function(message, result)
+				{
+					AlertDialog.showModal(I18n.defaultValue('config_restore_failed', 'Could not restore the settings'),
+						Util.textToHtml(result && result.error ? result.error.message : message));
+				});
+			}, function(dialog)
+			{
+				$('#ConfirmDialog_Text', dialog).append('<p><label for="RestorePrevious_Choice">' +
+					Util.textToHtml(I18n.defaultValue('config_restore_choose', 'Settings saved on:')) + '</label> ' +
+					'<select id="RestorePrevious_Choice" style="width:auto;max-width:100%">' + options + '</select></p>');
+			});
+		}, function(message, result)
+		{
+			AlertDialog.showModal(I18n.defaultValue('config_restore_failed', 'Could not restore the settings'),
+				Util.textToHtml(result && result.error ? result.error.message : message));
+		});
+	};
+
 	var $SaveBar = null;
 	var changeTimer = null;
 
@@ -3554,7 +3879,10 @@ var Config = (new function($)
 			'<button type="button" class="btn btn-primary" id="ConfigSaveBar_Save"></button>' +
 			'</div>');
 		$SaveBar.attr('aria-label', I18n.defaultValue('config_unsaved_changes', 'Unsaved changes'));
-		$('#ConfigSaveBar_Discard', $SaveBar).text(I18n.defaultValue('btn_discard', 'Discard')).on('click', discardOptionChanges);
+		$('#ConfigSaveBar_Discard', $SaveBar).text(I18n.defaultValue('btn_discard', 'Discard')).on('click', function()
+		{
+			ConfirmDialog.showModal('DiscardChangesConfirmDialog', discardOptionChanges);
+		});
 		$('#ConfigSaveBar_Save', $SaveBar).text(I18n.defaultValue('btn_save_and_reload', 'Save and reload')).on('click', function() { Config.saveChanges(); });
 		$('.config__main', $ConfigContent).append($SaveBar);
 		// Listen on the document, not only on #ConfigData: option editors in dialogs (RSS
@@ -3664,6 +3992,7 @@ var Config = (new function($)
 			}).join(', ') + (count > 4 ? ' \u2026' : ''));
 		}
 		refreshControls();
+		refreshValidation();
 	}
 	this.refreshChangeState = refreshChangeState;
 
@@ -4306,7 +4635,7 @@ var Config = (new function($)
 	function setServerSaving(on)
 	{
 		serverSaving = on;
-		$('#ConfigSaveBar_Save, #Config_Save').prop('disabled', on || pageSaving);
+		$('#ConfigSaveBar_Save, [id=Config_Save]').prop('disabled', on || pageSaving || invalidOptions.length > 0);
 	}
 
 	function serverDetails(multiid)
@@ -5741,6 +6070,13 @@ var Config = (new function($)
 			return;
 		}
 
+		refreshValidation();
+		if (invalidOptions.length > 0)
+		{
+			focusFirstInvalid();
+			return;
+		}
+
 		var serverSaveRequest = prepareSaveRequest(false, false);
 		var webSaveRequest = prepareSaveRequest(false, true);
 
@@ -5764,8 +6100,17 @@ var Config = (new function($)
 			$('#Notif_Config_Failed_Filename').text(Options.option('ConfigFile'));
 			RPC.call('saveconfig', [Config.withCipherBaseline(serverSaveRequest)], saveCompleted, function(value, result) {
 				removeSaveBanner();
-				$('#Notif_Config_CipherPending strong').text(result && result.error ? result.error.message : String(value));
-				PopupNotification.show('#Notif_Config_CipherPending');
+				var text = result && result.error ? result.error.message : String(value);
+				if (result && result.error && result.error.code === 3)
+				{
+					$('#Notif_Config_CipherPending strong').text(text);
+					PopupNotification.show('#Notif_Config_CipherPending');
+				}
+				else
+				{
+					// the daemon refused the values or could not write: say why, nothing was changed
+					AlertDialog.showModal(I18n.defaultValue('config_not_saved', 'Settings were not saved'), Util.textToHtml(text));
+				}
 			});
 		}
 		else
@@ -5799,6 +6144,7 @@ var Config = (new function($)
 		pageSaving = false;
 		$('#Config_Save').removeAttr('disabled');
 		$('.config-server-save, .config-cipher__optimize', $ConfigData).prop('disabled', serverSaving);
+		refreshValidation();
 	}
 
 	function saveCompleted(result)
@@ -6025,12 +6371,16 @@ var Config = (new function($)
 		restart(function() { RPC.call('reload', [], reloadCheckStatus); });
 	}
 
+	var reloadSawDown = false;
+
 	function reloadCheckStatus()
 	{
 		RPC.call('status', [], function(status)
 			{
-				// OK, checking if it is a restarted instance
-				if (status.UpTimeSec >= Status.status.UpTimeSec)
+				// OK, checking if it is a restarted instance (a shorter uptime, or
+				// any answer once the port was closed: a reload right after
+				// another one starts with the same uptime of 0)
+				if (!reloadSawDown && status.UpTimeSec >= Status.status.UpTimeSec)
 				{
 					// the old instance is not restarted yet
 					// waiting 0.5 sec. and retrying
@@ -6048,6 +6398,7 @@ var Config = (new function($)
 			function()
 			{
 				// Failure, waiting 0.5 sec. and retrying
+				reloadSawDown = true;
 				setTimeout(reloadCheckStatus, 500);
 				reloadCheckNotes();
 			});

@@ -21,6 +21,9 @@ function writeConfig(file, port, mainDir) {
     MainDir: mainDir, ControlIP: '127.0.0.1', ControlPort: String(port),
     ControlUsername: '', ControlPassword: '', WebDir: path.join(root, 'webui'),
     ConfigTemplate: path.join(root, 'rustyget.conf'), UpdateCheck: 'none',
+    // a news server (never contacted: nothing is queued), so only the bad
+    // paths keep downloading paused
+    'Server1.Active': 'yes', 'Server1.Host': '127.0.0.1', 'Server1.Port': '1', 'Server1.Encryption': 'no',
   };
   const text = fs.readFileSync(path.join(root, 'rustyget.conf'), 'utf8').split('\n')
     .map(line => {
@@ -132,6 +135,9 @@ async function waitFor(fn, timeout, what) {
       await page.locator('#ConfigNav a[href="#PATHS"]').click();
       await page.locator('#S_MainDir').waitFor({ state: 'visible', timeout: 5000 });
       assert.equal(await page.locator('#S_MainDir').inputValue(), badMain);
+      // Settings refuses to save it as it is, and says why
+      await page.locator('#S_MainDir_Invalid').waitFor({ state: 'visible', timeout: 5000 });
+      assert(await page.locator('#ConfigSaveBar_Save').isDisabled(), 'Save is off while MainDir is unusable');
       // the health check marks the option itself too
       await page.waitForFunction(() => window.SystemHealth && SystemHealth.getSection('PATHS') !== undefined, null, { timeout: 10000 });
       const row = page.locator('#S_MainDir').locator('xpath=ancestor::div[contains(@class,"control-group")][1]');
@@ -142,7 +148,9 @@ async function waitFor(fn, timeout, what) {
     await check('a valid MainDir saves and the reload clears the warnings', async () => {
       await page.locator('#S_MainDir').fill(goodMain);
       await page.locator('#ConfigSaveBar').waitFor({ state: 'visible', timeout: 5000 });
-      assert.match(await page.locator('.config-savebar__count').textContent(), /^1 change$/);
+      // (the bar is already up for the bad MainDir; it counts the change once it is typed)
+      await page.locator('.config-savebar__count').filter({ hasText: /^1 change$/ }).waitFor({ timeout: 5000 });
+      await page.waitForFunction(() => !document.querySelector('.config-invalid'), null, { timeout: 5000 });
       if (captureDir) await page.screenshot({ path: path.join(captureDir, 'bad-paths-fixed-unsaved.jpg'), type: 'jpeg', quality: 85 });
       await page.locator('#ConfigSaveBar_Save').click();
       await page.locator('#ConfigReload').waitFor({ state: 'visible', timeout: 10000 });

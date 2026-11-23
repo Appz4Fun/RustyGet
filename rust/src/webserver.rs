@@ -535,7 +535,53 @@ pub fn gzip_compress_body(body: &[u8]) -> Option<Vec<u8>> {
 /// configuration file kept there holds passwords).
 pub(crate) fn web_file_is_forbidden(path: &[u8]) -> bool {
     let base = &path[crate::paths::base_file_name(path)..];
-    base.len() >= 5 && base[base.len() - 5..].eq_ignore_ascii_case(b".conf")
+    // ".conf" anywhere: rustyget.conf, its backups (rustyget.conf.bak-...) and
+    // the file being saved (.rustyget.conf.saving-...)
+    base.windows(5).any(|w| w.eq_ignore_ascii_case(b".conf"))
+}
+
+mod bundle {
+    include!(concat!(env!("OUT_DIR"), "/webui_bundle.rs"));
+}
+
+/// A file of the web interface built into the binary (`rel` without the
+/// leading `/`, e.g. "index.html" or "lib/jquery.min.js").
+pub(crate) fn embedded_file(rel: &[u8]) -> Option<&'static [u8]> {
+    bundle::FILES
+        .iter()
+        .find(|(name, _)| name.as_bytes() == rel)
+        .map(|(_, data)| *data)
+}
+
+/// Is a web interface built in?
+pub(crate) fn has_embedded_webui() -> bool {
+    embedded_file(b"index.html").is_some()
+}
+
+/// Is WebDir set to a folder with the web interface in it? Otherwise the
+/// built-in one is served.
+pub(crate) fn web_dir_usable(web_dir: &[u8]) -> bool {
+    if web_dir.is_empty() || web_dir.contains(&0) {
+        return false;
+    }
+    let mut index = web_dir.to_vec();
+    index.push(crate::paths::PATH_SEPARATOR);
+    index.extend_from_slice(b"index.html");
+    std::fs::File::open(crate::cleanup::bytes_to_path_buf(&index))
+        .and_then(|f| f.metadata())
+        .is_ok_and(|m| m.is_file())
+}
+
+/// A built-in file with the trailing NUL the callers expect.
+fn load_embedded_file(rel: &[u8]) -> Option<Vec<u8>> {
+    if web_file_is_forbidden(rel) {
+        return None;
+    }
+    let data = embedded_file(rel)?;
+    let mut buf = Vec::with_capacity(data.len() + 1);
+    buf.extend_from_slice(data);
+    buf.push(0);
+    Some(buf)
 }
 
 /// Loads a static file from WebDir (with a trailing NUL), but never a `.conf`
@@ -1022,7 +1068,9 @@ where
         return keep_alive;
     }
 
-    if cfg.web_dir.is_empty() {
+    // WebDir when it holds the web interface, else the one built in
+    let embedded = !web_dir_usable(cfg.web_dir);
+    if embedded && !has_embedded_webui() {
         send_error(
             ERR_HTTP_SERVICE_UNAVAILABLE,
             true,
@@ -1065,7 +1113,12 @@ where
             disk_filename.push(crate::paths::PATH_SEPARATOR);
             disk_filename.extend_from_slice(part);
 
-            let Some(buf) = load_web_file(&disk_filename, cfg.config_file) else {
+            let loaded = if embedded {
+                load_embedded_file(part)
+            } else {
+                load_web_file(&disk_filename, cfg.config_file)
+            };
+            let Some(buf) = loaded else {
                 let mut w = Vec::with_capacity(32 + part.len());
                 w.extend_from_slice(b"Web-Server: ");
                 w.extend_from_slice(ERR_HTTP_NOT_FOUND);
@@ -1119,7 +1172,14 @@ where
             log_msg(0, &dbg);
         }
 
-        let Some(mut buf) = load_web_file(&filename, cfg.config_file) else {
+        let loaded = if embedded {
+            let mut rel = url.strip_prefix(b"/").unwrap_or(&url).to_vec();
+            rel.extend_from_slice(def_res);
+            load_embedded_file(&rel)
+        } else {
+            load_web_file(&filename, cfg.config_file)
+        };
+        let Some(mut buf) = loaded else {
             let base = &filename[crate::paths::base_file_name(&filename)..];
             let ignorable = web_is_ignorable_404(base);
             send_error(
@@ -1281,6 +1341,29 @@ mod tests {
         assert!(text.contains(
             "Content-Type: application/json\r\nContent-Encoding: gzip\r\nETag: \"abc\"\r\n"
         ));
+    }
+
+    #[test]
+    fn the_web_interface_is_built_in_and_config_copies_are_never_served() {
+        assert!(has_embedded_webui());
+        let index = embedded_file(b"index.html").unwrap();
+        assert!(index.windows(8).any(|w| w == b"setup.js"));
+        assert!(embedded_file(b"lib/jquery.min.js").is_some());
+        assert!(embedded_file(b"../rustyget.conf").is_none());
+        assert!(!web_dir_usable(b""));
+        assert!(!web_dir_usable(b"/nonexistent/webui"));
+        let dir = std::env::temp_dir().join(format!("rg-webdir-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!web_dir_usable(dir.to_str().unwrap().as_bytes()), "no index.html");
+        std::fs::write(dir.join("index.html"), b"x").unwrap();
+        assert!(web_dir_usable(dir.to_str().unwrap().as_bytes()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for name in [&b"rustyget.conf"[..], b"x/RUSTYGET.CONF", b"rustyget.conf.bak-20261123-101010", b".rustyget.conf.saving-42"] {
+            assert!(web_file_is_forbidden(name), "{}", String::from_utf8_lossy(name));
+            assert!(load_embedded_file(name).is_none());
+        }
+        assert!(!web_file_is_forbidden(b"config.js"));
+        assert_eq!(load_embedded_file(b"index.html").unwrap().last(), Some(&0));
     }
 
     #[test]

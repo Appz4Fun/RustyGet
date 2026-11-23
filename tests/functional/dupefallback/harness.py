@@ -10986,6 +10986,115 @@ def scenario_pardamagerepairable(daemon, t):
     return ('pardamagerepairable', ok, 'primary=%s failover_logs=%d' % (hp['Status'], over))
 
 
+def _livepar_release(t, tag, seed, missing, recovery, size=2_000_000, block=524288):
+    """8 data files of <size> (50 KB articles) with a par2 set of <block> blocks and
+    <recovery> recovery blocks in one volume; <missing> maps a data file number to the
+    part numbers it loses. Returns the NZB members and the payloads by name."""
+    import subprocess as _sp
+    work = t.path('data', tag)
+    os.makedirs(work, exist_ok=True)
+    names, payloads = [], {}
+    for i in range(8):
+        name = 'data%d.bin' % i
+        payloads[name] = _payload(size, seed + i)
+        t.write_file(os.path.join('data', tag, name), payloads[name])
+        names.append(name)
+    _sp.run(['par2', 'create', '-q', '-q', '-s%d' % block, '-c%d' % recovery, '-n1', '-a', 'rel',
+             'rel.par2'] + names, cwd=work, check=True, capture_output=True)
+    members = []
+    for name in sorted(n for n in os.listdir(work) if n.endswith('.par2')):
+        members.append(('%s/%s' % (tag, name), name, os.path.getsize(os.path.join(work, name)), 50_000, set()))
+    for i, name in enumerate(names):
+        members.append(('%s/%s' % (tag, name), name, size, 50_000, set(missing.get(i, ()))))
+    return members, payloads
+
+
+def _livepar_io(t, timeout=30):
+    """The live PAR I/O line of the job (written when its session ends), parsed into
+    numbers; {} when none was written within <timeout> seconds."""
+    pattern = re.compile(
+        r'Live PAR \(job \d+\) I/O: source_bytes_read ([\d.]+) MB .*?backfill_bytes_read ([\d.]+) MB, '
+        r'recovery_bytes_read ([\d.]+) MB.*?; (\d+) article\(s\) parked, (\d+) slice\(s\) read back from disk')
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        found = pattern.findall(t.read_file('nzbget.log').decode(errors='replace'))
+        if found:
+            source, backfill, recovery, parked, read_back = found[-1]
+            return {'source_mb': float(source), 'backfill_mb': float(backfill),
+                    'recovery_mb': float(recovery), 'parked': int(parked), 'read_back': int(read_back)}
+        time.sleep(0.5)
+    return {}
+
+
+def _livepar_run(daemon, t, tag, seed, missing, recovery):
+    members, payloads = _livepar_release(t, tag, seed, missing, recovery)
+    api = daemon.wait_ready()
+    daemon.append(api, 'Live', build_multi_nzb(members), False, tag + '-key', 100)
+    h = daemon.wait_history(api, 'Live', timeout=300)
+    intact = all(_verify_output(t, data, name, dirs=(('main', 'dst'), ('main', 'inter')))
+                 for name, data in payloads.items())
+    return h, intact, _livepar_io(t)
+
+
+def scenario_liveparnocache(daemon, t):
+    """Live PAR with no article cache (ArticleCache=0): RAM never holds an article, so
+    every one is a cache miss. Live repair must not give up: each article's slices are
+    parked and read back whole from the DirectWrite file once all their bytes are on
+    disk, the recovery volume is fetched for the two damaged blocks, and the live
+    repair rebuilds them as the download ends. No batch par-repair runs."""
+    h, intact, io = _livepar_run(daemon, t, 'lnc', 12480, {0: {5}, 1: {5}}, 3)
+    live = _grep_log(t, 'as the download ended')
+    batch = _grep_log(t, 'PAR repair timings for')
+    ok = (h['Status'].startswith('SUCCESS') and intact and live >= 1 and batch == 0
+          and io.get('parked', 0) > 0 and io.get('read_back', 0) > 0)
+    return ('liveparnocache', ok, 'status=%s intact=%s live_repairs=%d batch_repairs=%d io=%s'
+            % (h['Status'], intact, live, batch, io))
+
+
+def scenario_liveparplanned(daemon, t):
+    """Live PAR sizes its recovery slots up front (with_recovery_plan): the slots for
+    the expected damage plus margin exist before the first source slice arrives, so
+    the recovery blocks fold in without re-reading any source slice
+    (backfill_bytes_read 0), and the live repair finishes the job as the download
+    ends with no batch par-repair."""
+    h, intact, io = _livepar_run(daemon, t, 'lpl', 12490, {2: {5}, 6: {30}}, 3)
+    live = _grep_log(t, 'as the download ended')
+    batch = _grep_log(t, 'PAR repair timings for')
+    ok = (h['Status'].startswith('SUCCESS') and intact and live >= 1 and batch == 0
+          and bool(io) and io['backfill_mb'] == 0.0)
+    return ('liveparplanned', ok, 'status=%s intact=%s live_repairs=%d batch_repairs=%d io=%s'
+            % (h['Status'], intact, live, batch, io))
+
+
+def scenario_livepargrow(daemon, t):
+    """Damage grows past the initial recovery plan (planned for the 0 failures seen when
+    the index arrived, plus margin: 2 slots; 4 blocks get damaged later): the slots
+    grow with the damage (set_max_syndrome_slots), the late slots are back-filled, and
+    the live repair still finishes the job as the download ends, with no batch
+    par-repair."""
+    h, intact, io = _livepar_run(daemon, t, 'lpg', 12500, {4: {35}, 5: {20}, 6: {30}, 7: {30}}, 6)
+    live = _grep_log(t, 'as the download ended')
+    batch = _grep_log(t, 'PAR repair timings for')
+    grew = _grep_log(t, 'repair memory grew to')
+    ok = h['Status'].startswith('SUCCESS') and intact and live >= 1 and batch == 0 and grew >= 1
+    return ('livepargrow', ok, 'status=%s intact=%s live_repairs=%d batch_repairs=%d grew=%d io=%s'
+            % (h['Status'], intact, live, batch, grew, io))
+
+
+def scenario_parinplace(daemon, t):
+    """The batch fallback (live PAR off) repairs in place: only the damaged blocks are
+    written into the damaged files, no full-size backup copy is made, and the phase
+    timings of the repair are logged on one line."""
+    h, intact, _ = _livepar_run(daemon, t, 'pip', 12510, {0: {5}, 3: {12}}, 3)
+    rewrote = _grep_log(t, 'Rewrote ')
+    timings = _grep_log(t, 'PAR repair timings for')
+    backups = [f for base in (('main', 'dst'), ('main', 'inter')) for f in t.find_files(*base)
+               if re.search(r'data\d\.bin\.\d+$', f)]
+    ok = h['Status'].startswith('SUCCESS') and intact and rewrote >= 1 and timings >= 1 and not backups
+    return ('parinplace', ok, 'status=%s intact=%s in_place_logs=%d timing_logs=%d backups=%s'
+            % (h['Status'], intact, rewrote, timings, backups))
+
+
 def _parless_run(daemon, t, tag, backup_size, backup_par2=0):
     """A single .mkv without par2 (400 articles, every 10th missing: health
     90%, and enough failures for the failover check) and a duplicate in
@@ -12552,6 +12661,10 @@ SCENARIOS = {
     'twinaltsampled': scenario_twinaltsampled,
     'twinparrepair': scenario_twinparrepair,
     'pardamagerepairable': scenario_pardamagerepairable,
+    'liveparnocache': scenario_liveparnocache,
+    'liveparplanned': scenario_liveparplanned,
+    'livepargrow': scenario_livepargrow,
+    'parinplace': scenario_parinplace,
     'parlesscritical': scenario_parlesscritical,
     'parlesstwin': scenario_parlesstwin,
     'parlesstwinpar': scenario_parlesstwinpar,
@@ -12941,6 +13054,10 @@ SCENARIO_OPTIONS = {
     'twinaltsampled': ['HealthCheck=dupe'],
     'twinparrepair': ['HealthCheck=none', 'DupeArticleFallback=no', 'ParCheck=force', 'Unpack=no'],
     'pardamagerepairable': ['ParCheck=auto', 'HealthCheck=dupe', 'DupeArticleFallback=no'],
+    'liveparnocache': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=0', 'DirectWrite=yes'],
+    'liveparplanned': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],
+    'livepargrow': ['ParCheck=auto', 'LiveParRepair=yes', 'ArticleCache=256', 'DirectWrite=yes'],
+    'parinplace': ['ParCheck=auto', 'LiveParRepair=no'],
     'parlesscritical': ['HealthCheck=dupe', 'DupeArticleFallback=no'],
     'parlesstwin': ['HealthCheck=dupe', 'DupeArticleFallback=no'],
     'parlesstwinpar': ['HealthCheck=dupe', 'DupeArticleFallback=no'],

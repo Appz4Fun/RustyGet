@@ -34,6 +34,11 @@ pub const PAR_SCAN_DUPE: i32 = 3;
 
 static UNPACK_MUTEX: Mutex<()> = Mutex::new(());
 
+/// An extraction (unrar, 7-Zip, direct unpack) holds the unpack lock right now.
+pub(crate) fn extraction_running() -> bool {
+    matches!(UNPACK_MUTEX.try_lock(), Err(std::sync::TryLockError::WouldBlock))
+}
+
 #[inline]
 pub(crate) fn current_time_sec() -> i64 {
     // SAFETY: `libc::time(null)` is async-signal-safe and reads the wall clock.
@@ -697,16 +702,19 @@ impl NzbgetRsParChecker {
 
             let opts = hooks.read_options();
             self.lock_signal().par_ignore_ext = opts.par_ignore_ext.clone();
-            let cpu_cores = std::thread::available_parallelism()
-                .map(|n| n.get() as i32)
-                .unwrap_or(1);
+            let cpu_cores = crate::parchecker::batch_repair_threads(
+                opts.par_threads,
+                crate::sysmetrics::cpu_count() as i32,
+                crate::sysmetrics::physical_cpu_count() as i32,
+                crate::parchecker::repair_shares_cpu(),
+            );
             let monitor_mb = if opts.has_memory_monitor {
                 crate::articledl::memory_monitor_effective_par_buffer_mb(opts.par_buffer_mb)
             } else {
                 0
             };
             let (threads, mem) = crate::parchecker::calc_repairer_resources(
-                opts.par_threads,
+                0,
                 cpu_cores,
                 opts.has_memory_monitor,
                 monitor_mb,
@@ -3281,10 +3289,14 @@ pub(crate) fn live_repair_should_defer_post(nzb_id: i32) -> bool {
     const LIMIT: Duration = Duration::from_secs(10);
     let running = direct_unpack_holds()
         .get(&nzb_id)
-        .is_some_and(|state| state.live_repair_running);
+        .is_some_and(|state| state.live_repair_running)
+        || live_end_repair_running(nzb_id);
+    // A download-end live repair that can run now finishes the job in RAM: wait for it
+    // rather than starting a batch repair.
     let pending = running
         || crate::parchecker::streaming_session_pending_completed_jobs().contains(&nzb_id)
-        || crate::parchecker::streaming_session_completion_drain_active(nzb_id);
+        || crate::parchecker::streaming_session_completion_drain_active(nzb_id)
+        || crate::parchecker::streaming_session_download_end_targets(nzb_id).is_some();
     let mut since = SINCE.lock().unwrap_or_else(|e| e.into_inner());
     if !pending {
         since.remove(&nzb_id);
@@ -3322,6 +3334,12 @@ pub(crate) fn direct_unpack_try_live_par_repair(
     }
     let bytes = {
         let map = direct_unpack_holds();
+        let holding = map.get(&nzb_id).is_some_and(|state| !state.held.is_empty());
+        if !holding {
+            drop(map);
+            live_par_repair_at_download_end(host, nzb);
+            return;
+        }
         let Some(state) = map.get(&nzb_id) else {
             return;
         };
@@ -3428,6 +3446,126 @@ pub(crate) fn direct_unpack_try_live_par_repair(
         };
         crate::log::log_active_bytes(kind, &message);
     });
+    if let Ok(handle) = spawned {
+        let previous = LIVE_PAR_HELPERS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(nzb_id, handle);
+        if let Some(previous) = previous {
+            let _ = previous.join();
+        }
+    }
+}
+
+/// Downloads whose download-end live repair is running.
+#[cfg(unix)]
+static LIVE_END_REPAIRS: std::sync::LazyLock<Mutex<std::collections::HashSet<i32>>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
+
+#[cfg(unix)]
+fn live_end_repair_running(nzb_id: i32) -> bool {
+    LIVE_END_REPAIRS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(&nzb_id)
+}
+
+/// The live repair at the end of a download without held direct-unpack volumes: once every
+/// slice arrived or failed and the recovery on hand covers the damage, rebuild the damaged
+/// files from the live syndromes (no batch verify or repair read) and certify their CRCs,
+/// so post-processing's par-check finds them repaired and no batch repair runs. Files still
+/// under another name (obfuscated, not renamed yet) leave the job to par-check. The caller
+/// holds the queue lock; the repair runs on its own thread.
+#[cfg(unix)]
+fn live_par_repair_at_download_end(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    nzb: &crate::queuesubsys_host::NzbSnap,
+) {
+    let nzb_id = nzb.id;
+    if live_end_repair_running(nzb_id) {
+        return;
+    }
+    let Some(names) = crate::parchecker::streaming_session_download_end_targets(nzb_id) else {
+        return;
+    };
+    if names.len() > 512 {
+        return;
+    }
+    let mut targets = Vec::with_capacity(names.len());
+    for name in &names {
+        let found = (0..host.nzb_completed_files_len(nzb.ptr))
+            .map(|index| host.nzb_completed_file_at(nzb.ptr, index))
+            .find(|file| !file.par_file && file.filename == *name);
+        let Some(file) = found else {
+            return;
+        };
+        let path = crate::fsops::path(&nzb.dest_dir).join(crate::fsops::path(name));
+        if !path.is_file() {
+            return;
+        }
+        targets.push(crate::parlive::WriterTarget {
+            file_id: file.id,
+            path,
+        });
+    }
+    let bytes = targets.iter().fold(4096u64, |total, target| {
+        total.saturating_add((target.path.as_os_str().len() as u64).saturating_mul(4) + 512)
+    });
+    let Ok(charge) = crate::parlive::reserve_control(
+        nzb_id,
+        bytes,
+        crate::parchecker::effective_live_pool_bytes(),
+    ) else {
+        return;
+    };
+    let Ok(request) = crate::parchecker::streaming_session_prepare_repair(
+        nzb_id,
+        targets,
+        std::sync::Arc::new(charge),
+    ) else {
+        return;
+    };
+    if !LIVE_END_REPAIRS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(nzb_id)
+    {
+        return;
+    }
+    struct Running(i32);
+    impl Drop for Running {
+        fn drop(&mut self) {
+            LIVE_END_REPAIRS
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&self.0);
+        }
+    }
+    let running = Running(nzb_id);
+    let nzb_name = nzb.name.clone();
+    let spawned = std::thread::Builder::new()
+        .name("live-par-end-repair".to_string())
+        .spawn(move || {
+            let running = running; // Every exit, including unwind, lets par-check run.
+            let started = std::time::Instant::now();
+            let outcome = request
+                .acquire()
+                .and_then(|lease| lease.repair_and_publish(|verified| verified.len(), || {}));
+            let mut message = b"Live par-repair for ".to_vec();
+            message.extend_from_slice(&nzb_name);
+            let kind = match outcome {
+                Ok((report, files)) => {
+                    message.extend_from_slice(format!(": repaired {} block(s) with {} recovery block(s) in {:.1} s as the download ended, {} file(s) verified; no batch repair needed", report.repaired_slices.len(), report.recovery_used, started.elapsed().as_secs_f64(), files).as_bytes());
+                    MK_INFO
+                }
+                Err(error) => {
+                    message.extend_from_slice(format!(" at download end not possible ({error}); left to par-check").as_bytes());
+                    MK_DETAIL
+                }
+            };
+            crate::log::log_active_bytes(kind, &message);
+            drop(running);
+        });
     if let Ok(handle) = spawned {
         let previous = LIVE_PAR_HELPERS
             .lock()

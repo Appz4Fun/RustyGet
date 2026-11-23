@@ -2494,6 +2494,7 @@ unsafe fn emit_rpc_nzb(
         dupe_recovered_bytes: n.dupe_recovered_bytes,
         dupe_recovered_holes: n.dupe_recovered_holes,
         live_repairing: c_int::from(n.has_live_repair_thread),
+        live_repair_progress: crate::parchecker::streaming_session_progress_permille(n.id),
         health: n.health,
         critical_health: n.critical_health_exact,
         dupe_key: &c_dupe_key,

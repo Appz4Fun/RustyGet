@@ -99,6 +99,8 @@ pub struct NzbgetRsRpcNzbInfoInput<'a> {
     pub dupe_recovered_bytes: i64,
     pub dupe_recovered_holes: c_int,
     pub live_repairing: c_int,
+    /// Live PAR progress in permille (verified slices of all slices), -1 without a session.
+    pub live_repair_progress: c_int,
     pub health: c_int,
     pub critical_health: c_int,
     pub dupe_key: &'a CStr,
@@ -1112,6 +1114,7 @@ fn write_nzb_info_fields(out: &mut Vec<u8>, json: bool, nzb: &RpcNzbInfo<'_>) {
             \"DupeRecoveredBytesHi\" : {},\n\
             \"DupeRecoveredHoles\" : {},\n\
             \"LiveRepairing\" : {},\n\
+            \"LiveRepairProgress\" : {},\n\
             \"Health\" : {},\n\
             \"CriticalHealth\" : {},\n\
             \"DupeKey\" : \"{}\",\n\
@@ -1160,6 +1163,7 @@ fn write_nzb_info_fields(out: &mut Vec<u8>, json: bool, nzb: &RpcNzbInfo<'_>) {
             dupe_hi,
             n.dupe_recovered_holes,
             live_repair_str,
+            n.live_repair_progress,
             n.health,
             n.critical_health,
             dupe_key_enc,
@@ -1211,6 +1215,7 @@ fn write_nzb_info_fields(out: &mut Vec<u8>, json: bool, nzb: &RpcNzbInfo<'_>) {
             <member><name>DupeRecoveredBytesHi</name><value><i4>{}</i4></value></member>\n\
             <member><name>DupeRecoveredHoles</name><value><i4>{}</i4></value></member>\n\
             <member><name>LiveRepairing</name><value><boolean>{}</boolean></value></member>\n\
+            <member><name>LiveRepairProgress</name><value><i4>{}</i4></value></member>\n\
             <member><name>Health</name><value><i4>{}</i4></value></member>\n\
             <member><name>CriticalHealth</name><value><i4>{}</i4></value></member>\n\
             <member><name>DupeKey</name><value><string>{}</string></value></member>\n\
@@ -1259,6 +1264,7 @@ fn write_nzb_info_fields(out: &mut Vec<u8>, json: bool, nzb: &RpcNzbInfo<'_>) {
             dupe_hi,
             n.dupe_recovered_holes,
             live_repair_str,
+            n.live_repair_progress,
             n.health,
             n.critical_health,
             dupe_key_enc,

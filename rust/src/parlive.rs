@@ -73,7 +73,10 @@ pub(crate) fn resources(
             max_staging_bytes: working,
             solve_mem_limit_bytes: solve,
             solve_threads: 1,
-            fold_threads: 0,
+            // Fold off the thread that hands articles over; par-rs bounds the queue by
+            // `max_working_bytes` (and drops to inline folding when a slice is too large
+            // for a queued job to fit).
+            fold_threads: 2,
             // Re-reading verified slices for new slots runs on its own thread
             // (`streaming_session_kick_backfill`), never under the queue lock.
             defer_backfill: true,

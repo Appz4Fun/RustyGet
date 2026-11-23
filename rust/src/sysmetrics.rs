@@ -367,6 +367,34 @@ pub fn cpu_count() -> usize {
     }
 }
 
+/// Number of physical CPU cores (hyper-threads of one core count once), never more than
+/// [`cpu_count`] and at least 1. Falls back to the logical count when the topology is unknown.
+pub fn physical_cpu_count() -> usize {
+    let logical = cpu_count().max(1);
+    platform::physical_cores().map_or(logical, |n| n.clamp(1, logical))
+}
+
+/// Distinct (`physical id`, `core id`) pairs of a Linux `/proc/cpuinfo`; `None` when it lists
+/// no core ids (many ARM kernels), where every logical CPU is its own core.
+pub fn parse_cpuinfo_physical_cores(text: &str) -> Option<usize> {
+    let mut cores = std::collections::HashSet::new();
+    let (mut package, mut core) = (None::<String>, None::<String>);
+    let field = |line: &str| line.split_once(':').map(|(_, v)| v.trim().to_owned());
+    for line in text.lines().chain(std::iter::once("")) {
+        if line.trim().is_empty() {
+            if let Some(core) = core.take() {
+                cores.insert((package.take().unwrap_or_default(), core));
+            }
+            package = None;
+        } else if line.starts_with("physical id") {
+            package = field(line);
+        } else if line.starts_with("core id") {
+            core = field(line);
+        }
+    }
+    (!cores.is_empty()).then_some(cores.len())
+}
+
 /// The 1, 5 and 15 minute load averages.
 pub fn load_average() -> [f64; 3] {
     let mut l = [0.0f64; 3];
@@ -424,6 +452,10 @@ mod platform {
 
     pub fn cpu_identity() -> CpuIdentity {
         parse_cpuinfo(&read("/proc/cpuinfo"))
+    }
+
+    pub fn physical_cores() -> Option<usize> {
+        parse_cpuinfo_physical_cores(&read("/proc/cpuinfo"))
     }
 }
 
@@ -497,6 +529,12 @@ mod platform {
             )
         };
         (rc == 0).then_some(val)
+    }
+
+    pub fn physical_cores() -> Option<usize> {
+        sysctl_raw::<c_int>(c"hw.physicalcpu")
+            .and_then(|n| usize::try_from(n).ok())
+            .filter(|&n| n > 0)
     }
 
     fn page_size() -> u64 {
@@ -627,6 +665,9 @@ mod platform {
     }
     pub fn cpu_identity() -> CpuIdentity {
         CpuIdentity::default()
+    }
+    pub fn physical_cores() -> Option<usize> {
+        None
     }
 }
 
@@ -1109,6 +1150,26 @@ pub fn rpc_reply(is_json: bool, range_sec: Option<i32>) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn physical_cores_count_hyperthreads_once() {
+        // i7-8700K shape: 6 cores, 2 threads each, listed in kernel order.
+        let mut text = String::new();
+        for cpu in 0..12 {
+            text += &format!(
+                "processor\t: {cpu}\nphysical id\t: 0\ncore id\t\t: {}\n\n",
+                cpu % 6
+            );
+        }
+        assert_eq!(parse_cpuinfo_physical_cores(&text), Some(6));
+        // Two sockets reuse core ids.
+        let two = "physical id : 0\ncore id : 0\n\nphysical id : 1\ncore id : 0\n";
+        assert_eq!(parse_cpuinfo_physical_cores(two), Some(2));
+        // No core ids (ARM): unknown.
+        assert_eq!(parse_cpuinfo_physical_cores("processor : 0\nBogoMIPS : 50\n"), None);
+        let n = physical_cpu_count();
+        assert!(n >= 1 && n <= cpu_count());
+    }
 
     #[test]
     fn proc_stat_counts_idle_and_iowait() {

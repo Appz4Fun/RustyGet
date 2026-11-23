@@ -400,7 +400,14 @@ fn damaged_recovery_volume_still_delivers_its_good_blocks() {
     assert!(!streaming_session_process_completed_file(id, |_| Ok(()))
         .unwrap()
         .unwrap());
-    assert_eq!(streaming_session_status(id).unwrap().ready_recovery, 3);
+    // Slots follow the planned exponents (no damage: 0, 1, 2): the two good blocks of
+    // vol03+3 are absorbed or, without a slot, kept as turned away for growth.
+    let entry = active_streaming_session(id).unwrap();
+    assert!(
+        entry.session.status().ready_recovery + entry.session.turned_away_recovery_slices()
+            >= 3
+    );
+    drop(entry);
     streaming_session_forget(id);
 }
 
@@ -737,7 +744,7 @@ fn live_target_rejects_replacement_after_source_attestation() {
 fn cancelled_target_lease_never_publishes_a_hold_release() {
     let fx = Fixture::new();
     let set = fx.set();
-    let id = -1900141;
+    let id = -1900191;
     streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 << 20).unwrap();
     let fid = set.main.as_ref().unwrap().recoverable_file_ids[0];
     let target = fx.0.join(set.file_descs[&fid].local_name());
@@ -767,7 +774,7 @@ fn cancelled_target_lease_never_publishes_a_hold_release() {
 #[test]
 fn live_cancellation_and_hold_publication_share_one_fence() {
     let fx = Fixture::new();
-    let id = -1900142;
+    let id = -1900192;
     streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 << 20).unwrap();
     let entry = active_streaming_session(id).unwrap();
     let gate = Arc::clone(&entry.writers);
@@ -1359,5 +1366,150 @@ fn live_busy_completion_ticket_survives_until_later_tick() {
         .unwrap());
     assert!(!streaming_session_pending_completed_jobs().contains(&id));
     assert!(active_streaming_session(id).is_some());
+    streaming_session_forget(id);
+}
+
+/// Copies each source of the fixture to `<n>.out.tmp` (a DirectWrite file under another
+/// name than its par2 name) and returns `(par2 name, written path, bytes)` per file.
+fn written_copies(fx: &Fixture, set: &PacketSet) -> Vec<(Vec<u8>, PathBuf, Vec<u8>)> {
+    let written = fx.0.join("written");
+    std::fs::create_dir_all(&written).unwrap();
+    let mut out = Vec::new();
+    for (n, file_id) in set.main.as_ref().unwrap().recoverable_file_ids.iter().enumerate() {
+        let desc = &set.file_descs[file_id];
+        let bytes = std::fs::read(fx.0.join(desc.local_name())).unwrap();
+        let path = written.join(format!("{n}.out.tmp"));
+        std::fs::write(&path, &bytes).unwrap();
+        out.push((desc.name.clone(), path, bytes));
+    }
+    out
+}
+
+/// Defers `bytes[from..to]` of a file as articles of `article` bytes that RAM no longer
+/// holds (every snapshot misses), naming the file they were written into.
+fn defer_uncached(
+    id: i32,
+    name: &[u8],
+    path: &Path,
+    bytes: &[u8],
+    (from, to): (usize, usize),
+    article: usize,
+) {
+    let mut offset = from;
+    while offset < to {
+        let end = (offset + article).min(to);
+        streaming_session_defer_committed_article(
+            id,
+            (None, name, &[]),
+            offset as u64,
+            (end - offset) as u64,
+            crc32fast::hash(&bytes[offset..end]),
+            Some(path),
+            || None,
+        )
+        .unwrap()
+        .unwrap();
+        offset = end;
+    }
+}
+
+#[test]
+fn live_cache_miss_parks_slices_and_reads_them_back_once_complete() {
+    let fx = Fixture::new();
+    let set = fx.set();
+    let id = -1900180;
+    streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 * 1024 * 1024)
+        .unwrap();
+    let files = written_copies(&fx, &set);
+    // The first half of every file: a cache miss is no refusal and no error.
+    for (name, path, bytes) in &files {
+        defer_uncached(id, name, path, bytes, (0, bytes.len() / 2), 1000);
+    }
+    assert!(
+        streaming_session_last_error(id).is_none(),
+        "a cache miss must not be a refusal"
+    );
+    streaming_session_drain_articles(id).unwrap().unwrap();
+    let half = streaming_session_status(id).unwrap();
+    assert!(half.verified < half.total);
+    assert_eq!(half.damaged, 0, "slices not complete on disk stay parked, never damaged");
+    // The rest arrives: every slice is read back from the written file and verified,
+    // before any file completes.
+    for (name, path, bytes) in &files {
+        defer_uncached(id, name, path, bytes, (bytes.len() / 2, bytes.len()), 1000);
+    }
+    // One drain reads back at most COMMITTED_REPLAY_SLICES; the coordinator drains again
+    // while parked slices are due.
+    for _ in 0..16 {
+        streaming_session_drain_articles(id).unwrap().unwrap();
+    }
+    let status = streaming_session_status(id).unwrap();
+    assert_eq!(status.verified, status.total);
+    let total: u64 = files.iter().map(|(_, _, bytes)| bytes.len() as u64).sum();
+    let stats = streaming_session_io_stats(id).unwrap();
+    assert!(
+        stats.source_bytes_read >= total,
+        "slices are read from their written files"
+    );
+    let metrics = streaming_session_metrics(id).unwrap();
+    assert_eq!(metrics.capture_refusals, 0);
+    assert!(metrics.cache_misses > 0);
+    let entry = active_streaming_session(id).unwrap();
+    assert_eq!(entry.parked_slices(), 0);
+    assert!(entry.metrics.committed_slices.load(Ordering::Relaxed) as usize >= status.total);
+    assert!(entry.io_stats_line(id).contains("0 still parked"));
+    drop(entry);
+    streaming_session_forget(id);
+}
+
+#[test]
+fn live_committed_slice_waits_until_its_bytes_reach_the_disk() {
+    let fx = Fixture::new();
+    let set = fx.set();
+    let id = -1900181;
+    streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 * 1024 * 1024)
+        .unwrap();
+    let files = written_copies(&fx, &set);
+    // Every article has arrived, but the written files hold zeros: the cache flush
+    // has not happened yet. Nothing may be verified or damaged from those bytes.
+    for (name, path, bytes) in &files {
+        std::fs::write(path, vec![0u8; bytes.len()]).unwrap();
+        defer_uncached(id, name, path, bytes, (0, bytes.len()), 4096);
+    }
+    streaming_session_drain_articles(id).unwrap().unwrap();
+    let before = streaming_session_status(id).unwrap();
+    assert_eq!(before.verified, 0);
+    assert_eq!(before.damaged, 0);
+    // The flush lands; the slices are read again after their back-off.
+    for (_, path, bytes) in &files {
+        std::fs::write(path, bytes).unwrap();
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        streaming_session_drain_articles(id).unwrap().unwrap();
+        let status = streaming_session_status(id).unwrap();
+        if status.verified == status.total {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "parked slices never retried"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    streaming_session_forget(id);
+}
+
+#[test]
+fn live_session_plans_recovery_slots_for_the_expected_damage() {
+    let fx = Fixture::new();
+    let id = -1900182;
+    streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 * 1024 * 1024)
+        .unwrap();
+    // No failures known yet: the margin of 2 slots, allocated up front.
+    let entry = active_streaming_session(id).unwrap();
+    assert_eq!(entry.session.max_syndrome_slots(), 2);
+    assert_eq!(entry.session.status().syndrome_slots, 2);
+    drop(entry);
     streaming_session_forget(id);
 }

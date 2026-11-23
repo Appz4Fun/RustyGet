@@ -2769,7 +2769,7 @@ impl NzbgetRsArticleDownloader {
             article_ptr: self.article_ptr,
             status: self.status.load(Ordering::SeqCst),
             has_content_analyzer: w.has_analyzer,
-            analyzed_par_file: w.analyzer.as_ref().is_some_and(|ca| ca.par_file),
+            analyzed_par_file: w.analyzer.as_ref().is_some_and(|ca| ca.par_file()),
             has_article_filename: has_afn,
             decoded_file_size: w.decoded_file_size,
             downloaded_size: w.downloaded_size as i64,
@@ -2786,8 +2786,8 @@ impl NzbgetRsArticleDownloader {
         if w.parcheck_enabled {
             if let Some(ref mut ca) = w.analyzer {
                 let h = ca.finish();
-                par_out = ca.par_file;
-                let set_id = ca.par_set_id;
+                par_out = ca.par_file();
+                let set_id = ca.par_set_id();
                 w.hash16k_c = h;
                 if let Some(id) = set_id {
                     w.par_set_id_c = id;

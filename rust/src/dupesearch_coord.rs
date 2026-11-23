@@ -1254,7 +1254,7 @@ impl DonorServerExchange for NntpHealthTransportShared {
                             continue;
                         };
                         known_any = true;
-                        let raw = pool.get_check_connection(&srv);
+                        let raw = crate::light_pool::check_connection(&pool, &srv);
                         if !raw.is_null() {
                             need_join = srv.join_group;
                             conn_ptr = raw as usize;
@@ -1293,7 +1293,10 @@ impl DonorServerExchange for NntpHealthTransportShared {
                 // a backbone sibling can answer this batch: block this server for the
                 // retry interval (as a download's connect failure does) and ask the next
                 let failed_id = conn.server.id;
-                pool.block_server(&conn.server);
+                // a light connection's failed connect is unknown: it never blocks the server
+                if !crate::light_pool::is_light(conn) {
+                    pool.block_server(&conn.server);
+                }
                 drop(release);
                 failed.push(failed_id);
                 if ids.iter().all(|id| failed.contains(id)) {
@@ -1437,7 +1440,11 @@ fn get_nntp_fetch_host(
 ) -> Option<&'static dyn crate::articlefetcher::NntpHost> {
     #[cfg(unix)]
     if crate::net::active_server_pool().is_some() {
-        return Some(&crate::articlefetcher::NativeNntpHost);
+        // fleet probes, intake, identity and par2 index reads: a few articles
+        // each, on the light connections (`crate::light_pool`)
+        return Some(crate::light_pool::light(
+            &crate::articlefetcher::NativeNntpHost,
+        ));
     }
     None
 }
@@ -1600,7 +1607,9 @@ fn probe_copies(
         .map(|_| Mutex::new((crate::twin::Listed::default(), Packing::Unknown)))
         .collect();
     let ctx_addr = host_ctx as usize;
-    for chunk in (0..n).collect::<Vec<_>>().chunks(FLEET_KIND_PROBE_PARALLEL) {
+    // no more at once than there are light connections: the rest queue
+    let parallel = crate::light_pool::parallel_jobs_now(FLEET_KIND_PROBE_PARALLEL);
+    for chunk in (0..n).collect::<Vec<_>>().chunks(parallel) {
         if now_unix_sec() >= deadline || donor_stopping() || http_stopped() {
             break;
         }
@@ -1750,7 +1759,9 @@ fn fleet_prints_keyed(
         .map(|_| Mutex::new((Err(INTAKE_TIME_RAN_OUT.to_string()), None)))
         .collect();
     let ctx_addr = host_ctx as usize;
-    for chunk in (0..n).collect::<Vec<_>>().chunks(FLEET_KIND_PROBE_PARALLEL) {
+    // no more at once than there are light connections: the rest queue
+    let parallel = crate::light_pool::parallel_jobs_now(FLEET_KIND_PROBE_PARALLEL);
+    for chunk in (0..n).collect::<Vec<_>>().chunks(parallel) {
         if now_unix_sec() >= deadline || donor_stopping() || http_stopped() {
             break;
         }

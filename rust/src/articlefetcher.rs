@@ -105,6 +105,11 @@ pub trait NntpHost: Send + Sync {
     /// Read/write timeout for `conn`; `secs <= 0` restores the connection's own.
     fn set_io_timeout(&self, conn: ConnHandle, secs: i32);
     fn detail(&self, msg: &[u8]);
+    /// The host to use for light work (`crate::light_pool::light`): one that
+    /// takes light connections first. `None`: this host as it is.
+    fn light_host(&self) -> Option<&'static dyn NntpHost> {
+        None
+    }
 }
 
 /// The daemon's [`NntpHost`]: the active server pool, stat meter, work state,
@@ -167,22 +172,11 @@ impl NntpHost for NativeNntpHost {
     }
 
     fn get_connection(&self, level: i32, excluded: &[ServerHandle]) -> Option<ConnInfo> {
-        let pool = crate::net::active_server_pool()?;
-        // SAFETY: server handles come from `server`/`get_connection` and the
-        // pool keeps its servers alive.
-        let failed: Vec<&crate::net::RsNewsServer> = excluded
-            .iter()
-            .filter(|h| h.0 != 0)
-            .map(|h| unsafe { &*(h.0 as *const crate::net::RsNewsServer) })
-            .collect();
-        let conn_ptr = pool.get_connection(level, None, &failed);
-        // SAFETY: a non-null connection from the pool stays valid until freed.
-        let conn = unsafe { conn_ptr.as_ref() }?;
-        Some(ConnInfo {
-            conn: ConnHandle(conn_ptr as usize),
-            reused: conn.is_connected(),
-            server: server_info(&conn.server),
-        })
+        native_get_connection(level, excluded, false)
+    }
+
+    fn light_host(&self) -> Option<&'static dyn NntpHost> {
+        Some(&LIGHT_HOST)
     }
 
     fn release(&self, conn: ConnHandle, keep_connected: bool) {
@@ -265,6 +259,89 @@ impl NntpHost for NativeNntpHost {
 
     fn detail(&self, msg: &[u8]) {
         crate::log::log_active_bytes(crate::log::MK_DETAIL, msg);
+    }
+}
+
+/// A connection from the active pool at `level`, skipping `excluded`. `light`:
+/// a light connection (`crate::light_pool`); while every light connection is
+/// busy, none (the fetch waits for one, leaving the main pool's check
+/// connections to the duplicate health checks); with no reserve, the main
+/// pool as for any fetch.
+fn native_get_connection(level: i32, excluded: &[ServerHandle], light: bool) -> Option<ConnInfo> {
+    let pool = crate::net::active_server_pool()?;
+    // SAFETY: server handles come from `server`/`get_connection` and the
+    // pool keeps its servers alive.
+    let failed: Vec<&crate::net::RsNewsServer> = excluded
+        .iter()
+        .filter(|h| h.0 != 0)
+        .map(|h| unsafe { &*(h.0 as *const crate::net::RsNewsServer) })
+        .collect();
+    let conn_ptr = if light {
+        match pool.get_light_connection_level(level, &failed) {
+            crate::net::LightPick::Got(c) => c,
+            crate::net::LightPick::Busy => std::ptr::null_mut(),
+            crate::net::LightPick::NoReserve => pool.get_connection(level, None, &failed),
+        }
+    } else {
+        pool.get_connection(level, None, &failed)
+    };
+    // SAFETY: a non-null connection from the pool stays valid until freed.
+    let conn = unsafe { conn_ptr.as_ref() }?;
+    Some(ConnInfo {
+        conn: ConnHandle(conn_ptr as usize),
+        reused: conn.is_connected(),
+        server: server_info(&conn.server),
+    })
+}
+
+/// The daemon's host for light work: [`NativeNntpHost`], taking light
+/// connections first (see [`native_get_connection`]).
+pub struct LightNntpHost;
+
+pub static LIGHT_HOST: LightNntpHost = LightNntpHost;
+
+impl NntpHost for LightNntpHost {
+    fn status(&self) -> HostStatus {
+        NativeNntpHost.status()
+    }
+    fn server(&self, index: usize) -> Option<ServerInfo> {
+        NativeNntpHost.server(index)
+    }
+    fn get_connection(&self, level: i32, excluded: &[ServerHandle]) -> Option<ConnInfo> {
+        native_get_connection(level, excluded, true)
+    }
+    fn release(&self, conn: ConnHandle, keep_connected: bool) {
+        NativeNntpHost.release(conn, keep_connected);
+    }
+    fn conn_server(&self, conn: ConnHandle) -> Option<ServerInfo> {
+        NativeNntpHost.conn_server(conn)
+    }
+    fn connect(&self, conn: ConnHandle) -> bool {
+        NativeNntpHost.connect(conn)
+    }
+    fn join_group(&self, conn: ConnHandle, group: &[u8]) -> Option<Vec<u8>> {
+        NativeNntpHost.join_group(conn, group)
+    }
+    fn request(&self, conn: ConnHandle, cmd: &[u8]) -> Option<Vec<u8>> {
+        NativeNntpHost.request(conn, cmd)
+    }
+    fn read(&self, conn: ConnHandle, buf: &mut [u8]) -> Option<usize> {
+        NativeNntpHost.read(conn, buf)
+    }
+    fn disconnect(&self, conn: ConnHandle) {
+        NativeNntpHost.disconnect(conn);
+    }
+    fn cancel(&self, conn: ConnHandle) {
+        NativeNntpHost.cancel(conn);
+    }
+    fn set_io_timeout(&self, conn: ConnHandle, secs: i32) {
+        NativeNntpHost.set_io_timeout(conn, secs);
+    }
+    fn detail(&self, msg: &[u8]) {
+        NativeNntpHost.detail(msg);
+    }
+    fn light_host(&self) -> Option<&'static dyn NntpHost> {
+        Some(&LIGHT_HOST)
     }
 }
 
@@ -514,6 +591,28 @@ pub fn download_must_wait(limit: i64, cur_speed: i64, mom_speed: i64) -> bool {
     )
 }
 
+/// A connection an [`ArticleFetcher`] holds: returned to the pool when dropped
+/// (disconnected, its state unknown) unless [`Lease::release`]d.
+struct Lease<'a> {
+    fetcher: &'a ArticleFetcher,
+    conn: ConnHandle,
+}
+
+impl Lease<'_> {
+    fn release(mut self, keep_connected: bool) {
+        let conn = std::mem::take(&mut self.conn);
+        self.fetcher.release_connection(conn, keep_connected);
+    }
+}
+
+impl Drop for Lease<'_> {
+    fn drop(&mut self) {
+        if !self.conn.is_none() {
+            self.fetcher.release_connection(self.conn, false);
+        }
+    }
+}
+
 pub struct ArticleFetcher {
     host: &'static dyn NntpHost,
     wait_counter: Mutex<Option<Arc<AtomicI32>>>,
@@ -576,7 +675,7 @@ impl ArticleFetcher {
     }
 
     fn release_connection(&self, conn: ConnHandle, keep_connected: bool) {
-        let mut guard = self.conn_ptr.lock().unwrap();
+        let mut guard = self.conn_ptr.lock().unwrap_or_else(|e| e.into_inner());
         self.host.release(conn, keep_connected);
         if *guard == conn {
             *guard = ConnHandle::default();
@@ -706,13 +805,19 @@ impl ArticleFetcher {
                 self.host.detail(&log);
             }
 
+            // goes back to the pool however the fetch ends (disconnected
+            // unless released the normal way), so no connection leaks
+            let lease = Lease {
+                fetcher: self,
+                conn,
+            };
             let stopped_now = {
                 let mut guard = self.conn_ptr.lock().unwrap();
                 *guard = conn;
                 self.is_stopped()
             };
             if stopped_now {
-                self.release_connection(conn, true);
+                lease.release(true);
                 break;
             }
 
@@ -723,7 +828,7 @@ impl ArticleFetcher {
                 groups,
             );
             let timed_out = result.timed_out;
-            self.release_connection(conn, true);
+            lease.release(true);
 
             if result.success || !result.transient {
                 set_server_unreachable(server_id, false);

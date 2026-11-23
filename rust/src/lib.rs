@@ -42,6 +42,7 @@ pub(crate) mod historycoord;
 #[cfg(unix)]
 pub(crate) mod jobthread;
 pub mod json;
+pub(crate) mod light_pool;
 #[cfg(unix)]
 pub mod log;
 #[cfg(unix)]

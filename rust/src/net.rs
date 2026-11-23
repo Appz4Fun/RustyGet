@@ -2429,6 +2429,11 @@ pub struct RsNewsServer {
     /// Connections of this server currently held by duplicate health checks
     /// (`NzbgetRsServerPool::get_check_connection`).
     pub check_in_use: AtomicUsize,
+    /// Connects and requests that got an answer, for the light reserve's
+    /// flakiness test (`crate::light_pool`).
+    pub io_ok: AtomicUsize,
+    /// Connects and requests that failed or timed out (not cancelled ones).
+    pub io_errors: AtomicUsize,
 }
 
 impl RsNewsServer {
@@ -2478,7 +2483,18 @@ impl RsNewsServer {
             optional,
             block_time: AtomicI64::new(0),
             check_in_use: AtomicUsize::new(0),
+            io_ok: AtomicUsize::new(0),
+            io_errors: AtomicUsize::new(0),
             cert_verif_level,
+        }
+    }
+
+    /// Counts a connect or request outcome for the light reserve's flakiness test.
+    pub fn note_io(&self, ok: bool) {
+        if ok {
+            self.io_ok.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.io_errors.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
@@ -2509,6 +2525,8 @@ pub struct PooledNntpConn {
     pub free_time: AtomicI64,
     /// Checked out by a duplicate health check, not a download.
     pub check: AtomicBool,
+    /// Checked out as a light connection (`crate::light_pool`).
+    pub light: AtomicBool,
 }
 
 impl PooledNntpConn {
@@ -2543,6 +2561,7 @@ impl PooledNntpConn {
             in_use: AtomicBool::new(false),
             free_time: AtomicI64::new(0),
             check: AtomicBool::new(false),
+            light: AtomicBool::new(false),
         }
     }
 
@@ -2578,19 +2597,45 @@ impl PooledNntpConn {
 
     /// Sets how long a read or write on the open socket may wait, in seconds; `0` or less
     /// restores the connection's own timeout (the pool's `ArticleTimeout`). Takes effect on the
-    /// current socket only: a reconnect applies the connection's own timeout again.
+    /// current socket only: a reconnect applies the connection's own timeout again. A light
+    /// connection never waits longer than [`Self::light_io_timeout`].
     pub fn set_io_timeout(&self, secs: i32) {
         let fd = self.conn.slot.socket.load(Ordering::SeqCst);
         if fd < 0 || !self.is_connected() {
             return;
         }
-        let secs = if secs > 0 {
-            secs
+        let _ = crate::socket::init_socket_opts(fd, self.io_timeout_for(secs));
+    }
+
+    /// The read/write timeout [`Self::set_io_timeout`] applies for `secs`.
+    fn io_timeout_for(&self, secs: i32) -> i32 {
+        // SAFETY: only the thread holding the checked-out connection calls this
+        let own = unsafe { (*self.conn.session.get()).core.timeout };
+        if self.light.load(Ordering::SeqCst) {
+            let light = self.light_io_timeout();
+            if secs <= 0 {
+                light
+            } else {
+                secs.min(light)
+            }
+        } else if secs <= 0 {
+            own
         } else {
-            // SAFETY: only the thread holding the checked-out connection calls this
-            unsafe { (*self.conn.session.get()).core.timeout }
-        };
-        let _ = crate::socket::init_socket_opts(fd, secs);
+            secs
+        }
+    }
+
+    /// Read/write timeout of a light connection: [`crate::light_pool::LIGHT_IO_TIMEOUT_SECS`],
+    /// or the connection's own when shorter. Connecting keeps the connection's own timeout.
+    fn light_io_timeout(&self) -> i32 {
+        // SAFETY: only the thread holding the checked-out connection calls this
+        let own = unsafe { (*self.conn.session.get()).core.timeout };
+        let light = crate::light_pool::LIGHT_IO_TIMEOUT_SECS;
+        if own > 0 {
+            own.min(light)
+        } else {
+            light
+        }
     }
 
     #[inline]
@@ -2608,10 +2653,28 @@ impl PooledNntpConn {
     /// plan (`crate::addrpick`): the pinned or fastest address first, then the next one after
     /// a network-level failure (socket, TLS, greeting), never after a login failure.
     pub unsafe fn connect(&self) -> bool {
-        let session = &mut *self.conn.session.get();
         if self.conn.slot.status.is(ConnStatus::Connected) {
             return true;
         }
+        let ok = self.connect_planned();
+        self.note_io(ok);
+        if ok && self.light.load(Ordering::SeqCst) {
+            // connected with the connection's own timeout; reads take the light one
+            self.set_io_timeout(0);
+        }
+        ok
+    }
+
+    /// Counts an outcome on the server, unless the connection was cancelled
+    /// (a stop is not the server's fault).
+    fn note_io(&self, ok: bool) {
+        if ok || !self.is_cancelled() {
+            self.server.note_io(ok);
+        }
+    }
+
+    unsafe fn connect_planned(&self) -> bool {
+        let session = &mut *self.conn.session.get();
         let host = String::from_utf8_lossy(self.server.host.to_bytes()).into_owned();
         let name = String::from_utf8_lossy(self.server.name.to_bytes()).into_owned();
         let plan = crate::addrpick::plan(&crate::addrpick::ServerFacts {
@@ -2678,23 +2741,43 @@ impl PooledNntpConn {
     }
 
     pub unsafe fn request(&self, req: *const c_char) -> *const c_char {
-        (*self.conn.session.get()).nntp_request(
+        let answer = (*self.conn.session.get()).nntp_request(
             req,
             &self.server.user,
             &self.server.password,
             &self.server.name,
             &self.server.host,
-        )
+        );
+        self.note_io(!answer.is_null());
+        answer
     }
 
     pub unsafe fn join_group(&self, grp: *const c_char) -> *const c_char {
-        (*self.conn.session.get()).nntp_join_group(
+        let answer = (*self.conn.session.get()).nntp_join_group(
             grp,
             &self.server.user,
             &self.server.password,
             &self.server.name,
             &self.server.host,
-        )
+        );
+        self.note_io(!answer.is_null());
+        answer
+    }
+
+    /// Shortens the read/write timeout while the connection serves light work
+    /// ([`Self::light_io_timeout`]); connecting keeps the connection's own timeout,
+    /// so a slow connect is not taken for a dead server. Only while nobody else
+    /// holds the connection (checkout under the pool lock).
+    unsafe fn begin_light(&self) {
+        self.light.store(true, Ordering::SeqCst);
+        self.set_io_timeout(0);
+    }
+
+    /// Gives the connection its own read/write timeout back. Only by the
+    /// thread that held it, as it returns it.
+    unsafe fn end_light(&self) {
+        self.light.store(false, Ordering::SeqCst);
+        self.set_io_timeout(0);
     }
 
     pub unsafe fn auth_error(&self) -> bool {
@@ -2742,6 +2825,39 @@ struct ServerPoolInner {
     sorted_servers: Vec<Arc<RsNewsServer>>,
     connections: Vec<Box<PooledNntpConn>>,
     levels: Vec<i32>,
+    /// The light reserve of each server (`crate::light_pool`).
+    light: crate::light_pool::LightState,
+}
+
+/// Connections of one server held now: by downloads and checks, and as light connections.
+fn server_busy(connections: &[Box<PooledNntpConn>], srv: &Arc<RsNewsServer>) -> (i32, i32) {
+    let mut main = 0;
+    let mut light = 0;
+    for c in connections.iter().filter(|c| Arc::ptr_eq(&c.server, srv)) {
+        if c.in_use.load(Ordering::SeqCst) {
+            if c.light.load(Ordering::SeqCst) {
+                light += 1;
+            } else {
+                main += 1;
+            }
+        }
+    }
+    (main, light)
+}
+
+/// What [`NzbgetRsServerPool::get_light_connection_level`] found.
+pub enum LightPick {
+    Got(*mut PooledNntpConn),
+    /// A server has a reserve, but every light connection of it is busy.
+    Busy,
+    /// No matching server has a reserve: use the main pool.
+    NoReserve,
+}
+
+/// Inputs of a recompute read outside the pool lock.
+struct LightInputs {
+    cap: i32,
+    bandwidth_bound: bool,
 }
 
 pub struct NzbgetRsServerPool {
@@ -2755,6 +2871,10 @@ pub struct NzbgetRsServerPool {
     /// Last time (ms since an arbitrary epoch) a download asked for a connection
     /// and none was free. Duplicate health checks back off while this is recent.
     download_starved_at_ms: AtomicI64,
+    /// When the light reserves were last recomputed (`pool_now_ms`).
+    light_checked_ms: AtomicI64,
+    /// `LightConnections` to use instead of the option's (tests); -1 = the option.
+    light_cap_override: AtomicI32,
 }
 
 /// How long a download's failed connection request keeps duplicate health checks
@@ -2794,6 +2914,7 @@ impl NzbgetRsServerPool {
                 sorted_servers: Vec::new(),
                 connections: Vec::new(),
                 levels: Vec::new(),
+                light: crate::light_pool::LightState::default(),
             }),
             max_norm_level: AtomicI32::new(0),
             generation: AtomicI32::new(0),
@@ -2801,7 +2922,246 @@ impl NzbgetRsServerPool {
             retry_interval: AtomicI32::new(0),
             conn_host,
             download_starved_at_ms: AtomicI64::new(0),
+            light_checked_ms: AtomicI64::new(0),
+            light_cap_override: AtomicI32::new(-1),
         }
+    }
+
+    /// Uses `cap` instead of the `LightConnections` option (tests), and
+    /// recomputes the reserves at the next checkout.
+    pub fn set_light_cap(&self, cap: i32) {
+        self.light_cap_override.store(cap, Ordering::SeqCst);
+        self.light_checked_ms.store(0, Ordering::SeqCst);
+        if let Ok(mut g) = self.inner.lock() {
+            g.light.last_ms = 0;
+        }
+    }
+
+    /// Reads what a due recompute needs from outside the pool (options,
+    /// speed limit and meter) before the pool lock is taken; `None` when no
+    /// recompute is due.
+    fn light_inputs_if_due(&self) -> Option<LightInputs> {
+        let now = pool_now_ms();
+        let last = self.light_checked_ms.load(Ordering::SeqCst);
+        if last != 0 && now - last < crate::light_pool::RECOMPUTE_MS {
+            return None;
+        }
+        let over = self.light_cap_override.load(Ordering::SeqCst);
+        let cap = if over >= 0 {
+            over
+        } else {
+            crate::options::active_options().map_or(crate::light_pool::LIGHT_MAX, |o| {
+                o.scalars().light_connections
+            })
+        };
+        let limit = crate::ffi::active_workstate().map_or(0, |w| i64::from(w.speed_limit()));
+        let speed = if limit > 0 {
+            crate::statmeter::active_statmeter().map_or(0, |s| s.current_download_speed())
+        } else {
+            0
+        };
+        Some(LightInputs {
+            cap,
+            bandwidth_bound: crate::light_pool::bandwidth_bound(limit, speed),
+        })
+    }
+
+    /// Recomputes every server's light reserve (`crate::light_pool::next_size`)
+    /// under the pool lock; returns the log lines of the changes.
+    fn recompute_light(&self, g: &mut ServerPoolInner, inputs: &LightInputs) -> Vec<Vec<u8>> {
+        use crate::light_pool::Reason;
+        let now = pool_now_ms();
+        let mut msgs = Vec::new();
+        if g.light.last_ms != 0 && now - g.light.last_ms < crate::light_pool::RECOMPUTE_MS {
+            return msgs;
+        }
+        let window_ms = if g.light.last_ms == 0 {
+            crate::light_pool::RECOMPUTE_MS
+        } else {
+            now - g.light.last_ms
+        };
+        g.light.last_ms = now;
+        self.light_checked_ms.store(now, Ordering::SeqCst);
+        let starved_at = self.download_starved_at_ms.load(Ordering::SeqCst);
+        let download_starved = starved_at != 0 && now - starved_at <= window_ms;
+        let servers = g.sorted_servers.clone();
+        g.light
+            .servers
+            .retain(|l| servers.iter().any(|s| s.id == l.server_id));
+        for srv in &servers {
+            let usable =
+                srv.active.load(Ordering::SeqCst) && srv.norm_level.load(Ordering::SeqCst) >= 0;
+            let ok = srv.io_ok.load(Ordering::Relaxed);
+            let err = srv.io_errors.load(Ordering::Relaxed);
+            let blocked = self.is_server_blocked(srv);
+            let (main_busy, _) = server_busy(&g.connections, srv);
+            if g.light.get(srv.id).is_none() {
+                g.light.servers.push(crate::light_pool::ServerLight {
+                    server_id: srv.id,
+                    size: 0,
+                    min_spare: srv.max_connections - main_busy,
+                    ok_mark: ok,
+                    err_mark: err,
+                    flaky_until_ms: 0,
+                });
+            }
+            let Some(entry) = g.light.get_mut(srv.id) else {
+                continue;
+            };
+            let d_ok = ok.wrapping_sub(entry.ok_mark) as u64;
+            let d_err = err.wrapping_sub(entry.err_mark) as u64;
+            if blocked || crate::light_pool::window_flaky(d_ok, d_err) {
+                entry.flaky_until_ms = now + crate::light_pool::FLAKY_HOLD_MS;
+            }
+            let input = crate::light_pool::SizingInput {
+                max_connections: if usable { srv.max_connections } else { 0 },
+                cap: inputs.cap,
+                flaky: now < entry.flaky_until_ms,
+                current: entry.size,
+                spare: entry.min_spare,
+                download_starved,
+                bandwidth_bound: inputs.bandwidth_bound,
+            };
+            let (size, reason) = crate::light_pool::next_size(&input);
+            if size != entry.size {
+                let detail = match reason {
+                    Reason::Flaky if blocked => "blocked".to_string(),
+                    Reason::Flaky => format!("{d_err} of {} requests failed", d_ok + d_err),
+                    Reason::Spare => format!("{} of {} idle", input.spare, srv.max_connections),
+                    Reason::FewConnections | Reason::Ceiling | Reason::DownloadSaturated => {
+                        format!("{} connections", srv.max_connections)
+                    }
+                    _ => String::new(),
+                };
+                msgs.push(crate::light_pool::change_message(
+                    srv.name.to_bytes(),
+                    entry.size,
+                    size,
+                    reason,
+                    &detail,
+                ));
+            }
+            entry.size = size;
+            entry.min_spare = srv.max_connections - size - main_busy;
+            entry.ok_mark = ok;
+            entry.err_mark = err;
+        }
+        msgs
+    }
+
+    /// Recomputes the reserves when due.
+    fn maybe_recompute_light(&self) {
+        let Some(inputs) = self.light_inputs_if_due() else {
+            return;
+        };
+        let msgs = match self.inner.lock() {
+            Ok(mut g) => self.recompute_light(&mut g, &inputs),
+            Err(_) => return,
+        };
+        for msg in msgs {
+            crate::log::log_active_bytes(crate::log::MK_DETAIL, &msg);
+        }
+    }
+
+    /// A light connection of `srv` (see `crate::light_pool`), or null when
+    /// the server has no free one.
+    pub fn get_light_connection(&self, srv: &RsNewsServer) -> *mut PooledNntpConn {
+        match self.select_light(&|s: &RsNewsServer| s.id == srv.id) {
+            LightPick::Got(c) => c,
+            _ => ptr::null_mut(),
+        }
+    }
+
+    /// A light connection of any server on `level` but those in `ignore_srvs`.
+    pub fn get_light_connection_level(
+        &self,
+        level: i32,
+        ignore_srvs: &[&RsNewsServer],
+    ) -> LightPick {
+        if level < 0 {
+            return LightPick::NoReserve;
+        }
+        self.select_light(&|s: &RsNewsServer| {
+            s.norm_level.load(Ordering::SeqCst) == level
+                && !ignore_srvs.iter().any(|i| i.id == s.id)
+        })
+    }
+
+    /// Takes a free light connection of a matching server (active, not
+    /// blocked, reserve not used up), an open one first.
+    fn select_light(&self, matches: &dyn Fn(&RsNewsServer) -> bool) -> LightPick {
+        self.maybe_recompute_light();
+        let Ok(mut g) = self.inner.lock() else {
+            return LightPick::NoReserve;
+        };
+        let inner = &mut *g;
+        let mut any_reserve = false;
+        let mut picks: Vec<usize> = Vec::new();
+        for srv in &inner.sorted_servers {
+            if !srv.active.load(Ordering::SeqCst)
+                || srv.norm_level.load(Ordering::SeqCst) < 0
+                || !matches(srv)
+                || self.is_server_blocked(srv)
+            {
+                continue;
+            }
+            let size = inner.light.size_of(srv.id);
+            if size <= 0 {
+                continue;
+            }
+            any_reserve = true;
+            let (_, light_busy) = server_busy(&inner.connections, srv);
+            if light_busy >= size {
+                continue;
+            }
+            let mut best: Option<usize> = None;
+            for (idx, c) in inner.connections.iter().enumerate() {
+                if Arc::ptr_eq(&c.server, srv) && !c.in_use.load(Ordering::SeqCst) {
+                    if c.is_connected() {
+                        best = Some(idx);
+                        break;
+                    }
+                    best.get_or_insert(idx);
+                }
+            }
+            if let Some(idx) = best {
+                picks.push(idx);
+            }
+        }
+        if picks.is_empty() {
+            return if any_reserve {
+                LightPick::Busy
+            } else {
+                LightPick::NoReserve
+            };
+        }
+        let rand_val = unsafe { libc::rand() };
+        let idx = picks[crate::nntp::server_pool_pick_candidate_index(rand_val, picks.len())];
+        let nl = {
+            let c = &inner.connections[idx];
+            c.in_use.store(true, Ordering::SeqCst);
+            // SAFETY: free until now, and taken under the pool lock
+            unsafe { c.begin_light() };
+            c.server.norm_level.load(Ordering::SeqCst)
+        };
+        if let Some(slot) = inner.levels.get_mut(nl as usize) {
+            *slot -= 1;
+        }
+        LightPick::Got((&mut *inner.connections[idx]) as *mut PooledNntpConn)
+    }
+
+    /// `(server id, light reserve, light connections busy)` per server, for RPC status.
+    pub fn light_status(&self) -> Vec<(i32, i32, i32)> {
+        let Ok(g) = self.inner.lock() else {
+            return Vec::new();
+        };
+        g.sorted_servers
+            .iter()
+            .map(|s| {
+                let (_, busy) = server_busy(&g.connections, s);
+                (s.id, g.light.size_of(s.id), busy)
+            })
+            .collect()
     }
 
     pub fn add_server(&self, server: Arc<RsNewsServer>) {
@@ -3022,6 +3382,7 @@ impl NzbgetRsServerPool {
         if level < 0 {
             return ptr::null_mut();
         }
+        self.maybe_recompute_light();
         let Ok(mut g) = self.inner.lock() else {
             return ptr::null_mut();
         };
@@ -3051,7 +3412,7 @@ impl NzbgetRsServerPool {
             })
             .collect();
 
-        let conn_views: Vec<crate::nntp::ServerPoolConnView> = g
+        let mut conn_views: Vec<crate::nntp::ServerPoolConnView> = g
             .connections
             .iter()
             .map(|c| {
@@ -3067,6 +3428,28 @@ impl NzbgetRsServerPool {
                 }
             })
             .collect();
+
+        // downloads and checks may hold a server's connections but its light
+        // reserve: once they hold that many, its free ones look busy to them
+        let mut main_busy = vec![0i32; srv_count];
+        for (view, c) in conn_views.iter().zip(g.connections.iter()) {
+            if view.in_use && view.server_index < srv_count && !c.light.load(Ordering::SeqCst) {
+                main_busy[view.server_index] += 1;
+            }
+        }
+        let main_allowed: Vec<i32> = g
+            .sorted_servers
+            .iter()
+            .map(|s| s.max_connections - g.light.size_of(s.id))
+            .collect();
+        for view in &mut conn_views {
+            if !view.in_use
+                && view.server_index < srv_count
+                && main_busy[view.server_index] >= main_allowed[view.server_index]
+            {
+                view.in_use = true;
+            }
+        }
 
         let want_tuple = want_srv.map(|s| (s.id, s.group));
         let ignore_ids: Vec<i32> = if want_srv.is_none() {
@@ -3105,6 +3488,12 @@ impl NzbgetRsServerPool {
                 return ptr::null_mut();
             }
             g.levels[chosen_level as usize] -= 1;
+            let srv_index = conn_views[chosen_conn].server_index;
+            if srv_index < srv_count {
+                let id = g.sorted_servers[srv_index].id;
+                let spare = main_allowed[srv_index] - main_busy[srv_index] - 1;
+                g.light.note_spare(id, spare);
+            }
             let c = &mut g.connections[chosen_conn];
             c.in_use.store(true, Ordering::SeqCst);
             if for_check && !c.check.swap(true, Ordering::SeqCst) {
@@ -3150,6 +3539,10 @@ impl NzbgetRsServerPool {
         if c.check.swap(false, Ordering::SeqCst) {
             // paired with the increment in get_check_connection
             c.server.check_in_use.fetch_sub(1, Ordering::SeqCst);
+        }
+        if c.light.swap(false, Ordering::SeqCst) {
+            // SAFETY: the caller held the connection until this call
+            unsafe { c.end_light() };
         }
         c.in_use.store(false, Ordering::SeqCst);
         if used {
@@ -3249,6 +3642,19 @@ impl NzbgetRsServerPool {
         srvs.iter()
             .filter(|s| s.active.load(Ordering::SeqCst) && s.norm_level.load(Ordering::SeqCst) == 0)
             .map(|s| s.max_connections)
+            .sum()
+    }
+
+    /// Light connections kept now on the servers [`Self::primary_connections`] counts.
+    pub fn primary_light_connections(&self) -> i32 {
+        self.maybe_recompute_light();
+        let Ok(g) = self.inner.lock() else {
+            return 0;
+        };
+        g.sorted_servers
+            .iter()
+            .filter(|s| s.active.load(Ordering::SeqCst) && s.norm_level.load(Ordering::SeqCst) == 0)
+            .map(|s| g.light.size_of(s.id))
             .sum()
     }
 
@@ -3525,6 +3931,11 @@ pub(crate) unsafe fn nzbget_rs_serverpool_ctl(
         }
         9 => {
             // RPC status server list: if p1 == 0 return count; else fill p1 as *mut NzbgetRsRpcServerStatus up to p2
+            let light = if p1 != 0 && p2 > 0 {
+                p.light_status()
+            } else {
+                Vec::new()
+            };
             let Ok(srvs) = p.servers.read() else {
                 return 0;
             };
@@ -3536,6 +3947,12 @@ pub(crate) unsafe fn nzbget_rs_serverpool_ctl(
                 for (dst, s) in out.iter_mut().zip(srvs.iter()) {
                     dst.id = s.id;
                     dst.active = c_int::from(s.active.load(Ordering::SeqCst));
+                    let (size, busy) = light
+                        .iter()
+                        .find(|l| l.0 == s.id)
+                        .map_or((0, 0), |l| (l.1, l.2));
+                    dst.light_connections = size;
+                    dst.light_busy = busy;
                 }
             }
             srvs.len() as isize
@@ -3987,7 +4404,193 @@ mod tests {
         ));
         pool.add_server(Arc::clone(&srv));
         pool.init_connections();
+        // these tests are about the main pool alone
+        pool.set_light_cap(0);
         (pool, srv)
+    }
+
+    fn light_test_pool(connections: i32, cap: i32) -> (NzbgetRsServerPool, Arc<RsNewsServer>) {
+        let (pool, srv) = check_test_pool(connections);
+        pool.set_light_cap(cap);
+        (pool, srv)
+    }
+
+    #[test]
+    fn light_reserve_is_kept_from_downloads() {
+        // 40 connections: a reserve of 5, so downloads get 35
+        let (pool, srv) = light_test_pool(40, crate::light_pool::LIGHT_MAX);
+        let dl: Vec<_> = (0..40).map(|_| pool.get_connection(0, None, &[])).collect();
+        let got = dl.iter().filter(|c| !c.is_null()).count();
+        assert_eq!(got, 35);
+        assert_eq!(pool.light_status(), vec![(1, 5, 0)]);
+        // a STAT check during the full download is served at once
+        let light: Vec<_> = (0..5)
+            .map(|_| crate::light_pool::check_connection(&pool, &srv))
+            .collect();
+        assert!(light.iter().all(|c| !c.is_null()));
+        assert!(light
+            .iter()
+            .all(|&c| unsafe { &*c }.light.load(Ordering::SeqCst)));
+        assert_eq!(pool.light_status(), vec![(1, 5, 5)]);
+        // the reserve is used up and downloads hold the rest: nothing more
+        assert!(crate::light_pool::check_connection(&pool, &srv).is_null());
+        // a freed light connection never goes to a download
+        pool.free_connection(light[0], true);
+        assert!(pool.get_connection(0, None, &[]).is_null());
+        assert!(!unsafe { &*light[0] }.light.load(Ordering::SeqCst));
+        for c in light.into_iter().skip(1).chain(dl) {
+            pool.free_connection(c, true);
+        }
+        assert_eq!(pool.light_status(), vec![(1, 5, 0)]);
+    }
+
+    #[test]
+    fn light_reserve_off_and_small_servers() {
+        // turned off: downloads get every connection, checks the main pool
+        let (pool, srv) = light_test_pool(40, 0);
+        let dl: Vec<_> = (0..40).map(|_| pool.get_connection(0, None, &[])).collect();
+        assert!(dl.iter().all(|c| !c.is_null()));
+        assert!(pool.get_light_connection(&srv).is_null());
+        for c in dl {
+            pool.free_connection(c, true);
+        }
+        // four connections: one light connection
+        let (pool, srv) = light_test_pool(4, crate::light_pool::LIGHT_MAX);
+        let dl: Vec<_> = (0..4).map(|_| pool.get_connection(0, None, &[])).collect();
+        assert_eq!(dl.iter().filter(|c| !c.is_null()).count(), 3);
+        let light = pool.get_light_connection(&srv);
+        assert!(!light.is_null());
+        pool.free_connection(light, true);
+        for c in dl {
+            pool.free_connection(c, true);
+        }
+        // a single connection stays with downloads
+        let (pool, srv) = light_test_pool(1, crate::light_pool::LIGHT_MAX);
+        let dl = pool.get_connection(0, None, &[]);
+        assert!(!dl.is_null());
+        assert!(pool.get_light_connection(&srv).is_null());
+        pool.free_connection(dl, true);
+    }
+
+    #[test]
+    fn light_level_pick_reports_busy_and_no_reserve() {
+        let (pool, srv) = light_test_pool(16, crate::light_pool::LIGHT_MAX);
+        let a = pool.get_light_connection_level(0, &[]);
+        let b = pool.get_light_connection_level(0, &[]);
+        let (LightPick::Got(a), LightPick::Got(b)) = (a, b) else {
+            panic!("16 connections keep 2 light ones");
+        };
+        assert!(matches!(
+            pool.get_light_connection_level(0, &[]),
+            LightPick::Busy
+        ));
+        // an excluded server has no reserve to offer
+        assert!(matches!(
+            pool.get_light_connection_level(0, &[&srv]),
+            LightPick::NoReserve
+        ));
+        // no server on that level
+        assert!(matches!(
+            pool.get_light_connection_level(1, &[]),
+            LightPick::NoReserve
+        ));
+        pool.free_connection(a, true);
+        pool.free_connection(b, true);
+    }
+
+    #[test]
+    fn flaky_server_keeps_one_light_connection() {
+        let (pool, srv) = light_test_pool(40, crate::light_pool::LIGHT_MAX);
+        let c = pool.get_light_connection(&srv);
+        pool.free_connection(c, true);
+        assert_eq!(pool.light_status(), vec![(1, 5, 0)]);
+        for _ in 0..10 {
+            srv.note_io(false);
+        }
+        // the next recompute sees the errors
+        pool.light_checked_ms.store(0, Ordering::SeqCst);
+        pool.inner.lock().unwrap().light.last_ms = 0;
+        let c = pool.get_light_connection(&srv);
+        assert!(!c.is_null());
+        pool.free_connection(c, true);
+        assert_eq!(pool.light_status(), vec![(1, 1, 0)]);
+    }
+
+    fn force_light_recompute(pool: &NzbgetRsServerPool) {
+        pool.light_checked_ms.store(0, Ordering::SeqCst);
+        pool.inner.lock().unwrap().light.last_ms = 0;
+    }
+
+    #[test]
+    fn light_checkout_keeps_the_connect_timeout() {
+        let (pool, srv) = light_test_pool(40, crate::light_pool::LIGHT_MAX);
+        let c = pool.get_light_connection(&srv);
+        let conn = unsafe { &*c };
+        // the pool's ArticleTimeout (60 s) still governs connecting ...
+        assert_eq!(unsafe { (*conn.conn.session.get()).core.timeout }, 60);
+        // ... while reads and writes wait at most the light timeout
+        let light = crate::light_pool::LIGHT_IO_TIMEOUT_SECS;
+        assert_eq!(conn.io_timeout_for(0), light);
+        assert_eq!(conn.io_timeout_for(60), light);
+        assert_eq!(conn.io_timeout_for(5), 5);
+        pool.free_connection(c, true);
+        // back to the connection's own once returned
+        assert!(!conn.light.load(Ordering::SeqCst));
+        assert_eq!(conn.io_timeout_for(0), 60);
+        assert_eq!(conn.io_timeout_for(90), 90);
+        assert_eq!(unsafe { (*conn.conn.session.get()).core.timeout }, 60);
+    }
+
+    #[test]
+    fn small_servers_keep_no_or_a_returnable_light_connection() {
+        // three connections: all for downloads
+        let (pool, srv) = light_test_pool(3, crate::light_pool::LIGHT_MAX);
+        let dl: Vec<_> = (0..3).map(|_| pool.get_connection(0, None, &[])).collect();
+        assert!(dl.iter().all(|c| !c.is_null()));
+        assert!(pool.get_light_connection(&srv).is_null());
+        assert_eq!(pool.light_status(), vec![(1, 0, 0)]);
+        for c in dl {
+            pool.free_connection(c, true);
+        }
+        // four: one light connection, handed to a download that needs every one
+        let (pool, srv) = light_test_pool(4, crate::light_pool::LIGHT_MAX);
+        let mut dl: Vec<_> = (0..4).map(|_| pool.get_connection(0, None, &[])).collect();
+        assert_eq!(dl.iter().filter(|c| !c.is_null()).count(), 3);
+        assert_eq!(pool.light_status(), vec![(1, 1, 0)]);
+        force_light_recompute(&pool);
+        let fourth = pool.get_connection(0, None, &[]);
+        assert!(!fourth.is_null());
+        assert_eq!(pool.light_status(), vec![(1, 0, 0)]);
+        dl.push(fourth);
+        for c in dl {
+            pool.free_connection(c, true);
+        }
+        // and back after a window in which the download left connections idle
+        force_light_recompute(&pool);
+        assert!(pool.get_light_connection(&srv).is_null());
+        force_light_recompute(&pool);
+        let light = pool.get_light_connection(&srv);
+        assert!(!light.is_null());
+        assert_eq!(pool.light_status(), vec![(1, 1, 1)]);
+        pool.free_connection(light, true);
+    }
+
+    #[test]
+    fn checkout_returns_the_connection_on_panic() {
+        let (pool, srv) = light_test_pool(40, crate::light_pool::LIGHT_MAX);
+        let c = crate::light_pool::check_connection(&pool, &srv);
+        assert!(!c.is_null());
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = crate::light_pool::Checkout::new(&pool, c);
+            panic!("light job failed");
+        }));
+        assert!(res.is_err());
+        assert_eq!(pool.light_status(), vec![(1, 5, 0)]);
+        assert!(!unsafe { &*c }.in_use.load(Ordering::SeqCst));
+        // a normal release
+        let c = crate::light_pool::check_connection(&pool, &srv);
+        crate::light_pool::Checkout::new(&pool, c).release(true);
+        assert_eq!(pool.light_status(), vec![(1, 5, 0)]);
     }
 
     #[test]

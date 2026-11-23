@@ -300,9 +300,20 @@ struct HostOptions {
     timeout_sec: i32,
     allow_decompress_opt: bool,
     primary_connections: i32,
+    /// Light connections kept on the primary servers (`crate::light_pool`): not
+    /// there for the bulk fetch workers.
+    light_connections: i32,
     par_check: i32,
     download_rate: i64,
     par_ignore_ext: Vec<u8>,
+}
+
+impl HostOptions {
+    /// `workers`, but no more than the connections downloads and bulk fetches
+    /// may use (`crate::light_pool::fit_workers`).
+    fn fit_workers(&self, workers: i32) -> i32 {
+        crate::light_pool::fit_workers(workers, self.primary_connections, self.light_connections)
+    }
 }
 
 #[derive(Default)]
@@ -463,7 +474,10 @@ impl NzbgetRsStreamRepairCtrl {
             drain_checked: Mutex::new(None),
             tls_enabled,
             debug_enabled,
-            fetcher: ArticleFetcher::new(nntp_host),
+            // single reads (archive headers and footers while the payload map
+            // is built, one article at a time) take light connections; the
+            // batch fetchers that borrow in bulk stay on the main pool
+            fetcher: ArticleFetcher::new(crate::light_pool::light(nntp_host)),
             batch_fetcher: BatchFetcherPool::new(nntp_host),
             timed_out: Arc::new(AtomicBool::new(false)),
             progress_bytes: Arc::new(AtomicI64::new(0)),
@@ -669,6 +683,8 @@ impl NzbgetRsStreamRepairCtrl {
         let primary_connections = crate::net::active_server_pool().map_or(0, |p| unsafe {
             crate::net::nzbget_rs_serverpool_ctl(Arc::as_ptr(&p), 6, 0, 0, 0, 0) as i32
         });
+        let light_connections =
+            crate::net::active_server_pool().map_or(0, |p| p.primary_light_connections());
         let download_rate = crate::statmeter::active_statmeter().map_or(0, |sm| {
             let (_up, dn_sec, all_bytes, _sb) = sm.total_stat_snapshot();
             if dn_sec > 0 {
@@ -685,6 +701,7 @@ impl NzbgetRsStreamRepairCtrl {
                 .as_deref()
                 .is_some_and(|o| o.scalars().dupe_stream_decompress != 0),
             primary_connections,
+            light_connections,
             par_check: opts.as_deref().map_or(0, |o| o.scalars().par_check),
             download_rate,
             par_ignore_ext: opts
@@ -1234,10 +1251,12 @@ impl NzbgetRsStreamRepairCtrl {
         left_to_borrow: &[bool],
     ) {
         if self.live_mode {
-            self.drained_workers
-                .store(stream_fetch_worker_count(opts.primary_connections), Ordering::SeqCst);
+            self.drained_workers.store(
+                opts.fit_workers(stream_fetch_worker_count(opts.primary_connections)),
+                Ordering::SeqCst,
+            );
         }
-        self.batch_fetcher.set_worker_count(if self.live_mode {
+        let workers = if self.live_mode {
             if self.parallel_live_fetch.load(Ordering::SeqCst) {
                 // Half the connections only while a dead volume is left to borrow: a later
                 // pass that patches a few holes keeps to the usual count.
@@ -1251,7 +1270,9 @@ impl NzbgetRsStreamRepairCtrl {
             }
         } else {
             stream_fetch_worker_count(opts.primary_connections)
-        });
+        };
+        self.batch_fetcher
+            .set_worker_count(opts.fit_workers(workers));
         let mut tried_postings: BTreeSet<Vec<u8>> = BTreeSet::new();
         // Dead volumes left to the cross-packing repair to borrow (the mask from
         // `dead_volumes_to_borrow`, or empty for none) skip the whole-file recreation.
@@ -2771,8 +2792,9 @@ impl NzbgetRsStreamRepairCtrl {
                 // raised it stays raised.
                 if borrowing {
                     self.parallel_live_fetch.store(true, Ordering::SeqCst);
+                    let workers = live_borrow_fetch_worker_count(opts.primary_connections);
                     self.batch_fetcher
-                        .set_worker_count(live_borrow_fetch_worker_count(opts.primary_connections));
+                        .set_worker_count(opts.fit_workers(workers));
                 }
                 self.refresh_live_names(q, &mut targets, &mut member_names);
                 self.exec_cross_pack_repair(

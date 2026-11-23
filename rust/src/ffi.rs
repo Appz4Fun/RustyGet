@@ -2727,6 +2727,8 @@ unsafe fn web_rpc_collect_bridge(
                 srvs.resize_with(cnt, || crate::xmlrpc_format::NzbgetRsRpcServerStatus {
                     id: 0,
                     active: 0,
+                    light_connections: 0,
+                    light_busy: 0,
                 });
                 let filled = crate::net::nzbget_rs_serverpool_ctl(
                     p,

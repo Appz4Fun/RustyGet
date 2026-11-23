@@ -8328,6 +8328,83 @@ def scenario_recheckwholefail(daemon, t):
     return ('recheckwholefail', ok, 'status=%s sampled=%d state_errors=%d' % (h['Status'], sampled, no_state))
 
 
+# lightburst: 16 connections (a light reserve of 2), BODY of the load held
+# 0.25 s by the proxy, and a speed limit the download reaches (a full pipe:
+# more connections would not make it faster)
+LIGHTBURST_OPTIONS = ['DupeArticleFallback=article', 'HealthCheck=none', 'ArticleRetries=0',
+                      'Server1.Connections=16', 'DownloadRate=6000']
+
+
+def _lightburst_phase(daemon, api, t, tag):
+    """A full-speed download, and in its middle a small release whose failed
+    articles the daemon then asks the server about (STAT). Returns (seconds
+    from the release's history entry to the recheck verdict or None, seconds
+    the download took, the most light connections RPC status showed, the
+    recheck line)."""
+    load_size, load_seg = 48_000_000, 400_000
+    load = _place_copy(t, 'lbLoad%s' % tag, _payload(load_size, 8100), 'big.bin')
+    burst_size, burst_seg = 1_200_000, 100_000
+    burst = _place_copy(t, 'lbBurst%s' % tag, _payload(burst_size, 8101), 'b.bin')
+    verdicts = ('failed articles exist on the servers', 'Failed articles not rechecked')
+    before = sum(_grep_log(t, v) for v in verdicts)
+    started = time.time()
+    daemon.append(api, 'Load%s' % tag, build_nzb(load, 'Load%s.bin' % tag, load_size, load_seg, set()),
+                  False, 'lbl-%s' % tag, 0)
+    deadline = time.time() + 30
+    while time.time() < deadline and api.status().get('DownloadRate', 0) == 0:
+        time.sleep(0.2)
+    time.sleep(2)  # every connection the download may use is busy now
+
+    def light_seen():
+        return max([s.get('LightConnections', 0) for s in api.status().get('NewsServers', [])] or [0])
+    light = light_seen()
+    content = base64.standard_b64encode(
+        build_nzb(burst, 'Burst%s.bin' % tag, burst_size, burst_seg, set(range(2, 12))).encode()).decode()
+    api.append('Burst%s' % tag, content, 'test', 100, False, False, 'lbb-%s' % tag, 0, 'score', [])
+    in_history = None
+    verdict_at = None
+    deadline = time.time() + 60
+    while time.time() < deadline and verdict_at is None:
+        if in_history is None and any(h.get('NZBName') == 'Burst%s' % tag for h in api.history()):
+            in_history = time.time()
+        if in_history is not None and sum(_grep_log(t, v) for v in verdicts) > before:
+            verdict_at = time.time()
+        light = max(light, light_seen())
+        time.sleep(0.05)
+    hl = daemon.wait_history(api, 'Load%s' % tag, timeout=180)
+    load_secs = time.time() - started
+    latency = verdict_at - in_history if verdict_at is not None and in_history is not None else None
+    with open(t.path('nzbget.log'), errors='replace') as f:
+        lines = [ln for ln in f.read().splitlines() if any(v in ln for v in verdicts)]
+    return latency, load_secs, light, lines[-1].split('\t')[-1] if len(lines) > before else '', hl['Status']
+
+
+def scenario_lightburst(daemon, t):
+    """Light connections: a 48 MB download at its speed limit on 16
+    connections, its articles slow to come (0.25 s each), with a STAT burst
+    (the recheck of a failed release's articles) in its middle. Run with
+    LightConnections=0, then after a reload with LightConnections=5: with
+    the reserve the STAT burst finishes at once on a light connection, and
+    the download takes no longer than without it (within noise)."""
+    api = daemon.wait_ready()
+    off = _lightburst_phase(daemon, api, t, 'Off')
+    daemon.write_config(LIGHTBURST_OPTIONS + ['LightConnections=5'])
+    api = daemon.reload(api)
+    on = _lightburst_phase(daemon, api, t, 'On')
+    resized = _grep_log(t, 'Light connections of ')
+
+    def fmt(latency):
+        return 'none' if latency is None else '%.2fs' % latency
+    mbps = lambda secs: 48.0 / secs if secs > 0 else 0.0
+    ok = (on[0] is not None and on[0] < 3.0 and on[2] >= 1 and off[2] == 0 and resized >= 1 and
+          on[1] <= off[1] * 1.15 + 1.0 and 'SUCCESS' in on[4] and 'SUCCESS' in off[4])
+    return ('lightburst', ok,
+            'off: stat_latency=%s load=%.1fs (%.2f MB/s) light=%d verdict="%s"; '
+            'on: stat_latency=%s load=%.1fs (%.2f MB/s) light=%d verdict="%s"; resize_logs=%d'
+            % (fmt(off[0]), off[1], mbps(off[1]), off[2], off[3],
+               fmt(on[0]), on[1], mbps(on[1]), on[2], on[3], resized))
+
+
 def scenario_projectedhealthy(daemon, t):
     """B48c: 96% arrive (above the critical 85%): no swap, though a whole backup waits."""
     hp, swaps = _projected_run(daemon, t, 'pc', 96, 100)
@@ -11260,6 +11337,7 @@ SCENARIOS = {
     'ondiskstopothernamenointer': scenario_ondiskstopothernamenointer,
     'repairlast': scenario_repairlast,
     'recheckwholefail': scenario_recheckwholefail,
+    'lightburst': scenario_lightburst,
     'samepostingrepair': scenario_samepostingrepair,
     'samepostinglate': scenario_samepostinglate,
     'projectedhealthy': scenario_projectedhealthy,
@@ -11702,6 +11780,7 @@ SCENARIO_OPTIONS = {
     # Let both files complete so this isolates history's failed-article
     # recheck, rather than the separate early health-cancellation path.
     'recheckwholefail': ['DupeArticleFallback=article', 'HealthCheck=none', 'ArticleRetries=0'],
+    'lightburst': LIGHTBURST_OPTIONS + ['LightConnections=0'],
     'samepostingrepair': ['DupeArticleFallback=stream', 'ParCheck=auto', 'HealthCheck=dupe'],
     'samepostinglate': ['DupeArticleFallback=stream', 'ParCheck=auto', 'HealthCheck=dupe'],
     'projectedhealthy': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
@@ -11923,7 +12002,7 @@ SCENARIO_REWRITE_PROXY = {'notfound451': (b'430 ', b'451 '),
                           'pathtraversalarticle': (b'name=aaaaaaaa.bin', b'name=../../ab.bin'), 'rejectnextserver': (b'=ypart begin=', b'=ypart begxn=')}
 
 # scenarios with a DelayingNntpProxy in front of Server1: [(message-id marker, delay in s)]
-SCENARIO_DELAY_PROXY = {'clientthreads': [(b'ctA/', 3.0)], 'xdecomp_slow': [(b'xdzB/', 0.7)], 'damagedfilestate': [(b'?6=500000:', 20.0, True)], 'articledecoyparrestart': [(b'?9=4000000:', 15.0, True), (b'?10=4500000:', 15.0, True)], 'directrenamesubdir': [(b'drA/obf', 0.4)], 'directrenamesubdirjoin': [(b'drA/obf', 0.4)], 'slowprobe': [(b'STAT ', 5.0), (b'spA/', 0.2)],
+SCENARIO_DELAY_PROXY = {'lightburst': [(b'lbLoad', 0.25)], 'clientthreads': [(b'ctA/', 3.0)], 'xdecomp_slow': [(b'xdzB/', 0.7)], 'damagedfilestate': [(b'?6=500000:', 20.0, True)], 'articledecoyparrestart': [(b'?9=4000000:', 15.0, True), (b'?10=4500000:', 15.0, True)], 'directrenamesubdir': [(b'drA/obf', 0.4)], 'directrenamesubdirjoin': [(b'drA/obf', 0.4)], 'slowprobe': [(b'STAT ', 5.0), (b'spA/', 0.2)],
                         'directunpackkeep': [(b'rel.part03', 2.0)],
                         'directunpackkeepnointer': [(b'rel.part03', 2.0)],
                         'truncatedstate': [(b'tsA/', 0.5)],

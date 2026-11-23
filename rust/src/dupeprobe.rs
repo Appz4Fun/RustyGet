@@ -445,7 +445,7 @@ impl NzbgetRsDupeProbe {
         let mut server_name: Vec<u8> = Vec::new();
         let wait_start = now_sec();
         while conn_ptr == 0 && !self.is_stopped() && now_sec() - wait_start <= CONNECTION_WAIT_SEC {
-            let raw = pool.get_check_connection_by_server_id(server_id);
+            let raw = crate::light_pool::check_connection_by_server_id(pool, server_id);
             if !raw.is_null() {
                 let c = unsafe { &*raw };
                 conn_ptr = raw as usize;
@@ -468,6 +468,9 @@ impl NzbgetRsDupeProbe {
             return (false, result);
         }
 
+        // goes back to the pool however this probe ends
+        let checkout =
+            crate::light_pool::Checkout::new(pool, conn_ptr as *mut crate::net::PooledNntpConn);
         let fresh = probed.insert(actual_server_id);
         let mut probed_server = false;
         // a server that could not even connect (login refused, TLS, network) before
@@ -492,8 +495,10 @@ impl NzbgetRsDupeProbe {
 
                 if !unsafe { conn.connect() } {
                     result.unknown += remaining + 1;
-                    result.unreachable = result.exists + result.missing == 0;
-                    never_answered = result.unreachable;
+                    never_answered = result.exists + result.missing == 0;
+                    // a light connection that could not connect proves nothing
+                    // about the server: unknown, never fewer servers to a dead verdict
+                    result.unreachable = never_answered && !crate::light_pool::is_light(conn);
                     break;
                 }
 
@@ -582,7 +587,7 @@ impl NzbgetRsDupeProbe {
                 conn.disconnect();
             }
         }
-        pool.free_connection(conn_ptr as *mut crate::net::PooledNntpConn, true);
+        checkout.release(true);
         (probed_server, result)
     }
 
@@ -855,6 +860,58 @@ impl Drop for NzbgetRsDupeProbe {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A probe of a server that refuses connections (port 1), on 40 connections
+    /// with `LightConnections=cap`.
+    #[cfg(unix)]
+    fn probe_refusing_server(cap: i32) -> (bool, ServerResult) {
+        use std::sync::Arc;
+        let pool = crate::net::NzbgetRsServerPool::new(crate::ffi::tls_host());
+        let srv = Arc::new(crate::net::RsNewsServer::new(
+            7,
+            true,
+            b"s7",
+            b"127.0.0.1",
+            1,
+            0,
+            b"",
+            b"",
+            false,
+            false,
+            b"",
+            40,
+            0,
+            0,
+            0,
+            false,
+            0,
+        ));
+        pool.add_server(Arc::clone(&srv));
+        pool.init_connections();
+        pool.set_light_cap(cap);
+        let mut probe = NzbgetRsDupeProbe::new(1, false, 0);
+        probe.add_sample(b"<a@b>".to_vec(), Vec::new());
+        let mut probed = BTreeSet::new();
+        let out = probe.probe_server_native(&pool, 7, &mut probed);
+        let size = if cap > 0 { 5 } else { 0 };
+        assert_eq!(pool.light_status(), vec![(7, size, 0)]);
+        assert_eq!(pool.connections_in_use(), 0);
+        out
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_light_connection_that_cannot_connect_leaves_the_server_unknown() {
+        // on a light connection: unknown, the server still counts toward a verdict
+        let (reached, result) = probe_refusing_server(crate::light_pool::LIGHT_MAX);
+        assert!(!reached);
+        assert!(!result.unreachable);
+        assert_eq!(result.unknown, 1);
+        // on a main-pool check connection: unreachable as before
+        let (reached, result) = probe_refusing_server(0);
+        assert!(!reached);
+        assert!(result.unreachable);
+    }
 
     #[test]
     fn probe_order_is_one_entry_per_backbone_with_siblings_as_fallbacks() {

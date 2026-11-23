@@ -1743,7 +1743,7 @@ pub const DUPE_WATCH_DELAY_SEC: i32 = 20;
 /// Emits all default option `(name, value)` pairs for `Options::InitDefaults`.
 pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &CStr)) {
     let output_mode = if disable_curses { c"color" } else { c"curses" };
-    let defaults: [(&CStr, &CStr); 131] = [
+    let defaults: [(&CStr, &CStr); 132] = [
         (c"MainDir", c"~/downloads"),
         (c"WebDir", c""),
         (c"ConfigTemplate", c""),
@@ -1794,6 +1794,7 @@ pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &
         (c"AuthorizedIP", c""),
         (c"ArticleTimeout", c"60"),
         (c"ArticleReadChunkSize", c"4"),
+        (c"LightConnections", c"5"),
         (c"UrlTimeout", c"60"),
         (c"RemoteTimeout", c"90"),
         (c"FlushQueue", c"yes"),
@@ -2131,6 +2132,8 @@ pub struct NzbgetRsParsedOptions {
     pub unpack_max_depth: i32,
     /// Most folders one job may unpack; 0 means no limit.
     pub unpack_max_folders: i32,
+    /// Most light connections per news server (`crate::light_pool`); 0 turns them off.
+    pub light_connections: i32,
 }
 
 impl NzbgetRsParsedOptions {
@@ -2173,6 +2176,7 @@ impl NzbgetRsParsedOptions {
             file_naming: 1,
             post_download_rename: 1,
             rename_after_unpack: 1,
+            light_connections: crate::light_pool::LIGHT_MAX,
             ..Self::default()
         }
     }
@@ -2616,6 +2620,9 @@ pub fn init_scalar_options_host<H: OptionsHost>(
     s.unpack_max_files = host.parse_int_value(c"UnpackMaxFiles", 10).max(0);
     s.unpack_max_depth = host.parse_int_value(c"UnpackMaxDepth", 10).max(0);
     s.unpack_max_folders = host.parse_int_value(c"UnpackMaxFolders", 10).max(0);
+    s.light_connections = host
+        .parse_int_value(c"LightConnections", 10)
+        .clamp(0, crate::light_pool::LIGHT_MAX);
     s.url_force = i32::from(host.parse_bool_value(c"UrlForce"));
     s.cert_check = i32::from(host.parse_bool_value(c"CertCheck"));
     s.reorder_files = i32::from(host.parse_bool_value(c"ReorderFiles"));

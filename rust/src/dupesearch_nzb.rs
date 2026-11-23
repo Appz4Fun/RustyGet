@@ -3593,6 +3593,16 @@ pub struct NzbSummaryData {
     /// Each data file's encoded size and its article ids in part order: what
     /// the fleet intake reads to open a copy down to its video.
     pub data_segments: Vec<crate::dupeintake::IntakeFile>,
+    /// Each par2-file's name and its articles in part order (encoded bytes,
+    /// message-id): what a lost index is salvaged from (F2b).
+    pub par_files: Vec<ParFile>,
+}
+
+/// A par2-file of an nzb, for salvaging its critical packets (F2b).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ParFile {
+    pub name: Vec<u8>,
+    pub segments: Vec<(u64, Vec<u8>)>,
 }
 
 impl NzbSummaryData {
@@ -3824,6 +3834,20 @@ pub fn parse_nzb_summary(xml: &[u8]) -> Option<NzbSummaryData> {
                             name: m_name.clone(),
                             bytes: m_file_bytes,
                             ids: file_ids,
+                        });
+                    } else {
+                        let mut segments: Vec<(u64, Vec<u8>)> = Vec::new();
+                        for i in 0..seg_len {
+                            if i + 1 < seg_len && m_segments[i + 1].0 == m_segments[i].0 {
+                                continue;
+                            }
+                            if valid_message_id(&m_segments[i].2) {
+                                segments.push((m_segments[i].1.max(0) as u64, m_segments[i].2.clone()));
+                            }
+                        }
+                        out.par_files.push(ParFile {
+                            name: m_name.clone(),
+                            segments,
                         });
                     }
                     let (new_df, new_db, new_geom2, push_par_head, push_data_head) =

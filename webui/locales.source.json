@@ -5929,5 +5929,77 @@
   "config_parpreset_applied": {
     "message": "(%s MB in use until settings are saved or reloaded)",
     "description": "Detect resource level: the par buffer in use now differs from the newly measured one; %s is the buffer in MB"
+  },
+  "fleet_toggle_copies": {
+    "message": "+$1 copies",
+    "description": "Downloads: the toggle of a fleet's row; $1 is how many other copies of the release the fleet holds."
+  },
+  "fleet_toggle_copy": {
+    "message": "+$1 copy",
+    "description": "Downloads: the toggle of a fleet's row with one other copy; $1 is 1."
+  },
+  "fleet_toggle_hint": {
+    "message": "Show or hide the other copies of this release, in the order they are tried if the primary fails",
+    "description": "Tooltip of a fleet's toggle in Downloads."
+  },
+  "fleet_pos_primary": {
+    "message": "primary",
+    "description": "A fleet member's place: the copy downloading now."
+  },
+  "fleet_pos_next": {
+    "message": "next",
+    "description": "A fleet member's place: the copy tried next if the primary fails."
+  },
+  "fleet_state_probing": {
+    "message": "probing…",
+    "description": "A fleet member still being checked in the background."
+  },
+  "fleet_state_held": {
+    "message": "held donor",
+    "description": "A fleet member held paused at the lowest priority, lending articles to the primary."
+  },
+  "fleet_state_parked": {
+    "message": "held donor (tried)",
+    "description": "A fleet member that was tried, failed its health check, and is kept as a donor."
+  },
+  "fleet_state_downloading": {
+    "message": "downloading",
+    "description": "The fleet member downloading now."
+  },
+  "fleet_state_paused": {
+    "message": "paused",
+    "description": "The fleet's primary, paused by the user."
+  },
+  "fleet_label_twin": {
+    "message": "twin",
+    "description": "Fleet member label: the same post uploaded again."
+  },
+  "fleet_label_alt": {
+    "message": "alt",
+    "description": "Fleet member label: the same video in another container."
+  },
+  "fleet_label_container": {
+    "message": "container",
+    "description": "Fleet member label: another container, the video inside not verified yet."
+  },
+  "fleet_label_other": {
+    "message": "other",
+    "description": "Fleet member label: another video."
+  },
+  "fleet_label_locked": {
+    "message": "locked",
+    "description": "Fleet member label: encrypted archive headers and no password."
+  },
+  "fleet_label_unverified": {
+    "message": "unverified",
+    "description": "Fleet member label: its alive share could not be measured (timeouts never count as missing)."
+  },
+  "fleet_label_dead": {
+    "message": "dead",
+    "description": "Fleet member label: none of its sampled articles exist."
+  },
+  "fleet_label_alive": {
+    "message": "$1% alive",
+    "description": "Fleet member label: $1 is the share of its sampled articles that exist."
   }
 }

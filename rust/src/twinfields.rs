@@ -609,29 +609,99 @@ pub const INNER_KEY_PARAM: &[u8] = b"DupeInnerCrc";
 /// their sizes) repeat too often.
 pub const MIN_KEY_SIZE: u64 = 50 << 20;
 
-/// The size and CRC32 of the largest file in an archive, as its headers
-/// record them (unkeyed).
+/// The size and checks of the largest file in an archive, as its headers
+/// record them: its CRC32 and, for RAR 5, its BLAKE2sp (F11a). Checks of RAR 5
+/// encrypted data are keyed with the password (`keyed`): they compare only
+/// with keyed checks, and equal ones prove the same file under one password.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InnerKey {
     pub size: u64,
     pub crc32: u32,
+    /// whether `crc32` was recorded (a RAR 5 file may carry only BLAKE2sp)
+    pub has_crc: bool,
+    pub blake2: Option<[u8; 32]>,
+    pub keyed: bool,
 }
 
 impl InnerKey {
-    /// `<size>:<crc32 in 8 hex digits>`.
+    /// An unkeyed key from a size and a CRC32.
+    pub const fn crc(size: u64, crc32: u32) -> Self {
+        Self {
+            size,
+            crc32,
+            has_crc: true,
+            blake2: None,
+            keyed: false,
+        }
+    }
+
+    /// `<size>:<crc32 in 8 hex digits>` (an unkeyed CRC32, as before), with
+    /// `-` for no CRC32, then `:b2=<64 hex digits>` for a BLAKE2sp and `:k`
+    /// for keyed checks.
     pub fn param(&self) -> String {
-        format!("{}:{:08x}", self.size, self.crc32)
+        let mut out = if self.has_crc {
+            format!("{}:{:08x}", self.size, self.crc32)
+        } else {
+            format!("{}:-", self.size)
+        };
+        if let Some(b2) = self.blake2 {
+            out.push_str(":b2=");
+            for b in b2 {
+                out.push_str(&format!("{b:02x}"));
+            }
+        }
+        if self.keyed {
+            out.push_str(":k");
+        }
+        out
     }
 
     pub fn parse(value: &[u8]) -> Option<Self> {
         let s = std::str::from_utf8(value).ok()?;
-        let (size, crc) = s.trim().split_once(':')?;
-        if crc.len() != 8 {
+        let mut parts = s.trim().split(':');
+        let size = parts.next()?.parse().ok()?;
+        let crc = parts.next()?;
+        let mut key = if crc == "-" {
+            Self { has_crc: false, ..Self::crc(size, 0) }
+        } else {
+            if crc.len() != 8 {
+                return None;
+            }
+            Self::crc(size, u32::from_str_radix(crc, 16).ok()?)
+        };
+        for part in parts {
+            if part == "k" {
+                key.keyed = true;
+            } else if let Some(hex) = part.strip_prefix("b2=") {
+                if hex.len() != 64 {
+                    return None;
+                }
+                let mut b2 = [0u8; 32];
+                for (i, out) in b2.iter_mut().enumerate() {
+                    *out = u8::from_str_radix(hex.get(2 * i..2 * i + 2)?, 16).ok()?;
+                }
+                key.blake2 = Some(b2);
+            } else {
+                return None;
+            }
+        }
+        if !key.has_crc && key.blake2.is_none() {
+            return None;
+        }
+        Some(key)
+    }
+
+    /// From a member's size and checks as zipfast reads them.
+    pub fn from_checks(size: u64, checks: &zipfast::map::MapChecks) -> Option<Self> {
+        if checks.crc32.is_none() && checks.blake2sp.is_none() {
             return None;
         }
         Some(Self {
-            size: size.parse().ok()?,
-            crc32: u32::from_str_radix(crc, 16).ok()?,
+            size,
+            crc32: checks.crc32.unwrap_or(0),
+            has_crc: checks.crc32.is_some(),
+            blake2: checks.blake2sp,
+            keyed: checks.keyed,
         })
     }
 }
@@ -645,16 +715,37 @@ impl InnerKey {
 /// not another file (the user's rule, 2026-11-23: a copy of the same mkv
 /// without its 11,245-byte Tags tail): None, so the copy stays an unverified
 /// container that borrows with per-range checks, never `other`.
+///
+/// F11a: keyed checks compare only with keyed checks (a keyed and an unkeyed
+/// value say nothing), and two keyed values that differ may be one file under
+/// two passwords: None, never another file. Every check both keys record is
+/// compared (CRC32 and BLAKE2sp); one that differs is another file.
 pub fn same_inner_key(a: &[u8], b: &[u8], min_size: u64) -> Option<bool> {
     let (a, b) = (InnerKey::parse(a)?, InnerKey::parse(b)?);
+    if a.keyed != b.keyed {
+        return None;
+    }
     if a.size != b.size {
-        if a.size.abs_diff(b.size) <= HEADER_SIZED_DIFF {
+        if a.size.abs_diff(b.size) <= HEADER_SIZED_DIFF || a.keyed {
             return None;
         }
         return Some(false);
     }
-    if a.crc32 != b.crc32 {
-        return Some(false);
+    let mut compared = false;
+    let mut differ = false;
+    if a.has_crc && b.has_crc {
+        compared = true;
+        differ |= a.crc32 != b.crc32;
+    }
+    if let (Some(x), Some(y)) = (a.blake2, b.blake2) {
+        compared = true;
+        differ |= x != y;
+    }
+    if !compared {
+        return None;
+    }
+    if differ {
+        return if a.keyed { None } else { Some(false) };
     }
     (a.size >= min_size).then_some(true)
 }
@@ -757,17 +848,19 @@ impl VolumeSource for Volumes {
 /// CRC is not recorded, or a head with no last part of such a file.
 #[cfg(test)]
 pub fn rar_last_volume_key(head: &[u8], multi_volume: bool, min_size: u64) -> Option<InnerKey> {
-    rar_last_volume_key_with(head, multi_volume, min_size, None)
+    rar_last_volume_key_with(head, u64::MAX / 2, multi_volume, min_size, None)
 }
 
 /// [`rar_last_volume_key`] with the archive password from the copy's nzb
-/// (F8): encrypted headers (`-hp`) are read with it. A check the password
-/// keys (RAR 5 encrypted data) still gives no key: keyed values compare only
-/// under one password.
-// OPEN ITEM (zipfast): keyed checks (RAR 5 AES) as a key under one password,
-// via zipfast::map::last_volume_identity once the pin is at 21474cf or later.
+/// (F8): encrypted headers (`-hp`) are read with it. Read through
+/// `zipfast::map::last_volume_identity` from the last volume's first article
+/// (`head`, of a volume `volume_len` bytes long; an upper bound will do): the
+/// members ending there with their final size and checks, CRC32 or BLAKE2sp,
+/// keyed ones too (F11a: RAR 5 encrypted data; they compare only with keyed
+/// checks, see [`same_inner_key`]).
 pub fn rar_last_volume_key_with(
     head: &[u8],
+    volume_len: u64,
     multi_volume: bool,
     min_size: u64,
     password: Option<&str>,
@@ -776,8 +869,15 @@ pub fn rar_last_volume_key_with(
         return None;
     }
     let password = password.filter(|p| !p.is_empty());
-    let map =
-        MemberMap::from_volume(head, MapOptions::new("head.rar").password(password)).ok()?;
+    let held = zipfast::map::HeldVolume::new(head, &[], volume_len.max(head.len() as u64))?;
+    let identity = zipfast::map::last_volume_identity(
+        held,
+        MapOptions::new("head.rar").password(password),
+    )
+    .ok()?;
+    let zipfast::map::SetFacts::Rar { volume: map, .. } = &identity.set else {
+        return None;
+    };
     // the volume's own main header must agree: a lone middle volume (names
     // too obfuscated to group) is no whole archive, and a set's last volume
     // is never its first
@@ -792,6 +892,7 @@ pub fn rar_last_volume_key_with(
         .iter()
         .filter(|m| {
             !m.is_dir
+                && !m.split_after
                 && crate::streamrepair::is_stream_eligible(
                     m.name.as_deref().map_or(&m.raw_name[..], str::as_bytes),
                 )
@@ -801,18 +902,75 @@ pub fn rar_last_volume_key_with(
                     m.packed.end > head.len() as u64
                 }
         })
-        .filter_map(|m| {
-            let checks = m.checks?;
-            if checks.keyed {
-                return None;
-            }
-            Some(InnerKey {
-                size: m.unpacked_size?,
-                crc32: checks.crc32?,
-            })
-        })
+        .filter_map(|m| InnerKey::from_checks(m.unpacked_size?, m.checks.as_ref()?))
         .max_by_key(|k| k.size)
         .filter(|k| k.size >= min_size)
+}
+
+/// A copy's par2 identity salvaged from its recovery volumes when its index
+/// `.par2` is lost (F2b): the set [`par_rs::salvage::best_set`] keeps from the
+/// articles fetched, the files it describes and whether that list is whole.
+#[derive(Clone, Debug)]
+pub struct Salvaged {
+    pub set: par_rs::packet::PacketSet,
+    pub sigs: Vec<crate::twin::FileSig>,
+    pub complete: bool,
+}
+
+/// Plans the articles to fetch for a copy's critical par2 packets when its
+/// index is lost (F2b): `vols` are its par2 volumes (name, article lengths in
+/// order), each article read within `budget` bytes per volume, best plan
+/// first: the volume of fewest blocks, back from its end
+/// ([`par_rs::salvage::plan_critical_articles`]). Index files are left out:
+/// the caller found them dead. Returns (volume index, article indices).
+pub fn plan_par2_salvage(vols: &[(&[u8], Vec<u64>)], budget: u64) -> Vec<(usize, Vec<usize>)> {
+    let articles: Vec<Vec<par_rs::probe::NzbArticle>> = vols
+        .iter()
+        .map(|(_, lens)| {
+            let mut offset = 0u64;
+            lens.iter()
+                .map(|&len| {
+                    let a = par_rs::probe::NzbArticle { offset, len };
+                    offset = offset.saturating_add(len);
+                    a
+                })
+                .collect()
+        })
+        .collect();
+    let postings: Vec<par_rs::salvage::Par2Posting> = vols
+        .iter()
+        .zip(&articles)
+        .map(|((name, _), arts)| par_rs::salvage::Par2Posting { name, articles: arts })
+        .collect();
+    par_rs::salvage::plan_critical_articles(&postings, budget)
+        .into_iter()
+        .filter(|plan| par_rs::filenames::volume_range(vols[plan.posting].0).is_some())
+        .map(|plan| (plan.posting, plan.articles))
+        .collect()
+}
+
+/// The identity in the pieces of par2 volumes fetched, `(volume, offset in
+/// it, bytes)` (F2b): only packets whose MD5 matches count, and a set that
+/// names no file gives none.
+pub fn salvage_par2(pieces: &[(usize, u64, &[u8])]) -> Option<Salvaged> {
+    let sets = par_rs::salvage::salvage_sets(pieces);
+    let set = par_rs::salvage::best_set(&sets)?.clone();
+    let complete = set.main.as_ref().is_some_and(|main| {
+        main.total_file_count() > 0 && main.all_file_ids().all(|id| set.file_descs.contains_key(id))
+    });
+    let mut sigs = par_rs::twin::sigs_of_set(&set);
+    if sigs.is_empty() {
+        return None;
+    }
+    sigs.sort_by(|a, b| a.name.cmp(&b.name));
+    Some(Salvaged { set, sigs, complete })
+}
+
+/// Two salvaged identities compared ([`par_rs::salvage::compare_identity`]):
+/// Twin only when both sets survived whole and list the same files, Different
+/// only with proof, else Unknown: never a guess.
+pub fn salvaged_identity(a: &Salvaged, b: &Salvaged) -> par_rs::salvage::Identity {
+    par_rs::salvage::compare_identity(&a.set, &b.set)
 }
 
 /// Reads the header of a 7z set and returns its largest file's [`InnerKey`].
@@ -876,7 +1034,7 @@ where
     let crc32 = checks
         .crc32
         .ok_or_else(|| "7z file CRC not recorded".to_string())?;
-    Ok(InnerKey { size, crc32 })
+    Ok(InnerKey::crc(size, crc32))
 }
 
 #[cfg(test)]
@@ -885,10 +1043,7 @@ mod tests {
 
     const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/twinfields/fixtures");
     /// The payload every fixture packs: 49156 bytes, CRC32 0x771fbd29.
-    const VIDEO: InnerKey = InnerKey {
-        size: 49156,
-        crc32: 0x771f_bd29,
-    };
+    const VIDEO: InnerKey = InnerKey::crc(49156, 0x771f_bd29);
 
     fn fixture(name: &str) -> Vec<u8> {
         std::fs::read(format!("{FIXTURES}/{name}")).unwrap()
@@ -963,10 +1118,7 @@ mod tests {
         // the fixture heads hold only the video's tail (the nfo lies beyond
         // 4096 bytes), so this checks the key, not the nfo being passed over;
         // the intake's majority rule backs up the split_before filter
-        let video = InnerKey {
-            size: 49156,
-            crc32: 0x771f_bd29,
-        };
+        let video = InnerKey::crc(49156, 0x771f_bd29);
         assert_eq!((mm, nfo_first), (video, video));
         // a first volume records no final check of a continued file
         assert_eq!(
@@ -1320,12 +1472,103 @@ mod tests {
         assert!(key_of(&[fixture("rerar-a.part1.rar")], "rel.part1.rar").is_err());
     }
 
+    /// F2b: a copy whose index .par2 is lost is identified from one or two
+    /// tail articles of its smallest volume: Twin, Different or Unknown,
+    /// never guessed.
+    #[test]
+    fn a_lost_index_is_salvaged_from_a_volume_tail() {
+        use par_rs::create::{build_set, SetOptions, VolumeScheme};
+        use par_rs::salvage::Identity;
+        let make = |content: &[u8]| {
+            build_set(
+                "rel",
+                &[("movie.mkv", content)],
+                &SetOptions {
+                    slice_size: 4096,
+                    recovery_blocks: 3,
+                    first_exponent: 0,
+                    volumes: VolumeScheme::Exponential,
+                    creator: "rustyget-test".to_string(),
+                    unicode_names: false,
+                    kernel: par_rs::Kernel::detect(),
+                },
+            )
+            .unwrap()
+        };
+        let content: Vec<u8> = (0..40_000u32).map(|i| (i * 7 + i / 13) as u8).collect();
+        let mut other = content.clone();
+        other[123] ^= 0xff;
+        let (a, b, c) = (make(&content), make(&content), make(&other));
+        let article = 3000u64;
+        let salvage = |set: &par_rs::create::Par2Set| {
+            let vols: Vec<(&[u8], Vec<u64>)> = set
+                .volumes
+                .iter()
+                .map(|(name, bytes)| {
+                    let n = bytes.len() as u64;
+                    let lens = (0..n.div_ceil(article)).map(|i| article.min(n - i * article)).collect();
+                    (name.as_bytes(), lens)
+                })
+                .collect();
+            let plans = plan_par2_salvage(&vols, 2 * article);
+            let (vol, arts) = plans.first().cloned().expect("a plan");
+            assert!(arts.len() <= 2, "one or two tail articles: {arts:?}");
+            let bytes = &set.volumes[vol].1;
+            let pieces: Vec<(usize, u64, &[u8])> = arts
+                .iter()
+                .map(|&k| {
+                    let start = k as u64 * article;
+                    let end = (start + article).min(bytes.len() as u64);
+                    (vol, start, &bytes[start as usize..end as usize])
+                })
+                .collect();
+            salvage_par2(&pieces)
+        };
+        let (sa, sb, sc) = (salvage(&a).unwrap(), salvage(&b).unwrap(), salvage(&c).unwrap());
+        assert!(sa.complete && sa.sigs.len() == 1);
+        assert_eq!(salvaged_identity(&sa, &sb), Identity::Twin);
+        assert_eq!(salvaged_identity(&sa, &sc), Identity::Different);
+        // nothing that passes its MD5: no identity, never a guess
+        assert!(salvage_par2(&[(0, 0, &[0u8; 64][..])]).is_none());
+    }
+
+    /// F11a: keyed checks compare only with keyed ones, BLAKE2sp counts like
+    /// a CRC32, and two keyed values that differ never make another file.
+    #[test]
+    fn keyed_checks_compare_only_with_keyed() {
+        let size = MIN_KEY_SIZE + 5;
+        let b2 = |x: u8| Some([x; 32]);
+        let key = |crc: Option<u32>, blake2: Option<[u8; 32]>, keyed: bool| InnerKey {
+            size,
+            crc32: crc.unwrap_or(0),
+            has_crc: crc.is_some(),
+            blake2,
+            keyed,
+        };
+        let p = |k: InnerKey| k.param();
+        let plain = p(key(Some(1), None, false));
+        assert_eq!(plain, format!("{size}:00000001"));
+        let keyed_a = p(key(None, b2(9), true));
+        assert_eq!(InnerKey::parse(keyed_a.as_bytes()), Some(key(None, b2(9), true)));
+        let keyed_b = p(key(None, b2(8), true));
+        let unkeyed_b2 = p(key(None, b2(9), false));
+        assert_eq!(same_inner_key(keyed_a.as_bytes(), keyed_a.as_bytes(), MIN_KEY_SIZE), Some(true));
+        // another password may key the same file otherwise
+        assert_eq!(same_inner_key(keyed_a.as_bytes(), keyed_b.as_bytes(), MIN_KEY_SIZE), None);
+        assert_eq!(same_inner_key(keyed_a.as_bytes(), unkeyed_b2.as_bytes(), MIN_KEY_SIZE), None);
+        assert_eq!(same_inner_key(keyed_a.as_bytes(), plain.as_bytes(), MIN_KEY_SIZE), None);
+        // unkeyed: a BLAKE2sp that differs is another file, one equal the same
+        let both = p(key(Some(1), b2(3), false));
+        let both_other = p(key(Some(1), b2(4), false));
+        assert_eq!(same_inner_key(both.as_bytes(), both_other.as_bytes(), MIN_KEY_SIZE), Some(false));
+        assert_eq!(same_inner_key(both.as_bytes(), plain.as_bytes(), MIN_KEY_SIZE), Some(true));
+        assert_eq!(same_inner_key(unkeyed_b2.as_bytes(), plain.as_bytes(), MIN_KEY_SIZE), None);
+        assert_eq!(InnerKey::parse(b"12:-"), None);
+    }
+
     #[test]
     fn inner_keys_link_only_large_equal_files() {
-        let big = InnerKey {
-            size: MIN_KEY_SIZE,
-            crc32: 1,
-        };
+        let big = InnerKey::crc(MIN_KEY_SIZE, 1);
         let p = big.param();
         assert_eq!(InnerKey::parse(p.as_bytes()), Some(big));
         assert_eq!(
@@ -1358,16 +1601,10 @@ mod tests {
         assert_eq!(same_inner_key(b"", p.as_bytes(), MIN_KEY_SIZE), None);
         // F11c: a header-sized difference (an mkv without its 11,245-byte
         // Tags tail) is a likely alt, never another file
-        let short_tail = InnerKey {
-            size: big.size - 11_245,
-            crc32: 7,
-        }
+        let short_tail = InnerKey::crc(big.size - 11_245, 7)
         .param();
         assert_eq!(same_inner_key(p.as_bytes(), short_tail.as_bytes(), MIN_KEY_SIZE), None);
-        let far = InnerKey {
-            size: big.size - HEADER_SIZED_DIFF - 1,
-            crc32: 7,
-        }
+        let far = InnerKey::crc(big.size - HEADER_SIZED_DIFF - 1, 7)
         .param();
         assert_eq!(same_inner_key(p.as_bytes(), far.as_bytes(), MIN_KEY_SIZE), Some(false));
         assert_eq!(InnerKey::parse(b"12:abc"), None);

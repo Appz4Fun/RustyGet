@@ -1,7 +1,7 @@
 # Drop as fleet: NZBs added together are one fleet
 
 Status: built (2026-11-22), with both follow-ups: the NzbDir scanner and the
-daemon-side join.
+daemon-side join; F16 (fleets stay in Downloads) built 2026-11-23.
 
 ## What happened before
 
@@ -122,8 +122,11 @@ Each copy is scored from a probe of about 1 MB of articles
   shows in the alive share;
 - the kind probe reads two articles (the par2 file list and the head of the
   largest file: twin by par2 list, encrypted or locked headers);
-- the BODY checks get what is left of the 1 MB (`group_probe_body_checks`, at
-  least one, never more than `DupeBodyChecks`);
+- the alive share comes from STATs alone (`group_probe_body_checks` gives a
+  grouped fleet no BODY checks since F16); BODY reads are kept for the few
+  header and par2 articles whose content the kind probe needs, and for one or
+  two par2 volume tail articles when the index is lost (F2b,
+  `group_salvage_budget`);
 - the payload intake, which reads an article of every volume to map the video
   inside, is skipped for such a group: copies of one release name are matched
   by TwinCheck's par2 lists instead, and an unverified copy stays in the fleet.
@@ -133,6 +136,10 @@ labelled backups that lend articles when the primary misses them; no backup is
 downloaded in full while the primary can still finish.
 
 ### Imperfect copies stay donors
+
+(Superseded for copies grouped by name by F16 below: their backups and kept
+donors wait held in the queue, not in history. This section still describes
+a fleet of a client's own key, and copies kept in history by an earlier build.)
 
 Only the best copy downloads. Every other copy stays in the fleet as a backup
 (DELETED/DUPE in history) ranked by its alive percentage, which the web UI shows
@@ -190,9 +197,13 @@ badge, and shows a kept donor's `DupeParked` the same way.
   (RAR) or its 7z header records (`dupeintake::inner_key_copy_with`, two
   articles), with the nzb's password for encrypted headers
   (`twinfields::rar_last_volume_key_with`), and stores it as `DupeInnerCrc`;
-  TwinCheck makes a container an `alt` when the keys match. Keyed checks (RAR 5
-  AES data) still give no key: `OPEN ITEM (zipfast)` to use
-  `zipfast::map::last_volume_identity` with a zipfast pin at 21474cf or later.
+  TwinCheck makes a container an `alt` when the keys match. F11a: the RAR key
+  is read through `zipfast::map::last_volume_identity` (zipfast pinned at
+  21474cf) from the last volume's first article: the final size and CRC32
+  and/or BLAKE2sp of the member ending there, keyed checks (RAR 5 AES data)
+  too. `twinfields::same_inner_key` compares every check both keys record;
+  keyed checks only with keyed ones, and two keyed values that differ may be
+  one file under two passwords, so they never make `other`.
   (c) Sizes that differ only by a header-sized amount (at most 1 MiB, such as
   an mkv without its 11,245-byte Tags tail) are a likely alt
   (`twinfields::same_inner_key` gives no verdict), so the copy stays an
@@ -201,10 +212,24 @@ badge, and shows a kept donor's `DupeParked` the same way.
   gives today: `OPEN ITEM (zipfast): MKV landmark reader`.
 - **Borrowed alt bytes pass a structural check (F12).** Stream repair calls
   `streamrepair::validate_borrowed_range` before it writes bytes borrowed by
-  the video's offset; a range it calls Bad is never written, so another donor
-  is tried. Until zipfast's MKV range validator lands the hook answers Unknown
-  (`OPEN ITEM (zipfast): MKV range validator`); the final proof stays the
-  whole-file CRC32/BLAKE2 or par2.
+  the video's offset. It runs `vidmatch::validate` (vidmatch pinned at
+  636facc) over the range with the target's own good bytes around it as
+  context: back to the start of the Cluster holding it (`vidmatch::find_cluster`
+  in up to 8 MiB of good bytes before it) and up to 2 MiB after it, with the
+  Tracks from `vidmatch::parse_head` on the video's first bytes when they are
+  held. Bad: never written, another donor is tried or the range fetched
+  again. Unknown (too little context, no Tracks, not Matroska): written, and
+  the whole-file CRC32/BLAKE2 or par2 stays the gate. Ok proves the structure
+  only (headers, sizes, block headers, lacing, any CRC-32 element held whole).
+- **A lost index par2 is salvaged (F2b).** When a copy's index `.par2` cannot
+  be read, the fleet probe (`dupesearch_coord::salvage_copy`) and TwinCheck
+  (the "Fingerprint ... lost" case) fetch one or two articles at the tail of
+  its smallest par2 volume (`par_rs::salvage::plan_critical_articles`, par-rs
+  pinned at 482b936), keep the packets whose MD5 matches (`salvage_sets`,
+  `best_set`) and compare copies with `compare_identity`: Twin, Different or
+  Unknown, never a guess. TwinCheck stores the salvaged file list as the
+  copy's fingerprint. The alive share comes only from sampled articles: a
+  lost fingerprint never makes a copy dead.
 
 Open item (F2a): par-rs #87 is merged (b2ba9e5) but not pinned here yet; the 1 MB probe is to switch to
 `par_rs::probe::{plan_probe, check_probe}` (slice-verified Match, Mismatch or
@@ -265,6 +290,73 @@ marked `OPEN ITEM (par-rs)` at `GROUP_PROBE_BYTES`.
   beside each (`.<name>.nzb.priority`), which the scan reads once. A failed
   write, and a check that could not start, are logged.
 
+## F16: fleets stay in Downloads (built 2026-11-23)
+
+The user: "you should have them all be in the downloads, but have it so it is
+collapsed but you can uncollapse it and see all the nzb's attached; it
+shouldn't move these duplicates to history". This overrides how F3 was built
+for copies grouped by name (a `dupes:` key, DupeMode SCORE, DupeCheck on):
+
+- **Added at once, held, probing.** `appendfleet` (and the NzbDir scanner,
+  through the same code) adds every copy to the queue before the probe,
+  paused at priority -100 with `DupeHeld=yes` and `DupeProbing=yes`
+  (`dupesearch_coord::fleet_append`, `scanner_add_external_paused`), so the
+  copies show in Downloads as "probing…" right away. The key lock is held only
+  while copies are added and while what the probe found is written, not for
+  the probe (a client's fleet, which adds only after its probe, keeps it
+  throughout).
+- **One copy downloads, the others are held.** After the probe its findings
+  are written on each copy (`fleet_apply_member`: rank, kind, alive share,
+  `DupeEase`, score), and `fleethold::refresh_key_host` releases the first live
+  copy in failover order. Every other copy stays held: paused, priority -100,
+  never downloaded in full, and still a donor (the article fallback reads
+  queued copies). The duplicate check holds a copy that loses to a queued one
+  instead of moving it to history (`dupecoord::nzb_found_host`).
+- **Failover to the next held copy.** A primary that fails its health check
+  is held as a donor (`DupeParked`, `DupeAlive`) and the next live held copy
+  is released (`fleethold::park_on_health_host`, at every parking site of
+  `queuecoord.rs`); `find_dupe_backup_host` returns the next held copy, and
+  `return_best_dupe_host` releases it instead of returning a history item.
+  A copy deleted by hand fails over the same way.
+- **Only success or total failure ends it.** When the primary succeeds every
+  other queued copy goes to History as DELETED/DUPE, its nzb kept
+  (`fleethold::fleet_succeeded_host`, whatever the HealthCheck mode). When no
+  live copy is left, the held copies go to History as FAILURE/HEALTH with the
+  last one (`fleethold::fail_held_host`); a fleet whose every copy probed dead
+  goes there at once (`fleet_drop_pre_added`).
+- **F16a: one order.** `fleethold::failover_order` ranks the held copies:
+  healthy copies (at least 97.5% alive) first, by ease of borrowing into
+  (bare/split, stored RAR, compressed, encrypted: F10), twins before alts;
+  then weak copies by alive share; locked copies; unverified copies; dead and
+  parked copies last. The queue coordinator writes it every second as
+  `DupeFleetOrder` (0 the primary, 1 next, 2, 3, ...) and `DupeFleetPrimary`
+  on every copy, and failover takes the first live copy of the same order, so
+  the web UI shows exactly what failover will pick; JavaScript never re-ranks.
+- **Downloads shows one row per fleet** (`webui/downloads.js`
+  `DownloadsUI.buildFleets`, `buildFleetRow`): the primary with a "+N copies"
+  toggle, collapsed by default, open or closed remembered per viewer in
+  `localStorage` (`DownloadsFleetOpen`, inside try/catch). Opened, every copy
+  in `DupeFleetOrder` with its place (primary, next, 2, 3...), its label (twin,
+  alt, container, other, locked, unverified, dead, NN% alive) and its state
+  (probing…, held donor, held donor (tried), downloading).
+- **Probe speed.** The alive share comes from STATs; each request waits at
+  most `fleetprobe::PROBE_IO_TIMEOUT_SEC` (5 s; a timeout leaves the article
+  unknown, F6); while downloads run the probes take at most half of a
+  server's connections (`fleetprobe::probe_share`; with downloads held they
+  may take them all) and a grouped fleet no longer pauses the downloads, so
+  the primary keeps the rest. Every probe request gets its connection through
+  `fleetprobe::probe_connection` (STAT batches and, through
+  `fleetprobe::ProbeNntpHost`, BODY reads): moving the probes to the light
+  pool of branch `light-pool` (F17) changes that one function. Each copy's
+  probe is logged: "Fleet probe of X: N ms, N request(s) sent, N answered (N
+  present, N missing), N timed out or failed".
+
+Changed expectations (functional): `dropjoin` (backups held in the queue, not
+in history, until the primary succeeds), `dropkeepdonor` (the failed copy is
+held in the queue as a donor, then DELETED/DUPE), `dropallfail` (both copies
+end FAILURE/HEALTH), `dropallfailnonzb` (a held backup needs no nzb-file: it
+completes), `dropnzbdir` (every copy queued in front of the item queued before).
+
 ## Done when (acceptance tests)
 
 | Done when | Test |
@@ -279,14 +371,21 @@ marked `OPEN ITEM (par-rs)` at `GROUP_PROBE_BYTES`.
 | Web UI tests cover the grouping (suffix stripping, two releases, a single file, a user-supplied DupeKey). | `tests/webui/dupe-group.js`; Playwright `tests/webui/drop-fleet.js` (the Add dialog's preview, box on by default, box off and Force as plain appends, two releases as two fleets; Downloads: one primary, twin, alt and unverified backups, projected health; History: donors never FAILURE/HEALTH, DELETED/DUPE after the primary succeeds; no console errors) |
 | The NzbDir scanner treats files of one release in one scan pass as one fleet. | functional `dropnzbdir`; Rust `scanner::tests::nzbdir_copies_of_one_release_form_one_fleet` |
 | Items with no DupeKey and the same normalized name join one group, whatever added them. | functional `dropjoin`, `dropjoinrestart` (keyless copies already queued join once after a restart; the sequel stays apart); Rust `dupecoord::tests::group_scores_follow_the_order_copies_came` |
-| A group goes to the front of the queue, and each backup sends at most about 1 to 2 MB during intake. | functional `dropnzbdir` (queue order with an item queued before the drop; nserv request log: bytes served per backup copy at most 2 MB, borrowed articles included), `dropjoin` (the joined copy moves in front of an item queued before it); Rust `dupesearch_coord::tests::grouped_fleets_probe_about_a_megabyte_per_copy` |
+| A group goes to the front of the queue, and each backup sends at most about 1 to 2 MB during intake. | functional `dropnzbdir` (queue order with an item queued before the drop; nserv request log: bytes served per backup copy at most 2 MB, borrowed articles included), `dropjoin` (the joined copy moves in front of an item queued before it); Rust `dupesearch_coord::tests::grouped_fleets_sample_alive_by_stat_only` |
 | The shown health is the one a copy was judged on. | functional `dropkeepdonor` (Health above 90%, DupeProjected under 10%) |
 | F6: a copy whose checks timed out is unverified, never dead. | Rust `dupesearch_nzb::tests::timeouts_leave_a_fleet_copy_unverified`; functional `fleettimeoutunverified` |
 | F7: the check budget is per copy. | Rust `dupesearch_coord::tests::grouped_fleets_check_each_copy_for_a_minute` |
 | F8: encrypted headers are read with the nzb's password. | Rust `dupesearch_coord::tests::fleet_copies_carry_the_nzb_password`, `donorkind::tests::header_encrypted_rar_with_its_password_is_borrowable_encrypted`; functional `fleetnzbpassword` (RAR5 -hp fixture, password only in the nzb meta: borrowable-encrypted; missing password locked; never DEAD), `fleetencryptedpassword` (needs `rar`) |
 | F9: another container shows unverified until the video inside matches. | Rust `twin::tests::par2_differences_alone_never_make_an_alt`; web UI `dupe-group.js` "F9: another container is unverified" |
 | F11: alt identity without par2; a header-sized difference is a likely alt, never other. | Rust `twinfields::tests` (same_inner_key: an 11,245-byte shorter video gives no verdict, a difference over 1 MiB is another file), `dupeintake::tests` (inner keys); functional `dropdune` (the shorter bare mkv stays a container) |
-| F12: borrowed alt bytes pass a structural check before use. | Rust `streamrepair` test `borrowed_ranges_pass_the_validator_hook` (the hook answers Unknown until zipfast's validator lands) |
+| F12: borrowed alt bytes pass a structural check before use. | Rust `streamrepair` test `borrowed_ranges_pass_the_validator_hook` (vidmatch: the right bytes in a CRC-32-covered Cluster are Ok, one bit flipped is Bad, no Tracks is Unknown) |
+| F16: every copy stays in Downloads (held, lowest priority, lending) until the primary succeeds or every copy failed; copies show "probing…" at once. | functional `fleetstaysqueued` (all copies queued and probing within seconds, none in History while open, held copies PAUSED at -100, the primary borrows 2 articles from a held copy that never downloads, DELETED/DUPE after success, nzb-files kept), `dropjoin`, `dropkeepdonor`, `dropallfail`, `dropallfailnonzb`; Rust `fleethold::tests`; Playwright `tests/webui/fleet-downloads.js` |
+| F16: one collapsible row per fleet, collapsed by default, remembered per viewer, members with label and state. | Playwright `tests/webui/fleet-downloads.js` (light/dark, desktop/phone, no console errors) |
+| F16a: members in the daemon's failover order; the UI order is the order failover picks. | Rust `fleethold::tests::failover_order_follows_the_fleet_rules`; functional `fleetfailoverorder` (deleting the primary releases the copy at place 1, the others move up); Playwright `fleet-downloads.js` (shuffled list, DupeFleetOrder followed) |
+| Probe speed: STAT sampling, short timeouts, a bounded share of connections, a log line per copy. | Rust `fleetprobe::tests::probes_take_at_most_half_of_the_connections`, `dupesearch_coord::tests::grouped_fleets_sample_alive_by_stat_only`; functional `fleetstaysqueued` (probe log per copy; the held partial copy is read by BODY at most 8 times in all), `fleettimeoutunverified` |
+| Key lock only while adding. | functional `fleetstaysqueued` (a copy sent while the first fleet probes: no KEY_BUSY) |
+| F2b: a lost index par2 is salvaged from a volume's tail. | Rust `twinfields::tests::a_lost_index_is_salvaged_from_a_volume_tail`; functional `fleetsalvage` (two copies with dead indexes: twins, the same salvaged fingerprint, never dead) |
+| F11a: keyed checks compare only with keyed ones (zipfast last_volume_identity). | Rust `twinfields::tests::keyed_checks_compare_only_with_keyed`, `twinfields::tests` RAR fixtures |
 | F10: the primary is the healthy copy easiest to borrow into. | Rust `donorkind::tests::primary_ease_orders_bare_stored_compressed_encrypted`, `dupesearch_nzb::tests::the_primary_is_the_healthy_copy_easiest_to_borrow_into`; functional `fleetprimaryease`; functional `dropdune` (the Dune drop in small: stored RAR primary over a healthy header-encrypted RAR5 with the nzb password, twins, repacked and shorter copies as unverified containers, dead copies kept with their nzb, the 1080p release apart) |
 | Review 1-2: plain keys keep FAILURE; the last copy standing fails visibly. | functional `dupefailover`, `dupehopeless` (FAILURE/HEALTH again), `dropallfail` |
 | Review 3-5: strict joins, no reorder after a restart. | functional `dropjoinstrict`, `dropjoinrestart`; Rust `releasename::tests::copy_suffixes_strip_only_after_a_group_tag`; web UI `dupe-group.js` |

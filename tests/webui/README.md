@@ -8,6 +8,12 @@ checks the "N files → 1 fleet" preview, the box on by default, plain appends
 with the box off or Force on, two releases as two fleets, the fleet panel's
 primary and twin, alt and unverified backups, honest projected health, and
 History's donors (never FAILURE/HEALTH), with no console errors.
+F16 (fleets stay in Downloads) runs offline the same way:
+`node tests/webui/fleet-downloads.js http://127.0.0.1:17999/` checks one row
+per fleet collapsed by default, the open state remembered per viewer, every
+copy in the daemon's failover order (DupeFleetOrder) with its label and state,
+"probing…" right after adding, and no fleet copy in History, in both themes at
+desktop and phone widths.
 
 The WebUI density regression check uses Playwright and Chrome against an isolated,
 loopback NZBGet instance serving the current WebUI. The fixture should start with

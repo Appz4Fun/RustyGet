@@ -388,8 +388,15 @@ pub fn inner_key_copy_with(
             .map(|f| u64::try_from(f.bytes).unwrap_or(0))
             .fold(0u64, u64::saturating_add);
         let set_bytes = measured.max(listed);
+        // the nzb's byte count of the last volume is an upper bound of its length
+        let listed_last = set
+            .members
+            .last()
+            .and_then(|&i| files.get(i as usize))
+            .map_or(0, |f| u64::try_from(f.bytes).unwrap_or(0));
         return crate::twinfields::rar_last_volume_key_with(
             &head,
+            last_len.max(listed_last).max(head.len() as u64),
             vols.len() > 1,
             RAR_KEY_MIN,
             password.as_deref(),
@@ -679,10 +686,7 @@ mod tests {
             files: HashMap::new(),
             fetched: Cell::new(0),
         };
-        let video = crate::twinfields::InnerKey {
-            size: 49156,
-            crc32: 0x771f_bd29,
-        };
+        let video = crate::twinfields::InnerKey::crc(49156, 0x771f_bd29);
         let pass = copy(&mut mem, "p", "rel.7z", fixture("pass.7z"), 4000);
         assert!(print_copy(&pass, &mem, None, 2, 1).is_err(), "no password");
         assert_eq!(inner_key_copy(&pass, &mem), Some(video));
@@ -734,10 +738,7 @@ mod tests {
         };
         let a = key_of(&mut mem, "a", "rerar-a");
         let c = key_of(&mut mem, "c", "rerar-c");
-        let video = crate::twinfields::InnerKey {
-            size: 49156,
-            crc32: 0x771f_bd29,
-        };
+        let video = crate::twinfields::InnerKey::crc(49156, 0x771f_bd29);
         assert_eq!(inner_key_copy(&a, &mem), Some(video));
         // a re-RAR of the same file records the same size and CRC32
         assert_eq!(inner_key_copy(&c, &mem), Some(video));

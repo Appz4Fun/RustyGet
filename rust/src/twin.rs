@@ -366,6 +366,15 @@ pub struct NzbEntry {
     pub segments: Vec<(u64, String)>,
 }
 
+/// The par2 file name of an nzb entry: its quoted name, else its subject.
+fn volume_name(e: &NzbEntry) -> String {
+    if e.filename.is_empty() {
+        e.subject.clone()
+    } else {
+        e.filename.clone()
+    }
+}
+
 impl NzbEntry {
     pub fn size(&self) -> u64 {
         self.segments.iter().map(|s| s.0).sum()
@@ -1160,10 +1169,25 @@ fn store_has_sigs_dir(qdir: &[u8], id: i32, print: &[u8]) -> i32 {
 
 #[cfg(unix)]
 fn store_put_par2_dir(qdir: &[u8], id: i32, posting: &[u8], data: &[u8]) -> (String, bool) {
-    if data.is_empty() || !ensure_store_open_dir(qdir) {
+    if data.is_empty() {
         return (String::new(), false);
     }
-    let (mut sigs, complete) = par2_set(data);
+    let (sigs, complete) = par2_set(data);
+    store_put_sigs_dir(qdir, id, posting, sigs, complete)
+}
+
+/// Stores a posting's file list (`sigs`, whole when `complete`) as read from
+/// its par2 data, or salvaged from its volumes (F2b), and returns its print.
+fn store_put_sigs_dir(
+    qdir: &[u8],
+    id: i32,
+    posting: &[u8],
+    mut sigs: Vec<FileSig>,
+    complete: bool,
+) -> (String, bool) {
+    if !ensure_store_open_dir(qdir) {
+        return (String::new(), false);
+    }
     let posting_s = decode_utf8_chunks(posting);
     if !complete {
         let earlier = {
@@ -2171,10 +2195,61 @@ fn run_twin_job(token: usize, qdir: &[u8]) {
     if is_stopped() {
         return;
     }
-    let (mut fp, complete) = match data_opt {
+    let (mut fp, mut complete) = match data_opt {
         Some(ref data) => store_put_par2_dir(qdir, spec.nzb_id, &spec.posting, data),
         None => (String::new(), false),
     };
+    let mut salvaged_note = String::new();
+    if fetched && fp.is_empty() {
+        // F2b: the index .par2 is lost; its volumes repeat its critical
+        // packets at their tail: one or two articles of the smallest one
+        let vols: Vec<&NzbEntry> = entries
+            .iter()
+            .filter(|e| e.is_par2() && par_rs::filenames::volume_range(volume_name(e).as_bytes()).is_some())
+            .collect();
+        let names: Vec<String> = vols.iter().map(|e| volume_name(e)).collect();
+        let plan_in: Vec<(&[u8], Vec<u64>)> = vols
+            .iter()
+            .zip(&names)
+            .map(|(e, n)| (n.as_bytes(), e.segments.iter().map(|s| s.0).collect()))
+            .collect();
+        let largest = vols.iter().flat_map(|e| e.segments.iter().map(|s| s.0)).max().unwrap_or(0);
+        let budget = (2 * largest.max(1)).min(MAX_INDEX_SIZE as u64);
+        let mut pieces: Vec<(usize, u64, Vec<u8>)> = Vec::new();
+        let mut found = None;
+        for (vol, arts) in crate::twinfields::plan_par2_salvage(&plan_in, budget).into_iter().take(2) {
+            let groups: Vec<Vec<u8>> = vols[vol].groups.iter().map(|g| g.as_bytes().to_vec()).collect();
+            for k in arts {
+                if is_stopped() {
+                    return;
+                }
+                let Some((_, seg_id)) = vols[vol].segments.get(k) else {
+                    continue;
+                };
+                let part = fetcher.fetch(seg_id.as_bytes(), &groups);
+                if part.success && part.offset >= 0 {
+                    pieces.push((vol, part.offset as u64, part.data));
+                }
+            }
+            let refs: Vec<(usize, u64, &[u8])> = pieces.iter().map(|(v, o, d)| (*v, *o, d.as_slice())).collect();
+            if let Some(s) = crate::twinfields::salvage_par2(&refs) {
+                let whole = s.complete;
+                found = Some(s);
+                if whole {
+                    break;
+                }
+            }
+        }
+        if let Some(s) = found {
+            salvaged_note = format!(
+                ", salvaged from {} article(s) of its par2 volumes: the index is lost",
+                pieces.len()
+            );
+            let (print, whole) = store_put_sigs_dir(qdir, spec.nzb_id, &spec.posting, s.sigs, s.complete);
+            fp = print;
+            complete = whole;
+        }
+    }
     let known = !fp.is_empty();
     if fetched && (!known || !complete) {
         let mut guard = twin_coord().lock().unwrap_or_else(|e| e.into_inner());
@@ -2206,7 +2281,9 @@ fn run_twin_job(token: usize, qdir: &[u8]) {
             qh.nzb_set_param(nzb_ptr, b"DupeFiles", Some(fp.as_bytes()));
             let mut msg = b"Fingerprint of ".to_vec();
             msg.extend_from_slice(&name);
-            msg.extend_from_slice(format!(": {fp} ({files} file(s) in its par2 set)").as_bytes());
+            msg.extend_from_slice(
+                format!(": {fp} ({files} file(s) in its par2 set{salvaged_note})").as_bytes(),
+            );
             qh.nzb_print_message(nzb_ptr, crate::queuesubsys_host::MK_DETAIL, &msg);
             qh.dq_history_changed(dq_ptr);
             qh.dq_save(dq_ptr);

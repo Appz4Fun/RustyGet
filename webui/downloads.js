@@ -206,13 +206,27 @@ var Downloads = (new function($)
 
 	var SEARCH_FIELDS = ['name', 'status', 'priority', 'category', 'estimated', 'age', 'size', 'remaining'];
 
+	// F16: a fleet of copies grouped by name is ONE row in Downloads, its
+	// primary's, with the other copies listed under it when opened. The order
+	// is the daemon's failover order (DupeFleetOrder), never re-ranked here.
 	function redraw_table()
 	{
 		var data = [];
+		var fleets = DownloadsUI.buildFleets(groups);
 
 		for (var i=0; i < groups.length; i++)
 		{
 			var group = groups[i];
+			var fleet = fleets.byId[group.NZBID];
+			group.fleet = null;
+			if (fleet && fleet.members.length > 1)
+			{
+				if (fleet.leader !== group)
+				{
+					continue;
+				}
+				group.fleet = fleet;
+			}
 
 			group.name = group.NZBName + ' ' + ReleaseName.forGroup(group).headline;
 			group.status = DownloadsUI.buildStatusText(group);
@@ -287,7 +301,8 @@ var Downloads = (new function($)
 			priority = '<div data-nzbid="' + group.NZBID + '"' +  (group.postprocess ? ' class="dropdown-disabled"' : '') + '>' + priority + '</div>';
 			status = '<div data-nzbid="' + group.NZBID + '">' + status + '</div>';
 			category = '<div data-nzbid="' + group.NZBID + '"' +  (group.postprocess ? ' class="dropdown-disabled"' : '') + '>' + category + '</div>';
-			var info = name + ' ' + url + dupe + dupeScore + DownloadsUI.buildTwinGroupLabel(group.Parameters, group.Status !== 'PAUSED') + health + backup + propagation + progresslabel;
+			var info = name + ' ' + url + dupe + dupeScore + DownloadsUI.buildTwinGroupLabel(group.Parameters, group.Status !== 'PAUSED') + health + backup + propagation + progresslabel +
+				DownloadsUI.buildFleetRow(group.fleet);
 			item.fields = ['<div class="check img-check"></div>', priority, status, info, category, item.data.age, progress, item.data.estimated];
 		}
 		else
@@ -300,6 +315,7 @@ var Downloads = (new function($)
 				info += ' <span class="label label-status">' + category + '</span>';
 			}
 
+			info += DownloadsUI.buildFleetRow(group.fleet);
 			if (progresslabel)
 			{
 				progress = '<div class="downloads-progresslabel">' + progresslabel + '</div>' + progress;
@@ -390,6 +406,13 @@ var Downloads = (new function($)
 	{
 		e.preventDefault();
 		e.stopPropagation();
+		if ($(this).hasClass('fleet-toggle'))
+		{
+			$(this).blur();
+			DownloadsUI.toggleFleet($(this).attr('data-fleet-key'));
+			Downloads.redraw(true);
+			return;
+		}
 		var nzbid = $(this).attr('data-nzbid');
 		var area = $(this).attr('data-area');
 		$(this).blur();
@@ -976,6 +999,258 @@ var DownloadsUI = (new function($)
 		}
 		return encryptedPassword != '' ?
 			' <span class="label label-info" title="'+ Util.textToAttr(encryptedPassword) +'">' + I18n.translate('label_encrypted') + '</span>' : '';
+	}
+
+	// F16: the fleets in the queue, by key: copies grouped by name the daemon
+	// holds or orders (DupeHeld, DupeProbing, DupeFleetOrder). The leader is
+	// the primary (order 0), else the copy with the best score while every
+	// copy is being probed; the others follow in the daemon's failover order.
+	this.buildFleets = function(groups)
+	{
+		var byKey = {};
+		var keys = [];
+		for (var i = 0; i < groups.length; i++)
+		{
+			var g = groups[i];
+			var key = DownloadsUI.fleetKey(g);
+			if (!key)
+			{
+				continue;
+			}
+			if (!byKey[key])
+			{
+				byKey[key] = { key: key, members: [], leader: null };
+				keys.push(key);
+			}
+			byKey[key].members.push(g);
+		}
+		var byId = {};
+		keys.forEach(function(key)
+		{
+			var fleet = byKey[key];
+			fleet.members.sort(function(a, b)
+			{
+				var oa = DownloadsUI.fleetOrder(a), ob = DownloadsUI.fleetOrder(b);
+				if (oa !== ob) return oa - ob;
+				return (b.DupeScore || 0) - (a.DupeScore || 0) || a.NZBID - b.NZBID;
+			});
+			fleet.leader = fleet.members[0];
+			fleet.probing = fleet.members.some(function(m) { return DownloadsUI.fleetFlag(m, 'DupeProbing'); });
+			fleet.members.forEach(function(m) { byId[m.NZBID] = fleet; });
+		});
+		return { byKey: byKey, byId: byId };
+	}
+
+	this.fleetKey = function(group)
+	{
+		var key = String(group.DupeKey || '');
+		if (!/^dupes:./i.test(key) || group.Kind === 'URL')
+		{
+			return '';
+		}
+		var p = group.Parameters;
+		if (DownloadsUI.parameterValue(p, 'DupeFleetOrder') === '' && !DownloadsUI.fleetFlag(group, 'DupeHeld') &&
+			!DownloadsUI.fleetFlag(group, 'DupeProbing'))
+		{
+			return '';
+		}
+		return key.toLowerCase();
+	}
+
+	this.fleetFlag = function(group, name)
+	{
+		return DownloadsUI.parameterValue(group.Parameters, name).toLowerCase() === 'yes';
+	}
+
+	// the copy's place: 0 the primary, then the failover order; a copy not
+	// ordered yet (probing) after the ordered ones, a held copy after a free one
+	this.fleetOrder = function(group)
+	{
+		var order = parseInt(DownloadsUI.parameterValue(group.Parameters, 'DupeFleetOrder'), 10);
+		if (!isNaN(order))
+		{
+			return order;
+		}
+		return DownloadsUI.fleetFlag(group, 'DupeHeld') ? 100000 : 50000;
+	}
+
+	function fleetOpenState()
+	{
+		try
+		{
+			var raw = window.localStorage.getItem('DownloadsFleetOpen');
+			var parsed = raw ? JSON.parse(raw) : {};
+			return parsed && typeof parsed === 'object' ? parsed : {};
+		}
+		catch (e)
+		{
+			return {};
+		}
+	}
+
+	// open or closed per viewer, remembered in localStorage; closed by default
+	this.fleetOpen = function(key)
+	{
+		return isFleetOpen(key);
+	}
+
+	this.toggleFleet = function(key)
+	{
+		var state = fleetOpenState();
+		if (state[key])
+		{
+			delete state[key];
+		}
+		else
+		{
+			state[key] = true;
+		}
+		try
+		{
+			window.localStorage.setItem('DownloadsFleetOpen', JSON.stringify(state));
+		}
+		catch (e)
+		{
+			// private window or blocked storage: open only for this page
+		}
+		openFallback[key] = !!state[key];
+	}
+	var openFallback = {};
+
+	function isFleetOpen(key)
+	{
+		var stored = fleetOpenState();
+		if (Object.prototype.hasOwnProperty.call(openFallback, key) && !storageWorks())
+		{
+			return openFallback[key];
+		}
+		return stored[key] === true;
+	}
+
+	function storageWorks()
+	{
+		try
+		{
+			var probe = '__fleet_probe__';
+			window.localStorage.setItem(probe, '1');
+			window.localStorage.removeItem(probe);
+			return true;
+		}
+		catch (e)
+		{
+			return false;
+		}
+	}
+
+	// what a member is: twin, alt, container, locked, unverified or dead, and
+	// how much of it is alive
+	this.fleetMemberLabel = function(group)
+	{
+		var p = group.Parameters;
+		var parts = [];
+		var kind = DownloadsUI.parameterValue(p, 'DupeKind');
+		if (kind === 'twin' || /^twin:\d+\/\d+$/.test(kind) || DownloadsUI.parameterValue(p, 'DupeCopyKind') === 'twin')
+		{
+			parts.push(I18n.translate('fleet_label_twin'));
+		}
+		else if (kind === 'alt')
+		{
+			parts.push(I18n.translate('fleet_label_alt'));
+		}
+		else if (kind === 'container')
+		{
+			parts.push(I18n.translate('fleet_label_container'));
+		}
+		else if (kind === 'other')
+		{
+			parts.push(I18n.translate('fleet_label_other'));
+		}
+		var locked = DownloadsUI.parameterValue(p, 'DupeLocked').toLowerCase() === 'yes' &&
+			DownloadsUI.parameterValue(p, '*Unpack:Password') === '';
+		if (locked)
+		{
+			parts.push(I18n.translate('fleet_label_locked'));
+		}
+		if (DownloadsUI.fleetFlag(group, 'DupeProbing'))
+		{
+			return { text: parts.join(' · '), cls: 'fleet-sub-probing' };
+		}
+		var parked = parseFloat(DownloadsUI.parameterValue(p, 'DupeParked'));
+		var probed = DownloadsUI.probedAlive(p);
+		var alive = !isNaN(parked) ? parked : probed >= 0 ? probed / 10 : -1;
+		var cls = 'is-good';
+		if (alive < 0)
+		{
+			parts.push(I18n.translate('fleet_label_unverified'));
+			cls = 'is-unknown';
+		}
+		else if (alive <= 0)
+		{
+			parts.push(I18n.translate('fleet_label_dead'));
+			cls = 'is-bad';
+		}
+		else
+		{
+			parts.push(I18n.translate('fleet_label_alive', alive.toFixed(1)));
+			cls = alive >= 97.5 ? 'is-good' : 'is-warn';
+		}
+		return { text: parts.join(' · '), cls: cls };
+	}
+
+	this.fleetMemberState = function(group)
+	{
+		if (DownloadsUI.fleetFlag(group, 'DupeProbing'))
+		{
+			return I18n.translate('fleet_state_probing');
+		}
+		if (DownloadsUI.fleetFlag(group, 'DupeHeld'))
+		{
+			return I18n.translate(DownloadsUI.parameterValue(group.Parameters, 'DupeParked') !== '' ?
+				'fleet_state_parked' : 'fleet_state_held');
+		}
+		return group.Status === 'PAUSED' ? I18n.translate('fleet_state_paused') : I18n.translate('fleet_state_downloading');
+	}
+
+	this.fleetPosition = function(group)
+	{
+		var order = parseInt(DownloadsUI.parameterValue(group.Parameters, 'DupeFleetOrder'), 10);
+		if (DownloadsUI.fleetFlag(group, 'DupeProbing') || isNaN(order))
+		{
+			return '…';
+		}
+		return order === 0 ? I18n.translate('fleet_pos_primary') : order === 1 ? I18n.translate('fleet_pos_next') : String(order);
+	}
+
+	// the collapse toggle with "+N copies" and, opened, every member in order
+	this.buildFleetRow = function(fleet)
+	{
+		if (!fleet)
+		{
+			return '';
+		}
+		var open = isFleetOpen(fleet.key);
+		var others = fleet.members.length - 1;
+		var html = ' <a href="#" class="fleet-toggle' + (open ? ' is-open' : '') + '" data-fleet-key="' + Util.textToAttr(fleet.key) +
+			'" role="button" aria-expanded="' + (open ? 'true' : 'false') + '" title="' + Util.textToAttr(I18n.translate('fleet_toggle_hint')) + '">' +
+			'<i class="material-icon" aria-hidden="true">' + (open ? 'expand_more' : 'chevron_right') + '</i>' +
+			Util.textToHtml(I18n.translate(others === 1 ? 'fleet_toggle_copy' : 'fleet_toggle_copies', String(others))) +
+			(fleet.probing ? ' · ' + Util.textToHtml(I18n.translate('fleet_state_probing')) : '') + '</a>';
+		if (!open)
+		{
+			return html;
+		}
+		var rows = fleet.members.map(function(m)
+		{
+			var label = DownloadsUI.fleetMemberLabel(m);
+			var name = m.NZBNicename || m.NZBName;
+			return '<li class="fleet-sub" data-nzbid="' + m.NZBID + '" data-fleet-order="' +
+				Util.textToAttr(DownloadsUI.parameterValue(m.Parameters, 'DupeFleetOrder')) + '">' +
+				'<span class="fleet-sub-pos">' + Util.textToHtml(DownloadsUI.fleetPosition(m)) + '</span>' +
+				'<a href="#" class="fleet-sub-name" data-nzbid="' + m.NZBID + '" title="' + Util.textToAttr(name) + '">' + Util.textToHtml(name) + '</a>' +
+				(label.text ? '<span class="fleet-sub-label ' + label.cls + '">' + Util.textToHtml(label.text) + '</span>' : '') +
+				'<span class="fleet-sub-state">' + Util.textToHtml(DownloadsUI.fleetMemberState(m)) + '</span></li>';
+		});
+		return html + '<ul class="fleet-sublist">' + rows.join('') + '</ul>';
 	}
 
 	this.parameterValue = function(parameters, name)

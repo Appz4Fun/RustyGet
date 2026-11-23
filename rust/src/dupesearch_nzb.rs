@@ -699,7 +699,11 @@ pub fn eval_fleet_member_health(
     min_known: i32,
     min_alive_pct: i32,
 ) -> (i32, bool, bool) {
-    let answered = present.saturating_add(missing).saturating_add(error);
+    // A timeout or a server error is never evidence (the user's rule,
+    // 2026-11-23): only articles a server said it has or lacks count, so a
+    // copy whose checks timed out stays unknown ("unverified"), never dead.
+    let _ = error;
+    let answered = present.saturating_add(missing);
     let unknown = !checked || (!result_complete && present == 0);
     let alive = if unknown || answered < min_known {
         -1.0
@@ -811,6 +815,25 @@ pub fn rank_fleet_candidates(
         }
     }
     written
+}
+
+/// The primary of a fleet is the healthy copy easiest to borrow INTO (the
+/// user's rule, 2026-11-23): among the copies of `ranked` marked `healthy`
+/// (health gates: only copies healthy enough to complete), the first one with
+/// the lowest `ease` ([`crate::donorkind::primary_ease`]: bare or split, then a
+/// stored archive, then compressed, then encrypted) moves to the front. The
+/// other copies keep their order. Without a healthy copy `ranked` stays as it is.
+pub fn lead_easiest_healthy(ranked: &mut Vec<usize>, healthy: &[bool], ease: &[u8]) {
+    let best = ranked
+        .iter()
+        .enumerate()
+        .filter(|(_, &i)| healthy.get(i).copied().unwrap_or(false))
+        .min_by_key(|(pos, &i)| (ease.get(i).copied().unwrap_or(u8::MAX), *pos))
+        .map(|(pos, _)| pos);
+    if let Some(pos) = best {
+        let idx = ranked.remove(pos);
+        ranked.insert(0, idx);
+    }
 }
 
 /// `Fleet::Append` final reason code when `result.chosen == 0 && result.reason.empty()`:
@@ -3570,6 +3593,16 @@ pub struct NzbSummaryData {
     /// Each data file's encoded size and its article ids in part order: what
     /// the fleet intake reads to open a copy down to its video.
     pub data_segments: Vec<crate::dupeintake::IntakeFile>,
+    /// Each par2-file's name and its articles in part order (encoded bytes,
+    /// message-id): what a lost index is salvaged from (F2b).
+    pub par_files: Vec<ParFile>,
+}
+
+/// A par2-file of an nzb, for salvaging its critical packets (F2b).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ParFile {
+    pub name: Vec<u8>,
+    pub segments: Vec<(u64, Vec<u8>)>,
 }
 
 impl NzbSummaryData {
@@ -3801,6 +3834,20 @@ pub fn parse_nzb_summary(xml: &[u8]) -> Option<NzbSummaryData> {
                             name: m_name.clone(),
                             bytes: m_file_bytes,
                             ids: file_ids,
+                        });
+                    } else {
+                        let mut segments: Vec<(u64, Vec<u8>)> = Vec::new();
+                        for i in 0..seg_len {
+                            if i + 1 < seg_len && m_segments[i + 1].0 == m_segments[i].0 {
+                                continue;
+                            }
+                            if valid_message_id(&m_segments[i].2) {
+                                segments.push((m_segments[i].1.max(0) as u64, m_segments[i].2.clone()));
+                            }
+                        }
+                        out.par_files.push(ParFile {
+                            name: m_name.clone(),
+                            segments,
                         });
                     }
                     let (new_df, new_db, new_geom2, push_par_head, push_data_head) =
@@ -4340,10 +4387,49 @@ mod tests {
         assert!(fleet_member_skip_reason(false, 7, false).is_some());
     }
 
+    /// F6: timeouts are never evidence: a copy whose checks only timed out is
+    /// unknown (unverified, -1) and not complete, never dead or 0% alive; the
+    /// errors don't water down the share of the articles that did answer.
+    #[test]
+    fn timeouts_leave_a_fleet_copy_unverified() {
+        assert_eq!(eval_fleet_member_health(true, true, 0, 0, 20, 5, 80), (-1, false, false));
+        assert_eq!(eval_fleet_member_health(true, false, 0, 0, 20, 5, 80), (-1, false, false));
+        assert_eq!(eval_fleet_member_health(true, true, 2, 0, 18, 5, 80), (-1, false, false));
+        assert_eq!(eval_fleet_member_health(true, true, 10, 0, 30, 5, 80), (100, false, true));
+        assert_eq!(eval_fleet_member_health(true, true, 0, 10, 30, 5, 80), (0, true, true));
+    }
+
+    #[test]
+    fn the_primary_is_the_healthy_copy_easiest_to_borrow_into() {
+        // F10: ranked by health and kind; the healthy copies are 0 (encrypted),
+        // 1 (compressed), 2 (stored rar) and 3 (bare); 4 is weak but bare
+        let healthy = [true, true, true, true, false];
+        let ease = [3, 2, 1, 0, 0];
+        let mut ranked = vec![0, 1, 2, 3, 4];
+        lead_easiest_healthy(&mut ranked, &healthy, &ease);
+        assert_eq!(ranked, vec![3, 0, 1, 2, 4]);
+        let mut ranked = vec![0, 1, 2, 4];
+        lead_easiest_healthy(&mut ranked, &healthy, &ease);
+        assert_eq!(ranked, vec![2, 0, 1, 4]);
+        // health gates: a weak plain copy never leads a healthy encrypted one
+        let mut ranked = vec![0, 4];
+        lead_easiest_healthy(&mut ranked, &healthy, &ease);
+        assert_eq!(ranked, vec![0, 4]);
+        // nothing healthy: unchanged
+        let mut ranked = vec![4, 1];
+        lead_easiest_healthy(&mut ranked, &[false; 5], &ease);
+        assert_eq!(ranked, vec![4, 1]);
+        // ties keep the rank order
+        let mut ranked = vec![1, 0, 2];
+        lead_easiest_healthy(&mut ranked, &healthy, &[2, 2, 2, 0, 0]);
+        assert_eq!(ranked, vec![1, 0, 2]);
+    }
+
     #[test]
     fn test_fleet_and_donor_health() {
         let (alive, dead, complete) = eval_fleet_member_health(true, true, 95, 5, 0, 5, 80);
         assert_eq!((alive, dead, complete), (95, false, true));
+
 
         let mut ranked = [0usize; 3];
         let count = rank_fleet_candidates(

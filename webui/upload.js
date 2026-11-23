@@ -44,6 +44,11 @@ var Upload = (new function($)
 	var failure_message = null;
 	var url = '';
 	var urlInfo;
+	// one fleet per group of copies of a release (docs/DROP_AS_FLEET.md)
+	var jobs = [];
+	var jobIndex = 0;
+	var droppedCount = 0;
+	var contents = [];
 
 	this.init = function()
 	{
@@ -106,6 +111,7 @@ var Upload = (new function($)
 			inp.addEventListener("change", fileSelectHandler, false);
 		}
 		$('#AddDialog_Scan').click(scan);
+		$('#AddDialog_Fleet, #AddDialog_DupeForce, #AddDialog_Paused, #AddDialog_AutoCategory').change(updateFleetPlan);
 		
 		AddParamDialog.init();
 	}
@@ -231,6 +237,70 @@ var Upload = (new function($)
 		}
 		$('#AddDialog_Files,#AddDialog_RenameTip').show();
 		$('#AddDialog_FilesHelp').hide();
+		updateFleetPlan();
+	}
+
+	function fleetMode()
+	{
+		// a fleet has no per-copy options: with Add paused or Auto-category the
+		// files go in on their own, honouring them, as before
+		var plain = $('#AddDialog_Paused').is(':checked') || $('#AddDialog_AutoCategory').is(':checked');
+		return { enabled: $('#AddDialog_Fleet').is(':checked') && !plain, force: $('#AddDialog_DupeForce').is(':checked') };
+	}
+
+	function planFiles(withContents)
+	{
+		var list = [];
+		for (var i = 0; i < files.length; i++)
+		{
+			list.push({
+				name: infos[i].name + infos[i].ext,
+				// a file with a password goes in on its own: a fleet has no per-copy parameters
+				content: withContents ? contents[i] : undefined,
+				dupekey: infos[i].dupekey
+			});
+		}
+		var plan = DupeGroup.plan(list, fleetMode());
+		// copies with a password leave their fleet
+		for (var f = plan.fleets.length - 1; f >= 0; f--)
+		{
+			var fleet = plan.fleets[f];
+			fleet.members = fleet.members.filter(function(m)
+			{
+				// a password or a DupeScore of its own: the file goes in on its own
+				if (infos[m].password === '' && !infos[m].dupescore) return true;
+				plan.singles.push(m);
+				return false;
+			});
+			if (fleet.members.length < 2)
+			{
+				plan.singles = plan.singles.concat(fleet.members);
+				plan.fleets.splice(f, 1);
+			}
+		}
+		plan.singles.sort(function(a, b) { return a - b; });
+		return plan;
+	}
+
+	// The grouping, shown before Submit: "19 files → 1 fleet: Dune.Part.Two…FraMeSToR".
+	function updateFleetPlan()
+	{
+		var $plan = $('#AddDialog_FleetPlan');
+		$('#AddDialog_FleetRow').toggle(files.length > 1);
+		var plan = files.length > 1 ? planFiles(false) : { fleets: [] };
+		if (plan.fleets.length === 0)
+		{
+			$plan.empty().hide();
+			return;
+		}
+		var html = '';
+		for (var i = 0; i < plan.fleets.length; i++)
+		{
+			var fleet = plan.fleets[i];
+			html += '<div class="add-dialog-fleet">' + Util.textToHtml(
+				I18n.translate('add_dialog_fleet_plan', fleet.members.length, fleet.title)) + '</div>';
+		}
+		$plan.html(html).show();
 	}
 
 	this.addClick = function()
@@ -243,6 +313,7 @@ var Upload = (new function($)
 		var info = infos[no];
 		AddParamDialog.showModal(info, function() {
 			$('#AddDialog_File' + no).html(Util.textToHtml(Util.formatNZBName(info.name + info.ext)));
+			updateFleetPlan();
 		});
 	}
 
@@ -263,6 +334,9 @@ var Upload = (new function($)
 		$('#AddDialog_AutoCategory').prop('checked', false);
 		$('#AddDialog_Paused').prop('checked', false);
 		$('#AddDialog_DupeForce').prop('checked', false);
+		$('#AddDialog_Fleet').prop('checked', true);
+		$('#AddDialog_FleetPlan').empty().hide();
+		$('#AddDialog_FleetRow').hide();
 		enableAllButtons();
 
 		var v = $('#AddDialog_Priority');
@@ -271,6 +345,8 @@ var Upload = (new function($)
 		DownloadsUI.fillCategoryCombo($('#AddDialog_Category'));
 
 		files = [];
+		infos = [];
+		contents = [];
 		filesSuccess = [];
 		urlInfo = { name: '', password: '', dupekey: '', dupescore: 0 };
 
@@ -334,8 +410,193 @@ var Upload = (new function($)
 		}
 		else
 		{
-			fileNext();
+			filesStart();
 		}
+	}
+
+	// Files go in one by one as before, unless copies of one release are to be
+	// one fleet: then every file is read first, so exact copies are dropped
+	// and each group goes in with one appendfleet call.
+	function filesStart()
+	{
+		if (files.length < 2 || !fleetMode().enabled || fleetMode().force)
+		{
+			fileNext();
+			return;
+		}
+		contents = [];
+		droppedCount = 0;
+		readAll(0);
+	}
+
+	function readAll(no)
+	{
+		if (no === files.length)
+		{
+			startJobs();
+			return;
+		}
+		var reader = new FileReader();
+		reader.onload = function (event)
+		{
+			var result = event.target.result;
+			contents[no] = result.slice(result.indexOf(',') + 1);
+			readAll(no + 1);
+		};
+		reader.onerror = function ()
+		{
+			contents[no] = null;
+			readAll(no + 1);
+		};
+		reader.readAsDataURL(files[no]);
+	}
+
+	function startJobs()
+	{
+		var plan = planFiles(true);
+		jobs = [];
+		jobIndex = 0;
+		for (var d = 0; d < plan.dropped.length; d++)
+		{
+			// an exact copy of another file: nothing to send, and the dialog says so
+			var no = plan.dropped[d].index;
+			var same = plan.dropped[d].sameAs;
+			filesSuccess.push(files[no]);
+			setFileIcon(no, 'success');
+			$('#AddDialog_File' + no).append(' <span class="add-dialog-dropped">' +
+				Util.textToHtml(I18n.translate('add_dialog_exact_copy', infos[same].name + infos[same].ext)) + '</span>');
+			droppedCount++;
+		}
+		var fleetStart = {};
+		for (var f = 0; f < plan.fleets.length; f++)
+		{
+			fleetStart[plan.fleets[f].members[0]] = plan.fleets[f];
+		}
+		var inFleet = {};
+		plan.fleets.forEach(function(fleet) { fleet.members.forEach(function(m) { inFleet[m] = true; }); });
+		for (var i = 0; i < files.length; i++)
+		{
+			if (fleetStart[i])
+			{
+				jobs.push({ fleet: fleetStart[i] });
+			}
+			else if (!inFleet[i] && plan.singles.indexOf(i) > -1)
+			{
+				jobs.push({ single: i });
+			}
+		}
+		jobNext();
+	}
+
+	function setFileIcon(no, state)
+	{
+		var $t = $('#AddDialog_Files table:eq(' + no + ')');
+		$t.find('i.material-icon').addClass('hide');
+		$t.find('i.material-icon--' + state).removeClass('hide');
+	}
+
+	function jobNext()
+	{
+		if (jobIndex === jobs.length)
+		{
+			index = files.length;
+			allCompleted();
+			return;
+		}
+		var job = jobs[jobIndex++];
+		if (job.single !== undefined)
+		{
+			var no = job.single;
+			if (filesSuccess.indexOf(files[no]) > -1)
+			{
+				jobNext();
+				return;
+			}
+			setFileIcon(no, 'progress');
+			appendFile(no, contents[no], function(result)
+			{
+				var failure = result < 0 || (result == 0 && Options.option('ScanScript') === '');
+				fileDone(no, failure);
+				jobNext();
+			});
+			return;
+		}
+		var fleet = job.fleet;
+		var category = $('#AddDialog_Category').val();
+		var priority = parseInt($('#AddDialog_Priority').val());
+		var params = [fleet.key, category, priority, 60];
+		fleet.members.forEach(function(m)
+		{
+			setFileIcon(m, 'progress');
+			params.push(infos[m].name + infos[m].ext, contents[m]);
+		});
+		RPC.call('appendfleet', params, function(result)
+		{
+			var members = (result && result.Members) || [];
+			var used = [];
+			fleet.members.forEach(function(m)
+			{
+				// the reply echoes each name without its {{password}}
+				var name = DupeGroup.withoutPassword(infos[m].name + infos[m].ext);
+				var status = 'ERROR';
+				for (var k = 0; k < members.length; k++)
+				{
+					if (used.indexOf(k) < 0 && members[k].Name === name)
+					{
+						used.push(k);
+						status = members[k].Status;
+						break;
+					}
+				}
+				fileDone(m, status === 'ERROR');
+			});
+			jobNext();
+		}, function(res)
+		{
+			failure_message = res;
+			fleet.members.forEach(function(m) { fileDone(m, true); });
+			jobNext();
+		});
+	}
+
+	function fileDone(no, failure)
+	{
+		errors |= failure;
+		needRefresh |= !failure;
+		if (!failure)
+		{
+			filesSuccess.push(files[no]);
+		}
+		setFileIcon(no, failure ? 'error' : 'success');
+	}
+
+	function appendFile(no, base64str, done)
+	{
+		var info = infos[no];
+		var category = $('#AddDialog_Category').val();
+		var priority = parseInt($('#AddDialog_Priority').val());
+		var filename = info.name + info.ext;
+		var addPaused = $('#AddDialog_Paused').is(':checked');
+		var autoCategory = $('#AddDialog_AutoCategory').is(':checked');
+		var dupeMode = $('#AddDialog_DupeForce').is(':checked') ? "FORCE" : "SCORE";
+		var params = info.password === '' ? [] : [{'*Unpack:Password' : info.password}];
+		RPC.call('append', [
+			filename,
+			base64str,
+			category,
+			priority,
+			false,
+			addPaused,
+			info.dupekey,
+			info.dupescore,
+			dupeMode,
+			autoCategory,
+			params,
+		], done, function(res)
+		{
+			failure_message = res;
+			done(-1);
+		});
 	}
 
 	function fileNext()
@@ -372,6 +633,11 @@ var Upload = (new function($)
 			var autoCategory = $('#AddDialog_AutoCategory').is(':checked');
 			var dupeMode = $('#AddDialog_DupeForce').is(':checked') ? "FORCE" : "SCORE";
 			var params = info.password === '' ? [] : [{'*Unpack:Password' : info.password}];
+			if (!$('#AddDialog_Fleet').is(':checked'))
+			{
+				// the box off: not grouped with copies of its release by the daemon either
+				params.push({'DupeJoin': 'no'});
+			}
 			RPC.call('append', [
 				filename,
 				base64str,
@@ -463,7 +729,7 @@ var Upload = (new function($)
 		$('#AddDialog_URLLabel i').removeClass('icon-ok').removeClass('icon-remove').addClass(
 			result ? 'icon-ok' : 'icon-remove').show();
 
-		fileNext();
+		filesStart();
 	}
 
 	function urlFailure(res)
@@ -494,7 +760,12 @@ var Upload = (new function($)
 		else
 		{
 			$AddDialog.modal('hide');
-			if (index > 0)
+			if (droppedCount > 0)
+			{
+				// exact copies of another file were not sent: say so
+				PopupNotification.show('#Notif_AddFilesDropped');
+			}
+			else if (index > 0)
 			{
 				PopupNotification.show('#Notif_AddFiles');
 			}

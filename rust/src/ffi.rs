@@ -3070,7 +3070,7 @@ unsafe fn web_rpc_collect_bridge(
             });
             1
         }
-        8 => crate::dupesearch_coord::fleet_append(
+        8 => crate::dupesearch_coord::fleet_append_rpc(
             std::ptr::null_mut(),
             crate::dupesearch_coord::native_dupe_host,
             s1,

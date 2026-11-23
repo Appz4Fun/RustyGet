@@ -67,6 +67,7 @@
 	<script language="javascript" type="text/javascript" src="status.js"></script>
 	<script language="javascript" type="text/javascript" src="messages.js"></script>
 	<script language="javascript" type="text/javascript" src="history.js"></script>
+	<script language="javascript" type="text/javascript" src="dupegroup.js"></script>
 	<script language="javascript" type="text/javascript" src="upload.js"></script>
 	<script language="javascript" type="text/javascript" src="config.js"></script>
 	<script language="javascript" type="text/javascript" src="tlscipher.js"></script>
@@ -82,7 +83,7 @@
 
 	<!-- Loading all javascript files from libraries and NZBGet in one request -->
 	<!-- %if-not-debug% -->
-	<script language="javascript" type="text/javascript" src="combined.js?lib/jquery.min.js+lib/bootstrap.min.js+lib/raphael.min.js+lib/elycharts.min.js+i18n.js+datetime.js+fasttable.js+index.js+util.js+downloads.js+edit.js+status.js+messages.js+history.js+upload.js+config.js+tlscipher.js+feed.js+system-info.js+statistics.js+system-health.js+libraries.js+sysmetrics.js+releasename.js+easteregg.js"></script>
+	<script language="javascript" type="text/javascript" src="combined.js?lib/jquery.min.js+lib/bootstrap.min.js+lib/raphael.min.js+lib/elycharts.min.js+i18n.js+datetime.js+fasttable.js+index.js+util.js+downloads.js+edit.js+status.js+messages.js+history.js+dupegroup.js+upload.js+config.js+tlscipher.js+feed.js+system-info.js+statistics.js+system-health.js+libraries.js+sysmetrics.js+releasename.js+easteregg.js"></script>
 	<!-- %end% -->
 
 	<style>.hide{display:none;}</style>
@@ -2545,6 +2546,10 @@
 						<input multiple="multiple" type="file" accept=".nzb,.7z,.zip,.7z.001,.rar,.tar,.gz,.bz,.bz2,.tgz,.txz" id="AddDialog_Input" class="hidden-file-input">
 						<div class="dialog-add-files hide" id="AddDialog_Files"></div>
 						<div class="hide" style="margin-top:12px;" id="AddDialog_RenameTip" data-i18n="add_dialog_rename_tip"></div>
+						<div class="hide" style="margin-top:12px;" id="AddDialog_FleetRow">
+							<label class="checkbox"><input type="checkbox" id="AddDialog_Fleet" checked> <span data-i18n="add_dialog_fleet"></span></label>
+							<div class="hide" id="AddDialog_FleetPlan"></div>
+						</div>
 					</div>
 				</div>
 
@@ -2958,6 +2963,9 @@
 
 <div id="Notif_AddFiles" data-duration="1000" class="alert alert-inverse alert-center alert-center-small hide">
     <strong data-i18n="notif_add_files"></strong>
+</div>
+<div id="Notif_AddFilesDropped" data-duration="3000" class="alert alert-inverse alert-center alert-center-small hide">
+    <strong data-i18n="notif_add_files_dropped"></strong>
 </div>
 
 <div id="Notif_Scan" data-duration="1000" class="alert alert-inverse alert-center alert-center-small hide">

@@ -463,7 +463,10 @@ fn audio(tok: &[u8]) -> Option<(&[u8], &[u8])> {
 /// ReleaseName::Parse.
 pub fn parse(name: &[u8]) -> Attrs {
     let mut attrs = Attrs::default();
-    let clean = rewrite_episode_ranges(&clean(name));
+    // a copy suffix (`-FraMeSToR_3434`, ` (12)`, `_1.nzb.2.queued`) is no part
+    // of the release: the name parses as it would without it
+    let name = strip_copy_suffix(name);
+    let clean = rewrite_episode_ranges(&clean(&name));
 
     // the release group follows the last hyphen
     let mut body: &[u8] = &clean;
@@ -741,6 +744,239 @@ pub fn same_release(a_name: &[u8], b_name: &[u8]) -> bool {
         && compatible(&a.edition, &b.edition)
 }
 
+/// The DupeKey prefix of a group of copies joined by name (see [`group_key`]).
+pub const GROUP_KEY_PREFIX: &[u8] = b"dupes:";
+
+/// Strips what download managers and the NzbDir scanner add to the file name
+/// of a copy, so copies of one release compare equal (see [`group_name`]).
+/// Strict, so a number that is part of a title is never taken:
+///
+/// - the scanner's `.queued`, `.N.queued`, `.nzb.N` and repeated `.nzb` endings;
+/// - a trailing `" (N)"` (browsers), always: it is never part of a release name;
+/// - a trailing `_N`, `.N` or `-N` (any number of digits) only when what is
+///   left ends in a scene group tag (a last word holding a `-` followed by a
+///   word with a letter: `…REMUX-FraMeSToR_3434`, `…1080p-GRP_2`) AND the
+///   name carries release markers (a year or a resolution, see
+///   [`has_release_markers`]). `Iron-Man-3`, `Spider-Man.2`, `Toy-Story-3`,
+///   `Movie.Part.2` and `DDP5.1` have no such tag or markers, so they stay.
+///
+/// A group whose own tag ends in a separator and digits (`-GRP_2`) can't be
+/// told from a copy of `-GRP`; a group that ends in a digit without a
+/// separator (`-D3FiL3D`, `-EPSiLON2`) is never touched. The web UI mirrors
+/// this rule in `webui/dupegroup.js`.
+pub fn strip_copy_suffix(name: &[u8]) -> Vec<u8> {
+    let cut = without_password(name);
+    let mut s = trim(&cut, b" \t\r\n").to_vec();
+    loop {
+        let before = s.len();
+        if ends_icase(&s, b".queued") {
+            s.truncate(s.len() - 7);
+        }
+        // ".nzb.2" (the scanner's ".nzb.2.queued" without ".queued")
+        let digits = trailing_digits(&s);
+        if digits > 0 && s.len() > digits + 1 && s[s.len() - digits - 1] == b'.' {
+            let head_len = s.len() - digits - 1;
+            if ends_icase(&s[..head_len], b".nzb") {
+                s.truncate(head_len);
+            }
+        }
+        if ends_icase(&s, b".nzb") {
+            s.truncate(s.len() - 4);
+        }
+        if s.len() == before {
+            break;
+        }
+    }
+    loop {
+        let before = s.len();
+        // " (N)" or "(N)"
+        if s.last() == Some(&b')') {
+            let inner_len = s.len() - 1;
+            let digits = trailing_digits(&s[..inner_len]);
+            if digits > 0 && inner_len > digits && s[inner_len - digits - 1] == b'(' {
+                s.truncate(inner_len - digits - 1);
+                while s.last().is_some_and(|&b| c_space(b)) {
+                    s.pop();
+                }
+            }
+        }
+        // "_N", ".N", "-N" after a scene group tag, in a name with release markers
+        let digits = trailing_digits(&s);
+        if digits > 0 && s.len() > digits + 1 {
+            let rest_len = s.len() - digits - 1;
+            let rest = &s[..rest_len];
+            if matches!(s[rest_len], b'_' | b'.' | b'-')
+                && ends_in_group_tag(rest)
+                && has_release_markers(rest)
+            {
+                s.truncate(rest_len);
+            }
+        }
+        if s.len() == before || s.is_empty() {
+            break;
+        }
+    }
+    s
+}
+
+/// The name without any `{{password}}` in it (NZBGet's convention for an
+/// archive password in a file name): a password never reaches a group key, a
+/// DupeKey or a log line.
+pub fn without_password(name: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(name.len());
+    let mut i = 0;
+    while i < name.len() {
+        if name[i..].starts_with(b"{{") {
+            if let Some(end) = name[i + 2..].windows(2).position(|w| w == b"}}") {
+                i += 2 + end + 2;
+                continue;
+            }
+        }
+        out.push(name[i]);
+        i += 1;
+    }
+    out
+}
+
+/// A queue or file name as log lines and replies show it: without its
+/// `{{password}}` ([`without_password`]).
+pub fn log_name(name: &[u8]) -> Vec<u8> {
+    without_password(name)
+}
+
+/// The words of each `{{password}}` in `name`, as [`group_name`] writes
+/// them (lowercase, separator runs one dot).
+fn password_words(name: &[u8]) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut rest = name;
+    while let Some(start) = rest.windows(2).position(|w| w == b"{{") {
+        let inner = &rest[start + 2..];
+        let Some(end) = inner.windows(2).position(|w| w == b"}}") else {
+            break;
+        };
+        let words = dotted(&inner[..end]);
+        if !words.is_empty() {
+            out.push(words);
+        }
+        rest = &inner[end + 2..];
+    }
+    out
+}
+
+/// The group key to store instead of `key` for a download named `name`, when
+/// `key` is a group key an earlier build made from the name with its
+/// `{{password}}` in it (its words in the key, `dupes:movie.2024.grp.s3cret`):
+/// the key [`group_key`] gives the name now. None for any other key: one
+/// without the password's words, a client's key, or one already right.
+pub fn rebuilt_group_key(name: &[u8], key: &[u8]) -> Option<Vec<u8>> {
+    if key.len() < GROUP_KEY_PREFIX.len() || !key[..GROUP_KEY_PREFIX.len()].eq_ignore_ascii_case(GROUP_KEY_PREFIX) {
+        return None;
+    }
+    let words = password_words(name);
+    if words.is_empty() {
+        return None;
+    }
+    let fresh = group_key(name);
+    if fresh.eq_ignore_ascii_case(key) {
+        return None;
+    }
+    let mut body = b".".to_vec();
+    body.extend(key[GROUP_KEY_PREFIX.len()..].iter().map(|&b| c_lower(b)));
+    body.push(b'.');
+    let holds = words.iter().any(|w| {
+        let mut needle = b".".to_vec();
+        needle.extend_from_slice(w);
+        needle.push(b'.');
+        body.windows(needle.len()).any(|x| x == needle.as_slice())
+    });
+    holds.then_some(fresh)
+}
+
+fn trailing_digits(text: &[u8]) -> usize {
+    text.iter().rev().take_while(|&&b| ascii_digit(b)).count()
+}
+
+fn ends_icase(text: &[u8], suffix: &[u8]) -> bool {
+    text.len() >= suffix.len() && text[text.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
+}
+
+/// Does the last word of `text` (after its last `.` or space) end in a scene
+/// group tag: a `-` followed by a word of letters and digits with a letter
+/// (`x264-GRP`, `REMUX-FraMeSToR`)?
+fn ends_in_group_tag(text: &[u8]) -> bool {
+    let word = match text.iter().rposition(|&b| b == b'.' || c_space(b)) {
+        Some(p) => &text[p + 1..],
+        None => text,
+    };
+    match word.iter().rposition(|&b| b == b'-') {
+        Some(p) => {
+            let tag = &word[p + 1..];
+            !tag.is_empty() && tag.iter().all(|&b| c_alnum(b)) && tag.iter().any(|&b| c_alpha(b))
+        }
+        None => false,
+    }
+}
+
+/// Does `text` carry release markers: a year (1900 to 2099), a resolution
+/// (`1080p`, `720p`, `2160p`, `1080i`, `4k`, `8k`, `uhd`) or a season and
+/// episode (`S01E02`) as a word of its own?
+pub fn has_release_markers(text: &[u8]) -> bool {
+    text.split(|&b| !c_alnum(b)).any(|word| {
+        let w = lower(word);
+        let year = w.len() == 4
+            && w.iter().all(|&b| ascii_digit(b))
+            && (w.starts_with(b"19") || w.starts_with(b"20"));
+        let digits = w.iter().take_while(|&&b| ascii_digit(b)).count();
+        let resolution = (3..=4).contains(&digits)
+            && w.len() == digits + 1
+            && matches!(w[digits], b'p' | b'i');
+        let named = matches!(w.as_slice(), b"4k" | b"8k" | b"uhd");
+        year || resolution || named || season_episode(&w).is_some()
+    })
+}
+
+/// The name copies of one release share: the name without its copy suffix
+/// ([`strip_copy_suffix`]), lowercase, every run of separators (spaces and
+/// `. _ - ( ) [ ] { } + , '`) one dot. Nothing else is dropped: resolution,
+/// source, codec, edition and group stay, bracketed ones too (`[1080p]`), so
+/// the 720p and 1080p, REPACK and original, and two groups of one title never
+/// share a name. Empty when nothing is left.
+pub fn group_name(name: &[u8]) -> Vec<u8> {
+    dotted(&strip_copy_suffix(name))
+}
+
+/// `text` lowercase with every run of [`group_name`]'s separators one dot,
+/// none at either end.
+fn dotted(text: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len());
+    let mut separator = false;
+    for &ch in text {
+        if c_space(ch)
+            || matches!(ch, b'.' | b'_' | b'-' | b'(' | b')' | b'[' | b']' | b'{' | b'}' | b'+' | b',' | b'\'')
+        {
+            separator = true;
+            continue;
+        }
+        if separator && !out.is_empty() {
+            out.push(b'.');
+        }
+        separator = false;
+        out.push(c_lower(ch));
+    }
+    out
+}
+
+/// The DupeKey of the group of copies named like `name`: `dupes:` and its
+/// [`group_name`], or empty when the name has nothing to group by.
+pub fn group_key(name: &[u8]) -> Vec<u8> {
+    let g = group_name(name);
+    if g.is_empty() {
+        return Vec::new();
+    }
+    let mut key = GROUP_KEY_PREFIX.to_vec();
+    key.extend_from_slice(&g);
+    key
+}
 /// Parse's attributes as bytes for the C ABI: each set as a u32 count and its
 /// strings, each string as a u32 length and its bytes (LE), in Attrs order; then
 /// title, group, the seasons and episodes (u32 count, i32 each), year, repack, proper.
@@ -784,6 +1020,123 @@ pub fn encode(a: &Attrs) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The same cases run in `tests/webui/dupe-group.js` against the web UI's copy.
+    #[test]
+    fn copy_suffixes_strip_only_after_a_group_tag() {
+        let base = b"Dune.Part.Two.2024.UHD.BluRay.2160p.TrueHD.Atmos.7.1.DV.HEVC.REMUX-FraMeSToR";
+        let want = group_name(base);
+        assert_eq!(
+            want,
+            b"dune.part.two.2024.uhd.bluray.2160p.truehd.atmos.7.1.dv.hevc.remux.framestor".to_vec()
+        );
+        for suffix in [
+            ".nzb", " (1).nzb", "(12).nzb", "_1.nzb", "_14.nzb", "_3434.nzb", "-3.nzb", ".2.nzb",
+            ".nzb.queued", ".nzb.2.queued", "_5.nzb.2.queued", "_1 (1).nzb", ".nzb.nzb", " (12)",
+            "_1.nzb.2.queued",
+        ] {
+            let mut name = base.to_vec();
+            name.extend_from_slice(suffix.as_bytes());
+            assert_eq!(group_name(&name), want, "{suffix}");
+        }
+        assert_eq!(group_key(b"X.2024.1080p-GRP_2.nzb"), b"dupes:x.2024.1080p.grp".to_vec());
+        // numbers that are part of a title stay
+        for (name, kept) in [
+            ("Iron-Man-3", "Iron-Man-3"),
+            ("Iron-Man-3.nzb", "Iron-Man-3"),
+            ("Spider-Man.2", "Spider-Man.2"),
+            ("Toy-Story-3", "Toy-Story-3"),
+            ("Movie.Part.2", "Movie.Part.2"),
+            ("Movie.2024.1080p.DDP5.1", "Movie.2024.1080p.DDP5.1"),
+            ("Show.S01E01-02", "Show.S01E01-02"),
+            ("Movie.2024.1080p.H-264", "Movie.2024.1080p.H-264"),
+            ("Movie.2024.1080p-GRP2", "Movie.2024.1080p-GRP2"),
+            ("Movie.2024.1080p-D3FiL3D", "Movie.2024.1080p-D3FiL3D"),
+            ("Movie.2024.1080p-EPSiLON2.nzb", "Movie.2024.1080p-EPSiLON2"),
+            ("Movie_2", "Movie_2"),
+            ("Movie.2024", "Movie.2024"),
+            ("Some-Group_2", "Some-Group_2"),
+            ("Movie.2024.1080p-GRP_2", "Movie.2024.1080p-GRP"),
+            ("Movie.2024.1080p-GRP_2 (3)", "Movie.2024.1080p-GRP"),
+            ("Movie.2024.1080p-GRP.1234", "Movie.2024.1080p-GRP"),
+            ("Movie.2024.1080p-GRP-2", "Movie.2024.1080p-GRP"),
+            ("[Erai-raws] Show - 01 [1080p] (1)", "[Erai-raws] Show - 01 [1080p]"),
+        ] {
+            assert_eq!(strip_copy_suffix(name.as_bytes()), kept.as_bytes().to_vec(), "{name}");
+        }
+        // different releases never share a group
+        for (a, b) in [
+            ("Dune.2021.BluRay.1080p.TrueHD.Atmos.7.1.AVC.REMUX-FraMeSToR.nzb",
+             "Dune.Part.Two.2024.BluRay.1080p.TrueHD.Atmos.7.1.AVC.REMUX-FraMeSToR.nzb"),
+            ("[Erai-raws] Show - 01 [1080p].nzb", "[Erai-raws] Show - 01 [720p].nzb"),
+            ("Movie.2024.1080p.WEB-DL.x264-GRP.nzb", "Movie.2024.REPACK.1080p.WEB-DL.x264-GRP.nzb"),
+            ("Movie.2024.1080p.WEB-DL.x264-GRP.nzb", "Movie.2024.1080p.WEB-DL.x264-OTHER.nzb"),
+            ("Iron-Man-3.nzb", "Iron-Man.nzb"),
+            ("Spider-Man.2.nzb", "Spider-Man.nzb"),
+            ("Toy-Story-3.nzb", "Toy-Story.nzb"),
+            ("Dune.Part.Two.2024.UHD.BluRay.2160p.TrueHD.Atmos.7.1.DV.HEVC.REMUX-FraMeSToR.nzb",
+             "Dune.Part.Two.2024.BluRay.1080p.TrueHD.Atmos.7.1.AVC.REMUX-FraMeSToR.nzb"),
+        ] {
+            assert_ne!(group_key(a.as_bytes()), group_key(b.as_bytes()), "{a} vs {b}");
+        }
+        assert!(group_key(b"").is_empty());
+        assert!(group_key(b"(1).nzb").is_empty());
+        assert_eq!(
+            group_key(b"Dune.2021.BluRay.1080p.TrueHD.Atmos.7.1.AVC.REMUX-FraMeSToR_3.nzb"),
+            b"dupes:dune.2021.bluray.1080p.truehd.atmos.7.1.avc.remux.framestor".to_vec()
+        );
+    }
+
+    /// Review C: a `{{password}}` in a file name never reaches a group key.
+    #[test]
+    fn a_password_in_the_name_never_reaches_the_key() {
+        let key = group_key(b"Movie.2024.1080p-GRP{{s3cret}}.nzb");
+        assert_eq!(key, b"dupes:movie.2024.1080p.grp".to_vec());
+        assert!(!String::from_utf8_lossy(&key).contains("s3cret"));
+        assert_eq!(group_key(b"Movie.2024.1080p-GRP{{s3cret}}_2.nzb"), key);
+        assert_eq!(without_password(b"A{{x}}B{{y}}"), b"AB".to_vec());
+        assert_eq!(without_password(b"A{{unclosed"), b"A{{unclosed".to_vec());
+        assert_eq!(log_name(b"Movie.2024-GRP{{s3cret}}"), b"Movie.2024-GRP".to_vec());
+        // a bare season is a release marker too (review D, as in the web UI)
+        assert_eq!(strip_copy_suffix(b"Show.S01.COMPLETE-GRP_2"), b"Show.S01.COMPLETE-GRP".to_vec());
+    }
+
+    /// A group key an earlier build stored with the password's words in it
+    /// (it read `{ }` as separators: `dupes:movie.2024.1080p.grp.s3cret`) is
+    /// rebuilt from the name; a right key, a client's key, a key without the
+    /// password, and a name without one are left alone.
+    #[test]
+    fn an_old_key_with_the_password_is_rebuilt() {
+        let name = b"Movie.2024.1080p-GRP{{s3cret}}";
+        let old = b"dupes:movie.2024.1080p.grp.s3cret";
+        assert_eq!(rebuilt_group_key(name, old), Some(b"dupes:movie.2024.1080p.grp".to_vec()));
+        assert_eq!(rebuilt_group_key(b"Movie.2024.1080p-GRP{{s3cret}}_2", b"DUPES:Movie.2024.1080p.GRP.S3cret"),
+            Some(b"dupes:movie.2024.1080p.grp".to_vec()));
+        // a password with spaces and dots, in the middle of the name
+        assert_eq!(rebuilt_group_key(b"Show.S01E01.{{my pass.1}}.720p-GRP", b"dupes:show.s01e01.my.pass.1.720p.grp"),
+            Some(b"dupes:show.s01e01.720p.grp".to_vec()));
+        assert_eq!(rebuilt_group_key(name, b"dupes:movie.2024.1080p.grp"), None);
+        assert_eq!(rebuilt_group_key(name, b"imdb:tt123.s3cret"), None);
+        // another copy's key the item joined (no password words): kept
+        assert_eq!(rebuilt_group_key(name, b"dupes:movie.2024.1080p.other"), None);
+        assert_eq!(rebuilt_group_key(b"Movie.2024.1080p-GRP", old), None);
+        // a password word only as part of another word is no match
+        assert_eq!(rebuilt_group_key(b"Movie.2024-GRP{{grp}}", b"dupes:movie.2024.grpx"), None);
+    }
+
+    /// The release parser takes the group from a name with a copy suffix as
+    /// from the name without it; titles with numbers keep them.
+    #[test]
+    fn copy_suffix_never_hides_the_group() {
+        let base = parse(b"Dune.Part.Two.2024.UHD.BluRay.2160p.TrueHD.Atmos.7.1.DV.HEVC.REMUX-FraMeSToR");
+        assert_eq!(base.group, b"framestor".to_vec());
+        for suffix in ["_3434", " (12)", "_1.nzb.2.queued"] {
+            let name = format!("Dune.Part.Two.2024.UHD.BluRay.2160p.TrueHD.Atmos.7.1.DV.HEVC.REMUX-FraMeSToR{suffix}");
+            assert_eq!(parse(name.as_bytes()), base, "{suffix}");
+        }
+        assert_eq!(parse(b"Iron-Man-3").title, parse(b"Iron-Man-3.nzb").title);
+        assert!(!parse(b"Spider-Man.2").title.is_empty());
+    }
 
     #[test]
     fn cleans_extensions_tags_and_junk() {

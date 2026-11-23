@@ -5091,6 +5091,104 @@ impl ContentMap {
         true
     }
 
+    /// Bytes of the target's video in `inner_range` when every byte of it is
+    /// on disk and outside the holes still to fill (the context a borrowed
+    /// range is checked against must be good), else None.
+    fn read_target_good(
+        &self,
+        target_files: &mut dyn TargetFileSet,
+        target_holes: &[Vec<NzbgetRsByteRange>],
+        member_targets: &[i32],
+        inner_range: NzbgetRsByteRange,
+    ) -> Option<Vec<u8>> {
+        if inner_range.size <= 0 || inner_range.offset < 0 {
+            return None;
+        }
+        let mut buf = vec![0u8; usize::try_from(inner_range.size).ok()?];
+        let mut covered = 0i64;
+        for piece in self.map_from_inner(inner_range) {
+            let piece_range = NzbgetRsByteRange {
+                offset: piece.offset,
+                size: piece.size,
+            };
+            let target_idx = *member_targets.get(piece.member_index as usize)?;
+            let holes = target_holes.get(usize::try_from(target_idx).ok()?)?;
+            if holes.iter().any(|h| {
+                h.size > 0 && h.offset < piece.offset + piece.size && piece.offset < h.offset + h.size
+            }) {
+                return None;
+            }
+            let [inner_pos] = self.map_to_inner(piece.member_index, piece_range)[..] else {
+                return None;
+            };
+            if !target_files.has_file(piece.member_index) {
+                return None;
+            }
+            let rel = usize::try_from(inner_pos.offset - inner_range.offset).ok()?;
+            let len = usize::try_from(piece.size).ok()?;
+            target_files
+                .read_file(piece.member_index, piece.offset, buf.get_mut(rel..rel + len)?)
+                .ok()?;
+            covered += piece.size;
+        }
+        (covered == inner_range.size).then_some(buf)
+    }
+
+    /// The context a borrowed range of the video is checked with (F12): the
+    /// target's good bytes before it (as far back as they are good, at most
+    /// [`BORROW_CONTEXT_BEFORE`], so the Cluster holding the range starts in
+    /// them), the good bytes after it, and the video's first bytes for its
+    /// Tracks, when held.
+    fn borrow_context(
+        &self,
+        target_files: &mut dyn TargetFileSet,
+        target_holes: &[Vec<NzbgetRsByteRange>],
+        member_targets: &[i32],
+        inner_range: NzbgetRsByteRange,
+    ) -> (u64, Vec<u8>, Vec<u8>, Option<Vec<u8>>) {
+        let mut read = |offset: i64, size: i64| {
+            self.read_target_good(target_files, target_holes, member_targets, NzbgetRsByteRange { offset, size })
+        };
+        let mut before = (inner_range.offset.max(0) as u64, Vec::new());
+        for window in [BORROW_CONTEXT_BEFORE, BORROW_CONTEXT_BEFORE / 4, BORROW_CONTEXT_BEFORE / 16] {
+            let from = (inner_range.offset - window).max(0);
+            if let Some(bytes) = read(from, inner_range.offset - from) {
+                before = (from as u64, bytes);
+                break;
+            }
+        }
+        let end = inner_range.offset + inner_range.size;
+        let mut after = Vec::new();
+        for window in [BORROW_CONTEXT_AFTER, BORROW_CONTEXT_AFTER / 4, BORROW_CONTEXT_AFTER / 16] {
+            if let Some(bytes) = read(end, window) {
+                after = bytes;
+                break;
+            }
+        }
+        // the head up to the first Cluster: one window, a larger one if it
+        // stops short of the Tracks
+        let mut head = None;
+        for size in [BORROW_HEAD_BYTES, BORROW_HEAD_BYTES * 16] {
+            if size > inner_range.offset {
+                break;
+            }
+            match read(0, size) {
+                Some(bytes) => {
+                    let truncated = matches!(
+                        vidmatch::parse_head(&bytes, &vidmatch::Limits::default()),
+                        Err(vidmatch::Error::Truncated { .. })
+                    );
+                    head = Some(bytes);
+                    if !truncated {
+                        break;
+                    }
+                }
+                None => break,
+            }
+        }
+        (before.0, before.1, after, head)
+    }
+
     /// Writes `data` (bytes of `inner_range`) through the target map with M2 containment guards
     /// (`StreamRepairController::WriteInnerRange` in `StreamRepair.cpp`).
     /// Returns the number of bytes written, or `-1` when a write was blocked or failed.
@@ -5103,6 +5201,24 @@ impl ContentMap {
         inner_range: NzbgetRsByteRange,
         data: &[u8],
     ) -> i64 {
+        // bytes borrowed by the video's offset (an alt): checked structurally
+        // first, with the target's own good bytes around them as context; a
+        // range the check rejects is never written, so the caller tries
+        // another donor or fetches again
+        let (before_at, before, after, head) =
+            self.borrow_context(target_files, target_holes, member_targets, inner_range);
+        let ctx = BorrowContext {
+            before: (before_at, &before),
+            after: &after,
+            head: head.as_deref(),
+        };
+        if validate_borrowed_range(inner_range, data, &ctx) == RangeVerdict::Bad {
+            target_files.on_message_bytes(
+                TargetMessageKind::Warning,
+                b"Stream repair: borrowed bytes failed the media structure check, not written",
+            );
+            return -1;
+        }
         let mut written: i64 = 0;
         for piece in self.map_from_inner(inner_range) {
             let piece_range = NzbgetRsByteRange {
@@ -5149,6 +5265,96 @@ impl ContentMap {
             written += piece.size;
         }
         written
+    }
+}
+
+/// What the structural check of a borrowed range says ([`validate_borrowed_range`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RangeVerdict {
+    /// The range and both seams parse cleanly (structure only: headers,
+    /// sizes, block headers, lacing, any CRC-32 element held whole).
+    Ok,
+    /// The range breaks the media structure: never written; another donor is
+    /// tried or the range fetched again.
+    Bad,
+    /// Not checkable (too little context, no Tracks, not Matroska): written,
+    /// and the final proof stays the whole-file CRC32/BLAKE2 or par2.
+    Unknown,
+}
+
+/// How far back the good bytes before a borrowed range are read for its
+/// check: far enough that the Cluster holding it starts in them.
+pub const BORROW_CONTEXT_BEFORE: i64 = 8 << 20;
+/// How far after a borrowed range the good bytes are read (to its Cluster's end).
+pub const BORROW_CONTEXT_AFTER: i64 = 2 << 20;
+/// The video's first bytes read for its Tracks (16 times more if they stop short).
+pub const BORROW_HEAD_BYTES: i64 = 1 << 20;
+
+/// The target's own bytes around a borrowed range (see [`validate_borrowed_range`]).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BorrowContext<'a> {
+    /// Good bytes ending where the range starts: (video offset, bytes).
+    pub before: (u64, &'a [u8]),
+    /// Good bytes starting where the range ends.
+    pub after: &'a [u8],
+    /// The video's first bytes (offset 0), for its Tracks, when held.
+    pub head: Option<&'a [u8]>,
+}
+
+/// Checks bytes borrowed from an alt by the video's offset (`inner_range` of
+/// the video, `data` its bytes) that no par2 slice or archive hash covers,
+/// with `vidmatch::validate` (no ffmpeg): the walk starts at the Cluster
+/// holding the range (found in the good bytes before it with
+/// `vidmatch::find_cluster`), checks every element through the range and its
+/// seams, block headers against the Tracks (`vidmatch::parse_head` on the
+/// video's head), lacing, and any CRC-32 element held whole. Bad rejects the
+/// range; Unknown lets it through with the whole-file CRC32/BLAKE2 or par2 as
+/// the gate; Ok proves the structure only.
+pub fn validate_borrowed_range(
+    inner_range: NzbgetRsByteRange,
+    data: &[u8],
+    ctx: &BorrowContext<'_>,
+) -> RangeVerdict {
+    let limits = vidmatch::Limits::default();
+    if inner_range.offset < 0 || inner_range.size <= 0 || data.len() as i64 != inner_range.size {
+        return RangeVerdict::Unknown;
+    }
+    let Some(head) = ctx.head.and_then(|h| vidmatch::parse_head(h, &limits).ok()) else {
+        return RangeVerdict::Unknown;
+    };
+    if head.tracks.is_empty() {
+        return RangeVerdict::Unknown;
+    }
+    let start = inner_range.offset as u64;
+    let (before_at, before) = if ctx.before.0.saturating_add(ctx.before.1.len() as u64) == start {
+        ctx.before
+    } else {
+        (start, &[][..])
+    };
+    // the last Cluster that starts in the good bytes before the range
+    let scale = head.info.timestamp_scale;
+    let mut from = 0usize;
+    let mut cluster = None;
+    while from < before.len() {
+        let Some(hit) = vidmatch::find_cluster(&before[from..], before_at + from as u64, Some(scale), &limits) else {
+            break;
+        };
+        if hit.offset >= start || hit.offset < before_at {
+            break;
+        }
+        cluster = Some(hit.offset);
+        from = (hit.offset - before_at) as usize + 1;
+    }
+    let context_at = cluster.unwrap_or(before_at);
+    let skip = (context_at - before_at) as usize;
+    let mut bytes = Vec::with_capacity(before.len() - skip + data.len() + ctx.after.len());
+    bytes.extend_from_slice(&before[skip..]);
+    bytes.extend_from_slice(data);
+    bytes.extend_from_slice(ctx.after);
+    match vidmatch::validate(&bytes, context_at, start..start + inner_range.size as u64, &head.tracks, &limits) {
+        vidmatch::Verdict::Ok => RangeVerdict::Ok,
+        vidmatch::Verdict::Bad { .. } => RangeVerdict::Bad,
+        _ => RangeVerdict::Unknown,
     }
 }
 
@@ -20023,6 +20229,118 @@ mod seven_zip_header_coder_tests {
 #[cfg(test)]
 mod completion_tests {
     use super::*;
+
+    fn ebml_id(id: u32) -> Vec<u8> {
+        let b = id.to_be_bytes();
+        let skip = b.iter().position(|&x| x != 0).unwrap_or(3);
+        b[skip..].to_vec()
+    }
+
+    fn ebml_size(n: u64) -> Vec<u8> {
+        for len in 1..=8u32 {
+            if n < (1u64 << (7 * len)) - 1 {
+                return (n | (1u64 << (7 * len))).to_be_bytes()[8 - len as usize..].to_vec();
+            }
+        }
+        unreachable!()
+    }
+
+    fn el(id: u32, data: &[u8]) -> Vec<u8> {
+        let mut out = ebml_id(id);
+        out.extend(ebml_size(data.len() as u64));
+        out.extend_from_slice(data);
+        out
+    }
+
+    fn uint_el(id: u32, v: u64) -> Vec<u8> {
+        let b = v.to_be_bytes();
+        let skip = b.iter().position(|&x| x != 0).unwrap_or(7);
+        el(id, &b[skip..])
+    }
+
+    /// A Matroska file of one video track and two Clusters, each with a
+    /// CRC-32 element over its children; returns the file, where its first
+    /// Cluster starts, and where the payload of its second block starts.
+    fn crc_mkv() -> (Vec<u8>, usize, usize) {
+        let ebml = el(
+            0x1A45_DFA3,
+            &[uint_el(0x4286, 1), uint_el(0x42F7, 1), uint_el(0x42F2, 4), uint_el(0x42F3, 8),
+              el(0x4282, b"matroska"), uint_el(0x4287, 4), uint_el(0x4285, 2)]
+                .concat(),
+        );
+        let info = el(0x1549_A966, &[uint_el(0x2A_D7B1, 1_000_000), el(0x4D80, b"t"), el(0x5741, b"t")].concat());
+        let tracks = el(
+            0x1654_AE6B,
+            &el(0xAE, &[uint_el(0xD7, 1), uint_el(0x73C5, 7), uint_el(0x83, 1), el(0x86, b"V_MPEG4/ISO/AVC")].concat()),
+        );
+        let mut payload_at = 0usize;
+        let cluster = |ts: u64, seed: u8, payload_at: &mut usize| {
+            let mut kids = uint_el(0xE7, ts);
+            for b in 0..3u8 {
+                let payload: Vec<u8> = (0..900u32).map(|i| (i as u8).wrapping_mul(31) ^ seed ^ b).collect();
+                let mut block = ebml_size(1);
+                block.extend((i16::from(b) * 40).to_be_bytes());
+                block.push(if b == 0 { 0x80 } else { 0 });
+                if b == 1 {
+                    // where this block's payload starts in the children
+                    *payload_at = kids.len() + 1 + ebml_size((block.len() + payload.len()) as u64).len() + block.len();
+                }
+                block.extend(&payload);
+                kids.extend(el(0xA3, &block));
+            }
+            let crc = crc32fast::hash(&kids);
+            let mut data = el(0xBF, &crc.to_le_bytes());
+            let crc_len = data.len();
+            data.extend(kids);
+            *payload_at += crc_len;
+            el(0x1F43_B675, &data)
+        };
+        let mut segment_data = info.clone();
+        segment_data.extend(&tracks);
+        let first_cluster_rel = segment_data.len();
+        let c1 = cluster(0, 3, &mut payload_at);
+        // the payload offset inside c1: Cluster ID (4) + its size + the data offset
+        let c1_size_len = {
+            let data_len = c1.len() - 4;
+            (1..=8).find(|&l| ebml_size((data_len - l) as u64).len() == l).unwrap()
+        };
+        let payload_in_c1 = 4 + c1_size_len + payload_at;
+        segment_data.extend(&c1);
+        let mut throwaway = 0;
+        segment_data.extend(cluster(2000, 9, &mut throwaway));
+        let mut file = ebml;
+        file.extend(ebml_id(0x1853_8067));
+        file.extend(ebml_size(segment_data.len() as u64));
+        let segment_start = file.len();
+        file.extend(segment_data);
+        (file, segment_start + first_cluster_rel, segment_start + first_cluster_rel + payload_in_c1)
+    }
+
+    /// F12: borrowed alt bytes go through vidmatch's structural check with the
+    /// target's good bytes around them: a range inside a CRC-32-covered
+    /// Cluster passes when it is the right bytes, a bit flipped in it is
+    /// rejected, and without the video's head (no Tracks) the answer is
+    /// Unknown, so the whole-file proof stays the gate.
+    #[test]
+    fn borrowed_ranges_pass_the_validator_hook() {
+        let (file, first_cluster, payload) = crc_mkv();
+        let range = NzbgetRsByteRange { offset: payload as i64 + 100, size: 300 };
+        let (start, end) = (range.offset as usize, (range.offset + range.size) as usize);
+        let ctx = BorrowContext {
+            before: (0, &file[..start]),
+            after: &file[end..],
+            head: Some(&file[..first_cluster + 16]),
+        };
+        assert_eq!(validate_borrowed_range(range, &file[start..end], &ctx), RangeVerdict::Ok);
+        let mut flipped = file[start..end].to_vec();
+        flipped[150] ^= 0x10;
+        assert_eq!(validate_borrowed_range(range, &flipped, &ctx), RangeVerdict::Bad);
+        let headless = BorrowContext { head: None, ..ctx };
+        assert_eq!(validate_borrowed_range(range, &flipped, &headless), RangeVerdict::Unknown);
+        // context that does not reach the range is no context
+        let detached = BorrowContext { before: (0, &file[..start - 10]), ..ctx };
+        assert_ne!(validate_borrowed_range(range, &flipped, &detached), RangeVerdict::Ok);
+    }
 
     #[test]
     fn credit_repaired_moves_failed_to_success_and_floors_at_zero() {

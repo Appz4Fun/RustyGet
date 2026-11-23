@@ -2662,6 +2662,42 @@
     "message": "Disable duplicate check",
     "description": "Checkbox label. Add dialog text"
   },
+  "add_dialog_fleet": {
+    "message": "Add copies of the same release as one fleet",
+    "description": "Checkbox label. Add dialog text: files whose names differ only by a copy suffix go in as one fleet"
+  },
+  "add_dialog_exact_copy": {
+    "message": "(the same file as $1: not sent)",
+    "description": "Add dialog note beside a file whose content is exactly another file's. $1 is that file's name."
+  },
+  "notif_add_files_dropped": {
+    "message": "Files submitted; exact copies of another file were not sent",
+    "description": "Notification after adding files when some were exact copies of another file and were skipped."
+  },
+  "add_dialog_fleet_plan": {
+    "message": "$1 files → 1 fleet: $2",
+    "description": "Add dialog text: $1 is how many files go in as one fleet, $2 the release name"
+  },
+  "label_donor_alive": {
+    "message": "donor · $1% alive",
+    "description": "Label of a copy kept in its fleet as a donor after its health check. $1 is the share of its tried articles that arrived."
+  },
+  "label_donor_dead": {
+    "message": "dead donor",
+    "description": "Label of a copy kept in its fleet although none of its tried articles arrived."
+  },
+  "label_fleet_rank": {
+    "message": "#$1 · $2% alive",
+    "description": "Fleet member pill: $1 its place in the fleet's order, $2 the alive share its health check measured."
+  },
+  "desc_fleet_rank": {
+    "message": "Place in the fleet (1 downloads first) and the share of its articles the check found alive",
+    "description": "Tooltip of the fleet member pill."
+  },
+  "status_projected_health": {
+    "message": "projected health: $1%",
+    "description": "Status label. Health judged from the articles tried so far. $1 is the projected health percentage."
+  },
   "add_dialog_scan_label": {
     "message": "Add from NzbDir",
     "description": "Input label. Form or field label | Add dialog text"
@@ -4827,6 +4863,14 @@
     "message": "alt",
     "description": "Fleet role tag: the same video file in another container."
   },
+  "fleet_role_unverified": {
+    "message": "unverified",
+    "description": "Fleet role tag: another container (different packing), the video inside not checked yet. Not 'another encode'."
+  },
+  "status_unverified": {
+    "message": "unverified",
+    "description": "History status of a duplicate in another container whose video inside is not verified yet (par2 checksums differ, which only shows other packing)."
+  },
   "fleet_role_copy": {
     "message": "copy",
     "description": "Fleet role tag for a copy whose role has not been worked out yet."
@@ -5885,5 +5929,77 @@
   "config_parpreset_applied": {
     "message": "(%s MB in use until settings are saved or reloaded)",
     "description": "Detect resource level: the par buffer in use now differs from the newly measured one; %s is the buffer in MB"
+  },
+  "fleet_toggle_copies": {
+    "message": "+$1 copies",
+    "description": "Downloads: the toggle of a fleet's row; $1 is how many other copies of the release the fleet holds."
+  },
+  "fleet_toggle_copy": {
+    "message": "+$1 copy",
+    "description": "Downloads: the toggle of a fleet's row with one other copy; $1 is 1."
+  },
+  "fleet_toggle_hint": {
+    "message": "Show or hide the other copies of this release, in the order they are tried if the primary fails",
+    "description": "Tooltip of a fleet's toggle in Downloads."
+  },
+  "fleet_pos_primary": {
+    "message": "primary",
+    "description": "A fleet member's place: the copy downloading now."
+  },
+  "fleet_pos_next": {
+    "message": "next",
+    "description": "A fleet member's place: the copy tried next if the primary fails."
+  },
+  "fleet_state_probing": {
+    "message": "probing…",
+    "description": "A fleet member still being checked in the background."
+  },
+  "fleet_state_held": {
+    "message": "held donor",
+    "description": "A fleet member held paused at the lowest priority, lending articles to the primary."
+  },
+  "fleet_state_parked": {
+    "message": "held donor (tried)",
+    "description": "A fleet member that was tried, failed its health check, and is kept as a donor."
+  },
+  "fleet_state_downloading": {
+    "message": "downloading",
+    "description": "The fleet member downloading now."
+  },
+  "fleet_state_paused": {
+    "message": "paused",
+    "description": "The fleet's primary, paused by the user."
+  },
+  "fleet_label_twin": {
+    "message": "twin",
+    "description": "Fleet member label: the same post uploaded again."
+  },
+  "fleet_label_alt": {
+    "message": "alt",
+    "description": "Fleet member label: the same video in another container."
+  },
+  "fleet_label_container": {
+    "message": "container",
+    "description": "Fleet member label: another container, the video inside not verified yet."
+  },
+  "fleet_label_other": {
+    "message": "other",
+    "description": "Fleet member label: another video."
+  },
+  "fleet_label_locked": {
+    "message": "locked",
+    "description": "Fleet member label: encrypted archive headers and no password."
+  },
+  "fleet_label_unverified": {
+    "message": "unverified",
+    "description": "Fleet member label: its alive share could not be measured (timeouts never count as missing)."
+  },
+  "fleet_label_dead": {
+    "message": "dead",
+    "description": "Fleet member label: none of its sampled articles exist."
+  },
+  "fleet_label_alive": {
+    "message": "$1% alive",
+    "description": "Fleet member label: $1 is the share of its sampled articles that exist."
   }
 }

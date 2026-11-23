@@ -43,6 +43,11 @@ impl ConnHandle {
         Self(conn as usize)
     }
 
+    /// The pooled connection behind the handle (null for none).
+    pub fn pooled(self) -> *mut crate::net::PooledNntpConn {
+        self.0 as *mut crate::net::PooledNntpConn
+    }
+
     fn is_none(self) -> bool {
         self.0 == 0
     }

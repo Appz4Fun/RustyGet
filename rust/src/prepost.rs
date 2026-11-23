@@ -1012,6 +1012,14 @@ pub(crate) fn delete_cleanup_host(
     use crate::queuesubsys_host::{c_bytes, MK_DETAIL, MK_ERROR};
     use std::ffi::{CStr, CString};
 
+    // a fleet copy that shares the primary's folder, or is kept as a donor or
+    // a dead copy with its files: never cleaned up (fleethold::KEEP_FILES_PARAM)
+    if host
+        .nzb_get_param(nzb.ptr, crate::fleethold::KEEP_FILES_PARAM)
+        .is_some_and(|v| v.trim_ascii().eq_ignore_ascii_case(b"yes"))
+    {
+        return;
+    }
     let mode = classify_delete_cleanup_mode(
         nzb.cleanup_disk,
         nzb.delete_status,
@@ -1402,6 +1410,12 @@ impl NzbgetRsPrePostProcessor {
             host.dq_edit_entry(dq_ptr, nzb.id, EA_GROUP_PAUSE_EXTRA_PARS, None);
         }
 
+        // F16: the copy is in the queue now, so its fleet decides its primary
+        // with it counted (exactly one copy downloads)
+        if crate::fleethold::holds_in_queue(host, &nzb) {
+            crate::fleethold::refresh_key_host(host, dq_ptr, &nzb.dupe_key);
+        }
+
         if opts.reorder_files && nzb.delete_status == DeleteStatus::None {
             let mut msg = b"Reordering files for ".to_vec();
             msg.extend_from_slice(&nzb.name);
@@ -1722,9 +1736,19 @@ impl NzbgetRsPrePostProcessor {
             crate::dupecoord::nzb_completed_host(host, dq_ptr, nzb_ptr);
         }
         crate::dupecoord::rescue_on_health_failure_host(host, dq_ptr, nzb_ptr);
+        if add_to_history {
+            crate::dupecoord::keep_as_donor_host(host, dq_ptr, nzb_ptr);
+        }
         if !add_to_history {
             crate::postproc::live_par_time_settle(host, nzb_ptr, false);
-            host.history_delete_disk_files(nzb_ptr);
+            // a fleet copy kept with its files (fleethold::KEEP_FILES_PARAM)
+            // may share the primary's folder: its disk is left alone
+            if !host
+                .nzb_get_param(nzb_ptr, crate::fleethold::KEEP_FILES_PARAM)
+                .is_some_and(|v| v.trim_ascii().eq_ignore_ascii_case(b"yes"))
+            {
+                host.history_delete_disk_files(nzb_ptr);
+            }
             crate::dupefallback::par_damage_forget_all(nzb.id);
             host.queue_remove(dq_ptr, nzb_ptr);
         }

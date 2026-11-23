@@ -405,6 +405,30 @@ pub fn packing_of_head(data: &[u8], name: &[u8], password: Option<&[u8]>) -> Pac
     Packing::Unknown
 }
 
+/// How easy a copy is to borrow INTO when it is the primary, lower first (the
+/// user's rule, 2026-11-23): bare or split media (0), then a stored archive
+/// (1), then a compressed archive, a 7-Zip or an unknown packing (2), then an
+/// encrypted one (3: encrypted headers or data, or a 7-Zip whose nzb carries a
+/// password). `head_name` is the name of the file whose first article gave
+/// `packing`.
+pub fn primary_ease(packing: Packing, head_name: &[u8], password_known: bool) -> u8 {
+    match packing {
+        Packing::HeadersEncrypted | Packing::EncryptedBorrowable { .. } => 3,
+        Packing::Unborrowable if password_known && is_7z_name(head_name) => 3,
+        Packing::Unborrowable | Packing::Unknown => 2,
+        Packing::Borrowable => {
+            // borrowable and not an archive: bare media, a raw split, or a
+            // media file recognised by its first bytes under another name
+            let ext = extension(head_name);
+            let archive = matches!(ext.as_slice(), b"rar" | b"zip" | b"7z")
+                || (ext.len() == 3
+                    && matches!(ext[0], b'r' | b'z')
+                    && ext[1..].iter().all(u8::is_ascii_digit));
+            u8::from(archive)
+        }
+    }
+}
+
 /// Whether two copies are TWINs, the same post: their par2 sets list the
 /// same files by MD5 and length (a near-twin sharing most of a complete list
 /// counts too, as for article borrowing) and their data files are split into
@@ -568,6 +592,26 @@ mod tests {
                 .join(name),
         )
         .unwrap()
+    }
+
+    /// F10: bare or split media, then stored archives, then compressed, then
+    /// encrypted.
+    #[test]
+    fn primary_ease_orders_bare_stored_compressed_encrypted() {
+        assert_eq!(primary_ease(Packing::Borrowable, b"movie.mkv", false), 0);
+        assert_eq!(primary_ease(Packing::Borrowable, b"movie.mkv.001", false), 0);
+        assert_eq!(primary_ease(Packing::Borrowable, b"aGVsbG8", false), 0);
+        assert_eq!(primary_ease(Packing::Borrowable, b"movie.part01.rar", false), 1);
+        assert_eq!(primary_ease(Packing::Borrowable, b"movie.r00", false), 1);
+        assert_eq!(primary_ease(Packing::Borrowable, b"movie.zip", false), 1);
+        assert_eq!(primary_ease(Packing::Unborrowable, b"movie.rar", false), 2);
+        assert_eq!(primary_ease(Packing::Unknown, b"movie.7z", false), 2);
+        assert_eq!(primary_ease(Packing::Unborrowable, b"movie.7z.001", true), 3);
+        assert_eq!(primary_ease(Packing::HeadersEncrypted, b"movie.rar", false), 3);
+        assert_eq!(
+            primary_ease(Packing::EncryptedBorrowable { headers_encrypted: false }, b"movie.rar", true),
+            3
+        );
     }
 
     #[test]

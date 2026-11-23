@@ -245,8 +245,9 @@ var History = (new function($)
 			(hist.Category !== '' ? Util.textToHtml(hist.Category) : '<span class="none-category">' + I18n.translate('label_none') + '</span>')
 			: '';
 		var backup = hist.Kind === 'NZB' ? DownloadsUI.buildBackupLabel(hist) : '';
-		var dupeScore = hist.Kind === 'NZB' ? DownloadsUI.buildDupeScoreLabel(hist.DupeScore, hist.Health) +
-			DownloadsUI.buildTwinGroupLabel(hist.Parameters, hist.Status.indexOf('DELETED/') !== 0) : '';
+		var dupeScore = hist.Kind === 'NZB' ? DownloadsUI.buildDupeScoreLabel(hist.DupeScore, DownloadsUI.shownHealth(hist), hist.Parameters) +
+			DownloadsUI.buildTwinGroupLabel(hist.Parameters, hist.Status.indexOf('DELETED/') !== 0) +
+			(hist.Status === 'DELETED/DUPE' ? DownloadsUI.buildDonorLabel(hist.Parameters) : '') : '';
 
 		if (hist.Kind === 'URL')
 		{
@@ -661,7 +662,7 @@ var HistoryUI = (new function($)
 				if (detail === 'SCRIPT') return I18n.translate('status_pp_failure');
 				if (detail === 'DAMAGED') return I18n.translate('status_manual');
 				if (detail === 'REPAIRABLE') return I18n.translate('status_repairable');
-				if (detail === 'HEALTH') return I18n.translate('status_health', Math.floor(hist.Health / 10));
+				if (detail === 'HEALTH') return DownloadsUI.healthText(hist);
 				if (detail === 'SPACE') return I18n.translate('status_space');
 				if (detail === 'PASSWORD') return I18n.translate('status_password');
 				if (detail === 'SKIPPED') return I18n.translate('status_skipped');
@@ -674,8 +675,10 @@ var HistoryUI = (new function($)
 				{
 					// a twin or an alt of the primary of its dupe key (TwinCheck)
 					var kind = hist.Kind === 'NZB' ? DownloadsUI.parameterValue(hist.Parameters, 'DupeKind') : '';
-					return kind.indexOf('twin') === 0 ? I18n.translate('status_twin') :
-						kind === 'alt' ? I18n.translate('status_alt') : I18n.translate('status_dupe');
+					var label = DupeGroup.kindLabel(kind);
+					return label === 'twin' ? I18n.translate('status_twin') :
+						label === 'alt' ? I18n.translate('status_alt') :
+						label === 'unverified' ? I18n.translate('status_unverified') : I18n.translate('status_dupe');
 				}
 				if (detail === 'GOOD') return I18n.translate('status_good');
 				if (detail === 'SUCCESS') return I18n.translate('status_success');

@@ -60,6 +60,9 @@ var ReleaseName = (new function()
 	function stripName(name)
 	{
 		var s = String(name || '').trim();
+		// a copy suffix (-FraMeSToR_3434, " (12)", _1.nzb.2.queued) is no part of
+		// the release (the strict rule of webui/dupegroup.js and releasename.rs)
+		if (typeof DupeGroup !== 'undefined') s = DupeGroup.stripCopySuffix(s);
 		s = s.replace(/\.(nzb|mkv|mp4|avi|m4v|ts|par2|rar|7z|zip)$/i, '');
 		// trailing bracket tags such as "[NZBDAV copy 01]" or "{tvdb-123}"
 		s = s.replace(/(\s*[\[{(][^\]})]*[\]})]\s*)+$/, '');

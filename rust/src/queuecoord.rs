@@ -1840,6 +1840,8 @@ impl NzbgetRsQueueCoordinator {
 
             let now = host.opts().cur_time;
             if last_reset != now {
+                // F16a: the fleets' failover order, as their members show it
+                host.with_locked_queue(|dq_ptr| crate::fleethold::refresh_all_host(host, dq_ptr));
                 host.server_pool_close_unused();
                 self.reset_hanging_downloads(host);
                 if !standby {
@@ -2067,14 +2069,10 @@ impl NzbgetRsQueueCoordinator {
             )
             .as_bytes(),
         );
-        host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
-        host.nzb_set_delete_status(nzb.ptr, DeleteStatus::Health);
-        host.dq_edit_entry(
-            dq_ptr,
-            nzb.id,
-            crate::queuesubsys_host::EA_GROUP_PARK_DELETE,
-            None,
-        );
+        host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &crate::releasename::log_name(&msg));
+        // judged dead from the sample, whatever its Health says
+        host.nzb_set_param(nzb.ptr, crate::dupecoord::PROJECTED_PARAM, Some(b"0.0"));
+        crate::fleethold::park_on_health_host(host, dq_ptr, &nzb);
     }
 
     pub(crate) fn delete_queue_entry(
@@ -4520,7 +4518,11 @@ impl NzbgetRsQueueCoordinator {
                 )
                 .as_bytes(),
             );
-            host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
+            host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &crate::releasename::log_name(&msg));
+            if opts.health_check == crate::queuesubsys_host::HC_PARK {
+                crate::fleethold::park_on_health_host(host, dq_ptr, &nzb);
+                return;
+            }
             host.nzb_set_delete_status(nzb.ptr, DeleteStatus::Health);
             host.dq_edit_entry(
                 dq_ptr,
@@ -4843,14 +4845,9 @@ impl NzbgetRsQueueCoordinator {
                     )
                     .as_bytes(),
                 );
-                host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
-                host.nzb_set_delete_status(nzb.ptr, DeleteStatus::Health);
-                host.dq_edit_entry(
-                    dq_ptr,
-                    nzb.id,
-                    crate::queuesubsys_host::EA_GROUP_PARK_DELETE,
-                    None,
-                );
+                host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &crate::releasename::log_name(&msg));
+                set_projected_from_tried(host, nzb);
+                crate::fleethold::park_on_health_host(host, dq_ptr, &nzb);
                 return;
             }
         }
@@ -4863,6 +4860,7 @@ impl NzbgetRsQueueCoordinator {
             )
         {
             let tried = nzb.current_success_articles + nzb.current_failed_articles;
+            set_projected_from_tried(host, nzb);
             let reason = crate::dupecoord::no_backup_reason_host(host, opts, dq_ptr, nzb);
             let mut msg = b"Parking ".to_vec();
             msg.extend_from_slice(&nzb.name);
@@ -4880,14 +4878,9 @@ impl NzbgetRsQueueCoordinator {
             );
             msg.extend_from_slice(&reason);
             msg.push(b')');
+            crate::dupecoord::push_queued_copies_note(host, dq_ptr, nzb, &mut msg);
             host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
-            host.nzb_set_delete_status(nzb.ptr, DeleteStatus::Health);
-            host.dq_edit_entry(
-                dq_ptr,
-                nzb.id,
-                crate::queuesubsys_host::EA_GROUP_PARK_DELETE,
-                None,
-            );
+            crate::fleethold::park_on_health_host(host, dq_ptr, &nzb);
         }
     }
 
@@ -4936,14 +4929,8 @@ impl NzbgetRsQueueCoordinator {
                     msg.extend_from_slice(
                         b": it was kept to borrow its dead volumes, but the duplicate holds another video",
                     );
-                    host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
-                    host.nzb_set_delete_status(nzb.ptr, DeleteStatus::Health);
-                    host.dq_edit_entry(
-                        dq_ptr,
-                        nzb.id,
-                        crate::queuesubsys_host::EA_GROUP_PARK_DELETE,
-                        None,
-                    );
+                    host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &crate::releasename::log_name(&msg));
+                    crate::fleethold::park_on_health_host(host, dq_ptr, &nzb);
                     return;
                 }
             }
@@ -4984,6 +4971,15 @@ impl NzbgetRsQueueCoordinator {
         }
         if (!dead && !doomed) || (probing >= 0 && !hopeless) {
             return;
+        }
+        // Judged on the articles tried so far: the health shown is the projection, not
+        // the download's own health, which counts every untried article as good.
+        if eval.tried > 0 {
+            host.nzb_set_param(
+                nzb.ptr,
+                crate::dupecoord::PROJECTED_PARAM,
+                Some(format!("{:.1}", f64::from(eval.projected.clamp(0, 1000)) / 10.0).as_bytes()),
+            );
         }
 
         // A copy whose archive needs a password nobody has can never be extracted: failing over
@@ -5034,14 +5030,9 @@ impl NzbgetRsQueueCoordinator {
                 );
                 msg.extend_from_slice(&reason);
                 msg.push(b')');
+                crate::dupecoord::push_queued_copies_note(host, dq_ptr, &nzb, &mut msg);
                 host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
-                host.nzb_set_delete_status(nzb.ptr, DeleteStatus::Health);
-                host.dq_edit_entry(
-                    dq_ptr,
-                    nzb.id,
-                    crate::queuesubsys_host::EA_GROUP_PARK_DELETE,
-                    None,
-                );
+                crate::fleethold::park_on_health_host(host, dq_ptr, &nzb);
             }
             return;
         };
@@ -5124,7 +5115,7 @@ impl NzbgetRsQueueCoordinator {
                     .as_bytes(),
                 );
             }
-            host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
+            host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &crate::releasename::log_name(&msg));
         } else {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -5168,15 +5159,9 @@ impl NzbgetRsQueueCoordinator {
                 )
                 .as_bytes(),
             );
-            host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
+            host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &crate::releasename::log_name(&msg));
         }
-        host.nzb_set_delete_status(nzb.ptr, DeleteStatus::Health);
-        host.dq_edit_entry(
-            dq_ptr,
-            nzb.id,
-            crate::queuesubsys_host::EA_GROUP_PARK_DELETE,
-            None,
-        );
+        crate::fleethold::park_on_health_host(host, dq_ptr, &nzb);
     }
 
     /// Direct unpack found the download's archive needs a password that neither its nzb nor
@@ -5226,14 +5211,8 @@ impl NzbgetRsQueueCoordinator {
         msg.extend_from_slice(
             b": its archive needs a password its nzb does not carry, so it can never be extracted",
         );
-        host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
-        host.nzb_set_delete_status(nzb.ptr, DeleteStatus::Health);
-        host.dq_edit_entry(
-            dq_ptr,
-            nzb.id,
-            crate::queuesubsys_host::EA_GROUP_PARK_DELETE,
-            None,
-        );
+        host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &crate::releasename::log_name(&msg));
+        crate::fleethold::park_on_health_host(host, dq_ptr, &nzb);
     }
 
     fn check_par_damage(
@@ -5335,15 +5314,9 @@ impl NzbgetRsQueueCoordinator {
         msg.extend_from_slice(b": ");
         msg.extend_from_slice(&damage);
         msg.extend_from_slice(b", par-repair can't fix it");
-        host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
+        host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &crate::releasename::log_name(&msg));
         crate::dupefallback::par_damage_forget_all(nzb.id);
-        host.nzb_set_delete_status(nzb.ptr, DeleteStatus::Health);
-        host.dq_edit_entry(
-            dq_ptr,
-            nzb.id,
-            crate::queuesubsys_host::EA_GROUP_PARK_DELETE,
-            None,
-        );
+        crate::fleethold::park_on_health_host(host, dq_ptr, &nzb);
         true
     }
 
@@ -6914,4 +6887,21 @@ mod tests {
         assert!(!st.saw_non_null_strs_on_running_snap);
         assert_eq!(st.cancelled, vec![0xAD02]);
     }
+}
+
+/// Stores the share of a download's tried articles that arrived as the health it
+/// was judged on ([`crate::dupecoord::PROJECTED_PARAM`]): its own Health counts
+/// every untried article as good.
+#[cfg(unix)]
+fn set_projected_from_tried(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    nzb: &crate::queuesubsys_host::NzbSnap,
+) {
+    let projected =
+        crate::dupecoord::arrived_percent(nzb.current_success_articles, nzb.current_failed_articles);
+    host.nzb_set_param(
+        nzb.ptr,
+        crate::dupecoord::PROJECTED_PARAM,
+        Some(format!("{projected:.1}").as_bytes()),
+    );
 }

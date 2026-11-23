@@ -194,6 +194,14 @@ async function installDetailsFixture(page, base, writes = [], hooks = {}) {
     }
     if (/\/jsonrpc(\/|$)/.test(url.pathname)) {
       const rpc = request.method() === 'POST' ? request.postDataJSON() : { id: 1, method: url.pathname.split('/').pop() };
+      // a test answers a method itself (appendfleet, for one) by returning a result
+      if (hooks.answer) {
+        const answer = hooks.answer(rpc);
+        if (answer !== undefined) {
+          writes.push({ method: rpc.method, params: rpc.params });
+          return route.fulfill({ contentType: 'application/json', json: { id: rpc.id, result: answer } });
+        }
+      }
       if (['editqueue', 'saveconfig', 'append', 'writelog', 'pausedownload', 'resumedownload', 'scan', 'rate'].includes(rpc.method)) {
         writes.push({ method: rpc.method, params: rpc.params });
         if (hooks.holdMutation) await hooks.holdMutation(rpc);

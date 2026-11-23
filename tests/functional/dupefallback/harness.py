@@ -6771,6 +6771,162 @@ def _fleet_kinds(api, key):
             for g in api.listgroups() + api.history() if g.get('DupeKey') == key}
 
 
+def scenario_fleetprimaryease(daemon, t):
+    """F10: among healthy copies the primary is the one easiest to borrow
+    into: a bare copy before a stored rar before a compressed one, whatever
+    order the client sent them in. Health still gates: a weak bare copy (30
+    of 40 alive) never leads the healthy ones."""
+    daemon.fake_nntp.alive = set()
+    api = daemon.wait_ready()
+    reply = _fleet(daemon, [
+        ('Show.S01E01.compressed', _fleet_copy(daemon, 'ec', 'a.rar', 420_000, _rar4_head(0x33), _payload(420_000, 7801))),
+        ('Show.S01E01.store', _fleet_copy(daemon, 'es', 'b.rar', 410_000, _rar4_head(0x30), _payload(410_000, 7802))),
+        ('Show.S01E01.weakbare', _fleet_copy(daemon, 'ew', 'd.mkv', 400_000, None, _payload(400_000, 7803), 30)),
+        ('Show.S01E01.bare', _fleet_copy(daemon, 'eb', 'c.mkv', 400_000, None, _payload(400_000, 7804)))],
+        key='fleet:ease')
+    order = [m['Name'] for m in sorted(reply['Members'], key=lambda m: m['Rank'])]
+    chosen = next((m['Name'] for m in reply['Members'] if m['NZBID'] == reply['Chosen']), None)
+    ok = chosen == 'Show.S01E01.bare' and order[0] == 'Show.S01E01.bare' and \
+        order.index('Show.S01E01.store') < order.index('Show.S01E01.compressed')
+    return ('fleetprimaryease', ok, 'order=%s chosen=%s' % (order, chosen))
+
+
+def scenario_fleetnzbpassword(daemon, t):
+    """F8: a copy whose RAR5 headers are encrypted (-hp, store mode inside),
+    with its password only in its nzb's <meta type="password">, is read with
+    that password: borrowable-encrypted (it lends once decrypted), ranked
+    after the plain stored copy and kept as a backup with its alive share. The
+    same posting without a password is locked (DupeLocked, unborrowable, last);
+    with a wrong one its headers stay unread (DupeLocked recorded,
+    unborrowable). Neither is ever DEAD. Uses the committed RAR5 fixture, so no
+    rar binary is needed."""
+    daemon.fake_nntp.alive = set()
+    hp = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'testdata', 'donorkind', 'enchp5.rar'),
+              'rb').read()
+    api = daemon.wait_ready()
+    meta = '<head><meta type="password">%s</meta></head><file '
+    with_pw = _fleet_copy(daemon, 'pw', 'a.rar', 400_000, hp, _payload(400_000, 7951)).replace('<file ', meta % 'pw', 1)
+    wrong_pw = _fleet_copy(daemon, 'pr', 'b.rar', 400_000, hp, _payload(400_000, 7952)).replace('<file ', meta % 'nope', 1)
+    no_pw = _fleet_copy(daemon, 'pn', 'c.rar', 400_000, hp, _payload(400_000, 7953))
+    store = _fleet_copy(daemon, 'ps', 'd.rar', 400_000, _rar4_head(0x30), _payload(400_000, 7954))
+    reply = _fleet(daemon, [('Show.S01E01.nopw', no_pw), ('Show.S01E01.wrongpw', wrong_pw),
+                            ('Show.S01E01.pw', with_pw), ('Show.S01E01.store', store)], key='fleet:nzbpw')
+    order = [m['Name'] for m in sorted(reply['Members'], key=lambda m: m['Rank'])]
+    status = {m['Name']: (m['Status'], m['Alive']) for m in reply['Members']}
+    items = {g['NZBName']: {p['Name']: p['Value'] for p in g.get('Parameters', [])}
+             for g in api.listgroups() + api.history() if g.get('DupeKey') == 'fleet:nzbpw'}
+    kinds = {n: p.get('DupeCopyKind') for n, p in items.items()}
+    ok = (order[:2] == ['Show.S01E01.store', 'Show.S01E01.pw']
+          and kinds.get('Show.S01E01.pw') == 'borrowable-encrypted'
+          and items.get('Show.S01E01.pw', {}).get('*Unpack:Password') == 'pw'
+          and all(items.get(n, {}).get('DupeLocked') == 'yes' for n in ('Show.S01E01.nopw', 'Show.S01E01.wrongpw'))
+          and all(status[n][0] != 'DEAD' and status[n][1] == 100 for n in status))
+    return ('fleetnzbpassword', ok, 'order=%s kinds=%s status=%s' % (order, kinds, status))
+
+
+def scenario_dropdune(daemon, t):
+    """The Dune Part Two drop on m5air (docs/DROP_AS_FLEET.md, ground truth in
+    the request's nzb identity check), in small: copies of the 2160p release
+    copied into NzbDir with download-manager suffixes, plus the 1080p release.
+    - C01: RAR5 with encrypted headers, stored, password only in the nzb meta,
+      100% alive: read with that password (borrowable-encrypted), never the
+      primary while a healthy plain copy is there (F8, F10).
+    - C07: stored RAR, 100% alive: the primary (F10).
+    - C04 and C11: twins (the same par2 file list) of each other.
+    - C08: a repacked RAR (other par2): another container, never 'other' (F9).
+    - C13: a bare mkv a little shorter (other par2): never 'other' (F9).
+    - C17, C05, C09: dead: kept as dead donors with their nzb (F3); F16: held
+      in the queue at the end of the failover order while the fleet is open
+      (before F16 they waited in History as DELETED/DUPE).
+    - C00: the 1080p release: never joins the 2160p fleet (F1).
+    Every copy shows its probed alive share (DupeAlive), not a Health of
+    untried articles (F4)."""
+    daemon.fake_nntp.alive = set()
+    rel = 'Dune.Part.Two.2024.UHD.BluRay.2160p.TrueHD.Atmos.7.1.DV.HEVC.REMUX-FraMeSToR'
+    key = 'dupes:dune.part.two.2024.uhd.bluray.2160p.truehd.atmos.7.1.dv.hevc.remux.framestor'
+    hd = 'Dune.Part.Two.2024.BluRay.1080p.TrueHD.Atmos.7.1.AVC.REMUX-FraMeSToR'
+    hp = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'testdata', 'donorkind', 'enchp5.rar'),
+              'rb').read()
+    movie = _payload(400_000, 8001)
+    meta = '<head><meta type="password">pw</meta></head><file '
+    copies = {
+        ' (1)': _fleet_copy(daemon, 'du01', 'a.rar', 400_000, hp, _payload(400_000, 8011)).replace('<file ', meta, 1),
+        '_12': _fleet_copy(daemon, 'du07', 'b.rar', 400_000, _rar4_head(0x30), _payload(400_000, 8017)),
+        '_1': _fleet_copy(daemon, 'du04', 'c.mkv', 400_000, None, movie, 30),
+        '_3': _fleet_copy(daemon, 'du11', 'c.mkv', 400_000, None, movie, 26),
+        '_13': _fleet_copy(daemon, 'du08', 'd.rar', 400_000, _rar4_head(0x30), _payload(400_000, 8018), 20),
+        '_5': _fleet_copy(daemon, 'du13', 'e.mkv', 399_000, None, movie[:399_000], 34),
+        '_9': _fleet_copy(daemon, 'du02', 'f.rar', 400_000, None, _payload(400_000, 8012), 0),
+        '_10': _fleet_copy(daemon, 'du05', 'g.mkv', 400_000, None, _payload(400_000, 8015), 0),
+        '_14': _fleet_copy(daemon, 'du09', 'h.rar', 400_000, None, _payload(400_000, 8019), 0),
+    }
+    for tag in ('du02', 'du05', 'du09'):
+        daemon.fake_nntp.alive.discard('%s-par@x' % tag)
+    other = _fleet_copy(daemon, 'du00', 'i.mkv', 400_000, None, _payload(400_000, 8010))
+    api = daemon.wait_ready()
+    api.pausedownload()
+    for suffix, text in copies.items():
+        name = rel + suffix + '.nzb'
+        t.write_file(os.path.join('main', 'nzb', name), text.encode())
+    t.write_file(os.path.join('main', 'nzb', hd + '.nzb'), other.encode())
+    deadline = time.time() + 120
+    while time.time() < deadline and not _grep_log(t, 'Fleet ' + key + ' from NzbDir'):
+        time.sleep(0.5)
+    reply_line = next((line for line in t.read_file('nzbget.log').decode(errors='replace').splitlines()
+                       if 'Fleet ' + key + ' from NzbDir' in line), '')
+    chosen = re.search(r'downloading #(\d+)', reply_line)
+    # TwinCheck labels the backups on its next rounds
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        kinds = {i['NZBName']: _params(i).get('DupeKind') for i in _items_of_key(api, key)}
+        if kinds.get(rel + '_13') and kinds.get(rel + '_5'):
+            break
+        time.sleep(1)
+    items = {i['NZBName']: i for i in _items_of_key(api, key)}
+    p = {n: _params(i) for n, i in items.items()}
+    primary = next((n for n, i in items.items() if chosen and i['NZBID'] == int(chosen.group(1))), None)
+    hd_items = [g for g in api.listgroups() + api.history() if g['NZBName'] == hd]
+    nzb_files = os.listdir(t.path('main', 'nzb'))
+    dead_names = [n for n in items if p[n].get('DupeAlive') == '0']
+    api.resumedownload()
+    ok = (primary == rel + '_12'
+          and p.get(rel + ' (1)', {}).get('DupeCopyKind') == 'borrowable-encrypted'
+          and p.get(rel + '_3', {}).get('DupeCopyKind') == 'twin' and p.get(rel + '_1', {}).get('DupeCopyKind') == 'twin'
+          and all(p.get(rel + s, {}).get('DupeKind') not in ('other',) for s in ('_13', '_5'))
+          and all(p.get(rel + s, {}).get('DupeKind') == 'container' for s in ('_13', '_5'))
+          and len(dead_names) == 3 and all(p[n].get('DupeHeld') == 'yes' and items[n]['Status'] == 'PAUSED'
+                                           for n in dead_names)
+          and all(int(p[n].get('DupeFleetOrder', '0')) >= len(items) - 3 for n in dead_names)
+          and all(any(f.startswith(n + '.nzb') for f in nzb_files) for n in dead_names)
+          and all(p[n].get('DupeAlive') is not None for n in items)
+          and hd_items and all(g.get('DupeKey', '').lower() != key for g in hd_items))
+    return ('dropdune', ok, 'primary=%s kinds=%s alive=%s dead=%s hd=%s' % (
+        primary, {n: (q.get('DupeCopyKind'), q.get('DupeKind')) for n, q in p.items()},
+        {n: q.get('DupeAlive') for n, q in p.items()}, dead_names, [(g['NZBName'], g.get('DupeKey')) for g in hd_items]))
+
+
+def scenario_fleettimeoutunverified(daemon, t):
+    """F6: timeouts are never evidence. A copy whose every check fails with a
+    temporary error (451, as a server or proxy that times out answers) is
+    unverified: Alive -1, a backup, never DEAD; a copy the server says it
+    lacks is dead."""
+    daemon.fake_nntp.alive = set()
+    api = daemon.wait_ready()
+    whole = _fleet_copy(daemon, 'tw', 'a.mkv', 400_000, None, _payload(400_000, 7901))
+    flaky = _fleet_copy(daemon, 'tf', 'b.mkv', 400_000, None, _payload(400_000, 7902))
+    daemon.fake_nntp.reply451 |= set(_fleet_ids('tf')) | {'tf-par@x'}
+    dead = _fleet_copy(daemon, 'td', 'c.mkv', 400_000, None, _payload(400_000, 7903), 0)
+    reply = _fleet(daemon, [('Show.S01E01.whole', whole), ('Show.S01E01.flaky', flaky),
+                            ('Show.S01E01.dead', dead)], key='fleet:timeout')
+    byname = {m['Name']: (m['Status'], m['Alive']) for m in reply['Members']}
+    items = {g['NZBName']: {p['Name']: p['Value'] for p in g.get('Parameters', [])}
+             for g in api.listgroups() + api.history() if g.get('DupeKey') == 'fleet:timeout'}
+    ok = (byname.get('Show.S01E01.flaky', ('', 0))[1] == -1 and byname['Show.S01E01.flaky'][0] in ('BACKUP', 'QUEUED')
+          and byname.get('Show.S01E01.dead', ('', 0))[0] == 'DEAD'
+          and items.get('Show.S01E01.flaky', {}).get('DupeAlive') is None)
+    return ('fleettimeoutunverified', ok, 'members=%s params=%s' % (byname, items.get('Show.S01E01.flaky')))
+
+
 def scenario_fleetkindsingle(daemon, t):
     """appendfleet with one copy (store-mode rar): it is probed too, so it
     gets its kind (borrowable) instead of none."""
@@ -6970,7 +7126,9 @@ def scenario_fleettwinvolumes(daemon, t):
     items = {g['NZBName']: g for g in api.listgroups() + api.history() if g.get('DupeKey') == 'fleet:vol'}
     kinds = {n: {p['Name']: p['Value'] for p in g.get('Parameters', [])}.get('DupeCopyKind')
              for n, g in items.items()}
-    ok = (set(order[:2]) == {'Show.S01E01.twinA', 'Show.S01E01.twinvol'}
+    # F10: the stored copy is the primary (its packing is known; the twins'
+    # first articles tell no packing), the twins follow it
+    ok = (order[0] == 'Show.S01E01.store' and set(order[1:3]) == {'Show.S01E01.twinA', 'Show.S01E01.twinvol'}
           and kinds.get('Show.S01E01.twinvol') == 'twin' and kinds.get('Show.S01E01.twinA') == 'twin')
     return ('fleettwinvolumes', ok, 'order=%s kinds=%s' % (order, kinds))
 
@@ -11209,7 +11367,908 @@ def _log_before(t, first, second):
     return 0 <= first_at < second_at
 
 
+
+# ---- Copies of one release added together are one fleet (docs/DROP_AS_FLEET.md) ----
+
+DROP_REL = 'Drop.Movie.2024.1080p.WEB-DL.x264-GRP'
+DROP_KEY = 'dupes:drop.movie.2024.1080p.web.dl.x264.grp'
+DROP_OTHER = 'Drop.Show.S01E02.720p.HDTV.x264-GRP'
+DROP_OTHER_KEY = 'dupes:drop.show.s01e02.720p.hdtv.x264.grp'
+
+
+def _drop_copy(t, tag, data, missing, seg=100_000, dead_par=False):
+    """One posting of ``data`` with a par2 index (article borrowing checks
+    borrowed bytes against it); ``missing`` parts are gone from the server, and
+    with ``dead_par`` the par2 index too."""
+    path = _place_copy(t, tag, data, 'movie.bin')
+    par = generators.par2_index([('Drop.Movie.bin', data)])
+    par_path = tag + '/rel.par2'
+    t.write_file(os.path.join('data', par_path), par)
+    return build_multi_nzb([(path, 'Drop.Movie.bin', len(data), seg, missing),
+                            (par_path, 'Drop.Movie.par2', len(par), 500_000, {1} if dead_par else set())])
+
+
+def _params(item):
+    return {p['Name']: p['Value'] for p in item.get('Parameters', [])}
+
+
+def _items_of_key(api, key):
+    return [g for g in api.listgroups() + api.history() if g.get('DupeKey', '').lower() == key]
+
+
+def _wait_key_success(api, key, timeout=240):
+    """Waits until an item of ``key`` succeeds, then until nothing of it is queued."""
+    deadline = time.time() + timeout
+    done = None
+    while time.time() < deadline and not done:
+        done = next((h for h in api.history() if h.get('DupeKey', '').lower() == key
+                     and h['Status'].startswith('SUCCESS')), None)
+        time.sleep(0.5)
+    while time.time() < deadline and any(g.get('DupeKey', '').lower() == key for g in api.listgroups()):
+        time.sleep(0.5)
+    return done
+
+
+def scenario_dropnzbdir(daemon, t):
+    """Finder drops copies of one release into NzbDir at once (names differ only
+    by download-manager suffixes: ``X.nzb``, ``X (1).nzb``, ``X_1.nzb`` ...), plus
+    two copies of another release. Each release goes in as one fleet under
+    DupeKey dupes:<normalized name>: one copy downloads, the rest wait as
+    labelled backups with a DupeScore. The best copy (28 of 30 articles) is the
+    primary and borrows its two missing articles from the partly alive copy
+    (19 of 30), which stays a low-priority donor labelled a twin; the dead copies are labelled
+    dead and keep their nzb-file; the exact copy of the primary's nzb-file is
+    the same posting and is not added. After the primary succeeds every other
+    copy is in history as DELETED/DUPE: nothing is marked FAILURE and nothing
+    downloads again. The second release is a fleet of its own."""
+    n = 30
+    data = _payload(3_000_000, 15001)
+    every = set(range(1, n + 1))
+    primary = _drop_copy(t, 'dnA', data, {5, 6})
+    # holds 5 and 6, which the primary lacks: 19 of 30 alive
+    partial = _drop_copy(t, 'dnB', data, {2, 4, 8, 10, 12, 14, 16, 18, 20, 22, 24})
+    dead1 = _drop_copy(t, 'dnC', data, every, dead_par=True)
+    dead2 = _drop_copy(t, 'dnD', data, every, dead_par=True)
+    other_data = _payload(1_000_000, 15002)
+    other1 = _drop_copy(t, 'doA', other_data, set())
+    other2 = _drop_copy(t, 'doB', other_data, set())
+    api = daemon.wait_ready()
+    # something queued before the drop, and downloads paused (the fleet still
+    # probes): the copy picked to download goes in front of it
+    blocker = _drop_copy(t, 'dnZ', _payload(500_000, 15003), set())
+    _ds_append(api, 'Queued.Before.2023.720p.HDTV.x264-OTHER', blocker, 'other-key', 0, paused=True)
+    api.pausedownload()
+    files = [(DROP_REL + '.nzb', primary), (DROP_REL + ' (1).nzb', partial), (DROP_REL + '_1.nzb', dead1),
+             (DROP_REL + '_2.nzb', dead2), (DROP_REL + '_3.nzb', primary),
+             (DROP_OTHER + '.nzb', other1), (DROP_OTHER + '_1.nzb', other2)]
+    for name, text in files:
+        t.write_file(os.path.join('main', 'nzb', name), text.encode())
+    deadline = time.time() + 90
+    order = []
+    while time.time() < deadline:
+        order = [g['NZBName'] for g in api.listgroups()]
+        if DROP_REL in order and DROP_OTHER in order and \
+                _grep_log(t, 'Fleet dupes:drop.movie') + _grep_log(t, 'Fleet dupes:drop.show') == 2:
+            break
+        time.sleep(0.5)
+    order = [g['NZBName'] for g in api.listgroups()]
+    # F16: every copy of both fleets is queued (the held ones too), all of them
+    # in front of the item queued before the drop
+    # the primary's nzb and its exact copy (_3) are one posting: whichever of
+    # the two the scan pass listed first is the member (readdir order differs
+    # between file systems), the other is SAME_POSTING and not added
+    prim_names = (DROP_REL, DROP_REL + '_3')
+    in_front = order[-1:] == ['Queued.Before.2023.720p.HDTV.x264-OTHER'] and \
+        sum(1 for n_ in prim_names if n_ in order[:-1]) == 1
+    api.resumedownload()
+    done = _wait_key_success(api, DROP_KEY)
+    other_done = _wait_key_success(api, DROP_OTHER_KEY)
+    # TwinCheck labels the backups on its next round (every 15 s)
+    deadline = time.time() + 45
+    while time.time() < deadline and not any(
+            _params(i).get('DupeKind') for i in _items_of_key(api, DROP_KEY) if i['NZBName'] == DROP_REL + ' (1)'):
+        time.sleep(1)
+    items = _items_of_key(api, DROP_KEY)
+    byname = {i['NZBName']: i for i in items}
+    succeeded = [i['NZBName'] for i in items if i['Status'].startswith('SUCCESS')]
+    failures = [i['NZBName'] for i in items if i['Status'].startswith('FAILURE')]
+    others = [i for i in items if i['NZBName'] != (done or {}).get('NZBName')]
+    labelled = {i['NZBName']: (i['Status'], i.get('DupeScore'), _params(i).get('DupeKind'), _params(i).get('DupeAlive'))
+                for i in others}
+    part = byname.get(DROP_REL + ' (1)', {})
+    deads = [byname.get(DROP_REL + '_1', {}), byname.get(DROP_REL + '_2', {})]
+    nzb_files = os.listdir(t.path('main', 'nzb'))
+    dead_nzbs_kept = all(any(f.startswith(DROP_REL + s + '.nzb') for f in nzb_files) for s in ('_1', '_2'))
+    recovered = int((done or {}).get('DupeRecoveredArticles', 0))
+    tried_backups = sum(int(i.get('SuccessArticles', 0)) + int(i.get('FailedArticles', 0)) for i in others)
+    other_items = _items_of_key(api, DROP_OTHER_KEY)
+    # bytes each backup sent (articles served whole; a missing one costs nothing):
+    # the probe reads about 1 MB of each, borrowing takes the primary's 2 articles
+    time.sleep(0.5)
+    requests = re.findall(r'Received: (?:BODY|ARTICLE) <([^>]*)>', t.read_file('nserv.log').decode(errors='replace'))
+    sent = {}
+    for mid in requests:
+        m = re.match(r'(dn[A-Z])/[^?]*\?\d+=\d+:(\d+)$', mid)
+        if m:
+            sent[m.group(1)] = sent.get(m.group(1), 0) + int(m.group(2))
+    probe_ok = all(sent.get(tag, 0) <= 2 * 1024 * 1024 for tag in ('dnB', 'dnC', 'dnD'))
+    ok = (in_front and probe_ok and
+          done is not None and done['NZBName'] in prim_names and succeeded == [done['NZBName']] and not failures and
+          len(others) == 3 and all(i['Status'] == 'DELETED/DUPE' and int(i.get('DupeScore', 0)) > 0 for i in others) and
+          _params(part).get('DupeKind') == 'twin' and _params(part).get('DupeAlive') not in (None, '0') and
+          all(_params(d).get('DupeAlive') == '0' for d in deads) and dead_nzbs_kept and
+          recovered == 2 and tried_backups == 0 and
+          _verify_output(t, data, dirs=(('main', 'dst', (done or {}).get('NZBName', DROP_REL)),)) and
+          other_done is not None and len(other_items) == 2 and
+          sorted(i['Status'][:7] for i in other_items) == ['DELETED', 'SUCCESS'] and
+          _grep_log(t, 'from NzbDir as one fleet under DupeKey') == 2)
+    return ('dropnzbdir', ok, 'queue=%s bytes_sent=%s done=%s recovered=%d labelled=%s failures=%s dead_nzbs_kept=%s tried_backups=%d other=%s' % (
+        order, sent, done and done['Status'], recovered, labelled, failures, dead_nzbs_kept, tried_backups,
+        [(i['NZBName'], i['Status']) for i in other_items]))
+
+
+def scenario_dropjoin(daemon, t):
+    """Daemon side: copies of one release appended one by one without a DupeKey
+    (as a client or the NzbDir scanner would, minutes apart) join one group:
+    each gets DupeKey dupes:<normalized name> and a DupeScore in the order it
+    came (100, 99, 98), the first downloads and the others wait as backups,
+    then go to history as DELETED/DUPE when it succeeds (F16: until then they
+    wait held in the queue, never in History). Copies sent with
+    DupeJoin=no (the Add dialog's fleet box off) or in DupeMode FORCE stay on
+    their own, as before."""
+    data = _payload(1_000_000, 15101)
+    rel = 'Join.Movie.2024.1080p.WEB-DL.x264-GRP'
+    key = 'dupes:join.movie.2024.1080p.web.dl.x264.grp'
+    api = daemon.wait_ready()
+    # queued before the release: the group goes in front of it
+    _ds_append(api, 'Queued.Before.2023.720p.HDTV.x264-OTHER', _drop_copy(t, 'jnZ', data, set()), 'blocker-key', 0,
+               paused=True)
+    # the first stays paused until its copies came, so it is the one queued
+    _ds_append(api, rel, _drop_copy(t, 'jnA', data, set()), '', 0, paused=True)
+    _ds_append(api, rel + '_1', _drop_copy(t, 'jnB', data, set()), '', 0, paused=False)
+    _ds_append(api, rel + ' (2)', _drop_copy(t, 'jnC', data, set()), '', 0, paused=False)
+    # F16: the later copies wait held in the queue, not in History
+    held = [_params(_wait_held(api, n_)).get('DupeHeld') for n_ in (rel + '_1', rel + ' (2)')]
+    open_history = [h['NZBName'] for h in api.history() if h.get('DupeKey') == key]
+    queued = [(g['NZBName'], g.get('DupeKey'), g.get('DupeScore')) for g in api.listgroups()]
+    names = [q[0] for q in queued]
+    # the copy that downloads is in front of the item queued before it
+    in_front = rel in names and 'Queued.Before.2023.720p.HDTV.x264-OTHER' in names and \
+        names.index(rel) < names.index('Queued.Before.2023.720p.HDTV.x264-OTHER')
+    api.editqueue('GroupResume', 0, '', [g['NZBID'] for g in api.listgroups() if g['NZBName'] == rel])
+    done = _wait_key_success(api, key)
+    items = {i['NZBName']: i for i in _items_of_key(api, key)}
+    scores = {n: int(i.get('DupeScore', 0)) for n, i in items.items()}
+    statuses = {n: i['Status'] for n, i in items.items()}
+    # opt-outs: the box off (DupeJoin=no) and Force
+    solo = 'Solo.Movie.2024.1080p.WEB-DL.x264-GRP'
+    _ds_append(api, solo, _drop_copy(t, 'jsA', data, set()), '', 0, paused=False, params=[{'Name': 'DupeJoin', 'Value': 'no'}])
+    _ds_append(api, solo + '_1', _drop_copy(t, 'jsB', data, set()), '', 0, paused=False, params=[{'Name': 'DupeJoin', 'Value': 'no'}])
+    forced = 'Forced.Movie.2024.1080p.WEB-DL.x264-GRP'
+    for i, name in enumerate((forced, forced + '_1')):
+        content = base64.standard_b64encode(_drop_copy(t, 'jf%d' % i, data, set()).encode()).decode()
+        api.append(name, content, 'test', 0, False, False, '', 0, 'FORCE', [])
+    apart = {}
+    for name in (solo, solo + '_1', forced, forced + '_1'):
+        h = daemon.wait_history(api, name, timeout=120)
+        deadline = time.time() + 60
+        while time.time() < deadline and not h['Status'].startswith(('SUCCESS', 'FAILURE', 'DELETED')):
+            time.sleep(0.5)
+            h = daemon.wait_history(api, name, timeout=60)
+        apart[name] = (h['Status'], h.get('DupeKey'), h.get('DupeScore'))
+    ok = (held == ['yes', 'yes'] and not open_history and
+          done is not None and done['NZBName'] == rel and in_front and
+          scores == {rel: 100, rel + '_1': 99, rel + ' (2)': 98} and
+          statuses.get(rel + '_1') == 'DELETED/DUPE' and statuses.get(rel + ' (2)') == 'DELETED/DUPE' and
+          _grep_log(t, 'with 1 other copy(ies) of the same release: DupeKey ' + key) == 1 and
+          _grep_log(t, 'with 2 other copy(ies) of the same release: DupeKey ' + key) == 1 and
+          all(v[0].startswith('SUCCESS') and v[1] == '' for v in apart.values()))
+    return ('dropjoin', ok, 'queued=%s scores=%s statuses=%s apart=%s' % (queued, scores, statuses, apart))
+
+
+def scenario_dropjoinrestart(daemon, t):
+    """Copies queued without a DupeKey before the grouping ran (here: with
+    DupeCheck off) join their group once after a restart with it on: the
+    same DupeKey dupes:<normalized name> and DupeScores in queue order. The
+    first film and its sequel stay apart. A group key an earlier build stored
+    with the words of the name's {{password}} in it (review C:
+    dupes:...grp.s3cret) is rebuilt from the name, and its copy joins it; no
+    Grouping line shows the password."""
+    data = _payload(500_000, 15301)
+    rel = 'Restart.Movie.2024.1080p.WEB-DL.x264-GRP'
+    key = 'dupes:restart.movie.2024.1080p.web.dl.x264.grp'
+    sequel = 'Restart.Movie.Part.Two.2026.1080p.WEB-DL.x264-GRP'
+    pw_rel = 'Restart.Pw.Movie.2024.1080p.WEB-DL.x264-GRP{{s3cret}}'
+    pw_key = 'dupes:restart.pw.movie.2024.1080p.web.dl.x264.grp'
+    api = daemon.wait_ready()
+    for i, name in enumerate((rel, rel + '_1', sequel)):
+        _ds_append(api, name, _drop_copy(t, 'jr%d' % i, data, set()), '', 0, paused=True)
+    _ds_append(api, pw_rel, _drop_copy(t, 'jrp0', data, set()), pw_key + '.s3cret', 0, paused=True)
+    _ds_append(api, pw_rel + '_1', _drop_copy(t, 'jrp1', data, set()), '', 0, paused=True)
+    pw_names = [g['NZBName'] for g in api.listgroups() if g['NZBName'].startswith('Restart.Pw.')]
+    before_pw = {g['NZBName']: g.get('DupeKey') for g in api.listgroups() if g['NZBName'].startswith('Restart.Pw.')}
+    before = {g['NZBName']: g.get('DupeKey') for g in api.listgroups() if not g['NZBName'].startswith('Restart.Pw.')}
+    daemon.write_config(SCENARIO_OPTIONS['dropjoinrestart'][:-1] + ['DupeCheck=yes'])
+    api = daemon.reload(api)
+    deadline = time.time() + 60
+    keys = {}
+    while time.time() < deadline:
+        groups = api.listgroups()
+        keys = {g['NZBName']: (g.get('DupeKey'), g.get('DupeScore')) for g in groups}
+        if keys.get(rel + '_1', ('', 0))[0] and all(keys.get(n, ('', 0))[0] == pw_key for n in pw_names):
+            break
+        time.sleep(1)
+    log = t.read_file('nzbget.log').decode(errors='replace')
+    grouping = [l for l in log.splitlines() if 'Grouping ' in l]
+    pw_grouping = [l for l in grouping if 'Restart.Pw.' in l]
+    ok = (all(v == '' for v in before.values()) and keys.get(rel) == (key, 100) and keys.get(rel + '_1') == (key, 99)
+          and keys.get(sequel, ('x', 0))[0] == ''
+          and len(pw_names) == 2 and all(keys.get(n, ('', 0))[0] == pw_key for n in pw_names)
+          and len(pw_grouping) == 1 and not any('s3cret' in l for l in grouping))
+    return ('dropjoinrestart', ok, 'before=%s after=%s pw_before=%s pw_grouping=%s' % (
+        before, keys, before_pw, pw_grouping))
+
+
+def _wait_held(api, name, timeout=60):
+    """Waits until ``name`` is held in the queue by its fleet (F16); returns it."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        g = _ds_group(api, name)
+        if g and _params(g).get('DupeHeld') == 'yes':
+            return g
+        time.sleep(0.5)
+    return _ds_group(api, name) or {}
+
+
+def _dead_release(t, tag, seed):
+    seg, vol = 10_000, 2_900_000
+    n = vol // seg
+    dead = [('%s/d%d.bin' % (tag, i), 'Dead%d.bin' % i, vol, seg, set(range(1, n + 1))) for i in range(6)]
+    for i, m in enumerate(dead):
+        t.write_file(os.path.join('data', m[0]), _payload(vol, seed + i))
+    return build_multi_nzb(dead)
+
+
+def scenario_dropallfail(daemon, t):
+    """Review finding 2 and F16: when every copy of a fleet fails, the group
+    goes to History as a visible failure: the copy that failed first was held
+    in the queue as a donor while its backup was tried, and when the backup
+    failed too, both end FAILURE/HEALTH. (Before F16 the first copy waited in
+    History as DELETED/DUPE.)"""
+    rel = 'Allfail.Movie.2024.1080p.WEB-DL.x264-GRP'
+    api = daemon.wait_ready()
+    _ds_append(api, rel, _dead_release(t, 'afA', 15401), '', 0, paused=True)
+    _ds_append(api, rel + '_1', _dead_release(t, 'afB', 15411), '', 0, paused=False)
+    held_backup = _wait_held(api, rel + '_1')
+    api.editqueue('GroupResume', 0, '', [g['NZBID'] for g in api.listgroups() if g['NZBName'] == rel])
+    deadline = time.time() + 300
+    statuses = {}
+    while time.time() < deadline:
+        statuses = {h['NZBName']: h['Status'] for h in api.history() if h['NZBName'] in (rel, rel + '_1')}
+        if not any(g['NZBName'] in (rel, rel + '_1') for g in api.listgroups()) and \
+                statuses.get(rel + '_1', '').startswith('FAILURE'):
+            break
+        time.sleep(1)
+    ok = (_params(held_backup).get('DupeHeld') == 'yes' and statuses.get(rel, '').startswith('FAILURE/HEALTH') and
+          statuses.get(rel + '_1', '').startswith('FAILURE/HEALTH') and _grep_log(t, 'Holding ' + rel + ' in its fleet') == 1)
+    return ('dropallfail', ok, 'statuses=%s' % statuses)
+
+
+def scenario_dropallfailnonzb(daemon, t):
+    """Review B under F16: the backup failover picks is a held copy in the
+    queue, parsed when it was added, so its nzb-file being gone from NzbDir
+    does not stop it: when the first copy fails its health check it is held
+    as a donor, the backup downloads and succeeds, and the first copy then
+    goes to History as DELETED/DUPE. (Before F16 the backup waited in History,
+    where a missing nzb-file made it unusable and the first copy ended
+    FAILURE/HEALTH.)"""
+    rel = 'Nonzb.Movie.2024.1080p.WEB-DL.x264-GRP'
+    key = 'dupes:nonzb.movie.2024.1080p.web.dl.x264.grp'
+    data = _payload(1_000_000, 15421)
+    api = daemon.wait_ready()
+    _ds_append(api, rel, _dead_release(t, 'anA', 15431), '', 0, paused=True)
+    _ds_append(api, rel + '_1', _drop_copy(t, 'anB', data, set()), '', 0, paused=False)
+    hb = _wait_held(api, rel + '_1')
+    for f in os.listdir(t.path('main', 'nzb')):
+        if f.startswith(rel + '_1.nzb'):
+            os.remove(t.path('main', 'nzb', f))
+    api.editqueue('GroupResume', 0, '', [g['NZBID'] for g in api.listgroups() if g['NZBName'] == rel])
+    done = _wait_key_success(api, key, timeout=300)
+    h = next((x for x in api.history() if x['NZBName'] == rel), {})
+    ok = (_params(hb).get('DupeHeld') == 'yes' and done is not None and done['NZBName'] == rel + '_1' and
+          h.get('Status') == 'DELETED/DUPE' and _params(h).get('DupeParked') is not None)
+    return ('dropallfailnonzb', ok, 'held=%s done=%s first=%s' % (
+        _params(hb).get('DupeHeld'), done and done['NZBName'], h.get('Status')))
+
+
+def scenario_dropjoinstrict(daemon, t):
+    """Review findings 3 and 4: the daemon-side join never touches another
+    release, a copy in another category or DupeMode, or a download with a key
+    of its own. Iron-Man-3 and Iron-Man, the 1080p and 720p, the REPACK and
+    the original, two groups and the first film and its sequel all stay
+    apart; only true copies (X and X_1, same category) join."""
+    data = _payload(400_000, 15501)
+    api = daemon.wait_ready()
+
+    def add(name, category='test', key='', mode='SCORE', i=[0]):
+        i[0] += 1
+        content = base64.standard_b64encode(_drop_copy(t, 'js%d' % i[0], data, set()).encode()).decode()
+        return api.append(name, content, category, 0, False, True, key, 0, mode, [])
+    add('Iron-Man-3')
+    add('Iron-Man')
+    add('Strict.Movie.2024.1080p.WEB-DL.x264-GRP')
+    add('Strict.Movie.2024.720p.WEB-DL.x264-GRP')
+    add('Strict.Movie.2024.REPACK.1080p.WEB-DL.x264-GRP')
+    add('Strict.Movie.2024.1080p.WEB-DL.x264-OTHER')
+    add('Dune.2021.BluRay.1080p.TrueHD.Atmos.7.1.AVC.REMUX-FraMeSToR')
+    add('Dune.Part.Two.2024.BluRay.1080p.TrueHD.Atmos.7.1.AVC.REMUX-FraMeSToR')
+    add('Strict.Movie.2024.1080p.WEB-DL.x264-GRP_1', category='other')
+    add('Strict.Movie.2024.1080p.WEB-DL.x264-GRP_2', key='user-key')
+    add('Strict.Movie.2024.1080p.WEB-DL.x264-GRP_3', mode='ALL')
+    add('Real.Copy.2024.1080p.WEB-DL.x264-GRP')
+    add('Real.Copy.2024.1080p.WEB-DL.x264-GRP_1')
+    time.sleep(1)
+    items = {g['NZBName']: g.get('DupeKey') for g in api.listgroups() + api.history()}
+    joined = {n: k for n, k in items.items() if k and k.startswith('dupes:')}
+    ok = (set(joined) == {'Real.Copy.2024.1080p.WEB-DL.x264-GRP', 'Real.Copy.2024.1080p.WEB-DL.x264-GRP_1'}
+          and items.get('Strict.Movie.2024.1080p.WEB-DL.x264-GRP_2') == 'user-key'
+          and all(not items.get(n) for n in ('Iron-Man-3', 'Iron-Man', 'Strict.Movie.2024.1080p.WEB-DL.x264-GRP',
+                                              'Strict.Movie.2024.1080p.WEB-DL.x264-GRP_1',
+                                              'Strict.Movie.2024.1080p.WEB-DL.x264-GRP_3')))
+    return ('dropjoinstrict', ok, 'keys=%s' % items)
+
+
+def scenario_dropfleetasync(daemon, t):
+    """Review finding 9: appendfleet for copies grouped by name (the web UI's
+    dupes: key) answers at once (PROBING) and checks and adds the copies in
+    the background; their labels come afterwards."""
+    daemon.fake_nntp.alive = set()
+    api = daemon.wait_ready()
+    members = [('Async.Movie.2024.1080p.WEB-DL.x264-GRP%s.nzb' % s,
+                _fleet_copy(daemon, 'as%d' % i, 'c.mkv', 400_000, None, _payload(400_000, 15600))) for i, s in
+               enumerate(['', '_1', ' (2)', '_3', '_4', '_5', '_6', '_7', '_8', '_9', '_10', '_11', '_12'])]
+    daemon.fake_nntp.delays.update({'as': 0.3})
+    key = 'dupes:async.movie.2024.1080p.web.dl.x264.grp'
+    start = time.time()
+    reply = _fleet(daemon, members, key=key, timeout=60)
+    took = time.time() - start
+    deadline = time.time() + 300
+    kinds = {}
+    while time.time() < deadline:
+        kinds = {i['NZBName']: _params(i).get('DupeCopyKind') for i in _items_of_key(api, key)}
+        if len(kinds) >= 13 and all(kinds.values()):
+            break
+        time.sleep(1)
+    ok = took < 3 and reply['Reason'] == 'PROBING' and all(m['Status'] == 'PROBING' for m in reply['Members']) \
+        and len(kinds) == 13 and all(kinds.values())
+    return ('dropfleetasync', ok, 'took=%.1f reason=%s labelled=%d of %d' % (
+        took, reply['Reason'], sum(1 for v in kinds.values() if v), len(kinds)))
+
+
+def scenario_droppasswordlogs(daemon, t):
+    """Review of C: copies named with a {{password}} go in as fleets from the
+    web UI's appendfleet (dupes: key) and from NzbDir, and the password shows
+    in no fleet, grouping or rescue log line and not in the PROBING reply. A
+    client's key (checked within the call, with the payload intake) logs its
+    "Fleet intake:" lines without it too."""
+    daemon.fake_nntp.alive = set()
+    api = daemon.wait_ready()
+    web = 'Pwlog.Movie.2024.1080p.WEB-DL.x264-GRP'
+    web_key = 'dupes:pwlog.movie.2024.1080p.web.dl.x264.grp'
+    members = [(web + '{{s3cret}}%s.nzb' % s, _fleet_copy(daemon, 'pl%d' % i, 'c.mkv', 400_000, None, _payload(400_000, 15700)))
+               for i, s in enumerate(['', '_1'])]
+    reply = _fleet(daemon, members, key=web_key, timeout=60)
+    # a client's key: checked within the call, with the payload intake
+    client = [('Pwkey.Movie.2024.1080p.WEB-DL.x264-GRP{{s3cret}}%s.nzb' % s,
+               _fleet_copy(daemon, 'pk%d' % i, 'k.mkv', 400_000, None, _payload(400_000, 15702)))
+              for i, s in enumerate(['', '_1'])]
+    _fleet(daemon, client, key='fleet:pwkey', timeout=60)
+    nzbdir = 'Pwdir.Movie.2024.1080p.WEB-DL.x264-GRP'
+    for i, s in enumerate(['', '_1']):
+        text = _fleet_copy(daemon, 'pd%d' % i, 'd.mkv', 400_000, None, _payload(400_000, 15701))
+        t.write_file(os.path.join('main', 'nzb', nzbdir + '{{s3cret}}%s.nzb' % s), text.encode())
+    deadline = time.time() + 120
+    while time.time() < deadline:
+        if _grep_log(t, 'Fleet ' + web_key + ' checked in the background') == 1 and \
+                _grep_log(t, 'Fleet dupes:pwdir.movie.2024.1080p.web.dl.x264.grp from NzbDir') == 1:
+            break
+        time.sleep(0.5)
+    log = t.read_file('nzbget.log').decode(errors='replace').splitlines()
+    ours = [l for l in log if any(w in l for w in ('Fleet', 'Grouping ', 'Rescue: ', 'Keeping ', 'from NzbDir'))]
+    leaks = [l for l in ours if 's3cret' in l]
+    names = [m['Name'] for m in reply['Members']]
+    ok = (reply['Reason'] == 'PROBING' and len(names) == 2 and not any('s3cret' in n for n in names)
+          and any('Pwlog.' in l for l in ours) and any('Pwdir.' in l for l in ours)
+          and any('Fleet intake: Pwkey.' in l for l in ours) and not leaks)
+    return ('droppasswordlogs', ok, 'reply=%s lines=%d leaks=%s' % (names, len(ours), leaks[:3]))
+
+
+def scenario_dropkeepdonor(daemon, t):
+    """A copy that fails its health check while its fleet is open stays in it as
+    a donor, not a failure, and its shown health is the one it was judged on.
+    The first of two copies (grouped by name: ``X`` and ``X_1``) is a dead
+    posting of 1,740 articles; it fails over to the second as soon as a sample of
+    its articles shows it dead. Its Health (which counts every untried article as
+    good) is still above 90%, but it was judged dead from the sample. F16: while
+    the second copy downloads it stays in the queue, held (paused, DupeParked
+    near 0, shown as projected health and "dead"), never failed over to again;
+    when the second copy completes it goes to History as DELETED/DUPE with its
+    DupeParked/DupeProjected and nzb-file kept. (Before F16 it went to History
+    as DELETED/DUPE at once.)"""
+    seg, vol = 10_000, 2_900_000
+    n = vol // seg
+    rel = 'Keep.Movie.2024.1080p.WEB-DL.x264-GRP'
+    key = 'dupes:keep.movie.2024.1080p.web.dl.x264.grp'
+    dead = [('kdA/d%d.bin' % i, 'Dead%d.bin' % i, vol, seg, set(range(1, n + 1))) for i in range(6)]
+    for i, m in enumerate(dead):
+        t.write_file(os.path.join('data', m[0]), _payload(vol, 15200 + i))
+    data = _payload(3_000_000, 15210)
+    bp = _place_copy(t, 'kdB', data)
+    api = daemon.wait_ready()
+    _ds_append(api, rel, build_multi_nzb(dead), '', 0, paused=True)
+    _ds_append(api, rel + '_1', build_nzb(bp, 'Backup.bin', len(data), 100_000, set()), '', 0, paused=False)
+    backup_held = _params(_wait_held(api, rel + '_1')).get('DupeHeld') == 'yes'
+    api.editqueue('GroupResume', 0, '', [g['NZBID'] for g in api.listgroups() if g['NZBName'] == rel])
+    # failed over: held in the queue as a donor while the backup downloads
+    deadline = time.time() + 300
+    held_donor = False
+    while time.time() < deadline and not held_donor:
+        g = _ds_group(api, rel)
+        held_donor = bool(g) and _params(g).get('DupeHeld') == 'yes' and _params(g).get('DupeParked') is not None
+        if not g and any(h['NZBName'] == rel for h in api.history()):
+            break
+        time.sleep(0.2)
+    done = _wait_key_success(api, key, timeout=300)
+    hp = next((h for h in api.history() if h['NZBName'] == rel), {})
+    params = _params(hp)
+    health = int(hp.get('Health', 0))
+    projected = float(params.get('DupeProjected', '100'))
+    parked = params.get('DupeParked')
+    nzb_kept = any(f.startswith(rel + '.nzb') for f in os.listdir(t.path('main', 'nzb')))
+    ok = (backup_held and held_donor and done is not None and done['NZBName'] == rel + '_1' and hp.get('Status') == 'DELETED/DUPE' and
+          hp.get('DupeKey') == key and health >= 900 and projected < 10 and parked is not None and
+          float(parked) < 10 and params.get('DupeAlive') == parked and nzb_kept and
+          _grep_log(t, 'Holding ' + rel + ' in its fleet') == 1 and
+          _verify_output(t, data))
+    # downloaded again by hand: the earlier try's projection and donor mark go
+    api.editqueue('HistoryRedownload', 0, '', [hp['NZBID']])
+    deadline = time.time() + 30
+    again = {}
+    while time.time() < deadline:
+        again = next((_params(g) for g in api.listgroups() if g['NZBName'] == rel), {})
+        if again:
+            break
+        time.sleep(0.5)
+    cleared = bool(again) and 'DupeParked' not in again and 'DupeProjected' not in again
+    ok = ok and cleared
+    return ('dropkeepdonor', ok, 'backup_held=%s held_donor=%s done=%s primary=%s health=%d projected=%s parked=%s '
+            'nzb_kept=%s cleared=%s' % (backup_held, held_donor, done and (done['NZBName'], done['Status']),
+                                        hp.get('Status'), health, projected, parked, nzb_kept, cleared))
+
+
+
+# ---- F16: a fleet stays in Downloads (docs/DROP_AS_FLEET.md) ----
+
+STAY_REL = 'Stay.Movie.2024.1080p.WEB-DL.x264-GRP'
+STAY_KEY = 'dupes:stay.movie.2024.1080p.web.dl.x264.grp'
+
+
+def _queued(api, key):
+    return [g for g in api.listgroups() if g.get('DupeKey', '').lower() == key]
+
+
+def _history_of(api, key):
+    return [h for h in api.history() if h.get('DupeKey', '').lower() == key]
+
+
+def _wait_probed(api, key, count, timeout=120):
+    """Waits until ``count`` copies of ``key`` are queued and none is probing."""
+    deadline = time.time() + timeout
+    items = []
+    while time.time() < deadline:
+        items = _queued(api, key)
+        if len(items) >= count and not any(_params(g).get('DupeProbing') == 'yes' for g in items):
+            return items
+        time.sleep(0.5)
+    return items
+
+
+def scenario_fleetstaysqueued(daemon, t):
+    """F16 and F14: copies of one release sent as a fleet (appendfleet, a
+    dupes: key) are all in the queue at once, held and "probing", before the
+    background probe ends; then the copy picked downloads and the others stay
+    held in the queue (paused, priority -100, DupeHeld), in failover order
+    (DupeFleetOrder), never in History. A copy sent for the key while the
+    first fleet still probes is not refused (the key lock is held only while
+    adding: no KEY_BUSY). The primary (28 of 30 articles) borrows its two
+    missing articles from a held copy that never downloads; only when it
+    succeeds do the others go to History as DELETED/DUPE, nzb-files kept. Each
+    copy's probe is logged with its time and requests."""
+    n = 30
+    data = _payload(3_000_000, 16001)
+    primary = _drop_copy(t, 'sqA', data, {5, 6})
+    partial = _drop_copy(t, 'sqB', data, {2, 4, 8, 10, 12, 14, 16, 18, 20, 22, 24})
+    dead = _drop_copy(t, 'sqC', data, set(range(1, n + 1)), dead_par=True)
+    late = _drop_copy(t, 'sqD', data, set(range(1, n + 1)), dead_par=True)
+    api = daemon.wait_ready()
+    api.pausedownload()
+    start = time.time()
+    reply = _fleet(daemon, [(STAY_REL + '.nzb', primary), (STAY_REL + ' (1).nzb', partial),
+                            (STAY_REL + '_1.nzb', dead)], key=STAY_KEY, timeout=60)
+    took = time.time() - start
+    # every copy is in Downloads right away, probing
+    early = []
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        early = _queued(api, STAY_KEY)
+        if len(early) >= 3:
+            break
+        time.sleep(0.1)
+    early_seen = time.time() - start
+    early_probing = [g['NZBName'] for g in early if _params(g).get('DupeProbing') == 'yes'
+                     and _params(g).get('DupeHeld') == 'yes']
+    early_history = [h['NZBName'] for h in _history_of(api, STAY_KEY)]
+    # a copy sent while the first fleet probes
+    late_reply = _fleet(daemon, [(STAY_REL + '_2.nzb', late)], key=STAY_KEY, timeout=60)
+    items = _wait_probed(api, STAY_KEY, 4)
+    byname = {g['NZBName']: g for g in items}
+    free = [g['NZBName'] for g in items if _params(g).get('DupeHeld') != 'yes']
+    held = [g for g in items if _params(g).get('DupeHeld') == 'yes']
+    held_ok = all(g['Status'] == 'PAUSED' and int(g.get('MaxPriority', 0)) == -100 for g in held)
+    order = {g['NZBName']: _params(g).get('DupeFleetOrder') for g in items}
+    primary_ids = {_params(g).get('DupeFleetPrimary') for g in items}
+    open_history = [h['NZBName'] for h in _history_of(api, STAY_KEY)]
+    api.resumedownload()
+    done = _wait_key_success(api, STAY_KEY)
+    after = {h['NZBName']: h for h in _history_of(api, STAY_KEY)}
+    others = [h for n_, h in after.items() if n_ != STAY_REL]
+    part = after.get(STAY_REL + ' (1)', {})
+    nzb_files = os.listdir(t.path('main', 'nzb'))
+    nzbs_kept = all(any(f.startswith(STAY_REL + s) for f in nzb_files) for s in (' (1)', '_1', '_2'))
+    probe_logs = _grep_log(t, 'Fleet probe of ' + STAY_REL)
+    # STATs give the alive share: the held partial copy is read by BODY only
+    # for its par2 list and head (kind probe), its archive key and the two
+    # articles it lends
+    time.sleep(0.5)
+    bodies = re.findall(r'Received: (?:BODY|ARTICLE) <(sqB/[^>]*)>', t.read_file('nserv.log').decode(errors='replace'))
+    ok = (len(bodies) <= 8 and took < 3 and reply['Reason'] == 'PROBING' and late_reply['Reason'] == 'PROBING' and
+          early_seen < 5 and len(early_probing) >= 3 and not early_history and
+          free == [STAY_REL] and len(held) == 3 and held_ok and
+          order.get(STAY_REL) == '0' and order.get(STAY_REL + ' (1)') == '1' and
+          sorted([order.get(STAY_REL + '_1'), order.get(STAY_REL + '_2')]) == ['2', '3'] and
+          primary_ids == {str(byname.get(STAY_REL, {}).get('NZBID'))} and not open_history and
+          _grep_log(t, 'KEY_BUSY') == 0 and
+          done is not None and done['NZBName'] == STAY_REL and int(done.get('DupeRecoveredArticles', 0)) == 2 and
+          len(others) == 3 and all(h['Status'] == 'DELETED/DUPE' for h in others) and
+          int(part.get('SuccessArticles', 0)) == 0 and nzbs_kept and probe_logs >= 3 and
+          _verify_output(t, data))
+    return ('fleetstaysqueued', ok,
+            'took=%.1f early=%.1fs probing=%s early_history=%s free=%s held_ok=%s order=%s primary=%s '
+            'open_history=%s key_busy=%d done=%s recovered=%s others=%s part_success=%s nzbs_kept=%s probe_logs=%d '
+            'partial_bodies=%d' % (
+                took, early_seen, early_probing, early_history, free, held_ok, order, primary_ids, open_history,
+                _grep_log(t, 'KEY_BUSY'), done and done['Status'], (done or {}).get('DupeRecoveredArticles'),
+                [(h['NZBName'], h['Status']) for h in others], part.get('SuccessArticles'), nzbs_kept, probe_logs, len(bodies)))
+
+
+def scenario_fleetfailoverorder(daemon, t):
+    """F16a: the order Downloads shows (DupeFleetOrder, computed by the
+    daemon) is the order failover takes: when the primary goes (deleted here),
+    the copy at place 1 ("next") downloads, the others stay held and move up.
+    Healthy copies lead by ease of borrowing (a bare file before an archive),
+    a weak copy after them, a dead one last."""
+    data = _payload(1_500_000, 16101)
+    bare = _drop_copy(t, 'foA', data, set())
+    weak = _drop_copy(t, 'foB', data, {2, 3, 5, 7, 11})
+    dead = _drop_copy(t, 'foC', data, set(range(1, 16)), dead_par=True)
+    whole = _drop_copy(t, 'foD', data, set())
+    rel = 'Order.Movie.2024.1080p.WEB-DL.x264-GRP'
+    key = 'dupes:order.movie.2024.1080p.web.dl.x264.grp'
+    api = daemon.wait_ready()
+    api.pausedownload()
+    _fleet(daemon, [(rel + '_3.nzb', dead), (rel + '_1.nzb', weak), (rel + '.nzb', bare), (rel + '_2.nzb', whole)],
+           key=key, timeout=60)
+    items = _wait_probed(api, key, 4)
+    order = {g['NZBName']: int(_params(g).get('DupeFleetOrder', '-1')) for g in items}
+    ranked = sorted(order, key=lambda n_: order[n_])
+    primary = ranked[0] if ranked else None
+    nxt = ranked[1] if len(ranked) > 1 else None
+    if primary:
+        api.editqueue('GroupDelete', 0, '', [g['NZBID'] for g in items if g['NZBName'] == primary])
+    deadline = time.time() + 30
+    after = {}
+    while time.time() < deadline:
+        after = {g['NZBName']: g for g in _queued(api, key)}
+        if nxt in after and _params(after[nxt]).get('DupeHeld') != 'yes' and \
+                _params(after[nxt]).get('DupeFleetOrder') == '0':
+            break
+        time.sleep(0.5)
+    released = [n_ for n_, g in after.items() if _params(g).get('DupeHeld') != 'yes']
+    new_order = {n_: _params(g).get('DupeFleetOrder') for n_, g in after.items()}
+    ok = (len(order) == 4 and order.get(rel + '_3') == 3 and order.get(rel + '_1') == 2 and
+          sorted([order.get(rel), order.get(rel + '_2')]) == [0, 1] and
+          released == [nxt] and new_order.get(rel + '_1') == '1' and new_order.get(rel + '_3') == '2' and
+          _grep_log(t, 'Releasing ' + str(nxt) + ' from its fleet') == 1)
+    return ('fleetfailoverorder', ok, 'order=%s primary=%s next=%s released=%s new_order=%s' % (
+        order, primary, nxt, released, new_order))
+
+
+def _salvage_copy(t, tag, data, index_dead):
+    """A posting of ``data`` with a par2 index (dead when ``index_dead``) and
+    a one-block par2 volume whose tail repeats the critical packets."""
+    path = _place_copy(t, tag, data, 'movie.bin')
+    par = generators.par2_index([('Salv.Movie.bin', data)], pad=0)
+    par_path = tag + '/rel.par2'
+    vol_path = tag + '/rel.vol00+01.par2'
+    t.write_file(os.path.join('data', par_path), par)
+    t.write_file(os.path.join('data', vol_path), par)
+    return build_multi_nzb([(path, 'Salv.Movie.bin', len(data), 100_000, set()),
+                            (par_path, 'Salv.Movie.par2', len(par), 500_000, {1} if index_dead else set()),
+                            (vol_path, 'Salv.Movie.vol00+01.par2', len(par), 500_000, set())])
+
+
+def scenario_fleetsalvage(daemon, t):
+    """F2b: copies whose index .par2 is dead are identified from the tail of
+    their smallest par2 volume (par_rs::salvage): two postings of the same
+    files are twins, and the fingerprint TwinCheck stores is salvaged, never
+    "lost"; a lost index never makes a copy dead."""
+    data = _payload(1_200_000, 16201)
+    rel = 'Salv.Movie.2024.1080p.WEB-DL.x264-GRP'
+    key = 'dupes:salv.movie.2024.1080p.web.dl.x264.grp'
+    api = daemon.wait_ready()
+    api.pausedownload()
+    _fleet(daemon, [(rel + '.nzb', _salvage_copy(t, 'svA', data, True)),
+                    (rel + '_1.nzb', _salvage_copy(t, 'svB', data, True))], key=key, timeout=60)
+    items = _wait_probed(api, key, 2)
+    kinds = {g['NZBName']: _params(g).get('DupeCopyKind') for g in items}
+    alive = {g['NZBName']: _params(g).get('DupeAlive') for g in items}
+    deadline = time.time() + 60
+    files = {}
+    while time.time() < deadline:
+        files = {g['NZBName']: _params(g).get('DupeFiles') for g in _queued(api, key)}
+        if len(files) == 2 and all(files.values()):
+            break
+        time.sleep(1)
+    ok = (len(items) == 2 and 'twin' in kinds.values() and all(a not in (None, '0') for a in alive.values()) and
+          _grep_log(t, 'is lost; salvaged from its volumes') >= 2 and
+          all(f and f not in ('lost', 'none') for f in files.values()) and
+          len(set(files.values())) == 1)
+    return ('fleetsalvage', ok, 'kinds=%s alive=%s files=%s' % (kinds, alive, files))
+
+
+# ---- F16 review fixes (becee83b review) ----
+
+def _par_copy(t, tag, data, files=2, missing=(), vol=True):
+    """A posting of ``data`` cut into ``files`` data files, with a par2 index
+    and (``vol``) a par2 volume, the extra par2 a download pauses at first."""
+    size = len(data) // files
+    parts = [data[i * size:(i + 1) * size if i < files - 1 else len(data)] for i in range(files)]
+    members = []
+    for i, part in enumerate(parts):
+        path = _place_copy(t, tag, part, 'part%d.bin' % i)
+        members.append((path, 'Hold.Movie.part%d.bin' % i, len(part), 100_000, set(missing) if i == 0 else set()))
+    par = generators.par2_index([('Hold.Movie.part%d.bin' % i, part) for i, part in enumerate(parts)], pad=0)
+    t.write_file(os.path.join('data', tag, 'rel.par2'), par)
+    members.append((tag + '/rel.par2', 'Hold.Movie.par2', len(par), 500_000, set()))
+    if vol:
+        t.write_file(os.path.join('data', tag, 'rel.vol00+01.par2'), par)
+        members.append((tag + '/rel.vol00+01.par2', 'Hold.Movie.vol00+01.par2', len(par), 500_000, set()))
+    return build_multi_nzb(members)
+
+
+def _files_of(api, nzb_id):
+    return {f['Filename']: bool(f.get('Paused')) for f in api.listfiles(0, 0, nzb_id)}
+
+
+def _group_named(api, name):
+    """The queued item named ``name`` (its {{password}} may be cut from the name)."""
+    plain = re.sub(r'\s*\{\{[^}]*\}\}', '', name).strip()
+    return next((g for g in api.listgroups() if g['NZBName'] in (name, plain)), None)
+
+
+def _wait_free(api, name, timeout=30):
+    """Waits until ``name`` is queued and not held by its fleet."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        g = _group_named(api, name)
+        if g and _params(g).get('DupeHeld') != 'yes':
+            return g
+        time.sleep(0.3)
+    return _group_named(api, name) or {}
+
+
+def scenario_fleetholdfiles(daemon, t):
+    """Review items 3 and 4 and the priority and password nits.
+    - A copy sent later with a higher DupeScore takes over: the copy that
+      downloaded is held, and exactly one copy downloads (4).
+    - A release resumes only the files the hold paused: a file the user paused
+      stays paused, and the extra par2 volume stays paused (3). A copy held as
+      it was added resumes as a fresh copy: everything but its extra par2.
+    - A released copy gets its own priority back, or the one the user gave it
+      while it was held.
+    - "Found duplicate" and every fleet line show no {{password}}."""
+    data = _payload(1_200_000, 16301)
+    rel = 'Hold.Movie.2024.1080p.WEB-DL.x264-GRP'
+    key = 'dupes:hold.movie.2024.1080p.web.dl.x264.grp'
+    api = daemon.wait_ready()
+    api.pausedownload()
+    b_name = rel + '_1 {{s3cret}}'
+    _ds_append(api, b_name, _par_copy(t, 'hfB', data), key, 100, paused=False)
+    b = _wait_free(api, b_name)
+    b_files = {f['Filename']: f['ID'] for f in api.listfiles(0, 0, b['NZBID'])}
+    api.editqueue('FilePause', 0, '', [b_files['Hold.Movie.part1.bin']])
+    _ds_append(api, rel, _par_copy(t, 'hfA', data), key, 200, paused=False)
+    a = _wait_free(api, rel)
+    time.sleep(2)
+    copies = [g for g in api.listgroups() if g.get('DupeKey', '').lower() == key]
+    free = [g['NZBName'] for g in copies if _params(g).get('DupeHeld') != 'yes']
+    b_held = _params(_group_named(api, b_name) or {}).get('DupeHeld') == 'yes'
+    # a third copy, held as it is added; the user raises its priority meanwhile
+    _ds_append(api, rel + '_2', _par_copy(t, 'hfC', data), key, 50, paused=False)
+    c = _wait_held(api, rel + '_2')
+    api.editqueue('GroupSetPriority', 0, '50', [c['NZBID']])
+    # the primary goes: the copy next in order (b) takes over
+    api.editqueue('GroupDelete', 0, '', [a['NZBID']])
+    b2 = _wait_free(api, b_name)
+    b_after = _files_of(api, b2.get('NZBID', 0)) if b2 else {}
+    b_priority = int(b2.get('MaxPriority', -1)) if b2 else None
+    api.editqueue('GroupDelete', 0, '', [b2['NZBID']]) if b2 else None
+    c2 = _wait_free(api, rel + '_2')
+    c_after = _files_of(api, c2.get('NZBID', 0)) if c2 else {}
+    c_priority = int(c2.get('MaxPriority', -1)) if c2 else None
+    log = t.read_file('nzbget.log').decode(errors='replace')
+    fleet_lines = [line for line in log.splitlines()
+                   if any(w in line for w in ('Found duplicate', 'Releasing ', 'Holding ', 'Failing over'))]
+    secret = any('s3cret' in line for line in fleet_lines)
+    ok = (free == [rel] and b_held and
+          b_after.get('Hold.Movie.part1.bin') is True and b_after.get('Hold.Movie.part0.bin') is False and
+          b_after.get('Hold.Movie.par2') is False and b_after.get('Hold.Movie.vol00+01.par2') is True and
+          b_priority == 0 and
+          c_after.get('Hold.Movie.part0.bin') is False and c_after.get('Hold.Movie.part1.bin') is False and
+          c_after.get('Hold.Movie.vol00+01.par2') is True and c_priority == 50 and
+          any(rel + '_1' in line for line in fleet_lines if 'Releasing ' in line) and not secret)
+    return ('fleetholdfiles', ok, 'free=%s b_held=%s b_files=%s b_prio=%s c_files=%s c_prio=%s secret_in_fleet_lines=%s' % (
+        free, b_held, b_after, b_priority, c_after, c_priority, secret))
+
+
+def scenario_fleetendnolive(daemon, t):
+    """Review item 2: a fleet whose last live copy fails other than by its
+    health check ends: its primary downloads in full and fails its par check
+    (its data damaged), or is deleted by hand, and the held dead copies go to
+    History as FAILURE/HEALTH with their nzb-files, never left held in the
+    queue for ever."""
+    data = _payload(1_000_000, 16401)
+    bad = bytearray(data)
+    for i in range(0, len(bad), 50_000):
+        bad[i] ^= 0xff
+    api = daemon.wait_ready()
+    out = {}
+    for case in ('par', 'delete'):
+        rel = 'End%s.Movie.2024.1080p.WEB-DL.x264-GRP' % case.title()
+        key = 'dupes:end%s.movie.2024.1080p.web.dl.x264.grp' % case
+        prim_path = _place_copy(t, 'en%sA' % case, bytes(bad), 'movie.bin')
+        par = generators.par2_index([('End.Movie.bin', data)], pad=0)
+        t.write_file(os.path.join('data', 'en%sA' % case, 'rel.par2'), par)
+        primary = build_multi_nzb([(prim_path, 'End.Movie.bin', len(data), 100_000, set()),
+                                   ('en%sA/rel.par2' % case, 'End.Movie.par2', len(par), 500_000, set())])
+        dead = _drop_copy(t, 'en%sB' % case, data, set(range(1, 11)), dead_par=True)
+        if case == 'delete':
+            api.pausedownload()
+        _fleet(daemon, [(rel + '.nzb', primary), (rel + '_1.nzb', dead)], key=key, timeout=60)
+        items = _wait_probed(api, key, 2)
+        if case == 'delete':
+            prim = next((g for g in items if _params(g).get('DupeHeld') != 'yes'), None)
+            if prim:
+                api.editqueue('GroupDelete', 0, '', [prim['NZBID']])
+        deadline = time.time() + 180
+        while time.time() < deadline and _queued(api, key):
+            time.sleep(1)
+        hist = {h['NZBName']: h['Status'] for h in _history_of(api, key)}
+        out[case] = (len(_queued(api, key)), hist)
+        if case == 'delete':
+            api.resumedownload()
+    nzbs = os.listdir(t.path('main', 'nzb'))
+    ok = all(q == 0 and h.get(r + '_1', '').startswith('FAILURE/HEALTH')
+             for (q, h), r in ((out['par'], 'EndPar.Movie.2024.1080p.WEB-DL.x264-GRP'),
+                               (out['delete'], 'EndDelete.Movie.2024.1080p.WEB-DL.x264-GRP'))) and \
+        out['par'][1].get('EndPar.Movie.2024.1080p.WEB-DL.x264-GRP', '').startswith('FAILURE') and \
+        all(any(f.startswith('End%s.Movie.2024.1080p.WEB-DL.x264-GRP_1.nzb' % c) for f in nzbs) for c in ('Par', 'Delete')) and \
+        _grep_log(t, 'goes to history as dead') == 2
+    return ('fleetendnolive', ok, 'out=%s' % out)
+
+
+def scenario_fleetprobehealthfail(daemon, t):
+    """Review item 1: a dead copy that fails while copies of another
+    submission are being probed never fails them: failover takes no copy that
+    is still being probed, so the dead copy waits for the probe, is then held
+    as a donor and the best new copy downloads and succeeds; when its health
+    check gives up during the probe it is held as a donor too (the log line
+    "while other copies are still being probed"). It fails over once only:
+    a copy already held is never failed over again, which would leave two
+    copies downloading."""
+    rel = 'Probefail.Movie.2024.1080p.WEB-DL.x264-GRP'
+    key = 'dupes:probefail.movie.2024.1080p.web.dl.x264.grp'
+    data = _payload(1_000_000, 16501)
+    api = daemon.wait_ready()
+    _ds_append(api, rel, _dead_release(t, 'pfA', 16511), key, 100, paused=True)
+    copies = [(rel + '_1.nzb', _drop_copy(t, 'pfB', data, set())), (rel + '_2.nzb', _drop_copy(t, 'pfC', data, set()))]
+    import threading
+    th = threading.Thread(target=lambda: _fleet(daemon, copies, key=key, timeout=60))
+    th.start()
+    time.sleep(0.5)
+    api.editqueue('GroupResume', 0, '', [g['NZBID'] for g in api.listgroups() if g['NZBName'] == rel])
+    th.join(timeout=60)
+    done = _wait_key_success(api, key, timeout=300)
+    hist = {h['NZBName']: h['Status'] for h in _history_of(api, key)}
+    during = _grep_log(t, 'while other copies are still being probed')
+    # one failover only: a copy already held is never failed over again
+    failovers = _grep_log(t, 'from its fleet: failing over from ' + rel)
+    ok = (failovers == 1 and done is not None and done['NZBName'] in (rel + '_1', rel + '_2') and
+          not any(v.startswith('FAILURE') for n_, v in hist.items() if n_ != rel) and
+          not _queued(api, key))
+    return ('fleetprobehealthfail', ok, 'done=%s history=%s failed_during_probe=%d failovers=%d' % (
+        done and done['NZBName'], hist, during, failovers))
+
+
+def scenario_fleetendkeephistory0(daemon, t):
+    """Re-review 1: with KeepHistory=0 a copy deleted from the queue is freed at
+    once. A fleet whose primary fails its par check with two dead copies held
+    ends once: no crash (the daemon still answers), each held copy handled
+    exactly once ("Every copy of the fleet of ..." once for each), and nothing
+    of the fleet left in the queue."""
+    data = _payload(1_000_000, 16601)
+    bad = bytearray(data)
+    for i in range(0, len(bad), 50_000):
+        bad[i] ^= 0xff
+    rel = 'Kh0.Movie.2024.1080p.WEB-DL.x264-GRP'
+    key = 'dupes:kh0.movie.2024.1080p.web.dl.x264.grp'
+    api = daemon.wait_ready()
+    prim_path = _place_copy(t, 'khA', bytes(bad), 'movie.bin')
+    par = generators.par2_index([('Kh0.Movie.bin', data)], pad=0)
+    t.write_file(os.path.join('data', 'khA', 'rel.par2'), par)
+    primary = build_multi_nzb([(prim_path, 'Kh0.Movie.bin', len(data), 100_000, set()),
+                               ('khA/rel.par2', 'Kh0.Movie.par2', len(par), 500_000, set())])
+    dead1 = _drop_copy(t, 'khB', data, set(range(1, 11)), dead_par=True)
+    dead2 = _drop_copy(t, 'khC', data, set(range(1, 11)), dead_par=True)
+    _fleet(daemon, [(rel + '.nzb', primary), (rel + '_1.nzb', dead1), (rel + '_2.nzb', dead2)], key=key, timeout=60)
+    deadline = time.time() + 240
+    while time.time() < deadline:
+        if not _queued(api, key) and _grep_log(t, 'Every copy of the fleet of') >= 2:
+            break
+        time.sleep(1)
+    time.sleep(3)
+    alive = True
+    try:
+        api.status()
+    except Exception:
+        alive = False
+    counts = {s_: _grep_log(t, 'Every copy of the fleet of ' + rel + s_ + ' failed') for s_ in ('_1', '_2')}
+    total = _grep_log(t, 'Every copy of the fleet of')
+    ok = alive and not _queued(api, key) and counts == {'_1': 1, '_2': 1} and total == 2
+    return ('fleetendkeephistory0', ok, 'alive=%s queued=%d counts=%s total=%d' % (
+        alive, len(_queued(api, key)) if alive else -1, counts, total))
+
 SCENARIOS = {
+    'dropnzbdir': scenario_dropnzbdir,
+    'fleetprimaryease': scenario_fleetprimaryease,
+    'dropdune': scenario_dropdune,
+    'fleetnzbpassword': scenario_fleetnzbpassword,
+    'fleettimeoutunverified': scenario_fleettimeoutunverified,
+    'dropjoin': scenario_dropjoin,
+    'dropallfail': scenario_dropallfail,
+    'dropallfailnonzb': scenario_dropallfailnonzb,
+    'dropjoinstrict': scenario_dropjoinstrict,
+    'dropfleetasync': scenario_dropfleetasync,
+    'droppasswordlogs': scenario_droppasswordlogs,
+    'dropjoinrestart': scenario_dropjoinrestart,
+    'dropkeepdonor': scenario_dropkeepdonor,
+    'fleetstaysqueued': scenario_fleetstaysqueued,
+    'fleetfailoverorder': scenario_fleetfailoverorder,
+    'fleetsalvage': scenario_fleetsalvage,
+    'fleetholdfiles': scenario_fleetholdfiles,
+    'fleetendnolive': scenario_fleetendnolive,
+    'fleetprobehealthfail': scenario_fleetprobehealthfail,
+    'fleetendkeephistory0': scenario_fleetendkeephistory0,
     'complementary': scenario_complementary,
     'historylog': scenario_historylog,
     'urlhistorylog': scenario_urlhistorylog,
@@ -11607,6 +12666,26 @@ SCENARIO_ENV = {
 SCENARIO_ENV_KEYS = sorted({k for env in SCENARIO_ENV.values() for k in env})
 
 SCENARIO_OPTIONS = {
+    'fleetprimaryease': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
+    'dropdune': ['NzbDirInterval=1', 'NzbDirFileAge=2', 'DupeArticleFallback=no', 'HealthCheck=dupe'],
+    'fleetnzbpassword': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
+    'fleettimeoutunverified': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
+    'dropnzbdir': ['NzbDirInterval=1', 'NzbDirFileAge=2', 'HealthCheck=dupe', 'DupeArticleFallback=article'],
+    'dropjoin': ['HealthCheck=dupe'],
+    'dropallfail': ['HealthCheck=dupe', 'DupeArticleFallback=article'],
+    'dropallfailnonzb': ['HealthCheck=dupe', 'DupeArticleFallback=article'],
+    'dropjoinstrict': ['HealthCheck=dupe'],
+    'dropfleetasync': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
+    'droppasswordlogs': ['NzbDirInterval=1', 'NzbDirFileAge=2', 'HealthCheck=dupe', 'DupeArticleFallback=no'],
+    'dropjoinrestart': ['HealthCheck=dupe', 'DupeCheck=no'],
+    'dropkeepdonor': ['HealthCheck=dupe', 'DupeArticleFallback=article'],
+    'fleetstaysqueued': ['HealthCheck=dupe', 'DupeArticleFallback=article'],
+    'fleetfailoverorder': ['HealthCheck=dupe', 'DupeArticleFallback=article'],
+    'fleetsalvage': ['HealthCheck=dupe', 'DupeArticleFallback=article'],
+    'fleetholdfiles': ['HealthCheck=dupe', 'DupeArticleFallback=no'],
+    'fleetendnolive': ['HealthCheck=dupe', 'DupeArticleFallback=no', 'ParCheck=always'],
+    'fleetprobehealthfail': ['HealthCheck=dupe', 'DupeArticleFallback=no'],
+    'fleetendkeephistory0': ['HealthCheck=dupe', 'DupeArticleFallback=no', 'ParCheck=always', 'KeepHistory=0'],
     'allheadspar': PROD_OPTIONS,
     'allheadsalt': PROD_OPTIONS,
     'allheadsaltall': PROD_OPTIONS,
@@ -11972,9 +13051,9 @@ def _promote_fallback(options, mode):
 # finished job is rightly not redone
 FALLBACK_MODE_BOUND = {'livegate', 'streamrestartcredit', 'wholefilerestart', 'wholefilestale'}
 # scenarios that read nserv's request log (nserv.log)
-CAPTURE_REQUESTS = {'repost', 'wholefileproofcost'}
+CAPTURE_REQUESTS = {'repost', 'wholefileproofcost', 'dropnzbdir', 'fleetstaysqueued'}
 # extra nserv arguments per scenario (-w: response latency in ms)
-SCENARIO_NSERV_ARGS = {'finaldeletemidway': ['-w', '300'], 'finaldeleterestart': ['-w', '300'], 'restartmidway': ['-w', '300'], 'xpacklatency': ['-w', '1000'], 'deadpickprobe': ['-w', '500'], 'deadpickafterreload': ['-w', '500'],
+SCENARIO_NSERV_ARGS = {'fleetprobehealthfail': ['-w', '800'], 'finaldeletemidway': ['-w', '300'], 'finaldeleterestart': ['-w', '300'], 'restartmidway': ['-w', '300'], 'xpacklatency': ['-w', '1000'], 'deadpickprobe': ['-w', '500'], 'deadpickafterreload': ['-w', '500'],
                        'deadpickpartial': ['-w', '100'], 'deadpickstray': ['-w', '500'], 'forcefailover': ['-w', '500'], 'copybackup': ['-w', '500'], 'copyoffailed': ['-w', '500'], 'deaddownloadstray2': ['-w', '300'], 'deaddownloadrestart': ['-w', '300'], 'deadbackupsonly': ['-w', '500'], 'backuporder': ['-w', '500'], 'deaddownloadlate': ['-w', '300'], 'deadpickservers': ['-w', '200'],
                        'deadpickfewservers': ['-w', '200']}
 
@@ -12030,7 +13109,7 @@ SCENARIO_FIRST_FAIL_PROXY = {'recheckfailed': ((b'?5=', b'?10=', b'?15='),),
 # scenarios with a FakeNewznab indexer (DupeSearchUrl points to it)
 
 # scenarios with a FakeNntp news server in place of nserv
-SCENARIO_FAKE_NNTP = {'watchfleet', 'watchforcepick', 'watchdeadpick', 'watchswap', 'watchborrow', 'watchswaptwin', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetnodupecheck', 'fleetkindorder', 'fleetkindsingle', 'fleetkindlater', 'fleetintake', 'fleetintakelater', 'fleetencryptedlast', 'fleetencryptedheadless', 'fleetlockedlast', 'fleetencryptedpassword', 'fleetkindslowcheck', 'fleettwinvolumes', 'fleetalldead', 'fleetshutdown'}
+SCENARIO_FAKE_NNTP = {'fleetprimaryease', 'dropfleetasync', 'droppasswordlogs', 'dropdune', 'fleetnzbpassword', 'fleettimeoutunverified', 'watchfleet', 'watchforcepick', 'watchdeadpick', 'watchswap', 'watchborrow', 'watchswaptwin', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetnodupecheck', 'fleetkindorder', 'fleetkindsingle', 'fleetkindlater', 'fleetintake', 'fleetintakelater', 'fleetencryptedlast', 'fleetencryptedheadless', 'fleetlockedlast', 'fleetencryptedpassword', 'fleetkindslowcheck', 'fleettwinvolumes', 'fleetalldead', 'fleetshutdown'}
 
 
 # --------------------------------------------------------------------------- #

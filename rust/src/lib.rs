@@ -27,6 +27,8 @@ pub(crate) mod directrenamer;
 pub(crate) mod donorscore;
 pub mod downloadinfo;
 pub mod dupecoord;
+pub mod fleethold;
+pub mod fleetprobe;
 pub(crate) mod dupeprobe;
 pub(crate) mod dupesearch_coord;
 pub mod dupesearch_nzb;

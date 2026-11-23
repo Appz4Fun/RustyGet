@@ -652,17 +652,17 @@ pub fn borrowed_par2_mismatches(
 
     let mut arrived: Vec<(i64, i64)> = (0..n)
         .filter(|&i| statuses[i] == ARTICLE_STATUS_FINISHED && segment_sizes[i] > 0)
-        .map(|i| {
-            (
-                segment_offsets[i],
-                segment_offsets[i].wrapping_add(segment_sizes[i] as i64),
-            )
+        // The offset comes from the article's yEnc header, so skip ranges whose end
+        // overflows (par-rs `ByteRange::end` adds without a guard).
+        .filter_map(|i| {
+            let start = segment_offsets[i];
+            start.checked_add(segment_sizes[i] as i64).map(|end| (start, end))
         })
         .collect();
     arrived.sort_unstable();
     let arrived_ranges: Vec<par_rs::damage::ByteRange> = arrived
         .into_iter()
-        .map(|(start, end)| par_rs::damage::ByteRange::new(start, end.wrapping_sub(start)))
+        .map(|(start, end)| par_rs::damage::ByteRange::new(start, end - start))
         .collect();
 
     let mut in_file = File::open(path);
@@ -3594,6 +3594,20 @@ mod tests {
                 &[100],
             );
             assert!(mismatches.is_empty());
+
+            // A yEnc offset near i64::MAX must not overflow (it would abort a debug build).
+            write_par(100);
+            let mismatches = borrowed_par2_mismatches(
+                &f_bin,
+                &dir,
+                b"f.bin",
+                &[ARTICLE_STATUS_FINISHED, ARTICLE_STATUS_FINISHED],
+                &[1, 1],
+                &[0, 0],
+                &[0, i64::MAX - 10],
+                &[100, 100],
+            );
+            assert_eq!(mismatches, vec![0]);
             let _ = std::fs::remove_dir_all(&dir);
         }
 

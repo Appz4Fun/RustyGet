@@ -1402,6 +1402,12 @@ impl NzbgetRsPrePostProcessor {
             host.dq_edit_entry(dq_ptr, nzb.id, EA_GROUP_PAUSE_EXTRA_PARS, None);
         }
 
+        // F16: the copy is in the queue now, so its fleet decides its primary
+        // with it counted (exactly one copy downloads)
+        if crate::fleethold::holds_in_queue(host, &nzb) {
+            crate::fleethold::refresh_key_host(host, dq_ptr, &nzb.dupe_key);
+        }
+
         if opts.reorder_files && nzb.delete_status == DeleteStatus::None {
             let mut msg = b"Reordering files for ".to_vec();
             msg.extend_from_slice(&nzb.name);

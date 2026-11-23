@@ -2069,7 +2069,7 @@ impl NzbgetRsQueueCoordinator {
             )
             .as_bytes(),
         );
-        host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
+        host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &crate::releasename::log_name(&msg));
         // judged dead from the sample, whatever its Health says
         host.nzb_set_param(nzb.ptr, crate::dupecoord::PROJECTED_PARAM, Some(b"0.0"));
         crate::fleethold::park_on_health_host(host, dq_ptr, &nzb);
@@ -4518,7 +4518,7 @@ impl NzbgetRsQueueCoordinator {
                 )
                 .as_bytes(),
             );
-            host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
+            host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &crate::releasename::log_name(&msg));
             if opts.health_check == crate::queuesubsys_host::HC_PARK {
                 crate::fleethold::park_on_health_host(host, dq_ptr, &nzb);
                 return;
@@ -4845,7 +4845,7 @@ impl NzbgetRsQueueCoordinator {
                     )
                     .as_bytes(),
                 );
-                host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
+                host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &crate::releasename::log_name(&msg));
                 set_projected_from_tried(host, nzb);
                 crate::fleethold::park_on_health_host(host, dq_ptr, &nzb);
                 return;
@@ -4929,7 +4929,7 @@ impl NzbgetRsQueueCoordinator {
                     msg.extend_from_slice(
                         b": it was kept to borrow its dead volumes, but the duplicate holds another video",
                     );
-                    host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
+                    host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &crate::releasename::log_name(&msg));
                     crate::fleethold::park_on_health_host(host, dq_ptr, &nzb);
                     return;
                 }
@@ -5115,7 +5115,7 @@ impl NzbgetRsQueueCoordinator {
                     .as_bytes(),
                 );
             }
-            host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
+            host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &crate::releasename::log_name(&msg));
         } else {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -5159,7 +5159,7 @@ impl NzbgetRsQueueCoordinator {
                 )
                 .as_bytes(),
             );
-            host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
+            host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &crate::releasename::log_name(&msg));
         }
         crate::fleethold::park_on_health_host(host, dq_ptr, &nzb);
     }
@@ -5211,7 +5211,7 @@ impl NzbgetRsQueueCoordinator {
         msg.extend_from_slice(
             b": its archive needs a password its nzb does not carry, so it can never be extracted",
         );
-        host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
+        host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &crate::releasename::log_name(&msg));
         crate::fleethold::park_on_health_host(host, dq_ptr, &nzb);
     }
 
@@ -5314,7 +5314,7 @@ impl NzbgetRsQueueCoordinator {
         msg.extend_from_slice(b": ");
         msg.extend_from_slice(&damage);
         msg.extend_from_slice(b", par-repair can't fix it");
-        host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
+        host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &crate::releasename::log_name(&msg));
         crate::dupefallback::par_damage_forget_all(nzb.id);
         crate::fleethold::park_on_health_host(host, dq_ptr, &nzb);
         true

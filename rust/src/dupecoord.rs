@@ -821,14 +821,14 @@ fn return_best_dupe_host(
             msg.extend_from_slice(b" for ");
             msg.extend_from_slice(nzb_name);
             msg.extend_from_slice(b": its archive needs a password its nzb does not carry");
-            host.log(crate::queuesubsys_host::MK_INFO, &msg);
+            host.log(crate::queuesubsys_host::MK_INFO, &crate::releasename::log_name(&msg));
             return;
         }
         let mut msg = b"Found duplicate ".to_vec();
         msg.extend_from_slice(&backup_nzb.name);
         msg.extend_from_slice(b" for ");
         msg.extend_from_slice(nzb_name);
-        host.log(crate::queuesubsys_host::MK_INFO, &msg);
+        host.log(crate::queuesubsys_host::MK_INFO, &crate::releasename::log_name(&msg));
         if hi.hi_ptr == 0 {
             // a held copy of its fleet, still in the queue: only when no
             // other copy downloads (a held copy deleted or dropped is no
@@ -1510,8 +1510,9 @@ pub(crate) fn nzb_found_host(
     // copy its fleet added held (probing in the background) stays held, any
     // other copy that loses to a queued one is held instead of going to history
     let fleet_holds = crate::fleethold::holds_in_queue(host, &nzb);
+    // (the fleet's primary is decided once the copy is in the queue, by the
+    // refresh after it is added: here it is not queued yet)
     if fleet_holds && crate::fleethold::is_held(host, nzb.ptr) {
-        crate::fleethold::refresh_key_host(host, dq_ptr, &nzb.dupe_key);
         return;
     }
     if nzb.dupe_mode == DupeMode::Score {
@@ -1549,7 +1550,6 @@ pub(crate) fn nzb_found_host(
                         why.extend_from_slice(b" has a higher duplicate score");
                         crate::fleethold::hold_host(host, dq_ptr, &q, &why);
                     }
-                    crate::fleethold::refresh_key_host(host, dq_ptr, &nzb.dupe_key);
                     return;
                 }
                 if nzb.dupe_score <= q.dupe_score || keep_returned {
@@ -1603,6 +1603,12 @@ pub(crate) fn nzb_completed_host(
 
     if fails_over_snap(&opts, &nzb) && !nzb.is_dupe_success {
         return_best_dupe_host(host, &opts, dq_ptr, nzb.ptr, &nzb.name, &nzb.dupe_key);
+    }
+    // a copy of a fleet left the queue (failed after downloading, deleted,
+    // HealthCheck=Delete): the fleet releases its next copy, or ends with no
+    // live copy left (its held copies go to history)
+    if crate::fleethold::holds_in_queue(host, &nzb) && !nzb.is_dupe_success {
+        crate::fleethold::refresh_key_host(host, dq_ptr, &nzb.dupe_key);
     }
 
     if nzb.delete_status == DeleteStatus::None && nzb.is_dupe_success {

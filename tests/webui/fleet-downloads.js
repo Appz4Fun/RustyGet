@@ -49,7 +49,7 @@ function fleetQueue(groups, phase) {
       Parameters: params({ DupeFleetOrder: '0', DupeFleetPrimary: '51', DupeCopyKind: 'twin', DupeAlive: '99', DupeFleet: '1' }) }),
     item(base, 55, REL + '_4', KEY, Object.assign({}, held, { DupeScore: 97,
       Parameters: params({ DupeHeld: 'yes', DupeFleetOrder: '3', DupeFleetPrimary: '51', DupeKind: 'container', DupeFleet: '4' }) })),
-    item(base, 54, REL + ' (1)', KEY, Object.assign({}, held, { DupeScore: 96,
+    item(base, 54, REL + ' (1) {{s3cret}}', KEY, Object.assign({}, held, { DupeScore: 96,
       Parameters: params({ DupeHeld: 'yes', DupeFleetOrder: '1', DupeFleetPrimary: '51', DupeKind: 'twin',
         DupeCopyKind: 'twin', DupeAlive: '98.5', DupeFleet: '2' }) }))
   ];
@@ -142,7 +142,25 @@ function fleetHistory(history) {
         assert.match(await text(55), /container · unverified/i);
         assert.match(await text(53), /dead/i);
         assert.equal(await toggle().getAttribute('aria-expanded'), 'true');
+        // review: a {{password}} in a copy's name never shows
+        const list = await page.locator('#DownloadsTable .fleet-sublist').innerText();
+        assert.doesNotMatch(list, /s3cret/);
+        assert.doesNotMatch(await page.locator('#DownloadsTable .fleet-sublist').innerHTML(), /s3cret/);
         await shot('expanded');
+      });
+
+      await check('"next" only on the copy failover takes', async () => {
+        const pos = await page.evaluate(() => {
+          const g = map => ({ Parameters: Object.entries(map).map(([Name, Value]) => ({ Name, Value })) });
+          return [
+            DownloadsUI.fleetPosition(g({ DupeFleetOrder: '1', DupeAlive: '98' })),
+            DownloadsUI.fleetPosition(g({ DupeFleetOrder: '1', DupeAlive: '0' })),
+            DownloadsUI.fleetPosition(g({ DupeFleetOrder: '1', DupeParked: '12.0', DupeAlive: '12.0' })),
+            DownloadsUI.fleetPosition(g({ DupeFleetOrder: '1', DupeLocked: 'yes' })),
+            DownloadsUI.fleetPosition(g({ DupeFleetOrder: '1', DupeProbing: 'yes' })),
+            DownloadsUI.fleetPosition(g({ DupeFleetOrder: '1' }))];
+        });
+        assert.deepEqual(pos, ['next', '1', '1', '1', '…', 'next']);
       });
 
       await check('the open state is remembered per viewer', async () => {

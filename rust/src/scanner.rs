@@ -2496,6 +2496,9 @@ mod tests {
         // finding 8: a busy key or a stop puts the copies back for the next scan
         assert!(fleet_never_ran(b"KEY_BUSY", false));
         assert!(fleet_never_ran(b"SHUTDOWN", false));
+        // review: copies a grouped fleet already added held before the program
+        // stopped are reported as added, so they are never written back
+        assert!(!fleet_never_ran(b"SHUTDOWN", true));
         assert!(fleet_never_ran(b"", false));
         assert!(!fleet_never_ran(b"KEY_BUSY", true));
         assert!(!fleet_never_ran(b"ALL_DEAD", false));

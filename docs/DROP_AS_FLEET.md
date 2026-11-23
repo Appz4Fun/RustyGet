@@ -351,6 +351,33 @@ for copies grouped by name (a `dupes:` key, DupeMode SCORE, DupeCheck on):
   probe is logged: "Fleet probe of X: N ms, N request(s) sent, N answered (N
   present, N missing), N timed out or failed".
 
+Review fixes (becee83b review):
+
+- **A health failure during another submission's probe** never fails the
+  copies still being probed: the failed copy is held as a donor and the
+  fleet's refresh decides once the probe is over.
+- **A fleet with no live copy left ends**, however its last copy failed
+  (health check, post-processing, HealthCheck=Delete, a delete by hand):
+  `fleethold::end_fleet_host`, run from the refresh and from the duplicate
+  coordinator's completion, moves the held copies to History with their nzbs
+  and files: dead ones (nothing alive) FAILURE/HEALTH, the others DELETED/DUPE
+  donors (F3).
+- **A release resumes only what the hold paused** (`DupeHeldFiles`): files
+  the user paused and extra par2 volumes stay paused. A copy held as it was
+  added resumes as a fresh copy (every file, then the extra par2 volumes
+  paused again unless ParCheck is Force).
+- **Exactly one copy downloads**: the primary is decided after a new copy is
+  in the queue (`prepost::nzb_added`), not in the duplicate check, which runs
+  before it is queued.
+- A copy leaving its fleet gets its own priority back (or the user's, set
+  while it was held); a copy failover refuses (locked) is never released by
+  the refresh, and place 1 ("next") is always the copy failover takes, never
+  one being probed, locked or dead; "Found duplicate", "Failing over" and
+  "Cancelling download" lines and the Downloads list show no `{{password}}`;
+  a copy sharing the primary's folder goes to History without its files
+  deleted; copies already added when the program stops during a probe are
+  never written back to NzbDir.
+
 Changed expectations (functional): `dropjoin` (backups held in the queue, not
 in history, until the primary succeeds), `dropkeepdonor` (the failed copy is
 held in the queue as a donor, then DELETED/DUPE), `dropallfail` (both copies
@@ -384,6 +411,11 @@ completes), `dropnzbdir` (every copy queued in front of the item queued before).
 | F16a: members in the daemon's failover order; the UI order is the order failover picks. | Rust `fleethold::tests::failover_order_follows_the_fleet_rules`; functional `fleetfailoverorder` (deleting the primary releases the copy at place 1, the others move up); Playwright `fleet-downloads.js` (shuffled list, DupeFleetOrder followed) |
 | Probe speed: STAT sampling, short timeouts, a bounded share of connections, a log line per copy. | Rust `fleetprobe::tests::probes_take_at_most_half_of_the_connections`, `dupesearch_coord::tests::grouped_fleets_sample_alive_by_stat_only`; functional `fleetstaysqueued` (probe log per copy; the held partial copy is read by BODY at most 8 times in all), `fleettimeoutunverified` |
 | Key lock only while adding. | functional `fleetstaysqueued` (a copy sent while the first fleet probes: no KEY_BUSY) |
+| Review 1: a health failure during another submission's probe fails no copy being probed. | functional `fleetprobehealthfail` |
+| Review 2: a fleet with no live copy ends (par failure, delete by hand). | functional `fleetendnolive`; Rust `fleethold::tests::a_fleet_ends_only_without_a_live_copy` |
+| Review 3: a release resumes only what the hold paused. | functional `fleetholdfiles` (a user-paused file and the extra par2 stay paused; a copy held as added resumes with its extra par2 paused) |
+| Review 4: a copy with a higher score takes over, exactly one downloads. | functional `fleetholdfiles` |
+| Review nits: priority back, "next" only on failover's pick, no password shown, no NzbDir write-back at shutdown. | Rust `fleethold::tests::a_released_copy_keeps_the_users_priority`, `next_is_the_copy_failover_takes`, `scanner::tests` (`fleet_never_ran`); functional `fleetholdfiles`; Playwright `fleet-downloads.js` |
 | F2b: a lost index par2 is salvaged from a volume's tail. | Rust `twinfields::tests::a_lost_index_is_salvaged_from_a_volume_tail`; functional `fleetsalvage` (two copies with dead indexes: twins, the same salvaged fingerprint, never dead) |
 | F11a: keyed checks compare only with keyed ones (zipfast last_volume_identity). | Rust `twinfields::tests::keyed_checks_compare_only_with_keyed`, `twinfields::tests` RAR fixtures |
 | F10: the primary is the healthy copy easiest to borrow into. | Rust `donorkind::tests::primary_ease_orders_bare_stored_compressed_encrypted`, `dupesearch_nzb::tests::the_primary_is_the_healthy_copy_easiest_to_borrow_into`; functional `fleetprimaryease`; functional `dropdune` (the Dune drop in small: stored RAR primary over a healthy header-encrypted RAR5 with the nzb password, twins, repacked and shorter copies as unverified containers, dead copies kept with their nzb, the 1080p release apart) |

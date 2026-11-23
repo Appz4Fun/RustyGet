@@ -12035,6 +12035,180 @@ def scenario_fleetsalvage(daemon, t):
           len(set(files.values())) == 1)
     return ('fleetsalvage', ok, 'kinds=%s alive=%s files=%s' % (kinds, alive, files))
 
+
+# ---- F16 review fixes (becee83b review) ----
+
+def _par_copy(t, tag, data, files=2, missing=(), vol=True):
+    """A posting of ``data`` cut into ``files`` data files, with a par2 index
+    and (``vol``) a par2 volume, the extra par2 a download pauses at first."""
+    size = len(data) // files
+    parts = [data[i * size:(i + 1) * size if i < files - 1 else len(data)] for i in range(files)]
+    members = []
+    for i, part in enumerate(parts):
+        path = _place_copy(t, tag, part, 'part%d.bin' % i)
+        members.append((path, 'Hold.Movie.part%d.bin' % i, len(part), 100_000, set(missing) if i == 0 else set()))
+    par = generators.par2_index([('Hold.Movie.part%d.bin' % i, part) for i, part in enumerate(parts)], pad=0)
+    t.write_file(os.path.join('data', tag, 'rel.par2'), par)
+    members.append((tag + '/rel.par2', 'Hold.Movie.par2', len(par), 500_000, set()))
+    if vol:
+        t.write_file(os.path.join('data', tag, 'rel.vol00+01.par2'), par)
+        members.append((tag + '/rel.vol00+01.par2', 'Hold.Movie.vol00+01.par2', len(par), 500_000, set()))
+    return build_multi_nzb(members)
+
+
+def _files_of(api, nzb_id):
+    return {f['Filename']: bool(f.get('Paused')) for f in api.listfiles(0, 0, nzb_id)}
+
+
+def _group_named(api, name):
+    """The queued item named ``name`` (its {{password}} may be cut from the name)."""
+    plain = re.sub(r'\s*\{\{[^}]*\}\}', '', name).strip()
+    return next((g for g in api.listgroups() if g['NZBName'] in (name, plain)), None)
+
+
+def _wait_free(api, name, timeout=30):
+    """Waits until ``name`` is queued and not held by its fleet."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        g = _group_named(api, name)
+        if g and _params(g).get('DupeHeld') != 'yes':
+            return g
+        time.sleep(0.3)
+    return _group_named(api, name) or {}
+
+
+def scenario_fleetholdfiles(daemon, t):
+    """Review items 3 and 4 and the priority and password nits.
+    - A copy sent later with a higher DupeScore takes over: the copy that
+      downloaded is held, and exactly one copy downloads (4).
+    - A release resumes only the files the hold paused: a file the user paused
+      stays paused, and the extra par2 volume stays paused (3). A copy held as
+      it was added resumes as a fresh copy: everything but its extra par2.
+    - A released copy gets its own priority back, or the one the user gave it
+      while it was held.
+    - "Found duplicate" and every fleet line show no {{password}}."""
+    data = _payload(1_200_000, 16301)
+    rel = 'Hold.Movie.2024.1080p.WEB-DL.x264-GRP'
+    key = 'dupes:hold.movie.2024.1080p.web.dl.x264.grp'
+    api = daemon.wait_ready()
+    api.pausedownload()
+    b_name = rel + '_1 {{s3cret}}'
+    _ds_append(api, b_name, _par_copy(t, 'hfB', data), key, 100, paused=False)
+    b = _wait_free(api, b_name)
+    b_files = {f['Filename']: f['ID'] for f in api.listfiles(0, 0, b['NZBID'])}
+    api.editqueue('FilePause', 0, '', [b_files['Hold.Movie.part1.bin']])
+    _ds_append(api, rel, _par_copy(t, 'hfA', data), key, 200, paused=False)
+    a = _wait_free(api, rel)
+    time.sleep(2)
+    copies = [g for g in api.listgroups() if g.get('DupeKey', '').lower() == key]
+    free = [g['NZBName'] for g in copies if _params(g).get('DupeHeld') != 'yes']
+    b_held = _params(_group_named(api, b_name) or {}).get('DupeHeld') == 'yes'
+    # a third copy, held as it is added; the user raises its priority meanwhile
+    _ds_append(api, rel + '_2', _par_copy(t, 'hfC', data), key, 50, paused=False)
+    c = _wait_held(api, rel + '_2')
+    api.editqueue('GroupSetPriority', 0, '50', [c['NZBID']])
+    # the primary goes: the copy next in order (b) takes over
+    api.editqueue('GroupDelete', 0, '', [a['NZBID']])
+    b2 = _wait_free(api, b_name)
+    b_after = _files_of(api, b2.get('NZBID', 0)) if b2 else {}
+    b_priority = int(b2.get('MaxPriority', -1)) if b2 else None
+    api.editqueue('GroupDelete', 0, '', [b2['NZBID']]) if b2 else None
+    c2 = _wait_free(api, rel + '_2')
+    c_after = _files_of(api, c2.get('NZBID', 0)) if c2 else {}
+    c_priority = int(c2.get('MaxPriority', -1)) if c2 else None
+    log = t.read_file('nzbget.log').decode(errors='replace')
+    fleet_lines = [line for line in log.splitlines()
+                   if any(w in line for w in ('Found duplicate', 'Releasing ', 'Holding ', 'Failing over'))]
+    secret = any('s3cret' in line for line in fleet_lines)
+    ok = (free == [rel] and b_held and
+          b_after.get('Hold.Movie.part1.bin') is True and b_after.get('Hold.Movie.part0.bin') is False and
+          b_after.get('Hold.Movie.par2') is False and b_after.get('Hold.Movie.vol00+01.par2') is True and
+          b_priority == 0 and
+          c_after.get('Hold.Movie.part0.bin') is False and c_after.get('Hold.Movie.part1.bin') is False and
+          c_after.get('Hold.Movie.vol00+01.par2') is True and c_priority == 50 and
+          any(rel + '_1' in line for line in fleet_lines if 'Releasing ' in line) and not secret)
+    return ('fleetholdfiles', ok, 'free=%s b_held=%s b_files=%s b_prio=%s c_files=%s c_prio=%s secret_in_fleet_lines=%s' % (
+        free, b_held, b_after, b_priority, c_after, c_priority, secret))
+
+
+def scenario_fleetendnolive(daemon, t):
+    """Review item 2: a fleet whose last live copy fails other than by its
+    health check ends: its primary downloads in full and fails its par check
+    (its data damaged), or is deleted by hand, and the held dead copies go to
+    History as FAILURE/HEALTH with their nzb-files, never left held in the
+    queue for ever."""
+    data = _payload(1_000_000, 16401)
+    bad = bytearray(data)
+    for i in range(0, len(bad), 50_000):
+        bad[i] ^= 0xff
+    api = daemon.wait_ready()
+    out = {}
+    for case in ('par', 'delete'):
+        rel = 'End%s.Movie.2024.1080p.WEB-DL.x264-GRP' % case.title()
+        key = 'dupes:end%s.movie.2024.1080p.web.dl.x264.grp' % case
+        prim_path = _place_copy(t, 'en%sA' % case, bytes(bad), 'movie.bin')
+        par = generators.par2_index([('End.Movie.bin', data)], pad=0)
+        t.write_file(os.path.join('data', 'en%sA' % case, 'rel.par2'), par)
+        primary = build_multi_nzb([(prim_path, 'End.Movie.bin', len(data), 100_000, set()),
+                                   ('en%sA/rel.par2' % case, 'End.Movie.par2', len(par), 500_000, set())])
+        dead = _drop_copy(t, 'en%sB' % case, data, set(range(1, 11)), dead_par=True)
+        if case == 'delete':
+            api.pausedownload()
+        _fleet(daemon, [(rel + '.nzb', primary), (rel + '_1.nzb', dead)], key=key, timeout=60)
+        items = _wait_probed(api, key, 2)
+        if case == 'delete':
+            prim = next((g for g in items if _params(g).get('DupeHeld') != 'yes'), None)
+            if prim:
+                api.editqueue('GroupDelete', 0, '', [prim['NZBID']])
+        deadline = time.time() + 180
+        while time.time() < deadline and _queued(api, key):
+            time.sleep(1)
+        hist = {h['NZBName']: h['Status'] for h in _history_of(api, key)}
+        out[case] = (len(_queued(api, key)), hist)
+        if case == 'delete':
+            api.resumedownload()
+    nzbs = os.listdir(t.path('main', 'nzb'))
+    ok = all(q == 0 and h.get(r + '_1', '').startswith('FAILURE/HEALTH')
+             for (q, h), r in ((out['par'], 'EndPar.Movie.2024.1080p.WEB-DL.x264-GRP'),
+                               (out['delete'], 'EndDelete.Movie.2024.1080p.WEB-DL.x264-GRP'))) and \
+        out['par'][1].get('EndPar.Movie.2024.1080p.WEB-DL.x264-GRP', '').startswith('FAILURE') and \
+        all(any(f.startswith('End%s.Movie.2024.1080p.WEB-DL.x264-GRP_1.nzb' % c) for f in nzbs) for c in ('Par', 'Delete')) and \
+        _grep_log(t, 'goes to history as dead') == 2
+    return ('fleetendnolive', ok, 'out=%s' % out)
+
+
+def scenario_fleetprobehealthfail(daemon, t):
+    """Review item 1: a dead copy that fails while copies of another
+    submission are being probed never fails them: failover takes no copy that
+    is still being probed, so the dead copy waits for the probe, is then held
+    as a donor and the best new copy downloads and succeeds; when its health
+    check gives up during the probe it is held as a donor too (the log line
+    "while other copies are still being probed"). It fails over once only:
+    a copy already held is never failed over again, which would leave two
+    copies downloading."""
+    rel = 'Probefail.Movie.2024.1080p.WEB-DL.x264-GRP'
+    key = 'dupes:probefail.movie.2024.1080p.web.dl.x264.grp'
+    data = _payload(1_000_000, 16501)
+    api = daemon.wait_ready()
+    _ds_append(api, rel, _dead_release(t, 'pfA', 16511), key, 100, paused=True)
+    copies = [(rel + '_1.nzb', _drop_copy(t, 'pfB', data, set())), (rel + '_2.nzb', _drop_copy(t, 'pfC', data, set()))]
+    import threading
+    th = threading.Thread(target=lambda: _fleet(daemon, copies, key=key, timeout=60))
+    th.start()
+    time.sleep(0.5)
+    api.editqueue('GroupResume', 0, '', [g['NZBID'] for g in api.listgroups() if g['NZBName'] == rel])
+    th.join(timeout=60)
+    done = _wait_key_success(api, key, timeout=300)
+    hist = {h['NZBName']: h['Status'] for h in _history_of(api, key)}
+    during = _grep_log(t, 'while other copies are still being probed')
+    # one failover only: a copy already held is never failed over again
+    failovers = _grep_log(t, 'from its fleet: failing over from ' + rel)
+    ok = (failovers == 1 and done is not None and done['NZBName'] in (rel + '_1', rel + '_2') and
+          not any(v.startswith('FAILURE') for n_, v in hist.items() if n_ != rel) and
+          not _queued(api, key))
+    return ('fleetprobehealthfail', ok, 'done=%s history=%s failed_during_probe=%d failovers=%d' % (
+        done and done['NZBName'], hist, during, failovers))
+
 SCENARIOS = {
     'dropnzbdir': scenario_dropnzbdir,
     'fleetprimaryease': scenario_fleetprimaryease,
@@ -12052,6 +12226,9 @@ SCENARIOS = {
     'fleetstaysqueued': scenario_fleetstaysqueued,
     'fleetfailoverorder': scenario_fleetfailoverorder,
     'fleetsalvage': scenario_fleetsalvage,
+    'fleetholdfiles': scenario_fleetholdfiles,
+    'fleetendnolive': scenario_fleetendnolive,
+    'fleetprobehealthfail': scenario_fleetprobehealthfail,
     'complementary': scenario_complementary,
     'historylog': scenario_historylog,
     'urlhistorylog': scenario_urlhistorylog,
@@ -12465,6 +12642,9 @@ SCENARIO_OPTIONS = {
     'fleetstaysqueued': ['HealthCheck=dupe', 'DupeArticleFallback=article'],
     'fleetfailoverorder': ['HealthCheck=dupe', 'DupeArticleFallback=article'],
     'fleetsalvage': ['HealthCheck=dupe', 'DupeArticleFallback=article'],
+    'fleetholdfiles': ['HealthCheck=dupe', 'DupeArticleFallback=no'],
+    'fleetendnolive': ['HealthCheck=dupe', 'DupeArticleFallback=no', 'ParCheck=always'],
+    'fleetprobehealthfail': ['HealthCheck=dupe', 'DupeArticleFallback=no'],
     'allheadspar': PROD_OPTIONS,
     'allheadsalt': PROD_OPTIONS,
     'allheadsaltall': PROD_OPTIONS,
@@ -12832,7 +13012,7 @@ FALLBACK_MODE_BOUND = {'livegate', 'streamrestartcredit', 'wholefilerestart', 'w
 # scenarios that read nserv's request log (nserv.log)
 CAPTURE_REQUESTS = {'repost', 'wholefileproofcost', 'dropnzbdir', 'fleetstaysqueued'}
 # extra nserv arguments per scenario (-w: response latency in ms)
-SCENARIO_NSERV_ARGS = {'finaldeletemidway': ['-w', '300'], 'finaldeleterestart': ['-w', '300'], 'restartmidway': ['-w', '300'], 'xpacklatency': ['-w', '1000'], 'deadpickprobe': ['-w', '500'], 'deadpickafterreload': ['-w', '500'],
+SCENARIO_NSERV_ARGS = {'fleetprobehealthfail': ['-w', '800'], 'finaldeletemidway': ['-w', '300'], 'finaldeleterestart': ['-w', '300'], 'restartmidway': ['-w', '300'], 'xpacklatency': ['-w', '1000'], 'deadpickprobe': ['-w', '500'], 'deadpickafterreload': ['-w', '500'],
                        'deadpickpartial': ['-w', '100'], 'deadpickstray': ['-w', '500'], 'forcefailover': ['-w', '500'], 'copybackup': ['-w', '500'], 'copyoffailed': ['-w', '500'], 'deaddownloadstray2': ['-w', '300'], 'deaddownloadrestart': ['-w', '300'], 'deadbackupsonly': ['-w', '500'], 'backuporder': ['-w', '500'], 'deaddownloadlate': ['-w', '300'], 'deadpickservers': ['-w', '200'],
                        'deadpickfewservers': ['-w', '200']}
 

@@ -1211,6 +1211,23 @@ var DownloadsUI = (new function($)
 		return group.Status === 'PAUSED' ? I18n.translate('fleet_state_paused') : I18n.translate('fleet_state_downloading');
 	}
 
+	// whether failover can take the copy: not probing, not dead or tried, not locked
+	this.fleetPickable = function(group)
+	{
+		var p = group.Parameters;
+		if (DownloadsUI.fleetFlag(group, 'DupeProbing') || DownloadsUI.parameterValue(p, 'DupeParked') !== '')
+		{
+			return false;
+		}
+		if (DownloadsUI.parameterValue(p, 'DupeLocked').toLowerCase() === 'yes' &&
+			DownloadsUI.parameterValue(p, '*Unpack:Password') === '')
+		{
+			return false;
+		}
+		var alive = parseFloat(DownloadsUI.parameterValue(p, 'DupeAlive'));
+		return isNaN(alive) || alive > 0;
+	}
+
 	this.fleetPosition = function(group)
 	{
 		var order = parseInt(DownloadsUI.parameterValue(group.Parameters, 'DupeFleetOrder'), 10);
@@ -1218,7 +1235,9 @@ var DownloadsUI = (new function($)
 		{
 			return '…';
 		}
-		return order === 0 ? I18n.translate('fleet_pos_primary') : order === 1 ? I18n.translate('fleet_pos_next') : String(order);
+		// "next" only on the copy failover takes (the daemon orders it first)
+		return order === 0 ? I18n.translate('fleet_pos_primary') :
+			order === 1 && DownloadsUI.fleetPickable(group) ? I18n.translate('fleet_pos_next') : String(order);
 	}
 
 	// the collapse toggle with "+N copies" and, opened, every member in order
@@ -1242,7 +1261,8 @@ var DownloadsUI = (new function($)
 		var rows = fleet.members.map(function(m)
 		{
 			var label = DownloadsUI.fleetMemberLabel(m);
-			var name = m.NZBNicename || m.NZBName;
+			// never a {{password}} on screen (releasename.rs without_password)
+			var name = DupeGroup.withoutPassword(m.NZBNicename || m.NZBName);
 			return '<li class="fleet-sub" data-nzbid="' + m.NZBID + '" data-fleet-order="' +
 				Util.textToAttr(DownloadsUI.parameterValue(m.Parameters, 'DupeFleetOrder')) + '">' +
 				'<span class="fleet-sub-pos">' + Util.textToHtml(DownloadsUI.fleetPosition(m)) + '</span>' +

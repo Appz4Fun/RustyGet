@@ -97,7 +97,11 @@ function nzbFile(name, seed) {
       const errors = [], writes = [];
       const state = { primaryDone: false };
       page.on('pageerror', e => errors.push(e.message));
-      page.on('console', m => { if (m.type() === 'error') errors.push(m.text()); });
+      // the browser asks the loopback port for the favicon outside the
+      // fixture's routes; that request is the fixture's, not the web UI's
+      page.on('console', m => {
+        if (m.type() === 'error' && !/\/favicon\.ico$/.test(m.location().url)) errors.push(m.text());
+      });
       await installDetailsFixture(page, base, writes, {
         answer: rpc => rpc.method === 'appendfleet' ? { Chosen: 1, Complete: true, Reason: '',
           Members: rpc.params.slice(4).filter((_, i) => i % 2 === 0).map((Name, i) => ({ NZBID: i + 1, Name, Rank: i + 1, Alive: 100,

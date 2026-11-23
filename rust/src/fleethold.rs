@@ -29,6 +29,9 @@ pub const PRIMARY_PARAM: &[u8] = b"DupeFleetPrimary";
 pub const EASE_PARAM: &[u8] = b"DupeEase";
 /// The priority of a held copy: the lowest NZBGet knows ("very low").
 pub const HELD_PRIORITY: i32 = -100;
+/// The ids of the files a hold paused (comma separated): only these are
+/// resumed on release, so files the user paused and extra par2 volumes stay.
+pub const HELD_FILES_PARAM: &[u8] = b"DupeHeldFiles";
 
 /// What the failover order is computed from, per held copy.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -50,19 +53,27 @@ pub struct MemberFacts {
 }
 
 impl MemberFacts {
-    /// Whether failover may pick the copy: alive or unverified, never tried.
+    /// Whether the copy can still complete the release: alive or unverified,
+    /// never tried and failed.
     pub fn live(&self) -> bool {
         !self.parked && self.alive != 0
     }
 
-    /// healthy, weak, locked, unverified, dead (the user's rule, F16a)
+    /// Whether failover picks the copy: live and extractable (a locked copy
+    /// is refused, its archive needs a password nobody has).
+    pub fn pickable(&self) -> bool {
+        self.live() && !self.locked
+    }
+
+    /// healthy, weak, unverified, locked, dead (the user's rule, F16a: a
+    /// locked copy is never failed over to, so it goes after every copy that is)
     fn tier(&self) -> u8 {
         if !self.live() {
             4
         } else if self.locked {
-            2
-        } else if self.alive < 0 {
             3
+        } else if self.alive < 0 {
+            2
         } else if self.alive < crate::dupesearch_nzb::FLEET_HEALTHY_ALIVE_PERMILLE {
             1
         } else {
@@ -74,8 +85,8 @@ impl MemberFacts {
 /// The failover order of a fleet's held copies (indices into `members`):
 /// probed alive share first (healthy copies, at least 97.5%, before weak
 /// ones), then the ease of borrowing into (bare or split, stored, compressed,
-/// encrypted: F10), twins before alts; locked copies after every extractable
-/// one, then unverified copies, and dead or parked copies last. Weak copies
+/// encrypted: F10), twins before alts; then unverified copies; locked copies
+/// after every extractable one; dead or parked copies last. Weak copies
 /// go by their alive share first: a 90% copy completes where a 40% one can't.
 pub fn failover_order(members: &[MemberFacts]) -> Vec<usize> {
     let mut order: Vec<usize> = (0..members.len()).collect();
@@ -115,6 +126,65 @@ pub fn position_label(order: i32) -> String {
         1 => "next".to_string(),
         n => n.to_string(),
     }
+}
+
+/// The order the held copies are shown in (indices into `held`, which is in
+/// [`failover_order`], each with whether it is still being probed): the
+/// copies failover can pick now first, in that order, so place 1 ("next") is
+/// the copy failover takes; then copies still being probed, locked copies
+/// and dead ones, in failover order.
+pub fn display_order(held: &[(MemberFacts, bool)]) -> Vec<usize> {
+    let ready = |i: &usize| held[*i].0.pickable() && !held[*i].1;
+    let mut out: Vec<usize> = (0..held.len()).filter(ready).collect();
+    out.extend((0..held.len()).filter(|i| !ready(i)));
+    out
+}
+
+/// What a held copy becomes when its fleet ends with no live copy left: a
+/// failure (dead: nothing of it alive) or a donor kept in history
+/// (DELETED/DUPE, F3: any article alive, or not known, or locked).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ending {
+    Failure,
+    Donor,
+}
+
+pub fn ending_of(f: &MemberFacts) -> Ending {
+    if f.alive == 0 {
+        Ending::Failure
+    } else {
+        Ending::Donor
+    }
+}
+
+/// Whether a fleet ended with no live copy: nothing downloads, nothing is
+/// being probed (neither the key nor a held copy), held copies are left and
+/// failover can pick none of them.
+pub fn fleet_ended(active: usize, probing: bool, held: &[(MemberFacts, bool)]) -> bool {
+    active == 0 && !probing && !held.is_empty() && !held.iter().any(|(f, p)| *p || f.pickable())
+}
+
+/// The priority a copy leaving its hold gets: the user's own when they
+/// changed it while it was held, else the one it had before.
+pub fn released_priority(current: i32, stored: Option<i32>) -> i32 {
+    if current != HELD_PRIORITY {
+        current
+    } else {
+        stored.unwrap_or(0)
+    }
+}
+
+/// [`HELD_FILES_PARAM`] from file ids, and back.
+pub fn held_files_param(ids: &[i32]) -> String {
+    ids.iter().map(i32::to_string).collect::<Vec<_>>().join(",")
+}
+
+pub fn parse_held_files(value: &[u8]) -> Vec<i32> {
+    std::str::from_utf8(value)
+        .unwrap_or("")
+        .split(',')
+        .filter_map(|v| v.trim().parse().ok())
+        .collect()
 }
 
 /// Keys whose background probe runs now (see [`ProbingGuard`]): their
@@ -252,7 +322,7 @@ mod host {
         }
         held_in_order(host, dq_ptr, &nzb.dupe_key, nzb.ptr)
             .into_iter()
-            .find(|(q, f)| f.live() && !is_probing(host, q.ptr))
+            .find(|(q, f)| f.pickable() && !is_probing(host, q.ptr))
             .map(|(q, _)| q)
     }
 
@@ -284,13 +354,29 @@ mod host {
     }
 
     /// Holds a queued copy: paused, at the lowest priority, marked [`HELD_PARAM`].
+    /// A copy already in the queue records the files the hold paused
+    /// ([`HELD_FILES_PARAM`]), so a release resumes only those.
     pub(crate) fn hold_host(host: &QueueSubsysHost, dq_ptr: usize, q: &NzbSnap, why: &[u8]) {
         if !is_held(host, q.ptr) {
             host.nzb_set_param(q.ptr, HELD_PRIORITY_PARAM, Some(q.priority.to_string().as_bytes()));
+            if host.queue_find_by_id(dq_ptr, q.id).is_some() {
+                let mut paused_now = Vec::new();
+                for i in 0..host.nzb_file_len(q.ptr) {
+                    let f = host.file_snap(host.nzb_file_at(q.ptr, i));
+                    if !f.paused && !f.deleted {
+                        host.file_set_int(f.ptr, crate::queuesubsys_host::FILE_INT_PAUSED, 1);
+                        paused_now.push(f.id);
+                    }
+                }
+                host.nzb_set_param(q.ptr, HELD_FILES_PARAM, Some(held_files_param(&paused_now).as_bytes()));
+            } else {
+                // still being added: nothing of it is the user's yet; the
+                // release resumes it as a fresh copy (extra pars paused)
+                set_paused(host, dq_ptr, q, true);
+            }
         }
         host.nzb_set_param(q.ptr, HELD_PARAM, Some(b"yes"));
         host.nzb_set_int(q.ptr, crate::queuesubsys_host::NZB_INT_PRIORITY, HELD_PRIORITY);
-        set_paused(host, dq_ptr, q, true);
         if !why.is_empty() {
             let mut msg = b"Holding ".to_vec();
             msg.extend_from_slice(&q.name);
@@ -301,23 +387,53 @@ mod host {
         host.nzb_set_int(q.ptr, crate::queuesubsys_host::NZB_INT_CHANGED, 1);
     }
 
-    /// Releases a held copy: it downloads at its own priority again.
+    /// Takes a copy out of its fleet's hold: its own priority back (the
+    /// user's, when they changed it meanwhile) and the hold's marks gone.
+    /// Its files stay as they are.
+    pub(crate) fn leave_fleet_host(host: &QueueSubsysHost, ptr: NzbRef) {
+        let q = host.nzb_snap(ptr, false);
+        let stored = host
+            .nzb_get_param(ptr, HELD_PRIORITY_PARAM)
+            .and_then(|v| std::str::from_utf8(&v).ok()?.trim().parse::<i32>().ok());
+        if stored.is_some() || is_held(host, ptr) {
+            host.nzb_set_int(ptr, crate::queuesubsys_host::NZB_INT_PRIORITY, released_priority(q.priority, stored));
+        }
+        for name in [HELD_PARAM, HELD_PRIORITY_PARAM, PROBING_PARAM, HELD_FILES_PARAM] {
+            host.nzb_set_param(ptr, name, None);
+        }
+        host.nzb_set_int(ptr, crate::queuesubsys_host::NZB_INT_CHANGED, 1);
+    }
+
+    /// Releases a held copy: it downloads at its own priority again. Only the
+    /// files the hold paused are resumed; a copy held as it was added resumes
+    /// as a fresh copy does (every file, then the extra par2 volumes paused
+    /// again unless ParCheck is Force).
     pub(crate) fn release_host(host: &QueueSubsysHost, dq_ptr: usize, q: &NzbSnap, why: &[u8]) {
-        let priority = host
-            .nzb_get_param(q.ptr, HELD_PRIORITY_PARAM)
-            .and_then(|v| std::str::from_utf8(&v).ok()?.trim().parse::<i32>().ok())
-            .unwrap_or(0);
-        host.nzb_set_param(q.ptr, HELD_PARAM, None);
-        host.nzb_set_param(q.ptr, HELD_PRIORITY_PARAM, None);
-        host.nzb_set_param(q.ptr, PROBING_PARAM, None);
-        host.nzb_set_int(q.ptr, crate::queuesubsys_host::NZB_INT_PRIORITY, priority);
-        set_paused(host, dq_ptr, q, false);
+        let held_files = host.nzb_get_param(q.ptr, HELD_FILES_PARAM).map(|v| parse_held_files(&v));
+        leave_fleet_host(host, q.ptr);
+        match held_files {
+            Some(ids) => {
+                for i in 0..host.nzb_file_len(q.ptr) {
+                    let f = host.file_snap(host.nzb_file_at(q.ptr, i));
+                    if ids.contains(&f.id) {
+                        host.file_set_int(f.ptr, crate::queuesubsys_host::FILE_INT_PAUSED, 0);
+                    }
+                }
+            }
+            None => {
+                set_paused(host, dq_ptr, q, false);
+                if host.opts().par_check != crate::queuesubsys_host::PC_FORCE
+                    && host.queue_find_by_id(dq_ptr, q.id).is_some()
+                {
+                    host.dq_edit_entry(dq_ptr, q.id, crate::queuesubsys_host::EA_GROUP_PAUSE_EXTRA_PARS, None);
+                }
+            }
+        }
         let mut msg = b"Releasing ".to_vec();
         msg.extend_from_slice(&q.name);
         msg.extend_from_slice(b" from its fleet: ");
         msg.extend_from_slice(why);
         host.nzb_print_message(q.ptr, crate::queuesubsys_host::MK_INFO, &crate::releasename::log_name(&msg));
-        host.nzb_set_int(q.ptr, crate::queuesubsys_host::NZB_INT_CHANGED, 1);
     }
 
     /// The share of a copy's tried articles that arrived, as kept on a parked donor.
@@ -346,6 +462,12 @@ mod host {
     /// is left, the fleet failed: its held copies go to history as failures
     /// with it.
     pub(crate) fn park_on_health_host(host: &QueueSubsysHost, dq_ptr: usize, nzb: &NzbSnap) {
+        // a copy already held (failed over a moment ago: its last articles in
+        // flight still report) is not failed over again: that would release a
+        // second copy
+        if holds_in_queue(host, nzb) && is_held(host, nzb.ptr) {
+            return;
+        }
         if holds_in_queue(host, nzb) {
             if let Some(next) = next_held_host(host, dq_ptr, nzb) {
                 let alive = parked_alive_text(host, nzb);
@@ -364,7 +486,18 @@ mod host {
                 host.dq_save_changed(dq_ptr);
                 return;
             }
-            fail_held_host(host, dq_ptr, nzb);
+            if probing(&nzb.dupe_key) {
+                // copies of another submission are still being probed: kept
+                // as a donor; once the probe is over the fleet's refresh
+                // releases the best of them, or ends the fleet
+                let alive = parked_alive_text(host, nzb);
+                host.nzb_set_param(nzb.ptr, crate::dupecoord::PARKED_PARAM, Some(alive.as_bytes()));
+                host.nzb_set_param(nzb.ptr, b"DupeAlive", Some(alive.as_bytes()));
+                hold_host(host, dq_ptr, nzb, b"failed its health check while other copies are still being probed");
+                host.dq_save_changed(dq_ptr);
+                return;
+            }
+            end_fleet_host(host, dq_ptr, &nzb.dupe_key, nzb.ptr);
         }
         host.nzb_set_delete_status(nzb.ptr, DeleteStatus::Health);
         host.dq_edit_entry(
@@ -375,26 +508,37 @@ mod host {
         );
     }
 
-    /// The fleet of `nzb` failed (no live copy left): its held copies go to
-    /// history as failures (FAILURE/HEALTH, files and nzb kept), so the group
-    /// shows the failure instead of waiting in the queue for ever.
-    pub(crate) fn fail_held_host(host: &QueueSubsysHost, dq_ptr: usize, nzb: &NzbSnap) {
-        let held: Vec<NzbSnap> = queued_members(host, dq_ptr, &nzb.dupe_key)
+    /// A fleet ended with no live copy (its last one failed: a health check,
+    /// post-processing, HealthCheck=Delete or a delete by hand): its held
+    /// copies go to history, nzbs and files kept: a dead one (nothing alive)
+    /// as FAILURE/HEALTH, any other as a donor, DELETED/DUPE (F3). `exclude`
+    /// is the copy that just failed. Copies still being probed are left to
+    /// their probe.
+    pub(crate) fn end_fleet_host(host: &QueueSubsysHost, dq_ptr: usize, key: &[u8], exclude: NzbRef) {
+        let held: Vec<(NzbSnap, MemberFacts)> = held_in_order(host, dq_ptr, key, exclude)
             .into_iter()
-            .filter(|q| q.ptr != nzb.ptr && is_held(host, q.ptr))
+            .filter(|(q, _)| !is_probing(host, q.ptr))
             .collect();
-        for q in held {
+        for (q, f) in held {
+            let ending = ending_of(&f);
             let mut msg = b"Every copy of the fleet of ".to_vec();
             msg.extend_from_slice(&q.name);
-            msg.extend_from_slice(b" failed: it goes to history with them");
+            msg.extend_from_slice(match ending {
+                Ending::Failure => b" failed: it goes to history as dead, its nzb kept".as_slice(),
+                Ending::Donor => b" failed: it goes to history as a donor, its nzb kept".as_slice(),
+            });
             host.nzb_print_message(q.ptr, crate::queuesubsys_host::MK_WARNING, &crate::releasename::log_name(&msg));
-            if host.nzb_get_param(q.ptr, crate::dupecoord::PROJECTED_PARAM).is_none() {
-                let alive = host.nzb_get_param(q.ptr, b"DupeAlive").unwrap_or_else(|| b"0".to_vec());
-                host.nzb_set_param(q.ptr, crate::dupecoord::PROJECTED_PARAM, Some(&alive));
+            leave_fleet_host(host, q.ptr);
+            match ending {
+                Ending::Failure => {
+                    if host.nzb_get_param(q.ptr, crate::dupecoord::PROJECTED_PARAM).is_none() {
+                        host.nzb_set_param(q.ptr, crate::dupecoord::PROJECTED_PARAM, Some(b"0.0"));
+                    }
+                    host.nzb_set_delete_status(q.ptr, DeleteStatus::Health);
+                }
+                Ending::Donor => host.nzb_set_delete_status(q.ptr, DeleteStatus::Dupe),
             }
-            host.nzb_set_param(q.ptr, HELD_PARAM, None);
-            host.nzb_set_param(q.ptr, PROBING_PARAM, None);
-            host.nzb_set_delete_status(q.ptr, DeleteStatus::Health);
+            // parked: its files and nzb stay
             host.dq_edit_entry(dq_ptr, q.id, crate::queuesubsys_host::EA_GROUP_PARK_DELETE, None);
         }
     }
@@ -416,10 +560,18 @@ mod host {
             msg.extend_from_slice(&nzb.name);
             msg.extend_from_slice(b", a copy of its fleet, succeeded");
             host.nzb_print_message(q.ptr, crate::queuesubsys_host::MK_INFO, &crate::releasename::log_name(&msg));
-            host.nzb_set_param(q.ptr, HELD_PARAM, None);
-            host.nzb_set_param(q.ptr, PROBING_PARAM, None);
+            leave_fleet_host(host, q.ptr);
             host.nzb_set_delete_status(q.ptr, DeleteStatus::Dupe);
-            host.dq_edit_entry(dq_ptr, q.id, crate::queuesubsys_host::EA_GROUP_DUPE_DELETE, None);
+            // its own folder only: without InterDir two copies of one name
+            // share a folder, and the files there may be the primary's release
+            let shares_folder = !q.dest_dir.is_empty()
+                && (q.dest_dir == nzb.dest_dir || q.dest_dir == nzb.final_dir);
+            let action = if shares_folder {
+                crate::queuesubsys_host::EA_GROUP_PARK_DELETE
+            } else {
+                crate::queuesubsys_host::EA_GROUP_DUPE_DELETE
+            };
+            host.dq_edit_entry(dq_ptr, q.id, action, None);
         }
     }
 
@@ -455,9 +607,17 @@ mod host {
         active.sort_by_key(|q| std::cmp::Reverse(q.dupe_score));
         let mut ordered = held_in_order(host, dq_ptr, key, NzbRef::NONE);
         if active.is_empty() && !probing_now {
+            // never a locked copy: failover refuses it
             let first = ordered
                 .iter()
-                .position(|(q, f)| f.live() && !is_probing(host, q.ptr));
+                .position(|(q, f)| f.pickable() && !is_probing(host, q.ptr));
+            let flags: Vec<(MemberFacts, bool)> =
+                ordered.iter().map(|(q, f)| (*f, is_probing(host, q.ptr))).collect();
+            if first.is_none() && fleet_ended(0, probing_now, &flags) {
+                end_fleet_host(host, dq_ptr, key, NzbRef::NONE);
+                host.dq_save_changed(dq_ptr);
+                return true;
+            }
             if let Some(pos) = first {
                 let (q, _) = ordered.remove(pos);
                 release_host(host, dq_ptr, &q, b"no copy of its fleet downloads");
@@ -484,7 +644,10 @@ mod host {
             changed |= set_if_changed(host, q.ptr, ORDER_PARAM, b"0");
             changed |= set_if_changed(host, q.ptr, PRIMARY_PARAM, primary.as_bytes());
         }
-        for (pos, (q, _)) in ordered.iter().enumerate() {
+        let flags: Vec<(MemberFacts, bool)> =
+            ordered.iter().map(|(q, f)| (*f, is_probing(host, q.ptr))).collect();
+        let shown: Vec<&(NzbSnap, MemberFacts)> = display_order(&flags).into_iter().map(|i| &ordered[i]).collect();
+        for (pos, (q, _)) in shown.into_iter().enumerate() {
             changed |= set_if_changed(host, q.ptr, ORDER_PARAM, (pos + 1).to_string().as_bytes());
             changed |= set_if_changed(host, q.ptr, PRIMARY_PARAM, primary.as_bytes());
         }
@@ -537,7 +700,8 @@ mod tests {
     }
 
     /// F16a: healthy copies first, by ease, twins before alts; weak copies by
-    /// their alive share; locked, unverified, then dead and parked copies last.
+    /// their alive share; unverified, locked (never failed over to), then dead
+    /// and parked copies last.
     #[test]
     fn failover_order_follows_the_fleet_rules() {
         let mut stored = m(1, 990);
@@ -559,8 +723,9 @@ mod tests {
         locked.locked = true;
         let members = [stored, bare, twin, weak40, weak90, unverified, dead, parked, locked];
         let ids: Vec<i32> = failover_order(&members).into_iter().map(|i| members[i].id).collect();
-        assert_eq!(ids, vec![2, 3, 1, 5, 4, 9, 6, 8, 7]);
+        assert_eq!(ids, vec![2, 3, 1, 5, 4, 6, 9, 8, 7]);
         assert!(!dead.live() && !parked.live() && unverified.live());
+        assert!(locked.live() && !locked.pickable() && unverified.pickable());
     }
 
     /// Ties keep the order copies came (their scores), then their ids.
@@ -571,6 +736,57 @@ mod tests {
         assert_eq!(ids, vec![1, 2, 3]);
         assert_eq!(position_label(1), "next");
         assert_eq!(position_label(3), "3");
+    }
+
+    /// Review: place 1 ("next") is the copy failover takes: never one still
+    /// being probed, a locked one or a dead one.
+    #[test]
+    fn next_is_the_copy_failover_takes() {
+        let healthy = m(1, 1000);
+        let weak = m(2, 600);
+        let mut locked = m(3, 900);
+        locked.locked = true;
+        let dead = m(4, 0);
+        // in failover order: the probing healthy copy first
+        let held = [(healthy, true), (weak, false), (locked, false), (dead, false)];
+        assert_eq!(display_order(&held), vec![1, 0, 2, 3]);
+        let none_ready = [(healthy, true), (locked, false), (dead, false)];
+        assert_eq!(display_order(&none_ready), vec![0, 1, 2]);
+    }
+
+    /// Review: a fleet ends only with nothing downloading, nothing probed and
+    /// no copy failover can pick; dead copies end as failures, the rest as
+    /// donors (F3).
+    #[test]
+    fn a_fleet_ends_only_without_a_live_copy() {
+        let mut parked = m(1, 400);
+        parked.parked = true;
+        let dead = m(2, 0);
+        let mut locked = m(3, 1000);
+        locked.locked = true;
+        let unverified = m(4, -1);
+        let left = [(parked, false), (dead, false), (locked, false)];
+        assert!(fleet_ended(0, false, &left));
+        assert!(!fleet_ended(1, false, &left), "a copy still downloads");
+        assert!(!fleet_ended(0, true, &left), "a probe still runs");
+        assert!(!fleet_ended(0, false, &[(unverified, false)]), "an unverified copy is tried");
+        assert!(!fleet_ended(0, false, &[(locked, true)]), "a copy is still being probed");
+        assert!(!fleet_ended(0, false, &[]));
+        assert_eq!(ending_of(&dead), Ending::Failure);
+        assert_eq!(ending_of(&parked), Ending::Donor);
+        assert_eq!(ending_of(&locked), Ending::Donor);
+        assert_eq!(ending_of(&unverified), Ending::Donor);
+    }
+
+    /// Review nits: a copy leaving its hold gets the user's priority when
+    /// they changed it, else its own; the files a hold paused round-trip.
+    #[test]
+    fn a_released_copy_keeps_the_users_priority() {
+        assert_eq!(released_priority(HELD_PRIORITY, Some(50)), 50);
+        assert_eq!(released_priority(HELD_PRIORITY, None), 0);
+        assert_eq!(released_priority(100, Some(50)), 100);
+        assert_eq!(parse_held_files(held_files_param(&[3, 17, 40]).as_bytes()), vec![3, 17, 40]);
+        assert!(parse_held_files(b"").is_empty());
     }
 
     #[test]

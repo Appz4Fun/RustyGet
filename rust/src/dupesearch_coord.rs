@@ -6167,8 +6167,8 @@ fn fleet_drop_pre_added(host_ctx: *mut c_void, host_cb: DupeHostFn, dropped: &[(
                 if *dead { MK_WARNING } else { MK_INFO },
                 &crate::releasename::log_name(&msg),
             );
-            qh.nzb_set_param(ptr_, crate::fleethold::HELD_PARAM, None);
-            qh.nzb_set_param(ptr_, crate::fleethold::PROBING_PARAM, None);
+            // its own priority back, the hold's marks gone
+            crate::fleethold::leave_fleet_host(&qh, ptr_);
             if *dead {
                 if qh.nzb_get_param(ptr_, ALIVE_PARAM).is_none() {
                     qh.nzb_set_param(ptr_, ALIVE_PARAM, Some(b"0"));
@@ -7398,7 +7398,25 @@ pub unsafe fn fleet_append(
     }
 
     if donor_stopping() || http_stopped() {
-        return emit_fleet_result(out, 0, false, b"SHUTDOWN", &[]);
+        // copies already added held stay in the queue (the next start's
+        // refresh picks their primary): reported as added, so nothing writes
+        // them back to NzbDir as a fleet that never ran
+        let queued: Vec<FleetOutEntry> = candidates
+            .iter()
+            .filter(|c| c.pre_added != 0)
+            .map(|c| FleetOutEntry {
+                nzb_id: c.pre_added,
+                name: members[c.index].name.clone(),
+                rank: 0,
+                alive: c.alive,
+                status: b"QUEUED".to_vec(),
+                same_as: 0,
+                same_as_rank: 0,
+                member_idx: c.index as i32,
+                reason: b"held: the program stopped before the probe ended".to_vec(),
+            })
+            .collect();
+        return emit_fleet_result(out, 0, false, b"SHUTDOWN", &queued);
     }
 
     // a grouped fleet takes its key lock again to write what it found

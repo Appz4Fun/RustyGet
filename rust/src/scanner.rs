@@ -1021,6 +1021,33 @@ impl crate::xmlrpc_format::RpcEmit for FleetReply {
     }
 }
 
+/// The hidden file beside `nzb` that holds the priority of a fleet member
+/// written back to NzbDir (see [`crate::dupesearch_coord::keep_members_in`]):
+/// `.<file name>.priority`. The scan skips hidden files.
+pub fn priority_sidecar(nzb: &Path) -> PathBuf {
+    let mut leaf = std::ffi::OsString::from(".");
+    leaf.push(nzb.file_name().unwrap_or_default());
+    leaf.push(".priority");
+    nzb.with_file_name(leaf)
+}
+
+/// The priority kept for `nzb` ([`priority_sidecar`]), its file removed.
+pub fn take_kept_priority(nzb: &Path) -> Option<c_int> {
+    let side = priority_sidecar(nzb);
+    let text = std::fs::read(&side).ok()?;
+    let _ = std::fs::remove_file(&side);
+    std::str::from_utf8(&text).ok()?.trim().parse().ok()
+}
+
+/// Puts `priority` back beside each of `files` for the next scan.
+fn keep_priority(files: &[Vec<u8>], priority: c_int) {
+    if priority != 0 {
+        for f in files {
+            let _ = std::fs::write(priority_sidecar(crate::fsops::path(f)), priority.to_string());
+        }
+    }
+}
+
 /// Whether a fleet call from NzbDir did nothing with its copies, so they go
 /// back for the next scan: nothing was added and the reply says the key was
 /// busy, the program stops, or no member came through.
@@ -1035,9 +1062,12 @@ pub fn fleet_never_ran(reason: &[u8], any_added: bool) -> bool {
 fn spawn_nzbdir_fleet(
     key: Vec<u8>,
     category: Vec<u8>,
+    priority: c_int,
     copies: Vec<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)>,
     env: NzbgetRsScannerEnv,
 ) {
+    let env_for_spawn_failure = env.clone();
+    let key_for_spawn_failure = key.clone();
     // counted like the donor walkers, so shutdown waits for it
     #[cfg(unix)]
     let walker = crate::dupesearch_nzb::DonorWalkerGuard::enter();
@@ -1071,7 +1101,7 @@ fn spawn_nzbdir_fleet(
                         crate::dupesearch_coord::native_dupe_host,
                         key_c.as_ptr(),
                         cat_c.as_ptr(),
-                        0,
+                        priority,
                         FLEET_TIMEOUT_SEC,
                         req.as_ptr(),
                         req.len(),
@@ -1089,8 +1119,14 @@ fn spawn_nzbdir_fleet(
                     // the key was busy or the program stops: the next scan
                     // sends these copies again
                     for c in &copies {
-                        let _ = std::fs::rename(crate::fsops::path(&c.2), crate::fsops::path(&c.3));
+                        if let Err(err) = std::fs::rename(crate::fsops::path(&c.2), crate::fsops::path(&c.3)) {
+                            let mut msg = b"Could not put ".to_vec();
+                            msg.extend_from_slice(&crate::releasename::log_name(&c.2));
+                            msg.extend_from_slice(format!(" back for the next scan: {err}").as_bytes());
+                            emit_log(&env, LOG_WARN, &msg);
+                        }
                     }
+                    keep_priority(&copies.iter().map(|c| c.3.clone()).collect::<Vec<_>>(), priority);
                 }
                 let mut msg = b"Fleet ".to_vec();
                 msg.extend_from_slice(&key);
@@ -1101,7 +1137,7 @@ fn spawn_nzbdir_fleet(
                 }
                 for (name, id, status) in &reply.added {
                     msg.extend_from_slice(b"; ");
-                    msg.extend_from_slice(&crate::releasename::without_password(name));
+                    msg.extend_from_slice(&crate::releasename::log_name(name));
                     msg.extend_from_slice(b" ");
                     msg.extend_from_slice(status);
                     if *id > 0 {
@@ -1112,13 +1148,25 @@ fn spawn_nzbdir_fleet(
             }
             #[cfg(not(unix))]
             {
-                let _ = (key, category, copies, env);
+                let _ = (key, category, priority, copies, env);
             }
         });
-    if spawned.is_err() {
-        for (queued, original) in restore {
-            let _ = std::fs::rename(crate::fsops::path(&queued), crate::fsops::path(&original));
+    if let Err(err) = spawned {
+        let mut msg = b"Fleet ".to_vec();
+        msg.extend_from_slice(&key_for_spawn_failure);
+        msg.extend_from_slice(
+            format!(" from NzbDir: its check could not start ({err}), its copies stay for the next scan").as_bytes(),
+        );
+        emit_log(&env_for_spawn_failure, LOG_WARN, &msg);
+        for (queued, original) in &restore {
+            if let Err(err) = std::fs::rename(crate::fsops::path(queued), crate::fsops::path(original)) {
+                let mut msg = b"Could not put ".to_vec();
+                msg.extend_from_slice(&crate::releasename::log_name(queued));
+                msg.extend_from_slice(format!(" back for the next scan: {err}").as_bytes());
+                emit_log(&env_for_spawn_failure, LOG_WARN, &msg);
+            }
         }
+        keep_priority(&restore.iter().map(|r| r.1.clone()).collect::<Vec<_>>(), priority);
     }
 }
 
@@ -1424,6 +1472,12 @@ impl NzbgetRsScanner {
             }
         }
 
+        if matched_idx.is_none() {
+            // a fleet member written back to NzbDir keeps its priority
+            if let Some(kept) = take_kept_priority(crate::fsops::path(full_filename)) {
+                priority = kept;
+            }
+        }
         if let Some(host) = &env.host {
             host.set_work_category(to_cstr_sanitized(&nzb_category).to_bytes());
         }
@@ -1579,11 +1633,16 @@ impl NzbgetRsScanner {
             let first = &pending[members[0]];
             let (category, key) = (first.category.clone(), first.key.clone());
             let mut copies: Vec<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)> = Vec::new();
+            // the highest priority kept for a member written back to NzbDir
+            let mut priority: Option<c_int> = None;
             for &i in &members {
                 let p = &pending[i];
                 let Ok(data) = std::fs::read(crate::fsops::path(&p.full_filename)) else {
                     continue;
                 };
+                if let Some(kept) = take_kept_priority(crate::fsops::path(&p.full_filename)) {
+                    priority = Some(priority.map_or(kept, |p| p.max(kept)));
+                }
                 // renamed as any file it adds is, so the next pass leaves it be
                 let mut queued_name = Vec::new();
                 let renamed = crate::fsdelete::rename_bak(
@@ -1610,7 +1669,7 @@ impl NzbgetRsScanner {
             msg.extend_from_slice(&key);
             emit_log(env, LOG_INFO, &msg);
             let use_cat = resolve_category(env, &category, &copies[0].0);
-            spawn_nzbdir_fleet(key, use_cat, copies, env.clone());
+            spawn_nzbdir_fleet(key, use_cat, priority.unwrap_or(0), copies, env.clone());
         }
     }
 
@@ -2440,6 +2499,26 @@ mod tests {
         assert!(fleet_never_ran(b"", false));
         assert!(!fleet_never_ran(b"KEY_BUSY", true));
         assert!(!fleet_never_ran(b"ALL_DEAD", false));
+    }
+
+    /// A fleet member's priority kept beside its file is hidden from the scan
+    /// and read once.
+    #[test]
+    fn a_kept_priority_is_hidden_and_read_once() {
+        let nzb = Path::new("/nzb/Movies/Movie.2024-GRP (2).nzb");
+        let side = priority_sidecar(nzb);
+        assert_eq!(side, Path::new("/nzb/Movies/.Movie.2024-GRP (2).nzb.priority"));
+        let leaf = side.file_name().unwrap().as_encoded_bytes();
+        assert!(should_skip_item(leaf, b"processed", b"broken"));
+        let dir = std::env::temp_dir().join(format!("rg-prio-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("A.nzb");
+        keep_priority(&[f.to_string_lossy().into_owned().into_bytes()], 100);
+        assert_eq!(take_kept_priority(&f), Some(100));
+        assert_eq!(take_kept_priority(&f), None);
+        keep_priority(&[f.to_string_lossy().into_owned().into_bytes()], 0);
+        assert!(!priority_sidecar(&f).exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

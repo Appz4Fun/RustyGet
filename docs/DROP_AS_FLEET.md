@@ -246,6 +246,25 @@ marked `OPEN ITEM (par-rs)` at `GROUP_PROBE_BYTES`.
   share also for a copy ranked dead for too few alive articles, so only 0% is
   "dead donor".
 
+### Passwords (review C of cda2ae7d)
+
+- **No password in a key.** `{{password}}` is cut before a name is grouped. A
+  group key an earlier build stored with the password's words in it (it read
+  `{ }` as separators: `dupes:movie.2024.grp.s3cret`) is rebuilt from the name
+  once the queue is loaded (`releasename::rebuilt_group_key`, in the queue and
+  in history); a key without the password's words is left alone.
+- **No password in a log line or a reply.** Every log line of the fleet paths
+  (web UI, client, NzbDir, the background checks) goes out through
+  `dupesearch_coord::fleet_log`, and the grouping, keeping and rescue lines
+  through `releasename::log_name`, so neither shows a `{{password}}`. The
+  `PROBING` reply of a `dupes:` fleet echoes the names without it (the Add
+  dialog matches them that way); a client's key keeps its reply as before.
+- **A fleet written back to NzbDir keeps its options.** Its members go into the
+  category's folder, with a ` (N)` suffix (one the grouping ignores) when a
+  file of that name is there, and a priority other than 0 in a hidden file
+  beside each (`.<name>.nzb.priority`), which the scan reads once. A failed
+  write, and a check that could not start, are logged.
+
 ## Done when (acceptance tests)
 
 | Done when | Test |
@@ -275,6 +294,7 @@ marked `OPEN ITEM (par-rs)` at `GROUP_PROBE_BYTES`.
 | Review 8: NzbDir copies are never stranded. | Rust `scanner::tests::nzbdir_copies_of_one_release_form_one_fleet` (`fleet_never_ran`) |
 | Review 9: appendfleet returns at once for grouped copies, labels come after. | functional `dropfleetasync`; Playwright `drop-fleet.js` ("13 copies: the dialog closes within 3 s") |
 | Review 10 / F15: honest, consistent health; dead only at 0%. | Playwright `drop-fleet.js` (the 17% copy is a donor, "#6 · 17.0% alive", the list and the detail agree) |
+| Review C: no password in a key, a log line or a reply; write-back keeps category and priority. | Rust `releasename::tests::an_old_key_with_the_password_is_rebuilt`, `a_password_in_the_name_never_reaches_the_key`, `dupesearch_coord::tests::a_fleet_that_never_ran_keeps_its_uploads_for_the_next_scan`, `scanner::tests::a_kept_priority_is_hidden_and_read_once`; functional `dropjoinrestart` (an old key with the password rebuilt), `droppasswordlogs` (web and NzbDir fleets) |
 | The release parser finds the group behind a copy suffix. | Rust `releasename::tests::copy_suffix_never_hides_the_group`; Playwright `release-names.js` |
 | The name rule strips only a copy suffix. | Rust `releasename::tests::copy_suffixes_strip_only_after_a_group_tag`; web UI `dupe-group.js` (the same cases) |
 

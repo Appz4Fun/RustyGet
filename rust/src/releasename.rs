@@ -838,6 +838,60 @@ pub fn without_password(name: &[u8]) -> Vec<u8> {
     out
 }
 
+/// A queue or file name as log lines and replies show it: without its
+/// `{{password}}` ([`without_password`]).
+pub fn log_name(name: &[u8]) -> Vec<u8> {
+    without_password(name)
+}
+
+/// The words of each `{{password}}` in `name`, as [`group_name`] writes
+/// them (lowercase, separator runs one dot).
+fn password_words(name: &[u8]) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut rest = name;
+    while let Some(start) = rest.windows(2).position(|w| w == b"{{") {
+        let inner = &rest[start + 2..];
+        let Some(end) = inner.windows(2).position(|w| w == b"}}") else {
+            break;
+        };
+        let words = dotted(&inner[..end]);
+        if !words.is_empty() {
+            out.push(words);
+        }
+        rest = &inner[end + 2..];
+    }
+    out
+}
+
+/// The group key to store instead of `key` for a download named `name`, when
+/// `key` is a group key an earlier build made from the name with its
+/// `{{password}}` in it (its words in the key, `dupes:movie.2024.grp.s3cret`):
+/// the key [`group_key`] gives the name now. None for any other key: one
+/// without the password's words, a client's key, or one already right.
+pub fn rebuilt_group_key(name: &[u8], key: &[u8]) -> Option<Vec<u8>> {
+    if key.len() < GROUP_KEY_PREFIX.len() || !key[..GROUP_KEY_PREFIX.len()].eq_ignore_ascii_case(GROUP_KEY_PREFIX) {
+        return None;
+    }
+    let words = password_words(name);
+    if words.is_empty() {
+        return None;
+    }
+    let fresh = group_key(name);
+    if fresh.eq_ignore_ascii_case(key) {
+        return None;
+    }
+    let mut body = b".".to_vec();
+    body.extend(key[GROUP_KEY_PREFIX.len()..].iter().map(|&b| c_lower(b)));
+    body.push(b'.');
+    let holds = words.iter().any(|w| {
+        let mut needle = b".".to_vec();
+        needle.extend_from_slice(w);
+        needle.push(b'.');
+        body.windows(needle.len()).any(|x| x == needle.as_slice())
+    });
+    holds.then_some(fresh)
+}
+
 fn trailing_digits(text: &[u8]) -> usize {
     text.iter().rev().take_while(|&&b| ascii_digit(b)).count()
 }
@@ -888,10 +942,15 @@ pub fn has_release_markers(text: &[u8]) -> bool {
 /// the 720p and 1080p, REPACK and original, and two groups of one title never
 /// share a name. Empty when nothing is left.
 pub fn group_name(name: &[u8]) -> Vec<u8> {
-    let stripped = strip_copy_suffix(name);
-    let mut out = Vec::with_capacity(stripped.len());
+    dotted(&strip_copy_suffix(name))
+}
+
+/// `text` lowercase with every run of [`group_name`]'s separators one dot,
+/// none at either end.
+fn dotted(text: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len());
     let mut separator = false;
-    for &ch in &stripped {
+    for &ch in text {
         if c_space(ch)
             || matches!(ch, b'.' | b'_' | b'-' | b'(' | b')' | b'[' | b']' | b'{' | b'}' | b'+' | b',' | b'\'')
         {
@@ -1037,8 +1096,32 @@ mod tests {
         assert_eq!(group_key(b"Movie.2024.1080p-GRP{{s3cret}}_2.nzb"), key);
         assert_eq!(without_password(b"A{{x}}B{{y}}"), b"AB".to_vec());
         assert_eq!(without_password(b"A{{unclosed"), b"A{{unclosed".to_vec());
+        assert_eq!(log_name(b"Movie.2024-GRP{{s3cret}}"), b"Movie.2024-GRP".to_vec());
         // a bare season is a release marker too (review D, as in the web UI)
         assert_eq!(strip_copy_suffix(b"Show.S01.COMPLETE-GRP_2"), b"Show.S01.COMPLETE-GRP".to_vec());
+    }
+
+    /// A group key an earlier build stored with the password's words in it
+    /// (it read `{ }` as separators: `dupes:movie.2024.1080p.grp.s3cret`) is
+    /// rebuilt from the name; a right key, a client's key, a key without the
+    /// password, and a name without one are left alone.
+    #[test]
+    fn an_old_key_with_the_password_is_rebuilt() {
+        let name = b"Movie.2024.1080p-GRP{{s3cret}}";
+        let old = b"dupes:movie.2024.1080p.grp.s3cret";
+        assert_eq!(rebuilt_group_key(name, old), Some(b"dupes:movie.2024.1080p.grp".to_vec()));
+        assert_eq!(rebuilt_group_key(b"Movie.2024.1080p-GRP{{s3cret}}_2", b"DUPES:Movie.2024.1080p.GRP.S3cret"),
+            Some(b"dupes:movie.2024.1080p.grp".to_vec()));
+        // a password with spaces and dots, in the middle of the name
+        assert_eq!(rebuilt_group_key(b"Show.S01E01.{{my pass.1}}.720p-GRP", b"dupes:show.s01e01.my.pass.1.720p.grp"),
+            Some(b"dupes:show.s01e01.720p.grp".to_vec()));
+        assert_eq!(rebuilt_group_key(name, b"dupes:movie.2024.1080p.grp"), None);
+        assert_eq!(rebuilt_group_key(name, b"imdb:tt123.s3cret"), None);
+        // another copy's key the item joined (no password words): kept
+        assert_eq!(rebuilt_group_key(name, b"dupes:movie.2024.1080p.other"), None);
+        assert_eq!(rebuilt_group_key(b"Movie.2024.1080p-GRP", old), None);
+        // a password word only as part of another word is no match
+        assert_eq!(rebuilt_group_key(b"Movie.2024-GRP{{grp}}", b"dupes:movie.2024.grpx"), None);
     }
 
     /// The release parser takes the group from a name with a copy suffix as

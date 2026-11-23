@@ -677,6 +677,14 @@ fn host_log(_host_ctx: *mut c_void, _host_cb: DupeHostFn, kind: c_int, msg: &[u8
     let _ = (kind, msg);
 }
 
+/// [`host_log`] for the fleet paths (`appendfleet` from the web UI, a client
+/// or NzbDir, and its background checks): the line goes out without any
+/// `{{password}}` the member names in it hold
+/// ([`crate::releasename::log_name`]).
+fn fleet_log(host_ctx: *mut c_void, host_cb: DupeHostFn, kind: c_int, msg: &[u8]) {
+    host_log(host_ctx, host_cb, kind, &crate::releasename::log_name(msg));
+}
+
 fn with_guarded_queue<R, F: FnOnce(usize) -> R>(
     _host_ctx: *mut c_void,
     _host_cb: DupeHostFn,
@@ -2073,7 +2081,7 @@ fn fleet_intake_later(host_ctx: *mut c_void, host_cb: DupeHostFn, job: IntakeLat
                 push_c_slice(&mut msg, &job.dupe_key);
                 msg.extend_from_slice(b" could not be read, its backups stay unverified: ");
                 msg.extend_from_slice(why.as_bytes());
-                host_log(host_ctx, host_cb, MK_INFO, &msg);
+                fleet_log(host_ctx, host_cb, MK_INFO, &msg);
                 return;
             }
         },
@@ -2171,7 +2179,7 @@ fn fleet_intake_later(host_ctx: *mut c_void, host_cb: DupeHostFn, job: IntakeLat
                 msg.extend_from_slice(r.err().unwrap_or_default().as_bytes());
             }
         }
-        host_log(host_ctx, host_cb, MK_INFO, &msg);
+        fleet_log(host_ctx, host_cb, MK_INFO, &msg);
     }
 }
 
@@ -6018,18 +6026,46 @@ struct FleetLogReply {
 /// key busy with the same release, the thread not starting) into NzbDir, so
 /// the next scan adds them (as one fleet again): an upload is never lost.
 /// Members sent as urls have nothing to write. Returns how many were written.
-pub fn keep_members_for_scan(members: &[(Vec<u8>, bool, Vec<u8>)]) -> usize {
+pub fn keep_members_for_scan(members: &[(Vec<u8>, bool, Vec<u8>)], category: &[u8], priority: c_int) -> usize {
     let Some(opts) = crate::options::active_options() else {
+        fleet_log(
+            std::ptr::null_mut(),
+            native_dupe_host,
+            MK_WARNING,
+            b"Fleet: no options to find NzbDir by, its members were not written back",
+        );
         return 0;
     };
     let dir = opts.str_bytes(crate::options::OptStr::NzbDir).to_vec();
-    keep_members_in(&dir, members)
+    keep_members_in(&dir, category, priority, members)
 }
 
-/// [`keep_members_for_scan`] into `dir`.
-pub fn keep_members_in(dir: &[u8], members: &[(Vec<u8>, bool, Vec<u8>)]) -> usize {
+/// [`keep_members_for_scan`] into `dir`: into the category's folder in it
+/// (the scan takes a file's category from its folder), named as uploaded or,
+/// when that file exists, with a ` (N)` copy suffix the grouping ignores;
+/// a priority other than 0 goes into a hidden file beside each
+/// ([`crate::scanner::priority_sidecar`]), which the scan reads.
+pub fn keep_members_in(dir: &[u8], category: &[u8], priority: c_int, members: &[(Vec<u8>, bool, Vec<u8>)]) -> usize {
     let dir = crate::cstr::until_nul(dir);
     if dir.is_empty() {
+        fleet_log(
+            std::ptr::null_mut(),
+            native_dupe_host,
+            MK_WARNING,
+            b"Fleet: NzbDir is not set, its members were not written back",
+        );
+        return 0;
+    }
+    let mut folder = crate::fsops::path(dir).to_path_buf();
+    let category = crate::cstr::until_nul(category);
+    if !category.is_empty() {
+        folder.push(crate::fsops::path(&crate::paths::make_valid_filename(category, false)));
+    }
+    if let Err(err) = std::fs::create_dir_all(&folder) {
+        let mut msg = b"Fleet: could not create ".to_vec();
+        msg.extend_from_slice(folder.as_os_str().as_encoded_bytes());
+        msg.extend_from_slice(format!(" for its members: {err}").as_bytes());
+        fleet_log(std::ptr::null_mut(), native_dupe_host, MK_WARNING, &msg);
         return 0;
     }
     let mut written = 0;
@@ -6039,16 +6075,32 @@ pub fn keep_members_in(dir: &[u8], members: &[(Vec<u8>, bool, Vec<u8>)]) -> usiz
         }
         let base = crate::paths::make_valid_filename(&fleet_ensure_nzb_ext(name), false);
         let dot = base.len() - 4;
-        let mut path = crate::fsops::path(dir).join(crate::fsops::path(&base)).to_path_buf();
+        let mut path = folder.join(crate::fsops::path(&base));
         let mut n = 2;
-        while path.exists() {
+        while path.exists() || crate::scanner::priority_sidecar(&path).exists() {
             let mut leaf = base[..dot].to_vec();
-            leaf.extend_from_slice(format!("_{n}.nzb").as_bytes());
-            path = crate::fsops::path(dir).join(crate::fsops::path(&leaf)).to_path_buf();
+            leaf.extend_from_slice(format!(" ({n}).nzb").as_bytes());
+            path = folder.join(crate::fsops::path(&leaf));
             n += 1;
         }
-        if std::fs::write(&path, data).is_ok() {
-            written += 1;
+        // the priority first: the scan must never see the file without it
+        if priority != 0 {
+            if let Err(err) = std::fs::write(crate::scanner::priority_sidecar(&path), priority.to_string()) {
+                let mut msg = b"Fleet: could not keep the priority of ".to_vec();
+                msg.extend_from_slice(path.as_os_str().as_encoded_bytes());
+                msg.extend_from_slice(format!(": {err}").as_bytes());
+                fleet_log(std::ptr::null_mut(), native_dupe_host, MK_WARNING, &msg);
+            }
+        }
+        match std::fs::write(&path, data) {
+            Ok(()) => written += 1,
+            Err(err) => {
+                let _ = std::fs::remove_file(crate::scanner::priority_sidecar(&path));
+                let mut msg = b"Fleet: could not write ".to_vec();
+                msg.extend_from_slice(path.as_os_str().as_encoded_bytes());
+                msg.extend_from_slice(format!(" back to NzbDir, that upload is lost: {err}").as_bytes());
+                fleet_log(std::ptr::null_mut(), native_dupe_host, MK_WARNING, &msg);
+            }
         }
     }
     written
@@ -6075,7 +6127,7 @@ impl RpcEmit for FleetLogReply {
             msg.extend_from_slice(b" ");
             msg.extend_from_slice(m.status.to_bytes());
         }
-        host_log(std::ptr::null_mut(), native_dupe_host, MK_INFO, &msg);
+        fleet_log(std::ptr::null_mut(), native_dupe_host, MK_INFO, &msg);
         self.reason = reason.to_bytes().to_vec();
         self.any_added = members.iter().any(|m| m.nzb_id > 0);
     }
@@ -6115,6 +6167,7 @@ pub unsafe fn fleet_append_rpc(
         };
     }
     let category = unsafe { cstr::owned(category_ptr) };
+    let category_for_spawn_failure = category.clone();
     let raw = unsafe { std::slice::from_raw_parts(req_members, req_members_len) };
     // (name, is_url, payload), owned for the background thread
     let owned: Vec<(std::ffi::CString, c_int, Vec<u8>)> = raw
@@ -6134,7 +6187,8 @@ pub unsafe fn fleet_append_rpc(
         .enumerate()
         .map(|(i, (name, _, _))| FleetOutEntry {
             nzb_id: 0,
-            name: name.to_bytes().to_vec(),
+            // the reply echoes the names without their password
+            name: crate::releasename::log_name(name.to_bytes()),
             rank: 0,
             alive: -1,
             status: b"PROBING".to_vec(),
@@ -6151,6 +6205,7 @@ pub unsafe fn fleet_append_rpc(
         .map(|(name, is_url, data)| (name.to_bytes().to_vec(), *is_url != 0, data.clone()))
         .collect();
     let backup_for_spawn_failure = backup.clone();
+    let key_for_spawn_failure = key.clone();
     // counted like the donor walkers, so shutdown waits for the check
     let walker = crate::dupesearch_nzb::DonorWalkerGuard::enter();
     let spawned = std::thread::Builder::new()
@@ -6187,18 +6242,25 @@ pub unsafe fn fleet_append_rpc(
                 );
             }
             if crate::scanner::fleet_never_ran(&log.reason, log.any_added) {
-                let kept = keep_members_for_scan(&backup);
+                let kept = keep_members_for_scan(&backup, &category, priority);
                 let mut msg = b"Fleet ".to_vec();
                 msg.extend_from_slice(&key);
                 msg.extend_from_slice(
                     format!(": {} member(s) written to NzbDir for the next scan", kept).as_bytes(),
                 );
-                host_log(std::ptr::null_mut(), native_dupe_host, MK_INFO, &msg);
+                fleet_log(std::ptr::null_mut(), native_dupe_host, MK_INFO, &msg);
             }
         });
-    if spawned.is_err() {
+    if let Err(err) = spawned {
         // never lose an upload: the next scan adds the members
-        keep_members_for_scan(&backup_for_spawn_failure);
+        let kept = keep_members_for_scan(&backup_for_spawn_failure, &category_for_spawn_failure, priority);
+        let mut msg = b"Fleet ".to_vec();
+        msg.extend_from_slice(&key_for_spawn_failure);
+        msg.extend_from_slice(
+            format!(": its check could not start ({err}), {kept} member(s) written to NzbDir for the next scan")
+                .as_bytes(),
+        );
+        fleet_log(std::ptr::null_mut(), native_dupe_host, MK_WARNING, &msg);
     }
     emit_fleet_result(out, 0, false, b"PROBING", &entries)
 }
@@ -6583,7 +6645,7 @@ pub unsafe fn fleet_append(
         msg.extend_from_slice(b": ");
         push_c_slice(&mut msg, &dl_name);
         msg.extend_from_slice(b" is downloaded already");
-        host_log(host_ctx, host_cb, MK_INFO, &msg);
+        fleet_log(host_ctx, host_cb, MK_INFO, &msg);
         return emit_fleet_result(
             out,
             0,
@@ -6681,7 +6743,7 @@ pub unsafe fn fleet_append(
             let mut msg = b"Fleet intake: ".to_vec();
             msg.extend_from_slice(&members[candidates[usable[0]].index].name);
             msg.extend_from_slice(b" is checked against the queued copy in the background");
-            host_log(host_ctx, host_cb, MK_INFO, &msg);
+            fleet_log(host_ctx, host_cb, MK_INFO, &msg);
         } else if usable.len() >= 2 && !donor_stopping() && !http_stopped() {
             let intake_deadline = now_unix_sec()
                 + fleet_phase_secs(
@@ -6738,7 +6800,7 @@ pub unsafe fn fleet_append(
                         }
                     }
                 }
-                host_log(host_ctx, host_cb, MK_INFO, &msg);
+                fleet_log(host_ctx, host_cb, MK_INFO, &msg);
             }
         }
     }
@@ -7293,7 +7355,7 @@ pub unsafe fn fleet_append(
         let mut msg = b"Fleet intake: ".to_vec();
         msg.extend_from_slice(pending.len().to_string().as_bytes());
         msg.extend_from_slice(b" unverified copies are checked again in the background");
-        host_log(host_ctx, host_cb, MK_INFO, &msg);
+        fleet_log(host_ctx, host_cb, MK_INFO, &msg);
         spawn_fleet_intake_later(
             host_cb,
             IntakeLater {
@@ -7315,7 +7377,7 @@ pub unsafe fn fleet_append(
 
     let summary_log =
         fleet_format_summary_log(members.len() as i32, &dupe_key, chosen, &reason, complete);
-    host_log(host_ctx, host_cb, MK_INFO, &summary_log);
+    fleet_log(host_ctx, host_cb, MK_INFO, &summary_log);
     emit_fleet_result(out, chosen, complete, &reason, &out_entries)
 }
 
@@ -7390,11 +7452,25 @@ mod tests {
             (b"From.Url.nzb".to_vec(), true, b"https://example.invalid/x.nzb".to_vec()),
         ];
         let dir_bytes = dir.to_string_lossy().into_owned().into_bytes();
-        assert_eq!(keep_members_in(&dir_bytes, &members), 2);
+        assert_eq!(keep_members_in(&dir_bytes, b"", 0, &members), 2);
         assert_eq!(std::fs::read(dir.join("Movie.2024.1080p-GRP.nzb")).unwrap(), b"earlier");
-        assert_eq!(std::fs::read(dir.join("Movie.2024.1080p-GRP_2.nzb")).unwrap(), b"<nzb a/>");
+        // a collision gets a " (N)" suffix, which the grouping strips
+        assert_eq!(std::fs::read(dir.join("Movie.2024.1080p-GRP (2).nzb")).unwrap(), b"<nzb a/>");
+        assert_eq!(
+            crate::releasename::group_key(b"Movie.2024.1080p-GRP (2).nzb"),
+            crate::releasename::group_key(b"Movie.2024.1080p-GRP.nzb")
+        );
         assert_eq!(std::fs::read(dir.join("Movie.2024.1080p-GRP_1.nzb")).unwrap(), b"<nzb b/>");
         assert!(!dir.join("From.Url.nzb").exists());
+        assert!(!crate::scanner::priority_sidecar(&dir.join("Movie.2024.1080p-GRP_1.nzb")).exists());
+        // the category's folder, and the priority beside the file
+        assert_eq!(keep_members_in(&dir_bytes, b"Movies", 50, &members[..1]), 1);
+        let kept = dir.join("Movies").join("Movie.2024.1080p-GRP.nzb");
+        assert_eq!(std::fs::read(&kept).unwrap(), b"<nzb a/>");
+        assert_eq!(std::fs::read(crate::scanner::priority_sidecar(&kept)).unwrap(), b"50");
+        assert_eq!(crate::scanner::take_kept_priority(&kept), Some(50));
+        assert!(!crate::scanner::priority_sidecar(&kept).exists());
+        assert_eq!(crate::scanner::take_kept_priority(&kept), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

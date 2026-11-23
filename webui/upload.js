@@ -536,7 +536,8 @@ var Upload = (new function($)
 			var used = [];
 			fleet.members.forEach(function(m)
 			{
-				var name = infos[m].name + infos[m].ext;
+				// the reply echoes each name without its {{password}}
+				var name = DupeGroup.withoutPassword(infos[m].name + infos[m].ext);
 				var status = 'ERROR';
 				for (var k = 0; k < members.length; k++)
 				{

@@ -886,14 +886,14 @@ fn rescue_dupe_host(
     let dry_run = crate::options::active_options()
         .is_some_and(|o| o.scalars().dupe_search != 0 && o.scalars().dupe_search_dry_run != 0);
     let mut msg = b"Rescue: ".to_vec();
-    msg.extend_from_slice(&nzb.name);
+    msg.extend_from_slice(&crate::releasename::log_name(&nzb.name));
     msg.extend_from_slice(b" failed its health check with nothing of its key queued: ");
     msg.extend_from_slice(if dry_run {
         b"dry run, would return backup ".as_slice()
     } else {
         b"returning backup ".as_slice()
     });
-    msg.extend_from_slice(&backup.name);
+    msg.extend_from_slice(&crate::releasename::log_name(&backup.name));
     if alive >= 0 {
         msg.extend_from_slice(format!(" (alive {}.{}%)", alive / 10, alive % 10).as_bytes());
     }
@@ -1084,7 +1084,7 @@ pub(crate) fn join_copy_group_host(
         }
     }
     let mut msg = b"Grouping ".to_vec();
-    msg.extend_from_slice(&nzb.name);
+    msg.extend_from_slice(&crate::releasename::log_name(&nzb.name));
     msg.extend_from_slice(
         format!(
             " with {} other copy(ies) of the same release: DupeKey ",
@@ -1100,15 +1100,11 @@ pub(crate) fn join_copy_group_host(
     }
 }
 
-/// Groups the queued downloads without a DupeKey with the copies of their
-/// release ([`join_copy_group_host`]), once after start: a queue loaded from
-/// an earlier run, or filled while the grouping did not exist, gets the keys
-/// a download added now would get. Nothing is moved to history here: the
-/// copies already downloading keep downloading, and failover and TwinCheck
-/// see them as one fleet from now on.
-/// A group key stored by an earlier build that grouped by the raw file name
-/// (review C) can hold a `{{password}}`: such a key is rebuilt from the name
-/// without it, in the queue and in history.
+/// A group key stored by an earlier build that grouped by the raw name can
+/// hold the words of its `{{password}}` (that build read `{ }` as separators:
+/// `dupes:movie.2024.grp.s3cret`). Each download whose name holds a password
+/// and whose key is such a key gets the key its name gives now
+/// ([`crate::releasename::rebuilt_group_key`]), in the queue and in history.
 #[cfg(unix)]
 fn scrub_password_keys_host(host: &crate::queuesubsys_host::QueueSubsysHost, dq_ptr: usize) {
     let mut items = Vec::new();
@@ -1126,8 +1122,7 @@ fn scrub_password_keys_host(host: &crate::queuesubsys_host::QueueSubsysHost, dq_
     }
     let mut changed = false;
     for item in items {
-        if crate::dupesearch_coord::is_group_key(&item.dupe_key) && item.dupe_key.windows(2).any(|w| w == b"{{") {
-            let clean = crate::releasename::without_password(&item.dupe_key);
+        if let Some(clean) = crate::releasename::rebuilt_group_key(&item.name, &item.dupe_key) {
             host.nzb_set_str(item.ptr, crate::queuesubsys_host::NZB_STR_DUPE_KEY, &clean);
             changed = true;
         }
@@ -1138,6 +1133,14 @@ fn scrub_password_keys_host(host: &crate::queuesubsys_host::QueueSubsysHost, dq_
     }
 }
 
+/// Groups the queued downloads without a DupeKey with the copies of their
+/// release ([`join_copy_group_host`]): a queue loaded from an earlier run, or
+/// filled while the grouping did not exist, gets the keys a download added
+/// now would get. Each download is looked at once (`checked` holds the ids
+/// seen, and 0 once the keys of an earlier build were scrubbed, see
+/// [`scrub_password_keys_host`]); called with the queue loaded. Nothing is
+/// moved to history here: the copies already downloading keep downloading,
+/// and failover and TwinCheck see them as one fleet from now on.
 #[cfg(unix)]
 pub(crate) fn join_queued_copy_groups_host(
     host: &crate::queuesubsys_host::QueueSubsysHost,
@@ -1147,26 +1150,24 @@ pub(crate) fn join_queued_copy_groups_host(
     if dq_ptr == 0 || !host.opts().dupe_check {
         return;
     }
-    if checked.is_empty() {
+    // once, the first time the loaded queue is looked at (empty or not)
+    if checked.insert(0) {
         scrub_password_keys_host(host, dq_ptr);
     }
     // by id, from the end: the last copy joins the earlier ones, which are
     // scored in queue order, so the copy queued first keeps the top score; the
     // queue is never reordered after a restart
-    let ids: Vec<i32> = (0..host.queue_len(dq_ptr))
+    let queued: Vec<i32> = (0..host.queue_len(dq_ptr))
         .rev()
         .map(|i| host.queue_at(dq_ptr, i))
         .filter(|p| p.is_some())
         .map(|p| host.nzb_snap(p, false).id)
-        .filter(|id| !checked.contains(id))
         .collect();
-    if checked.is_empty() && ids.is_empty() {
-        // an empty queue: look again next round (a queue loading later)
-        return;
-    }
+    // forget the ids no longer queued, so the set stays the queue's size
+    let queued_set: std::collections::BTreeSet<i32> = queued.iter().copied().collect();
+    checked.retain(|id| *id == 0 || queued_set.contains(id));
+    let ids: Vec<i32> = queued.into_iter().filter(|id| !checked.contains(id)).collect();
     checked.extend(ids.iter().copied());
-    // the marker that the first look ran, even before anything was queued
-    checked.insert(0);
     for id in ids {
         let qp = host.queue_find_by_id(dq_ptr, id);
         if qp.is_none() {
@@ -1802,7 +1803,7 @@ pub(crate) fn keep_as_donor_host(
     host.nzb_set_param(nzb.ptr, PARKED_PARAM, Some(alive_text.as_bytes()));
     host.nzb_set_param(nzb.ptr, b"DupeAlive", Some(alive_text.as_bytes()));
     let mut msg = b"Keeping ".to_vec();
-    msg.extend_from_slice(&nzb.name);
+    msg.extend_from_slice(&crate::releasename::log_name(&nzb.name));
     if alive > 0.0 {
         msg.extend_from_slice(
             format!(

@@ -11550,15 +11550,24 @@ def scenario_dropjoinrestart(daemon, t):
     """Copies queued without a DupeKey before the grouping ran (here: with
     DupeCheck off) join their group once after a restart with it on: the
     same DupeKey dupes:<normalized name> and DupeScores in queue order. The
-    first film and its sequel stay apart."""
+    first film and its sequel stay apart. A group key an earlier build stored
+    with the words of the name's {{password}} in it (review C:
+    dupes:...grp.s3cret) is rebuilt from the name, and its copy joins it; no
+    Grouping line shows the password."""
     data = _payload(500_000, 15301)
     rel = 'Restart.Movie.2024.1080p.WEB-DL.x264-GRP'
     key = 'dupes:restart.movie.2024.1080p.web.dl.x264.grp'
     sequel = 'Restart.Movie.Part.Two.2026.1080p.WEB-DL.x264-GRP'
+    pw_rel = 'Restart.Pw.Movie.2024.1080p.WEB-DL.x264-GRP{{s3cret}}'
+    pw_key = 'dupes:restart.pw.movie.2024.1080p.web.dl.x264.grp'
     api = daemon.wait_ready()
     for i, name in enumerate((rel, rel + '_1', sequel)):
         _ds_append(api, name, _drop_copy(t, 'jr%d' % i, data, set()), '', 0, paused=True)
-    before = {g['NZBName']: g.get('DupeKey') for g in api.listgroups()}
+    _ds_append(api, pw_rel, _drop_copy(t, 'jrp0', data, set()), pw_key + '.s3cret', 0, paused=True)
+    _ds_append(api, pw_rel + '_1', _drop_copy(t, 'jrp1', data, set()), '', 0, paused=True)
+    pw_names = [g['NZBName'] for g in api.listgroups() if g['NZBName'].startswith('Restart.Pw.')]
+    before_pw = {g['NZBName']: g.get('DupeKey') for g in api.listgroups() if g['NZBName'].startswith('Restart.Pw.')}
+    before = {g['NZBName']: g.get('DupeKey') for g in api.listgroups() if not g['NZBName'].startswith('Restart.Pw.')}
     daemon.write_config(SCENARIO_OPTIONS['dropjoinrestart'][:-1] + ['DupeCheck=yes'])
     api = daemon.reload(api)
     deadline = time.time() + 60
@@ -11566,12 +11575,18 @@ def scenario_dropjoinrestart(daemon, t):
     while time.time() < deadline:
         groups = api.listgroups()
         keys = {g['NZBName']: (g.get('DupeKey'), g.get('DupeScore')) for g in groups}
-        if keys.get(rel + '_1', ('', 0))[0]:
+        if keys.get(rel + '_1', ('', 0))[0] and all(keys.get(n, ('', 0))[0] == pw_key for n in pw_names):
             break
         time.sleep(1)
+    log = t.read_file('nzbget.log').decode(errors='replace')
+    grouping = [l for l in log.splitlines() if 'Grouping ' in l]
+    pw_grouping = [l for l in grouping if 'Restart.Pw.' in l]
     ok = (all(v == '' for v in before.values()) and keys.get(rel) == (key, 100) and keys.get(rel + '_1') == (key, 99)
-          and keys.get(sequel, ('x', 0))[0] == '')
-    return ('dropjoinrestart', ok, 'before=%s after=%s' % (before, keys))
+          and keys.get(sequel, ('x', 0))[0] == ''
+          and len(pw_names) == 2 and all(keys.get(n, ('', 0))[0] == pw_key for n in pw_names)
+          and len(pw_grouping) == 1 and not any('s3cret' in l for l in grouping))
+    return ('dropjoinrestart', ok, 'before=%s after=%s pw_before=%s pw_grouping=%s' % (
+        before, keys, before_pw, pw_grouping))
 
 
 def _dead_release(t, tag, seed):
@@ -11692,6 +11707,44 @@ def scenario_dropfleetasync(daemon, t):
         took, reply['Reason'], sum(1 for v in kinds.values() if v), len(kinds)))
 
 
+def scenario_droppasswordlogs(daemon, t):
+    """Review of C: copies named with a {{password}} go in as fleets from the
+    web UI's appendfleet (dupes: key) and from NzbDir, and the password shows
+    in no fleet, grouping or rescue log line and not in the PROBING reply. A
+    client's key (checked within the call, with the payload intake) logs its
+    "Fleet intake:" lines without it too."""
+    daemon.fake_nntp.alive = set()
+    api = daemon.wait_ready()
+    web = 'Pwlog.Movie.2024.1080p.WEB-DL.x264-GRP'
+    web_key = 'dupes:pwlog.movie.2024.1080p.web.dl.x264.grp'
+    members = [(web + '{{s3cret}}%s.nzb' % s, _fleet_copy(daemon, 'pl%d' % i, 'c.mkv', 400_000, None, _payload(400_000, 15700)))
+               for i, s in enumerate(['', '_1'])]
+    reply = _fleet(daemon, members, key=web_key, timeout=60)
+    # a client's key: checked within the call, with the payload intake
+    client = [('Pwkey.Movie.2024.1080p.WEB-DL.x264-GRP{{s3cret}}%s.nzb' % s,
+               _fleet_copy(daemon, 'pk%d' % i, 'k.mkv', 400_000, None, _payload(400_000, 15702)))
+              for i, s in enumerate(['', '_1'])]
+    _fleet(daemon, client, key='fleet:pwkey', timeout=60)
+    nzbdir = 'Pwdir.Movie.2024.1080p.WEB-DL.x264-GRP'
+    for i, s in enumerate(['', '_1']):
+        text = _fleet_copy(daemon, 'pd%d' % i, 'd.mkv', 400_000, None, _payload(400_000, 15701))
+        t.write_file(os.path.join('main', 'nzb', nzbdir + '{{s3cret}}%s.nzb' % s), text.encode())
+    deadline = time.time() + 120
+    while time.time() < deadline:
+        if _grep_log(t, 'Fleet ' + web_key + ' checked in the background') == 1 and \
+                _grep_log(t, 'Fleet dupes:pwdir.movie.2024.1080p.web.dl.x264.grp from NzbDir') == 1:
+            break
+        time.sleep(0.5)
+    log = t.read_file('nzbget.log').decode(errors='replace').splitlines()
+    ours = [l for l in log if any(w in l for w in ('Fleet', 'Grouping ', 'Rescue: ', 'Keeping ', 'from NzbDir'))]
+    leaks = [l for l in ours if 's3cret' in l]
+    names = [m['Name'] for m in reply['Members']]
+    ok = (reply['Reason'] == 'PROBING' and len(names) == 2 and not any('s3cret' in n for n in names)
+          and any('Pwlog.' in l for l in ours) and any('Pwdir.' in l for l in ours)
+          and any('Fleet intake: Pwkey.' in l for l in ours) and not leaks)
+    return ('droppasswordlogs', ok, 'reply=%s lines=%d leaks=%s' % (names, len(ours), leaks[:3]))
+
+
 def scenario_dropkeepdonor(daemon, t):
     """A copy that fails its health check while its fleet is open stays in it as
     a donor, not a failure, and its shown health is the one it was judged on.
@@ -11743,6 +11796,7 @@ SCENARIOS = {
     'dropallfailnonzb': scenario_dropallfailnonzb,
     'dropjoinstrict': scenario_dropjoinstrict,
     'dropfleetasync': scenario_dropfleetasync,
+    'droppasswordlogs': scenario_droppasswordlogs,
     'dropjoinrestart': scenario_dropjoinrestart,
     'dropkeepdonor': scenario_dropkeepdonor,
     'complementary': scenario_complementary,
@@ -12152,6 +12206,7 @@ SCENARIO_OPTIONS = {
     'dropallfailnonzb': ['HealthCheck=dupe', 'DupeArticleFallback=article'],
     'dropjoinstrict': ['HealthCheck=dupe'],
     'dropfleetasync': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
+    'droppasswordlogs': ['NzbDirInterval=1', 'NzbDirFileAge=2', 'HealthCheck=dupe', 'DupeArticleFallback=no'],
     'dropjoinrestart': ['HealthCheck=dupe', 'DupeCheck=no'],
     'dropkeepdonor': ['HealthCheck=dupe', 'DupeArticleFallback=article'],
     'allheadspar': PROD_OPTIONS,
@@ -12577,7 +12632,7 @@ SCENARIO_FIRST_FAIL_PROXY = {'recheckfailed': ((b'?5=', b'?10=', b'?15='),),
 # scenarios with a FakeNewznab indexer (DupeSearchUrl points to it)
 
 # scenarios with a FakeNntp news server in place of nserv
-SCENARIO_FAKE_NNTP = {'fleetprimaryease', 'dropfleetasync', 'dropdune', 'fleetnzbpassword', 'fleettimeoutunverified', 'watchfleet', 'watchforcepick', 'watchdeadpick', 'watchswap', 'watchborrow', 'watchswaptwin', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetnodupecheck', 'fleetkindorder', 'fleetkindsingle', 'fleetkindlater', 'fleetintake', 'fleetintakelater', 'fleetencryptedlast', 'fleetencryptedheadless', 'fleetlockedlast', 'fleetencryptedpassword', 'fleetkindslowcheck', 'fleettwinvolumes', 'fleetalldead', 'fleetshutdown'}
+SCENARIO_FAKE_NNTP = {'fleetprimaryease', 'dropfleetasync', 'droppasswordlogs', 'dropdune', 'fleetnzbpassword', 'fleettimeoutunverified', 'watchfleet', 'watchforcepick', 'watchdeadpick', 'watchswap', 'watchborrow', 'watchswaptwin', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetnodupecheck', 'fleetkindorder', 'fleetkindsingle', 'fleetkindlater', 'fleetintake', 'fleetintakelater', 'fleetencryptedlast', 'fleetencryptedheadless', 'fleetlockedlast', 'fleetencryptedpassword', 'fleetkindslowcheck', 'fleettwinvolumes', 'fleetalldead', 'fleetshutdown'}
 
 
 # --------------------------------------------------------------------------- #

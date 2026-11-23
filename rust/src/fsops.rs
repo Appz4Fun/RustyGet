@@ -120,7 +120,9 @@ pub fn force_directories(orig: &[u8], errmsg: &mut Vec<u8>, stat: &Stat<'_>) -> 
     if st < 0 {
         if let Some(slash) = norm.iter().rposition(|&b| b == b'/') {
             let parent = &norm[..slash];
-            if parent.len() != orig.len() && !force_directories(parent, errmsg, stat) {
+            // an empty parent is the root: it exists, and mkdir("") would only
+            // hide the real error behind "could not create directory : ..."
+            if !parent.is_empty() && parent.len() != orig.len() && !force_directories(parent, errmsg, stat) {
                 return false;
             }
         }
@@ -1262,6 +1264,24 @@ mod tests {
             b"/home/u/x"
         );
         assert_eq!(expand_home_path(Some(c"~/x"), Some(b"/")), b"/x");
+    }
+
+    #[test]
+    fn force_directories_names_the_top_directory_it_could_not_create() {
+        // as root the top-level directory could really be created
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let top = format!("/rustyget-no-such-top-{}", std::process::id());
+        let deep = format!("{top}/rg/dst");
+        let mut msg = Vec::new();
+        assert!(!force_directories(deep.as_bytes(), &mut msg, &stat));
+        let text = String::from_utf8_lossy(&msg).into_owned();
+        assert!(
+            text.starts_with(&format!("could not create directory {top}: ")),
+            "{text}"
+        );
+        assert!(!std::path::Path::new(&top).exists());
     }
 
     #[test]

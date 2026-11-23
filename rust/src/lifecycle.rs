@@ -471,8 +471,10 @@ pub fn socket_deadline_wait(
 /// when running as root (unless backward-compat `"root"`), writes `<pid>\n` to the lock-file,
 /// and ignores `SIGCHLD`, `SIGTSTP`, `SIGTTOU`, and `SIGTTIN`.
 ///
-/// Returns `Ok((lock_file_owned, truncate_failed))` on success, or `Err(error_code)` where:
-/// - `1`: could not create lock-file
+/// Returns `Ok((lock_file_owned, truncate_failed, skipped_errno))` on success, or
+/// `Err(error_code)` where:
+/// - `1`: could not create lock-file (unless its folder does not exist: then it runs
+///   without one and `skipped_errno` says why)
 /// - `2`: lock-file is not a regular file
 /// - `3`: could not acquire lock on lock-file
 /// - `4`: invalid `DaemonUsername`
@@ -480,7 +482,7 @@ pub fn socket_deadline_wait(
 pub fn daemonize_setup(
     lock_file: &std::ffi::CStr,
     daemon_username: &std::ffi::CStr,
-) -> Result<(bool, bool), i32> {
+) -> Result<(bool, bool, Option<i32>), i32> {
     #[cfg(unix)]
     unsafe {
         let devnull = libc::open(c"/dev/null".as_ptr(), libc::O_RDWR);
@@ -496,14 +498,25 @@ pub fn daemonize_setup(
         let mut lfp: c_int = -1;
         let mut lock_file_owned = false;
         let mut truncate_failed = false;
+        let mut skipped_errno = None;
 
         if !lock_file.to_bytes().is_empty() {
             let flags = libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC;
             lfp = libc::open(lock_file.as_ptr(), flags, 0o640 as libc::c_uint);
             if lfp < 0 {
-                return Err(1);
+                let errno = crate::fsops::last_errno();
+                // only a folder that is not there is skipped: a permission or
+                // read-only error, or a lock file that may be another instance's,
+                // still refuses to start
+                if !lock_file_skippable_errno(errno) || !lock_file_folder_missing(lock_file.to_bytes()) {
+                    return Err(1);
+                }
+                // a path that does not work yet: run without the lock file
+                skipped_errno = Some(errno);
             }
+        }
 
+        if lfp >= 0 {
             let mut st: libc::stat = std::mem::zeroed();
             if libc::fstat(lfp, &mut st) != 0 || (st.st_mode & libc::S_IFMT) != libc::S_IFREG {
                 let _ = libc::close(lfp);
@@ -563,12 +576,47 @@ pub fn daemonize_setup(
         let _ = libc::signal(libc::SIGTTOU, libc::SIG_IGN);
         let _ = libc::signal(libc::SIGTTIN, libc::SIG_IGN);
 
-        Ok((lock_file_owned, truncate_failed))
+        Ok((lock_file_owned, truncate_failed, skipped_errno))
     }
     #[cfg(not(unix))]
     {
         let _ = (lock_file, daemon_username);
-        Ok((false, false))
+        Ok((false, false, None))
+    }
+}
+
+/// True when `lock_file` is set, does not exist and its folder is missing.
+/// True when `lock_file` is set and neither it nor its folder exists (or a
+/// regular file stands where the folder should be). A lookup that fails for
+/// another reason, such as a permission error, does not count as missing.
+pub(crate) fn lock_file_folder_missing(lock_file: &[u8]) -> bool {
+    if lock_file.is_empty() {
+        return false;
+    }
+    let gone = |p: &std::path::Path| match std::fs::symlink_metadata(p) {
+        Err(e) => lock_file_skippable_errno(e.raw_os_error().unwrap_or(0)),
+        Ok(_) => false,
+    };
+    let path = crate::cleanup::bytes_to_path_buf(lock_file);
+    let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) else {
+        return false;
+    };
+    gone(&path)
+        && (gone(dir) || std::fs::metadata(dir).is_ok_and(|m| !m.is_dir()))
+}
+
+/// A lock file that cannot be created because its folder does not exist is a
+/// path to fix, not a reason to refuse to start. A permission or read-only error
+/// still refuses, as before.
+pub(crate) fn lock_file_skippable_errno(errno: i32) -> bool {
+    #[cfg(unix)]
+    {
+        matches!(errno, libc::ENOENT | libc::ENOTDIR)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = errno;
+        false
     }
 }
 
@@ -1141,6 +1189,12 @@ pub(crate) unsafe fn activate_daemon(
     let active_opts = crate::options::active_options();
     if let Some(opts) = active_opts.as_ref() {
         if opts.server_mode() && opts.scalars().system_health_check != 0 {
+            // (before the lock file is taken: the check opens it, and closing any
+            // descriptor of a file drops the process's lock on it)
+            if daemon_mode && !was_reloading && lock_file_folder_missing(opts.str_bytes(OptStr::LockFile)) {
+                // daemonize_setup warns about it once
+                crate::options::note_path_warning(b"LockFile", opts.str_bytes(OptStr::LockFile));
+            }
             let _ = crate::ffi::system_health_diagnose_bytes(0);
         }
     }
@@ -1173,10 +1227,24 @@ pub(crate) unsafe fn activate_daemon(
             }
             libc::setsid();
             match daemonize_setup(lock_file, daemon_user) {
-                Ok((owned, trunc_failed)) => {
+                Ok((owned, trunc_failed, skipped_errno)) => {
                     DAEMON_INSTANCE
                         .lock_file_owned
                         .store(owned, Ordering::SeqCst);
+                    if let Some(errno) = skipped_errno {
+                        let why = crate::fsops::error_message(errno);
+                        let mut wm = crate::options::path_problem_message(
+                            b"LockFile",
+                            lock_file.to_bytes(),
+                            &why,
+                        );
+                        wm.extend_from_slice(
+                            b" Running without a lock file: after fixing LockFile, restart RustyGet \
+(a reload is not enough) so it takes the lock.",
+                        );
+                        crate::options::note_path_warning(b"LockFile", lock_file.to_bytes());
+                        dm_log(3, &wm);
+                    }
                     if trunc_failed {
                         let mut wm = b"Could not truncate lock-file ".to_vec();
                         wm.extend_from_slice(lock_file.to_bytes());
@@ -1561,6 +1629,11 @@ fn shutdown_daemon_globals() {
 }
 
 /// Whether this instance created its lock file and may delete it now.
+/// True while this daemon holds the lock on its LockFile.
+pub(crate) fn daemon_holds_lock_file() -> bool {
+    DAEMON_INSTANCE.lock_file_owned.load(Ordering::SeqCst)
+}
+
 fn may_delete_lock_file() -> bool {
     !dm_is_reloading() && DAEMON_INSTANCE.lock_file_owned.load(Ordering::SeqCst)
 }
@@ -1673,7 +1746,17 @@ pub(crate) fn apply_command_line() {
         unsafe { libc::exit(1) };
     }
     if opts.has_config_errors() && cmd.client_operation == 0 {
-        dm_emit_active_log(2, b"Pausing all activities due to errors in configuration");
+        // both notices when there are path errors and other configuration errors
+        if crate::options::has_pausing_path_errors() {
+            dm_emit_active_log(
+                3,
+                b"Downloading, post-processing and scanning are paused until the bad paths are fixed. \
+Fix them in Settings > Paths (or in the config file), then save and reload.",
+            );
+        }
+        if opts.has_other_config_errors() || !crate::options::has_pausing_path_errors() {
+            dm_emit_active_log(2, b"Pausing all activities due to errors in configuration");
+        }
         if let Some(ws) = crate::ffi::active_workstate() {
             ws.set_pause_download(true);
             ws.set_pause_post_process(true);
@@ -1717,6 +1800,45 @@ pub(crate) static TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn a_lock_file_in_a_missing_or_closed_folder_is_skipped_not_fatal() {
+        for errno in [libc::ENOENT, libc::ENOTDIR] {
+            assert!(lock_file_skippable_errno(errno), "{errno}");
+        }
+        // a permission or read-only error still refuses to start
+        for errno in [libc::EACCES, libc::EROFS, libc::ELOOP, libc::EMFILE, libc::ENOSPC, 0] {
+            assert!(!lock_file_skippable_errno(errno), "{errno}");
+        }
+    }
+
+    #[test]
+    fn only_a_lock_file_folder_that_is_not_there_counts_as_missing() {
+        let base = std::env::temp_dir().join(format!("rustyget_lockdir_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let b = |p: std::path::PathBuf| p.as_os_str().as_encoded_bytes().to_vec();
+        assert!(lock_file_folder_missing(&b(base.join("gone").join("rustyget.lock"))));
+        // a regular file where the folder should be
+        std::fs::write(base.join("file"), b"").unwrap();
+        assert!(lock_file_folder_missing(&b(base.join("file").join("rustyget.lock"))));
+        // the folder is there (the lock file can simply be created) or the file exists
+        assert!(!lock_file_folder_missing(&b(base.join("rustyget.lock"))));
+        std::fs::write(base.join("held.lock"), b"1\n").unwrap();
+        assert!(!lock_file_folder_missing(&b(base.join("held.lock"))));
+        assert!(!lock_file_folder_missing(b""));
+        // a folder that cannot be searched is a permission problem, not a missing one
+        if unsafe { libc::geteuid() } != 0 {
+            use std::os::unix::fs::PermissionsExt as _;
+            let closed = base.join("closed");
+            std::fs::create_dir_all(closed.join("inner")).unwrap();
+            std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let missing = lock_file_folder_missing(&b(closed.join("inner").join("rustyget.lock")));
+            std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(!missing);
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn test_phase_conversions() {

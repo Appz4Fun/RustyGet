@@ -129,8 +129,9 @@ test-rust jobs="3":
     CARGO_BUILD_JOBS={{jobs}} cargo test --manifest-path "{{root_dir}}/rust/Cargo.toml" --lib
 
 # Build the daemon and run its end-to-end checks: `--version` and `--help` exit
-# cleanly, and the direct-unpack/post-processing scenarios (formerly the C++
-# PostprocessTest suite) pass against the fake news server in tests/functional/dupefallback
+# cleanly, the direct-unpack/post-processing scenarios (formerly the C++
+# PostprocessTest suite) pass against the fake news server in tests/functional/dupefallback,
+# and a config whose paths do not work still starts the daemon (paused, with warnings)
 test-daemon jobs="3": (debug jobs)
     #!/usr/bin/env python3
     import os
@@ -146,7 +147,7 @@ test-daemon jobs="3": (debug jobs)
     subprocess.run([rustyget_bin, "--help"], stdout=subprocess.DEVNULL, check=True)
     scenarios = [
         "directunpacksimple", "directunpacktwoarchives", "directunpackparfailure",
-        "parfailurenodirectunpack", "parfailuredirectunpackfailed",
+        "parfailurenodirectunpack", "parfailuredirectunpackfailed", "badpaths",
     ]
     for scenario in scenarios:
         print(f"Running {scenario}...")

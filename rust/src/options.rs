@@ -760,6 +760,170 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_path_warning_names_the_option_the_value_the_reason_and_where_to_fix_it() {
+        assert_eq!(
+            path_problem_message(b"DestDir", b"/nonexistent/rg/dst", b"could not create directory /nonexistent: Permission denied"),
+            b"DestDir \"/nonexistent/rg/dst\" can't be used: could not create directory /nonexistent: Permission denied. \
+Change DestDir in Settings > Paths (or in the config file)."
+                .to_vec()
+        );
+        // a reason that already ends with a full stop gets no second one
+        assert!(path_problem_message(b"MainDir", b"/x", b"gone.").starts_with(b"MainDir \"/x\" can't be used: gone. Change"));
+    }
+
+    #[test]
+    fn unusable_paths_warn_once_each_and_count_as_config_errors() {
+        let _turn = super::PATH_WARNING_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let base = std::env::temp_dir().join(format!("rustyget_badpaths_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        // a regular file where MainDir should be: nothing can be created inside it,
+        // whoever runs the test
+        let main = base.join("main");
+        std::fs::write(&main, b"").unwrap();
+        let good = base.join("good");
+        let opt = |s: String| CString::new(s).unwrap();
+        let owned = [
+            opt(format!("MainDir={}", main.display())),
+            opt("DestDir=${MainDir}/dst".to_owned()),
+            opt("InterDir=".to_owned()),
+            opt(format!("TempDir={}/tmp", good.display())),
+            opt(format!("QueueDir={}/queue", good.display())),
+            opt("NzbDir=${MainDir}/nzb".to_owned()),
+            opt("WebDir=".to_owned()),
+            opt("ConfigTemplate=".to_owned()),
+            opt("LogFile=".to_owned()),
+            opt("LockFile=".to_owned()),
+        ];
+        let ptrs: Vec<*const c_char> = owned.iter().map(|c| c.as_ptr()).collect();
+        let mut scalars = NzbgetRsParsedOptions::default();
+        let mut flags = 0;
+        let opts = unsafe {
+            nzbget_rs_options_new(
+                c"rustyget".as_ptr(),
+                std::ptr::null(),
+                1,
+                0,
+                ptrs.as_ptr(),
+                ptrs.len(),
+                0,
+                c"1.0".as_ptr(),
+                std::ptr::null_mut(),
+                None,
+                &mut scalars,
+                &mut flags,
+            )
+        };
+        let o = unsafe { &*opts };
+        assert!(o.has_config_errors(), "an unusable path pauses activities");
+        assert!(!o.has_other_config_errors(), "only path errors");
+        for name in [&b"DestDir"[..], b"NzbDir", b"MainDir"] {
+            assert!(path_was_warned(name), "{}", String::from_utf8_lossy(name));
+        }
+        for name in [&b"TempDir"[..], b"QueueDir", b"InterDir"] {
+            assert!(!path_was_warned(name), "{}", String::from_utf8_lossy(name));
+        }
+        assert!(good.join("tmp").is_dir() && good.join("queue").is_dir());
+        assert!(has_pausing_path_errors());
+        assert_eq!(
+            path_warning_value(b"DestDir"),
+            Some(main.join("dst").as_os_str().as_encoded_bytes().to_vec())
+        );
+        unsafe { nzbget_rs_options_free(opts) };
+
+        // a folder that fails outside a missing MainDir does not blame MainDir
+        let blocked = base.join("blocked");
+        std::fs::write(&blocked, b"").unwrap();
+        let outside = [
+            opt(format!("MainDir={}", base.join("unused").display())),
+            opt(format!("DestDir={}/dst", blocked.display())),
+            opt(format!("NzbDir={}/nzb", good.display())),
+        ];
+        let mut ptrs_out = ptrs.clone();
+        ptrs_out.extend(outside.iter().map(|c| c.as_ptr()));
+        let opts = unsafe {
+            nzbget_rs_options_new(
+                c"rustyget".as_ptr(),
+                std::ptr::null(),
+                1,
+                0,
+                ptrs_out.as_ptr(),
+                ptrs_out.len(),
+                0,
+                c"1.0".as_ptr(),
+                std::ptr::null_mut(),
+                None,
+                &mut scalars,
+                &mut flags,
+            )
+        };
+        let o = unsafe { &*opts };
+        assert!(o.has_config_errors() && !o.has_other_config_errors());
+        assert!(path_was_warned(b"DestDir"));
+        assert!(!path_was_warned(b"MainDir"), "DestDir is not inside MainDir");
+        unsafe { nzbget_rs_options_free(opts) };
+        assert!(failed_folder_inside(blocked.as_os_str().as_encoded_bytes()));
+        assert!(!failed_folder_inside(base.join("block").as_os_str().as_encoded_bytes()));
+
+        // a missing MainDir that no folder uses is not warned about at load
+        let unused_main = opt(format!("MainDir={}", base.join("unused").display()));
+        let elsewhere = [
+            unused_main,
+            opt(format!("DestDir={}/dst", good.display())),
+            opt(format!("NzbDir={}/nzb", good.display())),
+        ];
+        let mut ptrs2 = ptrs.clone();
+        ptrs2.extend(elsewhere.iter().map(|c| c.as_ptr()));
+        let opts = unsafe {
+            nzbget_rs_options_new(
+                c"rustyget".as_ptr(),
+                std::ptr::null(),
+                1,
+                0,
+                ptrs2.as_ptr(),
+                ptrs2.len(),
+                0,
+                c"1.0".as_ptr(),
+                std::ptr::null_mut(),
+                None,
+                &mut scalars,
+                &mut flags,
+            )
+        };
+        let o = unsafe { &*opts };
+        assert!(!o.has_config_errors());
+        assert!(!path_was_warned(b"MainDir"));
+        assert!(!base.join("unused").exists());
+        unsafe { nzbget_rs_options_free(opts) };
+
+        // fixed paths load without warnings
+        std::fs::remove_file(&main).unwrap();
+        let opts = unsafe {
+            nzbget_rs_options_new(
+                c"rustyget".as_ptr(),
+                std::ptr::null(),
+                1,
+                0,
+                ptrs.as_ptr(),
+                ptrs.len(),
+                0,
+                c"1.0".as_ptr(),
+                std::ptr::null_mut(),
+                None,
+                &mut scalars,
+                &mut flags,
+            )
+        };
+        let o = unsafe { &*opts };
+        assert!(!o.has_config_errors());
+        assert!(!has_pausing_path_errors());
+        assert!(!path_was_warned(b"MainDir"));
+        assert!(main.join("dst").is_dir() && main.join("nzb").is_dir());
+        unsafe { nzbget_rs_options_free(opts) };
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn times_and_days() {
         let (mut h, mut m) = (99, 99);
         assert!(parse_time(c"*", &mut h, &mut m) && (h, m) == (-1, 0));
@@ -2032,6 +2196,12 @@ pub trait OptionsHost {
     fn get_config_line(&self) -> i32;
     fn config_error(&mut self, msg: &CStr);
     fn config_warn(&mut self, msg: &CStr);
+    /// A path option that cannot be used (`msg` from [`path_problem_message`]).
+    /// It counts as a configuration error, so activities stay paused.
+    fn path_error(&mut self, option: &CStr, value: &CStr, msg: &CStr) {
+        let _ = (option, value);
+        self.config_error(msg);
+    }
     fn file_exists(&self, path: &CStr) -> bool;
     fn ensure_directory(&mut self, dir: &CStr) -> Result<(), CString>;
     #[allow(clippy::too_many_arguments)]
@@ -2168,6 +2338,87 @@ pub trait OptionsHost {
     }
 }
 
+/// The one warning for a path option that cannot be used: which option, its
+/// value, why, and where to change it.
+pub fn path_problem_message(option: &[u8], value: &[u8], why: &[u8]) -> Vec<u8> {
+    let why = why.strip_suffix(b".").unwrap_or(why);
+    [
+        option,
+        b" \"",
+        value,
+        b"\" can't be used: ",
+        why,
+        b". Change ",
+        option,
+        b" in Settings > Paths (or in the config file).",
+    ]
+    .concat()
+}
+
+/// Path options warned about by [`path_problem_message`] (or by the log when
+/// LogFile cannot be written), with the value they had, since the options were
+/// last loaded, so the start-up health check does not repeat the same problem.
+static PATH_WARNINGS: std::sync::Mutex<Vec<(Vec<u8>, Vec<u8>)>> = std::sync::Mutex::new(Vec::new());
+
+/// The folder options whose warning is also a configuration error (it pauses).
+const PAUSING_PATH_OPTIONS: [&[u8]; 5] = [b"DestDir", b"InterDir", b"TempDir", b"QueueDir", b"NzbDir"];
+
+fn path_warnings() -> std::sync::MutexGuard<'static, Vec<(Vec<u8>, Vec<u8>)>> {
+    PATH_WARNINGS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+pub(crate) fn clear_path_warnings() {
+    path_warnings().clear();
+}
+
+pub(crate) fn note_path_warning(option: &[u8], value: &[u8]) {
+    let mut g = path_warnings();
+    if !g.iter().any(|(o, _)| o.as_slice() == option) {
+        g.push((option.to_vec(), value.to_vec()));
+    }
+}
+
+/// The value `option` had when it was warned about, if it was.
+pub(crate) fn path_warning_value(option: &[u8]) -> Option<Vec<u8>> {
+    path_warnings()
+        .iter()
+        .find(|(o, _)| o.as_slice() == option)
+        .map(|(_, v)| v.clone())
+}
+
+#[cfg(test)]
+pub(crate) fn path_was_warned(option: &[u8]) -> bool {
+    path_warning_value(option).is_some()
+}
+
+/// True when a folder that pauses activities and lies inside `dir` could not
+/// be used.
+pub(crate) fn failed_folder_inside(dir: &[u8]) -> bool {
+    let sep = crate::paths::PATH_SEPARATOR as u8;
+    let dir = dir.strip_suffix(&[sep]).unwrap_or(dir);
+    !dir.is_empty()
+        && path_warnings().iter().any(|(o, v)| {
+            PAUSING_PATH_OPTIONS.contains(&o.as_slice())
+                && v.len() > dir.len()
+                && v.starts_with(dir)
+                && v[dir.len()] == sep
+        })
+}
+
+/// True when a folder that pauses activities could not be used (a LogFile,
+/// LockFile or MainDir warning alone does not pause).
+pub(crate) fn has_pausing_path_errors() -> bool {
+    path_warnings()
+        .iter()
+        .any(|(o, _)| PAUSING_PATH_OPTIONS.contains(&o.as_slice()))
+}
+
+/// Path warnings are process-wide: tests that read or reset them take turns.
+#[cfg(test)]
+pub(crate) static PATH_WARNING_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Implements `Options::CheckDir` on top of `OptionsHost`.
 pub fn check_dir_host<H: OptionsHost + ?Sized>(
     host: &mut H,
@@ -2223,15 +2474,12 @@ pub fn check_dir_host<H: OptionsHost + ?Sized>(
     let dir_cstr = cstring(dir_bytes);
     if create {
         if let Err(errmsg) = host.ensure_directory(&dir_cstr) {
-            let msg = format_bytes_msg(&[
-                b"Invalid value for option \"",
+            let msg = cstring(path_problem_message(
                 option_name.to_bytes(),
-                b"\" (",
                 dir_cstr.to_bytes(),
-                b"): ",
                 errmsg.to_bytes(),
-            ]);
-            host.config_error(&msg);
+            ));
+            host.path_error(option_name, &dir_cstr, &msg);
             return Some(dir_cstr);
         }
     }
@@ -4037,6 +4285,8 @@ pub struct NzbgetRsOptions {
     default_diag_sink: bool,
     fatal_error: bool,
     config_errors: std::sync::atomic::AtomicBool,
+    /// a configuration error other than an unusable path
+    other_config_errors: std::sync::atomic::AtomicBool,
     mode_flags: std::sync::atomic::AtomicU8,
     config_line: i32,
     scalars: NzbgetRsParsedOptions,
@@ -4289,6 +4539,9 @@ impl NzbgetRsOptions {
             }
         }
 
+        if !no_disk_access {
+            clear_path_warnings();
+        }
         self.check_dirs_daemon();
         self.init_options_daemon();
 
@@ -4434,6 +4687,25 @@ impl NzbgetRsOptions {
         self.strs[OptStr::QueueDir] = check_dir_host(self, no_disk, c"QueueDir", main_dir.as_deref(), false, true);
         self.strs[OptStr::WebDir] = check_dir_host(self, no_disk, c"WebDir", None, true, false);
         self.strs[OptStr::NzbDir] = check_dir_host(self, no_disk, c"NzbDir", main_dir.as_deref(), false, true);
+        // when a folder inside MainDir failed and MainDir is missing, MainDir is
+        // the cause: say so (a missing MainDir that no failed folder lies in is
+        // left to the health check)
+        if let Some(main) = main_dir
+            .as_deref()
+            .filter(|m| !no_disk && failed_folder_inside(m.to_bytes()))
+        {
+            let why: Option<&[u8]> = match std::fs::metadata(crate::cleanup::bytes_to_path_buf(main.to_bytes())) {
+                Ok(m) if m.is_dir() => None,
+                Ok(_) => Some(b"it is not a directory"),
+                Err(_) => Some(b"the directory does not exist"),
+            };
+            if let Some(why) = why {
+                self.locate_option_src_pos(c"MainDir");
+                note_path_warning(b"MainDir", main.to_bytes());
+                let msg = cstring(path_problem_message(b"MainDir", main.to_bytes(), why));
+                self.emit_diag(2, &msg);
+            }
+        }
     }
 
     fn init_options_daemon(&mut self) {
@@ -4507,6 +4779,11 @@ impl NzbgetRsOptions {
     pub(crate) fn has_config_errors(&self) -> bool {
         self.config_errors.load(std::sync::atomic::Ordering::SeqCst)
     }
+
+    /// True for a configuration error that is not an unusable path.
+    pub(crate) fn has_other_config_errors(&self) -> bool {
+        self.other_config_errors.load(std::sync::atomic::Ordering::SeqCst)
+    }
 }
 
 impl OptionsHost for NzbgetRsOptions {
@@ -4566,10 +4843,19 @@ impl OptionsHost for NzbgetRsOptions {
         self.emit_diag(1, msg);
         self.config_errors
             .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.other_config_errors
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn config_warn(&mut self, msg: &CStr) {
         self.emit_diag(2, msg);
+    }
+
+    fn path_error(&mut self, option: &CStr, value: &CStr, msg: &CStr) {
+        note_path_warning(option.to_bytes(), value.to_bytes());
+        self.emit_diag(2, msg);
+        self.config_errors
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn file_exists(&self, path: &CStr) -> bool {
@@ -4836,6 +5122,7 @@ pub(crate) unsafe fn new_options(
         default_diag_sink: (flags & 32) != 0 || daemon_snap.is_some(),
         fatal_error: false,
         config_errors: std::sync::atomic::AtomicBool::new(false),
+        other_config_errors: std::sync::atomic::AtomicBool::new(false),
         mode_flags: std::sync::atomic::AtomicU8::new(0),
         config_line: 0,
         scalars: NzbgetRsParsedOptions::with_defaults(),

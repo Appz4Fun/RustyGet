@@ -561,6 +561,19 @@ pub struct PathsSectionInput<'a> {
     pub write_log: i32,
     pub cert_check: bool,
     pub daemon_mode: bool,
+    /// The running daemon holds the lock on `lock_file`: it is not opened again
+    /// (closing any descriptor of a file drops the process's lockf lock on it).
+    pub lock_file_held: bool,
+}
+
+/// LockFile's health: as [`validate_lock_file_path`], except that the lock
+/// file the daemon holds is not probed: it is open, locked and so writable,
+/// and opening and closing it here would release the lock.
+pub fn lock_file_status(path: &Path, daemon_mode: bool, held: bool) -> HealthStatus {
+    if held && daemon_mode && !path.as_os_str().is_empty() {
+        return HealthStatus::ok();
+    }
+    validate_lock_file_path(path, daemon_mode)
 }
 
 pub fn validate_paths_section(
@@ -677,7 +690,7 @@ pub fn validate_paths_section(
     });
     emit_if_not_ok(&mut emit, "CertStore", cert_status);
 
-    let lock_status = validate_lock_file_path(input.lock_file, input.daemon_mode).and_then(|| {
+    let lock_status = lock_file_status(input.lock_file, input.daemon_mode, input.lock_file_held).and_then(|| {
         unique_path(
             b"LockFile",
             input.lock_file,
@@ -4058,6 +4071,20 @@ mod tests {
         assert!(validate_lock_file_path(Path::new(""), false).is_ok());
         assert!(validate_lock_file_path(Path::new("random/path"), false).is_ok());
         assert!(validate_lock_file_path(&tmp.path.join("not_yet_created.lock"), true).is_ok());
+        {
+            // the held lock file is not opened: even one that could not be
+            // opened for writing is fine while the daemon holds it
+            use std::os::unix::fs::PermissionsExt as _;
+            let held = tmp.path.join("held.lock");
+            std::fs::write(&held, b"1\n").unwrap();
+            std::fs::set_permissions(&held, std::fs::Permissions::from_mode(0o400)).unwrap();
+            assert!(lock_file_status(&held, true, true).is_ok());
+            if unsafe { libc::geteuid() } != 0 {
+                assert!(!lock_file_status(&held, true, false).is_ok(), "probed when not held");
+            }
+            assert_eq!(lock_file_status(Path::new(""), true, true).severity, Severity::Warning);
+            std::fs::set_permissions(&held, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
         std::fs::write(&lock_path, b"pid").unwrap();
         assert!(validate_lock_file_path(&lock_path, true).is_ok());
         assert!(
@@ -4521,6 +4548,7 @@ mod tests {
                 write_log: 0,
                 cert_check: false,
                 daemon_mode: false,
+                lock_file_held: false,
             },
             servers: &servers,
             output_mode: 0,

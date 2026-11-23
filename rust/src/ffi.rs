@@ -151,6 +151,98 @@ unsafe fn in_place(raw: *mut c_char, f: impl FnOnce(&mut [u8]) -> usize) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_start_up_health_check_skips_paths_already_warned_about() {
+        let _turn = crate::options::PATH_WARNING_TESTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::options::clear_path_warnings();
+        crate::options::note_path_warning(b"DestDir", b"/x/dst");
+        crate::options::note_path_warning(b"LogFile", b"/x/rustyget.log");
+        let repeats = super::health_line_repeats_path_warning;
+        assert!(repeats(b"[Paths][DestDir]: \"/x/dst\" directory does not exist"));
+        assert!(repeats(b"[Paths][DestDir]: \"/x/dst\" is not a directory"));
+        let failed = format!(
+            "[Paths][DestDir]: Failed to check \"/x/dst\": {}",
+            std::io::Error::from_raw_os_error(libc::ENOTDIR)
+        );
+        assert!(repeats(failed.as_bytes()));
+        assert!(!repeats(b"[Paths][DestDir]: Failed to check \"/x/dst\": Permission denied (os error 13)"));
+        // LogFile's health check names its folder
+        assert!(repeats(b"[Paths][LogFile]: \"/x\" directory does not exist"));
+        // another problem with the same option is still logged
+        assert!(!repeats(b"[Paths][DestDir]: \"/x/dst\" is not writable"));
+        assert!(!repeats(b"[Paths][DestDir]: \"/x/dst\" is the same as MainDir"));
+        // another path, or one that only shares a prefix
+        assert!(!repeats(b"[Paths][DestDir]: \"/y/dst\" directory does not exist"));
+        assert!(!repeats(b"[Paths][DestDir]: \"/x/ds\" directory does not exist"));
+        assert!(!repeats(b"[Paths][TempDir]: \"/x/dst\" directory does not exist"));
+        assert!(!repeats(b"[Security][DestDir]: whatever"));
+        assert!(!repeats(b"[Paths][DestDir"));
+        crate::options::clear_path_warnings();
+        assert!(!repeats(b"[Paths][DestDir]: \"/x/dst\" directory does not exist"));
+    }
+
+    #[test]
+    fn the_config_template_fallback_says_what_to_set() {
+        let msg = super::config_template_fallback_message(b"ConfigTemplate \"/x\" can't be read: No such file or directory.");
+        assert_eq!(
+            String::from_utf8(msg).unwrap(),
+            "ConfigTemplate \"/x\" can't be read: No such file or directory. \
+The Settings page uses the descriptions built into RustyGet instead. \
+Change ConfigTemplate in Settings > Paths, or leave it empty."
+        );
+    }
+
+    #[test]
+    fn the_built_in_template_holds_descriptions_and_no_settings() {
+        let t = super::BUILT_IN_CONFIG_TEMPLATE;
+        assert!(t.contains("### PATHS"), "it is the stock template");
+        assert!(t.contains("\nMainDir=") && t.contains("# Root directory for all tasks."));
+        // the stock example values only
+        for line in t.lines() {
+            if let Some((name, value)) = line.split_once('=') {
+                if name.ends_with("Password") && !name.starts_with('#') {
+                    assert!(["", "pass", "tegbzn6789"].contains(&value), "{line}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_active_config_file_is_never_served_as_the_template() {
+        use super::TemplateRefusal::*;
+        let dir = std::env::temp_dir().join(format!("rustyget_tpl_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let live = dir.join("rustyget.conf");
+        std::fs::write(&live, "ControlPassword=secret\nServer1.Password=secret\n").unwrap();
+        let template = dir.join("template.conf");
+        std::fs::write(&template, "### PATHS\n").unwrap();
+        std::fs::hard_link(&live, dir.join("linked.conf")).unwrap();
+        std::os::unix::fs::symlink(&live, dir.join("symlinked.conf")).unwrap();
+        let b = |p: &std::path::Path| p.as_os_str().as_encoded_bytes().to_vec();
+        let read = |t: &std::path::Path, c: &std::path::Path| super::read_template_file(&b(t), &b(c));
+        assert_eq!(read(&template, &live), Ok(b"### PATHS\n".to_vec()));
+        // the configuration file under any name is refused
+        assert_eq!(read(&live, &live), Err(IsConfigFile));
+        assert_eq!(read(&dir.join(".").join("rustyget.conf"), &live), Err(IsConfigFile));
+        assert_eq!(read(&dir.join("linked.conf"), &live), Err(IsConfigFile));
+        assert_eq!(read(&dir.join("symlinked.conf"), &live), Err(IsConfigFile));
+        // a configuration file that cannot be checked refuses the template
+        assert!(matches!(read(&template, &dir.join("gone.conf")), Err(ConfigUnchecked(_))));
+        assert!(matches!(read(&dir.join("missing.conf"), &live), Err(Unreadable(_))));
+        // without a configuration file (-n) the template is read
+        assert_eq!(super::read_template_file(&b(&template), b""), Ok(b"### PATHS\n".to_vec()));
+        // only an unreadable template asks the user to change ConfigTemplate
+        let msg = |r| String::from_utf8(super::template_refusal_message(b"/w/rustyget.conf", b"/c.conf", &r)).unwrap();
+        assert!(!msg(IsConfigFile).contains("Change ConfigTemplate"));
+        assert!(msg(IsConfigFile).contains("is the configuration file in use"));
+        assert!(!msg(ConfigUnchecked(b"No such file or directory".to_vec())).contains("Change ConfigTemplate"));
+        assert!(msg(Unreadable(b"Permission denied".to_vec())).contains("Change ConfigTemplate"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
 
     #[test]
@@ -488,6 +580,44 @@ pub(crate) fn log_active_queue_coord_debug_info() {
 // SystemHealth (`rust/src/systemhealth.rs`)
 // ============================================================================
 
+/// True for a start-up health line saying a path is not there (`"<path>"
+/// directory does not exist`, `"<path>" is not a directory`, or `Failed to check
+/// "<path>": Not a directory`) about an option that already got its own warning
+/// for that path or a path inside it: the same problem, said once. Any other
+/// health problem with the option is still logged.
+fn health_line_repeats_path_warning(line: &[u8]) -> bool {
+    let Some(rest) = line.strip_prefix(b"[Paths][") else {
+        return false;
+    };
+    let Some(end) = rest.iter().position(|&b| b == b']') else {
+        return false;
+    };
+    let Some(warned) = crate::options::path_warning_value(&rest[..end]) else {
+        return false;
+    };
+    let Some(text) = rest[end + 1..].strip_prefix(b": ") else {
+        return false;
+    };
+    let not_a_dir = format!("\": {}", std::io::Error::from_raw_os_error(libc::ENOTDIR));
+    let path = if let Some(quoted) = text.strip_prefix(b"\"") {
+        [&b"\" directory does not exist"[..], b"\" is not a directory"]
+            .iter()
+            .find_map(|tail| quoted.strip_suffix(*tail))
+    } else {
+        text.strip_prefix(b"Failed to check \"")
+            .and_then(|quoted| quoted.strip_suffix(not_a_dir.as_bytes()))
+    };
+    let Some(path) = path else {
+        return false;
+    };
+    // (a quote or backslash in the path is escaped in the health line)
+    if path.iter().any(|&b| b == b'\\' || b == b'"') {
+        return false;
+    }
+    warned == path
+        || (warned.starts_with(path) && warned.get(path.len()) == Some(&(crate::paths::PATH_SEPARATOR as u8)))
+}
+
 #[cfg(unix)]
 pub(crate) fn system_health_diagnose_bytes(format_mode: c_int) -> Vec<u8> {
     let Some(opts) = crate::options::active_options() else {
@@ -599,6 +729,7 @@ pub(crate) fn system_health_diagnose_bytes(format_mode: c_int) -> Vec<u8> {
             write_log: sc.write_log,
             cert_check: sc.cert_check != 0,
             daemon_mode,
+            lock_file_held: crate::lifecycle::daemon_holds_lock_file(),
         },
         servers: &servers,
         output_mode: sc.output_mode,
@@ -691,6 +822,10 @@ pub(crate) fn system_health_diagnose_bytes(format_mode: c_int) -> Vec<u8> {
     };
 
     crate::systemhealth::diagnose_system_health(&diag_input, format_mode, |sev, msg| {
+        // a path already warned about at start-up is not repeated
+        if format_mode == 0 && health_line_repeats_path_warning(msg) {
+            return;
+        }
         if let Some(lg) = log.as_deref() {
             if sev == 2 {
                 lg.emit_bytes(2, Some(&opts), msg);
@@ -1226,19 +1361,112 @@ pub(crate) fn uninstall_workstate(ws: &std::sync::Arc<NzbgetRsWorkState>) {
 
 static ACTIVE_SCRIPT_TEMPLATES: std::sync::Mutex<Vec<CString>> = std::sync::Mutex::new(Vec::new());
 
-fn load_script_template_cstrings() -> Option<Vec<CString>> {
-    let opts = crate::options::active_options()?;
-    let path_bytes = opts.str_bytes(OptStr::ConfigTemplate);
-    if path_bytes.is_empty() {
-        return None;
+/// The stock configuration template, built in: option descriptions and
+/// defaults only, never anybody's settings or passwords.
+pub(crate) const BUILT_IN_CONFIG_TEMPLATE: &str = include_str!("../../rustyget.conf");
+
+/// Why a ConfigTemplate file is not used.
+#[derive(Debug, PartialEq, Eq)]
+enum TemplateRefusal {
+    /// it cannot be opened or read (the reason)
+    Unreadable(Vec<u8>),
+    /// it is the active configuration file (passwords included)
+    IsConfigFile,
+    /// the active configuration file cannot be checked, so neither can it (the reason)
+    ConfigUnchecked(Vec<u8>),
+}
+
+/// Reads a ConfigTemplate file unless it is the active configuration file. The
+/// template is opened first and the open file's device and inode are compared
+/// with `config_file`'s, so a file swapped in between cannot slip through, and a
+/// configuration file that cannot be checked refuses the template.
+fn read_template_file(template: &[u8], config_file: &[u8]) -> Result<Vec<u8>, TemplateRefusal> {
+    use std::io::Read as _;
+    use std::os::unix::fs::MetadataExt as _;
+    let why = |e: std::io::Error| crate::fsops::error_message(e.raw_os_error().unwrap_or(0));
+    let mut file = std::fs::File::open(crate::cleanup::bytes_to_path_buf(template))
+        .map_err(|e| TemplateRefusal::Unreadable(why(e)))?;
+    let meta = file.metadata().map_err(|e| TemplateRefusal::Unreadable(why(e)))?;
+    if !config_file.is_empty() {
+        let cfg = std::fs::metadata(crate::cleanup::bytes_to_path_buf(config_file))
+            .map_err(|e| TemplateRefusal::ConfigUnchecked(why(e)))?;
+        if cfg.dev() == meta.dev() && cfg.ino() == meta.ino() {
+            return Err(TemplateRefusal::IsConfigFile);
+        }
     }
-    let raw = std::fs::read(crate::cleanup::bytes_to_path_buf(path_bytes)).ok()?;
+    let mut raw = Vec::new();
+    file.read_to_end(&mut raw).map_err(|e| TemplateRefusal::Unreadable(why(e)))?;
+    Ok(raw)
+}
+
+/// The option descriptions for the Settings page: ConfigTemplate's text, or the
+/// built-in template when ConfigTemplate is not set, cannot be read, or is (or
+/// cannot be told apart from) the active configuration file, whose passwords
+/// must never be served as a template. The second value is the one notice to
+/// log about it; an empty ConfigTemplate needs none.
+fn read_config_template() -> (Vec<u8>, Option<Vec<u8>>) {
+    let built_in = || BUILT_IN_CONFIG_TEMPLATE.as_bytes().to_vec();
+    let Some(opts) = crate::options::active_options() else {
+        return (built_in(), None);
+    };
+    let template = opts.str_bytes(OptStr::ConfigTemplate);
+    if template.is_empty() {
+        return (built_in(), None);
+    }
+    let config_file = opts.str_bytes(OptStr::ConfigFile);
+    match read_template_file(template, config_file) {
+        Ok(raw) => (raw, None),
+        Err(refusal) => (built_in(), Some(template_refusal_message(template, config_file, &refusal))),
+    }
+}
+
+/// The notice for a ConfigTemplate that is not used. Only an unreadable one asks
+/// for a change: a template that is the configuration file in use can be the
+/// one found automatically in WebDir, which the user never set.
+fn template_refusal_message(template: &[u8], config_file: &[u8], refusal: &TemplateRefusal) -> Vec<u8> {
+    const BUILT_IN: &[u8] = b"The Settings page uses the descriptions built into RustyGet";
+    match refusal {
+        TemplateRefusal::Unreadable(why) => config_template_fallback_message(
+            &[b"ConfigTemplate \"".as_slice(), template, b"\" can't be read: ", why, b"."].concat(),
+        ),
+        TemplateRefusal::IsConfigFile => {
+            [BUILT_IN, b": \"", template, b"\" is the configuration file in use, not a template."].concat()
+        }
+        TemplateRefusal::ConfigUnchecked(why) => [
+            BUILT_IN,
+            b": the configuration file \"",
+            config_file,
+            b"\" can't be checked (",
+            why,
+            b"), so the template \"",
+            template,
+            b"\" is not used.",
+        ]
+        .concat(),
+    }
+}
+
+/// The warning for a ConfigTemplate that is not used.
+pub(crate) fn config_template_fallback_message(problem: &[u8]) -> Vec<u8> {
+    [
+        problem,
+        b" The Settings page uses the descriptions built into RustyGet instead. \
+Change ConfigTemplate in Settings > Paths, or leave it empty.",
+    ]
+    .concat()
+}
+
+fn template_cstrings(raw: Vec<u8>) -> Vec<CString> {
     let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
     let mut cbuf = Vec::with_capacity(end + 1);
     cbuf.extend_from_slice(&raw[..end]);
     cbuf.push(0);
     let cs = unsafe { CString::from_vec_with_nul_unchecked(cbuf) };
-    Some(vec![cs])
+    vec![cs]
+}
+
+fn load_script_template_cstrings() -> Option<Vec<CString>> {
+    Some(template_cstrings(read_config_template().0))
 }
 
 #[cfg(unix)]
@@ -1266,19 +1494,14 @@ pub(crate) unsafe fn script_config_emit_templates(
 /// Reloads the script configuration templates into [`ACTIVE_SCRIPT_TEMPLATES`].
 /// Returns false (and logs) when they cannot be read.
 pub(crate) fn reload_script_templates() -> bool {
-    match load_script_template_cstrings() {
-        Some(v) => {
-            if let Ok(mut g) = ACTIVE_SCRIPT_TEMPLATES.lock() {
-                *g = v;
-            }
-            true
-        }
-        None => {
-            #[cfg(unix)]
-            crate::log::log_active_bytes(2, b"Could not read configuration templates");
-            false
-        }
+    let (raw, problem) = read_config_template();
+    if let Ok(mut g) = ACTIVE_SCRIPT_TEMPLATES.lock() {
+        *g = template_cstrings(raw);
     }
+    if let Some(notice) = problem {
+        crate::log::log_active_bytes(crate::log::MK_WARNING, &notice);
+    }
+    true
 }
 
 /// The active config file's bytes as the TLS cipher job sees them, or `None`
@@ -2946,6 +3169,7 @@ pub(crate) unsafe fn serve_web_conn(conn: &crate::net::NzbgetRsConn, sig: &[u8; 
         remote_addr: &remote_addr,
         version: &version,
         web_dir,
+        config_file: opts.as_deref().map_or(&[][..], |o| o.str_bytes(OptStr::ConfigFile)),
         credentials: crate::webserver::Credentials {
             control_username: opt_str(OptStr::ControlUsername),
             control_password: opt_str(OptStr::ControlPassword),
